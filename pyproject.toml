@@ -1,0 +1,8 @@
+[project]
+name = "dmc-268-api-t6"
+version = "0.1.0"
+description = "FastAPI backend for DMC-268 Team 6"
+dependencies = [
+    "fastapi>=0.110.0",
+    "uvicorn>=0.28.0"
+]
