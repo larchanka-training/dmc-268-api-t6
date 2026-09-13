@@ -1,0 +1,142 @@
+erDiagram
+    WORKSPACES ||--o{ PROVIDER_INSTALLATIONS : owns
+    WORKSPACES ||--o{ USAGE_EVENTS : incurs
+    WORKSPACES ||--o{ PAYMENTS : pays
+    WORKSPACES ||--o{ CREDIT_LEDGER : balances
+    PROVIDER_INSTALLATIONS ||--o{ REPOSITORIES : installs
+    PROVIDER_INSTALLATIONS o|--o{ WEBHOOK_EVENTS : receives
+    PROMPT_VERSIONS o|--o{ REPOSITORIES : overrides
+    PROMPT_VERSIONS ||--o{ RUNS : snapshots
+    PROMPT_VERSIONS ||--o{ REPO_CONVENTIONS : builds
+    REPOSITORIES ||--o{ RULE_VERSIONS : versions
+    REPOSITORIES ||--o{ CODE_CHANGES : contains
+    REPOSITORIES ||--o{ REPO_CONVENTIONS : caches
+    RULE_VERSIONS ||--o{ RUNS : snapshots
+    CODE_CHANGES ||--o{ RUNS : triggers
+    RUNS ||--o| CONTEXT_PAYLOADS : stores
+    RUNS ||--o{ FINDINGS : yields
+    RUNS ||--o{ USAGE_EVENTS : consumes
+    RUNS ||--o{ RUN_ACTIONS : traces
+    FINDINGS ||--o| COMMENTS : publishes
+    USAGE_EVENTS o|--o| CREDIT_LEDGER : debits
+    PAYMENTS o|--o| CREDIT_LEDGER : credits
+
+    WORKSPACES {
+      uuid id PK
+      varchar name
+      numeric daily_budget_usd
+    }
+    PROVIDER_INSTALLATIONS {
+      uuid id PK
+      uuid workspace_id FK
+      varchar provider
+      bigint external_id
+      jsonb metadata
+    }
+    REPOSITORIES {
+      uuid id PK
+      uuid provider_installation_id FK
+      bigint external_id
+      uuid prompt_version_id FK
+      enum default_engine
+      boolean enabled
+    }
+    CODE_CHANGES {
+      uuid id PK
+      uuid repository_id FK
+      bigint external_id
+      int external_number
+      varchar base_sha
+      varchar head_sha
+      enum state
+    }
+    RUNS {
+      uuid id PK
+      uuid code_change_id FK
+      uuid rule_version_id FK
+      uuid prompt_version_id FK
+      char idempotency_key UK
+      enum state
+      enum engine
+      int attempt
+      timestamptz available_at
+    }
+    CONTEXT_PAYLOADS {
+      uuid id PK
+      uuid run_id FK
+      int schema_version
+      jsonb summary
+      text s3_ref
+    }
+    FINDINGS {
+      uuid id PK
+      uuid run_id FK
+      varchar file_path
+      int line_start
+      varchar category
+      text suggestion
+      numeric confidence
+      boolean published
+    }
+    COMMENTS {
+      uuid id PK
+      uuid finding_id FK
+      bigint github_review_id
+      bigint github_comment_id UK
+    }
+    RULE_VERSIONS {
+      uuid id PK
+      uuid repository_id FK
+      int version
+      jsonb rules
+      boolean is_active
+    }
+    PROMPT_VERSIONS {
+      uuid id PK
+      varchar key
+      int version
+      text content
+      boolean is_active
+    }
+    WEBHOOK_EVENTS {
+      uuid id PK
+      uuid provider_installation_id FK
+      varchar delivery_id UK
+      text payload_s3_ref
+    }
+    USAGE_EVENTS {
+      uuid id PK
+      uuid run_id FK
+      uuid workspace_id FK
+      numeric cost_usd
+    }
+    PAYMENTS {
+      uuid id PK
+      uuid workspace_id FK
+      varchar provider
+      enum status
+      numeric amount_usd
+    }
+    CREDIT_LEDGER {
+      uuid id PK
+      uuid workspace_id FK
+      uuid usage_event_id FK
+      uuid payment_id FK
+      enum kind
+      numeric amount_usd
+    }
+    REPO_CONVENTIONS {
+      uuid id PK
+      uuid repository_id FK
+      uuid prompt_version_id FK
+      varchar agents_md_sha
+      jsonb recommendations
+      jsonb languages
+    }
+    RUN_ACTIONS {
+      uuid id PK
+      uuid run_id FK
+      int index
+      varchar tool
+      jsonb request
+    }
