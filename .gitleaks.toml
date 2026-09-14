@@ -1,0 +1,11 @@
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Checked-in examples and placeholders, not live credentials"
+paths = [
+  '''\.env\.example$''',
+  '''.*\.tfvars\.example$''',
+  '''.*\.backend\.hcl\.example$''',
+  '''docs/.*''',
+]

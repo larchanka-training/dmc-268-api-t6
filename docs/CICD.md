@@ -4,9 +4,9 @@
 |---|---|
 | Статус | рабочий каркас пайплайна |
 | Владелец | инфраструктура (роль 3) |
-| Связанные документы | локальный `docker-compose.yml` (FastAPI + PostgreSQL) |
+| Связанные документы | [INFRASTRUCTURE.md](INFRASTRUCTURE.md), [SECRETS.md](SECRETS.md) |
 
-Пайплайн собирает FastAPI-бэкенд в OCI-образ, проверяет инфраструктурный код и выкатывает образ на staging-VM в Hetzner Cloud вместе с PostgreSQL. Реестр — **GitHub Container Registry**: у Hetzner нет managed registry, продукт уже живёт в GitHub.
+Пайплайн собирает FastAPI-бэкенд в OCI-образ, проверяет инфраструктурный код и выкатывает образ на staging-VM в Hetzner Cloud вместе с PostgreSQL. Реестр — **GitHub Container Registry**.
 
 ---
 
@@ -14,11 +14,13 @@
 
 ```mermaid
 flowchart TD
-  pr["PR / push"] --> tf["terraform fmt / validate"]
+  pr["PR / push"] --> secrets["gitleaks"]
+  pr --> tf["terraform fmt / validate"]
   pr --> lint["tflint + checkov"]
   pr --> build["docker build"]
   build --> scan["trivy: vuln / secret / misconfig"]
-  tf --> gate{"main?"}
+  secrets --> gate{"main?"}
+  tf --> gate
   lint --> gate
   scan --> gate
   gate -->|нет| stop["CI зелёный, без выката"]
@@ -31,96 +33,96 @@ flowchart TD
   rb --> fail["job красный"]
 ```
 
-| Job | Когда | Что проверяет / делает |
-|---|---|---|
-| `Terraform fmt / validate` | PR и `main` | `terraform fmt -check`, `terraform validate` |
-| `Terraform lint / security` | PR и `main` | TFLint (recommended) + Checkov (Terraform + Dockerfile) |
-| `Docker image build` | PR и `main` | образ `python:3.13-slim` + `uv sync --locked --no-dev` |
-| `Docker image security scan` | после сборки | Trivy: `CRITICAL`/`HIGH`, scanners `vuln,secret,misconfig` |
-| `Push Docker image` | только `main` | login в `ghcr.io`, сохранение прошлого `:staging`, push `:sha` и `:staging` |
-| `Deploy staging` | только `main` | `docker compose` (API + PostgreSQL) на VM, внешний health check, авто-rollback |
+| Job | Когда | Permissions | Что делает |
+|---|---|---|---|
+| `Secret scan` | PR и `main` | `contents: read` | Gitleaks с `--redact` |
+| `Terraform fmt / validate` | PR и `main` | `contents: read` | `fmt -check`, `validate` |
+| `Terraform lint / security` | PR и `main` | `contents: read` | TFLint + Checkov |
+| `Docker image build` | PR и `main` | `contents: read` | образ `python:3.13-slim` |
+| `Docker image security scan` | после сборки | `contents: read` | Trivy `CRITICAL`/`HIGH` |
+| `Push Docker image` | только `main` | `contents: read`, `packages: write` | GHCR `:sha` и `:staging` |
+| `Deploy staging` | только `main` | `contents: read`, `packages: read` | Compose, health check, авто-rollback |
 
-Ручной откат: workflow **Rollback staging** (`workflow_dispatch`). Пустой `image` → предыдущий успешный выкат; иначе тег или полный ref.
+Корневые permissions workflow: `contents: read`. Остальное — только у job, которому это нужно.
 
 ---
 
-## 2. Образ и health check
+## 2. Инструкция по deployment
 
-Образ слушает `:8000` и поднимает Uvicorn (`app.main:app`) от непривилегированного пользователя `app`. Контракт живости:
+Стенд должен уже существовать ([INFRASTRUCTURE.md](INFRASTRUCTURE.md)). Secrets и variables — [SECRETS.md](SECRETS.md).
+
+1. Settings → Environments → `staging`: заполнить secrets/variables, включить required reviewers.
+2. Push (или merge) в `main`.
+3. Дождаться зелёных проверок и job **Push Docker image**.
+4. Job **Deploy staging** копирует `deploy/` на `/opt/dmc-268-api`, снимает bootstrap-контейнер, поднимает API + PostgreSQL.
+5. Runner проверяет `GET /healthcheck` снаружи (`STAGING_HEALTH_URL` или `http://$STAGING_HOST/healthcheck`, 12 × 5 с).
+6. Успех: environment URL ведёт на `http://$STAGING_HOST`. Неуспех: авто-rollback и красный job.
+
+Повторный ручной запуск того же workflow: **Actions → CI/CD → Run workflow** (ветка `main`).
+
+Локально образ без выката:
+
+```bash
+docker build -t dmc-268-api:local .
+docker run --rm -p 8000:8000 dmc-268-api:local
+curl -fsS http://127.0.0.1:8000/healthcheck
+```
+
+---
+
+## 3. Образ и health check
+
+Образ слушает `:8000`, Uvicorn `app.main:app`, пользователь `app`.
 
 ```http
 GET /healthcheck
 200 {"status":"ok"}
 ```
 
-После `compose up --wait` runner дергает тот же URL снаружи (`STAGING_HEALTH_URL` или `http://$STAGING_HOST/healthcheck`, 12 попыток × 5 с). Если ответ не `ok` — на VM запускается `rollback.sh`, job падает.
-
-PostgreSQL остаётся на внутренней docker-сети и наружу не публикуется. Том `postgres-data` переживает выкат и rollback API-образа.
+PostgreSQL только во внутренней docker-сети. Том `postgres-data` переживает выкат и rollback API-образа.
 
 ---
 
-## 3. Container Registry
+## 4. Container Registry
 
 | Параметр | Значение |
 |---|---|
 | Host | `ghcr.io` |
 | Repository | `ghcr.io/<owner>/dmc-268-api-t6` |
-| Auth CI | `GITHUB_TOKEN`, `packages: write` |
-| Auth staging pull | тот же token, только на время `docker pull` |
-| Теги | `:<git-sha>` (неизменяемый), `:staging` (текущий), `:staging-previous` (точка отката) |
-
-Имя репозитория и хост реестра заданы в Terraform (`container_registry`, `image_repository`) и выводятся в `image_repository` / `health_url`.
-
----
-
-## 4. Staging (Hetzner)
-
-Одна VM, Docker Compose, наружу только HTTP(S) и SSH. Сеть отделена от UI-стенда: `10.21.0.0/16`, чтобы два стека можно было поднять в одном проекте Hetzner.
-
-Terraform поднимает:
-
-- private network `10.21.0.0/16` + subnet `10.21.1.0/24`
-- firewall: 80, 443, ICMP; SSH только из `ssh_allowed_cidrs`
-- Debian 12 + Docker / Compose через cloud-init
-- публичный IPv4/IPv6 и статический private IP `10.21.1.10`
-
-`terraform apply` — отдельная операция оператора (нужен remote state, иначе runner каждый раз создаст новую VM). CI проверяет код, но не применяет его.
-
-```bash
-cd terraform
-terraform init
-terraform plan  -var-file=environments/staging.tfvars
-terraform apply -var-file=environments/staging.tfvars
-```
-
-Токен: `HCLOUD_TOKEN`. Пример переменных: `terraform/environments/staging.tfvars.example`.
+| Auth CI | `GITHUB_TOKEN` |
+| Auth staging | тот же token, только на время `docker pull`, затем `docker logout` |
+| Теги | `:<git-sha>`, `:staging`, `:staging-previous` |
 
 ---
 
 ## 5. Rollback
 
-1. **Автоматический.** Health check после выката не прошёл → `rollback.sh` поднимает образ из `.deploy-state.previous`. Данные PostgreSQL не сбрасываются.
-2. **Ручной.** Actions → Rollback staging. Пустой image = previous; `staging-previous` / `abc123` / полный `ghcr.io/...@sha256:...` = конкретная версия.
-3. **Конкурентность.** Deploy и rollback делят группу `staging-deploy` без отмены друг друга.
+1. **Автоматический.** Health check не прошёл → `rollback.sh` поднимает образ из `.deploy-state.previous`. Данные PostgreSQL не сбрасываются.
+2. **Ручной.** Actions → **Rollback staging** → Run workflow.
+   - `reason` — обязателен.
+   - Пустой `image` — предыдущий успешный выкат.
+   - `staging-previous` / `abc123` / полный `ghcr.io/...@sha256:...` — конкретная версия.
+3. После отката тот же внешний `/healthcheck`.
+4. Deploy и rollback делят группу `staging-deploy` без отмены друг друга.
+
+На VM:
+
+```bash
+/opt/dmc-268-api/rollback.sh
+/opt/dmc-268-api/rollback.sh ghcr.io/<owner>/dmc-268-api-t6:staging-previous
+```
 
 ---
 
-## 6. Секреты GitHub Environment `staging`
+## 6. Secrets и permissions
 
-| Secret | Назначение |
-|---|---|
-| `STAGING_HOST` | публичный IPv4 или DNS VM |
-| `STAGING_SSH_USER` | пользователь с Docker (`root` после cloud-init) |
-| `STAGING_SSH_KEY` | приватный ключ к `hcloud_ssh_key.ci` |
-| `STAGING_HEALTH_URL` | необязательно; иначе `http://$STAGING_HOST/healthcheck` |
-| `POSTGRES_PASSWORD` | пароль PostgreSQL на staging (обязателен при первом выкате) |
-| `POSTGRES_USER` | необязательно; по умолчанию `app` |
-| `POSTGRES_DB` | необязательно; по умолчанию `app` |
-| `HCLOUD_TOKEN` | только для локального / операторского `terraform apply` |
+Перечень, хранение, доставка на VM и запрет утечек в git/логи — [SECRETS.md](SECRETS.md).
+
+Кратко: в Environment `staging` секреты — только `STAGING_SSH_KEY` и `POSTGRES_PASSWORD`. Хост и SSH-пользователь — variables. `HCLOUD_TOKEN` в Actions нет.
 
 ---
 
-## 7. Локальные команды
+## 7. Локальные команды CI
 
 ```bash
 terraform -chdir=terraform fmt -check -recursive
@@ -131,6 +133,4 @@ checkov -f .checkov.yaml
 
 docker build -t dmc-268-api:local .
 trivy image --severity CRITICAL,HIGH --exit-code 1 dmc-268-api:local
-docker run --rm -p 8000:8000 dmc-268-api:local
-curl -fsS http://127.0.0.1:8000/healthcheck
 ```

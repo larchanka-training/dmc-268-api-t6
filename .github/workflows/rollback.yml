@@ -26,7 +26,7 @@ jobs:
     runs-on: ubuntu-latest
     environment:
       name: staging
-      url: http://${{ secrets.STAGING_HOST }}
+      url: http://${{ vars.STAGING_HOST }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -47,7 +47,6 @@ jobs:
           else
             echo "ref=" >> "${GITHUB_OUTPUT}"
           fi
-          echo "reason=${{ inputs.reason }}" >> "${GITHUB_OUTPUT}"
 
       - name: Rollback
         uses: appleboy/ssh-action@v1.2.0
@@ -56,12 +55,14 @@ jobs:
           GHCR_USER: ${{ github.actor }}
           IMAGE: ${{ steps.image.outputs.ref }}
         with:
-          host: ${{ secrets.STAGING_HOST }}
-          username: ${{ secrets.STAGING_SSH_USER }}
+          host: ${{ vars.STAGING_HOST }}
+          username: ${{ vars.STAGING_SSH_USER }}
           key: ${{ secrets.STAGING_SSH_KEY }}
+          debug: false
           envs: GHCR_TOKEN,GHCR_USER,IMAGE
           script: |
             set -euo pipefail
+            set +o xtrace
             if [[ -n "${IMAGE}" ]]; then
               /opt/dmc-268-api/rollback.sh "${IMAGE}"
             else
@@ -70,8 +71,8 @@ jobs:
 
       - name: Health check
         env:
-          HEALTH_URL: ${{ secrets.STAGING_HEALTH_URL }}
-          STAGING_HOST: ${{ secrets.STAGING_HOST }}
+          HEALTH_URL: ${{ vars.STAGING_HEALTH_URL }}
+          STAGING_HOST: ${{ vars.STAGING_HOST }}
         run: |
           chmod +x deploy/scripts/healthcheck.sh
           target="${HEALTH_URL:-http://${STAGING_HOST}/healthcheck}"
