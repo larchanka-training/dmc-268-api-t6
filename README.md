@@ -55,6 +55,14 @@ uv run ruff format .
 uv run mypy .
 ```
 
+## Docs
+
+| Документ | Содержание |
+|---|---|
+| [docs/INFRASTRUCTURE.md](docs/INFRASTRUCTURE.md) | Архитектура Hetzner, запуск Terraform, удаление стенда |
+| [docs/CICD.md](docs/CICD.md) | Пайплайн, deployment, rollback |
+| [docs/SECRETS.md](docs/SECRETS.md) | Перечень secrets, доставка на staging, git и логи |
+
 ## Pre-commit
 
 Install hooks:

@@ -1,0 +1,79 @@
+name: Rollback staging
+
+on:
+  workflow_dispatch:
+    inputs:
+      image:
+        description: "Image tag or digest. Leave empty to restore the previous successful deploy."
+        required: false
+        type: string
+      reason:
+        description: "Why staging is being rolled back"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  packages: read
+
+concurrency:
+  group: staging-deploy
+  cancel-in-progress: false
+
+jobs:
+  rollback:
+    name: Rollback staging
+    runs-on: ubuntu-latest
+    environment:
+      name: staging
+      url: http://${{ vars.STAGING_HOST }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve image
+        id: image
+        env:
+          REQUESTED: ${{ inputs.image }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          repo="$(echo "${REPOSITORY}" | tr '[:upper:]' '[:lower:]')"
+          if [[ -n "${REQUESTED}" ]]; then
+            if [[ "${REQUESTED}" == *'/'* ]]; then
+              echo "ref=${REQUESTED}" >> "${GITHUB_OUTPUT}"
+            else
+              echo "ref=ghcr.io/${repo}:${REQUESTED}" >> "${GITHUB_OUTPUT}"
+            fi
+          else
+            echo "ref=" >> "${GITHUB_OUTPUT}"
+          fi
+
+      - name: Rollback
+        uses: appleboy/ssh-action@v1.2.0
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GHCR_USER: ${{ github.actor }}
+          IMAGE: ${{ steps.image.outputs.ref }}
+        with:
+          host: ${{ vars.STAGING_HOST }}
+          username: ${{ vars.STAGING_SSH_USER }}
+          key: ${{ secrets.STAGING_SSH_KEY }}
+          debug: false
+          envs: GHCR_TOKEN,GHCR_USER,IMAGE
+          script: |
+            set -euo pipefail
+            set +o xtrace
+            if [[ -n "${IMAGE}" ]]; then
+              /opt/dmc-268-api/rollback.sh "${IMAGE}"
+            else
+              /opt/dmc-268-api/rollback.sh
+            fi
+
+      - name: Health check
+        env:
+          HEALTH_URL: ${{ vars.STAGING_HEALTH_URL }}
+          STAGING_HOST: ${{ vars.STAGING_HOST }}
+        run: |
+          chmod +x deploy/scripts/healthcheck.sh
+          target="${HEALTH_URL:-http://${STAGING_HOST}/healthcheck}"
+          deploy/scripts/healthcheck.sh "${target}"
