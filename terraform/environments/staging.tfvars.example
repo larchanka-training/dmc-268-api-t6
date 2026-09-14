@@ -1,0 +1,7 @@
+environment        = "staging"
+location           = "nbg1"
+server_type        = "cx22"
+ssh_public_key     = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIreplace-with-ci-public-key ci@dmc-268"
+ssh_allowed_cidrs  = ["203.0.113.10/32"]
+container_registry = "ghcr.io"
+image_repository   = "larchanka-training/dmc-268-api-t6"

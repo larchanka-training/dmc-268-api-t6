@@ -1,0 +1,272 @@
+name: CI/CD
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: cicd-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+  packages: write
+  security-events: write
+
+env:
+  REGISTRY: ghcr.io
+  TF_WORKING_DIR: terraform
+  LOCAL_IMAGE: dmc-268-api:ci
+
+jobs:
+  terraform-fmt-validate:
+    name: Terraform fmt / validate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_wrapper: false
+
+      - name: terraform fmt
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        run: terraform fmt -check -diff -recursive
+
+      - name: terraform init
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        run: terraform init -backend=false -input=false
+
+      - name: terraform validate
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        run: terraform validate -no-color
+
+  terraform-lint-security:
+    name: Terraform lint / security
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup TFLint
+        uses: terraform-linters/setup-tflint@v4
+        with:
+          tflint_version: latest
+
+      - name: TFLint
+        run: |
+          tflint --init
+          tflint --recursive -f compact
+
+      - name: Checkov
+        uses: bridgecrewio/checkov-action@v12
+        with:
+          config_file: .checkov.yaml
+          directory: .
+          output_format: cli
+          soft_fail: false
+
+  docker-build:
+    name: Docker image build
+    runs-on: ubuntu-latest
+    outputs:
+      image: ${{ steps.meta.outputs.image }}
+      tags: ${{ steps.meta.outputs.tags }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set image coordinates
+        id: meta
+        run: |
+          repo="$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')"
+          image="${REGISTRY}/${repo}"
+          echo "image=${image}" >> "${GITHUB_OUTPUT}"
+          echo "tags=${image}:${{ github.sha }}" >> "${GITHUB_OUTPUT}"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          load: true
+          tags: |
+            ${{ env.LOCAL_IMAGE }}
+            ${{ steps.meta.outputs.tags }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: false
+
+  docker-scan:
+    name: Docker image security scan
+    runs-on: ubuntu-latest
+    needs: docker-build
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Rebuild image from cache
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          load: true
+          tags: ${{ env.LOCAL_IMAGE }}
+          cache-from: type=gha
+          provenance: false
+
+      - name: Trivy scan
+        uses: aquasecurity/trivy-action@0.29.0
+        with:
+          image-ref: ${{ env.LOCAL_IMAGE }}
+          severity: CRITICAL,HIGH
+          exit-code: "1"
+          ignore-unfixed: true
+          format: table
+          scanners: vuln,secret,misconfig
+
+  push-image:
+    name: Push Docker image
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    needs:
+      - terraform-fmt-validate
+      - terraform-lint-security
+      - docker-scan
+    outputs:
+      image: ${{ steps.tags.outputs.immutable }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set tags
+        id: tags
+        run: |
+          repo="$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')"
+          image="${REGISTRY}/${repo}"
+          echo "image=${image}" >> "${GITHUB_OUTPUT}"
+          echo "immutable=${image}:${{ github.sha }}" >> "${GITHUB_OUTPUT}"
+          echo "staging=${image}:staging" >> "${GITHUB_OUTPUT}"
+          echo "previous=${image}:staging-previous" >> "${GITHUB_OUTPUT}"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Preserve current staging image for rollback
+        run: |
+          if docker pull "${{ steps.tags.outputs.staging }}"; then
+            docker tag "${{ steps.tags.outputs.staging }}" "${{ steps.tags.outputs.previous }}"
+            docker push "${{ steps.tags.outputs.previous }}"
+          else
+            echo "no existing staging image; skip previous-tag"
+          fi
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          push: true
+          tags: |
+            ${{ steps.tags.outputs.immutable }}
+            ${{ steps.tags.outputs.staging }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: false
+
+  deploy-staging:
+    name: Deploy staging
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    needs: push-image
+    concurrency:
+      group: staging-deploy
+      cancel-in-progress: false
+    environment:
+      name: staging
+      url: http://${{ secrets.STAGING_HOST }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Upload deploy files
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.STAGING_HOST }}
+          username: ${{ secrets.STAGING_SSH_USER }}
+          key: ${{ secrets.STAGING_SSH_KEY }}
+          source: "deploy/compose/staging.yml,deploy/scripts/deploy.sh,deploy/scripts/rollback.sh,deploy/scripts/healthcheck.sh"
+          target: /opt/dmc-268-api
+          strip_components: 2
+
+      - name: Deploy image
+        uses: appleboy/ssh-action@v1.2.0
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GHCR_USER: ${{ github.actor }}
+          IMAGE: ${{ needs.push-image.outputs.image }}
+          POSTGRES_USER: ${{ secrets.POSTGRES_USER }}
+          POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
+          POSTGRES_DB: ${{ secrets.POSTGRES_DB }}
+        with:
+          host: ${{ secrets.STAGING_HOST }}
+          username: ${{ secrets.STAGING_SSH_USER }}
+          key: ${{ secrets.STAGING_SSH_KEY }}
+          envs: GHCR_TOKEN,GHCR_USER,IMAGE,POSTGRES_USER,POSTGRES_PASSWORD,POSTGRES_DB
+          script: |
+            set -euo pipefail
+            mv /opt/dmc-268-api/staging.yml /opt/dmc-268-api/compose.yml
+            chmod +x /opt/dmc-268-api/deploy.sh /opt/dmc-268-api/rollback.sh /opt/dmc-268-api/healthcheck.sh
+            /opt/dmc-268-api/deploy.sh "${IMAGE}"
+
+      - name: Health check
+        id: health
+        continue-on-error: true
+        env:
+          HEALTH_URL: ${{ secrets.STAGING_HEALTH_URL }}
+          STAGING_HOST: ${{ secrets.STAGING_HOST }}
+        run: |
+          chmod +x deploy/scripts/healthcheck.sh
+          target="${HEALTH_URL:-http://${STAGING_HOST}/healthcheck}"
+          deploy/scripts/healthcheck.sh "${target}"
+
+      - name: Rollback on failed health check
+        if: steps.health.outcome == 'failure'
+        uses: appleboy/ssh-action@v1.2.0
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GHCR_USER: ${{ github.actor }}
+        with:
+          host: ${{ secrets.STAGING_HOST }}
+          username: ${{ secrets.STAGING_SSH_USER }}
+          key: ${{ secrets.STAGING_SSH_KEY }}
+          envs: GHCR_TOKEN,GHCR_USER
+          script: |
+            set -euo pipefail
+            /opt/dmc-268-api/rollback.sh
+
+      - name: Fail the pipeline after rollback
+        if: steps.health.outcome == 'failure'
+        run: |
+          echo "staging health check failed; rollback was triggered"
+          exit 1
