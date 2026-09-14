@@ -55,6 +55,10 @@ uv run ruff format .
 uv run mypy .
 ```
 
+## CI/CD
+
+GitHub Actions собирает Docker-образ, сканирует его, пушит в GHCR и выкатывает FastAPI + PostgreSQL на Hetzner staging. После выката проверяется `GET /healthcheck`; при ошибке выполняется автоматический rollback. Дизайн, jobs и секреты: [docs/CICD.md](docs/CICD.md).
+
 ## Pre-commit
 
 Install hooks:
