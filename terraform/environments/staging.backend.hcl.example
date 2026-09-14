@@ -1,0 +1,17 @@
+# Copy to staging.backend.hcl (gitignored) after creating the Object Storage bucket.
+# Credentials: AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY from Hetzner Object Storage.
+
+bucket = "dmc-268-api-tfstate"
+key    = "staging/terraform.tfstate"
+region = "nbg1"
+
+endpoints = {
+  s3 = "https://nbg1.your-objectstorage.com"
+}
+
+use_path_style              = true
+skip_credentials_validation = true
+skip_metadata_api_check     = true
+skip_region_validation      = true
+skip_requesting_account_id  = true
+skip_s3_checksum            = true

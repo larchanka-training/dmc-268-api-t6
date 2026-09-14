@@ -1,3 +1,3 @@
 provider "hcloud" {
-  token = var.hcloud_token
+  token = var.hcloud_token != "" ? var.hcloud_token : null
 }
