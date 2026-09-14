@@ -1,5 +1,17 @@
-# Environment
+# Environment and secrets
 .env
+.env.*
+!.env.example
+*.pem
+*.p12
+*.pfx
+id_rsa
+id_ed25519
+id_ecdsa
+*.priv
+credentials
+credentials.json
+.aws/
 
 # Python
 __pycache__/
@@ -20,6 +32,8 @@ __pycache__/
 *.tfstate.*
 *.tfvars
 !*.tfvars.example
+*.backend.hcl
+!*.backend.hcl.example
 crash.log
 crash.*.log
 override.tf

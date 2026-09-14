@@ -12,8 +12,6 @@ concurrency:
 
 permissions:
   contents: read
-  packages: write
-  security-events: write
 
 env:
   REGISTRY: ghcr.io
@@ -21,6 +19,20 @@ env:
   LOCAL_IMAGE: dmc-268-api:ci
 
 jobs:
+  secret-scan:
+    name: Secret scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Gitleaks
+        run: |
+          docker run --rm -v "$PWD:/src:ro" ghcr.io/gitleaks/gitleaks:v8.28.0 \
+            detect --source /src --no-banner --redact --exit-code 1
+
   terraform-fmt-validate:
     name: Terraform fmt / validate
     runs-on: ubuntu-latest
@@ -139,7 +151,11 @@ jobs:
     name: Push Docker image
     if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
     needs:
+      - secret-scan
       - terraform-fmt-validate
       - terraform-lint-security
       - docker-scan
@@ -198,13 +214,16 @@ jobs:
     name: Deploy staging
     if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
     needs: push-image
     concurrency:
       group: staging-deploy
       cancel-in-progress: false
     environment:
       name: staging
-      url: http://${{ secrets.STAGING_HOST }}
+      url: http://${{ vars.STAGING_HOST }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -212,8 +231,8 @@ jobs:
       - name: Upload deploy files
         uses: appleboy/scp-action@v0.1.7
         with:
-          host: ${{ secrets.STAGING_HOST }}
-          username: ${{ secrets.STAGING_SSH_USER }}
+          host: ${{ vars.STAGING_HOST }}
+          username: ${{ vars.STAGING_SSH_USER }}
           key: ${{ secrets.STAGING_SSH_KEY }}
           source: "deploy/compose/staging.yml,deploy/scripts/deploy.sh,deploy/scripts/rollback.sh,deploy/scripts/healthcheck.sh"
           target: /opt/dmc-268-api
@@ -225,16 +244,18 @@ jobs:
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GHCR_USER: ${{ github.actor }}
           IMAGE: ${{ needs.push-image.outputs.image }}
-          POSTGRES_USER: ${{ secrets.POSTGRES_USER }}
+          POSTGRES_USER: ${{ vars.POSTGRES_USER }}
           POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
-          POSTGRES_DB: ${{ secrets.POSTGRES_DB }}
+          POSTGRES_DB: ${{ vars.POSTGRES_DB }}
         with:
-          host: ${{ secrets.STAGING_HOST }}
-          username: ${{ secrets.STAGING_SSH_USER }}
+          host: ${{ vars.STAGING_HOST }}
+          username: ${{ vars.STAGING_SSH_USER }}
           key: ${{ secrets.STAGING_SSH_KEY }}
+          debug: false
           envs: GHCR_TOKEN,GHCR_USER,IMAGE,POSTGRES_USER,POSTGRES_PASSWORD,POSTGRES_DB
           script: |
             set -euo pipefail
+            set +o xtrace
             mv /opt/dmc-268-api/staging.yml /opt/dmc-268-api/compose.yml
             chmod +x /opt/dmc-268-api/deploy.sh /opt/dmc-268-api/rollback.sh /opt/dmc-268-api/healthcheck.sh
             /opt/dmc-268-api/deploy.sh "${IMAGE}"
@@ -243,8 +264,8 @@ jobs:
         id: health
         continue-on-error: true
         env:
-          HEALTH_URL: ${{ secrets.STAGING_HEALTH_URL }}
-          STAGING_HOST: ${{ secrets.STAGING_HOST }}
+          HEALTH_URL: ${{ vars.STAGING_HEALTH_URL }}
+          STAGING_HOST: ${{ vars.STAGING_HOST }}
         run: |
           chmod +x deploy/scripts/healthcheck.sh
           target="${HEALTH_URL:-http://${STAGING_HOST}/healthcheck}"
@@ -257,12 +278,14 @@ jobs:
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GHCR_USER: ${{ github.actor }}
         with:
-          host: ${{ secrets.STAGING_HOST }}
-          username: ${{ secrets.STAGING_SSH_USER }}
+          host: ${{ vars.STAGING_HOST }}
+          username: ${{ vars.STAGING_SSH_USER }}
           key: ${{ secrets.STAGING_SSH_KEY }}
+          debug: false
           envs: GHCR_TOKEN,GHCR_USER
           script: |
             set -euo pipefail
+            set +o xtrace
             /opt/dmc-268-api/rollback.sh
 
       - name: Fail the pipeline after rollback

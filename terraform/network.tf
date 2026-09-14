@@ -7,6 +7,6 @@ resource "hcloud_network" "staging" {
 resource "hcloud_network_subnet" "staging" {
   network_id   = hcloud_network.staging.id
   type         = "cloud"
-  network_zone = "eu-central"
+  network_zone = var.network_zone
   ip_range     = var.subnet_cidr
 }
