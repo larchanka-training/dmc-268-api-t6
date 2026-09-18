@@ -12,10 +12,17 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /srv
 
+RUN apt-get update \
+    && apt-get upgrade -y --no-install-recommends \
+    && rm -rf /var/lib/apt/lists/*
+
 RUN useradd --uid 1000 --no-create-home --home-dir /srv app
 
 COPY pyproject.toml uv.lock ./
-RUN uv sync --locked --no-dev && rm -f /bin/uv /bin/uvx
+RUN uv sync --locked --no-dev \
+    && rm -f /bin/uv /bin/uvx \
+    && rm -rf /root/.cache/uv \
+    && pip uninstall -y pip
 
 COPY app ./app
 COPY alembic ./alembic
