@@ -59,7 +59,7 @@ uv run mypy .
 
 | Документ | Содержание |
 |---|---|
-| [docs/INFRASTRUCTURE.md](docs/INFRASTRUCTURE.md) | Архитектура Hetzner, запуск Terraform, удаление стенда |
+| [docs/INFRASTRUCTURE.md](docs/INFRASTRUCTURE.md) | Архитектура Hetzner, Terraform (`api-staging` + `ui-staging`), удаление стенда |
 | [docs/CICD.md](docs/CICD.md) | Пайплайн, deployment, rollback |
 | [docs/SECRETS.md](docs/SECRETS.md) | Перечень secrets, доставка на staging, git и логи |
 

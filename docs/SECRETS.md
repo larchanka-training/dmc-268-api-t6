@@ -94,8 +94,8 @@ Rollback пароль из GitHub не шлёт повторно: читает �
 
 ```bash
 cp .env.example .env
-cp terraform/environments/staging.tfvars.example terraform/environments/staging.tfvars
-cp terraform/environments/staging.backend.hcl.example terraform/environments/staging.backend.hcl
+cp terraform/api-staging/environments/staging.tfvars.example terraform/api-staging/environments/staging.tfvars
+cp terraform/api-staging/environments/staging.backend.hcl.example terraform/api-staging/environments/staging.backend.hcl
 ```
 
 PR и `main` гоняют Gitleaks (`--redact`) и Trivy scanner `secret`. Находка останавливает выкат.
