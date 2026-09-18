@@ -120,9 +120,13 @@ the file is not JSON or its kind is unknown. The kind is detected from the top-l
 
 ### Proof-run record
 
-| Model     | Date      | Diff      | Files | Findings | Of which custom-rule |
-| --------- | --------- | --------- | ----- | -------- | -------------------- |
-| _pending_ | _pending_ | _pending_ | —     | —        | —                    |
+Bot: `claude-sonnet-5`, Claude Code subagent, clean context. Date: 2026-09-19.
+
+| Diff                                       | Files | Findings | Of which custom-rule | Validator |
+| ------------------------------------------- | ----- | -------- | --------------------- | --------- |
+| api PR #4 code diff                        | 41    | 5        | 0                     | exit 0    |
+| ui PR #31 `src/{entities,widgets,shared}`  | 46    | 5        | 4                     | exit 0    |
+| `examples/sample.diff`                     | 3     | 5        | 3                     | exit 0    |
 
 ## Open questions
 

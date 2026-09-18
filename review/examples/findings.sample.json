@@ -1,0 +1,69 @@
+{
+  "findings": [
+    {
+      "path": "app/modules/billing/application/charge.py",
+      "line": 32,
+      "start_line": 31,
+      "severity": "high",
+      "category": "correctness",
+      "title": "Bare except silently swallows gateway failures",
+      "body": "According to custom instructions in 'Error Handling Standards' (no bare except that swallows an error without handling, logging or re-raising): `execute` wraps the gateway call in a bare `except:` (line 31) and returns `None` (line 32) with no exception type, logging or re-raise. This differs from `ChargeRepository.save` in the same PR, which lets failures propagate. A bare except also catches `CancelledError` and `KeyboardInterrupt`, not just gateway errors. A gateway outage becomes a silent `None` with no trace in logs, indistinguishable from 'no charge happened'. Catch `Exception`, log the failure with the account id, and re-raise or return a typed result.",
+      "suggestion": null,
+      "confidence": 0.9,
+      "rule_name": "Error Handling Standards"
+    },
+    {
+      "path": "app/modules/billing/infrastructure/repository.py",
+      "line": 33,
+      "start_line": 31,
+      "severity": "high",
+      "category": "correctness",
+      "title": "get_latest does not order results, so it is not the latest",
+      "body": "`get_latest` (lines 29-33) selects rows for the account and calls `result.scalars().first()` (line 33) with no `order_by` on the query (line 31). Without an explicit order, SQL does not guarantee row order, so `first()` returns an arbitrary matching row, not the most recent one. This contradicts both the method name and its own docstring, 'Return the latest charge recorded for the account'. Any caller that relies on `get_latest` for the current charge state (a status check, a duplicate-charge guard) can act on a stale or random row. Add `.order_by(ChargeRow.created_at.desc())` (or the equivalent recency column) and `.limit(1)` before calling `first()`.",
+      "suggestion": null,
+      "confidence": 0.85,
+      "rule_name": null
+    },
+    {
+      "path": "app/modules/billing/infrastructure/repository.py",
+      "line": 12,
+      "start_line": null,
+      "severity": "medium",
+      "category": "correctness",
+      "title": "ChargeRepository has no test coverage in this diff",
+      "body": "According to custom instructions in 'Test Coverage for Complex Functions' (new or changed logic needs a corresponding test in the same diff): `tests/test_charge.py` only exercises `ChargeAccount` through fakes; `ChargeRepository` (lines 12-33) is not exercised by any test in this diff, including `save`'s row construction and flush, and `get_latest`'s query and empty-result path. If `save` mis-maps a field, or `get_latest`'s filter is wrong, nothing here would catch it. Add tests for `ChargeRepository`, covering `save` and both the found and empty-result paths of `get_latest`.",
+      "suggestion": null,
+      "confidence": 0.6,
+      "rule_name": "Test Coverage for Complex Functions"
+    },
+    {
+      "path": "app/modules/billing/application/charge.py",
+      "line": 14,
+      "start_line": 12,
+      "severity": "medium",
+      "category": "correctness",
+      "title": "ChargeRequest amount and currency accepted without validation",
+      "body": "`ChargeRequest` (lines 12-14) accepts `amount: Decimal` and `currency: str` with no validation, and `execute` passes them straight to `self._gateway.charge` unchecked. A zero or negative `amount`, or an empty or malformed `currency`, reaches the payment gateway; depending on its behavior this can charge the wrong amount or raise an error that the bare `except:` two lines later swallows into a silent `None`. Validate `amount > 0` and the `currency` format before calling the gateway, for example in `ChargeRequest.__post_init__` or at the start of `execute`.",
+      "suggestion": null,
+      "confidence": 0.55,
+      "rule_name": null
+    },
+    {
+      "path": "app/modules/billing/application/charge.py",
+      "line": 34,
+      "start_line": null,
+      "severity": "medium",
+      "category": "correctness",
+      "title": "Charge transaction commit is not visible in execute",
+      "body": "According to custom instructions in 'Clean Architecture Boundaries' (inside a UnitOfWork a repository flushes, the use case commits): `execute` calls `self._repository.save(...)` (line 34) and returns; nothing in this file commits the transaction. `ChargeRepository.save` only calls `await self._session.flush()`, consistent with the flush-only convention, so the row stays uncommitted unless something outside this diff commits it. Not visible in the provided context whether a surrounding session or UnitOfWork commits; if not, the returned `charge_id` points to data that is rolled back at the end of the request. Confirm the commit happens, or add it to `execute`.",
+      "suggestion": null,
+      "confidence": 0.5,
+      "rule_name": "Clean Architecture Boundaries"
+    }
+  ],
+  "summary": {
+    "problem": "The bare `except:` in `ChargeAccount.execute` swallows every gateway failure, including cancellation, into a silent `None`, with no logging and no test or comment covering why.",
+    "done_well": "The use case, repository and test double follow the constructor-injection and flush-not-commit shape of the module, and both the happy and gateway-failure paths of `ChargeAccount.execute` are tested.",
+    "effort": "small"
+  }
+}

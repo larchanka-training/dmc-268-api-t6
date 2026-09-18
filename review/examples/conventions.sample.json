@@ -1,0 +1,35 @@
+{
+  "files": [
+    {
+      "path": "app/modules/billing/application/charge.py",
+      "relevance": "changed; new use case whose bare except and commit ownership need review"
+    },
+    {
+      "path": "app/modules/billing/infrastructure/repository.py",
+      "relevance": "changed; new repository whose flush-only write and untested get_latest need review"
+    },
+    {
+      "path": "tests/test_charge.py",
+      "relevance": "changed; new tests covering ChargeAccount but not ChargeRepository"
+    }
+  ],
+  "key_patterns": [
+    "Use cases take their collaborators through constructor injection (charge.py, ChargeAccount.__init__(gateway, repository)).",
+    "Request data crossing a use case boundary is a frozen dataclass (charge.py, ChargeRequest).",
+    "Repository writes call session.flush(), not commit, and no commit call is visible in this diff (repository.py, ChargeRepository.save).",
+    "New billing code is split into application/ and infrastructure/ under app/modules/billing/ (charge.py, repository.py paths).",
+    "Tests fake a use case's ports (gateway, repository) instead of hitting real infrastructure (tests/test_charge.py, FakeGateway/FakeRepository).",
+    "Async use cases and repository methods use pytest.mark.asyncio and async def throughout (tests/test_charge.py, charge.py, repository.py)."
+  ],
+  "recommendations": [
+    "Verify the bare `except:` in ChargeAccount.execute (charge.py) is narrowed and the failure is logged or re-raised instead of swallowed (from: Error Handling Standards)",
+    "Confirm where the charge transaction commits: ChargeRepository.save (repository.py) only flushes, and charge.py shows no commit call (from: Clean Architecture Boundaries)",
+    "Check that no database transaction spans the gateway.charge() network call inside ChargeAccount.execute (charge.py) (from: Clean Architecture Boundaries)",
+    "Add or point to tests for ChargeRepository.save and get_latest (repository.py); tests/test_charge.py only covers ChargeAccount (from: Test Coverage for Complex Functions)",
+    "Check that ChargeRequest (charge.py) validates amount is positive and currency is well-formed before the gateway call (from: standard/correctness)",
+    "Check that ChargeAccount and ChargeRepository follow the same class-naming suffixes as sibling use cases and repositories in other modules (from: Naming Consistency)",
+    "Check whether the bare except in charge.py needs a comment explaining why gateway failures are converted to None instead of raised (from: Meaningful Comments for Complex Logic)",
+    "Check that ChargeAccount.execute returning None on failure will not be confused by callers with a legitimate 'no charge' result (from: standard/correctness)",
+    "Check that ChargeRepository.get_latest (repository.py) orders its query before calling first(), since an unordered select does not return the latest charge (from: standard/correctness)"
+  ]
+}
