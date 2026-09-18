@@ -15,7 +15,6 @@ permissions:
 
 env:
   REGISTRY: ghcr.io
-  TF_WORKING_DIR: terraform
   LOCAL_IMAGE: dmc-268-api:ci
 
 jobs:
@@ -46,16 +45,15 @@ jobs:
           terraform_wrapper: false
 
       - name: terraform fmt
-        working-directory: ${{ env.TF_WORKING_DIR }}
-        run: terraform fmt -check -diff -recursive
+        run: terraform fmt -check -diff -recursive terraform/
 
-      - name: terraform init
-        working-directory: ${{ env.TF_WORKING_DIR }}
-        run: terraform init -backend=false -input=false
-
-      - name: terraform validate
-        working-directory: ${{ env.TF_WORKING_DIR }}
-        run: terraform validate -no-color
+      - name: terraform init and validate
+        run: |
+          for stack in terraform/api-staging terraform/ui-staging; do
+            echo "=== ${stack} ==="
+            terraform -chdir="${stack}" init -backend=false -input=false
+            terraform -chdir="${stack}" validate -no-color
+          done
 
   terraform-lint-security:
     name: Terraform lint / security

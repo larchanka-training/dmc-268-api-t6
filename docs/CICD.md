@@ -15,7 +15,7 @@
 ```mermaid
 flowchart TD
   pr["PR / push"] --> secrets["gitleaks"]
-  pr --> tf["terraform fmt / validate"]
+  pr --> tf["terraform fmt / validate\n(api + ui stacks)"]
   pr --> lint["tflint + checkov"]
   pr --> build["docker build"]
   build --> scan["trivy: vuln / secret / misconfig"]
@@ -36,7 +36,7 @@ flowchart TD
 | Job | Когда | Permissions | Что делает |
 |---|---|---|---|
 | `Secret scan` | PR и `main` | `contents: read` | Gitleaks с `--redact` |
-| `Terraform fmt / validate` | PR и `main` | `contents: read` | `fmt -check`, `validate` |
+| `Terraform fmt / validate` | PR и `main` | `contents: read` | `fmt -check`, `validate` для `api-staging` и `ui-staging` |
 | `Terraform lint / security` | PR и `main` | `contents: read` | TFLint + Checkov |
 | `Docker image build` | PR и `main` | `contents: read` | образ `python:3.13-slim` |
 | `Docker image security scan` | после сборки | `contents: read` | Trivy `CRITICAL`/`HIGH` |
@@ -125,9 +125,11 @@ PostgreSQL только во внутренней docker-сети. Том `postg
 ## 7. Локальные команды CI
 
 ```bash
-terraform -chdir=terraform fmt -check -recursive
-terraform -chdir=terraform init -backend=false
-terraform -chdir=terraform validate
+terraform fmt -check -diff -recursive terraform/
+for stack in terraform/api-staging terraform/ui-staging; do
+  terraform -chdir="${stack}" init -backend=false -input=false
+  terraform -chdir="${stack}" validate
+done
 tflint --init && tflint --recursive
 checkov -f .checkov.yaml
 
