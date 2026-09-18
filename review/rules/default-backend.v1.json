@@ -1,0 +1,77 @@
+{
+  "version": 1,
+  "stack": "backend",
+  "rules": [
+    {
+      "name": "Naming Consistency",
+      "include": ["app/**/*.py"],
+      "exclude": ["tests/**", "alembic/**"],
+      "checks": [
+        "A new identifier follows the casing already used in the same module: snake_case for functions, variables and modules, PascalCase for classes, UPPER_CASE for module-level constants; no second style is introduced next to an existing one.",
+        "A name says what the value is or what the function does; an abbreviation is used only if the same module already uses it.",
+        "A repository, port or use case is named the way its siblings in the same layer are named (same suffix, same verb form).",
+        "A renamed symbol is renamed at every use inside the diff; no stale name remains in docstrings, tests or exports."
+      ],
+      "severity_hint": "low"
+    },
+    {
+      "name": "Error Handling Standards",
+      "include": ["app/**/*.py"],
+      "exclude": ["tests/**", "alembic/**"],
+      "checks": [
+        "Every external call and I/O operation (HTTP client, database, queue, file system, subprocess) has error handling on the path that needs it: a specific exception is caught or the failure is propagated deliberately.",
+        "No bare except and no except Exception that swallows the error; an error is handled, logged with context, or re-raised.",
+        "No empty except block and no except that only logs and continues where the caller expects a result.",
+        "A router does not catch exceptions to hide a failure; it decodes the transport contract, calls a use case and maps known domain errors to HTTP status codes."
+      ],
+      "severity_hint": "high"
+    },
+    {
+      "name": "Complex Function Improvement Suggestions",
+      "include": ["app/**/*.py"],
+      "exclude": ["tests/**", "alembic/**"],
+      "checks": [
+        "A function longer than 50 lines or nested more than 3 levels deep is split; name the piece that can be extracted.",
+        "A function with more than 5 parameters, or a boolean parameter that switches behaviour, takes a dataclass or Pydantic model, or becomes two functions.",
+        "Nested conditionals are replaced by guard clauses; a repeated if/elif cascade on the same discriminator is replaced by a mapping or polymorphism.",
+        "Business logic that appears in a router or an infrastructure adapter is moved into a use case or a domain service."
+      ]
+    },
+    {
+      "name": "Meaningful Comments for Complex Logic",
+      "include": ["app/**/*.py"],
+      "exclude": ["tests/**", "alembic/**"],
+      "checks": [
+        "Non-obvious logic (a regex, a magic number, a workaround, an ordering constraint, a noqa or type: ignore) has a comment that says why, not what.",
+        "A comment or docstring that restates the code, or no longer matches the changed code next to it, is removed or updated.",
+        "A TODO or FIXME names an issue number or an owner."
+      ],
+      "severity_hint": "info"
+    },
+    {
+      "name": "Test Coverage for Complex Functions",
+      "include": ["app/**/*.py"],
+      "exclude": ["tests/**", "alembic/**"],
+      "checks": [
+        "New or changed logic with branches has a corresponding change in tests/test_<feature>.py in the same diff.",
+        "A use case is tested against fakes of its ports (Protocols), not real infrastructure; tests that need a database are marked integration and skip when TEST_DATABASE_URL is unset.",
+        "Tests cover the failure path (raised domain error, empty result, rejected input), not only the happy path.",
+        "Tests assert literal values taken from the spec, never values derived from the implementation under test."
+      ],
+      "severity_hint": "medium"
+    },
+    {
+      "name": "Clean Architecture Boundaries",
+      "include": ["app/**/*.py"],
+      "exclude": ["tests/**", "alembic/**"],
+      "checks": [
+        "Dependency rule: entrypoints -> application -> domain, and infrastructure -> application/domain; a domain or application module never imports from infrastructure or entrypoints.",
+        "A port (interface) lives in the module that consumes it, not in the module that implements it.",
+        "Inside a UnitOfWork a repository calls flush, never commit; the use case commits.",
+        "No database transaction spans an LLM or GitHub call; network calls happen outside the transaction boundary.",
+        "New module code lands in app/modules/<m>/{domain,application,infrastructure} or app/common/, and a router in app/entrypoints/ contains no business logic."
+      ],
+      "severity_hint": "medium"
+    }
+  ]
+}

@@ -1,0 +1,82 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/larchanka-training/dmc-268-api-t6/main/review/rules/schema.json",
+  "title": "Custom review rule set",
+  "description": "A versioned set of custom review rules for one repository. The `rules` array is what the backend stores in `rule_versions.rules`; the backend renders each rule into `<custom_instructions>` as `<rule name=\"…\" include=\"…\" exclude=\"…\">` followed by the numbered checks.",
+  "$ref": "#/$defs/RuleSet",
+  "$defs": {
+    "Glob": {
+      "type": "string",
+      "description": "A path glob relative to the repository root (`**`, `*`, `{a,b}` supported). No whitespace: globs are rendered space-separated.",
+      "minLength": 1,
+      "maxLength": 200,
+      "pattern": "^\\S+$"
+    },
+    "Check": {
+      "type": "string",
+      "description": "One concrete, checkable statement. Numbered at render time; do not number it yourself.",
+      "minLength": 1,
+      "maxLength": 300
+    },
+    "Rule": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "include", "exclude", "checks"],
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Unique within the set. Quoted verbatim in the attribution prefix `According to custom instructions in '<rule name>'`, so quotes and angle brackets are not allowed.",
+          "minLength": 1,
+          "maxLength": 80,
+          "pattern": "^[^'\"<>]+$"
+        },
+        "include": {
+          "type": "array",
+          "description": "The rule applies to files matching at least one of these globs.",
+          "minItems": 1,
+          "maxItems": 20,
+          "items": { "$ref": "#/$defs/Glob" }
+        },
+        "exclude": {
+          "type": "array",
+          "description": "Files matching any of these globs are out of scope even if they match `include`. May be empty.",
+          "maxItems": 20,
+          "items": { "$ref": "#/$defs/Glob" }
+        },
+        "checks": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 10,
+          "items": { "$ref": "#/$defs/Check" }
+        },
+        "severity_hint": {
+          "type": "string",
+          "description": "Default severity for findings of this rule; the reviewer may raise or lower it per finding.",
+          "enum": ["critical", "high", "medium", "low", "info"]
+        }
+      }
+    },
+    "RuleSet": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "stack", "rules"],
+      "properties": {
+        "version": {
+          "type": "integer",
+          "description": "Version of this rule set. A new version is a new file; a file with a version is never edited.",
+          "minimum": 1
+        },
+        "stack": {
+          "type": "string",
+          "enum": ["frontend", "backend", "any"]
+        },
+        "rules": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 50,
+          "items": { "$ref": "#/$defs/Rule" }
+        }
+      }
+    }
+  }
+}
