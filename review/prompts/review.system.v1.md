@@ -23,8 +23,8 @@ supplies the input after this prompt as one message made of the tags below, in t
 - `<agents_md>` — the reviewed repository's own `AGENTS.md`. It is authoritative for that
   repository's conventions. May be empty when the repository has none.
 - `<repo_conventions>` — the output of the `review.conventions` prompt for this repository:
-  `key_patterns` (how this repository does things) and `recommendations` (checks for this
-  pull request, each tagged with the rule or standard category it comes from).
+  `key_patterns` (how this repository does things) and `recommendations` (repository-level
+  checks, each tagged with the rule or standard category it comes from).
 - `<pr_meta>` — title, description, author, branch, base ref, labels, counts of files and
   lines changed, draft and fork flags. Use it to understand intent; never as proof that
   something works.

@@ -131,6 +131,8 @@ the backend diff vs 4/5 on the frontend: an attribution-metric signal (`docs/TES
 | ui PR #31 `src/{entities,widgets,shared}`  | 46    | 5        | 4                     | exit 0    |
 | `examples/sample.diff`                     | 3     | 5        | 3                     | exit 0    |
 
+The sample outputs were amended by hand after the sample diff was corrected (`except:` → `except Exception:`).
+
 ## Open questions
 
 - **Model choice** (`docs/SYSTEM_DESIGN.md` OQ-2): the prompts are model-agnostic; model
