@@ -23,12 +23,12 @@ class SubmitFinding:
     def __init__(self, repo: FindingRepository) -> None:
         self._repo = repo
 
-    def execute(self, run_id: str, line: int, body: str) -> Finding: ...
+    async def __call__(self, run_id: str, line: int, body: str) -> Finding: ...
 
 
 # Hard to fake
 class SubmitFinding:
-    def execute(self, run_id: str, line: int, body: str) -> Finding:
+    async def __call__(self, run_id: str, line: int, body: str) -> Finding:
         repo = PostgresFindingRepository(get_session())
         ...
 ```
@@ -45,7 +45,7 @@ each call with `unittest.mock`:
 
 ```python
 # tests/fakes.py
-from app.modules.reviews.domain.ports import Finding
+from app.modules.reviews.domain.ports import Finding  # illustrative path
 
 
 class InMemoryFindingRepository:

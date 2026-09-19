@@ -4,8 +4,7 @@ Requires: api #4 (layout, SQLAlchemy)
 
 ## When to use
 
-Persistence for a module's own aggregate: a typed model plus a repository that only
-`flush()`s — its unit of work owns the transaction.
+Persistence for a module's own aggregate: a typed model plus a repository that only `flush()`s — its unit of work owns the transaction.
 
 ## File placement
 
@@ -142,9 +141,7 @@ def test_foo_repository_add_and_get_round_trip() -> None:
 
 ## Checklist
 
-- The model extends a local `DeclarativeBase`, never the real `Base` — it must not join
-  the Alembic-managed metadata.
-- `StrEnum` column via `sqlalchemy.Enum(..., values_callable=...)`; constraint names
-  follow `ix_/uq_<table>_<column>`. The repository only `flush()`s.
-- One pure unit test (no database) plus one integration test gated on
-  `TEST_DATABASE_URL`, isolated in a throwaway schema it drops afterwards.
+- `ProofBase` is for the proof run only; production models extend `Base` from
+  `app.common.infrastructure.db` (pending api #4).
+- `StrEnum` column via `sqlalchemy.Enum(..., values_callable=...)` above; production uses `pg_enum()` from `app.common.infrastructure.db.columns` (pending api #4) instead — the inline `Enum(...)` is proof-run only. Constraint names follow `ix_/uq_<table>_<column>`; the repository only `flush()`s.
+- One pure unit test (no database) plus one integration test gated on `TEST_DATABASE_URL`, isolated in a throwaway schema it drops afterwards; production also adds `@pytest.mark.integration` (registered in api #4) — omitted here because this proof runs on `main`.

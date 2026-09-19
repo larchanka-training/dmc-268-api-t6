@@ -36,12 +36,12 @@ FastAPI, SQLAlchemy 2 (async), Alembic, Pydantic 2, httpx, pytest, uv, Python 3.
 
 Clean Architecture, module-first (`app/bootstrap`, `app/common`, `app/modules/<m>/
 {domain,application,infrastructure}`); dependency rule `entrypoints → application →
-domain`; details in the stack rules file in `.agents/rules/`.
+domain`; details in [.agents/rules/backend.md](../rules/backend.md).
 
 ## Conventions
 
 - Branches: `feat/<slug>`, `fix/<slug>`, `docs/<slug>`, `chore/<slug>`,
-  slug preferably `<issue>-<kebab-case>`.
+  `deps-update-YYYY-MM-DD`, slug preferably `<issue>-<kebab-case>`.
 - Commits: Conventional Commits, reference the issue (`(#N)` in the subject
   or `Refs #N` in the footer).
 - PR title: conventional, ≤72 characters.

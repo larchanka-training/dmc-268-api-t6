@@ -12,6 +12,10 @@ returning a fake port, `monkeypatch` for environment variables.
 
 - `app/modules/<module>/domain/money.py`, `tests/test_money.py`
 
+`default_currency()` below reads an env var for the proof only; in production such env
+readers belong in `app/bootstrap/config.py`, not `domain/` (`domain/` stays stdlib / small
+abstractions).
+
 ## Code
 
 <!-- proof: app/money.py -->
@@ -132,6 +136,7 @@ def test_default_currency_reads_env_var(monkeypatch: pytest.MonkeyPatch) -> None
 - Arrange/act/assert as three commented steps for the simplest case; skip the comments
   once a test is a one-liner. `parametrize` takes a literal tuple table, never one
   computed from the function under test.
-- `pytest.raises(SomeError, match="...")` — a literal message fragment, not a regex.
+- `pytest.raises(SomeError, match="...")` — `match` is a regex (applied with `re.search`);
+  `re.escape()` the fragment if it contains regex metacharacters (`.`, `(`, `$`, …).
 - A fixture returning a fake `Protocol` port is typed by the port, not the concrete fake
   class. `monkeypatch.setenv`/`delenv` for env vars — never mutate `os.environ` directly.

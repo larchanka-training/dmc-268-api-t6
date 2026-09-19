@@ -7,15 +7,17 @@ parts.
 
 ```python
 # GOOD: tests observable behavior of a use case
-from app.modules.reviews.application.submit_finding import SubmitFinding
-from tests.fakes import InMemoryFindingRepository
+import asyncio
+
+from app.modules.reviews.application.submit_finding import SubmitFinding  # illustrative path
+from tests.fakes import InMemoryFindingRepository  # illustrative path
 
 
 def test_submit_finding_persists_a_new_finding() -> None:
     repo = InMemoryFindingRepository()
     use_case = SubmitFinding(repo)
 
-    result = use_case.execute(run_id="r_1", line=42, body="unclear naming here")
+    result = asyncio.run(use_case(run_id="r_1", line=42, body="unclear naming here"))
 
     assert result.line == 42
     assert repo.get(result.id).body == "unclear naming here"
@@ -64,12 +66,14 @@ def test_sums_finding_counts() -> None:
 ## Parametrize with literal tables, and `pytest.raises`
 
 ```python
+import asyncio
+
 import pytest
 
 
 @pytest.mark.parametrize(
     ("status", "expected_terminal"),
-    [("queued", False), ("completed", True), ("cancelled", True)],
+    [("state-a", False), ("state-b", True), ("state-c", True)],  # illustrative, not RunState
 )
 def test_run_status_terminal(status: str, expected_terminal: bool) -> None:
     assert is_terminal(status) is expected_terminal
@@ -78,7 +82,7 @@ def test_run_status_terminal(status: str, expected_terminal: bool) -> None:
 def test_submit_finding_rejects_a_line_outside_the_diff() -> None:
     use_case = SubmitFinding(InMemoryFindingRepository())
     with pytest.raises(ValueError, match="line outside diff"):
-        use_case.execute(run_id="r_1", line=9999, body="x")
+        asyncio.run(use_case(run_id="r_1", line=9999, body="x"))
 ```
 
 ## Integration tests: skip without `TEST_DATABASE_URL`

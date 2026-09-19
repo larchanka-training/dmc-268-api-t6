@@ -14,8 +14,8 @@ metadata:
 ## Prerequisites
 
 - `gh` CLI installed and authenticated.
-- The branch, commit, and PR conventions in the stack rules file in `.agents/rules/`
-  (`git-workflow.md`: branch prefixes, commit format, PR sections).
+- The branch, commit, and PR conventions in the shared `git-workflow.md` in
+  `.agents/rules/` (branch prefixes, commit format, PR sections).
 
 ## Instructions
 
@@ -26,7 +26,10 @@ metadata:
      message — see `commit-message-instructions.md` in this skill for the full format.
 
 2. **Create branch, commit, and push**:
-   - `git checkout -b <branch-name> && git add . && git commit -m "<commit-message>" && git push -u origin <branch-name>`.
+   - `git checkout -b <branch-name>`, then `git add -u` (or explicit paths, never `git add .`)
+     and review `git status` before committing — an untracked file (`.env`, proof scratch,
+     stray logs) must never ride along.
+   - `git commit -m "<commit-message>" && git push -u origin <branch-name>`.
    - Never `--no-verify`.
 
 3. **Create the pull request**:

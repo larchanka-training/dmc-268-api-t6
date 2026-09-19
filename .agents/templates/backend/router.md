@@ -105,7 +105,7 @@ def test_create_foo_returns_camel_case_body() -> None:
   value — a call in a default argument is a lint error (ruff `B008`).
 - `model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)` on every
   request/response model — the wire format is camelCase, the Python attribute is
-  `snake_case`.
+  `snake_case` (pending role 6 decision; `rules/backend.md` carries the same caveat).
 - The handler body is two lines: call the use case, build the response — no branching,
   no session, no repository import.
 - The dependency is overridden with a fake async callable in the test, on a local

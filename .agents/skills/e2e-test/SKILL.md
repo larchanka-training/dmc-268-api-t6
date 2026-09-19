@@ -58,11 +58,11 @@ print('healthcheck: ok')
 
 **Webhook smoke** — once the webhook entrypoint exists (pending api #4):
 POST a sample GitHub payload with an `X-Hub-Signature-256` header (HMAC over
-the raw body, per the stack rules file in `.agents/rules/`) and assert the
+the raw body, per `docs/SYSTEM_DESIGN.md` (ui repo) §8.2) and assert the
 response status and the literal JSON fields the endpoint contracts to
 return. Do not invent the path or payload shape before the endpoint lands —
-cite `docs/SYSTEM_DESIGN.md` (ui repo) §"GitHub: events and permissions" for
-the header and signing scheme, and treat the route itself as not yet built:
+cite `docs/SYSTEM_DESIGN.md` (ui repo) §8.2 for the header and signing
+scheme, and treat the route itself as not yet built:
 
 ```bash
 uv run python -c "
@@ -76,7 +76,7 @@ body = b'{\"action\": \"opened\"}'
 sig = 'sha256=' + hmac.new(secret, body, hashlib.sha256).hexdigest()
 
 r = httpx.post(
-    'http://localhost:8000/webhooks/github',  # webhook route not scheduled yet
+    '<webhook route — not yet defined>',  # placeholder until api #4 lands the entrypoint
     content=body,
     headers={'X-Hub-Signature-256': sig, 'Content-Type': 'application/json'},
 )

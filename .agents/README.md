@@ -49,6 +49,9 @@ These files are byte-identical between the two repos, marked with a
 Everything else (`rules/frontend.md` / `rules/backend.md`, stack-specific
 skills, `templates/`) is per-repo.
 
+Shared files: edit in `dmc-268-ui-t6`, `cp` to `dmc-268-api-t6`, then
+`diff -r` the two paths to confirm byte-identity before committing either.
+
 ## How to add a skill
 
 Each `skills/<dir>/SKILL.md` needs frontmatter: `name` (matches the directory),

@@ -53,8 +53,9 @@ infrastructure}`, `app/modules/<m>/{domain,application,infrastructure}`,
 
 ## 4. Language rules
 
-- Python 3.13 (`requires-python = "==3.13.*"`); `from __future__ import annotations`
-  is not needed on 3.13, but full type annotations are mandatory (mypy `strict`).
+- Python 3.13 (`requires-python = "==3.13.*"`); full type annotations are mandatory
+  (mypy `strict`). Every module starts with `from __future__ import annotations`
+  (forward references; matches the api #4 models).
 - SQLAlchemy 2 typed models: `Mapped[...]` / `mapped_column`, no SQLModel.
 - FastAPI endpoints are `async def`.
 - Pydantic DTOs sit at the boundary; wire payloads use camelCase aliases
@@ -72,7 +73,7 @@ infrastructure}`, `app/modules/<m>/{domain,application,infrastructure}`,
 - Unit tests exercise use cases against fakes of the ports (Protocols), not real
   infrastructure.
 - Integration tests are marked `@pytest.mark.integration` and skip when
-  `TEST_DATABASE_URL` is unset (marker registration pending api #4 — same line).
+  `TEST_DATABASE_URL` is unset (marker registration pending api #4).
 - Assert literal values taken from the spec — never derive an expected value from
   the implementation under test.
 
