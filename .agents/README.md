@@ -11,7 +11,8 @@ Rationale: the course board's Definition of Ready/Done, `docs/SYSTEM_DESIGN.md`
 §15 (OQ-4) of `dmc-268-ui-t6`, and the 2026-08-17 lecture all converge on
 `.agents/` over `docs/agents/`. Codex reads `.agents/skills` natively; Claude
 Code reads `.claude/skills` — the symlink lets one file tree serve both without
-duplication.
+duplication. This is role 7's decision, pending ratification by role 1
+(tech lead); see `proposals/agents-md-draft.md`.
 
 ## Harness matrix
 
@@ -29,7 +30,10 @@ duplication.
 - `skills/` — agent skills, one `SKILL.md` per directory (7 here — no
   `manual-automation`).
 - `agents/` — agent definitions (`name`, `description`, `model` frontmatter).
-- `templates/backend/` — code/test templates with proof blocks.
+- `templates/backend/` — code/test templates with proof blocks. Fenced blocks
+  preceded by `<!-- proof: <file> -->` are extracted and run through
+  lint/typecheck/tests by role 7's local gate before merge; ui: file name
+  under one root; api: `app/…` or `tests/…` prefix selects the root.
 - `proposals/` — drafts owned by other roles (e.g. `agents-md-draft.md`).
 
 ## Sync map (ui ↔ api)
@@ -50,8 +54,9 @@ skills, `templates/`) is per-repo.
 Each `skills/<dir>/SKILL.md` needs frontmatter: `name` (matches the directory),
 `description` (third person, "This skill should be used when…"), and a
 `metadata` block (`version: 1.0.0`, `source: instructor-pack`,
-`adapted-for: frontend|backend|any`). Budget: keep each skill file under
-~150 lines; write it in English.
+`adapted-for: frontend|backend|any`). Budget scales with the source: about
+1.3× the instructor-pack original plus frontmatter; see existing `SKILL.md`
+files for precedent (templates ≤150 lines). Write it in English.
 
 ## Product review prompts
 

@@ -10,7 +10,7 @@ via `Depends` — it never contains business logic or talks to a session directl
 
 ## File placement
 
-- `app/modules/<module>/entrypoints/api/foo_router.py`
+- `app/entrypoints/api/foo_router.py`
 - `tests/test_foo_router.py`
 
 ## Code
@@ -110,5 +110,5 @@ def test_create_foo_returns_camel_case_body() -> None:
   no session, no repository import.
 - The dependency is overridden with a fake async callable in the test, on a local
   `FastAPI()` app, never the real application instance.
-- Production placement is `app/modules/<module>/entrypoints/api/`; the marker file
+- Production placement is `app/entrypoints/api/`; the marker file
   names above are proof-run paths only.

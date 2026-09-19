@@ -57,7 +57,7 @@ Use the affected module/component (folder) name, lowercase, kebab-case.
 ### Subject
 
 - Use **imperative mood** ("Add feature" not "Added feature").
-- Capitalize the first letter.
+- Lowercase, imperative subject after the type (`feat(auth): add …`).
 - Do not end with a period.
 - Be concise but descriptive.
 - Reference the issue with `(#N)` in the subject when there is room, or in the footer instead.

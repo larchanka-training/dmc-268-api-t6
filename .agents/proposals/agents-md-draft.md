@@ -53,7 +53,7 @@ domain`; details in the stack rules file in `.agents/rules/`.
 
 - `.agents/rules/` — stack and git-workflow rules.
 - `.agents/skills/` — agent skills (agent-loop, code-review, tdd,
-  pull-request, planning-and-task-breakdown, qa).
+  pull-request, planning-and-task-breakdown, qa, e2e-test).
 - `.agents/templates/` — code/test templates with proof blocks.
 - `review/` — the AI reviewer product's own prompts and rule sets, not covered here.
 

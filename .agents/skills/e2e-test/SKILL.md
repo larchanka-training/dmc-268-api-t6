@@ -56,7 +56,7 @@ print('healthcheck: ok')
 "
 ```
 
-**Webhook smoke** — once the webhook entrypoint exists (pending api #4/#6):
+**Webhook smoke** — once the webhook entrypoint exists (pending api #4):
 POST a sample GitHub payload with an `X-Hub-Signature-256` header (HMAC over
 the raw body, per the stack rules file in `.agents/rules/`) and assert the
 response status and the literal JSON fields the endpoint contracts to
@@ -76,7 +76,7 @@ body = b'{\"action\": \"opened\"}'
 sig = 'sha256=' + hmac.new(secret, body, hashlib.sha256).hexdigest()
 
 r = httpx.post(
-    'http://localhost:8000/webhooks/github',  # pending api #4/#6
+    'http://localhost:8000/webhooks/github',  # webhook route not scheduled yet
     content=body,
     headers={'X-Hub-Signature-256': sig, 'Content-Type': 'application/json'},
 )

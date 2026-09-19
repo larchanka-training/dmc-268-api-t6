@@ -31,6 +31,9 @@ repo layout) — do not fix it, run the commands above directly.
 
 ## 3. Layout & boundaries
 
+All of this section describes the layout of `docs/BACKEND_ARCHITECTURE.md`
+(pending api #4); on `main` today `app/` holds only `main.py`.
+
 Clean Architecture, module-first: `app/bootstrap/`, `app/common/{application,domain,
 infrastructure}`, `app/modules/<m>/{domain,application,infrastructure}`,
 `app/entrypoints/{api,webhook,worker,…}`.

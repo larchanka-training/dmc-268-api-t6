@@ -79,11 +79,11 @@ graph TD
 ## Sub-Agent Skill References
 
 - **Planning Sub-Agent**: the planning-and-task-breakdown skill
-  (`.agents/skills/planning-and-task-breakdown/SKILL.md`, added by a later task in this issue)
+  (`.agents/skills/planning-and-task-breakdown/SKILL.md`)
   — analyzes dependencies, partitions slices, and outputs plans.
 - **Development Sub-Agent**: incremental, vertical-slice implementation (see the stack rules
-  file in `.agents/rules/`), plus the tdd skill (`.agents/skills/tdd/SKILL.md`, added by a
-  later task in this issue) for test-first RED-GREEN loops at public boundaries.
+  file in `.agents/rules/`), plus the tdd skill (`.agents/skills/tdd/SKILL.md`)
+  for test-first RED-GREEN loops at public boundaries.
 - **Review Sub-Agent**: [code-review](../skills/code-review/SKILL.md) — two-axis checks for
   standard and spec compliance.
 - **Publisher Sub-Agent**: [pull-request](../skills/pull-request/SKILL.md) — automates git
