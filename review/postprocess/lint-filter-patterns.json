@@ -20,7 +20,7 @@
     "\\b(tabs?|spaces) (vs\\.?|versus|instead of|rather than) (tabs?|spaces)\\b",
     "\\bnits?\\b|\\bnitpicks?\\b|\\bcode style\\b",
     "\\bconsole\\.log\\b",
-    "\\b(===|strict equality)\\b"
+    "(===|\\bstrict equality\\b)"
   ],
   "keep_if_any": [
     "\\binject(ion|ed|s)?\\b",

@@ -55,10 +55,11 @@ play means not dropped: a `body_only` finding stays in play and still passes ste
    lines included) moves the finding to `body_only`. A `start_line` that is not inside a
    hunk, or not smaller than `line`, is cleared to `null`; the finding stays where it is. A
    finding in `body_only` is published without its `suggestion`.
-5. **Cap.** Sort the findings still in play by severity (`critical`, `high`, `medium`, `low`,
+5. **Cap.** Sort the findings still `inline` by severity (`critical`, `high`, `medium`, `low`,
    `info`), then by `confidence` descending, then by position in the model's answer. The
    first `N` stay `inline`, where `N` is the smaller of `max_inline` and the repository
-   setting; the rest move to `body_only`. `body_only` keeps the same order.
+   setting; the rest move to `body_only` and keep that order. A finding already in
+   `body_only` (steps 3 and 4) is never promoted back into the cap.
 6. **Attribution consistency.** `rule_name` stays set only when all three hold: `body`
    starts with `According to custom instructions in '`, the name quoted between the first
    pair of single quotes equals `rule_name`, and `rule_name` is one of the run's rule names.
@@ -82,8 +83,8 @@ for f in not_dropped:
     elif f.line not in hunk_lines[f.path]: to_body(f)
     if f.start_line is not None and (f.start_line not in hunk_lines[f.path]
                                      or f.start_line >= f.line): f.start_line = None
-sort in_play by (severity_rank, -confidence, position)
-inline, overflow = in_play[:N], in_play[N:]; to_body(each of overflow)
+sort inline by (severity_rank, -confidence, position)
+inline, overflow = inline[:N], inline[N:]; to_body(each of overflow)
 for f in inline + body_only:
     if not (f.body starts with PREFIX and quoted_name(f.body) == f.rule_name
             and f.rule_name in rule_names): f.rule_name = None
@@ -110,7 +111,7 @@ never published.
   `"missing null-check"` — one kept, one dropped as `duplicate`.
 - `confidence: 0.4` — `body_only`, even when the line is inside a hunk.
 - `line` not inside any hunk of its file — `body_only`, `suggestion` not published.
-- 14 findings after steps 1–4 with `max_inline: 10` — 10 `inline`, 4 `body_only`.
+- 14 findings still `inline` after steps 1–4 with `max_inline: 10` — 10 `inline`, 4 `body_only`.
 - `rule_name: "Naming Consistency"` with a `body` that does not start with the prefix —
   published with `rule_name: null`.
 - `rule_name: null` with a `body` that starts with the prefix — prefix stripped, `body_only`.

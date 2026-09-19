@@ -43,8 +43,12 @@ row when that repository is onboarded; where the backend keeps the defaults unti
 Canonical JSON is `json.dumps(rules, sort_keys=True, separators=(",", ":"))` in UTF-8, so
 the checksum is recomputable from the row. A change to a prompt or a rule set is a new file
 with the next version number; the old file stays. A run references the `prompt_version_id`
-and `rule_version_id` it was made with. `repo_conventions.languages` is computed
-deterministically by the backend; it is not part of `RepoConventionsDraft`.
+and `rule_version_id` it was made with. `RepoConventionsDraft` is split on save:
+`key_patterns` and `recommendations` go to `repo_conventions`, cached per `(repository,
+AGENTS.md sha, prompt_version)` and reused by every pull request of the repository until
+`AGENTS.md` or the prompt version changes; `files[]` describes one pull request and goes to
+the run trace (`run_actions`); `repo_conventions.languages` is computed deterministically by
+the backend and is not part of the draft.
 
 ## Assembly order
 
@@ -134,11 +138,6 @@ the backend diff vs 4/5 on the frontend: an attribution-metric signal (`docs/TES
 - **Output language**: English by default (stated in both prompts). Proposed override: a
   line `Review language: xx` in the reviewed repository's `AGENTS.md`, honoured by a later
   prompt version. Decision pending with the team.
-- **`files[]` placement**: `key_patterns` and `recommendations` go to `RepoConventions`,
-  `files[]` to the run trace. `RepoConventions` is cached per `(repository, AGENTS.md sha,
-  prompt version)` while `recommendations` and `files[]` describe one pull request; the
-  backend decides whether a cache hit skips the conventions prompt or re-runs it per pull
-  request. Decision pending with role 6.
 - **Default rule set**: how the backend picks a repository's first set (the `stack` of
   `rules/default-*.v1.json`) is open; proposal: by dominant language. Decision pending with role 6.
 
