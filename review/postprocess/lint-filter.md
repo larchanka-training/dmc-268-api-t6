@@ -30,13 +30,15 @@ Three buckets that together contain every input finding exactly once:
 - `dropped` — findings not published, each with a `drop_reason`: `lint_pattern`,
   `duplicate`, `unknown_path`.
 
-The filter never edits `title`, `body`, `severity`, `category`, `confidence` or
-`suggestion`. It may only move a finding between buckets, set `drop_reason`, clear
-`rule_name` (step 6) and clear `start_line` (step 4).
+The filter never edits `title`, `severity`, `category`, `confidence` or `suggestion`, and
+edits `body` in one case only: step 6 strips a prefix that names no rule. Otherwise it may
+only move a finding between buckets, set `drop_reason`, clear `rule_name` (step 6) and
+clear `start_line` (step 4).
 
 ## Pipeline
 
-Run the steps in this order; each step sees the findings the previous step left in play.
+Run the steps in this order; each step sees the findings the previous step left in play. In
+play means not dropped: a `body_only` finding stays in play and still passes steps 4 and 6.
 
 1. **Lint drop.** Let `text = title + "\n" + body`. Drop the finding with reason
    `lint_pattern` when any `drop_if_any` pattern matches `text`, unless a `keep_if_any`
@@ -49,10 +51,10 @@ Run the steps in this order; each step sees the findings the previous step left 
    reason `duplicate`.
 3. **Confidence threshold.** `confidence < min_confidence` moves the finding to `body_only`.
 4. **Hunk validation.** A `path` that is not among the run's changed files drops the finding
-   with reason `unknown_path`. A `line` that is not inside a hunk of that file moves the
-   finding to `body_only`. A `start_line` that is not inside a hunk, or not smaller than
-   `line`, is cleared to `null`; the finding stays where it is. A finding in `body_only`
-   is published without its `suggestion`.
+   with reason `unknown_path`. A `line` outside every hunk of that file (the extra context
+   lines included) moves the finding to `body_only`. A `start_line` that is not inside a
+   hunk, or not smaller than `line`, is cleared to `null`; the finding stays where it is. A
+   finding in `body_only` is published without its `suggestion`.
 5. **Cap.** Sort the findings still in play by severity (`critical`, `high`, `medium`, `low`,
    `info`), then by `confidence` descending, then by position in the model's answer. The
    first `N` stay `inline`, where `N` is the smaller of `max_inline` and the repository
@@ -60,10 +62,12 @@ Run the steps in this order; each step sees the findings the previous step left 
 6. **Attribution consistency.** `rule_name` stays set only when all three hold: `body`
    starts with `According to custom instructions in '`, the name quoted between the first
    pair of single quotes equals `rule_name`, and `rule_name` is one of the run's rule names.
-   Otherwise `rule_name` is cleared to `null`. A `body` carrying the prefix with `rule_name`
-   already `null` is left as it is: the prefix is text, `rule_name` is the fact.
+   Otherwise `rule_name` is cleared to `null`. A `body` that carries the prefix while
+   `rule_name` is `null` (from the model, or cleared here) has the prefix stripped — up to
+   and including the first `): ` after the quoted name — and moves to `body_only`: the
+   author never sees an attribution that names no rule.
 
-## Pseudocode
+## Pseudocode (illustrative)
 
 ```text
 for f in findings:
@@ -72,7 +76,7 @@ for f in findings:
        and f.severity not in {critical, high}:
         drop(f, "lint_pattern")
 dedup by (f.path, f.line, normalize(f.title)); keep best(severity, confidence, position)
-for f in in_play:
+for f in not_dropped:
     if f.confidence < min_confidence: to_body(f)
     if f.path not in changed_files: drop(f, "unknown_path")
     elif f.line not in hunk_lines[f.path]: to_body(f)
@@ -83,6 +87,9 @@ inline, overflow = in_play[:N], in_play[N:]; to_body(each of overflow)
 for f in inline + body_only:
     if not (f.body starts with PREFIX and quoted_name(f.body) == f.rule_name
             and f.rule_name in rule_names): f.rule_name = None
+    if f.rule_name is None and f.body starts with PREFIX:
+        f.body = strip_prefix(f.body); to_body(f)
+to_body(f): move f to body_only; f.suggestion is not published
 ```
 
 ## Hand-off to publishing
@@ -106,3 +113,4 @@ never published.
 - 14 findings after steps 1–4 with `max_inline: 10` — 10 `inline`, 4 `body_only`.
 - `rule_name: "Naming Consistency"` with a `body` that does not start with the prefix —
   published with `rule_name: null`.
+- `rule_name: null` with a `body` that starts with the prefix — prefix stripped, `body_only`.

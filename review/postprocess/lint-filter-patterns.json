@@ -1,7 +1,7 @@
 {
   "version": 1,
   "drop_if_any": [
-    "\\bformatting\\b",
+    "\\b(code|auto|source) formatting\\b|\\bformatting (only|nits?|issues?)\\b",
     "\\bwhitespace\\b",
     "\\bindent(ation|ed)?\\b",
     "\\b(blank|empty) lines?\\b",
@@ -18,7 +18,9 @@
     "\\b(prettier|eslint|stylelint|ruff|mypy|black|isort|flake8|pylint|pyright)\\b",
     "\\bpep ?8\\b",
     "\\b(tabs?|spaces) (vs\\.?|versus|instead of|rather than) (tabs?|spaces)\\b",
-    "\\b(nit|nitpick|nitpicks|code style)\\b"
+    "\\bnits?\\b|\\bnitpicks?\\b|\\bcode style\\b",
+    "\\bconsole\\.log\\b",
+    "\\b(===|strict equality)\\b"
   ],
   "keep_if_any": [
     "\\binject(ion|ed|s)?\\b",
@@ -30,7 +32,17 @@
     "\\bdeserializ(e|ed|es|ing|ation)\\b",
     "\\brace( condition)?s?\\b",
     "\\bleak(s|ed|ing)?\\b",
-    "\\b(unsafe|insecure|vulnerab(le|ility|ilities)|exploit(able)?)\\b"
+    "\\b(unsafe|insecure|vulnerab(le|ility|ilities)|exploit(able)?)\\b",
+    "\\bsql\\b",
+    "\\bquer(y|ies)\\b",
+    "\\bshell\\b",
+    "\\bcommand\\b",
+    "\\bescap(e|ed|ing)\\b",
+    "\\bsanitiz",
+    "\\beval\\b",
+    "\\bauthori[sz]",
+    "\\bauthentic",
+    "\\b(eslint-disable|noqa|type: ?ignore)\\b"
   ],
   "min_confidence": 0.6,
   "max_inline": 10

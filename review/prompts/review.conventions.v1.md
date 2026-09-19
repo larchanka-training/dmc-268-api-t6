@@ -1,7 +1,7 @@
 ---
 key: review.conventions
 version: 1
-description: Conventions prompt of the AI code reviewer: repository patterns and review plan.
+description: "Conventions prompt of the AI code reviewer: repository patterns and review plan."
 input_tags: [custom_instructions, agents_md, repo_tree, repo_files, changed_files]
 output_schema: RepoConventionsDraft
 ---

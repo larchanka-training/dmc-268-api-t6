@@ -23,12 +23,11 @@ immutable — a file with a version in its name is never edited — and served f
 
 ## Seeding contract
 
-Prompts and default rule sets are loaded from this directory at deploy or migration time —
-an Alembic data migration (pending api #4) or a `seed` command owned by the backend — never
-read from disk at runtime: `review/` is not part of the Docker image, `Dockerfile` copies
-only `app/`. Prompts are global rows of `prompt_versions`. A `rule_versions` row belongs to
-one repository, so a default set becomes a repository's first `rule_versions` row when that
-repository is onboarded; where the backend keeps the defaults until then is its choice.
+Prompts and default rule sets are loaded from this directory at deploy or migration time — an Alembic data
+migration (pending api #4) or a `seed` command owned by the backend — never read from disk at runtime: `review/`
+is not part of the Docker image, `Dockerfile` copies only `app/`. Prompts are global rows of `prompt_versions`.
+A `rule_versions` row belongs to one repository, so a default set becomes a repository's first `rule_versions`
+row when that repository is onboarded; where the backend keeps the defaults until then is its choice.
 
 | Column                      | Value                                                     |
 | --------------------------- | --------------------------------------------------------- |
@@ -44,16 +43,16 @@ repository is onboarded; where the backend keeps the defaults until then is its 
 Canonical JSON is `json.dumps(rules, sort_keys=True, separators=(",", ":"))` in UTF-8, so
 the checksum is recomputable from the row. A change to a prompt or a rule set is a new file
 with the next version number; the old file stays. A run references the `prompt_version_id`
-and `rule_version_id` it was made with.
+and `rule_version_id` it was made with. `repo_conventions.languages` is computed
+deterministically by the backend; it is not part of `RepoConventionsDraft`.
 
 ## Assembly order
 
-One request is assembled as
-`system → <custom_instructions> → <agents_md> → <repo_conventions> → <pr_meta> → <changed_files> → <omitted_files>`:
-the prompt file is the system message, the tags follow in this order. The order serves the
-provider's prompt cache: prompt, rules and conventions form the stable prefix shared by
-every run of a repository, the diff is the varying tail (`docs/SYSTEM_DESIGN.md` §10 of the
-ui repository). `review.conventions` runs first, with its own tags in the same style.
+One request is assembled as `system → <custom_instructions> → <agents_md> → <repo_conventions> → <pr_meta> →
+<changed_files> → <omitted_files>`: the prompt file is the system message, the tags follow in this order. The
+order serves the provider's prompt cache: prompt, rules and conventions form the stable prefix shared by every
+run of a repository, the diff is the varying tail (`docs/SYSTEM_DESIGN.md` §10 of the ui repository).
+`review.conventions` runs first, with its own tags in the same style.
 
 ## Input envelope
 
@@ -61,7 +60,8 @@ ui repository). `review.conventions` runs first, with its own tags in the same s
 - `<agents_md>` — the reviewed repository's `AGENTS.md` as text; empty when none.
 - `<repo_conventions>` — the `key_patterns` and `recommendations` of `review.conventions`.
 - `<pr_meta>` — title, description, author, branch, base ref, labels, counts, draft/fork.
-- `<changed_files>` — the diff as XML with pre-numbered lines (below).
+- `<changed_files>` — the diff as XML with pre-numbered lines (below). For `review.conventions`
+  it lists every changed path, including those the review prompt later omits.
 - `<omitted_files>` — changed paths not shown to the model, one per line.
 - `<repo_tree>`, `<repo_files>` — conventions prompt only: all paths, and up to 10 files of
   at most 300 lines as `<file path="…">` blocks with pre-numbered lines.
@@ -95,11 +95,10 @@ tool to continue; the trailer is the contract for a future tool-enabled engine's
 
 ## Rule sets
 
-`rules/schema.json` defines `RuleSet{version, stack, rules[]}` and
-`Rule{name, include[], exclude[], checks[], severity_hint?}`; `additionalProperties` is
-false everywhere, names are unique within a set. `rule_versions.rules` holds the `rules`
-array of a repository's active set: a default set first, the repository's own rules as a
-new version. A rule's `name` is quoted verbatim in the attribution prefix.
+`rules/schema.json` defines `RuleSet{version, stack, rules[]}` and `Rule{name, include[], exclude[], checks[],
+severity_hint?}`; `additionalProperties` is false everywhere, names are unique within a set.
+`rule_versions.rules` holds the `rules` array of a repository's active set: a default set first, the
+repository's own rules as a new version. A rule's `name` is quoted verbatim in the attribution prefix.
 
 ## Post-processing hand-off
 
@@ -111,16 +110,16 @@ threshold, hunk validation, inline cap, attribution consistency. Its buckets `in
 
 ## Evaluation
 
-`uv run python review/scripts/validate_findings.py <json>` checks one model output: exit `0`
-when valid, `1` when it violates the contract (violations printed one per line), `2` when
-the file is not JSON or its kind is unknown. The kind is detected from the top-level key:
-`findings` → `ReviewOutput`, `files` → `RepoConventionsDraft`. The tests run it over
-`examples/*.sample.json`. Quality targets and the golden dataset are defined in
-`docs/TEST_PLAN.md` §3–4 (pending #25, ui repository).
+`uv run python review/scripts/validate_findings.py <json>` checks one model output: exit `0` when valid, `1`
+when it violates the contract (violations printed one per line), `2` when the file is not JSON or its kind is
+unknown. The kind is detected from the top-level key: `findings` → `ReviewOutput`, `files` →
+`RepoConventionsDraft`. The tests run it over `examples/*.sample.json`. Quality targets and the golden dataset
+are defined in `docs/TEST_PLAN.md` §3–4 (pending #25, ui repository).
 
 ### Proof-run record
 
-Bot: `claude-sonnet-5`, Claude Code subagent, clean context. Date: 2026-09-19.
+Bot: `claude-sonnet-5`, Claude Code subagent, clean context. Date: 2026-09-19. 0/5 custom-rule attributions on
+the backend diff vs 4/5 on the frontend: an attribution-metric signal (`docs/TEST_PLAN.md` §3, pending #25).
 
 | Diff                                       | Files | Findings | Of which custom-rule | Validator |
 | ------------------------------------------- | ----- | -------- | --------------------- | --------- |
@@ -140,6 +139,8 @@ Bot: `claude-sonnet-5`, Claude Code subagent, clean context. Date: 2026-09-19.
   prompt version)` while `recommendations` and `files[]` describe one pull request; the
   backend decides whether a cache hit skips the conventions prompt or re-runs it per pull
   request. Decision pending with role 6.
+- **Default rule set**: how the backend picks a repository's first set (the `stack` of
+  `rules/default-*.v1.json`) is open; proposal: by dominant language. Decision pending with role 6.
 
 ## Ownership
 

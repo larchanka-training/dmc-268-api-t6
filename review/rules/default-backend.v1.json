@@ -54,8 +54,8 @@
       "exclude": ["tests/**", "alembic/**"],
       "checks": [
         "New or changed logic with branches has a corresponding change in tests/test_<feature>.py in the same diff.",
-        "A use case is tested against fakes of its ports (Protocols), not real infrastructure; tests that need a database are marked integration and skip when TEST_DATABASE_URL is unset.",
-        "Tests cover the failure path (raised domain error, empty result, rejected input), not only the happy path.",
+        "The change to a use case is accompanied by tests that fake its ports (Protocols) instead of real infrastructure; a change that needs a database is accompanied by tests marked integration that skip when TEST_DATABASE_URL is unset.",
+        "The change to an app file is accompanied by tests that cover its failure path (raised domain error, empty result, rejected input), not only the happy path.",
         "Tests assert literal values taken from the spec, never values derived from the implementation under test."
       ],
       "severity_hint": "medium"

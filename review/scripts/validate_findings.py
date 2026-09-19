@@ -14,6 +14,7 @@ top-level shape matches neither kind.
 from __future__ import annotations
 
 import json
+import re
 import sys
 from pathlib import Path
 from typing import TypeGuard
@@ -23,10 +24,16 @@ CATEGORIES = {"security", "correctness", "performance", "readability"}
 EFFORTS = {"none", "small", "medium", "large"}
 
 MAX_FINDINGS = 10
+MAX_TITLE_CHARS = 80
 MAX_BODY_CHARS = 1200
 MAX_KEY_PATTERN_CHARS = 160
 
 ATTRIBUTION_PREFIX = "According to custom instructions in '"
+
+# `(from: standard/<category>)` or `(from: <rule name>)`, nothing after it.
+FROM_SUFFIX_RE = re.compile(
+    r".*\(from: (standard/(security|correctness|performance|readability)|(?!standard/)[^()]+)\)"
+)
 
 FINDING_KEYS = (
     "path",
@@ -108,8 +115,8 @@ def _validate_finding(item: object, prefix: str) -> list[str]:
         start_ok = _is_int(start_line) and start_line >= 1
         if not start_ok:
             errors.append(_err(f"{prefix}.start_line", "must be an int >= 1 or null"))
-        elif line_ok and start_line > line:
-            errors.append(_err(f"{prefix}.start_line", "must be <= line"))
+        elif line_ok and start_line >= line:
+            errors.append(_err(f"{prefix}.start_line", "must be < line"))
 
     if item.get("severity") not in SEVERITIES:
         errors.append(_err(f"{prefix}.severity", f"must be one of {sorted(SEVERITIES)}"))
@@ -117,8 +124,11 @@ def _validate_finding(item: object, prefix: str) -> list[str]:
     if item.get("category") not in CATEGORIES:
         errors.append(_err(f"{prefix}.category", f"must be one of {sorted(CATEGORIES)}"))
 
-    if not _is_nonempty_str(item.get("title")):
-        errors.append(_err(f"{prefix}.title", "must be a non-empty string"))
+    title = item.get("title")
+    if not (_is_nonempty_str(title) and len(title) <= MAX_TITLE_CHARS):
+        errors.append(
+            _err(f"{prefix}.title", f"must be a non-empty string, at most {MAX_TITLE_CHARS} chars")
+        )
 
     body = item.get("body")
     body_ok = _is_nonempty_str(body) and len(body) <= MAX_BODY_CHARS
@@ -186,8 +196,16 @@ def validate_conventions(data: object) -> list[str]:
     if not isinstance(files, list):
         errors.append(_err("files", "must be a list"))
     else:
+        if not files:
+            errors.append(_err("files", "must have at least 1 item"))
+        seen: set[str] = set()
         for i, item in enumerate(files):
             errors.extend(_validate_file_entry(item, f"files[{i}]"))
+            path = item.get("path") if isinstance(item, dict) else None
+            if isinstance(path, str):
+                if path in seen:
+                    errors.append(_err(f"files[{i}].path", f"duplicate path {path!r}"))
+                seen.add(path)
 
     key_patterns = data.get("key_patterns")
     errors.extend(_validate_string_list(key_patterns, "key_patterns", 3, 10, MAX_KEY_PATTERN_CHARS))
@@ -233,13 +251,17 @@ def _validate_recommendations(value: object, prefix: str) -> list[str]:
     if isinstance(value, list):
         for i, item in enumerate(value):
             if _is_nonempty_str(item) and not _ends_with_from(item):
-                errors.append(_err(f"{prefix}[{i}]", "must end with '(from: ...)'"))
+                errors.append(
+                    _err(
+                        f"{prefix}[{i}]",
+                        "must end with '(from: standard/<category>)' or '(from: <rule name>)'",
+                    )
+                )
     return errors
 
 
 def _ends_with_from(text: str) -> bool:
-    stripped = text.rstrip()
-    return stripped.endswith(")") and "(from: " in stripped
+    return FROM_SUFFIX_RE.fullmatch(text.rstrip()) is not None
 
 
 def _load(path: Path) -> tuple[object | None, str | None]:

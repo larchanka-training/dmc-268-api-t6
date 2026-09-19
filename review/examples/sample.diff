@@ -34,7 +34,7 @@ index 0000000..e049ccf
 +                amount=request.amount,
 +                currency=request.currency,
 +            )
-+        except:
++        except Exception:
 +            return None
 +
 +        charge_id = await self._repository.save(request, receipt.reference)

@@ -6,8 +6,8 @@
       "start_line": 31,
       "severity": "high",
       "category": "correctness",
-      "title": "Bare except silently swallows gateway failures",
-      "body": "According to custom instructions in 'Error Handling Standards' (no bare except that swallows an error without handling, logging or re-raising): `execute` wraps the gateway call in a bare `except:` (line 31) and returns `None` (line 32) with no exception type, logging or re-raise. This differs from `ChargeRepository.save` in the same PR, which lets failures propagate. A bare except also catches `CancelledError` and `KeyboardInterrupt`, not just gateway errors. A gateway outage becomes a silent `None` with no trace in logs, indistinguishable from 'no charge happened'. Catch `Exception`, log the failure with the account id, and re-raise or return a typed result.",
+      "title": "except Exception silently swallows gateway failures",
+      "body": "According to custom instructions in 'Error Handling Standards' (no except Exception that swallows an error without logging or re-raising): `execute` wraps the gateway call in `except Exception:` (line 31) and returns `None` (line 32) with no logging, context or re-raise. This differs from `ChargeRepository.save` in the same PR, which lets failures propagate. A gateway outage becomes a silent `None` with no trace in logs, indistinguishable from 'no charge happened'. Log the failure with the account id and re-raise, or return a typed result.",
       "suggestion": null,
       "confidence": 0.9,
       "rule_name": "Error Handling Standards"
@@ -43,7 +43,7 @@
       "severity": "medium",
       "category": "correctness",
       "title": "ChargeRequest amount and currency accepted without validation",
-      "body": "`ChargeRequest` (lines 12-14) accepts `amount: Decimal` and `currency: str` with no validation, and `execute` passes them straight to `self._gateway.charge` unchecked. A zero or negative `amount`, or an empty or malformed `currency`, reaches the payment gateway; depending on its behavior this can charge the wrong amount or raise an error that the bare `except:` two lines later swallows into a silent `None`. Validate `amount > 0` and the `currency` format before calling the gateway, for example in `ChargeRequest.__post_init__` or at the start of `execute`.",
+      "body": "`ChargeRequest` (lines 12-14) accepts `amount: Decimal` and `currency: str` with no validation, and `execute` passes them straight to `self._gateway.charge` unchecked. A zero or negative `amount`, or an empty or malformed `currency`, reaches the payment gateway; depending on its behavior this can charge the wrong amount or raise an error that the `except Exception:` two lines later swallows into a silent `None`. Validate `amount > 0` and the `currency` format before calling the gateway, for example in `ChargeRequest.__post_init__` or at the start of `execute`.",
       "suggestion": null,
       "confidence": 0.55,
       "rule_name": null
@@ -62,7 +62,7 @@
     }
   ],
   "summary": {
-    "problem": "The bare `except:` in `ChargeAccount.execute` swallows every gateway failure, including cancellation, into a silent `None`, with no logging and no test or comment covering why.",
+    "problem": "The `except Exception:` in `ChargeAccount.execute` swallows every gateway failure into a silent `None`, with no logging and no test or comment covering why.",
     "done_well": "The use case, repository and test double follow the constructor-injection and flush-not-commit shape of the module, and both the happy and gateway-failure paths of `ChargeAccount.execute` are tested.",
     "effort": "small"
   }
