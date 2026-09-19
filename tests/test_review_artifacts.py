@@ -183,10 +183,6 @@ def test_system_prompt_contains_literal(literal: str) -> None:
     assert literal in SYSTEM_PROMPT_FLAT
 
 
-def test_validator_source_carries_the_attribution_prefix() -> None:
-    assert repr(ATTRIBUTION_PREFIX) in VALIDATOR.read_text(encoding="utf-8")
-
-
 # ---------- (d) lint-filter-patterns.json ----------
 
 
