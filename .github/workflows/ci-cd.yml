@@ -51,7 +51,7 @@ jobs:
         run: |
           for stack in terraform/api-staging terraform/ui-staging; do
             echo "=== ${stack} ==="
-            terraform -chdir="${stack}" init -backend=false -input=false
+            terraform -chdir="${stack}" init -backend=false -input=false -lockfile=readonly
             terraform -chdir="${stack}" validate -no-color
           done
 
@@ -237,7 +237,7 @@ jobs:
             set -euo pipefail
             set +o xtrace
             mv /opt/dmc-268-api/staging.yml /opt/dmc-268-api/compose.yml
-            chmod +x /opt/dmc-268-api/deploy.sh /opt/dmc-268-api/rollback.sh /opt/dmc-268-api/healthcheck.sh
+            chmod +x /opt/dmc-268-api/deploy.sh /opt/dmc-268-api/rollback.sh /opt/dmc-268-api/healthcheck.sh /opt/dmc-268-api/env-file.sh
             /opt/dmc-268-api/deploy.sh "${IMAGE}"
 
       - name: Health check

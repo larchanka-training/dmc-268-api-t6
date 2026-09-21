@@ -128,7 +128,7 @@ PostgreSQL только во внутренней docker-сети. Том `postg
 ```bash
 terraform fmt -check -diff -recursive terraform/
 for stack in terraform/api-staging terraform/ui-staging; do
-  terraform -chdir="${stack}" init -backend=false -input=false
+  terraform -chdir="${stack}" init -backend=false -input=false -lockfile=readonly
   terraform -chdir="${stack}" validate
 done
 tflint --init && tflint --recursive
