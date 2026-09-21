@@ -2,23 +2,50 @@
 set -euo pipefail
 set +o xtrace
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=env-file.sh
+source "${SCRIPT_DIR}/env-file.sh"
+
 APP_DIR="${APP_DIR:-/opt/dmc-268-api}"
 COMPOSE_FILE="${APP_DIR}/compose.yml"
 STATE_FILE="${APP_DIR}/.deploy-state"
 PREVIOUS_FILE="${STATE_FILE}.previous"
 ENV_FILE="${APP_DIR}/.env"
 REQUESTED_IMAGE="${1:-}"
+BOOTSTRAP_NAME="${BOOTSTRAP_NAME:-dmc-268-api-bootstrap}"
+BOOTSTRAP_IMAGE="${BOOTSTRAP_IMAGE:-nginx:1.27-alpine}"
 
 logout_registry() {
   docker logout ghcr.io >/dev/null 2>&1 || true
 }
 trap logout_registry EXIT
 
+restore_bootstrap() {
+  docker compose -f "${COMPOSE_FILE}" down --remove-orphans 2>/dev/null || true
+
+  if docker inspect "${BOOTSTRAP_NAME}" >/dev/null 2>&1; then
+    docker rm -f "${BOOTSTRAP_NAME}" >/dev/null 2>&1 || true
+  fi
+
+  docker pull "${BOOTSTRAP_IMAGE}"
+  docker run -d --name "${BOOTSTRAP_NAME}" \
+    --restart unless-stopped \
+    --label dmc-268.role=bootstrap \
+    -p 80:80 "${BOOTSTRAP_IMAGE}"
+
+  {
+    echo "current_image=bootstrap"
+    echo "deployed_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    echo "rolled_back=true"
+  } > "${STATE_FILE}"
+
+  echo "restored bootstrap container (${BOOTSTRAP_IMAGE})"
+}
+
 if [[ -f "${ENV_FILE}" ]]; then
-  set -a
-  # shellcheck disable=SC1090
-  source "${ENV_FILE}"
-  set +a
+  POSTGRES_USER="${POSTGRES_USER:-$(read_compose_env_var POSTGRES_USER "${ENV_FILE}")}"
+  POSTGRES_PASSWORD="${POSTGRES_PASSWORD:-$(read_compose_env_var POSTGRES_PASSWORD "${ENV_FILE}")}"
+  POSTGRES_DB="${POSTGRES_DB:-$(read_compose_env_var POSTGRES_DB "${ENV_FILE}")}"
 fi
 
 if [[ -n "${REQUESTED_IMAGE}" ]]; then
@@ -26,8 +53,8 @@ if [[ -n "${REQUESTED_IMAGE}" ]]; then
 elif [[ -f "${PREVIOUS_FILE}" ]]; then
   IMAGE="$(awk -F= '/^current_image=/{print $2}' "${PREVIOUS_FILE}")"
 else
-  echo "no previous deployment recorded and no image tag provided" >&2
-  exit 1
+  restore_bootstrap
+  exit 0
 fi
 
 if [[ -z "${IMAGE}" ]]; then
@@ -47,14 +74,12 @@ if [[ -n "${GHCR_TOKEN:-}" ]]; then
   unset GHCR_TOKEN
 fi
 
-umask 077
-{
-  printf 'IMAGE=%s\n' "${IMAGE}"
-  printf 'POSTGRES_USER=%s\n' "${POSTGRES_USER:-app}"
-  printf 'POSTGRES_PASSWORD=%s\n' "${POSTGRES_PASSWORD}"
-  printf 'POSTGRES_DB=%s\n' "${POSTGRES_DB:-app}"
-} > "${ENV_FILE}"
-chmod 600 "${ENV_FILE}"
+write_compose_env_file \
+  "${ENV_FILE}" \
+  "${IMAGE}" \
+  "${POSTGRES_USER:-app}" \
+  "${POSTGRES_PASSWORD}" \
+  "${POSTGRES_DB:-app}"
 
 docker pull "${IMAGE}"
 docker compose -f "${COMPOSE_FILE}" --env-file "${ENV_FILE}" up -d --remove-orphans --wait --wait-timeout 180

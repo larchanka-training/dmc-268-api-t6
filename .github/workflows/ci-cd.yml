@@ -85,7 +85,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       image: ${{ steps.meta.outputs.image }}
-      tags: ${{ steps.meta.outputs.tags }}
+      immutable: ${{ steps.meta.outputs.immutable }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -96,7 +96,7 @@ jobs:
           repo="$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')"
           image="${REGISTRY}/${repo}"
           echo "image=${image}" >> "${GITHUB_OUTPUT}"
-          echo "tags=${image}:${{ github.sha }}" >> "${GITHUB_OUTPUT}"
+          echo "immutable=${image}:${{ github.sha }}" >> "${GITHUB_OUTPUT}"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -107,33 +107,33 @@ jobs:
           context: .
           file: Dockerfile
           load: true
-          tags: |
-            ${{ env.LOCAL_IMAGE }}
-            ${{ steps.meta.outputs.tags }}
+          tags: ${{ env.LOCAL_IMAGE }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
           provenance: false
+
+      - name: Export image artifact
+        run: docker save "${LOCAL_IMAGE}" | gzip > /tmp/docker-image.tar.gz
+
+      - name: Upload image artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: docker-image
+          path: /tmp/docker-image.tar.gz
+          retention-days: 1
 
   docker-scan:
     name: Docker image security scan
     runs-on: ubuntu-latest
     needs: docker-build
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Rebuild image from cache
-        uses: docker/build-push-action@v6
+      - name: Download image artifact
+        uses: actions/download-artifact@v4
         with:
-          context: .
-          file: Dockerfile
-          load: true
-          tags: ${{ env.LOCAL_IMAGE }}
-          cache-from: type=gha
-          provenance: false
+          name: docker-image
+
+      - name: Load image
+        run: gunzip -c docker-image.tar.gz | docker load
 
       - name: Trivy scan
         uses: aquasecurity/trivy-action@v0.36.0
@@ -152,6 +152,7 @@ jobs:
     permissions:
       contents: read
       packages: write
+      actions: read
     needs:
       - secret-scan
       - terraform-fmt-validate
@@ -160,8 +161,10 @@ jobs:
     outputs:
       image: ${{ steps.tags.outputs.immutable }}
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - name: Download image artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: docker-image
 
       - name: Set tags
         id: tags
@@ -170,11 +173,6 @@ jobs:
           image="${REGISTRY}/${repo}"
           echo "image=${image}" >> "${GITHUB_OUTPUT}"
           echo "immutable=${image}:${{ github.sha }}" >> "${GITHUB_OUTPUT}"
-          echo "staging=${image}:staging" >> "${GITHUB_OUTPUT}"
-          echo "previous=${image}:staging-previous" >> "${GITHUB_OUTPUT}"
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
 
       - name: Log in to Container Registry
         uses: docker/login-action@v3
@@ -183,30 +181,11 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Preserve current staging image for rollback
+      - name: Load and push immutable tag
         run: |
-          if docker pull "${{ steps.tags.outputs.staging }}"; then
-            docker tag "${{ steps.tags.outputs.staging }}" "${{ steps.tags.outputs.previous }}"
-            docker push "${{ steps.tags.outputs.previous }}"
-          else
-            echo "no existing staging image; skip previous-tag"
-          fi
-
-      - name: Build and push
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: Dockerfile
-          push: true
-          tags: |
-            ${{ steps.tags.outputs.immutable }}
-            ${{ steps.tags.outputs.staging }}
-          labels: |
-            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
-            org.opencontainers.image.revision=${{ github.sha }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-          provenance: false
+          gunzip -c docker-image.tar.gz | docker load
+          docker tag "${LOCAL_IMAGE}" "${{ steps.tags.outputs.immutable }}"
+          docker push "${{ steps.tags.outputs.immutable }}"
 
   deploy-staging:
     name: Deploy staging
@@ -214,7 +193,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      packages: read
+      packages: write
     needs: push-image
     concurrency:
       group: staging-deploy
@@ -232,11 +211,13 @@ jobs:
           host: ${{ vars.STAGING_HOST }}
           username: ${{ vars.STAGING_SSH_USER }}
           key: ${{ secrets.STAGING_SSH_KEY }}
-          source: "deploy/compose/staging.yml,deploy/scripts/deploy.sh,deploy/scripts/rollback.sh,deploy/scripts/healthcheck.sh"
+          fingerprint: ${{ vars.STAGING_SSH_FINGERPRINT }}
+          source: "deploy/compose/staging.yml,deploy/scripts/deploy.sh,deploy/scripts/rollback.sh,deploy/scripts/healthcheck.sh,deploy/scripts/env-file.sh"
           target: /opt/dmc-268-api
           strip_components: 2
 
       - name: Deploy image
+        id: deploy
         uses: appleboy/ssh-action@v1.2.0
         env:
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -249,6 +230,7 @@ jobs:
           host: ${{ vars.STAGING_HOST }}
           username: ${{ vars.STAGING_SSH_USER }}
           key: ${{ secrets.STAGING_SSH_KEY }}
+          fingerprint: ${{ vars.STAGING_SSH_FINGERPRINT }}
           debug: false
           envs: GHCR_TOKEN,GHCR_USER,IMAGE,POSTGRES_USER,POSTGRES_PASSWORD,POSTGRES_DB
           script: |
@@ -260,6 +242,7 @@ jobs:
 
       - name: Health check
         id: health
+        if: steps.deploy.outcome == 'success'
         continue-on-error: true
         env:
           HEALTH_URL: ${{ vars.STAGING_HEALTH_URL }}
@@ -269,8 +252,8 @@ jobs:
           target="${HEALTH_URL:-http://${STAGING_HOST}/healthcheck}"
           deploy/scripts/healthcheck.sh "${target}"
 
-      - name: Rollback on failed health check
-        if: steps.health.outcome == 'failure'
+      - name: Rollback on failed deploy or health check
+        if: steps.deploy.outcome == 'failure' || steps.health.outcome == 'failure'
         uses: appleboy/ssh-action@v1.2.0
         env:
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -279,6 +262,7 @@ jobs:
           host: ${{ vars.STAGING_HOST }}
           username: ${{ vars.STAGING_SSH_USER }}
           key: ${{ secrets.STAGING_SSH_KEY }}
+          fingerprint: ${{ vars.STAGING_SSH_FINGERPRINT }}
           debug: false
           envs: GHCR_TOKEN,GHCR_USER
           script: |
@@ -286,8 +270,27 @@ jobs:
             set +o xtrace
             /opt/dmc-268-api/rollback.sh
 
-      - name: Fail the pipeline after rollback
-        if: steps.health.outcome == 'failure'
+      - name: Promote image to staging
+        if: steps.deploy.outcome == 'success' && steps.health.outcome == 'success'
+        env:
+          IMMUTABLE: ${{ needs.push-image.outputs.image }}
         run: |
-          echo "staging health check failed; rollback was triggered"
+          repo="$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')"
+          staging="${REGISTRY}/${repo}:staging"
+          previous="${REGISTRY}/${repo}:staging-previous"
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login "${REGISTRY}" -u "${{ github.actor }}" --password-stdin
+          docker pull "${IMMUTABLE}"
+          if docker pull "${staging}"; then
+            docker tag "${staging}" "${previous}"
+            docker push "${previous}"
+          else
+            echo "no existing staging image; skip previous-tag"
+          fi
+          docker tag "${IMMUTABLE}" "${staging}"
+          docker push "${staging}"
+
+      - name: Fail the pipeline after rollback
+        if: steps.deploy.outcome == 'failure' || steps.health.outcome == 'failure'
+        run: |
+          echo "staging deploy or health check failed; rollback was triggered"
           exit 1

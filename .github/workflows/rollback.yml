@@ -58,6 +58,7 @@ jobs:
           host: ${{ vars.STAGING_HOST }}
           username: ${{ vars.STAGING_SSH_USER }}
           key: ${{ secrets.STAGING_SSH_KEY }}
+          fingerprint: ${{ vars.STAGING_SSH_FINGERPRINT }}
           debug: false
           envs: GHCR_TOKEN,GHCR_USER,IMAGE
           script: |

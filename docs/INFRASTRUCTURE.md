@@ -58,7 +58,7 @@ flowchart LR
 
 | Файл (в каждом стеке) | Содержание |
 |---|---|
-| `versions.tf` | Terraform ≥ 1.8, provider `hcloud` ~> 1.54, backend `s3` |
+| `versions.tf` | Terraform ≥ 1.10, provider `hcloud` ~> 1.54, backend `s3`, `.terraform.lock.hcl` в git |
 | `providers.tf` | Токен: `var.hcloud_token` или `HCLOUD_TOKEN` |
 | `variables.tf` / `outputs.tf` | Входы и выходы стенда |
 | `network.tf` | Network + subnet |
@@ -84,7 +84,7 @@ Hetzner не даёт Terraform Cloud. State — в **Object Storage** (S3 API).
 
 1. В консоли Hetzner создать bucket (например `dmc-268-tfstate`) и S3-ключи.
 2. Скопировать `environments/staging.backend.hcl.example` → `environments/staging.backend.hcl` в нужном стеке (файл в gitignore).
-3. Поправить `bucket` и `endpoints.s3` (`nbg1` / `fsn1` / `hel1`). Ключ state: `api-staging/terraform.tfstate` или `ui-staging/terraform.tfstate`.
+3. Поправить `bucket` и `endpoints.s3` (`nbg1` / `fsn1` / `hel1`). Ключ state: `api-staging/terraform.tfstate` или `ui-staging/terraform.tfstate`. В backend включён `use_lockfile = true` (нативная блокировка S3, Terraform ≥ 1.10).
 
 ### 3.2. Apply (API staging)
 

@@ -2,6 +2,10 @@
 set -euo pipefail
 set +o xtrace
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=env-file.sh
+source "${SCRIPT_DIR}/env-file.sh"
+
 APP_DIR="${APP_DIR:-/opt/dmc-268-api}"
 IMAGE="${1:-${IMAGE:-}}"
 COMPOSE_FILE="${APP_DIR}/compose.yml"
@@ -24,10 +28,9 @@ cd "${APP_DIR}"
 REQUESTED_IMAGE="${IMAGE}"
 
 if [[ -f "${ENV_FILE}" ]]; then
-  set -a
-  # shellcheck disable=SC1090
-  source "${ENV_FILE}"
-  set +a
+  POSTGRES_USER="${POSTGRES_USER:-$(read_compose_env_var POSTGRES_USER "${ENV_FILE}")}"
+  POSTGRES_PASSWORD="${POSTGRES_PASSWORD:-$(read_compose_env_var POSTGRES_PASSWORD "${ENV_FILE}")}"
+  POSTGRES_DB="${POSTGRES_DB:-$(read_compose_env_var POSTGRES_DB "${ENV_FILE}")}"
 fi
 
 IMAGE="${REQUESTED_IMAGE}"
@@ -46,21 +49,19 @@ if [[ -n "${GHCR_TOKEN:-}" ]]; then
   unset GHCR_TOKEN
 fi
 
-umask 077
-{
-  printf 'IMAGE=%s\n' "${IMAGE}"
-  printf 'POSTGRES_USER=%s\n' "${POSTGRES_USER:-app}"
-  printf 'POSTGRES_PASSWORD=%s\n' "${POSTGRES_PASSWORD}"
-  printf 'POSTGRES_DB=%s\n' "${POSTGRES_DB:-app}"
-} > "${ENV_FILE}"
-chmod 600 "${ENV_FILE}"
+write_compose_env_file \
+  "${ENV_FILE}" \
+  "${IMAGE}" \
+  "${POSTGRES_USER:-app}" \
+  "${POSTGRES_PASSWORD}" \
+  "${POSTGRES_DB:-app}"
+
+docker pull "${IMAGE}"
+docker compose -f "${COMPOSE_FILE}" --env-file "${ENV_FILE}" up -d --remove-orphans --wait --wait-timeout 180
 
 if docker inspect dmc-268-api-bootstrap >/dev/null 2>&1; then
   docker rm -f dmc-268-api-bootstrap >/dev/null
 fi
-
-docker pull "${IMAGE}"
-docker compose -f "${COMPOSE_FILE}" --env-file "${ENV_FILE}" up -d --remove-orphans --wait --wait-timeout 180
 
 {
   echo "current_image=${IMAGE}"
