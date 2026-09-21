@@ -126,6 +126,7 @@ terraform -chdir=${STACK} output staging_ipv4
 ```
 
 - output `ssh_host` API-стека → GitHub variable `STAGING_HOST` в репозитории **dmc-268-api-t6**
+- SHA256 fingerprint хоста (`ssh-keyscan -H <host> | ssh-keygen -lf - -E sha256`) → `STAGING_SSH_FINGERPRINT` в том же environment
 - output `ssh_host` UI-стека → GitHub variable `STAGING_HOST` в репозитории **dmc-268-ui-t6**
 
 Дальше выкат — CICD.md в соответствующем репозитории. Секреты API — [SECRETS.md](SECRETS.md).
@@ -134,7 +135,7 @@ terraform -chdir=${STACK} output staging_ipv4
 
 ```bash
 for stack in terraform/api-staging terraform/ui-staging; do
-  terraform -chdir="${stack}" init -backend=false -input=false
+  terraform -chdir="${stack}" init -backend=false -input=false -lockfile=readonly
   terraform -chdir="${stack}" validate
 done
 ```

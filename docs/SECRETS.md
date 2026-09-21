@@ -53,6 +53,12 @@ CI **не** делает `terraform apply`. Эти значения в GitHub Ac
 1. Settings → Environments → **staging**.
 2. Secrets: `STAGING_SSH_KEY`, `POSTGRES_PASSWORD`.
 3. Variables: хост, SHA256 SSH fingerprint, SSH-пользователь, опционально health URL и имя БД.
+
+   Fingerprint после `terraform apply` (формат appleboy — строка `SHA256:…` из вывода):
+
+   ```bash
+   ssh-keyscan -H "${STAGING_HOST}" 2>/dev/null | ssh-keygen -lf - -E sha256
+   ```
 4. Protection rules: required reviewers на выкат и rollback.
 5. Actions → General: **Allow GitHub Actions to create and approve pull requests** не нужен. Secret scanning и push protection — включить.
 
@@ -126,7 +132,7 @@ Workflow по умолчанию: `contents: read`. Расширение точ�
 |---|---|---|
 | `secret-scan`, terraform, docker build/scan | `contents: read` | только checkout |
 | `push-image` | `contents: read`, `packages: write` | push в GHCR |
-| `deploy-staging` | `contents: read`, `packages: read` | pull образа на VM |
+| `deploy-staging` | `contents: read`, `packages: write` | pull образа на VM и промо `:staging` после health check |
 | Rollback staging | `contents: read`, `packages: read` | то же |
 
 `security-events`, `id-token`, `pull-requests`, `actions` не выдаются. `HCLOUD_TOKEN` в Actions нет — apply вне CI.
