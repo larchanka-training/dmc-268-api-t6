@@ -19,7 +19,7 @@
     "Repository writes call session.flush(), never commit; the transaction boundary belongs to the use case (unit of work).",
     "New billing code is split into application/ and infrastructure/ under app/modules/billing/ (charge.py, repository.py paths).",
     "Tests fake a use case's ports (gateway, repository) instead of hitting real infrastructure (tests/test_charge.py, FakeGateway/FakeRepository).",
-    "Async use cases and repository methods use pytest.mark.asyncio and async def throughout (tests/test_charge.py, charge.py, repository.py)."
+    "Async use cases are tested through asyncio.run, without pytest-asyncio (tests/test_charge.py, charge.py, repository.py)."
   ],
   "recommendations": [
     "An except Exception in a use case logs the failure with context or re-raises it; a handler that silently returns None swallows the error (from: Error Handling Standards)",

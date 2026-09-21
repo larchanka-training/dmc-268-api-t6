@@ -83,16 +83,15 @@ new file mode 100644
 index 0000000..bbfb9fd
 --- /dev/null
 +++ b/tests/test_charge.py
-@@ -0,0 +1,62 @@
+@@ -0,0 +1,59 @@
 +"""Tests for the ChargeAccount use case."""
 +
 +from __future__ import annotations
 +
++import asyncio
 +from dataclasses import dataclass
 +from decimal import Decimal
 +from uuid import UUID, uuid4
-+
-+import pytest
 +
 +from app.modules.billing.application.charge import ChargeAccount, ChargeRequest
 +
@@ -123,26 +122,24 @@ index 0000000..bbfb9fd
 +        return charge_id
 +
 +
-+@pytest.mark.asyncio
-+async def test_execute_saves_charge_on_success() -> None:
++def test_execute_saves_charge_on_success() -> None:
 +    gateway = FakeGateway(receipt=FakeReceipt(reference="ref-1"))
 +    repository = FakeRepository()
 +    use_case = ChargeAccount(gateway=gateway, repository=repository)
 +    request = ChargeRequest(account_id=uuid4(), amount=Decimal("10.00"), currency="USD")
 +
-+    charge_id = await use_case.execute(request)
++    charge_id = asyncio.run(use_case.execute(request))
 +
 +    assert charge_id is not None
 +    assert repository.saved[0][2] == "ref-1"
 +
 +
-+@pytest.mark.asyncio
-+async def test_execute_returns_none_when_gateway_fails() -> None:
++def test_execute_returns_none_when_gateway_fails() -> None:
 +    gateway = FakeGateway(fails=True)
 +    repository = FakeRepository()
 +    use_case = ChargeAccount(gateway=gateway, repository=repository)
 +    request = ChargeRequest(account_id=uuid4(), amount=Decimal("5.00"), currency="USD")
 +
-+    charge_id = await use_case.execute(request)
++    charge_id = asyncio.run(use_case.execute(request))
 +
 +    assert charge_id is None

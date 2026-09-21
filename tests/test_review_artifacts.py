@@ -248,6 +248,21 @@ def test_validator_rejects_broken_fixture(tmp_path: Path) -> None:
     assert "findings[0].body" in result.stdout
 
 
+def test_validator_rejects_both_keys(tmp_path: Path) -> None:
+    both = {
+        "findings": [],
+        "files": [],
+        "summary": {"problem": "p", "done_well": "d", "effort": "small"},
+    }
+    path = tmp_path / "both.json"
+    path.write_text(json.dumps(both), encoding="utf-8")
+
+    result = _run_validator(path)
+
+    assert result.returncode == 2
+    assert "both 'findings' and 'files'" in result.stderr
+
+
 @pytest.mark.parametrize(
     ("body", "rule_name"),
     [

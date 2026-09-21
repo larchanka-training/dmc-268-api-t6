@@ -9,17 +9,17 @@ immutable — a file with a version in its name is never edited — and served f
 
 ## Files
 
-| Path                                    | What it is                                        |
-| --------------------------------------- | ------------------------------------------------- |
-| `prompts/review.system.v1.md`           | review prompt: order, filters, attribution, output |
+| Path                                    | What it is                                          |
+| --------------------------------------- | --------------------------------------------------- |
+| `prompts/review.system.v1.md`           | review prompt: order, filters, attribution, output  |
 | `prompts/review.conventions.v1.md`      | pre-review prompt: repository patterns, review plan |
-| `rules/schema.json`                     | JSON Schema (draft 2020-12) of a custom rule set  |
-| `rules/default-frontend.v1.json`        | default rules for a Vite/React/TypeScript repo    |
-| `rules/default-backend.v1.json`         | default rules for a FastAPI/SQLAlchemy repo       |
-| `postprocess/lint-filter.md`            | filter #2: what the backend drops or demotes      |
-| `postprocess/lint-filter-patterns.json` | regex lists, confidence threshold, inline cap     |
-| `scripts/validate_findings.py`          | stdlib validator of model outputs (with the tests) |
-| `examples/`                             | synthetic diff and sample outputs (proof run)     |
+| `rules/schema.json`                     | JSON Schema (draft 2020-12) of a custom rule set    |
+| `rules/default-frontend.v1.json`        | default rules for a Vite/React/TypeScript repo      |
+| `rules/default-backend.v1.json`         | default rules for a FastAPI/SQLAlchemy repo         |
+| `postprocess/lint-filter.md`            | filter #2: what the backend drops or demotes        |
+| `postprocess/lint-filter-patterns.json` | regex lists, confidence threshold, inline cap       |
+| `scripts/validate_findings.py`          | stdlib validator of model outputs (with the tests)  |
+| `examples/`                             | synthetic diff and sample outputs (proof run)       |
 
 ## Seeding contract
 
@@ -106,8 +106,9 @@ repository's own rules as a new version. A rule's `name` is quoted verbatim in t
 
 ## Post-processing hand-off
 
-The model's JSON is parsed and schema-checked by the backend, then passed through the
-filter specified in [`postprocess/lint-filter.md`](postprocess/lint-filter.md) with the
+The model's JSON is parsed and schema-checked by the backend (JSON shape, enums, lengths —
+not the attribution binding, which is repaired by the filter, step 6), then passed through
+the filter specified in [`postprocess/lint-filter.md`](postprocess/lint-filter.md) with the
 values of `postprocess/lint-filter-patterns.json`: lint-class drop, dedup, confidence
 threshold, hunk validation, inline cap, attribution consistency. Its buckets `inline`,
 `body_only` and `dropped` feed publication; a dropped finding is never published.
@@ -117,21 +118,27 @@ threshold, hunk validation, inline cap, attribution consistency. Its buckets `in
 `uv run python review/scripts/validate_findings.py <json>` checks one model output: exit `0` when valid, `1`
 when it violates the contract (violations printed one per line), `2` when the file is not JSON or its kind is
 unknown. The kind is detected from the top-level key: `findings` → `ReviewOutput`, `files` →
-`RepoConventionsDraft`. The tests run it over `examples/*.sample.json`. Quality targets and the golden dataset
-are defined in `docs/TEST_PLAN.md` §3–4 (pending #25, ui repository).
+`RepoConventionsDraft`. A file carrying both keys is rejected with exit `2`. The 120-word `body` limit of
+`review.system.v1.md` §7 is a prompt-level brevity target, not part of the backend schema: the validator
+enforces only the 1200-character ceiling. The tests run it over `examples/*.sample.json`. Quality targets and
+the golden dataset are defined in `docs/TEST_PLAN.md` §3–4 (pending #25, ui repository).
 
 ### Proof-run record
 
 Bot: `claude-sonnet-5`, Claude Code subagent, clean context. Date: 2026-09-19. 0/5 custom-rule attributions on
 the backend diff vs 4/5 on the frontend: an attribution-metric signal (`docs/TEST_PLAN.md` §3, pending #25).
 
-| Diff                                       | Files | Findings | Of which custom-rule | Validator |
-| ------------------------------------------- | ----- | -------- | --------------------- | --------- |
-| api PR #4 code diff                        | 41    | 5        | 0                     | exit 0    |
-| ui PR #31 `src/{entities,widgets,shared}`  | 46    | 5        | 4                     | exit 0    |
-| `examples/sample.diff`                     | 3     | 5        | 3                     | exit 0    |
+| Diff                                      | Files | Findings | Of which custom-rule | Validator |
+| ----------------------------------------- | ----- | -------- | -------------------- | --------- |
+| api PR #4 code diff                       | 41    | 5        | 0                    | exit 0    |
+| ui PR #31 `src/{entities,widgets,shared}` | 46    | 5        | 4                    | exit 0    |
+| `examples/sample.diff`                    | 3     | 5        | 3                    | exit 0    |
 
-The sample outputs were amended by hand after the sample diff was corrected (`except:` → `except Exception:`).
+The sample outputs were amended by hand after the sample diff was corrected (`except:` →
+`except Exception:`; 2026-09-21: async tests rewritten to `asyncio.run`). The fixtures in
+`examples/` must stay in sync with `sample.diff`: after any edit to the diff, revise
+`conventions.sample.json` `key_patterns` and `findings.sample.json` line anchors, then re-run
+the validator and `uv run pytest tests/test_review_artifacts.py`.
 
 ## Open questions
 

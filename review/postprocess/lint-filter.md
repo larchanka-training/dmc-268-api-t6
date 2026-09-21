@@ -11,6 +11,10 @@ model call, no network. The backend owns the implementation; this file owns the 
 
 - `ReviewOutput` as returned by the model and already parsed and schema-checked by the
   backend (`findings[]`, `summary`). A malformed answer never reaches this filter.
+  Attribution consistency (a prefix that names no rule, or a `rule_name` the body does not
+  quote) is not a schema error: it reaches step 6 and is repaired there.
+  `scripts/validate_findings.py` rejects the same case deliberately — it is the strict gate
+  for proof-runs and fixtures, not the runtime contract.
 - The run's diff: for every changed file, the set of new-version line numbers that lie
   inside a hunk (`added` and `context` lines of the unified diff). Lines the backend added
   around hunks as extra context are not anchors.

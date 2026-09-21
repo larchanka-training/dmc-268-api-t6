@@ -295,6 +295,13 @@ def main(argv: list[str] | None = None) -> int:
         print("error: top-level JSON value must be an object", file=sys.stderr)
         return 2
 
+    if "findings" in data and "files" in data:
+        print(
+            "error: unknown kind: top-level object has both 'findings' and 'files'",
+            file=sys.stderr,
+        )
+        return 2
+
     if "findings" in data:
         kind = "ReviewOutput"
         errors = validate_review_output(data)

@@ -25,10 +25,10 @@
       "properties": {
         "name": {
           "type": "string",
-          "description": "Unique within the set. Quoted verbatim in the attribution prefix `According to custom instructions in '<rule name>'`, so quotes and angle brackets are not allowed.",
+          "description": "Unique within the set. Quoted verbatim in the attribution prefix `According to custom instructions in '<rule name>'`, so quotes, angle brackets and parentheses are not allowed (parentheses would also break the `(from: <rule name>)` suffix of a recommendation).",
           "minLength": 1,
           "maxLength": 80,
-          "pattern": "^[^'\"<>]+$"
+          "pattern": "^[^'\"<>()]+$"
         },
         "include": {
           "type": "array",
