@@ -2,10 +2,14 @@
 useDefault = true
 
 [allowlist]
-description = "Checked-in examples and placeholders, not live credentials"
+description = "Example config files and documented placeholder values only"
 paths = [
   '''\.env\.example$''',
   '''.*\.tfvars\.example$''',
   '''.*\.backend\.hcl\.example$''',
-  '''docs/.*''',
+]
+regexes = [
+  '''replace-with-''',
+  '''your-objectstorage\.com''',
+  '''203\.0\.113\.\d+/32''',
 ]

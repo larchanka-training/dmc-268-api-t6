@@ -30,6 +30,7 @@
 | Variable | Обязателен | Пример |
 |---|---|---|
 | `STAGING_HOST` | да | IPv4 или FQDN из Terraform output `ssh_host` |
+| `STAGING_SSH_FINGERPRINT` | да | SHA256 host key fingerprint для `appleboy/scp-action` и `appleboy/ssh-action` |
 | `STAGING_SSH_USER` | да | `root` после cloud-init |
 | `STAGING_HEALTH_URL` | нет | иначе `http://$STAGING_HOST/healthcheck` |
 | `POSTGRES_USER` | нет | иначе `app` |
@@ -51,7 +52,7 @@ CI **не** делает `terraform apply`. Эти значения в GitHub Ac
 
 1. Settings → Environments → **staging**.
 2. Secrets: `STAGING_SSH_KEY`, `POSTGRES_PASSWORD`.
-3. Variables: хост, SSH-пользователь, опционально health URL и имя БД.
+3. Variables: хост, SHA256 SSH fingerprint, SSH-пользователь, опционально health URL и имя БД.
 4. Protection rules: required reviewers на выкат и rollback.
 5. Actions → General: **Allow GitHub Actions to create and approve pull requests** не нужен. Secret scanning и push protection — включить.
 

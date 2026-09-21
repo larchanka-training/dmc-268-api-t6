@@ -24,12 +24,13 @@ flowchart TD
   lint --> gate
   scan --> gate
   gate -->|нет| stop["CI зелёный, без выката"]
-  gate -->|да| prev["сохранить :staging как :staging-previous"]
-  prev --> push["push :sha и :staging в GHCR"]
+  gate -->|да| push["push только :sha в GHCR"]
   push --> deploy["compose up на Hetzner staging"]
   deploy --> health["GET /healthcheck"]
-  health -->|ok| done["staging обновлён"]
+  health -->|ok| promote[":staging-previous ← :staging; :staging ← :sha"]
+  promote --> done["staging обновлён"]
   health -->|fail| rb["rollback на предыдущий образ"]
+  deploy -->|fail| rb
   rb --> fail["job красный"]
 ```
 
@@ -40,8 +41,8 @@ flowchart TD
 | `Terraform lint / security` | PR и `main` | `contents: read` | TFLint + Checkov |
 | `Docker image build` | PR и `main` | `contents: read` | образ `python:3.13-slim` |
 | `Docker image security scan` | после сборки | `contents: read` | Trivy `CRITICAL`/`HIGH` |
-| `Push Docker image` | только `main` | `contents: read`, `packages: write` | GHCR `:sha` и `:staging` |
-| `Deploy staging` | только `main` | `contents: read`, `packages: read` | Compose, health check, авто-rollback |
+| `Push Docker image` | только `main` | `contents: read`, `packages: write` | GHCR только `:sha` (тот же artifact, что прошёл Trivy) |
+| `Deploy staging` | только `main` | `contents: read`, `packages: write` | Compose, health check, авто-rollback, промо `:staging` после успеха |
 
 Корневые permissions workflow: `contents: read`. Остальное — только у job, которому это нужно.
 
@@ -53,10 +54,10 @@ flowchart TD
 
 1. Settings → Environments → `staging`: заполнить secrets/variables, включить required reviewers.
 2. Push (или merge) в `main`.
-3. Дождаться зелёных проверок и job **Push Docker image**.
-4. Job **Deploy staging** копирует `deploy/` на `/opt/dmc-268-api`, снимает bootstrap-контейнер, поднимает API + PostgreSQL.
+3. Дождаться зелёных проверок и job **Push Docker image** (immutable `:sha`).
+4. Job **Deploy staging** копирует `deploy/` на `/opt/dmc-268-api`, поднимает API + PostgreSQL; bootstrap снимается только после успешного `compose up`.
 5. Runner проверяет `GET /healthcheck` снаружи (`STAGING_HEALTH_URL` или `http://$STAGING_HOST/healthcheck`, 12 × 5 с).
-6. Успех: environment URL ведёт на `http://$STAGING_HOST`. Неуспех: авто-rollback и красный job.
+6. Успех: тег `:staging` продвигается на проверенный `:sha`, прежний `:staging` сохраняется как `:staging-previous`. Неуспех deploy или health: авто-rollback (включая первый выкат → bootstrap) и красный job.
 
 Повторный ручной запуск того же workflow: **Actions → CI/CD → Run workflow** (ветка `main`).
 
@@ -97,7 +98,7 @@ PostgreSQL только во внутренней docker-сети. Том `postg
 
 ## 5. Rollback
 
-1. **Автоматический.** Health check не прошёл → `rollback.sh` поднимает образ из `.deploy-state.previous`. Данные PostgreSQL не сбрасываются.
+1. **Автоматический.** Deploy или health check не прошли → `rollback.sh` поднимает образ из `.deploy-state.previous`. На первом выкате без предыдущего release восстанавливается bootstrap nginx. Данные PostgreSQL не сбрасываются. Тег `:staging` в GHCR не менялся до успешного health check.
 2. **Ручной.** Actions → **Rollback staging** → Run workflow.
    - `reason` — обязателен.
    - Пустой `image` — предыдущий успешный выкат.
@@ -131,7 +132,7 @@ for stack in terraform/api-staging terraform/ui-staging; do
   terraform -chdir="${stack}" validate
 done
 tflint --init && tflint --recursive
-checkov -f .checkov.yaml
+checkov --config-file .checkov.yaml -d .
 
 docker build -t dmc-268-api:local .
 trivy image --severity CRITICAL,HIGH --exit-code 1 dmc-268-api:local
