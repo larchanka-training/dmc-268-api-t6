@@ -1,15 +1,12 @@
 [project]
-name = "backend"
+name = "dmc-268-api-t6"
 version = "0.1.0"
-description = "Backend service"
+description = "AI Code Reviewer monorepo"
 requires-python = "==3.13.*"
-dependencies = [
-    "alembic>=1.16.0",
-    "fastapi>=0.118.0",
-    "psycopg[binary]>=3.2.0",
-    "sqlalchemy[asyncio]>=2.0.0",
-    "uvicorn[standard]>=0.37.0",
-]
+dependencies = []
+
+[tool.uv.workspace]
+members = ["services/*", "packages/*", "migrations"]
 
 [dependency-groups]
 dev = [
@@ -26,15 +23,3 @@ target-version = "py313"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM"]
-
-[tool.mypy]
-python_version = "3.13"
-strict = true
-files = ["app", "tests"]
-
-[tool.pytest.ini_options]
-testpaths = ["tests"]
-pythonpath = ["."]
-markers = [
-    "integration: requires an explicitly configured disposable PostgreSQL database",
-]

@@ -1,0 +1,1 @@
+"""Worker dependency composition root."""

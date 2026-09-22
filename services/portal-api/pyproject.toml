@@ -1,0 +1,25 @@
+[project]
+name = "portal-api"
+version = "0.1.0"
+description = "Frontend BFF for the customer portal"
+requires-python = "==3.13.*"
+dependencies = [
+    "database",
+    "fastapi>=0.118.0",
+    "uvicorn[standard]>=0.37.0",
+]
+
+[tool.uv.sources]
+database = { workspace = true }
+
+[tool.mypy]
+python_version = "3.13"
+strict = true
+files = ["app", "tests"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+markers = [
+    "integration: requires an explicitly configured disposable PostgreSQL database",
+]
