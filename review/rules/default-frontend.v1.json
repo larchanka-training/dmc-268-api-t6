@@ -1,0 +1,76 @@
+{
+  "version": 1,
+  "stack": "frontend",
+  "rules": [
+    {
+      "name": "Naming Consistency",
+      "include": ["src/**/*.{ts,tsx}"],
+      "exclude": ["**/*.test.{ts,tsx}", "**/node_modules/**", "dist/**"],
+      "checks": [
+        "A new identifier follows the casing already used in the same file and slice: camelCase for variables, functions and wire-level payload fields, PascalCase for components and types; no second casing style is introduced next to an existing one.",
+        "A name says what the value is or what the function does; an abbreviation is used only if the same file already uses it.",
+        "A boolean reads as a predicate (is, has, can, should) and an event handler follows the handler naming already present in the file.",
+        "A renamed symbol is renamed at every use inside the diff; no stale name remains in comments, tests or exports."
+      ],
+      "severity_hint": "low"
+    },
+    {
+      "name": "Error Handling Standards",
+      "include": ["src/**/*.{ts,tsx}"],
+      "exclude": ["**/*.test.{ts,tsx}", "**/node_modules/**", "dist/**"],
+      "checks": [
+        "Every external call and I/O operation (fetch, API client, storage, timers running async work) has error handling: a try/catch or a handled promise rejection.",
+        "An error is never silently swallowed: it is handled, surfaced to the UI state the file already uses, or rethrown with context.",
+        "No empty catch block, and no catch that only logs and continues where the caller expects a result.",
+        "Unknown external input is validated with Zod at the boundary before it is used; a parse failure is treated as an error, not ignored."
+      ],
+      "severity_hint": "high"
+    },
+    {
+      "name": "Complex Function Improvement Suggestions",
+      "include": ["src/**/*.{ts,tsx}"],
+      "exclude": ["**/*.test.{ts,tsx}", "**/node_modules/**", "dist/**"],
+      "checks": [
+        "A function or component body longer than 50 lines or nested more than 3 levels deep is split; name the piece that can be extracted.",
+        "A function with more than 5 parameters, or a boolean parameter that switches behaviour, takes an options object or becomes two functions.",
+        "Nested conditionals are replaced by guard clauses; a repeated if/switch cascade on the same discriminator is replaced by a lookup map or a dedicated component.",
+        "Derived state is computed during render or with useMemo, not written into state inside useEffect."
+      ]
+    },
+    {
+      "name": "Meaningful Comments for Complex Logic",
+      "include": ["src/**/*.{ts,tsx}"],
+      "exclude": ["**/*.test.{ts,tsx}", "**/node_modules/**", "dist/**"],
+      "checks": [
+        "Non-obvious logic (a regex, a magic number, a workaround, an ordering constraint, an eslint-disable) has a comment that says why, not what.",
+        "A comment that restates the code, or no longer matches the changed code next to it, is removed or updated.",
+        "A TODO or FIXME names an issue number or an owner."
+      ],
+      "severity_hint": "info"
+    },
+    {
+      "name": "Test Coverage for Complex Functions",
+      "include": ["src/**/*.{ts,tsx}"],
+      "exclude": ["**/*.test.{ts,tsx}", "**/node_modules/**", "dist/**"],
+      "checks": [
+        "New or changed logic with branches has a corresponding change in the co-located src/**/*.test.{ts,tsx} file in the same diff.",
+        "The change to an app file is accompanied by tests that cover its failure path (error state, empty data, rejected request), not only the happy path.",
+        "The change to an app file is accompanied by tests that assert literal values taken from the spec through the public interface (rendered output, store state), not implementation details or values derived from the code under test."
+      ],
+      "severity_hint": "medium"
+    },
+    {
+      "name": "FSD Layer Boundaries",
+      "include": ["src/**/*.{ts,tsx}"],
+      "exclude": ["**/*.test.{ts,tsx}", "**/node_modules/**", "dist/**"],
+      "checks": [
+        "Imports only go down the layer order app -> pages -> widgets -> features -> entities -> shared; never sideways, never up.",
+        "Slices within the same layer never import each other.",
+        "shared never imports from entities or higher.",
+        "A component file exports components only; no mixed component + hook + type barrel.",
+        "A new slice follows the documented structure: entities/<x>/{model/schemas.ts, api/index.ts, index.ts} and widgets/<x>/{ui/*.tsx, model/store.ts}, plus lib/ when the slice has derived helpers."
+      ],
+      "severity_hint": "medium"
+    }
+  ]
+}

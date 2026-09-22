@@ -1,0 +1,36 @@
+# Git workflow
+
+<!-- SYNC: mirrored in dmc-268-{ui,api}-t6/.agents/rules/git-workflow.md -->
+
+Shared across both repos. Do not add lab-only conventions here (no `(prompt: ...)`
+links, no `Impact:` blocks) — this file ships to any team using this stack.
+
+## Branches
+
+- `feat/<slug>`, `fix/<slug>`, `docs/<slug>`, `chore/<slug>`, `deps-update-YYYY-MM-DD`.
+- Slug preferably `<issue>-<kebab-case>`.
+- Existing branches that predate this rule are grandfathered — do not rename them.
+- Base branch is `main`. No direct pushes to `main`.
+
+## Commits
+
+- Conventional Commits (`type(scope): summary`).
+- Reference the issue: `(#N)` in the subject, or `Refs #N` in the footer.
+- Small, atomic commits — one logical change per commit.
+- Never `--no-verify`.
+- Rebase on `main` before requesting review.
+
+## Pull requests
+
+- Title: conventional (`type(scope): summary`), ≤72 characters.
+- Body has four mandatory sections, in this order — the AI reviewer reads the body
+  first:
+  - `What`
+  - `Why`
+  - `How to verify`
+  - `Refs`
+- Cross-repo references: `Refs owner/repo#N`.
+- One approving review required before merge.
+- Merging: squash is fine for single-purpose branches; a merge commit that keeps
+  the individual commits is fine too for multi-commit feature branches — either
+  works, pick whichever keeps history readable for that PR.
