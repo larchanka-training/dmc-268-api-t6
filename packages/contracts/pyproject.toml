@@ -1,0 +1,6 @@
+[project]
+name = "contracts"
+version = "0.1.0"
+description = "Versioned public event and transport contracts"
+requires-python = "==3.13.*"
+dependencies = []

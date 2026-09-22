@@ -1,0 +1,18 @@
+[project]
+name = "database-migrator"
+version = "0.1.0"
+description = "One-shot PostgreSQL schema migration tool"
+requires-python = "==3.13.*"
+dependencies = [
+    "alembic>=1.16.0",
+    "database",
+]
+
+[tool.uv.sources]
+database = { workspace = true }
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "integration: requires an explicitly configured disposable PostgreSQL database",
+]

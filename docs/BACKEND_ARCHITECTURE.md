@@ -9,38 +9,40 @@
 Артефакты задачи:
 
 - ORM: **SQLAlchemy 2**, типизированный Declarative (`Mapped`, `mapped_column`).
-- Миграции: **Alembic**, [первичная ревизия](alembic/versions/20260913_0001_initial_schema.py).
-- Схема: [реестр моделей](app/bootstrap/db_metadata.py) и ссылки на модули ниже.
-- ERD: [Mermaid-исходник](docs/erd/erd.mmd) и [SVG](docs/erd/erd.svg).
+- Миграции: **Alembic**, [первичная ревизия](../migrations/versions/20260913_0001_initial_schema.py).
+- Схема: [реестр metadata](../packages/database/src/database/metadata.py) и ссылки на модули ниже.
+- ERD: [Mermaid-исходник](erd/erd.mmd) и [SVG](erd/erd.svg).
 
-[SYSTEM_DESIGN.md](dos/SYSTEM_DESIGN.md) — источник правды о процессах, входных точках,
+[SYSTEM_DESIGN.md](SYSTEM_DESIGN.md) — источник правды о процессах, входных точках,
 очередях, потоках данных, retry/lease, безопасности и развёртывании. Здесь описано,
 как эти решения отражаются в исходном коде.
 
 ### Что реализовано, а что является планом
 
 В текущем каркасе реализованы healthcheck FastAPI, ORM-модели, общая DB-инфраструктура,
-Unit of Work, конфигурация Alembic, начальная миграция и тесты. Дерево слоёв и пять
-entrypoints ниже — целевая организация приложения: use cases, конкретные repositories,
-LLM/VCS/payment gateways и consumers ещё предстоит реализовать. Текущий Compose
-поднимает backend и PostgreSQL, а не весь целевой runtime.
+Unit of Work, конфигурация Alembic, начальная миграция и тесты. HTTP-каркас находится
+в `services/portal-api`, persistence — в `packages/database`, а миграции — в `migrations/`.
+Пять сервисов теперь имеют отдельные uv-пакеты и Docker-образы; AMQP
+consumers, use cases, конкретные repositories и LLM/VCS/payment gateways ещё предстоит
+реализовать. Подробное устройство репозитория — в
+разделе «Monorepo и границы сервисов» ниже.
 
 ## Принципы
 
 - Зависимости направлены внутрь: transport и infrastructure зависят от
   application/domain, но не наоборот.
 - Use case не знает о FastAPI, AMQP, SQLAlchemy или SDK провайдера.
-- Каждый процесс владеет своей точкой входа, а бизнес-логика сгруппирована по
-  модулям, а не по общему техническому слою.
+- Каждый сервис владеет своей точкой входа и полным набором внутренних слоёв;
+  бизнес-правила не смешиваются с техническими адаптерами.
 - Внешние зависимости представлены интерфейсами application/domain. Реализации для GitHub, LLM, Stripe, RabbitMQ, Redis и S3
   можно заменить без переписывания use case.
 
 ## Слои Clean Architecture
 
 Выбранный стиль — **Clean Architecture**. Бизнес-правила и use cases не зависят от
-FastAPI, SQLAlchemy, RabbitMQ или SDK внешних сервисов. Каждый бизнес-модуль делится
-на `domain`, `application` и `infrastructure`; entrypoint остаётся отдельным
-транспортным слоем.
+FastAPI, SQLAlchemy, RabbitMQ или SDK внешних сервисов. Каждый сервис имеет слои
+`domain`, `application` и `infrastructure`; entrypoint остаётся отдельным транспортным
+слоем.
 
 Зависимости направлены только внутрь: `entrypoints → application → domain` и
 `infrastructure → application/domain`. Поэтому use case получает нужную зависимость
@@ -63,10 +65,10 @@ infrastructure implementations
 
 | Слой | Содержимое | Зависимости |
 | --- | --- | --- |
-| `<module>/domain` | value objects, правила, доменные ошибки, интерфейсы модуля | только stdlib / небольшие абстракции |
-| `<module>/application` | use cases, DTO команд и результатов | domain своего модуля и явно нужные публичные контракты других модулей |
-| `<module>/infrastructure` | repositories и реализации внешних зависимостей конкретного модуля | application/domain модуля, внешние библиотеки |
-| `entrypoints` | FastAPI routers, webhook endpoint, consumers, scheduler, dependency wiring | application-модули и bootstrap |
+| `domain` | value objects, правила, доменные ошибки, порты | только stdlib / небольшие абстракции |
+| `application` | use cases, DTO команд и результатов, application ports | domain и явно нужные публичные контракты |
+| `infrastructure` | persistence, messaging и реализации внешних портов | application/domain, внешние библиотеки |
+| `entrypoints` | FastAPI routers, webhook endpoint, consumers, scheduler, dependency wiring | application и bootstrap |
 
 HTTP DTO и сообщения RabbitMQ — транспортные модели Pydantic. ORM-модели — детали
 persistence-слоя. Ни те, ни другие не пересекают границу application.
@@ -76,25 +78,63 @@ persistence-слоя. Ни те, ни другие не пересекают г�
 (use case) отдельно обращается к Repository и к LLM Gateway. Репозиторий отвечает
 за БД и не вызывает LLM; orchestration остаётся в application.
 
-## Entrypoints
+## Monorepo и границы сервисов
 
-Согласно Р-12 из [SYSTEM_DESIGN.md](../SYSTEM_DESIGN.md), image имеет пять entrypoint:
-`api`, `webhook`, `worker`, `publisher` и `collector`. Каждый располагается в
-`app/entrypoints/<name>/` и остаётся тонкой точкой входа: декодирует транспортный
-контракт, получает use case из container и преобразует результат обратно в HTTP/AMQP.
-Бизнес-решения в entrypoint не допускаются.
+```text
+.
+├── services/
+│   ├── portal-api/          # frontend BFF
+│   ├── auth-api/            # OAuth, JWT и сессии
+│   ├── webhook-api/         # GitHub webhook HTTP boundary
+│   ├── worker/              # consumer review.run
+│   └── publisher/           # consumer review.publish
+├── packages/
+│   ├── contracts/           # versioned HTTP and AMQP contracts
+│   └── database/            # SQLAlchemy models and PostgreSQL primitives
+├── migrations/              # database-migrator: revisions, tests and image
+├── infra/
+│   ├── docker/
+│   └── deploy/
+├── alembic.ini
+├── docker-compose.yml
+├── Makefile
+├── pyproject.toml           # uv workspace root
+└── uv.lock                  # one locked dependency graph
+```
 
-Развёртывание: один репозиторий, один Docker image и несколько процессов с разными
-командами запуска. На старте три контейнера приложения: `api` (+ `collector`),
-`webhook`, `worker` (+ `publisher`). RabbitMQ и PostgreSQL — общая инфраструктура.
-При раздельном запуске `publisher`/`collector` встроенные consumers нужно отключить
-в исходных процессах через конфигурацию; это не требует изменения бизнес-логики.
+| Компонент | Граница ответственности | Точка входа |
+| --- | --- | --- |
+| `portal-api` | BFF личного кабинета: подписка, биллинг, настройки, данные прогона и ручной rerun | FastAPI / REST / SSE |
+| `auth-api` | GitHub OAuth, JWT и сессии | FastAPI |
+| `webhook-api` | проверка GitHub HMAC, идемпотентность и постановка review-задач | FastAPI |
+| `worker` | получение контекста, вызов LLM и сохранение findings | AMQP `review.run.*` |
+| `publisher` | публикация review и check-run в GitHub | AMQP `review.publish` |
+| `database-migrator` | применение и проверка схемы PostgreSQL | Compose service `migrator`, profile `tools` |
 
-Это модульный многопроцессный backend, а не полностью автономные микросервисы:
-процессы разделяют версию кода, схему БД и миграции. Бизнес-модуль не равен контейнеру.
-Модели принадлежат модулям; чужие таблицы не изменяются напрямую из use cases —
-доступ идёт через публичные интерфейсы. Между процессами передаются версионированные
-сообщения с идентификаторами, не ORM-объекты и не Python-вызовы.
+Первые пять компонентов — независимо собираемые микросервисы. Каждый имеет собственные
+`pyproject.toml`, Dockerfile, тесты и `app/entrypoints/<name>/`. Entrypoint остаётся
+тонкой границей: декодирует HTTP/AMQP контракт, получает use case из container и
+преобразует результат обратно в транспортный формат. Бизнес-решения в entrypoint не
+допускаются. `database-migrator` не является шестым микросервисом и не работает
+постоянно.
+
+### Зависимости и данные
+
+- Сервис использует пакет только через явную зависимость в своём `pyproject.toml`.
+- `packages/contracts` содержит только версионированные DTO и схемы сообщений; без
+  ORM-моделей, repositories и use cases.
+- `packages/database` — узкий технический пакет общей PostgreSQL-схемы. Он
+  импортируется как `database`, а не `reviewer_database`; бизнес-правила в нём не живут.
+- Workspace-пакет `database-migrator` в `migrations/` — единственный потребитель
+  Alembic. Он импортирует
+  metadata непосредственно из `packages/database`, а не из `portal-api` или другого
+  сервиса.
+- Сервисы передают между собой идентификаторы и версионированные сообщения RabbitMQ,
+  а не ORM-сущности и не импорты чужого `app`.
+
+Сейчас схема и её история миграций общие. Когда сервис получит собственное хранилище,
+к нему переносятся только принадлежащие ему модели и новые миграции — первоначальную
+ревизию нельзя механически разрезать.
 
 ## Интерфейсы и инфраструктурные реализации
 
@@ -105,73 +145,53 @@ Application зависит от узких интерфейсов, сгрупп�
 | --- | --- | --- |
 | `RunRepository`, `ReviewRepository` | `reviews` | состояние прогона и результаты review |
 | `RepositoryReader` | `repositories` | настройки репозитория для use cases |
-| `VcsProvider` | использующий модуль | минимальные операции конкретного VCS-сценария |
+| `VcsProvider` | использующий use case | минимальные операции конкретного VCS-сценария |
 | `LlmGateway` | `reviews` | structured результат анализа контекста |
 | `PaymentGateway` | `billing` | создание и подтверждение оплаты |
-| `UnitOfWork` | общий контракт; расширение в использующем модуле | граница транзакции и доступ к интерфейсам repositories |
-| `Clock`, `IdGenerator` | `common` | детерминированные тесты и технические значения |
+| `UnitOfWork` | application | граница транзакции и доступ к интерфейсам repositories |
+| `Clock`, `IdGenerator` | application | детерминированные тесты и технические значения |
 
 `LlmGateway` принимает неизменяемый контекст, prompt/rule snapshots и выбранный engine;
 возвращает typed findings, usage и нормализованную ошибку. Он не публикует комментарии,
 не меняет состояние run и не знает о GitHub.
 
-## Модульная структура кода
+## Структура Clean Architecture внутри сервиса
 
-Код организован **сначала по бизнес-модулю**, а уже внутри модуля — по слоям Clean
-Architecture. Это не позволяет превратить `common` в свалку и сохраняет use case,
-его интерфейс и реализацию рядом друг с другом.
+Каждый микросервис — самостоятельное Clean Architecture-приложение. Папки
+`modules/` и `common/` не используются: они отражали прежний модульный монолит и
+размывали границы сервисов. Зависимости всегда направлены внутрь:
+`entrypoints → application → domain`; `infrastructure` реализует порты внутреннего
+слоя, но не задаёт бизнес-правила.
 
 ```text
-app/
+services/<service>/app/
   bootstrap/
     config.py                  # env / settings
     container.py               # composition root и DI wiring
-    db_metadata.py             # реализован: сбор ORM metadata всех модулей
     logging.py
-  common/
-    application/
-      unit_of_work.py           # реализован: интерфейс управления транзакцией
-    domain/
-      errors.py                # только базовые технические ошибки
-      ids.py                   # UUID/value types, не доменные сущности
-      events.py                # межмодульные event contracts
-    infrastructure/
-      db/                      # Base, session factory и DB helpers; не модели модулей
-      messaging/               # RabbitMQ connection и consumer/publisher helpers
-      storage/                 # Redis и S3 infrastructure implementations
-  modules/
-    workspaces/
-      domain/
-      application/
-      infrastructure/          # Workspace model и repository
-    reviews/
-      domain/                  # Run, Finding, Comment, Review interfaces
-      application/             # create/execute/publish/cancel/rerun
-      infrastructure/          # review models, repos, LLM gateway
-    repositories/
-      domain/
-      application/
-      infrastructure/
-    integrations/
-      github/                  # общая provider infrastructure: gateway, parser, tokens
-      webhooks/
-        domain/
-        application/
-        infrastructure/
-    billing/
-      domain/
-      application/
-      infrastructure/          # Payment/CreditLedger models, repos, Stripe implementation
-    analytics/
-      domain/
-      application/
-      infrastructure/
+  domain/
+    entities/                  # entities, value objects, domain errors
+    ports/                     # domain-owned abstractions
+  application/
+    use_cases/                 # orchestration, commands, queries and DTOs
+    ports/
+      unit_of_work.py          # реализован: интерфейс управления транзакцией
+  infrastructure/
+    messaging/                 # AMQP adapters
+    providers/                 # GitHub, LLM, Stripe and storage adapters
   entrypoints/
-    api/                       # FastAPI routes и response schemas
-    webhook/                   # GitHub webhook FastAPI app
-    worker/                    # review.run AMQP consumer
-    publisher/                 # review.publish AMQP consumer
-    collector/                 # events.* AMQP consumer
+    <service>/                 # service-specific FastAPI or AMQP boundary
+```
+
+Общие PostgreSQL-адаптеры находятся в отдельном workspace-пакете, а не в
+`app/common` и не в коде API:
+
+```text
+packages/database/src/database/
+  models/                      # SQLAlchemy models общей схемы
+  base.py                      # declarative base
+  session.py                   # session factory
+  unit_of_work.py              # SQLAlchemy adapter
 ```
 
 `bootstrap/container.py` — единственное место, где создаются engine, session factory,
@@ -182,31 +202,29 @@ fakes; интеграционные тесты проверяют реальны
 Engine и сетевые клиенты живут в течение lifespan процесса и закрываются при shutdown
 (`await engine.dispose()` и закрытие клиентов). Session и Unit of Work создаются
 заново для каждой короткой транзакции, не переиспользуются между запросами, сообщениями
-или параллельными asyncio tasks. `bootstrap/db_metadata.py` собирает только описания
+или параллельными asyncio tasks. `database.metadata` собирает только описания
 таблиц для Alembic и не открывает соединение с БД.
 
-### Что допустимо выносить в `common`
+### Границы кода и контрактов
 
-В `common` разрешён только код, который одновременно не содержит бизнес-правил и нужен
-минимум двум модулям: настройки, логирование, соединения с инфраструктурой, базовые
-идентификаторы, общие ошибки и стабильные event contracts. Нельзя выносить туда
-`Run`, `Repository`, `Finding`, review-правила, SQLAlchemy repositories или use cases
-«на будущее». Если код используется только одним модулем, он остаётся в нём.
-
-Интерфейс принадлежит модулю, который его **использует**: например `LlmGateway` определён в
-`modules/reviews/domain/ports.py`, а реализация лежит в
-`modules/reviews/infrastructure/llm_gateway.py`. GitHub implementation живёт отдельно, потому
-что его используют reviews, repositories и webhooks, но каждый модуль определяет свой
-узкий интерфейс, а не зависит от полного GitHub SDK.
+Интерфейс принадлежит application или domain-коду сервиса, который его использует:
+например, `LlmGateway` определяется в `application/ports`, а реализация живёт в
+`infrastructure/providers`. Публичные HTTP DTO и сообщения RabbitMQ оформляются как
+версионированные контракты в `packages/contracts`; они не содержат ORM-моделей,
+repositories или use cases. `packages/database` — намеренно узкое исключение:
+технический пакет общей PostgreSQL-схемы, импортируемый как `database` (не
+`reviewer_database`) и явно объявленный в зависимостях потребляющего сервиса. Не
+следует создавать новый общий технический слой между сервисами: код остаётся
+локальным, пока не станет стабильным публичным контрактом.
 
 ## Транзакции и выполнение review
 
-Application управляет транзакцией через [UnitOfWork](app/common/application/unit_of_work.py).
-[SqlAlchemyUnitOfWork](app/common/infrastructure/db/unit_of_work.py) создаёт одну
+Application управляет транзакцией через [UnitOfWork](../services/portal-api/app/application/ports/unit_of_work.py).
+[SqlAlchemyUnitOfWork](../packages/database/src/database/unit_of_work.py) создаёт одну
 `AsyncSession`, требует явного `commit()` и при выходе откатывает незавершённую
 транзакцию и закрывает session, в том числе при исключении.
 
-Конкретный UoW модуля предоставляет application интерфейсы repositories; инфраструктурная
+Конкретный UoW предоставляет application интерфейсы repositories; инфраструктурная
 сборка передаёт всем этим repositories одну session. Репозитории могут делать `flush`,
 но не `commit`. Application не обращается к `uow.session` — это свойство предназначено
 только для инфраструктурной сборки и её тестов. Пока конкретных repositories нет,
@@ -235,14 +253,14 @@ PostgreSQL 17, драйвер `psycopg` v3. Runtime использует `AsyncS
 синхронное соединение того же драйвера. URL: `postgresql+psycopg://...`.
 SQLModel не используется: ORM отделена от transport DTO и доменных контрактов.
 
-| Модуль / код схемы | Модели |
+| Группа ORM-моделей | Модели |
 | --- | --- |
-| [workspaces](app/modules/workspaces/infrastructure/models.py) | Workspace |
-| [repositories](app/modules/repositories/infrastructure/models.py) | ProviderInstallation, Repository, RuleVersion, RepoConventions |
-| [reviews](app/modules/reviews/infrastructure/models.py) | PromptVersion, CodeChange, Run, ContextPayload, Finding, Comment, RunAction |
-| [webhooks](app/modules/integrations/webhooks/infrastructure/models.py) | WebhookEvent |
-| [billing](app/modules/billing/infrastructure/models.py) | Payment, CreditLedger |
-| [analytics](app/modules/analytics/infrastructure/models.py) | UsageEvent |
+| [workspaces](../packages/database/src/database/models/workspaces.py) | Workspace |
+| [repositories](../packages/database/src/database/models/repositories.py) | ProviderInstallation, Repository, RuleVersion, RepoConventions |
+| [reviews](../packages/database/src/database/models/reviews.py) | PromptVersion, CodeChange, Run, ContextPayload, Finding, Comment, RunAction |
+| [webhooks](../packages/database/src/database/models/webhooks.py) | WebhookEvent |
+| [billing](../packages/database/src/database/models/billing.py) | Payment, CreditLedger |
+| [analytics](../packages/database/src/database/models/analytics.py) | UsageEvent |
 
 Названия из задания сопоставляются так: `MergeRequest → CodeChange`,
 `ReviewJob → Run`. Это согласованные переименования, а не отсутствующие сущности.
@@ -255,11 +273,13 @@ Comment — сведения о его публикации. Поля SHA в Fin
 ERD показывает связи и ключевые поля; полный состав колонок и ограничения следует
 смотреть в коде. Используются UUID, TIMESTAMPTZ, JSONB, точный Numeric для денежных
 значений, native ENUM и частичные unique indexes. Общая metadata нужна для FK между
-модулями и единой истории миграций; она не даёт application права обходить интерфейсы.
+группами таблиц и единой истории миграций; она не даёт application права обходить
+интерфейсы.
 
 ## Миграции и проверка
 
-[env.py](alembic/env.py) собирает `target_metadata` через bootstrap. Ревизии Alembic
+[env.py](../migrations/env.py) собирает `target_metadata` из `database.metadata`, без импорта
+какого-либо сервиса. Ревизии Alembic
 содержат фиксированные `op.create_table`, индексы и PostgreSQL enum types; они не
 импортируют runtime-модели и не используют `Base.metadata.create_all/drop_all`.
 Будущие изменения схемы оформляются новой ревизией, а не правкой уже применённой.
@@ -268,18 +288,19 @@ ERD показывает связи и ключевые поля; полный �
 в lifespan каждого приложения. Из корня backend-проекта:
 
 ```bash
-uv sync --dev
-DATABASE_URL='postgresql+psycopg://user:password@localhost:5432/backend' uv run alembic upgrade head
-uv run pytest -m 'not integration'
-TEST_DATABASE_URL='postgresql+psycopg://user:password@localhost:5432/backend_test' uv run pytest -m integration
+uv sync --all-packages
+make migrate
+DATABASE_URL='postgresql+psycopg://user:password@localhost:5432/backend' uv run --package database-migrator alembic -c alembic.ini upgrade head
+uv run --package portal-api pytest services/portal-api/tests
+TEST_DATABASE_URL='postgresql+psycopg://user:password@localhost:5432/backend_test' uv run --package database-migrator pytest migrations/tests -m integration
 ```
 
-Для нового изменения: `uv run alembic revision --autogenerate -m "description"`
+Для нового изменения: `uv run --package database-migrator alembic -c alembic.ini revision --autogenerate -m "description"`
 с настроенным `DATABASE_URL`; результат обязательно проверить вручную, особенно
 ENUM, rename, partial indexes и data migrations. Перед применением к рабочей БД
 проверить совместимость версий приложения и подготовить backup/rollback-план.
 
-[Интеграционные тесты](tests/test_initial_migration.py) создают случайную отдельную
+[Интеграционные тесты](../migrations/tests/test_initial_migration.py) создают случайную отдельную
 схему в тестовой БД и удаляют только её. Проверяют два цикла upgrade/downgrade,
 совпадение миграции с ORM metadata, удаление ENUM при downgrade и commit/rollback UoW.
 Пользователь тестовой БД должен иметь право CREATE SCHEMA. В Alembic передаётся

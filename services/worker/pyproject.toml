@@ -1,0 +1,6 @@
+[project]
+name = "worker"
+version = "0.1.0"
+description = "Review processing worker"
+requires-python = "==3.13.*"
+dependencies = []

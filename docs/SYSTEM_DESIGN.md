@@ -27,8 +27,8 @@
 | Р-8 | `usage_events` (токены, деньги, модель) — с первого вызова LLM, только вставка | Восстановить задним числом нельзя; основа для `CreditLedger` |
 | Р-9 | Бот односторонний: публикует, на комментарии не отвечает; **обязательно** игнорирует собственные события | Скорость запуска; защита от цикла «бот → CI → бот» |
 | Р-10 | Триггер — **конъюнкция двух событий в любом порядке**: бот назначен ревьюером ∧ CI успешен для текущего `head_sha` | Решение мита; события независимы, порядок не гарантирован |
-| Р-11 | Провайдер VCS — за портом `VcsProvider`; v1 реализует только GitHub | ТЗ упоминает GitLab, роль 6 — Bitbucket; порт дешёвый, реализации — нет |
-| Р-12 | Один образ, пять точек входа (`api`, `webhook`, `worker`, `publisher`, `collector`); на старте `publisher` живёт в процессе `worker`, `collector` — в процессе `api` | Микросервисы без пяти репозиториев; разнести = поменять compose, а не код |
+| Р-11 | Провайдер VCS — за портом `VcsProvider`; v1 реализует только GitHub | Другие провайдеры не входят в текущий объём работ |
+| Р-12 | Один monorepo и пять независимо собираемых сервисов (`portal-api`, `auth-api`, `webhook-api`, `worker`, `publisher`) с собственными зависимостями | Изоляция релизов и зависимостей без потери единого lock-файла и локального окружения |
 
 ---
 
@@ -73,6 +73,9 @@ flowchart LR
 
 ## 4. C4 — уровень 2: контейнеры
 
+Диаграмма фиксирует целевую границу системы; фактический состав локального Docker
+Compose, включая отдельный `database-migrator`, указан в §14.
+
 ```mermaid
 flowchart TB
   dev["<b>Разработчик</b><br/><i>[Person]</i>"]
@@ -83,13 +86,13 @@ flowchart TB
   subgraph sys["AI Code Reviewer"]
     direction TB
     ui["<b>Web UI</b><br/><i>[Container: React 18 + Vite + TS]</i><br/>прогоны, дифф, инспектор трейса,<br/>правила, метрики"]
-    api["<b>API Server</b><br/><i>[Container: FastAPI]</i><br/>REST + SSE, GitHub OAuth → JWT,<br/>конфигурация, ручной перезапуск"]
-    hook["<b>WebHook Processor</b><br/><i>[Container: FastAPI]</i><br/>HMAC, идемпотентность, триггер Р-10,<br/>схлопывание Р-2, ack < 500 мс"]
+    portal["<b>Portal API</b><br/><i>[Container: FastAPI BFF]</i><br/>REST + SSE, подписка, биллинг,<br/>настройки и ручной перезапуск"]
+    auth["<b>Auth API</b><br/><i>[Container: FastAPI]</i><br/>OAuth, JWT и сессии"]
+    hook["<b>Webhook API</b><br/><i>[Container: FastAPI]</i><br/>GitHub HMAC, идемпотентность,<br/>триггер Р-10, схлопывание Р-2, ack < 500 мс"]
     worker["<b>AI Worker</b><br/><i>[Container: Python + aio-pika]</i><br/>сборщик контекста (4 уровня) → LLM Gateway<br/>→ постобработка → трейс"]
-    pub["<b>GitHub Publisher</b><br/><i>[Container: Python + aio-pika]</i><br/>валидация координат, одно ревью, check-run<br/>v1: в процессе worker"]
-    coll["<b>Event Collector</b><br/><i>[Container: Python + aio-pika]</i><br/>события прогонов и LLM → usage_events<br/>v1: в процессе api"]
+    pub["<b>GitHub Publisher</b><br/><i>[Container: Python + aio-pika]</i><br/>валидация координат, одно ревью и check-run"]
     sandbox["<b>Sandbox Runner</b><br/><i>[Container: Docker, --network=none]</i><br/>SandboxEngine · фаза 3"]
-    mq[("<b>RabbitMQ</b><br/><i>[AMQP 0-9-1]</i><br/>reviews (direct), events (topic), DLX")]
+    mq[("<b>RabbitMQ</b><br/><i>[AMQP 0-9-1]</i><br/>reviews (direct), retry и DLX")]
     pg[("<b>PostgreSQL 17</b><br/><i>[SQLAlchemy 2 + Alembic]</i><br/>источник истины")]
     redis[("<b>Redis</b><br/>токены, блобы, AST, дерево репо")]
     s3[("<b>Object Storage</b><br/><i>[S3: MinIO / Hetzner]</i><br/>payload'ы, снимки диффов, контексты, трейсы")]
@@ -97,14 +100,15 @@ flowchart TB
 
   dev -->|"PR, назначение ревьюера"| gh
   op -->|HTTPS| ui
-  ui -->|"REST + SSE<br/>Zod-контракты"| api
+  ui -->|"REST + SSE<br/>Zod-контракты"| portal
+  ui -->|"OAuth / JWT"| auth
   gh -->|"webhooks<br/>HTTPS + HMAC"| hook
 
   hook -->|"webhook_events, code_changes,<br/>runs"| pg
   hook -->|review.run| mq
-  api -->|"чтение, конфигурация"| pg
-  api -->|"review.run<br/>(rerun)"| mq
-  api -->|"OAuth, репозитории<br/>installation"| gh
+  portal -->|"чтение, конфигурация"| pg
+  portal -->|"review.run<br/>(rerun)"| mq
+  auth -->|"OAuth"| gh
 
   mq -->|"review.run.fast / .deep<br/>prefetch=1"| worker
   worker -->|"diff, blobs, tree · REST"| gh
@@ -113,13 +117,11 @@ flowchart TB
   worker -->|"context_payloads, findings,<br/>run_actions, usage_events"| pg
   worker -->|"полный контекст, трейс"| s3
   worker -.->|"docker API · фаза 3"| sandbox
-  worker -->|"review.publish, events.*"| mq
+  worker -->|"review.publish"| mq
 
   mq -->|review.publish| pub
   pub -->|"POST /pulls/{n}/reviews,<br/>check-run · REST"| gh
   pub -->|"comments, run.state"| pg
-  mq -->|"events.*"| coll
-  coll -->|"usage_events, агрегаты"| pg
 
   classDef person fill:#08427b,color:#fff,stroke:#052e56
   classDef ext fill:#8a8a8a,color:#fff,stroke:#5f5f5f
@@ -127,11 +129,19 @@ flowchart TB
   classDef store fill:#2f6db3,color:#fff,stroke:#1f4f85
   class dev,op person
   class gh,llm ext
-  class ui,api,hook,worker,pub,coll,sandbox cont
+  class ui,portal,auth,hook,worker,pub,sandbox cont
   class mq,pg,redis,s3 store
 ```
 
-**Один образ, пять entrypoint'ов** (Р-12): `uv run python -m app.api | app.webhook | app.worker | app.publisher | app.collector`. Staging (Hetzner, одна VM, compose): `api`, `webhook`, `worker` (внутри — publisher), `postgres`, `rabbitmq`, `redis`, `minio`, `caddy` (TLS). Роль 3 разводит по сервисам — код не меняется.
+**Один monorepo, пять сервисов** (Р-12): `services/portal-api`, `services/auth-api`,
+`services/webhook-api`, `services/worker`, `services/publisher`. Каждый собирается своим
+Dockerfile и запускается отдельным контейнером; PostgreSQL, RabbitMQ и Redis — общая
+инфраструктура на переходном этапе. Текущий Compose запускает только эти пять сервисов,
+PostgreSQL, RabbitMQ и Redis; TLS-прокси и object storage — следующие deployment-этапы.
+
+Workspace-пакет `database-migrator` запускается Compose-сервисом `migrator` и не
+входит в runtime-набор: это одноразовый job из profile `tools`, который применяется
+до запуска сервисов и обращается только к PostgreSQL.
 
 ---
 
@@ -144,7 +154,7 @@ flowchart LR
   G -->|skip| ACK[ack без работы]
   G --> CC
 
-  subgraph CC[Context Collector]
+  subgraph CC[Context Assembler]
     direction TB
     M[MetaLoader<br/>PR, ветка, AGENTS.md,<br/>конвенции репо] --> D[DiffFetcher<br/>L1 unified diff → FileDiff]
     D --> F[FileFetcher<br/>блобы по sha, кэш Redis]
@@ -158,7 +168,7 @@ flowchart LR
   P --> L[LLM Gateway<br/>адаптеры провайдеров, ретраи,<br/>prompt cache, usage_events]
   L --> PP[FindingsPostProcessor<br/>lint-фильтр ×2, порог confidence,<br/>дедуп, hunk-валидация, лимит N]
   PP --> T[TraceRecorder<br/>RunAction: tool, request, response, ms]
-  T --> OUT[(review.publish<br/>events.run.finished)]
+  T --> OUT[(review.publish)]
   T --> PG[(PostgreSQL)]
   G -.checkpoints: после каждого уровня,<br/>перед каждым LLM-вызовом.-> PP
 ```
@@ -191,7 +201,7 @@ class Finding:
 sequenceDiagram
   autonumber
   participant GH as GitHub
-  participant WH as WebHook Processor
+  participant WH as Webhook API
   participant PG as PostgreSQL
   participant MQ as RabbitMQ
 
@@ -245,7 +255,7 @@ sequenceDiagram
   P->>PG: head_sha == code_changes.head_sha? findings_hash не опубликован?
   P->>GH: POST /pulls/{n}/reviews (одно ревью) + check-run completed
   P->>PG: comments (github ids), run.state → succeeded
-  P->>MQ: ack, events.run.finished
+  P->>MQ: ack review.publish
 ```
 
 ### 6.3 Схлопывание (Р-2): пуш во время прогона
@@ -254,7 +264,7 @@ sequenceDiagram
 sequenceDiagram
   autonumber
   participant GH as GitHub
-  participant WH as WebHook Processor
+  participant WH as Webhook API
   participant PG as PostgreSQL
   participant W as AI Worker
   participant P as Publisher
@@ -295,7 +305,7 @@ stateDiagram-v2
   skipped --> [*]
 ```
 
-Реконсилер (в `api`, раз в 5 мин, лидер через `pg_advisory_lock`): `running` с истёкшим `lease_until` → `queued` + повторная публикация сообщения; `queued` старше 10 мин без сообщения → повторная публикация.
+Реконсилер (в `portal-api`, раз в 5 мин, лидер через `pg_advisory_lock`): `running` с истёкшим `lease_until` → `queued` + повторная публикация сообщения; `queued` старше 10 мин без сообщения → повторная публикация.
 
 ---
 
@@ -310,7 +320,6 @@ stateDiagram-v2
 | `reviews` | direct | `review.publish` | `review.publish` | GitHub Publisher | durable, DLX |
 | `reviews.retry` | direct | `retry.30s` / `retry.2m` / `retry.10m` | `retry.*` | — | `x-message-ttl`, `x-dead-letter-exchange=reviews` (отложенный повтор без плагина) |
 | `reviews.dlx` | fanout | — | `reviews.dlq` | оператор / реконсилер | хранение 7 дней |
-| `events` | topic | `run.*`, `llm.*`, `feedback.*` | `events.collector` | Event Collector | durable; потеря допустима, но нежелательна |
 
 Параметры: сообщения `delivery_mode=2`, publisher confirms включены, `prefetch_count=1` на run-очередях (задачи длинные и неравные), ack **только после** фиксации состояния в PostgreSQL, `consumer_timeout=45min` (глубокий путь ≤ 10 мин с запасом).
 
@@ -319,7 +328,7 @@ stateDiagram-v2
 Сообщение — **указатель**, не данные: без диффов, без payload'ов. Всё, что нужно воркеру, он читает из БД и GitHub по идентификаторам. Так сообщение остаётся < 1 КБ, а состояние — единым.
 
 ```jsonc
-// review.run/v1  — WebHook Processor | API → AI Worker
+// review.run/v1  — Webhook API | Portal API → AI Worker
 {
   "schema": "review.run/v1",
   "message_id": "b3c1…",            // = run_id; ключ идемпотентности
@@ -349,18 +358,6 @@ stateDiagram-v2
 }
 ```
 
-```jsonc
-// events/v1 — любой контейнер → Event Collector (topic events)
-{
-  "schema": "events/v1",
-  "type": "run.finished",           // run.started | run.finished | run.cancelled | llm.call | review.published | feedback.signal
-  "occurred_at": "…",
-  "workspace_id": "ws_…",
-  "run_id": "b3c1…",
-  "payload": { "engine": "fast", "duration_ms": 31200, "findings": 6, "published": 5 }
-}
-```
-
 Правила: заголовок `schema` версионируется, потребитель отвергает незнакомую мажорную версию в DLQ; `message_id` = детерминированный id из БД, повторная доставка безопасна; `x-death` считает попытки, после 3 — `reviews.dlq` и `run.state = failed` с причиной.
 
 ---
@@ -382,7 +379,7 @@ class VcsProvider(Protocol):
     async def list_feedback(self, repo: RepoRef, number: int) -> list[FeedbackSignal]: ...
 ```
 
-v1 — `GitHubProvider`. `GitLabProvider` (MR `changes`, `discussions`, `pipeline` events, bot-user token) и `BitbucketProvider` — по портy, без реализации.
+v1 — `GitHubProvider`. Другие реализации `VcsProvider` не входят в текущий объём работ.
 
 ### 8.2 GitHub: события и права
 
@@ -405,7 +402,7 @@ v1 — `GitHubProvider`. `GitLabProvider` (MR `changes`, `discussions`, `pipelin
 | Ответ на вебхук < 500 мс | Проверка HMAC (`X-Hub-Signature-256`, `hmac.compare_digest`), INSERT, publish — всё; никакой работы в обработчике |
 | Идемпотентность | `webhook_events.delivery_id UNIQUE` (`X-GitHub-Delivery`); GitHub **не** ретраит доставки сам — приёмник обязан быть доступен |
 | Игнор собственных событий (Р-9) | `sender.type == "Bot"` ∧ `sender.id == наш app id` → 202 и выход |
-| Installation-токен | живёт 1 ч; Redis `token:{installation_id}`, TTL 50 мин; private key App — только в env `webhook`/`worker`/`publisher` |
+| Installation-токен | живёт 1 ч; Redis `token:{installation_id}`, TTL 50 мин; private key App — только в env `webhook-api`/`worker`/`publisher` |
 | Rate limit | 5000 req/ч на installation; `X-RateLimit-Remaining` в метрики; `403/429` + `Retry-After` → exponential backoff, задача в `retry.*`; вторичные лимиты — не более 1 мутации/сек |
 | Дифф | `GET /pulls/{n}/files` (patch на файл, ≤ 3000 файлов, patch пустой у бинарных и > 20 000 строк → файл помечается `too_large`) |
 | Файлы | `GET /git/blobs/{sha}` по sha из `files[].sha` — кэшируется вечно (immutable); никогда `contents` по пути с ref |
@@ -597,7 +594,7 @@ Zod-схемы — источник истины на фронте (роль 5);
 
 | Метод | Путь | Ответ | Примечание |
 |---|---|---|---|
-| `POST` | `/auth/github/callback` | JWT | GitHub OAuth; все `/api/*` — `Authorization: Bearer` |
+| `POST` | `/auth/github/callback` | JWT | обслуживается `auth-api`; все `/api/*` в `portal-api` — `Authorization: Bearer` |
 | `GET` | `/api/runs?status&repo&cursor` | `RunSession[]` | статусы `queued\|running\|completed\|failed` + `cancelled\|skipped` |
 | `GET` | `/api/runs/{id}` | `RunSession` + `findings` + `budget` | |
 | `GET` | `/api/runs/{id}/diff` | `[{ filename, patch }]` | **сырой unified-diff на файл** — требование роли 5 |
@@ -607,7 +604,7 @@ Zod-схемы — источник истины на фронте (роль 5);
 | `GET/PATCH` | `/api/repos`, `/api/repos/{id}` | | `enabled`, `default_engine`, `wait_for_ci`, `max_comments` |
 | `GET/POST` | `/api/repos/{id}/rules` | `RuleVersion[]` | POST создаёт новую версию |
 | `POST` | `/api/rules/{id}/preview` | `{ matched: PrRef[] }` | по PR за 7 дней |
-| `GET` | `/api/metrics/summary?range=24h` | плитки + ряды | из агрегатов Event Collector |
+| `GET` | `/api/metrics/summary?range=24h` | плитки + ряды | из usage events, записанных worker |
 | `GET` | `/api/stream` | SSE `run.updated` | один поток на вкладку |
 
 ---
@@ -633,31 +630,37 @@ Zod-схемы — источник истины на фронте (роль 5);
 
 ---
 
-## 14. Развёртывание v1
+## 14. Развёртывание: текущий Docker Compose
 
 ```mermaid
 flowchart TB
-  subgraph hetzner[Hetzner VM · staging · Docker Compose · Terraform роль 3]
-    caddy[caddy · TLS] --> api[api]
-    caddy --> hook[webhook]
-    api --> pg[(postgres 17)]
+  subgraph compose[Docker Compose]
+    portal[portal-api]
+    auth[auth-api]
+    hook[webhook-api]
+    migrator[migrator<br/>database-migrator · profile tools]
+    portal --> pg[(postgres 17)]
     hook --> pg
     hook --> mq[(rabbitmq)]
-    api --> mq
-    worker[worker + publisher] --> mq
+    portal --> mq
+    worker[worker] --> mq
+    publisher[publisher] --> mq
     worker --> pg
     worker --> redis[(redis)]
-    worker --> minio[(minio)]
-    hook --> minio
-    api -.collector.-> mq
+    publisher --> pg
+    migrator -.->|Alembic, one-shot| pg
   end
-  gh[GitHub] -->|webhooks| caddy
+  gh[GitHub] -->|webhooks| hook
   worker -->|REST| gh
+  publisher -->|REST| gh
   worker -->|HTTPS| llm[LLM Provider]
-  ui[Web UI · статика на caddy] --> caddy
+  ui[Web UI] --> portal
+  ui --> auth
 ```
 
-Внешние порты: только 443. Сандбокс (фаза 3) — отдельная VM с Docker-сокетом, недоступным из `api`/`webhook`.
+Локально наружу опубликованы только порты `portal-api` (8000), `webhook-api` (8001),
+`auth-api` (8002), PostgreSQL, RabbitMQ и Redis. TLS-прокси, object storage и sandbox
+— отдельные этапы развёртывания, их нет в текущем `docker-compose.yml`.
 
 ---
 
@@ -669,15 +672,14 @@ flowchart TB
 | OQ-2 | Модель для DiffEngine и размер бюджета | отдельное задание по тестированию моделей; дизайн модель-агностичен через LLM Gateway | роль 7 + мит |
 | OQ-3 | `review_event` по умолчанию: `COMMENT` или `REQUEST_CHANGES` при critical? | `COMMENT`; `REQUEST_CHANGES` — настройка репозитория | продукт |
 | OQ-4 | Раскладка `.agents/` vs `docs/agents/` | `.agents/` (DoD роли 7) | роль 7 + техлид |
-| OQ-5 | Event Collector как отдельный процесс — с какого порога | когда `usage_events` > 1 000 строк/мин или появится второй потребитель событий | техлид |
-| OQ-6 | Стековые PR (B на основе A): пуш в A меняет дифф B, событие приходит только по A | не решаем в v1, фиксируем как известный пробел | — |
+| OQ-5 | Стековые PR (B на основе A): пуш в A меняет дифф B, событие приходит только по A | не решаем в v1, фиксируем как известный пробел | — |
 
 ---
 
 ## 16. Проверка DoD
 
 - [x] Компоненты, потоки данных, границы backend / frontend / LLM — §2, §3–§5
-- [x] Правила взаимодействия с VCS (GitHub, порт для GitLab) — §8
+- [x] Правила взаимодействия с VCS (GitHub) — §8
 - [x] Форматы очереди задач (RabbitMQ) — §7
 - [x] Стратегия кэширования контекстов — §10
 - [x] Сборщик контекста: структуры данных на 4 уровнях — §9

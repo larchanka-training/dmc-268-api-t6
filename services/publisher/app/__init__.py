@@ -1,0 +1,1 @@
+"""Publisher service package."""
