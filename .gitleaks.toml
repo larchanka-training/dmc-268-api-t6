@@ -1,3 +1,8 @@
+# Gitleaks scans the full repository, including docs/ and examples/.
+# Allowlist only committed placeholder patterns — never real credentials.
+# Local check: docker run --rm -v "$PWD:/src:ro" ghcr.io/gitleaks/gitleaks:v8.28.0 \
+#   detect --source /src --config /src/.gitleaks.toml --no-banner --redact --exit-code 1
+
 [extend]
 useDefault = true
 

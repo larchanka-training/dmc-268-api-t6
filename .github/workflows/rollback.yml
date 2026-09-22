@@ -27,7 +27,21 @@ jobs:
     environment:
       name: staging
       url: http://${{ vars.STAGING_HOST }}
+    outputs:
+      image_ref: ${{ steps.deployed.outputs.stdout }}
+      staging: ${{ steps.meta.outputs.staging }}
+      previous: ${{ steps.meta.outputs.previous }}
     steps:
+      - name: Set image coordinates
+        id: meta
+        env:
+          REGISTRY: ghcr.io
+        run: |
+          repo="$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')"
+          image="${REGISTRY}/${repo}"
+          echo "staging=${image}:staging" >> "${GITHUB_OUTPUT}"
+          echo "previous=${image}:staging-previous" >> "${GITHUB_OUTPUT}"
+
       - name: Checkout
         uses: actions/checkout@v4
 
@@ -78,3 +92,41 @@ jobs:
           chmod +x deploy/scripts/healthcheck.sh
           target="${HEALTH_URL:-http://${STAGING_HOST}/healthcheck}"
           deploy/scripts/healthcheck.sh "${target}"
+
+      - name: Read deployed image
+        id: deployed
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ vars.STAGING_HOST }}
+          username: ${{ vars.STAGING_SSH_USER }}
+          key: ${{ secrets.STAGING_SSH_KEY }}
+          fingerprint: ${{ vars.STAGING_SSH_FINGERPRINT }}
+          debug: false
+          script: |
+            awk -F= '/^current_image=/{print $2; exit}' /opt/dmc-268-api/.deploy-state
+
+  promote-staging:
+    name: Promote staging tag
+    needs: rollback
+    permissions:
+      contents: read
+      packages: write
+    runs-on: ubuntu-latest
+    steps:
+      - name: Promote rolled-back image to staging
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          image_ref="${{ needs.rollback.outputs.image_ref }}"
+          staging="${{ needs.rollback.outputs.staging }}"
+          previous="${{ needs.rollback.outputs.previous }}"
+          if [[ -z "${image_ref}" || "${image_ref}" == "bootstrap" ]]; then
+            echo "skip registry promotion for bootstrap rollback"
+            exit 0
+          fi
+          if docker pull "${staging}"; then
+            docker tag "${staging}" "${previous}"
+            docker push "${previous}"
+          fi
+          docker pull "${image_ref}"
+          docker tag "${image_ref}" "${staging}"
+          docker push "${staging}"
