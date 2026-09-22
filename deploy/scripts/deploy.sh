@@ -11,6 +11,7 @@ IMAGE="${1:-${IMAGE:-}}"
 COMPOSE_FILE="${APP_DIR}/compose.yml"
 STATE_FILE="${APP_DIR}/.deploy-state"
 ENV_FILE="${APP_DIR}/.env"
+ROLLBACK_SCRIPT="${APP_DIR}/rollback.sh"
 
 logout_registry() {
   docker logout ghcr.io >/dev/null 2>&1 || true
@@ -57,10 +58,15 @@ write_compose_env_file \
   "${POSTGRES_DB:-app}"
 
 docker pull "${IMAGE}"
-docker compose -f "${COMPOSE_FILE}" --env-file "${ENV_FILE}" up -d --remove-orphans --wait --wait-timeout 180
 
 if docker inspect dmc-268-api-bootstrap >/dev/null 2>&1; then
   docker rm -f dmc-268-api-bootstrap >/dev/null
+fi
+
+if ! docker compose -f "${COMPOSE_FILE}" --env-file "${ENV_FILE}" up -d --remove-orphans --wait --wait-timeout 180; then
+  echo "compose up failed; rolling back" >&2
+  "${ROLLBACK_SCRIPT}"
+  exit 1
 fi
 
 {

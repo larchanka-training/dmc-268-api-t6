@@ -21,24 +21,18 @@ logout_registry() {
 trap logout_registry EXIT
 
 restore_bootstrap() {
-  docker compose -f "${COMPOSE_FILE}" down --remove-orphans 2>/dev/null || true
-
-  if docker inspect "${BOOTSTRAP_NAME}" >/dev/null 2>&1; then
-    docker rm -f "${BOOTSTRAP_NAME}" >/dev/null 2>&1 || true
+  if [[ -f "${COMPOSE_FILE}" && -f "${ENV_FILE}" ]]; then
+    docker compose -f "${COMPOSE_FILE}" --env-file "${ENV_FILE}" down --remove-orphans >/dev/null 2>&1 || true
   fi
 
+  docker rm -f "${BOOTSTRAP_NAME}" >/dev/null 2>&1 || true
   docker pull "${BOOTSTRAP_IMAGE}"
   docker run -d --name "${BOOTSTRAP_NAME}" \
     --restart unless-stopped \
     --label dmc-268.role=bootstrap \
     -p 80:80 "${BOOTSTRAP_IMAGE}"
 
-  {
-    echo "current_image=bootstrap"
-    echo "deployed_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-    echo "rolled_back=true"
-  } > "${STATE_FILE}"
-
+  rm -f "${STATE_FILE}" "${PREVIOUS_FILE}"
   echo "restored bootstrap container (${BOOTSTRAP_IMAGE})"
 }
 
@@ -53,6 +47,7 @@ if [[ -n "${REQUESTED_IMAGE}" ]]; then
 elif [[ -f "${PREVIOUS_FILE}" ]]; then
   IMAGE="$(awk -F= '/^current_image=/{print $2}' "${PREVIOUS_FILE}")"
 else
+  echo "no previous release; restoring bootstrap" >&2
   restore_bootstrap
   exit 0
 fi
