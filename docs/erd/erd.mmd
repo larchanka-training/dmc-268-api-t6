@@ -95,6 +95,7 @@ erDiagram
       uuid repository_id FK
       int version
       jsonb rules
+      char checksum
       boolean is_active
     }
     PROMPT_VERSIONS {
@@ -102,6 +103,7 @@ erDiagram
       varchar key
       int version
       text content
+      char checksum
       boolean is_active
     }
     WEBHOOK_EVENTS {
@@ -138,6 +140,8 @@ erDiagram
       uuid repository_id FK
       uuid prompt_version_id FK
       varchar agents_md_sha
+      text agents_md
+      jsonb key_patterns
       jsonb recommendations
       jsonb languages
     }
