@@ -223,7 +223,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Upload deploy files
-        uses: appleboy/scp-action@v0.1.7
+        uses: appleboy/scp-action@ff85246acaad7bdce478db94a363cd2bf7c90345 # v1.0.0
         with:
           host: ${{ vars.STAGING_HOST }}
           username: ${{ vars.STAGING_SSH_USER }}
@@ -235,7 +235,7 @@ jobs:
 
       - name: Deploy image
         id: deploy
-        uses: appleboy/ssh-action@v1.2.0
+        uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2 # v1.2.5
         env:
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GHCR_USER: ${{ github.actor }}
@@ -273,7 +273,7 @@ jobs:
         id: rollback
         if: always() && (steps.deploy.outcome == 'failure' || steps.health.outcome == 'failure')
         continue-on-error: true
-        uses: appleboy/ssh-action@v1.2.0
+        uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2 # v1.2.5
         env:
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GHCR_USER: ${{ github.actor }}
