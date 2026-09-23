@@ -63,7 +63,7 @@ CI **не** делает `terraform apply`. Эти значения в GitHub Ac
 4. Protection rules: required reviewers на выкат и rollback.
 5. Actions → General: **Allow GitHub Actions to create and approve pull requests** не нужен. Secret scanning и push protection — включить.
 
-Job `deploy-staging` и workflow Rollback ссылаются на `environment: staging`. Без значений environment пайплайн не выкатит стенд.
+Jobs `deploy-staging`, `promote-staging` (CI/CD) и workflow Rollback ссылаются на `environment: staging`. Без значений environment пайплайн не выкатит стенд. `promote-staging` нужен environment ради SSH-чтения `.deploy-state`; при required reviewers он тоже ждёт подтверждения.
 
 SSH на VM открыт миру намеренно: у GitHub-hosted runners нет стабильных egress IP. Защита — нестандартный порт (`STAGING_SSH_PORT`), вход только по ключу и fail2ban; подробности и break-glass — [INFRASTRUCTURE.md](INFRASTRUCTURE.md#41-ssh-доступ).
 
@@ -136,7 +136,7 @@ Workflow по умолчанию: `contents: read`. Расширение точ�
 | `secret-scan`, terraform, docker build/scan | `contents: read` | только checkout |
 | `push-image` | `contents: read`, `packages: write`, `actions: read` | push в GHCR; `actions: read` — скачать artifact образа, прошедшего Trivy |
 | `deploy-staging` | `contents: read`, `packages: read` | pull образа на VM (одноразовый `GITHUB_TOKEN`) |
-| `promote-staging` (CI/CD) | `contents: read`, `packages: write` | `:staging-previous` ← `:staging`, `:staging` ← проверенный digest после health check |
+| `promote-staging` (CI/CD) | `contents: read`, `packages: write` | `:staging-previous` ← `:staging`, `:staging` ← проверенный digest после health check; по SSH только читает `.deploy-state`, токен на VM не передаётся |
 | Rollback staging: `rollback` | `contents: read`, `packages: read` | pull образа на VM |
 | Rollback staging: `promote-staging` | `contents: read`, `packages: write` | синхронизировать `:staging` с откатанным образом |
 
