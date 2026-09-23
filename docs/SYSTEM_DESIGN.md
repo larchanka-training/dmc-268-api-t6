@@ -267,7 +267,7 @@ sequenceDiagram
   P->>PG: head_sha == code_changes.head_sha? findings_hash не опубликован?
   P->>GH: POST /pulls/{n}/reviews (одно ревью) + check-run completed
   P->>PG: comments (github ids), run.state → succeeded
-  P->>MQ: ack review.publish
+  P->>MQ: ack, events.run.finished
 ```
 
 ### 6.3 Схлопывание (Р-2): пуш во время прогона
@@ -307,11 +307,11 @@ stateDiagram-v2
   running --> publishing: findings готовы
   running --> failed: исключение, attempt ≥ 3
   running --> queued: исключение, attempt < 3 (retry с задержкой)
-  publishing --> succeeded: ревью опубликовано
+  publishing --> completed: ревью опубликовано
   publishing --> cancelled: head_sha устарел
   publishing --> failed: GitHub 4xx кроме 422-координат
   queued --> skipped: правило отбора не прошло
-  succeeded --> [*]
+  completed --> [*]
   failed --> [*]
   cancelled --> [*]
   skipped --> [*]

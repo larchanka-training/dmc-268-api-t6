@@ -27,7 +27,7 @@ class RunState(StrEnum):
     QUEUED = "queued"
     RUNNING = "running"
     PUBLISHING = "publishing"
-    SUCCEEDED = "succeeded"
+    COMPLETED = "completed"
     FAILED = "failed"
     CANCELLED = "cancelled"
     SKIPPED = "skipped"
