@@ -109,6 +109,9 @@ class Run(Base):
         Index(
             "ix_runs_queued_available_at", "available_at", postgresql_where=text("state = 'queued'")
         ),
+        Index("ix_runs_created_id", "created_at", "id"),
+        Index("ix_runs_state_created_id", "state", "created_at", "id"),
+        Index("ix_runs_code_change_created_id", "code_change_id", "created_at", "id"),
     )
 
     id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
