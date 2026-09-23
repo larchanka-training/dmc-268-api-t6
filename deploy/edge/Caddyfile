@@ -1,0 +1,43 @@
+# Edge routes on the shared course VPS, one hostname per service and environment under
+# APP_DOMAIN. Certificates come from Let's Encrypt; HTTP redirects to HTTPS automatically.
+# Upstreams are aliases on the docker network dmc268-edge. A route whose service is not
+# running answers 502; Caddy itself still starts and serves the other routes.
+
+(hsts) {
+	header Strict-Transport-Security "max-age=31536000"
+}
+
+staging-api.{$APP_DOMAIN} {
+	import hsts
+	reverse_proxy api-staging:8000
+}
+
+api.{$APP_DOMAIN} {
+	import hsts
+	reverse_proxy api-prod:8000
+}
+
+staging-webhook.{$APP_DOMAIN} {
+	import hsts
+	reverse_proxy webhook-staging:8000
+}
+
+webhook.{$APP_DOMAIN} {
+	import hsts
+	reverse_proxy webhook-prod:8000
+}
+
+staging-ui.{$APP_DOMAIN} {
+	import hsts
+	reverse_proxy ui-staging:8080
+}
+
+ui.{$APP_DOMAIN} {
+	import hsts
+	reverse_proxy ui-prod:8080
+}
+
+{$APP_DOMAIN} {
+	import hsts
+	redir https://ui.{$APP_DOMAIN}{uri} permanent
+}
