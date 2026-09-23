@@ -10,6 +10,7 @@ from app.common.infrastructure.db.enums import (
     Engine,
     FindingCategory,
     FindingSeverity,
+    FindingSide,
     LedgerKind,
     PaymentStatus,
     ReviewEvent,
@@ -31,6 +32,7 @@ def pg_enum(
         | RunState
         | FindingSeverity
         | FindingCategory
+        | FindingSide
         | PaymentStatus
         | LedgerKind
     ],

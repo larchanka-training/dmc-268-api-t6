@@ -38,6 +38,7 @@ from app.common.infrastructure.db.enums import (
     Engine,
     FindingCategory,
     FindingSeverity,
+    FindingSide,
     RunState,
 )
 
@@ -173,7 +174,9 @@ class Finding(Base):
     file_path: Mapped[str] = mapped_column(String(1024), nullable=False)
     line_start: Mapped[int] = mapped_column(INTEGER, nullable=False)
     line_end: Mapped[int | None] = mapped_column(INTEGER)
-    side: Mapped[str] = mapped_column(String(10), nullable=False, server_default=text("'RIGHT'"))
+    side: Mapped[FindingSide] = mapped_column(
+        pg_enum(FindingSide, "finding_side"), nullable=False, server_default=text("'RIGHT'")
+    )
     severity: Mapped[FindingSeverity] = mapped_column(
         pg_enum(FindingSeverity, "finding_severity"), nullable=False
     )

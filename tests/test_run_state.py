@@ -1,4 +1,9 @@
-from app.common.infrastructure.db.enums import FindingCategory, FindingSeverity, RunState
+from app.common.infrastructure.db.enums import (
+    FindingCategory,
+    FindingSeverity,
+    FindingSide,
+    RunState,
+)
 
 
 def test_run_state_uses_completed_for_a_successful_run() -> None:
@@ -20,3 +25,4 @@ def test_finding_enums_match_the_frontend_contract() -> None:
         "performance",
         "readability",
     ]
+    assert [side.value for side in FindingSide] == ["LEFT", "RIGHT"]

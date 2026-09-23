@@ -48,6 +48,11 @@ class FindingCategory(StrEnum):
     READABILITY = "readability"
 
 
+class FindingSide(StrEnum):
+    LEFT = "LEFT"
+    RIGHT = "RIGHT"
+
+
 class PaymentStatus(StrEnum):
     PENDING = "pending"
     PAID = "paid"
