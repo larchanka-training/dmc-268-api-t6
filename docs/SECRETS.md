@@ -30,8 +30,8 @@
 | Variable | Обязателен | Пример |
 |---|---|---|
 | `STAGING_HOST` | да | IPv4 или FQDN из Terraform output `ssh_host` |
-| `STAGING_SSH_PORT` | да | `22022` — Terraform output `ssh_port`; без него deploy и rollback падают на первом шаге |
-| `STAGING_SSH_FINGERPRINT` | да | SHA256 host key fingerprint для `appleboy/scp-action` и `appleboy/ssh-action` |
+| `STAGING_SSH_PORT` | да | `22022` — Terraform output `ssh_port`; без него jobs с SSH падают первым шагом |
+| `STAGING_SSH_FINGERPRINT` | да | SHA256 host key fingerprint для `appleboy/scp-action` и `appleboy/ssh-action`, формат `SHA256:<43 символа base64>`. С пустым значением appleboy принимает любой host key, поэтому jobs с SSH падают первым шагом |
 | `STAGING_SSH_USER` | да | `root` после cloud-init |
 | `STAGING_HEALTH_URL` | нет | иначе `http://$STAGING_HOST/healthcheck` |
 | `POSTGRES_USER` | нет | иначе `app` |

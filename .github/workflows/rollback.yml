@@ -34,12 +34,18 @@ jobs:
       staging: ${{ steps.meta.outputs.staging }}
       previous: ${{ steps.meta.outputs.previous }}
     steps:
-      - name: Check SSH port variable
+      - name: Check SSH variables
         env:
           STAGING_SSH_PORT: ${{ vars.STAGING_SSH_PORT }}
+          STAGING_SSH_FINGERPRINT: ${{ vars.STAGING_SSH_FINGERPRINT }}
         run: |
           if [[ ! "${STAGING_SSH_PORT}" =~ ^[0-9]+$ ]]; then
             echo "GitHub variable STAGING_SSH_PORT (environment staging) must be set to the sshd port (Terraform output ssh_port)" >&2
+            exit 1
+          fi
+          # With an empty fingerprint the appleboy actions accept any host key.
+          if [[ ! "${STAGING_SSH_FINGERPRINT}" =~ ^SHA256:[A-Za-z0-9+/]{43}$ ]]; then
+            echo "GitHub variable STAGING_SSH_FINGERPRINT (environment staging) must be the host key fingerprint SHA256:<43 base64 chars> (ssh-keyscan -p <port> <host> | ssh-keygen -lf - -E sha256)" >&2
             exit 1
           fi
 
