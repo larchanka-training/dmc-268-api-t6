@@ -161,6 +161,7 @@ jobs:
       - secret-scan
       - terraform-fmt-validate
       - terraform-lint-security
+      - docker-build
       - docker-scan
     outputs:
       image_ref: ${{ steps.push.outputs.image_ref }}
