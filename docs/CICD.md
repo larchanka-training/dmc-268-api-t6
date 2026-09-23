@@ -41,7 +41,7 @@ flowchart TD
 | `Terraform lint / security` | PR и `main` | `contents: read` | TFLint + Checkov |
 | `Docker image build` | PR и `main` | `contents: read` | образ `python:3.13-slim` |
 | `Docker image security scan` | после сборки | `contents: read` | Trivy `CRITICAL`/`HIGH` |
-| `Push Docker image` | только `main` | `contents: read`, `packages: write` | push `:sha`, resolve digest (тот же artifact, что прошёл Trivy) |
+| `Push Docker image` | только `main` | `contents: read`, `packages: write`, `actions: read` | push `:sha`, resolve digest (тот же artifact, что прошёл Trivy) |
 | `Deploy staging` | только `main` | `contents: read`, `packages: read` | Compose по digest, health check, авто-rollback при ошибке deploy или health |
 | `Promote staging tag` | после успешного health check | `contents: read`, `packages: write` | `:staging-previous` ← `:staging`; `:staging` ← проверенный digest |
 
@@ -99,20 +99,23 @@ PostgreSQL только во внутренней docker-сети. Том `postg
 
 ## 5. Rollback
 
-1. **Автоматический.** Deploy или health check не прошли → `rollback.sh` поднимает образ из `.deploy-state.previous`. На первом выкате без previous release восстанавливается bootstrap nginx. При падении `compose up` rollback вызывается и из `deploy.sh`. Данные PostgreSQL не сбрасываются. Тег `:staging` в GHCR не меняется до успешного health check.
+1. **Автоматический.** Deploy или health check не прошли → `rollback.sh` с `ROLLBACK_MODE=auto` поднимает образ из `.deploy-state.previous` и не записывает упавший образ в previous: повторный откат не вернёт сломанный релиз. На первом выкате без previous release восстанавливается bootstrap nginx. При падении `compose up` rollback вызывается и из `deploy.sh`. Данные PostgreSQL не сбрасываются. Тег `:staging` в GHCR не меняется до успешного health check.
 2. **Ручной.** Actions → **Rollback staging** → Run workflow.
    - `reason` — обязателен.
-   - Пустой `image` — предыдущий успешный выкат.
-   - `staging-previous` / `abc123` / полный `ghcr.io/...@sha256:...` — конкретная версия.
-3. После отката тот же внешний `/healthcheck`; workflow синхронизирует `:staging` с фактически запущенным образом (bootstrap пропускает promotion).
+   - Пустой `image` — предыдущий релиз из `.deploy-state.previous`; релиз, с которого откатились, становится новым previous (как `:staging` → `:staging-previous`).
+   - Конкретная версия — полный 40-символьный git SHA (→ `ghcr.io/<owner>/dmc-268-api-t6:<sha>`) или полный `ghcr.io/...@sha256:...`. Короткий SHA или `staging-previous` откатят VM, но promotion упадёт: в `:staging` продвигается только digest или тег полного SHA.
+3. После отката проверка снаружи: для образа API — `/healthcheck`, для bootstrap — `GET /` с HTTP 200. Workflow синхронизирует `:staging` с фактически запущенным образом; bootstrap пропускает promotion, неожиданная ссылка на образ валит job.
 4. Deploy и rollback делят группу `staging-deploy` без отмены друг друга.
 
 На VM:
 
 ```bash
+read -rs GHCR_TOKEN && export GHCR_TOKEN GHCR_USER=<github-user>   # PAT с read:packages, не попадает в history
 /opt/dmc-268-api/rollback.sh
-/opt/dmc-268-api/rollback.sh ghcr.io/<owner>/dmc-268-api-t6:staging-previous
+/opt/dmc-268-api/rollback.sh ghcr.io/<owner>/dmc-268-api-t6@sha256:<digest>
 ```
+
+Пакет в GHCR приватный: без `GHCR_TOKEN` `docker pull` на VM упадёт. Скрипт логинится только на время pull и делает `docker logout` при выходе.
 
 ---
 
