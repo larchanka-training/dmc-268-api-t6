@@ -28,7 +28,7 @@ jobs:
       name: staging
       url: http://${{ vars.STAGING_HOST }}
     outputs:
-      image_ref: ${{ steps.deployed.outputs.stdout }}
+      image_ref: ${{ steps.parsed.outputs.image_ref }}
       staging: ${{ steps.meta.outputs.staging }}
       previous: ${{ steps.meta.outputs.previous }}
     steps:
@@ -84,15 +84,6 @@ jobs:
               /opt/dmc-268-api/rollback.sh
             fi
 
-      - name: Health check
-        env:
-          HEALTH_URL: ${{ vars.STAGING_HEALTH_URL }}
-          STAGING_HOST: ${{ vars.STAGING_HOST }}
-        run: |
-          chmod +x deploy/scripts/healthcheck.sh
-          target="${HEALTH_URL:-http://${STAGING_HOST}/healthcheck}"
-          deploy/scripts/healthcheck.sh "${target}"
-
       - name: Read deployed image
         id: deployed
         uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2 # v1.2.5
@@ -102,8 +93,45 @@ jobs:
           key: ${{ secrets.STAGING_SSH_KEY }}
           fingerprint: ${{ vars.STAGING_SSH_FINGERPRINT }}
           debug: false
+          capture_stdout: true
           script: |
-            awk -F= '/^current_image=/{print $2; exit}' /opt/dmc-268-api/.deploy-state
+            state=/opt/dmc-268-api/.deploy-state
+            if [[ -f "${state}" ]]; then
+              awk -F= '/^current_image=/{print $2; exit}' "${state}"
+            else
+              echo bootstrap
+            fi
+
+      - name: Parse deployed image
+        id: parsed
+        env:
+          DEPLOYED_STDOUT: ${{ steps.deployed.outputs.stdout }}
+        run: |
+          # drone-ssh appends its own success banner; the first line is the script output.
+          image_ref="$(printf '%s\n' "${DEPLOYED_STDOUT}" | head -n 1 | tr -d '\r')"
+          echo "image_ref=${image_ref}" >> "${GITHUB_OUTPUT}"
+          echo "staging runs: ${image_ref:-<empty>}"
+
+      - name: Health check
+        env:
+          HEALTH_URL: ${{ vars.STAGING_HEALTH_URL }}
+          STAGING_HOST: ${{ vars.STAGING_HOST }}
+          DEPLOYED_IMAGE: ${{ steps.parsed.outputs.image_ref }}
+        run: |
+          if [[ "${DEPLOYED_IMAGE}" == "bootstrap" ]]; then
+            # The bootstrap nginx has no /healthcheck; it must answer 200 on /.
+            url="http://${STAGING_HOST}/"
+            code="$(curl -fsS -o /dev/null -w '%{http_code}' --retry 12 --retry-delay 5 --retry-all-errors --max-time 5 "${url}")"
+            if [[ "${code}" != "200" ]]; then
+              echo "bootstrap returned HTTP ${code} on ${url}, expected 200" >&2
+              exit 1
+            fi
+            echo "bootstrap check passed: HTTP ${code} on ${url}"
+            exit 0
+          fi
+          chmod +x deploy/scripts/healthcheck.sh
+          target="${HEALTH_URL:-http://${STAGING_HOST}/healthcheck}"
+          deploy/scripts/healthcheck.sh "${target}"
 
   promote-staging:
     name: Promote staging tag
@@ -114,15 +142,25 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Promote rolled-back image to staging
+        env:
+          DEPLOYED_IMAGE: ${{ needs.rollback.outputs.image_ref }}
+          STAGING_TAG: ${{ needs.rollback.outputs.staging }}
+          PREVIOUS_TAG: ${{ needs.rollback.outputs.previous }}
         run: |
-          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
-          image_ref="${{ needs.rollback.outputs.image_ref }}"
-          staging="${{ needs.rollback.outputs.staging }}"
-          previous="${{ needs.rollback.outputs.previous }}"
-          if [[ -z "${image_ref}" || "${image_ref}" == "bootstrap" ]]; then
-            echo "skip registry promotion for bootstrap rollback"
+          image_ref="${DEPLOYED_IMAGE}"
+          staging="${STAGING_TAG}"
+          previous="${PREVIOUS_TAG}"
+          if [[ "${image_ref}" == "bootstrap" ]]; then
+            echo "staging runs the bootstrap container; skip registry promotion"
             exit 0
           fi
+          digest_ref='^[a-z0-9./-]+(:[A-Za-z0-9._-]+)?@sha256:[0-9a-f]{64}$'
+          sha_tag_ref='^[a-z0-9./-]+:[0-9a-f]{40}$'
+          if [[ ! "${image_ref}" =~ ${digest_ref} && ! "${image_ref}" =~ ${sha_tag_ref} ]]; then
+            echo "refusing to promote '${image_ref}': expected a digest ref, a :<full git sha> tag or bootstrap" >&2
+            exit 1
+          fi
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
           if docker pull "${staging}"; then
             docker tag "${staging}" "${previous}"
             docker push "${previous}"
