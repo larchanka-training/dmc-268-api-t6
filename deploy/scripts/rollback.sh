@@ -12,8 +12,10 @@ STATE_FILE="${APP_DIR}/.deploy-state"
 PREVIOUS_FILE="${STATE_FILE}.previous"
 ENV_FILE="${APP_DIR}/.env"
 REQUESTED_IMAGE="${1:-}"
-BOOTSTRAP_NAME="${BOOTSTRAP_NAME:-dmc-268-api-bootstrap}"
+COMPOSE_PROJECT="${COMPOSE_PROJECT:-$(basename "${APP_DIR}")}"
+BOOTSTRAP_NAME="${BOOTSTRAP_NAME:-${COMPOSE_PROJECT}-bootstrap}"
 BOOTSTRAP_IMAGE="${BOOTSTRAP_IMAGE:-nginx:1.27-alpine}"
+EDGE_NETWORK="${EDGE_NETWORK:-dmc268-edge}"
 # auto: a failed deploy is being undone; the failed image must not become the rollback target.
 # manual: an operator rolls back a release; it becomes the previous release (mirrors :staging-previous).
 ROLLBACK_MODE="${ROLLBACK_MODE:-manual}"
@@ -30,15 +32,25 @@ trap logout_registry EXIT
 
 restore_bootstrap() {
   if [[ -f "${COMPOSE_FILE}" && -f "${ENV_FILE}" ]]; then
-    docker compose -f "${COMPOSE_FILE}" --env-file "${ENV_FILE}" down --remove-orphans >/dev/null 2>&1 || true
+    "${COMPOSE[@]}" down --remove-orphans >/dev/null 2>&1 || true
   fi
 
   docker rm -f "${BOOTSTRAP_NAME}" >/dev/null 2>&1 || true
   docker pull "${BOOTSTRAP_IMAGE}"
-  docker run -d --name "${BOOTSTRAP_NAME}" \
-    --restart unless-stopped \
-    --label dmc-268.role=bootstrap \
-    -p "${API_HTTP_PORT}:80" "${BOOTSTRAP_IMAGE}"
+  if [[ "${DEPLOY_MODE}" == "edge" ]]; then
+    # Behind the proxy under the API alias; the proxy dials port 8000, nginx listens on 80 by default.
+    docker run -d --name "${BOOTSTRAP_NAME}" \
+      --restart unless-stopped \
+      --label dmc-268.role=bootstrap \
+      --network "${EDGE_NETWORK}" --network-alias "${EDGE_ALIAS}" \
+      "${BOOTSTRAP_IMAGE}" \
+      sh -c "sed -i 's/listen  *80;/listen 8000;/' /etc/nginx/conf.d/default.conf && exec nginx -g 'daemon off;'"
+  else
+    docker run -d --name "${BOOTSTRAP_NAME}" \
+      --restart unless-stopped \
+      --label dmc-268.role=bootstrap \
+      -p 80:80 "${BOOTSTRAP_IMAGE}"
+  fi
 
   rm -f "${STATE_FILE}" "${PREVIOUS_FILE}"
   echo "restored bootstrap container (${BOOTSTRAP_IMAGE})"
@@ -48,15 +60,22 @@ if [[ -f "${ENV_FILE}" ]]; then
   POSTGRES_USER="${POSTGRES_USER:-$(read_compose_env_var POSTGRES_USER "${ENV_FILE}")}"
   POSTGRES_PASSWORD="${POSTGRES_PASSWORD:-$(read_compose_env_var POSTGRES_PASSWORD "${ENV_FILE}")}"
   POSTGRES_DB="${POSTGRES_DB:-$(read_compose_env_var POSTGRES_DB "${ENV_FILE}")}"
-  API_HTTP_PORT="${API_HTTP_PORT:-$(read_compose_env_var API_HTTP_PORT "${ENV_FILE}")}"
+  DEPLOY_MODE="${DEPLOY_MODE:-$(read_compose_env_var DEPLOY_MODE "${ENV_FILE}")}"
+  EDGE_ALIAS="${EDGE_ALIAS:-$(read_compose_env_var EDGE_ALIAS "${ENV_FILE}")}"
 fi
 
-# Host port for the API (and the bootstrap container). The shared course VPS keeps :80 for the UI.
-API_HTTP_PORT="${API_HTTP_PORT:-80}"
-if [[ ! "${API_HTTP_PORT}" =~ ^[1-9][0-9]{0,4}$ ]] || (( API_HTTP_PORT > 65535 )); then
-  echo "API_HTTP_PORT must be a TCP port, got: ${API_HTTP_PORT}" >&2
+# ports: publish the API on host port 80 (dedicated Terraform host).
+# edge: no host port; join the edge proxy network as EDGE_ALIAS (shared course VPS).
+DEPLOY_MODE="${DEPLOY_MODE:-ports}"
+if [[ "${DEPLOY_MODE}" != "ports" && "${DEPLOY_MODE}" != "edge" ]]; then
+  echo "DEPLOY_MODE must be ports or edge, got: ${DEPLOY_MODE}" >&2
   exit 1
 fi
+if [[ "${DEPLOY_MODE}" == "edge" && ! "${EDGE_ALIAS:-}" =~ ^[a-z0-9]+(-[a-z0-9]+)+$ ]]; then
+  echo "EDGE_ALIAS (<service>-<env>) is required in edge mode, got: ${EDGE_ALIAS:-}" >&2
+  exit 1
+fi
+COMPOSE=(docker compose -p "${COMPOSE_PROJECT}" -f "${COMPOSE_FILE}" -f "${APP_DIR}/compose.${DEPLOY_MODE}.yml" --env-file "${ENV_FILE}")
 
 if [[ -n "${REQUESTED_IMAGE}" ]]; then
   IMAGE="${REQUESTED_IMAGE}"
@@ -91,10 +110,11 @@ write_compose_env_file \
   "${POSTGRES_USER:-app}" \
   "${POSTGRES_PASSWORD}" \
   "${POSTGRES_DB:-app}" \
-  "${API_HTTP_PORT}"
+  "${DEPLOY_MODE}" \
+  "${EDGE_ALIAS:-}"
 
 docker pull "${IMAGE}"
-docker compose -f "${COMPOSE_FILE}" --env-file "${ENV_FILE}" up -d --remove-orphans --wait --wait-timeout 180
+"${COMPOSE[@]}" up -d --remove-orphans --wait --wait-timeout 180
 
 # Shared root account: drop the GHCR credential after the last pull (compose up, pull_policy: always).
 logout_registry

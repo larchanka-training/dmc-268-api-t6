@@ -12,8 +12,11 @@ COMPOSE_FILE="${APP_DIR}/compose.yml"
 STATE_FILE="${APP_DIR}/.deploy-state"
 ENV_FILE="${APP_DIR}/.env"
 ROLLBACK_SCRIPT="${APP_DIR}/rollback.sh"
-# Compose project "dmc-268-api" + volume "postgres-data" from compose.yml.
-POSTGRES_VOLUME="${POSTGRES_VOLUME:-dmc-268-api_postgres-data}"
+# One compose project per app dir: /opt/dmc-268-api (Terraform host), /opt/dmc-268-api-staging (course VPS).
+COMPOSE_PROJECT="${COMPOSE_PROJECT:-$(basename "${APP_DIR}")}"
+BOOTSTRAP_NAME="${BOOTSTRAP_NAME:-${COMPOSE_PROJECT}-bootstrap}"
+# Named volume "postgres-data" of the compose project.
+POSTGRES_VOLUME="${POSTGRES_VOLUME:-${COMPOSE_PROJECT}_postgres-data}"
 
 logout_registry() {
   docker logout ghcr.io >/dev/null 2>&1 || true
@@ -42,15 +45,22 @@ if [[ -f "${ENV_FILE}" ]]; then
   POSTGRES_USER="${POSTGRES_USER:-$(read_compose_env_var POSTGRES_USER "${ENV_FILE}")}"
   POSTGRES_PASSWORD="${POSTGRES_PASSWORD:-$(read_compose_env_var POSTGRES_PASSWORD "${ENV_FILE}")}"
   POSTGRES_DB="${POSTGRES_DB:-$(read_compose_env_var POSTGRES_DB "${ENV_FILE}")}"
-  API_HTTP_PORT="${API_HTTP_PORT:-$(read_compose_env_var API_HTTP_PORT "${ENV_FILE}")}"
+  DEPLOY_MODE="${DEPLOY_MODE:-$(read_compose_env_var DEPLOY_MODE "${ENV_FILE}")}"
+  EDGE_ALIAS="${EDGE_ALIAS:-$(read_compose_env_var EDGE_ALIAS "${ENV_FILE}")}"
 fi
 
-# Host port for the API (and the bootstrap container). The shared course VPS keeps :80 for the UI.
-API_HTTP_PORT="${API_HTTP_PORT:-80}"
-if [[ ! "${API_HTTP_PORT}" =~ ^[1-9][0-9]{0,4}$ ]] || (( API_HTTP_PORT > 65535 )); then
-  echo "API_HTTP_PORT must be a TCP port, got: ${API_HTTP_PORT}" >&2
+# ports: publish the API on host port 80 (dedicated Terraform host).
+# edge: no host port; join the edge proxy network as EDGE_ALIAS (shared course VPS).
+DEPLOY_MODE="${DEPLOY_MODE:-ports}"
+if [[ "${DEPLOY_MODE}" != "ports" && "${DEPLOY_MODE}" != "edge" ]]; then
+  echo "DEPLOY_MODE must be ports or edge, got: ${DEPLOY_MODE}" >&2
   exit 1
 fi
+if [[ "${DEPLOY_MODE}" == "edge" && ! "${EDGE_ALIAS:-}" =~ ^[a-z0-9]+(-[a-z0-9]+)+$ ]]; then
+  echo "EDGE_ALIAS (<service>-<env>) is required in edge mode, got: ${EDGE_ALIAS:-}" >&2
+  exit 1
+fi
+COMPOSE=(docker compose -p "${COMPOSE_PROJECT}" -f "${COMPOSE_FILE}" -f "${APP_DIR}/compose.${DEPLOY_MODE}.yml" --env-file "${ENV_FILE}")
 
 IMAGE="${REQUESTED_IMAGE}"
 
@@ -84,15 +94,16 @@ write_compose_env_file \
   "${POSTGRES_USER:-app}" \
   "${POSTGRES_PASSWORD}" \
   "${POSTGRES_DB:-app}" \
-  "${API_HTTP_PORT}"
+  "${DEPLOY_MODE}" \
+  "${EDGE_ALIAS:-}"
 
 docker pull "${IMAGE}"
 
-if docker inspect dmc-268-api-bootstrap >/dev/null 2>&1; then
-  docker rm -f dmc-268-api-bootstrap >/dev/null
+if docker inspect "${BOOTSTRAP_NAME}" >/dev/null 2>&1; then
+  docker rm -f "${BOOTSTRAP_NAME}" >/dev/null
 fi
 
-if ! docker compose -f "${COMPOSE_FILE}" --env-file "${ENV_FILE}" up -d --remove-orphans --wait --wait-timeout 180; then
+if ! "${COMPOSE[@]}" up -d --remove-orphans --wait --wait-timeout 180; then
   echo "compose up failed; rolling back" >&2
   ROLLBACK_MODE=auto "${ROLLBACK_SCRIPT}"
   exit 1

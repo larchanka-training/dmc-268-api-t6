@@ -1,0 +1,5 @@
+# Dedicated host (Terraform): publish the API on host port 80.
+services:
+  api:
+    ports:
+      - "80:8000"

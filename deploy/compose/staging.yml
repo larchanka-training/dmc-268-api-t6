@@ -1,10 +1,8 @@
-name: dmc-268-api
-
+# Base stack. Project name comes from deploy.sh (-p), published ports or the edge network
+# from an override: compose.ports.yml (dedicated host) or compose.edge.yml (course VPS).
 services:
   api:
     image: ${IMAGE:?IMAGE is required}
-    ports:
-      - "${API_HTTP_PORT:-80}:8000"
     environment:
       POSTGRES_HOST: postgres
       POSTGRES_PORT: "5432"
