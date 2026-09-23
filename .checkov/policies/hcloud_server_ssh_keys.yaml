@@ -1,0 +1,11 @@
+metadata:
+  id: "CKV2_HCLOUD_3"
+  name: "Ensure every Hetzner Cloud server is created with SSH keys (otherwise Hetzner emails a root password)"
+  category: "IAM"
+definition:
+  cond_type: attribute
+  resource_types:
+    - hcloud_server
+  # jsonpath_exists also fails an empty list and still resolves locals (value operators return UNKNOWN on them).
+  attribute: "ssh_keys[*]"
+  operator: jsonpath_exists
