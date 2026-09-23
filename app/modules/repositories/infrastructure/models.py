@@ -6,7 +6,9 @@ and column names are the stable persistence contract used by Alembic.
 
 from __future__ import annotations
 
+import json
 from datetime import datetime
+from hashlib import sha256
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -98,6 +100,8 @@ class RuleVersion(Base):
     __tablename__ = "rule_versions"
     __table_args__ = (
         UniqueConstraint("repository_id", "version"),
+        CheckConstraint("version > 0", name="ck_rule_versions_version_positive"),
+        CheckConstraint("checksum ~ '^[0-9a-f]{64}$'", name="ck_rule_versions_checksum_sha256"),
         Index(
             "uq_rule_versions_active_repository",
             "repository_id",
@@ -113,6 +117,31 @@ class RuleVersion(Base):
     checksum: Mapped[str] = mapped_column(CHAR(64), nullable=False)
     is_active: Mapped[bool] = mapped_column(BOOLEAN, nullable=False, server_default=text("true"))
     created_at: Mapped[datetime] = timestamp_column()
+
+    @classmethod
+    def from_rules(
+        cls,
+        *,
+        repository_id: UUID,
+        version: int,
+        rules: list[dict[str, Any]],
+        is_active: bool = True,
+    ) -> RuleVersion:
+        """Build a persistence row from schema-validated rules.
+
+        Schema validation and stack selection belong to the onboarding use case;
+        this factory preserves the rule array and derives its stable checksum.
+        """
+        if version <= 0:
+            raise ValueError("rule version must be positive")
+        canonical_rules = json.dumps(rules, sort_keys=True, separators=(",", ":"))
+        return cls(
+            repository_id=repository_id,
+            version=version,
+            rules=rules,
+            checksum=sha256(canonical_rules.encode("utf-8")).hexdigest(),
+            is_active=is_active,
+        )
 
 
 class RepoConventions(Base):
