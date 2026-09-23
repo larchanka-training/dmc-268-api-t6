@@ -79,6 +79,10 @@ write_compose_env_file \
 docker pull "${IMAGE}"
 docker compose -f "${COMPOSE_FILE}" --env-file "${ENV_FILE}" up -d --remove-orphans --wait --wait-timeout 180
 
+if [[ -f "${STATE_FILE}" ]]; then
+  cp "${STATE_FILE}" "${PREVIOUS_FILE}"
+fi
+
 {
   echo "current_image=${IMAGE}"
   echo "deployed_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"

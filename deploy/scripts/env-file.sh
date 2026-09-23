@@ -10,6 +10,7 @@ read_compose_env_var() {
     $0 !~ /^[[:space:]]*#/ && $1 == k {
       sub(/^[^=]*=/, "")
       gsub(/^[[:space:]]+|[[:space:]]+$/, "")
+      gsub(/\$\$/, "$")
       print
       exit
     }
