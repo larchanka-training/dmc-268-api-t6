@@ -27,9 +27,11 @@
 | Migrate        | `uv run alembic upgrade head`                      | main             |
 | New migration  | `uv run alembic revision --autogenerate -m "…"`    | main             |
 
-`uv.lock` is committed; `requires-python = "==3.13.*"`. Pre-commit config is
-currently inert (every hook has `files: ^backend/`, which never matches in this
-repo layout) — do not fix it, run the commands above directly.
+`uv.lock` is committed; `requires-python = "==3.13.*"`. Pre-commit checks the
+root layout: generic hooks cover repository files, Ruff lint covers `app/`,
+`tests/` and `alembic/`, Ruff format and mypy cover `app/` and `tests/`.
+Migrations are frozen, so they are not reformatted by a hook. Run the commands
+above directly before claiming done as the final gates.
 
 ## 3. Layout & boundaries
 
