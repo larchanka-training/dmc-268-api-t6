@@ -160,6 +160,7 @@ jobs:
           DEPLOYED_IMAGE: ${{ needs.rollback.outputs.image_ref }}
           STAGING_TAG: ${{ needs.rollback.outputs.staging }}
           PREVIOUS_TAG: ${{ needs.rollback.outputs.previous }}
+          REPOSITORY: ${{ github.repository }}
         run: |
           image_ref="${DEPLOYED_IMAGE}"
           staging="${STAGING_TAG}"
@@ -168,10 +169,14 @@ jobs:
             echo "staging runs the bootstrap container; skip registry promotion"
             exit 0
           fi
-          digest_ref='^[a-z0-9./-]+(:[A-Za-z0-9._-]+)?@sha256:[0-9a-f]{64}$'
-          sha_tag_ref='^[a-z0-9./-]+:[0-9a-f]{40}$'
-          if [[ ! "${image_ref}" =~ ${digest_ref} && ! "${image_ref}" =~ ${sha_tag_ref} ]]; then
-            echo "refusing to promote '${image_ref}': expected a digest ref, a :<full git sha> tag or bootstrap" >&2
+          # image_ref comes from .deploy-state on an internet-facing VM: promote only this repository's images.
+          repo="$(echo "${REPOSITORY}" | tr '[:upper:]' '[:lower:]')"
+          image="ghcr.io/${repo}"
+          suffix="${image_ref#"${image}"}"
+          digest_ref='^(:[A-Za-z0-9._-]+)?@sha256:[0-9a-f]{64}$'
+          sha_tag_ref='^:[0-9a-f]{40}$'
+          if [[ "${suffix}" == "${image_ref}" ]] || [[ ! "${suffix}" =~ ${digest_ref} && ! "${suffix}" =~ ${sha_tag_ref} ]]; then
+            echo "refusing to promote '${image_ref}': expected ${image}@sha256:<digest>, ${image}:<full git sha> or bootstrap" >&2
             exit 1
           fi
           echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
