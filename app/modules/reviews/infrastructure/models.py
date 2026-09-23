@@ -36,6 +36,8 @@ from app.common.infrastructure.db.columns import pg_enum, timestamp_column
 from app.common.infrastructure.db.enums import (
     CodeChangeState,
     Engine,
+    FindingCategory,
+    FindingSeverity,
     RunState,
 )
 
@@ -169,9 +171,13 @@ class Finding(Base):
     line_start: Mapped[int] = mapped_column(INTEGER, nullable=False)
     line_end: Mapped[int | None] = mapped_column(INTEGER)
     side: Mapped[str] = mapped_column(String(10), nullable=False, server_default=text("'RIGHT'"))
-    severity: Mapped[str] = mapped_column(String(30), nullable=False)
+    severity: Mapped[FindingSeverity] = mapped_column(
+        pg_enum(FindingSeverity, "finding_severity"), nullable=False
+    )
     confidence: Mapped[Decimal] = mapped_column(Numeric(3, 2), nullable=False)
-    category: Mapped[str] = mapped_column(String(30), nullable=False)
+    category: Mapped[FindingCategory] = mapped_column(
+        pg_enum(FindingCategory, "finding_category"), nullable=False
+    )
     suggestion: Mapped[str | None] = mapped_column(TEXT)
     title: Mapped[str] = mapped_column(String(500), nullable=False)
     body: Mapped[str] = mapped_column(TEXT, nullable=False)

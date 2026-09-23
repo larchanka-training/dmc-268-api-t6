@@ -8,6 +8,8 @@ from sqlalchemy.orm import Mapped, mapped_column
 from app.common.infrastructure.db.enums import (
     CodeChangeState,
     Engine,
+    FindingCategory,
+    FindingSeverity,
     LedgerKind,
     PaymentStatus,
     ReviewEvent,
@@ -22,7 +24,15 @@ def timestamp_column() -> Mapped[datetime]:
 
 def pg_enum(
     enum_class: type[
-        Engine | WaitForCi | ReviewEvent | CodeChangeState | RunState | PaymentStatus | LedgerKind
+        Engine
+        | WaitForCi
+        | ReviewEvent
+        | CodeChangeState
+        | RunState
+        | FindingSeverity
+        | FindingCategory
+        | PaymentStatus
+        | LedgerKind
     ],
     name: str,
 ) -> Enum:
