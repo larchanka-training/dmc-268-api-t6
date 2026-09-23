@@ -43,7 +43,7 @@ flowchart TD
 | `Docker image security scan` | после сборки | `contents: read` | Trivy `CRITICAL`/`HIGH` |
 | `Push Docker image` | только `main` | `contents: read`, `packages: write`, `actions: read` | push `:sha`, resolve digest (тот же artifact, что прошёл Trivy) |
 | `Deploy staging` | только `main` | `contents: read`, `packages: read` | Compose по digest, health check, авто-rollback при ошибке deploy или health |
-| `Promote staging tag` | после успешного health check | `contents: read`, `packages: write` | `:staging-previous` ← `:staging`; `:staging` ← проверенный digest |
+| `Promote staging tag` | после успешного health check | `contents: read`, `packages: write` | под lock `staging-deploy` читает `.deploy-state` на VM; если там всё ещё этот digest — `:staging-previous` ← `:staging`, `:staging` ← проверенный digest, иначе warning и пропуск |
 
 Корневые permissions workflow: `contents: read`. Остальное — только у job, которому это нужно.
 
@@ -105,7 +105,7 @@ PostgreSQL только во внутренней docker-сети. Том `postg
    - Пустой `image` — предыдущий релиз из `.deploy-state.previous`; релиз, с которого откатились, становится новым previous (как `:staging` → `:staging-previous`).
    - Конкретная версия — полный 40-символьный git SHA (→ `ghcr.io/<owner>/dmc-268-api-t6:<sha>`) или полный `ghcr.io/...@sha256:...`. Короткий SHA или `staging-previous` откатят VM, но promotion упадёт: в `:staging` продвигается только digest или тег полного SHA.
 3. После отката проверка снаружи: для образа API — `/healthcheck`, для bootstrap — `GET /` с HTTP 200. Workflow синхронизирует `:staging` с фактически запущенным образом; bootstrap пропускает promotion, неожиданная ссылка на образ валит job.
-4. Deploy и rollback делят группу `staging-deploy` без отмены друг друга.
+4. Deploy, promotion и rollback делят группу `staging-deploy` без отмены друг друга. Если ручной rollback успел пройти между deploy и promotion, promotion видит на VM другой образ и не перезаписывает `:staging` (warning в job). Ожидающий job в группе GitHub отменяет, когда в неё встаёт следующий, — отменённая promotion безопасна: `:staging` просто не меняется.
 
 На VM:
 
