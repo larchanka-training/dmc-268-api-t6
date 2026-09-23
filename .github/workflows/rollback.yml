@@ -63,6 +63,7 @@ jobs:
               echo "Terraform target needs variable STAGING_SSH_USER and secret STAGING_SSH_KEY (environment staging)" >&2
               exit 1
             fi
+            http_port=80
           elif [[ -n "${VPS_HOST}" ]]; then
             mode=course
             host="${VPS_HOST}"
@@ -71,6 +72,8 @@ jobs:
               echo "Course VPS target needs organization secrets VPS_DMC268_U and VPS_DMC268_P" >&2
               exit 1
             fi
+            # Port 80 on the shared VPS belongs to the UI.
+            http_port=8000
           else
             echo "No staging target: set STAGING_HOST, STAGING_SSH_PORT, STAGING_SSH_USER and STAGING_SSH_KEY (Terraform host)" \
               "or organization variable VPS_DMC268_IP_T6 with secrets VPS_DMC268_U and VPS_DMC268_P (course VPS)" >&2
@@ -86,6 +89,9 @@ jobs:
             exit 1
           fi
           base_url="http://${host}"
+          if [[ "${http_port}" != "80" ]]; then
+            base_url="${base_url}:${http_port}"
+          fi
           health_url="${base_url}/healthcheck"
           if [[ "${mode}" == "terraform" && -n "${STAGING_HEALTH_URL}" ]]; then
             health_url="${STAGING_HEALTH_URL}"
@@ -94,6 +100,7 @@ jobs:
             echo "mode=${mode}"
             echo "host=${host}"
             echo "port=${port}"
+            echo "http_port=${http_port}"
             echo "base_url=${base_url}"
             echo "health_url=${health_url}"
           } >> "${GITHUB_OUTPUT}"
@@ -135,6 +142,7 @@ jobs:
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GHCR_USER: ${{ github.actor }}
           IMAGE: ${{ steps.image.outputs.ref }}
+          API_HTTP_PORT: ${{ steps.target.outputs.http_port }}
         with:
           host: ${{ steps.target.outputs.host }}
           port: ${{ steps.target.outputs.port }}
@@ -143,7 +151,7 @@ jobs:
           password: ${{ steps.target.outputs.mode == 'course' && secrets.VPS_DMC268_P || '' }}
           fingerprint: ${{ vars.STAGING_SSH_FINGERPRINT }}
           debug: false
-          envs: GHCR_TOKEN,GHCR_USER,IMAGE
+          envs: GHCR_TOKEN,GHCR_USER,IMAGE,API_HTTP_PORT
           script: |
             set -euo pipefail
             set +o xtrace

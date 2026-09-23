@@ -24,13 +24,14 @@ escape_compose_value() {
 }
 
 write_compose_env_file() {
-  local file="$1" image="$2" pg_user="$3" pg_password="$4" pg_db="$5"
+  local file="$1" image="$2" pg_user="$3" pg_password="$4" pg_db="$5" api_http_port="$6"
   umask 077
   {
     printf 'IMAGE=%s\n' "$(escape_compose_value "${image}")"
     printf 'POSTGRES_USER=%s\n' "$(escape_compose_value "${pg_user}")"
     printf 'POSTGRES_PASSWORD=%s\n' "$(escape_compose_value "${pg_password}")"
     printf 'POSTGRES_DB=%s\n' "$(escape_compose_value "${pg_db}")"
+    printf 'API_HTTP_PORT=%s\n' "$(escape_compose_value "${api_http_port}")"
   } > "${file}"
   chmod 600 "${file}"
 }
