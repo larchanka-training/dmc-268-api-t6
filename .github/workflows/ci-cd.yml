@@ -317,7 +317,7 @@ jobs:
           key: ${{ steps.target.outputs.mode == 'terraform' && secrets.STAGING_SSH_KEY || '' }}
           password: ${{ steps.target.outputs.mode == 'course' && secrets.VPS_DMC268_P || '' }}
           fingerprint: ${{ vars.STAGING_SSH_FINGERPRINT }}
-          source: "deploy/compose/staging.yml,deploy/scripts/deploy.sh,deploy/scripts/rollback.sh,deploy/scripts/healthcheck.sh,deploy/scripts/env-file.sh"
+          source: "deploy/compose/staging.yml,deploy/scripts/provision.sh,deploy/scripts/deploy.sh,deploy/scripts/rollback.sh,deploy/scripts/healthcheck.sh,deploy/scripts/env-file.sh"
           target: /opt/dmc-268-api
           strip_components: 2
 
@@ -344,7 +344,8 @@ jobs:
             set -euo pipefail
             set +o xtrace
             mv /opt/dmc-268-api/staging.yml /opt/dmc-268-api/compose.yml
-            chmod +x /opt/dmc-268-api/deploy.sh /opt/dmc-268-api/rollback.sh /opt/dmc-268-api/healthcheck.sh /opt/dmc-268-api/env-file.sh
+            chmod +x /opt/dmc-268-api/provision.sh /opt/dmc-268-api/deploy.sh /opt/dmc-268-api/rollback.sh /opt/dmc-268-api/healthcheck.sh /opt/dmc-268-api/env-file.sh
+            /opt/dmc-268-api/provision.sh
             /opt/dmc-268-api/deploy.sh "${IMAGE}"
 
       - name: Health check
