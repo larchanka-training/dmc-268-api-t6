@@ -80,6 +80,28 @@ jobs:
           output_format: cli
           soft_fail: false
 
+      - name: Checkov custom policies fail on the bad fixture
+        run: |
+          # Same image checkov-action@v12 runs. Started from /tmp so .checkov.yaml (quiet, skip-path) is not auto-loaded.
+          report="$(docker run --rm -v "$PWD:/repo:ro" -w /tmp ghcr.io/bridgecrewio/checkov:3.3.19 \
+            -d /repo/.checkov/fixtures/bad --framework terraform \
+            --external-checks-dir /repo/.checkov/policies \
+            --check CKV2_HCLOUD_1,CKV2_HCLOUD_2,CKV2_HCLOUD_3 -o json || true)"
+          failed="$(jq -r '.results.failed_checks[].check_id' <<< "${report}" | sort -u)" || {
+            echo "Checkov produced no usable JSON report for .checkov/fixtures/bad" >&2
+            exit 1
+          }
+          missing=0
+          for id in CKV2_HCLOUD_1 CKV2_HCLOUD_2 CKV2_HCLOUD_3; do
+            if grep -qx "${id}" <<< "${failed}"; then
+              echo "${id}: FAILED on the bad fixture as expected"
+            else
+              echo "${id} did not report FAILED on .checkov/fixtures/bad; the policy is broken" >&2
+              missing=1
+            fi
+          done
+          exit "${missing}"
+
   docker-build:
     name: Docker image build
     runs-on: ubuntu-latest
