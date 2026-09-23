@@ -33,6 +33,21 @@ class RunState(StrEnum):
     SKIPPED = "skipped"
 
 
+class FindingSeverity(StrEnum):
+    CRITICAL = "critical"
+    HIGH = "high"
+    MEDIUM = "medium"
+    LOW = "low"
+    INFO = "info"
+
+
+class FindingCategory(StrEnum):
+    SECURITY = "security"
+    CORRECTNESS = "correctness"
+    PERFORMANCE = "performance"
+    READABILITY = "readability"
+
+
 class PaymentStatus(StrEnum):
     PENDING = "pending"
     PAID = "paid"
