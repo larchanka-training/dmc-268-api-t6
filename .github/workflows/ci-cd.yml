@@ -81,6 +81,7 @@ jobs:
           soft_fail: false
 
       - name: Checkov custom policies fail on the bad fixture
+        shell: bash
         run: |
           # Same image checkov-action@v12 runs. Started from /tmp so .checkov.yaml (quiet, skip-path) is not auto-loaded.
           report="$(docker run --rm -v "$PWD:/repo:ro" -w /tmp ghcr.io/bridgecrewio/checkov:3.3.19 \
