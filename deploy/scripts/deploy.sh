@@ -98,6 +98,10 @@ if ! docker compose -f "${COMPOSE_FILE}" --env-file "${ENV_FILE}" up -d --remove
   exit 1
 fi
 
+# The host is a shared root account: drop the GHCR credential right after the last pull
+# (compose up pulls again because of pull_policy: always). The EXIT trap stays as a fallback.
+logout_registry
+
 {
   echo "current_image=${IMAGE}"
   echo "deployed_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"

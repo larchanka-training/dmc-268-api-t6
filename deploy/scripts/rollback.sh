@@ -96,6 +96,9 @@ write_compose_env_file \
 docker pull "${IMAGE}"
 docker compose -f "${COMPOSE_FILE}" --env-file "${ENV_FILE}" up -d --remove-orphans --wait --wait-timeout 180
 
+# Shared root account: drop the GHCR credential after the last pull (compose up, pull_policy: always).
+logout_registry
+
 if [[ "${ROLLBACK_MODE}" == "manual" && -f "${STATE_FILE}" ]]; then
   cp "${STATE_FILE}" "${PREVIOUS_FILE}"
 fi
