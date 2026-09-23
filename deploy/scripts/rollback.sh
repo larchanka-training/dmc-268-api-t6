@@ -14,6 +14,14 @@ ENV_FILE="${APP_DIR}/.env"
 REQUESTED_IMAGE="${1:-}"
 BOOTSTRAP_NAME="${BOOTSTRAP_NAME:-dmc-268-api-bootstrap}"
 BOOTSTRAP_IMAGE="${BOOTSTRAP_IMAGE:-nginx:1.27-alpine}"
+# auto: a failed deploy is being undone; the failed image must not become the rollback target.
+# manual: an operator rolls back a release; it becomes the previous release (mirrors :staging-previous).
+ROLLBACK_MODE="${ROLLBACK_MODE:-manual}"
+
+if [[ "${ROLLBACK_MODE}" != "auto" && "${ROLLBACK_MODE}" != "manual" ]]; then
+  echo "ROLLBACK_MODE must be auto or manual, got: ${ROLLBACK_MODE}" >&2
+  exit 1
+fi
 
 logout_registry() {
   docker logout ghcr.io >/dev/null 2>&1 || true
@@ -79,7 +87,7 @@ write_compose_env_file \
 docker pull "${IMAGE}"
 docker compose -f "${COMPOSE_FILE}" --env-file "${ENV_FILE}" up -d --remove-orphans --wait --wait-timeout 180
 
-if [[ -f "${STATE_FILE}" ]]; then
+if [[ "${ROLLBACK_MODE}" == "manual" && -f "${STATE_FILE}" ]]; then
   cp "${STATE_FILE}" "${PREVIOUS_FILE}"
 fi
 
