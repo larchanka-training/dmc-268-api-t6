@@ -53,7 +53,7 @@ flowchart TD
 
 Стенд должен уже существовать ([INFRASTRUCTURE.md](INFRASTRUCTURE.md)). Secrets и variables — [SECRETS.md](SECRETS.md).
 
-1. Settings → Environments → `staging`: заполнить secrets/variables, включить required reviewers.
+1. Settings → Environments → `staging`: заполнить secrets/variables, Deployment branches → только `main`. Required reviewers по умолчанию не включать — см. [SECRETS.md](SECRETS.md) §2.
 2. Push (или merge) в `main`.
 3. Дождаться зелёных проверок и job **Push Docker image** (immutable `:sha` + digest в логах).
 4. Job **Deploy staging** копирует `deploy/` на `/opt/dmc-268-api`, выкатывает образ по digest; bootstrap снимается только после `docker pull` и перед `compose up`.
@@ -105,7 +105,12 @@ PostgreSQL только во внутренней docker-сети. Том `postg
    - Пустой `image` — предыдущий релиз из `.deploy-state.previous`; релиз, с которого откатились, становится новым previous (как `:staging` → `:staging-previous`).
    - Конкретная версия — полный 40-символьный git SHA (→ `ghcr.io/<owner>/dmc-268-api-t6:<sha>`) или полный `ghcr.io/...@sha256:...`. Короткий SHA или `staging-previous` откатят VM, но promotion упадёт: в `:staging` продвигается только digest или тег полного SHA образа `ghcr.io/<owner>/dmc-268-api-t6`; образ из другого реестра или репозитория валит promotion.
 3. После отката проверка снаружи: для образа API — `/healthcheck`, для bootstrap — `GET /` с HTTP 200. Workflow синхронизирует `:staging` с фактически запущенным образом; bootstrap пропускает promotion, неожиданная ссылка на образ валит job.
-4. Deploy, promotion и rollback делят группу `staging-deploy` без отмены друг друга. Если ручной rollback успел пройти между deploy и promotion, promotion видит на VM другой образ и не перезаписывает `:staging` (warning в job). Ожидающий job в группе GitHub отменяет, когда в неё встаёт следующий, — отменённая promotion безопасна: `:staging` просто не меняется.
+4. Deploy, promotion и rollback делят группу `staging-deploy`; выполняющийся job не отменяется (`cancel-in-progress: false`). Если ручной rollback успел пройти между deploy и promotion, promotion видит на VM другой образ и не перезаписывает `:staging` (warning в job). Ожидающий job в группе GitHub отменяет, когда в неё встаёт следующий, — отменённая promotion безопасна: `:staging` просто не меняется.
+5. **Отмена в очереди.** GitHub держит в группе concurrency один выполняющийся и только самый новый ожидающий run/job. Ожидающий **Rollback staging** отменится, если следом в группу встанет deploy из нового push в `main`, и наоборот: ожидающий deploy отменяется rollback, вставшим в очередь позже. Runbook на инцидент:
+   1. Заморозить merge в `main` на время инцидента.
+   2. Запустить **Rollback staging**.
+   3. Если run показал `cancelled` — запустить заново (Re-run или новый Run workflow).
+   4. Снять заморозку после зелёного rollback и внешней проверки.
 
 На VM:
 
