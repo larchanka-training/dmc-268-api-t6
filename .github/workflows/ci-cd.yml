@@ -253,10 +253,12 @@ jobs:
           VPS_HOST: ${{ vars.VPS_DMC268_IP_T6 }}
           HAS_VPS_USER: ${{ secrets.VPS_DMC268_U != '' }}
           HAS_VPS_PASSWORD: ${{ secrets.VPS_DMC268_P != '' }}
+          APP_DOMAIN: ${{ vars.APP_DOMAIN }}
           STAGING_SSH_FINGERPRINT: ${{ vars.STAGING_SSH_FINGERPRINT }}
         run: |
-          # Terraform/Hetzner host (key auth) when STAGING_HOST is set, otherwise the shared course VPS
-          # (password auth, port 22). Only non-secret values go to the step outputs.
+          # Terraform/Hetzner host (key auth, API on host port 80) when STAGING_HOST is set, otherwise
+          # the shared course VPS (password auth, port 22, API behind the edge proxy as api-staging).
+          # Only non-secret values go to the step outputs.
           if [[ -n "${STAGING_HOST}" ]]; then
             mode=terraform
             host="${STAGING_HOST}"
@@ -269,7 +271,11 @@ jobs:
               echo "Terraform target needs variable STAGING_SSH_USER and secret STAGING_SSH_KEY (environment staging)" >&2
               exit 1
             fi
-            http_port=80
+            app_dir=/opt/dmc-268-api
+            deploy_mode=ports
+            edge_alias=""
+            base_url="http://${host}"
+            health_url="${STAGING_HEALTH_URL:-${base_url}/healthcheck}"
           elif [[ -n "${VPS_HOST}" ]]; then
             mode=course
             host="${VPS_HOST}"
@@ -278,8 +284,15 @@ jobs:
               echo "Course VPS target needs organization secrets VPS_DMC268_U and VPS_DMC268_P" >&2
               exit 1
             fi
-            # Port 80 on the shared VPS belongs to the UI.
-            http_port=8000
+            if [[ ! "${APP_DOMAIN}" =~ ^[a-z0-9-]+(\.[a-z0-9-]+)+$ ]]; then
+              echo "Course VPS target needs repository variable APP_DOMAIN (base domain of the edge proxy routes)" >&2
+              exit 1
+            fi
+            app_dir=/opt/dmc-268-api-staging
+            deploy_mode=edge
+            edge_alias=api-staging
+            base_url="https://staging-api.${APP_DOMAIN}"
+            health_url="${base_url}/healthcheck"
           else
             echo "No staging target: set STAGING_HOST, STAGING_SSH_PORT, STAGING_SSH_USER and STAGING_SSH_KEY (Terraform host)" \
               "or organization variable VPS_DMC268_IP_T6 with secrets VPS_DMC268_U and VPS_DMC268_P (course VPS)" >&2
@@ -294,23 +307,17 @@ jobs:
             echo "GitHub variable STAGING_SSH_FINGERPRINT must be the ${mode} host key fingerprint SHA256:<43 base64 chars> (ssh-keyscan -p ${port} ${host} | ssh-keygen -lf - -E sha256)" >&2
             exit 1
           fi
-          base_url="http://${host}"
-          if [[ "${http_port}" != "80" ]]; then
-            base_url="${base_url}:${http_port}"
-          fi
-          health_url="${base_url}/healthcheck"
-          if [[ "${mode}" == "terraform" && -n "${STAGING_HEALTH_URL}" ]]; then
-            health_url="${STAGING_HEALTH_URL}"
-          fi
           {
             echo "mode=${mode}"
             echo "host=${host}"
             echo "port=${port}"
-            echo "http_port=${http_port}"
+            echo "app_dir=${app_dir}"
+            echo "deploy_mode=${deploy_mode}"
+            echo "edge_alias=${edge_alias}"
             echo "base_url=${base_url}"
             echo "health_url=${health_url}"
           } >> "${GITHUB_OUTPUT}"
-          echo "staging target: ${mode} (${host}:${port})"
+          echo "staging target: ${mode} (${host}:${port}, ${base_url})"
 
       - name: Checkout
         uses: actions/checkout@v4
@@ -324,8 +331,8 @@ jobs:
           key: ${{ steps.target.outputs.mode == 'terraform' && secrets.STAGING_SSH_KEY || '' }}
           password: ${{ steps.target.outputs.mode == 'course' && secrets.VPS_DMC268_P || '' }}
           fingerprint: ${{ vars.STAGING_SSH_FINGERPRINT }}
-          source: "deploy/compose/staging.yml,deploy/scripts/provision.sh,deploy/scripts/deploy.sh,deploy/scripts/rollback.sh,deploy/scripts/healthcheck.sh,deploy/scripts/env-file.sh"
-          target: /opt/dmc-268-api
+          source: "deploy/compose/staging.yml,deploy/compose/staging.ports.yml,deploy/compose/staging.edge.yml,deploy/scripts/provision.sh,deploy/scripts/deploy.sh,deploy/scripts/rollback.sh,deploy/scripts/healthcheck.sh,deploy/scripts/env-file.sh"
+          target: ${{ steps.target.outputs.app_dir }}
           strip_components: 2
 
       - name: Deploy image
@@ -335,7 +342,9 @@ jobs:
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GHCR_USER: ${{ github.actor }}
           IMAGE: ${{ needs.push-image.outputs.image_ref }}
-          API_HTTP_PORT: ${{ steps.target.outputs.http_port }}
+          APP_DIR: ${{ steps.target.outputs.app_dir }}
+          DEPLOY_MODE: ${{ steps.target.outputs.deploy_mode }}
+          EDGE_ALIAS: ${{ steps.target.outputs.edge_alias }}
           POSTGRES_USER: ${{ vars.POSTGRES_USER }}
           POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
           POSTGRES_DB: ${{ vars.POSTGRES_DB }}
@@ -347,14 +356,17 @@ jobs:
           password: ${{ steps.target.outputs.mode == 'course' && secrets.VPS_DMC268_P || '' }}
           fingerprint: ${{ vars.STAGING_SSH_FINGERPRINT }}
           debug: false
-          envs: GHCR_TOKEN,GHCR_USER,IMAGE,API_HTTP_PORT,POSTGRES_USER,POSTGRES_PASSWORD,POSTGRES_DB
+          envs: GHCR_TOKEN,GHCR_USER,IMAGE,APP_DIR,DEPLOY_MODE,EDGE_ALIAS,POSTGRES_USER,POSTGRES_PASSWORD,POSTGRES_DB
           script: |
             set -euo pipefail
             set +o xtrace
-            mv /opt/dmc-268-api/staging.yml /opt/dmc-268-api/compose.yml
-            chmod +x /opt/dmc-268-api/provision.sh /opt/dmc-268-api/deploy.sh /opt/dmc-268-api/rollback.sh /opt/dmc-268-api/healthcheck.sh /opt/dmc-268-api/env-file.sh
-            /opt/dmc-268-api/provision.sh
-            /opt/dmc-268-api/deploy.sh "${IMAGE}"
+            cd "${APP_DIR}"
+            mv staging.yml compose.yml
+            mv staging.ports.yml compose.ports.yml
+            mv staging.edge.yml compose.edge.yml
+            chmod +x provision.sh deploy.sh rollback.sh healthcheck.sh env-file.sh
+            ./provision.sh
+            ./deploy.sh "${IMAGE}"
 
       - name: Health check
         id: health
@@ -374,7 +386,9 @@ jobs:
         env:
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GHCR_USER: ${{ github.actor }}
-          API_HTTP_PORT: ${{ steps.target.outputs.http_port }}
+          APP_DIR: ${{ steps.target.outputs.app_dir }}
+          DEPLOY_MODE: ${{ steps.target.outputs.deploy_mode }}
+          EDGE_ALIAS: ${{ steps.target.outputs.edge_alias }}
         with:
           host: ${{ steps.target.outputs.host }}
           port: ${{ steps.target.outputs.port }}
@@ -383,11 +397,11 @@ jobs:
           password: ${{ steps.target.outputs.mode == 'course' && secrets.VPS_DMC268_P || '' }}
           fingerprint: ${{ vars.STAGING_SSH_FINGERPRINT }}
           debug: false
-          envs: GHCR_TOKEN,GHCR_USER,API_HTTP_PORT
+          envs: GHCR_TOKEN,GHCR_USER,APP_DIR,DEPLOY_MODE,EDGE_ALIAS
           script: |
             set -euo pipefail
             set +o xtrace
-            ROLLBACK_MODE=auto /opt/dmc-268-api/rollback.sh
+            ROLLBACK_MODE=auto "${APP_DIR}/rollback.sh"
 
       - name: Set promote flag
         id: result
@@ -443,10 +457,12 @@ jobs:
           VPS_HOST: ${{ vars.VPS_DMC268_IP_T6 }}
           HAS_VPS_USER: ${{ secrets.VPS_DMC268_U != '' }}
           HAS_VPS_PASSWORD: ${{ secrets.VPS_DMC268_P != '' }}
+          APP_DOMAIN: ${{ vars.APP_DOMAIN }}
           STAGING_SSH_FINGERPRINT: ${{ vars.STAGING_SSH_FINGERPRINT }}
         run: |
-          # Terraform/Hetzner host (key auth) when STAGING_HOST is set, otherwise the shared course VPS
-          # (password auth, port 22). Only non-secret values go to the step outputs.
+          # Terraform/Hetzner host (key auth, API on host port 80) when STAGING_HOST is set, otherwise
+          # the shared course VPS (password auth, port 22, API behind the edge proxy as api-staging).
+          # Only non-secret values go to the step outputs.
           if [[ -n "${STAGING_HOST}" ]]; then
             mode=terraform
             host="${STAGING_HOST}"
@@ -459,7 +475,11 @@ jobs:
               echo "Terraform target needs variable STAGING_SSH_USER and secret STAGING_SSH_KEY (environment staging)" >&2
               exit 1
             fi
-            http_port=80
+            app_dir=/opt/dmc-268-api
+            deploy_mode=ports
+            edge_alias=""
+            base_url="http://${host}"
+            health_url="${STAGING_HEALTH_URL:-${base_url}/healthcheck}"
           elif [[ -n "${VPS_HOST}" ]]; then
             mode=course
             host="${VPS_HOST}"
@@ -468,8 +488,15 @@ jobs:
               echo "Course VPS target needs organization secrets VPS_DMC268_U and VPS_DMC268_P" >&2
               exit 1
             fi
-            # Port 80 on the shared VPS belongs to the UI.
-            http_port=8000
+            if [[ ! "${APP_DOMAIN}" =~ ^[a-z0-9-]+(\.[a-z0-9-]+)+$ ]]; then
+              echo "Course VPS target needs repository variable APP_DOMAIN (base domain of the edge proxy routes)" >&2
+              exit 1
+            fi
+            app_dir=/opt/dmc-268-api-staging
+            deploy_mode=edge
+            edge_alias=api-staging
+            base_url="https://staging-api.${APP_DOMAIN}"
+            health_url="${base_url}/healthcheck"
           else
             echo "No staging target: set STAGING_HOST, STAGING_SSH_PORT, STAGING_SSH_USER and STAGING_SSH_KEY (Terraform host)" \
               "or organization variable VPS_DMC268_IP_T6 with secrets VPS_DMC268_U and VPS_DMC268_P (course VPS)" >&2
@@ -484,27 +511,23 @@ jobs:
             echo "GitHub variable STAGING_SSH_FINGERPRINT must be the ${mode} host key fingerprint SHA256:<43 base64 chars> (ssh-keyscan -p ${port} ${host} | ssh-keygen -lf - -E sha256)" >&2
             exit 1
           fi
-          base_url="http://${host}"
-          if [[ "${http_port}" != "80" ]]; then
-            base_url="${base_url}:${http_port}"
-          fi
-          health_url="${base_url}/healthcheck"
-          if [[ "${mode}" == "terraform" && -n "${STAGING_HEALTH_URL}" ]]; then
-            health_url="${STAGING_HEALTH_URL}"
-          fi
           {
             echo "mode=${mode}"
             echo "host=${host}"
             echo "port=${port}"
-            echo "http_port=${http_port}"
+            echo "app_dir=${app_dir}"
+            echo "deploy_mode=${deploy_mode}"
+            echo "edge_alias=${edge_alias}"
             echo "base_url=${base_url}"
             echo "health_url=${health_url}"
           } >> "${GITHUB_OUTPUT}"
-          echo "staging target: ${mode} (${host}:${port})"
+          echo "staging target: ${mode} (${host}:${port}, ${base_url})"
 
       - name: Read deployed image
         id: deployed
         uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2 # v1.2.5
+        env:
+          APP_DIR: ${{ steps.target.outputs.app_dir }}
         with:
           host: ${{ steps.target.outputs.host }}
           port: ${{ steps.target.outputs.port }}
@@ -514,8 +537,9 @@ jobs:
           fingerprint: ${{ vars.STAGING_SSH_FINGERPRINT }}
           debug: false
           capture_stdout: true
+          envs: APP_DIR
           script: |
-            state=/opt/dmc-268-api/.deploy-state
+            state="${APP_DIR}/.deploy-state"
             if [[ -f "${state}" ]]; then
               awk -F= '/^current_image=/{print $2; exit}' "${state}"
             else

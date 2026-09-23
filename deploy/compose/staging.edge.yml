@@ -1,0 +1,14 @@
+# Shared course VPS: no host port. The API joins the edge proxy network as EDGE_ALIAS
+# (<service>-<env>, e.g. api-staging); Postgres stays on the project network only.
+services:
+  api:
+    networks:
+      default: {}
+      edge:
+        aliases:
+          - ${EDGE_ALIAS:?EDGE_ALIAS is required}
+
+networks:
+  edge:
+    name: dmc268-edge
+    external: true
