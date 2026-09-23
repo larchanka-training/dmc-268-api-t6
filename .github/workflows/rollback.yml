@@ -16,8 +16,10 @@ permissions:
   contents: read
   packages: read
 
+# Whole-run lock for main only: a dispatch from another branch gets its own throwaway group,
+# so it cannot replace a pending main deploy or promotion before its jobs are skipped.
 concurrency:
-  group: staging-deploy
+  group: ${{ github.ref == 'refs/heads/main' && 'staging-deploy' || format('rollback-ignored-{0}', github.run_id) }}
   cancel-in-progress: false
 
 jobs:
