@@ -7,12 +7,7 @@
 useDefault = true
 
 [allowlist]
-description = "Example config files and documented placeholder values only"
-paths = [
-  '''\.env\.example$''',
-  '''.*\.tfvars\.example$''',
-  '''.*\.backend\.hcl\.example$''',
-]
+description = "Documented placeholder values only (all paths are scanned)"
 regexes = [
   '''replace-with-''',
   '''your-objectstorage\.com''',
