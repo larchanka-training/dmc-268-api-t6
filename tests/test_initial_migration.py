@@ -73,6 +73,11 @@ def test_initial_migration_round_trip(
         assert "uq_runs_one_active_per_code_change" in {
             index["name"] for index in inspector.get_indexes("runs")
         }
+        assert {
+            "ix_runs_created_id",
+            "ix_runs_state_created_id",
+            "ix_runs_code_change_created_id",
+        } <= {index["name"] for index in inspector.get_indexes("runs")}
         assert "ix_usage_events_run_created" in {
             index["name"] for index in inspector.get_indexes("usage_events")
         }
