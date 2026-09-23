@@ -125,7 +125,7 @@ read -rs GHCR_TOKEN && export GHCR_TOKEN GHCR_USER=<github-user>   # PAT с read
 
 Кратко: в Environment `staging` секреты — только `STAGING_SSH_KEY` и `POSTGRES_PASSWORD`. Хост, SSH-порт (`STAGING_SSH_PORT`) и SSH-пользователь — variables. `HCLOUD_TOKEN` в Actions нет.
 
-SSH на VM: нестандартный порт (`ssh_port`, по умолчанию `22022`), только ключи, fail2ban. Порт открыт миру намеренно — у GitHub-hosted runners нет стабильных egress IP ([INFRASTRUCTURE.md](INFRASTRUCTURE.md#41-ssh-доступ)). Все шаги `appleboy/*` передают `port: ${{ vars.STAGING_SSH_PORT }}`; deploy и rollback падают первым шагом, если переменная не задана.
+SSH на VM: нестандартный порт (`ssh_port`, по умолчанию `22022`), только ключи, fail2ban. Порт открыт миру намеренно — у GitHub-hosted runners нет стабильных egress IP ([INFRASTRUCTURE.md](INFRASTRUCTURE.md#41-ssh-доступ)). Все шаги `appleboy/*` передают `port: ${{ vars.STAGING_SSH_PORT }}`; deploy, promotion и rollback падают первым шагом, если не задан `STAGING_SSH_PORT` или `STAGING_SSH_FINGERPRINT` не в формате `SHA256:…` (с пустым fingerprint appleboy принимает любой host key).
 
 ---
 
