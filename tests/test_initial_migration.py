@@ -70,6 +70,10 @@ def test_initial_migration_round_trip(
         assert {"category", "suggestion"} <= {
             column["name"] for column in inspector.get_columns("findings")
         }
+        assert "response" in {column["name"] for column in inspector.get_columns("run_actions")}
+        assert "ck_run_actions_response_location" in {
+            constraint["name"] for constraint in inspector.get_check_constraints("run_actions")
+        }
         assert "uq_runs_one_active_per_code_change" in {
             index["name"] for index in inspector.get_indexes("runs")
         }

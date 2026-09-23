@@ -207,13 +207,20 @@ class Comment(Base):
 
 class RunAction(Base):
     __tablename__ = "run_actions"
-    __table_args__ = (UniqueConstraint("run_id", "index"),)
+    __table_args__ = (
+        UniqueConstraint("run_id", "index"),
+        CheckConstraint(
+            "response IS NULL OR response_ref IS NULL",
+            name="ck_run_actions_response_location",
+        ),
+    )
 
     id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
     run_id: Mapped[UUID] = mapped_column(ForeignKey("runs.id"), nullable=False)
     index: Mapped[int] = mapped_column(INTEGER, nullable=False)
     tool: Mapped[str] = mapped_column(String(100), nullable=False)
     request: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    response: Mapped[Any | None] = mapped_column(JSONB(none_as_null=True))
     response_ref: Mapped[str | None] = mapped_column(TEXT)
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     duration_ms: Mapped[int] = mapped_column(INTEGER, nullable=False)

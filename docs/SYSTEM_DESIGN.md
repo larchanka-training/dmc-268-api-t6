@@ -603,11 +603,11 @@ class ContextPayload(BaseModel):          # сущность роли 6
 | **Добавить:** `WebhookEvent` | `delivery_id UNIQUE`, `event`, `action`, `payload_s3_ref`, `received_at` |
 | **Добавить:** `RuleVersion`, `PromptVersion` | неизменяемые (Р-6) |
 | **Добавить:** `UsageEvent` | `run_id`, `model`, `tokens_in/out`, `cache_read_tokens`, `cost_usd` — только вставка (Р-8) |
-| **Добавить:** `RunAction` | `run_id`, `index`, `tool`, `request jsonb`, `response_ref`, `started_at`, `duration_ms` — Zod `RunAction` фронта |
-| **Добавить:** снимок диффа (Р-15) | ключ `(code_change, head_sha)`; по файлу — `filename`, `patch` (дифф > 3 000 строк — только `filename`, в API `patch: null`); каскад от Workspace |
-| **После MVP:** `FeedbackSignal` | `finding_id`, `kind: resolved\|line_changed\|reaction`, `value`, `at` |
-
-Payload вебхуков, полные контексты и тела ответов инструментов — в S3; в PG только ссылки. Хранятся до удаления Workspace и удаляются вместе с ним (§10).
+ | **Добавить:** `RunAction` | `run_id`, `index`, `tool`, `request jsonb`, `response jsonb?` (≤ 64 КБ) или `response_ref` (> 64 КБ), `started_at`, `duration_ms` — Zod `RunAction` фронта |
+ | **Добавить:** снимок диффа (Р-15) | ключ `(code_change, head_sha)`; по файлу — `filename`, `patch` (дифф > 3 000 строк — только `filename`, в API `patch: null`); каскад от Workspace |
+ | **После MVP:** `FeedbackSignal` | `finding_id`, `kind: resolved\|line_changed\|reaction`, `value`, `at` |
+ 
+ Payload вебхуков и полные контексты — в S3; для ответов инструментов действует гибридное хранение: JSON до 64 КБ — в PostgreSQL, больший payload — в S3 по `response_ref`. Данные хранятся до удаления Workspace и удаляются вместе с ним (§10).
 
 ---
 
