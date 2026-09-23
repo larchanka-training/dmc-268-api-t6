@@ -38,7 +38,7 @@ restore_bootstrap() {
   docker run -d --name "${BOOTSTRAP_NAME}" \
     --restart unless-stopped \
     --label dmc-268.role=bootstrap \
-    -p 80:80 "${BOOTSTRAP_IMAGE}"
+    -p "${API_HTTP_PORT}:80" "${BOOTSTRAP_IMAGE}"
 
   rm -f "${STATE_FILE}" "${PREVIOUS_FILE}"
   echo "restored bootstrap container (${BOOTSTRAP_IMAGE})"
@@ -48,6 +48,14 @@ if [[ -f "${ENV_FILE}" ]]; then
   POSTGRES_USER="${POSTGRES_USER:-$(read_compose_env_var POSTGRES_USER "${ENV_FILE}")}"
   POSTGRES_PASSWORD="${POSTGRES_PASSWORD:-$(read_compose_env_var POSTGRES_PASSWORD "${ENV_FILE}")}"
   POSTGRES_DB="${POSTGRES_DB:-$(read_compose_env_var POSTGRES_DB "${ENV_FILE}")}"
+  API_HTTP_PORT="${API_HTTP_PORT:-$(read_compose_env_var API_HTTP_PORT "${ENV_FILE}")}"
+fi
+
+# Host port for the API (and the bootstrap container). The shared course VPS keeps :80 for the UI.
+API_HTTP_PORT="${API_HTTP_PORT:-80}"
+if [[ ! "${API_HTTP_PORT}" =~ ^[1-9][0-9]{0,4}$ ]] || (( API_HTTP_PORT > 65535 )); then
+  echo "API_HTTP_PORT must be a TCP port, got: ${API_HTTP_PORT}" >&2
+  exit 1
 fi
 
 if [[ -n "${REQUESTED_IMAGE}" ]]; then
@@ -82,7 +90,8 @@ write_compose_env_file \
   "${IMAGE}" \
   "${POSTGRES_USER:-app}" \
   "${POSTGRES_PASSWORD}" \
-  "${POSTGRES_DB:-app}"
+  "${POSTGRES_DB:-app}" \
+  "${API_HTTP_PORT}"
 
 docker pull "${IMAGE}"
 docker compose -f "${COMPOSE_FILE}" --env-file "${ENV_FILE}" up -d --remove-orphans --wait --wait-timeout 180
