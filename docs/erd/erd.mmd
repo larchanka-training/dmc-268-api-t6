@@ -59,6 +59,10 @@ erDiagram
       enum state
       enum engine
       int attempt
+      boolean cancel_requested
+      varchar error_code
+      timestamptz started_at
+      timestamptz finished_at
       timestamptz available_at
     }
     CONTEXT_PAYLOADS {
@@ -73,7 +77,9 @@ erDiagram
       uuid run_id FK
       varchar file_path
       int line_start
-      varchar category
+      enum side
+      enum severity
+      enum category
       text suggestion
       numeric confidence
       boolean published
@@ -108,7 +114,9 @@ erDiagram
       uuid id PK
       uuid run_id FK
       uuid workspace_id FK
+      varchar model
       numeric cost_usd
+      timestamptz created_at
     }
     PAYMENTS {
       uuid id PK
@@ -139,4 +147,8 @@ erDiagram
       int index
       varchar tool
       jsonb request
+      jsonb response
+      text response_ref
+      timestamptz started_at
+      int duration_ms
     }
