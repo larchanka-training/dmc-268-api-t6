@@ -134,8 +134,10 @@ Workflow по умолчанию: `contents: read`. Расширение точ�
 | Job / workflow | Permissions | Почему |
 |---|---|---|
 | `secret-scan`, terraform, docker build/scan | `contents: read` | только checkout |
-| `push-image` | `contents: read`, `packages: write` | push в GHCR |
-| `deploy-staging` | `contents: read`, `packages: write` | pull образа на VM и промо `:staging` после health check |
-| Rollback staging | `contents: read`, `packages: read` | то же |
+| `push-image` | `contents: read`, `packages: write`, `actions: read` | push в GHCR; `actions: read` — скачать artifact образа, прошедшего Trivy |
+| `deploy-staging` | `contents: read`, `packages: read` | pull образа на VM (одноразовый `GITHUB_TOKEN`) |
+| `promote-staging` (CI/CD) | `contents: read`, `packages: write` | `:staging-previous` ← `:staging`, `:staging` ← проверенный digest после health check |
+| Rollback staging: `rollback` | `contents: read`, `packages: read` | pull образа на VM |
+| Rollback staging: `promote-staging` | `contents: read`, `packages: write` | синхронизировать `:staging` с откатанным образом |
 
-`security-events`, `id-token`, `pull-requests`, `actions` не выдаются. `HCLOUD_TOKEN` в Actions нет — apply вне CI.
+`security-events`, `id-token`, `pull-requests` не выдаются; `actions: read` есть только у `push-image`. `packages: write` — только у jobs `promote-staging`, на VM этот токен не уходит. `HCLOUD_TOKEN` в Actions нет — apply вне CI.
