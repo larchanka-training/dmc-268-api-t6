@@ -4,7 +4,10 @@ network_zone       = "eu-central"
 server_type        = "cx22"
 ssh_public_key     = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIreplace-with-ci-public-key ci@dmc-268"
 # ssh_operator_public_key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIreplace-with-operator-key operator@dmc-268"
-ssh_allowed_cidrs  = ["203.0.113.10/32"]
+# SSH is world-open by design (GitHub-hosted runners have no stable egress IPs):
+# key-only auth, fail2ban and a non-standard port. Defaults shown.
+# ssh_allowed_cidrs = ["0.0.0.0/0", "::/0"]
+# ssh_port          = 22022
 container_registry = "ghcr.io"
 image_repository   = "larchanka-training/dmc-268-ui-t6"
 bootstrap_image    = "nginx:1.27-alpine"

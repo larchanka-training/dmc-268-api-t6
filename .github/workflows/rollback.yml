@@ -32,6 +32,15 @@ jobs:
       staging: ${{ steps.meta.outputs.staging }}
       previous: ${{ steps.meta.outputs.previous }}
     steps:
+      - name: Check SSH port variable
+        env:
+          STAGING_SSH_PORT: ${{ vars.STAGING_SSH_PORT }}
+        run: |
+          if [[ ! "${STAGING_SSH_PORT}" =~ ^[0-9]+$ ]]; then
+            echo "GitHub variable STAGING_SSH_PORT (environment staging) must be set to the sshd port (Terraform output ssh_port)" >&2
+            exit 1
+          fi
+
       - name: Set image coordinates
         id: meta
         env:
@@ -70,6 +79,7 @@ jobs:
           IMAGE: ${{ steps.image.outputs.ref }}
         with:
           host: ${{ vars.STAGING_HOST }}
+          port: ${{ vars.STAGING_SSH_PORT }}
           username: ${{ vars.STAGING_SSH_USER }}
           key: ${{ secrets.STAGING_SSH_KEY }}
           fingerprint: ${{ vars.STAGING_SSH_FINGERPRINT }}
@@ -89,6 +99,7 @@ jobs:
         uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2 # v1.2.5
         with:
           host: ${{ vars.STAGING_HOST }}
+          port: ${{ vars.STAGING_SSH_PORT }}
           username: ${{ vars.STAGING_SSH_USER }}
           key: ${{ secrets.STAGING_SSH_KEY }}
           fingerprint: ${{ vars.STAGING_SSH_FINGERPRINT }}

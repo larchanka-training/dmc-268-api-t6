@@ -23,8 +23,8 @@
 flowchart LR
   internet["Internet"] --> dnsApi["Hetzner DNS\napi-staging.example.com"]
   internet --> dnsUi["Hetzner DNS\nui-staging.example.com"]
-  dnsApi --> fwApi["API firewall\n80/443, SSH по CIDR"]
-  dnsUi --> fwUi["UI firewall\n80/443, SSH по CIDR"]
+  dnsApi --> fwApi["API firewall\n80/443, SSH :22022"]
+  dnsUi --> fwUi["UI firewall\n80/443, SSH :22022"]
   fwApi --> vmApi["VM dmc-268-api-staging\nDebian 12 + Docker"]
   fwUi --> vmUi["VM dmc-268-ui-staging\nDebian 12 + Docker"]
   vmApi --> api["compose: api :8000"]
@@ -41,10 +41,10 @@ flowchart LR
 |---|---|
 | 2× `cx22` в `nbg1` | API и UI на отдельных VM: изоляция, независимый rollback |
 | Private networks `10.21.0.0/16` и `10.20.0.0/16` | Разные CIDR для API и UI; статические private IP `10.21.1.10` и `10.20.1.10` |
-| Firewall (на каждый стек) | Вход: ICMP, 80, 443; SSH только из `ssh_allowed_cidrs`. Postgres наружу не открыт |
+| Firewall (на каждый стек) | Вход: ICMP, 80, 443; SSH только на `ssh_port` (по умолчанию `22022`) из `ssh_allowed_cidrs` (по умолчанию весь интернет, см. §4.1). Порт 22 закрыт, Postgres наружу не открыт |
 | Primary IPv4/IPv6 | Адреса живут отдельно от VM: rebuild сервера не ломает DNS |
 | SSH keys | Обязательный ключ CI; опционально ключ оператора |
-| Cloud-init | Docker CE + Compose, каталог `/opt/dmc-268-api` или `/opt/dmc-268-ui`, bootstrap на `:80` |
+| Cloud-init | Docker CE + Compose, каталог `/opt/dmc-268-api` или `/opt/dmc-268-ui`, bootstrap на `:80`, sshd на `ssh_port` только по ключу, fail2ban |
 | DNS | Опциональная зона Hetzner Cloud + A/AAAA + reverse DNS (отдельные записи `api-staging` / `ui-staging`) |
 | State | S3-совместимый backend в Hetzner Object Storage; отдельные ключи `api-staging/` и `ui-staging/` |
 
@@ -67,7 +67,7 @@ flowchart LR
 | `primary_ip.tf` | Стабильные публичные адреса |
 | `server.tf` | VM + private NIC |
 | `dns.tf` | Зона / lookup, A, AAAA, PTR |
-| `templates/cloud-init.yaml.tftpl` | Docker и bootstrap |
+| `templates/cloud-init.yaml.tftpl` | Docker, bootstrap, sshd drop-in и fail2ban |
 | `environments/*.example` | Образцы tfvars и backend |
 
 Отличия стеков: CIDR, имя VM, `image_repository`, health URL (`/healthcheck` vs `/health`), DNS record name.
@@ -97,7 +97,7 @@ export AWS_RESPONSE_CHECKSUM_VALIDATION=when_required
 
 STACK=terraform/api-staging
 cp ${STACK}/environments/staging.tfvars.example ${STACK}/environments/staging.tfvars
-# заполнить ssh_public_key и ssh_allowed_cidrs; при необходимости dns_zone
+# заполнить ssh_public_key; при необходимости dns_zone (ssh_port и ssh_allowed_cidrs имеют defaults)
 
 terraform -chdir=${STACK} init -backend-config=environments/staging.backend.hcl
 terraform -chdir=${STACK} plan  -var-file=environments/staging.tfvars
@@ -121,13 +121,14 @@ terraform -chdir=${STACK} apply -var-file=environments/staging.tfvars
 
 ```bash
 terraform -chdir=${STACK} output ssh_host
+terraform -chdir=${STACK} output ssh_port
 terraform -chdir=${STACK} output health_url
 terraform -chdir=${STACK} output staging_ipv4
 ```
 
-- output `ssh_host` API-стека → GitHub variable `STAGING_HOST` в репозитории **dmc-268-api-t6**
-- SHA256 fingerprint хоста (`ssh-keyscan -H <host> | ssh-keygen -lf - -E sha256`) → `STAGING_SSH_FINGERPRINT` в том же environment
-- output `ssh_host` UI-стека → GitHub variable `STAGING_HOST` в репозитории **dmc-268-ui-t6**
+- outputs `ssh_host` и `ssh_port` API-стека → GitHub variables `STAGING_HOST` и `STAGING_SSH_PORT` в репозитории **dmc-268-api-t6**
+- SHA256 fingerprint хоста (`ssh-keyscan -p <ssh_port> -H <host> | ssh-keygen -lf - -E sha256`) → `STAGING_SSH_FINGERPRINT` в том же environment
+- outputs `ssh_host` и `ssh_port` UI-стека → GitHub variables `STAGING_HOST` и `STAGING_SSH_PORT` в репозитории **dmc-268-ui-t6**. SSH-шаги UI-workflow должны передавать `port:`, иначе после apply `ui-staging` выкат UI не достучится до VM (порт 22 закрыт)
 
 Дальше выкат — CICD.md в соответствующем репозитории. Секреты API — [SECRETS.md](SECRETS.md).
 
@@ -146,13 +147,44 @@ done
 
 После первого boot (на каждой VM):
 
-1. Ставятся Docker CE, containerd, Compose plugin.
-2. Создаётся `/opt/dmc-268-api` или `/opt/dmc-268-ui`.
-3. Запускается `nginx:1.27-alpine` как bootstrap-контейнер на `:80`.
+1. sshd переводится на `ssh_port` (drop-in `/etc/ssh/sshd_config.d/10-dmc-268.conf`, проверка `sshd -t` перед `systemctl restart ssh`), ставится и включается fail2ban.
+2. Ставятся Docker CE, containerd, Compose plugin.
+3. Создаётся `/opt/dmc-268-api` или `/opt/dmc-268-ui`.
+4. Запускается `nginx:1.27-alpine` как bootstrap-контейнер на `:80`.
 
 Пока CI не выкатил приложение, VM уже отвечает по HTTP. `deploy.sh` снимает bootstrap, чтобы порт 80 занял Compose.
 
 `user_data` в lifecycle игнорируется: правка cloud-init не пересоздаёт VM.
+
+### 4.1. SSH-доступ
+
+SSH открыт миру намеренно: у GitHub-hosted runners нет стабильных egress IP, allowlist по CIDR их не пропустит. Защита вместо allowlist:
+
+| Мера | Как |
+|---|---|
+| Нестандартный порт | `ssh_port` (по умолчанию `22022`, диапазон 1025–32767); firewall открывает только его, порт 22 закрыт |
+| Только ключи | `PasswordAuthentication no`, `KbdInteractiveAuthentication no`, `PermitRootLogin prohibit-password` (CI входит как `root` по ключу) |
+| fail2ban | jail `sshd` в `/etc/fail2ban/jail.d/sshd.local`: `port = <ssh_port>`, `backend = systemd` (в Debian 12 нет `/var/log/auth.log`), `banaction = nftables-multiport` |
+
+В GitHub Environment порт — variable `STAGING_SSH_PORT` (= output `ssh_port`). Сузить доступ можно через `ssh_allowed_cidrs`, но тогда выкат нужно вести с self-hosted runner с известным IP.
+
+Если заблокирован свой IP:
+
+```bash
+fail2ban-client status sshd
+fail2ban-client set sshd unbanip <IP>
+```
+
+Break-glass, если sshd не поднялся на новом порту или доступ по SSH потерян: Hetzner Cloud Console → сервер → **Rescue → Reset root password**, затем **Console** (VNC), исправить `/etc/ssh/sshd_config.d/10-dmc-268.conf`, `sshd -t && systemctl restart ssh`.
+
+### 4.2. Переход существующей VM на новый SSH-порт
+
+Из-за `ignore_changes = [user_data]` VM, созданная до появления `ssh_port`, продолжает слушать 22, а следующий `apply` переносит правило firewall на `ssh_port` — CI и оператор теряют доступ. Выберите один путь **до** `apply`:
+
+1. **Пересоздать VM:** `terraform -chdir=${STACK} apply -replace=hcloud_server.staging -var-file=environments/staging.tfvars`. Primary IP сохраняется, host key меняется → обновить `STAGING_SSH_FINGERPRINT`. Диск VM (и том PostgreSQL на API-стенде) пересоздаётся.
+2. **Без пересоздания:** по SSH на порт 22 положить на VM drop-in и jail из `templates/cloud-init.yaml.tftpl`, в drop-in временно добавить вторую строку `Port 22`, выполнить `apt-get install -y fail2ban nftables python3-systemd`, `sshd -t && systemctl restart ssh`, `systemctl restart fail2ban`. Затем `apply`, проверить вход на `ssh_port`, убрать `Port 22` и перезапустить ssh.
+
+После перехода задать `STAGING_SSH_PORT` в GitHub Environment обоих репозиториев.
 
 ---
 
@@ -183,9 +215,9 @@ create_dns_zone = false
 
 ## 6. Variables и outputs
 
-Обязательные variables: `ssh_public_key`, `ssh_allowed_cidrs`. Остальное имеет defaults (`nbg1`, `cx22`, CIDR стека, …).
+Обязательная variable: `ssh_public_key`. Остальное имеет defaults (`nbg1`, `cx22`, CIDR стека, `ssh_port = 22022`, `ssh_allowed_cidrs = ["0.0.0.0/0", "::/0"]`, …).
 
-Полезные outputs: `staging_ipv4`, `staging_ipv6`, `staging_private_ip`, `dns_fqdn`, `dns_nameservers`, `health_url`, `ssh_host`, `server_id`, `network_id`, `firewall_id`.
+Полезные outputs: `staging_ipv4`, `staging_ipv6`, `staging_private_ip`, `dns_fqdn`, `dns_nameservers`, `health_url`, `ssh_host`, `ssh_port`, `server_id`, `network_id`, `firewall_id`.
 
 Полный список — `variables.tf` и `outputs.tf` в каждом стеке.
 

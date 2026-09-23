@@ -6,6 +6,9 @@ packages:
   - curl
   - gnupg
   - jq
+  - fail2ban
+  - nftables
+  - python3-systemd
 
 write_files:
   - path: /etc/docker/daemon.json
@@ -18,8 +21,28 @@ write_files:
           "max-file": "3"
         }
       }
+  # Debian 12 starts sshd from ssh.service (ssh.socket is disabled), so a restart applies the port.
+  # The deploy user is root with a key (STAGING_SSH_USER), hence prohibit-password rather than no.
+  - path: /etc/ssh/sshd_config.d/10-dmc-268.conf
+    permissions: "0644"
+    content: |
+      Port ${ssh_port}
+      PasswordAuthentication no
+      KbdInteractiveAuthentication no
+      PermitRootLogin prohibit-password
+  # Debian 12 has no /var/log/auth.log without rsyslog: read sshd logs from the journal.
+  - path: /etc/fail2ban/jail.d/sshd.local
+    permissions: "0644"
+    content: |
+      [sshd]
+      enabled = true
+      port = ${ssh_port}
+      backend = systemd
+      banaction = nftables-multiport
 
 runcmd:
+  - /usr/sbin/sshd -t && systemctl restart ssh
+  - fail2ban-client -t && systemctl enable fail2ban && systemctl restart fail2ban
   - install -m 0755 -d /etc/apt/keyrings
   - curl -fsSL https://download.docker.com/linux/debian/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
   - chmod a+r /etc/apt/keyrings/docker.gpg

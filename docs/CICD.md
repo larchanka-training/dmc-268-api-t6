@@ -120,7 +120,9 @@ PostgreSQL только во внутренней docker-сети. Том `postg
 
 Перечень, хранение, доставка на VM и запрет утечек в git/логи — [SECRETS.md](SECRETS.md).
 
-Кратко: в Environment `staging` секреты — только `STAGING_SSH_KEY` и `POSTGRES_PASSWORD`. Хост и SSH-пользователь — variables. `HCLOUD_TOKEN` в Actions нет.
+Кратко: в Environment `staging` секреты — только `STAGING_SSH_KEY` и `POSTGRES_PASSWORD`. Хост, SSH-порт (`STAGING_SSH_PORT`) и SSH-пользователь — variables. `HCLOUD_TOKEN` в Actions нет.
+
+SSH на VM: нестандартный порт (`ssh_port`, по умолчанию `22022`), только ключи, fail2ban. Порт открыт миру намеренно — у GitHub-hosted runners нет стабильных egress IP ([INFRASTRUCTURE.md](INFRASTRUCTURE.md#41-ssh-доступ)). Все шаги `appleboy/*` передают `port: ${{ vars.STAGING_SSH_PORT }}`; deploy и rollback падают первым шагом, если переменная не задана.
 
 ---
 
