@@ -73,6 +73,9 @@ def test_initial_migration_round_trip(
         assert "uq_runs_one_active_per_code_change" in {
             index["name"] for index in inspector.get_indexes("runs")
         }
+        assert "ix_usage_events_run_created" in {
+            index["name"] for index in inspector.get_indexes("usage_events")
+        }
         context = MigrationContext.configure(
             connection, opts={"compare_type": True, "compare_server_default": True}
         )
