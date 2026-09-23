@@ -9,6 +9,7 @@ resource "hcloud_server" "staging" {
     app_dir         = local.app_dir
     bootstrap_name  = local.bootstrap_name
     bootstrap_image = var.bootstrap_image
+    ssh_port        = var.ssh_port
   })
   labels = local.labels
 

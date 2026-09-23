@@ -42,11 +42,23 @@ variable "ssh_operator_public_key" {
 
 variable "ssh_allowed_cidrs" {
   type        = list(string)
-  description = "CIDR ranges allowed to reach SSH. Restrict to the CI egress / office network in production."
+  description = "CIDR ranges allowed to reach SSH. World-open by design: GitHub-hosted runners have no stable egress IPs, so SSH relies on key-only auth, fail2ban and a non-standard port."
+  default     = ["0.0.0.0/0", "::/0"]
 
   validation {
     condition     = length(var.ssh_allowed_cidrs) > 0
     error_message = "Provide at least one CIDR allowed to use SSH."
+  }
+}
+
+variable "ssh_port" {
+  type        = number
+  description = "TCP port sshd listens on. Must match the GitHub variable STAGING_SSH_PORT."
+  default     = 22022
+
+  validation {
+    condition     = var.ssh_port > 1024 && var.ssh_port < 32768 && floor(var.ssh_port) == var.ssh_port
+    error_message = "ssh_port must be an integer between 1025 and 32767 (below the Linux ephemeral port range)."
   }
 }
 

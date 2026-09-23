@@ -26,10 +26,10 @@ resource "hcloud_firewall" "staging" {
   }
 
   rule {
-    description = "SSH for deploy and rollback"
+    description = "SSH for deploy and rollback on a non-standard port"
     direction   = "in"
     protocol    = "tcp"
-    port        = "22"
+    port        = tostring(var.ssh_port)
     source_ips  = var.ssh_allowed_cidrs
   }
 }

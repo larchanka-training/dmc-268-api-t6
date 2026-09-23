@@ -69,6 +69,11 @@ output "health_url" {
 }
 
 output "ssh_host" {
-  description = "Host to use for SSH and GitHub secret STAGING_HOST."
+  description = "Host to use for SSH and GitHub variable STAGING_HOST."
   value       = local.health_host
+}
+
+output "ssh_port" {
+  description = "sshd port for GitHub variable STAGING_SSH_PORT."
+  value       = var.ssh_port
 }

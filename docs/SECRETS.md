@@ -30,6 +30,7 @@
 | Variable | Обязателен | Пример |
 |---|---|---|
 | `STAGING_HOST` | да | IPv4 или FQDN из Terraform output `ssh_host` |
+| `STAGING_SSH_PORT` | да | `22022` — Terraform output `ssh_port`; без него deploy и rollback падают на первом шаге |
 | `STAGING_SSH_FINGERPRINT` | да | SHA256 host key fingerprint для `appleboy/scp-action` и `appleboy/ssh-action` |
 | `STAGING_SSH_USER` | да | `root` после cloud-init |
 | `STAGING_HEALTH_URL` | нет | иначе `http://$STAGING_HOST/healthcheck` |
@@ -52,17 +53,19 @@ CI **не** делает `terraform apply`. Эти значения в GitHub Ac
 
 1. Settings → Environments → **staging**.
 2. Secrets: `STAGING_SSH_KEY`, `POSTGRES_PASSWORD`.
-3. Variables: хост, SHA256 SSH fingerprint, SSH-пользователь, опционально health URL и имя БД.
+3. Variables: хост, SSH-порт, SHA256 SSH fingerprint, SSH-пользователь, опционально health URL и имя БД.
 
    Fingerprint после `terraform apply` (формат appleboy — строка `SHA256:…` из вывода):
 
    ```bash
-   ssh-keyscan -H "${STAGING_HOST}" 2>/dev/null | ssh-keygen -lf - -E sha256
+   ssh-keyscan -p "${STAGING_SSH_PORT}" -H "${STAGING_HOST}" 2>/dev/null | ssh-keygen -lf - -E sha256
    ```
 4. Protection rules: required reviewers на выкат и rollback.
 5. Actions → General: **Allow GitHub Actions to create and approve pull requests** не нужен. Secret scanning и push protection — включить.
 
 Job `deploy-staging` и workflow Rollback ссылаются на `environment: staging`. Без значений environment пайплайн не выкатит стенд.
+
+SSH на VM открыт миру намеренно: у GitHub-hosted runners нет стабильных egress IP. Защита — нестандартный порт (`STAGING_SSH_PORT`), вход только по ключу и fail2ban; подробности и break-glass — [INFRASTRUCTURE.md](INFRASTRUCTURE.md#41-ssh-доступ).
 
 `ACTIONS_STEP_DEBUG` / `ACTIONS_RUNNER_DEBUG` для environment `staging` не включать: отладочные логи могут повторить переданные на SSH переменные.
 

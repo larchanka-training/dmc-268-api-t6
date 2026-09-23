@@ -219,6 +219,15 @@ jobs:
       image_ref: ${{ needs.push-image.outputs.image_ref }}
       staging: ${{ needs.push-image.outputs.staging }}
     steps:
+      - name: Check SSH port variable
+        env:
+          STAGING_SSH_PORT: ${{ vars.STAGING_SSH_PORT }}
+        run: |
+          if [[ ! "${STAGING_SSH_PORT}" =~ ^[0-9]+$ ]]; then
+            echo "GitHub variable STAGING_SSH_PORT (environment staging) must be set to the sshd port (Terraform output ssh_port)" >&2
+            exit 1
+          fi
+
       - name: Checkout
         uses: actions/checkout@v4
 
@@ -226,6 +235,7 @@ jobs:
         uses: appleboy/scp-action@ff85246acaad7bdce478db94a363cd2bf7c90345 # v1.0.0
         with:
           host: ${{ vars.STAGING_HOST }}
+          port: ${{ vars.STAGING_SSH_PORT }}
           username: ${{ vars.STAGING_SSH_USER }}
           key: ${{ secrets.STAGING_SSH_KEY }}
           fingerprint: ${{ vars.STAGING_SSH_FINGERPRINT }}
@@ -245,6 +255,7 @@ jobs:
           POSTGRES_DB: ${{ vars.POSTGRES_DB }}
         with:
           host: ${{ vars.STAGING_HOST }}
+          port: ${{ vars.STAGING_SSH_PORT }}
           username: ${{ vars.STAGING_SSH_USER }}
           key: ${{ secrets.STAGING_SSH_KEY }}
           fingerprint: ${{ vars.STAGING_SSH_FINGERPRINT }}
@@ -279,6 +290,7 @@ jobs:
           GHCR_USER: ${{ github.actor }}
         with:
           host: ${{ vars.STAGING_HOST }}
+          port: ${{ vars.STAGING_SSH_PORT }}
           username: ${{ vars.STAGING_SSH_USER }}
           key: ${{ secrets.STAGING_SSH_KEY }}
           fingerprint: ${{ vars.STAGING_SSH_FINGERPRINT }}
