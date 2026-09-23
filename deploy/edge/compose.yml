@@ -1,0 +1,35 @@
+# Edge reverse proxy for the shared course VPS. Deployed only by the API repo as project
+# dmc-268-edge: docker compose -p dmc-268-edge -f /opt/dmc-268-edge/compose.yml up -d
+# Services join the external network dmc268-edge with an alias <service>-<env> (see Caddyfile).
+services:
+  caddy:
+    image: caddy:2.11.4@sha256:0c994536bddb66445885237f1a5dcc1916bccea922661c76b4e9fc24061f9b52
+    restart: unless-stopped
+    environment:
+      APP_DOMAIN: ${APP_DOMAIN:?APP_DOMAIN is required}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      # The directory, not the file: a re-uploaded Caddyfile gets a new inode, and a single-file
+      # bind mount would keep showing the old one. Apply changes with caddy reload.
+      - ./:/etc/caddy:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    networks:
+      - edge
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  caddy_data:
+  caddy_config:
+
+networks:
+  edge:
+    name: dmc268-edge
+    external: true
