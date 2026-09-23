@@ -1,0 +1,11 @@
+metadata:
+  id: "CKV2_HCLOUD_1"
+  name: "Ensure every Hetzner Cloud server has a firewall attached via firewall_ids"
+  category: "NETWORKING"
+definition:
+  cond_type: attribute
+  resource_types:
+    - hcloud_server
+  # jsonpath_exists also fails an empty list and still resolves references (value operators return UNKNOWN on them).
+  attribute: "firewall_ids[*]"
+  operator: jsonpath_exists

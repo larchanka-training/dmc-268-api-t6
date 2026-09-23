@@ -1,0 +1,11 @@
+metadata:
+  id: "CKV2_HCLOUD_2"
+  name: "Ensure no Hetzner Cloud firewall allows inbound port 22 from 0.0.0.0/0 or ::/0"
+  category: "NETWORKING"
+definition:
+  cond_type: attribute
+  resource_types:
+    - hcloud_firewall
+  # One inbound rule that is both port 22 and world-open; port may render as a string or a number.
+  attribute: 'rule[?(@.direction == "in" & (@.port == "22" | @.port == 22))].source_ips[?(@ == "0.0.0.0/0" | @ == "::/0")]'
+  operator: jsonpath_not_exists

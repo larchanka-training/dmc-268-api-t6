@@ -3,8 +3,11 @@ framework:
   - terraform
   - dockerfile
 download-external-modules: false
+external-checks-dir:
+  - .checkov/policies
 quiet: true
 soft-fail: false
 skip-path:
-  - .terraform
-  - .venv
+  - '\.terraform'
+  - '\.venv'
+  - '\.checkov/fixtures'
