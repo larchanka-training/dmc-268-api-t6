@@ -30,26 +30,74 @@ jobs:
     runs-on: ubuntu-latest
     environment:
       name: staging
-      url: http://${{ vars.STAGING_HOST }}
+      url: ${{ steps.target.outputs.base_url }}
     outputs:
       image_ref: ${{ steps.parsed.outputs.image_ref }}
       staging: ${{ steps.meta.outputs.staging }}
       previous: ${{ steps.meta.outputs.previous }}
     steps:
-      - name: Check SSH variables
+      - name: Resolve staging target
+        id: target
         env:
+          STAGING_HOST: ${{ vars.STAGING_HOST }}
           STAGING_SSH_PORT: ${{ vars.STAGING_SSH_PORT }}
+          STAGING_SSH_USER: ${{ vars.STAGING_SSH_USER }}
+          STAGING_HEALTH_URL: ${{ vars.STAGING_HEALTH_URL }}
+          HAS_STAGING_SSH_KEY: ${{ secrets.STAGING_SSH_KEY != '' }}
+          VPS_HOST: ${{ vars.VPS_DMC268_IP_T6 }}
+          HAS_VPS_USER: ${{ secrets.VPS_DMC268_U != '' }}
+          HAS_VPS_PASSWORD: ${{ secrets.VPS_DMC268_P != '' }}
           STAGING_SSH_FINGERPRINT: ${{ vars.STAGING_SSH_FINGERPRINT }}
         run: |
-          if [[ ! "${STAGING_SSH_PORT}" =~ ^[0-9]+$ ]]; then
-            echo "GitHub variable STAGING_SSH_PORT (environment staging) must be set to the sshd port (Terraform output ssh_port)" >&2
+          # Terraform/Hetzner host (key auth) when STAGING_HOST is set, otherwise the shared course VPS
+          # (password auth, port 22). Only non-secret values go to the step outputs.
+          if [[ -n "${STAGING_HOST}" ]]; then
+            mode=terraform
+            host="${STAGING_HOST}"
+            port="${STAGING_SSH_PORT}"
+            if [[ ! "${port}" =~ ^[0-9]+$ ]]; then
+              echo "GitHub variable STAGING_SSH_PORT (environment staging) must be set to the sshd port (Terraform output ssh_port)" >&2
+              exit 1
+            fi
+            if [[ -z "${STAGING_SSH_USER}" || "${HAS_STAGING_SSH_KEY}" != "true" ]]; then
+              echo "Terraform target needs variable STAGING_SSH_USER and secret STAGING_SSH_KEY (environment staging)" >&2
+              exit 1
+            fi
+          elif [[ -n "${VPS_HOST}" ]]; then
+            mode=course
+            host="${VPS_HOST}"
+            port=22
+            if [[ "${HAS_VPS_USER}" != "true" || "${HAS_VPS_PASSWORD}" != "true" ]]; then
+              echo "Course VPS target needs organization secrets VPS_DMC268_U and VPS_DMC268_P" >&2
+              exit 1
+            fi
+          else
+            echo "No staging target: set STAGING_HOST, STAGING_SSH_PORT, STAGING_SSH_USER and STAGING_SSH_KEY (Terraform host)" \
+              "or organization variable VPS_DMC268_IP_T6 with secrets VPS_DMC268_U and VPS_DMC268_P (course VPS)" >&2
+            exit 1
+          fi
+          if [[ ! "${host}" =~ ^[A-Za-z0-9.-]+$ ]]; then
+            echo "staging host '${host}' is not a hostname or IPv4 address" >&2
             exit 1
           fi
           # With an empty fingerprint the appleboy actions accept any host key.
           if [[ ! "${STAGING_SSH_FINGERPRINT}" =~ ^SHA256:[A-Za-z0-9+/]{43}$ ]]; then
-            echo "GitHub variable STAGING_SSH_FINGERPRINT (environment staging) must be the host key fingerprint SHA256:<43 base64 chars> (ssh-keyscan -p <port> <host> | ssh-keygen -lf - -E sha256)" >&2
+            echo "GitHub variable STAGING_SSH_FINGERPRINT must be the ${mode} host key fingerprint SHA256:<43 base64 chars> (ssh-keyscan -p ${port} ${host} | ssh-keygen -lf - -E sha256)" >&2
             exit 1
           fi
+          base_url="http://${host}"
+          health_url="${base_url}/healthcheck"
+          if [[ "${mode}" == "terraform" && -n "${STAGING_HEALTH_URL}" ]]; then
+            health_url="${STAGING_HEALTH_URL}"
+          fi
+          {
+            echo "mode=${mode}"
+            echo "host=${host}"
+            echo "port=${port}"
+            echo "base_url=${base_url}"
+            echo "health_url=${health_url}"
+          } >> "${GITHUB_OUTPUT}"
+          echo "staging target: ${mode} (${host}:${port})"
 
       - name: Set image coordinates
         id: meta
@@ -88,10 +136,11 @@ jobs:
           GHCR_USER: ${{ github.actor }}
           IMAGE: ${{ steps.image.outputs.ref }}
         with:
-          host: ${{ vars.STAGING_HOST }}
-          port: ${{ vars.STAGING_SSH_PORT }}
-          username: ${{ vars.STAGING_SSH_USER }}
-          key: ${{ secrets.STAGING_SSH_KEY }}
+          host: ${{ steps.target.outputs.host }}
+          port: ${{ steps.target.outputs.port }}
+          username: ${{ steps.target.outputs.mode == 'course' && secrets.VPS_DMC268_U || vars.STAGING_SSH_USER }}
+          key: ${{ steps.target.outputs.mode == 'terraform' && secrets.STAGING_SSH_KEY || '' }}
+          password: ${{ steps.target.outputs.mode == 'course' && secrets.VPS_DMC268_P || '' }}
           fingerprint: ${{ vars.STAGING_SSH_FINGERPRINT }}
           debug: false
           envs: GHCR_TOKEN,GHCR_USER,IMAGE
@@ -108,10 +157,11 @@ jobs:
         id: deployed
         uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2 # v1.2.5
         with:
-          host: ${{ vars.STAGING_HOST }}
-          port: ${{ vars.STAGING_SSH_PORT }}
-          username: ${{ vars.STAGING_SSH_USER }}
-          key: ${{ secrets.STAGING_SSH_KEY }}
+          host: ${{ steps.target.outputs.host }}
+          port: ${{ steps.target.outputs.port }}
+          username: ${{ steps.target.outputs.mode == 'course' && secrets.VPS_DMC268_U || vars.STAGING_SSH_USER }}
+          key: ${{ steps.target.outputs.mode == 'terraform' && secrets.STAGING_SSH_KEY || '' }}
+          password: ${{ steps.target.outputs.mode == 'course' && secrets.VPS_DMC268_P || '' }}
           fingerprint: ${{ vars.STAGING_SSH_FINGERPRINT }}
           debug: false
           capture_stdout: true
@@ -135,13 +185,13 @@ jobs:
 
       - name: Health check
         env:
-          HEALTH_URL: ${{ vars.STAGING_HEALTH_URL }}
-          STAGING_HOST: ${{ vars.STAGING_HOST }}
+          HEALTH_URL: ${{ steps.target.outputs.health_url }}
+          BASE_URL: ${{ steps.target.outputs.base_url }}
           DEPLOYED_IMAGE: ${{ steps.parsed.outputs.image_ref }}
         run: |
           if [[ "${DEPLOYED_IMAGE}" == "bootstrap" ]]; then
             # The bootstrap nginx has no /healthcheck; it must answer 200 on /.
-            url="http://${STAGING_HOST}/"
+            url="${BASE_URL}/"
             code="$(curl -fsS -o /dev/null -w '%{http_code}' --retry 12 --retry-delay 5 --retry-all-errors --max-time 5 "${url}")"
             if [[ "${code}" != "200" ]]; then
               echo "bootstrap returned HTTP ${code} on ${url}, expected 200" >&2
@@ -151,8 +201,7 @@ jobs:
             exit 0
           fi
           chmod +x deploy/scripts/healthcheck.sh
-          target="${HEALTH_URL:-http://${STAGING_HOST}/healthcheck}"
-          deploy/scripts/healthcheck.sh "${target}"
+          deploy/scripts/healthcheck.sh "${HEALTH_URL}"
 
   promote-staging:
     name: Promote staging tag
