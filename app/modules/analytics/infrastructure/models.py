@@ -27,7 +27,10 @@ from app.common.infrastructure.db.columns import timestamp_column
 
 class UsageEvent(Base):
     __tablename__ = "usage_events"
-    __table_args__ = (Index("ix_usage_events_workspace_created", "workspace_id", "created_at"),)
+    __table_args__ = (
+        Index("ix_usage_events_workspace_created", "workspace_id", "created_at"),
+        Index("ix_usage_events_run_created", "run_id", "created_at"),
+    )
 
     id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
     run_id: Mapped[UUID] = mapped_column(ForeignKey("runs.id"), nullable=False)
