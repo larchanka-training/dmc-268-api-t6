@@ -12,11 +12,21 @@ COMPOSE_FILE="${APP_DIR}/compose.yml"
 STATE_FILE="${APP_DIR}/.deploy-state"
 ENV_FILE="${APP_DIR}/.env"
 ROLLBACK_SCRIPT="${APP_DIR}/rollback.sh"
+# Compose project "dmc-268-api" + volume "postgres-data" from compose.yml.
+POSTGRES_VOLUME="${POSTGRES_VOLUME:-dmc-268-api_postgres-data}"
 
 logout_registry() {
   docker logout ghcr.io >/dev/null 2>&1 || true
 }
 trap logout_registry EXIT
+
+generate_password() {
+  if command -v openssl >/dev/null 2>&1; then
+    openssl rand -hex 24
+  else
+    od -An -N24 -tx1 /dev/urandom | tr -d ' \n'
+  fi
+}
 
 if [[ -z "${IMAGE}" ]]; then
   echo "usage: deploy.sh <image-ref>" >&2
@@ -44,9 +54,19 @@ fi
 
 IMAGE="${REQUESTED_IMAGE}"
 
+# Postgres fixes the password when the volume is initialised: generate one only on a fresh host,
+# keep it in .env (0600) and reuse it on every later deploy and rollback.
 if [[ -z "${POSTGRES_PASSWORD:-}" ]]; then
-  echo "POSTGRES_PASSWORD is required" >&2
-  exit 1
+  if [[ -f "${ENV_FILE}" ]] || docker volume inspect "${POSTGRES_VOLUME}" >/dev/null 2>&1; then
+    echo "POSTGRES_PASSWORD is not set and ${ENV_FILE} has none, but ${ENV_FILE} or volume ${POSTGRES_VOLUME} already exists; refusing to generate a new password" >&2
+    exit 1
+  fi
+  POSTGRES_PASSWORD="$(generate_password)"
+  if [[ ! "${POSTGRES_PASSWORD}" =~ ^[0-9a-f]{48}$ ]]; then
+    echo "failed to generate POSTGRES_PASSWORD" >&2
+    exit 1
+  fi
+  echo "generated POSTGRES_PASSWORD on the host (stored in ${ENV_FILE})"
 fi
 
 if [[ -f "${STATE_FILE}" ]]; then
