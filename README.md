@@ -35,6 +35,18 @@ Run locally:
 uv run uvicorn app.main:app --reload
 ```
 
+## Seed review prompts
+
+Before deploying an application version that uses AI review, load the versioned
+prompt artifacts into PostgreSQL from the repository checkout:
+
+```bash
+uv run python -m app.bootstrap.seed_prompts
+```
+
+The command requires `DATABASE_URL`. It is safe to run repeatedly; an existing
+prompt version whose file content has changed causes the command to fail.
+
 ## Tests
 
 ```bash
