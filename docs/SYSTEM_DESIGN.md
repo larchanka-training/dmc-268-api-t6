@@ -5,7 +5,7 @@
 | Статус | **черновик на утверждение командой** |
 | Владелец | техлид (роль 1) |
 | Связанные документы | `BACKEND_ARCHITECTURE.md` (роль 6, ERD), `FRONTEND_ARCHITECTURE.md` (роль 5, Zod-контракты), `TEST_PLAN.md` (роль 2, quality gates), инфраструктура (роль 3) |
-| Нумерация решений | `Р-1…Р-9` — общая с `TEST_PLAN.md`, не менять |
+| Нумерация решений | `Р-1…Р-13`; `Р-1…Р-9` — общие с `TEST_PLAN.md`, не менять |
 
 **Продукт.** GitHub App, которого назначают ревьюером в pull request. После зелёного CI бот публикует одно ревью с inline-комментариями прямо в PR. Web UI показывает прогоны, трейс действий агента, метрики и расход.
 
@@ -29,6 +29,7 @@
 | Р-10 | Триггер — **конъюнкция двух событий в любом порядке**: бот назначен ревьюером ∧ CI успешен для текущего `head_sha` | Решение мита; события независимы, порядок не гарантирован |
 | Р-11 | Провайдер VCS — за портом `VcsProvider`; v1 реализует только GitHub | ТЗ упоминает GitLab, роль 6 — Bitbucket; порт дешёвый, реализации — нет |
 | Р-12 | Один образ, пять точек входа (`api`, `webhook`, `worker`, `publisher`, `collector`); на старте `publisher` живёт в процессе `worker`, `collector` — в процессе `api` | Микросервисы без пяти репозиториев; разнести = поменять compose, а не код |
+| Р-13 | **RAG не входит в MVP.** Worker получает контекст через порт `ContextProvider`: в MVP — детерминированный сборщик L1–L4, позднее — `RagContextProvider`, возвращающий тот же `ContextPayload` | В MVP нет затрат и операционных рисков embeddings/vector DB, но RAG подключается без изменения LLM, post-processing и публикации |
 
 ---
 
@@ -144,7 +145,7 @@ flowchart LR
   G -->|skip| ACK[ack без работы]
   G --> CC
 
-  subgraph CC[Context Collector]
+  subgraph CC[ContextProvider → ContextPayload]
     direction TB
     M[MetaLoader<br/>PR, ветка, AGENTS.md,<br/>конвенции репо] --> D[DiffFetcher<br/>L1 unified diff → FileDiff]
     D --> F[FileFetcher<br/>блобы по sha, кэш Redis]
@@ -152,6 +153,7 @@ flowchart LR
     F --> W[WholeFileLoader<br/>L3 при size ≤ лимита]
     F --> A[ASTIndexer<br/>L4 tree-sitter: импорты, символы]
     S & W & A --> B[BudgetAllocator<br/>приоритеты файлов, лимит токенов]
+    R[RagContextProvider<br/>после MVP: retrieval-кандидаты] -. до BudgetAllocator .-> B
   end
 
   B --> P[PromptBuilder<br/>prompt_version + rule_version<br/>+ конвенции]
@@ -420,6 +422,12 @@ v1 — `GitHubProvider`. `GitLabProvider` (MR `changes`, `discussions`, `pipelin
 
 Цель: дать модели ровно столько, чтобы не галлюцинировать про код вне диффа (TC-06 в тест-плане), и не больше бюджета. Уровни **накапливаются**: файл получает L1 всегда, дальше — по приоритету и бюджету. Для каждого файла в `context_payloads` записывается `level_used` — инспектор показывает, что модель видела.
 
+### Граница MVP и будущего RAG
+
+Worker зависит от порта `ContextProvider`, который по PR и снимку `head_sha` возвращает неизменяемый `ContextPayload`. В **MVP** его единственная реализация — `DeterministicContextProvider`: описанные ниже L0–L4, фильтры файлов и `BudgetAllocator`. Это не «весь репозиторий в prompt»: source-файлы отбираются по приоритету, размеру и токен-бюджету; generated/binary/too-large файлы исключаются.
+
+**RAG не реализуется в MVP:** нет embedding-модели, vector DB, фоновой индексации всего репозитория и отдельного ingestion worker. После MVP `RagContextProvider` сможет добавить кандидаты контекста **после Diff/AST-анализа и до `BudgetAllocator`**. Кандидаты проходят те же allowlist путей, лимиты размера и токенов, записываются в trace с причиной выбора и в итоге дают тот же `ContextPayload`. Поэтому LLM Gateway, постобработка, хранение результатов и Publisher от способа retrieval не зависят.
+
 ### L0 — метаданные (всегда)
 
 ```python
@@ -544,7 +552,7 @@ class ContextPayload(BaseModel):          # сущность роли 6
 5. L3 — сверху вниз по приоритету, пока `used ≤ limit`.
 6. `level_used` фиксируется; `ContextPayload` → PostgreSQL (summary без содержимого) + S3 (полный).
 
-Глубокий путь (фаза 3) отличается только тем, что шаги 3–5 выполняет агент в сандбоксе инструментами `read_file` / `grep` / `list_symbols` по клону, а не воркер по API; контракт `ContextPayload` тот же.
+Глубокий путь (фаза 3) отличается только тем, что шаги 3–5 выполняет агент в сандбоксе инструментами `read_file` / `grep` / `list_symbols` по клону, а не воркер по API; контракт `ContextPayload` тот же. Он также не требует RAG.
 
 ---
 

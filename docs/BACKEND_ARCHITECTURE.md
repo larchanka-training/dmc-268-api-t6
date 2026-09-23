@@ -9,11 +9,11 @@
 Артефакты задачи:
 
 - ORM: **SQLAlchemy 2**, типизированный Declarative (`Mapped`, `mapped_column`).
-- Миграции: **Alembic**, [первичная ревизия](alembic/versions/20260913_0001_initial_schema.py).
-- Схема: [реестр моделей](app/bootstrap/db_metadata.py) и ссылки на модули ниже.
-- ERD: [Mermaid-исходник](docs/erd/erd.mmd) и [SVG](docs/erd/erd.svg).
+- Миграции: **Alembic**, [первичная ревизия](../alembic/versions/20260913_0001_initial_schema.py).
+- Схема: [реестр моделей](../app/bootstrap/db_metadata.py) и ссылки на модули ниже.
+- ERD: [Mermaid-исходник](erd/erd.mmd) и [SVG](erd/erd.svg).
 
-[SYSTEM_DESIGN.md](dos/SYSTEM_DESIGN.md) — источник правды о процессах, входных точках,
+[SYSTEM_DESIGN.md](SYSTEM_DESIGN.md) — источник правды о процессах, входных точках,
 очередях, потоках данных, retry/lease, безопасности и развёртывании. Здесь описано,
 как эти решения отражаются в исходном коде.
 
@@ -78,9 +78,9 @@ persistence-слоя. Ни те, ни другие не пересекают г�
 
 ## Entrypoints
 
-Согласно Р-12 из [SYSTEM_DESIGN.md](../SYSTEM_DESIGN.md), image имеет пять entrypoint:
-`api`, `webhook`, `worker`, `publisher` и `collector`. Каждый располагается в
-`app/entrypoints/<name>/` и остаётся тонкой точкой входа: декодирует транспортный
+Согласно Р-12 из [SYSTEM_DESIGN.md](SYSTEM_DESIGN.md), целевой image имеет пять entrypoint:
+`api`, `webhook`, `worker`, `publisher` и `collector`. После их реализации каждый будет
+располагаться в `app/entrypoints/<name>/` и останется тонкой точкой входа: декодирует транспортный
 контракт, получает use case из container и преобразует результат обратно в HTTP/AMQP.
 Бизнес-решения в entrypoint не допускаются.
 
@@ -106,7 +106,8 @@ Application зависит от узких интерфейсов, сгрупп�
 | `RunRepository`, `ReviewRepository` | `reviews` | состояние прогона и результаты review |
 | `RepositoryReader` | `repositories` | настройки репозитория для use cases |
 | `VcsProvider` | использующий модуль | минимальные операции конкретного VCS-сценария |
-| `LlmGateway` | `reviews` | structured результат анализа контекста |
+| `ContextProvider` | `reviews` | собирает ограниченный и трассируемый `ContextPayload` для конкретного `head_sha` |
+| `LlmGateway` | `reviews` | structured результат анализа неизменяемого контекста |
 | `PaymentGateway` | `billing` | создание и подтверждение оплаты |
 | `UnitOfWork` | общий контракт; расширение в использующем модуле | граница транзакции и доступ к интерфейсам repositories |
 | `Clock`, `IdGenerator` | `common` | детерминированные тесты и технические значения |
@@ -115,7 +116,14 @@ Application зависит от узких интерфейсов, сгрупп�
 возвращает typed findings, usage и нормализованную ошибку. Он не публикует комментарии,
 не меняет состояние run и не знает о GitHub.
 
-## Модульная структура кода
+`ContextProvider` также не знает о публикации или состоянии Run. В MVP container
+подставляет `DeterministicContextProvider`: diff, ограниченное окружение, целые файлы
+по бюджету и AST/imports (L0–L4 из SYSTEM_DESIGN). `RagContextProvider` — будущая
+реализация того же порта; он добавит retrieval-кандидаты перед общим
+`BudgetAllocator`, но вернёт тот же `ContextPayload`. Поэтому RAG не требует новой
+ORM-модели, миграции или изменения use case в рамках MVP.
+
+## Целевая модульная структура кода
 
 Код организован **сначала по бизнес-модулю**, а уже внутри модуля — по слоям Clean
 Architecture. Это не позволяет превратить `common` в свалку и сохраняет use case,
@@ -145,9 +153,9 @@ app/
       application/
       infrastructure/          # Workspace model и repository
     reviews/
-      domain/                  # Run, Finding, Comment, Review interfaces
-      application/             # create/execute/publish/cancel/rerun
-      infrastructure/          # review models, repos, LLM gateway
+      domain/                  # Run, Finding, Comment, Review interfaces, ContextProvider
+      application/             # create/execute/publish/cancel/rerun, context orchestration
+      infrastructure/          # review models, repos, LLM gateway, deterministic context provider
     repositories/
       domain/
       application/
@@ -201,8 +209,8 @@ Engine и сетевые клиенты живут в течение lifespan п
 
 ## Транзакции и выполнение review
 
-Application управляет транзакцией через [UnitOfWork](app/common/application/unit_of_work.py).
-[SqlAlchemyUnitOfWork](app/common/infrastructure/db/unit_of_work.py) создаёт одну
+Application управляет транзакцией через [UnitOfWork](../app/common/application/unit_of_work.py).
+[SqlAlchemyUnitOfWork](../app/common/infrastructure/db/unit_of_work.py) создаёт одну
 `AsyncSession`, требует явного `commit()` и при выходе откатывает незавершённую
 транзакцию и закрывает session, в том числе при исключении.
 
@@ -237,12 +245,12 @@ SQLModel не используется: ORM отделена от transport DTO 
 
 | Модуль / код схемы | Модели |
 | --- | --- |
-| [workspaces](app/modules/workspaces/infrastructure/models.py) | Workspace |
-| [repositories](app/modules/repositories/infrastructure/models.py) | ProviderInstallation, Repository, RuleVersion, RepoConventions |
-| [reviews](app/modules/reviews/infrastructure/models.py) | PromptVersion, CodeChange, Run, ContextPayload, Finding, Comment, RunAction |
-| [webhooks](app/modules/integrations/webhooks/infrastructure/models.py) | WebhookEvent |
-| [billing](app/modules/billing/infrastructure/models.py) | Payment, CreditLedger |
-| [analytics](app/modules/analytics/infrastructure/models.py) | UsageEvent |
+| [workspaces](../app/modules/workspaces/infrastructure/models.py) | Workspace |
+| [repositories](../app/modules/repositories/infrastructure/models.py) | ProviderInstallation, Repository, RuleVersion, RepoConventions |
+| [reviews](../app/modules/reviews/infrastructure/models.py) | PromptVersion, CodeChange, Run, ContextPayload, Finding, Comment, RunAction |
+| [webhooks](../app/modules/integrations/webhooks/infrastructure/models.py) | WebhookEvent |
+| [billing](../app/modules/billing/infrastructure/models.py) | Payment, CreditLedger |
+| [analytics](../app/modules/analytics/infrastructure/models.py) | UsageEvent |
 
 Названия из задания сопоставляются так: `MergeRequest → CodeChange`,
 `ReviewJob → Run`. Это согласованные переименования, а не отсутствующие сущности.
@@ -259,7 +267,7 @@ ERD показывает связи и ключевые поля; полный �
 
 ## Миграции и проверка
 
-[env.py](alembic/env.py) собирает `target_metadata` через bootstrap. Ревизии Alembic
+[env.py](../alembic/env.py) собирает `target_metadata` через bootstrap. Ревизии Alembic
 содержат фиксированные `op.create_table`, индексы и PostgreSQL enum types; они не
 импортируют runtime-модели и не используют `Base.metadata.create_all/drop_all`.
 Будущие изменения схемы оформляются новой ревизией, а не правкой уже применённой.
@@ -279,7 +287,7 @@ TEST_DATABASE_URL='postgresql+psycopg://user:password@localhost:5432/backend_tes
 ENUM, rename, partial indexes и data migrations. Перед применением к рабочей БД
 проверить совместимость версий приложения и подготовить backup/rollback-план.
 
-[Интеграционные тесты](tests/test_initial_migration.py) создают случайную отдельную
+[Интеграционные тесты](../tests/test_initial_migration.py) создают случайную отдельную
 схему в тестовой БД и удаляют только её. Проверяют два цикла upgrade/downgrade,
 совпадение миграции с ORM metadata, удаление ENUM при downgrade и commit/rollback UoW.
 Пользователь тестовой БД должен иметь право CREATE SCHEMA. В Alembic передаётся
