@@ -17,6 +17,7 @@ flowchart TD
   pr["PR / push"] --> secrets["gitleaks"]
   pr --> tf["terraform fmt / validate\n(api + ui stacks)"]
   pr --> lint["tflint + checkov"]
+  pr --> py["ruff check / format, mypy, pytest\n(required check, push не ждёт)"]
   pr --> build["docker build"]
   build --> scan["trivy: vuln / secret / misconfig"]
   secrets --> gate{"main?"}
@@ -39,6 +40,7 @@ flowchart TD
 | `Secret scan` | PR и `main` | `contents: read` | Gitleaks с `.gitleaks.toml` и `--redact` (сканирует docs и examples) |
 | `Terraform fmt / validate` | PR и `main` | `contents: read` | `fmt -check`, `validate` для `api-staging` и `ui-staging` |
 | `Terraform lint / security` | PR и `main` | `contents: read` | TFLint + Checkov (встроенные и custom policies `.checkov/policies`); отдельный шаг проверяет, что каждая custom policy падает на `.checkov/fixtures/bad` |
+| `Python lint / type / test` | PR и `main` | `contents: read` | uv 0.12.11, Python 3.13: `uv sync --locked --all-groups`, `ruff check`, `ruff format --check` (Markdown исключён в `pyproject.toml`), `mypy`, `pytest`. Имя — required check в правилах `main`, менять только вместе с ними. В `needs` у `Push Docker image` не входит. Интеграционные тесты без `TEST_DATABASE_URL` пропускаются |
 | `Docker image build` | PR и `main` | `contents: read` | образ `python:3.13-slim` |
 | `Docker image security scan` | после сборки | `contents: read` | Trivy `CRITICAL`/`HIGH` |
 | `Push Docker image` | только `main` | `contents: read`, `packages: write`, `actions: read` | push `:sha`, resolve digest (тот же artifact, что прошёл Trivy) |
@@ -149,6 +151,12 @@ for stack in terraform/api-staging terraform/ui-staging; do
 done
 tflint --init && tflint --recursive
 checkov --config-file .checkov.yaml -d .
+
+uv sync --locked --all-groups
+uv run ruff check .
+uv run ruff format --check .
+uv run mypy .
+uv run pytest
 
 docker build -t dmc-268-api:local .
 trivy image --severity CRITICAL,HIGH --exit-code 1 dmc-268-api:local

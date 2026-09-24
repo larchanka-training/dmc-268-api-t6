@@ -103,6 +103,35 @@ jobs:
           done
           exit "${missing}"
 
+  python-lint-type-test:
+    # The name is the required status check on main; keep it verbatim.
+    name: Python lint / type / test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          version: "0.12.11"
+          python-version: "3.13"
+
+      - name: uv sync
+        run: uv sync --locked --all-groups
+
+      - name: ruff check
+        run: uv run ruff check .
+
+      - name: ruff format
+        run: uv run ruff format --check .
+
+      - name: mypy
+        run: uv run mypy .
+
+      - name: pytest
+        run: uv run pytest
+
   docker-build:
     name: Docker image build
     runs-on: ubuntu-latest
