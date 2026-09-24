@@ -218,6 +218,25 @@ jobs:
               "${edge[@]}" exec -T caddy caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile
             fi
 
+      - name: Wait for the edge certificate
+        if: steps.target.outputs.deploy_mode == 'edge'
+        env:
+          BASE_URL: ${{ steps.target.outputs.base_url }}
+        run: |
+          # On a first run Let's Encrypt issues certificates for every edge host, which can outlast the
+          # health check window; a failed health check would trigger an automatic rollback. Wait here,
+          # before any app change, until the TLS handshake succeeds (any HTTP status, 502 included).
+          deadline=$((SECONDS + 180))
+          until curl -s -o /dev/null --max-time 10 "${BASE_URL}/"; do
+            if (( SECONDS >= deadline )); then
+              echo "no valid TLS certificate for ${BASE_URL} after 180 s; check DNS and the edge proxy logs" >&2
+              curl -sS -o /dev/null --max-time 10 "${BASE_URL}/" || true
+              exit 1
+            fi
+            sleep 5
+          done
+          echo "TLS handshake with ${BASE_URL} succeeded"
+
       - name: Rollback
         uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2 # v1.2.5
         env:
