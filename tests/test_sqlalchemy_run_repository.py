@@ -1,6 +1,7 @@
 import asyncio
 from contextlib import AbstractAsyncContextManager
 from datetime import UTC, datetime
+from decimal import Decimal
 from types import SimpleNamespace
 from typing import Any, cast
 from uuid import UUID
@@ -8,7 +9,13 @@ from uuid import UUID
 from sqlalchemy import Select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.common.infrastructure.db.enums import Engine, RunState
+from app.common.infrastructure.db.enums import (
+    Engine,
+    FindingCategory,
+    FindingSeverity,
+    FindingSide,
+    RunState,
+)
 from app.modules.reviews.application.list_runs import RunCursor
 from app.modules.reviews.infrastructure.run_repository import SqlAlchemyRunRepository
 
@@ -138,3 +145,64 @@ def test_sqlalchemy_run_repository_gets_detail_with_one_summary_query() -> None:
     assert "SELECT usage_events.model" in sql
     assert "SELECT count(*)" in sql
     assert run.id in compiled.params.values()
+
+
+def test_sqlalchemy_run_repository_returns_only_published_comments_with_side_mapping() -> None:
+    run_id = UUID("00000000-0000-0000-0000-000000000001")
+    right_finding = SimpleNamespace(
+        id=UUID("00000000-0000-0000-0000-000000000002"),
+        file_path="app/service.py",
+        line_start=23,
+        side=FindingSide.RIGHT,
+        severity=FindingSeverity.HIGH,
+        category=FindingCategory.CORRECTNESS,
+        confidence=Decimal("0.90"),
+        title="Incorrect transition",
+        body="Validation is skipped.",
+        suggestion=None,
+        rule_name="state-machine",
+    )
+    left_finding = SimpleNamespace(
+        id=UUID("00000000-0000-0000-0000-000000000003"),
+        file_path="app/service.py",
+        line_start=17,
+        side=FindingSide.LEFT,
+        severity=FindingSeverity.MEDIUM,
+        category=FindingCategory.READABILITY,
+        confidence=Decimal("0.75"),
+        title="Old code",
+        body="Remove this branch.",
+        suggestion="",
+        rule_name=None,
+    )
+    session = FakeSession([(run_id, right_finding), (run_id, left_finding)])
+    repository = SqlAlchemyRunRepository(
+        cast(async_sessionmaker[AsyncSession], FakeSessionFactory(session))
+    )
+
+    comments = asyncio.run(repository.get_published_comments(run_id))
+
+    assert comments is not None
+    assert [(comment.old_line, comment.new_line) for comment in comments] == [
+        (None, 23),
+        (17, None),
+    ]
+    assert comments[0].rule_name == "state-machine"
+    assert comments[1].rule_name is None
+    assert session.statement is not None
+    sql = str(session.statement.compile())
+    assert "LEFT OUTER JOIN findings" in sql
+    assert "findings.published IS true" in sql
+    assert "WHERE runs.id =" in sql
+
+
+def test_sqlalchemy_run_repository_returns_empty_comments_for_an_existing_run() -> None:
+    run_id = UUID("00000000-0000-0000-0000-000000000001")
+    session = FakeSession([(run_id, None)])
+    repository = SqlAlchemyRunRepository(
+        cast(async_sessionmaker[AsyncSession], FakeSessionFactory(session))
+    )
+
+    comments = asyncio.run(repository.get_published_comments(run_id))
+
+    assert comments == []

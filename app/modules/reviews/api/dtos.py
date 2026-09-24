@@ -38,3 +38,17 @@ class RunSessionDto(ApiDto):
 class RunListDto(ApiDto):
     items: list[RunSessionDto]
     next_cursor: str | None
+
+
+class ReviewCommentDto(ApiDto):
+    id: UUID
+    path: str
+    old_line: int | None
+    new_line: int | None
+    severity: str
+    category: str
+    confidence: float
+    title: str
+    body: str
+    suggestion: str | None
+    rule_name: str | None

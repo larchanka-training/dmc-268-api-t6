@@ -10,8 +10,13 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.common.infrastructure.db.enums import RunState
 from app.common.infrastructure.db.session import create_session_factory
-from app.modules.reviews.api.dtos import PullRequestDto, RunListDto, RunSessionDto
+from app.modules.reviews.api.dtos import PullRequestDto, ReviewCommentDto, RunListDto, RunSessionDto
 from app.modules.reviews.application.get_run import GetRun, RunDetailRepository
+from app.modules.reviews.application.get_run_comments import (
+    GetRunComments,
+    PublishedComment,
+    RunCommentsRepository,
+)
 from app.modules.reviews.application.list_runs import ListRuns, RunListItem, RunRepository
 from app.modules.reviews.infrastructure.run_repository import SqlAlchemyRunRepository
 
@@ -30,7 +35,7 @@ def session_factory_for(database_url: str) -> async_sessionmaker[AsyncSession]:
     return create_session_factory(database_url)
 
 
-def get_run_repository() -> RunRepository | RunDetailRepository:
+def get_run_repository() -> RunRepository | RunDetailRepository | RunCommentsRepository:
     database_url = os.environ.get("DATABASE_URL")
     if database_url is None:
         raise RuntimeError("DATABASE_URL must be configured to list runs")
@@ -56,6 +61,22 @@ def to_run_session_dto(item: RunListItem) -> RunSessionDto:
             url=item.url,
             head_sha=item.head_sha,
         ),
+    )
+
+
+def to_review_comment_dto(item: PublishedComment) -> ReviewCommentDto:
+    return ReviewCommentDto(
+        id=item.id,
+        path=item.path,
+        old_line=item.old_line,
+        new_line=item.new_line,
+        severity=item.severity,
+        category=item.category,
+        confidence=float(item.confidence),
+        title=item.title,
+        body=item.body,
+        suggestion=item.suggestion,
+        rule_name=item.rule_name,
     )
 
 
@@ -90,6 +111,17 @@ async def get_run(
     if item is None:
         raise HTTPException(status_code=404, detail="run not found")
     return to_run_session_dto(item)
+
+
+@api_router.get("/runs/{run_id}/comments", response_model=list[ReviewCommentDto])
+async def get_run_comments(
+    run_id: UUID,
+    repository: Annotated[RunCommentsRepository, Depends(get_run_repository)],
+) -> list[ReviewCommentDto]:
+    comments = await GetRunComments(repository).execute(run_id)
+    if comments is None:
+        raise HTTPException(status_code=404, detail="run not found")
+    return [to_review_comment_dto(comment) for comment in comments]
 
 
 app.include_router(api_router)
