@@ -33,3 +33,8 @@ class RunSessionDto(ApiDto):
     model: str | None
     action_count: int
     pull_request: PullRequestDto
+
+
+class RunListDto(ApiDto):
+    items: list[RunSessionDto]
+    next_cursor: str | None
