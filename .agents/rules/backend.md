@@ -11,7 +11,7 @@
 
 ## 2. Commands
 
-<!-- SYNC: commands table mirrored in AGENTS.md § Commands -->
+<!-- SYNC: commands table mirrored in AGENTS.md § Commands — change both together -->
 
 | Task           | Command                                            | Source          |
 | -------------- | --------------------------------------------------- | ---------------- |
@@ -33,8 +33,8 @@ repo layout) — do not fix it, run the commands above directly.
 
 ## 3. Layout & boundaries
 
-All of this section describes the layout of `docs/BACKEND_ARCHITECTURE.md`
-(pending api #4); on `main` today `app/` holds only `main.py`.
+All of this section describes the target layout of `docs/BACKEND_ARCHITECTURE.md`;
+on `main` today `app/` holds `bootstrap/`, `common/` and the modules' `infrastructure/` code.
 
 Clean Architecture, module-first: `app/bootstrap/`, `app/common/{application,domain,
 infrastructure}`, `app/modules/<m>/{domain,application,infrastructure}`,
@@ -89,7 +89,7 @@ material — leave it to the linters and the formatter.
 
 - [README.md](../../README.md) — setup, run, lint/format/typecheck/test commands
   (this repo, `main`).
-- `docs/BACKEND_ARCHITECTURE.md` (pending api #4) — Clean Architecture layout in
+- `docs/BACKEND_ARCHITECTURE.md` — Clean Architecture layout in
   full.
 - `docs/SYSTEM_DESIGN.md` — product architecture (this repo, `main`).
 - `.agents/skills/` — skill catalog (frontmatter contract in `.agents/README.md`).

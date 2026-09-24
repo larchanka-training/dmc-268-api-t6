@@ -11,7 +11,7 @@ FastAPI, SQLAlchemy 2 (async), Alembic, Pydantic 2, httpx, pytest, uv, Python 3.
 
 ## Non-negotiables
 
-<!-- SYNC: non-negotiables mirror .agents/rules/backend.md §1 (transaction rule: §3.4) -->
+<!-- SYNC: mirrors .agents/rules/backend.md §1 (transaction rule: §3.4); the rules file is authoritative — change both together -->
 
 - Always use uv for dependencies and running tools (never pip/poetry).
 - Never `--no-verify`.
@@ -24,7 +24,7 @@ FastAPI, SQLAlchemy 2 (async), Alembic, Pydantic 2, httpx, pytest, uv, Python 3.
 
 ## Commands
 
-<!-- SYNC: commands table mirrors .agents/rules/backend.md §2 -->
+<!-- SYNC: mirrors .agents/rules/backend.md §2; the rules file is authoritative — change both together -->
 
 | Task          | Command                                         | Source |
 | ------------- | ----------------------------------------------- | ------ |
@@ -42,10 +42,10 @@ FastAPI, SQLAlchemy 2 (async), Alembic, Pydantic 2, httpx, pytest, uv, Python 3.
 
 ## Layout
 
-Clean Architecture, module-first (`app/bootstrap`, `app/common`,
-`app/modules/<m>/{domain,application,infrastructure}`); dependency rule
-`entrypoints → application → domain`; `app/entrypoints/` is the target layout per
-`docs/BACKEND_ARCHITECTURE.md` (not on `main` yet); details in
+Clean Architecture, module-first. Target layout (`docs/BACKEND_ARCHITECTURE.md`):
+`app/bootstrap`, `app/common`, `app/modules/<m>/{domain,application,infrastructure}` and
+`app/entrypoints/`; dependency rule `entrypoints → application → domain`. On `main` today the
+modules hold only `infrastructure/` code and `app/entrypoints/` does not exist yet; details in
 `.agents/rules/backend.md`.
 
 ## Conventions
@@ -54,7 +54,7 @@ Clean Architecture, module-first (`app/bootstrap`, `app/common`,
   `refactor`/`test`/`ci`/`perf`/`style` work), `deps-update-YYYY-MM-DD`, slug
   preferably `<issue>-<kebab-case>`.
 - Commits: Conventional Commits, reference the issue (`(#N)` in the subject
-  or `Refs #N` in the footer).
+  or `Refs #N` in the footer; `Refs owner/repo#N` for another repo's issue).
 - PR title: conventional, ≤72 characters.
 - PR body: `What` / `Why` / `How to verify` / `Refs`, in that order.
 - One approving review required before merge.
