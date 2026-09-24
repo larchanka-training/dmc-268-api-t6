@@ -51,7 +51,7 @@ Look for the originating spec, in this order:
 
 ### 3. Identify the standards sources
 
-The stack rules file in `.agents/rules/` and `AGENTS.md` (pending role 1), plus anything else the repo documents, such as `CONTRIBUTING.md`.
+The stack rules file in `.agents/rules/` and `AGENTS.md`, plus anything else the repo documents, such as `CONTRIBUTING.md`.
 
 On top of whatever the repo documents, the Standards axis always carries the **smell baseline** below — a fixed set of Fowler code smells (_Refactoring_, ch.3) that applies even when a repo documents nothing. Two rules bind it:
 
