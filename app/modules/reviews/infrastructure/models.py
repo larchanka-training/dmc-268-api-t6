@@ -96,6 +96,20 @@ class CodeChange(Base):
     )
 
 
+class CodeChangeDiff(Base):
+    __tablename__ = "code_change_diffs"
+    __table_args__ = (UniqueConstraint("code_change_id", "head_sha", "filename"),)
+
+    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
+    code_change_id: Mapped[UUID] = mapped_column(
+        ForeignKey("code_changes.id", ondelete="CASCADE"), nullable=False
+    )
+    head_sha: Mapped[str] = mapped_column(String(64), nullable=False)
+    filename: Mapped[str] = mapped_column(String(1024), nullable=False)
+    patch: Mapped[str | None] = mapped_column(TEXT)
+    created_at: Mapped[datetime] = timestamp_column()
+
+
 class Run(Base):
     __tablename__ = "runs"
     __table_args__ = (

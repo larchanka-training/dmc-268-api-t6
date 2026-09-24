@@ -288,7 +288,7 @@ application права обходить интерфейсы.
 [env.py](../alembic/env.py) собирает `target_metadata` через bootstrap. Ревизии Alembic
 содержат фиксированные `op.create_table`, индексы и PostgreSQL enum types; они не
 импортируют runtime-модели и не используют `Base.metadata.create_all/drop_all`.
-После начальной схемы добавлены отдельные ревизии: enum для `Finding.severity`, `Finding.category` и
+После начальной схемы добавлены отдельные ревизии: успешный статус запуска `succeeded`, enum для `Finding.severity`, `Finding.category` и
 `Finding.side`, индексы для списка runs и последнего UsageEvent, а также JSONB
 `RunAction.response` с check constraint для гибридного хранения ответа. Будущие
 изменения схемы оформляются новой ревизией, а не правкой уже применённой.
