@@ -55,6 +55,18 @@ uv run ruff format .
 uv run mypy .
 ```
 
+## Environments
+
+Staging выкатывается автоматически при каждом push в `main` ([docs/CICD.md](docs/CICD.md)). Prod-адреса зарезервированы на edge-прокси и отвечают `502`, пока prod не задеплоен.
+
+| Сервис | Staging | Prod |
+|---|---|---|
+| API | [staging-api.dmc268-t6.axyi.ru](https://staging-api.dmc268-t6.axyi.ru/healthcheck) · [Swagger](https://staging-api.dmc268-t6.axyi.ru/docs) | [api.dmc268-t6.axyi.ru](https://api.dmc268-t6.axyi.ru) |
+| Webhook (будущий сервис за gateway) | [staging-webhook.dmc268-t6.axyi.ru](https://staging-webhook.dmc268-t6.axyi.ru) | [webhook.dmc268-t6.axyi.ru](https://webhook.dmc268-t6.axyi.ru) |
+| Web UI ([dmc-268-ui-t6](https://github.com/larchanka-training/dmc-268-ui-t6)) | [staging-ui.dmc268-t6.axyi.ru](https://staging-ui.dmc268-t6.axyi.ru) | [ui.dmc268-t6.axyi.ru](https://ui.dmc268-t6.axyi.ru) |
+
+`https://dmc268-t6.axyi.ru` — редирект на prod UI.
+
 ## Docs
 
 | Документ | Содержание |
