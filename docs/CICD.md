@@ -207,4 +207,3 @@ Caddy (compose project `dmc-268-edge`, `/opt/dmc-268-edge`) принимает 8
 Контракт для сервиса за прокси: подключиться к внешней docker-сети `dmc268-edge` с alias `<service>-<env>` и слушать порт из таблицы; host-порты на VPS не публиковать (80/443 заняты прокси). Пока upstream не запущен, маршрут отвечает 502, остальные работают. Webhook в MVP — отдельный сервис; роль API gateway выполняет этот прокси.
 
 HSTS: `max-age=31536000` без `includeSubDomains` и `preload`. ACME email не задан.
-
