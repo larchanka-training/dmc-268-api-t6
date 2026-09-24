@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 from functools import lru_cache
 from typing import Annotated
+from uuid import UUID
 
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -10,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app.common.infrastructure.db.enums import RunState
 from app.common.infrastructure.db.session import create_session_factory
 from app.modules.reviews.api.dtos import PullRequestDto, RunListDto, RunSessionDto
+from app.modules.reviews.application.get_run import GetRun, RunDetailRepository
 from app.modules.reviews.application.list_runs import ListRuns, RunListItem, RunRepository
 from app.modules.reviews.infrastructure.run_repository import SqlAlchemyRunRepository
 
@@ -28,7 +30,7 @@ def session_factory_for(database_url: str) -> async_sessionmaker[AsyncSession]:
     return create_session_factory(database_url)
 
 
-def get_run_repository() -> RunRepository:
+def get_run_repository() -> RunRepository | RunDetailRepository:
     database_url = os.environ.get("DATABASE_URL")
     if database_url is None:
         raise RuntimeError("DATABASE_URL must be configured to list runs")
@@ -77,6 +79,17 @@ async def list_runs(
     return RunListDto(
         items=[to_run_session_dto(item) for item in page.items], next_cursor=page.next_cursor
     )
+
+
+@api_router.get("/runs/{run_id}", response_model=RunSessionDto)
+async def get_run(
+    run_id: UUID,
+    repository: Annotated[RunDetailRepository, Depends(get_run_repository)],
+) -> RunSessionDto:
+    item = await GetRun(repository).execute(run_id)
+    if item is None:
+        raise HTTPException(status_code=404, detail="run not found")
+    return to_run_session_dto(item)
 
 
 app.include_router(api_router)

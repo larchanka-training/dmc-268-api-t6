@@ -1,9 +1,11 @@
+from dataclasses import replace
 from datetime import UTC, datetime
 from uuid import UUID
 
 from fastapi.testclient import TestClient
 
 from app.main import app, get_run_repository
+from app.modules.reviews.application.get_run import RunDetailRepository
 from app.modules.reviews.application.list_runs import RunCursor, RunListItem
 
 
@@ -22,6 +24,16 @@ class FakeRunRepository:
     ) -> list[RunListItem]:
         self.calls.append((status, repository, cursor, limit))
         return self.items
+
+
+class FakeRunDetailRepository:
+    def __init__(self, item: RunListItem | None) -> None:
+        self.item = item
+        self.calls: list[UUID] = []
+
+    async def get_run(self, run_id: UUID) -> RunListItem | None:
+        self.calls.append(run_id)
+        return self.item
 
 
 def make_item(value: int, created_at: datetime) -> RunListItem:
@@ -149,3 +161,52 @@ def test_runs_list_rejects_malformed_base64_and_non_utf8_cursors() -> None:
     assert malformed_base64.status_code == 422
     assert non_utf8.status_code == 422
     assert non_ascii.status_code == 422
+
+
+def test_run_detail_returns_pr_data_latest_model_and_action_count() -> None:
+    item = make_item(7, datetime(2026, 9, 24, tzinfo=UTC))
+    repository: RunDetailRepository = FakeRunDetailRepository(item)
+    app.dependency_overrides[get_run_repository] = lambda: repository
+    try:
+        response = TestClient(app).get(f"/api/runs/{item.id}")
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    assert response.json()["pullRequest"] == {
+        "repo": "org/repo",
+        "number": 7,
+        "title": "PR 7",
+        "url": "https://example.test/7",
+        "headSha": "a" * 40,
+    }
+    assert response.json()["model"] == "gpt-test"
+    assert response.json()["actionCount"] == 2
+
+
+def test_run_detail_returns_null_model_when_the_run_has_no_usage_event() -> None:
+    item = replace(make_item(8, datetime(2026, 9, 24, tzinfo=UTC)), model=None, action_count=3)
+    repository: RunDetailRepository = FakeRunDetailRepository(item)
+    app.dependency_overrides[get_run_repository] = lambda: repository
+    try:
+        response = TestClient(app).get(f"/api/runs/{item.id}")
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    assert response.json()["model"] is None
+    assert response.json()["actionCount"] == 3
+
+
+def test_run_detail_returns_404_for_a_missing_run_and_422_for_invalid_id() -> None:
+    repository: RunDetailRepository = FakeRunDetailRepository(None)
+    app.dependency_overrides[get_run_repository] = lambda: repository
+    try:
+        client = TestClient(app)
+        missing = client.get("/api/runs/00000000-0000-0000-0000-000000000999")
+        invalid = client.get("/api/runs/not-a-uuid")
+    finally:
+        app.dependency_overrides.clear()
+
+    assert missing.status_code == 404
+    assert invalid.status_code == 422
