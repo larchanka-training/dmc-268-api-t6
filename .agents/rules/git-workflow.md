@@ -8,6 +8,7 @@ links, no `Impact:` blocks) — this file ships to any team using this stack.
 ## Branches
 
 - `feat/<slug>`, `fix/<slug>`, `docs/<slug>`, `chore/<slug>`, `deps-update-YYYY-MM-DD`.
+- Work typed `refactor`/`test`/`ci`/`perf`/`style` uses `chore/`.
 - Slug preferably `<issue>-<kebab-case>`.
 - Existing branches that predate this rule are grandfathered — do not rename them.
 - Base branch is `main`. No direct pushes to `main`.

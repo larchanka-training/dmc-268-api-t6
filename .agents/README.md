@@ -16,13 +16,27 @@ duplication. This is role 7's decision, pending ratification by role 1
 
 ## Harness matrix
 
-| Harness     | Reads                        | Notes                                |
-| ----------- | ----------------------------- | ------------------------------------ |
-| Claude Code | `.claude/skills` (symlink)   | native skill discovery               |
-| Codex       | `.agents/skills`             | native, no symlink needed            |
-| Cursor      | `AGENTS.md` (pending role 1) | manual `@`-reference to `.agents/**` |
-| Gemini CLI  | `AGENTS.md` (pending role 1) | manual `@`-reference to `.agents/**` |
-| Copilot     | `AGENTS.md` (pending role 1) | manual reference — verify per tool   |
+| Harness     | Reads                                         | Notes                                                                                                                  |
+| ----------- | --------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
+| Claude Code | `.claude/skills`, `.claude/agents` (symlinks) | skills + agents via symlinks; rules only via skill links or `AGENTS.md`                                                |
+| Codex       | `.agents/skills`                              | skills only; `agents/` is not loaded (Codex agents are `.codex/agents/*.toml`); rules via `AGENTS.md` (pending role 1) |
+| Cursor      | `AGENTS.md` (pending role 1)                  | manual `@`-reference to `.agents/**`                                                                                   |
+| Gemini CLI  | `AGENTS.md` (pending role 1)                  | manual `@`-reference to `.agents/**`                                                                                   |
+| Copilot     | `AGENTS.md` (pending role 1)                  | manual reference — verify per tool                                                                                     |
+
+## Sub-agents across harnesses
+
+Skills and agents here name Claude Code's sub-agent tools. The equivalent per harness:
+
+- **Claude Code** — the `Agent` tool (`subagent_type: general-purpose`, or `Explore` for
+  read-only exploration).
+- **Codex** — `spawn_agent` with a self-contained message and no inherited history. Default
+  `multi_agent` (v1, on by default): `fork_context: false` or omit it; with `multi_agent_v2`:
+  `fork_turns: "none"` (its default is `all`).
+- **No sub-agent tool** — run each independent check as a separate fresh session
+  (`codex exec --ephemeral "<prompt>"` or `claude -p "<prompt>"`) and bring back only its
+  verdict. Never run the checks one after another in the same session — that defeats the
+  clean context the skills rely on.
 
 ## Directory map
 
@@ -31,9 +45,10 @@ duplication. This is role 7's decision, pending ratification by role 1
   `manual-automation`).
 - `agents/` — agent definitions (`name`, `description`, `model` frontmatter).
 - `templates/backend/` — code/test templates with proof blocks. Fenced blocks
-  preceded by `<!-- proof: <file> -->` are extracted and run through
-  lint/typecheck/tests by role 7's local gate before merge; ui: file name
-  under one root; api: `app/…` or `tests/…` prefix selects the root.
+  preceded by `<!-- proof: <file> -->` were proved once, at authoring time,
+  against the api base `b3a3505` (lint/typecheck/tests) with role 7's local gate
+  (not in this repo); ui: file name under one root; api: `app/…` or `tests/…`
+  prefix selects the root. Nothing re-checks them; re-prove after dependency bumps.
 - `proposals/` — drafts owned by other roles (e.g. `agents-md-draft.md`).
 
 ## Sync map (ui ↔ api)

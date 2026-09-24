@@ -41,7 +41,7 @@ Select the most specific type:
 - `test` — adding or updating tests
 - `chore` — maintenance, dependencies, build scripts
 - `ci` — CI/CD configuration changes
-- `sec` — security fixes or improvements
+- security fixes: `fix(security): …`
 - `revert` — revert a previous commit
 
 ### Scope (optional)
@@ -56,7 +56,7 @@ Use the affected module/component (folder) name, lowercase, kebab-case.
 
 ### Subject
 
-- Use **imperative mood** ("Add feature" not "Added feature").
+- Use **imperative mood** ("add feature" not "added feature").
 - Lowercase, imperative subject after the type (`feat(auth): add …`).
 - Do not end with a period.
 - Be concise but descriptive.
