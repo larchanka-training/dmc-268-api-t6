@@ -13,7 +13,7 @@ Rationale: the course board's Definition of Ready/Done, `docs/SYSTEM_DESIGN.md`
 `.claude/skills` — the symlink lets one file tree serve both without
 duplication. Decided in
 [dmc-268-ui-t6#32](https://github.com/larchanka-training/dmc-268-ui-t6/issues/32)
-(2026-09-24), closing SYSTEM_DESIGN §15 OQ-4.
+(2026-09-24); this answers SYSTEM_DESIGN §15 OQ-4.
 
 ## Harness matrix
 
@@ -88,5 +88,6 @@ how _we_ build, not what the bot reviews.
 
 ## AGENTS.md
 
-`AGENTS.md` is the root entry point; role 1 (tech lead) owns it, changes go
+`AGENTS.md` is the root entry point (Gemini CLI loads it only with the
+`context.fileName` setting above); role 1 (tech lead) owns it, changes go
 through a PR. `CLAUDE.md` only imports it.
