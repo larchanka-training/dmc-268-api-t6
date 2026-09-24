@@ -11,6 +11,8 @@
 
 ## 2. Commands
 
+<!-- SYNC: commands table mirrored in AGENTS.md § Commands -->
+
 | Task           | Command                                            | Source          |
 | -------------- | --------------------------------------------------- | ---------------- |
 | Env setup      | `cp .env.example .env`                             | main             |
@@ -22,8 +24,8 @@
 | Typecheck      | `uv run mypy .`                                    | main             |
 | Test           | `uv run pytest`                                    | main             |
 | Local infra    | `docker compose up -d`                             | main             |
-| Migrate        | `uv run alembic upgrade head`                      | pending api #4   |
-| New migration  | `uv run alembic revision --autogenerate -m "…"`    | pending api #4   |
+| Migrate        | `uv run alembic upgrade head`                      | main             |
+| New migration  | `uv run alembic revision --autogenerate -m "…"`    | main             |
 
 `uv.lock` is committed; `requires-python = "==3.13.*"`. Pre-commit config is
 currently inert (every hook has `files: ^backend/`, which never matches in this
@@ -93,5 +95,4 @@ material — leave it to the linters and the formatter.
 - `.agents/skills/` — skill catalog (frontmatter contract in `.agents/README.md`).
 - `review/README.md` — the AI reviewer product's own
   prompts and rule sets, not covered by this file.
-- `AGENTS.md` (pending role 1) — cross-tool entry point; see
-  `.agents/proposals/agents-md-draft.md` for the draft.
+- `AGENTS.md` — cross-tool entry point (decided in [dmc-268-ui-t6#32](https://github.com/larchanka-training/dmc-268-ui-t6/issues/32)).

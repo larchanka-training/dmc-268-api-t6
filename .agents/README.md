@@ -11,18 +11,19 @@ Rationale: the course board's Definition of Ready/Done, `docs/SYSTEM_DESIGN.md`
 §15 (OQ-4), and the 2026-08-17 lecture all converge on `.agents/` over
 `docs/agents/`. Codex reads `.agents/skills` natively; Claude Code reads
 `.claude/skills` — the symlink lets one file tree serve both without
-duplication. This is role 7's decision, pending ratification by role 1
-(tech lead); see `proposals/agents-md-draft.md`.
+duplication. Decided in
+[dmc-268-ui-t6#32](https://github.com/larchanka-training/dmc-268-ui-t6/issues/32)
+(2026-09-24), closing SYSTEM_DESIGN §15 OQ-4.
 
 ## Harness matrix
 
-| Harness     | Reads                                         | Notes                                                                                                                  |
-| ----------- | --------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
-| Claude Code | `.claude/skills`, `.claude/agents` (symlinks) | skills + agents via symlinks; rules only via skill links or `AGENTS.md`                                                |
-| Codex       | `.agents/skills`                              | skills only; `agents/` is not loaded (Codex agents are `.codex/agents/*.toml`); rules via `AGENTS.md` (pending role 1) |
-| Cursor      | `AGENTS.md` (pending role 1)                  | manual `@`-reference to `.agents/**`                                                                                   |
-| Gemini CLI  | `AGENTS.md` (pending role 1)                  | manual `@`-reference to `.agents/**`                                                                                   |
-| Copilot     | `AGENTS.md` (pending role 1)                  | manual reference — verify per tool                                                                                     |
+| Harness     | Reads                                                            | Notes                                                                                                                                            |
+| ----------- | ---------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Claude Code | `.claude/skills`, `.claude/agents` (symlinks)                    | skills + agents via symlinks; rules only via skill links or `AGENTS.md`                                                                          |
+| Codex       | `AGENTS.md`, `.agents/skills`                                    | `agents/` is not loaded (Codex agents are `.codex/agents/*.toml`)                                                                                |
+| Cursor      | `AGENTS.md` (root and nested)                                    | manual `@`-reference to `.agents/**`                                                                                                             |
+| Gemini CLI  | `GEMINI.md` only, by default                                     | add `AGENTS.md` to `context.fileName` in project `.gemini/settings.json` or user `~/.gemini/settings.json`; manual `@`-reference to `.agents/**` |
+| Copilot     | `AGENTS.md`: cloud agent, code review, VS Code Chat, Copilot CLI | not read by Visual Studio or by JetBrains / Eclipse Copilot Chat                                                                                 |
 
 ## Sub-agents across harnesses
 
@@ -49,7 +50,6 @@ Skills and agents here name Claude Code's sub-agent tools. The equivalent per ha
   against the api base `b3a3505` (lint/typecheck/tests) with role 7's local gate
   (not in this repo); ui: file name under one root; api: `app/…` or `tests/…`
   prefix selects the root. Nothing re-checks them; re-prove after dependency bumps.
-- `proposals/` — drafts owned by other roles (e.g. `agents-md-draft.md`).
 
 ## Sync map (ui ↔ api)
 
@@ -84,5 +84,5 @@ how _we_ build, not what the bot reviews.
 
 ## AGENTS.md
 
-`AGENTS.md` is owned by role 1 — see `proposals/agents-md-draft.md` for the
-draft this repo contributes.
+`AGENTS.md` is the root entry point; role 1 (tech lead) owns it, changes go
+through a PR.
