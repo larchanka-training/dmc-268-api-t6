@@ -1,4 +1,7 @@
+from __future__ import annotations
+
 from datetime import datetime
+from typing import Any
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict
@@ -52,3 +55,13 @@ class ReviewCommentDto(ApiDto):
     body: str
     suggestion: str | None
     rule_name: str | None
+
+
+class RunActionDto(ApiDto):
+    index: int
+    tool: str
+    request: dict[str, Any]
+    response: Any | None
+    response_ref: str | None
+    started_at: datetime
+    duration_ms: int

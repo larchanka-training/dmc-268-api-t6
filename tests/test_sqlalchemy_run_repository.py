@@ -206,3 +206,60 @@ def test_sqlalchemy_run_repository_returns_empty_comments_for_an_existing_run() 
     comments = asyncio.run(repository.get_published_comments(run_id))
 
     assert comments == []
+
+
+def test_sqlalchemy_run_repository_projects_ordered_actions_and_full_response() -> None:
+    run_id = UUID("00000000-0000-0000-0000-000000000001")
+    started_at = datetime(2026, 9, 24, tzinfo=UTC)
+    action = SimpleNamespace(
+        index=3,
+        tool="github.get_file",
+        request={"path": "app/service.py"},
+        response={"content": "small"},
+        response_ref=None,
+        started_at=started_at,
+        duration_ms=42,
+    )
+    actions_session = FakeSession([(run_id, action)])
+    actions_repository = SqlAlchemyRunRepository(
+        cast(async_sessionmaker[AsyncSession], FakeSessionFactory(actions_session))
+    )
+
+    actions = asyncio.run(actions_repository.get_run_actions(run_id))
+
+    assert actions is not None
+    assert actions[0].index == 3
+    assert actions[0].response == {"content": "small"}
+    assert actions_session.statement is not None
+    actions_sql = str(actions_session.statement.compile())
+    assert "LEFT OUTER JOIN run_actions" in actions_sql
+    assert "WHERE runs.id =" in actions_sql
+    assert "ORDER BY run_actions.index ASC" in actions_sql
+
+    response_session = FakeSession([({"content": "complete"},)])
+    response_repository = SqlAlchemyRunRepository(
+        cast(async_sessionmaker[AsyncSession], FakeSessionFactory(response_session))
+    )
+
+    response = asyncio.run(response_repository.get_run_action_response(run_id, 3))
+
+    assert response is not None
+    assert response.response == {"content": "complete"}
+    assert response_session.statement is not None
+    response_sql = str(response_session.statement.compile())
+    assert "FROM run_actions JOIN runs" in response_sql
+    assert "run_actions.index =" in response_sql
+    assert run_id in response_session.statement.compile().params.values()
+    assert 3 in response_session.statement.compile().params.values()
+
+
+def test_sqlalchemy_run_repository_returns_empty_actions_for_existing_run() -> None:
+    run_id = UUID("00000000-0000-0000-0000-000000000001")
+    session = FakeSession([(run_id, None)])
+    repository = SqlAlchemyRunRepository(
+        cast(async_sessionmaker[AsyncSession], FakeSessionFactory(session))
+    )
+
+    actions = asyncio.run(repository.get_run_actions(run_id))
+
+    assert actions == []
