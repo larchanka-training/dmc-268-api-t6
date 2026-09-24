@@ -71,6 +71,7 @@ Clean Architecture, module-first (`app/bootstrap`, `app/common`,
 - `docs/BACKEND_ARCHITECTURE.md` — Clean Architecture layout in full.
 - `docs/SYSTEM_DESIGN.md` — product architecture (this repo, `main`).
 - `review/` — the AI reviewer product's own prompts and rule sets, not covered here.
+- `CLAUDE.md` only imports this file — edit `AGENTS.md`.
 
 ## What NOT to do
 
