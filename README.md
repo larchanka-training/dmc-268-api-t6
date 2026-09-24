@@ -59,8 +59,8 @@ uv run mypy .
 
 | Документ | Содержание |
 |---|---|
-| [docs/INFRASTRUCTURE.md](docs/INFRASTRUCTURE.md) | Архитектура Hetzner, Terraform (`api-staging` + `ui-staging`), удаление стенда |
-| [docs/CICD.md](docs/CICD.md) | Пайплайн, deployment, rollback |
+| [docs/INFRASTRUCTURE.md](docs/INFRASTRUCTURE.md) | Курсовой VPS и DNS, архитектура Hetzner, Terraform (`api-staging` + `ui-staging`), удаление стенда |
+| [docs/CICD.md](docs/CICD.md) | Пайплайн, deployment, rollback, цели выката и edge-прокси |
 | [docs/SECRETS.md](docs/SECRETS.md) | Перечень secrets, доставка на staging, git и логи |
 
 ## Pre-commit

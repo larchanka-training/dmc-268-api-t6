@@ -6,7 +6,9 @@
 | Владелец | инфраструктура (роль 3) |
 | Связанные документы | [CICD.md](CICD.md), [SECRETS.md](SECRETS.md) |
 
-В этом репозитории живёт **вся** инфраструктура staging: два независимых Terraform-стека для API и UI. CI/CD приложений — в своих репозиториях (`dmc-268-api-t6`, `dmc-268-ui-t6`).
+В этом репозитории живёт **вся** инфраструктура staging: два независимых Terraform-стека для API и UI, а также edge-прокси курсового VPS. CI/CD приложений — в своих репозиториях (`dmc-268-api-t6`, `dmc-268-ui-t6`).
+
+Сейчас выкат идёт на **курсовой VPS** (выдан курсом, не Terraform) — §8. Terraform-стеки остаются рабочей альтернативой: CI выкатывает на Hetzner, как только задан `STAGING_HOST`.
 
 | Стек | Каталог | Сеть | VM / каталог на сервере |
 |---|---|---|---|
@@ -158,6 +160,8 @@ done
 
 ### 4.1. SSH-доступ
 
+Только для Terraform-хостов. На курсовом VPS (§8) sshd, порт и firewall не трогаем.
+
 SSH открыт миру намеренно: у GitHub-hosted runners нет стабильных egress IP, allowlist по CIDR их не пропустит. Защита вместо allowlist:
 
 | Мера | Как |
@@ -247,3 +251,37 @@ terraform -chdir=${STACK} destroy -var-file=environments/staging.tfvars
 4. Если домен делегировали на `dns_nameservers`, снять NS у регистратора.
 
 Не удаляйте VM руками в консоли, пока state жив: следующий `apply`/`destroy` разъедется с облаком.
+
+---
+
+## 8. Курсовой VPS
+
+Выдан курсом, Terraform им не управляет. Один VPS на команду держит staging и prod API, UI и будущего webhook-сервиса; маршрутизация по hostname через edge-прокси ([CICD.md](CICD.md#8-курсовой-vps-и-edge-прокси)).
+
+| Параметр | Значение |
+|---|---|
+| ОС | Debian 13 (trixie) |
+| SSH | порт 22, пользователь и пароль из organization secrets `VPS_DMC268_U` / `VPS_DMC268_P`, хост — `VPS_DMC268_IP_T6` |
+| Docker | нет в исходном образе; ставит CI (`deploy/scripts/provision.sh`: `docker.io`, `docker-cli`, `docker-compose` из Debian, идемпотентно и с блокировкой для параллельных выкатов API и UI) |
+| Входящий трафик | edge-прокси Caddy на 80/443 (`/opt/dmc-268-edge`, project `dmc-268-edge`), остальные сервисы — только в docker-сети `dmc268-edge` |
+| Каталоги | `/opt/dmc-268-api-staging` (API staging), `/opt/dmc-268-edge` (прокси); UI — свои каталоги |
+
+Правила общего VPS:
+
+- sshd, порт SSH, firewall и пользователей **не менять**: хост общий, доступ к нему у курса. Порт 22022, key-only и fail2ban (§4.1) относятся только к Terraform-хостам.
+- Host-порты публикует только edge-прокси. Сервис подключается к `dmc268-edge` с alias `<service>-<env>`.
+- Edge-прокси выкатывает только репозиторий API.
+
+### 8.1. DNS
+
+Все имена — A-записи на IPv4 VPS (`VPS_DMC268_IP_T6`), в зоне `APP_DOMAIN` (сейчас `dmc268-t6.axyi.ru`):
+
+| Имя | Тип |
+|---|---|
+| `<APP_DOMAIN>` | A |
+| `api`, `staging-api` | A |
+| `ui`, `staging-ui` | A |
+| `webhook`, `staging-webhook` | A |
+
+AAAA-записи добавлять только после проверки, что VPS принимает IPv6 на 443: иначе клиенты с IPv6 и выпуск сертификата по AAAA будут падать. Caddy выпускает сертификаты для всех имён из Caddyfile сразу после старта и сам их продлевает. Имя без A-записи сертификат не получит (Caddy повторяет попытки), остальные имена работают.
+
