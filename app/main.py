@@ -5,13 +5,25 @@ from functools import lru_cache
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, FastAPI, HTTPException, Query
+from fastapi import APIRouter, Depends, FastAPI, HTTPException, Path, Query
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.common.infrastructure.db.enums import RunState
 from app.common.infrastructure.db.session import create_session_factory
-from app.modules.reviews.api.dtos import PullRequestDto, ReviewCommentDto, RunListDto, RunSessionDto
+from app.modules.reviews.api.dtos import (
+    PullRequestDto,
+    ReviewCommentDto,
+    RunActionDto,
+    RunListDto,
+    RunSessionDto,
+)
 from app.modules.reviews.application.get_run import GetRun, RunDetailRepository
+from app.modules.reviews.application.get_run_actions import (
+    GetRunActionResponse,
+    GetRunActions,
+    RunActionsRepository,
+    RunActionTrace,
+)
 from app.modules.reviews.application.get_run_comments import (
     GetRunComments,
     PublishedComment,
@@ -35,7 +47,9 @@ def session_factory_for(database_url: str) -> async_sessionmaker[AsyncSession]:
     return create_session_factory(database_url)
 
 
-def get_run_repository() -> RunRepository | RunDetailRepository | RunCommentsRepository:
+def get_run_repository() -> (
+    RunRepository | RunDetailRepository | RunCommentsRepository | RunActionsRepository
+):
     database_url = os.environ.get("DATABASE_URL")
     if database_url is None:
         raise RuntimeError("DATABASE_URL must be configured to list runs")
@@ -77,6 +91,18 @@ def to_review_comment_dto(item: PublishedComment) -> ReviewCommentDto:
         body=item.body,
         suggestion=item.suggestion,
         rule_name=item.rule_name,
+    )
+
+
+def to_run_action_dto(item: RunActionTrace) -> RunActionDto:
+    return RunActionDto(
+        index=item.index,
+        tool=item.tool,
+        request=item.request,
+        response=item.response,
+        response_ref=item.response_ref,
+        started_at=item.started_at,
+        duration_ms=item.duration_ms,
     )
 
 
@@ -122,6 +148,29 @@ async def get_run_comments(
     if comments is None:
         raise HTTPException(status_code=404, detail="run not found")
     return [to_review_comment_dto(comment) for comment in comments]
+
+
+@api_router.get("/runs/{run_id}/actions", response_model=list[RunActionDto])
+async def get_run_actions(
+    run_id: UUID,
+    repository: Annotated[RunActionsRepository, Depends(get_run_repository)],
+) -> list[RunActionDto]:
+    actions = await GetRunActions(repository).execute(run_id)
+    if actions is None:
+        raise HTTPException(status_code=404, detail="run not found")
+    return [to_run_action_dto(action) for action in actions]
+
+
+@api_router.get("/runs/{run_id}/actions/{index}/response")
+async def get_run_action_response(
+    run_id: UUID,
+    index: Annotated[int, Path(ge=0)],
+    repository: Annotated[RunActionsRepository, Depends(get_run_repository)],
+) -> object:
+    response = await GetRunActionResponse(repository).execute(run_id, index)
+    if response is None:
+        raise HTTPException(status_code=404, detail="run action response not found")
+    return response.response
 
 
 app.include_router(api_router)

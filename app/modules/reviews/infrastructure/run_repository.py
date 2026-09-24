@@ -9,6 +9,8 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.modules.analytics.infrastructure.models import UsageEvent
 from app.modules.repositories.infrastructure.models import Repository
+from app.modules.reviews.application.get_run_actions import RunAction as RunActionProjection
+from app.modules.reviews.application.get_run_actions import RunActionResponse
 from app.modules.reviews.application.get_run_comments import PublishedComment
 from app.modules.reviews.application.list_runs import RunCursor, RunListItem
 from app.modules.reviews.infrastructure.models import CodeChange, Finding, Run, RunAction
@@ -102,6 +104,31 @@ class SqlAlchemyRunRepository:
             return None
         return [self._to_published_comment(finding) for _, finding in rows if finding is not None]
 
+    async def get_run_actions(self, run_id: UUID) -> list[RunActionProjection] | None:
+        statement = (
+            select(Run.id, RunAction)
+            .outerjoin(RunAction, RunAction.run_id == Run.id)
+            .where(Run.id == run_id)
+            .order_by(RunAction.index.asc())
+        )
+        async with self._session_factory() as session:
+            rows = (await session.execute(statement)).all()
+        if not rows:
+            return None
+        return [self._to_run_action(action) for _, action in rows if action is not None]
+
+    async def get_run_action_response(self, run_id: UUID, index: int) -> RunActionResponse | None:
+        statement = (
+            select(RunAction.response)
+            .join(Run, RunAction.run_id == Run.id)
+            .where(Run.id == run_id, RunAction.index == index)
+        )
+        async with self._session_factory() as session:
+            row = (await session.execute(statement)).one_or_none()
+        if row is None:
+            return None
+        return RunActionResponse(response=row[0])
+
     @staticmethod
     def _to_run_list_item(
         run: Run,
@@ -143,4 +170,16 @@ class SqlAlchemyRunRepository:
             body=finding.body,
             suggestion=finding.suggestion,
             rule_name=finding.rule_name,
+        )
+
+    @staticmethod
+    def _to_run_action(action: RunAction) -> RunActionProjection:
+        return RunActionProjection(
+            index=action.index,
+            tool=action.tool,
+            request=action.request,
+            response=action.response,
+            response_ref=action.response_ref,
+            started_at=action.started_at,
+            duration_ms=action.duration_ms,
         )
