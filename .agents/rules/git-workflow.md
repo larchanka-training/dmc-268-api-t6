@@ -33,7 +33,8 @@ links, no `Impact:` blocks) — this file ships to any team using this stack.
 - Cross-repo references: `Refs owner/repo#N`.
 - One approving review and all review threads resolved are required before merge.
 - Review threads: the author replies in every thread (the fix with its commit SHA, or
-  the reason for not changing it) and never resolves a thread — the reviewer does.
+  the reason for not changing it) and never resolves a thread — whoever opened it
+  (normally the reviewer) does.
   Full review flow (roles, board statuses, disputes): `docs/CONTRIBUTING.md`.
 - Merging: squash is fine for single-purpose branches; a merge commit that keeps
   the individual commits is fine too for multi-commit feature branches — either
