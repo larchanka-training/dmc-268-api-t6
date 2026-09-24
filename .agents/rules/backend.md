@@ -89,7 +89,7 @@ material — leave it to the linters and the formatter.
   (this repo, `main`).
 - `docs/BACKEND_ARCHITECTURE.md` (pending api #4) — Clean Architecture layout in
   full.
-- `docs/SYSTEM_DESIGN.md` (in `dmc-268-ui-t6`) — product architecture.
+- `docs/SYSTEM_DESIGN.md` — product architecture (this repo, `main`).
 - `.agents/skills/` — skill catalog (frontmatter contract in `.agents/README.md`).
 - `review/README.md` — the AI reviewer product's own
   prompts and rule sets, not covered by this file.

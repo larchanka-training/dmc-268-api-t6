@@ -8,9 +8,9 @@ onto it, not copies: `.claude/skills -> ../.agents/skills` and
 `.claude/agents -> ../.agents/agents` (committed as symlink objects).
 
 Rationale: the course board's Definition of Ready/Done, `docs/SYSTEM_DESIGN.md`
-§15 (OQ-4) of `dmc-268-ui-t6`, and the 2026-08-17 lecture all converge on
-`.agents/` over `docs/agents/`. Codex reads `.agents/skills` natively; Claude
-Code reads `.claude/skills` — the symlink lets one file tree serve both without
+§15 (OQ-4), and the 2026-08-17 lecture all converge on `.agents/` over
+`docs/agents/`. Codex reads `.agents/skills` natively; Claude Code reads
+`.claude/skills` — the symlink lets one file tree serve both without
 duplication. This is role 7's decision, pending ratification by role 1
 (tech lead); see `proposals/agents-md-draft.md`.
 
