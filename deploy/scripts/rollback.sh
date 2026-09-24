@@ -25,10 +25,25 @@ if [[ "${ROLLBACK_MODE}" != "auto" && "${ROLLBACK_MODE}" != "manual" ]]; then
   exit 1
 fi
 
+# Per-run registry credentials (see deploy.sh). Started by deploy.sh, the rollback inherits its
+# DOCKER_CONFIG, which still holds the login needed to pull the previous image.
+OWN_DOCKER_CONFIG=""
+if [[ -z "${DOCKER_CONFIG:-}" ]]; then
+  DOCKER_CONFIG="$(mktemp -d)"
+  OWN_DOCKER_CONFIG="${DOCKER_CONFIG}"
+  export DOCKER_CONFIG
+fi
+
 logout_registry() {
   docker logout ghcr.io >/dev/null 2>&1 || true
 }
-trap logout_registry EXIT
+cleanup_registry() {
+  logout_registry
+  if [[ -n "${OWN_DOCKER_CONFIG}" ]]; then
+    rm -rf "${OWN_DOCKER_CONFIG}"
+  fi
+}
+trap cleanup_registry EXIT
 
 restore_bootstrap() {
   if [[ -f "${COMPOSE_FILE}" && -f "${ENV_FILE}" ]]; then

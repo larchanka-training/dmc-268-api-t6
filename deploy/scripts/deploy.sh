@@ -18,10 +18,19 @@ BOOTSTRAP_NAME="${BOOTSTRAP_NAME:-${COMPOSE_PROJECT}-bootstrap}"
 # Named volume "postgres-data" of the compose project.
 POSTGRES_VOLUME="${POSTGRES_VOLUME:-${COMPOSE_PROJECT}_postgres-data}"
 
+# Per-run registry credentials: API and UI deploys share the root account on the course VPS, so
+# docker login must not touch /root/.docker/config.json. A rollback started from here reuses it.
+DOCKER_CONFIG="$(mktemp -d)"
+export DOCKER_CONFIG
+
 logout_registry() {
   docker logout ghcr.io >/dev/null 2>&1 || true
 }
-trap logout_registry EXIT
+cleanup_registry() {
+  logout_registry
+  rm -rf "${DOCKER_CONFIG}"
+}
+trap cleanup_registry EXIT
 
 generate_password() {
   if command -v openssl >/dev/null 2>&1; then
