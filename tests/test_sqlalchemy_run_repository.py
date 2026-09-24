@@ -263,3 +263,48 @@ def test_sqlalchemy_run_repository_returns_empty_actions_for_existing_run() -> N
     actions = asyncio.run(repository.get_run_actions(run_id))
 
     assert actions == []
+
+
+def test_sqlalchemy_run_repository_reads_snapshots_for_the_run_head_sha() -> None:
+    run_id = UUID("00000000-0000-0000-0000-000000000001")
+    session = FakeSession(
+        [
+            (run_id, "app/service.py", "diff --git a/app/service.py b/app/service.py"),
+            (run_id, "generated.lock", None),
+        ]
+    )
+    repository = SqlAlchemyRunRepository(
+        cast(async_sessionmaker[AsyncSession], FakeSessionFactory(session))
+    )
+
+    snapshots = asyncio.run(repository.get_run_diff(run_id))
+
+    assert snapshots is not None
+    assert [(snapshot.filename, snapshot.patch) for snapshot in snapshots] == [
+        ("app/service.py", "diff --git a/app/service.py b/app/service.py"),
+        ("generated.lock", None),
+    ]
+    assert session.statement is not None
+    sql = str(session.statement.compile())
+    assert "LEFT OUTER JOIN code_change_diffs" in sql
+    assert "code_change_diffs.head_sha = runs.head_sha" in sql
+    assert "ORDER BY code_change_diffs.filename ASC" in sql
+
+
+def test_sqlalchemy_run_repository_reads_the_durable_diff_input_for_processing() -> None:
+    run_id = UUID("00000000-0000-0000-0000-000000000001")
+    code_change_id = UUID("00000000-0000-0000-0000-000000000002")
+    session = FakeSession([(code_change_id, "a" * 40)])
+    repository = SqlAlchemyRunRepository(
+        cast(async_sessionmaker[AsyncSession], FakeSessionFactory(session))
+    )
+
+    run_input = asyncio.run(repository.get_run_diff_input(run_id))
+
+    assert run_input is not None
+    assert run_input.code_change_id == code_change_id
+    assert run_input.head_sha == "a" * 40
+    assert session.statement is not None
+    sql = str(session.statement.compile())
+    assert "SELECT runs.code_change_id, runs.head_sha" in sql
+    assert "WHERE runs.id =" in sql

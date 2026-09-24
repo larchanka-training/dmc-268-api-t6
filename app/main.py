@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app.common.infrastructure.db.enums import RunState
 from app.common.infrastructure.db.session import create_session_factory
 from app.modules.reviews.api.dtos import (
+    DiffFileDto,
     PullRequestDto,
     ReviewCommentDto,
     RunActionDto,
@@ -28,6 +29,11 @@ from app.modules.reviews.application.get_run_comments import (
     GetRunComments,
     PublishedComment,
     RunCommentsRepository,
+)
+from app.modules.reviews.application.get_run_diff import (
+    DiffSnapshot,
+    GetRunDiff,
+    RunDiffRepository,
 )
 from app.modules.reviews.application.list_runs import ListRuns, RunListItem, RunRepository
 from app.modules.reviews.infrastructure.run_repository import SqlAlchemyRunRepository
@@ -48,7 +54,11 @@ def session_factory_for(database_url: str) -> async_sessionmaker[AsyncSession]:
 
 
 def get_run_repository() -> (
-    RunRepository | RunDetailRepository | RunCommentsRepository | RunActionsRepository
+    RunRepository
+    | RunDetailRepository
+    | RunCommentsRepository
+    | RunActionsRepository
+    | RunDiffRepository
 ):
     database_url = os.environ.get("DATABASE_URL")
     if database_url is None:
@@ -104,6 +114,10 @@ def to_run_action_dto(item: RunActionTrace) -> RunActionDto:
         started_at=item.started_at,
         duration_ms=item.duration_ms,
     )
+
+
+def to_diff_file_dto(item: DiffSnapshot) -> DiffFileDto:
+    return DiffFileDto(filename=item.filename, patch=item.patch)
 
 
 @api_router.get("/runs", response_model=RunListDto)
@@ -171,6 +185,17 @@ async def get_run_action_response(
     if response is None:
         raise HTTPException(status_code=404, detail="run action response not found")
     return response.response
+
+
+@api_router.get("/runs/{run_id}/diff", response_model=list[DiffFileDto])
+async def get_run_diff(
+    run_id: UUID,
+    repository: Annotated[RunDiffRepository, Depends(get_run_repository)],
+) -> list[DiffFileDto]:
+    snapshots = await GetRunDiff(repository).execute(run_id)
+    if snapshots is None:
+        raise HTTPException(status_code=404, detail="run not found")
+    return [to_diff_file_dto(snapshot) for snapshot in snapshots]
 
 
 app.include_router(api_router)

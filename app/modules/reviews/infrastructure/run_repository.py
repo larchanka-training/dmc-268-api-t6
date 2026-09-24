@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from uuid import UUID
 
-from sqlalchemy import and_, func, or_, select
+from sqlalchemy import and_, delete, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.modules.analytics.infrastructure.models import UsageEvent
@@ -12,8 +12,16 @@ from app.modules.repositories.infrastructure.models import Repository
 from app.modules.reviews.application.get_run_actions import RunAction as RunActionProjection
 from app.modules.reviews.application.get_run_actions import RunActionResponse
 from app.modules.reviews.application.get_run_comments import PublishedComment
+from app.modules.reviews.application.get_run_diff import DiffSnapshot
 from app.modules.reviews.application.list_runs import RunCursor, RunListItem
-from app.modules.reviews.infrastructure.models import CodeChange, Finding, Run, RunAction
+from app.modules.reviews.application.process_run import RunDiffInput
+from app.modules.reviews.infrastructure.models import (
+    CodeChange,
+    CodeChangeDiff,
+    Finding,
+    Run,
+    RunAction,
+)
 
 
 class SqlAlchemyRunRepository:
@@ -128,6 +136,59 @@ class SqlAlchemyRunRepository:
         if row is None:
             return None
         return RunActionResponse(response=row[0])
+
+    async def get_run_diff(self, run_id: UUID) -> list[DiffSnapshot] | None:
+        statement = (
+            select(Run.id, CodeChangeDiff.filename, CodeChangeDiff.patch)
+            .outerjoin(
+                CodeChangeDiff,
+                and_(
+                    CodeChangeDiff.code_change_id == Run.code_change_id,
+                    CodeChangeDiff.head_sha == Run.head_sha,
+                ),
+            )
+            .where(Run.id == run_id)
+            .order_by(CodeChangeDiff.filename.asc())
+        )
+        async with self._session_factory() as session:
+            rows = (await session.execute(statement)).all()
+        if not rows:
+            return None
+        return [
+            DiffSnapshot(filename=filename, patch=patch)
+            for _, filename, patch in rows
+            if filename is not None
+        ]
+
+    async def replace_diff_snapshots(
+        self, code_change_id: UUID, head_sha: str, snapshots: list[DiffSnapshot]
+    ) -> None:
+        async with self._session_factory.begin() as session:
+            await session.execute(
+                delete(CodeChangeDiff).where(
+                    CodeChangeDiff.code_change_id == code_change_id,
+                    CodeChangeDiff.head_sha == head_sha,
+                )
+            )
+            session.add_all(
+                [
+                    CodeChangeDiff(
+                        code_change_id=code_change_id,
+                        head_sha=head_sha,
+                        filename=snapshot.filename,
+                        patch=snapshot.patch,
+                    )
+                    for snapshot in snapshots
+                ]
+            )
+
+    async def get_run_diff_input(self, run_id: UUID) -> RunDiffInput | None:
+        statement = select(Run.code_change_id, Run.head_sha).where(Run.id == run_id)
+        async with self._session_factory() as session:
+            row = (await session.execute(statement)).one_or_none()
+        if row is None:
+            return None
+        return RunDiffInput(code_change_id=row[0], head_sha=row[1])
 
     @staticmethod
     def _to_run_list_item(

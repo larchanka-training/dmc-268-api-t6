@@ -65,3 +65,8 @@ class RunActionDto(ApiDto):
     response_ref: str | None
     started_at: datetime
     duration_ms: int
+
+
+class DiffFileDto(ApiDto):
+    filename: str
+    patch: str | None
