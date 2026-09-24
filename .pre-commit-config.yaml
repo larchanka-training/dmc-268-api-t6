@@ -3,38 +3,33 @@ repos:
     rev: v6.0.0
     hooks:
       - id: trailing-whitespace
-        files: ^backend/
       - id: end-of-file-fixer
-        files: ^backend/
+        # Rendered from docs/erd/erd.mmd; a manual fix would be lost on the next render.
+        exclude: ^docs/erd/erd\.svg$
       - id: check-yaml
-        files: ^backend/
       - id: check-toml
-        files: ^backend/
       - id: check-merge-conflict
-        files: ^backend/
 
+  # Same commands as the CI job "Python lint / type / test", so both check the same files.
   - repo: local
     hooks:
       - id: ruff-check
         name: ruff check
-        entry: sh -c 'cd backend && uv run ruff check --fix .'
+        entry: uv run ruff check --fix .
         language: system
         types: [python]
-        files: ^backend/
         pass_filenames: false
 
       - id: ruff-format
         name: ruff format
-        entry: sh -c 'cd backend && uv run ruff format .'
+        entry: uv run ruff format .
         language: system
         types: [python]
-        files: ^backend/
         pass_filenames: false
 
       - id: mypy
         name: mypy
-        entry: sh -c 'cd backend && uv run mypy .'
+        entry: uv run mypy .
         language: system
         types: [python]
-        files: ^backend/
         pass_filenames: false
