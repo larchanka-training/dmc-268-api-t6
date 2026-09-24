@@ -37,6 +37,10 @@ metadata:
    - `gh pr create --title "<type>(<scope>): <subject>" --body "<body>" --base main`.
    - Title: Conventional Commits, ≤72 characters.
    - Body has four sections, in this order: `What`, `Why`, `How to verify`, `Refs`.
+   - Ask the user whether the PR is ready for review. Not ready: add `--draft`. Ready: ask
+     who reviews it and add `--reviewer <login>` — never pick the reviewer yourself.
+     The review flow after this point (threads, verdicts, merge) is in
+     `docs/CONTRIBUTING.md`.
    - Cross-repo references use `Refs owner/repo#N` — never a closing keyword; the issue is
      closed by hand after both linked PRs merge.
 
