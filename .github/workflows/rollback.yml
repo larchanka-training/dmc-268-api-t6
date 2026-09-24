@@ -101,6 +101,20 @@ jobs:
             echo "GitHub variable STAGING_SSH_FINGERPRINT must be the ${mode} host key fingerprint SHA256:<43 base64 chars> (ssh-keyscan -p ${port} ${host} | ssh-keygen -lf - -E sha256)" >&2
             exit 1
           fi
+          # One key=value line per output: a CR/LF inside a value (e.g. from STAGING_HEALTH_URL) could
+          # otherwise append lines that override mode, host or port.
+          for value in "${mode}" "${host}" "${port}" "${app_dir}" "${deploy_mode}" "${edge_alias}" "${base_url}" "${health_url}"; do
+            if [[ "${value}" == *$'\n'* || "${value}" == *$'\r'* ]]; then
+              echo "staging target values must be single-line" >&2
+              exit 1
+            fi
+          done
+          for url in "${base_url}" "${health_url}"; do
+            if [[ ! "${url}" =~ ^https?://[^[:space:]]+$ ]]; then
+              echo "staging URL '${url}' must be http(s)://<host>[/path] without whitespace" >&2
+              exit 1
+            fi
+          done
           {
             echo "mode=${mode}"
             echo "host=${host}"
