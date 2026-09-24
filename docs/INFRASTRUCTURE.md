@@ -270,6 +270,7 @@ terraform -chdir=${STACK} destroy -var-file=environments/staging.tfvars
 
 - sshd, порт SSH, firewall и пользователей **не менять**: хост общий, доступ к нему у курса. Порт 22022, key-only и fail2ban (§4.1) относятся только к Terraform-хостам.
 - Host-порты публикует только edge-прокси. Сервис подключается к `dmc268-edge` с alias `<service>-<env>`.
+- Docker Engine сам меняет iptables на хосте: цепочки `DOCKER*`, NAT (MASQUERADE и DNAT для опубликованных портов 80/443) и политику `FORWARD` (DROP). Сейчас host-firewall на VPS нет. Любой будущий firewall (nftables, ufw) должен это учитывать: правила для опубликованных портов Docker обходят цепочку `INPUT`, а перезагрузка firewall со сбросом ruleset (`flush ruleset`) ломает сеть контейнеров до перезапуска Docker.
 - Edge-прокси выкатывает только репозиторий API.
 
 ### 8.1. DNS
