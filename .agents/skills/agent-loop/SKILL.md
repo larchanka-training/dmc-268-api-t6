@@ -40,7 +40,11 @@ graph TD
 > implementation code, create source files, or modify files in the codebase directly during
 > the development phase. The coordinator is solely responsible for planning, orchestrating the
 > loop, conducting code reviews, and managing publishing. All code changes and task
-> implementations MUST be delegated to the spawned subagents.
+> implementations MUST be delegated to the spawned subagents, each given a brief file path
+> rather than a retyped copy of context.
+
+Sub-agents are spawned with the harness's sub-agent tool; for each harness see
+`.agents/README.md` § Sub-agents across harnesses.
 
 ### 1. Planning Phase
 
@@ -62,7 +66,8 @@ graph TD
 
 ### 3. Review Phase (Quality Gates)
 
-- **Spawn the `review` subagent** to perform standard and spec audits on the branch's git diff.
+- **Spawn the `review` subagent** — the `code-reviewer` agent (Claude Code), or a fresh
+  sub-agent elsewhere, following the code-review skill — to audit the branch's git diff.
 - The `review` agent outputs findings under `## Standards` and `## Spec` headers.
 - **Evaluate results**:
   - **If there are findings** (e.g., hard violations or baseline smells):
@@ -78,7 +83,8 @@ graph TD
 
 - **Spawn the `publisher` subagent** to automate the integration and deployment lifecycle.
 - The `publisher` agent must:
-  - Verify `git status` and stage all changed files.
+  - Review `git status`, then stage per the pull-request skill (explicit paths for new files,
+    `git add -u` for tracked; never `git add .`).
   - Commit files using the Conventional Commits syntax and push to origin.
   - Execute `gh pr create` with standard metadata titles/descriptions to open the pull request.
   - Return the direct URL link to the pull request.
@@ -96,11 +102,11 @@ To ensure execution consistency, each sub-agent in this loop is dedicated to exe
 specific workspace skill. They must load and re-use the following guides:
 
 - **Planning Sub-Agent**: the planning-and-task-breakdown skill
-  (`.agents/skills/planning-and-task-breakdown/SKILL.md`, added by a later task in this issue)
+  (`.agents/skills/planning-and-task-breakdown/SKILL.md`)
   — analyzes dependencies, partitions slices, and outputs plans.
 - **Development Sub-Agent**: incremental, vertical-slice implementation (see the stack rules
-  file in `.agents/rules/`), plus the tdd skill (`.agents/skills/tdd/SKILL.md`, added by a
-  later task in this issue) for test-first RED-GREEN loops at public boundaries.
+  file in `.agents/rules/`), plus the tdd skill (`.agents/skills/tdd/SKILL.md`) for
+  test-first RED-GREEN loops at public boundaries.
 - **Review Sub-Agent**: [code-review](../code-review/SKILL.md) — performs two-axis checks for
   standard compliance and specification compliance.
 - **Publisher Sub-Agent**: [pull-request](../pull-request/SKILL.md) — automates git checkout,

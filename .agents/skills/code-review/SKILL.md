@@ -18,7 +18,7 @@ Two-axis review of the diff between `HEAD` and a fixed point the user supplies:
 
 Both axes run as **parallel sub-agents** so they don't pollute each other's context, then this skill aggregates their findings.
 
-The issue tracker is GitHub; fetch issues with `gh issue view <n>`.
+The issue tracker is GitHub; fetch issues with `gh issue view <n> --json title,body,comments` (a bare `gh issue view <n>` fails in this org on the Projects (classic) deprecation).
 
 ## Analysis order & comment format
 
@@ -44,9 +44,9 @@ Before going further, confirm the fixed point resolves (`git rev-parse <fixed-po
 
 Look for the originating spec, in this order:
 
-1. Issue references in the commit messages (`#123`, `Closes #45`, GitLab `!67`, etc.) — fetch via `gh issue view <n>`.
-2. A path the user passed as an argument.
-3. A PRD/spec file under `docs/`, `specs/`, or `.scratch/` matching the branch name or feature.
+1. A path the user passed as an argument.
+2. Issue references in the commit messages (`#123`, `Closes #45`, etc.) — fetch via `gh issue view <n> --json title,body,comments`. If the commits reference several distinct issues, fetch all of them and name each in the Spec prompt.
+3. A PRD/spec file under `docs/` (including `docs/plans/`) or `specs/` matching the branch name or feature.
 4. If nothing is found, ask the user where the spec is. If they say there isn't one, the **Spec** sub-agent will skip and report "no spec available".
 
 ### 3. Identify the standards sources
@@ -77,7 +77,7 @@ Each smell reads _what it is_ → _how to fix_; match it against the diff:
 
 ### 4. Spawn both sub-agents in parallel
 
-Send a single message with two `Agent` tool calls. Use the `general-purpose` subagent for both.
+Send a single message with two `Agent` tool calls. Use the `general-purpose` subagent for both. Other harnesses: see `.agents/README.md` § Sub-agents across harnesses.
 
 **Standards sub-agent prompt** — include: the full diff command and commit list; the standards-source files found in step 3 **plus the smell baseline pasted in full** (the sub-agent has no other access to it); and the brief: "Report — per file/hunk where relevant — (a) every place the diff violates a documented standard: cite the standard (file + rule); and (b) any baseline smell you spot: name it and quote the hunk. Distinguish hard violations from judgement calls — documented-standard breaches can be hard, but baseline smells are always judgement calls, and a documented repo standard overrides the baseline. Skip anything tooling enforces. Under 400 words."
 

@@ -9,7 +9,8 @@ model: sonnet
 <!-- SYNC: mirrored in dmc-268-{ui,api}-t6/.agents/agents/code-reviewer.md -->
 
 Runs in a clean context — never the agent that wrote the code being reviewed. Read-only: it
-reports findings, it never edits files.
+reports findings, it never edits files. This definition is Claude Code-only; for other
+harnesses see `.agents/README.md` § Sub-agents across harnesses.
 
 ## Inputs
 
@@ -26,7 +27,9 @@ reports findings, it never edits files.
 
 ## Output
 
-A findings list, no prose outside it. Each finding:
+Two sections, `## Standards` and `## Spec` (as in the
+[code-review skill](../skills/code-review/SKILL.md)), no prose outside them; each finding uses
+the fields below:
 
 - `path:line`
 - `category`: `security` | `correctness` | `performance` | `readability`

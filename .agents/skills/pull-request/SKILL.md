@@ -26,9 +26,10 @@ metadata:
      message — see `commit-message-instructions.md` in this skill for the full format.
 
 2. **Create branch, commit, and push**:
-   - `git checkout -b <branch-name>`, then `git add -u` (or explicit paths, never `git add .`)
-     and review `git status` before committing — an untracked file (`.env`, proof scratch,
-     stray logs) must never ride along.
+   - `git checkout -b <branch-name>`, then `git add <explicit paths>` for every new file of
+     this change and `git add -u` for modified tracked files (never `git add .`).
+   - Check `git status` before committing: no unrelated untracked files (`.env`, proof
+     scratch, logs).
    - `git commit -m "<commit-message>" && git push -u origin <branch-name>`.
    - Never `--no-verify`.
 
