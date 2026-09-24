@@ -20,10 +20,11 @@
 ### Что реализовано, а что является планом
 
 В текущем каркасе реализованы healthcheck FastAPI, ORM-модели, общая DB-инфраструктура,
-Unit of Work, конфигурация Alembic, начальная миграция и тесты. Дерево слоёв и пять
+Unit of Work, конфигурация Alembic, начальная миграция и тесты. Дерево слоёв и
 entrypoints ниже — целевая организация приложения: use cases, конкретные repositories,
-LLM/VCS/payment gateways и consumers ещё предстоит реализовать. Текущий Compose
-поднимает backend и PostgreSQL, а не весь целевой runtime.
+LLM/VCS/payment gateways и consumers ещё предстоит реализовать. Весь код пока живёт в
+одном пакете `app/`; разнесение по сервисам `services/<name>/` (Р-12) реализуется в
+PR #10. Текущий Compose поднимает backend и PostgreSQL, а не весь целевой runtime.
 
 ## Принципы
 
@@ -78,23 +79,29 @@ persistence-слоя. Ни те, ни другие не пересекают г�
 
 ## Entrypoints
 
-Согласно Р-12 из [SYSTEM_DESIGN.md](SYSTEM_DESIGN.md), целевой image имеет пять entrypoint:
-`api`, `webhook`, `worker`, `publisher` и `collector`. После их реализации каждый будет
-располагаться в `app/entrypoints/<name>/` и останется тонкой точкой входа: декодирует транспортный
-контракт, получает use case из container и преобразует результат обратно в HTTP/AMQP.
-Бизнес-решения в entrypoint не допускаются.
+Согласно Р-12 из [SYSTEM_DESIGN.md](SYSTEM_DESIGN.md) (утверждён в редакции PR #10),
+backend — один monorepo и пять независимо собираемых сервисов: `services/portal-api`,
+`services/auth-api`, `services/webhook-api`, `services/worker`, `services/publisher`.
+Каждый собирается своим Dockerfile и запускается отдельным контейнером; PostgreSQL,
+RabbitMQ и Redis — общая инфраструктура на переходном этапе. Отдельного Event Collector
+нет: `usage_events` пишет worker (LLM Gateway), метрики строятся по ним. Схему применяет
+одноразовый job `migrator`, а не шестой сервис.
 
-Развёртывание: один репозиторий, один Docker image и несколько процессов с разными
-командами запуска. На старте три контейнера приложения: `api` (+ `collector`),
-`webhook`, `worker` (+ `publisher`). RabbitMQ и PostgreSQL — общая инфраструктура.
-При раздельном запуске `publisher`/`collector` встроенные consumers нужно отключить
-в исходных процессах через конфигурацию; это не требует изменения бизнес-логики.
+Import path един для всех сервисов: процесс стартует из `services/<name>/app/main.py` —
+HTTP-сервисы командой `uvicorn app.main:app`, consumers `worker` и `publisher` командой
+`python -m app.main`; `app.main` только импортирует тонкий entrypoint
+`app.entrypoints.<entry>` (`portal`, `auth`, `webhook`, `worker`, `publisher`). Entrypoint
+декодирует транспортный контракт, получает use case из container и преобразует результат
+обратно в HTTP/AMQP. Бизнес-решения в entrypoint не допускаются.
 
-Это модульный многопроцессный backend, а не полностью автономные микросервисы:
-процессы разделяют версию кода, схему БД и миграции. Бизнес-модуль не равен контейнеру.
-Модели принадлежат модулям; чужие таблицы не изменяются напрямую из use cases —
-доступ идёт через публичные интерфейсы. Между процессами передаются версионированные
-сообщения с идентификаторами, не ORM-объекты и не Python-вызовы.
+Эта раскладка реализуется в PR #10. До его слияния код — один пакет `app/`
+(структура ниже), а `docker-compose.yml` поднимает только `backend` и PostgreSQL.
+
+Сервисы собираются и выпускаются независимо, но это не полностью автономные
+микросервисы: на переходном этапе они разделяют схему БД и миграции. Бизнес-модуль не
+равен контейнеру. Модели принадлежат модулям; чужие таблицы не изменяются напрямую из
+use cases — доступ идёт через публичные интерфейсы. Между сервисами передаются
+версионированные сообщения с идентификаторами, не ORM-объекты и не Python-вызовы.
 
 ## Интерфейсы и инфраструктурные реализации
 
@@ -128,6 +135,9 @@ ORM-модели, миграции или изменения use case в рам�
 Код организован **сначала по бизнес-модулю**, а уже внутри модуля — по слоям Clean
 Architecture. Это не позволяет превратить `common` в свалку и сохраняет use case,
 его интерфейс и реализацию рядом друг с другом.
+
+Дерево описывает пакет `app/` до PR #10. После разнесения по Р-12 у каждого сервиса свой
+`services/<name>/app/`, и в его `entrypoints/` остаётся только entrypoint этого сервиса.
 
 ```text
 app/
@@ -175,11 +185,11 @@ app/
       application/
       infrastructure/
   entrypoints/
-    api/                       # FastAPI routes и response schemas
-    webhook/                   # GitHub webhook FastAPI app
-    worker/                    # review.run AMQP consumer
-    publisher/                 # review.publish AMQP consumer
-    collector/                 # events.* AMQP consumer
+    portal/                    # portal-api: FastAPI routes и response schemas
+    auth/                      # auth-api: GitHub OAuth, JWT и сессии
+    webhook/                   # webhook-api: GitHub webhook FastAPI app
+    worker/                    # worker: review.run AMQP consumer
+    publisher/                 # publisher: review.publish AMQP consumer
 ```
 
 `bootstrap/container.py` — единственное место, где создаются engine, session factory,
