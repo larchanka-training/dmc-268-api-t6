@@ -17,13 +17,17 @@ duplication. Decided in
 
 ## Harness matrix
 
-| Harness     | Reads                                                            | Notes                                                                                                                                            |
-| ----------- | ---------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Claude Code | `.claude/skills`, `.claude/agents` (symlinks)                    | skills + agents via symlinks; rules only via skill links or `AGENTS.md`                                                                          |
-| Codex       | `AGENTS.md`, `.agents/skills`                                    | `agents/` is not loaded (Codex agents are `.codex/agents/*.toml`)                                                                                |
-| Cursor      | `AGENTS.md` (root and nested)                                    | manual `@`-reference to `.agents/**`                                                                                                             |
-| Gemini CLI  | `GEMINI.md` only, by default                                     | add `AGENTS.md` to `context.fileName` in project `.gemini/settings.json` or user `~/.gemini/settings.json`; manual `@`-reference to `.agents/**` |
-| Copilot     | `AGENTS.md`: cloud agent, code review, VS Code Chat, Copilot CLI | not read by Visual Studio or by JetBrains / Eclipse Copilot Chat                                                                                 |
+| Harness     | Reads                                                                            | Notes                                                                                                                                            |
+| ----------- | -------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Claude Code | `CLAUDE.md` (imports `AGENTS.md`), `.claude/skills`, `.claude/agents` (symlinks) | skills + agents via symlinks                                                                                                                     |
+| Codex       | `AGENTS.md`, `.agents/skills`                                                    | `agents/` is not loaded (Codex agents are `.codex/agents/*.toml`)                                                                                |
+| Cursor      | `AGENTS.md` (root and nested)                                                    | manual `@`-reference to `.agents/**`                                                                                                             |
+| Gemini CLI  | `GEMINI.md` only, by default                                                     | add `AGENTS.md` to `context.fileName` in project `.gemini/settings.json` or user `~/.gemini/settings.json`; manual `@`-reference to `.agents/**` |
+| Copilot     | `AGENTS.md`: cloud agent, code review, VS Code Chat, Copilot CLI                 | not read by Visual Studio or by JetBrains / Eclipse Copilot Chat                                                                                 |
+
+Copilot's cloud agent and Copilot CLI also accept a root `CLAUDE.md`; which file wins when both
+exist, and whether its `@AGENTS.md` line is resolved, is not documented. `CLAUDE.md` holds no
+rules of its own either way.
 
 ## Sub-agents across harnesses
 
@@ -85,4 +89,4 @@ how _we_ build, not what the bot reviews.
 ## AGENTS.md
 
 `AGENTS.md` is the root entry point; role 1 (tech lead) owns it, changes go
-through a PR.
+through a PR. `CLAUDE.md` only imports it.
