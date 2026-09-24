@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from uuid import UUID
+
 from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -57,24 +59,55 @@ class SqlAlchemyRunRepository:
 
         async with self._session_factory() as session:
             rows = (await session.execute(statement)).all()
-        return [
-            RunListItem(
-                id=run.id,
-                status=run.state.value,
-                engine=run.engine.value,
-                attempt=run.attempt,
-                cancel_requested=run.cancel_requested,
-                started_at=run.started_at,
-                finished_at=run.finished_at,
-                error_code=run.error_code,
-                model=model,
-                action_count=action_count,
-                repo=repository_name,
-                number=code_change.external_number,
-                title=code_change.title,
-                url=code_change.web_url,
-                head_sha=run.head_sha,
-                created_at=run.created_at,
-            )
-            for run, code_change, repository_name, model, action_count in rows
-        ]
+        return [self._to_run_list_item(*row) for row in rows]
+
+    async def get_run(self, run_id: UUID) -> RunListItem | None:
+        latest_model = (
+            select(UsageEvent.model)
+            .where(UsageEvent.run_id == Run.id)
+            .order_by(UsageEvent.created_at.desc(), UsageEvent.id.desc())
+            .limit(1)
+            .scalar_subquery()
+        )
+        action_count = (
+            select(func.count())
+            .select_from(RunAction)
+            .where(RunAction.run_id == Run.id)
+            .scalar_subquery()
+        )
+        statement = (
+            select(Run, CodeChange, Repository.full_name, latest_model, action_count)
+            .join(CodeChange, Run.code_change_id == CodeChange.id)
+            .join(Repository, CodeChange.repository_id == Repository.id)
+            .where(Run.id == run_id)
+        )
+        async with self._session_factory() as session:
+            row = (await session.execute(statement)).one_or_none()
+        return self._to_run_list_item(*row) if row is not None else None
+
+    @staticmethod
+    def _to_run_list_item(
+        run: Run,
+        code_change: CodeChange,
+        repository_name: str,
+        model: str | None,
+        action_count: int,
+    ) -> RunListItem:
+        return RunListItem(
+            id=run.id,
+            status=run.state.value,
+            engine=run.engine.value,
+            attempt=run.attempt,
+            cancel_requested=run.cancel_requested,
+            started_at=run.started_at,
+            finished_at=run.finished_at,
+            error_code=run.error_code,
+            model=model,
+            action_count=action_count,
+            repo=repository_name,
+            number=code_change.external_number,
+            title=code_change.title,
+            url=code_change.web_url,
+            head_sha=run.head_sha,
+            created_at=run.created_at,
+        )

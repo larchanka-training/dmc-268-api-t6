@@ -20,6 +20,10 @@ class FakeResult:
     def all(self) -> list[tuple[Any, ...]]:
         return self._rows
 
+    def one_or_none(self) -> tuple[Any, ...] | None:
+        assert len(self._rows) <= 1
+        return self._rows[0] if self._rows else None
+
 
 class FakeSession:
     def __init__(self, rows: list[tuple[Any, ...]]) -> None:
@@ -97,4 +101,40 @@ def test_sqlalchemy_run_repository_filters_and_orders_with_a_tied_timestamp_curs
     assert "succeeded" in compiled.params.values()
     assert "org/repo" in compiled.params.values()
     assert list(compiled.params.values()).count(created_at) == 2
+    assert run.id in compiled.params.values()
+
+
+def test_sqlalchemy_run_repository_gets_detail_with_one_summary_query() -> None:
+    created_at = datetime(2026, 9, 24, tzinfo=UTC)
+    run = SimpleNamespace(
+        id=UUID("00000000-0000-0000-0000-000000000001"),
+        state=RunState.SUCCEEDED,
+        engine=Engine.FAST,
+        attempt=1,
+        cancel_requested=False,
+        started_at=created_at,
+        finished_at=None,
+        error_code=None,
+        head_sha="a" * 40,
+        created_at=created_at,
+    )
+    code_change = SimpleNamespace(
+        external_number=5, title="Review me", web_url="https://example.test/pull/5"
+    )
+    session = FakeSession([(run, code_change, "org/repo", None, 4)])
+    repository = SqlAlchemyRunRepository(
+        cast(async_sessionmaker[AsyncSession], FakeSessionFactory(session))
+    )
+
+    item = asyncio.run(repository.get_run(run.id))
+
+    assert item is not None
+    assert item.model is None
+    assert item.action_count == 4
+    assert session.statement is not None
+    compiled = session.statement.compile()
+    sql = str(compiled)
+    assert "WHERE runs.id =" in sql
+    assert "SELECT usage_events.model" in sql
+    assert "SELECT count(*)" in sql
     assert run.id in compiled.params.values()
