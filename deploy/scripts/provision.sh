@@ -6,11 +6,13 @@
 #   the installation.
 # - Safe to run twice in parallel, also from another app repo on the same host: installs are
 #   serialized with flock on a shared lock file, and apt waits for the dpkg lock.
-# - Touches only Docker packages and APP_DIR: no sshd, firewall or user changes.
+# - With EDGE_NETWORK set (course VPS), also creates that shared docker network.
+# - Touches only Docker packages, the docker network and APP_DIR: no sshd, firewall or user changes.
 set -euo pipefail
 set +o xtrace
 
 APP_DIR="${APP_DIR:-/opt/dmc-268-api}"
+EDGE_NETWORK="${EDGE_NETWORK:-}"
 LOCK_TIMEOUT="${PROVISION_LOCK_TIMEOUT:-600}"
 LOCK_FILE="/var/lock/docker-provision.lock"
 
@@ -75,6 +77,12 @@ done
 if ! docker info >/dev/null 2>&1; then
   echo "docker daemon is not running" >&2
   exit 1
+fi
+
+# A concurrent run may create the network between inspect and create: re-check on failure.
+if [[ -n "${EDGE_NETWORK}" ]] && ! docker network inspect "${EDGE_NETWORK}" >/dev/null 2>&1; then
+  docker network create "${EDGE_NETWORK}" >/dev/null 2>&1 || docker network inspect "${EDGE_NETWORK}" >/dev/null
+  echo "created docker network ${EDGE_NETWORK}"
 fi
 
 mkdir -p "${APP_DIR}"
