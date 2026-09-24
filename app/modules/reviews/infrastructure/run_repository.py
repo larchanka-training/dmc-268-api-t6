@@ -9,8 +9,9 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.modules.analytics.infrastructure.models import UsageEvent
 from app.modules.repositories.infrastructure.models import Repository
+from app.modules.reviews.application.get_run_comments import PublishedComment
 from app.modules.reviews.application.list_runs import RunCursor, RunListItem
-from app.modules.reviews.infrastructure.models import CodeChange, Run, RunAction
+from app.modules.reviews.infrastructure.models import CodeChange, Finding, Run, RunAction
 
 
 class SqlAlchemyRunRepository:
@@ -85,6 +86,22 @@ class SqlAlchemyRunRepository:
             row = (await session.execute(statement)).one_or_none()
         return self._to_run_list_item(*row) if row is not None else None
 
+    async def get_published_comments(self, run_id: UUID) -> list[PublishedComment] | None:
+        statement = (
+            select(Run.id, Finding)
+            .outerjoin(
+                Finding,
+                and_(Finding.run_id == Run.id, Finding.published.is_(True)),
+            )
+            .where(Run.id == run_id)
+            .order_by(Finding.created_at.asc(), Finding.id.asc())
+        )
+        async with self._session_factory() as session:
+            rows = (await session.execute(statement)).all()
+        if not rows:
+            return None
+        return [self._to_published_comment(finding) for _, finding in rows if finding is not None]
+
     @staticmethod
     def _to_run_list_item(
         run: Run,
@@ -110,4 +127,20 @@ class SqlAlchemyRunRepository:
             url=code_change.web_url,
             head_sha=run.head_sha,
             created_at=run.created_at,
+        )
+
+    @staticmethod
+    def _to_published_comment(finding: Finding) -> PublishedComment:
+        return PublishedComment(
+            id=finding.id,
+            path=finding.file_path,
+            old_line=finding.line_start if finding.side.value == "LEFT" else None,
+            new_line=finding.line_start if finding.side.value == "RIGHT" else None,
+            severity=finding.severity.value,
+            category=finding.category.value,
+            confidence=finding.confidence,
+            title=finding.title,
+            body=finding.body,
+            suggestion=finding.suggestion,
+            rule_name=finding.rule_name,
         )
