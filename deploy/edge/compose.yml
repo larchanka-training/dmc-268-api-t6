@@ -5,6 +5,17 @@ services:
   caddy:
     image: caddy:2.11.4@sha256:0c994536bddb66445885237f1a5dcc1916bccea922661c76b4e9fc24061f9b52
     restart: unless-stopped
+    # Only binding 80/443 needs a capability; certificates and state live on the volumes below.
+    # Without DAC_OVERRIDE the config dir must be readable by root as owner (root-owned on the VPS).
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp
     environment:
       APP_DOMAIN: ${APP_DOMAIN:?APP_DOMAIN is required}
     ports:
