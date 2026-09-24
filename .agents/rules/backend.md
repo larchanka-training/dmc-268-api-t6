@@ -47,11 +47,15 @@ infrastructure}`, `app/modules/<m>/{domain,application,infrastructure}`,
 3. `UnitOfWork`: repositories call `flush`, never `commit` — the use case commits.
 4. No DB transaction spans an LLM or GitHub call; network calls happen outside the
    transaction boundary.
-5. Alembic revisions are frozen (pending api #4): explicit `op.create_table` and
-   friends, never `Base.metadata.create_all/drop_all`; revision ids are
-   `YYYYMMDD_NNNN`.
-6. `StrEnum` maps to a PostgreSQL native `ENUM` type (pending api #4).
-7. Constraint names follow `ck_/ix_/uq_<table>_…` (pending api #4).
+5. Alembic revisions are frozen: a merged revision is never edited, not even by a
+   formatter or an import sorter — changes go into a new revision. Explicit
+   `op.create_table` and friends, never `Base.metadata.create_all/drop_all`;
+   revision ids are `YYYYMMDD_NNNN`.
+6. `StrEnum` maps to a PostgreSQL native `ENUM` type.
+7. CHECK constraints and indexes (partial unique ones included) get hand-written
+   `ck_/ix_/uq_<table>_…` names. There is no `MetaData` naming convention, so PK,
+   FK and most unique constraints keep PostgreSQL's default names; introducing a
+   convention is a decision of its own (it would re-prefix the existing `ck_` names).
 
 ## 4. Language rules
 
@@ -74,8 +78,9 @@ infrastructure}`, `app/modules/<m>/{domain,application,infrastructure}`,
 - Plain `pytest`, no `pytest-asyncio` plugin — drive async code with `asyncio.run`.
 - Unit tests exercise use cases against fakes of the ports (Protocols), not real
   infrastructure.
-- Integration tests are marked `@pytest.mark.integration` and skip when
-  `TEST_DATABASE_URL` is unset (marker registration pending api #4).
+- Integration tests are marked `@pytest.mark.integration` (registered in
+  `pyproject.toml`) and skip when `TEST_DATABASE_URL` is unset; the skip lives in
+  each DB test file's fixture — there is no shared `conftest.py` yet.
 - Assert literal values taken from the spec — never derive an expected value from
   the implementation under test.
 
