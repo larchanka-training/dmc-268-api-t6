@@ -143,6 +143,67 @@ jobs:
             echo "ref=" >> "${GITHUB_OUTPUT}"
           fi
 
+      # Course VPS: the host may be bare (never deployed); install Docker and the edge proxy first.
+      - name: Upload deploy files
+        if: steps.target.outputs.deploy_mode == 'edge'
+        uses: appleboy/scp-action@ff85246acaad7bdce478db94a363cd2bf7c90345 # v1.0.0
+        with:
+          host: ${{ steps.target.outputs.host }}
+          port: ${{ steps.target.outputs.port }}
+          username: ${{ steps.target.outputs.mode == 'course' && secrets.VPS_DMC268_U || vars.STAGING_SSH_USER }}
+          key: ${{ steps.target.outputs.mode == 'terraform' && secrets.STAGING_SSH_KEY || '' }}
+          password: ${{ steps.target.outputs.mode == 'course' && secrets.VPS_DMC268_P || '' }}
+          fingerprint: ${{ vars.STAGING_SSH_FINGERPRINT }}
+          source: "deploy/compose/staging.yml,deploy/compose/staging.ports.yml,deploy/compose/staging.edge.yml,deploy/scripts/provision.sh,deploy/scripts/deploy.sh,deploy/scripts/rollback.sh,deploy/scripts/healthcheck.sh,deploy/scripts/env-file.sh"
+          target: ${{ steps.target.outputs.app_dir }}
+          strip_components: 2
+
+      - name: Upload edge proxy files
+        if: steps.target.outputs.deploy_mode == 'edge'
+        uses: appleboy/scp-action@ff85246acaad7bdce478db94a363cd2bf7c90345 # v1.0.0
+        with:
+          host: ${{ steps.target.outputs.host }}
+          port: ${{ steps.target.outputs.port }}
+          username: ${{ steps.target.outputs.mode == 'course' && secrets.VPS_DMC268_U || vars.STAGING_SSH_USER }}
+          key: ${{ steps.target.outputs.mode == 'terraform' && secrets.STAGING_SSH_KEY || '' }}
+          password: ${{ steps.target.outputs.mode == 'course' && secrets.VPS_DMC268_P || '' }}
+          fingerprint: ${{ vars.STAGING_SSH_FINGERPRINT }}
+          source: "deploy/edge/compose.yml,deploy/edge/Caddyfile"
+          target: /opt/dmc-268-edge
+          strip_components: 2
+
+      - name: Prepare host
+        if: steps.target.outputs.deploy_mode == 'edge'
+        uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2 # v1.2.5
+        env:
+          APP_DIR: ${{ steps.target.outputs.app_dir }}
+          EDGE_NETWORK: ${{ steps.target.outputs.deploy_mode == 'edge' && 'dmc268-edge' || '' }}
+          APP_DOMAIN: ${{ vars.APP_DOMAIN }}
+        with:
+          host: ${{ steps.target.outputs.host }}
+          port: ${{ steps.target.outputs.port }}
+          username: ${{ steps.target.outputs.mode == 'course' && secrets.VPS_DMC268_U || vars.STAGING_SSH_USER }}
+          key: ${{ steps.target.outputs.mode == 'terraform' && secrets.STAGING_SSH_KEY || '' }}
+          password: ${{ steps.target.outputs.mode == 'course' && secrets.VPS_DMC268_P || '' }}
+          fingerprint: ${{ vars.STAGING_SSH_FINGERPRINT }}
+          debug: false
+          envs: APP_DIR,EDGE_NETWORK,APP_DOMAIN
+          script: |
+            set -euo pipefail
+            set +o xtrace
+            cd "${APP_DIR}"
+            mv staging.yml compose.yml
+            mv staging.ports.yml compose.ports.yml
+            mv staging.edge.yml compose.edge.yml
+            chmod +x provision.sh deploy.sh rollback.sh healthcheck.sh env-file.sh
+            ./provision.sh
+            if [[ -n "${EDGE_NETWORK}" ]]; then
+              # Only the API repo deploys the edge proxy on the course VPS; refreshed on every run.
+              edge=(docker compose -p dmc-268-edge -f /opt/dmc-268-edge/compose.yml)
+              "${edge[@]}" up -d --wait --wait-timeout 120
+              "${edge[@]}" exec -T caddy caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile
+            fi
+
       - name: Rollback
         uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2 # v1.2.5
         env:
