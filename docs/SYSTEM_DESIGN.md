@@ -695,7 +695,7 @@ flowchart TB
 | OQ-1 | После первого ревью GitHub снимает бота из requested reviewers. Повторный пуш: ревьюим автоматически или ждём повторного назначения? | автоматически, пока PR открыт (`reviewer_requested` — наш флаг, не GitHub) | продукт / мит |
 | OQ-2 | Модель для DiffEngine и размер бюджета | отдельное задание по тестированию моделей; дизайн модель-агностичен через LLM Gateway | роль 7 + мит |
 | OQ-3 | `review_event` по умолчанию: `COMMENT` или `REQUEST_CHANGES` при critical? | `COMMENT`; `REQUEST_CHANGES` — настройка репозитория | продукт |
-| OQ-4 | Раскладка `.agents/` vs `docs/agents/` | `.agents/` (DoD роли 7) | роль 7 + техлид |
+| OQ-4 | Раскладка `.agents/` vs `docs/agents/` | **закрыт** решением роли 7 в [dmc-268-ui-t6#32](https://github.com/larchanka-training/dmc-268-ui-t6/issues/32): `.agents/` — источник истины, `.claude/{skills,agents}` — симлинки на него | роль 7 + техлид |
 | OQ-5 | Event Collector как отдельный процесс — с какого порога | **закрыт Р-12**: отдельного collector нет, `usage_events` пишет worker | техлид |
 | OQ-6 | Стековые PR (B на основе A): пуш в A меняет дифф B, событие приходит только по A | не решаем в v1, фиксируем как известный пробел | — |
 | OQ-7 | Шифрование `ProviderInstallation` at rest | в MVP не заявлено: токены App не сохраняются, в `metadata` — только JSON-описание установки; вернуться, если в `metadata` появятся секреты | техлид + роль 6 |
