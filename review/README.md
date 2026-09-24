@@ -55,7 +55,7 @@ the backend and is not part of the draft.
 One request is assembled as `system → <custom_instructions> → <agents_md> → <repo_conventions> → <pr_meta> →
 <changed_files> → <omitted_files>`: the prompt file is the system message, the tags follow in this order. The
 order serves the provider's prompt cache: prompt, rules and conventions form the stable prefix shared by every
-run of a repository, the diff is the varying tail (`docs/SYSTEM_DESIGN.md` §10 of the ui repository).
+run of a repository, the diff is the varying tail (`docs/SYSTEM_DESIGN.md` §10).
 `review.conventions` runs first, with its own tags in the same style.
 
 ## Input envelope

@@ -58,10 +58,10 @@ print('healthcheck: ok')
 
 **Webhook smoke** — once the webhook entrypoint exists (pending api #4):
 POST a sample GitHub payload with an `X-Hub-Signature-256` header (HMAC over
-the raw body, per `docs/SYSTEM_DESIGN.md` (ui repo) §8.2) and assert the
+the raw body, per `docs/SYSTEM_DESIGN.md` §8.3) and assert the
 response status and the literal JSON fields the endpoint contracts to
 return. Do not invent the path or payload shape before the endpoint lands —
-cite `docs/SYSTEM_DESIGN.md` (ui repo) §8.2 for the header and signing
+cite `docs/SYSTEM_DESIGN.md` §8.3 for the header and signing
 scheme, and treat the route itself as not yet built:
 
 ```bash
