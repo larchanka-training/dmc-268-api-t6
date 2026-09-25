@@ -24,7 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from app.modules.reviews.infrastructure.models import PromptVersion
 
 _FILENAME_RE = re.compile(r"^(?P<key>.+)\.v(?P<version>\d+)\.md$")
-_FRONTMATTER_RE = re.compile(r"\A---\n(?P<fields>.*?)\n---\n", re.DOTALL)
+_FRONTMATTER_RE = re.compile(r"\A---\r?\n(?P<fields>.*?)\r?\n---\r?\n", re.DOTALL)
 _FIELD_RE = re.compile(r"^(?P<name>key|version):\s*(?P<value>.+?)\s*$")
 
 
@@ -46,7 +46,8 @@ def load_prompt_assets(prompts_dir: Path) -> tuple[PromptAsset, ...]:
         if filename is None:
             raise ValueError(f"prompt filename must match <key>.v<N>.md: {path}")
 
-        content = path.read_text(encoding="utf-8")
+        source_bytes = path.read_bytes()
+        content = source_bytes.decode("utf-8")
         frontmatter = _FRONTMATTER_RE.match(content)
         if frontmatter is None:
             raise ValueError(f"prompt has no YAML frontmatter: {path}")
@@ -64,7 +65,7 @@ def load_prompt_assets(prompts_dir: Path) -> tuple[PromptAsset, ...]:
                 key=key,
                 version=version,
                 content=content,
-                checksum=sha256(content.encode("utf-8")).hexdigest(),
+                checksum=sha256(source_bytes).hexdigest(),
             )
         )
     if not assets:

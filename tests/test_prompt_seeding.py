@@ -64,6 +64,18 @@ def test_load_prompt_assets_preserves_full_file_and_checksum() -> None:
         assert asset.checksum == sha256(expected_content.encode("utf-8")).hexdigest()
 
 
+def test_load_prompt_assets_preserves_crlf_bytes_and_checksum(tmp_path: Path) -> None:
+    source_bytes = b"---\r\nkey: review.system\r\nversion: 1\r\n---\r\nPrompt\r\n"
+    source_path = tmp_path / "review.system.v1.md"
+    source_path.write_bytes(source_bytes)
+
+    (asset,) = load_prompt_assets(tmp_path)
+
+    assert asset.content == source_bytes.decode("utf-8")
+    assert asset.content.encode("utf-8") == source_bytes
+    assert asset.checksum == sha256(source_bytes).hexdigest()
+
+
 def test_load_prompt_assets_rejects_filename_version_mismatch(tmp_path: Path) -> None:
     (tmp_path / "review.system.v2.md").write_text(
         "---\nkey: review.system\nversion: 1\n---\nPrompt\n", encoding="utf-8"
