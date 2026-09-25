@@ -96,19 +96,20 @@ def test_get_run_diff_returns_404_for_missing_run_and_422_for_invalid_id() -> No
     assert invalid.status_code == 422
 
 
-def test_store_diff_snapshot_normalizes_patches_and_omits_large_files() -> None:
+def test_store_diff_snapshot_persists_filenames_only_when_total_diff_exceeds_limit() -> None:
     code_change_id = UUID("00000000-0000-0000-0000-000000000200")
     repository = FakeDiffRepository([])
-    large_patch = "\n".join("+line" for _ in range(3001))
+    first_patch = "\n".join("+line" for _ in range(1501))
+    second_patch = "\n".join("+line" for _ in range(1500))
 
     asyncio.run(
         StoreDiffSnapshot(repository).execute(
             code_change_id=code_change_id,
             head_sha="a" * 40,
             files=[
-                DiffSnapshot(filename="app/service.py", patch="@@ -1 +1 @@\n-old\n+new"),
+                DiffSnapshot(filename="app/service.py", patch=first_patch),
                 DiffSnapshot(filename="logo.png", patch=None),
-                DiffSnapshot(filename="generated.lock", patch=large_patch),
+                DiffSnapshot(filename="generated.lock", patch=second_patch),
             ],
         )
     )
@@ -118,13 +119,44 @@ def test_store_diff_snapshot_normalizes_patches_and_omits_large_files() -> None:
             code_change_id,
             "a" * 40,
             [
+                DiffSnapshot(filename="app/service.py", patch=None),
+                DiffSnapshot(filename="logo.png", patch=None),
+                DiffSnapshot(filename="generated.lock", patch=None),
+            ],
+        )
+    ]
+
+
+def test_store_diff_snapshot_keeps_full_diff_at_aggregate_limit() -> None:
+    code_change_id = UUID("00000000-0000-0000-0000-000000000201")
+    repository = FakeDiffRepository([])
+    first_patch = "\n".join("+line" for _ in range(1500))
+    second_patch = "\n".join("+line" for _ in range(1500))
+
+    asyncio.run(
+        StoreDiffSnapshot(repository).execute(
+            code_change_id=code_change_id,
+            head_sha="c" * 40,
+            files=[
+                DiffSnapshot(filename="app/first.py", patch=first_patch),
+                DiffSnapshot(filename="logo.png", patch=None),
+                DiffSnapshot(filename="app/second.py", patch=second_patch),
+            ],
+        )
+    )
+
+    assert repository.write_calls == [
+        (
+            code_change_id,
+            "c" * 40,
+            [
                 DiffSnapshot(
-                    filename="app/service.py",
+                    filename="app/first.py",
                     patch=(
-                        "diff --git a/app/service.py b/app/service.py\n"
-                        "--- a/app/service.py\n"
-                        "+++ b/app/service.py\n"
-                        "@@ -1 +1 @@\n-old\n+new"
+                        "diff --git a/app/first.py b/app/first.py\n"
+                        "--- a/app/first.py\n"
+                        "+++ b/app/first.py\n"
+                        f"{first_patch}"
                     ),
                 ),
                 DiffSnapshot(
@@ -132,7 +164,15 @@ def test_store_diff_snapshot_normalizes_patches_and_omits_large_files() -> None:
                     patch="diff --git a/logo.png b/logo.png\n"
                     "Binary files a/logo.png and b/logo.png differ",
                 ),
-                DiffSnapshot(filename="generated.lock", patch=None),
+                DiffSnapshot(
+                    filename="app/second.py",
+                    patch=(
+                        "diff --git a/app/second.py b/app/second.py\n"
+                        "--- a/app/second.py\n"
+                        "+++ b/app/second.py\n"
+                        f"{second_patch}"
+                    ),
+                ),
             ],
         )
     ]

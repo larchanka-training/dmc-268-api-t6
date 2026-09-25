@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from uuid import UUID
 
-from sqlalchemy import and_, delete, func, or_, select
+from sqlalchemy import ColumnElement, and_, delete, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.common.infrastructure.db.enums import RunState
@@ -52,8 +52,9 @@ class SqlAlchemyRunRepository:
             .where(RunAction.run_id == Run.id)
             .scalar_subquery()
         )
+        summary_only = self._summary_only_projection()
         statement = (
-            select(Run, CodeChange, Repository.full_name, latest_model, action_count)
+            select(Run, CodeChange, Repository.full_name, latest_model, action_count, summary_only)
             .join(CodeChange, Run.code_change_id == CodeChange.id)
             .join(Repository, CodeChange.repository_id == Repository.id)
             .order_by(Run.created_at.desc(), Run.id.desc())
@@ -89,8 +90,9 @@ class SqlAlchemyRunRepository:
             .where(RunAction.run_id == Run.id)
             .scalar_subquery()
         )
+        summary_only = self._summary_only_projection()
         statement = (
-            select(Run, CodeChange, Repository.full_name, latest_model, action_count)
+            select(Run, CodeChange, Repository.full_name, latest_model, action_count, summary_only)
             .join(CodeChange, Run.code_change_id == CodeChange.id)
             .join(Repository, CodeChange.repository_id == Repository.id)
             .where(Run.id == run_id)
@@ -235,12 +237,36 @@ class SqlAlchemyRunRepository:
         return CancelRequestResult(found=True, changed=False)
 
     @staticmethod
+    def _summary_only_projection() -> ColumnElement[bool]:
+        snapshot_count = (
+            select(func.count())
+            .select_from(CodeChangeDiff)
+            .where(
+                CodeChangeDiff.code_change_id == Run.code_change_id,
+                CodeChangeDiff.head_sha == Run.head_sha,
+            )
+            .scalar_subquery()
+        )
+        textual_snapshot_count = (
+            select(func.count())
+            .select_from(CodeChangeDiff)
+            .where(
+                CodeChangeDiff.code_change_id == Run.code_change_id,
+                CodeChangeDiff.head_sha == Run.head_sha,
+                CodeChangeDiff.patch.is_not(None),
+            )
+            .scalar_subquery()
+        )
+        return and_(snapshot_count > 0, textual_snapshot_count == 0).label("summary_only")
+
+    @staticmethod
     def _to_run_list_item(
         run: Run,
         code_change: CodeChange,
         repository_name: str,
         model: str | None,
         action_count: int,
+        summary_only: bool = False,
     ) -> RunListItem:
         return RunListItem(
             id=run.id,
@@ -259,6 +285,7 @@ class SqlAlchemyRunRepository:
             url=code_change.web_url,
             head_sha=run.head_sha,
             created_at=run.created_at,
+            summary_only=summary_only,
         )
 
     @staticmethod

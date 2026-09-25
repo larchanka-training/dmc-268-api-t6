@@ -46,13 +46,15 @@ class StoreDiffSnapshot:
     async def execute(
         self, *, code_change_id: UUID, head_sha: str, files: list[DiffSnapshot]
     ) -> None:
-        snapshots = [_normalize_snapshot(file) for file in files]
+        snapshots = (
+            [DiffSnapshot(filename=file.filename, patch=None) for file in files]
+            if _total_line_count(files) > MAX_DIFF_LINES
+            else [_normalize_snapshot(file) for file in files]
+        )
         await self._repository.replace_diff_snapshots(code_change_id, head_sha, snapshots)
 
 
 def _normalize_snapshot(snapshot: DiffSnapshot) -> DiffSnapshot:
-    if snapshot.patch is not None and _line_count(snapshot.patch) > MAX_DIFF_LINES:
-        return DiffSnapshot(filename=snapshot.filename, patch=None)
     if snapshot.patch is None:
         return DiffSnapshot(
             filename=snapshot.filename,
@@ -76,3 +78,7 @@ def _normalize_snapshot(snapshot: DiffSnapshot) -> DiffSnapshot:
 
 def _line_count(patch: str) -> int:
     return patch.count("\n") + 1
+
+
+def _total_line_count(files: list[DiffSnapshot]) -> int:
+    return sum(_line_count(file.patch) for file in files if file.patch is not None)

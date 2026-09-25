@@ -16,6 +16,7 @@ def test_run_session_serializes_the_frontend_camel_case_contract() -> None:
         error_code=None,
         model=None,
         action_count=0,
+        summary_only=False,
         pull_request=PullRequestDto(
             repo="org/repo",
             number=1,
@@ -26,4 +27,5 @@ def test_run_session_serializes_the_frontend_camel_case_contract() -> None:
     )
 
     assert dto.model_dump(by_alias=True)["cancelRequested"] is False
+    assert dto.model_dump(by_alias=True)["summaryOnly"] is False
     assert dto.model_dump(by_alias=True)["pullRequest"]["headSha"] == "a" * 40
