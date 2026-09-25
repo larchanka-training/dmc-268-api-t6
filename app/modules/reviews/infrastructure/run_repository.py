@@ -6,11 +6,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from uuid import UUID
 
-<<<<<<< HEAD
 from sqlalchemy import ColumnElement, and_, delete, func, or_, select, update
-=======
-from sqlalchemy import and_, delete, func, or_, select, update
->>>>>>> a97ce23 (feat: publish validated review output)
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.common.infrastructure.db.enums import RunState
