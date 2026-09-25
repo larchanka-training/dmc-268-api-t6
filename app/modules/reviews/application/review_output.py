@@ -6,19 +6,21 @@ import json
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Annotated, Any, Literal, Protocol
+from typing import TYPE_CHECKING, Annotated, Any, Literal, Protocol
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from app.common.application.unit_of_work import UnitOfWork
 
+if TYPE_CHECKING:
+    from app.modules.reviews.application.findings_post_processor import ProcessedReviewOutput
+
 type Severity = Literal["critical", "high", "medium", "low", "info"]
 type Category = Literal["security", "correctness", "performance", "readability"]
 type Effort = Literal["none", "small", "medium", "large"]
 
 _STRICT = ConfigDict(extra="forbid", strict=True)
-_ATTRIBUTION_PREFIX = "According to custom instructions in '"
 
 
 class ReviewFinding(BaseModel):
@@ -40,8 +42,6 @@ class ReviewFinding(BaseModel):
     @model_validator(mode="after")
     def validate_range(self) -> ReviewFinding:
         """A multi-line anchor always has a strictly earlier start line."""
-        if self.start_line is not None and self.start_line >= self.line:
-            raise ValueError("start_line must be smaller than line")
         if self.title.endswith("."):
             raise ValueError("title must not end with a period")
         title_lines = self.title.splitlines()
@@ -49,12 +49,6 @@ class ReviewFinding(BaseModel):
             raise ValueError("title must be one line")
         if self.severity != "critical" and len(self.body.split()) > 120:
             raise ValueError("body must have at most 120 words unless severity is critical")
-        if self.rule_name is None and self.body.startswith(_ATTRIBUTION_PREFIX):
-            raise ValueError("attributed body requires rule_name")
-        if self.rule_name is not None:
-            expected_prefix = f"{_ATTRIBUTION_PREFIX}{self.rule_name}' ("
-            if not self.body.startswith(expected_prefix):
-                raise ValueError("rule_name requires a matching attribution prefix")
         return self
 
 
@@ -137,11 +131,28 @@ class ReviewPublication:
     idempotency_key: str = ""
 
 
+@dataclass(frozen=True)
+class FindingPostProcessingInput:
+    """Immutable run context required to safely anchor post-processed findings."""
+
+    hunk_lines: dict[str, frozenset[int]]
+    rule_names: frozenset[str]
+    repository_max_inline: int | None = None
+
+
 class ReviewOutputRepository(Protocol):
     """Transaction-owning persistence boundary for raw output and findings."""
 
+    async def get_post_processing_input(
+        self, run_id: UUID
+    ) -> FindingPostProcessingInput | None: ...
+
     async def store_review_output(
-        self, run_id: UUID, raw_output: dict[str, object], parsed: ReviewOutput
+        self,
+        run_id: UUID,
+        raw_output: dict[str, object],
+        parsed: ReviewOutput,
+        processed: ProcessedReviewOutput,
     ) -> ReviewPublication | None: ...
 
     async def mark_review_published(self, run_id: UUID) -> None: ...
@@ -177,16 +188,37 @@ class PublishReviewOutput:
     """Persist a validated model answer, then publish outside database transactions."""
 
     def __init__(
-        self, uow_factory: ReviewOutputUnitOfWorkFactory, provider: ReviewProvider
+        self,
+        uow_factory: ReviewOutputUnitOfWorkFactory,
+        provider: ReviewProvider,
     ) -> None:
         self._uow_factory = uow_factory
         self._provider = provider
 
-    async def execute(self, run_id: UUID, raw_output: Mapping[str, object] | str | bytes) -> bool:
+    async def execute(
+        self,
+        run_id: UUID,
+        raw_output: Mapping[str, object] | str | bytes,
+    ) -> bool:
         parsed = parse_review_output(raw_output)
         raw_json = _as_json_object(raw_output)
+        from app.modules.reviews.application.findings_post_processor import FindingsPostProcessor
+
+        # Anchoring and custom-rule attribution are an immutable run boundary:
+        # accepting caller data here would let a model response choose its own
+        # hunk lines or valid rule names.
         async with self._uow_factory() as uow:
-            publication = await uow.reviews.store_review_output(run_id, raw_json, parsed)
+            context = await uow.reviews.get_post_processing_input(run_id)
+        if context is None:
+            return False
+        processed = FindingsPostProcessor.from_default_patterns().process(
+            parsed,
+            hunk_lines=context.hunk_lines,
+            rule_names=context.rule_names,
+            repository_max_inline=context.repository_max_inline,
+        )
+        async with self._uow_factory() as uow:
+            publication = await uow.reviews.store_review_output(run_id, raw_json, parsed, processed)
             if publication is None:
                 return False
             await uow.commit()

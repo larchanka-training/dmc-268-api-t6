@@ -1,0 +1,19 @@
+{
+  "findings": [
+    {"path":"app/example.py","line":1,"start_line":null,"severity":"low","category":"correctness","title":"Finding 01","body":"This change needs validation.","suggestion":null,"confidence":0.9,"rule_name":null},
+    {"path":"app/example.py","line":2,"start_line":null,"severity":"low","category":"correctness","title":"Finding 02","body":"This change needs validation.","suggestion":null,"confidence":0.9,"rule_name":null},
+    {"path":"app/example.py","line":3,"start_line":null,"severity":"low","category":"correctness","title":"Finding 03","body":"This change needs validation.","suggestion":null,"confidence":0.9,"rule_name":null},
+    {"path":"app/example.py","line":4,"start_line":null,"severity":"low","category":"correctness","title":"Finding 04","body":"This change needs validation.","suggestion":null,"confidence":0.9,"rule_name":null},
+    {"path":"app/example.py","line":5,"start_line":null,"severity":"low","category":"correctness","title":"Finding 05","body":"This change needs validation.","suggestion":null,"confidence":0.9,"rule_name":null},
+    {"path":"app/example.py","line":6,"start_line":null,"severity":"low","category":"correctness","title":"Finding 06","body":"This change needs validation.","suggestion":null,"confidence":0.9,"rule_name":null},
+    {"path":"app/example.py","line":7,"start_line":null,"severity":"low","category":"correctness","title":"Finding 07","body":"This change needs validation.","suggestion":null,"confidence":0.9,"rule_name":null},
+    {"path":"app/example.py","line":8,"start_line":null,"severity":"low","category":"correctness","title":"Finding 08","body":"This change needs validation.","suggestion":null,"confidence":0.9,"rule_name":null},
+    {"path":"app/example.py","line":9,"start_line":null,"severity":"low","category":"correctness","title":"Finding 09","body":"This change needs validation.","suggestion":null,"confidence":0.9,"rule_name":null},
+    {"path":"app/example.py","line":10,"start_line":null,"severity":"low","category":"correctness","title":"Finding 10","body":"This change needs validation.","suggestion":null,"confidence":0.9,"rule_name":null},
+    {"path":"app/example.py","line":11,"start_line":null,"severity":"low","category":"correctness","title":"Finding 11","body":"This change needs validation.","suggestion":null,"confidence":0.9,"rule_name":null},
+    {"path":"app/example.py","line":12,"start_line":null,"severity":"low","category":"correctness","title":"Finding 12","body":"This change needs validation.","suggestion":null,"confidence":0.9,"rule_name":null},
+    {"path":"app/example.py","line":13,"start_line":null,"severity":"low","category":"correctness","title":"Finding 13","body":"This change needs validation.","suggestion":null,"confidence":0.9,"rule_name":null},
+    {"path":"app/example.py","line":14,"start_line":null,"severity":"low","category":"correctness","title":"Finding 14","body":"This change needs validation.","suggestion":null,"confidence":0.9,"rule_name":null}
+  ],
+  "summary": {"problem":"A required value is not validated.","done_well":"The endpoint remains small.","effort":"small"}
+}
