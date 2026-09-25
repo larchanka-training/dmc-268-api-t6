@@ -23,7 +23,7 @@ from app.modules.reviews.application.get_run_comments import PublishedComment
 from app.modules.reviews.application.get_run_diff import DiffSnapshot
 from app.modules.reviews.application.get_run_file_lines import BlobCacheKey
 from app.modules.reviews.application.list_runs import RunCursor, RunListItem
-from app.modules.reviews.application.process_run import RunDiffInput
+from app.modules.reviews.application.process_run import RunConventionsInput, RunDiffInput
 from app.modules.reviews.application.review_output import (
     PublishedFinding,
     ReviewOutput,
@@ -206,6 +206,18 @@ class SqlAlchemyRunRepository:
         if row is None:
             return None
         return RunDiffInput(code_change_id=row[0], head_sha=row[1])
+
+    async def get_run_conventions_input(self, run_id: UUID) -> RunConventionsInput | None:
+        statement = (
+            select(CodeChange.repository_id, Run.prompt_version_id)
+            .join(CodeChange, CodeChange.id == Run.code_change_id)
+            .where(Run.id == run_id)
+        )
+        async with self._session_factory() as session:
+            row = (await session.execute(statement)).one_or_none()
+        if row is None:
+            return None
+        return RunConventionsInput(repository_id=row[0], prompt_version_id=row[1])
 
     async def get_run_file_key(self, run_id: UUID, path: str) -> BlobCacheKey | None:
         statement = (

@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from typing import Protocol
 from uuid import UUID
 
 from sqlalchemy.ext.asyncio import (
@@ -19,27 +20,47 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 
+from app.modules.reviews.application.conventions import (
+    GenerateRepoConventions,
+)
 from app.modules.reviews.application.process_run import ReviewRunProcessor, RunDiffProvider
 from app.modules.reviews.infrastructure.blob_cache import SqlAlchemyBlobCache
+from app.modules.reviews.infrastructure.conventions_unit_of_work import (
+    SqlAlchemyRepositoryConventionsUnitOfWork,
+)
+from app.modules.reviews.infrastructure.provider_conventions import (
+    ProviderConventionsModel,
+    ProviderRepositoryConventionsSource,
+    ReviewConventionsProvider,
+)
 from app.modules.reviews.infrastructure.run_repository import SqlAlchemyRunRepository
+
+
+class ReviewWorkerProvider(RunDiffProvider, ReviewConventionsProvider, Protocol):
+    """All provider calls required by the ordinary review-worker pipeline."""
 
 
 async def process_review_run(
     run_id: UUID,
-    provider: RunDiffProvider,
+    provider: ReviewWorkerProvider,
     session_factory: async_sessionmaker[AsyncSession],
 ) -> bool:
     """Process one run using the worker's already-created database pool."""
 
     repository = SqlAlchemyRunRepository(session_factory)
     blob_cache = SqlAlchemyBlobCache(session_factory)
-    return await ReviewRunProcessor(repository, provider, blob_cache).execute(run_id)
+    conventions = GenerateRepoConventions(
+        ProviderRepositoryConventionsSource(provider),
+        ProviderConventionsModel(provider),
+        lambda: SqlAlchemyRepositoryConventionsUnitOfWork(session_factory),
+    )
+    return await ReviewRunProcessor(repository, provider, blob_cache, conventions).execute(run_id)
 
 
 class ReviewWorker:
     def __init__(
         self,
-        provider: RunDiffProvider,
+        provider: ReviewWorkerProvider,
         session_factory: async_sessionmaker[AsyncSession],
         engine: AsyncEngine,
     ) -> None:
@@ -56,7 +77,8 @@ class ReviewWorker:
 
 @asynccontextmanager
 async def review_worker(
-    provider: RunDiffProvider, database_url: str | None = None
+    provider: ReviewWorkerProvider,
+    database_url: str | None = None,
 ) -> AsyncIterator[ReviewWorker]:
     """Compose a worker once and dispose its pool during worker shutdown."""
 
