@@ -4,12 +4,15 @@ services:
   api:
     image: ${IMAGE:?IMAGE is required}
     environment:
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-app}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/${POSTGRES_DB:-app}
       POSTGRES_HOST: postgres
       POSTGRES_PORT: "5432"
       POSTGRES_USER: ${POSTGRES_USER:-app}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
       POSTGRES_DB: ${POSTGRES_DB:-app}
     depends_on:
+      bootstrap:
+        condition: service_completed_successfully
       postgres:
         condition: service_healthy
     restart: unless-stopped
@@ -31,6 +34,19 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
+
+  # This one-shot service must complete before API containers are started.  Keeping
+  # both commands in the image avoids needing uv or a checkout on the deploy host.
+  bootstrap:
+    image: ${IMAGE:?IMAGE is required}
+    command: ["sh", "-c", "alembic upgrade head && python -m app.bootstrap.seed_prompts"]
+    environment:
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-app}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/${POSTGRES_DB:-app}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+    pull_policy: always
 
   postgres:
     image: postgres:17-alpine

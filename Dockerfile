@@ -27,6 +27,7 @@ RUN uv sync --locked --no-dev \
 COPY app ./app
 COPY alembic ./alembic
 COPY alembic.ini ./
+COPY review/prompts ./review/prompts
 
 USER app
 EXPOSE 8000

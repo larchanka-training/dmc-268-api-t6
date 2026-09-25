@@ -112,6 +112,11 @@ if docker inspect "${BOOTSTRAP_NAME}" >/dev/null 2>&1; then
   docker rm -f "${BOOTSTRAP_NAME}" >/dev/null
 fi
 
+# A completed bootstrap container from the previous image must not suppress the
+# migration/seed pipeline for this deploy.  API startup is gated on its success
+# in compose.yml.
+"${COMPOSE[@]}" rm -sf bootstrap >/dev/null 2>&1 || true
+
 if ! "${COMPOSE[@]}" up -d --remove-orphans --wait --wait-timeout 180; then
   echo "compose up failed; rolling back" >&2
   ROLLBACK_MODE=auto "${ROLLBACK_SCRIPT}"
