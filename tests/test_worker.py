@@ -9,6 +9,8 @@ import app.worker as worker
 from app.modules.reviews.application.conventions import RepositoryFile, RepositorySnapshot
 from app.modules.reviews.application.get_run_diff import DiffSnapshot
 from app.modules.reviews.application.process_run import RunDiffProvider
+from app.modules.reviews.application.prompt_builder import PullRequestMeta
+from app.modules.reviews.application.review_output import PublishedFinding
 
 
 def test_process_review_run_composes_repository_and_processor_from_a_shared_factory(
@@ -46,6 +48,22 @@ def test_process_review_run_composes_repository_and_processor_from_a_shared_fact
         ) -> dict[str, object]:
             raise AssertionError("the composition test does not call the provider")
 
+        async def get_pull_request_meta(self, run_id: UUID) -> PullRequestMeta | None:
+            raise AssertionError("the composition test does not call the provider")
+
+        async def draft_review(self, *, prompt: str) -> dict[str, object]:
+            raise AssertionError("the composition test does not call the provider")
+
+        async def publish_review(
+            self,
+            *,
+            commit_sha: str,
+            body: str,
+            findings: tuple[PublishedFinding, ...],
+            idempotency_key: str,
+        ) -> None:
+            raise AssertionError("the composition test does not call the provider")
+
     class Repository:
         def __init__(self, received_factory: async_sessionmaker[AsyncSession]) -> None:
             assert received_factory is factory
@@ -59,12 +77,22 @@ def test_process_review_run_composes_repository_and_processor_from_a_shared_fact
             assert cache is not None
             assert conventions is not None
 
+    class Pipeline:
+        def __init__(
+            self, processor: Processor, repository: object, model: Provider, publisher: object
+        ) -> None:
+            assert isinstance(processor, Processor)
+            assert repository is not None
+            assert isinstance(model, Provider)
+            assert publisher is not None
+
         async def execute(self, received_run_id: UUID) -> bool:
             assert received_run_id == run_id
             return True
 
     monkeypatch.setattr(worker, "SqlAlchemyRunRepository", Repository)
     monkeypatch.setattr(worker, "ReviewRunProcessor", Processor)
+    monkeypatch.setattr(worker, "ExecuteReviewRun", Pipeline)
 
     assert asyncio.run(worker.process_review_run(run_id, Provider(), factory)) is True
 
@@ -97,6 +125,22 @@ def test_review_worker_disposes_its_single_engine_at_shutdown(monkeypatch: Monke
             files: tuple[RepositoryFile, ...],
             languages: dict[str, int],
         ) -> dict[str, object]:
+            raise AssertionError("the lifecycle test does not call the provider")
+
+        async def get_pull_request_meta(self, run_id: UUID) -> PullRequestMeta | None:
+            raise AssertionError("the lifecycle test does not call the provider")
+
+        async def draft_review(self, *, prompt: str) -> dict[str, object]:
+            raise AssertionError("the lifecycle test does not call the provider")
+
+        async def publish_review(
+            self,
+            *,
+            commit_sha: str,
+            body: str,
+            findings: tuple[PublishedFinding, ...],
+            idempotency_key: str,
+        ) -> None:
             raise AssertionError("the lifecycle test does not call the provider")
 
     class Engine:

@@ -23,7 +23,9 @@ from sqlalchemy.ext.asyncio import (
 from app.modules.reviews.application.conventions import (
     GenerateRepoConventions,
 )
+from app.modules.reviews.application.execute_review import ExecuteReviewRun, ReviewModel
 from app.modules.reviews.application.process_run import ReviewRunProcessor, RunDiffProvider
+from app.modules.reviews.application.review_output import PublishReviewOutput, ReviewProvider
 from app.modules.reviews.infrastructure.blob_cache import SqlAlchemyBlobCache
 from app.modules.reviews.infrastructure.conventions_unit_of_work import (
     SqlAlchemyRepositoryConventionsUnitOfWork,
@@ -33,10 +35,18 @@ from app.modules.reviews.infrastructure.provider_conventions import (
     ProviderRepositoryConventionsSource,
     ReviewConventionsProvider,
 )
+from app.modules.reviews.infrastructure.review_output_unit_of_work import (
+    SqlAlchemyReviewOutputUnitOfWork,
+)
+from app.modules.reviews.infrastructure.review_prompt_repository import (
+    SqlAlchemyReviewPromptRepository,
+)
 from app.modules.reviews.infrastructure.run_repository import SqlAlchemyRunRepository
 
 
-class ReviewWorkerProvider(RunDiffProvider, ReviewConventionsProvider, Protocol):
+class ReviewWorkerProvider(
+    RunDiffProvider, ReviewConventionsProvider, ReviewModel, ReviewProvider, Protocol
+):
     """All provider calls required by the ordinary review-worker pipeline."""
 
 
@@ -54,7 +64,16 @@ async def process_review_run(
         ProviderConventionsModel(provider),
         lambda: SqlAlchemyRepositoryConventionsUnitOfWork(session_factory),
     )
-    return await ReviewRunProcessor(repository, provider, blob_cache, conventions).execute(run_id)
+    processor = ReviewRunProcessor(repository, provider, blob_cache, conventions)
+    publisher = PublishReviewOutput(
+        lambda: SqlAlchemyReviewOutputUnitOfWork(session_factory), provider
+    )
+    return await ExecuteReviewRun(
+        processor,
+        SqlAlchemyReviewPromptRepository(session_factory),
+        provider,
+        publisher,
+    ).execute(run_id)
 
 
 class ReviewWorker:

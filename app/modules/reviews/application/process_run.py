@@ -6,7 +6,10 @@ from dataclasses import dataclass
 from typing import Protocol, cast
 from uuid import UUID
 
-from app.modules.reviews.application.conventions import GenerateRepoConventions
+from app.modules.reviews.application.conventions import (
+    GeneratedConventions,
+    GenerateRepoConventions,
+)
 from app.modules.reviews.application.get_run_diff import (
     DiffSnapshot,
     DiffSnapshotRepository,
@@ -67,9 +70,14 @@ class ReviewRunProcessor:
     async def execute(self, run_id: UUID) -> bool:
         """Fetch and snapshot the exact head associated with a durable run."""
 
+        return await self.prepare(run_id) is not None
+
+    async def prepare(self, run_id: UUID) -> GeneratedConventions | bool | None:
+        """Persist inputs and return the exact conventions snapshot for this run."""
+
         run = await self._repository.get_run_diff_input(run_id)
         if run is None:
-            return False
+            return None
         files = await self._provider.fetch_diff(
             code_change_id=run.code_change_id,
             head_sha=run.head_sha,
@@ -85,8 +93,8 @@ class ReviewRunProcessor:
             conventions_repository = cast(RunConventionsRepository, self._repository)
             conventions_input = await conventions_repository.get_run_conventions_input(run_id)
             if conventions_input is None:
-                return False
-            await self._conventions.execute(
+                return None
+            return await self._conventions.execute(
                 repository_id=conventions_input.repository_id,
                 prompt_version_id=conventions_input.prompt_version_id,
                 run_id=run_id,
