@@ -148,6 +148,11 @@ def test_processed_run_persists_provider_diff_before_the_diff_api_reads_it() -> 
             assert head_sha == "b" * 40
             return [DiffSnapshot(filename="app/main.py", patch="@@ -1 +1 @@\n-old\n+new")]
 
+        async def fetch_file_content(
+            self, *, code_change_id: UUID, head_sha: str, path: str
+        ) -> str:
+            raise AssertionError("the diff-only processor has no blob cache")
+
     class LifecycleRepository(FakeDiffRepository):
         async def get_run_diff_input(self, requested_run_id: UUID) -> RunDiffInput | None:
             if requested_run_id != run_id:

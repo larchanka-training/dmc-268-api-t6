@@ -12,6 +12,7 @@ from app.common.infrastructure.db.enums import RunState
 from app.common.infrastructure.db.session import create_session_factory
 from app.modules.reviews.api.dtos import (
     DiffFileDto,
+    FileLinesDto,
     PullRequestDto,
     ReviewCommentDto,
     RunActionDto,
@@ -35,7 +36,16 @@ from app.modules.reviews.application.get_run_diff import (
     GetRunDiff,
     RunDiffRepository,
 )
+from app.modules.reviews.application.get_run_file_lines import (
+    BlobCache,
+    FileLinesExpired,
+    FileLinesNotFound,
+    FileLinesPage,
+    GetRunFileLines,
+    RunFileRepository,
+)
 from app.modules.reviews.application.list_runs import ListRuns, RunListItem, RunRepository
+from app.modules.reviews.infrastructure.blob_cache import SqlAlchemyBlobCache
 from app.modules.reviews.infrastructure.run_repository import SqlAlchemyRunRepository
 
 api_router = APIRouter(prefix="/api")
@@ -59,11 +69,19 @@ def get_run_repository() -> (
     | RunCommentsRepository
     | RunActionsRepository
     | RunDiffRepository
+    | RunFileRepository
 ):
     database_url = os.environ.get("DATABASE_URL")
     if database_url is None:
         raise RuntimeError("DATABASE_URL must be configured to list runs")
     return SqlAlchemyRunRepository(session_factory_for(database_url))
+
+
+def get_file_blob_cache() -> BlobCache:
+    database_url = os.environ.get("DATABASE_URL")
+    if database_url is None:
+        raise RuntimeError("DATABASE_URL must be configured to read run files")
+    return SqlAlchemyBlobCache(session_factory_for(database_url))
 
 
 def to_run_session_dto(item: RunListItem) -> RunSessionDto:
@@ -118,6 +136,16 @@ def to_run_action_dto(item: RunActionTrace) -> RunActionDto:
 
 def to_diff_file_dto(item: DiffSnapshot) -> DiffFileDto:
     return DiffFileDto(filename=item.filename, patch=item.patch)
+
+
+def to_file_lines_dto(item: FileLinesPage) -> FileLinesDto:
+    return FileLinesDto(
+        path=item.path,
+        start_line=item.start_line,
+        lines=item.lines,
+        total_lines=item.total_lines,
+        next_offset=item.next_offset,
+    )
 
 
 @api_router.get("/runs", response_model=RunListDto)
@@ -196,6 +224,26 @@ async def get_run_diff(
     if snapshots is None:
         raise HTTPException(status_code=404, detail="run not found")
     return [to_diff_file_dto(snapshot) for snapshot in snapshots]
+
+
+@api_router.get("/runs/{run_id}/files", response_model=FileLinesDto)
+async def get_run_file_lines(
+    run_id: UUID,
+    repository: Annotated[RunFileRepository, Depends(get_run_repository)],
+    cache: Annotated[BlobCache, Depends(get_file_blob_cache)],
+    path: Annotated[str, Query(min_length=1, max_length=1024)],
+    offset: Annotated[int, Query(ge=0)] = 0,
+    limit: Annotated[int, Query(ge=1, le=1000)] = 200,
+) -> FileLinesDto:
+    try:
+        page = await GetRunFileLines(repository, cache).execute(run_id, path, offset, limit)
+    except FileLinesExpired as error:
+        raise HTTPException(status_code=410, detail="file blob cache entry expired") from error
+    except FileLinesNotFound as error:
+        raise HTTPException(status_code=404, detail="run file not found") from error
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    return to_file_lines_dto(page)
 
 
 app.include_router(api_router)

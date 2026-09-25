@@ -110,6 +110,23 @@ class CodeChangeDiff(Base):
     created_at: Mapped[datetime] = timestamp_column()
 
 
+class CachedFileBlob(Base):
+    """A seven-day immutable file blob retained for run inspection."""
+
+    __tablename__ = "cached_file_blobs"
+    __table_args__ = (UniqueConstraint("code_change_id", "head_sha", "path"),)
+
+    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
+    code_change_id: Mapped[UUID] = mapped_column(
+        ForeignKey("code_changes.id", ondelete="CASCADE"), nullable=False
+    )
+    head_sha: Mapped[str] = mapped_column(String(64), nullable=False)
+    path: Mapped[str] = mapped_column(String(1024), nullable=False)
+    content: Mapped[str] = mapped_column(TEXT, nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    created_at: Mapped[datetime] = timestamp_column()
+
+
 class Run(Base):
     __tablename__ = "runs"
     __table_args__ = (

@@ -308,3 +308,26 @@ def test_sqlalchemy_run_repository_reads_the_durable_diff_input_for_processing()
     sql = str(session.statement.compile())
     assert "SELECT runs.code_change_id, runs.head_sha" in sql
     assert "WHERE runs.id =" in sql
+
+
+def test_sqlalchemy_run_repository_uses_snapshot_membership_for_an_immutable_file_key() -> None:
+    run_id = UUID("00000000-0000-0000-0000-000000000001")
+    code_change_id = UUID("00000000-0000-0000-0000-000000000002")
+    session = FakeSession([(code_change_id, "a" * 40)])
+    repository = SqlAlchemyRunRepository(
+        cast(async_sessionmaker[AsyncSession], FakeSessionFactory(session))
+    )
+
+    key = asyncio.run(repository.get_run_file_key(run_id, "app/service.py"))
+
+    assert key is not None
+    assert key.code_change_id == code_change_id
+    assert key.head_sha == "a" * 40
+    assert key.path == "app/service.py"
+    assert session.statement is not None
+    compiled = session.statement.compile()
+    sql = str(compiled)
+    assert "JOIN code_change_diffs" in sql
+    assert "code_change_diffs.head_sha = runs.head_sha" in sql
+    assert "code_change_diffs.filename =" in sql
+    assert "app/service.py" in compiled.params.values()

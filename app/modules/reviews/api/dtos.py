@@ -70,3 +70,11 @@ class RunActionDto(ApiDto):
 class DiffFileDto(ApiDto):
     filename: str
     patch: str | None
+
+
+class FileLinesDto(ApiDto):
+    path: str
+    start_line: int
+    lines: list[str]
+    total_lines: int
+    next_offset: int | None

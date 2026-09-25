@@ -13,6 +13,7 @@ from app.modules.reviews.application.get_run_actions import RunAction as RunActi
 from app.modules.reviews.application.get_run_actions import RunActionResponse
 from app.modules.reviews.application.get_run_comments import PublishedComment
 from app.modules.reviews.application.get_run_diff import DiffSnapshot
+from app.modules.reviews.application.get_run_file_lines import BlobCacheKey
 from app.modules.reviews.application.list_runs import RunCursor, RunListItem
 from app.modules.reviews.application.process_run import RunDiffInput
 from app.modules.reviews.infrastructure.models import (
@@ -189,6 +190,25 @@ class SqlAlchemyRunRepository:
         if row is None:
             return None
         return RunDiffInput(code_change_id=row[0], head_sha=row[1])
+
+    async def get_run_file_key(self, run_id: UUID, path: str) -> BlobCacheKey | None:
+        statement = (
+            select(Run.code_change_id, Run.head_sha)
+            .join(
+                CodeChangeDiff,
+                and_(
+                    CodeChangeDiff.code_change_id == Run.code_change_id,
+                    CodeChangeDiff.head_sha == Run.head_sha,
+                    CodeChangeDiff.filename == path,
+                ),
+            )
+            .where(Run.id == run_id)
+        )
+        async with self._session_factory() as session:
+            row = (await session.execute(statement)).one_or_none()
+        if row is None:
+            return None
+        return BlobCacheKey(code_change_id=row[0], head_sha=row[1], path=path)
 
     @staticmethod
     def _to_run_list_item(
