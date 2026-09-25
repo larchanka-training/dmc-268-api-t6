@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any, Protocol
 from uuid import UUID
 
-from jsonschema import (  # type: ignore[import-untyped]  # jsonschema has no shipped stubs.
+from jsonschema import (
     Draft202012Validator,
     SchemaError,
     ValidationError,
