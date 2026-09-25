@@ -7,6 +7,7 @@ from typing import Protocol, cast
 from uuid import UUID
 
 from app.modules.reviews.application.conventions import (
+    ActiveConventionsPrompt,
     GeneratedConventions,
     GenerateRepoConventions,
 )
@@ -41,7 +42,7 @@ class RunDiffInput:
 @dataclass(frozen=True)
 class RunConventionsInput:
     repository_id: UUID
-    prompt_version_id: UUID
+    conventions_prompt: ActiveConventionsPrompt
 
 
 class RunProcessingRepository(DiffSnapshotRepository, Protocol):
@@ -96,7 +97,7 @@ class ReviewRunProcessor:
                 return None
             return await self._conventions.execute(
                 repository_id=conventions_input.repository_id,
-                prompt_version_id=conventions_input.prompt_version_id,
+                conventions_prompt=conventions_input.conventions_prompt,
                 run_id=run_id,
                 changed_files=tuple(file.filename for file in files),
             )
