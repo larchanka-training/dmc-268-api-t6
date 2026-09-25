@@ -20,7 +20,7 @@
 ### Что реализовано, а что является планом
 
 В текущем каркасе реализованы healthcheck FastAPI, ORM-модели, общая DB-инфраструктура,
-Unit of Work, конфигурация Alembic, начальная миграция и тесты. Дерево слоёв и
+Unit of Work, конфигурация Alembic, миграции схемы и тесты. Дерево слоёв и пять
 entrypoints ниже — целевая организация приложения: use cases, конкретные repositories,
 LLM/VCS/payment gateways и consumers ещё предстоит реализовать. Весь код пока живёт в
 одном пакете `app/`; разнесение по сервисам `services/<name>/` (Р-12) реализуется в
@@ -267,20 +267,31 @@ SQLModel не используется: ORM отделена от transport DTO 
 `CodeChange` хранит обновляемое состояние PR/MR; `Run` фиксирует SHA, engine и ссылки
 на версии prompt/rules конкретного запуска. `ContextPayload` появляется при сборке
 контекста: связь с Run — `0..1`, а не обязательная строка сразу после webhook.
-Finding содержит результат анализа (включая category и необязательный suggestion),
-Comment — сведения о его публикации. Поля SHA в Finding не дублируются.
+Finding содержит результат анализа, включая `side` (`LEFT`/`RIGHT`), `severity`,
+`category` и необязательный `suggestion`; `side`, `severity` и `category` хранятся
+как PostgreSQL enum. Comment — сведения о публикации Finding. `RunAction` хранит
+запрос инструмента и либо малый JSON-ответ inline в `response`, либо ссылку
+`response_ref` на внешний payload; DB check constraint запрещает заполнять оба
+поля одновременно. `UsageEvent` хранит выбранную модель и индексируется по
+`(run_id, created_at)`, что позволяет выбрать последнее потребление конкретного
+прогона. Поля SHA в Finding не дублируются.
 
-ERD показывает связи и ключевые поля; полный состав колонок и ограничения следует
-смотреть в коде. Используются UUID, TIMESTAMPTZ, JSONB, точный Numeric для денежных
-значений, native ENUM и частичные unique indexes. Общая metadata нужна для FK между
-модулями и единой истории миграций; она не даёт application права обходить интерфейсы.
+ERD показывает связи и ключевые поля; он отражает актуальные поля состояния Run,
+enum Finding, inline response для RunAction и модель UsageEvent. Полный состав
+колонок и ограничения следует смотреть в коде. Используются UUID, TIMESTAMPTZ,
+JSONB, точный Numeric для денежных значений, native ENUM и частичные unique indexes.
+Общая metadata нужна для FK между модулями и единой истории миграций; она не даёт
+application права обходить интерфейсы.
 
 ## Миграции и проверка
 
 [env.py](../alembic/env.py) собирает `target_metadata` через bootstrap. Ревизии Alembic
 содержат фиксированные `op.create_table`, индексы и PostgreSQL enum types; они не
 импортируют runtime-модели и не используют `Base.metadata.create_all/drop_all`.
-Будущие изменения схемы оформляются новой ревизией, а не правкой уже применённой.
+После начальной схемы добавлены отдельные ревизии: успешный статус запуска `succeeded`, enum для `Finding.severity`, `Finding.category` и
+`Finding.side`, индексы для списка runs и последнего UsageEvent, а также JSONB
+`RunAction.response` с check constraint для гибридного хранения ответа. Будущие
+изменения схемы оформляются новой ревизией, а не правкой уже применённой.
 
 Миграции запускаются один раз отдельным deployment-шагом до старта процессов, не
 в lifespan каждого приложения. Из корня backend-проекта:

@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from enum import StrEnum
 
 
@@ -31,6 +33,26 @@ class RunState(StrEnum):
     FAILED = "failed"
     CANCELLED = "cancelled"
     SKIPPED = "skipped"
+
+
+class FindingSeverity(StrEnum):
+    CRITICAL = "critical"
+    HIGH = "high"
+    MEDIUM = "medium"
+    LOW = "low"
+    INFO = "info"
+
+
+class FindingCategory(StrEnum):
+    SECURITY = "security"
+    CORRECTNESS = "correctness"
+    PERFORMANCE = "performance"
+    READABILITY = "readability"
+
+
+class FindingSide(StrEnum):
+    LEFT = "LEFT"
+    RIGHT = "RIGHT"
 
 
 class PaymentStatus(StrEnum):

@@ -59,6 +59,10 @@ erDiagram
       enum state
       enum engine
       int attempt
+      boolean cancel_requested
+      varchar error_code
+      timestamptz started_at
+      timestamptz finished_at
       timestamptz available_at
     }
     CONTEXT_PAYLOADS {
@@ -73,7 +77,9 @@ erDiagram
       uuid run_id FK
       varchar file_path
       int line_start
-      varchar category
+      enum side
+      enum severity
+      enum category
       text suggestion
       numeric confidence
       boolean published
@@ -89,6 +95,7 @@ erDiagram
       uuid repository_id FK
       int version
       jsonb rules
+      char checksum
       boolean is_active
     }
     PROMPT_VERSIONS {
@@ -96,6 +103,7 @@ erDiagram
       varchar key
       int version
       text content
+      char checksum
       boolean is_active
     }
     WEBHOOK_EVENTS {
@@ -108,7 +116,9 @@ erDiagram
       uuid id PK
       uuid run_id FK
       uuid workspace_id FK
+      varchar model
       numeric cost_usd
+      timestamptz created_at
     }
     PAYMENTS {
       uuid id PK
@@ -130,6 +140,8 @@ erDiagram
       uuid repository_id FK
       uuid prompt_version_id FK
       varchar agents_md_sha
+      text agents_md
+      jsonb key_patterns
       jsonb recommendations
       jsonb languages
     }
@@ -139,4 +151,8 @@ erDiagram
       int index
       varchar tool
       jsonb request
+      jsonb response
+      text response_ref
+      timestamptz started_at
+      int duration_ms
     }

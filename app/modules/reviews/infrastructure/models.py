@@ -36,6 +36,9 @@ from app.common.infrastructure.db.columns import pg_enum, timestamp_column
 from app.common.infrastructure.db.enums import (
     CodeChangeState,
     Engine,
+    FindingCategory,
+    FindingSeverity,
+    FindingSide,
     RunState,
 )
 
@@ -93,6 +96,37 @@ class CodeChange(Base):
     )
 
 
+class CodeChangeDiff(Base):
+    __tablename__ = "code_change_diffs"
+    __table_args__ = (UniqueConstraint("code_change_id", "head_sha", "filename"),)
+
+    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
+    code_change_id: Mapped[UUID] = mapped_column(
+        ForeignKey("code_changes.id", ondelete="CASCADE"), nullable=False
+    )
+    head_sha: Mapped[str] = mapped_column(String(64), nullable=False)
+    filename: Mapped[str] = mapped_column(String(1024), nullable=False)
+    patch: Mapped[str | None] = mapped_column(TEXT)
+    created_at: Mapped[datetime] = timestamp_column()
+
+
+class CachedFileBlob(Base):
+    """A seven-day immutable file blob retained for run inspection."""
+
+    __tablename__ = "cached_file_blobs"
+    __table_args__ = (UniqueConstraint("code_change_id", "head_sha", "path"),)
+
+    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
+    code_change_id: Mapped[UUID] = mapped_column(
+        ForeignKey("code_changes.id", ondelete="CASCADE"), nullable=False
+    )
+    head_sha: Mapped[str] = mapped_column(String(64), nullable=False)
+    path: Mapped[str] = mapped_column(String(1024), nullable=False)
+    content: Mapped[str] = mapped_column(TEXT, nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    created_at: Mapped[datetime] = timestamp_column()
+
+
 class Run(Base):
     __tablename__ = "runs"
     __table_args__ = (
@@ -107,6 +141,9 @@ class Run(Base):
         Index(
             "ix_runs_queued_available_at", "available_at", postgresql_where=text("state = 'queued'")
         ),
+        Index("ix_runs_created_id", "created_at", "id"),
+        Index("ix_runs_state_created_id", "state", "created_at", "id"),
+        Index("ix_runs_code_change_created_id", "code_change_id", "created_at", "id"),
     )
 
     id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
@@ -168,10 +205,16 @@ class Finding(Base):
     file_path: Mapped[str] = mapped_column(String(1024), nullable=False)
     line_start: Mapped[int] = mapped_column(INTEGER, nullable=False)
     line_end: Mapped[int | None] = mapped_column(INTEGER)
-    side: Mapped[str] = mapped_column(String(10), nullable=False, server_default=text("'RIGHT'"))
-    severity: Mapped[str] = mapped_column(String(30), nullable=False)
+    side: Mapped[FindingSide] = mapped_column(
+        pg_enum(FindingSide, "finding_side"), nullable=False, server_default=text("'RIGHT'")
+    )
+    severity: Mapped[FindingSeverity] = mapped_column(
+        pg_enum(FindingSeverity, "finding_severity"), nullable=False
+    )
     confidence: Mapped[Decimal] = mapped_column(Numeric(3, 2), nullable=False)
-    category: Mapped[str] = mapped_column(String(30), nullable=False)
+    category: Mapped[FindingCategory] = mapped_column(
+        pg_enum(FindingCategory, "finding_category"), nullable=False
+    )
     suggestion: Mapped[str | None] = mapped_column(TEXT)
     title: Mapped[str] = mapped_column(String(500), nullable=False)
     body: Mapped[str] = mapped_column(TEXT, nullable=False)
@@ -195,13 +238,20 @@ class Comment(Base):
 
 class RunAction(Base):
     __tablename__ = "run_actions"
-    __table_args__ = (UniqueConstraint("run_id", "index"),)
+    __table_args__ = (
+        UniqueConstraint("run_id", "index"),
+        CheckConstraint(
+            "response IS NULL OR response_ref IS NULL",
+            name="ck_run_actions_response_location",
+        ),
+    )
 
     id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
     run_id: Mapped[UUID] = mapped_column(ForeignKey("runs.id"), nullable=False)
     index: Mapped[int] = mapped_column(INTEGER, nullable=False)
     tool: Mapped[str] = mapped_column(String(100), nullable=False)
     request: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    response: Mapped[Any | None] = mapped_column(JSONB(none_as_null=True))
     response_ref: Mapped[str | None] = mapped_column(TEXT)
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     duration_ms: Mapped[int] = mapped_column(INTEGER, nullable=False)

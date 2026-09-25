@@ -1,5 +1,7 @@
 """Reusable persistence column and enum declarations."""
 
+from __future__ import annotations
+
 from datetime import datetime
 
 from sqlalchemy import DateTime, Enum, func
@@ -8,6 +10,9 @@ from sqlalchemy.orm import Mapped, mapped_column
 from app.common.infrastructure.db.enums import (
     CodeChangeState,
     Engine,
+    FindingCategory,
+    FindingSeverity,
+    FindingSide,
     LedgerKind,
     PaymentStatus,
     ReviewEvent,
@@ -22,7 +27,16 @@ def timestamp_column() -> Mapped[datetime]:
 
 def pg_enum(
     enum_class: type[
-        Engine | WaitForCi | ReviewEvent | CodeChangeState | RunState | PaymentStatus | LedgerKind
+        Engine
+        | WaitForCi
+        | ReviewEvent
+        | CodeChangeState
+        | RunState
+        | FindingSeverity
+        | FindingCategory
+        | FindingSide
+        | PaymentStatus
+        | LedgerKind
     ],
     name: str,
 ) -> Enum:
