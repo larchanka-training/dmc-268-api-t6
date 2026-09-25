@@ -76,6 +76,7 @@ def to_run_session_dto(item: RunListItem) -> RunSessionDto:
         error_code=item.error_code,
         model=item.model,
         action_count=item.action_count,
+        summary_only=item.summary_only,
         pull_request=PullRequestDto(
             repo=item.repo,
             number=item.number,

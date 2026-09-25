@@ -80,6 +80,7 @@ def test_runs_list_uses_the_camel_case_contract() -> None:
                 "errorCode": None,
                 "model": "gpt-test",
                 "actionCount": 2,
+                "summaryOnly": False,
                 "pullRequest": {
                     "repo": "org/repo",
                     "number": 1,
@@ -164,7 +165,7 @@ def test_runs_list_rejects_malformed_base64_and_non_utf8_cursors() -> None:
 
 
 def test_run_detail_returns_pr_data_latest_model_and_action_count() -> None:
-    item = make_item(7, datetime(2026, 9, 24, tzinfo=UTC))
+    item = replace(make_item(7, datetime(2026, 9, 24, tzinfo=UTC)), summary_only=True)
     repository: RunDetailRepository = FakeRunDetailRepository(item)
     app.dependency_overrides[get_run_repository] = lambda: repository
     try:
@@ -182,6 +183,7 @@ def test_run_detail_returns_pr_data_latest_model_and_action_count() -> None:
     }
     assert response.json()["model"] == "gpt-test"
     assert response.json()["actionCount"] == 2
+    assert response.json()["summaryOnly"] is True
 
 
 def test_run_detail_returns_null_model_when_the_run_has_no_usage_event() -> None:

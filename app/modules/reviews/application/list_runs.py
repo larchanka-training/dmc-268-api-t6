@@ -59,6 +59,7 @@ class RunListItem:
     url: str
     head_sha: str
     created_at: datetime
+    summary_only: bool = False
 
 
 @dataclass(frozen=True)

@@ -108,7 +108,7 @@ def test_sqlalchemy_run_repository_filters_and_orders_with_a_tied_timestamp_curs
     code_change = SimpleNamespace(
         external_number=5, title="Review me", web_url="https://example.test/pull/5"
     )
-    session = FakeSession([(run, code_change, "org/repo", "gpt-test", 3)])
+    session = FakeSession([(run, code_change, "org/repo", "gpt-test", 3, True)])
     repository = SqlAlchemyRunRepository(
         cast(async_sessionmaker[AsyncSession], FakeSessionFactory(session))
     )
@@ -125,6 +125,7 @@ def test_sqlalchemy_run_repository_filters_and_orders_with_a_tied_timestamp_curs
     assert items[0].repo == "org/repo"
     assert items[0].model == "gpt-test"
     assert items[0].action_count == 3
+    assert items[0].summary_only is True
     assert items[0].head_sha == "a" * 40
     assert session.statement is not None
     compiled = session.statement.compile()

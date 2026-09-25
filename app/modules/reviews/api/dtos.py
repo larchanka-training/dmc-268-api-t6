@@ -35,6 +35,7 @@ class RunSessionDto(ApiDto):
     error_code: str | None
     model: str | None
     action_count: int
+    summary_only: bool
     pull_request: PullRequestDto
 
 
