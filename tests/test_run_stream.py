@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from uuid import UUID
@@ -176,7 +177,18 @@ def test_stream_endpoint_uses_sse_event_and_camel_case_payload() -> None:
 
     assert response.status_code == 200
     assert response.headers["content-type"].startswith("text/event-stream")
-    assert response.text == (
-        "event: run.updated\\n"
-        'data: {"runId":"00000000-0000-0000-0000-000000000100","status":"cancelled"}\\n\\n'
-    )
+    frames = response.text.split("\n\n")
+    assert frames == [
+        (
+            "event: run.updated\n"
+            'data: {"runId":"00000000-0000-0000-0000-000000000100","status":"cancelled"}'
+        ),
+        "",
+    ]
+    event_line, data_line = frames[0].split("\n")
+    assert event_line == "event: run.updated"
+    assert data_line.startswith("data: ")
+    assert json.loads(data_line.removeprefix("data: ")) == {
+        "runId": str(RUN_ID),
+        "status": "cancelled",
+    }

@@ -181,8 +181,8 @@ async def stream_run_updates(
         async with event_hub.subscribe() as updates:
             async for update in updates:
                 yield (
-                    "event: run.updated\\n"
-                    f'data: {{"runId":"{update.run_id}","status":"{update.status}"}}\\n\\n'
+                    "event: run.updated\n"
+                    f'data: {{"runId":"{update.run_id}","status":"{update.status}"}}\n\n'
                 )
 
     return StreamingResponse(events(), media_type="text/event-stream")
