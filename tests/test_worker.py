@@ -20,14 +20,20 @@ def test_process_review_run_composes_repository_and_processor_from_a_shared_fact
         async def fetch_diff(self, *, code_change_id: UUID, head_sha: str) -> list[DiffSnapshot]:
             raise AssertionError("the composition test does not call the provider")
 
+        async def fetch_file_content(
+            self, *, code_change_id: UUID, head_sha: str, path: str
+        ) -> str:
+            raise AssertionError("the composition test does not call the provider")
+
     class Repository:
         def __init__(self, received_factory: async_sessionmaker[AsyncSession]) -> None:
             assert received_factory is factory
 
     class Processor:
-        def __init__(self, repository: Repository, provider: Provider) -> None:
+        def __init__(self, repository: Repository, provider: Provider, cache: object) -> None:
             assert isinstance(repository, Repository)
             assert isinstance(provider, Provider)
+            assert cache is not None
 
         async def execute(self, received_run_id: UUID) -> bool:
             assert received_run_id == run_id
@@ -42,6 +48,11 @@ def test_process_review_run_composes_repository_and_processor_from_a_shared_fact
 def test_review_worker_disposes_its_single_engine_at_shutdown(monkeypatch: MonkeyPatch) -> None:
     class Provider(RunDiffProvider):
         async def fetch_diff(self, *, code_change_id: UUID, head_sha: str) -> list[DiffSnapshot]:
+            raise AssertionError("the lifecycle test does not call the provider")
+
+        async def fetch_file_content(
+            self, *, code_change_id: UUID, head_sha: str, path: str
+        ) -> str:
             raise AssertionError("the lifecycle test does not call the provider")
 
     class Engine:

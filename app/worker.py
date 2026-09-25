@@ -20,6 +20,7 @@ from sqlalchemy.ext.asyncio import (
 )
 
 from app.modules.reviews.application.process_run import ReviewRunProcessor, RunDiffProvider
+from app.modules.reviews.infrastructure.blob_cache import SqlAlchemyBlobCache
 from app.modules.reviews.infrastructure.run_repository import SqlAlchemyRunRepository
 
 
@@ -31,7 +32,8 @@ async def process_review_run(
     """Process one run using the worker's already-created database pool."""
 
     repository = SqlAlchemyRunRepository(session_factory)
-    return await ReviewRunProcessor(repository, provider).execute(run_id)
+    blob_cache = SqlAlchemyBlobCache(session_factory)
+    return await ReviewRunProcessor(repository, provider, blob_cache).execute(run_id)
 
 
 class ReviewWorker:
