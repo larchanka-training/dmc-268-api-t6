@@ -191,8 +191,8 @@ flowchart LR
 @dataclass(frozen=True)
 class Finding:
     path: str
-    line: int  # строка в новой версии файла (side=RIGHT)
-    start_line: int | None  # для многострочных
+    line: int                 # строка в новой версии файла (side=RIGHT)
+    start_line: int | None    # для многострочных
     severity: Literal["critical", "high", "medium", "low", "info"]
     category: Literal["security", "correctness", "performance", "readability"]
     title: str
@@ -200,7 +200,6 @@ class Finding:
     suggestion: str | None    # готовая замена строк → ```suggestion
     confidence: float         # 0..1
     rule_name: str | None     # имя пользовательского правила → префикс атрибуции (роль 7)
-    commit_sha: str  # head_sha, на который ревьюили
 ```
 
 ---
@@ -268,7 +267,7 @@ sequenceDiagram
   P->>PG: head_sha == code_changes.head_sha? findings_hash не опубликован?
   P->>GH: POST /pulls/{n}/reviews (одно ревью) + check-run completed
   P->>PG: comments (github ids), run.state → succeeded
-  P->>MQ: ack, events.run.finished
+  P->>MQ: ack review.publish
 ```
 
 ### 6.3 Схлопывание (Р-2): пуш во время прогона
@@ -308,11 +307,11 @@ stateDiagram-v2
   running --> publishing: findings готовы
   running --> failed: исключение, attempt ≥ 3
   running --> queued: исключение, attempt < 3 (retry с задержкой)
-  publishing --> completed: ревью опубликовано
+  publishing --> succeeded: ревью опубликовано
   publishing --> cancelled: head_sha устарел
   publishing --> failed: GitHub 4xx кроме 422-координат
   queued --> skipped: правило отбора не прошло
-  completed --> [*]
+  succeeded --> [*]
   failed --> [*]
   cancelled --> [*]
   skipped --> [*]
@@ -383,9 +382,7 @@ stateDiagram-v2
 class VcsProvider(Protocol):
     def verify_webhook(self, headers: Mapping[str, str], body: bytes) -> WebhookEvent: ...
     async def get_pull_request(self, repo: RepoRef, number: int) -> PullRequest: ...
-    async def get_diff(
-        self, repo: RepoRef, number: int
-    ) -> list[RawFilePatch]: ...  # unified diff на файл
+    async def get_diff(self, repo: RepoRef, number: int) -> list[RawFilePatch]: ...   # unified diff на файл
     async def get_blob(self, repo: RepoRef, blob_sha: str) -> bytes: ...
     async def get_tree(self, repo: RepoRef, ref: str) -> list[TreeEntry]: ...
     async def get_ci_status(self, repo: RepoRef, sha: str) -> CiStatus: ...
@@ -442,24 +439,15 @@ Worker зависит от порта `ContextProvider`, который по PR 
 
 ```python
 class PrMeta(BaseModel):
-    title: str
-    body: str | None
-    author: str
-    branch: str
-    base_ref: str
-    labels: list[str]
-    files_changed: int
-    additions: int
-    deletions: int
-    is_draft: bool
-    is_fork: bool
+    title: str; body: str | None; author: str; branch: str; base_ref: str
+    labels: list[str]; files_changed: int; additions: int; deletions: int
+    is_draft: bool; is_fork: bool
 
-
-class RepoConventions(BaseModel):  # шаг «конвенции репозитория» (роль 7)
-    agents_md: str | None  # AGENTS.md проверяемого репо, ≤ 8k токенов
-    key_patterns: list[str]  # выведены LLM один раз на base_sha, кэш
+class RepoConventions(BaseModel):         # шаг «конвенции репозитория» (роль 7)
+    agents_md: str | None                 # AGENTS.md проверяемого репо, ≤ 8k токенов
+    key_patterns: list[str]               # выведены LLM один раз на base_sha, кэш
     recommendations: list[str]
-    languages: dict[str, int]  # {"python": 62, "typescript": 38} — % по дереву
+    languages: dict[str, int]             # {"python": 62, "typescript": 38} — % по дереву
 ```
 
 ### L1 — Diff (всегда, все файлы)
@@ -471,26 +459,18 @@ class RepoConventions(BaseModel):  # шаг «конвенции репозит�
 ```python
 class DiffLine(BaseModel):
     type: Literal["context", "added", "removed"]
-    old_line: int | None
-    new_line: int | None
-    content: str
-
+    old_line: int | None; new_line: int | None; content: str
 
 class Hunk(BaseModel):
-    header: str  # "@@ -12,7 +12,9 @@ def foo"
-    old_start: int
-    old_lines: int
-    new_start: int
-    new_lines: int
+    header: str                           # "@@ -12,7 +12,9 @@ def foo"
+    old_start: int; old_lines: int; new_start: int; new_lines: int
     lines: list[DiffLine]
 
-
 class FileDiff(BaseModel):
-    path: str
-    old_path: str | None
+    path: str; old_path: str | None
     status: Literal["added", "modified", "removed", "renamed"]
-    language: str | None  # по расширению
-    blob_sha: str | None  # новая версия (None для removed)
+    language: str | None                  # по расширению
+    blob_sha: str | None                  # новая версия (None для removed)
     hunks: list[Hunk]
     raw_patch: str                        # unified diff файла — из него же собирается `patch` в API (§12)
     is_binary: bool; is_generated: bool; is_too_large: bool
@@ -503,16 +483,14 @@ class FileDiff(BaseModel):
 
 ```python
 class LineRange(BaseModel):
-    start: int
-    end: int  # строки новой версии
+    start: int; end: int                  # строки новой версии
     lines: list[str]
     reason: Literal["hunk_window", "enclosing_symbol"]
 
-
 class Surrounding(BaseModel):
     path: str
-    ranges: list[LineRange]  # окна ±N вокруг ханков, пересечения слиты
-    window: int  # N, по умолчанию 30
+    ranges: list[LineRange]               # окна ±N вокруг ханков, пересечения слиты
+    window: int                           # N, по умолчанию 30
 ```
 
 Если для языка есть AST (L4) — окно расширяется до **границ объемлющего символа** (функция/класс/метод), а не по числу строк: модель видит функцию целиком.
@@ -521,13 +499,9 @@ class Surrounding(BaseModel):
 
 ```python
 class WholeFile(BaseModel):
-    path: str
-    blob_sha: str
-    language: str | None
-    content: str
-    loc: int
-    tokens_est: int
-    truncated: bool  # > лимита → усечено по границам символов, не по строкам
+    path: str; blob_sha: str; language: str | None
+    content: str; loc: int; tokens_est: int
+    truncated: bool                       # > лимита → усечено по границам символов, не по строкам
 ```
 
 Условия: файл — source, `loc ≤ 1500` и `tokens_est ≤ 12 000`; иначе L2 с `window = 80`. Тесты и конфиги — L3 только если это единственные изменённые файлы.
@@ -538,30 +512,22 @@ class WholeFile(BaseModel):
 
 ```python
 class ImportRef(BaseModel):
-    module: str
-    names: list[str]
-    resolved_path: str | None  # по дереву репо; None → внешняя зависимость
+    module: str; names: list[str]
+    resolved_path: str | None             # по дереву репо; None → внешняя зависимость
     is_external: bool
 
-
 class Symbol(BaseModel):
-    name: str
-    kind: Literal["function", "method", "class", "variable", "type"]
-    path: str
-    start_line: int
-    end_line: int
-    signature: str  # "def foo(a: int, *, b: str = '') -> Result"
+    name: str; kind: Literal["function", "method", "class", "variable", "type"]
+    path: str; start_line: int; end_line: int
+    signature: str                        # "def foo(a: int, *, b: str = '') -> Result"
     docstring: str | None
-
 
 class SymbolContext(BaseModel):
     path: str
     imports: list[ImportRef]
-    changed_symbols: list[Symbol]  # символы, чьи диапазоны пересекают ханки
-    referenced_symbols: list[
-        Symbol
-    ]  # определения того, что вызывается из изменённого кода (из других файлов)
-    exported_symbols: list[str]  # что этот файл отдаёт наружу — для оценки радиуса поражения
+    changed_symbols: list[Symbol]         # символы, чьи диапазоны пересекают ханки
+    referenced_symbols: list[Symbol]      # определения того, что вызывается из изменённого кода (из других файлов)
+    exported_symbols: list[str]           # что этот файл отдаёт наружу — для оценки радиуса поражения
 ```
 
 Именно `referenced_symbols` закрывает TC-06: метод родительского класса вне диффа попадает в контекст сигнатурой и докстрингой, а не полным файлом.
@@ -575,16 +541,15 @@ class FileContext(BaseModel):
     whole_file: WholeFile | None
     symbols: SymbolContext | None
     level_used: Literal[1, 2, 3, 4]
-    priority: float  # для инспектора: почему этот файл получил больше
+    priority: float                       # для инспектора: почему этот файл получил больше
 
-
-class ContextPayload(BaseModel):  # сущность роли 6
+class ContextPayload(BaseModel):          # сущность роли 6
     run_id: str
     pr: PrMeta
     conventions: RepoConventions
     files: list[FileContext]
-    omitted_files: list[str]  # не влезли в бюджет — перечислены модели явно
-    budget: dict  # {"limit": 60000, "used": 48210, "engine": "fast"}
+    omitted_files: list[str]              # не влезли в бюджет — перечислены модели явно
+    budget: dict                          # {"limit": 60000, "used": 48210, "engine": "fast"}
 ```
 
 Алгоритм `BudgetAllocator` (детерминированный):
@@ -638,11 +603,11 @@ class ContextPayload(BaseModel):  # сущность роли 6
 | **Добавить:** `WebhookEvent` | `delivery_id UNIQUE`, `event`, `action`, `payload_s3_ref`, `received_at` |
 | **Добавить:** `RuleVersion`, `PromptVersion` | неизменяемые (Р-6) |
 | **Добавить:** `UsageEvent` | `run_id`, `model`, `tokens_in/out`, `cache_read_tokens`, `cost_usd` — только вставка (Р-8) |
- | **Добавить:** `RunAction` | `run_id`, `index`, `tool`, `request jsonb`, `response jsonb?` (≤ 64 КБ) или `response_ref` (> 64 КБ), `started_at`, `duration_ms` — Zod `RunAction` фронта |
- | **Добавить:** снимок диффа (Р-15) | ключ `(code_change, head_sha)`; по файлу — `filename`, `patch` (дифф > 3 000 строк — только `filename`, в API `patch: null`); каскад от Workspace |
- | **После MVP:** `FeedbackSignal` | `finding_id`, `kind: resolved\|line_changed\|reaction`, `value`, `at` |
- 
- Payload вебхуков и полные контексты — в S3; для ответов инструментов действует гибридное хранение: JSON до 64 КБ — в PostgreSQL, больший payload — в S3 по `response_ref`. Данные хранятся до удаления Workspace и удаляются вместе с ним (§10).
+| **Добавить:** `RunAction` | `run_id`, `index`, `tool`, `request jsonb`, `response jsonb?` (≤ 64 КБ) или `response_ref` (> 64 КБ), `started_at`, `duration_ms` — Zod `RunAction` фронта |
+| **Добавить:** снимок диффа (Р-15) | ключ `(code_change, head_sha)`; по файлу — `filename`, `patch` (дифф > 3 000 строк — только `filename`, в API `patch: null`); каскад от Workspace |
+| **После MVP:** `FeedbackSignal` | `finding_id`, `kind: resolved\|line_changed\|reaction`, `value`, `at` |
+
+Payload вебхуков и полные контексты — в S3; для ответов инструментов действует гибридное хранение: JSON до 64 КБ — в PostgreSQL, больший payload — в S3 по `response_ref`. Данные хранятся до удаления Workspace и удаляются вместе с ним (§10).
 
 ---
 
