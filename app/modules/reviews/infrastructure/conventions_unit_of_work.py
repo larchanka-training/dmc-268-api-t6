@@ -26,14 +26,14 @@ class SqlAlchemyRepositoryConventionsStore:
     async def get(
         self, repository_id: UUID, agents_md_sha: str | None, prompt_version_id: UUID
     ) -> CachedConventions | None:
-        row = await self._session.execute(
+        result = await self._session.execute(
             select(RepoConventions).where(
                 RepoConventions.repository_id == repository_id,
                 RepoConventions.agents_md_sha == agents_md_sha,
                 RepoConventions.prompt_version_id == prompt_version_id,
             )
         )
-        item = row.one_or_none()
+        item = result.scalar_one_or_none()
         if item is None:
             return None
         conventions = item

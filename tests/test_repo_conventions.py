@@ -3,14 +3,29 @@
 from __future__ import annotations
 
 import asyncio
+import os
+from collections.abc import Iterator
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
+from decimal import Decimal
 from types import TracebackType
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import pytest
+from alembic.config import Config
 from pydantic import ValidationError
+from sqlalchemy import create_engine, func, select, text
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy.schema import CreateSchema, DropSchema
 
-from app.modules.repositories.infrastructure.models import RepoConventions
+from alembic import command
+from app.common.infrastructure.db.enums import CodeChangeState, Engine, RunState
+from app.modules.repositories.infrastructure.models import (
+    ProviderInstallation,
+    RepoConventions,
+    Repository,
+    RuleVersion,
+)
 from app.modules.reviews.application.conventions import (
     CachedConventions,
     ConventionsDraft,
@@ -24,12 +39,39 @@ from app.modules.reviews.infrastructure.conventions_unit_of_work import (
     SqlAlchemyRepositoryConventionsStore,
     SqlAlchemyRepositoryConventionsUnitOfWork,
 )
-from app.modules.reviews.infrastructure.models import RunAction
+from app.modules.reviews.infrastructure.models import CodeChange, PromptVersion, Run, RunAction
+from app.modules.workspaces.infrastructure.models import Workspace
 
 REPOSITORY_ID = UUID("00000000-0000-0000-0000-000000000501")
 PROMPT_VERSION_ID = UUID("00000000-0000-0000-0000-000000000502")
 RUN_ID = UUID("00000000-0000-0000-0000-000000000503")
+SECOND_RUN_ID = UUID("00000000-0000-0000-0000-000000000504")
 AGENTS_SHA = "a" * 40
+
+
+@pytest.fixture
+def migrated_conventions_database() -> Iterator[tuple[str, str]]:
+    """Provide a disposable migrated PostgreSQL schema when explicitly configured."""
+    database_url = os.environ.get("TEST_DATABASE_URL")
+    if database_url is None:
+        pytest.skip("set TEST_DATABASE_URL to run PostgreSQL integration tests")
+    schema = f"test_repo_conventions_{uuid4().hex}"
+    engine = create_engine(database_url)
+    try:
+        with engine.connect() as connection:
+            connection.execute(CreateSchema(schema))
+            connection.execute(text(f'SET search_path TO "{schema}"'))
+            connection.commit()
+            config = Config("alembic.ini")
+            config.attributes["connection"] = connection
+            command.upgrade(config, "head")
+            yield database_url, schema
+            connection.rollback()
+            connection.execute(text("SET search_path TO public"))
+            connection.execute(DropSchema(schema, cascade=True))
+            connection.commit()
+    finally:
+        engine.dispose()
 
 
 def draft() -> dict[str, object]:
@@ -350,8 +392,145 @@ def test_cache_hit_records_the_current_pr_files_not_the_first_pr_draft() -> None
     )
 
 
+@pytest.mark.integration
+def test_sqlalchemy_store_returns_cached_conventions_for_repeated_same_key(
+    migrated_conventions_database: tuple[str, str],
+) -> None:
+    database_url, schema = migrated_conventions_database
+    expected = CachedConventions(
+        repository_id=REPOSITORY_ID,
+        agents_md_sha=AGENTS_SHA,
+        prompt_version_id=PROMPT_VERSION_ID,
+        key_patterns=("One.", "Two.", "Three."),
+        recommendations=("One.", "Two.", "Three.", "Four.", "Five."),
+        languages={"Python": 100},
+    )
+
+    async def seed_and_reuse_cache() -> tuple[CachedConventions, int, list[UUID]]:
+        engine = create_async_engine(
+            database_url,
+            connect_args={"options": f"-csearch_path={schema}"},
+        )
+        session_factory = async_sessionmaker(engine, expire_on_commit=False)
+        try:
+            async with session_factory() as session:
+                workspace_id = uuid4()
+                installation_id = uuid4()
+                rule_version_id = uuid4()
+                code_change_id = uuid4()
+                workspace = Workspace(
+                    id=workspace_id,
+                    name="conventions",
+                    daily_budget_usd=Decimal("1"),
+                )
+                installation = ProviderInstallation(
+                    id=installation_id,
+                    workspace_id=workspace_id,
+                    provider="github",
+                    external_id=1,
+                    provider_metadata={},
+                )
+                repository = Repository(
+                    id=REPOSITORY_ID,
+                    provider_installation_id=installation_id,
+                    external_id=1,
+                    full_name="owner/repository",
+                    default_branch="main",
+                    web_url="https://example.test/owner/repository",
+                )
+                prompt = PromptVersion(
+                    id=PROMPT_VERSION_ID,
+                    key="review.conventions",
+                    version=1,
+                    content="prompt",
+                    checksum="b" * 64,
+                )
+                rule_version = RuleVersion(
+                    id=rule_version_id,
+                    repository_id=REPOSITORY_ID,
+                    version=1,
+                    rules=[],
+                    checksum="c" * 64,
+                )
+                code_change = CodeChange(
+                    id=code_change_id,
+                    repository_id=REPOSITORY_ID,
+                    external_id=1,
+                    external_number=1,
+                    title="Cache hit",
+                    description=None,
+                    source_branch="feature/cache-hit",
+                    target_branch="main",
+                    base_sha="d" * 40,
+                    head_sha="e" * 40,
+                    state=CodeChangeState.OPEN,
+                    web_url="https://example.test/owner/repository/pull/1",
+                )
+                now = datetime.now(UTC)
+                runs = (
+                    Run(
+                        id=RUN_ID,
+                        code_change_id=code_change_id,
+                        base_sha="d" * 40,
+                        head_sha="e" * 40,
+                        state=RunState.SUCCEEDED,
+                        trigger="manual",
+                        idempotency_key="f" * 64,
+                        engine=Engine.FAST,
+                        rule_version_id=rule_version_id,
+                        prompt_version_id=PROMPT_VERSION_ID,
+                        available_at=now,
+                    ),
+                    Run(
+                        id=SECOND_RUN_ID,
+                        code_change_id=code_change_id,
+                        base_sha="d" * 40,
+                        head_sha="e" * 40,
+                        state=RunState.SUCCEEDED,
+                        trigger="manual",
+                        idempotency_key="0" * 64,
+                        engine=Engine.FAST,
+                        rule_version_id=rule_version_id,
+                        prompt_version_id=PROMPT_VERSION_ID,
+                        available_at=now,
+                    ),
+                )
+                session.add_all(
+                    (workspace, installation, repository, prompt, rule_version, code_change, *runs)
+                )
+                await session.commit()
+
+            async with session_factory() as session:
+                store = SqlAlchemyRepositoryConventionsStore(session)
+                await store.save_and_record_trace(
+                    RUN_ID,
+                    expected,
+                    (ConventionsFile(path="first.py", relevance="First pull request."),),
+                )
+                await session.commit()
+
+            async with session_factory() as session:
+                store = SqlAlchemyRepositoryConventionsStore(session)
+                reused = await store.save_and_record_trace(
+                    SECOND_RUN_ID,
+                    expected,
+                    (ConventionsFile(path="second.py", relevance="Second pull request."),),
+                )
+                await session.commit()
+                convention_count = await session.scalar(select(func.count(RepoConventions.id)))
+                trace_run_ids = list(
+                    await session.scalars(select(RunAction.run_id).order_by(RunAction.run_id))
+                )
+                assert convention_count is not None
+                return reused, convention_count, trace_run_ids
+        finally:
+            await engine.dispose()
+
+    assert asyncio.run(seed_and_reuse_cache()) == (expected, 1, [RUN_ID, SECOND_RUN_ID])
+
+
 class EmptyResult:
-    def one_or_none(self) -> None:
+    def scalar_one_or_none(self) -> None:
         return None
 
 
