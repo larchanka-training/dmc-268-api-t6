@@ -27,6 +27,7 @@ from app.modules.repositories.infrastructure.models import (
     RuleVersion,
 )
 from app.modules.reviews.application.conventions import (
+    ActiveConventionsPrompt,
     CachedConventions,
     ConventionsDraft,
     ConventionsFile,
@@ -40,6 +41,7 @@ from app.modules.reviews.infrastructure.conventions_unit_of_work import (
     SqlAlchemyRepositoryConventionsUnitOfWork,
 )
 from app.modules.reviews.infrastructure.models import CodeChange, PromptVersion, Run, RunAction
+from app.modules.reviews.infrastructure.run_repository import SqlAlchemyRunRepository
 from app.modules.workspaces.infrastructure.models import Workspace
 
 REPOSITORY_ID = UUID("00000000-0000-0000-0000-000000000501")
@@ -138,17 +140,16 @@ class FakeStore:
     cached: CachedConventions | None = None
     saved: list[CachedConventions] = field(default_factory=list)
     traces: list[tuple[UUID, tuple[ConventionsFile, ...]]] = field(default_factory=list)
+    requested_keys: list[tuple[UUID, str | None, UUID]] = field(default_factory=list)
     fail_on_save: bool = False
 
     async def get(
         self, repository_id: UUID, agents_md_sha: str | None, prompt_version_id: UUID
     ) -> CachedConventions | None:
-        assert (repository_id, agents_md_sha, prompt_version_id) == (
-            REPOSITORY_ID,
-            AGENTS_SHA,
-            PROMPT_VERSION_ID,
-        )
-        return self.cached
+        self.requested_keys.append((repository_id, agents_md_sha, prompt_version_id))
+        if self.cached is not None and self.cached.prompt_version_id == prompt_version_id:
+            return self.cached
+        return None
 
     async def save_and_record_trace(
         self,
@@ -159,7 +160,7 @@ class FakeStore:
         if self.fail_on_save:
             raise RuntimeError("trace write failed")
         saved = self.cached
-        if saved is None:
+        if saved is None or saved.prompt_version_id != conventions.prompt_version_id:
             self.saved.append(conventions)
             self.cached = conventions
             saved = conventions
@@ -218,7 +219,7 @@ def test_cache_hit_uses_exact_revision_key_without_a_model_call() -> None:
     result = asyncio.run(
         GenerateRepoConventions(source, model, factory).execute(
             repository_id=REPOSITORY_ID,
-            prompt_version_id=PROMPT_VERSION_ID,
+            conventions_prompt=ActiveConventionsPrompt(PROMPT_VERSION_ID, "conventions v1"),
             run_id=RUN_ID,
             changed_files=("current/change.py",),
         )
@@ -229,6 +230,7 @@ def test_cache_hit_uses_exact_revision_key_without_a_model_call() -> None:
     assert source.calls == ["agents"]
     assert model.calls == []
     assert store.saved == []
+    assert store.requested_keys == [(REPOSITORY_ID, AGENTS_SHA, PROMPT_VERSION_ID)]
     assert store.traces == [
         (
             RUN_ID,
@@ -243,6 +245,50 @@ def test_cache_hit_uses_exact_revision_key_without_a_model_call() -> None:
     assert [unit.commits for unit in factory.units] == [0, 1]
 
 
+def test_active_conventions_v2_regenerates_cache_without_using_the_system_prompt_id() -> None:
+    """A conventions prompt activation is part of the cache identity on its own."""
+    system_prompt_id = UUID("00000000-0000-0000-0000-000000000599")
+    conventions_v1 = ActiveConventionsPrompt(PROMPT_VERSION_ID, "conventions v1")
+    conventions_v2 = ActiveConventionsPrompt(
+        UUID("00000000-0000-0000-0000-000000000598"), "conventions v2"
+    )
+    source = FakeSource()
+    model = FakeModel(draft())
+    store = FakeStore()
+    factory = FakeUnitOfWorkFactory(store)
+    generator = GenerateRepoConventions(source, model, factory)
+
+    first = asyncio.run(
+        generator.execute(
+            repository_id=REPOSITORY_ID,
+            conventions_prompt=conventions_v1,
+            run_id=RUN_ID,
+            changed_files=("app/main.py",),
+        )
+    )
+    second = asyncio.run(
+        generator.execute(
+            repository_id=REPOSITORY_ID,
+            conventions_prompt=conventions_v2,
+            run_id=SECOND_RUN_ID,
+            changed_files=("app/main.py",),
+        )
+    )
+
+    assert system_prompt_id != conventions_v1.id
+    assert first.cache_hit is False
+    assert second.cache_hit is False
+    assert [saved.prompt_version_id for saved in store.saved] == [
+        conventions_v1.id,
+        conventions_v2.id,
+    ]
+    assert store.requested_keys == [
+        (REPOSITORY_ID, AGENTS_SHA, conventions_v1.id),
+        (REPOSITORY_ID, AGENTS_SHA, conventions_v2.id),
+    ]
+    assert len(model.calls) == 2
+
+
 def test_cache_miss_fetches_bounded_context_derives_languages_and_records_draft_files() -> None:
     source = FakeSource()
     model = FakeModel(draft())
@@ -252,7 +298,7 @@ def test_cache_miss_fetches_bounded_context_derives_languages_and_records_draft_
     result = asyncio.run(
         GenerateRepoConventions(source, model, factory).execute(
             repository_id=REPOSITORY_ID,
-            prompt_version_id=PROMPT_VERSION_ID,
+            conventions_prompt=ActiveConventionsPrompt(PROMPT_VERSION_ID, "conventions v1"),
             run_id=RUN_ID,
             changed_files=("app/main.py",),
         )
@@ -288,7 +334,7 @@ def test_draft_rejects_malformed_model_output_before_save_or_trace(
         asyncio.run(
             GenerateRepoConventions(source, model, factory).execute(
                 repository_id=REPOSITORY_ID,
-                prompt_version_id=PROMPT_VERSION_ID,
+                conventions_prompt=ActiveConventionsPrompt(PROMPT_VERSION_ID, "conventions v1"),
                 run_id=RUN_ID,
                 changed_files=("app/main.py",),
             )
@@ -327,7 +373,7 @@ def test_failed_atomic_cache_and_trace_write_never_commits() -> None:
         asyncio.run(
             GenerateRepoConventions(source, model, factory).execute(
                 repository_id=REPOSITORY_ID,
-                prompt_version_id=PROMPT_VERSION_ID,
+                conventions_prompt=ActiveConventionsPrompt(PROMPT_VERSION_ID, "conventions v1"),
                 run_id=RUN_ID,
                 changed_files=("app/main.py",),
             )
@@ -346,7 +392,7 @@ def test_draft_rejects_files_from_another_pull_request_before_save_or_trace() ->
         asyncio.run(
             GenerateRepoConventions(source, model, factory).execute(
                 repository_id=REPOSITORY_ID,
-                prompt_version_id=PROMPT_VERSION_ID,
+                conventions_prompt=ActiveConventionsPrompt(PROMPT_VERSION_ID, "conventions v1"),
                 run_id=RUN_ID,
                 changed_files=("other_pr.py",),
             )
@@ -370,7 +416,7 @@ def test_cache_hit_records_the_current_pr_files_not_the_first_pr_draft() -> None
     asyncio.run(
         generator.execute(
             repository_id=REPOSITORY_ID,
-            prompt_version_id=PROMPT_VERSION_ID,
+            conventions_prompt=ActiveConventionsPrompt(PROMPT_VERSION_ID, "conventions v1"),
             run_id=first_run,
             changed_files=("first_pr.py",),
         )
@@ -378,7 +424,7 @@ def test_cache_hit_records_the_current_pr_files_not_the_first_pr_draft() -> None
     second = asyncio.run(
         generator.execute(
             repository_id=REPOSITORY_ID,
-            prompt_version_id=PROMPT_VERSION_ID,
+            conventions_prompt=ActiveConventionsPrompt(PROMPT_VERSION_ID, "conventions v1"),
             run_id=second_run,
             changed_files=("second_pr.py",),
         )
@@ -438,12 +484,29 @@ def test_sqlalchemy_store_returns_cached_conventions_for_repeated_same_key(
                     default_branch="main",
                     web_url="https://example.test/owner/repository",
                 )
-                prompt = PromptVersion(
+                system_prompt = PromptVersion(
+                    id=UUID("00000000-0000-0000-0000-000000000505"),
+                    key="review.system",
+                    version=1,
+                    content="system prompt",
+                    checksum="a" * 64,
+                    is_active=True,
+                )
+                conventions_v1 = PromptVersion(
                     id=PROMPT_VERSION_ID,
                     key="review.conventions",
                     version=1,
-                    content="prompt",
+                    content="conventions v1",
                     checksum="b" * 64,
+                    is_active=False,
+                )
+                conventions_v2 = PromptVersion(
+                    id=UUID("00000000-0000-0000-0000-000000000506"),
+                    key="review.conventions",
+                    version=2,
+                    content="conventions v2",
+                    checksum="9" * 64,
+                    is_active=True,
                 )
                 rule_version = RuleVersion(
                     id=rule_version_id,
@@ -478,7 +541,7 @@ def test_sqlalchemy_store_returns_cached_conventions_for_repeated_same_key(
                         idempotency_key="f" * 64,
                         engine=Engine.FAST,
                         rule_version_id=rule_version_id,
-                        prompt_version_id=PROMPT_VERSION_ID,
+                        prompt_version_id=system_prompt.id,
                         available_at=now,
                     ),
                     Run(
@@ -491,14 +554,32 @@ def test_sqlalchemy_store_returns_cached_conventions_for_repeated_same_key(
                         idempotency_key="0" * 64,
                         engine=Engine.FAST,
                         rule_version_id=rule_version_id,
-                        prompt_version_id=PROMPT_VERSION_ID,
+                        prompt_version_id=system_prompt.id,
                         available_at=now,
                     ),
                 )
                 session.add_all(
-                    (workspace, installation, repository, prompt, rule_version, code_change, *runs)
+                    (
+                        workspace,
+                        installation,
+                        repository,
+                        system_prompt,
+                        conventions_v1,
+                        conventions_v2,
+                        rule_version,
+                        code_change,
+                        *runs,
+                    )
                 )
                 await session.commit()
+
+            conventions_input = await SqlAlchemyRunRepository(
+                session_factory
+            ).get_run_conventions_input(RUN_ID)
+            assert conventions_input is not None
+            assert conventions_input.conventions_prompt == ActiveConventionsPrompt(
+                conventions_v2.id, "conventions v2"
+            )
 
             async with session_factory() as session:
                 store = SqlAlchemyRepositoryConventionsStore(session)

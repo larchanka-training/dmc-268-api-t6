@@ -53,6 +53,14 @@ class RepositoryFile:
     content: str | None = None
 
 
+@dataclass(frozen=True)
+class ActiveConventionsPrompt:
+    """The deployed conventions contract selected independently of a review run."""
+
+    id: UUID
+    content: str
+
+
 class ConventionsFile(BaseModel):
     """One pull-request file that explains a generated convention."""
 
@@ -161,7 +169,7 @@ class GenerateRepoConventions:
         self,
         *,
         repository_id: UUID,
-        prompt_version_id: UUID,
+        conventions_prompt: ActiveConventionsPrompt,
         run_id: UUID,
         changed_files: tuple[str, ...],
     ) -> GeneratedConventions:
@@ -169,7 +177,7 @@ class GenerateRepoConventions:
         # exact cache key and therefore cannot be inferred from a stale repository row.
         agents_md = await self._source.fetch_agents_md(repository_id)
         async with self._uow_factory() as uow:
-            cached = await uow.conventions.get(repository_id, agents_md.sha, prompt_version_id)
+            cached = await uow.conventions.get(repository_id, agents_md.sha, conventions_prompt.id)
         if cached is not None:
             async with self._uow_factory() as uow:
                 await uow.conventions.save_and_record_trace(
@@ -195,7 +203,7 @@ class GenerateRepoConventions:
         conventions = CachedConventions(
             repository_id=repository_id,
             agents_md_sha=agents_md.sha,
-            prompt_version_id=prompt_version_id,
+            prompt_version_id=conventions_prompt.id,
             key_patterns=tuple(draft.key_patterns),
             recommendations=tuple(draft.recommendations),
             languages=languages,

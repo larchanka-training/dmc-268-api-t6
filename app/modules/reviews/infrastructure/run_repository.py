@@ -13,6 +13,7 @@ from app.common.infrastructure.db.enums import RunState
 from app.modules.analytics.infrastructure.models import UsageEvent
 from app.modules.repositories.infrastructure.models import Repository, RuleVersion
 from app.modules.reviews.application.cancel_run import CancelRequestResult
+from app.modules.reviews.application.conventions import ActiveConventionsPrompt
 from app.modules.reviews.application.findings_post_processor import (
     ProcessedFinding,
     ProcessedReviewOutput,
@@ -35,6 +36,7 @@ from app.modules.reviews.infrastructure.models import (
     CodeChange,
     CodeChangeDiff,
     Finding,
+    PromptVersion,
     Run,
     RunAction,
 )
@@ -210,15 +212,27 @@ class SqlAlchemyRunRepository:
 
     async def get_run_conventions_input(self, run_id: UUID) -> RunConventionsInput | None:
         statement = (
-            select(CodeChange.repository_id, Run.prompt_version_id)
+            select(CodeChange.repository_id, PromptVersion.id, PromptVersion.content)
             .join(CodeChange, CodeChange.id == Run.code_change_id)
+            .outerjoin(
+                PromptVersion,
+                and_(
+                    PromptVersion.key == "review.conventions",
+                    PromptVersion.is_active.is_(True),
+                ),
+            )
             .where(Run.id == run_id)
         )
         async with self._session_factory() as session:
             row = (await session.execute(statement)).one_or_none()
         if row is None:
             return None
-        return RunConventionsInput(repository_id=row[0], prompt_version_id=row[1])
+        if row[1] is None or row[2] is None:
+            raise LookupError("active review.conventions prompt is missing")
+        return RunConventionsInput(
+            repository_id=row[0],
+            conventions_prompt=ActiveConventionsPrompt(id=row[1], content=row[2]),
+        )
 
     async def get_run_file_key(self, run_id: UUID, path: str) -> BlobCacheKey | None:
         statement = (
