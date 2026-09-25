@@ -7,6 +7,7 @@ from uuid import UUID
 from sqlalchemy import and_, delete, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.common.infrastructure.db.enums import RunState
 from app.modules.analytics.infrastructure.models import UsageEvent
 from app.modules.repositories.infrastructure.models import Repository
 from app.modules.reviews.application.get_run_actions import RunAction as RunActionProjection
@@ -209,6 +210,24 @@ class SqlAlchemyRunRepository:
         if row is None:
             return None
         return BlobCacheKey(code_change_id=row[0], head_sha=row[1], path=path)
+
+    async def request_cancel(self, run_id: UUID) -> bool:
+        """Persist one cancellation decision while holding the run row lock.
+
+        Queued work cannot have started and is cancelled immediately.  Running
+        and publishing work remains in its current state until its worker sees
+        ``cancel_requested`` at a checkpoint.  Terminal rows are intentionally
+        left untouched, making retries idempotent.
+        """
+        async with self._session_factory.begin() as session:
+            run = await session.scalar(select(Run).where(Run.id == run_id).with_for_update())
+            if run is None:
+                return False
+            if run.state is RunState.QUEUED:
+                run.state = RunState.CANCELLED
+            elif run.state in {RunState.RUNNING, RunState.PUBLISHING}:
+                run.cancel_requested = True
+        return True
 
     @staticmethod
     def _to_run_list_item(

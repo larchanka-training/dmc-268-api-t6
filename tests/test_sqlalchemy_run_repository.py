@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from typing import Any, cast
 from uuid import UUID
 
+import pytest
 from sqlalchemy import Select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -59,6 +60,35 @@ class FakeSessionFactory:
 
     def __call__(self) -> FakeSessionContext:
         return FakeSessionContext(self._session)
+
+
+class CancelSession:
+    def __init__(self, run: SimpleNamespace | None) -> None:
+        self.run = run
+        self.statement: Select[Any] | None = None
+
+    async def scalar(self, statement: Select[Any]) -> SimpleNamespace | None:
+        self.statement = statement
+        return self.run
+
+
+class CancelSessionContext(AbstractAsyncContextManager[CancelSession]):
+    def __init__(self, session: CancelSession) -> None:
+        self._session = session
+
+    async def __aenter__(self) -> CancelSession:
+        return self._session
+
+    async def __aexit__(self, *args: object) -> None:
+        return None
+
+
+class CancelSessionFactory:
+    def __init__(self, session: CancelSession) -> None:
+        self._session = session
+
+    def begin(self) -> CancelSessionContext:
+        return CancelSessionContext(self._session)
 
 
 def test_sqlalchemy_run_repository_filters_and_orders_with_a_tied_timestamp_cursor() -> None:
@@ -145,6 +175,39 @@ def test_sqlalchemy_run_repository_gets_detail_with_one_summary_query() -> None:
     assert "SELECT usage_events.model" in sql
     assert "SELECT count(*)" in sql
     assert run.id in compiled.params.values()
+
+
+def test_sqlalchemy_run_repository_cancels_only_the_locked_target_run() -> None:
+    run_id = UUID("00000000-0000-0000-0000-000000000001")
+    run = SimpleNamespace(state=RunState.QUEUED, cancel_requested=False)
+    session = CancelSession(run)
+    repository = SqlAlchemyRunRepository(
+        cast(async_sessionmaker[AsyncSession], CancelSessionFactory(session))
+    )
+
+    cancelled = asyncio.run(repository.request_cancel(run_id))
+
+    assert cancelled is True
+    assert run.state is RunState.CANCELLED
+    assert run.cancel_requested is False
+    assert session.statement is not None
+    compiled = session.statement.compile()
+    assert "FOR UPDATE" in str(compiled)
+    assert run_id in compiled.params.values()
+
+
+@pytest.mark.parametrize("state", [RunState.RUNNING, RunState.PUBLISHING])
+def test_sqlalchemy_run_repository_requests_cancellation_for_active_run(state: RunState) -> None:
+    run = SimpleNamespace(state=state, cancel_requested=False)
+    repository = SqlAlchemyRunRepository(
+        cast(async_sessionmaker[AsyncSession], CancelSessionFactory(CancelSession(run)))
+    )
+
+    cancelled = asyncio.run(repository.request_cancel(UUID("00000000-0000-0000-0000-000000000001")))
+
+    assert cancelled is True
+    assert run.state is state
+    assert run.cancel_requested is True
 
 
 def test_sqlalchemy_run_repository_returns_only_published_comments_with_side_mapping() -> None:
