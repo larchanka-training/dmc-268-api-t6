@@ -1,7 +1,6 @@
 import asyncio
 from contextlib import AbstractAsyncContextManager
 from datetime import UTC, datetime
-from decimal import Decimal
 from types import SimpleNamespace
 from typing import Any, cast
 from uuid import UUID
@@ -219,27 +218,27 @@ def test_sqlalchemy_run_repository_returns_only_published_comments_with_side_map
         id=UUID("00000000-0000-0000-0000-000000000002"),
         file_path="app/service.py",
         line_start=23,
+        line_end=25,
         side=FindingSide.RIGHT,
         severity=FindingSeverity.HIGH,
         category=FindingCategory.CORRECTNESS,
-        confidence=Decimal("0.90"),
         title="Incorrect transition",
         body="Validation is skipped.",
-        suggestion=None,
         rule_name="state-machine",
+        created_at=datetime(2026, 9, 25, tzinfo=UTC),
     )
     left_finding = SimpleNamespace(
         id=UUID("00000000-0000-0000-0000-000000000003"),
         file_path="app/service.py",
         line_start=17,
+        line_end=19,
         side=FindingSide.LEFT,
         severity=FindingSeverity.MEDIUM,
         category=FindingCategory.READABILITY,
-        confidence=Decimal("0.75"),
         title="Old code",
         body="Remove this branch.",
-        suggestion="",
         rule_name=None,
+        created_at=datetime(2026, 9, 25, tzinfo=UTC),
     )
     session = FakeSession([(run_id, right_finding), (run_id, left_finding)])
     repository = SqlAlchemyRunRepository(
@@ -253,6 +252,9 @@ def test_sqlalchemy_run_repository_returns_only_published_comments_with_side_map
         (None, 23),
         (17, None),
     ]
+    assert comments[0].file == "app/service.py"
+    assert comments[0].end_line == 25
+    assert comments[0].created_at == datetime(2026, 9, 25, tzinfo=UTC)
     assert comments[0].rule_name == "state-machine"
     assert comments[1].rule_name is None
     assert session.statement is not None
@@ -278,6 +280,8 @@ def test_sqlalchemy_run_repository_projects_ordered_actions_and_full_response() 
     run_id = UUID("00000000-0000-0000-0000-000000000001")
     started_at = datetime(2026, 9, 24, tzinfo=UTC)
     action = SimpleNamespace(
+        id=UUID("00000000-0000-0000-0000-000000000003"),
+        run_id=run_id,
         index=3,
         tool="github.get_file",
         request={"path": "app/service.py"},
@@ -294,6 +298,8 @@ def test_sqlalchemy_run_repository_projects_ordered_actions_and_full_response() 
     actions = asyncio.run(actions_repository.get_run_actions(run_id))
 
     assert actions is not None
+    assert actions[0].id == UUID("00000000-0000-0000-0000-000000000003")
+    assert actions[0].run_id == run_id
     assert actions[0].index == 3
     assert actions[0].response == {"content": "small"}
     assert actions_session.statement is not None

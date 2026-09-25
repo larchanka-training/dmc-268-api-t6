@@ -13,6 +13,8 @@ INLINE_RESPONSE_LIMIT_BYTES = 64 * 1024
 
 @dataclass(frozen=True)
 class RunAction:
+    id: UUID
+    run_id: UUID
     index: int
     tool: str
     request: dict[str, Any]
@@ -24,6 +26,8 @@ class RunAction:
 
 @dataclass(frozen=True)
 class RunActionTrace:
+    id: UUID
+    run_id: UUID
     index: int
     tool: str
     request: dict[str, Any]
@@ -63,6 +67,8 @@ class GetRunActions:
             and _json_size(action.response) <= INLINE_RESPONSE_LIMIT_BYTES
         ):
             return RunActionTrace(
+                id=action.id,
+                run_id=action.run_id,
                 index=action.index,
                 tool=action.tool,
                 request=action.request,
@@ -72,12 +78,14 @@ class GetRunActions:
                 duration_ms=action.duration_ms,
             )
         return RunActionTrace(
+            id=action.id,
+            run_id=action.run_id,
             index=action.index,
             tool=action.tool,
             request=action.request,
             response=None,
             response_ref=action.response_ref
-            or f"/api/runs/{run_id}/actions/{action.index}/response",
+            or f"/api/runs/{action.run_id}/actions/{action.index}/response",
             started_at=action.started_at,
             duration_ms=action.duration_ms,
         )

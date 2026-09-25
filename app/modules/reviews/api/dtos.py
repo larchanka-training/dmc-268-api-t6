@@ -46,19 +46,21 @@ class RunListDto(ApiDto):
 
 class ReviewCommentDto(ApiDto):
     id: UUID
-    path: str
+    file: str
     old_line: int | None
     new_line: int | None
+    end_line: int | None
     severity: str
     category: str
-    confidence: float
     title: str
     body: str
-    suggestion: str | None
     rule_name: str | None
+    created_at: datetime
 
 
 class RunActionDto(ApiDto):
+    id: UUID
+    run_id: UUID
     index: int
     tool: str
     request: dict[str, Any]

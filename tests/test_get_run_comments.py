@@ -1,5 +1,5 @@
 import asyncio
-from decimal import Decimal
+from datetime import UTC, datetime
 from uuid import UUID
 
 from fastapi.testclient import TestClient
@@ -21,16 +21,16 @@ class FakeCommentsRepository:
 def make_comment(value: int, *, left: bool = False) -> PublishedComment:
     return PublishedComment(
         id=UUID(f"00000000-0000-0000-0000-{value:012d}"),
-        path="app/service.py",
+        file="app/service.py",
         old_line=17 if left else None,
         new_line=None if left else 23,
+        end_line=19 if left else 25,
         severity="high",
         category="correctness",
-        confidence=Decimal("0.90"),
         title="Incorrect state transition",
         body="This transition skips validation.",
-        suggestion="validate()",
         rule_name=None if left else "state-machine",
+        created_at=datetime(2026, 9, 25, tzinfo=UTC),
     )
 
 
@@ -45,7 +45,7 @@ def test_get_run_comments_returns_the_repository_result() -> None:
     assert repository.calls == [run_id]
 
 
-def test_run_comments_expose_exactly_one_diff_side_and_metadata() -> None:
+def test_run_comments_match_the_ui_review_comment_contract() -> None:
     run_id = UUID("00000000-0000-0000-0000-000000000100")
     repository = FakeCommentsRepository([make_comment(1), make_comment(2, left=True)])
     app.dependency_overrides[get_run_repository] = lambda: repository
@@ -58,29 +58,29 @@ def test_run_comments_expose_exactly_one_diff_side_and_metadata() -> None:
     assert response.json() == [
         {
             "id": "00000000-0000-0000-0000-000000000001",
-            "path": "app/service.py",
+            "file": "app/service.py",
             "oldLine": None,
             "newLine": 23,
+            "endLine": 25,
             "severity": "high",
             "category": "correctness",
-            "confidence": 0.9,
             "title": "Incorrect state transition",
             "body": "This transition skips validation.",
-            "suggestion": "validate()",
             "ruleName": "state-machine",
+            "createdAt": "2026-09-25T00:00:00Z",
         },
         {
             "id": "00000000-0000-0000-0000-000000000002",
-            "path": "app/service.py",
+            "file": "app/service.py",
             "oldLine": 17,
             "newLine": None,
+            "endLine": 19,
             "severity": "high",
             "category": "correctness",
-            "confidence": 0.9,
             "title": "Incorrect state transition",
             "body": "This transition skips validation.",
-            "suggestion": "validate()",
             "ruleName": None,
+            "createdAt": "2026-09-25T00:00:00Z",
         },
     ]
 
