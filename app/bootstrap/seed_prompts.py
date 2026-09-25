@@ -127,10 +127,19 @@ async def seed_prompt_versions(session: AsyncSession, assets: tuple[PromptAsset,
                 )
 
         active_version = max((*existing.keys(), *(asset.version for asset in key_assets)))
+        # The partial unique index permits only one active version for a key.
+        # PostgreSQL does not guarantee the row order of a conditional bulk update,
+        # so transition the versions in two statements rather than setting v1 false
+        # and v2 true in one update.
         await session.execute(
             update(PromptVersion)
-            .where(PromptVersion.key == key)
-            .values(is_active=PromptVersion.version == active_version)
+            .where(PromptVersion.key == key, PromptVersion.is_active.is_(True))
+            .values(is_active=False)
+        )
+        await session.execute(
+            update(PromptVersion)
+            .where(PromptVersion.key == key, PromptVersion.version == active_version)
+            .values(is_active=True)
         )
     return inserted
 

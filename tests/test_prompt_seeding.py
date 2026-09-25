@@ -16,7 +16,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.schema import CreateSchema, DropSchema
 
 from alembic import command
-from app.bootstrap.seed_prompts import load_prompt_assets, seed_prompt_versions
+from app.bootstrap.seed_prompts import PromptAsset, load_prompt_assets, seed_prompt_versions
 from app.modules.reviews.infrastructure.models import PromptVersion
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -122,3 +122,48 @@ def test_first_seed_makes_both_version_one_prompts_active(
         ("review.conventions", 1),
         ("review.system", 1),
     ]
+
+
+@pytest.mark.integration
+def test_seed_activates_version_two_after_deactivating_version_one(
+    migrated_prompt_database: tuple[str, str],
+) -> None:
+    """PostgreSQL's partial unique index permits only one active version per key."""
+    database_url, schema = migrated_prompt_database
+    version_one = PromptAsset(
+        key="review.system",
+        version=1,
+        content="version one",
+        checksum=sha256(b"version one").hexdigest(),
+    )
+    version_two = PromptAsset(
+        key="review.system",
+        version=2,
+        content="version two",
+        checksum=sha256(b"version two").hexdigest(),
+    )
+
+    async def seed_versions() -> list[tuple[int, bool]]:
+        engine = create_async_engine(
+            database_url,
+            connect_args={"options": f"-csearch_path={schema}"},
+        )
+        session_factory = async_sessionmaker(engine, expire_on_commit=False)
+        try:
+            async with session_factory() as session:
+                assert await seed_prompt_versions(session, (version_one,)) == 1
+                await session.commit()
+
+                assert await seed_prompt_versions(session, (version_two,)) == 1
+                await session.commit()
+
+                rows = await session.execute(
+                    select(PromptVersion.version, PromptVersion.is_active).order_by(
+                        PromptVersion.version
+                    )
+                )
+                return list(rows.tuples().all())
+        finally:
+            await engine.dispose()
+
+    assert asyncio.run(seed_versions()) == [(1, False), (2, True)]
