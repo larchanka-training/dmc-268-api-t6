@@ -43,6 +43,24 @@ def test_review_output_accepts_the_exact_contract() -> None:
     assert output.summary.effort == "small"
 
 
+def test_review_output_accepts_a_body_over_the_prompt_word_target() -> None:
+    """The schema enforces the character ceiling, not prompt-level brevity."""
+    data = valid_output()
+    data["findings"][0]["body"] = " ".join(["word"] * 121)  # type: ignore[index]
+
+    output = ReviewOutput.model_validate(data)
+
+    assert len(output.findings[0].body.split()) == 121
+
+
+def test_review_output_rejects_a_body_over_the_character_ceiling() -> None:
+    data = valid_output()
+    data["findings"][0]["body"] = "x" * 1201  # type: ignore[index]
+
+    with pytest.raises(ValidationError):
+        ReviewOutput.model_validate(data)
+
+
 @pytest.mark.parametrize("start_line", [12, 13], ids=["equal", "after"])
 def test_parser_rejects_non_strict_multiline_anchor_start(start_line: int) -> None:
     data = valid_output()
