@@ -2,9 +2,15 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+from decimal import Decimal
 from uuid import UUID
 
-from sqlalchemy import ColumnElement, and_, delete, func, or_, select
+<<<<<<< HEAD
+from sqlalchemy import ColumnElement, and_, delete, func, or_, select, update
+=======
+from sqlalchemy import and_, delete, func, or_, select, update
+>>>>>>> a97ce23 (feat: publish validated review output)
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.common.infrastructure.db.enums import RunState
@@ -18,6 +24,12 @@ from app.modules.reviews.application.get_run_diff import DiffSnapshot
 from app.modules.reviews.application.get_run_file_lines import BlobCacheKey
 from app.modules.reviews.application.list_runs import RunCursor, RunListItem
 from app.modules.reviews.application.process_run import RunDiffInput
+from app.modules.reviews.application.review_output import (
+    PublishedFinding,
+    ReviewOutput,
+    ReviewPublication,
+    render_review_body,
+)
 from app.modules.reviews.infrastructure.models import (
     CodeChange,
     CodeChangeDiff,
@@ -317,3 +329,135 @@ class SqlAlchemyRunRepository:
             started_at=action.started_at,
             duration_ms=action.duration_ms,
         )
+
+
+class SqlAlchemyReviewOutputRepository:
+    """Write adapter bound to a caller-owned SQLAlchemy unit of work."""
+
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    async def store_review_output(
+        self, run_id: UUID, raw_output: dict[str, object], parsed: ReviewOutput
+    ) -> ReviewPublication | None:
+        """Flush one validated answer; the use case commits it before networking."""
+        run = await self._session.scalar(select(Run).where(Run.id == run_id).with_for_update())
+        if run is None or run.state in {RunState.SUCCEEDED, RunState.CANCELLED}:
+            return None
+
+        existing = await self._session.scalar(
+            select(RunAction).where(
+                RunAction.run_id == run_id,
+                RunAction.tool == "llm.review_output",
+            )
+        )
+        if existing is None:
+            index = await self._session.scalar(
+                select(func.coalesce(func.max(RunAction.index), -1)).where(
+                    RunAction.run_id == run_id
+                )
+            )
+            assert index is not None
+            self._session.add(
+                RunAction(
+                    run_id=run_id,
+                    index=index + 1,
+                    tool="llm.review_output",
+                    request={},
+                    response=raw_output,
+                    response_ref=None,
+                    started_at=datetime.now(UTC),
+                    duration_ms=0,
+                )
+            )
+            findings = tuple(_to_published_finding(item) for item in parsed.findings)
+            self._session.add_all([_to_finding(run_id, item) for item in findings])
+            run.review_body = render_review_body(parsed.summary)
+        else:
+            rows = (
+                await self._session.scalars(
+                    select(Finding)
+                    .where(Finding.run_id == run_id)
+                    .order_by(Finding.created_at.asc(), Finding.id.asc())
+                )
+            ).all()
+            findings = tuple(_to_published_finding_row(item) for item in rows)
+
+        assert run.review_body is not None
+        run.state = RunState.PUBLISHING
+        await self._session.flush()
+        return ReviewPublication(
+            head_sha=run.head_sha,
+            findings=findings,
+            review_body=run.review_body,
+            idempotency_key=run.idempotency_key,
+        )
+
+    async def mark_review_published(self, run_id: UUID) -> None:
+        """Flush completion after the provider returned; never commits itself."""
+        run = await self._session.scalar(select(Run).where(Run.id == run_id).with_for_update())
+        if run is None or run.state is RunState.SUCCEEDED:
+            return
+        await self._session.execute(
+            update(Finding).where(Finding.run_id == run_id).values(published=True)
+        )
+        run.state = RunState.SUCCEEDED
+        run.finished_at = datetime.now(UTC)
+        await self._session.flush()
+
+
+def _to_published_finding(item: object) -> PublishedFinding:
+    """Translate a parsed Pydantic finding without weakening its contract."""
+    from app.modules.reviews.application.review_output import ReviewFinding
+
+    assert isinstance(item, ReviewFinding)
+    return PublishedFinding(
+        path=item.path,
+        line=item.line,
+        start_line=item.start_line,
+        severity=item.severity,
+        category=item.category,
+        title=item.title,
+        body=item.body,
+        suggestion=item.suggestion,
+        confidence=item.confidence,
+        rule_name=item.rule_name,
+    )
+
+
+def _to_finding(run_id: UUID, item: PublishedFinding) -> Finding:
+    """Map new-version review anchors to the existing findings table."""
+    from app.common.infrastructure.db.enums import FindingCategory, FindingSeverity, FindingSide
+
+    return Finding(
+        run_id=run_id,
+        file_path=item.path,
+        line_start=item.start_line or item.line,
+        line_end=item.line if item.start_line is not None else None,
+        side=FindingSide.RIGHT,
+        severity=FindingSeverity(item.severity),
+        confidence=Decimal(str(item.confidence)),
+        category=FindingCategory(item.category),
+        suggestion=item.suggestion,
+        title=item.title,
+        body=item.body,
+        rule_name=item.rule_name,
+        published=False,
+        drop_reason=None,
+    )
+
+
+def _to_published_finding_row(item: Finding) -> PublishedFinding:
+    """Rebuild a retry-safe provider payload from the durable finding row."""
+    return PublishedFinding(
+        path=item.file_path,
+        line=item.line_end or item.line_start,
+        start_line=item.line_start if item.line_end is not None else None,
+        severity=item.severity.value,
+        category=item.category.value,
+        title=item.title,
+        body=item.body,
+        suggestion=item.suggestion,
+        confidence=float(item.confidence),
+        rule_name=item.rule_name,
+    )
