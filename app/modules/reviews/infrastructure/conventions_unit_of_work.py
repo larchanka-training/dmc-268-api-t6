@@ -9,7 +9,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.common.infrastructure.db.unit_of_work import SqlAlchemyUnitOfWork
-from app.modules.repositories.infrastructure.models import RepoConventionDraft, RepoConventions
+from app.modules.repositories.infrastructure.models import RepoConventions
 from app.modules.reviews.application.conventions import (
     CachedConventions,
     ConventionsFile,
@@ -27,12 +27,7 @@ class SqlAlchemyRepositoryConventionsStore:
         self, repository_id: UUID, agents_md_sha: str | None, prompt_version_id: UUID
     ) -> CachedConventions | None:
         row = await self._session.execute(
-            select(RepoConventions, RepoConventionDraft)
-            .outerjoin(
-                RepoConventionDraft,
-                RepoConventionDraft.repo_conventions_id == RepoConventions.id,
-            )
-            .where(
+            select(RepoConventions).where(
                 RepoConventions.repository_id == repository_id,
                 RepoConventions.agents_md_sha == agents_md_sha,
                 RepoConventions.prompt_version_id == prompt_version_id,
@@ -41,9 +36,7 @@ class SqlAlchemyRepositoryConventionsStore:
         item = row.one_or_none()
         if item is None:
             return None
-        conventions, draft = item
-        if draft is None:
-            raise RuntimeError("cached conventions are missing their draft trace")
+        conventions = item
         return CachedConventions(
             repository_id=conventions.repository_id,
             agents_md_sha=conventions.agents_md_sha,
@@ -51,11 +44,13 @@ class SqlAlchemyRepositoryConventionsStore:
             key_patterns=tuple(conventions.key_patterns),
             recommendations=tuple(conventions.recommendations),
             languages=dict(conventions.languages),
-            draft_files=tuple(ConventionsFile.model_validate(file) for file in draft.files),
         )
 
     async def save_and_record_trace(
-        self, run_id: UUID, conventions: CachedConventions
+        self,
+        run_id: UUID,
+        conventions: CachedConventions,
+        trace_files: tuple[ConventionsFile, ...],
     ) -> CachedConventions:
         existing = await self.get(
             conventions.repository_id, conventions.agents_md_sha, conventions.prompt_version_id
@@ -73,12 +68,6 @@ class SqlAlchemyRepositoryConventionsStore:
             )
             self._session.add(row)
             await self._session.flush()
-            self._session.add(
-                RepoConventionDraft(
-                    repo_conventions_id=row.id,
-                    files=[file.model_dump() for file in conventions.draft_files],
-                )
-            )
             saved = conventions
         index = await self._session.scalar(
             select(func.coalesce(func.max(RunAction.index), -1)).where(RunAction.run_id == run_id)
@@ -90,7 +79,7 @@ class SqlAlchemyRepositoryConventionsStore:
                 index=index + 1,
                 tool="llm.repo_conventions",
                 request={},
-                response={"files": [file.model_dump() for file in saved.draft_files]},
+                response={"files": [file.model_dump() for file in trace_files]},
                 response_ref=None,
                 started_at=datetime.now(UTC),
                 duration_ms=0,

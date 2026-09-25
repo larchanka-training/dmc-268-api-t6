@@ -10,7 +10,7 @@ from uuid import UUID
 import pytest
 from pydantic import ValidationError
 
-from app.modules.repositories.infrastructure.models import RepoConventionDraft, RepoConventions
+from app.modules.repositories.infrastructure.models import RepoConventions
 from app.modules.reviews.application.conventions import (
     CachedConventions,
     ConventionsDraft,
@@ -85,6 +85,7 @@ class FakeModel:
         agents_md: str | None,
         files: tuple[RepositoryFile, ...],
         languages: dict[str, int],
+        changed_files: tuple[str, ...],
     ) -> dict[str, object]:
         self.calls.append((agents_md, files, languages))
         return self.result
@@ -108,7 +109,10 @@ class FakeStore:
         return self.cached
 
     async def save_and_record_trace(
-        self, run_id: UUID, conventions: CachedConventions
+        self,
+        run_id: UUID,
+        conventions: CachedConventions,
+        trace_files: tuple[ConventionsFile, ...],
     ) -> CachedConventions:
         if self.fail_on_save:
             raise RuntimeError("trace write failed")
@@ -117,7 +121,7 @@ class FakeStore:
             self.saved.append(conventions)
             self.cached = conventions
             saved = conventions
-        self.traces.append((run_id, saved.draft_files))
+        self.traces.append((run_id, trace_files))
         return saved
 
 
@@ -163,7 +167,6 @@ def test_cache_hit_uses_exact_revision_key_without_a_model_call() -> None:
         key_patterns=("One.", "Two.", "Three."),
         recommendations=("One.", "Two.", "Three.", "Four.", "Five."),
         languages={"Python": 100},
-        draft_files=(ConventionsFile(path="app/main.py", relevance="Entry point."),),
     )
     source = FakeSource()
     model = FakeModel(draft())
@@ -175,6 +178,7 @@ def test_cache_hit_uses_exact_revision_key_without_a_model_call() -> None:
             repository_id=REPOSITORY_ID,
             prompt_version_id=PROMPT_VERSION_ID,
             run_id=RUN_ID,
+            changed_files=("current/change.py",),
         )
     )
 
@@ -183,7 +187,17 @@ def test_cache_hit_uses_exact_revision_key_without_a_model_call() -> None:
     assert source.calls == ["agents"]
     assert model.calls == []
     assert store.saved == []
-    assert store.traces == [(RUN_ID, cached.draft_files)]
+    assert store.traces == [
+        (
+            RUN_ID,
+            (
+                ConventionsFile(
+                    path="current/change.py",
+                    relevance="Changed in this pull request; apply cached repository conventions.",
+                ),
+            ),
+        )
+    ]
     assert [unit.commits for unit in factory.units] == [0, 1]
 
 
@@ -198,6 +212,7 @@ def test_cache_miss_fetches_bounded_context_derives_languages_and_records_draft_
             repository_id=REPOSITORY_ID,
             prompt_version_id=PROMPT_VERSION_ID,
             run_id=RUN_ID,
+            changed_files=("app/main.py",),
         )
     )
 
@@ -233,6 +248,7 @@ def test_draft_rejects_malformed_model_output_before_save_or_trace(
                 repository_id=REPOSITORY_ID,
                 prompt_version_id=PROMPT_VERSION_ID,
                 run_id=RUN_ID,
+                changed_files=("app/main.py",),
             )
         )
 
@@ -271,10 +287,67 @@ def test_failed_atomic_cache_and_trace_write_never_commits() -> None:
                 repository_id=REPOSITORY_ID,
                 prompt_version_id=PROMPT_VERSION_ID,
                 run_id=RUN_ID,
+                changed_files=("app/main.py",),
             )
         )
 
     assert [unit.commits for unit in factory.units] == [0, 0]
+
+
+def test_draft_rejects_files_from_another_pull_request_before_save_or_trace() -> None:
+    source = FakeSource()
+    model = FakeModel(draft())
+    store = FakeStore()
+    factory = FakeUnitOfWorkFactory(store)
+
+    with pytest.raises(ValueError, match="current pull request paths"):
+        asyncio.run(
+            GenerateRepoConventions(source, model, factory).execute(
+                repository_id=REPOSITORY_ID,
+                prompt_version_id=PROMPT_VERSION_ID,
+                run_id=RUN_ID,
+                changed_files=("other_pr.py",),
+            )
+        )
+
+    assert store.saved == []
+    assert store.traces == []
+
+
+def test_cache_hit_records_the_current_pr_files_not_the_first_pr_draft() -> None:
+    source = FakeSource()
+    first_draft = draft()
+    first_draft["files"] = [{"path": "first_pr.py", "relevance": "First pull request."}]
+    model = FakeModel(first_draft)
+    store = FakeStore()
+    factory = FakeUnitOfWorkFactory(store)
+    generator = GenerateRepoConventions(source, model, factory)
+    first_run = RUN_ID
+    second_run = UUID("00000000-0000-0000-0000-000000000504")
+
+    asyncio.run(
+        generator.execute(
+            repository_id=REPOSITORY_ID,
+            prompt_version_id=PROMPT_VERSION_ID,
+            run_id=first_run,
+            changed_files=("first_pr.py",),
+        )
+    )
+    second = asyncio.run(
+        generator.execute(
+            repository_id=REPOSITORY_ID,
+            prompt_version_id=PROMPT_VERSION_ID,
+            run_id=second_run,
+            changed_files=("second_pr.py",),
+        )
+    )
+
+    assert second.cache_hit is True
+    assert [file.path for file in store.traces[0][1]] == ["first_pr.py"]
+    assert [file.path for file in store.traces[1][1]] == ["second_pr.py"]
+    assert store.traces[1][1][0].relevance == (
+        "Changed in this pull request; apply cached repository conventions."
+    )
 
 
 class EmptyResult:
@@ -303,7 +376,7 @@ class FakeSqlAlchemySession:
                 row.id = REPOSITORY_ID
 
 
-def test_sqlalchemy_store_flushes_cache_draft_and_trace_without_committing() -> None:
+def test_sqlalchemy_store_flushes_cache_and_current_run_trace_without_committing() -> None:
     session = FakeSqlAlchemySession()
     conventions = CachedConventions(
         repository_id=REPOSITORY_ID,
@@ -312,16 +385,19 @@ def test_sqlalchemy_store_flushes_cache_draft_and_trace_without_committing() -> 
         key_patterns=("One.", "Two.", "Three."),
         recommendations=("One.", "Two.", "Three.", "Four.", "Five."),
         languages={"Python": 100},
-        draft_files=(ConventionsFile(path="app/main.py", relevance="Entry point."),),
     )
 
     result = asyncio.run(
-        SqlAlchemyRepositoryConventionsStore(session).save_and_record_trace(RUN_ID, conventions)  # type: ignore[arg-type]
+        SqlAlchemyRepositoryConventionsStore(session).save_and_record_trace(  # type: ignore[arg-type]
+            RUN_ID,
+            conventions,
+            (ConventionsFile(path="app/main.py", relevance="Entry point."),),
+        )
     )
 
     assert result == conventions
     assert session.flushes == 2
-    assert [type(row) for row in session.rows] == [RepoConventions, RepoConventionDraft, RunAction]
+    assert [type(row) for row in session.rows] == [RepoConventions, RunAction]
     trace = session.rows[-1]
     assert isinstance(trace, RunAction)
     assert trace.response == {"files": [{"path": "app/main.py", "relevance": "Entry point."}]}
@@ -355,12 +431,15 @@ def test_real_uow_rolls_back_cache_draft_and_trace_after_late_flush_failure() ->
         key_patterns=("One.", "Two.", "Three."),
         recommendations=("One.", "Two.", "Three.", "Four.", "Five."),
         languages={"Python": 100},
-        draft_files=(ConventionsFile(path="app/main.py", relevance="Entry point."),),
     )
 
     async def exercise() -> None:
         async with SqlAlchemyRepositoryConventionsUnitOfWork(lambda: session) as uow:  # type: ignore[arg-type]
-            await uow.conventions.save_and_record_trace(RUN_ID, conventions)
+            await uow.conventions.save_and_record_trace(
+                RUN_ID,
+                conventions,
+                (ConventionsFile(path="app/main.py", relevance="Entry point."),),
+            )
             await uow.commit()
 
     with pytest.raises(RuntimeError, match="late trace flush failed"):

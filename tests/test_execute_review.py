@@ -27,7 +27,6 @@ def conventions() -> GeneratedConventions:
             key_patterns=("Use services.",),
             recommendations=("Test paths.",),
             languages={},
-            draft_files=(),
         ),
         None,
         True,

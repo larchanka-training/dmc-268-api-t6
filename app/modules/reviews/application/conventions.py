@@ -82,7 +82,6 @@ class CachedConventions:
     key_patterns: tuple[str, ...]
     recommendations: tuple[str, ...]
     languages: dict[str, int]
-    draft_files: tuple[ConventionsFile, ...]
 
 
 @dataclass(frozen=True)
@@ -115,6 +114,7 @@ class ConventionsModel(Protocol):
         agents_md: str | None,
         files: tuple[RepositoryFile, ...],
         languages: dict[str, int],
+        changed_files: tuple[str, ...],
     ) -> Mapping[str, object]: ...
 
 
@@ -129,6 +129,7 @@ class RepositoryConventionsStore(Protocol):
         self,
         run_id: UUID,
         conventions: CachedConventions,
+        trace_files: tuple[ConventionsFile, ...],
     ) -> CachedConventions: ...
 
 
@@ -157,7 +158,12 @@ class GenerateRepoConventions:
         self._uow_factory = uow_factory
 
     async def execute(
-        self, *, repository_id: UUID, prompt_version_id: UUID, run_id: UUID
+        self,
+        *,
+        repository_id: UUID,
+        prompt_version_id: UUID,
+        run_id: UUID,
+        changed_files: tuple[str, ...],
     ) -> GeneratedConventions:
         # Fetching the revision happens outside every database operation; it is the
         # exact cache key and therefore cannot be inferred from a stale repository row.
@@ -166,7 +172,11 @@ class GenerateRepoConventions:
             cached = await uow.conventions.get(repository_id, agents_md.sha, prompt_version_id)
         if cached is not None:
             async with self._uow_factory() as uow:
-                await uow.conventions.save_and_record_trace(run_id, cached)
+                await uow.conventions.save_and_record_trace(
+                    run_id,
+                    cached,
+                    _trace_files_for_changed_paths(changed_files),
+                )
                 await uow.commit()
             return GeneratedConventions(cached, agents_md.content, cache_hit=True)
 
@@ -178,8 +188,10 @@ class GenerateRepoConventions:
             agents_md=agents_md.content,
             files=files,
             languages=languages,
+            changed_files=changed_files,
         )
         draft = ConventionsDraft.model_validate(raw_draft)
+        _validate_trace_files(draft.files, changed_files)
         conventions = CachedConventions(
             repository_id=repository_id,
             agents_md_sha=agents_md.sha,
@@ -187,10 +199,13 @@ class GenerateRepoConventions:
             key_patterns=tuple(draft.key_patterns),
             recommendations=tuple(draft.recommendations),
             languages=languages,
-            draft_files=tuple(draft.files),
         )
         async with self._uow_factory() as uow:
-            saved = await uow.conventions.save_and_record_trace(run_id, conventions)
+            saved = await uow.conventions.save_and_record_trace(
+                run_id,
+                conventions,
+                tuple(draft.files),
+            )
             await uow.commit()
         return GeneratedConventions(saved, agents_md.content, cache_hit=False)
 
@@ -235,3 +250,20 @@ def select_context_files(files: tuple[RepositoryFile, ...]) -> tuple[str, ...]:
         selected.append(file.path)
         total += file.size
     return tuple(selected)
+
+
+def _trace_files_for_changed_paths(paths: tuple[str, ...]) -> tuple[ConventionsFile, ...]:
+    """Record this run's changed paths when conventions themselves are cached."""
+    return tuple(
+        ConventionsFile(
+            path=path,
+            relevance="Changed in this pull request; apply cached repository conventions.",
+        )
+        for path in paths
+    )
+
+
+def _validate_trace_files(files: list[ConventionsFile], changed_paths: tuple[str, ...]) -> None:
+    """Reject a model trace that does not describe exactly this pull request."""
+    if tuple(file.path for file in files) != changed_paths:
+        raise ValueError("conventions draft files must match the current pull request paths")
