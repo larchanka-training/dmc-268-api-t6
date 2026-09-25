@@ -45,6 +45,7 @@ def test_process_review_run_composes_repository_and_processor_from_a_shared_fact
             agents_md: str | None,
             files: tuple[RepositoryFile, ...],
             languages: dict[str, int],
+            changed_files: tuple[str, ...],
         ) -> dict[str, object]:
             raise AssertionError("the composition test does not call the provider")
 
@@ -124,6 +125,7 @@ def test_review_worker_disposes_its_single_engine_at_shutdown(monkeypatch: Monke
             agents_md: str | None,
             files: tuple[RepositoryFile, ...],
             languages: dict[str, int],
+            changed_files: tuple[str, ...],
         ) -> dict[str, object]:
             raise AssertionError("the lifecycle test does not call the provider")
 

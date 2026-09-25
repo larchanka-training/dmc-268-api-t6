@@ -98,6 +98,7 @@ class ReviewRunProcessor:
                 repository_id=conventions_input.repository_id,
                 prompt_version_id=conventions_input.prompt_version_id,
                 run_id=run_id,
+                changed_files=tuple(file.filename for file in files),
             )
         return True
 

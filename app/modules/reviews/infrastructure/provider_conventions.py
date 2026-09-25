@@ -31,6 +31,7 @@ class ReviewConventionsProvider(Protocol):
         agents_md: str | None,
         files: tuple[RepositoryFile, ...],
         languages: dict[str, int],
+        changed_files: tuple[str, ...],
     ) -> Mapping[str, object]: ...
 
 
@@ -64,9 +65,11 @@ class ProviderConventionsModel(ConventionsModel):
         agents_md: str | None,
         files: tuple[RepositoryFile, ...],
         languages: dict[str, int],
+        changed_files: tuple[str, ...],
     ) -> Mapping[str, object]:
         return await self._provider.draft_conventions(
             agents_md=agents_md,
             files=files,
             languages=languages,
+            changed_files=changed_files,
         )
