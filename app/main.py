@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import os
+from collections.abc import AsyncIterator
 from functools import lru_cache
 from typing import Annotated
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Path, Query
+from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.common.infrastructure.db.enums import RunState
@@ -46,12 +48,14 @@ from app.modules.reviews.application.get_run_file_lines import (
     RunFileRepository,
 )
 from app.modules.reviews.application.list_runs import ListRuns, RunListItem, RunRepository
+from app.modules.reviews.application.run_events import InMemoryRunUpdateHub, RunUpdateStream
 from app.modules.reviews.infrastructure.blob_cache import SqlAlchemyBlobCache
 from app.modules.reviews.infrastructure.run_repository import SqlAlchemyRunRepository
 
 api_router = APIRouter(prefix="/api")
 
 app = FastAPI(title="Backend")
+run_update_hub = InMemoryRunUpdateHub()
 
 
 @app.get("/healthcheck")
@@ -84,6 +88,10 @@ def get_file_blob_cache() -> BlobCache:
     if database_url is None:
         raise RuntimeError("DATABASE_URL must be configured to read run files")
     return SqlAlchemyBlobCache(session_factory_for(database_url))
+
+
+def get_run_event_hub() -> InMemoryRunUpdateHub:
+    return run_update_hub
 
 
 def to_run_session_dto(item: RunListItem) -> RunSessionDto:
@@ -187,11 +195,27 @@ async def get_run(
 async def cancel_run(
     run_id: UUID,
     repository: Annotated[CancelRunRepository, Depends(get_run_repository)],
+    event_hub: Annotated[InMemoryRunUpdateHub, Depends(get_run_event_hub)],
 ) -> RunSessionDto:
-    item = await CancelRun(repository).execute(run_id)
+    item = await CancelRun(repository, event_hub).execute(run_id)
     if item is None:
         raise HTTPException(status_code=404, detail="run not found")
     return to_run_session_dto(item)
+
+
+@api_router.get("/stream")
+async def stream_run_updates(
+    event_hub: Annotated[RunUpdateStream, Depends(get_run_event_hub)],
+) -> StreamingResponse:
+    async def events() -> AsyncIterator[str]:
+        async with event_hub.subscribe() as updates:
+            async for update in updates:
+                yield (
+                    "event: run.updated\\n"
+                    f'data: {{"runId":"{update.run_id}","status":"{update.status}"}}\\n\\n'
+                )
+
+    return StreamingResponse(events(), media_type="text/event-stream")
 
 
 @api_router.get("/runs/{run_id}/comments", response_model=list[ReviewCommentDto])
