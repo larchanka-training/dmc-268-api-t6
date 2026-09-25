@@ -5,7 +5,11 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
-from app.modules.reviews.application.review_output import ReviewOutput
+from app.modules.reviews.application.review_output import (
+    InvalidReviewOutput,
+    ReviewOutput,
+    parse_review_output,
+)
 
 
 def valid_output() -> dict[str, object]:
@@ -37,6 +41,15 @@ def test_review_output_accepts_the_exact_contract() -> None:
 
     assert output.findings[0].line == 12
     assert output.summary.effort == "small"
+
+
+@pytest.mark.parametrize("start_line", [12, 13], ids=["equal", "after"])
+def test_parser_rejects_non_strict_multiline_anchor_start(start_line: int) -> None:
+    data = valid_output()
+    data["findings"][0]["start_line"] = start_line  # type: ignore[index]
+
+    with pytest.raises(InvalidReviewOutput):
+        parse_review_output(data)
 
 
 @pytest.mark.parametrize(

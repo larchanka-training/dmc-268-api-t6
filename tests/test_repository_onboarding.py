@@ -70,6 +70,30 @@ def test_load_default_rule_sets_rejects_schema_violations(
         load_default_rule_sets(rules_dir)
 
 
+def test_load_default_rule_sets_honors_draft_202012_composition_keywords(tmp_path: Path) -> None:
+    rules_dir = tmp_path / "rules"
+    rules_dir.mkdir()
+    schema = json.loads(Path("review/rules/schema.json").read_text(encoding="utf-8"))
+    schema["$defs"]["Rule"]["allOf"] = [
+        {
+            "not": {
+                "properties": {"name": {"const": "Forbidden"}},
+                "required": ["name"],
+            }
+        }
+    ]
+    (rules_dir / "schema.json").write_text(json.dumps(schema), encoding="utf-8")
+    backend = json.loads(Path("review/rules/default-backend.v1.json").read_text(encoding="utf-8"))
+    backend["rules"][0]["name"] = "Forbidden"
+    (rules_dir / "default-backend.v1.json").write_text(json.dumps(backend), encoding="utf-8")
+    (rules_dir / "default-frontend.v1.json").write_text(
+        Path("review/rules/default-frontend.v1.json").read_text(encoding="utf-8"), encoding="utf-8"
+    )
+
+    with pytest.raises(RuleSetValidationError, match="Forbidden"):
+        load_default_rule_sets(rules_dir)
+
+
 @pytest.mark.parametrize(
     ("languages", "stack"),
     [

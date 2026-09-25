@@ -10,6 +10,12 @@ from pathlib import Path
 from typing import Any, Protocol
 from uuid import UUID
 
+from jsonschema import (  # type: ignore[import-untyped]  # jsonschema has no shipped stubs.
+    Draft202012Validator,
+    SchemaError,
+    ValidationError,
+)
+
 
 class RuleSetValidationError(ValueError):
     """A default rule artifact does not satisfy its published JSON schema."""
@@ -138,83 +144,22 @@ def _read_json_object(path: Path) -> dict[str, Any]:
 
 
 def _validate_schema(schema: dict[str, Any], value: object) -> list[str]:
-    definitions = schema.get("$defs")
-    if not isinstance(definitions, dict):
-        raise RuleSetValidationError("schema.json: missing $defs")
-    root_ref = schema.get("$ref")
-    if not isinstance(root_ref, str):
-        raise RuleSetValidationError("schema.json: missing root $ref")
-    return _validate_node({"$ref": root_ref}, value, "$", definitions)
+    try:
+        Draft202012Validator.check_schema(schema)
+    except SchemaError as error:
+        raise RuleSetValidationError(
+            f"schema.json: invalid Draft 2020-12 schema: {error.message}"
+        ) from error
+
+    validator = Draft202012Validator(schema)
+    errors = sorted(validator.iter_errors(value), key=lambda error: list(error.absolute_path))
+    return [_format_schema_error(error) for error in errors]
 
 
-def _validate_node(
-    node: dict[str, Any], value: object, path: str, definitions: dict[str, Any]
-) -> list[str]:
-    reference = node.get("$ref")
-    if isinstance(reference, str):
-        name = reference.rsplit("/", 1)[-1]
-        referenced = definitions.get(name)
-        if not isinstance(referenced, dict):
-            return [f"{path}: unresolved schema reference {reference}"]
-        return _validate_node(referenced, value, path, definitions)
-
-    node_type = node.get("type")
-    if node_type == "object":
-        if not isinstance(value, dict):
-            return [f"{path}: expected object"]
-        properties = node.get("properties", {})
-        required = node.get("required", [])
-        if not isinstance(properties, dict) or not isinstance(required, list):
-            return [f"{path}: invalid object schema"]
-        object_errors = [
-            f"{path}.{key}: missing required key" for key in required if key not in value
-        ]
-        if node.get("additionalProperties") is False:
-            extras = set(value) - set(properties)
-            if extras:
-                object_errors.append(f"{path}: unexpected keys {sorted(extras)}")
-        for key, subnode in properties.items():
-            if key in value and isinstance(subnode, dict):
-                object_errors.extend(
-                    _validate_node(subnode, value[key], f"{path}.{key}", definitions)
-                )
-        return object_errors
-    if node_type == "array":
-        if not isinstance(value, list):
-            return [f"{path}: expected array"]
-        array_errors: list[str] = []
-        minimum = node.get("minItems")
-        maximum = node.get("maxItems")
-        if isinstance(minimum, int) and len(value) < minimum:
-            array_errors.append(f"{path}: fewer than {minimum} items")
-        if isinstance(maximum, int) and len(value) > maximum:
-            array_errors.append(f"{path}: more than {maximum} items")
-        items = node.get("items")
-        if isinstance(items, dict):
-            for index, item in enumerate(value):
-                array_errors.extend(_validate_node(items, item, f"{path}[{index}]", definitions))
-        return array_errors
-    if node_type == "string":
-        if not isinstance(value, str):
-            return [f"{path}: expected string"]
-        string_errors: list[str] = []
-        minimum = node.get("minLength")
-        maximum = node.get("maxLength")
-        if isinstance(minimum, int) and len(value) < minimum:
-            string_errors.append(f"{path}: shorter than {minimum}")
-        if isinstance(maximum, int) and len(value) > maximum:
-            string_errors.append(f"{path}: longer than {maximum}")
-        enum = node.get("enum")
-        if isinstance(enum, list) and value not in enum:
-            string_errors.append(f"{path}: not in {enum}")
-        pattern = node.get("pattern")
-        if isinstance(pattern, str) and re.fullmatch(pattern, value) is None:
-            string_errors.append(f"{path}: does not match {pattern}")
-        return string_errors
-    if node_type == "integer":
-        if not isinstance(value, int) or isinstance(value, bool):
-            return [f"{path}: expected integer"]
-        minimum = node.get("minimum")
-        if isinstance(minimum, int) and value < minimum:
-            return [f"{path}: below minimum {minimum}"]
-    return []
+def _format_schema_error(error: ValidationError) -> str:
+    path = error.absolute_path
+    message = error.message
+    rendered_path = "$" + "".join(
+        f"[{part}]" if isinstance(part, int) else f".{part}" for part in path
+    )
+    return f"{rendered_path}: {message}"

@@ -93,7 +93,7 @@ def test_dedup_confidence_hunks_and_cap_put_each_finding_in_one_bucket() -> None
         *duplicates,
         finding(title="Low confidence", confidence=0.4),
         finding(title="Outside hunk", line=99),
-        finding(title="Bad start", line=12, start_line=99),
+        finding(title="Valid range", line=12, start_line=10),
         *overflow,
         max_inline=2,
     )
@@ -111,9 +111,9 @@ def test_dedup_confidence_hunks_and_cap_put_each_finding_in_one_bucket() -> None
     inline_and_body = result.inline + result.body_only
     assert (
         next(
-            item.finding for item in inline_and_body if item.finding.title == "Bad start"
+            item.finding for item in inline_and_body if item.finding.title == "Valid range"
         ).start_line
-        is None
+        == 10
     )
 
 

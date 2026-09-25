@@ -42,6 +42,8 @@ class ReviewFinding(BaseModel):
     @model_validator(mode="after")
     def validate_range(self) -> ReviewFinding:
         """A multi-line anchor always has a strictly earlier start line."""
+        if self.start_line is not None and self.start_line >= self.line:
+            raise ValueError("start_line must be strictly earlier than line")
         if self.title.endswith("."):
             raise ValueError("title must not end with a period")
         title_lines = self.title.splitlines()
