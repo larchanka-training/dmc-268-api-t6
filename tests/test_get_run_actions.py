@@ -41,6 +41,8 @@ def make_action(
     response_ref: str | None = None,
 ) -> RunAction:
     return RunAction(
+        id=UUID(f"00000000-0000-0000-0000-{index + 1:012d}"),
+        run_id=UUID("00000000-0000-0000-0000-000000000100"),
         index=index,
         tool="github.get_file",
         request={"path": "app/service.py"},
@@ -66,6 +68,8 @@ def test_get_run_actions_returns_small_and_exactly_64_kib_responses_inline() -> 
     assert response.status_code == 200
     assert response.json() == [
         {
+            "id": "00000000-0000-0000-0000-000000000001",
+            "runId": str(run_id),
             "index": 0,
             "tool": "github.get_file",
             "request": {"path": "app/service.py"},
@@ -75,6 +79,8 @@ def test_get_run_actions_returns_small_and_exactly_64_kib_responses_inline() -> 
             "durationMs": 42,
         },
         {
+            "id": "00000000-0000-0000-0000-000000000002",
+            "runId": str(run_id),
             "index": 1,
             "tool": "github.get_file",
             "request": {"path": "app/service.py"},
@@ -103,6 +109,8 @@ def test_get_run_actions_redacts_oversized_response_and_preserves_external_refer
     assert response.status_code == 200
     assert response.json() == [
         {
+            "id": "00000000-0000-0000-0000-000000000003",
+            "runId": str(run_id),
             "index": 2,
             "tool": "github.get_file",
             "request": {"path": "app/service.py"},
@@ -112,6 +120,8 @@ def test_get_run_actions_redacts_oversized_response_and_preserves_external_refer
             "durationMs": 42,
         },
         {
+            "id": "00000000-0000-0000-0000-000000000004",
+            "runId": str(run_id),
             "index": 3,
             "tool": "github.get_file",
             "request": {"path": "app/service.py"},

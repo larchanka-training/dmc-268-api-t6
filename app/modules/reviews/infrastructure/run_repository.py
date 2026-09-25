@@ -292,21 +292,23 @@ class SqlAlchemyRunRepository:
     def _to_published_comment(finding: Finding) -> PublishedComment:
         return PublishedComment(
             id=finding.id,
-            path=finding.file_path,
+            file=finding.file_path,
             old_line=finding.line_start if finding.side.value == "LEFT" else None,
             new_line=finding.line_start if finding.side.value == "RIGHT" else None,
+            end_line=finding.line_end,
             severity=finding.severity.value,
             category=finding.category.value,
-            confidence=finding.confidence,
             title=finding.title,
             body=finding.body,
-            suggestion=finding.suggestion,
             rule_name=finding.rule_name,
+            created_at=finding.created_at,
         )
 
     @staticmethod
     def _to_run_action(action: RunAction) -> RunActionProjection:
         return RunActionProjection(
+            id=action.id,
+            run_id=action.run_id,
             index=action.index,
             tool=action.tool,
             request=action.request,

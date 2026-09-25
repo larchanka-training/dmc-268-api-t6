@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from decimal import Decimal
+from datetime import datetime
 from typing import Protocol
 from uuid import UUID
 
@@ -11,16 +11,16 @@ from uuid import UUID
 @dataclass(frozen=True)
 class PublishedComment:
     id: UUID
-    path: str
+    file: str
     old_line: int | None
     new_line: int | None
+    end_line: int | None
     severity: str
     category: str
-    confidence: Decimal
     title: str
     body: str
-    suggestion: str | None
     rule_name: str | None
+    created_at: datetime
 
 
 class RunCommentsRepository(Protocol):

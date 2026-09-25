@@ -90,21 +90,23 @@ def to_run_session_dto(item: RunListItem) -> RunSessionDto:
 def to_review_comment_dto(item: PublishedComment) -> ReviewCommentDto:
     return ReviewCommentDto(
         id=item.id,
-        path=item.path,
+        file=item.file,
         old_line=item.old_line,
         new_line=item.new_line,
+        end_line=item.end_line,
         severity=item.severity,
         category=item.category,
-        confidence=float(item.confidence),
         title=item.title,
         body=item.body,
-        suggestion=item.suggestion,
         rule_name=item.rule_name,
+        created_at=item.created_at,
     )
 
 
 def to_run_action_dto(item: RunActionTrace) -> RunActionDto:
     return RunActionDto(
+        id=item.id,
+        run_id=item.run_id,
         index=item.index,
         tool=item.tool,
         request=item.request,
