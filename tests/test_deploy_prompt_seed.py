@@ -9,9 +9,15 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 
 def test_image_carries_versioned_prompt_assets_and_can_seed_without_uv() -> None:
     dockerfile = (REPO_ROOT / "Dockerfile").read_text(encoding="utf-8")
+    workflow = (REPO_ROOT / ".github" / "workflows" / "ci-cd.yml").read_text(encoding="utf-8")
 
     assert "COPY review/prompts ./review/prompts" in dockerfile
+    assert "COPY review/postprocess ./review/postprocess" in dockerfile
+    assert "COPY review/rules ./review/rules" in dockerfile
     assert "rm -f /bin/uv /bin/uvx" in dockerfile
+    assert "Smoke-test packaged review artifacts" in workflow
+    assert "FindingsPostProcessor.from_default_patterns()" in workflow
+    assert 'load_default_rule_sets(Path("review/rules"))' in workflow
 
 
 def test_staging_bootstraps_migrations_then_prompts_before_starting_api() -> None:
