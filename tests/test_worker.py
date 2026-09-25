@@ -6,6 +6,7 @@ from pytest import MonkeyPatch
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 import app.worker as worker
+from app.modules.reviews.application.conventions import RepositoryFile, RepositorySnapshot
 from app.modules.reviews.application.get_run_diff import DiffSnapshot
 from app.modules.reviews.application.process_run import RunDiffProvider
 
@@ -25,15 +26,38 @@ def test_process_review_run_composes_repository_and_processor_from_a_shared_fact
         ) -> str:
             raise AssertionError("the composition test does not call the provider")
 
+        async def fetch_agents_md(self, repository_id: UUID) -> RepositorySnapshot:
+            raise AssertionError("the composition test does not call the provider")
+
+        async def fetch_tree(self, repository_id: UUID) -> tuple[RepositoryFile, ...]:
+            raise AssertionError("the composition test does not call the provider")
+
+        async def fetch_files(
+            self, repository_id: UUID, paths: tuple[str, ...]
+        ) -> tuple[RepositoryFile, ...]:
+            raise AssertionError("the composition test does not call the provider")
+
+        async def draft_conventions(
+            self,
+            *,
+            agents_md: str | None,
+            files: tuple[RepositoryFile, ...],
+            languages: dict[str, int],
+        ) -> dict[str, object]:
+            raise AssertionError("the composition test does not call the provider")
+
     class Repository:
         def __init__(self, received_factory: async_sessionmaker[AsyncSession]) -> None:
             assert received_factory is factory
 
     class Processor:
-        def __init__(self, repository: Repository, provider: Provider, cache: object) -> None:
+        def __init__(
+            self, repository: Repository, provider: Provider, cache: object, conventions: object
+        ) -> None:
             assert isinstance(repository, Repository)
             assert isinstance(provider, Provider)
             assert cache is not None
+            assert conventions is not None
 
         async def execute(self, received_run_id: UUID) -> bool:
             assert received_run_id == run_id
@@ -53,6 +77,26 @@ def test_review_worker_disposes_its_single_engine_at_shutdown(monkeypatch: Monke
         async def fetch_file_content(
             self, *, code_change_id: UUID, head_sha: str, path: str
         ) -> str:
+            raise AssertionError("the lifecycle test does not call the provider")
+
+        async def fetch_agents_md(self, repository_id: UUID) -> RepositorySnapshot:
+            raise AssertionError("the lifecycle test does not call the provider")
+
+        async def fetch_tree(self, repository_id: UUID) -> tuple[RepositoryFile, ...]:
+            raise AssertionError("the lifecycle test does not call the provider")
+
+        async def fetch_files(
+            self, repository_id: UUID, paths: tuple[str, ...]
+        ) -> tuple[RepositoryFile, ...]:
+            raise AssertionError("the lifecycle test does not call the provider")
+
+        async def draft_conventions(
+            self,
+            *,
+            agents_md: str | None,
+            files: tuple[RepositoryFile, ...],
+            languages: dict[str, int],
+        ) -> dict[str, object]:
             raise AssertionError("the lifecycle test does not call the provider")
 
     class Engine:

@@ -167,3 +167,16 @@ class RepoConventions(Base):
     recommendations: Mapped[list[str]] = mapped_column(JSONB, nullable=False)
     languages: Mapped[dict[str, int]] = mapped_column(JSONB, nullable=False)
     created_at: Mapped[datetime] = timestamp_column()
+
+
+class RepoConventionDraft(Base):
+    """Recoverable per-cache-entry model draft kept outside the conventions value."""
+
+    __tablename__ = "repo_convention_drafts"
+
+    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
+    repo_conventions_id: Mapped[UUID] = mapped_column(
+        ForeignKey("repo_conventions.id", ondelete="CASCADE"), nullable=False, unique=True
+    )
+    files: Mapped[list[dict[str, str]]] = mapped_column(JSONB, nullable=False)
+    created_at: Mapped[datetime] = timestamp_column()
