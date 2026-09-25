@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app.common.infrastructure.db.enums import RunState
 from app.modules.analytics.infrastructure.models import UsageEvent
 from app.modules.repositories.infrastructure.models import Repository
+from app.modules.reviews.application.cancel_run import CancelRequestResult
 from app.modules.reviews.application.get_run_actions import RunAction as RunActionProjection
 from app.modules.reviews.application.get_run_actions import RunActionResponse
 from app.modules.reviews.application.get_run_comments import PublishedComment
@@ -211,7 +212,7 @@ class SqlAlchemyRunRepository:
             return None
         return BlobCacheKey(code_change_id=row[0], head_sha=row[1], path=path)
 
-    async def request_cancel(self, run_id: UUID) -> bool:
+    async def request_cancel(self, run_id: UUID) -> CancelRequestResult:
         """Persist one cancellation decision while holding the run row lock.
 
         Queued work cannot have started and is cancelled immediately.  Running
@@ -222,12 +223,16 @@ class SqlAlchemyRunRepository:
         async with self._session_factory.begin() as session:
             run = await session.scalar(select(Run).where(Run.id == run_id).with_for_update())
             if run is None:
-                return False
+                return CancelRequestResult(found=False, changed=False)
             if run.state is RunState.QUEUED:
                 run.state = RunState.CANCELLED
+                return CancelRequestResult(found=True, changed=True)
             elif run.state in {RunState.RUNNING, RunState.PUBLISHING}:
+                if run.cancel_requested:
+                    return CancelRequestResult(found=True, changed=False)
                 run.cancel_requested = True
-        return True
+                return CancelRequestResult(found=True, changed=True)
+        return CancelRequestResult(found=True, changed=False)
 
     @staticmethod
     def _to_run_list_item(

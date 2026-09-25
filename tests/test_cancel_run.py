@@ -9,7 +9,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.main import app, get_run_repository
-from app.modules.reviews.application.cancel_run import CancelRun
+from app.modules.reviews.application.cancel_run import CancelRequestResult, CancelRun
 from app.modules.reviews.application.list_runs import RunListItem
 
 
@@ -17,29 +17,33 @@ class FakeCancelRunRepository:
     def __init__(self, items: list[RunListItem]) -> None:
         self._items = {item.id: item for item in items}
 
-    async def request_cancel(self, run_id: UUID) -> bool:
+    async def request_cancel(self, run_id: UUID) -> CancelRequestResult:
         item = self._items.get(run_id)
         if item is None:
-            return False
+            return CancelRequestResult(found=False, changed=False)
         if item.status == "queued":
             self._items[run_id] = replace(item, status="cancelled")
+            return CancelRequestResult(found=True, changed=True)
         elif item.status in {"running", "publishing"}:
-            self._items[run_id] = replace(item, cancel_requested=True)
-        return True
+            if not item.cancel_requested:
+                self._items[run_id] = replace(item, cancel_requested=True)
+                return CancelRequestResult(found=True, changed=True)
+        return CancelRequestResult(found=True, changed=False)
 
     async def get_run(self, run_id: UUID) -> RunListItem | None:
         return self._items.get(run_id)
 
 
 class StubCancelRunRepository:
-    def __init__(self, item: RunListItem | None, exists: bool) -> None:
+    def __init__(self, item: RunListItem | None, exists: bool, changed: bool = True) -> None:
         self._item = item
         self._exists = exists
+        self._changed = changed
         self.requested_id: UUID | None = None
 
-    async def request_cancel(self, run_id: UUID) -> bool:
+    async def request_cancel(self, run_id: UUID) -> CancelRequestResult:
         self.requested_id = run_id
-        return self._exists
+        return CancelRequestResult(found=self._exists, changed=self._changed)
 
     async def get_run(self, run_id: UUID) -> RunListItem | None:
         return self._item

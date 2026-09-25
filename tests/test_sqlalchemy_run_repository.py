@@ -185,9 +185,10 @@ def test_sqlalchemy_run_repository_cancels_only_the_locked_target_run() -> None:
         cast(async_sessionmaker[AsyncSession], CancelSessionFactory(session))
     )
 
-    cancelled = asyncio.run(repository.request_cancel(run_id))
+    result = asyncio.run(repository.request_cancel(run_id))
 
-    assert cancelled is True
+    assert result.found is True
+    assert result.changed is True
     assert run.state is RunState.CANCELLED
     assert run.cancel_requested is False
     assert session.statement is not None
@@ -203,9 +204,10 @@ def test_sqlalchemy_run_repository_requests_cancellation_for_active_run(state: R
         cast(async_sessionmaker[AsyncSession], CancelSessionFactory(CancelSession(run)))
     )
 
-    cancelled = asyncio.run(repository.request_cancel(UUID("00000000-0000-0000-0000-000000000001")))
+    result = asyncio.run(repository.request_cancel(UUID("00000000-0000-0000-0000-000000000001")))
 
-    assert cancelled is True
+    assert result.found is True
+    assert result.changed is True
     assert run.state is state
     assert run.cancel_requested is True
 
