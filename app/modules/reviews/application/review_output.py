@@ -49,8 +49,6 @@ class ReviewFinding(BaseModel):
         title_lines = self.title.splitlines()
         if len(title_lines) != 1 or title_lines[0] != self.title:
             raise ValueError("title must be one line")
-        if self.severity != "critical" and len(self.body.split()) > 120:
-            raise ValueError("body must have at most 120 words unless severity is critical")
         return self
 
 
