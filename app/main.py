@@ -19,6 +19,7 @@ from app.modules.reviews.api.dtos import (
     RunListDto,
     RunSessionDto,
 )
+from app.modules.reviews.application.cancel_run import CancelRun, CancelRunRepository
 from app.modules.reviews.application.get_run import GetRun, RunDetailRepository
 from app.modules.reviews.application.get_run_actions import (
     GetRunActionResponse,
@@ -70,6 +71,7 @@ def get_run_repository() -> (
     | RunActionsRepository
     | RunDiffRepository
     | RunFileRepository
+    | CancelRunRepository
 ):
     database_url = os.environ.get("DATABASE_URL")
     if database_url is None:
@@ -176,6 +178,17 @@ async def get_run(
     repository: Annotated[RunDetailRepository, Depends(get_run_repository)],
 ) -> RunSessionDto:
     item = await GetRun(repository).execute(run_id)
+    if item is None:
+        raise HTTPException(status_code=404, detail="run not found")
+    return to_run_session_dto(item)
+
+
+@api_router.post("/runs/{run_id}/cancel", response_model=RunSessionDto)
+async def cancel_run(
+    run_id: UUID,
+    repository: Annotated[CancelRunRepository, Depends(get_run_repository)],
+) -> RunSessionDto:
+    item = await CancelRun(repository).execute(run_id)
     if item is None:
         raise HTTPException(status_code=404, detail="run not found")
     return to_run_session_dto(item)
