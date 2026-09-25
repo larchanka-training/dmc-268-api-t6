@@ -1,17 +1,14 @@
 from __future__ import annotations
 
-import os
 from collections.abc import AsyncIterator
-from functools import lru_cache
 from typing import Annotated
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Path, Query
 from fastapi.responses import StreamingResponse
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.bootstrap.reviews_api import get_file_blob_cache, get_run_repository, reviews_api_lifespan
 from app.common.infrastructure.db.enums import RunState
-from app.common.infrastructure.db.session import create_session_factory
 from app.modules.reviews.api.dtos import (
     DiffFileDto,
     FileLinesDto,
@@ -49,45 +46,18 @@ from app.modules.reviews.application.get_run_file_lines import (
 )
 from app.modules.reviews.application.list_runs import ListRuns, RunListItem, RunRepository
 from app.modules.reviews.application.run_events import InMemoryRunUpdateHub, RunUpdateStream
-from app.modules.reviews.infrastructure.blob_cache import SqlAlchemyBlobCache
-from app.modules.reviews.infrastructure.run_repository import SqlAlchemyRunRepository
 
 api_router = APIRouter(prefix="/api")
 
-app = FastAPI(title="Backend")
+app = FastAPI(title="Backend", lifespan=reviews_api_lifespan)
 run_update_hub = InMemoryRunUpdateHub()
+
+__all__ = ["app", "get_file_blob_cache", "get_run_repository"]
 
 
 @app.get("/healthcheck")
 async def healthcheck() -> dict[str, str]:
     return {"status": "ok"}
-
-
-@lru_cache
-def session_factory_for(database_url: str) -> async_sessionmaker[AsyncSession]:
-    return create_session_factory(database_url)
-
-
-def get_run_repository() -> (
-    RunRepository
-    | RunDetailRepository
-    | RunCommentsRepository
-    | RunActionsRepository
-    | RunDiffRepository
-    | RunFileRepository
-    | CancelRunRepository
-):
-    database_url = os.environ.get("DATABASE_URL")
-    if database_url is None:
-        raise RuntimeError("DATABASE_URL must be configured to list runs")
-    return SqlAlchemyRunRepository(session_factory_for(database_url))
-
-
-def get_file_blob_cache() -> BlobCache:
-    database_url = os.environ.get("DATABASE_URL")
-    if database_url is None:
-        raise RuntimeError("DATABASE_URL must be configured to read run files")
-    return SqlAlchemyBlobCache(session_factory_for(database_url))
 
 
 def get_run_event_hub() -> InMemoryRunUpdateHub:
