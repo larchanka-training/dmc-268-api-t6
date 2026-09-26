@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import cast
 from uuid import UUID
 
+from sqlalchemy import update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -43,6 +44,7 @@ class SqlAlchemyInstallationRepositoryStore:
                     "full_name": snapshot.full_name,
                     "default_branch": snapshot.default_branch,
                     "web_url": snapshot.web_url,
+                    "enabled": True,
                 },
             )
             .returning(Repository.id)
@@ -51,6 +53,22 @@ class SqlAlchemyInstallationRepositoryStore:
         if repository_id is None:
             raise RuntimeError("repository upsert did not return an id")
         return repository_id
+
+    async def disable_repository(self, provider_installation_id: UUID, external_id: int) -> None:
+        """Disable a repository if it still belongs to this installation.
+
+        Updating a missing or already-disabled row is deliberately a no-op, so
+        GitHub's at-least-once removal deliveries are safe to replay.
+        """
+        statement = (
+            update(Repository)
+            .where(
+                Repository.provider_installation_id == provider_installation_id,
+                Repository.external_id == external_id,
+            )
+            .values(enabled=False)
+        )
+        await self._session.execute(statement)
 
     async def get_active_rule_version(self, repository_id: UUID) -> PersistedRuleVersion | None:
         return await self._rule_versions.get_active_rule_version(repository_id)

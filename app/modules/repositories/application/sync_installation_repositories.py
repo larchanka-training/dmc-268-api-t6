@@ -32,6 +32,10 @@ class InstallationRepositoryStore(RepositoryRuleVersionStore, Protocol):
         self, provider_installation_id: UUID, snapshot: RepositorySnapshot
     ) -> UUID: ...
 
+    async def disable_repository(
+        self, provider_installation_id: UUID, external_id: int
+    ) -> None: ...
+
 
 class InstallationRepositoriesUnitOfWork(UnitOfWork, Protocol):
     """The sync use case owns the one repository-plus-rules transaction."""
@@ -75,3 +79,22 @@ class SyncInstallationRepositories:
                 results.append(await onboarding.execute(repository_id, repository.languages))
             await uow.commit()
         return tuple(results)
+
+    async def disable(
+        self,
+        *,
+        provider_installation_id: UUID,
+        repositories: tuple[RepositorySnapshot, ...],
+    ) -> None:
+        """Soft-disable removed repositories in one short database transaction.
+
+        This lifecycle path deliberately accepts full transport snapshots but
+        persists only their stable external ids.  It performs no VCS work and
+        updates are naturally idempotent for duplicated webhook deliveries.
+        """
+        async with self._uow_factory() as uow:
+            for repository in repositories:
+                await uow.repositories.disable_repository(
+                    provider_installation_id, repository.external_id
+                )
+            await uow.commit()
