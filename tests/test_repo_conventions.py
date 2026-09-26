@@ -31,11 +31,13 @@ from app.modules.reviews.application.conventions import (
     CachedConventions,
     ConventionsDraft,
     ConventionsFile,
+    ConventionsRequest,
     GenerateRepoConventions,
     RepositoryFile,
     RepositorySnapshot,
     derive_languages,
 )
+from app.modules.reviews.application.prompt_builder import ReviewRule
 from app.modules.reviews.infrastructure.conventions_unit_of_work import (
     SqlAlchemyRepositoryConventionsStore,
     SqlAlchemyRepositoryConventionsUnitOfWork,
@@ -119,19 +121,14 @@ class FakeSource:
 @dataclass
 class FakeModel:
     result: dict[str, object]
-    calls: list[tuple[str | None, tuple[RepositoryFile, ...], dict[str, int]]] = field(
-        default_factory=list
-    )
+    calls: list[ConventionsRequest] = field(default_factory=list)
 
     async def draft_conventions(
         self,
         *,
-        agents_md: str | None,
-        files: tuple[RepositoryFile, ...],
-        languages: dict[str, int],
-        changed_files: tuple[str, ...],
+        request: ConventionsRequest,
     ) -> dict[str, object]:
-        self.calls.append((agents_md, files, languages))
+        self.calls.append(request)
         return self.result
 
 
@@ -308,10 +305,59 @@ def test_cache_miss_fetches_bounded_context_derives_languages_and_records_draft_
     assert result.conventions.languages == {"Python": 60, "TypeScript": 40}
     assert result.conventions.key_patterns == ("Pattern one.", "Pattern two.", "Pattern three.")
     assert source.calls == ["agents", "tree", "files:app/main.py,web/app.ts"]
-    assert model.calls[0][2] == {"Python": 60, "TypeScript": 40}
+    assert model.calls[0].languages == {"Python": 60, "TypeScript": 40}
     assert [file.path for file in store.traces[0][1]] == ["app/main.py"]
     assert len(store.saved) == 1
     assert [unit.commits for unit in factory.units] == [0, 1]
+
+
+def test_cache_miss_passes_the_complete_versioned_conventions_request() -> None:
+    source = FakeSource()
+    model = FakeModel(
+        {
+            **draft(),
+            "files": [
+                {"path": "app/main.py", "relevance": "Application entrypoint."},
+                {"path": "web/app.ts", "relevance": "Web application."},
+            ],
+        }
+    )
+    store = FakeStore()
+    factory = FakeUnitOfWorkFactory(store)
+    prompt = ActiveConventionsPrompt(PROMPT_VERSION_ID, "stored conventions prompt")
+    rules = (
+        ReviewRule(
+            name="Database boundary",
+            include=("app/**/*.py",),
+            exclude=("tests/**",),
+            checks=("Use cases commit once.",),
+        ),
+    )
+
+    asyncio.run(
+        GenerateRepoConventions(source, model, factory).execute(
+            repository_id=REPOSITORY_ID,
+            conventions_prompt=prompt,
+            rules=rules,
+            run_id=RUN_ID,
+            changed_files=("app/main.py", "web/app.ts"),
+        )
+    )
+
+    assert model.calls == [
+        ConventionsRequest(
+            system="stored conventions prompt",
+            rules=rules,
+            agents_md="Always use uv.",
+            repo_tree=("app/main.py", "web/app.ts", "README.md"),
+            repo_files=(
+                RepositoryFile("app/main.py", 10, content="content for app/main.py"),
+                RepositoryFile("web/app.ts", 10, content="content for web/app.ts"),
+            ),
+            languages={"Python": 60, "TypeScript": 40},
+            changed_files=("app/main.py", "web/app.ts"),
+        )
+    ]
 
 
 @pytest.mark.parametrize(
@@ -512,7 +558,14 @@ def test_sqlalchemy_store_returns_cached_conventions_for_repeated_same_key(
                     id=rule_version_id,
                     repository_id=REPOSITORY_ID,
                     version=1,
-                    rules=[],
+                    rules=[
+                        {
+                            "name": "Database boundary",
+                            "include": ["app/**/*.py"],
+                            "exclude": ["tests/**"],
+                            "checks": ["Use cases commit once."],
+                        }
+                    ],
                     checksum="c" * 64,
                 )
                 code_change = CodeChange(
@@ -579,6 +632,14 @@ def test_sqlalchemy_store_returns_cached_conventions_for_repeated_same_key(
             assert conventions_input is not None
             assert conventions_input.conventions_prompt == ActiveConventionsPrompt(
                 conventions_v2.id, "conventions v2"
+            )
+            assert conventions_input.rules == (
+                ReviewRule(
+                    name="Database boundary",
+                    include=("app/**/*.py",),
+                    exclude=("tests/**",),
+                    checks=("Use cases commit once.",),
+                ),
             )
 
             async with session_factory() as session:

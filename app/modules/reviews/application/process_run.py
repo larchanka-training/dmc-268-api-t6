@@ -21,6 +21,7 @@ from app.modules.reviews.application.get_run_file_lines import (
     BlobCacheKey,
     BlobCacheWriter,
 )
+from app.modules.reviews.application.prompt_builder import ReviewRule
 
 
 class RunDiffProvider(Protocol):
@@ -43,6 +44,7 @@ class RunDiffInput:
 class RunConventionsInput:
     repository_id: UUID
     conventions_prompt: ActiveConventionsPrompt
+    rules: tuple[ReviewRule, ...] = ()
 
 
 class RunProcessingRepository(DiffSnapshotRepository, Protocol):
@@ -100,6 +102,7 @@ class ReviewRunProcessor:
                 conventions_prompt=conventions_input.conventions_prompt,
                 run_id=run_id,
                 changed_files=tuple(file.filename for file in files),
+                rules=conventions_input.rules,
             )
         return True
 

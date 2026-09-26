@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Literal
 from xml.sax.saxutils import escape
@@ -75,6 +76,30 @@ class ReviewContext:
     pr_meta: PullRequestMeta
     changed_files: tuple[ChangedFile, ...]
     omitted_files: tuple[str, ...]
+
+
+def review_rule_from_stored(value: Mapping[str, object]) -> ReviewRule:
+    """Convert a validated persisted rule into the prompt representation."""
+    name = value.get("name")
+    include = value.get("include")
+    exclude = value.get("exclude")
+    checks = value.get("checks")
+    if not (
+        isinstance(name, str)
+        and isinstance(include, list)
+        and isinstance(exclude, list)
+        and isinstance(checks, list)
+        and all(isinstance(item, str) for item in include)
+        and all(isinstance(item, str) for item in exclude)
+        and all(isinstance(item, str) for item in checks)
+    ):
+        raise ValueError("stored rule has invalid prompt shape")
+    return ReviewRule(
+        name=name,
+        include=tuple(include),
+        exclude=tuple(exclude),
+        checks=tuple(checks),
+    )
 
 
 class PromptBuilder:

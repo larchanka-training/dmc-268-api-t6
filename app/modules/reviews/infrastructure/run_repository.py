@@ -25,7 +25,10 @@ from app.modules.reviews.application.get_run_diff import DiffSnapshot
 from app.modules.reviews.application.get_run_file_lines import BlobCacheKey
 from app.modules.reviews.application.list_runs import RunCursor, RunListItem
 from app.modules.reviews.application.process_run import RunConventionsInput, RunDiffInput
-from app.modules.reviews.application.prompt_builder import parse_unified_diff
+from app.modules.reviews.application.prompt_builder import (
+    parse_unified_diff,
+    review_rule_from_stored,
+)
 from app.modules.reviews.application.review_output import (
     FindingPostProcessingInput,
     PublishedFinding,
@@ -212,8 +215,14 @@ class SqlAlchemyRunRepository:
 
     async def get_run_conventions_input(self, run_id: UUID) -> RunConventionsInput | None:
         statement = (
-            select(CodeChange.repository_id, PromptVersion.id, PromptVersion.content)
+            select(
+                CodeChange.repository_id,
+                PromptVersion.id,
+                PromptVersion.content,
+                RuleVersion.rules,
+            )
             .join(CodeChange, CodeChange.id == Run.code_change_id)
+            .join(RuleVersion, RuleVersion.id == Run.rule_version_id)
             .outerjoin(
                 PromptVersion,
                 and_(
@@ -232,6 +241,7 @@ class SqlAlchemyRunRepository:
         return RunConventionsInput(
             repository_id=row[0],
             conventions_prompt=ActiveConventionsPrompt(id=row[1], content=row[2]),
+            rules=tuple(review_rule_from_stored(item) for item in row[3]),
         )
 
     async def get_run_file_key(self, run_id: UUID, path: str) -> BlobCacheKey | None:

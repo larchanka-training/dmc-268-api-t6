@@ -12,6 +12,7 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.common.application.unit_of_work import UnitOfWork
+from app.modules.reviews.application.prompt_builder import ReviewRule
 
 _STRICT = ConfigDict(extra="forbid", strict=True)
 _MAX_CONTEXT_FILES = 12
@@ -59,6 +60,19 @@ class ActiveConventionsPrompt:
 
     id: UUID
     content: str
+
+
+@dataclass(frozen=True)
+class ConventionsRequest:
+    """The complete immutable input envelope for one conventions-model call."""
+
+    system: str
+    rules: tuple[ReviewRule, ...]
+    agents_md: str | None
+    repo_tree: tuple[str, ...]
+    repo_files: tuple[RepositoryFile, ...]
+    languages: dict[str, int]
+    changed_files: tuple[str, ...]
 
 
 class ConventionsFile(BaseModel):
@@ -119,10 +133,7 @@ class ConventionsModel(Protocol):
     async def draft_conventions(
         self,
         *,
-        agents_md: str | None,
-        files: tuple[RepositoryFile, ...],
-        languages: dict[str, int],
-        changed_files: tuple[str, ...],
+        request: ConventionsRequest,
     ) -> Mapping[str, object]: ...
 
 
@@ -172,6 +183,7 @@ class GenerateRepoConventions:
         conventions_prompt: ActiveConventionsPrompt,
         run_id: UUID,
         changed_files: tuple[str, ...],
+        rules: tuple[ReviewRule, ...] = (),
     ) -> GeneratedConventions:
         # Fetching the revision happens outside every database operation; it is the
         # exact cache key and therefore cannot be inferred from a stale repository row.
@@ -193,10 +205,15 @@ class GenerateRepoConventions:
         selected = select_context_files(tree)
         files = await self._source.fetch_files(repository_id, selected)
         raw_draft = await self._model.draft_conventions(
-            agents_md=agents_md.content,
-            files=files,
-            languages=languages,
-            changed_files=changed_files,
+            request=ConventionsRequest(
+                system=conventions_prompt.content,
+                rules=rules,
+                agents_md=agents_md.content,
+                repo_tree=tuple(file.path for file in tree),
+                repo_files=files,
+                languages=languages,
+                changed_files=changed_files,
+            )
         )
         draft = ConventionsDraft.model_validate(raw_draft)
         _validate_trace_files(draft.files, changed_files)
