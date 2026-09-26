@@ -19,6 +19,7 @@ from app.modules.reviews.application.process_run import (
     RunDiffInput,
     RunDiffProvider,
 )
+from app.modules.reviews.application.prompt_builder import ReviewRule
 
 
 class FakeDiffRepository:
@@ -271,11 +272,13 @@ def test_processor_passes_active_conventions_prompt_not_the_run_system_prompt() 
             conventions_prompt: ActiveConventionsPrompt,
             run_id: UUID,
             changed_files: tuple[str, ...],
+            rules: tuple[ReviewRule, ...],
         ) -> GeneratedConventions:
             assert repository_id == expected_repository_id
             assert conventions_prompt == active_prompt
             assert conventions_prompt.id != system_prompt_id
             assert changed_files == ()
+            assert rules == ()
             return GeneratedConventions(
                 CachedConventions(
                     expected_repository_id,

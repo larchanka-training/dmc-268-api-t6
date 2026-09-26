@@ -8,6 +8,7 @@ from uuid import UUID
 
 from app.modules.reviews.application.conventions import (
     ConventionsModel,
+    ConventionsRequest,
     RepositoryConventionsSource,
     RepositoryFile,
     RepositorySnapshot,
@@ -28,10 +29,7 @@ class ReviewConventionsProvider(Protocol):
     async def draft_conventions(
         self,
         *,
-        agents_md: str | None,
-        files: tuple[RepositoryFile, ...],
-        languages: dict[str, int],
-        changed_files: tuple[str, ...],
+        request: ConventionsRequest,
     ) -> Mapping[str, object]: ...
 
 
@@ -62,14 +60,6 @@ class ProviderConventionsModel(ConventionsModel):
     async def draft_conventions(
         self,
         *,
-        agents_md: str | None,
-        files: tuple[RepositoryFile, ...],
-        languages: dict[str, int],
-        changed_files: tuple[str, ...],
+        request: ConventionsRequest,
     ) -> Mapping[str, object]:
-        return await self._provider.draft_conventions(
-            agents_md=agents_md,
-            files=files,
-            languages=languages,
-            changed_files=changed_files,
-        )
+        return await self._provider.draft_conventions(request=request)

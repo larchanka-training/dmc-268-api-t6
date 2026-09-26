@@ -6,7 +6,11 @@ from pytest import MonkeyPatch
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 import app.worker as worker
-from app.modules.reviews.application.conventions import RepositoryFile, RepositorySnapshot
+from app.modules.reviews.application.conventions import (
+    ConventionsRequest,
+    RepositoryFile,
+    RepositorySnapshot,
+)
 from app.modules.reviews.application.get_run_diff import DiffSnapshot
 from app.modules.reviews.application.process_run import RunDiffProvider
 from app.modules.reviews.application.prompt_builder import PullRequestMeta
@@ -42,10 +46,7 @@ def test_process_review_run_composes_repository_and_processor_from_a_shared_fact
         async def draft_conventions(
             self,
             *,
-            agents_md: str | None,
-            files: tuple[RepositoryFile, ...],
-            languages: dict[str, int],
-            changed_files: tuple[str, ...],
+            request: ConventionsRequest,
         ) -> dict[str, object]:
             raise AssertionError("the composition test does not call the provider")
 
@@ -122,10 +123,7 @@ def test_review_worker_disposes_its_single_engine_at_shutdown(monkeypatch: Monke
         async def draft_conventions(
             self,
             *,
-            agents_md: str | None,
-            files: tuple[RepositoryFile, ...],
-            languages: dict[str, int],
-            changed_files: tuple[str, ...],
+            request: ConventionsRequest,
         ) -> dict[str, object]:
             raise AssertionError("the lifecycle test does not call the provider")
 

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from typing import Any
 from uuid import UUID
 
 from sqlalchemy import select
@@ -14,7 +13,10 @@ from app.modules.reviews.application.execute_review import ReviewPromptInput
 from app.modules.reviews.application.prompt_builder import (
     RepoConventions as PromptConventions,
 )
-from app.modules.reviews.application.prompt_builder import ReviewRule, parse_unified_diff
+from app.modules.reviews.application.prompt_builder import (
+    parse_unified_diff,
+    review_rule_from_stored,
+)
 from app.modules.reviews.infrastructure.models import CodeChange, CodeChangeDiff, PromptVersion, Run
 
 
@@ -63,7 +65,7 @@ class SqlAlchemyReviewPromptRepository:
         omitted = tuple(filename for filename, patch in snapshots if patch is None)
         return ReviewPromptInput(
             system=system,
-            rules=tuple(_to_rule(item) for item in stored_rules),
+            rules=tuple(review_rule_from_stored(item) for item in stored_rules),
             agents_md=conventions.agents_md,
             conventions=PromptConventions(
                 key_patterns=conventions.conventions.key_patterns,
@@ -72,24 +74,3 @@ class SqlAlchemyReviewPromptRepository:
             changed_files=changed,
             omitted_files=omitted,
         )
-
-
-def _to_rule(value: dict[str, Any]) -> ReviewRule:
-    """Convert the already validated onboarding value without accepting loose shapes."""
-    name = value.get("name")
-    include = value.get("include")
-    exclude = value.get("exclude")
-    checks = value.get("checks")
-    if not (
-        isinstance(name, str)
-        and isinstance(include, list)
-        and isinstance(exclude, list)
-        and isinstance(checks, list)
-        and all(isinstance(item, str) for item in include)
-        and all(isinstance(item, str) for item in exclude)
-        and all(isinstance(item, str) for item in checks)
-    ):
-        raise ValueError("stored rule has invalid prompt shape")
-    return ReviewRule(
-        name=name, include=tuple(include), exclude=tuple(exclude), checks=tuple(checks)
-    )
