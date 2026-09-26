@@ -36,6 +36,6 @@ links, no `Impact:` blocks) — this file ships to any team using this stack.
   the reason for not changing it) and never resolves a thread — whoever opened it
   (normally the reviewer) does.
   Full review flow (roles, board statuses, disputes): `docs/CONTRIBUTING.md`.
-- Merging: squash is fine for single-purpose branches; a merge commit that keeps
-  the individual commits is fine too for multi-commit feature branches — either
-  works, pick whichever keeps history readable for that PR.
+- Merging: squash or rebase only — the `main` ruleset rejects merge commits. Squash
+  suits single-purpose branches; rebase keeps the individual commits of a
+  multi-commit feature branch — pick whichever keeps history readable for that PR.
