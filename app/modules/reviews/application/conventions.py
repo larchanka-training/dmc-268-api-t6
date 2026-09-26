@@ -16,8 +16,9 @@ from app.common.application.unit_of_work import UnitOfWork
 from app.modules.reviews.application.prompt_builder import ReviewRule
 
 _STRICT = ConfigDict(extra="forbid", strict=True)
-_MAX_CONTEXT_FILES = 12
+_MAX_CONTEXT_FILES = 10
 _MAX_CONTEXT_BYTES = 128 * 1024
+_MAX_CONTEXT_LINES = 300
 _RECOMMENDATION_SOURCE_SUFFIX = re.compile(
     r".*\(from: (standard/(security|correctness|performance|readability)|(?!standard/)[^()]+)\)"
 )
@@ -223,7 +224,8 @@ class GenerateRepoConventions:
         tree = await self._source.fetch_tree(repository_id)
         languages = derive_languages(tree)
         selected = select_context_files(tree)
-        files = await self._source.fetch_files(repository_id, selected)
+        fetched_files = await self._source.fetch_files(repository_id, selected)
+        files = _bound_context_files(selected, fetched_files)
         raw_draft = await self._model.draft_conventions(
             request=ConventionsRequest(
                 system=conventions_prompt.content,
@@ -290,11 +292,31 @@ def select_context_files(files: tuple[RepositoryFile, ...]) -> tuple[str, ...]:
         suffix = PurePosixPath(file.path).suffix.lower()
         if suffix not in _LANGUAGE_BY_SUFFIX or file.size <= 0:
             continue
-        if len(selected) == _MAX_CONTEXT_FILES or total + file.size > _MAX_CONTEXT_BYTES:
+        if len(selected) >= _MAX_CONTEXT_FILES or total + file.size > _MAX_CONTEXT_BYTES:
             continue
         selected.append(file.path)
         total += file.size
     return tuple(selected)
+
+
+def _bound_context_files(
+    selected_paths: tuple[str, ...], fetched_files: tuple[RepositoryFile, ...]
+) -> tuple[RepositoryFile, ...]:
+    """Keep the model input to the selected files and its per-file line budget."""
+    files_by_path = {file.path: file for file in fetched_files}
+    return tuple(
+        RepositoryFile(
+            path=file.path,
+            size=file.size,
+            content=(
+                None
+                if file.content is None
+                else "".join(file.content.splitlines(keepends=True)[:_MAX_CONTEXT_LINES])
+            ),
+        )
+        for path in selected_paths
+        if (file := files_by_path.get(path)) is not None
+    )
 
 
 def _trace_files_for_changed_paths(paths: tuple[str, ...]) -> tuple[ConventionsFile, ...]:

@@ -360,6 +360,78 @@ def test_cache_miss_passes_the_complete_versioned_conventions_request() -> None:
     ]
 
 
+def test_conventions_request_limits_repository_files_to_ten() -> None:
+    """The model never receives more than ten repository file payloads."""
+
+    @dataclass
+    class ManyFilesSource(FakeSource):
+        async def fetch_tree(self, repository_id: UUID) -> tuple[RepositoryFile, ...]:
+            assert repository_id == REPOSITORY_ID
+            self.calls.append("tree")
+            return tuple(RepositoryFile(f"app/file-{index:02}.py", 10) for index in range(11))
+
+    source = ManyFilesSource()
+    model = FakeModel(
+        {
+            **draft(),
+            "files": [{"path": "app/file-00.py", "relevance": "Application module."}],
+        }
+    )
+    store = FakeStore()
+    factory = FakeUnitOfWorkFactory(store)
+
+    asyncio.run(
+        GenerateRepoConventions(source, model, factory).execute(
+            repository_id=REPOSITORY_ID,
+            conventions_prompt=ActiveConventionsPrompt(PROMPT_VERSION_ID, "conventions v1"),
+            run_id=RUN_ID,
+            changed_files=("app/file-00.py",),
+        )
+    )
+
+    assert source.calls == [
+        "agents",
+        "tree",
+        "files:app/file-00.py,app/file-01.py,app/file-02.py,app/file-03.py,app/file-04.py,"
+        "app/file-05.py,app/file-06.py,app/file-07.py,app/file-08.py,app/file-09.py",
+    ]
+    assert [file.path for file in model.calls[0].repo_files] == [
+        f"app/file-{index:02}.py" for index in range(10)
+    ]
+
+
+def test_conventions_request_limits_each_repository_file_to_three_hundred_lines() -> None:
+    """The model receives only the first 300 lines of each fetched payload."""
+
+    @dataclass
+    class LongFileSource(FakeSource):
+        async def fetch_files(
+            self, repository_id: UUID, paths: tuple[str, ...]
+        ) -> tuple[RepositoryFile, ...]:
+            assert repository_id == REPOSITORY_ID
+            self.calls.append(f"files:{','.join(paths)}")
+            content = "".join(f"line {index}\n" for index in range(301))
+            return (RepositoryFile("app/main.py", len(content), content=content),)
+
+    source = LongFileSource()
+    model = FakeModel(draft())
+    store = FakeStore()
+    factory = FakeUnitOfWorkFactory(store)
+
+    asyncio.run(
+        GenerateRepoConventions(source, model, factory).execute(
+            repository_id=REPOSITORY_ID,
+            conventions_prompt=ActiveConventionsPrompt(PROMPT_VERSION_ID, "conventions v1"),
+            run_id=RUN_ID,
+            changed_files=("app/main.py",),
+        )
+    )
+
+    content = model.calls[0].repo_files[0].content
+    assert content is not None
+    assert content.splitlines() == [f"line {index}" for index in range(300)]
+
+
 @pytest.mark.parametrize(
     "payload",
     [
