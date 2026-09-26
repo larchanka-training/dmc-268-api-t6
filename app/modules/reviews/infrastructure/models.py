@@ -220,6 +220,9 @@ class Finding(Base):
     body: Mapped[str] = mapped_column(TEXT, nullable=False)
     rule_name: Mapped[str | None] = mapped_column(String(255))
     published: Mapped[bool] = mapped_column(BOOLEAN, nullable=False, server_default=text("false"))
+    inline_comment: Mapped[bool] = mapped_column(
+        BOOLEAN, nullable=False, server_default=text("false")
+    )
     drop_reason: Mapped[str | None] = mapped_column(String(100))
     created_at: Mapped[datetime] = timestamp_column()
 

@@ -2,26 +2,44 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+from decimal import Decimal
 from uuid import UUID
 
-from sqlalchemy import ColumnElement, and_, delete, func, or_, select
+from sqlalchemy import ColumnElement, and_, delete, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.common.infrastructure.db.enums import RunState
 from app.modules.analytics.infrastructure.models import UsageEvent
-from app.modules.repositories.infrastructure.models import Repository
+from app.modules.repositories.infrastructure.models import Repository, RuleVersion
 from app.modules.reviews.application.cancel_run import CancelRequestResult
+from app.modules.reviews.application.conventions import ActiveConventionsPrompt
+from app.modules.reviews.application.findings_post_processor import (
+    ProcessedFinding,
+    ProcessedReviewOutput,
+)
 from app.modules.reviews.application.get_run_actions import RunAction as RunActionProjection
 from app.modules.reviews.application.get_run_actions import RunActionResponse
 from app.modules.reviews.application.get_run_comments import PublishedComment
 from app.modules.reviews.application.get_run_diff import DiffSnapshot
 from app.modules.reviews.application.get_run_file_lines import BlobCacheKey
 from app.modules.reviews.application.list_runs import RunCursor, RunListItem
-from app.modules.reviews.application.process_run import RunDiffInput
+from app.modules.reviews.application.process_run import RunConventionsInput, RunDiffInput
+from app.modules.reviews.application.prompt_builder import (
+    parse_unified_diff,
+    review_rule_from_stored,
+)
+from app.modules.reviews.application.review_output import (
+    FindingPostProcessingInput,
+    PublishedFinding,
+    ReviewOutput,
+    ReviewPublication,
+)
 from app.modules.reviews.infrastructure.models import (
     CodeChange,
     CodeChangeDiff,
     Finding,
+    PromptVersion,
     Run,
     RunAction,
 )
@@ -195,6 +213,37 @@ class SqlAlchemyRunRepository:
             return None
         return RunDiffInput(code_change_id=row[0], head_sha=row[1])
 
+    async def get_run_conventions_input(self, run_id: UUID) -> RunConventionsInput | None:
+        statement = (
+            select(
+                CodeChange.repository_id,
+                PromptVersion.id,
+                PromptVersion.content,
+                RuleVersion.rules,
+            )
+            .join(CodeChange, CodeChange.id == Run.code_change_id)
+            .join(RuleVersion, RuleVersion.id == Run.rule_version_id)
+            .outerjoin(
+                PromptVersion,
+                and_(
+                    PromptVersion.key == "review.conventions",
+                    PromptVersion.is_active.is_(True),
+                ),
+            )
+            .where(Run.id == run_id)
+        )
+        async with self._session_factory() as session:
+            row = (await session.execute(statement)).one_or_none()
+        if row is None:
+            return None
+        if row[1] is None or row[2] is None:
+            raise LookupError("active review.conventions prompt is missing")
+        return RunConventionsInput(
+            repository_id=row[0],
+            conventions_prompt=ActiveConventionsPrompt(id=row[1], content=row[2]),
+            rules=tuple(review_rule_from_stored(item) for item in row[3]),
+        )
+
     async def get_run_file_key(self, run_id: UUID, path: str) -> BlobCacheKey | None:
         statement = (
             select(Run.code_change_id, Run.head_sha)
@@ -317,3 +366,189 @@ class SqlAlchemyRunRepository:
             started_at=action.started_at,
             duration_ms=action.duration_ms,
         )
+
+
+class SqlAlchemyReviewOutputRepository:
+    """Write adapter bound to a caller-owned SQLAlchemy unit of work."""
+
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    async def get_post_processing_input(self, run_id: UUID) -> FindingPostProcessingInput | None:
+        """Snapshot only the durable diff and immutable rule version for post-processing."""
+        row = (
+            await self._session.execute(
+                select(Run.code_change_id, Run.head_sha, RuleVersion.rules, Repository.max_comments)
+                .join(RuleVersion, RuleVersion.id == Run.rule_version_id)
+                .join(CodeChange, CodeChange.id == Run.code_change_id)
+                .join(Repository, Repository.id == CodeChange.repository_id)
+                .where(Run.id == run_id)
+            )
+        ).one_or_none()
+        if row is None:
+            return None
+        code_change_id, head_sha, rules, max_comments = row
+        snapshots = (
+            await self._session.execute(
+                select(CodeChangeDiff.filename, CodeChangeDiff.patch).where(
+                    CodeChangeDiff.code_change_id == code_change_id,
+                    CodeChangeDiff.head_sha == head_sha,
+                )
+            )
+        ).all()
+        hunk_lines = {filename: _new_hunk_lines(filename, patch) for filename, patch in snapshots}
+        rule_names = frozenset(rule["name"] for rule in rules if isinstance(rule.get("name"), str))
+        return FindingPostProcessingInput(
+            hunk_lines=hunk_lines,
+            rule_names=rule_names,
+            repository_max_inline=max_comments,
+        )
+
+    async def store_review_output(
+        self,
+        run_id: UUID,
+        raw_output: dict[str, object],
+        parsed: ReviewOutput,
+        processed: ProcessedReviewOutput,
+    ) -> ReviewPublication | None:
+        """Flush one validated answer; the use case commits it before networking."""
+        run = await self._session.scalar(select(Run).where(Run.id == run_id).with_for_update())
+        if run is None or run.state in {RunState.SUCCEEDED, RunState.CANCELLED}:
+            return None
+
+        existing = await self._session.scalar(
+            select(RunAction).where(
+                RunAction.run_id == run_id,
+                RunAction.tool == "llm.review_output",
+            )
+        )
+        if existing is None:
+            index = await self._session.scalar(
+                select(func.coalesce(func.max(RunAction.index), -1)).where(
+                    RunAction.run_id == run_id
+                )
+            )
+            assert index is not None
+            self._session.add(
+                RunAction(
+                    run_id=run_id,
+                    index=index + 1,
+                    tool="llm.review_output",
+                    request={},
+                    response=raw_output,
+                    response_ref=None,
+                    started_at=datetime.now(UTC),
+                    duration_ms=0,
+                )
+            )
+            findings = tuple(_to_published_finding(item.finding) for item in processed.inline)
+            records = (*processed.inline, *processed.body_only, *processed.dropped)
+            self._session.add_all([_to_finding(run_id, item) for item in records])
+            run.review_body = processed.review_body
+        else:
+            rows = (
+                await self._session.scalars(
+                    select(Finding)
+                    .where(Finding.run_id == run_id, Finding.inline_comment.is_(True))
+                    .order_by(Finding.created_at.asc(), Finding.id.asc())
+                )
+            ).all()
+            findings = tuple(_to_published_finding_row(item) for item in rows)
+
+        assert run.review_body is not None
+        run.state = RunState.PUBLISHING
+        await self._session.flush()
+        return ReviewPublication(
+            head_sha=run.head_sha,
+            findings=findings,
+            review_body=run.review_body,
+            idempotency_key=run.idempotency_key,
+        )
+
+    async def mark_review_published(self, run_id: UUID) -> None:
+        """Flush completion after the provider returned; never commits itself."""
+        run = await self._session.scalar(select(Run).where(Run.id == run_id).with_for_update())
+        if run is None or run.state is RunState.SUCCEEDED:
+            return
+        await self._session.execute(
+            update(Finding)
+            .where(Finding.run_id == run_id, Finding.drop_reason.is_(None))
+            .values(published=True)
+        )
+        run.state = RunState.SUCCEEDED
+        run.finished_at = datetime.now(UTC)
+        await self._session.flush()
+
+
+def _to_published_finding(item: object) -> PublishedFinding:
+    """Translate a parsed Pydantic finding without weakening its contract."""
+    from app.modules.reviews.application.review_output import ReviewFinding
+
+    assert isinstance(item, ReviewFinding)
+    return PublishedFinding(
+        path=item.path,
+        line=item.line,
+        start_line=item.start_line,
+        severity=item.severity,
+        category=item.category,
+        title=item.title,
+        body=item.body,
+        suggestion=item.suggestion,
+        confidence=item.confidence,
+        rule_name=item.rule_name,
+    )
+
+
+def _to_finding(run_id: UUID, item: ProcessedFinding) -> Finding:
+    """Map new-version review anchors to the existing findings table."""
+    from app.common.infrastructure.db.enums import FindingCategory, FindingSeverity, FindingSide
+
+    return Finding(
+        run_id=run_id,
+        file_path=item.finding.path,
+        line_start=item.finding.start_line or item.finding.line,
+        line_end=item.finding.line if item.finding.start_line is not None else None,
+        side=FindingSide.RIGHT,
+        severity=FindingSeverity(item.finding.severity),
+        confidence=Decimal(str(item.finding.confidence)),
+        category=FindingCategory(item.finding.category),
+        suggestion=item.finding.suggestion,
+        title=item.finding.title,
+        body=item.finding.body,
+        rule_name=item.finding.rule_name,
+        published=False,
+        inline_comment=item.bucket == "inline",
+        drop_reason=item.drop_reason,
+    )
+
+
+def _to_published_finding_row(item: Finding) -> PublishedFinding:
+    """Rebuild a retry-safe provider payload from the durable finding row."""
+    return PublishedFinding(
+        path=item.file_path,
+        line=item.line_end or item.line_start,
+        start_line=item.line_start if item.line_end is not None else None,
+        severity=item.severity.value,
+        category=item.category.value,
+        title=item.title,
+        body=item.body,
+        suggestion=item.suggestion,
+        confidence=float(item.confidence),
+        rule_name=item.rule_name,
+    )
+
+
+def _new_hunk_lines(filename: str, patch: str | None) -> frozenset[int]:
+    """Return only new-version anchors in one immutable stored diff snapshot."""
+    if patch is None:
+        return frozenset()
+    diff = patch
+    if not patch.startswith("diff --git "):
+        diff = f"diff --git a/{filename} b/{filename}\n{patch}"
+    changed_files = parse_unified_diff(diff)
+    return frozenset(
+        line.number
+        for changed_file in changed_files
+        for line in changed_file.lines
+        if line.type in {"added", "context"}
+    )

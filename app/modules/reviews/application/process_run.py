@@ -3,9 +3,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Protocol, cast
 from uuid import UUID
 
+from app.modules.reviews.application.conventions import (
+    ActiveConventionsPrompt,
+    GeneratedConventions,
+    GenerateRepoConventions,
+)
 from app.modules.reviews.application.get_run_diff import (
     DiffSnapshot,
     DiffSnapshotRepository,
@@ -16,6 +21,7 @@ from app.modules.reviews.application.get_run_file_lines import (
     BlobCacheKey,
     BlobCacheWriter,
 )
+from app.modules.reviews.application.prompt_builder import ReviewRule
 
 
 class RunDiffProvider(Protocol):
@@ -34,8 +40,19 @@ class RunDiffInput:
     head_sha: str
 
 
+@dataclass(frozen=True)
+class RunConventionsInput:
+    repository_id: UUID
+    conventions_prompt: ActiveConventionsPrompt
+    rules: tuple[ReviewRule, ...] = ()
+
+
 class RunProcessingRepository(DiffSnapshotRepository, Protocol):
     async def get_run_diff_input(self, run_id: UUID) -> RunDiffInput | None: ...
+
+
+class RunConventionsRepository(Protocol):
+    async def get_run_conventions_input(self, run_id: UUID) -> RunConventionsInput | None: ...
 
 
 class ReviewRunProcessor:
@@ -46,17 +63,24 @@ class ReviewRunProcessor:
         repository: RunProcessingRepository,
         provider: RunDiffProvider,
         blob_cache: BlobCacheWriter | None = None,
+        conventions: GenerateRepoConventions | None = None,
     ) -> None:
         self._repository = repository
         self._provider = provider
         self._blob_cache = blob_cache
+        self._conventions = conventions
 
     async def execute(self, run_id: UUID) -> bool:
         """Fetch and snapshot the exact head associated with a durable run."""
 
+        return await self.prepare(run_id) is not None
+
+    async def prepare(self, run_id: UUID) -> GeneratedConventions | bool | None:
+        """Persist inputs and return the exact conventions snapshot for this run."""
+
         run = await self._repository.get_run_diff_input(run_id)
         if run is None:
-            return False
+            return None
         files = await self._provider.fetch_diff(
             code_change_id=run.code_change_id,
             head_sha=run.head_sha,
@@ -68,6 +92,18 @@ class ReviewRunProcessor:
         )
         if self._blob_cache is not None:
             await self._store_file_blobs(run, files)
+        if self._conventions is not None:
+            conventions_repository = cast(RunConventionsRepository, self._repository)
+            conventions_input = await conventions_repository.get_run_conventions_input(run_id)
+            if conventions_input is None:
+                return None
+            return await self._conventions.execute(
+                repository_id=conventions_input.repository_id,
+                conventions_prompt=conventions_input.conventions_prompt,
+                run_id=run_id,
+                changed_files=tuple(file.filename for file in files),
+                rules=conventions_input.rules,
+            )
         return True
 
     async def _store_file_blobs(self, run: RunDiffInput, files: list[DiffSnapshot]) -> None:

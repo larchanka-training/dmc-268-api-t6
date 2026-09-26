@@ -4,15 +4,22 @@ from uuid import UUID
 from fastapi.testclient import TestClient
 
 from app.main import app, get_run_repository
+from app.modules.reviews.application.conventions import (
+    ActiveConventionsPrompt,
+    CachedConventions,
+    GeneratedConventions,
+)
 from app.modules.reviews.application.get_run_diff import (
     DiffSnapshot,
     StoreDiffSnapshot,
 )
 from app.modules.reviews.application.process_run import (
     ReviewRunProcessor,
+    RunConventionsInput,
     RunDiffInput,
     RunDiffProvider,
 )
+from app.modules.reviews.application.prompt_builder import ReviewRule
 
 
 class FakeDiffRepository:
@@ -227,3 +234,66 @@ def test_processed_run_persists_provider_diff_before_the_diff_api_reads_it() -> 
             ),
         }
     ]
+
+
+def test_processor_passes_active_conventions_prompt_not_the_run_system_prompt() -> None:
+    run_id = UUID("00000000-0000-0000-0000-000000000110")
+    expected_repository_id = UUID("00000000-0000-0000-0000-000000000111")
+    system_prompt_id = UUID("00000000-0000-0000-0000-000000000112")
+    active_prompt = ActiveConventionsPrompt(
+        UUID("00000000-0000-0000-0000-000000000113"), "stored conventions v2"
+    )
+
+    class Provider(RunDiffProvider):
+        async def fetch_diff(self, *, code_change_id: UUID, head_sha: str) -> list[DiffSnapshot]:
+            return []
+
+        async def fetch_file_content(
+            self, *, code_change_id: UUID, head_sha: str, path: str
+        ) -> str:
+            raise AssertionError("no blob cache was configured")
+
+    class Repository(FakeDiffRepository):
+        async def get_run_diff_input(self, requested_run_id: UUID) -> RunDiffInput | None:
+            assert requested_run_id == run_id
+            return RunDiffInput(code_change_id=expected_repository_id, head_sha="a" * 40)
+
+        async def get_run_conventions_input(
+            self, requested_run_id: UUID
+        ) -> RunConventionsInput | None:
+            assert requested_run_id == run_id
+            return RunConventionsInput(expected_repository_id, active_prompt)
+
+    class Conventions:
+        async def execute(
+            self,
+            *,
+            repository_id: UUID,
+            conventions_prompt: ActiveConventionsPrompt,
+            run_id: UUID,
+            changed_files: tuple[str, ...],
+            rules: tuple[ReviewRule, ...],
+        ) -> GeneratedConventions:
+            assert repository_id == expected_repository_id
+            assert conventions_prompt == active_prompt
+            assert conventions_prompt.id != system_prompt_id
+            assert changed_files == ()
+            assert rules == ()
+            return GeneratedConventions(
+                CachedConventions(
+                    expected_repository_id,
+                    None,
+                    conventions_prompt.id,
+                    ("One.", "Two.", "Three."),
+                    ("One.", "Two.", "Three.", "Four.", "Five."),
+                    {},
+                ),
+                None,
+                False,
+            )
+
+    result = asyncio.run(
+        ReviewRunProcessor(Repository([]), Provider(), conventions=Conventions()).prepare(run_id)  # type: ignore[arg-type]
+    )
+
+    assert isinstance(result, GeneratedConventions)

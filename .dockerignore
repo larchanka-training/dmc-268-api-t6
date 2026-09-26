@@ -16,6 +16,9 @@ docs
 terraform
 deploy
 *.md
+!review/
+!review/prompts/
+!review/prompts/*.md
 *.log
 .env
 .env.*
