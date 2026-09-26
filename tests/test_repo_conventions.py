@@ -83,11 +83,11 @@ def draft() -> dict[str, object]:
         "files": [{"path": "app/main.py", "relevance": "Application entrypoint."}],
         "key_patterns": ["Pattern one.", "Pattern two.", "Pattern three."],
         "recommendations": [
-            "Recommendation one.",
-            "Recommendation two.",
-            "Recommendation three.",
-            "Recommendation four.",
-            "Recommendation five.",
+            "Recommendation one (from: standard/correctness)",
+            "Recommendation two (from: standard/correctness)",
+            "Recommendation three (from: standard/correctness)",
+            "Recommendation four (from: standard/correctness)",
+            "Recommendation five (from: standard/correctness)",
         ],
     }
 
@@ -366,6 +366,17 @@ def test_cache_miss_passes_the_complete_versioned_conventions_request() -> None:
         {"files": [], "key_patterns": ["a", "b"], "recommendations": ["a"] * 5},
         {**draft(), "unknown": True},
         {**draft(), "files": [{"path": "app/main.py", "relevance": "ok", "extra": True}]},
+        {**draft(), "key_patterns": ["a" * 161, "Two.", "Three."]},
+        {
+            **draft(),
+            "recommendations": [
+                "Missing a provenance suffix.",
+                "Recommendation two (from: standard/correctness)",
+                "Recommendation three (from: standard/correctness)",
+                "Recommendation four (from: standard/correctness)",
+                "Recommendation five (from: standard/correctness)",
+            ],
+        },
     ],
 )
 def test_draft_rejects_malformed_model_output_before_save_or_trace(
@@ -377,6 +388,29 @@ def test_draft_rejects_malformed_model_output_before_save_or_trace(
     factory = FakeUnitOfWorkFactory(store)
 
     with pytest.raises(ValidationError):
+        asyncio.run(
+            GenerateRepoConventions(source, model, factory).execute(
+                repository_id=REPOSITORY_ID,
+                conventions_prompt=ActiveConventionsPrompt(PROMPT_VERSION_ID, "conventions v1"),
+                run_id=RUN_ID,
+                changed_files=("app/main.py",),
+            )
+        )
+
+    assert store.saved == []
+    assert store.traces == []
+    assert [unit.commits for unit in factory.units] == [0]
+
+
+def test_draft_rejects_empty_files_for_a_changed_pull_request_before_save_or_trace() -> None:
+    source = FakeSource()
+    payload = draft()
+    payload["files"] = []
+    model = FakeModel(payload)
+    store = FakeStore()
+    factory = FakeUnitOfWorkFactory(store)
+
+    with pytest.raises(ValueError, match="at least one file"):
         asyncio.run(
             GenerateRepoConventions(source, model, factory).execute(
                 repository_id=REPOSITORY_ID,

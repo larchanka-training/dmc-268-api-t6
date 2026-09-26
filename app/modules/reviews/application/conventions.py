@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from collections import defaultdict
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -9,7 +10,7 @@ from pathlib import PurePosixPath
 from typing import Annotated, Protocol
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.common.application.unit_of_work import UnitOfWork
 from app.modules.reviews.application.prompt_builder import ReviewRule
@@ -17,6 +18,9 @@ from app.modules.reviews.application.prompt_builder import ReviewRule
 _STRICT = ConfigDict(extra="forbid", strict=True)
 _MAX_CONTEXT_FILES = 12
 _MAX_CONTEXT_BYTES = 128 * 1024
+_RECOMMENDATION_SOURCE_SUFFIX = re.compile(
+    r".*\(from: (standard/(security|correctness|performance|readability)|(?!standard/)[^()]+)\)"
+)
 
 _LANGUAGE_BY_SUFFIX = {
     ".cs": "C#",
@@ -90,8 +94,24 @@ class ConventionsDraft(BaseModel):
     model_config = _STRICT
 
     files: Annotated[list[ConventionsFile], Field(max_length=100)]
-    key_patterns: Annotated[list[str], Field(min_length=3, max_length=10)]
-    recommendations: Annotated[list[str], Field(min_length=5, max_length=12)]
+    key_patterns: Annotated[
+        list[Annotated[str, Field(min_length=1, max_length=160)]],
+        Field(min_length=3, max_length=10),
+    ]
+    recommendations: Annotated[
+        list[Annotated[str, Field(min_length=1)]], Field(min_length=5, max_length=12)
+    ]
+
+    @field_validator("recommendations")
+    @classmethod
+    def recommendations_must_end_with_a_valid_source(cls, values: list[str]) -> list[str]:
+        """Keep every cacheable recommendation attributable to a stable source."""
+        if any(_RECOMMENDATION_SOURCE_SUFFIX.fullmatch(value.rstrip()) is None for value in values):
+            raise ValueError(
+                "recommendations must end with '(from: standard/<category>)' or "
+                "'(from: <rule name>)'"
+            )
+        return values
 
 
 @dataclass(frozen=True)
@@ -290,5 +310,9 @@ def _trace_files_for_changed_paths(paths: tuple[str, ...]) -> tuple[ConventionsF
 
 def _validate_trace_files(files: list[ConventionsFile], changed_paths: tuple[str, ...]) -> None:
     """Reject a model trace that does not describe exactly this pull request."""
+    if changed_paths and not files:
+        raise ValueError(
+            "conventions draft must trace at least one file for a changed pull request"
+        )
     if tuple(file.path for file in files) != changed_paths:
         raise ValueError("conventions draft files must match the current pull request paths")
