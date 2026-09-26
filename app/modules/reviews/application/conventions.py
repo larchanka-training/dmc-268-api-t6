@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import re
-from collections import defaultdict
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import PurePosixPath
@@ -12,6 +11,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from app.common.application.languages import LANGUAGE_BY_SUFFIX, classify_languages
 from app.common.application.unit_of_work import UnitOfWork
 from app.modules.reviews.application.prompt_builder import ReviewRule
 
@@ -22,24 +22,6 @@ _MAX_CONTEXT_LINES = 300
 _RECOMMENDATION_SOURCE_SUFFIX = re.compile(
     r".*\(from: (standard/(security|correctness|performance|readability)|(?!standard/)[^()]+)\)"
 )
-
-_LANGUAGE_BY_SUFFIX = {
-    ".cs": "C#",
-    ".go": "Go",
-    ".java": "Java",
-    ".js": "JavaScript",
-    ".jsx": "JSX",
-    ".kt": "Kotlin",
-    ".php": "PHP",
-    ".py": "Python",
-    ".rb": "Ruby",
-    ".rs": "Rust",
-    ".scala": "Scala",
-    ".svelte": "Svelte",
-    ".ts": "TypeScript",
-    ".tsx": "TSX",
-    ".vue": "Vue",
-}
 
 
 @dataclass(frozen=True)
@@ -222,7 +204,7 @@ class GenerateRepoConventions:
             return GeneratedConventions(cached, agents_md.content, cache_hit=True)
 
         tree = await self._source.fetch_tree(repository_id)
-        languages = derive_languages(tree)
+        languages = classify_languages(tree)
         selected = select_context_files(tree)
         fetched_files = await self._source.fetch_files(repository_id, selected)
         files = _bound_context_files(selected, fetched_files)
@@ -258,30 +240,8 @@ class GenerateRepoConventions:
 
 
 def derive_languages(files: tuple[RepositoryFile, ...]) -> dict[str, int]:
-    """Return deterministic whole-percent language shares from repository byte sizes.
-
-    Unknown extensions never affect the denominator.  Largest-remainder allocation
-    sums to 100; exact ties use the language name, so two equivalent trees always
-    produce the same cache value regardless of provider ordering.
-    """
-    totals: defaultdict[str, int] = defaultdict(int)
-    for file in files:
-        language = _LANGUAGE_BY_SUFFIX.get(PurePosixPath(file.path).suffix.lower())
-        if language is not None and file.size > 0:
-            totals[language] += file.size
-    total = sum(totals.values())
-    if total == 0:
-        return {}
-
-    percentages = {language: size * 100 // total for language, size in totals.items()}
-    remainder = 100 - sum(percentages.values())
-    ranked = sorted(
-        totals,
-        key=lambda language: (-(totals[language] * 100 % total), language),
-    )
-    for language in ranked[:remainder]:
-        percentages[language] += 1
-    return {language: percentages[language] for language in sorted(percentages)}
+    """Compatibility wrapper for callers of the former reviews-local helper."""
+    return classify_languages(files)
 
 
 def select_context_files(files: tuple[RepositoryFile, ...]) -> tuple[str, ...]:
@@ -290,7 +250,7 @@ def select_context_files(files: tuple[RepositoryFile, ...]) -> tuple[str, ...]:
     total = 0
     for file in sorted(files, key=lambda item: item.path):
         suffix = PurePosixPath(file.path).suffix.lower()
-        if suffix not in _LANGUAGE_BY_SUFFIX or file.size <= 0:
+        if suffix not in LANGUAGE_BY_SUFFIX or file.size <= 0:
             continue
         if len(selected) >= _MAX_CONTEXT_FILES or total + file.size > _MAX_CONTEXT_BYTES:
             continue
