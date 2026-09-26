@@ -5,6 +5,7 @@ from __future__ import annotations
 from uuid import UUID
 
 from sqlalchemy import select
+from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.modules.repositories.application.onboard_repository import PersistedRuleVersion
@@ -28,19 +29,30 @@ class SqlAlchemyRepositoryRuleVersionStore:
     async def get_or_create_initial_rule_version(
         self, repository_id: UUID, version: int, rules: list[dict[str, object]]
     ) -> PersistedRuleVersion:
+        """Create exactly one active version despite concurrent webhook deliveries."""
+        candidate = RuleVersion.from_rules(
+            repository_id=repository_id,
+            version=version,
+            rules=[dict(rule) for rule in rules],
+        )
+        statement = insert(RuleVersion).values(
+            repository_id=candidate.repository_id,
+            version=candidate.version,
+            rules=candidate.rules,
+            checksum=candidate.checksum,
+            is_active=candidate.is_active,
+        )
+        # No conflict target is deliberate: another transaction may have created
+        # an active version with a different version number while this webhook was
+        # waiting. Either unique constraint means we must reuse the active row.
+        await self._session.execute(statement.on_conflict_do_nothing())
         row = await self._session.scalar(
             select(RuleVersion).where(
                 RuleVersion.repository_id == repository_id, RuleVersion.is_active.is_(True)
             )
         )
         if row is None:
-            row = RuleVersion.from_rules(
-                repository_id=repository_id,
-                version=version,
-                rules=[dict(rule) for rule in rules],
-            )
-            self._session.add(row)
-            await self._session.flush()
+            raise RuntimeError("initial rule-version upsert did not produce an active version")
         return _to_persisted(row)
 
 

@@ -7,6 +7,7 @@ import json
 from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path
+from typing import Any, cast
 from uuid import UUID, uuid4
 
 import pytest
@@ -18,6 +19,7 @@ from app.modules.repositories.application.onboard_repository import (
     load_default_rule_sets,
     select_default_rule_set,
 )
+from app.modules.repositories.infrastructure.models import RuleVersion
 from app.modules.repositories.infrastructure.rule_version_repository import (
     SqlAlchemyRepositoryRuleVersionStore,
 )
@@ -181,14 +183,17 @@ class FakeRuleVersionSession:
     async def scalar(self, statement: object) -> object | None:
         return self.row
 
-    def add(self, row: object) -> None:
-        self.row = row
-
-    async def flush(self) -> None:
+    async def execute(self, statement: object) -> None:
+        params = cast(dict[str, object], cast(Any, statement).compile().params)
+        self.row = RuleVersion.from_rules(
+            repository_id=cast(UUID, params["repository_id"]),
+            version=cast(int, params["version"]),
+            rules=cast(list[dict[str, object]], params["rules"]),
+        )
         self.flushes += 1
 
 
-def test_sqlalchemy_store_flushes_the_factory_built_initial_version() -> None:
+def test_sqlalchemy_store_upserts_the_factory_built_initial_version() -> None:
     repository_id = uuid4()
     session = FakeRuleVersionSession()
     store = SqlAlchemyRepositoryRuleVersionStore(session)  # type: ignore[arg-type]
