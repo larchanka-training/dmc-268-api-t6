@@ -15,6 +15,10 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 
+from app.bootstrap.installation_onboarding import InstallationOnboarding
+from app.modules.integrations.webhooks.application.installation_event_projector import (
+    InstallationRepositoryTreeProvider,
+)
 from app.modules.reviews.application.cancel_run import CancelRunRepository
 from app.modules.reviews.application.get_run import RunDetailRepository
 from app.modules.reviews.application.get_run_actions import RunActionsRepository
@@ -57,6 +61,21 @@ class ReviewsApiResources:
 
     def file_blob_cache(self) -> BlobCache:
         return SqlAlchemyBlobCache(self._session_factory)
+
+    def installation_onboarding(
+        self, tree_provider: InstallationRepositoryTreeProvider
+    ) -> InstallationOnboarding:
+        """Compose repository onboarding with the API process's database pool.
+
+        A GitHub installation delivery consumer supplies the tree provider and
+        then calls the returned handler with its already-validated typed event.
+        This keeps the creation boundary callable from the current app without
+        making the reviews API own webhook transport or delivery dispatch.
+        """
+        return InstallationOnboarding(
+            session_factory=self._session_factory,
+            tree_provider=tree_provider,
+        )
 
     async def aclose(self) -> None:
         await self._engine.dispose()
