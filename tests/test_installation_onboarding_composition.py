@@ -4,14 +4,25 @@ from __future__ import annotations
 
 import asyncio
 import os
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field
+from decimal import Decimal
 from pathlib import Path
 from typing import Any, cast
 from uuid import UUID, uuid4
 
-from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
+import pytest
+from alembic.config import Config
+from sqlalchemy import create_engine, select, text
+from sqlalchemy.ext.asyncio import (
+    AsyncEngine,
+    AsyncSession,
+    async_sessionmaker,
+    create_async_engine,
+)
+from sqlalchemy.schema import CreateSchema, DropSchema
 
+from alembic import command
 from app.bootstrap.installation_onboarding import InstallationOnboarding
 from app.bootstrap.reviews_api import ReviewsApiResources
 from app.modules.integrations.webhooks.application.installation_event_projector import (
@@ -25,10 +36,17 @@ from app.modules.repositories.application.installation_repositories import (
 from app.modules.repositories.application.onboard_repository import (
     DefaultRuleSet,
     OnboardingResult,
+    load_default_rule_sets,
 )
 from app.modules.repositories.application.sync_installation_repositories import (
     RepositoryOnboardingInput,
 )
+from app.modules.repositories.infrastructure.models import (
+    ProviderInstallation,
+    Repository,
+    RuleVersion,
+)
+from app.modules.workspaces.infrastructure.models import Workspace
 
 
 @dataclass
@@ -43,6 +61,31 @@ class FakeTreeProvider(InstallationRepositoryTreeProvider):
     ) -> tuple[RepositoryTreeBlob, ...]:
         self.calls.append((installation_external_id, repository.external_id))
         return (RepositoryTreeBlob(path="src/app.ts", size=10, entry_type="blob"),)
+
+
+@pytest.fixture
+def migrated_onboarding_database() -> Iterator[tuple[str, str]]:
+    """Provide an isolated migrated PostgreSQL schema when configured."""
+    database_url = os.environ.get("TEST_DATABASE_URL")
+    if database_url is None:
+        pytest.skip("set TEST_DATABASE_URL to run PostgreSQL integration tests")
+    schema = f"test_installation_onboarding_{uuid4().hex}"
+    engine = create_engine(database_url)
+    try:
+        with engine.connect() as connection:
+            connection.execute(CreateSchema(schema))
+            connection.execute(text(f'SET search_path TO "{schema}"'))
+            connection.commit()
+            config = Config("alembic.ini")
+            config.attributes["connection"] = connection
+            command.upgrade(config, "head")
+            yield database_url, schema
+            connection.rollback()
+            connection.execute(text("SET search_path TO public"))
+            connection.execute(DropSchema(schema, cascade=True))
+            connection.commit()
+    finally:
+        engine.dispose()
 
 
 def test_composition_accepts_typed_event_and_internal_installation_id(
@@ -132,3 +175,89 @@ def test_resources_composes_onboarding_with_cwd_independent_default_rules(tmp_pa
 
     assert result == ()
     assert provider.calls == []
+
+
+@pytest.mark.integration
+def test_migrated_database_onboarding_creates_one_active_rule_version_and_replay_preserves_it(
+    migrated_onboarding_database: tuple[str, str],
+) -> None:
+    """The callable app boundary persists the language-selected initial version once."""
+    database_url, schema = migrated_onboarding_database
+    installation_id = uuid4()
+
+    async def execute_and_read() -> tuple[Repository, list[RuleVersion]]:
+        engine = create_async_engine(
+            database_url,
+            connect_args={"options": f"-csearch_path={schema}"},
+        )
+        session_factory = async_sessionmaker(engine, expire_on_commit=False)
+        try:
+            async with session_factory() as session:
+                workspace = Workspace(id=uuid4(), name="onboarding", daily_budget_usd=Decimal("1"))
+                session.add(workspace)
+                session.add(
+                    ProviderInstallation(
+                        id=installation_id,
+                        workspace_id=workspace.id,
+                        provider="github",
+                        external_id=17,
+                        provider_metadata={},
+                    )
+                )
+                await session.commit()
+
+            provider = FakeTreeProvider()
+            handler = ReviewsApiResources(engine, session_factory).installation_onboarding(provider)
+            event = InstallationRepositoriesEvent(
+                installation_external_id=17,
+                action="added",
+                added_repositories=(
+                    RepositorySnapshot(
+                        id=101,
+                        full_name="octo/web",
+                        default_branch="main",
+                        html_url="https://github.com/octo/web",
+                    ),
+                ),
+                removed_repositories=(),
+            )
+
+            first = await handler.execute(provider_installation_id=installation_id, event=event)
+            replay = await handler.execute(provider_installation_id=installation_id, event=event)
+            assert first[0].created is True
+            assert replay[0].created is False
+            assert provider.calls == [(17, 101), (17, 101)]
+
+            async with session_factory() as session:
+                repository = await session.scalar(
+                    select(Repository).where(
+                        Repository.provider_installation_id == installation_id,
+                        Repository.external_id == 101,
+                    )
+                )
+                assert repository is not None
+                versions = list(
+                    (
+                        await session.scalars(
+                            select(RuleVersion)
+                            .where(RuleVersion.repository_id == repository.id)
+                            .order_by(RuleVersion.version)
+                        )
+                    ).all()
+                )
+                return repository, versions
+        finally:
+            await engine.dispose()
+
+    repository, versions = asyncio.run(execute_and_read())
+
+    assert repository.enabled is True
+    assert len(versions) == 1
+    assert versions[0].version == 1
+    assert versions[0].is_active is True
+    assert (
+        versions[0].rules
+        == load_default_rule_sets(Path(__file__).resolve().parents[1] / "review" / "rules")[
+            "frontend"
+        ].rules
+    )
