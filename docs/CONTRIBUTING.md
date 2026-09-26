@@ -111,6 +111,7 @@ Ruleset `main` одинаков в обоих репо, кроме CI-прове
 | Есть минимум один Approve, и не от автора | ruleset `required_approving_review_count: 1` + GitHub |
 | Все треды закрыты | ruleset `required_review_thread_resolution` |
 | Request changes блокирует мерж, чужой вердикт снимает только техлид | ruleset `dismissal_restriction` |
+| Мерж только squash или rebase: merge commit GitHub не примет | ruleset `allowed_merge_methods` |
 | Автор отвечает в каждом треде | договорённость |
 | Тред закрывает ревьюер (или тот, кто открыл тред), но не автор PR | договорённость: GitHub разрешает закрыть тред автору PR и любому с правом записи, а права записи есть у всей команды |
 | После Approve изменений нет, кроме rebase | договорённость |
