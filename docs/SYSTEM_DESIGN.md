@@ -4,12 +4,12 @@
 |---|---|
 | Статус | **черновик на утверждение командой** |
 | Владелец | техлид (роль 1) |
-| Связанные документы | `BACKEND_ARCHITECTURE.md` (роль 6, ERD), [`FRONTEND_ARCHITECTURE.md`](https://github.com/larchanka-training/dmc-268-ui-t6/blob/main/docs/FRONTEND_ARCHITECTURE.md) (роль 5, Zod-контракты), [`TEST_PLAN.md`](https://github.com/larchanka-training/dmc-268-ui-t6/blob/main/docs/TEST_PLAN.md) (роль 2, quality gates), инфраструктура (роль 3) |
+| Связанные документы | `BACKEND_ARCHITECTURE.md` (роль 6, ERD), [`PIPELINE_SPEC.md`](PIPELINE_SPEC.md) (жизненный цикл Run, retry, сбои), [`contracts/openapi.yaml`](../contracts/openapi.yaml) (HTTP API), [`FRONTEND_ARCHITECTURE.md`](https://github.com/larchanka-training/dmc-268-ui-t6/blob/main/docs/FRONTEND_ARCHITECTURE.md) (роль 5, Zod-контракты), [`TEST_PLAN.md`](https://github.com/larchanka-training/dmc-268-ui-t6/blob/main/docs/TEST_PLAN.md) (роль 2, quality gates), инфраструктура (роль 3) |
 | Нумерация решений | `Р-1…Р-15`; `Р-1…Р-9` — общие с [`TEST_PLAN.md`](https://github.com/larchanka-training/dmc-268-ui-t6/blob/main/docs/TEST_PLAN.md), не менять |
 
 **Продукт.** GitHub App, которого назначают ревьюером в pull request. После зелёного CI бот публикует одно ревью с inline-комментариями прямо в PR. Web UI показывает прогоны, трейс действий агента, метрики и расход.
 
-**Стек (зафиксирован).** Backend: Python 3.13, FastAPI, SQLAlchemy 2, Alembic, PostgreSQL 17, RabbitMQ, Redis, uv, ruff, mypy strict. Frontend: React 19, Vite 8, TypeScript 5, pnpm, Zustand + TanStack Query, Zod, Vitest 5. Инфра: Hetzner Cloud, Terraform, Docker Compose.
+**Стек (зафиксирован).** Backend: Python 3.13, FastAPI, SQLAlchemy 2, Alembic, PostgreSQL 17, RabbitMQ, Redis, uv, ruff, mypy strict; объектного хранилища в MVP нет (S3 — после MVP, §10). Frontend: React 19, Vite 8, TypeScript 6, pnpm, Zustand + TanStack Query, Zod, Vitest 5. Инфра: Docker Compose; staging — курсовой VPS за edge-прокси Caddy (Terraform / Hetzner — альтернативная цель, [CICD.md](CICD.md) §8).
 
 ---
 
@@ -19,19 +19,19 @@
 |---|---|---|
 | Р-1 | Транспорт задач — **RabbitMQ** (durable, persistent, ack после фиксации состояния). **Источник истины — PostgreSQL**: брокер доставляет указатель на задачу, состояние живёт в БД | Микросервисы → общая БД как очередь становится антипаттерном; RabbitMQ даёт ack/DLQ/приоритеты; отмена и схлопывание не выражаются в брокере — поэтому состояние в БД |
 | Р-2 | Один активный прогон на PR: ключ `(installation_id, repo_id, pr_number)`; новый пуш отменяет предыдущий прогон, побеждает последний `head_sha` | Иначе 10 пушей = 10 ревью и 10× цена. Разные PR, ветки, репозитории — параллельны |
-| Р-3 | Два движка за одним контрактом `Finding[]`: **DiffEngine** (без диска, ≤ 40 с) и **SandboxEngine** (контейнер, ≤ 10 мин). v1 = DiffEngine | Движок будет меняться; всё ниже контракта об этом не знает |
+| Р-3 | Два движка за одним контрактом `ReviewOutput` (§5): **DiffEngine** (без диска, ≤ 40 с) и **SandboxEngine** (контейнер, ≤ 10 мин). v1 = DiffEngine | Движок будет меняться; всё ниже контракта об этом не знает |
 | Р-4 | Сандбокс: `--network=none`, без токенов внутри, клон монтирует контроллер снаружи | Промпт-инъекция в диффе — штатная ситуация |
 | Р-5 | Публикация **одним** `POST /pulls/{n}/reviews`; повтор безопасен по `findings_hash`; строки вне диффа — в тело ревью | N комментариев = N уведомлений и N вызовов к rate limit; 422 от GitHub на строку вне диффа |
 | Р-6 | Правила и промпты — неизменяемые версии; прогон ссылается на `rule_version_id`, `prompt_version_id` | Dry-run, откат, объяснимость — бесплатно |
 | Р-7 | Арендатор = **Workspace** (роль 6), к которому привязана `ProviderInstallation`; права на репозитории — из провайдера, не из своей таблицы ролей | Своя модель ролей разъедется с GitHub |
 | Р-8 | `usage_events` (токены, деньги, модель) — с первого вызова LLM, только вставка | Восстановить задним числом нельзя; основа для `CreditLedger` |
 | Р-9 | Бот односторонний: публикует, на комментарии не отвечает; **обязательно** игнорирует собственные события | Скорость запуска; защита от цикла «бот → CI → бот» |
-| Р-10 | Триггер — **конъюнкция двух событий в любом порядке**: бот назначен ревьюером ∧ CI успешен для текущего `head_sha` | Решение мита; события независимы, порядок не гарантирован |
+| Р-10 | Триггер — **конъюнкция двух событий в любом порядке**: бот назначен ревьюером ∧ CI успешен для текущего `head_sha`. **После пуша — авто-повтор**, пока PR открыт и стоит наш флаг `reviewer_requested`: GitHub снимает запрос после ревью бота, флаг снимают только `review_request_removed` от человека и закрытие PR (решение техлида по #20, OQ-1). Условие «CI успешен» и sweep «2 мин без CI» — §6.1, [PIPELINE_SPEC](PIPELINE_SPEC.md) §8 | Решение мита; события независимы, порядок не гарантирован |
 | Р-11 | Провайдер VCS — за портом `VcsProvider`; v1 реализует только GitHub | ТЗ упоминает GitLab, роль 6 — Bitbucket; порт дешёвый, реализации — нет |
 | Р-12 | Один monorepo и пять независимо собираемых сервисов (`portal-api`, `auth-api`, `webhook-api`, `worker`, `publisher`) с собственными зависимостями | Изоляция релизов и зависимостей без потери единого lock-файла и локального окружения |
 | Р-13 | **RAG не входит в MVP.** Worker получает контекст через порт `ContextProvider`: в MVP — детерминированный сборщик L1–L4, позднее — `RagContextProvider`, возвращающий тот же `ContextPayload` | В MVP нет затрат и операционных рисков embeddings/vector DB, но RAG подключается без изменения LLM, post-processing и публикации |
 | Р-14 | Успешный прогон — статус **`succeeded`** везде: домен (`RunState.SUCCEEDED`), PG enum `run_state`, API, Zod фронтенда. Полный набор: `queued\|running\|publishing\|succeeded\|failed\|cancelled\|skipped` (§6.4); `completed` — только события и статусы GitHub (`check_suite`, `check_run`, `workflow_run`) | Одно имя от БД до UI без маппинга; код и миграция уже используют `succeeded` и `publishing` |
-| Р-15 | Снимок диффа для `GET /api/runs/{id}/diff` хранится в **PostgreSQL**: патчи по файлам с ключом `(code_change, head_sha)`; дифф > 3 000 строк → хранится только список файлов (API: `patch: null`, `RunSession.summaryOnly: true`); удаляется каскадом вместе с Workspace. MinIO/S3 для снимка в MVP не используется | UI получает дифф прогона без GitHub и object storage; объём ограничен порогом сводки; данные клиента удаляются вместе с арендатором |
+| Р-15 | Снимок диффа для `GET /api/runs/{id}/diff` хранится в **PostgreSQL**: патчи по файлам с ключом `(code_change, head_sha)`; дифф > 3 000 строк → хранится только список файлов (API: `patch: null`, `RunSession.summaryOnly: true`); удаляется каскадом вместе с Workspace. Объектное хранилище для снимка не используется (в MVP его нет, §10) | UI получает дифф прогона без GitHub и object storage; объём ограничен порогом сводки; данные клиента удаляются вместе с арендатором |
 
 ---
 
@@ -61,7 +61,7 @@ flowchart LR
   gh -->|"вебхуки<br/>HTTPS + HMAC"| sys
   sys -->|"дифф, файлы, публикация ревью,<br/>check-run · REST / GraphQL"| gh
   sys -->|"контекст → находки<br/>HTTPS"| llm
-  op -->|"правила, прогоны, метрики<br/>Web UI · GitHub OAuth"| sys
+  op -->|"правила, прогоны, метрики<br/>Web UI · вход через GitHub App"| sys
   gh -.->|"ревью бота в PR"| dev
 
   classDef person fill:#08427b,color:#fff,stroke:#052e56
@@ -88,9 +88,9 @@ flowchart TB
 
   subgraph sys["AI Code Reviewer"]
     direction TB
-    ui["<b>Web UI</b><br/><i>[Container: React 19 + Vite 8 + TS 5]</i><br/>прогоны, дифф, инспектор трейса,<br/>правила, метрики"]
+    ui["<b>Web UI</b><br/><i>[Container: React 19 + Vite 8 + TS 6]</i><br/>прогоны, дифф, инспектор трейса,<br/>правила, метрики"]
     portal["<b>Portal API</b><br/><i>[Container: FastAPI BFF]</i><br/>REST + SSE, подписка, биллинг,<br/>настройки и ручной перезапуск"]
-    auth["<b>Auth API</b><br/><i>[Container: FastAPI]</i><br/>OAuth, JWT и сессии"]
+    auth["<b>Auth API</b><br/><i>[Container: FastAPI]</i><br/>вход через GitHub App,<br/>JWT и refresh, Workspace (Р-7)"]
     hook["<b>Webhook API</b><br/><i>[Container: FastAPI]</i><br/>GitHub HMAC, идемпотентность,<br/>триггер Р-10, схлопывание Р-2, ack < 500 мс"]
     worker["<b>AI Worker</b><br/><i>[Container: Python + aio-pika]</i><br/>сборщик контекста (4 уровня) → LLM Gateway<br/>→ постобработка → трейс"]
     pub["<b>GitHub Publisher</b><br/><i>[Container: Python + aio-pika]</i><br/>валидация координат, одно ревью и check-run"]
@@ -98,33 +98,35 @@ flowchart TB
     mq[("<b>RabbitMQ</b><br/><i>[AMQP 0-9-1]</i><br/>reviews (direct), retry и DLX")]
     pg[("<b>PostgreSQL 17</b><br/><i>[SQLAlchemy 2 + Alembic]</i><br/>источник истины")]
     redis[("<b>Redis</b><br/>токены, блобы, AST, дерево репо")]
-    s3[("<b>Object Storage</b><br/><i>[S3: MinIO / Hetzner]</i><br/>payload'ы, контексты, трейсы")]
   end
 
   dev -->|"PR, назначение ревьюера"| gh
   op -->|HTTPS| ui
   ui -->|"REST + SSE<br/>Zod-контракты"| portal
-  ui -->|"OAuth / JWT"| auth
+  ui -->|"вход, refresh<br/>/api/auth"| auth
   gh -->|"webhooks<br/>HTTPS + HMAC"| hook
 
   hook -->|"webhook_events, code_changes,<br/>runs"| pg
   hook -->|review.run| mq
+  hook -->|"check-suites, status · REST"| gh
   portal -->|"чтение, конфигурация"| pg
   portal -->|"review.run<br/>(rerun)"| mq
-  auth -->|"OAuth"| gh
+  portal -->|"блобы для /files"| redis
+  auth -->|"user authorization,<br/>/user/installations (Р-7)"| gh
+  auth -->|"пользователи,<br/>refresh-токены"| pg
 
   mq -->|"review.run.fast / .deep<br/>prefetch=1"| worker
   worker -->|"diff, blobs, tree · REST"| gh
   worker -->|"промпт → находки"| llm
   worker -->|"блобы, AST"| redis
   worker -->|"context_payloads, findings,<br/>run_actions, usage_events"| pg
-  worker -->|"полный контекст, трейс"| s3
   worker -.->|"docker API · фаза 3"| sandbox
   worker -->|"review.publish"| mq
 
   mq -->|review.publish| pub
   pub -->|"POST /pulls/{n}/reviews,<br/>check-run · REST"| gh
   pub -->|"comments, run.state"| pg
+  pub -->|"installation-токен"| redis
 
   classDef person fill:#08427b,color:#fff,stroke:#052e56
   classDef ext fill:#8a8a8a,color:#fff,stroke:#5f5f5f
@@ -133,14 +135,15 @@ flowchart TB
   class dev,op person
   class gh,llm ext
   class ui,portal,auth,hook,worker,pub,sandbox cont
-  class mq,pg,redis,s3 store
+  class mq,pg,redis store
 ```
 
 **Один monorepo, пять сервисов** (Р-12): `services/portal-api`, `services/auth-api`,
 `services/webhook-api`, `services/worker`, `services/publisher`. Каждый собирается своим
 Dockerfile и запускается отдельным контейнером; PostgreSQL, RabbitMQ и Redis — общая
-инфраструктура на переходном этапе. Отдельного Event Collector нет: `usage_events` пишет
-worker (LLM Gateway), метрики §12 строятся по ним.
+инфраструктура на переходном этапе. Объектного хранилища в MVP нет: всё, что §10 раньше
+относил к S3, лежит в PostgreSQL (D1 по #20). Отдельного Event Collector нет:
+`usage_events` пишет worker (LLM Gateway), метрики §12 строятся по ним.
 
 Import path един для всех сервисов: процесс стартует из `services/<name>/app/main.py` —
 HTTP-сервисы командой `uvicorn app.main:app`, consumers `worker` и `publisher` командой
@@ -151,8 +154,11 @@ Workspace-пакет `database-migrator` запускается Compose-серв
 входит в runtime-набор: это одноразовый job из profile `tools`, который применяется
 до запуска сервисов и обращается только к PostgreSQL.
 
-Эта раскладка реализуется в PR #10. До его слияния код — один пакет `app/`, а
-`docker-compose.yml` поднимает только `backend` и PostgreSQL.
+Диаграмма и раскладка выше — целевые. До разделения на сервисы (#16; скорее всего после
+этого спринта, отдельным рефакторингом) `portal-api`, `auth-api` и `webhook-api` —
+логические роли: их маршруты живут в одном FastAPI-приложении `app/main.py`, а `worker`
+(в MVP — вместе с consumer `review.publish`, §7.1) запускается отдельным процессом из
+того же образа.
 
 ---
 
@@ -185,22 +191,23 @@ flowchart LR
   G -.checkpoints: после каждого уровня,<br/>перед каждым LLM-вызовом.-> PP
 ```
 
-Контракт между движками и всем остальным:
+Контракт между движками и всем остальным — **`ReviewOutput`**: `{findings: [≤ 10], summary: {problem, done_well, effort}}`. Форму задаёт [`review/schemas/review-output.schema.json`](../review/schemas/review-output.schema.json) (JSON Schema draft 2020-12, единственный источник формы); рантайм-модель — Pydantic `ReviewOutput` (`app/modules/reviews/application/review_output.py`), совпадение проверяет `tests/test_review_output_schema.py`. Все ключи обязательны, nullable-поля приходят со значением `null`, лишних ключей нет. Семантика, которую схема не выражает, правила `suggestion` и strict structured output провайдеров — [PIPELINE_SPEC](PIPELINE_SPEC.md) §9. Поля находки — для обзора, авторитетна схема:
 
 ```python
-@dataclass(frozen=True)
-class Finding:
-    path: str
-    line: int                 # строка в новой версии файла (side=RIGHT)
-    start_line: int | None    # для многострочных
+class ReviewFinding:          # элемент ReviewOutput.findings
+    path: str                 # якорь (D6): path / start_line / line
+    start_line: int | None    # null — одна строка; иначе start_line < line
+    line: int                 # строка новой версии файла
     severity: Literal["critical", "high", "medium", "low", "info"]
     category: Literal["security", "correctness", "performance", "readability"]
-    title: str
+    title: str                # ≤ 80 символов, одна строка
     body: str                 # markdown, ≤ 1200 символов
-    suggestion: str | None    # готовая замена строк → ```suggestion
+    suggestion: str | None    # готовая замена строк start_line..line → ```suggestion
     confidence: float         # 0..1
     rule_name: str | None     # имя пользовательского правила → префикс атрибуции (роль 7)
 ```
+
+`side` и SHA в выходе нет: сторону (`RIGHT`) ставит постпроцессор, SHA берётся из `Run.head_sha`. Маппинг якоря в БД, API и GitHub — PIPELINE_SPEC §10.
 
 ---
 
@@ -223,14 +230,15 @@ sequenceDiagram
   WH->>PG: try_enqueue(pr): ci_ok(head_sha)? — нет, ждём
   WH-->>GH: 202 (< 500 мс)
 
-  GH->>WH: check_suite.completed (conclusion = success, head_sha)
-  WH->>PG: code_changes: ci_status[head_sha] = success
-  WH->>PG: try_enqueue(pr): reviewer_requested ∧ ci_ok ∧ нет активного run → runs INSERT (queued)
+  GH->>WH: check_suite.completed (head_sha)
+  WH->>PG: code_changes: ci_status[head_sha] (кэш событий)
+  WH->>GH: try_enqueue: REST check-suites и combined status для head_sha (свой suite не в счёт)
+  WH->>PG: reviewer_requested ∧ CI зелёный ∧ нет активного run → runs INSERT (queued)
   WH->>MQ: publish review.run {run_id, head_sha, engine}
   WH-->>GH: 202
 ```
 
-`try_enqueue` — одна функция, вызывается из обоих обработчиков; условие проверяется по состоянию в БД, а не по тому, какое событие пришло последним. Если у репозитория нет CI (`wait_for_ci = auto` и ни одного check suite для `head_sha` за 2 минуты) — прогон стартует по одному назначению.
+`try_enqueue` — одна функция, вызывается из обоих обработчиков и из sweep; условие проверяется по состоянию, а не по тому, какое событие пришло последним. «CI зелёный» (дефолт по #20): все check suites для `head_sha`, **кроме suite самого App** (`app.id`), завершены с `success` / `neutral` / `skipped`, а combined status коммита — `success` или статусов нет; проверяется REST-запросами check-suites и status внутри `try_enqueue`. Свой suite исключён: GitHub создаёт его для App с `checks: write`, а завершает его только наш check-run (§8.3) — иначе условие ждало бы само себя. Если у репозитория нет CI (`wait_for_ci = auto` и ни одного чужого check suite или статуса для `head_sha` за 2 минуты) — прогон стартует по одному назначению. Это правило реализует sweep раз в 30 с в leader-цикле `worker` (лидер через `pg_advisory_lock`, дефолт по #20): он вызывает тот же `try_enqueue`; реконсилер (раз в 5 мин, §6.4) его не заменяет. После пуша — авто-повтор, пока стоит наш флаг `reviewer_requested` (Р-10). Полное условие, `wait_for_ci` и жизненный цикл флага — [PIPELINE_SPEC](PIPELINE_SPEC.md) §8.
 
 ### 6.2 Прогон: быстрый путь
 
@@ -256,9 +264,9 @@ sequenceDiagram
     W->>GH: GET /git/blobs/{sha} (при miss)
     W->>R: put blob, put AST
   end
-  W->>PG: context_payloads (summary), S3: полный контекст
+  W->>PG: context_payloads (summary, полный контекст в MVP не хранится)
   W->>LLM: system(промпт vN + правила + конвенции) + контекст
-  LLM-->>W: findings JSON
+  LLM-->>W: ReviewOutput (JSON)
   W->>PG: usage_events, run_actions, findings
   W->>PG: cancel_requested? head_sha актуален?
   W->>MQ: review.publish {run_id, findings_hash}
@@ -305,11 +313,11 @@ stateDiagram-v2
   queued --> cancelled: новый head_sha
   running --> cancelled: cancel_requested на checkpoint
   running --> publishing: findings готовы
-  running --> failed: исключение, attempt ≥ 3
+  running --> failed: сбой без retry или attempt ≥ 3
   running --> queued: исключение, attempt < 3 (retry с задержкой)
   publishing --> succeeded: ревью опубликовано
   publishing --> cancelled: head_sha устарел
-  publishing --> failed: GitHub 4xx кроме 422-координат
+  publishing --> failed: GitHub 5xx после повторов, 403
   queued --> skipped: правило отбора не прошло
   succeeded --> [*]
   failed --> [*]
@@ -317,7 +325,141 @@ stateDiagram-v2
   skipped --> [*]
 ```
 
-Реконсилер (в `portal-api`, раз в 5 мин, лидер через `pg_advisory_lock`): `running` с истёкшим `lease_until` → `queued` + повторная публикация сообщения; `queued` старше 10 мин без сообщения → повторная публикация.
+Реконсилер (в `portal-api`, раз в 5 мин, лидер через `pg_advisory_lock`): `running` с истёкшим `lease_until` → `queued` + повторная публикация сообщения (при `attempt ≥ 3` — `failed`, `lease_expired`); `queued` старше 10 мин без сообщения → повторная публикация.
+
+Источник по переходам (триггеры, guard'ы и побочные эффекты T1–T18), lease (5 мин, heartbeat 60 с), таймаутам и retry — [PIPELINE_SPEC](PIPELINE_SPEC.md) §1, §3, §4; при расхождении по жизненному циклу прав он.
+
+### 6.5 Вход и сессия (D4)
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant B as Web UI
+  participant GH as GitHub
+  participant A as Auth API
+  participant PG as PostgreSQL
+  participant P as Portal API
+
+  B->>B: state → sessionStorage
+  B->>GH: authorize (client_id App, state), без scopes
+  GH-->>B: redirect /auth/callback (code, state)
+  B->>B: state совпадает?
+  B->>A: POST /api/auth/github/callback {code}
+  A->>GH: code → токен пользователя, GET /user, GET /user/installations
+  A->>PG: пользователь · refresh-токен · Workspace доступных установок (Р-7)
+  A-->>B: {accessToken, expiresIn, user} + Set-Cookie refresh_token
+  B->>P: GET /api/runs (Authorization: Bearer)
+  P->>P: подпись публичным ключом auth-api, exp, iss/aud, Workspace из claims
+  B->>A: POST /api/auth/refresh (cookie) при загрузке и по истечении access
+  A-->>B: новый accessToken + ротация cookie
+  B->>A: GET /api/auth/me → Me
+  B->>A: POST /api/auth/logout → refresh отозван, cookie стёрта
+```
+
+Сроки токенов, cookie, claims и граница Workspace — §12; пути и схемы — `contracts/openapi.yaml`.
+
+### 6.6 Чтение в UI и SSE
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant B as Web UI
+  participant P as Portal API
+  participant PG as PostgreSQL
+  participant W as AI Worker
+
+  P->>PG: LISTEN run_updated
+  B->>P: GET /api/stream (fetch, Authorization: Bearer)
+  B->>P: GET /api/runs (status, repo, cursor)
+  P->>PG: SELECT runs по Workspace из JWT
+  P-->>B: RunListPage
+  W->>PG: UPDATE runs.state + NOTIFY run_updated (одна транзакция)
+  PG-->>P: уведомление после commit
+  P-->>B: event run.updated {runId, status}
+  B->>P: GET /api/runs/{id} → RunDetail
+```
+
+Каждый переход Run шлёт `NOTIFY run_updated` в своей транзакции (D12 — дефолт по #20, PIPELINE_SPEC §1): уведомление приходит только после commit, и UI не видит незафиксированных состояний. Поток читается через `fetch` с Bearer — `EventSource` заголовки не передаёт. Мост LISTEN/NOTIFY → SSE — #34.
+
+### 6.7 Перезапуск
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant B as Web UI
+  participant P as Portal API
+  participant PG as PostgreSQL
+  participant MQ as RabbitMQ
+
+  B->>P: POST /api/runs/{id}/rerun
+  P->>PG: PR открыт? есть активный Run по PR?
+  alt PR закрыт или активный Run есть
+    P-->>B: 409
+  else
+    P->>PG: runs INSERT (queued, trigger = rerun, текущий head_sha) + NOTIFY
+    P->>MQ: review.run/v1 → review.run.{engine}, priority 9, после commit
+    P-->>B: 202 RunSession (queued)
+  end
+```
+
+Флаг `reviewer_requested` и CI не проверяются; дальше — как §6.2 (PIPELINE_SPEC T3).
+
+### 6.8 Retry и DLQ
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant MQ as RabbitMQ review.run.*
+  participant W as AI Worker
+  participant PG as PostgreSQL
+  participant RQ as reviews.retry
+  participant DLQ as reviews.dlq
+
+  MQ->>W: review.run
+  W->>PG: claim: attempt + 1, lease 5 мин
+  Note over W: сбой, класс — PIPELINE_SPEC §5
+  alt класс с retry, attempt < 3
+    W->>PG: queued, available_at = now + задержка
+    W->>RQ: копия в retry.{задержка}.{engine}
+    W->>MQ: ack после confirm копии
+    RQ->>MQ: TTL истёк → reviews, ключ review.run.{engine}
+  else класс с retry, attempt ≥ 3
+    W->>PG: failed, error_code
+    W->>DLQ: nack(requeue=false) через reviews.dlx
+  else класс без retry
+    W->>PG: failed, error_code
+    W->>MQ: ack, без DLQ
+  end
+```
+
+Счётчик один — `runs.attempt` (инкремент при claim), `x-death` — только диагностика. Задержки 30 с → 2 мин (при rate limit — не меньше 2 мин); после 3 попыток — `failed` и копия в `reviews.dlq`; классы без retry (невалидный вывод модели, переполнение контекста, бюджет, дедлайн) ведут в `failed` сразу, без DLQ. Автор PR видит check-run `neutral` «AI-ревью не выполнено», ревью нет. Политика целиком — PIPELINE_SPEC §4–§7.
+
+### 6.9 Подключение репозиториев: установка GitHub App (D10)
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant B as Web UI
+  participant GH as GitHub
+  participant WH as Webhook API
+  participant PG as PostgreSQL
+
+  B->>GH: «Подключить» → страница установки App
+  GH->>GH: пользователь выбирает аккаунт и репозитории
+  GH->>WH: installation.created / installation_repositories.added
+  WH->>PG: webhook_events INSERT, установка связана с Workspace?
+  alt установка не связана с Workspace
+    WH-->>GH: 202, доставка проигнорирована
+  else связана
+    WH->>GH: дерево репозитория для языков · REST, вне транзакции
+    WH->>PG: repositories upsert + начальная версия правил, одна транзакция
+    WH-->>GH: 202
+  end
+  GH->>WH: installation_repositories.removed / installation.deleted
+  WH->>PG: repositories отключены
+```
+
+Репозиторий подключается только установкой App: `POST /api/repos` нет (D10), кнопка «Подключить» в UI — ссылка на установку App, список обновляют вебхуки (§8.2). Кто связывает новую установку с Workspace, пока не определено: на `main` доставка для установки без Workspace подтверждается и игнорируется.
 
 ---
 
@@ -329,48 +471,28 @@ stateDiagram-v2
 |---|---|---|---|---|---|
 | `reviews` | direct | `review.run.fast` | `review.run.fast` | AI Worker (fast pool) | durable, `x-max-priority=10`, DLX → `reviews.dlx` |
 | `reviews` | direct | `review.run.deep` | `review.run.deep` | AI Worker (deep pool) | то же; отдельный пул — чтобы сандбокс не блокировал быстрые |
-| `reviews` | direct | `review.publish` | `review.publish` | GitHub Publisher | durable, DLX |
-| `reviews.retry` | direct | `retry.30s` / `retry.2m` / `retry.10m` | `retry.*` | — | `x-message-ttl`, `x-dead-letter-exchange=reviews` (отложенный повтор без плагина) |
-| `reviews.dlx` | fanout | — | `reviews.dlq` | оператор / реконсилер | хранение 7 дней |
+| `reviews` | direct | `review.publish` | `review.publish` | GitHub Publisher (в MVP — consumer в процессе worker) | durable, DLX |
+| `reviews.retry` | direct | `retry.{30s,2m,10m}.{fast,deep}` | с тем же именем | — | `x-message-ttl`, `x-dead-letter-exchange=reviews`, `x-dead-letter-routing-key=review.run.{engine}` (отложенный повтор без плагина; PIPELINE_SPEC §4.3) |
+| `reviews.dlx` | fanout | — | `reviews.dlq` | оператор | хранение 7 дней |
 
-Параметры: сообщения `delivery_mode=2`, publisher confirms включены, `prefetch_count=1` на run-очередях (задачи длинные и неравные), ack **только после** фиксации состояния в PostgreSQL, `consumer_timeout=45min` (глубокий путь ≤ 10 мин с запасом).
+Параметры: сообщения `delivery_mode=2`, publisher confirms включены, `prefetch_count=1` на run-очередях (задачи длинные и неравные), ack **только после** фиксации состояния в PostgreSQL, `consumer_timeout=45min` (глубокий путь ≤ 10 мин с запасом). Retry, lease и таймауты — PIPELINE_SPEC §3–§4.
+
+Пока отдельного сервиса `publisher` нет, очередь `review.publish` потребляет отдельный consumer в процессе worker: сообщение `review.publish/v1`, переходы и идемпотентность по `findings_hash` те же (PIPELINE_SPEC §1).
 
 ### 7.2 Форматы сообщений
 
 Сообщение — **указатель**, не данные: без диффов, без payload'ов. Всё, что нужно воркеру, он читает из БД и GitHub по идентификаторам. Так сообщение остаётся < 1 КБ, а состояние — единым.
 
-```jsonc
-// review.run/v1  — Webhook API | Portal API → AI Worker
-{
-  "schema": "review.run/v1",
-  "message_id": "b3c1…",            // = run_id; ключ идемпотентности
-  "run_id": "b3c1…",
-  "workspace_id": "ws_…",
-  "installation_id": 12345678,
-  "repo": { "id": "r_…", "provider": "github", "external_id": 987, "full_name": "org/repo" },
-  "pr":   { "number": 42, "head_sha": "a3f9…", "base_sha": "0c2e…", "base_ref": "main" },
-  "engine": "fast",                 // fast | deep
-  "rule_version_id": "rv_7",
-  "prompt_version_id": "pv_12",
-  "trigger": "webhook",             // webhook | manual | rerun | dry_run
-  "attempt": 1,
-  "requested_at": "2026-09-13T10:00:00Z"
-}
-```
+Форма сообщений — JSON Schema, пример — строгая JSON-фикстура; фикстуры и отказ на мутациях проверяет `tests/test_contract_schemas.py`.
 
-```jsonc
-// review.publish/v1 — AI Worker → GitHub Publisher
-{
-  "schema": "review.publish/v1",
-  "message_id": "pub_b3c1…",
-  "run_id": "b3c1…",
-  "head_sha": "a3f9…",
-  "findings_hash": "sha256:…",      // hash отсортированных находок → идемпотентность Р-5
-  "review_event": "COMMENT"         // COMMENT | REQUEST_CHANGES — из правил репозитория
-}
-```
+| Сообщение | Схема · фикстура | Кто → кому | Поля |
+|---|---|---|---|
+| `review.run/v1` | [`contracts/schemas/review.run.v1.schema.json`](../contracts/schemas/review.run.v1.schema.json) · [`contracts/examples/review.run.v1.json`](../contracts/examples/review.run.v1.json) | Webhook API, Portal API (rerun, реконсилер), worker (sweep) → AI Worker | `schema`, `message_id` (= `run_id`, ключ идемпотентности), `run_id`, `workspace_id`, `installation_id`, `repo {id, provider, external_id, full_name}`, `pr {number, head_sha, base_sha, base_ref}`, `engine`, `rule_version_id`, `prompt_version_id`, `trigger`, `attempt`, `requested_at` |
+| `review.publish/v1` | [`contracts/schemas/review.publish.v1.schema.json`](../contracts/schemas/review.publish.v1.schema.json) · [`contracts/examples/review.publish.v1.json`](../contracts/examples/review.publish.v1.json) | AI Worker, реконсилер → GitHub Publisher (в MVP — consumer в worker) | `schema`, `message_id`, `run_id`, `head_sha`, `findings_hash` (идемпотентность Р-5), `review_event` |
 
-Правила: заголовок `schema` версионируется, потребитель отвергает незнакомую мажорную версию в DLQ; `message_id` = детерминированный id из БД, повторная доставка безопасна; `x-death` считает попытки, после 3 — `reviews.dlq` и `run.state = failed` с причиной.
+ID — UUID без префиксов, как в БД; `findings_hash` — 64 hex; приоритет (rerun — 9) — свойство AMQP, а не поле. Отличия от прежних примеров этого раздела — PIPELINE_SPEC §12.
+
+Правила: заголовок `schema` версионируется, потребитель отвергает в DLQ незнакомую мажорную версию и сообщение, не прошедшее схему; `message_id` = детерминированный id из БД, повторная доставка безопасна; попытки считает один счётчик `runs.attempt` (инкремент при claim), `x-death` — только диагностика; после 3 попыток — `run.state = failed` с `error_code` и копия в `reviews.dlq` (PIPELINE_SPEC §4).
 
 ---
 
@@ -397,11 +519,11 @@ v1 — `GitHubProvider`. `GitLabProvider` (MR `changes`, `discussions`, `pipelin
 
 | Событие | Действия | Что делаем |
 |---|---|---|
-| `pull_request` | `opened`, `reopened`, `synchronize`, `edited` | upsert `code_changes`; `synchronize` → сброс `ci_status`, `cancel_requested` активной job |
+| `pull_request` | `opened`, `reopened`, `synchronize`, `edited` | upsert `code_changes`; `synchronize` → сброс `ci_status`, `cancel_requested` активного Run |
 | `pull_request` | `review_requested` / `review_request_removed` | `reviewer_requested = true/false` (только если reviewer — наш бот) |
-| `pull_request` | `closed` | отмена активной job |
-| `check_suite`, `workflow_run` | `completed` | `ci_status[head_sha]`; success = все suites для sha успешны |
-| `status` | — | для репозиториев со сторонним CI через commit status |
+| `pull_request` | `closed` | отмена активного Run |
+| `check_suite`, `workflow_run` | `completed` | `ci_status[head_sha]` (кэш) → `try_enqueue`; «зелёный» = все suites для sha, **кроме suite самого App**, завершены с `success` / `neutral` / `skipped` — проверяется REST-запросом в `try_enqueue` (§6.1) |
+| `status` | — | для репозиториев со сторонним CI через commit status; combined status `success` или пусто — часть условия «CI зелёный» |
 | `pull_request_review_thread` | `resolved`, `unresolved` | **после MVP**: `feedback_signals` |
 | `installation`, `installation_repositories` | `created`, `deleted`, `added`, `removed` | синхронизация `repositories` |
 
@@ -420,7 +542,7 @@ v1 — `GitHubProvider`. `GitLabProvider` (MR `changes`, `discussions`, `pipelin
 | Файлы | `GET /git/blobs/{sha}` по sha из `files[].sha` — кэшируется на 7 дней (содержимое неизменяемо по sha, §10); никогда `contents` по пути с ref |
 | Дерево | `GET /git/trees/{head_sha}?recursive=1` (лимит 100 000 записей → для монорепо только затронутые директории) |
 | Публикация (Р-5) | один `POST /pulls/{n}/reviews`: `commit_id = head_sha`, `event`, `body`, `comments[{path, line, side: "RIGHT", start_line?, body}]`; ≤ 10 inline по умолчанию, остальное — в `body`; строка вне диффа → в `body` (иначе 422); `suggestion` только если строка в диффе |
-| Check-run | `in_progress` при старте, `completed` с `conclusion: neutral` + summary; `failure` никогда — бот не блокирует merge (настройка репозитория может изменить) |
+| Check-run | `in_progress` при первом claim, `completed` с `conclusion: neutral` + summary для `succeeded` и `failed`; у `cancelled` и `skipped` — свои conclusion (PIPELINE_SPEC §7); `failure` никогда — бот не блокирует merge (настройка репозитория может изменить) |
 | Обратная связь | **после MVP** (`FeedbackSignal`): `pull_request_review_thread.resolved` — вебхук; реакции — poll `GET /pulls/comments/{id}/reactions` раз в час по комментариям бота за 7 дней |
 
 ---
@@ -559,7 +681,7 @@ class ContextPayload(BaseModel):          # сущность роли 6
 3. L4 `changed_symbols` + `referenced_symbols` всем source-файлам с парсером (дёшево: сигнатуры).
 4. L2 всем source-файлам по приоритету.
 5. L3 — сверху вниз по приоритету, пока `used ≤ limit`.
-6. `level_used` фиксируется; `ContextPayload` → PostgreSQL (summary без содержимого) + S3 (полный).
+6. `level_used` фиксируется; `ContextPayload` → PostgreSQL (summary без содержимого); полный payload в MVP не хранится (S3 — после MVP, §10).
 
 Глубокий путь (фаза 3) отличается только тем, что шаги 3–5 выполняет агент в сандбоксе инструментами `read_file` / `grep` / `list_symbols` по клону, а не воркер по API; контракт `ContextPayload` тот же. Он также не требует RAG.
 
@@ -570,18 +692,20 @@ class ContextPayload(BaseModel):          # сущность роли 6
 | Что | Ключ | Где | TTL / инвалидация | Зачем |
 |---|---|---|---|---|
 | Installation-токен | `installation_id` | Redis | 50 мин | лимит 1 ч у GitHub |
-| Блоб файла | `(repo_id, blob_sha)` | Redis ≤ 256 КБ, иначе S3 | 7 дней; содержимое неизменяемо по sha | один и тот же файл в серии пушей |
+| Блоб файла | `(repo_id, blob_sha)` | Redis ≤ 256 КБ, иначе PostgreSQL (`cached_file_blobs`) | 7 дней; содержимое неизменяемо по sha | один и тот же файл в серии пушей |
 | AST / `SymbolContext` файла | `(blob_sha, parser_version)` | Redis | 7 дней | парсинг дороже сети |
 | Дерево репозитория | `(repo_id, head_sha)` | Redis | 1 ч | резолв импортов |
 | `RepoConventions` | `(repo_id, sha AGENTS.md, prompt_version)` | PostgreSQL + Redis | пока не изменился AGENTS.md в default-ветке (вебхук `push`) | это LLM-вызов, самый дорогой кэш |
 | Снимок диффа PR (Р-15) | `(code_change, head_sha)` | PostgreSQL: патчи по файлам; дифф > 3 000 строк — только список файлов (`patch: null`) | до удаления Workspace (каскад) | `GET /api/runs/{id}/diff`, dry-run, повтор, инспектор |
-| `ContextPayload` | `run_id` | PG summary + S3 | до удаления Workspace | инспектор, отладка |
+| `ContextPayload` | `run_id` | PG: только summary (полный — после MVP, S3) | до удаления Workspace | инспектор, отладка |
 | Результат прогона | `(repo_id, pr, diff_hash, rule_version, prompt_version)` | PostgreSQL | — | совпал → прогон не запускается, переиспользуем |
 | Промпт у провайдера | стабильный префикс: system + правила + конвенции **в начале** промпта, дифф — в конце | prompt caching провайдера | 5 мин – 1 ч | ~70 % входа PR в серии пушей — общий префикс |
 
 Что **не** кэшируем: код клиента дольше 7 дней (снимки диффов и `ContextPayload` — хранение прогона, а не кэш: до удаления Workspace); ответы LLM для разных `head_sha`; ничего в сандбоксе.
 
-Тела ответов инструментов (`RunAction.response_ref`) и payload'ы вебхуков (`WebhookEvent.payload_s3_ref`) в S3 хранятся, как и полные `ContextPayload`, до удаления Workspace. При удалении Workspace строки PostgreSQL (снимки диффов, summary `ContextPayload`, `RunAction`, `WebhookEvent`) удаляются каскадом, а все эти объекты S3 тот же use case удаляет по ссылкам до каскада — S3 каскадов не знает.
+Тела ответов инструментов больше 64 КБ лежат в отдельной таблице PostgreSQL, на строку которой указывает `RunAction.response_ref` (PIPELINE_SPEC §2; таблица и миграция — #34); payload вебхуков — JSONB в `webhook_events` вместо `payload_s3_ref` (миграция — #11). Это строки PostgreSQL: они хранятся до удаления Workspace и удаляются каскадом вместе со снимками диффов, summary `ContextPayload`, `RunAction` и `WebhookEvent`.
+
+**Объектное хранилище (S3) — после MVP** (D1 по #20): MinIO community архивирован, его образы удалены с Docker Hub 11.09.2026. Когда S3 вернётся (полные `ContextPayload`, крупные тела), use case удаления Workspace должен удалять его объекты по ссылкам до каскада — S3 каскадов не знает.
 
 ---
 
@@ -595,41 +719,47 @@ class ContextPayload(BaseModel):          # сущность роли 6
 | `ProviderInstallation` | `provider`, `external_id`, `metadata` (JSON); токены App в БД не сохраняются (installation-токен — только кэш Redis, §8.3); шифрование в MVP не заявлено — OQ-7 |
 | `Repository` | `enabled`, `default_engine`, `wait_for_ci: auto\|always\|never`, `review_event`, `max_comments` |
 | `CodeChange` (PR) | `number`, `head_sha`, `base_sha`, `reviewer_requested`, `ci_status` (jsonb по sha), `state` |
-| `Run` | `head_sha`, `state` (§6.4), `engine`, `rule_version_id`, `prompt_version_id`, `attempt`, `available_at`, `lease_until`, `cancel_requested`, `worker_id`, `trigger`; `summaryOnly` в API не хранится, а выводится из снимка диффа (Р-15: только список файлов) |
-| `ContextPayload` | §9; summary в jsonb, `s3_ref` |
-| `Finding` | контракт §5 + `run_id`, `published: bool`, `drop_reason`; SHA не хранится — берётся из `Run.head_sha` |
+| `Run` | `head_sha`, `state` (§6.4), `engine`, `rule_version_id`, `prompt_version_id`, `attempt`, `available_at`, `lease_until`, `cancel_requested`, `worker_id`, `trigger`, `error_code`, `error_message` (каталог — PIPELINE_SPEC §6); `summaryOnly` в API не хранится, а выводится из снимка диффа (Р-15: только список файлов) |
+| `ContextPayload` | §9; summary в jsonb; полный payload в MVP не хранится, `s3_ref` — после MVP (§10) |
+| `Finding` | поля `ReviewFinding` (§5); якорь канона `path` / `start_line` / `line` хранится как `file_path`, `line_start`, `line_end`, `side` (`RIGHT` ставит постпроцессор) — маппинг PIPELINE_SPEC §10; + `run_id`, `published: bool`, `inline_comment`, `drop_reason`; SHA не хранится — берётся из `Run.head_sha` |
 | `Comment` | `finding_id`, `github_review_id`, `github_comment_id`, `findings_hash` |
 | `CreditLedger` | потребитель `usage_events`, не источник |
-| **Добавить:** `WebhookEvent` | `delivery_id UNIQUE`, `event`, `action`, `payload_s3_ref`, `received_at` |
+| **Добавить:** `WebhookEvent` | `delivery_id UNIQUE`, `event`, `action`, `payload` (JSONB в PostgreSQL; до миграции #11 — колонка `payload_s3_ref`), `received_at` |
 | **Добавить:** `RuleVersion`, `PromptVersion` | неизменяемые (Р-6) |
 | **Добавить:** `UsageEvent` | `run_id`, `model`, `tokens_in/out`, `cache_read_tokens`, `cost_usd` — только вставка (Р-8) |
-| **Добавить:** `RunAction` | `run_id`, `index`, `tool`, `request jsonb`, `response jsonb?` (≤ 64 КБ) или `response_ref` (> 64 КБ), `started_at`, `duration_ms` — Zod `RunAction` фронта |
+| **Добавить:** `RunAction` | `run_id`, `index`, `tool` (каталог — PIPELINE_SPEC §2), `request jsonb`, `response jsonb?` (≤ 64 КБ) или `response_ref` (> 64 КБ — id строки отдельной таблицы PG, PIPELINE_SPEC §2), `started_at`, `duration_ms` — Zod `RunAction` фронта |
 | **Добавить:** снимок диффа (Р-15) | ключ `(code_change, head_sha)`; по файлу — `filename`, `patch` (дифф > 3 000 строк — только `filename`, в API `patch: null`); каскад от Workspace |
 | **После MVP:** `FeedbackSignal` | `finding_id`, `kind: resolved\|line_changed\|reaction`, `value`, `at` |
 
-Payload вебхуков и полные контексты — в S3; для ответов инструментов действует гибридное хранение: JSON до 64 КБ — в PostgreSQL, больший payload — в S3 по `response_ref`. Данные хранятся до удаления Workspace и удаляются вместе с ним (§10).
+В MVP всё хранится в PostgreSQL (D1): payload вебхуков — JSONB; полный `ContextPayload` не хранится, только summary; ответы инструментов до 64 КБ — в `run_actions.response`, больше — в отдельной таблице по `response_ref`. Данные хранятся до удаления Workspace и удаляются вместе с ним (§10).
 
 ---
 
 ## 12. Контракт API ↔ UI
 
-Zod-схемы — источник истины на фронте (роль 5); бэкенд отдаёт ровно их. `RunSession` — API-представление сущности `Run` (§11; в задании — `ReviewJob`): одна сущность, не отдельная таблица.
+Zod-схемы фронта (роль 5) и бэкенд описывают одни и те же DTO. `RunSession` — API-представление сущности `Run` (§11; в задании — `ReviewJob`): одна сущность, не отдельная таблица.
 
-| Метод | Путь | Ответ | Примечание |
+**Источник истины — [`contracts/openapi.yaml`](../contracts/openapi.yaml)** (OpenAPI 3.1): пути, параметры, схемы, коды ответа и ошибки. `x-service` на операции называет сервис, `x-status: planned` + `x-issue` помечают ещё не реализованное. Совпадение с FastAPI и ответами проверяет `tests/test_openapi_contract.py`, с Zod — `tests/test_ui_zod_contracts.py`. Ниже — только сводка.
+
+Провод — **camelCase** (Ф-10): `defaultEngine`, `waitForCi`, `maxComments`, `reviewEvent`; snake_case — только в БД (и во внутренних сообщениях очереди, §7.2). Префикс `/api` без версии.
+
+| Группа | Операции | Сервис | Главное |
 |---|---|---|---|
-| `POST` | `/auth/github/callback` | JWT | обслуживается `auth-api`; все `/api/*` в `portal-api` — `Authorization: Bearer` |
-| `GET` | `/api/runs?status&repo&cursor` | `RunListPage` = `{ items: RunSession[], nextCursor }` | фильтр `status`: `queued\|running\|publishing\|succeeded\|failed\|cancelled\|skipped` (Р-14) |
-| `GET` | `/api/runs/{id}` | `RunSession` + `findings` + `budget` | |
-| `GET` | `/api/runs/{id}/diff` | `RawFileDiff[]` = `[{ filename, patch }]` | **сырой unified-diff на файл** — требование роли 5; `patch` — вывод `git diff` по файлу: начинается с `diff --git a/<path> b/<path>` и содержит строки `---`/`+++` (в `files[].patch` GitHub их нет — бэкенд дописывает); источник — снимок диффа в PG (Р-15); summary-only прогон (дифф > 3 000 строк) → `[{ filename, patch: null }]` и `summaryOnly: true` в `RunSession`, UI показывает список файлов и «дифф слишком большой» |
-| `GET` | `/api/runs/{id}/files?path&offset&limit` | `FileSlice` | дочитывание контекста срезами; прогон старше TTL кэша блобов (7 дней, §10) → `404`/`410` |
-| `GET` | `/api/runs/{id}/comments` | `ReviewComment[]` | `ruleName` заполнен для пользовательских правил |
-| `GET` | `/api/runs/{id}/actions` | `RunAction[]` | `response` инлайн ≤ 64 КБ; больше — `responseRef`, тело — `GET /api/runs/{id}/actions/{index}/response` |
-| `POST` | `/api/runs/{id}/rerun` · `/cancel` | `RunSession` | rerun → `review.run` с `trigger: rerun`, priority 9; `/cancel` → `RunSession` со `status: cancelled` или `cancelRequested: true` |
-| `GET/PATCH` | `/api/repos`, `/api/repos/{id}` | | `enabled`, `default_engine`, `wait_for_ci`, `max_comments` |
-| `GET/POST` | `/api/repos/{id}/rules` | `RuleVersion[]` | POST создаёт новую версию |
-| `POST` | `/api/rules/{id}/preview` | `{ matched: PrRef[] }` | по PR за 7 дней |
-| `GET` | `/api/metrics/summary?range=24h` | плитки + ряды | из usage events, записанных worker |
-| `GET` | `/api/stream` | SSE `run.updated` | один поток на вкладку; payload минимум `{ runId, status }` |
+| Прогоны | `GET /api/runs`, `GET /api/runs/{id}`, `…/diff`, `…/files`, `…/comments`, `…/actions`, `…/actions/{index}/response` | `portal-api` | список — `RunListPage {items, nextCursor}`, фильтр `status` — семь состояний Р-14; run detail — `RunDetail` = `RunSession` + `verdict`, `summary`, `severityCounts`, `findings` (с `suggestion`, `confidence`), `budget` (D3, PIPELINE_SPEC §11); `/diff` — сырой unified-diff на файл из снимка Р-15, summary-only → `patch: null`; `/files` старше TTL кэша блобов (§10) → `404`/`410`; тело действия > 64 КБ — через `…/actions/{index}/response` |
+| Действия с прогоном | `POST /api/runs/{id}/rerun`, `POST /api/runs/{id}/cancel` | `portal-api` | rerun — новый Run `queued`, `202`; PR закрыт или есть активный Run → `409` (§6.7); cancel идемпотентен |
+| Поток | `GET /api/stream` | `portal-api` | SSE `run.updated {runId, status}`, один поток на вкладку, `fetch` с Bearer; между процессами — PG `LISTEN/NOTIFY` (D12 — дефолт по #20, §6.6) |
+| Репозитории | `GET /api/repos`, `GET/PATCH /api/repos/{id}`, `GET /api/repos/{id}/pulls` | `portal-api` | подключение — установкой App (§6.9): `POST /api/repos` и PATCH коллекции нет (D10); `GET /api/repos` → `Repository[]`; PATCH — `enabled`, `defaultEngine`, `waitForCi` (`auto\|always\|never`), `maxComments` (1..10), `reviewEvent` (`COMMENT\|REQUEST_CHANGES`); pulls → `{items: PullRequestSummary[], nextCursor}` с `latestRun {id, status, verdict}` (D11 — дефолт по #20) |
+| Правила, метрики | `GET/POST /api/repos/{id}/rules`, `POST /api/rules/{id}/preview`, `GET /api/metrics/summary` | `portal-api` | после MVP (`x-note` в спеке) |
+| Вход и сессия | `POST /api/auth/github/callback`, `POST /api/auth/refresh`, `GET /api/auth/me`, `POST /api/auth/logout` | `auth-api` | ниже; поток — §6.5 |
+
+**Контракт авторизации** (D4 — решение техлида по #20; хранение access в памяти, подпись в `auth-api` с проверкой публичным ключом и граница Workspace — дефолт по #20):
+
+- **Вход** — GitHub App user authorization, без OAuth scopes. `state` генерирует SPA и хранит в `sessionStorage`; GitHub возвращает на SPA `/auth/callback`, SPA сверяет `state` и отправляет `POST /api/auth/github/callback {code}` → `AuthSession {accessToken, tokenType: "Bearer", expiresIn, user}` + cookie refresh.
+- **Access** — JWT на 15 мин в заголовке `Authorization: Bearer` на всех `/api/*`, кроме callback, refresh и logout; SPA держит его в памяти, не в `localStorage`.
+- **Refresh** — ротируемый, 30 дней, cookie `refresh_token`: `HttpOnly; Secure; SameSite=Strict; Path=/api/auth`. `POST /api/auth/refresh` выдаёт новый access и новую cookie, `POST /api/auth/logout` отзывает refresh и стирает cookie. При загрузке SPA восстанавливает сессию: refresh, затем `GET /api/auth/me` (`Me` = `User` + `workspaces [{id, name, installationId}]`).
+- **Claims** — `sub` (пользователь), id доступных Workspace, `iat` / `exp`, `iss` / `aud`. Подписывает `auth-api`; `portal-api` проверяет подпись публичным ключом `auth-api`, `exp`, `iss` и `aud`.
+- **Граница Workspace (Р-7)** — `auth-api` при входе получает установки пользователя (`GET /user/installations`) и кладёт в токен только их Workspace; `portal-api` фильтрует каждый `/api/*` по этому claim. Своей таблицы ролей нет.
+- **SSE** — `fetch`-стрим с тем же Bearer (`EventSource` заголовки не передаёт).
 
 ---
 
@@ -640,15 +770,15 @@ Zod-схемы — источник истины на фронте (роль 5);
 | Ack вебхука | p95 < 500 мс (внутренняя цель 200 мс) | TEST_PLAN 2.2 |
 | DiffEngine | p95 ≤ 40 с чистого времени движка | TEST_PLAN QG |
 | Время до ревью (fast) | p50 ≤ 90 с, p95 ≤ 4 мин от выполнения триггера (очередь + движок + публикация) | этот документ |
-| SandboxEngine | жёсткий таймаут 10 мин, затем `failed` с фоллбэком на fast | Р-3 |
+| SandboxEngine | жёсткий таймаут 10 мин, затем тот же Run продолжается как fast (действие `engine.fallback` в трейсе) — это не `failed` | Р-3, PIPELINE_SPEC §5.3 |
 | Лимиты контекста | fast: 60 000 входных токенов; deep: 150 000; один файл L3 ≤ 12 000; ≤ 50 файлов с контекстом, остальные в `omitted_files`; дифф > 3 000 строк → ранний путь `summary-only` до `ContextProvider`: без построчного ревью, одна сводка «PR слишком большой» по списку файлов | §9 |
-| Выход | ≤ 10 inline-комментариев (настройка репозитория), тело ревью ≤ 4 000 символов, ответ модели — строгая JSON-схема `Finding[]` | Р-5 |
+| Выход | ≤ 10 inline-комментариев (настройка репозитория), тело ревью ≤ 4 000 символов, ответ модели — `ReviewOutput` по `review/schemas/review-output.schema.json` (§5) | Р-5 |
 | Пропускная способность v1 | 100 PR/день, 5 параллельных прогонов; масштаб — реплики `worker` | |
 | Надёжность | ни одна задача не теряется: persistent-сообщения + состояние в PG + реконсилер 5 мин; приёмник вебхуков — отдельный процесс (GitHub не ретраит) | |
 | Схлопывание | 100 % устаревших прогонов отменены до публикации | TEST_PLAN QG |
-| Стоимость | лимит на прогон: fast $0.50, deep $3 (превышение → прервать и опубликовать, что успели); дневной бюджет на Workspace → деградация в fast, затем пауза | Р-8 |
+| Стоимость | лимит на прогон: fast $0.50, deep $3 — сумма `usage_events` за все попытки плюс оценка следующего вызова, проверка до каждого вызова; превышение: deep — прервать и опубликовать, что успели, fast — `failed` (`budget_exceeded`); дневной бюджет на Workspace → деградация в fast, затем пауза (`skipped`). Лимиты вызовов, токенов и стоимости применяются по PIPELINE_SPEC §4.5, §5 | Р-8, PIPELINE_SPEC |
 | Качество | Precision ≥ 85 %, Critical Recall ≥ 75 %, Hallucination < 3 % на golden dataset | TEST_PLAN QG |
-| Безопасность | HMAC на вебхуках; секреты только через env из CI (роль 3); токены GitHub и LLM не попадают в сандбокс; сандбокс `--network=none`, non-root, read-only rootfs; PG/RabbitMQ/Redis — только внутренняя сеть | TEST_PLAN 2.3, 2.5 |
+| Безопасность | HMAC на вебхуках; секреты только через env из CI (роль 3); токены GitHub и LLM не попадают в сандбокс; сандбокс `--network=none`, non-root, read-only rootfs; PG/RabbitMQ/Redis — только внутренняя сеть | TEST_PLAN 2.2, 2.4, 2.6 |
 | Данные клиента | блобы ≤ 7 дней в кэше; диффы, контексты, тела ответов инструментов и payload вебхуков — до удаления Workspace; ни один прогон не логирует содержимое файлов в stdout | |
 | Наблюдаемость | структурированные логи (JSON) с `run_id` во всех контейнерах; метрики: глубина очередей, длительность по этапам, `X-RateLimit-Remaining`, стоимость; self-hosted стек — отдельная задача | |
 
@@ -672,19 +802,21 @@ flowchart TB
     worker --> pg
     publisher --> pg
     worker --> redis[(redis)]
-    worker --> minio[(minio)]
-    hook --> minio
+    portal --> redis
+    publisher --> redis
+    auth --> pg
     migrator[migrator · one-shot] -.->|Alembic| pg
   end
   gh[GitHub] -->|webhooks| caddy
   op[Оператор · браузер] -->|HTTPS| caddy
-  auth -->|OAuth| gh
+  auth -->|"user authorization,<br/>/user/installations"| gh
+  hook -->|REST| gh
   worker -->|REST| gh
   publisher -->|REST| gh
   worker -->|HTTPS| llm[LLM Provider]
 ```
 
-Внешние порты — только у edge-прокси Caddy: 443 (80 — редирект на HTTPS). HTTP-сервисы и Web UI подключаются к docker-сети `dmc268-edge` по alias, без host-портов; Web UI — nginx-контейнер из репозитория UI (alias `ui-staging`, порт 8080). Маршруты edge-прокси текущего staging и альтернативная цель выката (Hetzner VM из Terraform роли 3, без edge-прокси) — [CICD.md](CICD.md) §8. До выката сервисов Р-12 staging поднимает `api` и `postgres` (`deploy/compose/staging.yml`), и edge-прокси знает только upstream `api-staging`; маршрут на `auth-api` и переименование `api` → `portal-api` добавляются в CICD.md §8 вместе с выкатом сервисов (PR #10). Сандбокс (фаза 3) — отдельная VM с Docker-сокетом, недоступным из `portal-api`, `auth-api` и `webhook-api`.
+Внешние порты — только у edge-прокси Caddy: 443 (80 — редирект на HTTPS). HTTP-сервисы и Web UI подключаются к docker-сети `dmc268-edge` по alias, без host-портов; Web UI — nginx-контейнер из репозитория UI (alias `ui-staging`, порт 8080). Маршруты edge-прокси текущего staging и альтернативная цель выката (Hetzner VM из Terraform роли 3, без edge-прокси) — [CICD.md](CICD.md) §8. Диаграмма — целевая раскладка Р-12, объектного хранилища в ней нет (§10). До разделения на сервисы (#16; скорее всего после этого спринта, отдельным рефакторингом) маршруты `portal-api`, `auth-api` и `webhook-api` живут в одном приложении `api`, а `worker` — отдельный процесс из того же образа (§4); staging поднимает `api` и `postgres` (`deploy/compose/staging.yml`), edge-прокси знает только upstream `api-staging`, туда же идёт `/api/auth/*`. Маршрут на `auth-api` и переименование `api` → `portal-api` добавляются в CICD.md §8 вместе с разделением. Сандбокс (фаза 3) — отдельная VM с Docker-сокетом, недоступным из `portal-api`, `auth-api` и `webhook-api`.
 
 ---
 
@@ -692,9 +824,9 @@ flowchart TB
 
 | # | Вопрос | Предложение | Кто решает |
 |---|---|---|---|
-| OQ-1 | После первого ревью GitHub снимает бота из requested reviewers. Повторный пуш: ревьюим автоматически или ждём повторного назначения? | автоматически, пока PR открыт (`reviewer_requested` — наш флаг, не GitHub) | продукт / мит |
-| OQ-2 | Модель для DiffEngine и размер бюджета | отдельное задание по тестированию моделей; дизайн модель-агностичен через LLM Gateway | роль 7 + мит |
-| OQ-3 | `review_event` по умолчанию: `COMMENT` или `REQUEST_CHANGES` при critical? | `COMMENT`; `REQUEST_CHANGES` — настройка репозитория | продукт |
+| OQ-1 | После первого ревью GitHub снимает бота из requested reviewers. Повторный пуш: ревьюим автоматически или ждём повторного назначения? | **закрыт** решением техлида по #20: конъюнкция Р-10 подтверждена; после пуша — автоматически, пока PR открыт и стоит наш флаг `reviewer_requested` (не GitHub). Определение «CI зелёный» и sweep «2 мин без CI» — дефолт по #20 (§6.1, PIPELINE_SPEC §8) | продукт / мит |
+| OQ-2 | Модель для DiffEngine и размер бюджета | владелец — исполнитель #33, срок 01.10.2026 (решение техлида по #20). Требования: strict structured output у основной и fallback-модели, контекст ≥ 60 000 токенов, стоимость fast ≤ $0.50 за прогон (PIPELINE_SPEC §14); дизайн модель-агностичен через LLM Gateway | исполнитель #33 |
+| OQ-3 | `review_event` по умолчанию: `COMMENT` или `REQUEST_CHANGES` при critical? | **закрыт** решением по #20: `COMMENT` по умолчанию, поле `reviewEvent` у репозитория; `REQUEST_CHANGES` — только при `reviewEvent = REQUEST_CHANGES` и вердикте `blocking` (PIPELINE_SPEC §11) | продукт |
 | OQ-4 | Раскладка `.agents/` vs `docs/agents/` | **закрыт** решением роли 7 в [dmc-268-ui-t6#32](https://github.com/larchanka-training/dmc-268-ui-t6/issues/32): `.agents/` — источник истины, `.claude/{skills,agents}` — симлинки на него | роль 7 + техлид |
 | OQ-5 | Event Collector как отдельный процесс — с какого порога | **закрыт Р-12**: отдельного collector нет, `usage_events` пишет worker | техлид |
 | OQ-6 | Стековые PR (B на основе A): пуш в A меняет дифф B, событие приходит только по A | не решаем в v1, фиксируем как известный пробел | — |
