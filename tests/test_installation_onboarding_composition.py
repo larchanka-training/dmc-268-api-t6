@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import hmac
+import json
 import os
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field
@@ -11,8 +14,10 @@ from pathlib import Path
 from typing import Any, cast
 from uuid import UUID, uuid4
 
+import httpx
 import pytest
 from alembic.config import Config
+from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, select, text
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
@@ -25,8 +30,16 @@ from sqlalchemy.schema import CreateSchema, DropSchema
 from alembic import command
 from app.bootstrap.installation_onboarding import InstallationOnboarding
 from app.bootstrap.reviews_api import ReviewsApiResources
+from app.main import (
+    app,
+    get_github_installation_delivery_dispatcher,
+    get_github_webhook_secret,
+)
 from app.modules.integrations.webhooks.application.installation_event_projector import (
     InstallationRepositoryTreeProvider,
+)
+from app.modules.integrations.webhooks.infrastructure.github_installation_tree_provider import (
+    GitHubInstallationAccessTokenProvider,
 )
 from app.modules.repositories.application.installation_repositories import (
     InstallationRepositoriesEvent,
@@ -261,3 +274,116 @@ def test_migrated_database_onboarding_creates_one_active_rule_version_and_replay
             "frontend"
         ].rules
     )
+
+
+@pytest.mark.integration
+def test_signed_runtime_delivery_onboards_replays_removes_and_ignores_unknown_installation(
+    migrated_onboarding_database: tuple[str, str],
+) -> None:
+    """The endpoint uses real resolver/onboarding while GitHub I/O stays injectable."""
+    database_url, schema = migrated_onboarding_database
+    installation_id = uuid4()
+    secret = "runtime-webhook-secret"
+    tree_requests: list[str] = []
+
+    @dataclass
+    class TokenProvider(GitHubInstallationAccessTokenProvider):
+        async def get_installation_access_token(self, installation_external_id: int) -> str:
+            assert installation_external_id == 17
+            return "test-installation-token"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        tree_requests.append(str(request.url))
+        return httpx.Response(200, json={"tree": [{"path": "src/app.ts", "type": "blob"}]})
+
+    async def exercise() -> tuple[Repository | None, list[RuleVersion], int]:
+        engine = create_async_engine(
+            database_url, connect_args={"options": f"-csearch_path={schema}"}
+        )
+        session_factory = async_sessionmaker(engine, expire_on_commit=False)
+        client = httpx.AsyncClient(
+            transport=httpx.MockTransport(handler), base_url="https://api.github.com"
+        )
+        try:
+            async with session_factory() as session:
+                workspace = Workspace(id=uuid4(), name="runtime", daily_budget_usd=Decimal("1"))
+                session.add(workspace)
+                session.add(
+                    ProviderInstallation(
+                        id=installation_id,
+                        workspace_id=workspace.id,
+                        provider="github",
+                        external_id=17,
+                        provider_metadata={},
+                    )
+                )
+                await session.commit()
+
+            dispatcher = ReviewsApiResources(
+                engine, session_factory
+            ).github_installation_delivery_dispatcher(client=client, token_provider=TokenProvider())
+            app.dependency_overrides[get_github_webhook_secret] = lambda: secret
+            app.dependency_overrides[get_github_installation_delivery_dispatcher] = lambda: (
+                dispatcher
+            )
+
+            def post(payload: Mapping[str, object], delivery: str) -> int:
+                raw_body = json.dumps(payload).encode()
+                signature = hmac.new(secret.encode(), raw_body, hashlib.sha256).hexdigest()
+                with TestClient(app) as test_client:
+                    response = test_client.post(
+                        "/webhooks/github",
+                        content=raw_body,
+                        headers={
+                            "X-GitHub-Event": "installation_repositories",
+                            "X-GitHub-Delivery": delivery,
+                            "X-Hub-Signature-256": f"sha256={signature}",
+                        },
+                    )
+                assert response.status_code == 202
+                return len(tree_requests)
+
+            added: dict[str, object] = {
+                "action": "added",
+                "installation": {"id": 17},
+                "repositories_added": [
+                    {
+                        "id": 101,
+                        "full_name": "octo/web",
+                        "default_branch": "main",
+                        "html_url": "https://github.com/octo/web",
+                    }
+                ],
+                "repositories_removed": [],
+            }
+            assert post(added, "delivery-added") == 1
+            assert post(added, "delivery-replay") == 2
+            removed: dict[str, object] = {
+                **added,
+                "action": "removed",
+                "repositories_added": [],
+                "repositories_removed": added["repositories_added"],
+            }
+            assert post(removed, "delivery-removed") == 2
+            unknown = {**added, "installation": {"id": 999}}
+            assert post(unknown, "delivery-unknown") == 2
+
+            async with session_factory() as session:
+                repository = await session.scalar(
+                    select(Repository).where(Repository.external_id == 101)
+                )
+                versions = list((await session.scalars(select(RuleVersion))).all())
+            return repository, versions, len(tree_requests)
+        finally:
+            app.dependency_overrides.clear()
+            await client.aclose()
+            await engine.dispose()
+
+    repository, versions, tree_fetches = asyncio.run(exercise())
+
+    assert repository is not None
+    assert repository.enabled is False
+    assert len(versions) == 1
+    assert versions[0].version == 1
+    assert versions[0].is_active is True
+    assert tree_fetches == 2

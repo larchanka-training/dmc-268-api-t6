@@ -1,14 +1,22 @@
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
-from typing import Annotated
+import hashlib
+import hmac
+import json
+from collections.abc import AsyncIterator, Mapping
+from typing import Annotated, cast
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, FastAPI, HTTPException, Path, Query
-from fastapi.responses import StreamingResponse
+from fastapi import APIRouter, Depends, FastAPI, HTTPException, Path, Query, Request
+from fastapi.responses import JSONResponse, StreamingResponse
 
 from app.bootstrap.reviews_api import get_file_blob_cache, get_run_repository, reviews_api_lifespan
 from app.common.infrastructure.db.enums import RunState
+from app.modules.integrations.webhooks.application.github_installation_dispatch import (
+    GitHubInstallationDeliveryDispatcher,
+    InstallationDeliveryDispatchStatus,
+    VerifiedGitHubDelivery,
+)
 from app.modules.reviews.api.dtos import (
     DiffFileDto,
     FileLinesDto,
@@ -48,6 +56,7 @@ from app.modules.reviews.application.list_runs import ListRuns, RunListItem, Run
 from app.modules.reviews.application.run_events import InMemoryRunUpdateHub, RunUpdateStream
 
 api_router = APIRouter(prefix="/api")
+github_webhook_router = APIRouter(prefix="/webhooks/github")
 
 app = FastAPI(title="Backend", lifespan=reviews_api_lifespan)
 run_update_hub = InMemoryRunUpdateHub()
@@ -62,6 +71,80 @@ async def healthcheck() -> dict[str, str]:
 
 def get_run_event_hub() -> InMemoryRunUpdateHub:
     return run_update_hub
+
+
+def get_github_webhook_secret(request: Request) -> str:
+    """Return the configured shared secret for GitHub's raw-body signature."""
+    secret = getattr(request.app.state, "github_webhook_secret", None)
+    if not isinstance(secret, str) or not secret:
+        raise HTTPException(status_code=503, detail="GitHub webhook is not configured")
+    return secret
+
+
+def get_github_installation_delivery_dispatcher(
+    request: Request,
+) -> GitHubInstallationDeliveryDispatcher:
+    """Return the composed dispatcher without exposing persistence to the router."""
+    dispatcher = getattr(request.app.state, "github_installation_delivery_dispatcher", None)
+    if not isinstance(dispatcher, GitHubInstallationDeliveryDispatcher):
+        raise HTTPException(status_code=503, detail="GitHub webhook is not configured")
+    return dispatcher
+
+
+def _has_valid_github_signature(*, raw_body: bytes, signature: str | None, secret: str) -> bool:
+    if signature is None or not signature.startswith("sha256="):
+        return False
+    received = signature.removeprefix("sha256=")
+    if len(received) != 64 or any(character not in "0123456789abcdef" for character in received):
+        return False
+    expected = hmac.new(secret.encode(), raw_body, hashlib.sha256).hexdigest()
+    return hmac.compare_digest(received, expected)
+
+
+@github_webhook_router.post("")
+async def receive_github_webhook(
+    request: Request,
+    secret: Annotated[str, Depends(get_github_webhook_secret)],
+    dispatcher: Annotated[
+        GitHubInstallationDeliveryDispatcher,
+        Depends(get_github_installation_delivery_dispatcher),
+    ],
+) -> JSONResponse:
+    """Verify a GitHub delivery and pass it to the application dispatch boundary."""
+    raw_body = await request.body()
+    if not _has_valid_github_signature(
+        raw_body=raw_body,
+        signature=request.headers.get("X-Hub-Signature-256"),
+        secret=secret,
+    ):
+        raise HTTPException(status_code=401, detail="invalid GitHub webhook signature")
+
+    event_name = request.headers.get("X-GitHub-Event")
+    delivery_id = request.headers.get("X-GitHub-Delivery")
+    if event_name is None or delivery_id is None:
+        raise HTTPException(status_code=400, detail="missing GitHub delivery headers")
+
+    try:
+        payload = json.loads(raw_body)
+    except json.JSONDecodeError:
+        return JSONResponse(
+            status_code=202,
+            content={"status": InstallationDeliveryDispatchStatus.IGNORED_INVALID_EVENT},
+        )
+    if not isinstance(payload, Mapping):
+        return JSONResponse(
+            status_code=202,
+            content={"status": InstallationDeliveryDispatchStatus.IGNORED_INVALID_EVENT},
+        )
+
+    result = await dispatcher.execute(
+        VerifiedGitHubDelivery(
+            delivery_id=delivery_id,
+            event_name=event_name,
+            payload=cast(Mapping[str, object], payload),
+        )
+    )
+    return JSONResponse(status_code=202, content={"status": result.status})
 
 
 def to_run_session_dto(item: RunListItem) -> RunSessionDto:
@@ -257,3 +340,4 @@ async def get_run_file_lines(
 
 
 app.include_router(api_router)
+app.include_router(github_webhook_router)
