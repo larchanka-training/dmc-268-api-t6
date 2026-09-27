@@ -717,19 +717,15 @@ def test_sqlalchemy_store_returns_cached_conventions_for_repeated_same_key(
                         available_at=now,
                     ),
                 )
-                session.add_all(
-                    (
-                        workspace,
-                        installation,
-                        repository,
-                        system_prompt,
-                        conventions_v1,
-                        conventions_v2,
-                        rule_version,
-                        code_change,
-                        *runs,
-                    )
-                )
+                session.add(workspace)
+                await session.flush()
+                session.add(installation)
+                await session.flush()
+                session.add_all((repository, system_prompt, conventions_v1, conventions_v2))
+                await session.flush()
+                session.add_all((rule_version, code_change))
+                await session.flush()
+                session.add_all(runs)
                 await session.commit()
 
             conventions_input = await SqlAlchemyRunRepository(

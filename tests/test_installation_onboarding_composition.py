@@ -208,6 +208,7 @@ def test_migrated_database_onboarding_creates_one_active_rule_version_and_replay
             async with session_factory() as session:
                 workspace = Workspace(id=uuid4(), name="onboarding", daily_budget_usd=Decimal("1"))
                 session.add(workspace)
+                await session.flush()
                 session.add(
                     ProviderInstallation(
                         id=installation_id,
@@ -308,6 +309,7 @@ def test_signed_runtime_delivery_onboards_replays_removes_and_ignores_unknown_in
             async with session_factory() as session:
                 workspace = Workspace(id=uuid4(), name="runtime", daily_budget_usd=Decimal("1"))
                 session.add(workspace)
+                await session.flush()
                 session.add(
                     ProviderInstallation(
                         id=installation_id,
