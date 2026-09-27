@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| Статус | **черновик на утверждение командой** |
+| Статус | **утверждён командой** — PR #36 (#20) |
 | Владелец | техлид (роль 1) |
 | Связанные документы | `BACKEND_ARCHITECTURE.md` (роль 6, ERD), [`PIPELINE_SPEC.md`](PIPELINE_SPEC.md) (жизненный цикл Run, retry, сбои), [`contracts/openapi.yaml`](../contracts/openapi.yaml) (HTTP API), [`FRONTEND_ARCHITECTURE.md`](https://github.com/larchanka-training/dmc-268-ui-t6/blob/main/docs/FRONTEND_ARCHITECTURE.md) (роль 5, Zod-контракты), [`TEST_PLAN.md`](https://github.com/larchanka-training/dmc-268-ui-t6/blob/main/docs/TEST_PLAN.md) (роль 2, quality gates), инфраструктура (роль 3) |
 | Нумерация решений | `Р-1…Р-15`; `Р-1…Р-9` — общие с [`TEST_PLAN.md`](https://github.com/larchanka-training/dmc-268-ui-t6/blob/main/docs/TEST_PLAN.md), не менять |
@@ -845,4 +845,4 @@ flowchart TB
 - [x] Сборщик контекста: структуры данных на 4 уровнях — §9
 - [x] Диаграммы C4 (контекст, контейнеры, компоненты) и потоков — §3–§6, §14
 - [x] Нефункциональные требования: latency, лимиты контекста — §13
-- [ ] Утверждено командой — PR-ревью
+- [x] Утверждено командой — PR-ревью (PR #36, #20)
