@@ -579,7 +579,7 @@ paths:
         GitHub returned to `/auth/callback`. Sets the refresh cookie.
       x-service: auth-api
       x-status: planned
-      x-issue: "#34"
+      x-issue: "#11"
       security: []
       requestBody:
         required: true
@@ -612,7 +612,7 @@ paths:
       summary: Rotate the refresh cookie and issue a new access token
       x-service: auth-api
       x-status: planned
-      x-issue: "#34"
+      x-issue: "#11"
       security:
         - refreshCookie: []
       responses:
@@ -638,7 +638,7 @@ paths:
       summary: Get the signed-in user and the workspaces they can access
       x-service: auth-api
       x-status: planned
-      x-issue: "#34"
+      x-issue: "#11"
       responses:
         "200":
           description: The signed-in user.
@@ -658,7 +658,7 @@ paths:
         sent, and succeeds without it as well.
       x-service: auth-api
       x-status: planned
-      x-issue: "#34"
+      x-issue: "#11"
       security: []
       responses:
         "204":
@@ -952,7 +952,7 @@ components:
           anyOf:
             - $ref: "#/components/schemas/Verdict"
             - type: "null"
-          description: Null until the run has published its review.
+          description: Null until the run has succeeded, and for summary-only runs (PIPELINE_SPEC §11).
         severityCounts:
           $ref: "#/components/schemas/SeverityCounts"
         budget:
