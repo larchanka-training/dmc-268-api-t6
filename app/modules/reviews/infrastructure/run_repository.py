@@ -221,6 +221,7 @@ class SqlAlchemyRunRepository:
                 PromptVersion.content,
                 RuleVersion.rules,
             )
+            .select_from(Run)
             .join(CodeChange, CodeChange.id == Run.code_change_id)
             .join(RuleVersion, RuleVersion.id == Run.rule_version_id)
             .outerjoin(
