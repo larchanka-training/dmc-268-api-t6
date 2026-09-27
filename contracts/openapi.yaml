@@ -1,0 +1,1475 @@
+openapi: 3.1.1
+info:
+  title: AI Code Reviewer browser API
+  version: 0.1.0
+  description: |
+    Browser-facing HTTP surface of the AI Code Reviewer: `portal-api` (runs, repositories,
+    pull requests, live updates) and `auth-api` (GitHub App user authorization), as decided
+    in api#20 (D4, D9, D10, D11). The GitHub webhook receiver (`/webhooks/github`) and
+    `/healthcheck` are not part of the browser surface and are not described here.
+
+    **Origin and CORS.** The UI calls the API on its own origin: caddy routes `/api/auth/*`
+    to `auth-api` and every other `/api/*` path to `portal-api`, so production needs no CORS.
+    Locally the Vite dev server proxies `/api` to the backend.
+
+    **Wire format.** JSON bodies use camelCase keys. Timestamps are RFC 3339 in UTC with a `Z`
+    suffix. IDs are UUIDs unless a field says it carries a GitHub numeric ID.
+
+    **Authentication.** `auth-api` issues a 15-minute access JWT, sent as
+    `Authorization: Bearer <token>` on every other operation (global `bearerAuth`), and a
+    rotating `refresh_token` cookie (30 days, `HttpOnly; Secure; SameSite=Strict;
+    Path=/api/auth`). The SSE stream is read with `fetch` so it carries the same header.
+    Token checks on `portal-api` routes are implemented in #34.
+
+    **Errors.** `HTTPException` errors are `{"detail": "<message>"}` (`ErrorResponse`);
+    request validation failures are FastAPI's `HTTPValidationError`.
+
+    **Extensions.** `x-service` names the process that serves an operation.
+    `x-status: planned` marks an operation that is not implemented yet; `x-issue` names the
+    issue that implements it, or `x-note` explains why it is deferred past the MVP.
+    Implementing an operation means removing its `x-status` marker
+    (tests/test_openapi_contract.py enforces this).
+servers:
+  - url: /
+    description: Same origin as the UI (caddy in deployed environments, Vite proxy locally).
+security:
+  - bearerAuth: []
+tags:
+  - name: runs
+    description: Review runs of pull requests and their artefacts.
+  - name: stream
+    description: Live run updates over Server-Sent Events.
+  - name: repositories
+    description: Repositories connected through the GitHub App installation.
+  - name: rules
+    description: Custom review rule sets (post-MVP).
+  - name: metrics
+    description: Usage metrics (post-MVP).
+  - name: auth
+    description: GitHub App user authorization and session tokens.
+paths:
+  /api/runs:
+    get:
+      operationId: listRuns
+      tags: [runs]
+      summary: List runs, newest first
+      x-service: portal-api
+      parameters:
+        - name: status
+          in: query
+          required: false
+          schema:
+            $ref: "#/components/schemas/RunStatus"
+        - name: repo
+          in: query
+          required: false
+          description: Repository full name, `owner/name`.
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 512
+        - $ref: "#/components/parameters/Cursor"
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 50
+      responses:
+        "200":
+          description: One page of runs.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RunListPage"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "422":
+          description: Invalid query parameter or malformed cursor.
+          content:
+            application/json:
+              schema:
+                anyOf:
+                  - $ref: "#/components/schemas/HTTPValidationError"
+                  - $ref: "#/components/schemas/ErrorResponse"
+  /api/runs/{run_id}:
+    parameters:
+      - $ref: "#/components/parameters/RunId"
+    get:
+      operationId: getRun
+      tags: [runs]
+      summary: Get a run with its review results
+      description: >-
+        Returns the RunSession fields plus findings, summary, verdict, severity counts and
+        budget (api#20 D3). Today the endpoint still returns a bare RunSession; the extra
+        fields are implemented in #34.
+      x-service: portal-api
+      responses:
+        "200":
+          description: The run with its review results.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RunDetail"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          $ref: "#/components/responses/ValidationFailed"
+  /api/runs/{run_id}/rerun:
+    parameters:
+      - $ref: "#/components/parameters/RunId"
+    post:
+      operationId: rerunRun
+      tags: [runs]
+      summary: Start a new run for the same pull request head
+      description: >-
+        Creates a new Run with trigger `rerun` for the pull request and head SHA of the given
+        run and publishes a `review.run` message for it. Returns the new, queued run.
+      x-service: portal-api
+      x-status: planned
+      x-issue: "#34"
+      responses:
+        "202":
+          description: The new run was accepted and queued.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RunSession"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: The pull request already has an active run; no new run was created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "422":
+          $ref: "#/components/responses/ValidationFailed"
+  /api/runs/{run_id}/cancel:
+    parameters:
+      - $ref: "#/components/parameters/RunId"
+    post:
+      operationId: cancelRun
+      tags: [runs]
+      summary: Request cancellation of a run
+      description: >-
+        Idempotent. A queued run becomes `cancelled`; an active run keeps its status with
+        `cancelRequested: true` until the worker stops it. Terminal runs are returned unchanged.
+      x-service: portal-api
+      responses:
+        "200":
+          description: The run after the cancellation request.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RunSession"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          $ref: "#/components/responses/ValidationFailed"
+  /api/runs/{run_id}/comments:
+    parameters:
+      - $ref: "#/components/parameters/RunId"
+    get:
+      operationId: listRunComments
+      tags: [runs]
+      summary: List the review comments a run published
+      x-service: portal-api
+      responses:
+        "200":
+          description: Published comments of the run.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/ReviewComment"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          $ref: "#/components/responses/ValidationFailed"
+  /api/runs/{run_id}/actions:
+    parameters:
+      - $ref: "#/components/parameters/RunId"
+    get:
+      operationId: listRunActions
+      tags: [runs]
+      summary: List the recorded steps of a run
+      x-service: portal-api
+      responses:
+        "200":
+          description: Run actions ordered by index.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/RunAction"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          $ref: "#/components/responses/ValidationFailed"
+  /api/runs/{run_id}/actions/{index}/response:
+    parameters:
+      - $ref: "#/components/parameters/RunId"
+      - name: index
+        in: path
+        required: true
+        schema:
+          type: integer
+          minimum: 0
+    get:
+      operationId: getRunActionResponse
+      tags: [runs]
+      summary: Get the full response body of a run action
+      description: >-
+        Serves the response body that `RunAction.responseRef` points to, and also returns
+        inline responses.
+      x-service: portal-api
+      responses:
+        "200":
+          description: The stored response body, any JSON value.
+          content:
+            application/json:
+              schema: {}
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          $ref: "#/components/responses/ValidationFailed"
+  /api/runs/{run_id}/diff:
+    parameters:
+      - $ref: "#/components/parameters/RunId"
+    get:
+      operationId: getRunDiff
+      tags: [runs]
+      summary: Get the raw per-file diff of a run
+      x-service: portal-api
+      responses:
+        "200":
+          description: One entry per changed file.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/RawFileDiff"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          $ref: "#/components/responses/ValidationFailed"
+  /api/runs/{run_id}/files:
+    parameters:
+      - $ref: "#/components/parameters/RunId"
+    get:
+      operationId: getRunFileSlice
+      tags: [runs]
+      summary: Read a slice of a file at the run's head revision
+      x-service: portal-api
+      parameters:
+        - name: path
+          in: query
+          required: true
+          description: Repository-relative file path from the run's diff.
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 1024
+        - name: offset
+          in: query
+          required: false
+          description: Zero-based index of the first line.
+          schema:
+            type: integer
+            minimum: 0
+            default: 0
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 1000
+            default: 200
+      responses:
+        "200":
+          description: The requested lines.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FileSlice"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          description: The run or file is unknown, or its cached blob is unavailable.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "410":
+          description: The cached file blob is older than the 7-day cache TTL.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "422":
+          description: Invalid path, offset beyond the end of the file, or invalid parameter.
+          content:
+            application/json:
+              schema:
+                anyOf:
+                  - $ref: "#/components/schemas/HTTPValidationError"
+                  - $ref: "#/components/schemas/ErrorResponse"
+  /api/stream:
+    get:
+      operationId: streamRunUpdates
+      tags: [stream]
+      summary: Subscribe to run status changes
+      description: >-
+        One stream per browser tab, read with `fetch` so it carries the Bearer header. Each
+        event is `event: run.updated` with a `data:` line holding a JSON `RunUpdatedEvent`.
+        The client refetches the run it shows after an event.
+      x-service: portal-api
+      responses:
+        "200":
+          description: A never-ending Server-Sent Events stream.
+          content:
+            text/event-stream:
+              schema:
+                type: string
+                description: >-
+                  SSE frames, e.g. `event: run.updated\ndata: {"runId":"…","status":"running"}`.
+              x-events:
+                run.updated:
+                  $ref: "#/components/schemas/RunUpdatedEvent"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+  /api/repos:
+    get:
+      operationId: listRepositories
+      tags: [repositories]
+      summary: List repositories the GitHub App installation gives access to
+      description: >-
+        Repositories are connected by installing the GitHub App (D10); there is no create
+        operation and no collection update.
+      x-service: portal-api
+      x-status: planned
+      x-issue: "#34"
+      responses:
+        "200":
+          description: Repositories visible to the caller's workspaces.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Repository"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+  /api/repos/{repo_id}:
+    parameters:
+      - $ref: "#/components/parameters/RepoId"
+    get:
+      operationId: getRepository
+      tags: [repositories]
+      summary: Get one repository
+      x-service: portal-api
+      x-status: planned
+      x-issue: "#34"
+      responses:
+        "200":
+          description: The repository.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Repository"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          $ref: "#/components/responses/ValidationFailed"
+    patch:
+      operationId: updateRepository
+      tags: [repositories]
+      summary: Change review settings of one repository
+      x-service: portal-api
+      x-status: planned
+      x-issue: "#34"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RepositoryUpdate"
+      responses:
+        "200":
+          description: The updated repository.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Repository"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          $ref: "#/components/responses/ValidationFailed"
+  /api/repos/{repo_id}/pulls:
+    parameters:
+      - $ref: "#/components/parameters/RepoId"
+    get:
+      operationId: listRepositoryPulls
+      tags: [repositories]
+      summary: List pull requests of a repository with their latest run
+      x-service: portal-api
+      x-status: planned
+      x-issue: "#34"
+      parameters:
+        - name: state
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [open, closed, all]
+            default: open
+        - $ref: "#/components/parameters/Cursor"
+      responses:
+        "200":
+          description: One page of pull requests, most recently updated first.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PullRequestPage"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          $ref: "#/components/responses/ValidationFailed"
+  /api/repos/{repo_id}/rules:
+    parameters:
+      - $ref: "#/components/parameters/RepoId"
+    get:
+      operationId: listRuleVersions
+      tags: [rules]
+      summary: List custom rule set versions of a repository
+      x-service: portal-api
+      x-status: planned
+      x-note: Post-MVP; the shape is indicative until the rules UI is scheduled.
+      responses:
+        "200":
+          description: Rule set versions, newest first.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/RuleVersion"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          $ref: "#/components/responses/ValidationFailed"
+    post:
+      operationId: createRuleVersion
+      tags: [rules]
+      summary: Create a new active rule set version
+      x-service: portal-api
+      x-status: planned
+      x-note: Post-MVP; the shape is indicative until the rules UI is scheduled.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RuleVersionCreate"
+      responses:
+        "201":
+          description: The new active version.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RuleVersion"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          $ref: "#/components/responses/ValidationFailed"
+  /api/rules/{rule_id}/preview:
+    parameters:
+      - name: rule_id
+        in: path
+        required: true
+        description: Rule set version ID.
+        schema:
+          type: string
+          format: uuid
+    post:
+      operationId: previewRuleVersion
+      tags: [rules]
+      summary: Show which pull requests of the last 7 days a rule set version matches
+      x-service: portal-api
+      x-status: planned
+      x-note: Post-MVP; the shape is indicative until the rules UI is scheduled.
+      responses:
+        "200":
+          description: Matching pull requests.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RulePreview"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          $ref: "#/components/responses/ValidationFailed"
+  /api/metrics/summary:
+    get:
+      operationId: getMetricsSummary
+      tags: [metrics]
+      summary: Usage tiles and time series from recorded usage events
+      x-service: portal-api
+      x-status: planned
+      x-note: Post-MVP; the shape is indicative until the metrics dashboard is scheduled.
+      parameters:
+        - name: range
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [24h, 7d, 30d]
+            default: 24h
+      responses:
+        "200":
+          description: Metrics for the requested range.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MetricsSummary"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "422":
+          $ref: "#/components/responses/ValidationFailed"
+  /api/auth/github/callback:
+    post:
+      operationId: exchangeGithubCode
+      tags: [auth]
+      summary: Exchange a GitHub App user authorization code for a session
+      description: >-
+        The SPA generates and checks `state` itself (sessionStorage) and posts only the code
+        GitHub returned to `/auth/callback`. Sets the refresh cookie.
+      x-service: auth-api
+      x-status: planned
+      x-issue: "#34"
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AuthCallbackRequest"
+      responses:
+        "200":
+          description: A new session.
+          headers:
+            Set-Cookie:
+              $ref: "#/components/headers/SetRefreshCookie"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthSession"
+        "400":
+          description: The code is invalid, expired or already used.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "422":
+          $ref: "#/components/responses/ValidationFailed"
+  /api/auth/refresh:
+    post:
+      operationId: refreshSession
+      tags: [auth]
+      summary: Rotate the refresh cookie and issue a new access token
+      x-service: auth-api
+      x-status: planned
+      x-issue: "#34"
+      security:
+        - refreshCookie: []
+      responses:
+        "200":
+          description: A new access token; the refresh cookie is rotated.
+          headers:
+            Set-Cookie:
+              $ref: "#/components/headers/SetRefreshCookie"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthSession"
+        "401":
+          description: The refresh cookie is missing, expired or revoked.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /api/auth/me:
+    get:
+      operationId: getCurrentUser
+      tags: [auth]
+      summary: Get the signed-in user and the workspaces they can access
+      x-service: auth-api
+      x-status: planned
+      x-issue: "#34"
+      responses:
+        "200":
+          description: The signed-in user.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Me"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+  /api/auth/logout:
+    post:
+      operationId: logout
+      tags: [auth]
+      summary: Revoke the refresh token and clear the cookie
+      description: >-
+        Idempotent; revokes the refresh token from the `refresh_token` cookie when one is
+        sent, and succeeds without it as well.
+      x-service: auth-api
+      x-status: planned
+      x-issue: "#34"
+      security: []
+      responses:
+        "204":
+          description: Signed out.
+          headers:
+            Set-Cookie:
+              description: Expires the `refresh_token` cookie (`Max-Age=0; Path=/api/auth`).
+              schema:
+                type: string
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: Access JWT issued by auth-api, valid for 15 minutes.
+    refreshCookie:
+      type: apiKey
+      in: cookie
+      name: refresh_token
+      description: >-
+        Rotating refresh token, 30 days, `HttpOnly; Secure; SameSite=Strict; Path=/api/auth`.
+  parameters:
+    RunId:
+      name: run_id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    RepoId:
+      name: repo_id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    Cursor:
+      name: cursor
+      in: query
+      required: false
+      description: Opaque `nextCursor` value from the previous page.
+      schema:
+        type: string
+  headers:
+    SetRefreshCookie:
+      description: >-
+        `refresh_token=<token>; Max-Age=2592000; Path=/api/auth; HttpOnly; Secure;
+        SameSite=Strict`.
+      schema:
+        type: string
+  responses:
+    Unauthorized:
+      description: The access token is missing, invalid or expired.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    NotFound:
+      description: The resource does not exist or is not visible to the caller.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    ValidationFailed:
+      description: A path, query or body parameter failed validation.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/HTTPValidationError"
+  schemas:
+    ErrorResponse:
+      type: object
+      description: Body of every `HTTPException` error.
+      required: [detail]
+      properties:
+        detail:
+          type: string
+      additionalProperties: false
+    HTTPValidationError:
+      type: object
+      description: FastAPI request validation error.
+      properties:
+        detail:
+          type: array
+          items:
+            $ref: "#/components/schemas/ValidationError"
+    ValidationError:
+      type: object
+      required: [loc, msg, type]
+      properties:
+        loc:
+          type: array
+          items:
+            anyOf:
+              - type: string
+              - type: integer
+        msg:
+          type: string
+        type:
+          type: string
+        input: {}
+        ctx:
+          type: object
+    RunStatus:
+      type: string
+      description: >-
+        Run lifecycle state. Terminal: succeeded, failed, cancelled, skipped. Processing
+        phases (fetch_diff, build_context, llm_review, postprocess) happen inside `running`.
+      enum: [queued, running, publishing, succeeded, failed, cancelled, skipped]
+    Engine:
+      type: string
+      enum: [fast, deep]
+    Severity:
+      type: string
+      enum: [critical, high, medium, low, info]
+    Category:
+      type: string
+      enum: [security, correctness, performance, readability]
+    Side:
+      type: string
+      description: Diff side a finding is anchored to.
+      enum: [LEFT, RIGHT]
+    Verdict:
+      type: string
+      description: >-
+        Derived on the server from published findings: `blocking` if any is critical or high,
+        `attention` if any is medium or low, `clean` otherwise (info only or none).
+      enum: [blocking, attention, clean]
+    Effort:
+      type: string
+      enum: [none, small, medium, large]
+    WaitForCi:
+      type: string
+      enum: [auto, always, never]
+    ReviewEvent:
+      type: string
+      description: GitHub review event used when publishing a `blocking` review.
+      enum: [COMMENT, REQUEST_CHANGES]
+    PullRequestRef:
+      type: object
+      required: [repo, number, title, url, headSha]
+      properties:
+        repo:
+          type: string
+          description: Repository full name, `owner/name`.
+        number:
+          type: integer
+          exclusiveMinimum: 0
+        title:
+          type: string
+        url:
+          type: string
+          format: uri
+        headSha:
+          type: string
+        author:
+          type: [string, "null"]
+          description: GitHub login of the pull request author. Not emitted yet (#34).
+        headRef:
+          type: [string, "null"]
+          description: Source branch. Not emitted yet (#34).
+        baseRef:
+          type: [string, "null"]
+          description: Target branch. Not emitted yet (#34).
+      additionalProperties: false
+    RunSession:
+      type: object
+      description: API view of the Run entity.
+      required:
+        - id
+        - engine
+        - model
+        - status
+        - startedAt
+        - finishedAt
+        - attempt
+        - cancelRequested
+        - summaryOnly
+        - pullRequest
+        - actionCount
+        - errorCode
+      properties:
+        id:
+          type: string
+          format: uuid
+        engine:
+          $ref: "#/components/schemas/Engine"
+        model:
+          type: [string, "null"]
+          description: Model of the latest LLM call; null before the first call.
+        status:
+          $ref: "#/components/schemas/RunStatus"
+        startedAt:
+          type: [string, "null"]
+          format: date-time
+        finishedAt:
+          type: [string, "null"]
+          format: date-time
+          description: Set only in a terminal status.
+        attempt:
+          type: integer
+          minimum: 0
+        cancelRequested:
+          type: boolean
+        summaryOnly:
+          type: boolean
+          description: >-
+            The diff exceeded 3000 lines; `/diff` lists the files with `patch: null` and no
+            inline comments are published.
+        pullRequest:
+          $ref: "#/components/schemas/PullRequestRef"
+        actionCount:
+          type: integer
+          minimum: 0
+        errorCode:
+          type: [string, "null"]
+          description: >-
+            Failure code from docs/PIPELINE_SPEC.md when `status` is `failed`; null otherwise.
+      additionalProperties: false
+    RunDetail:
+      type: object
+      description: >-
+        RunSession plus review results (api#20 D3). Repeats every RunSession property
+        (tests/test_openapi_contract.py checks that they stay identical).
+      required:
+        - id
+        - engine
+        - model
+        - status
+        - startedAt
+        - finishedAt
+        - attempt
+        - cancelRequested
+        - summaryOnly
+        - pullRequest
+        - actionCount
+        - errorCode
+        - findings
+        - summary
+        - verdict
+        - severityCounts
+        - budget
+      properties:
+        id:
+          type: string
+          format: uuid
+        engine:
+          $ref: "#/components/schemas/Engine"
+        model:
+          type: [string, "null"]
+          description: Model of the latest LLM call; null before the first call.
+        status:
+          $ref: "#/components/schemas/RunStatus"
+        startedAt:
+          type: [string, "null"]
+          format: date-time
+        finishedAt:
+          type: [string, "null"]
+          format: date-time
+          description: Set only in a terminal status.
+        attempt:
+          type: integer
+          minimum: 0
+        cancelRequested:
+          type: boolean
+        summaryOnly:
+          type: boolean
+          description: >-
+            The diff exceeded 3000 lines; `/diff` lists the files with `patch: null` and no
+            inline comments are published.
+        pullRequest:
+          $ref: "#/components/schemas/PullRequestRef"
+        actionCount:
+          type: integer
+          minimum: 0
+        errorCode:
+          type: [string, "null"]
+          description: >-
+            Failure code from docs/PIPELINE_SPEC.md when `status` is `failed`; null otherwise.
+        findings:
+          type: array
+          description: Published findings, ordered by severity.
+          items:
+            $ref: "#/components/schemas/FindingView"
+        summary:
+          anyOf:
+            - $ref: "#/components/schemas/ReviewSummary"
+            - type: "null"
+        verdict:
+          anyOf:
+            - $ref: "#/components/schemas/Verdict"
+            - type: "null"
+          description: Null until the run has published its review.
+        severityCounts:
+          $ref: "#/components/schemas/SeverityCounts"
+        budget:
+          anyOf:
+            - $ref: "#/components/schemas/RunBudget"
+            - type: "null"
+          description: Null before the first LLM call.
+      additionalProperties: false
+    FindingView:
+      type: object
+      description: >-
+        One finding. Anchor mapping (D6): `newLine` = line_start on the RIGHT side, `oldLine`
+        = line_start on the LEFT side, `endLine` = line_end (null for a single line).
+      required:
+        - id
+        - file
+        - oldLine
+        - newLine
+        - endLine
+        - side
+        - severity
+        - category
+        - title
+        - body
+        - suggestion
+        - confidence
+        - ruleName
+      properties:
+        id:
+          type: string
+          format: uuid
+        file:
+          type: string
+        oldLine:
+          type: [integer, "null"]
+          minimum: 1
+        newLine:
+          type: [integer, "null"]
+          minimum: 1
+        endLine:
+          type: [integer, "null"]
+          minimum: 1
+        side:
+          $ref: "#/components/schemas/Side"
+        severity:
+          $ref: "#/components/schemas/Severity"
+        category:
+          $ref: "#/components/schemas/Category"
+        title:
+          type: string
+        body:
+          type: string
+        suggestion:
+          type: [string, "null"]
+          description: Drop-in replacement for the anchored lines; null when none.
+        confidence:
+          type: number
+          minimum: 0
+          maximum: 1
+        ruleName:
+          type: [string, "null"]
+          description: Custom rule the finding comes from; null for built-in checks.
+      additionalProperties: false
+    ReviewSummary:
+      type: object
+      required: [problem, doneWell, effort]
+      properties:
+        problem:
+          type: string
+        doneWell:
+          type: string
+        effort:
+          $ref: "#/components/schemas/Effort"
+      additionalProperties: false
+    SeverityCounts:
+      type: object
+      description: Number of published findings per severity.
+      required: [critical, high, medium, low, info]
+      properties:
+        critical:
+          type: integer
+          minimum: 0
+        high:
+          type: integer
+          minimum: 0
+        medium:
+          type: integer
+          minimum: 0
+        low:
+          type: integer
+          minimum: 0
+        info:
+          type: integer
+          minimum: 0
+      additionalProperties: false
+    RunBudget:
+      type: object
+      description: Usage of the run across all attempts against the engine's caps.
+      required: [tokensIn, tokensOut, costUsd, tokenLimit, costLimitUsd]
+      properties:
+        tokensIn:
+          type: integer
+          minimum: 0
+        tokensOut:
+          type: integer
+          minimum: 0
+        costUsd:
+          type: number
+          minimum: 0
+        tokenLimit:
+          type: integer
+          minimum: 0
+        costLimitUsd:
+          type: number
+          minimum: 0
+      additionalProperties: false
+    RunListPage:
+      type: object
+      required: [items, nextCursor]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/RunSession"
+        nextCursor:
+          type: [string, "null"]
+          description: Pass as `cursor` to get the next page; null on the last page.
+      additionalProperties: false
+    RunAction:
+      type: object
+      description: One recorded step of a run.
+      required:
+        - id
+        - runId
+        - index
+        - tool
+        - request
+        - response
+        - responseRef
+        - startedAt
+        - durationMs
+      properties:
+        id:
+          type: string
+          format: uuid
+        runId:
+          type: string
+          format: uuid
+        index:
+          type: integer
+          minimum: 0
+        tool:
+          type: string
+          description: >-
+            Step name: fetch_diff, build_context, llm_review, postprocess, publish_review or
+            engine_fallback.
+        request:
+          type: object
+          description: Request metadata of the step.
+        response:
+          description: >-
+            Response body, any JSON value, inline when it is at most 64 KB; null when it is
+            stored separately (see `responseRef`) or absent.
+        responseRef:
+          type: [string, "null"]
+          description: >-
+            Opaque reference to a stored response body that exceeds the inline limit. Fetch the
+            body with `GET /api/runs/{run_id}/actions/{index}/response`. Null when `response`
+            is inline.
+        startedAt:
+          type: string
+          format: date-time
+        durationMs:
+          type: integer
+          minimum: 0
+      additionalProperties: false
+    ReviewComment:
+      type: object
+      description: >-
+        A published finding as a review comment. At least one of `oldLine` and `newLine` is
+        set.
+      required:
+        - id
+        - file
+        - oldLine
+        - newLine
+        - endLine
+        - body
+        - ruleName
+        - severity
+        - category
+        - title
+        - createdAt
+      properties:
+        id:
+          type: string
+          format: uuid
+        file:
+          type: string
+        oldLine:
+          type: [integer, "null"]
+          minimum: 0
+        newLine:
+          type: [integer, "null"]
+          minimum: 0
+        endLine:
+          type: [integer, "null"]
+          minimum: 0
+        body:
+          type: string
+        ruleName:
+          type: [string, "null"]
+        severity:
+          $ref: "#/components/schemas/Severity"
+        category:
+          $ref: "#/components/schemas/Category"
+        title:
+          type: string
+        createdAt:
+          type: string
+          format: date-time
+      additionalProperties: false
+    RawFileDiff:
+      type: object
+      required: [filename, patch]
+      properties:
+        filename:
+          type: string
+        patch:
+          type: [string, "null"]
+          description: >-
+            `git diff` output for the file, starting with `diff --git a/<path> b/<path>`; null
+            in a summary-only run.
+      additionalProperties: false
+    FileSlice:
+      type: object
+      required: [path, startLine, lines, totalLines, nextOffset]
+      properties:
+        path:
+          type: string
+        startLine:
+          type: integer
+          minimum: 1
+          description: One-based line number of `lines[0]`.
+        lines:
+          type: array
+          items:
+            type: string
+        totalLines:
+          type: integer
+          minimum: 0
+        nextOffset:
+          type: [integer, "null"]
+          minimum: 0
+          description: Pass as `offset` to read on; null at the end of the file.
+      additionalProperties: false
+    RunUpdatedEvent:
+      type: object
+      description: Data of a `run.updated` SSE event.
+      required: [runId, status]
+      properties:
+        runId:
+          type: string
+          format: uuid
+        status:
+          $ref: "#/components/schemas/RunStatus"
+      additionalProperties: false
+    Repository:
+      type: object
+      required:
+        - id
+        - fullName
+        - url
+        - defaultBranch
+        - enabled
+        - defaultEngine
+        - waitForCi
+        - maxComments
+        - reviewEvent
+      properties:
+        id:
+          type: string
+          format: uuid
+        fullName:
+          type: string
+          description: "`owner/name`."
+        url:
+          type: string
+          format: uri
+        defaultBranch:
+          type: string
+        enabled:
+          type: boolean
+        defaultEngine:
+          $ref: "#/components/schemas/Engine"
+        waitForCi:
+          $ref: "#/components/schemas/WaitForCi"
+        maxComments:
+          type: integer
+          minimum: 1
+          maximum: 10
+        reviewEvent:
+          $ref: "#/components/schemas/ReviewEvent"
+      additionalProperties: false
+    RepositoryUpdate:
+      type: object
+      description: Review settings to change; omitted fields keep their value.
+      minProperties: 1
+      properties:
+        enabled:
+          type: boolean
+        defaultEngine:
+          $ref: "#/components/schemas/Engine"
+        waitForCi:
+          $ref: "#/components/schemas/WaitForCi"
+        maxComments:
+          type: integer
+          minimum: 1
+          maximum: 10
+        reviewEvent:
+          $ref: "#/components/schemas/ReviewEvent"
+      additionalProperties: false
+    LatestRun:
+      type: object
+      required: [id, status, verdict]
+      properties:
+        id:
+          type: string
+          format: uuid
+        status:
+          $ref: "#/components/schemas/RunStatus"
+        verdict:
+          anyOf:
+            - $ref: "#/components/schemas/Verdict"
+            - type: "null"
+      additionalProperties: false
+    PullRequestSummary:
+      type: object
+      required: [number, title, url, author, headSha, updatedAt, latestRun]
+      properties:
+        number:
+          type: integer
+          exclusiveMinimum: 0
+        title:
+          type: string
+        url:
+          type: string
+          format: uri
+        author:
+          type: [string, "null"]
+          description: GitHub login of the pull request author.
+        headSha:
+          type: string
+        updatedAt:
+          type: string
+          format: date-time
+        latestRun:
+          anyOf:
+            - $ref: "#/components/schemas/LatestRun"
+            - type: "null"
+          description: Latest run for the pull request; null when it was never reviewed.
+      additionalProperties: false
+    PullRequestPage:
+      type: object
+      required: [items, nextCursor]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/PullRequestSummary"
+        nextCursor:
+          type: [string, "null"]
+      additionalProperties: false
+    User:
+      type: object
+      required: [id, login, name, avatarUrl]
+      properties:
+        id:
+          type: integer
+          description: GitHub user ID.
+        login:
+          type: string
+        name:
+          type: [string, "null"]
+        avatarUrl:
+          type: [string, "null"]
+          format: uri
+      additionalProperties: false
+    Workspace:
+      type: object
+      required: [id, name, installationId]
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        installationId:
+          type: integer
+          description: GitHub App installation ID.
+      additionalProperties: false
+    Me:
+      type: object
+      description: >-
+        User plus the workspaces the user can access through GitHub App installations.
+        Repeats every User property (tests/test_openapi_contract.py checks that they stay
+        identical).
+      required: [id, login, name, avatarUrl, workspaces]
+      properties:
+        id:
+          type: integer
+          description: GitHub user ID.
+        login:
+          type: string
+        name:
+          type: [string, "null"]
+        avatarUrl:
+          type: [string, "null"]
+          format: uri
+        workspaces:
+          type: array
+          items:
+            $ref: "#/components/schemas/Workspace"
+      additionalProperties: false
+    AuthCallbackRequest:
+      type: object
+      required: [code]
+      properties:
+        code:
+          type: string
+          minLength: 1
+          description: The `code` query parameter GitHub appended to `/auth/callback`.
+      additionalProperties: false
+    AuthSession:
+      type: object
+      required: [accessToken, tokenType, expiresIn, user]
+      properties:
+        accessToken:
+          type: string
+        tokenType:
+          type: string
+          enum: [Bearer]
+        expiresIn:
+          type: integer
+          minimum: 1
+          description: Access token lifetime in seconds (900).
+        user:
+          $ref: "#/components/schemas/User"
+      additionalProperties: false
+    RuleVersion:
+      type: object
+      required: [id, repositoryId, version, rules, checksum, isActive, createdAt]
+      properties:
+        id:
+          type: string
+          format: uuid
+        repositoryId:
+          type: string
+          format: uuid
+        version:
+          type: integer
+          minimum: 1
+        rules:
+          type: array
+          description: Rules as defined by `RuleSet.rules` in review/rules/schema.json.
+          items:
+            type: object
+        checksum:
+          type: string
+          pattern: "^[0-9a-f]{64}$"
+        isActive:
+          type: boolean
+        createdAt:
+          type: string
+          format: date-time
+      additionalProperties: false
+    RuleVersionCreate:
+      type: object
+      required: [rules]
+      properties:
+        rules:
+          type: array
+          minItems: 1
+          description: Rules as defined by `RuleSet.rules` in review/rules/schema.json.
+          items:
+            type: object
+      additionalProperties: false
+    RulePreview:
+      type: object
+      required: [matched]
+      properties:
+        matched:
+          type: array
+          items:
+            $ref: "#/components/schemas/PullRequestRef"
+      additionalProperties: false
+    MetricsSummary:
+      type: object
+      description: Indicative shape; fixed when the metrics dashboard is scheduled.
+      required: [range, tiles, series]
+      properties:
+        range:
+          type: string
+          enum: [24h, 7d, 30d]
+        tiles:
+          type: object
+          description: Named totals for the range, e.g. runs, findings, costUsd.
+          additionalProperties:
+            type: number
+        series:
+          type: array
+          items:
+            type: object
+            required: [bucketStart]
+            properties:
+              bucketStart:
+                type: string
+                format: date-time
+            additionalProperties:
+              type: number
