@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from jsonschema import Draft202012Validator
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 REVIEW_DIR = REPO_ROOT / "review"
@@ -31,78 +32,7 @@ def _load_json(path: Path) -> Any:
 
 # ---------- (a) review/rules/*.json structural check against schema.json ----------
 
-SCHEMA: dict[str, Any] = _load_json(REVIEW_DIR / "rules" / "schema.json")
-DEFS: dict[str, Any] = SCHEMA["$defs"]
-
-
-def _resolve(node: dict[str, Any]) -> dict[str, Any]:
-    if "$ref" in node:
-        name = node["$ref"].rsplit("/", 1)[-1]
-        result: dict[str, Any] = DEFS[name]
-        return result
-    return node
-
-
-def _check(node: dict[str, Any], value: object, path: str) -> list[str]:
-    node = _resolve(node)
-    node_type = node.get("type")
-    errors: list[str] = []
-
-    if node_type == "object":
-        if not isinstance(value, dict):
-            return [f"{path}: expected object"]
-        for key in node.get("required", []):
-            if key not in value:
-                errors.append(f"{path}.{key}: missing required key")
-        properties: dict[str, Any] = node.get("properties", {})
-        if node.get("additionalProperties") is False:
-            extra = set(value) - set(properties)
-            if extra:
-                errors.append(f"{path}: unexpected keys {sorted(extra)}")
-        for key, subnode in properties.items():
-            if key in value:
-                errors.extend(_check(subnode, value[key], f"{path}.{key}"))
-
-    elif node_type == "array":
-        if not isinstance(value, list):
-            return [f"{path}: expected array"]
-        min_items = node.get("minItems")
-        if min_items is not None and len(value) < min_items:
-            errors.append(f"{path}: fewer than {min_items} items")
-        max_items = node.get("maxItems")
-        if max_items is not None and len(value) > max_items:
-            errors.append(f"{path}: more than {max_items} items")
-        items_schema = node.get("items")
-        if items_schema is not None:
-            for i, item in enumerate(value):
-                errors.extend(_check(items_schema, item, f"{path}[{i}]"))
-
-    elif node_type == "string":
-        if not isinstance(value, str):
-            return [f"{path}: expected string"]
-        min_length = node.get("minLength")
-        if min_length is not None and len(value) < min_length:
-            errors.append(f"{path}: shorter than {min_length}")
-        max_length = node.get("maxLength")
-        if max_length is not None and len(value) > max_length:
-            errors.append(f"{path}: longer than {max_length}")
-        enum = node.get("enum")
-        if enum is not None and value not in enum:
-            errors.append(f"{path}: not in {enum}")
-        pattern = node.get("pattern")
-        if pattern is not None and re.fullmatch(pattern, value) is None:
-            errors.append(f"{path}: does not match {pattern}")
-
-    elif node_type == "integer":
-        if not isinstance(value, int) or isinstance(value, bool):
-            errors.append(f"{path}: expected integer")
-        else:
-            minimum = node.get("minimum")
-            if minimum is not None and value < minimum:
-                errors.append(f"{path}: below minimum {minimum}")
-
-    return errors
-
+RULE_SET_VALIDATOR = Draft202012Validator(_load_json(REVIEW_DIR / "rules" / "schema.json"))
 
 RULE_SET_FILES = sorted(p for p in (REVIEW_DIR / "rules").glob("*.json") if p.name != "schema.json")
 
@@ -110,7 +40,9 @@ RULE_SET_FILES = sorted(p for p in (REVIEW_DIR / "rules").glob("*.json") if p.na
 @pytest.mark.parametrize("path", RULE_SET_FILES, ids=lambda p: p.name)
 def test_rule_set_matches_schema(path: Path) -> None:
     data = _load_json(path)
-    errors = _check(DEFS["RuleSet"], data, "$")
+    errors = [
+        f"{error.json_path}: {error.message}" for error in RULE_SET_VALIDATOR.iter_errors(data)
+    ]
     assert errors == []
 
     names = [rule["name"] for rule in data["rules"]]

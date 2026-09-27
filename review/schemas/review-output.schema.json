@@ -1,0 +1,114 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/larchanka-training/dmc-268-api-t6/main/review/schemas/review-output.schema.json",
+  "title": "ReviewOutput",
+  "description": "The closed JSON object the review model returns for one run: the findings and the summary that becomes the review body. Mirrors the Pydantic model ReviewOutput in app/modules/reviews/application/review_output.py: every key is required, nullable keys carry null instead of being omitted, and no other keys are allowed.",
+  "$comment": "This schema is the single source of the output SHAPE. Rules JSON Schema cannot express are enforced by the Pydantic model (runtime) and by review/scripts/validate_findings.py (proof-runs and fixtures): findings ordered by severity (critical, high, medium, low, info), then by confidence descending; the per-finding and summary rules noted in their own $comment. JSON Schema `integer` also admits 1.0, which the strict Pydantic model and the script reject for line and start_line.",
+  "type": "object",
+  "required": ["findings", "summary"],
+  "additionalProperties": false,
+  "properties": {
+    "findings": {
+      "type": "array",
+      "description": "At most 10 findings, ordered by severity, then by confidence descending. May be empty.",
+      "maxItems": 10,
+      "items": { "$ref": "#/$defs/ReviewFinding" }
+    },
+    "summary": { "$ref": "#/$defs/ReviewSummary" }
+  },
+  "$defs": {
+    "ReviewFinding": {
+      "type": "object",
+      "description": "One finding anchored to new-version lines of a file in the diff.",
+      "$comment": "No `side` key: the model always anchors on the new version (RIGHT); the post-processor sets `side` (api#20 D6). Enforced outside this schema by the Pydantic model and validate_findings.py: start_line < line when start_line is not null; title is a single line (str.splitlines) and does not end with a period. Enforced by validate_findings.py only: a non-null rule_name requires the body to start with \"According to custom instructions in '<rule_name>' (\", and a null rule_name forbids that prefix; at runtime the post-processor repairs this binding instead (review/postprocess/lint-filter.md, step 6).",
+      "required": [
+        "path",
+        "line",
+        "start_line",
+        "severity",
+        "category",
+        "title",
+        "body",
+        "suggestion",
+        "confidence",
+        "rule_name"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "path": {
+          "type": "string",
+          "description": "File path relative to the repository root, as it appears in the diff.",
+          "minLength": 1
+        },
+        "line": {
+          "type": "integer",
+          "description": "The anchor line in the new version of the file; the last line of a multi-line range.",
+          "minimum": 1
+        },
+        "start_line": {
+          "type": ["integer", "null"],
+          "description": "The first line of a multi-line range, strictly before `line`; null for a single-line anchor.",
+          "minimum": 1
+        },
+        "severity": {
+          "type": "string",
+          "enum": ["critical", "high", "medium", "low", "info"]
+        },
+        "category": {
+          "type": "string",
+          "enum": ["security", "correctness", "performance", "readability"]
+        },
+        "title": {
+          "type": "string",
+          "description": "One line, no trailing period.",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "body": {
+          "type": "string",
+          "description": "The explanation in Markdown. 1200 characters is the hard ceiling; the prompt's 120-word target is not part of this contract.",
+          "minLength": 1,
+          "maxLength": 1200
+        },
+        "suggestion": {
+          "type": ["string", "null"],
+          "description": "A drop-in replacement for lines start_line..line (or line), no prose and no diff markers; null when there is none."
+        },
+        "confidence": {
+          "type": "number",
+          "description": "The model's confidence in the finding.",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "rule_name": {
+          "type": ["string", "null"],
+          "description": "The name of the custom rule the finding enforces, quoted verbatim in the body's attribution prefix; null for a standard finding."
+        }
+      }
+    },
+    "ReviewSummary": {
+      "type": "object",
+      "description": "The summary rendered into the review body.",
+      "$comment": "Enforced outside this schema by the Pydantic model and validate_findings.py: problem is exactly one sentence and done_well is one or two sentences (a sentence is a run of text ending in '.', '!' or '?' followed by whitespace or the end).",
+      "required": ["problem", "done_well", "effort"],
+      "additionalProperties": false,
+      "properties": {
+        "problem": {
+          "type": "string",
+          "description": "One sentence naming the main issue.",
+          "minLength": 1
+        },
+        "done_well": {
+          "type": "string",
+          "description": "One or two sentences on what is done well.",
+          "minLength": 1
+        },
+        "effort": {
+          "type": "string",
+          "description": "The work needed before merge.",
+          "enum": ["none", "small", "medium", "large"]
+        }
+      }
+    }
+  }
+}
