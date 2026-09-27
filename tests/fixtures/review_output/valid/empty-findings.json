@@ -1,0 +1,8 @@
+{
+  "findings": [],
+  "summary": {
+    "problem": "The `except Exception:` in `ChargeAccount.execute` swallows every gateway failure into a silent `None`.",
+    "done_well": "The repository keeps the flush-only convention of the module. Both paths of `execute` are tested.",
+    "effort": "small"
+  }
+}

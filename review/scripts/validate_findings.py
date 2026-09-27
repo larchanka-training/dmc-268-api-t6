@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
-"""Stdlib-only validator for the AI reviewer's JSON outputs.
+"""Validator for the AI reviewer's JSON outputs.
 
-Usage: python review/scripts/validate_findings.py <file.json>
+Usage: uv run python review/scripts/validate_findings.py <file.json>
 
 The kind is autodetected from the top-level key: `findings` -> ReviewOutput
 (review/prompts/review.system.v1.md, section 10), `files` -> RepoConventionsDraft
-(review/prompts/review.conventions.v1.md). Exit codes: 0 = valid (prints
-"OK <kind> <n> items"), 1 = contract violations (one "path.to.field: message"
-line per violation, on stdout), 2 = the file is missing, not JSON, or its
-top-level shape matches neither kind.
+(review/prompts/review.conventions.v1.md). A ReviewOutput's shape is checked
+against review/schemas/review-output.schema.json (hence `jsonschema` and
+`uv run`); this script adds only the rules that schema cannot express. Exit
+codes: 0 = valid (prints "OK <kind> <n> items"), 1 = contract violations (one
+"path.to.field: message" line per violation, on stdout), 2 = the file is
+missing, not JSON, or its top-level shape matches neither kind.
 """
 
 from __future__ import annotations
@@ -16,36 +18,27 @@ from __future__ import annotations
 import json
 import re
 import sys
+from functools import cache
 from pathlib import Path
 from typing import TypeGuard
 
-SEVERITIES = {"critical", "high", "medium", "low", "info"}
-CATEGORIES = {"security", "correctness", "performance", "readability"}
-EFFORTS = {"none", "small", "medium", "large"}
+from jsonschema import Draft202012Validator, ValidationError
 
-MAX_FINDINGS = 10
-MAX_TITLE_CHARS = 80
-MAX_BODY_CHARS = 1200
+REVIEW_OUTPUT_SCHEMA = Path(__file__).resolve().parents[1] / "schemas" / "review-output.schema.json"
+
 MAX_KEY_PATTERN_CHARS = 160
+MAX_MESSAGE_CHARS = 200
 
 ATTRIBUTION_PREFIX = "According to custom instructions in '"
+
+# Mirror the model validators of the runtime contract
+# (app/modules/reviews/application/review_output.py); this script runs standalone.
+SEVERITY_RANK = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
+SENTENCE_RE = re.compile(r"[^.!?]+[.!?](?:\s|$)")
 
 # `(from: standard/<category>)` or `(from: <rule name>)`, nothing after it.
 FROM_SUFFIX_RE = re.compile(
     r".*\(from: (standard/(security|correctness|performance|readability)|(?!standard/)[^()]+)\)"
-)
-
-FINDING_KEYS = (
-    "path",
-    "line",
-    "start_line",
-    "severity",
-    "category",
-    "title",
-    "body",
-    "suggestion",
-    "confidence",
-    "rule_name",
 )
 
 
@@ -65,99 +58,83 @@ def _is_nonempty_str(value: object) -> TypeGuard[str]:
     return isinstance(value, str) and bool(value)
 
 
+@cache
+def _review_output_validator() -> Draft202012Validator:
+    schema = json.loads(REVIEW_OUTPUT_SCHEMA.read_text(encoding="utf-8"))
+    return Draft202012Validator(schema)
+
+
+def _field_path(json_path: str) -> str:
+    """`$.findings[0].line` -> `findings[0].line`; the root stays `$`."""
+    return json_path.removeprefix("$.")
+
+
+def _schema_message(error: ValidationError) -> str:
+    """jsonschema quotes the offending value; name the keyword instead when that is long."""
+    if len(error.message) <= MAX_MESSAGE_CHARS:
+        return error.message
+    return f"fails {error.validator}: {error.validator_value!r}"
+
+
 def validate_review_output(data: object) -> list[str]:
     """Validate `data` against the ReviewOutput contract. Returns violation messages."""
-    if not isinstance(data, dict):
-        return ["$: must be an object"]
+    errors = [
+        _err(_field_path(error.json_path), _schema_message(error))
+        for error in _review_output_validator().iter_errors(data)
+    ]
+    # Semantic rules run even on a shape-invalid object, so one run reports both;
+    # each check skips values whose shape the schema already rejects.
+    if isinstance(data, dict):
+        errors.extend(_semantic_errors(data))
+    return sorted(errors)
 
+
+def _semantic_errors(data: dict[object, object]) -> list[str]:
     errors: list[str] = []
-    extra = set(data) - {"findings", "summary"}
-    if extra:
-        errors.append(_err("$", f"unexpected top-level keys: {sorted(extra)}"))
-
     findings = data.get("findings")
-    if not isinstance(findings, list):
-        errors.append(_err("findings", "must be a list"))
-    else:
-        if len(findings) > MAX_FINDINGS:
-            errors.append(
-                _err("findings", f"must have at most {MAX_FINDINGS} items, got {len(findings)}")
-            )
+    if isinstance(findings, list):
         for i, item in enumerate(findings):
-            errors.extend(_validate_finding(item, f"findings[{i}]"))
+            if isinstance(item, dict):
+                errors.extend(_finding_semantic_errors(item, f"findings[{i}]"))
+        errors.extend(_order_errors(findings))
 
-    errors.extend(_validate_summary(data.get("summary"), "summary"))
+    summary = data.get("summary")
+    if isinstance(summary, dict):
+        errors.extend(_summary_semantic_errors(summary, "summary"))
     return errors
 
 
-def _validate_finding(item: object, prefix: str) -> list[str]:
-    if not isinstance(item, dict):
-        return [_err(prefix, "must be an object")]
-
+def _finding_semantic_errors(item: dict[object, object], prefix: str) -> list[str]:
     errors: list[str] = []
-    missing = [key for key in FINDING_KEYS if key not in item]
-    if missing:
-        errors.append(_err(prefix, f"missing keys: {missing}"))
-    extra = set(item) - set(FINDING_KEYS)
-    if extra:
-        errors.append(_err(prefix, f"unexpected keys: {sorted(extra)}"))
 
-    if not _is_nonempty_str(item.get("path")):
-        errors.append(_err(f"{prefix}.path", "must be a non-empty string"))
+    # JSON Schema's `integer` admits 1.0; the strict runtime model does not.
+    for key in ("line", "start_line"):
+        value = item.get(key)
+        if isinstance(value, float) and value.is_integer():
+            errors.append(_err(f"{prefix}.{key}", "must be an integer, not a float"))
 
     line = item.get("line")
-    line_ok = _is_int(line) and line >= 1
-    if not line_ok:
-        errors.append(_err(f"{prefix}.line", "must be an int >= 1"))
-
     start_line = item.get("start_line")
-    if start_line is not None:
-        start_ok = _is_int(start_line) and start_line >= 1
-        if not start_ok:
-            errors.append(_err(f"{prefix}.start_line", "must be an int >= 1 or null"))
-        elif line_ok and start_line >= line:
-            errors.append(_err(f"{prefix}.start_line", "must be < line"))
-
-    if item.get("severity") not in SEVERITIES:
-        errors.append(_err(f"{prefix}.severity", f"must be one of {sorted(SEVERITIES)}"))
-
-    if item.get("category") not in CATEGORIES:
-        errors.append(_err(f"{prefix}.category", f"must be one of {sorted(CATEGORIES)}"))
+    if _is_int(line) and _is_int(start_line) and start_line >= line:
+        errors.append(_err(f"{prefix}.start_line", "must be < line"))
 
     title = item.get("title")
-    if not (_is_nonempty_str(title) and len(title) <= MAX_TITLE_CHARS):
-        errors.append(
-            _err(f"{prefix}.title", f"must be a non-empty string, at most {MAX_TITLE_CHARS} chars")
-        )
+    if _is_nonempty_str(title):
+        if title.endswith("."):
+            errors.append(_err(f"{prefix}.title", "must not end with a period"))
+        if title.splitlines() != [title]:
+            errors.append(_err(f"{prefix}.title", "must be one line"))
 
     body = item.get("body")
-    body_ok = _is_nonempty_str(body) and len(body) <= MAX_BODY_CHARS
-    if not body_ok:
-        errors.append(
-            _err(f"{prefix}.body", f"must be a non-empty string of at most {MAX_BODY_CHARS} chars")
-        )
-
-    suggestion = item.get("suggestion")
-    if suggestion is not None and not isinstance(suggestion, str):
-        errors.append(_err(f"{prefix}.suggestion", "must be a string or null"))
-
-    confidence = item.get("confidence")
-    if not (_is_number(confidence) and 0 <= confidence <= 1):
-        errors.append(_err(f"{prefix}.confidence", "must be a number in [0, 1]"))
-
     rule_name = item.get("rule_name")
-    if rule_name is not None and not isinstance(rule_name, str):
-        errors.append(_err(f"{prefix}.rule_name", "must be a string or null"))
-
-    if body_ok:
-        assert isinstance(body, str)
+    if _is_nonempty_str(body):
         if isinstance(rule_name, str):
             expected = f"{ATTRIBUTION_PREFIX}{rule_name}' ("
             if not body.startswith(expected):
                 errors.append(
                     _err(f"{prefix}.body", f'rule_name is set, body must start with "{expected}"')
                 )
-        elif body.startswith(ATTRIBUTION_PREFIX):
+        elif rule_name is None and body.startswith(ATTRIBUTION_PREFIX):
             errors.append(
                 _err(f"{prefix}.body", "rule_name is null, body must not start with the prefix")
             )
@@ -165,21 +142,37 @@ def _validate_finding(item: object, prefix: str) -> list[str]:
     return errors
 
 
-def _validate_summary(summary: object, prefix: str) -> list[str]:
-    if not isinstance(summary, dict):
-        return [_err(prefix, "must be an object")]
+def _order_errors(findings: list[object]) -> list[str]:
+    """Severity first, then confidence descending, as the runtime model requires."""
+    ordering: list[tuple[int, float]] = []
+    for item in findings:
+        if not isinstance(item, dict):
+            return []
+        severity = item.get("severity")
+        confidence = item.get("confidence")
+        if not (isinstance(severity, str) and severity in SEVERITY_RANK):
+            return []
+        if not _is_number(confidence):
+            return []
+        ordering.append((SEVERITY_RANK[severity], -confidence))
+    if ordering != sorted(ordering):
+        return [_err("findings", "must be ordered by severity, then by confidence descending")]
+    return []
 
+
+def _summary_semantic_errors(summary: dict[object, object], prefix: str) -> list[str]:
     errors: list[str] = []
-    extra = set(summary) - {"problem", "done_well", "effort"}
-    if extra:
-        errors.append(_err(prefix, f"unexpected keys: {sorted(extra)}"))
-    if not _is_nonempty_str(summary.get("problem")):
-        errors.append(_err(f"{prefix}.problem", "must be a non-empty string"))
-    if not _is_nonempty_str(summary.get("done_well")):
-        errors.append(_err(f"{prefix}.done_well", "must be a non-empty string"))
-    if summary.get("effort") not in EFFORTS:
-        errors.append(_err(f"{prefix}.effort", f"must be one of {sorted(EFFORTS)}"))
+    problem = summary.get("problem")
+    if _is_nonempty_str(problem) and _sentence_count(problem) != 1:
+        errors.append(_err(f"{prefix}.problem", "must contain exactly one sentence"))
+    done_well = summary.get("done_well")
+    if _is_nonempty_str(done_well) and not 1 <= _sentence_count(done_well) <= 2:
+        errors.append(_err(f"{prefix}.done_well", "must contain one or two sentences"))
     return errors
+
+
+def _sentence_count(text: str) -> int:
+    return len(SENTENCE_RE.findall(text))
 
 
 def validate_conventions(data: object) -> list[str]:
