@@ -25,8 +25,9 @@ immutable — a file with a version in its name is never edited — and served f
 ## Seeding contract
 
 Prompts and default rule sets are loaded from this directory at deploy or migration time — an Alembic data
-migration (pending api #4) or a `seed` command owned by the backend — never read from disk at runtime: `review/`
-is not part of the Docker image, `Dockerfile` copies only `app/`. Prompts are global rows of `prompt_versions`.
+migration (pending api #4) or a `seed` command owned by the backend — never read from disk at runtime. The Docker
+image carries `review/prompts`, `review/postprocess` and `review/rules` for seeding and `review/schemas` for runtime
+validation of the model output (LLM gateway, api #33). Prompts are global rows of `prompt_versions`.
 A `rule_versions` row belongs to one repository, so a default set becomes a repository's first `rule_versions`
 row when that repository is onboarded; where the backend keeps the defaults until then is its choice.
 
