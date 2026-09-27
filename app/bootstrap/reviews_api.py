@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import os
+import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import cast
 
+import httpx
 from fastapi import FastAPI, Request
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
@@ -16,8 +18,20 @@ from sqlalchemy.ext.asyncio import (
 )
 
 from app.bootstrap.installation_onboarding import InstallationOnboarding
+from app.modules.integrations.webhooks.application.github_installation_dispatch import (
+    GitHubInstallationDeliveryDispatcher,
+)
 from app.modules.integrations.webhooks.application.installation_event_projector import (
     InstallationRepositoryTreeProvider,
+)
+from app.modules.integrations.webhooks.infrastructure.github_installation_resolver import (
+    SqlAlchemyGitHubInstallationResolver,
+)
+from app.modules.integrations.webhooks.infrastructure.github_installation_tree_provider import (
+    GitHubAppInstallationAccessTokenProvider,
+    GitHubInstallationAccessTokenProvider,
+    GitHubInstallationTreeProvider,
+    InMemoryInstallationAccessTokenCache,
 )
 from app.modules.reviews.application.cancel_run import CancelRunRepository
 from app.modules.reviews.application.get_run import RunDetailRepository
@@ -77,6 +91,22 @@ class ReviewsApiResources:
             tree_provider=tree_provider,
         )
 
+    def github_installation_delivery_dispatcher(
+        self,
+        *,
+        client: httpx.AsyncClient,
+        token_provider: GitHubInstallationAccessTokenProvider,
+    ) -> GitHubInstallationDeliveryDispatcher:
+        """Compose the verified-delivery application boundary for this API process."""
+        tree_provider = GitHubInstallationTreeProvider(
+            client=client,
+            token_provider=token_provider,
+        )
+        return GitHubInstallationDeliveryDispatcher(
+            resolver=SqlAlchemyGitHubInstallationResolver(self._session_factory),
+            onboarding=self.installation_onboarding(tree_provider),
+        )
+
     async def aclose(self) -> None:
         await self._engine.dispose()
 
@@ -112,13 +142,44 @@ def get_file_blob_cache(request: Request) -> BlobCache:
 async def reviews_api_lifespan(app: FastAPI) -> AsyncIterator[None]:
     """Create one pool per API process and always dispose it at shutdown."""
     database_url = os.environ.get("DATABASE_URL")
+    github_webhook_secret = os.environ.get("GITHUB_WEBHOOK_SECRET")
+    github_app_id = os.environ.get("GITHUB_APP_ID")
+    github_app_private_key = os.environ.get("GITHUB_APP_PRIVATE_KEY")
     resources: ReviewsApiResources | None = None
+    github_client: httpx.AsyncClient | None = None
     if database_url is not None:
         resources = ReviewsApiResources.from_database_url(database_url)
         app.state.reviews_api_resources = resources
+        if (
+            github_webhook_secret is not None
+            and github_app_id is not None
+            and github_app_private_key is not None
+        ):
+            github_client = httpx.AsyncClient(
+                base_url=os.environ.get("GITHUB_API_URL", "https://api.github.com"),
+                timeout=10.0,
+            )
+            token_provider = GitHubAppInstallationAccessTokenProvider(
+                client=github_client,
+                app_id=github_app_id,
+                private_key=github_app_private_key,
+                cache=InMemoryInstallationAccessTokenCache(now=time.time),
+                now=time.time,
+            )
+            app.state.github_webhook_secret = github_webhook_secret
+            app.state.github_installation_delivery_dispatcher = (
+                resources.github_installation_delivery_dispatcher(
+                    client=github_client,
+                    token_provider=token_provider,
+                )
+            )
     try:
         yield
     finally:
+        if github_client is not None:
+            await github_client.aclose()
+            del app.state.github_installation_delivery_dispatcher
+            del app.state.github_webhook_secret
         if resources is not None:
             await resources.aclose()
             del app.state.reviews_api_resources
