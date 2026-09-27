@@ -38,7 +38,7 @@ stateDiagram-v2
 |---|---|---|---|---|---|
 | T1 | `[*]` → `queued` | `pull_request.review_requested` (бот), `check_suite` / `workflow_run.completed`, `pull_request.synchronize` → `try_enqueue` | webhook-api (#11) | условие Р-10 (§8) ∧ нет активного Run по PR (Р-2) ∧ нет Run с `trigger = webhook` для `(PR, head_sha)` | INSERT `runs` (`attempt = 0`, `available_at = now`), после commit — `review.run/v1` в `review.run.{engine}` · check-run не создаётся |
 | T2 | `[*]` → `queued` | sweep «2 мин без CI» → тот же `try_enqueue` | worker, leader-цикл (#34) | `wait_for_ci = auto` ∧ ни чужих check suites, ни статусов коммита ≥ 2 мин (§8.3) ∧ guard T1 | как T1 |
-| T3 | `[*]` → `queued` | `POST /api/runs/{id}/rerun` | portal-api (#34) | PR открыт ∧ нет активного Run по PR, иначе `409`; флаг и CI не проверяются | новый Run на текущий `head_sha`, `trigger = rerun`, AMQP priority 9 · check-run не создаётся |
+| T3 | `[*]` → `queued` | `POST /api/runs/{id}/rerun` | portal-api (#34) | PR открыт [дефолт] ∧ нет активного Run по PR, иначе `409`; флаг и CI не проверяются | новый Run на текущий `head_sha`, `trigger = rerun`, AMQP priority 9 · check-run не создаётся |
 | T4 | `queued` → `running` | доставка `review.run/v1` | worker | RunGuard: `state = queued` ∧ `available_at ≤ now` ∧ ¬`cancel_requested` ∧ `head_sha` актуален ∧ PR открыт | одним UPDATE: `attempt += 1`, `lease_until = now + 5 мин`, `worker_id`; `started_at` при первой попытке · check-run `in_progress` (создаётся при `attempt = 1`) |
 | T5 | `queued` → `skipped` | RunGuard при claim | worker | `repo_disabled` / `rule_not_matched` / `budget_paused` (§6) | `error_code` = причина, ack · check-run сразу `completed/skipped`, при `repo_disabled` не создаётся |
 | T6 | `queued` → `cancelled` | `synchronize` (новый `head_sha`), `pull_request.closed`, `POST /api/runs/{id}/cancel`; то же, найденное RunGuard при claim | webhook-api, portal-api, worker | — | `error_code` = `superseded` / `pr_closed` / `cancelled_by_user`; сообщение остаётся в брокере · check-run (если `attempt ≥ 1`) закрывает RunGuard при доставке |
@@ -123,7 +123,7 @@ Summary-only (дифф > 3 000 строк, SD §13) — это не `skipped`. `
 ### 4.1 Один счётчик (D13 [дефолт])
 
 - `runs.attempt` — единственный счётчик попыток: `0` при INSERT, `+1` в том же UPDATE, что T4. Предел — 3 попытки.
-- `attempt` в `review.run/v1` информационный: это номер попытки, которую ожидает отправитель. Каждая публикация (T1–T3, T9, T12, T13, T18) ставит `attempt = runs.attempt + 1` на момент публикации; копия в T9 публикуется с новым значением. При расхождении прав `runs.attempt`.
+- `attempt` в `review.run/v1` — номер попытки с 1, которую ожидает отправитель: `runs.attempt + 1` на момент публикации, в том числе повторной. Его ставит каждая публикация (T1–T3, T9, T12, T13, T18); копия в T9 публикуется с новым значением. Поле информационное: при расхождении прав `runs.attempt`.
 - `x-death` — только диагностика (из какой очереди, когда, сколько раз). Решения по нему не принимаются; это уточняет SD §7.2.
 - Истёкший lease тоже тратит попытку (T12, T13). Если воркер падает на одном Run раз за разом, Run приходит в `failed` (`lease_expired`) после 3 попыток.
 - Классы без retry (§6) ведут в `failed` при любом `attempt`.
@@ -309,7 +309,7 @@ Check-run Run, завершённого без воркера (T6 после п�
 | `start_line < line` | отвергает | отвергает |
 | `title` — одна строка без точки в конце | отвергает | отвергает |
 | порядок: severity по убыванию, затем confidence по убыванию | отвергает | отвергает |
-| `summary.problem` — 1 предложение, `done_well` — 1–2 | отвергает | — |
+| `summary.problem` — 1 предложение, `done_well` — 1–2 | отвергает | отвергает |
 | `rule_name` ↔ префикс `body` «According to custom instructions in '<rule_name>' (» | не проверяет — постпроцессор чинит (lint-filter, шаг 6) | отвергает |
 
 **`suggestion`:**
@@ -370,7 +370,7 @@ UI рисует диапазон `[newLine ?? oldLine, endLine ?? newLine ?? old
 | `message_id` в `review.publish/v1` | `"pub_b3c1…"` | UUID, детерминированно выводится из `run_id`, `head_sha` и `findings_hash` |
 | `findings_hash` | `"sha256:…"` | 64 hex в нижнем регистре без префикса, как `comments.findings_hash CHAR(64)` |
 | `head_sha`, `base_sha` | `"a3f9…"` | 40 hex |
-| `attempt` | попытки считает `x-death` | номер попытки с 1: при публикации `runs.attempt + 1`, то есть `runs.attempt` после claim; при повторной публикации (T9, T12, T18) пересчитывается; поле информационное, прав PG (§4.1) |
+| `attempt` | попытки считает `x-death` | номер попытки с 1, которую ожидает отправитель: `runs.attempt + 1` на момент публикации, в том числе повторной; поле информационное: при расхождении прав `runs.attempt` (§4.1) |
 | `trigger` | `webhook \| manual \| rerun \| dry_run` | enum тот же; sweep и реконсилер сохраняют исходный `trigger`; `manual` и `dry_run` зарезервированы, эндпоинтов для них нет |
 | приоритет | «priority 9» у rerun (SD §12) | свойство AMQP, а не поле: rerun — 9, остальные — 0 |
 
@@ -409,6 +409,7 @@ UI рисует диапазон `[newLine ?? oldLine, endLine ?? newLine ?? old
 | Инфраструктура MVP | PostgreSQL 17 + RabbitMQ + Redis. Объектное хранилище (S3) отложено после MVP. Вместо него: тела ответов > 64 КБ — отдельная таблица PG (§2, миграция — #34); полный `ContextPayload` не хранится, в PG — только summary; payload вебхука — JSONB в PG (миграция — #11); блобы > 256 КБ — `cached_file_blobs` в PG | D1 [техлид, пересмотрено 27.09.2026] |
 | Контракт авторизации | GitHub App user authorization без OAuth scopes; `state` генерирует и хранит SPA. `POST /api/auth/github/callback {code}` → access JWT (15 мин, Bearer) и refresh в httpOnly-cookie (30 дней, ротация, `Path=/api/auth`). Дальше — `POST /api/auth/refresh`, `GET /api/auth/me`, `POST /api/auth/logout`; SSE — fetch-стрим с Bearer. Полный контракт — SD §12 и `contracts/openapi.yaml`, реализация — #11 | D4 [техлид]; access-токен в памяти, подпись в auth-api и проверка публичным ключом в portal-api, граница Workspace по Р-7 — [дефолт] |
 | Стадии, вердикт, якорь, retry | §2, §11, §10, §4 | D5, D3 [техлид]; имена `run_actions.tool` в стиле main — [дефолт]; D6 [техлид, формулы — дефолт]; D13 [дефолт] |
+| Rerun (T3) | `POST /api/runs/{id}/rerun` создаёт новый Run на текущий `head_sha`; флаг и CI не проверяются. `409`, если у PR есть активный Run или PR закрыт (§1) | `409` при активном Run и при закрытом PR — [дефолт] |
 
 ---
 
