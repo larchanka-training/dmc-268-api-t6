@@ -125,10 +125,11 @@ paths:
     post:
       operationId: rerunRun
       tags: [runs]
-      summary: Start a new run for the same pull request head
+      summary: Start a new run for the pull request's current head
       description: >-
-        Creates a new Run with trigger `rerun` for the pull request and head SHA of the given
-        run and publishes a `review.run` message for it. Returns the new, queued run.
+        Creates a new Run with trigger `rerun` for the pull request of the given run at its
+        current head SHA and publishes a `review.run` message for it with priority 9. The
+        reviewer flag and CI are not checked (PIPELINE_SPEC T3). Returns the new, queued run.
       x-service: portal-api
       x-status: planned
       x-issue: "#34"
@@ -144,7 +145,7 @@ paths:
         "404":
           $ref: "#/components/responses/NotFound"
         "409":
-          description: The pull request already has an active run; no new run was created.
+          description: The pull request already has an active run or is closed; no new run was created.
           content:
             application/json:
               schema:

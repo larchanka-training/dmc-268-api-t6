@@ -30,6 +30,7 @@ COPY alembic.ini ./
 COPY review/prompts ./review/prompts
 COPY review/postprocess ./review/postprocess
 COPY review/rules ./review/rules
+COPY review/schemas ./review/schemas
 
 USER app
 EXPOSE 8000
