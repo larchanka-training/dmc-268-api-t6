@@ -1,0 +1,44 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/larchanka-training/dmc-268-api-t6/main/contracts/schemas/review.publish.v1.schema.json",
+  "title": "review.publish/v1 queue message",
+  "description": "Pointer message published by the AI Worker onto the `reviews` exchange (routing key `review.publish`) and consumed by the GitHub Publisher (SYSTEM_DESIGN.md §7.2, PIPELINE_SPEC). Carries no findings payload: the publisher reads the findings from PostgreSQL by `run_id`.",
+  "$ref": "#/$defs/ReviewPublishV1",
+  "$defs": {
+    "Uuid": {
+      "type": "string",
+      "format": "uuid",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+      "description": "Lowercase, unprefixed UUID (application ids are plain uuid4, no prefixes). `format: uuid` documents intent; the pattern is what actually enforces the shape, since `format` is not asserted unless the validator opts in with a FormatChecker."
+    },
+    "CommitSha": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$",
+      "description": "Git commit SHA-1: 40 lowercase hex characters."
+    },
+    "FindingsHash": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$",
+      "description": "SHA-256 hex digest of the sorted findings for this run, matching comments.findings_hash (64 lowercase hex characters, no \"sha256:\" prefix)."
+    },
+    "ReviewPublishV1": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "message_id", "run_id", "head_sha", "findings_hash", "review_event"],
+      "properties": {
+        "schema": { "const": "review.publish/v1" },
+        "message_id": {
+          "$ref": "#/$defs/Uuid",
+          "description": "UUIDv5 of run_id + head_sha + findings_hash, computed by the producer: deterministic and stable across redelivery, which is the idempotency key for this message (Р-5)."
+        },
+        "run_id": {
+          "$ref": "#/$defs/Uuid",
+          "description": "runs.id this publish message reports on."
+        },
+        "head_sha": { "$ref": "#/$defs/CommitSha" },
+        "findings_hash": { "$ref": "#/$defs/FindingsHash" },
+        "review_event": { "type": "string", "enum": ["COMMENT", "REQUEST_CHANGES"] }
+      }
+    }
+  }
+}
