@@ -8,9 +8,11 @@ info:
     in api#20 (D4, D9, D10, D11). The GitHub webhook receiver (`/webhooks/github`) and
     `/healthcheck` are not part of the browser surface and are not described here.
 
-    **Origin and CORS.** The UI calls the API on its own origin: caddy routes `/api/auth/*`
-    to `auth-api` and every other `/api/*` path to `portal-api`, so production needs no CORS.
-    Locally the Vite dev server proxies `/api` to the backend.
+    **Origin and CORS.** The UI and the API share one origin: the UI host serves `/api/*` and
+    its proxy (the edge proxy or the UI's nginx; the Vite dev server locally) forwards those
+    paths to the API, so there is no CORS (#35). A separate API host remains only for
+    `/healthcheck` and GitHub webhooks. Until the service split (#16, later), the `auth-api`,
+    `portal-api` and `webhook-api` routes live in the single FastAPI app `app/main.py`.
 
     **Wire format.** JSON bodies use camelCase keys. Timestamps are RFC 3339 in UTC with a `Z`
     suffix. IDs are UUIDs unless a field says it carries a GitHub numeric ID.
@@ -19,19 +21,23 @@ info:
     `Authorization: Bearer <token>` on every other operation (global `bearerAuth`), and a
     rotating `refresh_token` cookie (30 days, `HttpOnly; Secure; SameSite=Strict;
     Path=/api/auth`). The SSE stream is read with `fetch` so it carries the same header.
-    Token checks on `portal-api` routes are implemented in #34.
+    Issuing the access token and the Bearer check on every other operation are implemented
+    in #11.
 
     **Errors.** `HTTPException` errors are `{"detail": "<message>"}` (`ErrorResponse`);
     request validation failures are FastAPI's `HTTPValidationError`.
 
-    **Extensions.** `x-service` names the process that serves an operation.
+    **Extensions.** `x-service` names the logical service that owns an operation (one FastAPI
+    app today, see Origin and CORS).
     `x-status: planned` marks an operation that is not implemented yet; `x-issue` names the
     issue that implements it, or `x-note` explains why it is deferred past the MVP.
     Implementing an operation means removing its `x-status` marker
     (tests/test_openapi_contract.py enforces this).
 servers:
   - url: /
-    description: Same origin as the UI (caddy in deployed environments, Vite proxy locally).
+    description: >-
+      Same origin as the UI: the UI host proxies `/api/*` to the API (edge proxy or UI nginx
+      when deployed, Vite dev server locally).
 security:
   - bearerAuth: []
 tags:
@@ -768,7 +774,10 @@ components:
       type: string
       description: >-
         Run lifecycle state. Terminal: succeeded, failed, cancelled, skipped. Processing
-        phases (fetch_diff, build_context, llm_review, postprocess) happen inside `running`.
+        phases happen inside `running` and are recorded as run actions (`vcs.fetch_diff`,
+        `context.build`, `llm.repo_conventions`, `llm.call`, `llm.review_output`,
+        `review.postprocess`, plus the `engine.fallback` event); `github.publish_review` runs in
+        `publishing` (docs/PIPELINE_SPEC.md §2).
       enum: [queued, running, publishing, succeeded, failed, cancelled, skipped]
     Engine:
       type: string
@@ -878,7 +887,8 @@ components:
         errorCode:
           type: [string, "null"]
           description: >-
-            Failure code from docs/PIPELINE_SPEC.md when `status` is `failed`; null otherwise.
+            Code from docs/PIPELINE_SPEC.md §6: the failure reason when `status` is `failed`,
+            the termination reason when it is `cancelled` or `skipped`; null otherwise.
       additionalProperties: false
     RunDetail:
       type: object
@@ -939,7 +949,8 @@ components:
         errorCode:
           type: [string, "null"]
           description: >-
-            Failure code from docs/PIPELINE_SPEC.md when `status` is `failed`; null otherwise.
+            Code from docs/PIPELINE_SPEC.md §6: the failure reason when `status` is `failed`,
+            the termination reason when it is `cancelled` or `skipped`; null otherwise.
         findings:
           type: array
           description: Published findings, ordered by severity.
@@ -1108,8 +1119,10 @@ components:
         tool:
           type: string
           description: >-
-            Step name: fetch_diff, build_context, llm_review, postprocess, publish_review or
-            engine_fallback.
+            Step name from the run_actions catalog of docs/PIPELINE_SPEC.md §2:
+            `vcs.fetch_diff`, `context.build`, `llm.repo_conventions`, `llm.call`,
+            `llm.review_output`, `review.postprocess`, `github.publish_review` or
+            `engine.fallback`.
         request:
           type: object
           description: Request metadata of the step.

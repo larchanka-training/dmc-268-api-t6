@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://raw.githubusercontent.com/larchanka-training/dmc-268-api-t6/main/contracts/schemas/review.publish.v1.schema.json",
   "title": "review.publish/v1 queue message",
-  "description": "Pointer message published by the AI Worker onto the `reviews` exchange (routing key `review.publish`) and consumed by the GitHub Publisher (SYSTEM_DESIGN.md §7.2, PIPELINE_SPEC). Carries no findings payload: the publisher reads the findings from PostgreSQL by `run_id`.",
+  "description": "Pointer message published onto the `reviews` exchange (routing key `review.publish`) by the worker after post-processing (T8) and by the reconciler (portal-api leader loop, T17), and consumed by the publisher, which in the MVP is a separate `review.publish` consumer inside the worker process (SYSTEM_DESIGN.md §7.2, PIPELINE_SPEC §12). Carries no findings payload: the publisher reads the findings from PostgreSQL by `run_id`.",
   "$ref": "#/$defs/ReviewPublishV1",
   "$defs": {
     "Uuid": {

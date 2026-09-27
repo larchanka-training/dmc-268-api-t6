@@ -166,6 +166,16 @@ PUBLISH_MUTATIONS = [
     ),
     pytest.param(
         "review.publish.v1",
+        (lambda d: _set(d, "findings_hash", "a" * 63)),
+        id="review.publish.v1-findings-hash-63-hex",
+    ),
+    pytest.param(
+        "review.publish.v1",
+        (lambda d: _set(d, "findings_hash", "A" * 64)),
+        id="review.publish.v1-findings-hash-uppercase",
+    ),
+    pytest.param(
+        "review.publish.v1",
         (lambda d: _set(d, "review_event", "APPROVE")),
         id="review.publish.v1-bad-review-event",
     ),

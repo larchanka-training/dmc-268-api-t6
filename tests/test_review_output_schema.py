@@ -51,9 +51,10 @@ SEMANTIC_ONLY = {
 # post-processor repairs it rather than rejecting the answer (review/postprocess/lint-filter.md).
 SCRIPT_ONLY = {"rule-name-without-prefix.json"}
 
-# Known difference (brief gate trap 3): JSON Schema's `integer` admits 1.0, the strict Pydantic
-# model does not. The script's semantic layer keeps the strict check, so only the schema accepts.
-KNOWN_DIFFERENCES = {"line-float.json"}
+# Known difference (brief gate trap 3): JSON Schema's `integer` admits 1.0 for `line` and
+# `start_line`, the strict Pydantic model does not. The script's semantic layer keeps the strict
+# check, so only the schema accepts.
+KNOWN_DIFFERENCES = {"line-float.json", "start-line-float.json"}
 
 # Without a `findings` key the script cannot tell the output kind and exits 2 instead of 1.
 UNKNOWN_KIND = {"missing-findings.json"}
