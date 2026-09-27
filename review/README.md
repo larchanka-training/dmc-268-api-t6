@@ -18,7 +18,8 @@ immutable — a file with a version in its name is never edited — and served f
 | `rules/default-backend.v1.json`         | default rules for a FastAPI/SQLAlchemy repo         |
 | `postprocess/lint-filter.md`            | filter #2: what the backend drops or demotes        |
 | `postprocess/lint-filter-patterns.json` | regex lists, confidence threshold, inline cap       |
-| `scripts/validate_findings.py`          | stdlib validator of model outputs (with the tests)  |
+| `schemas/review-output.schema.json`     | JSON Schema (draft 2020-12) of the model output     |
+| `scripts/validate_findings.py`          | validator of model outputs: schema + semantic rules |
 | `examples/`                             | synthetic diff and sample outputs (proof run)       |
 
 ## Seeding contract
@@ -115,9 +116,20 @@ threshold, hunk validation, inline cap, attribution consistency. Its buckets `in
 
 ## Evaluation
 
-`uv run python review/scripts/validate_findings.py <json>` checks one model output: exit `0` when valid, `1`
-when it violates the contract (violations printed one per line), `2` when the file is not JSON or its kind is
-unknown. The kind is detected from the top-level key: `findings` → `ReviewOutput`, `files` →
+The shape of a review output (`ReviewOutput`: `findings` ≤ 10 and `summary`) is defined by
+[`schemas/review-output.schema.json`](schemas/review-output.schema.json) (JSON Schema draft 2020-12), the single
+source of truth for the shape: every key required, nullable keys present as `null`, no other keys. The runtime
+Pydantic model (`app/modules/reviews/application/review_output.py`) mirrors it one to one, checked by
+`tests/test_review_output_schema.py`. Rules the schema cannot express (finding order, `start_line < line`, a
+one-line title without a trailing period, the `rule_name` ↔ attribution-prefix binding) are listed in
+`docs/PIPELINE_SPEC.md` §9.
+
+`uv run python review/scripts/validate_findings.py <json>` checks one model output: the shape against the
+schema, then the semantic rules on top. Exit `0` when valid, `1` when it violates the contract (violations
+printed one per line), `2` when the file is not JSON or its kind is unknown. One command checks the sample
+(prints `OK ReviewOutput 5 items`):
+`uv run python review/scripts/validate_findings.py review/examples/findings.sample.json`. The kind is
+detected from the top-level key: `findings` → `ReviewOutput`, `files` →
 `RepoConventionsDraft`. A file carrying both keys is rejected with exit `2`. The 120-word `body` limit of
 `review.system.v1.md` §7 is a prompt-level brevity target, not part of the backend schema: the validator
 enforces only the 1200-character ceiling. The tests run it over `examples/*.sample.json`. Quality targets and
@@ -143,7 +155,7 @@ the validator and `uv run pytest tests/test_review_artifacts.py`.
 ## Open questions
 
 - **Model choice** (`docs/SYSTEM_DESIGN.md` OQ-2): the prompts are model-agnostic; model
-  and token budget are a separate task. The proof-run record names the model used.
+  and token budget are owned by the #33 assignee, due 2026-10-01. The proof-run record names the model used.
 - **Output language**: English by default (stated in both prompts). Proposed override: a
   line `Review language: xx` in the reviewed repository's `AGENTS.md`, honoured by a later
   prompt version. Decision pending with the team.
