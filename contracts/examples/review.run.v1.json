@@ -1,0 +1,25 @@
+{
+  "schema": "review.run/v1",
+  "message_id": "4fabfd21-5acc-4351-a99c-349dffdc00cf",
+  "run_id": "4fabfd21-5acc-4351-a99c-349dffdc00cf",
+  "workspace_id": "ce6ea2e3-bf09-4fe6-9ba7-929099805767",
+  "installation_id": 87654321,
+  "repo": {
+    "id": "8ef5d61b-30d8-4872-ac00-903cf4327c81",
+    "provider": "github",
+    "external_id": 123456789,
+    "full_name": "octo-org/octo-repo"
+  },
+  "pr": {
+    "number": 42,
+    "head_sha": "e1f145f3d2917526e06c206444f6c3dee1826946",
+    "base_sha": "2313ceaa503e76e89adfb643df776db7da8d7dab",
+    "base_ref": "main"
+  },
+  "engine": "fast",
+  "rule_version_id": "1227ab89-8c60-43df-b014-33e937c9137e",
+  "prompt_version_id": "48fb0edf-601a-445d-823d-009912f00325",
+  "trigger": "webhook",
+  "attempt": 1,
+  "requested_at": "2026-09-27T10:00:00Z"
+}

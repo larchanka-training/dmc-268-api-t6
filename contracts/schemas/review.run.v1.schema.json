@@ -1,0 +1,116 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/larchanka-training/dmc-268-api-t6/main/contracts/schemas/review.run.v1.schema.json",
+  "title": "review.run/v1 queue message",
+  "description": "Pointer message published by the Webhook API or Portal API onto the `reviews` exchange (routing key `review.run.fast` or `review.run.deep`) and consumed by the AI Worker (SYSTEM_DESIGN.md §7.2, PIPELINE_SPEC). Carries no diff or payload data: the worker reads everything else from PostgreSQL and GitHub by id, which keeps the message under 1 KB.",
+  "$ref": "#/$defs/ReviewRunV1",
+  "$defs": {
+    "Uuid": {
+      "type": "string",
+      "format": "uuid",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+      "description": "Lowercase, unprefixed UUID (application ids are plain uuid4, no prefixes). `format: uuid` documents intent; the pattern is what actually enforces the shape, since `format` is not asserted unless the validator opts in with a FormatChecker."
+    },
+    "CommitSha": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$",
+      "description": "Git commit SHA-1: 40 lowercase hex characters."
+    },
+    "PositiveInt": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "RequestedAt": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]+)?Z$",
+      "description": "RFC 3339 timestamp in UTC with a literal 'Z' offset. `format: date-time` is not asserted by the FormatChecker (needs the optional rfc3339-validator dependency, which is out of scope here), so this ASCII-digit pattern is what actually enforces the UTC-'Z' shape; it checks the shape only, not that the calendar date or time-of-day is valid."
+    },
+    "Repo": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "provider", "external_id", "full_name"],
+      "properties": {
+        "id": { "$ref": "#/$defs/Uuid", "description": "repositories.id." },
+        "provider": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Git hosting provider; \"github\" today (repositories.provider_installation_id -> provider_installations.provider)."
+        },
+        "external_id": {
+          "$ref": "#/$defs/PositiveInt",
+          "description": "Provider-side numeric repository id (repositories.external_id)."
+        },
+        "full_name": {
+          "type": "string",
+          "minLength": 1,
+          "description": "\"owner/repo\" as reported by the provider."
+        }
+      }
+    },
+    "PullRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["number", "head_sha", "base_sha", "base_ref"],
+      "properties": {
+        "number": { "$ref": "#/$defs/PositiveInt", "description": "Pull request number on the provider." },
+        "head_sha": { "$ref": "#/$defs/CommitSha" },
+        "base_sha": { "$ref": "#/$defs/CommitSha" },
+        "base_ref": { "type": "string", "minLength": 1, "description": "Base branch name." }
+      }
+    },
+    "ReviewRunV1": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "message_id",
+        "run_id",
+        "workspace_id",
+        "installation_id",
+        "repo",
+        "pr",
+        "engine",
+        "rule_version_id",
+        "prompt_version_id",
+        "trigger",
+        "attempt",
+        "requested_at"
+      ],
+      "properties": {
+        "schema": { "const": "review.run/v1" },
+        "message_id": {
+          "$ref": "#/$defs/Uuid",
+          "description": "Idempotency key for this message. Equal to `run_id` by construction; JSON Schema cannot assert cross-field equality, so this is enforced by the producer, not by this schema."
+        },
+        "run_id": {
+          "$ref": "#/$defs/Uuid",
+          "description": "Primary key of the runs row this message claims (runs.id)."
+        },
+        "workspace_id": { "$ref": "#/$defs/Uuid" },
+        "installation_id": {
+          "$ref": "#/$defs/PositiveInt",
+          "description": "GitHub App installation id (provider_installations.external_id)."
+        },
+        "repo": { "$ref": "#/$defs/Repo" },
+        "pr": { "$ref": "#/$defs/PullRequest" },
+        "engine": { "type": "string", "enum": ["fast", "deep"] },
+        "rule_version_id": {
+          "$ref": "#/$defs/Uuid",
+          "description": "rule_versions.id active for this repository at claim time."
+        },
+        "prompt_version_id": {
+          "$ref": "#/$defs/Uuid",
+          "description": "prompt_versions.id used to build the review prompt."
+        },
+        "trigger": { "type": "string", "enum": ["webhook", "manual", "rerun", "dry_run"] },
+        "attempt": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "1-based attempt number = runs.attempt at claim time; runs.attempt is the single counter (PIPELINE_SPEC)."
+        },
+        "requested_at": { "$ref": "#/$defs/RequestedAt" }
+      }
+    }
+  }
+}
