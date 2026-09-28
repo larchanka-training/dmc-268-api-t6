@@ -3,10 +3,10 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
-from fastapi.testclient import TestClient
 
 from app.bootstrap import reviews_api
 from app.main import app, get_run_repository
+from tests.portal_test_client import authenticated_test_client as TestClient
 
 
 class EmptyRunRepository:
