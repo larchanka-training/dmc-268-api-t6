@@ -45,6 +45,8 @@ SEMANTIC_ONLY = {
     "title-two-lines.json",
     "wrong-order.json",
     "problem-two-sentences.json",
+    "done-well-no-sentence.json",
+    "done-well-three-sentences.json",
 }
 
 # The body prefix <-> rule_name binding is enforced by the script only: at runtime the
