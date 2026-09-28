@@ -78,6 +78,7 @@ class CodeChange(Base):
     external_number: Mapped[int] = mapped_column(INTEGER, nullable=False)
     title: Mapped[str] = mapped_column(String(500), nullable=False)
     description: Mapped[str | None] = mapped_column(TEXT)
+    author_login: Mapped[str | None] = mapped_column(String(255), nullable=True)
     source_branch: Mapped[str] = mapped_column(String(255), nullable=False)
     target_branch: Mapped[str] = mapped_column(String(255), nullable=False)
     base_sha: Mapped[str] = mapped_column(String(64), nullable=False)
@@ -85,6 +86,24 @@ class CodeChange(Base):
     state: Mapped[CodeChangeState] = mapped_column(pg_enum(CodeChangeState, "code_change_state"))
     reviewer_requested: Mapped[bool] = mapped_column(
         BOOLEAN, nullable=False, server_default=text("false")
+    )
+    reviewer_requested_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    reviewer_intent_updated_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    reviewer_timeline_event_id: Mapped[int | None] = mapped_column(BIGINT, nullable=True)
+    reviewer_timeline_position: Mapped[int | None] = mapped_column(BIGINT, nullable=True)
+    reviewer_barrier_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    reviewer_barrier_position: Mapped[int | None] = mapped_column(BIGINT, nullable=True)
+    head_first_seen_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    provider_updated_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
     )
     ci_status: Mapped[dict[str, Any]] = mapped_column(
         JSONB, nullable=False, server_default=text("'{}'")
@@ -98,15 +117,40 @@ class CodeChange(Base):
 
 class CodeChangeDiff(Base):
     __tablename__ = "code_change_diffs"
-    __table_args__ = (UniqueConstraint("code_change_id", "head_sha", "filename"),)
+    __table_args__ = (
+        UniqueConstraint("run_id", "filename", name="uq_code_change_diffs_run_filename"),
+        CheckConstraint(
+            "status IN ('added', 'modified', 'removed', 'renamed')",
+            name="ck_code_change_diffs_status",
+        ),
+        CheckConstraint(
+            "omission_reason IS NULL OR omission_reason IN "
+            "('binary', 'too_large', 'generated', 'missing_patch')",
+            name="ck_code_change_diffs_omission_reason",
+        ),
+    )
 
     id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
+    run_id: Mapped[UUID] = mapped_column(ForeignKey("runs.id", ondelete="CASCADE"), nullable=False)
     code_change_id: Mapped[UUID] = mapped_column(
         ForeignKey("code_changes.id", ondelete="CASCADE"), nullable=False
     )
     head_sha: Mapped[str] = mapped_column(String(64), nullable=False)
     filename: Mapped[str] = mapped_column(String(1024), nullable=False)
     patch: Mapped[str | None] = mapped_column(TEXT)
+    review_patch: Mapped[str | None] = mapped_column(TEXT)
+    blob_sha: Mapped[str | None] = mapped_column(String(64))
+    status: Mapped[str] = mapped_column(
+        String(16), nullable=False, server_default=text("'modified'")
+    )
+    previous_filename: Mapped[str | None] = mapped_column(String(1024))
+    additions: Mapped[int] = mapped_column(INTEGER, nullable=False, server_default=text("0"))
+    deletions: Mapped[int] = mapped_column(INTEGER, nullable=False, server_default=text("0"))
+    changes: Mapped[int] = mapped_column(INTEGER, nullable=False, server_default=text("0"))
+    omission_reason: Mapped[str | None] = mapped_column(String(32))
+    summary_only: Mapped[bool] = mapped_column(
+        BOOLEAN, nullable=False, server_default=text("false")
+    )
     created_at: Mapped[datetime] = timestamp_column()
 
 
@@ -114,14 +158,13 @@ class CachedFileBlob(Base):
     """A seven-day immutable file blob retained for run inspection."""
 
     __tablename__ = "cached_file_blobs"
-    __table_args__ = (UniqueConstraint("code_change_id", "head_sha", "path"),)
+    __table_args__ = (UniqueConstraint("repository_id", "blob_sha"),)
 
     id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
-    code_change_id: Mapped[UUID] = mapped_column(
-        ForeignKey("code_changes.id", ondelete="CASCADE"), nullable=False
+    repository_id: Mapped[UUID] = mapped_column(
+        ForeignKey("repositories.id", ondelete="CASCADE"), nullable=False
     )
-    head_sha: Mapped[str] = mapped_column(String(64), nullable=False)
-    path: Mapped[str] = mapped_column(String(1024), nullable=False)
+    blob_sha: Mapped[str] = mapped_column(String(64), nullable=False)
     content: Mapped[str] = mapped_column(TEXT, nullable=False)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     created_at: Mapped[datetime] = timestamp_column()
@@ -139,6 +182,21 @@ class Run(Base):
             postgresql_where=text("state IN ('queued', 'running', 'publishing')"),
         ),
         Index(
+            "uq_runs_webhook_code_change_head",
+            "code_change_id",
+            "head_sha",
+            unique=True,
+            postgresql_where=text("trigger = 'webhook'"),
+        ),
+        Index(
+            "ix_runs_pending_webhook_publication",
+            "created_at",
+            "id",
+            postgresql_where=text(
+                "trigger = 'webhook' AND state = 'queued' AND message_published_at IS NULL"
+            ),
+        ),
+        Index(
             "ix_runs_queued_available_at", "available_at", postgresql_where=text("state = 'queued'")
         ),
         Index("ix_runs_created_id", "created_at", "id"),
@@ -149,6 +207,7 @@ class Run(Base):
     id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
     code_change_id: Mapped[UUID] = mapped_column(ForeignKey("code_changes.id"), nullable=False)
     base_sha: Mapped[str] = mapped_column(String(64), nullable=False)
+    base_ref: Mapped[str | None] = mapped_column(String(255), nullable=True)
     head_sha: Mapped[str] = mapped_column(String(64), nullable=False)
     state: Mapped[RunState] = mapped_column(
         pg_enum(RunState, "run_state"), nullable=False, server_default=RunState.QUEUED.value
@@ -161,6 +220,8 @@ class Run(Base):
         ForeignKey("prompt_versions.id"), nullable=False
     )
     attempt: Mapped[int] = mapped_column(INTEGER, nullable=False, server_default=text("0"))
+    message_published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    diff_snapshotted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     available_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     lease_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     worker_id: Mapped[str | None] = mapped_column(String(255))

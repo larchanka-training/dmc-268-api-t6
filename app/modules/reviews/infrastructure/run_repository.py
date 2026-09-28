@@ -6,12 +6,17 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from uuid import UUID
 
-from sqlalchemy import ColumnElement, and_, delete, func, or_, select, update
+from sqlalchemy import ColumnElement, and_, func, or_, select, true, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.common.infrastructure.db.enums import RunState
 from app.modules.analytics.infrastructure.models import UsageEvent
-from app.modules.repositories.infrastructure.models import Repository, RuleVersion
+from app.modules.auth.application.scope import AuthScope
+from app.modules.repositories.infrastructure.models import (
+    ProviderInstallation,
+    Repository,
+    RuleVersion,
+)
 from app.modules.reviews.application.cancel_run import CancelRequestResult
 from app.modules.reviews.application.conventions import ActiveConventionsPrompt
 from app.modules.reviews.application.findings_post_processor import (
@@ -24,7 +29,11 @@ from app.modules.reviews.application.get_run_comments import PublishedComment
 from app.modules.reviews.application.get_run_diff import DiffSnapshot
 from app.modules.reviews.application.get_run_file_lines import BlobCacheKey
 from app.modules.reviews.application.list_runs import RunCursor, RunListItem
-from app.modules.reviews.application.process_run import RunConventionsInput, RunDiffInput
+from app.modules.reviews.application.process_run import (
+    RunConventionsInput,
+    RunDiffInput,
+    RunVcsInput,
+)
 from app.modules.reviews.application.prompt_builder import (
     parse_unified_diff,
     review_rule_from_stored,
@@ -35,6 +44,7 @@ from app.modules.reviews.application.review_output import (
     ReviewOutput,
     ReviewPublication,
 )
+from app.modules.reviews.application.vcs_diff import PullRequestLocator
 from app.modules.reviews.infrastructure.models import (
     CodeChange,
     CodeChangeDiff,
@@ -43,11 +53,28 @@ from app.modules.reviews.infrastructure.models import (
     Run,
     RunAction,
 )
+from app.modules.workspaces.infrastructure.repository_access import repository_access_predicate
 
 
 class SqlAlchemyRunRepository:
-    def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
+    def __init__(
+        self, session_factory: async_sessionmaker[AsyncSession], scope: AuthScope | None = None
+    ) -> None:
         self._session_factory = session_factory
+        self._scope = scope
+
+    def _authorized_run(self) -> ColumnElement[bool]:
+        if self._scope is None:
+            return true()
+        scope = self._scope
+        return (
+            select(1)
+            .select_from(CodeChange)
+            .join(Repository, Repository.id == CodeChange.repository_id)
+            .where(CodeChange.id == Run.code_change_id, repository_access_predicate(scope))
+            .correlate(Run)
+            .exists()
+        )
 
     async def list_runs(
         self,
@@ -75,6 +102,7 @@ class SqlAlchemyRunRepository:
             select(Run, CodeChange, Repository.full_name, latest_model, action_count, summary_only)
             .join(CodeChange, Run.code_change_id == CodeChange.id)
             .join(Repository, CodeChange.repository_id == Repository.id)
+            .where(self._authorized_run())
             .order_by(Run.created_at.desc(), Run.id.desc())
             .limit(limit)
         )
@@ -114,6 +142,7 @@ class SqlAlchemyRunRepository:
             .join(CodeChange, Run.code_change_id == CodeChange.id)
             .join(Repository, CodeChange.repository_id == Repository.id)
             .where(Run.id == run_id)
+            .where(self._authorized_run())
         )
         async with self._session_factory() as session:
             row = (await session.execute(statement)).one_or_none()
@@ -127,6 +156,7 @@ class SqlAlchemyRunRepository:
                 and_(Finding.run_id == Run.id, Finding.published.is_(True)),
             )
             .where(Run.id == run_id)
+            .where(self._authorized_run())
             .order_by(Finding.created_at.asc(), Finding.id.asc())
         )
         async with self._session_factory() as session:
@@ -140,6 +170,7 @@ class SqlAlchemyRunRepository:
             select(Run.id, RunAction)
             .outerjoin(RunAction, RunAction.run_id == Run.id)
             .where(Run.id == run_id)
+            .where(self._authorized_run())
             .order_by(RunAction.index.asc())
         )
         async with self._session_factory() as session:
@@ -152,7 +183,7 @@ class SqlAlchemyRunRepository:
         statement = (
             select(RunAction.response)
             .join(Run, RunAction.run_id == Run.id)
-            .where(Run.id == run_id, RunAction.index == index)
+            .where(Run.id == run_id, RunAction.index == index, self._authorized_run())
         )
         async with self._session_factory() as session:
             row = (await session.execute(statement)).one_or_none()
@@ -162,48 +193,78 @@ class SqlAlchemyRunRepository:
 
     async def get_run_diff(self, run_id: UUID) -> list[DiffSnapshot] | None:
         statement = (
-            select(Run.id, CodeChangeDiff.filename, CodeChangeDiff.patch)
+            select(Run.id, CodeChangeDiff)
             .outerjoin(
                 CodeChangeDiff,
-                and_(
-                    CodeChangeDiff.code_change_id == Run.code_change_id,
-                    CodeChangeDiff.head_sha == Run.head_sha,
-                ),
+                CodeChangeDiff.run_id == Run.id,
             )
             .where(Run.id == run_id)
+            .where(self._authorized_run())
             .order_by(CodeChangeDiff.filename.asc())
         )
         async with self._session_factory() as session:
             rows = (await session.execute(statement)).all()
         if not rows:
             return None
-        return [
-            DiffSnapshot(filename=filename, patch=patch)
-            for _, filename, patch in rows
-            if filename is not None
-        ]
+        return [self._to_diff_snapshot(snapshot) for _, snapshot in rows if snapshot is not None]
 
-    async def replace_diff_snapshots(
-        self, code_change_id: UUID, head_sha: str, snapshots: list[DiffSnapshot]
-    ) -> None:
+    async def get_run_snapshots(self, run_id: UUID) -> list[DiffSnapshot] | None:
+        statement = (
+            select(Run.diff_snapshotted_at, CodeChangeDiff)
+            .outerjoin(CodeChangeDiff, CodeChangeDiff.run_id == Run.id)
+            .where(Run.id == run_id)
+            .where(self._authorized_run())
+            .order_by(CodeChangeDiff.filename.asc())
+        )
+        async with self._session_factory() as session:
+            rows = (await session.execute(statement)).all()
+        if not rows or rows[0][0] is None:
+            return None
+        return [self._to_diff_snapshot(snapshot) for _, snapshot in rows if snapshot is not None]
+
+    async def store_diff_snapshots(
+        self,
+        run_id: UUID,
+        code_change_id: UUID,
+        head_sha: str,
+        snapshots: list[DiffSnapshot],
+    ) -> list[DiffSnapshot]:
         async with self._session_factory.begin() as session:
-            await session.execute(
-                delete(CodeChangeDiff).where(
-                    CodeChangeDiff.code_change_id == code_change_id,
-                    CodeChangeDiff.head_sha == head_sha,
-                )
-            )
+            run = await session.scalar(select(Run).where(Run.id == run_id).with_for_update())
+            if run is None or run.code_change_id != code_change_id or run.head_sha != head_sha:
+                raise ValueError("run revision changed before diff snapshot storage")
+            if run.diff_snapshotted_at is not None:
+                rows = (
+                    await session.scalars(
+                        select(CodeChangeDiff)
+                        .where(CodeChangeDiff.run_id == run_id)
+                        .order_by(CodeChangeDiff.filename.asc())
+                    )
+                ).all()
+                return [self._to_diff_snapshot(row) for row in rows]
             session.add_all(
                 [
                     CodeChangeDiff(
+                        run_id=run_id,
                         code_change_id=code_change_id,
                         head_sha=head_sha,
                         filename=snapshot.filename,
                         patch=snapshot.patch,
+                        review_patch=snapshot.review_patch,
+                        blob_sha=snapshot.blob_sha,
+                        status=snapshot.status,
+                        previous_filename=snapshot.previous_filename,
+                        additions=snapshot.additions,
+                        deletions=snapshot.deletions,
+                        changes=snapshot.changes,
+                        omission_reason=snapshot.omission_reason,
+                        summary_only=snapshot.summary_only,
                     )
                     for snapshot in snapshots
                 ]
             )
+            run.diff_snapshotted_at = datetime.now(UTC)
+        return snapshots
 
     async def get_run_diff_input(self, run_id: UUID) -> RunDiffInput | None:
         statement = select(Run.code_change_id, Run.head_sha).where(Run.id == run_id)
@@ -212,6 +273,33 @@ class SqlAlchemyRunRepository:
         if row is None:
             return None
         return RunDiffInput(code_change_id=row[0], head_sha=row[1])
+
+    async def get_run_vcs_input(self, run_id: UUID) -> RunVcsInput | None:
+        statement = (
+            select(
+                Run.code_change_id,
+                CodeChange.repository_id,
+                Run.head_sha,
+                Run.base_sha,
+                ProviderInstallation.external_id,
+                Repository.full_name,
+                CodeChange.external_number,
+            )
+            .select_from(Run)
+            .join(CodeChange, CodeChange.id == Run.code_change_id)
+            .join(Repository, Repository.id == CodeChange.repository_id)
+            .join(
+                ProviderInstallation, ProviderInstallation.id == Repository.provider_installation_id
+            )
+            .where(Run.id == run_id)
+        )
+        async with self._session_factory() as session:
+            row = (await session.execute(statement)).one_or_none()
+        if row is None:
+            return None
+        return RunVcsInput(
+            row[0], row[1], row[2], row[3], PullRequestLocator(row[4], row[5], row[6])
+        )
 
     async def get_run_conventions_input(self, run_id: UUID) -> RunConventionsInput | None:
         statement = (
@@ -247,22 +335,23 @@ class SqlAlchemyRunRepository:
 
     async def get_run_file_key(self, run_id: UUID, path: str) -> BlobCacheKey | None:
         statement = (
-            select(Run.code_change_id, Run.head_sha)
+            select(CodeChange.repository_id, CodeChangeDiff.blob_sha)
+            .select_from(Run)
+            .join(CodeChange, CodeChange.id == Run.code_change_id)
             .join(
                 CodeChangeDiff,
                 and_(
-                    CodeChangeDiff.code_change_id == Run.code_change_id,
-                    CodeChangeDiff.head_sha == Run.head_sha,
+                    CodeChangeDiff.run_id == Run.id,
                     CodeChangeDiff.filename == path,
                 ),
             )
-            .where(Run.id == run_id)
+            .where(Run.id == run_id, CodeChangeDiff.blob_sha.is_not(None), self._authorized_run())
         )
         async with self._session_factory() as session:
             row = (await session.execute(statement)).one_or_none()
         if row is None:
             return None
-        return BlobCacheKey(code_change_id=row[0], head_sha=row[1], path=path)
+        return BlobCacheKey(repository_id=row[0], blob_sha=row[1])
 
     async def request_cancel(self, run_id: UUID) -> CancelRequestResult:
         """Persist one cancellation decision while holding the run row lock.
@@ -273,7 +362,9 @@ class SqlAlchemyRunRepository:
         left untouched, making retries idempotent.
         """
         async with self._session_factory.begin() as session:
-            run = await session.scalar(select(Run).where(Run.id == run_id).with_for_update())
+            run = await session.scalar(
+                select(Run).where(Run.id == run_id, self._authorized_run()).with_for_update()
+            )
             if run is None:
                 return CancelRequestResult(found=False, changed=False)
             if run.state is RunState.QUEUED:
@@ -288,26 +379,29 @@ class SqlAlchemyRunRepository:
 
     @staticmethod
     def _summary_only_projection() -> ColumnElement[bool]:
-        snapshot_count = (
-            select(func.count())
+        summary_only = (
+            select(func.bool_or(CodeChangeDiff.summary_only))
             .select_from(CodeChangeDiff)
-            .where(
-                CodeChangeDiff.code_change_id == Run.code_change_id,
-                CodeChangeDiff.head_sha == Run.head_sha,
-            )
+            .where(CodeChangeDiff.run_id == Run.id)
             .scalar_subquery()
         )
-        textual_snapshot_count = (
-            select(func.count())
-            .select_from(CodeChangeDiff)
-            .where(
-                CodeChangeDiff.code_change_id == Run.code_change_id,
-                CodeChangeDiff.head_sha == Run.head_sha,
-                CodeChangeDiff.patch.is_not(None),
-            )
-            .scalar_subquery()
+        return func.coalesce(summary_only, False).label("summary_only")
+
+    @staticmethod
+    def _to_diff_snapshot(row: CodeChangeDiff) -> DiffSnapshot:
+        return DiffSnapshot(
+            filename=row.filename,
+            patch=row.patch,
+            blob_sha=row.blob_sha,
+            status=row.status,  # type: ignore[arg-type]
+            previous_filename=row.previous_filename,
+            additions=row.additions,
+            deletions=row.deletions,
+            changes=row.changes,
+            omission_reason=row.omission_reason,
+            review_patch=row.review_patch,
+            summary_only=row.summary_only,
         )
-        return and_(snapshot_count > 0, textual_snapshot_count == 0).label("summary_only")
 
     @staticmethod
     def _to_run_list_item(
@@ -388,12 +482,11 @@ class SqlAlchemyReviewOutputRepository:
         ).one_or_none()
         if row is None:
             return None
-        code_change_id, head_sha, rules, max_comments = row
+        _, _, rules, max_comments = row
         snapshots = (
             await self._session.execute(
                 select(CodeChangeDiff.filename, CodeChangeDiff.patch).where(
-                    CodeChangeDiff.code_change_id == code_change_id,
-                    CodeChangeDiff.head_sha == head_sha,
+                    CodeChangeDiff.run_id == run_id,
                 )
             )
         ).all()

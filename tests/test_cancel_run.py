@@ -6,11 +6,11 @@ from datetime import UTC, datetime
 from uuid import UUID
 
 import pytest
-from fastapi.testclient import TestClient
 
 from app.main import app, get_run_repository
 from app.modules.reviews.application.cancel_run import CancelRequestResult, CancelRun
 from app.modules.reviews.application.list_runs import RunListItem
+from tests.portal_test_client import authenticated_test_client as TestClient
 
 
 class FakeCancelRunRepository:
