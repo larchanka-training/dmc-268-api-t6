@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://raw.githubusercontent.com/larchanka-training/dmc-268-api-t6/main/contracts/schemas/review.run.v1.schema.json",
   "title": "review.run/v1 queue message",
-  "description": "Pointer message published onto the `reviews` exchange (routing key `review.run.fast` or `review.run.deep`) and consumed by the worker (SYSTEM_DESIGN.md §7.2, PIPELINE_SPEC §12). Producers: the webhook path (webhook-api, T1), the trigger sweep in the worker leader loop (T2), rerun (portal-api, T3) and the reconciler (portal-api leader loop, T12, T13, T18); until the service split these roles run in the one FastAPI app and the worker process. Carries no diff or payload data: the worker reads everything else from PostgreSQL and GitHub by id, which keeps the message under 1 KB.",
+  "description": "Pointer message published onto the `reviews` exchange (routing key `review.run.fast` or `review.run.deep`) and consumed by the worker (SYSTEM_DESIGN.md §7.2, PIPELINE_SPEC §12). Producers: the webhook path (webhook-api, T1), the trigger sweep in the worker leader loop (T2), rerun (portal-api, T3), the check-run close signal on cancel (webhook-api and portal-api, T6) and the reconciler (portal-api leader loop, T12, T13, T18); until the service split these roles run in the one FastAPI app and the worker process. Carries no diff or payload data: the worker reads everything else from PostgreSQL and GitHub by id, which keeps the message under 1 KB.",
   "$ref": "#/$defs/ReviewRunV1",
   "$defs": {
     "Uuid": {

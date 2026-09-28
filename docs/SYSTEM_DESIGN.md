@@ -476,7 +476,7 @@ sequenceDiagram
 | `reviews.retry` | direct | `retry.{30s,2m,10m}.{fast,deep}` | с тем же именем | — | `x-message-ttl`, `x-dead-letter-exchange=reviews`, `x-dead-letter-routing-key=review.run.{engine}` (отложенный повтор без плагина; PIPELINE_SPEC §4.3) |
 | `reviews.dlx` | fanout | — | `reviews.dlq` | оператор | хранение 7 дней |
 
-Параметры: сообщения `delivery_mode=2`, publisher confirms включены, `prefetch_count=1` на run-очередях (задачи длинные и неравные), ack **только после** фиксации состояния в PostgreSQL, `consumer_timeout=45min` (глубокий путь ≤ 10 мин с запасом). Retry, lease и таймауты — PIPELINE_SPEC §3–§4.
+Параметры: сообщения `delivery_mode=2`, publisher confirms включены, `prefetch_count=1` на run-очередях (задачи длинные и неравные), ack **только после** фиксации состояния в PostgreSQL, `consumer_timeout=45min` (попытка в `running` — не дольше 28 мин с учётом lease и реконсилера, PIPELINE_SPEC §3). Retry, lease и таймауты — PIPELINE_SPEC §3–§4.
 
 Пока отдельного сервиса `publisher` нет, очередь `review.publish` потребляет отдельный consumer в процессе worker: сообщение `review.publish/v1`, переходы и идемпотентность по `findings_hash` те же (PIPELINE_SPEC §1).
 
