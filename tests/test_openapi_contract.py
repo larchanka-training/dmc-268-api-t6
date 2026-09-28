@@ -39,7 +39,8 @@ SPEC_PATH = Path(__file__).parents[1] / "contracts" / "openapi.yaml"
 HTTP_METHODS = frozenset({"get", "put", "post", "delete", "options", "head", "patch", "trace"})
 # api#20 D9: the webhook receiver and the liveness probe are not part of the browser API.
 EXCLUDED_APP_PATHS = frozenset({"/healthcheck", "/webhooks/github"})
-# Planned additions (#34) the UI Zod PullRequestRef does not have yet.
+# Optional PullRequestRef fields (#34). The UI Zod contract gains them in ui#57; until the
+# snapshot is regenerated it may lack any of them, and where present they stay optional.
 PLANNED_PULL_REQUEST_FIELDS = frozenset({"author", "headRef", "baseRef"})
 UNKNOWN_RUN_ID = UUID("99999999-9999-4999-8999-999999999999")
 EXPIRED_PATH = "expired.py"
@@ -361,9 +362,10 @@ def test_pull_request_ref_extends_the_ui_contract_only_with_optional_fields() ->
     zod = _generated_schemas()["runSession"]["properties"]["pullRequest"]
     schema = _components()["PullRequestRef"]
 
-    assert schema["properties"].keys() - zod["properties"].keys() == PLANNED_PULL_REQUEST_FIELDS
+    assert schema["properties"].keys() - zod["properties"].keys() <= PLANNED_PULL_REQUEST_FIELDS
     assert zod["properties"].keys() <= schema["properties"].keys()
     assert set(schema["required"]) == set(zod["required"])
+    assert (PLANNED_PULL_REQUEST_FIELDS & zod["properties"].keys()).isdisjoint(zod["required"])
 
 
 @pytest.mark.parametrize(("base", "extended"), [("RunSession", "RunDetail"), ("User", "Me")])

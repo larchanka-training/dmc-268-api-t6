@@ -57,7 +57,7 @@ stateDiagram-v2
 
 Правила для всех переходов:
 
-- **SSE.** Каждый переход — `NOTIFY run_updated` в той же транзакции (D12); portal-api отдаёт SSE `run.updated {runId, status}`.
+- **SSE.** Создание Run и каждая смена `state` — `NOTIFY run_updated` в той же транзакции (D12); T7, T17 и T18 состояние не меняют и уведомления не шлют [дефолт]. Payload — JSON в snake_case, как сообщения очереди: `{"run_id": "<uuid>", "workspace_id": "<uuid>", "status": "<run_state>"}` (PostgreSQL принимает payload короче 8000 байт); `workspace_id` позволяет portal-api раздать событие подписчикам Workspace этого Run (Р-7) без SELECT на каждое событие [техлид]. Шлют webhook-api (T1, T6 — #11), worker и portal-api (#34). Наружу portal-api отдаёт только SSE `run.updated` = `RunUpdatedEvent {runId, status}` из `contracts/openapi.yaml`; `workspace_id` наружу не выходит.
 - **Сначала commit, потом сообщение.** Публикация в RabbitMQ — после commit, с publisher confirms; ack входящего сообщения — после confirm исходящего (SD §7.1). Вызовы GitHub и LLM — вне транзакции БД.
 - **RunGuard решает по PG** (SD §6.3). Если Run не в `queued` или `available_at > now`, доставка подтверждается ack без работы. Если Run терминален и `attempt ≥ 1`, RunGuard идемпотентно доводит check-run до итогового conclusion (§7) и делает ack. Так закрываются check-run'ы Run, завершённых без воркера (T6, T13).
 - **Publisher в MVP.** Пока отдельного сервиса `publisher` нет (#34), очередь `review.publish` потребляет отдельный consumer в процессе worker. T8 и T17 идут через настоящее сообщение `review.publish/v1`, T14–T16 выполняет этот consumer; идемпотентность по `findings_hash` и переходы те же.
@@ -92,7 +92,7 @@ Summary-only (дифф > 3 000 строк, SD §13) — это не `skipped`. `
 | `github.publish_review` | `{head_sha, findings_hash, review_event, inline_count, try}` | `{github_review_id}` или `{error: {http_status, message}}` |
 | `engine.fallback` | `{from: "deep", to: "fast", reason: daily_budget \| sandbox_timeout}` | `null` |
 
-**Размер `response`** (D1, §14). Сериализованный JSON до 64 КБ включительно хранится в `run_actions.response`. Больший ответ — строка отдельной таблицы PG (таблица и миграция — #34): `run_actions.response_ref` хранит её id, `response = null` (CHECK `ck_run_actions_response_location` уже есть). UI читает тело через `GET /api/runs/{id}/actions/{index}/response`. Предел строки — 1 МиБ. Больший ответ заменяется обёрткой `{"truncated": true, "original_bytes": N, "text": "<первый 1 МиБ сериализованного JSON>"}`. У `request` ссылки нет: туда пишутся только метаданные.
+**Размер `response`** (D1, §14). Сериализованный JSON до 64 КБ включительно хранится в `run_actions.response`. Больший ответ — строка отдельной таблицы PG (таблица и миграция — #34): `run_actions.response_ref` хранит её id, `response = null` (CHECK `ck_run_actions_response_location` уже есть). UI читает тело через `GET /api/runs/{id}/actions/{index}/response`. Предел строки — 1 МиБ на всю сериализованную запись, включая обёртку [дефолт]. Больший ответ заменяется обёрткой `{"truncated": true, "original_bytes": N, "text": "<начало сериализованного JSON>"}`: `text` — самый длинный префикс сериализованного ответа, обрезанный по границе символа UTF-8, при котором сериализованная обёртка с экранированным `text` не превышает 1 МиБ. У `request` ссылки нет: туда пишутся только метаданные.
 
 ---
 
@@ -179,7 +179,7 @@ Fallback-модель — вторая модель шлюза с тем же st
 | 429 | HTTP 429 после ротации ключей в шлюзе (#33) | ждать `Retry-After`, если ≤ 30 с, 1 раз; иначе сразу fallback | fallback 1 раз, retry прогона с задержкой ≥ 2 мин | `failed`, `llm_rate_limited` | то же | то же |
 | 5xx / соединение | HTTP 5xx, отказ или обрыв соединения | 2 повтора: 2 с, 8 с (+ jitter до 1 с) | fallback 1 раз, retry прогона | `failed`, `llm_unavailable` | то же | то же |
 | Невалидный или нестрогий JSON | не JSON; вывод обрезан по длине; нарушена `review-output.schema.json` или семантика §9 (`InvalidReviewOutput`) | тот же запрос не повторяется | 1 repair-вызов той же модели с ошибками валидатора, затем fallback 1 раз; retry прогона нет | `failed`, `llm_invalid_output` | то же | то же; ответ модели — в `response` записи `llm.call` |
-| Переполнение контекста | предварительный подсчёт > лимита SD §13 или HTTP 400 провайдера о длине контекста | вызов того же размера не повторяется | 1 пересборка на уровень ниже: снимается последний добавленный уровень в обратном порядке SD §9 (L3 → L2 → L4, L1 остаётся); fallback и retry прогона нет | `failed`, `llm_context_overflow` | то же | то же; `context.build` дважды |
+| Переполнение контекста | предварительный подсчёт > лимита SD §13 или HTTP 400 провайдера о длине контекста | вызов того же размера не повторяется | 1 пересборка на уровень ниже: снимается последний добавленный уровень в обратном порядке SD §9 (L3 → L2 → L4, L1 остаётся); fallback и retry прогона нет. Пока контекст состоит только из L1 (спринт 2), пересборки нет — шлюз сразу возвращает `llm_context_overflow`; пересборка включается вместе с ContextProvider L2–L4 [техлид] | `failed`, `llm_context_overflow` | то же | то же; `context.build` дважды — после включения пересборки |
 | Бюджет прогона | сумма и оценка превышают лимит (§4.5) | вызов не делается | — | fast: `failed`, `budget_exceeded`; deep: публикуется сделанное (SD §13), `succeeded` | fast: как выше; deep: ревью, в check-run «прервано по бюджету» | fast: `failed`; deep: `succeeded` |
 | Дедлайн | перед вызовом осталось меньше таймаута вызова; на checkpoint дедлайн истёк (§3) | вызов не делается | — | `failed`, `deadline_exceeded` | как в первой строке | `failed` + `errorCode` |
 
@@ -217,7 +217,7 @@ Fallback-модель — вторая модель шлюза с тем же st
 | `llm_rate_limited` | `failed` | LLM | да | Провайдер модели ограничил частоту запросов. Перезапустите прогон позже. |
 | `llm_unavailable` | `failed` | LLM | да | Провайдер модели недоступен. |
 | `llm_invalid_output` | `failed` | LLM | repair и fallback; прогон — нет | Модель вернула ответ не по контракту. |
-| `llm_context_overflow` | `failed` | LLM | пересборка контекста; прогон — нет | PR не помещается в контекст модели. |
+| `llm_context_overflow` | `failed` | LLM | пересборка контекста — с L2–L4, пока только L1 её нет; прогон — нет | PR не помещается в контекст модели. |
 | `budget_exceeded` | `failed` | бюджет | нет | Превышен лимит стоимости прогона. |
 | `deadline_exceeded` | `failed` | время | нет | Прогон не уложился в лимит времени. |
 | `diff_fetch_failed` | `failed` | GitHub | да: прогон | Не удалось получить дифф из GitHub. |
@@ -382,7 +382,7 @@ UI рисует диапазон `[newLine ?? oldLine, endLine ?? newLine ?? old
 
 | Термин куратора (карточки спринта 2) | Канон | Где в каноне | Задача |
 |---|---|---|---|
-| `ReviewJob` | сущность `Run`, API-представление `RunSession` | SD §11, §12; `contracts/openapi.yaml` | #34, ui#57 |
+| `ReviewJob` | сущность `Run`, API-представление `RunSession` | SD §11, §12; `contracts/openapi.yaml` | #34, ui#57, #30 |
 | стадии `FETCHING_DIFF` / `PARSING_CONTEXT` / `LLM_PROCESSING` | фазы внутри `running`: `vcs.fetch_diff` / `context.build` / `llm.call` в `run_actions.tool`; новых состояний нет | §2 (D5) | #11, #33, #34, ui#57 |
 | `COMPLETED` | `succeeded` (Р-14); `completed` — только статусы GitHub | SD §1, §6.4; §1 | ui#50, ui#57 |
 | очередь на Redis с DLQ | RabbitMQ (Р-1): `review.run.*`, `reviews.retry`, `reviews.dlq`; Redis — только кэш (SD §10) | SD §7; §4 | #34, #35 |
@@ -390,11 +390,15 @@ UI рисует диапазон `[newLine ?? oldLine, endLine ?? newLine ?? old
 | список PR | `GET /api/repos/{id}/pulls` → `{items: PullRequestSummary[], nextCursor}` (D11) | `contracts/openapi.yaml` | #34 |
 | бейджи Critical / Warning / Info | пять уровней severity; три бейджа — группировка в UI | §11 | ui#57 |
 | «общий скор / вердикт» | `verdict: blocking \| attention \| clean`, выводится на сервере; скора нет | §11 (D3) | #34, ui#57, #30 (`expected_verdict`) |
-| Diff Suggestion | `suggestion` находки: замена строк `start_line..line`; `null` — замены нет | §9 | #33, ui#57 |
+| Diff Suggestion; предлагаемый diff-fix (карточка техлида) | `suggestion` находки: замена строк `start_line..line`; `null` — замены нет | §9 | #33, ui#57 |
 | запуск по `opened` / `synchronize` | конъюнкция Р-10: бот назначен ∧ CI зелёный; `synchronize` отменяет устаревший Run и запускает авто-повтор | §8 (D2) | #11 |
+| «GitHub / GitLab» (карточки Инженера 1 и Инженера 3) | в v1 только GitHub; GitLab — порт `VcsProvider` без реализации (Р-11) | SD §1, §8.1 | #11, ui#50 |
 | LLM Gateway с провайдерами и fallback | LLM Gateway (SD §5): ротация ключей внутри шлюза, fallback-модель по §5.1, strict structured output (D7) | §4.5, §5 | #33 |
 | хранилище секретов | env из CI; перечень и правила — `docs/SECRETS.md` (роль 3) | SD §13, `docs/SECRETS.md` | #35 |
 | инфраструктура DevOps: PostgreSQL и Redis | PostgreSQL 17 + RabbitMQ + Redis (D1) | §14, SD §10, §14 | #35 |
+| «Применить Terraform» (карточка DevOps) | окружение staging — курсовой VPS вне Terraform; стеки `terraform/` остаются задокументированной альтернативой, CI продолжает их проверять, apply не требуется | `docs/INFRASTRUCTURE.md` | #35 |
+| «по пушу в main/develop» (карточка DevOps) | ветки `develop` нет, базовая ветка — `main`; `main` выкатывается на staging, prod вне спринта | `docs/CICD.md` | #35 |
+| «Docker-образы бэкенда, воркеров» (карточка DevOps) | образ один: воркер запускается из того же образа, что `api`, своей командой (#34); per-service образы — вместе с разделением на сервисы (#16), не в этом спринте | SD §14 | #34, #35 |
 | Finding «от Теклида» (карточка LLM Gateway) | `ReviewOutput` по `review/schemas/review-output.schema.json`, а не `Finding[]` | §9 | #33, #30 |
 
 ---
@@ -438,3 +442,5 @@ UI рисует диапазон `[newLine ?? oldLine, endLine ?? newLine ?? old
 | HTTP API | `uv run pytest tests/test_openapi_contract.py` | валидность OAS 3.1; пути FastAPI есть в спеке; ответы соответствуют схемам; enum `RunStatus` совпадает с Zod. Локально дополнительно — `npx @redocly/cli lint contracts/openapi.yaml` |
 | Ответы API ↔ Zod UI | `uv run pytest tests/test_ui_zod_contracts.py` | DTO проходят JSON Schema Zod-контракта |
 | Имена канона | `git grep -nE 'ReviewJob\|COMPLETED\|/api/v1' -- contracts review/schemas` | вывод пустой |
+
+После мержа ui#57 (владелец — #34 [дефолт]): `tests/generate_ui_zod_contracts.mjs` выгружает также Zod-схемы run detail и находки; снимок `tests/fixtures/ui_zod_contracts.json` перегенерируется, хэш коммита ui обновляется в `provenance.commit` снимка и в проверке `_generated_schemas` (`tests/test_ui_zod_contracts.py`); `RunDetail` и `FindingView` добавляются в `test_component_schemas_mirror_the_ui_zod_contract`.
