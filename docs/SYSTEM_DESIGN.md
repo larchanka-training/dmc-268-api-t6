@@ -379,7 +379,7 @@ sequenceDiagram
   B->>P: GET /api/runs/{id} → RunDetail
 ```
 
-Каждый переход Run шлёт `NOTIFY run_updated` в своей транзакции (D12 — дефолт по #20, PIPELINE_SPEC §1): уведомление приходит только после commit, и UI не видит незафиксированных состояний. Поток читается через `fetch` с Bearer — `EventSource` заголовки не передаёт. Мост LISTEN/NOTIFY → SSE — #34.
+Каждая смена статуса Run шлёт `NOTIFY run_updated` в своей транзакции (D12 — дефолт по #20; payload и отправители — PIPELINE_SPEC §1): уведомление приходит только после commit, и UI не видит незафиксированных состояний. Поток читается через `fetch` с Bearer — `EventSource` заголовки не передаёт. Мост LISTEN/NOTIFY → SSE — #34.
 
 ### 6.7 Перезапуск
 
@@ -459,7 +459,7 @@ sequenceDiagram
   WH->>PG: repositories отключены
 ```
 
-Репозиторий подключается только установкой App: `POST /api/repos` нет (D10), кнопка «Подключить» в UI — ссылка на установку App, список обновляют вебхуки (§8.2). Кто связывает новую установку с Workspace, пока не определено: на `main` доставка для установки без Workspace подтверждается и игнорируется.
+Репозиторий подключается только установкой App: `POST /api/repos` нет (D10), кнопка «Подключить» в UI — ссылка на установку App, список обновляют вебхуки (§8.2). Новую установку с Workspace связывает #11; способ — при `installation.created` или при входе через `GET /user/installations` — выбирается в PR по #11. На `main` доставка для установки без Workspace подтверждается и игнорируется.
 
 ---
 
@@ -758,7 +758,7 @@ Zod-схемы фронта (роль 5) и бэкенд описывают од
 - **Access** — JWT на 15 мин в заголовке `Authorization: Bearer` на всех `/api/*`, кроме callback, refresh и logout; SPA держит его в памяти, не в `localStorage`.
 - **Refresh** — ротируемый, 30 дней, cookie `refresh_token`: `HttpOnly; Secure; SameSite=Strict; Path=/api/auth`. `POST /api/auth/refresh` выдаёт новый access и новую cookie, `POST /api/auth/logout` отзывает refresh и стирает cookie. При загрузке SPA восстанавливает сессию: refresh, затем `GET /api/auth/me` (`Me` = `User` + `workspaces [{id, name, installationId}]`).
 - **Claims** — `sub` (пользователь), id доступных Workspace, `iat` / `exp`, `iss` / `aud`. Подписывает `auth-api`; `portal-api` проверяет подпись публичным ключом `auth-api`, `exp`, `iss` и `aud`.
-- **Граница Workspace (Р-7)** — `auth-api` при входе получает установки пользователя (`GET /user/installations`) и кладёт в токен только их Workspace; `portal-api` фильтрует каждый `/api/*` по этому claim. Своей таблицы ролей нет.
+- **Граница Workspace (Р-7)** — `auth-api` при входе получает установки пользователя (`GET /user/installations`) и кладёт в токен только их Workspace; `portal-api` фильтрует каждый `/api/*` по этому claim. Пустой список Workspace — валидный claim (решение техлида 28.09.2026): `auth-api` выдаёт токен с `workspaces: []`, `portal-api` отвечает пустыми списками, UI показывает «Подключить»; 401 — только если claim Workspace нет или он битый. Своей таблицы ролей нет.
 - **SSE** — `fetch`-стрим с тем же Bearer (`EventSource` заголовки не передаёт).
 
 ---
