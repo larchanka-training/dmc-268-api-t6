@@ -36,7 +36,7 @@ stateDiagram-v2
 
 | # | Из → в | Триггер | Кто | Guard | Побочные эффекты: сообщение · check-run |
 |---|---|---|---|---|---|
-| T1 | `[*]` → `queued` | `pull_request.review_requested` (бот), `check_suite` / `workflow_run.completed`, `pull_request.synchronize` → `try_enqueue` | webhook-api (#11) | условие Р-10 (§8) ∧ нет активного Run по PR (Р-2) ∧ нет Run с `trigger = webhook` для `(PR, head_sha)` | INSERT `runs` (`attempt = 0`, `available_at = now`), после commit — `review.run/v1` в `review.run.{engine}` · check-run не создаётся |
+| T1 | `[*]` → `queued` | `pull_request.labeled` (`ai-review`) и `reopened`, `check_suite` / `workflow_run.completed`, `pull_request.synchronize` → `try_enqueue` | webhook-api (#11) | условие Р-10 (§8) ∧ нет активного Run по PR (Р-2) ∧ нет Run с `trigger = webhook` для `(PR, head_sha)` | INSERT `runs` (`attempt = 0`, `available_at = now`), после commit — `review.run/v1` в `review.run.{engine}` · check-run не создаётся |
 | T2 | `[*]` → `queued` | sweep «2 мин без CI» → тот же `try_enqueue` | worker, leader-цикл (#34) | `wait_for_ci = auto` ∧ ни чужих check suites, ни статусов коммита ≥ 2 мин (§8.3) ∧ guard T1 | как T1 |
 | T3 | `[*]` → `queued` | `POST /api/runs/{id}/rerun` | portal-api (#34) | PR открыт [дефолт] ∧ нет активного Run по PR, иначе `409`; флаг и CI не проверяются | новый Run на текущий `head_sha`, `trigger = rerun`, AMQP priority 9 · check-run не создаётся |
 | T4 | `queued` → `running` | доставка `review.run/v1` | worker | RunGuard: `state = queued` ∧ `available_at ≤ now` ∧ ¬`cancel_requested` ∧ `head_sha` актуален ∧ PR открыт | одним UPDATE: `attempt += 1`, `lease_until = now + 5 мин`, `worker_id`; `started_at` при первой попытке · check-run `in_progress` (создаётся при `attempt = 1`) |
@@ -260,7 +260,7 @@ Check-run Run, завершённого без воркера (T6 после п�
 
 | Условие | Проверка |
 |---|---|
-| Бот назначен ревьюером | `code_changes.reviewer_requested` — наш флаг (§8.2) [техлид] |
+| На PR стоит лейбл `ai-review` | `code_changes.reviewer_requested` — наш флаг (§8.2) [техлид, #37] |
 | CI зелёный для `head_sha` | REST в момент `try_enqueue`, порядок событий не важен [дефолт]: (а) `GET /repos/{owner}/{repo}/commits/{head_sha}/check-suites` — каждый чужой suite (все, кроме suite нашего App, `app.id`) имеет `status = completed` и `conclusion ∈ {success, neutral, skipped}`; (б) `GET /repos/{owner}/{repo}/commits/{head_sha}/status` — combined status `success` или статусов нет (`total_count = 0`; SD §8.2, события `status`); (в) CI есть: хотя бы один чужой suite или статус. При `wait_for_ci = never` проверка не выполняется; при `auto` и отсутствии CI через 2 мин — T2 |
 | Нет активного Run по PR | Р-2 |
 | Нет Run с `trigger = webhook` для `(PR, head_sha)` | повторные `check_suite.completed` по тому же sha второго прогона не создают; повторить можно только через rerun |
@@ -270,27 +270,27 @@ Check-run Run, завершённого без воркера (T6 после п�
 | `wait_for_ci` | Поведение |
 |---|---|
 | `always` | ждать зелёного CI без срока; пока нет ни чужих suites, ни статусов, Run не создаётся |
-| `auto` | как `always`, но если через 2 мин после назначения или пуша нет ни чужих suites, ни статусов — старт без CI (§8.3) |
-| `never` | достаточно назначения |
+| `auto` | как `always`, но если через 2 мин после постановки лейбла или пуша нет ни чужих suites, ни статусов — старт без CI (§8.3) |
+| `never` | достаточно лейбла |
 
 ### 8.2 Флаг и повторное ревью после пуша
 
 | Событие | `reviewer_requested` | Действие |
 |---|---|---|
-| `review_requested`, reviewer — бот | `true` | `try_enqueue` |
-| Бот опубликовал ревью | не меняется | GitHub сам снимает запрос: «Once a requested reviewer submits a review, they are no longer considered a requested reviewer» (REST, review requests). Наш флаг остаётся |
+| `labeled`, `label.name == "ai-review"` | `true` | `try_enqueue` |
+| Бот опубликовал ревью | не меняется | бот лейбл не снимает, флаг остаётся [техлид, #37] |
 | `synchronize` | не меняется | активный Run отменяется (`superseded`), `try_enqueue` для нового `head_sha` — авто-повтор, пока PR открыт [техлид] |
-| `review_request_removed`, reviewer — бот, `sender` — человек | `false` | новые Run не создаются; активный Run доработает |
-| `review_request_removed` от самого бота | не меняется | игнорируется (Р-9) |
+| `unlabeled`, `label.name == "ai-review"`, `sender` — человек | `false` | новые Run не создаются; активный Run доработает |
+| `labeled` / `unlabeled` от самого бота | не меняется | игнорируется (Р-9) |
 | `pull_request.closed` | `false` | активный Run отменяется (`pr_closed`) |
-| `reopened` | не меняется | нужен новый запрос ревью |
+| `reopened` | есть ли `ai-review` в `pull_request.labels` | `try_enqueue`; окно sweep отсчитывается заново, если флаг стал `true` (§8.3) [дефолт] |
 
-Документация GitHub не описывает, приходит ли `review_request_removed` после ревью бота и с каким `sender`. Правила выше верны, если такое событие приходит от имени бота или не приходит вовсе. #11 проверяет это на доставках staging до мержа триггера.
+Бота нельзя запросить ревьюером: `POST /repos/{owner}/{repo}/pulls/{pull_number}/requested_reviewers` с `<slug>[bot]` отвечает 201 с пустым `requested_reviewers`, событие `review_requested` не приходит, а GraphQL `requestReviews` принимает только `User` (проверено на staging App, [#37](https://github.com/larchanka-training/dmc-268-api-t6/issues/37#issuecomment-5874776355)). Поэтому триггер — лейбл `ai-review`. Ставить и снимать лейблы может только участник с правом triage и выше ([GitHub Docs](https://docs.github.com/en/issues/using-labels-and-milestones-to-track-work/managing-labels)): внешний автор PR не запустит ревью и не потратит бюджет LLM. События `labeled` / `unlabeled` приходят в подписке `pull_request`, новых прав App не нужно; кто создаёт сам лейбл в подключённом репозитории — SD OQ-8.
 
 ### 8.3 Sweep «2 мин без CI»
 
 - **Где:** leader-цикл сервиса worker (лидер через `pg_advisory_lock`), раз в 30 с [дефолт]; реализует #34. У worker уже есть ключ App (SD §8.3), поэтому REST-проверка не требует новых секретов. Реконсилер portal-api с периодом 5 мин sweep не заменяет.
-- **Кандидаты:** PR открыт ∧ `reviewer_requested` ∧ `wait_for_ci = auto` ∧ нет Run для `(PR, head_sha)` ∧ прошло ≥ 2 мин с `max(момент назначения, момент появления head_sha)`. Отметки времени в `code_changes` добавляет #11.
+- **Кандидаты:** PR открыт ∧ `reviewer_requested` ∧ `wait_for_ci = auto` ∧ нет Run для `(PR, head_sha)` ∧ прошло ≥ 2 мин с более позднего из двух моментов: `reviewer_requested` стал `true`, появился `head_sha`. Отметки времени в `code_changes` добавляет #11.
 - **Действие:** тот же `try_enqueue(pr, allow_no_ci = true)`, что у вебхуков (#11). Функция повторяет REST-проверку: если появился чужой suite или статус, ждём результата; если нет — T2.
 
 ---
@@ -391,7 +391,7 @@ UI рисует диапазон `[newLine ?? oldLine, endLine ?? newLine ?? old
 | бейджи Critical / Warning / Info | пять уровней severity; три бейджа — группировка в UI | §11 | ui#57 |
 | «общий скор / вердикт» | `verdict: blocking \| attention \| clean`, выводится на сервере; скора нет | §11 (D3) | #34, ui#57, #30 (`expected_verdict`) |
 | Diff Suggestion; предлагаемый diff-fix (карточка техлида) | `suggestion` находки: замена строк `start_line..line`; `null` — замены нет | §9 | #33, ui#57 |
-| запуск по `opened` / `synchronize` | конъюнкция Р-10: бот назначен ∧ CI зелёный; `synchronize` отменяет устаревший Run и запускает авто-повтор | §8 (D2) | #11 |
+| запуск по `opened` / `synchronize` | конъюнкция Р-10: стоит лейбл `ai-review` ∧ CI зелёный; `synchronize` отменяет устаревший Run и запускает авто-повтор | §8 (D2) | #11 |
 | «GitHub / GitLab» (карточки Инженера 1 и Инженера 3) | в v1 только GitHub; GitLab — порт `VcsProvider` без реализации (Р-11) | SD §1, §8.1 | #11, ui#50 |
 | LLM Gateway с провайдерами и fallback | LLM Gateway (SD §5): ротация ключей внутри шлюза, fallback-модель по §5.1, strict structured output (D7) | §4.5, §5 | #33 |
 | хранилище секретов | env из CI; перечень и правила — `docs/SECRETS.md` (роль 3) | SD §13, `docs/SECRETS.md` | #35 |
@@ -407,7 +407,7 @@ UI рисует диапазон `[newLine ?? oldLine, endLine ?? newLine ?? old
 
 | Вопрос | Решение | Источник |
 |---|---|---|
-| Р-10 / OQ-1 — триггер и повторное ревью | **закрыт**: конъюнкция Р-10 подтверждена; после пуша — авто-повтор, пока PR открыт и стоит флаг `reviewer_requested` (§8) | D2 [техлид]; определение «зелёного CI» (check suites без своего и combined status `success` или пусто), проверка через REST, sweep раз в 30 с в leader-цикле worker — [дефолт] |
+| Р-10 / OQ-1 — триггер и повторное ревью | **закрыт**: конъюнкция Р-10 подтверждена; триггер — лейбл `ai-review`, потому что бота нельзя запросить ревьюером ([#37](https://github.com/larchanka-training/dmc-268-api-t6/issues/37#issuecomment-5874776355)); после пуша — авто-повтор, пока PR открыт и стоит лейбл (флаг `reviewer_requested`, §8) | D2 [техлид]; лейбл вместо запроса ревьюера — [техлид] по #37; определение «зелёного CI» (check suites без своего и combined status `success` или пусто), проверка через REST, sweep раз в 30 с в leader-цикле worker — [дефолт] |
 | OQ-2 — модель и бюджет | владелец — исполнитель #33 (lama2x2), срок 01.10.2026. Требования: strict structured output у основной и fallback-модели, контекст ≥ 60 000 токенов, стоимость fast ≤ $0.50 за прогон | D7 [техлид] |
 | OQ-3 — `review_event` по умолчанию | **закрыт**: `COMMENT`; поле `reviewEvent` в `Repository`; `REQUEST_CHANGES` — только при `reviewEvent = REQUEST_CHANGES` ∧ `blocking` (§11) | D8, D3 [дефолт] |
 | Инфраструктура MVP | PostgreSQL 17 + RabbitMQ + Redis. Объектное хранилище (S3) отложено после MVP. Вместо него: тела ответов > 64 КБ — отдельная таблица PG (§2, миграция — #34); полный `ContextPayload` не хранится, в PG — только summary; payload вебхука — JSONB в PG (миграция — #11); блобы > 256 КБ — `cached_file_blobs` в PG | D1 [техлид, пересмотрено 27.09.2026] |
@@ -424,7 +424,7 @@ UI рисует диапазон `[newLine ?? oldLine, endLine ?? newLine ?? old
 | 1 | Где работает sweep (§8.3): для REST-проверки нужен installation-токен, а ключ App по SD §8.3 есть только у webhook-api, worker и publisher | **закрыт**: leader-цикл worker, тот же `try_enqueue` (§8.3) [дефолт] | #34 |
 | 2 | REST-вызов check-suites внутри обработчика вебхука может не уложиться в ack p95 < 500 мс (SD §13) | #11 измеряет на staging; если не укладывается — `try_enqueue` после ответа 202, страховка — sweep | #11 |
 | 3 | Статусы коммитов (`status`, SD §8.2) в условии «CI зелёный» | **закрыт**: combined status `success` или статусов нет (§8.1) [дефолт] | #11 |
-| 4 | Приходит ли `review_request_removed` после ревью бота (§8.2) | проверить на доставках staging | #11 |
+| 4 | Приходит ли `review_request_removed` после ревью бота (§8.2) | **закрыт**: не применимо — бота нельзя запросить ревьюером, флаг снимает `unlabeled` (§8.2, #37) | #11 |
 | 5 | Владелец таблицы тел ответов > 64 КБ и её миграции (§2) | **закрыт**: #34 [дефолт] | #34 |
 
 ---
