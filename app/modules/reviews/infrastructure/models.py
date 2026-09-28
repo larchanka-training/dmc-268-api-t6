@@ -84,6 +84,15 @@ class CodeChange(Base):
     base_sha: Mapped[str] = mapped_column(String(64), nullable=False)
     head_sha: Mapped[str] = mapped_column(String(64), nullable=False)
     state: Mapped[CodeChangeState] = mapped_column(pg_enum(CodeChangeState, "code_change_state"))
+    ai_review_labeled: Mapped[bool] = mapped_column(
+        BOOLEAN, nullable=False, server_default=text("false")
+    )
+    ai_review_labeled_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    label_intent_updated_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     reviewer_requested: Mapped[bool] = mapped_column(
         BOOLEAN, nullable=False, server_default=text("false")
     )
@@ -197,6 +206,15 @@ class Run(Base):
             ),
         ),
         Index(
+            "ix_runs_pending_cancellation_signal",
+            "cancellation_signal_requested_at",
+            "id",
+            postgresql_where=text(
+                "cancellation_signal_requested_at IS NOT NULL "
+                "AND cancellation_signal_published_at IS NULL"
+            ),
+        ),
+        Index(
             "ix_runs_queued_available_at", "available_at", postgresql_where=text("state = 'queued'")
         ),
         Index("ix_runs_created_id", "created_at", "id"),
@@ -221,6 +239,12 @@ class Run(Base):
     )
     attempt: Mapped[int] = mapped_column(INTEGER, nullable=False, server_default=text("0"))
     message_published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    cancellation_signal_requested_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
+    cancellation_signal_published_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
     diff_snapshotted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     available_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     lease_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

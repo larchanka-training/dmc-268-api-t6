@@ -46,8 +46,8 @@ class SqlAlchemyEligibilityCandidateStore:
                 head_sha=pr.head_sha,
                 state=PullRequestState(pr.state.value),
                 repository_enabled=repository.enabled,
-                reviewer_requested=pr.reviewer_requested,
-                reviewer_requested_at=pr.reviewer_requested_at,
+                ai_review_labeled=pr.ai_review_labeled,
+                ai_review_labeled_at=pr.ai_review_labeled_at,
                 head_first_seen_at=pr.head_first_seen_at,
                 wait_for_ci=CiWaitMode(repository.wait_for_ci.value),
             )

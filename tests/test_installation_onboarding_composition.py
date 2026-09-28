@@ -145,10 +145,10 @@ def test_composition_accepts_typed_event_and_internal_installation_id(
                 action="added",
                 added_repositories=(
                     RepositorySnapshot(
-                        id=101,
+                        external_id=101,
                         full_name="octo/web",
                         default_branch="main",
-                        html_url="https://github.com/octo/web",
+                        web_url="https://github.com/octo/web",
                     ),
                 ),
                 removed_repositories=(),
@@ -232,10 +232,10 @@ def test_migrated_database_onboarding_creates_one_active_rule_version_and_replay
                 action="added",
                 added_repositories=(
                     RepositorySnapshot(
-                        id=101,
+                        external_id=101,
                         full_name="octo/web",
                         default_branch="main",
-                        html_url="https://github.com/octo/web",
+                        web_url="https://github.com/octo/web",
                     ),
                 ),
                 removed_repositories=(),

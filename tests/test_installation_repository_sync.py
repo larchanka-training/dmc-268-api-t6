@@ -113,10 +113,10 @@ class FakeInstallationRepositoryUnitOfWork:
 
 def _snapshot(*, full_name: str = "octo/api") -> RepositorySnapshot:
     return RepositorySnapshot(
-        id=101,
+        external_id=101,
         full_name=full_name,
         default_branch="main",
-        html_url="https://github.com/octo/api",
+        web_url="https://github.com/octo/api",
     )
 
 

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import secrets
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -17,6 +16,7 @@ from app.modules.auth.application.exchange_github_code import (
     AuthenticatedUser,
     ExchangedSession,
 )
+from app.modules.auth.application.refresh_token_hash import hash_refresh_token
 
 
 class InvalidRefreshToken(Exception):
@@ -68,10 +68,6 @@ class RefreshSessionUnitOfWork(UnitOfWork, Protocol):
     def sessions(self) -> RefreshSessionStore: ...
 
 
-def _token_hash(token: str) -> str:
-    return hashlib.sha256(token.encode("utf-8")).hexdigest()
-
-
 class RefreshLocalSession:
     def __init__(
         self,
@@ -89,7 +85,7 @@ class RefreshLocalSession:
     async def execute(self, refresh_token: str | None) -> ExchangedSession:
         if not refresh_token:
             raise InvalidRefreshToken
-        token_hash = _token_hash(refresh_token)
+        token_hash = hash_refresh_token(refresh_token)
         replayed = False
         async with self._uow_factory() as uow:
             family_id = await uow.sessions.find_family_id(token_hash)
@@ -118,7 +114,7 @@ class RefreshLocalSession:
                 replacement = self._new_refresh_token()
                 await uow.sessions.rotate(
                     session.id,
-                    new_token_hash=_token_hash(replacement),
+                    new_token_hash=hash_refresh_token(replacement),
                     at=at,
                     expires_at=at + REFRESH_TOKEN_LIFETIME,
                 )
@@ -143,7 +139,7 @@ class LogoutLocalSession:
         if not refresh_token:
             return
         async with self._uow_factory() as uow:
-            family_id = await uow.sessions.find_family_id(_token_hash(refresh_token))
+            family_id = await uow.sessions.find_family_id(hash_refresh_token(refresh_token))
             if family_id is None:
                 return
             family = await uow.sessions.lock_family(family_id)

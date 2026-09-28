@@ -8,15 +8,25 @@ from uuid import UUID, uuid4
 
 import pytest
 
+from app.modules.integrations.webhooks.api.dispatch import GitHubWebhookDispatchAdapter
+from app.modules.integrations.webhooks.api.receipt import VerifiedGitHubDelivery
 from app.modules.integrations.webhooks.application.github_installation_dispatch import (
+    GitHubDispatchEvent,
     GitHubInstallationDeliveryDispatcher,
+    InstallationDeliveryDispatchResult,
     InstallationDeliveryDispatchStatus,
-    VerifiedGitHubDelivery,
+    UnsupportedGitHubEvent,
 )
 from app.modules.repositories.application.installation_repositories import (
     InstallationRepositoriesEvent,
 )
 from app.modules.repositories.application.onboard_repository import OnboardingResult
+from app.modules.reviews.application.project_github_pull_request import (
+    PullRequestEvent,
+    PullRequestLabelEvent,
+    PullRequestProjectionStatus,
+)
+from app.modules.reviews.application.trigger_from_delivery import CiTriggerEvent
 
 
 @dataclass
@@ -62,15 +72,171 @@ def _added_delivery() -> VerifiedGitHubDelivery:
     )
 
 
+def _pull_request_delivery(
+    action: str, *, label: object = None, delivery_id: str = "delivery-label"
+) -> VerifiedGitHubDelivery:
+    payload: dict[str, object] = {
+        "action": action,
+        "installation": {"id": 17},
+        "repository": {"id": 101, "full_name": "octo/repo"},
+        "pull_request": {
+            "id": 901,
+            "number": 7,
+            "title": "Review parser",
+            "html_url": "https://github.com/octo/repo/pull/7",
+            "user": {"login": "alice"},
+            "head": {"ref": "feature", "sha": "a" * 40},
+            "base": {"ref": "main", "sha": "b" * 40},
+            "state": "open",
+            "updated_at": "2026-09-28T11:59:00Z",
+        },
+    }
+    if label is not None:
+        payload["label"] = label
+    return VerifiedGitHubDelivery(delivery_id, "pull_request", payload)
+
+
+@pytest.mark.parametrize("action", ["labeled", "unlabeled"])
+def test_exact_ai_review_label_reaches_typed_intent_projector_and_only_add_triggers(
+    action: str,
+) -> None:
+    @dataclass
+    class IntentProjector:
+        events: list[PullRequestLabelEvent] = field(default_factory=list)
+
+        async def execute(self, event: PullRequestLabelEvent) -> PullRequestProjectionStatus:
+            self.events.append(event)
+            return PullRequestProjectionStatus.PROJECTED
+
+    @dataclass
+    class Trigger:
+        prs: list[PullRequestEvent] = field(default_factory=list)
+        labels: list[PullRequestLabelEvent] = field(default_factory=list)
+
+        async def on_pr(self, event: PullRequestEvent) -> None:
+            self.prs.append(event)
+
+        async def on_ci(self, event: CiTriggerEvent) -> None:
+            pass
+
+        async def on_label(self, event: PullRequestLabelEvent) -> None:
+            self.labels.append(event)
+
+    intent = IntentProjector()
+    trigger = Trigger()
+    adapter = GitHubWebhookDispatchAdapter(
+        GitHubInstallationDeliveryDispatcher(
+            resolver=FakeInstallationResolver(),
+            onboarding=FakeOnboarding(),
+            label_intent_projector=intent,
+            run_trigger=trigger,
+        )
+    )
+
+    result = asyncio.run(
+        adapter.execute(_pull_request_delivery(action, label={"name": "ai-review"}).to_receipt())
+    )
+
+    assert result.status is InstallationDeliveryDispatchStatus.PROJECTED_PR
+    assert len(intent.events) == 1
+    assert intent.events[0].pull_request.action == action
+    assert intent.events[0].label_name == "ai-review"
+    assert trigger.prs == []
+    assert trigger.labels == ([intent.events[0]] if action == "labeled" else [])
+
+
+@pytest.mark.parametrize("action", ["labeled", "unlabeled"])
+def test_exact_ai_review_label_defers_until_intent_projector_is_configured(
+    action: str,
+) -> None:
+    adapter = GitHubWebhookDispatchAdapter(
+        GitHubInstallationDeliveryDispatcher(
+            resolver=FakeInstallationResolver(), onboarding=FakeOnboarding()
+        )
+    )
+
+    result = asyncio.run(
+        adapter.execute(_pull_request_delivery(action, label={"name": "ai-review"}).to_receipt())
+    )
+
+    assert result.status is InstallationDeliveryDispatchStatus.DEFERRED_KNOWN_EVENT
+
+
+@pytest.mark.parametrize("action", ["labeled", "unlabeled"])
+def test_unrelated_label_is_ignored_before_intent_projection(action: str) -> None:
+    class IntentProjector:
+        async def execute(self, event: PullRequestLabelEvent) -> PullRequestProjectionStatus:
+            raise AssertionError("unrelated label reached intent projector")
+
+    adapter = GitHubWebhookDispatchAdapter(
+        GitHubInstallationDeliveryDispatcher(
+            resolver=FakeInstallationResolver(),
+            onboarding=FakeOnboarding(),
+            label_intent_projector=IntentProjector(),
+        )
+    )
+
+    result = asyncio.run(
+        adapter.execute(_pull_request_delivery(action, label={"name": "AI-review"}).to_receipt())
+    )
+
+    assert result.status is InstallationDeliveryDispatchStatus.IGNORED_IRRELEVANT_EVENT
+
+
+@pytest.mark.parametrize("label", [None, {}, {"name": ""}, {"name": 17}, "ai-review"])
+def test_malformed_label_is_rejected_at_transport_boundary(label: object) -> None:
+    class TypedDispatcher:
+        async def execute(self, event: GitHubDispatchEvent) -> InstallationDeliveryDispatchResult:
+            raise AssertionError("malformed label reached application")
+
+    result = asyncio.run(
+        GitHubWebhookDispatchAdapter(TypedDispatcher()).execute(
+            _pull_request_delivery("labeled", label=label).to_receipt()
+        )
+    )
+
+    assert result.status is InstallationDeliveryDispatchStatus.IGNORED_INVALID_EVENT
+
+
+@pytest.mark.parametrize("action", ["review_requested", "review_request_removed"])
+def test_former_reviewer_actions_do_not_project_intent_or_enqueue(action: str) -> None:
+    class Projector:
+        async def execute(self, event: PullRequestEvent) -> PullRequestProjectionStatus:
+            raise AssertionError("former reviewer action reached PR projector")
+
+    class Trigger:
+        async def on_pr(self, event: PullRequestEvent) -> None:
+            raise AssertionError("former reviewer action enqueued")
+
+        async def on_label(self, event: PullRequestLabelEvent) -> None:
+            raise AssertionError("former reviewer action enqueued")
+
+        async def on_ci(self, event: CiTriggerEvent) -> None:
+            pass
+
+    adapter = GitHubWebhookDispatchAdapter(
+        GitHubInstallationDeliveryDispatcher(
+            resolver=FakeInstallationResolver(),
+            onboarding=FakeOnboarding(),
+            pull_request_projector=Projector(),
+            run_trigger=Trigger(),
+        )
+    )
+
+    result = asyncio.run(adapter.execute(_pull_request_delivery(action).to_receipt()))
+
+    assert result.status is InstallationDeliveryDispatchStatus.IGNORED_IRRELEVANT_EVENT
+
+
 def test_dispatches_a_verified_delivery_to_the_existing_installation() -> None:
     installation_id = uuid4()
     resolver = FakeInstallationResolver(installations={17: installation_id})
     onboarding = FakeOnboarding()
 
     result = asyncio.run(
-        GitHubInstallationDeliveryDispatcher(resolver=resolver, onboarding=onboarding).execute(
-            _added_delivery()
-        )
+        GitHubWebhookDispatchAdapter(
+            GitHubInstallationDeliveryDispatcher(resolver=resolver, onboarding=onboarding)
+        ).execute(_added_delivery().to_receipt())
     )
 
     assert result.status is InstallationDeliveryDispatchStatus.ONBOARDED
@@ -85,9 +251,9 @@ def test_unknown_installation_is_ignored_without_calling_onboarding() -> None:
     onboarding = FakeOnboarding()
 
     result = asyncio.run(
-        GitHubInstallationDeliveryDispatcher(resolver=resolver, onboarding=onboarding).execute(
-            _added_delivery()
-        )
+        GitHubWebhookDispatchAdapter(
+            GitHubInstallationDeliveryDispatcher(resolver=resolver, onboarding=onboarding)
+        ).execute(_added_delivery().to_receipt())
     )
 
     assert result.status is InstallationDeliveryDispatchStatus.IGNORED_UNKNOWN_INSTALLATION
@@ -98,7 +264,9 @@ def test_unknown_installation_is_ignored_without_calling_onboarding() -> None:
 def test_malformed_or_unsupported_delivery_is_ignored_before_lookup() -> None:
     resolver = FakeInstallationResolver()
     onboarding = FakeOnboarding()
-    dispatcher = GitHubInstallationDeliveryDispatcher(resolver=resolver, onboarding=onboarding)
+    dispatcher = GitHubWebhookDispatchAdapter(
+        GitHubInstallationDeliveryDispatcher(resolver=resolver, onboarding=onboarding)
+    )
 
     malformed = asyncio.run(
         dispatcher.execute(
@@ -106,12 +274,14 @@ def test_malformed_or_unsupported_delivery_is_ignored_before_lookup() -> None:
                 delivery_id="delivery-2",
                 event_name="installation_repositories",
                 payload={"action": "added", "installation": {"id": 17}},
-            )
+            ).to_receipt()
         )
     )
     unsupported = asyncio.run(
         dispatcher.execute(
-            VerifiedGitHubDelivery(delivery_id="delivery-3", event_name="push", payload={})
+            VerifiedGitHubDelivery(
+                delivery_id="delivery-3", event_name="push", payload={}
+            ).to_receipt()
         )
     )
 
@@ -121,24 +291,45 @@ def test_malformed_or_unsupported_delivery_is_ignored_before_lookup() -> None:
     assert onboarding.calls == []
 
 
-@pytest.mark.parametrize(
-    ("event_name", "payload"),
-    [
-        ("pull_request", {"action": "opened"}),
-        ("check_suite", {"action": "completed"}),
-        ("workflow_run", {"action": "completed"}),
-        ("status", {"state": "success"}),
-    ],
-)
+@pytest.mark.parametrize("event_name", ["pull_request", "check_suite", "workflow_run", "status"])
 def test_future_actionable_delivery_is_deferred_without_installation_lookup(
-    event_name: str, payload: dict[str, object]
+    event_name: str,
 ) -> None:
     resolver = FakeInstallationResolver()
     onboarding = FakeOnboarding()
-    dispatcher = GitHubInstallationDeliveryDispatcher(resolver=resolver, onboarding=onboarding)
+    dispatcher = GitHubWebhookDispatchAdapter(
+        GitHubInstallationDeliveryDispatcher(resolver=resolver, onboarding=onboarding),
+    )
+    head = "a" * 40
+    payload: dict[str, object] = {
+        "installation": {"id": 17},
+        "repository": {"id": 101, "full_name": "octo/repo"},
+    }
+    if event_name == "pull_request":
+        payload.update(
+            {
+                "action": "opened",
+                "pull_request": {
+                    "id": 901,
+                    "number": 7,
+                    "title": "Review parser",
+                    "html_url": "https://github.com/octo/repo/pull/7",
+                    "user": {"login": "alice"},
+                    "head": {"ref": "feature", "sha": head},
+                    "base": {"ref": "main", "sha": "b" * 40},
+                    "state": "open",
+                    "updated_at": "2026-09-28T11:59:00Z",
+                },
+            }
+        )
+    elif event_name == "status":
+        payload["sha"] = head
+    else:
+        payload["action"] = "completed"
+        payload[event_name] = {"head_sha": head}
 
     result = asyncio.run(
-        dispatcher.execute(VerifiedGitHubDelivery("future-1", event_name, payload))
+        dispatcher.execute(VerifiedGitHubDelivery("future-1", event_name, payload).to_receipt())
     )
 
     assert result.status is InstallationDeliveryDispatchStatus.DEFERRED_KNOWN_EVENT
@@ -149,14 +340,187 @@ def test_future_actionable_delivery_is_deferred_without_installation_lookup(
 def test_non_actionable_pr_action_is_ignored() -> None:
     resolver = FakeInstallationResolver()
     onboarding = FakeOnboarding()
-    dispatcher = GitHubInstallationDeliveryDispatcher(resolver=resolver, onboarding=onboarding)
+    dispatcher = GitHubWebhookDispatchAdapter(
+        GitHubInstallationDeliveryDispatcher(resolver=resolver, onboarding=onboarding)
+    )
 
     result = asyncio.run(
         dispatcher.execute(
-            VerifiedGitHubDelivery("irrelevant-1", "pull_request", {"action": "labeled"})
+            VerifiedGitHubDelivery(
+                "irrelevant-1", "pull_request", {"action": "ready_for_review"}
+            ).to_receipt()
         )
     )
 
     assert result.status is InstallationDeliveryDispatchStatus.IGNORED_IRRELEVANT_EVENT
     assert resolver.calls == []
     assert onboarding.calls == []
+
+
+def test_replay_adapter_delivers_typed_pr_ci_and_installation_events() -> None:
+    @dataclass
+    class TypedDispatcher:
+        received: list[GitHubDispatchEvent] = field(default_factory=list)
+
+        async def execute(self, event: GitHubDispatchEvent) -> InstallationDeliveryDispatchResult:
+            self.received.append(event)
+            return InstallationDeliveryDispatchResult(InstallationDeliveryDispatchStatus.ONBOARDED)
+
+    dispatcher = TypedDispatcher()
+    adapter = GitHubWebhookDispatchAdapter(dispatcher)
+    head = "a" * 40
+    base = "b" * 40
+    pr = VerifiedGitHubDelivery(
+        "delivery-pr",
+        "pull_request",
+        {
+            "action": "opened",
+            "installation": {"id": 17},
+            "repository": {"id": 101, "full_name": "octo/repo"},
+            "pull_request": {
+                "id": 901,
+                "number": 7,
+                "title": "Review parser",
+                "html_url": "https://github.com/octo/repo/pull/7",
+                "user": {"login": "alice"},
+                "head": {"ref": "feature", "sha": head},
+                "base": {"ref": "main", "sha": base},
+                "state": "open",
+                "updated_at": "2026-09-28T11:59:00Z",
+            },
+        },
+    )
+    ci = VerifiedGitHubDelivery(
+        "delivery-ci",
+        "check_suite",
+        {
+            "action": "completed",
+            "installation": {"id": 17},
+            "repository": {"id": 101},
+            "check_suite": {"head_sha": head},
+        },
+    )
+    for delivery in (pr, ci, _added_delivery()):
+        assert asyncio.run(adapter.execute(delivery.to_receipt())).status == "onboarded"
+
+    assert [event.delivery_id for event in dispatcher.received] == [
+        "delivery-pr",
+        "delivery-ci",
+        "delivery-1",
+    ]
+    assert isinstance(dispatcher.received[0].value, PullRequestEvent)
+    assert dispatcher.received[0].value.title == "Review parser"
+    assert isinstance(dispatcher.received[1].value, CiTriggerEvent)
+    assert dispatcher.received[1].value.head_sha == head
+    assert isinstance(dispatcher.received[2].value, InstallationRepositoriesEvent)
+    assert dispatcher.received[2].value.installation_external_id == 17
+
+
+@pytest.mark.parametrize(
+    ("event_name", "payload"),
+    [
+        ("pull_request", {"action": "opened", "installation": {"id": 17}}),
+        ("check_suite", {"action": "completed", "installation": {"id": 17}}),
+        ("installation", {"action": "created", "installation": {"id": 17}}),
+    ],
+)
+def test_malformed_supported_event_fails_closed_at_replay_boundary(
+    event_name: str, payload: dict[str, object]
+) -> None:
+    resolver = FakeInstallationResolver()
+    onboarding = FakeOnboarding()
+    adapter = GitHubWebhookDispatchAdapter(
+        GitHubInstallationDeliveryDispatcher(resolver=resolver, onboarding=onboarding)
+    )
+
+    result = asyncio.run(
+        adapter.execute(
+            VerifiedGitHubDelivery("delivery-malformed", event_name, payload).to_receipt()
+        )
+    )
+
+    assert result.status is InstallationDeliveryDispatchStatus.IGNORED_INVALID_EVENT
+    assert resolver.calls == []
+    assert onboarding.calls == []
+
+
+def test_unsupported_receipt_reaches_application_as_event_metadata() -> None:
+    @dataclass
+    class TypedDispatcher:
+        events: list[GitHubDispatchEvent] = field(default_factory=list)
+
+        async def execute(self, event: GitHubDispatchEvent) -> InstallationDeliveryDispatchResult:
+            self.events.append(event)
+            return InstallationDeliveryDispatchResult(
+                InstallationDeliveryDispatchStatus.IGNORED_IRRELEVANT_EVENT
+            )
+
+    dispatcher = TypedDispatcher()
+    adapter = GitHubWebhookDispatchAdapter(dispatcher)
+    result = asyncio.run(
+        adapter.execute(
+            VerifiedGitHubDelivery("delivery-push", "push", {"action": "created"}).to_receipt()
+        )
+    )
+
+    assert result.status is InstallationDeliveryDispatchStatus.IGNORED_IRRELEVANT_EVENT
+    assert dispatcher.events == [
+        GitHubDispatchEvent("delivery-push", UnsupportedGitHubEvent("push", "created"))
+    ]
+
+
+@pytest.mark.parametrize("event_name", ["installation", "installation_repositories"])
+def test_unsupported_installation_action_reaches_application_as_event_metadata(
+    event_name: str,
+) -> None:
+    @dataclass
+    class TypedDispatcher:
+        events: list[GitHubDispatchEvent] = field(default_factory=list)
+
+        async def execute(self, event: GitHubDispatchEvent) -> InstallationDeliveryDispatchResult:
+            self.events.append(event)
+            return InstallationDeliveryDispatchResult(
+                InstallationDeliveryDispatchStatus.IGNORED_IRRELEVANT_EVENT
+            )
+
+    dispatcher = TypedDispatcher()
+    adapter = GitHubWebhookDispatchAdapter(dispatcher)
+    result = asyncio.run(
+        adapter.execute(
+            VerifiedGitHubDelivery(
+                "delivery-installation",
+                event_name,
+                {"action": "suspend", "installation": {"id": 17}},
+            ).to_receipt()
+        )
+    )
+
+    assert result.status is InstallationDeliveryDispatchStatus.IGNORED_IRRELEVANT_EVENT
+    assert dispatcher.events == [
+        GitHubDispatchEvent("delivery-installation", UnsupportedGitHubEvent(event_name, "suspend"))
+    ]
+
+
+def test_invalid_receipt_never_enters_typed_dispatch() -> None:
+    class TypedDispatcher:
+        async def execute(self, event: GitHubDispatchEvent) -> InstallationDeliveryDispatchResult:
+            raise AssertionError("invalid receipt reached application dispatch")
+
+    adapter = GitHubWebhookDispatchAdapter(TypedDispatcher())
+    cases: tuple[tuple[str, dict[str, object], InstallationDeliveryDispatchStatus], ...] = (
+        (
+            "installation",
+            {"action": "created", "installation": {"id": 17}},
+            InstallationDeliveryDispatchStatus.IGNORED_INVALID_EVENT,
+        ),
+        (
+            "installation",
+            {"action": "suspend", "installation": {"id": "17"}},
+            InstallationDeliveryDispatchStatus.IGNORED_INVALID_EVENT,
+        ),
+    )
+    for event_name, payload, expected in cases:
+        result = asyncio.run(
+            adapter.execute(VerifiedGitHubDelivery("delivery", event_name, payload).to_receipt())
+        )
+        assert result.status is expected

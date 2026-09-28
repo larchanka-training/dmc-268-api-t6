@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from typing import cast
 from uuid import UUID
 
 from sqlalchemy import select
@@ -11,7 +10,10 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app.common.infrastructure.db.enums import CodeChangeState
 from app.modules.repositories.infrastructure.models import ProviderInstallation, Repository
 from app.modules.reviews.application.project_github_pull_request import PullRequestEvent
-from app.modules.reviews.application.trigger_from_delivery import CiTriggerEvent
+from app.modules.reviews.application.trigger_from_delivery import (
+    CiTriggerEvent,
+    ProjectedPullRequestTarget,
+)
 from app.modules.reviews.infrastructure.models import CodeChange
 
 
@@ -19,12 +21,11 @@ class SqlAlchemyWebhookRunTargets:
     def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
         self._session_factory = session_factory
 
-    async def for_pr(self, event: PullRequestEvent) -> UUID | None:
+    async def for_pr(self, event: PullRequestEvent) -> ProjectedPullRequestTarget | None:
         async with self._session_factory() as session:
-            return cast(
-                UUID | None,
-                await session.scalar(
-                    select(CodeChange.id)
+            row = (
+                await session.execute(
+                    select(CodeChange.id, CodeChange.head_sha)
                     .join(Repository, CodeChange.repository_id == Repository.id)
                     .join(
                         ProviderInstallation,
@@ -35,9 +36,11 @@ class SqlAlchemyWebhookRunTargets:
                         ProviderInstallation.external_id == event.installation_external_id,
                         Repository.external_id == event.repository_external_id,
                         CodeChange.external_id == event.external_id,
+                        CodeChange.state == CodeChangeState.OPEN,
                     )
-                ),
-            )
+                )
+            ).one_or_none()
+            return ProjectedPullRequestTarget(*row) if row is not None else None
 
     async def for_ci(self, event: CiTriggerEvent) -> tuple[UUID, ...]:
         async with self._session_factory() as session:

@@ -207,6 +207,81 @@ def test_large_generated_file_keeps_blob_sha_without_fetching_blob() -> None:
     assert repository.snapshots[0].omission_reason == "generated"
 
 
+def test_failed_missing_patch_blob_stays_in_snapshot_and_run_continues(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    blob_requests: list[str] = []
+    files = (
+        VcsFile("src/unavailable.py", "modified", "1" * 40, None, 1, 1, 2, None),
+        VcsFile(
+            "src/reviewable.py", "modified", "2" * 40, None, 1, 1, 2, "@@ -1 +1 @@\n-old\n+new"
+        ),
+    )
+
+    class GitHub:
+        async def get_pull_request(self, locator: PullRequestLocator) -> VcsPullRequest:
+            return VcsPullRequest(
+                LOCATOR,
+                HEAD,
+                BASE,
+                PullRequestMeta("PR", None, "octo", "feature", "main", (), 2, 2, 2, False, False),
+            )
+
+        async def get_diff(self, pull_request: VcsPullRequest) -> tuple[VcsFile, ...]:
+            return files
+
+        async def get_blob(self, locator: PullRequestLocator, sha: str) -> bytes:
+            blob_requests.append(sha)
+            if sha == "1" * 40:
+                raise RuntimeError("GitHub blob unavailable")
+            return b"new\n"
+
+    @dataclass
+    class Repository:
+        snapshots: list[DiffSnapshot] = field(default_factory=list)
+
+        async def get_run_diff_input(self, run_id: UUID) -> None:
+            raise AssertionError("VCS Run cannot use a legacy diff input")
+
+        async def get_run_vcs_input(self, run_id: UUID) -> RunVcsInput:
+            return RunVcsInput(CODE_CHANGE_ID, REPOSITORY_ID, HEAD, BASE, LOCATOR)
+
+        async def get_run_snapshots(self, run_id: UUID) -> None:
+            return None
+
+        async def store_diff_snapshots(
+            self, run_id: UUID, code_change_id: UUID, head_sha: str, snapshots: list[DiffSnapshot]
+        ) -> list[DiffSnapshot]:
+            self.snapshots = snapshots
+            return snapshots
+
+    repository = Repository()
+    assert asyncio.run(
+        ReviewRunProcessor(
+            repository, None, blob_cache=InMemoryBlobCache(), vcs_provider=GitHub()
+        ).execute(RUN_ID)
+    )
+    assert [snapshot.filename for snapshot in repository.snapshots] == [
+        "src/unavailable.py",
+        "src/reviewable.py",
+    ]
+    assert repository.snapshots[0].blob_sha == "1" * 40
+    assert repository.snapshots[0].omission_reason == "missing_patch"
+    changed, omitted = review_files_from_snapshots(repository.snapshots)
+    assert [file.path for file in changed] == ["src/reviewable.py"]
+    assert omitted == ("src/unavailable.py",)
+    assert blob_requests == ["1" * 40, "2" * 40]
+    assert (
+        sum(
+            str(RUN_ID) in record.getMessage()
+            and "src/unavailable.py" in record.getMessage()
+            and "1" * 40 in record.getMessage()
+            for record in caplog.records
+        )
+        == 1
+    )
+
+
 def test_github_failure_cannot_fall_back_to_mutable_path_ref_provider() -> None:
     class FailingGitHub:
         async def get_pull_request(self, locator: PullRequestLocator) -> VcsPullRequest:

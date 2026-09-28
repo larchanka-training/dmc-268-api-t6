@@ -27,6 +27,11 @@ class EnqueueStatus(StrEnum):
     DUPLICATE = "duplicate"
 
 
+class RunPublicationKind(StrEnum):
+    QUEUED = "queued"
+    CANCELLATION = "cancellation"
+
+
 @dataclass(frozen=True)
 class EnqueueResult:
     status: EnqueueStatus
@@ -64,12 +69,6 @@ class PendingRunMessage:
     prompt_version_id: UUID
     attempt: int
     requested_at: datetime
-    schema: str = "review.run/v1"
-    trigger: str = "webhook"
-
-    @property
-    def message_id(self) -> UUID:
-        return self.run_id
 
     @classmethod
     def from_candidate(
@@ -92,35 +91,6 @@ class PendingRunMessage:
             attempt=1,
             requested_at=requested_at,
         )
-
-    def as_payload(self) -> dict[str, object]:
-        """Match the #34 `review.run/v1` pointer schema, without transport details."""
-        utc_requested_at = self.requested_at.astimezone(UTC).isoformat().replace("+00:00", "Z")
-        return {
-            "schema": self.schema,
-            "message_id": str(self.message_id),
-            "run_id": str(self.run_id),
-            "workspace_id": str(self.workspace_id),
-            "installation_id": self.installation_id,
-            "repo": {
-                "id": str(self.repository_id),
-                "provider": "github",
-                "external_id": self.repository_external_id,
-                "full_name": self.repository_full_name,
-            },
-            "pr": {
-                "number": self.pr_number,
-                "head_sha": self.head_sha,
-                "base_sha": self.base_sha,
-                "base_ref": self.base_ref,
-            },
-            "engine": self.engine,
-            "rule_version_id": str(self.rule_version_id),
-            "prompt_version_id": str(self.prompt_version_id),
-            "trigger": self.trigger,
-            "attempt": self.attempt,
-            "requested_at": utc_requested_at,
-        }
 
 
 class EligibilityChecker(Protocol):
@@ -147,9 +117,15 @@ class WebhookRunUnitOfWork(UnitOfWork, Protocol):
 
 
 class RunMessagePublisher(Protocol):
-    """Return only after a persistent `review.run/v1` publisher confirm."""
+    """Return only after the outgoing run pointer is durably confirmed."""
 
-    async def publish_confirmed(self, message: PendingRunMessage) -> None: ...
+    async def publish_confirmed(
+        self, message: PendingRunMessage, *, kind: RunPublicationKind = RunPublicationKind.QUEUED
+    ) -> None: ...
+
+
+class CancellationSignalReplay(Protocol):
+    async def replay_pending(self, *, limit: int = 100) -> int: ...
 
 
 class TryEnqueueWebhookRun:
@@ -159,11 +135,13 @@ class TryEnqueueWebhookRun:
         eligibility: EligibilityChecker,
         uow_factory: Callable[[], WebhookRunUnitOfWork],
         publisher: RunMessagePublisher,
+        cancellation_signals: CancellationSignalReplay | None = None,
         now: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
         self._eligibility = eligibility
         self._uow_factory = uow_factory
         self._publisher = publisher
+        self._cancellation_signals = cancellation_signals
         self._now = now
 
     async def execute(self, code_change_id: UUID, expected_head_sha: str) -> EnqueueResult:
@@ -185,9 +163,14 @@ class TryEnqueueWebhookRun:
         return EnqueueResult(EnqueueStatus.ENQUEUED, message.run_id)
 
     async def replay_pending_publications(self, *, limit: int = 100) -> int:
+        confirmed = 0
+        if self._cancellation_signals is not None:
+            try:
+                confirmed += await self._cancellation_signals.replay_pending(limit=limit)
+            except Exception:
+                _LOGGER.exception("Cancellation signal replay failed; ordinary replay continues")
         async with self._uow_factory() as uow:
             pending = await uow.runs.pending_messages(limit)
-        confirmed = 0
         for message in pending:
             if await self._publish_and_mark(message):
                 confirmed += 1
@@ -197,9 +180,7 @@ class TryEnqueueWebhookRun:
         try:
             await self._publisher.publish_confirmed(message)
         except Exception:
-            _LOGGER.exception(
-                "review.run/v1 publication remains pending for run %s", message.run_id
-            )
+            _LOGGER.exception("Run publication remains pending for run %s", message.run_id)
             return False
         async with self._uow_factory() as uow:
             await uow.runs.mark_published(message.run_id, self._now())

@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import os
 from collections.abc import AsyncIterator, Callable
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
+from dataclasses import dataclass
 from typing import Annotated, cast
 
 import httpx
@@ -20,8 +21,7 @@ from app.bootstrap.installation_onboarding import InstallationOnboarding
 from app.bootstrap.portal_auth import get_auth_scope
 from app.modules.auth.application.scope import AuthScope
 from app.modules.auth.infrastructure.sessions import SqlAlchemyAuthSessionUnitOfWork
-from app.modules.integrations.webhooks.api.ci_event_dtos import parse_ci_event
-from app.modules.integrations.webhooks.api.pull_request_dtos import parse_pull_request_event
+from app.modules.integrations.webhooks.api.dispatch import GitHubWebhookDispatchAdapter
 from app.modules.integrations.webhooks.application.github_installation_dispatch import (
     GitHubInstallationDeliveryDispatcher,
 )
@@ -42,9 +42,6 @@ from app.modules.integrations.webhooks.infrastructure.github_installation_tree_p
     GitHubInstallationAccessTokenProvider,
     GitHubInstallationTreeProvider,
 )
-from app.modules.integrations.webhooks.infrastructure.github_reviewer_timeline import (
-    HttpGitHubReviewerTimelineProvider,
-)
 from app.modules.integrations.webhooks.infrastructure.github_webhook_receipts import (
     SqlAlchemyGitHubWebhookReceiptUnitOfWork,
 )
@@ -57,6 +54,9 @@ from app.modules.reviews.application.get_run_diff import RunDiffRepository
 from app.modules.reviews.application.get_run_file_lines import BlobCache, RunFileRepository
 from app.modules.reviews.application.list_runs import RunRepository
 from app.modules.reviews.application.project_github_pull_request import ProjectGitHubPullRequest
+from app.modules.reviews.application.publish_cancellation_signals import (
+    PublishCancellationSignals,
+)
 from app.modules.reviews.application.trigger_from_delivery import TriggerFromDelivery
 from app.modules.reviews.application.try_enqueue_webhook_run import (
     RunMessagePublisher,
@@ -81,6 +81,12 @@ from app.modules.workspaces.infrastructure.github_installation_links import (
 from app.modules.workspaces.infrastructure.github_user_installations import (
     HttpGitHubUserInstallationsProvider,
 )
+
+
+@dataclass(frozen=True)
+class GitHubAuthHttpClients:
+    oauth: httpx.AsyncClient
+    api: httpx.AsyncClient
 
 
 class ReviewsApiResources:
@@ -162,6 +168,13 @@ class ReviewsApiResources:
             ),
             uow_factory=lambda: SqlAlchemyWebhookRunUnitOfWork(self._session_factory),
             publisher=publisher,
+            cancellation_signals=self.cancellation_signals(publisher),
+        )
+
+    def cancellation_signals(self, publisher: RunMessagePublisher) -> PublishCancellationSignals:
+        return PublishCancellationSignals(
+            uow_factory=lambda: SqlAlchemyPullRequestProjectionUnitOfWork(self._session_factory),
+            publisher=publisher,
         )
 
     def github_delivery_receiver(
@@ -207,7 +220,7 @@ class ReviewsApiResources:
         bot_login: str | None = None,
         run_publisher: RunMessagePublisher | None = None,
         app_id: int | None = None,
-    ) -> GitHubInstallationDeliveryDispatcher:
+    ) -> GitHubWebhookDispatchAdapter:
         """Compose the verified-delivery application boundary for this API process."""
         tree_provider = GitHubInstallationTreeProvider(
             client=client,
@@ -228,32 +241,32 @@ class ReviewsApiResources:
             if run_publisher is not None and app_id is not None
             else None
         )
-        return GitHubInstallationDeliveryDispatcher(
+        projector = (
+            ProjectGitHubPullRequest(
+                uow_factory=lambda: SqlAlchemyPullRequestProjectionUnitOfWork(
+                    self._session_factory
+                ),
+                bot_login=bot_login,
+                current_provider=HttpGitHubCurrentPullRequestProvider(
+                    client=client,
+                    token_provider=token_provider,
+                ),
+                projection_lock=SqlAlchemyPullRequestProjectionLock(self._engine),
+                cancellation_signals=(
+                    self.cancellation_signals(run_publisher) if run_publisher is not None else None
+                ),
+            )
+            if bot_login is not None
+            else None
+        )
+        dispatcher = GitHubInstallationDeliveryDispatcher(
             resolver=SqlAlchemyGitHubInstallationResolver(self._session_factory),
             onboarding=self.installation_onboarding(tree_provider),
-            pull_request_projector=(
-                ProjectGitHubPullRequest(
-                    uow_factory=lambda: SqlAlchemyPullRequestProjectionUnitOfWork(
-                        self._session_factory
-                    ),
-                    bot_login=bot_login,
-                    current_provider=HttpGitHubCurrentPullRequestProvider(
-                        client=client,
-                        token_provider=token_provider,
-                    ),
-                    reviewer_timeline_provider=HttpGitHubReviewerTimelineProvider(
-                        client=client,
-                        token_provider=token_provider,
-                    ),
-                    projection_lock=SqlAlchemyPullRequestProjectionLock(self._engine),
-                )
-                if bot_login is not None
-                else None
-            ),
-            pull_request_parser=parse_pull_request_event if bot_login is not None else None,
+            pull_request_projector=projector,
+            label_intent_projector=projector,
             run_trigger=run_trigger,
-            ci_parser=parse_ci_event if run_trigger is not None else None,
         )
+        return GitHubWebhookDispatchAdapter(dispatcher)
 
     async def aclose(self) -> None:
         await self._engine.dispose()
@@ -298,20 +311,31 @@ def get_github_webhook_receipt_uow_factory(
 
 @asynccontextmanager
 async def reviews_api_lifespan(app: FastAPI) -> AsyncIterator[None]:
-    """Create one pool per API process and always dispose it at shutdown."""
-    database_url = os.environ.get("DATABASE_URL")
-    github_webhook_secret = os.environ.get("GITHUB_WEBHOOK_SECRET")
-    resources: ReviewsApiResources | None = None
-    if database_url is not None:
-        resources = ReviewsApiResources.from_database_url(database_url)
-        app.state.reviews_api_resources = resources
-        if github_webhook_secret is not None:
-            app.state.github_webhook_secret = github_webhook_secret
-    try:
-        yield
-    finally:
-        if resources is not None:
+    """Create process-scoped pools and HTTP clients and dispose them at shutdown."""
+    async with AsyncExitStack() as stack:
+        oauth_client = await stack.enter_async_context(
+            httpx.AsyncClient(base_url="https://github.com", timeout=10)
+        )
+        api_client = await stack.enter_async_context(
+            httpx.AsyncClient(
+                base_url=os.environ.get("GITHUB_API_URL", "https://api.github.com"), timeout=10
+            )
+        )
+        app.state.github_auth_http_clients = GitHubAuthHttpClients(oauth_client, api_client)
+        database_url = os.environ.get("DATABASE_URL")
+        github_webhook_secret = os.environ.get("GITHUB_WEBHOOK_SECRET")
+        resources: ReviewsApiResources | None = None
+        if database_url is not None:
+            resources = ReviewsApiResources.from_database_url(database_url)
+            app.state.reviews_api_resources = resources
             if github_webhook_secret is not None:
-                del app.state.github_webhook_secret
-            await resources.aclose()
-            del app.state.reviews_api_resources
+                app.state.github_webhook_secret = github_webhook_secret
+        try:
+            yield
+        finally:
+            if resources is not None:
+                if github_webhook_secret is not None:
+                    del app.state.github_webhook_secret
+                await resources.aclose()
+                del app.state.reviews_api_resources
+            del app.state.github_auth_http_clients

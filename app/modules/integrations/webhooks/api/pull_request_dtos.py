@@ -3,17 +3,30 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import Literal
+from typing import Literal, get_args
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, HttpUrl
 
 from app.modules.reviews.application.project_github_pull_request import (
     PullRequestEvent,
+    PullRequestLabelEvent,
     PullRequestState,
 )
 
 _MAX_BIGINT = 2**63 - 1
 _SHA_PATTERN = r"^(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})$"
+PullRequestWebhookAction = Literal[
+    "opened",
+    "synchronize",
+    "edited",
+    "review_requested",
+    "review_request_removed",
+    "closed",
+    "reopened",
+    "labeled",
+    "unlabeled",
+]
+SUPPORTED_PULL_REQUEST_ACTIONS = frozenset(get_args(PullRequestWebhookAction))
 
 
 class _GitHubIdDto(BaseModel):
@@ -36,6 +49,12 @@ class _GitHubSenderDto(BaseModel):
     model_config = ConfigDict(extra="ignore", strict=True)
 
     type: str = Field(min_length=1, max_length=50)
+
+
+class _GitHubLabelDto(BaseModel):
+    model_config = ConfigDict(extra="ignore", strict=True)
+
+    name: str = Field(min_length=1, max_length=255)
 
 
 class _GitHubRefDto(BaseModel):
@@ -64,19 +83,29 @@ class _GitHubPullRequestDto(BaseModel):
 class _GitHubPullRequestPayloadDto(BaseModel):
     model_config = ConfigDict(extra="ignore", strict=True)
 
-    action: Literal[
-        "opened", "synchronize", "review_requested", "review_request_removed", "closed", "reopened"
-    ]
+    action: PullRequestWebhookAction
     number: int | None = Field(default=None, gt=0, le=2**31 - 1)
     installation: _GitHubIdDto
     repository: _GitHubRepositoryDto
     pull_request: _GitHubPullRequestDto
     requested_reviewer: _GitHubUserDto | None = None
+    label: _GitHubLabelDto | None = None
     sender: _GitHubSenderDto | None = None
 
 
 def parse_pull_request_event(payload: Mapping[str, object]) -> PullRequestEvent:
     parsed = _GitHubPullRequestPayloadDto.model_validate(payload)
+    return _event_from_payload(parsed)
+
+
+def parse_pull_request_label_event(payload: Mapping[str, object]) -> PullRequestLabelEvent:
+    parsed = _GitHubPullRequestPayloadDto.model_validate(payload)
+    if parsed.action not in {"labeled", "unlabeled"} or parsed.label is None:
+        raise ValueError("GitHub pull request label action requires a label name")
+    return PullRequestLabelEvent(_event_from_payload(parsed), parsed.label.name)
+
+
+def _event_from_payload(parsed: _GitHubPullRequestPayloadDto) -> PullRequestEvent:
     item = parsed.pull_request
     if parsed.number is not None and parsed.number != item.number:
         raise ValueError("GitHub pull request number mismatch")

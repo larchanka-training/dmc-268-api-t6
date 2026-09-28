@@ -11,7 +11,7 @@ from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from types import TracebackType
-from typing import Self
+from typing import Self, cast
 from uuid import UUID, uuid4
 
 import pytest
@@ -29,33 +29,45 @@ from app.main import (
     app,
     get_github_webhook_secret,
 )
+from app.modules.integrations.webhooks.api.dispatch import GitHubWebhookDispatchAdapter
+from app.modules.integrations.webhooks.api.receipt import VerifiedGitHubDelivery
 from app.modules.integrations.webhooks.application.github_installation_dispatch import (
+    GitHubInstallationDeliveryDispatcher,
+    GitHubInstallationResolver,
     InstallationDeliveryDispatchResult,
     InstallationDeliveryDispatchStatus,
-    VerifiedGitHubDelivery,
+    InstallationOnboardingHandler,
+    PullRequestLabelIntentHandler,
 )
 from app.modules.integrations.webhooks.application.receive_github_delivery import (
     ReceiveGitHubDelivery,
+    WebhookReceipt,
 )
 from app.modules.integrations.webhooks.infrastructure.github_webhook_receipts import (
     SqlAlchemyGitHubWebhookReceiptUnitOfWork,
 )
+from app.modules.reviews.application.project_github_pull_request import (
+    PullRequestEvent,
+    PullRequestLabelEvent,
+    PullRequestProjectionStatus,
+)
+from app.modules.reviews.application.trigger_from_delivery import CiTriggerEvent
 
 _SECRET = "receipt-test-secret"
 
 
 @dataclass
 class FakeDispatcher:
-    deliveries: list[VerifiedGitHubDelivery] = field(default_factory=list)
+    deliveries: list[WebhookReceipt] = field(default_factory=list)
 
-    async def execute(self, delivery: VerifiedGitHubDelivery) -> InstallationDeliveryDispatchResult:
+    async def execute(self, delivery: WebhookReceipt) -> InstallationDeliveryDispatchResult:
         self.deliveries.append(delivery)
         return InstallationDeliveryDispatchResult(InstallationDeliveryDispatchStatus.ONBOARDED)
 
 
 @dataclass
 class FakeClaimedReceipt:
-    delivery: VerifiedGitHubDelivery
+    delivery: WebhookReceipt
     projected: bool = False
     claim_token: object | None = None
     lease_until: datetime | None = None
@@ -88,7 +100,7 @@ class FakeReceiptUnitOfWork:
     async def rollback(self) -> None:
         pass
 
-    async def save(self, delivery: VerifiedGitHubDelivery) -> bool:
+    async def save(self, delivery: WebhookReceipt) -> bool:
         if delivery.delivery_id in self.rows:
             return False
         self.rows[delivery.delivery_id] = FakeClaimedReceipt(delivery)
@@ -96,7 +108,7 @@ class FakeReceiptUnitOfWork:
 
     async def claim(
         self, delivery_id: str, token: UUID, now: datetime, until: datetime
-    ) -> VerifiedGitHubDelivery | None:
+    ) -> WebhookReceipt | None:
         row = self.rows[delivery_id]
         if row.projected or (row.lease_until is not None and row.lease_until > now):
             return None
@@ -134,14 +146,15 @@ def test_failed_dispatch_is_replayed_once_after_retry_delay() -> None:
     now = datetime(2026, 9, 28, tzinfo=UTC)
     uow = FakeReceiptUnitOfWork()
     delivery = VerifiedGitHubDelivery("retry-1", "installation", {"action": "created"})
+    assert delivery.to_receipt() == WebhookReceipt(
+        "retry-1", "installation", '{"action": "created"}'
+    )
 
     @dataclass
     class FailOnceDispatcher:
         calls: int = 0
 
-        async def execute(
-            self, delivery: VerifiedGitHubDelivery
-        ) -> InstallationDeliveryDispatchResult:
+        async def execute(self, delivery: WebhookReceipt) -> InstallationDeliveryDispatchResult:
             self.calls += 1
             if self.calls == 1:
                 raise RuntimeError("GitHub unavailable")
@@ -152,25 +165,34 @@ def test_failed_dispatch_is_replayed_once_after_retry_delay() -> None:
         uow_factory=lambda: uow, dispatcher=dispatcher, now=lambda: now
     )
 
-    assert asyncio.run(receiver.execute(delivery)) == InstallationDeliveryDispatchStatus.PENDING
+    assert (
+        asyncio.run(receiver.execute(delivery.to_receipt()))
+        == InstallationDeliveryDispatchStatus.PENDING
+    )
     assert dispatcher.calls == 0
     assert asyncio.run(receiver.replay_pending()) == 0
     assert dispatcher.calls == 1
     assert uow.rows["retry-1"].projected is False
-    assert asyncio.run(receiver.execute(delivery)) == InstallationDeliveryDispatchStatus.DUPLICATE
+    assert (
+        asyncio.run(receiver.execute(delivery.to_receipt()))
+        == InstallationDeliveryDispatchStatus.DUPLICATE
+    )
     assert dispatcher.calls == 1
 
     now += timedelta(seconds=31)
     assert asyncio.run(receiver.replay_pending()) == 1
     assert uow.rows["retry-1"].projected is True
-    assert asyncio.run(receiver.execute(delivery)) == InstallationDeliveryDispatchStatus.DUPLICATE
+    assert (
+        asyncio.run(receiver.execute(delivery.to_receipt()))
+        == InstallationDeliveryDispatchStatus.DUPLICATE
+    )
     assert dispatcher.calls == 2
 
 
 def test_replay_claims_receipt_left_by_crash_after_commit() -> None:
     now = datetime(2026, 9, 28, tzinfo=UTC)
     delivery = VerifiedGitHubDelivery("crash-1", "ping", {"zen": "hello"})
-    uow = FakeReceiptUnitOfWork(rows={"crash-1": FakeClaimedReceipt(delivery)})
+    uow = FakeReceiptUnitOfWork(rows={"crash-1": FakeClaimedReceipt(delivery.to_receipt())})
     dispatcher = FakeDispatcher()
     receiver = ReceiveGitHubDelivery(
         uow_factory=lambda: uow, dispatcher=dispatcher, now=lambda: now
@@ -178,14 +200,195 @@ def test_replay_claims_receipt_left_by_crash_after_commit() -> None:
 
     assert asyncio.run(receiver.replay_pending()) == 1
     assert asyncio.run(receiver.replay_pending()) == 0
-    assert dispatcher.deliveries == [delivery]
+    assert dispatcher.deliveries == [delivery.to_receipt()]
+
+
+def test_malformed_supported_receipt_keeps_raw_json_and_is_acknowledged_on_replay() -> None:
+    now = datetime(2026, 9, 28, tzinfo=UTC)
+    raw = {"action": "opened", "installation": {"id": 17}, "extra": {"kept": True}}
+    delivery = VerifiedGitHubDelivery("malformed-pr", "pull_request", raw)
+    uow = FakeReceiptUnitOfWork()
+    dispatcher = GitHubWebhookDispatchAdapter(
+        GitHubInstallationDeliveryDispatcher(
+            resolver=cast(GitHubInstallationResolver, None),
+            onboarding=cast(InstallationOnboardingHandler, None),
+        )
+    )
+    receiver = ReceiveGitHubDelivery(
+        uow_factory=lambda: uow, dispatcher=dispatcher, now=lambda: now
+    )
+
+    assert (
+        asyncio.run(receiver.execute(delivery.to_receipt()))
+        == InstallationDeliveryDispatchStatus.PENDING
+    )
+    assert json.loads(uow.rows["malformed-pr"].delivery.payload_json) == raw
+    assert uow.rows["malformed-pr"].projected is False
+    assert asyncio.run(receiver.replay_pending()) == 1
+    assert uow.rows["malformed-pr"].projected is True
+    assert asyncio.run(receiver.replay_pending()) == 0
+
+
+def test_exact_label_receipt_stays_raw_and_retries_until_projector_and_trigger_exist() -> None:
+    now = datetime(2026, 9, 28, tzinfo=UTC)
+    raw: dict[str, object] = {
+        "action": "labeled",
+        "label": {"name": "ai-review"},
+        "installation": {"id": 17},
+        "repository": {"id": 101, "full_name": "octo/repo"},
+        "pull_request": {
+            "id": 901,
+            "number": 7,
+            "title": "Review parser",
+            "html_url": "https://github.com/octo/repo/pull/7",
+            "user": {"login": "alice"},
+            "head": {"ref": "feature", "sha": "a" * 40},
+            "base": {"ref": "main", "sha": "b" * 40},
+            "state": "open",
+            "updated_at": "2026-09-28T11:59:00Z",
+        },
+    }
+    delivery = VerifiedGitHubDelivery("label-retry", "pull_request", raw)
+    uow = FakeReceiptUnitOfWork()
+
+    class Trigger:
+        async def on_label(self, event: PullRequestLabelEvent) -> None:
+            assert event.label_name == "ai-review"
+
+        async def on_pr(self, event: PullRequestEvent) -> None:
+            raise AssertionError("label should not use PR trigger")
+
+        async def on_ci(self, event: CiTriggerEvent) -> None:
+            raise AssertionError("label should not use CI trigger")
+
+    def receiver(intent: object | None = None) -> ReceiveGitHubDelivery:
+        return ReceiveGitHubDelivery(
+            uow_factory=lambda: uow,
+            dispatcher=GitHubWebhookDispatchAdapter(
+                GitHubInstallationDeliveryDispatcher(
+                    resolver=cast(GitHubInstallationResolver, None),
+                    onboarding=cast(InstallationOnboardingHandler, None),
+                    label_intent_projector=cast(PullRequestLabelIntentHandler | None, intent),
+                    run_trigger=Trigger() if intent is not None else None,
+                )
+            ),
+            now=lambda: now,
+        )
+
+    first = receiver()
+    assert (
+        asyncio.run(first.execute(delivery.to_receipt()))
+        == InstallationDeliveryDispatchStatus.PENDING
+    )
+    assert json.loads(uow.rows["label-retry"].delivery.payload_json) == raw
+    assert asyncio.run(first.replay_pending()) == 1
+    assert uow.rows["label-retry"].projected is False
+
+    @dataclass
+    class Intent:
+        events: list[PullRequestLabelEvent] = field(default_factory=list)
+
+        async def execute(self, event: PullRequestLabelEvent) -> PullRequestProjectionStatus:
+            self.events.append(event)
+            return PullRequestProjectionStatus.PROJECTED
+
+    intent = Intent()
+    now += timedelta(minutes=5, seconds=1)
+    assert asyncio.run(receiver(intent).replay_pending()) == 1
+    assert uow.rows["label-retry"].projected is True
+    assert json.loads(uow.rows["label-retry"].delivery.payload_json) == raw
+    assert len(intent.events) == 1
+    assert intent.events[0].label_name == "ai-review"
+
+
+@pytest.mark.parametrize(
+    ("projection", "dispatch_status", "acknowledged"),
+    [
+        (
+            PullRequestProjectionStatus.UNKNOWN_REPOSITORY,
+            InstallationDeliveryDispatchStatus.IGNORED_UNKNOWN_REPOSITORY,
+            False,
+        ),
+        (
+            PullRequestProjectionStatus.IGNORED_STALE,
+            InstallationDeliveryDispatchStatus.DEFERRED_KNOWN_EVENT,
+            False,
+        ),
+        (
+            PullRequestProjectionStatus.IGNORED_UNRELATED,
+            InstallationDeliveryDispatchStatus.IGNORED_IRRELEVANT_EVENT,
+            True,
+        ),
+    ],
+)
+def test_label_projection_status_controls_receipt_ack_or_retry(
+    projection: PullRequestProjectionStatus,
+    dispatch_status: InstallationDeliveryDispatchStatus,
+    acknowledged: bool,
+) -> None:
+    now = datetime(2026, 9, 28, tzinfo=UTC)
+    delivery = VerifiedGitHubDelivery(
+        "label-result",
+        "pull_request",
+        {
+            "action": "labeled",
+            "label": {"name": "ai-review"},
+            "installation": {"id": 17},
+            "repository": {"id": 101, "full_name": "octo/repo"},
+            "pull_request": {
+                "id": 901,
+                "number": 7,
+                "title": "Review parser",
+                "html_url": "https://github.com/octo/repo/pull/7",
+                "user": {"login": "alice"},
+                "head": {"ref": "feature", "sha": "a" * 40},
+                "base": {"ref": "main", "sha": "b" * 40},
+                "state": "open",
+                "updated_at": "2026-09-28T11:59:00Z",
+            },
+        },
+    )
+
+    @dataclass
+    class Intent:
+        calls: int = 0
+
+        async def execute(self, event: PullRequestLabelEvent) -> PullRequestProjectionStatus:
+            assert event.label_name == "ai-review"
+            self.calls += 1
+            return projection
+
+    intent = Intent()
+    adapter = GitHubWebhookDispatchAdapter(
+        GitHubInstallationDeliveryDispatcher(
+            resolver=cast(GitHubInstallationResolver, None),
+            onboarding=cast(InstallationOnboardingHandler, None),
+            label_intent_projector=intent,
+        )
+    )
+    assert asyncio.run(adapter.execute(delivery.to_receipt())).status is dispatch_status
+    uow = FakeReceiptUnitOfWork()
+    receiver = ReceiveGitHubDelivery(uow_factory=lambda: uow, dispatcher=adapter, now=lambda: now)
+    assert (
+        asyncio.run(receiver.execute(delivery.to_receipt()))
+        == InstallationDeliveryDispatchStatus.PENDING
+    )
+    assert asyncio.run(receiver.replay_pending()) == 1
+    row = uow.rows["label-result"]
+    assert row.projected is acknowledged
+    assert row.retry_after == (None if acknowledged else now + timedelta(minutes=5))
+    assert asyncio.run(receiver.replay_pending()) == 0
+    if not acknowledged:
+        now += timedelta(minutes=5, seconds=1)
+        assert asyncio.run(receiver.replay_pending()) == 1
+        assert intent.calls == 3
 
 
 def test_expired_claim_is_replayed_but_live_claim_is_not() -> None:
     now = datetime(2026, 9, 28, tzinfo=UTC)
     delivery = VerifiedGitHubDelivery("leased-1", "ping", {"zen": "hello"})
     row = FakeClaimedReceipt(
-        delivery,
+        delivery.to_receipt(),
         claim_token=uuid4(),
         lease_until=now + timedelta(minutes=5),
     )
@@ -199,18 +402,16 @@ def test_expired_claim_is_replayed_but_live_claim_is_not() -> None:
     now += timedelta(minutes=6)
     assert asyncio.run(receiver.replay_pending()) == 1
     assert row.projected is True
-    assert dispatcher.deliveries == [delivery]
+    assert dispatcher.deliveries == [delivery.to_receipt()]
 
 
 def test_dispatch_timeout_releases_claim_before_lease_expiry() -> None:
     now = datetime(2026, 9, 28, tzinfo=UTC)
     delivery = VerifiedGitHubDelivery("timeout-1", "ping", {"zen": "hello"})
-    uow = FakeReceiptUnitOfWork(rows={"timeout-1": FakeClaimedReceipt(delivery)})
+    uow = FakeReceiptUnitOfWork(rows={"timeout-1": FakeClaimedReceipt(delivery.to_receipt())})
 
     class SlowDispatcher:
-        async def execute(
-            self, delivery: VerifiedGitHubDelivery
-        ) -> InstallationDeliveryDispatchResult:
+        async def execute(self, delivery: WebhookReceipt) -> InstallationDeliveryDispatchResult:
             await asyncio.sleep(0.05)
             return InstallationDeliveryDispatchResult(InstallationDeliveryDispatchStatus.ONBOARDED)
 
@@ -250,9 +451,7 @@ def test_signed_future_event_remains_replayable_after_worker_sweep(
     assert (status, response) == (202, {"status": "pending"})
 
     class DeferredDispatcher:
-        async def execute(
-            self, delivery: VerifiedGitHubDelivery
-        ) -> InstallationDeliveryDispatchResult:
+        async def execute(self, delivery: WebhookReceipt) -> InstallationDeliveryDispatchResult:
             return InstallationDeliveryDispatchResult(
                 InstallationDeliveryDispatchStatus.DEFERRED_KNOWN_EVENT
             )
@@ -267,7 +466,7 @@ def test_signed_future_event_remains_replayable_after_worker_sweep(
     assert row.claim_token is None
     assert row.retry_after == now + timedelta(minutes=5)
     assert row.delivery.event_name == event_name
-    assert row.delivery.payload == payload
+    assert json.loads(row.delivery.payload_json) == payload
 
 
 def test_unknown_pr_repository_receipt_remains_replayable_after_sweep() -> None:
@@ -276,9 +475,7 @@ def test_unknown_pr_repository_receipt_remains_replayable_after_sweep() -> None:
     delivery = VerifiedGitHubDelivery("unknown-pr", "pull_request", {"action": "opened"})
 
     class UnknownRepositoryDispatcher:
-        async def execute(
-            self, delivery: VerifiedGitHubDelivery
-        ) -> InstallationDeliveryDispatchResult:
+        async def execute(self, delivery: WebhookReceipt) -> InstallationDeliveryDispatchResult:
             return InstallationDeliveryDispatchResult(
                 InstallationDeliveryDispatchStatus.IGNORED_UNKNOWN_REPOSITORY
             )
@@ -287,7 +484,10 @@ def test_unknown_pr_repository_receipt_remains_replayable_after_sweep() -> None:
         uow_factory=lambda: uow, dispatcher=UnknownRepositoryDispatcher(), now=lambda: now
     )
 
-    assert asyncio.run(receiver.execute(delivery)) == InstallationDeliveryDispatchStatus.PENDING
+    assert (
+        asyncio.run(receiver.execute(delivery.to_receipt()))
+        == InstallationDeliveryDispatchStatus.PENDING
+    )
     assert asyncio.run(receiver.replay_pending()) == 1
     assert uow.rows["unknown-pr"].projected is False
     assert uow.rows["unknown-pr"].retry_after == now + timedelta(minutes=5)
@@ -329,9 +529,7 @@ def test_worker_claim_commit_finishes_before_dispatch() -> None:
     delivery = VerifiedGitHubDelivery("ordered-1", "ping", {"zen": "hello"})
 
     class AssertingDispatcher:
-        async def execute(
-            self, delivery: VerifiedGitHubDelivery
-        ) -> InstallationDeliveryDispatchResult:
+        async def execute(self, delivery: WebhookReceipt) -> InstallationDeliveryDispatchResult:
             assert uow.commits == 2
             assert uow.rows["ordered-1"].claim_token is not None
             return InstallationDeliveryDispatchResult(InstallationDeliveryDispatchStatus.ONBOARDED)
@@ -340,7 +538,10 @@ def test_worker_claim_commit_finishes_before_dispatch() -> None:
         uow_factory=lambda: uow, dispatcher=AssertingDispatcher(), now=lambda: now
     )
 
-    assert asyncio.run(receiver.execute(delivery)) == InstallationDeliveryDispatchStatus.PENDING
+    assert (
+        asyncio.run(receiver.execute(delivery.to_receipt()))
+        == InstallationDeliveryDispatchStatus.PENDING
+    )
     assert asyncio.run(receiver.replay_pending()) == 1
     assert uow.commits == 3
 
@@ -377,10 +578,13 @@ def test_signed_delivery_is_saved_once_and_http_never_dispatches() -> None:
 
     assert first == (202, {"status": "pending"})
     assert second == (202, {"status": "duplicate"})
-    assert receipts.rows["delivery-42"].delivery == VerifiedGitHubDelivery(
-        delivery_id="delivery-42",
-        event_name="installation_repositories",
-        payload={"action": "added", "installation": {"id": 17}},
+    assert (
+        receipts.rows["delivery-42"].delivery
+        == VerifiedGitHubDelivery(
+            delivery_id="delivery-42",
+            event_name="installation_repositories",
+            payload={"action": "added", "installation": {"id": 17}},
+        ).to_receipt()
     )
     assert receipts.rows["delivery-42"].projected is False
 
@@ -503,7 +707,7 @@ def test_signed_json_with_paired_surrogate_preserves_emoji_payload() -> None:
 
     assert status == 202
     assert response == {"status": "pending"}
-    assert receipts.rows["delivery-42"].delivery.payload == payload
+    assert json.loads(receipts.rows["delivery-42"].delivery.payload_json) == payload
 
 
 @pytest.mark.parametrize("depth", [300, 10_000])
@@ -555,7 +759,7 @@ def test_postgresql_claim_is_exclusive_expires_and_excludes_projected_rows(
         now = datetime(2026, 9, 28, tzinfo=UTC)
         first_token, second_token, replacement_token = uuid4(), uuid4(), uuid4()
 
-        async def claim(token: UUID, at: datetime) -> VerifiedGitHubDelivery | None:
+        async def claim(token: UUID, at: datetime) -> WebhookReceipt | None:
             async with SqlAlchemyGitHubWebhookReceiptUnitOfWork(sessions) as uow:
                 claimed = await uow.receipts.claim(
                     delivery.delivery_id, token, at, at + timedelta(minutes=5)
@@ -566,19 +770,21 @@ def test_postgresql_claim_is_exclusive_expires_and_excludes_projected_rows(
 
         try:
             async with SqlAlchemyGitHubWebhookReceiptUnitOfWork(sessions) as uow:
-                assert await uow.receipts.save(delivery) is True
+                assert await uow.receipts.save(delivery.to_receipt()) is True
                 await uow.commit()
 
             first, second = await asyncio.gather(claim(first_token, now), claim(second_token, now))
             assert (first is None) != (second is None)
-            assert first == delivery or second == delivery
+            assert first == delivery.to_receipt() or second == delivery.to_receipt()
             winning_token = first_token if first is not None else second_token
             assert await claim(replacement_token, now + timedelta(minutes=4)) is None
 
             async with SqlAlchemyGitHubWebhookReceiptUnitOfWork(sessions) as uow:
                 assert await uow.receipts.pending_ids(now + timedelta(minutes=4), 10) == ()
 
-            assert await claim(replacement_token, now + timedelta(minutes=6)) == delivery
+            assert (
+                await claim(replacement_token, now + timedelta(minutes=6)) == delivery.to_receipt()
+            )
             async with SqlAlchemyGitHubWebhookReceiptUnitOfWork(sessions) as uow:
                 with pytest.raises(RuntimeError, match="claim was lost"):
                     await uow.receipts.mark_projected(
@@ -634,7 +840,7 @@ def test_migration_preserves_legacy_receipt_and_concurrent_insert_is_unique(
 
             async def save_once() -> bool:
                 async with SqlAlchemyGitHubWebhookReceiptUnitOfWork(sessions) as uow:
-                    inserted = await uow.receipts.save(delivery)
+                    inserted = await uow.receipts.save(delivery.to_receipt())
                     await uow.commit()
                     return inserted
 

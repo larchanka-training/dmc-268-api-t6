@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import Protocol, cast
 from uuid import UUID
@@ -25,10 +26,13 @@ from app.modules.reviews.application.get_run_file_lines import (
 )
 from app.modules.reviews.application.prompt_builder import ReviewRule
 from app.modules.reviews.application.vcs_diff import (
+    MAX_BLOB_BYTES,
     FetchVcsReviewInput,
     PullRequestLocator,
     VcsProvider,
 )
+
+_LOGGER = logging.getLogger(__name__)
 
 
 class RunDiffProvider(Protocol):
@@ -104,6 +108,7 @@ class ReviewRunProcessor:
         """Persist inputs and return the exact conventions snapshot for this run."""
 
         vcs_run: RunVcsInput | None = None
+        failed_blob_shas: frozenset[str] = frozenset()
         if self._vcs_provider is not None:
             vcs_repository = cast(RunVcsRepository, self._repository)
             vcs_run = await vcs_repository.get_run_vcs_input(run_id)
@@ -111,9 +116,10 @@ class ReviewRunProcessor:
                 return None
             stored_files = await vcs_repository.get_run_snapshots(run_id)
             if stored_files is None:
-                fetched = await FetchVcsReviewInput(self._vcs_provider).execute(
+                fetched = await FetchVcsReviewInput(self._vcs_provider, run_id=run_id).execute(
                     vcs_run.locator, vcs_run.head_sha, vcs_run.base_sha
                 )
+                failed_blob_shas = fetched.failed_blob_shas
                 omission_by_path = {
                     item.file.filename: item.reason.value for item in fetched.omissions
                 }
@@ -157,7 +163,7 @@ class ReviewRunProcessor:
         if self._blob_cache is not None:
             if self._vcs_provider is not None:
                 assert vcs_run is not None
-                await self._store_vcs_blobs(vcs_run, stored_files)
+                await self._store_vcs_blobs(run_id, vcs_run, stored_files, failed_blob_shas)
             else:
                 await self._store_file_blobs(run, files)
         if self._conventions is not None:
@@ -196,17 +202,41 @@ class ReviewRunProcessor:
                 ttl=BLOB_CACHE_TTL,
             )
 
-    async def _store_vcs_blobs(self, run: RunVcsInput, files: list[DiffSnapshot]) -> None:
+    async def _store_vcs_blobs(
+        self,
+        run_id: UUID,
+        run: RunVcsInput,
+        files: list[DiffSnapshot],
+        failed_blob_shas: frozenset[str],
+    ) -> None:
         assert self._blob_cache is not None
         assert self._vcs_provider is not None
         for file in files:
-            if file.blob_sha is None or file.omission_reason in {"too_large", "generated"}:
+            if (
+                file.blob_sha is None
+                or file.blob_sha in failed_blob_shas
+                or file.omission_reason in {"too_large", "generated"}
+            ):
                 continue
             key = BlobCacheKey(run.repository_id, file.blob_sha)
             if (await self._blob_cache.get(key)).status is BlobCacheStatus.HIT:
                 continue
-            blob = await self._vcs_provider.get_blob(run.locator, file.blob_sha)
-            if len(blob) > 1_048_576:
+            try:
+                blob = await self._vcs_provider.get_blob(run.locator, file.blob_sha)
+            except Exception:
+                # Blob cache is optional; a single unavailable file must not abort the Run.
+                _LOGGER.warning(
+                    "VCS blob cache fetch failed run_id=%s repository=%s pr_number=%s "
+                    "file=%s blob_sha=%s",
+                    run_id,
+                    run.locator.repository_full_name,
+                    run.locator.number,
+                    file.filename,
+                    file.blob_sha,
+                    exc_info=True,
+                )
+                continue
+            if len(blob) > MAX_BLOB_BYTES:
                 continue
             try:
                 content = blob.decode("utf-8")

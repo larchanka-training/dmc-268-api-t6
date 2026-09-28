@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Protocol
+from uuid import UUID
 
 from app.modules.reviews.application.prompt_builder import (
     ChangedFile,
@@ -14,10 +16,11 @@ from app.modules.reviews.application.prompt_builder import (
     PullRequestMeta,
 )
 
+_LOGGER = logging.getLogger(__name__)
 _HUNK = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
 _MAX_PATCH_LINES = 20_000
 _MAX_PATCH_BYTES = 1_048_576
-_MAX_BLOB_BYTES = 1_048_576
+MAX_BLOB_BYTES = 1_048_576
 _LOCK_FILES = frozenset(
     {
         "package-lock.json",
@@ -71,6 +74,10 @@ class OmissionReason(StrEnum):
     MISSING_PATCH = "missing_patch"
 
 
+class BlobTooLargeError(ValueError):
+    """The provider stopped a blob retrieval at the review size budget."""
+
+
 @dataclass(frozen=True)
 class VcsFileOmission:
     file: VcsFile
@@ -84,6 +91,7 @@ class FetchedVcsReviewInput:
     changed_files: tuple[ChangedFile, ...]
     omitted_files: tuple[str, ...]
     omissions: tuple[VcsFileOmission, ...]
+    failed_blob_shas: frozenset[str]
 
 
 class VcsProvider(Protocol):
@@ -97,8 +105,9 @@ class VcsProvider(Protocol):
 class FetchVcsReviewInput:
     """Fetch current-head L1 inputs without a database transaction."""
 
-    def __init__(self, provider: VcsProvider) -> None:
+    def __init__(self, provider: VcsProvider, *, run_id: UUID | None = None) -> None:
         self._provider = provider
+        self._run_id = run_id
 
     async def execute(
         self,
@@ -114,19 +123,38 @@ class FetchVcsReviewInput:
         files = await self._provider.get_diff(pull_request)
         changed: list[ChangedFile] = []
         omitted: list[VcsFileOmission] = []
+        failed_blob_shas: set[str] = set()
         for file in files:
             reason = _known_omission(file)
             if reason is None and not file.patch:
-                if file.blob_sha is None:
+                if file.blob_sha is None or file.blob_sha in failed_blob_shas:
                     reason = OmissionReason.MISSING_PATCH
                 else:
-                    blob = await self._provider.get_blob(locator, file.blob_sha)
-                    if len(blob) > _MAX_BLOB_BYTES:
+                    try:
+                        blob = await self._provider.get_blob(locator, file.blob_sha)
+                    except BlobTooLargeError:
                         reason = OmissionReason.TOO_LARGE
-                    elif _is_binary(blob):
-                        reason = OmissionReason.BINARY
-                    else:
+                    except Exception:
+                        # Blob classification is best effort; retain this file as an omission.
+                        _LOGGER.warning(
+                            "VCS blob classification failed run_id=%s repository=%s "
+                            "pr_number=%s file=%s blob_sha=%s",
+                            self._run_id,
+                            locator.repository_full_name,
+                            locator.number,
+                            file.filename,
+                            file.blob_sha,
+                            exc_info=True,
+                        )
+                        failed_blob_shas.add(file.blob_sha)
                         reason = OmissionReason.MISSING_PATCH
+                    else:
+                        if len(blob) > MAX_BLOB_BYTES:
+                            reason = OmissionReason.TOO_LARGE
+                        elif _is_binary(blob):
+                            reason = OmissionReason.BINARY
+                        else:
+                            reason = OmissionReason.MISSING_PATCH
             if reason is None:
                 assert file.patch is not None
                 changed.append(parse_file_patch(file.filename, file.status, file.patch))
@@ -138,6 +166,7 @@ class FetchVcsReviewInput:
             changed_files=tuple(changed),
             omitted_files=tuple(item.file.filename for item in omitted),
             omissions=tuple(omitted),
+            failed_blob_shas=frozenset(failed_blob_shas),
         )
 
 
@@ -148,7 +177,7 @@ def _known_omission(file: VcsFile) -> OmissionReason | None:
         return OmissionReason.BINARY
     if (
         file.changes > _MAX_PATCH_LINES
-        or (file.size is not None and file.size > _MAX_BLOB_BYTES)
+        or (file.size is not None and file.size > MAX_BLOB_BYTES)
         or (
             file.patch is not None
             and (

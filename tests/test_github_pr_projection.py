@@ -7,7 +7,7 @@ import os
 from collections.abc import AsyncIterator, Callable, Iterator, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from types import TracebackType
 from typing import Self, cast
 from uuid import UUID, uuid4
@@ -15,19 +15,19 @@ from uuid import UUID, uuid4
 import httpx
 import pytest
 from alembic.config import Config
-from sqlalchemy import create_engine, select, text
+from sqlalchemy import create_engine, delete, select, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.schema import CreateSchema, DropSchema
 
 from alembic import command
-from app.modules.integrations.webhooks.api.ci_event_dtos import parse_ci_event
+from app.modules.integrations.webhooks.api.dispatch import GitHubWebhookDispatchAdapter
 from app.modules.integrations.webhooks.api.pull_request_dtos import parse_pull_request_event
+from app.modules.integrations.webhooks.api.receipt import VerifiedGitHubDelivery
 from app.modules.integrations.webhooks.application.github_installation_dispatch import (
     GitHubInstallationDeliveryDispatcher,
     GitHubInstallationResolver,
     InstallationDeliveryDispatchStatus,
     InstallationOnboardingHandler,
-    VerifiedGitHubDelivery,
 )
 from app.modules.integrations.webhooks.infrastructure.github_current_pull_request import (
     HttpGitHubCurrentPullRequestProvider,
@@ -36,9 +36,11 @@ from app.modules.integrations.webhooks.infrastructure.github_reviewer_timeline i
     HttpGitHubReviewerTimelineProvider,
 )
 from app.modules.reviews.application.project_github_pull_request import (
+    LockedPullRequest,
     ProjectGitHubPullRequest,
     PullRequestEvent,
     PullRequestIdentityConflict,
+    PullRequestLabelEvent,
     PullRequestProjectionStatus,
     PullRequestRecord,
     PullRequestState,
@@ -98,12 +100,13 @@ class FakeStore:
 
     async def get_or_create_locked(
         self, event: PullRequestEvent, now: datetime
-    ) -> PullRequestRecord | None:
+    ) -> LockedPullRequest | None:
         if self.repository_id is None:
             return None
+        created = self.row is None
         if self.row is None:
             self.row = PullRequestRecord.from_event(uuid4(), self.repository_id, event, now)
-        return self.row
+        return LockedPullRequest(self.row, created)
 
     async def save(self, record: PullRequestRecord) -> None:
         self.row = record
@@ -347,6 +350,54 @@ def test_head_change_and_close_cancel_runs_in_projection_transaction() -> None:
     )
     assert uow.run_store.calls[-1] == (uow.store.row.id, "pr_closed")
     assert uow.run_store.notices == [notice]
+
+
+def test_synchronize_and_close_publish_cancellation_ids_only_after_commit() -> None:
+    uow = FakeUnitOfWork()
+
+    @dataclass
+    class Signals:
+        calls: list[tuple[UUID, ...]] = field(default_factory=list)
+
+        async def publish_for(self, run_ids: tuple[UUID, ...]) -> int:
+            assert not uow.active
+            assert uow.commits >= 2
+            self.calls.append(run_ids)
+            return len(run_ids)
+
+    signals = Signals()
+    projector = ProjectGitHubPullRequest(
+        uow_factory=lambda: uow,
+        bot_login="reviewer[bot]",
+        cancellation_signals=signals,
+        now=lambda: _NOW,
+    )
+    asyncio.run(projector.execute(_event()))
+    first = RunCancellationNotice(UUID(int=1), UUID(int=2), "cancelled")
+    uow.run_store.next_notices = (first,)
+    synchronized = _event(
+        "synchronize",
+        head_sha="c" * 40,
+        provider_updated_at=_NOW + timedelta(minutes=1),
+    )
+    assert asyncio.run(projector.execute(synchronized)) == PullRequestProjectionStatus.PROJECTED
+    assert signals.calls == [(first.run_id,)]
+    assert uow.run_store.notices == [first]
+
+    assert asyncio.run(projector.execute(synchronized)) == PullRequestProjectionStatus.PROJECTED
+    assert signals.calls == [(first.run_id,)]
+
+    second = RunCancellationNotice(UUID(int=3), UUID(int=2), "cancelled")
+    uow.run_store.next_notices = (second,)
+    closed = _event(
+        "closed",
+        head_sha="c" * 40,
+        state=PullRequestState.CLOSED,
+        provider_updated_at=_NOW + timedelta(minutes=2),
+    )
+    assert asyncio.run(projector.execute(closed)) == PullRequestProjectionStatus.PROJECTED
+    assert signals.calls == [(first.run_id,), (second.run_id,)]
+    assert uow.run_store.notices == [first, second]
 
 
 def test_close_barrier_and_equal_time_removal_keep_reviewer_intent_fail_closed() -> None:
@@ -776,6 +827,157 @@ def test_postgresql_pr_lock_serializes_connections_and_releases_after_use(
     asyncio.run(exercise())
 
 
+@pytest.mark.integration
+def test_postgresql_first_edited_delivery_commits_and_equal_time_replay_is_stale(
+    legacy_pr_database: tuple[str, str, UUID],
+) -> None:
+    database_url, schema, legacy_pr_id = legacy_pr_database
+
+    async def exercise() -> None:
+        engine = create_async_engine(
+            database_url, connect_args={"options": f"-csearch_path={schema}"}
+        )
+        sessions = async_sessionmaker(engine, expire_on_commit=False)
+        projector = ProjectGitHubPullRequest(
+            uow_factory=lambda: SqlAlchemyPullRequestProjectionUnitOfWork(sessions),
+            bot_login="reviewer[bot]",
+            now=lambda: _NOW,
+        )
+        try:
+            async with sessions.begin() as session:
+                await session.execute(delete(CodeChange).where(CodeChange.id == legacy_pr_id))
+
+            first = _event("edited", title="Latest metadata")
+            assert await projector.execute(first) == PullRequestProjectionStatus.PROJECTED
+            async with sessions() as session:
+                rows = (await session.scalars(select(CodeChange))).all()
+                assert len(rows) == 1
+                assert rows[0].title == "Latest metadata"
+
+            stale = _event("edited", title="Older metadata")
+            assert await projector.execute(stale) == PullRequestProjectionStatus.IGNORED_STALE
+            async with sessions() as session:
+                rows = (await session.scalars(select(CodeChange))).all()
+                assert len(rows) == 1
+                assert rows[0].title == "Latest metadata"
+        finally:
+            await engine.dispose()
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.integration
+def test_postgresql_label_deliveries_persist_add_remove_readd_timestamps(
+    legacy_pr_database: tuple[str, str, UUID],
+) -> None:
+    database_url, schema, legacy_pr_id = legacy_pr_database
+
+    async def exercise() -> None:
+        engine = create_async_engine(
+            database_url, connect_args={"options": f"-csearch_path={schema}"}
+        )
+        sessions = async_sessionmaker(engine, expire_on_commit=False)
+        active_uow = [False]
+        clock = [datetime(2026, 9, 28, 12, 1, tzinfo=UTC)]
+        labels: set[str] = {"ai-review"}
+        rest_calls: list[str] = []
+
+        class TrackingUnitOfWork(SqlAlchemyPullRequestProjectionUnitOfWork):
+            async def __aenter__(self) -> Self:
+                assert not active_uow[0]
+                entered = await super().__aenter__()
+                active_uow[0] = True
+                return entered
+
+            async def __aexit__(
+                self,
+                exc_type: type[BaseException] | None,
+                exc: BaseException | None,
+                traceback: TracebackType | None,
+            ) -> None:
+                try:
+                    await super().__aexit__(exc_type, exc, traceback)
+                finally:
+                    active_uow[0] = False
+
+        class Current:
+            async def get_current(self, event: PullRequestEvent) -> PullRequestEvent:
+                assert not active_uow[0]
+                rest_calls.append(event.action)
+                return _event(event.action, current_label_names=frozenset(labels))
+
+        projector = ProjectGitHubPullRequest(
+            uow_factory=lambda: TrackingUnitOfWork(sessions),
+            bot_login="reviewer[bot]",
+            current_provider=Current(),
+            projection_lock=FakeProjectionLock(),
+            now=lambda: clock[0],
+        )
+        adapter = GitHubWebhookDispatchAdapter(
+            GitHubInstallationDeliveryDispatcher(
+                resolver=cast(GitHubInstallationResolver, None),
+                onboarding=cast(InstallationOnboardingHandler, None),
+                label_intent_projector=projector,
+            )
+        )
+
+        async def deliver(action: str) -> InstallationDeliveryDispatchStatus:
+            payload = _webhook_payload()
+            payload["action"] = action
+            payload["label"] = {"name": "ai-review"}
+            payload.pop("requested_reviewer")
+            result = await adapter.execute(
+                VerifiedGitHubDelivery(
+                    f"label-{action}-{clock[0]}", "pull_request", payload
+                ).to_receipt()
+            )
+            return result.status
+
+        async def stored() -> CodeChange:
+            async with sessions() as session:
+                rows = (await session.scalars(select(CodeChange))).all()
+                assert len(rows) == 1
+                session.expunge(rows[0])
+                return rows[0]
+
+        try:
+            async with sessions.begin() as session:
+                await session.execute(delete(CodeChange).where(CodeChange.id == legacy_pr_id))
+
+            assert await deliver("labeled") == InstallationDeliveryDispatchStatus.PROJECTED_PR
+            first = await stored()
+            assert first.ai_review_labeled is True
+            assert first.ai_review_labeled_at == clock[0]
+            assert first.label_intent_updated_at == clock[0]
+            assert first.head_first_seen_at == clock[0]
+
+            labels.clear()
+            clock[0] = datetime(2026, 9, 28, 12, 2, tzinfo=UTC)
+            assert await deliver("unlabeled") == InstallationDeliveryDispatchStatus.PROJECTED_PR
+            removed = await stored()
+            assert removed.id == first.id
+            assert removed.ai_review_labeled is False
+            assert removed.ai_review_labeled_at is None
+            assert removed.label_intent_updated_at == clock[0]
+            assert removed.head_first_seen_at == first.head_first_seen_at
+
+            labels.add("ai-review")
+            clock[0] = datetime(2026, 9, 28, 12, 3, tzinfo=UTC)
+            assert await deliver("labeled") == InstallationDeliveryDispatchStatus.PROJECTED_PR
+            reapplied = await stored()
+            assert reapplied.id == first.id
+            assert reapplied.ai_review_labeled is True
+            assert reapplied.ai_review_labeled_at == clock[0]
+            assert reapplied.label_intent_updated_at == clock[0]
+            assert reapplied.head_first_seen_at == first.head_first_seen_at
+            assert rest_calls == ["labeled", "unlabeled", "labeled"]
+            assert active_uow == [False]
+        finally:
+            await engine.dispose()
+
+    asyncio.run(exercise())
+
+
 def test_inverted_rest_observations_are_serialized_per_pr() -> None:
     uow = FakeUnitOfWork()
     current_head = ["c" * 40]
@@ -995,7 +1197,7 @@ def test_external_id_collision_with_different_pr_number_is_unrelated() -> None:
     class CollidingStore(FakeStore):
         async def get_or_create_locked(
             self, event: PullRequestEvent, now: datetime
-        ) -> PullRequestRecord | None:
+        ) -> LockedPullRequest | None:
             raise PullRequestIdentityConflict
 
     uow = FakeUnitOfWork(store=CollidingStore())
@@ -1044,6 +1246,492 @@ def test_webhook_payload_parses_pr_metadata_and_bot_request() -> None:
     )
 
 
+def test_edited_receipt_updates_metadata_without_changing_intent_clock_or_enqueue() -> None:
+    @dataclass
+    class Trigger:
+        prs: list[PullRequestEvent] = field(default_factory=list)
+        ci: list[CiTriggerEvent] = field(default_factory=list)
+
+        async def on_pr(self, event: PullRequestEvent) -> None:
+            self.prs.append(event)
+
+        async def on_ci(self, event: CiTriggerEvent) -> None:
+            self.ci.append(event)
+
+        async def on_label(self, event: PullRequestLabelEvent) -> None:
+            raise AssertionError("edited must not enqueue")
+
+    uow = FakeUnitOfWork()
+    projector = ProjectGitHubPullRequest(
+        uow_factory=lambda: uow, bot_login="reviewer[bot]", now=lambda: _NOW
+    )
+    asyncio.run(projector.execute(_event()))
+    assert uow.store.row is not None
+    row = uow.store.row
+    row.reviewer_requested = True
+    row.reviewer_requested_at = _NOW
+    row.ai_review_labeled = True
+    row.ai_review_labeled_at = _NOW
+    row.label_intent_updated_at = _NOW
+    row.ci_status = {"head": "green"}
+    first_seen = row.head_first_seen_at
+    trigger = Trigger()
+    adapter = GitHubWebhookDispatchAdapter(
+        GitHubInstallationDeliveryDispatcher(
+            resolver=cast(GitHubInstallationResolver, None),
+            onboarding=cast(InstallationOnboardingHandler, None),
+            pull_request_projector=projector,
+            run_trigger=trigger,
+        )
+    )
+    payload = _webhook_payload()
+    payload["action"] = "edited"
+    pr = dict(cast(Mapping[str, object], payload["pull_request"]))
+    pr.update(
+        {
+            "title": "Updated title",
+            "body": "Updated body",
+            "user": {"login": "bob"},
+            "head": {"ref": "feature/renamed", "sha": _HEAD},
+            "base": {"ref": "release", "sha": "c" * 40},
+            "updated_at": "2026-09-28T12:01:00Z",
+        }
+    )
+    payload["pull_request"] = pr
+
+    result = asyncio.run(
+        adapter.execute(
+            VerifiedGitHubDelivery("delivery-edited", "pull_request", payload).to_receipt()
+        )
+    )
+
+    assert result.status is InstallationDeliveryDispatchStatus.PROJECTED_PR
+    assert (row.title, row.description, row.author_login) == (
+        "Updated title",
+        "Updated body",
+        "bob",
+    )
+    assert (row.source_branch, row.target_branch, row.base_sha, row.head_sha) == (
+        "feature/renamed",
+        "release",
+        "c" * 40,
+        _HEAD,
+    )
+    # The persisted label intent arrives in Tasks 2b–2c; preserve existing intent meanwhile.
+    assert (row.reviewer_requested, row.reviewer_requested_at) == (True, _NOW)
+    assert (row.ai_review_labeled, row.ai_review_labeled_at, row.label_intent_updated_at) == (
+        True,
+        _NOW,
+        _NOW,
+    )
+    assert row.head_first_seen_at == first_seen
+    assert row.ci_status == {"head": "green"}
+    assert trigger.prs == [] and trigger.ci == []
+    saves = uow.store.saves
+    stale_payload = dict(payload)
+    stale_pr = dict(pr)
+    stale_pr.update({"title": "Stale title", "updated_at": "2026-09-28T12:00:00Z"})
+    stale_payload["pull_request"] = stale_pr
+
+    stale = asyncio.run(
+        adapter.execute(
+            VerifiedGitHubDelivery(
+                "delivery-stale-edited", "pull_request", stale_payload
+            ).to_receipt()
+        )
+    )
+
+    assert stale.status is InstallationDeliveryDispatchStatus.PROJECTED_PR
+    assert row.title == "Updated title"
+    assert uow.store.saves == saves
+    assert trigger.prs == [] and trigger.ci == []
+
+    same_second_pr = dict(pr)
+    same_second_pr["title"] = "Older title with same timestamp"
+    same_second_payload = dict(payload)
+    same_second_payload["pull_request"] = same_second_pr
+    same_second = asyncio.run(
+        adapter.execute(
+            VerifiedGitHubDelivery(
+                "delivery-same-second-edited", "pull_request", same_second_payload
+            ).to_receipt()
+        )
+    )
+
+    assert same_second.status is InstallationDeliveryDispatchStatus.PROJECTED_PR
+    assert row.title == "Updated title"
+    assert uow.store.saves == saves
+    assert trigger.prs == [] and trigger.ci == []
+
+
+def test_first_edited_delivery_creates_pr_without_current_provider() -> None:
+    uow = FakeUnitOfWork()
+    projector = ProjectGitHubPullRequest(
+        uow_factory=lambda: uow, bot_login="reviewer[bot]", now=lambda: _NOW
+    )
+    adapter = GitHubWebhookDispatchAdapter(
+        GitHubInstallationDeliveryDispatcher(
+            resolver=cast(GitHubInstallationResolver, None),
+            onboarding=cast(InstallationOnboardingHandler, None),
+            pull_request_projector=projector,
+        )
+    )
+    payload = _webhook_payload()
+    payload["action"] = "edited"
+    pr = dict(cast(Mapping[str, object], payload["pull_request"]))
+    pr["title"] = "First observed metadata"
+    payload["pull_request"] = pr
+
+    result = asyncio.run(
+        adapter.execute(
+            VerifiedGitHubDelivery("first-edited", "pull_request", payload).to_receipt()
+        )
+    )
+
+    assert result.status is InstallationDeliveryDispatchStatus.PROJECTED_PR
+    assert uow.store.row is not None
+    assert uow.store.row.title == "First observed metadata"
+    assert uow.store.saves == 1
+    assert uow.commits == 1
+
+
+def test_old_reviewer_intent_does_not_opt_in_to_new_label_state() -> None:
+    uow = FakeUnitOfWork()
+    projector = ProjectGitHubPullRequest(
+        uow_factory=lambda: uow, bot_login="reviewer[bot]", now=lambda: _NOW
+    )
+    assert asyncio.run(projector.execute(_event())) == PullRequestProjectionStatus.PROJECTED
+    assert uow.store.row is not None
+    row = uow.store.row
+    row.reviewer_requested = True
+    row.reviewer_requested_at = _NOW
+    first_seen = row.head_first_seen_at
+
+    result = asyncio.run(
+        projector.execute(
+            _event(
+                "edited",
+                title="Updated metadata",
+                provider_updated_at=datetime(2026, 9, 28, 12, 1, tzinfo=UTC),
+            )
+        )
+    )
+
+    assert result == PullRequestProjectionStatus.PROJECTED
+    assert row.title == "Updated metadata"
+    assert row.reviewer_requested is True
+    assert row.ai_review_labeled is False
+    assert row.ai_review_labeled_at is None
+    assert row.label_intent_updated_at is None
+    assert row.head_first_seen_at == first_seen
+
+
+def test_label_projection_reconciles_add_remove_readd_and_delayed_deliveries() -> None:
+    uow = FakeUnitOfWork()
+    clock = [datetime(2026, 9, 28, 12, 1, tzinfo=UTC)]
+    labels: set[str] = set()
+    observations: list[str] = []
+
+    class Current:
+        async def get_current(self, event: PullRequestEvent) -> PullRequestEvent:
+            assert not uow.active
+            observations.append(event.action)
+            return _event(
+                event.action,
+                provider_updated_at=datetime(2026, 9, 28, 12, 1, tzinfo=UTC),
+                current_label_names=frozenset(labels),
+            )
+
+    projector = ProjectGitHubPullRequest(
+        uow_factory=lambda: uow,
+        bot_login="reviewer[bot]",
+        current_provider=Current(),
+        projection_lock=FakeProjectionLock(),
+        now=lambda: clock[0],
+    )
+    assert asyncio.run(projector.execute(_event())) == PullRequestProjectionStatus.PROJECTED
+    assert uow.store.row is not None
+    row = uow.store.row
+    row.reviewer_requested = True  # Historical state cannot opt in by itself.
+    row.ci_status = {"head": "green"}
+    first_seen = row.head_first_seen_at
+    add = PullRequestLabelEvent(_event("labeled"), "ai-review")
+    remove = PullRequestLabelEvent(_event("unlabeled"), "ai-review")
+    unrelated = PullRequestLabelEvent(_event("labeled"), "docs")
+
+    assert (
+        asyncio.run(projector.execute(unrelated)) == PullRequestProjectionStatus.IGNORED_UNRELATED
+    )
+    assert observations == []
+    assert row.ai_review_labeled is False
+    labels.add("ai-review")
+    assert asyncio.run(projector.execute(add)) == PullRequestProjectionStatus.PROJECTED
+    assert (row.ai_review_labeled, row.ai_review_labeled_at) == (True, clock[0])
+    activation = row.ai_review_labeled_at
+    clock[0] = datetime(2026, 9, 28, 12, 2, tzinfo=UTC)
+    assert asyncio.run(projector.execute(add)) == PullRequestProjectionStatus.PROJECTED
+    assert asyncio.run(projector.execute(remove)) == PullRequestProjectionStatus.PROJECTED
+    assert (
+        row.ai_review_labeled_at == activation
+    )  # Duplicate and delayed removal see current label.
+
+    labels.clear()
+    clock[0] = datetime(2026, 9, 28, 12, 3, tzinfo=UTC)
+    assert asyncio.run(projector.execute(remove)) == PullRequestProjectionStatus.PROJECTED
+    assert row.ai_review_labeled is False
+    assert row.ai_review_labeled_at is None
+    assert row.label_intent_updated_at == clock[0]
+    assert asyncio.run(projector.execute(add)) == PullRequestProjectionStatus.PROJECTED
+    assert row.ai_review_labeled is False  # Delayed add cannot defeat current removal.
+
+    labels.add("ai-review")
+    clock[0] = datetime(2026, 9, 28, 12, 4, tzinfo=UTC)
+    assert asyncio.run(projector.execute(add)) == PullRequestProjectionStatus.PROJECTED
+    assert row.ai_review_labeled is True
+    assert row.ai_review_labeled_at == clock[0]
+    assert row.label_intent_updated_at == clock[0]
+    assert row.reviewer_requested is True
+    assert row.head_first_seen_at == first_seen
+    assert row.ci_status == {"head": "green"}
+    assert uow.run_store.calls == [(row.id, "label_removed")]
+    assert observations == ["labeled", "labeled", "unlabeled", "unlabeled", "labeled", "labeled"]
+
+
+def test_delayed_label_projects_current_head_and_cancels_obsolete_run() -> None:
+    uow = FakeUnitOfWork()
+    current_head = "c" * 40
+    current_at = datetime(2026, 9, 28, 12, 5, tzinfo=UTC)
+
+    class Current:
+        async def get_current(self, event: PullRequestEvent) -> PullRequestEvent:
+            assert not uow.active
+            return _event(
+                event.action,
+                head_sha=current_head,
+                base_sha="d" * 40,
+                provider_updated_at=current_at,
+                current_label_names=frozenset({"ai-review"}),
+            )
+
+    projector = ProjectGitHubPullRequest(
+        uow_factory=lambda: uow,
+        bot_login="reviewer[bot]",
+        current_provider=Current(),
+        projection_lock=FakeProjectionLock(),
+        now=lambda: current_at,
+    )
+    asyncio.run(projector.execute(_event()))
+    assert uow.store.row is not None
+    row = uow.store.row
+    row.ci_status = {"old": "success"}
+
+    result = asyncio.run(projector.execute(PullRequestLabelEvent(_event("labeled"), "ai-review")))
+
+    assert result == PullRequestProjectionStatus.PROJECTED
+    assert row.head_sha == current_head
+    assert row.base_sha == "d" * 40
+    assert row.head_first_seen_at == current_at
+    assert row.ci_status == {}
+    assert row.ai_review_labeled is True
+    assert uow.run_store.calls == [(row.id, "superseded")]
+
+
+def test_delayed_label_projects_current_closed_lifecycle() -> None:
+    uow = FakeUnitOfWork()
+    current_at = datetime(2026, 9, 28, 12, 5, tzinfo=UTC)
+
+    class Current:
+        async def get_current(self, event: PullRequestEvent) -> PullRequestEvent:
+            assert not uow.active
+            return _event(
+                event.action,
+                state=PullRequestState.CLOSED,
+                provider_updated_at=current_at,
+                current_label_names=frozenset({"ai-review"}),
+            )
+
+    projector = ProjectGitHubPullRequest(
+        uow_factory=lambda: uow,
+        bot_login="reviewer[bot]",
+        current_provider=Current(),
+        projection_lock=FakeProjectionLock(),
+        now=lambda: current_at,
+    )
+    asyncio.run(projector.execute(_event()))
+    assert uow.store.row is not None
+    row = uow.store.row
+
+    result = asyncio.run(projector.execute(PullRequestLabelEvent(_event("labeled"), "ai-review")))
+
+    assert result == PullRequestProjectionStatus.PROJECTED
+    assert row.state == PullRequestState.CLOSED
+    assert row.ai_review_labeled is True
+    assert uow.run_store.calls == [(row.id, "pr_closed")]
+
+
+def test_current_label_reconciles_old_row_on_sync_and_survives_close_reopen() -> None:
+    uow = FakeUnitOfWork()
+    clock = [datetime(2026, 9, 28, 12, 1, tzinfo=UTC)]
+    state = [PullRequestState.OPEN]
+    head = ["c" * 40]
+
+    class Current:
+        async def get_current(self, event: PullRequestEvent) -> PullRequestEvent:
+            assert not uow.active
+            return _event(
+                event.action,
+                state=state[0],
+                head_sha=head[0],
+                provider_updated_at=clock[0],
+                current_label_names=frozenset({"ai-review"}),
+            )
+
+    projector = ProjectGitHubPullRequest(
+        uow_factory=lambda: uow,
+        bot_login="reviewer[bot]",
+        current_provider=Current(),
+        projection_lock=FakeProjectionLock(),
+        now=lambda: clock[0],
+    )
+    asyncio.run(projector.execute(_event()))
+    assert uow.store.row is not None
+    row = uow.store.row
+    row.reviewer_requested = True  # Simulates an old migrated row.
+    row.ci_status = {"head": "old"}
+    assert row.ai_review_labeled is False
+
+    assert (
+        asyncio.run(projector.execute(_event("synchronize")))
+        == PullRequestProjectionStatus.PROJECTED
+    )
+    assert row.head_sha == "c" * 40
+    assert row.head_first_seen_at == clock[0]
+    assert row.ci_status == {}
+    assert (row.ai_review_labeled, row.ai_review_labeled_at) == (True, clock[0])
+    activation = row.ai_review_labeled_at
+
+    state[0] = PullRequestState.CLOSED
+    clock[0] = datetime(2026, 9, 28, 12, 2, tzinfo=UTC)
+    assert (
+        asyncio.run(projector.execute(_event("closed", state=PullRequestState.CLOSED)))
+        == PullRequestProjectionStatus.PROJECTED
+    )
+    assert row.state == PullRequestState.CLOSED
+    assert (row.ai_review_labeled, row.ai_review_labeled_at) == (True, activation)
+
+    state[0] = PullRequestState.OPEN
+    clock[0] = datetime(2026, 9, 28, 12, 3, tzinfo=UTC)
+    assert (
+        asyncio.run(projector.execute(_event("reopened"))) == PullRequestProjectionStatus.PROJECTED
+    )
+    assert cast(PullRequestState, row.state) == PullRequestState.OPEN
+    assert (row.ai_review_labeled, row.ai_review_labeled_at) == (True, activation)
+
+
+def test_first_label_receipt_projects_through_typed_adapter_and_real_intent_projector() -> None:
+    uow = FakeUnitOfWork()
+
+    class Current:
+        async def get_current(self, event: PullRequestEvent) -> PullRequestEvent:
+            assert not uow.active
+            return _event(event.action, current_label_names=frozenset({"ai-review"}))
+
+    projector = ProjectGitHubPullRequest(
+        uow_factory=lambda: uow,
+        bot_login="reviewer[bot]",
+        current_provider=Current(),
+        projection_lock=FakeProjectionLock(),
+        now=lambda: _NOW,
+    )
+    adapter = GitHubWebhookDispatchAdapter(
+        GitHubInstallationDeliveryDispatcher(
+            resolver=cast(GitHubInstallationResolver, None),
+            onboarding=cast(InstallationOnboardingHandler, None),
+            label_intent_projector=projector,
+        )
+    )
+    payload = _webhook_payload()
+    payload["action"] = "labeled"
+    payload["label"] = {"name": "ai-review"}
+    payload.pop("requested_reviewer")
+
+    result = asyncio.run(
+        adapter.execute(VerifiedGitHubDelivery("first-label", "pull_request", payload).to_receipt())
+    )
+
+    assert result.status is InstallationDeliveryDispatchStatus.DEFERRED_KNOWN_EVENT
+    assert uow.store.row is not None
+    assert uow.store.row.ai_review_labeled is True
+    assert uow.store.row.ai_review_labeled_at == _NOW
+    assert uow.store.row.label_intent_updated_at == _NOW
+    assert uow.commits == 1
+
+
+@pytest.mark.parametrize("titles", [("New title", "Old title"), ("Old title", "New title")])
+def test_same_second_edited_replay_uses_current_metadata_in_either_order(
+    titles: tuple[str, str],
+) -> None:
+    edited_at = datetime(2026, 9, 28, 12, 1, tzinfo=UTC)
+    uow = FakeUnitOfWork()
+    calls: list[str] = []
+
+    class Current:
+        async def get_current(self, event: PullRequestEvent) -> PullRequestEvent:
+            assert not uow.active
+            calls.append(event.title)
+            return _event(
+                "edited",
+                title="New title",
+                description="Newest body",
+                author_login="bob",
+                source_branch="feature/latest",
+                target_branch="release",
+                base_sha="c" * 40,
+                head_sha="d" * 40,
+                provider_updated_at=edited_at,
+            )
+
+    projector = ProjectGitHubPullRequest(
+        uow_factory=lambda: uow,
+        bot_login="reviewer[bot]",
+        current_provider=Current(),
+        projection_lock=FakeProjectionLock(),
+        now=lambda: _NOW,
+    )
+    assert asyncio.run(projector.execute(_event())) == PullRequestProjectionStatus.PROJECTED
+    assert uow.store.row is not None
+    row = uow.store.row
+    row.reviewer_requested = True
+    row.reviewer_requested_at = _NOW
+    row.ci_status = {"head": "green"}
+    first_seen = row.head_first_seen_at
+
+    for title in titles:
+        assert (
+            asyncio.run(
+                projector.execute(_event("edited", title=title, provider_updated_at=edited_at))
+            )
+            == PullRequestProjectionStatus.PROJECTED
+        )
+
+    assert calls == list(titles)
+    assert (row.title, row.description, row.author_login) == (
+        "New title",
+        "Newest body",
+        "bob",
+    )
+    assert (row.source_branch, row.target_branch, row.base_sha) == (
+        "feature/latest",
+        "release",
+        "c" * 40,
+    )
+    assert (row.reviewer_requested, row.reviewer_requested_at) == (True, _NOW)
+    assert row.head_first_seen_at == first_seen
+    assert row.head_sha == _HEAD
+    assert row.ci_status == {"head": "green"}
+    assert uow.run_store.calls == []
+
+
 def test_current_pr_provider_fetches_authoritative_snapshot_with_installation_token() -> None:
     seen: list[httpx.Request] = []
 
@@ -1057,6 +1745,7 @@ def test_current_pr_provider_fetches_authoritative_snapshot_with_installation_to
         current = dict(cast(Mapping[str, object], _webhook_payload()["pull_request"]))
         current["head"] = {"ref": "feature/parser", "sha": "c" * 40}
         current["state"] = "closed"
+        current["labels"] = [{"name": "ai-review"}, {"name": "docs"}]
         return httpx.Response(200, json=current)
 
     async def exercise() -> PullRequestEvent:
@@ -1069,10 +1758,34 @@ def test_current_pr_provider_fetches_authoritative_snapshot_with_installation_to
     result = asyncio.run(exercise())
 
     assert result.head_sha == "c" * 40
+    assert result.current_label_names == frozenset({"ai-review", "docs"})
     assert result.state == PullRequestState.CLOSED
     assert len(seen) == 1
     assert seen[0].url.path == "/repos/octo/repo/pulls/7"
     assert seen[0].headers["Authorization"] == "Bearer installation-token"
+
+
+@pytest.mark.parametrize("labels", [None, [{"name": 7}], [{"name": ""}]])
+def test_current_pr_without_valid_labels_cannot_clear_label_state(labels: object) -> None:
+    class Tokens:
+        async def get_installation_access_token(self, installation_external_id: int) -> str:
+            return "installation-token"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        current = dict(cast(Mapping[str, object], _webhook_payload()["pull_request"]))
+        if labels is not None:
+            current["labels"] = labels
+        return httpx.Response(200, json=current)
+
+    async def exercise() -> None:
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(handler), base_url="https://api.github.com"
+        ) as client:
+            provider = HttpGitHubCurrentPullRequestProvider(client=client, token_provider=Tokens())
+            await provider.get_current(_event("synchronize"))
+
+    with pytest.raises(ValueError):
+        asyncio.run(exercise())
 
 
 def test_reviewer_timeline_paginates_and_ignores_automatic_bot_removal() -> None:
@@ -1206,8 +1919,7 @@ def test_missing_lifecycle_timeline_does_not_commit_close() -> None:
     assert uow.commits == commits
 
 
-@pytest.mark.parametrize("action", ["review_requested", "reopened"])
-def test_dispatcher_projects_supported_pr_event_from_durable_delivery(action: str) -> None:
+def test_dispatcher_projects_reopened_pr_event_from_durable_delivery() -> None:
     @dataclass
     class Projector:
         events: list[PullRequestEvent] = field(default_factory=list)
@@ -1229,31 +1941,25 @@ def test_dispatcher_projects_supported_pr_event_from_durable_delivery(action: st
         async def on_ci(self, event: CiTriggerEvent) -> None:
             self.ci.append(event)
 
+        async def on_label(self, event: PullRequestLabelEvent) -> None:
+            raise AssertionError("reopened is not a label event")
+
     trigger = Trigger()
     dispatcher = GitHubInstallationDeliveryDispatcher(
         resolver=cast(GitHubInstallationResolver, None),
         onboarding=cast(InstallationOnboardingHandler, None),
         pull_request_projector=projector,
-        pull_request_parser=parse_pull_request_event,
         run_trigger=trigger,
-        ci_parser=parse_ci_event,
     )
     payload = _webhook_payload()
-    payload["action"] = action
-    if action == "reopened":
-        payload.pop("requested_reviewer")
+    payload["action"] = "reopened"
+    payload.pop("requested_reviewer")
     delivery = VerifiedGitHubDelivery("delivery-pr", "pull_request", payload)
 
-    result = asyncio.run(dispatcher.execute(delivery))
+    result = asyncio.run(GitHubWebhookDispatchAdapter(dispatcher).execute(delivery.to_receipt()))
 
     assert result.status == InstallationDeliveryDispatchStatus.PROJECTED_PR
-    assert projector.events == [
-        _event(
-            action,
-            requested_reviewer_login="reviewer[bot]" if action == "review_requested" else None,
-            sender_type="User",
-        )
-    ]
+    assert projector.events == [_event("reopened", sender_type="User")]
     assert trigger.prs == projector.events
 
     ci_delivery = VerifiedGitHubDelivery(
@@ -1267,7 +1973,9 @@ def test_dispatcher_projects_supported_pr_event_from_durable_delivery(action: st
         },
     )
     assert (
-        asyncio.run(dispatcher.execute(ci_delivery)).status
+        asyncio.run(
+            GitHubWebhookDispatchAdapter(dispatcher).execute(ci_delivery.to_receipt())
+        ).status
         == InstallationDeliveryDispatchStatus.PROCESSED_CI
     )
     assert trigger.ci == [CiTriggerEvent(17, 101, _HEAD)]
@@ -1296,6 +2004,9 @@ def test_pr_metadata_delivery_projects_without_triggering_run(
         async def on_ci(self, event: CiTriggerEvent) -> None:
             pass
 
+        async def on_label(self, event: PullRequestLabelEvent) -> None:
+            raise AssertionError("metadata must not enqueue")
+
     projector = Projector()
     trigger = Trigger()
     payload = _webhook_payload()
@@ -1305,12 +2016,13 @@ def test_pr_metadata_delivery_projects_without_triggering_run(
         resolver=cast(GitHubInstallationResolver, None),
         onboarding=cast(InstallationOnboardingHandler, None),
         pull_request_projector=projector,
-        pull_request_parser=parse_pull_request_event,
         run_trigger=trigger if trigger_configured else None,
     )
 
     result = asyncio.run(
-        dispatcher.execute(VerifiedGitHubDelivery("delivery-pr", "pull_request", payload))
+        GitHubWebhookDispatchAdapter(dispatcher).execute(
+            VerifiedGitHubDelivery("delivery-pr", "pull_request", payload).to_receipt()
+        )
     )
 
     assert result.status == InstallationDeliveryDispatchStatus.PROJECTED_PR
@@ -1328,11 +2040,13 @@ def test_pr_delivery_remains_retryable_until_confirmed_publisher_is_configured()
         resolver=cast(GitHubInstallationResolver, None),
         onboarding=cast(InstallationOnboardingHandler, None),
         pull_request_projector=Projector(),
-        pull_request_parser=parse_pull_request_event,
     )
+    payload = _webhook_payload()
+    payload["action"] = "reopened"
+    payload.pop("requested_reviewer")
     status = asyncio.run(
-        dispatcher.execute(
-            VerifiedGitHubDelivery("delivery-pr", "pull_request", _webhook_payload())
+        GitHubWebhookDispatchAdapter(dispatcher).execute(
+            VerifiedGitHubDelivery("delivery-pr", "pull_request", payload).to_receipt()
         )
     ).status
     assert status == InstallationDeliveryDispatchStatus.DEFERRED_KNOWN_EVENT

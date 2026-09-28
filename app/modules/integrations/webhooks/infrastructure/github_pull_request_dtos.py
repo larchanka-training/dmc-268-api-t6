@@ -24,6 +24,12 @@ class _Ref(BaseModel):
     sha: str = Field(pattern=r"^(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})$")
 
 
+class _Label(BaseModel):
+    model_config = ConfigDict(extra="ignore", strict=True)
+
+    name: str = Field(min_length=1, max_length=255)
+
+
 class _CurrentPullRequest(BaseModel):
     model_config = ConfigDict(extra="ignore", strict=True)
     id: int = Field(gt=0, le=2**63 - 1)
@@ -37,6 +43,7 @@ class _CurrentPullRequest(BaseModel):
     state: Literal["open", "closed"]
     merged: bool = False
     updated_at: AwareDatetime = Field(strict=False)
+    labels: list[_Label]
 
 
 def parse_current_pull_request(event: PullRequestEvent, payload: object) -> PullRequestEvent:
@@ -62,4 +69,5 @@ def parse_current_pull_request(event: PullRequestEvent, payload: object) -> Pull
         head_sha=item.head.sha,
         state=state,
         provider_updated_at=item.updated_at,
+        current_label_names=frozenset(label.name for label in item.labels),
     )

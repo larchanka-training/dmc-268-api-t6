@@ -31,17 +31,24 @@ from app.modules.reviews.application.determine_ci_eligibility import (
 from app.modules.reviews.application.project_github_pull_request import (
     ProjectGitHubPullRequest,
     PullRequestEvent,
+    PullRequestLabelEvent,
     PullRequestState,
 )
 from app.modules.reviews.application.trigger_from_delivery import (
     CiTriggerEvent,
+    ProjectedPullRequestTarget,
     TriggerFromDelivery,
 )
 from app.modules.reviews.application.try_enqueue_webhook_run import (
+    EnqueueResult,
     EnqueueStatus,
     PendingRunMessage,
     RunInsertCandidate,
+    RunPublicationKind,
     TryEnqueueWebhookRun,
+)
+from app.modules.reviews.infrastructure.ci_eligibility_candidates import (
+    SqlAlchemyEligibilityCandidateStore,
 )
 from app.modules.reviews.infrastructure.github_pull_request_projection import (
     SqlAlchemyPullRequestProjectionUnitOfWork,
@@ -163,7 +170,10 @@ class Publisher:
     fail: bool = False
     messages: list[PendingRunMessage] = field(default_factory=list)
 
-    async def publish_confirmed(self, message: PendingRunMessage) -> None:
+    async def publish_confirmed(
+        self, message: PendingRunMessage, *, kind: RunPublicationKind = RunPublicationKind.QUEUED
+    ) -> None:
+        assert kind is RunPublicationKind.QUEUED
         assert self.uow.active is False
         self.messages.append(message)
         if self.fail:
@@ -184,8 +194,7 @@ def test_enqueue_pins_run_message_and_publishes_only_after_commit() -> None:
     assert uow.commits == 2
     assert uow.store.published is True
     assert uow.store.notifications == [(_RUN, _WS, "queued")]
-    assert publisher.messages[0].schema == "review.run/v1"
-    assert publisher.messages[0].message_id == _RUN
+    assert publisher.messages[0].run_id == _RUN
     assert publisher.messages[0].attempt == 1
     assert publisher.messages[0].head_sha == _HEAD
     assert publisher.messages[0].base_sha == _BASE
@@ -193,29 +202,17 @@ def test_enqueue_pins_run_message_and_publishes_only_after_commit() -> None:
     assert publisher.messages[0].prompt_version_id == _PROMPT
 
 
-def test_publication_pointer_matches_review_run_v1_contract() -> None:
+def test_publication_pointer_contains_typed_run_data_without_wire_encoding() -> None:
     message = PendingRunMessage.from_candidate(_RUN, _insert_candidate(), _NOW)
 
-    assert message.as_payload() == {
-        "schema": "review.run/v1",
-        "message_id": str(_RUN),
-        "run_id": str(_RUN),
-        "workspace_id": str(_WS),
-        "installation_id": 17,
-        "repo": {
-            "id": str(_REPO),
-            "provider": "github",
-            "external_id": 101,
-            "full_name": "octo/repo",
-        },
-        "pr": {"number": 7, "head_sha": _HEAD, "base_sha": _BASE, "base_ref": "main"},
-        "engine": "fast",
-        "rule_version_id": str(_RULE),
-        "prompt_version_id": str(_PROMPT),
-        "trigger": "webhook",
-        "attempt": 1,
-        "requested_at": "2026-09-28T12:00:00Z",
-    }
+    assert message.run_id == _RUN
+    assert message.workspace_id == _WS
+    assert message.repository_id == _REPO
+    assert message.requested_at == _NOW
+    assert not hasattr(message, "as_payload")
+    assert not hasattr(message, "schema")
+    assert not hasattr(message, "message_id")
+    assert not hasattr(message, "trigger")
 
 
 def test_failed_publish_remains_replayable_and_duplicate_does_not_create_second_run() -> None:
@@ -235,14 +232,14 @@ def test_failed_publish_remains_replayable_and_duplicate_does_not_create_second_
     replayed = asyncio.run(use_case.replay_pending_publications())
     assert replayed == 1
     assert uow.store.published is True
-    assert [message.message_id for message in publisher.messages] == [_RUN, _RUN]
+    assert [message.run_id for message in publisher.messages] == [_RUN, _RUN]
 
 
 def test_repeated_ci_delivery_routes_to_one_run() -> None:
     @dataclass
     class Targets:
-        async def for_pr(self, event: PullRequestEvent) -> UUID | None:
-            return _PR
+        async def for_pr(self, event: PullRequestEvent) -> ProjectedPullRequestTarget:
+            return ProjectedPullRequestTarget(_PR, _HEAD)
 
         async def for_ci(self, event: CiTriggerEvent) -> tuple[UUID, ...]:
             assert event == CiTriggerEvent(17, 101, _HEAD)
@@ -265,6 +262,50 @@ def test_repeated_ci_delivery_routes_to_one_run() -> None:
 
     assert uow.commits == 2
     assert [message.run_id for message in publisher.messages] == [_RUN]
+
+
+def test_delayed_label_enqueues_projected_head_instead_of_webhook_head() -> None:
+    current_head = "c" * 40
+    observed: list[tuple[UUID, str]] = []
+
+    class Targets:
+        async def for_pr(self, event: PullRequestEvent) -> ProjectedPullRequestTarget:
+            assert event.head_sha == _HEAD
+            return ProjectedPullRequestTarget(_PR, current_head)
+
+        async def for_ci(self, event: CiTriggerEvent) -> tuple[UUID, ...]:
+            return ()
+
+    class Enqueuer:
+        async def execute(self, code_change_id: UUID, expected_head_sha: str) -> EnqueueResult:
+            observed.append((code_change_id, expected_head_sha))
+            return EnqueueResult(EnqueueStatus.ENQUEUED)
+
+    event = PullRequestEvent(
+        action="labeled",
+        installation_external_id=17,
+        repository_external_id=101,
+        external_id=901,
+        number=7,
+        title="Review parser",
+        description=None,
+        author_login="alice",
+        web_url="https://github.com/octo/repo/pull/7",
+        source_branch="feature",
+        target_branch="main",
+        base_sha=_BASE,
+        head_sha=_HEAD,
+        state=PullRequestState.OPEN,
+        provider_updated_at=_NOW,
+    )
+
+    asyncio.run(
+        TriggerFromDelivery(targets=Targets(), enqueuer=Enqueuer()).on_label(
+            PullRequestLabelEvent(event, "ai-review")
+        )
+    )
+
+    assert observed == [(_PR, current_head)]
 
 
 @pytest.fixture
@@ -331,10 +372,11 @@ def webhook_run_database() -> Iterator[tuple[str, str]]:
                     "INSERT INTO code_changes "
                     "(id, repository_id, external_id, external_number, title, source_branch, "
                     "target_branch, base_sha, head_sha, state, web_url, reviewer_requested, "
-                    "reviewer_requested_at, head_first_seen_at, provider_updated_at) "
+                    "reviewer_requested_at, ai_review_labeled, ai_review_labeled_at, "
+                    "head_first_seen_at, provider_updated_at) "
                     "VALUES (:id, :repository_id, 901, 7, 'Test PR', 'feature', 'main', "
                     ":base_sha, :head_sha, 'open', 'https://github.com/octo/repo/pull/7', "
-                    "true, :now, :now, :now)"
+                    "true, :now, true, :now, :now, :now)"
                 ),
                 {
                     "id": _PR,
@@ -364,7 +406,13 @@ def test_postgres_enqueue_race_terminal_duplicate_rollback_and_notify(
     class ConfirmedPublisher:
         messages: list[PendingRunMessage] = field(default_factory=list)
 
-        async def publish_confirmed(self, message: PendingRunMessage) -> None:
+        async def publish_confirmed(
+            self,
+            message: PendingRunMessage,
+            *,
+            kind: RunPublicationKind = RunPublicationKind.QUEUED,
+        ) -> None:
+            assert kind is RunPublicationKind.QUEUED
             self.messages.append(message)
 
     async def exercise() -> UUID:
@@ -463,6 +511,25 @@ def test_postgres_pending_replay_excludes_superseded_closed_and_disabled(
                 async with SqlAlchemyWebhookRunUnitOfWork(sessions) as uow:
                     return await uow.runs.pending_messages(10)
 
+            assert [message.run_id for message in await pending()] == [run_id]
+            async with sessions() as session:
+                pr = await session.get(CodeChange, _PR)
+                assert pr is not None and pr.reviewer_requested is True
+                pr.ai_review_labeled = False
+                pr.ai_review_labeled_at = None
+                await session.commit()
+            assert await pending() == ()
+            detached = await SqlAlchemyEligibilityCandidateStore(sessions).get(_PR)
+            assert detached is not None and detached.ai_review_labeled is False
+            async with SqlAlchemyWebhookRunUnitOfWork(sessions) as uow:
+                locked = await uow.runs.lock_candidate(_PR)
+                assert locked is not None and locked.ci.ai_review_labeled is False
+            async with sessions() as session:
+                pr = await session.get(CodeChange, _PR)
+                assert pr is not None
+                pr.ai_review_labeled = True
+                pr.ai_review_labeled_at = _NOW
+                await session.commit()
             assert [message.run_id for message in await pending()] == [run_id]
             async with sessions() as session:
                 pr = await session.get(CodeChange, _PR)

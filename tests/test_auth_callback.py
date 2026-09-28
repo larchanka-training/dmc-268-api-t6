@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import json
 from datetime import UTC, datetime, timedelta
 from types import TracebackType
+from typing import Annotated, cast
 from uuid import UUID, uuid4
 
 import httpx
@@ -19,8 +19,12 @@ from cryptography.hazmat.primitives.serialization import (
     PrivateFormat,
     PublicFormat,
 )
+from fastapi import Depends, FastAPI
 from fastapi.testclient import TestClient
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
+from app.bootstrap import auth_api
+from app.bootstrap.reviews_api import ReviewsApiResources, reviews_api_lifespan
 from app.main import app
 from app.modules.auth.application.exchange_github_code import (
     AuthenticatedUser,
@@ -111,6 +115,67 @@ def _keys() -> tuple[str, str]:
     return private, public
 
 
+def test_auth_clients_are_reused_across_callbacks_and_closed_at_shutdown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    private, _ = _keys()
+    for name, value in {
+        "GITHUB_CLIENT_ID": "client-id",
+        "GITHUB_CLIENT_SECRET": "client-secret",
+        "AUTH_JWT_PRIVATE_KEY": private,
+        "AUTH_JWT_ISSUER": "dmc-268-api",
+        "AUTH_JWT_AUDIENCE": "dmc-268-ui",
+        "GITHUB_API_URL": "https://github.enterprise.test",
+    }.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    composed: list[httpx.AsyncClient] = []
+    profile_clients: list[httpx.AsyncClient] = []
+    original_oauth = HttpGitHubOAuthClient
+    original_profile = HttpGitHubUserProfile
+
+    def observe_oauth(
+        client: httpx.AsyncClient, *, client_id: str, client_secret: str
+    ) -> HttpGitHubOAuthClient:
+        composed.append(client)
+        return original_oauth(client, client_id=client_id, client_secret=client_secret)
+
+    monkeypatch.setattr(auth_api, "HttpGitHubOAuthClient", observe_oauth)
+
+    def observe_profile(client: httpx.AsyncClient) -> HttpGitHubUserProfile:
+        profile_clients.append(client)
+        return original_profile(client)
+
+    monkeypatch.setattr(auth_api, "HttpGitHubUserProfile", observe_profile)
+    test_app = FastAPI(lifespan=reviews_api_lifespan)
+
+    @test_app.get("/compose")
+    async def compose(
+        use_case: Annotated[ExchangeGitHubCode, Depends(auth_api.get_exchange_github_code)],
+    ) -> dict[str, bool]:
+        return {"ready": isinstance(use_case, ExchangeGitHubCode)}
+
+    with TestClient(test_app) as client:
+        test_app.state.reviews_api_resources = ReviewsApiResources(
+            cast(AsyncEngine, None), cast(async_sessionmaker[AsyncSession], None)
+        )
+        first = client.get("/compose")
+        second = client.get("/compose")
+        assert first.json() == second.json() == {"ready": True}
+        assert len(composed) == 2
+        assert composed[0] is composed[1]
+        assert len(profile_clients) == 2
+        assert profile_clients[0] is profile_clients[1]
+        assert composed[0].base_url == httpx.URL("https://github.com")
+        assert composed[0].timeout == httpx.Timeout(10)
+        api_client = test_app.state.github_auth_http_clients.api
+        assert profile_clients[0] is api_client
+        assert api_client.base_url == httpx.URL("https://github.enterprise.test")
+        assert api_client.timeout == httpx.Timeout(10)
+        assert not composed[0].is_closed and not api_client.is_closed
+    assert composed[0].is_closed and api_client.is_closed
+
+
 def test_callback_use_case_links_before_committing_hashed_refresh_session() -> None:
     workspace = UUID("00000000-0000-0000-0000-000000000011")
     private, public = _keys()
@@ -143,7 +208,7 @@ def test_callback_use_case_links_before_committing_hashed_refresh_session() -> N
     assert sessions.saved == [
         (
             result.user,
-            hashlib.sha256(b"opaque-refresh-secret").hexdigest(),
+            "9abaf4d12594a637f6e6484601c068b5cda175d70aea6de969f2b8351962f0d8",
             UUID("00000000-0000-0000-0000-000000000099"),
             now + timedelta(days=30),
         )

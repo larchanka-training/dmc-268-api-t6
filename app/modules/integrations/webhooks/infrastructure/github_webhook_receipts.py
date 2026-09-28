@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+import json
 from datetime import datetime
 from typing import cast
 from uuid import UUID
@@ -12,9 +12,7 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.common.infrastructure.db.unit_of_work import SqlAlchemyUnitOfWork
-from app.modules.integrations.webhooks.application.github_installation_dispatch import (
-    VerifiedGitHubDelivery,
-)
+from app.modules.integrations.webhooks.application.receive_github_delivery import WebhookReceipt
 from app.modules.integrations.webhooks.infrastructure.models import WebhookEvent
 
 
@@ -24,10 +22,13 @@ class SqlAlchemyGitHubWebhookReceiptStore:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
 
-    async def save(self, delivery: VerifiedGitHubDelivery) -> bool:
-        installation = delivery.payload.get("installation")
+    async def save(self, delivery: WebhookReceipt) -> bool:
+        payload = json.loads(delivery.payload_json)
+        if not isinstance(payload, dict):
+            raise ValueError("GitHub receipt JSON must be an object")
+        installation = payload.get("installation")
         installation_id = installation.get("id") if isinstance(installation, dict) else None
-        action = delivery.payload.get("action")
+        action = payload.get("action")
         statement = (
             insert(WebhookEvent)
             .values(
@@ -37,7 +38,7 @@ class SqlAlchemyGitHubWebhookReceiptStore:
                 installation_external_id=(
                     installation_id if isinstance(installation_id, int) else None
                 ),
-                payload=dict(delivery.payload),
+                payload=payload,
             )
             .on_conflict_do_nothing(index_elements=[WebhookEvent.delivery_id])
             .returning(WebhookEvent.id)
@@ -46,7 +47,7 @@ class SqlAlchemyGitHubWebhookReceiptStore:
 
     async def claim(
         self, delivery_id: str, token: UUID, now: datetime, until: datetime
-    ) -> VerifiedGitHubDelivery | None:
+    ) -> WebhookReceipt | None:
         statement = (
             update(WebhookEvent)
             .where(
@@ -65,10 +66,10 @@ class SqlAlchemyGitHubWebhookReceiptStore:
         row = (await self._session.execute(statement)).one_or_none()
         if row is None:
             return None
-        return VerifiedGitHubDelivery(
+        return WebhookReceipt(
             delivery_id=delivery_id,
             event_name=cast(str, row[0]),
-            payload=cast(Mapping[str, object], row[1]),
+            payload_json=json.dumps(row[1]),
         )
 
     async def mark_projected(self, delivery_id: str, token: UUID, at: datetime) -> None:
