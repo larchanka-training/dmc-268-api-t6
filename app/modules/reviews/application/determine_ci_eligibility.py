@@ -1,0 +1,161 @@
+"""Decide whether a current PR head may enter Task 5's enqueue transaction."""
+
+from __future__ import annotations
+
+from collections.abc import Callable
+from dataclasses import dataclass, field
+from datetime import UTC, datetime, timedelta
+from enum import StrEnum
+from typing import Protocol
+from uuid import UUID
+
+from app.modules.reviews.application.project_github_pull_request import PullRequestState
+
+
+class CiWaitMode(StrEnum):
+    NEVER = "never"
+    ALWAYS = "always"
+    AUTO = "auto"
+
+
+class EligibilityReason(StrEnum):
+    ELIGIBLE = "eligible"
+    UNKNOWN_PR = "unknown_pr"
+    DISABLED_REPOSITORY = "disabled_repository"
+    CLOSED_PR = "closed_pr"
+    BOT_NOT_ASSIGNED = "bot_not_assigned"
+    STALE_HEAD = "stale_head"
+    STALE_STATE = "stale_state"
+    WAITING_FOR_CI = "waiting_for_ci"
+    CI_BLOCKED = "ci_blocked"
+
+
+@dataclass(frozen=True)
+class EligibilityCandidate:
+    code_change_id: UUID
+    installation_external_id: int
+    repository_full_name: str
+    head_sha: str
+    state: PullRequestState
+    repository_enabled: bool
+    reviewer_requested: bool
+    reviewer_requested_at: datetime | None
+    head_first_seen_at: datetime | None
+    wait_for_ci: CiWaitMode
+
+
+@dataclass(frozen=True)
+class CheckSuite:
+    app_id: int
+    status: str
+    conclusion: str | None
+
+
+@dataclass(frozen=True)
+class CiSnapshot:
+    head_sha: str
+    check_suites: tuple[CheckSuite, ...]
+    combined_state: str
+    combined_total_count: int
+
+
+@dataclass(frozen=True)
+class CiEligibility:
+    eligible: bool
+    reason: EligibilityReason
+    head_sha: str | None
+    candidate: EligibilityCandidate | None = field(default=None, compare=False)
+
+
+class EligibilityCandidateStore(Protocol):
+    """Each read returns a detached snapshot and closes its DB transaction."""
+
+    async def get(self, code_change_id: UUID) -> EligibilityCandidate | None: ...
+
+
+class CurrentHeadCiProvider(Protocol):
+    async def get_current_head_ci(
+        self, installation_external_id: int, repository_full_name: str, head_sha: str
+    ) -> CiSnapshot: ...
+
+
+class DetermineCiEligibility:
+    """Read, fetch GitHub outside the DB, then reject an intervening state change."""
+
+    def __init__(
+        self,
+        *,
+        candidates: EligibilityCandidateStore,
+        ci: CurrentHeadCiProvider,
+        own_app_id: int,
+        now: Callable[[], datetime] = lambda: datetime.now(UTC),
+    ) -> None:
+        if own_app_id <= 0:
+            raise ValueError("GitHub App ID must be positive")
+        self._candidates = candidates
+        self._ci = ci
+        self._own_app_id = own_app_id
+        self._now = now
+
+    async def execute(self, code_change_id: UUID, expected_head_sha: str) -> CiEligibility:
+        candidate = await self._candidates.get(code_change_id)
+        precheck = self._precheck(candidate, expected_head_sha)
+        if precheck is not None:
+            return precheck
+        assert candidate is not None
+        if candidate.wait_for_ci == CiWaitMode.NEVER:
+            return CiEligibility(True, EligibilityReason.ELIGIBLE, candidate.head_sha, candidate)
+
+        snapshot = await self._ci.get_current_head_ci(
+            candidate.installation_external_id,
+            candidate.repository_full_name,
+            candidate.head_sha,
+        )
+        current = await self._candidates.get(code_change_id)
+        precheck = self._precheck(current, expected_head_sha)
+        if precheck is not None:
+            return precheck
+        if current != candidate or snapshot.head_sha != candidate.head_sha:
+            reason = (
+                EligibilityReason.STALE_HEAD
+                if current is not None and current.head_sha != candidate.head_sha
+                else EligibilityReason.STALE_STATE
+            )
+            return CiEligibility(False, reason, current.head_sha if current is not None else None)
+
+        foreign = tuple(
+            suite for suite in snapshot.check_suites if suite.app_id != self._own_app_id
+        )
+        if any(
+            suite.status != "completed" or suite.conclusion not in {"success", "neutral", "skipped"}
+            for suite in foreign
+        ):
+            return CiEligibility(False, EligibilityReason.CI_BLOCKED, candidate.head_sha)
+        if snapshot.combined_total_count > 0 and snapshot.combined_state != "success":
+            return CiEligibility(False, EligibilityReason.CI_BLOCKED, candidate.head_sha)
+        if foreign or snapshot.combined_total_count > 0:
+            return CiEligibility(True, EligibilityReason.ELIGIBLE, candidate.head_sha, candidate)
+        if candidate.wait_for_ci == CiWaitMode.ALWAYS:
+            return CiEligibility(False, EligibilityReason.WAITING_FOR_CI, candidate.head_sha)
+        if candidate.reviewer_requested_at is None or candidate.head_first_seen_at is None:
+            return CiEligibility(False, EligibilityReason.WAITING_FOR_CI, candidate.head_sha)
+        window_start = max(candidate.reviewer_requested_at, candidate.head_first_seen_at)
+        if self._now() < window_start + timedelta(minutes=2):
+            return CiEligibility(False, EligibilityReason.WAITING_FOR_CI, candidate.head_sha)
+        return CiEligibility(True, EligibilityReason.ELIGIBLE, candidate.head_sha, candidate)
+
+    @staticmethod
+    def _precheck(
+        candidate: EligibilityCandidate | None, expected_head_sha: str
+    ) -> CiEligibility | None:
+        if candidate is None:
+            return CiEligibility(False, EligibilityReason.UNKNOWN_PR, None)
+        if candidate.head_sha != expected_head_sha:
+            return CiEligibility(False, EligibilityReason.STALE_HEAD, candidate.head_sha)
+        if not candidate.repository_enabled:
+            return CiEligibility(False, EligibilityReason.DISABLED_REPOSITORY, candidate.head_sha)
+        if candidate.state != PullRequestState.OPEN:
+            return CiEligibility(False, EligibilityReason.CLOSED_PR, candidate.head_sha)
+        if not candidate.reviewer_requested:
+            return CiEligibility(False, EligibilityReason.BOT_NOT_ASSIGNED, candidate.head_sha)
+        return None

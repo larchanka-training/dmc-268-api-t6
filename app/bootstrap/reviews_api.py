@@ -3,13 +3,12 @@
 from __future__ import annotations
 
 import os
-import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
-from typing import cast
+from typing import Annotated, cast
 
 import httpx
-from fastapi import FastAPI, Request
+from fastapi import Depends, FastAPI, HTTPException, Request
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -18,30 +17,70 @@ from sqlalchemy.ext.asyncio import (
 )
 
 from app.bootstrap.installation_onboarding import InstallationOnboarding
+from app.bootstrap.portal_auth import get_auth_scope
+from app.modules.auth.application.scope import AuthScope
+from app.modules.auth.infrastructure.sessions import SqlAlchemyAuthSessionUnitOfWork
+from app.modules.integrations.webhooks.api.ci_event_dtos import parse_ci_event
+from app.modules.integrations.webhooks.api.pull_request_dtos import parse_pull_request_event
 from app.modules.integrations.webhooks.application.github_installation_dispatch import (
     GitHubInstallationDeliveryDispatcher,
 )
 from app.modules.integrations.webhooks.application.installation_event_projector import (
     InstallationRepositoryTreeProvider,
 )
+from app.modules.integrations.webhooks.application.receive_github_delivery import (
+    GitHubWebhookReceiptUnitOfWork,
+    ReceiveGitHubDelivery,
+)
+from app.modules.integrations.webhooks.infrastructure.github_current_pull_request import (
+    HttpGitHubCurrentPullRequestProvider,
+)
 from app.modules.integrations.webhooks.infrastructure.github_installation_resolver import (
     SqlAlchemyGitHubInstallationResolver,
 )
 from app.modules.integrations.webhooks.infrastructure.github_installation_tree_provider import (
-    GitHubAppInstallationAccessTokenProvider,
     GitHubInstallationAccessTokenProvider,
     GitHubInstallationTreeProvider,
-    InMemoryInstallationAccessTokenCache,
+)
+from app.modules.integrations.webhooks.infrastructure.github_reviewer_timeline import (
+    HttpGitHubReviewerTimelineProvider,
+)
+from app.modules.integrations.webhooks.infrastructure.github_webhook_receipts import (
+    SqlAlchemyGitHubWebhookReceiptUnitOfWork,
 )
 from app.modules.reviews.application.cancel_run import CancelRunRepository
+from app.modules.reviews.application.determine_ci_eligibility import DetermineCiEligibility
 from app.modules.reviews.application.get_run import RunDetailRepository
 from app.modules.reviews.application.get_run_actions import RunActionsRepository
 from app.modules.reviews.application.get_run_comments import RunCommentsRepository
 from app.modules.reviews.application.get_run_diff import RunDiffRepository
 from app.modules.reviews.application.get_run_file_lines import BlobCache, RunFileRepository
 from app.modules.reviews.application.list_runs import RunRepository
+from app.modules.reviews.application.project_github_pull_request import ProjectGitHubPullRequest
+from app.modules.reviews.application.trigger_from_delivery import TriggerFromDelivery
+from app.modules.reviews.application.try_enqueue_webhook_run import (
+    RunMessagePublisher,
+    TryEnqueueWebhookRun,
+)
 from app.modules.reviews.infrastructure.blob_cache import SqlAlchemyBlobCache
+from app.modules.reviews.infrastructure.ci_eligibility_candidates import (
+    SqlAlchemyEligibilityCandidateStore,
+)
+from app.modules.reviews.infrastructure.github_ci import HttpGitHubCurrentHeadCiProvider
+from app.modules.reviews.infrastructure.github_pull_request_projection import (
+    SqlAlchemyPullRequestProjectionLock,
+    SqlAlchemyPullRequestProjectionUnitOfWork,
+)
 from app.modules.reviews.infrastructure.run_repository import SqlAlchemyRunRepository
+from app.modules.reviews.infrastructure.webhook_run_targets import SqlAlchemyWebhookRunTargets
+from app.modules.reviews.infrastructure.webhook_runs import SqlAlchemyWebhookRunUnitOfWork
+from app.modules.workspaces.application.link_github_installations import LinkGitHubInstallations
+from app.modules.workspaces.infrastructure.github_installation_links import (
+    SqlAlchemyGitHubInstallationLinkUnitOfWork,
+)
+from app.modules.workspaces.infrastructure.github_user_installations import (
+    HttpGitHubUserInstallationsProvider,
+)
 
 
 class ReviewsApiResources:
@@ -62,6 +101,7 @@ class ReviewsApiResources:
 
     def run_repository(
         self,
+        scope: AuthScope | None = None,
     ) -> (
         RunRepository
         | RunDetailRepository
@@ -71,10 +111,78 @@ class ReviewsApiResources:
         | RunFileRepository
         | CancelRunRepository
     ):
-        return SqlAlchemyRunRepository(self._session_factory)
+        return SqlAlchemyRunRepository(self._session_factory, scope)
 
     def file_blob_cache(self) -> BlobCache:
         return SqlAlchemyBlobCache(self._session_factory)
+
+    def github_webhook_receipts(self) -> SqlAlchemyGitHubWebhookReceiptUnitOfWork:
+        return SqlAlchemyGitHubWebhookReceiptUnitOfWork(self._session_factory)
+
+    def auth_session_uow(self) -> SqlAlchemyAuthSessionUnitOfWork:
+        return SqlAlchemyAuthSessionUnitOfWork(self._session_factory)
+
+    @property
+    def session_factory(self) -> async_sessionmaker[AsyncSession]:
+        return self._session_factory
+
+    def github_installation_linker(self, *, client: httpx.AsyncClient) -> LinkGitHubInstallations:
+        """Compose callback reconciliation after the caller obtains a GitHub user token."""
+        return LinkGitHubInstallations(
+            github=HttpGitHubUserInstallationsProvider(client),
+            uow_factory=lambda: SqlAlchemyGitHubInstallationLinkUnitOfWork(self._session_factory),
+        )
+
+    def github_ci_eligibility(
+        self,
+        *,
+        client: httpx.AsyncClient,
+        token_provider: GitHubInstallationAccessTokenProvider,
+        app_id: int,
+    ) -> DetermineCiEligibility:
+        """Compose Task 4's read-only eligibility decision for a later enqueue use case."""
+        return DetermineCiEligibility(
+            candidates=SqlAlchemyEligibilityCandidateStore(self._session_factory),
+            ci=HttpGitHubCurrentHeadCiProvider(client=client, token_provider=token_provider),
+            own_app_id=app_id,
+        )
+
+    def webhook_run_trigger(
+        self,
+        *,
+        client: httpx.AsyncClient,
+        token_provider: GitHubInstallationAccessTokenProvider,
+        app_id: int,
+        publisher: RunMessagePublisher,
+    ) -> TryEnqueueWebhookRun:
+        """Bind #34's confirmed publisher once its AMQP adapter is available."""
+        return TryEnqueueWebhookRun(
+            eligibility=self.github_ci_eligibility(
+                client=client, token_provider=token_provider, app_id=app_id
+            ),
+            uow_factory=lambda: SqlAlchemyWebhookRunUnitOfWork(self._session_factory),
+            publisher=publisher,
+        )
+
+    def github_delivery_receiver(
+        self,
+        *,
+        client: httpx.AsyncClient,
+        token_provider: GitHubInstallationAccessTokenProvider,
+        bot_login: str | None = None,
+        run_publisher: RunMessagePublisher | None = None,
+        app_id: int | None = None,
+    ) -> ReceiveGitHubDelivery:
+        return ReceiveGitHubDelivery(
+            uow_factory=self.github_webhook_receipts,
+            dispatcher=self.github_installation_delivery_dispatcher(
+                client=client,
+                token_provider=token_provider,
+                bot_login=bot_login,
+                run_publisher=run_publisher,
+                app_id=app_id,
+            ),
+        )
 
     def installation_onboarding(
         self, tree_provider: InstallationRepositoryTreeProvider
@@ -96,15 +204,55 @@ class ReviewsApiResources:
         *,
         client: httpx.AsyncClient,
         token_provider: GitHubInstallationAccessTokenProvider,
+        bot_login: str | None = None,
+        run_publisher: RunMessagePublisher | None = None,
+        app_id: int | None = None,
     ) -> GitHubInstallationDeliveryDispatcher:
         """Compose the verified-delivery application boundary for this API process."""
         tree_provider = GitHubInstallationTreeProvider(
             client=client,
             token_provider=token_provider,
         )
+        if run_publisher is not None and app_id is None:
+            raise ValueError("GitHub App ID is required with the Run publisher")
+        run_trigger = (
+            TriggerFromDelivery(
+                targets=SqlAlchemyWebhookRunTargets(self._session_factory),
+                enqueuer=self.webhook_run_trigger(
+                    client=client,
+                    token_provider=token_provider,
+                    app_id=app_id,
+                    publisher=run_publisher,
+                ),
+            )
+            if run_publisher is not None and app_id is not None
+            else None
+        )
         return GitHubInstallationDeliveryDispatcher(
             resolver=SqlAlchemyGitHubInstallationResolver(self._session_factory),
             onboarding=self.installation_onboarding(tree_provider),
+            pull_request_projector=(
+                ProjectGitHubPullRequest(
+                    uow_factory=lambda: SqlAlchemyPullRequestProjectionUnitOfWork(
+                        self._session_factory
+                    ),
+                    bot_login=bot_login,
+                    current_provider=HttpGitHubCurrentPullRequestProvider(
+                        client=client,
+                        token_provider=token_provider,
+                    ),
+                    reviewer_timeline_provider=HttpGitHubReviewerTimelineProvider(
+                        client=client,
+                        token_provider=token_provider,
+                    ),
+                    projection_lock=SqlAlchemyPullRequestProjectionLock(self._engine),
+                )
+                if bot_login is not None
+                else None
+            ),
+            pull_request_parser=parse_pull_request_event if bot_login is not None else None,
+            run_trigger=run_trigger,
+            ci_parser=parse_ci_event if run_trigger is not None else None,
         )
 
     async def aclose(self) -> None:
@@ -120,6 +268,7 @@ def _resources(request: Request) -> ReviewsApiResources:
 
 def get_run_repository(
     request: Request,
+    scope: Annotated[AuthScope, Depends(get_auth_scope)],
 ) -> (
     RunRepository
     | RunDetailRepository
@@ -130,7 +279,7 @@ def get_run_repository(
     | CancelRunRepository
 ):
     """Provide a request-scoped repository backed by the application pool."""
-    return _resources(request).run_repository()
+    return _resources(request).run_repository(scope)
 
 
 def get_file_blob_cache(request: Request) -> BlobCache:
@@ -138,48 +287,31 @@ def get_file_blob_cache(request: Request) -> BlobCache:
     return _resources(request).file_blob_cache()
 
 
+def get_github_webhook_receipt_uow_factory(
+    request: Request,
+) -> Callable[[], GitHubWebhookReceiptUnitOfWork]:
+    resources = getattr(request.app.state, "reviews_api_resources", None)
+    if not isinstance(resources, ReviewsApiResources):
+        raise HTTPException(status_code=503, detail="GitHub webhook is not configured")
+    return resources.github_webhook_receipts
+
+
 @asynccontextmanager
 async def reviews_api_lifespan(app: FastAPI) -> AsyncIterator[None]:
     """Create one pool per API process and always dispose it at shutdown."""
     database_url = os.environ.get("DATABASE_URL")
     github_webhook_secret = os.environ.get("GITHUB_WEBHOOK_SECRET")
-    github_app_id = os.environ.get("GITHUB_APP_ID")
-    github_app_private_key = os.environ.get("GITHUB_APP_PRIVATE_KEY")
     resources: ReviewsApiResources | None = None
-    github_client: httpx.AsyncClient | None = None
     if database_url is not None:
         resources = ReviewsApiResources.from_database_url(database_url)
         app.state.reviews_api_resources = resources
-        if (
-            github_webhook_secret is not None
-            and github_app_id is not None
-            and github_app_private_key is not None
-        ):
-            github_client = httpx.AsyncClient(
-                base_url=os.environ.get("GITHUB_API_URL", "https://api.github.com"),
-                timeout=10.0,
-            )
-            token_provider = GitHubAppInstallationAccessTokenProvider(
-                client=github_client,
-                app_id=github_app_id,
-                private_key=github_app_private_key,
-                cache=InMemoryInstallationAccessTokenCache(now=time.time),
-                now=time.time,
-            )
+        if github_webhook_secret is not None:
             app.state.github_webhook_secret = github_webhook_secret
-            app.state.github_installation_delivery_dispatcher = (
-                resources.github_installation_delivery_dispatcher(
-                    client=github_client,
-                    token_provider=token_provider,
-                )
-            )
     try:
         yield
     finally:
-        if github_client is not None:
-            await github_client.aclose()
-            del app.state.github_installation_delivery_dispatcher
-            del app.state.github_webhook_secret
         if resources is not None:
+            if github_webhook_secret is not None:
+                del app.state.github_webhook_secret
             await resources.aclose()
             del app.state.reviews_api_resources

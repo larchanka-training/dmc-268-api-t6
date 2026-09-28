@@ -341,8 +341,38 @@ def test_sqlalchemy_run_repository_reads_snapshots_for_the_run_head_sha() -> Non
     run_id = UUID("00000000-0000-0000-0000-000000000001")
     session = FakeSession(
         [
-            (run_id, "app/service.py", "diff --git a/app/service.py b/app/service.py"),
-            (run_id, "generated.lock", None),
+            (
+                run_id,
+                SimpleNamespace(
+                    filename="app/service.py",
+                    patch="diff --git a/app/service.py b/app/service.py",
+                    review_patch=None,
+                    blob_sha="a" * 40,
+                    status="modified",
+                    previous_filename=None,
+                    additions=1,
+                    deletions=1,
+                    changes=2,
+                    omission_reason=None,
+                    summary_only=False,
+                ),
+            ),
+            (
+                run_id,
+                SimpleNamespace(
+                    filename="generated.lock",
+                    patch=None,
+                    review_patch=None,
+                    blob_sha=None,
+                    status="modified",
+                    previous_filename=None,
+                    additions=0,
+                    deletions=0,
+                    changes=0,
+                    omission_reason="generated",
+                    summary_only=False,
+                ),
+            ),
         ]
     )
     repository = SqlAlchemyRunRepository(
@@ -359,7 +389,7 @@ def test_sqlalchemy_run_repository_reads_snapshots_for_the_run_head_sha() -> Non
     assert session.statement is not None
     sql = str(session.statement.compile())
     assert "LEFT OUTER JOIN code_change_diffs" in sql
-    assert "code_change_diffs.head_sha = runs.head_sha" in sql
+    assert "code_change_diffs.run_id = runs.id" in sql
     assert "ORDER BY code_change_diffs.filename ASC" in sql
 
 
@@ -382,10 +412,36 @@ def test_sqlalchemy_run_repository_reads_the_durable_diff_input_for_processing()
     assert "WHERE runs.id =" in sql
 
 
-def test_sqlalchemy_run_repository_uses_snapshot_membership_for_an_immutable_file_key() -> None:
+def test_sqlalchemy_run_repository_reads_the_installation_scoped_vcs_locator() -> None:
     run_id = UUID("00000000-0000-0000-0000-000000000001")
     code_change_id = UUID("00000000-0000-0000-0000-000000000002")
-    session = FakeSession([(code_change_id, "a" * 40)])
+    repository_id = UUID("00000000-0000-0000-0000-000000000003")
+    session = FakeSession([(code_change_id, repository_id, "a" * 40, "b" * 40, 17, "octo/repo", 7)])
+    repository = SqlAlchemyRunRepository(
+        cast(async_sessionmaker[AsyncSession], FakeSessionFactory(session))
+    )
+
+    run_input = asyncio.run(repository.get_run_vcs_input(run_id))
+
+    assert run_input is not None
+    assert run_input.code_change_id == code_change_id
+    assert run_input.repository_id == repository_id
+    assert run_input.head_sha == "a" * 40
+    assert run_input.base_sha == "b" * 40
+    assert run_input.locator.installation_external_id == 17
+    assert run_input.locator.repository_full_name == "octo/repo"
+    assert run_input.locator.number == 7
+    assert session.statement is not None
+    sql = str(session.statement.compile())
+    assert "FROM runs JOIN code_changes" in sql
+    assert "JOIN repositories" in sql
+    assert "JOIN provider_installations" in sql
+
+
+def test_sqlalchemy_run_repository_uses_snapshot_membership_for_an_immutable_file_key() -> None:
+    run_id = UUID("00000000-0000-0000-0000-000000000001")
+    repository_id = UUID("00000000-0000-0000-0000-000000000002")
+    session = FakeSession([(repository_id, "a" * 40)])
     repository = SqlAlchemyRunRepository(
         cast(async_sessionmaker[AsyncSession], FakeSessionFactory(session))
     )
@@ -393,13 +449,16 @@ def test_sqlalchemy_run_repository_uses_snapshot_membership_for_an_immutable_fil
     key = asyncio.run(repository.get_run_file_key(run_id, "app/service.py"))
 
     assert key is not None
-    assert key.code_change_id == code_change_id
-    assert key.head_sha == "a" * 40
-    assert key.path == "app/service.py"
+    assert key.repository_id == repository_id
+    assert key.blob_sha == "a" * 40
     assert session.statement is not None
     compiled = session.statement.compile()
     sql = str(compiled)
+    assert "FROM runs JOIN code_changes" in sql
+    assert sql.count("JOIN code_change_diffs") == 1
     assert "JOIN code_change_diffs" in sql
-    assert "code_change_diffs.head_sha = runs.head_sha" in sql
+    assert "JOIN code_changes" in sql
+    assert "code_change_diffs.blob_sha IS NOT NULL" in sql
+    assert "code_change_diffs.run_id = runs.id" in sql
     assert "code_change_diffs.filename =" in sql
     assert "app/service.py" in compiled.params.values()

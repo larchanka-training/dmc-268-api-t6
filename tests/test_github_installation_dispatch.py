@@ -6,6 +6,8 @@ import asyncio
 from dataclasses import dataclass, field
 from uuid import UUID, uuid4
 
+import pytest
+
 from app.modules.integrations.webhooks.application.github_installation_dispatch import (
     GitHubInstallationDeliveryDispatcher,
     InstallationDeliveryDispatchStatus,
@@ -114,6 +116,47 @@ def test_malformed_or_unsupported_delivery_is_ignored_before_lookup() -> None:
     )
 
     assert malformed.status is InstallationDeliveryDispatchStatus.IGNORED_INVALID_EVENT
-    assert unsupported.status is InstallationDeliveryDispatchStatus.IGNORED_INVALID_EVENT
+    assert unsupported.status is InstallationDeliveryDispatchStatus.IGNORED_IRRELEVANT_EVENT
+    assert resolver.calls == []
+    assert onboarding.calls == []
+
+
+@pytest.mark.parametrize(
+    ("event_name", "payload"),
+    [
+        ("pull_request", {"action": "opened"}),
+        ("check_suite", {"action": "completed"}),
+        ("workflow_run", {"action": "completed"}),
+        ("status", {"state": "success"}),
+    ],
+)
+def test_future_actionable_delivery_is_deferred_without_installation_lookup(
+    event_name: str, payload: dict[str, object]
+) -> None:
+    resolver = FakeInstallationResolver()
+    onboarding = FakeOnboarding()
+    dispatcher = GitHubInstallationDeliveryDispatcher(resolver=resolver, onboarding=onboarding)
+
+    result = asyncio.run(
+        dispatcher.execute(VerifiedGitHubDelivery("future-1", event_name, payload))
+    )
+
+    assert result.status is InstallationDeliveryDispatchStatus.DEFERRED_KNOWN_EVENT
+    assert resolver.calls == []
+    assert onboarding.calls == []
+
+
+def test_non_actionable_pr_action_is_ignored() -> None:
+    resolver = FakeInstallationResolver()
+    onboarding = FakeOnboarding()
+    dispatcher = GitHubInstallationDeliveryDispatcher(resolver=resolver, onboarding=onboarding)
+
+    result = asyncio.run(
+        dispatcher.execute(
+            VerifiedGitHubDelivery("irrelevant-1", "pull_request", {"action": "labeled"})
+        )
+    )
+
+    assert result.status is InstallationDeliveryDispatchStatus.IGNORED_IRRELEVANT_EVENT
     assert resolver.calls == []
     assert onboarding.calls == []

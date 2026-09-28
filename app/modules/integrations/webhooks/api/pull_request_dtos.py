@@ -1,0 +1,111 @@
+"""Strict GitHub pull-request webhook payload at the transport boundary."""
+
+from __future__ import annotations
+
+from collections.abc import Mapping
+from typing import Literal
+
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, HttpUrl
+
+from app.modules.reviews.application.project_github_pull_request import (
+    PullRequestEvent,
+    PullRequestState,
+)
+
+_MAX_BIGINT = 2**63 - 1
+_SHA_PATTERN = r"^(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})$"
+
+
+class _GitHubIdDto(BaseModel):
+    model_config = ConfigDict(extra="ignore", strict=True)
+
+    id: int = Field(gt=0, le=_MAX_BIGINT)
+
+
+class _GitHubRepositoryDto(_GitHubIdDto):
+    full_name: str = Field(pattern=r"^[^/]+/[^/]+$", max_length=512)
+
+
+class _GitHubUserDto(BaseModel):
+    model_config = ConfigDict(extra="ignore", strict=True)
+
+    login: str = Field(min_length=1, max_length=255)
+
+
+class _GitHubSenderDto(BaseModel):
+    model_config = ConfigDict(extra="ignore", strict=True)
+
+    type: str = Field(min_length=1, max_length=50)
+
+
+class _GitHubRefDto(BaseModel):
+    model_config = ConfigDict(extra="ignore", strict=True)
+
+    ref: str = Field(min_length=1, max_length=255)
+    sha: str = Field(pattern=_SHA_PATTERN)
+
+
+class _GitHubPullRequestDto(BaseModel):
+    model_config = ConfigDict(extra="ignore", strict=True)
+
+    id: int = Field(gt=0, le=_MAX_BIGINT)
+    number: int = Field(gt=0, le=2**31 - 1)
+    title: str = Field(min_length=1, max_length=500)
+    body: str | None = None
+    html_url: HttpUrl
+    user: _GitHubUserDto
+    head: _GitHubRefDto
+    base: _GitHubRefDto
+    state: Literal["open", "closed"]
+    merged: bool = False
+    updated_at: AwareDatetime = Field(strict=False)
+
+
+class _GitHubPullRequestPayloadDto(BaseModel):
+    model_config = ConfigDict(extra="ignore", strict=True)
+
+    action: Literal[
+        "opened", "synchronize", "review_requested", "review_request_removed", "closed", "reopened"
+    ]
+    number: int | None = Field(default=None, gt=0, le=2**31 - 1)
+    installation: _GitHubIdDto
+    repository: _GitHubRepositoryDto
+    pull_request: _GitHubPullRequestDto
+    requested_reviewer: _GitHubUserDto | None = None
+    sender: _GitHubSenderDto | None = None
+
+
+def parse_pull_request_event(payload: Mapping[str, object]) -> PullRequestEvent:
+    parsed = _GitHubPullRequestPayloadDto.model_validate(payload)
+    item = parsed.pull_request
+    if parsed.number is not None and parsed.number != item.number:
+        raise ValueError("GitHub pull request number mismatch")
+    state = (
+        PullRequestState.MERGED
+        if item.merged
+        else PullRequestState.OPEN
+        if item.state == "open"
+        else PullRequestState.CLOSED
+    )
+    return PullRequestEvent(
+        action=parsed.action,
+        installation_external_id=parsed.installation.id,
+        repository_external_id=parsed.repository.id,
+        external_id=item.id,
+        number=item.number,
+        title=item.title,
+        description=item.body,
+        author_login=item.user.login,
+        web_url=str(item.html_url),
+        source_branch=item.head.ref,
+        target_branch=item.base.ref,
+        base_sha=item.base.sha,
+        head_sha=item.head.sha,
+        state=state,
+        provider_updated_at=item.updated_at,
+        repository_full_name=parsed.repository.full_name,
+        requested_reviewer_login=(
+            parsed.requested_reviewer.login if parsed.requested_reviewer is not None else None
+        ),
+        sender_type=parsed.sender.type if parsed.sender is not None else None,
+    )
