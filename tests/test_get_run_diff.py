@@ -1,8 +1,6 @@
 import asyncio
 from uuid import UUID
 
-from fastapi.testclient import TestClient
-
 from app.main import app, get_run_repository
 from app.modules.reviews.application.conventions import (
     ActiveConventionsPrompt,
@@ -11,7 +9,9 @@ from app.modules.reviews.application.conventions import (
 )
 from app.modules.reviews.application.get_run_diff import (
     DiffSnapshot,
+    GetRunDiff,
     StoreDiffSnapshot,
+    review_files_from_snapshots,
 )
 from app.modules.reviews.application.process_run import (
     ReviewRunProcessor,
@@ -19,7 +19,8 @@ from app.modules.reviews.application.process_run import (
     RunDiffInput,
     RunDiffProvider,
 )
-from app.modules.reviews.application.prompt_builder import ReviewRule
+from app.modules.reviews.application.prompt_builder import DiffLine, ReviewRule
+from tests.portal_test_client import authenticated_test_client as TestClient
 
 
 class FakeDiffRepository:
@@ -32,10 +33,11 @@ class FakeDiffRepository:
         self.read_calls.append(run_id)
         return self.snapshots
 
-    async def replace_diff_snapshots(
-        self, code_change_id: UUID, head_sha: str, snapshots: list[DiffSnapshot]
-    ) -> None:
+    async def store_diff_snapshots(
+        self, run_id: UUID, code_change_id: UUID, head_sha: str, snapshots: list[DiffSnapshot]
+    ) -> list[DiffSnapshot]:
         self.write_calls.append((code_change_id, head_sha, snapshots))
+        return snapshots
 
 
 def test_get_run_diff_returns_saved_normal_binary_and_large_snapshots() -> None:
@@ -103,7 +105,7 @@ def test_get_run_diff_returns_404_for_missing_run_and_422_for_invalid_id() -> No
     assert invalid.status_code == 422
 
 
-def test_store_diff_snapshot_persists_filenames_only_when_total_diff_exceeds_limit() -> None:
+def test_store_diff_snapshot_retains_ui_patches_when_model_summary_limit_is_exceeded() -> None:
     code_change_id = UUID("00000000-0000-0000-0000-000000000200")
     repository = FakeDiffRepository([])
     first_patch = "\n".join("+line" for _ in range(1501))
@@ -111,6 +113,7 @@ def test_store_diff_snapshot_persists_filenames_only_when_total_diff_exceeds_lim
 
     asyncio.run(
         StoreDiffSnapshot(repository).execute(
+            run_id=UUID("00000000-0000-0000-0000-000000000100"),
             code_change_id=code_change_id,
             head_sha="a" * 40,
             files=[
@@ -126,12 +129,31 @@ def test_store_diff_snapshot_persists_filenames_only_when_total_diff_exceeds_lim
             code_change_id,
             "a" * 40,
             [
-                DiffSnapshot(filename="app/service.py", patch=None),
-                DiffSnapshot(filename="logo.png", patch=None),
-                DiffSnapshot(filename="generated.lock", patch=None),
+                DiffSnapshot(
+                    filename="app/service.py",
+                    patch=(
+                        "diff --git a/app/service.py b/app/service.py\n"
+                        "--- a/app/service.py\n+++ b/app/service.py\n"
+                        f"{first_patch}"
+                    ),
+                    summary_only=True,
+                ),
+                DiffSnapshot(filename="logo.png", patch=None, summary_only=True),
+                DiffSnapshot(
+                    filename="generated.lock",
+                    patch=(
+                        "diff --git a/generated.lock b/generated.lock\n"
+                        "--- a/generated.lock\n+++ b/generated.lock\n"
+                        f"{second_patch}"
+                    ),
+                    summary_only=True,
+                ),
             ],
         )
     ]
+    changed, omitted = review_files_from_snapshots(repository.write_calls[0][2])
+    assert changed == ()
+    assert omitted == ("app/service.py", "logo.png", "generated.lock")
 
 
 def test_store_diff_snapshot_keeps_full_diff_at_aggregate_limit() -> None:
@@ -142,6 +164,7 @@ def test_store_diff_snapshot_keeps_full_diff_at_aggregate_limit() -> None:
 
     asyncio.run(
         StoreDiffSnapshot(repository).execute(
+            run_id=UUID("00000000-0000-0000-0000-000000000100"),
             code_change_id=code_change_id,
             head_sha="c" * 40,
             files=[
@@ -165,12 +188,9 @@ def test_store_diff_snapshot_keeps_full_diff_at_aggregate_limit() -> None:
                         "+++ b/app/first.py\n"
                         f"{first_patch}"
                     ),
+                    review_patch=first_patch,
                 ),
-                DiffSnapshot(
-                    filename="logo.png",
-                    patch="diff --git a/logo.png b/logo.png\n"
-                    "Binary files a/logo.png and b/logo.png differ",
-                ),
+                DiffSnapshot(filename="logo.png", patch=None),
                 DiffSnapshot(
                     filename="app/second.py",
                     patch=(
@@ -179,10 +199,136 @@ def test_store_diff_snapshot_keeps_full_diff_at_aggregate_limit() -> None:
                         "+++ b/app/second.py\n"
                         f"{second_patch}"
                     ),
+                    review_patch=second_patch,
                 ),
             ],
         )
     ]
+
+
+def test_store_snapshot_excludes_generated_lines_from_summary_limit_and_preserves_metadata() -> (
+    None
+):
+    repository = FakeDiffRepository([])
+    code_change_id = UUID("00000000-0000-0000-0000-000000000201")
+    source = DiffSnapshot(
+        filename="src/new.py",
+        patch="@@ -1 +1 @@\n-old\n+new",
+        blob_sha="a" * 40,
+        status="renamed",
+        previous_filename="src/old.py",
+        additions=1,
+        deletions=1,
+        changes=2,
+    )
+    generated = DiffSnapshot(
+        filename="package-lock.json",
+        patch="@@ -0,0 +1,3001 @@\n" + "+x\n" * 3001,
+        blob_sha="b" * 40,
+        status="modified",
+        omission_reason="generated",
+    )
+    missing = DiffSnapshot(filename="assets/logo.png", patch=None, blob_sha="c" * 40)
+
+    asyncio.run(
+        StoreDiffSnapshot(repository).execute(
+            run_id=UUID("00000000-0000-0000-0000-000000000100"),
+            code_change_id=code_change_id,
+            head_sha="d" * 40,
+            files=[source, generated, missing],
+        )
+    )
+
+    saved = repository.write_calls[0][2]
+    assert [item.filename for item in saved] == [
+        "src/new.py",
+        "package-lock.json",
+        "assets/logo.png",
+    ]
+    assert saved[0].blob_sha == "a" * 40
+    assert saved[0].status == "renamed"
+    assert saved[0].previous_filename == "src/old.py"
+    assert saved[0].patch is not None and "@@ -1 +1 @@" in saved[0].patch
+    assert saved[1].omission_reason == "generated"
+    assert saved[1].patch is not None
+    assert saved[2].patch is None
+
+
+def test_run_snapshots_do_not_leak_to_or_rewrite_another_run_at_the_same_head() -> None:
+    first_run = UUID("00000000-0000-0000-0000-000000000301")
+    second_run = UUID("00000000-0000-0000-0000-000000000302")
+    code_change_id = UUID("00000000-0000-0000-0000-000000000303")
+
+    class Repository:
+        snapshots: dict[UUID, list[DiffSnapshot]] = {}
+
+        async def store_diff_snapshots(
+            self,
+            run_id: UUID,
+            code_change_id: UUID,
+            head_sha: str,
+            snapshots: list[DiffSnapshot],
+        ) -> list[DiffSnapshot]:
+            return self.snapshots.setdefault(run_id, snapshots)
+
+        async def get_run_diff(self, run_id: UUID) -> list[DiffSnapshot]:
+            return self.snapshots.get(run_id, [])
+
+    repository = Repository()
+    store = StoreDiffSnapshot(repository)
+    assert asyncio.run(GetRunDiff(repository).execute(second_run)) == []
+    first = asyncio.run(
+        store.execute(
+            run_id=first_run,
+            code_change_id=code_change_id,
+            head_sha="a" * 40,
+            files=[DiffSnapshot("src/a.py", "@@ -1 +1 @@\n-old\n+first")],
+        )
+    )
+    second = asyncio.run(
+        store.execute(
+            run_id=second_run,
+            code_change_id=code_change_id,
+            head_sha="a" * 40,
+            files=[DiffSnapshot("src/a.py", "@@ -1 +1 @@\n-old\n+second")],
+        )
+    )
+    retried = asyncio.run(
+        store.execute(
+            run_id=first_run,
+            code_change_id=code_change_id,
+            head_sha="a" * 40,
+            files=[DiffSnapshot("src/a.py", "@@ -1 +1 @@\n-old\n+later")],
+        )
+    )
+    assert first[0].patch is not None and "first" in first[0].patch
+    assert second[0].patch is not None and "second" in second[0].patch
+    assert retried == first
+    assert asyncio.run(GetRunDiff(repository).execute(first_run)) == first
+
+
+def test_full_provider_diff_keeps_rename_status_in_model_projection() -> None:
+    repository = FakeDiffRepository([])
+    full_patch = (
+        "diff --git a/src/old.py b/src/new.py\nsimilarity index 50%\n@@ -1 +1 @@\n-old\n+new"
+    )
+    asyncio.run(
+        StoreDiffSnapshot(repository).execute(
+            run_id=UUID("00000000-0000-0000-0000-000000000100"),
+            code_change_id=UUID("00000000-0000-0000-0000-000000000201"),
+            head_sha="a" * 40,
+            files=[DiffSnapshot("src/new.py", full_patch, blob_sha="b" * 40, status="renamed")],
+        )
+    )
+    saved = repository.write_calls[0][2]
+    changed, omitted = review_files_from_snapshots(saved)
+    assert saved[0].patch == full_patch
+    assert changed[0].status == "renamed"
+    assert changed[0].lines == (
+        DiffLine(1, "removed", "old"),
+        DiffLine(1, "added", "new"),
+    )
+    assert omitted == ()
 
 
 def test_processed_run_persists_provider_diff_before_the_diff_api_reads_it() -> None:
@@ -206,11 +352,12 @@ def test_processed_run_persists_provider_diff_before_the_diff_api_reads_it() -> 
                 return None
             return RunDiffInput(code_change_id=code_change_id, head_sha="b" * 40)
 
-        async def replace_diff_snapshots(
-            self, code_change_id: UUID, head_sha: str, snapshots: list[DiffSnapshot]
-        ) -> None:
-            await super().replace_diff_snapshots(code_change_id, head_sha, snapshots)
+        async def store_diff_snapshots(
+            self, run_id: UUID, code_change_id: UUID, head_sha: str, snapshots: list[DiffSnapshot]
+        ) -> list[DiffSnapshot]:
+            await super().store_diff_snapshots(run_id, code_change_id, head_sha, snapshots)
             self.snapshots = snapshots
+            return snapshots
 
     repository = LifecycleRepository([])
 
@@ -297,3 +444,52 @@ def test_processor_passes_active_conventions_prompt_not_the_run_system_prompt() 
     )
 
     assert isinstance(result, GeneratedConventions)
+
+
+def test_summary_only_run_passes_no_file_paths_to_conventions() -> None:
+    run_id = UUID("00000000-0000-0000-0000-000000000110")
+    repository_id = UUID("00000000-0000-0000-0000-000000000111")
+    prompt = ActiveConventionsPrompt(run_id, "prompt")
+
+    class Provider:
+        async def fetch_diff(self, *, code_change_id: UUID, head_sha: str) -> list[DiffSnapshot]:
+            return [DiffSnapshot("src/large.py", "+line\n" * 3001)]
+
+        async def fetch_file_content(
+            self, *, code_change_id: UUID, head_sha: str, path: str
+        ) -> str:
+            raise AssertionError("no blob cache")
+
+    class Repository(FakeDiffRepository):
+        async def get_run_diff_input(self, requested_run_id: UUID) -> RunDiffInput:
+            return RunDiffInput(repository_id, "a" * 40)
+
+        async def get_run_conventions_input(self, requested_run_id: UUID) -> RunConventionsInput:
+            return RunConventionsInput(repository_id, prompt)
+
+    class Conventions:
+        async def execute(
+            self,
+            *,
+            repository_id: UUID,
+            conventions_prompt: ActiveConventionsPrompt,
+            run_id: UUID,
+            changed_files: tuple[str, ...],
+            rules: tuple[ReviewRule, ...],
+        ) -> GeneratedConventions:
+            assert changed_files == ()
+            return GeneratedConventions(
+                CachedConventions(repository_id, None, prompt.id, (), (), {}), None, False
+            )
+
+    repository = Repository([])
+    result = asyncio.run(
+        ReviewRunProcessor(
+            repository,
+            Provider(),
+            conventions=Conventions(),  # type: ignore[arg-type]
+        ).prepare(run_id)
+    )
+    assert isinstance(result, GeneratedConventions)
+    assert repository.write_calls[0][2][0].summary_only is True
+    assert repository.write_calls[0][2][0].patch is not None

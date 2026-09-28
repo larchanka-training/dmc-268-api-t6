@@ -13,11 +13,10 @@ BLOB_CACHE_TTL = timedelta(days=7)
 
 @dataclass(frozen=True)
 class BlobCacheKey:
-    """Immutable revision-qualified file identity from the persisted diff snapshot."""
+    """Immutable blob identity shared by runs in the same repository."""
 
-    code_change_id: UUID
-    head_sha: str
-    path: str
+    repository_id: UUID
+    blob_sha: str
 
 
 class BlobCacheStatus(StrEnum):
@@ -78,7 +77,10 @@ class GetRunFileLines:
         if entry.status is not BlobCacheStatus.HIT or entry.content is None:
             raise FileLinesNotFound
 
-        lines = entry.content.splitlines()
+        lines = entry.content.split("\n") if entry.content else []
+        if lines and lines[-1] == "":
+            lines.pop()
+        lines = [line[:-1] if line.endswith("\r") else line for line in lines]
         if offset > len(lines):
             raise ValueError("offset exceeds file length")
         page_lines = lines[offset : offset + limit]

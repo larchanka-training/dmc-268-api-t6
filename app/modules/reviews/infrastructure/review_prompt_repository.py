@@ -10,14 +10,15 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app.modules.repositories.infrastructure.models import RuleVersion
 from app.modules.reviews.application.conventions import GeneratedConventions
 from app.modules.reviews.application.execute_review import ReviewPromptInput
+from app.modules.reviews.application.get_run_diff import (
+    DiffSnapshot,
+    review_files_from_snapshots,
+)
 from app.modules.reviews.application.prompt_builder import (
     RepoConventions as PromptConventions,
 )
-from app.modules.reviews.application.prompt_builder import (
-    parse_unified_diff,
-    review_rule_from_stored,
-)
-from app.modules.reviews.infrastructure.models import CodeChange, CodeChangeDiff, PromptVersion, Run
+from app.modules.reviews.application.prompt_builder import review_rule_from_stored
+from app.modules.reviews.infrastructure.models import CodeChangeDiff, PromptVersion, Run
 
 
 class SqlAlchemyReviewPromptRepository:
@@ -33,36 +34,41 @@ class SqlAlchemyReviewPromptRepository:
             select(
                 PromptVersion.content,
                 RuleVersion.rules,
-                Run.code_change_id,
-                Run.head_sha,
             )
             .join(PromptVersion, PromptVersion.id == Run.prompt_version_id)
             .join(RuleVersion, RuleVersion.id == Run.rule_version_id)
-            .join(CodeChange, CodeChange.id == Run.code_change_id)
             .where(Run.id == run_id)
         )
         async with self._session_factory() as session:
             row = (await session.execute(statement)).one_or_none()
             if row is None:
                 return None
-            system, stored_rules, code_change_id, head_sha = row
+            system, stored_rules = row
             snapshots = (
                 await session.execute(
-                    select(CodeChangeDiff.filename, CodeChangeDiff.patch)
-                    .where(
-                        CodeChangeDiff.code_change_id == code_change_id,
-                        CodeChangeDiff.head_sha == head_sha,
-                    )
+                    select(CodeChangeDiff)
+                    .where(CodeChangeDiff.run_id == run_id)
                     .order_by(CodeChangeDiff.filename.asc())
                 )
             ).all()
-        changed = tuple(
-            item
-            for _, patch in snapshots
-            if patch is not None
-            for item in parse_unified_diff(patch)
+        changed, omitted = review_files_from_snapshots(
+            [
+                DiffSnapshot(
+                    filename=row.filename,
+                    patch=row.patch,
+                    blob_sha=row.blob_sha,
+                    status=row.status,
+                    previous_filename=row.previous_filename,
+                    additions=row.additions,
+                    deletions=row.deletions,
+                    changes=row.changes,
+                    omission_reason=row.omission_reason,
+                    review_patch=row.review_patch,
+                    summary_only=row.summary_only,
+                )
+                for (row,) in snapshots
+            ]
         )
-        omitted = tuple(filename for filename, patch in snapshots if patch is None)
         return ReviewPromptInput(
             system=system,
             rules=tuple(review_rule_from_stored(item) for item in stored_rules),
