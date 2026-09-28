@@ -69,6 +69,22 @@ CI **не** делает `terraform apply`. Эти значения в GitHub Ac
 
 ## 2. Хранение в CI/CD
 
+Для GitHub App callback сервису также нужны следующие переменные окружения. Их значения
+задаются только в менеджере секретов или локальном `.env`; в репозиторий не записываются.
+
+| Имя | Назначение |
+|---|---|
+| `GITHUB_CLIENT_ID` | Client ID GitHub App для обмена кода; отличается от `GITHUB_APP_ID` |
+| `GITHUB_CLIENT_SECRET` | Client secret GitHub App для обмена кода |
+| `AUTH_JWT_PRIVATE_KEY` | PEM RSA private key для подписи локального access JWT |
+| `AUTH_JWT_PUBLIC_KEY` | Соответствующий PEM RSA public key для проверки JWT |
+| `AUTH_JWT_ISSUER` | Фиксированное значение `iss` (`dmc-268-api`) |
+| `AUTH_JWT_AUDIENCE` | Фиксированное значение `aud` (`dmc-268-ui`) |
+
+OAuth-код и client secret отправляются в теле POST запроса к GitHub, а не в URL.
+GitHub user access token используется только для чтения профиля и установок во время
+callback; в PostgreSQL хранится только хеш локального refresh token.
+
 1. Settings → Environments → **staging**.
 2. Secrets: `STAGING_SSH_KEY` (только для Terraform-хоста), при желании `POSTGRES_PASSWORD`. Для курсового VPS environment secrets не нужны — хватает organization secrets и repository variables.
 3. Variables: хост, SSH-порт, SHA256 SSH fingerprint, SSH-пользователь, опционально health URL и имя БД.

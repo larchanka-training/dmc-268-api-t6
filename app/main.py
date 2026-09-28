@@ -3,19 +3,31 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
-from collections.abc import AsyncIterator, Mapping
-from typing import Annotated, cast
+import math
+from collections.abc import AsyncIterator, Callable
+from typing import Annotated, NoReturn
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Path, Query, Request
 from fastapi.responses import JSONResponse, StreamingResponse
+from pydantic import ValidationError
 
-from app.bootstrap.reviews_api import get_file_blob_cache, get_run_repository, reviews_api_lifespan
+from app.bootstrap.portal_auth import get_auth_scope
+from app.bootstrap.reviews_api import (
+    get_file_blob_cache,
+    get_github_webhook_receipt_uow_factory,
+    get_run_repository,
+    reviews_api_lifespan,
+)
 from app.common.infrastructure.db.enums import RunState
+from app.modules.auth.api.router import auth_router
+from app.modules.integrations.webhooks.api.dtos import GitHubWebhookPayloadDto
 from app.modules.integrations.webhooks.application.github_installation_dispatch import (
-    GitHubInstallationDeliveryDispatcher,
-    InstallationDeliveryDispatchStatus,
     VerifiedGitHubDelivery,
+)
+from app.modules.integrations.webhooks.application.receive_github_delivery import (
+    GitHubWebhookReceiptUnitOfWork,
+    ReceiveGitHubDelivery,
 )
 from app.modules.reviews.api.dtos import (
     DiffFileDto,
@@ -55,7 +67,7 @@ from app.modules.reviews.application.get_run_file_lines import (
 from app.modules.reviews.application.list_runs import ListRuns, RunListItem, RunRepository
 from app.modules.reviews.application.run_events import InMemoryRunUpdateHub, RunUpdateStream
 
-api_router = APIRouter(prefix="/api")
+api_router = APIRouter(prefix="/api", dependencies=[Depends(get_auth_scope)])
 github_webhook_router = APIRouter(prefix="/webhooks/github")
 
 app = FastAPI(title="Backend", lifespan=reviews_api_lifespan)
@@ -81,16 +93,6 @@ def get_github_webhook_secret(request: Request) -> str:
     return secret
 
 
-def get_github_installation_delivery_dispatcher(
-    request: Request,
-) -> GitHubInstallationDeliveryDispatcher:
-    """Return the composed dispatcher without exposing persistence to the router."""
-    dispatcher = getattr(request.app.state, "github_installation_delivery_dispatcher", None)
-    if not isinstance(dispatcher, GitHubInstallationDeliveryDispatcher):
-        raise HTTPException(status_code=503, detail="GitHub webhook is not configured")
-    return dispatcher
-
-
 def _has_valid_github_signature(*, raw_body: bytes, signature: str | None, secret: str) -> bool:
     if signature is None or not signature.startswith("sha256="):
         return False
@@ -105,12 +107,12 @@ def _has_valid_github_signature(*, raw_body: bytes, signature: str | None, secre
 async def receive_github_webhook(
     request: Request,
     secret: Annotated[str, Depends(get_github_webhook_secret)],
-    dispatcher: Annotated[
-        GitHubInstallationDeliveryDispatcher,
-        Depends(get_github_installation_delivery_dispatcher),
+    receipt_uow_factory: Annotated[
+        Callable[[], GitHubWebhookReceiptUnitOfWork],
+        Depends(get_github_webhook_receipt_uow_factory),
     ],
 ) -> JSONResponse:
-    """Verify a GitHub delivery and pass it to the application dispatch boundary."""
+    """Verify and persist a GitHub delivery before acknowledging it."""
     raw_body = await request.body()
     if not _has_valid_github_signature(
         raw_body=raw_body,
@@ -121,30 +123,54 @@ async def receive_github_webhook(
 
     event_name = request.headers.get("X-GitHub-Event")
     delivery_id = request.headers.get("X-GitHub-Delivery")
-    if event_name is None or delivery_id is None:
+    if not event_name or not delivery_id or len(event_name) > 100 or len(delivery_id) > 255:
         raise HTTPException(status_code=400, detail="missing GitHub delivery headers")
 
     try:
-        payload = json.loads(raw_body)
-    except json.JSONDecodeError:
-        return JSONResponse(
-            status_code=202,
-            content={"status": InstallationDeliveryDispatchStatus.IGNORED_INVALID_EVENT},
+        raw_payload = json.loads(
+            raw_body,
+            parse_float=_finite_json_float,
+            parse_constant=_reject_nonfinite_json_constant,
         )
-    if not isinstance(payload, Mapping):
-        return JSONResponse(
-            status_code=202,
-            content={"status": InstallationDeliveryDispatchStatus.IGNORED_INVALID_EVENT},
-        )
+        _validate_jsonb_unicode(raw_payload)
+        payload = GitHubWebhookPayloadDto.model_validate(raw_payload)
+        stored_payload = payload.model_dump(mode="json", exclude_unset=True)
+    except (ValueError, UnicodeDecodeError, ValidationError, RecursionError) as error:
+        raise HTTPException(status_code=400, detail="malformed GitHub webhook payload") from error
 
-    result = await dispatcher.execute(
+    status = await ReceiveGitHubDelivery(uow_factory=receipt_uow_factory).execute(
         VerifiedGitHubDelivery(
             delivery_id=delivery_id,
             event_name=event_name,
-            payload=cast(Mapping[str, object], payload),
+            payload=stored_payload,
         )
     )
-    return JSONResponse(status_code=202, content={"status": result.status})
+    return JSONResponse(status_code=202, content={"status": status})
+
+
+def _reject_nonfinite_json_constant(value: str) -> NoReturn:
+    raise ValueError(f"nonfinite JSON constant: {value}")
+
+
+def _finite_json_float(value: str) -> float:
+    parsed = float(value)
+    if not math.isfinite(parsed):
+        raise ValueError("nonfinite JSON number")
+    return parsed
+
+
+def _validate_jsonb_unicode(value: object) -> None:
+    pending = [value]
+    while pending:
+        item = pending.pop()
+        if isinstance(item, str):
+            if any(character == "\x00" or 0xD800 <= ord(character) <= 0xDFFF for character in item):
+                raise ValueError("invalid Unicode in PostgreSQL JSONB string")
+        elif isinstance(item, dict):
+            pending.extend(item.keys())
+            pending.extend(item.values())
+        elif isinstance(item, list):
+            pending.extend(item)
 
 
 def to_run_session_dto(item: RunListItem) -> RunSessionDto:
@@ -262,10 +288,13 @@ async def cancel_run(
 @api_router.get("/stream")
 async def stream_run_updates(
     event_hub: Annotated[RunUpdateStream, Depends(get_run_event_hub)],
+    repository: Annotated[RunDetailRepository, Depends(get_run_repository)],
 ) -> StreamingResponse:
     async def events() -> AsyncIterator[str]:
         async with event_hub.subscribe() as updates:
             async for update in updates:
+                if await repository.get_run(update.run_id) is None:
+                    continue
                 yield (
                     "event: run.updated\n"
                     f'data: {{"runId":"{update.run_id}","status":"{update.status}"}}\n\n'
@@ -341,3 +370,4 @@ async def get_run_file_lines(
 
 app.include_router(api_router)
 app.include_router(github_webhook_router)
+app.include_router(auth_router)

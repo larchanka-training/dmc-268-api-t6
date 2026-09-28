@@ -29,14 +29,19 @@ from sqlalchemy.schema import CreateSchema, DropSchema
 
 from alembic import command
 from app.bootstrap.installation_onboarding import InstallationOnboarding
-from app.bootstrap.reviews_api import ReviewsApiResources
+from app.bootstrap.reviews_api import (
+    ReviewsApiResources,
+    get_github_webhook_receipt_uow_factory,
+)
 from app.main import (
     app,
-    get_github_installation_delivery_dispatcher,
     get_github_webhook_secret,
 )
 from app.modules.integrations.webhooks.application.installation_event_projector import (
     InstallationRepositoryTreeProvider,
+)
+from app.modules.integrations.webhooks.application.receive_github_delivery import (
+    ReceiveGitHubDelivery,
 )
 from app.modules.integrations.webhooks.infrastructure.github_installation_tree_provider import (
     GitHubInstallationAccessTokenProvider,
@@ -324,12 +329,16 @@ def test_signed_runtime_delivery_onboards_replays_removes_and_ignores_unknown_in
             dispatcher = ReviewsApiResources(
                 engine, session_factory
             ).github_installation_delivery_dispatcher(client=client, token_provider=TokenProvider())
+            receiver = ReceiveGitHubDelivery(
+                uow_factory=ReviewsApiResources(engine, session_factory).github_webhook_receipts,
+                dispatcher=dispatcher,
+            )
             app.dependency_overrides[get_github_webhook_secret] = lambda: secret
-            app.dependency_overrides[get_github_installation_delivery_dispatcher] = lambda: (
-                dispatcher
+            app.dependency_overrides[get_github_webhook_receipt_uow_factory] = lambda: (
+                ReviewsApiResources(engine, session_factory).github_webhook_receipts
             )
 
-            def post(payload: Mapping[str, object], delivery: str) -> int:
+            async def post(payload: Mapping[str, object], delivery: str) -> int:
                 raw_body = json.dumps(payload).encode()
                 signature = hmac.new(secret.encode(), raw_body, hashlib.sha256).hexdigest()
                 with TestClient(app) as test_client:
@@ -343,6 +352,7 @@ def test_signed_runtime_delivery_onboards_replays_removes_and_ignores_unknown_in
                         },
                     )
                 assert response.status_code == 202
+                await receiver.replay_pending()
                 return len(tree_requests)
 
             added: dict[str, object] = {
@@ -358,17 +368,17 @@ def test_signed_runtime_delivery_onboards_replays_removes_and_ignores_unknown_in
                 ],
                 "repositories_removed": [],
             }
-            assert post(added, "delivery-added") == 1
-            assert post(added, "delivery-replay") == 2
+            assert await post(added, "delivery-added") == 1
+            assert await post(added, "delivery-replay") == 2
             removed: dict[str, object] = {
                 **added,
                 "action": "removed",
                 "repositories_added": [],
                 "repositories_removed": added["repositories_added"],
             }
-            assert post(removed, "delivery-removed") == 2
+            assert await post(removed, "delivery-removed") == 2
             unknown = {**added, "installation": {"id": 999}}
-            assert post(unknown, "delivery-unknown") == 2
+            assert await post(unknown, "delivery-unknown") == 2
 
             async with session_factory() as session:
                 repository = await session.scalar(

@@ -2,6 +2,7 @@
 
 from app.common.infrastructure.db.base import Base
 from app.modules.analytics.infrastructure import models as analytics_models  # noqa: F401
+from app.modules.auth.infrastructure import models as auth_models  # noqa: F401
 from app.modules.billing.infrastructure import models as billing_models  # noqa: F401
 from app.modules.integrations.webhooks.infrastructure import (
     models as integrations_webhooks_models,  # noqa: F401
