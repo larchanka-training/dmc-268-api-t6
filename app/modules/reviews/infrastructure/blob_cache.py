@@ -63,18 +63,13 @@ class SqlAlchemyBlobCache:
     async def put(self, key: BlobCacheKey, content: str, *, ttl: timedelta = SEVEN_DAYS) -> None:
         expires_at = self._now() + ttl
         statement = insert(CachedFileBlob).values(
-            code_change_id=key.code_change_id,
-            head_sha=key.head_sha,
-            path=key.path,
+            repository_id=key.repository_id,
+            blob_sha=key.blob_sha,
             content=content,
             expires_at=expires_at,
         )
         statement = statement.on_conflict_do_update(
-            index_elements=[
-                CachedFileBlob.code_change_id,
-                CachedFileBlob.head_sha,
-                CachedFileBlob.path,
-            ],
+            index_elements=[CachedFileBlob.repository_id, CachedFileBlob.blob_sha],
             set_={"content": content, "expires_at": expires_at},
         )
         async with self._session_factory.begin() as session:
@@ -82,9 +77,8 @@ class SqlAlchemyBlobCache:
 
     async def get(self, key: BlobCacheKey) -> BlobCacheEntry:
         statement = select(CachedFileBlob.content, CachedFileBlob.expires_at).where(
-            CachedFileBlob.code_change_id == key.code_change_id,
-            CachedFileBlob.head_sha == key.head_sha,
-            CachedFileBlob.path == key.path,
+            CachedFileBlob.repository_id == key.repository_id,
+            CachedFileBlob.blob_sha == key.blob_sha,
         )
         async with self._session_factory() as session:
             row = (await session.execute(statement)).one_or_none()

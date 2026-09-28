@@ -3,8 +3,6 @@ from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
-from fastapi.testclient import TestClient
-
 from app.main import app, get_run_repository
 from app.modules.reviews.application.get_run_actions import (
     GetRunActionResponse,
@@ -12,6 +10,7 @@ from app.modules.reviews.application.get_run_actions import (
     RunAction,
     RunActionResponse,
 )
+from tests.portal_test_client import authenticated_test_client as TestClient
 
 
 class FakeActionsRepository:

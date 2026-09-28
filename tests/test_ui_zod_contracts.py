@@ -8,13 +8,13 @@ from pathlib import Path
 from typing import Any, cast
 from uuid import UUID
 
-from fastapi.testclient import TestClient
 from jsonschema import Draft202012Validator
 
 from app.main import app, get_run_repository
 from app.modules.reviews.application.get_run_actions import RunAction, RunActionResponse
 from app.modules.reviews.application.get_run_comments import PublishedComment
 from app.modules.reviews.application.list_runs import RunListItem
+from tests.portal_test_client import authenticated_test_client as TestClient
 
 CONTRACTS_PATH = Path(__file__).parent / "fixtures" / "ui_zod_contracts.json"
 RUN_ID = UUID("11111111-1111-4111-8111-111111111111")

@@ -2,7 +2,7 @@ import asyncio
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
-from fastapi.testclient import TestClient
+import pytest
 
 from app.main import app, get_file_blob_cache, get_run_repository
 from app.modules.reviews.application.get_run_diff import DiffSnapshot
@@ -20,12 +20,15 @@ from app.modules.reviews.application.process_run import (
     RunDiffInput,
     RunDiffProvider,
 )
+from tests.portal_test_client import authenticated_test_client as TestClient
 
 RUN_ID = UUID("00000000-0000-0000-0000-000000000100")
+CODE_CHANGE_ID = UUID("00000000-0000-0000-0000-000000000201")
+HEAD = "a" * 40
+PATH = "app/service.py"
 KEY = BlobCacheKey(
-    code_change_id=UUID("00000000-0000-0000-0000-000000000200"),
-    head_sha="a" * 40,
-    path="app/service.py",
+    repository_id=UUID("00000000-0000-0000-0000-000000000200"),
+    blob_sha="a" * 40,
 )
 
 
@@ -63,6 +66,15 @@ def test_get_run_file_lines_pages_first_middle_final_and_empty_page() -> None:
     assert middle == FileLinesPage("app/service.py", 3, ["three"], 4, 3)
     assert final == FileLinesPage("app/service.py", 4, ["four"], 4, None)
     assert empty == FileLinesPage("app/service.py", 5, [], 4, None)
+
+
+def test_file_lines_keep_unicode_separators_inside_one_crlf_source_line() -> None:
+    cache = FakeBlobCache(BlobCacheStatus.HIT, "left\u2028middle\u0085right\r\nnext\r\n")
+
+    page = asyncio.run(GetRunFileLines(FakeFileRepository(KEY), cache).execute(RUN_ID, PATH, 0, 5))
+
+    assert page.lines == ["left\u2028middle\u0085right", "next"]
+    assert page.total_lines == 2
 
 
 def test_get_run_file_lines_rejects_unowned_path_and_invalid_offset() -> None:
@@ -173,16 +185,37 @@ def test_in_memory_blob_cache_expires_entries_after_seven_days() -> None:
     assert asyncio.run(cache.get(KEY)) == BlobCacheEntry(BlobCacheStatus.EXPIRED, None)
 
 
+def test_two_pull_requests_share_one_repository_blob_without_sharing_path_authorization() -> None:
+    from app.modules.reviews.infrastructure.blob_cache import InMemoryBlobCache
+
+    second_run = UUID("00000000-0000-0000-0000-000000000101")
+    cache = InMemoryBlobCache()
+    asyncio.run(cache.put(KEY, "same\nblob", ttl=timedelta(days=7)))
+    first = asyncio.run(
+        GetRunFileLines(FakeFileRepository(KEY), cache).execute(RUN_ID, "a.py", 0, 5)
+    )
+    second = asyncio.run(
+        GetRunFileLines(FakeFileRepository(KEY), cache).execute(second_run, "renamed.py", 0, 5)
+    )
+    with pytest.raises(FileLinesNotFound):
+        asyncio.run(
+            GetRunFileLines(FakeFileRepository(None), cache).execute(RUN_ID, "secret.py", 0, 5)
+        )
+    assert first.lines == second.lines == ["same", "blob"]
+
+
 def test_processing_populates_immutable_cache_before_file_endpoint_reads_it() -> None:
     class Provider(RunDiffProvider):
         async def fetch_diff(self, *, code_change_id: UUID, head_sha: str) -> list[DiffSnapshot]:
-            assert (code_change_id, head_sha) == (KEY.code_change_id, KEY.head_sha)
-            return [DiffSnapshot(filename=KEY.path, patch="@@ -1 +1 @@\n-old\n+new")]
+            assert (code_change_id, head_sha) == (CODE_CHANGE_ID, HEAD)
+            return [
+                DiffSnapshot(filename=PATH, patch="@@ -1 +1 @@\n-old\n+new", blob_sha=KEY.blob_sha)
+            ]
 
         async def fetch_file_content(
             self, *, code_change_id: UUID, head_sha: str, path: str
         ) -> str:
-            assert (code_change_id, head_sha, path) == (KEY.code_change_id, KEY.head_sha, KEY.path)
+            assert (code_change_id, head_sha, path) == (CODE_CHANGE_ID, HEAD, PATH)
             return "cached\nfile"
 
     class ProcessingRepository(FakeFileRepository):
@@ -191,14 +224,18 @@ def test_processing_populates_immutable_cache_before_file_endpoint_reads_it() ->
             self.snapshots: list[DiffSnapshot] = []
 
         async def get_run_diff_input(self, run_id: UUID) -> RunDiffInput | None:
-            return RunDiffInput(KEY.code_change_id, KEY.head_sha) if run_id == RUN_ID else None
+            return (
+                RunDiffInput(CODE_CHANGE_ID, HEAD, KEY.repository_id) if run_id == RUN_ID else None
+            )
 
-        async def replace_diff_snapshots(
-            self, code_change_id: UUID, head_sha: str, snapshots: list[DiffSnapshot]
-        ) -> None:
-            assert (code_change_id, head_sha) == (KEY.code_change_id, KEY.head_sha)
+        async def store_diff_snapshots(
+            self, run_id: UUID, code_change_id: UUID, head_sha: str, snapshots: list[DiffSnapshot]
+        ) -> list[DiffSnapshot]:
+            assert run_id == RUN_ID
+            assert (code_change_id, head_sha) == (CODE_CHANGE_ID, HEAD)
             self.snapshots = snapshots
             self.key = KEY
+            return snapshots
 
     repository = ProcessingRepository()
     from app.modules.reviews.infrastructure.blob_cache import InMemoryBlobCache
@@ -209,7 +246,7 @@ def test_processing_populates_immutable_cache_before_file_endpoint_reads_it() ->
     app.dependency_overrides[get_run_repository] = lambda: repository
     app.dependency_overrides[get_file_blob_cache] = lambda: cache
     try:
-        response = TestClient(app).get(f"/api/runs/{RUN_ID}/files", params={"path": KEY.path})
+        response = TestClient(app).get(f"/api/runs/{RUN_ID}/files", params={"path": PATH})
     finally:
         app.dependency_overrides.clear()
 
@@ -240,11 +277,10 @@ def test_sqlalchemy_blob_cache_is_readable_from_a_separate_adapter_instance() ->
         async def execute(self, statement: object) -> Result:
             compiled = statement.compile()  # type: ignore[attr-defined]
             params = compiled.params
-            suffix = "" if "code_change_id" in params else "_1"
+            suffix = "" if "repository_id" in params else "_1"
             key = BlobCacheKey(
-                params[f"code_change_id{suffix}"],
-                params[f"head_sha{suffix}"],
-                params[f"path{suffix}"],
+                params[f"repository_id{suffix}"],
+                params[f"blob_sha{suffix}"],
             )
             if statement.__visit_name__ == "insert":  # type: ignore[attr-defined]
                 self._store[key] = (params["content"], params["expires_at"])

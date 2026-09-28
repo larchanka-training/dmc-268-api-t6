@@ -6,12 +6,11 @@ from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from uuid import UUID
 
-from fastapi.testclient import TestClient
-
-from app.main import app, get_run_event_hub
+from app.main import app, get_run_event_hub, get_run_repository
 from app.modules.reviews.application.cancel_run import CancelRequestResult, CancelRun
 from app.modules.reviews.application.list_runs import RunListItem
 from app.modules.reviews.application.run_events import InMemoryRunUpdateHub, RunUpdated
+from tests.portal_test_client import authenticated_test_client as TestClient
 
 RUN_ID = UUID("00000000-0000-0000-0000-000000000100")
 
@@ -153,6 +152,7 @@ def test_repeated_or_terminal_cancellation_does_not_publish_an_update() -> None:
 
 def test_stream_endpoint_uses_sse_event_and_camel_case_payload() -> None:
     async def single_event() -> AsyncIterator[RunUpdated]:
+        yield RunUpdated(UUID("00000000-0000-0000-0000-000000000101"), "running")
         yield RunUpdated(RUN_ID, "cancelled")
 
     class StreamHub:
@@ -169,7 +169,12 @@ def test_stream_endpoint_uses_sse_event_and_camel_case_payload() -> None:
         async def __aexit__(self, *args: object) -> None:
             return None
 
+    class AuthorizedRunRepository:
+        async def get_run(self, run_id: UUID) -> RunListItem | None:
+            return make_item() if run_id == RUN_ID else None
+
     app.dependency_overrides[get_run_event_hub] = StreamHub
+    app.dependency_overrides[get_run_repository] = AuthorizedRunRepository
     try:
         response = TestClient(app).get("/api/stream")
     finally:

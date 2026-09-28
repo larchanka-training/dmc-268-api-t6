@@ -2,10 +2,9 @@ import asyncio
 from datetime import UTC, datetime
 from uuid import UUID
 
-from fastapi.testclient import TestClient
-
 from app.main import app, get_run_repository
 from app.modules.reviews.application.get_run_comments import GetRunComments, PublishedComment
+from tests.portal_test_client import authenticated_test_client as TestClient
 
 
 class FakeCommentsRepository:
