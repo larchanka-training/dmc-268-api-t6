@@ -279,145 +279,216 @@ class ProjectGitHubPullRequest:
             if record.external_id != event.external_id:
                 return PullRequestProjectionStatus.IGNORED_UNRELATED
             previous_head_sha = record.head_sha
-            if (
-                event.action == "opened"
-                and record.state != PullRequestState.OPEN
-                and record.provider_updated_at is not None
-                and event.provider_updated_at <= record.provider_updated_at
-            ):
+            if self._is_stale_opened(record, event):
                 return PullRequestProjectionStatus.IGNORED_STALE
             reviewer_intent = event.action in {"review_requested", "review_request_removed"}
+            intent_at: datetime | None = None
             if reviewer_intent:
-                timeline_intent = timeline.intent if timeline is not None else None
-                intent_at = (
-                    timeline_intent.occurred_at
-                    if timeline_intent is not None
-                    else event.provider_updated_at
-                )
-                barrier = timeline.lifecycle if timeline is not None else None
-                if (
-                    timeline is not None
-                    and record.reviewer_barrier_at is not None
-                    and (
-                        barrier is None
-                        or barrier.occurred_at < record.reviewer_barrier_at
-                        or (
-                            record.reviewer_barrier_position is not None
-                            and barrier.position < record.reviewer_barrier_position
-                        )
-                    )
-                ):
-                    raise ValueError("GitHub timeline lifecycle is incomplete")
-                if barrier is not None and timeline_intent is not None:
-                    if timeline_intent.position <= barrier.position:
-                        return PullRequestProjectionStatus.IGNORED_STALE
-                elif record.reviewer_barrier_at is not None:
-                    if intent_at < record.reviewer_barrier_at:
-                        return PullRequestProjectionStatus.IGNORED_STALE
-                    if intent_at == record.reviewer_barrier_at:
-                        if timeline is not None:
-                            raise ValueError("GitHub timeline cannot order reviewer and lifecycle")
-                        return PullRequestProjectionStatus.IGNORED_STALE
-                if record.reviewer_intent_updated_at is not None:
-                    if intent_at < record.reviewer_intent_updated_at:
-                        return PullRequestProjectionStatus.IGNORED_STALE
-                    if intent_at == record.reviewer_intent_updated_at:
-                        if timeline_intent is not None:
-                            if record.reviewer_timeline_position is not None and (
-                                timeline_intent.position <= record.reviewer_timeline_position
-                            ):
-                                return PullRequestProjectionStatus.IGNORED_STALE
-                        elif event.action == "review_requested" and not record.reviewer_requested:
-                            return PullRequestProjectionStatus.IGNORED_STALE
+                intent_at = self._reviewer_intent_time(event, timeline)
+                if self._reviewer_intent_is_stale(record, event, timeline, intent_at):
+                    return PullRequestProjectionStatus.IGNORED_STALE
             elif record.provider_updated_at is not None and (
                 event.provider_updated_at < record.provider_updated_at
             ):
                 return PullRequestProjectionStatus.IGNORED_STALE
             if not reviewer_intent and event.head_sha != record.head_sha:
-                if (event.action not in {"opened", "synchronize"} and not authoritative) or (
-                    record.provider_updated_at is not None
-                    and event.provider_updated_at <= record.provider_updated_at
-                    and not (
-                        authoritative and event.provider_updated_at == record.provider_updated_at
-                    )
-                ):
+                if self._head_change_is_stale(record, event, authoritative=authoritative):
                     return PullRequestProjectionStatus.IGNORED_STALE
-                record.head_sha = event.head_sha
-                record.head_first_seen_at = now
-                record.ci_status = {}
+                self._apply_new_head(record, event, now)
 
             if event.action in {"opened", "synchronize"}:
-                record.title = event.title
-                record.description = event.description
-                record.author_login = event.author_login
-                record.web_url = event.web_url
-                record.source_branch = event.source_branch
-                record.target_branch = event.target_branch
-                record.base_sha = event.base_sha
-                record.state = event.state if authoritative else PullRequestState.OPEN
-                if record.state != PullRequestState.OPEN:
-                    self._advance_reviewer_barrier(
-                        record, event.provider_updated_at, force_clear=True
-                    )
-                if record.head_first_seen_at is None:
-                    record.head_first_seen_at = now
+                self._apply_metadata(record, event, authoritative=authoritative, now=now)
             elif event.action in {"review_requested", "review_request_removed"}:
                 if record.state != PullRequestState.OPEN:
                     return PullRequestProjectionStatus.IGNORED_STALE
-                timeline_intent = timeline.intent if timeline is not None else None
-                requested = (
-                    timeline_intent.requested
-                    if timeline_intent is not None
-                    else event.action == "review_requested"
+                assert intent_at is not None
+                self._apply_reviewer_intent(record, event, timeline, intent_at, now)
+            elif event.action in {"closed", "reopened"}:
+                self._apply_lifecycle(
+                    record,
+                    event,
+                    timeline,
+                    authoritative=authoritative,
+                    trigger_updated_at=trigger_updated_at,
+                    now=now,
                 )
-                if requested and not record.reviewer_requested:
-                    record.reviewer_requested = True
-                    record.reviewer_requested_at = now
-                elif not requested:
-                    record.reviewer_requested = False
-                    record.reviewer_requested_at = None
-                record.reviewer_intent_updated_at = intent_at
-                if timeline_intent is not None:
-                    record.reviewer_timeline_event_id = timeline_intent.event_id
-                    record.reviewer_timeline_position = timeline_intent.position
-            elif event.action == "closed":
-                record.state = event.state
-                if timeline is None:
-                    self._advance_reviewer_barrier(record, trigger_updated_at)
-                    if record.state != PullRequestState.OPEN:
-                        self._advance_reviewer_barrier(
-                            record, event.provider_updated_at, force_clear=True
-                        )
-                else:
-                    self._reconcile_lifecycle_timeline(record, timeline, now)
-            elif event.action == "reopened":
-                record.state = event.state if authoritative else PullRequestState.OPEN
-                if timeline is None:
-                    self._advance_reviewer_barrier(record, trigger_updated_at)
-                    if record.state != PullRequestState.OPEN:
-                        self._advance_reviewer_barrier(
-                            record, event.provider_updated_at, force_clear=True
-                        )
-                else:
-                    self._reconcile_lifecycle_timeline(record, timeline, now)
             else:
                 return PullRequestProjectionStatus.IGNORED_UNRELATED
 
             if not reviewer_intent:
                 record.provider_updated_at = event.provider_updated_at
             await uow.pull_requests.save(record)
-            cancellation_reason: str | None = None
-            if event.action in {"synchronize", "closed", "reopened"}:
-                if record.state != PullRequestState.OPEN:
-                    cancellation_reason = "pr_closed"
-                elif event.action == "synchronize" and record.head_sha != previous_head_sha:
-                    cancellation_reason = "superseded"
-            if cancellation_reason is not None:
-                notices = await uow.runs.cancel_for_pr(record.id, cancellation_reason, now)
-                for notice in notices:
-                    await uow.runs.notify_run_updated(notice)
+            await self._cancel_obsolete_runs(uow, record, event, previous_head_sha, now)
             await uow.commit()
         return PullRequestProjectionStatus.PROJECTED
+
+    @staticmethod
+    def _is_stale_opened(record: PullRequestRecord, event: PullRequestEvent) -> bool:
+        return (
+            event.action == "opened"
+            and record.state != PullRequestState.OPEN
+            and record.provider_updated_at is not None
+            and event.provider_updated_at <= record.provider_updated_at
+        )
+
+    @staticmethod
+    def _reviewer_intent_time(
+        event: PullRequestEvent, timeline: ReviewerTimelineSnapshot | None
+    ) -> datetime:
+        timeline_intent = timeline.intent if timeline is not None else None
+        return (
+            timeline_intent.occurred_at
+            if timeline_intent is not None
+            else event.provider_updated_at
+        )
+
+    @staticmethod
+    def _reviewer_intent_is_stale(
+        record: PullRequestRecord,
+        event: PullRequestEvent,
+        timeline: ReviewerTimelineSnapshot | None,
+        intent_at: datetime,
+    ) -> bool:
+        timeline_intent = timeline.intent if timeline is not None else None
+        barrier = timeline.lifecycle if timeline is not None else None
+        if (
+            timeline is not None
+            and record.reviewer_barrier_at is not None
+            and (
+                barrier is None
+                or barrier.occurred_at < record.reviewer_barrier_at
+                or (
+                    record.reviewer_barrier_position is not None
+                    and barrier.position < record.reviewer_barrier_position
+                )
+            )
+        ):
+            raise ValueError("GitHub timeline lifecycle is incomplete")
+        if barrier is not None and timeline_intent is not None:
+            if timeline_intent.position <= barrier.position:
+                return True
+        elif record.reviewer_barrier_at is not None:
+            if intent_at < record.reviewer_barrier_at:
+                return True
+            if intent_at == record.reviewer_barrier_at:
+                if timeline is not None:
+                    raise ValueError("GitHub timeline cannot order reviewer and lifecycle")
+                return True
+        if record.reviewer_intent_updated_at is not None:
+            if intent_at < record.reviewer_intent_updated_at:
+                return True
+            if intent_at == record.reviewer_intent_updated_at:
+                if timeline_intent is not None:
+                    if record.reviewer_timeline_position is not None and (
+                        timeline_intent.position <= record.reviewer_timeline_position
+                    ):
+                        return True
+                elif event.action == "review_requested" and not record.reviewer_requested:
+                    return True
+        return False
+
+    @staticmethod
+    def _head_change_is_stale(
+        record: PullRequestRecord, event: PullRequestEvent, *, authoritative: bool
+    ) -> bool:
+        return (event.action not in {"opened", "synchronize"} and not authoritative) or (
+            record.provider_updated_at is not None
+            and event.provider_updated_at <= record.provider_updated_at
+            and not (authoritative and event.provider_updated_at == record.provider_updated_at)
+        )
+
+    @staticmethod
+    def _apply_new_head(record: PullRequestRecord, event: PullRequestEvent, now: datetime) -> None:
+        record.head_sha = event.head_sha
+        record.head_first_seen_at = now
+        record.ci_status = {}
+
+    @classmethod
+    def _apply_metadata(
+        cls,
+        record: PullRequestRecord,
+        event: PullRequestEvent,
+        *,
+        authoritative: bool,
+        now: datetime,
+    ) -> None:
+        record.title = event.title
+        record.description = event.description
+        record.author_login = event.author_login
+        record.web_url = event.web_url
+        record.source_branch = event.source_branch
+        record.target_branch = event.target_branch
+        record.base_sha = event.base_sha
+        record.state = event.state if authoritative else PullRequestState.OPEN
+        if record.state != PullRequestState.OPEN:
+            cls._advance_reviewer_barrier(record, event.provider_updated_at, force_clear=True)
+        if record.head_first_seen_at is None:
+            record.head_first_seen_at = now
+
+    @staticmethod
+    def _apply_reviewer_intent(
+        record: PullRequestRecord,
+        event: PullRequestEvent,
+        timeline: ReviewerTimelineSnapshot | None,
+        intent_at: datetime,
+        now: datetime,
+    ) -> None:
+        timeline_intent = timeline.intent if timeline is not None else None
+        requested = (
+            timeline_intent.requested
+            if timeline_intent is not None
+            else event.action == "review_requested"
+        )
+        if requested and not record.reviewer_requested:
+            record.reviewer_requested = True
+            record.reviewer_requested_at = now
+        elif not requested:
+            record.reviewer_requested = False
+            record.reviewer_requested_at = None
+        record.reviewer_intent_updated_at = intent_at
+        if timeline_intent is not None:
+            record.reviewer_timeline_event_id = timeline_intent.event_id
+            record.reviewer_timeline_position = timeline_intent.position
+
+    @classmethod
+    def _apply_lifecycle(
+        cls,
+        record: PullRequestRecord,
+        event: PullRequestEvent,
+        timeline: ReviewerTimelineSnapshot | None,
+        *,
+        authoritative: bool,
+        trigger_updated_at: datetime,
+        now: datetime,
+    ) -> None:
+        record.state = (
+            event.state if event.action == "closed" or authoritative else PullRequestState.OPEN
+        )
+        if timeline is None:
+            cls._advance_reviewer_barrier(record, trigger_updated_at)
+            if record.state != PullRequestState.OPEN:
+                cls._advance_reviewer_barrier(record, event.provider_updated_at, force_clear=True)
+        else:
+            cls._reconcile_lifecycle_timeline(record, timeline, now)
+
+    @staticmethod
+    async def _cancel_obsolete_runs(
+        uow: PullRequestProjectionUnitOfWork,
+        record: PullRequestRecord,
+        event: PullRequestEvent,
+        previous_head_sha: str,
+        now: datetime,
+    ) -> None:
+        cancellation_reason: str | None = None
+        if event.action in {"synchronize", "closed", "reopened"}:
+            if record.state != PullRequestState.OPEN:
+                cancellation_reason = "pr_closed"
+            elif event.action == "synchronize" and record.head_sha != previous_head_sha:
+                cancellation_reason = "superseded"
+        if cancellation_reason is not None:
+            notices = await uow.runs.cancel_for_pr(record.id, cancellation_reason, now)
+            for notice in notices:
+                await uow.runs.notify_run_updated(notice)
 
     @staticmethod
     def _reconcile_lifecycle_timeline(
