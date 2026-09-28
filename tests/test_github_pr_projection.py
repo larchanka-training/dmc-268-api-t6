@@ -1206,7 +1206,8 @@ def test_missing_lifecycle_timeline_does_not_commit_close() -> None:
     assert uow.commits == commits
 
 
-def test_dispatcher_projects_supported_pr_event_from_durable_delivery() -> None:
+@pytest.mark.parametrize("action", ["review_requested", "reopened"])
+def test_dispatcher_projects_supported_pr_event_from_durable_delivery(action: str) -> None:
     @dataclass
     class Projector:
         events: list[PullRequestEvent] = field(default_factory=list)
@@ -1237,13 +1238,21 @@ def test_dispatcher_projects_supported_pr_event_from_durable_delivery() -> None:
         run_trigger=trigger,
         ci_parser=parse_ci_event,
     )
-    delivery = VerifiedGitHubDelivery("delivery-pr", "pull_request", _webhook_payload())
+    payload = _webhook_payload()
+    payload["action"] = action
+    if action == "reopened":
+        payload.pop("requested_reviewer")
+    delivery = VerifiedGitHubDelivery("delivery-pr", "pull_request", payload)
 
     result = asyncio.run(dispatcher.execute(delivery))
 
     assert result.status == InstallationDeliveryDispatchStatus.PROJECTED_PR
     assert projector.events == [
-        _event("review_requested", requested_reviewer_login="reviewer[bot]", sender_type="User")
+        _event(
+            action,
+            requested_reviewer_login="reviewer[bot]" if action == "review_requested" else None,
+            sender_type="User",
+        )
     ]
     assert trigger.prs == projector.events
 
@@ -1262,6 +1271,51 @@ def test_dispatcher_projects_supported_pr_event_from_durable_delivery() -> None:
         == InstallationDeliveryDispatchStatus.PROCESSED_CI
     )
     assert trigger.ci == [CiTriggerEvent(17, 101, _HEAD)]
+
+
+@pytest.mark.parametrize("action", ["opened", "synchronize"])
+@pytest.mark.parametrize("trigger_configured", [False, True])
+def test_pr_metadata_delivery_projects_without_triggering_run(
+    action: str, trigger_configured: bool
+) -> None:
+    @dataclass
+    class Projector:
+        events: list[PullRequestEvent] = field(default_factory=list)
+
+        async def execute(self, event: PullRequestEvent) -> PullRequestProjectionStatus:
+            self.events.append(event)
+            return PullRequestProjectionStatus.PROJECTED
+
+    @dataclass
+    class Trigger:
+        prs: list[PullRequestEvent] = field(default_factory=list)
+
+        async def on_pr(self, event: PullRequestEvent) -> None:
+            self.prs.append(event)
+
+        async def on_ci(self, event: CiTriggerEvent) -> None:
+            pass
+
+    projector = Projector()
+    trigger = Trigger()
+    payload = _webhook_payload()
+    payload["action"] = action
+    payload.pop("requested_reviewer")
+    dispatcher = GitHubInstallationDeliveryDispatcher(
+        resolver=cast(GitHubInstallationResolver, None),
+        onboarding=cast(InstallationOnboardingHandler, None),
+        pull_request_projector=projector,
+        pull_request_parser=parse_pull_request_event,
+        run_trigger=trigger if trigger_configured else None,
+    )
+
+    result = asyncio.run(
+        dispatcher.execute(VerifiedGitHubDelivery("delivery-pr", "pull_request", payload))
+    )
+
+    assert result.status == InstallationDeliveryDispatchStatus.PROJECTED_PR
+    assert projector.events == [_event(action, sender_type="User")]
+    assert trigger.prs == []
 
 
 def test_pr_delivery_remains_retryable_until_confirmed_publisher_is_configured() -> None:

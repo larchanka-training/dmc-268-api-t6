@@ -31,7 +31,7 @@ _DEFERRED_PR_ACTIONS = frozenset(
     }
 )
 _DEFERRED_CI_EVENTS = frozenset({"check_suite", "workflow_run"})
-_RUN_TRIGGER_PR_ACTIONS = frozenset({"opened", "synchronize", "review_requested", "reopened"})
+_RUN_TRIGGER_PR_ACTIONS = frozenset({"review_requested", "reopened"})
 
 
 @dataclass(frozen=True)
