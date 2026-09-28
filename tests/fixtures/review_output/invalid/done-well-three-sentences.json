@@ -1,0 +1,21 @@
+{
+  "findings": [
+    {
+      "path": "app/modules/billing/application/charge.py",
+      "line": 34,
+      "start_line": null,
+      "severity": "medium",
+      "category": "correctness",
+      "title": "Charge transaction commit is not visible in execute",
+      "body": "`execute` saves the charge and returns; nothing in this file commits the transaction. Confirm the commit happens, or add it to `execute`.",
+      "suggestion": null,
+      "confidence": 0.5,
+      "rule_name": null
+    }
+  ],
+  "summary": {
+    "problem": "The `except Exception:` in `ChargeAccount.execute` swallows every gateway failure into a silent `None`.",
+    "done_well": "The repository keeps the flush-only convention of the module. Both paths of `execute` are tested. The charge amount is validated first.",
+    "effort": "small"
+  }
+}
