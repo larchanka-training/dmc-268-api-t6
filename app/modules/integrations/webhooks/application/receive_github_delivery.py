@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Protocol
 from uuid import UUID, uuid4
@@ -13,7 +14,6 @@ from app.common.application.unit_of_work import UnitOfWork
 from app.modules.integrations.webhooks.application.github_installation_dispatch import (
     InstallationDeliveryDispatchResult,
     InstallationDeliveryDispatchStatus,
-    VerifiedGitHubDelivery,
 )
 
 _LEASE = timedelta(minutes=5)
@@ -23,14 +23,23 @@ _UNKNOWN_INSTALLATION_RETRY = timedelta(minutes=5)
 _LOGGER = logging.getLogger(__name__)
 
 
+@dataclass(frozen=True)
+class WebhookReceipt:
+    """Opaque JSON receipt; only transport and storage adapters decode it."""
+
+    delivery_id: str
+    event_name: str
+    payload_json: str
+
+
 class GitHubWebhookReceiptStore(Protocol):
     """Flush-only operations for the durable receipt and projection claim."""
 
-    async def save(self, delivery: VerifiedGitHubDelivery) -> bool: ...
+    async def save(self, delivery: WebhookReceipt) -> bool: ...
 
     async def claim(
         self, delivery_id: str, token: UUID, now: datetime, until: datetime
-    ) -> VerifiedGitHubDelivery | None: ...
+    ) -> WebhookReceipt | None: ...
 
     async def mark_projected(self, delivery_id: str, token: UUID, at: datetime) -> None: ...
 
@@ -45,9 +54,7 @@ class GitHubWebhookReceiptUnitOfWork(UnitOfWork, Protocol):
 
 
 class GitHubDeliveryDispatcher(Protocol):
-    async def execute(
-        self, delivery: VerifiedGitHubDelivery
-    ) -> InstallationDeliveryDispatchResult: ...
+    async def execute(self, delivery: WebhookReceipt) -> InstallationDeliveryDispatchResult: ...
 
 
 class ReceiveGitHubDelivery:
@@ -73,7 +80,7 @@ class ReceiveGitHubDelivery:
         self._now = now
         self._dispatch_timeout_seconds = dispatch_timeout_seconds
 
-    async def execute(self, delivery: VerifiedGitHubDelivery) -> InstallationDeliveryDispatchStatus:
+    async def execute(self, delivery: WebhookReceipt) -> InstallationDeliveryDispatchStatus:
         async with self._uow_factory() as uow:
             inserted = await uow.receipts.save(delivery)
             await uow.commit()

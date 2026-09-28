@@ -22,9 +22,7 @@ from app.bootstrap.reviews_api import (
 from app.common.infrastructure.db.enums import RunState
 from app.modules.auth.api.router import auth_router
 from app.modules.integrations.webhooks.api.dtos import GitHubWebhookPayloadDto
-from app.modules.integrations.webhooks.application.github_installation_dispatch import (
-    VerifiedGitHubDelivery,
-)
+from app.modules.integrations.webhooks.api.receipt import VerifiedGitHubDelivery
 from app.modules.integrations.webhooks.application.receive_github_delivery import (
     GitHubWebhookReceiptUnitOfWork,
     ReceiveGitHubDelivery,
@@ -143,7 +141,7 @@ async def receive_github_webhook(
             delivery_id=delivery_id,
             event_name=event_name,
             payload=stored_payload,
-        )
+        ).to_receipt()
     )
     return JSONResponse(status_code=202, content={"status": status})
 

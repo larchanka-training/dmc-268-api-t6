@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import secrets
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -11,6 +10,7 @@ from typing import Protocol
 from uuid import UUID, uuid4
 
 from app.common.application.unit_of_work import UnitOfWork
+from app.modules.auth.application.refresh_token_hash import hash_refresh_token
 
 ACCESS_TOKEN_LIFETIME = timedelta(minutes=15)
 REFRESH_TOKEN_LIFETIME = timedelta(days=30)
@@ -101,7 +101,7 @@ class ExchangeGitHubCode:
         workspace_ids = await self._linker.execute(github_token, expected_user_id=user.id)
         access_token = self._issuer.issue(user.id, workspace_ids)
         refresh_token = self._new_refresh_token()
-        token_hash = hashlib.sha256(refresh_token.encode("utf-8")).hexdigest()
+        token_hash = hash_refresh_token(refresh_token)
         async with self._uow_factory() as uow:
             await uow.sessions.create(
                 user, token_hash, self._new_family_id(), self._now() + REFRESH_TOKEN_LIFETIME

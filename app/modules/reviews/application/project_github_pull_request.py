@@ -72,6 +72,13 @@ class PullRequestEvent:
     repository_full_name: str | None = None
     requested_reviewer_login: str | None = None
     sender_type: str | None = None
+    current_label_names: frozenset[str] | None = None
+
+
+@dataclass(frozen=True)
+class PullRequestLabelEvent:
+    pull_request: PullRequestEvent
+    label_name: str
 
 
 @dataclass
@@ -89,6 +96,9 @@ class PullRequestRecord:
     base_sha: str
     head_sha: str
     state: PullRequestState
+    ai_review_labeled: bool = False
+    ai_review_labeled_at: datetime | None = None
+    label_intent_updated_at: datetime | None = None
     reviewer_requested: bool = False
     reviewer_requested_at: datetime | None = None
     reviewer_intent_updated_at: datetime | None = None
@@ -123,10 +133,16 @@ class PullRequestRecord:
         )
 
 
+@dataclass(frozen=True)
+class LockedPullRequest:
+    record: PullRequestRecord
+    created: bool
+
+
 class PullRequestProjectionStore(Protocol):
     async def get_or_create_locked(
         self, event: PullRequestEvent, now: datetime
-    ) -> PullRequestRecord | None: ...
+    ) -> LockedPullRequest | None: ...
 
     async def save(self, record: PullRequestRecord) -> None: ...
 
@@ -174,6 +190,10 @@ class PullRequestProjectionLock(Protocol):
     def hold(self, event: PullRequestEvent) -> AbstractAsyncContextManager[None]: ...
 
 
+class CancellationSignalPublisher(Protocol):
+    async def publish_for(self, run_ids: tuple[UUID, ...]) -> int: ...
+
+
 class ProjectGitHubPullRequest:
     """Apply one verified PR event and cancel work made obsolete by its state."""
 
@@ -185,6 +205,7 @@ class ProjectGitHubPullRequest:
         current_provider: CurrentPullRequestProvider | None = None,
         reviewer_timeline_provider: ReviewerTimelineProvider | None = None,
         projection_lock: PullRequestProjectionLock | None = None,
+        cancellation_signals: CancellationSignalPublisher | None = None,
         now: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
         if not bot_login:
@@ -198,9 +219,21 @@ class ProjectGitHubPullRequest:
         self._current_provider = current_provider
         self._reviewer_timeline_provider = reviewer_timeline_provider
         self._projection_lock = projection_lock
+        self._cancellation_signals = cancellation_signals
         self._now = now
 
-    async def execute(self, event: PullRequestEvent) -> PullRequestProjectionStatus:
+    async def execute(
+        self, event: PullRequestEvent | PullRequestLabelEvent
+    ) -> PullRequestProjectionStatus:
+        if isinstance(event, PullRequestLabelEvent):
+            if event.label_name != "ai-review":
+                return PullRequestProjectionStatus.IGNORED_UNRELATED
+            if self._projection_lock is None or self._current_provider is None:
+                raise RuntimeError(
+                    "label projection requires current GitHub PR and projection lock"
+                )
+            async with self._projection_lock.hold(event.pull_request):
+                return await self._project_label_under_lock(event.pull_request)
         if event.action in {"review_requested", "review_request_removed"}:
             if event.requested_reviewer_login is None or (
                 event.requested_reviewer_login.casefold() != self._bot_login
@@ -213,6 +246,54 @@ class ProjectGitHubPullRequest:
             async with self._projection_lock.hold(event):
                 return await self._execute_under_lock(event)
         return await self._execute_under_lock(event)
+
+    async def _project_label_under_lock(
+        self, event: PullRequestEvent
+    ) -> PullRequestProjectionStatus:
+        assert self._current_provider is not None
+        current = await self._current_provider.get_current(event)
+        if not self._same_identity(current, event):
+            return PullRequestProjectionStatus.IGNORED_UNRELATED
+        if current.current_label_names is None:
+            raise ValueError("current GitHub PR response has no labels")
+        now = self._now()
+        async with self._uow_factory() as uow:
+            try:
+                locked = await uow.pull_requests.get_or_create_locked(current, now)
+            except PullRequestIdentityConflict:
+                return PullRequestProjectionStatus.IGNORED_UNRELATED
+            if locked is None:
+                return PullRequestProjectionStatus.UNKNOWN_REPOSITORY
+            record = locked.record
+            if record.external_id != current.external_id:
+                return PullRequestProjectionStatus.IGNORED_UNRELATED
+            previous_head_sha = record.head_sha
+            previously_labeled = record.ai_review_labeled
+            if record.provider_updated_at is None or (
+                current.provider_updated_at >= record.provider_updated_at
+            ):
+                if current.head_sha != record.head_sha:
+                    self._apply_new_head(record, current, now)
+                self._apply_metadata(record, current, authoritative=True, now=now)
+                record.provider_updated_at = current.provider_updated_at
+            self._reconcile_label_state(record, current.current_label_names, now)
+            await uow.pull_requests.save(record)
+            notices = await self._cancel_obsolete_runs(
+                uow, record, current, previous_head_sha, now, previously_labeled
+            )
+            await uow.commit()
+        if notices and self._cancellation_signals is not None:
+            await self._cancellation_signals.publish_for(tuple(notice.run_id for notice in notices))
+        return PullRequestProjectionStatus.PROJECTED
+
+    @staticmethod
+    def _same_identity(current: PullRequestEvent, event: PullRequestEvent) -> bool:
+        return (
+            current.external_id == event.external_id
+            and current.number == event.number
+            and current.repository_external_id == event.repository_external_id
+            and current.installation_external_id == event.installation_external_id
+        )
 
     async def _execute_under_lock(self, event: PullRequestEvent) -> PullRequestProjectionStatus:
         timeline: ReviewerTimelineSnapshot | None = None
@@ -230,16 +311,12 @@ class ProjectGitHubPullRequest:
             "synchronize",
             "closed",
             "reopened",
+            "edited",
         }
         if authoritative:
             assert self._current_provider is not None
             current = await self._current_provider.get_current(event)
-            if (
-                current.external_id != event.external_id
-                or current.number != event.number
-                or current.repository_external_id != event.repository_external_id
-                or current.installation_external_id != event.installation_external_id
-            ):
+            if not self._same_identity(current, event):
                 return PullRequestProjectionStatus.IGNORED_UNRELATED
             if event.action in {"closed", "reopened"} and timeline is not None:
                 assert timeline.lifecycle is not None
@@ -271,14 +348,16 @@ class ProjectGitHubPullRequest:
         now = self._now()
         async with self._uow_factory() as uow:
             try:
-                record = await uow.pull_requests.get_or_create_locked(event, now)
+                locked = await uow.pull_requests.get_or_create_locked(event, now)
             except PullRequestIdentityConflict:
                 return PullRequestProjectionStatus.IGNORED_UNRELATED
-            if record is None:
+            if locked is None:
                 return PullRequestProjectionStatus.UNKNOWN_REPOSITORY
+            record = locked.record
             if record.external_id != event.external_id:
                 return PullRequestProjectionStatus.IGNORED_UNRELATED
             previous_head_sha = record.head_sha
+            previously_labeled = record.ai_review_labeled
             if self._is_stale_opened(record, event):
                 return PullRequestProjectionStatus.IGNORED_STALE
             reviewer_intent = event.action in {"review_requested", "review_request_removed"}
@@ -289,14 +368,24 @@ class ProjectGitHubPullRequest:
                     return PullRequestProjectionStatus.IGNORED_STALE
             elif record.provider_updated_at is not None and (
                 event.provider_updated_at < record.provider_updated_at
+                or (
+                    event.action == "edited"
+                    and not authoritative
+                    and not locked.created
+                    and event.provider_updated_at == record.provider_updated_at
+                )
             ):
                 return PullRequestProjectionStatus.IGNORED_STALE
-            if not reviewer_intent and event.head_sha != record.head_sha:
+            if (
+                not reviewer_intent
+                and event.action != "edited"
+                and event.head_sha != record.head_sha
+            ):
                 if self._head_change_is_stale(record, event, authoritative=authoritative):
                     return PullRequestProjectionStatus.IGNORED_STALE
                 self._apply_new_head(record, event, now)
 
-            if event.action in {"opened", "synchronize"}:
+            if event.action in {"opened", "synchronize", "edited"}:
                 self._apply_metadata(record, event, authoritative=authoritative, now=now)
             elif event.action in {"review_requested", "review_request_removed"}:
                 if record.state != PullRequestState.OPEN:
@@ -315,12 +404,33 @@ class ProjectGitHubPullRequest:
             else:
                 return PullRequestProjectionStatus.IGNORED_UNRELATED
 
+            if (
+                authoritative
+                and event.action in {"synchronize", "closed", "reopened"}
+                and event.current_label_names is not None
+            ):
+                self._reconcile_label_state(record, event.current_label_names, now)
             if not reviewer_intent:
                 record.provider_updated_at = event.provider_updated_at
             await uow.pull_requests.save(record)
-            await self._cancel_obsolete_runs(uow, record, event, previous_head_sha, now)
+            notices = await self._cancel_obsolete_runs(
+                uow, record, event, previous_head_sha, now, previously_labeled
+            )
             await uow.commit()
+        if notices and self._cancellation_signals is not None:
+            await self._cancellation_signals.publish_for(tuple(notice.run_id for notice in notices))
         return PullRequestProjectionStatus.PROJECTED
+
+    @staticmethod
+    def _reconcile_label_state(
+        record: PullRequestRecord, current_label_names: frozenset[str], now: datetime
+    ) -> None:
+        labeled = "ai-review" in current_label_names
+        if labeled == record.ai_review_labeled and (not labeled or record.ai_review_labeled_at):
+            return
+        record.ai_review_labeled = labeled
+        record.ai_review_labeled_at = now if labeled else None
+        record.label_intent_updated_at = now
 
     @staticmethod
     def _is_stale_opened(record: PullRequestRecord, event: PullRequestEvent) -> bool:
@@ -419,10 +529,11 @@ class ProjectGitHubPullRequest:
         record.source_branch = event.source_branch
         record.target_branch = event.target_branch
         record.base_sha = event.base_sha
-        record.state = event.state if authoritative else PullRequestState.OPEN
-        if record.state != PullRequestState.OPEN:
-            cls._advance_reviewer_barrier(record, event.provider_updated_at, force_clear=True)
-        if record.head_first_seen_at is None:
+        if event.action != "edited":
+            record.state = event.state if authoritative else PullRequestState.OPEN
+            if record.state != PullRequestState.OPEN:
+                cls._advance_reviewer_barrier(record, event.provider_updated_at, force_clear=True)
+        if record.head_first_seen_at is None and event.action != "edited":
             record.head_first_seen_at = now
 
     @staticmethod
@@ -478,17 +589,22 @@ class ProjectGitHubPullRequest:
         event: PullRequestEvent,
         previous_head_sha: str,
         now: datetime,
-    ) -> None:
+        previously_labeled: bool,
+    ) -> tuple[RunCancellationNotice, ...]:
         cancellation_reason: str | None = None
-        if event.action in {"synchronize", "closed", "reopened"}:
+        if event.action in {"synchronize", "closed", "reopened", "labeled", "unlabeled"}:
             if record.state != PullRequestState.OPEN:
                 cancellation_reason = "pr_closed"
-            elif event.action == "synchronize" and record.head_sha != previous_head_sha:
+            elif record.head_sha != previous_head_sha:
                 cancellation_reason = "superseded"
+        if cancellation_reason is None and previously_labeled and not record.ai_review_labeled:
+            cancellation_reason = "label_removed"
         if cancellation_reason is not None:
             notices = await uow.runs.cancel_for_pr(record.id, cancellation_reason, now)
             for notice in notices:
                 await uow.runs.notify_run_updated(notice)
+            return notices
+        return ()
 
     @staticmethod
     def _reconcile_lifecycle_timeline(

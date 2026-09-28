@@ -66,10 +66,10 @@ class FakeInstallationTokenCache:
 
 def _repository() -> RepositorySnapshot:
     return RepositorySnapshot(
-        id=101,
+        external_id=101,
         full_name="octo/api",
         default_branch="main",
-        html_url="https://github.com/octo/api",
+        web_url="https://github.com/octo/api",
     )
 
 

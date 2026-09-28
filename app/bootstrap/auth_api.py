@@ -3,14 +3,13 @@
 from __future__ import annotations
 
 import os
-from collections.abc import AsyncIterator
 from uuid import UUID
 
 import httpx
 from fastapi import HTTPException, Request
 from pydantic import ValidationError
 
-from app.bootstrap.reviews_api import ReviewsApiResources
+from app.bootstrap.reviews_api import GitHubAuthHttpClients, ReviewsApiResources
 from app.modules.auth.application.exchange_github_code import (
     ExchangeGitHubCode,
     GitHubProviderUnavailable,
@@ -39,8 +38,9 @@ class _CallbackInstallationLinker:
             raise GitHubProviderUnavailable from exc
 
 
-async def get_exchange_github_code(request: Request) -> AsyncIterator[ExchangeGitHubCode]:
+def get_exchange_github_code(request: Request) -> ExchangeGitHubCode:
     resources = getattr(request.app.state, "reviews_api_resources", None)
+    clients = getattr(request.app.state, "github_auth_http_clients", None)
     names = (
         "GITHUB_CLIENT_ID",
         "GITHUB_CLIENT_SECRET",
@@ -49,33 +49,29 @@ async def get_exchange_github_code(request: Request) -> AsyncIterator[ExchangeGi
         "AUTH_JWT_AUDIENCE",
     )
     config = {name: os.environ.get(name) for name in names}
-    if not isinstance(resources, ReviewsApiResources) or any(
-        not value for value in config.values()
+    if (
+        not isinstance(resources, ReviewsApiResources)
+        or not isinstance(clients, GitHubAuthHttpClients)
+        or any(not value for value in config.values())
     ):
         raise HTTPException(status_code=503, detail="GitHub authentication is not configured")
-    async with (
-        httpx.AsyncClient(base_url="https://github.com", timeout=10) as oauth_client,
-        httpx.AsyncClient(
-            base_url=os.environ.get("GITHUB_API_URL", "https://api.github.com"), timeout=10
-        ) as api_client,
-    ):
-        yield ExchangeGitHubCode(
-            oauth=HttpGitHubOAuthClient(
-                oauth_client,
-                client_id=config["GITHUB_CLIENT_ID"] or "",
-                client_secret=config["GITHUB_CLIENT_SECRET"] or "",
-            ),
-            profile=HttpGitHubUserProfile(api_client),
-            linker=_CallbackInstallationLinker(
-                resources.github_installation_linker(client=api_client)
-            ),
-            uow_factory=resources.auth_session_uow,
-            issuer=Rs256AccessTokenIssuer(
-                config["AUTH_JWT_PRIVATE_KEY"] or "",
-                issuer=config["AUTH_JWT_ISSUER"] or "",
-                audience=config["AUTH_JWT_AUDIENCE"] or "",
-            ),
-        )
+    return ExchangeGitHubCode(
+        oauth=HttpGitHubOAuthClient(
+            clients.oauth,
+            client_id=config["GITHUB_CLIENT_ID"] or "",
+            client_secret=config["GITHUB_CLIENT_SECRET"] or "",
+        ),
+        profile=HttpGitHubUserProfile(clients.api),
+        linker=_CallbackInstallationLinker(
+            resources.github_installation_linker(client=clients.api)
+        ),
+        uow_factory=resources.auth_session_uow,
+        issuer=Rs256AccessTokenIssuer(
+            config["AUTH_JWT_PRIVATE_KEY"] or "",
+            issuer=config["AUTH_JWT_ISSUER"] or "",
+            audience=config["AUTH_JWT_AUDIENCE"] or "",
+        ),
+    )
 
 
 def get_refresh_local_session(request: Request) -> RefreshLocalSession:

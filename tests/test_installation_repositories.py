@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import pytest
 
-from app.modules.repositories.application.installation_repositories import (
+from app.modules.integrations.webhooks.api.installation_event_dtos import (
     InstallationEventValidationError,
+    parse_installation_repositories_event,
+)
+from app.modules.repositories.application.installation_repositories import (
     RepositoryTreeBlob,
     classify_tree_languages,
-    parse_installation_repositories_event,
 )
 
 

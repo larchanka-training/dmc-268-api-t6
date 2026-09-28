@@ -35,8 +35,8 @@ def _candidate(**overrides: object) -> EligibilityCandidate:
         "head_sha": _HEAD,
         "state": PullRequestState.OPEN,
         "repository_enabled": True,
-        "reviewer_requested": True,
-        "reviewer_requested_at": _AT,
+        "ai_review_labeled": True,
+        "ai_review_labeled_at": _AT,
         "head_first_seen_at": _AT,
         "wait_for_ci": CiWaitMode.AUTO,
     }
@@ -88,7 +88,7 @@ def _decide(
     return asyncio.run(use_case.execute(_PR_ID, expected_head)), provider, store
 
 
-def test_never_needs_assignment_but_does_not_fetch_ci() -> None:
+def test_never_needs_label_but_does_not_fetch_ci() -> None:
     result, provider, _ = _decide(
         _candidate(wait_for_ci=CiWaitMode.NEVER), _ci(status_state="failure", status_count=1)
     )
@@ -96,7 +96,7 @@ def test_never_needs_assignment_but_does_not_fetch_ci() -> None:
     assert provider.calls == []
 
     for candidate in (
-        _candidate(wait_for_ci=CiWaitMode.NEVER, reviewer_requested=False),
+        _candidate(wait_for_ci=CiWaitMode.NEVER, ai_review_labeled=False),
         _candidate(wait_for_ci=CiWaitMode.NEVER, repository_enabled=False),
         _candidate(wait_for_ci=CiWaitMode.NEVER, state=PullRequestState.CLOSED),
     ):
@@ -104,10 +104,10 @@ def test_never_needs_assignment_but_does_not_fetch_ci() -> None:
         assert result.eligible is False
         assert provider.calls == []
 
-    legacy_assignment, provider, _ = _decide(
-        _candidate(wait_for_ci=CiWaitMode.NEVER, reviewer_requested_at=None), _ci()
+    legacy_label, provider, _ = _decide(
+        _candidate(wait_for_ci=CiWaitMode.NEVER, ai_review_labeled_at=None), _ci()
     )
-    assert legacy_assignment.eligible is True
+    assert legacy_label.eligible is True
     assert provider.calls == []
 
 
@@ -151,7 +151,7 @@ def test_always_requires_green_foreign_ci(
     assert provider.calls == [(17, "octo/repo", _HEAD)]
 
 
-def test_auto_no_ci_waits_from_later_assignment_or_head_at_inclusive_boundary() -> None:
+def test_auto_no_ci_waits_from_later_label_or_head_at_inclusive_boundary() -> None:
     candidate = _candidate(head_first_seen_at=_AT + timedelta(minutes=1))
     empty = _ci()
     before, _, _ = _decide(candidate, empty, now=_AT + timedelta(minutes=2, seconds=59))
@@ -159,11 +159,11 @@ def test_auto_no_ci_waits_from_later_assignment_or_head_at_inclusive_boundary() 
     assert before == CiEligibility(False, EligibilityReason.WAITING_FOR_CI, _HEAD)
     assert at_boundary == CiEligibility(True, EligibilityReason.ELIGIBLE, _HEAD)
 
-    assignment_later = _candidate(
-        reviewer_requested_at=_AT + timedelta(minutes=1), head_first_seen_at=_AT
+    label_later = _candidate(
+        ai_review_labeled_at=_AT + timedelta(minutes=1), head_first_seen_at=_AT
     )
-    before, _, _ = _decide(assignment_later, empty, now=_AT + timedelta(minutes=2, seconds=59))
-    at_boundary, _, _ = _decide(assignment_later, empty, now=_AT + timedelta(minutes=3))
+    before, _, _ = _decide(label_later, empty, now=_AT + timedelta(minutes=2, seconds=59))
+    at_boundary, _, _ = _decide(label_later, empty, now=_AT + timedelta(minutes=3))
     assert before.eligible is False
     assert at_boundary.eligible is True
 
@@ -206,6 +206,27 @@ def test_pending_ci_never_times_out_and_stale_or_disabled_state_blocks() -> None
     use_case = DetermineCiEligibility(candidates=store, ci=provider, own_app_id=42)
     result = asyncio.run(use_case.execute(_PR_ID, _HEAD))
     assert result.reason == EligibilityReason.DISABLED_REPOSITORY
+
+
+def test_retained_label_rechecks_new_head_from_later_ci_or_sweep() -> None:
+    new_head = "c" * 40
+    candidate = _candidate(
+        head_sha=new_head,
+        head_first_seen_at=_AT + timedelta(minutes=1),
+        ai_review_labeled_at=_AT,
+    )
+    store = CandidateStore(candidate)
+    provider = CiProvider(
+        CiSnapshot(new_head, (CheckSuite(7, "completed", "success"),), "pending", 0)
+    )
+    use_case = DetermineCiEligibility(candidates=store, ci=provider, own_app_id=42)
+
+    old_head = asyncio.run(use_case.execute(_PR_ID, _HEAD))
+    later_ci_or_sweep = asyncio.run(use_case.execute(_PR_ID, new_head))
+
+    assert old_head.reason == EligibilityReason.STALE_HEAD
+    assert later_ci_or_sweep.reason == EligibilityReason.ELIGIBLE
+    assert provider.calls == [(17, "octo/repo", new_head)]
 
 
 def test_candidate_reads_complete_before_and_after_github_fetch() -> None:

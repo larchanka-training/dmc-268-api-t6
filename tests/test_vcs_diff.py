@@ -222,6 +222,55 @@ def test_large_patch_and_non_utf8_text_without_patch_are_distinct_omissions() ->
     ]
 
 
+def test_missing_patch_blob_failures_do_not_hide_later_files(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    files = (
+        VcsFile("src/oversized.py", "modified", "1" * 40, None, 1, 1, 2, None),
+        VcsFile("src/unavailable.py", "modified", "2" * 40, None, 1, 1, 2, None),
+        VcsFile(
+            "src/reviewable.py", "modified", "3" * 40, None, 1, 1, 2, "@@ -1 +1 @@\n-old\n+new"
+        ),
+    )
+
+    class Provider:
+        async def get_pull_request(self, locator: PullRequestLocator) -> VcsPullRequest:
+            return _pull_request()
+
+        async def get_diff(self, pull_request: VcsPullRequest) -> tuple[VcsFile, ...]:
+            return files
+
+        async def get_blob(self, locator: PullRequestLocator, sha: str) -> bytes:
+            if sha == "1" * 40:
+                return b"x" * 1_048_577
+            raise RuntimeError("one blob is unavailable")
+
+    result = asyncio.run(FetchVcsReviewInput(Provider()).execute(_locator(), _HEAD))
+
+    assert result.files == files
+    assert result.omitted_files == ("src/oversized.py", "src/unavailable.py")
+    assert [item.reason for item in result.omissions] == [
+        OmissionReason.TOO_LARGE,
+        OmissionReason.MISSING_PATCH,
+    ]
+    assert result.changed_files == (
+        ChangedFile(
+            "src/reviewable.py",
+            "modified",
+            (
+                DiffLine(1, "removed", "old"),
+                DiffLine(1, "added", "new"),
+            ),
+        ),
+    )
+    assert any(
+        "src/unavailable.py" in record.getMessage()
+        and "2" * 40 in record.getMessage()
+        and "octo/repo" in record.getMessage()
+        for record in caplog.records
+    )
+
+
 def test_unicode_separators_do_not_count_as_patch_lines() -> None:
     content = "x\u2028\u0085" * 10001
     file = VcsFile("src/a.py", "added", "1" * 40, None, 1, 0, 1, f"@@ -0,0 +1 @@\n+{content}")

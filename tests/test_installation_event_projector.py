@@ -25,10 +25,10 @@ from app.modules.repositories.application.sync_installation_repositories import 
 
 def _snapshot(*, external_id: int = 101, branch: str = "main") -> RepositorySnapshot:
     return RepositorySnapshot(
-        id=external_id,
+        external_id=external_id,
         full_name=f"octo/repository-{external_id}",
         default_branch=branch,
-        html_url=f"https://github.com/octo/repository-{external_id}",
+        web_url=f"https://github.com/octo/repository-{external_id}",
     )
 
 

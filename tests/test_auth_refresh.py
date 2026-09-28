@@ -30,7 +30,19 @@ from app.modules.auth.application.refresh_session import (
     RefreshSessionRecord,
     RefreshTokenFamily,
 )
+from app.modules.auth.application.refresh_token_hash import hash_refresh_token
 from app.modules.auth.infrastructure.jwt_tokens import Rs256AccessTokenIssuer
+
+
+@pytest.mark.parametrize(
+    ("token", "expected"),
+    [
+        ("abc", "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"),
+        ("é", "4a99557e4033c3539de2eb65472017cad5f9557f7a0625a09f1c3f6e2ba69c4c"),
+    ],
+)
+def test_refresh_token_hash_matches_sha256_vectors(token: str, expected: str) -> None:
+    assert hash_refresh_token(token) == expected
 
 
 @dataclass
@@ -190,8 +202,8 @@ def test_refresh_rotates_once_and_uses_current_workspace_memberships() -> None:
 
     result = asyncio.run(refresh.execute("original-secret"))
 
-    original_hash = hashlib.sha256(b"original-secret").hexdigest()
-    replacement_hash = hashlib.sha256(b"replacement-secret").hexdigest()
+    original_hash = "90acf9a86740a5b3ff03c71cdbbbae591773691219be3165497378cdc1a14ed4"
+    replacement_hash = "d0f82d558a622b0eb49f832c76ba3ad848b4f3d585eebc46b091e94c980125bf"
     assert database.sessions[original_hash].rotated_at == now
     assert database.sessions[replacement_hash].expires_at == database.family.expires_at
     assert result.refresh_token == "replacement-secret"

@@ -18,12 +18,14 @@ from app.common.infrastructure.db.enums import CodeChangeState, RunState
 from app.common.infrastructure.db.unit_of_work import SqlAlchemyUnitOfWork
 from app.modules.repositories.infrastructure.models import ProviderInstallation, Repository
 from app.modules.reviews.application.project_github_pull_request import (
+    LockedPullRequest,
     PullRequestEvent,
     PullRequestIdentityConflict,
     PullRequestRecord,
     PullRequestState,
     RunCancellationNotice,
 )
+from app.modules.reviews.application.try_enqueue_webhook_run import PendingRunMessage
 from app.modules.reviews.infrastructure.models import CodeChange, Run
 
 
@@ -35,7 +37,7 @@ class SqlAlchemyPullRequestProjectionStore:
 
     async def get_or_create_locked(
         self, event: PullRequestEvent, now: datetime
-    ) -> PullRequestRecord | None:
+    ) -> LockedPullRequest | None:
         repository_id = cast(
             UUID | None,
             await self._session.scalar(
@@ -55,34 +57,41 @@ class SqlAlchemyPullRequestProjectionStore:
         if repository_id is None:
             return None
 
-        await self._session.execute(
-            insert(CodeChange)
-            .values(
-                id=uuid4(),
-                repository_id=repository_id,
-                external_id=event.external_id,
-                external_number=event.number,
-                title=event.title,
-                description=event.description,
-                author_login=event.author_login,
-                source_branch=event.source_branch,
-                target_branch=event.target_branch,
-                base_sha=event.base_sha,
-                head_sha=event.head_sha,
-                state=CodeChangeState(event.state.value),
-                reviewer_requested=False,
-                reviewer_requested_at=None,
-                reviewer_intent_updated_at=None,
-                reviewer_timeline_event_id=None,
-                reviewer_timeline_position=None,
-                reviewer_barrier_at=None,
-                reviewer_barrier_position=None,
-                head_first_seen_at=now,
-                provider_updated_at=event.provider_updated_at,
-                ci_status={},
-                web_url=event.web_url,
-            )
-            .on_conflict_do_nothing()
+        inserted_id = cast(
+            UUID | None,
+            await self._session.scalar(
+                insert(CodeChange)
+                .values(
+                    id=uuid4(),
+                    repository_id=repository_id,
+                    external_id=event.external_id,
+                    external_number=event.number,
+                    title=event.title,
+                    description=event.description,
+                    author_login=event.author_login,
+                    source_branch=event.source_branch,
+                    target_branch=event.target_branch,
+                    base_sha=event.base_sha,
+                    head_sha=event.head_sha,
+                    state=CodeChangeState(event.state.value),
+                    ai_review_labeled=False,
+                    ai_review_labeled_at=None,
+                    label_intent_updated_at=None,
+                    reviewer_requested=False,
+                    reviewer_requested_at=None,
+                    reviewer_intent_updated_at=None,
+                    reviewer_timeline_event_id=None,
+                    reviewer_timeline_position=None,
+                    reviewer_barrier_at=None,
+                    reviewer_barrier_position=None,
+                    head_first_seen_at=now,
+                    provider_updated_at=event.provider_updated_at,
+                    ci_status={},
+                    web_url=event.web_url,
+                )
+                .on_conflict_do_nothing()
+                .returning(CodeChange.id)
+            ),
         )
         row = await self._session.scalar(
             select(CodeChange)
@@ -94,7 +103,7 @@ class SqlAlchemyPullRequestProjectionStore:
         )
         if row is None:
             raise PullRequestIdentityConflict
-        return PullRequestRecord(
+        record = PullRequestRecord(
             id=row.id,
             repository_id=row.repository_id,
             external_id=row.external_id,
@@ -108,6 +117,9 @@ class SqlAlchemyPullRequestProjectionStore:
             base_sha=row.base_sha,
             head_sha=row.head_sha,
             state=PullRequestState(row.state.value),
+            ai_review_labeled=row.ai_review_labeled,
+            ai_review_labeled_at=row.ai_review_labeled_at,
+            label_intent_updated_at=row.label_intent_updated_at,
             reviewer_requested=row.reviewer_requested,
             reviewer_requested_at=row.reviewer_requested_at,
             reviewer_intent_updated_at=row.reviewer_intent_updated_at,
@@ -119,6 +131,7 @@ class SqlAlchemyPullRequestProjectionStore:
             provider_updated_at=row.provider_updated_at,
             ci_status=dict(row.ci_status),
         )
+        return LockedPullRequest(record=record, created=inserted_id is not None)
 
     async def save(self, record: PullRequestRecord) -> None:
         await self._session.execute(
@@ -134,6 +147,9 @@ class SqlAlchemyPullRequestProjectionStore:
                 base_sha=record.base_sha,
                 head_sha=record.head_sha,
                 state=CodeChangeState(record.state.value),
+                ai_review_labeled=record.ai_review_labeled,
+                ai_review_labeled_at=record.ai_review_labeled_at,
+                label_intent_updated_at=record.label_intent_updated_at,
                 reviewer_requested=record.reviewer_requested,
                 reviewer_requested_at=record.reviewer_requested_at,
                 reviewer_intent_updated_at=record.reviewer_intent_updated_at,
@@ -192,6 +208,8 @@ class SqlAlchemyPullRequestRunCanceller:
                 run.state = RunState.CANCELLED
                 run.error_code = reason
                 run.finished_at = now
+                if run.attempt >= 1:
+                    run.cancellation_signal_requested_at = now
                 notices.append(RunCancellationNotice(run.id, workspace_id, "cancelled"))
             elif not run.cancel_requested:
                 run.cancel_requested = True
@@ -208,6 +226,68 @@ class SqlAlchemyPullRequestRunCanceller:
             separators=(",", ":"),
         )
         await self._session.execute(select(func.pg_notify("run_updated", payload)))
+
+    async def pending_cancellation_signals(
+        self, limit: int, run_ids: tuple[UUID, ...] | None = None
+    ) -> tuple[PendingRunMessage, ...]:
+        if run_ids == ():
+            return ()
+        conditions = [
+            Run.state == RunState.CANCELLED,
+            Run.attempt >= 1,
+            Run.cancellation_signal_requested_at.is_not(None),
+            Run.cancellation_signal_published_at.is_(None),
+            ProviderInstallation.provider == "github",
+        ]
+        if run_ids is not None:
+            conditions.append(Run.id.in_(run_ids))
+        rows = (
+            await self._session.execute(
+                select(Run, CodeChange, Repository, ProviderInstallation)
+                .join(CodeChange, Run.code_change_id == CodeChange.id)
+                .join(Repository, CodeChange.repository_id == Repository.id)
+                .join(
+                    ProviderInstallation,
+                    Repository.provider_installation_id == ProviderInstallation.id,
+                )
+                .where(*conditions)
+                .order_by(Run.cancellation_signal_requested_at, Run.id)
+                .limit(limit)
+            )
+        ).all()
+        return tuple(
+            PendingRunMessage(
+                run_id=run.id,
+                workspace_id=installation.workspace_id,
+                installation_id=installation.external_id,
+                repository_id=repository.id,
+                repository_external_id=repository.external_id,
+                repository_full_name=repository.full_name,
+                pr_number=pr.external_number,
+                head_sha=run.head_sha,
+                base_sha=run.base_sha,
+                base_ref=run.base_ref or pr.target_branch,
+                engine=run.engine.value,
+                rule_version_id=run.rule_version_id,
+                prompt_version_id=run.prompt_version_id,
+                attempt=run.attempt + 1,
+                requested_at=run.cancellation_signal_requested_at,
+            )
+            for run, pr, repository, installation in rows
+        )
+
+    async def mark_cancellation_signal_published(self, run_id: UUID, now: datetime) -> None:
+        await self._session.execute(
+            update(Run)
+            .where(
+                Run.id == run_id,
+                Run.state == RunState.CANCELLED,
+                Run.attempt >= 1,
+                Run.cancellation_signal_requested_at.is_not(None),
+                Run.cancellation_signal_published_at.is_(None),
+            )
+            .values(cancellation_signal_published_at=now)
+        )
 
 
 class SqlAlchemyPullRequestProjectionLock:

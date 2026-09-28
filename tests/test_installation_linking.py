@@ -18,9 +18,10 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from sqlalchemy.schema import CreateSchema, DropSchema
 
 from alembic import command
+from app.modules.integrations.webhooks.api.dispatch import GitHubWebhookDispatchAdapter
+from app.modules.integrations.webhooks.api.receipt import VerifiedGitHubDelivery
 from app.modules.integrations.webhooks.application.github_installation_dispatch import (
     GitHubInstallationDeliveryDispatcher,
-    VerifiedGitHubDelivery,
 )
 from app.modules.integrations.webhooks.application.receive_github_delivery import (
     ReceiveGitHubDelivery,
@@ -477,12 +478,14 @@ def test_concurrent_authenticated_links_share_workspace_and_replay_prior_receipt
             )
             receiver = ReceiveGitHubDelivery(
                 uow_factory=receipt_factory,
-                dispatcher=GitHubInstallationDeliveryDispatcher(
-                    resolver=SqlAlchemyGitHubInstallationResolver(session_factory),
-                    onboarding=Onboarding(),
+                dispatcher=GitHubWebhookDispatchAdapter(
+                    GitHubInstallationDeliveryDispatcher(
+                        resolver=SqlAlchemyGitHubInstallationResolver(session_factory),
+                        onboarding=Onboarding(),
+                    )
                 ),
             )
-            await receiver.execute(delivery)
+            await receiver.execute(delivery.to_receipt())
             await receiver.replay_pending()
             async with session_factory() as session:
                 receipt = await session.scalar(
@@ -540,9 +543,11 @@ def test_concurrent_authenticated_links_share_workspace_and_replay_prior_receipt
             onboarding = Onboarding()
             replay = ReceiveGitHubDelivery(
                 uow_factory=receipt_factory,
-                dispatcher=GitHubInstallationDeliveryDispatcher(
-                    resolver=SqlAlchemyGitHubInstallationResolver(session_factory),
-                    onboarding=onboarding,
+                dispatcher=GitHubWebhookDispatchAdapter(
+                    GitHubInstallationDeliveryDispatcher(
+                        resolver=SqlAlchemyGitHubInstallationResolver(session_factory),
+                        onboarding=onboarding,
+                    )
                 ),
             )
             assert await replay.replay_pending() == 1

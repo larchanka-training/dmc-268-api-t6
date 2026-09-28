@@ -23,7 +23,7 @@ class EligibilityReason(StrEnum):
     UNKNOWN_PR = "unknown_pr"
     DISABLED_REPOSITORY = "disabled_repository"
     CLOSED_PR = "closed_pr"
-    BOT_NOT_ASSIGNED = "bot_not_assigned"
+    LABEL_NOT_ACTIVE = "label_not_active"
     STALE_HEAD = "stale_head"
     STALE_STATE = "stale_state"
     WAITING_FOR_CI = "waiting_for_ci"
@@ -38,8 +38,8 @@ class EligibilityCandidate:
     head_sha: str
     state: PullRequestState
     repository_enabled: bool
-    reviewer_requested: bool
-    reviewer_requested_at: datetime | None
+    ai_review_labeled: bool
+    ai_review_labeled_at: datetime | None
     head_first_seen_at: datetime | None
     wait_for_ci: CiWaitMode
 
@@ -137,9 +137,9 @@ class DetermineCiEligibility:
             return CiEligibility(True, EligibilityReason.ELIGIBLE, candidate.head_sha, candidate)
         if candidate.wait_for_ci == CiWaitMode.ALWAYS:
             return CiEligibility(False, EligibilityReason.WAITING_FOR_CI, candidate.head_sha)
-        if candidate.reviewer_requested_at is None or candidate.head_first_seen_at is None:
+        if candidate.ai_review_labeled_at is None or candidate.head_first_seen_at is None:
             return CiEligibility(False, EligibilityReason.WAITING_FOR_CI, candidate.head_sha)
-        window_start = max(candidate.reviewer_requested_at, candidate.head_first_seen_at)
+        window_start = max(candidate.ai_review_labeled_at, candidate.head_first_seen_at)
         if self._now() < window_start + timedelta(minutes=2):
             return CiEligibility(False, EligibilityReason.WAITING_FOR_CI, candidate.head_sha)
         return CiEligibility(True, EligibilityReason.ELIGIBLE, candidate.head_sha, candidate)
@@ -156,6 +156,6 @@ class DetermineCiEligibility:
             return CiEligibility(False, EligibilityReason.DISABLED_REPOSITORY, candidate.head_sha)
         if candidate.state != PullRequestState.OPEN:
             return CiEligibility(False, EligibilityReason.CLOSED_PR, candidate.head_sha)
-        if not candidate.reviewer_requested:
-            return CiEligibility(False, EligibilityReason.BOT_NOT_ASSIGNED, candidate.head_sha)
+        if not candidate.ai_review_labeled:
+            return CiEligibility(False, EligibilityReason.LABEL_NOT_ACTIVE, candidate.head_sha)
         return None

@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import json
-from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from dataclasses import dataclass, field, replace
+from datetime import UTC, datetime, timedelta, timezone
 from typing import Self, cast
 from uuid import UUID
 
@@ -13,7 +13,10 @@ import aio_pika
 import pytest
 from aio_pika.abc import AbstractExchange
 
-from app.modules.reviews.application.try_enqueue_webhook_run import PendingRunMessage
+from app.modules.reviews.application.try_enqueue_webhook_run import (
+    PendingRunMessage,
+    RunPublicationKind,
+)
 from app.modules.reviews.infrastructure.rabbitmq_run_publisher import (
     RabbitMqRunPublisher,
     open_rabbitmq_run_publisher,
@@ -76,7 +79,48 @@ def test_publisher_sends_persistent_pointer_and_waits_for_confirm(engine: str, r
     assert message.delivery_mode == aio_pika.DeliveryMode.PERSISTENT
     assert message.message_id == str(_RUN)
     assert message.content_type == "application/json"
-    assert json.loads(message.body) == _message(engine).as_payload()
+    assert message.priority == 0
+    assert json.loads(message.body) == {
+        "schema": "review.run/v1",
+        "message_id": str(_RUN),
+        "run_id": str(_RUN),
+        "workspace_id": str(_WS),
+        "installation_id": 17,
+        "repo": {
+            "id": str(_REPO),
+            "provider": "github",
+            "external_id": 101,
+            "full_name": "octo/repo",
+        },
+        "pr": {"number": 7, "head_sha": "a" * 40, "base_sha": "b" * 40, "base_ref": "main"},
+        "engine": engine,
+        "rule_version_id": str(_RULE),
+        "prompt_version_id": str(_PROMPT),
+        "trigger": "webhook",
+        "attempt": 1,
+        "requested_at": "2026-09-28T12:00:00Z",
+    }
+
+
+def test_publisher_serializes_requested_at_as_utc_z() -> None:
+    exchange = Exchange()
+    publisher = RabbitMqRunPublisher(cast(AbstractExchange, exchange))
+    requested_at = datetime(2026, 9, 28, 14, 0, tzinfo=timezone(timedelta(hours=2)))
+
+    asyncio.run(publisher.publish_confirmed(replace(_message(), requested_at=requested_at)))
+
+    assert json.loads(exchange.sent[0][0].body)["requested_at"] == "2026-09-28T12:00:00Z"
+
+
+def test_cancellation_publication_uses_priority_nine_without_changing_wire_schema() -> None:
+    exchange = Exchange()
+    publisher = RabbitMqRunPublisher(cast(AbstractExchange, exchange))
+
+    asyncio.run(publisher.publish_confirmed(_message(), kind=RunPublicationKind.CANCELLATION))
+
+    message = exchange.sent[0][0]
+    assert message.priority == 9
+    assert json.loads(message.body)["schema"] == "review.run/v1"
 
 
 @pytest.mark.parametrize("confirmation", [False, None, RuntimeError("broker rejected")])

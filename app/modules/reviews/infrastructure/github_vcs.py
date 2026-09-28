@@ -13,6 +13,8 @@ from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, model_validator
 
 from app.modules.reviews.application.prompt_builder import PullRequestMeta
 from app.modules.reviews.application.vcs_diff import (
+    MAX_BLOB_BYTES,
+    BlobTooLargeError,
     PullRequestLocator,
     VcsFile,
     VcsPullRequest,
@@ -22,6 +24,7 @@ _SHA = r"^(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})$"
 _MAX_FILES = 3000
 _PAGE_SIZE = 100
 _REQUEST_TIMEOUT = 10.0
+_MAX_BLOB_RESPONSE_BYTES = 1_500_000  # 1 MiB of base64 content plus JSON envelope.
 _API_VERSION = "2022-11-28"
 
 
@@ -209,15 +212,30 @@ class HttpGitHubVcsProvider:
         if re.fullmatch(_SHA, sha) is None:
             raise ValueError("GitHub blob SHA must be 40 or 64 hexadecimal characters")
         token = await self._tokens.get_installation_access_token(locator.installation_external_id)
-        response = await self._client.get(
+        async with self._client.stream(
+            "GET",
             f"{prefix}/git/blobs/{sha}",
             headers=_headers(token),
             timeout=_REQUEST_TIMEOUT,
-        )
-        response.raise_for_status()
-        item = _Blob.model_validate(response.json())
+        ) as response:
+            response.raise_for_status()
+            content_length = response.headers.get("Content-Length")
+            if (
+                content_length is not None
+                and content_length.isdecimal()
+                and int(content_length) > _MAX_BLOB_RESPONSE_BYTES
+            ):
+                raise BlobTooLargeError("GitHub blob response exceeds the retrieval budget")
+            body = bytearray()
+            async for chunk in response.aiter_bytes(chunk_size=65_536):
+                if len(body) + len(chunk) > _MAX_BLOB_RESPONSE_BYTES:
+                    raise BlobTooLargeError("GitHub blob response exceeds the retrieval budget")
+                body.extend(chunk)
+        item = _Blob.model_validate_json(body)
         if item.sha.casefold() != sha.casefold():
             raise ValueError("GitHub blob SHA differs from the requested SHA")
+        if item.size > MAX_BLOB_BYTES:
+            raise BlobTooLargeError("GitHub blob exceeds the 1 MiB review budget")
         try:
             data = base64.b64decode("".join(item.content.split()), validate=True)
         except binascii.Error as exc:

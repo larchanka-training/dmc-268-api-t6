@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import asyncio
 import base64
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
 
 import httpx
 import pytest
 
 from app.modules.reviews.application.vcs_diff import (
+    BlobTooLargeError,
     FetchVcsReviewInput,
     OmissionReason,
     PullRequestLocator,
@@ -292,6 +294,52 @@ def test_http_rate_limit_and_invalid_blob_fail_closed() -> None:
         ) as client:
             provider = HttpGitHubVcsProvider(client=client, token_provider=Tokens())
             with pytest.raises(ValueError, match="base64"):
+                await provider.get_blob(PullRequestLocator(17, "octo/repo", 7), _BLOB)
+
+    asyncio.run(exercise())
+
+
+def test_blob_retrieval_stops_before_consuming_an_oversized_response() -> None:
+    @dataclass
+    class BlobStream(httpx.AsyncByteStream):
+        chunks_read: int = 0
+
+        async def __aiter__(self) -> AsyncIterator[bytes]:
+            for _ in range(100):
+                self.chunks_read += 1
+                yield b"x" * 100_000
+
+    stream = BlobStream()
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        assert request.url.path.endswith(f"/git/blobs/{_BLOB}")
+        return httpx.Response(200, stream=stream)
+
+    async def exercise() -> None:
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(respond), base_url="https://api.github.test"
+        ) as client:
+            provider = HttpGitHubVcsProvider(client=client, token_provider=Tokens())
+            with pytest.raises(BlobTooLargeError):
+                await provider.get_blob(PullRequestLocator(17, "octo/repo", 7), _BLOB)
+
+    asyncio.run(exercise())
+    assert stream.chunks_read < 100
+
+
+def test_blob_declared_over_one_mebibyte_is_rejected_before_decoding() -> None:
+    def respond(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={"sha": _BLOB, "encoding": "base64", "content": "", "size": 1_048_577},
+        )
+
+    async def exercise() -> None:
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(respond), base_url="https://api.github.test"
+        ) as client:
+            provider = HttpGitHubVcsProvider(client=client, token_provider=Tokens())
+            with pytest.raises(BlobTooLargeError):
                 await provider.get_blob(PullRequestLocator(17, "octo/repo", 7), _BLOB)
 
     asyncio.run(exercise())

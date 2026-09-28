@@ -1,4 +1,4 @@
-"""One signed delivery reaches a confirmed Run and filtered review input."""
+"""Signed webhook receipt storage and replay through application dispatch."""
 
 from __future__ import annotations
 
@@ -6,7 +6,9 @@ import asyncio
 import hashlib
 import hmac
 import json
-from dataclasses import dataclass, field
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from types import TracebackType
 from typing import Self
@@ -16,13 +18,13 @@ from fastapi.testclient import TestClient
 
 from app.bootstrap.reviews_api import get_github_webhook_receipt_uow_factory
 from app.main import app, get_github_webhook_secret
-from app.modules.integrations.webhooks.api.pull_request_dtos import parse_pull_request_event
+from app.modules.integrations.webhooks.api.dispatch import GitHubWebhookDispatchAdapter
 from app.modules.integrations.webhooks.application.github_installation_dispatch import (
     GitHubInstallationDeliveryDispatcher,
-    VerifiedGitHubDelivery,
 )
 from app.modules.integrations.webhooks.application.receive_github_delivery import (
     ReceiveGitHubDelivery,
+    WebhookReceipt,
 )
 from app.modules.reviews.application.determine_ci_eligibility import (
     CheckSuite,
@@ -31,21 +33,26 @@ from app.modules.reviews.application.determine_ci_eligibility import (
     DetermineCiEligibility,
     EligibilityCandidate,
 )
-from app.modules.reviews.application.get_run_diff import DiffSnapshot, review_files_from_snapshots
-from app.modules.reviews.application.process_run import ReviewRunProcessor, RunVcsInput
+from app.modules.reviews.application.get_run_diff import DiffSnapshot
+from app.modules.reviews.application.process_run import RunVcsInput
 from app.modules.reviews.application.project_github_pull_request import (
+    LockedPullRequest,
     ProjectGitHubPullRequest,
     PullRequestEvent,
     PullRequestRecord,
+    PullRequestState,
 )
-from app.modules.reviews.application.prompt_builder import DiffLine, PullRequestMeta
+from app.modules.reviews.application.prompt_builder import PullRequestMeta
 from app.modules.reviews.application.trigger_from_delivery import (
     CiTriggerEvent,
+    ProjectedPullRequestTarget,
     TriggerFromDelivery,
 )
 from app.modules.reviews.application.try_enqueue_webhook_run import (
+    EnqueueStatus,
     PendingRunMessage,
     RunInsertCandidate,
+    RunPublicationKind,
     TryEnqueueWebhookRun,
 )
 from app.modules.reviews.application.vcs_diff import PullRequestLocator, VcsFile, VcsPullRequest
@@ -64,7 +71,7 @@ _PROMPT_ID = UUID("66666666-6666-6666-6666-666666666666")
 
 @dataclass
 class Receipt:
-    delivery: VerifiedGitHubDelivery
+    delivery: WebhookReceipt
     claim_token: UUID | None = None
     projected: bool = False
 
@@ -92,8 +99,8 @@ class State:
             head_sha=pr.head_sha,
             state=pr.state,
             repository_enabled=True,
-            reviewer_requested=pr.reviewer_requested,
-            reviewer_requested_at=pr.reviewer_requested_at,
+            ai_review_labeled=pr.ai_review_labeled,
+            ai_review_labeled_at=pr.ai_review_labeled_at,
             head_first_seen_at=pr.head_first_seen_at,
             wait_for_ci=CiWaitMode.ALWAYS,
         )
@@ -103,7 +110,7 @@ class ReceiptStore:
     def __init__(self, state: State) -> None:
         self.state = state
 
-    async def save(self, delivery: VerifiedGitHubDelivery) -> bool:
+    async def save(self, delivery: WebhookReceipt) -> bool:
         if delivery.delivery_id in self.state.receipts:
             return False
         self.state.receipts[delivery.delivery_id] = Receipt(delivery)
@@ -114,7 +121,7 @@ class ReceiptStore:
 
     async def claim(
         self, delivery_id: str, token: UUID, now: datetime, until: datetime
-    ) -> VerifiedGitHubDelivery | None:
+    ) -> WebhookReceipt | None:
         row = self.state.receipts[delivery_id]
         if row.projected or row.claim_token is not None:
             return None
@@ -137,10 +144,11 @@ class ProjectionStore:
 
     async def get_or_create_locked(
         self, event: PullRequestEvent, now: datetime
-    ) -> PullRequestRecord:
+    ) -> LockedPullRequest:
+        created = self.state.pull_request is None
         if self.state.pull_request is None:
             self.state.pull_request = PullRequestRecord.from_event(_PR_ID, _REPO_ID, event, now)
-        return self.state.pull_request
+        return LockedPullRequest(self.state.pull_request, created)
 
     async def save(self, record: PullRequestRecord) -> None:
         self.state.pull_request = record
@@ -258,9 +266,13 @@ class Targets:
     def __init__(self, state: State) -> None:
         self.state = state
 
-    async def for_pr(self, event: PullRequestEvent) -> UUID | None:
+    async def for_pr(self, event: PullRequestEvent) -> ProjectedPullRequestTarget | None:
         record = self.state.pull_request
-        return record.id if record is not None and record.head_sha == event.head_sha else None
+        return (
+            ProjectedPullRequestTarget(record.id, record.head_sha)
+            if record is not None and record.state == PullRequestState.OPEN
+            else None
+        )
 
     async def for_ci(self, event: CiTriggerEvent) -> tuple[UUID, ...]:
         return ()
@@ -270,7 +282,10 @@ class ConfirmedPublisher:
     def __init__(self, state: State) -> None:
         self.state = state
 
-    async def publish_confirmed(self, message: PendingRunMessage) -> None:
+    async def publish_confirmed(
+        self, message: PendingRunMessage, *, kind: RunPublicationKind = RunPublicationKind.QUEUED
+    ) -> None:
+        assert kind is RunPublicationKind.QUEUED
         assert self.state.open_transactions == 0
         assert self.state.message == message
         assert self.state.notification == (_RUN_ID, _WORKSPACE_ID, "queued")
@@ -347,7 +362,7 @@ class Vcs:
         raise AssertionError("both files have patches; blob download is unnecessary")
 
 
-def test_signed_webhook_reaches_confirmed_run_and_filtered_snapshot() -> None:
+def test_signed_former_reviewer_webhook_cannot_create_intent_or_run() -> None:
     state = State()
 
     def uow_factory() -> MemoryUnitOfWork:
@@ -367,11 +382,12 @@ def test_signed_webhook_reaches_confirmed_run_and_filtered_snapshot() -> None:
         pull_request_projector=ProjectGitHubPullRequest(
             uow_factory=uow_factory, bot_login="reviewer[bot]", now=lambda: _NOW
         ),
-        pull_request_parser=parse_pull_request_event,
         run_trigger=TriggerFromDelivery(targets=Targets(state), enqueuer=enqueuer),
     )
     receiver = ReceiveGitHubDelivery(
-        uow_factory=uow_factory, dispatcher=dispatcher, now=lambda: _NOW
+        uow_factory=uow_factory,
+        dispatcher=GitHubWebhookDispatchAdapter(dispatcher),
+        now=lambda: _NOW,
     )
     payload = {
         "action": "review_requested",
@@ -414,25 +430,106 @@ def test_signed_webhook_reaches_confirmed_run_and_filtered_snapshot() -> None:
     assert duplicate.json() == {"status": "duplicate"}
     assert len(state.receipts) == 1
     assert state.receipts["delivery-full-path"].projected is False
+    assert json.loads(state.receipts["delivery-full-path"].delivery.payload_json) == payload
     assert state.pull_request is None and state.message is None
 
     assert asyncio.run(receiver.replay_pending()) == 1
     assert state.receipts["delivery-full-path"].projected is True
-    assert state.pull_request is not None and state.pull_request.reviewer_requested
-    assert state.published
-    assert len(state.confirmed) == 1
-    message = state.confirmed[0]
-    assert message.as_payload()["schema"] == "review.run/v1"
-    assert (message.run_id, message.head_sha, message.attempt) == (_RUN_ID, _HEAD, 1)
+    assert state.pull_request is None
+    assert state.message is None
+    assert state.confirmed == []
+    assert not state.published
 
-    assert asyncio.run(
-        ReviewRunProcessor(SnapshotRepository(state), None, vcs_provider=Vcs(state)).execute(
-            _RUN_ID
-        )
+
+def test_signed_ai_review_label_enqueues_after_current_head_green_ci() -> None:
+    state = State()
+    labels = {"ai-review"}
+
+    def uow_factory() -> MemoryUnitOfWork:
+        return MemoryUnitOfWork(state)
+
+    class Current:
+        async def get_current(self, event: PullRequestEvent) -> PullRequestEvent:
+            assert state.open_transactions == 0
+            return replace(event, current_label_names=frozenset(labels))
+
+    class Lock:
+        @asynccontextmanager
+        async def hold(self, event: PullRequestEvent) -> AsyncIterator[None]:
+            yield
+
+    enqueuer = TryEnqueueWebhookRun(
+        eligibility=DetermineCiEligibility(
+            candidates=Candidates(state), ci=GreenCi(state), own_app_id=42
+        ),
+        uow_factory=uow_factory,
+        publisher=ConfirmedPublisher(state),
+        now=lambda: _NOW,
     )
-    assert state.snapshots is not None
-    assert [item.filename for item in state.snapshots] == ["src/parser.py", "package-lock.json"]
-    changed, omitted = review_files_from_snapshots(state.snapshots)
-    assert tuple(file.path for file in changed) == ("src/parser.py",)
-    assert changed[0].lines == (DiffLine(1, "removed", "old"), DiffLine(1, "added", "new"))
-    assert omitted == ("package-lock.json",)
+    projector = ProjectGitHubPullRequest(
+        uow_factory=uow_factory,
+        bot_login="reviewer[bot]",
+        current_provider=Current(),
+        projection_lock=Lock(),
+        now=lambda: _NOW,
+    )
+    dispatcher = GitHubInstallationDeliveryDispatcher(
+        resolver=UnusedResolver(),
+        onboarding=UnusedOnboarding(),
+        label_intent_projector=projector,
+        run_trigger=TriggerFromDelivery(targets=Targets(state), enqueuer=enqueuer),
+    )
+    receiver = ReceiveGitHubDelivery(
+        uow_factory=uow_factory,
+        dispatcher=GitHubWebhookDispatchAdapter(dispatcher),
+        now=lambda: _NOW,
+    )
+    payload = {
+        "action": "labeled",
+        "installation": {"id": 17},
+        "repository": {"id": 101, "full_name": "octo/repo"},
+        "label": {"name": "ai-review"},
+        "pull_request": {
+            "id": 901,
+            "number": 7,
+            "title": "Review parser",
+            "html_url": "https://github.com/octo/repo/pull/7",
+            "user": {"login": "alice"},
+            "head": {"ref": "feature", "sha": _HEAD},
+            "base": {"ref": "main", "sha": _BASE},
+            "state": "open",
+            "updated_at": "2026-09-28T11:59:00Z",
+        },
+    }
+    body = json.dumps(payload).encode()
+    signature = hmac.new(_SECRET.encode(), body, hashlib.sha256).hexdigest()
+    headers = {
+        "X-GitHub-Event": "pull_request",
+        "X-GitHub-Delivery": "delivery-ai-review",
+        "X-Hub-Signature-256": f"sha256={signature}",
+    }
+    app.dependency_overrides[get_github_webhook_secret] = lambda: _SECRET
+    app.dependency_overrides[get_github_webhook_receipt_uow_factory] = lambda: uow_factory
+    try:
+        response = TestClient(app).post("/webhooks/github", content=body, headers=headers)
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 202
+    assert state.message is None
+    assert asyncio.run(receiver.replay_pending()) == 1
+    assert state.pull_request is not None and state.pull_request.ai_review_labeled
+    assert state.message is not None and state.message.head_sha == _HEAD
+    assert state.published and len(state.confirmed) == 1
+    assert state.notification == (_RUN_ID, _WORKSPACE_ID, "queued")
+    assert state.receipts["delivery-ai-review"].projected
+
+    labels.clear()
+    payload["action"] = "unlabeled"
+    asyncio.run(
+        receiver.execute(WebhookReceipt("delivery-unlabel", "pull_request", json.dumps(payload)))
+    )
+    assert asyncio.run(receiver.replay_pending()) == 1
+    assert state.pull_request is not None and not state.pull_request.ai_review_labeled
+    assert asyncio.run(enqueuer.execute(_PR_ID, _HEAD)).status is EnqueueStatus.INELIGIBLE
+    assert len(state.confirmed) == 1
