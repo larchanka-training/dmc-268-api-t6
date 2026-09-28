@@ -283,9 +283,9 @@ Check-run Run, завершённого без воркера (T6 после п�
 | `unlabeled`, `label.name == "ai-review"`, `sender` — человек | `false` | новые Run не создаются; активный Run доработает |
 | `labeled` / `unlabeled` от самого бота | не меняется | игнорируется (Р-9) |
 | `pull_request.closed` | `false` | активный Run отменяется (`pr_closed`) |
-| `reopened` | есть ли `ai-review` в `pull_request.labels` | `try_enqueue`; окно sweep отсчитывается заново, если флаг стал `true` (§8.3) [дефолт] |
+| `reopened` | есть ли `ai-review` в `pull_request.labels` | `try_enqueue`; окно sweep отсчитывается заново, если флаг стал `true` (§8.3) [техлид] |
 
-Бота нельзя запросить ревьюером: `POST /repos/{owner}/{repo}/pulls/{pull_number}/requested_reviewers` с `<slug>[bot]` отвечает 201 с пустым `requested_reviewers`, событие `review_requested` не приходит, а GraphQL `requestReviews` принимает только `User` (проверено на staging App, [#37](https://github.com/larchanka-training/dmc-268-api-t6/issues/37#issuecomment-5874776355)). Поэтому триггер — лейбл `ai-review`. Ставить и снимать лейблы может только участник с правом triage и выше ([GitHub Docs](https://docs.github.com/en/issues/using-labels-and-milestones-to-track-work/managing-labels)): внешний автор PR не запустит ревью и не потратит бюджет LLM. События `labeled` / `unlabeled` приходят в подписке `pull_request`, новых прав App не нужно; кто создаёт сам лейбл в подключённом репозитории — SD OQ-8.
+Бота нельзя запросить ревьюером: `POST /repos/{owner}/{repo}/pulls/{pull_number}/requested_reviewers` с `<slug>[bot]` отвечает 201 с пустым `requested_reviewers`, событие `review_requested` не приходит, а GraphQL `requestReviews` принимает только `User` (проверено на staging App, [#37](https://github.com/larchanka-training/dmc-268-api-t6/issues/37#issuecomment-5874776355)). Поэтому триггер — лейбл `ai-review`. Ставить и снимать лейблы может только участник с правом triage и выше ([GitHub Docs](https://docs.github.com/en/issues/using-labels-and-milestones-to-track-work/managing-labels)): внешний автор PR не запустит ревью и не потратит бюджет LLM. События `labeled` / `unlabeled` приходят в подписке `pull_request`, новых прав App не нужно; сам лейбл App создаёт при подключении репозитория (SD §6.9, OQ-8).
 
 ### 8.3 Sweep «2 мин без CI»
 

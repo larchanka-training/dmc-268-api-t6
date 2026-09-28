@@ -452,6 +452,7 @@ sequenceDiagram
     WH-->>GH: 202, доставка проигнорирована
   else связана
     WH->>GH: дерево репозитория для языков · REST, вне транзакции
+    WH->>GH: POST labels ai-review, 422 — лейбл уже есть · REST, вне транзакции
     WH->>PG: repositories upsert + начальная версия правил, одна транзакция
     WH-->>GH: 202
   end
@@ -459,7 +460,7 @@ sequenceDiagram
   WH->>PG: repositories отключены
 ```
 
-Репозиторий подключается только установкой App: `POST /api/repos` нет (D10), кнопка «Подключить» в UI — ссылка на установку App, список обновляют вебхуки (§8.2). Новую установку с Workspace связывает #11; способ — при `installation.created` или при входе через `GET /user/installations` — выбирается в PR по #11. На `main` доставка для установки без Workspace подтверждается и игнорируется.
+Репозиторий подключается только установкой App: `POST /api/repos` нет (D10), кнопка «Подключить» в UI — ссылка на установку App, список обновляют вебхуки (§8.2). Новую установку с Workspace связывает #11; способ — при `installation.created` или при входе через `GET /user/installations` — выбирается в PR по #11. На `main` доставка для установки без Workspace подтверждается и игнорируется. При подключении репозитория App создаёт в нём лейбл `ai-review` — триггер Р-10: `POST /repos/{owner}/{repo}/labels` вне транзакции, права `pull_requests: write` хватает. Ответ 422 (лейбл уже есть) — успех; другая ошибка логируется и подключение не отменяет [дефолт]. Лейбл, удалённый мейнтейнером, вернётся только при повторном подключении репозитория (OQ-8).
 
 ---
 
@@ -525,9 +526,9 @@ v1 — `GitHubProvider`. `GitLabProvider` (MR `changes`, `discussions`, `pipelin
 | `check_suite`, `workflow_run` | `completed` | `ci_status[head_sha]` (кэш) → `try_enqueue`; «зелёный» = все suites для sha, **кроме suite самого App**, завершены с `success` / `neutral` / `skipped` — проверяется REST-запросом в `try_enqueue` (§6.1) |
 | `status` | — | для репозиториев со сторонним CI через commit status; combined status `success` или пусто — часть условия «CI зелёный» |
 | `pull_request_review_thread` | `resolved`, `unresolved` | **после MVP**: `feedback_signals` |
-| `installation`, `installation_repositories` | `created`, `deleted`, `added`, `removed` | синхронизация `repositories` |
+| `installation`, `installation_repositories` | `created`, `deleted`, `added`, `removed` | синхронизация `repositories`; при подключении — создание лейбла `ai-review` (§6.9) |
 
-Права App (repository): `pull_requests: write`, `checks: write`, `contents: read`, `metadata: read`, `actions: read` (событие `workflow_run`), `statuses: read` (событие `status` и combined status в PIPELINE_SPEC §8.1). Бот **не** имеет `contents: write`. Прав организации и аккаунта нет. События `labeled` / `unlabeled` приходят в подписке `pull_request`, поэтому триггер Р-10 новых прав не требует; кто создаёт сам лейбл `ai-review` — OQ-8. Регистрация App и полный список настроек — #37.
+Права App (repository): `pull_requests: write`, `checks: write`, `contents: read`, `metadata: read`, `actions: read` (событие `workflow_run`), `statuses: read` (событие `status` и combined status в PIPELINE_SPEC §8.1). Бот **не** имеет `contents: write`. Прав организации и аккаунта нет. События `labeled` / `unlabeled` приходят в подписке `pull_request`, поэтому триггер Р-10 новых прав не требует; лейбл `ai-review` App создаёт сам при подключении репозитория (§6.9), `POST /repos/{owner}/{repo}/labels` покрывается правом `pull_requests: write` (OQ-8). Регистрация App и полный список настроек — #37.
 
 ### 8.3 Правила работы с API
 
@@ -833,7 +834,7 @@ flowchart TB
 | OQ-5 | Event Collector как отдельный процесс — с какого порога | **закрыт Р-12**: отдельного collector нет, `usage_events` пишет worker | техлид |
 | OQ-6 | Стековые PR (B на основе A): пуш в A меняет дифф B, событие приходит только по A | не решаем в v1, фиксируем как известный пробел | — |
 | OQ-7 | Шифрование `ProviderInstallation` at rest | в MVP не заявлено: токены App не сохраняются, в `metadata` — только JSON-описание установки; вернуться, если в `metadata` появятся секреты | техлид + роль 6 |
-| OQ-8 | Кто создаёт лейбл `ai-review` в подключённом репозитории | Новое право не нужно: `POST /repos/{owner}/{repo}/labels` и `POST /repos/{owner}/{repo}/issues/{issue_number}/labels` требуют одно из прав `issues: write` или `pull_requests: write` ([GitHub Docs](https://docs.github.com/en/rest/issues/labels#create-a-label)), у App есть второе. Варианты: (а) App создаёт лейбл при `installation.created` и `installation_repositories.added`, ответ 422 на существующий лейбл считается успехом; (б) лейбл создаёт мейнтейнер при подключении (создавать лейблы может роль write и выше, [GitHub Docs](https://docs.github.com/en/issues/using-labels-and-milestones-to-track-work/managing-labels)). Создаёт ли `POST …/issues/{issue_number}/labels` несуществующий лейбл, документация не описывает — проверить в песочнице #37 | техлид; реализация — #11 |
+| OQ-8 | Кто создаёт лейбл `ai-review` в подключённом репозитории | **закрыт** решением техлида: лейбл создаёт App при подключении репозитория (`installation.created`, `installation_repositories.added`, §6.9), ответ 422 на существующий лейбл — успех. Новое право не нужно: `POST /repos/{owner}/{repo}/labels` требует одно из прав `issues: write` или `pull_requests: write` ([GitHub Docs](https://docs.github.com/en/rest/issues/labels#create-a-label)), у App есть второе. Ограничение: лейбл, удалённый мейнтейнером, вернётся только при повторном подключении репозитория | техлид; реализация — #11 |
 
 ---
 
