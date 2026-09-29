@@ -132,6 +132,8 @@ T01–T04, C01–C04 and C06–C25 are complete; the corpus checkpoint has user 
 
 - [ ] **Acceptance:** Existing required `Python lint / type / test` has PostgreSQL and RabbitMQ services, `TEST_DATABASE_URL` and RabbitMQ address, readiness checks, then uv gates; no integration-marked test skips.
 - [ ] **Verify:** Required CI log identifies integration count and zero skips; intentionally unavailable service fails job rather than turning green with skips. **Depends:** T09; full claim needs T10–T12 and #34 worker tests. **Likely files:** api `.github/workflows/ci-cd.yml`. **Ownership:** PR #10/#38 diff check; do not edit owned file without comment.
+  - [x] Local workflow proof: PostgreSQL 17 and RabbitMQ 4 readiness succeeded; the exact integration step reported 12 collected/0 skipped. Deliberately unavailable PostgreSQL or RabbitMQ made readiness exit 1; a JUnit report with one real skip and one expected xfail made the guard exit 1 for the skip. All four uv gates passed with real services (`388 passed, 1 xfailed` in full pytest).
+  - [ ] Required GitHub CI log must prove integration count/zero skips and service failure; full T13 acceptance awaits T10–T12 and #34 worker integration coverage.
 
 ### Checkpoint 2 — API integration
 

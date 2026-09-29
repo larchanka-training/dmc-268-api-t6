@@ -107,6 +107,35 @@ jobs:
     # The name is the required status check on main; keep it verbatim.
     name: Python lint / type / test
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: ci
+          POSTGRES_PASSWORD: ci
+          POSTGRES_DB: ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U ci -d ci"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+      rabbitmq:
+        image: rabbitmq:4-management-alpine
+        env:
+          RABBITMQ_DEFAULT_USER: ci
+          RABBITMQ_DEFAULT_PASS: ci
+        ports:
+          - 5672:5672
+        options: >-
+          --health-cmd "rabbitmq-diagnostics -q ping"
+          --health-interval 5s
+          --health-timeout 10s
+          --health-retries 12
+    env:
+      TEST_DATABASE_URL: postgresql+psycopg://ci:ci@127.0.0.1:5432/ci
+      RABBITMQ_URL: amqp://ci:ci@127.0.0.1:5672/
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -120,6 +149,36 @@ jobs:
       - name: uv sync
         run: uv sync --locked --all-groups
 
+      - name: Check integration services
+        run: |
+          uv run python - <<'PYTHON'
+          import os
+          import socket
+          from urllib.parse import urlsplit
+
+          import psycopg
+          from sqlalchemy.engine import make_url
+
+          database = make_url(os.environ["TEST_DATABASE_URL"])
+          with psycopg.connect(
+              host=database.host,
+              port=database.port,
+              dbname=database.database,
+              user=database.username,
+              password=database.password,
+              connect_timeout=5,
+          ) as connection:
+              with connection.cursor() as cursor:
+                  cursor.execute("SELECT 1")
+                  assert cursor.fetchone() == (1,)
+
+          rabbitmq = urlsplit(os.environ["RABBITMQ_URL"])
+          with socket.create_connection((rabbitmq.hostname or "", rabbitmq.port or 5672), timeout=5) as connection:
+              connection.sendall(b"AMQP\x00\x00\x09\x01")
+              assert connection.recv(1) == b"\x01", "RabbitMQ did not answer the AMQP handshake"
+          print("PostgreSQL and RabbitMQ ready")
+          PYTHON
+
       - name: ruff check
         run: uv run ruff check .
 
@@ -131,6 +190,32 @@ jobs:
 
       - name: pytest
         run: uv run pytest
+
+      - name: Integration suite (zero skips)
+        run: |
+          report="${RUNNER_TEMP}/integration-results.xml"
+          uv run pytest -m integration -q -rs --junitxml="${report}"
+          INTEGRATION_REPORT="${report}" uv run python - <<'PYTHON'
+          import os
+          from pathlib import Path
+          from xml.etree import ElementTree
+
+          root = ElementTree.parse(os.environ["INTEGRATION_REPORT"]).getroot()
+          cases = root.findall(".//testcase")
+          skipped = [
+              case.attrib.get("name", "<unnamed>")
+              for case in cases
+              if (outcome := case.find("skipped")) is not None
+              and outcome.attrib.get("type") != "pytest.xfail"
+          ]
+          print(f"Integration tests: {len(cases)} collected, {len(skipped)} skipped")
+          if not cases or skipped:
+              for name in skipped:
+                  print(f"::error::Integration test skipped: {name}")
+              raise SystemExit("Integration suite must contain tests and have zero skips")
+          with Path(os.environ["GITHUB_STEP_SUMMARY"]).open("a") as summary:
+              summary.write(f"Integration tests: {len(cases)} collected, 0 skipped\n")
+          PYTHON
 
   docker-build:
     name: Docker image build
