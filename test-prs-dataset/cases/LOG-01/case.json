@@ -1,0 +1,21 @@
+{
+  "id": "LOG-01",
+  "class": "logic",
+  "language": "python",
+  "source": {
+    "kind": "synthetic",
+    "attribution": "AI Code Reviewer QA fixture for issue #30"
+  },
+  "base_path": "base",
+  "patch_path": "diff.patch",
+  "expected_verdict": "blocking",
+  "expected_findings": [
+    {
+      "path": "orders/confirmation.py",
+      "start_line": null,
+      "line": 31,
+      "severity": "high",
+      "category": "correctness"
+    }
+  ]
+}

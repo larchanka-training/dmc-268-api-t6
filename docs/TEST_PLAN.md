@@ -1,0 +1,104 @@
+# TEST_PLAN: стратегия тестирования AI Code Reviewer
+
+Канонический план для API и UI. Основа — [UI TEST_PLAN из PR #58](https://github.com/larchanka-training/dmc-268-ui-t6/pull/58); контракты уточнены по [SYSTEM_DESIGN](SYSTEM_DESIGN.md), [PIPELINE_SPEC](PIPELINE_SPEC.md) и [OpenAPI](../contracts/openapi.yaml). Этот документ описывает целевое поведение; наличие сценария в плане не означает, что реализация или проверка уже готовы.
+
+## 1. Архитектура под тестированием
+
+GitHub webhook → `webhook-api` (HMAC, delivery idempotency) → PostgreSQL `Run` → persistent-сообщение RabbitMQ → `worker` (`DiffEngine` или позднее `SandboxEngine`) → `ReviewOutput` → post-processing → `publisher` → один GitHub pull-request review. `auth-api` выдаёт сессию, `portal-api` отдаёт Workspace-ограниченные `/api/*` и принимает rerun. Целевая топология — пять сервисов в одном monorepo (Р-12); до разделения `portal-api`, `auth-api` и `webhook-api` работают в одном приложении `api`, а worker запускается отдельно из того же образа ([SD §4](SYSTEM_DESIGN.md#4-c4--уровень-2-контейнеры)). Источник состояния и идемпотентности — PostgreSQL; RabbitMQ доставляет указатель на Run, не заменяет БД.
+
+Нумерация Р-1…Р-9 сохранена из исходного плана и [SD §1](SYSTEM_DESIGN.md#1-решения):
+
+| Решение | Проверяемый контракт |
+| --- | --- |
+| Р-1 | RabbitMQ durable/persistent, ack после фиксации состояния; Run и дедупликация в PostgreSQL. |
+| Р-2 | Один активный Run на `(installation_id, repo_id, pr_number)`; новый `head_sha` отменяет устаревший Run до публикации. |
+| Р-3 | Два движка за единым `ReviewOutput`; v1 — DiffEngine, SandboxEngine — поздняя фаза. |
+| Р-4 | SandboxEngine: контроллер снаружи, read-only клон, `--network=none`, без секретов внутри; проверка в фазе 3. |
+| Р-5 | Один `POST /pulls/{n}/reviews`, идемпотентность по `findings_hash`, находки вне hunk переходят в тело ревью. |
+| Р-6 | Run фиксирует неизменяемые версии правил и промпта. |
+| Р-7 | Workspace — граница доступа; права на репозитории основаны на GitHub App installations. |
+| Р-8 | `usage_events` записываются для каждого вызова LLM, только вставкой. |
+| Р-9 | Бот игнорирует собственные webhook-события и не отвечает на комментарии. |
+
+Дополнительные инварианты: Р-10 — запуск по лейблу `ai-review` и зелёному CI для текущего `head_sha`, независимо от порядка событий; Р-14 — состояния `queued | running | publishing | succeeded | failed | cancelled | skipped`; Р-15 — снимок diff хранится в PostgreSQL, при > 3 000 строк остаётся список файлов и `patch: null`. Р-11 ограничивает v1 GitHub, Р-12 задаёт топологию, Р-13 исключает RAG из MVP. Сборщик контекста [SD §9](SYSTEM_DESIGN.md#9-сборщик-контекста-4-уровня): L0 метаданные PR/репозитория и правила; L1 unified diff; L2 окружающие строки; L3 целый файл в лимите; L4 AST/символы. Проверять состав, ограничения и ранний summary-only путь отдельно по мере реализации уровней.
+
+`ReviewOutput` — объект `{findings, summary}`, максимум 10 findings, форма из [JSON Schema](../review/schemas/review-output.schema.json), дополнительная семантика из [PIPELINE_SPEC §9](PIPELINE_SPEC.md#9-выход-llm-reviewoutput). Модель выдаёт `path`, `start_line`, `line` на **новой** стороне diff; `side: RIGHT` ставит post-processing, SHA берётся из `Run.head_sha` ([PIPELINE_SPEC §10](PIPELINE_SPEC.md#10-якорь-находки-d6)). Однострочная находка: `start_line: null`, API `newLine = line`, `endLine = null`; диапазон: `start_line < line`, API `newLine = start_line`, `endLine = line`. Публикатор передаёт `path`, `line`, `side`, условный `start_line`, `commit_id = Run.head_sha`, максимум 10 inline-комментариев; непривязанные замечания остаются в теле ревью. `REQUEST_CHANGES` используется только при `Repository.reviewEvent = REQUEST_CHANGES` и `verdict = blocking`, иначе `COMMENT` ([PIPELINE_SPEC §11](PIPELINE_SPEC.md#11-вердикт-и-бейджи-d3)).
+
+## 2. Уровни, окружения и архитектурные сценарии
+
+| Уровень | Граница проверки | Где и чем запускать |
+| --- | --- | --- |
+| Unit/contract | Use case с fake портами; `ReviewOutput`, D6-якоря, вердикт, UI Zod/клиент. | Локально и в PR CI: `uv run pytest`; UI `pnpm test`, `pnpm check-types`. |
+| Integration | Реальная мигрированная PostgreSQL и RabbitMQ, fake GitHub REST/LLM; API HTTP и async worker. | Локально и в обязательном PR CI: `TEST_DATABASE_URL=... uv run pytest -m integration -rs`; ноль skip для integration. |
+| Offline replay | Зафиксированные patch/pre-image/raw responses без сети и ключей; валидация и метрики §3. | Локально и в PR CI после появления корпуса; два запуска дают одинаковый JSON. |
+| Live eval | Тот же корпус, выбранная модель через PromptBuilder, сохранение raw output и provenance. | Ручной запуск с разрешённым секретом; отдельный необязательный `workflow_dispatch`, после решения #33/OQ-2. |
+| End-to-end | GitHub App, webhook, очереди, API, UI, публикация и изоляция арендаторов. | Staging на VPS; тестовые PR и установки, без реальных секретов в фикстурах или логах. Sandbox isolation — фаза 3. |
+
+API baseline gates локально и в обязательном CI: `uv run ruff check .`, `uv run ruff format --check .`, `uv run mypy .`, `uv run pytest`. UI gates: `pnpm lint`, `pnpm check-types`, `pnpm format:check`, `pnpm test`, `pnpm build`. Для integration сервисы должны быть доступны; отсутствие `TEST_DATABASE_URL` даёт skip локально, но не считается успехом обязательного integration job. Staging smoke измеряет p95 ACK < 500 мс и p95 чистого времени DiffEngine ≤ 40 с на определённом наборе PR; окно, объём выборки и измерение записываются с результатом.
+
+### 2.1. Схлопывание и жизненный цикл Run (Р-1, Р-2, Р-14)
+
+Отправить три `pull_request.synchronize` с `sha_1`, `sha_2`, `sha_3` в один открытый PR с активным `ai-review`: устаревшие Run отменяются, только текущий SHA может быть опубликован; in-flight worker и publisher повторно проверяют актуальность перед публикацией. Дубли одного `X-GitHub-Delivery` и одного `(PR, head_sha, trigger=webhook)` не создают второй Run. Тестировать реальные PG constraints: default `queued`, единственный активный Run, уникальный `idempotency_key`, FK-цепочку; не ограничиваться проверкой существования индекса. Проверять переходы и `succeeded` по [PIPELINE_SPEC §1](PIPELINE_SPEC.md#1-состояния-и-переходы), без старого `COMPLETED` в домене/UI.
+
+### 2.2. Webhook и триггер (Р-9, Р-10)
+
+Отсутствующая/неверная HMAC-подпись отклоняется; валидное событие получает HTTP 202 с p95 < 500 мс, появление Run проверяется ожиданием eventual результата. Человеческий `labeled(ai-review)` и зелёный CI на текущем SHA запускают `try_enqueue` в любом порядке. `check_suite`, `workflow_run` и commit `status` сверяются REST-запросом: чужие suites завершены `success | neutral | skipped`, собственный suite App исключён, combined status `success` либо статусов нет. При `wait_for_ci=always` ждём CI; `auto` допускает старт без CI после 2 минут через sweep worker каждые 30 с; `never` достаточно лейбла и не проверяет CI. Красный/ожидающий CI не запускает Run в режимах `always` и `auto`; в режиме `never` не препятствует запуску. `unlabeled` человеком выключает будущие старты, `closed` отменяет активный, `reopened` перечитывает лейбл, `synchronize` отменяет старый Run и пробует новый SHA; события бота игнорируются. Полный контракт — [PIPELINE_SPEC §8](PIPELINE_SPEC.md#8-триггер-р-10-d2). `review_requested` не является входным событием бота; поле `reviewer_requested` означает активный лейбл.
+
+### 2.3. Движки, контекст и post-processing (Р-3, Р-5, Р-6, Р-8, Р-13)
+
+DiffEngine создаёт `ReviewOutput`; проверять схему и семантику, L0–L4 и лимиты на доступных стадиях, версии правил/промпта и учёт LLM-вызова. Ветка > 3 000 строк до ContextProvider не выполняет построчный обзор, сохраняет только список файлов (Р-15). Проверять hunk coordinates, `side=RIGHT`, `commit_id`, cap 10 inline, перенос вне-hunk находки в body, один batch review, повтор публикации по `findings_hash` без дубля и обработку 422 старого commit. `suggestion` — готовая замена новых строк, без diff-маркеров; GitHub code fence добавляет publisher. Проверять, что сеть GitHub/LLM вызывается вне DB-транзакции.
+
+### 2.4. SandboxEngine (Р-4, фаза 3)
+
+После реализации проверить `--network=none` исходящим socket/DNS запросом из контейнера, read-only mount, non-root/read-only rootfs, отсутствие GitHub/DB/LLM токенов в его env и fallback по таймауту 10 мин в том же Run. TC-09 старого UI набора относится сюда, а не к LLM-корпусу. До фазы 3 этот gate не объявляется пройденным.
+
+### 2.5. Auth API, Portal API, rerun и UI (D4, T3, Р-7)
+
+Проверять `state` в SPA до обмена code, `POST /api/auth/github/callback`, JWT access 15 мин в памяти и ротируемую refresh cookie 30 дней (`HttpOnly; Secure; SameSite=Strict; Path=/api/auth`), `refresh → me` при старте, logout и отзыв семейства при повторном использовании refresh. GitHub exchange failure не создаёт cookie/сессию. Все защищённые `/api/*` и SSE fetch-stream требуют Bearer; неверная подпись, истёкший токен, неверные `iss`/`aud`, отсутствующий или битый Workspace claim дают 401. **`workspaces: []` валиден:** `GET /api/repos` отвечает 200 с `[]`, `GET /api/runs` — 200 с `{items: [], nextCursor: null}`; UI показывает подключение, а не ошибку авторизации. Две установки/Workspace доказывают изоляцию списков и 404 для чужого Run. Контракт — [SD §12](SYSTEM_DESIGN.md#12-контракт-api--ui) и [OpenAPI](../contracts/openapi.yaml).
+
+`POST /api/runs/{id}/rerun` (T3) создаёт новый `queued` Run на текущем SHA с `trigger=rerun` без проверки лейбла/CI; активный Run либо закрытый PR дают 409, нет авторизации — 401, чужой Workspace — 404. Клиент UI проверяет callback failure/state mismatch, один общий refresh при конкурентных 401 и ровно один retry исходных запросов, logout при неудачном refresh, восстановление сессии через refresh+me. Контракт Finding→ReviewComment проверяет однострочный и диапазонный D6-якорь, severity/category и состояния Run.
+
+### 2.6. Инфраструктура и безопасность
+
+Проверять durable RabbitMQ, ack после фиксации Run, retry/DLQ по [PIPELINE_SPEC §4](PIPELINE_SPEC.md#4-retry-и-backoff), внутреннюю доступность PostgreSQL/RabbitMQ/Redis и отсутствие секретов/кода клиента в stdout. Невалидное сообщение и падение worker не должны терять Run; реконсилер возвращает зависшие задачи. Секреты подаются через env CI, не хранятся в корпусе. Синтетические токены — явно фиктивные значения. Для fixture `.patch` проверять сохранность байтов после hooks и `git apply --check`.
+
+## 3. Методология LLM eval
+
+### 3.1. Корпус и вход оценки
+
+Корпус содержит 24 независимых PR-кейса (допустимо 20–30): четыре класса безопасности и по пять кейсов ресурсов, логики, синтаксиса и чистых изменений; не менее пяти licensed real PR (хотя бы один на класс), Python и TypeScript/React, не менее пяти отдельных `critical` ground truths. Слот SEC-05 исключён после остановки автоматическим фильтром и не входит в знаменатель replay/live оценки. Отображение класса в основную категорию: безопасность → `security`, ресурсы/память → `performance` (либо `correctness` при конкретном сбое), логика → `correctness`, синтаксический overhead → `readability`, чистое изменение → без findings. Исключения записываются в metadata и README.
+
+Каждый кейс имеет JSON metadata/ground truth, исходное состояние файла (pre-image), применимый unified `.patch` и источник; raw responses добавляются позднее, отдельно от кейса. Для real PR обязательны URL PR/commit, revision, название и URL лицензии, attribution и ручная проверка права на конкретный excerpt. Ground truth использует `path`, `start_line`, `line`, `severity`, `category` из Finding; `start_line: null` означает одну строку, иначе `< line`. Ожидаемый `verdict` выводится из severity по [PIPELINE_SPEC §11](PIPELINE_SPEC.md#11-вердикт-и-бейджи-d3): `critical/high → blocking`, иначе `medium/low → attention`, иначе `clean`. Case schema собственная; [ReviewOutput schema](../review/schemas/review-output.schema.json) применяется только к ответу модели. `git apply --check` выполняется на копии pre-image, truth якорится в добавленных строках новой стороны; answer-hint комментарии запрещены.
+
+Оценивать **сырой** ответ модели до post-processing, hunk-фильтра, severity threshold, cap inline и публикации: иначе качество промпта скрывается правилами выпуска. Replay читает committed raw response без сети и ключа, с model ID, prompt version/SHA и run metadata. Валиден только ответ, для которого `uv run python review/scripts/validate_findings.py <response.json>` завершился кодом 0 **и** напечатал `OK ReviewOutput`; exit 1/2 и `RepoConventionsDraft` невалидны. Live использует PromptBuilder и `review/prompts/`, выбранную модель и внешние credentials, сохраняет raw output и ту же provenance для replay. Live включается после решения #33/OQ-2; LLM-as-a-judge в этот спринт не входит.
+
+### 3.2. Однозначное сопоставление и счётчики
+
+Для каждой валидной находки и эталона одного кейса ребро допустимо, когда совпадают **`path` и `category`**, оба конечных якоря `line` находятся на добавленных строках новой стороны diff и `abs(pred.line - truth.line) ≤ 2`. Находки вне добавленных строк не отбрасываются: они остаются FP и влияют на derived verdict из сырого ответа. Для диапазона `line` — конечный якорь, `start_line` проверяется как корректный диапазон, но не расширяет окно. Сначала ищется максимальное число пар один-к-одному; при равенстве выбирается минимальная суммарная дистанция строк, затем лексикографический порядок `(truth index, prediction index)` для воспроизводимости. Один prediction закрывает не более одного truth. Корпус не должен содержать две разные проблемы с неразличимыми `path/category/line ±2`.
+
+Каждая пара = TP; непарная prediction = FP (включая дубликат и любую находку на чистом кейсе); непарный truth = FN. Неверная категория/путь/якорь даёт FP и FN. Severity пары сохраняется в отчёте как есть, не нормализуется: `critical` truth, совпавший с `high` prediction, считается найденным для Critical Recall, но severity mismatch виден отдельно. Невалидный raw response остаётся в знаменателе validity: его predictions не интерпретируются, все truths кейса дают FN, FP=0; такой кейс не может дать verdict agreement.
+
+Суммировать TP/FP/FN **по всему корпусу** (micro), не усреднять проценты кейсов. `Precision = TP/(TP+FP)`, `Recall = TP/(TP+FN)`. `Critical Recall = matched critical truths / all critical truths`. По каждой категории truth показывать TP/FN, по категории prediction — FP; per-category Precision = `TP_c/(TP_c+FP_c)`, Recall = `TP_c/(TP_c+FN_c)`. Если знаменатель ноль, метрика `null`/«не определена», а не 0 или 100; счётчики всегда выводятся. `Validity = valid raw responses / all cases`; пустой корпус делает validity неопределённой. `Verdict agreement = cases with derived predicted verdict == expected_verdict / all cases`; невалидный ответ считается несогласием. Предсказанный verdict выводится из **сырого** набора findings по тому же severity-правилу, без поля модели.
+
+### 3.3. Ручной оракул семантики
+
+Автоматическая пара по пути, категории и строке не доказывает, что модель поняла корневую причину. Куратор вручную отмечает для каждой находки groundedness (есть ли утверждаемый код/тип/API в переданном контексте), совпадение причины с truth и тон; отдельно проверяет корректность `suggestion` на новой версии. Галлюцинация — утверждение о несуществующем коде, типе, библиотеке или поведении; спорные случаи проходят вторую ручную оценку. `Hallucination Rate = число вручную подтверждённых галлюцинаций / число находок в валидных raw responses`; нулевой знаменатель — `null`. Отчёт хранит ручные решения и ссылки на контекст, не выдаёт автоматическое path/line совпадение за семантическую истину. LLM judge не используется.
+
+## 4. Эталонные данные и исполнение
+
+Целевой каталог — `test-prs-dataset/cases/<id>/` с metadata JSON, `diff.patch` и pre-image; raw responses и manifest версионируются отдельно. Минимальный шаблон metadata (форма в [case schema](../test-prs-dataset/schema/case.schema.json)): `id`, `class`, `language`, `source {kind, url, revision, license_name, license_url, attribution}`, `base_path`, `patch_path`, `expected_verdict`, `expected_findings [{path, start_line, line, severity, category}]`. Для synthetic source URL/license могут быть неприменимы, но attribution обязателен. Отдельный response manifest после baseline хранит `model_id`, `prompt_sha`, `prompt_version`, metadata прогона и путь raw response. В case README фиксируются замены категорий и ручной оракул.
+
+Старые UI TC-01…06 — идеи для переработки в корректные pre-image/patch и канонические verdict; их YAML и patch не считаются валидным корпусом. TC-07 становится unit-тестом фильтра generated files, TC-08 — webhook integration, TC-09 — sandbox phase 3. Старый UI каталог удаляется только после готовности нового корпуса и переноса ссылок.
+
+## 5. Критерии приёмки и отчётность
+
+| Проверка | Цель | Режим в этом спринте |
+| --- | --- | --- |
+| Corpus schema и patch apply | 100% кейсов; лицензии/ground truth подтверждены вручную | Обязательный gate. |
+| Validity, micro Precision/Recall, Critical Recall, per-category, verdict agreement | Числа и provenance в PR summary и воспроизводимом JSON | Отчёт; качество модели не валит required check. |
+| Precision ≥ 85%, Critical Recall ≥ 75%, Hallucination Rate < 3% | Продуктовые ориентиры из [SD §13](SYSTEM_DESIGN.md#13-нефункциональные-требования) | Отчёт; ручной hallucination oracle обязателен для заявления метрики. |
+| Coalescing 100%, webhook HMAC/idempotency, batch publication без 422 | Интеграционные тесты с реальными PG/RabbitMQ и fake GitHub | Обязательные функциональные gates после реализации зависимостей. |
+| Sandbox isolation 100% | Сеть/секреты/FS из §2.4 | Фаза 3; текущий спринт не заявляет прохождение. |
+| DiffEngine p95 ≤ 40 с, webhook ACK p95 < 500 мс | Измерения на указанной staging выборке | Отчёт с размером выборки и окружением. |
+
+Required CI запускает schema/apply/replay и кодовые gates; некорректный набор или сломанный replay завершают job ошибкой, значения quality metrics только выводятся. Live eval — отдельный ручной job, результаты сохраняются с model/prompt provenance. Перед выпуском сверить этот план с критериями [api#30](https://github.com/larchanka-training/dmc-268-api-t6/issues/30), включая устаревшее там `review_requested`: действующий триггер задан Р-10 и [PIPELINE_SPEC §8](PIPELINE_SPEC.md#8-триггер-р-10-d2); формулировку issue нужно согласовать с владельцем.

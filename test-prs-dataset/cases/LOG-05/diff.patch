@@ -1,0 +1,12 @@
+diff --git a/queue/durable_jobs.py b/queue/durable_jobs.py
+--- a/queue/durable_jobs.py
++++ b/queue/durable_jobs.py
+@@ -7,7 +7,7 @@ class PublishReceipt:
+ 
+ 
+ def was_accepted(receipt: PublishReceipt) -> bool:
+-    return receipt.accepted
++    return bool(receipt)
+ 
+ 
+ class JobStore:

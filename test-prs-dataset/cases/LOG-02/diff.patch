@@ -1,0 +1,12 @@
+diff --git a/src/checkout/settlement.ts b/src/checkout/settlement.ts
+--- a/src/checkout/settlement.ts
++++ b/src/checkout/settlement.ts
+@@ -11,7 +11,7 @@ export interface FulfillmentDecision {
+ }
+ 
+ export function decideFulfillment(result: GatewayResult): FulfillmentDecision {
+-  if (result.status === "captured") {
++  if (result.status !== "declined") {
+     return {
+       orderId: result.orderId,
+       paymentState: "paid",

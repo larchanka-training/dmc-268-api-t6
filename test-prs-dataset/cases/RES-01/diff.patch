@@ -1,0 +1,15 @@
+diff --git a/app/report_reader.py b/app/report_reader.py
+--- a/app/report_reader.py
++++ b/app/report_reader.py
+@@ -1,6 +1,9 @@
+ from pathlib import Path
++from typing import TextIO
+ 
++_open_reports: list[TextIO] = []
+ 
+ def read_report(path: Path) -> str:
+-    with path.open(encoding="utf-8") as report:
+-        return report.read()
++    report = path.open(encoding="utf-8")
++    _open_reports.append(report)
++    return report.read()

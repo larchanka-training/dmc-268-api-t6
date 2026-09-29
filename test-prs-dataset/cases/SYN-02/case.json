@@ -1,0 +1,21 @@
+{
+  "id": "SYN-02",
+  "class": "syntax",
+  "language": "tsx",
+  "source": {
+    "kind": "synthetic",
+    "attribution": "AI Code Reviewer QA fixture for issue #30"
+  },
+  "base_path": "base",
+  "patch_path": "diff.patch",
+  "expected_verdict": "attention",
+  "expected_findings": [
+    {
+      "path": "src/components/RequiredChecks.tsx",
+      "start_line": null,
+      "line": 10,
+      "severity": "low",
+      "category": "readability"
+    }
+  ]
+}

@@ -1,5 +1,8 @@
 # Gitleaks scans the full repository, including docs/ and examples/.
 # Allowlist only committed placeholder patterns — never real credentials.
+# Dataset fixtures must use unmistakably fake credentials (for example,
+# FAKE_TEST_CREDENTIAL_DO_NOT_USE). Keep scanning every dataset path; add a
+# value-specific exception only if Gitleaks flags a future fake fixture.
 # Local check: docker run --rm -v "$PWD:/src:ro" ghcr.io/gitleaks/gitleaks:v8.28.0 \
 #   detect --source /src --config /src/.gitleaks.toml --no-banner --redact --exit-code 1
 

@@ -1,0 +1,21 @@
+{
+  "id": "SEC-02",
+  "class": "security",
+  "language": "python",
+  "source": {
+    "kind": "synthetic",
+    "attribution": "AI Code Reviewer QA fixture for issue #30"
+  },
+  "base_path": "base",
+  "patch_path": "diff.patch",
+  "expected_verdict": "blocking",
+  "expected_findings": [
+    {
+      "path": "app/orders.py",
+      "start_line": null,
+      "line": 6,
+      "severity": "critical",
+      "category": "security"
+    }
+  ]
+}

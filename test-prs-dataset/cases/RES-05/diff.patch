@@ -1,0 +1,20 @@
+diff --git a/services/settlement_worker.py b/services/settlement_worker.py
+index 78a3bf6..d720049 100644
+--- a/services/settlement_worker.py
++++ b/services/settlement_worker.py
+@@ -1,6 +1,5 @@
+ from __future__ import annotations
+ 
+-from collections import deque
+ from collections.abc import Callable
+ 
+ 
+@@ -13,7 +12,7 @@ class SettlementBatchWorker:
+ 
+     def __init__(self, write_batch: Callable[[bytes], None]) -> None:
+         self._write_batch = write_batch
+-        self._recent_batches: deque[bytes] = deque(maxlen=2)
++        self._recent_batches: list[bytes] = []
+         self._stopped = False
+ 
+     @property

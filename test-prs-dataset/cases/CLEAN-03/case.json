@@ -1,0 +1,18 @@
+{
+  "id": "CLEAN-03",
+  "class": "clean",
+  "language": "typescript",
+  "source": {
+    "kind": "real",
+    "url": "https://github.com/pmndrs/zustand/pull/663",
+    "revision": "2593c915195c0a75f8afbf02a5b90945721d27e1",
+    "license_name": "MIT",
+    "license_url": "https://github.com/pmndrs/zustand/blob/e3566f9b54c520343b9318720ac3dd9b8397bed7/LICENSE",
+    "attribution": "pmndrs/zustand contributors; PR #663 by dai-shi"
+  },
+  "base_path": "base",
+  "apply_directory": ".upstream",
+  "patch_path": "diff.patch",
+  "expected_verdict": "clean",
+  "expected_findings": []
+}

@@ -1,0 +1,13 @@
+diff --git a/src/socket-message-tracker.ts b/src/socket-message-tracker.ts
+index f1dd927..b9351ef 100644
+--- a/src/socket-message-tracker.ts
++++ b/src/socket-message-tracker.ts
+@@ -18,7 +18,7 @@ export class SocketMessageTracker {
+   }
+ 
+   dispose(): void {
+-    this.socket.removeEventListener("message", this.onMessage);
++    this.socket.removeEventListener("close", this.onMessage);
+     this.socket.removeEventListener("close", this.onClose);
+   }
+ }

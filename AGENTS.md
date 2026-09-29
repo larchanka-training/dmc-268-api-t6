@@ -70,6 +70,7 @@ modules hold only `infrastructure/` code and `app/entrypoints/` does not exist y
 - `.agents/templates/` — code/test templates with proof blocks.
 - `docs/BACKEND_ARCHITECTURE.md` — Clean Architecture layout in full.
 - `docs/SYSTEM_DESIGN.md` — product architecture (this repo, `main`).
+- [docs/TEST_PLAN.md](docs/TEST_PLAN.md) — canonical API/UI test strategy and benchmark methodology.
 - `review/` — the AI reviewer product's own prompts and rule sets, not covered here.
 - `CLAUDE.md` only imports this file — edit `AGENTS.md`.
 

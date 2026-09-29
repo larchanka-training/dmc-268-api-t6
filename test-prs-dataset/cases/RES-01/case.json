@@ -1,0 +1,21 @@
+{
+  "id": "RES-01",
+  "class": "resource",
+  "language": "python",
+  "source": {
+    "kind": "synthetic",
+    "attribution": "AI Code Reviewer QA fixture for issue #30"
+  },
+  "base_path": "base",
+  "patch_path": "diff.patch",
+  "expected_verdict": "attention",
+  "expected_findings": [
+    {
+      "path": "app/report_reader.py",
+      "start_line": null,
+      "line": 8,
+      "severity": "medium",
+      "category": "performance"
+    }
+  ]
+}

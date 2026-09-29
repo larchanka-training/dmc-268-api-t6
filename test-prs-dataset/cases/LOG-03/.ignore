@@ -1,0 +1,2 @@
+# Preserve exact upstream bytes; this project uses different Ruff rules.
+base/.upstream/snap7/server/__init__.py

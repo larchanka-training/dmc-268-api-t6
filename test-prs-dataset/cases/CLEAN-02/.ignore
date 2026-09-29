@@ -1,0 +1,2 @@
+# The pre-image intentionally retains syntax that this repository's Ruff auto-fixes.
+base/review/summary_line.py

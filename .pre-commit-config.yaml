@@ -3,9 +3,11 @@ repos:
     rev: v6.0.0
     hooks:
       - id: trailing-whitespace
+        # Unified patches must retain whitespace on added/context lines byte-for-byte.
+        exclude: ^test-prs-dataset/.*\.patch$
       - id: end-of-file-fixer
-        # Rendered from docs/erd/erd.mmd; a manual fix would be lost on the next render.
-        exclude: ^docs/erd/erd\.svg$
+        # Rendered SVG and dataset patches are generated/validated in their own workflows.
+        exclude: ^(?:docs/erd/erd\.svg|test-prs-dataset/.*\.patch)$
       - id: check-yaml
       - id: check-toml
       - id: check-merge-conflict

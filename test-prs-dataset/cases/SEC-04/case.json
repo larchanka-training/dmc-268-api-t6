@@ -1,0 +1,26 @@
+{
+  "id": "SEC-04",
+  "class": "security",
+  "language": "python",
+  "source": {
+    "kind": "real",
+    "url": "https://github.com/pallets/flask/pull/5632",
+    "revision": "e13373f838ab34027c5a80e16a6cb8262d41eab7",
+    "license_name": "BSD-3-Clause",
+    "license_url": "https://github.com/pallets/flask/blob/7522c4bcdb10449dc919e0ffbdebb92fe66822b5/LICENSE.txt",
+    "attribution": "Pallets / Flask; PR #5632 by davidism"
+  },
+  "base_path": "base",
+  "apply_directory": ".upstream",
+  "patch_path": "diff.patch",
+  "expected_verdict": "attention",
+  "expected_findings": [
+    {
+      "path": "src/flask/sessions.py",
+      "start_line": null,
+      "line": 322,
+      "severity": "low",
+      "category": "security"
+    }
+  ]
+}

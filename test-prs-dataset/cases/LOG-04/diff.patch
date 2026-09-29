@@ -1,0 +1,12 @@
+diff --git a/src/features/reviews/model/useReviewRun.tsx b/src/features/reviews/model/useReviewRun.tsx
+--- a/src/features/reviews/model/useReviewRun.tsx
++++ b/src/features/reviews/model/useReviewRun.tsx
+@@ -29,7 +29,7 @@ export function transitionReviewRun(
+     return { ...state, phase: "cancelled" };
+   }
+ 
+-  if (action.type === "completed" && state.phase === "running") {
++  if (action.type === "completed" && state.phase !== "failed") {
+     return { ...state, phase: "passed" };
+   }
+ 
