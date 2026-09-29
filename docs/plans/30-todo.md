@@ -139,6 +139,8 @@ T01–T04, C01–C04 and C06–C25 are complete; the corpus checkpoint has user 
 
 ## UI and documentation retirement
 
+User scope for this work is API only. UI T14–T16 and the UI portion of T17 remain in issue #30 but are outside this API work; UI PRs #60/#61 were closed without merging.
+
 ### T14 — UI auth client tests (ui; 2–4 new or existing test files)
 
 - [ ] **Acceptance:** Callback backend failure leaves no local session; OAuth `state` missing/mismatch prevents exchange; concurrent 401s share one refresh then each original request retries once; failed refresh logs out; startup refresh then `/api/auth/me` restores session.
@@ -146,8 +148,8 @@ T01–T04, C01–C04 and C06–C25 are complete; the corpus checkpoint has user 
 
 ### T15 — UI Finding→ReviewComment contract (ui; 1–2 files)
 
-- [x] **Acceptance:** Tests validate single-line `newLine=line,endLine=null`, range `newLine=start_line,endLine=line`, enum parity for severity/category and Run statuses against backend contract fixture; no old `APPROVE`/`COMPLETED` vocabulary.
-- [x] **Verify:** `pnpm test`, `pnpm check-types` pass. **Evidence:** [UI PR #60](https://github.com/larchanka-training/dmc-268-ui-t6/pull/60); independent review Standards 0 / Spec 0, all five pnpm gates green (102 tests). **Depends:** current api D6 and UI schema; account for UI PR #58. **Files:** ui `src/entities/review/model/schemas.contract.test.ts`, `src/entities/run/model/schemas.contract.test.ts`.
+- [ ] **Acceptance:** Tests validate single-line `newLine=line,endLine=null`, range `newLine=start_line,endLine=line`, enum parity for severity/category and Run statuses against backend contract fixture; no old `APPROVE`/`COMPLETED` vocabulary.
+- [ ] **Verify:** `pnpm test`, `pnpm check-types` pass. **Depends:** current api D6 and UI schema; account for UI PR #58. **Likely files:** ui `src/entities/review/model/schemas.test.ts`, `src/entities/run/model/schemas.test.ts` (confirm after merge).
 
 ### T16 — UI PR quality job and required ruleset (ui; 1–2 files + GitHub setting)
 
