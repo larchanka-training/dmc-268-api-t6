@@ -137,6 +137,16 @@ class ReceiptStore:
     async def release(self, delivery_id: str, token: UUID, retry_after: datetime) -> None:
         raise AssertionError("successful full path must not release its receipt")
 
+    async def release_after_dispatch_failure(
+        self,
+        delivery_id: str,
+        token: UUID,
+        retry_after: datetime,
+        failed_at: datetime,
+        max_attempts: int,
+    ) -> None:
+        raise AssertionError("successful full path must not release its receipt")
+
 
 class ProjectionStore:
     def __init__(self, state: State) -> None:

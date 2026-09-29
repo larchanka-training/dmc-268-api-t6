@@ -20,6 +20,7 @@ _LEASE = timedelta(minutes=5)
 _DISPATCH_TIMEOUT_SECONDS = 240.0
 _FAILURE_RETRY = timedelta(seconds=30)
 _UNKNOWN_INSTALLATION_RETRY = timedelta(minutes=5)
+_MAX_DISPATCH_ATTEMPTS = 3
 _LOGGER = logging.getLogger(__name__)
 
 
@@ -44,6 +45,15 @@ class GitHubWebhookReceiptStore(Protocol):
     async def mark_projected(self, delivery_id: str, token: UUID, at: datetime) -> None: ...
 
     async def release(self, delivery_id: str, token: UUID, retry_after: datetime) -> None: ...
+
+    async def release_after_dispatch_failure(
+        self,
+        delivery_id: str,
+        token: UUID,
+        retry_after: datetime,
+        failed_at: datetime,
+        max_attempts: int,
+    ) -> None: ...
 
     async def pending_ids(self, now: datetime, limit: int) -> tuple[str, ...]: ...
 
@@ -127,7 +137,14 @@ class ReceiveGitHubDelivery:
             )
         except Exception:
             async with self._uow_factory() as uow:
-                await uow.receipts.release(delivery_id, token, self._now() + _FAILURE_RETRY)
+                failed_at = self._now()
+                await uow.receipts.release_after_dispatch_failure(
+                    delivery_id,
+                    token,
+                    failed_at + _FAILURE_RETRY,
+                    failed_at,
+                    _MAX_DISPATCH_ATTEMPTS,
+                )
                 await uow.commit()
             raise
 

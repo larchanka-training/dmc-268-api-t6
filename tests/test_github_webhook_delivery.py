@@ -69,6 +69,8 @@ class FakeDispatcher:
 class FakeClaimedReceipt:
     delivery: WebhookReceipt
     projected: bool = False
+    projection_attempt_count: int = 0
+    projection_failed_at: datetime | None = None
     claim_token: object | None = None
     lease_until: datetime | None = None
     retry_after: datetime | None = None
@@ -110,7 +112,11 @@ class FakeReceiptUnitOfWork:
         self, delivery_id: str, token: UUID, now: datetime, until: datetime
     ) -> WebhookReceipt | None:
         row = self.rows[delivery_id]
-        if row.projected or (row.lease_until is not None and row.lease_until > now):
+        if (
+            row.projected
+            or row.projection_failed_at is not None
+            or (row.lease_until is not None and row.lease_until > now)
+        ):
             return None
         if row.retry_after is not None and row.retry_after > now:
             return None
@@ -132,11 +138,31 @@ class FakeReceiptUnitOfWork:
         row.lease_until = None
         row.retry_after = retry_after
 
+    async def release_after_dispatch_failure(
+        self,
+        delivery_id: str,
+        token: UUID,
+        retry_after: datetime,
+        failed_at: datetime,
+        max_attempts: int,
+    ) -> None:
+        row = self.rows[delivery_id]
+        assert row.claim_token == token
+        row.projection_attempt_count += 1
+        row.claim_token = None
+        row.lease_until = None
+        if row.projection_attempt_count == max_attempts:
+            row.projection_failed_at = failed_at
+            row.retry_after = None
+        else:
+            row.retry_after = retry_after
+
     async def pending_ids(self, now: datetime, limit: int) -> tuple[str, ...]:
         return tuple(
             delivery_id
             for delivery_id, row in self.rows.items()
             if not row.projected
+            and row.projection_failed_at is None
             and (row.lease_until is None or row.lease_until <= now)
             and (row.retry_after is None or row.retry_after <= now)
         )[:limit]
@@ -187,6 +213,45 @@ def test_failed_dispatch_is_replayed_once_after_retry_delay() -> None:
         == InstallationDeliveryDispatchStatus.DUPLICATE
     )
     assert dispatcher.calls == 2
+
+
+def test_failed_dispatch_stops_after_three_total_attempts() -> None:
+    now = datetime(2026, 9, 28, tzinfo=UTC)
+    delivery = VerifiedGitHubDelivery("retry-limit-1", "installation", {"action": "created"})
+    uow = FakeReceiptUnitOfWork()
+
+    @dataclass
+    class AlwaysFailDispatcher:
+        calls: int = 0
+
+        async def execute(self, delivery: WebhookReceipt) -> InstallationDeliveryDispatchResult:
+            self.calls += 1
+            raise RuntimeError("GitHub unavailable")
+
+    dispatcher = AlwaysFailDispatcher()
+    receiver = ReceiveGitHubDelivery(
+        uow_factory=lambda: uow, dispatcher=dispatcher, now=lambda: now
+    )
+    assert (
+        asyncio.run(receiver.execute(delivery.to_receipt()))
+        == InstallationDeliveryDispatchStatus.PENDING
+    )
+
+    for attempt in range(1, 4):
+        assert asyncio.run(receiver.replay_pending()) == 0
+        row = uow.rows["retry-limit-1"]
+        assert row.projection_attempt_count == attempt
+        if attempt < 3:
+            assert row.projection_failed_at is None
+            assert row.retry_after == now + timedelta(seconds=30)
+            now += timedelta(seconds=31)
+        else:
+            assert row.projection_failed_at == now
+            assert row.retry_after is None
+
+    now += timedelta(days=1)
+    assert asyncio.run(receiver.replay_pending()) == 0
+    assert dispatcher.calls == 3
 
 
 def test_replay_claims_receipt_left_by_crash_after_commit() -> None:
@@ -800,6 +865,57 @@ def test_postgresql_claim_is_exclusive_expires_and_excludes_projected_rows(
             async with SqlAlchemyGitHubWebhookReceiptUnitOfWork(sessions) as uow:
                 assert await uow.receipts.pending_ids(now + timedelta(minutes=7), 10) == ()
             assert await claim(uuid4(), now + timedelta(minutes=7)) is None
+        finally:
+            await engine.dispose()
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.integration
+def test_postgresql_failed_dispatches_are_terminal_after_three_attempts(
+    isolated_webhook_database: tuple[Connection, str, str],
+) -> None:
+    connection, database_url, schema = isolated_webhook_database
+    config = Config("alembic.ini")
+    config.attributes["connection"] = connection
+    command.upgrade(config, "head")
+
+    async def exercise() -> None:
+        engine = create_async_engine(
+            database_url, connect_args={"options": f"-csearch_path={schema}"}
+        )
+        sessions = async_sessionmaker(engine, expire_on_commit=False)
+        delivery = VerifiedGitHubDelivery("failure-limit-1", "ping", {"zen": "hello"})
+        now = datetime(2026, 9, 28, tzinfo=UTC)
+        try:
+            async with SqlAlchemyGitHubWebhookReceiptUnitOfWork(sessions) as uow:
+                assert await uow.receipts.save(delivery.to_receipt()) is True
+                await uow.commit()
+
+            for attempt in range(1, 4):
+                async with SqlAlchemyGitHubWebhookReceiptUnitOfWork(sessions) as uow:
+                    token = uuid4()
+                    assert (
+                        await uow.receipts.claim(
+                            delivery.delivery_id, token, now, now + timedelta(minutes=5)
+                        )
+                        == delivery.to_receipt()
+                    )
+                    await uow.receipts.release_after_dispatch_failure(
+                        delivery.delivery_id,
+                        token,
+                        now + timedelta(seconds=30),
+                        now,
+                        max_attempts=3,
+                    )
+                    await uow.commit()
+
+                async with SqlAlchemyGitHubWebhookReceiptUnitOfWork(sessions) as uow:
+                    expected_pending = (delivery.delivery_id,) if attempt < 3 else ()
+                    assert await uow.receipts.pending_ids(now + timedelta(seconds=31), 10) == (
+                        expected_pending
+                    )
+                now += timedelta(seconds=31)
         finally:
             await engine.dispose()
 
