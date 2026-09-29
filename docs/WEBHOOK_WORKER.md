@@ -5,8 +5,8 @@ and returns `202`. The worker claims pending receipts and projects installation
 and pull request events after the HTTP response. Expired claims and failed dispatches are retried.
 
 Set `DATABASE_URL`, `GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY`,
-`GITHUB_APP_BOT_LOGIN` (the exact App bot login, such as `example[bot]`), and
-`RABBITMQ_URL`, then run:
+and `GITHUB_APP_BOT_LOGIN` (the exact App bot login, such as `example[bot]`),
+then run:
 
 ```bash
 uv run alembic upgrade head
@@ -15,11 +15,8 @@ uv run python -m app.webhook_worker
 
 For local Docker Compose, set `GITHUB_WEBHOOK_SECRET`, `GITHUB_APP_ID`,
 `GITHUB_APP_PRIVATE_KEY`, and `GITHUB_APP_BOT_LOGIN` in `.env`, apply the migration,
-and start the `webhooks` profile. The main Compose file starts RabbitMQ and passes
-`RABBITMQ_USER` and `RABBITMQ_PASSWORD` (both default to `app`) to the worker,
-which URL-encodes them before connecting. Set `RABBITMQ_URL` explicitly for an external broker;
-it takes precedence over the separate credentials. A worker
-started outside Compose always needs `RABBITMQ_URL` in its environment.
+and start the `webhooks` profile. A worker started outside Compose needs the
+same database and GitHub App configuration.
 
 ```bash
 docker compose up -d postgres
@@ -36,12 +33,9 @@ and lifecycle barrier, including events in one timestamp second. GitHub timeline
 the receipt pending for retry. It also projects installation events. Unknown repositories remain
 retryable until onboarding.
 
-The worker connects to RabbitMQ before claiming receipts. It declares durable
-`review.run.fast` and `review.run.deep` queues on the `reviews` direct exchange,
-publishes persistent `review.run/v1` messages with mandatory routing and broker
-confirms, and treats a returned or unconfirmed message as a failure. The Run and
-`run_updated` notification commit before publication; a failed confirm leaves a queued
-Run with `message_published_at` unset. Every worker sweep retries these publications,
-skipping superseded, closed, unassigned, or disabled PRs. Missing broker or App
-configuration stops startup before any receipt is claimed. PostgreSQL and live RabbitMQ
-integration verification still require a configured test environment.
+This worker only projects durable GitHub receipts. It neither connects to a broker
+nor enqueues `review.run/v1` messages. The application-level Run publisher port and
+its fake-driven behavior tests remain in place; the concrete AMQP publisher, queue
+topology, and consumer integration are deferred to #34. Missing database or GitHub App
+configuration stops startup before any receipt is claimed. PostgreSQL integration
+verification still requires a configured test environment.

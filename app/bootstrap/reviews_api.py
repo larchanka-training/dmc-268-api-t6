@@ -50,7 +50,6 @@ from app.modules.integrations.webhooks.infrastructure.github_webhook_receipts im
     SqlAlchemyGitHubWebhookReceiptUnitOfWork,
 )
 from app.modules.reviews.application.cancel_run import CancelRunRepository
-from app.modules.reviews.application.determine_ci_eligibility import DetermineCiEligibility
 from app.modules.reviews.application.get_run import RunDetailRepository
 from app.modules.reviews.application.get_run_actions import RunActionsRepository
 from app.modules.reviews.application.get_run_comments import RunCommentsRepository
@@ -58,26 +57,12 @@ from app.modules.reviews.application.get_run_diff import RunDiffRepository
 from app.modules.reviews.application.get_run_file_lines import BlobCache, RunFileRepository
 from app.modules.reviews.application.list_runs import RunRepository
 from app.modules.reviews.application.project_github_pull_request import ProjectGitHubPullRequest
-from app.modules.reviews.application.publish_cancellation_signals import (
-    PublishCancellationSignals,
-)
-from app.modules.reviews.application.trigger_from_delivery import TriggerFromDelivery
-from app.modules.reviews.application.try_enqueue_webhook_run import (
-    RunMessagePublisher,
-    TryEnqueueWebhookRun,
-)
 from app.modules.reviews.infrastructure.blob_cache import SqlAlchemyBlobCache
-from app.modules.reviews.infrastructure.ci_eligibility_candidates import (
-    SqlAlchemyEligibilityCandidateStore,
-)
-from app.modules.reviews.infrastructure.github_ci import HttpGitHubCurrentHeadCiProvider
 from app.modules.reviews.infrastructure.github_pull_request_projection import (
     SqlAlchemyPullRequestProjectionLock,
     SqlAlchemyPullRequestProjectionUnitOfWork,
 )
 from app.modules.reviews.infrastructure.run_repository import SqlAlchemyRunRepository
-from app.modules.reviews.infrastructure.webhook_run_targets import SqlAlchemyWebhookRunTargets
-from app.modules.reviews.infrastructure.webhook_runs import SqlAlchemyWebhookRunUnitOfWork
 from app.modules.workspaces.application.link_github_installations import LinkGitHubInstallations
 from app.modules.workspaces.infrastructure.github_installation_links import (
     SqlAlchemyGitHubInstallationLinkUnitOfWork,
@@ -143,52 +128,12 @@ class ReviewsApiResources:
             uow_factory=lambda: SqlAlchemyGitHubInstallationLinkUnitOfWork(self._session_factory),
         )
 
-    def github_ci_eligibility(
-        self,
-        *,
-        client: httpx.AsyncClient,
-        token_provider: GitHubInstallationAccessTokenProvider,
-        app_id: int,
-    ) -> DetermineCiEligibility:
-        """Compose Task 4's read-only eligibility decision for a later enqueue use case."""
-        return DetermineCiEligibility(
-            candidates=SqlAlchemyEligibilityCandidateStore(self._session_factory),
-            ci=HttpGitHubCurrentHeadCiProvider(client=client, token_provider=token_provider),
-            own_app_id=app_id,
-        )
-
-    def webhook_run_trigger(
-        self,
-        *,
-        client: httpx.AsyncClient,
-        token_provider: GitHubInstallationAccessTokenProvider,
-        app_id: int,
-        publisher: RunMessagePublisher,
-    ) -> TryEnqueueWebhookRun:
-        """Bind #34's confirmed publisher once its AMQP adapter is available."""
-        return TryEnqueueWebhookRun(
-            eligibility=self.github_ci_eligibility(
-                client=client, token_provider=token_provider, app_id=app_id
-            ),
-            uow_factory=lambda: SqlAlchemyWebhookRunUnitOfWork(self._session_factory),
-            publisher=publisher,
-            cancellation_signals=self.cancellation_signals(publisher),
-        )
-
-    def cancellation_signals(self, publisher: RunMessagePublisher) -> PublishCancellationSignals:
-        return PublishCancellationSignals(
-            uow_factory=lambda: SqlAlchemyPullRequestProjectionUnitOfWork(self._session_factory),
-            publisher=publisher,
-        )
-
     def github_delivery_receiver(
         self,
         *,
         client: httpx.AsyncClient,
         token_provider: GitHubInstallationAccessTokenProvider,
         bot_login: str | None = None,
-        run_publisher: RunMessagePublisher | None = None,
-        app_id: int | None = None,
     ) -> ReceiveGitHubDelivery:
         return ReceiveGitHubDelivery(
             uow_factory=self.github_webhook_receipts,
@@ -196,8 +141,6 @@ class ReviewsApiResources:
                 client=client,
                 token_provider=token_provider,
                 bot_login=bot_login,
-                run_publisher=run_publisher,
-                app_id=app_id,
             ),
         )
 
@@ -225,8 +168,6 @@ class ReviewsApiResources:
         client: httpx.AsyncClient,
         token_provider: GitHubInstallationAccessTokenProvider,
         bot_login: str | None = None,
-        run_publisher: RunMessagePublisher | None = None,
-        app_id: int | None = None,
     ) -> GitHubWebhookDispatchAdapter:
         """Compose the verified-delivery application boundary for this API process."""
         tree_provider = GitHubInstallationTreeProvider(
@@ -236,21 +177,6 @@ class ReviewsApiResources:
         label_provider = GitHubRepositoryLabelProvider(
             client=client,
             token_provider=token_provider,
-        )
-        if run_publisher is not None and app_id is None:
-            raise ValueError("GitHub App ID is required with the Run publisher")
-        run_trigger = (
-            TriggerFromDelivery(
-                targets=SqlAlchemyWebhookRunTargets(self._session_factory),
-                enqueuer=self.webhook_run_trigger(
-                    client=client,
-                    token_provider=token_provider,
-                    app_id=app_id,
-                    publisher=run_publisher,
-                ),
-            )
-            if run_publisher is not None and app_id is not None
-            else None
         )
         projector = (
             ProjectGitHubPullRequest(
@@ -263,9 +189,6 @@ class ReviewsApiResources:
                     token_provider=token_provider,
                 ),
                 projection_lock=SqlAlchemyPullRequestProjectionLock(self._engine),
-                cancellation_signals=(
-                    self.cancellation_signals(run_publisher) if run_publisher is not None else None
-                ),
             )
             if bot_login is not None
             else None
@@ -275,7 +198,6 @@ class ReviewsApiResources:
             onboarding=self.installation_onboarding(tree_provider, label_provider),
             pull_request_projector=projector,
             label_intent_projector=projector,
-            run_trigger=run_trigger,
         )
         return GitHubWebhookDispatchAdapter(dispatcher)
 
