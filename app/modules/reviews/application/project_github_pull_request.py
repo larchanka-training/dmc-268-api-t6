@@ -72,6 +72,7 @@ class PullRequestEvent:
     repository_full_name: str | None = None
     requested_reviewer_login: str | None = None
     sender_type: str | None = None
+    sender_login: str | None = None
     current_label_names: frozenset[str] | None = None
 
 
@@ -228,6 +229,12 @@ class ProjectGitHubPullRequest:
         if isinstance(event, PullRequestLabelEvent):
             if event.label_name != "ai-review":
                 return PullRequestProjectionStatus.IGNORED_UNRELATED
+            if (
+                event.pull_request.sender_type == "Bot"
+                and event.pull_request.sender_login is not None
+                and event.pull_request.sender_login.casefold() == self._bot_login
+            ):
+                return PullRequestProjectionStatus.IGNORED_UNRELATED
             if self._projection_lock is None or self._current_provider is None:
                 raise RuntimeError(
                     "label projection requires current GitHub PR and projection lock"
@@ -268,7 +275,6 @@ class ProjectGitHubPullRequest:
             if record.external_id != current.external_id:
                 return PullRequestProjectionStatus.IGNORED_UNRELATED
             previous_head_sha = record.head_sha
-            previously_labeled = record.ai_review_labeled
             if record.provider_updated_at is None or (
                 current.provider_updated_at >= record.provider_updated_at
             ):
@@ -278,9 +284,7 @@ class ProjectGitHubPullRequest:
                 record.provider_updated_at = current.provider_updated_at
             self._reconcile_label_state(record, current.current_label_names, now)
             await uow.pull_requests.save(record)
-            notices = await self._cancel_obsolete_runs(
-                uow, record, current, previous_head_sha, now, previously_labeled
-            )
+            notices = await self._cancel_obsolete_runs(uow, record, current, previous_head_sha, now)
             await uow.commit()
         if notices and self._cancellation_signals is not None:
             await self._cancellation_signals.publish_for(tuple(notice.run_id for notice in notices))
@@ -357,7 +361,6 @@ class ProjectGitHubPullRequest:
             if record.external_id != event.external_id:
                 return PullRequestProjectionStatus.IGNORED_UNRELATED
             previous_head_sha = record.head_sha
-            previously_labeled = record.ai_review_labeled
             if self._is_stale_opened(record, event):
                 return PullRequestProjectionStatus.IGNORED_STALE
             reviewer_intent = event.action in {"review_requested", "review_request_removed"}
@@ -413,9 +416,7 @@ class ProjectGitHubPullRequest:
             if not reviewer_intent:
                 record.provider_updated_at = event.provider_updated_at
             await uow.pull_requests.save(record)
-            notices = await self._cancel_obsolete_runs(
-                uow, record, event, previous_head_sha, now, previously_labeled
-            )
+            notices = await self._cancel_obsolete_runs(uow, record, event, previous_head_sha, now)
             await uow.commit()
         if notices and self._cancellation_signals is not None:
             await self._cancellation_signals.publish_for(tuple(notice.run_id for notice in notices))
@@ -589,7 +590,6 @@ class ProjectGitHubPullRequest:
         event: PullRequestEvent,
         previous_head_sha: str,
         now: datetime,
-        previously_labeled: bool,
     ) -> tuple[RunCancellationNotice, ...]:
         cancellation_reason: str | None = None
         if event.action in {"synchronize", "closed", "reopened", "labeled", "unlabeled"}:
@@ -597,8 +597,6 @@ class ProjectGitHubPullRequest:
                 cancellation_reason = "pr_closed"
             elif record.head_sha != previous_head_sha:
                 cancellation_reason = "superseded"
-        if cancellation_reason is None and previously_labeled and not record.ai_review_labeled:
-            cancellation_reason = "label_removed"
         if cancellation_reason is not None:
             notices = await uow.runs.cancel_for_pr(record.id, cancellation_reason, now)
             for notice in notices:

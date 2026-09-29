@@ -49,6 +49,7 @@ class _GitHubSenderDto(BaseModel):
     model_config = ConfigDict(extra="ignore", strict=True)
 
     type: str = Field(min_length=1, max_length=50)
+    login: str | None = Field(default=None, min_length=1, max_length=255)
 
 
 class _GitHubLabelDto(BaseModel):
@@ -137,4 +138,5 @@ def _event_from_payload(parsed: _GitHubPullRequestPayloadDto) -> PullRequestEven
             parsed.requested_reviewer.login if parsed.requested_reviewer is not None else None
         ),
         sender_type=parsed.sender.type if parsed.sender is not None else None,
+        sender_login=parsed.sender.login if parsed.sender is not None else None,
     )
