@@ -7,7 +7,7 @@ from datetime import datetime
 from typing import cast
 from uuid import UUID
 
-from sqlalchemy import or_, select, update
+from sqlalchemy import case, or_, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -54,6 +54,7 @@ class SqlAlchemyGitHubWebhookReceiptStore:
                 WebhookEvent.delivery_id == delivery_id,
                 WebhookEvent.payload.is_not(None),
                 WebhookEvent.projected_at.is_(None),
+                WebhookEvent.projection_failed_at.is_(None),
                 or_(
                     WebhookEvent.projection_lease_until.is_(None),
                     WebhookEvent.projection_lease_until <= now,
@@ -108,12 +109,41 @@ class SqlAlchemyGitHubWebhookReceiptStore:
         )
         await self._session.execute(statement)
 
+    async def release_after_dispatch_failure(
+        self,
+        delivery_id: str,
+        token: UUID,
+        retry_after: datetime,
+        failed_at: datetime,
+        max_attempts: int,
+    ) -> None:
+        next_attempt_count = WebhookEvent.projection_attempt_count + 1
+        is_final_attempt = next_attempt_count >= max_attempts
+        statement = (
+            update(WebhookEvent)
+            .where(
+                WebhookEvent.delivery_id == delivery_id,
+                WebhookEvent.projection_claim_token == token,
+                WebhookEvent.projected_at.is_(None),
+                WebhookEvent.projection_failed_at.is_(None),
+            )
+            .values(
+                projection_claim_token=None,
+                projection_lease_until=None,
+                projection_attempt_count=next_attempt_count,
+                projection_failed_at=case((is_final_attempt, failed_at), else_=None),
+                retry_after=case((is_final_attempt, None), else_=retry_after),
+            )
+        )
+        await self._session.execute(statement)
+
     async def pending_ids(self, now: datetime, limit: int) -> tuple[str, ...]:
         statement = (
             select(WebhookEvent.delivery_id)
             .where(
                 WebhookEvent.payload.is_not(None),
                 WebhookEvent.projected_at.is_(None),
+                WebhookEvent.projection_failed_at.is_(None),
                 or_(
                     WebhookEvent.projection_lease_until.is_(None),
                     WebhookEvent.projection_lease_until <= now,

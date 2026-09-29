@@ -38,11 +38,17 @@ class WebhookEvent(Base):
             "(projection_claim_token IS NULL) = (projection_lease_until IS NULL)",
             name="ck_webhook_events_projection_claim_pair",
         ),
+        CheckConstraint(
+            "projection_attempt_count >= 0",
+            name="ck_webhook_events_projection_attempt_count_nonnegative",
+        ),
         Index(
             "ix_webhook_events_pending_retry",
             "retry_after",
             "received_at",
-            postgresql_where=text("projected_at IS NULL AND payload IS NOT NULL"),
+            postgresql_where=text(
+                "projected_at IS NULL AND projection_failed_at IS NULL AND payload IS NOT NULL"
+            ),
         ),
     )
 
@@ -62,4 +68,8 @@ class WebhookEvent(Base):
     )
     retry_after: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     projected_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    projection_attempt_count: Mapped[int] = mapped_column(default=0, server_default=text("0"))
+    projection_failed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     received_at: Mapped[datetime] = timestamp_column()
