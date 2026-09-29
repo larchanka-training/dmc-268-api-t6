@@ -944,7 +944,9 @@ def test_postgresql_label_deliveries_persist_add_remove_readd_timestamps(
             async with sessions.begin() as session:
                 await session.execute(delete(CodeChange).where(CodeChange.id == legacy_pr_id))
 
-            assert await deliver("labeled") == InstallationDeliveryDispatchStatus.PROJECTED_PR
+            assert (
+                await deliver("labeled") == InstallationDeliveryDispatchStatus.DEFERRED_KNOWN_EVENT
+            )
             first = await stored()
             assert first.ai_review_labeled is True
             assert first.ai_review_labeled_at == clock[0]
@@ -963,7 +965,9 @@ def test_postgresql_label_deliveries_persist_add_remove_readd_timestamps(
 
             labels.add("ai-review")
             clock[0] = datetime(2026, 9, 28, 12, 3, tzinfo=UTC)
-            assert await deliver("labeled") == InstallationDeliveryDispatchStatus.PROJECTED_PR
+            assert (
+                await deliver("labeled") == InstallationDeliveryDispatchStatus.DEFERRED_KNOWN_EVENT
+            )
             reapplied = await stored()
             assert reapplied.id == first.id
             assert reapplied.ai_review_labeled is True

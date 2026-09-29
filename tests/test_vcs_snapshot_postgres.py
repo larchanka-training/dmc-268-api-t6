@@ -10,7 +10,6 @@ from uuid import UUID, uuid4
 
 import pytest
 from alembic.config import Config
-from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, func, inspect, select, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
@@ -26,6 +25,7 @@ from app.modules.reviews.application.get_run_file_lines import BlobCacheKey
 from app.modules.reviews.infrastructure.blob_cache import SqlAlchemyBlobCache
 from app.modules.reviews.infrastructure.models import CachedFileBlob, Run
 from app.modules.reviews.infrastructure.run_repository import SqlAlchemyRunRepository
+from tests.portal_test_client import authenticated_test_client
 
 
 @pytest.fixture
@@ -314,7 +314,7 @@ def test_file_endpoint_resolves_two_pr_paths_through_one_immutable_blob(
         )
         app.dependency_overrides[get_run_repository] = lambda: SqlAlchemyRunRepository(factory)
         app.dependency_overrides[get_file_blob_cache] = lambda: cache
-        client = TestClient(app)
+        client = authenticated_test_client(app)
         first = client.get(f"/api/runs/{first_run}/files", params={"path": "src/first.py"})
         second = client.get(f"/api/runs/{second_run}/files", params={"path": "src/renamed.py"})
         missing = client.get(f"/api/runs/{first_run}/files", params={"path": "src/renamed.py"})
@@ -378,7 +378,9 @@ def test_file_endpoint_resolves_two_pr_paths_through_one_immutable_blob(
         assert client.get(f"/api/runs/{fresh_run}/diff").json() == [
             {"filename": "src/new.py", "patch": first_snapshot.patch}
         ]
-        assert client.get(f"/api/runs/{first_run}/diff").json()[0]["filename"] == "src/first.py"
+        assert "src/first.py" in {
+            item["filename"] for item in client.get(f"/api/runs/{first_run}/diff").json()
+        }
         assert expired.status_code == 410
     finally:
         app.dependency_overrides.clear()

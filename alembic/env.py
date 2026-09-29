@@ -9,7 +9,7 @@ from alembic import context
 from app.bootstrap.db_metadata import metadata
 
 config = context.config
-if config.config_file_name is not None:
+if config.config_file_name is not None and config.attributes.get("connection") is None:
     fileConfig(config.config_file_name)
 
 database_url = config.attributes.get("database_url") or os.environ.get("DATABASE_URL")

@@ -184,10 +184,15 @@ def portal_database() -> Iterator[tuple[str, str]]:
                     text(
                         "INSERT INTO run_actions "
                         "(id, run_id, index, tool, request, response, started_at, duration_ms) "
-                        "VALUES (:id, :run, 0, 'test', '{}'::jsonb, '{\"secret\":true}'::jsonb, "
+                        "VALUES (:id, :run, 0, 'test', '{}'::jsonb, CAST(:response AS jsonb), "
                         ":started, 1)"
                     ),
-                    {"id": uuid4(), "run": run_id, "started": now},
+                    {
+                        "id": uuid4(),
+                        "run": run_id,
+                        "response": '{"secret":true}',
+                        "started": now,
+                    },
                 )
                 connection.execute(
                     text(
