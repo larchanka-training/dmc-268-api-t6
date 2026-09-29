@@ -146,8 +146,8 @@ T01–T04, C01–C04 and C06–C25 are complete; the corpus checkpoint has user 
 
 ### T15 — UI Finding→ReviewComment contract (ui; 1–2 files)
 
-- [ ] **Acceptance:** Tests validate single-line `newLine=line,endLine=null`, range `newLine=start_line,endLine=line`, enum parity for severity/category and Run statuses against backend contract fixture; no old `APPROVE`/`COMPLETED` vocabulary.
-- [ ] **Verify:** `pnpm test`, `pnpm check-types` pass. **Depends:** current api D6 and UI schema; account for UI PR #58. **Likely files:** ui `src/entities/review/model/schemas.test.ts`, `src/entities/run/model/schemas.test.ts` (confirm after merge).
+- [x] **Acceptance:** Tests validate single-line `newLine=line,endLine=null`, range `newLine=start_line,endLine=line`, enum parity for severity/category and Run statuses against backend contract fixture; no old `APPROVE`/`COMPLETED` vocabulary.
+- [x] **Verify:** `pnpm test`, `pnpm check-types` pass. **Evidence:** [UI PR #60](https://github.com/larchanka-training/dmc-268-ui-t6/pull/60); independent review Standards 0 / Spec 0, all five pnpm gates green (102 tests). **Depends:** current api D6 and UI schema; account for UI PR #58. **Files:** ui `src/entities/review/model/schemas.contract.test.ts`, `src/entities/run/model/schemas.contract.test.ts`.
 
 ### T16 — UI PR quality job and required ruleset (ui; 1–2 files + GitHub setting)
 
