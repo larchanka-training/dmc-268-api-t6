@@ -15,13 +15,13 @@ uv run python -m app.webhook_worker
 
 For local Docker Compose, set `GITHUB_WEBHOOK_SECRET`, `GITHUB_APP_ID`,
 `GITHUB_APP_PRIVATE_KEY`, and `GITHUB_APP_BOT_LOGIN` in `.env`, apply the migration,
-and start the override. It starts a RabbitMQ service and defaults `RABBITMQ_URL` to
-that service; set the URL explicitly for an external broker.
+and start the `webhooks` profile. The main Compose file starts RabbitMQ and defaults
+`RABBITMQ_URL` to that service; set the URL explicitly for an external broker.
 
 ```bash
-docker compose -f docker-compose.yml -f docker-compose.webhooks.yml up -d postgres
-docker compose -f docker-compose.yml -f docker-compose.webhooks.yml run --rm backend alembic upgrade head
-docker compose -f docker-compose.yml -f docker-compose.webhooks.yml --profile webhooks up --build
+docker compose up -d postgres
+docker compose run --rm backend alembic upgrade head
+docker compose --profile webhooks up --build
 ```
 
 The worker serializes each PR's event projection with a PostgreSQL session advisory lock on an
