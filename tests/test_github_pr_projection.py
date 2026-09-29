@@ -1981,7 +1981,7 @@ def test_dispatcher_projects_reopened_pr_event_from_durable_delivery() -> None:
     assert trigger.ci == [CiTriggerEvent(17, 101, _HEAD)]
 
 
-@pytest.mark.parametrize("action", ["opened", "synchronize"])
+@pytest.mark.parametrize("action", ["opened", "edited"])
 @pytest.mark.parametrize("trigger_configured", [False, True])
 def test_pr_metadata_delivery_projects_without_triggering_run(
     action: str, trigger_configured: bool

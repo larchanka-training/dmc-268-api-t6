@@ -18,7 +18,7 @@ from app.modules.reviews.application.project_github_pull_request import (
 )
 from app.modules.reviews.application.trigger_from_delivery import CiTriggerEvent
 
-_RUN_TRIGGER_PR_ACTIONS = frozenset({"reopened"})
+_RUN_TRIGGER_PR_ACTIONS = frozenset({"reopened", "synchronize"})
 
 
 class InstallationDeliveryDispatchStatus(StrEnum):

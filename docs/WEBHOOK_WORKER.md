@@ -15,8 +15,11 @@ uv run python -m app.webhook_worker
 
 For local Docker Compose, set `GITHUB_WEBHOOK_SECRET`, `GITHUB_APP_ID`,
 `GITHUB_APP_PRIVATE_KEY`, and `GITHUB_APP_BOT_LOGIN` in `.env`, apply the migration,
-and start the `webhooks` profile. The main Compose file starts RabbitMQ and defaults
-`RABBITMQ_URL` to that service; set the URL explicitly for an external broker.
+and start the `webhooks` profile. The main Compose file starts RabbitMQ and passes
+`RABBITMQ_USER` and `RABBITMQ_PASSWORD` (both default to `app`) to the worker,
+which URL-encodes them before connecting. Set `RABBITMQ_URL` explicitly for an external broker;
+it takes precedence over the separate credentials. A worker
+started outside Compose always needs `RABBITMQ_URL` in its environment.
 
 ```bash
 docker compose up -d postgres

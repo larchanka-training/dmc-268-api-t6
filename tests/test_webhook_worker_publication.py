@@ -49,6 +49,22 @@ def test_worker_requires_broker_and_numeric_app_id_before_startup() -> None:
         WorkerConfig.from_environment(invalid_app_id)
 
 
+def test_worker_encodes_broker_credentials_and_prefers_explicit_url() -> None:
+    env = _environment()
+    del env["RABBITMQ_URL"]
+    env["RABBITMQ_USER"] = "review@team"
+    env["RABBITMQ_PASSWORD"] = "slash/secret:#"
+
+    config = WorkerConfig.from_environment(env)
+
+    assert config.rabbitmq_url == "amqp://review%40team:slash%2Fsecret%3A%23@rabbitmq:5672/"
+
+    env["RABBITMQ_URL"] = "amqp://external:sample@example.test:5672/custom"
+    overridden = WorkerConfig.from_environment(env)
+
+    assert overridden.rabbitmq_url == "amqp://external:sample@example.test:5672/custom"
+
+
 def test_worker_wires_one_publisher_to_receipts_and_recovery_sweep() -> None:
     @dataclass
     class Receiver:

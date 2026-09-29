@@ -37,7 +37,12 @@ from app.main import (
     app,
     get_github_webhook_secret,
 )
+from app.modules.integrations.webhooks.api.receipt import VerifiedGitHubDelivery
+from app.modules.integrations.webhooks.application.github_installation_dispatch import (
+    InstallationDeliveryDispatchStatus,
+)
 from app.modules.integrations.webhooks.application.installation_event_projector import (
+    InstallationRepositoryLabelProvider,
     InstallationRepositoryTreeProvider,
 )
 from app.modules.integrations.webhooks.application.receive_github_delivery import (
@@ -81,6 +86,16 @@ class FakeTreeProvider(InstallationRepositoryTreeProvider):
         return (RepositoryTreeBlob(path="src/app.ts", size=10, entry_type="blob"),)
 
 
+@dataclass
+class FakeLabelProvider(InstallationRepositoryLabelProvider):
+    calls: list[tuple[int, str]] = field(default_factory=list)
+
+    async def create_ai_review_label(
+        self, *, installation_external_id: int, repository: RepositorySnapshot
+    ) -> None:
+        self.calls.append((installation_external_id, repository.full_name))
+
+
 @pytest.fixture
 def migrated_onboarding_database() -> Iterator[tuple[str, str]]:
     """Provide an isolated migrated PostgreSQL schema when configured."""
@@ -111,6 +126,7 @@ def test_composition_accepts_typed_event_and_internal_installation_id(
 ) -> None:
     """The callable boundary sends a typed event through the composed projector."""
     provider = FakeTreeProvider()
+    labels = FakeLabelProvider()
     internal_installation_id = uuid4()
     observed: dict[str, object] = {}
 
@@ -134,6 +150,7 @@ def test_composition_accepts_typed_event_and_internal_installation_id(
     handler = InstallationOnboarding(
         session_factory=cast(async_sessionmaker[AsyncSession], object()),
         tree_provider=provider,
+        label_provider=labels,
         rules_dir=Path("review/rules"),
     )
 
@@ -157,6 +174,7 @@ def test_composition_accepts_typed_event_and_internal_installation_id(
     )
 
     assert provider.calls == [(17, 101)]
+    assert labels.calls == [(17, "octo/web")]
     assert observed["provider_installation_id"] == internal_installation_id
     repositories = cast(tuple[RepositoryOnboardingInput, ...], observed["repositories"])
     rule_sets = cast(Mapping[str, DefaultRuleSet], observed["rule_sets"])
@@ -175,7 +193,7 @@ def test_resources_composes_onboarding_with_cwd_independent_default_rules(tmp_pa
             cast(async_sessionmaker[AsyncSession], object()),
         )
 
-        handler = resources.installation_onboarding(provider)
+        handler = resources.installation_onboarding(provider, FakeLabelProvider())
 
         result = asyncio.run(
             handler.execute(
@@ -193,6 +211,95 @@ def test_resources_composes_onboarding_with_cwd_independent_default_rules(tmp_pa
 
     assert result == ()
     assert provider.calls == []
+
+
+def test_runtime_dispatcher_creates_label_only_for_linked_added_repositories(
+    monkeypatch: Any,
+) -> None:
+    requests: list[httpx.Request] = []
+    synchronized: list[str] = []
+
+    class Resolver:
+        def __init__(self, session_factory: object) -> None:
+            pass
+
+        async def find_github_installation_id(self, external_id: int) -> UUID | None:
+            return uuid4() if external_id == 17 else None
+
+    class Sync:
+        def __init__(self, *, uow_factory: object, rule_sets: object) -> None:
+            pass
+
+        async def execute(
+            self, *, provider_installation_id: UUID, repositories: object
+        ) -> tuple[OnboardingResult, ...]:
+            assert [request.method for request in requests] == ["GET", "POST"]
+            synchronized.append("added")
+            return ()
+
+        async def disable(self, *, provider_installation_id: UUID, repositories: object) -> None:
+            synchronized.append("removed")
+
+    class TokenProvider:
+        async def get_installation_access_token(self, installation_external_id: int) -> str:
+            assert installation_external_id == 17
+            return "installation-token"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.method == "GET":
+            return httpx.Response(200, request=request, json={"tree": []})
+        return httpx.Response(201, request=request, json={})
+
+    monkeypatch.setattr("app.bootstrap.reviews_api.SqlAlchemyGitHubInstallationResolver", Resolver)
+    monkeypatch.setattr("app.bootstrap.installation_onboarding.SyncInstallationRepositories", Sync)
+    repository = {
+        "id": 101,
+        "full_name": "octo/api",
+        "default_branch": "main",
+        "html_url": "https://github.com/octo/api",
+    }
+
+    async def exercise() -> tuple[InstallationDeliveryDispatchStatus, ...]:
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(handler), base_url="https://api.github.com"
+        ) as client:
+            resources = ReviewsApiResources(
+                cast(AsyncEngine, object()), cast(async_sessionmaker[AsyncSession], object())
+            )
+            dispatcher = resources.github_installation_delivery_dispatcher(
+                client=client, token_provider=TokenProvider()
+            )
+            results = []
+            for installation_id, action, added, removed in (
+                (17, "added", [repository], []),
+                (999, "added", [repository], []),
+                (17, "removed", [], [repository]),
+            ):
+                payload = {
+                    "action": action,
+                    "installation": {"id": installation_id},
+                    "repositories_added": added,
+                    "repositories_removed": removed,
+                }
+                result = await dispatcher.execute(
+                    VerifiedGitHubDelivery(
+                        "delivery", "installation_repositories", payload
+                    ).to_receipt()
+                )
+                results.append(result.status)
+            return tuple(results)
+
+    statuses = asyncio.run(exercise())
+
+    assert statuses == (
+        InstallationDeliveryDispatchStatus.ONBOARDED,
+        InstallationDeliveryDispatchStatus.IGNORED_UNKNOWN_INSTALLATION,
+        InstallationDeliveryDispatchStatus.ONBOARDED,
+    )
+    assert [request.method for request in requests] == ["GET", "POST"]
+    assert str(requests[1].url) == "https://api.github.com/repos/octo/api/labels"
+    assert synchronized == ["added", "removed"]
 
 
 @pytest.mark.integration
@@ -226,7 +333,9 @@ def test_migrated_database_onboarding_creates_one_active_rule_version_and_replay
                 await session.commit()
 
             provider = FakeTreeProvider()
-            handler = ReviewsApiResources(engine, session_factory).installation_onboarding(provider)
+            handler = ReviewsApiResources(engine, session_factory).installation_onboarding(
+                provider, FakeLabelProvider()
+            )
             event = InstallationRepositoriesEvent(
                 installation_external_id=17,
                 action="added",
@@ -291,6 +400,7 @@ def test_signed_runtime_delivery_onboards_replays_removes_and_ignores_unknown_in
     installation_id = uuid4()
     secret = "runtime-webhook-secret"
     tree_requests: list[str] = []
+    label_requests: list[str] = []
 
     @dataclass
     class TokenProvider(GitHubInstallationAccessTokenProvider):
@@ -299,10 +409,13 @@ def test_signed_runtime_delivery_onboards_replays_removes_and_ignores_unknown_in
             return "test-installation-token"
 
     def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST":
+            label_requests.append(str(request.url))
+            return httpx.Response(201, json={})
         tree_requests.append(str(request.url))
         return httpx.Response(200, json={"tree": [{"path": "src/app.ts", "type": "blob"}]})
 
-    async def exercise() -> tuple[Repository | None, list[RuleVersion], int]:
+    async def exercise() -> tuple[Repository | None, list[RuleVersion], int, int]:
         engine = create_async_engine(
             database_url, connect_args={"options": f"-csearch_path={schema}"}
         )
@@ -385,13 +498,13 @@ def test_signed_runtime_delivery_onboards_replays_removes_and_ignores_unknown_in
                     select(Repository).where(Repository.external_id == 101)
                 )
                 versions = list((await session.scalars(select(RuleVersion))).all())
-            return repository, versions, len(tree_requests)
+            return repository, versions, len(tree_requests), len(label_requests)
         finally:
             app.dependency_overrides.clear()
             await client.aclose()
             await engine.dispose()
 
-    repository, versions, tree_fetches = asyncio.run(exercise())
+    repository, versions, tree_fetches, label_creations = asyncio.run(exercise())
 
     assert repository is not None
     assert repository.enabled is False
@@ -399,3 +512,4 @@ def test_signed_runtime_delivery_onboards_replays_removes_and_ignores_unknown_in
     assert versions[0].version == 1
     assert versions[0].is_active is True
     assert tree_fetches == 2
+    assert label_creations == 2
