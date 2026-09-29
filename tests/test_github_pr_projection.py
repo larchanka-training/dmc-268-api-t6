@@ -1497,8 +1497,157 @@ def test_label_projection_reconciles_add_remove_readd_and_delayed_deliveries() -
     assert row.reviewer_requested is True
     assert row.head_first_seen_at == first_seen
     assert row.ci_status == {"head": "green"}
-    assert uow.run_store.calls == [(row.id, "label_removed")]
+    assert uow.run_store.calls == []
     assert observations == ["labeled", "labeled", "unlabeled", "unlabeled", "labeled", "labeled"]
+
+
+def test_human_unlabels_ai_review_without_cancelling_active_run_or_enqueuing() -> None:
+    uow = FakeUnitOfWork()
+    labels = {"ai-review"}
+
+    class Current:
+        async def get_current(self, event: PullRequestEvent) -> PullRequestEvent:
+            assert not uow.active
+            return _event(event.action, current_label_names=frozenset(labels))
+
+    @dataclass
+    class Signals:
+        published: list[tuple[UUID, ...]] = field(default_factory=list)
+
+        async def publish_for(self, run_ids: tuple[UUID, ...]) -> int:
+            self.published.append(run_ids)
+            return len(run_ids)
+
+    @dataclass
+    class Trigger:
+        calls: list[str] = field(default_factory=list)
+
+        async def on_pr(self, event: PullRequestEvent) -> None:
+            self.calls.append(event.action)
+
+        async def on_label(self, event: PullRequestLabelEvent) -> None:
+            self.calls.append(event.pull_request.action)
+
+        async def on_ci(self, event: CiTriggerEvent) -> None:
+            self.calls.append("ci")
+
+    signals = Signals()
+    trigger = Trigger()
+    projector = ProjectGitHubPullRequest(
+        uow_factory=lambda: uow,
+        bot_login="reviewer[bot]",
+        current_provider=Current(),
+        projection_lock=FakeProjectionLock(),
+        cancellation_signals=signals,
+        now=lambda: _NOW,
+    )
+    assert asyncio.run(projector.execute(_event())) == PullRequestProjectionStatus.PROJECTED
+    assert uow.store.row is not None
+    row = uow.store.row
+    assert (
+        asyncio.run(projector.execute(PullRequestLabelEvent(_event("labeled"), "ai-review")))
+        == PullRequestProjectionStatus.PROJECTED
+    )
+    assert row.ai_review_labeled is True
+    active_run = RunCancellationNotice(uuid4(), uuid4(), "cancelled")
+    uow.run_store.next_notices = (active_run,)
+    adapter = GitHubWebhookDispatchAdapter(
+        GitHubInstallationDeliveryDispatcher(
+            resolver=cast(GitHubInstallationResolver, None),
+            onboarding=cast(InstallationOnboardingHandler, None),
+            label_intent_projector=projector,
+            run_trigger=trigger,
+        )
+    )
+    payload = _webhook_payload()
+    payload["action"] = "unlabeled"
+    payload["label"] = {"name": "ai-review"}
+    payload["sender"] = {"type": "User", "login": "alice"}
+    payload.pop("requested_reviewer")
+    labels.clear()
+
+    result = asyncio.run(
+        adapter.execute(
+            VerifiedGitHubDelivery("human-unlabeled", "pull_request", payload).to_receipt()
+        )
+    )
+
+    assert result.status is InstallationDeliveryDispatchStatus.PROJECTED_PR
+    assert row.ai_review_labeled is False
+    assert row.ai_review_labeled_at is None
+    assert row.label_intent_updated_at == _NOW
+    assert uow.run_store.calls == []
+    assert uow.run_store.notices == []
+    assert uow.run_store.next_notices == (active_run,)
+    assert signals.published == []
+    assert trigger.calls == []
+
+
+@pytest.mark.parametrize("action,initially_labeled", [("labeled", False), ("unlabeled", True)])
+def test_self_bot_label_delivery_is_ignored_before_projection_and_trigger(
+    action: str, initially_labeled: bool
+) -> None:
+    uow = FakeUnitOfWork()
+    provider_calls: list[str] = []
+    trigger_calls: list[str] = []
+
+    class Current:
+        async def get_current(self, event: PullRequestEvent) -> PullRequestEvent:
+            provider_calls.append(event.action)
+            return _event(event.action, current_label_names=frozenset())
+
+    class Trigger:
+        async def on_pr(self, event: PullRequestEvent) -> None:
+            trigger_calls.append(event.action)
+
+        async def on_label(self, event: PullRequestLabelEvent) -> None:
+            trigger_calls.append(event.pull_request.action)
+
+        async def on_ci(self, event: CiTriggerEvent) -> None:
+            trigger_calls.append("ci")
+
+    projector = ProjectGitHubPullRequest(
+        uow_factory=lambda: uow,
+        bot_login="reviewer[bot]",
+        current_provider=Current(),
+        projection_lock=FakeProjectionLock(),
+        now=lambda: _NOW,
+    )
+    assert asyncio.run(projector.execute(_event())) == PullRequestProjectionStatus.PROJECTED
+    assert uow.store.row is not None
+    row = uow.store.row
+    row.ai_review_labeled = initially_labeled
+    row.ai_review_labeled_at = _NOW if initially_labeled else None
+    saves = uow.store.saves
+    commits = uow.commits
+    adapter = GitHubWebhookDispatchAdapter(
+        GitHubInstallationDeliveryDispatcher(
+            resolver=cast(GitHubInstallationResolver, None),
+            onboarding=cast(InstallationOnboardingHandler, None),
+            label_intent_projector=projector,
+            run_trigger=Trigger(),
+        )
+    )
+    payload = _webhook_payload()
+    payload["action"] = action
+    payload["label"] = {"name": "ai-review"}
+    payload["sender"] = {"type": "Bot", "login": "Reviewer[bot]"}
+    payload.pop("requested_reviewer")
+
+    result = asyncio.run(
+        adapter.execute(
+            VerifiedGitHubDelivery(f"bot-{action}", "pull_request", payload).to_receipt()
+        )
+    )
+
+    assert result.status is InstallationDeliveryDispatchStatus.IGNORED_IRRELEVANT_EVENT
+    assert row.ai_review_labeled is initially_labeled
+    assert row.ai_review_labeled_at == (_NOW if initially_labeled else None)
+    assert uow.store.saves == saves
+    assert uow.commits == commits
+    assert uow.run_store.calls == []
+    assert provider_calls == []
+    assert trigger_calls == []
 
 
 def test_delayed_label_projects_current_head_and_cancels_obsolete_run() -> None:
