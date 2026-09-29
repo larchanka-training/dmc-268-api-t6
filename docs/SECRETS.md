@@ -21,7 +21,7 @@
 | `VPS_DMC268_IP_T6` | variable | IPv4 курсового VPS, SSH на порт 22 |
 | `VPS_DMC268_U` | secret | SSH-пользователь (`root`) |
 | `VPS_DMC268_P` | secret | SSH-пароль; уходит только на VPS, никогда на Terraform-хост |
-| `AI_DMC268_T6` | secret | LLM-ключ приложения; зарезервирован для app, CI его не использует |
+| `AI_DMC268_T6` | secret | LLM-ключ приложения (EUrouter): в рантайме — значение `LLM_API_KEYS` (ниже); CI его не использует |
 
 ### Repository — variables
 
@@ -54,6 +54,22 @@
 | `STAGING_HEALTH_URL` | нет | иначе `http://$STAGING_HOST/healthcheck` |
 | `POSTGRES_USER` | нет | иначе `app` |
 | `POSTGRES_DB` | нет | иначе `app` |
+
+### LLM-шлюз — переменные приложения (#33)
+
+Читает `LlmSettings.from_env` (`app/modules/reviews/infrastructure/llm/settings.py`). Секрет здесь — только ключи; остальное — конфигурация. Проброс в рантайм staging (`<APP_DIR>/.env` через `deploy.sh`) — карточка DevOps #35; `AI_DMC268_T6` становится значением `LLM_API_KEYS`.
+
+| Переменная | Секрет | Обязательна | Значение |
+|---|---|---|---|
+| `LLM_API_KEYS` | **да** | для EUrouter | ключи через запятую; при 401/403/429 шлюз переходит к следующему (ротация вызовом не считается). Для self-hosted без авторизации — пусто |
+| `LLM_MODEL` | нет | да | основная модель, `gpt-4.1-mini` (OQ-2, SD §15) |
+| `LLM_FALLBACK_MODEL` | нет | нет | fallback-модель, `mistral-small-4`; пусто — без fallback |
+| `LLM_FALLBACK_API_KEYS` | **да** | нет | если fallback у другого провайдера; иначе наследует `LLM_API_KEYS` |
+| `LLM_BASE_URL`, `LLM_FALLBACK_BASE_URL` | нет | для неизвестной модели | OpenAI-совместимый endpoint; для моделей из `KNOWN_MODELS` — `https://api.eurouter.ai/api/v1` |
+| `LLM_PROVIDER`, `LLM_CONTEXT_WINDOW`, `LLM_MAX_OUTPUT_TOKENS`, `LLM_PRICE_*_PER_MTOK`, `LLM_EXTRA_BODY` (и `LLM_FALLBACK_*`) | нет | для неизвестной модели | метка провайдера в `usage_events`, окно, резерв на ответ, цены за 1 млн токенов, доп. поля тела запроса (JSON) |
+| `LLM_STRUCTURED_OUTPUT` | нет | нет | `json_schema` (по умолчанию). `prompt_json` — только локальные и self-hosted модели в dev и eval, требует `LLM_ALLOW_PROMPT_JSON=1`; на staging и prod не задаётся (D7) |
+
+Ключи не попадают в логи, тексты исключений, `run_actions` и `usage_events`: транспорт вычищает их из текстов ошибок провайдера, у `ModelProfile` ключи скрыты из `repr` — это проверяет `tests/test_llm_gateway.py::test_keys_never_reach_logs_exceptions_or_the_trace`. Required CI работает без сети и без LLM-ключей: все тесты шлюза идут на фейковом HTTP-транспорте; живой прогон — вручную (README, раздел «LLM gateway»).
 
 ### Только локально у оператора
 

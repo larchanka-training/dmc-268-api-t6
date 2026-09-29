@@ -173,7 +173,7 @@ RabbitMQ пересылает dead-letter с исходным routing key, ес�
 
 ### 5.1 Классы сбоев LLM
 
-Fallback-модель — вторая модель шлюза с тем же strict structured output (D7); какая именно — OQ-2 (§14).
+Fallback-модель — вторая модель шлюза с тем же strict structured output (D7): `mistral-small-4` при основной `gpt-4.1-mini` (OQ-2 закрыт, §14, SD §15).
 
 | Класс | Обнаружение | Попытки и backoff | Repair / fallback / контекст | Итог Run, `error_code` | Автор PR (check-run) | UI |
 |---|---|---|---|---|---|---|
@@ -410,7 +410,7 @@ UI рисует диапазон `[newLine ?? oldLine, endLine ?? newLine ?? old
 | Вопрос | Решение | Источник |
 |---|---|---|
 | Р-10 / OQ-1 — триггер и повторное ревью | **закрыт**: конъюнкция Р-10 подтверждена; триггер — лейбл `ai-review`, потому что бота нельзя запросить ревьюером ([#37](https://github.com/larchanka-training/dmc-268-api-t6/issues/37#issuecomment-5874776355)); после пуша — авто-повтор, пока PR открыт и стоит лейбл (флаг `ai_review_labeled`, §8). #38 владеет портом выбора и `SweepNoCi`, #34 — advisory-lock leader-циклом и периодом 30 с. | D2 [техлид]; лейбл вместо запроса ревьюера — [техлид] по #37; определение «зелёного CI» (check suites без своего и combined status `success` или пусто) — REST в `try_enqueue`; guard включает отсутствие webhook Run на `(PR, head_sha)` |
-| OQ-2 — модель и бюджет | владелец — исполнитель #33 (lama2x2), срок 01.10.2026. Требования: strict structured output у основной и fallback-модели, контекст ≥ 60 000 токенов, стоимость fast ≤ $0.50 за прогон | D7 [техлид] |
+| OQ-2 — модель и бюджет | **закрыт** (#33): основная `gpt-4.1-mini`, fallback `mistral-small-4` через EUrouter; проверка по трём требованиям (strict structured output у обеих, контекст ≥ 60 000 токенов, стоимость fast ≤ $0.50 за прогон) — SD §15 | D7 [техлид]; выбор — #33 |
 | OQ-3 — `review_event` по умолчанию | **закрыт**: `COMMENT`; поле `reviewEvent` в `Repository`; `REQUEST_CHANGES` — только при `reviewEvent = REQUEST_CHANGES` ∧ `blocking` (§11) | D8, D3 [дефолт] |
 | Инфраструктура MVP | PostgreSQL 17 + RabbitMQ + Redis. Объектное хранилище (S3) отложено после MVP. Вместо него: тела ответов > 64 КБ — отдельная таблица PG (§2, миграция — #34); полный `ContextPayload` не хранится, в PG — только summary; payload вебхука — JSONB в PG (миграция — #11); блобы > 256 КБ — `cached_file_blobs` в PG | D1 [техлид, пересмотрено 27.09.2026] |
 | Контракт авторизации | GitHub App user authorization без OAuth scopes; `state` генерирует и хранит SPA. `POST /api/auth/github/callback {code}` → access JWT (15 мин, Bearer) и refresh в httpOnly-cookie (30 дней, ротация, `Path=/api/auth`). Дальше — `POST /api/auth/refresh`, `GET /api/auth/me`, `POST /api/auth/logout`; SSE — fetch-стрим с Bearer. Полный контракт — SD §12 и `contracts/openapi.yaml`, реализация — #11 | D4 [техлид]; access-токен в памяти, подпись в auth-api и проверка публичным ключом в portal-api, граница Workspace по Р-7 — [дефолт] |

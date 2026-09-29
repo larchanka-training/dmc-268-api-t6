@@ -12,6 +12,7 @@ immutable — a file with a version in its name is never edited — and served f
 | Path                                    | What it is                                          |
 | --------------------------------------- | --------------------------------------------------- |
 | `prompts/review.system.v1.md`           | review prompt: order, filters, attribution, output  |
+| `prompts/review.system.v2.md`           | v1 + input metadata and three few-shot examples     |
 | `prompts/review.conventions.v1.md`      | pre-review prompt: repository patterns, review plan |
 | `rules/schema.json`                     | JSON Schema (draft 2020-12) of a custom rule set    |
 | `rules/default-frontend.v1.json`        | default rules for a Vite/React/TypeScript repo      |
@@ -155,16 +156,28 @@ the validator and `uv run pytest tests/test_review_artifacts.py`.
 
 ## Open questions
 
-- **Model choice** (`docs/SYSTEM_DESIGN.md` OQ-2): the prompts are model-agnostic; model
-  and token budget are owned by the #33 assignee, due 2026-10-01. The proof-run record names the model used.
+- **Model choice** (`docs/SYSTEM_DESIGN.md` OQ-2): closed by #33 — primary `gpt-4.1-mini`, fallback
+  `mistral-small-4` through EUrouter, checked against D7 in SD §15. The prompts stay model-agnostic.
 - **Output language**: English by default (stated in both prompts). Proposed override: a
   line `Review language: xx` in the reviewed repository's `AGENTS.md`, honoured by a later
   prompt version. Decision pending with the team.
 - **Default rule set**: how the backend picks a repository's first set (the `stack` of
   `rules/default-*.v1.json`) is open; proposal: by dominant language. Decision pending with role 6.
 
+## Few-shot examples
+
+`review.system.v2.md` §11 holds three input → answer pairs (one with no findings). They sit in
+the system message — the stable prefix of the provider's prompt cache — and are versioned with
+the prompt (Р-6): a change is a new prompt file. They are synthetic: never taken from
+`examples/` (proof-run fixtures) nor from the eval dataset of #30.
+`tests/test_review_prompt_examples.py` runs every answer through the gateway's parse path.
+
 ## Ownership
 
 Role 7 (DevTools) authors the prompts, the rule format, the default rule sets and the filter
 specification. Role 6 (backend) loads them into `prompt_versions` and `rule_versions`,
-assembles the envelope, calls the model and implements `FindingsPostProcessor` to this spec.
+assembles the envelope and implements `FindingsPostProcessor` to this spec. The backend
+calls the model only through the ports `ReviewModel` and `ConventionsModel`; their
+implementation — the LLM gateway (`app/modules/reviews/infrastructure/llm/`: providers, key
+rotation, fallback model, structured output, token budget, usage and `llm.call` trace) — is
+owned by Engineer 4 (api #33).
