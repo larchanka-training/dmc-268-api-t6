@@ -189,7 +189,11 @@ jobs:
         run: uv run mypy .
 
       - name: pytest
-        run: uv run pytest
+        # ReviewOutput schema module: 100% lines and branches (#33).
+        run: >-
+          uv run pytest
+          --cov=app.modules.reviews.application.review_output
+          --cov-branch --cov-fail-under=100 --cov-report=term-missing
 
       - name: Gold corpus and recorded replay
         shell: bash

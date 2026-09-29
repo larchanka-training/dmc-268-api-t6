@@ -1,0 +1,418 @@
+"""LLM Gateway: failure policy of one run attempt (docs/PIPELINE_SPEC.md §3, §4.5, §5.1).
+
+Per attempt: at most ``max_calls_per_attempt`` provider calls in total (primary, retries,
+repair, fallback); key rotation inside the transport is not a call. Before every call the
+gateway checks the attempt deadline, the context size and the run cost over all attempts
+(``usage_events``) plus the estimate of that call. Each call is traced as ``llm.call`` and
+its usage recorded as soon as the call returns, outside any database transaction.
+
+| class           | same model                         | then              |
+|-----------------|------------------------------------|-------------------|
+| timeout         | 1 retry after 2 s + jitter         | fallback once     |
+| 429             | 1 retry after Retry-After <= 30 s  | fallback once     |
+| 5xx, connection | 2 retries after 2 s, 8 s + jitter  | fallback once     |
+| invalid answer  | 1 repair call with validator errors| fallback once     |
+| context overflow| none                               | none              |
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import math
+import random
+import time
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
+from decimal import Decimal
+from typing import Protocol
+
+from app.modules.reviews.application.llm import (
+    LlmCallError,
+    LlmCallFailed,
+    LlmCallKind,
+    LlmCallRecord,
+    LlmCallTrace,
+    LlmErrorCode,
+    LlmUsage,
+    RunCallContext,
+    UsageLedger,
+)
+from app.modules.reviews.infrastructure.llm.answers import InvalidAnswer
+from app.modules.reviews.infrastructure.llm.settings import LlmSettings, ModelProfile
+from app.modules.reviews.infrastructure.llm.transport import (
+    ChatMessage,
+    ChatRequest,
+    ChatResponse,
+    ChatTransport,
+    ResponseSchema,
+    TransportError,
+)
+
+logger = logging.getLogger(__name__)
+
+_REPAIR_INSTRUCTION = (
+    "Your previous answer violated the output contract. Validator errors:\n{errors}\n"
+    "Answer again with the corrected JSON object only: no prose, no code fence."
+)
+
+
+class Clock(Protocol):
+    def now(self) -> datetime: ...
+
+
+class SystemClock:
+    def now(self) -> datetime:
+        return datetime.now(UTC)
+
+
+class HeuristicTokenCounter:
+    """Conservative pre-send estimate: characters / ``chars_per_token``, rounded up.
+
+    Exact tokenizers of the routed models are not available offline; the provider's
+    ``prompt_tokens`` is the truth recorded in ``usage_events``, and an HTTP 400 about
+    the context length is classified as overflow as well.
+    """
+
+    def __init__(self, chars_per_token: float) -> None:
+        self._chars_per_token = chars_per_token
+
+    def count(self, text: str) -> int:
+        return math.ceil(len(text) / self._chars_per_token)
+
+
+@dataclass(frozen=True)
+class StructuredTask:
+    """One structured generation: its messages, the strict schema and the validator."""
+
+    operation: str
+    messages: tuple[ChatMessage, ...]
+    schema: ResponseSchema
+    validate: Callable[[str], dict[str, object]]
+
+
+@dataclass(frozen=True)
+class GatewayResult:
+    output: dict[str, object]
+    provider: str
+    model: str
+    usage: tuple[LlmUsage, ...]
+    calls: int
+
+
+@dataclass
+class _Outcome:
+    output: dict[str, object] | None = None
+    error: LlmErrorCode | None = None
+    message: str = ""
+    retryable: bool = True
+    retry_after_s: float | None = None
+    answer: str = ""
+    errors: list[str] = field(default_factory=list)
+
+
+@dataclass
+class _AttemptState:
+    calls: int = 0
+    usage: list[LlmUsage] = field(default_factory=list)
+
+
+class LlmGateway:
+    def __init__(
+        self,
+        settings: LlmSettings,
+        transport: ChatTransport,
+        ledger: UsageLedger,
+        trace: LlmCallTrace,
+        *,
+        clock: Clock | None = None,
+        sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+        jitter: Callable[[], float] | None = None,
+        monotonic: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self._settings = settings
+        self._transport = transport
+        self._ledger = ledger
+        self._trace = trace
+        self._clock = clock or SystemClock()
+        self._sleep = sleep
+        policy = settings.policy
+        self._jitter = jitter or (lambda: random.uniform(0, policy.max_jitter_s))
+        self._monotonic = monotonic
+
+    @property
+    def settings(self) -> LlmSettings:
+        return self._settings
+
+    def token_counter(self, profile: ModelProfile | None = None) -> HeuristicTokenCounter:
+        return HeuristicTokenCounter((profile or self._settings.primary).chars_per_token)
+
+    def context_limit(self, profile: ModelProfile, engine: str) -> int:
+        """``prompt + reserved answer`` must not exceed this (SD §13, model window)."""
+        limit = self._settings.policy.input_token_limit["deep" if engine == "deep" else "fast"]
+        return min(profile.context_window, limit)
+
+    def max_prompt_tokens(self, engine: str) -> int:
+        """The budget ``PromptBuilder`` input is fitted to, for the primary model."""
+        primary = self._settings.primary
+        return self.context_limit(primary, engine) - primary.max_output_tokens
+
+    async def generate(self, task: StructuredTask, context: RunCallContext) -> GatewayResult:
+        policy = self._settings.policy
+        primary = self._settings.primary
+        fallback = self._settings.fallback
+        state = _AttemptState()
+        primary_calls = policy.max_calls_per_attempt - (1 if fallback is not None else 0)
+        messages = task.messages
+        kind = LlmCallKind.PRIMARY
+        timeouts = unavailable = 0
+        rate_limit_waited = repaired = False
+        last = _Outcome(error=LlmErrorCode.UNAVAILABLE, message="no call was made")
+
+        while state.calls < primary_calls:
+            last = await self._call(primary, kind, messages, task, context, state)
+            if last.output is not None:
+                return self._result(primary, last, state)
+            assert last.error is not None
+            delay: float | None = None
+            if last.error is LlmErrorCode.TIMEOUT and timeouts < len(policy.timeout_retry_delays_s):
+                delay = policy.timeout_retry_delays_s[timeouts] + self._jitter()
+                timeouts += 1
+            elif (
+                last.error is LlmErrorCode.UNAVAILABLE
+                and last.retryable
+                and unavailable < len(policy.unavailable_retry_delays_s)
+            ):
+                delay = policy.unavailable_retry_delays_s[unavailable] + self._jitter()
+                unavailable += 1
+            elif (
+                last.error is LlmErrorCode.RATE_LIMITED
+                and not rate_limit_waited
+                and last.retry_after_s is not None
+                and last.retry_after_s <= policy.max_retry_after_s
+            ):
+                delay = last.retry_after_s
+                rate_limit_waited = True
+            elif last.error is LlmErrorCode.INVALID_OUTPUT and not repaired:
+                repaired = True
+                messages = (
+                    *messages,
+                    ChatMessage("assistant", last.answer),
+                    ChatMessage(
+                        "user",
+                        _REPAIR_INSTRUCTION.format(
+                            errors="\n".join(f"- {item}" for item in last.errors)
+                        ),
+                    ),
+                )
+                kind = LlmCallKind.REPAIR
+                continue
+            else:
+                break
+            await self._sleep(delay)
+            kind = LlmCallKind.RETRY
+
+        if fallback is not None and state.calls < policy.max_calls_per_attempt:
+            last = await self._call(
+                fallback, LlmCallKind.FALLBACK, task.messages, task, context, state
+            )
+            if last.output is not None:
+                return self._result(fallback, last, state)
+        assert last.error is not None
+        raise self._failed(last.error, last.message, state)
+
+    async def _call(
+        self,
+        profile: ModelProfile,
+        kind: LlmCallKind,
+        messages: tuple[ChatMessage, ...],
+        task: StructuredTask,
+        context: RunCallContext,
+        state: _AttemptState,
+    ) -> _Outcome:
+        """Check deadline, context and budget, then make one provider call."""
+        policy = self._settings.policy
+        timeout_s = policy.call_timeout_s[context.engine]
+        remaining = (context.deadline - self._clock.now()).total_seconds()
+        if remaining < timeout_s:
+            raise self._failed(
+                LlmErrorCode.DEADLINE_EXCEEDED,
+                f"{remaining:.0f} s left before the attempt deadline, a call needs {timeout_s:g} s",
+                state,
+            )
+        counter = self.token_counter(profile)
+        estimate = sum(counter.count(message.content) for message in messages)
+        limit = self.context_limit(profile, context.engine)
+        if estimate + profile.max_output_tokens > limit:
+            raise self._failed(
+                LlmErrorCode.CONTEXT_OVERFLOW,
+                f"prompt ~{estimate} tokens + {profile.max_output_tokens} reserved exceeds {limit}",
+                state,
+            )
+        spent = await self._ledger.run_cost_usd(context.run_id)
+        next_cost = profile.price.cost_usd(tokens_in=estimate, tokens_out=profile.max_output_tokens)
+        cost_limit = policy.run_cost_limit_usd[context.engine]
+        if spent + next_cost > cost_limit:
+            raise self._failed(
+                LlmErrorCode.BUDGET_EXCEEDED,
+                f"run spent ${spent} and the next call may cost ${next_cost}, limit ${cost_limit}",
+                state,
+            )
+
+        state.calls += 1
+        started_at = self._clock.now()
+        started = self._monotonic()
+        record = _RecordDraft(
+            kind=kind,
+            model=profile.model,
+            call_no=state.calls,
+            context=context,
+            timeout_s=timeout_s,
+            estimate=estimate,
+            started_at=started_at,
+        )
+        try:
+            response = await self._transport.complete(
+                ChatRequest(
+                    profile=profile,
+                    messages=messages,
+                    response_schema=task.schema,
+                    timeout_s=timeout_s,
+                )
+            )
+        except TransportError as error:
+            duration_ms = _elapsed_ms(started, self._monotonic())
+            await self._trace.record_call(
+                context.run_id,
+                record.finish(
+                    duration_ms,
+                    error=LlmCallError(error.error_class, error.http_status, error.message),
+                ),
+            )
+            logger.info(
+                "llm call failed",
+                extra={
+                    "run_id": str(context.run_id),
+                    "kind": kind.value,
+                    "model": profile.model,
+                    "error_class": error.error_class.value,
+                    "http_status": error.http_status,
+                    "duration_ms": duration_ms,
+                },
+            )
+            if error.error_class is LlmErrorCode.CONTEXT_OVERFLOW:
+                raise self._failed(error.error_class, error.message, state) from None
+            return _Outcome(
+                error=error.error_class,
+                message=error.message,
+                retryable=error.retryable,
+                retry_after_s=error.retry_after_s,
+            )
+
+        duration_ms = _elapsed_ms(started, self._monotonic())
+        usage = self._usage(profile, task.operation, response)
+        state.usage.append(usage)
+        await self._ledger.record(context, usage)
+        await self._trace.record_call(
+            context.run_id, record.finish(duration_ms, response=response.raw)
+        )
+        logger.info(
+            "llm call answered",
+            extra={
+                "run_id": str(context.run_id),
+                "kind": kind.value,
+                "model": usage.model,
+                "tokens_in": usage.tokens_in,
+                "tokens_out": usage.tokens_out,
+                "duration_ms": duration_ms,
+            },
+        )
+        return _validated(response, task)
+
+    def _usage(self, profile: ModelProfile, operation: str, response: ChatResponse) -> LlmUsage:
+        if response.cost_usd is not None:
+            cost = Decimal(str(response.cost_usd)).quantize(Decimal("0.000001"))
+        else:
+            cost = profile.price.cost_usd(
+                tokens_in=response.prompt_tokens,
+                tokens_out=response.completion_tokens,
+                cache_read_tokens=response.cached_tokens,
+            )
+        return LlmUsage(
+            provider=profile.provider,
+            model=response.model or profile.model,
+            operation=operation,
+            tokens_in=response.prompt_tokens,
+            tokens_out=response.completion_tokens,
+            cache_read_tokens=response.cached_tokens,
+            cost_usd=cost,
+        )
+
+    @staticmethod
+    def _result(profile: ModelProfile, outcome: _Outcome, state: _AttemptState) -> GatewayResult:
+        assert outcome.output is not None
+        usage = tuple(state.usage)
+        return GatewayResult(
+            output=outcome.output,
+            provider=profile.provider,
+            model=usage[-1].model if usage else profile.model,
+            usage=usage,
+            calls=state.calls,
+        )
+
+    @staticmethod
+    def _failed(code: LlmErrorCode, message: str, state: _AttemptState) -> LlmCallFailed:
+        return LlmCallFailed(code, message, usage=tuple(state.usage), calls=state.calls)
+
+
+@dataclass(frozen=True)
+class _RecordDraft:
+    kind: LlmCallKind
+    model: str
+    call_no: int
+    context: RunCallContext
+    timeout_s: float
+    estimate: int
+    started_at: datetime
+
+    def finish(
+        self, duration_ms: int, *, response: object = None, error: LlmCallError | None = None
+    ) -> LlmCallRecord:
+        return LlmCallRecord(
+            kind=self.kind,
+            model=self.model,
+            call_no=self.call_no,
+            attempt=self.context.attempt,
+            timeout_s=self.timeout_s,
+            prompt_version_id=self.context.prompt_version_id,
+            rule_version_id=self.context.rule_version_id,
+            input_tokens_estimate=self.estimate,
+            started_at=self.started_at,
+            duration_ms=duration_ms,
+            response=response,
+            error=error,
+        )
+
+
+def _validated(response: ChatResponse, task: StructuredTask) -> _Outcome:
+    answer = response.content or ""
+    if response.finish_reason == "length":
+        errors = ["the answer was cut at the output token limit; return a shorter JSON object"]
+    elif response.content is None:
+        errors = ["the answer has no text content"]
+    else:
+        try:
+            return _Outcome(output=task.validate(answer))
+        except InvalidAnswer as error:
+            errors = error.errors
+    return _Outcome(
+        error=LlmErrorCode.INVALID_OUTPUT,
+        message="; ".join(errors)[:500],
+        answer=answer,
+        errors=errors,
+    )
+
+
+def _elapsed_ms(started: float, finished: float) -> int:
+    return max(int((finished - started) * 1000), 0)
