@@ -26,7 +26,12 @@ from app.modules.reviews.application.project_github_pull_request import (
     PullRequestLabelEvent,
     PullRequestProjectionStatus,
 )
-from app.modules.reviews.application.trigger_from_delivery import CiTriggerEvent
+from app.modules.reviews.application.trigger_from_delivery import (
+    CiTriggerEvent,
+    ProjectedPullRequestTarget,
+    TriggerFromDelivery,
+)
+from app.modules.reviews.application.try_enqueue_webhook_run import EnqueueResult, EnqueueStatus
 
 
 @dataclass
@@ -94,6 +99,55 @@ def _pull_request_delivery(
     if label is not None:
         payload["label"] = label
     return VerifiedGitHubDelivery(delivery_id, "pull_request", payload)
+
+
+@pytest.mark.parametrize(
+    ("action", "expected_enqueue"),
+    [("synchronize", True), ("opened", False), ("edited", False)],
+)
+def test_projected_pr_actions_recheck_current_head_only_on_synchronize(
+    action: str, expected_enqueue: bool
+) -> None:
+    current_head = "c" * 40
+    projected: list[str] = []
+    enqueued: list[tuple[UUID, str]] = []
+
+    class Projector:
+        async def execute(self, event: PullRequestEvent) -> PullRequestProjectionStatus:
+            projected.append(event.action)
+            return PullRequestProjectionStatus.PROJECTED
+
+    class Targets:
+        async def for_pr(self, event: PullRequestEvent) -> ProjectedPullRequestTarget:
+            assert projected == [action]
+            return ProjectedPullRequestTarget(
+                UUID("11111111-1111-1111-1111-111111111111"), current_head
+            )
+
+        async def for_ci(self, event: CiTriggerEvent) -> tuple[UUID, ...]:
+            return ()
+
+    class Enqueuer:
+        async def execute(self, code_change_id: UUID, expected_head_sha: str) -> EnqueueResult:
+            enqueued.append((code_change_id, expected_head_sha))
+            return EnqueueResult(EnqueueStatus.ENQUEUED)
+
+    adapter = GitHubWebhookDispatchAdapter(
+        GitHubInstallationDeliveryDispatcher(
+            resolver=FakeInstallationResolver(),
+            onboarding=FakeOnboarding(),
+            pull_request_projector=Projector(),
+            run_trigger=TriggerFromDelivery(targets=Targets(), enqueuer=Enqueuer()),
+        )
+    )
+
+    result = asyncio.run(adapter.execute(_pull_request_delivery(action).to_receipt()))
+
+    assert result.status is InstallationDeliveryDispatchStatus.PROJECTED_PR
+    assert projected == [action]
+    assert enqueued == (
+        [(UUID("11111111-1111-1111-1111-111111111111"), current_head)] if expected_enqueue else []
+    )
 
 
 @pytest.mark.parametrize("action", ["labeled", "unlabeled"])

@@ -11,6 +11,7 @@ import os
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass
+from urllib.parse import quote
 
 import httpx
 
@@ -59,12 +60,23 @@ class WorkerConfig:
             raise RuntimeError("GITHUB_APP_ID must be a positive integer") from exc
         if app_id <= 0:
             raise RuntimeError("GITHUB_APP_ID must be a positive integer")
+        rabbitmq_url = env.get("RABBITMQ_URL")
+        if not rabbitmq_url:
+            user = env.get("RABBITMQ_USER")
+            password = env.get("RABBITMQ_PASSWORD")
+            if not user or not password:
+                raise RuntimeError(
+                    "RABBITMQ_URL or RABBITMQ_USER and RABBITMQ_PASSWORD are required"
+                )
+            rabbitmq_url = (
+                f"amqp://{quote(user, safe='')}:{quote(password, safe='')}@rabbitmq:5672/"
+            )
         return cls(
             database_url=database_url,
             app_id=app_id,
             private_key=required("GITHUB_APP_PRIVATE_KEY"),
             bot_login=required("GITHUB_APP_BOT_LOGIN"),
-            rabbitmq_url=required("RABBITMQ_URL"),
+            rabbitmq_url=rabbitmq_url,
             github_api_url=env.get("GITHUB_API_URL", "https://api.github.com"),
         )
 

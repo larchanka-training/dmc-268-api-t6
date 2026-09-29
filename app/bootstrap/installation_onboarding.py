@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.modules.integrations.webhooks.application.installation_event_projector import (
     InstallationEventProjector,
+    InstallationRepositoryLabelProvider,
     InstallationRepositoryTreeProvider,
 )
 from app.modules.repositories.application.installation_repositories import (
@@ -48,6 +49,7 @@ class InstallationOnboarding:
         *,
         session_factory: async_sessionmaker[AsyncSession],
         tree_provider: InstallationRepositoryTreeProvider,
+        label_provider: InstallationRepositoryLabelProvider,
         rules_dir: Path | None = None,
     ) -> None:
         rule_sets = load_default_rule_sets(rules_dir or _DEFAULT_RULES_DIR)
@@ -55,7 +57,9 @@ class InstallationOnboarding:
             uow_factory=lambda: SqlAlchemyInstallationRepositoriesUnitOfWork(session_factory),
             rule_sets=rule_sets,
         )
-        self._projector = InstallationEventProjector(tree_provider=tree_provider, sync=sync)
+        self._projector = InstallationEventProjector(
+            tree_provider=tree_provider, label_provider=label_provider, sync=sync
+        )
 
     async def execute(
         self,

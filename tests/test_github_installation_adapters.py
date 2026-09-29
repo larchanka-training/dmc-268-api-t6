@@ -18,6 +18,9 @@ from app.modules.integrations.webhooks.infrastructure.github_installation_tree_p
     GitHubInstallationTreeProvider,
     GitHubTreeResponseIncompleteError,
 )
+from app.modules.integrations.webhooks.infrastructure.github_repository_labels import (
+    GitHubRepositoryLabelProvider,
+)
 from app.modules.repositories.application.installation_repositories import (
     RepositorySnapshot,
     RepositoryTreeBlob,
@@ -71,6 +74,53 @@ def _repository() -> RepositorySnapshot:
         default_branch="main",
         web_url="https://github.com/octo/api",
     )
+
+
+@pytest.mark.parametrize("status_code", [201, 422])
+def test_github_label_provider_creates_ai_review_with_installation_token(
+    status_code: int,
+) -> None:
+    requests: list[httpx.Request] = []
+    tokens = FakeInstallationTokenProvider()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(status_code, request=request, json={})
+
+    async def create_label() -> None:
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(handler), base_url="https://api.github.com"
+        ) as client:
+            await GitHubRepositoryLabelProvider(
+                client=client, token_provider=tokens
+            ).create_ai_review_label(installation_external_id=17, repository=_repository())
+
+    asyncio.run(create_label())
+
+    assert tokens.calls == [17]
+    assert len(requests) == 1
+    assert requests[0].method == "POST"
+    assert str(requests[0].url) == "https://api.github.com/repos/octo/api/labels"
+    assert requests[0].headers["Authorization"] == "Bearer installation-token"
+    assert requests[0].headers["Accept"] == "application/vnd.github+json"
+    assert requests[0].headers["X-GitHub-Api-Version"] == "2022-11-28"
+    assert requests[0].read() == b'{"name":"ai-review"}'
+
+
+def test_github_label_provider_raises_for_non_422_http_errors() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(403, request=request, json={"message": "Forbidden"})
+
+    async def create_label() -> None:
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(handler), base_url="https://api.github.com"
+        ) as client:
+            await GitHubRepositoryLabelProvider(
+                client=client, token_provider=FakeInstallationTokenProvider()
+            ).create_ai_review_label(installation_external_id=17, repository=_repository())
+
+    with pytest.raises(httpx.HTTPStatusError):
+        asyncio.run(create_label())
 
 
 def test_github_app_token_provider_exchanges_an_app_jwt_per_installation_and_caches_it() -> None:

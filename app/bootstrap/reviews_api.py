@@ -26,6 +26,7 @@ from app.modules.integrations.webhooks.application.github_installation_dispatch 
     GitHubInstallationDeliveryDispatcher,
 )
 from app.modules.integrations.webhooks.application.installation_event_projector import (
+    InstallationRepositoryLabelProvider,
     InstallationRepositoryTreeProvider,
 )
 from app.modules.integrations.webhooks.application.receive_github_delivery import (
@@ -41,6 +42,9 @@ from app.modules.integrations.webhooks.infrastructure.github_installation_resolv
 from app.modules.integrations.webhooks.infrastructure.github_installation_tree_provider import (
     GitHubInstallationAccessTokenProvider,
     GitHubInstallationTreeProvider,
+)
+from app.modules.integrations.webhooks.infrastructure.github_repository_labels import (
+    GitHubRepositoryLabelProvider,
 )
 from app.modules.integrations.webhooks.infrastructure.github_webhook_receipts import (
     SqlAlchemyGitHubWebhookReceiptUnitOfWork,
@@ -198,7 +202,9 @@ class ReviewsApiResources:
         )
 
     def installation_onboarding(
-        self, tree_provider: InstallationRepositoryTreeProvider
+        self,
+        tree_provider: InstallationRepositoryTreeProvider,
+        label_provider: InstallationRepositoryLabelProvider,
     ) -> InstallationOnboarding:
         """Compose repository onboarding with the API process's database pool.
 
@@ -210,6 +216,7 @@ class ReviewsApiResources:
         return InstallationOnboarding(
             session_factory=self._session_factory,
             tree_provider=tree_provider,
+            label_provider=label_provider,
         )
 
     def github_installation_delivery_dispatcher(
@@ -223,6 +230,10 @@ class ReviewsApiResources:
     ) -> GitHubWebhookDispatchAdapter:
         """Compose the verified-delivery application boundary for this API process."""
         tree_provider = GitHubInstallationTreeProvider(
+            client=client,
+            token_provider=token_provider,
+        )
+        label_provider = GitHubRepositoryLabelProvider(
             client=client,
             token_provider=token_provider,
         )
@@ -261,7 +272,7 @@ class ReviewsApiResources:
         )
         dispatcher = GitHubInstallationDeliveryDispatcher(
             resolver=SqlAlchemyGitHubInstallationResolver(self._session_factory),
-            onboarding=self.installation_onboarding(tree_provider),
+            onboarding=self.installation_onboarding(tree_provider, label_provider),
             pull_request_projector=projector,
             label_intent_projector=projector,
             run_trigger=run_trigger,

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Protocol
 from uuid import UUID
 
@@ -16,6 +17,8 @@ from app.modules.repositories.application.sync_installation_repositories import 
     RepositoryOnboardingInput,
 )
 
+_LOGGER = logging.getLogger(__name__)
+
 
 class InstallationRepositoryTreeProvider(Protocol):
     """Fetch one repository's recursive tree at its declared default branch."""
@@ -26,6 +29,14 @@ class InstallationRepositoryTreeProvider(Protocol):
         installation_external_id: int,
         repository: RepositorySnapshot,
     ) -> tuple[RepositoryTreeBlob, ...]: ...
+
+
+class InstallationRepositoryLabelProvider(Protocol):
+    """Create the review trigger label using the installation's GitHub token."""
+
+    async def create_ai_review_label(
+        self, *, installation_external_id: int, repository: RepositorySnapshot
+    ) -> None: ...
 
 
 class InstallationRepositoriesSync(Protocol):
@@ -60,9 +71,11 @@ class InstallationEventProjector:
         self,
         *,
         tree_provider: InstallationRepositoryTreeProvider,
+        label_provider: InstallationRepositoryLabelProvider,
         sync: InstallationRepositoriesSync,
     ) -> None:
         self._tree_provider = tree_provider
+        self._label_provider = label_provider
         self._sync = sync
 
     async def execute(
@@ -84,6 +97,13 @@ class InstallationEventProjector:
                 installation_external_id=event.installation_external_id,
                 repository=repository,
             )
+            try:
+                await self._label_provider.create_ai_review_label(
+                    installation_external_id=event.installation_external_id,
+                    repository=repository,
+                )
+            except Exception:
+                _LOGGER.exception("Failed to create ai-review label for %s", repository.full_name)
             inputs.append(
                 RepositoryOnboardingInput(
                     snapshot=repository,
