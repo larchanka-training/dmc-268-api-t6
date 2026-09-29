@@ -20,7 +20,6 @@ from openapi_spec_validator import OpenAPIV31SpecValidator, validate
 from openapi_spec_validator.readers import read_from_filename
 from referencing import Registry
 from referencing.jsonschema import DRAFT202012
-from test_ui_zod_contracts import RUN_ID, ContractRepository, _generated_schemas
 
 from app.main import app, get_file_blob_cache, get_run_event_hub, get_run_repository
 from app.modules.reviews.application.cancel_run import CancelRequestResult
@@ -34,6 +33,8 @@ from app.modules.reviews.application.get_run_file_lines import (
 from app.modules.reviews.application.list_runs import RunCursor, RunListItem
 from app.modules.reviews.application.review_output import Category, Severity
 from app.modules.reviews.application.run_events import RunUpdated
+from tests.portal_test_client import authenticated_test_client
+from tests.test_ui_zod_contracts import RUN_ID, ContractRepository, _generated_schemas
 
 SPEC_PATH = Path(__file__).parents[1] / "contracts" / "openapi.yaml"
 HTTP_METHODS = frozenset({"get", "put", "post", "delete", "options", "head", "patch", "trace"})
@@ -45,6 +46,7 @@ PLANNED_PULL_REQUEST_FIELDS = frozenset({"author", "headRef", "baseRef"})
 UNKNOWN_RUN_ID = UUID("99999999-9999-4999-8999-999999999999")
 EXPIRED_PATH = "expired.py"
 RUN_URL = f"/api/runs/{RUN_ID}"
+REPOSITORY_ID = UUID("22222222-2222-4222-8222-222222222222")
 
 
 @cache
@@ -142,12 +144,15 @@ class OpenApiContractRepository(ContractRepository):
     async def get_run_file_key(self, run_id: UUID, path: str) -> BlobCacheKey | None:
         if run_id != RUN_ID:
             return None
-        return BlobCacheKey(code_change_id=RUN_ID, head_sha="a" * 40, path=path)
+        return BlobCacheKey(
+            repository_id=REPOSITORY_ID,
+            blob_sha=("e" if path == EXPIRED_PATH else "a") * 40,
+        )
 
 
 class ContractBlobCache:
     async def get(self, key: BlobCacheKey) -> BlobCacheEntry:
-        if key.path == EXPIRED_PATH:
+        if key.blob_sha == "e" * 40:
             return BlobCacheEntry(status=BlobCacheStatus.EXPIRED, content=None)
         return BlobCacheEntry(status=BlobCacheStatus.HIT, content="one\ntwo\nthree\n")
 
@@ -170,7 +175,7 @@ def client() -> Iterator[TestClient]:
     app.dependency_overrides[get_run_repository] = lambda: repository
     app.dependency_overrides[get_file_blob_cache] = lambda: blob_cache
     try:
-        yield TestClient(app)
+        yield authenticated_test_client(app)
     finally:
         app.dependency_overrides.clear()
 
@@ -275,8 +280,9 @@ def test_app_responses_validate_against_the_declared_schema(
 
 def test_stream_events_validate_against_the_declared_event_schema() -> None:
     app.dependency_overrides[get_run_event_hub] = OneEventHub
+    app.dependency_overrides[get_run_repository] = OpenApiContractRepository
     try:
-        response = TestClient(app).get("/api/stream")
+        response = authenticated_test_client(app).get("/api/stream")
     finally:
         app.dependency_overrides.clear()
     event, data = response.text.strip().split("\n")

@@ -585,7 +585,6 @@ paths:
         The SPA generates and checks `state` itself (sessionStorage) and posts only the code
         GitHub returned to `/auth/callback`. Sets the refresh cookie.
       x-service: auth-api
-      x-status: planned
       x-issue: "#11"
       security: []
       requestBody:
@@ -618,7 +617,6 @@ paths:
       tags: [auth]
       summary: Rotate the refresh cookie and issue a new access token
       x-service: auth-api
-      x-status: planned
       x-issue: "#11"
       security:
         - refreshCookie: []
@@ -644,7 +642,6 @@ paths:
       tags: [auth]
       summary: Get the signed-in user and the workspaces they can access
       x-service: auth-api
-      x-status: planned
       x-issue: "#11"
       responses:
         "200":
@@ -664,7 +661,6 @@ paths:
         Idempotent; revokes the refresh token from the `refresh_token` cookie when one is
         sent, and succeeds without it as well.
       x-service: auth-api
-      x-status: planned
       x-issue: "#11"
       security: []
       responses:
