@@ -6,6 +6,7 @@ import os
 from collections.abc import AsyncIterator, Callable
 from contextlib import AsyncExitStack, asynccontextmanager, nullcontext
 from dataclasses import dataclass
+from functools import partial
 from typing import Annotated, cast
 
 import httpx
@@ -50,19 +51,32 @@ from app.modules.integrations.webhooks.infrastructure.github_repository_labels i
 from app.modules.integrations.webhooks.infrastructure.github_webhook_receipts import (
     SqlAlchemyGitHubWebhookReceiptUnitOfWork,
 )
-from app.modules.reviews.application.cancel_run import CancelRunRepository
+from app.modules.repositories.application.repository_settings import (
+    RepositorySettingsRepository,
+)
+from app.modules.repositories.infrastructure.repository_settings import (
+    SqlAlchemyRepositorySettings,
+)
+from app.modules.reviews.application.cancel_run import CancellationSignals, CancelRunRepository
 from app.modules.reviews.application.get_run import RunDetailRepository
 from app.modules.reviews.application.get_run_actions import RunActionsRepository
 from app.modules.reviews.application.get_run_comments import RunCommentsRepository
 from app.modules.reviews.application.get_run_diff import RunDiffRepository
 from app.modules.reviews.application.get_run_file_lines import BlobCache, RunFileRepository
+from app.modules.reviews.application.list_pulls import PullRequestRepository
 from app.modules.reviews.application.list_runs import RunRepository
 from app.modules.reviews.application.project_github_pull_request import ProjectGitHubPullRequest
+from app.modules.reviews.application.publish_cancellation_signals import (
+    PublishCancellationSignals,
+)
+from app.modules.reviews.application.try_enqueue_webhook_run import RunMessagePublisher
+from app.modules.reviews.infrastructure.amqp import LazyAmqpPublisher
 from app.modules.reviews.infrastructure.blob_cache import SqlAlchemyBlobCache
 from app.modules.reviews.infrastructure.github_pull_request_projection import (
     SqlAlchemyPullRequestProjectionLock,
     SqlAlchemyPullRequestProjectionUnitOfWork,
 )
+from app.modules.reviews.infrastructure.pull_request_queries import SqlAlchemyPullRequestQueries
 from app.modules.reviews.infrastructure.run_repository import SqlAlchemyRunRepository
 from app.modules.workspaces.application.link_github_installations import LinkGitHubInstallations
 from app.modules.workspaces.infrastructure.github_installation_links import (
@@ -233,6 +247,38 @@ def get_run_repository(
     return _resources(request).run_repository(scope)
 
 
+def get_repository_settings(
+    request: Request,
+    scope: Annotated[AuthScope, Depends(get_auth_scope)],
+) -> RepositorySettingsRepository:
+    return SqlAlchemyRepositorySettings(_resources(request).session_factory, scope)
+
+
+def get_pull_requests(
+    request: Request,
+    scope: Annotated[AuthScope, Depends(get_auth_scope)],
+) -> PullRequestRepository:
+    return SqlAlchemyPullRequestQueries(_resources(request).session_factory, scope)
+
+
+def get_run_publisher(request: Request) -> RunMessagePublisher | None:
+    """The API process publisher (rerun, T6 close signal); ``None`` without RabbitMQ."""
+    publisher = getattr(request.app.state, "run_publisher", None)
+    return cast(RunMessagePublisher | None, publisher)
+
+
+def get_cancellation_signals(request: Request) -> CancellationSignals | None:
+    publisher = get_run_publisher(request)
+    if publisher is None:
+        return None
+    return PublishCancellationSignals(
+        uow_factory=partial(
+            SqlAlchemyPullRequestProjectionUnitOfWork, _resources(request).session_factory
+        ),
+        publisher=publisher,
+    )
+
+
 def get_file_blob_cache(request: Request) -> BlobCache:
     """Provide the file cache backed by the application pool."""
     return _resources(request).file_blob_cache()
@@ -268,6 +314,11 @@ async def reviews_api_lifespan(app: FastAPI) -> AsyncIterator[None]:
             app.state.reviews_api_resources = resources
             if github_webhook_secret is not None:
                 app.state.github_webhook_secret = github_webhook_secret
+        rabbitmq_url = os.environ.get("RABBITMQ_URL")
+        if resources is not None and rabbitmq_url:
+            publisher = LazyAmqpPublisher(rabbitmq_url)
+            stack.push_async_callback(publisher.aclose)
+            app.state.run_publisher = publisher
         try:
             async with (
                 reconciler_loop(
@@ -284,3 +335,5 @@ async def reviews_api_lifespan(app: FastAPI) -> AsyncIterator[None]:
                 await resources.aclose()
                 del app.state.reviews_api_resources
             del app.state.github_auth_http_clients
+            if hasattr(app.state, "run_publisher"):
+                del app.state.run_publisher

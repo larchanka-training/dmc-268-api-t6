@@ -1,9 +1,10 @@
 from dataclasses import replace
 from datetime import UTC, datetime
+from decimal import Decimal
 from uuid import UUID
 
 from app.main import app, get_run_repository
-from app.modules.reviews.application.get_run import RunDetailRepository
+from app.modules.reviews.application.get_run import RunReview, RunReviewRepository
 from app.modules.reviews.application.list_runs import RunCursor, RunListItem
 from tests.portal_test_client import authenticated_test_client as TestClient
 
@@ -33,6 +34,23 @@ class FakeRunDetailRepository:
     async def get_run(self, run_id: UUID) -> RunListItem | None:
         self.calls.append(run_id)
         return self.item
+
+    async def get_run_review(self, run_id: UUID) -> RunReview | None:
+        return empty_review() if self.item is not None else None
+
+
+def empty_review() -> RunReview:
+    return RunReview(
+        author=None,
+        head_ref=None,
+        base_ref=None,
+        findings=[],
+        summary=None,
+        usage_calls=0,
+        tokens_in=0,
+        tokens_out=0,
+        cost_usd=Decimal("0"),
+    )
 
 
 def make_item(value: int, created_at: datetime) -> RunListItem:
@@ -165,7 +183,7 @@ def test_runs_list_rejects_malformed_base64_and_non_utf8_cursors() -> None:
 
 def test_run_detail_returns_pr_data_latest_model_and_action_count() -> None:
     item = replace(make_item(7, datetime(2026, 9, 24, tzinfo=UTC)), summary_only=True)
-    repository: RunDetailRepository = FakeRunDetailRepository(item)
+    repository: RunReviewRepository = FakeRunDetailRepository(item)
     app.dependency_overrides[get_run_repository] = lambda: repository
     try:
         response = TestClient(app).get(f"/api/runs/{item.id}")
@@ -179,6 +197,9 @@ def test_run_detail_returns_pr_data_latest_model_and_action_count() -> None:
         "title": "PR 7",
         "url": "https://example.test/7",
         "headSha": "a" * 40,
+        "author": None,
+        "headRef": None,
+        "baseRef": None,
     }
     assert response.json()["model"] == "gpt-test"
     assert response.json()["actionCount"] == 2
@@ -187,7 +208,7 @@ def test_run_detail_returns_pr_data_latest_model_and_action_count() -> None:
 
 def test_run_detail_returns_null_model_when_the_run_has_no_usage_event() -> None:
     item = replace(make_item(8, datetime(2026, 9, 24, tzinfo=UTC)), model=None, action_count=3)
-    repository: RunDetailRepository = FakeRunDetailRepository(item)
+    repository: RunReviewRepository = FakeRunDetailRepository(item)
     app.dependency_overrides[get_run_repository] = lambda: repository
     try:
         response = TestClient(app).get(f"/api/runs/{item.id}")
@@ -200,7 +221,7 @@ def test_run_detail_returns_null_model_when_the_run_has_no_usage_event() -> None
 
 
 def test_run_detail_returns_404_for_a_missing_run_and_422_for_invalid_id() -> None:
-    repository: RunDetailRepository = FakeRunDetailRepository(None)
+    repository: RunReviewRepository = FakeRunDetailRepository(None)
     app.dependency_overrides[get_run_repository] = lambda: repository
     try:
         client = TestClient(app)

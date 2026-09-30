@@ -4,8 +4,10 @@ import hashlib
 import hmac
 import json
 import math
+import os
 from collections.abc import AsyncIterator, Callable
-from typing import Annotated, NoReturn
+from contextlib import asynccontextmanager
+from typing import Annotated, Literal, NoReturn
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Path, Query, Request
@@ -14,11 +16,16 @@ from pydantic import ValidationError
 
 from app.bootstrap.portal_auth import get_auth_scope
 from app.bootstrap.reviews_api import (
+    get_cancellation_signals,
     get_file_blob_cache,
     get_github_webhook_receipt_uow_factory,
+    get_pull_requests,
+    get_repository_settings,
+    get_run_publisher,
     get_run_repository,
     reviews_api_lifespan,
 )
+from app.bootstrap.run_update_listener import run_update_listener
 from app.common.infrastructure.db.enums import RunState
 from app.modules.auth.api.router import auth_router
 from app.modules.integrations.webhooks.api.dtos import GitHubWebhookPayloadDto
@@ -27,17 +34,44 @@ from app.modules.integrations.webhooks.application.receive_github_delivery impor
     GitHubWebhookReceiptUnitOfWork,
     ReceiveGitHubDelivery,
 )
+from app.modules.repositories.api.dtos import RepositoryDto, RepositoryUpdateDto
+from app.modules.repositories.application.repository_settings import (
+    GetRepository,
+    ListRepositories,
+    RepositorySettings,
+    RepositorySettingsChange,
+    RepositorySettingsRepository,
+    UpdateRepository,
+)
 from app.modules.reviews.api.dtos import (
     DiffFileDto,
     FileLinesDto,
+    FindingViewDto,
+    LatestRunDto,
+    PullRequestDetailDto,
     PullRequestDto,
+    PullRequestPageDto,
+    PullRequestSummaryDto,
     ReviewCommentDto,
+    ReviewSummaryDto,
     RunActionDto,
+    RunBudgetDto,
+    RunDetailDto,
     RunListDto,
     RunSessionDto,
+    SeverityCountsDto,
 )
-from app.modules.reviews.application.cancel_run import CancelRun, CancelRunRepository
-from app.modules.reviews.application.get_run import GetRun, RunDetailRepository
+from app.modules.reviews.application.cancel_run import (
+    CancellationSignals,
+    CancelRun,
+    CancelRunRepository,
+)
+from app.modules.reviews.application.get_run import (
+    GetRunDetail,
+    RunDetail,
+    RunDetailRepository,
+    RunReviewRepository,
+)
 from app.modules.reviews.application.get_run_actions import (
     GetRunActionResponse,
     GetRunActions,
@@ -62,14 +96,33 @@ from app.modules.reviews.application.get_run_file_lines import (
     GetRunFileLines,
     RunFileRepository,
 )
+from app.modules.reviews.application.list_pulls import (
+    ListRepositoryPulls,
+    PullRequestRepository,
+    PullRequestSummary,
+)
 from app.modules.reviews.application.list_runs import ListRuns, RunListItem, RunRepository
+from app.modules.reviews.application.rerun_run import RerunConflict, RerunRepository, RerunRun
 from app.modules.reviews.application.run_events import InMemoryRunUpdateHub, RunUpdateStream
+from app.modules.reviews.application.try_enqueue_webhook_run import RunMessagePublisher
 
 api_router = APIRouter(prefix="/api", dependencies=[Depends(get_auth_scope)])
 github_webhook_router = APIRouter(prefix="/webhooks/github")
 
-app = FastAPI(title="Backend", lifespan=reviews_api_lifespan)
 run_update_hub = InMemoryRunUpdateHub()
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    """Process resources plus the NOTIFY bridge from worker processes into ``/api/stream``."""
+    async with (
+        reviews_api_lifespan(app),
+        run_update_listener(os.environ.get("DATABASE_URL"), run_update_hub),
+    ):
+        yield
+
+
+app = FastAPI(title="Backend", lifespan=lifespan)
 
 __all__ = ["app", "get_file_blob_cache", "get_run_repository"]
 
@@ -194,6 +247,76 @@ def to_run_session_dto(item: RunListItem) -> RunSessionDto:
     )
 
 
+def to_run_detail_dto(detail: RunDetail) -> RunDetailDto:
+    session = to_run_session_dto(detail.run)
+    review = detail.review
+    return RunDetailDto(
+        **session.model_dump(exclude={"pull_request"}),
+        pull_request=PullRequestDetailDto(
+            **session.pull_request.model_dump(),
+            author=review.author,
+            head_ref=review.head_ref,
+            base_ref=review.base_ref,
+        ),
+        findings=[
+            FindingViewDto(
+                id=item.comment.id,
+                file=item.comment.file,
+                old_line=item.comment.old_line,
+                new_line=item.comment.new_line,
+                end_line=item.comment.end_line,
+                side=item.side,
+                severity=item.comment.severity,
+                category=item.comment.category,
+                title=item.comment.title,
+                body=item.comment.body,
+                suggestion=item.suggestion,
+                confidence=item.confidence,
+                rule_name=item.comment.rule_name,
+            )
+            for item in review.findings
+        ],
+        summary=ReviewSummaryDto(**review.summary) if review.summary is not None else None,
+        verdict=detail.verdict,
+        severity_counts=SeverityCountsDto(**detail.severity_counts),
+        budget=(
+            RunBudgetDto(
+                tokens_in=detail.budget.tokens_in,
+                tokens_out=detail.budget.tokens_out,
+                cost_usd=float(detail.budget.cost_usd),
+                token_limit=detail.budget.token_limit,
+                cost_limit_usd=float(detail.budget.cost_limit_usd),
+            )
+            if detail.budget is not None
+            else None
+        ),
+    )
+
+
+def to_repository_dto(item: RepositorySettings) -> RepositoryDto:
+    return RepositoryDto.model_validate(item, from_attributes=True)
+
+
+def to_pull_request_summary_dto(item: PullRequestSummary) -> PullRequestSummaryDto:
+    return PullRequestSummaryDto(
+        number=item.number,
+        title=item.title,
+        url=item.url,
+        author=item.author,
+        head_sha=item.head_sha,
+        updated_at=item.updated_at,
+        latest_run=(
+            LatestRunDto(
+                id=item.latest_run.id,
+                status=item.latest_run.status,
+                verdict=item.latest_run.verdict,
+            )
+            if item.latest_run is not None
+            else None
+        ),
+    )
+
+
 def to_review_comment_dto(item: PublishedComment) -> ReviewCommentDto:
     return ReviewCommentDto(
         id=item.id,
@@ -260,12 +383,29 @@ async def list_runs(
     )
 
 
-@api_router.get("/runs/{run_id}", response_model=RunSessionDto)
+@api_router.get("/runs/{run_id}", response_model=RunDetailDto)
 async def get_run(
     run_id: UUID,
-    repository: Annotated[RunDetailRepository, Depends(get_run_repository)],
+    repository: Annotated[RunReviewRepository, Depends(get_run_repository)],
+) -> RunDetailDto:
+    detail = await GetRunDetail(repository).execute(run_id)
+    if detail is None:
+        raise HTTPException(status_code=404, detail="run not found")
+    return to_run_detail_dto(detail)
+
+
+@api_router.post("/runs/{run_id}/rerun", status_code=202, response_model=RunSessionDto)
+async def rerun_run(
+    run_id: UUID,
+    repository: Annotated[RerunRepository, Depends(get_run_repository)],
+    publisher: Annotated[RunMessagePublisher | None, Depends(get_run_publisher)],
 ) -> RunSessionDto:
-    item = await GetRun(repository).execute(run_id)
+    try:
+        item = await RerunRun(repository, publisher).execute(run_id)
+    except RerunConflict as error:
+        raise HTTPException(
+            status_code=409, detail="the pull request has an active run or is closed"
+        ) from error
     if item is None:
         raise HTTPException(status_code=404, detail="run not found")
     return to_run_session_dto(item)
@@ -276,8 +416,9 @@ async def cancel_run(
     run_id: UUID,
     repository: Annotated[CancelRunRepository, Depends(get_run_repository)],
     event_hub: Annotated[InMemoryRunUpdateHub, Depends(get_run_event_hub)],
+    signals: Annotated[CancellationSignals | None, Depends(get_cancellation_signals)],
 ) -> RunSessionDto:
-    item = await CancelRun(repository, event_hub).execute(run_id)
+    item = await CancelRun(repository, event_hub, signals).execute(run_id)
     if item is None:
         raise HTTPException(status_code=404, detail="run not found")
     return to_run_session_dto(item)
@@ -364,6 +505,64 @@ async def get_run_file_lines(
     except ValueError as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
     return to_file_lines_dto(page)
+
+
+@api_router.get("/repos", response_model=list[RepositoryDto])
+async def list_repositories(
+    repository: Annotated[RepositorySettingsRepository, Depends(get_repository_settings)],
+) -> list[RepositoryDto]:
+    return [to_repository_dto(item) for item in await ListRepositories(repository).execute()]
+
+
+@api_router.get("/repos/{repo_id}", response_model=RepositoryDto)
+async def get_repository(
+    repo_id: UUID,
+    repository: Annotated[RepositorySettingsRepository, Depends(get_repository_settings)],
+) -> RepositoryDto:
+    item = await GetRepository(repository).execute(repo_id)
+    if item is None:
+        raise HTTPException(status_code=404, detail="repository not found")
+    return to_repository_dto(item)
+
+
+@api_router.patch("/repos/{repo_id}", response_model=RepositoryDto)
+async def update_repository(
+    repo_id: UUID,
+    body: RepositoryUpdateDto,
+    repository: Annotated[RepositorySettingsRepository, Depends(get_repository_settings)],
+) -> RepositoryDto:
+    item = await UpdateRepository(repository).execute(
+        repo_id,
+        RepositorySettingsChange(
+            enabled=body.enabled,
+            default_engine=body.default_engine,
+            wait_for_ci=body.wait_for_ci,
+            max_comments=body.max_comments,
+            review_event=body.review_event,
+        ),
+    )
+    if item is None:
+        raise HTTPException(status_code=404, detail="repository not found")
+    return to_repository_dto(item)
+
+
+@api_router.get("/repos/{repo_id}/pulls", response_model=PullRequestPageDto)
+async def list_repository_pulls(
+    repo_id: UUID,
+    repository: Annotated[PullRequestRepository, Depends(get_pull_requests)],
+    state: Literal["open", "closed", "all"] = "open",
+    cursor: str | None = None,
+) -> PullRequestPageDto:
+    try:
+        page = await ListRepositoryPulls(repository).execute(repo_id, state=state, cursor=cursor)
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    if page is None:
+        raise HTTPException(status_code=404, detail="repository not found")
+    return PullRequestPageDto(
+        items=[to_pull_request_summary_dto(item) for item in page.items],
+        next_cursor=page.next_cursor,
+    )
 
 
 app.include_router(api_router)

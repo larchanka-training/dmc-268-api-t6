@@ -84,7 +84,7 @@ class GetRunActions:
             tool=action.tool,
             request=action.request,
             response=None,
-            response_ref=action.response_ref
+            response_ref=_external_ref(action.response_ref)
             or f"/api/runs/{action.run_id}/actions/{action.index}/response",
             started_at=action.started_at,
             duration_ms=action.duration_ms,
@@ -97,6 +97,17 @@ class GetRunActionResponse:
 
     async def execute(self, run_id: UUID, index: int) -> RunActionResponse | None:
         return await self._repository.get_run_action_response(run_id, index)
+
+
+def _external_ref(value: str | None) -> str | None:
+    """A ``run_action_responses`` row id is served by the API; other references pass through."""
+    if value is None:
+        return None
+    try:
+        UUID(value)
+    except ValueError:
+        return value
+    return None
 
 
 def _json_size(value: Any) -> int:

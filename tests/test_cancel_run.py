@@ -9,8 +9,10 @@ import pytest
 
 from app.main import app, get_run_repository
 from app.modules.reviews.application.cancel_run import CancelRequestResult, CancelRun
+from app.modules.reviews.application.get_run import RunReview
 from app.modules.reviews.application.list_runs import RunListItem
 from tests.portal_test_client import authenticated_test_client as TestClient
+from tests.test_runs_api import empty_review
 
 
 class FakeCancelRunRepository:
@@ -32,6 +34,9 @@ class FakeCancelRunRepository:
 
     async def get_run(self, run_id: UUID) -> RunListItem | None:
         return self._items.get(run_id)
+
+    async def get_run_review(self, run_id: UUID) -> RunReview | None:
+        return empty_review() if run_id in self._items else None
 
 
 class StubCancelRunRepository:

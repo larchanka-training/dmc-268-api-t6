@@ -109,8 +109,7 @@ paths:
       summary: Get a run with its review results
       description: >-
         Returns the RunSession fields plus findings, summary, verdict, severity counts and
-        budget (api#20 D3). Today the endpoint still returns a bare RunSession; the extra
-        fields are implemented in #34.
+        budget (api#20 D3).
       x-service: portal-api
       responses:
         "200":
@@ -137,8 +136,6 @@ paths:
         current head SHA and publishes a `review.run` message for it with priority 9. The
         reviewer flag and CI are not checked (PIPELINE_SPEC T3). Returns the new, queued run.
       x-service: portal-api
-      x-status: planned
-      x-issue: "#34"
       responses:
         "202":
           description: The new run was accepted and queued.
@@ -375,8 +372,6 @@ paths:
         Repositories are connected by installing the GitHub App (D10); there is no create
         operation and no collection update.
       x-service: portal-api
-      x-status: planned
-      x-issue: "#34"
       responses:
         "200":
           description: Repositories visible to the caller's workspaces.
@@ -396,8 +391,6 @@ paths:
       tags: [repositories]
       summary: Get one repository
       x-service: portal-api
-      x-status: planned
-      x-issue: "#34"
       responses:
         "200":
           description: The repository.
@@ -416,8 +409,6 @@ paths:
       tags: [repositories]
       summary: Change review settings of one repository
       x-service: portal-api
-      x-status: planned
-      x-issue: "#34"
       requestBody:
         required: true
         content:
@@ -445,8 +436,6 @@ paths:
       tags: [repositories]
       summary: List pull requests of a repository with their latest run
       x-service: portal-api
-      x-status: planned
-      x-issue: "#34"
       parameters:
         - name: state
           in: query
@@ -823,13 +812,13 @@ components:
           type: string
         author:
           type: [string, "null"]
-          description: GitHub login of the pull request author. Not emitted yet (#34).
+          description: GitHub login of the pull request author. Emitted by run detail only.
         headRef:
           type: [string, "null"]
-          description: Source branch. Not emitted yet (#34).
+          description: Source branch. Emitted by run detail only.
         baseRef:
           type: [string, "null"]
-          description: Target branch. Not emitted yet (#34).
+          description: Target branch. Emitted by run detail only.
       additionalProperties: false
     RunSession:
       type: object
