@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import AsyncIterator, Callable
-from contextlib import AsyncExitStack, asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager, nullcontext
 from dataclasses import dataclass
 from typing import Annotated, cast
 
@@ -19,6 +19,7 @@ from sqlalchemy.ext.asyncio import (
 
 from app.bootstrap.installation_onboarding import InstallationOnboarding
 from app.bootstrap.portal_auth import get_auth_scope
+from app.bootstrap.reconciler import reconciler_loop
 from app.modules.auth.application.scope import AuthScope
 from app.modules.auth.infrastructure.sessions import SqlAlchemyAuthSessionUnitOfWork
 from app.modules.integrations.webhooks.api.dispatch import GitHubWebhookDispatchAdapter
@@ -120,6 +121,10 @@ class ReviewsApiResources:
     @property
     def session_factory(self) -> async_sessionmaker[AsyncSession]:
         return self._session_factory
+
+    @property
+    def engine(self) -> AsyncEngine:
+        return self._engine
 
     def github_installation_linker(self, *, client: httpx.AsyncClient) -> LinkGitHubInstallations:
         """Compose callback reconciliation after the caller obtains a GitHub user token."""
@@ -264,7 +269,14 @@ async def reviews_api_lifespan(app: FastAPI) -> AsyncIterator[None]:
             if github_webhook_secret is not None:
                 app.state.github_webhook_secret = github_webhook_secret
         try:
-            yield
+            async with (
+                reconciler_loop(
+                    resources.engine, resources.session_factory, os.environ.get("RABBITMQ_URL")
+                )
+                if resources is not None
+                else nullcontext()
+            ):
+                yield
         finally:
             if resources is not None:
                 if github_webhook_secret is not None:
