@@ -184,6 +184,16 @@ class ReviewProvider(Protocol):
     ) -> None: ...
 
 
+class ReviewOutputHandler(Protocol):
+    """What the review pipeline does with an accepted model answer."""
+
+    async def execute(
+        self,
+        run_id: UUID,
+        raw_output: Mapping[str, object] | str | bytes,
+    ) -> bool: ...
+
+
 class PublishReviewOutput:
     """Persist a validated model answer, then publish outside database transactions."""
 

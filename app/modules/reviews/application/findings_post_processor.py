@@ -74,6 +74,10 @@ class FindingsPostProcessor:
     def __init__(self, patterns: LintFilterPatterns) -> None:
         self._patterns = patterns
 
+    @property
+    def patterns(self) -> LintFilterPatterns:
+        return self._patterns
+
     @classmethod
     def from_default_patterns(cls) -> FindingsPostProcessor:
         """Load the immutable repository-owned lint filter artifact."""
