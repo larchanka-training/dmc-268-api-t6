@@ -93,7 +93,9 @@ def test_process_review_run_composes_repository_and_processor_from_a_shared_fact
             conventions: object,
             *,
             vcs_provider: Vcs,
+            trace: object = None,
         ) -> None:
+            assert trace is None
             assert isinstance(repository, Repository)
             assert isinstance(provider, Provider)
             assert cache is not None

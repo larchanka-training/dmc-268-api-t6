@@ -270,7 +270,7 @@ class ContextPayload(Base):
     run_id: Mapped[UUID] = mapped_column(ForeignKey("runs.id"), nullable=False, unique=True)
     schema_version: Mapped[int] = mapped_column(INTEGER, nullable=False)
     summary: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
-    s3_ref: Mapped[str] = mapped_column(TEXT, nullable=False)
+    s3_ref: Mapped[str | None] = mapped_column(TEXT, nullable=True)
     created_at: Mapped[datetime] = timestamp_column()
 
 

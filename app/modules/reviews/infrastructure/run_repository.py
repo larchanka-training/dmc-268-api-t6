@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from decimal import Decimal
+from typing import Any
 from uuid import UUID
 
 from sqlalchemy import ColumnElement, and_, func, or_, select, true, update
@@ -44,6 +45,7 @@ from app.modules.reviews.application.review_output import (
     ReviewOutput,
     ReviewPublication,
 )
+from app.modules.reviews.application.store_review_output import PublishingGuard
 from app.modules.reviews.application.vcs_diff import PullRequestLocator
 from app.modules.reviews.infrastructure.models import (
     CodeChange,
@@ -53,6 +55,7 @@ from app.modules.reviews.infrastructure.models import (
     Run,
     RunAction,
 )
+from app.modules.reviews.infrastructure.run_notifications import notify_run_state
 from app.modules.workspaces.infrastructure.repository_access import repository_access_predicate
 
 
@@ -572,6 +575,62 @@ class SqlAlchemyReviewOutputRepository:
         run.state = RunState.SUCCEEDED
         run.finished_at = datetime.now(UTC)
         await self._session.flush()
+
+    async def lock_for_publishing(self, run_id: UUID) -> PublishingGuard | None:
+        """Lock the Run and read the T8 guard; the caller stores findings in the same UOW."""
+        row = (
+            await self._session.execute(
+                select(Run, CodeChange.head_sha, Repository.review_event)
+                .join(CodeChange, CodeChange.id == Run.code_change_id)
+                .join(Repository, Repository.id == CodeChange.repository_id)
+                .where(Run.id == run_id)
+                .with_for_update(of=Run)
+            )
+        ).one_or_none()
+        if row is None:
+            return None
+        run, pr_head_sha, repository_review_event = row
+        return PublishingGuard(
+            state=run.state.value,
+            worker_id=run.worker_id,
+            cancel_requested=run.cancel_requested,
+            head_sha=run.head_sha,
+            head_current=run.head_sha == pr_head_sha,
+            repository_review_event=repository_review_event.value,
+        )
+
+    async def enter_publishing(
+        self,
+        run_id: UUID,
+        *,
+        lease_until: datetime,
+        postprocess_request: dict[str, Any],
+        postprocess_response: dict[str, Any],
+        started_at: datetime,
+        duration_ms: int,
+    ) -> None:
+        """Record ``review.postprocess``, the publishing lease and NOTIFY (T8); flush only."""
+        index = await self._session.scalar(
+            select(func.coalesce(func.max(RunAction.index), -1)).where(RunAction.run_id == run_id)
+        )
+        assert index is not None
+        self._session.add(
+            RunAction(
+                run_id=run_id,
+                index=index + 1,
+                tool="review.postprocess",
+                request=postprocess_request,
+                response=postprocess_response,
+                response_ref=None,
+                started_at=started_at,
+                duration_ms=duration_ms,
+            )
+        )
+        await self._session.execute(
+            update(Run).where(Run.id == run_id).values(lease_until=lease_until)
+        )
+        await self._session.flush()
+        await notify_run_state(self._session, run_id, RunState.PUBLISHING)
 
 
 def _to_published_finding(item: object) -> PublishedFinding:
