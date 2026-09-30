@@ -6,7 +6,7 @@ import asyncio
 import json
 import logging
 from collections.abc import AsyncIterator, Awaitable, Callable
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from functools import cache
@@ -298,3 +298,45 @@ async def amqp_channels(url: str, delays: RetryDelays) -> AsyncIterator[AmqpChan
         yield AmqpChannels(connection, await AmqpQueuePublisher.open(channel))
     finally:
         await connection.close()
+
+
+class LazyAmqpPublisher:
+    """Connect on first publication, so that portal-api starts without a reachable broker.
+
+    A failed publication raises; the caller leaves the Run for the outbox replay or the
+    reconciler. The robust connection reconnects on its own once it was established.
+    """
+
+    def __init__(self, url: str, delays: RetryDelays | None = None) -> None:
+        self._url = url
+        self._delays = delays or RetryDelays()
+        self._lock = asyncio.Lock()
+        self._stack: AsyncExitStack | None = None
+        self._publisher: AmqpQueuePublisher | None = None
+
+    async def _connected(self) -> AmqpQueuePublisher:
+        async with self._lock:
+            if self._publisher is None:
+                stack = AsyncExitStack()
+                try:
+                    channels = await stack.enter_async_context(
+                        amqp_channels(self._url, self._delays)
+                    )
+                except BaseException:
+                    await stack.aclose()
+                    raise
+                self._stack, self._publisher = stack, channels.publisher
+            return self._publisher
+
+    async def publish_confirmed(
+        self, message: PendingRunMessage, *, kind: RunPublicationKind = RunPublicationKind.QUEUED
+    ) -> None:
+        await (await self._connected()).publish_confirmed(message, kind=kind)
+
+    async def publish_review(self, pointer: ReviewPublishPointer) -> None:
+        await (await self._connected()).publish_review(pointer)
+
+    async def aclose(self) -> None:
+        if self._stack is not None:
+            await self._stack.aclose()
+        self._stack, self._publisher = None, None
