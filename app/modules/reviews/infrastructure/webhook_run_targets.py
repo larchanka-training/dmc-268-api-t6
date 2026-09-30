@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.common.infrastructure.db.enums import CodeChangeState
@@ -43,7 +43,7 @@ class SqlAlchemyWebhookRunTargets:
             return ProjectedPullRequestTarget(*row) if row is not None else None
 
     async def for_ci(self, event: CiTriggerEvent) -> tuple[UUID, ...]:
-        async with self._session_factory() as session:
+        async with self._session_factory() as session, session.begin():
             rows = await session.scalars(
                 select(CodeChange.id)
                 .join(Repository, CodeChange.repository_id == Repository.id)
@@ -60,4 +60,11 @@ class SqlAlchemyWebhookRunTargets:
                 )
                 .order_by(CodeChange.id)
             )
-            return tuple(rows.all())
+            ids = tuple(rows.all())
+            if ids and event.event_name in {"check_suite", "status"}:
+                await session.execute(
+                    update(CodeChange)
+                    .where(CodeChange.id.in_(ids), CodeChange.head_sha == event.head_sha)
+                    .values(ci_status={"event": event.event_name})
+                )
+            return ids

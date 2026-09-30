@@ -262,7 +262,7 @@ Check-run Run, завершённого без воркера (T6 после п�
 
 | Условие | Проверка |
 |---|---|
-| На PR стоит лейбл `ai-review` | `code_changes.reviewer_requested` — наш флаг (§8.2) [техлид, #37] |
+| На PR стоит лейбл `ai-review` | `code_changes.ai_review_labeled` — наш флаг (§8.2) [техлид, #37] |
 | CI зелёный для `head_sha` | REST в момент `try_enqueue`, порядок событий не важен [дефолт]: (а) `GET /repos/{owner}/{repo}/commits/{head_sha}/check-suites` — каждый чужой suite (все, кроме suite нашего App, `app.id`) имеет `status = completed` и `conclusion ∈ {success, neutral, skipped}`; (б) `GET /repos/{owner}/{repo}/commits/{head_sha}/status` — combined status `success` или статусов нет (`total_count = 0`; SD §8.2, события `status`); (в) CI есть: хотя бы один чужой suite или статус. При `wait_for_ci = never` проверка не выполняется; при `auto` и отсутствии CI через 2 мин — T2 |
 | Нет активного Run по PR | Р-2 |
 | Нет Run с `trigger = webhook` для `(PR, head_sha)` | повторные `check_suite.completed` по тому же sha второго прогона не создают; повторить можно только через rerun |
@@ -277,7 +277,7 @@ Check-run Run, завершённого без воркера (T6 после п�
 
 ### 8.2 Флаг и повторное ревью после пуша
 
-| Событие | `reviewer_requested` | Действие |
+| Событие | `ai_review_labeled` | Действие |
 |---|---|---|
 | `labeled`, `label.name == "ai-review"` | `true` | `try_enqueue` |
 | Бот опубликовал ревью | не меняется | бот лейбл не снимает, флаг остаётся [техлид, #37] |
@@ -291,9 +291,9 @@ Check-run Run, завершённого без воркера (T6 после п�
 
 ### 8.3 Sweep «2 мин без CI»
 
-- **Где:** leader-цикл сервиса worker (лидер через `pg_advisory_lock`), раз в 30 с [дефолт]; реализует #34. У worker уже есть ключ App (SD §8.3), поэтому REST-проверка не требует новых секретов. Реконсилер portal-api с периодом 5 мин sweep не заменяет.
-- **Кандидаты:** PR открыт ∧ `reviewer_requested` ∧ `wait_for_ci = auto` ∧ нет Run для `(PR, head_sha)` ∧ прошло ≥ 2 мин с более позднего из двух моментов: `reviewer_requested` стал `true`, появился `head_sha`. Отметки времени в `code_changes` добавляет #11.
-- **Действие:** тот же `try_enqueue(pr, allow_no_ci = true)`, что у вебхуков (#11). Функция повторяет REST-проверку: если появился чужой suite или статус, ждём результата; если нет — T2.
+- **Где:** #34 реализует leader-цикл worker (лидер через `pg_advisory_lock`) с периодом 30 с [дефолт] и вызывает предоставленный #38 `SweepNoCi`. У worker уже есть ключ App (SD §8.3), поэтому REST-проверка не требует новых секретов. Реконсилер portal-api с периодом 5 мин sweep не заменяет.
+- **Кандидаты:** #38 выбирает короткой транзакцией PR: открыт ∧ `ai_review_labeled` ∧ репозиторий включён ∧ `wait_for_ci = auto` ∧ `ci_status` пуст ∧ нет активного Run по PR ∧ нет Run с `trigger = webhook` для `(PR, head_sha)` ∧ прошло ≥ 2 мин с более позднего из `ai_review_labeled_at` и `head_first_seen_at`. `check_suite` и `status` текущего `head_sha` обновляют `ci_status` как кэш; изменение head или состояния лейбла очищает его.
+- **Действие:** после завершения транзакции #38 вызывает обычный `try_enqueue(pr)` без `allow_no_ci`; окончательное решение всё так же принимает GitHub REST в `DetermineCiEligibility`. Если результат не `ENQUEUED`, #38 помечает кандидата исключённым до изменения head или состояния лейбла, чтобы sweep не повторял REST-запрос каждые 30 с. #34 владеет только лидер-циклом и его расписанием.
 
 ---
 
@@ -409,7 +409,7 @@ UI рисует диапазон `[newLine ?? oldLine, endLine ?? newLine ?? old
 
 | Вопрос | Решение | Источник |
 |---|---|---|
-| Р-10 / OQ-1 — триггер и повторное ревью | **закрыт**: конъюнкция Р-10 подтверждена; триггер — лейбл `ai-review`, потому что бота нельзя запросить ревьюером ([#37](https://github.com/larchanka-training/dmc-268-api-t6/issues/37#issuecomment-5874776355)); после пуша — авто-повтор, пока PR открыт и стоит лейбл (флаг `reviewer_requested`, §8) | D2 [техлид]; лейбл вместо запроса ревьюера — [техлид] по #37; определение «зелёного CI» (check suites без своего и combined status `success` или пусто), проверка через REST, sweep раз в 30 с в leader-цикле worker — [дефолт] |
+| Р-10 / OQ-1 — триггер и повторное ревью | **закрыт**: конъюнкция Р-10 подтверждена; триггер — лейбл `ai-review`, потому что бота нельзя запросить ревьюером ([#37](https://github.com/larchanka-training/dmc-268-api-t6/issues/37#issuecomment-5874776355)); после пуша — авто-повтор, пока PR открыт и стоит лейбл (флаг `ai_review_labeled`, §8). #38 владеет портом выбора и `SweepNoCi`, #34 — advisory-lock leader-циклом и периодом 30 с. | D2 [техлид]; лейбл вместо запроса ревьюера — [техлид] по #37; определение «зелёного CI» (check suites без своего и combined status `success` или пусто) — REST в `try_enqueue`; guard включает отсутствие webhook Run на `(PR, head_sha)` |
 | OQ-2 — модель и бюджет | владелец — исполнитель #33 (lama2x2), срок 01.10.2026. Требования: strict structured output у основной и fallback-модели, контекст ≥ 60 000 токенов, стоимость fast ≤ $0.50 за прогон | D7 [техлид] |
 | OQ-3 — `review_event` по умолчанию | **закрыт**: `COMMENT`; поле `reviewEvent` в `Repository`; `REQUEST_CHANGES` — только при `reviewEvent = REQUEST_CHANGES` ∧ `blocking` (§11) | D8, D3 [дефолт] |
 | Инфраструктура MVP | PostgreSQL 17 + RabbitMQ + Redis. Объектное хранилище (S3) отложено после MVP. Вместо него: тела ответов > 64 КБ — отдельная таблица PG (§2, миграция — #34); полный `ContextPayload` не хранится, в PG — только summary; payload вебхука — JSONB в PG (миграция — #11); блобы > 256 КБ — `cached_file_blobs` в PG | D1 [техлид, пересмотрено 27.09.2026] |

@@ -18,6 +18,7 @@ class CiTriggerEvent:
     installation_external_id: int
     repository_external_id: int
     head_sha: str
+    event_name: str = "ci"
 
 
 @dataclass(frozen=True)

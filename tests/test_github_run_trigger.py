@@ -20,11 +20,13 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.schema import CreateSchema, DropSchema
 
 from alembic import command
-from app.common.infrastructure.db.enums import CodeChangeState, Engine, RunState
+from app.common.infrastructure.db.enums import CodeChangeState, Engine, RunState, WaitForCi
 from app.modules.repositories.infrastructure.models import Repository
 from app.modules.reviews.application.determine_ci_eligibility import (
     CiEligibility,
+    CiSnapshot,
     CiWaitMode,
+    DetermineCiEligibility,
     EligibilityCandidate,
     EligibilityReason,
 )
@@ -34,6 +36,7 @@ from app.modules.reviews.application.project_github_pull_request import (
     PullRequestLabelEvent,
     PullRequestState,
 )
+from app.modules.reviews.application.sweep_no_ci import SweepNoCi
 from app.modules.reviews.application.trigger_from_delivery import (
     CiTriggerEvent,
     ProjectedPullRequestTarget,
@@ -54,6 +57,8 @@ from app.modules.reviews.infrastructure.github_pull_request_projection import (
     SqlAlchemyPullRequestProjectionUnitOfWork,
 )
 from app.modules.reviews.infrastructure.models import CodeChange, Run
+from app.modules.reviews.infrastructure.no_ci_sweep_candidates import SqlAlchemyDueNoCiCandidates
+from app.modules.reviews.infrastructure.webhook_run_targets import SqlAlchemyWebhookRunTargets
 from app.modules.reviews.infrastructure.webhook_runs import SqlAlchemyWebhookRunUnitOfWork
 
 _PR = UUID("11111111-1111-1111-1111-111111111111")
@@ -552,6 +557,232 @@ def test_postgres_pending_replay_excludes_superseded_closed_and_disabled(
                 repo.enabled = False
                 await session.commit()
             assert await pending() == ()
+        finally:
+            await engine.dispose()
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.integration
+def test_postgres_no_ci_sweep_enqueues_once_and_skips_later_rest_calls(
+    webhook_run_database: tuple[str, str],
+) -> None:
+    database_url, schema = webhook_run_database
+
+    @dataclass
+    class GitHubRest:
+        calls: list[tuple[int, str, str]] = field(default_factory=list)
+
+        async def get_current_head_ci(
+            self, installation_id: int, repository_full_name: str, head_sha: str
+        ) -> CiSnapshot:
+            self.calls.append((installation_id, repository_full_name, head_sha))
+            return CiSnapshot(head_sha, (), "success", 0)
+
+    @dataclass
+    class Publisher:
+        async def publish_confirmed(
+            self,
+            message: PendingRunMessage,
+            *,
+            kind: RunPublicationKind = RunPublicationKind.QUEUED,
+        ) -> None:
+            assert kind is RunPublicationKind.QUEUED
+
+    async def exercise() -> None:
+        engine = create_async_engine(
+            database_url, connect_args={"options": f"-csearch_path={schema}"}
+        )
+        sessions = async_sessionmaker(engine, expire_on_commit=False)
+        rest = GitHubRest()
+        try:
+            async with sessions() as session:
+                repository = await session.get(Repository, _REPO)
+                assert repository is not None
+                repository.wait_for_ci = WaitForCi.AUTO
+                await session.commit()
+            enqueuer = TryEnqueueWebhookRun(
+                eligibility=DetermineCiEligibility(
+                    candidates=SqlAlchemyEligibilityCandidateStore(sessions),
+                    ci=rest,
+                    own_app_id=23,
+                    now=lambda: _NOW + timedelta(minutes=2),
+                ),
+                uow_factory=lambda: SqlAlchemyWebhookRunUnitOfWork(sessions),
+                publisher=Publisher(),
+                now=lambda: _NOW + timedelta(minutes=2),
+            )
+            sweep = SweepNoCi(
+                candidates=SqlAlchemyDueNoCiCandidates(sessions),
+                enqueuer=enqueuer,
+                now=lambda: _NOW + timedelta(minutes=2),
+            )
+
+            assert await sweep.execute() == 1
+            assert rest.calls == [(17, "octo/repo", _HEAD)]
+            async with sessions() as session:
+                assert len((await session.scalars(select(Run))).all()) == 1
+            assert await sweep.execute() == 0
+            assert rest.calls == [(17, "octo/repo", _HEAD)]
+        finally:
+            await engine.dispose()
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.integration
+def test_postgres_ci_event_cache_only_updates_current_head_for_check_suite_and_status(
+    webhook_run_database: tuple[str, str],
+) -> None:
+    database_url, schema = webhook_run_database
+
+    async def exercise() -> None:
+        engine = create_async_engine(
+            database_url, connect_args={"options": f"-csearch_path={schema}"}
+        )
+        sessions = async_sessionmaker(engine, expire_on_commit=False)
+        targets = SqlAlchemyWebhookRunTargets(sessions)
+        try:
+            assert await targets.for_ci(CiTriggerEvent(17, 101, "c" * 40, "check_suite")) == ()
+            async with sessions() as session:
+                pr = await session.get(CodeChange, _PR)
+                assert pr is not None and pr.ci_status == {}
+
+            assert await targets.for_ci(CiTriggerEvent(17, 101, _HEAD, "check_suite")) == (_PR,)
+            async with sessions() as session:
+                pr = await session.get(CodeChange, _PR)
+                assert pr is not None and pr.ci_status == {"event": "check_suite"}
+
+            assert await targets.for_ci(CiTriggerEvent(17, 101, _HEAD, "status")) == (_PR,)
+            async with sessions() as session:
+                pr = await session.get(CodeChange, _PR)
+                assert pr is not None and pr.ci_status == {"event": "status"}
+        finally:
+            await engine.dispose()
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.integration
+def test_postgres_no_ci_sweep_races_current_head_check_suite_to_one_run(
+    webhook_run_database: tuple[str, str],
+) -> None:
+    database_url, schema = webhook_run_database
+
+    @dataclass
+    class GitHubRest:
+        calls: int = 0
+
+        async def get_current_head_ci(
+            self, installation_id: int, repository_full_name: str, head_sha: str
+        ) -> CiSnapshot:
+            self.calls += 1
+            return CiSnapshot(head_sha, (), "success", 0)
+
+    @dataclass
+    class Publisher:
+        async def publish_confirmed(
+            self,
+            message: PendingRunMessage,
+            *,
+            kind: RunPublicationKind = RunPublicationKind.QUEUED,
+        ) -> None:
+            assert kind is RunPublicationKind.QUEUED
+
+    async def exercise() -> None:
+        engine = create_async_engine(
+            database_url, connect_args={"options": f"-csearch_path={schema}"}
+        )
+        sessions = async_sessionmaker(engine, expire_on_commit=False)
+        rest = GitHubRest()
+        try:
+            async with sessions() as session:
+                repository = await session.get(Repository, _REPO)
+                assert repository is not None
+                repository.wait_for_ci = WaitForCi.AUTO
+                await session.commit()
+            enqueuer = TryEnqueueWebhookRun(
+                eligibility=DetermineCiEligibility(
+                    candidates=SqlAlchemyEligibilityCandidateStore(sessions),
+                    ci=rest,
+                    own_app_id=23,
+                    now=lambda: _NOW + timedelta(minutes=2),
+                ),
+                uow_factory=lambda: SqlAlchemyWebhookRunUnitOfWork(sessions),
+                publisher=Publisher(),
+                now=lambda: _NOW + timedelta(minutes=2),
+            )
+            sweep = SweepNoCi(
+                candidates=SqlAlchemyDueNoCiCandidates(sessions),
+                enqueuer=enqueuer,
+                now=lambda: _NOW + timedelta(minutes=2),
+            )
+            trigger = TriggerFromDelivery(
+                targets=SqlAlchemyWebhookRunTargets(sessions), enqueuer=enqueuer
+            )
+
+            await asyncio.gather(
+                sweep.execute(), trigger.on_ci(CiTriggerEvent(17, 101, _HEAD, "check_suite"))
+            )
+            async with sessions() as session:
+                runs = (await session.scalars(select(Run))).all()
+                pr = await session.get(CodeChange, _PR)
+                assert len(runs) == 1
+                assert pr is not None and pr.ci_status == {"event": "check_suite"}
+            assert rest.calls >= 1
+        finally:
+            await engine.dispose()
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.integration
+def test_postgres_no_ci_sweep_excludes_failed_candidate_until_state_changes(
+    webhook_run_database: tuple[str, str],
+) -> None:
+    database_url, schema = webhook_run_database
+
+    @dataclass
+    class RestDecision:
+        calls: list[tuple[UUID, str]] = field(default_factory=list)
+
+        async def execute(self, code_change_id: UUID, expected_head_sha: str) -> EnqueueResult:
+            self.calls.append((code_change_id, expected_head_sha))
+            return EnqueueResult(EnqueueStatus.INELIGIBLE)
+
+    async def exercise() -> None:
+        engine = create_async_engine(
+            database_url, connect_args={"options": f"-csearch_path={schema}"}
+        )
+        sessions = async_sessionmaker(engine, expire_on_commit=False)
+        rest = RestDecision()
+        try:
+            async with sessions() as session:
+                repository = await session.get(Repository, _REPO)
+                pr = await session.get(CodeChange, _PR)
+                assert repository is not None and pr is not None
+                repository.wait_for_ci = WaitForCi.AUTO
+                pr.ai_review_labeled = True
+                pr.ai_review_labeled_at = _NOW
+                pr.head_first_seen_at = _NOW
+                pr.ci_status = {}
+                await session.commit()
+            sweep = SweepNoCi(
+                candidates=SqlAlchemyDueNoCiCandidates(sessions),
+                enqueuer=rest,
+                now=lambda: _NOW + timedelta(minutes=2),
+            )
+            assert await sweep.execute() == 1
+            assert rest.calls == [(_PR, _HEAD)]
+            assert await sweep.execute() == 0
+            assert rest.calls == [(_PR, _HEAD)]
+            async with sessions() as session:
+                pr = await session.get(CodeChange, _PR)
+                assert pr is not None
+                pr.ci_status = {}
+                await session.commit()
+            assert await sweep.execute() == 1
+            assert rest.calls == [(_PR, _HEAD), (_PR, _HEAD)]
         finally:
             await engine.dispose()
 

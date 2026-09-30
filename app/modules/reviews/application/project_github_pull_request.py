@@ -432,6 +432,7 @@ class ProjectGitHubPullRequest:
         record.ai_review_labeled = labeled
         record.ai_review_labeled_at = now if labeled else None
         record.label_intent_updated_at = now
+        record.ci_status = {}
 
     @staticmethod
     def _is_stale_opened(record: PullRequestRecord, event: PullRequestEvent) -> bool:

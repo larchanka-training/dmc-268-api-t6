@@ -1496,7 +1496,7 @@ def test_label_projection_reconciles_add_remove_readd_and_delayed_deliveries() -
     assert row.label_intent_updated_at == clock[0]
     assert row.reviewer_requested is True
     assert row.head_first_seen_at == first_seen
-    assert row.ci_status == {"head": "green"}
+    assert row.ci_status == {}  # A label-state change re-enables the no-CI sweep.
     assert uow.run_store.calls == []
     assert observations == ["labeled", "labeled", "unlabeled", "unlabeled", "labeled", "labeled"]
 
@@ -2131,7 +2131,7 @@ def test_dispatcher_projects_reopened_pr_event_from_durable_delivery() -> None:
         ).status
         == InstallationDeliveryDispatchStatus.PROCESSED_CI
     )
-    assert trigger.ci == [CiTriggerEvent(17, 101, _HEAD)]
+    assert trigger.ci == [CiTriggerEvent(17, 101, _HEAD, "check_suite")]
 
 
 @pytest.mark.parametrize("action", ["opened", "edited"])
