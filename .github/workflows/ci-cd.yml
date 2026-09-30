@@ -291,6 +291,7 @@ jobs:
           file: Dockerfile
           load: true
           tags: ${{ env.LOCAL_IMAGE }}
+          build-args: APT_REFRESH=${{ github.run_id }}-${{ github.run_attempt }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
           provenance: false
