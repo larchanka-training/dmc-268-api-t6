@@ -284,6 +284,16 @@ Consumer `review.run.deep` не запускается, очередь толь�
 после commit публикуется `review.publish/v1` с publisher confirms; ack входящего сообщения
 отправляется после commit. Каждая смена `state` отправляет `NOTIFY run_updated` в той же транзакции.
 
+Процесс API (`app/main.py`) тоже публикует в RabbitMQ: `POST /api/runs/{id}/rerun`
+(новый Run с `trigger = rerun`, AMQP priority 9) и сигнал закрытия check-run T6 при
+`POST /api/runs/{id}/cancel` для Run с `attempt ≥ 1`. Подключение ленивое
+(`LazyAmqpPublisher`): API стартует и без доступного брокера, а неотправленное
+сообщение подбирают replay в лидер-цикле worker (сигналы T6) или реконсилер (T18).
+Статусы из worker доходят до `/api/stream` через PostgreSQL: API слушает канал
+`run_updated` (`LISTEN` на отдельном autocommit-соединении,
+[run_update_listener.py](../app/bootstrap/run_update_listener.py)) и передаёт события в
+хаб, который хранит для медленного подписчика последний статус каждого Run.
+
 ## PostgreSQL и владение моделями
 
 PostgreSQL 17, драйвер `psycopg` v3. Runtime использует `AsyncSession`, Alembic —
