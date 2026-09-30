@@ -27,6 +27,7 @@ RUN uv sync --locked --no-dev \
 COPY app ./app
 COPY alembic ./alembic
 COPY alembic.ini ./
+COPY contracts/schemas ./contracts/schemas
 COPY review/prompts ./review/prompts
 COPY review/postprocess ./review/postprocess
 COPY review/rules ./review/rules
