@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime
+from decimal import Decimal
 from pathlib import Path
 from typing import Any, cast
 from uuid import UUID
@@ -11,9 +12,10 @@ from uuid import UUID
 from jsonschema import Draft202012Validator
 
 from app.main import app, get_run_repository
+from app.modules.reviews.application.get_run import FindingView, RunReview
 from app.modules.reviews.application.get_run_actions import RunAction, RunActionResponse
 from app.modules.reviews.application.get_run_comments import PublishedComment
-from app.modules.reviews.application.list_runs import RunListItem
+from app.modules.reviews.application.list_runs import RunCursor, RunListItem
 from tests.portal_test_client import authenticated_test_client as TestClient
 
 CONTRACTS_PATH = Path(__file__).parent / "fixtures" / "ui_zod_contracts.json"
@@ -42,6 +44,38 @@ class ContractRepository:
             head_sha="a" * 40,
             created_at=datetime(2026, 9, 25, tzinfo=UTC),
             summary_only=False,
+        )
+
+    async def list_runs(
+        self,
+        *,
+        status: str | None,
+        repository: str | None,
+        cursor: RunCursor | None,
+        limit: int,
+    ) -> list[RunListItem]:
+        item = await self.get_run(RUN_ID)
+        assert item is not None
+        return [item]
+
+    async def get_run_review(self, run_id: UUID) -> RunReview | None:
+        if run_id != RUN_ID:
+            return None
+        comments = await self.get_published_comments(run_id)
+        assert comments is not None
+        return RunReview(
+            author="octocat",
+            head_ref="feature",
+            base_ref="main",
+            findings=[
+                FindingView(comment=comment, side="RIGHT", suggestion=None, confidence=0.8)
+                for comment in comments
+            ],
+            summary={"problem": "One bug.", "done_well": "Clear names.", "effort": "small"},
+            usage_calls=1,
+            tokens_in=1200,
+            tokens_out=300,
+            cost_usd=Decimal("0.02"),
         )
 
     async def get_run_actions(self, run_id: UUID) -> list[RunAction] | None:
@@ -95,7 +129,8 @@ def test_api_responses_validate_against_json_schema_generated_from_ui_zod() -> N
     app.dependency_overrides[get_run_repository] = lambda: repository
     try:
         client = TestClient(app)
-        run_session = client.get(f"/api/runs/{RUN_ID}")
+        # GET /api/runs/{id} returns RunDetail (api#20 D3); list items are RunSession.
+        run_session = client.get("/api/runs")
         run_actions = client.get(f"/api/runs/{RUN_ID}/actions")
         review_comments = client.get(f"/api/runs/{RUN_ID}/comments")
     finally:
@@ -106,6 +141,6 @@ def test_api_responses_validate_against_json_schema_generated_from_ui_zod() -> N
     assert review_comments.status_code == 200
 
     schemas = _generated_schemas()
-    Draft202012Validator(schemas["runSession"]).validate(run_session.json())
+    Draft202012Validator(schemas["runSession"]).validate(run_session.json()["items"][0])
     Draft202012Validator(schemas["runAction"]).validate(run_actions.json()[0])
     Draft202012Validator(schemas["reviewComment"]).validate(review_comments.json()[0])

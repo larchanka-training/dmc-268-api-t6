@@ -81,3 +81,77 @@ class FileLinesDto(ApiDto):
     lines: list[str]
     total_lines: int
     next_offset: int | None
+
+
+class PullRequestDetailDto(PullRequestDto):
+    author: str | None
+    head_ref: str | None
+    base_ref: str | None
+
+
+class FindingViewDto(ApiDto):
+    id: UUID
+    file: str
+    old_line: int | None
+    new_line: int | None
+    end_line: int | None
+    side: str
+    severity: str
+    category: str
+    title: str
+    body: str
+    suggestion: str | None
+    confidence: float
+    rule_name: str | None
+
+
+class ReviewSummaryDto(ApiDto):
+    problem: str
+    done_well: str
+    effort: str
+
+
+class SeverityCountsDto(ApiDto):
+    critical: int
+    high: int
+    medium: int
+    low: int
+    info: int
+
+
+class RunBudgetDto(ApiDto):
+    tokens_in: int
+    tokens_out: int
+    cost_usd: float
+    token_limit: int
+    cost_limit_usd: float
+
+
+class RunDetailDto(RunSessionDto):
+    pull_request: PullRequestDetailDto
+    findings: list[FindingViewDto]
+    summary: ReviewSummaryDto | None
+    verdict: str | None
+    severity_counts: SeverityCountsDto
+    budget: RunBudgetDto | None
+
+
+class LatestRunDto(ApiDto):
+    id: UUID
+    status: str
+    verdict: str | None
+
+
+class PullRequestSummaryDto(ApiDto):
+    number: int
+    title: str
+    url: str
+    author: str | None
+    head_sha: str
+    updated_at: datetime
+    latest_run: LatestRunDto | None
+
+
+class PullRequestPageDto(ApiDto):
+    items: list[PullRequestSummaryDto]
+    next_cursor: str | None

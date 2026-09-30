@@ -73,7 +73,7 @@ def test_hub_delivers_only_to_live_subscribers_and_cleans_up_after_disconnect() 
 
 
 def test_hub_coalesces_stale_events_for_a_slow_subscriber() -> None:
-    hub = InMemoryRunUpdateHub(queue_size=1)
+    hub = InMemoryRunUpdateHub()
 
     async def receive_latest() -> RunUpdated:
         async with hub.subscribe() as events:

@@ -4,13 +4,14 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from decimal import Decimal
+from hashlib import sha256
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
-from sqlalchemy import ColumnElement, and_, func, or_, select, true, update
+from sqlalchemy import ColumnElement, Row, String, and_, cast, func, or_, select, true, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.common.infrastructure.db.enums import RunState
+from app.common.infrastructure.db.enums import Engine, RunState
 from app.modules.analytics.infrastructure.models import UsageEvent
 from app.modules.auth.application.scope import AuthScope
 from app.modules.repositories.infrastructure.models import (
@@ -24,6 +25,7 @@ from app.modules.reviews.application.findings_post_processor import (
     ProcessedFinding,
     ProcessedReviewOutput,
 )
+from app.modules.reviews.application.get_run import FindingView, RunReview
 from app.modules.reviews.application.get_run_actions import RunAction as RunActionProjection
 from app.modules.reviews.application.get_run_actions import RunActionResponse
 from app.modules.reviews.application.get_run_comments import PublishedComment
@@ -35,10 +37,13 @@ from app.modules.reviews.application.process_run import (
     RunDiffInput,
     RunVcsInput,
 )
+from app.modules.reviews.application.project_github_pull_request import PullRequestState
 from app.modules.reviews.application.prompt_builder import (
     parse_unified_diff,
     review_rule_from_stored,
 )
+from app.modules.reviews.application.queue_messages import StoredRunMessage
+from app.modules.reviews.application.rerun_run import RerunOutcome, RerunResult
 from app.modules.reviews.application.review_output import (
     FindingPostProcessingInput,
     PublishedFinding,
@@ -46,6 +51,7 @@ from app.modules.reviews.application.review_output import (
     ReviewPublication,
 )
 from app.modules.reviews.application.store_review_output import PublishingGuard
+from app.modules.reviews.application.try_enqueue_webhook_run import PendingRunMessage
 from app.modules.reviews.application.vcs_diff import PullRequestLocator
 from app.modules.reviews.infrastructure.models import (
     CodeChange,
@@ -54,8 +60,11 @@ from app.modules.reviews.infrastructure.models import (
     PromptVersion,
     Run,
     RunAction,
+    RunActionResponseBody,
 )
+from app.modules.reviews.infrastructure.run_action_payloads import place_response
 from app.modules.reviews.infrastructure.run_notifications import notify_run_state
+from app.modules.reviews.infrastructure.webhook_runs import SqlAlchemyWebhookRunStore
 from app.modules.workspaces.infrastructure.repository_access import repository_access_predicate
 
 
@@ -151,6 +160,66 @@ class SqlAlchemyRunRepository:
             row = (await session.execute(statement)).one_or_none()
         return self._to_run_list_item(*row) if row is not None else None
 
+    async def get_run_review(self, run_id: UUID) -> RunReview | None:
+        async with self._session_factory() as session:
+            pr = await session.scalar(
+                select(CodeChange)
+                .join(Run, Run.code_change_id == CodeChange.id)
+                .where(Run.id == run_id, self._authorized_run())
+            )
+            if pr is None:
+                return None
+            findings = (
+                await session.scalars(
+                    select(Finding)
+                    .where(
+                        Finding.run_id == run_id,
+                        Finding.published.is_(True),
+                        Finding.drop_reason.is_(None),
+                    )
+                    .order_by(Finding.created_at.asc(), Finding.id.asc())
+                )
+            ).all()
+            output = (
+                await session.execute(
+                    select(RunAction.response, RunActionResponseBody.body)
+                    .outerjoin(
+                        RunActionResponseBody,
+                        cast(RunActionResponseBody.id, String) == RunAction.response_ref,
+                    )
+                    .where(RunAction.run_id == run_id, RunAction.tool == "llm.review_output")
+                )
+            ).first()
+            usage = (
+                await session.execute(
+                    select(
+                        func.count(UsageEvent.id),
+                        func.coalesce(func.sum(UsageEvent.tokens_in), 0),
+                        func.coalesce(func.sum(UsageEvent.tokens_out), 0),
+                        func.coalesce(func.sum(UsageEvent.cost_usd), 0),
+                    ).where(UsageEvent.run_id == run_id)
+                )
+            ).one()
+        return RunReview(
+            author=pr.author_login,
+            head_ref=pr.source_branch,
+            base_ref=pr.target_branch,
+            findings=[
+                FindingView(
+                    comment=self._to_published_comment(item),
+                    side=item.side.value,
+                    suggestion=item.suggestion,
+                    confidence=float(item.confidence),
+                )
+                for item in findings
+            ],
+            summary=_review_summary(output),
+            usage_calls=int(usage[0]),
+            tokens_in=int(usage[1]),
+            tokens_out=int(usage[2]),
+            cost_usd=Decimal(usage[3]),
+        )
+
     async def get_published_comments(self, run_id: UUID) -> list[PublishedComment] | None:
         statement = (
             select(Run.id, Finding)
@@ -184,15 +253,20 @@ class SqlAlchemyRunRepository:
 
     async def get_run_action_response(self, run_id: UUID, index: int) -> RunActionResponse | None:
         statement = (
-            select(RunAction.response)
+            select(RunAction.response, RunActionResponseBody.body)
             .join(Run, RunAction.run_id == Run.id)
+            .outerjoin(
+                RunActionResponseBody,
+                cast(RunActionResponseBody.id, String) == RunAction.response_ref,
+            )
             .where(Run.id == run_id, RunAction.index == index, self._authorized_run())
         )
         async with self._session_factory() as session:
             row = (await session.execute(statement)).one_or_none()
         if row is None:
             return None
-        return RunActionResponse(response=row[0])
+        inline, stored = row
+        return RunActionResponse(response=stored if stored is not None else inline)
 
     async def get_run_diff(self, run_id: UUID) -> list[DiffSnapshot] | None:
         statement = (
@@ -359,7 +433,8 @@ class SqlAlchemyRunRepository:
     async def request_cancel(self, run_id: UUID) -> CancelRequestResult:
         """Persist one cancellation decision while holding the run row lock.
 
-        Queued work cannot have started and is cancelled immediately.  Running
+        Queued work cannot have started and is cancelled immediately (T6); an
+        attempted Run also gets a durable close signal for its check-run.  Running
         and publishing work remains in its current state until its worker sees
         ``cancel_requested`` at a checkpoint.  Terminal rows are intentionally
         left untouched, making retries idempotent.
@@ -371,14 +446,82 @@ class SqlAlchemyRunRepository:
             if run is None:
                 return CancelRequestResult(found=False, changed=False)
             if run.state is RunState.QUEUED:
+                now = datetime.now(UTC)
                 run.state = RunState.CANCELLED
-                return CancelRequestResult(found=True, changed=True)
+                run.error_code = "cancelled_by_user"
+                run.finished_at = now
+                if run.attempt >= 1:
+                    run.cancellation_signal_requested_at = now
+                await session.flush()
+                await notify_run_state(session, run_id, RunState.CANCELLED)
+                return CancelRequestResult(
+                    found=True, changed=True, signal_requested=run.attempt >= 1
+                )
             elif run.state in {RunState.RUNNING, RunState.PUBLISHING}:
                 if run.cancel_requested:
                     return CancelRequestResult(found=True, changed=False)
                 run.cancel_requested = True
                 return CancelRequestResult(found=True, changed=True)
         return CancelRequestResult(found=True, changed=False)
+
+    async def create_rerun(self, run_id: UUID, now: datetime) -> RerunResult:
+        """T3: a queued ``rerun`` Run for the PR's current head, or a conflict."""
+        async with self._session_factory.begin() as session:
+            code_change_id = await session.scalar(
+                select(Run.code_change_id).where(Run.id == run_id, self._authorized_run())
+            )
+            if code_change_id is None:
+                return RerunResult(RerunOutcome.NOT_FOUND)
+            # Locks the PR row like the webhook path, so both see one active-Run decision.
+            candidate = await SqlAlchemyWebhookRunStore(session).lock_candidate(code_change_id)
+            active = await session.scalar(
+                select(Run.id).where(
+                    Run.code_change_id == code_change_id,
+                    Run.state.in_([RunState.QUEUED, RunState.RUNNING, RunState.PUBLISHING]),
+                )
+            )
+            if (
+                candidate is None
+                or candidate.ci.state != PullRequestState.OPEN
+                or active is not None
+            ):
+                return RerunResult(RerunOutcome.CONFLICT)
+            new_id = uuid4()
+            session.add(
+                Run(
+                    id=new_id,
+                    code_change_id=code_change_id,
+                    base_sha=candidate.base_sha,
+                    base_ref=candidate.base_ref,
+                    head_sha=candidate.ci.head_sha,
+                    state=RunState.QUEUED,
+                    trigger="rerun",
+                    idempotency_key=sha256(f"rerun:{new_id}".encode()).hexdigest(),
+                    engine=Engine(candidate.engine),
+                    rule_version_id=candidate.rule_version_id,
+                    prompt_version_id=candidate.prompt_version_id,
+                    attempt=0,
+                    available_at=now,
+                    cancel_requested=False,
+                    message_published_at=None,
+                    created_at=now,
+                )
+            )
+            await session.flush()
+            await notify_run_state(session, new_id, RunState.QUEUED)
+            pending = PendingRunMessage.from_candidate(new_id, candidate, now)
+            return RerunResult(
+                RerunOutcome.CREATED,
+                StoredRunMessage(**{**vars(pending), "trigger": "rerun"}),
+            )
+
+    async def mark_rerun_published(self, run_id: UUID, now: datetime) -> None:
+        async with self._session_factory.begin() as session:
+            await session.execute(
+                update(Run)
+                .where(Run.id == run_id, Run.message_published_at.is_(None))
+                .values(message_published_at=now)
+            )
 
     @staticmethod
     def _summary_only_projection() -> ColumnElement[bool]:
@@ -526,14 +669,15 @@ class SqlAlchemyReviewOutputRepository:
                 )
             )
             assert index is not None
+            response, response_ref = await place_response(self._session, run_id, raw_output)
             self._session.add(
                 RunAction(
                     run_id=run_id,
                     index=index + 1,
                     tool="llm.review_output",
                     request={},
-                    response=raw_output,
-                    response_ref=None,
+                    response=response,
+                    response_ref=response_ref,
                     started_at=datetime.now(UTC),
                     duration_ms=0,
                 )
@@ -614,14 +758,15 @@ class SqlAlchemyReviewOutputRepository:
             select(func.coalesce(func.max(RunAction.index), -1)).where(RunAction.run_id == run_id)
         )
         assert index is not None
+        response, response_ref = await place_response(self._session, run_id, postprocess_response)
         self._session.add(
             RunAction(
                 run_id=run_id,
                 index=index + 1,
                 tool="review.postprocess",
                 request=postprocess_request,
-                response=postprocess_response,
-                response_ref=None,
+                response=response,
+                response_ref=response_ref,
                 started_at=started_at,
                 duration_ms=duration_ms,
             )
@@ -631,6 +776,21 @@ class SqlAlchemyReviewOutputRepository:
         )
         await self._session.flush()
         await notify_run_state(self._session, run_id, RunState.PUBLISHING)
+
+
+def _review_summary(output: Row[tuple[Any, Any]] | None) -> dict[str, str] | None:
+    """The accepted ``ReviewOutput.summary`` of ``llm.review_output``, if any."""
+    if output is None:
+        return None
+    value = output[1] if output[1] is not None else output[0]
+    summary = value.get("summary") if isinstance(value, dict) else None
+    if not isinstance(summary, dict):
+        return None
+    return {
+        "problem": str(summary.get("problem", "")),
+        "done_well": str(summary.get("done_well", "")),
+        "effort": str(summary.get("effort", "none")),
+    }
 
 
 def _to_published_finding(item: object) -> PublishedFinding:

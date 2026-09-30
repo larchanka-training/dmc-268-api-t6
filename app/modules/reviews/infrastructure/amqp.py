@@ -157,7 +157,8 @@ class AmqpQueuePublisher:
     async def publish_confirmed(
         self, message: PendingRunMessage, *, kind: RunPublicationKind = RunPublicationKind.QUEUED
     ) -> None:
-        priority = HIGH_PRIORITY if kind is not RunPublicationKind.QUEUED else 0
+        rerun = message_trigger(message) == "rerun"
+        priority = HIGH_PRIORITY if kind is not RunPublicationKind.QUEUED or rerun else 0
         await self._reviews.publish(
             self._message(run_message_body(message), priority), run_queue(message.engine)
         )

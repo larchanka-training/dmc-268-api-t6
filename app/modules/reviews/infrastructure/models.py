@@ -343,3 +343,15 @@ class RunAction(Base):
     response_ref: Mapped[str | None] = mapped_column(TEXT)
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     duration_ms: Mapped[int] = mapped_column(INTEGER, nullable=False)
+
+
+class RunActionResponseBody(Base):
+    """A ``run_actions`` response over 64 KB, referenced by ``response_ref`` (D1)."""
+
+    __tablename__ = "run_action_responses"
+    __table_args__ = (Index("ix_run_action_responses_run_id", "run_id"),)
+
+    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
+    run_id: Mapped[UUID] = mapped_column(ForeignKey("runs.id", ondelete="CASCADE"), nullable=False)
+    body: Mapped[Any] = mapped_column(JSONB, nullable=False)
+    created_at: Mapped[datetime] = timestamp_column()
