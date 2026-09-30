@@ -57,4 +57,4 @@ def parse_ci_event(event_name: str, payload: Mapping[str, object]) -> CiTriggerE
         repository_id = parsed_status.repository.id
     else:
         raise ValueError("unsupported GitHub CI event")
-    return CiTriggerEvent(installation_id, repository_id, sha)
+    return CiTriggerEvent(installation_id, repository_id, sha, event_name)
