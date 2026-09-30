@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import shutil
 import subprocess
@@ -11,7 +12,7 @@ from typing import Any
 
 import pytest
 
-from review.scripts.eval_replay import ReplayError, replay
+from review.scripts.eval_replay import ReplayError, format_console, replay
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DATASET_ROOT = REPO_ROOT / "test-prs-dataset"
@@ -88,6 +89,37 @@ def test_replay_scores_valid_responses_and_preserves_provenance(tmp_path: Path) 
     assert report["per_category"]["security"]["tp"] == 1
     assert report["verdict"] == {"agreed": 2, "total": 2, "agreement": 1.0}
     assert all(item["validator_exit_code"] == 0 for item in report["responses"])
+
+
+def test_replay_warns_when_recorded_prompt_differs_from_current_file(tmp_path: Path) -> None:
+    root = fixture_root(tmp_path)
+    record(root, {"SEC-01": review_output()})
+    prompt_root = tmp_path / "repo"
+    prompt = prompt_root / "review" / "prompts" / "review.system.v1.md"
+    prompt.parent.mkdir(parents=True)
+    prompt.write_text("recorded prompt\n", encoding="utf-8")
+    manifest_path = root / "responses" / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["prompt_sha"] = hashlib.sha256(prompt.read_bytes()).hexdigest()
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    assert replay(root, prompt_root=prompt_root)["warnings"] == []
+
+    prompt.write_text("changed prompt\n", encoding="utf-8")
+    report = replay(root, prompt_root=prompt_root)
+
+    assert len(report["warnings"]) == 1
+    assert "Prompt SHA mismatch" in report["warnings"][0]
+    assert "Warning: Prompt SHA mismatch" in format_console(report)
+
+
+def test_replay_warns_when_recorded_prompt_is_missing(tmp_path: Path) -> None:
+    root = fixture_root(tmp_path)
+    record(root, {"SEC-01": review_output()})
+
+    report = replay(root, prompt_root=tmp_path / "empty-repo")
+
+    assert report["warnings"] == ["Prompt file is missing: review/prompts/review.system.v1.md"]
 
 
 @pytest.mark.parametrize(

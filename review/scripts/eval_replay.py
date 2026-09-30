@@ -23,6 +23,7 @@ contributes to scoring as invalid rather than being corrected or dropped.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import subprocess
@@ -46,6 +47,7 @@ from review.scripts.validate_dataset import (  # noqa: E402
 VALIDATOR_SCRIPT = Path(__file__).with_name("validate_findings.py")
 SUCCESS = re.compile(r"OK ReviewOutput \d+ items")
 SHA256 = re.compile(r"[0-9a-f]{64}")
+REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 class ReplayError(Exception):
@@ -137,10 +139,29 @@ def _validated_raw(path: Path) -> tuple[object, bool, int, str]:
     return raw, True, result.returncode, output
 
 
-def replay(root: Path = DEFAULT_ROOT) -> dict[str, Any]:
+def _prompt_warnings(manifest: dict[str, Any], prompt_root: Path) -> list[str]:
+    relative = Path(manifest["prompt_path"])
+    if relative.is_absolute() or ".." in relative.parts:
+        raise ReplayError("response manifest prompt_path must be relative to repository root")
+    path = prompt_root / relative
+    if not path.resolve().is_relative_to(prompt_root.resolve()):
+        raise ReplayError("response manifest prompt_path must stay inside repository root")
+    if not path.is_file():
+        return [f"Prompt file is missing: {manifest['prompt_path']}"]
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    if digest != manifest["prompt_sha"]:
+        return [
+            f"Prompt SHA mismatch for {manifest['prompt_path']}: "
+            f"manifest {manifest['prompt_sha']}, current {digest}"
+        ]
+    return []
+
+
+def replay(root: Path = DEFAULT_ROOT, *, prompt_root: Path = REPO_ROOT) -> dict[str, Any]:
     """Validate case inputs and raw responses, then return a deterministic report."""
     records = _case_records(root)
     manifest = _manifest(root)
+    warnings = _prompt_warnings(manifest, prompt_root)
     entries = manifest["responses"]
     case_ids = {record["id"] for _, record in records}
     missing = sorted(case_ids - entries.keys())
@@ -180,6 +201,7 @@ def replay(root: Path = DEFAULT_ROOT) -> dict[str, Any]:
         )
     return {
         "schema_version": 1,
+        "warnings": warnings,
         "provenance": {
             key: manifest[key]
             for key in ("model_id", "prompt_path", "prompt_sha", "prompt_version", "run_metadata")
@@ -220,6 +242,8 @@ def format_console(report: dict[str, Any]) -> str:
             f"Precision={_percent(counts['precision'])} Recall={_percent(counts['recall'])}"
         )
     lines.append(f"Severity mismatches: {len(report['severity_mismatches'])}")
+    for warning in report["warnings"]:
+        lines.append(f"Warning: {warning}")
     return "\n".join(lines)
 
 

@@ -54,11 +54,13 @@ The first command checks one case, the second all present cases. `--final` also 
 
 ## Curated corpus
 
-The 24 active inputs pass final schema, patch-application and distribution validation. The class counts are security **4**, resource **5**, logic **5**, syntax **5**, and clean **5**. Five cases use distinct licensed real PRs, one in each class. Five separate critical truth anchors come from synthetic cases. The omitted SEC-05 slot has no case or response entry and is excluded from future replay/live denominators. No model response or quality baseline has been recorded yet.
+The 24 active inputs pass final schema, patch-application and distribution validation. The class counts are security **4**, resource **5**, logic **5**, syntax **5**, and clean **5**. Five cases use distinct licensed real PRs, one in each class. Five separate critical truth anchors come from synthetic cases. SEC-05 was omitted after two candidate fixtures were stopped by the automatic safety filter; four security cases still meet the minimum. It has no case or response entry and is excluded from future replay/live denominators. No model response or quality baseline has been recorded yet.
 
 ### Real PR provenance and checked truth
 
 Each case's linked notes record the exact base/head revisions, retained license text, patch scope and ground-truth oracle. Independent case reviews checked source and license identity and inspected the stated behavior; the validator checks mechanics but cannot establish semantics or legal permission by itself.
+
+Case-local `oracle.mjs` and `*_oracle.py` files support human fixture verification. They are never sent to the model and are not inputs to the replay harness; replay reads only case metadata, patches, and recorded raw responses.
 
 | Case | Source and attribution | License at base revision | Checked result |
 | --- | --- | --- | --- |
