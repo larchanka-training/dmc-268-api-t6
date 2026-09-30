@@ -24,7 +24,8 @@ Unit of Work, конфигурация Alembic, миграции схемы и �
 entrypoints ниже — целевая организация приложения: use cases, конкретные repositories,
 LLM/VCS/payment gateways и consumers ещё предстоит реализовать. Весь код пока живёт в
 одном пакете `app/`; разнесение по сервисам `services/<name>/` (Р-12) реализуется в
-PR #10. Текущий Compose поднимает backend и PostgreSQL, а не весь целевой runtime.
+PR #10. Текущий Compose поднимает backend, worker, PostgreSQL, RabbitMQ и Redis, а не весь
+целевой runtime; worker и очередь описаны в разделе «Worker и очередь (#34)».
 
 ## Принципы
 
@@ -246,6 +247,42 @@ Application управляет транзакцией через [UnitOfWork](..
 
 Вызовы GitHub и Stripe также не включаются в длительную DB-транзакцию. Их retries,
 idempotency и reconciliation — часть соответствующего use case, не repository.
+
+### Worker и очередь (#34)
+
+До разнесения по сервисам (#16) worker является отдельным процессом из того же образа,
+что `backend`. Запуск одной командой:
+
+```bash
+uv run python -m app.worker        # локально
+docker compose up -d worker        # сервис worker в docker-compose.yml
+```
+
+Переменные: `DATABASE_URL` и `RABBITMQ_URL` обязательны; `GITHUB_APP_ID` и
+`GITHUB_APP_PRIVATE_KEY` необязательны: без них процесс стартует, пишет предупреждение,
+а sweep «2 мин без CI» и публикация в GitHub (ревью и check-run) выключены. `WORKER_ID`
+(по умолчанию `hostname:pid`) пишется в `runs.worker_id`, `PORTAL_URL` даёт ссылку на
+прогон в check-run.
+
+При старте worker объявляет топологию SD §7.1 целиком
+([amqp.py](../app/modules/reviews/infrastructure/amqp.py)) и запускает три задачи:
+
+| Задача | Что делает | Use case |
+|---|---|---|
+| consumer `review.run.fast` (prefetch 1) | RunGuard, claim по lease, попытка под watchdog, retry и DLQ | [HandleReviewRun](../app/modules/reviews/application/handle_review_run.py) |
+| consumer `review.publish` (prefetch 1) | T14-T16: ревью в GitHub, check-run | [PublishRunReview](../app/modules/reviews/application/publish_run_review.py) |
+| лидер-цикл (`pg_advisory_lock`, 30 с) | sweep «2 мин без CI» и повторная отправка outbox (`message_published_at IS NULL`, сигналы отмены T6) | `SweepNoCi`, `TryEnqueueWebhookRun.replay_pending_publications` |
+
+Consumer `review.run.deep` не запускается, очередь только объявляется. Реконсилер
+(T12, T13, T17, T18) работает лидер-циклом процесса API (`app/main.py`, раз в 5 минут,
+[reconciler.py](../app/bootstrap/reconciler.py)); без `RABBITMQ_URL` он выключен.
+
+Транзакции попытки: claim (`queued` → `running`, `attempt + 1`, lease 5 мин,
+`NOTIFY run_updated`) идёт одной короткой транзакцией; diff, конвенции и вызов модели идут
+вне транзакций; heartbeat раз в 60 с продлевает lease только до дедлайна попытки
+(8 мин для fast); T8 (`review.postprocess`, находки, `publishing`) идёт одной транзакцией,
+после commit публикуется `review.publish/v1` с publisher confirms; ack входящего сообщения
+отправляется после commit. Каждая смена `state` отправляет `NOTIFY run_updated` в той же транзакции.
 
 ## PostgreSQL и владение моделями
 

@@ -495,6 +495,16 @@ ID — UUID без префиксов, как в БД; `findings_hash` — 64 he
 
 Правила: заголовок `schema` версионируется, потребитель отвергает в DLQ незнакомую мажорную версию и сообщение, не прошедшее схему; `message_id` = детерминированный id из БД, повторная доставка безопасна; попытки считает один счётчик `runs.attempt` (инкремент при claim), `x-death` — только диагностика; после 3 попыток — `run.state = failed` с `error_code` и копия в `reviews.dlq` (PIPELINE_SPEC §4).
 
+### 7.3 Реализация (#34): отступления
+
+- `consumer_timeout=45min` не задаётся аргументом очереди: RabbitMQ 4 отклоняет `x-consumer-timeout` для classic-очереди (`PRECONDITION_FAILED`). Это настройка брокера (`consumer_timeout` в `rabbitmq.conf`, по умолчанию 30 мин). Попытка в `running` занимает не больше 18 мин (PIPELINE_SPEC §3), поэтому дефолта хватает; значение 45 мин задаётся конфигурацией брокера при деплое (#35).
+- `budget_paused` (PIPELINE_SPEC §5.3): `workspaces.daily_budget_usd = 0` означает «лимит не задан», проверка остатка идёт только при положительном лимите. Остаток считается по `usage_events.cost_usd` за текущие сутки UTC.
+- `rule_not_matched`: правила отбора PR в схеме пока нет. RunGuard спрашивает порт `RunSelectionRule`, текущая реализация пропускает любой PR; условия отбора подключаются к этому порту отдельной задачей.
+- Идемпотентность публикации (Р-5): в тело ревью добавляется скрытый маркер `<!-- ai-review findings_hash=... -->`. Перед `POST /pulls/{n}/reviews` publisher ищет ревью с этим маркером и при находке не публикует повторно.
+- Check-run называется `AI Review`, ссылка на прогон строится из `PORTAL_URL` (`{PORTAL_URL}/runs/{run_id}`); без `PORTAL_URL` ссылки нет.
+- Без `GITHUB_APP_ID` и `GITHUB_APP_PRIVATE_KEY` worker стартует, но diff получить не может: доставленный `review.run/v1` завершает Run как `failed` / `github_forbidden` без retry.
+- До подключения LLM Gateway (#33) worker собирает заглушку `ReviewModel`: вызов модели завершается `llm_unavailable`, Run проходит retry и уходит в `failed`.
+
 ---
 
 ## 8. Взаимодействие с VCS
