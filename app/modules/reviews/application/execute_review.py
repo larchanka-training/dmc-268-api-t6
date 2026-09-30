@@ -16,7 +16,7 @@ from app.modules.reviews.application.prompt_builder import (
     ReviewContext,
     ReviewRule,
 )
-from app.modules.reviews.application.review_output import PublishReviewOutput
+from app.modules.reviews.application.review_output import ReviewOutputHandler
 
 
 @dataclass(frozen=True)
@@ -63,7 +63,7 @@ class ExecuteReviewRun:
         processor: ReviewInputProcessor,
         repository: ReviewPromptRepository,
         model: ReviewModel,
-        publisher: PublishReviewOutput,
+        publisher: ReviewOutputHandler,
     ) -> None:
         self._processor = processor
         self._repository = repository

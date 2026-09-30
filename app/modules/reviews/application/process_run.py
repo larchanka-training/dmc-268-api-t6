@@ -25,6 +25,7 @@ from app.modules.reviews.application.get_run_file_lines import (
     BlobCacheWriter,
 )
 from app.modules.reviews.application.prompt_builder import ReviewRule
+from app.modules.reviews.application.run_trace import RunTrace, traced_step
 from app.modules.reviews.application.vcs_diff import (
     MAX_BLOB_BYTES,
     FetchVcsReviewInput,
@@ -92,12 +93,14 @@ class ReviewRunProcessor:
         blob_cache: BlobCacheWriter | None = None,
         conventions: GenerateRepoConventions | None = None,
         vcs_provider: VcsProvider | None = None,
+        trace: RunTrace | None = None,
     ) -> None:
         self._repository = repository
         self._provider = provider
         self._blob_cache = blob_cache
         self._conventions = conventions
         self._vcs_provider = vcs_provider
+        self._trace = trace
 
     async def execute(self, run_id: UUID) -> bool:
         """Fetch and snapshot the exact head associated with a durable run."""
@@ -116,33 +119,53 @@ class ReviewRunProcessor:
                 return None
             stored_files = await vcs_repository.get_run_snapshots(run_id)
             if stored_files is None:
-                fetched = await FetchVcsReviewInput(self._vcs_provider, run_id=run_id).execute(
-                    vcs_run.locator, vcs_run.head_sha, vcs_run.base_sha
-                )
-                failed_blob_shas = fetched.failed_blob_shas
-                omission_by_path = {
-                    item.file.filename: item.reason.value for item in fetched.omissions
+                request = {
+                    "pr_number": vcs_run.locator.number,
+                    "head_sha": vcs_run.head_sha,
+                    "base_sha": vcs_run.base_sha,
                 }
-                files = [
-                    DiffSnapshot(
-                        filename=file.filename,
-                        patch=file.patch,
-                        blob_sha=file.blob_sha,
-                        status=file.status,
-                        previous_filename=file.previous_filename,
-                        additions=file.additions,
-                        deletions=file.deletions,
-                        changes=file.changes,
-                        omission_reason=omission_by_path.get(file.filename),
+                async with traced_step(self._trace, run_id, "vcs.fetch_diff", request) as step:
+                    fetched = await FetchVcsReviewInput(self._vcs_provider, run_id=run_id).execute(
+                        vcs_run.locator, vcs_run.head_sha, vcs_run.base_sha
                     )
-                    for file in fetched.files
-                ]
-                stored_files = await StoreDiffSnapshot(self._repository).execute(
-                    run_id=run_id,
-                    code_change_id=vcs_run.code_change_id,
-                    head_sha=vcs_run.head_sha,
-                    files=files,
-                )
+                    failed_blob_shas = fetched.failed_blob_shas
+                    omission_by_path = {
+                        item.file.filename: item.reason.value for item in fetched.omissions
+                    }
+                    files = [
+                        DiffSnapshot(
+                            filename=file.filename,
+                            patch=file.patch,
+                            blob_sha=file.blob_sha,
+                            status=file.status,
+                            previous_filename=file.previous_filename,
+                            additions=file.additions,
+                            deletions=file.deletions,
+                            changes=file.changes,
+                            omission_reason=omission_by_path.get(file.filename),
+                        )
+                        for file in fetched.files
+                    ]
+                    stored_files = await StoreDiffSnapshot(self._repository).execute(
+                        run_id=run_id,
+                        code_change_id=vcs_run.code_change_id,
+                        head_sha=vcs_run.head_sha,
+                        files=files,
+                    )
+                    step.response = {
+                        "files": [
+                            {
+                                "filename": file.filename,
+                                "status": file.status,
+                                "additions": file.additions,
+                                "deletions": file.deletions,
+                                "too_large": file.omission_reason == "too_large",
+                            }
+                            for file in stored_files
+                        ],
+                        "total_lines": sum(file.changes for file in stored_files),
+                        "summary_only": any(file.summary_only for file in stored_files),
+                    }
         else:
             legacy_run = await self._repository.get_run_diff_input(run_id)
             if legacy_run is None:
