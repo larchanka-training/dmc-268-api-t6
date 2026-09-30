@@ -67,8 +67,16 @@ class CancelSession:
         self.statement: Select[Any] | None = None
 
     async def scalar(self, statement: Select[Any]) -> SimpleNamespace | None:
-        self.statement = statement
+        # The row lock is the first statement; NOTIFY lookups follow it.
+        if self.statement is None:
+            self.statement = statement
         return self.run
+
+    async def flush(self) -> None:
+        return None
+
+    async def execute(self, statement: Select[Any]) -> None:
+        return None
 
 
 class CancelSessionContext(AbstractAsyncContextManager[CancelSession]):
@@ -179,7 +187,7 @@ def test_sqlalchemy_run_repository_gets_detail_with_one_summary_query() -> None:
 
 def test_sqlalchemy_run_repository_cancels_only_the_locked_target_run() -> None:
     run_id = UUID("00000000-0000-0000-0000-000000000001")
-    run = SimpleNamespace(state=RunState.QUEUED, cancel_requested=False)
+    run = SimpleNamespace(state=RunState.QUEUED, cancel_requested=False, attempt=0)
     session = CancelSession(run)
     repository = SqlAlchemyRunRepository(
         cast(async_sessionmaker[AsyncSession], CancelSessionFactory(session))
@@ -308,7 +316,7 @@ def test_sqlalchemy_run_repository_projects_ordered_actions_and_full_response() 
     assert "WHERE runs.id =" in actions_sql
     assert "ORDER BY run_actions.index ASC" in actions_sql
 
-    response_session = FakeSession([({"content": "complete"},)])
+    response_session = FakeSession([({"content": "complete"}, None)])
     response_repository = SqlAlchemyRunRepository(
         cast(async_sessionmaker[AsyncSession], FakeSessionFactory(response_session))
     )

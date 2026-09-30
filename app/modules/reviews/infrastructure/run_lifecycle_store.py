@@ -37,6 +37,7 @@ from app.modules.reviews.infrastructure.models import (
     Run,
     RunAction,
 )
+from app.modules.reviews.infrastructure.run_action_payloads import place_response
 from app.modules.reviews.infrastructure.run_notifications import notify_run_state
 from app.modules.reviews.infrastructure.run_repository import _to_published_finding_row
 from app.modules.workspaces.infrastructure.models import Workspace
@@ -449,14 +450,15 @@ class SqlAlchemyRunTraceStore:
             select(func.coalesce(func.max(RunAction.index), -1)).where(RunAction.run_id == run_id)
         )
         assert index is not None
+        stored, response_ref = await place_response(self._session, run_id, response)
         self._session.add(
             RunAction(
                 run_id=run_id,
                 index=index + 1,
                 tool=tool,
                 request=request,
-                response=response,
-                response_ref=None,
+                response=stored,
+                response_ref=response_ref,
                 started_at=started_at,
                 duration_ms=duration_ms,
             )

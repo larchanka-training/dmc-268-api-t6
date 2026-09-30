@@ -6,6 +6,8 @@ import json
 import re
 from collections.abc import AsyncIterator, Iterator, Mapping
 from contextlib import asynccontextmanager
+from dataclasses import replace
+from datetime import UTC, datetime
 from functools import cache
 from pathlib import Path
 from typing import Any, get_args
@@ -21,7 +23,12 @@ from openapi_spec_validator.readers import read_from_filename
 from referencing import Registry
 from referencing.jsonschema import DRAFT202012
 
+from app.bootstrap.reviews_api import get_pull_requests, get_repository_settings, get_run_publisher
 from app.main import app, get_file_blob_cache, get_run_event_hub, get_run_repository
+from app.modules.repositories.application.repository_settings import (
+    RepositorySettings,
+    RepositorySettingsChange,
+)
 from app.modules.reviews.application.cancel_run import CancelRequestResult
 from app.modules.reviews.application.get_run_actions import RunActionResponse
 from app.modules.reviews.application.get_run_diff import DiffSnapshot
@@ -30,9 +37,12 @@ from app.modules.reviews.application.get_run_file_lines import (
     BlobCacheKey,
     BlobCacheStatus,
 )
+from app.modules.reviews.application.list_pulls import LatestRunRow, PullRequestRow
 from app.modules.reviews.application.list_runs import RunCursor, RunListItem
+from app.modules.reviews.application.rerun_run import RerunOutcome, RerunResult
 from app.modules.reviews.application.review_output import Category, Severity
 from app.modules.reviews.application.run_events import RunUpdated
+from app.modules.reviews.application.try_enqueue_webhook_run import PendingRunMessage
 from tests.portal_test_client import authenticated_test_client
 from tests.test_ui_zod_contracts import RUN_ID, ContractRepository, _generated_schemas
 
@@ -47,6 +57,7 @@ UNKNOWN_RUN_ID = UUID("99999999-9999-4999-8999-999999999999")
 EXPIRED_PATH = "expired.py"
 RUN_URL = f"/api/runs/{RUN_ID}"
 REPOSITORY_ID = UUID("22222222-2222-4222-8222-222222222222")
+CONFLICT_RUN_ID = UUID("88888888-8888-4888-8888-888888888888")
 
 
 @cache
@@ -149,6 +160,99 @@ class OpenApiContractRepository(ContractRepository):
             blob_sha=("e" if path == EXPIRED_PATH else "a") * 40,
         )
 
+    async def create_rerun(self, run_id: UUID, now: datetime) -> RerunResult:
+        if run_id == CONFLICT_RUN_ID:
+            return RerunResult(RerunOutcome.CONFLICT)
+        if run_id != RUN_ID:
+            return RerunResult(RerunOutcome.NOT_FOUND)
+        return RerunResult(
+            RerunOutcome.CREATED,
+            PendingRunMessage(
+                run_id=RUN_ID,
+                workspace_id=REPOSITORY_ID,
+                installation_id=17,
+                repository_id=REPOSITORY_ID,
+                repository_external_id=101,
+                repository_full_name="org/repo",
+                pr_number=1,
+                head_sha="a" * 40,
+                base_sha="b" * 40,
+                base_ref="main",
+                engine="fast",
+                rule_version_id=REPOSITORY_ID,
+                prompt_version_id=REPOSITORY_ID,
+                attempt=1,
+                requested_at=now,
+            ),
+        )
+
+    async def mark_rerun_published(self, run_id: UUID, now: datetime) -> None:
+        return None
+
+
+REPOSITORY = RepositorySettings(
+    id=REPOSITORY_ID,
+    full_name="org/repo",
+    url="https://github.test/org/repo",
+    default_branch="main",
+    enabled=True,
+    default_engine="fast",
+    wait_for_ci="auto",
+    max_comments=10,
+    review_event="COMMENT",
+)
+
+
+class ContractRepositories:
+    def __init__(self) -> None:
+        self.item = REPOSITORY
+
+    async def list_repositories(self) -> list[RepositorySettings]:
+        return [self.item]
+
+    async def get_repository(self, repository_id: UUID) -> RepositorySettings | None:
+        return self.item if repository_id == REPOSITORY_ID else None
+
+    async def update_repository(
+        self, repository_id: UUID, change: RepositorySettingsChange
+    ) -> RepositorySettings | None:
+        if repository_id != REPOSITORY_ID:
+            return None
+        values = {key: value for key, value in vars(change).items() if value is not None}
+        self.item = replace(self.item, **values)
+        return self.item
+
+
+class ContractPulls:
+    async def list_pulls(
+        self, repository_id: UUID, *, state: str, cursor: RunCursor | None, limit: int
+    ) -> list[PullRequestRow] | None:
+        if repository_id != REPOSITORY_ID:
+            return None
+        updated_at = datetime(2026, 9, 25, tzinfo=UTC)
+        return [
+            PullRequestRow(
+                id=REPOSITORY_ID,
+                number=1,
+                title="Contract fixture",
+                url="https://example.test/pr/1",
+                author="octocat",
+                head_sha="a" * 40,
+                updated_at=updated_at,
+                latest_run=LatestRunRow(RUN_ID, "succeeded", False, ("high",)),
+            ),
+            PullRequestRow(
+                id=UNKNOWN_RUN_ID,
+                number=2,
+                title="Never reviewed",
+                url="https://example.test/pr/2",
+                author=None,
+                head_sha="b" * 40,
+                updated_at=updated_at,
+                latest_run=None,
+            ),
+        ][:limit]
+
 
 class ContractBlobCache:
     async def get(self, key: BlobCacheKey) -> BlobCacheEntry:
@@ -172,8 +276,13 @@ class OneEventHub:
 def client() -> Iterator[TestClient]:
     repository = OpenApiContractRepository()
     blob_cache = ContractBlobCache()
+    repositories = ContractRepositories()
+    pulls = ContractPulls()
     app.dependency_overrides[get_run_repository] = lambda: repository
     app.dependency_overrides[get_file_blob_cache] = lambda: blob_cache
+    app.dependency_overrides[get_repository_settings] = lambda: repositories
+    app.dependency_overrides[get_pull_requests] = lambda: pulls
+    app.dependency_overrides[get_run_publisher] = lambda: None
     try:
         yield authenticated_test_client(app)
     finally:
@@ -229,9 +338,6 @@ def test_every_operation_declares_its_service_and_plan() -> None:
             RUN_URL,
             "200",
             id="run-detail",
-            marks=pytest.mark.xfail(
-                raises=ValidationError, strict=True, reason="#34: run detail per api#20 D3"
-            ),
         ),
         pytest.param("post", "/api/runs/{run_id}/cancel", f"{RUN_URL}/cancel", "200", id="cancel"),
         pytest.param(
@@ -266,6 +372,32 @@ def test_every_operation_declares_its_service_and_plan() -> None:
             id="file-expired",
         ),
         pytest.param("get", "/api/runs", "/api/runs?limit=0", "422", id="invalid-limit"),
+        pytest.param("post", "/api/runs/{run_id}/rerun", f"{RUN_URL}/rerun", "202", id="rerun"),
+        pytest.param(
+            "post",
+            "/api/runs/{run_id}/rerun",
+            f"/api/runs/{CONFLICT_RUN_ID}/rerun",
+            "409",
+            id="rerun-conflict",
+        ),
+        pytest.param("get", "/api/repos", "/api/repos", "200", id="repositories"),
+        pytest.param(
+            "get", "/api/repos/{repo_id}", f"/api/repos/{REPOSITORY_ID}", "200", id="repository"
+        ),
+        pytest.param(
+            "get",
+            "/api/repos/{repo_id}",
+            f"/api/repos/{UNKNOWN_RUN_ID}",
+            "404",
+            id="repository-not-found",
+        ),
+        pytest.param(
+            "get",
+            "/api/repos/{repo_id}/pulls",
+            f"/api/repos/{REPOSITORY_ID}/pulls?state=all",
+            "200",
+            id="pulls",
+        ),
         pytest.param("get", "/api/runs", "/api/runs?cursor=not-a-cursor", "422", id="bad-cursor"),
     ],
 )
@@ -394,3 +526,41 @@ def test_enums_match_the_ui_contract_and_the_review_output_model() -> None:
     assert components["Category"]["enum"] == list(get_args(Category.__value__))
     assert components["Severity"]["enum"] == zod["reviewComment"]["properties"]["severity"]["enum"]
     assert components["Category"]["enum"] == zod["reviewComment"]["properties"]["category"]["enum"]
+
+
+def test_repository_update_validates_and_returns_the_repository_schema(client: TestClient) -> None:
+    url = f"/api/repos/{REPOSITORY_ID}"
+    updated = client.patch(url, json={"waitForCi": "never", "maxComments": 3})
+    review_event = client.patch(url, json={"reviewEvent": "REQUEST_CHANGES"})
+    invalid = [
+        client.patch(url, json=body)
+        for body in (
+            {"maxComments": 0},
+            {"maxComments": 11},
+            {"waitForCi": "sometimes"},
+            {"reviewEvent": "APPROVE"},
+            {"name": "renamed"},
+            {"enabled": None},
+            {},
+        )
+    ]
+    missing = client.patch(f"/api/repos/{UNKNOWN_RUN_ID}", json={"enabled": False})
+
+    assert updated.status_code == 200
+    assert (updated.json()["waitForCi"], updated.json()["maxComments"]) == ("never", 3)
+    assert review_event.json()["reviewEvent"] == "REQUEST_CHANGES"
+    _validator_for("patch", "/api/repos/{repo_id}", "200").validate(updated.json())
+    assert [response.status_code for response in invalid] == [422] * 7
+    assert missing.status_code == 404
+
+
+def test_pulls_page_derives_the_latest_run_verdict(client: TestClient) -> None:
+    page = client.get(f"/api/repos/{REPOSITORY_ID}/pulls").json()
+
+    assert [item["latestRun"] for item in page["items"]] == [
+        {"id": str(RUN_ID), "status": "succeeded", "verdict": "blocking"},
+        None,
+    ]
+    assert page["nextCursor"] is None
+    assert client.get(f"/api/repos/{REPOSITORY_ID}/pulls?state=merged").status_code == 422
+    assert client.get(f"/api/repos/{REPOSITORY_ID}/pulls?cursor=bad").status_code == 422
