@@ -35,6 +35,7 @@ class SqlAlchemyReviewPromptRepository:
                 PromptVersion.content,
                 RuleVersion.rules,
             )
+            .select_from(Run)
             .join(PromptVersion, PromptVersion.id == Run.prompt_version_id)
             .join(RuleVersion, RuleVersion.id == Run.rule_version_id)
             .where(Run.id == run_id)
