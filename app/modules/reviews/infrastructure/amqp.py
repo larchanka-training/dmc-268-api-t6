@@ -8,7 +8,6 @@ import logging
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from functools import cache
 from pathlib import Path
 from typing import Any
@@ -23,6 +22,7 @@ from aio_pika.abc import (
     AbstractRobustConnection,
 )
 from jsonschema import Draft202012Validator
+from pydantic import BaseModel
 
 from app.modules.reviews.application.handle_review_run import DeliveryOutcome
 from app.modules.reviews.application.queue_messages import ReviewPublishPointer, message_trigger
@@ -31,7 +31,10 @@ from app.modules.reviews.application.try_enqueue_webhook_run import (
     PendingRunMessage,
     RunPublicationKind,
 )
-from app.modules.reviews.application.verdict import publish_message_id
+from app.modules.reviews.infrastructure.amqp_messages import (
+    ReviewPublishMessage,
+    ReviewRunMessage,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -68,51 +71,14 @@ def validate_message(name: str, body: dict[str, Any]) -> None:
     _validator(name).validate(body)
 
 
-def _timestamp(value: datetime) -> str:
-    return value.astimezone(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z")
-
-
 def run_message_body(message: PendingRunMessage) -> dict[str, Any]:
-    body: dict[str, Any] = {
-        "schema": "review.run/v1",
-        "message_id": str(message.run_id),
-        "run_id": str(message.run_id),
-        "workspace_id": str(message.workspace_id),
-        "installation_id": message.installation_id,
-        "repo": {
-            "id": str(message.repository_id),
-            "provider": "github",
-            "external_id": message.repository_external_id,
-            "full_name": message.repository_full_name,
-        },
-        "pr": {
-            "number": message.pr_number,
-            "head_sha": message.head_sha,
-            "base_sha": message.base_sha,
-            "base_ref": message.base_ref,
-        },
-        "engine": message.engine,
-        "rule_version_id": str(message.rule_version_id),
-        "prompt_version_id": str(message.prompt_version_id),
-        "trigger": message_trigger(message),
-        "attempt": message.attempt,
-        "requested_at": _timestamp(message.requested_at),
-    }
+    body = ReviewRunMessage.from_pending(message).wire()
     validate_message("review.run.v1", body)
     return body
 
 
 def publish_message_body(pointer: ReviewPublishPointer) -> dict[str, Any]:
-    body: dict[str, Any] = {
-        "schema": "review.publish/v1",
-        "message_id": str(
-            publish_message_id(pointer.run_id, pointer.head_sha, pointer.findings_hash)
-        ),
-        "run_id": str(pointer.run_id),
-        "head_sha": pointer.head_sha,
-        "findings_hash": pointer.findings_hash,
-        "review_event": pointer.review_event,
-    }
+    body = ReviewPublishMessage.from_pointer(pointer).wire()
     validate_message("review.publish.v1", body)
     return body
 
@@ -207,16 +173,17 @@ class AmqpQueuePublisher:
         await self._reviews.publish(self._message(publish_message_body(pointer), 0), PUBLISH_QUEUE)
 
 
-def _decode(name: str, message: AbstractIncomingMessage) -> dict[str, Any] | None:
+def _decode[T: BaseModel](name: str, model: type[T], message: AbstractIncomingMessage) -> T | None:
+    """Contract schema first (unknown major goes to the DLQ), then the transport model."""
     try:
         body = json.loads(message.body)
         if not isinstance(body, dict):
             raise ValueError("message body is not a JSON object")
         validate_message(name, body)
+        return model.model_validate(body)
     except Exception:
         _LOGGER.exception("Rejecting message %s to %s", message.message_id, DEAD_LETTER_QUEUE)
         return None
-    return body
 
 
 async def _requeue_after_error(message: AbstractIncomingMessage) -> None:
@@ -230,12 +197,12 @@ async def handle_run_delivery(
     message: AbstractIncomingMessage, handler: Callable[[UUID], Awaitable[DeliveryOutcome]]
 ) -> None:
     """Unknown ``schema`` or an invalid body goes to ``reviews.dlq`` without processing (§4.4)."""
-    body = _decode("review.run.v1", message)
-    if body is None or body["message_id"] != body["run_id"]:
+    decoded = _decode("review.run.v1", ReviewRunMessage, message)
+    if decoded is None or decoded.message_id != decoded.run_id:
         await message.nack(requeue=False)
         return
     try:
-        outcome = await handler(UUID(body["run_id"]))
+        outcome = await handler(decoded.run_id)
     except Exception:
         await _requeue_after_error(message)
         return
@@ -248,19 +215,12 @@ async def handle_run_delivery(
 async def handle_publish_delivery(
     message: AbstractIncomingMessage, handler: Callable[[ReviewPublishPointer], Awaitable[None]]
 ) -> None:
-    body = _decode("review.publish.v1", message)
-    if body is None:
+    decoded = _decode("review.publish.v1", ReviewPublishMessage, message)
+    if decoded is None:
         await message.nack(requeue=False)
         return
     try:
-        await handler(
-            ReviewPublishPointer(
-                run_id=UUID(body["run_id"]),
-                head_sha=body["head_sha"],
-                findings_hash=body["findings_hash"],
-                review_event=body["review_event"],
-            )
-        )
+        await handler(decoded.to_pointer())
     except Exception:
         await _requeue_after_error(message)
         return

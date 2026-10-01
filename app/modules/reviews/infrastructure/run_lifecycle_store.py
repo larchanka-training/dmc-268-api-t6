@@ -19,6 +19,7 @@ from app.modules.reviews.application.check_runs import CheckRunReport, CheckRunT
 from app.modules.reviews.application.handle_review_run import RunGuardSnapshot
 from app.modules.reviews.application.publish_run_review import PublishContext
 from app.modules.reviews.application.queue_messages import ReviewPublishPointer, StoredRunMessage
+from app.modules.reviews.application.run_failures import cancellation_reason
 from app.modules.reviews.application.try_enqueue_webhook_run import PendingRunMessage
 from app.modules.reviews.application.verdict import (
     HashedFinding,
@@ -248,11 +249,11 @@ class SqlAlchemyRunLifecycleStore:
         if row is None:
             return None
         cancel_requested, head_sha, pr_head_sha, pr_state = row
-        if pr_state != CodeChangeState.OPEN:
-            return "pr_closed"
-        if head_sha != pr_head_sha:
-            return "superseded"
-        return "cancelled_by_user" if cancel_requested else None
+        return cancellation_reason(
+            pr_open=pr_state == CodeChangeState.OPEN,
+            head_current=head_sha == pr_head_sha,
+            cancel_requested=cancel_requested,
+        )
 
     async def run_message(self, run_id: UUID) -> PendingRunMessage | None:
         row = (await self._session.execute(_joined().where(Run.id == run_id))).one_or_none()
@@ -329,10 +330,23 @@ class SqlAlchemyRunLifecycleStore:
         findings_hash: str,
         moved_to_body: bool,
         now: datetime,
-    ) -> bool:
-        run = await self._session.scalar(select(Run).where(Run.id == run_id).with_for_update())
-        if run is None or run.state != RunState.PUBLISHING:
-            return False
+    ) -> str | None:
+        """T14 under the Run lock; a cancel or push seen during the POST wins (T15).
+
+        The review is already on GitHub either way, so findings and comment ids are
+        recorded; only the final state differs.
+        """
+        row = (
+            await self._session.execute(
+                select(Run, CodeChange.head_sha, CodeChange.state)
+                .join(CodeChange, Run.code_change_id == CodeChange.id)
+                .where(Run.id == run_id)
+                .with_for_update(of=Run)
+            )
+        ).one_or_none()
+        if row is None or row[0].state != RunState.PUBLISHING:
+            return None
+        run, pr_head_sha, pr_state = row
         findings = await self._published_findings(run_id)
         inline = [item for item in findings if item.inline_comment]
         if moved_to_body:
@@ -353,12 +367,19 @@ class SqlAlchemyRunLifecycleStore:
                 )
         for item in findings:
             item.published = True
-        run.state = RunState.SUCCEEDED
+        reason = cancellation_reason(
+            pr_open=pr_state == CodeChangeState.OPEN,
+            head_current=run.head_sha == pr_head_sha,
+            cancel_requested=run.cancel_requested,
+        )
+        final = RunState.SUCCEEDED if reason is None else RunState.CANCELLED
+        run.state = final
+        run.error_code = reason
         run.finished_at = now
         run.lease_until = None
         await self._session.flush()
-        await self._notify(run_id, RunState.SUCCEEDED)
-        return True
+        await self._notify(run_id, final)
+        return final.value
 
     async def expired_running(self, now: datetime, limit: int) -> tuple[tuple[UUID, int], ...]:
         rows = await self._session.execute(
@@ -407,13 +428,13 @@ class SqlAlchemyRunLifecycleUnitOfWork(SqlAlchemyUnitOfWork):
         return SqlAlchemyRunLifecycleStore(self.session)
 
 
-class SqlAlchemyRunTrace:
-    """``run_actions`` records and ``context_payloads``, each in its own short transaction."""
+class SqlAlchemyRunTraceStore:
+    """``run_actions`` records and ``context_payloads``; flushes, the use case commits."""
 
-    def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
-        self._session_factory = session_factory
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
 
-    async def record(
+    async def add_action(
         self,
         run_id: UUID,
         tool: str,
@@ -422,33 +443,40 @@ class SqlAlchemyRunTrace:
         started_at: datetime,
         duration_ms: int,
     ) -> None:
-        async with self._session_factory() as session, session.begin():
-            await session.execute(select(Run.id).where(Run.id == run_id).with_for_update())
-            index = await session.scalar(
-                select(func.coalesce(func.max(RunAction.index), -1)).where(
-                    RunAction.run_id == run_id
-                )
+        # The Run row lock serializes the next action index.
+        await self._session.execute(select(Run.id).where(Run.id == run_id).with_for_update())
+        index = await self._session.scalar(
+            select(func.coalesce(func.max(RunAction.index), -1)).where(RunAction.run_id == run_id)
+        )
+        assert index is not None
+        self._session.add(
+            RunAction(
+                run_id=run_id,
+                index=index + 1,
+                tool=tool,
+                request=request,
+                response=response,
+                response_ref=None,
+                started_at=started_at,
+                duration_ms=duration_ms,
             )
-            assert index is not None
-            session.add(
-                RunAction(
-                    run_id=run_id,
-                    index=index + 1,
-                    tool=tool,
-                    request=request,
-                    response=response,
-                    response_ref=None,
-                    started_at=started_at,
-                    duration_ms=duration_ms,
-                )
-            )
+        )
+        await self._session.flush()
 
     async def save_context_payload(self, run_id: UUID, summary: dict[str, Any]) -> None:
-        async with self._session_factory() as session, session.begin():
-            await session.execute(
-                insert(ContextPayload)
-                .values(run_id=run_id, schema_version=1, summary=summary, s3_ref=None)
-                .on_conflict_do_update(
-                    index_elements=[ContextPayload.run_id], set_={"summary": summary}
-                )
+        await self._session.execute(
+            insert(ContextPayload)
+            .values(run_id=run_id, schema_version=1, summary=summary, s3_ref=None)
+            .on_conflict_do_update(
+                index_elements=[ContextPayload.run_id], set_={"summary": summary}
             )
+        )
+
+
+class SqlAlchemyRunTraceUnitOfWork(SqlAlchemyUnitOfWork):
+    def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
+        super().__init__(session_factory)
+
+    @property
+    def trace(self) -> SqlAlchemyRunTraceStore:
+        return SqlAlchemyRunTraceStore(self.session)

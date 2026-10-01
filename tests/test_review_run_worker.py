@@ -8,9 +8,10 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from types import TracebackType
-from typing import Self
+from typing import Self, cast
 from uuid import UUID
 
+import httpx
 import pytest
 
 from app.modules.reviews.application.check_runs import (
@@ -19,17 +20,26 @@ from app.modules.reviews.application.check_runs import (
     CheckRunView,
     check_run_view,
 )
+from app.modules.reviews.application.conventions import ConventionsRequest
 from app.modules.reviews.application.handle_review_run import (
     AttemptCheckpoint,
+    AttemptProvider,
+    CheckpointedProvider,
     ClaimedAttempt,
     DeliveryOutcome,
     HandleReviewRun,
     RunGuardSnapshot,
 )
 from app.modules.reviews.application.review_output import InvalidReviewOutput
-from app.modules.reviews.application.run_failures import RetryDelays, RunCancelled, RunFailure
+from app.modules.reviews.application.run_failures import (
+    RETRYABLE_ERROR_CODES,
+    RetryDelays,
+    RunCancelled,
+    RunFailure,
+)
 from app.modules.reviews.application.run_trace import traced_step
 from app.modules.reviews.application.try_enqueue_webhook_run import PendingRunMessage
+from app.modules.reviews.infrastructure.vcs_failures import classify_vcs_error
 
 RUN = UUID("11111111-1111-1111-1111-111111111111")
 WORKSPACE = UUID("22222222-2222-2222-2222-222222222222")
@@ -642,3 +652,58 @@ def test_failed_step_records_its_error_and_duration() -> None:
         )
     ]
     assert records[0][2] >= 0
+
+
+def test_checkpointed_provider_checks_before_every_llm_call_only() -> None:
+    calls: list[str] = []
+
+    class Inner:
+        def __getattr__(self, name: str) -> object:
+            async def call(*args: object, **kwargs: object) -> object:
+                calls.append(name)
+                return {}
+
+            return call
+
+    async def checkpoint() -> None:
+        calls.append("checkpoint")
+        if len(calls) > 3:
+            raise RunCancelled("checkpoint")
+
+    provider = CheckpointedProvider(cast(AttemptProvider, Inner()), checkpoint)
+
+    async def scenario() -> None:
+        await provider.fetch_tree(RUN)
+        await provider.draft_conventions(request=cast(ConventionsRequest, None))
+        with pytest.raises(RunCancelled):
+            await provider.draft_review(prompt="p")
+
+    asyncio.run(scenario())
+    assert calls == ["fetch_tree", "checkpoint", "draft_conventions", "checkpoint"]
+
+
+@pytest.mark.parametrize(
+    ("status", "headers", "code", "retry_after"),
+    [
+        (403, {}, "github_forbidden", None),
+        (404, {}, "github_forbidden", None),
+        (403, {"X-RateLimit-Remaining": "0"}, "diff_fetch_failed", None),
+        (429, {"Retry-After": "300"}, "diff_fetch_failed", timedelta(minutes=5)),
+        (502, {}, "diff_fetch_failed", None),
+    ],
+)
+def test_vcs_errors_map_to_their_error_code(
+    status: int, headers: dict[str, str], code: str, retry_after: timedelta | None
+) -> None:
+    request = httpx.Request("GET", "https://api.github.test/repos/o/r/pulls/1")
+    error = httpx.HTTPStatusError(
+        "GitHub", request=request, response=httpx.Response(status, headers=headers, request=request)
+    )
+    failure = classify_vcs_error(error)
+    assert (failure.error_code, failure.retry_after) == (code, retry_after)
+    assert failure.error_code in RETRYABLE_ERROR_CODES or code == "github_forbidden"
+
+
+def test_vcs_transport_error_is_a_retryable_diff_failure() -> None:
+    failure = classify_vcs_error(httpx.ConnectTimeout("timed out"))
+    assert failure.error_code == "diff_fetch_failed"

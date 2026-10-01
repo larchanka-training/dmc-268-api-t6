@@ -395,12 +395,15 @@ class Vcs:
 class GitHub:
     check_runs: list[tuple[UUID, str, str | None]] = field(default_factory=list)
     reviews: list[ReviewSubmission] = field(default_factory=list)
+    during_post: Callable[[], Awaitable[None]] | None = None
 
     async def upsert(self, target: CheckRunTarget, view: CheckRunView) -> None:
         self.check_runs.append((target.run_id, view.status, view.conclusion))
 
     async def submit_review(self, submission: ReviewSubmission) -> SubmittedReview:
         self.reviews.append(submission)
+        if self.during_post is not None:
+            await self.during_post()
         return SubmittedReview(7001, tuple(9000 + n for n in range(len(submission.findings))))
 
     async def execute(self, code_change_id: UUID, expected_head_sha: str) -> CiEligibility:
@@ -977,3 +980,50 @@ def test_lazy_publisher_connects_on_first_use_and_retries_after_an_outage(env: E
         return body
 
     assert asyncio.run(scenario())["schema"] == "review.run/v1"
+
+
+@pytest.mark.integration
+def test_push_during_the_github_post_ends_the_run_cancelled_not_succeeded(env: Env) -> None:
+    engine = env.engine()
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+
+    async def push() -> None:
+        from app.modules.reviews.infrastructure.github_pull_request_projection import (
+            SqlAlchemyPullRequestProjectionUnitOfWork,
+        )
+
+        async with SqlAlchemyPullRequestProjectionUnitOfWork(factory) as uow:
+            await uow.session.execute(
+                text("UPDATE code_changes SET head_sha = :sha"), {"sha": "d" * 40}
+            )
+            await uow.runs.cancel_for_pr(env.pr_id, "superseded", datetime.now(UTC))
+            await uow.commit()
+
+    github = GitHub(during_post=push)
+    model = Model(factory)
+
+    async def scenario() -> tuple[tuple[Any, ...], list[tuple[Any, ...]]]:
+        run_id = await insert_run(factory, env)
+        async with (
+            amqp_channels(env.rabbitmq_url, SHORT_DELAYS) as channels,
+            running_worker(env, factory, model, github, channels),
+        ):
+            await publish_run(channels, factory, run_id)
+            state = await wait_for_state(factory, run_id, "cancelled", "succeeded")
+            await wait_for_check_run(github, "completed")
+        async with factory() as session:
+            findings = [
+                tuple(row) for row in await session.execute(text("SELECT published FROM findings"))
+            ]
+        await engine.dispose()
+        return state, findings
+
+    state, findings = asyncio.run(scenario())
+
+    assert state == ("cancelled", 1, "superseded")
+    # The review reached GitHub before the push was seen, so its findings are published.
+    assert findings == [(True,)]
+    assert [(status, conclusion) for _, status, conclusion in github.check_runs][-1] == (
+        "completed",
+        "cancelled",
+    )

@@ -12,7 +12,7 @@ import logging
 import os
 import socket
 import time
-from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+from collections.abc import AsyncIterator, Callable, Mapping
 from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -52,6 +52,7 @@ from app.modules.reviews.application.execute_review import (
 from app.modules.reviews.application.get_run_diff import DiffSnapshot
 from app.modules.reviews.application.handle_review_run import (
     AttemptCheckpoint,
+    CheckpointedProvider,
     ClaimedAttempt,
     HandleReviewRun,
 )
@@ -77,7 +78,10 @@ from app.modules.reviews.application.run_failures import (
     RetryDelays,
     RunFailure,
 )
-from app.modules.reviews.application.run_trace import TracedReviewPromptRepository
+from app.modules.reviews.application.run_trace import (
+    TracedReviewPromptRepository,
+    TransactionalRunTrace,
+)
 from app.modules.reviews.application.store_review_output import StoreReviewOutput
 from app.modules.reviews.application.sweep_no_ci import SweepNoCi
 from app.modules.reviews.application.try_enqueue_webhook_run import (
@@ -124,7 +128,7 @@ from app.modules.reviews.infrastructure.review_prompt_repository import (
 )
 from app.modules.reviews.infrastructure.run_lifecycle_store import (
     SqlAlchemyRunLifecycleUnitOfWork,
-    SqlAlchemyRunTrace,
+    SqlAlchemyRunTraceUnitOfWork,
 )
 from app.modules.reviews.infrastructure.run_repository import SqlAlchemyRunRepository
 from app.modules.reviews.infrastructure.vcs_failures import ClassifiedVcsProvider
@@ -146,7 +150,7 @@ async def process_review_run(
     vcs_provider: VcsProvider,
     *,
     output: ReviewOutputHandler | None = None,
-    trace: SqlAlchemyRunTrace | None = None,
+    trace: TransactionalRunTrace | None = None,
     engine: str = "fast",
 ) -> bool:
     """Process one run using the worker's already-created database pool.
@@ -239,58 +243,6 @@ async def review_worker(
             yield worker
         finally:
             await worker.aclose()
-
-
-class CheckpointedProvider:
-    """Run the attempt checkpoint before every LLM call of the pipeline (§3, T11)."""
-
-    def __init__(
-        self, inner: ReviewWorkerProvider, checkpoint: Callable[[], Awaitable[None]]
-    ) -> None:
-        self._inner = inner
-        self._checkpoint = checkpoint
-
-    async def fetch_diff(self, *, code_change_id: UUID, head_sha: str) -> list[DiffSnapshot]:
-        return await self._inner.fetch_diff(code_change_id=code_change_id, head_sha=head_sha)
-
-    async def fetch_file_content(self, *, code_change_id: UUID, head_sha: str, path: str) -> str:
-        return await self._inner.fetch_file_content(
-            code_change_id=code_change_id, head_sha=head_sha, path=path
-        )
-
-    async def fetch_agents_md(self, repository_id: UUID) -> RepositorySnapshot:
-        return await self._inner.fetch_agents_md(repository_id)
-
-    async def fetch_tree(self, repository_id: UUID) -> tuple[RepositoryFile, ...]:
-        return await self._inner.fetch_tree(repository_id)
-
-    async def fetch_files(
-        self, repository_id: UUID, paths: tuple[str, ...]
-    ) -> tuple[RepositoryFile, ...]:
-        return await self._inner.fetch_files(repository_id, paths)
-
-    async def draft_conventions(self, *, request: ConventionsRequest) -> Mapping[str, object]:
-        await self._checkpoint()
-        return await self._inner.draft_conventions(request=request)
-
-    async def get_pull_request_meta(self, run_id: UUID) -> PullRequestMeta | None:
-        return await self._inner.get_pull_request_meta(run_id)
-
-    async def draft_review(self, *, prompt: str) -> Mapping[str, object] | str | bytes:
-        await self._checkpoint()
-        return await self._inner.draft_review(prompt=prompt)
-
-    async def publish_review(
-        self,
-        *,
-        commit_sha: str,
-        body: str,
-        findings: tuple[PublishedFinding, ...],
-        idempotency_key: str,
-    ) -> None:
-        await self._inner.publish_review(
-            commit_sha=commit_sha, body=body, findings=findings, idempotency_key=idempotency_key
-        )
 
 
 class UnavailableReviewProvider:
@@ -458,7 +410,7 @@ def compose_worker_process(
     factory = provider_factory or (lambda _: UnavailableReviewProvider())
     run_url = run_url_factory(settings.portal_url)
     lifecycle = partial(SqlAlchemyRunLifecycleUnitOfWork, session_factory)
-    trace = SqlAlchemyRunTrace(session_factory)
+    trace = TransactionalRunTrace(partial(SqlAlchemyRunTraceUnitOfWork, session_factory))
 
     async def pipeline(claimed: ClaimedAttempt) -> bool:
         if github is None:

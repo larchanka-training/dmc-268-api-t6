@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Callable, Coroutine
+from collections.abc import Awaitable, Callable, Coroutine, Mapping
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -19,7 +19,19 @@ from app.modules.reviews.application.check_runs import (
     CheckRunTarget,
     check_run_view,
 )
+from app.modules.reviews.application.conventions import (
+    ConventionsModel,
+    ConventionsRequest,
+    RepositoryConventionsSource,
+    RepositoryFile,
+    RepositorySnapshot,
+)
+from app.modules.reviews.application.execute_review import ReviewModel
+from app.modules.reviews.application.get_run_diff import DiffSnapshot
+from app.modules.reviews.application.process_run import RunDiffProvider
+from app.modules.reviews.application.prompt_builder import PullRequestMeta
 from app.modules.reviews.application.queue_messages import RunRetryQueue
+from app.modules.reviews.application.review_output import PublishedFinding, ReviewProvider
 from app.modules.reviews.application.run_failures import (
     FAST_ATTEMPT_DEADLINE,
     HEARTBEAT_INTERVAL,
@@ -29,6 +41,7 @@ from app.modules.reviews.application.run_failures import (
     RetryDelays,
     RunCancelled,
     RunFailure,
+    cancellation_reason,
     classify_failure,
 )
 from app.modules.reviews.application.try_enqueue_webhook_run import PendingRunMessage
@@ -173,6 +186,67 @@ class AttemptCheckpoint:
             raise RunCancelled(reason)
 
 
+class AttemptProvider(
+    RunDiffProvider,
+    RepositoryConventionsSource,
+    ConventionsModel,
+    ReviewModel,
+    ReviewProvider,
+    Protocol,
+):
+    """Every provider call one review attempt makes."""
+
+
+class CheckpointedProvider:
+    """Run the attempt checkpoint before every LLM call of the pipeline (§3, T11)."""
+
+    def __init__(self, inner: AttemptProvider, checkpoint: Callable[[], Awaitable[None]]) -> None:
+        self._inner = inner
+        self._checkpoint = checkpoint
+
+    async def fetch_diff(self, *, code_change_id: UUID, head_sha: str) -> list[DiffSnapshot]:
+        return await self._inner.fetch_diff(code_change_id=code_change_id, head_sha=head_sha)
+
+    async def fetch_file_content(self, *, code_change_id: UUID, head_sha: str, path: str) -> str:
+        return await self._inner.fetch_file_content(
+            code_change_id=code_change_id, head_sha=head_sha, path=path
+        )
+
+    async def fetch_agents_md(self, repository_id: UUID) -> RepositorySnapshot:
+        return await self._inner.fetch_agents_md(repository_id)
+
+    async def fetch_tree(self, repository_id: UUID) -> tuple[RepositoryFile, ...]:
+        return await self._inner.fetch_tree(repository_id)
+
+    async def fetch_files(
+        self, repository_id: UUID, paths: tuple[str, ...]
+    ) -> tuple[RepositoryFile, ...]:
+        return await self._inner.fetch_files(repository_id, paths)
+
+    async def draft_conventions(self, *, request: ConventionsRequest) -> Mapping[str, object]:
+        await self._checkpoint()
+        return await self._inner.draft_conventions(request=request)
+
+    async def get_pull_request_meta(self, run_id: UUID) -> PullRequestMeta | None:
+        return await self._inner.get_pull_request_meta(run_id)
+
+    async def draft_review(self, *, prompt: str) -> Mapping[str, object] | str | bytes:
+        await self._checkpoint()
+        return await self._inner.draft_review(prompt=prompt)
+
+    async def publish_review(
+        self,
+        *,
+        commit_sha: str,
+        body: str,
+        findings: tuple[PublishedFinding, ...],
+        idempotency_key: str,
+    ) -> None:
+        await self._inner.publish_review(
+            commit_sha=commit_sha, body=body, findings=findings, idempotency_key=idempotency_key
+        )
+
+
 class HandleReviewRun:
     def __init__(
         self,
@@ -259,12 +333,13 @@ class HandleReviewRun:
 
     @staticmethod
     def _guard(snapshot: RunGuardSnapshot, matches: bool) -> tuple[str, str] | None:
-        if not snapshot.pr_open:
-            return "cancelled", "pr_closed"
-        if snapshot.head_sha != snapshot.pr_head_sha:
-            return "cancelled", "superseded"
-        if snapshot.cancel_requested:
-            return "cancelled", "cancelled_by_user"
+        reason = cancellation_reason(
+            pr_open=snapshot.pr_open,
+            head_current=snapshot.head_sha == snapshot.pr_head_sha,
+            cancel_requested=snapshot.cancel_requested,
+        )
+        if reason is not None:
+            return "cancelled", reason
         if not snapshot.repository_enabled:
             return "skipped", "repo_disabled"
         if not matches:

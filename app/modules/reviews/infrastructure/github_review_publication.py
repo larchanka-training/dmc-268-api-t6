@@ -126,34 +126,40 @@ class GitHubPullRequestReviewGateway:
             headers = _headers(
                 await self._tokens.get_installation_access_token(submission.installation_id)
             )
-            existing = await self._find(prefix, headers, submission.findings_hash)
-            if existing is not None:
-                return await self._with_comments(prefix, headers, existing)
-            response = await self._client.post(
-                f"{prefix}/reviews",
-                json={
-                    "commit_id": submission.commit_sha,
-                    "event": submission.event,
-                    "body": f"{submission.body}\n\n{_marker(submission.findings_hash)}",
-                    "comments": [
-                        {
-                            "path": item.path,
-                            "line": item.line,
-                            "side": "RIGHT",
-                            **({"start_line": item.start_line} if item.start_line else {}),
-                            "body": _comment_body(item.title, item.body, item.suggestion),
-                        }
-                        for item in submission.findings
-                    ],
-                },
-                headers=headers,
-                timeout=_REQUEST_TIMEOUT,
-            )
+            review_id = await self._find(prefix, headers, submission.findings_hash)
+            if review_id is None:
+                review_id = await self._post(prefix, headers, submission)
+            # A failed read raises: the retry finds the posted review by its marker.
+            return await self._with_comments(prefix, headers, review_id)
         except httpx.TransportError as exc:
             raise GitHubPublishError("retryable", f"GitHub request failed: {exc}") from exc
+
+    async def _post(
+        self, prefix: str, headers: dict[str, str], submission: ReviewSubmission
+    ) -> int:
+        response = await self._client.post(
+            f"{prefix}/reviews",
+            json={
+                "commit_id": submission.commit_sha,
+                "event": submission.event,
+                "body": f"{submission.body}\n\n{_marker(submission.findings_hash)}",
+                "comments": [
+                    {
+                        "path": item.path,
+                        "line": item.line,
+                        "side": "RIGHT",
+                        **({"start_line": item.start_line} if item.start_line else {}),
+                        "body": _comment_body(item.title, item.body, item.suggestion),
+                    }
+                    for item in submission.findings
+                ],
+            },
+            headers=headers,
+            timeout=_REQUEST_TIMEOUT,
+        )
         if response.is_error:
             raise _publish_error(response)
-        return await self._with_comments(prefix, headers, int(response.json()["id"]))
+        return int(response.json()["id"])
 
     async def _find(self, prefix: str, headers: dict[str, str], findings_hash: str) -> int | None:
         response = await self._client.get(
@@ -180,8 +186,7 @@ class GitHubPullRequestReviewGateway:
             timeout=_REQUEST_TIMEOUT,
         )
         if response.is_error:
-            # The review is posted; comment ids are diagnostics only.
-            return SubmittedReview(review_id, ())
+            raise _publish_error(response)
         return SubmittedReview(review_id, tuple(int(item["id"]) for item in response.json()))
 
 
