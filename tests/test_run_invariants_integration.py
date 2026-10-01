@@ -198,6 +198,7 @@ def add_run(
     *,
     key: str,
     state: RunState | None = None,
+    head_sha: str = "h" * 40,
     code_change: UUID | None = None,
     rule_version: UUID | None = None,
     prompt_version: UUID | None = None,
@@ -207,7 +208,7 @@ def add_run(
         "id": run_id,
         "code_change_id": code_change or parents.code_change,
         "base_sha": "b" * 40,
-        "head_sha": "h" * 40,
+        "head_sha": head_sha,
         "trigger": "webhook",
         "idempotency_key": key,
         "engine": Engine.FAST,
@@ -251,18 +252,22 @@ def test_one_active_run_per_code_change_but_terminal_runs_can_coexist(
     first = add_run(connection, parents, key="1" * 64)
     assert_rejected(
         connection,
-        lambda: add_run(connection, parents, key="2" * 64, state=RunState.RUNNING),
+        lambda: add_run(
+            connection, parents, key="2" * 64, state=RunState.RUNNING, head_sha="i" * 40
+        ),
         "23505",
         "uq_runs_one_active_per_code_change",
     )
     connection.execute(
         update(RUN_TABLE).where(RUN_TABLE.c.id == first).values(state=RunState.SUCCEEDED)
     )
-    second = add_run(connection, parents, key="2" * 64, state=RunState.RUNNING)
-    add_run(connection, parents, key="3" * 64, state=RunState.FAILED)
+    second = add_run(connection, parents, key="2" * 64, state=RunState.RUNNING, head_sha="i" * 40)
+    add_run(connection, parents, key="3" * 64, state=RunState.FAILED, head_sha="j" * 40)
     assert_rejected(
         connection,
-        lambda: add_run(connection, parents, key="4" * 64, state=RunState.PUBLISHING),
+        lambda: add_run(
+            connection, parents, key="4" * 64, state=RunState.PUBLISHING, head_sha="k" * 40
+        ),
         "23505",
         "uq_runs_one_active_per_code_change",
     )
@@ -271,7 +276,20 @@ def test_one_active_run_per_code_change_but_terminal_runs_can_coexist(
     connection.execute(
         update(RUN_TABLE).where(RUN_TABLE.c.id == second).values(state=RunState.FAILED)
     )
-    add_run(connection, parents, key="6" * 64)
+    add_run(connection, parents, key="6" * 64, head_sha="k" * 40)
+
+
+def test_webhook_run_head_is_unique_after_terminal_state(
+    seeded_connection: tuple[Connection, ParentIds],
+) -> None:
+    connection, parents = seeded_connection
+    add_run(connection, parents, key="1" * 64, state=RunState.SUCCEEDED)
+    assert_rejected(
+        connection,
+        lambda: add_run(connection, parents, key="2" * 64, state=RunState.FAILED),
+        "23505",
+        "uq_runs_webhook_code_change_head",
+    )
 
 
 def test_idempotency_key_is_unique_across_changes_and_terminal_states(
