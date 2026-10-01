@@ -25,7 +25,8 @@ class SqlAlchemyUsageLedger:
                     UsageEvent.run_id == run_id
                 )
             )
-        return Decimal(total or 0)
+        # Through str: a driver or dialect returning float must not leak binary noise.
+        return Decimal(str(total or 0))
 
     async def record(self, context: RunCallContext, usage: LlmUsage) -> None:
         async with self._session_factory.begin() as session:

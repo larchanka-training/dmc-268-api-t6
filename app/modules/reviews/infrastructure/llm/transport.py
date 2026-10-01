@@ -176,16 +176,23 @@ class OpenAICompatibleTransport:
 
 
 def _request_body(request: ChatRequest) -> dict[str, Any]:
+    """Defaults, then ``extra_body`` on top of them, then the fields config cannot change.
+
+    ``extra_body`` overrides sampling defaults (a reasoning model rejects
+    ``temperature: 0`` and wants ``max_completion_tokens``); a ``null`` value drops the
+    key. The model, the messages and strict ``response_format`` (D7) stay fixed.
+    """
     profile = request.profile
-    body: dict[str, Any] = {
-        **profile.extra_body,
-        "model": profile.model,
-        "messages": [
-            {"role": message.role, "content": message.content} for message in request.messages
-        ],
+    defaults: dict[str, Any] = {
         "max_tokens": profile.max_output_tokens,
         "temperature": 0,
     }
+    merged = {**defaults, **profile.extra_body}
+    body: dict[str, Any] = {key: value for key, value in merged.items() if value is not None}
+    body["model"] = profile.model
+    body["messages"] = [
+        {"role": message.role, "content": message.content} for message in request.messages
+    ]
     if request.response_schema is not None and profile.structured_output == "json_schema":
         body["response_format"] = {
             "type": "json_schema",

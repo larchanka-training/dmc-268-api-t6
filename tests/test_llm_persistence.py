@@ -106,6 +106,12 @@ def test_usage_ledger_sums_the_run_cost_and_inserts_one_event_per_call() -> None
     assert event.cost_usd == Decimal("0.0011")
 
 
+def test_usage_ledger_converts_a_float_sum_without_binary_noise() -> None:
+    spent = asyncio.run(SqlAlchemyUsageLedger(_factory(FakeFactory(0.1))).run_cost_usd(RUN_ID))
+
+    assert spent == Decimal("0.1")
+
+
 def test_usage_ledger_reads_zero_for_a_run_without_events() -> None:
     assert asyncio.run(SqlAlchemyUsageLedger(_factory(FakeFactory(None))).run_cost_usd(RUN_ID)) == 0
 

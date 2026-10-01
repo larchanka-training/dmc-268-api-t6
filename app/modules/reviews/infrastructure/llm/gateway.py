@@ -9,9 +9,11 @@ its usage recorded as soon as the call returns, outside any database transaction
 | class           | same model                         | then              |
 |-----------------|------------------------------------|-------------------|
 | timeout         | 1 retry after 2 s + jitter         | fallback once     |
-| 429             | 1 retry after Retry-After <= 30 s  | fallback once     |
+| 429             | 1 retry after Retry-After <= 30 s, | fallback once     |
+|                 | or 2 s + jitter without the header |                   |
 | 5xx, connection | 2 retries after 2 s, 8 s + jitter  | fallback once     |
 | invalid answer  | 1 repair call with validator errors| fallback once     |
+|                 | (skipped if it would overflow)     |                   |
 | context overflow| none                               | none              |
 """
 
@@ -189,14 +191,19 @@ class LlmGateway:
             elif (
                 last.error is LlmErrorCode.RATE_LIMITED
                 and not rate_limit_waited
-                and last.retry_after_s is not None
-                and last.retry_after_s <= policy.max_retry_after_s
+                and (last.retry_after_s is None or last.retry_after_s <= policy.max_retry_after_s)
             ):
-                delay = last.retry_after_s
+                # Without Retry-After (common behind routers and self-hosted servers)
+                # one default backoff replaces the provider's hint.
+                delay = (
+                    policy.rate_limit_default_delay_s + self._jitter()
+                    if last.retry_after_s is None
+                    else last.retry_after_s
+                )
                 rate_limit_waited = True
             elif last.error is LlmErrorCode.INVALID_OUTPUT and not repaired:
                 repaired = True
-                messages = (
+                repair_messages = (
                     *messages,
                     ChatMessage("assistant", last.answer),
                     ChatMessage(
@@ -206,6 +213,11 @@ class LlmGateway:
                         ),
                     ),
                 )
+                if not self._fits_context(primary, repair_messages, context.engine):
+                    # The repair conversation would overflow where the original prompt
+                    # did not: skip the repair, the fallback gets the original prompt.
+                    break
+                messages = repair_messages
                 kind = LlmCallKind.REPAIR
                 continue
             else:
@@ -221,6 +233,16 @@ class LlmGateway:
                 return self._result(fallback, last, state)
         assert last.error is not None
         raise self._failed(last.error, last.message, state)
+
+    def _estimate(self, profile: ModelProfile, messages: tuple[ChatMessage, ...]) -> int:
+        counter = self.token_counter(profile)
+        return sum(counter.count(message.content) for message in messages)
+
+    def _fits_context(
+        self, profile: ModelProfile, messages: tuple[ChatMessage, ...], engine: str
+    ) -> bool:
+        estimate = self._estimate(profile, messages)
+        return estimate + profile.max_output_tokens <= self.context_limit(profile, engine)
 
     async def _call(
         self,
@@ -241,8 +263,7 @@ class LlmGateway:
                 f"{remaining:.0f} s left before the attempt deadline, a call needs {timeout_s:g} s",
                 state,
             )
-        counter = self.token_counter(profile)
-        estimate = sum(counter.count(message.content) for message in messages)
+        estimate = self._estimate(profile, messages)
         limit = self.context_limit(profile, context.engine)
         if estimate + profile.max_output_tokens > limit:
             raise self._failed(

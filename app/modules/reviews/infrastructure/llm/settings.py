@@ -71,6 +71,7 @@ class GatewayPolicy:
     unavailable_retry_delays_s: tuple[float, ...] = (2.0, 8.0)
     max_jitter_s: float = 1.0
     max_retry_after_s: float = 30.0
+    rate_limit_default_delay_s: float = 2.0
 
 
 @dataclass(frozen=True)

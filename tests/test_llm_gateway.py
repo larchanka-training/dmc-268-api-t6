@@ -28,6 +28,7 @@ from app.modules.reviews.application.llm import (
     LlmUsage,
     RunCallContext,
 )
+from app.modules.reviews.application.prompt_budget import prompt_tokens
 from app.modules.reviews.application.prompt_builder import (
     ChangedFile,
     DiffLine,
@@ -37,7 +38,11 @@ from app.modules.reviews.application.prompt_builder import (
     parse_unified_diff,
 )
 from app.modules.reviews.application.review_output import ReviewOutput, parse_review_output
-from app.modules.reviews.infrastructure.llm.gateway import GatewayResult, LlmGateway
+from app.modules.reviews.infrastructure.llm.gateway import (
+    GatewayResult,
+    HeuristicTokenCounter,
+    LlmGateway,
+)
 from app.modules.reviews.infrastructure.llm.memory import (
     InMemoryLlmCallTrace,
     InMemoryUsageLedger,
@@ -393,7 +398,32 @@ def test_extra_body_and_overrides_reach_the_request() -> None:
     body = harness.bodies()[0]
     assert body["provider"] == {"allow_fallbacks": False}
     assert body["max_tokens"] == 4000
+    assert body["temperature"] == 0
     assert settings.primary.price.input_per_mtok == Decimal("0.5")
+
+
+def test_extra_body_overrides_sampling_defaults_but_not_model_messages_or_schema() -> None:
+    extra: dict[str, object] = {
+        "temperature": None,
+        "max_tokens": None,
+        "max_completion_tokens": 8000,
+        "reasoning_effort": "low",
+        "model": "other-model",
+        "messages": [],
+        "response_format": {"type": "text"},
+    }
+    harness = Harness([valid()], primary=replace(PRIMARY, extra_body=extra))
+
+    harness.review()
+
+    body = harness.bodies()[0]
+    assert "temperature" not in body
+    assert "max_tokens" not in body
+    assert body["max_completion_tokens"] == 8000
+    assert body["reasoning_effort"] == "low"
+    assert body["model"] == "primary-model"
+    assert [message["role"] for message in body["messages"]] == ["system", "user"]
+    assert body["response_format"]["json_schema"]["strict"] is True
 
 
 # ---------- key rotation ----------
@@ -454,18 +484,33 @@ def test_rate_limit_without_free_keys_waits_retry_after_once_then_falls_back() -
     assert harness.clock.sleeps == [5.0]
 
 
-@pytest.mark.parametrize("retry_after", ["60", None])
-def test_rate_limit_with_a_long_or_missing_retry_after_falls_back_at_once(
-    retry_after: str | None,
-) -> None:
-    headers = {} if retry_after is None else {"Retry-After": retry_after}
-    harness = Harness([error(429, **headers), valid(model="fallback-model-v2")])
+def test_rate_limit_with_a_long_retry_after_falls_back_at_once() -> None:
+    harness = Harness([error(429, **{"Retry-After": "60"}), valid(model="fallback-model-v2")])
 
     result = harness.review()
 
     assert harness.kinds() == ["primary", "fallback"]
     assert harness.clock.sleeps == []
     assert result.model == "fallback-model-v2"
+
+
+def test_rate_limit_without_retry_after_retries_once_after_the_default_backoff() -> None:
+    harness = Harness([error(429), error(429), valid(model="fallback-model-v2")])
+
+    result = harness.review()
+
+    assert harness.kinds() == ["primary", "retry", "fallback"]
+    assert harness.clock.sleeps == [2.25]
+    assert result.model == "fallback-model-v2"
+
+
+def test_rate_limit_without_retry_after_may_succeed_on_the_retry() -> None:
+    harness = Harness([error(429), valid()])
+
+    result = harness.review()
+
+    assert harness.kinds() == ["primary", "retry"]
+    assert result.output == VALID_OUTPUT
 
 
 def test_server_errors_retry_twice_with_backoff_then_fall_back_within_four_calls() -> None:
@@ -604,6 +649,19 @@ def test_cut_or_empty_answer_is_invalid(reply: httpx.Response) -> None:
     harness.review()
 
     assert harness.kinds() == ["primary", "repair"]
+
+
+def test_repair_that_would_overflow_the_context_is_skipped_for_the_fallback() -> None:
+    estimate = prompt_tokens(CONTEXT, HeuristicTokenCounter(PRIMARY.chars_per_token))
+    primary = replace(PRIMARY, context_window=estimate + PRIMARY.max_output_tokens + 50)
+    harness = Harness([completion("x" * 3_000), valid(model="fallback-model-v3")], primary=primary)
+
+    result = harness.review()
+
+    assert harness.kinds() == ["primary", "fallback"]
+    assert result.model == "fallback-model-v3"
+    fallback_messages = harness.bodies()[1]["messages"]
+    assert fallback_messages == harness.bodies()[0]["messages"]
 
 
 # ---------- context overflow, budget, deadline ----------
