@@ -7,6 +7,7 @@ import json
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from decimal import Decimal
+from typing import Self
 from uuid import UUID
 
 import pytest
@@ -20,6 +21,7 @@ from app.modules.reviews.application.list_runs import RunListItem
 from app.modules.reviews.application.queue_messages import StoredRunMessage
 from app.modules.reviews.application.rerun_run import (
     RerunConflict,
+    RerunNotConfigured,
     RerunOutcome,
     RerunResult,
     RerunRun,
@@ -204,8 +206,27 @@ def pending(run_id: UUID) -> StoredRunMessage:
 
 @dataclass
 class Reruns:
+    """Rerun store, its unit of work and the run reader in one fake."""
+
     result: RerunResult
     published: list[UUID] = field(default_factory=list)
+    commits: int = 0
+
+    @property
+    def runs(self) -> Reruns:
+        return self
+
+    async def __aenter__(self) -> Self:
+        return self
+
+    async def __aexit__(self, *args: object) -> None:
+        return None
+
+    async def commit(self) -> None:
+        self.commits += 1
+
+    async def rollback(self) -> None:
+        return None
 
     async def create_rerun(self, run_id: UUID, now: datetime) -> RerunResult:
         return self.result
@@ -235,27 +256,39 @@ def test_rerun_publishes_the_new_run_and_marks_it_published() -> None:
     repository = Reruns(RerunResult(RerunOutcome.CREATED, pending(OTHER)))
     publisher = Publisher()
 
-    item = asyncio.run(RerunRun(repository, publisher, lambda: NOW).execute(RUN))
+    item = asyncio.run(
+        RerunRun(lambda: repository, repository, publisher, lambda: NOW).execute(RUN)
+    )
 
     assert item is not None and (item.id, item.status) == (OTHER, "queued")
     assert publisher.sent == [(OTHER, "rerun")]
     assert repository.published == [OTHER]
+    # The insert and the published mark commit in two short transactions.
+    assert repository.commits == 2
 
 
 def test_rerun_publication_failure_keeps_the_run_queued_for_the_reconciler() -> None:
     repository = Reruns(RerunResult(RerunOutcome.CREATED, pending(OTHER)))
 
-    item = asyncio.run(RerunRun(repository, Publisher(fail=True), lambda: NOW).execute(RUN))
+    item = asyncio.run(
+        RerunRun(lambda: repository, repository, Publisher(fail=True), lambda: NOW).execute(RUN)
+    )
 
     assert item is not None and item.status == "queued"
     assert repository.published == []
 
 
-def test_rerun_conflict_and_missing_run() -> None:
+def rerun(result: RerunResult) -> RerunRun:
+    repository = Reruns(result)
+    return RerunRun(lambda: repository, repository, Publisher())
+
+
+def test_rerun_conflict_missing_run_and_missing_configuration() -> None:
     with pytest.raises(RerunConflict):
-        asyncio.run(RerunRun(Reruns(RerunResult(RerunOutcome.CONFLICT)), Publisher()).execute(RUN))
-    missing = RerunRun(Reruns(RerunResult(RerunOutcome.NOT_FOUND)), Publisher())
-    assert asyncio.run(missing.execute(RUN)) is None
+        asyncio.run(rerun(RerunResult(RerunOutcome.CONFLICT)).execute(RUN))
+    with pytest.raises(RerunNotConfigured):
+        asyncio.run(rerun(RerunResult(RerunOutcome.NOT_CONFIGURED)).execute(RUN))
+    assert asyncio.run(rerun(RerunResult(RerunOutcome.NOT_FOUND)).execute(RUN)) is None
 
 
 @dataclass

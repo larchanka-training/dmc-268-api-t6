@@ -8,6 +8,7 @@ from sqlalchemy import ColumnElement, select, true, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.common.infrastructure.db.enums import Engine, ReviewEvent, WaitForCi
+from app.common.infrastructure.db.unit_of_work import SqlAlchemyUnitOfWork
 from app.modules.auth.application.scope import AuthScope
 from app.modules.repositories.application.repository_settings import (
     RepositorySettings,
@@ -32,31 +33,25 @@ def _to_settings(repository: Repository) -> RepositorySettings:
     )
 
 
-class SqlAlchemyRepositorySettings:
-    def __init__(
-        self, session_factory: async_sessionmaker[AsyncSession], scope: AuthScope | None = None
-    ) -> None:
-        self._session_factory = session_factory
+class SqlAlchemyRepositorySettingsStore:
+    def __init__(self, session: AsyncSession, scope: AuthScope | None) -> None:
+        self._session = session
         self._scope = scope
 
     def _visible(self) -> ColumnElement[bool]:
         return true() if self._scope is None else repository_access_predicate(self._scope)
 
     async def list_repositories(self) -> list[RepositorySettings]:
-        async with self._session_factory() as session:
-            rows = await session.scalars(
-                select(Repository)
-                .where(self._visible())
-                .order_by(Repository.full_name, Repository.id)
-            )
-            return [_to_settings(row) for row in rows]
+        rows = await self._session.scalars(
+            select(Repository).where(self._visible()).order_by(Repository.full_name, Repository.id)
+        )
+        return [_to_settings(row) for row in rows]
 
     async def get_repository(self, repository_id: UUID) -> RepositorySettings | None:
-        async with self._session_factory() as session:
-            row = await session.scalar(
-                select(Repository).where(Repository.id == repository_id, self._visible())
-            )
-            return None if row is None else _to_settings(row)
+        row = await self._session.scalar(
+            select(Repository).where(Repository.id == repository_id, self._visible())
+        )
+        return None if row is None else _to_settings(row)
 
     async def update_repository(
         self, repository_id: UUID, change: RepositorySettingsChange
@@ -72,11 +67,22 @@ class SqlAlchemyRepositorySettings:
             values["max_comments"] = change.max_comments
         if change.review_event is not None:
             values["review_event"] = ReviewEvent(change.review_event.lower())
-        async with self._session_factory.begin() as session:
-            row = await session.scalar(
-                update(Repository)
-                .where(Repository.id == repository_id, self._visible())
-                .values(**values)
-                .returning(Repository)
-            )
-            return None if row is None else _to_settings(row)
+        row = await self._session.scalar(
+            update(Repository)
+            .where(Repository.id == repository_id, self._visible())
+            .values(**values)
+            .returning(Repository)
+        )
+        return None if row is None else _to_settings(row)
+
+
+class SqlAlchemyRepositorySettingsUnitOfWork(SqlAlchemyUnitOfWork):
+    def __init__(
+        self, session_factory: async_sessionmaker[AsyncSession], scope: AuthScope | None = None
+    ) -> None:
+        super().__init__(session_factory)
+        self._scope = scope
+
+    @property
+    def repositories(self) -> SqlAlchemyRepositorySettingsStore:
+        return SqlAlchemyRepositorySettingsStore(self.session, self._scope)

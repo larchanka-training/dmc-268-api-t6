@@ -21,6 +21,7 @@ from app.bootstrap.reviews_api import (
     get_github_webhook_receipt_uow_factory,
     get_pull_requests,
     get_repository_settings,
+    get_rerun_uow_factory,
     get_run_publisher,
     get_run_repository,
     reviews_api_lifespan,
@@ -40,7 +41,7 @@ from app.modules.repositories.application.repository_settings import (
     ListRepositories,
     RepositorySettings,
     RepositorySettingsChange,
-    RepositorySettingsRepository,
+    RepositorySettingsUowFactory,
     UpdateRepository,
 )
 from app.modules.reviews.api.dtos import (
@@ -102,7 +103,12 @@ from app.modules.reviews.application.list_pulls import (
     PullRequestSummary,
 )
 from app.modules.reviews.application.list_runs import ListRuns, RunListItem, RunRepository
-from app.modules.reviews.application.rerun_run import RerunConflict, RerunRepository, RerunRun
+from app.modules.reviews.application.rerun_run import (
+    RerunConflict,
+    RerunNotConfigured,
+    RerunRun,
+    RerunUnitOfWork,
+)
 from app.modules.reviews.application.run_events import InMemoryRunUpdateHub, RunUpdateStream
 from app.modules.reviews.application.try_enqueue_webhook_run import RunMessagePublisher
 
@@ -397,14 +403,19 @@ async def get_run(
 @api_router.post("/runs/{run_id}/rerun", status_code=202, response_model=RunSessionDto)
 async def rerun_run(
     run_id: UUID,
-    repository: Annotated[RerunRepository, Depends(get_run_repository)],
+    uow_factory: Annotated[Callable[[], RerunUnitOfWork], Depends(get_rerun_uow_factory)],
+    runs: Annotated[RunDetailRepository, Depends(get_run_repository)],
     publisher: Annotated[RunMessagePublisher | None, Depends(get_run_publisher)],
 ) -> RunSessionDto:
     try:
-        item = await RerunRun(repository, publisher).execute(run_id)
+        item = await RerunRun(uow_factory, runs, publisher).execute(run_id)
     except RerunConflict as error:
         raise HTTPException(
             status_code=409, detail="the pull request has an active run or is closed"
+        ) from error
+    except RerunNotConfigured as error:
+        raise HTTPException(
+            status_code=422, detail="the repository has no active rule or prompt version"
         ) from error
     if item is None:
         raise HTTPException(status_code=404, detail="run not found")
@@ -509,17 +520,17 @@ async def get_run_file_lines(
 
 @api_router.get("/repos", response_model=list[RepositoryDto])
 async def list_repositories(
-    repository: Annotated[RepositorySettingsRepository, Depends(get_repository_settings)],
+    uow_factory: Annotated[RepositorySettingsUowFactory, Depends(get_repository_settings)],
 ) -> list[RepositoryDto]:
-    return [to_repository_dto(item) for item in await ListRepositories(repository).execute()]
+    return [to_repository_dto(item) for item in await ListRepositories(uow_factory).execute()]
 
 
 @api_router.get("/repos/{repo_id}", response_model=RepositoryDto)
 async def get_repository(
     repo_id: UUID,
-    repository: Annotated[RepositorySettingsRepository, Depends(get_repository_settings)],
+    uow_factory: Annotated[RepositorySettingsUowFactory, Depends(get_repository_settings)],
 ) -> RepositoryDto:
-    item = await GetRepository(repository).execute(repo_id)
+    item = await GetRepository(uow_factory).execute(repo_id)
     if item is None:
         raise HTTPException(status_code=404, detail="repository not found")
     return to_repository_dto(item)
@@ -529,9 +540,9 @@ async def get_repository(
 async def update_repository(
     repo_id: UUID,
     body: RepositoryUpdateDto,
-    repository: Annotated[RepositorySettingsRepository, Depends(get_repository_settings)],
+    uow_factory: Annotated[RepositorySettingsUowFactory, Depends(get_repository_settings)],
 ) -> RepositoryDto:
-    item = await UpdateRepository(repository).execute(
+    item = await UpdateRepository(uow_factory).execute(
         repo_id,
         RepositorySettingsChange(
             enabled=body.enabled,

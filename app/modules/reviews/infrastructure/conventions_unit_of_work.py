@@ -15,6 +15,7 @@ from app.modules.reviews.application.conventions import (
     ConventionsFile,
 )
 from app.modules.reviews.infrastructure.models import RunAction
+from app.modules.reviews.infrastructure.run_action_payloads import place_response
 
 
 class SqlAlchemyRepositoryConventionsStore:
@@ -73,14 +74,17 @@ class SqlAlchemyRepositoryConventionsStore:
             select(func.coalesce(func.max(RunAction.index), -1)).where(RunAction.run_id == run_id)
         )
         assert index is not None
+        response, response_ref = await place_response(
+            self._session, run_id, {"files": [file.model_dump() for file in trace_files]}
+        )
         self._session.add(
             RunAction(
                 run_id=run_id,
                 index=index + 1,
                 tool="llm.repo_conventions",
                 request={},
-                response={"files": [file.model_dump() for file in trace_files]},
-                response_ref=None,
+                response=response,
+                response_ref=response_ref,
                 started_at=datetime.now(UTC),
                 duration_ms=0,
             )

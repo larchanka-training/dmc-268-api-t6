@@ -156,6 +156,8 @@ class StoreReviewOutput:
                     "verdict": run_verdict,
                     "severity_counts": severity_counts(severities),
                     "findings_hash": hash_,
+                    # Kept here as well: a huge llm.review_output may be truncated (D1).
+                    "summary": parsed.summary.model_dump(),
                 },
                 started_at=started_at,
                 duration_ms=int((time.monotonic() - started) * 1000),
