@@ -1,0 +1,21 @@
+{
+  "id": "LOG-05",
+  "class": "logic",
+  "language": "python",
+  "source": {
+    "kind": "synthetic",
+    "attribution": "AI Code Reviewer QA fixture for issue #30"
+  },
+  "base_path": "base",
+  "patch_path": "diff.patch",
+  "expected_verdict": "blocking",
+  "expected_findings": [
+    {
+      "path": "queue/durable_jobs.py",
+      "start_line": null,
+      "line": 10,
+      "severity": "critical",
+      "category": "correctness"
+    }
+  ]
+}

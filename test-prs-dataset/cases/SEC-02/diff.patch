@@ -1,0 +1,13 @@
+diff --git a/app/orders.py b/app/orders.py
+new file mode 100644
+index 0000000..fce8f5b
+--- /dev/null
++++ b/app/orders.py
+@@ -0,0 +1,7 @@
++from __future__ import annotations
++
++import sqlite3
++
++def list_orders(connection: sqlite3.Connection, account_id: str) -> list[tuple[int, int]]:
++    query = f"SELECT id, total_cents FROM orders WHERE account_id = '{account_id}'"
++    return connection.execute(query).fetchall()

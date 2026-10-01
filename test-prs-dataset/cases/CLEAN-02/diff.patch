@@ -1,0 +1,10 @@
+diff --git a/review/summary_line.py b/review/summary_line.py
+--- a/review/summary_line.py
++++ b/review/summary_line.py
+@@ -13,5 +13,5 @@
+         self.run_id = run_id
+ 
+     def render(self, title: str, score: float | None) -> str:
+-        body = super(RunSummaryLine, self).render(title, score)
++        body = super().render(title, score)
+         return f"[run {self.run_id}] {body}"

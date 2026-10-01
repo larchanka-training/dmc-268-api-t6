@@ -1,0 +1,14 @@
+diff --git a/src/review/check_summary.ts b/src/review/check_summary.ts
+--- a/src/review/check_summary.ts
++++ b/src/review/check_summary.ts
+@@ -1,7 +1,7 @@
+ export type CheckSummaryInput = {
+-  passed: number
+-  failed: number
+-  skipped: number
++  readonly passed: number
++  readonly failed: number
++  readonly skipped: number
+ }
+ 
+ export function formatCheckSummary({

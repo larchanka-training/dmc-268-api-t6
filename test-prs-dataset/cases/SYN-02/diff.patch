@@ -1,0 +1,26 @@
+diff --git a/src/components/RequiredChecks.tsx b/src/components/RequiredChecks.tsx
+--- a/src/components/RequiredChecks.tsx
++++ b/src/components/RequiredChecks.tsx
+@@ -1,13 +1,15 @@
+-const CHECK_NAMES = ["lint", "typecheck", "test"] as const;
+-
+ export function RequiredChecks() {
+   return (
+     <ul className="required-checks">
+-      {CHECK_NAMES.map((name) => (
+-        <li key={name} className="required-check">
+-          <span className="required-check__name">{name}</span>
+-        </li>
+-      ))}
++      <li className="required-check">
++        <span className="required-check__name">lint</span>
++      </li>
++      <li className="required-check">
++        <span className="required-check__name">typecheck</span>
++      </li>
++      <li className="required-check">
++        <span className="required-check__name">test</span>
++      </li>
+     </ul>
+   );
+ }

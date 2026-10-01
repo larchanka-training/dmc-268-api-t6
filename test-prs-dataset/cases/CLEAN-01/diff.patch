@@ -1,0 +1,25 @@
+diff --git a/review/metrics.py b/review/metrics.py
+--- a/review/metrics.py
++++ b/review/metrics.py
+@@ -1,13 +1,15 @@
+ from __future__ import annotations
+ 
+ 
++def _percentage(matched: int, total: int) -> float:
++    if total <= 0:
++        return 0.0
++    return matched / total * 100.0
++
++
+ def findings_recall_percent(matched: int, expected: int) -> float:
+-    if expected <= 0:
+-        return 0.0
+-    return matched / expected * 100.0
++    return _percentage(matched, expected)
+ 
+ 
+ def findings_precision_percent(matched: int, predicted: int) -> float:
+-    if predicted <= 0:
+-        return 0.0
+-    return matched / predicted * 100.0
++    return _percentage(matched, predicted)

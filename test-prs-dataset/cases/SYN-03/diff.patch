@@ -1,0 +1,14 @@
+diff --git a/review/retry_policy.py b/review/retry_policy.py
+--- a/review/retry_policy.py
++++ b/review/retry_policy.py
+@@ -1,5 +1,6 @@
+-RETRYABLE_STATES = frozenset({"failed", "cancelled"})
+-
+-
+ def can_retry_review(status: str, retries_used: int, retry_limit: int) -> bool:
+-    return status in RETRYABLE_STATES and retries_used < retry_limit
++    match status:
++        case "failed" | "cancelled":
++            return retries_used < retry_limit
++        case _:
++            return False

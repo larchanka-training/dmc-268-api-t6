@@ -1,0 +1,2 @@
+# Keep the original upstream bytes; this project's Ruff settings differ.
+base/.upstream/aiohttp/cookiejar.py

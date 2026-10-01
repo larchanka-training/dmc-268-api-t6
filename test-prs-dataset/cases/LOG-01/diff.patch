@@ -1,0 +1,13 @@
+diff --git a/orders/confirmation.py b/orders/confirmation.py
+--- a/orders/confirmation.py
++++ b/orders/confirmation.py
+@@ -25,4 +25,8 @@ def build_confirmation(order: Order) -> dict[str, str]:
+     else:
+         destination = order.shipping_address.city
+ 
+-    return {"order_id": str(order.order_id), "destination": destination}
++    return {
++        "order_id": str(order.order_id),
++        "destination": destination,
++        "shipping_zone": order.shipping_address.zone.upper(),
++    }

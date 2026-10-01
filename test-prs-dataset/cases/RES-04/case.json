@@ -1,0 +1,21 @@
+{
+  "id": "RES-04",
+  "class": "resource",
+  "language": "typescript",
+  "source": {
+    "kind": "synthetic",
+    "attribution": "AI Code Reviewer QA fixture for issue #30"
+  },
+  "base_path": "base",
+  "patch_path": "diff.patch",
+  "expected_verdict": "attention",
+  "expected_findings": [
+    {
+      "path": "src/socket-message-tracker.ts",
+      "start_line": null,
+      "line": 21,
+      "severity": "medium",
+      "category": "performance"
+    }
+  ]
+}

@@ -1,0 +1,8 @@
+diff --git a/review/run_label.py b/review/run_label.py
+--- a/review/run_label.py
++++ b/review/run_label.py
+@@ -4,2 +4,3 @@
+ def render_run_label(run_id: int, state: str) -> str:
+-    return f"Run #{run_id}: {state}"
++    fields = {"run_id": run_id, "state": state}
++    return "Run #{run_id}: {state}".format_map(fields)

@@ -1,0 +1,14 @@
+diff --git a/src/report-reader.ts b/src/report-reader.ts
+new file mode 100644
+index 0000000..05ead9f
+--- /dev/null
++++ b/src/report-reader.ts
+@@ -0,0 +1,8 @@
++import { readFile } from "node:fs/promises";
++import { join } from "node:path";
++
++const REPORT_ROOT = join(process.cwd(), "reports");
++
++export async function readReport(filename: string): Promise<string> {
++  return readFile(join(REPORT_ROOT, filename), "utf8");
++}

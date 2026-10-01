@@ -1,0 +1,12 @@
+diff --git a/app/authorization.py b/app/authorization.py
+new file mode 100644
+index 0000000..686dc91
+--- /dev/null
++++ b/app/authorization.py
+@@ -0,0 +1,6 @@
++from __future__ import annotations
++
++PARTNER_TOKEN = "FAKE_TEST_CREDENTIAL_DO_NOT_USE"
++
++def can_read_private_records(token: str | None) -> bool:
++    return token == PARTNER_TOKEN

@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Gold benchmark case",
+  "description": "Input and ground truth for one PR case. Recorded model responses and their model/prompt provenance belong in a separate response manifest.",
+  "type": "object",
+  "required": ["id", "class", "language", "source", "base_path", "patch_path", "expected_verdict", "expected_findings"],
+  "additionalProperties": false,
+  "properties": {
+    "id": { "type": "string", "pattern": "^(SEC|RES|LOG|SYN|CLEAN)-[0-9]{2}$" },
+    "class": { "enum": ["security", "resource", "logic", "syntax", "clean"] },
+    "category_reason": { "type": "string", "minLength": 1 },
+    "language": { "enum": ["python", "typescript", "tsx"] },
+    "source": {
+      "type": "object",
+      "required": ["kind", "attribution"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": { "enum": ["synthetic", "real"] },
+        "url": { "type": "string", "pattern": "^https://", "minLength": 9 },
+        "revision": { "type": "string", "minLength": 1 },
+        "license_name": { "type": "string", "minLength": 1 },
+        "license_url": { "type": "string", "pattern": "^https://", "minLength": 9 },
+        "attribution": { "type": "string", "minLength": 1 }
+      },
+      "if": { "properties": { "kind": { "const": "real" } } },
+      "then": { "required": ["url", "revision", "license_name", "license_url", "attribution"] }
+    },
+    "base_path": { "type": "string", "minLength": 1 },
+    "apply_directory": { "type": "string", "minLength": 1 },
+    "patch_path": { "type": "string", "pattern": "\\.patch$", "minLength": 7 },
+    "expected_verdict": { "enum": ["blocking", "attention", "clean"] },
+    "expected_findings": { "type": "array", "items": { "$ref": "#/$defs/groundTruthFinding" } }
+  },
+  "allOf": [{
+    "if": { "properties": { "class": { "const": "clean" } } },
+    "then": { "properties": { "expected_findings": { "maxItems": 0 } } },
+    "else": { "properties": { "expected_findings": { "minItems": 1 } } }
+  }],
+  "$defs": {
+    "groundTruthFinding": {
+      "type": "object",
+      "required": ["path", "start_line", "line", "severity", "category"],
+      "additionalProperties": false,
+      "properties": {
+        "path": { "type": "string", "minLength": 1 },
+        "start_line": { "type": ["integer", "null"], "minimum": 1 },
+        "line": { "type": "integer", "minimum": 1 },
+        "severity": { "enum": ["critical", "high", "medium", "low", "info"] },
+        "category": { "enum": ["security", "correctness", "performance", "readability"] }
+      }
+    }
+  }
+}

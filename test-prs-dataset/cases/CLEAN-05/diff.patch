@@ -1,0 +1,15 @@
+diff --git a/webhook/headers.py b/webhook/headers.py
+--- a/webhook/headers.py
++++ b/webhook/headers.py
+@@ -4,10 +4,7 @@
+ 
+ 
+ def canonicalize_headers(headers: Mapping[str, str]) -> dict[str, str]:
+-    canonical: dict[str, str] = {}
+-    for name, value in headers.items():
+-        canonical[name.lower()] = value.strip()
+-    return canonical
++    return {name.lower(): value.strip() for name, value in headers.items()}
+ 
+ 
+ def delivery_metadata(headers: Mapping[str, str]) -> tuple[str | None, str | None]:

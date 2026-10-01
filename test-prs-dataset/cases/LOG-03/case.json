@@ -1,0 +1,26 @@
+{
+  "id": "LOG-03",
+  "class": "logic",
+  "language": "python",
+  "source": {
+    "kind": "real",
+    "url": "https://github.com/gijzelaerr/python-snap7/pull/806",
+    "revision": "bd11af442dd0a710b816c408d4ec180a8f5e89ee",
+    "license_name": "MIT",
+    "license_url": "https://github.com/gijzelaerr/python-snap7/blob/d72b66fb4a7e64c7c11ea9caa0ad64d4345d34c9/LICENSE",
+    "attribution": "gijzelaerr/python-snap7 contributors; PR #806 by gijzelaerr"
+  },
+  "base_path": "base",
+  "apply_directory": ".upstream",
+  "patch_path": "diff.patch",
+  "expected_verdict": "blocking",
+  "expected_findings": [
+    {
+      "path": "snap7/server/__init__.py",
+      "start_line": null,
+      "line": 2634,
+      "severity": "high",
+      "category": "correctness"
+    }
+  ]
+}

@@ -1,0 +1,26 @@
+{
+  "id": "RES-03",
+  "class": "resource",
+  "language": "python",
+  "source": {
+    "kind": "real",
+    "url": "https://github.com/aio-libs/aiohttp/pull/7944",
+    "revision": "ac55d6466963b7bb2834fe3d19a4f3c2a67e82a3",
+    "license_name": "Apache-2.0",
+    "license_url": "https://github.com/aio-libs/aiohttp/blob/2670e7b08da179e74a643dca8d795fd23fcd282e/LICENSE.txt",
+    "attribution": "aio-libs/aiohttp contributors; PR #7944 by xiangxli"
+  },
+  "base_path": "base",
+  "apply_directory": ".upstream",
+  "patch_path": "diff.patch",
+  "expected_verdict": "blocking",
+  "expected_findings": [
+    {
+      "path": "aiohttp/cookiejar.py",
+      "start_line": null,
+      "line": 288,
+      "severity": "high",
+      "category": "performance"
+    }
+  ]
+}

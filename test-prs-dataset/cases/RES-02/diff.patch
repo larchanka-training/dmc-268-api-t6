@@ -1,0 +1,14 @@
+diff --git a/src/useNotifications.tsx b/src/useNotifications.tsx
+index c08b3ee..eef45c3 100644
+--- a/src/useNotifications.tsx
++++ b/src/useNotifications.tsx
+@@ -10,7 +10,8 @@ export function useNotifications(
+   onMessage: (message: string) => void,
+ ): void {
+   useEffect(() => {
+-    source.subscribe(onMessage);
++    const listener = (message: string) => onMessage(message);
++    source.subscribe(listener);
+     return () => source.unsubscribe(onMessage);
+   }, [source, onMessage]);
+ }

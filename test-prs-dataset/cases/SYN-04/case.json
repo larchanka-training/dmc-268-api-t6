@@ -1,0 +1,26 @@
+{
+  "id": "SYN-04",
+  "class": "syntax",
+  "language": "typescript",
+  "source": {
+    "kind": "real",
+    "url": "https://github.com/pmndrs/zustand/pull/725",
+    "revision": "9d6e7e2050a5b9b4b541f0df7708f30d74cbe760",
+    "license_name": "MIT",
+    "license_url": "https://github.com/pmndrs/zustand/blob/76eeacb1c448ea323f46c2956ffb66c307c746b5/LICENSE",
+    "attribution": "pmndrs/zustand contributors; PR #725 by devanshj"
+  },
+  "base_path": "base",
+  "apply_directory": ".upstream",
+  "patch_path": "diff.patch",
+  "expected_verdict": "attention",
+  "expected_findings": [
+    {
+      "path": "src/middleware/devtools.ts",
+      "start_line": null,
+      "line": 86,
+      "severity": "low",
+      "category": "readability"
+    }
+  ]
+}

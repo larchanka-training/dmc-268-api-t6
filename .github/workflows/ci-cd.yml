@@ -107,6 +107,35 @@ jobs:
     # The name is the required status check on main; keep it verbatim.
     name: Python lint / type / test
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: ci
+          POSTGRES_PASSWORD: ci
+          POSTGRES_DB: ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U ci -d ci"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+      rabbitmq:
+        image: rabbitmq:4-management-alpine
+        env:
+          RABBITMQ_DEFAULT_USER: ci
+          RABBITMQ_DEFAULT_PASS: ci
+        ports:
+          - 5672:5672
+        options: >-
+          --health-cmd "rabbitmq-diagnostics -q ping"
+          --health-interval 5s
+          --health-timeout 10s
+          --health-retries 12
+    env:
+      TEST_DATABASE_URL: postgresql+psycopg://ci:ci@127.0.0.1:5432/ci
+      RABBITMQ_URL: amqp://ci:ci@127.0.0.1:5672/
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -120,6 +149,36 @@ jobs:
       - name: uv sync
         run: uv sync --locked --all-groups
 
+      - name: Check integration services
+        run: |
+          uv run python - <<'PYTHON'
+          import os
+          import socket
+          from urllib.parse import urlsplit
+
+          import psycopg
+          from sqlalchemy.engine import make_url
+
+          database = make_url(os.environ["TEST_DATABASE_URL"])
+          with psycopg.connect(
+              host=database.host,
+              port=database.port,
+              dbname=database.database,
+              user=database.username,
+              password=database.password,
+              connect_timeout=5,
+          ) as connection:
+              with connection.cursor() as cursor:
+                  cursor.execute("SELECT 1")
+                  assert cursor.fetchone() == (1,)
+
+          rabbitmq = urlsplit(os.environ["RABBITMQ_URL"])
+          with socket.create_connection((rabbitmq.hostname or "", rabbitmq.port or 5672), timeout=5) as connection:
+              connection.sendall(b"AMQP\x00\x00\x09\x01")
+              assert connection.recv(1) == b"\x01", "RabbitMQ did not answer the AMQP handshake"
+          print("PostgreSQL and RabbitMQ ready")
+          PYTHON
+
       - name: ruff check
         run: uv run ruff check .
 
@@ -131,6 +190,74 @@ jobs:
 
       - name: pytest
         run: uv run pytest
+
+      - name: Gold corpus and recorded replay
+        shell: bash
+        run: |
+          corpus_report="${RUNNER_TEMP}/corpus-report.json"
+          replay_report="${RUNNER_TEMP}/replay-report.json"
+          uv run python review/scripts/validate_dataset.py --final --report-json "${corpus_report}"
+          if [[ -f test-prs-dataset/responses/manifest.json ]]; then
+            uv run python review/scripts/eval_replay.py --report-json "${replay_report}"
+          fi
+          CORPUS_REPORT="${corpus_report}" REPLAY_REPORT="${replay_report}" uv run python - <<'PYTHON'
+          import json
+          import os
+          from pathlib import Path
+
+          corpus = json.loads(Path(os.environ["CORPUS_REPORT"]).read_text(encoding="utf-8"))
+          replay_path = Path(os.environ["REPLAY_REPORT"])
+
+          def percent(value):
+              return "undefined" if value is None else f"{value * 100:.1f}%"
+
+          with Path(os.environ["GITHUB_STEP_SUMMARY"]).open("a", encoding="utf-8") as summary:
+              summary.write("## Gold benchmark\n\n")
+              summary.write(
+                  f"Corpus: {corpus['valid_case_count']}/{corpus['case_count']} valid; "
+                  f"distribution {'passed' if corpus['passed'] else 'failed'}.\n\n"
+              )
+              if replay_path.is_file():
+                  replay = json.loads(replay_path.read_text(encoding="utf-8"))
+                  summary.write(
+                      f"Recorded replay ({replay['provenance']['model_id']}): "
+                      f"Validity {percent(replay['validity'])}, "
+                      f"micro Precision {percent(replay['micro']['precision'])}, "
+                      f"micro Recall {percent(replay['micro']['recall'])}, "
+                      f"Critical Recall {percent(replay['critical']['recall'])}.\n"
+                  )
+                  for warning in replay["warnings"]:
+                      print(f"::warning::{warning}")
+                      summary.write(f"\n> [!WARNING]\n> {warning}\n")
+              else:
+                  summary.write("Recorded replay: pending baseline responses and manifest.\n")
+          PYTHON
+
+      - name: Integration suite (zero skips)
+        run: |
+          report="${RUNNER_TEMP}/integration-results.xml"
+          uv run pytest -m integration -q -rs --junitxml="${report}"
+          INTEGRATION_REPORT="${report}" uv run python - <<'PYTHON'
+          import os
+          from pathlib import Path
+          from xml.etree import ElementTree
+
+          root = ElementTree.parse(os.environ["INTEGRATION_REPORT"]).getroot()
+          cases = root.findall(".//testcase")
+          skipped = [
+              case.attrib.get("name", "<unnamed>")
+              for case in cases
+              if (outcome := case.find("skipped")) is not None
+              and outcome.attrib.get("type") != "pytest.xfail"
+          ]
+          print(f"Integration tests: {len(cases)} collected, {len(skipped)} skipped")
+          if not cases or skipped:
+              for name in skipped:
+                  print(f"::error::Integration test skipped: {name}")
+              raise SystemExit("Integration suite must contain tests and have zero skips")
+          with Path(os.environ["GITHUB_STEP_SUMMARY"]).open("a") as summary:
+              summary.write(f"Integration tests: {len(cases)} collected, 0 skipped\n")
+          PYTHON
 
   docker-build:
     name: Docker image build
@@ -164,6 +291,7 @@ jobs:
           file: Dockerfile
           load: true
           tags: ${{ env.LOCAL_IMAGE }}
+          build-args: APT_REFRESH=${{ github.run_id }}-${{ github.run_attempt }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
           provenance: false

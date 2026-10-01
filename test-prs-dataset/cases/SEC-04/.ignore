@@ -1,0 +1,2 @@
+# Keep the original upstream bytes; this project's Ruff settings differ.
+base/.upstream/src/flask/sessions.py
