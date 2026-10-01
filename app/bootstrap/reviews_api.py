@@ -52,10 +52,10 @@ from app.modules.integrations.webhooks.infrastructure.github_webhook_receipts im
     SqlAlchemyGitHubWebhookReceiptUnitOfWork,
 )
 from app.modules.repositories.application.repository_settings import (
-    RepositorySettingsRepository,
+    RepositorySettingsUowFactory,
 )
 from app.modules.repositories.infrastructure.repository_settings import (
-    SqlAlchemyRepositorySettings,
+    SqlAlchemyRepositorySettingsUnitOfWork,
 )
 from app.modules.reviews.application.cancel_run import CancellationSignals, CancelRunRepository
 from app.modules.reviews.application.get_run import RunDetailRepository
@@ -69,6 +69,7 @@ from app.modules.reviews.application.project_github_pull_request import ProjectG
 from app.modules.reviews.application.publish_cancellation_signals import (
     PublishCancellationSignals,
 )
+from app.modules.reviews.application.rerun_run import RerunUnitOfWork
 from app.modules.reviews.application.try_enqueue_webhook_run import RunMessagePublisher
 from app.modules.reviews.infrastructure.amqp import LazyAmqpPublisher
 from app.modules.reviews.infrastructure.blob_cache import SqlAlchemyBlobCache
@@ -77,6 +78,7 @@ from app.modules.reviews.infrastructure.github_pull_request_projection import (
     SqlAlchemyPullRequestProjectionUnitOfWork,
 )
 from app.modules.reviews.infrastructure.pull_request_queries import SqlAlchemyPullRequestQueries
+from app.modules.reviews.infrastructure.rerun_store import SqlAlchemyRerunUnitOfWork
 from app.modules.reviews.infrastructure.run_repository import SqlAlchemyRunRepository
 from app.modules.workspaces.application.link_github_installations import LinkGitHubInstallations
 from app.modules.workspaces.infrastructure.github_installation_links import (
@@ -250,8 +252,17 @@ def get_run_repository(
 def get_repository_settings(
     request: Request,
     scope: Annotated[AuthScope, Depends(get_auth_scope)],
-) -> RepositorySettingsRepository:
-    return SqlAlchemyRepositorySettings(_resources(request).session_factory, scope)
+) -> RepositorySettingsUowFactory:
+    return partial(
+        SqlAlchemyRepositorySettingsUnitOfWork, _resources(request).session_factory, scope
+    )
+
+
+def get_rerun_uow_factory(
+    request: Request,
+    scope: Annotated[AuthScope, Depends(get_auth_scope)],
+) -> Callable[[], RerunUnitOfWork]:
+    return partial(SqlAlchemyRerunUnitOfWork, _resources(request).session_factory, scope)
 
 
 def get_pull_requests(

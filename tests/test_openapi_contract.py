@@ -10,7 +10,7 @@ from dataclasses import replace
 from datetime import UTC, datetime
 from functools import cache
 from pathlib import Path
-from typing import Any, get_args
+from typing import Any, Self, get_args
 from uuid import UUID
 
 import pytest
@@ -23,7 +23,12 @@ from openapi_spec_validator.readers import read_from_filename
 from referencing import Registry
 from referencing.jsonschema import DRAFT202012
 
-from app.bootstrap.reviews_api import get_pull_requests, get_repository_settings, get_run_publisher
+from app.bootstrap.reviews_api import (
+    get_pull_requests,
+    get_repository_settings,
+    get_rerun_uow_factory,
+    get_run_publisher,
+)
 from app.main import app, get_file_blob_cache, get_run_event_hub, get_run_repository
 from app.modules.repositories.application.repository_settings import (
     RepositorySettings,
@@ -189,6 +194,22 @@ class OpenApiContractRepository(ContractRepository):
     async def mark_rerun_published(self, run_id: UUID, now: datetime) -> None:
         return None
 
+    @property
+    def runs(self) -> OpenApiContractRepository:
+        return self
+
+    async def __aenter__(self) -> Self:
+        return self
+
+    async def __aexit__(self, *args: object) -> None:
+        return None
+
+    async def commit(self) -> None:
+        return None
+
+    async def rollback(self) -> None:
+        return None
+
 
 REPOSITORY = RepositorySettings(
     id=REPOSITORY_ID,
@@ -204,8 +225,26 @@ REPOSITORY = RepositorySettings(
 
 
 class ContractRepositories:
+    """Repository settings store and its unit of work."""
+
     def __init__(self) -> None:
         self.item = REPOSITORY
+
+    @property
+    def repositories(self) -> ContractRepositories:
+        return self
+
+    async def __aenter__(self) -> Self:
+        return self
+
+    async def __aexit__(self, *args: object) -> None:
+        return None
+
+    async def commit(self) -> None:
+        return None
+
+    async def rollback(self) -> None:
+        return None
 
     async def list_repositories(self) -> list[RepositorySettings]:
         return [self.item]
@@ -280,7 +319,8 @@ def client() -> Iterator[TestClient]:
     pulls = ContractPulls()
     app.dependency_overrides[get_run_repository] = lambda: repository
     app.dependency_overrides[get_file_blob_cache] = lambda: blob_cache
-    app.dependency_overrides[get_repository_settings] = lambda: repositories
+    app.dependency_overrides[get_repository_settings] = lambda: lambda: repositories
+    app.dependency_overrides[get_rerun_uow_factory] = lambda: lambda: repository
     app.dependency_overrides[get_pull_requests] = lambda: pulls
     app.dependency_overrides[get_run_publisher] = lambda: None
     try:
