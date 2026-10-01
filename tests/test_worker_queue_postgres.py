@@ -47,7 +47,7 @@ from app.modules.reviews.application.conventions import (
 from app.modules.reviews.application.determine_ci_eligibility import CiEligibility
 from app.modules.reviews.application.get_run_diff import DiffSnapshot
 from app.modules.reviews.application.handle_review_run import ClaimedAttempt
-from app.modules.reviews.application.prompt_builder import PullRequestMeta
+from app.modules.reviews.application.prompt_builder import PullRequestMeta, ReviewContext
 from app.modules.reviews.application.publish_run_review import ReviewSubmission, SubmittedReview
 from app.modules.reviews.application.reconcile_runs import ReconcileRuns
 from app.modules.reviews.application.review_output import PublishedFinding
@@ -316,7 +316,7 @@ class Model:
             is_fork=False,
         )
 
-    async def draft_review(self, *, prompt: str) -> Mapping[str, object] | str | bytes:
+    async def draft_review(self, *, context: ReviewContext) -> Mapping[str, object] | str | bytes:
         self.review_calls += 1
         async with self.factory() as session:
             row = (

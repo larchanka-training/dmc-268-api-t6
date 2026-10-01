@@ -3,12 +3,11 @@
 from __future__ import annotations
 
 import asyncio
-import json
 from contextlib import AbstractAsyncContextManager
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any, cast
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -21,14 +20,9 @@ from app.modules.reviews.application.llm import (
     LlmErrorCode,
     LlmUsage,
     RunCallContext,
-    serialized_size,
 )
-from app.modules.reviews.infrastructure.llm_call_trace import (
-    INLINE_RESPONSE_LIMIT,
-    SqlAlchemyLlmCallTrace,
-    inline_response,
-)
-from app.modules.reviews.infrastructure.models import RunAction
+from app.modules.reviews.infrastructure.llm_call_trace import SqlAlchemyLlmCallTrace
+from app.modules.reviews.infrastructure.models import RunAction, RunActionResponseBody
 
 RUN_ID = UUID("00000000-0000-0000-0000-000000003311")
 WORKSPACE_ID = UUID("00000000-0000-0000-0000-000000003312")
@@ -47,6 +41,11 @@ class FakeSession:
 
     def add(self, item: object) -> None:
         self.added.append(item)
+
+    async def flush(self) -> None:
+        for item in self.added:
+            if isinstance(item, RunActionResponseBody) and item.id is None:
+                item.id = uuid4()
 
 
 class FakeContext(AbstractAsyncContextManager[FakeSession]):
@@ -166,21 +165,30 @@ def test_llm_call_is_appended_as_the_next_run_action() -> None:
     assert (action.started_at, action.duration_ms) == (STARTED, 1234)
 
 
-def test_response_up_to_64_kb_is_stored_inline_as_is() -> None:
-    body = {"choices": [{"message": {"content": "x" * 1000}}]}
+def test_llm_call_response_over_64_kb_goes_to_run_action_responses() -> None:
+    factory = FakeFactory(0)
+    huge = {"choices": [{"message": {"content": "я" * 50_000}}]}
 
-    assert inline_response(body) is body
+    asyncio.run(
+        SqlAlchemyLlmCallTrace(_factory(factory)).record_call(RUN_ID, _record(response=huge))
+    )
+
+    body, action = factory.session.added
+    assert isinstance(body, RunActionResponseBody)
+    assert (body.run_id, body.body) == (RUN_ID, huge)
+    assert isinstance(action, RunAction)
+    assert action.response is None
+    assert action.response_ref == str(body.id)
 
 
-def test_larger_response_is_cut_to_a_marked_utf8_safe_prefix() -> None:
-    body = {"content": "я" * 50_000}
-    original = serialized_size(body)
+def test_llm_call_response_up_to_64_kb_stays_inline() -> None:
+    factory = FakeFactory(0)
+    small = {"choices": [{"message": {"content": "x" * 1000}}]}
 
-    stored = inline_response(body)
+    asyncio.run(
+        SqlAlchemyLlmCallTrace(_factory(factory)).record_call(RUN_ID, _record(response=small))
+    )
 
-    assert original > INLINE_RESPONSE_LIMIT
-    assert stored["truncated"] is True
-    assert stored["original_bytes"] == original
-    assert serialized_size(stored) <= INLINE_RESPONSE_LIMIT
-    assert serialized_size(stored) > INLINE_RESPONSE_LIMIT - 8
-    assert json.dumps(body, ensure_ascii=False, separators=(",", ":")).startswith(stored["text"])
+    (action,) = factory.session.added
+    assert isinstance(action, RunAction)
+    assert (action.response, action.response_ref) == (small, None)

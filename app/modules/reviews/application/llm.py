@@ -7,7 +7,6 @@ the attempt deadline, the run cost limit and to write the ``llm.call`` trace and
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
@@ -157,11 +156,6 @@ class LlmCallTrace(Protocol):
     """Writes one ``llm.call`` run action per provider call, outside any call transaction."""
 
     async def record_call(self, run_id: UUID, record: LlmCallRecord) -> None: ...
-
-
-def serialized_size(value: object) -> int:
-    """Bytes of the compact UTF-8 JSON that PostgreSQL JSONB receives."""
-    return len(json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
 
 
 def _uuid_or_none(value: UUID | None) -> str | None:
