@@ -28,6 +28,15 @@ KNOWN_ERROR_CODES = RETRYABLE_ERROR_CODES | {
 }
 
 
+def cancellation_reason(*, pr_open: bool, head_current: bool, cancel_requested: bool) -> str | None:
+    """T6, T11, T14 and T15 decide by PostgreSQL: closed PR, then a new head, then a user cancel."""
+    if not pr_open:
+        return "pr_closed"
+    if not head_current:
+        return "superseded"
+    return "cancelled_by_user" if cancel_requested else None
+
+
 class RunFailure(Exception):
     """A failed attempt with an ``error_code`` from the §6 catalog."""
 

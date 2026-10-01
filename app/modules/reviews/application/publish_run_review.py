@@ -18,6 +18,7 @@ from app.modules.reviews.application.handle_review_run import (
 )
 from app.modules.reviews.application.queue_messages import ReviewPublishPointer
 from app.modules.reviews.application.review_output import PublishedFinding
+from app.modules.reviews.application.run_failures import cancellation_reason
 from app.modules.reviews.application.run_trace import RunTrace
 
 _LOGGER = logging.getLogger(__name__)
@@ -108,7 +109,9 @@ class ReviewPublicationStore(CheckRunReports, Protocol):
         findings_hash: str,
         moved_to_body: bool,
         now: datetime,
-    ) -> bool: ...
+    ) -> str | None:
+        """Final state (``succeeded``, or ``cancelled`` if cancelled during the POST)."""
+        ...
 
 
 class ReviewPublicationUnitOfWork(UnitOfWork, Protocol):
@@ -156,7 +159,11 @@ class PublishRunReview:
         if (context.head_sha, context.findings_hash) != (pointer.head_sha, pointer.findings_hash):
             _LOGGER.warning("Stale review.publish/v1 for run %s is ignored", pointer.run_id)
             return
-        reason = self._cancellation_reason(context)
+        reason = cancellation_reason(
+            pr_open=context.pr_open,
+            head_current=context.head_sha == context.pr_head_sha,
+            cancel_requested=context.cancel_requested,
+        )
         if reason is not None:
             await self._finish(pointer.run_id, "cancelled", reason, None)
             return
@@ -244,16 +251,6 @@ class PublishRunReview:
             pointer.run_id, "github.publish_review", request, response, started_at, duration_ms
         )
         return result
-
-    @staticmethod
-    def _cancellation_reason(context: PublishContext) -> str | None:
-        if not context.pr_open:
-            return "pr_closed"
-        if context.head_sha != context.pr_head_sha:
-            return "superseded"
-        if context.cancel_requested:
-            return "cancelled_by_user"
-        return None
 
     async def _finish(
         self, run_id: UUID, state: str, error_code: str, error_message: str | None

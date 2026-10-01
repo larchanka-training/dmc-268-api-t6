@@ -88,11 +88,11 @@ class Store:
         findings_hash: str,
         moved_to_body: bool,
         now: datetime,
-    ) -> bool:
+    ) -> str | None:
         assert findings_hash == HASH
         self.completed.append((review_id, comment_ids, moved_to_body))
         self.state = "succeeded"
-        return True
+        return self.state
 
     async def finish(
         self,
@@ -415,3 +415,35 @@ class _Tokens:
     async def get_installation_access_token(self, installation_external_id: int) -> str:
         assert installation_external_id == 17
         return "token"
+
+
+def test_failed_comment_read_is_retried_and_finds_the_posted_review() -> None:
+    posts: list[str] = []
+    comment_reads: list[int] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if request.method == "POST":
+            posts.append(path)
+            return httpx.Response(200, json={"id": 55})
+        if path.endswith("/pulls/7/reviews"):
+            body = f"x\n\n<!-- ai-review findings_hash={HASH} -->"
+            return httpx.Response(200, json=[{"id": 55, "body": body}] if posts else [])
+        comment_reads.append(1)
+        if len(comment_reads) == 1:
+            return httpx.Response(502, json={"message": "Bad Gateway"})
+        return httpx.Response(200, json=[{"id": 900}])
+
+    gateway = GitHubPullRequestReviewGateway(
+        client=httpx.AsyncClient(
+            base_url="https://api.github.test", transport=httpx.MockTransport(respond)
+        ),
+        token_provider=_Tokens(),
+    )
+    submission = ReviewSubmission(17, "octo/repo", 7, HEAD, "COMMENT", "body", (FINDING,), HASH)
+
+    with pytest.raises(GitHubPublishError) as raised:
+        asyncio.run(gateway.submit_review(submission))
+    assert raised.value.kind == "retryable"
+    assert asyncio.run(gateway.submit_review(submission)) == SubmittedReview(55, (900,))
+    assert len(posts) == 1
