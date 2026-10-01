@@ -10,6 +10,7 @@ from datetime import UTC, datetime
 from typing import Any, Protocol
 from uuid import UUID
 
+from app.common.application.unit_of_work import UnitOfWork
 from app.modules.reviews.application.conventions import GeneratedConventions
 from app.modules.reviews.application.execute_review import (
     ReviewPromptInput,
@@ -29,6 +30,52 @@ class RunTrace(Protocol):
         started_at: datetime,
         duration_ms: int,
     ) -> None: ...
+
+
+class RunTraceStore(Protocol):
+    """Repository side of the trace: adds rows and flushes, never commits."""
+
+    async def add_action(
+        self,
+        run_id: UUID,
+        tool: str,
+        request: dict[str, Any],
+        response: Any,
+        started_at: datetime,
+        duration_ms: int,
+    ) -> None: ...
+
+    async def save_context_payload(self, run_id: UUID, summary: dict[str, Any]) -> None: ...
+
+
+class RunTraceUnitOfWork(UnitOfWork, Protocol):
+    @property
+    def trace(self) -> RunTraceStore: ...
+
+
+class TransactionalRunTrace:
+    """``RunTrace`` and ``ContextPayloadStore``: each record commits in its own short UoW."""
+
+    def __init__(self, uow_factory: Callable[[], RunTraceUnitOfWork]) -> None:
+        self._uow_factory = uow_factory
+
+    async def record(
+        self,
+        run_id: UUID,
+        tool: str,
+        request: dict[str, Any],
+        response: Any,
+        started_at: datetime,
+        duration_ms: int,
+    ) -> None:
+        async with self._uow_factory() as uow:
+            await uow.trace.add_action(run_id, tool, request, response, started_at, duration_ms)
+            await uow.commit()
+
+    async def save_context_payload(self, run_id: UUID, summary: dict[str, Any]) -> None:
+        async with self._uow_factory() as uow:
+            await uow.trace.save_context_payload(run_id, summary)
+            await uow.commit()
 
 
 @dataclass

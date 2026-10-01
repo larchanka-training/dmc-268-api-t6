@@ -65,7 +65,7 @@ def test_run_message_passes_the_contract_schema_with_message_id_equal_to_run_id(
     assert body["message_id"] == body["run_id"] == str(RUN)
     assert body["attempt"] == 2
     assert body["trigger"] == "webhook"
-    assert body["requested_at"] == "2026-09-30T12:00:00.000Z"
+    assert body["requested_at"] == "2026-09-30T12:00:00Z"
     assert amqp.run_message_body(pending(trigger="rerun"))["trigger"] == "rerun"
 
 
