@@ -21,7 +21,7 @@
 | `VPS_DMC268_IP_T6` | variable | IPv4 курсового VPS, SSH на порт 22 |
 | `VPS_DMC268_U` | secret | SSH-пользователь (`root`) |
 | `VPS_DMC268_P` | secret | SSH-пароль; уходит только на VPS, никогда на Terraform-хост |
-| `AI_DMC268_T6` | secret | LLM-ключ приложения; зарезервирован для app, CI его не использует |
+| `AI_DMC268_T6` | secret | LLM-ключ приложения. В контейнеры пока не пробрасывается: имена переменных LLM (`LLM_API_KEYS` и др.) появятся с #33, тогда ключ уйдёт в `app.env` тем же путём, что секреты Environment `staging` ниже |
 
 ### Repository — variables
 
@@ -32,12 +32,47 @@
 
 ### GitHub Environment `staging` — secrets
 
-Только то, что даёт доступ к машине, реестру или данным.
+Доступ к машине, реестру и данным, а также секреты приложения.
 
 | Secret | Обязателен | Куда уходит | Зачем |
 |---|---|---|---|
 | `STAGING_SSH_KEY` | да, для Terraform-хоста | SCP/SSH на VM | приватный ключ к `hcloud_ssh_key.ci` |
 | `POSTGRES_PASSWORD` | нет | `<APP_DIR>/.env` на хосте | пароль PostgreSQL. Если не задан, `deploy.sh` генерирует его при первом выкате и хранит в `.env` (0600). После инициализации тома пароль не менять: Postgres его не перечитывает |
+
+Секреты приложения. GitHub не принимает имена секретов с префиксом `GITHUB_` (HTTP 422), поэтому секреты App заведены как `GH_*`, а в контейнере у них имена из `.env.example`. Сопоставление делает шаг «Bundle application secrets» в `deploy-staging`. Незаданный секрет в контейнер не попадает совсем, а не приходит пустой строкой.
+
+| Secret | Тип значения | Переменная в контейнере | Контейнеры | Зачем |
+|---|---|---|---|---|
+| `GH_APP_ID` | число | `GITHUB_APP_ID` | `api`, `worker` | App ID staging App `dmc268-t6-reviewer` (#37) |
+| `GH_APP_PRIVATE_KEY` | многострочный PEM | `GITHUB_APP_PRIVATE_KEY` | `api`, `worker` | подпись JWT App для installation token |
+| `GH_WEBHOOK_SECRET` | строка | `GITHUB_WEBHOOK_SECRET` | `api` | проверка подписи вебхуков; без него диспетчер вебхуков выключен |
+| `GH_CLIENT_ID` | строка | `GITHUB_CLIENT_ID` | `api` | user authorization App (auth-api, #11); отличается от App ID |
+| `GH_CLIENT_SECRET` | строка | `GITHUB_CLIENT_SECRET` | `api` | обмен OAuth-кода (auth-api, #11) |
+| `AUTH_JWT_PRIVATE_KEY` | многострочный PEM (RSA) | `AUTH_JWT_PRIVATE_KEY` | `api` | подпись локального access JWT |
+| `AUTH_JWT_PUBLIC_KEY` | многострочный PEM (RSA) | `AUTH_JWT_PUBLIC_KEY` | `api` | проверка access JWT |
+
+`AUTH_JWT_ISSUER` (`dmc-268-api`) и `AUTH_JWT_AUDIENCE` (`dmc-268-ui`) — не секреты: они фиксированы в `deploy/compose/staging.yml`. Домен cookie refresh не настраивается: cookie host-only с `Path=/api/auth`, а UI и API работают с одного origin `staging-ui.<APP_DOMAIN>` (маршрут `/api/*` в `deploy/edge/Caddyfile`).
+
+Пара ключей JWT создаётся один раз и заводится в Environment `staging`:
+
+```bash
+openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out jwt.pem
+openssl rsa -in jwt.pem -pubout -out jwt.pub
+gh secret set AUTH_JWT_PRIVATE_KEY --env staging -R larchanka-training/dmc-268-api-t6 < jwt.pem
+gh secret set AUTH_JWT_PUBLIC_KEY --env staging -R larchanka-training/dmc-268-api-t6 < jwt.pub
+rm jwt.pem jwt.pub
+```
+
+Смена пары разлогинивает всех: ранее выданные access JWT перестают проверяться.
+
+### Генерируются на хосте
+
+В GitHub не заводятся. `deploy.sh` создаёт их при первом выкате (48 hex-символов), хранит в `<APP_DIR>/.env` (0600) и переиспользует при каждом выкате и откате.
+
+| Имя | Куда уходит | Примечание |
+|---|---|---|
+| `RABBITMQ_PASSWORD` (пользователь `RABBITMQ_USER`, по умолчанию `app`) | контейнер `rabbitmq`; `RABBITMQ_URL` в `api` и `worker` | RabbitMQ, как Postgres, применяет учётные данные только на пустом томе `rabbitmq-data`. Если том есть, а пароля в `.env` нет, `deploy.sh` отказывается генерировать новый |
+| `REDIS_PASSWORD` | контейнер `redis`; `REDIS_URL` в `api` и `worker` | Redis — кэш без тома: новый пароль только сбрасывает кэш |
 
 `GITHUB_TOKEN` выдаёт Actions сам. В репозиторий его не кладут. Push в GHCR — `packages: write`; pull на staging — `packages: read`.
 
@@ -86,7 +121,7 @@ GitHub user access token используется только для чтени
 callback; в PostgreSQL хранится только хеш локального refresh token.
 
 1. Settings → Environments → **staging**.
-2. Secrets: `STAGING_SSH_KEY` (только для Terraform-хоста), при желании `POSTGRES_PASSWORD`. Для курсового VPS environment secrets не нужны — хватает organization secrets и repository variables.
+2. Secrets: `STAGING_SSH_KEY` (только для Terraform-хоста), при желании `POSTGRES_PASSWORD`, секреты приложения из §1. Для выката как такового на курсовой VPS environment secrets не нужны — хватает organization secrets и repository variables; без секретов приложения стенд поднимается с выключенными вебхуками и авторизацией.
 3. Variables: хост, SSH-порт, SHA256 SSH fingerprint, SSH-пользователь, опционально health URL и имя БД.
 
    Fingerprint после `terraform apply` (формат appleboy — строка `SHA256:…` из вывода):
@@ -113,17 +148,20 @@ flowchart LR
   gha["GitHub Environment"] --> ssh["SSH/SCP, debug: false"]
   ssh --> script["deploy.sh / rollback.sh"]
   script --> envfile["<APP_DIR>/.env\nchmod 600"]
+  script --> appenv["<APP_DIR>/app.env, api.env\nchmod 600"]
   envfile --> compose["docker compose --env-file"]
+  appenv --> compose2["env_file: api, worker"]
   script --> logout["docker logout ghcr.io"]
 ```
 
 1. Runner забирает secret/var только в job с `environment: staging`.
 2. `appleboy/ssh-action` с `debug: false` передаёт в скрипт одноразовый `GITHUB_TOKEN` и, если задан, `POSTGRES_PASSWORD`. SSH-пароль VPS передаётся только как `password` действия, в скрипт он не попадает.
 3. `deploy.sh` пишет `.env` с `umask 077` и `chmod 600`; без `POSTGRES_PASSWORD` генерирует пароль один раз на свежем хосте и отказывается генерировать, если `.env` или том Postgres уже есть. Пароль в stdout не печатается.
-4. Compose читает `.env` на VM. Postgres слушает только docker-сеть.
-5. `GITHUB_TOKEN` нужен лишь для pull. Логин идёт во временный `DOCKER_CONFIG` (`mktemp -d`), а не в `/root/.docker/config.json`: выкаты API и UI под общим root не мешают друг другу. После последнего pull — `docker logout`, при выходе каталог удаляется; `unset GHCR_TOKEN`.
+4. Compose читает `.env` на VM. Postgres, RabbitMQ и Redis слушают только docker-сеть проекта, `ports:` у них нет.
+5. Секреты приложения шаг «Bundle application secrets» собирает в одну строку `APP_SECRETS_B64`: base64 от строк `ИМЯ=<base64 значения>`, только для заданных секретов. Строка маскируется (`::add-mask::`) и уходит через `envs:` SSH-действия; многострочные PEM так не ломаются в SSH и shell. На хосте `write_app_env_files` (`env-file.sh`) раскладывает значения по allowlist: `app.env` (`api` и `worker`) и `api.env` (только `api`), в одинарных кавычках — Compose читает их буквально, без подстановки `$`. Имя вне allowlist или значение с `'` валит выкат до `compose up`.
+6. `GITHUB_TOKEN` нужен лишь для pull. Логин идёт во временный `DOCKER_CONFIG` (`mktemp -d`), а не в `/root/.docker/config.json`: выкаты API и UI под общим root не мешают друг другу. После последнего pull — `docker logout`, при выходе каталог удаляется; `unset GHCR_TOKEN`.
 
-Rollback пароль из GitHub не шлёт повторно: читает уже лежащий `.env`.
+Rollback ничего из GitHub не шлёт повторно: пароли Postgres, RabbitMQ и Redis берёт из лежащего `.env`, а `app.env` и `api.env` не трогает — откатанные `api` и `worker` стартуют с теми же секретами. Секреты не привязаны к образу: откат образа не возвращает предыдущие значения секретов.
 
 ---
 
@@ -159,6 +197,14 @@ PR и `main` гоняют Gitleaks (`--redact`) и Trivy scanner `secret`. На�
 | Gitleaks | `--redact`, чтобы находка не продублировала секрет |
 
 Не делайте `echo "$POSTGRES_PASSWORD"`, `env`, `cat .env` в workflow.
+
+Имена переменных в контейнере без значений — не через `env | cut -d= -f1`: строки многострочного PEM не содержат `=` и печатаются целиком. Безопасно:
+
+```bash
+cd /opt/dmc-268-api-staging
+docker compose -p dmc-268-api-staging -f compose.yml -f compose.edge.yml --env-file .env \
+  exec -T api python -c "import os; print(' '.join(sorted(os.environ)))"
+```
 
 ---
 
