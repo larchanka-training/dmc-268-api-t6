@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import os
+from collections.abc import Iterator
 from uuid import UUID
 
 import pytest
@@ -18,10 +20,20 @@ from tests.portal_postgres import (
     WS_A,
     Env,
     api,
+    portal_schema,
     queued_messages,
-    rest_env,  # noqa: F401  (the env fixture)
     scalar,
 )
+
+
+@pytest.fixture
+def env() -> Iterator[Env]:
+    database_url = os.environ.get("TEST_DATABASE_URL")
+    rabbitmq_url = os.environ.get("TEST_RABBITMQ_URL")
+    if database_url is None or rabbitmq_url is None:
+        pytest.skip("set TEST_DATABASE_URL and TEST_RABBITMQ_URL to run publication tests")
+    with portal_schema(database_url, rabbitmq_url) as schema:
+        yield schema
 
 
 @pytest.mark.integration
@@ -40,7 +52,7 @@ def test_rerun_creates_a_priority_nine_run_and_rejects_active_or_closed_prs(env:
         )
         runs = scalar(factory, "SELECT count(*) FROM runs")
 
-    messages = asyncio.run(queued_messages(env.rabbitmq_url))
+    messages = asyncio.run(queued_messages(env))
 
     assert created.status_code == 202 and created.json()["status"] == "queued"
     assert tuple(row) == ("rerun", "queued", 0, HEAD, True)
@@ -71,4 +83,4 @@ def test_rerun_without_an_active_rule_version_is_not_a_conflict_and_creates_no_r
 
     assert response.status_code == 422
     assert tuple(runs) == (4,)
-    assert asyncio.run(queued_messages(env.rabbitmq_url)) == []
+    assert asyncio.run(queued_messages(env)) == []

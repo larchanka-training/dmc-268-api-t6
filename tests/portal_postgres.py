@@ -10,14 +10,12 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
-import os
 from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
-import pytest
 from alembic.config import Config
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, text
@@ -59,7 +57,7 @@ NOW = datetime.now(UTC)
 class Env:
     database_url: str
     schema: str
-    rabbitmq_url: str
+    rabbitmq_url: str | None
 
     def engine(self) -> AsyncEngine:
         return create_async_engine(
@@ -177,18 +175,18 @@ def _seed(connection: Any) -> None:
     )
 
 
-@pytest.fixture(name="env")
-def rest_env() -> Iterator[Env]:
-    database_url = os.environ.get("TEST_DATABASE_URL")
-    rabbitmq_url = os.environ.get("TEST_RABBITMQ_URL")
-    if database_url is None or rabbitmq_url is None:
-        pytest.skip("set TEST_DATABASE_URL and TEST_RABBITMQ_URL to run REST integration tests")
-    asyncio.run(_reset_topology(rabbitmq_url))
-    schema = f"test_rest_{UUID(int=NOW.microsecond).hex[-8:]}_{os.getpid()}"
+@contextlib.contextmanager
+def portal_schema(database_url: str, rabbitmq_url: str | None) -> Iterator[Env]:
+    """A migrated, seeded schema; the review topology is reset only with a broker URL.
+
+    Each test file's fixture decides what it needs and skips without it.
+    """
+    if rabbitmq_url is not None:
+        asyncio.run(_reset_topology(rabbitmq_url))
+    schema = f"test_rest_{uuid4().hex}"
     engine = create_engine(database_url)
     try:
         with engine.connect() as connection:
-            connection.execute(text(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE'))
             connection.execute(CreateSchema(schema))
             connection.execute(text(f'SET search_path TO "{schema}"'))
             connection.commit()
@@ -204,34 +202,39 @@ def rest_env() -> Iterator[Env]:
             connection.commit()
     finally:
         engine.dispose()
-        asyncio.run(_reset_topology(rabbitmq_url))
+        if rabbitmq_url is not None:
+            asyncio.run(_reset_topology(rabbitmq_url))
 
 
 @contextlib.contextmanager
 def api(env: Env, scope: AuthScope) -> Iterator[tuple[TestClient, async_sessionmaker[Any]]]:
     engine = env.engine()
     factory = async_sessionmaker(engine, expire_on_commit=False)
-    publisher = LazyAmqpPublisher(env.rabbitmq_url)
+    # Without a broker the API skips its publications, as in production.
+    publisher = LazyAmqpPublisher(env.rabbitmq_url) if env.rabbitmq_url else None
     app.dependency_overrides[get_auth_scope] = lambda: scope
     try:
         # One portal loop for every request: the lazy AMQP connection lives in it.
         with TestClient(app) as client:
             app.state.reviews_api_resources = ReviewsApiResources(engine, factory)
-            app.state.run_publisher = publisher
+            if publisher is not None:
+                app.state.run_publisher = publisher
             try:
                 yield client, factory
             finally:
-                assert client.portal is not None
-                client.portal.call(publisher.aclose)
+                if publisher is not None:
+                    assert client.portal is not None
+                    client.portal.call(publisher.aclose)
                 del app.state.reviews_api_resources
     finally:
         app.dependency_overrides.clear()
         asyncio.run(engine.dispose())
 
 
-async def queued_messages(url: str) -> list[tuple[int | None, dict[str, Any]]]:
+async def queued_messages(env: Env) -> list[tuple[int | None, dict[str, Any]]]:
+    assert env.rabbitmq_url is not None, "publication tests need TEST_RABBITMQ_URL"
     messages: list[tuple[int | None, dict[str, Any]]] = []
-    async with amqp_channels(url, RetryDelays()) as channels:
+    async with amqp_channels(env.rabbitmq_url, RetryDelays()) as channels:
         queue = await channels.consumer_queue(run_queue("fast"))
         while (message := await queue.get(no_ack=True, fail=False)) is not None:
             messages.append((message.priority, json.loads(message.body)))

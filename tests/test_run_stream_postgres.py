@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import os
+from collections.abc import Iterator
 from datetime import timedelta
 
 import pytest
@@ -18,8 +20,17 @@ from tests.portal_postgres import (
     NOW,
     RUN_ATTEMPTED,
     Env,
-    rest_env,  # noqa: F401  (the env fixture)
+    portal_schema,
 )
+
+
+@pytest.fixture
+def env() -> Iterator[Env]:
+    database_url = os.environ.get("TEST_DATABASE_URL")
+    if database_url is None:
+        pytest.skip("set TEST_DATABASE_URL to run PostgreSQL integration tests")
+    with portal_schema(database_url, None) as schema:
+        yield schema
 
 
 @pytest.mark.integration
