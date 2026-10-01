@@ -2,16 +2,16 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from decimal import Decimal
-from hashlib import sha256
 from typing import Any
-from uuid import UUID, uuid4
+from uuid import UUID
 
 from sqlalchemy import ColumnElement, Row, String, and_, cast, func, or_, select, true, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.common.infrastructure.db.enums import Engine, RunState
+from app.common.infrastructure.db.enums import RunState
 from app.modules.analytics.infrastructure.models import UsageEvent
 from app.modules.auth.application.scope import AuthScope
 from app.modules.repositories.infrastructure.models import (
@@ -37,13 +37,10 @@ from app.modules.reviews.application.process_run import (
     RunDiffInput,
     RunVcsInput,
 )
-from app.modules.reviews.application.project_github_pull_request import PullRequestState
 from app.modules.reviews.application.prompt_builder import (
     parse_unified_diff,
     review_rule_from_stored,
 )
-from app.modules.reviews.application.queue_messages import StoredRunMessage
-from app.modules.reviews.application.rerun_run import RerunOutcome, RerunResult
 from app.modules.reviews.application.review_output import (
     FindingPostProcessingInput,
     PublishedFinding,
@@ -51,7 +48,6 @@ from app.modules.reviews.application.review_output import (
     ReviewPublication,
 )
 from app.modules.reviews.application.store_review_output import PublishingGuard
-from app.modules.reviews.application.try_enqueue_webhook_run import PendingRunMessage
 from app.modules.reviews.application.vcs_diff import PullRequestLocator
 from app.modules.reviews.infrastructure.models import (
     CodeChange,
@@ -64,8 +60,21 @@ from app.modules.reviews.infrastructure.models import (
 )
 from app.modules.reviews.infrastructure.run_action_payloads import place_response
 from app.modules.reviews.infrastructure.run_notifications import notify_run_state
-from app.modules.reviews.infrastructure.webhook_runs import SqlAlchemyWebhookRunStore
 from app.modules.workspaces.infrastructure.repository_access import repository_access_predicate
+
+
+def authorized_run(scope: AuthScope | None) -> ColumnElement[bool]:
+    """A Run is visible when the claim and grants give access to its repository."""
+    if scope is None:
+        return true()
+    return (
+        select(1)
+        .select_from(CodeChange)
+        .join(Repository, Repository.id == CodeChange.repository_id)
+        .where(CodeChange.id == Run.code_change_id, repository_access_predicate(scope))
+        .correlate(Run)
+        .exists()
+    )
 
 
 class SqlAlchemyRunRepository:
@@ -76,17 +85,7 @@ class SqlAlchemyRunRepository:
         self._scope = scope
 
     def _authorized_run(self) -> ColumnElement[bool]:
-        if self._scope is None:
-            return true()
-        scope = self._scope
-        return (
-            select(1)
-            .select_from(CodeChange)
-            .join(Repository, Repository.id == CodeChange.repository_id)
-            .where(CodeChange.id == Run.code_change_id, repository_access_predicate(scope))
-            .correlate(Run)
-            .exists()
-        )
+        return authorized_run(self._scope)
 
     async def list_runs(
         self,
@@ -180,16 +179,19 @@ class SqlAlchemyRunRepository:
                     .order_by(Finding.created_at.asc(), Finding.id.asc())
                 )
             ).all()
-            output = (
+            outputs = (
                 await session.execute(
-                    select(RunAction.response, RunActionResponseBody.body)
+                    select(RunAction.tool, RunAction.response, RunActionResponseBody.body)
                     .outerjoin(
                         RunActionResponseBody,
                         cast(RunActionResponseBody.id, String) == RunAction.response_ref,
                     )
-                    .where(RunAction.run_id == run_id, RunAction.tool == "llm.review_output")
+                    .where(
+                        RunAction.run_id == run_id,
+                        RunAction.tool.in_(["review.postprocess", "llm.review_output"]),
+                    )
                 )
-            ).first()
+            ).all()
             usage = (
                 await session.execute(
                     select(
@@ -213,7 +215,7 @@ class SqlAlchemyRunRepository:
                 )
                 for item in findings
             ],
-            summary=_review_summary(output),
+            summary=_review_summary(outputs),
             usage_calls=int(usage[0]),
             tokens_in=int(usage[1]),
             tokens_out=int(usage[2]),
@@ -463,65 +465,6 @@ class SqlAlchemyRunRepository:
                 run.cancel_requested = True
                 return CancelRequestResult(found=True, changed=True)
         return CancelRequestResult(found=True, changed=False)
-
-    async def create_rerun(self, run_id: UUID, now: datetime) -> RerunResult:
-        """T3: a queued ``rerun`` Run for the PR's current head, or a conflict."""
-        async with self._session_factory.begin() as session:
-            code_change_id = await session.scalar(
-                select(Run.code_change_id).where(Run.id == run_id, self._authorized_run())
-            )
-            if code_change_id is None:
-                return RerunResult(RerunOutcome.NOT_FOUND)
-            # Locks the PR row like the webhook path, so both see one active-Run decision.
-            candidate = await SqlAlchemyWebhookRunStore(session).lock_candidate(code_change_id)
-            active = await session.scalar(
-                select(Run.id).where(
-                    Run.code_change_id == code_change_id,
-                    Run.state.in_([RunState.QUEUED, RunState.RUNNING, RunState.PUBLISHING]),
-                )
-            )
-            if (
-                candidate is None
-                or candidate.ci.state != PullRequestState.OPEN
-                or active is not None
-            ):
-                return RerunResult(RerunOutcome.CONFLICT)
-            new_id = uuid4()
-            session.add(
-                Run(
-                    id=new_id,
-                    code_change_id=code_change_id,
-                    base_sha=candidate.base_sha,
-                    base_ref=candidate.base_ref,
-                    head_sha=candidate.ci.head_sha,
-                    state=RunState.QUEUED,
-                    trigger="rerun",
-                    idempotency_key=sha256(f"rerun:{new_id}".encode()).hexdigest(),
-                    engine=Engine(candidate.engine),
-                    rule_version_id=candidate.rule_version_id,
-                    prompt_version_id=candidate.prompt_version_id,
-                    attempt=0,
-                    available_at=now,
-                    cancel_requested=False,
-                    message_published_at=None,
-                    created_at=now,
-                )
-            )
-            await session.flush()
-            await notify_run_state(session, new_id, RunState.QUEUED)
-            pending = PendingRunMessage.from_candidate(new_id, candidate, now)
-            return RerunResult(
-                RerunOutcome.CREATED,
-                StoredRunMessage(**{**vars(pending), "trigger": "rerun"}),
-            )
-
-    async def mark_rerun_published(self, run_id: UUID, now: datetime) -> None:
-        async with self._session_factory.begin() as session:
-            await session.execute(
-                update(Run)
-                .where(Run.id == run_id, Run.message_published_at.is_(None))
-                .values(message_published_at=now)
-            )
 
     @staticmethod
     def _summary_only_projection() -> ColumnElement[bool]:
@@ -778,19 +721,23 @@ class SqlAlchemyReviewOutputRepository:
         await notify_run_state(self._session, run_id, RunState.PUBLISHING)
 
 
-def _review_summary(output: Row[tuple[Any, Any]] | None) -> dict[str, str] | None:
-    """The accepted ``ReviewOutput.summary`` of ``llm.review_output``, if any."""
-    if output is None:
-        return None
-    value = output[1] if output[1] is not None else output[0]
-    summary = value.get("summary") if isinstance(value, dict) else None
-    if not isinstance(summary, dict):
-        return None
-    return {
-        "problem": str(summary.get("problem", "")),
-        "done_well": str(summary.get("done_well", "")),
-        "effort": str(summary.get("effort", "none")),
-    }
+def _review_summary(outputs: Sequence[Row[tuple[str, Any, Any]]]) -> dict[str, str] | None:
+    """``ReviewOutput.summary``: from ``review.postprocess``, else from ``llm.review_output``.
+
+    ``review.postprocess`` stays small; a huge ``llm.review_output`` may be a truncation
+    wrapper without the summary.
+    """
+    by_tool = {tool: body if body is not None else inline for tool, inline, body in outputs}
+    for tool in ("review.postprocess", "llm.review_output"):
+        value = by_tool.get(tool)
+        summary = value.get("summary") if isinstance(value, dict) else None
+        if isinstance(summary, dict):
+            return {
+                "problem": str(summary.get("problem", "")),
+                "done_well": str(summary.get("done_well", "")),
+                "effort": str(summary.get("effort", "none")),
+            }
+    return None
 
 
 def _to_published_finding(item: object) -> PublishedFinding:

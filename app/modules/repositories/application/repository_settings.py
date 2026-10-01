@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Protocol
 from uuid import UUID
+
+from app.common.application.unit_of_work import UnitOfWork
 
 
 @dataclass(frozen=True)
@@ -31,8 +34,8 @@ class RepositorySettingsChange:
     review_event: str | None = None
 
 
-class RepositorySettingsRepository(Protocol):
-    """Only repositories of the caller's Workspaces are visible."""
+class RepositorySettingsStore(Protocol):
+    """Only repositories of the caller's Workspaces are visible; flushes, never commits."""
 
     async def list_repositories(self) -> list[RepositorySettings]: ...
 
@@ -43,27 +46,41 @@ class RepositorySettingsRepository(Protocol):
     ) -> RepositorySettings | None: ...
 
 
+class RepositorySettingsUnitOfWork(UnitOfWork, Protocol):
+    @property
+    def repositories(self) -> RepositorySettingsStore: ...
+
+
+type RepositorySettingsUowFactory = Callable[[], RepositorySettingsUnitOfWork]
+
+
 class ListRepositories:
-    def __init__(self, repository: RepositorySettingsRepository) -> None:
-        self._repository = repository
+    def __init__(self, uow_factory: RepositorySettingsUowFactory) -> None:
+        self._uow_factory = uow_factory
 
     async def execute(self) -> list[RepositorySettings]:
-        return await self._repository.list_repositories()
+        async with self._uow_factory() as uow:
+            return await uow.repositories.list_repositories()
 
 
 class GetRepository:
-    def __init__(self, repository: RepositorySettingsRepository) -> None:
-        self._repository = repository
+    def __init__(self, uow_factory: RepositorySettingsUowFactory) -> None:
+        self._uow_factory = uow_factory
 
     async def execute(self, repository_id: UUID) -> RepositorySettings | None:
-        return await self._repository.get_repository(repository_id)
+        async with self._uow_factory() as uow:
+            return await uow.repositories.get_repository(repository_id)
 
 
 class UpdateRepository:
-    def __init__(self, repository: RepositorySettingsRepository) -> None:
-        self._repository = repository
+    def __init__(self, uow_factory: RepositorySettingsUowFactory) -> None:
+        self._uow_factory = uow_factory
 
     async def execute(
         self, repository_id: UUID, change: RepositorySettingsChange
     ) -> RepositorySettings | None:
-        return await self._repository.update_repository(repository_id, change)
+        async with self._uow_factory() as uow:
+            item = await uow.repositories.update_repository(repository_id, change)
+            if item is not None:
+                await uow.commit()
+            return item
