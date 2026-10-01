@@ -127,7 +127,9 @@ async def _reset_topology(url: str) -> None:
 @pytest.fixture
 def env() -> Iterator[Env]:
     database_url = os.environ.get("TEST_DATABASE_URL")
-    rabbitmq_url = os.environ.get("TEST_RABBITMQ_URL")
+    rabbitmq_url = os.environ.get("TEST_RABBITMQ_URL") or (
+        os.environ.get("RABBITMQ_URL") if os.environ.get("GITHUB_ACTIONS") == "true" else None
+    )
     if database_url is None or rabbitmq_url is None:
         pytest.skip("set TEST_DATABASE_URL and TEST_RABBITMQ_URL to run worker integration tests")
     asyncio.run(_reset_topology(rabbitmq_url))

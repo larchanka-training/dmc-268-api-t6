@@ -23,7 +23,9 @@ from tests.portal_postgres import (
 @pytest.fixture
 def env() -> Iterator[Env]:
     database_url = os.environ.get("TEST_DATABASE_URL")
-    rabbitmq_url = os.environ.get("TEST_RABBITMQ_URL")
+    rabbitmq_url = os.environ.get("TEST_RABBITMQ_URL") or (
+        os.environ.get("RABBITMQ_URL") if os.environ.get("GITHUB_ACTIONS") == "true" else None
+    )
     if database_url is None or rabbitmq_url is None:
         pytest.skip("set TEST_DATABASE_URL and TEST_RABBITMQ_URL to run publication tests")
     with portal_schema(database_url, rabbitmq_url) as schema:
