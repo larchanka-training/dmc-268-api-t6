@@ -77,6 +77,9 @@ if [[ -f "${ENV_FILE}" ]]; then
   POSTGRES_DB="${POSTGRES_DB:-$(read_compose_env_var POSTGRES_DB "${ENV_FILE}")}"
   DEPLOY_MODE="${DEPLOY_MODE:-$(read_compose_env_var DEPLOY_MODE "${ENV_FILE}")}"
   EDGE_ALIAS="${EDGE_ALIAS:-$(read_compose_env_var EDGE_ALIAS "${ENV_FILE}")}"
+  RABBITMQ_USER="${RABBITMQ_USER:-$(read_compose_env_var RABBITMQ_USER "${ENV_FILE}")}"
+  RABBITMQ_PASSWORD="${RABBITMQ_PASSWORD:-$(read_compose_env_var RABBITMQ_PASSWORD "${ENV_FILE}")}"
+  REDIS_PASSWORD="${REDIS_PASSWORD:-$(read_compose_env_var REDIS_PASSWORD "${ENV_FILE}")}"
 fi
 
 # ports: publish the API on host port 80 (dedicated Terraform host).
@@ -107,10 +110,12 @@ if [[ -z "${IMAGE}" ]]; then
   exit 1
 fi
 
-if [[ -z "${POSTGRES_PASSWORD:-}" ]]; then
-  echo "POSTGRES_PASSWORD is required (expected in ${ENV_FILE})" >&2
-  exit 1
-fi
+for name in POSTGRES_PASSWORD RABBITMQ_PASSWORD REDIS_PASSWORD; do
+  if [[ -z "${!name:-}" ]]; then
+    echo "${name} is required (expected in ${ENV_FILE})" >&2
+    exit 1
+  fi
+done
 
 cd "${APP_DIR}"
 
@@ -126,7 +131,13 @@ write_compose_env_file \
   "${POSTGRES_PASSWORD}" \
   "${POSTGRES_DB:-app}" \
   "${DEPLOY_MODE}" \
-  "${EDGE_ALIAS:-}"
+  "${EDGE_ALIAS:-}" \
+  "${RABBITMQ_USER:-app}" \
+  "${RABBITMQ_PASSWORD}" \
+  "${REDIS_PASSWORD}"
+
+# App secrets are not tied to an image: the files of the last deploy stay as they are.
+ensure_app_env_files "${APP_DIR}"
 
 docker pull "${IMAGE}"
 "${COMPOSE[@]}" up -d --remove-orphans --wait --wait-timeout 180
