@@ -92,12 +92,12 @@ GET /healthcheck
 | `bootstrap` | тот же образ, разово: `alembic upgrade head`, сид промптов | — | проектная |
 | `postgres` | `postgres:17-alpine` | том `postgres-data` | только проектная |
 | `rabbitmq` | `rabbitmq:4-management-alpine`, `hostname: rabbitmq` | том `rabbitmq-data` | только проектная |
-| `redis` | `redis:8-alpine`, пароль, без персистентности (кэш, SD §10) | — | только проектная |
-| `worker` | тот же образ, команда из #34 | — | появится после #34 |
+| `redis` | `redis:8-alpine`, пароль, без персистентности, `maxmemory 128mb` + `allkeys-lru` (кэш, SD §10) | — | только проектная |
+| `worker` | тот же образ, `python -m app.worker` (#34) | — | следующим PR по #35 |
 
 У PostgreSQL, RabbitMQ и Redis нет `ports:`: `ports:` в compose публикует порт на все интерфейсы в обход файрвола хоста. Панель управления RabbitMQ — через SSH-туннель к IP контейнера. Тома `postgres-data` и `rabbitmq-data` переживают выкат и rollback образа. Фиксированный `hostname` RabbitMQ держит имя узла, а с ним каталог данных в томе: без него каждое пересоздание контейнера начинало бы новый узел, и durable-очереди пропадали бы.
 
-`api` стартует после успешного `bootstrap` и здоровых `postgres`, `rabbitmq` и `redis`; `up --wait` ждёт healthcheck каждого сервиса, и падение любого запускает авто-rollback. Секреты приложения приходят в `api` (и `worker`) через `env_file` — [SECRETS.md](SECRETS.md) §3.
+`api` стартует после успешного `bootstrap` и здорового `postgres`. От RabbitMQ и Redis он не зависит: к брокеру API подключается при первой публикации (`LazyAmqpPublisher`), поэтому сбой брокера или кэша не мешает пересозданному `api` стартовать. `up --wait` всё равно ждёт healthcheck каждого сервиса, и падение любого запускает авто-rollback. Секреты приложения приходят в `api` (и `worker`) через `env_file` — [SECRETS.md](SECRETS.md) §3.
 
 ---
 
