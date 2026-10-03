@@ -55,6 +55,7 @@ def test_load_prompt_assets_preserves_full_file_and_checksum() -> None:
     assert [(asset.key, asset.version) for asset in assets] == [
         ("review.conventions", 1),
         ("review.system", 1),
+        ("review.system", 2),
     ]
     for asset in assets:
         expected_content = (prompts_dir / f"{asset.key}.v{asset.version}.md").read_text(
@@ -90,7 +91,7 @@ def test_load_prompt_assets_rejects_filename_version_mismatch(tmp_path: Path) ->
 
 
 @pytest.mark.integration
-def test_first_seed_makes_both_version_one_prompts_active(
+def test_first_seed_makes_the_newest_version_of_each_prompt_active(
     migrated_prompt_database: tuple[str, str],
 ) -> None:
     database_url, schema = migrated_prompt_database
@@ -113,14 +114,14 @@ def test_first_seed_makes_both_version_one_prompts_active(
                     .order_by(PromptVersion.key)
                 )
                 active_versions = [(key, version) for key, version in rows.tuples().all()]
-                assert inserted == 2
+                assert inserted == 3
                 return active_versions
         finally:
             await engine.dispose()
 
     assert asyncio.run(seed_and_read_active_versions()) == [
         ("review.conventions", 1),
-        ("review.system", 1),
+        ("review.system", 2),
     ]
 
 

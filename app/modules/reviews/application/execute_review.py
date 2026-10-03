@@ -10,7 +10,6 @@ from uuid import UUID
 from app.modules.reviews.application.conventions import GeneratedConventions
 from app.modules.reviews.application.prompt_builder import (
     ChangedFile,
-    PromptBuilder,
     PullRequestMeta,
     RepoConventions,
     ReviewContext,
@@ -39,12 +38,25 @@ class ReviewPromptRepository(Protocol):
     ) -> ReviewPromptInput | None: ...
 
 
-class ReviewModel(Protocol):
-    """Injected model boundary; no vendor SDK belongs in the worker pipeline."""
+class PullRequestMetaSource(Protocol):
+    """Provider-neutral pull request metadata, including the commit context (#11)."""
 
     async def get_pull_request_meta(self, run_id: UUID) -> PullRequestMeta | None: ...
 
-    async def draft_review(self, *, prompt: str) -> Mapping[str, object] | str | bytes: ...
+
+class ReviewModel(PullRequestMetaSource, Protocol):
+    """Injected model boundary; no vendor SDK belongs in the worker pipeline.
+
+    ``draft_review`` receives the immutable context, not a rendered string: the LLM
+    gateway (#33) fits it to its model's token budget, renders it with
+    ``PromptBuilder`` as a system and a user message and returns the accepted JSON
+    object. Run-attempt data (deadline, attempt, cost limit) is bound to the model
+    adapter by the worker when it claims the run.
+    """
+
+    async def draft_review(
+        self, *, context: ReviewContext
+    ) -> Mapping[str, object] | str | bytes: ...
 
 
 class ReviewInputProcessor(Protocol):
@@ -80,16 +92,14 @@ class ExecuteReviewRun:
         meta = await self._model.get_pull_request_meta(run_id)
         if meta is None:
             return False
-        prompt = PromptBuilder().build(
-            ReviewContext(
-                system=prompt_input.system,
-                rules=prompt_input.rules,
-                agents_md=prompt_input.agents_md,
-                conventions=prompt_input.conventions,
-                pr_meta=meta,
-                changed_files=prompt_input.changed_files,
-                omitted_files=prompt_input.omitted_files,
-            )
+        context = ReviewContext(
+            system=prompt_input.system,
+            rules=prompt_input.rules,
+            agents_md=prompt_input.agents_md,
+            conventions=prompt_input.conventions,
+            pr_meta=meta,
+            changed_files=prompt_input.changed_files,
+            omitted_files=prompt_input.omitted_files,
         )
-        raw_output = await self._model.draft_review(prompt=prompt)
+        raw_output = await self._model.draft_review(context=context)
         return await self._publisher.execute(run_id, raw_output)

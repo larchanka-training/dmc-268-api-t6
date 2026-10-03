@@ -57,7 +57,7 @@ from app.modules.reviews.application.handle_review_run import (
     HandleReviewRun,
 )
 from app.modules.reviews.application.process_run import ReviewRunProcessor, RunDiffProvider
-from app.modules.reviews.application.prompt_builder import PullRequestMeta
+from app.modules.reviews.application.prompt_builder import PullRequestMeta, ReviewContext
 from app.modules.reviews.application.publish_cancellation_signals import (
     PublishCancellationSignals,
 )
@@ -274,7 +274,7 @@ class UnavailableReviewProvider:
     async def get_pull_request_meta(self, run_id: UUID) -> PullRequestMeta | None:
         await self._unavailable()
 
-    async def draft_review(self, *, prompt: str) -> Mapping[str, object] | str | bytes:
+    async def draft_review(self, *, context: ReviewContext) -> Mapping[str, object] | str | bytes:
         await self._unavailable()
 
     async def publish_review(

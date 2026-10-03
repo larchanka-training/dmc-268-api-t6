@@ -14,7 +14,7 @@ from app.modules.reviews.application.conventions import (
 )
 from app.modules.reviews.application.get_run_diff import DiffSnapshot
 from app.modules.reviews.application.process_run import RunDiffProvider
-from app.modules.reviews.application.prompt_builder import PullRequestMeta
+from app.modules.reviews.application.prompt_builder import PullRequestMeta, ReviewContext
 from app.modules.reviews.application.review_output import PublishedFinding
 from app.modules.reviews.application.vcs_diff import PullRequestLocator, VcsFile, VcsPullRequest
 
@@ -67,7 +67,7 @@ def test_process_review_run_composes_repository_and_processor_from_a_shared_fact
         async def get_pull_request_meta(self, run_id: UUID) -> PullRequestMeta | None:
             raise AssertionError("the composition test does not call the provider")
 
-        async def draft_review(self, *, prompt: str) -> dict[str, object]:
+        async def draft_review(self, *, context: ReviewContext) -> dict[str, object]:
             raise AssertionError("the composition test does not call the provider")
 
         async def publish_review(
@@ -153,7 +153,7 @@ def test_review_worker_disposes_its_single_engine_at_shutdown(monkeypatch: Monke
         async def get_pull_request_meta(self, run_id: UUID) -> PullRequestMeta | None:
             raise AssertionError("the lifecycle test does not call the provider")
 
-        async def draft_review(self, *, prompt: str) -> dict[str, object]:
+        async def draft_review(self, *, context: ReviewContext) -> dict[str, object]:
             raise AssertionError("the lifecycle test does not call the provider")
 
         async def publish_review(

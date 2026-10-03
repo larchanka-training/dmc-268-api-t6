@@ -144,6 +144,7 @@ class HttpGitHubVcsProvider:
             head_sha=item.head.sha,
             base_sha=item.base.sha,
             meta=PullRequestMeta(
+                head_sha=item.head.sha,
                 title=item.title,
                 description=item.body,
                 author=item.user.login,

@@ -5,10 +5,17 @@ from __future__ import annotations
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
+from pathlib import PurePosixPath
 from typing import Literal
 from xml.sax.saxutils import escape
 
+from app.common.application.languages import LANGUAGE_BY_SUFFIX
+
 type LineType = Literal["added", "removed", "context"]
+
+# Commit messages are a fixed cost outside the diff budget: keep them bounded.
+MAX_COMMIT_MESSAGES = 20
+MAX_COMMIT_MESSAGE_CHARS = 500
 type FileStatus = Literal["added", "modified", "removed", "renamed"]
 
 
@@ -33,11 +40,21 @@ class DiffLine:
 
 @dataclass(frozen=True)
 class ChangedFile:
-    """One visible changed file in the review input."""
+    """One visible changed file in the review input.
+
+    ``total_lines`` is set only for a block cut to fit the token budget: it is the
+    number of diff lines before the cut, and the block ends with the truncation trailer.
+    """
 
     path: str
     status: FileStatus
     lines: tuple[DiffLine, ...]
+    total_lines: int | None = None
+
+    @property
+    def language(self) -> str | None:
+        """The file's language by extension, like ``FileDiff.language`` (SD §9)."""
+        return LANGUAGE_BY_SUFFIX.get(PurePosixPath(self.path).suffix.lower())
 
 
 @dataclass(frozen=True)
@@ -63,6 +80,8 @@ class PullRequestMeta:
     lines_removed: int
     is_draft: bool
     is_fork: bool
+    head_sha: str | None = None
+    commit_messages: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -76,6 +95,14 @@ class ReviewContext:
     pr_meta: PullRequestMeta
     changed_files: tuple[ChangedFile, ...]
     omitted_files: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class ReviewPrompt:
+    """The two provider messages: the prompt version, then the input envelope."""
+
+    system: str
+    user: str
 
 
 def review_rule_from_stored(value: Mapping[str, object]) -> ReviewRule:
@@ -111,9 +138,22 @@ class PromptBuilder:
 
     def build(self, context: ReviewContext) -> str:
         """Build the exact system-to-omitted-files envelope in cache order."""
+        prompt = self.build_prompt(context)
+        return "\n".join((prompt.system, prompt.user))
+
+    def build_prompt(self, context: ReviewContext) -> ReviewPrompt:
+        """Split the same envelope into the system message and the user message.
+
+        The prompt version (with its few-shot examples) is the system message; rules,
+        AGENTS.md and conventions open the user message, so the provider's cacheable
+        prefix does not depend on the diff (SD §10).
+        """
+        return ReviewPrompt(system=context.system, user=self.render_input(context))
+
+    def render_input(self, context: ReviewContext) -> str:
+        """Render the tags after the system prompt, in the documented order."""
         return "\n".join(
             (
-                context.system,
                 self._render_rules(context.rules),
                 _container("agents_md", _text(context.agents_md or "")),
                 self._render_conventions(context.conventions),
@@ -173,22 +213,46 @@ class PromptBuilder:
             ("draft", str(meta.is_draft).lower()),
             ("fork", str(meta.is_fork).lower()),
         )
-        return _container(
-            "pr_meta", "\n".join(_element(name, _text(value)) for name, value in values)
-        )
+        elements = [_element(name, _text(value)) for name, value in values]
+        if meta.head_sha is not None:
+            elements.append(_element("head_sha", _text(meta.head_sha)))
+        if meta.commit_messages:
+            shown = meta.commit_messages[:MAX_COMMIT_MESSAGES]
+            commits = [_element("commit", _text(_shorten(item))) for item in shown]
+            if len(meta.commit_messages) > len(shown):
+                hidden = len(meta.commit_messages) - len(shown)
+                commits.append(_element("commit", f"[{hidden} more commits omitted]"))
+            elements.append(_container("commit_messages", "\n".join(commits)))
+        return _container("pr_meta", "\n".join(elements))
 
     @staticmethod
     def _render_changed_files(files: tuple[ChangedFile, ...]) -> str:
         rendered = []
         for file in files:
-            lines = "\n".join(
+            body = [
                 f'<line n="{line.number}" type="{line.type}">{_text(line.content)}</line>'
                 for line in file.lines
-            )
-            rendered.append(
-                f'<file path="{_attribute(file.path)}" status="{file.status}">\n{lines}\n</file>'
-            )
+            ]
+            if file.total_lines is not None and file.total_lines > len(file.lines):
+                body.append(truncation_trailer(len(file.lines), file.total_lines))
+            attributes = f'path="{_attribute(file.path)}" status="{file.status}"'
+            if file.language is not None:
+                attributes += f' language="{_attribute(file.language)}"'
+            rendered.append(f"<file {attributes}>\n" + "\n".join(body) + "\n</file>")
         return _container("changed_files", "\n".join(rendered))
+
+
+def _shorten(message: str) -> str:
+    if len(message) <= MAX_COMMIT_MESSAGE_CHARS:
+        return message
+    return message[: MAX_COMMIT_MESSAGE_CHARS - 1] + "…"
+
+
+def truncation_trailer(shown: int, total: int) -> str:
+    """The cut-file trailer of review/README.md "Input envelope", in block-line positions."""
+    return (
+        f"[Showing lines 1-{shown} of {total} total. Use offset={shown + 1} to continue reading.]"
+    )
 
 
 _HUNK_HEADER = re.compile(r"^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@")
@@ -262,6 +326,23 @@ def _path_from_diff_header(header: str) -> str:
     if not remainder:
         raise ValueError(f"invalid unified diff header: {header}")
     return remainder
+
+
+def render_custom_instructions(rules: tuple[ReviewRule, ...]) -> str:
+    """The ``<custom_instructions>`` block shared by the review and conventions prompts."""
+    return PromptBuilder._render_rules(rules)
+
+
+def xml_container(name: str, content: str) -> str:
+    return _container(name, content)
+
+
+def xml_text(value: str) -> str:
+    return _text(value)
+
+
+def xml_attribute(value: str) -> str:
+    return _attribute(value)
 
 
 def _container(name: str, content: str) -> str:

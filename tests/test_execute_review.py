@@ -10,8 +10,10 @@ from app.modules.reviews.application.execute_review import ExecuteReviewRun, Rev
 from app.modules.reviews.application.prompt_builder import (
     ChangedFile,
     DiffLine,
+    PromptBuilder,
     PullRequestMeta,
     RepoConventions,
+    ReviewContext,
     ReviewRule,
 )
 
@@ -68,7 +70,8 @@ def test_execute_review_run_builds_prompt_then_publishes_model_output() -> None:
                 "Title", None, "author", "feature", "main", (), 1, 1, 0, False, False
             )
 
-        async def draft_review(self, *, prompt: str) -> dict[str, object]:
+        async def draft_review(self, *, context: ReviewContext) -> dict[str, object]:
+            prompt = PromptBuilder().build(context)
             assert "<changed_files>" in prompt
             assert "print('x')" in prompt
             calls.append("model")
@@ -100,7 +103,7 @@ def test_execute_review_run_does_not_call_model_when_processing_fails() -> None:
         async def get_pull_request_meta(self, run_id: UUID) -> None:
             raise AssertionError("no provider call after failed processing")
 
-        async def draft_review(self, *, prompt: str) -> dict[str, object]:
+        async def draft_review(self, *, context: ReviewContext) -> dict[str, object]:
             raise AssertionError("no provider call after failed processing")
 
     class Publisher:

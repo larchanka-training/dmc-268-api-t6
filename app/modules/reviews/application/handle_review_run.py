@@ -29,7 +29,7 @@ from app.modules.reviews.application.conventions import (
 from app.modules.reviews.application.execute_review import ReviewModel
 from app.modules.reviews.application.get_run_diff import DiffSnapshot
 from app.modules.reviews.application.process_run import RunDiffProvider
-from app.modules.reviews.application.prompt_builder import PullRequestMeta
+from app.modules.reviews.application.prompt_builder import PullRequestMeta, ReviewContext
 from app.modules.reviews.application.queue_messages import RunRetryQueue
 from app.modules.reviews.application.review_output import PublishedFinding, ReviewProvider
 from app.modules.reviews.application.run_failures import (
@@ -230,9 +230,9 @@ class CheckpointedProvider:
     async def get_pull_request_meta(self, run_id: UUID) -> PullRequestMeta | None:
         return await self._inner.get_pull_request_meta(run_id)
 
-    async def draft_review(self, *, prompt: str) -> Mapping[str, object] | str | bytes:
+    async def draft_review(self, *, context: ReviewContext) -> Mapping[str, object] | str | bytes:
         await self._checkpoint()
-        return await self._inner.draft_review(prompt=prompt)
+        return await self._inner.draft_review(context=context)
 
     async def publish_review(
         self,

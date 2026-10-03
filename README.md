@@ -47,6 +47,49 @@ uv run python -m app.bootstrap.seed_prompts
 The command requires `DATABASE_URL`. It is safe to run repeatedly; an existing
 prompt version whose file content has changed causes the command to fail.
 
+## LLM gateway
+
+The review model is called through the LLM gateway (#33): one OpenAI-compatible adapter for
+EUrouter and self-hosted servers, key rotation, retries, a fallback model, the run cost limit
+and the attempt deadline of `docs/PIPELINE_SPEC.md` §3–§6. Configuration is `LLM_*` in
+`.env` ([docs/SECRETS.md](docs/SECRETS.md)).
+
+**Case → `ReviewOutput` + usage, without a database** — the entry point of eval #30 (live mode):
+
+```python
+from app.bootstrap.llm_gateway import ReviewCase, review_case
+from app.modules.reviews.infrastructure.llm.settings import LlmSettings
+
+result = await review_case(
+    ReviewCase(diff=unified_diff, system=prompt_text, pr_meta=pr_meta),
+    LlmSettings.from_env(os.environ),
+)
+result.output   # ReviewOutput (typed, schema- and Pydantic-checked)
+result.usage    # one LlmUsage per provider call: provider, actual model, tokens, cost_usd
+result.calls    # the llm.call records: kind (primary/retry/repair/fallback), model, duration
+```
+
+A failure raises `ReviewCaseFailed` — an `LlmCallFailed` with `error_code` (`llm_timeout`,
+`llm_rate_limited`, `llm_unavailable`, `llm_invalid_output`, `llm_context_overflow`,
+`budget_exceeded`, `deadline_exceeded`), `usage` and `trace` (every call with its error).
+Usage and the trace live in memory; `transport=` accepts a fake.
+
+Manual live run (needs `LLM_MODEL` and `LLM_API_KEYS`; not part of the required CI) — prints
+provider, model, every call (with its error), tokens, cost and latency as JSON; exit 1 when the
+gateway failed, 2 on a configuration error. `uv run` does not read `.env` by itself:
+
+```bash
+uv run --env-file .env python -m app.bootstrap.llm_gateway review/examples/sample.diff
+```
+
+On EUrouter the same run is the manual workflow `LLM live run` (`.github/workflows/llm-live-run.yml`,
+Actions → Run workflow): it uses the organization secret `AI_DMC268_T6` and writes a summary
+table per run.
+
+For a self-hosted model in dev (LM Studio, Ollama, vLLM): `LLM_BASE_URL=http://localhost:1234/v1`,
+`LLM_MODEL=<model>`, `LLM_CONTEXT_WINDOW=<tokens>` and, if the server has no strict JSON Schema
+mode, `LLM_STRUCTURED_OUTPUT=prompt_json` with `LLM_ALLOW_PROMPT_JSON=1`.
+
 ## Tests
 
 ```bash
