@@ -106,6 +106,9 @@ def test_llm_calls_continue_the_run_action_indexes_next_to_other_steps(env: Env)
     try:
 
         async def scenario() -> None:
+            # another run's actions must not shift the indexes of this run
+            for _ in range(3):
+                await run_trace.record(RUN_B, "context.build", {}, {}, NOW, 1)
             await run_trace.record(RUN_DONE, "context.build", {}, {"files": []}, NOW, 1)
             for call_no in (1, 2, 3):
                 await calls.record_call(RUN_DONE, _record(call_no))
@@ -128,3 +131,27 @@ def test_llm_calls_continue_the_run_action_indexes_next_to_other_steps(env: Env)
         (3, "llm.call", "3"),
         (4, "llm.review_output", None),
     ]
+
+
+@pytest.mark.integration
+def test_concurrent_llm_call_writes_get_distinct_indexes(env: Env) -> None:
+    engine = env.engine()
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    calls = RunTraceLlmCalls(TransactionalRunTrace(partial(SqlAlchemyRunTraceUnitOfWork, factory)))
+    try:
+
+        async def scenario() -> None:
+            await asyncio.gather(
+                *(calls.record_call(RUN_DONE, _record(call_no)) for call_no in range(1, 9))
+            )
+
+        asyncio.run(scenario())
+        rows = _rows(
+            factory,
+            "SELECT index FROM run_actions WHERE run_id = :id ORDER BY index",
+            id=RUN_DONE,
+        )
+    finally:
+        asyncio.run(engine.dispose())
+
+    assert [row[0] for row in rows] == list(range(8))

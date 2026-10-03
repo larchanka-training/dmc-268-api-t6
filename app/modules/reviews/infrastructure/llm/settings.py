@@ -92,8 +92,10 @@ class LlmSettings:
     def from_env(cls, env: Mapping[str, str]) -> LlmSettings:
         """Read ``LLM_*`` (primary) and ``LLM_FALLBACK_*`` (fallback) variables.
 
-        Fallback variables that are not set inherit the provider, base URL and keys of
-        the primary. The prompt-JSON path is refused unless ``LLM_ALLOW_PROMPT_JSON=1``:
+        A known fallback model keeps its own endpoint; an unknown one without
+        ``LLM_FALLBACK_BASE_URL`` uses the primary's. Keys, provider and output mode are
+        inherited only on the primary's endpoint, never sent to another host.
+        The prompt-JSON path is refused unless ``LLM_ALLOW_PROMPT_JSON=1``:
         it exists for local and self-hosted models in dev and eval only (D7).
         """
         allow_prompt_json = env.get("LLM_ALLOW_PROMPT_JSON", "") == "1"
@@ -173,7 +175,7 @@ def _profile_from_env(
         api_keys = ()
     if known is not None and base_url == known.base_url and not api_keys:
         raise LlmConfigError(f"{prefix}API_KEYS must be set for {model}")
-    if api_keys and base_url.startswith("http://") and not _is_local(base_url):
+    if api_keys and urlsplit(base_url).scheme.lower() != "https" and not _is_local(base_url):
         raise LlmConfigError(f"{prefix}BASE_URL must use https when keys are sent")
 
     provider = value("PROVIDER")

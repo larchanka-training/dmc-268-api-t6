@@ -395,6 +395,10 @@ _KEY = {"LLM_API_KEYS": "sk-eu-1"}
             "non-negative decimal",
         ),
         ({**_KEY, "LLM_MODEL": "gpt-4.1-mini", "LLM_STRUCTURED_OUTPUT": "tools"}, "json_schema or"),
+        (
+            {**_KEY, "LLM_MODEL": "gpt-4.1-mini", "LLM_BASE_URL": "HTTP://router.example/v1"},
+            "LLM_BASE_URL must use https when keys are sent",
+        ),
         ({**_KEY, "LLM_MODEL": "gpt-4.1-mini", "LLM_EXTRA_BODY": "[1]"}, "JSON object"),
         ({**_KEY, "LLM_MODEL": "gpt-4.1-mini", "LLM_EXTRA_BODY": "{"}, "JSON object"),
         (
@@ -755,6 +759,7 @@ def test_conventions_and_review_share_the_four_calls_of_one_attempt() -> None:
                     context=CONTEXT
                 )
             assert exhausted.value.calls == 0
+            assert exhausted.value.error_code is LlmErrorCode.UNAVAILABLE
             return caught.value
 
     failure = asyncio.run(scenario())
@@ -797,6 +802,57 @@ def test_a_fallback_window_too_small_for_the_prompt_keeps_the_primary_error() ->
     assert failure.error_code is LlmErrorCode.UNAVAILABLE
     assert failure.run_retryable is True
     assert harness.kinds() == ["primary", "retry", "retry"]
+
+
+def test_two_runs_with_the_same_attempt_number_have_separate_limits() -> None:
+    harness = Harness([error(500), error(500), error(500), error(500), valid()])
+    other_run = UUID("00000000-0000-0000-0000-000000003399")
+
+    async def scenario() -> GatewayResult:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(harness._handle)) as client:
+            gateway = harness.gateway(client)
+            with pytest.raises(LlmCallFailed):
+                await GatewayReviewModel(gateway, harness.run, _NoMeta()).draft_review(
+                    context=CONTEXT
+                )
+            model = GatewayReviewModel(gateway, replace(harness.run, run_id=other_run), _NoMeta())
+            await model.draft_review(context=CONTEXT)
+            assert model.last_result is not None
+            return model.last_result
+
+    assert asyncio.run(scenario()).calls == 1
+    assert [record.call_no for _, record in harness.trace.records] == [1, 2, 3, 4, 1]
+
+
+def test_concurrent_generations_of_one_attempt_stay_within_four_calls() -> None:
+    class YieldingLedger(InMemoryUsageLedger):
+        """Like the database ledger, the cost read lets other tasks run."""
+
+        async def run_cost_usd(self, run_id: UUID) -> Decimal:
+            await asyncio.sleep(0)
+            return await super().run_cost_usd(run_id)
+
+    replies: list[Reply] = [error(500) for _ in range(8)]
+    harness = Harness(replies, fallback=None, ledger=YieldingLedger())
+
+    async def scenario() -> None:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(harness._handle)) as client:
+            gateway = harness.gateway(client)
+            results = await asyncio.gather(
+                *(
+                    GatewayReviewModel(gateway, harness.run, _NoMeta()).draft_review(
+                        context=CONTEXT
+                    )
+                    for _ in range(2)
+                ),
+                return_exceptions=True,
+            )
+            assert all(isinstance(item, LlmCallFailed) for item in results)
+
+    asyncio.run(scenario())
+
+    assert len(harness.requests) == 4
+    assert sorted(record.call_no for _, record in harness.trace.records) == [1, 2, 3, 4]
 
 
 # ---------- invalid answers ----------
@@ -1013,6 +1069,16 @@ def test_no_same_model_retry_when_the_backoff_leaves_less_than_the_call_timeout(
     assert result.model == "fallback-model-v4"
 
 
+def test_a_backoff_that_leaves_exactly_one_call_timeout_still_retries() -> None:
+    # 92.25 s - 2.25 s of backoff == the 90 s call timeout
+    harness = Harness([timeout(), valid()], deadline_in_s=92.25)
+
+    harness.review()
+
+    assert harness.kinds() == ["primary", "retry"]
+    assert harness.clock.sleeps == [2.25]
+
+
 def test_long_retry_after_is_not_slept_when_it_would_pass_the_deadline() -> None:
     harness = Harness([error(429, **{"Retry-After": "30"})], deadline_in_s=110, fallback=None)
 
@@ -1166,7 +1232,8 @@ def test_review_adapter_fits_a_diff_larger_than_the_budget() -> None:
         "context_length_exceeded",
         "This model's context length is 8192 tokens",
         "prompt exceeds the context window",
-        "maximum context length exceeded",
+        # only this marker matches: "context length" must not cover it
+        "request exceeds the maximum context of 8192 tokens",
         "too many tokens in the request",
         "prompt is too long",
         "input is too long for the model",
@@ -1253,6 +1320,8 @@ def test_a_failed_trace_write_does_not_discard_the_answer(
 
     assert result.output == VALID_OUTPUT
     assert "llm.call trace write failed" in caplog.text
+    failed = next(r for r in caplog.records if r.getMessage() == "llm.call trace write failed")
+    assert vars(failed)["run_id"] == str(RUN_ID)
     assert len(harness.ledger.events) == 1
 
 
@@ -1320,6 +1389,21 @@ def test_every_call_is_traced_with_request_metadata_then_response_or_error() -> 
     assert second.kind is LlmCallKind.RETRY
     assert second.request_json()["call_no"] == 2
     assert second.response_json()["model"] == "primary-model-2026-09-01"
+
+
+def test_a_key_on_the_cut_boundary_of_an_error_text_leaves_no_prefix() -> None:
+    secret = "sk-live-" + "k" * 30
+    harness = Harness(
+        [error(401, "x" * 290 + secret)],
+        primary=replace(PRIMARY, api_keys=(secret,)),
+        fallback=None,
+    )
+
+    failure = harness.failure()
+
+    message = harness.trace.records[0][1].response_json()["error"]["message"]
+    assert "sk-live-" not in message
+    assert "sk-live-" not in str(failure)
 
 
 def test_keys_never_reach_logs_exceptions_or_the_trace(caplog: pytest.LogCaptureFixture) -> None:
@@ -1443,7 +1527,11 @@ def test_conventions_tree_over_the_budget_is_cut_with_a_marker() -> None:
 
     assert len(harness.requests) == 1
     user = harness.bodies()[0]["messages"][1]["content"]
-    assert re.search(r"\[\d+ more paths omitted\]\n</repo_tree>", user)
+    marker = re.search(r"\[(\d+) more paths omitted\]\n</repo_tree>", user)
+    assert marker is not None
+    kept = user.split("<repo_tree>\n")[1].split("\n[")[0].splitlines()
+    assert kept and kept[0] == "src/pkg0/module_0.py"
+    assert len(kept) + int(marker.group(1)) == 8_000
     assert "<changed_files>\napp/service.py\n</changed_files>" in user
     estimate = harness.trace.records[0][1].input_tokens_estimate
     assert estimate + PRIMARY.max_output_tokens <= 60_000

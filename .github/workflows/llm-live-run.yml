@@ -30,7 +30,6 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
-      LLM_API_KEYS: ${{ secrets.AI_DMC268_T6 }}
       MODEL: ${{ inputs.model }}
       FALLBACK_MODEL: ${{ inputs.fallback_model }}
       DIFF: ${{ inputs.diff }}
@@ -50,6 +49,9 @@ jobs:
       - name: Primary with fallback
         id: primary
         continue-on-error: true
+        shell: bash
+        env:
+          LLM_API_KEYS: ${{ secrets.AI_DMC268_T6 }}
         run: |
           set -o pipefail
           LLM_MODEL="$MODEL" LLM_FALLBACK_MODEL="$FALLBACK_MODEL" \
@@ -58,14 +60,21 @@ jobs:
       - name: Fallback as the primary, without a fallback
         id: fallback
         continue-on-error: true
+        shell: bash
+        env:
+          LLM_API_KEYS: ${{ secrets.AI_DMC268_T6 }}
         run: |
           set -o pipefail
           LLM_MODEL="$FALLBACK_MODEL" \
             uv run python -m app.bootstrap.llm_gateway "$DIFF" > fallback.json
 
+      # D7 holds for a run only when its single call is the primary and the answer is valid:
+      # a repair, a retry or a fallback means strict json_schema was not confirmed.
       - name: Validate and summarize
         if: always()
+        shell: bash
         run: |
+          set -o pipefail
           status=0
           {
             echo "## LLM live run"
@@ -81,7 +90,13 @@ jobs:
             fi
             if jq -e '.output' "$run.json" > /dev/null; then
               jq '.output' "$run.json" > "$run.output.json"
-              verdict="$(uv run python review/scripts/validate_findings.py "$run.output.json" 2>&1 | tail -n 1)" || status=1
+              if ! verdict="$(uv run python review/scripts/validate_findings.py "$run.output.json" 2>&1 | tail -n 1)"; then
+                status=1
+              fi
+              if ! jq -e '[.calls[].kind] == ["primary"]' "$run.json" > /dev/null; then
+                verdict="$verdict; D7 not confirmed: calls $(jq -c '[.calls[].kind]' "$run.json")"
+                status=1
+              fi
             else
               verdict="$(jq -r '"failed: " + .error_code' "$run.json")"
               status=1

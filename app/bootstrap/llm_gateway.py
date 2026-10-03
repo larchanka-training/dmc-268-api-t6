@@ -51,6 +51,7 @@ from app.modules.reviews.application.prompt_builder import (
     parse_unified_diff,
 )
 from app.modules.reviews.application.review_output import ReviewOutput, parse_review_output
+from app.modules.reviews.application.run_failures import FAST_ATTEMPT_DEADLINE
 from app.modules.reviews.application.run_trace import TransactionalRunTrace
 from app.modules.reviews.infrastructure.llm.answers import review_output_schema
 from app.modules.reviews.infrastructure.llm.gateway import LlmGateway
@@ -107,7 +108,11 @@ class ReviewCase:
 
 
 # Attempt deadlines of docs/PIPELINE_SPEC.md §3: fast 8 min, deep (SandboxEngine) 10 min.
-_CASE_DEADLINE: dict[str, timedelta] = {"fast": timedelta(minutes=8), "deep": timedelta(minutes=10)}
+SANDBOX_ENGINE_DEADLINE = timedelta(minutes=10)
+_CASE_DEADLINE: dict[str, timedelta] = {
+    "fast": FAST_ATTEMPT_DEADLINE,
+    "deep": SANDBOX_ENGINE_DEADLINE,
+}
 
 
 class ReviewCaseFailed(LlmCallFailed):

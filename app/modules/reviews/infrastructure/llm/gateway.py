@@ -331,6 +331,13 @@ class LlmGateway:
                 state,
             )
 
+        if attempt.calls >= policy.max_calls_per_attempt:
+            # Guards concurrent generations of one attempt, not only their entry.
+            raise self._failed(
+                LlmErrorCode.UNAVAILABLE,
+                f"attempt {context.attempt} already made {attempt.calls} provider calls",
+                state,
+            )
         state.calls += 1
         attempt.calls += 1
         started_at = self._clock.now()

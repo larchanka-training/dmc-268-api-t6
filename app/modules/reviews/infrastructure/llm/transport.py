@@ -282,6 +282,7 @@ def _error_text(response: httpx.Response, keys: tuple[str, ...]) -> str:
 
 
 def _retry_after(response: httpx.Response) -> float | None:
+    """Seconds only; an HTTP-date or a negative / non-finite value counts as no header."""
     raw = response.headers.get("Retry-After")
     if raw is None:
         return None
