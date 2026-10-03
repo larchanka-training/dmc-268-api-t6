@@ -30,6 +30,7 @@ from app.modules.reviews.application.handle_review_run import (
     HandleReviewRun,
     RunGuardSnapshot,
 )
+from app.modules.reviews.application.prompt_builder import ReviewContext
 from app.modules.reviews.application.review_output import InvalidReviewOutput
 from app.modules.reviews.application.run_failures import (
     RETRYABLE_ERROR_CODES,
@@ -676,7 +677,7 @@ def test_checkpointed_provider_checks_before_every_llm_call_only() -> None:
         await provider.fetch_tree(RUN)
         await provider.draft_conventions(request=cast(ConventionsRequest, None))
         with pytest.raises(RunCancelled):
-            await provider.draft_review(prompt="p")
+            await provider.draft_review(context=cast(ReviewContext, None))
 
     asyncio.run(scenario())
     assert calls == ["fetch_tree", "checkpoint", "draft_conventions", "checkpoint"]

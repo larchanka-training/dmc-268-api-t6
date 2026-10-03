@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
+import json
+from dataclasses import dataclass, field
 from types import TracebackType
 from typing import Any, cast
 from uuid import UUID
@@ -13,6 +14,7 @@ import pytest
 from app.modules.reviews.application.findings_post_processor import ProcessedReviewOutput
 from app.modules.reviews.application.review_output import (
     FindingPostProcessingInput,
+    InvalidReviewOutput,
     PublishedFinding,
     PublishReviewOutput,
     ReviewOutput,
@@ -292,3 +294,82 @@ def test_publisher_does_not_allow_callers_to_override_durable_anchor_context() -
                 untrusted_context,
             )
         )
+
+
+@pytest.mark.parametrize("encode", [lambda text: text, lambda text: text.encode("utf-8")])
+def test_gateway_json_text_is_parsed_and_stored_as_the_exact_object(
+    encode: Any,
+) -> None:
+    @dataclass
+    class RecordingRepository(FakeRepository):
+        raw: list[dict[str, object]] = field(default_factory=list)
+
+        async def store_review_output(
+            self,
+            run_id: UUID,
+            raw_output: dict[str, object],
+            parsed: ReviewOutput,
+            processed: ProcessedReviewOutput,
+        ) -> ReviewPublication | None:
+            self.raw.append(raw_output)
+            return await super().store_review_output(run_id, raw_output, parsed, processed)
+
+    repository = RecordingRepository(
+        [], ReviewPublication("a" * 40, (), "review body", idempotency_key="stable-key")
+    )
+    provider = FakeProvider([])
+    # key order and spacing as the provider sent them
+    text = json.dumps(output(), indent=1)
+
+    published = asyncio.run(
+        PublishReviewOutput(FakeUnitOfWorkFactory(repository, []), provider).execute(
+            RUN_ID, encode(text)
+        )
+    )
+
+    assert published is True
+    assert repository.raw == [json.loads(text)]
+    assert list(repository.raw[0]) == ["findings", "summary"]
+    assert repository.stored[0][1] == ReviewOutput.model_validate(output())
+
+
+def test_json_text_that_is_not_an_object_is_rejected_before_any_write() -> None:
+    repository = FakeRepository([], ReviewPublication("a" * 40, (), "review body"))
+    factory = FakeUnitOfWorkFactory(repository, [])
+
+    with pytest.raises(InvalidReviewOutput):
+        asyncio.run(PublishReviewOutput(factory, FakeProvider([])).execute(RUN_ID, "[1]"))
+
+    assert factory.units == []
+
+
+def test_run_without_post_processing_context_is_not_published() -> None:
+    @dataclass
+    class MissingContext(FakeRepository):
+        async def get_post_processing_input(
+            self, run_id: UUID
+        ) -> FindingPostProcessingInput | None:
+            return None
+
+    repository = MissingContext([], ReviewPublication("a" * 40, (), "review body"))
+    provider = FakeProvider([])
+
+    assert (
+        asyncio.run(
+            PublishReviewOutput(FakeUnitOfWorkFactory(repository, []), provider).execute(
+                RUN_ID, output()
+            )
+        )
+        is False
+    )
+    assert provider.calls == []
+
+
+def test_run_that_cannot_store_its_output_is_not_published() -> None:
+    repository = FakeRepository([], None)
+    factory = FakeUnitOfWorkFactory(repository, [])
+    provider = FakeProvider([])
+
+    assert asyncio.run(PublishReviewOutput(factory, provider).execute(RUN_ID, output())) is False
+    assert provider.calls == []
+    assert [unit.commits for unit in factory.units] == [0, 0]

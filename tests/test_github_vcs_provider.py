@@ -103,6 +103,8 @@ def test_provider_paginates_101_files_at_100_and_reads_blob_by_sha() -> None:
             files = await provider.get_diff(pr)
             blob = await provider.get_blob(locator, _BLOB)
         assert pr.head_sha == _HEAD
+        # the commit context of the review prompt (#33)
+        assert pr.meta.head_sha == _HEAD
         assert pr.base_sha == _BASE
         assert pr.meta.files_changed == 101
         assert pr.meta.labels == ("backend",)

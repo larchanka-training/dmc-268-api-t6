@@ -871,3 +871,27 @@ def test_real_uow_rolls_back_cache_draft_and_trace_after_late_flush_failure() ->
     assert session.rollbacks == 1
     assert session.rows == []
     assert session.closed is True
+
+
+def test_a_pull_request_over_the_traced_limit_keeps_every_path_in_the_trace() -> None:
+    changed = tuple(f"src/module_{index:03}.py" for index in range(101))
+    answer = dict(
+        draft(),
+        files=[{"path": path, "relevance": "changed module"} for path in changed[:100]],
+    )
+    model = FakeModel(answer)
+    store = FakeStore()
+
+    asyncio.run(
+        GenerateRepoConventions(FakeSource(), model, FakeUnitOfWorkFactory(store)).execute(
+            repository_id=REPOSITORY_ID,
+            conventions_prompt=ActiveConventionsPrompt(PROMPT_VERSION_ID, "conventions v1"),
+            run_id=RUN_ID,
+            changed_files=changed,
+        )
+    )
+
+    assert model.calls[0].traced_files == changed[:100]
+    traced = store.traces[0][1]
+    assert [file.path for file in traced] == list(changed)
+    assert traced[-1].relevance.startswith("Changed in this pull request")

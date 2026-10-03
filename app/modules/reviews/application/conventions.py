@@ -19,6 +19,9 @@ _STRICT = ConfigDict(extra="forbid", strict=True)
 _MAX_CONTEXT_FILES = 10
 _MAX_CONTEXT_BYTES = 128 * 1024
 _MAX_CONTEXT_LINES = 300
+# The model describes at most this many changed paths (``RepoConventionsDraft.files``);
+# the rest of a large pull request gets the generic trace entry of a cache hit.
+MAX_TRACED_FILES = 100
 _RECOMMENDATION_SOURCE_SUFFIX = re.compile(
     r".*\(from: (standard/(security|correctness|performance|readability)|(?!standard/)[^()]+)\)"
 )
@@ -60,6 +63,12 @@ class ConventionsRequest:
     repo_files: tuple[RepositoryFile, ...]
     languages: dict[str, int]
     changed_files: tuple[str, ...]
+    omitted_tree_paths: int = 0
+
+    @property
+    def traced_files(self) -> tuple[str, ...]:
+        """The changed paths the model must describe, in order."""
+        return self.changed_files[:MAX_TRACED_FILES]
 
 
 class ConventionsFile(BaseModel):
@@ -76,7 +85,7 @@ class ConventionsDraft(BaseModel):
 
     model_config = _STRICT
 
-    files: Annotated[list[ConventionsFile], Field(max_length=100)]
+    files: Annotated[list[ConventionsFile], Field(max_length=MAX_TRACED_FILES)]
     key_patterns: Annotated[
         list[Annotated[str, Field(min_length=1, max_length=160)]],
         Field(min_length=3, max_length=10),
@@ -220,7 +229,7 @@ class GenerateRepoConventions:
             )
         )
         draft = ConventionsDraft.model_validate(raw_draft)
-        _validate_trace_files(draft.files, changed_files)
+        _validate_trace_files(draft.files, changed_files[:MAX_TRACED_FILES])
         conventions = CachedConventions(
             repository_id=repository_id,
             agents_md_sha=agents_md.sha,
@@ -233,7 +242,10 @@ class GenerateRepoConventions:
             saved = await uow.conventions.save_and_record_trace(
                 run_id,
                 conventions,
-                tuple(draft.files),
+                (
+                    *draft.files,
+                    *_trace_files_for_changed_paths(changed_files[MAX_TRACED_FILES:]),
+                ),
             )
             await uow.commit()
         return GeneratedConventions(saved, agents_md.content, cache_hit=False)

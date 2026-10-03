@@ -131,6 +131,53 @@ Application зависит от узких интерфейсов, сгрупп�
 `BudgetAllocator`, но вернёт тот же `ContextPayload`. Поэтому RAG не требует новой
 ORM-модели, миграции или изменения use case в рамках MVP.
 
+## LLM Gateway (#33)
+
+Порт — `ReviewModel.draft_review(*, context: ReviewContext)` в
+`modules/reviews/application/execute_review.py` и `ConventionsModel.draft_conventions`
+в `conventions.py`: use case передаёт неизменяемый контекст, а не отрендеренную строку.
+Контракты вызова, общие для application и шлюза, — `modules/reviews/application/llm.py`:
+`RunCallContext` (run, attempt, engine, дедлайн попытки, версии промпта и правил —
+их передаёт воркер при claim, #34), `LlmCallFailed` с `error_code` из PIPELINE_SPEC §6,
+порты `UsageLedger` и `LlmCallTrace`. Подгонка L1-контекста под токен-бюджет —
+чистая функция `application/prompt_budget.py`.
+
+| Файл | Что делает |
+| --- | --- |
+| `infrastructure/llm/settings.py` | профили моделей из env (`LLM_*`), политика PIPELINE_SPEC §3, §4.5, §5.1 |
+| `infrastructure/llm/transport.py` | один адаптер OpenAI-совместимого `/chat/completions`, ротация ключей, классы HTTP-сбоев |
+| `infrastructure/llm/gateway.py` | `LlmGateway`: дедлайн, переполнение, бюджет до каждого вызова; retry, repair, fallback; ≤ 4 вызовов на попытку |
+| `infrastructure/llm/answers.py` | путь разбора ответа: `review-output.schema.json`, затем `parse_review_output`; тексты ошибок для repair |
+| `infrastructure/llm/models.py` | `GatewayReviewModel`, `GatewayConventionsModel` — реализации портов |
+| `infrastructure/llm_call_trace.py`, `analytics/infrastructure/usage_ledger.py` | `llm.call` — через общий порт `RunTrace` (`add_action` блокирует строку Run и кладёт ответ > 64 KB в `run_action_responses`); `usage_events` — вставкой. Каждая запись — своей короткой транзакцией после вызова; сбой записи трейса логируется и не теряет оплаченный ответ |
+| `bootstrap/llm_gateway.py` | сборка шлюза для worker и точка входа `review_case` без БД (eval #30, живой прогон) |
+
+**Структурный вывод: `response_format` с JSON Schema (`strict: true`).** Выбран потому,
+что форма ответа уже задана одним файлом `review/schemas/review-output.schema.json`, и
+он соответствует требованиям строгого режима (все ключи обязательны, `additionalProperties:
+false`, nullable — `[..., "null"]`, PIPELINE_SPEC §9): шлюз отправляет его как есть, без
+корневых `$`-аннотаций, и второй копии схемы не появляется. Tool calling дал бы ту же
+схему, но с обёрткой `tool_calls` и лишним рендером аргументов; Instructor — новая
+зависимость, которая дублирует наш repair-цикл (PIPELINE_SPEC §5.1 требует ровно один
+repair и затем fallback, а не собственные ретраи библиотеки). Путь «JSON по промпту»
+(`LLM_STRUCTURED_OUTPUT=prompt_json`, только с `LLM_ALLOW_PROMPT_JSON=1`) — для локальных
+и self-hosted моделей в dev и eval: `response_format` не отправляется, ответ проходит тот
+же путь разбора. Любой путь заканчивается JSON Schema и Pydantic: семантику, которую
+схема не выражает, провайдер не проверяет.
+
+**Подсчёт токенов.** Точные токенизаторы моделей за роутером офлайн недоступны, поэтому
+до отправки шлюз оценивает промпт консервативно (`символы / 3`); фактические
+`prompt_tokens` провайдера пишутся в `usage_events`, а HTTP 400 о длине контекста и 413
+относятся к тому же классу `llm_context_overflow`. Известные ограничения оценки: она не
+учитывает размер `response_format` и занижает CJK-текст примерно в 2,25 раза — страховка в
+обоих случаях та же, ответ провайдера о длине контекста. Если провайдер не прислал `usage`,
+в учёт идёт та же оценка, а не ноль.
+
+**Лимит вызовов на попытку.** Шлюз — один объект на процесс; счётчик вызовов ведётся на
+`(run_id, attempt)` и общий для `GatewayConventionsModel` и `GatewayReviewModel`, поэтому
+конвенции и ревью одной попытки вместе делают не больше 4 вызовов, а `call_no` в `llm.call`
+сквозной.
+
 ## Целевая модульная структура кода
 
 Код организован **сначала по бизнес-модулю**, а уже внутри модуля — по слоям Clean

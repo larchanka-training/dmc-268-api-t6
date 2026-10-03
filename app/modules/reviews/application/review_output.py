@@ -6,7 +6,7 @@ import json
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Annotated, Any, Literal, Protocol
+from typing import TYPE_CHECKING, Annotated, Literal, Protocol
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
@@ -246,12 +246,14 @@ class PublishReviewOutput:
 
 
 def _as_json_object(raw_output: Mapping[str, object] | str | bytes) -> dict[str, object]:
-    """Store the exact JSON object instead of a lossy model serialization."""
+    """Store the exact JSON object instead of a lossy model serialization.
+
+    Called after ``parse_review_output`` accepted the same value, so a text is already
+    known to decode to one JSON object.
+    """
     if isinstance(raw_output, Mapping):
         return dict(raw_output)
-    decoded: Any = json.loads(raw_output)
-    if not isinstance(decoded, dict):
-        raise InvalidReviewOutput("invalid review output")
+    decoded: dict[str, object] = json.loads(raw_output)
     return decoded
 
 

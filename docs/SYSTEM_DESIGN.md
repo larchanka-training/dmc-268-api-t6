@@ -183,7 +183,7 @@ flowchart LR
   end
 
   B --> P[PromptBuilder<br/>prompt_version + rule_version<br/>+ конвенции]
-  P --> L[LLM Gateway<br/>адаптеры провайдеров, ретраи,<br/>prompt cache, usage_events]
+  P --> L[LLM Gateway<br/>OpenAI-совместимый адаптер, ротация ключей,<br/>ретраи, fallback-модель, prompt cache,<br/>usage_events, llm.call]
   L --> PP[FindingsPostProcessor<br/>lint-фильтр ×2, порог confidence,<br/>дедуп, hunk-валидация, лимит N]
   PP --> T[TraceRecorder<br/>RunAction: tool, request, response, ms]
   T --> OUT[(review.publish)]
@@ -208,6 +208,8 @@ class ReviewFinding:          # элемент ReviewOutput.findings
 ```
 
 `side` и SHA в выходе нет: сторону (`RIGHT`) ставит постпроцессор, SHA берётся из `Run.head_sha`. Маппинг якоря в БД, API и GitHub — PIPELINE_SPEC §10.
+
+**LLM Gateway** (#33) — один адаптер OpenAI-совместимого API: EUrouter и self-hosted (LM Studio, Ollama, vLLM) различаются только конфигурацией — base URL, модель, список ключей (`docs/SECRETS.md`). Внутри шлюза: **ротация ключей** — несколько ключей на провайдера, при 401/403/429 запрос уходит со следующим ключом, и это не считается вызовом; **fallback-модель** — вторая модель со strict structured output (D7), вызывается один раз на попытку после исчерпания повторов основной модели. Повторы, repair-вызов, лимиты вызовов и стоимости, дедлайн попытки и нормализация ошибок в `error_code` — PIPELINE_SPEC §3, §4.5, §5.1, §6. Шлюз подгоняет L1-контекст под `min(окно модели, лимит §13) − резерв на ответ` (обрезка файла с трейлером, остальное — в `<omitted_files>`), пишет `usage_events` и по записи `llm.call` на каждый вызов провайдера через порты вне транзакции. Раскладка кода и выбор механизма структурного вывода — `BACKEND_ARCHITECTURE.md`, раздел «LLM Gateway».
 
 ---
 
@@ -842,13 +844,27 @@ flowchart TB
 | # | Вопрос | Предложение | Кто решает |
 |---|---|---|---|
 | OQ-1 | После первого ревью GitHub снимает бота из requested reviewers. Повторный пуш: ревьюим автоматически или ждём повторного назначения? | **закрыт**, вопрос потерял смысл: бота нельзя запросить ревьюером, триггер — лейбл `ai-review`, бот его не снимает ([#37](https://github.com/larchanka-training/dmc-268-api-t6/issues/37#issuecomment-5874776355), Р-10). После пуша — автоматически, пока PR открыт и лейбл стоит (решение техлида по #20). Определение «CI зелёный» и sweep «2 мин без CI» — дефолт по #20 (§6.1, PIPELINE_SPEC §8) | продукт / мит |
-| OQ-2 | Модель для DiffEngine и размер бюджета | владелец — исполнитель #33, срок 01.10.2026 (решение техлида по #20). Требования: strict structured output у основной и fallback-модели, контекст ≥ 60 000 токенов, стоимость fast ≤ $0.50 за прогон (PIPELINE_SPEC §14); дизайн модель-агностичен через LLM Gateway | исполнитель #33 |
+| OQ-2 | Модель для DiffEngine и размер бюджета | **закрыт по каталогу EUrouter** (#33, 29.09.2026): основная — `gpt-4.1-mini`, fallback — `mistral-small-4`; проверка по требованиям D7 и расчёт — таблица ниже, strict `json_schema` подтверждается первым прогоном workflow `LLM live run` после мержа. Бюджет — лимиты §13 без изменений; дизайн модель-агностичен: модель меняется конфигурацией шлюза (`LLM_MODEL`, `LLM_FALLBACK_MODEL`) | исполнитель #33 |
 | OQ-3 | `review_event` по умолчанию: `COMMENT` или `REQUEST_CHANGES` при critical? | **закрыт** решением по #20: `COMMENT` по умолчанию, поле `reviewEvent` у репозитория; `REQUEST_CHANGES` — только при `reviewEvent = REQUEST_CHANGES` и вердикте `blocking` (PIPELINE_SPEC §11) | продукт |
 | OQ-4 | Раскладка `.agents/` vs `docs/agents/` | **закрыт** решением роли 7 в [dmc-268-ui-t6#32](https://github.com/larchanka-training/dmc-268-ui-t6/issues/32): `.agents/` — источник истины, `.claude/{skills,agents}` — симлинки на него | роль 7 + техлид |
 | OQ-5 | Event Collector как отдельный процесс — с какого порога | **закрыт Р-12**: отдельного collector нет, `usage_events` пишет worker | техлид |
 | OQ-6 | Стековые PR (B на основе A): пуш в A меняет дифф B, событие приходит только по A | не решаем в v1, фиксируем как известный пробел | — |
 | OQ-7 | Шифрование `ProviderInstallation` at rest | в MVP не заявлено: токены App не сохраняются, в `metadata` — только JSON-описание установки; вернуться, если в `metadata` появятся секреты | техлид + роль 6 |
 | OQ-8 | Кто создаёт лейбл `ai-review` в подключённом репозитории | **закрыт** решением техлида: лейбл создаёт App при подключении репозитория (`installation.created`, `installation_repositories.added`, §6.9), ответ 422 на существующий лейбл — успех. Новое право не нужно: `POST /repos/{owner}/{repo}/labels` требует одно из прав `issues: write` или `pull_requests: write` ([GitHub Docs](https://docs.github.com/en/rest/issues/labels#create-a-label)), у App есть второе. Ограничение: лейбл, удалённый мейнтейнером, вернётся только при повторном подключении репозитория | техлид; реализация — #11 |
+
+**Закрытие OQ-2: проверка по D7.** Значения — каталог EUrouter (`GET https://api.eurouter.ai/api/v1/models`) на 29.09.2026; цены в USD за 1 млн токенов, они же — дефолты `KNOWN_MODELS` шлюза и переопределяются env без релиза.
+
+| Требование D7 | `gpt-4.1-mini` (основная) | `mistral-small-4` (fallback) |
+|---|---|---|
+| Strict structured output | `response_format` в `supported_parameters` — параметр принимается. Шлюз шлёт `json_schema` со `strict: true` и схемой `review-output.schema.json` (без `$`-аннотаций); что маршрут EUrouter принимает её целиком, подтверждает workflow `LLM live run` — первый прогон после мержа, ссылка на run добавляется сюда | то же |
+| Контекст ≥ 60 000 | 1 047 576 | 262 144 |
+| Цена вход / выход / чтение кэша | $0.44 / $1.76 / $0.11 | $0.165 / $0.66 / $0.0165 — маршрут Mistral AI; у EUrouter ещё два эндпоинта: Regolo €0.50 / €2.10, AKI.IO €0.20 / €0.60 |
+| Максимум одного вызова fast (52 000 вход + 8 000 выход) | $0.037 | $0.014 (Regolo — около €0.043) |
+| Прогон fast ≤ $0.50 | худший случай — 3 попытки × (3 вызова основной + 1 fallback) = $0.37 (вызов конвенций входит в те же 4 вызова попытки); типичный прогон — один вызов ≈ 20 000 / 2 000 токенов ≈ $0.012 | — |
+
+Выбор: основная и fallback — разные вендоры (OpenAI, Mistral), так что сбой одного не выбивает обе; обе с EU-резидентностью данных через EUrouter. `gpt-4.1-mini` — не reasoning-модель; `mistral-small-4` — гибридная, reasoning опционален (`reasoning.mandatory = false`), шлюз его не включает, поэтому ответ укладывается в таймаут 90 с. Даже по самому дорогому эндпоинту fallback худший случай прогона fast остаётся ниже $0.50, а лимит шлюз в любом случае проверяет до каждого вызова по `usage_events` (PIPELINE_SPEC §4.5).
+
+Строгость `json_schema` на маршруте EUrouter подтверждается ручным workflow `LLM live run` (`.github/workflows/llm-live-run.yml`, `workflow_dispatch`, ключ — секрет организации `AI_DMC268_T6`): два прогона — основная с fallback и fallback как основная — и `validate_findings.py` на ответе; итог (провайдер, фактическая модель, вызовы, токены, стоимость, время) — в summary run. `workflow_dispatch` запускается только для файла на `main`, поэтому первый прогон — сразу после мержа #33; ссылка на него и проверка, что `usage.cost` приходит в USD, добавляются в эту строку. Если маршрут отвергнет схему (HTTP 400 на `response_format`), это hotfix по OQ-2: другая пара моделей или tool calling. Известные пробелы: схему конвенций (`RepoConventionsDraft`) workflow не проверяет — её strict-путь подтвердится вместе с подключением шлюза в воркер (#34); `review.conventions.v1` не описывает маркеры `[N more … omitted]`, поэтому при обрезанном дереве или > 100 изменённых путях модель может выдать запись на строку-маркер и уйти в repair — это учесть в следующей версии промпта конвенций.
 
 ---
 
