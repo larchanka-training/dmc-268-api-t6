@@ -36,7 +36,7 @@ SECRET_SOURCES = {
     "AUTH_JWT_PRIVATE_KEY": "AUTH_JWT_PRIVATE_KEY",
     "AUTH_JWT_PUBLIC_KEY": "AUTH_JWT_PUBLIC_KEY",
 }
-APP_ENV_KEYS = {"GITHUB_APP_ID", "GITHUB_APP_PRIVATE_KEY"}  # api and worker
+APP_ENV_KEYS = {"GITHUB_APP_ID", "GITHUB_APP_PRIVATE_KEY"}  # worker and webhook-worker
 API_ENV_KEYS = set(SECRET_SOURCES) - APP_ENV_KEYS  # api only
 
 # Multi-line like a PEM, with what a shell or Compose could rewrite: $, ${...} and backslashes.
@@ -74,6 +74,7 @@ case "$1" in
     case "${action}" in
       up)
         # Like Compose: env_file paths resolve against the directory of the first compose file.
+        # Both files must exist: deploy and rollback keep app.env in place for the workers too.
         for name in app.env api.env; do
           [[ -f "${project_dir}/${name}" ]] || { echo "env file ${name} not found" >&2; exit 1; }
         done
@@ -108,10 +109,10 @@ def _workflow_step(name: str) -> str:
     return workflow[start : end if end != -1 else len(workflow)]
 
 
-def _bash_array(script: str, name: str) -> set[str]:
+def _bash_array(script: str, name: str) -> list[str]:
     match = re.search(rf"^\s*{name}=\(([^)]*)\)", script, re.MULTILINE)
     assert match is not None, f"array {name} is missing"
-    return set(match.group(1).split())
+    return match.group(1).split()
 
 
 def _bundle(secrets: Mapping[str, str]) -> str:
@@ -146,6 +147,7 @@ class Host:
     bin_dir: Path
     volumes: Path
     log: Path
+    tmp: Path
 
     @property
     def env_file(self) -> Path:
@@ -169,6 +171,7 @@ class Host:
             "APP_DIR": str(self.app_dir),
             "STUB_LOG": str(self.log),
             "STUB_VOLUMES": str(self.volumes),
+            "TMPDIR": str(self.tmp),
             **(env or {}),
         }
         return subprocess.run(
@@ -213,7 +216,11 @@ def host(tmp_path: Path) -> Host:
     docker.chmod(0o755)
     volumes = tmp_path / "volumes"
     volumes.mkdir()
-    return Host(app_dir=app_dir, bin_dir=bin_dir, volumes=volumes, log=tmp_path / "docker.log")
+    tmp = tmp_path / "tmp"
+    tmp.mkdir()
+    return Host(
+        app_dir=app_dir, bin_dir=bin_dir, volumes=volumes, log=tmp_path / "docker.log", tmp=tmp
+    )
 
 
 def _run_bundle_step(tmp_path: Path, secrets: Mapping[str, str]) -> tuple[str, str]:
@@ -243,8 +250,30 @@ def test_bundle_step_maps_environment_secrets_to_container_names() -> None:
     mapping = dict(re.findall(r"^\s+([A-Z_]+): \$\{\{ secrets\.([A-Z_]+) \}\}$", step, re.M))
 
     assert "id: app_secrets" in step
+    assert "shell: bash" in step  # bash -eo pipefail, as _run_bundle_step runs it
     assert mapping == SECRET_SOURCES
-    assert _bash_array(step, "names") == set(SECRET_SOURCES)
+    assert set(_bash_array(step, "names")) == set(SECRET_SOURCES)
+
+
+def test_bundle_step_masks_the_bundle_and_logs_only_names(tmp_path: Path) -> None:
+    stdout, bundle = _run_bundle_step(tmp_path, CI_SECRETS)
+    names = _bash_array(_workflow_step("Bundle application secrets"), "names")
+
+    # The bundle is reversible base64 of every secret and is shown in the env of "Deploy image":
+    # the runner must mask exactly this value before anything else is logged.
+    assert bundle
+    assert stdout.splitlines() == [
+        f"::add-mask::{bundle}",
+        *(f"set: {name}" if CI_SECRETS[name] else f"not set: {name}" for name in names),
+    ]
+
+
+def test_bundle_step_without_secrets_outputs_an_empty_bundle(tmp_path: Path) -> None:
+    stdout, bundle = _run_bundle_step(tmp_path, dict.fromkeys(SECRET_SOURCES, ""))
+    names = _bash_array(_workflow_step("Bundle application secrets"), "names")
+
+    assert bundle == ""
+    assert stdout.splitlines() == [f"not set: {name}" for name in names]
 
 
 def test_deploy_step_forwards_the_bundle_to_the_host() -> None:
@@ -259,27 +288,43 @@ def test_deploy_step_forwards_the_bundle_to_the_host() -> None:
 def test_host_allowlist_follows_the_container_table() -> None:
     env_file = _read("deploy", "scripts", "env-file.sh")
 
-    assert _bash_array(env_file, "APP_ENV_KEYS") == APP_ENV_KEYS
-    assert _bash_array(env_file, "API_ENV_KEYS") == API_ENV_KEYS
+    assert set(_bash_array(env_file, "APP_ENV_KEYS")) == APP_ENV_KEYS
+    assert set(_bash_array(env_file, "API_ENV_KEYS")) == API_ENV_KEYS
 
 
-def test_secrets_from_ci_land_in_the_right_files_unchanged(tmp_path: Path, host: Host) -> None:
-    stdout, bundle = _run_bundle_step(tmp_path, CI_SECRETS)
+@pytest.mark.parametrize(
+    "secrets",
+    [CI_SECRETS, {**CI_SECRETS, "GITHUB_WEBHOOK_SECRET": "whsec$1\\x"}],
+    ids=["webhook-secret-unset", "all-set"],
+)
+def test_secrets_from_ci_land_in_the_right_files_unchanged(
+    tmp_path: Path, host: Host, secrets: Mapping[str, str]
+) -> None:
+    stdout, bundle = _run_bundle_step(tmp_path, secrets)
 
     result = host.deploy("ghcr.io/test/api@sha256:a", bundle=bundle)
 
     assert result.returncode == 0, result.stderr
     assert "BEGIN TEST" not in stdout
-    assert CI_SECRETS["GITHUB_CLIENT_SECRET"] not in stdout
-    assert "not set: GITHUB_WEBHOOK_SECRET" in stdout
-    expected = {name: value for name, value in CI_SECRETS.items() if value}
+    assert secrets["GITHUB_CLIENT_SECRET"] not in stdout
+    expected = {name: value for name, value in secrets.items() if value}
     app_env = _read_env_file(host.app_dir / "app.env")
     api_env = _read_env_file(host.app_dir / "api.env")
     assert app_env == {name: expected[name] for name in APP_ENV_KEYS}
     assert api_env == {name: expected[name] for name in API_ENV_KEYS if name in expected}
-    assert "GITHUB_WEBHOOK_SECRET" not in api_env  # absent, not an empty string
+    for name in secrets.keys() - expected.keys():
+        assert name not in app_env and name not in api_env  # absent, not an empty string
     for name in (".env", "app.env", "api.env"):
         assert _mode(host.app_dir / name) == 0o600
+
+
+def test_empty_value_in_the_bundle_is_left_out(host: Host) -> None:
+    bundle = _bundle({"GITHUB_APP_ID": "7", "GITHUB_CLIENT_ID": ""})
+
+    assert host.deploy("ghcr.io/test/api@sha256:a", bundle=bundle).returncode == 0
+
+    assert _read_env_file(host.app_dir / "app.env") == {"GITHUB_APP_ID": "7"}
+    assert _read_env_file(host.app_dir / "api.env") == {}
 
 
 # --- Host: generated credentials, rollbacks and refusals ----------------------------------------
@@ -296,6 +341,7 @@ def test_first_deploy_generates_store_passwords_once(host: Host) -> None:
         assert second[name] == first[name], name
     assert first["RABBITMQ_USER"] == "app"
     assert second["IMAGE"] == "ghcr.io/test/api@sha256:b"
+    assert list(host.tmp.iterdir()) == []  # the per-run DOCKER_CONFIG is removed
 
 
 def test_rollbacks_keep_store_passwords_and_app_secrets(host: Host) -> None:
@@ -307,9 +353,13 @@ def test_rollbacks_keep_store_passwords_and_app_secrets(host: Host) -> None:
 
     manual = host.run("rollback.sh")
     after_manual = _read_dotenv(host.env_file)
+    secrets_after_manual = {name: (host.app_dir / name).read_bytes() for name in secrets}
+    # The failing deploy brings rotated secrets. They stay after the automatic rollback: secrets
+    # are not tied to an image (docs/SECRETS.md §3).
+    rotated = _bundle({"GITHUB_APP_ID": "2", "GITHUB_CLIENT_ID": "client"})
     failed = host.deploy(
         "ghcr.io/test/api@sha256:bad",
-        bundle=bundle,
+        bundle=rotated,
         env={"STUB_FAILING_IMAGE": "ghcr.io/test/api@sha256:bad"},
     )
     after_auto = _read_dotenv(host.env_file)
@@ -322,8 +372,29 @@ def test_rollbacks_keep_store_passwords_and_app_secrets(host: Host) -> None:
     for name in ("POSTGRES_PASSWORD", "RABBITMQ_USER", "RABBITMQ_PASSWORD", "REDIS_PASSWORD"):
         assert after_manual[name] == deployed[name], name
         assert after_auto[name] == deployed[name], name
-    for name, content in secrets.items():
-        assert (host.app_dir / name).read_bytes() == content, name
+    assert secrets_after_manual == secrets
+    assert _read_env_file(host.app_dir / "app.env") == {"GITHUB_APP_ID": "2"}
+    assert _read_env_file(host.app_dir / "api.env") == {"GITHUB_CLIENT_ID": "client"}
+
+
+@pytest.mark.parametrize("name", ["POSTGRES_PASSWORD", "RABBITMQ_PASSWORD", "REDIS_PASSWORD"])
+def test_rollback_refuses_without_a_store_password(host: Host, name: str) -> None:
+    assert host.deploy("ghcr.io/test/api@sha256:a", bundle="").returncode == 0
+    assert host.deploy("ghcr.io/test/api@sha256:b", bundle="").returncode == 0
+    env = host.env_file.read_text(encoding="utf-8")
+    host.env_file.write_text(
+        "".join(line for line in env.splitlines(True) if not line.startswith(f"{name}=")),
+        encoding="utf-8",
+    )
+    before = host.files()
+    calls_before = len(host.calls())
+
+    result = host.run("rollback.sh")
+
+    assert result.returncode != 0
+    assert f"{name} is required" in result.stderr
+    assert host.files() == before
+    assert not any(call.startswith("compose") for call in host.calls()[calls_before:])
 
 
 def test_rollback_recreates_missing_app_secret_files(host: Host) -> None:
@@ -485,11 +556,12 @@ def test_api_starts_without_the_broker_and_the_cache() -> None:
     assert dependencies == ["bootstrap", "postgres"]
 
 
-def test_api_receives_app_secrets_only_through_env_files() -> None:
+def test_api_gets_only_its_own_env_file() -> None:
     api = _service_block("api")
+    env_files = api[api.index("    env_file:\n") : api.index("    environment:\n")]
 
-    assert "- app.env" in api
-    assert "- api.env" in api
+    # The API reads no GitHub App credentials: app.env belongs to the workers.
+    assert re.findall(r"^      - (\S+)$", env_files, re.MULTILINE) == ["api.env"]
     assert "GITHUB_" not in api
     assert "AUTH_JWT_PRIVATE_KEY" not in api
 
