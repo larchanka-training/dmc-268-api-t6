@@ -46,7 +46,7 @@ Skills and agents here name Claude Code's sub-agent tools. The equivalent per ha
 ## Directory map
 
 - `rules/` — stack and workflow rules (`backend.md`, `git-workflow.md`).
-- `skills/` — agent skills, one `SKILL.md` per directory (7 here — no
+- `skills/` — agent skills, one `SKILL.md` per directory (8 here — no
   `manual-automation`).
 - `agents/` — agent definitions (`name`, `description`, `model` frontmatter).
 - `templates/backend/` — code/test templates with proof blocks. Fenced blocks
@@ -61,9 +61,14 @@ These files are byte-identical between the two repos, marked with a
 `<!-- SYNC: mirrored in dmc-268-{ui,api}-t6/.agents/<path> -->` line:
 
 - `rules/git-workflow.md`
-- `skills/agent-loop/**`, `skills/code-review/**`, `skills/pull-request/**`,
-  `skills/planning-and-task-breakdown/**`, `skills/qa/**`
+- `skills/agent-loop/**`, `skills/code-review/**`, `skills/create-issue/**`,
+  `skills/pull-request/**`, `skills/planning-and-task-breakdown/**`, `skills/qa/**`
 - `agents/*.md`
+
+The marker takes the form the file type allows: `.md` — the `<!-- SYNC: … -->` line
+(after the H1 in a skill file); `.py` / `.sh` — a `# SYNC: …` comment after the shebang or
+the module docstring; golden files under `skills/create-issue/tests/golden/` — the SYNC
+line, a blank line, then the body (the golden test drops exactly those two lines).
 
 Everything else (`rules/frontend.md` / `rules/backend.md`, stack-specific
 skills, `templates/`) is per-repo.
@@ -75,10 +80,12 @@ Shared files: edit in `dmc-268-ui-t6`, `cp` to `dmc-268-api-t6`, then
 
 Each `skills/<dir>/SKILL.md` needs frontmatter: `name` (matches the directory),
 `description` (third person, "This skill should be used when…"), and a
-`metadata` block (`version: 1.0.0`, `source: instructor-pack`,
+`metadata` block (`version: 1.0.0`, `source: instructor-pack | team`,
 `adapted-for: frontend|backend|any`). Budget scales with the source: about
 1.3× the instructor-pack original plus frontmatter; see existing `SKILL.md`
-files for precedent (templates ≤150 lines). Write it in English.
+files for precedent (templates ≤150 lines). A `source: team` skill has no original
+to scale from: `SKILL.md` ≤ ~250 lines, details in `references/` (as in
+`create-issue`). Write it in English.
 
 ## Product review prompts
 
