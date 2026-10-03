@@ -586,6 +586,7 @@ jobs:
 
       - name: Bundle application secrets
         id: app_secrets
+        shell: bash
         env:
           # Environment staging secrets (docs/SECRETS.md). GitHub rejects secret names starting with
           # GITHUB_, so the App secrets are GH_* here and GITHUB_* in the container.

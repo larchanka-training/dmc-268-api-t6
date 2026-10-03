@@ -5,8 +5,8 @@ services:
   api:
     image: ${IMAGE:?IMAGE is required}
     # Application secrets from GitHub, only the keys that are set (deploy/scripts/env-file.sh).
+    # api.env only: the API reads no GitHub App credentials, app.env is for the workers.
     env_file:
-      - app.env
       - api.env
     environment:
       DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-app}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/${POSTGRES_DB:-app}
@@ -16,6 +16,7 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
       POSTGRES_DB: ${POSTGRES_DB:-app}
       RABBITMQ_URL: amqp://${RABBITMQ_USER:-app}:${RABBITMQ_PASSWORD:?RABBITMQ_PASSWORD is required}@rabbitmq:5672/
+      # Cache per SD §10; the application does not read it yet.
       REDIS_URL: redis://:${REDIS_PASSWORD:?REDIS_PASSWORD is required}@redis:6379/0
       AUTH_JWT_ISSUER: dmc-268-api
       AUTH_JWT_AUDIENCE: dmc-268-ui

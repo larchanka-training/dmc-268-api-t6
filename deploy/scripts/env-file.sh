@@ -4,10 +4,11 @@
 # literally ($ escaped as $$). Never source these files as shell code.
 
 # Application secrets go to per-container env files instead of compose interpolation: Compose turns
-# an unset ${VAR} into an empty string, and the app treats GITHUB_APP_ID= as configured. A key that
-# is not set in GitHub is simply absent from the file and from the container environment.
-APP_ENV_FILE_NAME="app.env"  # api and worker
-API_ENV_FILE_NAME="api.env"  # api only (user authorization)
+# an unset ${VAR} into an empty string, and app/bootstrap/reviews_api.py checks GITHUB_WEBHOOK_SECRET
+# with `is not None`. A key that is not set in GitHub is simply absent from the file and from the
+# container environment.
+APP_ENV_FILE_NAME="app.env"  # GitHub App credentials: worker and webhook-worker (next PR of #35)
+API_ENV_FILE_NAME="api.env"  # api only: webhook signature and user authorization
 APP_ENV_KEYS=(GITHUB_APP_ID GITHUB_APP_PRIVATE_KEY)
 API_ENV_KEYS=(GITHUB_WEBHOOK_SECRET GITHUB_CLIENT_ID GITHUB_CLIENT_SECRET AUTH_JWT_PRIVATE_KEY AUTH_JWT_PUBLIC_KEY)
 
@@ -53,6 +54,7 @@ write_compose_env_file() {
 # so multi-line PEM values cross the SSH action and the shell as one opaque line. Values are written
 # single-quoted: Compose reads them across lines without interpolation, and a backslash stays a
 # backslash except right before a quote. So a value may contain neither ' nor a trailing \.
+# Command substitution drops trailing newlines of a value, which PEM parsing ignores.
 # Everything is validated before either file is replaced; the body runs in a subshell so that the
 # EXIT trap removes the temporary files on any failure.
 write_app_env_files() (
