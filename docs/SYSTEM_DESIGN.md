@@ -462,7 +462,7 @@ sequenceDiagram
   WH->>PG: repositories отключены
 ```
 
-Репозиторий подключается только установкой App: `POST /api/repos` нет (D10), кнопка «Подключить» в UI — ссылка на установку App, список обновляют вебхуки (§8.2). Новую установку с Workspace связывает #11; способ — при `installation.created` или при входе через `GET /user/installations` — выбирается в PR по #11. На `main` доставка для установки без Workspace подтверждается и игнорируется. При подключении репозитория App создаёт в нём лейбл `ai-review` — триггер Р-10: `POST /repos/{owner}/{repo}/labels` вне транзакции, права `pull_requests: write` хватает. Ответ 422 (лейбл уже есть) — успех; другая ошибка логируется и подключение не отменяет [дефолт]. Лейбл, удалённый мейнтейнером, вернётся только при повторном подключении репозитория (OQ-8).
+Репозиторий подключается только установкой App: `POST /api/repos` нет (D10), кнопка «Подключить» в UI — ссылка на установку App, список обновляют вебхуки (§8.2). Новую установку с Workspace связывает #11; способ — при `installation.created` или при входе через `GET /user/installations` — выбирается в PR по #11. На `main` доставка для установки без Workspace подтверждается и игнорируется. При подключении репозитория App создаёт в нём лейбл `ai-review` — триггер Р-10: `POST /repos/{owner}/{repo}/labels` вне транзакции; эндпоинт относится к правам Issues, поэтому у App есть `issues: write` (добавлено 03.10.2026 по #37). Ответ 422 (лейбл уже есть) — успех; другая ошибка логируется и подключение не отменяет [дефолт]. Лейбл, удалённый мейнтейнером, вернётся только при повторном подключении репозитория (OQ-8).
 
 ---
 
@@ -544,7 +544,7 @@ v1 — `GitHubProvider`. `GitLabProvider` (MR `changes`, `discussions`, `pipelin
 | `pull_request_review_thread` | `resolved`, `unresolved` | **после MVP**: `feedback_signals` |
 | `installation`, `installation_repositories` | `created`, `deleted`, `added`, `removed` | синхронизация `repositories`; при подключении — создание лейбла `ai-review` (§6.9) |
 
-Права App (repository): `pull_requests: write`, `checks: write`, `contents: read`, `metadata: read`, `actions: read` (событие `workflow_run`), `statuses: read` (событие `status` и combined status в PIPELINE_SPEC §8.1). Бот **не** имеет `contents: write`. Прав организации и аккаунта нет. События `labeled` / `unlabeled` приходят в подписке `pull_request`, поэтому триггер Р-10 новых прав не требует; лейбл `ai-review` App создаёт сам при подключении репозитория (§6.9), `POST /repos/{owner}/{repo}/labels` покрывается правом `pull_requests: write` (OQ-8). Регистрация App и полный список настроек — #37.
+Права App (repository): `pull_requests: write`, `checks: write`, `contents: read`, `metadata: read`, `issues: write` (создание лейбла `ai-review`, §6.9), `actions: read` (событие `workflow_run`), `statuses: read` (событие `status` и combined status в PIPELINE_SPEC §8.1). Бот **не** имеет `contents: write`. Прав организации и аккаунта нет. События `labeled` / `unlabeled` приходят в подписке `pull_request`, поэтому триггер Р-10 новых прав не требует; лейбл `ai-review` App создаёт сам при подключении репозитория (§6.9), `POST /repos/{owner}/{repo}/labels` требует `issues: write`, а не `pull_requests: write` ([GitHub Docs](https://docs.github.com/en/rest/authentication/permissions-required-for-github-apps), OQ-8). Регистрация App и полный список настроек — #37.
 
 ### 8.3 Правила работы с API
 
