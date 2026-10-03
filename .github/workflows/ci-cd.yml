@@ -355,10 +355,12 @@ jobs:
       contents: read
       packages: write
       actions: read
+    # Nothing reaches the registry or staging unless the required check is green.
     needs:
       - secret-scan
       - terraform-fmt-validate
       - terraform-lint-security
+      - python-lint-type-test
       - docker-build
       - docker-scan
     outputs:
@@ -588,6 +590,38 @@ jobs:
           done
           echo "TLS handshake with ${BASE_URL} succeeded"
 
+      - name: Bundle application secrets
+        id: app_secrets
+        shell: bash
+        env:
+          # Environment staging secrets (docs/SECRETS.md). GitHub rejects secret names starting with
+          # GITHUB_, so the App secrets are GH_* here and GITHUB_* in the container.
+          GITHUB_APP_ID: ${{ secrets.GH_APP_ID }}
+          GITHUB_APP_PRIVATE_KEY: ${{ secrets.GH_APP_PRIVATE_KEY }}
+          GITHUB_WEBHOOK_SECRET: ${{ secrets.GH_WEBHOOK_SECRET }}
+          GITHUB_CLIENT_ID: ${{ secrets.GH_CLIENT_ID }}
+          GITHUB_CLIENT_SECRET: ${{ secrets.GH_CLIENT_SECRET }}
+          AUTH_JWT_PRIVATE_KEY: ${{ secrets.AUTH_JWT_PRIVATE_KEY }}
+          AUTH_JWT_PUBLIC_KEY: ${{ secrets.AUTH_JWT_PUBLIC_KEY }}
+        run: |
+          # One opaque line of base64 so multi-line PEM values survive the SSH action and the shell;
+          # deploy/scripts/env-file.sh decodes it on the host. Unset secrets are left out entirely.
+          names=(GITHUB_APP_ID GITHUB_APP_PRIVATE_KEY GITHUB_WEBHOOK_SECRET GITHUB_CLIENT_ID GITHUB_CLIENT_SECRET AUTH_JWT_PRIVATE_KEY AUTH_JWT_PUBLIC_KEY)
+          bundle="$(
+            for name in "${names[@]}"; do
+              if [[ -n "${!name}" ]]; then
+                printf '%s=%s\n' "${name}" "$(printf '%s' "${!name}" | base64 | tr -d '\n')"
+              fi
+            done | base64 | tr -d '\n'
+          )"
+          if [[ -n "${bundle}" ]]; then
+            echo "::add-mask::${bundle}"
+          fi
+          echo "bundle=${bundle}" >> "${GITHUB_OUTPUT}"
+          for name in "${names[@]}"; do
+            [[ -n "${!name}" ]] && echo "set: ${name}" || echo "not set: ${name}"
+          done
+
       - name: Deploy image
         id: deploy
         uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2 # v1.2.5
@@ -601,6 +635,7 @@ jobs:
           POSTGRES_USER: ${{ vars.POSTGRES_USER }}
           POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
           POSTGRES_DB: ${{ vars.POSTGRES_DB }}
+          APP_SECRETS_B64: ${{ steps.app_secrets.outputs.bundle }}
         with:
           host: ${{ steps.target.outputs.host }}
           port: ${{ steps.target.outputs.port }}
@@ -609,7 +644,7 @@ jobs:
           password: ${{ steps.target.outputs.mode == 'course' && secrets.VPS_DMC268_P || '' }}
           fingerprint: ${{ vars.STAGING_SSH_FINGERPRINT }}
           debug: false
-          envs: GHCR_TOKEN,GHCR_USER,IMAGE,APP_DIR,DEPLOY_MODE,EDGE_ALIAS,POSTGRES_USER,POSTGRES_PASSWORD,POSTGRES_DB
+          envs: GHCR_TOKEN,GHCR_USER,IMAGE,APP_DIR,DEPLOY_MODE,EDGE_ALIAS,POSTGRES_USER,POSTGRES_PASSWORD,POSTGRES_DB,APP_SECRETS_B64
           script: |
             set -euo pipefail
             set +o xtrace

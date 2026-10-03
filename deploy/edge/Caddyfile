@@ -27,9 +27,17 @@ webhook.{$APP_DOMAIN} {
 	reverse_proxy webhook-prod:8000
 }
 
+# One origin (#20): /api/* on the UI host, /api/auth/* and the SSE /api/stream included, goes to
+# the API, so the UI needs no CORS and the refresh cookie (Path=/api/auth) reaches the API.
+# Caddy flushes text/event-stream responses immediately. staging-api keeps healthcheck and webhooks.
 staging-ui.{$APP_DOMAIN} {
 	import hsts
-	reverse_proxy ui-staging:8080
+	handle /api/* {
+		reverse_proxy api-staging:8000
+	}
+	handle {
+		reverse_proxy ui-staging:8080
+	}
 }
 
 ui.{$APP_DOMAIN} {

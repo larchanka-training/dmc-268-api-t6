@@ -2,20 +2,20 @@
 
 | | |
 |---|---|
-| Статус | рабочий каркас Hetzner + Terraform |
+| Статус | staging — курсовой VPS вне Terraform (§8); Hetzner + Terraform — задокументированная альтернатива |
 | Владелец | инфраструктура (роль 3) |
 | Связанные документы | [CICD.md](CICD.md), [SECRETS.md](SECRETS.md) |
 
 В этом репозитории живёт **вся** инфраструктура staging: два независимых Terraform-стека для API и UI, а также edge-прокси курсового VPS. CI/CD приложений — в своих репозиториях (`dmc-268-api-t6`, `dmc-268-ui-t6`).
 
-Сейчас выкат идёт на **курсовой VPS** (выдан курсом, не Terraform) — §8. Terraform-стеки остаются рабочей альтернативой: CI выкатывает на Hetzner, как только задан `STAGING_HOST`.
+Сейчас выкат идёт на **курсовой VPS** (выдан курсом, не Terraform) — §8. Terraform-стеки остаются рабочей альтернативой: CI их проверяет (`terraform-fmt-validate`, `terraform-lint-security`) и выкатывает на Hetzner, как только задан `STAGING_HOST`; `terraform apply` для staging не делается.
 
 | Стек | Каталог | Сеть | VM / каталог на сервере |
 |---|---|---|---|
 | API staging | `terraform/api-staging/` | `10.21.0.0/16` | `/opt/dmc-268-api` |
 | UI staging | `terraform/ui-staging/` | `10.20.0.0/16` | `/opt/dmc-268-ui` |
 
-На каждой VM — Docker и Compose. API-стенд: bootstrap-контейнер до первого выката, затем FastAPI и PostgreSQL. UI-стенд: bootstrap nginx до первого выката, затем статический UI в nginx.
+На каждой VM — Docker и Compose. API-стенд: bootstrap-контейнер до первого выката, затем FastAPI, PostgreSQL, RabbitMQ и Redis (список сервисов — [CICD.md](CICD.md#3-образ-и-health-check)). UI-стенд: bootstrap nginx до первого выката, затем статический UI в nginx.
 
 ---
 
@@ -257,6 +257,10 @@ terraform -chdir=${STACK} destroy -var-file=environments/staging.tfvars
 ## 8. Курсовой VPS
 
 Выдан курсом, Terraform им не управляет. Один VPS на команду держит staging и prod API, UI и будущего webhook-сервиса; маршрутизация по hostname через edge-прокси ([CICD.md](CICD.md#8-курсовой-vps-и-edge-прокси)).
+
+**Почему staging здесь, а не в Terraform** (решение техлида 27.09.2026, #35): стеки `terraform/` описывают Hetzner Cloud, а токена Hetzner (`HCLOUD_TOKEN`) у команды нет — курс выдал готовый VPS. Terraform не может управлять машиной, которую не создавал, а импорт чужого общего хоста дал бы state, расходящийся с реальностью при каждом изменении курса. Поэтому окружение staging — этот VPS, а стеки остаются альтернативой на случай своего проекта в Hetzner: CI продолжает их проверять, переключение — переменной `STAGING_HOST` ([CICD.md](CICD.md#81-две-цели)).
+
+Сервисы API staging на VPS (compose project `dmc-268-api-staging`): `api`, разовый `bootstrap`, PostgreSQL 17 (`postgres:17-alpine`), RabbitMQ (`rabbitmq:4-management-alpine`, брокер очереди, SD Р-1), Redis (`redis:8-alpine`, только кэш, SD §10, лимит памяти 128 MB); `worker` и `webhook-worker` из того же образа — следующим PR по #35. Объектного хранилища нет (#20, D1). Наружу через edge виден только `api`; PostgreSQL, RabbitMQ и Redis — во внутренней сети проекта без `ports:`.
 
 | Параметр | Значение |
 |---|---|

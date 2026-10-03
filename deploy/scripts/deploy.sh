@@ -17,6 +17,8 @@ COMPOSE_PROJECT="${COMPOSE_PROJECT:-$(basename "${APP_DIR}")}"
 BOOTSTRAP_NAME="${BOOTSTRAP_NAME:-${COMPOSE_PROJECT}-bootstrap}"
 # Named volume "postgres-data" of the compose project.
 POSTGRES_VOLUME="${POSTGRES_VOLUME:-${COMPOSE_PROJECT}_postgres-data}"
+# RabbitMQ, like Postgres, fixes its default user only when the volume "rabbitmq-data" is initialised.
+RABBITMQ_VOLUME="${RABBITMQ_VOLUME:-${COMPOSE_PROJECT}_rabbitmq-data}"
 
 # Per-run registry credentials: API and UI deploys share the root account on the course VPS, so
 # docker login must not touch /root/.docker/config.json. A rollback started from here reuses it.
@@ -56,6 +58,9 @@ if [[ -f "${ENV_FILE}" ]]; then
   POSTGRES_DB="${POSTGRES_DB:-$(read_compose_env_var POSTGRES_DB "${ENV_FILE}")}"
   DEPLOY_MODE="${DEPLOY_MODE:-$(read_compose_env_var DEPLOY_MODE "${ENV_FILE}")}"
   EDGE_ALIAS="${EDGE_ALIAS:-$(read_compose_env_var EDGE_ALIAS "${ENV_FILE}")}"
+  RABBITMQ_USER="${RABBITMQ_USER:-$(read_compose_env_var RABBITMQ_USER "${ENV_FILE}")}"
+  RABBITMQ_PASSWORD="${RABBITMQ_PASSWORD:-$(read_compose_env_var RABBITMQ_PASSWORD "${ENV_FILE}")}"
+  REDIS_PASSWORD="${REDIS_PASSWORD:-$(read_compose_env_var REDIS_PASSWORD "${ENV_FILE}")}"
 fi
 
 # ports: publish the API on host port 80 (dedicated Terraform host).
@@ -88,6 +93,40 @@ if [[ -z "${POSTGRES_PASSWORD:-}" ]]; then
   echo "generated POSTGRES_PASSWORD on the host (stored in ${ENV_FILE})"
 fi
 
+# Same rule for RabbitMQ; the .env of a host deployed before RabbitMQ existed has no password yet,
+# so only an existing volume blocks generation.
+if [[ -z "${RABBITMQ_PASSWORD:-}" ]]; then
+  if docker volume inspect "${RABBITMQ_VOLUME}" >/dev/null 2>&1; then
+    echo "RABBITMQ_PASSWORD is not set and ${ENV_FILE} has none, but volume ${RABBITMQ_VOLUME} already exists; refusing to generate a new password" >&2
+    exit 1
+  fi
+  RABBITMQ_PASSWORD="$(generate_password)"
+  if [[ ! "${RABBITMQ_PASSWORD}" =~ ^[0-9a-f]{48}$ ]]; then
+    echo "failed to generate RABBITMQ_PASSWORD" >&2
+    exit 1
+  fi
+  echo "generated RABBITMQ_PASSWORD on the host (stored in ${ENV_FILE})"
+fi
+
+# Redis is a cache without a volume: a new password only drops the cache.
+if [[ -z "${REDIS_PASSWORD:-}" ]]; then
+  REDIS_PASSWORD="$(generate_password)"
+  if [[ ! "${REDIS_PASSWORD}" =~ ^[0-9a-f]{48}$ ]]; then
+    echo "failed to generate REDIS_PASSWORD" >&2
+    exit 1
+  fi
+  echo "generated REDIS_PASSWORD on the host (stored in ${ENV_FILE})"
+fi
+
+# Application secrets from GitHub (see env-file.sh). CI always passes the bundle, empty when no
+# secret is set; a manual deploy without it keeps the files of the previous deploy. Written before
+# anything else on the host changes: an invalid bundle stops the deploy with the host untouched.
+if [[ -n "${APP_SECRETS_B64+set}" ]]; then
+  write_app_env_files "${APP_DIR}" "${APP_SECRETS_B64}"
+  unset APP_SECRETS_B64
+fi
+ensure_app_env_files "${APP_DIR}"
+
 if [[ -f "${STATE_FILE}" ]]; then
   cp "${STATE_FILE}" "${STATE_FILE}.previous"
 fi
@@ -104,7 +143,10 @@ write_compose_env_file \
   "${POSTGRES_PASSWORD}" \
   "${POSTGRES_DB:-app}" \
   "${DEPLOY_MODE}" \
-  "${EDGE_ALIAS:-}"
+  "${EDGE_ALIAS:-}" \
+  "${RABBITMQ_USER:-app}" \
+  "${RABBITMQ_PASSWORD}" \
+  "${REDIS_PASSWORD}"
 
 docker pull "${IMAGE}"
 

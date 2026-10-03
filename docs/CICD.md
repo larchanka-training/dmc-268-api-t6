@@ -6,7 +6,7 @@
 | Владелец | инфраструктура (роль 3) |
 | Связанные документы | [INFRASTRUCTURE.md](INFRASTRUCTURE.md), [SECRETS.md](SECRETS.md) |
 
-Пайплайн собирает FastAPI-бэкенд в OCI-образ, проверяет инфраструктурный код и выкатывает образ на staging-VM в Hetzner Cloud вместе с PostgreSQL. Реестр — **GitHub Container Registry**.
+Пайплайн собирает FastAPI-бэкенд в OCI-образ, проверяет инфраструктурный код и выкатывает образ на staging — курсовой VPS (§8; Terraform-хост в Hetzner — задокументированная альтернатива). Вместе с `api` на staging работают PostgreSQL 17, RabbitMQ (брокер очереди) и Redis (только кэш) — §3. Реестр — **GitHub Container Registry**.
 
 ---
 
@@ -17,16 +17,17 @@ flowchart TD
   pr["PR / push"] --> secrets["gitleaks"]
   pr --> tf["terraform fmt / validate\n(api + ui stacks)"]
   pr --> lint["tflint + checkov"]
-  pr --> py["ruff check / format, mypy, pytest\n(required check, push не ждёт)"]
+  pr --> py["ruff check / format, mypy, pytest\n(required check)"]
   pr --> build["docker build"]
   build --> scan["trivy: vuln / secret / misconfig"]
   secrets --> gate{"main?"}
+  py --> gate
   tf --> gate
   lint --> gate
   scan --> gate
   gate -->|нет| stop["CI зелёный, без выката"]
   gate -->|да| push["push только :sha в GHCR"]
-  push --> deploy["compose up по digest на Hetzner staging"]
+  push --> deploy["compose up по digest на staging"]
   deploy --> health["GET /healthcheck"]
   health -->|ok| promote["promote digest → :staging"]
   promote --> done["staging обновлён"]
@@ -40,7 +41,7 @@ flowchart TD
 | `Secret scan` | PR и `main` | `contents: read` | Gitleaks с `.gitleaks.toml` и `--redact` (сканирует docs и examples) |
 | `Terraform fmt / validate` | PR и `main` | `contents: read` | `fmt -check`, `validate` для `api-staging` и `ui-staging` |
 | `Terraform lint / security` | PR и `main` | `contents: read` | TFLint + Checkov (встроенные и custom policies `.checkov/policies`); отдельный шаг проверяет, что каждая custom policy падает на `.checkov/fixtures/bad` |
-| `Python lint / type / test` | PR и `main` | `contents: read` | uv 0.12.11, Python 3.13: `uv sync --locked --all-groups`, `ruff check`, `ruff format --check` (Markdown исключён в `pyproject.toml`), `mypy`, `pytest`. Имя — required check в правилах `main`, менять только вместе с ними. В `needs` у `Push Docker image` не входит. Интеграционные тесты без `TEST_DATABASE_URL` пропускаются |
+| `Python lint / type / test` | PR и `main` | `contents: read` | uv 0.12.11, Python 3.13: `uv sync --locked --all-groups`, `ruff check`, `ruff format --check` (Markdown исключён в `pyproject.toml`), `mypy`, `pytest`. Имя — required check в правилах `main`, менять только вместе с ними. Входит в `needs` у `Push Docker image`: с красными тестами образ не пушится и staging не выкатывается. Интеграционные тесты без `TEST_DATABASE_URL` пропускаются |
 | `Docker image build` | PR и `main` | `contents: read` | образ `python:3.13-slim` |
 | `Docker image security scan` | после сборки | `contents: read` | Trivy `CRITICAL`/`HIGH` |
 | `Push Docker image` | только `main` | `contents: read`, `packages: write`, `actions: read` | push `:sha`, resolve digest (тот же artifact, что прошёл Trivy) |
@@ -83,7 +84,21 @@ GET /healthcheck
 200 {"status":"ok"}
 ```
 
-PostgreSQL только во внутренней docker-сети. Том `postgres-data` переживает выкат и rollback API-образа.
+Сервисы staging (`deploy/compose/staging.yml`), все из одного compose-проекта:
+
+| Сервис | Образ | Данные | Сеть |
+|---|---|---|---|
+| `api` | образ этого репозитория по digest | — | проектная + `dmc268-edge` (alias `api-staging`) |
+| `bootstrap` | тот же образ, разово: `alembic upgrade head`, сид промптов | — | проектная |
+| `postgres` | `postgres:17-alpine` | том `postgres-data` | только проектная |
+| `rabbitmq` | `rabbitmq:4-management-alpine`, `hostname: rabbitmq` | том `rabbitmq-data` | только проектная |
+| `redis` | `redis:8-alpine`, пароль, без персистентности, `maxmemory 128mb` + `allkeys-lru` (кэш, SD §10) | — | только проектная |
+
+У PostgreSQL, RabbitMQ и Redis нет `ports:`: `ports:` в compose публикует порт на все интерфейсы в обход файрвола хоста. Панель управления RabbitMQ — через SSH-туннель к IP контейнера. Тома `postgres-data` и `rabbitmq-data` переживают выкат и rollback образа. Фиксированный `hostname` RabbitMQ держит имя узла, а с ним каталог данных в томе: без него каждое пересоздание контейнера начинало бы новый узел, и durable-очереди пропадали бы.
+
+`api` стартует после успешного `bootstrap` и здорового `postgres`. От RabbitMQ и Redis он не зависит: к брокеру API подключается при первой публикации (`LazyAmqpPublisher`), поэтому сбой брокера или кэша не мешает пересозданному `api` стартовать. `up --wait` всё равно ждёт healthcheck каждого сервиса, и падение любого запускает авто-rollback. Секреты приложения приходят в `api` через `env_file: api.env`; `app.env` с ключом App пишется для воркеров — [SECRETS.md](SECRETS.md) §3.
+
+`worker` (`python -m app.worker`, #34) и `webhook-worker` (`python -m app.webhook_worker`, #11) из того же образа поднимаются следующим PR по #35. До него квитанции вебхуков на staging принимаются (`POST /webhooks/github` → 202) и хранятся в PostgreSQL, но не разбираются; `webhook-worker` разберёт накопленные, когда появится.
 
 ---
 
@@ -132,7 +147,7 @@ APP_DIR=/opt/dmc-268-api-staging /opt/dmc-268-api-staging/rollback.sh
 
 Перечень, хранение, доставка на VM и запрет утечек в git/логи — [SECRETS.md](SECRETS.md).
 
-Кратко: курсовой VPS — organization variable `VPS_DMC268_IP_T6` и secrets `VPS_DMC268_U` / `VPS_DMC268_P`, плюс repository variables `STAGING_SSH_FINGERPRINT` и `APP_DOMAIN`. Terraform-хост — Environment `staging`: secret `STAGING_SSH_KEY`, variables хоста, SSH-порта и пользователя. `POSTGRES_PASSWORD` необязателен (генерируется на хосте). `AI_DMC268_T6` — ключ приложения, CI его не использует. `HCLOUD_TOKEN` в Actions нет.
+Кратко: курсовой VPS — organization variable `VPS_DMC268_IP_T6` и secrets `VPS_DMC268_U` / `VPS_DMC268_P`, плюс repository variables `STAGING_SSH_FINGERPRINT` и `APP_DOMAIN`. Terraform-хост — Environment `staging`: secret `STAGING_SSH_KEY`, variables хоста, SSH-порта и пользователя. `POSTGRES_PASSWORD` необязателен; пароли PostgreSQL, RabbitMQ и Redis генерируются на хосте. Секреты приложения (GitHub App, авторизация) — в Environment `staging`, в контейнеры их доставляет `deploy-staging` ([SECRETS.md](SECRETS.md) §1, §3). `AI_DMC268_T6` пробрасывается после #33. `HCLOUD_TOKEN` в Actions нет.
 
 SSH на Terraform-хосте: нестандартный порт (`ssh_port`, по умолчанию `22022`), только ключи, fail2ban. На курсовом VPS — порт 22 и пароль; sshd и firewall общего VPS не меняем. Порт открыт миру намеренно — у GitHub-hosted runners нет стабильных egress IP ([INFRASTRUCTURE.md](INFRASTRUCTURE.md#41-ssh-доступ)). Все шаги `appleboy/*` берут хост, порт и способ входа из шага **Resolve staging target**: ключ уходит только на Terraform-хост, пароль — только на VPS. Deploy, promotion и rollback падают первым шагом, если цель задана не полностью или `STAGING_SSH_FINGERPRINT` не в формате `SHA256:…` (с пустым fingerprint appleboy принимает любой host key).
 
@@ -198,11 +213,13 @@ Caddy (compose project `dmc-268-edge`, `/opt/dmc-268-edge`) принимает 8
 |---|---|---|
 | `staging-api.<APP_DOMAIN>` | `api-staging:8000` | выкатывается этим репозиторием |
 | `api.<APP_DOMAIN>` | `api-prod:8000` | маршрут есть, prod-выката пока нет → 502 |
-| `staging-ui.<APP_DOMAIN>` | `ui-staging:8080` | выкатывает репозиторий UI |
+| `staging-ui.<APP_DOMAIN>` | `/api/*` → `api-staging:8000`, остальное → `ui-staging:8080` | UI выкатывает репозиторий UI; `/api/*` — этот |
 | `ui.<APP_DOMAIN>` | `ui-prod:8080` | 502 до prod-выката |
 | `staging-webhook.<APP_DOMAIN>` | `webhook-staging:8000` | будущий сервис → 502 |
 | `webhook.<APP_DOMAIN>` | `webhook-prod:8000` | будущий сервис → 502 |
 | `<APP_DOMAIN>` | — | 301 на `https://ui.<APP_DOMAIN>{uri}` |
+
+Один origin (решение по #20): на хосте UI `/api/*`, включая `/api/auth/*` и SSE `/api/stream`, идёт в `api`. UI и API живут на одном origin — CORS не нужен, cookie refresh с `Path=/api/auth` доходит до API. Caddy сразу отдаёт клиенту ответы `text/event-stream`. Хост `staging-api.<APP_DOMAIN>` остаётся для healthcheck и вебхуков GitHub.
 
 Контракт для сервиса за прокси: подключиться к внешней docker-сети `dmc268-edge` с alias `<service>-<env>` и слушать порт из таблицы; host-порты на VPS не публиковать (80/443 заняты прокси). Пока upstream не запущен, маршрут отвечает 502, остальные работают. Webhook в MVP — отдельный сервис; роль API gateway выполняет этот прокси.
 

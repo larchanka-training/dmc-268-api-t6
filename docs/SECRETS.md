@@ -32,12 +32,51 @@
 
 ### GitHub Environment `staging` — secrets
 
-Только то, что даёт доступ к машине, реестру или данным.
+Доступ к машине, реестру и данным, а также секреты приложения.
 
 | Secret | Обязателен | Куда уходит | Зачем |
 |---|---|---|---|
 | `STAGING_SSH_KEY` | да, для Terraform-хоста | SCP/SSH на VM | приватный ключ к `hcloud_ssh_key.ci` |
 | `POSTGRES_PASSWORD` | нет | `<APP_DIR>/.env` на хосте | пароль PostgreSQL. Если не задан, `deploy.sh` генерирует его при первом выкате и хранит в `.env` (0600). После инициализации тома пароль не менять: Postgres его не перечитывает |
+
+Секреты приложения. GitHub не принимает имена секретов и variables с префиксом `GITHUB_` (HTTP 422), поэтому секреты App заведены как `GH_*`, а в контейнере у них имена из `.env.example`. Сопоставление делает шаг «Bundle application secrets» в `deploy-staging`. Незаданный секрет в контейнер не попадает совсем, а не приходит пустой строкой.
+
+**Ограничение на значения:** без одинарной кавычки `'` и без `\` в конце. Значения пишутся в env-файл в одинарных кавычках (§3, п. 5), и `deploy.sh` такие значения отклоняет: выкат останавливается до изменений на хосте. На первом выкате после #35, пока в `.env` хоста нет `RABBITMQ_PASSWORD`, следующий за этим авто-откат падает с `RABBITMQ_PASSWORD is required` — стек не тронут, прогон красный. Завершающий перевод строки значения срезается; разбору PEM это безразлично.
+
+`worker` и `webhook-worker` появятся следующим PR по #35. До него `app.env` пишется на хост, но ни к одному контейнеру не подключён.
+
+| Secret | Тип значения | Переменная в контейнере | Контейнеры | Зачем |
+|---|---|---|---|---|
+| `GH_APP_ID` | число | `GITHUB_APP_ID` | `worker`, `webhook-worker` | App ID staging App `dmc268-t6-reviewer` (#37) |
+| `GH_APP_PRIVATE_KEY` | многострочный PEM | `GITHUB_APP_PRIVATE_KEY` | `worker`, `webhook-worker` | подпись JWT App для installation token. В `api` не уходит: процесс API его не читает, а PEM App не должен лежать в контейнере, смотрящем в интернет |
+| `GH_WEBHOOK_SECRET` | строка | `GITHUB_WEBHOOK_SECRET` | `api` | проверка подписи вебхуков. Без него `POST /webhooks/github` отвечает 503; с ним API сохраняет квитанцию и отвечает 202, а разбирает квитанции `app.webhook_worker` (на staging появится следующим PR по #35; до него квитанции копятся в PostgreSQL) |
+| `GH_CLIENT_ID` | строка | `GITHUB_CLIENT_ID` | `api` | user authorization App (auth-api, #11); отличается от App ID |
+| `GH_CLIENT_SECRET` | строка | `GITHUB_CLIENT_SECRET` | `api` | обмен OAuth-кода (auth-api, #11) |
+| `AUTH_JWT_PRIVATE_KEY` | многострочный PEM (RSA) | `AUTH_JWT_PRIVATE_KEY` | `api` | подпись локального access JWT |
+| `AUTH_JWT_PUBLIC_KEY` | многострочный PEM (RSA) | `AUTH_JWT_PUBLIC_KEY` | `api` | проверка access JWT |
+
+`AUTH_JWT_ISSUER` (`dmc-268-api`) и `AUTH_JWT_AUDIENCE` (`dmc-268-ui`) — не секреты: они фиксированы в `deploy/compose/staging.yml`. Домен cookie refresh не настраивается: cookie host-only с `Path=/api/auth`, а UI и API работают с одного origin `staging-ui.<APP_DOMAIN>` (маршрут `/api/*` в `deploy/edge/Caddyfile`).
+
+Пара ключей JWT создаётся один раз и заводится в Environment `staging`:
+
+```bash
+openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out jwt.pem
+openssl rsa -in jwt.pem -pubout -out jwt.pub
+gh secret set AUTH_JWT_PRIVATE_KEY --env staging -R larchanka-training/dmc-268-api-t6 < jwt.pem
+gh secret set AUTH_JWT_PUBLIC_KEY --env staging -R larchanka-training/dmc-268-api-t6 < jwt.pub
+rm jwt.pem jwt.pub
+```
+
+Смена пары разлогинивает всех: ранее выданные access JWT перестают проверяться.
+
+### Генерируются на хосте
+
+В GitHub не заводятся. `deploy.sh` создаёт их при первом выкате (48 hex-символов), хранит в `<APP_DIR>/.env` (0600) и переиспользует при каждом выкате и откате.
+
+| Имя | Куда уходит | Примечание |
+|---|---|---|
+| `RABBITMQ_PASSWORD` (пользователь `RABBITMQ_USER`, по умолчанию `app`) | контейнер `rabbitmq`; `RABBITMQ_URL` в `api` (в `worker` — следующим PR) | RabbitMQ, как Postgres, применяет учётные данные только на пустом томе `rabbitmq-data`. Если том есть, а пароля в `.env` нет, `deploy.sh` отказывается генерировать новый |
+| `REDIS_PASSWORD` | контейнер `redis`; `REDIS_URL` в `api` | Redis — кэш без тома (лимит 128 MB, `allkeys-lru`): новый пароль только сбрасывает кэш. Кэш по SD §10, `REDIS_URL` приложение пока не читает |
 
 `GITHUB_TOKEN` выдаёт Actions сам. В репозиторий его не кладут. Push в GHCR — `packages: write`; pull на staging — `packages: read`.
 
@@ -54,6 +93,7 @@
 | `STAGING_HEALTH_URL` | нет | иначе `http://$STAGING_HOST/healthcheck` |
 | `POSTGRES_USER` | нет | иначе `app` |
 | `POSTGRES_DB` | нет | иначе `app` |
+| `GH_APP_BOT_LOGIN` | для `webhook-worker` (следующий PR по #35) | `dmc268-t6-reviewer[bot]` — логин бота App. В контейнере `GITHUB_APP_BOT_LOGIN`, только у `webhook-worker` (`app/webhook_worker.py`). Префикс `GH_`, потому что GitHub не принимает `GITHUB_` и у variables; берётся из `vars.`, а не из `secrets.` |
 
 ### LLM-шлюз — переменные приложения (#33)
 
@@ -103,7 +143,7 @@ GitHub user access token используется только для чтени
 callback; в PostgreSQL хранится только хеш локального refresh token.
 
 1. Settings → Environments → **staging**.
-2. Secrets: `STAGING_SSH_KEY` (только для Terraform-хоста), при желании `POSTGRES_PASSWORD`. Для курсового VPS environment secrets не нужны — хватает organization secrets и repository variables.
+2. Secrets: `STAGING_SSH_KEY` (только для Terraform-хоста), при желании `POSTGRES_PASSWORD`, секреты приложения из §1. Для выката как такового на курсовой VPS environment secrets не нужны — хватает organization secrets и repository variables; без секретов приложения стенд поднимается с выключенными вебхуками и авторизацией.
 3. Variables: хост, SSH-порт, SHA256 SSH fingerprint, SSH-пользователь, опционально health URL и имя БД.
 
    Fingerprint после `terraform apply` (формат appleboy — строка `SHA256:…` из вывода):
@@ -130,17 +170,20 @@ flowchart LR
   gha["GitHub Environment"] --> ssh["SSH/SCP, debug: false"]
   ssh --> script["deploy.sh / rollback.sh"]
   script --> envfile["<APP_DIR>/.env\nchmod 600"]
+  script --> appenv["<APP_DIR>/app.env, api.env\nchmod 600"]
   envfile --> compose["docker compose --env-file"]
+  appenv --> compose2["env_file: api.env → api,\napp.env → workers (следующий PR)"]
   script --> logout["docker logout ghcr.io"]
 ```
 
 1. Runner забирает secret/var только в job с `environment: staging`.
-2. `appleboy/ssh-action` с `debug: false` передаёт в скрипт одноразовый `GITHUB_TOKEN` и, если задан, `POSTGRES_PASSWORD`. SSH-пароль VPS передаётся только как `password` действия, в скрипт он не попадает.
+2. `appleboy/ssh-action` с `debug: false` передаёт в скрипт одноразовый `GITHUB_TOKEN`, бандл секретов приложения `APP_SECRETS_B64` (п. 5) и, если задан, `POSTGRES_PASSWORD`. SSH-пароль VPS передаётся только как `password` действия, в скрипт он не попадает.
 3. `deploy.sh` пишет `.env` с `umask 077` и `chmod 600`; без `POSTGRES_PASSWORD` генерирует пароль один раз на свежем хосте и отказывается генерировать, если `.env` или том Postgres уже есть. Пароль в stdout не печатается.
-4. Compose читает `.env` на VM. Postgres слушает только docker-сеть.
-5. `GITHUB_TOKEN` нужен лишь для pull. Логин идёт во временный `DOCKER_CONFIG` (`mktemp -d`), а не в `/root/.docker/config.json`: выкаты API и UI под общим root не мешают друг другу. После последнего pull — `docker logout`, при выходе каталог удаляется; `unset GHCR_TOKEN`.
+4. Compose читает `.env` на VM. Postgres, RabbitMQ и Redis слушают только docker-сеть проекта, `ports:` у них нет.
+5. Секреты приложения шаг «Bundle application secrets» собирает в одну строку `APP_SECRETS_B64`: base64 от строк `ИМЯ=<base64 значения>`, только для заданных секретов. Строка маскируется (`::add-mask::`) и уходит через `envs:` SSH-действия; многострочные PEM так не ломаются в SSH и shell. На хосте `write_app_env_files` (`env-file.sh`) раскладывает значения по allowlist: `app.env` (ключ App для `worker` и `webhook-worker`) и `api.env` (`api`), в одинарных кавычках — Compose читает их буквально, без подстановки `$`, обратный слэш остаётся обратным слэшем (кроме позиции перед кавычкой). Поэтому имя вне allowlist, значение с `'` или с `\` в конце валят выкат до любых изменений на хосте: бандл проверяется раньше, чем перезаписывается `.env` (ограничение на значения — §1).
+6. `GITHUB_TOKEN` нужен лишь для pull. Логин идёт во временный `DOCKER_CONFIG` (`mktemp -d`), а не в `/root/.docker/config.json`: выкаты API и UI под общим root не мешают друг другу. После последнего pull — `docker logout`, при выходе каталог удаляется; `unset GHCR_TOKEN`.
 
-Rollback пароль из GitHub не шлёт повторно: читает уже лежащий `.env`.
+Rollback ничего из GitHub не шлёт повторно: пароли Postgres, RabbitMQ и Redis берёт из лежащего `.env`, а `app.env` и `api.env` не трогает — откатанные контейнеры стартуют с теми же секретами. Секреты не привязаны к образу: откат образа не возвращает предыдущие значения секретов.
 
 ---
 
@@ -176,6 +219,14 @@ PR и `main` гоняют Gitleaks (`--redact`) и Trivy scanner `secret`. На�
 | Gitleaks | `--redact`, чтобы находка не продублировала секрет |
 
 Не делайте `echo "$POSTGRES_PASSWORD"`, `env`, `cat .env` в workflow.
+
+Имена переменных в контейнере без значений — не через `env | cut -d= -f1`: строки многострочного PEM не содержат `=` и печатаются целиком. Безопасно:
+
+```bash
+cd /opt/dmc-268-api-staging
+docker compose -p dmc-268-api-staging -f compose.yml -f compose.edge.yml --env-file .env \
+  exec -T api python -c "import os; print(' '.join(sorted(os.environ)))"
+```
 
 ---
 
