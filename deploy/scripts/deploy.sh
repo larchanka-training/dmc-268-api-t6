@@ -118,6 +118,15 @@ if [[ -z "${REDIS_PASSWORD:-}" ]]; then
   echo "generated REDIS_PASSWORD on the host (stored in ${ENV_FILE})"
 fi
 
+# Application secrets from GitHub (see env-file.sh). CI always passes the bundle, empty when no
+# secret is set; a manual deploy without it keeps the files of the previous deploy. Written before
+# anything else on the host changes: an invalid bundle stops the deploy with the host untouched.
+if [[ -n "${APP_SECRETS_B64+set}" ]]; then
+  write_app_env_files "${APP_DIR}" "${APP_SECRETS_B64}"
+  unset APP_SECRETS_B64
+fi
+ensure_app_env_files "${APP_DIR}"
+
 if [[ -f "${STATE_FILE}" ]]; then
   cp "${STATE_FILE}" "${STATE_FILE}.previous"
 fi
@@ -138,14 +147,6 @@ write_compose_env_file \
   "${RABBITMQ_USER:-app}" \
   "${RABBITMQ_PASSWORD}" \
   "${REDIS_PASSWORD}"
-
-# Application secrets from GitHub (see env-file.sh). CI always passes the bundle, empty when no
-# secret is set; a manual deploy without it keeps the files of the previous deploy.
-if [[ -n "${APP_SECRETS_B64+set}" ]]; then
-  write_app_env_files "${APP_DIR}" "${APP_SECRETS_B64}"
-  unset APP_SECRETS_B64
-fi
-ensure_app_env_files "${APP_DIR}"
 
 docker pull "${IMAGE}"
 

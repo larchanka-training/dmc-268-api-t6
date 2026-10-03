@@ -603,11 +603,13 @@ jobs:
           bundle="$(
             for name in "${names[@]}"; do
               if [[ -n "${!name}" ]]; then
-                printf '%s=%s\n' "${name}" "$(printf '%s' "${!name}" | base64 -w0)"
+                printf '%s=%s\n' "${name}" "$(printf '%s' "${!name}" | base64 | tr -d '\n')"
               fi
-            done | base64 -w0
+            done | base64 | tr -d '\n'
           )"
-          echo "::add-mask::${bundle}"
+          if [[ -n "${bundle}" ]]; then
+            echo "::add-mask::${bundle}"
+          fi
           echo "bundle=${bundle}" >> "${GITHUB_OUTPUT}"
           for name in "${names[@]}"; do
             [[ -n "${!name}" ]] && echo "set: ${name}" || echo "not set: ${name}"

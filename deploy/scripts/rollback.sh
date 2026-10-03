@@ -46,8 +46,11 @@ cleanup_registry() {
 trap cleanup_registry EXIT
 
 restore_bootstrap() {
-  if [[ -f "${COMPOSE_FILE}" && -f "${ENV_FILE}" ]]; then
-    "${COMPOSE[@]}" down --remove-orphans >/dev/null 2>&1 || true
+  # By project name only, without compose.yml: an older .env may lack variables the current file
+  # requires, and a stack left running would share the API alias with the bootstrap container.
+  if ! docker compose -p "${COMPOSE_PROJECT}" down --remove-orphans; then
+    echo "compose down failed for project ${COMPOSE_PROJECT}; not starting the bootstrap container" >&2
+    return 1
   fi
 
   docker rm -f "${BOOTSTRAP_NAME}" >/dev/null 2>&1 || true

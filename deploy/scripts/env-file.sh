@@ -51,13 +51,19 @@ write_compose_env_file() {
 
 # The bundle is base64 of "NAME=<base64 of value>" lines, one per secret that is set; CI builds it
 # so multi-line PEM values cross the SSH action and the shell as one opaque line. Values are written
-# single-quoted, which Compose reads literally across lines (no interpolation, no escapes).
-write_app_env_files() {
-  local dir="$1" bundle="$2"
-  local decoded app_tmp api_tmp line name encoded value
+# single-quoted: Compose reads them across lines without interpolation, and a backslash stays a
+# backslash except right before a quote. So a value may contain neither ' nor a trailing \.
+# Everything is validated before either file is replaced; the body runs in a subshell so that the
+# EXIT trap removes the temporary files on any failure.
+write_app_env_files() (
+  dir="$1"
+  bundle="$2"
+  app_tmp=""
+  api_tmp=""
+  trap 'rm -f "${app_tmp}" "${api_tmp}"' EXIT
   if ! decoded="$(printf '%s' "${bundle}" | base64 -d 2>/dev/null)"; then
     echo "app secrets bundle is not valid base64" >&2
-    return 1
+    exit 1
   fi
   umask 077
   app_tmp="$(mktemp "${dir}/.${APP_ENV_FILE_NAME}.XXXXXX")"
@@ -68,35 +74,35 @@ write_app_env_files() {
     encoded="${line#*=}"
     # Checked before the name is printed anywhere: a malformed line could carry part of a value.
     if [[ ! "${name}" =~ ^[A-Z][A-Z0-9_]*$ ]]; then
-      rm -f "${app_tmp}" "${api_tmp}"
       echo "app secrets bundle has a malformed line" >&2
-      return 1
+      exit 1
     fi
     if ! value="$(printf '%s' "${encoded}" | base64 -d 2>/dev/null)"; then
-      rm -f "${app_tmp}" "${api_tmp}"
       echo "app secret ${name}: value is not valid base64" >&2
-      return 1
+      exit 1
     fi
     [[ -n "${value}" ]] || continue
     if [[ "${value}" == *"'"* ]]; then
-      rm -f "${app_tmp}" "${api_tmp}"
       echo "app secret ${name}: single quotes are not supported in values" >&2
-      return 1
+      exit 1
+    fi
+    if [[ "${value}" == *\\ ]]; then
+      echo "app secret ${name}: a trailing backslash is not supported in values" >&2
+      exit 1
     fi
     if [[ " ${APP_ENV_KEYS[*]} " == *" ${name} "* ]]; then
       printf "%s='%s'\n" "${name}" "${value}" >> "${app_tmp}"
     elif [[ " ${API_ENV_KEYS[*]} " == *" ${name} "* ]]; then
       printf "%s='%s'\n" "${name}" "${value}" >> "${api_tmp}"
     else
-      rm -f "${app_tmp}" "${api_tmp}"
       echo "app secret ${name} is not in the allowlist of env-file.sh" >&2
-      return 1
+      exit 1
     fi
   done <<< "${decoded}"
   chmod 600 "${app_tmp}" "${api_tmp}"
   mv -f "${app_tmp}" "${dir}/${APP_ENV_FILE_NAME}"
   mv -f "${api_tmp}" "${dir}/${API_ENV_FILE_NAME}"
-}
+)
 
 # Compose requires every env_file to exist; a host deployed without a bundle gets empty files.
 ensure_app_env_files() {
