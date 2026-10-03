@@ -66,12 +66,17 @@ run of a repository, the diff is the varying tail (`docs/SYSTEM_DESIGN.md` §10)
 - `<custom_instructions>` — the rendered rules of the active rule set; empty when none.
 - `<agents_md>` — the reviewed repository's `AGENTS.md` as text; empty when none.
 - `<repo_conventions>` — the `key_patterns` and `recommendations` of `review.conventions`.
-- `<pr_meta>` — title, description, author, branch, base ref, labels, counts, draft/fork.
-- `<changed_files>` — the diff as XML with pre-numbered lines (below). For `review.conventions`
-  it lists every changed path, including those the review prompt later omits.
+- `<pr_meta>` — title, description, author, branch, base ref, labels, counts, draft/fork; from
+  `review.system.v2`, also `<head_sha>` and `<commit_messages>` (one `<commit>` each) when the
+  VCS client passes them.
+- `<changed_files>` — the diff as XML with pre-numbered lines (below); each `<file>` carries
+  `language` (by extension, absent when unknown). For `review.conventions` it lists the changed
+  paths, including those the review prompt later omits — at most 100, then a line
+  `[N more changed paths omitted]`.
 - `<omitted_files>` — changed paths not shown to the model, one per line.
 - `<repo_tree>`, `<repo_files>` — conventions prompt only: all paths, and up to 10 files of
-  at most 300 lines as `<file path="…">` blocks with pre-numbered lines.
+  at most 300 lines as `<file path="…">` blocks with pre-numbered lines. A tree over the
+  token budget is cut from its end and closed with `[N more paths omitted]`.
 
 Rendered custom rule — one block per rule, globs space-separated, checks numbered from 1;
 this example is the second rule of `rules/default-backend.v1.json`, checks shortened:
@@ -97,8 +102,9 @@ for `added` and `context` lines and the old-version number for `removed` lines:
 ```
 
 A file block cut to fit the token budget ends with the trailer
-`[Showing lines 260-339 of 376 total. Use offset=340 to continue reading.]`. The model has no
-tool to continue; the trailer is the contract for a future tool-enabled engine's file reader.
+`[Showing lines 1-80 of 376 total. Use offset=81 to continue reading.]`. The numbers count the
+`<line>` elements of the block (removed lines included), not file line numbers. The model has
+no tool to continue; the trailer is the contract for a future tool-enabled engine's file reader.
 
 ## Rule sets
 
@@ -156,8 +162,10 @@ the validator and `uv run pytest tests/test_review_artifacts.py`.
 
 ## Open questions
 
-- **Model choice** (`docs/SYSTEM_DESIGN.md` OQ-2): closed by #33 — primary `gpt-4.1-mini`, fallback
-  `mistral-small-4` through EUrouter, checked against D7 in SD §15. The prompts stay model-agnostic.
+- **Model choice** (`docs/SYSTEM_DESIGN.md` OQ-2): closed by #33 on the EUrouter catalog — primary
+  `gpt-4.1-mini`, fallback `mistral-small-4`; strict `json_schema` on the EUrouter route is
+  confirmed by the first run of the `LLM live run` workflow after the merge (SD §15). The
+  prompts stay model-agnostic.
 - **Output language**: English by default (stated in both prompts). Proposed override: a
   line `Review language: xx` in the reviewed repository's `AGENTS.md`, honoured by a later
   prompt version. Decision pending with the team.

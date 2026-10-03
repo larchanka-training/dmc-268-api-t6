@@ -69,16 +69,22 @@ result.usage    # one LlmUsage per provider call: provider, actual model, tokens
 result.calls    # the llm.call records: kind (primary/retry/repair/fallback), model, duration
 ```
 
-A failure raises `LlmCallFailed` with `error_code` (`llm_timeout`, `llm_rate_limited`,
-`llm_unavailable`, `llm_invalid_output`, `llm_context_overflow`, `budget_exceeded`,
-`deadline_exceeded`). Usage and the trace live in memory; `transport=` accepts a fake.
+A failure raises `ReviewCaseFailed` — an `LlmCallFailed` with `error_code` (`llm_timeout`,
+`llm_rate_limited`, `llm_unavailable`, `llm_invalid_output`, `llm_context_overflow`,
+`budget_exceeded`, `deadline_exceeded`), `usage` and `trace` (every call with its error).
+Usage and the trace live in memory; `transport=` accepts a fake.
 
-Manual live run (needs `LLM_MODEL` and `LLM_API_KEYS`; not part of CI) — prints provider,
-model, tokens, cost and latency:
+Manual live run (needs `LLM_MODEL` and `LLM_API_KEYS`; not part of the required CI) — prints
+provider, model, every call (with its error), tokens, cost and latency as JSON; exit 1 when the
+gateway failed, 2 on a configuration error. `uv run` does not read `.env` by itself:
 
 ```bash
-uv run python -m app.bootstrap.llm_gateway review/examples/sample.diff
+uv run --env-file .env python -m app.bootstrap.llm_gateway review/examples/sample.diff
 ```
+
+On EUrouter the same run is the manual workflow `LLM live run` (`.github/workflows/llm-live-run.yml`,
+Actions → Run workflow): it uses the organization secret `AI_DMC268_T6` and writes a summary
+table per run.
 
 For a self-hosted model in dev (LM Studio, Ollama, vLLM): `LLM_BASE_URL=http://localhost:1234/v1`,
 `LLM_MODEL=<model>`, `LLM_CONTEXT_WINDOW=<tokens>` and, if the server has no strict JSON Schema

@@ -149,7 +149,7 @@ ORM-модели, миграции или изменения use case в рам�
 | `infrastructure/llm/gateway.py` | `LlmGateway`: дедлайн, переполнение, бюджет до каждого вызова; retry, repair, fallback; ≤ 4 вызовов на попытку |
 | `infrastructure/llm/answers.py` | путь разбора ответа: `review-output.schema.json`, затем `parse_review_output`; тексты ошибок для repair |
 | `infrastructure/llm/models.py` | `GatewayReviewModel`, `GatewayConventionsModel` — реализации портов |
-| `infrastructure/llm_call_trace.py`, `analytics/infrastructure/usage_ledger.py` | запись `llm.call` в `run_actions` и `usage_events`, каждая — своей короткой транзакцией после вызова |
+| `infrastructure/llm_call_trace.py`, `analytics/infrastructure/usage_ledger.py` | `llm.call` — через общий порт `RunTrace` (`add_action` блокирует строку Run и кладёт ответ > 64 KB в `run_action_responses`); `usage_events` — вставкой. Каждая запись — своей короткой транзакцией после вызова; сбой записи трейса логируется и не теряет оплаченный ответ |
 | `bootstrap/llm_gateway.py` | сборка шлюза для worker и точка входа `review_case` без БД (eval #30, живой прогон) |
 
 **Структурный вывод: `response_format` с JSON Schema (`strict: true`).** Выбран потому,
@@ -167,8 +167,16 @@ repair и затем fallback, а не собственные ретраи би�
 
 **Подсчёт токенов.** Точные токенизаторы моделей за роутером офлайн недоступны, поэтому
 до отправки шлюз оценивает промпт консервативно (`символы / 3`); фактические
-`prompt_tokens` провайдера пишутся в `usage_events`, а HTTP 400 о длине контекста
-относится к тому же классу `llm_context_overflow`.
+`prompt_tokens` провайдера пишутся в `usage_events`, а HTTP 400 о длине контекста и 413
+относятся к тому же классу `llm_context_overflow`. Известные ограничения оценки: она не
+учитывает размер `response_format` и занижает CJK-текст примерно в 2,25 раза — страховка в
+обоих случаях та же, ответ провайдера о длине контекста. Если провайдер не прислал `usage`,
+в учёт идёт та же оценка, а не ноль.
+
+**Лимит вызовов на попытку.** Шлюз — один объект на процесс; счётчик вызовов ведётся на
+`(run_id, attempt)` и общий для `GatewayConventionsModel` и `GatewayReviewModel`, поэтому
+конвенции и ревью одной попытки вместе делают не больше 4 вызовов, а `call_no` в `llm.call`
+сквозной.
 
 ## Целевая модульная структура кода
 
