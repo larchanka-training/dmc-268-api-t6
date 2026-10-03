@@ -39,13 +39,17 @@
 | `STAGING_SSH_KEY` | да, для Terraform-хоста | SCP/SSH на VM | приватный ключ к `hcloud_ssh_key.ci` |
 | `POSTGRES_PASSWORD` | нет | `<APP_DIR>/.env` на хосте | пароль PostgreSQL. Если не задан, `deploy.sh` генерирует его при первом выкате и хранит в `.env` (0600). После инициализации тома пароль не менять: Postgres его не перечитывает |
 
-Секреты приложения. GitHub не принимает имена секретов с префиксом `GITHUB_` (HTTP 422), поэтому секреты App заведены как `GH_*`, а в контейнере у них имена из `.env.example`. Сопоставление делает шаг «Bundle application secrets» в `deploy-staging`. Незаданный секрет в контейнер не попадает совсем, а не приходит пустой строкой.
+Секреты приложения. GitHub не принимает имена секретов и variables с префиксом `GITHUB_` (HTTP 422), поэтому секреты App заведены как `GH_*`, а в контейнере у них имена из `.env.example`. Сопоставление делает шаг «Bundle application secrets» в `deploy-staging`. Незаданный секрет в контейнер не попадает совсем, а не приходит пустой строкой.
+
+**Ограничение на значения:** без одинарной кавычки `'` и без `\` в конце. Значения пишутся в env-файл в одинарных кавычках (§3, п. 5), и `deploy.sh` такие значения отклоняет: выкат останавливается до изменений на хосте. На первом выкате после #35, пока в `.env` хоста нет `RABBITMQ_PASSWORD`, следующий за этим авто-откат падает с `RABBITMQ_PASSWORD is required` — стек не тронут, прогон красный. Завершающий перевод строки значения срезается; разбору PEM это безразлично.
+
+`worker` и `webhook-worker` появятся следующим PR по #35. До него `app.env` пишется на хост, но ни к одному контейнеру не подключён.
 
 | Secret | Тип значения | Переменная в контейнере | Контейнеры | Зачем |
 |---|---|---|---|---|
-| `GH_APP_ID` | число | `GITHUB_APP_ID` | `api`, `worker` | App ID staging App `dmc268-t6-reviewer` (#37) |
-| `GH_APP_PRIVATE_KEY` | многострочный PEM | `GITHUB_APP_PRIVATE_KEY` | `api`, `worker` | подпись JWT App для installation token |
-| `GH_WEBHOOK_SECRET` | строка | `GITHUB_WEBHOOK_SECRET` | `api` | проверка подписи вебхуков. Без него `POST /webhooks/github` отвечает 503; с ним API сохраняет квитанцию и отвечает 202, а разбирает квитанции `app.webhook_worker` (на staging пока не развёрнут) |
+| `GH_APP_ID` | число | `GITHUB_APP_ID` | `worker`, `webhook-worker` | App ID staging App `dmc268-t6-reviewer` (#37) |
+| `GH_APP_PRIVATE_KEY` | многострочный PEM | `GITHUB_APP_PRIVATE_KEY` | `worker`, `webhook-worker` | подпись JWT App для installation token. В `api` не уходит: процесс API его не читает, а PEM App не должен лежать в контейнере, смотрящем в интернет |
+| `GH_WEBHOOK_SECRET` | строка | `GITHUB_WEBHOOK_SECRET` | `api` | проверка подписи вебхуков. Без него `POST /webhooks/github` отвечает 503; с ним API сохраняет квитанцию и отвечает 202, а разбирает квитанции `app.webhook_worker` (на staging появится следующим PR по #35; до него квитанции копятся в PostgreSQL) |
 | `GH_CLIENT_ID` | строка | `GITHUB_CLIENT_ID` | `api` | user authorization App (auth-api, #11); отличается от App ID |
 | `GH_CLIENT_SECRET` | строка | `GITHUB_CLIENT_SECRET` | `api` | обмен OAuth-кода (auth-api, #11) |
 | `AUTH_JWT_PRIVATE_KEY` | многострочный PEM (RSA) | `AUTH_JWT_PRIVATE_KEY` | `api` | подпись локального access JWT |
@@ -71,8 +75,8 @@ rm jwt.pem jwt.pub
 
 | Имя | Куда уходит | Примечание |
 |---|---|---|
-| `RABBITMQ_PASSWORD` (пользователь `RABBITMQ_USER`, по умолчанию `app`) | контейнер `rabbitmq`; `RABBITMQ_URL` в `api` и `worker` | RabbitMQ, как Postgres, применяет учётные данные только на пустом томе `rabbitmq-data`. Если том есть, а пароля в `.env` нет, `deploy.sh` отказывается генерировать новый |
-| `REDIS_PASSWORD` | контейнер `redis`; `REDIS_URL` в `api` и `worker` | Redis — кэш без тома (лимит 128 MB, `allkeys-lru`): новый пароль только сбрасывает кэш |
+| `RABBITMQ_PASSWORD` (пользователь `RABBITMQ_USER`, по умолчанию `app`) | контейнер `rabbitmq`; `RABBITMQ_URL` в `api` (в `worker` — следующим PR) | RabbitMQ, как Postgres, применяет учётные данные только на пустом томе `rabbitmq-data`. Если том есть, а пароля в `.env` нет, `deploy.sh` отказывается генерировать новый |
+| `REDIS_PASSWORD` | контейнер `redis`; `REDIS_URL` в `api` | Redis — кэш без тома (лимит 128 MB, `allkeys-lru`): новый пароль только сбрасывает кэш. Кэш по SD §10, `REDIS_URL` приложение пока не читает |
 
 `GITHUB_TOKEN` выдаёт Actions сам. В репозиторий его не кладут. Push в GHCR — `packages: write`; pull на staging — `packages: read`.
 
@@ -89,6 +93,7 @@ rm jwt.pem jwt.pub
 | `STAGING_HEALTH_URL` | нет | иначе `http://$STAGING_HOST/healthcheck` |
 | `POSTGRES_USER` | нет | иначе `app` |
 | `POSTGRES_DB` | нет | иначе `app` |
+| `GH_APP_BOT_LOGIN` | для `webhook-worker` (следующий PR по #35) | `dmc268-t6-reviewer[bot]` — логин бота App. В контейнере `GITHUB_APP_BOT_LOGIN`, только у `webhook-worker` (`app/webhook_worker.py`). Префикс `GH_`, потому что GitHub не принимает `GITHUB_` и у variables; берётся из `vars.`, а не из `secrets.` |
 
 ### Только локально у оператора
 
@@ -150,7 +155,7 @@ flowchart LR
   script --> envfile["<APP_DIR>/.env\nchmod 600"]
   script --> appenv["<APP_DIR>/app.env, api.env\nchmod 600"]
   envfile --> compose["docker compose --env-file"]
-  appenv --> compose2["env_file: api, worker"]
+  appenv --> compose2["env_file: api.env → api,\napp.env → workers (следующий PR)"]
   script --> logout["docker logout ghcr.io"]
 ```
 
@@ -158,10 +163,10 @@ flowchart LR
 2. `appleboy/ssh-action` с `debug: false` передаёт в скрипт одноразовый `GITHUB_TOKEN`, бандл секретов приложения `APP_SECRETS_B64` (п. 5) и, если задан, `POSTGRES_PASSWORD`. SSH-пароль VPS передаётся только как `password` действия, в скрипт он не попадает.
 3. `deploy.sh` пишет `.env` с `umask 077` и `chmod 600`; без `POSTGRES_PASSWORD` генерирует пароль один раз на свежем хосте и отказывается генерировать, если `.env` или том Postgres уже есть. Пароль в stdout не печатается.
 4. Compose читает `.env` на VM. Postgres, RabbitMQ и Redis слушают только docker-сеть проекта, `ports:` у них нет.
-5. Секреты приложения шаг «Bundle application secrets» собирает в одну строку `APP_SECRETS_B64`: base64 от строк `ИМЯ=<base64 значения>`, только для заданных секретов. Строка маскируется (`::add-mask::`) и уходит через `envs:` SSH-действия; многострочные PEM так не ломаются в SSH и shell. На хосте `write_app_env_files` (`env-file.sh`) раскладывает значения по allowlist: `app.env` (`api` и `worker`) и `api.env` (только `api`), в одинарных кавычках — Compose читает их буквально, без подстановки `$`, обратный слэш остаётся обратным слэшем (кроме позиции перед кавычкой). Поэтому имя вне allowlist, значение с `'` или с `\` в конце валят выкат до любых изменений на хосте: бандл проверяется раньше, чем перезаписывается `.env`.
+5. Секреты приложения шаг «Bundle application secrets» собирает в одну строку `APP_SECRETS_B64`: base64 от строк `ИМЯ=<base64 значения>`, только для заданных секретов. Строка маскируется (`::add-mask::`) и уходит через `envs:` SSH-действия; многострочные PEM так не ломаются в SSH и shell. На хосте `write_app_env_files` (`env-file.sh`) раскладывает значения по allowlist: `app.env` (ключ App для `worker` и `webhook-worker`) и `api.env` (`api`), в одинарных кавычках — Compose читает их буквально, без подстановки `$`, обратный слэш остаётся обратным слэшем (кроме позиции перед кавычкой). Поэтому имя вне allowlist, значение с `'` или с `\` в конце валят выкат до любых изменений на хосте: бандл проверяется раньше, чем перезаписывается `.env` (ограничение на значения — §1).
 6. `GITHUB_TOKEN` нужен лишь для pull. Логин идёт во временный `DOCKER_CONFIG` (`mktemp -d`), а не в `/root/.docker/config.json`: выкаты API и UI под общим root не мешают друг другу. После последнего pull — `docker logout`, при выходе каталог удаляется; `unset GHCR_TOKEN`.
 
-Rollback ничего из GitHub не шлёт повторно: пароли Postgres, RabbitMQ и Redis берёт из лежащего `.env`, а `app.env` и `api.env` не трогает — откатанные `api` и `worker` стартуют с теми же секретами. Секреты не привязаны к образу: откат образа не возвращает предыдущие значения секретов.
+Rollback ничего из GitHub не шлёт повторно: пароли Postgres, RabbitMQ и Redis берёт из лежащего `.env`, а `app.env` и `api.env` не трогает — откатанные контейнеры стартуют с теми же секретами. Секреты не привязаны к образу: откат образа не возвращает предыдущие значения секретов.
 
 ---
 
