@@ -40,6 +40,8 @@ exclude = ["*.md"]
 [tool.mypy]
 python_version = "3.13"
 strict = true
+# `mypy .` does not walk `.agents/**` (dot-directory), so the create-issue skill is
+# checked by an explicit command: see `.agents/skills/create-issue/SKILL.md`.
 files = ["app", "tests"]
 
 [tool.pytest.ini_options]
