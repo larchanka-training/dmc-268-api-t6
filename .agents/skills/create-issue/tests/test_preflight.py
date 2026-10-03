@@ -51,6 +51,8 @@ def call_fn(fn: str, *args: str) -> subprocess.CompletedProcess[str]:
         # the form that a naive ${url#https://*/} mangles
         ("https://oauth2:TOKEN@github.com/acme/sandbox.git", "github.com", "acme/sandbox"),
         ("git://github.com/acme/x.git", "github.com", "acme/x"),
+        # a password may itself contain "@": the host is what follows the LAST one
+        ("https://u:p@ss@github.com/acme/sandbox.git", "github.com", "acme/sandbox"),
     ],
 )
 def test_parse_remote(url: str, host: str, path: str) -> None:
@@ -277,6 +279,34 @@ def test_a_remote_with_an_invalid_repository_name_is_refused(tmp_path: Path) -> 
     r = preflight_in(clone, tmp_path)
     assert r.returncode == 2
     assert "OWNER/REPO" in json.loads(r.stderr)["error"]
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        # the parse FAILS
+        "https://u:SECRET@github.com",  # a bare host
+        "ftp://u:SECRET@h/x",
+        "https://u:SECRET@",
+        "ssh://u:SECRET@",
+        # the parse works but the remote is refused
+        "https://u:SECRET@git.example.com/g/p.git",
+        "https://u:SE@CRET@git.example.com/g/p.git",  # "@" inside the password
+        "https://u:pa/SECRET@github.com/acme/x",  # "/" inside the password
+        "https://u:SECRET@github.com/ac%20me/x",  # a bad repository name
+        "https://u:SECRET@github.com/acme/sand box",
+    ],
+)
+def test_a_remote_url_is_never_echoed(tmp_path: Path, url: str) -> None:
+    """Remote URLs can carry tokens (`https://user:TOKEN@host/...`); an error that
+    quoted one would put the token into stderr and from there into agent logs."""
+    clone = clone_with_remotes(tmp_path, {"origin": url})
+    r = preflight_in(clone, tmp_path)
+    assert r.returncode == 2
+    output = r.stdout + r.stderr
+    for fragment in ("SECRET", "CRET", "SE@", "u:"):
+        assert fragment not in output, fragment
+    assert "origin" in json.loads(r.stderr)["error"] or "OWNER/REPO" in r.stderr
 
 
 def test_two_clones_resolve_to_their_own_repo(tmp_path: Path) -> None:

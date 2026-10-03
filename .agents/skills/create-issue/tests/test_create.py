@@ -344,14 +344,20 @@ def run(
     )
 
 
-def rest_issue(number: int, title: str = "[test] a title", **extra: Any) -> dict[str, Any]:
-    """One row of the REST issues listing."""
-    return {
+def rest_issue(
+    number: int, title: str = "[test] a title", author: str | None = "octocat", **extra: Any
+) -> dict[str, Any]:
+    """One row of the REST issues listing. `octocat` is the authenticated user of every
+    fixture and of the stand-in gh; `author=None` leaves the `user` key out."""
+    row: dict[str, Any] = {
         "number": number,
         "title": title,
         "html_url": f"https://github.com/acme/sandbox/issues/{number}",
-        **extra,
     }
+    if author is not None:
+        row["user"] = {"login": author}
+    row.update(extra)
+    return row
 
 
 def listing(*issues: dict[str, Any]) -> str:
@@ -576,6 +582,47 @@ def test_recovery_never_reports_an_issue_that_was_already_there(tmp_path: Path) 
     assert "not retrying" in json.loads(r.stderr)["error"]
     assert r.stdout == ""
     assert not board_was_called(tmp_path)
+
+
+def test_recovery_does_not_adopt_a_teammates_same_title_issue(tmp_path: Path) -> None:
+    """A new, same-title issue opened by someone else in the window between snapshot
+    and create is the wrong object: adopting it would report and board it as ours."""
+    r = run(tmp_path, create='{"url": ""}', recover=listing(rest_issue(42, author="hubot")))
+    assert r.returncode == 4
+    assert "not retrying" in json.loads(r.stderr)["error"]
+    assert r.stdout == ""
+    assert not board_was_called(tmp_path)
+
+
+def test_recovery_adopts_the_users_own_issue_whatever_the_login_case(tmp_path: Path) -> None:
+    r = run(tmp_path, create='{"url": ""}', recover=listing(rest_issue(42, author="OctoCat")))
+    assert r.returncode == 0, r.stderr
+    assert json.loads(r.stdout)["number"] == 42
+
+
+def test_recovery_prefers_the_users_issue_over_a_newer_teammates(tmp_path: Path) -> None:
+    mine, theirs = rest_issue(42), rest_issue(43, author="hubot")
+    r = run(tmp_path, create='{"url": ""}', recover=listing(theirs, mine))
+    assert r.returncode == 0, r.stderr
+    assert json.loads(r.stdout)["number"] == 42
+
+
+@pytest.mark.parametrize(
+    "row",
+    [
+        rest_issue(42, author=None),  # no `user` at all
+        rest_issue(42, user=None),
+        rest_issue(42, user="octocat"),  # not an object
+        rest_issue(42, user={"login": None}),
+        rest_issue(42, user={}),
+    ],
+)
+def test_recovery_does_not_adopt_an_issue_without_a_usable_author(
+    tmp_path: Path, row: dict[str, Any]
+) -> None:
+    r = run(tmp_path, create='{"url": ""}', recover=listing(row))
+    assert r.returncode == 4
+    assert "not retrying" in json.loads(r.stderr)["error"]
 
 
 def test_recovery_ignores_pull_requests_and_other_titles(tmp_path: Path) -> None:

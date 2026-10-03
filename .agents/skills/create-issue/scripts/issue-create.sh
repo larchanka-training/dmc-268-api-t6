@@ -10,7 +10,8 @@
 # failure, retries, and the server ends up with two issues — because the first
 # call had in fact succeeded. So a create is never retried blind; a create that
 # looks like it failed is followed by a lookup of the newest issues, and only an
-# issue that did not exist before the create counts as "it landed".
+# issue that did not exist before the create AND was opened by the authenticated
+# user counts as "it landed".
 #
 # Usage: issue-create.sh <spec.json> [--dry-run] [--allow-duplicate] [--no-board]
 # Output: {"url","number","repo","verified","board"} on stdout; board is
@@ -51,7 +52,7 @@ while [ $# -gt 0 ]; do
     --dry-run)         DRY=true; shift ;;
     --allow-duplicate) ALLOW_DUP=true; shift ;;
     --no-board)        NO_BOARD=true; shift ;;
-    -h|--help)         sed -n '4,32p' "$0"; exit 0 ;;
+    -h|--help)         sed -n '4,33p' "$0"; exit 0 ;;
     -*)                die "unknown argument: $1" 2 ;;
     *)                 SPEC="$1"; shift ;;
   esac
@@ -103,6 +104,8 @@ fi
 # composing the issue and posting it, and this is the cheap place to find out.
 PRE="$("$PREFLIGHT" --repo "$REPO" 2>&1)"; PRC=$?
 [ $PRC -eq 0 ] || { printf '%s\n' "$PRE" >&2; exit $PRC; }
+# Who is filing: recovery only adopts an issue this account opened.
+ME="$(printf '%s' "$PRE" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("user", ""))' 2>/dev/null)"
 
 if [ "$DRY" = true ]; then
   python3 - "$REPO" "$BODY" <<'PY'
@@ -169,14 +172,15 @@ URL="$(printf '%s' "$URL" | grep -Eo 'https?://[^[:space:]]+' | tail -1)"
 # ─── 3. recover by looking, never by retrying ───────────────────────────────
 if [ -z "$URL" ] || [ $CRC -ne 0 ]; then
   # The create may still have succeeded. Only an issue with this title that was
-  # NOT in the snapshot counts; one that was already there is somebody else's.
+  # NOT in the snapshot AND was opened by the authenticated user counts; one that
+  # was already there, or that a teammate opened in the same window, is not ours.
   # exit 0 = found (url on stdout) · 1 = nothing new · 2 = a lookup was unusable
   FRC=2
   if [ "$BEFORE_OK" = true ] && recent_issues issue_recover.json > "$WORK/after.json"; then
-    FOUND="$(python3 - "$SUMMARY" "$WORK/before.json" "$WORK/after.json" <<'PY'
+    FOUND="$(python3 - "$SUMMARY" "$WORK/before.json" "$WORK/after.json" "$ME" <<'PY'
 import json, sys
 
-want, before_path, after_path = sys.argv[1:4]
+want, before_path, after_path, me = sys.argv[1:5]
 
 
 def load(path):
@@ -192,13 +196,20 @@ def same(row):
     return "pull_request" not in row and (row.get("title") or "").strip() == want.strip()
 
 
+def mine(row):
+    # no author, or somebody else's: not adopted
+    user = row.get("user")
+    login = user.get("login") if isinstance(user, dict) else None
+    return bool(me) and isinstance(login, str) and login.lower() == me.lower()
+
+
 try:
     before, after = load(before_path), load(after_path)
 except Exception:
     sys.exit(2)
 seen = {r.get("number") for r in before if same(r)}
 for row in after:  # newest first
-    if same(row) and row.get("number") not in seen and row.get("html_url"):
+    if same(row) and mine(row) and row.get("number") not in seen and row.get("html_url"):
         print(row["html_url"])
         sys.exit(0)
 sys.exit(1)

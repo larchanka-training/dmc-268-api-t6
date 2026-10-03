@@ -49,19 +49,18 @@ api_host_for() {
 
 # ─── remote URL parsing ─────────────────────────────────────────────────────
 # Four forms in the wild. Deliberately not `${url#https://*/}` — that mangles
-# https://user:token@host/path.
+# https://user:token@host/path. The host is what follows the LAST "@" of the
+# authority (a password may itself contain "@"), so no credential fragment can end
+# up in it. Nothing here, or anywhere in this script, ever prints a remote URL.
 parse_remote() {  # $1=url -> "host<TAB>path"
-  local url="$1" host path
+  local url="$1" host path auth
   url="${url%.git}"
   case "$url" in
     git@*:*)      host="${url#git@}"; host="${host%%:*}"; path="${url#*:}" ;;
-    ssh://*)      url="${url#ssh://}"; url="${url#*@}"
-                  host="${url%%/*}"; host="${host%%:*}"; path="${url#*/}" ;;
-    git://*)      url="${url#git://}"; host="${url%%/*}"; path="${url#*/}" ;;
-    http://*|https://*)
-                  url="${url#http://}"; url="${url#https://}"
-                  url="${url#*@}"                       # strip user[:token]@
-                  host="${url%%/*}"; host="${host%%:*}"; path="${url#*/}" ;;
+    ssh://*|git://*|http://*|https://*)
+                  url="${url#*://}"
+                  auth="${url%%/*}"; host="${auth##*@}"; host="${host%%:*}"
+                  path="${url#*/}" ;;
     *) return 1 ;;
   esac
   # path == url means there was no "/" to cut at: a bare host, not a repository.
@@ -96,12 +95,15 @@ else
 
   URL="$(git remote get-url "$pick" 2>/dev/null)" \
     || die "no such remote: $pick" 2
+  # The URL may carry credentials: errors below name the remote, never its URL.
   IFS=$'\t' read -r REMOTE_HOST REPO < <(parse_remote "$URL") \
-    || die "cannot parse remote URL: $URL" 2
+    || die "cannot parse the URL of remote '$pick' (expected https://, ssh://, git:// or git@host:path)" 2
 
   API_HOST="$(api_host_for "$REMOTE_HOST")"
+  SHOWN_HOST="$REMOTE_HOST"
+  [[ "$SHOWN_HOST" =~ ^[A-Za-z0-9.-]+$ ]] || SHOWN_HOST="an unrecognised host"
   [ "$API_HOST" = "$GITHUB_HOST" ] \
-    || die "remote '$pick' points at $REMOTE_HOST — this skill files issues on $GITHUB_HOST only (pass --repo OWNER/REPO for a $GITHUB_HOST repository)" 2
+    || die "remote '$pick' points at $SHOWN_HOST — this skill files issues on $GITHUB_HOST only (pass --repo OWNER/REPO for a $GITHUB_HOST repository)" 2
 
   # GitHub is always exactly owner/repo.
   OWNER="${REPO%%/*}"; NAME="${REPO#*/}"; NAME="${NAME%%/*}"
@@ -109,11 +111,13 @@ else
 fi
 
 # Whatever the source, the name goes into API paths and argv: owner and name are
-# plain GitHub names or the run stops here.
+# plain GitHub names or the run stops here. A name cut out of a remote URL is not
+# echoed (the URL may carry credentials); a --repo value is the caller's own.
+if [ -n "$REPO_ARG" ]; then WHAT="--repo '$REPO_ARG'"; else WHAT="the repository path of remote '${pick:-}'"; fi
 OWNER="${REPO%%/*}"; NAME="${REPO#*/}"
 for part in "$OWNER" "$NAME"; do
   [[ "$part" =~ ^[A-Za-z0-9_.-]+$ ]] && [[ ! "$part" =~ ^\.+$ ]] \
-    || die "'$REPO' is not a valid OWNER/REPO name (letters, digits, '_', '.', '-' only)" 2
+    || die "$WHAT is not a valid OWNER/REPO name (letters, digits, '_', '.', '-' only)" 2
 done
 
 # ─── nested repositories ────────────────────────────────────────────────────

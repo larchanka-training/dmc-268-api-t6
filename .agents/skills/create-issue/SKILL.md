@@ -161,8 +161,8 @@ create proceeds), creates once, reads the issue back through the REST API, then 
 `gh project item-add 12 --owner larchanka-training --url <url>`. A create that returns
 nothing useful is never retried: the script lists the newest issues (a plain listing — the
 search index lags) and accepts only a same-title issue that was not there before the
-create, so an older duplicate is never reported as the new one. If that lookup fails the
-outcome is unknown (exit 5): check the repo by hand.
+create and was opened by the authenticated user — never an older duplicate or a
+teammate's. If that lookup fails the outcome is unknown (exit 5): check the repo by hand.
 
 Report the URL, the `board` value (`added` / `skipped` / `failed`) and `verified`. A
 `verified: false` means the title read back differs from the one posted — say so and look
