@@ -8,6 +8,7 @@ the truncation trailer of review/README.md "Input envelope", or is moved to
 from __future__ import annotations
 
 import math
+import re
 from dataclasses import replace
 from pathlib import PurePosixPath
 from typing import Protocol
@@ -19,7 +20,7 @@ from app.modules.reviews.application.prompt_builder import (
     ReviewRule,
 )
 
-_TEST_MARKERS = ("tests/", "test/", "__tests__/", "spec/")
+_TEST_DIRECTORIES = frozenset({"tests", "test", "__tests__", "spec"})
 _TEST_NAME_MARKERS = ("test_", "_test.", ".test.", ".spec.")
 _CONFIG_SUFFIXES = frozenset(
     {".cfg", ".conf", ".env", ".ini", ".json", ".lock", ".toml", ".xml", ".yaml", ".yml"}
@@ -111,18 +112,41 @@ def _priority(file: ChangedFile, rules: tuple[ReviewRule, ...]) -> float:
 
 
 def _kind_weight(path: str) -> float:
-    lowered = path.lower()
-    name = PurePosixPath(lowered).name
-    if any(marker in f"/{lowered}" for marker in _TEST_MARKERS) or any(
+    lowered = PurePosixPath(path.lower())
+    name = lowered.name
+    if _TEST_DIRECTORIES & set(lowered.parts[:-1]) or any(
         marker in name for marker in _TEST_NAME_MARKERS
     ):
         return 0.6
-    if PurePosixPath(lowered).suffix in _CONFIG_SUFFIXES or name == "dockerfile":
+    if lowered.suffix in _CONFIG_SUFFIXES or name == "dockerfile":
         return 0.4
     return 1.0
 
 
 def _matches_rule(path: str, rule: ReviewRule) -> bool:
     candidate = PurePosixPath(path)
-    included = any(candidate.full_match(pattern) for pattern in rule.include)
-    return included and not any(candidate.full_match(pattern) for pattern in rule.exclude)
+
+    def matches(patterns: tuple[str, ...]) -> bool:
+        return any(
+            candidate.full_match(expanded)
+            for pattern in patterns
+            for expanded in _expand_braces(pattern)
+        )
+
+    return matches(rule.include) and not matches(rule.exclude)
+
+
+def _expand_braces(pattern: str) -> list[str]:
+    """``src/**/*.{ts,tsx}`` (review/rules/schema.json) as plain globs for ``full_match``."""
+    match = _BRACES.search(pattern)
+    if match is None:
+        return [pattern]
+    head, tail = pattern[: match.start()], pattern[match.end() :]
+    return [
+        expanded
+        for option in match.group(1).split(",")
+        for expanded in _expand_braces(head + option + tail)
+    ]
+
+
+_BRACES = re.compile(r"\{([^{}]*)\}")

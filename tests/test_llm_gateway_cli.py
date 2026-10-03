@@ -1,0 +1,120 @@
+"""The live-run CLI and composition of the LLM gateway (README "LLM gateway", #33)."""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import Any, cast
+
+import httpx
+import pytest
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+from app.bootstrap.llm_gateway import build_gateway, main
+from app.modules.reviews.infrastructure.llm.gateway import LlmGateway
+from app.modules.reviews.infrastructure.llm.settings import LlmSettings
+from app.modules.reviews.infrastructure.llm.transport import OpenAICompatibleTransport
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+SAMPLE_DIFF = str(REPO_ROOT / "review" / "examples" / "sample.diff")
+SAMPLE_OUTPUT = (REPO_ROOT / "review" / "examples" / "findings.sample.json").read_text()
+SELF_HOSTED = {
+    "LLM_BASE_URL": "http://localhost:11434/v1",
+    "LLM_MODEL": "qwen3-1.7b-16k",
+    "LLM_CONTEXT_WINDOW": "16384",
+    "LLM_MAX_OUTPUT_TOKENS": "4000",
+}
+
+
+def _transport(handler: Any, requests: list[httpx.Request]) -> OpenAICompatibleTransport:
+    def record(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        response: httpx.Response = handler(request)
+        return response
+
+    return OpenAICompatibleTransport(httpx.AsyncClient(transport=httpx.MockTransport(record)))
+
+
+def test_cli_prints_the_run_summary_for_a_self_hosted_strict_model(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    requests: list[httpx.Request] = []
+    answer = {
+        "model": "qwen3-1.7b-16k",
+        "choices": [{"message": {"content": SAMPLE_OUTPUT}, "finish_reason": "stop"}],
+        "usage": {"prompt_tokens": 7511, "completion_tokens": 379},
+    }
+
+    code = main(
+        [SAMPLE_DIFF],
+        env=SELF_HOSTED,
+        transport=_transport(lambda _: httpx.Response(200, json=answer), requests),
+    )
+
+    out = json.loads(capsys.readouterr().out)
+    assert code == 0
+    assert out["provider"] == "self-hosted"
+    assert out["model"] == "qwen3-1.7b-16k"
+    assert out["calls"] == [
+        {
+            "kind": "primary",
+            "model": "qwen3-1.7b-16k",
+            "call_no": 1,
+            "duration_ms": out["calls"][0]["duration_ms"],
+            "response_model": "qwen3-1.7b-16k",
+        }
+    ]
+    assert (out["tokens_in"], out["tokens_out"], out["cost_usd"]) == (7511, 379, "0.000000")
+    assert out["findings"] == len(json.loads(SAMPLE_OUTPUT)["findings"])
+    body = json.loads(requests[0].content)
+    assert str(requests[0].url) == "http://localhost:11434/v1/chat/completions"
+    assert body["response_format"]["json_schema"]["strict"] is True
+
+
+def test_cli_reports_a_gateway_failure_with_every_call(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    requests: list[httpx.Request] = []
+    rejected = httpx.Response(400, json={"error": {"message": "response_format is not supported"}})
+
+    code = main(
+        [SAMPLE_DIFF],
+        env={**SELF_HOSTED, "LLM_FALLBACK_MODEL": "other", "LLM_FALLBACK_CONTEXT_WINDOW": "16384"},
+        transport=_transport(lambda _: rejected, requests),
+    )
+
+    captured = capsys.readouterr()
+    out = json.loads(captured.out)
+    assert code == 1
+    assert out["error_code"] == "llm_unavailable"
+    assert [(call["kind"], call["error"]["http_status"]) for call in out["calls"]] == [
+        ("primary", 400),
+        ("fallback", 400),
+    ]
+    assert "response_format is not supported" in out["calls"][0]["error"]["message"]
+    assert captured.err == "gateway failed: llm_unavailable\n"
+    assert len(requests) == 2
+
+
+def test_cli_reports_a_configuration_error_without_a_traceback(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    code = main([SAMPLE_DIFF], env={})
+
+    captured = capsys.readouterr()
+    assert code == 2
+    assert json.loads(captured.out) == {
+        "error_code": "config_error",
+        "message": "LLM_MODEL must be set",
+    }
+    assert captured.err == "configuration error: LLM_MODEL must be set\n"
+
+
+def test_build_gateway_composes_the_production_ports() -> None:
+    settings = LlmSettings.from_env(SELF_HOSTED)
+    factory = cast(async_sessionmaker[AsyncSession], object())
+
+    gateway = build_gateway(settings, httpx.AsyncClient(), factory)
+
+    assert isinstance(gateway, LlmGateway)
+    assert gateway.settings is settings

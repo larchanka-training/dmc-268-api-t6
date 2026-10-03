@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
@@ -42,6 +43,7 @@ from app.modules.reviews.infrastructure.llm.gateway import (
     GatewayResult,
     HeuristicTokenCounter,
     LlmGateway,
+    StructuredTask,
 )
 from app.modules.reviews.infrastructure.llm.memory import (
     InMemoryLlmCallTrace,
@@ -57,7 +59,11 @@ from app.modules.reviews.infrastructure.llm.settings import (
     ModelPrice,
     ModelProfile,
 )
-from app.modules.reviews.infrastructure.llm.transport import OpenAICompatibleTransport
+from app.modules.reviews.infrastructure.llm.transport import (
+    ChatMessage,
+    OpenAICompatibleTransport,
+    ResponseSchema,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 RUN_ID = UUID("00000000-0000-0000-0000-000000003301")
@@ -360,6 +366,9 @@ def test_prompt_json_requires_the_dev_flag() -> None:
         )
 
 
+_KEY = {"LLM_API_KEYS": "sk-eu-1"}
+
+
 @pytest.mark.parametrize(
     ("env", "message"),
     [
@@ -369,16 +378,118 @@ def test_prompt_json_requires_the_dev_flag() -> None:
             {"LLM_MODEL": "unknown", "LLM_BASE_URL": "http://llm.test/v1"},
             "LLM_CONTEXT_WINDOW must be set",
         ),
-        ({"LLM_MODEL": "gpt-4.1-mini", "LLM_CONTEXT_WINDOW": "big"}, "must be an integer"),
-        ({"LLM_MODEL": "gpt-4.1-mini", "LLM_PRICE_INPUT_PER_MTOK": "x"}, "must be a decimal"),
-        ({"LLM_MODEL": "gpt-4.1-mini", "LLM_STRUCTURED_OUTPUT": "tools"}, "json_schema or"),
-        ({"LLM_MODEL": "gpt-4.1-mini", "LLM_EXTRA_BODY": "[1]"}, "JSON object"),
-        ({"LLM_MODEL": "gpt-4.1-mini", "LLM_EXTRA_BODY": "{"}, "JSON object"),
+        ({"LLM_MODEL": "gpt-4.1-mini"}, "LLM_API_KEYS must be set for gpt-4.1-mini"),
+        ({**_KEY, "LLM_MODEL": "gpt-4.1-mini", "LLM_CONTEXT_WINDOW": "big"}, "must be an integer"),
+        ({**_KEY, "LLM_MODEL": "gpt-4.1-mini", "LLM_CONTEXT_WINDOW": "0"}, "must be positive"),
+        (
+            {**_KEY, "LLM_MODEL": "gpt-4.1-mini", "LLM_MAX_OUTPUT_TOKENS": "2000000"},
+            "LLM_MAX_OUTPUT_TOKENS must be below LLM_CONTEXT_WINDOW",
+        ),
+        ({**_KEY, "LLM_MODEL": "gpt-4.1-mini", "LLM_PRICE_INPUT_PER_MTOK": "x"}, "a decimal"),
+        (
+            {**_KEY, "LLM_MODEL": "gpt-4.1-mini", "LLM_PRICE_INPUT_PER_MTOK": "NaN"},
+            "non-negative decimal",
+        ),
+        (
+            {**_KEY, "LLM_MODEL": "gpt-4.1-mini", "LLM_PRICE_OUTPUT_PER_MTOK": "-1"},
+            "non-negative decimal",
+        ),
+        ({**_KEY, "LLM_MODEL": "gpt-4.1-mini", "LLM_STRUCTURED_OUTPUT": "tools"}, "json_schema or"),
+        ({**_KEY, "LLM_MODEL": "gpt-4.1-mini", "LLM_EXTRA_BODY": "[1]"}, "JSON object"),
+        ({**_KEY, "LLM_MODEL": "gpt-4.1-mini", "LLM_EXTRA_BODY": "{"}, "JSON object"),
+        (
+            {
+                **_KEY,
+                "LLM_MODEL": "gpt-4.1-mini",
+                "LLM_BASE_URL": "http://router.example/v1",
+            },
+            "LLM_BASE_URL must use https when keys are sent",
+        ),
+        (
+            {
+                "LLM_BASE_URL": "http://localhost:1234/v1",
+                "LLM_MODEL": "local",
+                "LLM_CONTEXT_WINDOW": "32768",
+                "LLM_FALLBACK_MODEL": "mistral-small-4",
+            },
+            "LLM_FALLBACK_API_KEYS must be set for mistral-small-4",
+        ),
     ],
 )
 def test_incomplete_configuration_names_the_variable(env: dict[str, str], message: str) -> None:
     with pytest.raises(LlmConfigError, match=message):
         LlmSettings.from_env(env)
+
+
+def test_primary_keys_are_not_sent_to_another_fallback_endpoint() -> None:
+    settings = LlmSettings.from_env(
+        {
+            "LLM_MODEL": "gpt-4.1-mini",
+            "LLM_API_KEYS": "eurouter-secret",
+            "LLM_FALLBACK_MODEL": "qwen",
+            "LLM_FALLBACK_BASE_URL": "https://third-party.example/v1",
+            "LLM_FALLBACK_CONTEXT_WINDOW": "32768",
+        }
+    )
+
+    assert settings.fallback is not None
+    assert settings.fallback.base_url == "https://third-party.example/v1"
+    assert settings.fallback.api_keys == ()
+    assert settings.fallback.provider == "self-hosted"
+
+
+def test_a_known_fallback_keeps_its_own_endpoint_behind_a_self_hosted_primary() -> None:
+    settings = LlmSettings.from_env(
+        {
+            "LLM_BASE_URL": "http://localhost:1234/v1",
+            "LLM_MODEL": "local",
+            "LLM_CONTEXT_WINDOW": "65536",
+            "LLM_STRUCTURED_OUTPUT": "prompt_json",
+            "LLM_ALLOW_PROMPT_JSON": "1",
+            "LLM_FALLBACK_MODEL": "mistral-small-4",
+            "LLM_FALLBACK_API_KEYS": "sk-eu-1",
+        }
+    )
+
+    assert settings.primary.provider == "self-hosted"
+    assert settings.fallback is not None
+    assert settings.fallback.base_url == "https://api.eurouter.ai/api/v1"
+    assert settings.fallback.provider == "eurouter"
+    assert settings.fallback.structured_output == "json_schema"
+    assert settings.fallback.api_keys == ("sk-eu-1",)
+
+
+def test_an_unknown_fallback_on_the_same_endpoint_inherits_keys_and_output_mode() -> None:
+    settings = LlmSettings.from_env(
+        {
+            "LLM_BASE_URL": "http://localhost:1234/v1",
+            "LLM_MODEL": "local",
+            "LLM_CONTEXT_WINDOW": "65536",
+            "LLM_API_KEYS": "local-key",
+            "LLM_STRUCTURED_OUTPUT": "prompt_json",
+            "LLM_ALLOW_PROMPT_JSON": "1",
+            "LLM_FALLBACK_MODEL": "local-small",
+            "LLM_FALLBACK_CONTEXT_WINDOW": "32768",
+        }
+    )
+
+    assert settings.fallback is not None
+    assert settings.fallback.base_url == "http://localhost:1234/v1"
+    assert settings.fallback.api_keys == ("local-key",)
+    assert settings.fallback.structured_output == "prompt_json"
+
+
+def test_a_remote_model_without_a_price_is_reported(caplog: pytest.LogCaptureFixture) -> None:
+    with caplog.at_level(logging.WARNING):
+        LlmSettings.from_env(
+            {
+                "LLM_BASE_URL": "https://llm.example/v1",
+                "LLM_MODEL": "remote",
+                "LLM_CONTEXT_WINDOW": "65536",
+            }
+        )
+
+    assert "llm model has no price" in caplog.text
 
 
 def test_extra_body_and_overrides_reach_the_request() -> None:
@@ -434,21 +545,43 @@ def test_rejected_key_rotates_to_the_next_key_without_counting_a_call(status: in
     primary = replace(PRIMARY, api_keys=("sk-a", "sk-b"))
     harness = Harness([error(status), valid(), valid()], primary=primary)
 
-    async def two_reviews() -> None:
+    async def two_attempts() -> list[int]:
         async with httpx.AsyncClient(transport=httpx.MockTransport(harness._handle)) as client:
-            model = GatewayReviewModel(harness.gateway(client), harness.run, _NoMeta())
-            await model.draft_review(context=CONTEXT)
-            await model.draft_review(context=CONTEXT)
+            gateway = harness.gateway(client)
+            calls = []
+            for attempt in (2, 3):
+                run = replace(harness.run, attempt=attempt)
+                model = GatewayReviewModel(gateway, run, _NoMeta())
+                await model.draft_review(context=CONTEXT)
+                assert model.last_result is not None
+                calls.append(model.last_result.calls)
+            return calls
 
-    asyncio.run(two_reviews())
+    calls = asyncio.run(two_attempts())
 
+    # the next attempt starts with the key that answered last
     assert [request.headers["Authorization"] for request in harness.requests] == [
         "Bearer sk-a",
         "Bearer sk-b",
         "Bearer sk-b",
     ]
+    assert calls == [1, 1]
     assert harness.kinds() == ["primary", "primary"]
     assert [record.call_no for _, record in harness.trace.records] == [1, 1]
+
+
+def test_rotations_inside_every_call_do_not_shrink_the_call_limit() -> None:
+    primary = replace(PRIMARY, api_keys=("sk-a", "sk-b"))
+    harness = Harness(
+        [error(401), error(503), error(401), error(503), error(401), error(503), valid()],
+        primary=primary,
+    )
+
+    result = harness.review()
+
+    assert len(harness.requests) == 7
+    assert result.calls == 4
+    assert harness.kinds() == ["primary", "retry", "retry", "fallback"]
 
 
 # ---------- failure classes, §5.1 ----------
@@ -583,6 +716,89 @@ def test_without_a_fallback_the_primary_gets_the_whole_call_limit() -> None:
     assert harness.kinds() == ["primary", "retry", "retry"]
 
 
+def _conventions_request() -> ConventionsRequest:
+    return ConventionsRequest("P", (), None, ("app/service.py",), (), {}, ("app/service.py",))
+
+
+def _conventions_answer() -> dict[str, object]:
+    return {
+        "files": [{"path": "app/service.py", "relevance": "changed service"}],
+        "key_patterns": ["a", "b", "c"],
+        "recommendations": [f"Check {index} (from: standard/correctness)" for index in range(5)],
+    }
+
+
+def test_conventions_and_review_share_the_four_calls_of_one_attempt() -> None:
+    harness = Harness(
+        [
+            error(503),
+            error(503),
+            completion(json.dumps(_conventions_answer())),
+            error(503),
+            valid(),
+        ]
+    )
+
+    async def scenario() -> LlmCallFailed:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(harness._handle)) as client:
+            gateway = harness.gateway(client)
+            await GatewayConventionsModel(gateway, harness.run).draft_conventions(
+                request=_conventions_request()
+            )
+            with pytest.raises(LlmCallFailed) as caught:
+                await GatewayReviewModel(gateway, harness.run, _NoMeta()).draft_review(
+                    context=CONTEXT
+                )
+            # a third generation in the same attempt has no call left at all
+            with pytest.raises(LlmCallFailed) as exhausted:
+                await GatewayReviewModel(gateway, harness.run, _NoMeta()).draft_review(
+                    context=CONTEXT
+                )
+            assert exhausted.value.calls == 0
+            return caught.value
+
+    failure = asyncio.run(scenario())
+
+    assert failure.error_code is LlmErrorCode.UNAVAILABLE
+    assert len(harness.requests) == 4
+    assert [record.call_no for _, record in harness.trace.records] == [1, 2, 3, 4]
+    assert harness.kinds() == ["primary", "retry", "retry", "primary"]
+
+
+def test_a_new_attempt_of_the_run_gets_four_calls_again() -> None:
+    harness = Harness([error(500), error(500), error(500), error(500), valid()])
+
+    async def scenario() -> GatewayResult:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(harness._handle)) as client:
+            gateway = harness.gateway(client)
+            with pytest.raises(LlmCallFailed):
+                await GatewayReviewModel(gateway, harness.run, _NoMeta()).draft_review(
+                    context=CONTEXT
+                )
+            model = GatewayReviewModel(gateway, replace(harness.run, attempt=3), _NoMeta())
+            await model.draft_review(context=CONTEXT)
+            assert model.last_result is not None
+            return model.last_result
+
+    result = asyncio.run(scenario())
+
+    assert result.calls == 1
+    assert [record.call_no for _, record in harness.trace.records] == [1, 2, 3, 4, 1]
+    assert [record.attempt for _, record in harness.trace.records] == [2, 2, 2, 2, 3]
+
+
+def test_a_fallback_window_too_small_for_the_prompt_keeps_the_primary_error() -> None:
+    harness = Harness(
+        [error(503), error(503), error(503)], fallback=replace(FALLBACK, context_window=500)
+    )
+
+    failure = harness.failure()
+
+    assert failure.error_code is LlmErrorCode.UNAVAILABLE
+    assert failure.run_retryable is True
+    assert harness.kinds() == ["primary", "retry", "retry"]
+
+
 # ---------- invalid answers ----------
 
 
@@ -639,7 +855,8 @@ def test_invalid_answers_end_in_llm_invalid_output_after_repair_and_fallback() -
 @pytest.mark.parametrize(
     "reply",
     [
-        completion(json.dumps(VALID_OUTPUT)[:40], finish_reason="length"),
+        # valid JSON that was nevertheless cut: the length flag alone makes it invalid
+        completion(json.dumps({"findings": [], "summary": {}}), finish_reason="length"),
         completion(None),
     ],
 )
@@ -662,6 +879,42 @@ def test_repair_that_would_overflow_the_context_is_skipped_for_the_fallback() ->
     assert result.model == "fallback-model-v3"
     fallback_messages = harness.bodies()[1]["messages"]
     assert fallback_messages == harness.bodies()[0]["messages"]
+
+
+def test_a_refusal_skips_the_repair_and_goes_to_the_fallback() -> None:
+    refusal = httpx.Response(
+        200,
+        json={
+            "model": "primary-model",
+            "choices": [
+                {
+                    "message": {"role": "assistant", "content": None, "refusal": "I can't."},
+                    "finish_reason": "stop",
+                }
+            ],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 3},
+        },
+    )
+    harness = Harness([refusal, valid(model="fallback-model-v8")])
+
+    result = harness.review()
+
+    assert harness.kinds() == ["primary", "fallback"]
+    assert result.model == "fallback-model-v8"
+
+
+def test_content_parts_are_joined_into_the_answer() -> None:
+    text = json.dumps(VALID_OUTPUT)
+    parts = [{"type": "text", "text": text[:50]}, {"type": "text", "text": text[50:]}]
+    body = {
+        "model": "primary-model",
+        "choices": [{"message": {"content": parts}, "finish_reason": "stop"}],
+        "usage": {"prompt_tokens": 10, "completion_tokens": 3},
+    }
+    harness = Harness([httpx.Response(200, json=body)])
+
+    assert harness.review().output == VALID_OUTPUT
+    assert harness.kinds() == ["primary"]
 
 
 # ---------- context overflow, budget, deadline ----------
@@ -749,14 +1002,258 @@ def test_no_call_when_less_than_the_call_timeout_is_left_before_the_deadline() -
     assert harness.requests == []
 
 
-def test_no_retry_when_the_backoff_leaves_less_than_the_call_timeout() -> None:
-    harness = Harness([timeout(), valid()], deadline_in_s=92)
+def test_no_same_model_retry_when_the_backoff_leaves_less_than_the_call_timeout() -> None:
+    harness = Harness([timeout(), valid(model="fallback-model-v4")], deadline_in_s=92)
+
+    result = harness.review()
+
+    # 92 s - 2.25 s of backoff < 90 s: the retry is skipped, the fallback still fits
+    assert harness.kinds() == ["primary", "fallback"]
+    assert harness.clock.sleeps == []
+    assert result.model == "fallback-model-v4"
+
+
+def test_long_retry_after_is_not_slept_when_it_would_pass_the_deadline() -> None:
+    harness = Harness([error(429, **{"Retry-After": "30"})], deadline_in_s=110, fallback=None)
+
+    failure = harness.failure()
+
+    assert failure.error_code is LlmErrorCode.RATE_LIMITED
+    assert harness.clock.sleeps == []
+    assert harness.kinds() == ["primary"]
+
+
+def test_no_backoff_after_the_last_same_model_call() -> None:
+    harness = Harness([timeout(), error(503), error(503), valid(model="fallback-model-v5")])
+
+    result = harness.review()
+
+    assert harness.kinds() == ["primary", "retry", "retry", "fallback"]
+    # timeout retry, then the first 5xx retry; no sleep after the third primary call
+    assert harness.clock.sleeps == [2.25, 2.25]
+    assert result.model == "fallback-model-v5"
+
+
+def _advance(harness: Harness, seconds: float, reply: httpx.Response | Exception) -> Reply:
+    """A provider answer that takes ``seconds`` of the fake clock."""
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        harness.clock.current += timedelta(seconds=seconds)
+        if isinstance(reply, Exception):
+            raise reply
+        return reply
+
+    return respond
+
+
+def test_no_repair_call_when_the_deadline_is_too_close() -> None:
+    harness = Harness([], deadline_in_s=100)
+    harness.replies = [_advance(harness, 20, completion("not json")), valid()]
 
     failure = harness.failure()
 
     assert failure.error_code is LlmErrorCode.DEADLINE_EXCEEDED
     assert harness.kinds() == ["primary"]
+    assert len(harness.requests) == 1
+
+
+def test_no_fallback_call_when_the_deadline_is_too_close() -> None:
+    harness = Harness([], deadline_in_s=200)
+    harness.replies = [
+        _advance(harness, 90, timeout()),
+        _advance(harness, 90, timeout()),
+        valid(),
+    ]
+
+    failure = harness.failure()
+
+    assert failure.error_code is LlmErrorCode.DEADLINE_EXCEEDED
+    assert harness.kinds() == ["primary", "retry"]
+    assert len(harness.requests) == 2
+
+
+def test_exactly_one_call_timeout_left_still_allows_the_call() -> None:
+    harness = Harness([valid()], deadline_in_s=90)
+
+    harness.review()
+
+    assert harness.kinds() == ["primary"]
+
+
+async def _generate(harness: Harness, characters: int) -> GatewayResult:
+    async with httpx.AsyncClient(transport=httpx.MockTransport(harness._handle)) as client:
+        return await harness.gateway(client).generate(
+            StructuredTask(
+                operation="review",
+                messages=(ChatMessage("user", "x" * characters),),
+                schema=ResponseSchema("ReviewOutput", {"type": "object"}),
+                validate=lambda content: json.loads(content),
+            ),
+            harness.run,
+        )
+
+
+@pytest.mark.parametrize(
+    ("engine", "characters", "calls"),
+    [
+        # fast: min(window 200 000, SD §13 60 000) - 1 000 reserved = 59 000 tokens
+        ("fast", 59_000 * 3, 1),
+        ("fast", 59_000 * 3 + 1, 0),
+        # deep: min(200 000, 150 000) - 1 000 = 149 000 tokens
+        ("deep", 149_000 * 3, 1),
+        ("deep", 149_000 * 3 + 1, 0),
+    ],
+)
+def test_sd13_input_limit_applies_below_a_larger_model_window(
+    engine: str, characters: int, calls: int
+) -> None:
+    primary = replace(PRIMARY, context_window=200_000, price=ModelPrice(Decimal(0), Decimal(0)))
+    harness = Harness([completion("{}")], primary=primary, engine=engine, deadline_in_s=900)
+
+    if calls:
+        asyncio.run(_generate(harness, characters))
+    else:
+        with pytest.raises(LlmCallFailed) as caught:
+            asyncio.run(_generate(harness, characters))
+        assert caught.value.error_code is LlmErrorCode.CONTEXT_OVERFLOW
+
+    assert len(harness.requests) == calls
+
+
+@pytest.mark.parametrize(("spent", "calls"), [("0.497", 1), ("0.497001", 0)])
+def test_run_cost_limit_boundary(spent: str, calls: int) -> None:
+    # one call may cost 1 000 output tokens x $3/Mtok = $0.003 (the input is priced 0)
+    primary = replace(PRIMARY, price=ModelPrice(Decimal(0), Decimal(3)))
+    harness = Harness([valid()], primary=primary)
+    asyncio.run(
+        harness.ledger.record(
+            harness.run, LlmUsage("eurouter", "m", "review", 1, 1, 0, Decimal(spent))
+        )
+    )
+
+    if calls:
+        harness.review()
+    else:
+        assert harness.failure().error_code is LlmErrorCode.BUDGET_EXCEEDED
+    assert len(harness.requests) == calls
+
+
+def test_review_adapter_fits_a_diff_larger_than_the_budget() -> None:
+    primary = replace(PRIMARY, context_window=3_000, max_output_tokens=1_000)
+    files = tuple(
+        ChangedFile(
+            path,
+            "modified",
+            tuple(DiffLine(number, "added", "x" * 40) for number in range(1, 61)),
+        )
+        for path in ("app/a.py", "app/b.py", "app/c.py")
+    )
+    harness = Harness([valid()], primary=primary)
+
+    harness.review(replace(CONTEXT, changed_files=files))
+
+    assert len(harness.requests) == 1
+    user = harness.bodies()[0]["messages"][1]["content"]
+    assert "<omitted_files>\napp/" in user
+    assert "Use offset=" in user
+    estimate = harness.trace.records[0][1].input_tokens_estimate
+    assert estimate + primary.max_output_tokens <= 3_000
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "context_length_exceeded",
+        "This model's context length is 8192 tokens",
+        "prompt exceeds the context window",
+        "maximum context length exceeded",
+        "too many tokens in the request",
+        "prompt is too long",
+        "input is too long for the model",
+    ],
+)
+def test_every_context_length_marker_is_an_overflow(message: str) -> None:
+    harness = Harness([error(400, message)])
+
+    assert harness.failure().error_code is LlmErrorCode.CONTEXT_OVERFLOW
+    assert harness.kinds() == ["primary"]
+
+
+def test_payload_too_large_is_an_overflow() -> None:
+    harness = Harness([httpx.Response(413, text="Request Entity Too Large")])
+
+    failure = harness.failure()
+
+    assert failure.error_code is LlmErrorCode.CONTEXT_OVERFLOW
+    assert harness.trace.records[0][1].response_json()["error"]["http_status"] == 413
+
+
+def test_other_bad_request_goes_straight_to_the_fallback() -> None:
+    harness = Harness(
+        [error(400, "unsupported parameter: temperature"), valid(model="fallback-model-v6")]
+    )
+
+    result = harness.review()
+
+    assert harness.kinds() == ["primary", "fallback"]
+    assert harness.clock.sleeps == []
+    assert result.model == "fallback-model-v6"
+
+
+@pytest.mark.parametrize("value", ["-5", "inf", "nan", "soon"])
+def test_unusable_retry_after_counts_as_missing(value: str) -> None:
+    harness = Harness([error(429, **{"Retry-After": value}), valid()])
+
+    harness.review()
+
+    assert harness.kinds() == ["primary", "retry"]
     assert harness.clock.sleeps == [2.25]
+
+
+def test_a_rate_limited_key_outranks_a_rejected_one() -> None:
+    primary = replace(PRIMARY, api_keys=("sk-a", "sk-b"))
+    harness = Harness([error(429, **{"Retry-After": "5"}), error(401), valid()], primary=primary)
+
+    harness.review()
+
+    assert harness.kinds() == ["primary", "retry"]
+    assert harness.clock.sleeps == [5.0]
+    first = harness.trace.records[0][1].response_json()["error"]
+    assert (first["class"], first["http_status"]) == ("llm_rate_limited", 429)
+
+
+def test_an_answer_without_usage_is_charged_by_the_estimate() -> None:
+    body = {
+        "model": "local",
+        "choices": [{"message": {"content": json.dumps(VALID_OUTPUT)}, "finish_reason": "stop"}],
+    }
+    primary = replace(PRIMARY, price=ModelPrice(Decimal(1), Decimal(1)))
+    harness = Harness([httpx.Response(200, json=body)], primary=primary)
+
+    result = harness.review()
+
+    (usage,) = result.usage
+    assert usage.tokens_in == harness.trace.records[0][1].input_tokens_estimate > 0
+    assert usage.tokens_out == -(-len(json.dumps(VALID_OUTPUT)) // 3)
+    assert usage.cost_usd > 0
+
+
+def test_a_failed_trace_write_does_not_discard_the_answer(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    class BrokenTrace:
+        async def record_call(self, run_id: UUID, record: object) -> None:
+            raise RuntimeError("database is down")
+
+    harness = Harness([valid()])
+    harness.trace = BrokenTrace()  # type: ignore[assignment]
+
+    with caplog.at_level(logging.ERROR):
+        result = harness.review()
+
+    assert result.output == VALID_OUTPUT
+    assert "llm.call trace write failed" in caplog.text
+    assert len(harness.ledger.events) == 1
 
 
 # ---------- usage and trace ----------
@@ -848,6 +1345,8 @@ def test_keys_never_reach_logs_exceptions_or_the_trace(caplog: pytest.LogCapture
 
     texts = [
         caplog.text,
+        # structured fields passed through ``extra=`` are not part of caplog.text
+        *(repr(vars(record)) for record in caplog.records),
         str(failure),
         repr(failure),
         repr(primary),
@@ -902,7 +1401,7 @@ def test_conventions_usage_counts_toward_the_run_cost_limit_of_the_review() -> N
     assert [usage.operation for _, usage in harness.ledger.events] == ["conventions"]
 
 
-def test_conventions_answer_for_other_paths_is_repaired() -> None:
+def test_conventions_answer_for_other_paths_goes_through_repair_to_the_fallback() -> None:
     wrong = {
         "files": [{"path": "other.py", "relevance": "x"}],
         "key_patterns": ["a", "b", "c"],
@@ -928,6 +1427,48 @@ def test_conventions_answer_for_other_paths_is_repaired() -> None:
     assert asyncio.run(scenario()) == right
     assert harness.kinds() == ["primary", "repair", "fallback"]
     assert "must list every path" in harness.bodies()[1]["messages"][-1]["content"]
+
+
+def test_conventions_tree_over_the_budget_is_cut_with_a_marker() -> None:
+    tree = tuple(f"src/pkg{index}/module_{index}.py" for index in range(8_000))
+    harness = Harness([completion(json.dumps(_conventions_answer()))])
+
+    async def scenario() -> None:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(harness._handle)) as client:
+            await GatewayConventionsModel(harness.gateway(client), harness.run).draft_conventions(
+                request=ConventionsRequest("P", (), None, tree, (), {}, ("app/service.py",))
+            )
+
+    asyncio.run(scenario())
+
+    assert len(harness.requests) == 1
+    user = harness.bodies()[0]["messages"][1]["content"]
+    assert re.search(r"\[\d+ more paths omitted\]\n</repo_tree>", user)
+    assert "<changed_files>\napp/service.py\n</changed_files>" in user
+    estimate = harness.trace.records[0][1].input_tokens_estimate
+    assert estimate + PRIMARY.max_output_tokens <= 60_000
+
+
+def test_conventions_for_more_than_one_hundred_changed_paths_are_valid() -> None:
+    changed = tuple(f"src/module_{index:03}.py" for index in range(101))
+    answer = dict(
+        _conventions_answer(),
+        files=[{"path": path, "relevance": "changed module"} for path in changed[:100]],
+    )
+    harness = Harness([completion(json.dumps(answer))])
+
+    async def scenario() -> object:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(harness._handle)) as client:
+            return await GatewayConventionsModel(
+                harness.gateway(client), harness.run
+            ).draft_conventions(request=ConventionsRequest("P", (), None, (), (), {}, changed))
+
+    assert asyncio.run(scenario()) == answer
+    assert harness.kinds() == ["primary"]
+    user = harness.bodies()[0]["messages"][1]["content"]
+    assert "src/module_099.py\n[1 more changed paths omitted]\n</changed_files>" in user
+    schema = harness.bodies()[0]["response_format"]["json_schema"]["schema"]
+    assert schema["properties"]["files"]["maxItems"] == 100
 
 
 # ---------- end to end ----------

@@ -14,6 +14,8 @@ from enum import StrEnum
 from typing import Any, Literal, Protocol
 from uuid import UUID
 
+from app.modules.reviews.application.run_failures import RETRYABLE_ERROR_CODES
+
 type EngineName = Literal["fast", "deep"]
 
 
@@ -27,12 +29,6 @@ class LlmErrorCode(StrEnum):
     CONTEXT_OVERFLOW = "llm_context_overflow"
     BUDGET_EXCEEDED = "budget_exceeded"
     DEADLINE_EXCEEDED = "deadline_exceeded"
-
-
-# Classes whose run is retried through reviews.retry while attempt < 3 (§6, "Retry: да").
-_RUN_RETRYABLE = frozenset(
-    {LlmErrorCode.TIMEOUT, LlmErrorCode.RATE_LIMITED, LlmErrorCode.UNAVAILABLE}
-)
 
 
 class LlmCallKind(StrEnum):
@@ -76,7 +72,7 @@ class LlmCallFailed(Exception):
     @property
     def run_retryable(self) -> bool:
         """Whether the worker may retry the run (T9) for this class."""
-        return self.error_code in _RUN_RETRYABLE
+        return self.error_code.value in RETRYABLE_ERROR_CODES
 
 
 @dataclass(frozen=True)

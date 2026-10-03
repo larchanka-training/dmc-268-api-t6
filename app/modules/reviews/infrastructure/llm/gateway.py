@@ -24,11 +24,13 @@ import logging
 import math
 import random
 import time
+from collections import OrderedDict
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Protocol
+from uuid import UUID
 
 from app.modules.reviews.application.llm import (
     LlmCallError,
@@ -112,12 +114,26 @@ class _Outcome:
     retry_after_s: float | None = None
     answer: str = ""
     errors: list[str] = field(default_factory=list)
+    refused: bool = False
 
 
 @dataclass
 class _AttemptState:
+    """One ``generate()``: its own calls and usage, returned to the caller."""
+
     calls: int = 0
     usage: list[LlmUsage] = field(default_factory=list)
+
+
+@dataclass
+class _AttemptCalls:
+    """Provider calls of one run attempt across every ``generate()`` (§4.5)."""
+
+    attempt: int
+    calls: int = 0
+
+
+_TRACKED_RUNS = 4096
 
 
 class LlmGateway:
@@ -142,6 +158,8 @@ class LlmGateway:
         policy = settings.policy
         self._jitter = jitter or (lambda: random.uniform(0, policy.max_jitter_s))
         self._monotonic = monotonic
+        # run_id -> calls of its current attempt; conventions and review share it.
+        self._attempts: OrderedDict[UUID, _AttemptCalls] = OrderedDict()
 
     @property
     def settings(self) -> LlmSettings:
@@ -165,18 +183,28 @@ class LlmGateway:
         primary = self._settings.primary
         fallback = self._settings.fallback
         state = _AttemptState()
-        primary_calls = policy.max_calls_per_attempt - (1 if fallback is not None else 0)
+        attempt = self._attempt_calls(context)
+        max_calls = policy.max_calls_per_attempt
+        if attempt.calls >= max_calls:
+            raise self._failed(
+                LlmErrorCode.UNAVAILABLE,
+                f"attempt {context.attempt} already made {attempt.calls} provider calls",
+                state,
+            )
+        primary_limit = max_calls - (1 if fallback is not None else 0)
+        timeout_s = policy.call_timeout_s[context.engine]
         messages = task.messages
         kind = LlmCallKind.PRIMARY
         timeouts = unavailable = 0
         rate_limit_waited = repaired = False
-        last = _Outcome(error=LlmErrorCode.UNAVAILABLE, message="no call was made")
 
-        while state.calls < primary_calls:
-            last = await self._call(primary, kind, messages, task, context, state)
+        while True:
+            last = await self._call(primary, kind, messages, task, context, state, attempt)
             if last.output is not None:
                 return self._result(primary, last, state)
             assert last.error is not None
+            if attempt.calls >= primary_limit:
+                break
             delay: float | None = None
             if last.error is LlmErrorCode.TIMEOUT and timeouts < len(policy.timeout_retry_delays_s):
                 delay = policy.timeout_retry_delays_s[timeouts] + self._jitter()
@@ -201,7 +229,7 @@ class LlmGateway:
                     else last.retry_after_s
                 )
                 rate_limit_waited = True
-            elif last.error is LlmErrorCode.INVALID_OUTPUT and not repaired:
+            elif last.error is LlmErrorCode.INVALID_OUTPUT and not repaired and not last.refused:
                 repaired = True
                 repair_messages = (
                     *messages,
@@ -222,17 +250,38 @@ class LlmGateway:
                 continue
             else:
                 break
+            if self._seconds_left(context) - delay < timeout_s:
+                # Sleeping would leave less than one call timeout: no same-model
+                # retry; the fallback still gets the time that is left.
+                break
             await self._sleep(delay)
             kind = LlmCallKind.RETRY
 
-        if fallback is not None and state.calls < policy.max_calls_per_attempt:
+        if fallback is not None and attempt.calls < max_calls:
+            if not self._fits_context(fallback, task.messages, context.engine):
+                # A smaller fallback window must not turn a retryable primary error
+                # into a non-retryable context overflow.
+                raise self._failed(last.error, last.message, state)
             last = await self._call(
-                fallback, LlmCallKind.FALLBACK, task.messages, task, context, state
+                fallback, LlmCallKind.FALLBACK, task.messages, task, context, state, attempt
             )
             if last.output is not None:
                 return self._result(fallback, last, state)
         assert last.error is not None
         raise self._failed(last.error, last.message, state)
+
+    def _attempt_calls(self, context: RunCallContext) -> _AttemptCalls:
+        current = self._attempts.get(context.run_id)
+        if current is None or current.attempt != context.attempt:
+            current = _AttemptCalls(context.attempt)
+            self._attempts[context.run_id] = current
+        self._attempts.move_to_end(context.run_id)
+        while len(self._attempts) > _TRACKED_RUNS:
+            self._attempts.popitem(last=False)
+        return current
+
+    def _seconds_left(self, context: RunCallContext) -> float:
+        return (context.deadline - self._clock.now()).total_seconds()
 
     def _estimate(self, profile: ModelProfile, messages: tuple[ChatMessage, ...]) -> int:
         counter = self.token_counter(profile)
@@ -252,11 +301,12 @@ class LlmGateway:
         task: StructuredTask,
         context: RunCallContext,
         state: _AttemptState,
+        attempt: _AttemptCalls,
     ) -> _Outcome:
         """Check deadline, context and budget, then make one provider call."""
         policy = self._settings.policy
         timeout_s = policy.call_timeout_s[context.engine]
-        remaining = (context.deadline - self._clock.now()).total_seconds()
+        remaining = self._seconds_left(context)
         if remaining < timeout_s:
             raise self._failed(
                 LlmErrorCode.DEADLINE_EXCEEDED,
@@ -282,12 +332,13 @@ class LlmGateway:
             )
 
         state.calls += 1
+        attempt.calls += 1
         started_at = self._clock.now()
         started = self._monotonic()
         record = _RecordDraft(
             kind=kind,
             model=profile.model,
-            call_no=state.calls,
+            call_no=attempt.calls,
             context=context,
             timeout_s=timeout_s,
             estimate=estimate,
@@ -304,8 +355,8 @@ class LlmGateway:
             )
         except TransportError as error:
             duration_ms = _elapsed_ms(started, self._monotonic())
-            await self._trace.record_call(
-                context.run_id,
+            await self._record_trace(
+                context,
                 record.finish(
                     duration_ms,
                     error=LlmCallError(error.error_class, error.http_status, error.message),
@@ -332,12 +383,10 @@ class LlmGateway:
             )
 
         duration_ms = _elapsed_ms(started, self._monotonic())
-        usage = self._usage(profile, task.operation, response)
+        usage = self._usage(profile, task.operation, response, estimate)
         state.usage.append(usage)
         await self._ledger.record(context, usage)
-        await self._trace.record_call(
-            context.run_id, record.finish(duration_ms, response=response.raw)
-        )
+        await self._record_trace(context, record.finish(duration_ms, response=response.raw))
         logger.info(
             "llm call answered",
             extra={
@@ -351,21 +400,39 @@ class LlmGateway:
         )
         return _validated(response, task)
 
-    def _usage(self, profile: ModelProfile, operation: str, response: ChatResponse) -> LlmUsage:
+    async def _record_trace(self, context: RunCallContext, record: LlmCallRecord) -> None:
+        """A failed trace write is logged, never allowed to discard a paid answer."""
+        try:
+            await self._trace.record_call(context.run_id, record)
+        except Exception:
+            logger.exception(
+                "llm.call trace write failed",
+                extra={"run_id": str(context.run_id), "call_no": record.call_no},
+            )
+
+    def _usage(
+        self, profile: ModelProfile, operation: str, response: ChatResponse, estimate: int
+    ) -> LlmUsage:
+        tokens_in, tokens_out = response.prompt_tokens, response.completion_tokens
+        if tokens_in == 0 and tokens_out == 0 and response.cost_usd is None:
+            # No usage block (some self-hosted servers): count the pre-send estimate and
+            # the answer, so the run cost limit does not fail open.
+            tokens_in = estimate
+            tokens_out = self.token_counter(profile).count(response.content or "")
         if response.cost_usd is not None:
             cost = Decimal(str(response.cost_usd)).quantize(Decimal("0.000001"))
         else:
             cost = profile.price.cost_usd(
-                tokens_in=response.prompt_tokens,
-                tokens_out=response.completion_tokens,
+                tokens_in=tokens_in,
+                tokens_out=tokens_out,
                 cache_read_tokens=response.cached_tokens,
             )
         return LlmUsage(
             provider=profile.provider,
             model=response.model or profile.model,
             operation=operation,
-            tokens_in=response.prompt_tokens,
-            tokens_out=response.completion_tokens,
+            tokens_in=tokens_in,
+            tokens_out=tokens_out,
             cache_read_tokens=response.cached_tokens,
             cost_usd=cost,
         )
@@ -418,6 +485,14 @@ class _RecordDraft:
 
 def _validated(response: ChatResponse, task: StructuredTask) -> _Outcome:
     answer = response.content or ""
+    if response.refusal is not None:
+        # A refusal is not a format error: repeating it with validator errors is wasted.
+        return _Outcome(
+            error=LlmErrorCode.INVALID_OUTPUT,
+            message=f"the model refused: {response.refusal[:200]}",
+            answer=answer,
+            refused=True,
+        )
     if response.finish_reason == "length":
         errors = ["the answer was cut at the output token limit; return a shorter JSON object"]
     elif response.content is None:

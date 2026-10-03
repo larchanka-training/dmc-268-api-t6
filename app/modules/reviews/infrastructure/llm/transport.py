@@ -70,6 +70,7 @@ class ChatResponse:
     completion_tokens: int
     cached_tokens: int
     cost_usd: float | None
+    refusal: str | None = None
 
 
 class TransportError(Exception):
@@ -130,6 +131,7 @@ class OpenAICompatibleTransport:
         start = self._current_key.get(pool, 0) % len(keys)
         body = _request_body(request)
         last: TransportError | None = None
+        rate_limited: TransportError | None = None
         for offset in range(len(keys)):
             index = (start + offset) % len(keys)
             try:
@@ -138,6 +140,8 @@ class OpenAICompatibleTransport:
                 raise _redacted(error, profile.api_keys) from None
             if response.status_code in _ROTATE_STATUSES:
                 last = _status_error(response, profile.api_keys)
+                if isinstance(last, TransportRateLimited):
+                    rate_limited = last
                 logger.warning(
                     "llm provider rejected key",
                     extra={
@@ -150,7 +154,9 @@ class OpenAICompatibleTransport:
             self._current_key[pool] = index
             return _parse_response(response, profile.api_keys)
         assert last is not None
-        raise last
+        # A key that is only rate limited outranks a dead one: the gateway then waits
+        # for Retry-After and reports llm_rate_limited, not llm_unavailable.
+        raise rate_limited or last
 
     async def _post(
         self, request: ChatRequest, body: dict[str, Any], key: str | None
@@ -207,7 +213,7 @@ def _request_body(request: ChatRequest) -> dict[str, Any]:
 
 def _status_error(response: httpx.Response, keys: tuple[str, ...]) -> TransportError:
     status = response.status_code
-    text = _redact(_error_text(response), keys)
+    text = _error_text(response, keys)
     if status == 429:
         return TransportRateLimited(
             f"HTTP 429: {text}", http_status=status, retry_after_s=_retry_after(response)
@@ -215,8 +221,12 @@ def _status_error(response: httpx.Response, keys: tuple[str, ...]) -> TransportE
     if status in (401, 403):
         # Every key was refused: a same-model retry cannot help, the fallback may.
         return TransportUnavailable(f"HTTP {status}: {text}", http_status=status, retryable=False)
-    if status == 400 and any(marker in text.lower() for marker in _CONTEXT_MARKERS):
-        return TransportContextOverflow(f"HTTP 400: {text}", http_status=status, retryable=False)
+    if status == 413 or (
+        status == 400 and any(marker in text.lower() for marker in _CONTEXT_MARKERS)
+    ):
+        return TransportContextOverflow(
+            f"HTTP {status}: {text}", http_status=status, retryable=False
+        )
     if status >= 500:
         return TransportUnavailable(f"HTTP {status}: {text}", http_status=status)
     return TransportUnavailable(f"HTTP {status}: {text}", http_status=status, retryable=False)
@@ -230,6 +240,14 @@ def _parse_response(response: httpx.Response, keys: tuple[str, ...]) -> ChatResp
         choice = raw["choices"][0]
         message = choice["message"]
         content = message.get("content")
+        if isinstance(content, list):
+            # Content parts: the text of every ``text`` part, in order.
+            content = "".join(
+                str(part.get("text", ""))
+                for part in content
+                if isinstance(part, dict) and part.get("type") == "text"
+            )
+        refusal = message.get("refusal")
         usage = raw.get("usage") or {}
         details = usage.get("prompt_tokens_details") or {}
         cost = usage.get("cost")
@@ -242,6 +260,7 @@ def _parse_response(response: httpx.Response, keys: tuple[str, ...]) -> ChatResp
             completion_tokens=int(usage.get("completion_tokens") or 0),
             cached_tokens=int(details.get("cached_tokens") or 0),
             cost_usd=float(cost) if isinstance(cost, (int, float)) else None,
+            refusal=refusal if isinstance(refusal, str) and refusal else None,
         )
     except (ValueError, KeyError, IndexError, TypeError, AttributeError):
         raise TransportUnavailable(
@@ -249,16 +268,17 @@ def _parse_response(response: httpx.Response, keys: tuple[str, ...]) -> ChatResp
         ) from None
 
 
-def _error_text(response: httpx.Response) -> str:
+def _error_text(response: httpx.Response, keys: tuple[str, ...]) -> str:
+    """Redact first, cut second: a key on the cut boundary must not leave a prefix."""
     try:
         payload = response.json()
     except ValueError:
-        return response.text[:_MAX_ERROR_TEXT]
+        return _redact(response.text, keys)[:_MAX_ERROR_TEXT]
     error = payload.get("error") if isinstance(payload, dict) else None
     if isinstance(error, dict):
         parts = [str(error.get(name)) for name in ("code", "message") if error.get(name)]
-        return " ".join(parts)[:_MAX_ERROR_TEXT]
-    return str(payload)[:_MAX_ERROR_TEXT]
+        return _redact(" ".join(parts), keys)[:_MAX_ERROR_TEXT]
+    return _redact(str(payload), keys)[:_MAX_ERROR_TEXT]
 
 
 def _retry_after(response: httpx.Response) -> float | None:

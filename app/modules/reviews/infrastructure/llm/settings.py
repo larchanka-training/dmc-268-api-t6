@@ -7,12 +7,16 @@ so a provider is only a base URL, a model and a list of keys (docs/SECRETS.md).
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Literal
+from urllib.parse import urlsplit
 
 from app.modules.reviews.application.llm import EngineName
+
+logger = logging.getLogger(__name__)
 
 type StructuredOutput = Literal["json_schema", "prompt_json"]
 
@@ -55,7 +59,11 @@ class ModelProfile:
 
 @dataclass(frozen=True)
 class GatewayPolicy:
-    """Defaults of docs/PIPELINE_SPEC.md §3, §4.5, §5.1; overridable in config."""
+    """Defaults of docs/PIPELINE_SPEC.md §3, §4.5, §5.1.
+
+    Set in code (``LlmSettings(policy=…)`` in the composition root or tests); ``from_env``
+    reads only the model profiles, the policy stays the reviewed spec value.
+    """
 
     call_timeout_s: Mapping[EngineName, float] = field(
         default_factory=lambda: {"fast": 90.0, "deep": 300.0}
@@ -143,21 +151,41 @@ def _profile_from_env(
         raw = env.get(f"{prefix}{name}")
         return raw if raw else None
 
-    base_url = value("BASE_URL") or (inherit.base_url if inherit else None)
-    base_url = base_url or (known.base_url if known else None)
-    if base_url is None:
+    # A known model keeps its own endpoint; only an unknown one inherits the primary's.
+    explicit_url = value("BASE_URL")
+    if explicit_url is not None:
+        base_url = explicit_url.rstrip("/")
+    elif known is not None:
+        base_url = known.base_url
+    elif inherit is not None:
+        base_url = inherit.base_url
+    else:
         raise LlmConfigError(f"{prefix}BASE_URL must be set for an unknown model")
+    same_endpoint = inherit is not None and base_url == inherit.base_url
 
     keys_raw = value("API_KEYS")
     if keys_raw is not None:
         api_keys = tuple(item.strip() for item in keys_raw.split(",") if item.strip())
+    elif same_endpoint and inherit is not None:
+        # Keys follow their endpoint: they are never sent to another host.
+        api_keys = inherit.api_keys
     else:
-        api_keys = inherit.api_keys if inherit else ()
+        api_keys = ()
+    if known is not None and base_url == known.base_url and not api_keys:
+        raise LlmConfigError(f"{prefix}API_KEYS must be set for {model}")
+    if api_keys and base_url.startswith("http://") and not _is_local(base_url):
+        raise LlmConfigError(f"{prefix}BASE_URL must use https when keys are sent")
 
-    provider = value("PROVIDER") or (inherit.provider if inherit else None)
-    provider = provider or (known.provider if known else "self-hosted")
+    provider = value("PROVIDER")
+    if provider is None and known is not None and base_url == known.base_url:
+        provider = known.provider
+    if provider is None and same_endpoint and inherit is not None:
+        provider = inherit.provider
+    provider = provider or "self-hosted"
 
     structured = value("STRUCTURED_OUTPUT") or (known.structured_output if known else None)
+    if structured is None and same_endpoint and inherit is not None:
+        structured = inherit.structured_output
     structured = structured or "json_schema"
     if structured not in ("json_schema", "prompt_json"):
         raise LlmConfigError(f"{prefix}STRUCTURED_OUTPUT must be json_schema or prompt_json")
@@ -173,18 +201,24 @@ def _profile_from_env(
                 raise LlmConfigError(f"{prefix}{name} must be set for an unknown model")
             return default
         try:
-            return int(raw)
+            parsed = int(raw)
         except ValueError as error:
             raise LlmConfigError(f"{prefix}{name} must be an integer") from error
+        if parsed <= 0:
+            raise LlmConfigError(f"{prefix}{name} must be positive")
+        return parsed
 
     def price(name: str, default: Decimal | None) -> Decimal:
         raw = value(name)
         if raw is None:
             return default if default is not None else Decimal(0)
         try:
-            return Decimal(raw)
+            parsed = Decimal(raw)
         except ArithmeticError as error:
             raise LlmConfigError(f"{prefix}{name} must be a decimal") from error
+        if not parsed.is_finite() or parsed < 0:
+            raise LlmConfigError(f"{prefix}{name} must be a non-negative decimal")
+        return parsed
 
     extra_raw = value("EXTRA_BODY")
     extra_body: Mapping[str, object] = {}
@@ -197,12 +231,16 @@ def _profile_from_env(
             raise LlmConfigError(f"{prefix}EXTRA_BODY must be a JSON object")
         extra_body = parsed
 
-    return ModelProfile(
+    context_window = number("CONTEXT_WINDOW", known.context_window if known else None)
+    max_output_tokens = number("MAX_OUTPUT_TOKENS", known.max_output_tokens if known else 8_000)
+    if max_output_tokens >= context_window:
+        raise LlmConfigError(f"{prefix}MAX_OUTPUT_TOKENS must be below {prefix}CONTEXT_WINDOW")
+    profile = ModelProfile(
         provider=provider,
-        base_url=base_url.rstrip("/"),
+        base_url=base_url,
         model=model,
-        context_window=number("CONTEXT_WINDOW", known.context_window if known else None),
-        max_output_tokens=number("MAX_OUTPUT_TOKENS", known.max_output_tokens if known else 8_000),
+        context_window=context_window,
+        max_output_tokens=max_output_tokens,
         price=ModelPrice(
             input_per_mtok=price(
                 "PRICE_INPUT_PER_MTOK", known.price.input_per_mtok if known else None
@@ -219,3 +257,20 @@ def _profile_from_env(
         api_keys=api_keys,
         extra_body=extra_body,
     )
+    if not _is_local(base_url) and not (
+        profile.price.input_per_mtok or profile.price.output_per_mtok
+    ):
+        # Without a price the run cost limit only sees provider-reported usage.cost.
+        logger.warning(
+            "llm model has no price, the run cost limit relies on usage.cost",
+            extra={"model": model, "variable": f"{prefix}PRICE_INPUT_PER_MTOK"},
+        )
+    return profile
+
+
+_LOCAL_HOSTS = frozenset({"localhost", "127.0.0.1", "::1", "host.docker.internal"})
+
+
+def _is_local(base_url: str) -> bool:
+    host = urlsplit(base_url).hostname or ""
+    return host in _LOCAL_HOSTS or host.endswith((".localhost", ".local", ".internal"))

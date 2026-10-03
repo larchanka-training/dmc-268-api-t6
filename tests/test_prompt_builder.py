@@ -167,7 +167,9 @@ def test_parse_unified_diff_keeps_payloads_that_look_like_file_headers() -> None
     assert '<line n="4" type="added">++new_flag</line>' in rendered
 
 
-def _metadata_context(**meta: object) -> ReviewContext:
+def _metadata_context(
+    head_sha: str | None = None, commit_messages: tuple[str, ...] = ()
+) -> ReviewContext:
     pr_meta = PullRequestMeta(
         title="Add charge",
         description=None,
@@ -180,7 +182,8 @@ def _metadata_context(**meta: object) -> ReviewContext:
         lines_removed=0,
         is_draft=False,
         is_fork=False,
-        **meta,  # type: ignore[arg-type]
+        head_sha=head_sha,
+        commit_messages=commit_messages,
     )
     return ReviewContext(
         system="SYSTEM",
@@ -264,23 +267,28 @@ def test_prompt_metadata_golden_without_commit_messages() -> None:
 
 
 def test_stable_prefix_does_not_depend_on_the_diff() -> None:
-    shared = dict(
-        system="SYSTEM WITH FEW-SHOT",
-        rules=(ReviewRule("No print", ("app/**",), (), ("Do not print.",)),),
-        agents_md="Use ports.",
-        conventions=RepoConventions(("Use services.",), ("Test paths.",)),
+    def context(
+        pr_meta: PullRequestMeta, files: tuple[ChangedFile, ...], omitted: tuple[str, ...]
+    ) -> ReviewContext:
+        return ReviewContext(
+            system="SYSTEM WITH FEW-SHOT",
+            rules=(ReviewRule("No print", ("app/**",), (), ("Do not print.",)),),
+            agents_md="Use ports.",
+            conventions=RepoConventions(("Use services.",), ("Test paths.",)),
+            pr_meta=pr_meta,
+            changed_files=files,
+            omitted_files=omitted,
+        )
+
+    first = context(
+        PullRequestMeta("One", None, "a", "x", "main", (), 1, 1, 0, False, False),
+        (ChangedFile("app/a.py", "added", (DiffLine(1, "added", "a = 1"),)),),
+        (),
     )
-    first = ReviewContext(
-        **shared,  # type: ignore[arg-type]
-        pr_meta=PullRequestMeta("One", None, "a", "x", "main", (), 1, 1, 0, False, False),
-        changed_files=(ChangedFile("app/a.py", "added", (DiffLine(1, "added", "a = 1"),)),),
-        omitted_files=(),
-    )
-    second = ReviewContext(
-        **shared,  # type: ignore[arg-type]
-        pr_meta=PullRequestMeta("Two", "d", "b", "y", "dev", ("l",), 3, 9, 4, True, True),
-        changed_files=(ChangedFile("lib/b.ts", "removed", (DiffLine(7, "removed", "b"),)),),
-        omitted_files=("big.bin",),
+    second = context(
+        PullRequestMeta("Two", "d", "b", "y", "dev", ("l",), 3, 9, 4, True, True),
+        (ChangedFile("lib/b.ts", "removed", (DiffLine(7, "removed", "b"),)),),
+        ("big.bin",),
     )
 
     first_prompt = PromptBuilder().build_prompt(first)
@@ -292,3 +300,16 @@ def test_stable_prefix_does_not_depend_on_the_diff() -> None:
     assert first_prefix.startswith("<custom_instructions>")
     assert "</repo_conventions>" in first_prefix
     assert PromptBuilder().build(first) == "\n".join((first_prompt.system, first_prompt.user))
+
+
+def test_commit_messages_are_bounded_in_number_and_length() -> None:
+    messages = ("x" * 600,) + tuple(f"fix: change {index}" for index in range(24))
+
+    rendered = PromptBuilder().build(_metadata_context(commit_messages=messages))
+
+    commits = rendered.split("<commit_messages>\n")[1].split("\n</commit_messages>")[0]
+    lines = commits.splitlines()
+    assert len(lines) == 21
+    assert lines[0] == "<commit>" + "x" * 499 + "…</commit>"
+    assert lines[19] == "<commit>fix: change 18</commit>"
+    assert lines[20] == "<commit>[5 more commits omitted]</commit>"

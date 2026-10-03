@@ -21,8 +21,8 @@ from app.modules.reviews.application.llm import (
     LlmUsage,
     RunCallContext,
 )
-from app.modules.reviews.infrastructure.llm_call_trace import SqlAlchemyLlmCallTrace
-from app.modules.reviews.infrastructure.models import RunAction, RunActionResponseBody
+from app.modules.reviews.infrastructure.llm_call_trace import RunTraceLlmCalls
+from app.modules.reviews.infrastructure.models import RunActionResponseBody
 
 RUN_ID = UUID("00000000-0000-0000-0000-000000003311")
 WORKSPACE_ID = UUID("00000000-0000-0000-0000-000000003312")
@@ -132,63 +132,52 @@ def _record(**overrides: Any) -> LlmCallRecord:
     return LlmCallRecord(**values)
 
 
-def test_llm_call_is_appended_as_the_next_run_action() -> None:
-    factory = FakeFactory(6)
+class RecordingRunTrace:
+    def __init__(self) -> None:
+        self.records: list[tuple[UUID, str, dict[str, Any], Any, datetime, int]] = []
+
+    async def record(
+        self,
+        run_id: UUID,
+        tool: str,
+        request: dict[str, Any],
+        response: Any,
+        started_at: datetime,
+        duration_ms: int,
+    ) -> None:
+        self.records.append((run_id, tool, request, response, started_at, duration_ms))
+
+
+def test_llm_call_goes_through_the_shared_run_trace() -> None:
+    trace = RecordingRunTrace()
     record = _record(
         error=LlmCallError(LlmErrorCode.TIMEOUT, None, "no answer within 90 s (ReadTimeout)")
     )
 
-    asyncio.run(SqlAlchemyLlmCallTrace(_factory(factory)).record_call(RUN_ID, record))
+    asyncio.run(RunTraceLlmCalls(trace).record_call(RUN_ID, record))
 
-    assert factory.opened == ["transaction"]
-    (action,) = factory.session.added
-    assert isinstance(action, RunAction)
-    assert (action.run_id, action.index, action.tool) == (RUN_ID, 7, "llm.call")
-    assert action.request == {
-        "kind": "fallback",
-        "model": "mistral-small-4",
-        "call_no": 3,
-        "attempt": 2,
-        "timeout_s": 90.0,
-        "prompt_version_id": None,
-        "rule_version_id": None,
-        "input_tokens_estimate": 4200,
-    }
-    assert action.response == {
-        "error": {
-            "class": "llm_timeout",
-            "http_status": None,
-            "message": "no answer within 90 s (ReadTimeout)",
-        }
-    }
-    assert action.response_ref is None
-    assert (action.started_at, action.duration_ms) == (STARTED, 1234)
-
-
-def test_llm_call_response_over_64_kb_goes_to_run_action_responses() -> None:
-    factory = FakeFactory(0)
-    huge = {"choices": [{"message": {"content": "я" * 50_000}}]}
-
-    asyncio.run(
-        SqlAlchemyLlmCallTrace(_factory(factory)).record_call(RUN_ID, _record(response=huge))
-    )
-
-    body, action = factory.session.added
-    assert isinstance(body, RunActionResponseBody)
-    assert (body.run_id, body.body) == (RUN_ID, huge)
-    assert isinstance(action, RunAction)
-    assert action.response is None
-    assert action.response_ref == str(body.id)
-
-
-def test_llm_call_response_up_to_64_kb_stays_inline() -> None:
-    factory = FakeFactory(0)
-    small = {"choices": [{"message": {"content": "x" * 1000}}]}
-
-    asyncio.run(
-        SqlAlchemyLlmCallTrace(_factory(factory)).record_call(RUN_ID, _record(response=small))
-    )
-
-    (action,) = factory.session.added
-    assert isinstance(action, RunAction)
-    assert (action.response, action.response_ref) == (small, None)
+    assert trace.records == [
+        (
+            RUN_ID,
+            "llm.call",
+            {
+                "kind": "fallback",
+                "model": "mistral-small-4",
+                "call_no": 3,
+                "attempt": 2,
+                "timeout_s": 90.0,
+                "prompt_version_id": None,
+                "rule_version_id": None,
+                "input_tokens_estimate": 4200,
+            },
+            {
+                "error": {
+                    "class": "llm_timeout",
+                    "http_status": None,
+                    "message": "no answer within 90 s (ReadTimeout)",
+                }
+            },
+            STARTED,
+            1234,
+        )
+    ]

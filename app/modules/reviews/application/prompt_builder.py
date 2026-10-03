@@ -12,6 +12,10 @@ from xml.sax.saxutils import escape
 from app.common.application.languages import LANGUAGE_BY_SUFFIX
 
 type LineType = Literal["added", "removed", "context"]
+
+# Commit messages are a fixed cost outside the diff budget: keep them bounded.
+MAX_COMMIT_MESSAGES = 20
+MAX_COMMIT_MESSAGE_CHARS = 500
 type FileStatus = Literal["added", "modified", "removed", "renamed"]
 
 
@@ -213,12 +217,12 @@ class PromptBuilder:
         if meta.head_sha is not None:
             elements.append(_element("head_sha", _text(meta.head_sha)))
         if meta.commit_messages:
-            elements.append(
-                _container(
-                    "commit_messages",
-                    "\n".join(_element("commit", _text(item)) for item in meta.commit_messages),
-                )
-            )
+            shown = meta.commit_messages[:MAX_COMMIT_MESSAGES]
+            commits = [_element("commit", _text(_shorten(item))) for item in shown]
+            if len(meta.commit_messages) > len(shown):
+                hidden = len(meta.commit_messages) - len(shown)
+                commits.append(_element("commit", f"[{hidden} more commits omitted]"))
+            elements.append(_container("commit_messages", "\n".join(commits)))
         return _container("pr_meta", "\n".join(elements))
 
     @staticmethod
@@ -236,6 +240,12 @@ class PromptBuilder:
                 attributes += f' language="{_attribute(file.language)}"'
             rendered.append(f"<file {attributes}>\n" + "\n".join(body) + "\n</file>")
         return _container("changed_files", "\n".join(rendered))
+
+
+def _shorten(message: str) -> str:
+    if len(message) <= MAX_COMMIT_MESSAGE_CHARS:
+        return message
+    return message[: MAX_COMMIT_MESSAGE_CHARS - 1] + "…"
 
 
 def truncation_trailer(shown: int, total: int) -> str:
@@ -316,6 +326,23 @@ def _path_from_diff_header(header: str) -> str:
     if not remainder:
         raise ValueError(f"invalid unified diff header: {header}")
     return remainder
+
+
+def render_custom_instructions(rules: tuple[ReviewRule, ...]) -> str:
+    """The ``<custom_instructions>`` block shared by the review and conventions prompts."""
+    return PromptBuilder._render_rules(rules)
+
+
+def xml_container(name: str, content: str) -> str:
+    return _container(name, content)
+
+
+def xml_text(value: str) -> str:
+    return _text(value)
+
+
+def xml_attribute(value: str) -> str:
+    return _attribute(value)
 
 
 def _container(name: str, content: str) -> str:

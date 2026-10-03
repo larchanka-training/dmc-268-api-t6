@@ -83,6 +83,23 @@ def _mutated(mutate: Any) -> str:
         (_mutated(lambda v: v["findings"][0].update(title="x" * 81)), "is too long"),
         (_mutated(lambda v: v["findings"][0].update(body="x" * 1201)), "is too long"),
         (_mutated(lambda v: v["findings"][0].update(path="")), "should be non-empty"),
+        (_mutated(lambda v: v["findings"][0].update(title="")), "title: '' should be non-empty"),
+        (_mutated(lambda v: v["findings"][0].update(body="")), "body: '' should be non-empty"),
+        (_mutated(lambda v: v["summary"].update(problem="")), "problem: '' should be non-empty"),
+        (
+            _mutated(lambda v: v["summary"].update(done_well="")),
+            "done_well: '' should be non-empty",
+        ),
+        (_mutated(lambda v: v["findings"][0].update(start_line=0)), "less than the minimum of 1"),
+        (_mutated(lambda v: v["findings"][0].update(confidence=-0.1)), "minimum of 0"),
+        (
+            _mutated(lambda v: v["findings"][0].update(start_line=v["findings"][0]["line"] + 1)),
+            "start_line must be strictly earlier than line",
+        ),
+        (
+            _mutated(lambda v: v["summary"].update(problem="No terminal punctuation")),
+            "exactly one sentence",
+        ),
         (_mutated(lambda v: v.update(findings=v["findings"] * 11)), "is too long"),
         (_mutated(lambda v: v["findings"][0].update(line=1.0)), "valid integer"),
         (_mutated(lambda v: v["findings"][0].update(title="Two.\nlines")), "title"),
@@ -110,11 +127,48 @@ def test_order_by_severity_then_confidence_is_enforced() -> None:
         validate_review_answer(raw)
 
 
-def test_provider_schema_is_the_schema_file_without_root_annotations() -> None:
+def test_equal_severity_must_be_ordered_by_descending_confidence() -> None:
+    first = dict(SAMPLE["findings"][0], severity="high", confidence=0.4)
+    second = dict(SAMPLE["findings"][0], severity="high", confidence=0.9)
+
+    with pytest.raises(InvalidAnswer, match="severity then confidence ordered"):
+        validate_review_answer(json.dumps(dict(SAMPLE, findings=[first, second])))
+    # the same pair in descending confidence is accepted
+    validate_review_answer(json.dumps(dict(SAMPLE, findings=[second, first])))
+
+
+@pytest.mark.parametrize(
+    ("problem", "done_well"),
+    [("Is this safe?", "It is! Mostly."), ("It breaks!", "Tests pass. Names are clear?")],
+)
+def test_exclamation_and_question_marks_end_a_sentence(problem: str, done_well: str) -> None:
+    summary = dict(SAMPLE["summary"], problem=problem, done_well=done_well)
+
+    validate_review_answer(json.dumps(dict(SAMPLE, summary=summary)))
+
+
+def test_provider_schema_is_the_schema_file_without_any_annotation() -> None:
     on_disk = json.loads(REVIEW_OUTPUT_SCHEMA_PATH.read_text(encoding="utf-8"))
     sent = provider_schema(review_output_schema())
 
-    assert {
-        key: on_disk[key] for key in on_disk if not key.startswith("$") or key == "$defs"
-    } == sent
+    assert "$comment" in json.dumps(on_disk["$defs"])
+    assert "$comment" not in json.dumps(sent)
+    assert "$schema" not in sent and "$id" not in sent
+    assert (
+        sent["$defs"]["ReviewFinding"]["required"] == on_disk["$defs"]["ReviewFinding"]["required"]
+    )
+    assert sent["properties"]["findings"]["items"] == {"$ref": "#/$defs/ReviewFinding"}
     assert sent["required"] == ["findings", "summary"]
+
+
+def test_a_long_echoed_value_keeps_the_message_short_and_its_verdict() -> None:
+    value = json.loads(json.dumps(SAMPLE))
+    value["findings"][0]["body"] = "x" * 20_000
+
+    with pytest.raises(InvalidAnswer) as caught:
+        validate_review_answer(json.dumps(value))
+
+    (message,) = caught.value.errors
+    assert len(message) <= 300
+    assert message.startswith("findings/0/body: ")
+    assert message.endswith("is too long")

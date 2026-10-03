@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import re
+from pathlib import Path
 
 from app.modules.reviews.application.prompt_budget import fit_review_context, prompt_tokens
 from app.modules.reviews.application.prompt_builder import (
@@ -24,6 +26,9 @@ class CharCounter:
 
 
 COUNTER = CharCounter()
+DEFAULT_FRONTEND = (
+    Path(__file__).resolve().parents[1] / "review" / "rules" / "default-frontend.v1.json"
+)
 
 
 def changed_file(path: str, count: int, *, width: int = 40) -> ChangedFile:
@@ -125,3 +130,47 @@ def test_nothing_fits_returns_the_all_omitted_context() -> None:
 
     assert fitted.changed_files == ()
     assert fitted.omitted_files == ("assets/logo.png", "app/a.py")
+
+
+def test_one_token_over_the_budget_changes_the_context() -> None:
+    original = context(changed_file("app/a.py", 5), changed_file("app/b.py", 5))
+    exact = prompt_tokens(original, COUNTER)
+
+    assert fit_review_context(original, max_prompt_tokens=exact, counter=COUNTER) is original
+    fitted = fit_review_context(original, max_prompt_tokens=exact - 1, counter=COUNTER)
+    assert fitted != original
+    assert prompt_tokens(fitted, COUNTER) <= exact - 1
+
+
+def test_the_shipped_brace_glob_of_a_custom_rule_raises_the_priority() -> None:
+    rule = next(
+        ReviewRule(item["name"], tuple(item["include"]), tuple(item["exclude"]), ("Check.",))
+        for item in json.loads(DEFAULT_FRONTEND.read_text(encoding="utf-8"))["rules"]
+        if item["include"] == ["src/**/*.{ts,tsx}"]
+    )
+    original = context(
+        changed_file("lib/aaa.ts", 20),
+        changed_file("src/widgets/card.tsx", 20),
+        rules=(rule,),
+    )
+    budget = prompt_tokens(original, COUNTER) - 20 * 60
+
+    fitted = fit_review_context(original, max_prompt_tokens=budget, counter=COUNTER)
+
+    kept = {file.path: file for file in fitted.changed_files}
+    assert kept["src/widgets/card.tsx"] == original.changed_files[1]
+
+
+def test_test_directories_are_matched_by_path_segment_not_substring() -> None:
+    original = context(
+        # sorts first, so a tie in priority would keep it instead of the source file
+        changed_file("a/tests/test_a.py", 20),
+        changed_file("app/latest/core.py", 20),
+    )
+    budget = prompt_tokens(original, COUNTER) - 20 * 60
+
+    fitted = fit_review_context(original, max_prompt_tokens=budget, counter=COUNTER)
+
+    kept = {file.path: file for file in fitted.changed_files}
+    # "latest/" is a source directory: it outranks the test file
+    assert kept["app/latest/core.py"] == original.changed_files[1]

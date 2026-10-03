@@ -6,11 +6,15 @@ use cases keep their narrow ports and know nothing about providers or retries.
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Mapping
 from uuid import UUID
 
 from app.modules.reviews.application.conventions import ConventionsRequest
-from app.modules.reviews.application.conventions_prompt import build_conventions_prompt
+from app.modules.reviews.application.conventions_prompt import (
+    build_conventions_prompt,
+    fit_conventions_request,
+)
 from app.modules.reviews.application.execute_review import PullRequestMetaSource
 from app.modules.reviews.application.llm import RunCallContext
 from app.modules.reviews.application.prompt_budget import fit_review_context
@@ -69,13 +73,18 @@ class GatewayConventionsModel:
         self._run = run
 
     async def draft_conventions(self, *, request: ConventionsRequest) -> Mapping[str, object]:
-        prompt = build_conventions_prompt(request)
+        fitted = fit_conventions_request(
+            request,
+            max_prompt_tokens=self._gateway.max_prompt_tokens(self._run.engine),
+            counter=self._gateway.token_counter(),
+        )
+        prompt = build_conventions_prompt(fitted)
         result = await self._gateway.generate(
             StructuredTask(
                 operation=CONVENTIONS_OPERATION,
                 messages=_messages(prompt),
                 schema=ResponseSchema("RepoConventionsDraft", conventions_schema()),
-                validate=conventions_answer_validator(request.changed_files),
+                validate=conventions_answer_validator(request.traced_files),
             ),
             self._run,
         )
@@ -86,7 +95,10 @@ async def review_with_gateway(
     gateway: LlmGateway, context: ReviewContext, run: RunCallContext
 ) -> GatewayResult:
     """The whole review call: token budget, rendering, structured generation."""
-    fitted = fit_review_context(
+    # The fitting renders the prompt per candidate (CPU-bound on large diffs): keep it
+    # off the event loop, where the worker's heartbeat and lease renewals run.
+    fitted = await asyncio.to_thread(
+        fit_review_context,
         context,
         max_prompt_tokens=gateway.max_prompt_tokens(run.engine),
         counter=gateway.token_counter(),
