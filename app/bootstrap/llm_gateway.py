@@ -109,7 +109,7 @@ class ReviewCase:
 
 # Attempt deadlines of docs/PIPELINE_SPEC.md §3: fast 8 min, deep (SandboxEngine) 10 min.
 SANDBOX_ENGINE_DEADLINE = timedelta(minutes=10)
-_CASE_DEADLINE: dict[str, timedelta] = {
+CASE_DEADLINE: dict[str, timedelta] = {
     "fast": FAST_ATTEMPT_DEADLINE,
     "deep": SANDBOX_ENGINE_DEADLINE,
 }
@@ -156,7 +156,7 @@ async def review_case(
         workspace_id=_EVAL_WORKSPACE,
         attempt=1,
         engine=case.engine,
-        deadline=datetime.now(UTC) + _CASE_DEADLINE[case.engine],
+        deadline=datetime.now(UTC) + CASE_DEADLINE[case.engine],
     )
     context = ReviewContext(
         system=case.system,

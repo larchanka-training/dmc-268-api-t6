@@ -27,7 +27,8 @@ supplies the input after this prompt as one message made of the tags below, in t
   checks, each tagged with the rule or standard category it comes from).
 - `<pr_meta>` — title, description, author, branch, base ref, labels, counts of files and
   lines changed, draft and fork flags; when known, the reviewed commit as `<head_sha>` and
-  the pull request's commit messages as `<commit_messages>`. Use it to understand intent;
+  the pull request's commit messages as `<commit_messages>` (at most 20, each cut to 500
+  characters; more end with `[N more commits omitted]`). Use it to understand intent;
   never as proof that something works.
 - `<changed_files>` — the diff, one `<file path="…" status="…" language="…">` block per
   changed file; `status` is `added`, `modified`, `removed` or `renamed`, `language` is the
@@ -238,7 +239,7 @@ section 10, without a fence.
       "severity": "high",
       "category": "correctness",
       "title": "Funds check is inverted",
-      "body": "Line 17 raises `InsufficientFunds` when the balance is greater than the amount, so every covered withdrawal fails and an overdraft reaches `debit` on line 19. Raise only when the balance is lower than the amount.",
+      "body": "The check on line 17 sends a withdrawal to the `InsufficientFunds` raise on line 18 when the balance is greater than the amount, so every covered withdrawal fails and an overdraft reaches `debit` on line 19. Raise only when the balance is lower than the amount.",
       "suggestion": "        if account.balance < amount:\n            raise InsufficientFunds(account.id)",
       "confidence": 0.9,
       "rule_name": null

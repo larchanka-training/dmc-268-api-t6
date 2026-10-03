@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from datetime import timedelta
 from pathlib import Path
 from typing import Any, cast
 
@@ -10,7 +11,8 @@ import httpx
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.bootstrap.llm_gateway import build_gateway, main
+from app.bootstrap.llm_gateway import CASE_DEADLINE, build_gateway, main
+from app.modules.reviews.infrastructure.llm import answers
 from app.modules.reviews.infrastructure.llm.gateway import LlmGateway
 from app.modules.reviews.infrastructure.llm.settings import LlmSettings
 from app.modules.reviews.infrastructure.llm.transport import OpenAICompatibleTransport
@@ -118,3 +120,24 @@ def test_build_gateway_composes_the_production_ports() -> None:
 
     assert isinstance(gateway, LlmGateway)
     assert gateway.settings is settings
+
+
+def test_case_deadlines_are_the_attempt_deadlines_of_the_spec() -> None:
+    # docs/PIPELINE_SPEC.md §3: fast 8 min from claim, deep (SandboxEngine) 10 min
+    assert {"fast": timedelta(minutes=8), "deep": timedelta(minutes=10)} == CASE_DEADLINE
+
+
+def test_build_gateway_fails_at_start_when_the_schema_file_is_missing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(answers, "REVIEW_OUTPUT_SCHEMA_PATH", tmp_path / "missing.json")
+    answers.review_output_schema.cache_clear()
+    try:
+        with pytest.raises(FileNotFoundError):
+            build_gateway(
+                LlmSettings.from_env(SELF_HOSTED),
+                httpx.AsyncClient(),
+                cast(async_sessionmaker[AsyncSession], object()),
+            )
+    finally:
+        answers.review_output_schema.cache_clear()
