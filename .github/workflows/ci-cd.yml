@@ -189,10 +189,11 @@ jobs:
         run: uv run mypy .
 
       - name: pytest
-        # ReviewOutput schema module: 100% lines and branches (#33).
+        # ReviewOutput schema and the gateway's answer parse path: 100% lines and branches (#33).
         run: >-
           uv run pytest
           --cov=app.modules.reviews.application.review_output
+          --cov=app.modules.reviews.infrastructure.llm.answers
           --cov-branch --cov-fail-under=100 --cov-report=term-missing
 
       - name: Gold corpus and recorded replay

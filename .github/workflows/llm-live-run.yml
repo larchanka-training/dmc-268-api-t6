@@ -1,0 +1,103 @@
+name: LLM live run
+
+# Manual live check of the LLM gateway on EUrouter (#33, OQ-2 / D7 in docs/SYSTEM_DESIGN.md §15).
+# Not part of the required checks: those run without network and keys. The org secret
+# AI_DMC268_T6 is used only here; GitHub masks it in the log, the gateway never logs keys.
+
+on:
+  workflow_dispatch:
+    inputs:
+      model:
+        description: Primary model
+        default: gpt-4.1-mini
+      fallback_model:
+        description: Fallback model
+        default: mistral-small-4
+      diff:
+        description: Unified diff to review
+        default: review/examples/sample.diff
+
+permissions:
+  contents: read
+
+concurrency:
+  group: llm-live-run
+  cancel-in-progress: false
+
+jobs:
+  live-run:
+    name: LLM live run
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      LLM_API_KEYS: ${{ secrets.AI_DMC268_T6 }}
+      MODEL: ${{ inputs.model }}
+      FALLBACK_MODEL: ${{ inputs.fallback_model }}
+      DIFF: ${{ inputs.diff }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          version: "0.12.11"
+          python-version: "3.13"
+
+      - name: uv sync
+        run: uv sync --locked --all-groups
+
+      - name: Primary with fallback
+        id: primary
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          LLM_MODEL="$MODEL" LLM_FALLBACK_MODEL="$FALLBACK_MODEL" \
+            uv run python -m app.bootstrap.llm_gateway "$DIFF" > primary.json
+
+      - name: Fallback as the primary, without a fallback
+        id: fallback
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          LLM_MODEL="$FALLBACK_MODEL" \
+            uv run python -m app.bootstrap.llm_gateway "$DIFF" > fallback.json
+
+      - name: Validate and summarize
+        if: always()
+        run: |
+          status=0
+          {
+            echo "## LLM live run"
+            echo
+            echo "| Run | Provider | Model (\`model\` of the answer) | Calls | Tokens in / out / cache | Cost, \$ | Time, ms | Validator |"
+            echo "|---|---|---|---|---|---|---|---|"
+          } >> "$GITHUB_STEP_SUMMARY"
+          for run in primary fallback; do
+            if [[ ! -s "$run.json" ]]; then
+              echo "| $run | — | — | — | — | — | — | no output |" >> "$GITHUB_STEP_SUMMARY"
+              status=1
+              continue
+            fi
+            if jq -e '.output' "$run.json" > /dev/null; then
+              jq '.output' "$run.json" > "$run.output.json"
+              verdict="$(uv run python review/scripts/validate_findings.py "$run.output.json" 2>&1 | tail -n 1)" || status=1
+            else
+              verdict="$(jq -r '"failed: " + .error_code' "$run.json")"
+              status=1
+            fi
+            jq -r --arg run "$run" --arg verdict "$verdict" \
+              '"| \($run) | \(.provider // "—") | \(.model // "—") | \([.calls[]? | .kind + (if .error then " (" + .error.class + " " + ((.error.http_status // "") | tostring) + ")" else "" end)] | join(", ")) | \(.tokens_in) / \(.tokens_out) / \(.cache_read_tokens) | \(.cost_usd) | \(.latency_ms // "—") | \($verdict) |"' \
+              "$run.json" >> "$GITHUB_STEP_SUMMARY"
+          done
+          exit "$status"
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: llm-live-run
+          path: |
+            primary.json
+            fallback.json
+          if-no-files-found: warn
