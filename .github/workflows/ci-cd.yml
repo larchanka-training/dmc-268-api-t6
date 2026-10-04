@@ -265,6 +265,19 @@ jobs:
               summary.write(f"Integration tests: {len(cases)} collected, 0 skipped\n")
           PYTHON
 
+  openapi-lint:
+    name: OpenAPI lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Redocly lint
+        # docs/PIPELINE_SPEC.md §16; the same command as locally. The repo-root redocly.yaml
+        # (extends recommended-strict: every warning is an error) and .redocly.lint-ignore.yaml apply.
+        # The runner's preinstalled Node satisfies the CLI's engines (>=22.12).
+        run: npx --yes @redocly/cli@2.57.0 lint contracts/openapi.yaml
+
   docker-build:
     name: Docker image build
     runs-on: ubuntu-latest
@@ -419,6 +432,7 @@ jobs:
       - terraform-fmt-validate
       - terraform-lint-security
       - python-lint-type-test
+      - openapi-lint
       - docker-build
       - docker-scan
       - webhook-smoke
