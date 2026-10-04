@@ -104,7 +104,7 @@ jobs:
           exit "${missing}"
 
   python-lint-type-test:
-    # The name is the required status check on main; keep it verbatim.
+    # The name is a required status check on main; keep it verbatim.
     name: Python lint / type / test
     runs-on: ubuntu-latest
     services:
@@ -266,6 +266,7 @@ jobs:
           PYTHON
 
   openapi-lint:
+    # The name is a required status check on main; keep it verbatim.
     name: OpenAPI lint
     runs-on: ubuntu-latest
     steps:
@@ -361,6 +362,7 @@ jobs:
           scanners: vuln,secret,misconfig
 
   webhook-smoke:
+    # The name is a required status check on main; keep it verbatim.
     name: Webhook container smoke
     runs-on: ubuntu-latest
     needs: docker-build
@@ -426,7 +428,7 @@ jobs:
       contents: read
       packages: write
       actions: read
-    # Nothing reaches the registry or staging unless the required check is green.
+    # Nothing reaches the registry or staging unless every job below is green.
     needs:
       - secret-scan
       - terraform-fmt-validate
