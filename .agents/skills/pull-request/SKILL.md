@@ -37,12 +37,15 @@ metadata:
    - `gh pr create --title "<type>(<scope>): <subject>" --body "<body>" --base main`.
    - Title: Conventional Commits, ≤72 characters.
    - Body has four sections, in this order: `What`, `Why`, `How to verify`, `Refs`.
+   - Body follows `.github/pull_request_template.md`, including its Before merge checklist
+     (`gh pr create --body` bypasses the template).
    - Ask the user whether the PR is ready for review. Not ready: add `--draft`. Ready: ask
      who reviews it and add `--reviewer <login>` — never pick the reviewer yourself.
      The review flow after this point (threads, verdicts, merge) is in
      `docs/CONTRIBUTING.md`.
-   - Cross-repo references use `Refs owner/repo#N` — never a closing keyword; the issue is
-     closed by hand after both linked PRs merge.
+   - Every issue reference uses `Refs #N` / `Refs owner/repo#N` — never a closing keyword,
+     and never link the PR in the Development panel; the tech lead closes the issue after
+     checking its AC (`docs/CONTRIBUTING.md`).
 
 4. **Handle authentication errors**: if `gh pr create` fails on auth, ask the user to run
    `gh auth login`.

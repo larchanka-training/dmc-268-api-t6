@@ -73,8 +73,8 @@ Use the affected module/component (folder) name, lowercase, kebab-case.
 ## 3. Footer
 
 - Reference the issue: `Refs #N` (same repo) or `Refs owner/repo#N` (cross-repo).
-- Never a closing keyword (`Closes`/`Fixes`) on a cross-repo reference — the issue is closed
-  by hand after every linked PR merges.
+- Never a closing keyword (`Closes`/`Fixes`/`Resolves`), same-repo or cross-repo — the tech
+  lead closes the issue after checking its AC.
 - Mention breaking changes: `BREAKING CHANGE: <description>`.
 
 ### Example
