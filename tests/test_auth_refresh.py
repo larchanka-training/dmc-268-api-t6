@@ -22,7 +22,10 @@ from cryptography.hazmat.primitives.serialization import (
 from fastapi.testclient import TestClient
 
 from app.main import app
-from app.modules.auth.application.exchange_github_code import AuthenticatedUser
+from app.modules.auth.application.exchange_github_code import (
+    AuthenticatedUser,
+    ExchangedSession,
+)
 from app.modules.auth.application.refresh_session import (
     InvalidRefreshToken,
     LogoutLocalSession,
@@ -159,6 +162,18 @@ class FakeRefreshUow:
             uuid4(), prior.family_id, prior.user_id, new_token_hash, expires_at
         )
 
+    async def add_session(
+        self,
+        family_id: UUID,
+        user_id: int,
+        token_hash: str,
+        expires_at: datetime,
+    ) -> None:
+        self._database.family.expires_at = expires_at
+        self._database.sessions[token_hash] = FakeSession(
+            uuid4(), family_id, user_id, token_hash, expires_at
+        )
+
     async def revoke_family(self, family_id: UUID, at: datetime) -> None:
         assert self._locked and self._database.family.id == family_id
         self._database.family.revoked_at = at
@@ -219,9 +234,11 @@ def test_refresh_rotates_once_and_uses_current_workspace_memberships() -> None:
     )
     assert claims["workspaces"] == ["00000000-0000-0000-0000-000000000077"]
 
+    # Replay after the grace period expires revokes the entire family
+    database.now = now + timedelta(seconds=16)
     with pytest.raises(InvalidRefreshToken):
         asyncio.run(refresh.execute("original-secret"))
-    assert database.family.revoked_at == now
+    assert database.family.revoked_at == database.now
     with pytest.raises(InvalidRefreshToken):
         asyncio.run(refresh.execute("replacement-secret"))
 
@@ -266,7 +283,7 @@ def test_missing_unknown_expired_and_revoked_refresh_are_rejected() -> None:
         asyncio.run(refresh.execute("expired-secret"))
 
 
-def test_concurrent_same_token_replay_revokes_descendants() -> None:
+def test_concurrent_same_token_refresh_within_grace_period_does_not_revoke() -> None:
     now = datetime(2026, 9, 28, 12, tzinfo=UTC)
     database = FakeRefreshDatabase(now)
     database.seed("original-secret")
@@ -283,10 +300,14 @@ def test_concurrent_same_token_replay_revokes_descendants() -> None:
         )
 
     outcomes = asyncio.run(race())
-    assert sum(isinstance(item, InvalidRefreshToken) for item in outcomes) == 1
-    assert database.family.revoked_at == now
+    assert all(isinstance(item, ExchangedSession) for item in outcomes)
+    assert database.family.revoked_at is None
+
+    # True replay after the 15-second grace period revokes the whole family
+    database.now = now + timedelta(seconds=16)
     with pytest.raises(InvalidRefreshToken):
-        asyncio.run(refresh.execute("replacement-secret"))
+        asyncio.run(refresh.execute("original-secret"))
+    assert database.family.revoked_at == database.now
 
 
 def test_replay_racing_current_token_revokes_whole_family() -> None:
@@ -294,8 +315,9 @@ def test_replay_racing_current_token_revokes_whole_family() -> None:
     database = FakeRefreshDatabase(now)
     database.seed("old-secret")
     database.seed("current-secret")
+    # Old token rotated outside the grace period (e.g. 20s ago)
     database.sessions[hashlib.sha256(b"old-secret").hexdigest()].rotated_at = now - timedelta(
-        seconds=1
+        seconds=20
     )
     private, _ = _keys()
     refresh, _ = _use_cases(database, private, new_token="next-secret")
@@ -346,6 +368,7 @@ def test_refresh_and_logout_http_cookie_contract() -> None:
             "/api/auth/refresh", headers={"Cookie": "refresh_token=original-secret"}
         )
         client.cookies.clear()
+        database.now = now + timedelta(seconds=16)
         replay = client.post(
             "/api/auth/refresh", headers={"Cookie": "refresh_token=original-secret"}
         )

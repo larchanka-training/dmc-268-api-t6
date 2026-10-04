@@ -131,6 +131,8 @@ class ReviewsApiResources:
     def run_repository(
         self,
         scope: AuthScope | None = None,
+        *,
+        allow_unscoped: bool = False,
     ) -> (
         RunRepository
         | RunDetailRepository
@@ -140,7 +142,7 @@ class ReviewsApiResources:
         | RunFileRepository
         | CancelRunRepository
     ):
-        return SqlAlchemyRunRepository(self._session_factory, scope)
+        return SqlAlchemyRunRepository(self._session_factory, scope, allow_unscoped=allow_unscoped)
 
     def file_blob_cache(self) -> BlobCache:
         return SqlAlchemyBlobCache(self._session_factory)

@@ -33,7 +33,7 @@ class SqlAlchemyDueNoCiCandidates:
                 Run.head_sha == CodeChange.head_sha,
             )
         )
-        async with self._session_factory() as session, session.begin():
+        async with self._session_factory() as session:
             rows = await session.execute(
                 select(CodeChange.id, CodeChange.head_sha)
                 .join(Repository, CodeChange.repository_id == Repository.id)
@@ -57,7 +57,7 @@ class SqlAlchemyDueNoCiCandidates:
             return tuple(DueNoCiCandidate(*row) for row in rows)
 
     async def exclude(self, candidate: DueNoCiCandidate) -> None:
-        async with self._session_factory() as session, session.begin():
+        async with self._session_factory() as session:
             await session.execute(
                 update(CodeChange)
                 .where(
@@ -67,3 +67,5 @@ class SqlAlchemyDueNoCiCandidates:
                 )
                 .values(ci_status={"sweep": "excluded"})
             )
+            await session.flush()
+            await session.commit()

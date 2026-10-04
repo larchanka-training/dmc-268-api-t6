@@ -14,10 +14,11 @@ from cryptography.hazmat.primitives.serialization import (
     PrivateFormat,
     PublicFormat,
 )
+from fastapi.routing import APIRoute
 from fastapi.testclient import TestClient
 
 from app.bootstrap.auth_api import get_current_user
-from app.main import app, get_run_repository
+from app.main import api_router, app, get_repository_settings, get_run_repository
 from app.modules.auth.application.get_me import CurrentUser, GetCurrentUser, MyWorkspace
 from app.modules.auth.application.scope import AuthScope
 
@@ -49,20 +50,29 @@ def _token(private_key: str, **overrides: object) -> str:
     return jwt.encode(claims, private_key, algorithm="RS256")
 
 
+def _portal_routes() -> list[tuple[str, str]]:
+    routes: list[tuple[str, str]] = []
+    dummy_uuid = "00000000-0000-0000-0000-000000000001"
+    for route in api_router.routes:
+        if not isinstance(route, APIRoute):
+            continue
+        path = (
+            route.path.replace("{run_id}", dummy_uuid)
+            .replace("{repo_id}", dummy_uuid)
+            .replace("{index}", "0")
+        )
+        if not route.methods:
+            continue
+        for method in sorted(route.methods):
+            if method in {"GET", "POST", "PATCH", "PUT", "DELETE"}:
+                routes.append((method, path))
+    routes.append(("GET", "/api/auth/me"))
+    return routes
+
+
 @pytest.mark.parametrize(
     ("method", "path"),
-    [
-        ("GET", "/api/runs"),
-        ("GET", "/api/runs/00000000-0000-0000-0000-000000000001"),
-        ("POST", "/api/runs/00000000-0000-0000-0000-000000000001/cancel"),
-        ("GET", "/api/runs/00000000-0000-0000-0000-000000000001/comments"),
-        ("GET", "/api/runs/00000000-0000-0000-0000-000000000001/actions"),
-        ("GET", "/api/runs/00000000-0000-0000-0000-000000000001/actions/0/response"),
-        ("GET", "/api/runs/00000000-0000-0000-0000-000000000001/diff"),
-        ("GET", "/api/runs/00000000-0000-0000-0000-000000000001/files?path=src/a.py"),
-        ("GET", "/api/stream"),
-        ("GET", "/api/auth/me"),
-    ],
+    _portal_routes(),
 )
 def test_every_portal_route_rejects_missing_bearer(method: str, path: str) -> None:
     assert TestClient(app).request(method, path).status_code == 401
@@ -140,6 +150,45 @@ def test_portal_list_requires_strict_bearer_and_accepts_empty_workspace_claim(
         )
         assert valid.status_code == 200
         assert valid.json() == {"items": [], "nextCursor": None}
+    finally:
+        app.dependency_overrides.clear()
+
+
+class EmptyRepositoriesStore:
+    async def list_repositories(self) -> list[object]:
+        return []
+
+
+class EmptyRepositoriesUow:
+    @property
+    def repositories(self) -> EmptyRepositoriesStore:
+        return EmptyRepositoriesStore()
+
+    async def __aenter__(self) -> EmptyRepositoriesUow:
+        return self
+
+    async def __aexit__(self, *args: object) -> None:
+        return None
+
+
+def test_portal_repos_requires_strict_bearer_and_accepts_empty_workspace_claim(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    private, public = _keys()
+    monkeypatch.setenv("AUTH_JWT_PUBLIC_KEY", public)
+    monkeypatch.setenv("AUTH_JWT_ISSUER", "review-api")
+    monkeypatch.setenv("AUTH_JWT_AUDIENCE", "review-ui")
+    app.dependency_overrides[get_repository_settings] = lambda: lambda: EmptyRepositoriesUow()
+    try:
+        client = TestClient(app)
+        assert client.get("/api/repos").status_code == 401
+        assert client.get("/api/repos", headers={"Authorization": "Basic abc"}).status_code == 401
+        valid = client.get(
+            "/api/repos",
+            headers={"Authorization": f"Bearer {_token(private, workspaces=[])}"},
+        )
+        assert valid.status_code == 200
+        assert valid.json() == []
     finally:
         app.dependency_overrides.clear()
 

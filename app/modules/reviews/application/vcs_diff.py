@@ -195,12 +195,9 @@ def _is_generated(path: str) -> bool:
     filename = parts[-1]
     return (
         filename in _LOCK_FILES
-        or filename.endswith((".lock", ".lockb"))
-        or filename.endswith((".min.js", ".pb.go", ".snap"))
-        or any(
-            part in {"dist", "__snapshots__", "locale", "locales", "i18n", "l10n", "translations"}
-            for part in parts[:-1]
-        )
+        or filename.endswith((".min.js", ".pb.go"))
+        or (len(parts) > 1 and parts[0] == "dist")
+        or ("__snapshots__" in parts[:-1] and filename.endswith(".snap"))
         or ("migrations" in parts[:-1] and "snapshot" in filename)
     )
 

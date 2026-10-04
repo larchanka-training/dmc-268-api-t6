@@ -10,3 +10,4 @@ from uuid import UUID
 class AuthScope:
     user_id: int
     workspace_ids: tuple[UUID, ...]
+    expires_at: int | None = None

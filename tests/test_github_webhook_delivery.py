@@ -2014,6 +2014,19 @@ def test_signed_delivery_is_saved_once_and_http_never_dispatches() -> None:
     assert receipts.rows["delivery-42"].projected is False
 
 
+def test_oversized_webhook_payload_returns_413_before_signature_validation() -> None:
+    receipts = FakeReceiptUnitOfWork()
+    oversized = b"x" * (10 * 1024 * 1024 + 1)
+    headers = {
+        "X-GitHub-Event": "push",
+        "X-GitHub-Delivery": "d-oversized",
+        "X-Hub-Signature-256": "sha256=invalid-hmac-signature",
+        "Content-Length": str(len(oversized)),
+    }
+    status, response = _post(oversized, headers, receipts)
+    assert status == 413
+
+
 def test_invalid_signature_never_saves_or_dispatches() -> None:
     body = b'{"action":"added"}'
     receipts = FakeReceiptUnitOfWork()

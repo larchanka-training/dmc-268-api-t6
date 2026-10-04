@@ -6,6 +6,8 @@ from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from uuid import UUID
 
+import pytest
+
 from app.main import app, get_run_event_hub, get_run_repository
 from app.modules.reviews.application.cancel_run import CancelRequestResult, CancelRun
 from app.modules.reviews.application.list_runs import RunListItem
@@ -197,3 +199,114 @@ def test_stream_endpoint_uses_sse_event_and_camel_case_payload() -> None:
         "runId": str(RUN_ID),
         "status": "cancelled",
     }
+
+
+def test_stream_uses_has_run_access() -> None:
+    calls: list[UUID] = []
+
+    async def single_event() -> AsyncIterator[RunUpdated]:
+        yield RunUpdated(RUN_ID, "succeeded")
+
+    class StreamHub:
+        def subscribe(self) -> object:
+            class _Sub:
+                async def __aenter__(self) -> AsyncIterator[RunUpdated]:
+                    return single_event()
+
+                async def __aexit__(self, *args: object) -> None:
+                    pass
+
+            return _Sub()
+
+    class LightRepository:
+        async def has_run_access(self, run_id: UUID) -> bool:
+            calls.append(run_id)
+            return True
+
+    app.dependency_overrides[get_run_event_hub] = StreamHub
+    app.dependency_overrides[get_run_repository] = LightRepository
+    try:
+        response = TestClient(app).get("/api/stream")
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    expected_data = 'data: {"runId":"00000000-0000-0000-0000-000000000100","status":"succeeded"}'
+    assert expected_data in response.text
+
+
+def test_stream_emits_keepalive_when_idle(monkeypatch: pytest.MonkeyPatch) -> None:
+    import app.main as main_mod
+
+    # Set very short timeout for test
+    monkeypatch.setattr(main_mod, "KEEPALIVE_INTERVAL_SECONDS", 0.01)
+
+    async def delayed_event() -> AsyncIterator[RunUpdated]:
+        # Sleep to trigger at least one keepalive before event
+        await asyncio.sleep(0.03)
+        yield RunUpdated(RUN_ID, "running")
+
+    class StreamHub:
+        def subscribe(self) -> object:
+            class _Sub:
+                async def __aenter__(self) -> AsyncIterator[RunUpdated]:
+                    return delayed_event()
+
+                async def __aexit__(self, *args: object) -> None:
+                    pass
+
+            return _Sub()
+
+    class LightRepository:
+        async def has_run_access(self, run_id: UUID) -> bool:
+            return True
+
+    app.dependency_overrides[get_run_event_hub] = StreamHub
+    app.dependency_overrides[get_run_repository] = LightRepository
+    try:
+        response = TestClient(app).get("/api/stream")
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    assert ": keepalive\n\n" in response.text
+
+
+def test_stream_terminates_cleanly_when_jwt_expires() -> None:
+    from app.bootstrap.portal_auth import get_auth_scope
+    from app.modules.auth.application.scope import AuthScope
+
+    # Expired token scope
+    expired_scope = AuthScope(user_id=42, workspace_ids=(), expires_at=1)
+
+    async def infinite_events() -> AsyncIterator[RunUpdated]:
+        while True:
+            await asyncio.sleep(0.1)
+            yield RunUpdated(RUN_ID, "running")
+
+    class StreamHub:
+        def subscribe(self) -> object:
+            class _Sub:
+                async def __aenter__(self) -> AsyncIterator[RunUpdated]:
+                    return infinite_events()
+
+                async def __aexit__(self, *args: object) -> None:
+                    pass
+
+            return _Sub()
+
+    class LightRepository:
+        async def has_run_access(self, run_id: UUID) -> bool:
+            return True
+
+    app.dependency_overrides[get_run_event_hub] = StreamHub
+    app.dependency_overrides[get_run_repository] = LightRepository
+    app.dependency_overrides[get_auth_scope] = lambda: expired_scope
+    try:
+        response = TestClient(app).get("/api/stream")
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    # Stream terminates immediately without consuming infinite events
+    assert response.text == ""

@@ -5,7 +5,7 @@ from __future__ import annotations
 import secrets
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Protocol
 from uuid import UUID
 
@@ -17,6 +17,8 @@ from app.modules.auth.application.exchange_github_code import (
     ExchangedSession,
 )
 from app.modules.auth.application.refresh_token_hash import hash_refresh_token
+
+DEFAULT_REFRESH_GRACE_PERIOD = timedelta(seconds=15)
 
 
 class InvalidRefreshToken(Exception):
@@ -60,6 +62,14 @@ class RefreshSessionStore(Protocol):
         expires_at: datetime,
     ) -> None: ...
 
+    async def add_session(
+        self,
+        family_id: UUID,
+        user_id: int,
+        token_hash: str,
+        expires_at: datetime,
+    ) -> None: ...
+
     async def revoke_family(self, family_id: UUID, at: datetime) -> None: ...
 
 
@@ -76,11 +86,13 @@ class RefreshLocalSession:
         issuer: AccessTokenIssuer,
         now: Callable[[], datetime] = lambda: datetime.now(UTC),
         new_refresh_token: Callable[[], str] = lambda: secrets.token_urlsafe(48),
+        grace_period: timedelta = DEFAULT_REFRESH_GRACE_PERIOD,
     ) -> None:
         self._uow_factory = uow_factory
         self._issuer = issuer
         self._now = now
         self._new_refresh_token = new_refresh_token
+        self._grace_period = grace_period
 
     async def execute(self, refresh_token: str | None) -> ExchangedSession:
         if not refresh_token:
@@ -99,9 +111,22 @@ class RefreshLocalSession:
                 raise InvalidRefreshToken
             at = self._now()
             if session.rotated_at is not None:
-                await uow.sessions.revoke_family(family_id, at)
-                await uow.commit()
-                replayed = True
+                if at - session.rotated_at <= self._grace_period:
+                    user, workspace_ids = await uow.sessions.current_identity(session.user_id)
+                    access_token = self._issuer.issue(user.id, workspace_ids)
+                    replacement = self._new_refresh_token()
+                    await uow.sessions.add_session(
+                        family_id=family_id,
+                        user_id=session.user_id,
+                        token_hash=hash_refresh_token(replacement),
+                        expires_at=at + REFRESH_TOKEN_LIFETIME,
+                    )
+                    await uow.commit()
+                    return ExchangedSession(access_token, replacement, user)
+                else:
+                    await uow.sessions.revoke_family(family_id, at)
+                    await uow.commit()
+                    replayed = True
             elif (
                 session.revoked_at is not None
                 or session.expires_at <= at

@@ -63,9 +63,11 @@ from app.modules.reviews.infrastructure.run_notifications import notify_run_stat
 from app.modules.workspaces.infrastructure.repository_access import repository_access_predicate
 
 
-def authorized_run(scope: AuthScope | None) -> ColumnElement[bool]:
+def authorized_run(scope: AuthScope | None, *, allow_unscoped: bool = False) -> ColumnElement[bool]:
     """A Run is visible when the claim and grants give access to its repository."""
     if scope is None:
+        if not allow_unscoped:
+            raise ValueError("Run authorization requires an AuthScope unless allow_unscoped=True")
         return true()
     return (
         select(1)
@@ -79,13 +81,28 @@ def authorized_run(scope: AuthScope | None) -> ColumnElement[bool]:
 
 class SqlAlchemyRunRepository:
     def __init__(
-        self, session_factory: async_sessionmaker[AsyncSession], scope: AuthScope | None = None
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        scope: AuthScope | None = None,
+        *,
+        allow_unscoped: bool = False,
     ) -> None:
+        if scope is None and not allow_unscoped:
+            raise ValueError(
+                "SqlAlchemyRunRepository requires an AuthScope unless allow_unscoped=True"
+            )
         self._session_factory = session_factory
         self._scope = scope
+        self._allow_unscoped = allow_unscoped
 
     def _authorized_run(self) -> ColumnElement[bool]:
-        return authorized_run(self._scope)
+        return authorized_run(self._scope, allow_unscoped=self._allow_unscoped)
+
+    async def has_run_access(self, run_id: UUID) -> bool:
+        """Lightweight query verifying repository access for a Run without loading details."""
+        statement = select(1).where(Run.id == run_id, self._authorized_run())
+        async with self._session_factory() as session:
+            return (await session.scalar(statement)) is not None
 
     async def list_runs(
         self,
@@ -308,7 +325,7 @@ class SqlAlchemyRunRepository:
         head_sha: str,
         snapshots: list[DiffSnapshot],
     ) -> list[DiffSnapshot]:
-        async with self._session_factory.begin() as session:
+        async with self._session_factory() as session:
             run = await session.scalar(select(Run).where(Run.id == run_id).with_for_update())
             if run is None or run.code_change_id != code_change_id or run.head_sha != head_sha:
                 raise ValueError("run revision changed before diff snapshot storage")
@@ -343,6 +360,8 @@ class SqlAlchemyRunRepository:
                 ]
             )
             run.diff_snapshotted_at = datetime.now(UTC)
+            await session.flush()
+            await session.commit()
         return snapshots
 
     async def get_run_diff_input(self, run_id: UUID) -> RunDiffInput | None:

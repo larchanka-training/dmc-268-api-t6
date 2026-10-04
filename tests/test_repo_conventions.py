@@ -819,7 +819,7 @@ def test_sqlalchemy_store_returns_cached_conventions_for_repeated_same_key(
                 await session.commit()
 
             conventions_input = await SqlAlchemyRunRepository(
-                session_factory
+                session_factory, allow_unscoped=True
             ).get_run_conventions_input(RUN_ID)
             assert conventions_input is not None
             assert conventions_input.conventions_prompt == ActiveConventionsPrompt(

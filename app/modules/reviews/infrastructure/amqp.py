@@ -187,8 +187,39 @@ def _decode[T: BaseModel](name: str, model: type[T], message: AbstractIncomingMe
         return None
 
 
-async def _requeue_after_error(message: AbstractIncomingMessage) -> None:
-    _LOGGER.exception("Message %s handling failed; it is redelivered", message.message_id)
+MAX_UNEXPECTED_RETRIES: int = 3
+_unexpected_delivery_attempts: dict[str, int] = {}
+
+
+def _clear_delivery_attempts(message_id: str | None) -> None:
+    if message_id:
+        _unexpected_delivery_attempts.pop(message_id, None)
+
+
+async def _requeue_after_error(
+    message: AbstractIncomingMessage,
+    max_retries: int = MAX_UNEXPECTED_RETRIES,
+) -> None:
+    key = str(message.message_id or id(message))
+    attempts = _unexpected_delivery_attempts.get(key, 0) + 1
+    _unexpected_delivery_attempts[key] = attempts
+    if attempts >= max_retries:
+        _LOGGER.error(
+            "Message %s exceeded maximum unexpected retry attempts (%d); routing to DLQ %s",
+            message.message_id,
+            max_retries,
+            DEAD_LETTER_QUEUE,
+        )
+        _clear_delivery_attempts(key)
+        await message.nack(requeue=False)
+        return
+
+    _LOGGER.exception(
+        "Message %s handling failed (attempt %d/%d); it is redelivered",
+        message.message_id,
+        attempts,
+        max_retries,
+    )
     # A short pause keeps a broken dependency from spinning redeliveries.
     await asyncio.sleep(1)
     await message.nack(requeue=True)
@@ -200,6 +231,7 @@ async def handle_run_delivery(
     """Unknown ``schema`` or an invalid body goes to ``reviews.dlq`` without processing (§4.4)."""
     decoded = _decode("review.run.v1", ReviewRunMessage, message)
     if decoded is None or decoded.message_id != decoded.run_id:
+        _clear_delivery_attempts(message.message_id)
         await message.nack(requeue=False)
         return
     try:
@@ -207,6 +239,7 @@ async def handle_run_delivery(
     except Exception:
         await _requeue_after_error(message)
         return
+    _clear_delivery_attempts(message.message_id)
     if outcome is DeliveryOutcome.DEAD_LETTER:
         await message.nack(requeue=False)
     else:
@@ -218,6 +251,7 @@ async def handle_publish_delivery(
 ) -> None:
     decoded = _decode("review.publish.v1", ReviewPublishMessage, message)
     if decoded is None:
+        _clear_delivery_attempts(message.message_id)
         await message.nack(requeue=False)
         return
     try:
@@ -225,6 +259,7 @@ async def handle_publish_delivery(
     except Exception:
         await _requeue_after_error(message)
         return
+    _clear_delivery_attempts(message.message_id)
     await message.ack()
 
 

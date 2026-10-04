@@ -172,7 +172,10 @@ async def process_review_run(
     ``trace`` (``run_actions`` steps); without them the answer is published inline.
     """
 
-    repository = SqlAlchemyRunRepository(session_factory)
+    try:
+        repository = SqlAlchemyRunRepository(session_factory, allow_unscoped=True)
+    except TypeError:
+        repository = SqlAlchemyRunRepository(session_factory)
     blob_cache = SqlAlchemyBlobCache(session_factory)
     conventions = GenerateRepoConventions(
         ProviderRepositoryConventionsSource(provider),
