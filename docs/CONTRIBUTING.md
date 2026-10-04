@@ -40,12 +40,12 @@ flowchart TD
 | # | Кто | Что делает | Статус issue на доске | Кому уходит уведомление |
 |---|---|---|---|---|
 | 1 | Автор | Назначает себя в Assignees issue и создаёт ветку по `git-workflow.md` | Todo → In Progress (вручную) | — |
-| 2 | Автор | Открывает PR; пока работа не готова, PR остаётся Draft. В теле PR — `Refs #N` на issue из этого же репо или `Refs owner/repo#N` на issue из другого. Закрывающие ключевые слова (`Closes`, `Fixes`, `Resolves` и их формы) запрещены в теле PR и в коммитах, а PR не привязывается к issue в панели Development: issue закрывает техлид на шаге 8 | In Progress | — |
+| 2 | Автор | Открывает PR; пока работа не готова, PR остаётся Draft. В теле PR — `Refs #N` на issue из этого же репо или `Refs owner/repo#N` на issue из другого. Закрывающие ключевые слова (`Closes`, `Fixes`, `Resolves` и их формы) запрещены в заголовке и теле PR и в коммитах, а PR не привязывается к issue в панели Development: issue закрывает техлид на шаге 8 | In Progress | — |
 | 3 | Автор | Работа готова, CI зелёный: нажимает Ready for review и назначает ревьюера в Reviewers | On Review (вручную) | ревьюеру: запрос ревью |
 | 4 | Ревьюер | Оставляет каждое замечание отдельным тредом на строке кода и отправляет всё одним Submit review с вердиктом (§4) | On Review | автору: отправлено ревью |
 | 5 | Автор | Отвечает в каждом треде (§3). Когда ответ есть во всех открытых тредах, нажимает Re-request review (🔄 рядом с именем ревьюера) | On Review | ревьюеру: повторный запрос ревью |
 | 6 | Ревьюер | Перепроверяет: закрывает (Resolve) обработанные треды, в необработанных отвечает, при необходимости открывает новые. Остались открытые треды — Request changes, возврат к шагу 5. Открытых нет — Approve | On Review | автору: отправлено ревью |
-| 7 | Автор | Мержит, когда есть Approve на текущей голове PR, ветка на текущем `main`, все треды закрыты, CI зелёный и тело PR описывает весь PR. Способ мержа — по `git-workflow.md`. Мерж issue не закрывает | On Review | — |
+| 7 | Автор | Мержит, когда выполнены условия [мержа](#мерж): Approve на текущей голове PR, ветка на текущем `main`, все треды закрыты, CI зелёный и тело PR описывает весь PR. Способ мержа — по `git-workflow.md`. Мерж не должен закрывать issue | On Review | — |
 | 8 | Техлид или назначенный им | Проверяет AC и закрывает issue по правилам [приёмки](#приёмка-задачи) | Done (ставит workflow «Item closed», когда issue закрыт) | подписчикам issue: issue закрыт |
 
 Про доску:
@@ -99,9 +99,36 @@ gh api graphql -F owner='{owner}' -F repo='{repo}' -F n=N -f query='
       closingIssuesReferences(first: 10) { totalCount } } } }' \
   --jq '.data.repository.pullRequest.closingIssuesReferences.totalCount'
 
-# 4б. Коммиты PR с закрывающим ключевым словом (ожидается 0); команда 4 их не видит
-gh pr view N --json commits --jq '[.commits[] | "\(.messageHeadline)\n\(.messageBody)"
-  | select(test("(?i)\\b(close[sd]?|fix(e[sd])?|resolve[sd]?)\\b:?\\s+([\\w.-]+/[\\w.-]+)?#[0-9]+"))] | length'
+# 4б. Заголовок и коммиты PR с закрывающим ключевым словом (ожидается 0); команда 4 их не видит,
+#     а при squash заголовок PR становится сообщением коммита в main
+gh pr view N --json title,commits --jq '[.title, (.commits[] | "\(.messageHeadline)\n\(.messageBody)")]
+  | map(select(test("(?i)\\b(close[sd]?|fix(e[sd])?|resolve[sd]?)\\b:?\\s+([\\w.-]+/[\\w.-]+)?#[0-9]+"))) | length'
+```
+
+### Мерж
+
+Автор мержит PR, только когда выполнены все условия ниже. Условия, за которыми следит ruleset, GitHub проверяет сам: пока они не выполнены, кнопка Merge не работает.
+
+| Условие | Признак | Чем обеспечено |
+|---|---|---|
+| Ветка на текущем `main`: перед мержем автор делает rebase | команда 5 выводит `0` | ruleset: Require branches to be up to date before merging |
+| Approve стоит на текущей голове PR | в выводе команды 6 `commit_id` одобряющего ревью равен голове PR | ruleset: Dismiss stale pull request approvals when new commits are pushed — push, меняющий дифф PR (новые коммиты, rebase или Update branch после изменений в `main`), снимает Approve; Approve именно на текущей голове при любом push — договорённость команды, она строже |
+| Последний push одобрил не тот, кто его сделал | если ревьюер сам запушил коммит в PR, Approve даёт другой участник | ruleset: Require approval of the most recent reviewable push |
+| Все треды закрыты, CI зелёный | кнопка Merge доступна | ruleset (§7) |
+| Тело PR описывает весь PR | ревьюер сверяет раздел What с `gh pr diff N --name-only`; расхождение — Request changes | договорённость: автор обновляет тело при каждом новом коммите |
+| Мерж не закроет issue | команды 4 и 4б выводят `0` | договорённость |
+
+Шаблон тела PR с чек-листом перед мержем — `.github/pull_request_template.md`.
+
+```bash
+# 5. На сколько коммитов ветка PR отстаёт от main (ожидается 0)
+gh api "repos/{owner}/{repo}/compare/main...$(gh pr view N --json headRefOid --jq .headRefOid)" \
+  --jq .behind_by
+
+# 6. На каком коммите стоит каждый Approve и какая сейчас голова PR (должны совпасть)
+gh api 'repos/{owner}/{repo}/pulls/N/reviews' \
+  --jq '.[] | select(.state == "APPROVED") | "\(.user.login) \(.commit_id)"'
+gh pr view N --json headRefOid --jq .headRefOid
 ```
 
 ## 3. Треды
@@ -153,20 +180,28 @@ Push, меняющий дифф PR (новые коммиты, rebase или Upd
 
 ## 7. Что проверяет GitHub, а что держится на договорённости
 
-Ruleset `main` одинаков в обоих репо, кроме CI-проверки: она обязательна только в api.
+Ruleset `main` одинаков в обоих репо, кроме обязательной CI-проверки: в api это `Python lint / type / test`, в ui — `Docker image build`.
 
 | Правило | Как соблюдается |
 |---|---|
 | В `main` попадают только PR: без прямого push, force push и удаления ветки | ruleset |
-| CI `Python lint / type / test` зелёный | ruleset (только api) |
+| Обязательная CI-проверка зелёная: в api `Python lint / type / test`, в ui `Docker image build` | ruleset `required_status_checks` |
+| Ветка на текущем `main`: перед мержем rebase | ruleset `strict_required_status_checks_policy` |
 | Есть минимум один Approve, и не от автора | ruleset `required_approving_review_count: 1` + GitHub |
+| Approve стоит на текущей голове PR: push, меняющий дифф PR (новые коммиты, rebase или Update branch после изменений в `main`), снимает его | ruleset `dismiss_stale_reviews_on_push`; Approve именно на текущей голове при любом push (команда 6 из §2) — договорённость команды, она строже |
+| Последний push одобряет не тот, кто его сделал | ruleset `require_last_push_approval` |
 | Все треды закрыты | ruleset `required_review_thread_resolution` |
 | Request changes блокирует мерж, чужой вердикт снимает только техлид | ruleset `dismissal_restriction` |
 | Мерж только squash или rebase: merge commit GitHub не примет | ruleset `allowed_merge_methods` |
 | Автор отвечает в каждом треде | договорённость |
 | Тред закрывает ревьюер (или тот, кто открыл тред), но не автор PR | договорённость: GitHub разрешает закрыть тред автору PR и любому с правом записи, а права записи есть у всей команды |
-| После Approve изменений нет, кроме rebase | договорённость |
 | Мержит автор | договорённость |
-| Статусы Todo → In Progress → On Review | вручную; Done GitHub ставит сам |
+| Тело PR описывает весь PR | договорённость: ревьюер сверяет What с `gh pr diff N --name-only` |
+| В заголовке, теле PR и коммитах нет закрывающих ключевых слов, PR не привязан к issue в панели Development | договорённость; признак — команда 4 из §2 (тело PR и связь Development) и команда 4б (заголовок PR и сообщения коммитов) |
+| Issue закрывает техлид или назначенный им после проверки AC | договорённость; признак — команда 1 из §2 |
+| Перенос карточки в Done не закрывает issue | workflow «Auto-close issue» в Project 12 выключен |
+| Статусы Todo → In Progress → On Review | вручную; Done ставит workflow «Item closed», когда issue закрыт |
+
+Решение техлида 04.10.2026 (в рамках #56): в ruleset `main` обоих репо включены «Dismiss stale pull request approvals when new commits are pushed» (`dismiss_stale_reviews_on_push`), «Require approval of the most recent reviewable push» (`require_last_push_approval`) и «Require branches to be up to date before merging» (`strict_required_status_checks_policy`); в ui обязательной стала проверка `Docker image build`, иначе требование «up to date» там не действует. В Project 12 выключен workflow «Auto-close issue», а «Item closed» оставлен. Причина: в спринте 2 PR #38 смёржен без rebase на `main`, и `main` был красным около 3 ч; PR #42 одобрен на `dcdf95d`, а смёржен после rebase и новых коммитов, в том числе коммита ревьюера, без повторного Approve. Такое правило должно проверять GitHub, а не договорённость. Цена решения: каждый push, меняющий дифф PR (новые коммиты, rebase или Update branch после изменений в `main`, в том числе после мержа чужого PR), требует нового Approve, а ревьюер, запушивший коммит в PR, одобрить его не может — нужен другой участник.
 
 При смене техлида обновите `dismissal_restriction` в ruleset обоих репо и упоминания техлида в этом файле.
