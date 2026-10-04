@@ -25,13 +25,21 @@ docker compose --profile webhooks up --build
 ```
 
 The worker serializes each PR's event projection with a PostgreSQL session advisory lock on an
-autocommit connection. Synchronize, close, and reopen events fetch the current GitHub PR while
-holding that lock. It stores the result in a separate short transaction, so the GitHub call never
-spans a database transaction. Reviewer and close/reopen deliveries fetch the paginated issue
-timeline under the same lock to resolve the latest explicit bot reviewer request, human removal,
-and lifecycle barrier, including events in one timestamp second. GitHub timeline failures leave
-the receipt pending for retry. It also projects installation events. Unknown repositories remain
-retryable until onboarding.
+autocommit connection and stores the result in a separate short transaction, so the GitHub call
+never spans a database transaction. `labeled` / `unlabeled` of the `ai-review` label (events sent
+by the App's own bot are ignored) and `synchronize`, `closed`, `reopened`, and `edited` fetch the
+current GitHub PR once while holding that lock; `opened` is applied from the payload. Label
+events and `synchronize`, `closed`, and `reopened` reconcile `ai_review_labeled` from that PR's
+current labels, so a closed PR keeps its label state (`docs/PIPELINE_SPEC.md` §8.2 lists `false`
+for `closed`; the effect is the same, since CI eligibility and the no-CI sweep consider only open
+PRs for a new Run); `edited` updates metadata only. The issue timeline is never fetched:
+`review_requested` and `review_request_removed` are dropped as irrelevant. A failed dispatch (for
+example a GitHub error or the 240 s dispatch timeout) releases the receipt for a retry after
+30 s; the third failure marks it failed and it is no longer replayed. It also projects
+installation events. Unknown repositories remain retryable until onboarding. Until #52 wires Run
+creation, a projected `labeled`, `synchronize`, or `reopened` delivery and every CI event
+(`status`, completed `check_suite` and `workflow_run`) are deferred and replayed every 5 minutes;
+each replay of a PR delivery fetches the current PR again.
 
 This worker only projects durable GitHub receipts. It neither connects to a broker
 nor enqueues `review.run/v1` messages. The application-level Run publisher port and
