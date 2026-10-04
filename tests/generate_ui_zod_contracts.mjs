@@ -1,4 +1,6 @@
+import { execFileSync } from 'node:child_process'
 import { mkdir, writeFile } from 'node:fs/promises'
+import { registerHooks } from 'node:module'
 import { dirname, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
@@ -11,19 +13,58 @@ if (!process.env.DMC_268_UI_DIR) {
   throw new Error('DMC_268_UI_DIR must point to a checkout of dmc-268-ui-t6')
 }
 
-const { z } = await import(pathToFileURL(resolve(uiDir, 'node_modules/zod/index.js')).href)
-const { RunActionSchema, RunSessionSchema } = await import(
-  pathToFileURL(resolve(uiDir, 'src/entities/run/model/schemas.ts')).href,
-)
-const { ReviewCommentSchema } = await import(
-  pathToFileURL(resolve(uiDir, 'src/entities/review/model/schemas.ts')).href,
-)
+// The ui imports its own modules without an extension (`../../review/model/schemas`), which
+// Vite resolves and Node does not: retry a failed relative specifier as `.ts`, then `/index.ts`.
+registerHooks({
+  resolve(specifier, context, nextResolve) {
+    try {
+      return nextResolve(specifier, context)
+    } catch (error) {
+      const relative = specifier.startsWith('./') || specifier.startsWith('../')
+      if (!relative || !['ERR_MODULE_NOT_FOUND', 'ERR_UNSUPPORTED_DIR_IMPORT'].includes(error.code)) {
+        throw error
+      }
+      for (const candidate of [`${specifier}.ts`, `${specifier}/index.ts`]) {
+        try {
+          return nextResolve(candidate, context)
+        } catch {
+          // try the next candidate
+        }
+      }
+      throw error
+    }
+  },
+})
 
-const commit = (await import('node:child_process')).execFileSync(
-  'git',
-  ['-C', uiDir, 'rev-parse', 'HEAD'],
-  { encoding: 'utf8' },
-).trim()
+const load = (path) => import(pathToFileURL(resolve(uiDir, path)).href)
+
+const { z } = await load('node_modules/zod/index.js')
+const diff = await load('src/entities/diff/model/schemas.ts')
+const repository = await load('src/entities/repository/model/schemas.ts')
+const review = await load('src/entities/review/model/schemas.ts')
+const run = await load('src/entities/run/model/schemas.ts')
+const user = await load('src/entities/user/model/schemas.ts')
+
+const commit = execFileSync('git', ['-C', uiDir, 'rev-parse', 'HEAD'], {
+  encoding: 'utf8',
+}).trim()
+
+// Keys are the snapshot names the api tests read; each maps to one ui Zod schema.
+const sources = {
+  runSession: run.RunSessionSchema,
+  runAction: run.RunActionSchema,
+  reviewComment: review.ReviewCommentSchema,
+  runDetail: run.RunDetailSchema,
+  findingView: review.FindingViewSchema,
+  runListPage: run.RunListPageSchema,
+  runUpdatedEvent: run.RunUpdatedEventSchema,
+  repository: repository.RepositorySchema,
+  repositoryUpdate: repository.UpdateRepositorySchema,
+  rawFileDiff: diff.RawFileDiffSchema,
+  fileSlice: diff.FileSliceSchema,
+  authSession: user.AuthSessionSchema,
+  me: user.MeSchema,
+}
 
 const contracts = {
   provenance: {
@@ -31,13 +72,11 @@ const contracts = {
     commit,
     generator: 'z.toJSONSchema (Zod 4)',
     command:
-      'node --experimental-strip-types tests/generate_ui_zod_contracts.mjs',
+      'DMC_268_UI_DIR=<ui checkout after pnpm install> node tests/generate_ui_zod_contracts.mjs',
   },
-  schemas: {
-    runSession: z.toJSONSchema(RunSessionSchema),
-    runAction: z.toJSONSchema(RunActionSchema),
-    reviewComment: z.toJSONSchema(ReviewCommentSchema),
-  },
+  schemas: Object.fromEntries(
+    Object.entries(sources).map(([name, schema]) => [name, z.toJSONSchema(schema)]),
+  ),
 }
 
 await mkdir(dirname(outputPath), { recursive: true })
