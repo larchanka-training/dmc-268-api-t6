@@ -4,8 +4,8 @@
 |---|---|
 | Статус | **утверждён командой** — PR #36 (#20) |
 | Владелец | техлид (роль 1) |
-| Связанные документы | `BACKEND_ARCHITECTURE.md` (роль 6, ERD), [`PIPELINE_SPEC.md`](PIPELINE_SPEC.md) (жизненный цикл Run, retry, сбои), [`contracts/openapi.yaml`](../contracts/openapi.yaml) (HTTP API), [`FRONTEND_ARCHITECTURE.md`](https://github.com/larchanka-training/dmc-268-ui-t6/blob/main/docs/FRONTEND_ARCHITECTURE.md) (роль 5, Zod-контракты), [`TEST_PLAN.md`](https://github.com/larchanka-training/dmc-268-ui-t6/blob/main/docs/TEST_PLAN.md) (роль 2, quality gates), инфраструктура (роль 3) |
-| Нумерация решений | `Р-1…Р-15`; `Р-1…Р-9` — общие с [`TEST_PLAN.md`](https://github.com/larchanka-training/dmc-268-ui-t6/blob/main/docs/TEST_PLAN.md), не менять |
+| Связанные документы | `BACKEND_ARCHITECTURE.md` (роль 6, ERD), [`PIPELINE_SPEC.md`](PIPELINE_SPEC.md) (жизненный цикл Run, retry, сбои), [`contracts/openapi.yaml`](../contracts/openapi.yaml) (HTTP API), [`FRONTEND_ARCHITECTURE.md`](https://github.com/larchanka-training/dmc-268-ui-t6/blob/main/docs/FRONTEND_ARCHITECTURE.md) (роль 5, Zod-контракты), [`TEST_PLAN.md`](TEST_PLAN.md) (роль 2, quality gates), инфраструктура (роль 3) |
+| Нумерация решений | `Р-1…Р-15`; `Р-1…Р-9` — общие с [`TEST_PLAN.md`](TEST_PLAN.md), не менять |
 
 **Продукт.** GitHub App, который ревьюит pull request с лейблом `ai-review`. После зелёного CI бот публикует одно ревью с inline-комментариями прямо в PR. Web UI показывает прогоны, трейс действий агента, метрики и расход.
 
@@ -813,16 +813,16 @@ Zod-схемы фронта (роль 5) и бэкенд описывают од
 | Область | Требование | Источник |
 |---|---|---|
 | Ack вебхука | p95 < 500 мс (внутренняя цель 200 мс) | TEST_PLAN 2.2 |
-| DiffEngine | p95 ≤ 40 с чистого времени движка | TEST_PLAN QG |
+| DiffEngine | p95 ≤ 40 с чистого времени движка | [TEST_PLAN §5](TEST_PLAN.md#5-критерии-приёмки-и-отчётность) |
 | Время до ревью (fast) | p50 ≤ 90 с, p95 ≤ 4 мин от выполнения триггера (очередь + движок + публикация) | этот документ |
 | SandboxEngine (фаза 3; до неё API принимает только `fast`, #52) | жёсткий таймаут 10 мин, затем тот же Run продолжается как fast (действие `engine.fallback` в трейсе) — это не `failed` | Р-3, PIPELINE_SPEC §5.3 |
 | Лимиты контекста | fast: 60 000 входных токенов; deep: 150 000; один файл L3 ≤ 12 000; ≤ 50 файлов с контекстом, остальные в `omitted_files`; дифф > 3 000 строк → ранний путь `summary-only` до `ContextProvider`: без построчного ревью, одна сводка «PR слишком большой» по списку файлов | §9 |
 | Выход | ≤ 10 inline-комментариев (настройка репозитория), тело ревью ≤ 4 000 символов, ответ модели — `ReviewOutput` по `review/schemas/review-output.schema.json` (§5) | Р-5 |
 | Пропускная способность v1 | 100 PR/день, 5 параллельных прогонов; масштаб — реплики `worker` | |
 | Надёжность | ни одна задача не теряется: persistent-сообщения + состояние в PG + реконсилер 5 мин; приёмник вебхуков — отдельный процесс (GitHub не ретраит) | |
-| Схлопывание | Устаревший прогон не публикуется: publisher сверяет голову PR в GitHub непосредственно перед `POST /pulls/{n}/reviews` и при расхождении завершает прогон `cancelled`/`superseded`. Окно между этим чтением и POST (один HTTP-запрос) — принятый остаточный риск (решение техлида 05.10.2026) | TEST_PLAN QG |
+| Схлопывание | Устаревший прогон не публикуется: publisher сверяет голову PR в GitHub непосредственно перед `POST /pulls/{n}/reviews` и при расхождении завершает прогон `cancelled`/`superseded`. Окно между этим чтением и POST (один HTTP-запрос) — принятый остаточный риск (решение техлида 05.10.2026) | [TEST_PLAN §5](TEST_PLAN.md#5-критерии-приёмки-и-отчётность) |
 | Стоимость | лимит на прогон: fast $0.50, deep $3 — сумма `usage_events` за все попытки плюс оценка следующего вызова, проверка до каждого вызова; превышение: deep — прервать и опубликовать, что успели, fast — `failed` (`budget_exceeded`); дневной бюджет на Workspace → деградация в fast, затем пауза (`skipped`). Лимиты вызовов, токенов и стоимости применяются по PIPELINE_SPEC §4.5, §5 | Р-8, PIPELINE_SPEC |
-| Качество | Precision ≥ 85 %, Critical Recall ≥ 75 %, Hallucination < 3 % на golden dataset | TEST_PLAN QG |
+| Качество | Precision ≥ 85 %, Critical Recall ≥ 75 %, Hallucination < 3 % на golden dataset | [TEST_PLAN §5](TEST_PLAN.md#5-критерии-приёмки-и-отчётность) |
 | Безопасность | HMAC на вебхуках; секреты только через env из CI (роль 3); токены GitHub и LLM не попадают в сандбокс; сандбокс `--network=none`, non-root, read-only rootfs; PG/RabbitMQ/Redis — только внутренняя сеть | TEST_PLAN 2.2, 2.4, 2.6 |
 | Данные клиента | блобы ≤ 7 дней в кэше; диффы, контексты, тела ответов инструментов и payload вебхуков — до удаления Workspace; ни один прогон не логирует содержимое файлов в stdout | |
 | Наблюдаемость | структурированные логи (JSON) с `run_id` во всех контейнерах; метрики: глубина очередей, длительность по этапам, `X-RateLimit-Remaining`, стоимость; self-hosted стек — отдельная задача | |
