@@ -4,7 +4,7 @@
 
 This plan covers [api#30](https://github.com/larchanka-training/dmc-268-api-t6/issues/30) in **both** `dmc-268-api-t6` and `dmc-268-ui-t6`. Target: 20–30 reproducible PR cases, replay/live evaluation, CI reports, real integration coverage, UI contract/auth tests, and a canonical TEST_PLAN in api. The sprint deadline in the issue is 04.10.2026. This document is planning only; task completion and gates are tracked in `30-todo.md`.
 
-Read against api `origin/main` at `3cdb417` on 29.09.2026, `docs/SYSTEM_DESIGN.md`, `docs/PIPELINE_SPEC.md`, `contracts/openapi.yaml`, `review/schemas/review-output.schema.json`, the existing [ui TEST_PLAN](https://github.com/larchanka-training/dmc-268-ui-t6/blob/main/docs/TEST_PLAN.md), and the three dependency issues [api#11](https://github.com/larchanka-training/dmc-268-api-t6/issues/11), [api#34](https://github.com/larchanka-training/dmc-268-api-t6/issues/34), [ui#50](https://github.com/larchanka-training/dmc-268-ui-t6/issues/50).
+Read against api `origin/main` at `3cdb417` on 29.09.2026, `docs/SYSTEM_DESIGN.md`, `docs/PIPELINE_SPEC.md`, `contracts/openapi.yaml`, `review/schemas/review-output.schema.json`, the existing [ui TEST_PLAN](https://github.com/larchanka-training/dmc-268-ui-t6/blob/d8c9172/docs/TEST_PLAN.md), and the three dependency issues [api#11](https://github.com/larchanka-training/dmc-268-api-t6/issues/11), [api#34](https://github.com/larchanka-training/dmc-268-api-t6/issues/34), [ui#50](https://github.com/larchanka-training/dmc-268-ui-t6/issues/50).
 
 ## Current readiness and ownership
 
