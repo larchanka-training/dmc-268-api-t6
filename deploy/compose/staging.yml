@@ -48,6 +48,85 @@ services:
         max-size: "10m"
         max-file: "3"
 
+  # Review worker (#34): consumes review.run.fast and review.publish, runs the leader loop. No HTTP
+  # port: the image healthcheck is replaced by the age of the heartbeat file it touches every 10 s
+  # once its consumers are attached (app/common/infrastructure/heartbeat.py). A worker that exits
+  # or whose event loop freezes fails up --wait in deploy.sh, and the deploy rolls back. Stuck
+  # work inside a running loop keeps beating: the heartbeat is liveness, not progress.
+  worker:
+    image: ${IMAGE:?IMAGE is required}
+    command: ["python", "-m", "app.worker"]
+    # app.env: GitHub App credentials; worker.env: LLM gateway (docs/SECRETS.md).
+    env_file:
+      - app.env
+      - worker.env
+    environment:
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-app}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/${POSTGRES_DB:-app}
+      RABBITMQ_URL: amqp://${RABBITMQ_USER:-app}:${RABBITMQ_PASSWORD:?RABBITMQ_PASSWORD is required}@rabbitmq:5672/
+      WORKER_HEARTBEAT_FILE: /tmp/worker.heartbeat
+    # Unlike the API, the worker cannot start without the broker: it declares the topology first.
+    depends_on:
+      bootstrap:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    restart: unless-stopped
+    pull_policy: always
+    healthcheck:
+      # An image built before the heartbeat (a rollback target older than #35, part 2) never
+      # beats: for it a running process counts as healthy. Every newer image is checked strictly.
+      test:
+        - CMD-SHELL
+        - test ! -f /srv/app/common/infrastructure/heartbeat.py || exec python -m app.common.infrastructure.heartbeat /tmp/worker.heartbeat 30
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # Webhook worker (#11): projects stored GitHub deliveries (installations, repositories, pull
+  # requests). Without it deliveries are accepted (202) and stored but never processed.
+  webhook-worker:
+    image: ${IMAGE:?IMAGE is required}
+    command: ["python", "-m", "app.webhook_worker"]
+    # app.env: GitHub App credentials; webhook-worker.env: GITHUB_APP_BOT_LOGIN (docs/SECRETS.md).
+    env_file:
+      - app.env
+      - webhook-worker.env
+    environment:
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-app}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/${POSTGRES_DB:-app}
+      WORKER_HEARTBEAT_FILE: /tmp/webhook-worker.heartbeat
+    # No broker: the projection only writes PostgreSQL, the reconciler of the API publishes the runs
+    # (app/webhook_worker.py composes the receiver without a run publisher).
+    depends_on:
+      bootstrap:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+    pull_policy: always
+    healthcheck:
+      # An image built before the heartbeat (a rollback target older than #35, part 2) never
+      # beats: for it a running process counts as healthy. Every newer image is checked strictly.
+      test:
+        - CMD-SHELL
+        - test ! -f /srv/app/common/infrastructure/heartbeat.py || exec python -m app.common.infrastructure.heartbeat /tmp/webhook-worker.heartbeat 30
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
   # This one-shot service must complete before API containers are started.  Keeping
   # both commands in the image avoids needing uv or a checkout on the deploy host.
   bootstrap:

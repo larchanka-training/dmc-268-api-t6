@@ -1,4 +1,4 @@
-"""Deployment contracts for the staging broker, cache and application secrets (#35).
+"""Deployment contracts for the staging broker, cache, workers and application secrets (#35).
 
 The behavioural tests run the real `run:` script of the CI bundle step and the real deploy and
 rollback scripts against a fake docker CLI: they cover what reaches the host and what the host
@@ -35,9 +35,32 @@ SECRET_SOURCES = {
     "GITHUB_CLIENT_SECRET": "GH_CLIENT_SECRET",
     "AUTH_JWT_PRIVATE_KEY": "AUTH_JWT_PRIVATE_KEY",
     "AUTH_JWT_PUBLIC_KEY": "AUTH_JWT_PUBLIC_KEY",
+    # Organization secrets of the LLM gateway (decision of the tech lead in #35, 04.10).
+    "LLM_API_KEYS": "AI_DMC268_T6",
+    "LLM_BASE_URL": "AI_DMC268_URL",
 }
-APP_ENV_KEYS = {"GITHUB_APP_ID", "GITHUB_APP_PRIVATE_KEY"}  # worker and webhook-worker
-API_ENV_KEYS = set(SECRET_SOURCES) - APP_ENV_KEYS  # api only
+# Non-secret configuration from variables of the Environment, routed like the secrets.
+VARIABLE_SOURCES = {
+    "GITHUB_APP_BOT_LOGIN": "GH_APP_BOT_LOGIN",
+    "LLM_MODEL": "LLM_MODEL",
+}
+# One env file per set of recipients (docs/SECRETS.md); its bash array in env-file.sh.
+ENV_FILES = {
+    "app.env": ("APP_ENV_KEYS", {"GITHUB_APP_ID", "GITHUB_APP_PRIVATE_KEY"}),  # both workers
+    "api.env": (
+        "API_ENV_KEYS",
+        {
+            "GITHUB_WEBHOOK_SECRET",
+            "GITHUB_CLIENT_ID",
+            "GITHUB_CLIENT_SECRET",
+            "AUTH_JWT_PRIVATE_KEY",
+            "AUTH_JWT_PUBLIC_KEY",
+        },
+    ),
+    "worker.env": ("WORKER_ENV_KEYS", {"LLM_API_KEYS", "LLM_BASE_URL", "LLM_MODEL"}),
+    "webhook-worker.env": ("WEBHOOK_WORKER_ENV_KEYS", {"GITHUB_APP_BOT_LOGIN"}),
+}
+BUNDLED = {**SECRET_SOURCES, **VARIABLE_SOURCES}
 
 # Multi-line like a PEM, with what a shell or Compose could rewrite: $, ${...} and backslashes.
 FAKE_PEM = "-----BEGIN TEST KEY-----\nAAAA$HOME/${PATH}\nBB\\nBB\\\\CC\n-----END TEST KEY-----"
@@ -49,6 +72,10 @@ CI_SECRETS = {
     "GITHUB_CLIENT_SECRET": "aaaa$bbbb\\cccc${dddd}",
     "AUTH_JWT_PRIVATE_KEY": FAKE_PEM.replace("TEST KEY", "TEST SIGNING"),
     "AUTH_JWT_PUBLIC_KEY": "-----BEGIN TEST VERIFY-----\nCCCC\n-----END TEST VERIFY-----",
+    "LLM_API_KEYS": "sk-test-1,sk-test-2",
+    "LLM_BASE_URL": "https://llm.test/api/v1",
+    "GITHUB_APP_BOT_LOGIN": "reviewer[bot]",
+    "LLM_MODEL": "gpt-4.1-mini",
 }
 
 FAKE_DOCKER = """\
@@ -74,8 +101,8 @@ case "$1" in
     case "${action}" in
       up)
         # Like Compose: env_file paths resolve against the directory of the first compose file.
-        # Both files must exist: deploy and rollback keep app.env in place for the workers too.
-        for name in app.env api.env; do
+        # Every file must exist: deploy and rollback keep each role's file in place.
+        for name in app.env api.env worker.env webhook-worker.env; do
           [[ -f "${project_dir}/${name}" ]] || { echo "env file ${name} not found" >&2; exit 1; }
         done
         ! grep -qxF "IMAGE=${STUB_FAILING_IMAGE:-}" "${env_file}"
@@ -247,12 +274,14 @@ def _run_bundle_step(tmp_path: Path, secrets: Mapping[str, str]) -> tuple[str, s
 
 def test_bundle_step_maps_environment_secrets_to_container_names() -> None:
     step = _workflow_step("Bundle application secrets")
-    mapping = dict(re.findall(r"^\s+([A-Z_]+): \$\{\{ secrets\.([A-Z_]+) \}\}$", step, re.M))
+    secrets = dict(re.findall(r"^\s+([A-Z_]+): \$\{\{ secrets\.([A-Z_0-9]+) \}\}$", step, re.M))
+    variables = dict(re.findall(r"^\s+([A-Z_]+): \$\{\{ vars\.([A-Z_0-9]+) \}\}$", step, re.M))
 
     assert "id: app_secrets" in step
     assert "shell: bash" in step  # bash -eo pipefail, as _run_bundle_step runs it
-    assert mapping == SECRET_SOURCES
-    assert set(_bash_array(step, "names")) == set(SECRET_SOURCES)
+    assert secrets == SECRET_SOURCES
+    assert variables == VARIABLE_SOURCES
+    assert set(_bash_array(step, "names")) == set(BUNDLED)
 
 
 def test_bundle_step_masks_the_bundle_and_logs_only_names(tmp_path: Path) -> None:
@@ -269,7 +298,7 @@ def test_bundle_step_masks_the_bundle_and_logs_only_names(tmp_path: Path) -> Non
 
 
 def test_bundle_step_without_secrets_outputs_an_empty_bundle(tmp_path: Path) -> None:
-    stdout, bundle = _run_bundle_step(tmp_path, dict.fromkeys(SECRET_SOURCES, ""))
+    stdout, bundle = _run_bundle_step(tmp_path, dict.fromkeys(BUNDLED, ""))
     names = _bash_array(_workflow_step("Bundle application secrets"), "names")
 
     assert bundle == ""
@@ -288,8 +317,10 @@ def test_deploy_step_forwards_the_bundle_to_the_host() -> None:
 def test_host_allowlist_follows_the_container_table() -> None:
     env_file = _read("deploy", "scripts", "env-file.sh")
 
-    assert set(_bash_array(env_file, "APP_ENV_KEYS")) == APP_ENV_KEYS
-    assert set(_bash_array(env_file, "API_ENV_KEYS")) == API_ENV_KEYS
+    for array, keys in ENV_FILES.values():
+        assert set(_bash_array(env_file, array)) == keys, array
+    # Every bundled name has exactly one file.
+    assert sorted(k for _, keys in ENV_FILES.values() for k in keys) == sorted(BUNDLED)
 
 
 @pytest.mark.parametrize(
@@ -308,13 +339,12 @@ def test_secrets_from_ci_land_in_the_right_files_unchanged(
     assert "BEGIN TEST" not in stdout
     assert secrets["GITHUB_CLIENT_SECRET"] not in stdout
     expected = {name: value for name, value in secrets.items() if value}
-    app_env = _read_env_file(host.app_dir / "app.env")
-    api_env = _read_env_file(host.app_dir / "api.env")
-    assert app_env == {name: expected[name] for name in APP_ENV_KEYS}
-    assert api_env == {name: expected[name] for name in API_ENV_KEYS if name in expected}
-    for name in secrets.keys() - expected.keys():
-        assert name not in app_env and name not in api_env  # absent, not an empty string
-    for name in (".env", "app.env", "api.env"):
+    # Unset names are absent from every file, not an empty string.
+    for file_name, (_, keys) in ENV_FILES.items():
+        assert _read_env_file(host.app_dir / file_name) == {
+            name: expected[name] for name in keys if name in expected
+        }, file_name
+    for name in (".env", *ENV_FILES):
         assert _mode(host.app_dir / name) == 0o600
 
 
@@ -324,7 +354,8 @@ def test_empty_value_in_the_bundle_is_left_out(host: Host) -> None:
     assert host.deploy("ghcr.io/test/api@sha256:a", bundle=bundle).returncode == 0
 
     assert _read_env_file(host.app_dir / "app.env") == {"GITHUB_APP_ID": "7"}
-    assert _read_env_file(host.app_dir / "api.env") == {}
+    for name in ("api.env", "worker.env", "webhook-worker.env"):
+        assert _read_env_file(host.app_dir / name) == {}
 
 
 # --- Host: generated credentials, rollbacks and refusals ----------------------------------------
@@ -400,13 +431,13 @@ def test_rollback_refuses_without_a_store_password(host: Host, name: str) -> Non
 def test_rollback_recreates_missing_app_secret_files(host: Host) -> None:
     assert host.deploy("ghcr.io/test/api@sha256:a", bundle="").returncode == 0
     assert host.deploy("ghcr.io/test/api@sha256:b", bundle="").returncode == 0
-    for name in ("app.env", "api.env"):
+    for name in ENV_FILES:
         (host.app_dir / name).unlink()
 
     result = host.run("rollback.sh")
 
     assert result.returncode == 0, result.stderr
-    for name in ("app.env", "api.env"):
+    for name in ENV_FILES:
         assert _mode(host.app_dir / name) == 0o600
 
 
@@ -427,7 +458,7 @@ def test_host_deployed_before_the_broker_keeps_its_postgres_password(host: Host)
     assert env["POSTGRES_PASSWORD"] == postgres_password
     assert re.fullmatch(r"[0-9a-f]{48}", env["RABBITMQ_PASSWORD"])
     assert re.fullmatch(r"[0-9a-f]{48}", env["REDIS_PASSWORD"])
-    for name in ("app.env", "api.env"):
+    for name in ENV_FILES:
         assert (host.app_dir / name).read_text(encoding="utf-8") == ""
         assert _mode(host.app_dir / name) == 0o600
 
@@ -564,6 +595,70 @@ def test_api_gets_only_its_own_env_file() -> None:
     assert re.findall(r"^      - (\S+)$", env_files, re.MULTILINE) == ["api.env"]
     assert "GITHUB_" not in api
     assert "AUTH_JWT_PRIVATE_KEY" not in api
+
+
+def _list_under(block: str, key: str) -> list[str]:
+    """Items (``- x``) or keys (``x:``) directly under a top-level key of a service block."""
+    match = re.search(rf"^    {key}:\n((?:      .*\n)*)", block, re.MULTILINE)
+    assert match is not None, f"{key} is missing"
+    return re.findall(r"^      (?:- )?([a-z][a-z.-]*):?$", match.group(1), re.MULTILINE)
+
+
+@pytest.mark.parametrize(
+    ("service", "module", "env_files", "dependencies"),
+    [
+        ("worker", "app.worker", ["app.env", "worker.env"], ["bootstrap", "postgres", "rabbitmq"]),
+        # The projection writes only PostgreSQL; the reconciler of the API publishes the runs.
+        (
+            "webhook-worker",
+            "app.webhook_worker",
+            ["app.env", "webhook-worker.env"],
+            ["bootstrap", "postgres"],
+        ),
+    ],
+)
+def test_workers_run_from_the_api_image_with_their_own_files_and_dependencies(
+    service: str, module: str, env_files: list[str], dependencies: list[str]
+) -> None:
+    block = _service_block(service)
+
+    assert "image: ${IMAGE:?IMAGE is required}" in block
+    assert f'command: ["python", "-m", "{module}"]' in block
+    assert _list_under(block, "env_file") == env_files
+    assert _list_under(block, "depends_on") == dependencies
+    assert "condition: service_completed_successfully" in block  # bootstrap: migrations first
+    assert "DATABASE_URL: postgresql+psycopg://" in block
+    assert ("RABBITMQ_URL: amqp://" in block) == ("rabbitmq" in dependencies)
+    assert "restart: unless-stopped" in block
+    assert "ports:" not in block
+
+
+@pytest.mark.parametrize("service", ["worker", "webhook-worker"])
+def test_worker_healthcheck_reads_its_heartbeat_not_the_http_port(service: str) -> None:
+    block = _service_block(service)
+    heartbeat = re.search(r"^      WORKER_HEARTBEAT_FILE: (\S+)$", block, re.MULTILINE)
+    test = re.search(r"^      test:\n        - CMD-SHELL\n        - (.+)$", block, re.MULTILINE)
+
+    assert heartbeat is not None and test is not None
+    # The image HEALTHCHECK polls :8000/healthcheck, which no worker serves: it must be replaced.
+    assert "8000" not in block and "urllib" not in block
+    # The module file is the marker of an image that beats; WORKDIR /srv, app copied to ./app.
+    module = REPO_ROOT / "app" / "common" / "infrastructure" / "heartbeat.py"
+    assert module.is_file()
+    assert test.group(1) == (
+        "test ! -f /srv/app/common/infrastructure/heartbeat.py || exec python -m "
+        f"app.common.infrastructure.heartbeat {heartbeat.group(1)} 30"
+    )
+    assert "COPY app ./app" in _read("Dockerfile") and "WORKDIR /srv" in _read("Dockerfile")
+
+
+def test_workers_are_not_on_the_edge_network() -> None:
+    edge = (STAGING_COMPOSE.parent / "staging.edge.yml").read_text(encoding="utf-8")
+    ports = (STAGING_COMPOSE.parent / "staging.ports.yml").read_text(encoding="utf-8")
+
+    for service in ("worker", "webhook-worker"):
+        assert f"\n  {service}:" not in edge
+        assert f"\n  {service}:" not in ports
 
 
 def test_push_image_waits_for_the_required_python_check() -> None:

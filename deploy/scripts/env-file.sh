@@ -7,10 +7,32 @@
 # an unset ${VAR} into an empty string, and app/bootstrap/reviews_api.py checks GITHUB_WEBHOOK_SECRET
 # with `is not None`. A key that is not set in GitHub is simply absent from the file and from the
 # container environment.
-APP_ENV_FILE_NAME="app.env"  # GitHub App credentials: worker and webhook-worker (next PR of #35)
+# One file per set of recipients (docs/SECRETS.md); a container reads only the files of its role.
+APP_ENV_FILE_NAME="app.env"  # GitHub App credentials: worker and webhook-worker
 API_ENV_FILE_NAME="api.env"  # api only: webhook signature and user authorization
+WORKER_ENV_FILE_NAME="worker.env"  # worker only: LLM gateway
+WEBHOOK_WORKER_ENV_FILE_NAME="webhook-worker.env"  # webhook-worker only: bot login
 APP_ENV_KEYS=(GITHUB_APP_ID GITHUB_APP_PRIVATE_KEY)
 API_ENV_KEYS=(GITHUB_WEBHOOK_SECRET GITHUB_CLIENT_ID GITHUB_CLIENT_SECRET AUTH_JWT_PRIVATE_KEY AUTH_JWT_PUBLIC_KEY)
+WORKER_ENV_KEYS=(LLM_API_KEYS LLM_BASE_URL LLM_MODEL)
+WEBHOOK_WORKER_ENV_KEYS=(GITHUB_APP_BOT_LOGIN)
+ENV_FILE_NAMES=("${APP_ENV_FILE_NAME}" "${API_ENV_FILE_NAME}" "${WORKER_ENV_FILE_NAME}" "${WEBHOOK_WORKER_ENV_FILE_NAME}")
+
+# The env file of an allowlisted key; fails for any other name.
+env_file_for_key() {
+  local name="$1"
+  if [[ " ${APP_ENV_KEYS[*]} " == *" ${name} "* ]]; then
+    printf '%s' "${APP_ENV_FILE_NAME}"
+  elif [[ " ${API_ENV_KEYS[*]} " == *" ${name} "* ]]; then
+    printf '%s' "${API_ENV_FILE_NAME}"
+  elif [[ " ${WORKER_ENV_KEYS[*]} " == *" ${name} "* ]]; then
+    printf '%s' "${WORKER_ENV_FILE_NAME}"
+  elif [[ " ${WEBHOOK_WORKER_ENV_KEYS[*]} " == *" ${name} "* ]]; then
+    printf '%s' "${WEBHOOK_WORKER_ENV_FILE_NAME}"
+  else
+    return 1
+  fi
+}
 
 read_compose_env_var() {
   local key="$1" file="$2"
@@ -55,21 +77,21 @@ write_compose_env_file() {
 # single-quoted: Compose reads them across lines without interpolation, and a backslash stays a
 # backslash except right before a quote. So a value may contain neither ' nor a trailing \.
 # Command substitution drops trailing newlines of a value, which PEM parsing ignores.
-# Everything is validated before either file is replaced; the body runs in a subshell so that the
-# EXIT trap removes the temporary files on any failure.
+# Everything is validated before any file is replaced; the body runs in a subshell so that the
+# EXIT trap removes the temporary files on any failure. Temporary file i belongs to ENV_FILE_NAMES[i].
 write_app_env_files() (
   dir="$1"
   bundle="$2"
-  app_tmp=""
-  api_tmp=""
-  trap 'rm -f "${app_tmp}" "${api_tmp}"' EXIT
+  tmp_files=()
+  trap 'rm -f ${tmp_files[@]+"${tmp_files[@]}"}' EXIT
   if ! decoded="$(printf '%s' "${bundle}" | base64 -d 2>/dev/null)"; then
     echo "app secrets bundle is not valid base64" >&2
     exit 1
   fi
   umask 077
-  app_tmp="$(mktemp "${dir}/.${APP_ENV_FILE_NAME}.XXXXXX")"
-  api_tmp="$(mktemp "${dir}/.${API_ENV_FILE_NAME}.XXXXXX")"
+  for file_name in "${ENV_FILE_NAMES[@]}"; do
+    tmp_files+=("$(mktemp "${dir}/.${file_name}.XXXXXX")")
+  done
   while IFS= read -r line; do
     [[ -n "${line}" ]] || continue
     name="${line%%=*}"
@@ -92,25 +114,27 @@ write_app_env_files() (
       echo "app secret ${name}: a trailing backslash is not supported in values" >&2
       exit 1
     fi
-    if [[ " ${APP_ENV_KEYS[*]} " == *" ${name} "* ]]; then
-      printf "%s='%s'\n" "${name}" "${value}" >> "${app_tmp}"
-    elif [[ " ${API_ENV_KEYS[*]} " == *" ${name} "* ]]; then
-      printf "%s='%s'\n" "${name}" "${value}" >> "${api_tmp}"
-    else
+    if ! file_name="$(env_file_for_key "${name}")"; then
       echo "app secret ${name} is not in the allowlist of env-file.sh" >&2
       exit 1
     fi
+    for i in "${!ENV_FILE_NAMES[@]}"; do
+      if [[ "${ENV_FILE_NAMES[i]}" == "${file_name}" ]]; then
+        printf "%s='%s'\n" "${name}" "${value}" >> "${tmp_files[i]}"
+      fi
+    done
   done <<< "${decoded}"
-  chmod 600 "${app_tmp}" "${api_tmp}"
-  mv -f "${app_tmp}" "${dir}/${APP_ENV_FILE_NAME}"
-  mv -f "${api_tmp}" "${dir}/${API_ENV_FILE_NAME}"
+  chmod 600 "${tmp_files[@]}"
+  for i in "${!ENV_FILE_NAMES[@]}"; do
+    mv -f "${tmp_files[i]}" "${dir}/${ENV_FILE_NAMES[i]}"
+  done
 )
 
 # Compose requires every env_file to exist; a host deployed without a bundle gets empty files.
 ensure_app_env_files() {
   local dir="$1" name
   umask 077
-  for name in "${APP_ENV_FILE_NAME}" "${API_ENV_FILE_NAME}"; do
+  for name in "${ENV_FILE_NAMES[@]}"; do
     [[ -f "${dir}/${name}" ]] || : > "${dir}/${name}"
     chmod 600 "${dir}/${name}"
   done
