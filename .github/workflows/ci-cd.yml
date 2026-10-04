@@ -347,6 +347,64 @@ jobs:
           format: table
           scanners: vuln,secret,misconfig
 
+  webhook-smoke:
+    name: Webhook container smoke
+    runs-on: ubuntu-latest
+    needs: docker-build
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: ci
+          POSTGRES_PASSWORD: ci
+          POSTGRES_DB: ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U ci -d ci"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      DATABASE_URL: postgresql+psycopg://ci:ci@127.0.0.1:5432/ci
+    steps:
+      # Checkout first: its clean step would delete the downloaded artifact.
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download image artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: docker-image
+
+      - name: Load image
+        run: gunzip -c docker-image.tar.gz | docker load
+
+      - name: Generate a throwaway webhook secret
+        # Never a repository or environment secret: the image is unpublished at this point.
+        run: |
+          secret="$(openssl rand -hex 32)"
+          echo "::add-mask::${secret}"
+          echo "GITHUB_WEBHOOK_SECRET=${secret}" >> "${GITHUB_ENV}"
+
+      - name: Migrate the database with the built image
+        run: docker run --rm --network host -e DATABASE_URL "${LOCAL_IMAGE}" alembic upgrade head
+
+      - name: Start the API container
+        run: |
+          docker run -d --name api --network host \
+            -e DATABASE_URL -e GITHUB_WEBHOOK_SECRET "${LOCAL_IMAGE}"
+
+      - name: Wait for the API healthcheck
+        run: deploy/scripts/healthcheck.sh http://127.0.0.1:8000/healthcheck
+
+      - name: Signed webhook smoke
+        run: python3 scripts/webhook_smoke.py --url http://127.0.0.1:8000/webhooks/github --count 50
+
+      - name: API container logs
+        if: failure()
+        run: docker logs api || true
+
   push-image:
     name: Push Docker image
     if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
@@ -363,6 +421,7 @@ jobs:
       - python-lint-type-test
       - docker-build
       - docker-scan
+      - webhook-smoke
     outputs:
       image_ref: ${{ steps.push.outputs.image_ref }}
       staging: ${{ needs.docker-build.outputs.staging }}
