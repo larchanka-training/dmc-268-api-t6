@@ -57,8 +57,11 @@ modules hold only `infrastructure/` code and `app/entrypoints/` does not exist y
   or `Refs #N` in the footer; `Refs owner/repo#N` for another repo's issue).
 - PR title: conventional, ≤72 characters.
 - PR body: `What` / `Why` / `How to verify` / `Refs`, in that order.
-- One approving review required before merge.
-- Rebase on `main` before requesting review.
+- One approving review on the current head and all review threads resolved are required
+  before merge; a push that changes the PR diff dismisses the approve.
+- Rebase on `main` before requesting review and again before merge (branch up to date).
+- No closing keyword and no Development-panel link: the tech lead closes the issue after
+  checking its AC (`docs/CONTRIBUTING.md`).
 
 ## Where the details live
 
