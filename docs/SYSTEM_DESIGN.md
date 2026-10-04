@@ -532,6 +532,7 @@ ID — UUID без префиксов, как в БД; `findings_hash` — 64 he
 - `POST /api/runs/{id}/rerun` отвечает 422, если у репозитория нет активной версии правил или промпта: это не конфликт T3 (409 только для активного Run или закрытого PR).
 - `GET /api/runs/{id}` отдаёт `RunDetail`; `author`, `headRef` и `baseRef` в `PullRequestRef` заполняются только в нём, список `GET /api/runs` отдаёт `RunSession` без них. Zod-схема UI допускает оба ответа: с ui#59 (`4369e02`) эти поля `nullable().optional()`; снимок `tests/fixtures/ui_zod_contracts.json` ещё снят с ui `68c85e0` (до ui#59), его перегенерация — PIPELINE_SPEC §16.
 - До подключения LLM Gateway (#33) worker собирает заглушку `ReviewModel`: вызов модели завершается `llm_unavailable`, Run проходит retry и уходит в `failed`.
+- Installation-токены кэшируются в памяти процесса (`InMemoryInstallationAccessTokenCache`: `app/webhook_worker.py:97`, `app/worker.py:368`): каждый процесс выпускает свой токен и держит его до `expires_at` из ответа GitHub минус 60 с. Цель — Redis `token:{installation_id}` (§8.3, §10); перенос в Redis — бэклог, #62.
 
 ---
 
@@ -575,7 +576,7 @@ v1 — `GitHubProvider`. `GitLabProvider` (MR `changes`, `discussions`, `pipelin
 | Ответ на вебхук < 500 мс | Проверка HMAC (`X-Hub-Signature-256`, `hmac.compare_digest`), заголовков и JSON, одна вставка квитанции в `webhook_events` — всё; никакой работы в обработчике: REST-вызовы и проекция — в `webhook-worker` после ответа (§6.1) |
 | Идемпотентность | `webhook_events.delivery_id UNIQUE` (`X-GitHub-Delivery`); GitHub **не** ретраит доставки сам — приёмник обязан быть доступен |
 | Игнор собственных событий (Р-9) | Маршрут по `sender` не фильтрует: квитанция сохраняется, ответ — 202. `webhook-worker` пропускает событие лейбла `ai-review` (`labeled` / `unlabeled`), если `sender.type == "Bot"` ∧ `sender.login` совпадает с `GITHUB_APP_BOT_LOGIN` без учёта регистра, и помечает квитанцию разобранной (`projected_at`). В событиях бота `sender` — пользователь `<slug>[bot]`, и его id не равен App ID (staging: App ID `5111033`, `dmc268-t6-reviewer[bot]` — `335108304`, #37). App ID остаётся в `iss` App JWT и в исключении своего check suite по `app.id` (PIPELINE_SPEC §8.1) |
-| Installation-токен | живёт 1 ч; кэш — в памяти процесса (`InMemoryInstallationAccessTokenCache`, свой у `webhook-worker` и `worker`) до `expires_at` из ответа GitHub минус 60 с; private key App — только в env `webhook-worker`/`worker`/`publisher` |
+| Installation-токен | живёт 1 ч; Redis `token:{installation_id}`, TTL 50 мин (сейчас — в памяти процесса, отступление §7.3); private key App — только в env `webhook-worker`/`worker`/`publisher` |
 | Rate limit | 5000 req/ч на installation; `X-RateLimit-Remaining` в метрики; `403/429` + `Retry-After` — повторы по PIPELINE_SPEC §5.2; вторичные лимиты — не более 1 мутации/сек |
 | Дифф | `GET /pulls/{n}/files` (patch на файл, ≤ 3000 файлов, patch пустой у бинарных и > 20 000 строк → файл помечается `too_large`) |
 | Файлы | `GET /git/blobs/{sha}` по sha из `files[].sha` — кэшируется на 7 дней (содержимое неизменяемо по sha, §10); никогда `contents` по пути с ref |
@@ -730,7 +731,7 @@ class ContextPayload(BaseModel):          # сущность роли 6
 
 | Что | Ключ | Где | TTL / инвалидация | Зачем |
 |---|---|---|---|---|
-| Installation-токен | `installation_id` | память процесса (`webhook-worker`, `worker`) | до `expires_at` минус 60 с | лимит 1 ч у GitHub |
+| Installation-токен | `installation_id` | Redis (сейчас — в памяти процесса, отступление §7.3) | 50 мин | лимит 1 ч у GitHub |
 | Блоб файла | `(repo_id, blob_sha)` | Redis ≤ 256 КБ, иначе PostgreSQL (`cached_file_blobs`) | 7 дней; содержимое неизменяемо по sha | один и тот же файл в серии пушей |
 | AST / `SymbolContext` файла | `(blob_sha, parser_version)` | Redis | 7 дней | парсинг дороже сети |
 | Дерево репозитория | `(repo_id, head_sha)` | Redis | 1 ч | резолв импортов |
@@ -755,7 +756,7 @@ class ContextPayload(BaseModel):          # сущность роли 6
 | Сущность (роль 6) | Требуемые поля |
 |---|---|
 | `Workspace` | арендатор (Р-7); дневной бюджет |
-| `ProviderInstallation` | `provider`, `external_id`, `metadata` (JSON); токены App в БД не сохраняются (installation-токен — только кэш в памяти процесса, §8.3); шифрование в MVP не заявлено — OQ-7 |
+| `ProviderInstallation` | `provider`, `external_id`, `metadata` (JSON); токены App в БД не сохраняются (installation-токен — только кэш Redis, §8.3; сейчас — в памяти процесса, отступление §7.3); шифрование в MVP не заявлено — OQ-7 |
 | `Repository` | `enabled`, `default_engine`, `wait_for_ci: auto\|always\|never`, `review_event`, `max_comments` |
 | `CodeChange` (PR) | `number`, `head_sha`, `base_sha`, `ai_review_labeled` (стоит лейбл `ai-review`, Р-10), `ci_status` (jsonb по sha), `state` |
 | `Run` | `head_sha`, `state` (§6.4), `engine`, `rule_version_id`, `prompt_version_id`, `attempt`, `available_at`, `lease_until`, `cancel_requested`, `worker_id`, `trigger`, `error_code`, `error_message` (каталог — PIPELINE_SPEC §6); `summaryOnly` в API не хранится, а выводится из снимка диффа (Р-15: только список файлов) |
@@ -820,6 +821,8 @@ Zod-схемы фронта (роль 5) и бэкенд описывают од
 | Безопасность | HMAC на вебхуках; секреты только через env из CI (роль 3); токены GitHub и LLM не попадают в сандбокс; сандбокс `--network=none`, non-root, read-only rootfs; PG/RabbitMQ/Redis — только внутренняя сеть | TEST_PLAN 2.2, 2.4, 2.6 |
 | Данные клиента | блобы ≤ 7 дней в кэше; диффы, контексты, тела ответов инструментов и payload вебхуков — до удаления Workspace; ни один прогон не логирует содержимое файлов в stdout | |
 | Наблюдаемость | структурированные логи (JSON) с `run_id` во всех контейнерах; метрики: глубина очередей, длительность по этапам, `X-RateLimit-Remaining`, стоимость; self-hosted стек — отдельная задача | |
+
+**Риск схлопывания** (решение техлида 04.10.2026, #56): цель «100 % устаревших прогонов отменены до публикации» остаётся, но пока не выполняется гарантированно. Publisher считает head актуальным, если `head_sha` прогона совпадает с `code_changes.head_sha` в PostgreSQL (`app/modules/reviews/application/publish_run_review.py:161-165`, `head_current`). Новый head попадает в PostgreSQL только через `webhook-worker` (§6.3): до одного цикла разбора квитанций (~30 с при пустой очереди, `app/webhook_worker.py:101-103`) плюс обработка после ответа 202. В этом окне ревью старого sha ещё может быть опубликовано. Закрыть окно должна #52.
 
 ---
 

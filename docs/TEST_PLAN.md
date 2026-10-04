@@ -97,7 +97,7 @@ DiffEngine создаёт `ReviewOutput`; проверять схему и се�
 | Corpus schema и patch apply | 100% кейсов; лицензии/ground truth подтверждены вручную | Обязательный gate. |
 | Validity, micro Precision/Recall, Critical Recall, per-category, verdict agreement | Числа и provenance в PR summary и воспроизводимом JSON | Отчёт; качество модели не валит required check. |
 | Precision ≥ 85%, Critical Recall ≥ 75%, Hallucination Rate < 3% | Продуктовые ориентиры из [SD §13](SYSTEM_DESIGN.md#13-нефункциональные-требования) | Отчёт; ручной hallucination oracle обязателен для заявления метрики. |
-| Coalescing 100%, webhook HMAC/idempotency, batch publication без 422 | Интеграционные тесты с реальными PG/RabbitMQ и fake GitHub | Обязательные функциональные gates после реализации зависимостей. |
+| Coalescing 100%, webhook HMAC/idempotency, batch publication без 422 | Интеграционные тесты с реальными PG/RabbitMQ и fake GitHub | Обязательные функциональные gates после реализации зависимостей. Для Coalescing до #52 остаётся окно до проекции нового head — риск в [SD §13](SYSTEM_DESIGN.md#13-нефункциональные-требования). |
 | Sandbox isolation 100% | Сеть/секреты/FS из §2.4 | Фаза 3; текущий спринт не заявляет прохождение. |
 | DiffEngine p95 ≤ 40 с, webhook ACK p95 < 500 мс | Измерения на указанной staging выборке | Отчёт с размером выборки и окружением. |
 
