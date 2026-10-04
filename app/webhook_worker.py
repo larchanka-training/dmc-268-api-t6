@@ -11,10 +11,13 @@ import os
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass
+from pathlib import Path
+from typing import NoReturn
 
 import httpx
 
 from app.bootstrap.reviews_api import ReviewsApiResources
+from app.common.infrastructure.heartbeat import beat, heartbeat_file, reset
 from app.modules.integrations.webhooks.application.receive_github_delivery import (
     ReceiveGitHubDelivery,
 )
@@ -34,6 +37,7 @@ class WorkerConfig:
     private_key: str
     bot_login: str
     github_api_url: str
+    heartbeat_file: Path | None = None
 
     @classmethod
     def from_environment(cls, env: Mapping[str, str]) -> WorkerConfig:
@@ -57,6 +61,7 @@ class WorkerConfig:
             private_key=required("GITHUB_APP_PRIVATE_KEY"),
             bot_login=required("GITHUB_APP_BOT_LOGIN"),
             github_api_url=env.get("GITHUB_API_URL", "https://api.github.com"),
+            heartbeat_file=heartbeat_file(env),
         )
 
 
@@ -82,8 +87,16 @@ async def sweep_once(receiver: ReceiveGitHubDelivery) -> int:
     return projected
 
 
+async def sweep_forever(receiver: ReceiveGitHubDelivery) -> NoReturn:
+    while True:
+        projected = await sweep_once(receiver)
+        await asyncio.sleep(0 if projected == 100 else 30)
+
+
 async def run_forever() -> None:
     config = WorkerConfig.from_environment(os.environ)
+    if config.heartbeat_file is not None:
+        reset(config.heartbeat_file)
     resources = ReviewsApiResources.from_database_url(config.database_url)
     try:
         async with httpx.AsyncClient(
@@ -98,9 +111,10 @@ async def run_forever() -> None:
                 now=time.time,
             )
             receiver = compose_worker(resources, client, tokens, config)
-            while True:
-                projected = await sweep_once(receiver)
-                await asyncio.sleep(0 if projected == 100 else 30)
+            async with asyncio.TaskGroup() as tasks:
+                tasks.create_task(sweep_forever(receiver))
+                if config.heartbeat_file is not None:
+                    tasks.create_task(beat(config.heartbeat_file))
     finally:
         await resources.aclose()
 

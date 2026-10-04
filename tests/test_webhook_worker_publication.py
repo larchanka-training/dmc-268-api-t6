@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
+from pathlib import Path
 from typing import cast
 
 import httpx
@@ -36,6 +37,16 @@ def test_worker_requires_github_configuration_and_numeric_app_id_before_startup(
     invalid_app_id["GITHUB_APP_ID"] = "not-a-number"
     with pytest.raises(RuntimeError, match="GITHUB_APP_ID"):
         WorkerConfig.from_environment(invalid_app_id)
+
+
+def test_worker_writes_a_heartbeat_only_when_configured() -> None:
+    assert WorkerConfig.from_environment(_environment()).heartbeat_file is None
+
+    environment = _environment()
+    environment["WORKER_HEARTBEAT_FILE"] = "/tmp/webhook-worker.heartbeat"
+    config = WorkerConfig.from_environment(environment)
+
+    assert config.heartbeat_file == Path("/tmp/webhook-worker.heartbeat")
 
 
 def test_worker_wires_receipt_projection_without_a_run_publisher() -> None:

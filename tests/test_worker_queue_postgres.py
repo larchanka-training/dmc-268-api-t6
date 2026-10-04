@@ -12,10 +12,12 @@ import itertools
 import json
 import logging
 import os
+import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from functools import partial
+from pathlib import Path
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -37,6 +39,7 @@ from sqlalchemy.schema import CreateSchema, DropSchema
 from alembic import command
 from app.bootstrap.reviews_api import get_run_repository
 from app.common.infrastructure.db.leader import run_as_leader
+from app.common.infrastructure.heartbeat import is_fresh
 from app.main import app
 from app.modules.reviews.application.check_runs import CheckRunTarget, CheckRunView
 from app.modules.reviews.application.conventions import (
@@ -815,17 +818,24 @@ def test_second_leader_does_not_tick_while_the_first_holds_the_lock(env: Env) ->
 
 @pytest.mark.integration
 def test_worker_without_github_app_starts_and_stays_healthy(
-    env: Env, caplog: pytest.LogCaptureFixture
+    env: Env, caplog: pytest.LogCaptureFixture, tmp_path: Path
 ) -> None:
     database_url = f"{env.database_url}?options=-csearch_path%3D{env.schema}"
+    heartbeat = tmp_path / "worker.heartbeat"
+    heartbeat.touch()  # left by a previous process: must not count as a beat of this one
+    os.utime(heartbeat, (1.0, 1.0))
     settings = WorkerSettings.from_environment(
-        {"DATABASE_URL": database_url, "RABBITMQ_URL": env.rabbitmq_url}
+        {
+            "DATABASE_URL": database_url,
+            "RABBITMQ_URL": env.rabbitmq_url,
+            "WORKER_HEARTBEAT_FILE": str(heartbeat),
+        }
     )
 
     async def scenario() -> bool:
         task = asyncio.create_task(run_worker(settings, leader_period=0.1))
         await asyncio.sleep(1.5)
-        healthy = not task.done()
+        healthy = not task.done() and is_fresh(heartbeat, max_age=5, now=time.time())
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
         return healthy

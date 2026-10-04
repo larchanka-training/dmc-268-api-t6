@@ -17,6 +17,7 @@ from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from functools import partial
+from pathlib import Path
 from typing import NoReturn, Protocol
 from uuid import UUID
 
@@ -29,6 +30,7 @@ from sqlalchemy.ext.asyncio import (
 )
 
 from app.common.infrastructure.db.leader import WORKER_LEADER_LOCK, run_as_leader
+from app.common.infrastructure.heartbeat import beat, heartbeat_file, reset
 from app.modules.integrations.webhooks.infrastructure.github_installation_tree_provider import (
     GitHubAppInstallationAccessTokenProvider,
     InMemoryInstallationAccessTokenCache,
@@ -300,6 +302,7 @@ class WorkerSettings:
     github_private_key: str | None
     github_api_url: str
     portal_url: str | None
+    heartbeat_file: Path | None = None
 
     @property
     def github_app_configured(self) -> bool:
@@ -321,6 +324,7 @@ class WorkerSettings:
             github_private_key=env.get("GITHUB_APP_PRIVATE_KEY") or None,
             github_api_url=env.get("GITHUB_API_URL", "https://api.github.com"),
             portal_url=env.get("PORTAL_URL") or None,
+            heartbeat_file=heartbeat_file(env),
         )
 
 
@@ -479,6 +483,8 @@ async def run_worker(
     leader_period: float = 30.0,
 ) -> None:
     """Consume until cancelled; the caller owns signal handling."""
+    if settings.heartbeat_file is not None:
+        reset(settings.heartbeat_file)
     engine = create_async_engine(settings.database_url, pool_pre_ping=True)
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
     async with AsyncExitStack() as stack:
@@ -524,6 +530,9 @@ async def run_worker(
                         name="worker",
                     )
                 )
+                # Beats only once both consumers are attached; any failed task ends the group.
+                if settings.heartbeat_file is not None:
+                    tasks.create_task(beat(settings.heartbeat_file))
 
 
 def main() -> None:
