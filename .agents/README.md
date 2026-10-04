@@ -64,6 +64,7 @@ These files are byte-identical between the two repos, marked with a
 - `skills/agent-loop/**`, `skills/code-review/**`, `skills/create-issue/**`,
   `skills/pull-request/**`, `skills/planning-and-task-breakdown/**`, `skills/qa/**`
 - `agents/*.md`
+- outside `.agents/`: `.github/pull_request_template.md` (SYNC marker on its first line)
 
 The marker takes the form the file type allows: `.md` — the `<!-- SYNC: … -->` line
 (after the H1 in a skill file); `.py` / `.sh` — a `# SYNC: …` comment after the shebang or
