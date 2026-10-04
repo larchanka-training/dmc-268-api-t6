@@ -21,9 +21,11 @@ docker compose up -d --build
 ```
 
 This starts `backend` (port `${BACKEND_PORT:-8000}`, from `docker-compose.yml`
-on `main`) and `postgres` with a healthcheck. Do not run the app locally with
-`uv run uvicorn` for this workflow — the point is to exercise the same
-container image and network path CI/prod use.
+on `main`), `worker`, `postgres`, `rabbitmq` and `redis`; every service but
+`backend` has a healthcheck. `webhook-worker` starts only with
+`--profile webhooks`. Do not run the app locally with `uv run uvicorn` for this
+workflow — the point is to exercise the same container image and network path
+CI/prod use.
 
 `up` does not run migrations; apply them before any check that touches the
 database (an unmigrated database answers the webhook with 500):
@@ -48,7 +50,8 @@ done
 
 ## 3. Smoke checks via `httpx`
 
-`httpx` is a dev dependency on `main` (`pyproject.toml`). Drive it with
+`httpx` is a runtime dependency on `main` (`pyproject.toml`,
+`[project].dependencies`). Drive it with
 `uv run python -c` for quick, disposable smoke scripts — no new test file
 needed for a manual smoke pass:
 
