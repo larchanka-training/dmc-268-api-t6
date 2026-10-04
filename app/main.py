@@ -1,16 +1,19 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import json
 import math
 import os
+import time
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
-from typing import Annotated, Literal, NoReturn
+from typing import Annotated, Any, Literal, NoReturn
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Path, Query, Request
+from fastapi.openapi.utils import get_openapi
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import ValidationError
 
@@ -29,6 +32,7 @@ from app.bootstrap.reviews_api import (
 from app.bootstrap.run_update_listener import run_update_listener
 from app.common.infrastructure.db.enums import RunState
 from app.modules.auth.api.router import auth_router
+from app.modules.auth.application.scope import AuthScope
 from app.modules.integrations.webhooks.api.dtos import GitHubWebhookPayloadDto
 from app.modules.integrations.webhooks.api.receipt import VerifiedGitHubDelivery
 from app.modules.integrations.webhooks.application.receive_github_delivery import (
@@ -128,9 +132,58 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         yield
 
 
-app = FastAPI(title="Backend", lifespan=lifespan)
+KEEPALIVE_INTERVAL_SECONDS = 15.0
 
-__all__ = ["app", "get_file_blob_cache", "get_run_repository"]
+app = FastAPI(title="AI Code Reviewer browser API", lifespan=lifespan)
+
+__all__ = [
+    "KEEPALIVE_INTERVAL_SECONDS",
+    "api_router",
+    "app",
+    "get_file_blob_cache",
+    "get_repository_settings",
+    "get_run_repository",
+]
+
+
+def custom_openapi() -> dict[str, Any]:
+    if app.openapi_schema:
+        return app.openapi_schema
+    openapi_schema = get_openapi(
+        title="AI Code Reviewer browser API",
+        version="0.1.0",
+        description="Browser-facing HTTP surface of the AI Code Reviewer service",
+        routes=app.routes,
+    )
+    openapi_schema["components"] = openapi_schema.get("components", {})
+    openapi_schema["components"]["securitySchemes"] = {
+        "bearerAuth": {
+            "type": "http",
+            "scheme": "bearer",
+            "bearerFormat": "JWT",
+            "description": "Access JWT issued by auth-api, valid for 15 minutes.",
+        }
+    }
+    for path, path_item in openapi_schema.get("paths", {}).items():
+        if path.startswith("/api/") and not (
+            path.startswith("/api/auth/github/callback")
+            or path.startswith("/api/auth/refresh")
+            or path.startswith("/api/auth/logout")
+        ):
+            for method, operation in path_item.items():
+                if method.lower() in ("get", "post", "put", "delete", "patch"):
+                    if "security" not in operation:
+                        operation["security"] = [{"bearerAuth": []}]
+                    operation.setdefault("responses", {})
+                    if "401" not in operation["responses"]:
+                        operation["responses"]["401"] = {
+                            "description": "Missing or invalid Bearer access token"
+                        }
+    app.openapi_schema = openapi_schema
+    return app.openapi_schema
+
+
+app.openapi = custom_openapi  # type: ignore[method-assign]
 
 
 @app.get("/healthcheck")
@@ -160,6 +213,9 @@ def _has_valid_github_signature(*, raw_body: bytes, signature: str | None, secre
     return hmac.compare_digest(received, expected)
 
 
+MAX_WEBHOOK_PAYLOAD_BYTES: int = 10 * 1024 * 1024  # 10 MB
+
+
 @github_webhook_router.post("")
 async def receive_github_webhook(
     request: Request,
@@ -170,7 +226,23 @@ async def receive_github_webhook(
     ],
 ) -> JSONResponse:
     """Verify and persist a GitHub delivery before acknowledging it."""
-    raw_body = await request.body()
+    content_length = request.headers.get("Content-Length")
+    if content_length is not None:
+        try:
+            if int(content_length) > MAX_WEBHOOK_PAYLOAD_BYTES:
+                raise HTTPException(status_code=413, detail="payload too large")
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail="invalid Content-Length header") from error
+
+    body_chunks: list[bytes] = []
+    total_bytes = 0
+    async for chunk in request.stream():
+        total_bytes += len(chunk)
+        if total_bytes > MAX_WEBHOOK_PAYLOAD_BYTES:
+            raise HTTPException(status_code=413, detail="payload too large")
+        body_chunks.append(chunk)
+    raw_body = b"".join(body_chunks)
+
     if not _has_valid_github_signature(
         raw_body=raw_body,
         signature=request.headers.get("X-Hub-Signature-256"),
@@ -380,7 +452,16 @@ def to_file_lines_dto(item: FileLinesPage) -> FileLinesDto:
     )
 
 
-@api_router.get("/runs", response_model=RunListDto)
+@api_router.get(
+    "/runs",
+    response_model=RunListDto,
+    summary="List review runs",
+    description="Paginated list of review runs for visible repositories.",
+    responses={
+        401: {"description": "Unauthorized"},
+        422: {"description": "Invalid query parameters"},
+    },
+)
 async def list_runs(
     repository: Annotated[RunRepository, Depends(get_run_repository)],
     status: RunState | None = None,
@@ -402,7 +483,16 @@ async def list_runs(
     )
 
 
-@api_router.get("/runs/{run_id}", response_model=RunDetailDto)
+@api_router.get(
+    "/runs/{run_id}",
+    response_model=RunDetailDto,
+    summary="Get review run details",
+    description="Detailed information about a specific review run.",
+    responses={
+        401: {"description": "Unauthorized"},
+        404: {"description": "Run not found"},
+    },
+)
 async def get_run(
     run_id: UUID,
     repository: Annotated[RunReviewRepository, Depends(get_run_repository)],
@@ -413,7 +503,20 @@ async def get_run(
     return to_run_detail_dto(detail)
 
 
-@api_router.post("/runs/{run_id}/rerun", status_code=202, response_model=RunSessionDto)
+@api_router.post(
+    "/runs/{run_id}/rerun",
+    status_code=202,
+    response_model=RunSessionDto,
+    summary="Rerun a review",
+    description="Trigger a new review run for the same pull request.",
+    responses={
+        202: {"description": "Rerun enqueued"},
+        401: {"description": "Unauthorized"},
+        404: {"description": "Run not found"},
+        409: {"description": "Conflict: Active run exists or PR is closed"},
+        422: {"description": "Repository configuration missing"},
+    },
+)
 async def rerun_run(
     run_id: UUID,
     uow_factory: Annotated[Callable[[], RerunUnitOfWork], Depends(get_rerun_uow_factory)],
@@ -435,7 +538,16 @@ async def rerun_run(
     return to_run_session_dto(item)
 
 
-@api_router.post("/runs/{run_id}/cancel", response_model=RunSessionDto)
+@api_router.post(
+    "/runs/{run_id}/cancel",
+    response_model=RunSessionDto,
+    summary="Cancel review run",
+    description="Request cancellation of an active or queued review run.",
+    responses={
+        401: {"description": "Unauthorized"},
+        404: {"description": "Run not found"},
+    },
+)
 async def cancel_run(
     run_id: UUID,
     repository: Annotated[CancelRunRepository, Depends(get_run_repository)],
@@ -448,15 +560,52 @@ async def cancel_run(
     return to_run_session_dto(item)
 
 
-@api_router.get("/stream")
+async def _check_run_access(repository: Any, run_id: UUID) -> bool:
+    if hasattr(repository, "has_run_access"):
+        return bool(await repository.has_run_access(run_id))
+    if hasattr(repository, "get_run"):
+        return await repository.get_run(run_id) is not None
+    return True
+
+
+@api_router.get(
+    "/stream",
+    summary="Stream live run updates",
+    description=(
+        "Server-Sent Events stream delivering real-time lifecycle updates for visible review runs."
+    ),
+    responses={
+        200: {"description": "SSE stream", "content": {"text/event-stream": {}}},
+        401: {"description": "Unauthorized"},
+    },
+)
 async def stream_run_updates(
     event_hub: Annotated[RunUpdateStream, Depends(get_run_event_hub)],
-    repository: Annotated[RunDetailRepository, Depends(get_run_repository)],
+    repository: Annotated[Any, Depends(get_run_repository)],
+    scope: Annotated[AuthScope, Depends(get_auth_scope)],
 ) -> StreamingResponse:
     async def events() -> AsyncIterator[str]:
         async with event_hub.subscribe() as updates:
-            async for update in updates:
-                if await repository.get_run(update.run_id) is None:
+            while True:
+                if scope.expires_at is not None and time.time() >= scope.expires_at:
+                    break
+                timeout = KEEPALIVE_INTERVAL_SECONDS
+                if scope.expires_at is not None:
+                    remaining = max(0.0, scope.expires_at - time.time())
+                    if remaining <= 0:
+                        break
+                    timeout = min(timeout, remaining)
+                try:
+                    update = await asyncio.wait_for(anext(updates), timeout=timeout)
+                except TimeoutError:
+                    if scope.expires_at is not None and time.time() >= scope.expires_at:
+                        break
+                    yield ": keepalive\n\n"
+                    continue
+                except StopAsyncIteration:
+                    break
+
+                if not await _check_run_access(repository, update.run_id):
                     continue
                 yield (
                     "event: run.updated\n"
@@ -466,7 +615,16 @@ async def stream_run_updates(
     return StreamingResponse(events(), media_type="text/event-stream")
 
 
-@api_router.get("/runs/{run_id}/comments", response_model=list[ReviewCommentDto])
+@api_router.get(
+    "/runs/{run_id}/comments",
+    response_model=list[ReviewCommentDto],
+    summary="Get review run comments",
+    description="List published review comments and findings for a run.",
+    responses={
+        401: {"description": "Unauthorized"},
+        404: {"description": "Run not found"},
+    },
+)
 async def get_run_comments(
     run_id: UUID,
     repository: Annotated[RunCommentsRepository, Depends(get_run_repository)],
@@ -477,7 +635,16 @@ async def get_run_comments(
     return [to_review_comment_dto(comment) for comment in comments]
 
 
-@api_router.get("/runs/{run_id}/actions", response_model=list[RunActionDto])
+@api_router.get(
+    "/runs/{run_id}/actions",
+    response_model=list[RunActionDto],
+    summary="Get review run execution steps",
+    description="Trace of model actions and tool calls recorded during a review run.",
+    responses={
+        401: {"description": "Unauthorized"},
+        404: {"description": "Run not found"},
+    },
+)
 async def get_run_actions(
     run_id: UUID,
     repository: Annotated[RunActionsRepository, Depends(get_run_repository)],
@@ -488,7 +655,15 @@ async def get_run_actions(
     return [to_run_action_dto(action) for action in actions]
 
 
-@api_router.get("/runs/{run_id}/actions/{index}/response")
+@api_router.get(
+    "/runs/{run_id}/actions/{index}/response",
+    summary="Get tool response payload",
+    description="Full response body of an action tool call by step index.",
+    responses={
+        401: {"description": "Unauthorized"},
+        404: {"description": "Run action response not found"},
+    },
+)
 async def get_run_action_response(
     run_id: UUID,
     index: Annotated[int, Path(ge=0)],
@@ -500,7 +675,16 @@ async def get_run_action_response(
     return response.response
 
 
-@api_router.get("/runs/{run_id}/diff", response_model=list[DiffFileDto])
+@api_router.get(
+    "/runs/{run_id}/diff",
+    response_model=list[DiffFileDto],
+    summary="Get review run diff snapshots",
+    description="Diff snapshots captured and reviewed for the target commit.",
+    responses={
+        401: {"description": "Unauthorized"},
+        404: {"description": "Run not found"},
+    },
+)
 async def get_run_diff(
     run_id: UUID,
     repository: Annotated[RunDiffRepository, Depends(get_run_repository)],
@@ -511,7 +695,18 @@ async def get_run_diff(
     return [to_diff_file_dto(snapshot) for snapshot in snapshots]
 
 
-@api_router.get("/runs/{run_id}/files", response_model=FileLinesDto)
+@api_router.get(
+    "/runs/{run_id}/files",
+    response_model=FileLinesDto,
+    summary="Get file content slice",
+    description="Slice of lines for a file reviewed in the run.",
+    responses={
+        401: {"description": "Unauthorized"},
+        404: {"description": "Run file not found"},
+        410: {"description": "File blob cache entry expired"},
+        422: {"description": "Invalid parameters"},
+    },
+)
 async def get_run_file_lines(
     run_id: UUID,
     repository: Annotated[RunFileRepository, Depends(get_run_repository)],
@@ -531,14 +726,31 @@ async def get_run_file_lines(
     return to_file_lines_dto(page)
 
 
-@api_router.get("/repos", response_model=list[RepositoryDto])
+@api_router.get(
+    "/repos",
+    response_model=list[RepositoryDto],
+    summary="List repositories",
+    description="List repositories accessible in the caller's workspaces.",
+    responses={
+        401: {"description": "Unauthorized"},
+    },
+)
 async def list_repositories(
     uow_factory: Annotated[RepositorySettingsUowFactory, Depends(get_repository_settings)],
 ) -> list[RepositoryDto]:
     return [to_repository_dto(item) for item in await ListRepositories(uow_factory).execute()]
 
 
-@api_router.get("/repos/{repo_id}", response_model=RepositoryDto)
+@api_router.get(
+    "/repos/{repo_id}",
+    response_model=RepositoryDto,
+    summary="Get repository settings",
+    description="Review automation configuration and settings for a repository.",
+    responses={
+        401: {"description": "Unauthorized"},
+        404: {"description": "Repository not found"},
+    },
+)
 async def get_repository(
     repo_id: UUID,
     uow_factory: Annotated[RepositorySettingsUowFactory, Depends(get_repository_settings)],
@@ -549,7 +761,16 @@ async def get_repository(
     return to_repository_dto(item)
 
 
-@api_router.patch("/repos/{repo_id}", response_model=RepositoryDto)
+@api_router.patch(
+    "/repos/{repo_id}",
+    response_model=RepositoryDto,
+    summary="Update repository settings",
+    description="Update review automation settings for a repository.",
+    responses={
+        401: {"description": "Unauthorized"},
+        404: {"description": "Repository not found"},
+    },
+)
 async def update_repository(
     repo_id: UUID,
     body: RepositoryUpdateDto,
@@ -570,7 +791,17 @@ async def update_repository(
     return to_repository_dto(item)
 
 
-@api_router.get("/repos/{repo_id}/pulls", response_model=PullRequestPageDto)
+@api_router.get(
+    "/repos/{repo_id}/pulls",
+    response_model=PullRequestPageDto,
+    summary="List repository pull requests",
+    description="List synchronized pull requests and their latest review runs for a repository.",
+    responses={
+        401: {"description": "Unauthorized"},
+        404: {"description": "Repository not found"},
+        422: {"description": "Invalid query parameters"},
+    },
+)
 async def list_repository_pulls(
     repo_id: UUID,
     repository: Annotated[PullRequestRepository, Depends(get_pull_requests)],

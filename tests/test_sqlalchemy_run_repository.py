@@ -16,8 +16,12 @@ from app.common.infrastructure.db.enums import (
     FindingSide,
     RunState,
 )
+from app.modules.auth.application.scope import AuthScope
 from app.modules.reviews.application.list_runs import RunCursor
-from app.modules.reviews.infrastructure.run_repository import SqlAlchemyRunRepository
+from app.modules.reviews.infrastructure.run_repository import (
+    SqlAlchemyRunRepository,
+    authorized_run,
+)
 
 
 class FakeResult:
@@ -40,6 +44,12 @@ class FakeSession:
     async def execute(self, statement: Select[Any]) -> FakeResult:
         self.statement = statement
         return FakeResult(self.rows)
+
+    async def scalar(self, statement: Select[Any]) -> Any:
+        self.statement = statement
+        if self.rows and self.rows[0]:
+            return self.rows[0][0]
+        return None
 
 
 class FakeSessionContext(AbstractAsyncContextManager[FakeSession]):
@@ -117,7 +127,8 @@ def test_sqlalchemy_run_repository_filters_and_orders_with_a_tied_timestamp_curs
     )
     session = FakeSession([(run, code_change, "org/repo", "gpt-test", 3, True)])
     repository = SqlAlchemyRunRepository(
-        cast(async_sessionmaker[AsyncSession], FakeSessionFactory(session))
+        cast(async_sessionmaker[AsyncSession], FakeSessionFactory(session)),
+        allow_unscoped=True,
     )
 
     items = asyncio.run(
@@ -168,7 +179,8 @@ def test_sqlalchemy_run_repository_gets_detail_with_one_summary_query() -> None:
     )
     session = FakeSession([(run, code_change, "org/repo", None, 4)])
     repository = SqlAlchemyRunRepository(
-        cast(async_sessionmaker[AsyncSession], FakeSessionFactory(session))
+        cast(async_sessionmaker[AsyncSession], FakeSessionFactory(session)),
+        allow_unscoped=True,
     )
 
     item = asyncio.run(repository.get_run(run.id))
@@ -190,7 +202,8 @@ def test_sqlalchemy_run_repository_cancels_only_the_locked_target_run() -> None:
     run = SimpleNamespace(state=RunState.QUEUED, cancel_requested=False, attempt=0)
     session = CancelSession(run)
     repository = SqlAlchemyRunRepository(
-        cast(async_sessionmaker[AsyncSession], CancelSessionFactory(session))
+        cast(async_sessionmaker[AsyncSession], CancelSessionFactory(session)),
+        allow_unscoped=True,
     )
 
     result = asyncio.run(repository.request_cancel(run_id))
@@ -209,7 +222,8 @@ def test_sqlalchemy_run_repository_cancels_only_the_locked_target_run() -> None:
 def test_sqlalchemy_run_repository_requests_cancellation_for_active_run(state: RunState) -> None:
     run = SimpleNamespace(state=state, cancel_requested=False)
     repository = SqlAlchemyRunRepository(
-        cast(async_sessionmaker[AsyncSession], CancelSessionFactory(CancelSession(run)))
+        cast(async_sessionmaker[AsyncSession], CancelSessionFactory(CancelSession(run))),
+        allow_unscoped=True,
     )
 
     result = asyncio.run(repository.request_cancel(UUID("00000000-0000-0000-0000-000000000001")))
@@ -250,7 +264,8 @@ def test_sqlalchemy_run_repository_returns_only_published_comments_with_side_map
     )
     session = FakeSession([(run_id, right_finding), (run_id, left_finding)])
     repository = SqlAlchemyRunRepository(
-        cast(async_sessionmaker[AsyncSession], FakeSessionFactory(session))
+        cast(async_sessionmaker[AsyncSession], FakeSessionFactory(session)),
+        allow_unscoped=True,
     )
 
     comments = asyncio.run(repository.get_published_comments(run_id))
@@ -276,7 +291,8 @@ def test_sqlalchemy_run_repository_returns_empty_comments_for_an_existing_run() 
     run_id = UUID("00000000-0000-0000-0000-000000000001")
     session = FakeSession([(run_id, None)])
     repository = SqlAlchemyRunRepository(
-        cast(async_sessionmaker[AsyncSession], FakeSessionFactory(session))
+        cast(async_sessionmaker[AsyncSession], FakeSessionFactory(session)),
+        allow_unscoped=True,
     )
 
     comments = asyncio.run(repository.get_published_comments(run_id))
@@ -300,7 +316,8 @@ def test_sqlalchemy_run_repository_projects_ordered_actions_and_full_response() 
     )
     actions_session = FakeSession([(run_id, action)])
     actions_repository = SqlAlchemyRunRepository(
-        cast(async_sessionmaker[AsyncSession], FakeSessionFactory(actions_session))
+        cast(async_sessionmaker[AsyncSession], FakeSessionFactory(actions_session)),
+        allow_unscoped=True,
     )
 
     actions = asyncio.run(actions_repository.get_run_actions(run_id))
@@ -318,7 +335,8 @@ def test_sqlalchemy_run_repository_projects_ordered_actions_and_full_response() 
 
     response_session = FakeSession([({"content": "complete"}, None)])
     response_repository = SqlAlchemyRunRepository(
-        cast(async_sessionmaker[AsyncSession], FakeSessionFactory(response_session))
+        cast(async_sessionmaker[AsyncSession], FakeSessionFactory(response_session)),
+        allow_unscoped=True,
     )
 
     response = asyncio.run(response_repository.get_run_action_response(run_id, 3))
@@ -337,7 +355,8 @@ def test_sqlalchemy_run_repository_returns_empty_actions_for_existing_run() -> N
     run_id = UUID("00000000-0000-0000-0000-000000000001")
     session = FakeSession([(run_id, None)])
     repository = SqlAlchemyRunRepository(
-        cast(async_sessionmaker[AsyncSession], FakeSessionFactory(session))
+        cast(async_sessionmaker[AsyncSession], FakeSessionFactory(session)),
+        allow_unscoped=True,
     )
 
     actions = asyncio.run(repository.get_run_actions(run_id))
@@ -384,7 +403,8 @@ def test_sqlalchemy_run_repository_reads_snapshots_for_the_run_head_sha() -> Non
         ]
     )
     repository = SqlAlchemyRunRepository(
-        cast(async_sessionmaker[AsyncSession], FakeSessionFactory(session))
+        cast(async_sessionmaker[AsyncSession], FakeSessionFactory(session)),
+        allow_unscoped=True,
     )
 
     snapshots = asyncio.run(repository.get_run_diff(run_id))
@@ -406,7 +426,8 @@ def test_sqlalchemy_run_repository_reads_the_durable_diff_input_for_processing()
     code_change_id = UUID("00000000-0000-0000-0000-000000000002")
     session = FakeSession([(code_change_id, "a" * 40)])
     repository = SqlAlchemyRunRepository(
-        cast(async_sessionmaker[AsyncSession], FakeSessionFactory(session))
+        cast(async_sessionmaker[AsyncSession], FakeSessionFactory(session)),
+        allow_unscoped=True,
     )
 
     run_input = asyncio.run(repository.get_run_diff_input(run_id))
@@ -426,7 +447,8 @@ def test_sqlalchemy_run_repository_reads_the_installation_scoped_vcs_locator() -
     repository_id = UUID("00000000-0000-0000-0000-000000000003")
     session = FakeSession([(code_change_id, repository_id, "a" * 40, "b" * 40, 17, "octo/repo", 7)])
     repository = SqlAlchemyRunRepository(
-        cast(async_sessionmaker[AsyncSession], FakeSessionFactory(session))
+        cast(async_sessionmaker[AsyncSession], FakeSessionFactory(session)),
+        allow_unscoped=True,
     )
 
     run_input = asyncio.run(repository.get_run_vcs_input(run_id))
@@ -451,7 +473,8 @@ def test_sqlalchemy_run_repository_uses_snapshot_membership_for_an_immutable_fil
     repository_id = UUID("00000000-0000-0000-0000-000000000002")
     session = FakeSession([(repository_id, "a" * 40)])
     repository = SqlAlchemyRunRepository(
-        cast(async_sessionmaker[AsyncSession], FakeSessionFactory(session))
+        cast(async_sessionmaker[AsyncSession], FakeSessionFactory(session)),
+        allow_unscoped=True,
     )
 
     key = asyncio.run(repository.get_run_file_key(run_id, "app/service.py"))
@@ -470,3 +493,55 @@ def test_sqlalchemy_run_repository_uses_snapshot_membership_for_an_immutable_fil
     assert "code_change_diffs.run_id = runs.id" in sql
     assert "code_change_diffs.filename =" in sql
     assert "app/service.py" in compiled.params.values()
+
+
+def test_sqlalchemy_run_repository_requires_scope_unless_allow_unscoped() -> None:
+    session = FakeSession([])
+    factory = cast(async_sessionmaker[AsyncSession], FakeSessionFactory(session))
+    with pytest.raises(ValueError, match="requires an AuthScope unless allow_unscoped=True"):
+        SqlAlchemyRunRepository(factory)
+
+    with pytest.raises(
+        ValueError, match="Run authorization requires an AuthScope unless allow_unscoped=True"
+    ):
+        authorized_run(None, allow_unscoped=False)
+
+
+def test_sqlalchemy_run_repository_has_run_access() -> None:
+    run_id = UUID("00000000-0000-0000-0000-000000000001")
+    session = FakeSession([(1,)])
+    repository = SqlAlchemyRunRepository(
+        cast(async_sessionmaker[AsyncSession], FakeSessionFactory(session)),
+        allow_unscoped=True,
+    )
+
+    has_access = asyncio.run(repository.has_run_access(run_id))
+    assert has_access is True
+    assert session.statement is not None
+    sql = str(session.statement.compile())
+    assert "WHERE runs.id =" in sql
+
+    # Test not found
+    empty_session = FakeSession([])
+    empty_repo = SqlAlchemyRunRepository(
+        cast(async_sessionmaker[AsyncSession], FakeSessionFactory(empty_session)),
+        allow_unscoped=True,
+    )
+    assert asyncio.run(empty_repo.has_run_access(run_id)) is False
+
+
+def test_sqlalchemy_run_repository_with_scope_correlates_repository_access() -> None:
+    run_id = UUID("00000000-0000-0000-0000-000000000001")
+    scope = AuthScope(user_id=42, workspace_ids=(UUID("00000000-0000-0000-0000-000000000099"),))
+    session = FakeSession([(1,)])
+    repository = SqlAlchemyRunRepository(
+        cast(async_sessionmaker[AsyncSession], FakeSessionFactory(session)),
+        scope=scope,
+    )
+
+    assert asyncio.run(repository.has_run_access(run_id)) is True
+    assert session.statement is not None
+    sql = str(session.statement.compile())
+    assert "WHERE runs.id =" in sql
+    assert "WHERE code_changes.id = runs.code_change_id" in sql
+    assert "provider_installations.workspace_id IN" in sql

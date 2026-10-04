@@ -72,8 +72,12 @@ class SqlAlchemyBlobCache:
             index_elements=[CachedFileBlob.repository_id, CachedFileBlob.blob_sha],
             set_={"content": content, "expires_at": expires_at},
         )
-        async with self._session_factory.begin() as session:
+        async with self._session_factory() as session:
             await session.execute(statement)
+            if hasattr(session, "flush"):
+                await session.flush()
+            if hasattr(session, "commit"):
+                await session.commit()
 
     async def get(self, key: BlobCacheKey) -> BlobCacheEntry:
         statement = select(CachedFileBlob.content, CachedFileBlob.expires_at).where(

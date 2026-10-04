@@ -72,7 +72,7 @@ class _PullRequest(_GitHubDto):
 
 class _File(_GitHubDto):
     filename: str = Field(min_length=1, max_length=1024)
-    status: Literal["added", "modified", "removed", "renamed"]
+    status: Literal["added", "modified", "removed", "renamed", "copied", "changed", "unchanged"]
     sha: str | None = Field(default=None, pattern=_SHA)
     previous_filename: str | None = None
     additions: int = Field(ge=0)

@@ -312,7 +312,9 @@ def test_file_endpoint_resolves_two_pr_paths_through_one_immutable_blob(
         asyncio.run(
             cache.put(BlobCacheKey(repository_id, blob_sha), "same\nblob", ttl=timedelta(days=7))
         )
-        app.dependency_overrides[get_run_repository] = lambda: SqlAlchemyRunRepository(factory)
+        app.dependency_overrides[get_run_repository] = lambda: SqlAlchemyRunRepository(
+            factory, allow_unscoped=True
+        )
         app.dependency_overrides[get_file_blob_cache] = lambda: cache
         client = authenticated_test_client(app)
         first = client.get(f"/api/runs/{first_run}/files", params={"path": "src/first.py"})
@@ -341,7 +343,9 @@ def test_file_endpoint_resolves_two_pr_paths_through_one_immutable_blob(
         assert copied_legacy.status_code == 200 and len(copied_legacy.json()) == 5
 
         async def legacy_review_files() -> tuple[tuple[str, ...], tuple[str, ...]]:
-            snapshots = await SqlAlchemyRunRepository(factory).get_run_snapshots(duplicate_run)
+            snapshots = await SqlAlchemyRunRepository(
+                factory, allow_unscoped=True
+            ).get_run_snapshots(duplicate_run)
             assert snapshots is not None
             changed, omitted = review_files_from_snapshots(snapshots)
             return tuple(file.path for file in changed), omitted
@@ -354,7 +358,7 @@ def test_file_endpoint_resolves_two_pr_paths_through_one_immutable_blob(
             "package-lock.json",
             "src/pre_migration.py",
         )
-        repository = SqlAlchemyRunRepository(factory)
+        repository = SqlAlchemyRunRepository(factory, allow_unscoped=True)
         first_snapshot = DiffSnapshot(filename="src/new.py", patch="@@ -0,0 +1 @@\n+first")
         retry_snapshot = DiffSnapshot(filename="src/new.py", patch="@@ -0,0 +1 @@\n+retry")
 

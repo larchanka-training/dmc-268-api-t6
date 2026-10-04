@@ -194,8 +194,33 @@ def test_handler_error_requeues_the_message(monkeypatch: pytest.MonkeyPatch) -> 
         return None
 
     monkeypatch.setattr(asyncio, "sleep", no_sleep)
+    amqp._clear_delivery_attempts("m")
     delivery, _ = _deliver(VALID, RuntimeError("database is down"))
     assert delivery.nacked == [True]
+
+
+def test_handler_repeated_errors_route_to_dlq_with_log(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    async def no_sleep(seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr(asyncio, "sleep", no_sleep)
+    amqp._clear_delivery_attempts("m")
+
+    # Attempt 1: requeued
+    d1, _ = _deliver(VALID, RuntimeError("unexpected error 1"))
+    assert d1.nacked == [True] and not d1.acked
+
+    # Attempt 2: requeued
+    d2, _ = _deliver(VALID, RuntimeError("unexpected error 2"))
+    assert d2.nacked == [True] and not d2.acked
+
+    # Attempt 3: reached max (3) -> DLQ (nack requeue=False) with error log
+    with caplog.at_level(logging.ERROR):
+        d3, _ = _deliver(VALID, RuntimeError("unexpected error 3"))
+    assert d3.nacked == [False] and not d3.acked
+    assert "exceeded maximum unexpected retry attempts (3); routing to DLQ" in caplog.text
 
 
 class _Queue:

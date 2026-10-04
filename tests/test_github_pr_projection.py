@@ -9,7 +9,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from types import TracebackType
-from typing import Self, cast
+from typing import Any, Self, cast
 from uuid import UUID, uuid4
 
 import httpx
@@ -795,6 +795,42 @@ def test_closed_new_head_then_delayed_sync_cannot_reopen_and_reopen_is_authorita
     assert cast(PullRequestState, uow.store.row.state) == PullRequestState.OPEN
     asyncio.run(projector.execute(_event("closed", head_sha=head_b, provider_updated_at=same_time)))
     assert cast(PullRequestState, uow.store.row.state) == PullRequestState.OPEN
+
+
+def test_advisory_lock_sets_lock_timeout_and_resets_default() -> None:
+    executed_statements: list[str] = []
+
+    class FakeConnection:
+        async def execution_options(self, **kwargs: object) -> None:
+            pass
+
+        async def execute(self, statement: object, *args: object, **kwargs: object) -> None:
+            executed_statements.append(str(getattr(statement, "text", statement)))
+
+    class FakeEngine:
+        def connect(self) -> object:
+            conn = FakeConnection()
+
+            class Context:
+                async def __aenter__(self) -> FakeConnection:
+                    return conn
+
+                async def __aexit__(self, *args: object) -> None:
+                    pass
+
+            return Context()
+
+    lock = SqlAlchemyPullRequestProjectionLock(cast(Any, FakeEngine()), lock_timeout="10s")
+
+    async def exercise() -> None:
+        async with lock.hold(_event()):
+            pass
+
+    asyncio.run(exercise())
+    assert any("SET lock_timeout = '10s'" in stmt for stmt in executed_statements)
+    assert any("SELECT pg_advisory_lock" in stmt for stmt in executed_statements)
+    assert any("SELECT pg_advisory_unlock" in stmt for stmt in executed_statements)
+    assert any("SET lock_timeout = DEFAULT" in stmt for stmt in executed_statements)
 
 
 @pytest.mark.integration

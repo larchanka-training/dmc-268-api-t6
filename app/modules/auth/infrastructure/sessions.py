@@ -144,6 +144,29 @@ class SqlAlchemyAuthSessionStore:
         )
         await self._session.flush()
 
+    async def add_session(
+        self,
+        family_id: UUID,
+        user_id: int,
+        token_hash: str,
+        expires_at: datetime,
+    ) -> None:
+        await self._session.execute(
+            update(AuthRefreshFamily)
+            .where(AuthRefreshFamily.id == family_id)
+            .values(expires_at=expires_at)
+        )
+        self._session.add(
+            AuthRefreshSession(
+                id=uuid4(),
+                family_id=family_id,
+                github_user_id=user_id,
+                token_hash=token_hash,
+                expires_at=expires_at,
+            )
+        )
+        await self._session.flush()
+
     async def revoke_family(self, family_id: UUID, at: datetime) -> None:
         await self._session.execute(
             update(AuthRefreshFamily).where(AuthRefreshFamily.id == family_id).values(revoked_at=at)

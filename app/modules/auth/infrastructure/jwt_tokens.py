@@ -9,6 +9,8 @@ from uuid import UUID
 
 import jwt
 
+from app.modules.auth.application.scope import AuthScope
+
 
 class Rs256AccessTokenIssuer:
     def __init__(
@@ -48,7 +50,7 @@ class Rs256AccessTokenVerifier:
         self._issuer = issuer
         self._audience = audience
 
-    def verify(self, token: str) -> tuple[int, tuple[UUID, ...]]:
+    def verify_token(self, token: str) -> AuthScope:
         claims = jwt.decode(
             token,
             self._public_key,
@@ -72,6 +74,14 @@ class Rs256AccessTokenVerifier:
         ):
             raise jwt.InvalidTokenError("invalid Workspace claim")
         try:
-            return int(subject), tuple(UUID(item) for item in workspaces)
+            return AuthScope(
+                int(subject),
+                tuple(UUID(item) for item in workspaces),
+                expires_at=claims["exp"],
+            )
         except ValueError as exc:
             raise jwt.InvalidTokenError("invalid Workspace ID") from exc
+
+    def verify(self, token: str) -> tuple[int, tuple[UUID, ...]]:
+        scope = self.verify_token(token)
+        return scope.user_id, scope.workspace_ids

@@ -647,7 +647,9 @@ def test_full_path_queued_running_publishing_succeeded_is_readable_over_rest(env
         ("completed", "neutral"),
     ]
 
-    app.dependency_overrides[get_run_repository] = lambda: SqlAlchemyRunRepository(factory)
+    app.dependency_overrides[get_run_repository] = lambda: SqlAlchemyRunRepository(
+        factory, allow_unscoped=True
+    )
     try:
         client = authenticated_test_client(app)
         detail = client.get(f"/api/runs/{run_id}")

@@ -129,7 +129,8 @@ class CodeChangeDiff(Base):
     __table_args__ = (
         UniqueConstraint("run_id", "filename", name="uq_code_change_diffs_run_filename"),
         CheckConstraint(
-            "status IN ('added', 'modified', 'removed', 'renamed')",
+            "status IN ('added', 'modified', 'removed', 'renamed', "
+            "'copied', 'changed', 'unchanged')",
             name="ck_code_change_diffs_status",
         ),
         CheckConstraint(

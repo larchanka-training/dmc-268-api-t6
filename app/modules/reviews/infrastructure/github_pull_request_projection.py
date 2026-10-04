@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from datetime import datetime
 from hashlib import sha256
 from typing import cast
@@ -315,8 +315,9 @@ class SqlAlchemyPullRequestRunCanceller:
 class SqlAlchemyPullRequestProjectionLock:
     """Session advisory lock across REST fetch and apply, on an autocommit connection."""
 
-    def __init__(self, engine: AsyncEngine) -> None:
+    def __init__(self, engine: AsyncEngine, lock_timeout: str = "10s") -> None:
         self._engine = engine
+        self._lock_timeout = lock_timeout
 
     @asynccontextmanager
     async def hold(self, event: PullRequestEvent) -> AsyncIterator[None]:
@@ -327,8 +328,13 @@ class SqlAlchemyPullRequestProjectionLock:
         async with self._engine.connect() as connection:
             # AUTOCOMMIT keeps the session lock while no DB transaction spans GitHub I/O.
             await connection.execution_options(isolation_level="AUTOCOMMIT")
-            await connection.execute(text("SELECT pg_advisory_lock(:key)"), {"key": key})
+            await connection.execute(text(f"SET lock_timeout = '{self._lock_timeout}'"))
             try:
-                yield
+                await connection.execute(text("SELECT pg_advisory_lock(:key)"), {"key": key})
+                try:
+                    yield
+                finally:
+                    await connection.execute(text("SELECT pg_advisory_unlock(:key)"), {"key": key})
             finally:
-                await connection.execute(text("SELECT pg_advisory_unlock(:key)"), {"key": key})
+                with suppress(Exception):
+                    await connection.execute(text("SET lock_timeout = DEFAULT"))

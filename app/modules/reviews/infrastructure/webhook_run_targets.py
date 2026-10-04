@@ -43,7 +43,7 @@ class SqlAlchemyWebhookRunTargets:
             return ProjectedPullRequestTarget(*row) if row is not None else None
 
     async def for_ci(self, event: CiTriggerEvent) -> tuple[UUID, ...]:
-        async with self._session_factory() as session, session.begin():
+        async with self._session_factory() as session:
             rows = await session.scalars(
                 select(CodeChange.id)
                 .join(Repository, CodeChange.repository_id == Repository.id)

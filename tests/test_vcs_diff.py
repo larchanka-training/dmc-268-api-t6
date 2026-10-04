@@ -105,9 +105,10 @@ def test_review_input_keeps_all_file_metadata_but_omits_nonreviewable_paths() ->
         VcsFile("src/generated.min.js", "modified", "4" * 40, None, 1, 1, 2, None),
         VcsFile("proto/a.pb.go", "added", "5" * 40, None, 1, 0, 1, None),
         VcsFile("__snapshots__/a.snap", "added", "6" * 40, None, 1, 0, 1, None),
-        VcsFile("locales/pl.json", "modified", "7" * 40, None, 1, 1, 2, None),
+        VcsFile("migrations/0001_snapshot.py", "modified", "7" * 40, None, 1, 1, 2, None),
         VcsFile("assets/logo.png", "modified", "8" * 40, None, 1, 1, 2, None),
         VcsFile("src/missing.py", "modified", "9" * 40, None, 1, 1, 2, None),
+        VcsFile("locales/pl.json", "modified", "a" * 40, None, 1, 1, 2, "@@ -1 +1 @@\n-old\n+new"),
     )
 
     @dataclass
@@ -135,6 +136,11 @@ def test_review_input_keeps_all_file_metadata_but_omits_nonreviewable_paths() ->
             "modified",
             (DiffLine(1, "removed", "old"), DiffLine(1, "added", "new")),
         ),
+        ChangedFile(
+            "locales/pl.json",
+            "modified",
+            (DiffLine(1, "removed", "old"), DiffLine(1, "added", "new")),
+        ),
     )
     assert result.omitted_files == (
         "package-lock.json",
@@ -142,7 +148,7 @@ def test_review_input_keeps_all_file_metadata_but_omits_nonreviewable_paths() ->
         "src/generated.min.js",
         "proto/a.pb.go",
         "__snapshots__/a.snap",
-        "locales/pl.json",
+        "migrations/0001_snapshot.py",
         "assets/logo.png",
         "src/missing.py",
     )
@@ -157,6 +163,30 @@ def test_review_input_keeps_all_file_metadata_but_omits_nonreviewable_paths() ->
         OmissionReason.MISSING_PATCH,
     ]
     assert provider.blobs_requested == ["8" * 40, "9" * 40]
+
+
+def test_generated_heuristics_narrowing() -> None:
+    from app.modules.reviews.application.vcs_diff import _is_generated
+
+    # Should NOT be classified as generated:
+    assert not _is_generated("locales/en.json")
+    assert not _is_generated("src/locales/messages.po")
+    assert not _is_generated("i18n/fr.json")
+    assert not _is_generated("src/l10n/translations.ts")
+    assert not _is_generated("arbitrary.lock")
+    assert not _is_generated("component.snap")
+    assert not _is_generated("src/features/dist/bundle.js")
+
+    # Should be classified as generated:
+    assert _is_generated("package-lock.json")
+    assert _is_generated("uv.lock")
+    assert _is_generated("pnpm-lock.yaml")
+    assert _is_generated("dist/app.min.js")
+    assert _is_generated("dist/nested/file.js")
+    assert _is_generated("app.min.js")
+    assert _is_generated("proto/service.pb.go")
+    assert _is_generated("__snapshots__/component.test.js.snap")
+    assert _is_generated("src/migrations/0001_snapshot_test.py")
 
 
 def test_oversize_and_stale_head_fail_closed() -> None:

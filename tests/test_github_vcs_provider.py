@@ -345,3 +345,40 @@ def test_blob_declared_over_one_mebibyte_is_rejected_before_decoding() -> None:
                 await provider.get_blob(PullRequestLocator(17, "octo/repo", 7), _BLOB)
 
     asyncio.run(exercise())
+
+
+def test_extended_file_statuses_copied_changed_unchanged_do_not_crash() -> None:
+    def respond(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/pulls/7"):
+            return httpx.Response(200, json=_pull_payload(changed_files=3))
+        if request.url.path.endswith("/pulls/7/files"):
+            return httpx.Response(
+                200,
+                json=[
+                    _file(0, status="copied"),
+                    _file(1, status="changed"),
+                    {
+                        "filename": "src/file2.py",
+                        "status": "unchanged",
+                        "sha": _BLOB,
+                        "previous_filename": None,
+                        "additions": 0,
+                        "deletions": 0,
+                        "changes": 0,
+                        "patch": None,
+                    },
+                ],
+            )
+        raise AssertionError(f"unexpected request: {request.url}")
+
+    async def exercise() -> None:
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(respond), base_url="https://api.github.test"
+        ) as client:
+            provider = HttpGitHubVcsProvider(client=client, token_provider=Tokens())
+            locator = PullRequestLocator(17, "octo/repo", 7)
+            pr = await provider.get_pull_request(locator)
+            files = await provider.get_diff(pr)
+            assert [f.status for f in files] == ["copied", "changed", "unchanged"]
+
+    asyncio.run(exercise())

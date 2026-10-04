@@ -22,9 +22,8 @@ def get_auth_scope(request: Request) -> AuthScope:
     if not public_key or not issuer or not audience:
         raise HTTPException(status_code=503, detail="access token verification is not configured")
     try:
-        user_id, workspace_ids = Rs256AccessTokenVerifier(
-            public_key, issuer=issuer, audience=audience
-        ).verify(token)
+        return Rs256AccessTokenVerifier(public_key, issuer=issuer, audience=audience).verify_token(
+            token
+        )
     except jwt.InvalidTokenError as exc:
         raise HTTPException(status_code=401, detail="invalid access token") from exc
-    return AuthScope(user_id, workspace_ids)
