@@ -31,11 +31,17 @@ links, no `Impact:` blocks) — this file ships to any team using this stack.
   - `How to verify`
   - `Refs`
 - Cross-repo references: `Refs owner/repo#N`.
+- Never a closing keyword (`Closes`/`Fixes`/`Resolves`) in the PR title (squash makes it
+  the commit subject), the PR body or a commit message, and never link the PR to the
+  issue in the Development panel — the tech lead closes the issue after checking its AC.
 - One approving review and all review threads resolved are required before merge.
 - Review threads: the author replies in every thread (the fix with its commit SHA, or
   the reason for not changing it) and never resolves a thread — whoever opened it
   (normally the reviewer) does.
-  Full review flow (roles, board statuses, disputes): `docs/CONTRIBUTING.md`.
+  Full review flow (roles, board statuses, disputes), issue acceptance (who closes an
+  issue, when, on what evidence) and merge rules (rebase on `main`; an approve on the
+  current head, since a push that changes the PR diff — new commits, a rebase, Update
+  branch — dismisses it; a body that covers the whole PR): `docs/CONTRIBUTING.md`.
 - Merging: squash or rebase only — the `main` ruleset rejects merge commits. Squash
   suits single-purpose branches; rebase keeps the individual commits of a
   multi-commit feature branch — pick whichever keeps history readable for that PR.
