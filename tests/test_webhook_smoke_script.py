@@ -347,7 +347,8 @@ def test_ci_smokes_the_built_image_before_the_push() -> None:
     assert "name: Webhook container smoke" in job
     assert "needs: docker-build" in job
     assert "alembic upgrade head" in job
-    assert "python3 scripts/webhook_smoke.py" in job
+    assert "astral-sh/setup-uv@" in job
+    assert "uv run --locked python scripts/webhook_smoke.py" in job
     # A throwaway secret generated in the job, never a repository or environment secret.
     assert "openssl rand -hex 32" in job
     assert "::add-mask::" in job

@@ -387,6 +387,12 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Setup uv
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          version: "0.12.11"
+          python-version: "3.13"
+
       - name: Download image artifact
         uses: actions/download-artifact@v4
         with:
@@ -414,7 +420,7 @@ jobs:
         run: deploy/scripts/healthcheck.sh http://127.0.0.1:8000/healthcheck
 
       - name: Signed webhook smoke
-        run: python3 scripts/webhook_smoke.py --url http://127.0.0.1:8000/webhooks/github --count 50
+        run: uv run --locked python scripts/webhook_smoke.py --url http://127.0.0.1:8000/webhooks/github --count 50
 
       - name: API container logs
         if: failure()

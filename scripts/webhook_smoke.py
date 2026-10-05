@@ -12,7 +12,8 @@ body to `POST /webhooks/github` and checks, one line per check:
 
 Usage:
     local: uv run --env-file .env python scripts/webhook_smoke.py [--url URL] [--count N]
-    CI:    python3 scripts/webhook_smoke.py --url http://127.0.0.1:8000/webhooks/github --count 50
+    CI:    uv run --locked python scripts/webhook_smoke.py \\
+               --url http://127.0.0.1:8000/webhooks/github --count 50
 
 The secret is read only from the environment variable GITHUB_WEBHOOK_SECRET (the same value the
 server has); the script never prints it or a signature. Every accepted delivery is stored in
@@ -20,7 +21,7 @@ server has); the script never prints it or a signature. Every accepted delivery 
 
 Exit codes: 0 every check passed; 1 a response did not match; 2 invalid arguments, no secret, or
 no valid HTTP answer (the API unreachable or something else listening at --url).
-Stdlib only and Python 3.12+, so CI runs it with the runner's python3 outside the project venv.
+Stdlib only; run through uv on Python 3.13 like every other tool here (AGENTS.md).
 """
 
 from __future__ import annotations
