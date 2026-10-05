@@ -38,7 +38,7 @@ API baseline gates локально и в обязательном CI: `uv run r
 
 ### 2.1. Схлопывание и жизненный цикл Run (Р-1, Р-2, Р-14)
 
-Отправить три `pull_request.synchronize` с `sha_1`, `sha_2`, `sha_3` в один открытый PR с активным `ai-review`: устаревшие Run отменяются, только текущий SHA может быть опубликован; in-flight worker и publisher повторно проверяют актуальность перед публикацией. Дубли одного `X-GitHub-Delivery` и одного `(PR, head_sha, trigger=webhook)` не создают второй Run. Тестировать реальные PG constraints: default `queued`, единственный активный Run, уникальный `idempotency_key`, FK-цепочку; не ограничиваться проверкой существования индекса. Проверять переходы и `succeeded` по [PIPELINE_SPEC §1](PIPELINE_SPEC.md#1-состояния-и-переходы), без старого `COMPLETED` в домене/UI.
+Отправить три `pull_request.synchronize` с `sha_1`, `sha_2`, `sha_3` в один открытый PR с активным `ai-review`: устаревшие Run отменяются; публикация разрешена только для SHA, совпадающего с головой PR в GitHub при проверке перед POST; in-flight worker и publisher повторно проверяют актуальность перед публикацией. Дубли одного `X-GitHub-Delivery` и одного `(PR, head_sha, trigger=webhook)` не создают второй Run. Тестировать реальные PG constraints: default `queued`, единственный активный Run, уникальный `idempotency_key`, FK-цепочку; не ограничиваться проверкой существования индекса. Проверять переходы и `succeeded` по [PIPELINE_SPEC §1](PIPELINE_SPEC.md#1-состояния-и-переходы), без старого `COMPLETED` в домене/UI.
 
 ### 2.2. Webhook и триггер (Р-9, Р-10)
 
@@ -97,7 +97,7 @@ DiffEngine создаёт `ReviewOutput`; проверять схему и се�
 | Corpus schema и patch apply | 100% кейсов; лицензии/ground truth подтверждены вручную | Обязательный gate. |
 | Validity, micro Precision/Recall, Critical Recall, per-category, verdict agreement | Числа и provenance в PR summary и воспроизводимом JSON | Отчёт; качество модели не валит required check. |
 | Precision ≥ 85%, Critical Recall ≥ 75%, Hallucination Rate < 3% | Продуктовые ориентиры из [SD §13](SYSTEM_DESIGN.md#13-нефункциональные-требования) | Отчёт; ручной hallucination oracle обязателен для заявления метрики. |
-| Coalescing 100%, webhook HMAC/idempotency, batch publication без 422 | Интеграционные тесты с реальными PG/RabbitMQ и fake GitHub | Обязательные функциональные gates после реализации зависимостей. Для Coalescing до #52 остаётся окно до проекции нового head — риск в [SD §13](SYSTEM_DESIGN.md#13-нефункциональные-требования). |
+| Coalescing: публикация разрешена только для SHA, совпадающего с головой PR в GitHub при проверке перед POST; webhook HMAC/idempotency, batch publication без 422 | Интеграционные тесты с реальными PG/RabbitMQ и fake GitHub | Обязательные функциональные gates после реализации зависимостей. Окно между проверкой и POST — принятый остаточный риск ([SD §13](SYSTEM_DESIGN.md#13-нефункциональные-требования), решение техлида 05.10.2026). |
 | Sandbox isolation 100% | Сеть/секреты/FS из §2.4 | Фаза 3; текущий спринт не заявляет прохождение. |
 | DiffEngine p95 ≤ 40 с, webhook ACK p95 < 500 мс | Измерения на указанной staging выборке | Отчёт с размером выборки и окружением. |
 
