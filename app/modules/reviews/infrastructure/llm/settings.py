@@ -111,6 +111,9 @@ class LlmSettings:
 # Chosen for OQ-2 (docs/SYSTEM_DESIGN.md §15) in #46: catalog values of EUrouter on
 # 2026-10-05. Env variables override every field, so a price change needs no release.
 KNOWN_MODELS: Mapping[str, ModelProfile] = {
+    # Price of the Mistral AI route, which served every live run. Regolo (EUR 0.50 / 2.10 per
+    # 1M) is up to ~3.5x higher, so the pre-call estimate may undershoot there; the worst case
+    # in docs/SYSTEM_DESIGN.md §15 uses Regolo.
     "mistral-small-4": ModelProfile(
         provider="eurouter",
         base_url="https://api.eurouter.ai/api/v1",
