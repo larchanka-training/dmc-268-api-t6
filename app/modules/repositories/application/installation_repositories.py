@@ -19,13 +19,28 @@ class RepositorySnapshot:
 
 
 @dataclass(frozen=True)
+class RepositoryReference:
+    """A repository as an installation webhook names it.
+
+    GitHub sends only ``id`` and ``full_name`` (plus ``name``/``private``) for the
+    repositories of ``installation`` and ``installation_repositories`` events, so the
+    default branch and web URL are usually absent and are read from GitHub later.
+    """
+
+    external_id: int
+    full_name: str
+    default_branch: str | None
+    web_url: str | None
+
+
+@dataclass(frozen=True)
 class InstallationRepositoriesEvent:
     """Normalized repository changes from a supported GitHub installation webhook."""
 
     installation_external_id: int
     action: Literal["created", "deleted", "added", "removed"]
-    added_repositories: tuple[RepositorySnapshot, ...]
-    removed_repositories: tuple[RepositorySnapshot, ...]
+    added_repositories: tuple[RepositoryReference, ...]
+    removed_repositories: tuple[RepositoryReference, ...]
 
 
 @dataclass(frozen=True)

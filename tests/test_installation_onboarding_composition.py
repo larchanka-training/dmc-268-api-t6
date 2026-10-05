@@ -42,8 +42,10 @@ from app.modules.integrations.webhooks.application.github_installation_dispatch 
     InstallationDeliveryDispatchStatus,
 )
 from app.modules.integrations.webhooks.application.installation_event_projector import (
+    InstallationRepositoryDetailsProvider,
     InstallationRepositoryLabelProvider,
     InstallationRepositoryTreeProvider,
+    RepositoryDetails,
 )
 from app.modules.integrations.webhooks.application.receive_github_delivery import (
     ReceiveGitHubDelivery,
@@ -53,6 +55,7 @@ from app.modules.integrations.webhooks.infrastructure.github_installation_tree_p
 )
 from app.modules.repositories.application.installation_repositories import (
     InstallationRepositoriesEvent,
+    RepositoryReference,
     RepositorySnapshot,
     RepositoryTreeBlob,
 )
@@ -70,6 +73,7 @@ from app.modules.repositories.infrastructure.models import (
     RuleVersion,
 )
 from app.modules.workspaces.infrastructure.models import Workspace
+from tests.github_webhook_fixtures import load_github_webhook_fixture, removal_of
 
 
 @dataclass
@@ -94,6 +98,15 @@ class FakeLabelProvider(InstallationRepositoryLabelProvider):
         self, *, installation_external_id: int, repository: RepositorySnapshot
     ) -> None:
         self.calls.append((installation_external_id, repository.full_name))
+
+
+class UnusedDetailsProvider(InstallationRepositoryDetailsProvider):
+    """Events in these tests carry branch and URL, so GitHub must not be asked for them."""
+
+    async def fetch_repository_details(
+        self, *, installation_external_id: int, full_name: str
+    ) -> RepositoryDetails:
+        raise AssertionError("complete repositories need no details request")
 
 
 @pytest.fixture
@@ -151,6 +164,7 @@ def test_composition_accepts_typed_event_and_internal_installation_id(
         session_factory=cast(async_sessionmaker[AsyncSession], object()),
         tree_provider=provider,
         label_provider=labels,
+        details_provider=UnusedDetailsProvider(),
         rules_dir=Path("review/rules"),
     )
 
@@ -161,7 +175,7 @@ def test_composition_accepts_typed_event_and_internal_installation_id(
                 installation_external_id=17,
                 action="added",
                 added_repositories=(
-                    RepositorySnapshot(
+                    RepositoryReference(
                         external_id=101,
                         full_name="octo/web",
                         default_branch="main",
@@ -193,7 +207,9 @@ def test_resources_composes_onboarding_with_cwd_independent_default_rules(tmp_pa
             cast(async_sessionmaker[AsyncSession], object()),
         )
 
-        handler = resources.installation_onboarding(provider, FakeLabelProvider())
+        handler = resources.installation_onboarding(
+            provider, FakeLabelProvider(), UnusedDetailsProvider()
+        )
 
         result = asyncio.run(
             handler.execute(
@@ -334,13 +350,13 @@ def test_migrated_database_onboarding_creates_one_active_rule_version_and_replay
 
             provider = FakeTreeProvider()
             handler = ReviewsApiResources(engine, session_factory).installation_onboarding(
-                provider, FakeLabelProvider()
+                provider, FakeLabelProvider(), UnusedDetailsProvider()
             )
             event = InstallationRepositoriesEvent(
                 installation_external_id=17,
                 action="added",
                 added_repositories=(
-                    RepositorySnapshot(
+                    RepositoryReference(
                         external_id=101,
                         full_name="octo/web",
                         default_branch="main",
@@ -513,3 +529,140 @@ def test_signed_runtime_delivery_onboards_replays_removes_and_ignores_unknown_in
     assert versions[0].is_active is True
     assert tree_fetches == 2
     assert label_creations == 2
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize(
+    ("event_name", "fixture", "external_id", "full_name"),
+    [
+        ("installation", "installation_created", 1000004, "example-owner/example-repo"),
+        (
+            "installation_repositories",
+            "installation_repositories_added",
+            1000005,
+            "example-owner/example-repo-two",
+        ),
+    ],
+)
+def test_real_delivery_fixture_is_onboarded_with_branch_and_url_read_from_github(
+    migrated_onboarding_database: tuple[str, str],
+    event_name: str,
+    fixture: str,
+    external_id: int,
+    full_name: str,
+) -> None:
+    """A delivery in the shape GitHub sends (api#71) reaches ``repositories``.
+
+    The event carries neither ``default_branch`` nor ``html_url``: the row must hold
+    the values of the stubbed ``GET /repos/{full_name}``, and the tree request must
+    use that branch, proving the details were fetched before the tree.
+    """
+    database_url, schema = migrated_onboarding_database
+    installation_id = uuid4()
+    repository_path = f"/repos/{full_name}"
+    requests: list[tuple[str, str]] = []
+
+    class TokenProvider:
+        async def get_installation_access_token(self, installation_external_id: int) -> str:
+            assert installation_external_id == 1000001
+            return "test-installation-token"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append((request.method, request.url.path))
+        if request.method == "GET" and request.url.path == repository_path:
+            return httpx.Response(
+                200,
+                json={
+                    "default_branch": "trunk",
+                    "html_url": f"https://example.test/{full_name}",
+                },
+            )
+        if request.method == "GET" and request.url.path == f"{repository_path}/git/trees/trunk":
+            return httpx.Response(200, json={"tree": [{"path": "src/app.ts", "type": "blob"}]})
+        if request.method == "POST" and request.url.path == f"{repository_path}/labels":
+            return httpx.Response(201, json={})
+        return httpx.Response(500, json={"message": "unexpected request"})
+
+    async def exercise() -> tuple[
+        InstallationDeliveryDispatchStatus,
+        Repository | None,
+        list[tuple[str, str]],
+        InstallationDeliveryDispatchStatus,
+        Repository | None,
+        list[tuple[str, str]],
+    ]:
+        engine = create_async_engine(
+            database_url, connect_args={"options": f"-csearch_path={schema}"}
+        )
+        session_factory = async_sessionmaker(engine, expire_on_commit=False)
+        client = httpx.AsyncClient(
+            transport=httpx.MockTransport(handler), base_url="https://api.github.com"
+        )
+        try:
+            async with session_factory() as session:
+                workspace = Workspace(
+                    id=uuid4(), name="real-payload", daily_budget_usd=Decimal("1")
+                )
+                session.add(workspace)
+                await session.flush()
+                session.add(
+                    ProviderInstallation(
+                        id=installation_id,
+                        workspace_id=workspace.id,
+                        provider="github",
+                        external_id=1000001,
+                        provider_metadata={},
+                    )
+                )
+                await session.commit()
+
+            dispatcher = ReviewsApiResources(
+                engine, session_factory
+            ).github_installation_delivery_dispatcher(client=client, token_provider=TokenProvider())
+
+            async def read_repository() -> Repository | None:
+                async with session_factory() as session:
+                    repository: Repository | None = await session.scalar(
+                        select(Repository).where(Repository.external_id == external_id)
+                    )
+                    return repository
+
+            delivery = load_github_webhook_fixture(fixture)
+            onboarded = await dispatcher.execute(
+                VerifiedGitHubDelivery("delivery-real", event_name, delivery).to_receipt()
+            )
+            after_onboarding = (onboarded.status, await read_repository(), list(requests))
+            removed = await dispatcher.execute(
+                VerifiedGitHubDelivery(
+                    "delivery-real-removal", event_name, removal_of(event_name, delivery)
+                ).to_receipt()
+            )
+            return (*after_onboarding, removed.status, await read_repository(), list(requests))
+        finally:
+            await client.aclose()
+            await engine.dispose()
+
+    (
+        onboarded_status,
+        onboarded_row,
+        requests_after_onboarding,
+        removed_status,
+        removed_row,
+        requests_after_removal,
+    ) = asyncio.run(exercise())
+
+    assert onboarded_status is InstallationDeliveryDispatchStatus.ONBOARDED
+    assert onboarded_row is not None
+    assert onboarded_row.full_name == full_name
+    assert onboarded_row.default_branch == "trunk"
+    assert onboarded_row.web_url == f"https://example.test/{full_name}"
+    assert onboarded_row.enabled is True
+    assert requests_after_onboarding == [
+        ("GET", repository_path),
+        ("GET", f"{repository_path}/git/trees/trunk"),
+        ("POST", f"{repository_path}/labels"),
+    ]
+    assert removed_status is InstallationDeliveryDispatchStatus.ONBOARDED
+    assert removed_row is not None
+    assert removed_row.enabled is False
+    assert requests_after_removal == requests_after_onboarding

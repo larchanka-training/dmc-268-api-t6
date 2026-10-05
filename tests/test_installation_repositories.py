@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 
 from app.modules.integrations.webhooks.api.installation_event_dtos import (
@@ -12,6 +14,9 @@ from app.modules.repositories.application.installation_repositories import (
     RepositoryTreeBlob,
     classify_tree_languages,
 )
+from tests.github_webhook_fixtures import load_github_webhook_fixture, removal_of
+
+_GITHUB_REPOSITORY_ITEM_KEYS = {"id", "node_id", "name", "full_name", "private"}
 
 
 def test_parse_created_installation_snapshot_as_added_repositories() -> None:
@@ -124,6 +129,155 @@ def test_parse_requires_the_repository_array_for_each_event_action(
     with pytest.raises(
         InstallationEventValidationError,
         match="invalid installation repository payload",
+    ):
+        parse_installation_repositories_event(event_name=event_name, payload=payload)
+
+
+@pytest.mark.parametrize(
+    ("fixture", "array"),
+    [
+        ("installation_created", "repositories"),
+        ("installation_repositories_added", "repositories_added"),
+    ],
+)
+def test_real_delivery_fixtures_keep_the_five_field_repository_shape(
+    fixture: str, array: str
+) -> None:
+    """Guard: a synthetic ``default_branch`` / ``html_url`` must not creep into the fixtures."""
+    items = load_github_webhook_fixture(fixture)[array]
+
+    assert len(items) == 1
+    assert set(items[0]) == _GITHUB_REPOSITORY_ITEM_KEYS
+
+
+def test_parse_real_installation_created_delivery_without_branch_and_url() -> None:
+    event = parse_installation_repositories_event(
+        event_name="installation",
+        payload=load_github_webhook_fixture("installation_created"),
+    )
+
+    assert event.action == "created"
+    assert event.installation_external_id == 1000001
+    assert len(event.added_repositories) == 1
+    repository = event.added_repositories[0]
+    assert repository.external_id == 1000004
+    assert repository.full_name == "example-owner/example-repo"
+    assert repository.default_branch is None
+    assert repository.web_url is None
+    assert event.removed_repositories == ()
+
+
+def test_parse_real_installation_repositories_added_delivery_without_branch_and_url() -> None:
+    event = parse_installation_repositories_event(
+        event_name="installation_repositories",
+        payload=load_github_webhook_fixture("installation_repositories_added"),
+    )
+
+    assert event.action == "added"
+    assert event.installation_external_id == 1000001
+    assert len(event.added_repositories) == 1
+    repository = event.added_repositories[0]
+    assert repository.external_id == 1000005
+    assert repository.full_name == "example-owner/example-repo-two"
+    assert repository.default_branch is None
+    assert repository.web_url is None
+    assert event.removed_repositories == ()
+
+
+@pytest.mark.parametrize(
+    ("event_name", "fixture", "action"),
+    [
+        ("installation", "installation_created", "deleted"),
+        ("installation_repositories", "installation_repositories_added", "removed"),
+    ],
+)
+def test_parse_removal_deliveries_in_the_real_five_field_shape(
+    event_name: str, fixture: str, action: str
+) -> None:
+    created_or_added = load_github_webhook_fixture(fixture)
+    event = parse_installation_repositories_event(
+        event_name=event_name, payload=removal_of(event_name, created_or_added)
+    )
+
+    assert event.action == action
+    assert event.installation_external_id == 1000001
+    assert event.added_repositories == ()
+    assert [repository.external_id for repository in event.removed_repositories] == [
+        1000004 if event_name == "installation" else 1000005
+    ]
+    assert event.removed_repositories[0].default_branch is None
+    assert event.removed_repositories[0].web_url is None
+
+
+def test_parse_keeps_branch_and_url_when_only_one_of_them_is_present() -> None:
+    payload = load_github_webhook_fixture("installation_repositories_added")
+    payload["repositories_added"][0]["default_branch"] = "trunk"
+
+    event = parse_installation_repositories_event(
+        event_name="installation_repositories", payload=payload
+    )
+
+    assert event.added_repositories[0].default_branch == "trunk"
+    assert event.added_repositories[0].web_url is None
+
+
+@pytest.mark.parametrize("field", ["default_branch", "html_url"])
+def test_parse_rejects_empty_branch_or_url_instead_of_treating_them_as_present(
+    field: str,
+) -> None:
+    payload = load_github_webhook_fixture("installation_repositories_added")
+    payload["repositories_added"][0][field] = ""
+
+    with pytest.raises(InstallationEventValidationError):
+        parse_installation_repositories_event(
+            event_name="installation_repositories", payload=payload
+        )
+
+
+@pytest.mark.parametrize(
+    ("event_name", "fixture", "removal", "array"),
+    [
+        ("installation", "installation_created", False, "repositories"),
+        ("installation", "installation_created", True, "repositories"),
+        (
+            "installation_repositories",
+            "installation_repositories_added",
+            False,
+            "repositories_added",
+        ),
+        (
+            "installation_repositories",
+            "installation_repositories_added",
+            True,
+            "repositories_removed",
+        ),
+    ],
+)
+@pytest.mark.parametrize(
+    "damage",
+    [
+        {"id": None},
+        {"id": 0},
+        {"id": "1000004"},
+        {"full_name": None},
+        {"full_name": ""},
+    ],
+)
+def test_parse_still_requires_repository_id_and_full_name(
+    event_name: str, fixture: str, removal: bool, array: str, damage: dict[str, Any]
+) -> None:
+    """Guard, green before the fix too: ``id`` and ``full_name`` stay required."""
+    payload = load_github_webhook_fixture(fixture)
+    if removal:
+        payload = removal_of(event_name, payload)
+    for key, value in damage.items():
+        if value is None:
+            del payload[array][0][key]
+        else:
+            payload[array][0][key] = value
+
+    with pytest.raises(
+        InstallationEventValidationError, match="invalid installation repository payload"
     ):
         parse_installation_repositories_event(event_name=event_name, payload=payload)
 

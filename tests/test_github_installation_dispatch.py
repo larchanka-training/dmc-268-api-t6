@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from dataclasses import dataclass, field
+from typing import Any
 from uuid import UUID, uuid4
 
 import pytest
@@ -32,6 +34,9 @@ from app.modules.reviews.application.trigger_from_delivery import (
     TriggerFromDelivery,
 )
 from app.modules.reviews.application.try_enqueue_webhook_run import EnqueueResult, EnqueueStatus
+from tests.github_webhook_fixtures import load_github_webhook_fixture
+
+_DISPATCH_LOGGER = "app.modules.integrations.webhooks.api.dispatch"
 
 
 @dataclass
@@ -496,6 +501,162 @@ def test_malformed_supported_event_fails_closed_at_replay_boundary(
     assert result.status is InstallationDeliveryDispatchStatus.IGNORED_INVALID_EVENT
     assert resolver.calls == []
     assert onboarding.calls == []
+
+
+@pytest.mark.parametrize(
+    ("event_name", "fixture", "installation_id"),
+    [
+        ("installation", "installation_created", 1000001),
+        ("installation_repositories", "installation_repositories_added", 1000001),
+    ],
+)
+def test_real_installation_delivery_reaches_onboarding_without_branch_and_url(
+    event_name: str, fixture: str, installation_id: int
+) -> None:
+    """The five-field repository items GitHub really sends are accepted (api#71)."""
+    local_id = uuid4()
+    resolver = FakeInstallationResolver(installations={installation_id: local_id})
+    onboarding = FakeOnboarding()
+
+    result = asyncio.run(
+        GitHubWebhookDispatchAdapter(
+            GitHubInstallationDeliveryDispatcher(resolver=resolver, onboarding=onboarding)
+        ).execute(
+            VerifiedGitHubDelivery(
+                "delivery-real", event_name, load_github_webhook_fixture(fixture)
+            ).to_receipt()
+        )
+    )
+
+    assert result.status is InstallationDeliveryDispatchStatus.ONBOARDED
+    assert resolver.calls == [installation_id]
+    assert len(onboarding.calls) == 1
+    assert onboarding.calls[0][0] == local_id
+    repository = onboarding.calls[0][1].added_repositories[0]
+    assert repository.default_branch is None
+    assert repository.web_url is None
+
+
+@pytest.mark.parametrize(
+    ("event_name", "payload", "action", "installation_id", "location", "message"),
+    [
+        (
+            "installation_repositories",
+            {
+                "action": "added",
+                "installation": {"id": 17},
+                "repositories_added": [
+                    {
+                        "id": 0,
+                        "node_id": "SENTINEL-node-id",
+                        "name": "SENTINEL-name",
+                        "full_name": "SENTINEL-owner/SENTINEL-name",
+                        "private": False,
+                    }
+                ],
+            },
+            "added",
+            "17",
+            "repositories_added.0.id",
+            "greater than or equal to 1",
+        ),
+        (
+            "installation",
+            {
+                "action": "created",
+                "installation": {"id": 17},
+                "repositories": [
+                    {
+                        "id": 1000004,
+                        "node_id": "SENTINEL-node-id",
+                        "name": "SENTINEL-name",
+                        "full_name": "",
+                        "private": False,
+                    }
+                ],
+            },
+            "created",
+            "17",
+            "repositories.0.full_name",
+            "at least 1 character",
+        ),
+        (
+            "installation_repositories",
+            {
+                "action": "removed",
+                "installation": {"id": "SENTINEL-installation-id"},
+                "repositories_removed": [],
+            },
+            "removed",
+            "None",
+            "installation.id",
+            "valid integer",
+        ),
+    ],
+)
+def test_invalid_installation_event_is_ignored_with_a_warning_naming_the_failing_fields(
+    caplog: pytest.LogCaptureFixture,
+    event_name: str,
+    payload: dict[str, Any],
+    action: str,
+    installation_id: str,
+    location: str,
+    message: str,
+) -> None:
+    """The receipt is still ignored, but the operator can see why (api#71 AC3)."""
+    resolver = FakeInstallationResolver()
+    onboarding = FakeOnboarding()
+    adapter = GitHubWebhookDispatchAdapter(
+        GitHubInstallationDeliveryDispatcher(resolver=resolver, onboarding=onboarding)
+    )
+
+    with caplog.at_level(logging.WARNING, logger=_DISPATCH_LOGGER):
+        result = asyncio.run(
+            adapter.execute(
+                VerifiedGitHubDelivery("delivery-invalid", event_name, payload).to_receipt()
+            )
+        )
+
+    assert result.status is InstallationDeliveryDispatchStatus.IGNORED_INVALID_EVENT
+    assert resolver.calls == []
+    assert onboarding.calls == []
+    warnings = [
+        record
+        for record in caplog.records
+        if record.name == _DISPATCH_LOGGER and record.levelno == logging.WARNING
+    ]
+    assert len(warnings) == 1
+    logged = warnings[0].getMessage()
+    assert "delivery-invalid" in logged
+    assert f"event={event_name}" in logged
+    assert f"action={action}" in logged
+    assert f"installation_id={installation_id}" in logged
+    assert location in logged
+    assert message in logged
+    assert "SENTINEL" not in caplog.text
+
+
+def test_unsupported_installation_action_is_not_logged_as_an_invalid_event(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    adapter = GitHubWebhookDispatchAdapter(
+        GitHubInstallationDeliveryDispatcher(
+            resolver=FakeInstallationResolver(), onboarding=FakeOnboarding()
+        )
+    )
+
+    with caplog.at_level(logging.WARNING, logger=_DISPATCH_LOGGER):
+        asyncio.run(
+            adapter.execute(
+                VerifiedGitHubDelivery(
+                    "delivery-suspend",
+                    "installation",
+                    {"action": "suspend", "installation": {"id": 17}},
+                ).to_receipt()
+            )
+        )
+
+    assert [r for r in caplog.records if r.name == _DISPATCH_LOGGER] == []
 
 
 def test_unsupported_receipt_reaches_application_as_event_metadata() -> None:

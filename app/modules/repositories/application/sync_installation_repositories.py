@@ -8,7 +8,10 @@ from typing import Protocol
 from uuid import UUID
 
 from app.common.application.unit_of_work import UnitOfWork
-from app.modules.repositories.application.installation_repositories import RepositorySnapshot
+from app.modules.repositories.application.installation_repositories import (
+    RepositoryReference,
+    RepositorySnapshot,
+)
 from app.modules.repositories.application.onboard_repository import (
     DefaultRuleSet,
     OnboardingResult,
@@ -84,11 +87,11 @@ class SyncInstallationRepositories:
         self,
         *,
         provider_installation_id: UUID,
-        repositories: tuple[RepositorySnapshot, ...],
+        repositories: tuple[RepositoryReference, ...],
     ) -> None:
         """Soft-disable removed repositories in one short database transaction.
 
-        This lifecycle path deliberately accepts full transport snapshots but
+        This lifecycle path deliberately accepts transport references but
         persists only their stable external ids.  It performs no VCS work and
         updates are naturally idempotent for duplicated webhook deliveries.
         """

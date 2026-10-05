@@ -1,0 +1,89 @@
+{
+  "action": "created",
+  "sender": {
+    "id": 1000002,
+    "url": "https://api.example.test/users/example-owner",
+    "type": "User",
+    "login": "example-owner",
+    "node_id": "U_example_node_id_0001",
+    "html_url": "https://example.test/example-owner",
+    "gists_url": "https://api.example.test/users/example-owner/gists{/gist_id}",
+    "repos_url": "https://api.example.test/users/example-owner/repos",
+    "avatar_url": "https://avatars.example.test/u/1000002?v=4",
+    "events_url": "https://api.example.test/users/example-owner/events{/privacy}",
+    "site_admin": false,
+    "gravatar_id": "",
+    "starred_url": "https://api.example.test/users/example-owner/starred{/owner}{/repo}",
+    "followers_url": "https://api.example.test/users/example-owner/followers",
+    "following_url": "https://api.example.test/users/example-owner/following{/other_user}",
+    "user_view_type": "public",
+    "organizations_url": "https://api.example.test/users/example-owner/orgs",
+    "subscriptions_url": "https://api.example.test/users/example-owner/subscriptions",
+    "received_events_url": "https://api.example.test/users/example-owner/received_events"
+  },
+  "requester": null,
+  "installation": {
+    "id": 1000001,
+    "app_id": 1000003,
+    "events": [
+      "check_suite",
+      "pull_request",
+      "status",
+      "workflow_run"
+    ],
+    "account": {
+      "id": 1000002,
+      "url": "https://api.example.test/users/example-owner",
+      "type": "User",
+      "login": "example-owner",
+      "node_id": "U_example_node_id_0001",
+      "html_url": "https://example.test/example-owner",
+      "gists_url": "https://api.example.test/users/example-owner/gists{/gist_id}",
+      "repos_url": "https://api.example.test/users/example-owner/repos",
+      "avatar_url": "https://avatars.example.test/u/1000002?v=4",
+      "events_url": "https://api.example.test/users/example-owner/events{/privacy}",
+      "site_admin": false,
+      "gravatar_id": "",
+      "starred_url": "https://api.example.test/users/example-owner/starred{/owner}{/repo}",
+      "followers_url": "https://api.example.test/users/example-owner/followers",
+      "following_url": "https://api.example.test/users/example-owner/following{/other_user}",
+      "user_view_type": "public",
+      "organizations_url": "https://api.example.test/users/example-owner/orgs",
+      "subscriptions_url": "https://api.example.test/users/example-owner/subscriptions",
+      "received_events_url": "https://api.example.test/users/example-owner/received_events"
+    },
+    "app_slug": "example-app",
+    "html_url": "https://example.test/settings/installations/1000001",
+    "client_id": "Iv1.example-client-id",
+    "target_id": 1000002,
+    "created_at": "2026-01-01T00:00:00.000+00:00",
+    "updated_at": "2026-01-01T00:00:00.000+00:00",
+    "permissions": {
+      "checks": "write",
+      "issues": "write",
+      "actions": "read",
+      "contents": "read",
+      "metadata": "read",
+      "statuses": "read",
+      "pull_requests": "write"
+    },
+    "target_type": "User",
+    "suspended_at": null,
+    "suspended_by": null,
+    "repositories_url": "https://api.example.test/installation/repositories",
+    "single_file_name": null,
+    "access_tokens_url": "https://api.example.test/app/installations/1000001/access_tokens",
+    "single_file_paths": [],
+    "repository_selection": "selected",
+    "has_multiple_single_files": false
+  },
+  "repositories": [
+    {
+      "id": 1000004,
+      "name": "example-repo",
+      "node_id": "R_example_node_id_0001",
+      "private": false,
+      "full_name": "example-owner/example-repo"
+    }
+  ]
+}
