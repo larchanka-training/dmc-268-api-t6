@@ -35,13 +35,14 @@ SECRET_SOURCES = {
     "GITHUB_CLIENT_SECRET": "GH_CLIENT_SECRET",
     "AUTH_JWT_PRIVATE_KEY": "AUTH_JWT_PRIVATE_KEY",
     "AUTH_JWT_PUBLIC_KEY": "AUTH_JWT_PUBLIC_KEY",
-    # Organization secrets of the LLM gateway (decision of the tech lead in #35, 04.10).
+    # Organization secret of the LLM gateway (decision of the tech lead in #35, 04.10).
     "LLM_API_KEYS": "AI_DMC268_T6",
-    "LLM_BASE_URL": "AI_DMC268_URL",
 }
-# Non-secret configuration from variables of the Environment, routed like the secrets.
+# Non-secret configuration, routed like the secrets: variables of the Environment and the
+# organization variable with the endpoint of the LLM gateway.
 VARIABLE_SOURCES = {
     "GITHUB_APP_BOT_LOGIN": "GH_APP_BOT_LOGIN",
+    "LLM_BASE_URL": "AI_DMC268_URL",
     "LLM_MODEL": "LLM_MODEL",
 }
 # One env file per set of recipients (docs/SECRETS.md); its bash array in env-file.sh.
@@ -376,21 +377,28 @@ def test_first_deploy_generates_store_passwords_once(host: Host) -> None:
 
 
 def test_rollbacks_keep_store_passwords_and_app_secrets(host: Host) -> None:
-    bundle = _bundle({"GITHUB_APP_ID": "1", "AUTH_JWT_PUBLIC_KEY": FAKE_PEM})
+    bundle = _bundle(CI_SECRETS)
     assert host.deploy("ghcr.io/test/api@sha256:a", bundle=bundle).returncode == 0
     assert host.deploy("ghcr.io/test/api@sha256:b", bundle=bundle).returncode == 0
     deployed = _read_dotenv(host.env_file)
-    secrets = {name: (host.app_dir / name).read_bytes() for name in ("app.env", "api.env")}
+    secrets = {name: (host.app_dir / name).read_bytes() for name in ENV_FILES}
 
     manual = host.run("rollback.sh")
     after_manual = _read_dotenv(host.env_file)
-    secrets_after_manual = {name: (host.app_dir / name).read_bytes() for name in secrets}
-    # The failing deploy brings rotated secrets. They stay after the automatic rollback: secrets
-    # are not tied to an image (docs/SECRETS.md §3).
-    rotated = _bundle({"GITHUB_APP_ID": "2", "GITHUB_CLIENT_ID": "client"})
+    secrets_after_manual = {name: (host.app_dir / name).read_bytes() for name in ENV_FILES}
+    # The failing deploy brings rotated secrets, one of them no longer set. They stay after the
+    # automatic rollback: secrets are not tied to an image (docs/SECRETS.md §3).
+    rotated = {
+        **CI_SECRETS,
+        "GITHUB_APP_ID": "2",
+        "GITHUB_CLIENT_ID": "client",
+        "AUTH_JWT_PUBLIC_KEY": "",
+        "LLM_API_KEYS": "sk-rotated",
+        "GITHUB_APP_BOT_LOGIN": "rotated[bot]",
+    }
     failed = host.deploy(
         "ghcr.io/test/api@sha256:bad",
-        bundle=rotated,
+        bundle=_bundle(rotated),
         env={"STUB_FAILING_IMAGE": "ghcr.io/test/api@sha256:bad"},
     )
     after_auto = _read_dotenv(host.env_file)
@@ -403,9 +411,12 @@ def test_rollbacks_keep_store_passwords_and_app_secrets(host: Host) -> None:
     for name in ("POSTGRES_PASSWORD", "RABBITMQ_USER", "RABBITMQ_PASSWORD", "REDIS_PASSWORD"):
         assert after_manual[name] == deployed[name], name
         assert after_auto[name] == deployed[name], name
+    assert all(secrets.values())  # every role has something to lose
     assert secrets_after_manual == secrets
-    assert _read_env_file(host.app_dir / "app.env") == {"GITHUB_APP_ID": "2"}
-    assert _read_env_file(host.app_dir / "api.env") == {"GITHUB_CLIENT_ID": "client"}
+    for file_name, (_, keys) in ENV_FILES.items():
+        assert _read_env_file(host.app_dir / file_name) == {
+            name: rotated[name] for name in keys if rotated[name]
+        }, file_name
 
 
 @pytest.mark.parametrize("name", ["POSTGRES_PASSWORD", "RABBITMQ_PASSWORD", "REDIS_PASSWORD"])

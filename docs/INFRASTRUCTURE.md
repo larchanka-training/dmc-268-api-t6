@@ -260,7 +260,7 @@ terraform -chdir=${STACK} destroy -var-file=environments/staging.tfvars
 
 **Почему staging здесь, а не в Terraform** (решение техлида 27.09.2026, #35): стеки `terraform/` описывают Hetzner Cloud, а токена Hetzner (`HCLOUD_TOKEN`) у команды нет — курс выдал готовый VPS. Terraform не может управлять машиной, которую не создавал, а импорт чужого общего хоста дал бы state, расходящийся с реальностью при каждом изменении курса. Поэтому окружение staging — этот VPS, а стеки остаются альтернативой на случай своего проекта в Hetzner: CI продолжает их проверять, переключение — переменной `STAGING_HOST` ([CICD.md](CICD.md#81-две-цели)).
 
-Сервисы API staging на VPS (compose project `dmc-268-api-staging`): `api`, разовый `bootstrap`, PostgreSQL 17 (`postgres:17-alpine`), RabbitMQ (`rabbitmq:4-management-alpine`, брокер очереди, SD Р-1), Redis (`redis:8-alpine`, только кэш, SD §10, лимит памяти 128 MB); `worker` и `webhook-worker` из того же образа — следующим PR по #35. Объектного хранилища нет (#20, D1). Наружу через edge виден только `api`; PostgreSQL, RabbitMQ и Redis — во внутренней сети проекта без `ports:`.
+Сервисы API staging на VPS (compose project `dmc-268-api-staging`): `api`, разовый `bootstrap`, PostgreSQL 17 (`postgres:17-alpine`), RabbitMQ (`rabbitmq:4-management-alpine`, брокер очереди, SD Р-1), Redis (`redis:8-alpine`, только кэш, SD §10, лимит памяти 128 MB); `worker` и `webhook-worker` — из того же образа, что `api`, со своим healthcheck по heartbeat-файлу ([CICD.md](CICD.md) §3). Объектного хранилища нет (#20, D1). Наружу через edge виден только `api`; оба воркера, PostgreSQL, RabbitMQ и Redis — во внутренней сети проекта без `ports:`.
 
 | Параметр | Значение |
 |---|---|

@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 
 from app.common.infrastructure.heartbeat import beat, heartbeat_file, is_fresh, reset
+from app.worker import WorkerSettings, run_worker
 
 
 def test_reset_removes_a_beat_left_by_the_previous_process(tmp_path: Path) -> None:
@@ -81,3 +82,21 @@ def test_healthcheck_command_exits_by_freshness(tmp_path: Path) -> None:
     assert check() == 0
     os.utime(path, (1.0, 1.0))
     assert check() == 1
+
+
+def test_worker_that_never_reaches_the_broker_leaves_no_beat(tmp_path: Path) -> None:
+    """The first beat comes after the broker connection: until then a stale file must not pass."""
+    path = tmp_path / "worker.heartbeat"
+    path.touch()  # left fresh by the previous process of a restarted container
+    settings = WorkerSettings.from_environment(
+        {
+            "DATABASE_URL": "postgresql+psycopg://app:app@127.0.0.1:1/app",
+            "RABBITMQ_URL": "amqp://app:app@127.0.0.1:1/",  # nothing listens on port 1
+            "WORKER_HEARTBEAT_FILE": str(path),
+        }
+    )
+
+    with pytest.raises(ConnectionError):
+        asyncio.run(run_worker(settings))
+
+    assert not path.exists()
