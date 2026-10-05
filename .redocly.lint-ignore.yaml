@@ -1,0 +1,11 @@
+# This file instructs Redocly's linter to ignore the rules contained for specific parts of your API.
+# See https://redocly.com/docs/cli/ for more information.
+contracts/openapi.yaml:
+  operation-4xx-response:
+    # Logout is idempotent and succeeds without a cookie; it can fail only with 503 when auth
+    # is not configured (app/modules/auth/api/router.py, app/bootstrap/auth_api.py).
+    - '#/paths/~1api~1auth~1logout/post/responses'
+  no-unused-components:
+    # Referenced from x-events.run.updated of GET /api/stream, which Redocly does not follow;
+    # tests/test_openapi_contract.py validates SSE events against it. Do not delete.
+    - '#/components/schemas/RunUpdatedEvent'

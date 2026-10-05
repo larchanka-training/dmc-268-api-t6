@@ -21,9 +21,18 @@ docker compose up -d --build
 ```
 
 This starts `backend` (port `${BACKEND_PORT:-8000}`, from `docker-compose.yml`
-on `main`) and `postgres` with a healthcheck. Do not run the app locally with
-`uv run uvicorn` for this workflow — the point is to exercise the same
-container image and network path CI/prod use.
+on `main`), `worker`, `postgres`, `rabbitmq` and `redis`; every service but
+`backend` has a healthcheck. `webhook-worker` starts only with
+`--profile webhooks`. Do not run the app locally with `uv run uvicorn` for this
+workflow — the point is to exercise the same container image and network path
+CI/prod use.
+
+`up` does not run migrations; apply them before any check that touches the
+database (an unmigrated database answers the webhook with 500):
+
+```bash
+docker compose run --rm backend alembic upgrade head
+```
 
 ## 2. Readiness loop
 
@@ -41,7 +50,8 @@ done
 
 ## 3. Smoke checks via `httpx`
 
-`httpx` is a dev dependency on `main` (`pyproject.toml`). Drive it with
+`httpx` is a runtime dependency on `main` (`pyproject.toml`,
+`[project].dependencies`). Drive it with
 `uv run python -c` for quick, disposable smoke scripts — no new test file
 needed for a manual smoke pass:
 
@@ -56,33 +66,32 @@ print('healthcheck: ok')
 "
 ```
 
-**Webhook smoke** — once the webhook entrypoint exists (pending api #4):
-POST a sample GitHub payload with an `X-Hub-Signature-256` header (HMAC over
-the raw body, per `docs/SYSTEM_DESIGN.md` §8.3) and assert the
-response status and the literal JSON fields the endpoint contracts to
-return. Do not invent the path or payload shape before the endpoint lands —
-cite `docs/SYSTEM_DESIGN.md` §8.3 for the header and signing
-scheme, and treat the route itself as not yet built:
+**Webhook smoke** — `scripts/webhook_smoke.py` (stdlib only) signs deliveries
+with `GITHUB_WEBHOOK_SECRET` (HMAC-SHA256 over the raw body,
+`docs/SYSTEM_DESIGN.md` §8.3) and posts them to `POST /webhooks/github`. Set a
+non-empty `GITHUB_WEBHOOK_SECRET` in `.env` before step 1: compose hands the
+same value to `backend`, and the script reads it from the environment only
+(empty: the route answers 503, the script exits 2 before sending).
+
+Step 1 does not start webhook-worker (compose profile `webhooks`). If it runs,
+stop it for the smoke (`docker compose stop webhook-worker`) or expect failed
+projections: the deliveries name installation 17 and repository 101, so the
+worker's GitHub calls fail and it marks each delivery failed after three tries.
 
 ```bash
-uv run python -c "
-import hashlib
-import hmac
-
-import httpx
-
-secret = b'test-secret'
-body = b'{\"action\": \"opened\"}'
-sig = 'sha256=' + hmac.new(secret, body, hashlib.sha256).hexdigest()
-
-r = httpx.post(
-    '<webhook route — not yet defined>',  # placeholder until api #4 lands the entrypoint
-    content=body,
-    headers={'X-Hub-Signature-256': sig, 'Content-Type': 'application/json'},
-)
-assert r.status_code == 202, r.status_code
-"
+uv run --env-file .env python scripts/webhook_smoke.py --count 100
 ```
+
+One line per check: a fresh delivery → 202 `{"status": "pending"}`; the same
+delivery again → 202 `{"status": "duplicate"}`; a corrupted signature → 401
+`{"detail": "invalid GitHub webhook signature"}`; with `--count N`, N fresh
+deliveries → 202 pending each, then p50/p95/max latency. Exit 0 — all passed;
+1 — a response did not match (expected vs got printed); 2 — invalid arguments
+(e.g. a `--url` without `http://`), no secret, or no valid HTTP answer. A 500
+usually means the migrations were not applied. `--url` overrides
+`http://localhost:8000/webhooks/github` (non-default `BACKEND_PORT`). CI runs
+the same script against the built image in the `Webhook container smoke` job
+(`.github/workflows/ci-cd.yml`).
 
 ## 4. Assertions
 

@@ -573,6 +573,25 @@ def test_push_image_waits_for_the_required_python_check() -> None:
     assert "- python-lint-type-test" in push_image
 
 
+def test_ci_lints_the_openapi_contract_before_the_push() -> None:
+    workflow = WORKFLOW.read_text(encoding="utf-8")
+    job = workflow[workflow.index("  openapi-lint:") : workflow.index("  docker-build:")]
+    push_image = workflow[workflow.index("  push-image:") : workflow.index("  deploy-staging:")]
+
+    assert "name: OpenAPI lint" in job
+    # Pinned CLI, the same command as locally: the repo-root redocly.yaml and
+    # .redocly.lint-ignore.yaml apply, no CLI flag overrides them.
+    assert re.search(
+        r"^        run: npx --yes @redocly/cli@2\.57\.0 lint contracts/openapi\.yaml$",
+        job,
+        re.MULTILINE,
+    )
+    assert "--extends" not in job
+    # Redocly exits 0 on warnings; the config's strict ruleset turns every warning into an error.
+    assert re.search(r"^extends:\n  - recommended-strict$", _read("redocly.yaml"), re.MULTILINE)
+    assert "- openapi-lint" in push_image
+
+
 def test_ui_host_sends_api_paths_to_the_api_and_the_rest_to_the_ui() -> None:
     caddyfile = _read("deploy", "edge", "Caddyfile")
     ui_site = caddyfile[caddyfile.index("staging-ui.{$APP_DOMAIN} {") :]

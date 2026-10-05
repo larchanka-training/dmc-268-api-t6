@@ -1,0 +1,9 @@
+# Redocly CLI lint config for contracts/openapi.yaml (docs/PIPELINE_SPEC.md §16), the same
+# command locally and in CI: npx --yes @redocly/cli@2.57.0 lint contracts/openapi.yaml
+# Redocly exits 0 on warnings, so the strict ruleset turns every warning into an error.
+extends:
+  - recommended-strict
+
+rules:
+  # Private course repository without a LICENSE file: an info.license entry would be invented.
+  info-license: off
