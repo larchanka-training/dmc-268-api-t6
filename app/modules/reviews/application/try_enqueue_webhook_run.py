@@ -46,6 +46,10 @@ class DuplicateReason(StrEnum):
     HEAD_ALREADY_REVIEWED = "head_already_reviewed"
 
 
+# The PR changed between the gate and the locked read. Logged as the reason of a STALE
+# result; keep in sync with the reason table in docs/WEBHOOK_WORKER.md.
+STATE_CHANGED_REASON = "state_changed"
+
 _UNCONFIGURED = frozenset(
     {
         CandidateMiss.MISSING_INSTALLATION,
@@ -187,7 +191,7 @@ class TryEnqueueWebhookRun:
                 )
                 return EnqueueResult(status, reason=candidate.value)
             if candidate.ci != decision.candidate:
-                return EnqueueResult(EnqueueStatus.STALE, reason="state_changed")
+                return EnqueueResult(EnqueueStatus.STALE, reason=STATE_CHANGED_REASON)
             message = await uow.runs.insert_webhook_run(candidate, self._now())
             if isinstance(message, DuplicateReason):
                 return EnqueueResult(EnqueueStatus.DUPLICATE, reason=message.value)

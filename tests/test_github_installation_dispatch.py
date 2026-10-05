@@ -246,7 +246,7 @@ def test_unrelated_label_is_ignored_before_intent_projection(action: str) -> Non
     )
 
     assert result.status is InstallationDeliveryDispatchStatus.IGNORED_IRRELEVANT_EVENT
-    assert result.detail == "label is not ai-review"
+    assert result.detail == f"action={action} label is not ai-review"
 
 
 @pytest.mark.parametrize("label", [None, {}, {"name": ""}, {"name": 17}, "ai-review"])
@@ -283,12 +283,12 @@ def _check_suite_delivery() -> VerifiedGitHubDelivery:
         (
             _pull_request_delivery("labeled", label={"name": "ai-review"}),
             InstallationDeliveryDispatchStatus.PROJECTED_PR,
-            "label outcome",
+            "action=labeled label outcome",
         ),
         (
             _pull_request_delivery("synchronize"),
             InstallationDeliveryDispatchStatus.PROJECTED_PR,
-            "pr outcome",
+            "action=synchronize pr outcome",
         ),
         (
             _check_suite_delivery(),
@@ -369,7 +369,9 @@ def test_a_projection_that_did_not_apply_the_label_names_itself_in_the_detail(
         )
     )
 
-    assert result == InstallationDeliveryDispatchResult(status, projection.value)
+    assert result == InstallationDeliveryDispatchResult(
+        status, f"action=unlabeled {projection.value}"
+    )
 
 
 @pytest.mark.parametrize("action", ["review_requested", "review_request_removed"])
@@ -400,6 +402,7 @@ def test_former_reviewer_actions_do_not_project_intent_or_enqueue(action: str) -
     result = asyncio.run(adapter.execute(_pull_request_delivery(action).to_receipt()))
 
     assert result.status is InstallationDeliveryDispatchStatus.IGNORED_IRRELEVANT_EVENT
+    assert result.detail == f"action={action}"
 
 
 def test_dispatches_a_verified_delivery_to_the_existing_installation() -> None:
@@ -528,6 +531,7 @@ def test_malformed_or_unsupported_delivery_is_ignored_before_lookup() -> None:
 
     assert malformed.status is InstallationDeliveryDispatchStatus.IGNORED_INVALID_EVENT
     assert unsupported.status is InstallationDeliveryDispatchStatus.IGNORED_IRRELEVANT_EVENT
+    assert unsupported.detail is None  # a push has no action to report
     assert resolver.calls == []
     assert onboarding.calls == []
 
@@ -594,6 +598,7 @@ def test_non_actionable_pr_action_is_ignored() -> None:
     )
 
     assert result.status is InstallationDeliveryDispatchStatus.IGNORED_IRRELEVANT_EVENT
+    assert result.detail == "action=ready_for_review"
     assert resolver.calls == []
     assert onboarding.calls == []
 

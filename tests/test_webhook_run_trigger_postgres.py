@@ -234,6 +234,18 @@ class Pipeline:
         )
 
 
+_UUID = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+
+
+def _outcome_lines(caplog: pytest.LogCaptureFixture) -> list[str]:
+    return [
+        record.getMessage()
+        for record in caplog.records
+        if record.levelno == logging.INFO
+        and record.getMessage().startswith("GitHub webhook delivery ")
+    ]
+
+
 def _run(database: Database, github: FakeGitHub, scenario: Any) -> Any:
     async def main() -> Any:
         pipeline = Pipeline(database, github)
@@ -285,7 +297,7 @@ def test_queued_foreign_suites_without_runs_do_not_block_a_run_next_to_green_ci(
 
 @pytest.mark.integration
 def test_queued_foreign_suite_without_runs_alone_is_not_ci_evidence_for_wait_for_ci_always(
-    database: Database,
+    database: Database, caplog: pytest.LogCaptureFixture
 ) -> None:
     suites = [_suite(HEAD, 8, "queued", None, 0)]
 
@@ -294,7 +306,18 @@ def test_queued_foreign_suite_without_runs_alone_is_not_ci_evidence_for_wait_for
         await pipeline.deliver("pull_request", _pr_delivery("labeled"))
         return await pipeline.runs()
 
-    assert _run(database, FakeGitHub(ci={HEAD: suites}), scenario) == []
+    with caplog.at_level(logging.INFO):
+        runs = _run(database, FakeGitHub(ci={HEAD: suites}), scenario)
+
+    assert runs == []
+    # The gate used to count that suite as blocking CI (`ci_blocked`); without it there is no CI
+    # evidence yet, so `always` waits (`waiting_for_ci`). No Run is created either way.
+    [line] = _outcome_lines(caplog)
+    assert re.fullmatch(
+        r"GitHub webhook delivery delivery-1 event=pull_request status=projected_pr "
+        rf"detail=action=labeled pr={_UUID} head=eeeeeee: ineligible \(waiting_for_ci\)",
+        line,
+    ), line
 
 
 @pytest.mark.integration
@@ -367,9 +390,6 @@ def test_synchronize_cancels_the_attempted_run_and_signals_the_worker_at_once(
     assert kinds[0] == (HEAD, RunPublicationKind.QUEUED)
 
 
-_UUID = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
-
-
 @pytest.mark.integration
 def test_every_label_outcome_is_logged_with_its_reason_and_without_the_token(
     database: Database, caplog: pytest.LogCaptureFixture
@@ -392,25 +412,20 @@ def test_every_label_outcome_is_logged_with_its_reason_and_without_the_token(
     with caplog.at_level(logging.INFO):
         _run(database, github, scenario)
 
-    lines = [
-        record.getMessage()
-        for record in caplog.records
-        if record.levelno == logging.INFO
-        and record.getMessage().startswith("GitHub webhook delivery ")
-    ]
+    lines = _outcome_lines(caplog)
     pr = rf"pr={_UUID} head=eeeeeee"
     expected = [
         r"GitHub webhook delivery delivery-1 event=pull_request "
-        r"status=ignored_unknown_repository detail=unknown_repository "
+        r"status=ignored_unknown_repository detail=action=labeled unknown_repository "
         r"retry_at=\d{4}-\d\d-\d\dT\S+",
         rf"GitHub webhook delivery delivery-2 event=pull_request status=projected_pr "
-        rf"detail={pr}: ineligible \(ci_blocked\)",
+        rf"detail=action=labeled {pr}: ineligible \(ci_blocked\)",
         rf"GitHub webhook delivery delivery-3 event=pull_request status=projected_pr "
-        rf"detail={pr}: unconfigured \(missing_rules\)",
+        rf"detail=action=labeled {pr}: unconfigured \(missing_rules\)",
         rf"GitHub webhook delivery delivery-4 event=pull_request status=projected_pr "
-        rf"detail={pr}: enqueued run={_UUID}",
+        rf"detail=action=labeled {pr}: enqueued run={_UUID}",
         rf"GitHub webhook delivery delivery-5 event=pull_request status=projected_pr "
-        rf"detail={pr}: duplicate \(active_run\)",
+        rf"detail=action=labeled {pr}: duplicate \(active_run\)",
     ]
     assert len(lines) == len(expected), lines
     for line, pattern in zip(lines, expected, strict=True):

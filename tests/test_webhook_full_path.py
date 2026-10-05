@@ -662,6 +662,7 @@ def _outcome_lines(
 
 
 _LINE = "GitHub webhook delivery delivery-outcome event=pull_request"
+_PR_LINE = f"{_LINE} status=projected_pr detail=action=labeled pr={_PR_ID} head=aaaaaaa:"
 
 
 def test_label_delivery_that_enqueues_a_run_logs_the_run(
@@ -671,9 +672,7 @@ def test_label_delivery_that_enqueues_a_run_logs_the_run(
 
     lines = _outcome_lines(state, caplog, _label_payload())
 
-    assert lines == [
-        f"{_LINE} status=projected_pr detail=pr={_PR_ID} head=aaaaaaa: enqueued run={_RUN_ID}"
-    ]
+    assert lines == [f"{_PR_LINE} enqueued run={_RUN_ID}"]
     assert state.published
 
 
@@ -684,9 +683,7 @@ def test_label_delivery_blocked_by_foreign_ci_logs_the_gate_reason(
 
     lines = _outcome_lines(state, caplog, _label_payload(), ci=BlockedCi(state))
 
-    assert lines == [
-        f"{_LINE} status=projected_pr detail=pr={_PR_ID} head=aaaaaaa: ineligible (ci_blocked)"
-    ]
+    assert lines == [f"{_PR_LINE} ineligible (ci_blocked)"]
     assert state.message is None
 
 
@@ -697,9 +694,7 @@ def test_label_delivery_without_rules_logs_unconfigured_not_stale(
 
     lines = _outcome_lines(state, caplog, _label_payload())
 
-    assert lines == [
-        f"{_LINE} status=projected_pr detail=pr={_PR_ID} head=aaaaaaa: unconfigured (missing_rules)"
-    ]
+    assert lines == [f"{_PR_LINE} unconfigured (missing_rules)"]
     assert state.message is None
 
 
@@ -710,7 +705,7 @@ def test_label_delivery_for_a_closed_pr_logs_that_no_open_pr_exists(
 
     lines = _outcome_lines(state, caplog, _label_payload(pr_state="closed"))
 
-    assert lines == [f"{_LINE} status=projected_pr detail=no open pull request"]
+    assert lines == [f"{_LINE} status=projected_pr detail=action=labeled no open pull request"]
     assert state.message is None
 
 
@@ -721,7 +716,9 @@ def test_foreign_label_delivery_logs_that_the_label_is_not_ai_review(
 
     lines = _outcome_lines(state, caplog, _label_payload("bug"))
 
-    assert lines == [f"{_LINE} status=ignored_irrelevant_event detail=label is not ai-review"]
+    assert lines == [
+        f"{_LINE} status=ignored_irrelevant_event detail=action=labeled label is not ai-review"
+    ]
     assert state.pull_request is None
 
 
@@ -733,5 +730,7 @@ def test_label_delivery_from_the_apps_own_bot_logs_the_ignored_projection(
 
     lines = _outcome_lines(state, caplog, _label_payload(sender=sender))
 
-    assert lines == [f"{_LINE} status=ignored_irrelevant_event detail=ignored_unrelated"]
+    assert lines == [
+        f"{_LINE} status=ignored_irrelevant_event detail=action=labeled ignored_unrelated"
+    ]
     assert state.pull_request is None
