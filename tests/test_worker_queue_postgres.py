@@ -7,6 +7,7 @@ Opt-in: set ``TEST_DATABASE_URL`` (disposable PostgreSQL) and ``TEST_RABBITMQ_UR
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextlib
 import itertools
 import json
@@ -22,10 +23,17 @@ from typing import Any
 from uuid import UUID, uuid4
 
 import aio_pika
+import httpx
 import psycopg
 import pytest
 from aiormq.exceptions import ChannelPreconditionFailed
 from alembic.config import Config
+from cryptography.hazmat.primitives.asymmetric import rsa
+from cryptography.hazmat.primitives.serialization import (
+    Encoding,
+    NoEncryption,
+    PrivateFormat,
+)
 from sqlalchemy import create_engine, text
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
@@ -77,6 +85,7 @@ from app.modules.reviews.infrastructure.amqp import (
     retry_queue,
     run_queue,
 )
+from app.modules.reviews.infrastructure.github_run_source import GitHubRunSource
 from app.modules.reviews.infrastructure.run_lifecycle_store import (
     SqlAlchemyRunLifecycleUnitOfWork,
 )
@@ -426,6 +435,10 @@ SETTINGS = WorkerSettings(
 )
 
 
+def _no_run_source(run_id: UUID) -> GitHubRunSource:
+    raise AssertionError("these tests inject provider_factory")
+
+
 @contextlib.asynccontextmanager
 async def running_worker(
     env: Env,
@@ -438,7 +451,13 @@ async def running_worker(
         settings=SETTINGS,
         session_factory=factory,
         queue=channels.publisher,
-        github=GitHubAdapters(vcs=Vcs(), check_runs=github, reviews=github, eligibility=github),
+        github=GitHubAdapters(
+            vcs=Vcs(),
+            check_runs=github,
+            reviews=github,
+            eligibility=github,
+            run_source=_no_run_source,
+        ),
         provider_factory=model.for_attempt,
         delays=SHORT_DELAYS,
     )
@@ -1039,3 +1058,239 @@ def test_push_during_the_github_post_ends_the_run_cancelled_not_succeeded(env: E
         "completed",
         "cancelled",
     )
+
+
+_APP_KEY = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+_APP_PEM = _APP_KEY.private_bytes(Encoding.PEM, PrivateFormat.PKCS8, NoEncryption()).decode()
+_FILE_SHA = "f" * 40
+_FILE_TEXT = b"line10\nline11\nline12\n"
+
+
+class FakeGitHubApi:
+    """GitHub REST as the worker uses it, on a MockTransport (no network)."""
+
+    def __init__(self, *, agents_md: bytes | None = None) -> None:
+        self.agents_md = agents_md
+        self.reviews: list[dict[str, Any]] = []
+        self.requests: list[str] = []
+
+    def blob(self, sha: str, data: bytes) -> httpx.Response:
+        content = base64.b64encode(data).decode()
+        return httpx.Response(
+            200, json={"sha": sha, "encoding": "base64", "content": content, "size": len(data)}
+        )
+
+    def __call__(self, request: httpx.Request) -> httpx.Response:
+        path, method = request.url.path, request.method
+        self.requests.append(f"{method} {path}")
+        repo = "/repos/octo/repo"
+        if path == "/app/installations/17/access_tokens":
+            return httpx.Response(201, json={"token": "t", "expires_at": "2099-01-01T00:00:00Z"})
+        if path == f"{repo}/pulls/7":
+            ref = {"ref": "feature", "sha": HEAD, "repo": {"full_name": "octo/repo"}}
+            base = {"ref": "main", "sha": BASE, "repo": {"full_name": "octo/repo"}}
+            return httpx.Response(
+                200,
+                json={
+                    "id": 907,
+                    "number": 7,
+                    "title": "PR",
+                    "body": None,
+                    "user": {"login": "octocat"},
+                    "head": ref,
+                    "base": base,
+                    "labels": [{"name": "ai-review"}],
+                    "draft": False,
+                    "changed_files": 1,
+                    "additions": 1,
+                    "deletions": 0,
+                },
+            )
+        if path == f"{repo}/pulls/7/files":
+            return httpx.Response(
+                200,
+                json=[
+                    {
+                        "filename": "app/example.py",
+                        "status": "modified",
+                        "sha": _FILE_SHA,
+                        "additions": 1,
+                        "deletions": 0,
+                        "changes": 1,
+                        "patch": PATCH,
+                    }
+                ],
+            )
+        if path == f"{repo}/git/blobs/{_FILE_SHA}":
+            return self.blob(_FILE_SHA, _FILE_TEXT)
+        if path == f"{repo}/git/blobs/{'a' * 40}" and self.agents_md is not None:
+            return self.blob("a" * 40, self.agents_md)
+        if path == f"{repo}/git/trees/{BASE}":
+            tree = [{"path": "README.md", "type": "blob", "sha": "c" * 40, "size": 3}]
+            if self.agents_md is not None:
+                tree.append({"path": "AGENTS.md", "type": "blob", "sha": "a" * 40, "size": 9})
+            return httpx.Response(200, json={"tree": tree, "truncated": False})
+        if path == f"{repo}/git/trees/{HEAD}":
+            tree = [{"path": "app/example.py", "type": "blob", "sha": _FILE_SHA, "size": 21}]
+            return httpx.Response(200, json={"tree": tree, "truncated": False})
+        if path == f"{repo}/commits/{HEAD}/check-runs":
+            return httpx.Response(200, json={"total_count": 0, "check_runs": []})
+        if path.startswith(f"{repo}/check-runs"):
+            return httpx.Response(201 if method == "POST" else 200, json={"id": 31})
+        if path == f"{repo}/pulls/7/reviews" and method == "GET":
+            return httpx.Response(200, json=[])
+        if path == f"{repo}/pulls/7/reviews":
+            self.reviews.append(json.loads(request.content))
+            return httpx.Response(200, json={"id": 501})
+        if path == f"{repo}/pulls/7/reviews/501/comments":
+            return httpx.Response(200, json=[{"id": 9001}])
+        raise AssertionError(f"unexpected GitHub call {method} {request.url}")
+
+
+class FakeLlm:
+    """An OpenAI-compatible chat endpoint answering the conventions and review tasks."""
+
+    def __init__(self) -> None:
+        self.tasks: list[str] = []
+
+    def __call__(self, request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/v1/chat/completions"
+        body = json.loads(request.content)
+        task = body["response_format"]["json_schema"]["name"]
+        self.tasks.append(task)
+        answer: dict[str, object] = (
+            {
+                "files": [{"path": "app/example.py", "relevance": "Changed module."}],
+                "key_patterns": ["Pattern one.", "Pattern two.", "Pattern three."],
+                "recommendations": [
+                    f"Recommendation {n} (from: standard/correctness)"
+                    for n in ("one", "two", "three", "four", "five")
+                ],
+            }
+            if task == "RepoConventionsDraft"
+            else review_output()
+        )
+        return httpx.Response(
+            200,
+            json={
+                "model": "test-model",
+                "choices": [{"message": {"content": json.dumps(answer)}, "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": 1200, "completion_tokens": 300},
+            },
+        )
+
+
+LLM_ENV = {
+    "LLM_MODEL": "test-model",
+    "LLM_BASE_URL": "https://llm.test/v1",
+    "LLM_API_KEYS": "test-key",
+    "LLM_CONTEXT_WINDOW": "100000",
+    "LLM_MAX_OUTPUT_TOKENS": "8000",
+    "LLM_PRICE_INPUT_PER_MTOK": "1",
+    "LLM_PRICE_OUTPUT_PER_MTOK": "2",
+}
+
+
+def _main_settings(env: Env, extra: Mapping[str, str]) -> WorkerSettings:
+    assert env.rabbitmq_url is not None
+    return WorkerSettings.from_environment(
+        {
+            "DATABASE_URL": f"{env.database_url}?options=-csearch_path%3D{env.schema}",
+            "RABBITMQ_URL": env.rabbitmq_url,
+            "WORKER_ID": "main-composition",
+            "GITHUB_APP_ID": "1",
+            "GITHUB_APP_PRIVATE_KEY": _APP_PEM,
+            "GITHUB_API_URL": "https://api.github.test",
+            **extra,
+        }
+    )
+
+
+async def _run_main_worker(
+    env: Env, settings: WorkerSettings, github: FakeGitHubApi, llm: FakeLlm, *states: str
+) -> tuple[UUID, tuple[Any, ...]]:
+    engine = env.engine()
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    run_id = await insert_run(factory, env)
+    worker = asyncio.create_task(
+        run_worker(
+            settings,
+            delays=SHORT_DELAYS,
+            github_transport=httpx.MockTransport(github),
+            llm_transport=httpx.MockTransport(llm),
+        )
+    )
+    try:
+        async with amqp_channels(env.rabbitmq_url or "", SHORT_DELAYS) as channels:
+            await publish_run(channels, factory, run_id)
+        state = await wait_for_state(factory, run_id, *states)
+        # The check-run and the ack follow the last commit.
+        await asyncio.sleep(0.5)
+    finally:
+        worker.cancel()
+        await asyncio.gather(worker, return_exceptions=True)
+        await engine.dispose()
+    return run_id, state
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("agents_md", [None, b"# Rules\n"], ids=["no-agents-md", "agents-md"])
+def test_main_composition_reviews_through_the_llm_gateway(
+    env: Env, agents_md: bytes | None
+) -> None:
+    github, llm = FakeGitHubApi(agents_md=agents_md), FakeLlm()
+    settings = _main_settings(env, LLM_ENV)
+    run_id, state = asyncio.run(_run_main_worker(env, settings, github, llm, "succeeded", "failed"))
+    engine = env.engine()
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+
+    async def read() -> tuple[list[tuple[Any, ...]], int]:
+        actions = await tools(factory, run_id)
+        async with factory() as session:
+            usage = await session.scalar(
+                text("SELECT count(*) FROM usage_events WHERE run_id = :id"), {"id": run_id}
+            )
+        await engine.dispose()
+        return actions, int(usage or 0)
+
+    actions, usage_rows = asyncio.run(read())
+    names = [action[0] for action in actions]
+
+    assert state == ("succeeded", 1, None)
+    assert llm.tasks[-1] != "RepoConventionsDraft" and "RepoConventionsDraft" in llm.tasks
+    assert names.count("llm.review_output") == 1
+    assert names.count("llm.call") >= 2
+    assert usage_rows >= 2
+    assert github.reviews and github.reviews[0]["commit_id"] == HEAD
+
+
+@pytest.mark.integration
+def test_main_composition_without_llm_config_names_the_missing_configuration(
+    env: Env, caplog: pytest.LogCaptureFixture
+) -> None:
+    github, llm = FakeGitHubApi(), FakeLlm()
+    settings = _main_settings(env, {})
+    with caplog.at_level(logging.WARNING):
+        run_id, state = asyncio.run(_run_main_worker(env, settings, github, llm, "failed"))
+    engine = env.engine()
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+
+    async def read() -> tuple[str, list[tuple[Any, ...]]]:
+        async with factory() as session:
+            message = await session.scalar(
+                text("SELECT error_message FROM runs WHERE id = :id"), {"id": run_id}
+            )
+        actions = await tools(factory, run_id)
+        await engine.dispose()
+        return str(message), actions
+
+    message, actions = asyncio.run(read())
+    fetches = [action for action in actions if action[0] == "vcs.fetch_diff"]
+
+    assert settings.llm is None
+    assert "LLM_MODEL is not set" in caplog.text
+    assert state == ("failed", 3, "llm_unavailable")
+    assert "not configured" in message
+    assert llm.tasks == []
+    # The diff step succeeds: the missing LLM never masks a VCS step.
+    assert fetches and all("error" not in (action[2] or {}) for action in fetches)
