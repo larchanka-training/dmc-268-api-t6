@@ -283,12 +283,12 @@ class _NoMeta:
 def test_eurouter_is_selected_by_configuration_only() -> None:
     settings = LlmSettings.from_env(
         {
-            "LLM_MODEL": "gpt-4.1-mini",
+            "LLM_MODEL": "mistral-small-4",
             "LLM_API_KEYS": "sk-eu-1, sk-eu-2",
-            "LLM_FALLBACK_MODEL": "mistral-small-4",
+            "LLM_FALLBACK_MODEL": "mistral-small-3.2-24b",
         }
     )
-    harness = Harness([valid(model="openai/gpt-4.1-mini-2025-04-14")], settings=settings)
+    harness = Harness([valid(model="mistral/mistral-small-4")], settings=settings)
 
     result = harness.review()
 
@@ -296,7 +296,7 @@ def test_eurouter_is_selected_by_configuration_only() -> None:
     assert str(request.url) == "https://api.eurouter.ai/api/v1/chat/completions"
     assert request.headers["Authorization"] == "Bearer sk-eu-1"
     body = harness.bodies()[0]
-    assert body["model"] == "gpt-4.1-mini"
+    assert body["model"] == "mistral-small-4"
     assert body["temperature"] == 0
     assert [message["role"] for message in body["messages"]] == ["system", "user"]
     assert body["messages"][0]["content"] == "SYSTEM PROMPT"
@@ -310,10 +310,13 @@ def test_eurouter_is_selected_by_configuration_only() -> None:
     assert schema["additionalProperties"] is False
     assert result.output == VALID_OUTPUT
     assert result.provider == "eurouter"
-    assert result.model == "openai/gpt-4.1-mini-2025-04-14"
+    assert result.model == "mistral/mistral-small-4"
     assert settings.fallback is not None
     assert settings.fallback.api_keys == ("sk-eu-1", "sk-eu-2")
     assert settings.fallback.base_url == "https://api.eurouter.ai/api/v1"
+    assert settings.fallback.model == "mistral-small-3.2-24b"
+    assert settings.fallback.context_window == 128_000
+    assert settings.fallback.structured_output == "json_schema"
 
 
 def test_self_hosted_is_selected_by_configuration_only_with_prompt_json() -> None:
@@ -378,33 +381,39 @@ _KEY = {"LLM_API_KEYS": "sk-eu-1"}
             {"LLM_MODEL": "unknown", "LLM_BASE_URL": "http://llm.test/v1"},
             "LLM_CONTEXT_WINDOW must be set",
         ),
-        ({"LLM_MODEL": "gpt-4.1-mini"}, "LLM_API_KEYS must be set for gpt-4.1-mini"),
-        ({**_KEY, "LLM_MODEL": "gpt-4.1-mini", "LLM_CONTEXT_WINDOW": "big"}, "must be an integer"),
-        ({**_KEY, "LLM_MODEL": "gpt-4.1-mini", "LLM_CONTEXT_WINDOW": "0"}, "must be positive"),
+        ({"LLM_MODEL": "mistral-small-4"}, "LLM_API_KEYS must be set for mistral-small-4"),
         (
-            {**_KEY, "LLM_MODEL": "gpt-4.1-mini", "LLM_MAX_OUTPUT_TOKENS": "2000000"},
+            {**_KEY, "LLM_MODEL": "mistral-small-4", "LLM_CONTEXT_WINDOW": "big"},
+            "must be an integer",
+        ),
+        ({**_KEY, "LLM_MODEL": "mistral-small-4", "LLM_CONTEXT_WINDOW": "0"}, "must be positive"),
+        (
+            {**_KEY, "LLM_MODEL": "mistral-small-4", "LLM_MAX_OUTPUT_TOKENS": "2000000"},
             "LLM_MAX_OUTPUT_TOKENS must be below LLM_CONTEXT_WINDOW",
         ),
-        ({**_KEY, "LLM_MODEL": "gpt-4.1-mini", "LLM_PRICE_INPUT_PER_MTOK": "x"}, "a decimal"),
+        ({**_KEY, "LLM_MODEL": "mistral-small-4", "LLM_PRICE_INPUT_PER_MTOK": "x"}, "a decimal"),
         (
-            {**_KEY, "LLM_MODEL": "gpt-4.1-mini", "LLM_PRICE_INPUT_PER_MTOK": "NaN"},
+            {**_KEY, "LLM_MODEL": "mistral-small-4", "LLM_PRICE_INPUT_PER_MTOK": "NaN"},
             "non-negative decimal",
         ),
         (
-            {**_KEY, "LLM_MODEL": "gpt-4.1-mini", "LLM_PRICE_OUTPUT_PER_MTOK": "-1"},
+            {**_KEY, "LLM_MODEL": "mistral-small-4", "LLM_PRICE_OUTPUT_PER_MTOK": "-1"},
             "non-negative decimal",
         ),
-        ({**_KEY, "LLM_MODEL": "gpt-4.1-mini", "LLM_STRUCTURED_OUTPUT": "tools"}, "json_schema or"),
         (
-            {**_KEY, "LLM_MODEL": "gpt-4.1-mini", "LLM_BASE_URL": "HTTP://router.example/v1"},
+            {**_KEY, "LLM_MODEL": "mistral-small-4", "LLM_STRUCTURED_OUTPUT": "tools"},
+            "json_schema or",
+        ),
+        (
+            {**_KEY, "LLM_MODEL": "mistral-small-4", "LLM_BASE_URL": "HTTP://router.example/v1"},
             "LLM_BASE_URL must use https when keys are sent",
         ),
-        ({**_KEY, "LLM_MODEL": "gpt-4.1-mini", "LLM_EXTRA_BODY": "[1]"}, "JSON object"),
-        ({**_KEY, "LLM_MODEL": "gpt-4.1-mini", "LLM_EXTRA_BODY": "{"}, "JSON object"),
+        ({**_KEY, "LLM_MODEL": "mistral-small-4", "LLM_EXTRA_BODY": "[1]"}, "JSON object"),
+        ({**_KEY, "LLM_MODEL": "mistral-small-4", "LLM_EXTRA_BODY": "{"}, "JSON object"),
         (
             {
                 **_KEY,
-                "LLM_MODEL": "gpt-4.1-mini",
+                "LLM_MODEL": "mistral-small-4",
                 "LLM_BASE_URL": "http://router.example/v1",
             },
             "LLM_BASE_URL must use https when keys are sent",
@@ -428,7 +437,7 @@ def test_incomplete_configuration_names_the_variable(env: dict[str, str], messag
 def test_primary_keys_are_not_sent_to_another_fallback_endpoint() -> None:
     settings = LlmSettings.from_env(
         {
-            "LLM_MODEL": "gpt-4.1-mini",
+            "LLM_MODEL": "mistral-small-4",
             "LLM_API_KEYS": "eurouter-secret",
             "LLM_FALLBACK_MODEL": "qwen",
             "LLM_FALLBACK_BASE_URL": "https://third-party.example/v1",
@@ -499,7 +508,7 @@ def test_a_remote_model_without_a_price_is_reported(caplog: pytest.LogCaptureFix
 def test_extra_body_and_overrides_reach_the_request() -> None:
     settings = LlmSettings.from_env(
         {
-            "LLM_MODEL": "gpt-4.1-mini",
+            "LLM_MODEL": "mistral-small-4",
             "LLM_API_KEYS": "sk-eu-1",
             "LLM_MAX_OUTPUT_TOKENS": "4000",
             "LLM_PRICE_INPUT_PER_MTOK": "0.5",

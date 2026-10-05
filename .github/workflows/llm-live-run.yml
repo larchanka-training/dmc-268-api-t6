@@ -9,10 +9,10 @@ on:
     inputs:
       model:
         description: Primary model
-        default: gpt-4.1-mini
+        default: mistral-small-4
       fallback_model:
         description: Fallback model
-        default: mistral-small-4
+        default: mistral-small-3.2-24b
       diff:
         description: Unified diff to review
         default: review/examples/sample.diff

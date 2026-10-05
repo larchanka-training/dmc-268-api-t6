@@ -108,19 +108,9 @@ class LlmSettings:
         return cls(primary=primary, fallback=fallback)
 
 
-# Chosen and checked for OQ-2 (docs/SYSTEM_DESIGN.md §15): catalog values of EUrouter
-# on 2026-09-29. Env variables override every field, so a price change needs no release.
+# Chosen for OQ-2 (docs/SYSTEM_DESIGN.md §15) in #46: catalog values of EUrouter on
+# 2026-10-05. Env variables override every field, so a price change needs no release.
 KNOWN_MODELS: Mapping[str, ModelProfile] = {
-    "gpt-4.1-mini": ModelProfile(
-        provider="eurouter",
-        base_url="https://api.eurouter.ai/api/v1",
-        model="gpt-4.1-mini",
-        context_window=1_047_576,
-        max_output_tokens=8_000,
-        price=ModelPrice(Decimal("0.44"), Decimal("1.76"), Decimal("0.11")),
-        structured_output="json_schema",
-        chars_per_token=3.0,
-    ),
     "mistral-small-4": ModelProfile(
         provider="eurouter",
         base_url="https://api.eurouter.ai/api/v1",
@@ -128,6 +118,20 @@ KNOWN_MODELS: Mapping[str, ModelProfile] = {
         context_window=262_144,
         max_output_tokens=8_000,
         price=ModelPrice(Decimal("0.165"), Decimal("0.66"), Decimal("0.0165")),
+        structured_output="json_schema",
+        chars_per_token=3.0,
+    ),
+    # Every endpoint bills in EUR: the most expensive one (GreenPT, EUR 0.20 / 0.40 per 1M)
+    # at EUrouter's own rate of 1.1225 USD/EUR (usage.cost / usage.cost_eur, 2026-10-05).
+    # The catalog has no cache-read price, so cached tokens count at the input price.
+    # The window is the smallest endpoint's (Scaleway, GreenPT).
+    "mistral-small-3.2-24b": ModelProfile(
+        provider="eurouter",
+        base_url="https://api.eurouter.ai/api/v1",
+        model="mistral-small-3.2-24b",
+        context_window=128_000,
+        max_output_tokens=8_000,
+        price=ModelPrice(Decimal("0.2245"), Decimal("0.449"), Decimal("0.2245")),
         structured_output="json_schema",
         chars_per_token=3.0,
     ),
