@@ -211,11 +211,10 @@ jobs:
           import os
           from pathlib import Path
 
+          from review.scripts.eval_replay import format_console
+
           corpus = json.loads(Path(os.environ["CORPUS_REPORT"]).read_text(encoding="utf-8"))
           replay_path = Path(os.environ["REPLAY_REPORT"])
-
-          def percent(value):
-              return "undefined" if value is None else f"{value * 100:.1f}%"
 
           with Path(os.environ["GITHUB_STEP_SUMMARY"]).open("a", encoding="utf-8") as summary:
               summary.write("## Gold benchmark\n\n")
@@ -225,16 +224,11 @@ jobs:
               )
               if replay_path.is_file():
                   replay = json.loads(replay_path.read_text(encoding="utf-8"))
-                  summary.write(
-                      f"Recorded replay ({replay['provenance']['model_id']}): "
-                      f"Validity {percent(replay['validity'])}, "
-                      f"micro Precision {percent(replay['micro']['precision'])}, "
-                      f"micro Recall {percent(replay['micro']['recall'])}, "
-                      f"Critical Recall {percent(replay['critical']['recall'])}.\n"
-                  )
+                  summary.write("Recorded replay:\n\n```text\n")
+                  summary.write(format_console(replay))
+                  summary.write("\n```\n\n")
                   for warning in replay["warnings"]:
                       print(f"::warning::{warning}")
-                      summary.write(f"\n> [!WARNING]\n> {warning}\n")
               else:
                   summary.write("Recorded replay: pending baseline responses and manifest.\n")
           PYTHON

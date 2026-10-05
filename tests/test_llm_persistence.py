@@ -7,7 +7,7 @@ from contextlib import AbstractAsyncContextManager
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import Any, cast
-from uuid import UUID, uuid4
+from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -23,7 +23,6 @@ from app.modules.reviews.application.llm import (
     RunCallContext,
 )
 from app.modules.reviews.infrastructure.llm_call_trace import RunTraceLlmCalls
-from app.modules.reviews.infrastructure.models import RunActionResponseBody
 
 RUN_ID = UUID("00000000-0000-0000-0000-000000003311")
 WORKSPACE_ID = UUID("00000000-0000-0000-0000-000000003312")
@@ -42,11 +41,6 @@ class FakeSession:
 
     def add(self, item: object) -> None:
         self.added.append(item)
-
-    async def flush(self) -> None:
-        for item in self.added:
-            if isinstance(item, RunActionResponseBody) and item.id is None:
-                item.id = uuid4()
 
 
 class FakeContext(AbstractAsyncContextManager[FakeSession]):

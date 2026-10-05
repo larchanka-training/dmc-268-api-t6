@@ -54,7 +54,20 @@ The first command checks one case, the second all present cases. `--final` also 
 
 ## Curated corpus
 
-The 24 active inputs pass final schema, patch-application and distribution validation. The class counts are security **4**, resource **5**, logic **5**, syntax **5**, and clean **5**. Five cases use distinct licensed real PRs, one in each class. Five separate critical truth anchors come from synthetic cases. SEC-05 was omitted after two candidate fixtures were stopped by the automatic safety filter; four security cases still meet the minimum. It has no case or response entry and is excluded from future replay/live denominators. No model response or quality baseline has been recorded yet.
+The 24 active inputs pass final schema, patch-application and distribution validation. [PR #68](https://github.com/larchanka-training/dmc-268-api-t6/pull/68) merged the [#66](https://github.com/larchanka-training/dmc-268-api-t6/issues/66) normalization work, including PIPELINE_SPEC §9, before the first baseline capture. Issue #66 remains open for operational acceptance; this does not make the merged code a pending baseline dependency. The class counts are security **4**, resource **5**, logic **5**, syntax **5**, and clean **5**. Five cases use distinct licensed real PRs, one in each class. Five separate critical truth anchors come from synthetic cases. SEC-05 was omitted after two candidate fixtures were stopped by the automatic safety filter; four security cases still meet the minimum. It has no case or response entry and is excluded from future replay/live denominators. No model response or quality baseline has been recorded yet.
+
+### Issue #53 corpus decision (2026-10-04)
+
+Keep **24 active cases** for the first live baseline. No case was added or promoted: the validator proves patch and anchor mechanics, but it cannot supply an independent semantic or license review. The baseline still requires one raw first answer per active case, so its denominator remains 24.
+
+| Requested gap | Decision and reason |
+| --- | --- |
+| Multiple truths in one case | **Defer.** None of the 24 active cases has more than one expected finding. A new multi-truth patch needs two independently checked defects and distinct added-line anchors in the same coherent change; combining existing truths just to exercise the scorer would make the benchmark claim unsupported. Scorer unit tests cover duplicate/multiple-anchor mechanics. |
+| Range truth | **Defer.** Every active finding has `start_line: null`. A range case needs a reviewed defect spanning two added new-side anchors, with both endpoints and the semantic range checked; `git apply --check` and anchor validation alone cannot establish that truth. Scorer unit tests cover range mechanics. |
+| Licensed real high/critical security truth | **Defer.** The only real security case, SEC-04, is supported as **low** by its recorded Flask source and advisory; promoting its severity would contradict that evidence. No additional high/critical security PR has a curated source revision, license permission for the exact excerpt, and independently checked impact. The synthetic critical truths remain explicitly synthetic. |
+| SEC-05 | **Keep omitted.** Two earlier candidate fixtures were stopped by the automatic safety filter, and no independently reviewed safe replacement exists. Four security cases satisfy the final distribution rule; SEC-05 has no active input or response and is excluded from the 24-case denominator. |
+
+Any later addition must receive its own source/license and ground-truth review, pass `validate_dataset.py --final`, and change issue #53's literal 24-response criterion **before** live capture. A case or truth edit after capture requires a complete fresh baseline.
 
 ### Real PR provenance and checked truth
 
@@ -83,3 +96,31 @@ Each row points to one distinct new-side anchor. Severity is tied to the concret
 | [LOG-05](cases/LOG-05/README.md) | A declined publisher receipt removes ready jobs from the only pending store, causing durable job loss. |
 
 Case metadata deliberately contains **no model response or model/prompt provenance**. It is valid before #33 selects a model and before any baseline exists. Replay/live tasks will keep raw responses and a separate manifest with case ID, model ID, prompt path/version/SHA, run metadata, and response path. Missing or invalid recorded responses must remain visible to eval rather than being rewritten into valid answers. Quality metrics and manual semantic adjudication follow [TEST_PLAN §3](../docs/TEST_PLAN.md#3-методология-llm-eval).
+
+The recorder scores the **first call**, even if a retry, repair, or fallback later succeeds. A first-call HTTP 429 or timeout therefore records an empty response and counts as invalid; the later valid answer never replaces it. The manifest distinguishes `first_call: no_content` (a provider call failed before an answer), `empty_answer` (a provider answer had no text), and `no_call` (the gateway did not send a request). A successful later fallback can make a transient first-call failure part of a publishable, measured raw-first baseline, while its invalid response remains in the denominator.
+
+Terminal provider or infrastructure failure for a case, such as HTTP 402 on both primary and fallback or invalid accounting metadata on a paid HTTP 200 response, sets `run_metadata.baseline_publishable` to `false` and lists affected IDs in `nonpublishable_case_ids`. The safe per-case `paid_metadata_error` marker distinguishes the paid-metadata failure from ordinary invalid model text; the first raw answer remains recorded even when its JSON validates. The recorder saves all first raw responses, statuses, and the full manifest for diagnosis; both live and offline replay CLI return nonzero, and replay warns that the capture is not publishable. Capture is prepared in a same-filesystem temporary directory and promoted only after every response and the manifest are ready; an unexpected mid-corpus exception leaves no partial baseline, and an existing populated `responses/` is preserved. Resolve the failure and rerun all 24 cases before publishing metrics or responses.
+
+For each case, `run_metadata.cases` records the requested `first_model` and the actual first response's serving `provider` as `first_provider_label` plus a domain-separated `first_provider_digest`. Known EUrouter route names use safe public labels; any other provider string becomes `custom` with its digest, and a first call with no provider response records nulls. A paid but rejected first response keeps its available provider identity. This differs from the configured provider in `effective_settings`. Report observed provider labels and any custom digests with the measured baseline, without copying raw provider strings, URLs, or keys into the manifest or README.
+
+The manifest also stores sorted `static_inputs`, `static_digest`, and `corpus_digest`. Each digest is `sha256-v1:<64 lowercase hex>` over a SHA-256 stream beginning with the bytes `review-eval-inputs-v1` followed by a NUL byte. For every unique relative POSIX path in sorted order, the stream then contains its UTF-8 path length as an unsigned 8-byte big-endian integer, the path bytes, its file-content length in the same format, and the exact file bytes. Static inputs are the selected review system prompt, all literal `review/rules/*.json` files (including the rule schema), selected custom rule files, and these code paths. Each remains in the byte-level digest because a change can affect the provider request, whether a response is accepted or retried, or which raw answer the recorder captures:
+
+| Static code path | Why it is included |
+| --- | --- |
+| `app/bootstrap/llm_gateway.py` | Composes requests and sets attempt deadlines. |
+| `app/common/application/languages.py` | Selects the case language and default rule set. |
+| `app/modules/reviews/application/llm.py` | Defines call kinds and retryability used by the gateway. |
+| `app/modules/reviews/application/prompt_budget.py` | Chooses whole, truncated, and omitted diff files. |
+| `app/modules/reviews/application/prompt_builder.py` | Renders the system/user message envelope. |
+| `app/modules/reviews/application/review_output.py` | Parses and validates review output. |
+| `app/modules/reviews/application/run_failures.py` | Supplies the gateway's attempt deadline and retryable codes. |
+| `app/modules/reviews/infrastructure/llm/answers.py` | Validates answers and prepares repair feedback. |
+| `app/modules/reviews/infrastructure/llm/gateway.py` | Controls calls, retries, repair, fallback, and budgets. |
+| `app/modules/reviews/infrastructure/llm/models.py` | Adapts gateway calls to review and conventions model ports. |
+| `app/modules/reviews/infrastructure/llm/settings.py` | Resolves model profiles, endpoints, and call policy. |
+| `app/modules/reviews/infrastructure/llm/transport.py` | Encodes provider requests and extracts response text. |
+| `review/schemas/review-output.schema.json` | Defines strict response format and validation. |
+| `review/scripts/eval_live.py` | Assembles each case request and selects first-call raw content. |
+| `app/modules/reviews/application/conventions_prompt.py` | Renders conventions input when a conventions prompt is supplied. |
+
+A supplied conventions prompt and its renderer are included only for that task. Byte hashing also warns on a docstring-only edit to any listed file; this conservative warning avoids missing a changed deadline or call policy. `run_failures.py` remains included because `FAST_ATTEMPT_DEADLINE` and `RETRYABLE_ERROR_CODES` are imported into the gateway path. Corpus inputs are every active `case.json`, patch, and recursive pre-image file. Every case ID maps exactly to `responses/<case-id>.json`; replay rejects unmapped extra files. Replay warns if either digest differs or a static file is missing; it never rewrites raw answers. Refresh the **entire** response set and manifest after any input edit, even if only one rule or case changes. Traversal and symlink inputs are rejected.

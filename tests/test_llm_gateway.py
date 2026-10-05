@@ -26,6 +26,7 @@ from app.modules.reviews.application.conventions import ConventionsRequest, Repo
 from app.modules.reviews.application.llm import (
     LlmCallFailed,
     LlmCallKind,
+    LlmCallRecord,
     LlmErrorCode,
     LlmUsage,
     RunCallContext,
@@ -840,6 +841,76 @@ def test_rotations_inside_every_call_do_not_shrink_the_call_limit() -> None:
 # ---------- failure classes, §5.1 ----------
 
 
+def test_primary_payment_required_uses_fallback_without_same_model_retry() -> None:
+    primary = replace(PRIMARY, api_keys=("sk-primary-1", "sk-primary-2"))
+    harness = Harness(
+        [error(402, "account has no credits"), valid(model="fallback-model-v2")],
+        primary=primary,
+    )
+
+    result = harness.review()
+
+    assert result.output == VALID_OUTPUT
+    assert harness.kinds() == ["primary", "fallback"]
+    assert harness.models() == ["primary-model", "fallback-model"]
+    assert harness.clock.sleeps == []
+    first = harness.trace.records[0][1].response_json()["error"]
+    assert (first["class"], first["http_status"]) == ("llm_payment_required", 402)
+
+
+def test_primary_and_fallback_payment_required_fail_without_retry_or_key_rotation() -> None:
+    primary = replace(PRIMARY, api_keys=("sk-primary-1", "sk-primary-2"))
+    fallback = replace(FALLBACK, api_keys=("sk-fallback-1", "sk-fallback-2"))
+    harness = Harness(
+        [
+            error(402, "primary account has no credits"),
+            error(402, "fallback account has no credits"),
+        ],
+        primary=primary,
+        fallback=fallback,
+    )
+
+    failure = harness.failure()
+
+    assert failure.error_code is LlmErrorCode.PAYMENT_REQUIRED
+    assert failure.run_retryable is False
+    assert failure.calls == 2
+    assert len(harness.requests) == 2
+    assert harness.kinds() == ["primary", "fallback"]
+    assert harness.models() == ["primary-model", "fallback-model"]
+    assert harness.clock.sleeps == []
+    assert [request.headers["Authorization"] for request in harness.requests] == [
+        "Bearer sk-primary-1",
+        "Bearer sk-fallback-1",
+    ]
+
+
+def test_payment_required_without_fallback_fails_without_retry() -> None:
+    harness = Harness([error(402, "account has no credits")], fallback=None)
+
+    failure = harness.failure()
+
+    assert failure.error_code is LlmErrorCode.PAYMENT_REQUIRED
+    assert failure.run_retryable is False
+    assert failure.calls == 1
+    assert harness.kinds() == ["primary"]
+    assert harness.clock.sleeps == []
+
+
+def test_fallback_payment_required_is_a_non_retryable_final_failure() -> None:
+    harness = Harness([error(503), error(503), error(503), error(402)])
+
+    failure = harness.failure()
+
+    assert failure.error_code is LlmErrorCode.PAYMENT_REQUIRED
+    assert failure.run_retryable is False
+    assert harness.kinds() == ["primary", "retry", "retry", "fallback"]
+    assert harness.models() == ["primary-model"] * 3 + ["fallback-model"]
+    assert harness.clock.sleeps == [2.25, 8.25]
+    last = harness.trace.records[-1][1].response_json()["error"]
+    assert (last["class"], last["http_status"]) == ("llm_payment_required", 402)
+
+
 def test_timeout_retries_once_then_uses_the_fallback_then_fails() -> None:
     harness = Harness([timeout(), timeout(), timeout()])
 
@@ -1074,29 +1145,46 @@ def test_two_runs_with_the_same_attempt_number_have_separate_limits() -> None:
 
 
 def test_concurrent_generations_of_one_attempt_stay_within_four_calls() -> None:
-    class YieldingLedger(InMemoryUsageLedger):
-        """Like the database ledger, the cost read lets other tasks run."""
+    class PausingLedger(InMemoryUsageLedger):
+        """Hold one generation after its entry check, before its first call."""
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.entered = asyncio.Event()
+            self.resume = asyncio.Event()
+            self.pause_next = True
 
         async def run_cost_usd(self, run_id: UUID) -> Decimal:
-            await asyncio.sleep(0)
+            if self.pause_next:
+                self.pause_next = False
+                self.entered.set()
+                await self.resume.wait()
             return await super().run_cost_usd(run_id)
 
-    replies: list[Reply] = [error(500) for _ in range(8)]
-    harness = Harness(replies, fallback=None, ledger=YieldingLedger())
+    ledger = PausingLedger()
+    replies: list[Reply] = []
+    replies.extend(error(500) for _ in range(4))
+    replies.append(valid())
+    harness = Harness(replies, ledger=ledger)
 
     async def scenario() -> None:
         async with httpx.AsyncClient(transport=httpx.MockTransport(harness._handle)) as client:
             gateway = harness.gateway(client)
-            results = await asyncio.gather(
-                *(
-                    GatewayReviewModel(gateway, harness.run, _NoMeta()).draft_review(
+            blocked = asyncio.create_task(
+                GatewayReviewModel(gateway, harness.run, _NoMeta()).draft_review(context=CONTEXT)
+            )
+            await ledger.entered.wait()
+            try:
+                with pytest.raises(LlmCallFailed) as active_failure:
+                    await GatewayReviewModel(gateway, harness.run, _NoMeta()).draft_review(
                         context=CONTEXT
                     )
-                    for _ in range(2)
-                ),
-                return_exceptions=True,
-            )
-            assert all(isinstance(item, LlmCallFailed) for item in results)
+            finally:
+                ledger.resume.set()
+            with pytest.raises(LlmCallFailed) as blocked_failure:
+                await blocked
+            assert active_failure.value.calls == 4
+            assert blocked_failure.value.calls == 0
 
     asyncio.run(scenario())
 
@@ -1626,12 +1714,11 @@ def test_an_answer_without_usage_is_charged_by_the_estimate(empty_usage: bool) -
 def test_a_failed_trace_write_does_not_discard_the_answer(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    class BrokenTrace:
-        async def record_call(self, run_id: UUID, record: object) -> None:
+    class BrokenTrace(InMemoryLlmCallTrace):
+        async def record_call(self, run_id: UUID, record: LlmCallRecord) -> None:
             raise RuntimeError("database is down")
 
-    harness = Harness([valid()])
-    harness.trace = BrokenTrace()  # type: ignore[assignment]
+    harness = Harness([valid()], trace=BrokenTrace())
 
     with caplog.at_level(logging.ERROR):
         result = harness.review()
@@ -2301,6 +2388,8 @@ def test_paid_answer_with_bad_currency_and_tokens_is_not_retried() -> None:
     assert len(harness.requests) == 1
     assert harness.clock.sleeps == []
     assert harness.trace.records[0][1].response_json()["usage"] == payload["usage"]
+    assert harness.trace.records[0][1].paid_metadata_error is True
+    assert harness.trace.records[0][1].request_json()["paid_metadata_error"] is True
     assert len(failure.usage) == 1
     usage = failure.usage[0]
     assert usage.tokens_in == prompt_tokens(CONTEXT, HeuristicTokenCounter(PRIMARY.chars_per_token))
@@ -2533,6 +2622,8 @@ def test_unquantizable_paid_cost_records_estimate_and_raw_trace_then_fails(
     ]
     assert harness.ledger.events[0][1] == failure.usage[0]
     assert harness.trace.records[0][1].response_json()["usage"]["cost"] == cost
+    assert harness.trace.records[0][1].paid_metadata_error is True
+    assert harness.trace.records[0][1].request_json()["paid_metadata_error"] is True
 
 
 def test_usage_of_every_call_is_returned_and_recorded_with_the_actual_model() -> None:

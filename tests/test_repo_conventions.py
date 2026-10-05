@@ -37,6 +37,10 @@ from app.modules.reviews.application.conventions import (
     RepositorySnapshot,
     derive_languages,
 )
+from app.modules.reviews.application.conventions_prompt import (
+    build_conventions_prompt,
+    fit_conventions_request,
+)
 from app.modules.reviews.application.prompt_builder import ReviewRule
 from app.modules.reviews.infrastructure.conventions_unit_of_work import (
     SqlAlchemyRepositoryConventionsStore,
@@ -398,6 +402,9 @@ def test_conventions_request_limits_repository_files_to_ten() -> None:
     assert [file.path for file in model.calls[0].repo_files] == [
         f"app/file-{index:02}.py" for index in range(10)
     ]
+    assert (
+        "[1 more repository file contexts omitted]" in build_conventions_prompt(model.calls[0]).user
+    )
 
 
 def test_conventions_request_limits_each_repository_file_to_three_hundred_lines() -> None:
@@ -430,6 +437,89 @@ def test_conventions_request_limits_each_repository_file_to_three_hundred_lines(
     content = model.calls[0].repo_files[0].content
     assert content is not None
     assert content.splitlines() == [f"line {index}" for index in range(300)]
+    assert model.calls[0].repo_files[0].omitted_lines == 1
+    assert '<line n="300">line 299</line>\n[1 more lines omitted]\n</file>' in (
+        build_conventions_prompt(model.calls[0]).user
+    )
+
+
+def test_conventions_renderer_marks_all_known_omissions_and_escapes_content() -> None:
+    request = ConventionsRequest(
+        system="P",
+        rules=(),
+        agents_md=None,
+        repo_tree=("a&b.py", "extra<.py"),
+        repo_files=(RepositoryFile("a&b.py", 10, "x < y & z", omitted_lines=2),),
+        languages={},
+        changed_files=("a&b.py", *(f"f{index:03}.py" for index in range(100))),
+        omitted_tree_paths=2,
+    )
+
+    user = build_conventions_prompt(request).user
+
+    assert "<repo_tree>\na&amp;b.py\nextra&lt;.py\n[2 more paths omitted]\n</repo_tree>" in user
+    assert (
+        '<file path="a&amp;b.py">\n<line n="1">x &lt; y &amp; z</line>\n'
+        "[2 more lines omitted]\n</file>"
+    ) in user
+    assert "[3 more repository file contexts omitted]" in user
+    assert "f098.py\n[1 more changed paths omitted]\n</changed_files>" in user
+
+
+def test_conventions_renderer_has_no_omission_marker_for_empty_or_complete_context() -> None:
+    empty = ConventionsRequest("P", (), None, (), (), {}, ())
+    complete = ConventionsRequest(
+        "P",
+        (),
+        None,
+        ("app/main.py",),
+        (RepositoryFile("app/main.py", 1, "x"),),
+        {},
+        ("app/main.py",),
+    )
+
+    assert " more " not in build_conventions_prompt(empty).user
+    assert " more " not in build_conventions_prompt(complete).user
+
+
+def test_fitting_adds_prior_tree_omissions_to_the_exact_count() -> None:
+    class CharCounter:
+        def count(self, text: str) -> int:
+            return len(text)
+
+    request = ConventionsRequest("P", (), None, ("a.py", "b.py"), (), {}, (), 2)
+
+    fitted = fit_conventions_request(request, max_prompt_tokens=0, counter=CharCounter())
+
+    assert fitted.repo_tree == ()
+    assert fitted.omitted_tree_paths == 4
+    assert "[4 more paths omitted]" in build_conventions_prompt(fitted).user
+
+
+def test_missing_selected_file_content_is_counted_as_omitted_context() -> None:
+    @dataclass
+    class MissingContentSource(FakeSource):
+        async def fetch_files(
+            self, repository_id: UUID, paths: tuple[str, ...]
+        ) -> tuple[RepositoryFile, ...]:
+            assert paths == ("app/main.py", "web/app.ts")
+            return (RepositoryFile("app/main.py", 10, "content"),)
+
+    model = FakeModel(draft())
+    asyncio.run(
+        GenerateRepoConventions(
+            MissingContentSource(), model, FakeUnitOfWorkFactory(FakeStore())
+        ).execute(
+            repository_id=REPOSITORY_ID,
+            conventions_prompt=ActiveConventionsPrompt(PROMPT_VERSION_ID, "conventions v1"),
+            run_id=RUN_ID,
+            changed_files=("app/main.py",),
+        )
+    )
+
+    assert (
+        "[2 more repository file contexts omitted]" in build_conventions_prompt(model.calls[0]).user
+    )
 
 
 @pytest.mark.parametrize(

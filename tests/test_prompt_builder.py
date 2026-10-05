@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from app.modules.reviews.application.prompt_builder import (
     ChangedFile,
     DiffLine,
@@ -313,3 +315,50 @@ def test_commit_messages_are_bounded_in_number_and_length() -> None:
     assert lines[0] == "<commit>" + "x" * 499 + "…</commit>"
     assert lines[19] == "<commit>fix: change 18</commit>"
     assert lines[20] == "<commit>[5 more commits omitted]</commit>"
+
+
+def _sample_review_context() -> ReviewContext:
+    root = Path(__file__).resolve().parents[1]
+    return ReviewContext(
+        system=(root / "review/prompts/review.system.v2.md").read_text(encoding="utf-8"),
+        rules=(
+            ReviewRule(
+                name="Billing & error handling",
+                include=("app/modules/billing/**/*.py",),
+                exclude=("tests/**",),
+                checks=("Preserve gateway failures & transaction boundaries.",),
+            ),
+        ),
+        agents_md="Use application ports; keep network calls outside DB transactions.",
+        conventions=RepoConventions(
+            key_patterns=(
+                "Use cases live in application; SQL repositories live in infrastructure.",
+            ),
+            recommendations=("Use cases own transactions (from: standard/correctness)",),
+        ),
+        pr_meta=PullRequestMeta(
+            title="Add <billing> charge flow",
+            description="Introduce a charge use case & repository.",
+            author="example-author",
+            source_branch="feat/billing-charge",
+            target_branch="main",
+            labels=("backend", "billing & payments"),
+            files_changed=3,
+            lines_added=127,
+            lines_removed=0,
+            is_draft=False,
+            is_fork=False,
+            head_sha="0123456789abcdef0123456789abcdef01234567",
+            commit_messages=("feat: add charge & repository", "test: cover <failure> path"),
+        ),
+        changed_files=parse_unified_diff((root / "review/examples/sample.diff").read_text()),
+        omitted_files=(),
+    )
+
+
+def test_sample_review_provider_messages_match_golden_bytes() -> None:
+    fixture = Path(__file__).resolve().parent / "fixtures/prompt_builder"
+    messages = PromptBuilder().build_prompt(_sample_review_context())
+
+    assert messages.system.encode("utf-8") == (fixture / "sample.system.txt").read_bytes()
+    assert messages.user.encode("utf-8") == (fixture / "sample.user.txt").read_bytes()

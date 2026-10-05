@@ -24,7 +24,7 @@ import json
 import os
 import sys
 import time
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from contextlib import AsyncExitStack
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -37,6 +37,7 @@ import httpx
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.modules.analytics.infrastructure.usage_ledger import SqlAlchemyUsageLedger
+from app.modules.reviews.application.conventions import ConventionsDraft, ConventionsRequest
 from app.modules.reviews.application.llm import (
     EngineName,
     LlmCallFailed,
@@ -65,7 +66,10 @@ from app.modules.reviews.infrastructure.llm.memory import (
     InMemoryLlmCallTrace,
     InMemoryUsageLedger,
 )
-from app.modules.reviews.infrastructure.llm.models import review_with_gateway
+from app.modules.reviews.infrastructure.llm.models import (
+    GatewayConventionsModel,
+    review_with_gateway,
+)
 from app.modules.reviews.infrastructure.llm.settings import LlmConfigError, LlmSettings
 from app.modules.reviews.infrastructure.llm.transport import (
     ChatTransport,
@@ -76,6 +80,7 @@ from app.modules.reviews.infrastructure.run_lifecycle_store import SqlAlchemyRun
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_SYSTEM_PROMPT = REPO_ROOT / "review" / "prompts" / "review.system.v2.md"
+DEFAULT_CONVENTIONS_PROMPT = REPO_ROOT / "review" / "prompts" / "review.conventions.v2.md"
 _EVAL_WORKSPACE = UUID(int=0)
 
 
@@ -147,6 +152,44 @@ class ReviewCaseResult:
     latency_ms: int
 
 
+async def _run_database_free_case[CaseOutput](
+    settings: LlmSettings,
+    engine: EngineName,
+    invoke: Callable[[LlmGateway, RunCallContext], Awaitable[CaseOutput]],
+    *,
+    transport: ChatTransport | None,
+    fx_provider: FxQuoteProvider | None,
+    fx_transport: httpx.AsyncBaseTransport | None,
+) -> tuple[CaseOutput, tuple[LlmUsage, ...], tuple[LlmCallRecord, ...], int]:
+    """Share gateway, ECB quote, deadline and failure trace for both case tasks."""
+    ledger = InMemoryUsageLedger()
+    trace = InMemoryLlmCallTrace()
+    run = RunCallContext(
+        run_id=uuid4(),
+        workspace_id=_EVAL_WORKSPACE,
+        attempt=1,
+        engine=engine,
+        deadline=datetime.now(UTC) + CASE_DEADLINE[engine],
+    )
+    started = time.monotonic()
+    async with AsyncExitStack() as stack:
+        effective = await stack.enter_async_context(_ClientScope(transport))
+        if fx_provider is None:
+            fx_client = await stack.enter_async_context(httpx.AsyncClient(transport=fx_transport))
+            fx_provider = EcbFxQuoteCache(EcbFxRateAdapter(fx_client))
+        gateway = LlmGateway(settings, effective, ledger, trace, fx_provider=fx_provider)
+        try:
+            output = await invoke(gateway, run)
+        except LlmCallFailed as failure:
+            raise ReviewCaseFailed(failure, tuple(record for _, record in trace.records)) from None
+    return (
+        output,
+        tuple(item for _, item in ledger.events),
+        tuple(record for _, record in trace.records),
+        int((time.monotonic() - started) * 1000),
+    )
+
+
 async def review_case(
     case: ReviewCase,
     settings: LlmSettings,
@@ -160,15 +203,6 @@ async def review_case(
     Raises ``ReviewCaseFailed`` (an ``LlmCallFailed`` with the normalized ``error_code``,
     like the worker path) that also carries every ``llm.call`` record of the case.
     """
-    ledger = InMemoryUsageLedger()
-    trace = InMemoryLlmCallTrace()
-    run = RunCallContext(
-        run_id=uuid4(),
-        workspace_id=_EVAL_WORKSPACE,
-        attempt=1,
-        engine=case.engine,
-        deadline=datetime.now(UTC) + CASE_DEADLINE[case.engine],
-    )
     context = ReviewContext(
         system=case.system,
         rules=case.rules,
@@ -178,25 +212,53 @@ async def review_case(
         changed_files=parse_unified_diff(case.diff),
         omitted_files=(),
     )
-    started = time.monotonic()
-    async with AsyncExitStack() as stack:
-        effective = await stack.enter_async_context(_ClientScope(transport))
-        if fx_provider is None:
-            fx_client = await stack.enter_async_context(httpx.AsyncClient(transport=fx_transport))
-            fx_provider = EcbFxQuoteCache(EcbFxRateAdapter(fx_client))
-        gateway = LlmGateway(settings, effective, ledger, trace, fx_provider=fx_provider)
-        try:
-            result = await review_with_gateway(gateway, context, run)
-        except LlmCallFailed as failure:
-            raise ReviewCaseFailed(failure, tuple(record for _, record in trace.records)) from None
+    result, _, calls, latency_ms = await _run_database_free_case(
+        settings,
+        case.engine,
+        lambda gateway, run: review_with_gateway(gateway, context, run),
+        transport=transport,
+        fx_provider=fx_provider,
+        fx_transport=fx_transport,
+    )
     return ReviewCaseResult(
         output=parse_review_output(result.output),
         provider=result.provider,
         model=result.model,
         usage=result.usage,
-        calls=tuple(record for _, record in trace.records),
-        latency_ms=int((time.monotonic() - started) * 1000),
+        calls=calls,
+        latency_ms=latency_ms,
     )
+
+
+async def conventions_case(
+    request: ConventionsRequest,
+    settings: LlmSettings,
+    *,
+    transport: ChatTransport | None = None,
+    fx_provider: FxQuoteProvider | None = None,
+    fx_transport: httpx.AsyncBaseTransport | None = None,
+) -> dict[str, object]:
+    """Check the strict conventions call through the database-free gateway."""
+    output, usage, calls, latency_ms = await _run_database_free_case(
+        settings,
+        "fast",
+        lambda gateway, run: GatewayConventionsModel(gateway, run).draft_conventions(
+            request=request
+        ),
+        transport=transport,
+        fx_provider=fx_provider,
+        fx_transport=fx_transport,
+    )
+    draft = ConventionsDraft.model_validate(output)
+    return {
+        "provider": usage[-1].provider,
+        "model": usage[-1].model,
+        "calls": [_call_json(item) for item in calls],
+        **_usage_json(usage),
+        "latency_ms": latency_ms,
+        "files": len(draft.files),
+        "output": draft.model_dump(mode="json"),
+    }
 
 
 class _ClientScope:
@@ -231,9 +293,11 @@ def main(
     ``error_code`` and every call with its error), 2 on a configuration error. The
     environment is read as is: ``uv run --env-file .env …`` loads a local ``.env``.
     """
-    parser = argparse.ArgumentParser(description="Review one unified diff through the gateway.")
+    parser = argparse.ArgumentParser(description="Check one strict gateway task on a unified diff.")
     parser.add_argument("diff", type=Path)
+    parser.add_argument("--task", choices=("review", "conventions"), default="review")
     parser.add_argument("--system", type=Path, default=DEFAULT_SYSTEM_PROMPT)
+    parser.add_argument("--conventions-system", type=Path, default=DEFAULT_CONVENTIONS_PROMPT)
     parser.add_argument("--engine", choices=("fast", "deep"), default="fast")
     parser.add_argument("--title", default="Live gateway check")
     args = parser.parse_args(argv)
@@ -245,34 +309,64 @@ def main(
         return 2
     diff = args.diff.read_text(encoding="utf-8")
     files = parse_unified_diff(diff)
-    case = ReviewCase(
-        diff=diff,
-        system=args.system.read_text(encoding="utf-8"),
-        pr_meta=PullRequestMeta(
-            title=args.title,
-            description=None,
-            author="eval",
-            source_branch="eval",
-            target_branch="main",
-            labels=(),
-            files_changed=len(files),
-            lines_added=sum(line.type == "added" for f in files for line in f.lines),
-            lines_removed=sum(line.type == "removed" for f in files for line in f.lines),
-            is_draft=False,
-            is_fork=False,
-        ),
-        engine=args.engine,
-    )
     try:
-        result = asyncio.run(
-            review_case(
-                case,
-                settings,
-                transport=transport,
-                fx_provider=fx_provider,
-                fx_transport=fx_transport,
+        if args.task == "conventions":
+            paths = tuple(file.path for file in files)
+            request = ConventionsRequest(
+                system=args.conventions_system.read_text(encoding="utf-8"),
+                rules=(),
+                agents_md=None,
+                repo_tree=paths,
+                repo_files=(),
+                languages={},
+                changed_files=paths,
             )
-        )
+            payload = asyncio.run(
+                conventions_case(
+                    request,
+                    settings,
+                    transport=transport,
+                    fx_provider=fx_provider,
+                    fx_transport=fx_transport,
+                )
+            )
+        else:
+            case = ReviewCase(
+                diff=diff,
+                system=args.system.read_text(encoding="utf-8"),
+                pr_meta=PullRequestMeta(
+                    title=args.title,
+                    description=None,
+                    author="eval",
+                    source_branch="eval",
+                    target_branch="main",
+                    labels=(),
+                    files_changed=len(files),
+                    lines_added=sum(line.type == "added" for f in files for line in f.lines),
+                    lines_removed=sum(line.type == "removed" for f in files for line in f.lines),
+                    is_draft=False,
+                    is_fork=False,
+                ),
+                engine=args.engine,
+            )
+            result = asyncio.run(
+                review_case(
+                    case,
+                    settings,
+                    transport=transport,
+                    fx_provider=fx_provider,
+                    fx_transport=fx_transport,
+                )
+            )
+            payload = {
+                "provider": result.provider,
+                "model": result.model,
+                "calls": [_call_json(item) for item in result.calls],
+                **_usage_json(result.usage),
+                "latency_ms": result.latency_ms,
+                "findings": len(result.output.findings),
+                "output": result.output.model_dump(mode="json"),
+            }
     except ReviewCaseFailed as failure:
         _emit(
             {
@@ -284,17 +378,7 @@ def main(
         )
         sys.stderr.write(f"gateway failed: {failure.error_code.value}\n")
         return 1
-    _emit(
-        {
-            "provider": result.provider,
-            "model": result.model,
-            "calls": [_call_json(item) for item in result.calls],
-            **_usage_json(result.usage),
-            "latency_ms": result.latency_ms,
-            "findings": len(result.output.findings),
-            "output": result.output.model_dump(mode="json"),
-        }
-    )
+    _emit(payload)
     return 0
 
 

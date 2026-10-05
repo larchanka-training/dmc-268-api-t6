@@ -24,6 +24,7 @@ class LlmErrorCode(StrEnum):
 
     TIMEOUT = "llm_timeout"
     RATE_LIMITED = "llm_rate_limited"
+    PAYMENT_REQUIRED = "llm_payment_required"
     UNAVAILABLE = "llm_unavailable"
     INVALID_OUTPUT = "llm_invalid_output"
     CONTEXT_OVERFLOW = "llm_context_overflow"
@@ -132,6 +133,7 @@ class LlmCallRecord:
     response: Any = None
     error: LlmCallError | None = None
     fx: FxProvenance | None = None
+    paid_metadata_error: bool = False
 
     def request_json(self) -> dict[str, object]:
         """Metadata only: the prompt itself is never copied into the trace."""
@@ -147,6 +149,8 @@ class LlmCallRecord:
         }
         if self.fx is not None:
             metadata["fx"] = self.fx.as_json()
+        if self.paid_metadata_error:
+            metadata["paid_metadata_error"] = True
         return metadata
 
     def response_json(self) -> Any:

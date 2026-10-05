@@ -22,14 +22,23 @@ def build_conventions_prompt(request: ConventionsRequest) -> ReviewPrompt:
     tree or a pull request over that limit ends its list with an explicit count.
     """
     files = []
+    visible_paths: set[str] = set()
     for file in request.repo_files:
         if file.content is None:
             continue
-        lines = "\n".join(
+        visible_paths.add(file.path)
+        lines = [
             f'<line n="{number}">{xml_text(line)}</line>'
             for number, line in enumerate(file.content.splitlines(), start=1)
-        )
-        files.append(f'<file path="{xml_attribute(file.path)}">\n{lines}\n</file>')
+        ]
+        if file.omitted_lines:
+            lines.append(f"[{file.omitted_lines} more lines omitted]")
+        files.append(f'<file path="{xml_attribute(file.path)}">\n' + "\n".join(lines) + "\n</file>")
+    omitted_contexts = max(
+        0, len(request.repo_tree) + request.omitted_tree_paths - len(visible_paths)
+    )
+    if omitted_contexts:
+        files.append(f"[{omitted_contexts} more repository file contexts omitted]")
     tree = [xml_text(path) for path in request.repo_tree]
     if request.omitted_tree_paths:
         tree.append(f"[{request.omitted_tree_paths} more paths omitted]")

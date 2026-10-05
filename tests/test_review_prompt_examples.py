@@ -60,6 +60,8 @@ def test_example_suggestions_are_drop_in_replacements_of_the_anchored_lines() ->
                 continue
             assert "```" not in suggestion
             assert _DIFF_MARKER.search(suggestion) is None
+            first_line = finding["start_line"] or finding["line"]
+            assert len(suggestion.splitlines()) == finding["line"] - first_line + 1
 
 
 def test_examples_are_not_taken_from_the_proof_run_fixtures_or_the_eval_dataset() -> None:

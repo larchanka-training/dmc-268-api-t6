@@ -45,6 +45,19 @@ class ChatMessage:
     content: str
 
 
+def extract_text_content(content: object) -> str | None:
+    """Normalize a provider message's string or ordered text parts."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "".join(
+            str(part.get("text", ""))
+            for part in content
+            if isinstance(part, dict) and part.get("type") == "text"
+        )
+    return None
+
+
 @dataclass(frozen=True)
 class ResponseSchema:
     """A strict JSON Schema for ``response_format`` (structured output)."""
@@ -103,6 +116,10 @@ class TransportTimeout(TransportError):
 
 class TransportRateLimited(TransportError):
     error_class = LlmErrorCode.RATE_LIMITED
+
+
+class TransportPaymentRequired(TransportError):
+    error_class = LlmErrorCode.PAYMENT_REQUIRED
 
 
 class TransportUnavailable(TransportError):
@@ -230,6 +247,8 @@ def _status_error(response: httpx.Response, keys: tuple[str, ...]) -> TransportE
         return TransportRateLimited(
             f"HTTP 429: {text}", http_status=status, retry_after_s=_retry_after(response)
         )
+    if status == 402:
+        return TransportPaymentRequired(f"HTTP 402: {text}", http_status=status, retryable=False)
     if status in (401, 403):
         # Every key was refused: a same-model retry cannot help, the fallback may.
         return TransportUnavailable(f"HTTP {status}: {text}", http_status=status, retryable=False)
@@ -251,14 +270,7 @@ def _parse_response(response: httpx.Response, profile: ModelProfile) -> ChatResp
         raw = response.json()
         choice = raw["choices"][0]
         message = choice["message"]
-        content = message.get("content")
-        if isinstance(content, list):
-            # Content parts: the text of every ``text`` part, in order.
-            content = "".join(
-                str(part.get("text", ""))
-                for part in content
-                if isinstance(part, dict) and part.get("type") == "text"
-            )
+        content = extract_text_content(message.get("content"))
         refusal = message.get("refusal")
         usage_raw = raw.get("usage", _MISSING_TOKEN)
         no_usage = (
@@ -293,7 +305,7 @@ def _parse_response(response: httpx.Response, profile: ModelProfile) -> ChatResp
         )
         parsed = ChatResponse(
             raw=raw,
-            content=content if isinstance(content, str) else None,
+            content=content,
             finish_reason=choice.get("finish_reason"),
             model=str(raw.get("model") or ""),
             prompt_tokens=prompt_tokens,
