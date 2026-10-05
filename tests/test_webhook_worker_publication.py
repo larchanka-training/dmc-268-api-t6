@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import os
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import cast
@@ -11,13 +13,14 @@ import httpx
 import pytest
 
 from app.bootstrap.reviews_api import ReviewsApiResources
+from app.common.infrastructure.heartbeat import is_fresh
 from app.modules.integrations.webhooks.application.receive_github_delivery import (
     ReceiveGitHubDelivery,
 )
 from app.modules.integrations.webhooks.infrastructure.github_installation_tree_provider import (
     GitHubInstallationAccessTokenProvider,
 )
-from app.webhook_worker import WorkerConfig, compose_worker, sweep_once
+from app.webhook_worker import WorkerConfig, compose_worker, run_forever, sweep_once
 
 
 def _environment() -> dict[str, str]:
@@ -47,6 +50,33 @@ def test_worker_writes_a_heartbeat_only_when_configured() -> None:
     config = WorkerConfig.from_environment(environment)
 
     assert config.heartbeat_file == Path("/tmp/webhook-worker.heartbeat")
+
+
+def test_running_worker_beats_even_when_its_sweep_fails(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    heartbeat = tmp_path / "webhook-worker.heartbeat"
+    heartbeat.touch()  # left by a previous process: must not count as a beat of this one
+    os.utime(heartbeat, (1.0, 1.0))
+    environment = _environment()
+    # Nothing listens on port 1: the sweep fails and is retried, the process stays alive.
+    environment["DATABASE_URL"] = "postgresql+psycopg://app:app@127.0.0.1:1/app"
+    environment["WORKER_HEARTBEAT_FILE"] = str(heartbeat)
+    for name, value in environment.items():
+        monkeypatch.setenv(name, value)
+
+    async def scenario() -> bool:
+        task = asyncio.create_task(run_forever())
+        for _ in range(100):
+            await asyncio.sleep(0.05)
+            if task.done() or is_fresh(heartbeat, max_age=5, now=time.time()):
+                break
+        beating = not task.done() and is_fresh(heartbeat, max_age=5, now=time.time())
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        return beating
+
+    assert asyncio.run(scenario()) is True
 
 
 def test_worker_wires_receipt_projection_without_a_run_publisher() -> None:

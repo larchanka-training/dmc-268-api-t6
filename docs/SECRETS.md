@@ -22,7 +22,7 @@
 | `VPS_DMC268_U` | secret | SSH-пользователь (`root`) |
 | `VPS_DMC268_P` | secret | SSH-пароль; уходит только на VPS, никогда на Terraform-хост |
 | `AI_DMC268_T6` | secret | LLM-ключ приложения (EUrouter): на staging — `LLM_API_KEYS` в контейнере `worker` (ниже); в CI — ещё ручной workflow `LLM live run` (`workflow_dispatch`), required-проверки его не используют |
-| `AI_DMC268_URL` | secret | endpoint LLM-провайдера: на staging — `LLM_BASE_URL` в контейнере `worker` |
+| `AI_DMC268_URL` | variable | endpoint LLM-провайдера: на staging — `LLM_BASE_URL` в контейнере `worker` |
 
 ### Repository — variables
 
@@ -40,7 +40,7 @@
 | `STAGING_SSH_KEY` | да, для Terraform-хоста | SCP/SSH на VM | приватный ключ к `hcloud_ssh_key.ci` |
 | `POSTGRES_PASSWORD` | нет | `<APP_DIR>/.env` на хосте | пароль PostgreSQL. Если не задан, `deploy.sh` генерирует его при первом выкате и хранит в `.env` (0600). После инициализации тома пароль не менять: Postgres его не перечитывает |
 
-Секреты приложения. GitHub не принимает имена секретов и variables с префиксом `GITHUB_` (HTTP 422), поэтому секреты App заведены как `GH_*`, а в контейнере у них имена из `.env.example`. Сопоставление делает шаг «Bundle application secrets» в `deploy-staging`; тем же путём идут два organization-секрета LLM и variables `GH_APP_BOT_LOGIN`, `LLM_MODEL`. Незаданное значение в контейнер не попадает совсем, а не приходит пустой строкой.
+Секреты приложения. GitHub не принимает имена секретов и variables с префиксом `GITHUB_` (HTTP 422), поэтому секреты App заведены как `GH_*`, а в контейнере у них имена из `.env.example`. Сопоставление делает шаг «Bundle application secrets» в `deploy-staging`; тем же путём идут organization secret `AI_DMC268_T6`, organization variable `AI_DMC268_URL` и variables Environment `GH_APP_BOT_LOGIN`, `LLM_MODEL`. Незаданное значение в контейнер не попадает совсем, а не приходит пустой строкой.
 
 **Ограничение на значения:** без одинарной кавычки `'` и без `\` в конце. Значения пишутся в env-файл в одинарных кавычках (§3, п. 5), и `deploy.sh` такие значения отклоняет: выкат останавливается до изменений на хосте. На первом выкате после #35, пока в `.env` хоста нет `RABBITMQ_PASSWORD`, следующий за этим авто-откат падает с `RABBITMQ_PASSWORD is required` — стек не тронут, прогон красный. Завершающий перевод строки значения срезается; разбору PEM это безразлично.
 
@@ -63,7 +63,7 @@
 | `AUTH_JWT_PRIVATE_KEY` | многострочный PEM (RSA) | `AUTH_JWT_PRIVATE_KEY` | `api` | подпись локального access JWT |
 | `AUTH_JWT_PUBLIC_KEY` | многострочный PEM (RSA) | `AUTH_JWT_PUBLIC_KEY` | `api` | проверка access JWT |
 | `AI_DMC268_T6` (organization) | строка, ключи через запятую | `LLM_API_KEYS` | `worker` | ключи LLM-шлюза (§1, «LLM-шлюз») |
-| `AI_DMC268_URL` (organization) | URL | `LLM_BASE_URL` | `worker` | endpoint LLM-шлюза |
+| `AI_DMC268_URL` (organization variable, берётся из `vars.`) | URL | `LLM_BASE_URL` | `worker` | endpoint LLM-шлюза |
 
 `AUTH_JWT_ISSUER` (`dmc-268-api`) и `AUTH_JWT_AUDIENCE` (`dmc-268-ui`) — не секреты: они фиксированы в `deploy/compose/staging.yml`. Домен cookie refresh не настраивается: cookie host-only с `Path=/api/auth`, а UI и API работают с одного origin `staging-ui.<APP_DOMAIN>` (маршрут `/api/*` в `deploy/edge/Caddyfile`).
 
@@ -108,7 +108,7 @@ rm jwt.pem jwt.pub
 
 ### LLM-шлюз — переменные приложения (#33)
 
-Читает `LlmSettings.from_env` (`app/modules/reviews/infrastructure/llm/settings.py`). Секрет здесь — только ключи; остальное — конфигурация. На staging `LLM_API_KEYS` (из `AI_DMC268_T6`), `LLM_BASE_URL` (из `AI_DMC268_URL`) и `LLM_MODEL` (variable Environment) приходят в `worker` через `worker.env` (§1, таблица env-файлов); остальные `LLM_*` на staging не заданы и берут дефолты.
+Читает `LlmSettings.from_env` (`app/modules/reviews/infrastructure/llm/settings.py`). Секрет здесь — только ключи; остальное — конфигурация. На staging `LLM_API_KEYS` (из organization secret `AI_DMC268_T6`), `LLM_BASE_URL` (из organization variable `AI_DMC268_URL`) и `LLM_MODEL` (variable Environment) приходят в `worker` через `worker.env` (§1, таблица env-файлов); остальные `LLM_*` на staging не заданы и берут дефолты.
 
 | Переменная | Секрет | Обязательна | Значение |
 |---|---|---|---|
