@@ -335,13 +335,207 @@ def test_oq2_pair_keeps_the_sd15_catalog_prices_and_windows() -> None:
 
     primary, fallback = settings.primary, settings.fallback
     assert fallback is not None
-    assert primary.price == ModelPrice(Decimal("0.165"), Decimal("0.66"), Decimal("0.0165"))
+    assert primary.price == ModelPrice(Decimal("0.56125"), Decimal("2.35725"), Decimal("0.56125"))
     assert primary.context_window == 262_144
     assert fallback.price == ModelPrice(Decimal("0.2245"), Decimal("0.449"), Decimal("0.2245"))
     assert fallback.context_window == 128_000
     # one maximal fast call: SD §13 60 000 - 8 000 reserved = 52 000 in + 8 000 out
-    assert primary.price.cost_usd(tokens_in=52_000, tokens_out=8_000) == Decimal("0.01386")
+    assert primary.price.cost_usd(tokens_in=52_000, tokens_out=8_000) == Decimal("0.048043")
     assert fallback.price.cost_usd(tokens_in=52_000, tokens_out=8_000) == Decimal("0.015266")
+
+
+@pytest.mark.parametrize(
+    ("rate", "primary_price", "fallback_price", "primary_call_usd", "fallback_call_usd"),
+    [
+        (
+            "1.1204",
+            ModelPrice(Decimal("0.56125"), Decimal("2.35725"), Decimal("0.56125")),
+            ModelPrice(Decimal("0.2245"), Decimal("0.449"), Decimal("0.2245")),
+            Decimal("0.048043"),
+            Decimal("0.015266"),
+        ),
+        (
+            "1.1225",
+            ModelPrice(Decimal("0.56125"), Decimal("2.35725"), Decimal("0.56125")),
+            ModelPrice(Decimal("0.2245"), Decimal("0.449"), Decimal("0.2245")),
+            Decimal("0.048043"),
+            Decimal("0.015266"),
+        ),
+        (
+            "1.20",
+            ModelPrice(Decimal("0.60"), Decimal("2.520"), Decimal("0.60")),
+            ModelPrice(Decimal("0.240"), Decimal("0.480"), Decimal("0.240")),
+            Decimal("0.051360"),
+            Decimal("0.016320"),
+        ),
+    ],
+)
+def test_known_eurouter_prices_cover_eur_routes_at_the_configured_rate(
+    rate: str,
+    primary_price: ModelPrice,
+    fallback_price: ModelPrice,
+    primary_call_usd: Decimal,
+    fallback_call_usd: Decimal,
+) -> None:
+    settings = LlmSettings.from_env(
+        {
+            "LLM_MODEL": "mistral-small-4",
+            "LLM_API_KEYS": "sk-eu-1",
+            "LLM_FALLBACK_MODEL": "mistral-small-3.2-24b",
+            "LLM_EUR_TO_USD_RATE": rate,
+        }
+    )
+
+    assert settings.primary.price == primary_price
+    assert settings.primary.price.cost_usd(tokens_in=52_000, tokens_out=8_000) == primary_call_usd
+    assert settings.fallback is not None
+    assert settings.fallback.price == fallback_price
+    assert settings.fallback.price.cost_usd(tokens_in=52_000, tokens_out=8_000) == fallback_call_usd
+
+
+def test_equivalent_eurouter_url_keeps_the_rate_aware_floor_and_provider() -> None:
+    settings = LlmSettings.from_env(
+        {
+            "LLM_MODEL": "mistral-small-4",
+            "LLM_BASE_URL": "HTTPS://API.EUROUTER.AI:443/api/v1/",
+            "LLM_API_KEYS": "sk-eu-1",
+            "LLM_EUR_TO_USD_RATE": "1.20",
+        }
+    )
+
+    assert settings.primary.provider == "eurouter"
+    assert settings.primary.price == ModelPrice(Decimal("0.60"), Decimal("2.520"), Decimal("0.60"))
+
+
+def test_fallback_inherits_keys_across_equivalent_eurouter_urls() -> None:
+    settings = LlmSettings.from_env(
+        {
+            "LLM_MODEL": "mistral-small-4",
+            "LLM_BASE_URL": "https://API.EUROUTER.AI:443/api/v1",
+            "LLM_API_KEYS": "sk-eu-1",
+            "LLM_FALLBACK_MODEL": "mistral-small-3.2-24b",
+            "LLM_EUR_TO_USD_RATE": "1.20",
+        }
+    )
+
+    assert settings.fallback is not None
+    assert settings.fallback.api_keys == ("sk-eu-1",)
+    assert settings.fallback.price == ModelPrice(
+        Decimal("0.240"), Decimal("0.480"), Decimal("0.240")
+    )
+
+
+def test_eurouter_host_with_unrecognized_path_cannot_bypass_the_price_floor() -> None:
+    with pytest.raises(LlmConfigError, match="LLM_BASE_URL"):
+        LlmSettings.from_env(
+            {
+                "LLM_MODEL": "mistral-small-4",
+                "LLM_BASE_URL": "https://api.eurouter.ai/api/%76%31",
+                "LLM_API_KEYS": "sk-eu-1",
+                "LLM_EUR_TO_USD_RATE": "1.20",
+            }
+        )
+
+
+@pytest.mark.parametrize("prefix", ["LLM_", "LLM_FALLBACK_"])
+def test_unicode_dot_eurouter_host_cannot_bypass_the_price_floor(prefix: str) -> None:
+    env = {
+        "LLM_MODEL": "mistral-small-4",
+        "LLM_API_KEYS": "sk-eu-1",
+        "LLM_EUR_TO_USD_RATE": "1.20",
+        f"{prefix}BASE_URL": "https://api.eurouter.ai。/api/v1",
+        f"{prefix}PRICE_INPUT_PER_MTOK": "0.01",
+        f"{prefix}PRICE_OUTPUT_PER_MTOK": "0.01",
+    }
+    if prefix == "LLM_FALLBACK_":
+        env["LLM_FALLBACK_MODEL"] = "mistral-small-3.2-24b"
+        env["LLM_FALLBACK_API_KEYS"] = "sk-eu-2"
+
+    with pytest.raises(LlmConfigError, match=f"{prefix}BASE_URL"):
+        LlmSettings.from_env(env)
+
+
+def test_large_representable_rate_can_price_a_known_route() -> None:
+    settings = LlmSettings.from_env(
+        {
+            "LLM_MODEL": "mistral-small-4",
+            "LLM_API_KEYS": "sk-eu-1",
+            "LLM_EUR_TO_USD_RATE": "1e20",
+        }
+    )
+
+    assert settings.primary.price.cost_usd(tokens_in=52_000, tokens_out=8_000) == Decimal(
+        "4280000000000000000.000000"
+    )
+
+
+def test_unquantizable_rate_is_rejected_before_gateway_start() -> None:
+    with pytest.raises(LlmConfigError, match="LLM_EUR_TO_USD_RATE"):
+        LlmSettings.from_env(
+            {
+                "LLM_MODEL": "mistral-small-4",
+                "LLM_API_KEYS": "sk-eu-1",
+                "LLM_EUR_TO_USD_RATE": "1e30",
+            }
+        )
+
+
+def test_known_eurouter_price_floor_survives_lower_env_overrides() -> None:
+    settings = LlmSettings.from_env(
+        {
+            "LLM_MODEL": "mistral-small-4",
+            "LLM_API_KEYS": "sk-eu-1",
+            "LLM_FALLBACK_MODEL": "mistral-small-3.2-24b",
+            "LLM_EUR_TO_USD_RATE": "1.20",
+            "LLM_PRICE_INPUT_PER_MTOK": "0.01",
+            "LLM_PRICE_OUTPUT_PER_MTOK": "0.01",
+            "LLM_PRICE_CACHE_READ_PER_MTOK": "0.01",
+            "LLM_FALLBACK_PRICE_INPUT_PER_MTOK": "0.01",
+            "LLM_FALLBACK_PRICE_OUTPUT_PER_MTOK": "0.01",
+            "LLM_FALLBACK_PRICE_CACHE_READ_PER_MTOK": "0.01",
+        }
+    )
+
+    assert settings.primary.price == ModelPrice(Decimal("0.60"), Decimal("2.520"), Decimal("0.60"))
+    assert settings.fallback is not None
+    assert settings.fallback.price == ModelPrice(
+        Decimal("0.240"), Decimal("0.480"), Decimal("0.240")
+    )
+
+
+def test_known_route_cache_reads_use_the_effective_input_price() -> None:
+    settings = LlmSettings.from_env(
+        {
+            "LLM_MODEL": "mistral-small-4",
+            "LLM_API_KEYS": "sk-eu-1",
+            "LLM_FALLBACK_MODEL": "mistral-small-3.2-24b",
+            "LLM_EUR_TO_USD_RATE": "1.20",
+            "LLM_PRICE_INPUT_PER_MTOK": "0.70",
+            "LLM_PRICE_CACHE_READ_PER_MTOK": "0.01",
+            "LLM_FALLBACK_PRICE_INPUT_PER_MTOK": "0.30",
+            "LLM_FALLBACK_PRICE_CACHE_READ_PER_MTOK": "0.01",
+        }
+    )
+
+    assert settings.primary.price == ModelPrice(Decimal("0.70"), Decimal("2.520"), Decimal("0.70"))
+    assert settings.fallback is not None
+    assert settings.fallback.price == ModelPrice(Decimal("0.30"), Decimal("0.480"), Decimal("0.30"))
+
+
+def test_custom_endpoint_keeps_its_explicit_price_for_a_known_model() -> None:
+    settings = LlmSettings.from_env(
+        {
+            "LLM_MODEL": "mistral-small-4",
+            "LLM_BASE_URL": "https://custom.test/v1",
+            "LLM_API_KEYS": "sk-custom",
+            "LLM_EUR_TO_USD_RATE": "1.20",
+            "LLM_PRICE_INPUT_PER_MTOK": "0.1",
+            "LLM_PRICE_OUTPUT_PER_MTOK": "0.2",
+            "LLM_PRICE_CACHE_READ_PER_MTOK": "0.05",
+        }
+    )
+
+    assert settings.primary.price == ModelPrice(Decimal("0.1"), Decimal("0.2"), Decimal("0.05"))
 
 
 def test_self_hosted_is_selected_by_configuration_only_with_prompt_json() -> None:
@@ -536,7 +730,7 @@ def test_extra_body_and_overrides_reach_the_request() -> None:
             "LLM_MODEL": "mistral-small-4",
             "LLM_API_KEYS": "sk-eu-1",
             "LLM_MAX_OUTPUT_TOKENS": "4000",
-            "LLM_PRICE_INPUT_PER_MTOK": "0.5",
+            "LLM_PRICE_INPUT_PER_MTOK": "0.7",
             "LLM_EXTRA_BODY": '{"provider": {"allow_fallbacks": false}}',
         }
     )
@@ -548,7 +742,7 @@ def test_extra_body_and_overrides_reach_the_request() -> None:
     assert body["provider"] == {"allow_fallbacks": False}
     assert body["max_tokens"] == 4000
     assert body["temperature"] == 0
-    assert settings.primary.price.input_per_mtok == Decimal("0.5")
+    assert settings.primary.price.input_per_mtok == Decimal("0.7")
 
 
 def test_extra_body_overrides_sampling_defaults_but_not_model_messages_or_schema() -> None:
@@ -1240,7 +1434,13 @@ def test_run_cost_limit_boundary(spent: str, calls: int) -> None:
 
 @pytest.mark.parametrize(("over", "calls"), [(Decimal(0), 1), (Decimal("0.000001"), 0)])
 def test_run_cost_limit_boundary_at_the_oq2_primary_price(over: Decimal, calls: int) -> None:
-    settings = LlmSettings.from_env({"LLM_MODEL": "mistral-small-4", "LLM_API_KEYS": "sk-eu-1"})
+    settings = LlmSettings.from_env(
+        {
+            "LLM_MODEL": "mistral-small-4",
+            "LLM_API_KEYS": "sk-eu-1",
+            "LLM_EUR_TO_USD_RATE": "1.20",
+        }
+    )
     primary = settings.primary
     # the gateway's own pre-call estimate: gateway.token_counter(primary) over both messages
     estimate = prompt_tokens(CONTEXT, HeuristicTokenCounter(primary.chars_per_token))
@@ -1258,6 +1458,36 @@ def test_run_cost_limit_boundary_at_the_oq2_primary_price(over: Decimal, calls: 
     else:
         assert harness.failure().error_code is LlmErrorCode.BUDGET_EXCEEDED
     assert len(harness.requests) == calls
+
+
+@pytest.mark.parametrize("base_url", [None, "HTTPS://API.EUROUTER.AI:443/api/v1/"])
+def test_regolo_price_at_higher_fx_rejects_a_maximal_fast_call_before_request(
+    base_url: str | None,
+) -> None:
+    settings = LlmSettings.from_env(
+        {
+            "LLM_MODEL": "mistral-small-4",
+            "LLM_API_KEYS": "sk-eu-1",
+            "LLM_EUR_TO_USD_RATE": "1.20",
+            **({"LLM_BASE_URL": base_url} if base_url is not None else {}),
+        }
+    )
+    harness = Harness([completion("{}")], settings=settings)
+    asyncio.run(
+        harness.ledger.record(
+            harness.run,
+            LlmUsage("eurouter", "mistral-small-4", "review", 1, 1, 0, Decimal("0.450000")),
+        )
+    )
+
+    # Regolo: 52k × €0.50/M + 8k × €2.10/M = €0.0428; at 1.20 this is $0.05136.
+    # The historical 1.1225 floor would admit the call ($0.450000 + $0.048043).
+    with pytest.raises(LlmCallFailed) as caught:
+        asyncio.run(_generate(harness, 52_000 * 3))
+
+    assert caught.value.error_code is LlmErrorCode.BUDGET_EXCEEDED
+    assert caught.value.calls == 0
+    assert harness.requests == []
 
 
 def test_review_adapter_fits_a_diff_larger_than_the_budget() -> None:
@@ -1478,6 +1708,60 @@ def test_bad_paid_cost_metadata_is_traced_and_charged_without_another_call(
     assert harness.trace.records[0][1].response_json()["usage"]["cost"] == (
         0.1 if metadata == "unknown-currency" else "invalid"
     )
+
+
+def test_known_route_ceiling_prices_a_paid_answer_with_bad_currency() -> None:
+    settings = LlmSettings.from_env(
+        {
+            "LLM_MODEL": "mistral-small-4",
+            "LLM_API_KEYS": "sk-eu-1",
+            "LLM_EUR_TO_USD_RATE": "1.20",
+        }
+    )
+    harness = Harness(
+        [
+            valid(cost=0.1, cost_currency="GBP", prompt_tokens=52_000, completion_tokens=200),
+            valid(),
+        ],
+        settings=settings,
+    )
+
+    failure = harness.failure()
+
+    assert failure.error_code is LlmErrorCode.INVALID_OUTPUT
+    assert failure.calls == 1
+    assert len(harness.requests) == 1
+    assert failure.usage[0].cost_usd == Decimal("0.051360")
+    assert harness.ledger.events[0][1] == failure.usage[0]
+    assert harness.trace.records[0][1].response_json()["usage"]["cost_currency"] == "GBP"
+
+
+def test_fallback_route_ceiling_prices_a_paid_answer_with_bad_currency() -> None:
+    settings = LlmSettings.from_env(
+        {
+            "LLM_MODEL": "mistral-small-4",
+            "LLM_API_KEYS": "sk-eu-1",
+            "LLM_FALLBACK_MODEL": "mistral-small-3.2-24b",
+            "LLM_EUR_TO_USD_RATE": "1.20",
+        }
+    )
+    harness = Harness(
+        [
+            error(401),
+            valid(cost=0.1, cost_currency="GBP", prompt_tokens=52_000, completion_tokens=200),
+            valid(),
+        ],
+        settings=settings,
+    )
+
+    failure = harness.failure()
+
+    assert failure.error_code is LlmErrorCode.INVALID_OUTPUT
+    assert failure.calls == 2
+    assert len(harness.requests) == 2
+    assert failure.usage[0].cost_usd == Decimal("0.016320")
+    assert harness.ledger.events[0][1] == failure.usage[0]
+    assert harness.trace.records[1][1].response_json()["usage"]["cost_currency"] == "GBP"
 
 
 @pytest.mark.parametrize(

@@ -10,7 +10,7 @@ import json
 import logging
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, DecimalException, InvalidOperation
 from typing import Literal
 from urllib.parse import urlsplit
 
@@ -99,13 +99,6 @@ class LlmSettings:
         The prompt-JSON path is refused unless ``LLM_ALLOW_PROMPT_JSON=1``:
         it exists for local and self-hosted models in dev and eval only (D7).
         """
-        allow_prompt_json = env.get("LLM_ALLOW_PROMPT_JSON", "") == "1"
-        primary = _profile_from_env(env, "LLM_", None, allow_prompt_json)
-        fallback = (
-            _profile_from_env(env, "LLM_FALLBACK_", primary, allow_prompt_json)
-            if env.get("LLM_FALLBACK_MODEL")
-            else None
-        )
         rate_raw = env.get("LLM_EUR_TO_USD_RATE")
         rate = None
         if rate_raw:
@@ -117,22 +110,28 @@ class LlmSettings:
                 ) from None
             if not rate.is_finite() or rate <= 0:
                 raise LlmConfigError("LLM_EUR_TO_USD_RATE must be a positive finite decimal")
+        allow_prompt_json = env.get("LLM_ALLOW_PROMPT_JSON", "") == "1"
+        primary = _profile_from_env(env, "LLM_", None, allow_prompt_json, rate)
+        fallback = (
+            _profile_from_env(env, "LLM_FALLBACK_", primary, allow_prompt_json, rate)
+            if env.get("LLM_FALLBACK_MODEL")
+            else None
+        )
         return cls(primary=primary, fallback=fallback, eur_to_usd_rate=rate)
 
 
 # Chosen for OQ-2 (docs/SYSTEM_DESIGN.md §15) in #46: catalog values of EUrouter on
-# 2026-10-05. Env variables override every field, so a price change needs no release.
+# 2026-10-05. Known-endpoint prices are lower bounds; higher env prices remain possible.
 KNOWN_MODELS: Mapping[str, ModelProfile] = {
-    # Price of the Mistral AI route, which served every live run. Regolo (EUR 0.50 / 2.10 per
-    # 1M) is up to ~3.5x higher, so the pre-call estimate may undershoot there; the worst case
-    # in docs/SYSTEM_DESIGN.md §15 uses Regolo.
+    # Regolo's EUR 0.50 / 2.10 per 1M at the historical 1.1225 USD/EUR comparison rate.
+    # Cache-read pricing is unknown, so charge at the full input price.
     "mistral-small-4": ModelProfile(
         provider="eurouter",
         base_url="https://api.eurouter.ai/api/v1",
         model="mistral-small-4",
         context_window=262_144,
         max_output_tokens=8_000,
-        price=ModelPrice(Decimal("0.165"), Decimal("0.66"), Decimal("0.0165")),
+        price=ModelPrice(Decimal("0.56125"), Decimal("2.35725"), Decimal("0.56125")),
         structured_output="json_schema",
         chars_per_token=3.0,
     ),
@@ -153,9 +152,64 @@ KNOWN_MODELS: Mapping[str, ModelProfile] = {
     ),
 }
 
+_KNOWN_EUR_ROUTE_CEILING: Mapping[str, ModelPrice] = {
+    "mistral-small-4": ModelPrice(Decimal("0.50"), Decimal("2.10"), Decimal("0.50")),
+    "mistral-small-3.2-24b": ModelPrice(Decimal("0.20"), Decimal("0.40"), Decimal("0.20")),
+}
+
 
 class LlmConfigError(ValueError):
     """The LLM environment is incomplete or unsafe; the message names variables only."""
+
+
+def _endpoint_identity(url: str, prefix: str) -> tuple[str, str, int | None, str]:
+    """Compare endpoints without treating host case or the default port as different hosts."""
+    try:
+        parts = urlsplit(url)
+        host = parts.hostname
+        explicit_port = parts.port
+    except ValueError:
+        raise LlmConfigError(f"{prefix}BASE_URL must be a valid endpoint URL") from None
+    if not parts.scheme or host is None or parts.username is not None or parts.password is not None:
+        raise LlmConfigError(f"{prefix}BASE_URL must be a valid endpoint URL")
+    if parts.query or parts.fragment:
+        raise LlmConfigError(f"{prefix}BASE_URL must not contain query or fragment")
+    scheme = parts.scheme.lower()
+    default_port = 443 if scheme == "https" else 80 if scheme == "http" else None
+    port = explicit_port if explicit_port is not None else default_port
+    return scheme, host.lower().removesuffix("."), port, parts.path.rstrip("/")
+
+
+def _known_endpoint_price(
+    configured: ModelPrice, catalog_floor: ModelPrice, model: str, rate: Decimal | None
+) -> ModelPrice:
+    """Bound known EUrouter route prices, including an explicitly lower env price."""
+    eur_ceiling = _KNOWN_EUR_ROUTE_CEILING[model]
+    try:
+        converted = ModelPrice(
+            eur_ceiling.input_per_mtok * rate if rate is not None else Decimal(0),
+            eur_ceiling.output_per_mtok * rate if rate is not None else Decimal(0),
+            eur_ceiling.cache_read_per_mtok * rate if rate is not None else Decimal(0),
+        )
+    except DecimalException:
+        raise LlmConfigError("LLM_EUR_TO_USD_RATE is too large for model pricing") from None
+    input_price = max(
+        configured.input_per_mtok, catalog_floor.input_per_mtok, converted.input_per_mtok
+    )
+    return ModelPrice(
+        input_price,
+        max(
+            configured.output_per_mtok,
+            catalog_floor.output_per_mtok,
+            converted.output_per_mtok,
+        ),
+        max(
+            configured.cache_read_per_mtok,
+            catalog_floor.cache_read_per_mtok,
+            converted.cache_read_per_mtok,
+            input_price,
+        ),
+    )
 
 
 def _profile_from_env(
@@ -163,6 +217,7 @@ def _profile_from_env(
     prefix: str,
     inherit: ModelProfile | None,
     allow_prompt_json: bool,
+    eur_to_usd_rate: Decimal | None,
 ) -> ModelProfile:
     model = env.get(f"{prefix}MODEL")
     if not model:
@@ -183,7 +238,14 @@ def _profile_from_env(
         base_url = inherit.base_url
     else:
         raise LlmConfigError(f"{prefix}BASE_URL must be set for an unknown model")
-    same_endpoint = inherit is not None and base_url == inherit.base_url
+    endpoint = _endpoint_identity(base_url, prefix)
+    if known is not None and not endpoint[1].isascii():
+        raise LlmConfigError(f"{prefix}BASE_URL host must contain only ASCII characters")
+    known_identity = _endpoint_identity(known.base_url, prefix) if known is not None else None
+    known_endpoint = known_identity is not None and endpoint == known_identity
+    if known_identity is not None and endpoint[1] == known_identity[1] and not known_endpoint:
+        raise LlmConfigError(f"{prefix}BASE_URL must use the known endpoint for {model}")
+    same_endpoint = inherit is not None and endpoint == _endpoint_identity(inherit.base_url, prefix)
 
     keys_raw = value("API_KEYS")
     if keys_raw is not None:
@@ -193,13 +255,13 @@ def _profile_from_env(
         api_keys = inherit.api_keys
     else:
         api_keys = ()
-    if known is not None and base_url == known.base_url and not api_keys:
+    if known_endpoint and not api_keys:
         raise LlmConfigError(f"{prefix}API_KEYS must be set for {model}")
     if api_keys and urlsplit(base_url).scheme.lower() != "https" and not _is_local(base_url):
         raise LlmConfigError(f"{prefix}BASE_URL must use https when keys are sent")
 
     provider = value("PROVIDER")
-    if provider is None and known is not None and base_url == known.base_url:
+    if provider is None and known_endpoint and known is not None:
         provider = known.provider
     if provider is None and same_endpoint and inherit is not None:
         provider = inherit.provider
@@ -257,23 +319,32 @@ def _profile_from_env(
     max_output_tokens = number("MAX_OUTPUT_TOKENS", known.max_output_tokens if known else 8_000)
     if max_output_tokens >= context_window:
         raise LlmConfigError(f"{prefix}MAX_OUTPUT_TOKENS must be below {prefix}CONTEXT_WINDOW")
+    configured_price = ModelPrice(
+        input_per_mtok=price("PRICE_INPUT_PER_MTOK", known.price.input_per_mtok if known else None),
+        output_per_mtok=price(
+            "PRICE_OUTPUT_PER_MTOK", known.price.output_per_mtok if known else None
+        ),
+        cache_read_per_mtok=price(
+            "PRICE_CACHE_READ_PER_MTOK", known.price.cache_read_per_mtok if known else None
+        ),
+    )
+    effective_price = (
+        _known_endpoint_price(configured_price, known.price, model, eur_to_usd_rate)
+        if known_endpoint and known is not None
+        else configured_price
+    )
+    if known_endpoint and eur_to_usd_rate is not None:
+        try:
+            effective_price.cost_usd(tokens_in=context_window, tokens_out=max_output_tokens)
+        except DecimalException:
+            raise LlmConfigError("LLM_EUR_TO_USD_RATE is too large for model pricing") from None
     profile = ModelProfile(
         provider=provider,
         base_url=base_url,
         model=model,
         context_window=context_window,
         max_output_tokens=max_output_tokens,
-        price=ModelPrice(
-            input_per_mtok=price(
-                "PRICE_INPUT_PER_MTOK", known.price.input_per_mtok if known else None
-            ),
-            output_per_mtok=price(
-                "PRICE_OUTPUT_PER_MTOK", known.price.output_per_mtok if known else None
-            ),
-            cache_read_per_mtok=price(
-                "PRICE_CACHE_READ_PER_MTOK", known.price.cache_read_per_mtok if known else None
-            ),
-        ),
+        price=effective_price,
         structured_output="prompt_json" if structured == "prompt_json" else "json_schema",
         chars_per_token=known.chars_per_token if known else 3.0,
         api_keys=api_keys,

@@ -686,8 +686,8 @@ jobs:
           AUTH_JWT_PUBLIC_KEY: ${{ secrets.AUTH_JWT_PUBLIC_KEY }}
           # Variable of the Environment: the prefix GITHUB_ is rejected for variables too.
           GITHUB_APP_BOT_LOGIN: ${{ vars.GH_APP_BOT_LOGIN }}
-          # LLM gateway of the worker: the organization secret and variable, and model variables
-          # of the Environment.
+          # LLM gateway of the worker: the organization secret and endpoint variable;
+          # model and EUR rate are repository variables (staging Environment may override).
           LLM_API_KEYS: ${{ secrets.AI_DMC268_T6 }}
           LLM_BASE_URL: ${{ vars.AI_DMC268_URL }}
           LLM_MODEL: ${{ vars.LLM_MODEL }}

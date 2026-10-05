@@ -164,6 +164,66 @@ PR #65 merges and before final review.
 - [x] `uv run pytest`
 - [x] Recheck current open PR file ownership and review branch diff.
 
+## Task 7: Bound known-route costs at the configured FX rate
+
+**Description:** Address the [#66 scope addition](https://github.com/larchanka-training/dmc-268-api-t6/issues/66#issuecomment-5999075669):
+make the primary model's pre-call cost estimate conservative for Regolo,
+preserve that ceiling as the configured EUR→USD rate changes, and correct the
+budget explanation and repository-variable labels.
+
+**Acceptance criteria:**
+
+- [x] `mistral-small-4` uses at least Regolo's €0.50/€2.10 per million
+      input/output token price (cache reads at the full input price) converted
+      to USD. For both known EUrouter models, the effective price is the
+      componentwise maximum of the USD catalog floor and the highest known EUR
+      route price times configured `LLM_EUR_TO_USD_RATE`; a lower env override
+      on the known EUrouter endpoint cannot weaken the floor.
+- [x] A boundary test using literal Regolo prices and a configured rate above
+      1.1225 proves a call that could exceed $0.50 is rejected with
+      `BUDGET_EXCEEDED` before any provider request. Update
+      `test_oq2_pair_keeps_the_sd15_catalog_prices_and_windows` and the existing
+      OQ-2 primary boundary test. The same effective price covers the
+      conservative paid-answer fallback path.
+- [x] SYSTEM_DESIGN §15 states the shared four-call attempt ceiling, the
+      possible 12-primary case (€0.5136 ≈ $0.5765 at 1.1225), and the
+      9+3 case's 1.1737 USD/EUR threshold. Replace the unconditional
+      “Прогон fast ≤ $0.50” cost claim with the actual pre-call guard and its
+      catalog/token-estimate limits. `docs/SECRETS.md` and the CI workflow
+      comment label `LLM_MODEL` a repository variable.
+
+**Verification:**
+
+- [x] `uv run pytest tests/test_llm_gateway.py tests/test_deploy_staging_services.py` passes.
+- [x] Check literal arithmetic at FX 1.1204, 1.1225, and above 1.1225;
+      inspect `LLM_MODEL` labels in both documentation and workflow.
+- [x] Equivalent EUrouter URL spellings retain the price floor, provider, and
+      key inheritance; an unrecognized path or IDNA-normalized Unicode-dot
+      hostname cannot bypass it on either known model.
+      A huge unrepresentable finite rate fails at configuration time, while a
+      large representable rate still works.
+- [x] Rerun `uv run ruff check .`, `uv run ruff format --check .`,
+      `uv run mypy .`, and `uv run pytest` after code/documentation changes.
+
+**Dependencies:** Tasks 3–5; human review of this plan amendment. The PR #65
+coordination comment covers the overlapping settings and gateway test files;
+rebase after PR #65 merges before final review.
+
+**Files likely touched:** `app/modules/reviews/infrastructure/llm/settings.py`,
+`tests/test_llm_gateway.py`, `docs/SYSTEM_DESIGN.md`, `docs/SECRETS.md`,
+`.github/workflows/ci-cd.yml`. Reuse one effective-price path in settings and
+gateway; if a separate gateway edit is needed, split this into price-policy
+and integration substeps before development.
+
+**Estimated scope:** Medium (5 files; split if the gateway must change).
+
+## Checkpoint C: Added budget scope
+
+- [x] Task 7's focused tests and all four repository gates pass on the new
+      head; review the final price, FX, and rounding assumptions.
+- [x] SYSTEM_DESIGN §15, SECRETS.md, and the workflow agree with code and
+      GitHub variable scope.
+
 ## Task 6: Set variables and verify staging
 
 **Description:** Finish the acceptance criteria that cannot be proven by local
@@ -194,7 +254,7 @@ repository variables, checked for staging Environment overrides, and verified
 the model endpoints. `deploy-staging` runs only from `main`; this PR has not
 merged, so deployed `worker.env`, startup, and run results remain unverified.
 
-**Dependencies:** Tasks 1–5, Checkpoint B, and deployment authorization.
+**Dependencies:** Tasks 1–5 and 7, Checkpoints B–C, and deployment authorization.
 
 **Files likely touched:** None locally.
 

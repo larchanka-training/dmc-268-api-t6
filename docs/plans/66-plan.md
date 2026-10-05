@@ -2,9 +2,10 @@
 
 ## Overview
 
-Fix three defects found in live runs: record provider cost in USD, accept two
-losslessly repairable review-output deviations, and pass the configured fallback
-model to the staging worker. Keep the gateway's cost limit in USD and preserve
+Fix the live-run gaps: record provider cost in USD, accept two losslessly
+repairable review-output deviations, pass the configured fallback model to the
+staging worker, and make the pre-call price ceiling conservative for the chosen
+primary model. Keep the gateway's cost limit in USD and preserve
 strict rejection of meaning-changing output errors. The changes use the existing
 LLM and deployment boundaries; no migration or new dependency is needed.
 
@@ -24,6 +25,9 @@ LLM and deployment boundaries; no migration or new dependency is needed.
   either one. Do not expose LLM keys in verification output.
 - `#46` selects the model pair; this issue does not change model selection.
   HTTP 402 handling from `#53` is outside this issue.
+- The [scope addition on #66](https://github.com/larchanka-training/dmc-268-api-t6/issues/66#issuecomment-5999075669)
+  identifies a fourth budget gap. Tasks 1–5 were completed before this
+  addition; Task 7 below is implemented and verified locally.
 
 ## Architecture decisions
 
@@ -66,11 +70,37 @@ LLM and deployment boundaries; no migration or new dependency is needed.
    `mistral-small-3.2-24b`; verify the deployed `worker.env` and worker startup.
    The known fallback's endpoint must still match the primary endpoint for
    inherited keys; verify this before deployment.
+6. **Use a rate-aware price ceiling for the chosen EUrouter models.** The
+   current primary default uses the Mistral AI route ($0.165/$0.66 per million
+   input/output tokens), while Regolo charges €0.50/€2.10. Set the primary
+   catalog floor to the most expensive known route at the historical 1.1225
+   USD/EUR comparison rate, with unknown cache-read pricing charged at the
+   full input price. For known EUrouter routes, the effective pre-call price
+   and conservative paid-answer estimate must be the componentwise maximum of
+   the USD catalog floor and the EUR ceiling multiplied by the configured
+   `LLM_EUR_TO_USD_RATE`. Apply the same rule to the fallback's GreenPT EUR
+   ceiling. A fixed USD floor alone stops bounding Regolo once the configured
+   rate exceeds 1.1225. Do not silently let a lower environment price override
+   weaken this floor on the known EUrouter endpoint; custom endpoints may use
+   their explicitly configured price. This bounds the *published route prices*
+   at the configured rate, not unknown future price changes or an undercounted
+   token estimate.
+7. **Correct the budget explanation.** Four calls per attempt are shared by
+   conventions and review, so 12 primary calls across three attempts are
+   possible despite the 3+1 reservation inside one `generate()`. At 52,000
+   input/8,000 output tokens each, 12 Regolo calls cost €0.5136, or about
+   $0.5765 at 1.1225; they cannot all be admitted at the $0.50 limit if each
+   is charged at that maximum. The illustrative 9-primary+3-fallback mix is
+   €0.426 and crosses $0.50 at 0.50/0.426 = 1.1737 USD/EUR. At the same
+   maximal token count, 12-primary crosses at 0.50/0.5136 ≈ 0.9735; it is
+   already over at today's rate. SD §15 must state both cases and describe
+   the pre-call guard instead of asserting every 12-call pattern costs ≤$0.50.
 
 ## Dependency graph and order
 
 ```text
 PR #65 comment + #46 rebase ─> currency metadata/config ─> USD ledger/budget ─> §4.5 + SD §15
+configured FX + catalog routes ────────────────────────> Task 7 price ceiling ─> corrected SD §15
 runtime normalization ───────────────────────────────────────────────────> §9 documentation
 PR #65 merge + rebase ────────────────────────────────────────────────────> final review
 staging fallback delivery ─────> repository variable ─> deploy check
@@ -97,14 +127,18 @@ EUR rate configuration ────────> repository variable ─> deploy
 - [x] Task 4: Record converted cost and enforce the USD run limit, including
       absent-currency warnings and non-USD error cases.
 - [x] Task 5: Update PIPELINE_SPEC §4.5/§9, SYSTEM_DESIGN §15, and SECRETS.md.
+- [x] Task 7: Make the primary-model cost ceiling rate-aware, test the budget
+      boundary, and correct SD §15 and repository-variable labels.
 
 ### Checkpoint: Code and documentation
 
-- [ ] Focused transport, gateway, validation, and deployment tests pass.
-- [ ] `uv run ruff check .`, `uv run ruff format --check .`, `uv run mypy .`,
+- [x] Focused transport, gateway, validation, and deployment tests pass.
+- [x] `uv run ruff check .`, `uv run ruff format --check .`, `uv run mypy .`,
       and `uv run pytest` pass.
-- [ ] Docs reflect the actual configured exchange-rate policy and strict eval
+- [x] Docs reflect the actual configured exchange-rate policy and strict eval
       behavior; no new dependency or migration was introduced.
+- [x] Task 7's literal maximum-call and FX-threshold arithmetic is verified;
+      no unconditional $0.50 guarantee remains in SD §15.
 
 ### Phase 3: Operational verification
 
@@ -121,6 +155,8 @@ EUR rate configuration ────────> repository variable ─> deploy
 |---|---|---|
 | Editing PR #65-owned files while it is open | Creates conflicts with its final diff | Coordination comment is posted; recheck ownership and rebase after merge |
 | EUR exchange rate is stale or missing | Incorrect USD budget or failed calls | Explicit positive rate, documented update owner/cadence, tests for missing/invalid config and budget boundary |
+| Fixed USD catalog floor becomes too low when configured FX rises | Pre-call guard may admit a call over budget | Use componentwise max of catalog USD floor and EUR route ceiling × configured FX for both known models; test above 1.1225 |
+| Provider prices or tokenization differ from catalog assumptions | Estimate may be too low despite a rate-aware floor | State the catalog/estimate limits in SD §15; retain actual USD ledger checks and refresh catalog when prices change |
 | Unknown currency or failed conversion loses paid usage | Budget may undercount | Define an explicit error and accounting path before implementation; test it end to end |
 | Normalizer accepts a changed anchor or hides invalid JSON | Wrong inline comments | Normalize equality only, after schema check; preserve strict range and summary/title validators |
 | Fallback worker starts without a usable key | Staging deployment failure | Check both known model URLs and key inheritance before setting variable/deploying |
@@ -139,5 +175,6 @@ EUR rate configuration ────────> repository variable ─> deploy
    parsing and the eval script strict. This avoids changing the semantic
    contract for other callers.
 
-Development begins only after human approval of this plan, per the
-planning-and-task-breakdown and agent-loop workflows.
+Task 7 was implemented after human review of this amendment, per the
+planning-and-task-breakdown and agent-loop workflows. Tasks 1–5 were completed
+under the prior approved plan.
