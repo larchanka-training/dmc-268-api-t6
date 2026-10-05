@@ -11,7 +11,7 @@ from sqlalchemy import ColumnElement, and_, func, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.common.infrastructure.db.enums import CodeChangeState, RunState
+from app.common.infrastructure.db.enums import CodeChangeState, Engine, RunState
 from app.common.infrastructure.db.unit_of_work import SqlAlchemyUnitOfWork
 from app.modules.analytics.infrastructure.models import UsageEvent
 from app.modules.repositories.infrastructure.models import ProviderInstallation, Repository
@@ -412,7 +412,12 @@ class SqlAlchemyRunLifecycleStore:
         rows = (
             await self._session.execute(
                 _joined()
-                .where(Run.state == RunState.QUEUED, Run.available_at < available_before)
+                .where(
+                    Run.state == RunState.QUEUED,
+                    Run.available_at < available_before,
+                    # review.run.deep has no consumer until phase 3 (SD §13).
+                    Run.engine == Engine.FAST,
+                )
                 .order_by(Run.available_at)
                 .limit(limit)
             )

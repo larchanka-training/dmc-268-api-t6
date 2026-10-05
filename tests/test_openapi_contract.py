@@ -582,6 +582,8 @@ def test_repository_update_validates_and_returns_the_repository_schema(client: T
             {"name": "renamed"},
             {"enabled": None},
             {},
+            # deep (SandboxEngine) is phase 3: the API accepts only fast.
+            {"defaultEngine": "deep"},
         )
     ]
     missing = client.patch(f"/api/repos/{UNKNOWN_RUN_ID}", json={"enabled": False})
@@ -590,7 +592,7 @@ def test_repository_update_validates_and_returns_the_repository_schema(client: T
     assert (updated.json()["waitForCi"], updated.json()["maxComments"]) == ("never", 3)
     assert review_event.json()["reviewEvent"] == "REQUEST_CHANGES"
     _validator_for("patch", "/api/repos/{repo_id}", "200").validate(updated.json())
-    assert [response.status_code for response in invalid] == [422] * 7
+    assert [response.status_code for response in invalid] == [422] * 8
     assert missing.status_code == 404
 
 
