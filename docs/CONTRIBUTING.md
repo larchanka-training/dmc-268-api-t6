@@ -125,11 +125,14 @@ gh pr view N --json title,commits --jq '[.title, (.commits[] | "\(.messageHeadli
 gh api "repos/{owner}/{repo}/compare/main...$(gh pr view N --json headRefOid --jq .headRefOid)" \
   --jq .behind_by
 
-# 5б. Merge-коммиты в ветке PR (ожидается 0): «Update branch» в режиме merge даёт актуальную ветку, но не rebase
-gh api "repos/{owner}/{repo}/pulls/N/commits" --jq '[.[] | select(.parents | length > 1)] | length'
+# 5б. Merge-коммиты в ветке PR (ожидается 0): «Update branch» в режиме merge даёт актуальную ветку, но не rebase.
+#     Читаются все страницы; GitHub отдаёт не больше 250 коммитов PR, для более длинного PR —
+#     git rev-list --merges --count origin/main..origin/<ветка PR>
+gh api --paginate "repos/{owner}/{repo}/pulls/N/commits?per_page=100" \
+  --jq '.[] | select(.parents | length > 1) | .sha' | wc -l
 
 # 6. На каком коммите стоит каждый Approve и какая сейчас голова PR (должны совпасть)
-gh api 'repos/{owner}/{repo}/pulls/N/reviews' \
+gh api --paginate 'repos/{owner}/{repo}/pulls/N/reviews?per_page=100' \
   --jq '.[] | select(.state == "APPROVED") | "\(.user.login) \(.commit_id)"'
 gh pr view N --json headRefOid --jq .headRefOid
 ```
