@@ -85,7 +85,7 @@ rm jwt.pem jwt.pub
 
 | Имя | Куда уходит | Примечание |
 |---|---|---|
-| `RABBITMQ_PASSWORD` (пользователь `RABBITMQ_USER`, по умолчанию `app`) | контейнер `rabbitmq`; `RABBITMQ_URL` в `api` и `worker` (`webhook-worker` брокер не использует) | RabbitMQ, как Postgres, применяет учётные данные только на пустом томе `rabbitmq-data`. Если том есть, а пароля в `.env` нет, `deploy.sh` отказывается генерировать новый |
+| `RABBITMQ_PASSWORD` (пользователь `RABBITMQ_USER`, по умолчанию `app`) | контейнер `rabbitmq`; `RABBITMQ_URL` в `api`, `worker` и `webhook-worker` | RabbitMQ, как Postgres, применяет учётные данные только на пустом томе `rabbitmq-data`. Если том есть, а пароля в `.env` нет, `deploy.sh` отказывается генерировать новый |
 | `REDIS_PASSWORD` | контейнер `redis`; `REDIS_URL` в `api` | Redis — кэш без тома (лимит 128 MB, `allkeys-lru`): новый пароль только сбрасывает кэш. Кэш по SD §10, `REDIS_URL` приложение пока не читает |
 
 `GITHUB_TOKEN` выдаёт Actions сам. В репозиторий его не кладут. Push в GHCR — `packages: write`; pull на staging — `packages: read`.

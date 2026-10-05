@@ -101,13 +101,15 @@ services:
       - webhook-worker.env
     environment:
       DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-app}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/${POSTGRES_DB:-app}
+      RABBITMQ_URL: amqp://${RABBITMQ_USER:-app}:${RABBITMQ_PASSWORD:?RABBITMQ_PASSWORD is required}@rabbitmq:5672/
       WORKER_HEARTBEAT_FILE: /tmp/webhook-worker.heartbeat
-    # No broker: the projection only writes PostgreSQL, the reconciler of the API publishes the runs
-    # (app/webhook_worker.py composes the receiver without a run publisher).
+    # The projection creates Runs and publishes them to the review queue (#52).
     depends_on:
       bootstrap:
         condition: service_completed_successfully
       postgres:
+        condition: service_healthy
+      rabbitmq:
         condition: service_healthy
     restart: unless-stopped
     pull_policy: always
