@@ -111,7 +111,7 @@ gh pr view N --json title,commits --jq '[.title, (.commits[] | "\(.messageHeadli
 
 | Условие | Признак | Чем обеспечено |
 |---|---|---|
-| Ветка на текущем `main` и обновлена rebase, а не merge `main` в ветку: локально `git rebase origin/main` и `git push --force-with-lease` или кнопка «Update branch» в режиме «Update with rebase» | команды 5 и 5б выводят `0` | ruleset: Require branches to be up to date before merging (актуальность); отсутствие merge-коммитов — договорённость (команда 5б) |
+| Ветка на текущем `main` и обновлена rebase, а не merge `main` в ветку: локально `git rebase origin/main` и `git push --force-with-lease` или кнопка «Update branch» в режиме «Update with rebase» | команда 5 выводит `0`, команда 5б — пустой вывод | ruleset: Require branches to be up to date before merging (актуальность); отсутствие merge-коммитов — договорённость (команда 5б) |
 | Approve стоит на текущей голове PR | в выводе команды 6 `commit_id` одобряющего ревью равен голове PR | ruleset: Dismiss stale pull request approvals when new commits are pushed — push, меняющий дифф PR (новые коммиты, rebase или Update branch после изменений в `main`), снимает Approve; Approve именно на текущей голове при любом push — договорённость команды, она строже |
 | Последний push одобрил не тот, кто его сделал | если ревьюер сам запушил коммит в PR, Approve даёт другой участник | ruleset: Require approval of the most recent reviewable push |
 | Все треды закрыты, CI зелёный | кнопка Merge доступна | ruleset (§7) |
@@ -125,11 +125,13 @@ gh pr view N --json title,commits --jq '[.title, (.commits[] | "\(.messageHeadli
 gh api "repos/{owner}/{repo}/compare/main...$(gh pr view N --json headRefOid --jq .headRefOid)" \
   --jq .behind_by
 
-# 5б. Merge-коммиты в ветке PR (ожидается 0): «Update branch» в режиме merge даёт актуальную ветку, но не rebase.
-#     Читаются все страницы; GitHub отдаёт не больше 250 коммитов PR, для более длинного PR —
-#     git rev-list --merges --count origin/main..origin/<ветка PR>
+# 5б. SHA merge-коммитов в ветке PR (ожидается пустой вывод и код выхода 0): «Update branch»
+#     в режиме merge даёт актуальную ветку, но не rebase. Без конвейера: ошибка API остаётся
+#     ненулевым кодом выхода, а не превращается в «0». Читаются все страницы; GitHub отдаёт
+#     не больше 250 коммитов PR, для более длинного PR —
+#     git rev-list --merges origin/main..origin/<ветка PR> (тоже ожидается пустой вывод)
 gh api --paginate "repos/{owner}/{repo}/pulls/N/commits?per_page=100" \
-  --jq '.[] | select(.parents | length > 1) | .sha' | wc -l
+  --jq '.[] | select(.parents | length > 1) | .sha'
 
 # 6. На каком коммите стоит каждый Approve и какая сейчас голова PR (должны совпасть)
 gh api --paginate 'repos/{owner}/{repo}/pulls/N/reviews?per_page=100' \
