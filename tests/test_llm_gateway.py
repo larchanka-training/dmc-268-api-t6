@@ -319,6 +319,27 @@ def test_eurouter_is_selected_by_configuration_only() -> None:
     assert settings.fallback.structured_output == "json_schema"
 
 
+def test_oq2_pair_keeps_the_sd15_catalog_prices_and_windows() -> None:
+    # docs/SYSTEM_DESIGN.md §15: these prices feed the pre-call run cost check.
+    settings = LlmSettings.from_env(
+        {
+            "LLM_MODEL": "mistral-small-4",
+            "LLM_API_KEYS": "sk-eu-1",
+            "LLM_FALLBACK_MODEL": "mistral-small-3.2-24b",
+        }
+    )
+
+    primary, fallback = settings.primary, settings.fallback
+    assert fallback is not None
+    assert primary.price == ModelPrice(Decimal("0.165"), Decimal("0.66"), Decimal("0.0165"))
+    assert primary.context_window == 262_144
+    assert fallback.price == ModelPrice(Decimal("0.2245"), Decimal("0.449"), Decimal("0.2245"))
+    assert fallback.context_window == 128_000
+    # one maximal fast call: SD §13 60 000 - 8 000 reserved = 52 000 in + 8 000 out
+    assert primary.price.cost_usd(tokens_in=52_000, tokens_out=8_000) == Decimal("0.01386")
+    assert fallback.price.cost_usd(tokens_in=52_000, tokens_out=8_000) == Decimal("0.015266")
+
+
 def test_self_hosted_is_selected_by_configuration_only_with_prompt_json() -> None:
     settings = LlmSettings.from_env(
         {
@@ -1203,6 +1224,28 @@ def test_run_cost_limit_boundary(spent: str, calls: int) -> None:
     asyncio.run(
         harness.ledger.record(
             harness.run, LlmUsage("eurouter", "m", "review", 1, 1, 0, Decimal(spent))
+        )
+    )
+
+    if calls:
+        harness.review()
+    else:
+        assert harness.failure().error_code is LlmErrorCode.BUDGET_EXCEEDED
+    assert len(harness.requests) == calls
+
+
+@pytest.mark.parametrize(("over", "calls"), [(Decimal(0), 1), (Decimal("0.000001"), 0)])
+def test_run_cost_limit_boundary_at_the_oq2_primary_price(over: Decimal, calls: int) -> None:
+    settings = LlmSettings.from_env({"LLM_MODEL": "mistral-small-4", "LLM_API_KEYS": "sk-eu-1"})
+    primary = settings.primary
+    # the gateway's own pre-call estimate: gateway.token_counter(primary) over both messages
+    estimate = prompt_tokens(CONTEXT, HeuristicTokenCounter(primary.chars_per_token))
+    next_cost = primary.price.cost_usd(tokens_in=estimate, tokens_out=primary.max_output_tokens)
+    spent = settings.policy.run_cost_limit_usd["fast"] - next_cost + over
+    harness = Harness([valid(model="mistral/mistral-small-4")], settings=settings)
+    asyncio.run(
+        harness.ledger.record(
+            harness.run, LlmUsage("eurouter", "mistral-small-4", "review", 1, 1, 0, spent)
         )
     )
 
