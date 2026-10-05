@@ -104,7 +104,7 @@ rm jwt.pem jwt.pub
 | `POSTGRES_USER` | нет | иначе `app` |
 | `POSTGRES_DB` | нет | иначе `app` |
 | `GH_APP_BOT_LOGIN` | да: без него `webhook-worker` не стартует, выкат откатывается | `dmc268-t6-reviewer[bot]` — логин бота App. В контейнере `GITHUB_APP_BOT_LOGIN`, только у `webhook-worker` (`app/webhook_worker.py`). Префикс `GH_`, потому что GitHub не принимает `GITHUB_` и у variables; берётся из `vars.`, а не из `secrets.` |
-| `LLM_MODEL` | для ревью моделью | `gpt-4.1-mini` (OQ-2, SD §15). В контейнере `LLM_MODEL`, только у `worker`. Модель — конфигурация шлюза, а не секрет: меняется без коммита |
+| `LLM_MODEL` | для ревью моделью | `mistral-small-4` (OQ-2, SD §15). В контейнере `LLM_MODEL`, только у `worker`. Модель — конфигурация шлюза, а не секрет: меняется без коммита |
 
 ### LLM-шлюз — переменные приложения (#33)
 
