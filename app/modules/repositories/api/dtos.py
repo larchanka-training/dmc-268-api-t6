@@ -16,7 +16,8 @@ class RepositoryDto(ApiDto):
     url: str
     default_branch: str
     enabled: bool
-    default_engine: Literal["fast", "deep"]
+    # deep (SandboxEngine) is phase 3 (SD §13): it has no worker in the MVP.
+    default_engine: Literal["fast"]
     wait_for_ci: Literal["auto", "always", "never"]
     max_comments: int
     review_event: Literal["COMMENT", "REQUEST_CHANGES"]
@@ -28,7 +29,7 @@ class RepositoryUpdateDto(ApiDto):
     model_config = ConfigDict(extra="forbid")
 
     enabled: bool | None = None
-    default_engine: Literal["fast", "deep"] | None = None
+    default_engine: Literal["fast"] | None = None
     wait_for_ci: Literal["auto", "always", "never"] | None = None
     max_comments: int | None = Field(default=None, ge=1, le=10)
     review_event: Literal["COMMENT", "REQUEST_CHANGES"] | None = None

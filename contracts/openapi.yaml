@@ -766,7 +766,16 @@ components:
       enum: [queued, running, publishing, succeeded, failed, cancelled, skipped]
     Engine:
       type: string
+      description: >-
+        Engine a run was executed with. `deep` (SandboxEngine) is phase 3 (SD §13): new runs
+        are `fast`; `deep` stays here only for runs stored before it was removed.
       enum: [fast, deep]
+    RepositoryEngine:
+      type: string
+      description: >-
+        Review engine of a repository. Only `fast` until phase 3 brings `deep` (SandboxEngine,
+        SD §13); `PATCH` with `deep` is rejected with 422.
+      enum: [fast]
     Severity:
       type: string
       enum: [critical, high, medium, low, info]
@@ -1246,7 +1255,7 @@ components:
         enabled:
           type: boolean
         defaultEngine:
-          $ref: "#/components/schemas/Engine"
+          $ref: "#/components/schemas/RepositoryEngine"
         waitForCi:
           $ref: "#/components/schemas/WaitForCi"
         maxComments:
@@ -1264,7 +1273,7 @@ components:
         enabled:
           type: boolean
         defaultEngine:
-          $ref: "#/components/schemas/Engine"
+          $ref: "#/components/schemas/RepositoryEngine"
         waitForCi:
           $ref: "#/components/schemas/WaitForCi"
         maxComments:
