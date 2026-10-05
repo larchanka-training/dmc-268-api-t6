@@ -111,7 +111,7 @@ gh pr view N --json title,commits --jq '[.title, (.commits[] | "\(.messageHeadli
 
 | Условие | Признак | Чем обеспечено |
 |---|---|---|
-| Ветка на текущем `main`: перед мержем автор делает rebase | команда 5 выводит `0` | ruleset: Require branches to be up to date before merging |
+| Ветка на текущем `main` и обновлена rebase, а не merge `main` в ветку: локально `git rebase origin/main` и `git push --force-with-lease` или кнопка «Update branch» в режиме «Update with rebase» | команды 5 и 5б выводят `0` | ruleset: Require branches to be up to date before merging (актуальность); отсутствие merge-коммитов — договорённость (команда 5б) |
 | Approve стоит на текущей голове PR | в выводе команды 6 `commit_id` одобряющего ревью равен голове PR | ruleset: Dismiss stale pull request approvals when new commits are pushed — push, меняющий дифф PR (новые коммиты, rebase или Update branch после изменений в `main`), снимает Approve; Approve именно на текущей голове при любом push — договорённость команды, она строже |
 | Последний push одобрил не тот, кто его сделал | если ревьюер сам запушил коммит в PR, Approve даёт другой участник | ruleset: Require approval of the most recent reviewable push |
 | Все треды закрыты, CI зелёный | кнопка Merge доступна | ruleset (§7) |
@@ -124,6 +124,9 @@ gh pr view N --json title,commits --jq '[.title, (.commits[] | "\(.messageHeadli
 # 5. На сколько коммитов ветка PR отстаёт от main (ожидается 0)
 gh api "repos/{owner}/{repo}/compare/main...$(gh pr view N --json headRefOid --jq .headRefOid)" \
   --jq .behind_by
+
+# 5б. Merge-коммиты в ветке PR (ожидается 0): «Update branch» в режиме merge даёт актуальную ветку, но не rebase
+gh api "repos/{owner}/{repo}/pulls/N/commits" --jq '[.[] | select(.parents | length > 1)] | length'
 
 # 6. На каком коммите стоит каждый Approve и какая сейчас голова PR (должны совпасть)
 gh api 'repos/{owner}/{repo}/pulls/N/reviews' \
@@ -186,7 +189,8 @@ Ruleset `main` одинаков в обоих репо, кроме обязат�
 |---|---|
 | В `main` попадают только PR: без прямого push, force push и удаления ветки | ruleset |
 | Обязательные CI-проверки зелёные: в api `Python lint / type / test`, `OpenAPI lint`, `Webhook container smoke`, в ui `Docker image build` | ruleset `required_status_checks` |
-| Ветка на текущем `main`: перед мержем rebase | ruleset `strict_required_status_checks_policy` |
+| Ветка на текущем `main` | ruleset `strict_required_status_checks_policy` |
+| Ветка обновлена rebase, а не merge `main` в ветку | договорённость; признак — команда 5б из §2 |
 | Есть минимум один Approve, и не от автора | ruleset `required_approving_review_count: 1` + GitHub |
 | Approve стоит на текущей голове PR: push, меняющий дифф PR (новые коммиты, rebase или Update branch после изменений в `main`), снимает его | ruleset `dismiss_stale_reviews_on_push`; Approve именно на текущей голове при любом push (команда 6 из §2) — договорённость команды, она строже |
 | Последний push одобряет не тот, кто его сделал | ruleset `require_last_push_approval` |
