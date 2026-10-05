@@ -30,9 +30,9 @@ never spans a database transaction. `labeled` / `unlabeled` of the `ai-review` l
 by the App's own bot are ignored) and `synchronize`, `closed`, `reopened`, and `edited` fetch the
 current GitHub PR once while holding that lock; `opened` is applied from the payload. Label
 events and `synchronize`, `closed`, and `reopened` reconcile `ai_review_labeled` from that PR's
-current labels, so a closed PR keeps its label state (`docs/PIPELINE_SPEC.md` §8.2 lists `false`
-for `closed`; the effect is the same, since CI eligibility and the no-CI sweep consider only open
-PRs for a new Run); `edited` updates metadata only. The issue timeline is never fetched:
+current labels, so a closed PR keeps its label state; a new Run needs an open PR, since CI
+eligibility and the no-CI sweep consider only open PRs (`docs/PIPELINE_SPEC.md` §8.2);
+`edited` updates metadata only. The issue timeline is never fetched:
 `review_requested` and `review_request_removed` are dropped as irrelevant. A failed dispatch (for
 example a GitHub error or the 240 s dispatch timeout) releases the receipt for a retry after
 30 s; the third failure marks it failed and it is no longer replayed. It also projects
