@@ -26,6 +26,8 @@ from app.modules.integrations.webhooks.infrastructure.github_installation_tree_p
     GitHubInstallationAccessTokenProvider,
     InMemoryInstallationAccessTokenCache,
 )
+from app.modules.reviews.application.try_enqueue_webhook_run import RunMessagePublisher
+from app.modules.reviews.infrastructure.amqp import LazyAmqpPublisher
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -37,6 +39,7 @@ class WorkerConfig:
     private_key: str
     bot_login: str
     github_api_url: str
+    rabbitmq_url: str
     heartbeat_file: Path | None = None
 
     @classmethod
@@ -61,6 +64,8 @@ class WorkerConfig:
             private_key=required("GITHUB_APP_PRIVATE_KEY"),
             bot_login=required("GITHUB_APP_BOT_LOGIN"),
             github_api_url=env.get("GITHUB_API_URL", "https://api.github.com"),
+            # Run pointers go to the review queue (T1); see docs/WEBHOOK_WORKER.md.
+            rabbitmq_url=required("RABBITMQ_URL"),
             heartbeat_file=heartbeat_file(env),
         )
 
@@ -70,11 +75,14 @@ def compose_worker(
     client: httpx.AsyncClient,
     tokens: GitHubInstallationAccessTokenProvider,
     config: WorkerConfig,
+    run_publisher: RunMessagePublisher,
 ) -> ReceiveGitHubDelivery:
     return resources.github_delivery_receiver(
         client=client,
         token_provider=tokens,
         bot_login=config.bot_login,
+        run_publisher=run_publisher,
+        app_id=config.app_id,
     )
 
 
@@ -98,6 +106,8 @@ async def run_forever() -> None:
     if config.heartbeat_file is not None:
         reset(config.heartbeat_file)
     resources = ReviewsApiResources.from_database_url(config.database_url)
+    # Connects on the first Run; an unpublished Run is replayed by the review worker.
+    publisher = LazyAmqpPublisher(config.rabbitmq_url)
     try:
         async with httpx.AsyncClient(
             base_url=config.github_api_url,
@@ -110,12 +120,13 @@ async def run_forever() -> None:
                 cache=InMemoryInstallationAccessTokenCache(now=time.time),
                 now=time.time,
             )
-            receiver = compose_worker(resources, client, tokens, config)
+            receiver = compose_worker(resources, client, tokens, config, publisher)
             async with asyncio.TaskGroup() as tasks:
                 tasks.create_task(sweep_forever(receiver))
                 if config.heartbeat_file is not None:
                     tasks.create_task(beat(config.heartbeat_file))
     finally:
+        await publisher.aclose()
         await resources.aclose()
 
 
