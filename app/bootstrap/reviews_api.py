@@ -58,6 +58,7 @@ from app.modules.repositories.infrastructure.repository_settings import (
     SqlAlchemyRepositorySettingsUnitOfWork,
 )
 from app.modules.reviews.application.cancel_run import CancellationSignals, CancelRunRepository
+from app.modules.reviews.application.determine_ci_eligibility import DetermineCiEligibility
 from app.modules.reviews.application.get_run import RunDetailRepository
 from app.modules.reviews.application.get_run_actions import RunActionsRepository
 from app.modules.reviews.application.get_run_comments import RunCommentsRepository
@@ -70,9 +71,17 @@ from app.modules.reviews.application.publish_cancellation_signals import (
     PublishCancellationSignals,
 )
 from app.modules.reviews.application.rerun_run import RerunUnitOfWork
-from app.modules.reviews.application.try_enqueue_webhook_run import RunMessagePublisher
+from app.modules.reviews.application.trigger_from_delivery import TriggerFromDelivery
+from app.modules.reviews.application.try_enqueue_webhook_run import (
+    RunMessagePublisher,
+    TryEnqueueWebhookRun,
+)
 from app.modules.reviews.infrastructure.amqp import LazyAmqpPublisher
 from app.modules.reviews.infrastructure.blob_cache import SqlAlchemyBlobCache
+from app.modules.reviews.infrastructure.ci_eligibility_candidates import (
+    SqlAlchemyEligibilityCandidateStore,
+)
+from app.modules.reviews.infrastructure.github_ci import HttpGitHubCurrentHeadCiProvider
 from app.modules.reviews.infrastructure.github_pull_request_projection import (
     SqlAlchemyPullRequestProjectionLock,
     SqlAlchemyPullRequestProjectionUnitOfWork,
@@ -80,6 +89,8 @@ from app.modules.reviews.infrastructure.github_pull_request_projection import (
 from app.modules.reviews.infrastructure.pull_request_queries import SqlAlchemyPullRequestQueries
 from app.modules.reviews.infrastructure.rerun_store import SqlAlchemyRerunUnitOfWork
 from app.modules.reviews.infrastructure.run_repository import SqlAlchemyRunRepository
+from app.modules.reviews.infrastructure.webhook_run_targets import SqlAlchemyWebhookRunTargets
+from app.modules.reviews.infrastructure.webhook_runs import SqlAlchemyWebhookRunUnitOfWork
 from app.modules.workspaces.application.link_github_installations import LinkGitHubInstallations
 from app.modules.workspaces.infrastructure.github_installation_links import (
     SqlAlchemyGitHubInstallationLinkUnitOfWork,
@@ -155,6 +166,8 @@ class ReviewsApiResources:
         client: httpx.AsyncClient,
         token_provider: GitHubInstallationAccessTokenProvider,
         bot_login: str | None = None,
+        run_publisher: RunMessagePublisher | None = None,
+        app_id: int | None = None,
     ) -> ReceiveGitHubDelivery:
         return ReceiveGitHubDelivery(
             uow_factory=self.github_webhook_receipts,
@@ -162,6 +175,8 @@ class ReviewsApiResources:
                 client=client,
                 token_provider=token_provider,
                 bot_login=bot_login,
+                run_publisher=run_publisher,
+                app_id=app_id,
             ),
         )
 
@@ -189,8 +204,14 @@ class ReviewsApiResources:
         client: httpx.AsyncClient,
         token_provider: GitHubInstallationAccessTokenProvider,
         bot_login: str | None = None,
+        run_publisher: RunMessagePublisher | None = None,
+        app_id: int | None = None,
     ) -> GitHubWebhookDispatchAdapter:
-        """Compose the verified-delivery application boundary for this API process."""
+        """Compose the verified-delivery application boundary.
+
+        With a ``run_publisher`` and the App id, PR, label and CI events create Runs
+        through ``try_enqueue`` (T1) and cancellations signal the worker at once (T6).
+        """
         tree_provider = GitHubInstallationTreeProvider(
             client=client,
             token_provider=token_provider,
@@ -198,6 +219,35 @@ class ReviewsApiResources:
         label_provider = GitHubRepositoryLabelProvider(
             client=client,
             token_provider=token_provider,
+        )
+        signals = (
+            PublishCancellationSignals(
+                uow_factory=partial(
+                    SqlAlchemyPullRequestProjectionUnitOfWork, self._session_factory
+                ),
+                publisher=run_publisher,
+            )
+            if run_publisher is not None
+            else None
+        )
+        run_trigger = (
+            TriggerFromDelivery(
+                targets=SqlAlchemyWebhookRunTargets(self._session_factory),
+                enqueuer=TryEnqueueWebhookRun(
+                    eligibility=DetermineCiEligibility(
+                        candidates=SqlAlchemyEligibilityCandidateStore(self._session_factory),
+                        ci=HttpGitHubCurrentHeadCiProvider(
+                            client=client, token_provider=token_provider
+                        ),
+                        own_app_id=app_id,
+                    ),
+                    uow_factory=partial(SqlAlchemyWebhookRunUnitOfWork, self._session_factory),
+                    publisher=run_publisher,
+                    cancellation_signals=signals,
+                ),
+            )
+            if run_publisher is not None and app_id is not None
+            else None
         )
         projector = (
             ProjectGitHubPullRequest(
@@ -210,6 +260,7 @@ class ReviewsApiResources:
                     token_provider=token_provider,
                 ),
                 projection_lock=SqlAlchemyPullRequestProjectionLock(self._engine),
+                cancellation_signals=signals,
             )
             if bot_login is not None
             else None
@@ -219,6 +270,7 @@ class ReviewsApiResources:
             onboarding=self.installation_onboarding(tree_provider, label_provider),
             pull_request_projector=projector,
             label_intent_projector=projector,
+            run_trigger=run_trigger,
         )
         return GitHubWebhookDispatchAdapter(dispatcher)
 

@@ -1,4 +1,4 @@
-"""The webhook worker replays durable receipts without an AMQP dependency."""
+"""The webhook worker replays durable receipts and publishes the Runs they create."""
 
 from __future__ import annotations
 
@@ -20,6 +20,7 @@ from app.modules.integrations.webhooks.application.receive_github_delivery impor
 from app.modules.integrations.webhooks.infrastructure.github_installation_tree_provider import (
     GitHubInstallationAccessTokenProvider,
 )
+from app.modules.reviews.application.try_enqueue_webhook_run import RunMessagePublisher
 from app.webhook_worker import WorkerConfig, compose_worker, run_forever, sweep_once
 
 
@@ -29,6 +30,7 @@ def _environment() -> dict[str, str]:
         "GITHUB_APP_ID": "17",
         "GITHUB_APP_PRIVATE_KEY": "private-key",
         "GITHUB_APP_BOT_LOGIN": "reviewer[bot]",
+        "RABBITMQ_URL": "amqp://app:app@rabbitmq:5672/",
     }
 
 
@@ -79,7 +81,16 @@ def test_running_worker_beats_even_when_its_sweep_fails(
     assert asyncio.run(scenario()) is True
 
 
-def test_worker_wires_receipt_projection_without_a_run_publisher() -> None:
+def test_worker_requires_the_broker_for_run_publication() -> None:
+    environment = _environment()
+    del environment["RABBITMQ_URL"]
+    with pytest.raises(RuntimeError, match="RABBITMQ_URL"):
+        WorkerConfig.from_environment(environment)
+
+
+def test_worker_wires_receipt_projection_with_the_run_publisher_and_app_id() -> None:
+    publisher = cast(RunMessagePublisher, object())
+
     @dataclass
     class Receiver:
         calls: int = 0
@@ -95,8 +106,8 @@ def test_worker_wires_receipt_projection_without_a_run_publisher() -> None:
 
         def github_delivery_receiver(self, **kwargs: object) -> Receiver:
             assert kwargs["bot_login"] == "reviewer[bot]"
-            assert "run_publisher" not in kwargs
-            assert "app_id" not in kwargs
+            assert kwargs["run_publisher"] is publisher
+            assert kwargs["app_id"] == 17
             return self.receiver
 
     resources = Resources()
@@ -105,6 +116,7 @@ def test_worker_wires_receipt_projection_without_a_run_publisher() -> None:
         cast(httpx.AsyncClient, object()),
         cast(GitHubInstallationAccessTokenProvider, object()),
         WorkerConfig.from_environment(_environment()),
+        publisher,
     )
 
     assert asyncio.run(sweep_once(receiver)) == 1
