@@ -49,6 +49,10 @@ class CheckSuite:
     app_id: int
     status: str
     conclusion: str | None
+    # A suite whose App created no check run stays ``queued`` for good and never sends
+    # ``completed``. Only that state is ignored by the gate (#72); an unknown count means
+    # "runs may exist", so the default keeps blocking.
+    latest_check_runs_count: int = 1
 
 
 @dataclass(frozen=True)
@@ -124,7 +128,10 @@ class DetermineCiEligibility:
             return CiEligibility(False, reason, current.head_sha if current is not None else None)
 
         foreign = tuple(
-            suite for suite in snapshot.check_suites if suite.app_id != self._own_app_id
+            suite
+            for suite in snapshot.check_suites
+            if suite.app_id != self._own_app_id
+            and not (suite.status == "queued" and suite.latest_check_runs_count == 0)
         )
         if any(
             suite.status != "completed" or suite.conclusion not in {"success", "neutral", "skipped"}

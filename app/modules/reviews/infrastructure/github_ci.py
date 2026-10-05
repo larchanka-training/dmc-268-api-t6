@@ -29,6 +29,8 @@ class _SuiteDto(BaseModel):
     app: _AppDto
     status: str = Field(min_length=1)
     conclusion: str | None
+    # Absent means "runs may exist": the gate keeps blocking on the suite (fail-safe).
+    latest_check_runs_count: int = Field(default=1, ge=0)
 
 
 class _SuitesPageDto(BaseModel):
@@ -88,7 +90,14 @@ class HttpGitHubCurrentHeadCiProvider:
             for item in parsed.check_suites:
                 if item.head_sha.casefold() != head_sha.casefold():
                     raise ValueError("GitHub check suite head SHA mismatch")
-                suites.append(CheckSuite(item.app.id, item.status, item.conclusion))
+                suites.append(
+                    CheckSuite(
+                        app_id=item.app.id,
+                        status=item.status,
+                        conclusion=item.conclusion,
+                        latest_check_runs_count=item.latest_check_runs_count,
+                    )
+                )
             if len(suites) >= expected_count:
                 if len(suites) != expected_count:
                     raise ValueError("GitHub check suite page exceeded total count")
