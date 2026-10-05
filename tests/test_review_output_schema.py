@@ -31,6 +31,7 @@ SCHEMA: dict[str, Any] = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
 SCHEMA_VALIDATOR = Draft202012Validator(SCHEMA)
 
 VALID_FILES = sorted((CORPUS_DIR / "valid").glob("*.json"))
+NORMALIZABLE_FILES = sorted((CORPUS_DIR / "normalizable").glob("*.json"))
 INVALID_FILES = sorted((CORPUS_DIR / "invalid").glob("*.json"))
 
 # Verdict triples, in order: JSON Schema, Pydantic ReviewOutput, validate_findings.py.
@@ -40,10 +41,8 @@ REJECTED_BY_ALL = (False, False, False)
 # Rules JSON Schema cannot express (see the schema's $comment): the schema accepts,
 # the Pydantic model and the script reject.
 SEMANTIC_ONLY = {
-    "start-line-equals-line.json",
     "title-trailing-period.json",
     "title-two-lines.json",
-    "wrong-order.json",
     "problem-two-sentences.json",
     "done-well-no-sentence.json",
     "done-well-three-sentences.json",
@@ -65,6 +64,8 @@ UNKNOWN_KIND = {"missing-findings.json"}
 def _expected(path: Path) -> tuple[bool, bool, bool]:
     if path.parent.name == "valid":
         return ACCEPTED_BY_ALL
+    if path.parent.name == "normalizable":
+        return (True, False, False)
     if path.name in SEMANTIC_ONLY:
         return (True, False, False)
     if path.name in SCRIPT_ONLY:
@@ -99,11 +100,17 @@ def test_corpus_declares_only_existing_cases() -> None:
     declared = SEMANTIC_ONLY | SCRIPT_ONLY | KNOWN_DIFFERENCES | UNKNOWN_KIND
 
     assert VALID_FILES
+    assert {path.name for path in NORMALIZABLE_FILES} == {
+        "start-line-equals-line.json",
+        "wrong-order.json",
+    }
     assert declared <= invalid_names
 
 
 @pytest.mark.parametrize(
-    "path", VALID_FILES + INVALID_FILES, ids=lambda p: f"{p.parent.name}/{p.name}"
+    "path",
+    VALID_FILES + NORMALIZABLE_FILES + INVALID_FILES,
+    ids=lambda p: f"{p.parent.name}/{p.name}",
 )
 def test_schema_model_and_script_verdicts(path: Path) -> None:
     raw = path.read_text(encoding="utf-8")

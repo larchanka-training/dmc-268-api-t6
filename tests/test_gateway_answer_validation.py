@@ -7,12 +7,17 @@ is shared with the parity test; no fourth copy of the schema exists.
 
 from __future__ import annotations
 
+import asyncio
 import json
+from copy import deepcopy
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
+from uuid import UUID
 
 import pytest
 
+from app.modules.reviews.application.llm import RunCallContext
 from app.modules.reviews.application.review_output import ReviewOutput
 from app.modules.reviews.infrastructure.llm.answers import (
     REVIEW_OUTPUT_SCHEMA_PATH,
@@ -22,9 +27,19 @@ from app.modules.reviews.infrastructure.llm.answers import (
     review_output_schema,
     validate_review_answer,
 )
+from app.modules.reviews.infrastructure.llm.gateway import LlmGateway, StructuredTask
+from app.modules.reviews.infrastructure.llm.memory import InMemoryLlmCallTrace, InMemoryUsageLedger
+from app.modules.reviews.infrastructure.llm.settings import LlmSettings
+from app.modules.reviews.infrastructure.llm.transport import (
+    ChatMessage,
+    ChatRequest,
+    ChatResponse,
+    ResponseSchema,
+)
 
 CORPUS = Path(__file__).parent / "fixtures" / "review_output"
 VALID = sorted((CORPUS / "valid").glob("*.json"))
+NORMALIZABLE = sorted((CORPUS / "normalizable").glob("*.json"))
 # The body prefix <-> rule_name binding is repaired by the post-processor at runtime
 # (review/postprocess/lint-filter.md, step 6), so the gateway accepts it (§9 table).
 REPAIRED_LATER = {"rule-name-without-prefix.json"}
@@ -39,6 +54,25 @@ def test_valid_corpus_is_accepted_as_a_typed_review_output(path: Path) -> None:
     output = parse_review_answer(path.read_text(encoding="utf-8"))
 
     assert isinstance(output, ReviewOutput)
+
+
+@pytest.mark.parametrize("path", NORMALIZABLE, ids=lambda path: path.name)
+def test_normalizable_corpus_is_corrected_before_typed_parsing(path: Path) -> None:
+    raw = path.read_text(encoding="utf-8")
+    original = json.loads(raw)
+
+    accepted = validate_review_answer(raw)
+
+    if path.name == "start-line-equals-line.json":
+        expected = {
+            **original,
+            "findings": [{**original["findings"][0], "start_line": None}],
+        }
+    else:
+        assert path.name == "wrong-order.json"
+        expected = {**original, "findings": [original["findings"][1], original["findings"][0]]}
+    assert accepted == expected
+    assert parse_review_answer(raw) == ReviewOutput.model_validate(expected)
 
 
 @pytest.mark.parametrize("path", INVALID, ids=lambda path: path.name)
@@ -103,10 +137,7 @@ def _mutated(mutate: Any) -> str:
         (_mutated(lambda v: v.update(findings=v["findings"] * 11)), "is too long"),
         (_mutated(lambda v: v["findings"][0].update(line=1.0)), "valid integer"),
         (_mutated(lambda v: v["findings"][0].update(title="Two.\nlines")), "title"),
-        (
-            _mutated(lambda v: v["findings"][0].update(start_line=v["findings"][0]["line"])),
-            "start_line",
-        ),
+        (_mutated(lambda v: v["findings"][0].update(start_line=1.0, line=1)), "start_line"),
         (_mutated(lambda v: v["summary"].update(problem="One. Two.")), "exactly one sentence"),
         (_mutated(lambda v: v["summary"].update(done_well="A. B. C.")), "one or two sentences"),
     ],
@@ -118,23 +149,93 @@ def test_malformed_answers_are_rejected_with_the_validator_message(raw: str, mes
     assert message in str(caught.value)
 
 
-def test_order_by_severity_then_confidence_is_enforced() -> None:
+def test_order_by_severity_then_confidence_is_normalized() -> None:
     first = dict(SAMPLE["findings"][0], severity="low", confidence=0.9)
     second = dict(SAMPLE["findings"][0], severity="critical", confidence=0.9)
     raw = json.dumps(dict(SAMPLE, findings=[first, second]))
 
-    with pytest.raises(InvalidAnswer, match="severity then confidence ordered"):
-        validate_review_answer(raw)
+    assert validate_review_answer(raw)["findings"] == [second, first]
 
 
-def test_equal_severity_must_be_ordered_by_descending_confidence() -> None:
+def test_equal_severity_is_normalized_by_descending_confidence() -> None:
     first = dict(SAMPLE["findings"][0], severity="high", confidence=0.4)
     second = dict(SAMPLE["findings"][0], severity="high", confidence=0.9)
 
-    with pytest.raises(InvalidAnswer, match="severity then confidence ordered"):
+    assert validate_review_answer(json.dumps(dict(SAMPLE, findings=[first, second])))[
+        "findings"
+    ] == [second, first]
+
+
+def test_equal_severity_and_confidence_keep_provider_order() -> None:
+    first = dict(SAMPLE["findings"][0], path="first.py", severity="high", confidence=0.9)
+    second = dict(SAMPLE["findings"][0], path="second.py", severity="low", confidence=0.9)
+    third = dict(SAMPLE["findings"][0], path="third.py", severity="high", confidence=0.9)
+
+    accepted = validate_review_answer(json.dumps(dict(SAMPLE, findings=[first, second, third])))
+
+    assert accepted["findings"] == [first, third, second]
+
+
+def test_semantic_error_uses_the_raw_finding_index_before_sorting() -> None:
+    first = dict(SAMPLE["findings"][0], severity="low", title="Invalid title.")
+    second = dict(SAMPLE["findings"][0], severity="critical", title="Valid title")
+
+    with pytest.raises(InvalidAnswer) as caught:
         validate_review_answer(json.dumps(dict(SAMPLE, findings=[first, second])))
-    # the same pair in descending confidence is accepted
-    validate_review_answer(json.dumps(dict(SAMPLE, findings=[second, first])))
+
+    assert caught.value.errors == ["findings/0: Value error, title must not end with a period"]
+
+
+def test_gateway_returns_normalized_output_and_keeps_raw_provider_trace() -> None:
+    payload = json.loads((CORPUS / "normalizable" / "wrong-order.json").read_text())
+    payload["findings"][1]["start_line"] = 33
+    raw_answer = json.dumps(payload)
+    raw_response = {"choices": [{"message": {"content": raw_answer}}]}
+    expected_raw_response = deepcopy(raw_response)
+
+    class OneAnswerTransport:
+        async def complete(self, request: ChatRequest) -> ChatResponse:
+            return ChatResponse(
+                raw=raw_response,
+                content=raw_answer,
+                finish_reason="stop",
+                model=request.profile.model,
+                prompt_tokens=10,
+                completion_tokens=20,
+                cached_tokens=0,
+                cost=None,
+                cost_currency=None,
+            )
+
+    settings = LlmSettings.from_env({"LLM_MODEL": "mistral-small-4", "LLM_API_KEYS": "sk-test"})
+    trace = InMemoryLlmCallTrace()
+    gateway = LlmGateway(settings, OneAnswerTransport(), InMemoryUsageLedger(), trace)
+    task = StructuredTask(
+        operation="review",
+        messages=(ChatMessage("user", "Review this diff"),),
+        schema=ResponseSchema("ReviewOutput", provider_schema(review_output_schema())),
+        validate=validate_review_answer,
+    )
+    context = RunCallContext(
+        run_id=UUID("00000000-0000-0000-0000-000000000066"),
+        workspace_id=UUID("00000000-0000-0000-0000-000000000067"),
+        attempt=1,
+        engine="fast",
+        deadline=datetime.now(UTC) + timedelta(minutes=5),
+    )
+
+    result = asyncio.run(gateway.generate(task, context))
+
+    findings = cast(list[dict[str, object]], result.output["findings"])
+    assert [finding["path"] for finding in findings] == [
+        "app/modules/billing/infrastructure/repository.py",
+        "app/modules/billing/application/charge.py",
+    ]
+    assert findings[0]["start_line"] is None
+    assert isinstance(ReviewOutput.model_validate(result.output), ReviewOutput)
+    assert raw_response == expected_raw_response
+    assert trace.records[0][1].response == expected_raw_response
+    assert trace.records[0][1].response["choices"][0]["message"]["content"] == raw_answer
 
 
 @pytest.mark.parametrize(

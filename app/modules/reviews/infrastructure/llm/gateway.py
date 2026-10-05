@@ -28,7 +28,7 @@ from collections import OrderedDict
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from decimal import Decimal
+from decimal import Decimal, DecimalException
 from typing import Protocol
 from uuid import UUID
 
@@ -52,6 +52,7 @@ from app.modules.reviews.infrastructure.llm.transport import (
     ChatTransport,
     ResponseSchema,
     TransportError,
+    TransportPaidAnswerError,
 )
 
 logger = logging.getLogger(__name__)
@@ -60,6 +61,11 @@ _REPAIR_INSTRUCTION = (
     "Your previous answer violated the output contract. Validator errors:\n{errors}\n"
     "Answer again with the corrected JSON object only: no prose, no code fence."
 )
+_USD_QUANTUM = Decimal("0.000001")
+
+
+class _CostMetadataError(ValueError):
+    """The provider amount cannot be converted to USD for this paid answer."""
 
 
 class Clock(Protocol):
@@ -360,6 +366,14 @@ class LlmGateway:
                     timeout_s=timeout_s,
                 )
             )
+        except TransportPaidAnswerError as error:
+            duration_ms = _elapsed_ms(started, self._monotonic())
+            paid_response = error.paid_response
+            usage = self._usage(profile, task.operation, paid_response, estimate, conservative=True)
+            await self._record_paid_answer(
+                context, state, record, duration_ms, paid_response, usage
+            )
+            raise self._failed(LlmErrorCode.INVALID_OUTPUT, error.message, state) from None
         except TransportError as error:
             duration_ms = _elapsed_ms(started, self._monotonic())
             await self._record_trace(
@@ -390,10 +404,13 @@ class LlmGateway:
             )
 
         duration_ms = _elapsed_ms(started, self._monotonic())
-        usage = self._usage(profile, task.operation, response, estimate)
-        state.usage.append(usage)
-        await self._ledger.record(context, usage)
-        await self._record_trace(context, record.finish(duration_ms, response=response.raw))
+        try:
+            usage = self._usage(profile, task.operation, response, estimate)
+        except _CostMetadataError as error:
+            usage = self._usage(profile, task.operation, response, estimate, conservative=True)
+            await self._record_paid_answer(context, state, record, duration_ms, response, usage)
+            raise self._failed(LlmErrorCode.INVALID_OUTPUT, str(error), state) from None
+        await self._record_paid_answer(context, state, record, duration_ms, response, usage)
         logger.info(
             "llm call answered",
             extra={
@@ -407,6 +424,19 @@ class LlmGateway:
         )
         return _validated(response, task)
 
+    async def _record_paid_answer(
+        self,
+        context: RunCallContext,
+        state: _AttemptState,
+        record: _RecordDraft,
+        duration_ms: int,
+        response: ChatResponse,
+        usage: LlmUsage,
+    ) -> None:
+        state.usage.append(usage)
+        await self._ledger.record(context, usage)
+        await self._record_trace(context, record.finish(duration_ms, response=response.raw))
+
     async def _record_trace(self, context: RunCallContext, record: LlmCallRecord) -> None:
         """A failed trace write is logged, never allowed to discard a paid answer."""
         try:
@@ -418,16 +448,45 @@ class LlmGateway:
             )
 
     def _usage(
-        self, profile: ModelProfile, operation: str, response: ChatResponse, estimate: int
+        self,
+        profile: ModelProfile,
+        operation: str,
+        response: ChatResponse,
+        estimate: int,
+        *,
+        conservative: bool = False,
     ) -> LlmUsage:
         tokens_in, tokens_out = response.prompt_tokens, response.completion_tokens
-        if tokens_in == 0 and tokens_out == 0 and response.cost_usd is None:
+        if tokens_in == 0 and tokens_out == 0 and response.cost is None:
             # No usage block (some self-hosted servers): count the pre-send estimate and
             # the answer, so the run cost limit does not fail open.
             tokens_in = estimate
             tokens_out = self.token_counter(profile).count(response.content or "")
-        if response.cost_usd is not None:
-            cost = Decimal(str(response.cost_usd)).quantize(Decimal("0.000001"))
+        if conservative:
+            # The provider answered but its amount cannot be trusted as USD. Charge at
+            # least the pre-call reservation, without a cache discount, then fail.
+            cost = profile.price.cost_usd(
+                tokens_in=max(tokens_in, estimate),
+                tokens_out=max(tokens_out, profile.max_output_tokens),
+            )
+        elif response.cost is not None:
+            try:
+                if response.cost_currency in (None, "USD"):
+                    cost_usd = response.cost
+                elif response.cost_currency == "EUR":
+                    rate = self._settings.eur_to_usd_rate
+                    if rate is None or not rate.is_finite() or rate <= 0:
+                        raise _CostMetadataError(
+                            "LLM_EUR_TO_USD_RATE is required for EUR usage.cost"
+                        )
+                    cost_usd = response.cost * rate
+                else:
+                    raise _CostMetadataError("unsupported usage.cost_currency")
+                if not cost_usd.is_finite():
+                    raise _CostMetadataError("usage.cost cannot be represented in USD")
+                cost = cost_usd.quantize(_USD_QUANTUM)
+            except DecimalException:
+                raise _CostMetadataError("usage.cost cannot be represented in USD") from None
         else:
             cost = profile.price.cost_usd(
                 tokens_in=tokens_in,

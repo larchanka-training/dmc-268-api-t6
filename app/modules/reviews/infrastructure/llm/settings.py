@@ -10,7 +10,7 @@ import json
 import logging
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from typing import Literal
 from urllib.parse import urlsplit
 
@@ -87,6 +87,7 @@ class LlmSettings:
     primary: ModelProfile
     fallback: ModelProfile | None
     policy: GatewayPolicy = field(default_factory=GatewayPolicy)
+    eur_to_usd_rate: Decimal | None = None
 
     @classmethod
     def from_env(cls, env: Mapping[str, str]) -> LlmSettings:
@@ -105,7 +106,18 @@ class LlmSettings:
             if env.get("LLM_FALLBACK_MODEL")
             else None
         )
-        return cls(primary=primary, fallback=fallback)
+        rate_raw = env.get("LLM_EUR_TO_USD_RATE")
+        rate = None
+        if rate_raw:
+            try:
+                rate = Decimal(rate_raw)
+            except InvalidOperation:
+                raise LlmConfigError(
+                    "LLM_EUR_TO_USD_RATE must be a positive finite decimal"
+                ) from None
+            if not rate.is_finite() or rate <= 0:
+                raise LlmConfigError("LLM_EUR_TO_USD_RATE must be a positive finite decimal")
+        return cls(primary=primary, fallback=fallback, eur_to_usd_rate=rate)
 
 
 # Chosen for OQ-2 (docs/SYSTEM_DESIGN.md §15) in #46: catalog values of EUrouter on

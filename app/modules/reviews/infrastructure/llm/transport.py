@@ -8,10 +8,12 @@ HTTP failures are mapped to the classes of §5.1; a key never reaches a message.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import math
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from decimal import Decimal
 from typing import Any, Literal, Protocol
 
 import httpx
@@ -69,7 +71,8 @@ class ChatResponse:
     prompt_tokens: int
     completion_tokens: int
     cached_tokens: int
-    cost_usd: float | None
+    cost: Decimal | None
+    cost_currency: str | None
     refusal: str | None = None
 
 
@@ -107,6 +110,14 @@ class TransportUnavailable(TransportError):
 
 class TransportContextOverflow(TransportError):
     error_class = LlmErrorCode.CONTEXT_OVERFLOW
+
+
+class TransportPaidAnswerError(TransportUnavailable):
+    """A paid HTTP 200 whose usage metadata cannot be safely charged as USD."""
+
+    def __init__(self, message: str, paid_response: ChatResponse) -> None:
+        super().__init__(message, http_status=200, retryable=False)
+        self.paid_response = paid_response
 
 
 class ChatTransport(Protocol):
@@ -152,7 +163,7 @@ class OpenAICompatibleTransport:
                 )
                 continue
             self._current_key[pool] = index
-            return _parse_response(response, profile.api_keys)
+            return _parse_response(response, profile)
         assert last is not None
         # A key that is only rate limited outranks a dead one: the gateway then waits
         # for Retry-After and reports llm_rate_limited, not llm_unavailable.
@@ -232,9 +243,9 @@ def _status_error(response: httpx.Response, keys: tuple[str, ...]) -> TransportE
     return TransportUnavailable(f"HTTP {status}: {text}", http_status=status, retryable=False)
 
 
-def _parse_response(response: httpx.Response, keys: tuple[str, ...]) -> ChatResponse:
+def _parse_response(response: httpx.Response, profile: ModelProfile) -> ChatResponse:
     if response.status_code != 200:
-        raise _status_error(response, keys)
+        raise _status_error(response, profile.api_keys)
     try:
         raw = response.json()
         choice = raw["choices"][0]
@@ -250,8 +261,8 @@ def _parse_response(response: httpx.Response, keys: tuple[str, ...]) -> ChatResp
         refusal = message.get("refusal")
         usage = raw.get("usage") or {}
         details = usage.get("prompt_tokens_details") or {}
-        cost = usage.get("cost")
-        return ChatResponse(
+        currency_raw = usage.get("cost_currency")
+        parsed = ChatResponse(
             raw=raw,
             content=content if isinstance(content, str) else None,
             finish_reason=choice.get("finish_reason"),
@@ -259,13 +270,41 @@ def _parse_response(response: httpx.Response, keys: tuple[str, ...]) -> ChatResp
             prompt_tokens=int(usage.get("prompt_tokens") or 0),
             completion_tokens=int(usage.get("completion_tokens") or 0),
             cached_tokens=int(details.get("cached_tokens") or 0),
-            cost_usd=float(cost) if isinstance(cost, (int, float)) else None,
+            cost=None,
+            cost_currency=currency_raw if isinstance(currency_raw, str) else None,
             refusal=refusal if isinstance(refusal, str) and refusal else None,
         )
+        if currency_raw is not None and (
+            not isinstance(currency_raw, str) or currency_raw.upper() not in ("USD", "EUR")
+        ):
+            raise TransportPaidAnswerError("HTTP 200 with unsupported usage.cost_currency", parsed)
+        currency = currency_raw.upper() if currency_raw is not None else None
+        try:
+            cost = _exact_cost(response) if usage.get("cost") is not None else None
+        except (ValueError, KeyError, TypeError, AttributeError):
+            raise TransportPaidAnswerError("HTTP 200 with invalid usage.cost", parsed) from None
+        if cost is not None and currency is None:
+            logger.warning(
+                "llm usage cost has no currency; treating as USD",
+                extra={"provider": profile.provider, "model": profile.model},
+            )
+        return replace(parsed, cost=cost, cost_currency=currency)
     except (ValueError, KeyError, IndexError, TypeError, AttributeError):
         raise TransportUnavailable(
             "HTTP 200 with a body that is not a chat completion", http_status=200
         ) from None
+
+
+def _exact_cost(response: httpx.Response) -> Decimal:
+    """Parse the JSON number separately so the raw trace keeps JSON-native types."""
+    precise = json.loads(response.content, parse_float=Decimal)
+    value = precise["usage"]["cost"]
+    if isinstance(value, bool) or not isinstance(value, (int, Decimal)):
+        raise ValueError("invalid usage.cost")
+    cost = Decimal(value)
+    if not cost.is_finite() or cost < 0:
+        raise ValueError("invalid usage.cost")
+    return cost
 
 
 def _error_text(response: httpx.Response, keys: tuple[str, ...]) -> str:

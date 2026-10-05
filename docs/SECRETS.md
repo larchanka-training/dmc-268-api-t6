@@ -30,6 +30,8 @@
 |---|---|---|
 | `STAGING_SSH_FINGERPRINT` | да, для обеих целей | `SHA256:…` host key VPS (`ssh-keyscan -p 22 <VPS_DMC268_IP_T6> \| ssh-keygen -lf - -E sha256`). Значение в Environment `staging` перекрывает repository. При переключении между курсовым VPS и Terraform-хостом fingerprint нужно обновить: у хостов разные ключи, и при несовпадении jobs с SSH падают (fail-closed) |
 | `APP_DOMAIN` | да, для курсового VPS | `dmc268-t6.axyi.ru` — базовый домен маршрутов edge-прокси |
+| `LLM_FALLBACK_MODEL` | нет | `mistral-small-3.2-24b` (OQ-2, SD §15). Значение передаётся только в `worker.env`; пустое или незаданное значение исключает fallback |
+| `LLM_EUR_TO_USD_RATE` | для учёта ответа с EUR-стоимостью и ручного `LLM live run` | `1.1204` USD за 1 EUR на 05.10.2026; явный курс для worker и обеих проверок live-run, без значения по умолчанию в коде. Workflow live-run читает repository variable, не Environment `staging`. Порядок обновления — ниже |
 
 ### GitHub Environment `staging` — secrets
 
@@ -40,7 +42,7 @@
 | `STAGING_SSH_KEY` | да, для Terraform-хоста | SCP/SSH на VM | приватный ключ к `hcloud_ssh_key.ci` |
 | `POSTGRES_PASSWORD` | нет | `<APP_DIR>/.env` на хосте | пароль PostgreSQL. Если не задан, `deploy.sh` генерирует его при первом выкате и хранит в `.env` (0600). После инициализации тома пароль не менять: Postgres его не перечитывает |
 
-Секреты приложения. GitHub не принимает имена секретов и variables с префиксом `GITHUB_` (HTTP 422), поэтому секреты App заведены как `GH_*`, а в контейнере у них имена из `.env.example`. Сопоставление делает шаг «Bundle application secrets» в `deploy-staging`; тем же путём идут organization secret `AI_DMC268_T6`, organization variable `AI_DMC268_URL` и variables Environment `GH_APP_BOT_LOGIN`, `LLM_MODEL`. Незаданное значение в контейнер не попадает совсем, а не приходит пустой строкой.
+Секреты приложения. GitHub не принимает имена секретов и variables с префиксом `GITHUB_` (HTTP 422), поэтому секреты App заведены как `GH_*`, а в контейнере у них имена из `.env.example`. Сопоставление делает шаг «Bundle application secrets» в `deploy-staging`; тем же путём идут organization secret `AI_DMC268_T6`, organization variable `AI_DMC268_URL` и `vars.GH_APP_BOT_LOGIN`, `vars.LLM_MODEL`, `vars.LLM_FALLBACK_MODEL`, `vars.LLM_EUR_TO_USD_RATE`. Последние два можно задать на уровне repository либо переопределить в Environment `staging`. Незаданное значение в контейнер не попадает совсем, а не приходит пустой строкой.
 
 **Ограничение на значения:** без одинарной кавычки `'` и без `\` в конце. Значения пишутся в env-файл в одинарных кавычках (§3, п. 5), и `deploy.sh` такие значения отклоняет: выкат останавливается до изменений на хосте. На первом выкате после #35, пока в `.env` хоста нет `RABBITMQ_PASSWORD`, следующий за этим авто-откат падает с `RABBITMQ_PASSWORD is required` — стек не тронут, прогон красный. Завершающий перевод строки значения срезается; разбору PEM это безразлично.
 
@@ -50,7 +52,7 @@
 |---|---|---|
 | `api.env` | `GITHUB_WEBHOOK_SECRET`, `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET`, `AUTH_JWT_PRIVATE_KEY`, `AUTH_JWT_PUBLIC_KEY` | `api` |
 | `app.env` | `GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY` | `worker`, `webhook-worker` |
-| `worker.env` | `LLM_API_KEYS`, `LLM_BASE_URL`, `LLM_MODEL` | `worker` |
+| `worker.env` | `LLM_API_KEYS`, `LLM_BASE_URL`, `LLM_MODEL`, `LLM_FALLBACK_MODEL`, `LLM_EUR_TO_USD_RATE` (последние два — только при непустом значении) | `worker` |
 | `webhook-worker.env` | `GITHUB_APP_BOT_LOGIN` | `webhook-worker` |
 
 | Secret | Тип значения | Переменная в контейнере | Контейнеры | Зачем |
@@ -105,21 +107,26 @@ rm jwt.pem jwt.pub
 | `POSTGRES_DB` | нет | иначе `app` |
 | `GH_APP_BOT_LOGIN` | да: без него `webhook-worker` не стартует, выкат откатывается | `dmc268-t6-reviewer[bot]` — логин бота App. В контейнере `GITHUB_APP_BOT_LOGIN`, только у `webhook-worker` (`app/webhook_worker.py`). Префикс `GH_`, потому что GitHub не принимает `GITHUB_` и у variables; берётся из `vars.`, а не из `secrets.` |
 | `LLM_MODEL` | для ревью моделью | `mistral-small-4` (OQ-2, SD §15). В контейнере `LLM_MODEL`, только у `worker`. Модель — конфигурация шлюза, а не секрет: меняется без коммита |
+| `LLM_FALLBACK_MODEL` | нет, переопределение repository | `mistral-small-3.2-24b`; пусто — без fallback. Только `worker` |
+| `LLM_EUR_TO_USD_RATE` | для ответа с EUR-стоимостью, переопределение repository | `1.1204` USD/EUR на 05.10.2026; только `worker`. Пусто — курс отсутствует, оплаченный EUR-ответ завершится ошибкой (§1, «LLM-шлюз») |
 
 ### LLM-шлюз — переменные приложения (#33)
 
-Читает `LlmSettings.from_env` (`app/modules/reviews/infrastructure/llm/settings.py`). Секрет здесь — только ключи; остальное — конфигурация. На staging `LLM_API_KEYS` (из organization secret `AI_DMC268_T6`), `LLM_BASE_URL` (из organization variable `AI_DMC268_URL`) и `LLM_MODEL` (variable Environment) приходят в `worker` через `worker.env` (§1, таблица env-файлов); остальные `LLM_*` на staging не заданы и берут дефолты.
+Читает `LlmSettings.from_env` (`app/modules/reviews/infrastructure/llm/settings.py`). Секрет здесь — только ключи; остальное — конфигурация. На staging `LLM_API_KEYS` (из organization secret `AI_DMC268_T6`), `LLM_BASE_URL` (из organization variable `AI_DMC268_URL`), `LLM_MODEL` (variable Environment), а также непустые `LLM_FALLBACK_MODEL` и `LLM_EUR_TO_USD_RATE` (repository variable или переопределение Environment) приходят в `worker` через `worker.env` (§1, таблица env-файлов). Остальные `LLM_*` на staging берут дефолты, если они есть.
 
 | Переменная | Секрет | Обязательна | Значение |
 |---|---|---|---|
 | `LLM_API_KEYS` | **да** | для EUrouter | ключи через запятую; при 401/403/429 шлюз переходит к следующему (ротация вызовом не считается). Для self-hosted без авторизации — пусто |
 | `LLM_MODEL` | нет | да | основная модель, `mistral-small-4` (OQ-2, SD §15) |
 | `LLM_FALLBACK_MODEL` | нет | нет | fallback-модель, `mistral-small-3.2-24b`; пусто — без fallback |
+| `LLM_EUR_TO_USD_RATE` | нет | для ответа с EUR-стоимостью | Положительное конечное десятичное число, USD за 1 EUR; пример staging на 05.10.2026 — `1.1204`. Курс по умолчанию отсутствует. USD-стоимость проходит без пересчёта, отсутствие `cost_currency` трактуется как USD с предупреждением. При EUR без курса, неизвестной валюте или некорректной стоимости оплаченный ответ сохраняет сырой трейс и токены, ledger получает консервативную USD-оценку, затем шлюз завершает вызов `llm_invalid_output` без повторов (PIPELINE_SPEC §4.5) |
 | `LLM_FALLBACK_API_KEYS` | **да** | для известной fallback-модели на другом endpoint | ключи наследуются только вместе с endpoint: если fallback идёт на тот же base URL, что и основная, — `LLM_API_KEYS`; на другой хост ключи основной не уходят никогда |
 | `LLM_BASE_URL`, `LLM_FALLBACK_BASE_URL` | нет | для неизвестной модели | OpenAI-совместимый endpoint; для моделей из `KNOWN_MODELS` — их собственный (`https://api.eurouter.ai/api/v1`), неизвестная fallback-модель без своего URL берёт URL основной. С ключами — только `https`, кроме локальных хостов: `localhost`, `127.0.0.1`, `::1`, `host.docker.internal`, `*.localhost`, `*.local`, `*.internal`. Compose-сервис (`http://ollama:11434/v1`) или адрес RFC 1918 по `http` работает только без ключей |
 | `LLM_CONTEXT_WINDOW` (и `LLM_FALLBACK_CONTEXT_WINDOW`) | нет | для неизвестной модели | окно модели в токенах |
 | `LLM_PROVIDER`, `LLM_MAX_OUTPUT_TOKENS`, `LLM_PRICE_INPUT_PER_MTOK`, `LLM_PRICE_OUTPUT_PER_MTOK`, `LLM_PRICE_CACHE_READ_PER_MTOK`, `LLM_EXTRA_BODY` (и те же `LLM_FALLBACK_*`) | нет | нет | дефолты: провайдер `self-hosted`, резерв на ответ 8000, цена 0, тело `{}`. **Цена 0 у удалённой модели — лимит стоимости прогона видит только `usage.cost` провайдера**; шлюз пишет предупреждение, для hosted-модели цены задавать обязательно. Метка провайдера идёт в `usage_events`, цены — USD за 1 млн токенов, `LLM_EXTRA_BODY` — доп. поля тела запроса (JSON). `LLM_EXTRA_BODY` переопределяет `temperature` и `max_tokens`, `null` убирает ключ — для reasoning-моделей, например `{"temperature": null, "max_tokens": null, "max_completion_tokens": 8000}`; `model`, `messages` и строгий `response_format` не переопределяются |
 | `LLM_STRUCTURED_OUTPUT` | нет | нет | `json_schema` (по умолчанию). `prompt_json` — только локальные и self-hosted модели в dev и eval, требует `LLM_ALLOW_PROMPT_JSON=1`; на staging и prod не задаётся (D7) |
+
+**Обновление курса.** Ответственный за staging (дежурный backend-оператор) сверяет `LLM_EUR_TO_USD_RATE` с [дневным справочным курсом ЕЦБ, опубликованным Банком Литвы](https://www.lb.lt/en/daily-euro-foreign-exchange-reference-rates-published-by-the-european-central-bank), в каждый рабочий день после публикации ЕЦБ и перед ручным `LLM live run` или выкатом staging; при изменении обновляет repository variable и запускает выкат worker. На 05.10.2026 опубликовано **1 EUR = 1.1204 USD** — это начальное значение для настройки, не встроенный дефолт. Если новый дневной курс ещё не опубликован, оператор использует последний опубликованный и фиксирует его дату при проверке. Значение из Environment `staging` перекрывает repository variable только при выкате staging; live-run job не привязан к этому Environment и видит repository variable. Если Environment содержит переопределение, обновлять оба значения согласованно.
 
 Ключи не попадают в логи, тексты исключений, `run_actions` и `usage_events`: транспорт вычищает их из текстов ошибок провайдера, у `ModelProfile` ключи скрыты из `repr` — это проверяет `tests/test_llm_gateway.py::test_keys_never_reach_logs_exceptions_or_the_trace`. Required CI работает без сети и без LLM-ключей: все тесты шлюза идут на фейковом HTTP-транспорте; живой прогон — вручную (README, раздел «LLM gateway»).
 

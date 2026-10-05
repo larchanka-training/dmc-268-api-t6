@@ -140,6 +140,7 @@ def completion(
     completion_tokens: int = 300,
     cached_tokens: int = 0,
     cost: float | None = None,
+    cost_currency: str | None = None,
     finish_reason: str = "stop",
 ) -> httpx.Response:
     usage: dict[str, Any] = {
@@ -150,6 +151,8 @@ def completion(
     }
     if cost is not None:
         usage["cost"] = cost
+    if cost_currency is not None:
+        usage["cost_currency"] = cost_currency
     return httpx.Response(
         200,
         json={
@@ -205,6 +208,7 @@ class Harness:
     fallback: ModelProfile | None = FALLBACK
     deadline_in_s: float = 480
     engine: str = "fast"
+    attempt: int = 2
     clock: FakeClock = field(default_factory=FakeClock)
     ledger: InMemoryUsageLedger = field(default_factory=InMemoryUsageLedger)
     trace: InMemoryLlmCallTrace = field(default_factory=InMemoryLlmCallTrace)
@@ -216,7 +220,7 @@ class Harness:
         return RunCallContext(
             run_id=RUN_ID,
             workspace_id=WORKSPACE_ID,
-            attempt=2,
+            attempt=self.attempt,
             engine="deep" if self.engine == "deep" else "fast",
             deadline=NOW + timedelta(seconds=self.deadline_in_s),
             prompt_version_id=PROMPT_VERSION_ID,
@@ -1378,6 +1382,130 @@ def test_a_failed_trace_write_does_not_discard_the_answer(
 
 
 # ---------- usage and trace ----------
+
+
+@pytest.mark.parametrize(
+    ("currency", "raw_cost", "rate", "expected_usd"),
+    [
+        ("USD", 0.1234567, "1.1204", Decimal("0.123457")),
+        (None, 0.125, "1.1204", Decimal("0.125000")),
+        ("EUR", 0.125, "1.1204", Decimal("0.140050")),
+        ("EUR", 0.00000049, "2", Decimal("0.000001")),
+    ],
+)
+def test_provider_cost_is_recorded_in_usd_once(
+    currency: str | None, raw_cost: float, rate: str, expected_usd: Decimal
+) -> None:
+    settings = LlmSettings(primary=PRIMARY, fallback=None, eur_to_usd_rate=Decimal(rate))
+    harness = Harness([valid(cost=raw_cost, cost_currency=currency)], settings=settings)
+
+    result = harness.review()
+
+    assert result.usage[0].cost_usd == expected_usd
+    assert harness.ledger.events[0][1].cost_usd == expected_usd
+
+
+def test_eur_fallback_cost_blocks_a_later_attempt_at_the_usd_budget() -> None:
+    settings = LlmSettings(primary=PRIMARY, fallback=FALLBACK, eur_to_usd_rate=Decimal("1.1204"))
+    harness = Harness([error(401), valid(cost=0.445, cost_currency="EUR")], settings=settings)
+
+    first = harness.review()
+    harness.attempt = 3
+    failure = harness.failure()
+
+    assert first.usage[0].cost_usd == Decimal("0.498578")
+    assert harness.kinds() == ["primary", "fallback"]
+    assert failure.error_code is LlmErrorCode.BUDGET_EXCEEDED
+    assert failure.calls == 0
+    assert len(harness.requests) == 2
+
+
+def test_eur_cost_without_rate_records_paid_usage_and_raw_trace_then_fails() -> None:
+    harness = Harness(
+        [
+            valid(cost=0.1, cost_currency="EUR", prompt_tokens=10_000, completion_tokens=200),
+            valid(),
+        ],
+        settings=LlmSettings(primary=PRIMARY, fallback=FALLBACK),
+    )
+
+    failure = harness.failure()
+
+    assert failure.error_code is LlmErrorCode.INVALID_OUTPUT
+    assert not failure.run_retryable
+    assert "LLM_EUR_TO_USD_RATE" in str(failure)
+    assert failure.calls == 1
+    assert len(harness.requests) == 1
+    assert [(usage.tokens_in, usage.tokens_out, usage.cost_usd) for usage in failure.usage] == [
+        (10_000, 200, Decimal("0.012000"))
+    ]
+    assert harness.ledger.events[0][1] == failure.usage[0]
+    assert harness.trace.records[0][1].response_json()["usage"]["cost_currency"] == "EUR"
+
+
+@pytest.mark.parametrize("metadata", ["unknown-currency", "invalid-cost"])
+def test_bad_paid_cost_metadata_is_traced_and_charged_without_another_call(
+    metadata: str,
+) -> None:
+    if metadata == "unknown-currency":
+        reply = valid(
+            cost=0.1,
+            cost_currency="GBP",
+            prompt_tokens=10_000,
+            completion_tokens=200,
+        )
+    else:
+        payload = valid(
+            cost=0.1,
+            cost_currency="USD",
+            prompt_tokens=10_000,
+            completion_tokens=200,
+        ).json()
+        payload["usage"]["cost"] = "invalid"
+        reply = httpx.Response(200, json=payload)
+    harness = Harness([reply, valid()])
+
+    failure = harness.failure()
+
+    assert failure.error_code is LlmErrorCode.INVALID_OUTPUT
+    assert not failure.run_retryable
+    assert failure.calls == 1
+    assert len(harness.requests) == 1
+    assert [(usage.tokens_in, usage.tokens_out, usage.cost_usd) for usage in failure.usage] == [
+        (10_000, 200, Decimal("0.012000"))
+    ]
+    assert harness.ledger.events[0][1] == failure.usage[0]
+    assert harness.trace.records[0][1].response_json()["usage"]["cost"] == (
+        0.1 if metadata == "unknown-currency" else "invalid"
+    )
+
+
+@pytest.mark.parametrize(
+    ("currency", "cost", "rate"),
+    [("USD", 1e30, None), ("EUR", 1e20, Decimal("1e20"))],
+)
+def test_unquantizable_paid_cost_records_estimate_and_raw_trace_then_fails(
+    currency: str, cost: float, rate: Decimal | None
+) -> None:
+    harness = Harness(
+        [
+            valid(cost=cost, cost_currency=currency, prompt_tokens=10_000, completion_tokens=200),
+            valid(),
+        ],
+        settings=LlmSettings(primary=PRIMARY, fallback=FALLBACK, eur_to_usd_rate=rate),
+    )
+
+    failure = harness.failure()
+
+    assert failure.error_code is LlmErrorCode.INVALID_OUTPUT
+    assert not failure.run_retryable
+    assert failure.calls == 1
+    assert len(harness.requests) == 1
+    assert [(usage.tokens_in, usage.tokens_out, usage.cost_usd) for usage in failure.usage] == [
+        (10_000, 200, Decimal("0.012000"))
+    ]
+    assert harness.ledger.events[0][1] == failure.usage[0]
+    assert harness.trace.records[0][1].response_json()["usage"]["cost"] == cost
 
 
 def test_usage_of_every_call_is_returned_and_recorded_with_the_actual_model() -> None:

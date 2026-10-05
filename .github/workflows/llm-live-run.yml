@@ -33,6 +33,7 @@ jobs:
       MODEL: ${{ inputs.model }}
       FALLBACK_MODEL: ${{ inputs.fallback_model }}
       DIFF: ${{ inputs.diff }}
+      LLM_EUR_TO_USD_RATE: ${{ vars.LLM_EUR_TO_USD_RATE }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
