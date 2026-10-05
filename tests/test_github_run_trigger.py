@@ -438,6 +438,10 @@ class OutcomeEnqueuer:
             f"pr={_PR} head=aaaaaaa: enqueued run={_RUN}",
         ),
         (
+            EnqueueResult(EnqueueStatus.PUBLICATION_PENDING, _RUN),
+            f"pr={_PR} head=aaaaaaa: publication_pending run={_RUN}",
+        ),
+        (
             EnqueueResult(EnqueueStatus.INELIGIBLE, reason="ci_blocked"),
             f"pr={_PR} head=aaaaaaa: ineligible (ci_blocked)",
         ),
@@ -467,6 +471,23 @@ def test_pr_and_label_triggers_report_the_enqueue_outcome(
         == expected
     )
     assert enqueuer.calls == [(_PR, _HEAD), (_PR, _HEAD)]
+
+
+def test_a_run_whose_publish_failed_is_reported_as_publication_pending_with_its_run() -> None:
+    uow = Uow()
+    trigger = TriggerFromDelivery(
+        targets=OutcomeTargets(),
+        enqueuer=TryEnqueueWebhookRun(
+            eligibility=Eligibility(),
+            uow_factory=lambda: uow,
+            publisher=Publisher(uow, fail=True),
+            now=lambda: _NOW,
+        ),
+    )
+
+    outcome = asyncio.run(trigger.on_pr(_outcome_event("synchronize")))
+
+    assert outcome == f"pr={_PR} head=aaaaaaa: publication_pending run={_RUN}"
 
 
 def test_a_pr_with_no_open_row_is_reported_without_enqueueing() -> None:
@@ -513,7 +534,7 @@ def test_a_ci_event_reports_every_target_and_the_absence_of_one() -> None:
     )
     assert enqueuer.calls == [(_PR, _HEAD), (other, _HEAD)]
     nobody = TriggerFromDelivery(targets=OutcomeTargets(ci=()), enqueuer=OutcomeEnqueuer([]))
-    assert asyncio.run(nobody.on_ci(event)) == "no open pull request"
+    assert asyncio.run(nobody.on_ci(event)) == "no open pull request at this head"
 
 
 @pytest.fixture

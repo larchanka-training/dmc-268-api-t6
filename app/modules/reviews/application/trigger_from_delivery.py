@@ -13,6 +13,8 @@ from app.modules.reviews.application.project_github_pull_request import (
 from app.modules.reviews.application.try_enqueue_webhook_run import EnqueueResult
 
 _NO_OPEN_PULL_REQUEST = "no open pull request"
+# CI of a head that is no longer current (it finished after a push) also ends up here.
+_NO_OPEN_PULL_REQUEST_AT_HEAD = "no open pull request at this head"
 _NOT_AN_AI_REVIEW_LABELED_ACTION = "not an ai-review labeled action"
 
 
@@ -61,7 +63,7 @@ class TriggerFromDelivery:
     async def on_ci(self, event: CiTriggerEvent) -> str:
         targets = await self._targets.for_ci(event)
         if not targets:
-            return _NO_OPEN_PULL_REQUEST
+            return _NO_OPEN_PULL_REQUEST_AT_HEAD
         return "; ".join([await self._enqueue(target, event.head_sha) for target in targets])
 
     async def _enqueue(self, code_change_id: UUID, head_sha: str) -> str:

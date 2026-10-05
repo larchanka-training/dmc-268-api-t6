@@ -26,6 +26,13 @@ _LOGGER = logging.getLogger(__name__)
 _RUN_TRIGGER_PR_ACTIONS = frozenset({"reopened", "synchronize"})
 
 
+def _with_action(action: str | None, detail: str | None) -> str | None:
+    """Name the pull request action in the detail, so ``labeled`` differs from ``synchronize``."""
+    if action is None:
+        return detail
+    return f"action={action}" if detail is None else f"action={action} {detail}"
+
+
 class InstallationDeliveryDispatchStatus(StrEnum):
     """Observable result for a verified installation delivery."""
 
@@ -47,7 +54,8 @@ class InstallationDeliveryDispatchResult:
     """Result that lets the transport choose an acknowledgement response."""
 
     status: InstallationDeliveryDispatchStatus
-    # Why the delivery ended as it did (never a payload or a credential); logged by the worker.
+    # Why the delivery ended as it did, prefixed with ``action=<action>`` for pull request
+    # events (never a payload or a credential); logged by the worker.
     detail: str | None = None
 
 
@@ -135,51 +143,62 @@ class GitHubInstallationDeliveryDispatcher:
         event = delivery.value
         if isinstance(event, UnsupportedGitHubEvent):
             return InstallationDeliveryDispatchResult(
-                status=InstallationDeliveryDispatchStatus.IGNORED_IRRELEVANT_EVENT
+                status=InstallationDeliveryDispatchStatus.IGNORED_IRRELEVANT_EVENT,
+                detail=_with_action(event.action, None),
             )
         if isinstance(event, PullRequestLabelEvent):
+            action = event.pull_request.action
             if event.label_name != "ai-review":
                 return InstallationDeliveryDispatchResult(
                     status=InstallationDeliveryDispatchStatus.IGNORED_IRRELEVANT_EVENT,
-                    detail="label is not ai-review",
+                    detail=_with_action(action, "label is not ai-review"),
                 )
             if self._label_intent_projector is None:
                 return InstallationDeliveryDispatchResult(
-                    status=InstallationDeliveryDispatchStatus.DEFERRED_KNOWN_EVENT
+                    status=InstallationDeliveryDispatchStatus.DEFERRED_KNOWN_EVENT,
+                    detail=_with_action(action, None),
                 )
             projection = await self._label_intent_projector.execute(event)
-            result = self._projection_result(projection)
+            result = self._projection_result(projection, action)
             if (
-                event.pull_request.action == "labeled"
+                action == "labeled"
                 and result.status == InstallationDeliveryDispatchStatus.PROJECTED_PR
             ):
                 if self._run_trigger is None:
                     return InstallationDeliveryDispatchResult(
-                        status=InstallationDeliveryDispatchStatus.DEFERRED_KNOWN_EVENT
+                        status=InstallationDeliveryDispatchStatus.DEFERRED_KNOWN_EVENT,
+                        detail=_with_action(action, None),
                     )
                 detail = await self._run_trigger.on_label(event)
-                return InstallationDeliveryDispatchResult(result.status, detail)
+                return InstallationDeliveryDispatchResult(
+                    result.status, _with_action(action, detail)
+                )
             return result
         if isinstance(event, PullRequestEvent):
             if event.action in {"review_requested", "review_request_removed"}:
                 return InstallationDeliveryDispatchResult(
-                    status=InstallationDeliveryDispatchStatus.IGNORED_IRRELEVANT_EVENT
+                    status=InstallationDeliveryDispatchStatus.IGNORED_IRRELEVANT_EVENT,
+                    detail=_with_action(event.action, None),
                 )
             if self._pull_request_projector is None:
                 return InstallationDeliveryDispatchResult(
-                    status=InstallationDeliveryDispatchStatus.DEFERRED_KNOWN_EVENT
+                    status=InstallationDeliveryDispatchStatus.DEFERRED_KNOWN_EVENT,
+                    detail=_with_action(event.action, None),
                 )
             projection = await self._pull_request_projector.execute(event)
-            result = self._projection_result(projection)
+            result = self._projection_result(projection, event.action)
             if result.status != InstallationDeliveryDispatchStatus.PROJECTED_PR:
                 return result
             if event.action in _RUN_TRIGGER_PR_ACTIONS:
                 if self._run_trigger is None:
                     return InstallationDeliveryDispatchResult(
-                        status=InstallationDeliveryDispatchStatus.DEFERRED_KNOWN_EVENT
+                        status=InstallationDeliveryDispatchStatus.DEFERRED_KNOWN_EVENT,
+                        detail=_with_action(event.action, None),
                     )
                 detail = await self._run_trigger.on_pr(event)
-                return InstallationDeliveryDispatchResult(result.status, detail)
+                return InstallationDeliveryDispatchResult(
+                    result.status, _with_action(event.action, detail)
+                )
             return result
         if isinstance(event, CiTriggerEvent):
             if self._run_trigger is not None:
@@ -218,7 +237,7 @@ class GitHubInstallationDeliveryDispatcher:
 
     @staticmethod
     def _projection_result(
-        projection: PullRequestProjectionStatus,
+        projection: PullRequestProjectionStatus, action: str
     ) -> InstallationDeliveryDispatchResult:
         if projection == PullRequestProjectionStatus.UNKNOWN_REPOSITORY:
             status = InstallationDeliveryDispatchStatus.IGNORED_UNKNOWN_REPOSITORY
@@ -229,4 +248,6 @@ class GitHubInstallationDeliveryDispatcher:
             status = InstallationDeliveryDispatchStatus.PROJECTED_PR
         else:
             status = InstallationDeliveryDispatchStatus.IGNORED_IRRELEVANT_EVENT
-        return InstallationDeliveryDispatchResult(status=status, detail=projection.value)
+        return InstallationDeliveryDispatchResult(
+            status=status, detail=_with_action(action, projection.value)
+        )

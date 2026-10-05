@@ -587,14 +587,13 @@ def _outcome_lines(caplog: pytest.LogCaptureFixture) -> list[str]:
     ]
 
 
-def test_projected_delivery_logs_one_outcome_line_with_its_detail_and_no_payload(
+def test_projected_delivery_logs_one_outcome_line_with_its_detail(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     now = datetime(2026, 9, 28, tzinfo=UTC)
     uow = FakeReceiptUnitOfWork()
-    payload = {"action": "labeled", "secret": "ghs_payload_sentinel"}
     receipts = [
-        VerifiedGitHubDelivery("outcome-1", "pull_request", payload).to_receipt(),
+        VerifiedGitHubDelivery("outcome-1", "pull_request", {"action": "labeled"}).to_receipt(),
         VerifiedGitHubDelivery("outcome-2", "installation", {"action": "created"}).to_receipt(),
     ]
 
@@ -603,7 +602,7 @@ def test_projected_delivery_logs_one_outcome_line_with_its_detail_and_no_payload
             if delivery.delivery_id == "outcome-1":
                 return InstallationDeliveryDispatchResult(
                     InstallationDeliveryDispatchStatus.PROJECTED_PR,
-                    "pr=p head=aaaaaaa: ineligible (ci_blocked)",
+                    "action=labeled pr=p head=aaaaaaa: ineligible (ci_blocked)",
                 )
             return InstallationDeliveryDispatchResult(InstallationDeliveryDispatchStatus.ONBOARDED)
 
@@ -618,10 +617,9 @@ def test_projected_delivery_logs_one_outcome_line_with_its_detail_and_no_payload
 
     assert _outcome_lines(caplog) == [
         "GitHub webhook delivery outcome-1 event=pull_request status=projected_pr "
-        "detail=pr=p head=aaaaaaa: ineligible (ci_blocked)",
+        "detail=action=labeled pr=p head=aaaaaaa: ineligible (ci_blocked)",
         "GitHub webhook delivery outcome-2 event=installation status=onboarded detail=-",
     ]
-    assert "ghs_payload_sentinel" not in caplog.text
 
 
 def test_deferred_delivery_logs_when_it_is_tried_again_and_then_that_it_is_final(

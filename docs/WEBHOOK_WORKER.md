@@ -82,20 +82,24 @@ GitHub webhook delivery <delivery_id> event=<event> status=<status> detail=<deta
 
 `status` is the dispatch status (`projected_pr`, `processed_ci`, `onboarded`, `ignored_*`,
 `deferred_known_event`, `deferred_repository_details`). `detail` is `-` or the reason. For a
-Run trigger (label, `synchronize`, `reopened`, CI events) it is
+`pull_request` event it starts with `action=<action>`, so `labeled` and `synchronize` can be
+told apart (an ignored action, such as `ready_for_review`, shows only that). For a Run trigger
+(label, `synchronize`, `reopened`, CI events) the rest is
 `pr=<pull request id> head=<first 7 of the head sha>: <status> (<reason>) run=<run id>`, and a
-CI event joins one such outcome per open PR on that head with `; `:
+CI event joins one such outcome per open PR on that head with `; ` (and has no action):
 
 | status | reason | meaning |
 | --- | --- | --- |
 | `enqueued` | | the Run was inserted and published (`run=<id>`) |
 | `publication_pending` | | the Run was inserted, the broker publish failed; the review worker's leader loop replays it |
-| `ineligible` | the CI gate reason: `ci_blocked` (a foreign check suite is not green), `waiting_for_ci`, `label_not_active`, `stale_head`, `stale_state`, `closed_pr`, `disabled_repository`, `unknown_pr` | the gate decided not to start a Run |
+| `ineligible` | the CI gate reason: `ci_blocked` (a foreign check suite or the commit status is not green), `waiting_for_ci` (no CI evidence yet with `wait_for_ci = always`, or still inside the 2-minute `auto` window), `label_not_active`, `stale_head`, `stale_state`, `closed_pr`, `disabled_repository`, `unknown_pr` | the gate decided not to start a Run |
 | `unconfigured` | `missing_installation`, `missing_rules` (no active rule version), `missing_prompt` (no active `review.system` prompt and none pinned) | the repository lacks what a Run needs; a new label or CI event does not change that |
 | `stale` | `pull_request_gone`, `repository_gone`, `state_changed` (the PR changed between the gate and the locked read) | the decision no longer matches the current PR |
 | `duplicate` | `active_run` (a queued, running or publishing Run exists), `head_already_reviewed` (this head already has a webhook Run) | no second Run is created |
 
-Other details: `no open pull request` (the PR is closed or unknown, nothing to enqueue),
+Other details: `no open pull request` (a PR event or label whose PR is closed or unknown,
+nothing to enqueue), `no open pull request at this head` (a CI event for a head that no open PR
+has, for example CI of an old head that finished after a push),
 `not an ai-review labeled action`, `label is not ai-review` (a foreign label), and, when the
 trigger did not run, the projection result: `projected`, `ignored_stale`, `ignored_unrelated`
 (for example a label set by the App's own bot) or `unknown_repository`. The line never carries

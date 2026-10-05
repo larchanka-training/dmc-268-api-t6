@@ -126,6 +126,10 @@ class SqlAlchemyWebhookRunStore:
                 message_published_at=None,
                 created_at=now,
             )
+            # ``head_already_reviewed`` is inferred from any unique violation here. That is safe
+            # only because the PR row lock and the active-Run pre-check above make
+            # ``uq_runs_one_active_per_code_change`` unreachable: what is left to collide is
+            # this head's idempotency key / ``uq_runs_webhook_code_change_head``.
             .on_conflict_do_nothing()
             .returning(Run.id)
         )
