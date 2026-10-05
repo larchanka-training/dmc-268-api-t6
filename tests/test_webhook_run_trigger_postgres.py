@@ -8,7 +8,9 @@ fails if the dispatcher is composed without ``run_trigger``. Opt-in with
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
+import re
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from typing import Any
@@ -37,6 +39,8 @@ HEAD = "e" * 40
 NEW_HEAD = "d" * 40
 BASE = "b" * 40
 APP_ID = 42
+# A recognisable installation token: it must never show up in a log record.
+TOKEN = "ghs_t72_sentinel"
 
 
 @dataclass(frozen=True)
@@ -209,7 +213,7 @@ class Pipeline:
         )
         receiver = ReviewsApiResources(self.engine, self.factory).github_delivery_receiver(
             client=client,
-            token_provider=StaticGitHubInstallationAccessTokenProvider("token"),
+            token_provider=StaticGitHubInstallationAccessTokenProvider(TOKEN),
             bot_login="reviewer[bot]",
             run_publisher=self.publisher,
             app_id=APP_ID,
@@ -361,3 +365,56 @@ def test_synchronize_cancels_the_attempted_run_and_signals_the_worker_at_once(
     # The close signal goes out with the delivery, without the worker's replay.
     assert (HEAD, RunPublicationKind.CANCELLATION) in kinds
     assert kinds[0] == (HEAD, RunPublicationKind.QUEUED)
+
+
+_UUID = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+
+
+@pytest.mark.integration
+def test_every_label_outcome_is_logged_with_its_reason_and_without_the_token(
+    database: Database, caplog: pytest.LogCaptureFixture
+) -> None:
+    github = FakeGitHub()
+    unknown_repository = _pr_delivery("labeled")
+    unknown_repository["repository"] = {"id": 999, "full_name": "octo/repo"}
+
+    async def scenario(pipeline: Pipeline) -> None:
+        await pipeline.deliver("pull_request", unknown_repository)
+        github.ci[HEAD] = [_suite(HEAD, 7, "in_progress", None, 1)]
+        await pipeline.deliver("pull_request", _pr_delivery("labeled"))
+        github.ci[HEAD] = _green(HEAD)
+        await pipeline.sql("UPDATE rule_versions SET is_active = false")
+        await pipeline.deliver("pull_request", _pr_delivery("labeled"))
+        await pipeline.sql("UPDATE rule_versions SET is_active = true")
+        await pipeline.deliver("pull_request", _pr_delivery("labeled"))
+        await pipeline.deliver("pull_request", _pr_delivery("labeled"))
+
+    with caplog.at_level(logging.INFO):
+        _run(database, github, scenario)
+
+    lines = [
+        record.getMessage()
+        for record in caplog.records
+        if record.levelno == logging.INFO
+        and record.getMessage().startswith("GitHub webhook delivery ")
+    ]
+    pr = rf"pr={_UUID} head=eeeeeee"
+    expected = [
+        r"GitHub webhook delivery delivery-1 event=pull_request "
+        r"status=ignored_unknown_repository detail=unknown_repository "
+        r"retry_at=\d{4}-\d\d-\d\dT\S+",
+        rf"GitHub webhook delivery delivery-2 event=pull_request status=projected_pr "
+        rf"detail={pr}: ineligible \(ci_blocked\)",
+        rf"GitHub webhook delivery delivery-3 event=pull_request status=projected_pr "
+        rf"detail={pr}: unconfigured \(missing_rules\)",
+        rf"GitHub webhook delivery delivery-4 event=pull_request status=projected_pr "
+        rf"detail={pr}: enqueued run={_UUID}",
+        rf"GitHub webhook delivery delivery-5 event=pull_request status=projected_pr "
+        rf"detail={pr}: duplicate \(active_run\)",
+    ]
+    assert len(lines) == len(expected), lines
+    for line, pattern in zip(lines, expected, strict=True):
+        assert re.fullmatch(pattern, line), line
+    # The App was really called with the token: it appears in no message or record field.
+    for logged in (caplog.text, *(repr(vars(record)) for record in caplog.records)):
+        assert TOKEN not in logged

@@ -6,7 +6,7 @@ import asyncio
 import json
 import os
 from collections.abc import Iterator
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from types import TracebackType
 from typing import Self
@@ -43,6 +43,8 @@ from app.modules.reviews.application.trigger_from_delivery import (
     TriggerFromDelivery,
 )
 from app.modules.reviews.application.try_enqueue_webhook_run import (
+    CandidateMiss,
+    DuplicateReason,
     EnqueueResult,
     EnqueueStatus,
     PendingRunMessage,
@@ -105,27 +107,33 @@ def _insert_candidate() -> RunInsertCandidate:
 @dataclass
 class Eligibility:
     calls: int = 0
+    decision: CiEligibility = field(
+        default_factory=lambda: CiEligibility(
+            True, EligibilityReason.ELIGIBLE, _HEAD, _ci_candidate()
+        )
+    )
 
     async def execute(self, code_change_id: UUID, expected_head_sha: str) -> CiEligibility:
         self.calls += 1
-        return CiEligibility(True, EligibilityReason.ELIGIBLE, _HEAD, _ci_candidate())
+        return self.decision
 
 
 @dataclass
 class Runs:
-    candidate: RunInsertCandidate = field(default_factory=_insert_candidate)
+    candidate: RunInsertCandidate | CandidateMiss = field(default_factory=_insert_candidate)
     pending: PendingRunMessage | None = None
+    duplicate: DuplicateReason = DuplicateReason.ACTIVE_RUN
     published: bool = False
     notifications: list[tuple[UUID, UUID, str]] = field(default_factory=list)
 
-    async def lock_candidate(self, code_change_id: UUID) -> RunInsertCandidate:
+    async def lock_candidate(self, code_change_id: UUID) -> RunInsertCandidate | CandidateMiss:
         return self.candidate
 
     async def insert_webhook_run(
         self, candidate: RunInsertCandidate, now: datetime
-    ) -> PendingRunMessage | None:
+    ) -> PendingRunMessage | DuplicateReason:
         if self.pending is not None:
-            return None
+            return self.duplicate
         self.pending = PendingRunMessage.from_candidate(_RUN, candidate, now)
         return self.pending
 
@@ -196,6 +204,7 @@ def test_enqueue_pins_run_message_and_publishes_only_after_commit() -> None:
 
     assert result.status == EnqueueStatus.ENQUEUED
     assert result.run_id == _RUN
+    assert result.reason is None
     assert uow.commits == 2
     assert uow.store.published is True
     assert uow.store.notifications == [(_RUN, _WS, "queued")]
@@ -238,6 +247,72 @@ def test_failed_publish_remains_replayable_and_duplicate_does_not_create_second_
     assert replayed == 1
     assert uow.store.published is True
     assert [message.run_id for message in publisher.messages] == [_RUN, _RUN]
+
+
+def _enqueue(
+    *, eligibility: Eligibility | None = None, store: Runs | None = None
+) -> tuple[TryEnqueueWebhookRun, Uow]:
+    uow = Uow(store=store if store is not None else Runs())
+    use_case = TryEnqueueWebhookRun(
+        eligibility=eligibility if eligibility is not None else Eligibility(),
+        uow_factory=lambda: uow,
+        publisher=Publisher(uow),
+        now=lambda: _NOW,
+    )
+    return use_case, uow
+
+
+def test_an_ineligible_decision_reports_the_gate_reason() -> None:
+    blocked = CiEligibility(False, EligibilityReason.CI_BLOCKED, _HEAD)
+    use_case, uow = _enqueue(eligibility=Eligibility(decision=blocked))
+
+    result = asyncio.run(use_case.execute(_PR, _HEAD))
+
+    assert result == EnqueueResult(EnqueueStatus.INELIGIBLE, reason="ci_blocked")
+    assert uow.commits == 0
+
+
+@pytest.mark.parametrize(
+    ("miss", "status"),
+    [
+        (CandidateMiss.MISSING_INSTALLATION, EnqueueStatus.UNCONFIGURED),
+        (CandidateMiss.MISSING_RULES, EnqueueStatus.UNCONFIGURED),
+        (CandidateMiss.MISSING_PROMPT, EnqueueStatus.UNCONFIGURED),
+        (CandidateMiss.PULL_REQUEST_GONE, EnqueueStatus.STALE),
+        (CandidateMiss.REPOSITORY_GONE, EnqueueStatus.STALE),
+    ],
+)
+def test_a_missing_candidate_names_what_is_missing(
+    miss: CandidateMiss, status: EnqueueStatus
+) -> None:
+    use_case, uow = _enqueue(store=Runs(candidate=miss))
+
+    result = asyncio.run(use_case.execute(_PR, _HEAD))
+
+    assert result == EnqueueResult(status, reason=miss.value)
+    assert uow.commits == 0
+    assert uow.store.pending is None
+
+
+def test_a_candidate_that_moved_since_the_decision_is_stale_with_state_changed() -> None:
+    moved = replace(_insert_candidate(), ci=replace(_ci_candidate(), head_sha="c" * 40))
+    use_case, uow = _enqueue(store=Runs(candidate=moved))
+
+    result = asyncio.run(use_case.execute(_PR, _HEAD))
+
+    assert result == EnqueueResult(EnqueueStatus.STALE, reason="state_changed")
+    assert uow.store.pending is None
+
+
+@pytest.mark.parametrize("reason", list(DuplicateReason))
+def test_a_duplicate_reports_why_no_second_run_was_created(reason: DuplicateReason) -> None:
+    pending = PendingRunMessage.from_candidate(_RUN, _insert_candidate(), _NOW)
+    use_case, uow = _enqueue(store=Runs(pending=pending, duplicate=reason))
+
+    result = asyncio.run(use_case.execute(_PR, _HEAD))
+
+    assert result == EnqueueResult(EnqueueStatus.DUPLICATE, reason=reason.value)
+    assert uow.commits == 0
 
 
 def test_repeated_ci_delivery_routes_to_one_run() -> None:
@@ -311,6 +386,134 @@ def test_delayed_label_enqueues_projected_head_instead_of_webhook_head() -> None
     )
 
     assert observed == [(_PR, current_head)]
+
+
+def _outcome_event(action: str = "labeled") -> PullRequestEvent:
+    return PullRequestEvent(
+        action=action,
+        installation_external_id=17,
+        repository_external_id=101,
+        external_id=901,
+        number=7,
+        title="Review parser",
+        description=None,
+        author_login="alice",
+        web_url="https://github.com/octo/repo/pull/7",
+        source_branch="feature",
+        target_branch="main",
+        base_sha=_BASE,
+        head_sha=_HEAD,
+        state=PullRequestState.OPEN,
+        provider_updated_at=_NOW,
+    )
+
+
+@dataclass
+class OutcomeTargets:
+    pull_request: ProjectedPullRequestTarget | None = ProjectedPullRequestTarget(_PR, _HEAD)
+    ci: tuple[UUID, ...] = (_PR,)
+
+    async def for_pr(self, event: PullRequestEvent) -> ProjectedPullRequestTarget | None:
+        return self.pull_request
+
+    async def for_ci(self, event: CiTriggerEvent) -> tuple[UUID, ...]:
+        return self.ci
+
+
+@dataclass
+class OutcomeEnqueuer:
+    results: list[EnqueueResult]
+    calls: list[tuple[UUID, str]] = field(default_factory=list)
+
+    async def execute(self, code_change_id: UUID, expected_head_sha: str) -> EnqueueResult:
+        self.calls.append((code_change_id, expected_head_sha))
+        return self.results.pop(0)
+
+
+@pytest.mark.parametrize(
+    ("result", "expected"),
+    [
+        (
+            EnqueueResult(EnqueueStatus.ENQUEUED, _RUN),
+            f"pr={_PR} head=aaaaaaa: enqueued run={_RUN}",
+        ),
+        (
+            EnqueueResult(EnqueueStatus.INELIGIBLE, reason="ci_blocked"),
+            f"pr={_PR} head=aaaaaaa: ineligible (ci_blocked)",
+        ),
+        (
+            EnqueueResult(EnqueueStatus.UNCONFIGURED, reason="missing_rules"),
+            f"pr={_PR} head=aaaaaaa: unconfigured (missing_rules)",
+        ),
+        (
+            EnqueueResult(EnqueueStatus.STALE, reason="state_changed"),
+            f"pr={_PR} head=aaaaaaa: stale (state_changed)",
+        ),
+        (
+            EnqueueResult(EnqueueStatus.DUPLICATE, reason="active_run"),
+            f"pr={_PR} head=aaaaaaa: duplicate (active_run)",
+        ),
+    ],
+)
+def test_pr_and_label_triggers_report_the_enqueue_outcome(
+    result: EnqueueResult, expected: str
+) -> None:
+    enqueuer = OutcomeEnqueuer([result, result])
+    trigger = TriggerFromDelivery(targets=OutcomeTargets(), enqueuer=enqueuer)
+
+    assert asyncio.run(trigger.on_pr(_outcome_event("synchronize"))) == expected
+    assert (
+        asyncio.run(trigger.on_label(PullRequestLabelEvent(_outcome_event(), "ai-review")))
+        == expected
+    )
+    assert enqueuer.calls == [(_PR, _HEAD), (_PR, _HEAD)]
+
+
+def test_a_pr_with_no_open_row_is_reported_without_enqueueing() -> None:
+    enqueuer = OutcomeEnqueuer([])
+    trigger = TriggerFromDelivery(targets=OutcomeTargets(pull_request=None), enqueuer=enqueuer)
+
+    assert asyncio.run(trigger.on_pr(_outcome_event("reopened"))) == "no open pull request"
+    assert (
+        asyncio.run(trigger.on_label(PullRequestLabelEvent(_outcome_event(), "ai-review")))
+        == "no open pull request"
+    )
+    assert enqueuer.calls == []
+
+
+@pytest.mark.parametrize(
+    ("label", "action"), [("bug", "labeled"), ("ai-review", "unlabeled"), ("AI-review", "labeled")]
+)
+def test_a_foreign_label_or_action_is_reported_without_enqueueing(label: str, action: str) -> None:
+    enqueuer = OutcomeEnqueuer([])
+    trigger = TriggerFromDelivery(targets=OutcomeTargets(), enqueuer=enqueuer)
+
+    outcome = asyncio.run(trigger.on_label(PullRequestLabelEvent(_outcome_event(action), label)))
+
+    assert outcome == "not an ai-review labeled action"
+    assert enqueuer.calls == []
+
+
+def test_a_ci_event_reports_every_target_and_the_absence_of_one() -> None:
+    other = UUID("77777777-7777-7777-7777-777777777777")
+    enqueuer = OutcomeEnqueuer(
+        [
+            EnqueueResult(EnqueueStatus.ENQUEUED, _RUN),
+            EnqueueResult(EnqueueStatus.INELIGIBLE, reason="waiting_for_ci"),
+        ]
+    )
+    trigger = TriggerFromDelivery(targets=OutcomeTargets(ci=(_PR, other)), enqueuer=enqueuer)
+    event = CiTriggerEvent(17, 101, _HEAD, "check_suite")
+
+    outcome = asyncio.run(trigger.on_ci(event))
+
+    assert outcome == (
+        f"pr={_PR} head=aaaaaaa: enqueued run={_RUN}; "
+        f"pr={other} head=aaaaaaa: ineligible (waiting_for_ci)"
+    )
+    assert enqueuer.calls == [(_PR, _HEAD), (other, _HEAD)]
+    nobody = TriggerFromDelivery(targets=OutcomeTargets(ci=()), enqueuer=OutcomeEnqueuer([]))
+    assert asyncio.run(nobody.on_ci(event)) == "no open pull request"
 
 
 @pytest.fixture
@@ -430,9 +633,10 @@ def test_postgres_enqueue_race_terminal_duplicate_rollback_and_notify(
             # An uncommitted insert and pg_notify must both disappear on rollback.
             async with SqlAlchemyWebhookRunUnitOfWork(sessions) as uow:
                 candidate = await uow.runs.lock_candidate(_PR)
+                assert isinstance(candidate, RunInsertCandidate)
                 assert candidate == _insert_candidate()
                 message = await uow.runs.insert_webhook_run(candidate, _NOW)
-                assert message is not None
+                assert isinstance(message, PendingRunMessage)
                 await uow.runs.notify_run_updated(message.run_id, _WS, "queued")
             async with sessions() as session:
                 assert await session.scalar(select(Run.id)) is None
@@ -445,6 +649,10 @@ def test_postgres_enqueue_race_terminal_duplicate_rollback_and_notify(
             )
             results = await asyncio.gather(trigger.execute(_PR, _HEAD), trigger.execute(_PR, _HEAD))
             assert sorted(result.status.value for result in results) == ["duplicate", "enqueued"]
+            # The loser waits on the PR row lock and then finds the winner's active Run.
+            assert [r.reason for r in results if r.status == EnqueueStatus.DUPLICATE] == [
+                "active_run"
+            ]
             async with sessions() as session:
                 rows = (await session.scalars(select(Run))).all()
                 assert len(rows) == 1
@@ -457,7 +665,9 @@ def test_postgres_enqueue_race_terminal_duplicate_rollback_and_notify(
                 run_id = rows[0].id
                 rows[0].state = RunState.SUCCEEDED
                 await session.commit()
-            assert (await trigger.execute(_PR, _HEAD)).status == EnqueueStatus.DUPLICATE
+            assert await trigger.execute(_PR, _HEAD) == EnqueueResult(
+                EnqueueStatus.DUPLICATE, reason="head_already_reviewed"
+            )
             assert len(publisher.messages) == 1
             assert publisher.messages[0].run_id == run_id
             return run_id
@@ -476,6 +686,45 @@ def test_postgres_enqueue_race_terminal_duplicate_rollback_and_notify(
         "workspace_id": str(_WS),
         "status": "queued",
     }
+
+
+@pytest.mark.integration
+def test_postgres_lock_candidate_names_what_is_missing(
+    webhook_run_database: tuple[str, str],
+) -> None:
+    database_url, schema = webhook_run_database
+
+    async def exercise() -> None:
+        engine = create_async_engine(
+            database_url, connect_args={"options": f"-csearch_path={schema}"}
+        )
+        sessions = async_sessionmaker(engine, expire_on_commit=False)
+
+        async def lock(code_change_id: UUID = _PR) -> RunInsertCandidate | CandidateMiss:
+            async with SqlAlchemyWebhookRunUnitOfWork(sessions) as uow:
+                return await uow.runs.lock_candidate(code_change_id)
+
+        async def set_active(table: str, active: bool) -> None:
+            async with sessions() as session:
+                await session.execute(
+                    text(f"UPDATE {table} SET is_active = :active"), {"active": active}
+                )
+                await session.commit()
+
+        try:
+            assert await lock() == _insert_candidate()
+            assert await lock(uuid4()) is CandidateMiss.PULL_REQUEST_GONE
+            await set_active("rule_versions", False)
+            assert await lock() is CandidateMiss.MISSING_RULES
+            await set_active("rule_versions", True)
+            await set_active("prompt_versions", False)
+            assert await lock() is CandidateMiss.MISSING_PROMPT
+            await set_active("prompt_versions", True)
+            assert await lock() == _insert_candidate()
+        finally:
+            await engine.dispose()
+
+    asyncio.run(exercise())
 
 
 @pytest.mark.integration
@@ -528,7 +777,8 @@ def test_postgres_pending_replay_excludes_superseded_closed_and_disabled(
             assert detached is not None and detached.ai_review_labeled is False
             async with SqlAlchemyWebhookRunUnitOfWork(sessions) as uow:
                 locked = await uow.runs.lock_candidate(_PR)
-                assert locked is not None and locked.ci.ai_review_labeled is False
+                assert isinstance(locked, RunInsertCandidate)
+                assert locked.ci.ai_review_labeled is False
             async with sessions() as session:
                 pr = await session.get(CodeChange, _PR)
                 assert pr is not None

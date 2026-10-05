@@ -47,6 +47,8 @@ class InstallationDeliveryDispatchResult:
     """Result that lets the transport choose an acknowledgement response."""
 
     status: InstallationDeliveryDispatchStatus
+    # Why the delivery ended as it did (never a payload or a credential); logged by the worker.
+    detail: str | None = None
 
 
 @dataclass(frozen=True)
@@ -97,11 +99,13 @@ class PullRequestLabelIntentHandler(Protocol):
 
 
 class WebhookRunTriggerHandler(Protocol):
-    async def on_pr(self, event: PullRequestEvent) -> None: ...
+    """Each handler returns a short outcome line for the delivery log."""
 
-    async def on_label(self, event: PullRequestLabelEvent) -> None: ...
+    async def on_pr(self, event: PullRequestEvent) -> str | None: ...
 
-    async def on_ci(self, event: CiTriggerEvent) -> None: ...
+    async def on_label(self, event: PullRequestLabelEvent) -> str | None: ...
+
+    async def on_ci(self, event: CiTriggerEvent) -> str | None: ...
 
 
 class GitHubInstallationDeliveryDispatcher:
@@ -136,7 +140,8 @@ class GitHubInstallationDeliveryDispatcher:
         if isinstance(event, PullRequestLabelEvent):
             if event.label_name != "ai-review":
                 return InstallationDeliveryDispatchResult(
-                    status=InstallationDeliveryDispatchStatus.IGNORED_IRRELEVANT_EVENT
+                    status=InstallationDeliveryDispatchStatus.IGNORED_IRRELEVANT_EVENT,
+                    detail="label is not ai-review",
                 )
             if self._label_intent_projector is None:
                 return InstallationDeliveryDispatchResult(
@@ -152,7 +157,8 @@ class GitHubInstallationDeliveryDispatcher:
                     return InstallationDeliveryDispatchResult(
                         status=InstallationDeliveryDispatchStatus.DEFERRED_KNOWN_EVENT
                     )
-                await self._run_trigger.on_label(event)
+                detail = await self._run_trigger.on_label(event)
+                return InstallationDeliveryDispatchResult(result.status, detail)
             return result
         if isinstance(event, PullRequestEvent):
             if event.action in {"review_requested", "review_request_removed"}:
@@ -172,13 +178,14 @@ class GitHubInstallationDeliveryDispatcher:
                     return InstallationDeliveryDispatchResult(
                         status=InstallationDeliveryDispatchStatus.DEFERRED_KNOWN_EVENT
                     )
-                await self._run_trigger.on_pr(event)
+                detail = await self._run_trigger.on_pr(event)
+                return InstallationDeliveryDispatchResult(result.status, detail)
             return result
         if isinstance(event, CiTriggerEvent):
             if self._run_trigger is not None:
-                await self._run_trigger.on_ci(event)
+                detail = await self._run_trigger.on_ci(event)
                 return InstallationDeliveryDispatchResult(
-                    status=InstallationDeliveryDispatchStatus.PROCESSED_CI
+                    status=InstallationDeliveryDispatchStatus.PROCESSED_CI, detail=detail
                 )
             return InstallationDeliveryDispatchResult(
                 status=InstallationDeliveryDispatchStatus.DEFERRED_KNOWN_EVENT
@@ -222,4 +229,4 @@ class GitHubInstallationDeliveryDispatcher:
             status = InstallationDeliveryDispatchStatus.PROJECTED_PR
         else:
             status = InstallationDeliveryDispatchStatus.IGNORED_IRRELEVANT_EVENT
-        return InstallationDeliveryDispatchResult(status=status)
+        return InstallationDeliveryDispatchResult(status=status, detail=projection.value)

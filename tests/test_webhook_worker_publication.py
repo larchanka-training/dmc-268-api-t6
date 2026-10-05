@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import time
 from dataclasses import dataclass
@@ -21,7 +22,7 @@ from app.modules.integrations.webhooks.infrastructure.github_installation_tree_p
     GitHubInstallationAccessTokenProvider,
 )
 from app.modules.reviews.application.try_enqueue_webhook_run import RunMessagePublisher
-from app.webhook_worker import WorkerConfig, compose_worker, run_forever, sweep_once
+from app.webhook_worker import WorkerConfig, compose_worker, main, run_forever, sweep_once
 
 
 def _environment() -> dict[str, str]:
@@ -129,3 +130,24 @@ def test_worker_returns_zero_when_receipt_sweep_fails() -> None:
             raise RuntimeError("GitHub unavailable")
 
     assert asyncio.run(sweep_once(cast(ReceiveGitHubDelivery, FailingReceiver()))) == 0
+
+
+def test_main_configures_info_logging_before_running_the_worker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # caplog already installed a root handler, so a real basicConfig would be a no-op here.
+    calls: list[str] = []
+
+    def basic_config(**kwargs: object) -> None:
+        assert kwargs == {"level": logging.INFO}
+        calls.append("basicConfig")
+
+    async def worker() -> None:
+        calls.append("run_forever")
+
+    monkeypatch.setattr(logging, "basicConfig", basic_config)
+    monkeypatch.setattr("app.webhook_worker.run_forever", worker)
+
+    main()
+
+    assert calls == ["basicConfig", "run_forever"]

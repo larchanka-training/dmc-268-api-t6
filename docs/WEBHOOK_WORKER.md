@@ -72,6 +72,43 @@ make no GitHub request. An installation payload that fails validation is logged 
 field names and messages, never their values) and its receipt is marked projected, so it is
 not replayed.
 
+Outcome log. The process calls `logging.basicConfig(level=INFO)` and, once a delivery has been
+processed and its receipt updated, writes one INFO line to the `webhook-worker` log, so the log
+shows why a label produced no Run:
+
+```text
+GitHub webhook delivery <delivery_id> event=<event> status=<status> detail=<detail> [retry_at=<time|none>]
+```
+
+`status` is the dispatch status (`projected_pr`, `processed_ci`, `onboarded`, `ignored_*`,
+`deferred_known_event`, `deferred_repository_details`). `detail` is `-` or the reason. For a
+Run trigger (label, `synchronize`, `reopened`, CI events) it is
+`pr=<pull request id> head=<first 7 of the head sha>: <status> (<reason>) run=<run id>`, and a
+CI event joins one such outcome per open PR on that head with `; `:
+
+| status | reason | meaning |
+| --- | --- | --- |
+| `enqueued` | | the Run was inserted and published (`run=<id>`) |
+| `publication_pending` | | the Run was inserted, the broker publish failed; the review worker's leader loop replays it |
+| `ineligible` | the CI gate reason: `ci_blocked` (a foreign check suite is not green), `waiting_for_ci`, `label_not_active`, `stale_head`, `stale_state`, `closed_pr`, `disabled_repository`, `unknown_pr` | the gate decided not to start a Run |
+| `unconfigured` | `missing_installation`, `missing_rules` (no active rule version), `missing_prompt` (no active `review.system` prompt and none pinned) | the repository lacks what a Run needs; a new label or CI event does not change that |
+| `stale` | `pull_request_gone`, `repository_gone`, `state_changed` (the PR changed between the gate and the locked read) | the decision no longer matches the current PR |
+| `duplicate` | `active_run` (a queued, running or publishing Run exists), `head_already_reviewed` (this head already has a webhook Run) | no second Run is created |
+
+Other details: `no open pull request` (the PR is closed or unknown, nothing to enqueue),
+`not an ai-review labeled action`, `label is not ai-review` (a foreign label), and, when the
+trigger did not run, the projection result: `projected`, `ignored_stale`, `ignored_unrelated`
+(for example a label set by the App's own bot) or `unknown_repository`. The line never carries
+the payload, an installation token or the webhook secret.
+
+A deferred delivery's outcome line ends with `retry_at=<time>`, or `retry_at=none` after the
+third attempt, and that final deferral is also logged as a WARNING with its reason.
+`deferred_repository_details` is an installation event whose repository details GitHub cannot
+answer; like the other deferrals it is retried after 5 minutes, at most three attempts in
+total. `retry_at=none` means no retry is scheduled: the receipt waits until something revives
+it, the hourly revival for installation events or linking the installation (`wake_receipts`),
+see "Deferred deliveries" below.
+
 Deferred deliveries. A delivery the dispatcher cannot handle yet (unknown installation or
 repository, an event without a handler, or an installation event whose repository details
 GitHub cannot answer) is retried after 5 minutes, at most three attempts in total, like a

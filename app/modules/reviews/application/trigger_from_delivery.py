@@ -12,6 +12,9 @@ from app.modules.reviews.application.project_github_pull_request import (
 )
 from app.modules.reviews.application.try_enqueue_webhook_run import EnqueueResult
 
+_NO_OPEN_PULL_REQUEST = "no open pull request"
+_NOT_AN_AI_REVIEW_LABELED_ACTION = "not an ai-review labeled action"
+
 
 @dataclass(frozen=True)
 class CiTriggerEvent:
@@ -38,20 +41,34 @@ class WebhookRunEnqueuer(Protocol):
 
 
 class TriggerFromDelivery:
+    """Re-evaluate eligibility and return a one-line outcome for the delivery log."""
+
     def __init__(self, *, targets: RunTriggerTargets, enqueuer: WebhookRunEnqueuer) -> None:
         self._targets = targets
         self._enqueuer = enqueuer
 
-    async def on_pr(self, event: PullRequestEvent) -> None:
+    async def on_pr(self, event: PullRequestEvent) -> str:
         target = await self._targets.for_pr(event)
-        if target is not None:
-            await self._enqueuer.execute(target.code_change_id, target.head_sha)
+        if target is None:
+            return _NO_OPEN_PULL_REQUEST
+        return await self._enqueue(target.code_change_id, target.head_sha)
 
-    async def on_label(self, event: PullRequestLabelEvent) -> None:
+    async def on_label(self, event: PullRequestLabelEvent) -> str:
         if event.label_name != "ai-review" or event.pull_request.action != "labeled":
-            return
-        await self.on_pr(event.pull_request)
+            return _NOT_AN_AI_REVIEW_LABELED_ACTION
+        return await self.on_pr(event.pull_request)
 
-    async def on_ci(self, event: CiTriggerEvent) -> None:
-        for target in await self._targets.for_ci(event):
-            await self._enqueuer.execute(target, event.head_sha)
+    async def on_ci(self, event: CiTriggerEvent) -> str:
+        targets = await self._targets.for_ci(event)
+        if not targets:
+            return _NO_OPEN_PULL_REQUEST
+        return "; ".join([await self._enqueue(target, event.head_sha) for target in targets])
+
+    async def _enqueue(self, code_change_id: UUID, head_sha: str) -> str:
+        result = await self._enqueuer.execute(code_change_id, head_sha)
+        outcome = f"pr={code_change_id} head={head_sha[:7]}: {result.status.value}"
+        if result.reason is not None:
+            outcome += f" ({result.reason})"
+        if result.run_id is not None:
+            outcome += f" run={result.run_id}"
+        return outcome

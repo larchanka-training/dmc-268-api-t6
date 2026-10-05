@@ -24,6 +24,8 @@ from app.modules.reviews.application.determine_ci_eligibility import (
 )
 from app.modules.reviews.application.project_github_pull_request import PullRequestState
 from app.modules.reviews.application.try_enqueue_webhook_run import (
+    CandidateMiss,
+    DuplicateReason,
     PendingRunMessage,
     RunInsertCandidate,
 )
@@ -34,27 +36,27 @@ class SqlAlchemyWebhookRunStore:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
 
-    async def lock_candidate(self, code_change_id: UUID) -> RunInsertCandidate | None:
+    async def lock_candidate(self, code_change_id: UUID) -> RunInsertCandidate | CandidateMiss:
         pr = await self._session.scalar(
             select(CodeChange).where(CodeChange.id == code_change_id).with_for_update()
         )
         if pr is None:
-            return None
+            return CandidateMiss.PULL_REQUEST_GONE
         repository = await self._session.get(Repository, pr.repository_id)
         if repository is None:
-            return None
+            return CandidateMiss.REPOSITORY_GONE
         installation = await self._session.get(
             ProviderInstallation, repository.provider_installation_id
         )
         if installation is None or installation.provider != "github":
-            return None
+            return CandidateMiss.MISSING_INSTALLATION
         rule_version_id = await self._session.scalar(
             select(RuleVersion.id).where(
                 RuleVersion.repository_id == repository.id, RuleVersion.is_active.is_(True)
             )
         )
         if rule_version_id is None:
-            return None
+            return CandidateMiss.MISSING_RULES
         prompt_version_id = repository.prompt_version_id
         if prompt_version_id is None:
             prompt_version_id = await self._session.scalar(
@@ -63,7 +65,7 @@ class SqlAlchemyWebhookRunStore:
                 )
             )
         if prompt_version_id is None:
-            return None
+            return CandidateMiss.MISSING_PROMPT
         return RunInsertCandidate(
             ci=EligibilityCandidate(
                 code_change_id=pr.id,
@@ -90,7 +92,7 @@ class SqlAlchemyWebhookRunStore:
 
     async def insert_webhook_run(
         self, candidate: RunInsertCandidate, now: datetime
-    ) -> PendingRunMessage | None:
+    ) -> PendingRunMessage | DuplicateReason:
         code_change_id = candidate.ci.code_change_id
         active = await self._session.scalar(
             select(Run.id).where(
@@ -99,7 +101,7 @@ class SqlAlchemyWebhookRunStore:
             )
         )
         if active is not None:
-            return None
+            return DuplicateReason.ACTIVE_RUN
         idempotency_key = sha256(
             f"webhook:{code_change_id}:{candidate.ci.head_sha}".encode()
         ).hexdigest()
@@ -128,7 +130,7 @@ class SqlAlchemyWebhookRunStore:
             .returning(Run.id)
         )
         if inserted is None:
-            return None
+            return DuplicateReason.HEAD_ALREADY_REVIEWED
         return PendingRunMessage.from_candidate(inserted, candidate, now)
 
     async def notify_run_updated(self, run_id: UUID, workspace_id: UUID, status: str) -> None:
