@@ -50,17 +50,20 @@ any receipt is claimed.
 
 Installation events. GitHub sends each repository of `installation.created`,
 `installation_repositories.added` and the removal events as `id`, `node_id`, `name`,
-`full_name` and `private` only, and the parser accepts exactly that shape; `default_branch`
-and `html_url` are optional and used when present. When either is missing, the worker reads
-both with `GET /repos/{full_name}` using the installation token before it fetches the tree,
-outside any database transaction; a response without a default branch or web URL is an
-error, never an empty value. A failed read follows the failed-dispatch path above (retry
-after 30 s, three attempts in total, then `projection_failed_at`). That is a residual risk: a
-receipt that failed for good is not replayed, and `wake_receipts` does not clear that mark.
-`deleted` and `removed` make no GitHub request. An installation payload that fails
-validation is logged at WARNING (delivery, event, action, installation id, the failing field
-names and messages, never their values) and its receipt is marked projected, so it is not
-replayed.
+`full_name` and `private` only. The parser requires `id` and `full_name` and ignores the
+rest; `default_branch` and `html_url` are used only when both are present. When either is
+missing, the worker reads both with `GET /repos/{full_name}` using the installation token
+before it fetches the tree, outside any database transaction; a response without a default
+branch or web URL is an error, never an empty value. A failed read follows the
+failed-dispatch path above (retry after 30 s, three attempts in total, then
+`projection_failed_at`). That is a residual risk: a receipt that failed for good is not
+replayed, and `wake_receipts` does not clear that mark. The event is handled all or
+nothing: one repository that keeps failing (a 404 after a rename or removal, for example)
+keeps every other repository of the same event from being stored. `deleted` and `removed`
+make no GitHub request. An installation payload that fails validation is logged at WARNING
+(delivery, event, action, installation id, the total error count and the first ten failing
+field names and messages, never their values) and its receipt is marked projected, so it is
+not replayed.
 
 Deferred deliveries. A delivery the dispatcher cannot handle yet (unknown installation or
 repository, or an event without a handler) is retried after 5 minutes, at most three
