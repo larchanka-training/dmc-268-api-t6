@@ -119,6 +119,10 @@ Details: [docs/WEBHOOK_WORKER.md](docs/WEBHOOK_WORKER.md).
 
 ## LLM gateway
 
+The review worker (`python -m app.worker`) builds the gateway once per process from `LLM_*`
+and binds the models to each claimed attempt. Without `LLM_MODEL` it starts with a warning
+and every run fails with a message that names the missing configuration.
+
 The review model is called through the LLM gateway (#33): one OpenAI-compatible adapter for
 EUrouter and self-hosted servers, key rotation, retries, a fallback model, the run cost limit
 and the attempt deadline of `docs/PIPELINE_SPEC.md` §3–§6. Configuration is `LLM_*` in

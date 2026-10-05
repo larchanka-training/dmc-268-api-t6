@@ -19,10 +19,10 @@
 
 ### Что реализовано, а что является планом
 
-В текущем каркасе реализованы healthcheck FastAPI, ORM-модели, общая DB-инфраструктура,
-Unit of Work, конфигурация Alembic, миграции схемы и тесты. Дерево слоёв и пять
-entrypoints ниже — целевая организация приложения: use cases, конкретные repositories,
-LLM/VCS/payment gateways и consumers ещё предстоит реализовать. Весь код пока живёт в
+Реализован путь ревью целиком: приём вебхука и проекция PR, создание Run (`try_enqueue`),
+очередь RabbitMQ, worker с LLM Gateway (#33) и GitHub-адаптерами, публикация ревью и
+check-run, REST для UI. Дерево слоёв и пять entrypoints ниже описывают целевую организацию
+приложения; payment gateway и отдельные сервисы ещё предстоит реализовать. Весь код пока живёт в
 одном пакете `app/`; разнесение по сервисам `services/<name>/` (Р-12) реализуется в
 PR #10. Текущий Compose поднимает backend, worker, PostgreSQL, RabbitMQ и Redis, а не весь
 целевой runtime; worker и очередь описаны в разделе «Worker и очередь (#34)».
@@ -305,7 +305,10 @@ uv run python -m app.worker        # локально
 docker compose up -d worker        # сервис worker в docker-compose.yml
 ```
 
-Переменные: `DATABASE_URL` и `RABBITMQ_URL` обязательны; `GITHUB_APP_ID` и
+Переменные: `DATABASE_URL` и `RABBITMQ_URL` обязательны; `LLM_*` (модель, ключи, при
+необходимости base URL) включают ревью через LLM Gateway: шлюз создаётся один раз на процесс,
+модели на каждую попытку. Без `LLM_MODEL` worker стартует с предупреждением, и Run
+завершается с сообщением о ненастроенном шлюзе; `GITHUB_APP_ID` и
 `GITHUB_APP_PRIVATE_KEY` необязательны: без них процесс стартует, пишет предупреждение,
 а sweep «2 мин без CI» и публикация в GitHub (ревью и check-run) выключены. `WORKER_ID`
 (по умолчанию `hostname:pid`) пишется в `runs.worker_id`, `PORTAL_URL` даёт ссылку на
