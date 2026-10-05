@@ -473,6 +473,54 @@ def test_details_failure_is_propagated_before_tree_label_and_database_sync() -> 
     assert sync.calls == []
 
 
+def test_details_failure_on_a_later_repository_persists_nothing_for_the_batch() -> None:
+    """All-or-nothing: the first repository resolves, the second fails, ``sync`` never runs."""
+
+    @dataclass
+    class FailingSecondDetails(FakeDetailsProvider):
+        async def fetch_repository_details(
+            self, *, installation_external_id: int, full_name: str
+        ) -> RepositoryDetails:
+            if full_name == "example-owner/repo-102":
+                self.calls.append((installation_external_id, full_name))
+                raise RuntimeError("GitHub unavailable for the second repository")
+            return await super().fetch_repository_details(
+                installation_external_id=installation_external_id, full_name=full_name
+            )
+
+    details = FailingSecondDetails(
+        details={
+            "example-owner/repo-101": RepositoryDetails(
+                default_branch="trunk", web_url="https://example.test/example-owner/repo-101"
+            )
+        }
+    )
+    tree = FakeTreeProvider(trees={101: (), 102: ()})
+    sync = FakeSyncInstallationRepositories()
+
+    with pytest.raises(RuntimeError, match="second repository"):
+        asyncio.run(
+            InstallationEventProjector(
+                tree_provider=tree,
+                label_provider=FakeLabelProvider(),
+                details_provider=details,
+                sync=sync,
+            ).execute(
+                provider_installation_id=uuid4(),
+                event=InstallationRepositoriesEvent(
+                    17,
+                    "added",
+                    (_bare_reference(external_id=101), _bare_reference(external_id=102)),
+                    (),
+                ),
+            )
+        )
+
+    assert details.calls == [(17, "example-owner/repo-101"), (17, "example-owner/repo-102")]
+    assert tree.calls == [(17, 101, "trunk")]
+    assert sync.calls == []
+
+
 @pytest.mark.parametrize("action", ["deleted", "removed"])
 def test_removal_of_bare_repositories_makes_no_github_request(action: str) -> None:
     details = FakeDetailsProvider()

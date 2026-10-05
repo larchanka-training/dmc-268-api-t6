@@ -37,6 +37,7 @@ from app.modules.reviews.application.project_github_pull_request import (
 from app.modules.reviews.application.trigger_from_delivery import CiTriggerEvent
 
 _CI_EVENTS = frozenset({"check_suite", "workflow_run"})
+_MAX_LOGGED_FIELD_ERRORS = 10
 _LOGGER = logging.getLogger(__name__)
 
 
@@ -120,18 +121,23 @@ def _log_invalid_installation_event(
     """Say why a receipt was ignored without echoing any payload value.
 
     The receipt is still marked projected and never replayed, so this line is the
-    only trace of the rejection: delivery, event, action, installation and the
-    failing field locations with their messages.
+    only trace of the rejection: delivery, event, action, installation, the total
+    number of failing fields and the first few locations with their messages (a
+    signed event may list hundreds of repositories that all fail alike).
     """
     action = payload.get("action")
     installation = payload.get("installation")
     installation_id = installation.get("id") if isinstance(installation, Mapping) else None
+    shown = error.field_errors[:_MAX_LOGGED_FIELD_ERRORS]
+    omitted = len(error.field_errors) - len(shown)
     _LOGGER.warning(
         "Ignoring invalid GitHub installation event: delivery_id=%s event=%s action=%s "
-        "installation_id=%s errors=%s",
+        "installation_id=%s error_count=%d errors=%s%s",
         delivery_id,
         event_name,
         action if isinstance(action, str) else None,
         installation_id if isinstance(installation_id, int) else None,
-        "; ".join(f"{location}: {message}" for location, message in error.field_errors),
+        len(error.field_errors),
+        "; ".join(f"{location}: {message}" for location, message in shown),
+        f" (+{omitted} more)" if omitted else "",
     )

@@ -74,7 +74,18 @@ def test_provider_reads_the_default_branch_and_web_url_with_the_installation_tok
     assert requests[0].headers["X-GitHub-Api-Version"] == "2022-11-28"
 
 
-def test_provider_percent_encodes_the_repository_path_but_keeps_the_owner_separator() -> None:
+@pytest.mark.parametrize(
+    ("full_name", "encoded_path"),
+    [
+        ("o/r with space", "/repos/o/r%20with%20space"),
+        ("o/r?x", "/repos/o/r%3Fx"),
+        ("o/r#x", "/repos/o/r%23x"),
+        ("o/r%2Fx", "/repos/o/r%252Fx"),
+    ],
+)
+def test_provider_percent_encodes_the_repository_path_but_keeps_the_owner_separator(
+    full_name: str, encoded_path: str
+) -> None:
     requests: list[httpx.Request] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -84,9 +95,11 @@ def test_provider_percent_encodes_the_repository_path_but_keeps_the_owner_separa
             json={"default_branch": "main", "html_url": "https://example.test/o/r"},
         )
 
-    _fetch(handler, FakeInstallationTokenProvider(), "o/r with space")
+    _fetch(handler, FakeInstallationTokenProvider(), full_name)
 
-    assert str(requests[0].url) == "https://api.github.com/repos/o/r%20with%20space"
+    assert requests[0].url.raw_path == encoded_path.encode()
+    assert requests[0].url.query == b""
+    assert requests[0].url.fragment == ""
 
 
 def test_provider_propagates_a_missing_repository_as_an_http_status_error() -> None:

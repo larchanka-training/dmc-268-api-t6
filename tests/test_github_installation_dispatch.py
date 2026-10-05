@@ -636,6 +636,54 @@ def test_invalid_installation_event_is_ignored_with_a_warning_naming_the_failing
     assert "SENTINEL" not in caplog.text
 
 
+def test_invalid_installation_event_warning_is_bounded_to_the_first_ten_field_errors(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A signed event with many bad repositories still yields one short log line."""
+    payload = {
+        "action": "added",
+        "installation": {"id": 17},
+        "repositories_added": [
+            {
+                "node_id": f"SENTINEL-node-id-{index}",
+                "name": "SENTINEL-name",
+                "full_name": "SENTINEL-owner/SENTINEL-name",
+                "private": False,
+            }
+            for index in range(25)
+        ],
+    }
+    adapter = GitHubWebhookDispatchAdapter(
+        GitHubInstallationDeliveryDispatcher(
+            resolver=FakeInstallationResolver(), onboarding=FakeOnboarding()
+        )
+    )
+
+    with caplog.at_level(logging.WARNING, logger=_DISPATCH_LOGGER):
+        result = asyncio.run(
+            adapter.execute(
+                VerifiedGitHubDelivery(
+                    "delivery-many-invalid", "installation_repositories", payload
+                ).to_receipt()
+            )
+        )
+
+    assert result.status is InstallationDeliveryDispatchStatus.IGNORED_INVALID_EVENT
+    warnings = [
+        record
+        for record in caplog.records
+        if record.name == _DISPATCH_LOGGER and record.levelno == logging.WARNING
+    ]
+    assert len(warnings) == 1
+    logged = warnings[0].getMessage()
+    assert "error_count=25" in logged
+    assert "(+15 more)" in logged
+    for index in range(10):
+        assert f"repositories_added.{index}.id: Field required" in logged
+    assert "repositories_added.10.id" not in logged
+    assert "SENTINEL" not in caplog.text
+
+
 def test_unsupported_installation_action_is_not_logged_as_an_invalid_event(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
