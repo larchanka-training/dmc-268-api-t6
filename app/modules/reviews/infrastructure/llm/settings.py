@@ -121,8 +121,9 @@ KNOWN_MODELS: Mapping[str, ModelProfile] = {
         structured_output="json_schema",
         chars_per_token=3.0,
     ),
-    # Every endpoint bills in EUR: the most expensive one (GreenPT, EUR 0.20 / 0.40 per 1M)
-    # at EUrouter's own rate of 1.1225 USD/EUR (usage.cost / usage.cost_eur, 2026-10-05).
+    # Every endpoint bills in EUR, so the stored values are USD converted from EUR: the most
+    # expensive endpoint (GreenPT, EUR 0.20 / 0.40 per 1M) at EUrouter's own rate of
+    # 1.1225 USD/EUR (usage.cost / usage.cost_eur, 2026-10-05).
     # The catalog has no cache-read price, so cached tokens count at the input price.
     # The window is the smallest endpoint's (Scaleway, GreenPT).
     "mistral-small-3.2-24b": ModelProfile(
