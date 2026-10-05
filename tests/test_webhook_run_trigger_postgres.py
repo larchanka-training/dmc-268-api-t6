@@ -127,6 +127,17 @@ def _green(sha: str) -> list[dict[str, Any]]:
     ]
 
 
+def _suite(sha: str, app_id: int, status: str, conclusion: str | None, runs: int) -> dict[str, Any]:
+    return {
+        "id": app_id,
+        "head_sha": sha,
+        "app": {"id": app_id},
+        "status": status,
+        "conclusion": conclusion,
+        "latest_check_runs_count": runs,
+    }
+
+
 def _pull_request(head: str) -> dict[str, Any]:
     return {
         "id": 901,
@@ -242,6 +253,44 @@ def test_labeled_pr_with_green_ci_creates_and_publishes_a_run(database: Database
     assert [(message.head_sha, kind) for message, kind in publisher.messages] == [
         (HEAD, RunPublicationKind.QUEUED)
     ]
+
+
+@pytest.mark.integration
+def test_queued_foreign_suites_without_runs_do_not_block_a_run_next_to_green_ci(
+    database: Database,
+) -> None:
+    # Our own suite, a second reviewer App that never creates a check run (its suite stays
+    # queued with no runs for good), and green Actions: the gate lets the review start (#72).
+    suites = [
+        _suite(HEAD, APP_ID, "queued", None, 0),
+        _suite(HEAD, 8, "queued", None, 0),
+        _suite(HEAD, 7, "completed", "success", 1),
+    ]
+
+    async def scenario(pipeline: Pipeline) -> tuple[list[tuple[Any, ...]], Publisher]:
+        await pipeline.deliver("pull_request", _pr_delivery("labeled"))
+        return await pipeline.runs(), pipeline.publisher
+
+    runs, publisher = _run(database, FakeGitHub(ci={HEAD: suites}), scenario)
+
+    assert runs == [(HEAD, "queued", True)]
+    assert [(message.head_sha, kind) for message, kind in publisher.messages] == [
+        (HEAD, RunPublicationKind.QUEUED)
+    ]
+
+
+@pytest.mark.integration
+def test_queued_foreign_suite_without_runs_alone_is_not_ci_evidence_for_wait_for_ci_always(
+    database: Database,
+) -> None:
+    suites = [_suite(HEAD, 8, "queued", None, 0)]
+
+    async def scenario(pipeline: Pipeline) -> list[tuple[Any, ...]]:
+        await pipeline.sql("UPDATE repositories SET wait_for_ci = 'always'")
+        await pipeline.deliver("pull_request", _pr_delivery("labeled"))
+        return await pipeline.runs()
+
+    assert _run(database, FakeGitHub(ci={HEAD: suites}), scenario) == []
 
 
 @pytest.mark.integration
