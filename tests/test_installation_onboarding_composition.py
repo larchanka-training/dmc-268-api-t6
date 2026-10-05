@@ -666,3 +666,87 @@ def test_real_delivery_fixture_is_onboarded_with_branch_and_url_read_from_github
     assert removed_row is not None
     assert removed_row.enabled is False
     assert requests_after_removal == requests_after_onboarding
+
+
+@pytest.mark.integration
+def test_unreadable_repository_details_raise_and_write_no_row(
+    migrated_onboarding_database: tuple[str, str],
+) -> None:
+    """``GET /repos`` answering 404 propagates, so the receipt takes the failed-dispatch path.
+
+    The dispatcher must raise (not return an ignored status) and nothing may reach
+    ``repositories``: no tree fetch, no label, no transaction.
+    """
+    database_url, schema = migrated_onboarding_database
+    installation_id = uuid4()
+    repository_path = "/repos/example-owner/example-repo-two"
+    requests: list[tuple[str, str]] = []
+
+    class TokenProvider:
+        async def get_installation_access_token(self, installation_external_id: int) -> str:
+            assert installation_external_id == 1000001
+            return "test-installation-token"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append((request.method, request.url.path))
+        if request.method == "GET" and request.url.path == repository_path:
+            return httpx.Response(404, json={"message": "Not Found"})
+        return httpx.Response(500, json={"message": "unexpected request"})
+
+    async def exercise() -> tuple[int, int]:
+        engine = create_async_engine(
+            database_url, connect_args={"options": f"-csearch_path={schema}"}
+        )
+        session_factory = async_sessionmaker(engine, expire_on_commit=False)
+        client = httpx.AsyncClient(
+            transport=httpx.MockTransport(handler), base_url="https://api.github.com"
+        )
+        try:
+            async with session_factory() as session:
+                workspace = Workspace(id=uuid4(), name="unreadable", daily_budget_usd=Decimal("1"))
+                session.add(workspace)
+                await session.flush()
+                session.add(
+                    ProviderInstallation(
+                        id=installation_id,
+                        workspace_id=workspace.id,
+                        provider="github",
+                        external_id=1000001,
+                        provider_metadata={},
+                    )
+                )
+                await session.commit()
+
+            dispatcher = ReviewsApiResources(
+                engine, session_factory
+            ).github_installation_delivery_dispatcher(client=client, token_provider=TokenProvider())
+            with pytest.raises(httpx.HTTPStatusError) as raised:
+                await dispatcher.execute(
+                    VerifiedGitHubDelivery(
+                        "delivery-unreadable",
+                        "installation_repositories",
+                        load_github_webhook_fixture("installation_repositories_added"),
+                    ).to_receipt()
+                )
+
+            async with session_factory() as session:
+                repositories = list(
+                    (
+                        await session.scalars(
+                            select(Repository).where(
+                                Repository.provider_installation_id == installation_id
+                            )
+                        )
+                    ).all()
+                )
+                rule_versions = list((await session.scalars(select(RuleVersion))).all())
+            return raised.value.response.status_code, len(repositories) + len(rule_versions)
+        finally:
+            await client.aclose()
+            await engine.dispose()
+
+    status_code, persisted_rows = asyncio.run(exercise())
+
+    assert status_code == 404
+    assert persisted_rows == 0
+    assert requests == [("GET", repository_path)]
