@@ -1575,11 +1575,14 @@ def test_a_rate_limited_key_outranks_a_rejected_one() -> None:
     assert (first["class"], first["http_status"]) == ("llm_rate_limited", 429)
 
 
-def test_an_answer_without_usage_is_charged_by_the_estimate() -> None:
-    body = {
+@pytest.mark.parametrize("empty_usage", [False, True])
+def test_an_answer_without_usage_is_charged_by_the_estimate(empty_usage: bool) -> None:
+    body: dict[str, Any] = {
         "model": "local",
         "choices": [{"message": {"content": json.dumps(VALID_OUTPUT)}, "finish_reason": "stop"}],
     }
+    if empty_usage:
+        body["usage"] = {}
     primary = replace(PRIMARY, price=ModelPrice(Decimal(1), Decimal(1)))
     harness = Harness([httpx.Response(200, json=body)], primary=primary)
 
@@ -1708,6 +1711,74 @@ def test_bad_paid_cost_metadata_is_traced_and_charged_without_another_call(
     assert harness.trace.records[0][1].response_json()["usage"]["cost"] == (
         0.1 if metadata == "unknown-currency" else "invalid"
     )
+
+
+def test_paid_answer_with_bad_currency_and_tokens_is_not_retried() -> None:
+    payload = valid(cost=0.125, cost_currency="GBP", completion_tokens=200).json()
+    payload["usage"]["prompt_tokens"] = "unknown"
+    harness = Harness([httpx.Response(200, json=payload), valid()])
+
+    failure = harness.failure()
+
+    assert failure.error_code is LlmErrorCode.INVALID_OUTPUT
+    assert not failure.run_retryable
+    assert failure.calls == 1
+    assert len(harness.requests) == 1
+    assert harness.clock.sleeps == []
+    assert harness.trace.records[0][1].response_json()["usage"] == payload["usage"]
+    assert len(failure.usage) == 1
+    usage = failure.usage[0]
+    assert usage.tokens_in == prompt_tokens(CONTEXT, HeuristicTokenCounter(PRIMARY.chars_per_token))
+    assert usage.tokens_out == 200
+    assert Decimal("0.002000") < usage.cost_usd < Decimal("0.125")
+    assert harness.ledger.events[0][1] == usage
+
+
+@pytest.mark.parametrize("field", ["usage", "prompt_tokens_details"])
+def test_paid_answer_with_nonmapping_usage_metadata_is_not_retried(field: str) -> None:
+    payload = valid(cost=0.125, cost_currency="GBP", prompt_tokens=10_000).json()
+    if field == "usage":
+        payload["usage"] = "oops"
+    else:
+        payload["usage"]["prompt_tokens_details"] = "oops"
+    harness = Harness([httpx.Response(200, json=payload), valid()])
+
+    failure = harness.failure()
+
+    assert failure.error_code is LlmErrorCode.INVALID_OUTPUT
+    assert not failure.run_retryable
+    assert failure.calls == len(harness.requests) == 1
+    assert harness.clock.sleeps == []
+    assert harness.trace.records[0][1].response_json()["usage"] == payload["usage"]
+    assert len(failure.usage) == 1
+    usage = failure.usage[0]
+    assert usage.tokens_in == (
+        prompt_tokens(CONTEXT, HeuristicTokenCounter(PRIMARY.chars_per_token))
+        if field == "usage"
+        else 10_000
+    )
+    assert usage.tokens_out == (PRIMARY.max_output_tokens if field == "usage" else 300)
+    assert usage.cost_usd > Decimal("0.002000")
+    assert harness.ledger.events[0][1] == usage
+
+
+def test_paid_answer_with_missing_prompt_count_uses_preflight_estimate() -> None:
+    payload = valid(cost=0.125, cost_currency="GBP", completion_tokens=200).json()
+    del payload["usage"]["prompt_tokens"]
+    harness = Harness([httpx.Response(200, json=payload), valid()])
+
+    failure = harness.failure()
+
+    assert failure.error_code is LlmErrorCode.INVALID_OUTPUT
+    assert not failure.run_retryable
+    assert failure.calls == len(harness.requests) == 1
+    assert harness.trace.records[0][1].response_json()["usage"] == payload["usage"]
+    assert len(failure.usage) == 1
+    usage = failure.usage[0]
+    assert usage.tokens_in == prompt_tokens(CONTEXT, HeuristicTokenCounter(PRIMARY.chars_per_token))
+    assert usage.tokens_out == 200
+    assert usage.cost_usd > Decimal("0.002000")
+    assert harness.ledger.events[0][1] == usage
 
 
 def test_known_route_ceiling_prices_a_paid_answer_with_bad_currency() -> None:

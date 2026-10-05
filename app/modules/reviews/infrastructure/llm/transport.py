@@ -36,6 +36,7 @@ _CONTEXT_MARKERS = (
     "input is too long",
 )
 _MAX_ERROR_TEXT = 300
+_MISSING_TOKEN = object()
 
 
 @dataclass(frozen=True)
@@ -68,9 +69,9 @@ class ChatResponse:
     content: str | None
     finish_reason: str | None
     model: str
-    prompt_tokens: int
-    completion_tokens: int
-    cached_tokens: int
+    prompt_tokens: int | None
+    completion_tokens: int | None
+    cached_tokens: int | None
     cost: Decimal | None
     cost_currency: str | None
     refusal: str | None = None
@@ -259,21 +260,45 @@ def _parse_response(response: httpx.Response, profile: ModelProfile) -> ChatResp
                 if isinstance(part, dict) and part.get("type") == "text"
             )
         refusal = message.get("refusal")
-        usage = raw.get("usage") or {}
-        details = usage.get("prompt_tokens_details") or {}
+        usage_raw = raw.get("usage", _MISSING_TOKEN)
+        no_usage = (
+            usage_raw is _MISSING_TOKEN
+            or usage_raw is None
+            or (isinstance(usage_raw, Mapping) and not usage_raw)
+        )
+        invalid_usage = not no_usage and not isinstance(usage_raw, Mapping)
+        usage = usage_raw if isinstance(usage_raw, Mapping) else {}
+        details_raw = usage.get("prompt_tokens_details", _MISSING_TOKEN)
+        invalid_details = (
+            details_raw is not _MISSING_TOKEN
+            and details_raw is not None
+            and not isinstance(details_raw, Mapping)
+        )
+        details = details_raw if isinstance(details_raw, Mapping) else {}
         currency_raw = usage.get("cost_currency")
+        prompt_tokens, invalid_prompt = _token_count(
+            usage.get("prompt_tokens", _MISSING_TOKEN), missing_is_zero=no_usage
+        )
+        completion_tokens, invalid_completion = _token_count(
+            usage.get("completion_tokens", _MISSING_TOKEN), missing_is_zero=no_usage
+        )
+        cached_tokens, invalid_cached = _token_count(
+            details.get("cached_tokens", _MISSING_TOKEN), missing_is_zero=no_usage
+        )
         parsed = ChatResponse(
             raw=raw,
             content=content if isinstance(content, str) else None,
             finish_reason=choice.get("finish_reason"),
             model=str(raw.get("model") or ""),
-            prompt_tokens=int(usage.get("prompt_tokens") or 0),
-            completion_tokens=int(usage.get("completion_tokens") or 0),
-            cached_tokens=int(details.get("cached_tokens") or 0),
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            cached_tokens=cached_tokens,
             cost=None,
             cost_currency=currency_raw if isinstance(currency_raw, str) else None,
             refusal=refusal if isinstance(refusal, str) and refusal else None,
         )
+        if invalid_usage or invalid_details:
+            raise TransportPaidAnswerError("HTTP 200 with invalid usage metadata", parsed)
         if currency_raw is not None and (
             not isinstance(currency_raw, str) or currency_raw.upper() not in ("USD", "EUR")
         ):
@@ -283,6 +308,8 @@ def _parse_response(response: httpx.Response, profile: ModelProfile) -> ChatResp
             cost = _exact_cost(response) if usage.get("cost") is not None else None
         except (ValueError, KeyError, TypeError, AttributeError):
             raise TransportPaidAnswerError("HTTP 200 with invalid usage.cost", parsed) from None
+        if invalid_prompt or invalid_completion or invalid_cached:
+            raise TransportPaidAnswerError("HTTP 200 with invalid usage token counts", parsed)
         if cost is not None and currency is None:
             logger.warning(
                 "llm usage cost has no currency; treating as USD",
@@ -293,6 +320,22 @@ def _parse_response(response: httpx.Response, profile: ModelProfile) -> ChatResp
         raise TransportUnavailable(
             "HTTP 200 with a body that is not a chat completion", http_status=200
         ) from None
+
+
+def _token_count(value: object, *, missing_is_zero: bool) -> tuple[int | None, bool]:
+    """Distinguish no usage, an absent partial count, and an invalid count."""
+    if value is _MISSING_TOKEN:
+        return (0 if missing_is_zero else None), False
+    if isinstance(value, bool):
+        return None, True
+    if isinstance(value, int):
+        return (value, False) if value >= 0 else (None, True)
+    if isinstance(value, str) and value.isascii() and value.isdecimal():
+        try:
+            return int(value), False
+        except ValueError:
+            return None, True
+    return None, True
 
 
 def _exact_cost(response: httpx.Response) -> Decimal:

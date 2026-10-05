@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from decimal import Decimal
+from typing import Any
 
 import httpx
 import pytest
@@ -129,6 +131,78 @@ def test_invalid_provider_cost_is_a_classified_error(cost: str) -> None:
 
     assert caught.value.paid_response.raw["usage"]["cost_currency"] == "USD"
     assert caught.value.paid_response.cost is None
+
+
+@pytest.mark.parametrize("bad_count", ["-1", "true", "1.5", '"1.5"', '"unknown"', "null"])
+def test_invalid_paid_prompt_count_preserves_other_counts(bad_count: str) -> None:
+    with pytest.raises(TransportPaidAnswerError, match="invalid usage token counts") as caught:
+        _complete(
+            _answer(
+                '{"prompt_tokens":'
+                + bad_count
+                + ',"completion_tokens":7,"prompt_tokens_details":{"cached_tokens":3},'
+                '"cost":0.125,"cost_currency":"USD"}'
+            )
+        )
+
+    assert caught.value.http_status == 200
+    assert not caught.value.retryable
+    assert caught.value.paid_response.prompt_tokens is None
+    assert caught.value.paid_response.completion_tokens == 7
+    assert caught.value.paid_response.cached_tokens == 3
+    assert caught.value.paid_response.raw["usage"]["prompt_tokens"] == json.loads(bad_count)
+
+
+@pytest.mark.parametrize("field", ["completion_tokens", "cached_tokens"])
+def test_invalid_paid_other_count_preserves_valid_prompt_count(field: str) -> None:
+    usage: dict[str, Any] = {
+        "prompt_tokens": 11,
+        "completion_tokens": 7,
+        "prompt_tokens_details": {"cached_tokens": 3},
+        "cost": 0.125,
+        "cost_currency": "USD",
+    }
+    if field == "cached_tokens":
+        usage["prompt_tokens_details"]["cached_tokens"] = False
+    else:
+        usage[field] = False
+
+    with pytest.raises(TransportPaidAnswerError, match="invalid usage token counts") as caught:
+        _complete(_answer(json.dumps(usage)))
+
+    assert caught.value.paid_response.prompt_tokens == 11
+    assert (
+        caught.value.paid_response.cached_tokens is None
+        if field == "cached_tokens"
+        else caught.value.paid_response.completion_tokens is None
+    )
+
+
+def test_missing_prompt_count_in_partial_usage_is_unknown() -> None:
+    response = _complete(_answer('{"completion_tokens":7,"cost":0.125,"cost_currency":"USD"}'))
+
+    assert response.prompt_tokens is None
+    assert response.completion_tokens == 7
+    assert response.cost == Decimal("0.125")
+
+
+@pytest.mark.parametrize("details", ["null", "{}"])
+def test_optional_null_or_empty_prompt_token_details_keeps_paid_usd_answer(
+    details: str,
+) -> None:
+    response = _complete(
+        _answer(
+            '{"prompt_tokens":11,"completion_tokens":7,"prompt_tokens_details":'
+            + details
+            + ',"cost":0.125,"cost_currency":"USD"}'
+        )
+    )
+
+    assert response.prompt_tokens == 11
+    assert response.completion_tokens == 7
+    assert response.cached_tokens is None
+    assert response.cost == Decimal("0.125")
+    assert response.cost_currency == "USD"
 
 
 def test_explicit_eur_rate_is_a_decimal_without_default() -> None:

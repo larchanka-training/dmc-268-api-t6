@@ -456,7 +456,13 @@ class LlmGateway:
         *,
         conservative: bool = False,
     ) -> LlmUsage:
-        tokens_in, tokens_out = response.prompt_tokens, response.completion_tokens
+        tokens_in = response.prompt_tokens if response.prompt_tokens is not None else estimate
+        tokens_out = (
+            response.completion_tokens
+            if response.completion_tokens is not None
+            else profile.max_output_tokens
+        )
+        cached_tokens = response.cached_tokens if response.cached_tokens is not None else 0
         if tokens_in == 0 and tokens_out == 0 and response.cost is None:
             # No usage block (some self-hosted servers): count the pre-send estimate and
             # the answer, so the run cost limit does not fail open.
@@ -491,7 +497,7 @@ class LlmGateway:
             cost = profile.price.cost_usd(
                 tokens_in=tokens_in,
                 tokens_out=tokens_out,
-                cache_read_tokens=response.cached_tokens,
+                cache_read_tokens=cached_tokens,
             )
         return LlmUsage(
             provider=profile.provider,
@@ -499,7 +505,7 @@ class LlmGateway:
             operation=operation,
             tokens_in=tokens_in,
             tokens_out=tokens_out,
-            cache_read_tokens=response.cached_tokens,
+            cache_read_tokens=cached_tokens,
             cost_usd=cost,
         )
 
