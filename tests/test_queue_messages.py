@@ -17,15 +17,26 @@ from aio_pika.abc import AbstractExchange, AbstractIncomingMessage
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 import app.modules.reviews.infrastructure.amqp as amqp
-from app.modules.reviews.application.handle_review_run import DeliveryOutcome
+from app.modules.reviews.application.handle_review_run import ClaimedAttempt, DeliveryOutcome
 from app.modules.reviews.application.queue_messages import ReviewPublishPointer, StoredRunMessage
+from app.modules.reviews.application.run_failures import RunFailure
 from app.modules.reviews.application.try_enqueue_webhook_run import (
     PendingRunMessage,
     RunPublicationKind,
 )
+from app.modules.reviews.infrastructure.github_run_source import GitHubRunSource
+from app.modules.reviews.infrastructure.llm.gateway import LlmGateway
+from app.modules.reviews.infrastructure.llm.models import (
+    GatewayConventionsModel,
+    GatewayReviewModel,
+)
+from app.modules.reviews.infrastructure.llm.settings import LlmConfigError
 from app.worker import (
+    AttemptReviewProvider,
+    GitHubAdapters,
     WorkerProcess,
     WorkerSettings,
+    attempt_provider_factory,
     compose_worker_process,
     github_adapters,
     run_worker,
@@ -246,3 +257,81 @@ def test_worker_leader_tick_runs_the_sweep_then_the_outbox_replay_every_thirty_s
 
     assert calls == ["sweep", "replay", "replay"]
     assert inspect.signature(run_worker).parameters["leader_period"].default == 30.0
+
+
+LLM_ENV = {
+    "DATABASE_URL": "postgresql+psycopg://test",
+    "RABBITMQ_URL": "amqp://test",
+    "LLM_MODEL": "test-model",
+    "LLM_BASE_URL": "https://llm.test/v1",
+    "LLM_API_KEYS": "k",
+    "LLM_CONTEXT_WINDOW": "100000",
+}
+
+
+def test_worker_settings_read_llm_and_reject_a_partial_llm_config() -> None:
+    settings = WorkerSettings.from_environment(LLM_ENV)
+    assert settings.llm is not None and settings.llm.primary.model == "test-model"
+    assert (
+        WorkerSettings.from_environment(
+            {"DATABASE_URL": "postgresql+psycopg://test", "RABBITMQ_URL": "amqp://test"}
+        ).llm
+        is None
+    )
+    with pytest.raises(LlmConfigError):
+        WorkerSettings.from_environment({**LLM_ENV, "LLM_BASE_URL": ""})
+
+
+def _claimed() -> ClaimedAttempt:
+    return ClaimedAttempt(
+        run_id=RUN,
+        workspace_id=UUID(int=1),
+        attempt=2,
+        engine="fast",
+        deadline=NOW,
+        prompt_version_id=UUID(int=4),
+        rule_version_id=UUID(int=3),
+        worker_id="w",
+    )
+
+
+def test_production_factory_binds_gateway_models_to_the_attempt() -> None:
+    sources: list[UUID] = []
+    source = cast(GitHubRunSource, object())
+
+    def run_source(run_id: UUID) -> GitHubRunSource:
+        sources.append(run_id)
+        return source
+
+    github = GitHubAdapters(
+        vcs=cast(Any, None),
+        check_runs=cast(Any, None),
+        reviews=cast(Any, None),
+        eligibility=cast(Any, None),
+        run_source=run_source,
+    )
+    gateway = cast(LlmGateway, object())
+
+    provider = attempt_provider_factory(gateway, github)(_claimed())
+
+    assert isinstance(provider, AttemptReviewProvider)
+    review = provider._review
+    assert isinstance(review, GatewayReviewModel)
+    assert isinstance(provider._conventions, GatewayConventionsModel)
+    assert review._run.deadline == NOW and review._run.attempt == 2
+    assert sources == [RUN]
+
+
+def test_factory_without_llm_fails_the_model_call_and_names_the_missing_config() -> None:
+    github = GitHubAdapters(
+        vcs=cast(Any, None),
+        check_runs=cast(Any, None),
+        reviews=cast(Any, None),
+        eligibility=cast(Any, None),
+        run_source=lambda run_id: cast(GitHubRunSource, object()),
+    )
+    provider = attempt_provider_factory(None, github)(_claimed())
+
+    with pytest.raises(RunFailure, match="not configured") as raised:
+        asyncio.run(provider.draft_review(context=cast(Any, None)))
+    assert raised.value.error_code == "llm_unavailable"

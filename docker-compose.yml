@@ -29,6 +29,23 @@ services:
       GITHUB_APP_PRIVATE_KEY: ${GITHUB_APP_PRIVATE_KEY:-}
       GITHUB_API_URL: ${GITHUB_API_URL:-https://api.github.com}
       PORTAL_URL: ${PORTAL_URL:-}
+      # LLM gateway (#33): without LLM_MODEL the worker starts and every run fails
+      # with a message naming the missing configuration.
+      LLM_MODEL: ${LLM_MODEL:-}
+      LLM_API_KEYS: ${LLM_API_KEYS:-}
+      LLM_PROVIDER: ${LLM_PROVIDER:-}
+      LLM_BASE_URL: ${LLM_BASE_URL:-}
+      LLM_CONTEXT_WINDOW: ${LLM_CONTEXT_WINDOW:-}
+      LLM_MAX_OUTPUT_TOKENS: ${LLM_MAX_OUTPUT_TOKENS:-}
+      LLM_PRICE_INPUT_PER_MTOK: ${LLM_PRICE_INPUT_PER_MTOK:-}
+      LLM_PRICE_OUTPUT_PER_MTOK: ${LLM_PRICE_OUTPUT_PER_MTOK:-}
+      LLM_PRICE_CACHE_READ_PER_MTOK: ${LLM_PRICE_CACHE_READ_PER_MTOK:-}
+      LLM_STRUCTURED_OUTPUT: ${LLM_STRUCTURED_OUTPUT:-}
+      LLM_EXTRA_BODY: ${LLM_EXTRA_BODY:-}
+      LLM_ALLOW_PROMPT_JSON: ${LLM_ALLOW_PROMPT_JSON:-}
+      LLM_FALLBACK_MODEL: ${LLM_FALLBACK_MODEL:-}
+      LLM_FALLBACK_API_KEYS: ${LLM_FALLBACK_API_KEYS:-}
+      LLM_FALLBACK_BASE_URL: ${LLM_FALLBACK_BASE_URL:-}
     depends_on:
       postgres:
         condition: service_healthy

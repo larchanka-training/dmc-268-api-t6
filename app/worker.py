@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from functools import partial
 from pathlib import Path
-from typing import NoReturn, Protocol
+from typing import Protocol
 from uuid import UUID
 
 import httpx
@@ -29,6 +29,7 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 
+from app.bootstrap.llm_gateway import build_gateway
 from app.common.infrastructure.db.leader import WORKER_LEADER_LOCK, run_as_leader
 from app.common.infrastructure.heartbeat import beat, heartbeat_file, reset
 from app.modules.integrations.webhooks.infrastructure.github_installation_tree_provider import (
@@ -37,6 +38,7 @@ from app.modules.integrations.webhooks.infrastructure.github_installation_tree_p
 )
 from app.modules.reviews.application.check_runs import CheckRunGateway
 from app.modules.reviews.application.conventions import (
+    ConventionsModel,
     ConventionsRequest,
     GenerateRepoConventions,
     RepositoryFile,
@@ -58,6 +60,7 @@ from app.modules.reviews.application.handle_review_run import (
     ClaimedAttempt,
     HandleReviewRun,
 )
+from app.modules.reviews.application.llm import RunCallContext
 from app.modules.reviews.application.process_run import ReviewRunProcessor, RunDiffProvider
 from app.modules.reviews.application.prompt_builder import PullRequestMeta, ReviewContext
 from app.modules.reviews.application.publish_cancellation_signals import (
@@ -115,7 +118,14 @@ from app.modules.reviews.infrastructure.github_review_publication import (
     GitHubCheckRunGateway,
     GitHubPullRequestReviewGateway,
 )
+from app.modules.reviews.infrastructure.github_run_source import GitHubRunSource
 from app.modules.reviews.infrastructure.github_vcs import HttpGitHubVcsProvider
+from app.modules.reviews.infrastructure.llm.gateway import LlmGateway
+from app.modules.reviews.infrastructure.llm.models import (
+    GatewayConventionsModel,
+    GatewayReviewModel,
+)
+from app.modules.reviews.infrastructure.llm.settings import LlmSettings
 from app.modules.reviews.infrastructure.no_ci_sweep_candidates import SqlAlchemyDueNoCiCandidates
 from app.modules.reviews.infrastructure.provider_conventions import (
     ProviderConventionsModel,
@@ -247,37 +257,60 @@ async def review_worker(
             await worker.aclose()
 
 
-class UnavailableReviewProvider:
-    """Placeholder until the LLM gateway (#33) is composed: every call is ``llm_unavailable``."""
+LLM_NOT_CONFIGURED = (
+    "the LLM gateway is not configured: set LLM_MODEL and LLM_API_KEYS "
+    "(or LLM_BASE_URL for a self-hosted model)"
+)
 
-    async def _unavailable(self) -> NoReturn:
-        raise RunFailure("llm_unavailable", "no ReviewModel is configured for this worker")
+
+class UnconfiguredModel:
+    """Model calls of a worker started without ``LLM_*``: the Run fails and says why."""
+
+    async def draft_conventions(self, *, request: ConventionsRequest) -> Mapping[str, object]:
+        raise RunFailure("llm_unavailable", LLM_NOT_CONFIGURED)
+
+    async def draft_review(self, *, context: ReviewContext) -> Mapping[str, object] | str | bytes:
+        raise RunFailure("llm_unavailable", LLM_NOT_CONFIGURED)
+
+
+class AttemptReviewProvider:
+    """One attempt's provider: GitHub reads of the Run plus the models for the attempt."""
+
+    def __init__(
+        self,
+        source: GitHubRunSource,
+        conventions: ConventionsModel,
+        review: GatewayReviewModel | UnconfiguredModel,
+    ) -> None:
+        self._source = source
+        self._conventions = conventions
+        self._review = review
 
     async def fetch_diff(self, *, code_change_id: UUID, head_sha: str) -> list[DiffSnapshot]:
-        await self._unavailable()
+        raise RuntimeError("the worker reads the diff through its VcsProvider")
 
     async def fetch_file_content(self, *, code_change_id: UUID, head_sha: str, path: str) -> str:
-        await self._unavailable()
+        raise RuntimeError("the worker reads files through its VcsProvider")
 
     async def fetch_agents_md(self, repository_id: UUID) -> RepositorySnapshot:
-        await self._unavailable()
+        return await self._source.fetch_agents_md(repository_id)
 
     async def fetch_tree(self, repository_id: UUID) -> tuple[RepositoryFile, ...]:
-        await self._unavailable()
+        return await self._source.fetch_tree(repository_id)
 
     async def fetch_files(
         self, repository_id: UUID, paths: tuple[str, ...]
     ) -> tuple[RepositoryFile, ...]:
-        await self._unavailable()
+        return await self._source.fetch_files(repository_id, paths)
 
     async def draft_conventions(self, *, request: ConventionsRequest) -> Mapping[str, object]:
-        await self._unavailable()
+        return await self._conventions.draft_conventions(request=request)
 
     async def get_pull_request_meta(self, run_id: UUID) -> PullRequestMeta | None:
-        await self._unavailable()
+        return await self._source.get_pull_request_meta(run_id)
 
     async def draft_review(self, *, context: ReviewContext) -> Mapping[str, object] | str | bytes:
-        await self._unavailable()
+        return await self._review.draft_review(context=context)
 
     async def publish_review(
         self,
@@ -287,7 +320,7 @@ class UnavailableReviewProvider:
         findings: tuple[PublishedFinding, ...],
         idempotency_key: str,
     ) -> None:
-        await self._unavailable()
+        raise RuntimeError("the review is published by the review.publish consumer")
 
 
 type ProviderFactory = Callable[[ClaimedAttempt], ReviewWorkerProvider]
@@ -303,6 +336,7 @@ class WorkerSettings:
     github_api_url: str
     portal_url: str | None
     heartbeat_file: Path | None = None
+    llm: LlmSettings | None = None
 
     @property
     def github_app_configured(self) -> bool:
@@ -325,6 +359,8 @@ class WorkerSettings:
             github_api_url=env.get("GITHUB_API_URL", "https://api.github.com"),
             portal_url=env.get("PORTAL_URL") or None,
             heartbeat_file=heartbeat_file(env),
+            # Partly set LLM_* fails the start; none at all starts with a warning.
+            llm=LlmSettings.from_env(env) if env.get("LLM_MODEL") else None,
         )
 
 
@@ -350,6 +386,7 @@ class GitHubAdapters:
     check_runs: CheckRunGateway
     reviews: PullRequestReviewGateway
     eligibility: EligibilityChecker
+    run_source: Callable[[UUID], GitHubRunSource]
 
 
 def github_adapters(
@@ -372,8 +409,13 @@ def github_adapters(
         cache=InMemoryInstallationAccessTokenCache(now=time.time),
         now=time.time,
     )
+    vcs = ClassifiedVcsProvider(HttpGitHubVcsProvider(client=client, token_provider=tokens))
+    runs = SqlAlchemyRunRepository(session_factory)
     return GitHubAdapters(
-        vcs=ClassifiedVcsProvider(HttpGitHubVcsProvider(client=client, token_provider=tokens)),
+        vcs=vcs,
+        run_source=lambda run_id: GitHubRunSource(
+            client=client, token_provider=tokens, vcs=vcs, runs=runs, run_id=run_id
+        ),
         check_runs=GitHubCheckRunGateway(client=client, token_provider=tokens),
         reviews=GitHubPullRequestReviewGateway(client=client, token_provider=tokens),
         eligibility=DetermineCiEligibility(
@@ -382,6 +424,35 @@ def github_adapters(
             own_app_id=int(settings.github_app_id),
         ),
     )
+
+
+def attempt_provider_factory(
+    gateway: LlmGateway | None, github: GitHubAdapters | None
+) -> ProviderFactory:
+    """The production provider of each attempt: models bound to its ``RunCallContext``."""
+
+    def factory(claimed: ClaimedAttempt) -> ReviewWorkerProvider:
+        if github is None:
+            raise RunFailure("github_forbidden", "the GitHub App is not configured")
+        source = github.run_source(claimed.run_id)
+        if gateway is None:
+            return AttemptReviewProvider(source, UnconfiguredModel(), UnconfiguredModel())
+        run = RunCallContext(
+            run_id=claimed.run_id,
+            workspace_id=claimed.workspace_id,
+            attempt=claimed.attempt,
+            engine=claimed.engine,
+            deadline=claimed.deadline,
+            prompt_version_id=claimed.prompt_version_id,
+            rule_version_id=claimed.rule_version_id,
+        )
+        return AttemptReviewProvider(
+            source,
+            GatewayConventionsModel(gateway, run),
+            GatewayReviewModel(gateway, run, source),
+        )
+
+    return factory
 
 
 @dataclass(frozen=True)
@@ -405,13 +476,14 @@ def compose_worker_process(
     session_factory: async_sessionmaker[AsyncSession],
     queue: WorkerQueue,
     github: GitHubAdapters | None,
+    gateway: LlmGateway | None = None,
     provider_factory: ProviderFactory | None = None,
     delays: RetryDelays | None = None,
     attempt_deadline: timedelta = FAST_ATTEMPT_DEADLINE,
     heartbeat_interval: timedelta = HEARTBEAT_INTERVAL,
     now: Callable[[], datetime] = lambda: datetime.now(UTC),
 ) -> WorkerProcess:
-    factory = provider_factory or (lambda _: UnavailableReviewProvider())
+    factory = provider_factory or attempt_provider_factory(gateway, github)
     run_url = run_url_factory(settings.portal_url)
     lifecycle = partial(SqlAlchemyRunLifecycleUnitOfWork, session_factory)
     trace = TransactionalRunTrace(partial(SqlAlchemyRunTraceUnitOfWork, session_factory))
@@ -481,8 +553,13 @@ async def run_worker(
     provider_factory: ProviderFactory | None = None,
     delays: RetryDelays | None = None,
     leader_period: float = 30.0,
+    github_transport: httpx.AsyncBaseTransport | None = None,
+    llm_transport: httpx.AsyncBaseTransport | None = None,
 ) -> None:
-    """Consume until cancelled; the caller owns signal handling."""
+    """Consume until cancelled; the caller owns signal handling.
+
+    The transports replace the network in tests of this very composition.
+    """
     if settings.heartbeat_file is not None:
         reset(settings.heartbeat_file)
     engine = create_async_engine(settings.database_url, pool_pre_ping=True)
@@ -491,17 +568,27 @@ async def run_worker(
         stack.push_async_callback(engine.dispose)
         client = (
             await stack.enter_async_context(
-                httpx.AsyncClient(base_url=settings.github_api_url, timeout=10.0)
+                httpx.AsyncClient(
+                    base_url=settings.github_api_url, timeout=10.0, transport=github_transport
+                )
             )
             if settings.github_app_configured
             else None
         )
+        gateway: LlmGateway | None = None
+        if settings.llm is None:
+            _LOGGER.warning("LLM_MODEL is not set: %s; every review run fails", LLM_NOT_CONFIGURED)
+        else:
+            # One gateway (and HTTP pool) per process; models are bound per attempt.
+            llm_client = await stack.enter_async_context(httpx.AsyncClient(transport=llm_transport))
+            gateway = build_gateway(settings.llm, llm_client, session_factory)
         async with amqp_channels(settings.rabbitmq_url, delays or RetryDelays()) as channels:
             process = compose_worker_process(
                 settings=settings,
                 session_factory=session_factory,
                 queue=channels.publisher,
                 github=github_adapters(settings, client, session_factory),
+                gateway=gateway,
                 provider_factory=provider_factory,
                 delays=delays,
             )

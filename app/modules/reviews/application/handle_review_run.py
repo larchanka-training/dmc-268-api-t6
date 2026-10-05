@@ -28,6 +28,7 @@ from app.modules.reviews.application.conventions import (
 )
 from app.modules.reviews.application.execute_review import ReviewModel
 from app.modules.reviews.application.get_run_diff import DiffSnapshot
+from app.modules.reviews.application.llm import EngineName
 from app.modules.reviews.application.process_run import RunDiffProvider
 from app.modules.reviews.application.prompt_builder import PullRequestMeta, ReviewContext
 from app.modules.reviews.application.queue_messages import RunRetryQueue
@@ -74,7 +75,7 @@ class RunGuardSnapshot:
     repository_enabled: bool
     daily_budget_usd: Decimal
     spent_today_usd: Decimal
-    engine: str
+    engine: EngineName
     prompt_version_id: UUID
     rule_version_id: UUID
     check_run: CheckRunTarget
@@ -87,7 +88,7 @@ class ClaimedAttempt:
     run_id: UUID
     workspace_id: UUID
     attempt: int
-    engine: str
+    engine: EngineName
     deadline: datetime
     prompt_version_id: UUID
     rule_version_id: UUID
