@@ -4,7 +4,7 @@ The HTTP endpoint verifies each GitHub signature, commits the JSONB delivery rec
 and returns `202`. The worker claims pending receipts and projects installation
 and pull request events after the HTTP response. Expired claims and failed dispatches are retried.
 
-Set `DATABASE_URL`, `GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY`,
+Set `DATABASE_URL`, `RABBITMQ_URL`, `GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY`,
 and `GITHUB_APP_BOT_LOGIN` (the exact App bot login, such as `example[bot]`),
 then run:
 
@@ -15,7 +15,7 @@ uv run python -m app.webhook_worker
 
 For local Docker Compose, set `GITHUB_WEBHOOK_SECRET`, `GITHUB_APP_ID`,
 `GITHUB_APP_PRIVATE_KEY`, and `GITHUB_APP_BOT_LOGIN` in `.env`, apply the migration,
-and start the `webhooks` profile. A worker started outside Compose needs the
+and start the `webhooks` profile (the compose file passes `RABBITMQ_URL` itself). A worker started outside Compose needs the
 same database and GitHub App configuration.
 
 ```bash
@@ -36,14 +36,25 @@ eligibility and the no-CI sweep consider only open PRs (`docs/PIPELINE_SPEC.md` 
 `review_requested` and `review_request_removed` are dropped as irrelevant. A failed dispatch (for
 example a GitHub error or the 240 s dispatch timeout) releases the receipt for a retry after
 30 s; the third failure marks it failed and it is no longer replayed. It also projects
-installation events. Unknown repositories remain retryable until onboarding. Until #52 wires Run
-creation, a projected `labeled`, `synchronize`, or `reopened` delivery and every CI event
-(`status`, completed `check_suite` and `workflow_run`) are deferred and replayed every 5 minutes;
-each replay of a PR delivery fetches the current PR again.
+installation events. A delivery for an unknown installation or repository is deferred, see
+"Deferred deliveries" below.
 
-This worker only projects durable GitHub receipts. It neither connects to a broker
-nor enqueues `review.run/v1` messages. The application-level Run publisher port and
-its fake-driven behavior tests remain in place; the concrete AMQP publisher, queue
-topology, and consumer integration are deferred to #34. Missing database or GitHub App
-configuration stops startup before any receipt is claimed. PostgreSQL integration
-verification still requires a configured test environment.
+Runs (T1, T6). Label, `synchronize`, `reopened`, `check_suite`, `workflow_run` and
+`status` deliveries go through `TriggerFromDelivery` and `try_enqueue`: a Run is inserted with
+its outbox mark in one transaction and its `review.run/v1` pointer is published to RabbitMQ
+after commit with publisher confirms. The broker connection opens on the first Run; a
+publication that fails stays in the outbox and the review worker's leader loop replays it.
+Cancelling an attempted Run (new head, closed PR) publishes the check-run close signal with
+the same delivery. Missing database, broker or GitHub App configuration stops startup before
+any receipt is claimed.
+
+Deferred deliveries. A delivery the dispatcher cannot handle yet (unknown installation or
+repository, or an event without a handler) is retried after 5 minutes, at most three
+attempts in total, like a failed dispatch. After the third it is deferred for good
+(`projection_deferred_at`) and no longer retried. Linking the installation
+(`wake_receipts`) clears that mark and gives the deliveries of the installation a fresh
+attempt budget. Each sweep logs how many deliveries it handled and deferred, and every
+final deferral is logged with its reason.
+
+Retention. Finished receipts (projected, failed or deferred for good) are deleted 30 days
+after they finished; the worker runs the purge once an hour.
