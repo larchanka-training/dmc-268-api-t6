@@ -619,12 +619,12 @@ def _list_under(block: str, key: str) -> list[str]:
     ("service", "module", "env_files", "dependencies"),
     [
         ("worker", "app.worker", ["app.env", "worker.env"], ["bootstrap", "postgres", "rabbitmq"]),
-        # The projection writes only PostgreSQL; the reconciler of the API publishes the runs.
+        # The projection creates Runs and publishes them to the review queue (#52).
         (
             "webhook-worker",
             "app.webhook_worker",
             ["app.env", "webhook-worker.env"],
-            ["bootstrap", "postgres"],
+            ["bootstrap", "postgres", "rabbitmq"],
         ),
     ],
 )
