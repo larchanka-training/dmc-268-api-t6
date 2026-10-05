@@ -356,6 +356,8 @@ def test_github_review_gateway_classifies_publication_errors(
     status: int, body: dict[str, Any], headers: dict[str, str], kind: str
 ) -> None:
     def respond(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET" and request.url.path.endswith("/pulls/7"):
+            return httpx.Response(200, json={"head": {"sha": HEAD}})
         if request.method == "GET":
             return httpx.Response(200, json=[])
         payload = _json(request)
@@ -426,6 +428,8 @@ def test_failed_comment_read_is_retried_and_finds_the_posted_review() -> None:
         if request.method == "POST":
             posts.append(path)
             return httpx.Response(200, json={"id": 55})
+        if path.endswith("/pulls/7"):
+            return httpx.Response(200, json={"head": {"sha": HEAD}})
         if path.endswith("/pulls/7/reviews"):
             body = f"x\n\n<!-- ai-review findings_hash={HASH} -->"
             return httpx.Response(200, json=[{"id": 55, "body": body}] if posts else [])
@@ -447,3 +451,30 @@ def test_failed_comment_read_is_retried_and_finds_the_posted_review() -> None:
     assert raised.value.kind == "retryable"
     assert asyncio.run(gateway.submit_review(submission)) == SubmittedReview(55, (900,))
     assert len(posts) == 1
+
+
+def test_review_gateway_does_not_post_on_a_head_that_moved_on_github() -> None:
+    posts: list[str] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST":
+            posts.append(request.url.path)
+            return httpx.Response(200, json={"id": 1})
+        if request.url.path.endswith("/pulls/7/reviews"):
+            return httpx.Response(200, json=[])
+        if request.url.path.endswith("/pulls/7"):
+            return httpx.Response(200, json={"head": {"sha": "c" * 40}})
+        raise AssertionError(f"unexpected {request.method} {request.url}")
+
+    gateway = GitHubPullRequestReviewGateway(
+        client=httpx.AsyncClient(
+            base_url="https://api.github.test", transport=httpx.MockTransport(respond)
+        ),
+        token_provider=_Tokens(),
+    )
+    submission = ReviewSubmission(17, "octo/repo", 7, HEAD, "COMMENT", "body", (FINDING,), HASH)
+
+    with pytest.raises(GitHubPublishError) as raised:
+        asyncio.run(gateway.submit_review(submission))
+    assert raised.value.kind == "stale_commit"
+    assert posts == []

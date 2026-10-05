@@ -128,11 +128,23 @@ class GitHubPullRequestReviewGateway:
             )
             review_id = await self._find(prefix, headers, submission.findings_hash)
             if review_id is None:
+                await self._ensure_current_head(prefix, headers, submission.commit_sha)
                 review_id = await self._post(prefix, headers, submission)
             # A failed read raises: the retry finds the posted review by its marker.
             return await self._with_comments(prefix, headers, review_id)
         except httpx.TransportError as exc:
             raise GitHubPublishError("retryable", f"GitHub request failed: {exc}") from exc
+
+    async def _ensure_current_head(
+        self, prefix: str, headers: dict[str, str], commit_sha: str
+    ) -> None:
+        """GitHub, not PostgreSQL, knows a push that the webhook worker has not projected yet."""
+        response = await self._client.get(prefix, headers=headers, timeout=_REQUEST_TIMEOUT)
+        if response.is_error:
+            raise _publish_error(response)
+        head = response.json().get("head", {}).get("sha")
+        if head != commit_sha:
+            raise GitHubPublishError("stale_commit", f"pull request head moved to {head}")
 
     async def _post(
         self, prefix: str, headers: dict[str, str], submission: ReviewSubmission
