@@ -21,7 +21,16 @@ _DISPATCH_TIMEOUT_SECONDS = 240.0
 _FAILURE_RETRY = timedelta(seconds=30)
 _UNKNOWN_INSTALLATION_RETRY = timedelta(minutes=5)
 _MAX_DISPATCH_ATTEMPTS = 3
+# Finished receipts (projected, failed or finally deferred) are kept this long.
+RECEIPT_RETENTION = timedelta(days=30)
 _LOGGER = logging.getLogger(__name__)
+_DEFERRED = frozenset(
+    {
+        InstallationDeliveryDispatchStatus.IGNORED_UNKNOWN_INSTALLATION,
+        InstallationDeliveryDispatchStatus.IGNORED_UNKNOWN_REPOSITORY,
+        InstallationDeliveryDispatchStatus.DEFERRED_KNOWN_EVENT,
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -44,7 +53,18 @@ class GitHubWebhookReceiptStore(Protocol):
 
     async def mark_projected(self, delivery_id: str, token: UUID, at: datetime) -> None: ...
 
-    async def release(self, delivery_id: str, token: UUID, retry_after: datetime) -> None: ...
+    async def release(
+        self,
+        delivery_id: str,
+        token: UUID,
+        retry_after: datetime,
+        deferred_at: datetime,
+        max_attempts: int,
+    ) -> bool:
+        """Retry a deferred delivery later; the last attempt defers it for good (True)."""
+        ...
+
+    async def purge_finished(self, before: datetime) -> int: ...
 
     async def release_after_dispatch_failure(
         self,
@@ -108,7 +128,7 @@ class ReceiveGitHubDelivery:
             raise ValueError("limit must be positive")
         async with self._uow_factory() as uow:
             delivery_ids = await uow.receipts.pending_ids(self._now(), limit)
-        projected = 0
+        projected = deferred = 0
         for delivery_id in delivery_ids:
             try:
                 status = await self._project(delivery_id)
@@ -117,7 +137,19 @@ class ReceiveGitHubDelivery:
                 continue
             if status is not None:
                 projected += 1
+                deferred += status in _DEFERRED
+        if delivery_ids:
+            _LOGGER.info("GitHub webhook sweep: %d handled, %d deferred", projected, deferred)
         return projected
+
+    async def purge_finished(self, retention: timedelta = RECEIPT_RETENTION) -> int:
+        """Delete finished receipts older than ``retention`` (docs/WEBHOOK_WORKER.md)."""
+        async with self._uow_factory() as uow:
+            purged = await uow.receipts.purge_finished(self._now() - retention)
+            await uow.commit()
+        if purged:
+            _LOGGER.info("Purged %d finished GitHub webhook receipts", purged)
+        return purged
 
     async def _project(self, delivery_id: str) -> InstallationDeliveryDispatchStatus | None:
         dispatcher = self._dispatcher
@@ -149,14 +181,22 @@ class ReceiveGitHubDelivery:
             raise
 
         async with self._uow_factory() as uow:
-            if result.status in (
-                InstallationDeliveryDispatchStatus.IGNORED_UNKNOWN_INSTALLATION,
-                InstallationDeliveryDispatchStatus.IGNORED_UNKNOWN_REPOSITORY,
-                InstallationDeliveryDispatchStatus.DEFERRED_KNOWN_EVENT,
-            ):
-                await uow.receipts.release(
-                    delivery_id, token, self._now() + _UNKNOWN_INSTALLATION_RETRY
+            if result.status in _DEFERRED:
+                now = self._now()
+                final = await uow.receipts.release(
+                    delivery_id,
+                    token,
+                    now + _UNKNOWN_INSTALLATION_RETRY,
+                    now,
+                    _MAX_DISPATCH_ATTEMPTS,
                 )
+                if final:
+                    # Linking the installation wakes it up again (wake_receipts).
+                    _LOGGER.warning(
+                        "GitHub webhook delivery %s deferred for good: %s",
+                        delivery_id,
+                        result.status.value,
+                    )
             else:
                 await uow.receipts.mark_projected(delivery_id, token, self._now())
             await uow.commit()

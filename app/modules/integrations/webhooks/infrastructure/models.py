@@ -47,7 +47,8 @@ class WebhookEvent(Base):
             "retry_after",
             "received_at",
             postgresql_where=text(
-                "projected_at IS NULL AND projection_failed_at IS NULL AND payload IS NOT NULL"
+                "projected_at IS NULL AND projection_failed_at IS NULL "
+                "AND projection_deferred_at IS NULL AND payload IS NOT NULL"
             ),
         ),
     )
@@ -70,6 +71,10 @@ class WebhookEvent(Base):
     projected_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     projection_attempt_count: Mapped[int] = mapped_column(default=0, server_default=text("0"))
     projection_failed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    # Deferred for good after the last attempt; wake_receipts clears it (#52).
+    projection_deferred_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
     received_at: Mapped[datetime] = timestamp_column()

@@ -71,6 +71,7 @@ class FakeClaimedReceipt:
     projected: bool = False
     projection_attempt_count: int = 0
     projection_failed_at: datetime | None = None
+    projection_deferred_at: datetime | None = None
     claim_token: object | None = None
     lease_until: datetime | None = None
     retry_after: datetime | None = None
@@ -115,6 +116,7 @@ class FakeReceiptUnitOfWork:
         if (
             row.projected
             or row.projection_failed_at is not None
+            or row.projection_deferred_at is not None
             or (row.lease_until is not None and row.lease_until > now)
         ):
             return None
@@ -131,12 +133,28 @@ class FakeReceiptUnitOfWork:
         row.claim_token = None
         row.lease_until = None
 
-    async def release(self, delivery_id: str, token: UUID, retry_after: datetime) -> None:
+    async def release(
+        self,
+        delivery_id: str,
+        token: UUID,
+        retry_after: datetime,
+        deferred_at: datetime,
+        max_attempts: int,
+    ) -> bool:
         row = self.rows[delivery_id]
         assert row.claim_token == token
+        row.projection_attempt_count += 1
         row.claim_token = None
         row.lease_until = None
+        if row.projection_attempt_count >= max_attempts:
+            row.projection_deferred_at = deferred_at
+            row.retry_after = None
+            return True
         row.retry_after = retry_after
+        return False
+
+    async def purge_finished(self, before: datetime) -> int:
+        return 0
 
     async def release_after_dispatch_failure(
         self,
@@ -163,6 +181,7 @@ class FakeReceiptUnitOfWork:
             for delivery_id, row in self.rows.items()
             if not row.projected
             and row.projection_failed_at is None
+            and row.projection_deferred_at is None
             and (row.lease_until is None or row.lease_until <= now)
             and (row.retry_after is None or row.retry_after <= now)
         )[:limit]

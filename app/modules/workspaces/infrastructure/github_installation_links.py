@@ -6,7 +6,7 @@ from decimal import Decimal
 from typing import cast
 from uuid import UUID, uuid4
 
-from sqlalchemy import delete, select, update
+from sqlalchemy import delete, or_, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -196,11 +196,15 @@ class SqlAlchemyGitHubInstallationLinkStore:
             update(WebhookEvent)
             .where(
                 WebhookEvent.installation_external_id == installation_id,
-                WebhookEvent.event.in_(("installation", "installation_repositories")),
+                or_(
+                    WebhookEvent.event.in_(("installation", "installation_repositories")),
+                    # Deliveries deferred for good while the installation was unknown.
+                    WebhookEvent.projection_deferred_at.is_not(None),
+                ),
                 WebhookEvent.projected_at.is_(None),
                 WebhookEvent.payload.is_not(None),
             )
-            .values(retry_after=None)
+            .values(retry_after=None, projection_deferred_at=None, projection_attempt_count=0)
         )
 
     async def revoke_unlisted(

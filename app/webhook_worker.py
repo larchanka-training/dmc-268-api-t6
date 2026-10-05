@@ -30,6 +30,7 @@ from app.modules.reviews.application.try_enqueue_webhook_run import RunMessagePu
 from app.modules.reviews.infrastructure.amqp import LazyAmqpPublisher
 
 _LOGGER = logging.getLogger(__name__)
+_PURGE_INTERVAL_SECONDS = 3600.0
 
 
 @dataclass(frozen=True)
@@ -95,9 +96,21 @@ async def sweep_once(receiver: ReceiveGitHubDelivery) -> int:
     return projected
 
 
+async def purge_once(receiver: ReceiveGitHubDelivery) -> int:
+    try:
+        return await receiver.purge_finished()
+    except Exception:
+        _LOGGER.exception("GitHub webhook receipt purge failed")
+        return 0
+
+
 async def sweep_forever(receiver: ReceiveGitHubDelivery) -> NoReturn:
+    next_purge = 0.0
     while True:
         projected = await sweep_once(receiver)
+        if time.monotonic() >= next_purge:
+            await purge_once(receiver)
+            next_purge = time.monotonic() + _PURGE_INTERVAL_SECONDS
         await asyncio.sleep(0 if projected == 100 else 30)
 
 
