@@ -246,6 +246,7 @@ def test_unrelated_label_is_ignored_before_intent_projection(action: str) -> Non
     )
 
     assert result.status is InstallationDeliveryDispatchStatus.IGNORED_IRRELEVANT_EVENT
+    assert result.detail == "label is not ai-review"
 
 
 @pytest.mark.parametrize("label", [None, {}, {"name": ""}, {"name": 17}, "ai-review"])
@@ -261,6 +262,114 @@ def test_malformed_label_is_rejected_at_transport_boundary(label: object) -> Non
     )
 
     assert result.status is InstallationDeliveryDispatchStatus.IGNORED_INVALID_EVENT
+
+
+def _check_suite_delivery() -> VerifiedGitHubDelivery:
+    return VerifiedGitHubDelivery(
+        "delivery-ci",
+        "check_suite",
+        {
+            "action": "completed",
+            "installation": {"id": 17},
+            "repository": {"id": 101, "full_name": "octo/repo"},
+            "check_suite": {"head_sha": "a" * 40},
+        },
+    )
+
+
+@pytest.mark.parametrize(
+    ("delivery", "status", "detail"),
+    [
+        (
+            _pull_request_delivery("labeled", label={"name": "ai-review"}),
+            InstallationDeliveryDispatchStatus.PROJECTED_PR,
+            "label outcome",
+        ),
+        (
+            _pull_request_delivery("synchronize"),
+            InstallationDeliveryDispatchStatus.PROJECTED_PR,
+            "pr outcome",
+        ),
+        (
+            _check_suite_delivery(),
+            InstallationDeliveryDispatchStatus.PROCESSED_CI,
+            "ci outcome",
+        ),
+    ],
+)
+def test_the_run_trigger_outcome_becomes_the_dispatch_detail(
+    delivery: VerifiedGitHubDelivery, status: InstallationDeliveryDispatchStatus, detail: str
+) -> None:
+    class Projector:
+        async def execute(
+            self, event: PullRequestEvent | PullRequestLabelEvent
+        ) -> PullRequestProjectionStatus:
+            return PullRequestProjectionStatus.PROJECTED
+
+    class Trigger:
+        async def on_pr(self, event: PullRequestEvent) -> str:
+            return "pr outcome"
+
+        async def on_label(self, event: PullRequestLabelEvent) -> str:
+            return "label outcome"
+
+        async def on_ci(self, event: CiTriggerEvent) -> str:
+            return "ci outcome"
+
+    adapter = GitHubWebhookDispatchAdapter(
+        GitHubInstallationDeliveryDispatcher(
+            resolver=FakeInstallationResolver(),
+            onboarding=FakeOnboarding(),
+            pull_request_projector=Projector(),
+            label_intent_projector=Projector(),
+            run_trigger=Trigger(),
+        )
+    )
+
+    result = asyncio.run(adapter.execute(delivery.to_receipt()))
+
+    assert result == InstallationDeliveryDispatchResult(status, detail)
+
+
+@pytest.mark.parametrize(
+    ("projection", "status"),
+    [
+        (
+            PullRequestProjectionStatus.UNKNOWN_REPOSITORY,
+            InstallationDeliveryDispatchStatus.IGNORED_UNKNOWN_REPOSITORY,
+        ),
+        (
+            PullRequestProjectionStatus.IGNORED_UNRELATED,
+            InstallationDeliveryDispatchStatus.IGNORED_IRRELEVANT_EVENT,
+        ),
+        (
+            PullRequestProjectionStatus.IGNORED_STALE,
+            InstallationDeliveryDispatchStatus.PROJECTED_PR,
+        ),
+    ],
+)
+def test_a_projection_that_did_not_apply_the_label_names_itself_in_the_detail(
+    projection: PullRequestProjectionStatus, status: InstallationDeliveryDispatchStatus
+) -> None:
+    class IntentProjector:
+        async def execute(self, event: PullRequestLabelEvent) -> PullRequestProjectionStatus:
+            return projection
+
+    adapter = GitHubWebhookDispatchAdapter(
+        GitHubInstallationDeliveryDispatcher(
+            resolver=FakeInstallationResolver(),
+            onboarding=FakeOnboarding(),
+            label_intent_projector=IntentProjector(),
+        )
+    )
+
+    result = asyncio.run(
+        adapter.execute(
+            _pull_request_delivery("unlabeled", label={"name": "ai-review"}).to_receipt()
+        )
+    )
+
+    assert result == InstallationDeliveryDispatchResult(status, projection.value)
 
 
 @pytest.mark.parametrize("action", ["review_requested", "review_request_removed"])

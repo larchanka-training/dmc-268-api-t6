@@ -6,14 +6,16 @@ import asyncio
 import hashlib
 import hmac
 import json
+import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from types import TracebackType
-from typing import Self
+from typing import Any, Self
 from uuid import UUID
 
+import pytest
 from fastapi.testclient import TestClient
 
 from app.bootstrap.reviews_api import get_github_webhook_receipt_uow_factory
@@ -49,6 +51,8 @@ from app.modules.reviews.application.trigger_from_delivery import (
     TriggerFromDelivery,
 )
 from app.modules.reviews.application.try_enqueue_webhook_run import (
+    CandidateMiss,
+    DuplicateReason,
     EnqueueStatus,
     PendingRunMessage,
     RunInsertCandidate,
@@ -87,6 +91,7 @@ class State:
     commits: int = 0
     notification: tuple[UUID, UUID, str] | None = None
     published: bool = False
+    miss: CandidateMiss | None = None
 
     def candidate(self) -> EligibilityCandidate | None:
         pr = self.pull_request
@@ -188,10 +193,12 @@ class RunStore:
             assert isinstance(status, str)
             self.state.notification = (run_id, workspace_id, status)
 
-    async def lock_candidate(self, code_change_id: UUID) -> RunInsertCandidate | None:
+    async def lock_candidate(self, code_change_id: UUID) -> RunInsertCandidate | CandidateMiss:
         ci = self.state.candidate()
         if ci is None or ci.code_change_id != code_change_id:
-            return None
+            return CandidateMiss.PULL_REQUEST_GONE
+        if self.state.miss is not None:
+            return self.state.miss
         return RunInsertCandidate(
             ci=ci,
             repository_id=_REPO_ID,
@@ -207,9 +214,9 @@ class RunStore:
 
     async def insert_webhook_run(
         self, candidate: RunInsertCandidate, now: datetime
-    ) -> PendingRunMessage | None:
+    ) -> PendingRunMessage | DuplicateReason:
         if self.state.message is not None:
-            return None
+            return DuplicateReason.ACTIVE_RUN
         self.state.message = PendingRunMessage.from_candidate(_RUN_ID, candidate, now)
         return self.state.message
 
@@ -553,3 +560,178 @@ def test_signed_ai_review_label_enqueues_after_current_head_green_ci() -> None:
     assert state.pull_request is not None and not state.pull_request.ai_review_labeled
     assert asyncio.run(enqueuer.execute(_PR_ID, _HEAD)).status is EnqueueStatus.INELIGIBLE
     assert len(state.confirmed) == 1
+
+
+_DELIVERY_LOGGER = "app.modules.integrations.webhooks.application.receive_github_delivery"
+
+
+class BlockedCi(GreenCi):
+    async def get_current_head_ci(
+        self, installation_external_id: int, repository_full_name: str, head_sha: str
+    ) -> CiSnapshot:
+        snapshot = await super().get_current_head_ci(
+            installation_external_id, repository_full_name, head_sha
+        )
+        return replace(snapshot, check_suites=(CheckSuite(7, "in_progress", None),))
+
+
+class LabelCurrent:
+    async def get_current(self, event: PullRequestEvent) -> PullRequestEvent:
+        return replace(event, current_label_names=frozenset({"ai-review"}))
+
+
+class LabelLock:
+    @asynccontextmanager
+    async def hold(self, event: PullRequestEvent) -> AsyncIterator[None]:
+        yield
+
+
+def _label_payload(
+    label: str = "ai-review",
+    *,
+    sender: dict[str, str] | None = None,
+    pr_state: str = "open",
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "action": "labeled",
+        "installation": {"id": 17},
+        "repository": {"id": 101, "full_name": "octo/repo"},
+        "label": {"name": label},
+        "pull_request": {
+            "id": 901,
+            "number": 7,
+            "title": "Review parser",
+            "html_url": "https://github.com/octo/repo/pull/7",
+            "user": {"login": "alice"},
+            "head": {"ref": "feature", "sha": _HEAD},
+            "base": {"ref": "main", "sha": _BASE},
+            "state": pr_state,
+            "updated_at": "2026-09-28T11:59:00Z",
+        },
+    }
+    if sender is not None:
+        payload["sender"] = sender
+    return payload
+
+
+def _outcome_lines(
+    state: State,
+    caplog: pytest.LogCaptureFixture,
+    payload: dict[str, Any],
+    *,
+    ci: GreenCi | None = None,
+) -> list[str]:
+    def uow_factory() -> MemoryUnitOfWork:
+        return MemoryUnitOfWork(state)
+
+    enqueuer = TryEnqueueWebhookRun(
+        eligibility=DetermineCiEligibility(
+            candidates=Candidates(state), ci=ci or GreenCi(state), own_app_id=42
+        ),
+        uow_factory=uow_factory,
+        publisher=ConfirmedPublisher(state),
+        now=lambda: _NOW,
+    )
+    dispatcher = GitHubInstallationDeliveryDispatcher(
+        resolver=UnusedResolver(),
+        onboarding=UnusedOnboarding(),
+        label_intent_projector=ProjectGitHubPullRequest(
+            uow_factory=uow_factory,
+            bot_login="reviewer[bot]",
+            current_provider=LabelCurrent(),
+            projection_lock=LabelLock(),
+            now=lambda: _NOW,
+        ),
+        run_trigger=TriggerFromDelivery(targets=Targets(state), enqueuer=enqueuer),
+    )
+    receiver = ReceiveGitHubDelivery(
+        uow_factory=uow_factory,
+        dispatcher=GitHubWebhookDispatchAdapter(dispatcher),
+        now=lambda: _NOW,
+    )
+    asyncio.run(
+        receiver.execute(WebhookReceipt("delivery-outcome", "pull_request", json.dumps(payload)))
+    )
+    with caplog.at_level(logging.INFO, logger=_DELIVERY_LOGGER):
+        assert asyncio.run(receiver.replay_pending()) == 1
+    return [
+        record.getMessage()
+        for record in caplog.records
+        if record.name == _DELIVERY_LOGGER and "delivery-outcome" in record.getMessage()
+    ]
+
+
+_LINE = "GitHub webhook delivery delivery-outcome event=pull_request"
+
+
+def test_label_delivery_that_enqueues_a_run_logs_the_run(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    state = State()
+
+    lines = _outcome_lines(state, caplog, _label_payload())
+
+    assert lines == [
+        f"{_LINE} status=projected_pr detail=pr={_PR_ID} head=aaaaaaa: enqueued run={_RUN_ID}"
+    ]
+    assert state.published
+
+
+def test_label_delivery_blocked_by_foreign_ci_logs_the_gate_reason(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    state = State()
+
+    lines = _outcome_lines(state, caplog, _label_payload(), ci=BlockedCi(state))
+
+    assert lines == [
+        f"{_LINE} status=projected_pr detail=pr={_PR_ID} head=aaaaaaa: ineligible (ci_blocked)"
+    ]
+    assert state.message is None
+
+
+def test_label_delivery_without_rules_logs_unconfigured_not_stale(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    state = State(miss=CandidateMiss.MISSING_RULES)
+
+    lines = _outcome_lines(state, caplog, _label_payload())
+
+    assert lines == [
+        f"{_LINE} status=projected_pr detail=pr={_PR_ID} head=aaaaaaa: unconfigured (missing_rules)"
+    ]
+    assert state.message is None
+
+
+def test_label_delivery_for_a_closed_pr_logs_that_no_open_pr_exists(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    state = State()
+
+    lines = _outcome_lines(state, caplog, _label_payload(pr_state="closed"))
+
+    assert lines == [f"{_LINE} status=projected_pr detail=no open pull request"]
+    assert state.message is None
+
+
+def test_foreign_label_delivery_logs_that_the_label_is_not_ai_review(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    state = State()
+
+    lines = _outcome_lines(state, caplog, _label_payload("bug"))
+
+    assert lines == [f"{_LINE} status=ignored_irrelevant_event detail=label is not ai-review"]
+    assert state.pull_request is None
+
+
+def test_label_delivery_from_the_apps_own_bot_logs_the_ignored_projection(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    state = State()
+    sender = {"type": "Bot", "login": "reviewer[bot]"}
+
+    lines = _outcome_lines(state, caplog, _label_payload(sender=sender))
+
+    assert lines == [f"{_LINE} status=ignored_irrelevant_event detail=ignored_unrelated"]
+    assert state.pull_request is None

@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import hmac
 import json
+import logging
 import os
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field
@@ -575,6 +576,92 @@ def test_unknown_pr_repository_receipt_remains_replayable_after_sweep() -> None:
     assert asyncio.run(receiver.replay_pending()) == 1
     assert uow.rows["unknown-pr"].projected is False
     assert uow.rows["unknown-pr"].retry_after == now + timedelta(minutes=5)
+
+
+def _outcome_lines(caplog: pytest.LogCaptureFixture) -> list[str]:
+    return [
+        record.getMessage()
+        for record in caplog.records
+        if record.levelno == logging.INFO
+        and record.getMessage().startswith("GitHub webhook delivery ")
+    ]
+
+
+def test_projected_delivery_logs_one_outcome_line_with_its_detail_and_no_payload(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    now = datetime(2026, 9, 28, tzinfo=UTC)
+    uow = FakeReceiptUnitOfWork()
+    payload = {"action": "labeled", "secret": "ghs_payload_sentinel"}
+    receipts = [
+        VerifiedGitHubDelivery("outcome-1", "pull_request", payload).to_receipt(),
+        VerifiedGitHubDelivery("outcome-2", "installation", {"action": "created"}).to_receipt(),
+    ]
+
+    class Dispatcher:
+        async def execute(self, delivery: WebhookReceipt) -> InstallationDeliveryDispatchResult:
+            if delivery.delivery_id == "outcome-1":
+                return InstallationDeliveryDispatchResult(
+                    InstallationDeliveryDispatchStatus.PROJECTED_PR,
+                    "pr=p head=aaaaaaa: ineligible (ci_blocked)",
+                )
+            return InstallationDeliveryDispatchResult(InstallationDeliveryDispatchStatus.ONBOARDED)
+
+    receiver = ReceiveGitHubDelivery(
+        uow_factory=lambda: uow, dispatcher=Dispatcher(), now=lambda: now
+    )
+    for receipt in receipts:
+        asyncio.run(receiver.execute(receipt))
+
+    with caplog.at_level(logging.INFO):
+        assert asyncio.run(receiver.replay_pending()) == 2
+
+    assert _outcome_lines(caplog) == [
+        "GitHub webhook delivery outcome-1 event=pull_request status=projected_pr "
+        "detail=pr=p head=aaaaaaa: ineligible (ci_blocked)",
+        "GitHub webhook delivery outcome-2 event=installation status=onboarded detail=-",
+    ]
+    assert "ghs_payload_sentinel" not in caplog.text
+
+
+def test_deferred_delivery_logs_when_it_is_tried_again_and_then_that_it_is_final(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    now = datetime(2026, 9, 28, tzinfo=UTC)
+    uow = FakeReceiptUnitOfWork()
+    delivery = VerifiedGitHubDelivery("deferred-1", "pull_request", {"action": "labeled"})
+
+    class UnknownRepositoryDispatcher:
+        async def execute(self, delivery: WebhookReceipt) -> InstallationDeliveryDispatchResult:
+            return InstallationDeliveryDispatchResult(
+                InstallationDeliveryDispatchStatus.IGNORED_UNKNOWN_REPOSITORY, "unknown_repository"
+            )
+
+    receiver = ReceiveGitHubDelivery(
+        uow_factory=lambda: uow, dispatcher=UnknownRepositoryDispatcher(), now=lambda: now
+    )
+    asyncio.run(receiver.execute(delivery.to_receipt()))
+
+    with caplog.at_level(logging.INFO):
+        for _ in range(3):
+            assert asyncio.run(receiver.replay_pending()) == 1
+            now += timedelta(minutes=6)
+
+    prefix = (
+        "GitHub webhook delivery deferred-1 event=pull_request "
+        "status=ignored_unknown_repository detail=unknown_repository"
+    )
+    assert _outcome_lines(caplog) == [
+        f"{prefix} retry_at=2026-09-28T00:05:00+00:00",
+        f"{prefix} retry_at=2026-09-28T00:11:00+00:00",
+        f"{prefix} retry_at=none",
+    ]
+    assert [
+        record.getMessage() for record in caplog.records if record.levelno == logging.WARNING
+    ] == [
+        "GitHub webhook delivery deferred-1 deferred after its last attempt: "
+        "ignored_unknown_repository"
+    ]
 
 
 def test_commit_failure_cannot_acknowledge_receipt() -> None:

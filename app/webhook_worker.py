@@ -168,5 +168,10 @@ async def run_forever() -> None:
         await resources.aclose()
 
 
-if __name__ == "__main__":
+def main() -> None:
+    logging.basicConfig(level=logging.INFO)
     asyncio.run(run_forever())
+
+
+if __name__ == "__main__":
+    main()

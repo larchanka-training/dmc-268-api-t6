@@ -14,7 +14,10 @@ from app.common.infrastructure.db.unit_of_work import SqlAlchemyUnitOfWork
 from app.modules.auth.application.scope import AuthScope
 from app.modules.reviews.application.queue_messages import StoredRunMessage
 from app.modules.reviews.application.rerun_run import RerunOutcome, RerunResult
-from app.modules.reviews.application.try_enqueue_webhook_run import PendingRunMessage
+from app.modules.reviews.application.try_enqueue_webhook_run import (
+    PendingRunMessage,
+    RunInsertCandidate,
+)
 from app.modules.reviews.infrastructure.models import CodeChange, Run
 from app.modules.reviews.infrastructure.run_notifications import notify_run_state
 from app.modules.reviews.infrastructure.run_repository import authorized_run
@@ -46,7 +49,7 @@ class SqlAlchemyRerunStore:
         if pr_state != CodeChangeState.OPEN or active is not None:
             return RerunResult(RerunOutcome.CONFLICT)
         candidate = await SqlAlchemyWebhookRunStore(self._session).lock_candidate(code_change_id)
-        if candidate is None:
+        if not isinstance(candidate, RunInsertCandidate):
             # No active rule or prompt version, or no GitHub installation: not a T3 conflict.
             return RerunResult(RerunOutcome.NOT_CONFIGURED)
         new_id = uuid4()

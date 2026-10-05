@@ -185,16 +185,15 @@ class ReceiveGitHubDelivery:
                 await uow.commit()
             raise
 
+        retry_note = ""
         async with self._uow_factory() as uow:
             if result.status in _DEFERRED:
                 now = self._now()
+                retry_at = now + _UNKNOWN_INSTALLATION_RETRY
                 final = await uow.receipts.release(
-                    delivery_id,
-                    token,
-                    now + _UNKNOWN_INSTALLATION_RETRY,
-                    now,
-                    _MAX_DISPATCH_ATTEMPTS,
+                    delivery_id, token, retry_at, now, _MAX_DISPATCH_ATTEMPTS
                 )
+                retry_note = f" retry_at={'none' if final else retry_at.isoformat()}"
                 if final:
                     # Linking the installation wakes it up again (wake_receipts); installation
                     # events of linked installations received within the revival window are
@@ -207,4 +206,14 @@ class ReceiveGitHubDelivery:
             else:
                 await uow.receipts.mark_projected(delivery_id, token, self._now())
             await uow.commit()
+        # One line per delivery: why a label (or any event) did or did not become a Run.
+        # Ids, statuses and reasons only; never the payload or a credential.
+        _LOGGER.info(
+            "GitHub webhook delivery %s event=%s status=%s detail=%s%s",
+            delivery_id,
+            delivery.event_name,
+            result.status.value,
+            result.detail or "-",
+            retry_note,
+        )
         return result.status

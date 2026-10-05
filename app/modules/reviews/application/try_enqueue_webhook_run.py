@@ -23,8 +23,36 @@ class EnqueueStatus(StrEnum):
     ENQUEUED = "enqueued"
     PUBLICATION_PENDING = "publication_pending"
     INELIGIBLE = "ineligible"
+    # The repository lacks what a Run needs; a later delivery does not fix that by itself.
+    UNCONFIGURED = "unconfigured"
     STALE = "stale"
     DUPLICATE = "duplicate"
+
+
+class CandidateMiss(StrEnum):
+    """Why the locked read found no Run to insert; the value is the logged reason."""
+
+    PULL_REQUEST_GONE = "pull_request_gone"
+    REPOSITORY_GONE = "repository_gone"
+    MISSING_INSTALLATION = "missing_installation"
+    MISSING_RULES = "missing_rules"
+    MISSING_PROMPT = "missing_prompt"
+
+
+class DuplicateReason(StrEnum):
+    """Why the insert created no second Run; the value is the logged reason."""
+
+    ACTIVE_RUN = "active_run"
+    HEAD_ALREADY_REVIEWED = "head_already_reviewed"
+
+
+_UNCONFIGURED = frozenset(
+    {
+        CandidateMiss.MISSING_INSTALLATION,
+        CandidateMiss.MISSING_RULES,
+        CandidateMiss.MISSING_PROMPT,
+    }
+)
 
 
 class RunPublicationKind(StrEnum):
@@ -36,6 +64,7 @@ class RunPublicationKind(StrEnum):
 class EnqueueResult:
     status: EnqueueStatus
     run_id: UUID | None = None
+    reason: str | None = None
 
 
 @dataclass(frozen=True)
@@ -98,11 +127,11 @@ class EligibilityChecker(Protocol):
 
 
 class WebhookRunStore(Protocol):
-    async def lock_candidate(self, code_change_id: UUID) -> RunInsertCandidate | None: ...
+    async def lock_candidate(self, code_change_id: UUID) -> RunInsertCandidate | CandidateMiss: ...
 
     async def insert_webhook_run(
         self, candidate: RunInsertCandidate, now: datetime
-    ) -> PendingRunMessage | None: ...
+    ) -> PendingRunMessage | DuplicateReason: ...
 
     async def notify_run_updated(self, run_id: UUID, workspace_id: UUID, status: str) -> None: ...
 
@@ -147,14 +176,21 @@ class TryEnqueueWebhookRun:
     async def execute(self, code_change_id: UUID, expected_head_sha: str) -> EnqueueResult:
         decision = await self._eligibility.execute(code_change_id, expected_head_sha)
         if not decision.eligible or decision.candidate is None:
-            return EnqueueResult(EnqueueStatus.INELIGIBLE)
+            return EnqueueResult(EnqueueStatus.INELIGIBLE, reason=decision.reason.value)
         async with self._uow_factory() as uow:
             candidate = await uow.runs.lock_candidate(code_change_id)
-            if candidate is None or candidate.ci != decision.candidate:
-                return EnqueueResult(EnqueueStatus.STALE)
+            if isinstance(candidate, CandidateMiss):
+                status = (
+                    EnqueueStatus.UNCONFIGURED
+                    if candidate in _UNCONFIGURED
+                    else EnqueueStatus.STALE
+                )
+                return EnqueueResult(status, reason=candidate.value)
+            if candidate.ci != decision.candidate:
+                return EnqueueResult(EnqueueStatus.STALE, reason="state_changed")
             message = await uow.runs.insert_webhook_run(candidate, self._now())
-            if message is None:
-                return EnqueueResult(EnqueueStatus.DUPLICATE)
+            if isinstance(message, DuplicateReason):
+                return EnqueueResult(EnqueueStatus.DUPLICATE, reason=message.value)
             await uow.runs.notify_run_updated(message.run_id, message.workspace_id, "queued")
             await uow.commit()
 
