@@ -12,7 +12,10 @@ from uuid import UUID, uuid4
 
 import pytest
 
-from app.modules.repositories.application.installation_repositories import RepositorySnapshot
+from app.modules.repositories.application.installation_repositories import (
+    RepositoryReference,
+    RepositorySnapshot,
+)
 from app.modules.repositories.application.onboard_repository import (
     PersistedRuleVersion,
     load_default_rule_sets,
@@ -113,6 +116,15 @@ class FakeInstallationRepositoryUnitOfWork:
 
 def _snapshot(*, full_name: str = "octo/api") -> RepositorySnapshot:
     return RepositorySnapshot(
+        external_id=101,
+        full_name=full_name,
+        default_branch="main",
+        web_url="https://github.com/octo/api",
+    )
+
+
+def _reference(*, full_name: str = "octo/api") -> RepositoryReference:
+    return RepositoryReference(
         external_id=101,
         full_name=full_name,
         default_branch="main",
@@ -221,10 +233,12 @@ def test_sync_soft_disables_only_matching_repositories_idempotently() -> None:
     asyncio.run(
         sync.disable(
             provider_installation_id=installation_id,
-            repositories=(_snapshot(), _snapshot(full_name="unknown/repository")),
+            repositories=(_reference(), _reference(full_name="unknown/repository")),
         )
     )
-    asyncio.run(sync.disable(provider_installation_id=installation_id, repositories=(_snapshot(),)))
+    asyncio.run(
+        sync.disable(provider_installation_id=installation_id, repositories=(_reference(),))
+    )
 
     assert store.repositories[(installation_id, 101)].enabled is False
     assert uow.commits == 3
@@ -242,7 +256,9 @@ def test_sync_readding_a_removed_repository_reenables_it() -> None:
     input_ = RepositoryOnboardingInput(snapshot=_snapshot(), languages={"Python": 100})
 
     asyncio.run(sync.execute(provider_installation_id=installation_id, repositories=(input_,)))
-    asyncio.run(sync.disable(provider_installation_id=installation_id, repositories=(_snapshot(),)))
+    asyncio.run(
+        sync.disable(provider_installation_id=installation_id, repositories=(_reference(),))
+    )
     asyncio.run(sync.execute(provider_installation_id=installation_id, repositories=(input_,)))
 
     assert store.repositories[(installation_id, 101)].enabled is True
@@ -260,7 +276,7 @@ def test_sync_rolls_back_and_never_commits_when_soft_disable_fails() -> None:
                 rule_sets=load_default_rule_sets(Path("review/rules")),
             ).disable(
                 provider_installation_id=uuid4(),
-                repositories=(_snapshot(),),
+                repositories=(_reference(),),
             )
         )
 

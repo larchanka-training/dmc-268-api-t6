@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import Mapping
 from typing import Protocol
 
@@ -36,6 +37,7 @@ from app.modules.reviews.application.project_github_pull_request import (
 from app.modules.reviews.application.trigger_from_delivery import CiTriggerEvent
 
 _CI_EVENTS = frozenset({"check_suite", "workflow_run"})
+_LOGGER = logging.getLogger(__name__)
 
 
 class TypedGitHubDeliveryDispatcher(Protocol):
@@ -99,10 +101,37 @@ class GitHubWebhookDispatchAdapter:
                 )
             except UnsupportedInstallationAction as unsupported:
                 value = UnsupportedGitHubEvent(event_name, unsupported.action)
-            except InstallationEventValidationError:
+            except InstallationEventValidationError as invalid:
+                _log_invalid_installation_event(delivery.delivery_id, event_name, payload, invalid)
                 return InstallationDeliveryDispatchResult(
                     InstallationDeliveryDispatchStatus.IGNORED_INVALID_EVENT
                 )
         else:
             value = UnsupportedGitHubEvent(event_name, action if isinstance(action, str) else None)
         return await self._dispatcher.execute(GitHubDispatchEvent(delivery.delivery_id, value))
+
+
+def _log_invalid_installation_event(
+    delivery_id: str,
+    event_name: str,
+    payload: Mapping[str, object],
+    error: InstallationEventValidationError,
+) -> None:
+    """Say why a receipt was ignored without echoing any payload value.
+
+    The receipt is still marked projected and never replayed, so this line is the
+    only trace of the rejection: delivery, event, action, installation and the
+    failing field locations with their messages.
+    """
+    action = payload.get("action")
+    installation = payload.get("installation")
+    installation_id = installation.get("id") if isinstance(installation, Mapping) else None
+    _LOGGER.warning(
+        "Ignoring invalid GitHub installation event: delivery_id=%s event=%s action=%s "
+        "installation_id=%s errors=%s",
+        delivery_id,
+        event_name,
+        action if isinstance(action, str) else None,
+        installation_id if isinstance(installation_id, int) else None,
+        "; ".join(f"{location}: {message}" for location, message in error.field_errors),
+    )

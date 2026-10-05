@@ -9,12 +9,20 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from app.modules.repositories.application.installation_repositories import (
     InstallationRepositoriesEvent,
-    RepositorySnapshot,
+    RepositoryReference,
 )
 
 
 class InstallationEventValidationError(ValueError):
-    """A supported installation action has an invalid transport payload."""
+    """A supported installation action has an invalid transport payload.
+
+    ``field_errors`` holds the failing ``(location, message)`` pairs, never the
+    offending values, so a caller can log why a payload was rejected safely.
+    """
+
+    def __init__(self, message: str, *, field_errors: tuple[tuple[str, str], ...] = ()) -> None:
+        super().__init__(message)
+        self.field_errors = field_errors
 
 
 class UnsupportedInstallationAction(InstallationEventValidationError):
@@ -42,20 +50,34 @@ class _InstallationEnvelope(BaseModel):
 
 
 class _RepositoryDto(BaseModel):
+    """Real GitHub installation events carry only ``id``, ``node_id``, ``name``,
+    ``full_name`` and ``private``; branch and URL are read from GitHub later."""
+
     model_config = _STRICT_GITHUB_PAYLOAD
 
     external_id: int = Field(alias="id", ge=1)
     full_name: str = Field(min_length=1, max_length=512)
-    default_branch: str = Field(min_length=1, max_length=255)
-    web_url: str = Field(alias="html_url", min_length=1)
+    default_branch: str | None = Field(default=None, min_length=1, max_length=255)
+    web_url: str | None = Field(default=None, alias="html_url", min_length=1)
 
-    def to_application(self) -> RepositorySnapshot:
-        return RepositorySnapshot(
+    def to_application(self) -> RepositoryReference:
+        return RepositoryReference(
             external_id=self.external_id,
             full_name=self.full_name,
             default_branch=self.default_branch,
             web_url=self.web_url,
         )
+
+
+def _invalid_payload(error: ValidationError) -> InstallationEventValidationError:
+    """Keep each failing field's location and message; drop the input values."""
+    field_errors = tuple(
+        (".".join(str(part) for part in item["loc"]), item["msg"])
+        for item in error.errors(include_url=False, include_context=False, include_input=False)
+    )
+    return InstallationEventValidationError(
+        "invalid installation repository payload", field_errors=field_errors
+    )
 
 
 class _InstallationSnapshotPayload(BaseModel):
@@ -91,7 +113,7 @@ def parse_installation_repositories_event(
     try:
         envelope = _InstallationEnvelope.model_validate(payload)
     except ValidationError as error:
-        raise InstallationEventValidationError("invalid installation repository payload") from error
+        raise _invalid_payload(error) from error
     if event_name == "installation" and envelope.action not in {"created", "deleted"}:
         raise UnsupportedInstallationAction(envelope.action)
     if event_name == "installation_repositories" and envelope.action not in {
@@ -103,9 +125,7 @@ def parse_installation_repositories_event(
         try:
             parsed = _InstallationSnapshotPayload.model_validate(payload)
         except ValidationError as error:
-            raise InstallationEventValidationError(
-                "invalid installation repository payload"
-            ) from error
+            raise _invalid_payload(error) from error
         repositories = tuple(item.to_application() for item in parsed.repositories)
         if parsed.action == "created":
             return InstallationRepositoriesEvent(
@@ -144,6 +164,6 @@ def parse_installation_repositories_event(
                 ),
             )
     except ValidationError as error:
-        raise InstallationEventValidationError("invalid installation repository payload") from error
+        raise _invalid_payload(error) from error
 
     raise AssertionError("validated installation action was not handled")
