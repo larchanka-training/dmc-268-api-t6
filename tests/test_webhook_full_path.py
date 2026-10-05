@@ -134,8 +134,18 @@ class ReceiptStore:
         row.projected = True
         row.claim_token = None
 
-    async def release(self, delivery_id: str, token: UUID, retry_after: datetime) -> None:
+    async def release(
+        self,
+        delivery_id: str,
+        token: UUID,
+        retry_after: datetime,
+        deferred_at: datetime,
+        max_attempts: int,
+    ) -> bool:
         raise AssertionError("successful full path must not release its receipt")
+
+    async def purge_finished(self, before: datetime) -> int:
+        return 0
 
     async def release_after_dispatch_failure(
         self,

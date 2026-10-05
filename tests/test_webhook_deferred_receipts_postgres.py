@@ -1,0 +1,174 @@
+"""Deferred GitHub deliveries stop after three attempts and wake on linking (#52).
+
+Opt-in with ``TEST_DATABASE_URL``.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import os
+from collections.abc import Iterator
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
+from typing import Any
+from uuid import uuid4
+
+import pytest
+from alembic.config import Config
+from sqlalchemy import create_engine, text
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.pool import NullPool
+from sqlalchemy.schema import CreateSchema, DropSchema
+
+from alembic import command
+from app.modules.integrations.webhooks.api.receipt import VerifiedGitHubDelivery
+from app.modules.integrations.webhooks.application.github_installation_dispatch import (
+    InstallationDeliveryDispatchResult,
+    InstallationDeliveryDispatchStatus,
+)
+from app.modules.integrations.webhooks.application.receive_github_delivery import (
+    ReceiveGitHubDelivery,
+    WebhookReceipt,
+)
+from app.modules.integrations.webhooks.infrastructure.github_webhook_receipts import (
+    SqlAlchemyGitHubWebhookReceiptUnitOfWork,
+)
+from app.modules.workspaces.infrastructure.github_installation_links import (
+    SqlAlchemyGitHubInstallationLinkUnitOfWork,
+)
+
+START = datetime(2026, 10, 5, 12, 0, tzinfo=UTC)
+
+
+@dataclass(frozen=True)
+class Database:
+    url: str
+    schema: str
+
+
+@pytest.fixture
+def database() -> Iterator[Database]:
+    database_url = os.environ.get("TEST_DATABASE_URL")
+    if database_url is None:
+        pytest.skip("set TEST_DATABASE_URL to run PostgreSQL integration tests")
+    schema = f"test_deferred_{uuid4().hex}"
+    engine = create_engine(database_url)
+    try:
+        with engine.connect() as connection:
+            connection.execute(CreateSchema(schema))
+            connection.execute(text(f'SET search_path TO "{schema}"'))
+            connection.commit()
+            config = Config("alembic.ini")
+            config.attributes["connection"] = connection
+            command.upgrade(config, "head")
+            yield Database(database_url, schema)
+            connection.rollback()
+            connection.execute(text("SET search_path TO public"))
+            connection.execute(DropSchema(schema, cascade=True))
+            connection.commit()
+    finally:
+        engine.dispose()
+
+
+class UnknownInstallation:
+    """The dispatcher answer for a delivery of an installation nobody linked yet."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+        self.known = False
+
+    async def execute(self, delivery: WebhookReceipt) -> InstallationDeliveryDispatchResult:
+        self.calls += 1
+        return InstallationDeliveryDispatchResult(
+            InstallationDeliveryDispatchStatus.ONBOARDED
+            if self.known
+            else InstallationDeliveryDispatchStatus.IGNORED_UNKNOWN_INSTALLATION
+        )
+
+
+def _delivery() -> WebhookReceipt:
+    return VerifiedGitHubDelivery(
+        "delivery-1",
+        "installation",
+        {"action": "created", "installation": {"id": 99}, "sender": {"type": "User"}},
+    ).to_receipt()
+
+
+@pytest.mark.integration
+def test_deferred_delivery_is_final_after_three_attempts_and_wakes_on_linking(
+    database: Database,
+) -> None:
+    async def scenario() -> dict[str, Any]:
+        engine = create_async_engine(
+            database.url,
+            connect_args={"options": f"-csearch_path={database.schema}"},
+            poolclass=NullPool,
+        )
+        factory: async_sessionmaker[AsyncSession] = async_sessionmaker(
+            engine, expire_on_commit=False
+        )
+        clock = [START]
+        dispatcher = UnknownInstallation()
+        receiver = ReceiveGitHubDelivery(
+            uow_factory=lambda: SqlAlchemyGitHubWebhookReceiptUnitOfWork(factory),
+            dispatcher=dispatcher,
+            now=lambda: clock[0],
+        )
+
+        async def row() -> tuple[Any, ...]:
+            async with factory() as session:
+                return tuple(
+                    (
+                        await session.execute(
+                            text(
+                                "SELECT projection_attempt_count, "
+                                "projection_deferred_at IS NOT NULL, retry_after IS NULL "
+                                "FROM webhook_events"
+                            )
+                        )
+                    ).one()
+                )
+
+        await receiver.execute(_delivery())
+        for _ in range(5):
+            await receiver.replay_pending()
+            clock[0] += timedelta(minutes=6)
+        final = await row()
+        calls_before_wake = dispatcher.calls
+
+        async with SqlAlchemyGitHubInstallationLinkUnitOfWork(factory) as uow:
+            await uow.links.wake_receipts(99)
+            await uow.commit()
+        woken = await row()
+        dispatcher.known = True
+        handled = await receiver.replay_pending()
+        async with factory() as session:
+            projected = await session.scalar(
+                text("SELECT projected_at IS NOT NULL FROM webhook_events")
+            )
+
+        clock[0] += timedelta(days=31)
+        purged = await receiver.purge_finished()
+        async with factory() as session:
+            left = await session.scalar(text("SELECT count(*) FROM webhook_events"))
+        await engine.dispose()
+        return {
+            "final": final,
+            "calls": calls_before_wake,
+            "woken": woken,
+            "handled": handled,
+            "projected": projected,
+            "purged": purged,
+            "left": left,
+        }
+
+    result = asyncio.run(scenario())
+
+    # Three attempts, then a final deferral: no more retries, no more dispatches.
+    assert result["final"] == (3, True, True)
+    assert result["calls"] == 3
+    # Linking the installation wakes the delivery with a fresh attempt budget.
+    assert result["woken"] == (0, False, True)
+    assert result["handled"] == 1 and result["projected"] is True
+    # Finished receipts are purged after the 30-day retention.
+    assert (result["purged"], result["left"]) == (1, 0)

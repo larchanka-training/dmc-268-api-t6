@@ -7,7 +7,7 @@ from datetime import datetime
 from typing import cast
 from uuid import UUID
 
-from sqlalchemy import case, or_, select, update
+from sqlalchemy import case, delete, or_, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -55,6 +55,7 @@ class SqlAlchemyGitHubWebhookReceiptStore:
                 WebhookEvent.payload.is_not(None),
                 WebhookEvent.projected_at.is_(None),
                 WebhookEvent.projection_failed_at.is_(None),
+                WebhookEvent.projection_deferred_at.is_(None),
                 or_(
                     WebhookEvent.projection_lease_until.is_(None),
                     WebhookEvent.projection_lease_until <= now,
@@ -93,7 +94,16 @@ class SqlAlchemyGitHubWebhookReceiptStore:
         if result.scalar_one_or_none() is None:
             raise RuntimeError("webhook projection claim was lost")
 
-    async def release(self, delivery_id: str, token: UUID, retry_after: datetime) -> None:
+    async def release(
+        self,
+        delivery_id: str,
+        token: UUID,
+        retry_after: datetime,
+        deferred_at: datetime,
+        max_attempts: int,
+    ) -> bool:
+        next_attempt_count = WebhookEvent.projection_attempt_count + 1
+        is_final_attempt = next_attempt_count >= max_attempts
         statement = (
             update(WebhookEvent)
             .where(
@@ -104,10 +114,27 @@ class SqlAlchemyGitHubWebhookReceiptStore:
             .values(
                 projection_claim_token=None,
                 projection_lease_until=None,
-                retry_after=retry_after,
+                projection_attempt_count=next_attempt_count,
+                projection_deferred_at=case((is_final_attempt, deferred_at), else_=None),
+                retry_after=case((is_final_attempt, None), else_=retry_after),
             )
+            .returning(WebhookEvent.projection_deferred_at)
         )
-        await self._session.execute(statement)
+        return await self._session.scalar(statement) is not None
+
+    async def purge_finished(self, before: datetime) -> int:
+        statement = (
+            delete(WebhookEvent)
+            .where(
+                or_(
+                    WebhookEvent.projected_at < before,
+                    WebhookEvent.projection_failed_at < before,
+                    WebhookEvent.projection_deferred_at < before,
+                )
+            )
+            .returning(WebhookEvent.id)
+        )
+        return len((await self._session.scalars(statement)).all())
 
     async def release_after_dispatch_failure(
         self,
@@ -144,6 +171,7 @@ class SqlAlchemyGitHubWebhookReceiptStore:
                 WebhookEvent.payload.is_not(None),
                 WebhookEvent.projected_at.is_(None),
                 WebhookEvent.projection_failed_at.is_(None),
+                WebhookEvent.projection_deferred_at.is_(None),
                 or_(
                     WebhookEvent.projection_lease_until.is_(None),
                     WebhookEvent.projection_lease_until <= now,
