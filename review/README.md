@@ -162,10 +162,10 @@ the validator and `uv run pytest tests/test_review_artifacts.py`.
 
 ## Open questions
 
-- **Model choice** (`docs/SYSTEM_DESIGN.md` OQ-2): closed by #33 on the EUrouter catalog — primary
-  `gpt-4.1-mini`, fallback `mistral-small-4`; strict `json_schema` on the EUrouter route is
-  confirmed by the first run of the `LLM live run` workflow after the merge (SD §15). The
-  prompts stay model-agnostic.
+- **Model choice** (`docs/SYSTEM_DESIGN.md` OQ-2): closed by #46 — primary `mistral-small-4`,
+  fallback `mistral-small-3.2-24b`; strict `json_schema` on the serving EUrouter routes is
+  confirmed by run 37304578603 of the `LLM live run` workflow (SD §15). The prompts stay
+  model-agnostic.
 - **Output language**: English by default (stated in both prompts). Proposed override: a
   line `Review language: xx` in the reviewed repository's `AGENTS.md`, honoured by a later
   prompt version. Decision pending with the team.
