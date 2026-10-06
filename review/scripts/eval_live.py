@@ -257,6 +257,30 @@ def _effective_profile(
     }
 
 
+def _effective_settings(settings: LlmSettings, engine: EngineName) -> dict[str, object]:
+    """Snapshot the effective profiles and policy used for this capture."""
+    policy = settings.policy
+    return {
+        "primary": _effective_profile(settings.primary, settings, engine),
+        "fallback": (
+            _effective_profile(settings.fallback, settings, engine)
+            if settings.fallback is not None
+            else None
+        ),
+        "policy": {
+            "input_token_limit": policy.input_token_limit[engine],
+            "call_timeout_s": policy.call_timeout_s[engine],
+            "run_cost_limit_usd": _decimal_text(policy.run_cost_limit_usd[engine]),
+            "max_calls_per_attempt": policy.max_calls_per_attempt,
+            "timeout_retry_delays_s": list(policy.timeout_retry_delays_s),
+            "unavailable_retry_delays_s": list(policy.unavailable_retry_delays_s),
+            "max_jitter_s": policy.max_jitter_s,
+            "max_retry_after_s": policy.max_retry_after_s,
+            "rate_limit_default_delay_s": policy.rate_limit_default_delay_s,
+        },
+    }
+
+
 async def record_live(
     root: Path,
     settings: LlmSettings,
@@ -284,11 +308,15 @@ async def record_live(
 
     relative_prompt = relative_input(system_prompt)
     languages = {record["language"] for _, record in records}
-    selected_rules = []
-    if "python" in languages:
-        selected_rules.append(relative_input(backend_rules))
-    if languages & {"typescript", "tsx"}:
-        selected_rules.append(relative_input(frontend_rules))
+    selected_rule_sets = [
+        (rule_path, matching)
+        for rule_path, supported in (
+            (backend_rules, ("python",)),
+            (frontend_rules, ("typescript", "tsx")),
+        )
+        if (matching := tuple(language for language in supported if language in languages))
+    ]
+    selected_rules = [relative_input(path) for path, _ in selected_rule_sets]
     try:
         static_inputs = static_input_paths(
             relative_prompt, [*rule_json_paths(REPO_ROOT), *selected_rules]
@@ -303,32 +331,11 @@ async def record_live(
     if version is None:
         raise RecorderError("system prompt has no version")
     by_language: dict[str, tuple[ReviewRule, ...]] = {}
-    if "python" in languages:
-        by_language["python"] = _rules(backend_rules)
-    if languages & {"typescript", "tsx"}:
-        frontend = _rules(frontend_rules)
-        by_language["typescript"] = frontend
-        by_language["tsx"] = frontend
-    policy = settings.policy
-    effective_settings = {
-        "primary": _effective_profile(settings.primary, settings, engine),
-        "fallback": (
-            _effective_profile(settings.fallback, settings, engine)
-            if settings.fallback is not None
-            else None
-        ),
-        "policy": {
-            "input_token_limit": policy.input_token_limit[engine],
-            "call_timeout_s": policy.call_timeout_s[engine],
-            "run_cost_limit_usd": _decimal_text(policy.run_cost_limit_usd[engine]),
-            "max_calls_per_attempt": policy.max_calls_per_attempt,
-            "timeout_retry_delays_s": list(policy.timeout_retry_delays_s),
-            "unavailable_retry_delays_s": list(policy.unavailable_retry_delays_s),
-            "max_jitter_s": policy.max_jitter_s,
-            "max_retry_after_s": policy.max_retry_after_s,
-            "rate_limit_default_delay_s": policy.rate_limit_default_delay_s,
-        },
-    }
+    for rule_path, matching in selected_rule_sets:
+        parsed_rules = _rules(rule_path)
+        for language in matching:
+            by_language[language] = parsed_rules
+    effective_settings = _effective_settings(settings, engine)
     timestamp = (
         (recorded_at or datetime.now(UTC)).astimezone(UTC).isoformat().replace("+00:00", "Z")
     )

@@ -83,7 +83,13 @@ class ReplayError(Exception):
 
 
 def nonpublishable_case_ids(statuses: Mapping[str, Mapping[str, object]]) -> list[str]:
-    """Return cases with a terminal failure or no first provider answer."""
+    """Return paid-metadata or terminal failures that invalidate a baseline.
+
+    A paid-metadata failure is always nonpublishable, even with an answer.
+    Without that marker, ``llm_invalid_output`` is nonpublishable only with
+    ``no_call`` or ``no_content``. An ``accepted`` case without the marker remains
+    publishable when a later repair or fallback succeeds after an empty first response.
+    """
     return sorted(
         case_id
         for case_id, status in statuses.items()
@@ -427,8 +433,8 @@ def format_console(report: dict[str, Any]) -> str:
         f"Model: {provenance['model_id']}",
         f"Prompt: {provenance['prompt_path']} (version {provenance['prompt_version']})",
         f"Prompt SHA: {provenance['prompt_sha']}",
-        f"Static digest: {provenance.get('static_digest', 'unrecorded')}",
-        f"Corpus digest: {provenance.get('corpus_digest', 'unrecorded')}",
+        f"Static digest: {provenance['static_digest']}",
+        f"Corpus digest: {provenance['corpus_digest']}",
         f"Validity: {_percent(report['validity'])} "
         f"({report['valid_response_count']}/{report['case_count']})",
         f"Micro: TP={micro['tp']} FP={micro['fp']} FN={micro['fn']} "
