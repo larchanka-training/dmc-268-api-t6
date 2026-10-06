@@ -7,7 +7,10 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from app.common.application.github_repository_name import REPOSITORY_FULL_NAME_PATTERN
+from app.common.application.github_repository_name import (
+    REPOSITORY_FULL_NAME_MAX_LENGTH,
+    REPOSITORY_FULL_NAME_PATTERN,
+)
 from app.modules.repositories.application.installation_repositories import (
     InstallationRepositoriesEvent,
     RepositoryReference,
@@ -57,7 +60,11 @@ class _RepositoryDto(BaseModel):
     model_config = _STRICT_GITHUB_PAYLOAD
 
     external_id: int = Field(alias="id", ge=1)
-    full_name: str = Field(min_length=1, max_length=512, pattern=REPOSITORY_FULL_NAME_PATTERN)
+    full_name: str = Field(
+        min_length=1,
+        max_length=REPOSITORY_FULL_NAME_MAX_LENGTH,
+        pattern=REPOSITORY_FULL_NAME_PATTERN,
+    )
     default_branch: str | None = Field(default=None, min_length=1, max_length=255)
     web_url: str | None = Field(default=None, alias="html_url", min_length=1)
 
