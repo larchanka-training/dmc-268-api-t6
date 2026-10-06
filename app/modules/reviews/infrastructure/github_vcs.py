@@ -10,6 +10,7 @@ from typing import Literal, Protocol
 import httpx
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, model_validator
 
+from app.common.application.github_repository_name import REPOSITORY_FULL_NAME_MAX_LENGTH
 from app.common.infrastructure.github_repository_path import repository_path_from_full_name
 from app.modules.reviews.application.prompt_builder import PullRequestMeta
 from app.modules.reviews.application.vcs_diff import (
@@ -41,7 +42,7 @@ class _User(_GitHubDto):
 
 
 class _Repo(_GitHubDto):
-    full_name: str = Field(min_length=3, max_length=512)
+    full_name: str = Field(min_length=3, max_length=REPOSITORY_FULL_NAME_MAX_LENGTH)
 
 
 class _Ref(_GitHubDto):
