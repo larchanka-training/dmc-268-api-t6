@@ -198,7 +198,7 @@ class SqlAlchemyGitHubInstallationLinkStore:
                 WebhookEvent.installation_external_id == installation_id,
                 or_(
                     WebhookEvent.event.in_(("installation", "installation_repositories")),
-                    # Deliveries deferred for good while the installation was unknown.
+                    # Every delivery deferred after its last attempt, whatever the reason.
                     WebhookEvent.projection_deferred_at.is_not(None),
                 ),
                 WebhookEvent.projected_at.is_(None),

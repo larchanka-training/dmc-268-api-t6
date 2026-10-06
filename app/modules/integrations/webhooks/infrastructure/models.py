@@ -73,7 +73,8 @@ class WebhookEvent(Base):
     projection_failed_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
-    # Deferred for good after the last attempt; wake_receipts clears it (#52).
+    # Set by the last deferred attempt; wake_receipts clears it (#52), and so does the
+    # hourly revival of installation events of linked installations (#71).
     projection_deferred_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )

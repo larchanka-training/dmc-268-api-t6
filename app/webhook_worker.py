@@ -11,6 +11,7 @@ import os
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import NoReturn
 
@@ -21,6 +22,9 @@ from app.common.infrastructure.heartbeat import beat, heartbeat_file, reset
 from app.modules.integrations.webhooks.application.receive_github_delivery import (
     ReceiveGitHubDelivery,
 )
+from app.modules.integrations.webhooks.application.revive_deferred_installation_deliveries import (
+    ReviveDeferredInstallationDeliveries,
+)
 from app.modules.integrations.webhooks.infrastructure.github_installation_tree_provider import (
     GitHubAppInstallationAccessTokenProvider,
     GitHubInstallationAccessTokenProvider,
@@ -30,7 +34,7 @@ from app.modules.reviews.application.try_enqueue_webhook_run import RunMessagePu
 from app.modules.reviews.infrastructure.amqp import LazyAmqpPublisher
 
 _LOGGER = logging.getLogger(__name__)
-_PURGE_INTERVAL_SECONDS = 3600.0
+_MAINTENANCE_INTERVAL_SECONDS = 3600.0
 
 
 @dataclass(frozen=True)
@@ -104,13 +108,30 @@ async def purge_once(receiver: ReceiveGitHubDelivery) -> int:
         return 0
 
 
-async def sweep_forever(receiver: ReceiveGitHubDelivery) -> NoReturn:
-    next_purge = 0.0
+async def revive_once(reviver: ReviveDeferredInstallationDeliveries) -> int:
+    try:
+        return await reviver.execute()
+    except Exception:
+        _LOGGER.exception("GitHub webhook deferred-delivery revival failed")
+        return 0
+
+
+async def hourly_maintenance(
+    receiver: ReceiveGitHubDelivery, reviver: ReviveDeferredInstallationDeliveries
+) -> None:
+    await purge_once(receiver)
+    await revive_once(reviver)
+
+
+async def sweep_forever(
+    receiver: ReceiveGitHubDelivery, reviver: ReviveDeferredInstallationDeliveries
+) -> NoReturn:
+    next_maintenance = 0.0
     while True:
         projected = await sweep_once(receiver)
-        if time.monotonic() >= next_purge:
-            await purge_once(receiver)
-            next_purge = time.monotonic() + _PURGE_INTERVAL_SECONDS
+        if time.monotonic() >= next_maintenance:
+            await hourly_maintenance(receiver, reviver)
+            next_maintenance = time.monotonic() + _MAINTENANCE_INTERVAL_SECONDS
         await asyncio.sleep(0 if projected == 100 else 30)
 
 
@@ -134,8 +155,12 @@ async def run_forever() -> None:
                 now=time.time,
             )
             receiver = compose_worker(resources, client, tokens, config, publisher)
+            # Same wall clock as the receiver, which uses its default.
+            reviver = ReviveDeferredInstallationDeliveries(
+                uow_factory=resources.github_webhook_receipts, now=lambda: datetime.now(UTC)
+            )
             async with asyncio.TaskGroup() as tasks:
-                tasks.create_task(sweep_forever(receiver))
+                tasks.create_task(sweep_forever(receiver, reviver))
                 if config.heartbeat_file is not None:
                     tasks.create_task(beat(config.heartbeat_file))
     finally:

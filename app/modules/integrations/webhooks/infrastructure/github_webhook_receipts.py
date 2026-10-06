@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.common.infrastructure.db.unit_of_work import SqlAlchemyUnitOfWork
 from app.modules.integrations.webhooks.application.receive_github_delivery import WebhookReceipt
 from app.modules.integrations.webhooks.infrastructure.models import WebhookEvent
+from app.modules.repositories.infrastructure.models import ProviderInstallation
 
 
 class SqlAlchemyGitHubWebhookReceiptStore:
@@ -132,6 +133,30 @@ class SqlAlchemyGitHubWebhookReceiptStore:
                     WebhookEvent.projection_deferred_at < before,
                 )
             )
+            .returning(WebhookEvent.id)
+        )
+        return len((await self._session.scalars(statement)).all())
+
+    async def revive_deferred_installation_deliveries(
+        self, *, deferred_before: datetime, received_after: datetime
+    ) -> int:
+        linked_installation = select(ProviderInstallation.id).where(
+            ProviderInstallation.provider == "github",
+            ProviderInstallation.external_id == WebhookEvent.installation_external_id,
+        )
+        statement = (
+            update(WebhookEvent)
+            .where(
+                WebhookEvent.event.in_(("installation", "installation_repositories")),
+                WebhookEvent.payload.is_not(None),
+                WebhookEvent.projected_at.is_(None),
+                WebhookEvent.projection_failed_at.is_(None),
+                WebhookEvent.projection_deferred_at.is_not(None),
+                WebhookEvent.projection_deferred_at <= deferred_before,
+                WebhookEvent.received_at >= received_after,
+                linked_installation.exists(),
+            )
+            .values(projection_deferred_at=None, retry_after=None, projection_attempt_count=0)
             .returning(WebhookEvent.id)
         )
         return len((await self._session.scalars(statement)).all())
