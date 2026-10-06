@@ -32,6 +32,7 @@ from sqlalchemy import (
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
+from app.common.application.github_repository_name import REPOSITORY_FULL_NAME_MAX_LENGTH
 from app.common.infrastructure.db.base import Base
 from app.common.infrastructure.db.columns import pg_enum, timestamp_column
 from app.common.infrastructure.db.enums import (
@@ -71,7 +72,7 @@ class Repository(Base):
         ForeignKey("provider_installations.id"), nullable=False
     )
     external_id: Mapped[int] = mapped_column(BIGINT, nullable=False)
-    full_name: Mapped[str] = mapped_column(String(512), nullable=False)
+    full_name: Mapped[str] = mapped_column(String(REPOSITORY_FULL_NAME_MAX_LENGTH), nullable=False)
     default_branch: Mapped[str] = mapped_column(String(255), nullable=False)
     web_url: Mapped[str] = mapped_column(TEXT, nullable=False)
     enabled: Mapped[bool] = mapped_column(BOOLEAN, nullable=False, server_default=text("true"))
