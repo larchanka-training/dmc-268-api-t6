@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Protocol
 from uuid import UUID
 
+from app.modules.integrations.webhooks.application.installation_event_projector import (
+    RepositoryDetailsUnavailableError,
+)
 from app.modules.repositories.application.installation_repositories import (
     InstallationRepositoriesEvent,
 )
@@ -18,6 +22,7 @@ from app.modules.reviews.application.project_github_pull_request import (
 )
 from app.modules.reviews.application.trigger_from_delivery import CiTriggerEvent
 
+_LOGGER = logging.getLogger(__name__)
 _RUN_TRIGGER_PR_ACTIONS = frozenset({"reopened", "synchronize"})
 
 
@@ -34,6 +39,7 @@ class InstallationDeliveryDispatchStatus(StrEnum):
     PROJECTED_PR = "projected_pr"
     IGNORED_UNKNOWN_REPOSITORY = "ignored_unknown_repository"
     PROCESSED_CI = "processed_ci"
+    DEFERRED_REPOSITORY_DETAILS = "deferred_repository_details"
 
 
 @dataclass(frozen=True)
@@ -185,10 +191,20 @@ class GitHubInstallationDeliveryDispatcher:
                 status=InstallationDeliveryDispatchStatus.IGNORED_UNKNOWN_INSTALLATION
             )
 
-        await self._onboarding.execute(
-            provider_installation_id=provider_installation_id,
-            event=event,
-        )
+        try:
+            await self._onboarding.execute(
+                provider_installation_id=provider_installation_id,
+                event=event,
+            )
+        except RepositoryDetailsUnavailableError as error:
+            _LOGGER.warning(
+                "Repository details unavailable for installation %s: %s",
+                event.installation_external_id,
+                error,
+            )
+            return InstallationDeliveryDispatchResult(
+                status=InstallationDeliveryDispatchStatus.DEFERRED_REPOSITORY_DETAILS
+            )
         return InstallationDeliveryDispatchResult(
             status=InstallationDeliveryDispatchStatus.ONBOARDED
         )

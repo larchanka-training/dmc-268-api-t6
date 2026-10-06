@@ -30,6 +30,17 @@ class RepositoryDetails:
     web_url: str
 
 
+class RepositoryDetailsUnavailableError(Exception):
+    """GitHub cannot answer a repository details read right now.
+
+    A provider raises it when the HTTP exchange itself failed: a transport-level error,
+    a timeout, a redirect or decoding failure, or a non-2xx status from the token mint
+    or from ``GET /repos/{full_name}``. The delivery is deferred and replayed. A response
+    that arrives but is unusable (200 without branch or URL, a body that is not JSON, a
+    malformed token response) is a permanent fault and propagates unchanged.
+    """
+
+
 class InstallationRepositoryDetailsProvider(Protocol):
     """Read a repository's default branch and web URL using the installation's token."""
 

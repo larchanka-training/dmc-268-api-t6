@@ -15,6 +15,7 @@ from app.modules.integrations.webhooks.application.installation_event_projector 
     InstallationRepositoryLabelProvider,
     InstallationRepositoryTreeProvider,
     RepositoryDetails,
+    RepositoryDetailsUnavailableError,
 )
 from app.modules.repositories.application.installation_repositories import (
     InstallationRepositoriesEvent,
@@ -467,6 +468,33 @@ def test_details_failure_is_propagated_before_tree_label_and_database_sync() -> 
             )
         )
 
+    assert details.calls == [(17, "example-owner/repo-101")]
+    assert tree.calls == []
+    assert labels.calls == []
+    assert sync.calls == []
+
+
+def test_unavailable_details_propagate_as_the_typed_error_before_any_write() -> None:
+    """The typed outage error is not swallowed: the dispatcher defers the delivery on it."""
+    unavailable = RepositoryDetailsUnavailableError("GitHub repository details request failed")
+    details = FakeDetailsProvider(error=unavailable)
+    tree = FakeTreeProvider(trees={101: ()})
+    labels = FakeLabelProvider()
+    sync = FakeSyncInstallationRepositories()
+
+    with pytest.raises(RepositoryDetailsUnavailableError) as raised:
+        asyncio.run(
+            InstallationEventProjector(
+                tree_provider=tree, label_provider=labels, details_provider=details, sync=sync
+            ).execute(
+                provider_installation_id=uuid4(),
+                event=InstallationRepositoriesEvent(
+                    17, "added", (_bare_reference(external_id=101),), ()
+                ),
+            )
+        )
+
+    assert raised.value is unavailable
     assert details.calls == [(17, "example-owner/repo-101")]
     assert tree.calls == []
     assert labels.calls == []
