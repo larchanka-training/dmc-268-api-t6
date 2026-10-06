@@ -23,7 +23,18 @@ class PullRequestProjectionStatus(StrEnum):
     PROJECTED = "projected"
     UNKNOWN_REPOSITORY = "unknown_repository"
     IGNORED_STALE = "ignored_stale"
+    # Only paths the dispatcher already filters (review requests, unhandled actions).
     IGNORED_UNRELATED = "ignored_unrelated"
+    # The label event was sent by the App's own bot.
+    IGNORED_OWN_BOT = "ignored_own_bot"
+    # The current GitHub PR is not the PR the event names (id, number, repository, installation).
+    IGNORED_IDENTITY_MISMATCH = "ignored_identity_mismatch"
+    # The PR id and number identify different stored PRs.
+    IGNORED_IDENTITY_CONFLICT = "ignored_identity_conflict"
+    # The stored PR with this number has another provider id.
+    IGNORED_EXTERNAL_ID_MISMATCH = "ignored_external_id_mismatch"
+    # A label other than ai-review.
+    IGNORED_OTHER_LABEL = "ignored_other_label"
 
 
 class PullRequestIdentityConflict(Exception):
@@ -228,13 +239,13 @@ class ProjectGitHubPullRequest:
     ) -> PullRequestProjectionStatus:
         if isinstance(event, PullRequestLabelEvent):
             if event.label_name != "ai-review":
-                return PullRequestProjectionStatus.IGNORED_UNRELATED
+                return PullRequestProjectionStatus.IGNORED_OTHER_LABEL
             if (
                 event.pull_request.sender_type == "Bot"
                 and event.pull_request.sender_login is not None
                 and event.pull_request.sender_login.casefold() == self._bot_login
             ):
-                return PullRequestProjectionStatus.IGNORED_UNRELATED
+                return PullRequestProjectionStatus.IGNORED_OWN_BOT
             if self._projection_lock is None or self._current_provider is None:
                 raise RuntimeError(
                     "label projection requires current GitHub PR and projection lock"
@@ -245,8 +256,10 @@ class ProjectGitHubPullRequest:
             if event.requested_reviewer_login is None or (
                 event.requested_reviewer_login.casefold() != self._bot_login
             ):
+                # Unreachable behind the dispatcher, which ignores review requests: generic.
                 return PullRequestProjectionStatus.IGNORED_UNRELATED
             if event.action == "review_request_removed" and event.sender_type != "User":
+                # Unreachable behind the dispatcher, which ignores review requests: generic.
                 return PullRequestProjectionStatus.IGNORED_UNRELATED
 
         if self._projection_lock is not None:
@@ -260,7 +273,7 @@ class ProjectGitHubPullRequest:
         assert self._current_provider is not None
         current = await self._current_provider.get_current(event)
         if not self._same_identity(current, event):
-            return PullRequestProjectionStatus.IGNORED_UNRELATED
+            return PullRequestProjectionStatus.IGNORED_IDENTITY_MISMATCH
         if current.current_label_names is None:
             raise ValueError("current GitHub PR response has no labels")
         now = self._now()
@@ -268,12 +281,12 @@ class ProjectGitHubPullRequest:
             try:
                 locked = await uow.pull_requests.get_or_create_locked(current, now)
             except PullRequestIdentityConflict:
-                return PullRequestProjectionStatus.IGNORED_UNRELATED
+                return PullRequestProjectionStatus.IGNORED_IDENTITY_CONFLICT
             if locked is None:
                 return PullRequestProjectionStatus.UNKNOWN_REPOSITORY
             record = locked.record
             if record.external_id != current.external_id:
-                return PullRequestProjectionStatus.IGNORED_UNRELATED
+                return PullRequestProjectionStatus.IGNORED_EXTERNAL_ID_MISMATCH
             previous_head_sha = record.head_sha
             if record.provider_updated_at is None or (
                 current.provider_updated_at >= record.provider_updated_at
@@ -321,7 +334,7 @@ class ProjectGitHubPullRequest:
             assert self._current_provider is not None
             current = await self._current_provider.get_current(event)
             if not self._same_identity(current, event):
-                return PullRequestProjectionStatus.IGNORED_UNRELATED
+                return PullRequestProjectionStatus.IGNORED_IDENTITY_MISMATCH
             if event.action in {"closed", "reopened"} and timeline is not None:
                 assert timeline.lifecycle is not None
                 if (current.state == PullRequestState.OPEN) != (
@@ -354,12 +367,12 @@ class ProjectGitHubPullRequest:
             try:
                 locked = await uow.pull_requests.get_or_create_locked(event, now)
             except PullRequestIdentityConflict:
-                return PullRequestProjectionStatus.IGNORED_UNRELATED
+                return PullRequestProjectionStatus.IGNORED_IDENTITY_CONFLICT
             if locked is None:
                 return PullRequestProjectionStatus.UNKNOWN_REPOSITORY
             record = locked.record
             if record.external_id != event.external_id:
-                return PullRequestProjectionStatus.IGNORED_UNRELATED
+                return PullRequestProjectionStatus.IGNORED_EXTERNAL_ID_MISMATCH
             previous_head_sha = record.head_sha
             if self._is_stale_opened(record, event):
                 return PullRequestProjectionStatus.IGNORED_STALE
@@ -405,6 +418,7 @@ class ProjectGitHubPullRequest:
                     now=now,
                 )
             else:
+                # Unreachable behind the dispatcher, which passes only handled actions: generic.
                 return PullRequestProjectionStatus.IGNORED_UNRELATED
 
             if (

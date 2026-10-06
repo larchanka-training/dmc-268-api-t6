@@ -738,7 +738,7 @@ def test_label_delivery_from_the_apps_own_bot_logs_the_ignored_projection(
     lines = _outcome_lines(state, caplog, _label_payload(sender=sender))
 
     assert lines == [
-        f"{_LINE} status=ignored_irrelevant_event detail=action=labeled ignored_unrelated"
+        f"{_LINE} status=ignored_irrelevant_event detail=action=labeled ignored_own_bot"
     ]
     assert state.pull_request is None
 

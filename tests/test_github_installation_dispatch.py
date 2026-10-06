@@ -345,6 +345,31 @@ def test_the_run_trigger_outcome_becomes_the_dispatch_detail(
             "action=unlabeled ignored_unrelated",
         ),
         (
+            PullRequestProjectionStatus.IGNORED_OWN_BOT,
+            InstallationDeliveryDispatchStatus.IGNORED_IRRELEVANT_EVENT,
+            "action=unlabeled ignored_own_bot",
+        ),
+        (
+            PullRequestProjectionStatus.IGNORED_IDENTITY_MISMATCH,
+            InstallationDeliveryDispatchStatus.IGNORED_IRRELEVANT_EVENT,
+            "action=unlabeled ignored_identity_mismatch",
+        ),
+        (
+            PullRequestProjectionStatus.IGNORED_IDENTITY_CONFLICT,
+            InstallationDeliveryDispatchStatus.IGNORED_IRRELEVANT_EVENT,
+            "action=unlabeled ignored_identity_conflict",
+        ),
+        (
+            PullRequestProjectionStatus.IGNORED_EXTERNAL_ID_MISMATCH,
+            InstallationDeliveryDispatchStatus.IGNORED_IRRELEVANT_EVENT,
+            "action=unlabeled ignored_external_id_mismatch",
+        ),
+        (
+            PullRequestProjectionStatus.IGNORED_OTHER_LABEL,
+            InstallationDeliveryDispatchStatus.IGNORED_IRRELEVANT_EVENT,
+            "action=unlabeled ignored_other_label",
+        ),
+        (
             PullRequestProjectionStatus.IGNORED_STALE,
             InstallationDeliveryDispatchStatus.PROJECTED_PR,
             "action=unlabeled ignored_stale",
