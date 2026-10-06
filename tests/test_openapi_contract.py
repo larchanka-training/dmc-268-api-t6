@@ -632,7 +632,8 @@ def _contract_mismatches(
         zod_closed = zod.get("additionalProperties") is False
         if not (spec_closed and zod_closed):
             mismatches.append(
-                f"{path}: additionalProperties false: spec {spec_closed}, zod {zod_closed}"
+                f"{path}: additionalProperties must be false on both sides: "
+                f"spec {spec_closed}, zod {zod_closed}"
             )
         for name in sorted(spec_properties.keys() & zod_properties.keys()):
             mismatches += _contract_mismatches(
@@ -659,6 +660,25 @@ def test_component_schemas_mirror_the_ui_zod_contract(zod_name: str, component: 
     )
 
     assert mismatches == []
+
+
+@pytest.mark.parametrize(
+    ("keyword", "kind"),
+    [
+        ("minimum", "integer"),
+        ("exclusiveMinimum", "integer"),
+        ("maximum", "integer"),
+        ("exclusiveMaximum", "integer"),
+        ("minLength", "string"),
+        ("maxLength", "string"),
+        ("minItems", "array"),
+        ("maxItems", "array"),
+    ],
+)
+def test_contract_mirror_compares_every_bound(keyword: str, kind: str) -> None:
+    mismatches = _contract_mismatches({"type": kind, keyword: 3}, {"type": kind}, {}, "field")
+
+    assert mismatches == [f"field: {keyword} 3 != None"]
 
 
 def test_contract_mirror_does_not_pass_unions_it_cannot_compare() -> None:
@@ -734,6 +754,12 @@ def test_contract_mirror_does_not_pass_unions_it_cannot_compare() -> None:
             "Repository.maxComments",
             lambda schema: schema["properties"]["maxComments"].update(maximum=11),
             id="upper-bound",
+        ),
+        pytest.param(
+            "PullRequestRef",
+            "RunSession.pullRequest.number",
+            lambda schema: schema["properties"].update(number={"type": "integer", "minimum": 1}),
+            id="exclusive-bound",
         ),
         pytest.param(
             "Repository",
