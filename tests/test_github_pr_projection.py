@@ -43,6 +43,7 @@ from app.modules.reviews.application.project_github_pull_request import (
     PullRequestLabelEvent,
     PullRequestProjectionStatus,
     PullRequestRecord,
+    PullRequestRepositoryRefused,
     PullRequestState,
     ReviewerTimelineIntent,
     ReviewerTimelineSnapshot,
@@ -1213,6 +1214,37 @@ def test_external_id_collision_with_different_pr_number_is_unrelated() -> None:
         asyncio.run(projector.execute(_event(number=8)))
         == PullRequestProjectionStatus.IGNORED_IDENTITY_CONFLICT
     )
+    assert uow.commits == 0
+
+
+@pytest.mark.parametrize("reason", ["disabled_repository", "other_installation_repository"])
+def test_a_stored_repository_that_refuses_the_event_names_its_reason_on_every_path(
+    reason: str,
+) -> None:
+    class RefusingStore(FakeStore):
+        async def get_or_create_locked(
+            self, event: PullRequestEvent, now: datetime
+        ) -> LockedPullRequest | None:
+            raise PullRequestRepositoryRefused(PullRequestProjectionStatus(reason))
+
+    class Current:
+        async def get_current(self, event: PullRequestEvent) -> PullRequestEvent:
+            return _event(event.action, current_label_names=frozenset({"ai-review"}))
+
+    uow = FakeUnitOfWork(store=RefusingStore())
+    projector = ProjectGitHubPullRequest(
+        uow_factory=lambda: uow,
+        bot_login="reviewer[bot]",
+        current_provider=Current(),
+        projection_lock=FakeProjectionLock(),
+        now=lambda: _NOW,
+    )
+
+    label = PullRequestLabelEvent(_event("labeled"), "ai-review")
+    assert asyncio.run(projector.execute(label)) == reason
+    assert asyncio.run(projector.execute(_event("synchronize"))) == reason
+    assert asyncio.run(projector.execute(_event())) == reason
+    assert uow.store.saves == 0
     assert uow.commits == 0
 
 

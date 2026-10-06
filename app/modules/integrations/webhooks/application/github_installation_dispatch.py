@@ -246,7 +246,13 @@ class GitHubInstallationDeliveryDispatcher:
     def _projection_result(
         projection: PullRequestProjectionStatus, action: str
     ) -> InstallationDeliveryDispatchResult:
-        if projection == PullRequestProjectionStatus.UNKNOWN_REPOSITORY:
+        # A disabled repository or one stored under another installation is deferred like an
+        # unknown one; only the detail tells them apart.
+        if projection in {
+            PullRequestProjectionStatus.UNKNOWN_REPOSITORY,
+            PullRequestProjectionStatus.DISABLED_REPOSITORY,
+            PullRequestProjectionStatus.OTHER_INSTALLATION_REPOSITORY,
+        }:
             status = InstallationDeliveryDispatchStatus.IGNORED_UNKNOWN_REPOSITORY
         elif projection in {
             PullRequestProjectionStatus.PROJECTED,

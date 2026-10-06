@@ -342,6 +342,17 @@ def test_the_run_trigger_outcome_becomes_the_dispatch_detail(
             InstallationDeliveryDispatchStatus.IGNORED_UNKNOWN_REPOSITORY,
             "action=unlabeled unknown_repository",
         ),
+        # A stored repository that refuses the event is deferred like an unknown one (#80).
+        (
+            PullRequestProjectionStatus.DISABLED_REPOSITORY,
+            InstallationDeliveryDispatchStatus.IGNORED_UNKNOWN_REPOSITORY,
+            "action=unlabeled disabled_repository",
+        ),
+        (
+            PullRequestProjectionStatus.OTHER_INSTALLATION_REPOSITORY,
+            InstallationDeliveryDispatchStatus.IGNORED_UNKNOWN_REPOSITORY,
+            "action=unlabeled other_installation_repository",
+        ),
         (
             PullRequestProjectionStatus.IGNORED_UNRELATED,
             InstallationDeliveryDispatchStatus.IGNORED_IRRELEVANT_EVENT,
