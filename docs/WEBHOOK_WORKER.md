@@ -175,9 +175,9 @@ event failures" and "Installation token failures" below. A `GET /repos` answer t
 a malformed token response and an App key that cannot sign are not outages: they fail the
 dispatch (retry after 30 s, three attempts in total, then `projection_failed_at`, never
 replayed). `deleted` and `removed` make no GitHub
-request. An installation payload that fails validation is logged at WARNING (delivery,
-event, action, installation id, the total error count and the first ten failing field names
-and messages, never their values) and its receipt is marked projected, so it is not
+request. An installation payload that fails validation is logged at WARNING (delivery, event,
+action as a plain token or `-`, installation id, the total error count and the first ten failing
+field names and messages, never their values) and its receipt is marked projected, so it is not
 replayed. One invalid `full_name` among N repositories therefore drops the whole event at
 the parser, the valid repositories included.
 
