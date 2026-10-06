@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -62,6 +63,50 @@ def _run(dataset: Path, *args: str) -> subprocess.CompletedProcess[str]:
         text=True,
         check=False,
     )
+
+
+def _git_env() -> dict[str, str]:
+    """The current environment without any ``GIT_*`` key, read on every call.
+
+    With ``GIT_DIR`` exported (``git rebase --exec``), ``git init <path>`` re-initialises the
+    caller's repository and ``git config`` / ``git add`` write its config and index.
+    """
+    return {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+
+
+def _quoted_utf8_patch(tmp_path: Path) -> str:
+    """``git diff`` of ``app/café.py`` from a scratch repository with ``core.quotePath``."""
+    repo = tmp_path / "source-repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], env=_git_env(), check=True)
+    subprocess.run(
+        ["git", "config", "core.quotePath", "true"], cwd=repo, env=_git_env(), check=True
+    )
+    source = repo / "app" / "café.py"
+    source.parent.mkdir()
+    source.write_text("def f():\n    pass\n", encoding="utf-8")
+    subprocess.run(["git", "add", "app/café.py"], cwd=repo, env=_git_env(), check=True)
+    source.write_text("def f():\n    return 1\n    pass\n", encoding="utf-8")
+    generated = subprocess.run(
+        ["git", "diff", "--", "app/café.py"],
+        cwd=repo,
+        env=_git_env(),
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    assert '+++ "b/app/caf\\303\\251.py"' in generated
+    return generated
+
+
+def _repo_state(repo: Path) -> tuple[str, str]:
+    """Local config and index of ``repo``, named by flags rather than by the environment."""
+    git = ["git", f"--git-dir={repo / '.git'}", f"--work-tree={repo}"]
+    config = subprocess.run(
+        [*git, "config", "--local", "--list"], capture_output=True, text=True, check=True
+    ).stdout
+    files = subprocess.run([*git, "ls-files"], capture_output=True, text=True, check=True).stdout
+    return config, files
 
 
 def test_valid_case_needs_no_recorded_response(tmp_path: Path) -> None:
@@ -355,23 +400,7 @@ def test_accepts_valid_patch_filename_with_spaces(tmp_path: Path, quoted: bool) 
 
 
 def test_accepts_git_octal_quoted_utf8_filename(tmp_path: Path) -> None:
-    repo = tmp_path / "source-repo"
-    repo.mkdir()
-    subprocess.run(["git", "init", "-q", str(repo)], check=True)
-    subprocess.run(["git", "config", "core.quotePath", "true"], cwd=repo, check=True)
-    source = repo / "app" / "café.py"
-    source.parent.mkdir()
-    source.write_text("def f():\n    pass\n", encoding="utf-8")
-    subprocess.run(["git", "add", "app/café.py"], cwd=repo, check=True)
-    source.write_text("def f():\n    return 1\n    pass\n", encoding="utf-8")
-    generated = subprocess.run(
-        ["git", "diff", "--", "app/café.py"],
-        cwd=repo,
-        capture_output=True,
-        text=True,
-        check=True,
-    ).stdout
-    assert '+++ "b/app/caf\\303\\251.py"' in generated
+    generated = _quoted_utf8_patch(tmp_path)
 
     metadata = _metadata()
     metadata["expected_findings"][0]["path"] = "app/café.py"
@@ -383,6 +412,22 @@ def test_accepts_git_octal_quoted_utf8_filename(tmp_path: Path) -> None:
     result = _run(dataset, "--case", "SEC-01")
 
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_quoted_patch_steps_leave_an_exported_git_dir_alone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    decoy = tmp_path / "decoy"
+    subprocess.run(["git", "init", "-q", str(decoy)], env=_git_env(), check=True)
+    (decoy / "tracked.txt").write_text("tracked\n", encoding="utf-8")
+    subprocess.run(["git", "add", "tracked.txt"], cwd=decoy, env=_git_env(), check=True)
+    before = _repo_state(decoy)
+    assert before[1] == "tracked.txt\n"
+
+    monkeypatch.setenv("GIT_DIR", str(decoy / ".git"))
+    _quoted_utf8_patch(tmp_path)
+
+    assert _repo_state(decoy) == before
 
 
 def test_rejects_duplicate_truth_anchors_and_does_not_count_them_as_critical(
