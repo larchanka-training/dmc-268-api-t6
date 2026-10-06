@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 from typing import Literal, Protocol
-from urllib.parse import quote
 
 import httpx
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.common.infrastructure.github_repository_path import repository_path_from_full_name
 from app.modules.reviews.application.determine_ci_eligibility import CheckSuite, CiSnapshot
 
 _SHA_PATTERN = r"^(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})$"
@@ -66,13 +66,14 @@ class HttpGitHubCurrentHeadCiProvider:
             or (any(character not in "0123456789abcdefABCDEF" for character in head_sha))
         ):
             raise ValueError("Invalid GitHub repository or head SHA")
+        repository_path = repository_path_from_full_name(repository_full_name)
         token = await self._tokens.get_installation_access_token(installation_external_id)
         headers = {
             "Accept": "application/vnd.github+json",
             "Authorization": f"Bearer {token}",
             "X-GitHub-Api-Version": "2022-11-28",
         }
-        prefix = f"/repos/{quote(owner, safe='')}/{quote(repo, safe='')}/commits/{head_sha}"
+        prefix = f"{repository_path}/commits/{head_sha}"
         suites: list[CheckSuite] = []
         expected_count: int | None = None
         for page in range(1, 1001):
