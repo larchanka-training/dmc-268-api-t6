@@ -102,7 +102,9 @@ The script signs test deliveries with `GITHUB_WEBHOOK_SECRET` from the environme
 same script against the built image (job `Webhook container smoke`). Stop webhook-worker during
 the smoke (`docker compose stop webhook-worker`; it runs only with `--profile webhooks`) or expect
 failed projections: the test deliveries name installation 17 and repository 101, so the worker's
-GitHub calls fail and it marks each delivery failed after three tries.
+GitHub calls fail and it marks each delivery failed after three tries. To turn the same delivery
+into a queued Run locally, follow the recipe in
+[docs/WEBHOOK_WORKER.md](docs/WEBHOOK_WORKER.md#local-recipe-a-signed-labeled-delivery-creates-a-queued-run).
 
 ### webhook-worker
 

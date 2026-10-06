@@ -27,14 +27,24 @@ docker compose run --rm backend python -m app.bootstrap.seed_prompts
 docker compose --profile webhooks up --build
 ```
 
-### Local recipe: a signed `labeled` delivery creates a queued Run
+## Local recipe: a signed `labeled` delivery creates a queued Run
 
-`scripts/webhook_smoke.py` alone only checks that the API accepts a delivery (202): it sends
-installation 17 and repository 101, which an empty database does not know, so the delivery is
-deferred and no Run is created. To get a Run, seed that installation and repository and point
-the worker at `scripts/github_stub.py`, which answers the installation token, PR 7 with the
-`ai-review` label, and no CI. Run each long-lived command in its own terminal, from a clean
-database, with PostgreSQL and RabbitMQ up (`docker compose up -d postgres rabbitmq`):
+`scripts/webhook_smoke.py` alone only checks that the API accepts a delivery (202). It sends
+installation 17 and repository 101: against the real GitHub the worker's calls fail (GitHub does
+not know installation 17), so the delivery is marked failed after three tries and no Run is
+created; with the stub below but without the seed it is deferred as an unknown repository. To
+get a Run, seed that installation and repository and point the worker at
+`scripts/github_stub.py`, which answers the installation token and PR 7 with the `ai-review`
+label. Start from a clean database with only PostgreSQL and RabbitMQ up: the compose `backend`
+would hold port 8000, the compose `worker` would take the Run from the queue, and the compose
+`webhook-worker` could claim the delivery against the real GitHub. The seed fails on a second
+run; start again from `down -v`, which deletes the local database and broker volumes. Run each
+long-lived command in its own terminal:
+
+```bash
+docker compose --profile webhooks down -v
+docker compose up -d --wait postgres rabbitmq
+```
 
 ```bash
 # .env.local: the API and the worker read the same values
@@ -70,20 +80,24 @@ uv run --env-file .env.local uvicorn app.main:app --port 8000             # term
 uv run --env-file .env.local python -m app.webhook_worker                 # terminal 3
 
 GITHUB_WEBHOOK_SECRET=local-secret uv run python scripts/webhook_smoke.py
-sleep 30                                 # the worker sweeps every 30 s
+sleep 40                                 # the worker sweeps every 30 s
 docker compose exec -T postgres psql -U app -d app -c \
   "SELECT state, head_sha, trigger, engine, message_published_at IS NOT NULL FROM runs"
 ```
 
 After the sweep the query shows one Run: `queued`, head `aaaa…`, trigger
-`webhook`, engine `fast`, published `t`. The repository waits for no CI (`wait_for_ci =
-never`), so the label alone starts the Run.
+`webhook`, engine `fast`, published `t`, and the worker terminal logs `GitHub webhook delivery
+… event=pull_request status=…`. The repository waits for no CI (`wait_for_ci = never`), so the
+label alone starts the Run.
 
 The review worker is not needed for this check: started with the same `.env.local`, it would
-claim the Run and fail at the diff, which the stub does not serve. Against a real PR it
+claim the Run and fail at its first GitHub read of the PR, which the stub answers only in the
+shape the webhook worker needs. Against a real PR it
 reviews only with `LLM_*` set: without `LLM_MODEL` the Run takes all three attempts and ends
 `failed` / `llm_unavailable`, and local models have a fixed 90 s call timeout and may need
 `prompt_json` (README, "LLM gateway").
+
+## How the worker handles deliveries
 
 The worker serializes each PR's event projection with a PostgreSQL session advisory lock on an
 autocommit connection and stores the result in a separate short transaction, so the GitHub call
