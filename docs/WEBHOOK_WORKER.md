@@ -329,7 +329,7 @@ nothing to enqueue), `no open pull request at this head` (a CI event for a head 
 has, for example CI of an old head that finished after a push),
 `not an ai-review labeled action`, `label is not ai-review` (a foreign label), and, when the
 trigger did not run, the projection result: `projected`, `ignored_stale`, why the repository
-cannot take the event (table below the next one), or why the projection was ignored, for
+cannot take the event (the second table below), or why the projection was ignored, for
 example `action=labeled ignored_own_bot` (status `ignored_irrelevant_event`, the receipt is
 acknowledged):
 
@@ -351,7 +351,7 @@ database query after the repository lookup misses, without a GitHub call (api#80
 | projection result | meaning |
 | --- | --- |
 | `unknown_repository` | no installation stores the repository: it was never onboarded |
-| `disabled_repository` | the event's installation stores the repository, but disabled (removed from the installation, or turned off in its settings); this wins when another installation stores it too |
+| `disabled_repository` | the event's installation stores the repository, but disabled (removed from the installation, or turned off in its settings); this wins when another installation stores it too. It is not the CI gate reason of the same name, `ineligible (disabled_repository)` above, which the Run trigger reports for a pull request already stored |
 | `other_installation_repository` | the repository is stored, but only under installations other than the event's; pull request events are not checked against the linked installations, so the event's installation may also be unlinked |
 
 GitHub before the repository, one budget (api#80, kept by decision). A label delivery
