@@ -54,7 +54,7 @@ The first command checks one case, the second all present cases. `--final` also 
 
 ## Curated corpus
 
-The 24 active inputs pass final schema, patch-application and distribution validation. [PR #68](https://github.com/larchanka-training/dmc-268-api-t6/pull/68) merged the [#66](https://github.com/larchanka-training/dmc-268-api-t6/issues/66) normalization work, including PIPELINE_SPEC §9, before the first baseline capture. Issue #66 is CLOSED; the merged normalization is no longer a pending baseline dependency. The class counts are security **4**, resource **5**, logic **5**, syntax **5**, and clean **5**. Five cases use distinct licensed real PRs, one in each class. Five separate critical truth anchors come from synthetic cases. SEC-05 was omitted after two candidate fixtures were stopped by the automatic safety filter; four security cases still meet the minimum. It has no case or response entry and is excluded from future replay/live denominators. No model response or quality baseline has been recorded yet.
+The 24 active inputs pass final schema, patch-application and distribution validation. [PR #68](https://github.com/larchanka-training/dmc-268-api-t6/pull/68) merged the [#66](https://github.com/larchanka-training/dmc-268-api-t6/issues/66) normalization work, including PIPELINE_SPEC §9, before the first baseline capture. Issue #66 is CLOSED; the merged normalization is no longer a pending baseline dependency. The class counts are security **4**, resource **5**, logic **5**, syntax **5**, and clean **5**. Five cases use distinct licensed real PRs, one in each class. Five separate critical truth anchors come from synthetic cases. SEC-05 was omitted after two candidate fixtures were stopped by the automatic safety filter; four security cases still meet the minimum. It has no case or response entry and is excluded from future replay/live denominators. The first recorded baseline is documented below; it measures Nemotron via OpenRouter, not the selected EUrouter production models.
 
 ### Issue #53 corpus decision (2026-10-04)
 
@@ -124,3 +124,71 @@ The manifest also stores sorted `static_inputs`, `static_digest`, and `corpus_di
 | `app/modules/reviews/application/conventions_prompt.py` | Renders conventions input when a conventions prompt is supplied. |
 
 A supplied conventions prompt and its renderer are included only for that task. Byte hashing also warns on a docstring-only edit to any listed file; this conservative warning avoids missing a changed deadline or call policy. `run_failures.py` remains included because `FAST_ATTEMPT_DEADLINE` and `RETRYABLE_ERROR_CODES` are imported into the gateway path. Corpus inputs are every active `case.json`, patch, and recursive pre-image file. Every case ID maps exactly to `responses/<case-id>.json`; replay rejects unmapped extra files. Replay warns if either digest differs or a static file is missing; it never rewrites raw answers. Refresh the **entire** response set and manifest after any input edit, even if only one rule or case changes. Traversal and symlink inputs are rejected.
+
+## Recorded baseline — 2026-10-06
+
+The 24-case capture in [`responses/manifest.json`](responses/manifest.json) uses
+`nvidia/nemotron-3-super-120b-a12b:free` through OpenRouter with
+`review/prompts/review.system.v2.md` (version `v2`). Recording started at
+`2026-10-06T20:43:54.136922Z` (22:43:54 Europe/Warsaw). Capture source commit:
+`995059a6df811d111d8a10d65884d4c12ceff754`.
+
+This is a baseline for that free model and route, not evidence for the selected
+EUrouter Mistral models or their two-model live conventions/D7 acceptance criterion.
+No fallback model was configured. The engine was `fast`, structured output was
+`json_schema`, the context window was 262144 tokens, and the output limit was
+8192 tokens. The per-call timeout was 90 seconds. The full effective settings and
+input digests are in the manifest.
+
+Configured provider OpenRouter is recorded as `custom` with digest
+`sha256-v1:5044b4f1c460e88a5fb9af9debfee5ecbbdd846289e93635ba781251ed4ba231`.
+For the 23 first calls with provider responses, the observed serving-provider label
+is `custom` with digest
+`sha256-v1:6903649630881d2de78976de011006c49db83b4b727e184cce5ae1171124e7ba`;
+SEC-04 has no first-response provider identity. The manifest deliberately retains
+safe labels and digests rather than arbitrary provider strings; it does not
+provide a human-readable serving-provider name for this capture.
+
+| Metric | Baseline |
+| --- | --- |
+| First raw response validity | 66.7% (16/24) |
+| Micro TP / FP / FN | 3 / 5 / 16 |
+| Micro precision | 37.5% |
+| Micro recall | 15.8% |
+| Critical recall | 40.0% (2/5) |
+| Verdict agreement | 29.2% (7/24) |
+| Severity mismatches | 2 |
+
+| Category | TP | FP | FN | Precision | Recall |
+| --- | --- | --- | --- | --- | --- |
+| security | 1 | 0 | 3 | 100.0% | 25.0% |
+| correctness | 2 | 4 | 3 | 33.3% | 40.0% |
+| performance | 0 | 1 | 5 | 0.0% | 0.0% |
+| readability | 0 | 0 | 5 | undefined | 0.0% |
+
+These are mechanical scorer results, not a claim of manually adjudicated semantic
+accuracy. The first responses remain unchanged, including empty or invalid text.
+CLEAN-03, LOG-02, RES-03, SEC-02 and SEC-03 have `empty_answer`; SEC-04 has
+`no_content`. All six later reached `accepted`, but the missing first answers still
+count as invalid. LOG-03 ended with `llm_invalid_output` and has truncated JSON.
+SYN-04 fails the offline attribution-prefix check for its custom rule, accounting
+for the eighth invalid first answer. The manifest marks the
+capture publishable because no terminal infrastructure/provider failures remain;
+that flag does not imply high quality or completion of all issue #53 criteria.
+
+Replay the committed capture without credentials or network calls:
+
+```sh
+uv run python review/scripts/eval_replay.py
+```
+
+The existing required `Python lint / type / test` job runs the same replay when
+this manifest is present and writes its metrics to the job summary. Quality values
+are reported rather than used as pass thresholds. Raw response files are excluded
+from whitespace and end-of-file rewriting hooks so a commit preserves exact bytes.
+
+Corpus expansion is deferred for this baseline: keep the already curated 24-case
+corpus fixed so this measurement can be reproduced. Multi-truth and range-truth
+cases, a real high/critical security case, and reconsideration of SEC-05 remain
+future curation work; expanding the corpus will require a separately recorded
+baseline and updated denominators.

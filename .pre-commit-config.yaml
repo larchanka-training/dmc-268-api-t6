@@ -3,11 +3,11 @@ repos:
     rev: v6.0.0
     hooks:
       - id: trailing-whitespace
-        # Unified patches must retain whitespace on added/context lines byte-for-byte.
-        exclude: ^test-prs-dataset/.*\.patch$
+        # Dataset patches and raw provider answers must retain their exact bytes.
+        exclude: ^test-prs-dataset/(?:.*\.patch|responses/(?!manifest\.json$)[^/]+\.json)$
       - id: end-of-file-fixer
-        # Rendered SVG and dataset patches are generated/validated in their own workflows.
-        exclude: ^(?:docs/erd/erd\.svg|test-prs-dataset/.*\.patch)$
+        # Preserve generated SVG, dataset patches and raw provider answers byte-for-byte.
+        exclude: ^(?:docs/erd/erd\.svg|test-prs-dataset/(?:.*\.patch|responses/(?!manifest\.json$)[^/]+\.json))$
       - id: check-yaml
       - id: check-toml
       - id: check-merge-conflict

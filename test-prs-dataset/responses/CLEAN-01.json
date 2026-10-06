@@ -1,0 +1,1 @@
+{"findings": [], "summary": {"problem": "No defect was found in this change.", "done_well": "The change reduces code duplication by extracting a helper function `_percentage` and uses it in both `findings_recall_percent` and `findings_precision_percent`, improving maintainability without altering behavior.", "effort": "none"}}
