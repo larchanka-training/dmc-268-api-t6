@@ -20,19 +20,17 @@ container networking).
 docker compose up -d --build
 ```
 
-This starts `backend` (port `${BACKEND_PORT:-8000}`, from `docker-compose.yml`
-on `main`), `worker`, `postgres`, `rabbitmq` and `redis`; every service but
-`backend` has a healthcheck. `webhook-worker` starts only with
+This starts `postgres`, `rabbitmq` and `redis`, runs the one-shot `bootstrap`
+(migrations and the prompt seed) and then starts `backend` (port
+`${BACKEND_PORT:-8000}`, from `docker-compose.yml` on `main`) and `worker`;
+every long-running service has a healthcheck. `webhook-worker` starts only with
 `--profile webhooks`. Do not run the app locally with `uv run uvicorn` for this
 workflow — the point is to exercise the same container image and network path
 CI/prod use.
 
-`up` does not run migrations; apply them before any check that touches the
-database (an unmigrated database answers the webhook with 500):
-
-```bash
-docker compose run --rm backend alembic upgrade head
-```
+`up` applies the migrations itself: `backend` starts only after `bootstrap` has
+completed. If `bootstrap` fails, `up` exits non-zero and a new `backend` is not
+started; read the reason with `docker compose logs bootstrap`.
 
 ## 2. Readiness loop
 
