@@ -961,11 +961,15 @@ def test_invalid_installation_event_is_ignored_with_a_warning_naming_the_failing
 
 
 @pytest.mark.parametrize(
-    ("action", "array"),
-    [("added", "repositories_added"), ("removed", "repositories_removed")],
+    ("event_name", "action", "array"),
+    [
+        ("installation_repositories", "added", "repositories_added"),
+        ("installation_repositories", "removed", "repositories_removed"),
+        ("installation", "created", "repositories"),
+    ],
 )
 def test_repository_name_outside_owner_slash_repo_is_ignored_without_logging_the_value(
-    caplog: pytest.LogCaptureFixture, action: str, array: str
+    caplog: pytest.LogCaptureFixture, event_name: str, action: str, array: str
 ) -> None:
     """A path-traversal-shaped ``full_name`` never reaches onboarding or a GitHub request."""
     resolver = FakeInstallationResolver()
@@ -992,9 +996,7 @@ def test_repository_name_outside_owner_slash_repo_is_ignored_without_logging_the
     with caplog.at_level(logging.WARNING, logger=_DISPATCH_LOGGER):
         result = asyncio.run(
             adapter.execute(
-                VerifiedGitHubDelivery(
-                    "delivery-bad-name", "installation_repositories", payload
-                ).to_receipt()
+                VerifiedGitHubDelivery("delivery-bad-name", event_name, payload).to_receipt()
             )
         )
 
@@ -1008,6 +1010,7 @@ def test_repository_name_outside_owner_slash_repo_is_ignored_without_logging_the
     ]
     assert len(warnings) == 1
     logged = warnings[0].getMessage()
+    assert f"event={event_name}" in logged
     assert f"action={action}" in logged
     assert f"{array}.0.full_name: String should match pattern" in logged
     assert "SENTINEL" not in caplog.text
