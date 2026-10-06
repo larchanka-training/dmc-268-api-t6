@@ -177,21 +177,20 @@ retried after 5 minutes, then revived once an hour, see "Deferred deliveries" be
 their names, that status and the dispatcher's WARNING `Repository details unavailable for
 installation <id>: <reason>` cover both causes: the reason is the HTTP status or exception
 class of unreadable details, or `GitHub installation access token unavailable`, never the URL
-or the token. A failed tree request, a malformed token response or an App key that cannot sign,
-the 240 s dispatch timeout and any other error take the
-failed-dispatch path above (retry after 30 s, three attempts in total, then
-`projection_failed_at`). So a failed tree request of an earlier repository fails the
-delivery even when a later repository's details are only unavailable, and unavailable
-details of an earlier repository defer it even when a later tree request failed. Every
-retry or revival replays the whole event, which is safe to repeat: every repository that
-was read is upserted again, and the upsert sets `enabled` to true, so a repository disabled
-between two attempts is enabled again. (The at-least-once replay of a delivery already did
-that; with partial persistence, replaying repositories that are already saved is now the
-normal path of a partly failed event.) The label request is sent again and a 422 (label
-exists) counts as success. A 404 caused by replication lag therefore heals on a later
-attempt. A repository whose tree keeps failing is a residual risk: a receipt that failed
-for good is not replayed, and neither the hourly revival nor `wake_receipts` clears that
-mark.
+or the token. A failed tree request, a malformed token response or an App key that cannot
+sign, the 240 s dispatch timeout and any other error take the failed-dispatch path above
+(retry after 30 s, three attempts in total, then `projection_failed_at`). So a failed tree
+request of an earlier repository fails the delivery even when a later repository's details
+are only unavailable, and unavailable details of an earlier repository defer it even when a
+later tree request failed. Every retry or revival replays the whole event, which is safe to
+repeat: every repository that was read is upserted again, and the upsert sets `enabled` to
+true, so a repository disabled between two attempts is enabled again. (The at-least-once
+replay of a delivery already did that; with partial persistence, replaying repositories that
+are already saved is now the normal path of a partly failed event.) The label request is sent
+again and a 422 (label exists) counts as success. A 404 caused by replication lag therefore
+heals on a later attempt. A repository whose tree keeps failing is a residual risk: a receipt
+that failed for good is not replayed, and neither the hourly revival nor `wake_receipts`
+clears that mark.
 
 Installation token failures. The cache of installation tokens is cold after a restart or an
 expiry, and the parallel repositories then share one token mint:
@@ -250,12 +249,12 @@ Empty repositories. The tree request of a repository without a commit answers 40
 compared case-insensitively, is read as an empty tree, so the repository is connected with no
 recognised languages and `select_default_rule_set` picks `backend`, as for any tie. Any other
 409 is an error like any other status, so a retry can heal it and an unrelated 409 does not
-freeze a repository as empty. The default rule set is
-chosen once, at the first connection: `OnboardRepository` returns the existing active rule
-version before it reads the languages, and connecting the repository again re-enables the
-same row without touching its rules. Nothing recomputes the languages, so an empty
-repository keeps the `backend` rules, even if it later gets frontend code, until its rules
-are replaced by another path; there is no automatic path.
+freeze a repository as empty. The default rule set is chosen once, at the first connection:
+`OnboardRepository` returns the existing active rule version before it reads the languages,
+and connecting the repository again re-enables the same row without touching its rules.
+Nothing recomputes the languages, so an empty repository keeps the `backend` rules, even if
+it later gets frontend code, until its rules are replaced by another path; there is no
+automatic path.
 
 Residual risks of the budget. GitHub also caps content-generating requests at 500 an hour.
 A retry or a revival sends the label request again for every repository of the event that
