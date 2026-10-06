@@ -212,9 +212,14 @@ WARNING with the installation id and the count covers the skipped repositories, 
 WARNING of their own, and the WARNING of a failed repository names the type and status of the
 original error. A failed attempt therefore costs about one mint, not N: about three per cycle
 of three attempts, and for a transient failure a cycle about once an hour for up to 7 days. A
-failure of the label request alone
-is still not fatal. The pull request and CI adapters, and the review worker that shares the
-provider class, still see the original HTTP errors.
+failed label request is still only logged, unless the token behind it failed: a token failure
+at the label request is a failure of that repository like any token failure. The repository
+is not saved in this attempt, the repositories that have not started are skipped, and the
+first failure in event order decides the path (transient: deferred and retried; permanent:
+failed). So a transient token failure at the label request of the last repository alone
+defers the delivery instead of onboarding it without that label. The pull request and CI
+adapters, and the review worker that shares the provider class, still see the original HTTP
+errors.
 
 Installation event budget. The dispatch of a receipt is limited to 240 s. Up to four
 repositories are processed at a time (details, tree, label), and the label requests are
@@ -449,9 +454,10 @@ tick (its first deferral, a cycle started by a login, a worker restart that shif
 or a slow sweep), it is the tick after that, up to about two hours later. An outage of the
 details read therefore heals on its own, with no login, about an hour after it ends, unless
 the last attempt of a cycle fails the dispatch instead (a failing tree request, the 240 s
-dispatch timeout or a database error; a failed label request is only logged): the receipt is
-then marked failed (`projection_failed_at`), and neither the revival nor a login brings it
-back. The 45-minute delay and the 7-day window are the parameters the tech lead approved
+dispatch timeout or a database error; a failed label request is only logged, unless its token
+failed): the receipt is then marked failed (`projection_failed_at`), and neither the revival
+nor a login brings it back. The 45-minute delay and the 7-day window are the parameters the
+tech lead approved
 (api#71): a GitHub outage longer than a week is not a transient failure, and a `GET /repos`
 404 for a week means the repository is gone. Linking the installation (`wake_receipts`,
 which runs at every GitHub login of a user whose token lists the installation) clears the
