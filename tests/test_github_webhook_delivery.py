@@ -2045,6 +2045,10 @@ def test_missing_headers_and_malformed_signed_json_are_rejected() -> None:
     [
         ({"action": "added"}, "x" * 101, "valid-id"),
         ({"action": "added"}, "push", "x" * 256),
+        ({"action": "added"}, "push", "delivery 42"),
+        ({"action": "added"}, "push", "status=projected"),
+        ({"action": "added"}, "push", "delivery_42"),
+        ({"action": "added"}, "push", "delivery.42"),
         ({"action": 42}, "push", "valid-id"),
         ({"action": "x" * 101}, "push", "valid-id"),
         ({"installation": {"id": True}}, "push", "valid-id"),
@@ -2065,6 +2069,34 @@ def test_invalid_delivery_fields_do_not_store_or_dispatch(
 
     assert status == 400
     assert receipts.rows == {}
+
+
+def test_delivery_id_outside_the_guid_alphabet_is_rejected_without_logging_it(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # webhook-worker logs the stored id as is: spaces and ``key=value`` would forge fields.
+    sentinel = "zq7-forged status=projected detail=ok"
+    body = json.dumps({"action": "labeled"}).encode()
+    receipts = FakeReceiptUnitOfWork()
+
+    with caplog.at_level(logging.DEBUG):
+        status, response = _post(body, _headers(body, delivery_id=sentinel), receipts)
+
+    assert status == 400
+    assert response == {"detail": "malformed GitHub delivery id"}
+    assert receipts.rows == {}
+    assert "zq7-forged" not in caplog.text
+
+
+@pytest.mark.parametrize("delivery_id", ["72D3162E-cc78-11e3-81ab-4c9367dc0958", "x" * 255])
+def test_delivery_id_in_the_guid_alphabet_is_stored_as_received(delivery_id: str) -> None:
+    body = json.dumps({"action": "added"}).encode()
+    receipts = FakeReceiptUnitOfWork()
+
+    status, response = _post(body, _headers(body, delivery_id=delivery_id), receipts)
+
+    assert (status, response) == (202, {"status": "pending"})
+    assert list(receipts.rows) == [delivery_id]
 
 
 @pytest.mark.parametrize("constant", ["NaN", "Infinity", "-Infinity", "1e999", "-1e999"])
