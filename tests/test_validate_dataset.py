@@ -100,12 +100,21 @@ def _quoted_utf8_patch(tmp_path: Path) -> str:
 
 
 def _repo_state(repo: Path) -> tuple[str, str]:
-    """Local config and index of ``repo``, named by flags rather than by the environment."""
+    """Local config and index of ``repo``, named by flags; no ``GIT_*`` key is inherited.
+
+    An exported ``GIT_INDEX_FILE`` would otherwise redirect ``ls-files`` to another index.
+    """
     git = ["git", f"--git-dir={repo / '.git'}", f"--work-tree={repo}"]
     config = subprocess.run(
-        [*git, "config", "--local", "--list"], capture_output=True, text=True, check=True
+        [*git, "config", "--local", "--list"],
+        env=_git_env(),
+        capture_output=True,
+        text=True,
+        check=True,
     ).stdout
-    files = subprocess.run([*git, "ls-files"], capture_output=True, text=True, check=True).stdout
+    files = subprocess.run(
+        [*git, "ls-files"], env=_git_env(), capture_output=True, text=True, check=True
+    ).stdout
     return config, files
 
 
