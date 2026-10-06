@@ -1208,10 +1208,15 @@ def _main_settings(env: Env, extra: Mapping[str, str]) -> WorkerSettings:
 
 async def _run_main_worker(
     env: Env, settings: WorkerSettings, github: FakeGitHubApi, llm: FakeLlm, *states: str
-) -> tuple[UUID, tuple[Any, ...]]:
+) -> tuple[UUID, tuple[Any, ...], list[str]]:
+    """Run ``run_worker`` on one Run; the statuses are its state at insert, then each NOTIFY."""
     engine = env.engine()
     factory = async_sessionmaker(engine, expire_on_commit=False)
     run_id = await insert_run(factory, env)
+    async with factory() as session:
+        statuses = [
+            str(await session.scalar(text("SELECT state FROM runs WHERE id = :id"), {"id": run_id}))
+        ]
     worker = asyncio.create_task(
         run_worker(
             settings,
@@ -1221,16 +1226,18 @@ async def _run_main_worker(
         )
     )
     try:
-        async with amqp_channels(env.rabbitmq_url or "", SHORT_DELAYS) as channels:
-            await publish_run(channels, factory, run_id)
-        state = await wait_for_state(factory, run_id, *states)
-        # The check-run and the ack follow the last commit.
-        await asyncio.sleep(0.5)
+        async with listen(env) as events:
+            async with amqp_channels(env.rabbitmq_url or "", SHORT_DELAYS) as channels:
+                await publish_run(channels, factory, run_id)
+            state = await wait_for_state(factory, run_id, *states)
+            # The check-run and the ack follow the last commit.
+            await asyncio.sleep(0.5)
     finally:
         worker.cancel()
         await asyncio.gather(worker, return_exceptions=True)
         await engine.dispose()
-    return run_id, state
+    statuses += [event["status"] for event in events if event["run_id"] == str(run_id)]
+    return run_id, state, statuses
 
 
 @pytest.mark.integration
@@ -1240,7 +1247,9 @@ def test_main_composition_reviews_through_the_llm_gateway(
 ) -> None:
     github, llm = FakeGitHubApi(agents_md=agents_md), FakeLlm()
     settings = _main_settings(env, LLM_ENV)
-    run_id, state = asyncio.run(_run_main_worker(env, settings, github, llm, "succeeded", "failed"))
+    run_id, state, statuses = asyncio.run(
+        _run_main_worker(env, settings, github, llm, "succeeded", "failed")
+    )
     engine = env.engine()
     factory = async_sessionmaker(engine, expire_on_commit=False)
 
@@ -1257,6 +1266,7 @@ def test_main_composition_reviews_through_the_llm_gateway(
     names = [action[0] for action in actions]
 
     assert state == ("succeeded", 1, None)
+    assert statuses == ["queued", "running", "publishing", "succeeded"]
     assert llm.tasks[-1] != "RepoConventionsDraft" and "RepoConventionsDraft" in llm.tasks
     assert names.count("llm.review_output") == 1
     assert names.count("llm.call") >= 2
@@ -1271,7 +1281,7 @@ def test_main_composition_without_llm_config_names_the_missing_configuration(
     github, llm = FakeGitHubApi(), FakeLlm()
     settings = _main_settings(env, {})
     with caplog.at_level(logging.WARNING):
-        run_id, state = asyncio.run(_run_main_worker(env, settings, github, llm, "failed"))
+        run_id, state, _ = asyncio.run(_run_main_worker(env, settings, github, llm, "failed"))
     engine = env.engine()
     factory = async_sessionmaker(engine, expire_on_commit=False)
 
