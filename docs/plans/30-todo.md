@@ -141,7 +141,7 @@ T01–T04, C01–C04 and C06–C25 are complete; the corpus checkpoint has user 
 
 ## UI and documentation retirement
 
-User scope for this work is API only. UI T14–T16 and the UI portion of T17 remain in issue #30 but are outside this API work; UI PRs #60/#61 were closed without merging. Their UI half (T15, T17) moved to [api#55](https://github.com/larchanka-training/dmc-268-api-t6/issues/55); T16 to [ui#66](https://github.com/larchanka-training/dmc-268-ui-t6/issues/66).
+User scope for this work is API only; UI PRs #60/#61 were closed without merging. The UI tasks now live elsewhere: T14 under ui PR #55 (merged 01.10.2026), per its Ownership note below; T15 and the UI portion of T17 in [api#55](https://github.com/larchanka-training/dmc-268-api-t6/issues/55) (ui PR #69, merged 05.10.2026); T16 in [ui#66](https://github.com/larchanka-training/dmc-268-ui-t6/issues/66), part 1.
 
 ### T14 — UI auth client tests (ui; 2–4 new or existing test files)
 
