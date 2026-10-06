@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import re
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -10,11 +9,10 @@ from enum import StrEnum
 from typing import Protocol
 from uuid import UUID
 
-from app.modules.reviews.application.project_github_pull_request import PullRequestState
-
 # A GitHub-supplied status, conclusion or state goes into the outcome log line only when it is
 # a plain token; anything else is logged as ``?``.
-_LOG_TOKEN = re.compile(r"[a-z_]{1,40}")
+from app.common.application.log_token import log_token
+from app.modules.reviews.application.project_github_pull_request import PullRequestState
 
 
 class CiWaitMode(StrEnum):
@@ -158,7 +156,7 @@ class DetermineCiEligibility:
                 False,
                 EligibilityReason.CI_BLOCKED,
                 candidate.head_sha,
-                detail=f"commit status {_log_token(snapshot.combined_state)}",
+                detail=f"commit status {log_token(snapshot.combined_state) or '?'}",
             )
         if foreign or snapshot.combined_total_count > 0:
             return CiEligibility(True, EligibilityReason.ELIGIBLE, candidate.head_sha, candidate)
@@ -204,14 +202,10 @@ class DetermineCiEligibility:
 def _blocking_suites_detail(blocking: Sequence[CheckSuite]) -> str:
     """Name the first blocking suite in GitHub's order and count the others."""
     first = blocking[0]
-    state = _log_token(first.status)
+    state = log_token(first.status) or "?"
     if first.conclusion is not None:
-        state += f"/{_log_token(first.conclusion)}"
+        state += f"/{log_token(first.conclusion) or '?'}"
     detail = f"check suite app={first.app_id} {state}"
     if len(blocking) > 1:
         detail += f" (+{len(blocking) - 1} more)"
     return detail
-
-
-def _log_token(value: str) -> str:
-    return value if _LOG_TOKEN.fullmatch(value) else "?"
