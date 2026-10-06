@@ -447,13 +447,19 @@ jobs:
             "${LOCAL_IMAGE}" python -m app.webhook_worker
 
       - name: Wait for the labeled outcome in the worker log
-        # The worker sweeps at start, then every 30 s, and logs to stderr.
+        # The worker sweeps at start, then every 30 s, and logs to stderr. Its state is read before
+        # its log, so a worker that exited (e.g. on its configuration) has its full log searched.
         run: |
           expected='event=pull_request status=ignored_unknown_repository detail=action=labeled unknown_repository'
           for _ in $(seq 1 30); do
+            running="$(docker inspect -f '{{.State.Running}}' webhook-worker)"
             logs="$(docker logs webhook-worker 2>&1)"
             if grep -m 1 -F "${expected}" <<< "${logs}"; then
               exit 0
+            fi
+            if [ "${running}" = false ]; then
+              echo "The webhook worker exited without '${expected}' in its log" >&2
+              exit 1
             fi
             sleep 3
           done

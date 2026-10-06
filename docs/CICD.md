@@ -21,7 +21,7 @@ flowchart TD
   pr --> oas["redocly lint openapi.yaml\n(required check)"]
   pr --> build["docker build"]
   build --> scan["trivy: vuln / secret / misconfig"]
-  build --> smoke["webhook smoke: миграции, 202 / 401, p95\n(required check)"]
+  build --> smoke["webhook smoke: миграции, 202 / 401, p95,\nисход labeled в логе webhook-worker\n(required check)"]
   secrets --> gate{"main?"}
   py --> gate
   tf --> gate

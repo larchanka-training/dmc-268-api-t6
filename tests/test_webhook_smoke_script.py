@@ -365,9 +365,17 @@ def test_ci_smokes_the_built_image_before_the_push() -> None:
     assert "--name webhook-worker" in job
     assert "GITHUB_API_URL=http://127.0.0.1:9999" in job
     assert "openssl genrsa 2048" in job
-    assert "docker logs webhook-worker 2>&1" in job
+    wait = job[
+        job.index("- name: Wait for the labeled outcome") : job.index("- name: API container logs")
+    ]
     assert (
-        "event=pull_request status=ignored_unknown_repository "
-        "detail=action=labeled unknown_repository"
-    ) in job
+        "expected='event=pull_request status=ignored_unknown_repository "
+        "detail=action=labeled unknown_repository'"
+    ) in wait
+    assert 'logs="$(docker logs webhook-worker 2>&1)"' in wait
+    assert 'grep -m 1 -F "${expected}" <<< "${logs}"' in wait
+    # A worker that exited (e.g. on its configuration) fails the step early.
+    assert "docker inspect -f '{{.State.Running}}' webhook-worker" in wait
+    # No line before the timeout: the loop ends and the step fails.
+    assert wait.rstrip().endswith("exit 1")
     assert "docker logs webhook-worker || true" in job
