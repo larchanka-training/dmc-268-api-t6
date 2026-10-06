@@ -669,6 +669,121 @@ def test_real_delivery_fixture_is_onboarded_with_branch_and_url_read_from_github
 
 
 @pytest.mark.integration
+def test_empty_repository_is_saved_with_the_backend_rules_through_the_real_tree_adapter(
+    migrated_onboarding_database: tuple[str, str],
+) -> None:
+    """GitHub's 409 for a repository without a commit is an empty tree, not an error.
+
+    The real tree adapter reads ``409 Git Repository is empty.`` as no files, so the
+    delivery is onboarded and the saved repository gets the rule set of no recognised
+    language, ``backend`` (WEBHOOK_WORKER.md, "Empty repositories").
+    """
+    database_url, schema = migrated_onboarding_database
+    installation_id = uuid4()
+    repository_path = "/repos/example-owner/example-repo-two"
+    requests: list[tuple[str, str]] = []
+
+    class TokenProvider:
+        async def get_installation_access_token(self, installation_external_id: int) -> str:
+            assert installation_external_id == 1000001
+            return "test-installation-token"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append((request.method, request.url.path))
+        if request.method == "GET" and request.url.path == repository_path:
+            return httpx.Response(
+                200,
+                json={
+                    "default_branch": "main",
+                    "html_url": "https://example.test/example-owner/example-repo-two",
+                },
+            )
+        if request.method == "GET" and request.url.path == f"{repository_path}/git/trees/main":
+            return httpx.Response(409, json={"message": "Git Repository is empty."})
+        if request.method == "POST" and request.url.path == f"{repository_path}/labels":
+            return httpx.Response(201, json={})
+        return httpx.Response(500, json={"message": "unexpected request"})
+
+    async def exercise() -> tuple[
+        InstallationDeliveryDispatchStatus, Repository | None, list[RuleVersion]
+    ]:
+        engine = create_async_engine(
+            database_url, connect_args={"options": f"-csearch_path={schema}"}
+        )
+        session_factory = async_sessionmaker(engine, expire_on_commit=False)
+        client = httpx.AsyncClient(
+            transport=httpx.MockTransport(handler), base_url="https://api.github.com"
+        )
+        try:
+            async with session_factory() as session:
+                workspace = Workspace(id=uuid4(), name="empty-repo", daily_budget_usd=Decimal("1"))
+                session.add(workspace)
+                await session.flush()
+                session.add(
+                    ProviderInstallation(
+                        id=installation_id,
+                        workspace_id=workspace.id,
+                        provider="github",
+                        external_id=1000001,
+                        provider_metadata={},
+                    )
+                )
+                await session.commit()
+
+            dispatcher = ReviewsApiResources(
+                engine, session_factory
+            ).github_installation_delivery_dispatcher(client=client, token_provider=TokenProvider())
+            result = await dispatcher.execute(
+                VerifiedGitHubDelivery(
+                    "delivery-empty-repository",
+                    "installation_repositories",
+                    load_github_webhook_fixture("installation_repositories_added"),
+                ).to_receipt()
+            )
+
+            async with session_factory() as session:
+                repository = await session.scalar(
+                    select(Repository).where(Repository.external_id == 1000005)
+                )
+                versions = (
+                    []
+                    if repository is None
+                    else list(
+                        (
+                            await session.scalars(
+                                select(RuleVersion).where(
+                                    RuleVersion.repository_id == repository.id
+                                )
+                            )
+                        ).all()
+                    )
+                )
+            return result.status, repository, versions
+        finally:
+            await client.aclose()
+            await engine.dispose()
+
+    status, repository, versions = asyncio.run(exercise())
+
+    assert status is InstallationDeliveryDispatchStatus.ONBOARDED
+    assert requests == [
+        ("GET", repository_path),
+        ("GET", f"{repository_path}/git/trees/main"),
+        ("POST", f"{repository_path}/labels"),
+    ]
+    assert repository is not None
+    assert repository.full_name == "example-owner/example-repo-two"
+    assert repository.enabled is True
+    assert [(version.version, version.is_active) for version in versions] == [(1, True)]
+    assert (
+        versions[0].rules
+        == load_default_rule_sets(Path(__file__).resolve().parents[1] / "review" / "rules")[
+            "backend"
+        ].rules
+    )
+
+
+@pytest.mark.integration
 def test_unreadable_repository_details_defer_the_delivery_and_write_no_row(
     migrated_onboarding_database: tuple[str, str],
 ) -> None:
