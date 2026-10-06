@@ -19,6 +19,7 @@ For local Docker Compose, set `GITHUB_WEBHOOK_SECRET`, `GITHUB_APP_ID`,
 `GITHUB_APP_PRIVATE_KEY`, and `GITHUB_APP_BOT_LOGIN` in `.env`, apply the migrations, seed the
 prompts and start the `webhooks` profile (the compose file passes `RABBITMQ_URL` itself). A
 worker started outside Compose needs the same database, broker and GitHub App configuration.
+Values of the dev GitHub App and its smee.io delivery path: [README](../README.md#local-dev-app).
 
 ```bash
 docker compose up -d postgres rabbitmq

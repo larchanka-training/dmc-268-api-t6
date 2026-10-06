@@ -150,6 +150,32 @@ docker compose --profile webhooks up -d webhook-worker
 
 Details: [docs/WEBHOOK_WORKER.md](docs/WEBHOOK_WORKER.md).
 
+### Local dev App
+
+Local work uses the dev GitHub App `dmc268-t6-reviewer-dev`, not the staging App. Its values come
+from the App's settings page, which only its owner (`axyi`) can open; ask the owner for them and
+keep them in `.env` only: the App ID (`GITHUB_APP_ID`), a private key generated there
+(`GITHUB_APP_PRIVATE_KEY`, multi-line PEM quoted as above), the webhook secret set on the App
+(`GITHUB_WEBHOOK_SECRET`), and the client ID and a client secret (`GITHUB_CLIENT_ID`,
+`GITHUB_CLIENT_SECRET`). `GITHUB_APP_BOT_LOGIN` is the bot login `<app-slug>[bot]`, here
+`dmc268-t6-reviewer-dev[bot]`: empty, webhook-worker does not start; with the staging App's
+login it does not skip the dev bot's own label events (Р-9 in
+[docs/SYSTEM_DESIGN.md](docs/SYSTEM_DESIGN.md)).
+
+GitHub cannot reach `localhost`, so the dev App's webhook URL is a smee.io channel; its address
+comes from the owner with the other values and is not kept in the repository. Run the API on
+port 8000 (`uvicorn` reads `.env` only with `--env-file .env`) and, in a second terminal,
+forward the channel to the webhook route:
+
+```bash
+uv run --env-file .env uvicorn app.main:app --reload
+npx smee-client --url "<smee channel URL>" --target http://localhost:8000/webhooks/github
+```
+
+The API stores each delivery and webhook-worker (above) projects it. The dev App is installed
+(installation `168298055`) on the sandbox repository `axyi/dmc268-t6-sandbox-dev`: events of its
+pull requests, such as the `ai-review` label, arrive along this path.
+
 ## LLM gateway
 
 The review worker (`python -m app.worker`) builds the gateway once per process from `LLM_*`
