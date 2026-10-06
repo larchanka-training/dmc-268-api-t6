@@ -111,7 +111,10 @@ events and `synchronize`, `closed`, and `reopened` reconcile `ai_review_labeled`
 current labels, so a closed PR keeps its label state; a new Run needs an open PR, since CI
 eligibility and the no-CI sweep consider only open PRs (`docs/PIPELINE_SPEC.md` §8.2);
 `edited` updates metadata only. The issue timeline is never fetched:
-`review_requested` and `review_request_removed` are dropped as irrelevant. A failed dispatch (for
+`review_requested` and `review_request_removed` are dropped as irrelevant. A pull request payload
+whose repository name is outside `owner/repo` (the same shape as for installation events, below)
+is invalid: the outcome line reports `invalid_payload fields=repository.full_name` (see "Outcome
+log") and the receipt is acknowledged. A failed dispatch (for
 example a GitHub error or the 240 s dispatch timeout) releases the receipt for a retry after
 30 s; the third failure marks it failed and it is no longer replayed (if the release itself fails,
 the receipt keeps its claim until the 5-minute lease lapses and the attempt counter does not
@@ -119,8 +122,8 @@ advance). Once that mark is committed, the worker logs a WARNING after the failu
 `GitHub webhook delivery <delivery_id> failed after its last attempt: <ExceptionClass>`
 (see "Failure log" below). It also projects
 installation events. A delivery for an unknown installation or repository, or for an
-installation event whose repository details GitHub cannot answer, is deferred instead, see
-"Deferred deliveries" below.
+installation event whose repository details or installation token GitHub cannot answer, is
+deferred instead, see "Deferred deliveries" below.
 
 Runs (T1, T6). Label, `synchronize`, `reopened`, `check_suite`, `workflow_run` and
 `status` deliveries go through `TriggerFromDelivery` and `try_enqueue`: a Run is inserted with
@@ -138,32 +141,43 @@ rest; `default_branch` and `html_url` are used only when both are present. `full
 have the form `owner/repo`, because it goes into the path of GitHub requests that carry the
 installation token: exactly one slash, no dots in the owner (underscores are allowed, as in
 Enterprise Managed User logins), and a repo that does not consist of dots only (`.github`
-and `repo.js` pass, `.` and `..` do not). When either of `default_branch` and `html_url` is
+and `repo.js` pass, `.` and `..` do not). Every adapter that puts a repository name into a
+request path builds the path with the shared builder in
+`app/common/infrastructure/github_repository_path.py`, which rejects a name of another shape
+before a token is minted or a request is sent, so it also protects rows stored before the
+parser checked the name. The tree adapter encodes the default branch with it (`.` and `..` are
+rejected), and the check-run and run-source reads pass their commit SHAs through it;
+`get_blob` and the CI adapter keep their own SHA checks, and the installation id in a path is
+an integer. When either of `default_branch` and `html_url` is
 missing, the worker reads both with `GET /repos/{full_name}` using the installation token
 before it fetches the tree, outside any database transaction. A read that GitHub cannot
 answer (the token request or `GET /repos` fails with a network error, a timeout, a 404, a
-5xx or any other HTTP error status) is a details outage: it defers the delivery, see
-"Installation event failures" below. A `GET /repos` answer that is HTTP 200 but is not JSON
-or lacks the default branch or web URL (never stored as an empty value) and a malformed
-token response are not outages: they fail the dispatch (retry after 30 s, three attempts in
-total, then `projection_failed_at`, never replayed). `deleted` and `removed` make no GitHub
+5xx or any other HTTP error status) is an outage and defers the delivery, see "Installation
+event failures" and "Installation token failures" below. A `GET /repos` answer that is HTTP
+200 but is not JSON or lacks the default branch or web URL (never stored as an empty value),
+a malformed token response and an App key that cannot sign are not outages: they fail the
+dispatch (retry after 30 s, three attempts in total, then `projection_failed_at`, never
+replayed). `deleted` and `removed` make no GitHub
 request. An installation payload that fails validation is logged at WARNING (delivery,
 event, action, installation id, the total error count and the first ten failing field names
 and messages, never their values) and its receipt is marked projected, so it is not
 replayed. One invalid `full_name` among N repositories therefore drops the whole event at
 the parser, the valid repositories included.
 
-Installation event failures. Repositories are processed independently. One that cannot be
-read (a 404 right after the repository was created, a rename or a removal, for example)
-does not discard the others: the readable ones are saved in one transaction, each failure
+Installation event failures. Repositories are processed independently, except that a token
+failure skips the repositories that have not started (see "Installation token failures"). One
+that cannot be read (a 404 right after the repository was created, a rename or a removal, for
+example) does not discard the others: the readable ones are saved in one transaction, each failure
 is logged at WARNING (installation id, repository id, full name, error type and, for an
-HTTP error, its status code, for unreadable details those of the HTTP error behind them;
-never the message or URL), and the first error in event order is then raised. That error
-decides the path of the receipt. Unreadable details defer the delivery like an unknown
-installation (`deferred_repository_details`: retried after 5 minutes, then revived once an
-hour, see "Deferred deliveries" below), and the dispatcher logs a WARNING with the
-installation id and the HTTP status or exception class, never the URL or the token. A
-failed tree request, the 240 s dispatch timeout and any other error take the
+HTTP error, its status code, for unreadable details or a token failure those of the error
+behind them; never the message or URL), and the first error in event order is then raised.
+That error decides the path of the receipt. Unreadable details and a token request GitHub
+could not answer defer the delivery like an unknown installation (`deferred_repository_details`:
+retried after 5 minutes, then revived once an hour, see "Deferred deliveries" below), and the
+dispatcher logs a WARNING with the installation id and the HTTP status or exception class of
+unreadable details, or that the installation access token is unavailable, never the URL or
+the token. A failed tree request, a malformed token response or an App key that cannot sign,
+the 240 s dispatch timeout and any other error take the
 failed-dispatch path above (retry after 30 s, three attempts in total, then
 `projection_failed_at`). So a failed tree request of an earlier repository fails the
 delivery even when a later repository's details are only unavailable, and unavailable
@@ -177,6 +191,30 @@ exists) counts as success. A 404 caused by replication lag therefore heals on a 
 attempt. A repository whose tree keeps failing is a residual risk: a receipt that failed
 for good is not replayed, and neither the hourly revival nor `wake_receipts` clears that
 mark.
+
+Installation token failures. The cache of installation tokens is cold after a restart or an
+expiry, and the parallel repositories then share one token mint:
+`GitHubAppInstallationAccessTokenProvider` keeps one exchange in flight per installation, and
+every caller that waits for it receives its token or its error. A failed exchange is not
+remembered, so the next call after it exchanges again, and a waiter that is cancelled (by the
+dispatch timeout, for one) leaves the exchange running for the others. A failure to obtain
+the token, such as a suspended installation or a revoked or invalid App key, concerns the
+whole installation, not one repository. The details, tree and label adapters report it as
+`InstallationAccessTokenError`, and the projector then skips the repositories that have not
+started, while the running ones finish, the readable ones are saved and the first failure in
+event order is raised as before. When GitHub could not answer the token request (a transport
+error, a timeout or an error status, such as the 401 of a revoked App key), the error is
+transient and the dispatcher defers the delivery like unreadable details (see "Installation
+event failures"). A malformed token response or an App key that cannot sign is permanent, as
+for details: the repositories that have not started are still skipped, but the delivery takes
+the failed-dispatch path. One
+WARNING with the installation id and the count covers the skipped repositories, which get no
+WARNING of their own, and the WARNING of a failed repository names the type and status of the
+original error. A failed attempt therefore costs about one mint, not N: about three per cycle
+of three attempts, and for a transient failure a cycle about once an hour for up to 7 days. A
+failure of the label request alone
+is still not fatal. The pull request and CI adapters, and the review worker that shares the
+provider class, still see the original HTTP errors.
 
 Installation event budget. The dispatch of a receipt is limited to 240 s. Up to four
 repositories are processed at a time (details, tree, label), and the label requests are
@@ -223,14 +261,9 @@ attempts about once an hour for up to 7 days after the delivery was received (se
 deliveries"), so an event of about 170 or more repositories with one such repository can
 hit the cap every hour for up to 7 days. Once the cap is reached the label POSTs answer 403
 (or 429); each is logged and is not fatal, and the repositories are connected without the
-label. After a restart or an expiry the token cache is cold, and up to four parallel
-repositories each mint an installation token (`GitHubAppInstallationAccessTokenProvider`
-has no single-flight); this is not fixed here. A systemic failure, such as a suspended
-installation or a revoked or invalid App key, makes the token mint fail again for each of
-the N repositories: N mint attempts and N WARNINGs per attempt. A failed token request of
-the details read is a details outage, so the delivery is deferred and revived: up to 3 × N
-per cycle, about once an hour for up to 7 days. There is no fail-fast on token errors; that
-is a follow-up candidate.
+label. The other residual risks are described above: a receipt that failed for good is not
+replayed, a replay enables a repository again, the sweep handles receipts one at a time, and
+one invalid name drops the whole event at the parser.
 
 Outcome log. The process calls `logging.basicConfig(level=INFO)` and, once a delivery has been
 processed and its receipt updated, writes one INFO line to the `webhook-worker` log, so the log
@@ -320,7 +353,8 @@ token or the webhook secret.
 A deferred delivery's outcome line ends with `retry_at=<time>`, or `retry_at=none` after the
 third attempt, and that final deferral is also logged as a WARNING with its reason, once the
 receipt is committed. `deferred_repository_details` is an installation event whose repository
-details GitHub cannot answer; like the other deferrals it is retried after 5 minutes, at most
+details or installation token GitHub cannot answer; like the other deferrals it is retried
+after 5 minutes, at most
 three attempts in total. `retry_at=none` means no retry is scheduled: the receipt waits until
 something revives it, the hourly revival for installation events or linking the installation
 (`wake_receipts`), see "Deferred deliveries" below.
@@ -388,7 +422,8 @@ and database libraries; without a classifier every other failure is `internal`.
 
 Deferred deliveries. A delivery the dispatcher cannot handle yet (unknown installation or
 repository, an event without a handler, or an installation event whose repository details
-GitHub cannot answer) is retried after 5 minutes, at most three attempts in total, like a
+or installation token GitHub cannot answer) is retried after 5 minutes, at most three
+attempts in total, like a
 failed dispatch. Deferrals and failed dispatches draw on the same three attempts: two
 deferrals followed by one failed dispatch (a failing tree request, for example) mark the
 receipt failed. After the third deferral it is deferred (`projection_deferred_at`) and the
