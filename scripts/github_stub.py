@@ -3,7 +3,9 @@
 
 Answers just enough for `scripts/webhook_smoke.py`'s `pull_request` / `labeled` delivery
 (installation 17, repository 101 `smoke/webhook-smoke`, PR 7) to create a Run: an installation
-token, the current PR with the `ai-review` label, and no CI. Every other request gets 404.
+token and the current PR with the `ai-review` label. The recipe seeds `wait_for_ci = never`, so
+no CI is read. Every other request gets 404; tests/test_github_stub_script.py keeps the PR in
+step with the smoke delivery.
 
 Usage (point the webhook worker at it with GITHUB_API_URL=http://127.0.0.1:9999):
     uv run python scripts/github_stub.py [--port 9999]
@@ -54,10 +56,6 @@ class Handler(BaseHTTPRequestHandler):
         path = self.path.split("?", 1)[0]
         if path == f"/repos/{REPOSITORY}/pulls/7":
             self._send(200, PULL_REQUEST)
-        elif path.endswith("/check-suites"):
-            self._send(200, {"total_count": 0, "check_suites": []})
-        elif path.endswith("/status"):
-            self._send(200, {"state": "pending", "total_count": 0, "statuses": []})
         else:
             self._send(404, {"message": "Not Found"})
 
