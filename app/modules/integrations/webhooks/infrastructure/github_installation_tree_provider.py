@@ -198,8 +198,26 @@ class GitHubInstallationTreeProvider:
                 "X-GitHub-Api-Version": _GITHUB_API_VERSION,
             },
         )
+        if _is_empty_repository_answer(response):
+            return ()
         response.raise_for_status()
         return _parse_tree_response(response.json())
+
+
+def _is_empty_repository_answer(response: httpx.Response) -> bool:
+    """409 "Git Repository is empty.": no commit yet, so no tree and no languages.
+
+    Any other 409 (or a body of another shape) is not that answer and raises, so a retry
+    can heal it instead of freezing the repository as empty.
+    """
+    if response.status_code != 409:
+        return False
+    try:
+        body = response.json()
+    except ValueError:
+        return False
+    message = body.get("message") if isinstance(body, Mapping) else None
+    return isinstance(message, str) and "repository is empty" in message.lower()
 
 
 def _parse_tree_response(payload: object) -> tuple[RepositoryTreeBlob, ...]:
