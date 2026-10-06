@@ -18,6 +18,9 @@ from app.modules.integrations.webhooks.application.github_installation_dispatch 
     InstallationDeliveryDispatchResult,
     InstallationDeliveryDispatchStatus,
 )
+from app.modules.integrations.webhooks.application.installation_access_token import (
+    InstallationAccessTokenError,
+)
 from app.modules.integrations.webhooks.application.installation_event_projector import (
     InstallationEventProjector,
     InstallationRepositoryDetailsProvider,
@@ -1074,3 +1077,248 @@ def test_removal_of_bare_repositories_makes_no_github_request(action: str) -> No
     assert labels.calls == []
     assert sync.calls == []
     assert sync.disable_calls == [(provider_installation_id, removed)]
+
+
+def _token_failure(status: int = 401) -> InstallationAccessTokenError:
+    request = httpx.Request("POST", "https://api.github.com/app/installations/17/access_tokens")
+    original = httpx.HTTPStatusError(
+        f"Client error '{status}' for url '{request.url}'",
+        request=request,
+        response=httpx.Response(status, request=request),
+    )
+    error = InstallationAccessTokenError(
+        "GitHub installation access token unavailable", transient=True
+    )
+    error.__cause__ = original
+    return error
+
+
+@dataclass
+class StartRecordingTree(FakeTreeProvider):
+    """Records every repository it is asked about; ``errors`` fail, the rest wait for them.
+
+    A repository without an error answers only once every failing one has failed, so it is
+    still in flight when the failure happens.
+    """
+
+    errors: dict[int, Exception] = field(default_factory=dict)
+    started: list[int] = field(default_factory=list)
+    failed: asyncio.Event = field(default_factory=asyncio.Event)
+
+    async def fetch_default_branch_tree(
+        self,
+        *,
+        installation_external_id: int,
+        repository: RepositorySnapshot,
+    ) -> tuple[RepositoryTreeBlob, ...]:
+        self.started.append(repository.external_id)
+        if repository.external_id in self.errors:
+            self.failed.set()
+            raise self.errors[repository.external_id]
+        if self.errors:
+            await self.failed.wait()
+        return ()
+
+
+def _execute(
+    tree: InstallationRepositoryTreeProvider,
+    sync: FakeSyncInstallationRepositories,
+    references: tuple[RepositoryReference, ...],
+    *,
+    max_concurrent_repositories: int,
+    labels: InstallationRepositoryLabelProvider | None = None,
+    details: InstallationRepositoryDetailsProvider | None = None,
+) -> None:
+    asyncio.run(
+        InstallationEventProjector(
+            tree_provider=tree,
+            label_provider=labels or FakeLabelProvider(),
+            details_provider=details or FakeDetailsProvider(),
+            sync=sync,
+            max_concurrent_repositories=max_concurrent_repositories,
+        ).execute(
+            provider_installation_id=uuid4(),
+            event=InstallationRepositoriesEvent(17, "added", references, ()),
+        )
+    )
+
+
+def _warnings(caplog: pytest.LogCaptureFixture) -> list[str]:
+    return [
+        record.getMessage()
+        for record in caplog.records
+        if record.name == _PROJECTOR_LOGGER and record.levelno == logging.WARNING
+    ]
+
+
+def test_a_token_failure_skips_the_repositories_that_have_not_started(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    failure = _token_failure()
+    tree = StartRecordingTree(errors={101: failure})
+    sync = FakeSyncInstallationRepositories()
+
+    with (
+        caplog.at_level(logging.WARNING, logger=_PROJECTOR_LOGGER),
+        pytest.raises(InstallationAccessTokenError) as raised,
+    ):
+        _execute(
+            tree,
+            sync,
+            tuple(_reference(external_id=item) for item in (101, 102, 103, 104)),
+            max_concurrent_repositories=1,
+        )
+
+    assert raised.value is failure
+    assert tree.started == [101]
+    assert sync.calls == []
+    logged = _warnings(caplog)
+    assert len(logged) == 2
+    assert "repository_id=101" in logged[0]
+    assert "repository_id=" not in logged[1]
+    assert "full_name=" not in logged[1]
+    assert "installation_id=17" in logged[1] and "skipped=3" in logged[1]
+
+
+def test_a_token_failure_lets_the_running_repositories_finish_and_syncs_them(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    tree = StartRecordingTree(errors={102: _token_failure()})
+    sync = FakeSyncInstallationRepositories()
+
+    with (
+        caplog.at_level(logging.WARNING, logger=_PROJECTOR_LOGGER),
+        pytest.raises(InstallationAccessTokenError),
+    ):
+        _execute(
+            tree,
+            sync,
+            tuple(_reference(external_id=item) for item in (101, 102, 103, 104)),
+            max_concurrent_repositories=2,
+        )
+
+    assert tree.started == [101, 102]
+    assert len(sync.calls) == 1
+    assert [item.snapshot.external_id for item in sync.calls[0][1]] == [101]
+    logged = _warnings(caplog)
+    assert len(logged) == 2 and "skipped=2" in logged[1]
+
+
+def test_a_token_failure_of_the_details_request_also_skips_the_rest() -> None:
+    @dataclass
+    class TokenFailingDetails(FakeDetailsProvider):
+        async def fetch_repository_details(
+            self, *, installation_external_id: int, full_name: str
+        ) -> RepositoryDetails:
+            self.calls.append((installation_external_id, full_name))
+            raise _token_failure()
+
+    details = TokenFailingDetails()
+    tree = StartRecordingTree()
+    sync = FakeSyncInstallationRepositories()
+
+    with pytest.raises(InstallationAccessTokenError):
+        _execute(
+            tree,
+            sync,
+            tuple(_bare_reference(external_id=item) for item in (101, 102, 103)),
+            max_concurrent_repositories=1,
+            details=details,
+        )
+
+    assert details.calls == [(17, "example-owner/repo-101")]
+    assert tree.started == []
+    assert sync.calls == []
+
+
+def test_a_token_failure_does_not_hide_an_earlier_failure_in_event_order() -> None:
+    earlier = RuntimeError("earlier failure")
+    tree = StartRecordingTree(errors={101: earlier, 102: _token_failure()})
+    sync = FakeSyncInstallationRepositories()
+
+    with pytest.raises(RuntimeError) as raised:
+        _execute(
+            tree,
+            sync,
+            tuple(_reference(external_id=item) for item in (101, 102, 103)),
+            max_concurrent_repositories=2,
+        )
+
+    assert raised.value is earlier
+    assert tree.started == [101, 102]
+
+
+def test_a_failure_that_is_not_a_token_failure_does_not_skip_the_rest(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Regression guard: a repository-specific error (a 404, say) never stops the event."""
+    failure = _not_found("octo/repository-101")
+    tree = StartRecordingTree(errors={101: failure})
+    sync = FakeSyncInstallationRepositories()
+
+    with (
+        caplog.at_level(logging.WARNING, logger=_PROJECTOR_LOGGER),
+        pytest.raises(httpx.HTTPStatusError) as raised,
+    ):
+        _execute(
+            tree,
+            sync,
+            tuple(_reference(external_id=item) for item in (101, 102, 103)),
+            max_concurrent_repositories=1,
+        )
+
+    assert raised.value is failure
+    assert tree.started == [101, 102, 103]
+    assert [item.snapshot.external_id for item in sync.calls[0][1]] == [102, 103]
+    assert len(_warnings(caplog)) == 1
+
+
+def test_a_token_failure_of_the_label_request_is_not_fatal() -> None:
+    @dataclass
+    class TokenFailingLabels(FakeLabelProvider):
+        async def create_ai_review_label(
+            self, *, installation_external_id: int, repository: RepositorySnapshot
+        ) -> None:
+            await super().create_ai_review_label(
+                installation_external_id=installation_external_id, repository=repository
+            )
+            raise _token_failure()
+
+    labels = TokenFailingLabels()
+    tree = StartRecordingTree()
+    sync = FakeSyncInstallationRepositories()
+
+    _execute(
+        tree,
+        sync,
+        tuple(_reference(external_id=item) for item in (101, 102, 103)),
+        max_concurrent_repositories=1,
+        labels=labels,
+    )
+
+    assert tree.started == [101, 102, 103]
+    assert len(labels.calls) == 3
+    assert [item.snapshot.external_id for item in sync.calls[0][1]] == [101, 102, 103]
+
+
+def test_a_token_failure_is_logged_with_the_type_and_status_of_its_cause(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    tree = StartRecordingTree(errors={101: _token_failure(status=404)})
+
+    with (
+        caplog.at_level(logging.WARNING, logger=_PROJECTOR_LOGGER),
+        pytest.raises(InstallationAccessTokenError),
+    ):
+        _execute(
+            tree,
+            FakeSyncInstallationRepositories(),
+            (_reference(external_id=101),),
+            max_concurrent_repositories=1,
+        )
+
+    logged = _warnings(caplog)
+    assert len(logged) == 1
+    assert "error_type=HTTPStatusError" in logged[0]
+    assert "status_code=404" in logged[0]
+    assert "access_tokens" not in caplog.text

@@ -19,6 +19,9 @@ from app.modules.integrations.webhooks.application.github_installation_dispatch 
     InstallationDeliveryDispatchStatus,
     UnsupportedGitHubEvent,
 )
+from app.modules.integrations.webhooks.application.installation_access_token import (
+    InstallationAccessTokenError,
+)
 from app.modules.integrations.webhooks.application.installation_event_projector import (
     RepositoryDetailsUnavailableError,
 )
@@ -531,6 +534,66 @@ def test_any_other_onboarding_failure_still_propagates_instead_of_deferring(
         )
 
     assert raised.value is error
+
+
+def test_a_transient_installation_token_failure_defers_the_delivery_like_unreadable_details(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A token GitHub could not issue is a read it cannot answer: deferred, not failed."""
+    token_error = InstallationAccessTokenError(
+        "GitHub installation access token unavailable", transient=True
+    )
+    token_error.__cause__ = RuntimeError("SENTINEL-token-response")
+    dispatcher = GitHubInstallationDeliveryDispatcher(
+        resolver=FakeInstallationResolver(installations={17: uuid4()}),
+        onboarding=RaisingOnboarding(token_error),
+    )
+
+    with caplog.at_level(logging.WARNING, logger=_DISPATCHER_LOGGER):
+        result = asyncio.run(
+            GitHubWebhookDispatchAdapter(dispatcher).execute(_added_delivery().to_receipt())
+        )
+
+    assert result.status is InstallationDeliveryDispatchStatus.DEFERRED_REPOSITORY_DETAILS
+    warnings = [
+        record
+        for record in caplog.records
+        if record.name == _DISPATCHER_LOGGER and record.levelno == logging.WARNING
+    ]
+    assert [record.getMessage() for record in warnings] == [
+        "Repository details unavailable for installation 17: "
+        "GitHub installation access token unavailable"
+    ]
+    assert warnings[0].exc_info is None
+    for value in ("SENTINEL", "octo/api", "https://github.com/octo/api", "delivery-1"):
+        assert value not in caplog.text
+
+
+def test_a_permanent_installation_token_failure_still_propagates_instead_of_deferring(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A malformed token response or an unusable App key is permanent (api#71): failed path."""
+    token_error = InstallationAccessTokenError(
+        "GitHub installation access token unavailable", transient=False
+    )
+    token_error.__cause__ = ValueError("SENTINEL-token-response")
+    dispatcher = GitHubInstallationDeliveryDispatcher(
+        resolver=FakeInstallationResolver(installations={17: uuid4()}),
+        onboarding=RaisingOnboarding(token_error),
+    )
+
+    with (
+        caplog.at_level(logging.DEBUG),
+        pytest.raises(InstallationAccessTokenError) as raised,
+    ):
+        asyncio.run(
+            GitHubWebhookDispatchAdapter(dispatcher).execute(_added_delivery().to_receipt())
+        )
+
+    assert raised.value is token_error
+    assert [record for record in caplog.records if record.name == _DISPATCHER_LOGGER] == []
+    for value in ("SENTINEL", "octo/api", "https://github.com/octo/api", "delivery-1"):
+        assert value not in caplog.text
 
 
 def test_malformed_or_unsupported_delivery_is_ignored_before_lookup() -> None:

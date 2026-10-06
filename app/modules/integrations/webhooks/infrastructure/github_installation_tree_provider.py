@@ -15,6 +15,9 @@ from app.common.infrastructure.github_repository_path import (
     ref_segment,
     repository_path_from_full_name,
 )
+from app.modules.integrations.webhooks.application.installation_access_token import (
+    InstallationAccessTokenError,
+)
 from app.modules.repositories.application.installation_repositories import (
     RepositorySnapshot,
     RepositoryTreeBlob,
@@ -160,6 +163,30 @@ class GitHubAppInstallationAccessTokenProvider:
         if expires_at.timestamp() > self._now() + _INSTALLATION_TOKEN_SAFETY_SKEW_SECONDS:
             self._cache.set(installation_external_id, access_token, expires_at)
         return access_token
+
+
+class TokenErrorClassifyingProvider:
+    """Report any failure to obtain a token as ``InstallationAccessTokenError``.
+
+    The installation onboarding adapters use it so that the application layer can tell
+    a failure that concerns the whole installation from one that concerns a repository,
+    without knowing httpx. The original error stays the ``__cause__``; the text carries
+    no URL, body or token. Only an ``httpx.HTTPError`` (GitHub could not answer the
+    request) is transient; a malformed response or an App key that cannot sign is not.
+    Cancellation is not an ``Exception`` and passes through.
+    """
+
+    def __init__(self, inner: GitHubInstallationAccessTokenProvider) -> None:
+        self._inner = inner
+
+    async def get_installation_access_token(self, installation_external_id: int) -> str:
+        try:
+            return await self._inner.get_installation_access_token(installation_external_id)
+        except Exception as error:
+            raise InstallationAccessTokenError(
+                "GitHub installation access token unavailable",
+                transient=isinstance(error, httpx.HTTPError),
+            ) from error
 
 
 class StaticGitHubInstallationAccessTokenProvider:

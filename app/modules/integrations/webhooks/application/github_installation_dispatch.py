@@ -8,6 +8,9 @@ from enum import StrEnum
 from typing import Protocol
 from uuid import UUID
 
+from app.modules.integrations.webhooks.application.installation_access_token import (
+    InstallationAccessTokenError,
+)
 from app.modules.integrations.webhooks.application.installation_event_projector import (
     RepositoryDetailsUnavailableError,
 )
@@ -222,7 +225,11 @@ class GitHubInstallationDeliveryDispatcher:
                 provider_installation_id=provider_installation_id,
                 event=event,
             )
-        except RepositoryDetailsUnavailableError as error:
+        except (RepositoryDetailsUnavailableError, InstallationAccessTokenError) as error:
+            # A token GitHub could not issue is a read it cannot answer either: same deferral.
+            # A malformed token response or an unusable App key is permanent (api#71).
+            if isinstance(error, InstallationAccessTokenError) and not error.transient:
+                raise
             _LOGGER.warning(
                 "Repository details unavailable for installation %s: %s",
                 event.installation_external_id,
