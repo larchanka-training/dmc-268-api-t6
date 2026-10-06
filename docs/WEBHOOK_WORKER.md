@@ -36,7 +36,8 @@ eligibility and the no-CI sweep consider only open PRs (`docs/PIPELINE_SPEC.md` 
 `review_requested` and `review_request_removed` are dropped as irrelevant. A failed dispatch (for
 example a GitHub error or the 240 s dispatch timeout) releases the receipt for a retry after
 30 s; the third failure marks it failed and it is no longer replayed. It also projects
-installation events. A delivery for an unknown installation or repository is deferred, see
+installation events. A delivery for an unknown installation or repository, or for an
+installation event whose repository details GitHub cannot answer, is deferred instead, see
 "Deferred deliveries" below.
 
 Runs (T1, T6). Label, `synchronize`, `reopened`, `check_suite`, `workflow_run` and
@@ -53,25 +54,40 @@ Installation events. GitHub sends each repository of `installation.created`,
 `full_name` and `private` only. The parser requires `id` and `full_name` and ignores the
 rest; `default_branch` and `html_url` are used only when both are present. When either is
 missing, the worker reads both with `GET /repos/{full_name}` using the installation token
-before it fetches the tree, outside any database transaction; a response without a default
-branch or web URL is an error, never an empty value. A failed read follows the
-failed-dispatch path above (retry after 30 s, three attempts in total, then
-`projection_failed_at`). That is a residual risk: a receipt that failed for good is not
-replayed, and `wake_receipts` does not clear that mark. The event is handled all or
-nothing: one repository that keeps failing (a 404 after a rename or removal, for example)
-keeps every other repository of the same event from being stored. `deleted` and `removed`
+before it fetches the tree, outside any database transaction. A read that GitHub cannot
+answer (the token request or `GET /repos` fails with a network error, a timeout, a 404, a
+5xx or any other HTTP error status) defers the delivery like an unknown installation, see
+"Deferred deliveries" below, and logs a WARNING with the installation id and the HTTP
+status or exception class, never the URL or the token. A `GET /repos` answer that is HTTP
+200 but is not JSON or lacks the default branch or web URL (never stored as an empty value)
+and a malformed token response are not outages: they fail the dispatch (retry after 30 s,
+three attempts in total, then `projection_failed_at`, never replayed). The tree request is
+not part of this deferral; its failure still fails the dispatch, and so does the 240 s
+dispatch timeout, which a large installation event can exceed because its repositories are
+read one after another. The event is handled all or nothing: one repository that keeps
+failing (a 404 after a rename or removal, for example) keeps every other repository of the
+same event from being stored. `deleted` and `removed`
 make no GitHub request. An installation payload that fails validation is logged at WARNING
 (delivery, event, action, installation id, the total error count and the first ten failing
 field names and messages, never their values) and its receipt is marked projected, so it is
 not replayed.
 
 Deferred deliveries. A delivery the dispatcher cannot handle yet (unknown installation or
-repository, or an event without a handler) is retried after 5 minutes, at most three
-attempts in total, like a failed dispatch. After the third it is deferred for good
-(`projection_deferred_at`) and no longer retried. Linking the installation
-(`wake_receipts`) clears that mark and gives the deliveries of the installation a fresh
-attempt budget. Each sweep logs how many deliveries it handled and deferred, and every
-final deferral is logged with its reason.
+repository, an event without a handler, or an installation event whose repository details
+GitHub cannot answer) is retried after 5 minutes, at most three attempts in total, like a
+failed dispatch. Deferrals and failed dispatches draw on the same three attempts: two
+deferrals followed by one failed dispatch (a failing tree request, for example) mark the
+receipt failed. After the third deferral it is deferred for good (`projection_deferred_at`)
+and no longer retried. Linking the installation (`wake_receipts`, which runs at every GitHub
+login of a user whose token lists the installation) clears that mark and gives the
+deliveries of the installation a fresh attempt budget. Residual risk: only that login
+revives a deferred receipt, and every login revives it again, so a receipt that keeps
+failing (a repository that is gone) costs three more attempts per login; one nobody wakes is
+deleted 30 days after `projection_deferred_at` (see Retention). Its repositories are then
+stored only by a delivery with a new GUID, for example after removing and re-adding the
+repository in the installation settings; a redelivery of the same GUID is ignored as a
+duplicate. Each sweep logs how many deliveries it handled and deferred, and every final
+deferral is logged with its reason.
 
 Retention. Finished receipts (projected, failed or deferred for good) are deleted 30 days
 after they finished; the worker runs the purge once an hour.
