@@ -22,7 +22,7 @@ CONTRACTS_PATH = Path(__file__).parent / "fixtures" / "ui_zod_contracts.json"
 RUN_ID = UUID("11111111-1111-4111-8111-111111111111")
 # The ui commit the snapshot was generated from: regenerate after every ui contract change
 # (`DMC_268_UI_DIR=<ui checkout after pnpm install> node tests/generate_ui_zod_contracts.mjs`).
-UI_CONTRACT_COMMIT = "84686243b7054604f849344abcb53c7ddba18fe1"
+UI_CONTRACT_COMMIT = "fd4b5c8a8d3709fe5a4c69005b63e7fc99e4819f"
 
 
 class ContractRepository:
