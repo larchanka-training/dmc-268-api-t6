@@ -1226,22 +1226,23 @@ def test_without_a_classifier_only_a_timeout_has_a_category_of_its_own(
     assert uow.rows["unclassified-1"].retry_after == _NOW + timedelta(seconds=30)
 
 
-def test_error_class_without_a_module_is_internal_and_still_released_for_retry(
+def test_an_error_the_classifier_does_not_recognise_is_internal_and_still_released_for_retry(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    odd = type("OddError", (Exception,), {"__module__": None})
+    class UnrecognisedError(Exception):
+        """An error from none of the libraries the classifier knows."""
 
     uow = _dispatch_failure_run(
-        _pull_request_receipt("odd-1"), FailingTypedDispatcher(odd("boom")), caplog
+        _pull_request_receipt("odd-1"), FailingTypedDispatcher(UnrecognisedError("boom")), caplog
     )
 
     assert _failure_lines(caplog) == [
         "GitHub webhook delivery odd-1 event=pull_request action=labeled "
-        "failed stage=dispatch category=internal error=OddError"
+        "failed stage=dispatch category=internal error=UnrecognisedError"
     ]
     (traceback_record,) = _traceback_records(caplog)
     assert traceback_record.exc_info is not None
-    assert traceback_record.exc_info[0] is odd
+    assert traceback_record.exc_info[0] is UnrecognisedError
     assert uow.rows["odd-1"].retry_after == _NOW + timedelta(seconds=30)
 
 
