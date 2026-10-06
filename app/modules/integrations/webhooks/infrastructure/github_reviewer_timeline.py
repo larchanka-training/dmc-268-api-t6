@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 from typing import Literal, Protocol
-from urllib.parse import quote
 
 import httpx
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
 
+from app.common.infrastructure.github_repository_path import repository_path_from_full_name
 from app.modules.reviews.application.project_github_pull_request import (
     PullRequestEvent,
     ReviewerTimelineIntent,
@@ -57,12 +57,11 @@ class HttpGitHubReviewerTimelineProvider:
         full_name = event.repository_full_name
         if full_name is None:
             raise ValueError("GitHub repository name is required for timeline lookup")
-        owner, repo = full_name.split("/", 1)
+        repository_path = repository_path_from_full_name(full_name)
         token = await self._tokens.get_installation_access_token(event.installation_external_id)
         latest: ReviewerTimelineIntent | None = None
         lifecycle: TimelineLifecycle | None = None
         position = 0
-        repository_path = f"/repos/{quote(owner, safe='')}/{quote(repo, safe='')}"
         path = f"{repository_path}/issues/{event.number}/timeline"
         for page in range(1, 1001):
             response = await self._client.get(

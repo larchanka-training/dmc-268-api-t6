@@ -5,10 +5,10 @@ from __future__ import annotations
 import asyncio
 import time
 from collections.abc import Awaitable, Callable
-from urllib.parse import quote
 
 import httpx
 
+from app.common.infrastructure.github_repository_path import repository_path_from_full_name
 from app.modules.integrations.webhooks.infrastructure.github_installation_tree_provider import (
     GitHubInstallationAccessTokenProvider,
 )
@@ -51,11 +51,11 @@ class GitHubRepositoryLabelProvider:
     async def create_ai_review_label(
         self, *, installation_external_id: int, repository: RepositorySnapshot
     ) -> None:
+        repository_path = repository_path_from_full_name(repository.full_name)
         token = await self._token_provider.get_installation_access_token(installation_external_id)
         await self._wait_for_post_slot()
-        repository_name = quote(repository.full_name, safe="/")
         response = await self._client.post(
-            f"/repos/{repository_name}/labels",
+            f"{repository_path}/labels",
             json={"name": "ai-review"},
             headers={
                 "Accept": "application/vnd.github+json",

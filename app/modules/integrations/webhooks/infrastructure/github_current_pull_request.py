@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 from typing import Protocol
-from urllib.parse import quote
 
 import httpx
 
+from app.common.infrastructure.github_repository_path import repository_path_from_full_name
 from app.modules.integrations.webhooks.infrastructure.github_pull_request_dtos import (
     parse_current_pull_request,
 )
@@ -33,10 +33,10 @@ class HttpGitHubCurrentPullRequestProvider:
         full_name = event.repository_full_name
         if full_name is None:
             raise ValueError("GitHub repository name is required for current PR lookup")
-        owner, repo = full_name.split("/", 1)
+        repository_path = repository_path_from_full_name(full_name)
         token = await self._tokens.get_installation_access_token(event.installation_external_id)
         response = await self._client.get(
-            f"/repos/{quote(owner, safe='')}/{quote(repo, safe='')}/pulls/{event.number}",
+            f"{repository_path}/pulls/{event.number}",
             headers={
                 "Accept": "application/vnd.github+json",
                 "Authorization": f"Bearer {token}",
