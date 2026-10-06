@@ -434,7 +434,8 @@ enabled after it was removed from the installation (a private one answers 404 an
 deferred); the 5-minute retries and `wake_receipts` already had this gap. Outside the 7-day
 window only a login or a delivery with a new GUID revives a receipt, and one nobody revives
 is deleted 30 days after its last `projection_deferred_at` (see Retention). Its repositories
-are then stored only by a delivery with a new GUID, for example after removing and re-adding
+that no earlier attempt saved are then stored only by a delivery with a new GUID, for example
+after removing and re-adding
 the repository in the installation settings; a redelivery of the same GUID is ignored as a
 duplicate. Each sweep logs how many deliveries it handled, deferred and deferred for good
 (`GitHub webhook sweep: N handled, M deferred, K deferred for good`). K counts the final
