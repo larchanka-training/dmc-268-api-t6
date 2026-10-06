@@ -10,6 +10,7 @@ import json
 import logging
 import re
 from collections.abc import Callable
+from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -39,6 +40,7 @@ from app.modules.reviews.application.prompt_builder import (
     parse_unified_diff,
 )
 from app.modules.reviews.application.review_output import ReviewOutput, parse_review_output
+from app.modules.reviews.infrastructure.llm.ecb_fx import EcbFxQuoteCache, FxQuote, FxQuoteResult
 from app.modules.reviews.infrastructure.llm.gateway import (
     GatewayResult,
     HeuristicTokenCounter,
@@ -58,9 +60,12 @@ from app.modules.reviews.infrastructure.llm.settings import (
     LlmSettings,
     ModelPrice,
     ModelProfile,
+    price_at_eur_quote,
 )
 from app.modules.reviews.infrastructure.llm.transport import (
     ChatMessage,
+    ChatRequest,
+    ChatResponse,
     OpenAICompatibleTransport,
     ResponseSchema,
 )
@@ -140,6 +145,7 @@ def completion(
     completion_tokens: int = 300,
     cached_tokens: int = 0,
     cost: float | None = None,
+    cost_currency: str | None = None,
     finish_reason: str = "stop",
 ) -> httpx.Response:
     usage: dict[str, Any] = {
@@ -150,6 +156,8 @@ def completion(
     }
     if cost is not None:
         usage["cost"] = cost
+    if cost_currency is not None:
+        usage["cost_currency"] = cost_currency
     return httpx.Response(
         200,
         json={
@@ -198,6 +206,17 @@ class FakeClock:
         self.ticks += seconds
 
 
+@dataclass(frozen=True)
+class FixedFxProvider:
+    rate: Decimal
+
+    async def get_quote(self) -> FxQuoteResult:
+        return FxQuoteResult(
+            FxQuote(self.rate, NOW.date(), "EXR.D.USD.EUR.SP00.A", NOW),
+            stale_cache=False,
+        )
+
+
 @dataclass
 class Harness:
     replies: list[Reply]
@@ -205,18 +224,20 @@ class Harness:
     fallback: ModelProfile | None = FALLBACK
     deadline_in_s: float = 480
     engine: str = "fast"
+    attempt: int = 2
     clock: FakeClock = field(default_factory=FakeClock)
     ledger: InMemoryUsageLedger = field(default_factory=InMemoryUsageLedger)
     trace: InMemoryLlmCallTrace = field(default_factory=InMemoryLlmCallTrace)
     requests: list[httpx.Request] = field(default_factory=list)
     settings: LlmSettings | None = None
+    fx_provider: Any = None
 
     @property
     def run(self) -> RunCallContext:
         return RunCallContext(
             run_id=RUN_ID,
             workspace_id=WORKSPACE_ID,
-            attempt=2,
+            attempt=self.attempt,
             engine="deep" if self.engine == "deep" else "fast",
             deadline=NOW + timedelta(seconds=self.deadline_in_s),
             prompt_version_id=PROMPT_VERSION_ID,
@@ -245,6 +266,7 @@ class Harness:
             sleep=self.clock.sleep,
             jitter=lambda: 0.25,
             monotonic=self.clock.monotonic,
+            fx_provider=self.fx_provider,
         )
 
     async def _review(self, context: ReviewContext) -> GatewayResult:
@@ -288,7 +310,11 @@ def test_eurouter_is_selected_by_configuration_only() -> None:
             "LLM_FALLBACK_MODEL": "mistral-small-3.2-24b",
         }
     )
-    harness = Harness([valid(model="mistral/mistral-small-4")], settings=settings)
+    harness = Harness(
+        [valid(model="mistral/mistral-small-4")],
+        settings=settings,
+        fx_provider=FixedFxProvider(Decimal("1.1204")),
+    )
 
     result = harness.review()
 
@@ -331,13 +357,206 @@ def test_oq2_pair_keeps_the_sd15_catalog_prices_and_windows() -> None:
 
     primary, fallback = settings.primary, settings.fallback
     assert fallback is not None
-    assert primary.price == ModelPrice(Decimal("0.165"), Decimal("0.66"), Decimal("0.0165"))
+    assert primary.price == ModelPrice(Decimal("0.56125"), Decimal("2.35725"), Decimal("0.56125"))
     assert primary.context_window == 262_144
     assert fallback.price == ModelPrice(Decimal("0.2245"), Decimal("0.449"), Decimal("0.2245"))
     assert fallback.context_window == 128_000
     # one maximal fast call: SD §13 60 000 - 8 000 reserved = 52 000 in + 8 000 out
-    assert primary.price.cost_usd(tokens_in=52_000, tokens_out=8_000) == Decimal("0.01386")
+    assert primary.price.cost_usd(tokens_in=52_000, tokens_out=8_000) == Decimal("0.048043")
     assert fallback.price.cost_usd(tokens_in=52_000, tokens_out=8_000) == Decimal("0.015266")
+
+
+@pytest.mark.parametrize(
+    ("rate", "primary_price", "fallback_price", "primary_call_usd", "fallback_call_usd"),
+    [
+        (
+            "1.1204",
+            ModelPrice(Decimal("0.56125"), Decimal("2.35725"), Decimal("0.56125")),
+            ModelPrice(Decimal("0.2245"), Decimal("0.449"), Decimal("0.2245")),
+            Decimal("0.048043"),
+            Decimal("0.015266"),
+        ),
+        (
+            "1.1225",
+            ModelPrice(Decimal("0.56125"), Decimal("2.35725"), Decimal("0.56125")),
+            ModelPrice(Decimal("0.2245"), Decimal("0.449"), Decimal("0.2245")),
+            Decimal("0.048043"),
+            Decimal("0.015266"),
+        ),
+        (
+            "1.20",
+            ModelPrice(Decimal("0.60"), Decimal("2.520"), Decimal("0.60")),
+            ModelPrice(Decimal("0.240"), Decimal("0.480"), Decimal("0.240")),
+            Decimal("0.051360"),
+            Decimal("0.016320"),
+        ),
+    ],
+)
+def test_known_eurouter_prices_cover_eur_routes_at_the_fetched_quote(
+    rate: str,
+    primary_price: ModelPrice,
+    fallback_price: ModelPrice,
+    primary_call_usd: Decimal,
+    fallback_call_usd: Decimal,
+) -> None:
+    settings = LlmSettings.from_env(
+        {
+            "LLM_MODEL": "mistral-small-4",
+            "LLM_API_KEYS": "sk-eu-1",
+            "LLM_FALLBACK_MODEL": "mistral-small-3.2-24b",
+        }
+    )
+
+    priced_primary = price_at_eur_quote(settings.primary, Decimal(rate))
+    assert priced_primary == primary_price
+    assert priced_primary.cost_usd(tokens_in=52_000, tokens_out=8_000) == primary_call_usd
+    assert settings.fallback is not None
+    priced_fallback = price_at_eur_quote(settings.fallback, Decimal(rate))
+    assert priced_fallback == fallback_price
+    assert priced_fallback.cost_usd(tokens_in=52_000, tokens_out=8_000) == fallback_call_usd
+
+
+def test_equivalent_eurouter_url_keeps_the_rate_aware_floor_and_provider() -> None:
+    settings = LlmSettings.from_env(
+        {
+            "LLM_MODEL": "mistral-small-4",
+            "LLM_BASE_URL": "HTTPS://API.EUROUTER.AI:443/api/v1/",
+            "LLM_API_KEYS": "sk-eu-1",
+        }
+    )
+
+    assert settings.primary.provider == "eurouter"
+    assert price_at_eur_quote(settings.primary, Decimal("1.20")) == ModelPrice(
+        Decimal("0.60"), Decimal("2.520"), Decimal("0.60")
+    )
+
+
+def test_fallback_inherits_keys_across_equivalent_eurouter_urls() -> None:
+    settings = LlmSettings.from_env(
+        {
+            "LLM_MODEL": "mistral-small-4",
+            "LLM_BASE_URL": "https://API.EUROUTER.AI:443/api/v1",
+            "LLM_API_KEYS": "sk-eu-1",
+            "LLM_FALLBACK_MODEL": "mistral-small-3.2-24b",
+        }
+    )
+
+    assert settings.fallback is not None
+    assert settings.fallback.api_keys == ("sk-eu-1",)
+    assert price_at_eur_quote(settings.fallback, Decimal("1.20")) == ModelPrice(
+        Decimal("0.240"), Decimal("0.480"), Decimal("0.240")
+    )
+
+
+def test_eurouter_host_with_unrecognized_path_cannot_bypass_the_price_floor() -> None:
+    with pytest.raises(LlmConfigError, match="LLM_BASE_URL"):
+        LlmSettings.from_env(
+            {
+                "LLM_MODEL": "mistral-small-4",
+                "LLM_BASE_URL": "https://api.eurouter.ai/api/%76%31",
+                "LLM_API_KEYS": "sk-eu-1",
+                "LLM_EUR_TO_USD_RATE": "1.20",
+            }
+        )
+
+
+@pytest.mark.parametrize("prefix", ["LLM_", "LLM_FALLBACK_"])
+def test_unicode_dot_eurouter_host_cannot_bypass_the_price_floor(prefix: str) -> None:
+    env = {
+        "LLM_MODEL": "mistral-small-4",
+        "LLM_API_KEYS": "sk-eu-1",
+        "LLM_EUR_TO_USD_RATE": "1.20",
+        f"{prefix}BASE_URL": "https://api.eurouter.ai。/api/v1",
+        f"{prefix}PRICE_INPUT_PER_MTOK": "0.01",
+        f"{prefix}PRICE_OUTPUT_PER_MTOK": "0.01",
+    }
+    if prefix == "LLM_FALLBACK_":
+        env["LLM_FALLBACK_MODEL"] = "mistral-small-3.2-24b"
+        env["LLM_FALLBACK_API_KEYS"] = "sk-eu-2"
+
+    with pytest.raises(LlmConfigError, match=f"{prefix}BASE_URL"):
+        LlmSettings.from_env(env)
+
+
+def test_large_representable_rate_can_price_a_known_route() -> None:
+    settings = LlmSettings.from_env(
+        {
+            "LLM_MODEL": "mistral-small-4",
+            "LLM_API_KEYS": "sk-eu-1",
+        }
+    )
+
+    assert price_at_eur_quote(settings.primary, Decimal("1e20")).cost_usd(
+        tokens_in=52_000, tokens_out=8_000
+    ) == Decimal("4280000000000000000.000000")
+
+
+def test_unquantizable_quote_is_rejected_before_gateway_start() -> None:
+    settings = LlmSettings.from_env({"LLM_MODEL": "mistral-small-4", "LLM_API_KEYS": "sk-eu-1"})
+    with pytest.raises(LlmConfigError, match="ECB EUR/USD"):
+        price_at_eur_quote(settings.primary, Decimal("1e30"))
+
+
+def test_known_eurouter_price_floor_survives_lower_env_overrides() -> None:
+    settings = LlmSettings.from_env(
+        {
+            "LLM_MODEL": "mistral-small-4",
+            "LLM_API_KEYS": "sk-eu-1",
+            "LLM_FALLBACK_MODEL": "mistral-small-3.2-24b",
+            "LLM_PRICE_INPUT_PER_MTOK": "0.01",
+            "LLM_PRICE_OUTPUT_PER_MTOK": "0.01",
+            "LLM_PRICE_CACHE_READ_PER_MTOK": "0.01",
+            "LLM_FALLBACK_PRICE_INPUT_PER_MTOK": "0.01",
+            "LLM_FALLBACK_PRICE_OUTPUT_PER_MTOK": "0.01",
+            "LLM_FALLBACK_PRICE_CACHE_READ_PER_MTOK": "0.01",
+        }
+    )
+
+    assert price_at_eur_quote(settings.primary, Decimal("1.20")) == ModelPrice(
+        Decimal("0.60"), Decimal("2.520"), Decimal("0.60")
+    )
+    assert settings.fallback is not None
+    assert price_at_eur_quote(settings.fallback, Decimal("1.20")) == ModelPrice(
+        Decimal("0.240"), Decimal("0.480"), Decimal("0.240")
+    )
+
+
+def test_known_route_cache_reads_use_the_effective_input_price() -> None:
+    settings = LlmSettings.from_env(
+        {
+            "LLM_MODEL": "mistral-small-4",
+            "LLM_API_KEYS": "sk-eu-1",
+            "LLM_FALLBACK_MODEL": "mistral-small-3.2-24b",
+            "LLM_PRICE_INPUT_PER_MTOK": "0.70",
+            "LLM_PRICE_CACHE_READ_PER_MTOK": "0.01",
+            "LLM_FALLBACK_PRICE_INPUT_PER_MTOK": "0.30",
+            "LLM_FALLBACK_PRICE_CACHE_READ_PER_MTOK": "0.01",
+        }
+    )
+
+    assert price_at_eur_quote(settings.primary, Decimal("1.20")) == ModelPrice(
+        Decimal("0.70"), Decimal("2.520"), Decimal("0.70")
+    )
+    assert settings.fallback is not None
+    assert price_at_eur_quote(settings.fallback, Decimal("1.20")) == ModelPrice(
+        Decimal("0.30"), Decimal("0.480"), Decimal("0.30")
+    )
+
+
+def test_custom_endpoint_keeps_its_explicit_price_for_a_known_model() -> None:
+    settings = LlmSettings.from_env(
+        {
+            "LLM_MODEL": "mistral-small-4",
+            "LLM_BASE_URL": "https://custom.test/v1",
+            "LLM_API_KEYS": "sk-custom",
+            "LLM_EUR_TO_USD_RATE": "1.20",
+            "LLM_PRICE_INPUT_PER_MTOK": "0.1",
+            "LLM_PRICE_OUTPUT_PER_MTOK": "0.2",
+            "LLM_PRICE_CACHE_READ_PER_MTOK": "0.05",
+        }
+    )
+
+    assert settings.primary.price == ModelPrice(Decimal("0.1"), Decimal("0.2"), Decimal("0.05"))
 
 
 def test_self_hosted_is_selected_by_configuration_only_with_prompt_json() -> None:
@@ -532,11 +751,11 @@ def test_extra_body_and_overrides_reach_the_request() -> None:
             "LLM_MODEL": "mistral-small-4",
             "LLM_API_KEYS": "sk-eu-1",
             "LLM_MAX_OUTPUT_TOKENS": "4000",
-            "LLM_PRICE_INPUT_PER_MTOK": "0.5",
+            "LLM_PRICE_INPUT_PER_MTOK": "0.7",
             "LLM_EXTRA_BODY": '{"provider": {"allow_fallbacks": false}}',
         }
     )
-    harness = Harness([valid()], settings=settings)
+    harness = Harness([valid()], settings=settings, fx_provider=FixedFxProvider(Decimal("1.1204")))
 
     harness.review()
 
@@ -544,7 +763,7 @@ def test_extra_body_and_overrides_reach_the_request() -> None:
     assert body["provider"] == {"allow_fallbacks": False}
     assert body["max_tokens"] == 4000
     assert body["temperature"] == 0
-    assert settings.primary.price.input_per_mtok == Decimal("0.5")
+    assert settings.primary.price.input_per_mtok == Decimal("0.7")
 
 
 def test_extra_body_overrides_sampling_defaults_but_not_model_messages_or_schema() -> None:
@@ -1236,13 +1455,25 @@ def test_run_cost_limit_boundary(spent: str, calls: int) -> None:
 
 @pytest.mark.parametrize(("over", "calls"), [(Decimal(0), 1), (Decimal("0.000001"), 0)])
 def test_run_cost_limit_boundary_at_the_oq2_primary_price(over: Decimal, calls: int) -> None:
-    settings = LlmSettings.from_env({"LLM_MODEL": "mistral-small-4", "LLM_API_KEYS": "sk-eu-1"})
+    settings = LlmSettings.from_env(
+        {
+            "LLM_MODEL": "mistral-small-4",
+            "LLM_API_KEYS": "sk-eu-1",
+            "LLM_EUR_TO_USD_RATE": "1.20",
+        }
+    )
     primary = settings.primary
     # the gateway's own pre-call estimate: gateway.token_counter(primary) over both messages
     estimate = prompt_tokens(CONTEXT, HeuristicTokenCounter(primary.chars_per_token))
-    next_cost = primary.price.cost_usd(tokens_in=estimate, tokens_out=primary.max_output_tokens)
+    next_cost = price_at_eur_quote(primary, Decimal("1.20")).cost_usd(
+        tokens_in=estimate, tokens_out=primary.max_output_tokens
+    )
     spent = settings.policy.run_cost_limit_usd["fast"] - next_cost + over
-    harness = Harness([valid(model="mistral/mistral-small-4")], settings=settings)
+    harness = Harness(
+        [valid(model="mistral/mistral-small-4")],
+        settings=settings,
+        fx_provider=FixedFxProvider(Decimal("1.20")),
+    )
     asyncio.run(
         harness.ledger.record(
             harness.run, LlmUsage("eurouter", "mistral-small-4", "review", 1, 1, 0, spent)
@@ -1254,6 +1485,38 @@ def test_run_cost_limit_boundary_at_the_oq2_primary_price(over: Decimal, calls: 
     else:
         assert harness.failure().error_code is LlmErrorCode.BUDGET_EXCEEDED
     assert len(harness.requests) == calls
+
+
+@pytest.mark.parametrize("base_url", [None, "HTTPS://API.EUROUTER.AI:443/api/v1/"])
+def test_regolo_price_at_higher_fx_rejects_a_maximal_fast_call_before_request(
+    base_url: str | None,
+) -> None:
+    settings = LlmSettings.from_env(
+        {
+            "LLM_MODEL": "mistral-small-4",
+            "LLM_API_KEYS": "sk-eu-1",
+            "LLM_EUR_TO_USD_RATE": "1.20",
+            **({"LLM_BASE_URL": base_url} if base_url is not None else {}),
+        }
+    )
+    harness = Harness(
+        [completion("{}")], settings=settings, fx_provider=FixedFxProvider(Decimal("1.20"))
+    )
+    asyncio.run(
+        harness.ledger.record(
+            harness.run,
+            LlmUsage("eurouter", "mistral-small-4", "review", 1, 1, 0, Decimal("0.450000")),
+        )
+    )
+
+    # Regolo: 52k × €0.50/M + 8k × €2.10/M = €0.0428; at 1.20 this is $0.05136.
+    # The historical 1.1225 floor would admit the call ($0.450000 + $0.048043).
+    with pytest.raises(LlmCallFailed) as caught:
+        asyncio.run(_generate(harness, 52_000 * 3))
+
+    assert caught.value.error_code is LlmErrorCode.BUDGET_EXCEEDED
+    assert caught.value.calls == 0
+    assert harness.requests == []
 
 
 def test_review_adapter_fits_a_diff_larger_than_the_budget() -> None:
@@ -1341,11 +1604,14 @@ def test_a_rate_limited_key_outranks_a_rejected_one() -> None:
     assert (first["class"], first["http_status"]) == ("llm_rate_limited", 429)
 
 
-def test_an_answer_without_usage_is_charged_by_the_estimate() -> None:
-    body = {
+@pytest.mark.parametrize("empty_usage", [False, True])
+def test_an_answer_without_usage_is_charged_by_the_estimate(empty_usage: bool) -> None:
+    body: dict[str, Any] = {
         "model": "local",
         "choices": [{"message": {"content": json.dumps(VALID_OUTPUT)}, "finish_reason": "stop"}],
     }
+    if empty_usage:
+        body["usage"] = {}
     primary = replace(PRIMARY, price=ModelPrice(Decimal(1), Decimal(1)))
     harness = Harness([httpx.Response(200, json=body)], primary=primary)
 
@@ -1378,6 +1644,895 @@ def test_a_failed_trace_write_does_not_discard_the_answer(
 
 
 # ---------- usage and trace ----------
+
+
+def test_known_eurouter_quote_precedes_ledger_and_prices_paid_eur_answer() -> None:
+    events: list[str] = []
+    quote = FxQuote(Decimal("1.20"), NOW.date(), "EXR.D.USD.EUR.SP00.A", NOW)
+
+    class QuoteProvider:
+        async def get_quote(self) -> FxQuoteResult:
+            events.append("fx")
+            return FxQuoteResult(quote, stale_cache=False)
+
+    class Ledger(InMemoryUsageLedger):
+        async def run_cost_usd(self, run_id: UUID) -> Decimal:
+            events.append("ledger")
+            return await super().run_cost_usd(run_id)
+
+    def provider_request(_: httpx.Request) -> httpx.Response:
+        events.append("provider")
+        return valid(cost=0.125, cost_currency="EUR")
+
+    settings = LlmSettings.from_env({"LLM_MODEL": "mistral-small-4", "LLM_API_KEYS": "sk"})
+    harness = Harness(
+        [provider_request], settings=settings, fx_provider=QuoteProvider(), ledger=Ledger()
+    )
+
+    result = harness.review()
+
+    assert events == ["fx", "ledger", "provider"]
+    assert result.usage[0].cost_usd == Decimal("0.150000")
+    assert harness.ledger.events[0][1].cost_usd == Decimal("0.150000")
+
+
+def test_stale_ecb_quote_is_traced_with_exact_paid_eur_answer() -> None:
+    quote = FxQuote(Decimal("1.20"), NOW.date(), "EXR.D.USD.EUR.SP00.A", NOW)
+
+    class StaleFx:
+        async def get_quote(self) -> FxQuoteResult:
+            return FxQuoteResult(quote, stale_cache=True)
+
+    settings = LlmSettings.from_env({"LLM_MODEL": "mistral-small-4", "LLM_API_KEYS": "sk"})
+    harness = Harness(
+        [valid(cost=0.125, cost_currency="EUR")],
+        settings=settings,
+        fx_provider=StaleFx(),
+    )
+
+    result = harness.review()
+
+    record = harness.trace.records[0][1]
+    assert record.request_json()["fx"] == {
+        "source": "EXR.D.USD.EUR.SP00.A",
+        "observation_date": NOW.date().isoformat(),
+        "rate_usd_per_eur": "1.20",
+        "stale_cache": True,
+    }
+    assert record.response_json()["usage"]["cost"] == 0.125
+    assert record.response_json()["usage"]["cost_currency"] == "EUR"
+    assert result.usage[0].cost_usd == Decimal("0.150000")
+
+
+def test_known_eurouter_transport_failure_still_traces_quote_without_credentials() -> None:
+    class FixedFx:
+        async def get_quote(self) -> FxQuoteResult:
+            return FxQuoteResult(
+                FxQuote(Decimal("1.20"), NOW.date(), "EXR.D.USD.EUR.SP00.A", NOW),
+                stale_cache=False,
+            )
+
+    settings = LlmSettings.from_env({"LLM_MODEL": "mistral-small-4", "LLM_API_KEYS": "sk-secret"})
+    harness = Harness([error(400, "bad request")], settings=settings, fx_provider=FixedFx())
+
+    harness.failure()
+
+    record = harness.trace.records[0][1]
+    metadata = record.request_json()
+    assert metadata["fx"] == {
+        "source": "EXR.D.USD.EUR.SP00.A",
+        "observation_date": NOW.date().isoformat(),
+        "rate_usd_per_eur": "1.20",
+        "stale_cache": False,
+    }
+    assert "sk-secret" not in json.dumps(metadata)
+    assert "SYSTEM PROMPT" not in json.dumps(metadata)
+    assert record.response_json()["error"]["http_status"] == 400
+
+
+def test_known_eurouter_without_usable_quote_fails_before_ledger_or_provider() -> None:
+    class UnavailableFx:
+        async def get_quote(self) -> FxQuoteResult:
+            return FxQuoteResult(None, stale_cache=False)
+
+    class Ledger(InMemoryUsageLedger):
+        async def run_cost_usd(self, run_id: UUID) -> Decimal:
+            raise AssertionError("ledger was opened before ECB quote")
+
+    settings = LlmSettings.from_env(
+        {"LLM_MODEL": "mistral-small-4", "LLM_API_KEYS": "sk", "LLM_EUR_TO_USD_RATE": "1.20"}
+    )
+    harness = Harness([valid()], settings=settings, fx_provider=UnavailableFx(), ledger=Ledger())
+
+    failure = harness.failure()
+
+    assert failure.error_code is LlmErrorCode.UNAVAILABLE
+    assert failure.run_retryable
+    assert failure.calls == 0
+    assert failure.usage == ()
+    assert harness.requests == []
+    assert harness.trace.records == []
+
+
+def test_known_eurouter_cannot_call_provider_with_only_static_rate() -> None:
+    settings = LlmSettings.from_env(
+        {"LLM_MODEL": "mistral-small-4", "LLM_API_KEYS": "sk", "LLM_EUR_TO_USD_RATE": "1.20"}
+    )
+    harness = Harness([valid()], settings=settings, fx_provider=None)
+
+    failure = harness.failure()
+
+    assert failure.error_code is LlmErrorCode.UNAVAILABLE
+    assert failure.calls == 0
+    assert harness.requests == []
+
+
+def test_known_eurouter_uses_quote_not_stale_env_rate_at_budget_boundary() -> None:
+    settings = LlmSettings.from_env(
+        {
+            "LLM_MODEL": "mistral-small-4",
+            "LLM_API_KEYS": "sk",
+            "LLM_EUR_TO_USD_RATE": "1.1204",
+        }
+    )
+    harness = Harness(
+        [completion("{}")], settings=settings, fx_provider=FixedFxProvider(Decimal("1.20"))
+    )
+    asyncio.run(
+        harness.ledger.record(
+            harness.run,
+            LlmUsage("eurouter", "mistral-small-4", "review", 1, 1, 0, Decimal("0.450000")),
+        )
+    )
+
+    with pytest.raises(LlmCallFailed) as caught:
+        asyncio.run(_generate(harness, 52_000 * 3))
+
+    assert caught.value.error_code is LlmErrorCode.BUDGET_EXCEEDED
+    assert caught.value.calls == 0
+    assert harness.requests == []
+    assert Decimal("0.450000") + Decimal("0.051360") > Decimal("0.50")
+
+
+def test_known_eurouter_lower_quote_does_not_keep_higher_static_env_price() -> None:
+    settings = LlmSettings.from_env(
+        {
+            "LLM_MODEL": "mistral-small-4",
+            "LLM_API_KEYS": "sk",
+            "LLM_EUR_TO_USD_RATE": "1.20",
+        }
+    )
+    harness = Harness([valid()], settings=settings, fx_provider=FixedFxProvider(Decimal("1.00")))
+    asyncio.run(
+        harness.ledger.record(
+            harness.run,
+            LlmUsage("eurouter", "mistral-small-4", "review", 1, 1, 0, Decimal("0.450000")),
+        )
+    )
+
+    result = asyncio.run(_generate(harness, 52_000 * 3))
+
+    assert result.calls == 1
+    assert len(harness.requests) == 1
+    assert Decimal("0.450000") + Decimal("0.048043") <= Decimal("0.50")
+
+
+def test_known_eurouter_freezes_one_quote_for_paid_answer() -> None:
+    first = FxQuote(Decimal("1.20"), NOW.date(), "EXR.D.USD.EUR.SP00.A", NOW)
+    second = FxQuote(Decimal("1.25"), NOW.date(), "EXR.D.USD.EUR.SP00.A", NOW)
+
+    class ChangingFx:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def get_quote(self) -> FxQuoteResult:
+            self.calls += 1
+            return FxQuoteResult(first if self.calls == 1 else second, stale_cache=False)
+
+    fx = ChangingFx()
+    settings = LlmSettings.from_env({"LLM_MODEL": "mistral-small-4", "LLM_API_KEYS": "sk"})
+    harness = Harness([valid(cost=0.125, cost_currency="EUR")], settings=settings, fx_provider=fx)
+
+    result = harness.review()
+
+    assert fx.calls == 1
+    assert result.usage[0].cost_usd == Decimal("0.150000")
+    assert harness.trace.records[0][1].request_json()["fx"] == {
+        "source": "EXR.D.USD.EUR.SP00.A",
+        "observation_date": NOW.date().isoformat(),
+        "rate_usd_per_eur": "1.20",
+        "stale_cache": False,
+    }
+
+
+def test_paid_answer_keeps_its_quote_during_concurrent_cache_refresh() -> None:
+    first = FxQuote(Decimal("1.20"), NOW.date(), "EXR.D.USD.EUR.SP00.A", NOW)
+    second = FxQuote(Decimal("1.30"), NOW.date(), "EXR.D.USD.EUR.SP00.A", NOW)
+    monotonic_time = 100.0
+    fetches = 0
+
+    class Fetcher:
+        async def fetch_latest(self) -> FxQuote:
+            nonlocal fetches
+            fetches += 1
+            return first if fetches == 1 else second
+
+    cache = EcbFxQuoteCache(
+        Fetcher(), wall_clock=lambda: NOW, monotonic_clock=lambda: monotonic_time
+    )
+    settings = LlmSettings.from_env({"LLM_MODEL": "mistral-small-4", "LLM_API_KEYS": "sk"})
+    harness = Harness([valid(cost=0.125, cost_currency="EUR")], settings=settings)
+
+    async def exercise() -> GatewayResult:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(harness._handle)) as client:
+            inner = OpenAICompatibleTransport(client)
+
+            class RefreshingTransport:
+                async def complete(self, request: ChatRequest) -> ChatResponse:
+                    nonlocal monotonic_time
+                    response = await inner.complete(request)
+                    monotonic_time += 3600
+                    assert (await cache.get_quote()).quote is second
+                    return response
+
+            gateway = LlmGateway(
+                settings,
+                RefreshingTransport(),
+                harness.ledger,
+                harness.trace,
+                clock=harness.clock,
+                monotonic=harness.clock.monotonic,
+                fx_provider=cache,
+            )
+            model = GatewayReviewModel(gateway, harness.run, _NoMeta())
+            await model.draft_review(context=CONTEXT)
+            assert model.last_result is not None
+            return model.last_result
+
+    result = asyncio.run(exercise())
+
+    assert fetches == 2
+    assert result.usage[0].cost_usd == Decimal("0.150000")
+
+
+def test_fallback_gets_its_own_quote_and_paid_cost_blocks_later_attempt() -> None:
+    class ChangingFx:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def get_quote(self) -> FxQuoteResult:
+            self.calls += 1
+            rate = Decimal("1.20") if self.calls == 1 else Decimal("1.25")
+            return FxQuoteResult(
+                FxQuote(rate, NOW.date(), "EXR.D.USD.EUR.SP00.A", NOW),
+                stale_cache=False,
+            )
+
+    settings = LlmSettings.from_env(
+        {
+            "LLM_MODEL": "mistral-small-4",
+            "LLM_API_KEYS": "sk",
+            "LLM_FALLBACK_MODEL": "mistral-small-3.2-24b",
+        }
+    )
+    fx = ChangingFx()
+    harness = Harness(
+        [error(401), valid(cost=0.445, cost_currency="EUR")],
+        settings=settings,
+        fx_provider=fx,
+    )
+
+    first = harness.review()
+    harness.attempt = 3
+    failure = harness.failure()
+
+    assert first.calls == 2
+    assert first.usage[0].cost_usd == Decimal("0.556250")
+    assert failure.error_code is LlmErrorCode.BUDGET_EXCEEDED
+    assert failure.calls == 0
+    assert len(harness.requests) == 2
+    assert fx.calls == 3
+
+
+def test_known_eurouter_rechecks_deadline_after_fx_wait() -> None:
+    clock = FakeClock()
+
+    class SlowFx:
+        async def get_quote(self) -> FxQuoteResult:
+            clock.current += timedelta(seconds=400)
+            return FxQuoteResult(
+                FxQuote(Decimal("1.20"), NOW.date(), "EXR.D.USD.EUR.SP00.A", NOW),
+                stale_cache=False,
+            )
+
+    settings = LlmSettings.from_env({"LLM_MODEL": "mistral-small-4", "LLM_API_KEYS": "sk"})
+    harness = Harness([valid()], settings=settings, fx_provider=SlowFx(), clock=clock)
+
+    failure = harness.failure()
+
+    assert failure.error_code is LlmErrorCode.DEADLINE_EXCEEDED
+    assert failure.calls == 0
+    assert harness.requests == []
+    assert harness.ledger.events == []
+
+
+def test_gateway_rechecks_deadline_after_ledger_read_before_provider() -> None:
+    clock = FakeClock()
+
+    class SlowLedger(InMemoryUsageLedger):
+        async def run_cost_usd(self, run_id: UUID) -> Decimal:
+            clock.current += timedelta(seconds=400)
+            return await super().run_cost_usd(run_id)
+
+    settings = LlmSettings.from_env({"LLM_MODEL": "mistral-small-4", "LLM_API_KEYS": "sk"})
+    harness = Harness(
+        [valid()],
+        settings=settings,
+        fx_provider=FixedFxProvider(Decimal("1.20")),
+        clock=clock,
+        ledger=SlowLedger(),
+    )
+
+    failure = harness.failure()
+
+    assert failure.error_code is LlmErrorCode.DEADLINE_EXCEEDED
+    assert failure.calls == 0
+    assert harness.requests == []
+
+
+def test_unknown_endpoint_paid_eur_with_unavailable_fx_keeps_trace_and_estimate() -> None:
+    class UnavailableFx:
+        async def get_quote(self) -> FxQuoteResult:
+            return FxQuoteResult(None, stale_cache=False)
+
+    harness = Harness(
+        [valid(cost=0.125, cost_currency="EUR", prompt_tokens=10_000, completion_tokens=200)],
+        settings=LlmSettings(primary=PRIMARY, fallback=FALLBACK),
+        fx_provider=UnavailableFx(),
+    )
+
+    failure = harness.failure()
+
+    assert failure.error_code is LlmErrorCode.INVALID_OUTPUT
+    assert not failure.run_retryable
+    assert failure.calls == len(harness.requests) == 1
+    assert failure.usage[0].cost_usd == Decimal("0.012000")
+    assert harness.ledger.events[0][1] == failure.usage[0]
+    assert harness.trace.records[0][1].response_json()["usage"]["cost_currency"] == "EUR"
+
+
+def test_unknown_endpoint_bad_tokens_still_converts_trusted_paid_eur_cost() -> None:
+    payload = valid(cost=0.125, cost_currency="EUR").json()
+    payload["usage"]["prompt_tokens"] = 10**100
+    raw_answer = deepcopy(payload)
+    harness = Harness(
+        [httpx.Response(200, json=payload), valid()],
+        fx_provider=FixedFxProvider(Decimal("1.20")),
+    )
+
+    failure = harness.failure()
+
+    assert failure.error_code is LlmErrorCode.INVALID_OUTPUT
+    assert not failure.run_retryable
+    assert failure.calls == len(harness.requests) == 1
+    assert len(failure.usage) == len(harness.ledger.events) == 1
+    assert failure.usage[0].cost_usd == Decimal("0.150000")
+    assert harness.ledger.events[0][1] == failure.usage[0]
+    record = harness.trace.records[0][1]
+    assert record.response_json() == raw_answer
+    assert record.request_json()["fx"] == {
+        "source": "EXR.D.USD.EUR.SP00.A",
+        "observation_date": NOW.date().isoformat(),
+        "rate_usd_per_eur": "1.20",
+        "stale_cache": False,
+    }
+
+
+@pytest.mark.parametrize(
+    ("invalid_tokens", "expected_tokens_in", "expected_cost"),
+    [(False, 10_000, Decimal("0.012000")), (True, 250, Decimal("0.002250"))],
+)
+def test_cancelling_lazy_fx_after_paid_answer_records_conservative_usage_and_raw_trace(
+    invalid_tokens: bool, expected_tokens_in: int, expected_cost: Decimal
+) -> None:
+    class WaitingFx:
+        def __init__(self) -> None:
+            self.started = asyncio.Event()
+
+        async def get_quote(self) -> FxQuoteResult:
+            self.started.set()
+            await asyncio.Event().wait()
+            raise AssertionError("FX lookup should have been cancelled")
+
+    class WaitingLedger(InMemoryUsageLedger):
+        def __init__(self) -> None:
+            super().__init__()
+            self.record_started = asyncio.Event()
+            self.release_record = asyncio.Event()
+
+        async def record(self, context: RunCallContext, usage: LlmUsage) -> None:
+            self.record_started.set()
+            await self.release_record.wait()
+            await super().record(context, usage)
+
+    fx = WaitingFx()
+    ledger = WaitingLedger()
+    paid = valid(cost=0.125, cost_currency="EUR", prompt_tokens=10_000, completion_tokens=200)
+    if invalid_tokens:
+        payload = paid.json()
+        payload["usage"]["prompt_tokens"] = 10**100
+        paid = httpx.Response(200, json=payload)
+    expected_raw = deepcopy(paid.json())
+    harness = Harness(
+        [paid, valid()],
+        settings=LlmSettings(primary=PRIMARY, fallback=FALLBACK),
+        fx_provider=fx,
+        ledger=ledger,
+    )
+
+    async def exercise() -> None:
+        pending = asyncio.create_task(harness._review(CONTEXT))
+        await asyncio.wait_for(fx.started.wait(), timeout=1)
+        assert len(harness.requests) == 1
+        pending.cancel()
+        await ledger.record_started.wait()
+        pending.cancel()
+        ledger.release_record.set()
+        with pytest.raises(asyncio.CancelledError):
+            await pending
+
+    asyncio.run(exercise())
+
+    assert len(harness.requests) == 1
+    assert [
+        (usage.tokens_in, usage.tokens_out, usage.cost_usd) for _, usage in harness.ledger.events
+    ] == [(expected_tokens_in, 200, expected_cost)]
+    assert len(harness.trace.records) == 1
+    assert harness.trace.records[0][1].response_json() == expected_raw
+
+
+def test_cancelling_paid_usage_write_finishes_ledger_and_raw_trace_once() -> None:
+    class WaitingLedger(InMemoryUsageLedger):
+        def __init__(self) -> None:
+            super().__init__()
+            self.started = asyncio.Event()
+            self.release = asyncio.Event()
+
+        async def record(self, context: RunCallContext, usage: LlmUsage) -> None:
+            self.started.set()
+            await self.release.wait()
+            await super().record(context, usage)
+
+    paid = valid(cost=0.125, cost_currency="USD")
+    expected_raw = deepcopy(paid.json())
+    ledger = WaitingLedger()
+    harness = Harness(
+        [paid, valid()],
+        settings=LlmSettings(primary=PRIMARY, fallback=FALLBACK),
+        ledger=ledger,
+    )
+
+    async def exercise() -> None:
+        pending = asyncio.create_task(harness._review(CONTEXT))
+        await ledger.started.wait()
+        pending.cancel()
+        ledger.release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await pending
+
+    asyncio.run(exercise())
+
+    assert len(harness.requests) == 1
+    assert [usage.cost_usd for _, usage in ledger.events] == [Decimal("0.125000")]
+    assert len(harness.trace.records) == 1
+    assert harness.trace.records[0][1].response_json() == expected_raw
+
+
+def test_unknown_endpoint_paid_eur_traces_lazy_stale_quote() -> None:
+    class StaleFx:
+        async def get_quote(self) -> FxQuoteResult:
+            return FxQuoteResult(
+                FxQuote(Decimal("1.20"), NOW.date(), "EXR.D.USD.EUR.SP00.A", NOW),
+                stale_cache=True,
+            )
+
+    harness = Harness(
+        [valid(cost=0.125, cost_currency="EUR")],
+        settings=LlmSettings(primary=PRIMARY, fallback=None),
+        fx_provider=StaleFx(),
+    )
+
+    result = harness.review()
+
+    assert result.usage[0].cost_usd == Decimal("0.150000")
+    record = harness.trace.records[0][1]
+    assert record.request_json()["fx"] == {
+        "source": "EXR.D.USD.EUR.SP00.A",
+        "observation_date": NOW.date().isoformat(),
+        "rate_usd_per_eur": "1.20",
+        "stale_cache": True,
+    }
+    assert record.response_json()["usage"]["cost_currency"] == "EUR"
+
+
+def test_paid_eur_without_fx_provider_uses_conservative_accounting() -> None:
+    harness = Harness(
+        [valid(cost=0.125, cost_currency="EUR", prompt_tokens=10_000, completion_tokens=200)],
+        settings=LlmSettings(primary=PRIMARY, fallback=FALLBACK),
+        fx_provider=None,
+    )
+
+    failure = harness.failure()
+
+    assert failure.error_code is LlmErrorCode.INVALID_OUTPUT
+    assert failure.calls == 1
+    assert failure.usage[0].cost_usd == Decimal("0.012000")
+    assert harness.trace.records[0][1].response_json()["usage"]["cost_currency"] == "EUR"
+
+
+def test_usd_only_endpoint_does_not_fetch_fx() -> None:
+    class UnexpectedFx:
+        async def get_quote(self) -> FxQuoteResult:
+            raise AssertionError("USD-only endpoint should not fetch ECB")
+
+    harness = Harness(
+        [valid(cost=0.125, cost_currency="USD")],
+        settings=LlmSettings(primary=PRIMARY, fallback=None),
+        fx_provider=UnexpectedFx(),
+    )
+
+    assert harness.review().usage[0].cost_usd == Decimal("0.125000")
+
+
+@pytest.mark.parametrize(
+    ("currency", "raw_cost", "rate", "expected_usd"),
+    [
+        ("USD", 0.1234567, "1.1204", Decimal("0.123457")),
+        (None, 0.125, "1.1204", Decimal("0.125000")),
+        ("EUR", 0.125, "1.1204", Decimal("0.140050")),
+        ("EUR", 0.00000049, "2", Decimal("0.000001")),
+    ],
+)
+def test_provider_cost_is_recorded_in_usd_once(
+    currency: str | None, raw_cost: float, rate: str, expected_usd: Decimal
+) -> None:
+    settings = LlmSettings(primary=PRIMARY, fallback=None)
+    harness = Harness(
+        [valid(cost=raw_cost, cost_currency=currency)],
+        settings=settings,
+        fx_provider=FixedFxProvider(Decimal(rate)),
+    )
+
+    result = harness.review()
+
+    assert result.usage[0].cost_usd == expected_usd
+    assert harness.ledger.events[0][1].cost_usd == expected_usd
+
+
+def test_eur_fallback_cost_blocks_a_later_attempt_at_the_usd_budget() -> None:
+    settings = LlmSettings(primary=PRIMARY, fallback=FALLBACK)
+    harness = Harness(
+        [error(401), valid(cost=0.445, cost_currency="EUR")],
+        settings=settings,
+        fx_provider=FixedFxProvider(Decimal("1.1204")),
+    )
+
+    first = harness.review()
+    harness.attempt = 3
+    failure = harness.failure()
+
+    assert first.usage[0].cost_usd == Decimal("0.498578")
+    assert harness.kinds() == ["primary", "fallback"]
+    assert failure.error_code is LlmErrorCode.BUDGET_EXCEEDED
+    assert failure.calls == 0
+    assert len(harness.requests) == 2
+
+
+def test_eur_cost_without_quote_records_paid_usage_and_raw_trace_then_fails() -> None:
+    harness = Harness(
+        [
+            valid(cost=0.1, cost_currency="EUR", prompt_tokens=10_000, completion_tokens=200),
+            valid(),
+        ],
+        settings=LlmSettings(primary=PRIMARY, fallback=FALLBACK),
+    )
+
+    failure = harness.failure()
+
+    assert failure.error_code is LlmErrorCode.INVALID_OUTPUT
+    assert not failure.run_retryable
+    assert "ECB EUR/USD quote" in str(failure)
+    assert failure.calls == 1
+    assert len(harness.requests) == 1
+    assert [(usage.tokens_in, usage.tokens_out, usage.cost_usd) for usage in failure.usage] == [
+        (10_000, 200, Decimal("0.012000"))
+    ]
+    assert harness.ledger.events[0][1] == failure.usage[0]
+    assert harness.trace.records[0][1].response_json()["usage"]["cost_currency"] == "EUR"
+
+
+@pytest.mark.parametrize("metadata", ["unknown-currency", "invalid-cost"])
+def test_bad_paid_cost_metadata_is_traced_and_charged_without_another_call(
+    metadata: str,
+) -> None:
+    if metadata == "unknown-currency":
+        reply = valid(
+            cost=0.1,
+            cost_currency="GBP",
+            prompt_tokens=10_000,
+            completion_tokens=200,
+        )
+    else:
+        payload = valid(
+            cost=0.1,
+            cost_currency="USD",
+            prompt_tokens=10_000,
+            completion_tokens=200,
+        ).json()
+        payload["usage"]["cost"] = "invalid"
+        reply = httpx.Response(200, json=payload)
+    harness = Harness([reply, valid()])
+
+    failure = harness.failure()
+
+    assert failure.error_code is LlmErrorCode.INVALID_OUTPUT
+    assert not failure.run_retryable
+    assert failure.calls == 1
+    assert len(harness.requests) == 1
+    assert [(usage.tokens_in, usage.tokens_out, usage.cost_usd) for usage in failure.usage] == [
+        (10_000, 200, Decimal("0.012000"))
+    ]
+    assert harness.ledger.events[0][1] == failure.usage[0]
+    assert harness.trace.records[0][1].response_json()["usage"]["cost"] == (
+        0.1 if metadata == "unknown-currency" else "invalid"
+    )
+
+
+def test_paid_answer_with_bad_currency_and_tokens_is_not_retried() -> None:
+    payload = valid(cost=0.125, cost_currency="GBP", completion_tokens=200).json()
+    payload["usage"]["prompt_tokens"] = "unknown"
+    harness = Harness([httpx.Response(200, json=payload), valid()])
+
+    failure = harness.failure()
+
+    assert failure.error_code is LlmErrorCode.INVALID_OUTPUT
+    assert not failure.run_retryable
+    assert failure.calls == 1
+    assert len(harness.requests) == 1
+    assert harness.clock.sleeps == []
+    assert harness.trace.records[0][1].response_json()["usage"] == payload["usage"]
+    assert len(failure.usage) == 1
+    usage = failure.usage[0]
+    assert usage.tokens_in == prompt_tokens(CONTEXT, HeuristicTokenCounter(PRIMARY.chars_per_token))
+    assert usage.tokens_out == 200
+    assert Decimal("0.002000") < usage.cost_usd < Decimal("0.125")
+    assert harness.ledger.events[0][1] == usage
+
+
+@pytest.mark.parametrize("field", ["usage", "prompt_tokens_details"])
+def test_paid_answer_with_nonmapping_usage_metadata_is_not_retried(field: str) -> None:
+    payload = valid(cost=0.125, cost_currency="GBP", prompt_tokens=10_000).json()
+    if field == "usage":
+        payload["usage"] = "oops"
+    else:
+        payload["usage"]["prompt_tokens_details"] = "oops"
+    harness = Harness([httpx.Response(200, json=payload), valid()])
+
+    failure = harness.failure()
+
+    assert failure.error_code is LlmErrorCode.INVALID_OUTPUT
+    assert not failure.run_retryable
+    assert failure.calls == len(harness.requests) == 1
+    assert harness.clock.sleeps == []
+    assert harness.trace.records[0][1].response_json()["usage"] == payload["usage"]
+    assert len(failure.usage) == 1
+    usage = failure.usage[0]
+    assert usage.tokens_in == (
+        prompt_tokens(CONTEXT, HeuristicTokenCounter(PRIMARY.chars_per_token))
+        if field == "usage"
+        else 10_000
+    )
+    assert usage.tokens_out == (PRIMARY.max_output_tokens if field == "usage" else 300)
+    assert usage.cost_usd > Decimal("0.002000")
+    assert harness.ledger.events[0][1] == usage
+
+
+def test_paid_answer_with_missing_prompt_count_uses_preflight_estimate() -> None:
+    payload = valid(cost=0.125, cost_currency="GBP", completion_tokens=200).json()
+    del payload["usage"]["prompt_tokens"]
+    harness = Harness([httpx.Response(200, json=payload), valid()])
+
+    failure = harness.failure()
+
+    assert failure.error_code is LlmErrorCode.INVALID_OUTPUT
+    assert not failure.run_retryable
+    assert failure.calls == len(harness.requests) == 1
+    assert harness.trace.records[0][1].response_json()["usage"] == payload["usage"]
+    assert len(failure.usage) == 1
+    usage = failure.usage[0]
+    assert usage.tokens_in == prompt_tokens(CONTEXT, HeuristicTokenCounter(PRIMARY.chars_per_token))
+    assert usage.tokens_out == 200
+    assert usage.cost_usd > Decimal("0.002000")
+    assert harness.ledger.events[0][1] == usage
+
+
+@pytest.mark.parametrize(
+    ("field", "cost", "currency"),
+    [
+        ("prompt_tokens", 0.125, "GBP"),
+        ("prompt_tokens", 0.125, "USD"),
+        ("completion_tokens", None, None),
+        ("cached_tokens", 0.125, "USD"),
+    ],
+)
+def test_paid_answer_with_oversized_token_count_keeps_raw_trace_and_one_charge(
+    field: str, cost: float | None, currency: str | None
+) -> None:
+    payload = valid(cost=cost, cost_currency=currency).json()
+    oversized = 10**100
+    if field == "cached_tokens":
+        payload["usage"]["prompt_tokens_details"][field] = oversized
+    else:
+        payload["usage"][field] = oversized
+    raw_answer = deepcopy(payload)
+    harness = Harness([httpx.Response(200, json=payload), valid()])
+
+    failure = harness.failure()
+
+    assert failure.error_code is LlmErrorCode.INVALID_OUTPUT
+    assert not failure.run_retryable
+    assert failure.calls == len(harness.requests) == 1
+    assert harness.clock.sleeps == []
+    assert len(failure.usage) == len(harness.ledger.events) == 1
+    usage = failure.usage[0]
+    assert usage.tokens_in == (
+        prompt_tokens(CONTEXT, HeuristicTokenCounter(PRIMARY.chars_per_token))
+        if field == "prompt_tokens"
+        else 1200
+    )
+    assert usage.tokens_out == (PRIMARY.max_output_tokens if field == "completion_tokens" else 300)
+    assert usage.cache_read_tokens == 0
+    if currency == "USD":
+        assert usage.cost_usd == Decimal("0.125000")
+    else:
+        assert Decimal("0.002000") < usage.cost_usd < Decimal("0.125")
+    assert harness.ledger.events[0][1] == usage
+    assert harness.trace.records[0][1].response_json() == raw_answer
+
+
+def test_known_eurouter_oversized_count_uses_quoted_ceiling_once() -> None:
+    settings = LlmSettings.from_env({"LLM_MODEL": "mistral-small-4", "LLM_API_KEYS": "sk-eu-1"})
+    payload = valid(cost=0.125, cost_currency="EUR").json()
+    payload["usage"]["prompt_tokens"] = 10**100
+    raw_answer = deepcopy(payload)
+    harness = Harness(
+        [httpx.Response(200, json=payload), valid()],
+        settings=settings,
+        fx_provider=FixedFxProvider(Decimal("1.20")),
+    )
+
+    failure = harness.failure()
+
+    assert failure.error_code is LlmErrorCode.INVALID_OUTPUT
+    assert not failure.run_retryable
+    assert failure.calls == len(harness.requests) == 1
+    assert len(failure.usage) == len(harness.ledger.events) == 1
+    assert failure.usage[0].cost_usd == Decimal("0.150000")
+    assert harness.ledger.events[0][1] == failure.usage[0]
+    record = harness.trace.records[0][1]
+    assert record.response_json() == raw_answer
+    assert record.request_json()["fx"] == {
+        "source": "EXR.D.USD.EUR.SP00.A",
+        "observation_date": NOW.date().isoformat(),
+        "rate_usd_per_eur": "1.20",
+        "stale_cache": False,
+    }
+
+
+@pytest.mark.parametrize(
+    ("cost", "currency"),
+    [(0.001, "USD"), (1e30, "USD"), (0.125, "EUR")],
+)
+def test_oversized_count_uses_reserve_when_paid_amount_cannot_raise_it(
+    cost: float, currency: str
+) -> None:
+    payload = valid(cost=cost, cost_currency=currency).json()
+    payload["usage"]["prompt_tokens"] = 10**100
+    harness = Harness([httpx.Response(200, json=payload), valid()])
+
+    failure = harness.failure()
+
+    assert failure.error_code is LlmErrorCode.INVALID_OUTPUT
+    assert failure.calls == len(harness.requests) == 1
+    assert len(failure.usage) == len(harness.ledger.events) == 1
+    assert failure.usage[0].cost_usd == Decimal("0.002250")
+    assert harness.ledger.events[0][1] == failure.usage[0]
+    assert harness.trace.records[0][1].response_json()["usage"] == payload["usage"]
+
+
+def test_known_route_ceiling_prices_a_paid_answer_with_bad_currency() -> None:
+    settings = LlmSettings.from_env(
+        {
+            "LLM_MODEL": "mistral-small-4",
+            "LLM_API_KEYS": "sk-eu-1",
+            "LLM_EUR_TO_USD_RATE": "1.1204",
+        }
+    )
+    harness = Harness(
+        [
+            valid(cost=0.1, cost_currency="GBP", prompt_tokens=52_000, completion_tokens=200),
+            valid(),
+        ],
+        settings=settings,
+        fx_provider=FixedFxProvider(Decimal("1.20")),
+    )
+
+    failure = harness.failure()
+
+    assert failure.error_code is LlmErrorCode.INVALID_OUTPUT
+    assert failure.calls == 1
+    assert len(harness.requests) == 1
+    assert failure.usage[0].cost_usd == Decimal("0.051360")
+    assert harness.ledger.events[0][1] == failure.usage[0]
+    assert harness.trace.records[0][1].response_json()["usage"]["cost_currency"] == "GBP"
+
+
+def test_fallback_route_ceiling_prices_a_paid_answer_with_bad_currency() -> None:
+    settings = LlmSettings.from_env(
+        {
+            "LLM_MODEL": "mistral-small-4",
+            "LLM_API_KEYS": "sk-eu-1",
+            "LLM_FALLBACK_MODEL": "mistral-small-3.2-24b",
+            "LLM_EUR_TO_USD_RATE": "1.1204",
+        }
+    )
+    harness = Harness(
+        [
+            error(401),
+            valid(cost=0.1, cost_currency="GBP", prompt_tokens=52_000, completion_tokens=200),
+            valid(),
+        ],
+        settings=settings,
+        fx_provider=FixedFxProvider(Decimal("1.20")),
+    )
+
+    failure = harness.failure()
+
+    assert failure.error_code is LlmErrorCode.INVALID_OUTPUT
+    assert failure.calls == 2
+    assert len(harness.requests) == 2
+    assert failure.usage[0].cost_usd == Decimal("0.016320")
+    assert harness.ledger.events[0][1] == failure.usage[0]
+    assert harness.trace.records[1][1].response_json()["usage"]["cost_currency"] == "GBP"
+
+
+@pytest.mark.parametrize(
+    ("currency", "cost", "rate"),
+    [("USD", 1e30, None), ("EUR", 1e20, Decimal("1e20"))],
+)
+def test_unquantizable_paid_cost_records_estimate_and_raw_trace_then_fails(
+    currency: str, cost: float, rate: Decimal | None
+) -> None:
+    harness = Harness(
+        [
+            valid(cost=cost, cost_currency=currency, prompt_tokens=10_000, completion_tokens=200),
+            valid(),
+        ],
+        settings=LlmSettings(primary=PRIMARY, fallback=FALLBACK),
+        fx_provider=FixedFxProvider(rate) if rate is not None else None,
+    )
+
+    failure = harness.failure()
+
+    assert failure.error_code is LlmErrorCode.INVALID_OUTPUT
+    assert not failure.run_retryable
+    assert failure.calls == 1
+    assert len(harness.requests) == 1
+    assert [(usage.tokens_in, usage.tokens_out, usage.cost_usd) for usage in failure.usage] == [
+        (10_000, 200, Decimal("0.012000"))
+    ]
+    assert harness.ledger.events[0][1] == failure.usage[0]
+    assert harness.trace.records[0][1].response_json()["usage"]["cost"] == cost
 
 
 def test_usage_of_every_call_is_returned_and_recorded_with_the_actual_model() -> None:

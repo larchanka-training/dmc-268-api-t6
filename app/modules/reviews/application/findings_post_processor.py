@@ -11,13 +11,13 @@ from typing import Literal
 from app.modules.reviews.application.review_output import (
     ReviewFinding,
     ReviewOutput,
+    finding_order_key,
     render_review_body,
 )
 
 DropReason = Literal["lint_pattern", "duplicate", "unknown_path"]
 Bucket = Literal["inline", "body_only", "dropped"]
 
-_SEVERITY_RANK = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
 _ATTRIBUTION_PREFIX = "According to custom instructions in '"
 _ATTRIBUTION_RE = re.compile(r"^According to custom instructions in '(?P<name>[^']+)' \([^)]*\): ")
 
@@ -129,13 +129,7 @@ class FindingsPostProcessor:
             prepared.append(ProcessedFinding(finding, item.position, bucket))
 
         inline_candidates = [item for item in prepared if item.bucket == "inline"]
-        inline_candidates.sort(
-            key=lambda item: (
-                _SEVERITY_RANK[item.finding.severity],
-                -item.finding.confidence,
-                item.position,
-            )
-        )
+        inline_candidates.sort(key=_quality)
         inline = inline_candidates[:cap]
         overflow = [
             ProcessedFinding(item.finding, item.position, "body_only")
@@ -225,7 +219,7 @@ def _normalize_title(title: str) -> str:
 
 
 def _quality(item: ProcessedFinding) -> tuple[int, float, int]:
-    return (_SEVERITY_RANK[item.finding.severity], -item.finding.confidence, item.position)
+    return (*finding_order_key(item.finding.severity, item.finding.confidence), item.position)
 
 
 def _render_body(output: ReviewOutput, body_only: tuple[ProcessedFinding, ...]) -> str:

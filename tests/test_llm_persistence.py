@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import AbstractAsyncContextManager
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import Any, cast
 from uuid import UUID, uuid4
@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app.modules.analytics.infrastructure.models import UsageEvent
 from app.modules.analytics.infrastructure.usage_ledger import SqlAlchemyUsageLedger
 from app.modules.reviews.application.llm import (
+    FxProvenance,
     LlmCallError,
     LlmCallKind,
     LlmCallRecord,
@@ -181,3 +182,25 @@ def test_llm_call_goes_through_the_shared_run_trace() -> None:
             1234,
         )
     ]
+
+
+def test_llm_call_persists_fx_in_request_metadata_without_changing_raw_response() -> None:
+    trace = RecordingRunTrace()
+    raw_response = {"usage": {"cost": 0.125, "cost_currency": "EUR"}}
+    record = _record(
+        response=raw_response,
+        fx=FxProvenance(
+            "EXR.D.USD.EUR.SP00.A", date(2026, 10, 5), Decimal("1.20"), stale_cache=True
+        ),
+    )
+
+    asyncio.run(RunTraceLlmCalls(trace).record_call(RUN_ID, record))
+
+    stored = trace.records[0]
+    assert stored[2]["fx"] == {
+        "source": "EXR.D.USD.EUR.SP00.A",
+        "observation_date": "2026-10-05",
+        "rate_usd_per_eur": "1.20",
+        "stale_cache": True,
+    }
+    assert stored[3] is raw_response

@@ -21,6 +21,12 @@ type Category = Literal["security", "correctness", "performance", "readability"]
 type Effort = Literal["none", "small", "medium", "large"]
 
 _STRICT = ConfigDict(extra="forbid", strict=True)
+_SEVERITY_RANK = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
+
+
+def finding_order_key(severity: Severity, confidence: float) -> tuple[int, float]:
+    """The shared severity and confidence order for review findings."""
+    return _SEVERITY_RANK[severity], -confidence
 
 
 class ReviewFinding(BaseModel):
@@ -84,8 +90,7 @@ class ReviewOutput(BaseModel):
     @model_validator(mode="after")
     def validate_finding_order(self) -> ReviewOutput:
         """Require the documented severity/confidence order from the model."""
-        rank = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
-        ordering = [(rank[item.severity], -item.confidence) for item in self.findings]
+        ordering = [finding_order_key(item.severity, item.confidence) for item in self.findings]
         if ordering != sorted(ordering):
             raise ValueError("findings must be severity then confidence ordered")
         return self

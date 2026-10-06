@@ -12,7 +12,7 @@ import json
 from collections.abc import Mapping
 from functools import cache
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from jsonschema import Draft202012Validator
 from pydantic import ValidationError
@@ -20,7 +20,10 @@ from pydantic import ValidationError
 from app.modules.reviews.application.conventions import ConventionsDraft
 from app.modules.reviews.application.review_output import (
     InvalidReviewOutput,
+    ReviewFinding,
     ReviewOutput,
+    Severity,
+    finding_order_key,
     parse_review_output,
 )
 
@@ -83,11 +86,38 @@ def validate_review_answer(content: str) -> dict[str, object]:
     ][:_MAX_ERRORS]
     if errors:
         raise InvalidAnswer(errors)
+    normalized = _normalize_review_answer(decoded)
     try:
-        parse_review_output(decoded)
+        parse_review_output(normalized)
     except InvalidReviewOutput as error:
         raise InvalidAnswer(_pydantic_errors(error)) from None
-    return decoded
+    return normalized
+
+
+def _normalize_review_answer(decoded: dict[str, object]) -> dict[str, object]:
+    """Repair lossless deviations, reporting semantic errors at raw finding indexes."""
+    findings = cast(list[dict[str, object]], decoded["findings"])
+    normalized_findings = []
+    errors: list[str] = []
+    for index, finding in enumerate(findings):
+        normalized = dict(finding)
+        line = normalized["line"]
+        start_line = normalized["start_line"]
+        if isinstance(line, int) and isinstance(start_line, int) and start_line == line:
+            normalized["start_line"] = None
+        try:
+            ReviewFinding.model_validate(normalized)
+        except ValidationError as error:
+            errors.extend(_validation_messages(error, prefix=("findings", index)))
+        normalized_findings.append(normalized)
+    if errors:
+        raise InvalidAnswer(errors[:_MAX_ERRORS])
+    normalized_findings.sort(
+        key=lambda finding: finding_order_key(
+            cast(Severity, finding["severity"]), cast(float, finding["confidence"])
+        )
+    )
+    return {**decoded, "findings": normalized_findings}
 
 
 def parse_review_answer(content: str) -> ReviewOutput:
@@ -147,10 +177,12 @@ def _pydantic_errors(error: InvalidReviewOutput) -> list[str]:
     return _validation_messages(cause)
 
 
-def _validation_messages(error: ValidationError) -> list[str]:
+def _validation_messages(
+    error: ValidationError, *, prefix: tuple[str | int, ...] = ()
+) -> list[str]:
     messages = []
     for item in error.errors()[:_MAX_ERRORS]:
-        location = "/".join(str(part) for part in item["loc"]) or "(root)"
+        location = "/".join(str(part) for part in (*prefix, *item["loc"])) or "(root)"
         messages.append(_bounded(f"{location}: {item['msg']}"))
     return messages
 

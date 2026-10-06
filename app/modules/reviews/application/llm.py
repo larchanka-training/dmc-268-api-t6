@@ -8,7 +8,7 @@ the attempt deadline, the run cost limit and to write the ``llm.call`` trace and
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 from enum import StrEnum
 from typing import Any, Literal, Protocol
@@ -98,6 +98,24 @@ class LlmCallError:
 
 
 @dataclass(frozen=True)
+class FxProvenance:
+    """The public ECB quote metadata attached to one provider call."""
+
+    source: str
+    observation_date: date
+    rate_usd_per_eur: Decimal
+    stale_cache: bool
+
+    def as_json(self) -> dict[str, str | bool]:
+        return {
+            "source": self.source,
+            "observation_date": self.observation_date.isoformat(),
+            "rate_usd_per_eur": str(self.rate_usd_per_eur),
+            "stale_cache": self.stale_cache,
+        }
+
+
+@dataclass(frozen=True)
 class LlmCallRecord:
     """One provider call as the ``llm.call`` run action stores it (§2)."""
 
@@ -113,10 +131,11 @@ class LlmCallRecord:
     duration_ms: int
     response: Any = None
     error: LlmCallError | None = None
+    fx: FxProvenance | None = None
 
     def request_json(self) -> dict[str, object]:
         """Metadata only: the prompt itself is never copied into the trace."""
-        return {
+        metadata: dict[str, object] = {
             "kind": self.kind.value,
             "model": self.model,
             "call_no": self.call_no,
@@ -126,6 +145,9 @@ class LlmCallRecord:
             "rule_version_id": _uuid_or_none(self.rule_version_id),
             "input_tokens_estimate": self.input_tokens_estimate,
         }
+        if self.fx is not None:
+            metadata["fx"] = self.fx.as_json()
+        return metadata
 
     def response_json(self) -> Any:
         """The provider answer as is (also an invalid one), or the normalized error."""

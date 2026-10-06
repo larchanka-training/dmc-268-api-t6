@@ -120,6 +120,7 @@ from app.modules.reviews.infrastructure.github_review_publication import (
 )
 from app.modules.reviews.infrastructure.github_run_source import GitHubRunSource
 from app.modules.reviews.infrastructure.github_vcs import HttpGitHubVcsProvider
+from app.modules.reviews.infrastructure.llm.ecb_fx import EcbFxQuoteCache, EcbFxRateAdapter
 from app.modules.reviews.infrastructure.llm.gateway import LlmGateway
 from app.modules.reviews.infrastructure.llm.models import (
     GatewayConventionsModel,
@@ -350,9 +351,13 @@ class WorkerSettings:
                 raise RuntimeError(f"{name} is required for the review worker")
             return value
 
+        database_url = required("DATABASE_URL")
+        rabbitmq_url = required("RABBITMQ_URL")
+        llm = LlmSettings.from_env(env) if env.get("LLM_MODEL") else None
+
         return cls(
-            database_url=required("DATABASE_URL"),
-            rabbitmq_url=required("RABBITMQ_URL"),
+            database_url=database_url,
+            rabbitmq_url=rabbitmq_url,
             worker_id=env.get("WORKER_ID") or f"{socket.gethostname()}:{os.getpid()}",
             github_app_id=env.get("GITHUB_APP_ID") or None,
             github_private_key=env.get("GITHUB_APP_PRIVATE_KEY") or None,
@@ -360,7 +365,7 @@ class WorkerSettings:
             portal_url=env.get("PORTAL_URL") or None,
             heartbeat_file=heartbeat_file(env),
             # Partly set LLM_* fails the start; none at all starts with a warning.
-            llm=LlmSettings.from_env(env) if env.get("LLM_MODEL") else None,
+            llm=llm,
         )
 
 
@@ -555,6 +560,7 @@ async def run_worker(
     leader_period: float = 30.0,
     github_transport: httpx.AsyncBaseTransport | None = None,
     llm_transport: httpx.AsyncBaseTransport | None = None,
+    fx_transport: httpx.AsyncBaseTransport | None = None,
 ) -> None:
     """Consume until cancelled; the caller owns signal handling.
 
@@ -579,9 +585,15 @@ async def run_worker(
         if settings.llm is None:
             _LOGGER.warning("LLM_MODEL is not set: %s; every review run fails", LLM_NOT_CONFIGURED)
         else:
-            # One gateway (and HTTP pool) per process; models are bound per attempt.
+            # One gateway and separate LLM/ECB HTTP pools per process.
             llm_client = await stack.enter_async_context(httpx.AsyncClient(transport=llm_transport))
-            gateway = build_gateway(settings.llm, llm_client, session_factory)
+            fx_client = await stack.enter_async_context(httpx.AsyncClient(transport=fx_transport))
+            gateway = build_gateway(
+                settings.llm,
+                llm_client,
+                session_factory,
+                fx_provider=EcbFxQuoteCache(EcbFxRateAdapter(fx_client)),
+            )
         async with amqp_channels(settings.rabbitmq_url, delays or RetryDelays()) as channels:
             process = compose_worker_process(
                 settings=settings,

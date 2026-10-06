@@ -26,13 +26,15 @@ import random
 import time
 from collections import OrderedDict
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, field
+from contextlib import suppress
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
-from decimal import Decimal
+from decimal import Decimal, DecimalException
 from typing import Protocol
 from uuid import UUID
 
 from app.modules.reviews.application.llm import (
+    FxProvenance,
     LlmCallError,
     LlmCallFailed,
     LlmCallKind,
@@ -44,7 +46,15 @@ from app.modules.reviews.application.llm import (
     UsageLedger,
 )
 from app.modules.reviews.infrastructure.llm.answers import InvalidAnswer
-from app.modules.reviews.infrastructure.llm.settings import LlmSettings, ModelProfile
+from app.modules.reviews.infrastructure.llm.ecb_fx import FxQuote, FxQuoteProvider, FxQuoteResult
+from app.modules.reviews.infrastructure.llm.settings import (
+    LlmConfigError,
+    LlmSettings,
+    ModelPrice,
+    ModelProfile,
+    is_eurouter_route,
+    price_at_eur_quote,
+)
 from app.modules.reviews.infrastructure.llm.transport import (
     ChatMessage,
     ChatRequest,
@@ -52,6 +62,7 @@ from app.modules.reviews.infrastructure.llm.transport import (
     ChatTransport,
     ResponseSchema,
     TransportError,
+    TransportPaidAnswerError,
 )
 
 logger = logging.getLogger(__name__)
@@ -60,6 +71,11 @@ _REPAIR_INSTRUCTION = (
     "Your previous answer violated the output contract. Validator errors:\n{errors}\n"
     "Answer again with the corrected JSON object only: no prose, no code fence."
 )
+_USD_QUANTUM = Decimal("0.000001")
+
+
+class _CostMetadataError(ValueError):
+    """The provider amount cannot be converted to USD for this paid answer."""
 
 
 class Clock(Protocol):
@@ -148,6 +164,7 @@ class LlmGateway:
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         jitter: Callable[[], float] | None = None,
         monotonic: Callable[[], float] = time.monotonic,
+        fx_provider: FxQuoteProvider | None = None,
     ) -> None:
         self._settings = settings
         self._transport = transport
@@ -158,6 +175,7 @@ class LlmGateway:
         policy = settings.policy
         self._jitter = jitter or (lambda: random.uniform(0, policy.max_jitter_s))
         self._monotonic = monotonic
+        self._fx_provider = fx_provider
         # run_id -> calls of its current attempt; conventions and review share it.
         self._attempts: OrderedDict[UUID, _AttemptCalls] = OrderedDict()
 
@@ -321,13 +339,43 @@ class LlmGateway:
                 f"prompt ~{estimate} tokens + {profile.max_output_tokens} reserved exceeds {limit}",
                 state,
             )
+        quote_result: FxQuoteResult | None = None
+        quote: FxQuote | None = None
+        price = profile.price
+        if is_eurouter_route(profile):
+            quote_result = await self._get_fx_quote()
+            quote = quote_result.quote if quote_result is not None else None
+            if quote is None:
+                raise self._failed(LlmErrorCode.UNAVAILABLE, "ECB EUR/USD quote unavailable", state)
+            try:
+                price = price_at_eur_quote(profile, quote.rate_usd_per_eur)
+            except (LlmConfigError, DecimalException):
+                raise self._failed(
+                    LlmErrorCode.UNAVAILABLE, "ECB EUR/USD quote cannot price this call", state
+                ) from None
+            remaining = self._seconds_left(context)
+            if remaining < timeout_s:
+                raise self._failed(
+                    LlmErrorCode.DEADLINE_EXCEEDED,
+                    f"{remaining:.0f} s left before the attempt deadline; "
+                    f"a call needs {timeout_s:g} s",
+                    state,
+                )
         spent = await self._ledger.run_cost_usd(context.run_id)
-        next_cost = profile.price.cost_usd(tokens_in=estimate, tokens_out=profile.max_output_tokens)
+        next_cost = price.cost_usd(tokens_in=estimate, tokens_out=profile.max_output_tokens)
         cost_limit = policy.run_cost_limit_usd[context.engine]
         if spent + next_cost > cost_limit:
             raise self._failed(
                 LlmErrorCode.BUDGET_EXCEEDED,
                 f"run spent ${spent} and the next call may cost ${next_cost}, limit ${cost_limit}",
+                state,
+            )
+
+        remaining = self._seconds_left(context)
+        if remaining < timeout_s:
+            raise self._failed(
+                LlmErrorCode.DEADLINE_EXCEEDED,
+                f"{remaining:.0f} s left before the attempt deadline; a call needs {timeout_s:g} s",
                 state,
             )
 
@@ -350,6 +398,7 @@ class LlmGateway:
             timeout_s=timeout_s,
             estimate=estimate,
             started_at=started_at,
+            fx=_fx_provenance(quote_result),
         )
         try:
             response = await self._transport.complete(
@@ -360,6 +409,39 @@ class LlmGateway:
                     timeout_s=timeout_s,
                 )
             )
+        except TransportPaidAnswerError as error:
+            duration_ms = _elapsed_ms(started, self._monotonic())
+            paid_response = error.paid_response
+            if (
+                paid_response.cost is not None
+                and paid_response.cost_currency == "EUR"
+                and quote is None
+            ):
+                try:
+                    quote_result = await self._get_fx_quote()
+                except asyncio.CancelledError:
+                    usage = self._usage(
+                        profile,
+                        task.operation,
+                        paid_response,
+                        estimate,
+                        price,
+                        quote,
+                        conservative=True,
+                    )
+                    await self._record_paid_answer(
+                        context, state, record, duration_ms, paid_response, usage
+                    )
+                    raise
+                quote = quote_result.quote if quote_result is not None else None
+                record = replace(record, fx=_fx_provenance(quote_result))
+            usage = self._usage(
+                profile, task.operation, paid_response, estimate, price, quote, conservative=True
+            )
+            await self._record_paid_answer(
+                context, state, record, duration_ms, paid_response, usage
+            )
+            raise self._failed(LlmErrorCode.INVALID_OUTPUT, error.message, state) from None
         except TransportError as error:
             duration_ms = _elapsed_ms(started, self._monotonic())
             await self._record_trace(
@@ -390,10 +472,28 @@ class LlmGateway:
             )
 
         duration_ms = _elapsed_ms(started, self._monotonic())
-        usage = self._usage(profile, task.operation, response, estimate)
-        state.usage.append(usage)
-        await self._ledger.record(context, usage)
-        await self._record_trace(context, record.finish(duration_ms, response=response.raw))
+        if response.cost is not None and response.cost_currency == "EUR" and quote is None:
+            try:
+                quote_result = await self._get_fx_quote()
+            except asyncio.CancelledError:
+                # The provider has already answered. Keep its raw answer and charge
+                # conservatively before letting the worker watchdog stop this call.
+                usage = self._usage(
+                    profile, task.operation, response, estimate, price, quote, conservative=True
+                )
+                await self._record_paid_answer(context, state, record, duration_ms, response, usage)
+                raise
+            quote = quote_result.quote if quote_result is not None else None
+            record = replace(record, fx=_fx_provenance(quote_result))
+        try:
+            usage = self._usage(profile, task.operation, response, estimate, price, quote)
+        except _CostMetadataError as error:
+            usage = self._usage(
+                profile, task.operation, response, estimate, price, quote, conservative=True
+            )
+            await self._record_paid_answer(context, state, record, duration_ms, response, usage)
+            raise self._failed(LlmErrorCode.INVALID_OUTPUT, str(error), state) from None
+        await self._record_paid_answer(context, state, record, duration_ms, response, usage)
         logger.info(
             "llm call answered",
             extra={
@@ -407,6 +507,33 @@ class LlmGateway:
         )
         return _validated(response, task)
 
+    async def _record_paid_answer(
+        self,
+        context: RunCallContext,
+        state: _AttemptState,
+        record: _RecordDraft,
+        duration_ms: int,
+        response: ChatResponse,
+        usage: LlmUsage,
+    ) -> None:
+        async def write_once() -> None:
+            state.usage.append(usage)
+            await self._ledger.record(context, usage)
+            await self._record_trace(context, record.finish(duration_ms, response=response.raw))
+
+        # Once a provider has answered, a watchdog cancellation must not drop its
+        # usage and raw trace. Shield a single write task and wait for it to finish.
+        settlement = asyncio.create_task(write_once())
+        interrupted = False
+        while not settlement.done():
+            try:
+                await asyncio.shield(settlement)
+            except asyncio.CancelledError:
+                interrupted = True
+        await settlement
+        if interrupted:
+            raise asyncio.CancelledError
+
     async def _record_trace(self, context: RunCallContext, record: LlmCallRecord) -> None:
         """A failed trace write is logged, never allowed to discard a paid answer."""
         try:
@@ -417,22 +544,57 @@ class LlmGateway:
                 extra={"run_id": str(context.run_id), "call_no": record.call_no},
             )
 
+    async def _get_fx_quote(self) -> FxQuoteResult | None:
+        if self._fx_provider is None:
+            return None
+        try:
+            return await self._fx_provider.get_quote()
+        except Exception:
+            logger.warning("ECB EUR/USD quote unavailable")
+            return None
+
     def _usage(
-        self, profile: ModelProfile, operation: str, response: ChatResponse, estimate: int
+        self,
+        profile: ModelProfile,
+        operation: str,
+        response: ChatResponse,
+        estimate: int,
+        price: ModelPrice,
+        quote: FxQuote | None,
+        *,
+        conservative: bool = False,
     ) -> LlmUsage:
-        tokens_in, tokens_out = response.prompt_tokens, response.completion_tokens
-        if tokens_in == 0 and tokens_out == 0 and response.cost_usd is None:
+        tokens_in = response.prompt_tokens if response.prompt_tokens is not None else estimate
+        tokens_out = (
+            response.completion_tokens
+            if response.completion_tokens is not None
+            else profile.max_output_tokens
+        )
+        cached_tokens = response.cached_tokens if response.cached_tokens is not None else 0
+        if tokens_in == 0 and tokens_out == 0 and response.cost is None:
             # No usage block (some self-hosted servers): count the pre-send estimate and
             # the answer, so the run cost limit does not fail open.
             tokens_in = estimate
             tokens_out = self.token_counter(profile).count(response.content or "")
-        if response.cost_usd is not None:
-            cost = Decimal(str(response.cost_usd)).quantize(Decimal("0.000001"))
+        if conservative:
+            # Invalid metadata must not discard a trustworthy paid amount. Keep the
+            # larger of that USD amount and the no-cache pre-call reservation.
+            cost = price.cost_usd(
+                tokens_in=max(tokens_in, estimate),
+                tokens_out=max(tokens_out, profile.max_output_tokens),
+            )
+            if response.cost is not None:
+                # Unknown currency, unavailable quote or unrepresentable amount:
+                # only the model-price estimate is safe to record.
+                with suppress(_CostMetadataError):
+                    cost = max(cost, self._provider_cost_usd(response, quote))
+        elif response.cost is not None:
+            cost = self._provider_cost_usd(response, quote)
         else:
-            cost = profile.price.cost_usd(
+            cost = price.cost_usd(
                 tokens_in=tokens_in,
                 tokens_out=tokens_out,
-                cache_read_tokens=response.cached_tokens,
+                cache_read_tokens=cached_tokens,
             )
         return LlmUsage(
             provider=profile.provider,
@@ -440,9 +602,28 @@ class LlmGateway:
             operation=operation,
             tokens_in=tokens_in,
             tokens_out=tokens_out,
-            cache_read_tokens=response.cached_tokens,
+            cache_read_tokens=cached_tokens,
             cost_usd=cost,
         )
+
+    @staticmethod
+    def _provider_cost_usd(response: ChatResponse, quote: FxQuote | None) -> Decimal:
+        assert response.cost is not None
+        try:
+            if response.cost_currency in (None, "USD"):
+                cost_usd = response.cost
+            elif response.cost_currency == "EUR":
+                rate = quote.rate_usd_per_eur if quote is not None else None
+                if rate is None or not rate.is_finite() or rate <= 0:
+                    raise _CostMetadataError("ECB EUR/USD quote is required for EUR usage.cost")
+                cost_usd = response.cost * rate
+            else:
+                raise _CostMetadataError("unsupported usage.cost_currency")
+            if not cost_usd.is_finite() or cost_usd < 0:
+                raise _CostMetadataError("usage.cost cannot be represented in USD")
+            return cost_usd.quantize(_USD_QUANTUM)
+        except DecimalException:
+            raise _CostMetadataError("usage.cost cannot be represented in USD") from None
 
     @staticmethod
     def _result(profile: ModelProfile, outcome: _Outcome, state: _AttemptState) -> GatewayResult:
@@ -470,6 +651,7 @@ class _RecordDraft:
     timeout_s: float
     estimate: int
     started_at: datetime
+    fx: FxProvenance | None = None
 
     def finish(
         self, duration_ms: int, *, response: object = None, error: LlmCallError | None = None
@@ -487,7 +669,20 @@ class _RecordDraft:
             duration_ms=duration_ms,
             response=response,
             error=error,
+            fx=self.fx,
         )
+
+
+def _fx_provenance(result: FxQuoteResult | None) -> FxProvenance | None:
+    if result is None or result.quote is None:
+        return None
+    quote = result.quote
+    return FxProvenance(
+        quote.source,
+        quote.observation_date,
+        quote.rate_usd_per_eur,
+        result.stale_cache,
+    )
 
 
 def _validated(response: ChatResponse, task: StructuredTask) -> _Outcome:
