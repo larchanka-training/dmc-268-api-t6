@@ -113,6 +113,40 @@ total. `retry_at=none` means no retry is scheduled: the receipt waits until some
 it, the hourly revival for installation events or linking the installation (`wake_receipts`),
 see "Deferred deliveries" below.
 
+Failure log. When processing a delivery fails, the worker first writes one WARNING line with the
+action and a failure category, then the sweep writes its ERROR record
+`GitHub webhook projection failed for delivery <delivery_id>` with the traceback. The first line
+is the greppable outcome, the second the diagnosis:
+
+```text
+GitHub webhook delivery <delivery_id> event=<event|-> action=<action|-> failed stage=<stage> category=<category> error=<ExceptionClass> [outcome=<status> detail=<detail>]
+```
+
+For a failed `labeled` delivery the line therefore carries `action=labeled` and why no Run was
+created. `error` is the class name only: an exception message can hold a URL or an identifier, so
+it is left to the traceback record, and the line never carries the payload, an installation token
+or the webhook secret. The receipt is opaque to the receipt layer, so the action comes from a
+reader that the transport adapter supplies (`action_of`): it decodes the payload and returns the
+`action` only when it is a plain token (`[a-z_]`, 1 to 40 characters), so free text or a line
+break in a payload cannot reach the log. The reader runs for the `dispatch` and `finalize`
+stages, including a timeout, and a reader that fails never hides the failure: the line then shows
+`action=-`. `action=-` also means an event without an action (`status`) and a failure while
+claiming, where the receipt has not been read. The same token rule applies to the `action=` that
+starts the `detail` of an ignored event in the outcome line.
+
+| stage | meaning |
+| --- | --- |
+| `claim` | the receipt could not be claimed; `event` and `action` are `-` |
+| `dispatch` | the projection or the Run trigger failed (a GitHub request, the database, the 240 s timeout); the receipt is released for a retry after 30 s, the third failure marks it failed |
+| `finalize` | the dispatch finished but updating the receipt failed; `outcome` and `detail` repeat the dispatch result, so a Run may already exist. The claim lapses after 5 minutes and the delivery is replayed; the trigger answers `duplicate` instead of creating a second Run |
+
+| category | meaning |
+| --- | --- |
+| `timeout` | the dispatch exceeded its timeout, or a builtin `TimeoutError` |
+| `github_request` | an `httpx` / `httpcore` error: a refused connection, an HTTP error status such as a 5xx from the current-PR lookup, an `httpx` timeout |
+| `database` | a SQLAlchemy or `psycopg` error |
+| `internal` | anything else |
+
 Deferred deliveries. A delivery the dispatcher cannot handle yet (unknown installation or
 repository, an event without a handler, or an installation event whose repository details
 GitHub cannot answer) is retried after 5 minutes, at most three attempts in total, like a

@@ -106,14 +106,19 @@ def database() -> Iterator[Database]:
 
 @dataclass
 class FakeGitHub:
-    """Current PR and CI of PR 7; ``ci`` maps a head to its check suites."""
+    """Current PR and CI of PR 7; ``ci`` maps a head to its check suites.
+
+    ``pull_request_status`` is the status the current-PR lookup answers with."""
 
     head: str = HEAD
     ci: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
+    pull_request_status: int = 200
 
     def __call__(self, request: httpx.Request) -> httpx.Response:
         path = request.url.path
         if path == "/repos/octo/repo/pulls/7":
+            if self.pull_request_status != 200:
+                return httpx.Response(self.pull_request_status, json={"message": "Server Error"})
             return httpx.Response(200, json=_pull_request(self.head))
         for sha, suites in ((sha, self.ci.get(sha, [])) for sha in (HEAD, NEW_HEAD)):
             if path == f"/repos/octo/repo/commits/{sha}/check-suites":
@@ -431,5 +436,37 @@ def test_every_label_outcome_is_logged_with_its_reason_and_without_the_token(
     for line, pattern in zip(lines, expected, strict=True):
         assert re.fullmatch(pattern, line), line
     # The App was really called with the token: it appears in no message or record field.
+    for logged in (caplog.text, *(repr(vars(record)) for record in caplog.records)):
+        assert TOKEN not in logged
+
+
+@pytest.mark.integration
+def test_labeled_delivery_whose_github_call_fails_logs_its_action_and_category(
+    database: Database, caplog: pytest.LogCaptureFixture
+) -> None:
+    github = FakeGitHub(ci={HEAD: _green(HEAD)}, pull_request_status=500)
+
+    async def scenario(pipeline: Pipeline) -> list[tuple[Any, ...]]:
+        await pipeline.deliver("pull_request", _pr_delivery("labeled"))
+        return await pipeline.runs()
+
+    with caplog.at_level(logging.INFO):
+        runs = _run(database, github, scenario)
+
+    assert runs == []
+    failures = [
+        record.getMessage()
+        for record in caplog.records
+        if record.levelno == logging.WARNING and " failed stage=" in record.getMessage()
+    ]
+    assert failures == [
+        "GitHub webhook delivery delivery-1 event=pull_request action=labeled "
+        "failed stage=dispatch category=github_request error=HTTPStatusError"
+    ]
+    assert _outcome_lines(caplog) == []
+    # The sweep logs the traceback after the line; neither record carries the token.
+    assert [r.getMessage() for r in caplog.records if r.levelno == logging.ERROR] == [
+        "GitHub webhook projection failed for delivery delivery-1"
+    ]
     for logged in (caplog.text, *(repr(vars(record)) for record in caplog.records)):
         assert TOKEN not in logged

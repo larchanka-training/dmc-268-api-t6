@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from collections.abc import Mapping
 from typing import Protocol
 
@@ -39,6 +40,22 @@ from app.modules.reviews.application.trigger_from_delivery import CiTriggerEvent
 _CI_EVENTS = frozenset({"check_suite", "workflow_run"})
 _MAX_LOGGED_FIELD_ERRORS = 10
 _LOGGER = logging.getLogger(__name__)
+# GitHub's actions are lowercase words joined by ``_``. The action goes into log lines, so
+# anything else (free text, line breaks) is treated as absent.
+_ACTION_TOKEN = re.compile(r"[a-z_]{1,40}")
+
+
+def _action_token(value: object) -> str | None:
+    return value if isinstance(value, str) and _ACTION_TOKEN.fullmatch(value) else None
+
+
+def action_of(receipt: WebhookReceipt) -> str | None:
+    """The payload's action as a safe log token, or None; never raises."""
+    try:
+        decoded = json.loads(receipt.payload_json)
+    except (TypeError, ValueError, RecursionError):
+        return None
+    return _action_token(decoded.get("action")) if isinstance(decoded, dict) else None
 
 
 class TypedGitHubDeliveryDispatcher(Protocol):
@@ -63,7 +80,7 @@ class GitHubWebhookDispatchAdapter:
                 InstallationDeliveryDispatchStatus.IGNORED_INVALID_EVENT
             )
         payload: Mapping[str, object] = decoded
-        action = payload.get("action")
+        action = _action_token(payload.get("action"))
         event_name = delivery.event_name
         value: (
             PullRequestEvent
@@ -73,10 +90,8 @@ class GitHubWebhookDispatchAdapter:
             | UnsupportedGitHubEvent
         )
         if event_name == "pull_request":
-            if not isinstance(action, str) or action not in SUPPORTED_PULL_REQUEST_ACTIONS:
-                value = UnsupportedGitHubEvent(
-                    event_name, action if isinstance(action, str) else None
-                )
+            if action not in SUPPORTED_PULL_REQUEST_ACTIONS:
+                value = UnsupportedGitHubEvent(event_name, action)
             else:
                 try:
                     value = (
@@ -101,14 +116,14 @@ class GitHubWebhookDispatchAdapter:
                     event_name=event_name, payload=payload
                 )
             except UnsupportedInstallationAction as unsupported:
-                value = UnsupportedGitHubEvent(event_name, unsupported.action)
+                value = UnsupportedGitHubEvent(event_name, _action_token(unsupported.action))
             except InstallationEventValidationError as invalid:
                 _log_invalid_installation_event(delivery.delivery_id, event_name, payload, invalid)
                 return InstallationDeliveryDispatchResult(
                     InstallationDeliveryDispatchStatus.IGNORED_INVALID_EVENT
                 )
         else:
-            value = UnsupportedGitHubEvent(event_name, action if isinstance(action, str) else None)
+            value = UnsupportedGitHubEvent(event_name, action)
         return await self._dispatcher.execute(GitHubDispatchEvent(delivery.delivery_id, value))
 
 

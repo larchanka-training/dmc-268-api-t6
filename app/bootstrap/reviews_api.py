@@ -23,7 +23,7 @@ from app.bootstrap.portal_auth import get_auth_scope
 from app.bootstrap.reconciler import reconciler_loop
 from app.modules.auth.application.scope import AuthScope
 from app.modules.auth.infrastructure.sessions import SqlAlchemyAuthSessionUnitOfWork
-from app.modules.integrations.webhooks.api.dispatch import GitHubWebhookDispatchAdapter
+from app.modules.integrations.webhooks.api.dispatch import GitHubWebhookDispatchAdapter, action_of
 from app.modules.integrations.webhooks.application.github_installation_dispatch import (
     GitHubInstallationDeliveryDispatcher,
 )
@@ -182,6 +182,7 @@ class ReviewsApiResources:
                 run_publisher=run_publisher,
                 app_id=app_id,
             ),
+            action_of=action_of,
         )
 
     def installation_onboarding(

@@ -8,18 +8,22 @@ import hmac
 import json
 import logging
 import os
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from types import TracebackType
 from typing import Self, cast
 from uuid import UUID, uuid4
 
+import httpcore
+import httpx
+import psycopg
 import pytest
 from alembic.config import Config
 from fastapi.testclient import TestClient
 from sqlalchemy import Connection, create_engine, text
-from sqlalchemy.exc import DatabaseError
+from sqlalchemy.exc import DatabaseError, OperationalError
+from sqlalchemy.exc import TimeoutError as PoolTimeoutError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.schema import CreateSchema, DropSchema
 
@@ -30,9 +34,10 @@ from app.main import (
     app,
     get_github_webhook_secret,
 )
-from app.modules.integrations.webhooks.api.dispatch import GitHubWebhookDispatchAdapter
+from app.modules.integrations.webhooks.api.dispatch import GitHubWebhookDispatchAdapter, action_of
 from app.modules.integrations.webhooks.api.receipt import VerifiedGitHubDelivery
 from app.modules.integrations.webhooks.application.github_installation_dispatch import (
+    GitHubDispatchEvent,
     GitHubInstallationDeliveryDispatcher,
     GitHubInstallationResolver,
     InstallationDeliveryDispatchResult,
@@ -43,6 +48,7 @@ from app.modules.integrations.webhooks.application.github_installation_dispatch 
 from app.modules.integrations.webhooks.application.receive_github_delivery import (
     ReceiveGitHubDelivery,
     WebhookReceipt,
+    failure_category,
 )
 from app.modules.integrations.webhooks.infrastructure.github_webhook_receipts import (
     SqlAlchemyGitHubWebhookReceiptUnitOfWork,
@@ -620,6 +626,7 @@ def test_projected_delivery_logs_one_outcome_line_with_its_detail(
         "detail=action=labeled pr=p head=aaaaaaa: ineligible (ci_blocked)",
         "GitHub webhook delivery outcome-2 event=installation status=onboarded detail=-",
     ]
+    assert [record for record in caplog.records if record.levelno >= logging.WARNING] == []
 
 
 def test_deferred_delivery_logs_when_it_is_tried_again_and_then_that_it_is_final(
@@ -660,6 +667,418 @@ def test_deferred_delivery_logs_when_it_is_tried_again_and_then_that_it_is_final
         "GitHub webhook delivery deferred-1 deferred after its last attempt: "
         "ignored_unknown_repository"
     ]
+
+
+_DELIVERY_LOGGER = "app.modules.integrations.webhooks.application.receive_github_delivery"
+_SECRET_IN_MESSAGE = "ghs_t72_sentinel"
+_NOW = datetime(2026, 9, 28, tzinfo=UTC)
+
+
+def _pull_request_receipt(delivery_id: str, action: str = "labeled") -> WebhookReceipt:
+    payload: dict[str, object] = {
+        "action": action,
+        "installation": {"id": 17},
+        "repository": {"id": 101, "full_name": "octo/repo"},
+        "pull_request": {
+            "id": 901,
+            "number": 7,
+            "title": "Review parser",
+            "html_url": "https://github.com/octo/repo/pull/7",
+            "user": {"login": "alice"},
+            "head": {"ref": "feature", "sha": "a" * 40},
+            "base": {"ref": "main", "sha": "b" * 40},
+            "state": "open",
+            "updated_at": "2026-09-28T11:59:00Z",
+        },
+    }
+    if action in {"labeled", "unlabeled"}:
+        payload["label"] = {"name": "ai-review"}
+    return VerifiedGitHubDelivery(delivery_id, "pull_request", payload).to_receipt()
+
+
+@dataclass
+class FailingTypedDispatcher:
+    """The typed dispatcher behind the real adapter: it raises ``error`` or hangs."""
+
+    error: Exception | None = None
+
+    async def execute(self, delivery: GitHubDispatchEvent) -> InstallationDeliveryDispatchResult:
+        if self.error is not None:
+            raise self.error
+        await asyncio.sleep(10)
+        raise AssertionError("the dispatch timeout did not cancel the dispatcher")
+
+
+def _failure_lines(caplog: pytest.LogCaptureFixture) -> list[str]:
+    return [
+        record.getMessage()
+        for record in caplog.records
+        if record.levelno == logging.WARNING
+        and record.getMessage().startswith("GitHub webhook delivery ")
+        and " failed stage=" in record.getMessage()
+    ]
+
+
+def _traceback_records(caplog: pytest.LogCaptureFixture) -> list[logging.LogRecord]:
+    return [record for record in caplog.records if record.levelno == logging.ERROR]
+
+
+def _dispatch_failure_run(
+    receipt: WebhookReceipt,
+    typed: FailingTypedDispatcher,
+    caplog: pytest.LogCaptureFixture,
+    *,
+    dispatch_timeout_seconds: float = 1.0,
+    reader: Callable[[WebhookReceipt], str | None] = action_of,
+) -> FakeReceiptUnitOfWork:
+    uow = FakeReceiptUnitOfWork()
+    receiver = ReceiveGitHubDelivery(
+        uow_factory=lambda: uow,
+        dispatcher=GitHubWebhookDispatchAdapter(typed),
+        now=lambda: _NOW,
+        dispatch_timeout_seconds=dispatch_timeout_seconds,
+        action_of=reader,
+    )
+    asyncio.run(receiver.execute(receipt))
+    with caplog.at_level(logging.INFO, logger=_DELIVERY_LOGGER):
+        assert asyncio.run(receiver.replay_pending()) == 0
+    return uow
+
+
+def _http_status_error() -> httpx.HTTPStatusError:
+    request = httpx.Request("GET", f"https://api.github.test/pulls/7?t={_SECRET_IN_MESSAGE}")
+    return httpx.HTTPStatusError(
+        f"Server error for {_SECRET_IN_MESSAGE}", request=request, response=httpx.Response(500)
+    )
+
+
+@pytest.mark.parametrize(
+    ("error", "category", "error_name"),
+    [
+        (httpx.ConnectError(f"refused {_SECRET_IN_MESSAGE}"), "github_request", "ConnectError"),
+        (_http_status_error(), "github_request", "HTTPStatusError"),
+        (httpx.ReadTimeout(f"slow {_SECRET_IN_MESSAGE}"), "github_request", "ReadTimeout"),
+        (
+            OperationalError("SELECT 1", {}, Exception(f"lost {_SECRET_IN_MESSAGE}")),
+            "database",
+            "OperationalError",
+        ),
+        (TimeoutError(f"slow {_SECRET_IN_MESSAGE}"), "timeout", "TimeoutError"),
+        (RuntimeError(f"boom {_SECRET_IN_MESSAGE}"), "internal", "RuntimeError"),
+    ],
+)
+def test_failed_label_dispatch_logs_its_action_and_category_without_the_error_message(
+    caplog: pytest.LogCaptureFixture, error: Exception, category: str, error_name: str
+) -> None:
+    uow = _dispatch_failure_run(
+        _pull_request_receipt("fail-1"), FailingTypedDispatcher(error), caplog
+    )
+
+    lines = _failure_lines(caplog)
+    assert lines == [
+        "GitHub webhook delivery fail-1 event=pull_request action=labeled "
+        f"failed stage=dispatch category={category} error={error_name}"
+    ]
+    assert _SECRET_IN_MESSAGE not in lines[0]
+    # The receipt is released for a retry exactly as before.
+    row = uow.rows["fail-1"]
+    assert row.projected is False
+    assert row.claim_token is None
+    assert row.retry_after == _NOW + timedelta(seconds=30)
+    # The traceback record follows; the sweep still sees the original exception.
+    (traceback_record,) = _traceback_records(caplog)
+    assert traceback_record.getMessage() == "GitHub webhook projection failed for delivery fail-1"
+    assert traceback_record.exc_info is not None
+    assert traceback_record.exc_info[0] is type(error)
+    assert traceback_record.exc_info[1] is error
+
+
+def test_dispatch_timeout_logs_the_timeout_category_and_the_action(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    uow = _dispatch_failure_run(
+        _pull_request_receipt("slow-1"),
+        FailingTypedDispatcher(),
+        caplog,
+        dispatch_timeout_seconds=0.001,
+    )
+
+    assert _failure_lines(caplog) == [
+        "GitHub webhook delivery slow-1 event=pull_request action=labeled "
+        "failed stage=dispatch category=timeout error=TimeoutError"
+    ]
+    assert uow.rows["slow-1"].retry_after == _NOW + timedelta(seconds=30)
+
+
+@pytest.mark.parametrize(
+    ("receipt", "event", "action"),
+    [
+        (_pull_request_receipt("event-1", "synchronize"), "pull_request", "synchronize"),
+        (_pull_request_receipt("event-2", "unlabeled"), "pull_request", "unlabeled"),
+        (
+            VerifiedGitHubDelivery(
+                "event-3",
+                "check_suite",
+                {
+                    "action": "completed",
+                    "installation": {"id": 17},
+                    "repository": {"id": 101},
+                    "check_suite": {"head_sha": "a" * 40},
+                },
+            ).to_receipt(),
+            "check_suite",
+            "completed",
+        ),
+        (
+            VerifiedGitHubDelivery(
+                "event-4",
+                "status",
+                {"installation": {"id": 17}, "repository": {"id": 101}, "sha": "a" * 40},
+            ).to_receipt(),
+            "status",
+            "-",
+        ),
+    ],
+)
+def test_failed_dispatch_of_any_event_logs_its_own_action(
+    caplog: pytest.LogCaptureFixture, receipt: WebhookReceipt, event: str, action: str
+) -> None:
+    _dispatch_failure_run(receipt, FailingTypedDispatcher(RuntimeError("boom")), caplog)
+
+    assert _failure_lines(caplog) == [
+        f"GitHub webhook delivery {receipt.delivery_id} event={event} action={action} "
+        "failed stage=dispatch category=internal error=RuntimeError"
+    ]
+
+
+def test_failure_line_survives_a_failing_release_of_the_receipt(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    @dataclass
+    class ReleaseFailsUnitOfWork(FakeReceiptUnitOfWork):
+        async def release_after_dispatch_failure(
+            self,
+            delivery_id: str,
+            token: UUID,
+            retry_after: datetime,
+            failed_at: datetime,
+            max_attempts: int,
+        ) -> None:
+            raise OperationalError("UPDATE", {}, Exception("connection lost"))
+
+    uow = ReleaseFailsUnitOfWork()
+    receiver = ReceiveGitHubDelivery(
+        uow_factory=lambda: uow,
+        dispatcher=GitHubWebhookDispatchAdapter(
+            FailingTypedDispatcher(httpx.ConnectError("refused"))
+        ),
+        now=lambda: _NOW,
+        action_of=action_of,
+    )
+    asyncio.run(receiver.execute(_pull_request_receipt("release-1")))
+    with caplog.at_level(logging.INFO, logger=_DELIVERY_LOGGER):
+        assert asyncio.run(receiver.replay_pending()) == 0
+
+    assert _failure_lines(caplog) == [
+        "GitHub webhook delivery release-1 event=pull_request action=labeled "
+        "failed stage=dispatch category=github_request error=ConnectError"
+    ]
+    (traceback_record,) = _traceback_records(caplog)
+    assert traceback_record.exc_info is not None
+    assert traceback_record.exc_info[0] is OperationalError
+
+
+@pytest.mark.parametrize("failing_step", ["mark_projected", "commit"])
+def test_failure_after_a_successful_dispatch_logs_the_outcome_that_may_exist(
+    caplog: pytest.LogCaptureFixture, failing_step: str
+) -> None:
+    @dataclass
+    class FinalizeFailsUnitOfWork(FakeReceiptUnitOfWork):
+        dispatched: bool = False
+
+        async def mark_projected(self, delivery_id: str, token: UUID, at: datetime) -> None:
+            if failing_step == "mark_projected":
+                raise OperationalError("UPDATE", {}, Exception("connection lost"))
+            await super().mark_projected(delivery_id, token, at)
+
+        async def commit(self) -> None:
+            if failing_step == "commit" and self.dispatched:
+                raise OperationalError("COMMIT", {}, Exception("connection lost"))
+            await super().commit()
+
+    uow = FinalizeFailsUnitOfWork()
+
+    class Dispatcher:
+        async def execute(self, delivery: WebhookReceipt) -> InstallationDeliveryDispatchResult:
+            uow.dispatched = True
+            return InstallationDeliveryDispatchResult(
+                InstallationDeliveryDispatchStatus.PROJECTED_PR,
+                "action=labeled pr=p head=aaaaaaa: enqueued run=r",
+            )
+
+    receiver = ReceiveGitHubDelivery(
+        uow_factory=lambda: uow, dispatcher=Dispatcher(), now=lambda: _NOW, action_of=action_of
+    )
+    asyncio.run(receiver.execute(_pull_request_receipt("final-1")))
+    with caplog.at_level(logging.INFO, logger=_DELIVERY_LOGGER):
+        assert asyncio.run(receiver.replay_pending()) == 0
+
+    assert _failure_lines(caplog) == [
+        "GitHub webhook delivery final-1 event=pull_request action=labeled "
+        "failed stage=finalize category=database error=OperationalError "
+        "outcome=projected_pr detail=action=labeled pr=p head=aaaaaaa: enqueued run=r"
+    ]
+    if failing_step == "mark_projected":  # the fake commit does not roll back
+        assert uow.rows["final-1"].projected is False
+    # The original exception type reaches the sweep.
+    (traceback_record,) = _traceback_records(caplog)
+    assert traceback_record.exc_info is not None
+    assert traceback_record.exc_info[0] is OperationalError
+
+
+def test_failure_to_claim_a_receipt_logs_the_claim_stage_without_event_or_action(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    @dataclass
+    class ClaimFailsUnitOfWork(FakeReceiptUnitOfWork):
+        async def claim(
+            self, delivery_id: str, token: UUID, now: datetime, until: datetime
+        ) -> WebhookReceipt | None:
+            raise OperationalError("UPDATE", {}, Exception(f"lost {_SECRET_IN_MESSAGE}"))
+
+    uow = ClaimFailsUnitOfWork()
+    receiver = ReceiveGitHubDelivery(
+        uow_factory=lambda: uow, dispatcher=FakeDispatcher(), now=lambda: _NOW, action_of=action_of
+    )
+    asyncio.run(receiver.execute(_pull_request_receipt("claim-1")))
+    with caplog.at_level(logging.INFO, logger=_DELIVERY_LOGGER):
+        assert asyncio.run(receiver.replay_pending()) == 0
+
+    assert _failure_lines(caplog) == [
+        "GitHub webhook delivery claim-1 event=- action=- "
+        "failed stage=claim category=database error=OperationalError"
+    ]
+    (traceback_record,) = _traceback_records(caplog)
+    assert traceback_record.exc_info is not None
+    assert traceback_record.exc_info[0] is OperationalError
+
+
+def test_unexpected_failure_while_parsing_a_delivery_still_logs_its_action(
+    caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def broken_parse(payload: Mapping[str, object]) -> PullRequestLabelEvent:
+        raise RuntimeError(f"parser bug {_SECRET_IN_MESSAGE}")
+
+    monkeypatch.setattr(
+        "app.modules.integrations.webhooks.api.dispatch.parse_pull_request_label_event",
+        broken_parse,
+    )
+
+    _dispatch_failure_run(_pull_request_receipt("parse-1"), FailingTypedDispatcher(), caplog)
+
+    lines = _failure_lines(caplog)
+    assert lines == [
+        "GitHub webhook delivery parse-1 event=pull_request action=labeled "
+        "failed stage=dispatch category=internal error=RuntimeError"
+    ]
+    assert _SECRET_IN_MESSAGE not in lines[0]
+
+
+def test_a_failing_action_reader_cannot_hide_the_failure_line(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    def broken_reader(receipt: WebhookReceipt) -> str | None:
+        raise RuntimeError(f"reader bug {_SECRET_IN_MESSAGE}")
+
+    uow = _dispatch_failure_run(
+        _pull_request_receipt("reader-1"),
+        FailingTypedDispatcher(httpx.ConnectError("refused")),
+        caplog,
+        reader=broken_reader,
+    )
+
+    lines = _failure_lines(caplog)
+    assert lines == [
+        "GitHub webhook delivery reader-1 event=pull_request action=- "
+        "failed stage=dispatch category=github_request error=ConnectError"
+    ]
+    assert _SECRET_IN_MESSAGE not in lines[0]
+    assert uow.rows["reader-1"].retry_after == _NOW + timedelta(seconds=30)
+    (traceback_record,) = _traceback_records(caplog)
+    assert traceback_record.exc_info is not None
+    assert traceback_record.exc_info[0] is httpx.ConnectError
+
+
+def test_failure_line_has_no_action_without_a_reader(caplog: pytest.LogCaptureFixture) -> None:
+    uow = FakeReceiptUnitOfWork()
+    receiver = ReceiveGitHubDelivery(
+        uow_factory=lambda: uow,
+        dispatcher=GitHubWebhookDispatchAdapter(FailingTypedDispatcher(RuntimeError("boom"))),
+        now=lambda: _NOW,
+    )
+    asyncio.run(receiver.execute(_pull_request_receipt("bare-1")))
+    with caplog.at_level(logging.INFO, logger=_DELIVERY_LOGGER):
+        assert asyncio.run(receiver.replay_pending()) == 0
+
+    assert _failure_lines(caplog) == [
+        "GitHub webhook delivery bare-1 event=pull_request action=- "
+        "failed stage=dispatch category=internal error=RuntimeError"
+    ]
+
+
+@pytest.mark.parametrize(
+    ("payload_json", "expected"),
+    [
+        ('{"action": "labeled"}', "labeled"),
+        ('{"action": "ready_for_review"}', "ready_for_review"),
+        ('{"action": "' + "a" * 40 + '"}', "a" * 40),
+        ('{"action": "' + "a" * 41 + '"}', None),
+        ('{"action": "labeled\\nFAKE LINE"}', None),
+        ('{"action": "labeled\\n"}', None),
+        ('{"action": "Labeled"}', None),
+        ('{"action": "labeled pr"}', None),
+        ('{"action": ""}', None),
+        ('{"action": 7}', None),
+        ('{"action": null}', None),
+        ('{"action": ["labeled"]}', None),
+        ("{}", None),
+        ('["labeled"]', None),
+        ('"labeled"', None),
+        ("not json", None),
+        ("", None),
+        pytest.param("[" * 100_000, None, id="deeply-nested"),
+    ],
+)
+def test_action_reader_returns_only_a_plain_token(payload_json: str, expected: str | None) -> None:
+    receipt = WebhookReceipt("reader", "pull_request", payload_json)
+
+    assert action_of(receipt) == expected
+
+
+@pytest.mark.parametrize(
+    ("error", "category"),
+    [
+        (httpx.ConnectError("refused"), "github_request"),
+        (httpx.ReadTimeout("slow"), "github_request"),
+        (
+            httpx.HTTPStatusError(
+                "500", request=httpx.Request("GET", "https://x"), response=httpx.Response(500)
+            ),
+            "github_request",
+        ),
+        (httpcore.ConnectError("refused"), "github_request"),
+        (OperationalError("SELECT 1", {}, Exception("lost")), "database"),
+        (PoolTimeoutError("QueuePool limit reached"), "database"),
+        (psycopg.OperationalError("lost"), "database"),
+        (TimeoutError(), "timeout"),
+        (ValueError("bad"), "internal"),
+        (KeyError("missing"), "internal"),
+    ],
+)
+def test_failure_category_names_the_library_family_of_the_error(
+    error: BaseException, category: str
+) -> None:
+    assert failure_category(error) == category
 
 
 def test_commit_failure_cannot_acknowledge_receipt() -> None:

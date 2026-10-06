@@ -606,6 +606,41 @@ def test_non_actionable_pr_action_is_ignored() -> None:
     assert onboarding.calls == []
 
 
+@pytest.mark.parametrize(
+    ("event_name", "action", "detail"),
+    [
+        ("pull_request", "ready_for_review", "action=ready_for_review"),
+        ("pull_request", "ready_for_review\nFAKE LINE", None),
+        ("pull_request", "Ready For Review", None),
+        ("installation", "suspend", "action=suspend"),
+        ("installation", "suspend\nFAKE LINE", None),
+        ("installation_repositories", "x" * 41, None),
+        ("push", "created", "action=created"),
+        ("push", "created\nFAKE LINE", None),
+    ],
+)
+def test_an_ignored_events_action_reaches_the_detail_only_as_a_plain_token(
+    event_name: str, action: str, detail: str | None
+) -> None:
+    resolver = FakeInstallationResolver()
+    onboarding = FakeOnboarding()
+    adapter = GitHubWebhookDispatchAdapter(
+        GitHubInstallationDeliveryDispatcher(resolver=resolver, onboarding=onboarding)
+    )
+
+    result = asyncio.run(
+        adapter.execute(
+            VerifiedGitHubDelivery(
+                "ignored-1", event_name, {"action": action, "installation": {"id": 17}}
+            ).to_receipt()
+        )
+    )
+
+    assert result.status is InstallationDeliveryDispatchStatus.IGNORED_IRRELEVANT_EVENT
+    assert result.detail == detail
+    assert resolver.calls == []
+
+
 def test_replay_adapter_delivers_typed_pr_ci_and_installation_events() -> None:
     @dataclass
     class TypedDispatcher:
