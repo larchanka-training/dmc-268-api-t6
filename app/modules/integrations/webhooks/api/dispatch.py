@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from collections.abc import Mapping
 from typing import Protocol
 
@@ -17,6 +18,7 @@ from app.modules.integrations.webhooks.api.installation_event_dtos import (
 )
 from app.modules.integrations.webhooks.api.pull_request_dtos import (
     SUPPORTED_PULL_REQUEST_ACTIONS,
+    PullRequestPayloadValidationError,
     parse_pull_request_event,
     parse_pull_request_label_event,
 )
@@ -41,10 +43,13 @@ from app.modules.reviews.application.project_github_pull_request import (
 from app.modules.reviews.application.trigger_from_delivery import CiTriggerEvent
 
 _CI_EVENTS = frozenset({"check_suite", "workflow_run"})
-# The outcome-line reason for a payload that cannot be parsed into its event's shape. Generic on
-# purpose: no field value, path or exception message (docs/WEBHOOK_WORKER.md, outcome log).
+# The outcome-line reason for a payload that cannot be parsed into its event's shape. Never a
+# field value or an exception message; a schema error adds the failing field paths as
+# ``fields=`` (docs/WEBHOOK_WORKER.md, outcome log).
 _INVALID_PAYLOAD = "invalid_payload"
 _MAX_LOGGED_FIELD_ERRORS = 10
+# A field path segment goes into the outcome line only when it is an identifier.
+_FIELD_SEGMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,63}")
 _LOGGER = logging.getLogger(__name__)
 # The action goes into log lines, so it follows the same plain-token rule as the event name;
 # anything else (free text, line breaks) is treated as absent.
@@ -102,17 +107,18 @@ class GitHubWebhookDispatchAdapter:
                         if action in {"labeled", "unlabeled"}
                         else parse_pull_request_event(payload)
                     )
-                except (ValueError, ValidationError):
+                except (ValueError, ValidationError) as error:
                     return InstallationDeliveryDispatchResult(
                         InstallationDeliveryDispatchStatus.IGNORED_INVALID_EVENT,
-                        _with_action(action, _INVALID_PAYLOAD),
+                        _with_action(action, _invalid_payload(error)),
                     )
         elif event_name == "status" or (event_name in _CI_EVENTS and action == "completed"):
             try:
                 value = parse_ci_event(event_name, payload)
-            except (ValueError, ValidationError):
+            except (ValueError, ValidationError) as error:
                 return InstallationDeliveryDispatchResult(
-                    InstallationDeliveryDispatchStatus.IGNORED_INVALID_EVENT, _INVALID_PAYLOAD
+                    InstallationDeliveryDispatchStatus.IGNORED_INVALID_EVENT,
+                    _invalid_payload(error),
                 )
         elif event_name in {"installation", "installation_repositories"}:
             try:
@@ -129,6 +135,35 @@ class GitHubWebhookDispatchAdapter:
         else:
             value = UnsupportedGitHubEvent(event_name, action)
         return await self._dispatcher.execute(GitHubDispatchEvent(delivery.delivery_id, value))
+
+
+def _invalid_payload(error: ValueError) -> str:
+    """``invalid_payload``, followed by ``fields=<path>,...`` when the error names its fields.
+
+    Paths only, never a value or a message: a pydantic error contributes its locations, the
+    pull request rule error its fields; any other ``ValueError`` names none. Each path is
+    logged once, the first ``_MAX_LOGGED_FIELD_ERRORS`` of them, then ``+<n>`` for the rest.
+    """
+    locations: list[tuple[int | str, ...]]
+    if isinstance(error, ValidationError):
+        locations = [
+            tuple(item["loc"]) for item in error.errors(include_input=False, include_url=False)
+        ]
+    elif isinstance(error, PullRequestPayloadValidationError):
+        locations = [(name,) for name in error.fields]
+    else:
+        return _INVALID_PAYLOAD
+    paths = list(dict.fromkeys(".".join(_field_segment(part) for part in loc) for loc in locations))
+    shown = paths[:_MAX_LOGGED_FIELD_ERRORS]
+    omitted = len(paths) - len(shown)
+    return f"{_INVALID_PAYLOAD} fields={','.join(shown)}{f',+{omitted}' if omitted else ''}"
+
+
+def _field_segment(part: int | str) -> str:
+    """A list index as its number, a field name only when it is an identifier, else ``?``."""
+    if isinstance(part, int):
+        return str(part)
+    return part if _FIELD_SEGMENT.fullmatch(part) else "?"
 
 
 def _log_invalid_installation_event(
