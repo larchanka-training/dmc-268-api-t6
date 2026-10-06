@@ -365,7 +365,6 @@ def test_file_endpoint_resolves_two_pr_paths_through_one_immutable_blob(
             "package-lock.json",
             "src/pre_migration.py",
         )
-        repository = SqlAlchemyRunRepository(factory, allow_unscoped=True)
         first_snapshot = DiffSnapshot(filename="src/new.py", patch="@@ -0,0 +1 @@\n+first")
         retry_snapshot = DiffSnapshot(filename="src/new.py", patch="@@ -0,0 +1 @@\n+retry")
 
@@ -374,13 +373,18 @@ def test_file_endpoint_resolves_two_pr_paths_through_one_immutable_blob(
                 code_change_id = await session.scalar(
                     select(Run.code_change_id).where(Run.id == fresh_run)
                 )
-            assert code_change_id is not None
-            stored = await repository.store_diff_snapshots(
-                fresh_run, code_change_id, "e" * 40, [first_snapshot]
-            )
-            repeated = await repository.store_diff_snapshots(
-                fresh_run, code_change_id, "e" * 40, [retry_snapshot]
-            )
+                assert code_change_id is not None
+                repo = SqlAlchemyRunRepository(session=session, allow_unscoped=True)
+                stored = await repo.store_diff_snapshots(
+                    fresh_run, code_change_id, "e" * 40, [first_snapshot]
+                )
+                await session.commit()
+            async with factory() as session:
+                repo = SqlAlchemyRunRepository(session=session, allow_unscoped=True)
+                repeated = await repo.store_diff_snapshots(
+                    fresh_run, code_change_id, "e" * 40, [retry_snapshot]
+                )
+                await session.commit()
             return stored, repeated
 
         stored, repeated = asyncio.run(store_fresh_run())
