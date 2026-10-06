@@ -113,6 +113,20 @@ for example `ineligible (ci_blocked: check suite app=5111174 queued)`:
 The status, conclusion and state come from GitHub and are logged like `event` below: as is when
 they are `[a-z_]`, 1 to 40 characters, and as `?` otherwise.
 
+No-CI sweep. Under `wait_for_ci = auto`, no delivery resolves `waiting_for_ci` when the head
+gets no CI: the no-CI sweep in `worker` does (its leader loop, every 30 s, once 2 minutes have
+passed since the later of the label and the first sight of the head; a PR without either time
+is never picked). It calls the same `try_enqueue` and writes one INFO line per candidate to the
+`worker` log, not the `webhook-worker` log, with the same outcome as above:
+
+```text
+No-CI sweep pr=<pull request id> head=<first 7 of the head sha>: <status> (<reason>[: <detail>]) [run=<run id>][; excluded until the head or label changes]
+```
+
+A candidate whose result is not `enqueued` gets the suffix: the sweep excludes it and does not
+pick it again until its head or label changes, for example
+`No-CI sweep pr=<id> head=aaaaaaa: unconfigured (missing_rules); excluded until the head or label changes`.
+
 Other details: `no open pull request` (a PR event or label whose PR is closed or unknown,
 nothing to enqueue), `no open pull request at this head` (a CI event for a head that no open PR
 has, for example CI of an old head that finished after a push),

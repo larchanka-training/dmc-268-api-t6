@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -11,7 +12,10 @@ from uuid import UUID
 from app.modules.reviews.application.try_enqueue_webhook_run import (
     EnqueueResult,
     EnqueueStatus,
+    describe_enqueue,
 )
+
+_LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -53,4 +57,14 @@ class SweepNoCi:
             result = await self._enqueuer.execute(candidate.code_change_id, candidate.head_sha)
             if result.status != EnqueueStatus.ENQUEUED:
                 await self._candidates.exclude(candidate)
+            _log_outcome(candidate, result)
         return attempted
+
+
+def _log_outcome(candidate: DueNoCiCandidate, result: EnqueueResult) -> None:
+    """Log one line per candidate, after its exclusion (if any) is stored."""
+    outcome = describe_enqueue(candidate.code_change_id, candidate.head_sha, result)
+    if result.status == EnqueueStatus.ENQUEUED:
+        _LOGGER.info("No-CI sweep %s", outcome)
+    else:
+        _LOGGER.info("No-CI sweep %s; excluded until the head or label changes", outcome)

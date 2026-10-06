@@ -73,6 +73,18 @@ class EnqueueResult:
     detail: str | None = None
 
 
+def describe_enqueue(code_change_id: UUID, head_sha: str, result: EnqueueResult) -> str:
+    """Render one enqueue outcome for a log line; keep in sync with docs/WEBHOOK_WORKER.md."""
+    outcome = f"pr={code_change_id} head={head_sha[:7]}: {result.status.value}"
+    if result.reason is not None and result.detail is not None:
+        outcome += f" ({result.reason}: {result.detail})"
+    elif result.reason is not None:
+        outcome += f" ({result.reason})"
+    if result.run_id is not None:
+        outcome += f" run={result.run_id}"
+    return outcome
+
+
 @dataclass(frozen=True)
 class RunInsertCandidate:
     ci: EligibilityCandidate
