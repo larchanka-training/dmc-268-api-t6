@@ -12,18 +12,12 @@ from __future__ import annotations
 import re
 from urllib.parse import quote
 
-# ``owner/repo`` as GitHub allows it: one slash; an owner without dots (``_`` is
-# valid for Enterprise Managed User logins); a repo that is never only dots
-# (``.``/``..`` would walk the request path) but may start with one (``.github``).
-# pydantic compiles patterns with the Rust regex engine: no lookaround, and ``$``
-# matches only at the very end of the text, so a trailing newline is rejected.
-REPOSITORY_FULL_NAME_PATTERN = (
-    r"^[A-Za-z0-9][A-Za-z0-9_-]*/[A-Za-z0-9._-]*[A-Za-z0-9_-][A-Za-z0-9._-]*$"
+from app.common.application.github_repository_name import (
+    REPOSITORY_FULL_NAME_MAX_LENGTH,
+    REPOSITORY_FULL_NAME_PATTERN,
 )
+
 _REPOSITORY_FULL_NAME = re.compile(REPOSITORY_FULL_NAME_PATTERN)
-# The database column and the webhook DTOs allow 512 characters. The check comes first:
-# the pattern backtracks quadratically on a crafted long name such as "o/a.a.a...!".
-_MAX_FULL_NAME_LENGTH = 512
 _COMMIT_SHA = re.compile(r"[0-9a-fA-F]{40}|[0-9a-fA-F]{64}")
 
 
@@ -33,7 +27,12 @@ class InvalidGitHubPathSegment(ValueError):
 
 def repository_path_from_full_name(full_name: str) -> str:
     """Return ``/repos/{owner}/{repo}``; a name of another shape raises before any request."""
-    if len(full_name) > _MAX_FULL_NAME_LENGTH or _REPOSITORY_FULL_NAME.fullmatch(full_name) is None:
+    # The length check comes first: the pattern backtracks quadratically on a crafted long
+    # name such as "o/a.a.a...!".
+    if (
+        len(full_name) > REPOSITORY_FULL_NAME_MAX_LENGTH
+        or _REPOSITORY_FULL_NAME.fullmatch(full_name) is None
+    ):
         raise InvalidGitHubPathSegment("GitHub repository must be owner/repo")
     return f"/repos/{full_name}"
 

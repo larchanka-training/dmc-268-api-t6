@@ -7,7 +7,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from app.common.infrastructure.github_repository_path import REPOSITORY_FULL_NAME_PATTERN
+from app.common.application.github_repository_name import REPOSITORY_FULL_NAME_PATTERN
 from app.modules.repositories.application.installation_repositories import (
     InstallationRepositoriesEvent,
     RepositoryReference,

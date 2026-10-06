@@ -7,7 +7,7 @@ from typing import Literal, get_args
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, HttpUrl
 
-from app.common.infrastructure.github_repository_path import REPOSITORY_FULL_NAME_PATTERN
+from app.common.application.github_repository_name import REPOSITORY_FULL_NAME_PATTERN
 from app.modules.reviews.application.project_github_pull_request import (
     PullRequestEvent,
     PullRequestLabelEvent,
