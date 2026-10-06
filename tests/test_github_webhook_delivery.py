@@ -700,7 +700,7 @@ def _pull_request_receipt(delivery_id: str, action: str = "labeled") -> WebhookR
 class FailingTypedDispatcher:
     """The typed dispatcher behind the real adapter: it raises ``error`` or hangs."""
 
-    error: Exception | None = None
+    error: BaseException | None = None
 
     async def execute(self, delivery: GitHubDispatchEvent) -> InstallationDeliveryDispatchResult:
         if self.error is not None:
@@ -785,7 +785,12 @@ def test_failed_label_dispatch_logs_its_action_and_category_without_the_error_me
     assert row.projected is False
     assert row.claim_token is None
     assert row.retry_after == _NOW + timedelta(seconds=30)
-    # The traceback record follows; the sweep still sees the original exception.
+    # The line comes first, then the traceback record; the sweep still sees the original error.
+    assert [
+        record.levelno
+        for record in caplog.records
+        if record.name == _DELIVERY_LOGGER and record.levelno >= logging.WARNING
+    ] == [logging.WARNING, logging.ERROR]
     (traceback_record,) = _traceback_records(caplog)
     assert traceback_record.getMessage() == "GitHub webhook projection failed for delivery fail-1"
     assert traceback_record.exc_info is not None
@@ -1024,6 +1029,119 @@ def test_failure_line_has_no_action_without_a_reader(caplog: pytest.LogCaptureFi
         "GitHub webhook delivery bare-1 event=pull_request action=- "
         "failed stage=dispatch category=internal error=RuntimeError"
     ]
+
+
+def test_error_class_without_a_module_is_internal_and_still_released_for_retry(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    odd = type("OddError", (Exception,), {"__module__": None})
+
+    uow = _dispatch_failure_run(
+        _pull_request_receipt("odd-1"), FailingTypedDispatcher(odd("boom")), caplog
+    )
+
+    assert _failure_lines(caplog) == [
+        "GitHub webhook delivery odd-1 event=pull_request action=labeled "
+        "failed stage=dispatch category=internal error=OddError"
+    ]
+    (traceback_record,) = _traceback_records(caplog)
+    assert traceback_record.exc_info is not None
+    assert traceback_record.exc_info[0] is odd
+    assert uow.rows["odd-1"].retry_after == _NOW + timedelta(seconds=30)
+
+
+def test_a_failing_log_step_cannot_mask_the_error_or_block_the_release(
+    caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def broken_category(exc: BaseException) -> str:
+        raise RuntimeError("classifier bug")
+
+    monkeypatch.setattr(
+        "app.modules.integrations.webhooks.application.receive_github_delivery.failure_category",
+        broken_category,
+    )
+
+    uow = _dispatch_failure_run(
+        _pull_request_receipt("mask-1"),
+        FailingTypedDispatcher(httpx.ConnectError("refused")),
+        caplog,
+    )
+
+    assert _failure_lines(caplog) == []
+    (traceback_record,) = _traceback_records(caplog)
+    assert traceback_record.exc_info is not None
+    assert traceback_record.exc_info[0] is httpx.ConnectError
+    assert uow.rows["mask-1"].retry_after == _NOW + timedelta(seconds=30)
+
+
+def test_cancelled_dispatch_is_neither_logged_as_a_failure_nor_swallowed(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    uow = FakeReceiptUnitOfWork()
+    receiver = ReceiveGitHubDelivery(
+        uow_factory=lambda: uow,
+        dispatcher=GitHubWebhookDispatchAdapter(FailingTypedDispatcher(asyncio.CancelledError())),
+        now=lambda: _NOW,
+        action_of=action_of,
+    )
+    asyncio.run(receiver.execute(_pull_request_receipt("cancel-1")))
+
+    with (
+        caplog.at_level(logging.INFO, logger=_DELIVERY_LOGGER),
+        pytest.raises(asyncio.CancelledError),
+    ):
+        asyncio.run(receiver.replay_pending())
+
+    assert _failure_lines(caplog) == []
+    assert _traceback_records(caplog) == []
+
+
+@pytest.mark.parametrize("commit_fails", [True, False])
+def test_final_deferral_is_logged_only_once_the_receipt_is_committed(
+    caplog: pytest.LogCaptureFixture, commit_fails: bool
+) -> None:
+    @dataclass
+    class CommitUnitOfWork(FakeReceiptUnitOfWork):
+        dispatched: bool = False
+
+        async def commit(self) -> None:
+            if commit_fails and self.dispatched:
+                raise OperationalError("COMMIT", {}, Exception("connection lost"))
+            await super().commit()
+
+    receipt = _pull_request_receipt("defer-1")
+    # Two attempts are used up: this one is the third, so the deferral is final.
+    uow = CommitUnitOfWork(
+        rows={"defer-1": FakeClaimedReceipt(receipt, projection_attempt_count=2)}
+    )
+
+    class Dispatcher:
+        async def execute(self, delivery: WebhookReceipt) -> InstallationDeliveryDispatchResult:
+            uow.dispatched = True
+            return InstallationDeliveryDispatchResult(
+                InstallationDeliveryDispatchStatus.IGNORED_UNKNOWN_REPOSITORY, "unknown_repository"
+            )
+
+    receiver = ReceiveGitHubDelivery(
+        uow_factory=lambda: uow, dispatcher=Dispatcher(), now=lambda: _NOW, action_of=action_of
+    )
+    with caplog.at_level(logging.INFO, logger=_DELIVERY_LOGGER):
+        assert asyncio.run(receiver.replay_pending()) == (0 if commit_fails else 1)
+
+    warnings = [
+        record.getMessage() for record in caplog.records if record.levelno == logging.WARNING
+    ]
+    if commit_fails:
+        assert warnings == [
+            "GitHub webhook delivery defer-1 event=pull_request action=labeled "
+            "failed stage=finalize category=database error=OperationalError "
+            "outcome=ignored_unknown_repository detail=unknown_repository"
+        ]
+    else:
+        assert warnings == [
+            "GitHub webhook delivery defer-1 deferred after its last attempt: "
+            "ignored_unknown_repository"
+        ]
 
 
 @pytest.mark.parametrize(

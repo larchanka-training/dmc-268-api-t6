@@ -35,7 +35,9 @@ eligibility and the no-CI sweep consider only open PRs (`docs/PIPELINE_SPEC.md` 
 `edited` updates metadata only. The issue timeline is never fetched:
 `review_requested` and `review_request_removed` are dropped as irrelevant. A failed dispatch (for
 example a GitHub error or the 240 s dispatch timeout) releases the receipt for a retry after
-30 s; the third failure marks it failed and it is no longer replayed. It also projects
+30 s; the third failure marks it failed and it is no longer replayed (if the release itself fails,
+the receipt keeps its claim until the 5-minute lease lapses and the attempt counter does not
+advance). It also projects
 installation events. A delivery for an unknown installation or repository, or for an
 installation event whose repository details GitHub cannot answer, is deferred instead, see
 "Deferred deliveries" below.
@@ -106,12 +108,12 @@ trigger did not run, the projection result: `projected`, `ignored_stale`, `ignor
 the payload, an installation token or the webhook secret.
 
 A deferred delivery's outcome line ends with `retry_at=<time>`, or `retry_at=none` after the
-third attempt, and that final deferral is also logged as a WARNING with its reason.
-`deferred_repository_details` is an installation event whose repository details GitHub cannot
-answer; like the other deferrals it is retried after 5 minutes, at most three attempts in
-total. `retry_at=none` means no retry is scheduled: the receipt waits until something revives
-it, the hourly revival for installation events or linking the installation (`wake_receipts`),
-see "Deferred deliveries" below.
+third attempt, and that final deferral is also logged as a WARNING with its reason, once the
+receipt is committed. `deferred_repository_details` is an installation event whose repository
+details GitHub cannot answer; like the other deferrals it is retried after 5 minutes, at most
+three attempts in total. `retry_at=none` means no retry is scheduled: the receipt waits until
+something revives it, the hourly revival for installation events or linking the installation
+(`wake_receipts`), see "Deferred deliveries" below.
 
 Failure log. When processing a delivery fails, the worker first writes one WARNING line with the
 action and a failure category, then the sweep writes its ERROR record
@@ -122,10 +124,14 @@ is the greppable outcome, the second the diagnosis:
 GitHub webhook delivery <delivery_id> event=<event|-> action=<action|-> failed stage=<stage> category=<category> error=<ExceptionClass> [outcome=<status> detail=<detail>]
 ```
 
-For a failed `labeled` delivery the line therefore carries `action=labeled` and why no Run was
-created. `error` is the class name only: an exception message can hold a URL or an identifier, so
-it is left to the traceback record, and the line never carries the payload, an installation token
-or the webhook secret. The receipt is opaque to the receipt layer, so the action comes from a
+For a failed `labeled` delivery the line therefore carries `action=labeled` and the category of
+the failure. A `stage=dispatch` line does not prove that no Run exists: the Run may have been
+committed and published before the failure (the publish was confirmed and then `mark_published`
+failed), and a CI event loops over several pull requests, so a later one can fail after an
+earlier one was enqueued. The replayed delivery then reports `duplicate (active_run)`. `error` is
+the class name only: an exception message can hold a URL or an identifier, so it is left to the
+traceback record, and the line never carries the payload, an installation token or the webhook
+secret. The receipt is opaque to the receipt layer, so the action comes from a
 reader that the transport adapter supplies (`action_of`): it decodes the payload and returns the
 `action` only when it is a plain token (`[a-z_]`, 1 to 40 characters), so free text or a line
 break in a payload cannot reach the log. The reader runs for the `dispatch` and `finalize`
@@ -137,15 +143,15 @@ starts the `detail` of an ignored event in the outcome line.
 | stage | meaning |
 | --- | --- |
 | `claim` | the receipt could not be claimed; `event` and `action` are `-` |
-| `dispatch` | the projection or the Run trigger failed (a GitHub request, the database, the 240 s timeout); the receipt is released for a retry after 30 s, the third failure marks it failed |
+| `dispatch` | the projection or the Run trigger failed (a GitHub request, the database, the 240 s timeout); a Run may already exist, see above. The receipt is released for a retry after 30 s and the third failure marks it failed; if the release itself fails, the line still names the dispatch error, but the receipt waits for the 5-minute claim lease and its attempt counter does not advance |
 | `finalize` | the dispatch finished but updating the receipt failed; `outcome` and `detail` repeat the dispatch result, so a Run may already exist. The claim lapses after 5 minutes and the delivery is replayed; the trigger answers `duplicate` instead of creating a second Run |
 
 | category | meaning |
 | --- | --- |
 | `timeout` | the dispatch exceeded its timeout, or a builtin `TimeoutError` |
-| `github_request` | an `httpx` / `httpcore` error: a refused connection, an HTTP error status such as a 5xx from the current-PR lookup, an `httpx` timeout |
+| `github_request` | an `httpx` / `httpcore` error: a refused connection, an `httpx` timeout, or an `HTTPStatusError` of any status (401, 404, 5xx); the status is in the traceback record, not in the line |
 | `database` | a SQLAlchemy or `psycopg` error |
-| `internal` | anything else |
+| `internal` | anything else: our own bugs and failed invariants on a GitHub response (a `ValueError` for an unexpected response, such as inconsistent check-suite pagination or a changed pull request number, a pydantic `ValidationError`, a JSON error); the traceback record tells them apart |
 
 Deferred deliveries. A delivery the dispatcher cannot handle yet (unknown installation or
 repository, an event without a handler, or an installation event whose repository details
