@@ -328,9 +328,10 @@ Other details: `no open pull request` (a PR event or label whose PR is closed or
 nothing to enqueue), `no open pull request at this head` (a CI event for a head that no open PR
 has, for example CI of an old head that finished after a push),
 `not an ai-review labeled action`, `label is not ai-review` (a foreign label), and, when the
-trigger did not run, the projection result: `projected`, `ignored_stale`, `unknown_repository`,
-or why the projection was ignored, for example `action=labeled ignored_own_bot` (status
-`ignored_irrelevant_event`, the receipt is acknowledged):
+trigger did not run, the projection result: `projected`, `ignored_stale`, why the repository
+cannot take the event (table below the next one), or why the projection was ignored, for
+example `action=labeled ignored_own_bot` (status `ignored_irrelevant_event`, the receipt is
+acknowledged):
 
 | projection result | meaning |
 | --- | --- |
@@ -340,6 +341,34 @@ or why the projection was ignored, for example `action=labeled ignored_own_bot` 
 | `ignored_external_id_mismatch` | the stored PR with this number has another GitHub PR id |
 | `ignored_other_label` | a label other than `ai-review`; the dispatcher answers `label is not ai-review` before the projection, so a delivered label does not show it |
 | `ignored_unrelated` | remains only for paths the dispatcher already filters (review requests, actions the projection does not handle), so it does not appear for a delivered label |
+
+A pull request or label event whose repository cannot take it is not acknowledged: its status is
+`ignored_unknown_repository`, it is deferred like any deferral below (retried after 5 minutes,
+three attempts in total, then `retry_at=none`), and the detail names the case, for example
+`action=labeled disabled_repository`. The projection tells the cases apart with one extra
+database query after the repository lookup misses, without a GitHub call (api#80):
+
+| projection result | meaning |
+| --- | --- |
+| `unknown_repository` | no installation stores the repository: it was never onboarded |
+| `disabled_repository` | the event's installation stores the repository, but disabled (removed from the installation, or turned off in its settings); this wins when another installation stores it too |
+| `other_installation_repository` | the repository is stored, but only under installations other than the event's; pull request events are not checked against the linked installations, so the event's installation may also be unlinked |
+
+GitHub before the repository, one budget (api#80, kept by decision). A label delivery
+(`labeled`, `unlabeled`) asks GitHub first, for the installation token and the current pull
+request, and looks the repository up only after that; a pull request event that reads the
+current pull request (`synchronize`, `closed`, `reopened`, `edited`) does the same. So while
+GitHub cannot be reached, even a repository that was never onboarded fails the dispatch
+(`failed stage=dispatch category=github_request`) instead of being deferred as
+`unknown_repository`. Failed dispatches and deferrals spend the same three attempts
+(`projection_attempt_count`), in either order: two deferrals and then a failed dispatch mark
+the receipt failed (see "Deferred deliveries"), and two failed dispatches (a `ConnectError`,
+for example) and then one repository lookup that misses defer it for good (`retry_at=none`)
+after a single real check of the repository. A receipt deferred for good waits for linking
+(`wake_receipts`); a receipt marked failed is never revived: neither the hourly revival nor
+linking clears `projection_failed_at`, and the sweep claims only receipts without it. Its pull
+request gets a Run only from a later delivery, such as a push, a reopen, or the label removed
+and added again.
 
 `invalid_payload` (status `ignored_invalid_event`) means the payload could not be parsed into the event's shape,
 for example a `labeled` event with an empty `label`; for a `pull_request` event
