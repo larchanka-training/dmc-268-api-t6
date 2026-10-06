@@ -33,19 +33,22 @@ docker compose --profile webhooks up --build
 `scripts/webhook_smoke.py` alone only checks that the API accepts a delivery (202). It sends
 installation 17 and repository 101: against the real GitHub the worker's calls fail (GitHub does
 not know installation 17), so the delivery is marked failed after three tries and no Run is
-created; with the stub below but without the seed it is deferred as an unknown repository. To
-get a Run, seed that installation and repository and point the worker at
-`scripts/github_stub.py`, which answers the installation token and PR 7 with the `ai-review`
-label. Start from a clean database with only PostgreSQL and RabbitMQ up: the compose `backend`
-would hold port 8000, the compose `worker` would take the Run from the queue, and the compose
-`webhook-worker` could claim the delivery against the real GitHub. The seed fails on a second
-run; start again from `down -v`, which deletes the local database and broker volumes. Run each
-long-lived command in its own terminal:
+created; with the stub below but without the seed it is deferred with
+`ignored_unknown_repository`. To get a Run, seed that installation and repository and point the
+worker at `scripts/github_stub.py`, which answers the installation token and PR 7 with the
+`ai-review` label. Start from a clean database with only PostgreSQL and RabbitMQ up: the
+compose `backend` would hold port 8000, the compose `worker` would take the Run from the
+queue, and the compose `webhook-worker` could claim the delivery against the real GitHub. The
+SQL seed (the `psql` block of `INSERT`s below) fails on a second run, unlike `seed_prompts`,
+which is safe to rerun; to repeat the recipe, start again from `down -v`, which deletes the
+local database and broker volumes:
 
 ```bash
 docker compose --profile webhooks down -v
 docker compose up -d --wait postgres rabbitmq
 ```
+
+One-time setup of that database, from the repository root:
 
 ```bash
 # .env.local: the API and the worker read the same values
@@ -75,12 +78,19 @@ INSERT INTO rule_versions (id, repository_id, version, rules, checksum, is_activ
   SELECT gen_random_uuid(), id, 1, '[]'::jsonb, repeat('a', 64), true
   FROM repositories WHERE external_id = 101;
 SQL
+```
 
+Then start each long-lived command in its own terminal and leave it running:
+
+```bash
 uv run python scripts/github_stub.py                                      # terminal 1
 uv run --env-file .env.local uvicorn app.main:app --port 8000             # terminal 2
 uv run --env-file .env.local python -m app.webhook_worker                 # terminal 3
+```
 
-# terminal 4
+In a fourth terminal, send the delivery and read the Run:
+
+```bash
 GITHUB_WEBHOOK_SECRET=local-secret uv run python scripts/webhook_smoke.py
 sleep 40                                 # the worker sweeps every 30 s
 docker compose exec -T postgres psql -U app -d app -c \
@@ -88,11 +98,17 @@ docker compose exec -T postgres psql -U app -d app -c \
 ```
 
 After the sweep the query shows one Run: `queued`, head `aaaa…`, trigger
-`webhook`, engine `fast`, published `t`. In the worker terminal the delivery line reads
-`GitHub webhook delivery … event=pull_request status=projected_pr … enqueued run=<id>`; a
-deferred delivery prints the same prefix with another status, such as
-`status=ignored_unknown_repository`. The repository waits for no CI (`wait_for_ci = never`), so the
-label alone starts the Run.
+`webhook`, engine `fast`, published `t`. In the worker terminal, after the `INFO:<logger>:`
+prefix, the delivery line reads (ids vary):
+
+```text
+GitHub webhook delivery <delivery_id> event=pull_request status=projected_pr detail=action=labeled pr=<pull request id> head=aaaaaaa: enqueued run=<run id>
+```
+
+`enqueued` has no reason, so no parentheses follow it (see "Outcome log" below). A deferred
+delivery prints the same prefix with another status, such as
+`status=ignored_unknown_repository`, and ends with `retry_at=`. The repository waits for no CI
+(`wait_for_ci = never`), so the label alone starts the Run.
 
 The review worker is not needed for this check: started with the same `.env.local`, it would
 claim the Run and fail at its first GitHub read of the PR, which the stub answers only in the
@@ -281,18 +297,23 @@ shows why a label produced no Run:
 GitHub webhook delivery <delivery_id> event=<event> status=<status> detail=<detail> [retry_at=<time|none>]
 ```
 
-`status` is the dispatch status (`projected_pr`, `processed_ci`, `onboarded`, `ignored_*`,
-`deferred_known_event`, `deferred_repository_details`). `detail` is `-` or the reason. For a
-`pull_request` event it starts with `action=<action>`, so `labeled` and `synchronize` can be
-told apart (an ignored action, such as `ready_for_review`, shows only that). For a Run trigger
+`status` is the dispatch status: `projected_pr`, `processed_ci`, `onboarded`, the final
+`ignored_irrelevant_event` and `ignored_invalid_event`, or a deferral, retried as described in
+"Deferred deliveries" below (`ignored_unknown_installation`, `ignored_unknown_repository`,
+`deferred_known_event`, `deferred_repository_details`; a deferral carries `retry_at`).
+`detail` is `-` or the reason. For a `pull_request` event it starts with `action=<action>`, so
+`labeled` and `synchronize` can be told apart (an ignored action, such as `ready_for_review`,
+shows only that). For a Run trigger
 (label, `synchronize`, `reopened`, CI events) the rest is
-`pr=<pull request id> head=<first 7 of the head sha>: <status> (<reason>[: <detail>]) run=<run id>`,
-and a CI event joins one such outcome per open PR on that head with `; ` (and has no action):
+`pr=<pull request id> head=<first 7 of the head sha>: <status>[ (<reason>[: <detail>])][ run=<run id>]`:
+`enqueued` and `publication_pending` have no reason and end with `run=`, every other status has
+a reason in parentheses and no `run=`. A CI event joins one such outcome per open PR on that
+head with `; ` (and has no action):
 
 | status | reason | meaning |
 | --- | --- | --- |
 | `enqueued` | | the Run was inserted and published (`run=<id>`) |
-| `publication_pending` | | the Run was inserted, the broker publish failed; the review worker's leader loop replays it |
+| `publication_pending` | | the Run was inserted (`run=<id>`), the broker publish failed; the review worker's leader loop replays it |
 | `ineligible` | the CI gate reason: `ci_blocked` (a foreign check suite or the commit status is not green), `waiting_for_ci` (no CI evidence yet: with `wait_for_ci = always`, with `auto` while the label or head time is unknown, or with `auto` still inside the 2-minute window), `label_not_active`, `stale_head`, `stale_state`, `closed_pr`, `disabled_repository`, `unknown_pr` | the gate decided not to start a Run |
 | `unconfigured` | `missing_installation`, `missing_rules` (no active rule version), `missing_prompt` (no active `review.system` prompt and none pinned) | the repository lacks what a Run needs; a new label or CI event does not change that |
 | `stale` | `pull_request_gone`, `repository_gone`, `state_changed` (the PR changed between the gate and the locked read) | the decision no longer matches the current PR |
