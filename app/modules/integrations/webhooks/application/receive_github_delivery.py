@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Callable
-from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Protocol
@@ -268,26 +267,52 @@ class ReceiveGitHubDelivery:
 
         Class names and the action only: an exception message can carry a URL or an
         identifier, so it is never logged here. ``result`` is the dispatch outcome a failed
-        finalize leaves behind (a Run may already exist).
+        finalize leaves behind (a Run may already exist). A field that cannot be computed
+        falls back to a default after a diagnostic record, so the line is always written.
         """
-        with suppress(Exception):  # logging a failure must never raise or replace it
-            action = None
-            if delivery is not None and self._action_of is not None:
-                with suppress(Exception):  # a broken reader still leaves the line
-                    action = self._action_of(delivery)
-            outcome = (
-                ""
-                if result is None
-                else f" outcome={result.status.value} detail={result.detail or '-'}"
-            )
-            _LOGGER.warning(
-                "GitHub webhook delivery %s event=%s action=%s failed stage=%s category=%s "
-                "error=%s%s",
+        action = "-"
+        reader = self._action_of
+        if delivery is not None and reader is not None:
+            action = _failure_field(delivery_id, "action", "-", lambda: reader(delivery) or "-")
+        category = _failure_field(
+            delivery_id, "category", "internal", lambda: failure_category(exc)
+        )
+        outcome = ""
+        if result is not None:
+            rendered = _failure_field(
                 delivery_id,
-                delivery.event_name if delivery is not None else "-",
-                action or "-",
-                stage,
-                failure_category(exc),
-                type(exc).__name__,
-                outcome,
+                "outcome",
+                "-",
+                lambda: f"{result.status.value} detail={result.detail or '-'}",
             )
+            outcome = f" outcome={rendered}"
+        # Not guarded: logging reports format/emit errors itself (Handler.handleError, stderr).
+        _LOGGER.warning(
+            "GitHub webhook delivery %s event=%s action=%s failed stage=%s category=%s error=%s%s",
+            delivery_id,
+            delivery.event_name if delivery is not None else "-",
+            action,
+            stage,
+            category,
+            type(exc).__name__,
+            outcome,
+        )
+
+
+def _failure_field(delivery_id: str, field: str, default: str, compute: Callable[[], str]) -> str:
+    """``compute()``, or ``default`` after a WARNING that names the field and the error class.
+
+    The error message is never logged: the action reader parses the payload, so a message
+    could carry a fragment of it.
+    """
+    try:
+        return compute()
+    except Exception as error:
+        _LOGGER.warning(
+            "GitHub webhook delivery %s failure line: %s fell back to %s after %s",
+            delivery_id,
+            field,
+            default,
+            type(error).__name__,
+        )
+        return default

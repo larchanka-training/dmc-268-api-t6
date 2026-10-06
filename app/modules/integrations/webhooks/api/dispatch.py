@@ -50,11 +50,12 @@ def _action_token(value: object) -> str | None:
 
 
 def action_of(receipt: WebhookReceipt) -> str | None:
-    """The payload's action as a safe log token, or None; never raises."""
-    try:
-        decoded = json.loads(receipt.payload_json)
-    except (TypeError, ValueError, RecursionError):
-        return None
+    """The payload's action as a safe log token, or None when it has none.
+
+    A payload that cannot be decoded is an error, not a missing action: it raises, and the
+    failure line records that fallback (docs/WEBHOOK_WORKER.md, failure log).
+    """
+    decoded = json.loads(receipt.payload_json)
     return _action_token(decoded.get("action")) if isinstance(decoded, dict) else None
 
 
