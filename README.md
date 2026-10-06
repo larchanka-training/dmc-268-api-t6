@@ -13,32 +13,62 @@ uv sync
 
 ## Run
 
-Docker:
+Docker, one step:
 
 ```bash
-docker compose up
+docker compose up --build --wait
 ```
 
-Backend: `http://localhost:8000`
-Healthcheck: `http://localhost:8000/healthcheck`
+It starts PostgreSQL, RabbitMQ and Redis; then the one-shot `bootstrap` service applies the
+migrations (`alembic upgrade head`) and seeds the review prompts; `backend` and the review
+`worker` start only after it has completed. `--wait` returns when every service is healthy. If a
+migration fails, the command fails and new `backend` and `worker` containers are not started,
+so a fresh stack without the schema never looks healthy. Containers that were already running
+keep running: there the exit code of `up` is the only signal. `Can't locate revision` from
+`bootstrap` means another branch has migrated the database further: go back to that branch or
+reset with `docker compose down -v`.
+
+Run the same command after pulling new commits: `--build` rebuilds the image and `bootstrap`
+applies the new migrations. Without code changes `docker compose up --wait` is enough and,
+unlike `--build`, needs no access to the registry.
+
+| Service | What it runs | From the host |
+|---|---|---|
+| `backend` | API, `uvicorn app.main:app` | `http://localhost:8000`, `http://localhost:8000/healthcheck` |
+| `worker` | review worker, `python -m app.worker`: consumes the review queues | — |
+| `bootstrap` | migrations and the prompt seed, exits when done | — |
+| `postgres` | PostgreSQL 17 | `localhost:5432`, user, password and database `app` |
+| `rabbitmq` | RabbitMQ 4, the review queue broker | `localhost:5672`, management UI `http://localhost:15672`, `app` / `app` |
+| `redis` | Redis 8, cache | `localhost:6379` |
+| `webhook-worker` | only with `--profile webhooks` ([below](#webhook-worker)) | — |
+
+`/healthcheck` is liveness only: it answers `200` without reading the database. Schema
+readiness comes from the start order, not from an endpoint
+([docs/BACKEND_ARCHITECTURE.md](docs/BACKEND_ARCHITECTURE.md#readiness-готовность-схемы)).
 
 Stop:
 
 ```bash
 docker compose down
-docker compose down -v  # also remove PostgreSQL data
+docker compose down -v  # also remove the PostgreSQL, RabbitMQ and Redis volumes
 ```
 
-Run locally (`uv run` does not read `.env` by itself; outside Compose change the `postgres` host
-in `DATABASE_URL` to `localhost`):
+Run the processes outside Compose (`uv run` does not read `.env` by itself; change the
+`postgres` and `rabbitmq` hosts in `DATABASE_URL` and `RABBITMQ_URL` to `localhost`). Nothing
+applies the migrations for you here:
 
 ```bash
+docker compose up -d --wait postgres rabbitmq
+uv run --env-file .env alembic upgrade head
+uv run --env-file .env python -m app.bootstrap.seed_prompts
 uv run --env-file .env uvicorn app.main:app --reload
+uv run --env-file .env python -m app.worker  # review worker, in its own terminal
 ```
 
 ## Seed review prompts
 
-Before deploying an application version that uses AI review, load the versioned
+`docker compose up` and the staging deploy do this in the `bootstrap` service. Outside Compose,
+before running an application version that uses AI review, load the versioned
 prompt artifacts into PostgreSQL from the repository checkout:
 
 ```bash
@@ -86,13 +116,11 @@ sign-in answers `503`; without `AUTH_JWT_PUBLIC_KEY` every authenticated endpoin
 `202` with `{"status": "pending"}`, or `"duplicate"` for a repeated `X-GitHub-Delivery`. Nothing
 else happens in the request: webhook-worker projects the delivery later.
 
-`docker compose up` does not run migrations (the image only starts uvicorn), and `/healthcheck`
-answers `200` without touching the schema. Apply them, then smoke-test the endpoint:
+Start the stack (`bootstrap` applies the migrations before `backend` starts), then smoke-test the
+endpoint:
 
 ```bash
-docker compose up -d postgres
-docker compose run --rm backend alembic upgrade head
-docker compose up -d backend
+docker compose up --build --wait
 uv run --env-file .env python scripts/webhook_smoke.py
 ```
 
@@ -181,6 +209,26 @@ settings above.
 uv run pytest
 ```
 
+Integration tests (`-m integration`) need a real PostgreSQL and RabbitMQ and are skipped without
+the variables below. The local stack serves both:
+
+```bash
+docker compose up -d --wait postgres rabbitmq
+docker compose exec rabbitmq rabbitmqctl add_vhost test
+docker compose exec rabbitmq rabbitmqctl set_permissions -p test app '.*' '.*' '.*'
+
+TEST_DATABASE_URL=postgresql+psycopg://app:app@localhost:5432/app \
+TEST_RABBITMQ_URL=amqp://app:app@localhost:5672/test \
+uv run pytest -m integration -rs
+```
+
+| Variable | Needed by | Notes |
+|---|---|---|
+| `TEST_DATABASE_URL` | every integration test | Each test creates a random schema, migrates it and drops only it, so the database of the local stack is safe to use. The user needs `CREATE SCHEMA`. |
+| `TEST_RABBITMQ_URL` | worker, rerun and cancel tests | The tests delete and redeclare the review topology. Give them their own virtual host (`/test` above), never `/`, where the compose `worker` consumes. |
+
+CI runs the same tests in the job `Python lint / type / test` and fails on a skipped one.
+
 ## Lint & format
 
 ```bash
@@ -197,12 +245,12 @@ uv run mypy .
 
 ## Environments
 
-Staging выкатывается автоматически при каждом push в `main` ([docs/CICD.md](docs/CICD.md)). Prod-адреса зарезервированы на edge-прокси и отвечают `502`, пока prod не задеплоен.
+Staging выкатывается автоматически при каждом push в `main` ([docs/CICD.md](docs/CICD.md)). Prod-адреса зарезервированы на edge-прокси и, пока prod не задеплоен, отвечают заглушкой `503`.
 
 | Сервис | Staging | Prod |
 |---|---|---|
 | API | [staging-api.dmc268-t6.axyi.ru](https://staging-api.dmc268-t6.axyi.ru/healthcheck) · [Swagger](https://staging-api.dmc268-t6.axyi.ru/docs) | [api.dmc268-t6.axyi.ru](https://api.dmc268-t6.axyi.ru) |
-| Webhook `POST /webhooks/github` | `https://staging-api.dmc268-t6.axyi.ru/webhooks/github` — обслуживает API; [staging-webhook.dmc268-t6.axyi.ru](https://staging-webhook.dmc268-t6.axyi.ru) зарезервирован под отдельный сервис и отвечает `502` | [webhook.dmc268-t6.axyi.ru](https://webhook.dmc268-t6.axyi.ru) — зарезервирован |
+| Webhook `POST /webhooks/github` | `https://staging-api.dmc268-t6.axyi.ru/webhooks/github` — обслуживает API; [staging-webhook.dmc268-t6.axyi.ru](https://staging-webhook.dmc268-t6.axyi.ru) зарезервирован под отдельный сервис и отвечает заглушкой `503` | [webhook.dmc268-t6.axyi.ru](https://webhook.dmc268-t6.axyi.ru) — зарезервирован |
 | Web UI ([dmc-268-ui-t6](https://github.com/larchanka-training/dmc-268-ui-t6)) | [staging-ui.dmc268-t6.axyi.ru](https://staging-ui.dmc268-t6.axyi.ru) | [ui.dmc268-t6.axyi.ru](https://ui.dmc268-t6.axyi.ru) |
 
 `https://dmc268-t6.axyi.ru` — редирект на prod UI.

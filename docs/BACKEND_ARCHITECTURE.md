@@ -24,8 +24,9 @@
 check-run, REST для UI. Дерево слоёв и пять entrypoints ниже описывают целевую организацию
 приложения; payment gateway и отдельные сервисы ещё предстоит реализовать. Весь код пока живёт в
 одном пакете `app/`; разнесение по сервисам `services/<name>/` (Р-12) реализуется в
-PR #10. Текущий Compose поднимает не весь целевой runtime, а backend, worker, PostgreSQL,
-RabbitMQ и Redis, в профиле `webhooks` ещё `webhook-worker` (разбор квитанций вебхуков и
+PR #10. Текущий Compose поднимает не весь целевой runtime, а backend, worker, разовый
+`bootstrap` (миграции и сид промптов), PostgreSQL, RabbitMQ и Redis, в профиле `webhooks` ещё
+`webhook-worker` (разбор квитанций вебхуков и
 создание Run, [WEBHOOK_WORKER.md](WEBHOOK_WORKER.md)); worker и очередь описаны в разделе
 «Worker и очередь (#34)».
 
@@ -414,3 +415,37 @@ ENUM, rename, partial indexes и data migrations. Перед применени�
 Пользователь тестовой БД должен иметь право CREATE SCHEMA. В Alembic передаётся
 готовое соединение: переменная `DATABASE_URL` приложения не может перенаправить тест
 в другую БД. Без `TEST_DATABASE_URL` интеграционные тесты пропускаются.
+
+### Readiness: готовность схемы
+
+`GET /healthcheck` — только liveness: отвечает `200`, пока жив процесс, и в БД не ходит.
+Отдельного readiness-эндпоинта нет (решение по larchanka-training/dmc-268-ui-t6#66): готовность
+схемы обеспечивает порядок старта, а не проверка во время работы.
+
+- Миграции и сид промптов выполняет разовый сервис `bootstrap`
+  (`alembic upgrade head && python -m app.bootstrap.seed_prompts`) — на staging
+  (`deploy/compose/staging.yml`) и локально (`docker-compose.yml`).
+- API и оба воркера зависят от него с условием `service_completed_successfully`. При
+  ненулевом коде выхода `bootstrap` Compose их не запускает, а `docker compose up --wait`
+  завершается ошибкой; на staging `deploy.sh` после этого откатывает выкат. Свежий стек с
+  пустой схемой не поднимается и здоровым не выглядит.
+- Повторный запуск безопасен: применённые ревизии Alembic пропускает, сид вставляет только
+  новые версии промптов и падает, если содержимое уже сохранённой версии изменилось.
+
+Почему не эндпоинт. Проверка БД в healthcheck контейнера делала бы API unhealthy при коротком
+сбое PostgreSQL, и `up --wait` ронял бы выкат из-за сбоя, не связанного с релизом. Для воркеров
+действует то же правило: heartbeat — liveness, а не прогресс ([CICD.md](CICD.md), §3).
+
+Границы решения:
+
+- Если `bootstrap` упал при повторном `up`, а контейнеры API и воркеров не пересоздавались,
+  они продолжают работать на прежней схеме и остаются healthy: сигнал — только код выхода
+  `up`. Локально так бывает после переключения ветки (`Can't locate revision`).
+- Схему, сломанную уже после старта (ручной `DROP`, откат ревизии), healthcheck не видит: это
+  видно по ошибкам запросов в логах.
+- `docker compose up --no-deps backend` и запуск процессов через `uv run` обходят `bootstrap`:
+  там миграции и сид применяются вручную ([README](../README.md), «Run»).
+- Локально `backend` дополнительно ждёт здоровый RabbitMQ, а воркеры, как на staging, отдают
+  состояние через heartbeat-файл (`WORKER_HEARTBEAT_FILE`): `docker compose up --wait` ждёт,
+  пока `worker` подключит консьюмеры. На staging API от брокера намеренно не зависит
+  (CICD.md, §3).
