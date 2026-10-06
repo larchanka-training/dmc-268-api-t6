@@ -1246,12 +1246,14 @@ components:
           format: uuid
         fullName:
           type: string
+          minLength: 1
           description: "`owner/name`."
         url:
           type: string
           format: uri
         defaultBranch:
           type: string
+          minLength: 1
         enabled:
           type: boolean
         defaultEngine:
@@ -1343,6 +1345,7 @@ components:
           description: GitHub user ID.
         login:
           type: string
+          minLength: 1
         name:
           type: [string, "null"]
         avatarUrl:
@@ -1358,6 +1361,7 @@ components:
           format: uuid
         name:
           type: string
+          minLength: 1
         installationId:
           type: integer
           description: GitHub App installation ID.
@@ -1375,6 +1379,7 @@ components:
           description: GitHub user ID.
         login:
           type: string
+          minLength: 1
         name:
           type: [string, "null"]
         avatarUrl:
@@ -1400,6 +1405,7 @@ components:
       properties:
         accessToken:
           type: string
+          minLength: 1
         tokenType:
           type: string
           enum: [Bearer]
