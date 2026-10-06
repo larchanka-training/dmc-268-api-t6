@@ -71,7 +71,9 @@ def _seed(connection: Connection, engine: str) -> dict[str, UUID]:
     return ids
 
 
-def _add_run(connection: Connection, ids: dict[str, UUID], number: int, state: str) -> UUID:
+def _add_run(
+    connection: Connection, ids: dict[str, UUID], number: int, state: str, engine: str = "deep"
+) -> UUID:
     pr, run_id = uuid4(), uuid4()
     connection.execute(
         text(
@@ -86,7 +88,7 @@ def _add_run(connection: Connection, ids: dict[str, UUID], number: int, state: s
             "INSERT INTO runs (id, code_change_id, base_sha, base_ref, head_sha, state, trigger, "
             "idempotency_key, engine, rule_version_id, prompt_version_id, available_at, "
             "created_at) VALUES (:id, :pr, :base, 'main', :head, CAST(:state AS run_state), "
-            "'webhook', :key, 'deep', :rule, :prompt, :at, :at)"
+            "'webhook', :key, :engine, :rule, :prompt, :at, :at)"
         ),
         {
             "id": run_id,
@@ -95,6 +97,7 @@ def _add_run(connection: Connection, ids: dict[str, UUID], number: int, state: s
             "head": "e" * 40,
             "state": state,
             "key": uuid4().hex + uuid4().hex,
+            "engine": engine,
             "rule": ids["rule"],
             "prompt": ids["prompt"],
             "at": LONG_AGO,
@@ -174,12 +177,16 @@ class Publisher:
 
 
 @pytest.mark.integration
-def test_reconciler_does_not_republish_into_the_deep_queue(schema: tuple[str, str]) -> None:
+def test_reconciler_republishes_fast_runs_but_not_into_the_deep_queue(
+    schema: tuple[str, str],
+) -> None:
     database_url, name = schema
     connection = _migrate(database_url, name, "head")
     ids = _seed(connection, "fast")
     # A legacy deep run written after the migration, e.g. by an old API process.
     deep = _add_run(connection, ids, 1, "queued")
+    # Positive control: a stale queued fast run is republished.
+    fast = _add_run(connection, ids, 2, "queued", engine="fast")
     connection.commit()
     connection.close()
 
@@ -200,4 +207,4 @@ def test_reconciler_does_not_republish_into_the_deep_queue(schema: tuple[str, st
     published = asyncio.run(reconcile())
 
     assert deep not in [run_id for run_id, _ in published]
-    assert published == []
+    assert published == [(fast, "fast")]
