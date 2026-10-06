@@ -5,12 +5,14 @@ Answers just enough for `scripts/webhook_smoke.py`'s `pull_request` / `labeled` 
 (installation 17, repository 101 `smoke/webhook-smoke`, PR 7) to create a Run: an installation
 token and the current PR with the `ai-review` label. The recipe seeds `wait_for_ci = never`, so
 no CI is read. Every other request gets 404; tests/test_github_stub_script.py keeps the PR in
-step with the smoke delivery.
+step with the smoke delivery. CI's `Webhook container smoke` job starts it too, for the webhook
+worker of the built image; there repository 101 is not seeded, so the delivery is deferred as an
+unknown repository and the job checks that outcome line in the worker log.
 
 Usage (point the webhook worker at it with GITHUB_API_URL=http://127.0.0.1:9999):
     uv run python scripts/github_stub.py [--port 9999]
 
-Stdlib only; local use, never a deployed environment.
+Stdlib only; local use and CI, never a deployed environment.
 """
 
 from __future__ import annotations
