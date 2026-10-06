@@ -26,6 +26,10 @@ class RunUpdateStream(RunUpdatePublisher, Protocol):
     def subscribe(self) -> AbstractAsyncContextManager[AsyncIterator[RunUpdated]]: ...
 
 
+class RunAccessRepository(Protocol):
+    async def has_run_access(self, run_id: UUID) -> bool: ...
+
+
 class _Subscriber:
     def __init__(self) -> None:
         self.pending: dict[UUID, RunUpdated] = {}

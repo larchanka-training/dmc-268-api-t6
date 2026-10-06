@@ -117,3 +117,36 @@ def test_sweep_logs_the_outcome_of_an_excluded_candidate(
         "INFO No-CI sweep pr=11111111-1111-1111-1111-111111111111 head=aaaaaaa: "
         f"{outcome}; excluded until the head or label changes"
     ]
+
+
+@dataclass
+class FakeUnitOfWork:
+    candidates: Candidates
+    committed: bool = False
+
+    async def __aenter__(self) -> FakeUnitOfWork:
+        return self
+
+    async def __aexit__(self, exc_type: object, exc: object, tb: object) -> None:
+        pass
+
+    async def commit(self) -> None:
+        self.committed = True
+
+    async def rollback(self) -> None:
+        pass
+
+
+def test_sweep_with_unit_of_work_commits_on_exclusion() -> None:
+    candidates = Candidates()
+    uow = FakeUnitOfWork(candidates)
+    enqueuer = Enqueuer(EnqueueResult(EnqueueStatus.INELIGIBLE))
+
+    attempted = asyncio.run(
+        SweepNoCi(uow_factory=lambda: uow, enqueuer=enqueuer, now=lambda: _NOW).execute()
+    )
+
+    assert attempted == 1
+    assert enqueuer.calls == [_CANDIDATE]
+    assert candidates.excluded == [_CANDIDATE]
+    assert uow.committed is True

@@ -196,13 +196,46 @@ def _clear_delivery_attempts(message_id: str | None) -> None:
         _unexpected_delivery_attempts.pop(message_id, None)
 
 
+def _get_delivery_attempts(message: AbstractIncomingMessage) -> int:
+    headers = getattr(message, "headers", None)
+    if isinstance(headers, dict):
+        if "x-delivery-count" in headers:
+            try:
+                return int(headers["x-delivery-count"]) + 1
+            except (ValueError, TypeError):
+                pass
+        if "x-death" in headers and isinstance(headers["x-death"], list):
+            try:
+                deaths = sum(
+                    int(d.get("count", 1)) for d in headers["x-death"] if isinstance(d, dict)
+                )
+                if deaths > 0:
+                    return deaths + 1
+            except (ValueError, TypeError):
+                pass
+        for key in ("x-attempt", "x-retries", "attempt", "delivery_attempts"):
+            if key in headers:
+                try:
+                    return int(headers[key])
+                except (ValueError, TypeError):
+                    pass
+    key = str(message.message_id or id(message))
+    return _unexpected_delivery_attempts.get(key, 0) + 1
+
+
 async def _requeue_after_error(
     message: AbstractIncomingMessage,
     max_retries: int = MAX_UNEXPECTED_RETRIES,
 ) -> None:
     key = str(message.message_id or id(message))
-    attempts = _unexpected_delivery_attempts.get(key, 0) + 1
+    attempts = _get_delivery_attempts(message)
     _unexpected_delivery_attempts[key] = attempts
+
+    headers = getattr(message, "headers", None)
+    if isinstance(headers, dict):
+        headers["x-delivery-count"] = attempts
+        headers["x-attempt"] = attempts + 1
+
     if attempts >= max_retries:
         _LOGGER.error(
             "Message %s exceeded maximum unexpected retry attempts (%d); routing to DLQ %s",

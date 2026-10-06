@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Protocol, cast
 from uuid import UUID
 
+from app.common.application.unit_of_work import UnitOfWork
 from app.modules.reviews.application.conventions import (
     ActiveConventionsPrompt,
     GeneratedConventions,
@@ -83,6 +85,14 @@ class RunVcsRepository(Protocol):
     async def get_run_snapshots(self, run_id: UUID) -> list[DiffSnapshot] | None: ...
 
 
+class RunProcessingUnitOfWork(UnitOfWork, Protocol):
+    @property
+    def repository(self) -> RunProcessingRepository: ...
+
+    @property
+    def blob_cache(self) -> BlobCacheWriter | None: ...
+
+
 class ReviewRunProcessor:
     """Persist provider inputs before downstream review actions consume them."""
 
@@ -94,6 +104,7 @@ class ReviewRunProcessor:
         conventions: GenerateRepoConventions | None = None,
         vcs_provider: VcsProvider | None = None,
         trace: RunTrace | None = None,
+        uow_factory: Callable[[], RunProcessingUnitOfWork] | None = None,
     ) -> None:
         self._repository = repository
         self._provider = provider
@@ -101,6 +112,7 @@ class ReviewRunProcessor:
         self._conventions = conventions
         self._vcs_provider = vcs_provider
         self._trace = trace
+        self._uow_factory = uow_factory
 
     async def execute(self, run_id: UUID) -> bool:
         """Fetch and snapshot the exact head associated with a durable run."""
@@ -146,12 +158,22 @@ class ReviewRunProcessor:
                         )
                         for file in fetched.files
                     ]
-                    stored_files = await StoreDiffSnapshot(self._repository).execute(
-                        run_id=run_id,
-                        code_change_id=vcs_run.code_change_id,
-                        head_sha=vcs_run.head_sha,
-                        files=files,
-                    )
+                    if self._uow_factory is not None:
+                        async with self._uow_factory() as uow:
+                            stored_files = await StoreDiffSnapshot(uow.repository).execute(
+                                run_id=run_id,
+                                code_change_id=vcs_run.code_change_id,
+                                head_sha=vcs_run.head_sha,
+                                files=files,
+                            )
+                            await uow.commit()
+                    else:
+                        stored_files = await StoreDiffSnapshot(self._repository).execute(
+                            run_id=run_id,
+                            code_change_id=vcs_run.code_change_id,
+                            head_sha=vcs_run.head_sha,
+                            files=files,
+                        )
                     step.response = {
                         "files": [
                             {
@@ -177,13 +199,23 @@ class ReviewRunProcessor:
                 code_change_id=run.code_change_id,
                 head_sha=run.head_sha,
             )
-            stored_files = await StoreDiffSnapshot(self._repository).execute(
-                run_id=run_id,
-                code_change_id=run.code_change_id,
-                head_sha=run.head_sha,
-                files=files,
-            )
-        if self._blob_cache is not None:
+            if self._uow_factory is not None:
+                async with self._uow_factory() as uow:
+                    stored_files = await StoreDiffSnapshot(uow.repository).execute(
+                        run_id=run_id,
+                        code_change_id=run.code_change_id,
+                        head_sha=run.head_sha,
+                        files=files,
+                    )
+                    await uow.commit()
+            else:
+                stored_files = await StoreDiffSnapshot(self._repository).execute(
+                    run_id=run_id,
+                    code_change_id=run.code_change_id,
+                    head_sha=run.head_sha,
+                    files=files,
+                )
+        if self._blob_cache is not None or self._uow_factory is not None:
             if self._vcs_provider is not None:
                 assert vcs_run is not None
                 await self._store_vcs_blobs(run_id, vcs_run, stored_files, failed_blob_shas)
@@ -206,8 +238,8 @@ class ReviewRunProcessor:
         return True
 
     async def _store_file_blobs(self, run: RunDiffInput, files: list[DiffSnapshot]) -> None:
-        assert self._blob_cache is not None
         assert self._provider is not None
+        blobs: list[tuple[BlobCacheKey, str]] = []
         for file in files:
             if run.repository_id is None or file.blob_sha is None:
                 continue
@@ -216,14 +248,25 @@ class ReviewRunProcessor:
                 head_sha=run.head_sha,
                 path=file.filename,
             )
-            await self._blob_cache.put(
-                BlobCacheKey(
-                    repository_id=run.repository_id,
-                    blob_sha=file.blob_sha,
-                ),
-                content,
-                ttl=BLOB_CACHE_TTL,
+            blobs.append(
+                (
+                    BlobCacheKey(
+                        repository_id=run.repository_id,
+                        blob_sha=file.blob_sha,
+                    ),
+                    content,
+                )
             )
+        if blobs:
+            if self._uow_factory is not None:
+                async with self._uow_factory() as uow:
+                    if uow.blob_cache is not None:
+                        for key, content in blobs:
+                            await uow.blob_cache.put(key, content, ttl=BLOB_CACHE_TTL)
+                    await uow.commit()
+            elif self._blob_cache is not None:
+                for key, content in blobs:
+                    await self._blob_cache.put(key, content, ttl=BLOB_CACHE_TTL)
 
     async def _store_vcs_blobs(
         self,
@@ -232,8 +275,8 @@ class ReviewRunProcessor:
         files: list[DiffSnapshot],
         failed_blob_shas: frozenset[str],
     ) -> None:
-        assert self._blob_cache is not None
         assert self._vcs_provider is not None
+        blobs: list[tuple[BlobCacheKey, str]] = []
         for file in files:
             if (
                 file.blob_sha is None
@@ -242,7 +285,10 @@ class ReviewRunProcessor:
             ):
                 continue
             key = BlobCacheKey(run.repository_id, file.blob_sha)
-            if (await self._blob_cache.get(key)).status is BlobCacheStatus.HIT:
+            if (
+                self._blob_cache is not None
+                and (await self._blob_cache.get(key)).status is BlobCacheStatus.HIT
+            ):
                 continue
             try:
                 blob = await self._vcs_provider.get_blob(run.locator, file.blob_sha)
@@ -267,4 +313,15 @@ class ReviewRunProcessor:
                 continue
             if "\x00" in content:
                 continue
-            await self._blob_cache.put(key, content, ttl=BLOB_CACHE_TTL)
+            blobs.append((key, content))
+
+        if blobs:
+            if self._uow_factory is not None:
+                async with self._uow_factory() as uow:
+                    if uow.blob_cache is not None:
+                        for key, content in blobs:
+                            await uow.blob_cache.put(key, content, ttl=BLOB_CACHE_TTL)
+                    await uow.commit()
+            elif self._blob_cache is not None:
+                for key, content in blobs:
+                    await self._blob_cache.put(key, content, ttl=BLOB_CACHE_TTL)

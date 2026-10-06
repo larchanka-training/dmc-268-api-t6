@@ -94,6 +94,7 @@ def test_process_review_run_composes_repository_and_processor_from_a_shared_fact
             *,
             vcs_provider: Vcs,
             trace: object = None,
+            uow_factory: object = None,
         ) -> None:
             assert trace is None
             assert isinstance(repository, Repository)
@@ -101,6 +102,7 @@ def test_process_review_run_composes_repository_and_processor_from_a_shared_fact
             assert cache is not None
             assert conventions is not None
             assert vcs_provider is vcs
+            assert uow_factory is not None
 
     class Pipeline:
         def __init__(

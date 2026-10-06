@@ -26,6 +26,9 @@ UI_CONTRACT_COMMIT = "fd4b5c8a8d3709fe5a4c69005b63e7fc99e4819f"
 
 
 class ContractRepository:
+    async def has_run_access(self, run_id: UUID) -> bool:
+        return run_id == RUN_ID
+
     async def get_run(self, run_id: UUID) -> RunListItem | None:
         if run_id != RUN_ID:
             return None

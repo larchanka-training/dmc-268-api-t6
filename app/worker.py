@@ -127,7 +127,9 @@ from app.modules.reviews.infrastructure.llm.models import (
     GatewayReviewModel,
 )
 from app.modules.reviews.infrastructure.llm.settings import LlmSettings
-from app.modules.reviews.infrastructure.no_ci_sweep_candidates import SqlAlchemyDueNoCiCandidates
+from app.modules.reviews.infrastructure.no_ci_sweep_candidates import (
+    SqlAlchemySweepNoCiUnitOfWork,
+)
 from app.modules.reviews.infrastructure.provider_conventions import (
     ProviderConventionsModel,
     ProviderRepositoryConventionsSource,
@@ -142,6 +144,9 @@ from app.modules.reviews.infrastructure.review_prompt_repository import (
 from app.modules.reviews.infrastructure.run_lifecycle_store import (
     SqlAlchemyRunLifecycleUnitOfWork,
     SqlAlchemyRunTraceUnitOfWork,
+)
+from app.modules.reviews.infrastructure.run_processing_unit_of_work import (
+    SqlAlchemyRunProcessingUnitOfWork,
 )
 from app.modules.reviews.infrastructure.run_repository import SqlAlchemyRunRepository
 from app.modules.reviews.infrastructure.vcs_failures import ClassifiedVcsProvider
@@ -183,7 +188,13 @@ async def process_review_run(
         lambda: SqlAlchemyRepositoryConventionsUnitOfWork(session_factory),
     )
     processor = ReviewRunProcessor(
-        repository, provider, blob_cache, conventions, vcs_provider=vcs_provider, trace=trace
+        repository,
+        provider,
+        blob_cache,
+        conventions,
+        vcs_provider=vcs_provider,
+        trace=trace,
+        uow_factory=lambda: SqlAlchemyRunProcessingUnitOfWork(session_factory),
     )
     publisher = output or PublishReviewOutput(
         lambda: SqlAlchemyReviewOutputUnitOfWork(session_factory), provider
@@ -548,7 +559,10 @@ def compose_worker_process(
         ),
         enqueue=enqueue,
         sweep=(
-            SweepNoCi(candidates=SqlAlchemyDueNoCiCandidates(session_factory), enqueuer=enqueue)
+            SweepNoCi(
+                uow_factory=lambda: SqlAlchemySweepNoCiUnitOfWork(session_factory),
+                enqueuer=enqueue,
+            )
             if github is not None
             else None
         ),
