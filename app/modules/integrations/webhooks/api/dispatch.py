@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import logging
-import re
 from collections.abc import Mapping
 from typing import Protocol
 
@@ -27,7 +26,10 @@ from app.modules.integrations.webhooks.application.github_installation_dispatch 
     InstallationDeliveryDispatchStatus,
     UnsupportedGitHubEvent,
 )
-from app.modules.integrations.webhooks.application.receive_github_delivery import WebhookReceipt
+from app.modules.integrations.webhooks.application.receive_github_delivery import (
+    WebhookReceipt,
+    log_token,
+)
 from app.modules.repositories.application.installation_repositories import (
     InstallationRepositoriesEvent,
 )
@@ -40,13 +42,9 @@ from app.modules.reviews.application.trigger_from_delivery import CiTriggerEvent
 _CI_EVENTS = frozenset({"check_suite", "workflow_run"})
 _MAX_LOGGED_FIELD_ERRORS = 10
 _LOGGER = logging.getLogger(__name__)
-# GitHub's actions are lowercase words joined by ``_``. The action goes into log lines, so
+# The action goes into log lines, so it follows the same plain-token rule as the event name;
 # anything else (free text, line breaks) is treated as absent.
-_ACTION_TOKEN = re.compile(r"[a-z_]{1,40}")
-
-
-def _action_token(value: object) -> str | None:
-    return value if isinstance(value, str) and _ACTION_TOKEN.fullmatch(value) else None
+_action_token = log_token
 
 
 def action_of(receipt: WebhookReceipt) -> str | None:

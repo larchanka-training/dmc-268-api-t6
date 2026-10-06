@@ -1084,6 +1084,60 @@ def test_an_undecodable_payload_is_logged_as_a_reader_fallback_not_as_no_action(
     assert row.retry_after == _NOW + timedelta(seconds=30)
 
 
+_EVENT_NAMES_AS_LOGGED = [
+    ("pull_request", "pull_request"),
+    ("pull_request\nx", "-"),
+    ("Pull Request", "-"),
+]
+
+
+@pytest.mark.parametrize(("event_name", "logged"), _EVENT_NAMES_AS_LOGGED)
+def test_outcome_line_logs_the_event_name_only_as_a_plain_token(
+    caplog: pytest.LogCaptureFixture, event_name: str, logged: str
+) -> None:
+    uow = FakeReceiptUnitOfWork()
+    dispatcher = FakeDispatcher()
+    receiver = ReceiveGitHubDelivery(
+        uow_factory=lambda: uow, dispatcher=dispatcher, now=lambda: _NOW
+    )
+    asyncio.run(receiver.execute(WebhookReceipt("event-1", event_name, "{}")))
+    with caplog.at_level(logging.INFO, logger=_DELIVERY_LOGGER):
+        assert asyncio.run(receiver.replay_pending()) == 1
+
+    assert _outcome_lines(caplog) == [
+        f"GitHub webhook delivery event-1 event={logged} status=onboarded detail=-"
+    ]
+    # Only the log is restricted: the receipt is stored and dispatched as received.
+    assert [delivery.event_name for delivery in dispatcher.deliveries] == [event_name]
+
+
+@pytest.mark.parametrize(("event_name", "logged"), _EVENT_NAMES_AS_LOGGED)
+def test_failure_line_logs_the_event_name_only_as_a_plain_token(
+    caplog: pytest.LogCaptureFixture, event_name: str, logged: str
+) -> None:
+    class RaisingDispatcher:
+        async def execute(self, delivery: WebhookReceipt) -> InstallationDeliveryDispatchResult:
+            raise httpx.ConnectError("refused")
+
+    uow = FakeReceiptUnitOfWork()
+    receiver = ReceiveGitHubDelivery(
+        uow_factory=lambda: uow,
+        dispatcher=RaisingDispatcher(),
+        now=lambda: _NOW,
+        action_of=action_of,
+        classify_failure=classify_failure,
+    )
+    asyncio.run(receiver.execute(WebhookReceipt("event-2", event_name, '{"action": "labeled"}')))
+    with caplog.at_level(logging.INFO, logger=_DELIVERY_LOGGER):
+        assert asyncio.run(receiver.replay_pending()) == 0
+
+    assert _failure_lines(caplog) == [
+        f"GitHub webhook delivery event-2 event={logged} action=labeled "
+        "failed stage=dispatch category=github_request error=ConnectError"
+    ]
+    assert uow.rows["event-2"].delivery.event_name == event_name
+
+
 def test_failure_line_has_no_action_without_a_reader(caplog: pytest.LogCaptureFixture) -> None:
     uow = FakeReceiptUnitOfWork()
     receiver = ReceiveGitHubDelivery(

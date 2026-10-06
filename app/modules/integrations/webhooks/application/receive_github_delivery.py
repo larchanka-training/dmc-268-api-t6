@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -33,6 +34,14 @@ _DEFERRED = frozenset(
         InstallationDeliveryDispatchStatus.DEFERRED_REPOSITORY_DETAILS,
     }
 )
+# GitHub's event names and actions are lowercase words joined by ``_``. They go into log
+# lines, so anything else (free text, line breaks) is logged as absent.
+_LOG_TOKEN = re.compile(r"[a-z_]{1,40}")
+
+
+def log_token(value: object) -> str | None:
+    """``value`` when it is a plain token that is safe to log, otherwise None."""
+    return value if isinstance(value, str) and _LOG_TOKEN.fullmatch(value) else None
 
 
 class FailureCategory(StrEnum):
@@ -249,7 +258,7 @@ class ReceiveGitHubDelivery:
         _LOGGER.info(
             "GitHub webhook delivery %s event=%s status=%s detail=%s%s",
             delivery_id,
-            delivery.event_name,
+            log_token(delivery.event_name) or "-",
             result.status.value,
             result.detail or "-",
             retry_note,
@@ -266,11 +275,12 @@ class ReceiveGitHubDelivery:
     ) -> None:
         """One greppable line for a failed delivery; the sweep logs the traceback after it.
 
-        Class names and the action only: an exception message can carry a URL or an
+        Class names and plain tokens only: an exception message can carry a URL or an
         identifier, so it is never logged here. ``result`` is the dispatch outcome a failed
         finalize leaves behind (a Run may already exist). A field that cannot be computed
         falls back to a default after a diagnostic record, so the line is always written.
         """
+        event = (log_token(delivery.event_name) if delivery is not None else None) or "-"
         action = "-"
         reader = self._action_of
         if delivery is not None and reader is not None:
@@ -296,7 +306,7 @@ class ReceiveGitHubDelivery:
         _LOGGER.warning(
             "GitHub webhook delivery %s event=%s action=%s failed stage=%s category=%s error=%s%s",
             delivery_id,
-            delivery.event_name if delivery is not None else "-",
+            event,
             action,
             stage,
             category,
