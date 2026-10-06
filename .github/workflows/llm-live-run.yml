@@ -3,6 +3,7 @@ name: LLM live run
 # Manual live check of the LLM gateway on EUrouter (#33, OQ-2 / D7 in docs/SYSTEM_DESIGN.md §15).
 # Not part of the required checks: those run without network and keys. The org secret
 # AI_DMC268_T6 is used only here; GitHub masks it in the log, the gateway never logs keys.
+# This manual job fetches ECB FX over outbound HTTPS from data-api.ecb.europa.eu.
 
 on:
   workflow_dispatch:
@@ -33,7 +34,6 @@ jobs:
       MODEL: ${{ inputs.model }}
       FALLBACK_MODEL: ${{ inputs.fallback_model }}
       DIFF: ${{ inputs.diff }}
-      LLM_EUR_TO_USD_RATE: ${{ vars.LLM_EUR_TO_USD_RATE }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -80,12 +80,12 @@ jobs:
           {
             echo "## LLM live run"
             echo
-            echo "| Run | Provider | Model (\`model\` of the answer) | Calls | Tokens in / out / cache | Cost, \$ | Time, ms | Validator |"
-            echo "|---|---|---|---|---|---|---|---|"
+            echo "| Run | Provider | Model (\`model\` of the answer) | Calls | FX quote per call | Tokens in / out / cache | Cost, \$ | Time, ms | Validator |"
+            echo "|---|---|---|---|---|---|---|---|---|"
           } >> "$GITHUB_STEP_SUMMARY"
           for run in primary fallback; do
             if [[ ! -s "$run.json" ]]; then
-              echo "| $run | — | — | — | — | — | — | no output |" >> "$GITHUB_STEP_SUMMARY"
+              echo "| $run | — | — | — | — | — | — | — | no output |" >> "$GITHUB_STEP_SUMMARY"
               status=1
               continue
             fi
@@ -103,7 +103,29 @@ jobs:
               status=1
             fi
             jq -r --arg run "$run" --arg verdict "$verdict" \
-              '"| \($run) | \(.provider // "—") | \(.model // "—") | \([.calls[]? | .kind + (if .error then " (" + .error.class + " " + ((.error.http_status // "") | tostring) + ")" else "" end)] | join(", ")) | \(.tokens_in) / \(.tokens_out) / \(.cache_read_tokens) | \(.cost_usd) | \(.latency_ms // "—") | \($verdict) |"' \
+              'def md_cell:
+                tostring | @html
+                | gsub("\\\\"; "&#92;") | gsub("\\|"; "&#124;")
+                | gsub("`"; "&#96;") | gsub("\\*"; "&#42;") | gsub("_"; "&#95;")
+                | gsub("\\["; "&#91;") | gsub("\\]"; "&#93;")
+                | gsub("\\("; "&#40;") | gsub("\\)"; "&#41;")
+                | gsub("!"; "&#33;") | gsub("~"; "&#126;") | gsub(":"; "&#58;")
+                | gsub("\r\n|\r|\n"; "<br>");
+              def call_summary:
+                [.calls[]? | (.kind | md_cell) +
+                  (if .error then
+                    " (" + (.error.class | md_cell) + " " +
+                    ((.error.http_status // "") | md_cell) + ")"
+                  else "" end)] | join(", ");
+              def fx_calls:
+                [.calls[]? | (.kind | md_cell) + "#" + (.call_no | md_cell) + ": " +
+                  (if .fx then
+                    (.fx.source | md_cell) + " " + (.fx.observation_date | md_cell) + " " +
+                    (.fx.rate_usd_per_eur | md_cell) +
+                    " USD/EUR (" + (if .fx.stale_cache then "stale cache" else "fresh" end) + ")"
+                  else "—" end)] |
+                if length == 0 then "—" else join("<br>") end;
+              "| \($run | md_cell) | \((.provider // "—") | md_cell) | \((.model // "—") | md_cell) | \(call_summary) | \(fx_calls) | \(.tokens_in | md_cell) / \(.tokens_out | md_cell) / \(.cache_read_tokens | md_cell) | \(.cost_usd | md_cell) | \((.latency_ms // "—") | md_cell) | \($verdict | md_cell) |"' \
               "$run.json" >> "$GITHUB_STEP_SUMMARY"
           done
           exit "$status"

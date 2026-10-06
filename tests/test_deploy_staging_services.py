@@ -45,7 +45,6 @@ VARIABLE_SOURCES = {
     "LLM_BASE_URL": "AI_DMC268_URL",
     "LLM_MODEL": "LLM_MODEL",
     "LLM_FALLBACK_MODEL": "LLM_FALLBACK_MODEL",
-    "LLM_EUR_TO_USD_RATE": "LLM_EUR_TO_USD_RATE",
 }
 # One env file per set of recipients (docs/SECRETS.md); its bash array in env-file.sh.
 ENV_FILES = {
@@ -62,7 +61,7 @@ ENV_FILES = {
     ),
     "worker.env": (
         "WORKER_ENV_KEYS",
-        {"LLM_API_KEYS", "LLM_BASE_URL", "LLM_MODEL", "LLM_FALLBACK_MODEL", "LLM_EUR_TO_USD_RATE"},
+        {"LLM_API_KEYS", "LLM_BASE_URL", "LLM_MODEL", "LLM_FALLBACK_MODEL"},
     ),
     "webhook-worker.env": ("WEBHOOK_WORKER_ENV_KEYS", {"GITHUB_APP_BOT_LOGIN"}),
 }
@@ -83,7 +82,6 @@ CI_SECRETS = {
     "GITHUB_APP_BOT_LOGIN": "reviewer[bot]",
     "LLM_MODEL": "gpt-4.1-mini",
     "LLM_FALLBACK_MODEL": "mistral-small-3.2-24b",
-    "LLM_EUR_TO_USD_RATE": "1.1204",
 }
 
 FAKE_DOCKER = """\
@@ -332,19 +330,26 @@ def test_optional_fallback_model_is_omitted_from_worker_env(
         "LLM_API_KEYS": "sk-test-1,sk-test-2",
         "LLM_BASE_URL": "https://llm.test/api/v1",
         "LLM_MODEL": "gpt-4.1-mini",
-        "LLM_EUR_TO_USD_RATE": "1.1204",
     }
 
 
-def test_unset_eur_rate_is_omitted_from_worker_env(tmp_path: Path, host: Host) -> None:
-    values = {name: value for name, value in CI_SECRETS.items() if name != "LLM_EUR_TO_USD_RATE"}
-    stdout, bundle = _run_bundle_step(tmp_path, values)
+def test_legacy_eur_rate_is_ignored_by_bundle_and_worker_env(tmp_path: Path, host: Host) -> None:
+    stdout, bundle = _run_bundle_step(tmp_path, {**CI_SECRETS, "LLM_EUR_TO_USD_RATE": "1.1204"})
 
     result = host.deploy("ghcr.io/test/api@sha256:a", bundle=bundle)
 
     assert result.returncode == 0, result.stderr
-    assert "not set: LLM_EUR_TO_USD_RATE" in stdout.splitlines()
+    assert all("LLM_EUR_TO_USD_RATE" not in line for line in stdout.splitlines())
     assert "LLM_EUR_TO_USD_RATE" not in _read_env_file(host.app_dir / "worker.env")
+
+
+def test_staging_worker_uses_nonisolated_default_network_for_ecb_https() -> None:
+    compose = STAGING_COMPOSE.read_text(encoding="utf-8")
+    worker = compose.split("  worker:\n", 1)[1].split("\n  webhook-worker:", 1)[0]
+
+    assert "network_mode: none" not in worker
+    assert "networks:" not in worker  # Compose's project default network has outbound egress.
+    assert "internal: true" not in compose
 
 
 def test_deploy_step_forwards_the_bundle_to_the_host() -> None:

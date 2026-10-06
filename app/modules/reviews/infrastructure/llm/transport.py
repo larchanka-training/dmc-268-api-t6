@@ -277,13 +277,19 @@ def _parse_response(response: httpx.Response, profile: ModelProfile) -> ChatResp
         details = details_raw if isinstance(details_raw, Mapping) else {}
         currency_raw = usage.get("cost_currency")
         prompt_tokens, invalid_prompt = _token_count(
-            usage.get("prompt_tokens", _MISSING_TOKEN), missing_is_zero=no_usage
+            usage.get("prompt_tokens", _MISSING_TOKEN),
+            max_count=profile.context_window,
+            missing_is_zero=no_usage,
         )
         completion_tokens, invalid_completion = _token_count(
-            usage.get("completion_tokens", _MISSING_TOKEN), missing_is_zero=no_usage
+            usage.get("completion_tokens", _MISSING_TOKEN),
+            max_count=profile.max_output_tokens,
+            missing_is_zero=no_usage,
         )
         cached_tokens, invalid_cached = _token_count(
-            details.get("cached_tokens", _MISSING_TOKEN), missing_is_zero=no_usage
+            details.get("cached_tokens", _MISSING_TOKEN),
+            max_count=profile.context_window,
+            missing_is_zero=no_usage,
         )
         parsed = ChatResponse(
             raw=raw,
@@ -297,7 +303,7 @@ def _parse_response(response: httpx.Response, profile: ModelProfile) -> ChatResp
             cost_currency=currency_raw if isinstance(currency_raw, str) else None,
             refusal=refusal if isinstance(refusal, str) and refusal else None,
         )
-        if invalid_usage or invalid_details:
+        if invalid_usage:
             raise TransportPaidAnswerError("HTTP 200 with invalid usage metadata", parsed)
         if currency_raw is not None and (
             not isinstance(currency_raw, str) or currency_raw.upper() not in ("USD", "EUR")
@@ -308,33 +314,39 @@ def _parse_response(response: httpx.Response, profile: ModelProfile) -> ChatResp
             cost = _exact_cost(response) if usage.get("cost") is not None else None
         except (ValueError, KeyError, TypeError, AttributeError):
             raise TransportPaidAnswerError("HTTP 200 with invalid usage.cost", parsed) from None
-        if invalid_prompt or invalid_completion or invalid_cached:
-            raise TransportPaidAnswerError("HTTP 200 with invalid usage token counts", parsed)
+        parsed = replace(parsed, cost=cost, cost_currency=currency)
         if cost is not None and currency is None:
             logger.warning(
                 "llm usage cost has no currency; treating as USD",
                 extra={"provider": profile.provider, "model": profile.model},
             )
-        return replace(parsed, cost=cost, cost_currency=currency)
+        if invalid_details:
+            raise TransportPaidAnswerError("HTTP 200 with invalid usage metadata", parsed)
+        if invalid_prompt or invalid_completion or invalid_cached:
+            raise TransportPaidAnswerError("HTTP 200 with invalid usage token counts", parsed)
+        return parsed
     except (ValueError, KeyError, IndexError, TypeError, AttributeError):
         raise TransportUnavailable(
             "HTTP 200 with a body that is not a chat completion", http_status=200
         ) from None
 
 
-def _token_count(value: object, *, missing_is_zero: bool) -> tuple[int | None, bool]:
-    """Distinguish no usage, an absent partial count, and an invalid count."""
+def _token_count(
+    value: object, *, max_count: int, missing_is_zero: bool
+) -> tuple[int | None, bool]:
+    """Reject counters beyond the configured model limits before paid accounting."""
     if value is _MISSING_TOKEN:
         return (0 if missing_is_zero else None), False
     if isinstance(value, bool):
         return None, True
     if isinstance(value, int):
-        return (value, False) if value >= 0 else (None, True)
+        return (value, False) if 0 <= value <= max_count else (None, True)
     if isinstance(value, str) and value.isascii() and value.isdecimal():
         try:
-            return int(value), False
+            count = int(value)
         except ValueError:
             return None, True
+        return (count, False) if count <= max_count else (None, True)
     return None, True
 
 

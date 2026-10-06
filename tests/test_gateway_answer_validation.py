@@ -11,6 +11,7 @@ import asyncio
 import json
 from copy import deepcopy
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from pathlib import Path
 from typing import Any, cast
 from uuid import UUID
@@ -27,6 +28,7 @@ from app.modules.reviews.infrastructure.llm.answers import (
     review_output_schema,
     validate_review_answer,
 )
+from app.modules.reviews.infrastructure.llm.ecb_fx import FxQuote, FxQuoteResult
 from app.modules.reviews.infrastructure.llm.gateway import LlmGateway, StructuredTask
 from app.modules.reviews.infrastructure.llm.memory import InMemoryLlmCallTrace, InMemoryUsageLedger
 from app.modules.reviews.infrastructure.llm.settings import LlmSettings
@@ -209,7 +211,22 @@ def test_gateway_returns_normalized_output_and_keeps_raw_provider_trace() -> Non
 
     settings = LlmSettings.from_env({"LLM_MODEL": "mistral-small-4", "LLM_API_KEYS": "sk-test"})
     trace = InMemoryLlmCallTrace()
-    gateway = LlmGateway(settings, OneAnswerTransport(), InMemoryUsageLedger(), trace)
+
+    class FixedQuote:
+        async def get_quote(self) -> FxQuoteResult:
+            return FxQuoteResult(
+                FxQuote(
+                    Decimal("1.20"),
+                    datetime.now(UTC).date(),
+                    "EXR.D.USD.EUR.SP00.A",
+                    datetime.now(UTC),
+                ),
+                stale_cache=False,
+            )
+
+    gateway = LlmGateway(
+        settings, OneAnswerTransport(), InMemoryUsageLedger(), trace, fx_provider=FixedQuote()
+    )
     task = StructuredTask(
         operation="review",
         messages=(ChatMessage("user", "Review this diff"),),

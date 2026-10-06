@@ -1,4 +1,4 @@
-"""Provider cost metadata and the explicit EUR conversion-rate configuration (#66)."""
+"""Provider cost metadata and legacy static EUR-rate compatibility (#66)."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ from typing import Any
 import httpx
 import pytest
 
-from app.modules.reviews.infrastructure.llm.settings import LlmConfigError, LlmSettings
+from app.modules.reviews.infrastructure.llm.settings import LlmSettings
 from app.modules.reviews.infrastructure.llm.transport import (
     ChatMessage,
     ChatRequest,
@@ -150,6 +150,8 @@ def test_invalid_paid_prompt_count_preserves_other_counts(bad_count: str) -> Non
     assert caught.value.paid_response.prompt_tokens is None
     assert caught.value.paid_response.completion_tokens == 7
     assert caught.value.paid_response.cached_tokens == 3
+    assert caught.value.paid_response.cost == Decimal("0.125")
+    assert caught.value.paid_response.cost_currency == "USD"
     assert caught.value.paid_response.raw["usage"]["prompt_tokens"] == json.loads(bad_count)
 
 
@@ -205,14 +207,8 @@ def test_optional_null_or_empty_prompt_token_details_keeps_paid_usd_answer(
     assert response.cost_currency == "USD"
 
 
-def test_explicit_eur_rate_is_a_decimal_without_default() -> None:
-    assert LlmSettings.from_env(_ENV).eur_to_usd_rate is None
-    assert LlmSettings.from_env({**_ENV, "LLM_EUR_TO_USD_RATE": "1.1204"}).eur_to_usd_rate == (
-        Decimal("1.1204")
-    )
-
-
 @pytest.mark.parametrize("rate", ["0", "-1.2", "NaN", "Infinity", "-Infinity", "invalid"])
-def test_invalid_eur_rate_is_rejected(rate: str) -> None:
-    with pytest.raises(LlmConfigError, match="LLM_EUR_TO_USD_RATE"):
-        LlmSettings.from_env({**_ENV, "LLM_EUR_TO_USD_RATE": rate})
+def test_obsolete_eur_rate_does_not_affect_transport_settings(rate: str) -> None:
+    baseline = LlmSettings.from_env(_ENV)
+    with_legacy_rate = LlmSettings.from_env({**_ENV, "LLM_EUR_TO_USD_RATE": rate})
+    assert with_legacy_rate == baseline

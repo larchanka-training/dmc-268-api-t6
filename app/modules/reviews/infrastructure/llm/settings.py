@@ -10,7 +10,7 @@ import json
 import logging
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from decimal import Decimal, DecimalException, InvalidOperation
+from decimal import Decimal, DecimalException
 from typing import Literal
 from urllib.parse import urlsplit
 
@@ -87,22 +87,13 @@ class LlmSettings:
     primary: ModelProfile
     fallback: ModelProfile | None
     policy: GatewayPolicy = field(default_factory=GatewayPolicy)
-    eur_to_usd_rate: Decimal | None = None
 
     @property
     def has_eurouter_route(self) -> bool:
         """Whether either configured endpoint may return a EUR-denominated cost."""
-        for prefix, profile in (("LLM_", self.primary), ("LLM_FALLBACK_", self.fallback)):
-            if profile is None:
-                continue
-            host = _endpoint_identity(profile.base_url, prefix)[1]
-            try:
-                canonical_host = host.encode("idna").decode("ascii").rstrip(".")
-            except UnicodeError:
-                raise LlmConfigError(f"{prefix}BASE_URL host must be valid") from None
-            if canonical_host == "api.eurouter.ai":
-                return True
-        return False
+        return is_eurouter_route(self.primary) or (
+            self.fallback is not None and is_eurouter_route(self.fallback)
+        )
 
     @classmethod
     def from_env(cls, env: Mapping[str, str]) -> LlmSettings:
@@ -114,25 +105,14 @@ class LlmSettings:
         The prompt-JSON path is refused unless ``LLM_ALLOW_PROMPT_JSON=1``:
         it exists for local and self-hosted models in dev and eval only (D7).
         """
-        rate_raw = env.get("LLM_EUR_TO_USD_RATE")
-        rate = None
-        if rate_raw:
-            try:
-                rate = Decimal(rate_raw)
-            except InvalidOperation:
-                raise LlmConfigError(
-                    "LLM_EUR_TO_USD_RATE must be a positive finite decimal"
-                ) from None
-            if not rate.is_finite() or rate <= 0:
-                raise LlmConfigError("LLM_EUR_TO_USD_RATE must be a positive finite decimal")
         allow_prompt_json = env.get("LLM_ALLOW_PROMPT_JSON", "") == "1"
-        primary = _profile_from_env(env, "LLM_", None, allow_prompt_json, rate)
+        primary = _profile_from_env(env, "LLM_", None, allow_prompt_json)
         fallback = (
-            _profile_from_env(env, "LLM_FALLBACK_", primary, allow_prompt_json, rate)
+            _profile_from_env(env, "LLM_FALLBACK_", primary, allow_prompt_json)
             if env.get("LLM_FALLBACK_MODEL")
             else None
         )
-        return cls(primary=primary, fallback=fallback, eur_to_usd_rate=rate)
+        return cls(primary=primary, fallback=fallback)
 
 
 # Chosen for OQ-2 (docs/SYSTEM_DESIGN.md §15) in #46: catalog values of EUrouter on
@@ -207,7 +187,7 @@ def _known_endpoint_price(
             eur_ceiling.cache_read_per_mtok * rate if rate is not None else Decimal(0),
         )
     except DecimalException:
-        raise LlmConfigError("LLM_EUR_TO_USD_RATE is too large for model pricing") from None
+        raise LlmConfigError("ECB EUR/USD rate is too large for model pricing") from None
     input_price = max(
         configured.input_per_mtok, catalog_floor.input_per_mtok, converted.input_per_mtok
     )
@@ -227,12 +207,38 @@ def _known_endpoint_price(
     )
 
 
+def is_eurouter_route(profile: ModelProfile) -> bool:
+    """Use the same IDNA host identity as HTTPX for EUR-capable routes."""
+    host = _endpoint_identity(profile.base_url, "LLM_")[1]
+    try:
+        canonical_host = host.encode("idna").decode("ascii").rstrip(".")
+    except UnicodeError:
+        raise LlmConfigError("LLM_BASE_URL host must be valid") from None
+    return canonical_host == "api.eurouter.ai"
+
+
+def price_at_eur_quote(profile: ModelProfile, rate: Decimal) -> ModelPrice:
+    """Price a known EUrouter model at one quote, independent of a static env rate."""
+    known = KNOWN_MODELS.get(profile.model)
+    if known is None or _endpoint_identity(profile.base_url, "LLM_") != _endpoint_identity(
+        known.base_url, "LLM_"
+    ):
+        return profile.price
+    if not rate.is_finite() or rate <= 0:
+        raise LlmConfigError("ECB EUR/USD rate must be positive and finite")
+    price = _known_endpoint_price(profile.price, known.price, profile.model, rate)
+    try:
+        price.cost_usd(tokens_in=profile.context_window, tokens_out=profile.max_output_tokens)
+    except DecimalException:
+        raise LlmConfigError("ECB EUR/USD rate is too large for model pricing") from None
+    return price
+
+
 def _profile_from_env(
     env: Mapping[str, str],
     prefix: str,
     inherit: ModelProfile | None,
     allow_prompt_json: bool,
-    eur_to_usd_rate: Decimal | None,
 ) -> ModelProfile:
     model = env.get(f"{prefix}MODEL")
     if not model:
@@ -344,15 +350,10 @@ def _profile_from_env(
         ),
     )
     effective_price = (
-        _known_endpoint_price(configured_price, known.price, model, eur_to_usd_rate)
+        _known_endpoint_price(configured_price, known.price, model, None)
         if known_endpoint and known is not None
         else configured_price
     )
-    if known_endpoint and eur_to_usd_rate is not None:
-        try:
-            effective_price.cost_usd(tokens_in=context_window, tokens_out=max_output_tokens)
-        except DecimalException:
-            raise LlmConfigError("LLM_EUR_TO_USD_RATE is too large for model pricing") from None
     profile = ModelProfile(
         provider=provider,
         base_url=base_url,

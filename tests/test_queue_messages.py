@@ -6,6 +6,8 @@ import asyncio
 import inspect
 import json
 import logging
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -13,11 +15,14 @@ from typing import Any, cast
 from uuid import UUID, uuid5
 
 import aio_pika
+import httpx
 import pytest
 from aio_pika.abc import AbstractExchange, AbstractIncomingMessage
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 import app.modules.reviews.infrastructure.amqp as amqp
+import app.worker as worker_module
+from app.bootstrap.llm_gateway import build_gateway as original_build_gateway
 from app.modules.reviews.application.handle_review_run import ClaimedAttempt, DeliveryOutcome
 from app.modules.reviews.application.queue_messages import ReviewPublishPointer, StoredRunMessage
 from app.modules.reviews.application.run_failures import RunFailure
@@ -26,6 +31,7 @@ from app.modules.reviews.application.try_enqueue_webhook_run import (
     RunPublicationKind,
 )
 from app.modules.reviews.infrastructure.github_run_source import GitHubRunSource
+from app.modules.reviews.infrastructure.llm.ecb_fx import FxQuoteProvider
 from app.modules.reviews.infrastructure.llm.gateway import LlmGateway
 from app.modules.reviews.infrastructure.llm.models import (
     GatewayConventionsModel,
@@ -302,17 +308,90 @@ def test_worker_settings_read_llm_and_reject_a_partial_llm_config() -> None:
         },
     ],
 )
-def test_worker_rejects_configured_eurouter_route_without_eur_rate(
+def test_worker_starts_with_configured_eurouter_route_without_eur_rate(
     model_env: dict[str, str],
 ) -> None:
-    with pytest.raises(LlmConfigError, match="LLM_EUR_TO_USD_RATE"):
-        WorkerSettings.from_environment(
-            {
-                "DATABASE_URL": "postgresql+psycopg://test",
-                "RABBITMQ_URL": "amqp://test",
-                **model_env,
-            }
+    settings = WorkerSettings.from_environment(
+        {
+            "DATABASE_URL": "postgresql+psycopg://test",
+            "RABBITMQ_URL": "amqp://test",
+            **model_env,
+        }
+    )
+    assert settings.llm is not None
+    assert settings.llm.has_eurouter_route
+
+
+def test_worker_startup_creates_fx_provider_without_fetching_ecb(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = WorkerSettings.from_environment(
+        {
+            "DATABASE_URL": "postgresql+psycopg://test:test@localhost:5432/test",
+            "RABBITMQ_URL": "amqp://test:test@localhost:5672/",
+            "LLM_MODEL": "mistral-small-4",
+            "LLM_API_KEYS": "sk-test",
+        }
+    )
+    fx_requests: list[httpx.Request] = []
+    llm_requests: list[httpx.Request] = []
+    fx_provider: FxQuoteProvider | None = None
+
+    def capture_gateway(*args: Any, **kwargs: Any) -> LlmGateway:
+        nonlocal fx_provider
+        fx_provider = kwargs.get("fx_provider")
+        return original_build_gateway(*args, **kwargs)
+
+    def respond_llm(request: httpx.Request) -> httpx.Response:
+        llm_requests.append(request)
+        raise AssertionError("LLM request during worker startup")
+
+    def respond_fx(request: httpx.Request) -> httpx.Response:
+        fx_requests.append(request)
+        assert "authorization" not in request.headers
+        return httpx.Response(
+            200,
+            text=(
+                "KEY,FREQ,CURRENCY,CURRENCY_DENOM,EXR_TYPE,EXR_SUFFIX,TIME_PERIOD,OBS_VALUE\n"
+                f"EXR.D.USD.EUR.SP00.A,D,USD,EUR,SP00,A,{datetime.now(UTC).date()},1.1204\n"
+            ),
         )
+
+    class FxTransport(httpx.MockTransport):
+        closed = False
+
+        async def aclose(self) -> None:
+            self.closed = True
+            await super().aclose()
+
+    fx_transport = FxTransport(respond_fx)
+
+    class BrokerReached(Exception):
+        pass
+
+    @asynccontextmanager
+    async def stop_at_broker(*_: object) -> AsyncIterator[None]:
+        assert fx_requests == []
+        assert fx_provider is not None
+        quote = (await fx_provider.get_quote()).quote
+        assert quote is not None and quote.rate_usd_per_eur == Decimal("1.1204")
+        raise BrokerReached
+        yield
+
+    monkeypatch.setattr(worker_module, "build_gateway", capture_gateway)
+    monkeypatch.setattr(worker_module, "amqp_channels", stop_at_broker)
+    with pytest.raises(BrokerReached):
+        asyncio.run(
+            run_worker(
+                settings,
+                llm_transport=httpx.MockTransport(respond_llm),
+                fx_transport=fx_transport,
+            )
+        )
+    assert llm_requests == []
+    assert len(fx_requests) == 1
+    assert fx_requests[0].url.host == "data-api.ecb.europa.eu"
+    assert fx_transport.closed
 
 
 def test_worker_allows_usd_only_route_and_no_model_without_eur_rate() -> None:
@@ -332,11 +411,10 @@ def test_worker_allows_usd_only_route_and_no_model_without_eur_rate() -> None:
 
     assert usd_only.llm is not None
     assert usd_only.llm.primary.base_url == "https://usd-only.test/v1"
-    assert usd_only.llm.eur_to_usd_rate is None
     assert unconfigured.llm is None
 
 
-def test_worker_accepts_eurouter_route_with_explicit_eur_rate() -> None:
+def test_worker_ignores_invalid_legacy_eur_rate_at_startup() -> None:
     settings = WorkerSettings.from_environment(
         {
             "DATABASE_URL": "postgresql+psycopg://test",
@@ -344,13 +422,12 @@ def test_worker_accepts_eurouter_route_with_explicit_eur_rate() -> None:
             "LLM_MODEL": "mistral-small-4",
             "LLM_API_KEYS": "k",
             "LLM_FALLBACK_MODEL": "mistral-small-3.2-24b",
-            "LLM_EUR_TO_USD_RATE": "1.1204",
+            "LLM_EUR_TO_USD_RATE": "invalid-legacy-value",
         }
     )
 
     assert settings.llm is not None
     assert settings.llm.fallback is not None
-    assert settings.llm.eur_to_usd_rate == Decimal("1.1204")
 
 
 def _claimed() -> ClaimedAttempt:

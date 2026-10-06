@@ -120,12 +120,13 @@ from app.modules.reviews.infrastructure.github_review_publication import (
 )
 from app.modules.reviews.infrastructure.github_run_source import GitHubRunSource
 from app.modules.reviews.infrastructure.github_vcs import HttpGitHubVcsProvider
+from app.modules.reviews.infrastructure.llm.ecb_fx import EcbFxQuoteCache, EcbFxRateAdapter
 from app.modules.reviews.infrastructure.llm.gateway import LlmGateway
 from app.modules.reviews.infrastructure.llm.models import (
     GatewayConventionsModel,
     GatewayReviewModel,
 )
-from app.modules.reviews.infrastructure.llm.settings import LlmConfigError, LlmSettings
+from app.modules.reviews.infrastructure.llm.settings import LlmSettings
 from app.modules.reviews.infrastructure.no_ci_sweep_candidates import SqlAlchemyDueNoCiCandidates
 from app.modules.reviews.infrastructure.provider_conventions import (
     ProviderConventionsModel,
@@ -353,8 +354,6 @@ class WorkerSettings:
         database_url = required("DATABASE_URL")
         rabbitmq_url = required("RABBITMQ_URL")
         llm = LlmSettings.from_env(env) if env.get("LLM_MODEL") else None
-        if llm is not None and llm.has_eurouter_route and llm.eur_to_usd_rate is None:
-            raise LlmConfigError("LLM_EUR_TO_USD_RATE is required for an EUrouter route")
 
         return cls(
             database_url=database_url,
@@ -561,6 +560,7 @@ async def run_worker(
     leader_period: float = 30.0,
     github_transport: httpx.AsyncBaseTransport | None = None,
     llm_transport: httpx.AsyncBaseTransport | None = None,
+    fx_transport: httpx.AsyncBaseTransport | None = None,
 ) -> None:
     """Consume until cancelled; the caller owns signal handling.
 
@@ -585,9 +585,15 @@ async def run_worker(
         if settings.llm is None:
             _LOGGER.warning("LLM_MODEL is not set: %s; every review run fails", LLM_NOT_CONFIGURED)
         else:
-            # One gateway (and HTTP pool) per process; models are bound per attempt.
+            # One gateway and separate LLM/ECB HTTP pools per process.
             llm_client = await stack.enter_async_context(httpx.AsyncClient(transport=llm_transport))
-            gateway = build_gateway(settings.llm, llm_client, session_factory)
+            fx_client = await stack.enter_async_context(httpx.AsyncClient(transport=fx_transport))
+            gateway = build_gateway(
+                settings.llm,
+                llm_client,
+                session_factory,
+                fx_provider=EcbFxQuoteCache(EcbFxRateAdapter(fx_client)),
+            )
         async with amqp_channels(settings.rabbitmq_url, delays or RetryDelays()) as channels:
             process = compose_worker_process(
                 settings=settings,

@@ -687,16 +687,16 @@ jobs:
           # Variable of the Environment: the prefix GITHUB_ is rejected for variables too.
           GITHUB_APP_BOT_LOGIN: ${{ vars.GH_APP_BOT_LOGIN }}
           # LLM gateway of the worker: the organization secret and endpoint variable;
-          # model and EUR rate are repository variables (staging Environment may override).
+          # models are repository variables (staging Environment may override).
+          # The worker fetches ECB FX over outbound HTTPS at call time; no rate is bundled.
           LLM_API_KEYS: ${{ secrets.AI_DMC268_T6 }}
           LLM_BASE_URL: ${{ vars.AI_DMC268_URL }}
           LLM_MODEL: ${{ vars.LLM_MODEL }}
           LLM_FALLBACK_MODEL: ${{ vars.LLM_FALLBACK_MODEL }}
-          LLM_EUR_TO_USD_RATE: ${{ vars.LLM_EUR_TO_USD_RATE }}
         run: |
           # One opaque line of base64 so multi-line PEM values survive the SSH action and the shell;
           # deploy/scripts/env-file.sh decodes it on the host. Unset secrets are left out entirely.
-          names=(GITHUB_APP_ID GITHUB_APP_PRIVATE_KEY GITHUB_WEBHOOK_SECRET GITHUB_CLIENT_ID GITHUB_CLIENT_SECRET AUTH_JWT_PRIVATE_KEY AUTH_JWT_PUBLIC_KEY GITHUB_APP_BOT_LOGIN LLM_API_KEYS LLM_BASE_URL LLM_MODEL LLM_FALLBACK_MODEL LLM_EUR_TO_USD_RATE)
+          names=(GITHUB_APP_ID GITHUB_APP_PRIVATE_KEY GITHUB_WEBHOOK_SECRET GITHUB_CLIENT_ID GITHUB_CLIENT_SECRET AUTH_JWT_PRIVATE_KEY AUTH_JWT_PUBLIC_KEY GITHUB_APP_BOT_LOGIN LLM_API_KEYS LLM_BASE_URL LLM_MODEL LLM_FALLBACK_MODEL)
           bundle="$(
             for name in "${names[@]}"; do
               if [[ -n "${!name}" ]]; then

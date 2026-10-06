@@ -25,6 +25,7 @@ import os
 import sys
 import time
 from collections.abc import Mapping
+from contextlib import AsyncExitStack
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -54,6 +55,11 @@ from app.modules.reviews.application.review_output import ReviewOutput, parse_re
 from app.modules.reviews.application.run_failures import FAST_ATTEMPT_DEADLINE
 from app.modules.reviews.application.run_trace import TransactionalRunTrace
 from app.modules.reviews.infrastructure.llm.answers import review_output_schema
+from app.modules.reviews.infrastructure.llm.ecb_fx import (
+    EcbFxQuoteCache,
+    EcbFxRateAdapter,
+    FxQuoteProvider,
+)
 from app.modules.reviews.infrastructure.llm.gateway import LlmGateway
 from app.modules.reviews.infrastructure.llm.memory import (
     InMemoryLlmCallTrace,
@@ -77,6 +83,8 @@ def build_gateway(
     settings: LlmSettings,
     client: httpx.AsyncClient,
     session_factory: async_sessionmaker[AsyncSession],
+    *,
+    fx_provider: FxQuoteProvider | None = None,
 ) -> LlmGateway:
     """The production gateway: HTTP transport, ``usage_events`` and ``llm.call`` in PG.
 
@@ -91,6 +99,7 @@ def build_gateway(
         RunTraceLlmCalls(
             TransactionalRunTrace(partial(SqlAlchemyRunTraceUnitOfWork, session_factory))
         ),
+        fx_provider=fx_provider,
     )
 
 
@@ -143,6 +152,8 @@ async def review_case(
     settings: LlmSettings,
     *,
     transport: ChatTransport | None = None,
+    fx_provider: FxQuoteProvider | None = None,
+    fx_transport: httpx.AsyncBaseTransport | None = None,
 ) -> ReviewCaseResult:
     """Run one case through the real gateway policy without a database.
 
@@ -168,8 +179,12 @@ async def review_case(
         omitted_files=(),
     )
     started = time.monotonic()
-    async with _ClientScope(transport) as effective:
-        gateway = LlmGateway(settings, effective, ledger, trace)
+    async with AsyncExitStack() as stack:
+        effective = await stack.enter_async_context(_ClientScope(transport))
+        if fx_provider is None:
+            fx_client = await stack.enter_async_context(httpx.AsyncClient(transport=fx_transport))
+            fx_provider = EcbFxQuoteCache(EcbFxRateAdapter(fx_client))
+        gateway = LlmGateway(settings, effective, ledger, trace, fx_provider=fx_provider)
         try:
             result = await review_with_gateway(gateway, context, run)
         except LlmCallFailed as failure:
@@ -207,6 +222,8 @@ def main(
     *,
     env: Mapping[str, str] | None = None,
     transport: ChatTransport | None = None,
+    fx_provider: FxQuoteProvider | None = None,
+    fx_transport: httpx.AsyncBaseTransport | None = None,
 ) -> int:
     """Manual live run: prints provider, model, calls, tokens, cost and time as JSON.
 
@@ -247,7 +264,15 @@ def main(
         engine=args.engine,
     )
     try:
-        result = asyncio.run(review_case(case, settings, transport=transport))
+        result = asyncio.run(
+            review_case(
+                case,
+                settings,
+                transport=transport,
+                fx_provider=fx_provider,
+                fx_transport=fx_transport,
+            )
+        )
     except ReviewCaseFailed as failure:
         _emit(
             {
@@ -280,6 +305,8 @@ def _call_json(record: LlmCallRecord) -> dict[str, object]:
         "call_no": record.call_no,
         "duration_ms": record.duration_ms,
     }
+    if record.fx is not None:
+        item["fx"] = record.fx.as_json()
     if record.error is not None:
         item["error"] = record.response_json()["error"]
     else:
