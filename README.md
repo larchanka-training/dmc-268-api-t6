@@ -159,16 +159,18 @@ keep them in `.env` only: the App ID (`GITHUB_APP_ID`), a private key generated 
 (`GITHUB_WEBHOOK_SECRET`), and the client ID and a client secret (`GITHUB_CLIENT_ID`,
 `GITHUB_CLIENT_SECRET`). `GITHUB_APP_BOT_LOGIN` is the bot login `<app-slug>[bot]`, here
 `dmc268-t6-reviewer-dev[bot]`: empty, webhook-worker does not start; with the staging App's
-login it does not skip the dev bot's own label events (Р-9 in
+login it does not skip the dev bot's own label events (Р-9, SD §8.3 in
 [docs/SYSTEM_DESIGN.md](docs/SYSTEM_DESIGN.md)).
 
 GitHub cannot reach `localhost`, so the dev App's webhook URL is a smee.io channel; its address
 comes from the owner with the other values and is not kept in the repository. Run the API on
-port 8000 (`uvicorn` reads `.env` only with `--env-file .env`) and, in a second terminal,
-forward the channel to the webhook route:
+port 8000 (`uv run` reads `.env` only with `--env-file .env`) and, in a second terminal,
+forward the channel to the webhook route with `smee-client` (needs Node.js for `npx`):
 
 ```bash
+# terminal 1
 uv run --env-file .env uvicorn app.main:app --reload
+# terminal 2
 npx smee-client --url "<smee channel URL>" --target http://localhost:8000/webhooks/github
 ```
 
