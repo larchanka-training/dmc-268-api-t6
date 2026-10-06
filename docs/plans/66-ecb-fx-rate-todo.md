@@ -229,17 +229,18 @@ and an update to existing PR #68.
       and `uv run pytest` all pass on the final diff.
 - [x] Standards and spec reviews report no unresolved findings; the branch is
       rebased on `main`.
-- [ ] PR #68's `What` / `Why` / `How to verify` / `Refs` body describes ECB
-      sourcing without a closing keyword. Push the branch and request approval
-      on its new head.
+- [x] PR #68's `What` / `Why` / `How to verify` / `Refs` body describes ECB
+      sourcing without a closing keyword, and the branch is pushed.
+- [ ] Request approval on the current PR head.
 - [ ] After merge/deploy, a redacted staging check confirms ECB egress and the
       latest acceptable quote; the manual `LLM live run` records source/date
       and no longer needs a repository FX variable.
 
 **Verification:**
 
-- [ ] Record gate outputs, review findings, and updated PR #68 link; report
-      staging/deploy and live-run checks as pending until they occur.
+- [x] Record gate outputs, review findings, and the updated
+      [PR #68](https://github.com/larchanka-training/dmc-268-api-t6/pull/68) link.
+- [ ] Record staging/deploy and live-run links after the operational checks.
 
 **Dependencies:** Tasks 1–6 and Checkpoints A–B; do not publish a new PR.
 
