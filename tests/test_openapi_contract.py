@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import copy
 import json
 import re
-from collections.abc import AsyncIterator, Iterator, Mapping
+from collections.abc import AsyncIterator, Callable, Iterator, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import replace
 from datetime import UTC, datetime
@@ -55,9 +56,26 @@ SPEC_PATH = Path(__file__).parents[1] / "contracts" / "openapi.yaml"
 HTTP_METHODS = frozenset({"get", "put", "post", "delete", "options", "head", "patch", "trace"})
 # api#20 D9: the webhook receiver and the liveness probe are not part of the browser API.
 EXCLUDED_APP_PATHS = frozenset({"/healthcheck", "/webhooks/github"})
-# Optional PullRequestRef fields (#34). The UI Zod contract gains them in ui#57; until the
-# snapshot is regenerated it may lack any of them, and where present they stay optional.
-PLANNED_PULL_REQUEST_FIELDS = frozenset({"author", "headRef", "baseRef"})
+# DTOs shared with the UI: Zod snapshot name -> contracts/openapi.yaml component.
+UI_ZOD_COMPONENTS = {
+    "runSession": "RunSession",
+    "runAction": "RunAction",
+    "reviewComment": "ReviewComment",
+    "runDetail": "RunDetail",
+    "findingView": "FindingView",
+    "runListPage": "RunListPage",
+    "runUpdatedEvent": "RunUpdatedEvent",
+    "repository": "Repository",
+    "repositoryUpdate": "RepositoryUpdate",
+    "rawFileDiff": "RawFileDiff",
+    "fileSlice": "FileSlice",
+    "authSession": "AuthSession",
+    "me": "Me",
+}
+# z.int() exports the safe-integer range as its bounds; the spec leaves such integers unbounded.
+ZOD_SAFE_INTEGER = 2**53 - 1
+# Keywords that make a schema typed; a schema with none of them accepts any JSON value, null too.
+TYPED_KEYWORDS = frozenset({"type", "properties", "items", "enum", "const", "anyOf", "oneOf"})
 UNKNOWN_RUN_ID = UUID("99999999-9999-4999-8999-999999999999")
 EXPIRED_PATH = "expired.py"
 RUN_URL = f"/api/runs/{RUN_ID}"
@@ -523,27 +541,172 @@ def test_run_detail_schema_accepts_a_complete_run(client: TestClient) -> None:
     _validator_for("get", "/api/runs/{run_id}", "200").validate(detail)
 
 
-@pytest.mark.parametrize(
-    ("zod_name", "component"),
-    [("runSession", "RunSession"), ("runAction", "RunAction"), ("reviewComment", "ReviewComment")],
-)
+def _resolve(schema: Mapping[str, Any], components: Mapping[str, Any]) -> Mapping[str, Any]:
+    while "$ref" in schema:
+        schema = components[str(schema["$ref"]).removeprefix("#/components/schemas/")]
+    return schema
+
+
+def _split_null(
+    schema: Mapping[str, Any], components: Mapping[str, Any]
+) -> tuple[bool, Mapping[str, Any]]:
+    """Return whether ``schema`` admits null and the schema of its non-null values."""
+    schema = _resolve(schema, components)
+    if not TYPED_KEYWORDS & schema.keys():
+        return True, {}
+    nullable = False
+    branches = []
+    for branch in schema.get("anyOf") or schema.get("oneOf") or [schema]:
+        branch = _resolve(branch, components)
+        types = branch.get("type")
+        if types == "null":
+            nullable = True
+            continue
+        if isinstance(types, list) and "null" in types:
+            nullable = True
+            rest = [name for name in types if name != "null"]
+            branch = {**branch, "type": rest[0] if len(rest) == 1 else rest}
+        branches.append(branch)
+    if len(branches) == 1:
+        return nullable, branches[0]
+    return nullable, {"anyOf": branches}
+
+
+def _bound(schema: Mapping[str, Any], keyword: str) -> object:
+    value = schema.get(keyword)
+    return None if value in (ZOD_SAFE_INTEGER, -ZOD_SAFE_INTEGER) else value
+
+
+def _facets(schema: Mapping[str, Any]) -> dict[str, object]:
+    """The value constraints compared field by field; Zod's ``const`` equals a one-item enum."""
+    return {
+        "type": schema.get("type"),
+        "format": schema.get("format"),
+        "enum": schema.get("enum", [schema["const"]] if "const" in schema else None),
+        **{
+            keyword: _bound(schema, keyword)
+            for keyword in ("minimum", "exclusiveMinimum", "maximum", "exclusiveMaximum")
+        },
+    }
+
+
+def _contract_mismatches(
+    spec: Mapping[str, Any], zod: Mapping[str, Any], components: Mapping[str, Any], path: str
+) -> list[str]:
+    """List every difference between a spec schema and its Zod JSON Schema, nested ones too."""
+    spec_nullable, spec = _split_null(spec, components)
+    zod_nullable, zod = _split_null(zod, components)
+    mismatches = []
+    if spec_nullable != zod_nullable:
+        mismatches.append(f"{path}: nullable {spec_nullable} != {zod_nullable}")
+    spec_facets, zod_facets = _facets(spec), _facets(zod)
+    mismatches += [
+        f"{path}: {name} {spec_facets[name]!r} != {zod_facets[name]!r}"
+        for name in spec_facets
+        if spec_facets[name] != zod_facets[name]
+    ]
+    if "properties" in spec or "properties" in zod:
+        spec_properties = spec.get("properties", {})
+        zod_properties = zod.get("properties", {})
+        if spec_properties.keys() != zod_properties.keys():
+            mismatches.append(
+                f"{path}: properties {sorted(spec_properties)} != {sorted(zod_properties)}"
+            )
+        spec_required = sorted(spec.get("required", []))
+        zod_required = sorted(zod.get("required", []))
+        if spec_required != zod_required:
+            mismatches.append(f"{path}: required {spec_required} != {zod_required}")
+        if not spec.get("additionalProperties") is zod.get("additionalProperties") is False:
+            mismatches.append(f"{path}: additionalProperties is not false on both sides")
+        for name in spec_properties.keys() & zod_properties.keys():
+            mismatches += _contract_mismatches(
+                spec_properties[name], zod_properties[name], components, f"{path}.{name}"
+            )
+    if "items" in spec or "items" in zod:
+        mismatches += _contract_mismatches(
+            spec.get("items", {}), zod.get("items", {}), components, f"{path}[]"
+        )
+    return mismatches
+
+
+def test_ui_zod_snapshot_covers_the_shared_dtos() -> None:
+    assert _generated_schemas().keys() == UI_ZOD_COMPONENTS.keys()
+    assert len(UI_ZOD_COMPONENTS) >= 12
+
+
+@pytest.mark.parametrize(("zod_name", "component"), UI_ZOD_COMPONENTS.items())
 def test_component_schemas_mirror_the_ui_zod_contract(zod_name: str, component: str) -> None:
-    zod = _generated_schemas()[zod_name]
-    schema = _components()[component]
+    components = _components()
 
-    assert schema["properties"].keys() == zod["properties"].keys()
-    assert set(schema["required"]) == set(zod["required"])
-    assert schema["additionalProperties"] is zod["additionalProperties"] is False
+    mismatches = _contract_mismatches(
+        components[component], _generated_schemas()[zod_name], components, component
+    )
+
+    assert mismatches == []
 
 
-def test_pull_request_ref_extends_the_ui_contract_only_with_optional_fields() -> None:
-    zod = _generated_schemas()["runSession"]["properties"]["pullRequest"]
-    schema = _components()["PullRequestRef"]
+@pytest.mark.parametrize(
+    ("component", "path", "corrupt"),
+    [
+        pytest.param(
+            "RunDetail",
+            "RunDetail.severityCounts",
+            lambda schema: schema["properties"].update(
+                severityCounts={"anyOf": [schema["properties"]["severityCounts"], {"type": "null"}]}
+            ),
+            id="nullable-field",
+        ),
+        pytest.param(
+            "ReviewComment",
+            "ReviewComment.newLine",
+            lambda schema: schema["properties"]["newLine"].update(minimum=0),
+            id="lower-bound",
+        ),
+        pytest.param(
+            "RunDetail",
+            "RunDetail",
+            lambda schema: schema["required"].remove("findings"),
+            id="required",
+        ),
+        pytest.param(
+            "Repository",
+            "Repository",
+            lambda schema: schema["properties"].update(archived={"type": "boolean"}),
+            id="extra-field",
+        ),
+        pytest.param(
+            "FileSlice",
+            "FileSlice.startLine",
+            lambda schema: schema["properties"]["startLine"].update(type="number"),
+            id="type",
+        ),
+        pytest.param(
+            "PullRequestRef",
+            "RunSession.pullRequest.author",
+            lambda schema: schema["properties"]["author"].update(type="string"),
+            id="nested-ref",
+        ),
+        pytest.param(
+            "Severity",
+            "ReviewComment.severity",
+            lambda schema: schema["enum"].reverse(),
+            id="enum",
+        ),
+    ],
+)
+def test_contract_mirror_catches_a_corrupted_spec(
+    component: str, path: str, corrupt: Callable[[dict[str, Any]], object]
+) -> None:
+    components = copy.deepcopy(dict(_components()))
+    corrupt(components[component])
+    root = path.split(".")[0]
+    zod_name = next(name for name, parent in UI_ZOD_COMPONENTS.items() if parent == root)
 
-    assert schema["properties"].keys() - zod["properties"].keys() <= PLANNED_PULL_REQUEST_FIELDS
-    assert zod["properties"].keys() <= schema["properties"].keys()
-    assert set(schema["required"]) == set(zod["required"])
-    assert (PLANNED_PULL_REQUEST_FIELDS & zod["properties"].keys()).isdisjoint(zod["required"])
+    mismatches = _contract_mismatches(
+        components[root], _generated_schemas()[zod_name], components, root
+    )
+
+    assert any(mismatch.startswith(f"{path}:") for mismatch in mismatches), mismatches
 
 
 @pytest.mark.parametrize(("base", "extended"), [("RunSession", "RunDetail"), ("User", "Me")])
