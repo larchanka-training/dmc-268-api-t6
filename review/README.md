@@ -141,12 +141,12 @@ detected from the top-level key: `findings` → `ReviewOutput`, `files` →
 `RepoConventionsDraft`. A file carrying both keys is rejected with exit `2`. The 120-word `body` limit of
 `review.system.v1.md` §7 is a prompt-level brevity target, not part of the backend schema: the validator
 enforces only the 1200-character ceiling. The tests run it over `examples/*.sample.json`. Quality targets and
-the golden dataset are defined in [`docs/TEST_PLAN.md`](../docs/TEST_PLAN.md) §3–5.
+the evaluation corpus (`test-prs-dataset/`) are defined in [`docs/TEST_PLAN.md`](../docs/TEST_PLAN.md) §3–5.
 
 ### Proof-run record
 
 Bot: `claude-sonnet-5`, Claude Code subagent, clean context. Date: 2026-09-19. 0/5 custom-rule attributions on
-the backend diff vs 4/5 on the frontend: an attribution-metric signal ([`docs/TEST_PLAN.md`](../docs/TEST_PLAN.md) §3).
+the backend diff vs 4/5 on the frontend: an attribution-metric signal (not yet defined in [`docs/TEST_PLAN.md`](../docs/TEST_PLAN.md)).
 
 | Diff                                      | Files | Findings | Of which custom-rule | Validator |
 | ----------------------------------------- | ----- | -------- | -------------------- | --------- |
