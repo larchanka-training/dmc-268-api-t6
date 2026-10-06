@@ -24,9 +24,10 @@
 check-run, REST для UI. Дерево слоёв и пять entrypoints ниже описывают целевую организацию
 приложения; payment gateway и отдельные сервисы ещё предстоит реализовать. Весь код пока живёт в
 одном пакете `app/`; разнесение по сервисам `services/<name>/` (Р-12) реализуется в
-PR #10. Текущий Compose поднимает backend, worker, PostgreSQL, RabbitMQ и Redis, а в профиле
-`webhooks` ещё `webhook-worker` (разбор квитанций вебхуков и создание Run, [WEBHOOK_WORKER.md](WEBHOOK_WORKER.md)),
-а не весь целевой runtime; worker и очередь описаны в разделе «Worker и очередь (#34)».
+PR #10. Текущий Compose поднимает не весь целевой runtime, а backend, worker, PostgreSQL,
+RabbitMQ и Redis, в профиле `webhooks` ещё `webhook-worker` (разбор квитанций вебхуков и
+создание Run, [WEBHOOK_WORKER.md](WEBHOOK_WORKER.md)); worker и очередь описаны в разделе
+«Worker и очередь (#34)».
 
 ## Принципы
 
@@ -308,8 +309,9 @@ docker compose up -d worker        # сервис worker в docker-compose.yml
 
 Переменные: `DATABASE_URL` и `RABBITMQ_URL` обязательны; `LLM_*` (модель, ключи, при
 необходимости base URL) включают ревью через LLM Gateway: шлюз создаётся один раз на процесс,
-модели на каждую попытку. Без `LLM_MODEL` worker стартует с предупреждением, и Run
-завершается с сообщением о ненастроенном шлюзе; `GITHUB_APP_ID` и
+модели на каждую попытку. Без `LLM_MODEL` worker стартует с предупреждением, а Run проходит
+все три попытки (`llm_unavailable` ретраится) и завершается `failed` с сообщением о
+ненастроенном шлюзе; `GITHUB_APP_ID` и
 `GITHUB_APP_PRIVATE_KEY` необязательны: без них процесс стартует, пишет предупреждение,
 а sweep «2 мин без CI» и публикация в GitHub (ревью и check-run) выключены. `WORKER_ID`
 (по умолчанию `hostname:pid`) пишется в `runs.worker_id`, `PORTAL_URL` даёт ссылку на

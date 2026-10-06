@@ -163,8 +163,9 @@ Workspace-пакет `database-migrator` запускается Compose-серв
 (в MVP — вместе с consumer `review.publish`, §7.1) запускается отдельным процессом из
 того же образа. Отдельным процессом из того же образа запускается и `webhook-worker`
 (`python -m app.webhook_worker`, Compose profile `webhooks`): он разбирает квитанции,
-которые маршрут `webhook-api` записал в `webhook_events`, и требует PostgreSQL и GitHub App
-(ID, приватный ключ, логин бота) — [WEBHOOK_WORKER.md](WEBHOOK_WORKER.md).
+которые маршрут `webhook-api` записал в `webhook_events`, создаёт Run и публикует их в очередь
+ревью, поэтому требует PostgreSQL, RabbitMQ (`RABBITMQ_URL`) и GitHub App (ID, приватный ключ,
+логин бота) — [WEBHOOK_WORKER.md](WEBHOOK_WORKER.md).
 
 ---
 
@@ -248,7 +249,7 @@ sequenceDiagram
   WW->>GH: try_enqueue: REST check-suites и combined status для head_sha (свой suite и чужой `queued` без check run не в счёт)
   WW->>PG: ai_review_labeled ∧ CI зелёный ∧ нет активного run → runs INSERT (queued)
   WW->>MQ: publish review.run {run_id, head_sha, engine}
-  Note over WW,MQ: ci_status, try_enqueue и publish из доставки (#52)
+  Note over WW,MQ: ci_status, try_enqueue и publish из доставки реализованы в #52
 ```
 
 Ответ 202 подтверждает только приём: HMAC и одна вставка квитанции в `webhook_events`, без REST-вызовов; проекцию события и `try_enqueue` выполняет `webhook-worker` после ответа ([WEBHOOK_WORKER.md](WEBHOOK_WORKER.md); `try_enqueue` из доставки реализован в #52). `try_enqueue` — одна функция, вызывается из обоих обработчиков и из sweep; условие проверяется по состоянию, а не по тому, какое событие пришло последним. «CI зелёный» (дефолт по #20): все check suites для `head_sha`, **кроме suite самого App** (`app.id`) и чужих suites в `queued` без единого check run (`latest_check_runs_count = 0`, решение #72 ниже), завершены с `success` / `neutral` / `skipped`, а combined status коммита — `success` или статусов нет; проверяется REST-запросами check-suites и status внутри `try_enqueue`. Свой suite исключён: GitHub создаёт его для App с `checks: write`, а завершает его только наш check-run (§8.3) — иначе условие ждало бы само себя. Если у репозитория нет CI (`wait_for_ci = auto` и ни одного чужого check suite, кроме `queued` без check run, или статуса для `head_sha` за 2 минуты) — прогон стартует по одному лейблу. Это правило реализует sweep раз в 30 с в leader-цикле `worker` (лидер через `pg_advisory_lock`, дефолт по #20): он вызывает тот же `try_enqueue`; реконсилер (раз в 5 мин, §6.4) его не заменяет. После пуша — авто-повтор, пока стоит лейбл `ai-review` (флаг `ai_review_labeled`, Р-10). Полное условие, `wait_for_ci` и жизненный цикл флага — [PIPELINE_SPEC](PIPELINE_SPEC.md) §8.
@@ -321,7 +322,7 @@ sequenceDiagram
   WH->>PG: webhook_events INSERT (квитанция)
   WH-->>GH: 202
   WW->>PG: try_enqueue → run#2 (sha_2)
-  Note over WW: try_enqueue из доставки (#52)
+  Note over WW: try_enqueue из доставки реализован в #52
 ```
 
 Сообщение run#1 в RabbitMQ удалить нельзя — поэтому решение всегда принимается по состоянию в БД (`RunGuard`), а брокер только доставляет.
