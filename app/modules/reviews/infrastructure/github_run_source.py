@@ -12,6 +12,7 @@ from uuid import UUID
 
 import httpx
 
+from app.common.infrastructure.github_repository_path import commit_sha_segment
 from app.modules.reviews.application.conventions import RepositoryFile, RepositorySnapshot
 from app.modules.reviews.application.process_run import RunVcsInput, RunVcsRepository
 from app.modules.reviews.application.prompt_builder import PullRequestMeta
@@ -57,11 +58,12 @@ class GitHubRunSource:
         return self._run
 
     async def _tree(self, run: RunVcsInput, sha: str, *, recursive: bool) -> list[dict[str, Any]]:
+        path = f"{_repository_prefix(run.locator)}/git/trees/{commit_sha_segment(sha)}"
         token = await self._tokens.get_installation_access_token(
             run.locator.installation_external_id
         )
         response = await self._client.get(
-            f"{_repository_prefix(run.locator)}/git/trees/{sha}",
+            path,
             params={"recursive": "1"} if recursive else None,
             headers=_headers(token),
             timeout=_REQUEST_TIMEOUT,

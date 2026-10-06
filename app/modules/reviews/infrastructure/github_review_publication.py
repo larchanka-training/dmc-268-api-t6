@@ -4,10 +4,13 @@ from __future__ import annotations
 
 from datetime import timedelta
 from typing import Any
-from urllib.parse import quote
 
 import httpx
 
+from app.common.infrastructure.github_repository_path import (
+    commit_sha_segment,
+    repository_path_from_full_name,
+)
 from app.modules.reviews.application.check_runs import CheckRunTarget, CheckRunView
 from app.modules.reviews.application.publish_run_review import (
     GitHubPublishError,
@@ -19,13 +22,6 @@ from app.modules.reviews.infrastructure.github_vcs import InstallationTokenProvi
 CHECK_RUN_NAME = "AI Review"
 _REQUEST_TIMEOUT = 10.0
 _API_VERSION = "2022-11-28"
-
-
-def _repository_path(full_name: str) -> str:
-    owner, _, repo = full_name.partition("/")
-    if not owner or not repo or "/" in repo:
-        raise ValueError("GitHub repository must be owner/repo")
-    return f"/repos/{quote(owner, safe='')}/{quote(repo, safe='')}"
 
 
 def _headers(token: str) -> dict[str, str]:
@@ -49,7 +45,8 @@ class GitHubCheckRunGateway:
         self._tokens = token_provider
 
     async def upsert(self, target: CheckRunTarget, view: CheckRunView) -> None:
-        prefix = _repository_path(target.repository_full_name)
+        prefix = repository_path_from_full_name(target.repository_full_name)
+        commit_check_runs = f"{prefix}/commits/{commit_sha_segment(target.head_sha)}/check-runs"
         headers = _headers(await self._tokens.get_installation_access_token(target.installation_id))
         payload: dict[str, Any] = {
             "status": view.status,
@@ -57,7 +54,7 @@ class GitHubCheckRunGateway:
         }
         if view.conclusion is not None:
             payload["conclusion"] = view.conclusion
-        existing = await self._find(prefix, headers, target)
+        existing = await self._find(commit_check_runs, headers, target)
         if existing is None:
             payload |= {
                 "name": CHECK_RUN_NAME,
@@ -76,11 +73,9 @@ class GitHubCheckRunGateway:
             )
         response.raise_for_status()
 
-    async def _find(
-        self, prefix: str, headers: dict[str, str], target: CheckRunTarget
-    ) -> int | None:
+    async def _find(self, path: str, headers: dict[str, str], target: CheckRunTarget) -> int | None:
         response = await self._client.get(
-            f"{prefix}/commits/{target.head_sha}/check-runs",
+            path,
             params={"check_name": CHECK_RUN_NAME, "filter": "all", "per_page": 100},
             headers=headers,
             timeout=_REQUEST_TIMEOUT,
@@ -121,7 +116,8 @@ class GitHubPullRequestReviewGateway:
         self._tokens = token_provider
 
     async def submit_review(self, submission: ReviewSubmission) -> SubmittedReview:
-        prefix = f"{_repository_path(submission.repository_full_name)}/pulls/{submission.pr_number}"
+        repository_path = repository_path_from_full_name(submission.repository_full_name)
+        prefix = f"{repository_path}/pulls/{submission.pr_number}"
         try:
             headers = _headers(
                 await self._tokens.get_installation_access_token(submission.installation_id)

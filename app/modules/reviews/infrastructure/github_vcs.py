@@ -6,11 +6,11 @@ import base64
 import binascii
 import re
 from typing import Literal, Protocol
-from urllib.parse import quote
 
 import httpx
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, model_validator
 
+from app.common.infrastructure.github_repository_path import repository_path_from_full_name
 from app.modules.reviews.application.prompt_builder import PullRequestMeta
 from app.modules.reviews.application.vcs_diff import (
     MAX_BLOB_BYTES,
@@ -104,12 +104,7 @@ _FILES = TypeAdapter(list[_File])
 def _repository_prefix(locator: PullRequestLocator) -> str:
     if locator.installation_external_id <= 0 or locator.number <= 0:
         raise ValueError("GitHub installation and pull request number must be positive")
-    if locator.repository_full_name.count("/") != 1:
-        raise ValueError("GitHub repository must be owner/repo")
-    owner, repo = locator.repository_full_name.split("/", 1)
-    if not owner or not repo:
-        raise ValueError("GitHub repository must be owner/repo")
-    return f"/repos/{quote(owner, safe='')}/{quote(repo, safe='')}"
+    return repository_path_from_full_name(locator.repository_full_name)
 
 
 def _headers(token: str) -> dict[str, str]:
