@@ -12,6 +12,7 @@ from typing import Any
 
 import pytest
 
+import review.scripts.eval_replay as eval_replay_module
 from review.scripts import eval_provenance
 from review.scripts.eval_provenance import (
     DigestInputError,
@@ -173,6 +174,69 @@ def test_replay_rejects_case_status_without_paid_metadata_marker(tmp_path: Path)
     manifest_path.write_text(json.dumps(manifest))
 
     with pytest.raises(ReplayError, match="invalid statuses"):
+        replay(root)
+
+
+@pytest.mark.parametrize("change", ["missing", "extra"])
+def test_replay_rejects_case_status_ids_different_from_responses(
+    tmp_path: Path, change: str
+) -> None:
+    root = fixture_root(tmp_path)
+    record(root, {"SEC-01": review_output()})
+    manifest_path = root / "responses/manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    statuses = manifest["run_metadata"]["cases"]
+    if change == "missing":
+        statuses.pop("SEC-01")
+    else:
+        statuses["CLEAN-01"] = statuses["SEC-01"].copy()
+    manifest_path.write_text(json.dumps(manifest))
+
+    with pytest.raises(ReplayError, match="run_metadata cases have invalid statuses"):
+        replay(root)
+
+
+@pytest.mark.parametrize(
+    "status",
+    [
+        [],
+        {"first_call": "unknown", "gateway_status": "accepted", "paid_metadata_error": False},
+        {"first_call": "answer", "gateway_status": "", "paid_metadata_error": False},
+        {"first_call": "answer", "gateway_status": 200, "paid_metadata_error": False},
+        {"first_call": "answer", "gateway_status": "accepted", "paid_metadata_error": "false"},
+        {"first_call": "answer", "gateway_status": "accepted", "paid_metadata_error": True},
+    ],
+)
+def test_replay_rejects_malformed_case_status(tmp_path: Path, status: object) -> None:
+    root = fixture_root(tmp_path)
+    record(root, {"SEC-01": review_output()})
+    manifest_path = root / "responses/manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["run_metadata"]["cases"]["SEC-01"] = status
+    manifest_path.write_text(json.dumps(manifest))
+
+    with pytest.raises(ReplayError, match="run_metadata cases have invalid statuses"):
+        replay(root)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("static_digest", "unrecorded"),
+        ("static_digest", "sha256-v1:" + "A" * 64),
+        ("corpus_digest", None),
+        ("corpus_digest", "sha256-v1:short"),
+    ],
+)
+def test_replay_rejects_invalid_digest_fields(tmp_path: Path, field: str, value: object) -> None:
+    root = fixture_root(tmp_path)
+    record(root, {"SEC-01": review_output()})
+    manifest_path = root / "responses/manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest[field] = value
+    manifest_path.write_text(json.dumps(manifest))
+
+    with pytest.raises(ReplayError, match=f"response manifest {field} must be a sha256-v1 digest"):
         replay(root)
 
 
@@ -524,6 +588,67 @@ def test_replay_rejects_unsafe_static_path_named_missing(tmp_path: Path) -> None
         replay(root, prompt_root=repo)
 
 
+def test_replay_rejects_static_digest_directory_input(tmp_path: Path) -> None:
+    root = fixture_root(tmp_path)
+    repo = tmp_path / "repo"
+    _record_with_digests(root, repo)
+    manifest_path = root / "responses/manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["static_inputs"] = ["review/rules"]
+    manifest_path.write_text(json.dumps(manifest))
+
+    with pytest.raises(ReplayError, match="digest path is not a file"):
+        replay(root, prompt_root=repo)
+
+
+@pytest.mark.parametrize("rule_directory", ["missing", "symlink"])
+def test_replay_classifies_current_rule_directory_failure(
+    tmp_path: Path, rule_directory: str
+) -> None:
+    root = fixture_root(tmp_path)
+    repo = tmp_path / "repo"
+    _record_with_digests(root, repo)
+    manifest_path = root / "responses/manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["static_inputs"] = [
+        path for path in manifest["static_inputs"] if not path.startswith("review/rules/")
+    ]
+    manifest["static_digest"] = digest_files(repo, manifest["static_inputs"])
+    manifest_path.write_text(json.dumps(manifest))
+    rules_dir = repo / "review/rules"
+    shutil.rmtree(rules_dir)
+    if rule_directory == "symlink":
+        outside = tmp_path / "outside-rules"
+        outside.mkdir()
+        rules_dir.symlink_to(outside, target_is_directory=True)
+        with pytest.raises(ReplayError, match="symlink rule directory"):
+            replay(root, prompt_root=repo)
+    else:
+        assert replay(root, prompt_root=repo)["warnings"] == [
+            f"Static input is missing: missing rule directory: {rules_dir}"
+        ]
+
+
+@pytest.mark.parametrize("base_path", ["missing", "diff.patch", "../missing"])
+def test_corpus_digest_rejects_missing_or_unsafe_preimage_inputs(
+    tmp_path: Path, base_path: str
+) -> None:
+    root = fixture_root(tmp_path, ("SEC-01",))
+    case_dir = root / "cases/SEC-01"
+    record_data = json.loads((case_dir / "case.json").read_text())
+    record_data["base_path"] = base_path
+
+    if base_path == "missing":
+        with pytest.raises(eval_provenance.DigestInputMissing, match="missing pre-image directory"):
+            corpus_input_paths(root, [(case_dir, record_data)])
+    elif base_path == "diff.patch":
+        with pytest.raises(DigestInputError, match="pre-image path is not a directory"):
+            corpus_input_paths(root, [(case_dir, record_data)])
+    else:
+        with pytest.raises(DigestInputError, match="unsafe pre-image directory"):
+            corpus_input_paths(root, [(case_dir, record_data)])
+
+
 def test_missing_digest_input_has_distinct_error_type(tmp_path: Path) -> None:
     with pytest.raises(DigestInputError, match="missing") as error:
         digest_files(tmp_path, ["missing.txt"])
@@ -546,6 +671,31 @@ def test_replay_warns_when_static_input_is_missing(tmp_path: Path) -> None:
     assert len(report["warnings"]) == 1
     assert report["warnings"][0].startswith("Static input is missing:")
     assert (root / "responses/SEC-01.json").read_bytes() == original
+
+
+def test_replay_warns_when_corpus_input_disappears_after_enumeration(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = fixture_root(tmp_path)
+    repo = tmp_path / "repo"
+    _record_with_digests(root, repo)
+    disappearing = root / "cases/SEC-01/base/README.md"
+    original_paths = corpus_input_paths
+
+    def enumerate_then_remove(
+        dataset_root: Path, records: list[tuple[Path, dict[str, Any]]]
+    ) -> list[str]:
+        paths = original_paths(dataset_root, records)
+        disappearing.unlink()
+        return paths
+
+    monkeypatch.setattr(eval_replay_module, "corpus_input_paths", enumerate_then_remove)
+    report = replay(root, prompt_root=repo)
+
+    assert report["warnings"] == [
+        "Corpus input is missing: missing digest file: cases/SEC-01/base/README.md"
+    ]
+    assert report["case_count"] == 1
 
 
 @pytest.mark.parametrize("changed", ["case.json", "base/README.md"])

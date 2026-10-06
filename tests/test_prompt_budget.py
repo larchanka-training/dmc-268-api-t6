@@ -177,7 +177,8 @@ def test_additive_budget_matches_full_render_with_multiple_omitted_files() -> No
             return len(text)
 
     original = context(
-        changed_file("app/alpha.py", 2, width=4),
+        changed_file("app/alpha.py", 12, width=4),
+        changed_file("app/beta.py", 2, width=4),
         changed_file("tests/test_beta.py", 2, width=4),
         changed_file("config/gamma.json", 2, width=4),
     )
@@ -185,19 +186,32 @@ def test_additive_budget_matches_full_render_with_multiple_omitted_files() -> No
     full_length = prompt_tokens(original, render_counter)
     all_omitted = fit_review_context(original, max_prompt_tokens=0, counter=render_counter)
     minimum_length = prompt_tokens(all_omitted, render_counter)
-    assert len(all_omitted.omitted_files) - len(original.omitted_files) == 3
-    saw_multiple_omitted = False
+    assert len(all_omitted.omitted_files) - len(original.omitted_files) == 4
+    saw_cut_with_multiple_omitted = False
+    builder = PromptBuilder()
 
     for budget in range(full_length + 1):
         fast = fit_review_context(original, max_prompt_tokens=budget, counter=COUNTER)
         rendered = fit_review_context(original, max_prompt_tokens=budget, counter=render_counter)
         assert fast == rendered, f"budget={budget}"
-        if len(fast.omitted_files) - len(original.omitted_files) >= 2:
-            saw_multiple_omitted = True
+        fast_prompt = builder.build_prompt(fast)
+        rendered_prompt = builder.build_prompt(rendered)
+        assert (fast_prompt.system, fast_prompt.user) == (
+            rendered_prompt.system,
+            rendered_prompt.user,
+        ), f"budget={budget}"
+        assert prompt_tokens(fast, COUNTER) == prompt_tokens(rendered, render_counter), (
+            f"budget={budget}"
+        )
+        if len(fast.omitted_files) - len(original.omitted_files) >= 2 and any(
+            file.path == "app/alpha.py" and file.total_lines == 12 for file in fast.changed_files
+        ):
+            assert "[Showing lines" in fast_prompt.user
+            saw_cut_with_multiple_omitted = True
         if budget >= minimum_length:
             assert prompt_tokens(fast, render_counter) <= budget, f"budget={budget}"
 
-    assert saw_multiple_omitted
+    assert saw_cut_with_multiple_omitted
 
 
 def test_the_shipped_brace_glob_of_a_custom_rule_raises_the_priority() -> None:
@@ -257,6 +271,35 @@ def test_normal_brace_include_and_exclude_patterns_prioritize_only_matching_file
         2,
         20,
     )
+
+
+@pytest.mark.parametrize(
+    ("alternatives", "whole_path", "cut_path"),
+    [
+        (127, "src/z.py", "src/a.py"),
+        (128, "src/a.py", "src/z.py"),
+    ],
+)
+def test_brace_work_cap_keeps_255_units_and_rejects_257(
+    alternatives: int, whole_path: str, cut_path: str
+) -> None:
+    # One brace with N alternatives costs 1 examined + N produced + N examined.
+    # Complete expansions therefore straddle the 256-unit cap at 255 and 257.
+    include = "{" + ",".join(["src/z.py", *(["unmatched.py"] * (alternatives - 1))]) + "}"
+    original = context(
+        changed_file("src/a.py", 20),
+        changed_file("src/z.py", 20),
+        rules=(ReviewRule("Boundary", (include,), (), ("Check.",)),),
+    )
+    budget = prompt_tokens(original, COUNTER) - 20 * 60
+
+    fitted = fit_review_context(original, max_prompt_tokens=budget, counter=COUNTER)
+
+    kept = {file.path: file for file in fitted.changed_files}
+    assert kept[whole_path] == next(
+        file for file in original.changed_files if file.path == whole_path
+    )
+    assert (len(kept[cut_path].lines), kept[cut_path].total_lines) == (2, 20)
 
 
 def test_oversized_brace_glob_is_ignored_without_expanding_every_combination() -> None:

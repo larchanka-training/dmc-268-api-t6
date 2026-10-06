@@ -514,6 +514,28 @@ def test_payment_required_fails_run_after_one_attempt_without_retry() -> None:
     assert check_runs.views[-1].summary == "AI-ревью временно недоступно."
 
 
+def test_payment_required_check_run_keeps_neutral_text_and_run_link() -> None:
+    run_url = f"https://review.example/runs/{RUN}"
+    report = CheckRunReport(
+        CheckRunTarget(1, "o/r", HEAD, RUN),
+        "failed",
+        1,
+        "llm_payment_required",
+        run_url=run_url,
+    )
+
+    view = check_run_view(report)
+
+    assert (view.status, view.conclusion, view.title) == (
+        "completed",
+        "neutral",
+        "AI-ревью не выполнено",
+    )
+    assert view.summary == f"AI-ревью временно недоступно.\n\n{run_url}"
+    assert "llm_payment_required" not in view.summary
+    assert "402" not in view.summary
+
+
 def test_checkpoint_after_the_deadline_fails_the_run_before_the_model_call() -> None:
     run = FakeRun()
     store = FakeStore(run)

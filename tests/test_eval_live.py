@@ -744,6 +744,27 @@ def test_records_exactly_the_twenty_four_active_case_ids(tmp_path: Path) -> None
     )
 
 
+def test_python_typescript_and_tsx_cases_use_their_selected_rules(tmp_path: Path) -> None:
+    case_ids = ("LOG-02", "RES-02", "SEC-01")
+    root = fixture_root(tmp_path, case_ids)
+    transport = FakeTransport([answer("primary-model", VALID) for _ in case_ids])
+
+    manifest = record(root, transport)
+
+    assert list(manifest["responses"]) == list(case_ids)
+    assert len(transport.requests) == len(case_ids)
+    for case_id, request in zip(case_ids, transport.requests, strict=True):
+        user_prompt = request.messages[1].content
+        if case_id == "SEC-01":
+            assert 'name="Clean Architecture Boundaries"' in user_prompt
+            assert 'name="FSD Layer Boundaries"' not in user_prompt
+        else:
+            assert 'name="FSD Layer Boundaries"' in user_prompt
+            assert 'name="Clean Architecture Boundaries"' not in user_prompt
+    assert "review/rules/default-backend.v1.json" in manifest["static_inputs"]
+    assert "review/rules/default-frontend.v1.json" in manifest["static_inputs"]
+
+
 def test_invalid_case_is_rejected_before_any_response_is_written(tmp_path: Path) -> None:
     root = fixture_root(tmp_path, ("SEC-01",))
     (root / "cases/SEC-01/diff.patch").write_text("not a patch\n")
@@ -917,6 +938,53 @@ def test_live_cli_writes_redacted_json_report_with_fake_transport(
     assert metadata["valid"] is False
     assert len(metadata["raw_sha256"]) == 64
     assert capsys.readouterr().out == format_console(replay(root)) + "\n"
+
+
+@pytest.mark.parametrize("flag", ["--report-json", "--redacted-responses"])
+@pytest.mark.parametrize(
+    ("target", "error"),
+    [
+        ("missing_parent", "parent directory must already exist"),
+        ("parent_traversal", "path must not contain parent traversal"),
+        ("symlink_parent", "path must not contain a symlink"),
+    ],
+)
+def test_export_parent_is_checked_before_provider_call(
+    tmp_path: Path,
+    flag: str,
+    target: str,
+    error: str,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    root = fixture_root(tmp_path, ("SEC-01",))
+    name = "report.json" if flag == "--report-json" else "redacted"
+    if target == "missing_parent":
+        destination = tmp_path / "absent" / name
+    elif target == "parent_traversal":
+        nested = tmp_path / "nested"
+        nested.mkdir()
+        destination = nested / ".." / name
+    else:
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        linked = tmp_path / "linked"
+        linked.symlink_to(outside, target_is_directory=True)
+        destination = linked / name
+    transport = FakeTransport([answer("primary-model", VALID)])
+
+    assert (
+        main(
+            ["--root", str(root), flag, str(destination)],
+            transport=transport,
+            model_settings=settings(),
+        )
+        == 1
+    )
+
+    assert error in capsys.readouterr().err
+    assert transport.requests == []
+    assert not (root / "responses").exists()
+    assert not destination.exists()
 
 
 @pytest.mark.parametrize("target", ["case", "existing", "symlink"])
