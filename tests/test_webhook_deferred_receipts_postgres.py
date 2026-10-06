@@ -208,11 +208,13 @@ def test_sweep_summary_counts_deliveries_deferred_for_good(
     with caplog.at_level(logging.INFO):
         asyncio.run(scenario())
 
-    sweeps = [r.getMessage() for r in caplog.records if "webhook sweep" in r.getMessage()]
+    sweeps = [
+        (r.levelno, r.getMessage()) for r in caplog.records if "webhook sweep" in r.getMessage()
+    ]
     assert sweeps == [
-        "GitHub webhook sweep: 1 handled, 1 deferred, 0 deferred for good",
-        "GitHub webhook sweep: 1 handled, 1 deferred, 0 deferred for good",
-        "GitHub webhook sweep: 1 handled, 1 deferred, 1 deferred for good",
+        (logging.INFO, "GitHub webhook sweep: 1 handled, 1 deferred, 0 deferred for good"),
+        (logging.INFO, "GitHub webhook sweep: 1 handled, 1 deferred, 0 deferred for good"),
+        (logging.INFO, "GitHub webhook sweep: 1 handled, 1 deferred, 1 deferred for good"),
     ]
     warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
     assert warnings == [
