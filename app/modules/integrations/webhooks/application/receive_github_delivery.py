@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -12,6 +11,7 @@ from enum import StrEnum
 from typing import Protocol
 from uuid import UUID, uuid4
 
+from app.common.application.log_token import log_token
 from app.common.application.unit_of_work import UnitOfWork
 from app.modules.integrations.webhooks.application.github_installation_dispatch import (
     InstallationDeliveryDispatchResult,
@@ -34,14 +34,6 @@ _DEFERRED = frozenset(
         InstallationDeliveryDispatchStatus.DEFERRED_REPOSITORY_DETAILS,
     }
 )
-# GitHub's event names and actions are lowercase words joined by ``_``. They go into log
-# lines, so anything else (free text, line breaks) is logged as absent.
-_LOG_TOKEN = re.compile(r"[a-z_]{1,40}")
-
-
-def log_token(value: object) -> str | None:
-    """``value`` when it is a plain token that is safe to log, otherwise None."""
-    return value if isinstance(value, str) and _LOG_TOKEN.fullmatch(value) else None
 
 
 class FailureCategory(StrEnum):
