@@ -5,11 +5,14 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
 from typing import Literal, Protocol, cast
-from urllib.parse import quote
 
 import httpx
 import jwt
 
+from app.common.infrastructure.github_repository_path import (
+    ref_segment,
+    repository_path_from_full_name,
+)
 from app.modules.repositories.application.installation_repositories import (
     RepositorySnapshot,
     RepositoryTreeBlob,
@@ -184,13 +187,13 @@ class GitHubInstallationTreeProvider:
         repository: RepositorySnapshot,
     ) -> tuple[RepositoryTreeBlob, ...]:
         """Fetch the recursive tree for the repository's declared default branch."""
+        repository_path = repository_path_from_full_name(repository.full_name)
+        branch = ref_segment(repository.default_branch)
         access_token = await self._token_provider.get_installation_access_token(
             installation_external_id
         )
-        repository_name = quote(repository.full_name, safe="/")
-        branch = quote(repository.default_branch, safe="")
         response = await self._client.get(
-            f"/repos/{repository_name}/git/trees/{branch}",
+            f"{repository_path}/git/trees/{branch}",
             params={"recursive": "1"},
             headers={
                 "Accept": "application/vnd.github+json",

@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from urllib.parse import quote
 
 import httpx
 
+from app.common.infrastructure.github_repository_path import repository_path_from_full_name
 from app.modules.integrations.webhooks.application.installation_event_projector import (
     RepositoryDetails,
     RepositoryDetailsUnavailableError,
@@ -37,6 +37,7 @@ class GitHubInstallationRepositoryDetailsProvider:
     async def fetch_repository_details(
         self, *, installation_external_id: int, full_name: str
     ) -> RepositoryDetails:
+        repository_path = repository_path_from_full_name(full_name)
         try:
             access_token = await self._token_provider.get_installation_access_token(
                 installation_external_id
@@ -45,10 +46,9 @@ class GitHubInstallationRepositoryDetailsProvider:
             raise RepositoryDetailsUnavailableError(
                 _unavailable_message("installation token request", error)
             ) from error
-        repository_name = quote(full_name, safe="/")
         try:
             response = await self._client.get(
-                f"/repos/{repository_name}",
+                repository_path,
                 headers={
                     "Accept": "application/vnd.github+json",
                     "Authorization": f"Bearer {access_token}",

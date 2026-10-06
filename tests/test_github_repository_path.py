@@ -2,10 +2,16 @@
 
 from __future__ import annotations
 
+import asyncio
+import logging
 import time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
+from typing import Any
 
 import httpx
+import pydantic
 import pytest
 
 from app.common.infrastructure.github_repository_path import (
@@ -13,6 +19,34 @@ from app.common.infrastructure.github_repository_path import (
     commit_sha_segment,
     ref_segment,
     repository_path_from_full_name,
+)
+from app.modules.integrations.webhooks.api.dispatch import GitHubWebhookDispatchAdapter
+from app.modules.integrations.webhooks.api.pull_request_dtos import parse_pull_request_event
+from app.modules.integrations.webhooks.api.receipt import VerifiedGitHubDelivery
+from app.modules.integrations.webhooks.application.github_installation_dispatch import (
+    GitHubDispatchEvent,
+    InstallationDeliveryDispatchResult,
+    InstallationDeliveryDispatchStatus,
+)
+from app.modules.integrations.webhooks.infrastructure.github_current_pull_request import (
+    HttpGitHubCurrentPullRequestProvider,
+)
+from app.modules.integrations.webhooks.infrastructure.github_installation_tree_provider import (
+    GitHubInstallationTreeProvider,
+)
+from app.modules.integrations.webhooks.infrastructure.github_repository_details import (
+    GitHubInstallationRepositoryDetailsProvider,
+)
+from app.modules.integrations.webhooks.infrastructure.github_repository_labels import (
+    GitHubRepositoryLabelProvider,
+)
+from app.modules.integrations.webhooks.infrastructure.github_reviewer_timeline import (
+    HttpGitHubReviewerTimelineProvider,
+)
+from app.modules.repositories.application.installation_repositories import RepositorySnapshot
+from app.modules.reviews.application.project_github_pull_request import (
+    PullRequestEvent,
+    PullRequestState,
 )
 
 _SHA_40 = "0123456789abcdef0123456789abcdef01234567"
@@ -199,3 +233,262 @@ def test_the_error_never_carries_the_rejected_value(
     assert "leak-marker" not in repr(raised.value)
     assert raised.value.args == (str(raised.value),)
     assert ".." not in str(raised.value)
+
+
+# --- Webhook adapters: a bad name is rejected before a token is minted or a request is sent ---
+
+
+@dataclass
+class _Tokens:
+    calls: list[int] = field(default_factory=list)
+
+    async def get_installation_access_token(self, installation_external_id: int) -> str:
+        self.calls.append(installation_external_id)
+        return "installation-token"
+
+
+@dataclass
+class _Wire:
+    """Records what reaches the transport; ``answer`` is the body of every reply."""
+
+    answer: object = field(default_factory=dict)
+    requests: list[httpx.Request] = field(default_factory=list)
+
+    def handler(self, request: httpx.Request) -> httpx.Response:
+        self.requests.append(request)
+        return httpx.Response(200, request=request, json=self.answer)
+
+
+def _run_on_wire(
+    action: Callable[[httpx.AsyncClient, _Tokens], Awaitable[object]], wire: _Wire, tokens: _Tokens
+) -> None:
+    async def run() -> None:
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(wire.handler), base_url=_API
+        ) as client:
+            await action(client, tokens)
+
+    asyncio.run(run())
+
+
+def _pull_request_event(full_name: str) -> PullRequestEvent:
+    return PullRequestEvent(
+        action="synchronize",
+        installation_external_id=17,
+        repository_external_id=101,
+        external_id=901,
+        number=7,
+        title="Add parser",
+        description=None,
+        author_login="alice",
+        web_url="https://github.com/octo/repo/pull/7",
+        source_branch="feature/parser",
+        target_branch="main",
+        base_sha="b" * 40,
+        head_sha="a" * 40,
+        state=PullRequestState.OPEN,
+        provider_updated_at=datetime(2026, 9, 28, 11, 59, tzinfo=UTC),
+        repository_full_name=full_name,
+    )
+
+
+def _snapshot(full_name: str, default_branch: str = "main") -> RepositorySnapshot:
+    return RepositorySnapshot(
+        external_id=101,
+        full_name=full_name,
+        default_branch=default_branch,
+        web_url="https://github.com/octo/repo",
+    )
+
+
+_WEBHOOK_SINKS: dict[str, Callable[[httpx.AsyncClient, _Tokens, str], Awaitable[object]]] = {
+    "reviewer-timeline": lambda client, tokens, full_name: HttpGitHubReviewerTimelineProvider(
+        client=client, token_provider=tokens
+    ).snapshot(_pull_request_event(full_name), "reviewer[bot]"),
+    "current-pull-request": lambda client, tokens, full_name: HttpGitHubCurrentPullRequestProvider(
+        client=client, token_provider=tokens
+    ).get_current(_pull_request_event(full_name)),
+    "repository-details": lambda client, tokens, full_name: (
+        GitHubInstallationRepositoryDetailsProvider(
+            client=client, token_provider=tokens
+        ).fetch_repository_details(installation_external_id=17, full_name=full_name)
+    ),
+    "repository-label": lambda client, tokens, full_name: GitHubRepositoryLabelProvider(
+        client=client, token_provider=tokens
+    ).create_ai_review_label(installation_external_id=17, repository=_snapshot(full_name)),
+    "installation-tree": lambda client, tokens, full_name: GitHubInstallationTreeProvider(
+        client=client, token_provider=tokens
+    ).fetch_default_branch_tree(installation_external_id=17, repository=_snapshot(full_name)),
+}
+
+_BAD_FULL_NAMES = ["o/..", "../r", "o/../../pulls/1", "o/r?x", "o/r#x", "o/r%2Fx", "a/b/c", "o /r"]
+
+
+@pytest.mark.parametrize("sink", _WEBHOOK_SINKS)
+@pytest.mark.parametrize("full_name", _BAD_FULL_NAMES)
+def test_webhook_adapter_rejects_a_bad_repository_name_before_any_request(
+    sink: str, full_name: str
+) -> None:
+    wire, tokens = _Wire(), _Tokens()
+
+    with pytest.raises(InvalidGitHubPathSegment):
+        _run_on_wire(lambda client, t: _WEBHOOK_SINKS[sink](client, t, full_name), wire, tokens)
+
+    assert wire.requests == []
+    assert tokens.calls == []
+
+
+@pytest.mark.parametrize("default_branch", ["..", "."])
+def test_tree_provider_rejects_a_default_branch_that_walks_the_path_before_any_request(
+    default_branch: str,
+) -> None:
+    wire, tokens = _Wire(), _Tokens()
+
+    with pytest.raises(InvalidGitHubPathSegment):
+        _run_on_wire(
+            lambda client, t: GitHubInstallationTreeProvider(
+                client=client, token_provider=t
+            ).fetch_default_branch_tree(
+                installation_external_id=17, repository=_snapshot("octo/api", default_branch)
+            ),
+            wire,
+            tokens,
+        )
+
+    assert wire.requests == []
+    assert tokens.calls == []
+
+
+@pytest.mark.parametrize(
+    ("default_branch", "encoded"),
+    [
+        ("release/1.0", "release%2F1.0"),
+        ("a/b/c", "a%2Fb%2Fc"),
+        ("%2e%2e", "%252e%252e"),
+        ("feat?x", "feat%3Fx"),
+        ("a..b", "a..b"),
+    ],
+)
+def test_tree_provider_sends_a_default_branch_as_one_encoded_path_segment(
+    default_branch: str, encoded: str
+) -> None:
+    wire, tokens = _Wire(answer={"tree": []}), _Tokens()
+
+    _run_on_wire(
+        lambda client, t: GitHubInstallationTreeProvider(
+            client=client, token_provider=t
+        ).fetch_default_branch_tree(
+            installation_external_id=17, repository=_snapshot("octo/api", default_branch)
+        ),
+        wire,
+        tokens,
+    )
+
+    assert [request.url.raw_path for request in wire.requests] == [
+        f"/repos/octo/api/git/trees/{encoded}?recursive=1".encode()
+    ]
+
+
+def _pull_request_payload(full_name: str) -> dict[str, Any]:
+    return {
+        "action": "opened",
+        "installation": {"id": 17},
+        "repository": {"id": 101, "full_name": full_name},
+        "pull_request": {
+            "id": 901,
+            "number": 7,
+            "title": "Add parser",
+            "body": None,
+            "html_url": "https://github.com/octo/repo/pull/7",
+            "user": {"login": "alice"},
+            "head": {"ref": "feature/parser", "sha": "a" * 40},
+            "base": {"ref": "main", "sha": "b" * 40},
+            "state": "open",
+            "merged": False,
+            "updated_at": "2026-09-28T11:59:00Z",
+        },
+    }
+
+
+@pytest.mark.parametrize(
+    "full_name",
+    ["octo/repo", "octo/.github", "octo_acme/repo", "owner/repo.js", "example-owner/example-repo"],
+)
+def test_pull_request_parser_accepts_real_github_repository_names(full_name: str) -> None:
+    event = parse_pull_request_event(_pull_request_payload(full_name))
+
+    assert event.repository_full_name == full_name
+
+
+_DISPATCH_LOGGER = "app.modules.integrations.webhooks.api.dispatch"
+
+
+@dataclass
+class _Dispatched:
+    events: list[GitHubDispatchEvent] = field(default_factory=list)
+
+    async def execute(self, delivery: GitHubDispatchEvent) -> InstallationDeliveryDispatchResult:
+        self.events.append(delivery)
+        return InstallationDeliveryDispatchResult(InstallationDeliveryDispatchStatus.PROJECTED_PR)
+
+
+def _dispatch_pull_request(
+    payload: dict[str, Any],
+) -> tuple[InstallationDeliveryDispatchResult, _Dispatched]:
+    dispatched = _Dispatched()
+    result = asyncio.run(
+        GitHubWebhookDispatchAdapter(dispatched).execute(
+            VerifiedGitHubDelivery("delivery-pr", "pull_request", payload).to_receipt()
+        )
+    )
+    return result, dispatched
+
+
+def _warnings(caplog: pytest.LogCaptureFixture) -> list[str]:
+    return [
+        record.getMessage()
+        for record in caplog.records
+        if record.name == _DISPATCH_LOGGER and record.levelno == logging.WARNING
+    ]
+
+
+@pytest.mark.parametrize("action", ["opened", "labeled"])
+def test_a_pull_request_event_with_a_bad_repository_name_is_ignored_with_its_field_path_only(
+    caplog: pytest.LogCaptureFixture, action: str
+) -> None:
+    """The outcome reason names the failing field (api#72), never the rejected value."""
+    payload = _pull_request_payload("SENTINEL-owner/../SENTINEL-name")
+    payload["action"] = action
+    payload["label"] = {"name": "SENTINEL-label"}
+
+    with caplog.at_level(logging.DEBUG):
+        result, dispatched = _dispatch_pull_request(payload)
+
+    assert result.status is InstallationDeliveryDispatchStatus.IGNORED_INVALID_EVENT
+    assert dispatched.events == []
+    assert result.detail == f"action={action} invalid_payload fields=repository.full_name"
+    assert "SENTINEL" not in caplog.text
+
+
+def test_a_valid_pull_request_event_is_dispatched_without_a_warning(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    with caplog.at_level(logging.WARNING, logger=_DISPATCH_LOGGER):
+        result, dispatched = _dispatch_pull_request(_pull_request_payload("octo/repo"))
+
+    assert result.status is InstallationDeliveryDispatchStatus.PROJECTED_PR
+    assert len(dispatched.events) == 1
+    assert _warnings(caplog) == []
+
+
+@pytest.mark.parametrize(
+    "full_name",
+    [".", "..", "../..", "o/..", "../r", "./.", "o r/r", "o/r p", "o/r\n", "o/r/x", "o"],
+)
+def test_pull_request_parser_rejects_a_repository_name_outside_owner_slash_repo(
+    full_name: str,
+) -> None:
+    with pytest.raises(pydantic.ValidationError) as raised:
+        parse_pull_request_event(_pull_request_payload(full_name))
+
+    assert [error["loc"] for error in raised.value.errors()] == [("repository", "full_name")]
