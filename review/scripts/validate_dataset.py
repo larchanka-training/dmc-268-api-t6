@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import codecs
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -60,6 +61,15 @@ def _case_path(case_dir: Path, raw: str) -> Path | None:
         return None
     result = (case_dir / relative).resolve()
     return result if result.is_relative_to(case_dir.resolve()) else None
+
+
+def _git_env() -> dict[str, str]:
+    """The environment without any ``GIT_*`` key, for git runs on the copied base.
+
+    An exported ``GIT_DIR`` (``git rebase --exec``) would make git read the caller's repository
+    and its config instead of the copy.
+    """
+    return {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
 
 
 def _patch_added_lines(patch: Path) -> dict[str, set[int]]:
@@ -188,6 +198,7 @@ def validate_case(
         applied = subprocess.run(
             [*command, str(patch)],
             cwd=workdir,
+            env=_git_env(),
             capture_output=True,
             text=True,
             check=False,
