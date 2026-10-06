@@ -618,7 +618,7 @@ def test_staging_stores_publish_no_host_ports() -> None:
 def test_rabbitmq_keeps_its_node_name_across_recreates() -> None:
     rabbitmq = _service_block("rabbitmq")
 
-    assert "image: rabbitmq:4-management-alpine" in rabbitmq
+    assert re.search(r"image: rabbitmq:4\.[\d.]+-management-alpine@sha256:", rabbitmq)
     assert "hostname: rabbitmq" in rabbitmq
     assert "rabbitmq-data:/var/lib/rabbitmq" in rabbitmq
 
@@ -626,7 +626,7 @@ def test_rabbitmq_keeps_its_node_name_across_recreates() -> None:
 def test_redis_is_a_bounded_password_protected_cache() -> None:
     redis = _service_block("redis")
 
-    assert "image: redis:8-alpine" in redis
+    assert re.search(r"image: redis:8\.[\d.]+-alpine@sha256:", redis)
     assert "requirepass %s" in redis
     assert "--requirepass" not in redis  # the password stays out of argv
     assert "maxmemory 128mb" in redis
