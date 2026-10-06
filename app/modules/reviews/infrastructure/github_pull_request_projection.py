@@ -21,7 +21,9 @@ from app.modules.reviews.application.project_github_pull_request import (
     LockedPullRequest,
     PullRequestEvent,
     PullRequestIdentityConflict,
+    PullRequestProjectionStatus,
     PullRequestRecord,
+    PullRequestRepositoryRefused,
     PullRequestState,
     RunCancellationNotice,
 )
@@ -55,6 +57,7 @@ class SqlAlchemyPullRequestProjectionStore:
             ),
         )
         if repository_id is None:
+            await self._raise_if_repository_refused(event)
             return None
 
         inserted_id = cast(
@@ -132,6 +135,25 @@ class SqlAlchemyPullRequestProjectionStore:
             ci_status=dict(row.ci_status),
         )
         return LockedPullRequest(record=record, created=inserted_id is not None)
+
+    async def _raise_if_repository_refused(self, event: PullRequestEvent) -> None:
+        """Name why a stored repository refused the event; return if none stores it."""
+        installations = (
+            await self._session.scalars(
+                select(ProviderInstallation.external_id)
+                .join(Repository, Repository.provider_installation_id == ProviderInstallation.id)
+                .where(
+                    ProviderInstallation.provider == "github",
+                    Repository.external_id == event.repository_external_id,
+                )
+            )
+        ).all()
+        if event.installation_external_id in installations:
+            raise PullRequestRepositoryRefused(PullRequestProjectionStatus.DISABLED_REPOSITORY)
+        if installations:
+            raise PullRequestRepositoryRefused(
+                PullRequestProjectionStatus.OTHER_INSTALLATION_REPOSITORY
+            )
 
     async def save(self, record: PullRequestRecord) -> None:
         await self._session.execute(

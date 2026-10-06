@@ -22,6 +22,10 @@ class PullRequestState(StrEnum):
 class PullRequestProjectionStatus(StrEnum):
     PROJECTED = "projected"
     UNKNOWN_REPOSITORY = "unknown_repository"
+    # The event's installation stores the repository, but it is disabled.
+    DISABLED_REPOSITORY = "disabled_repository"
+    # The repository is stored only under another installation.
+    OTHER_INSTALLATION_REPOSITORY = "other_installation_repository"
     IGNORED_STALE = "ignored_stale"
     # Only paths the dispatcher already filters (review requests, unhandled actions).
     IGNORED_UNRELATED = "ignored_unrelated"
@@ -39,6 +43,14 @@ class PullRequestProjectionStatus(StrEnum):
 
 class PullRequestIdentityConflict(Exception):
     """A provider PR ID and number identify different persisted PR rows."""
+
+
+class PullRequestRepositoryRefused(Exception):
+    """The repository is stored, but disabled or only under another installation."""
+
+    def __init__(self, status: PullRequestProjectionStatus) -> None:
+        super().__init__(status.value)
+        self.status = status
 
 
 @dataclass(frozen=True)
@@ -282,6 +294,8 @@ class ProjectGitHubPullRequest:
                 locked = await uow.pull_requests.get_or_create_locked(current, now)
             except PullRequestIdentityConflict:
                 return PullRequestProjectionStatus.IGNORED_IDENTITY_CONFLICT
+            except PullRequestRepositoryRefused as refused:
+                return refused.status
             if locked is None:
                 return PullRequestProjectionStatus.UNKNOWN_REPOSITORY
             record = locked.record
@@ -368,6 +382,8 @@ class ProjectGitHubPullRequest:
                 locked = await uow.pull_requests.get_or_create_locked(event, now)
             except PullRequestIdentityConflict:
                 return PullRequestProjectionStatus.IGNORED_IDENTITY_CONFLICT
+            except PullRequestRepositoryRefused as refused:
+                return refused.status
             if locked is None:
                 return PullRequestProjectionStatus.UNKNOWN_REPOSITORY
             record = locked.record

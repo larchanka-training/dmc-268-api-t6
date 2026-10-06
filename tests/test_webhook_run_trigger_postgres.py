@@ -440,6 +440,84 @@ def test_every_label_outcome_is_logged_with_its_reason_and_without_the_token(
         assert TOKEN not in logged
 
 
+async def _link_installation_18(pipeline: Pipeline, *, with_repository: bool) -> None:
+    """A second linked installation of the workspace, optionally storing repository 101 too."""
+    await pipeline.sql(
+        "INSERT INTO provider_installations (id, workspace_id, provider, external_id, metadata) "
+        "SELECT :id, workspace_id, 'github', 18, '{}'::jsonb FROM provider_installations",
+        id=uuid4(),
+    )
+    if with_repository:
+        await pipeline.sql(
+            "INSERT INTO repositories (id, provider_installation_id, external_id, full_name, "
+            "default_branch, web_url) SELECT :id, id, 101, 'octo/repo', 'main', "
+            "'https://github.test/octo/repo' FROM provider_installations WHERE external_id = 18",
+            id=uuid4(),
+        )
+
+
+async def _first_deferral(pipeline: Pipeline, delivery: dict[str, Any]) -> list[tuple[Any, ...]]:
+    await pipeline.deliver("pull_request", delivery)
+    return [
+        *await pipeline.sql(
+            "SELECT projection_attempt_count, retry_after IS NOT NULL, projection_deferred_at, "
+            "projection_failed_at, projected_at FROM webhook_events"
+        ),
+        *await pipeline.sql("SELECT count(*) FROM code_changes"),
+        *await pipeline.sql("SELECT count(*) FROM runs"),
+    ]
+
+
+@pytest.mark.integration
+def test_a_label_on_a_disabled_repository_is_deferred_with_its_own_reason(
+    database: Database, caplog: pytest.LogCaptureFixture
+) -> None:
+    async def scenario(pipeline: Pipeline) -> list[tuple[Any, ...]]:
+        await pipeline.sql("UPDATE repositories SET enabled = false")
+        # The same GitHub repository stored under another installation does not hide that the
+        # event's own installation stores it disabled.
+        await _link_installation_18(pipeline, with_repository=True)
+        return await _first_deferral(pipeline, _pr_delivery("labeled"))
+
+    with caplog.at_level(logging.INFO):
+        state = _run(database, FakeGitHub(ci={HEAD: _green(HEAD)}), scenario)
+
+    # Deferred for a retry like an unknown repository (first of three attempts), nothing stored.
+    assert state == [(1, True, None, None, None), (0,), (0,)]
+    [line] = _outcome_lines(caplog)
+    assert re.fullmatch(
+        r"GitHub webhook delivery delivery-1 event=pull_request "
+        r"status=ignored_unknown_repository detail=action=labeled disabled_repository "
+        r"retry_at=\d{4}-\d\d-\d\dT\S+",
+        line,
+    ), line
+
+
+@pytest.mark.integration
+def test_a_label_from_an_installation_that_does_not_store_the_repository_names_the_other_one(
+    database: Database, caplog: pytest.LogCaptureFixture
+) -> None:
+    # Repository 101 is stored only under installation 17; the event comes from installation 18.
+    delivery = _pr_delivery("labeled")
+    delivery["installation"] = {"id": 18}
+
+    async def scenario(pipeline: Pipeline) -> list[tuple[Any, ...]]:
+        await _link_installation_18(pipeline, with_repository=False)
+        return await _first_deferral(pipeline, delivery)
+
+    with caplog.at_level(logging.INFO):
+        state = _run(database, FakeGitHub(ci={HEAD: _green(HEAD)}), scenario)
+
+    assert state == [(1, True, None, None, None), (0,), (0,)]
+    [line] = _outcome_lines(caplog)
+    assert re.fullmatch(
+        r"GitHub webhook delivery delivery-1 event=pull_request "
+        r"status=ignored_unknown_repository detail=action=labeled other_installation_repository "
+        r"retry_at=\d{4}-\d\d-\d\dT\S+",
+        line,
+    ), line
+
+
 @pytest.mark.integration
 def test_labeled_delivery_whose_github_call_fails_logs_its_action_and_category(
     database: Database, caplog: pytest.LogCaptureFixture
