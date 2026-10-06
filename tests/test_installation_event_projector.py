@@ -29,6 +29,9 @@ from app.modules.integrations.webhooks.application.installation_event_projector 
     RepositoryDetails,
     RepositoryDetailsUnavailableError,
 )
+from app.modules.integrations.webhooks.application.receive_github_delivery import (
+    _DISPATCH_TIMEOUT_SECONDS,
+)
 from app.modules.integrations.webhooks.infrastructure.github_installation_tree_provider import (
     GitHubInstallationTreeProvider,
 )
@@ -960,20 +963,25 @@ def test_projector_rejects_a_concurrency_limit_below_one(limit: int) -> None:
 def test_two_hundred_bare_repositories_fit_the_delivery_budget(
     action: Literal["created", "added"],
 ) -> None:
-    """api#73 AC 1: the real adapters onboard 200 repositories inside the 240 s budget.
+    """api#73 AC 1: the real adapters onboard 200 repositories inside the dispatch budget.
 
-    The details and tree GETs of up to four repositories overlap, while the label POSTs
-    are spaced 0.8 s apart on a virtual clock: 199 gaps of 0.8 s are 159.2 s, below the
-    240 s dispatch timeout of the worker.
+    The whole event must end within ``_DISPATCH_TIMEOUT_SECONDS`` of virtual time: the
+    worker's timeout is a budget to stay under, not an expected value. Each details and
+    tree GET takes 0.1 s of that time, and the label POSTs are spaced 0.8 s apart by the
+    pacer on the same clock. The clock is one counter that every sleep advances, so GETs
+    of up to four repositories that run at the same time add up instead of overlapping:
+    the virtual time is a pessimistic upper bound of the real one. The event needs at least
+    199 gaps of 0.8 s, 159.2 s, plus the part of the 200 x 0.2 s of GETs that does not fall
+    inside the pacer's waits, so a timeout of 240 s holds it and one of 100 s does not.
 
-    What this proves is the label lane (POST starts at least 0.8 s apart, the last one
-    within 160 s of virtual time) and the GET concurrency (peak of four). It assumes the
-    GitHub latency of one repository (details, tree and label request) is a few
-    milliseconds, as the mock's is. A semaphore slot stays held while its repository waits
-    for the label pacer, so the throughput is min(1 / 0.8 s, 4 / latency): the 160 s only
-    holds while that latency stays under about 3.2 s per repository.
+    It also proves the label lane (POST starts at least 0.8 s apart) and the GET
+    concurrency (peak of four). A semaphore slot stays held while its repository waits for
+    the label pacer, so the throughput is min(1 / 0.8 s, 4 / latency): the pacer stays the
+    limit only while the latency of one repository (details, tree and label request) is
+    under about 3.2 s.
     """
     total = 200
+    get_latency_seconds = 0.1
     virtual_now = 0.0
     in_flight = 0
     peak_in_flight = 0
@@ -1001,7 +1009,7 @@ def test_two_hundred_bare_repositories_fit_the_delivery_budget(
         in_flight += 1
         peak_in_flight = max(peak_in_flight, in_flight)
         try:
-            await asyncio.sleep(0)
+            await virtual_sleep(get_latency_seconds)
         finally:
             in_flight -= 1
         if request.url.path.endswith("/git/trees/trunk"):
@@ -1051,7 +1059,7 @@ def test_two_hundred_bare_repositories_fit_the_delivery_budget(
     assert peak_in_flight == 4
     gaps = [later - earlier for earlier, later in pairwise(label_post_starts)]
     assert min(gaps) == pytest.approx(0.8)
-    assert label_post_starts[-1] <= 160
+    assert virtual_now <= _DISPATCH_TIMEOUT_SECONDS
 
 
 @pytest.mark.parametrize("action", ["deleted", "removed"])
