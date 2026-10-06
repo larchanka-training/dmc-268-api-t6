@@ -418,9 +418,57 @@ jobs:
       - name: Signed webhook smoke
         run: uv run --locked python scripts/webhook_smoke.py --url http://127.0.0.1:8000/webhooks/github --count 50
 
+      - name: Start the GitHub API stub
+        # Answers the installation token and PR 7 of the smoke delivery. Output goes to a file,
+        # so the background process does not hold the step open.
+        run: |
+          uv run --locked python scripts/github_stub.py > "${RUNNER_TEMP}/github-stub.log" 2>&1 &
+          for attempt in $(seq 1 30); do
+            # Any HTTP answer will do: the stub answers 404 on /.
+            if curl -s -o /dev/null --max-time 2 http://127.0.0.1:9999/; then
+              echo "GitHub stub answered on attempt ${attempt}"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "GitHub stub did not answer on 127.0.0.1:9999" >&2
+          exit 1
+
+      - name: Start the webhook worker container
+        # A throwaway App key: multi-line, so it cannot be masked, and the stub does not check
+        # the JWT. RabbitMQ is never reached: repository 101 is not seeded, so no Run is created.
+        run: |
+          docker run -d --name webhook-worker --network host \
+            -e DATABASE_URL -e GITHUB_APP_ID=1 \
+            -e GITHUB_APP_PRIVATE_KEY="$(openssl genrsa 2048 2>/dev/null)" \
+            -e GITHUB_APP_BOT_LOGIN='ci[bot]' \
+            -e GITHUB_API_URL=http://127.0.0.1:9999 \
+            -e RABBITMQ_URL=amqp://unused@127.0.0.1:1/ \
+            "${LOCAL_IMAGE}" python -m app.webhook_worker
+
+      - name: Wait for the labeled outcome in the worker log
+        # The worker sweeps at start, then every 30 s, and logs to stderr.
+        run: |
+          expected='event=pull_request status=ignored_unknown_repository detail=action=labeled unknown_repository'
+          for _ in $(seq 1 30); do
+            logs="$(docker logs webhook-worker 2>&1)"
+            if grep -m 1 -F "${expected}" <<< "${logs}"; then
+              exit 0
+            fi
+            sleep 3
+          done
+          echo "No line with '${expected}' in the webhook worker log" >&2
+          exit 1
+
       - name: API container logs
         if: failure()
         run: docker logs api || true
+
+      - name: Webhook worker and GitHub stub logs
+        if: failure()
+        run: |
+          docker logs webhook-worker || true
+          cat "${RUNNER_TEMP}/github-stub.log" || true
 
   push-image:
     name: Push Docker image

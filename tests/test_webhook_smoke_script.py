@@ -2,7 +2,8 @@
 
 The script's deliveries go through the real `POST /webhooks/github` route in-process, with a fake
 receipt store and the secret overridden, so no PostgreSQL or container is needed here. The CI job
-"Webhook container smoke" runs the same script against the built image and a migrated database.
+"Webhook container smoke" runs the same script against the built image and a migrated database,
+then checks the outcome line of the delivery in the log of the image's webhook worker (#80).
 """
 
 from __future__ import annotations
@@ -354,3 +355,19 @@ def test_ci_smokes_the_built_image_before_the_push() -> None:
     assert "::add-mask::" in job
     assert "secrets." not in job
     assert "- webhook-smoke" in push_image
+    # After the smoke the webhook worker from the same image replays the stored deliveries
+    # through the GitHub stub; its log must show the outcome of the signed `labeled` delivery
+    # (repository 101 is not seeded). The App key is throwaway too (#80).
+    assert "python -m app.webhook_worker" in job
+    worker = job.index("python -m app.webhook_worker")
+    assert job.index("scripts/webhook_smoke.py") < worker
+    assert job.index("uv run --locked python scripts/github_stub.py") < worker
+    assert "--name webhook-worker" in job
+    assert "GITHUB_API_URL=http://127.0.0.1:9999" in job
+    assert "openssl genrsa 2048" in job
+    assert "docker logs webhook-worker 2>&1" in job
+    assert (
+        "event=pull_request status=ignored_unknown_repository "
+        "detail=action=labeled unknown_repository"
+    ) in job
+    assert "docker logs webhook-worker || true" in job
