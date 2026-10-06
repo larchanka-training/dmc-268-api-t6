@@ -36,6 +36,7 @@ from app.modules.integrations.webhooks.application.receive_github_delivery impor
     GitHubWebhookReceiptUnitOfWork,
     ReceiveGitHubDelivery,
 )
+from app.modules.integrations.webhooks.infrastructure.failure_category import classify_failure
 from app.modules.integrations.webhooks.infrastructure.github_current_pull_request import (
     HttpGitHubCurrentPullRequestProvider,
 )
@@ -183,6 +184,7 @@ class ReviewsApiResources:
                 app_id=app_id,
             ),
             action_of=action_of,
+            classify_failure=classify_failure,
         )
 
     def installation_onboarding(
