@@ -373,6 +373,8 @@ class SqlAlchemyRunRepository:
             )
             run.diff_snapshotted_at = datetime.now(UTC)
             await session.flush()
+            if self._session is None:
+                await session.commit()
         return snapshots
 
     async def get_run_diff_input(self, run_id: UUID) -> RunDiffInput | None:

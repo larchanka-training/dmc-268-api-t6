@@ -17,6 +17,7 @@ from sqlalchemy.pool import NullPool
 from sqlalchemy.schema import CreateSchema, DropSchema
 
 from alembic import command
+from app.modules.auth.application.exchange_github_code import ExchangedSession
 from app.modules.auth.application.refresh_session import (
     InvalidRefreshToken,
     LogoutLocalSession,
@@ -100,10 +101,12 @@ def test_concurrent_refresh_replay_revokes_every_family_token(
         poolclass=NullPool,
     )
     factory = async_sessionmaker(engine, expire_on_commit=False)
+    clock = [datetime.now(UTC)]
     refresh = RefreshLocalSession(
         uow_factory=lambda: SqlAlchemyAuthSessionUnitOfWork(factory),
         issuer=FakeIssuer(),
         new_refresh_token=lambda: "replacement-secret",
+        now=lambda: clock[0],
     )
 
     async def exercise() -> None:
@@ -112,11 +115,25 @@ def test_concurrent_refresh_replay_revokes_every_family_token(
             refresh.execute("original-secret"),
             return_exceptions=True,
         )
-        assert sum(isinstance(item, InvalidRefreshToken) for item in outcomes) == 1
-        assert (
-            sum(getattr(item, "refresh_token", None) == "replacement-secret" for item in outcomes)
-            == 1
-        )
+        assert all(isinstance(item, ExchangedSession) for item in outcomes)
+        async with factory() as session:
+            family = await session.scalar(
+                select(AuthRefreshFamily).where(AuthRefreshFamily.id == family_id)
+            )
+            rows = (
+                await session.scalars(
+                    select(AuthRefreshSession).where(AuthRefreshSession.family_id == family_id)
+                )
+            ).all()
+            assert family is not None and family.revoked_at is None
+            assert len(rows) == 2 and any(row.revoked_at is None for row in rows)
+            assert sum(row.rotated_at is not None for row in rows) == 1
+
+        # Replay outside the grace period revokes the entire family
+        clock[0] += timedelta(seconds=16)
+        with pytest.raises(InvalidRefreshToken):
+            await refresh.execute("original-secret")
+
         async with factory() as session:
             family = await session.scalar(
                 select(AuthRefreshFamily).where(AuthRefreshFamily.id == family_id)
@@ -127,8 +144,8 @@ def test_concurrent_refresh_replay_revokes_every_family_token(
                 )
             ).all()
             assert family is not None and family.revoked_at is not None
-            assert len(rows) == 2 and all(row.revoked_at is not None for row in rows)
-            assert sum(row.rotated_at is not None for row in rows) == 1
+            assert all(row.revoked_at is not None for row in rows)
+
         with pytest.raises(InvalidRefreshToken):
             await refresh.execute("replacement-secret")
 
