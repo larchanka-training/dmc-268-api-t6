@@ -107,6 +107,54 @@ def test_github_label_provider_creates_ai_review_with_installation_token(
     assert requests[0].read() == b'{"name":"ai-review"}'
 
 
+def test_github_label_provider_spaces_concurrent_label_posts_by_the_minimum_interval() -> None:
+    """GitHub allows 80 content-generating requests a minute; POSTs start 0.8 s apart.
+
+    The fake ``sleep`` yields to the event loop before it advances the virtual clock, as a
+    real sleep does; only the lock around the slot reservation keeps the concurrent
+    callers from all reading the same, unreserved slot in that gap.
+    """
+    virtual_now = 1_000.0
+    delays: list[float] = []
+    post_starts: list[float] = []
+
+    def clock() -> float:
+        return virtual_now
+
+    async def sleep(seconds: float) -> None:
+        nonlocal virtual_now
+        delays.append(seconds)
+        await asyncio.sleep(0)
+        virtual_now += seconds
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        post_starts.append(virtual_now)
+        return httpx.Response(201, request=request, json={})
+
+    async def create_labels() -> None:
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(handler), base_url="https://api.github.com"
+        ) as client:
+            provider = GitHubRepositoryLabelProvider(
+                client=client,
+                token_provider=FakeInstallationTokenProvider(),
+                min_interval_seconds=0.8,
+                clock=clock,
+                sleep=sleep,
+            )
+            await asyncio.gather(
+                *(
+                    provider.create_ai_review_label(installation_external_id=17, repository=repo)
+                    for repo in (_repository(), _repository(), _repository())
+                )
+            )
+
+    asyncio.run(create_labels())
+
+    assert delays == pytest.approx([0, 0.8, 0.8])
+    assert post_starts == pytest.approx([1_000.0, 1_000.8, 1_001.6])
+
+
 def test_github_label_provider_raises_for_non_422_http_errors() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(403, request=request, json={"message": "Forbidden"})

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass, field
+from itertools import pairwise
 from typing import Literal
 from uuid import UUID, uuid4
 
@@ -24,6 +25,15 @@ from app.modules.integrations.webhooks.application.installation_event_projector 
     InstallationRepositoryTreeProvider,
     RepositoryDetails,
     RepositoryDetailsUnavailableError,
+)
+from app.modules.integrations.webhooks.infrastructure.github_installation_tree_provider import (
+    GitHubInstallationTreeProvider,
+)
+from app.modules.integrations.webhooks.infrastructure.github_repository_details import (
+    GitHubInstallationRepositoryDetailsProvider,
+)
+from app.modules.integrations.webhooks.infrastructure.github_repository_labels import (
+    GitHubRepositoryLabelProvider,
 )
 from app.modules.repositories.application.installation_repositories import (
     InstallationRepositoriesEvent,
@@ -866,6 +876,171 @@ def test_a_cancelled_repository_aborts_the_event_before_the_database_sync() -> N
         )
 
     assert sync.calls == []
+
+
+@dataclass
+class HangingTree(FakeTreeProvider):
+    """Never answers; counts the repositories that entered and the ones it saw cancelled."""
+
+    entered: int = 0
+    cancelled: int = 0
+
+    async def fetch_default_branch_tree(
+        self,
+        *,
+        installation_external_id: int,
+        repository: RepositorySnapshot,
+    ) -> tuple[RepositoryTreeBlob, ...]:
+        self.entered += 1
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            self.cancelled += 1
+            raise
+        raise AssertionError("the hanging tree provider must never answer")
+
+
+def test_the_dispatch_timeout_cancels_every_running_repository_and_never_syncs() -> None:
+    """The worker wraps ``execute`` in ``wait_for(240 s)``: a timeout must reach the children."""
+    tree = HangingTree()
+    labels = FakeLabelProvider()
+    sync = FakeSyncInstallationRepositories()
+    projector = InstallationEventProjector(
+        tree_provider=tree,
+        label_provider=labels,
+        details_provider=FakeDetailsProvider(),
+        sync=sync,
+        max_concurrent_repositories=4,
+    )
+
+    async def dispatch() -> None:
+        await asyncio.wait_for(
+            projector.execute(
+                provider_installation_id=uuid4(),
+                event=InstallationRepositoriesEvent(
+                    17,
+                    "added",
+                    tuple(_reference(external_id=item) for item in range(101, 107)),
+                    (),
+                ),
+            ),
+            timeout=0.05,
+        )
+
+    with pytest.raises(TimeoutError):
+        asyncio.run(dispatch())
+
+    assert tree.entered == 4
+    assert tree.cancelled == 4
+    assert labels.calls == []
+    assert sync.calls == []
+
+
+@pytest.mark.parametrize("limit", [0, -1])
+def test_projector_rejects_a_concurrency_limit_below_one(limit: int) -> None:
+    with pytest.raises(ValueError, match="max_concurrent_repositories must be at least 1"):
+        InstallationEventProjector(
+            tree_provider=FakeTreeProvider(),
+            label_provider=FakeLabelProvider(),
+            details_provider=FakeDetailsProvider(),
+            sync=FakeSyncInstallationRepositories(),
+            max_concurrent_repositories=limit,
+        )
+
+
+def test_two_hundred_bare_repositories_fit_the_delivery_budget() -> None:
+    """api#73 AC 1: the real adapters onboard 200 repositories inside the 240 s budget.
+
+    The details and tree GETs of up to four repositories overlap, while the label POSTs
+    are spaced 0.8 s apart on a virtual clock: 199 gaps of 0.8 s are 159.2 s, below the
+    240 s dispatch timeout of the worker.
+
+    What this proves is the label lane (POST starts at least 0.8 s apart, the last one
+    within 160 s of virtual time) and the GET concurrency (peak of four). It assumes the
+    GitHub latency of one repository (details, tree and label request) is a few
+    milliseconds, as the mock's is. A semaphore slot stays held while its repository waits
+    for the label pacer, so the throughput is min(1 / 0.8 s, 4 / latency): the 160 s only
+    holds while that latency stays under about 3.2 s per repository.
+    """
+    total = 200
+    virtual_now = 0.0
+    in_flight = 0
+    peak_in_flight = 0
+    label_posts: list[str] = []
+    label_post_starts: list[float] = []
+
+    class TokenProvider:
+        async def get_installation_access_token(self, installation_external_id: int) -> str:
+            return "test-installation-token"
+
+    def clock() -> float:
+        return virtual_now
+
+    async def virtual_sleep(seconds: float) -> None:
+        nonlocal virtual_now
+        await asyncio.sleep(0)
+        virtual_now += seconds
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal in_flight, peak_in_flight
+        if request.method == "POST":
+            label_posts.append(request.url.path)
+            label_post_starts.append(virtual_now)
+            return httpx.Response(201, json={})
+        in_flight += 1
+        peak_in_flight = max(peak_in_flight, in_flight)
+        try:
+            await asyncio.sleep(0)
+        finally:
+            in_flight -= 1
+        if request.url.path.endswith("/git/trees/trunk"):
+            return httpx.Response(
+                200, json={"tree": [{"path": "src/app.py", "type": "blob", "size": 10}]}
+            )
+        return httpx.Response(
+            200,
+            json={"default_branch": "trunk", "html_url": f"https://example.test{request.url.path}"},
+        )
+
+    sync = FakeSyncInstallationRepositories()
+
+    async def onboard() -> None:
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(handler), base_url="https://api.github.com"
+        ) as client:
+            tokens = TokenProvider()
+            projector = InstallationEventProjector(
+                tree_provider=GitHubInstallationTreeProvider(client=client, token_provider=tokens),
+                label_provider=GitHubRepositoryLabelProvider(
+                    client=client, token_provider=tokens, clock=clock, sleep=virtual_sleep
+                ),
+                details_provider=GitHubInstallationRepositoryDetailsProvider(
+                    client=client, token_provider=tokens
+                ),
+                sync=sync,
+            )
+            await asyncio.wait_for(
+                projector.execute(
+                    provider_installation_id=uuid4(),
+                    event=InstallationRepositoriesEvent(
+                        17,
+                        "added",
+                        tuple(_bare_reference(external_id=item) for item in range(1, total + 1)),
+                        (),
+                    ),
+                ),
+                timeout=10,
+            )
+
+    asyncio.run(onboard())
+
+    assert len(sync.calls) == 1
+    assert [item.snapshot.external_id for item in sync.calls[0][1]] == list(range(1, total + 1))
+    assert len(label_posts) == total
+    assert peak_in_flight == 4
+    gaps = [later - earlier for earlier, later in pairwise(label_post_starts)]
+    assert min(gaps) == pytest.approx(0.8)
+    assert label_post_starts[-1] <= 160
 
 
 @pytest.mark.parametrize("action", ["deleted", "removed"])

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from dataclasses import dataclass
 from typing import Protocol
@@ -20,6 +21,12 @@ from app.modules.repositories.application.sync_installation_repositories import 
 )
 
 _LOGGER = logging.getLogger(__name__)
+
+# Per-repository work is up to three sequential GitHub calls; four repositories at a
+# time keep a few hundred of them inside the 240 s delivery budget (while the latency of
+# one repository stays small, see the class docstring) and stay far from GitHub's
+# concurrent-request limit (100 per token).
+_MAX_CONCURRENT_REPOSITORIES = 4
 
 
 @dataclass(frozen=True)
@@ -92,15 +99,25 @@ class InstallationEventProjector:
     A durable-delivery runner calls this projector after parsing a stored
     installation event.  Real events name a repository without its default branch
     and web URL; those are read through ``details_provider`` before the tree is
-    fetched, and not at all when the event already carries both.  A repository
-    whose details or tree cannot be read does not discard the others: the
-    readable ones go to ``sync`` (which therefore never opens its unit of work
-    before every GitHub call is done), then the first failure in event order
-    propagates unchanged: the dispatcher defers the delivery when it is
-    ``RepositoryDetailsUnavailableError``, any other error leaves it eligible for
-    retry on the failed path.  Replaying the whole event is safe to repeat (replay
-    upserts and re-enables saved repositories).  Removed/deleted events enter the
-    explicit transactional soft-disable path without making a VCS request.
+    fetched, and not at all when the event already carries both.  Up to
+    ``max_concurrent_repositories`` repositories are processed at a time.  A slot
+    stays held while its repository waits for the label adapter's pacer (one POST
+    every 0.8 s), so the throughput is ``min(1 / 0.8 s, slots / (G + P))``, where
+    ``G + P`` is the details, tree and label-request latency of one repository.  The
+    pacing, not the sum of all calls, bounds a large event only while ``G + P``
+    stays below about 3.2 s per repository (200 repositories take about 160 s).  The
+    label lane alone allows 240 s / 0.8 s = 300 repositories; the ceiling of about 280
+    leaves about 16 s for the details and tree requests of the first repositories and
+    for the commit.  Slow trees shrink that ceiling (the 10 s httpx timeout applies to
+    each phase of a call, not to its total).  A repository whose details or tree
+    cannot be read does not discard the others: the readable ones go to ``sync``
+    (which therefore never opens its unit of work before every GitHub call is done),
+    then the first failure in event order propagates unchanged: the dispatcher defers
+    the delivery when it is ``RepositoryDetailsUnavailableError``, any other error
+    leaves it eligible for retry on the failed path.  Replaying the whole event is safe
+    to repeat (replay upserts and re-enables saved repositories).  Removed/deleted
+    events enter the explicit transactional soft-disable path without making a VCS
+    request.
     """
 
     def __init__(
@@ -110,11 +127,15 @@ class InstallationEventProjector:
         label_provider: InstallationRepositoryLabelProvider,
         details_provider: InstallationRepositoryDetailsProvider,
         sync: InstallationRepositoriesSync,
+        max_concurrent_repositories: int = _MAX_CONCURRENT_REPOSITORIES,
     ) -> None:
+        if max_concurrent_repositories < 1:
+            raise ValueError("max_concurrent_repositories must be at least 1")
         self._tree_provider = tree_provider
         self._label_provider = label_provider
         self._details_provider = details_provider
         self._sync = sync
+        self._max_concurrent_repositories = max_concurrent_repositories
 
     async def execute(
         self,
@@ -129,14 +150,20 @@ class InstallationEventProjector:
             )
             return ()
 
-        outcomes: list[RepositoryOnboardingInput | Exception] = []
-        for reference in event.added_repositories:
-            try:
-                outcomes.append(
-                    await self._onboard_repository(event.installation_external_id, reference)
-                )
-            except Exception as error:
-                outcomes.append(error)
+        slots = asyncio.Semaphore(self._max_concurrent_repositories)
+
+        async def onboard(reference: RepositoryReference) -> RepositoryOnboardingInput:
+            async with slots:
+                return await self._onboard_repository(event.installation_external_id, reference)
+
+        # No fail-fast: every repository runs to its end, results keep the event order.
+        outcomes = await asyncio.gather(
+            *(onboard(reference) for reference in event.added_repositories),
+            return_exceptions=True,
+        )
+        for outcome in outcomes:
+            if isinstance(outcome, BaseException) and not isinstance(outcome, Exception):
+                raise outcome
 
         inputs = tuple(item for item in outcomes if isinstance(item, RepositoryOnboardingInput))
         failures = [
