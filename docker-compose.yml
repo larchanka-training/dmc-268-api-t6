@@ -13,18 +13,32 @@ services:
       RABBITMQ_URL: amqp://${RABBITMQ_USER:-app}:${RABBITMQ_PASSWORD:-app}@rabbitmq:5672/
     ports:
       - "${BACKEND_PORT:-8000}:8000"
+    # The schema is ready before the first request: /healthcheck is liveness only and does not
+    # read the database (docs/BACKEND_ARCHITECTURE.md, "Readiness"). Unlike staging, the local
+    # backend also waits for the broker, which is always part of this stack.
     depends_on:
+      bootstrap:
+        condition: service_completed_successfully
       postgres:
+        condition: service_healthy
+      rabbitmq:
         condition: service_healthy
 
   worker:
     build: .
     command: ["python", "-m", "app.worker"]
+    # No HTTP port: the image healthcheck is replaced by the age of the heartbeat file, as on
+    # staging, so `up --wait` waits until the consumers are attached.
     healthcheck:
-      disable: true
+      test: ["CMD", "python", "-m", "app.common.infrastructure.heartbeat", "/tmp/worker.heartbeat", "30"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
     environment:
       DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-app}:${POSTGRES_PASSWORD:-app}@postgres:5432/${POSTGRES_DB:-app}
       RABBITMQ_URL: amqp://${RABBITMQ_USER:-app}:${RABBITMQ_PASSWORD:-app}@rabbitmq:5672/
+      WORKER_HEARTBEAT_FILE: /tmp/worker.heartbeat
       GITHUB_APP_ID: ${GITHUB_APP_ID:-}
       GITHUB_APP_PRIVATE_KEY: ${GITHUB_APP_PRIVATE_KEY:-}
       GITHUB_API_URL: ${GITHUB_API_URL:-https://api.github.com}
@@ -47,10 +61,24 @@ services:
       LLM_FALLBACK_API_KEYS: ${LLM_FALLBACK_API_KEYS:-}
       LLM_FALLBACK_BASE_URL: ${LLM_FALLBACK_BASE_URL:-}
     depends_on:
+      bootstrap:
+        condition: service_completed_successfully
       postgres:
         condition: service_healthy
       rabbitmq:
         condition: service_healthy
+
+  # One shot, as on staging (deploy/compose/staging.yml): migrations and the prompt seed complete
+  # before backend and the workers start. A failure stops `up` with nothing started on top.
+  bootstrap:
+    build: .
+    command: ["sh", "-c", "alembic upgrade head && python -m app.bootstrap.seed_prompts"]
+    environment:
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-app}:${POSTGRES_PASSWORD:-app}@postgres:5432/${POSTGRES_DB:-app}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
 
   postgres:
     image: postgres:17-alpine
@@ -81,10 +109,13 @@ services:
     volumes:
       - rabbitmq-data:/var/lib/rabbitmq
     healthcheck:
+      # backend and the workers wait for this check. The ping takes close to 10 s on a busy
+      # machine, hence the longer timeout; start_period as on staging.
       test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
       interval: 10s
-      timeout: 10s
+      timeout: 30s
       retries: 10
+      start_period: 30s
 
   redis:
     image: redis:8-alpine
@@ -103,7 +134,11 @@ services:
     build: .
     command: ["python", "-m", "app.webhook_worker"]
     healthcheck:
-      disable: true
+      test: ["CMD", "python", "-m", "app.common.infrastructure.heartbeat", "/tmp/webhook-worker.heartbeat", "30"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
     environment:
       DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-app}:${POSTGRES_PASSWORD:-app}@postgres:5432/${POSTGRES_DB:-app}
       GITHUB_APP_ID: ${GITHUB_APP_ID:-}
@@ -111,7 +146,10 @@ services:
       GITHUB_APP_BOT_LOGIN: ${GITHUB_APP_BOT_LOGIN:-}
       GITHUB_API_URL: ${GITHUB_API_URL:-https://api.github.com}
       RABBITMQ_URL: amqp://${RABBITMQ_USER:-app}:${RABBITMQ_PASSWORD:-app}@rabbitmq:5672/
+      WORKER_HEARTBEAT_FILE: /tmp/webhook-worker.heartbeat
     depends_on:
+      bootstrap:
+        condition: service_completed_successfully
       postgres:
         condition: service_healthy
       rabbitmq:
