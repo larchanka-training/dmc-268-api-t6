@@ -296,6 +296,22 @@ class CancelRepository:
     signal: bool
     item: RunListItem = field(default_factory=lambda: run_item("cancelled"))
 
+    @property
+    def repository(self) -> CancelRepository:
+        return self
+
+    async def __aenter__(self) -> CancelRepository:
+        return self
+
+    async def __aexit__(self, *args: object) -> None:
+        pass
+
+    async def commit(self) -> None:
+        pass
+
+    async def rollback(self) -> None:
+        pass
+
     async def request_cancel(self, run_id: UUID) -> CancelRequestResult:
         return CancelRequestResult(found=True, changed=True, signal_requested=self.signal)
 
@@ -315,7 +331,9 @@ class Signals:
 @pytest.mark.parametrize("signal", [True, False])
 def test_cancel_publishes_the_t6_close_signal_only_for_an_attempted_run(signal: bool) -> None:
     signals = Signals()
-    asyncio.run(CancelRun(CancelRepository(signal), None, signals).execute(RUN))
+    asyncio.run(
+        CancelRun(signals=signals, uow_factory=lambda: CancelRepository(signal)).execute(RUN)
+    )
     assert signals.calls == ([(RUN,)] if signal else [])
 
 

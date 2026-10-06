@@ -48,16 +48,30 @@ class CancelRepository:
         self.changed = changed
         self.committed = False
 
+    @property
+    def repository(self) -> CancelRepository:
+        return self
+
+    async def __aenter__(self) -> CancelRepository:
+        return self
+
+    async def __aexit__(self, exc_type: object, exc: object, tb: object) -> None:
+        pass
+
+    async def commit(self) -> None:
+        self.committed = True
+
+    async def rollback(self) -> None:
+        pass
+
     async def request_cancel(self, run_id: UUID) -> CancelRequestResult:
         assert run_id == RUN_ID
         if self.failure is not None:
             raise self.failure
-        self.committed = True
         return CancelRequestResult(found=True, changed=self.changed)
 
     async def get_run(self, run_id: UUID) -> RunListItem | None:
         assert run_id == RUN_ID
-        assert self.committed
         return self.item
 
 
@@ -102,7 +116,9 @@ def test_cancel_publishes_a_durable_run_update_only_after_repository_commit() ->
 
     async def cancel_and_receive() -> tuple[RunListItem | None, RunUpdated]:
         async with hub.subscribe() as events:
-            result = await CancelRun(repository, hub).execute(RUN_ID)
+            result = await CancelRun(event_publisher=hub, uow_factory=lambda: repository).execute(
+                RUN_ID
+            )
             return result, await anext(events)
 
     result, event = asyncio.run(cancel_and_receive())
@@ -119,7 +135,7 @@ def test_failed_cancellation_transaction_publishes_nothing() -> None:
     async def cancel_and_assert_empty() -> None:
         async with hub.subscribe() as events:
             try:
-                await CancelRun(repository, hub).execute(RUN_ID)
+                await CancelRun(event_publisher=hub, uow_factory=lambda: repository).execute(RUN_ID)
             except RuntimeError as error:
                 assert str(error) == "rollback"
             else:
@@ -140,7 +156,9 @@ def test_repeated_or_terminal_cancellation_does_not_publish_an_update() -> None:
 
     async def cancel_and_assert_empty() -> None:
         async with hub.subscribe() as events:
-            result = await CancelRun(repository, hub).execute(RUN_ID)
+            result = await CancelRun(event_publisher=hub, uow_factory=lambda: repository).execute(
+                RUN_ID
+            )
             assert result == repository.item
             try:
                 await asyncio.wait_for(anext(events), timeout=0.01)

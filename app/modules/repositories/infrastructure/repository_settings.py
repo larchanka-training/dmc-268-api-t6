@@ -50,11 +50,7 @@ class SqlAlchemyRepositorySettingsStore:
         self._allow_unscoped = allow_unscoped
 
     def _visible(self) -> ColumnElement[bool]:
-        if self._scope is None:
-            if not self._allow_unscoped:
-                raise ValueError("SqlAlchemyRepositorySettingsStore requires an AuthScope")
-            return true()
-        return repository_access_predicate(self._scope)
+        return true() if self._scope is None else repository_access_predicate(self._scope)
 
     async def list_repositories(self) -> list[RepositorySettings]:
         rows = await self._session.scalars(

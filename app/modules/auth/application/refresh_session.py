@@ -54,7 +54,13 @@ class RefreshSessionStore(Protocol):
         self, user_id: int
     ) -> tuple[AuthenticatedUser, tuple[UUID, ...]]: ...
 
-    async def count_family_sessions(self, family_id: UUID) -> int: ...
+    async def count_family_sessions(
+        self,
+        family_id: UUID,
+        *,
+        since: datetime | None = None,
+        exclude_session_id: UUID | None = None,
+    ) -> int: ...
 
     async def rotate(
         self,
@@ -71,6 +77,8 @@ class RefreshSessionStore(Protocol):
         user_id: int,
         token_hash: str,
         expires_at: datetime,
+        *,
+        created_at: datetime | None = None,
     ) -> None: ...
 
     async def revoke_family(self, family_id: UUID, at: datetime) -> None: ...
@@ -115,7 +123,9 @@ class RefreshLocalSession:
             at = self._now()
             if session.rotated_at is not None:
                 if at - session.rotated_at <= self._grace_period:
-                    count = await uow.sessions.count_family_sessions(family_id)
+                    count = await uow.sessions.count_family_sessions(
+                        family_id, since=session.rotated_at, exclude_session_id=session.id
+                    )
                     if count >= MAX_GRACE_REFRESH_SESSIONS:
                         await uow.sessions.revoke_family(family_id, at)
                         await uow.commit()
@@ -128,6 +138,7 @@ class RefreshLocalSession:
                         user_id=session.user_id,
                         token_hash=hash_refresh_token(replacement),
                         expires_at=at + REFRESH_TOKEN_LIFETIME,
+                        created_at=at,
                     )
                     await uow.commit()
                     return ExchangedSession(access_token, replacement, user)

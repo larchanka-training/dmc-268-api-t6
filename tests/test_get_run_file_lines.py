@@ -287,6 +287,9 @@ def test_sqlalchemy_blob_cache_is_readable_from_a_separate_adapter_instance() ->
                 return Result(None)
             return Result(self._store.get(key))
 
+        async def flush(self) -> None:
+            pass
+
     class SessionContext:
         def __init__(self, session: Session) -> None:
             self._session = session
@@ -309,7 +312,8 @@ def test_sqlalchemy_blob_cache_is_readable_from_a_separate_adapter_instance() ->
 
     factory = SessionFactory()
     clock = [datetime(2026, 9, 25, tzinfo=UTC)]
-    producer = SqlAlchemyBlobCache(factory, now=lambda: clock[0])  # type: ignore[arg-type]
+    producer_session = Session(factory.store)
+    producer = SqlAlchemyBlobCache(producer_session, now=lambda: clock[0])  # type: ignore[arg-type]
     consumer = SqlAlchemyBlobCache(factory, now=lambda: clock[0])  # type: ignore[arg-type]
 
     asyncio.run(producer.put(KEY, "written-by-worker", ttl=timedelta(days=7)))

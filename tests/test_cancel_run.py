@@ -7,8 +7,12 @@ from uuid import UUID
 
 import pytest
 
-from app.main import app, get_run_repository
-from app.modules.reviews.application.cancel_run import CancelRequestResult, CancelRun
+from app.main import app, get_cancel_run, get_run_repository
+from app.modules.reviews.application.cancel_run import (
+    CancelRequestResult,
+    CancelRun,
+    CancelRunRepository,
+)
 from app.modules.reviews.application.get_run import RunReview
 from app.modules.reviews.application.list_runs import RunListItem
 from tests.portal_test_client import authenticated_test_client as TestClient
@@ -54,6 +58,26 @@ class StubCancelRunRepository:
         return self._item
 
 
+class FakeCancelRunUow:
+    def __init__(self, repository: CancelRunRepository) -> None:
+        self.repository = repository
+        self.committed = False
+        self.rolled_back = False
+
+    async def __aenter__(self) -> FakeCancelRunUow:
+        return self
+
+    async def __aexit__(self, exc_type: object, exc: object, tb: object) -> None:
+        if exc_type is not None:
+            self.rolled_back = True
+
+    async def commit(self) -> None:
+        self.committed = True
+
+    async def rollback(self) -> None:
+        self.rolled_back = True
+
+
 def make_item(value: int, status: str) -> RunListItem:
     created_at = datetime(2026, 9, 25, tzinfo=UTC)
     return RunListItem(
@@ -79,27 +103,49 @@ def make_item(value: int, status: str) -> RunListItem:
 def test_cancel_run_returns_the_updated_run() -> None:
     item = make_item(1, "running")
     repository = StubCancelRunRepository(item, exists=True)
+    uow = FakeCancelRunUow(repository)
 
-    result = asyncio.run(CancelRun(repository).execute(item.id))
+    result = asyncio.run(CancelRun(uow_factory=lambda: uow).execute(item.id))
 
     assert result == item
     assert repository.requested_id == item.id
+    assert uow.committed is True
+
+
+def test_cancel_run_rolls_back_and_does_not_commit_on_failure() -> None:
+    class FailingCancelRunRepository(StubCancelRunRepository):
+        async def request_cancel(self, run_id: UUID) -> CancelRequestResult:
+            raise RuntimeError("db error")
+
+    item = make_item(1, "running")
+    repository = FailingCancelRunRepository(item, exists=True)
+    uow = FakeCancelRunUow(repository)
+
+    with pytest.raises(RuntimeError, match="db error"):
+        asyncio.run(CancelRun(uow_factory=lambda: uow).execute(item.id))
+
+    assert uow.committed is False
+    assert uow.rolled_back is True
 
 
 def test_cancel_run_returns_none_for_a_missing_run() -> None:
     run_id = UUID("00000000-0000-0000-0000-000000000999")
     repository = StubCancelRunRepository(None, exists=False)
+    uow = FakeCancelRunUow(repository)
 
-    result = asyncio.run(CancelRun(repository).execute(run_id))
+    result = asyncio.run(CancelRun(uow_factory=lambda: uow).execute(run_id))
 
     assert result is None
     assert repository.requested_id == run_id
+    assert uow.committed is False
 
 
 def test_cancel_queued_run_transitions_to_cancelled() -> None:
     item = make_item(1, "queued")
     repository = FakeCancelRunRepository([item])
-    app.dependency_overrides[get_run_repository] = lambda: repository
+    app.dependency_overrides[get_cancel_run] = lambda: CancelRun(
+        uow_factory=lambda: FakeCancelRunUow(repository)
+    )
     try:
         response = TestClient(app).post(f"/api/runs/{item.id}/cancel")
     finally:
@@ -115,6 +161,9 @@ def test_cancel_active_run_is_idempotent_and_does_not_change_another_run(status:
     item = make_item(1, status)
     other = make_item(2, "running")
     repository = FakeCancelRunRepository([item, other])
+    app.dependency_overrides[get_cancel_run] = lambda: CancelRun(
+        uow_factory=lambda: FakeCancelRunUow(repository)
+    )
     app.dependency_overrides[get_run_repository] = lambda: repository
     try:
         client = TestClient(app)
@@ -138,7 +187,9 @@ def test_cancel_active_run_is_idempotent_and_does_not_change_another_run(status:
 def test_cancel_terminal_run_is_an_idempotent_noop(status: str) -> None:
     item = make_item(1, status)
     repository = FakeCancelRunRepository([item])
-    app.dependency_overrides[get_run_repository] = lambda: repository
+    app.dependency_overrides[get_cancel_run] = lambda: CancelRun(
+        uow_factory=lambda: FakeCancelRunUow(repository)
+    )
     try:
         response = TestClient(app).post(f"/api/runs/{item.id}/cancel")
     finally:
@@ -151,7 +202,9 @@ def test_cancel_terminal_run_is_an_idempotent_noop(status: str) -> None:
 
 def test_cancel_returns_404_for_missing_run_and_422_for_invalid_id() -> None:
     repository = FakeCancelRunRepository([])
-    app.dependency_overrides[get_run_repository] = lambda: repository
+    app.dependency_overrides[get_cancel_run] = lambda: CancelRun(
+        uow_factory=lambda: FakeCancelRunUow(repository)
+    )
     try:
         client = TestClient(app)
         missing = client.post("/api/runs/00000000-0000-0000-0000-000000000999/cancel")

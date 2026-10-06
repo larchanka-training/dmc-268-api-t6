@@ -55,6 +55,7 @@ class FakeSession:
     user_id: int
     token_hash: str
     expires_at: datetime
+    created_at: datetime
     rotated_at: datetime | None = None
     revoked_at: datetime | None = None
 
@@ -85,6 +86,7 @@ class FakeRefreshDatabase:
             42,
             token_hash,
             expires_at or self.family.expires_at,
+            self.now,
         )
 
     def uow(self) -> FakeRefreshUow:
@@ -147,11 +149,20 @@ class FakeRefreshUow:
         assert user_id == self._database.user.id
         return self._database.user, self._database.workspace_ids
 
-    async def count_family_sessions(self, family_id: UUID) -> int:
+    async def count_family_sessions(
+        self,
+        family_id: UUID,
+        *,
+        since: datetime | None = None,
+        exclude_session_id: UUID | None = None,
+    ) -> int:
         return sum(
             1
             for session in self._database.sessions.values()
-            if session.family_id == family_id and session.revoked_at is None
+            if session.family_id == family_id
+            and session.revoked_at is None
+            and (since is None or session.created_at >= since)
+            and (exclude_session_id is None or session.id != exclude_session_id)
         )
 
     async def rotate(
@@ -166,7 +177,7 @@ class FakeRefreshUow:
         prior.rotated_at = at
         self._database.family.expires_at = expires_at
         self._database.sessions[new_token_hash] = FakeSession(
-            uuid4(), prior.family_id, prior.user_id, new_token_hash, expires_at
+            uuid4(), prior.family_id, prior.user_id, new_token_hash, expires_at, at
         )
 
     async def add_session(
@@ -175,10 +186,17 @@ class FakeRefreshUow:
         user_id: int,
         token_hash: str,
         expires_at: datetime,
+        *,
+        created_at: datetime | None = None,
     ) -> None:
         self._database.family.expires_at = expires_at
         self._database.sessions[token_hash] = FakeSession(
-            uuid4(), family_id, user_id, token_hash, expires_at
+            uuid4(),
+            family_id,
+            user_id,
+            token_hash,
+            expires_at,
+            created_at or self._database.now,
         )
 
     async def revoke_family(self, family_id: UUID, at: datetime) -> None:
@@ -338,19 +356,103 @@ def test_refresh_grace_window_enforces_max_session_limit() -> None:
         new_refresh_token=next_token,
     )
 
-    # Initial rotation creates session 2 (total sessions in family = 2: original + token-1)
+    # Initial rotation creates token-1 (count of reissues since rotation = 1)
     asyncio.run(refresh.execute("original-secret"))
+    assert database.commits == 1
 
     # Grace period re-refreshes:
-    # 2nd call -> sessions = 3
+    # 2nd call -> count=1 < 5 -> creates token-2
     asyncio.run(refresh.execute("original-secret"))
-    # 3rd call -> sessions = 4
+    # 3rd call -> count=2 < 5 -> creates token-3
     asyncio.run(refresh.execute("original-secret"))
-    # 4th call -> sessions = 5 (reaches MAX_GRACE_REFRESH_SESSIONS = 5)
+    # 4th call -> count=3 < 5 -> creates token-4
+    asyncio.run(refresh.execute("original-secret"))
+    # 5th call -> count=4 < 5 -> creates token-5
+    asyncio.run(refresh.execute("original-secret"))
+    assert database.commits == 5
+
+    # 6th call: count is 5 >= MAX_GRACE_REFRESH_SESSIONS (5) ->
+    # revokes family, commits the revocation, and raises InvalidRefreshToken
+    with pytest.raises(InvalidRefreshToken):
+        asyncio.run(refresh.execute("original-secret"))
+    assert database.family.revoked_at == database.now
+    assert database.commits == 6
+
+
+def test_sequential_rotations_do_not_exhaust_grace_session_limit() -> None:
+    now = datetime(2026, 9, 28, 12, tzinfo=UTC)
+    database = FakeRefreshDatabase(now)
+    database.seed("token-0")
+    private, _ = _keys()
+    counter = 0
+
+    def next_token() -> str:
+        nonlocal counter
+        counter += 1
+        return f"token-{counter}"
+
+    refresh = RefreshLocalSession(
+        uow_factory=database.uow,
+        issuer=Rs256AccessTokenIssuer(
+            private, issuer="dmc-268-api", audience="dmc-268-ui", now=lambda: database.now
+        ),
+        now=lambda: database.now,
+        new_refresh_token=next_token,
+    )
+
+    # 4 sequential rotations spaced 15 minutes apart:
+    # token-0 -> token-1 -> token-2 -> token-3 -> token-4
+    for i in range(4):
+        database.now += timedelta(minutes=15)
+        asyncio.run(refresh.execute(f"token-{i}"))
+
+    # Now token-3 was rotated at t3 (last rotation).
+    # Replay token-3 within the 15-second grace window (e.g. at t3 + 5s).
+    # Even though the family has 5 total sessions (token-0, 1, 2, 3, 4),
+    # only token-4 was created since token-3's rotation.
+    # Therefore, grace count is 1 < 5, and replay MUST succeed!
+    database.now += timedelta(seconds=5)
+    result = asyncio.run(refresh.execute("token-3"))
+    assert result.user.id == 42
+    assert database.family.revoked_at is None
+
+
+def test_refresh_grace_window_exact_boundaries() -> None:
+    now = datetime(2026, 9, 28, 12, tzinfo=UTC)
+    database = FakeRefreshDatabase(now)
+    database.seed("original-secret")
+    private, _ = _keys()
+    counter = 0
+
+    def next_token() -> str:
+        nonlocal counter
+        counter += 1
+        return f"token-{counter}"
+
+    refresh = RefreshLocalSession(
+        uow_factory=database.uow,
+        issuer=Rs256AccessTokenIssuer(
+            private, issuer="dmc-268-api", audience="dmc-268-ui", now=lambda: database.now
+        ),
+        now=lambda: database.now,
+        new_refresh_token=next_token,
+    )
+
+    # Initial rotation at t0
     asyncio.run(refresh.execute("original-secret"))
 
-    # 5th call: count is 5 >= MAX_GRACE_REFRESH_SESSIONS ->
-    # revokes family and raises InvalidRefreshToken
+    # Replay at +14 seconds (inside grace window) -> succeeds
+    database.now = now + timedelta(seconds=14)
+    res_14 = asyncio.run(refresh.execute("original-secret"))
+    assert res_14.user.id == 42
+
+    # Replay at +15 seconds (exact boundary: delta <= grace_period) -> succeeds
+    database.now = now + timedelta(seconds=15)
+    res_15 = asyncio.run(refresh.execute("original-secret"))
+    assert res_15.user.id == 42
+
+    # Replay at +16 seconds (outside grace window) -> revokes family and raises InvalidRefreshToken
+    database.now = now + timedelta(seconds=16)
     with pytest.raises(InvalidRefreshToken):
         asyncio.run(refresh.execute("original-secret"))
     assert database.family.revoked_at == database.now
