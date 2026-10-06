@@ -755,9 +755,23 @@ def test_postgres_lock_candidate_names_what_is_missing(
                 )
                 await session.commit()
 
+        async def set_installation_provider(provider: str) -> None:
+            async with sessions() as session:
+                await session.execute(
+                    text("UPDATE provider_installations SET provider = :provider"),
+                    {"provider": provider},
+                )
+                await session.commit()
+
         try:
             assert await lock() == _insert_candidate()
             assert await lock(uuid4()) is CandidateMiss.PULL_REQUEST_GONE
+            # repository_gone cannot happen here: code_changes.repository_id is a NOT NULL
+            # foreign key, and repositories.provider_installation_id is one too, so only a
+            # non-GitHub installation is left for missing_installation.
+            await set_installation_provider("gitlab")
+            assert await lock() is CandidateMiss.MISSING_INSTALLATION
+            await set_installation_provider("github")
             await set_active("rule_versions", False)
             assert await lock() is CandidateMiss.MISSING_RULES
             await set_active("rule_versions", True)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
@@ -445,19 +446,25 @@ def test_github_ci_adapter_treats_a_missing_run_count_as_blocking() -> None:
 
 @pytest.mark.parametrize("count", [-1, "0", None, 1.5])
 def test_github_ci_adapter_rejects_a_malformed_run_count(count: object) -> None:
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match=r"check_suites\.0\.latest_check_runs_count"):
         _fetch_suites([_raw_suite(8, "queued", latest_check_runs_count=count)])
 
 
 @pytest.mark.parametrize(
-    "status_body",
+    ("status_body", "reason"),
     [
-        {"sha": "b" * 40, "state": "success", "total_count": 1},
-        {"sha": _HEAD, "state": "unknown", "total_count": 0},
+        (
+            {"sha": "b" * 40, "state": "success", "total_count": 1},
+            "GitHub combined status SHA mismatch",
+        ),
+        (
+            {"sha": _HEAD, "state": "unknown", "total_count": 0},
+            "_CombinedStatusDto\nstate\n  Input should be 'success', 'failure' or 'pending'",
+        ),
     ],
 )
 def test_github_ci_adapter_rejects_uncertain_combined_status(
-    status_body: dict[str, object],
+    status_body: dict[str, object], reason: str
 ) -> None:
     class Tokens:
         async def get_installation_access_token(self, installation_external_id: int) -> str:
@@ -475,5 +482,5 @@ def test_github_ci_adapter_rejects_uncertain_combined_status(
             provider = HttpGitHubCurrentHeadCiProvider(client=client, token_provider=Tokens())
             return await provider.get_current_head_ci(17, "octo/repo", _HEAD)
 
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match=re.escape(reason)):
         asyncio.run(exercise())
