@@ -153,8 +153,9 @@ for example a `labeled` event with an empty `label`; for a `pull_request` event
 `pull_request.head.sha`; `label` for a label event without a label, `number` when the top-level
 number differs from the pull request's), each once, at most 10, then `+<n>` for the rest:
 `action=labeled invalid_payload fields=label.name`. A path segment that is not an identifier
-(`[A-Za-z_][A-Za-z0-9_]*`, at most 64 characters) is logged as `?`, and a list index as its
-number. A payload that is not a JSON object, or any other rejection, is plain `invalid_payload`.
+(`[A-Za-z_][A-Za-z0-9_]*`, at most 64 characters) is logged as `?`, a list index as its
+number, and an empty path as `?`. A payload that is not a JSON object, or any other rejection,
+is plain `invalid_payload`.
 The receipt is acknowledged and not retried, and no payload value or error message is logged
 with this reason, only field paths; for an installation event the reason stays plain and a
 separate WARNING names the failing fields. The line never carries the payload, an installation

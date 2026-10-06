@@ -55,16 +55,17 @@ class SweepNoCi:
         for candidate in await self._candidates.list_due(self._now(), limit):
             attempted += 1
             result = await self._enqueuer.execute(candidate.code_change_id, candidate.head_sha)
-            if result.status != EnqueueStatus.ENQUEUED:
+            excluded = result.status != EnqueueStatus.ENQUEUED
+            if excluded:
                 await self._candidates.exclude(candidate)
-            _log_outcome(candidate, result)
+            _log_outcome(candidate, result, excluded=excluded)
         return attempted
 
 
-def _log_outcome(candidate: DueNoCiCandidate, result: EnqueueResult) -> None:
+def _log_outcome(candidate: DueNoCiCandidate, result: EnqueueResult, *, excluded: bool) -> None:
     """Log one line per candidate, after its exclusion (if any) is stored."""
     outcome = describe_enqueue(candidate.code_change_id, candidate.head_sha, result)
-    if result.status == EnqueueStatus.ENQUEUED:
-        _LOGGER.info("No-CI sweep %s", outcome)
-    else:
+    if excluded:
         _LOGGER.info("No-CI sweep %s; excluded until the head or label changes", outcome)
+    else:
+        _LOGGER.info("No-CI sweep %s", outcome)

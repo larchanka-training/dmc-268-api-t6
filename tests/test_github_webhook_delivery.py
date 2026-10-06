@@ -1287,22 +1287,20 @@ def test_invalid_labeled_payload_logs_its_action_and_reason_without_payload_valu
     assert row.projection_attempt_count == 0
 
 
+def _synchronize_with_unparsable_number() -> str:
+    """A ``synchronize`` payload that is valid except for a string ``pull_request.number``."""
+    payload = json.loads(_pull_request_receipt("payload", "synchronize").payload_json)
+    payload["pull_request"]["number"] = _PAYLOAD_SENTINEL
+    return json.dumps(payload)
+
+
 @pytest.mark.parametrize(
     ("event_name", "payload_json", "detail"),
     [
         (
             "pull_request",
-            json.dumps(
-                {
-                    "action": "synchronize",
-                    "installation": {"id": 17},
-                    "repository": {"id": 101, "full_name": "octo/repo"},
-                    "pull_request": {"id": "901", "title": _PAYLOAD_SENTINEL},
-                }
-            ),
-            "action=synchronize invalid_payload fields=pull_request.id,pull_request.number,"
-            "pull_request.html_url,pull_request.user,pull_request.head,pull_request.base,"
-            "pull_request.state,pull_request.updated_at",
+            _synchronize_with_unparsable_number(),
+            "action=synchronize invalid_payload fields=pull_request.number",
         ),
         ("pull_request", "not json", "invalid_payload"),
         ("pull_request", "[]", "invalid_payload"),
@@ -1362,15 +1360,8 @@ def _mismatched_number() -> dict[str, object]:
             },
             "invalid_payload fields=check_suite.head_sha",
         ),
-        (
-            "pull_request",
-            {"action": "opened", "installation": {}, "repository": {}, "pull_request": {}},
-            "action=opened invalid_payload fields=installation.id,repository.id,"
-            "repository.full_name,pull_request.id,pull_request.number,pull_request.title,"
-            "pull_request.html_url,pull_request.user,pull_request.head,pull_request.base,+2",
-        ),
     ],
-    ids=["label-missing", "number-mismatch", "check-suite-head-sha", "at-most-ten-fields"],
+    ids=["label-missing", "number-mismatch", "check-suite-head-sha"],
 )
 def test_invalid_payload_names_its_failing_fields_never_their_values(
     caplog: pytest.LogCaptureFixture, event_name: str, payload: dict[str, object], detail: str
@@ -1422,6 +1413,77 @@ def test_a_field_name_that_is_not_an_identifier_is_logged_as_a_question_mark(
         "detail=invalid_payload fields=check_suite.?.0,check_suite.?,check_suite._app_1"
     ]
     assert _PAYLOAD_SENTINEL not in caplog.text
+
+
+def test_invalid_payload_logs_each_field_path_once_and_at_most_ten(
+    caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Twelve locations, the fourth a repeat of the second: eleven paths, ten of them shown.
+    locations: tuple[tuple[int | str, ...], ...] = (
+        ("check_suite", "head_sha"),
+        ("check_suite", "head_branch"),
+        ("check_suite", "id"),
+        ("check_suite", "head_branch"),
+        ("check_suite", "app", "id"),
+        ("check_suite", "pull_requests", 0, "number"),
+        ("check_suite", "pull_requests", 1, "number"),
+        ("repository", "id"),
+        ("repository", "full_name"),
+        ("installation", "id"),
+        ("check_suite", "status"),
+        ("check_suite", "conclusion"),
+    )
+
+    def parse_with_many_locations(event_name: str, payload: Mapping[str, object]) -> CiTriggerEvent:
+        raise ValidationError.from_exception_data(
+            "check_suite",
+            [{"type": "missing", "loc": location, "input": {}} for location in locations],
+        )
+
+    monkeypatch.setattr(
+        "app.modules.integrations.webhooks.api.dispatch.parse_ci_event", parse_with_many_locations
+    )
+    receipt = VerifiedGitHubDelivery(
+        "many-fields-1", "check_suite", {"action": "completed"}
+    ).to_receipt()
+
+    _replay_invalid_receipt(receipt, caplog)
+
+    assert _outcome_lines(caplog) == [
+        "GitHub webhook delivery many-fields-1 event=check_suite status=ignored_invalid_event "
+        "detail=invalid_payload fields=check_suite.head_sha,check_suite.head_branch,"
+        "check_suite.id,check_suite.app.id,check_suite.pull_requests.0.number,"
+        "check_suite.pull_requests.1.number,repository.id,repository.full_name,installation.id,"
+        "check_suite.status,+1"
+    ]
+
+
+def test_an_empty_field_location_is_logged_as_a_question_mark(
+    caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A model-level error carries no location at all.
+    def parse_with_empty_location(event_name: str, payload: Mapping[str, object]) -> CiTriggerEvent:
+        raise ValidationError.from_exception_data(
+            "check_suite",
+            [
+                {"type": "missing", "loc": (), "input": {}},
+                {"type": "missing", "loc": ("check_suite", "head_sha"), "input": {}},
+            ],
+        )
+
+    monkeypatch.setattr(
+        "app.modules.integrations.webhooks.api.dispatch.parse_ci_event", parse_with_empty_location
+    )
+    receipt = VerifiedGitHubDelivery(
+        "empty-loc-1", "check_suite", {"action": "completed"}
+    ).to_receipt()
+
+    _replay_invalid_receipt(receipt, caplog)
+
+    assert _outcome_lines(caplog) == [
+        "GitHub webhook delivery empty-loc-1 event=check_suite status=ignored_invalid_event "
+        "detail=invalid_payload fields=?,check_suite.head_sha"
+    ]
 
 
 def test_a_rejection_that_names_no_field_is_logged_as_plain_invalid_payload(

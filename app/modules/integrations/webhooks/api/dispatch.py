@@ -153,10 +153,17 @@ def _invalid_payload(error: ValueError) -> str:
         locations = [(name,) for name in error.fields]
     else:
         return _INVALID_PAYLOAD
-    paths = list(dict.fromkeys(".".join(_field_segment(part) for part in loc) for loc in locations))
+    paths = list(dict.fromkeys(_field_path(loc) for loc in locations))
     shown = paths[:_MAX_LOGGED_FIELD_ERRORS]
     omitted = len(paths) - len(shown)
     return f"{_INVALID_PAYLOAD} fields={','.join(shown)}{f',+{omitted}' if omitted else ''}"
+
+
+def _field_path(loc: tuple[int | str, ...]) -> str:
+    """The location's segments joined by ``.``; an empty location (a model error) is ``?``."""
+    if not loc:
+        return "?"
+    return ".".join(_field_segment(part) for part in loc)
 
 
 def _field_segment(part: int | str) -> str:
