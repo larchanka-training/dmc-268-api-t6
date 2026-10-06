@@ -1,10 +1,30 @@
+{
+	# With handle_errors on any site Caddy logs proxy errors (the cause of a 502: no such host,
+	# connection refused) at debug level for every site. This log keeps them visible.
+	log proxy_errors {
+		include http.log.error
+		level DEBUG
+	}
+}
+
 # Edge routes on the shared course VPS, one hostname per service and environment under
 # APP_DOMAIN. Certificates come from Let's Encrypt; HTTP redirects to HTTPS automatically.
-# Upstreams are aliases on the docker network dmc268-edge. A route whose service is not
+# Upstreams are aliases on the docker network dmc268-edge. A staging route whose service is not
 # running answers 502; Caddy itself still starts and serves the other routes.
 
 (hsts) {
 	header Strict-Transport-Security "max-age=31536000"
+}
+
+# Hosts whose service is not deployed yet (prod, the standalone webhook service) answer 503 with a
+# plain text instead of a bare 502. handle_errors runs whenever Caddy cannot reach the upstream:
+# before the first rollout and, after it, while the service is down or restarting. The routes
+# below are already final, so a rollout needs no Caddyfile change.
+(not_deployed) {
+	handle_errors 502 {
+		import hsts
+		respond "No service is running on this host: it is not deployed yet or is restarting." 503
+	}
 }
 
 staging-api.{$APP_DOMAIN} {
@@ -14,16 +34,19 @@ staging-api.{$APP_DOMAIN} {
 
 api.{$APP_DOMAIN} {
 	import hsts
+	import not_deployed
 	reverse_proxy api-prod:8000
 }
 
 staging-webhook.{$APP_DOMAIN} {
 	import hsts
+	import not_deployed
 	reverse_proxy webhook-staging:8000
 }
 
 webhook.{$APP_DOMAIN} {
 	import hsts
+	import not_deployed
 	reverse_proxy webhook-prod:8000
 }
 
@@ -40,9 +63,16 @@ staging-ui.{$APP_DOMAIN} {
 	}
 }
 
+# The same one origin for prod.
 ui.{$APP_DOMAIN} {
 	import hsts
-	reverse_proxy ui-prod:8080
+	import not_deployed
+	handle /api/* {
+		reverse_proxy api-prod:8000
+	}
+	handle {
+		reverse_proxy ui-prod:8080
+	}
 }
 
 {$APP_DOMAIN} {
