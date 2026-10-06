@@ -87,8 +87,10 @@ def nonpublishable_case_ids(statuses: Mapping[str, Mapping[str, object]]) -> lis
 
     A paid-metadata failure is always nonpublishable, even with an answer.
     Without that marker, ``llm_invalid_output`` is nonpublishable only with
-    ``no_call`` or ``no_content``. An ``accepted`` case without the marker remains
-    publishable when a later repair or fallback succeeds after an empty first response.
+    ``no_call`` or ``no_content``. Every other terminal gateway status is
+    nonpublishable, even if its first call returned an answer. An ``accepted``
+    case without the marker remains publishable when a later repair or fallback
+    succeeds after an empty first response.
     """
     return sorted(
         case_id

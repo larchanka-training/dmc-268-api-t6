@@ -32,6 +32,7 @@ from app.modules.reviews.infrastructure.llm.transport import (
     extract_text_content,
 )
 from review.scripts.eval_live import RecorderError, main, record_live
+from review.scripts.eval_provenance import rule_json_paths, static_input_paths
 from review.scripts.eval_replay import format_console, replay
 from review.scripts.eval_replay import main as replay_main
 
@@ -141,6 +142,110 @@ def record(
 
 def response(root: Path, case_id: str) -> bytes:
     return (root / "responses" / f"{case_id}.json").read_bytes()
+
+
+def test_selected_custom_rules_outside_default_rule_glob_are_hashed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = tmp_path / "repo"
+    system_relative = "review/prompts/review.system.v2.md"
+    for relative in static_input_paths(system_relative, rule_json_paths(REPO_ROOT)):
+        destination = repo / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(REPO_ROOT / relative, destination)
+    custom = repo / "config/custom-backend.json"
+    custom.parent.mkdir(parents=True)
+    custom_rules = json.loads(BACKEND_RULES.read_text(encoding="utf-8"))
+    custom_rules["rules"][0]["name"] = "Custom Source Review"
+    custom.write_text(json.dumps(custom_rules), encoding="utf-8")
+    monkeypatch.setattr(eval_live_module, "REPO_ROOT", repo)
+
+    first_root = fixture_root(tmp_path / "first", ("SEC-01",))
+    first_transport = FakeTransport([answer("primary-model", VALID)])
+    first = asyncio.run(
+        record_live(
+            first_root,
+            settings(),
+            system_prompt=repo / system_relative,
+            backend_rules=custom,
+            frontend_rules=repo / "review/rules/default-frontend.v1.json",
+            transport=first_transport,
+            recorded_at=RECORDED_AT,
+        )
+    )
+
+    assert "config/custom-backend.json" not in rule_json_paths(repo)
+    assert "config/custom-backend.json" in first["static_inputs"]
+    assert 'name="Custom Source Review"' in first_transport.requests[0].messages[1].content
+
+    custom.write_text(json.dumps(custom_rules) + "\n", encoding="utf-8")
+    second_root = fixture_root(tmp_path / "second", ("SEC-01",))
+    second = asyncio.run(
+        record_live(
+            second_root,
+            settings(),
+            system_prompt=repo / system_relative,
+            backend_rules=custom,
+            frontend_rules=repo / "review/rules/default-frontend.v1.json",
+            transport=FakeTransport([answer("primary-model", VALID)]),
+            recorded_at=RECORDED_AT,
+        )
+    )
+
+    assert second["static_inputs"] == first["static_inputs"]
+    assert second["static_digest"] != first["static_digest"]
+    assert second["corpus_digest"] == first["corpus_digest"]
+
+
+def test_cli_deep_engine_records_deep_settings_and_uses_deep_timeout(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    configured = settings()
+    assert configured.fallback is not None
+    profiles = LlmSettings(
+        replace(configured.primary, context_window=20_000, max_output_tokens=1_000),
+        replace(configured.fallback, context_window=10_000, max_output_tokens=1_500),
+        replace(
+            configured.policy,
+            input_token_limit={"fast": 8_000, "deep": 15_000},
+            call_timeout_s={"fast": 15.0, "deep": 45.0},
+            run_cost_limit_usd={"fast": Decimal("0.5"), "deep": Decimal("3.25")},
+        ),
+    )
+
+    def capture(engine: str) -> tuple[dict[str, Any], FakeTransport]:
+        root = fixture_root(tmp_path / engine, ("SEC-01",))
+        transport = FakeTransport([answer("primary-model", VALID)])
+        assert (
+            main(
+                ["--root", str(root), "--engine", engine],
+                model_settings=profiles,
+                transport=transport,
+            )
+            == 0
+        )
+        capsys.readouterr()
+        return json.loads((root / "responses/manifest.json").read_text(encoding="utf-8")), transport
+
+    fast, fast_transport = capture("fast")
+    deep, deep_transport = capture("deep")
+    fast_settings = fast["run_metadata"]["effective_settings"]
+    deep_settings = deep["run_metadata"]["effective_settings"]
+
+    assert deep["run_metadata"]["engine"] == "deep"
+    assert deep_settings["policy"]["input_token_limit"] == 15_000
+    assert deep_settings["policy"]["call_timeout_s"] == 45.0
+    assert deep_settings["policy"]["run_cost_limit_usd"] == "3.25"
+    assert deep_settings["primary"]["input_budget_tokens"] == 14_000
+    assert deep_settings["fallback"]["input_budget_tokens"] == 8_500
+    assert fast_settings["policy"]["input_token_limit"] == 8_000
+    assert fast_settings["policy"]["call_timeout_s"] == 15.0
+    assert fast_settings["policy"]["run_cost_limit_usd"] == "0.5"
+    assert fast_settings["primary"]["input_budget_tokens"] == 7_000
+    assert fast_settings["fallback"]["input_budget_tokens"] == 6_500
+    assert len(fast_transport.requests) == len(deep_transport.requests) == 1
+    assert fast_transport.requests[0].timeout_s == 15.0
+    assert deep_transport.requests[0].timeout_s == 45.0
 
 
 def test_effective_settings_track_provider_and_endpoint_without_raw_url(tmp_path: Path) -> None:

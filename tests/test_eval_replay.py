@@ -21,7 +21,7 @@ from review.scripts.eval_provenance import (
     rule_json_paths,
     static_input_paths,
 )
-from review.scripts.eval_replay import ReplayError, format_console, replay
+from review.scripts.eval_replay import ReplayError, format_console, nonpublishable_case_ids, replay
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DATASET_ROOT = REPO_ROOT / "test-prs-dataset"
@@ -238,6 +238,53 @@ def test_replay_rejects_invalid_digest_fields(tmp_path: Path, field: str, value:
 
     with pytest.raises(ReplayError, match=f"response manifest {field} must be a sha256-v1 digest"):
         replay(root)
+
+
+@pytest.mark.parametrize(
+    ("gateway_status", "first_call", "paid_metadata_error", "expected"),
+    [
+        ("accepted", "answer", False, []),
+        ("accepted", "no_content", False, []),
+        ("accepted", "empty_answer", False, []),
+        ("llm_invalid_output", "answer", False, []),
+        ("llm_invalid_output", "empty_answer", False, []),
+        ("llm_invalid_output", "no_call", False, ["CASE"]),
+        ("llm_invalid_output", "no_content", False, ["CASE"]),
+        ("llm_invalid_output", "answer", True, ["CASE"]),
+        ("accepted", "answer", True, ["CASE"]),
+        ("llm_payment_required", "answer", False, ["CASE"]),
+        ("llm_unavailable", "answer", False, ["CASE"]),
+        ("budget_exceeded", "answer", False, ["CASE"]),
+    ],
+)
+def test_nonpublishable_case_status_table(
+    gateway_status: str,
+    first_call: str,
+    paid_metadata_error: bool,
+    expected: list[str],
+) -> None:
+    statuses = {
+        "CASE": {
+            "gateway_status": gateway_status,
+            "first_call": first_call,
+            "paid_metadata_error": paid_metadata_error,
+        }
+    }
+
+    assert nonpublishable_case_ids(statuses) == expected
+
+
+def test_nonpublishable_case_ids_are_sorted() -> None:
+    statuses = {
+        case_id: {
+            "gateway_status": "llm_payment_required",
+            "first_call": "answer",
+            "paid_metadata_error": False,
+        }
+        for case_id in ("Z", "A", "M")
+    }
+
+    assert nonpublishable_case_ids(statuses) == ["A", "M", "Z"]
 
 
 def test_replay_scores_valid_responses_and_preserves_provenance(tmp_path: Path) -> None:
@@ -659,6 +706,15 @@ def test_missing_digest_input_has_distinct_error_type(tmp_path: Path) -> None:
     assert isinstance(error.value, eval_provenance.DigestInputMissing)
 
 
+def test_rule_json_paths_rejects_regular_file_instead_of_directory(tmp_path: Path) -> None:
+    rules = tmp_path / "review/rules"
+    rules.parent.mkdir(parents=True)
+    rules.write_text("not a directory\n")
+
+    with pytest.raises(DigestInputError, match="rule path is not a directory"):
+        rule_json_paths(tmp_path)
+
+
 def test_replay_warns_when_static_input_is_missing(tmp_path: Path) -> None:
     root = fixture_root(tmp_path)
     repo = tmp_path / "repo"
@@ -696,6 +752,33 @@ def test_replay_warns_when_corpus_input_disappears_after_enumeration(
         "Corpus input is missing: missing digest file: cases/SEC-01/base/README.md"
     ]
     assert report["case_count"] == 1
+
+
+def test_replay_rejects_corpus_path_replaced_by_symlink_after_enumeration(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = fixture_root(tmp_path)
+    repo = tmp_path / "repo"
+    _record_with_digests(root, repo)
+    raw = (root / "responses/SEC-01.json").read_bytes()
+    replaced = root / "cases/SEC-01/base/README.md"
+    outside = tmp_path / "outside.txt"
+    outside.write_text("unsafe replacement\n")
+    original_paths = corpus_input_paths
+
+    def enumerate_then_replace(
+        dataset_root: Path, records: list[tuple[Path, dict[str, Any]]]
+    ) -> list[str]:
+        paths = original_paths(dataset_root, records)
+        replaced.unlink()
+        replaced.symlink_to(outside)
+        return paths
+
+    monkeypatch.setattr(eval_replay_module, "corpus_input_paths", enumerate_then_replace)
+
+    with pytest.raises(ReplayError, match="symlink digest path"):
+        replay(root, prompt_root=repo)
+    assert (root / "responses/SEC-01.json").read_bytes() == raw
 
 
 @pytest.mark.parametrize("changed", ["case.json", "base/README.md"])
