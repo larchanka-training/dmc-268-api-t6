@@ -8,7 +8,8 @@ import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, cast
+from uuid import UUID, uuid4
 
 import httpx
 import pydantic
@@ -44,10 +45,21 @@ from app.modules.integrations.webhooks.infrastructure.github_reviewer_timeline i
     HttpGitHubReviewerTimelineProvider,
 )
 from app.modules.repositories.application.installation_repositories import RepositorySnapshot
+from app.modules.reviews.application.check_runs import CheckRunTarget, CheckRunView
+from app.modules.reviews.application.process_run import RunVcsInput
 from app.modules.reviews.application.project_github_pull_request import (
     PullRequestEvent,
     PullRequestState,
 )
+from app.modules.reviews.application.publish_run_review import ReviewSubmission
+from app.modules.reviews.application.vcs_diff import PullRequestLocator, VcsProvider
+from app.modules.reviews.infrastructure.github_ci import HttpGitHubCurrentHeadCiProvider
+from app.modules.reviews.infrastructure.github_review_publication import (
+    GitHubCheckRunGateway,
+    GitHubPullRequestReviewGateway,
+)
+from app.modules.reviews.infrastructure.github_run_source import GitHubRunSource
+from app.modules.reviews.infrastructure.github_vcs import HttpGitHubVcsProvider
 
 _SHA_40 = "0123456789abcdef0123456789abcdef01234567"
 _SHA_64 = "0123456789abcdef" * 4
@@ -492,3 +504,138 @@ def test_pull_request_parser_rejects_a_repository_name_outside_owner_slash_repo(
         parse_pull_request_event(_pull_request_payload(full_name))
 
     assert [error["loc"] for error in raised.value.errors()] == [("repository", "full_name")]
+
+
+# --- Review adapters: names and SHAs read from the database are validated the same way ---
+
+_HEAD = "e" * 40
+_BASE = "b" * 40
+_BAD_SHAS = ["", "short", "..", "../../x", "e" * 39, "e" * 40 + "/", "e" * 40 + "\n", "g" * 40]
+
+
+def _check_run(
+    client: httpx.AsyncClient, tokens: _Tokens, full_name: str, sha: str
+) -> Awaitable[object]:
+    return GitHubCheckRunGateway(client=client, token_provider=tokens).upsert(
+        CheckRunTarget(17, full_name, sha, uuid4()),
+        CheckRunView(status="in_progress", conclusion=None, title="AI Review", summary="s"),
+    )
+
+
+def _review(client: httpx.AsyncClient, tokens: _Tokens, full_name: str) -> Awaitable[object]:
+    return GitHubPullRequestReviewGateway(client=client, token_provider=tokens).submit_review(
+        ReviewSubmission(17, full_name, 7, _HEAD, "COMMENT", "body", (), "hash")
+    )
+
+
+def _vcs_pull_request(
+    client: httpx.AsyncClient, tokens: _Tokens, full_name: str
+) -> Awaitable[object]:
+    return HttpGitHubVcsProvider(client=client, token_provider=tokens).get_pull_request(
+        PullRequestLocator(17, full_name, 7)
+    )
+
+
+def _vcs_blob(client: httpx.AsyncClient, tokens: _Tokens, full_name: str) -> Awaitable[object]:
+    return HttpGitHubVcsProvider(client=client, token_provider=tokens).get_blob(
+        PullRequestLocator(17, full_name, 7), _HEAD
+    )
+
+
+def _current_head_ci(
+    client: httpx.AsyncClient, tokens: _Tokens, full_name: str
+) -> Awaitable[object]:
+    return HttpGitHubCurrentHeadCiProvider(
+        client=client, token_provider=tokens
+    ).get_current_head_ci(17, full_name, _HEAD)
+
+
+@dataclass
+class _Runs:
+    full_name: str
+    head_sha: str
+    base_sha: str
+
+    async def get_run_vcs_input(self, run_id: UUID) -> RunVcsInput:
+        return RunVcsInput(
+            code_change_id=uuid4(),
+            repository_id=uuid4(),
+            head_sha=self.head_sha,
+            base_sha=self.base_sha,
+            locator=PullRequestLocator(17, self.full_name, 7),
+        )
+
+
+def _run_source(client: httpx.AsyncClient, tokens: _Tokens, runs: _Runs) -> GitHubRunSource:
+    return GitHubRunSource(
+        client=client,
+        token_provider=tokens,
+        vcs=cast(VcsProvider, None),
+        runs=runs,  # type: ignore[arg-type]
+        run_id=uuid4(),
+    )
+
+
+_REVIEW_SINKS: dict[str, Callable[[httpx.AsyncClient, _Tokens, str], Awaitable[object]]] = {
+    "check-run": lambda client, tokens, full_name: _check_run(client, tokens, full_name, _HEAD),
+    "pull-request-review": _review,
+    "vcs-pull-request": _vcs_pull_request,
+    "vcs-blob": _vcs_blob,
+    "current-head-ci": _current_head_ci,
+    "run-source-tree": lambda client, tokens, full_name: _run_source(
+        client, tokens, _Runs(full_name, _HEAD, _BASE)
+    ).fetch_tree(uuid4()),
+    "run-source-agents-md": lambda client, tokens, full_name: _run_source(
+        client, tokens, _Runs(full_name, _HEAD, _BASE)
+    ).fetch_agents_md(uuid4()),
+}
+
+
+@pytest.mark.parametrize("sink", _REVIEW_SINKS)
+@pytest.mark.parametrize("full_name", _BAD_FULL_NAMES)
+def test_review_adapter_rejects_a_bad_repository_name_before_any_request(
+    sink: str, full_name: str
+) -> None:
+    wire, tokens = _Wire(), _Tokens()
+    # The CI adapter keeps its own earlier slash count, so it raises a plain ValueError there.
+    expected = (
+        ValueError
+        if sink == "current-head-ci" and full_name.count("/") != 1
+        else InvalidGitHubPathSegment
+    )
+
+    with pytest.raises(expected):
+        _run_on_wire(lambda client, t: _REVIEW_SINKS[sink](client, t, full_name), wire, tokens)
+
+    assert wire.requests == []
+    assert tokens.calls == []
+
+
+@pytest.mark.parametrize("sha", _BAD_SHAS)
+def test_check_run_gateway_rejects_a_bad_head_sha_before_any_request(sha: str) -> None:
+    wire, tokens = _Wire(), _Tokens()
+
+    with pytest.raises(InvalidGitHubPathSegment):
+        _run_on_wire(lambda client, t: _check_run(client, t, "octo/repo", sha), wire, tokens)
+
+    assert wire.requests == []
+    assert tokens.calls == []
+
+
+@pytest.mark.parametrize("sha", _BAD_SHAS)
+@pytest.mark.parametrize("which", ["head", "base"])
+def test_run_source_rejects_a_bad_tree_sha_before_any_request(sha: str, which: str) -> None:
+    runs = _Runs("octo/repo", sha if which == "head" else _HEAD, sha if which == "base" else _BASE)
+    wire, tokens = _Wire(), _Tokens()
+
+    async def read_tree(client: httpx.AsyncClient, t: _Tokens) -> object:
+        source = _run_source(client, t, runs)
+        return await (
+            source.fetch_tree(uuid4()) if which == "head" else source.fetch_agents_md(uuid4())
+        )
+
+    with pytest.raises(InvalidGitHubPathSegment):
+        _run_on_wire(read_tree, wire, tokens)
+
+    assert wire.requests == []
+    assert tokens.calls == []
