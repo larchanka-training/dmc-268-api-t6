@@ -7,7 +7,10 @@ from typing import Literal, get_args
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, HttpUrl
 
-from app.common.application.github_repository_name import REPOSITORY_FULL_NAME_PATTERN
+from app.common.application.github_repository_name import (
+    REPOSITORY_FULL_NAME_MAX_LENGTH,
+    REPOSITORY_FULL_NAME_PATTERN,
+)
 from app.modules.reviews.application.project_github_pull_request import (
     PullRequestEvent,
     PullRequestLabelEvent,
@@ -49,7 +52,9 @@ class _GitHubIdDto(BaseModel):
 
 
 class _GitHubRepositoryDto(_GitHubIdDto):
-    full_name: str = Field(pattern=REPOSITORY_FULL_NAME_PATTERN, max_length=512)
+    full_name: str = Field(
+        pattern=REPOSITORY_FULL_NAME_PATTERN, max_length=REPOSITORY_FULL_NAME_MAX_LENGTH
+    )
 
 
 class _GitHubUserDto(BaseModel):
