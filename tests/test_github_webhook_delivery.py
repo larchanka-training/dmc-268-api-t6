@@ -412,6 +412,31 @@ def test_exact_label_receipt_stays_raw_and_retries_until_projector_and_trigger_e
             InstallationDeliveryDispatchStatus.IGNORED_IRRELEVANT_EVENT,
             True,
         ),
+        (
+            PullRequestProjectionStatus.IGNORED_OWN_BOT,
+            InstallationDeliveryDispatchStatus.IGNORED_IRRELEVANT_EVENT,
+            True,
+        ),
+        (
+            PullRequestProjectionStatus.IGNORED_IDENTITY_MISMATCH,
+            InstallationDeliveryDispatchStatus.IGNORED_IRRELEVANT_EVENT,
+            True,
+        ),
+        (
+            PullRequestProjectionStatus.IGNORED_IDENTITY_CONFLICT,
+            InstallationDeliveryDispatchStatus.IGNORED_IRRELEVANT_EVENT,
+            True,
+        ),
+        (
+            PullRequestProjectionStatus.IGNORED_EXTERNAL_ID_MISMATCH,
+            InstallationDeliveryDispatchStatus.IGNORED_IRRELEVANT_EVENT,
+            True,
+        ),
+        (
+            PullRequestProjectionStatus.IGNORED_OTHER_LABEL,
+            InstallationDeliveryDispatchStatus.IGNORED_IRRELEVANT_EVENT,
+            True,
+        ),
     ],
 )
 def test_label_projection_status_controls_receipt_ack_or_retry(

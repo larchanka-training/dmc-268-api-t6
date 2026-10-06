@@ -1186,7 +1186,7 @@ def test_stale_sha_unknown_repository_and_unrelated_pr_do_not_mutate_record() ->
     )
     unrelated = asyncio.run(projector.execute(_event(external_id=902)))
     assert stale_push == PullRequestProjectionStatus.IGNORED_STALE
-    assert unrelated == PullRequestProjectionStatus.IGNORED_UNRELATED
+    assert unrelated == PullRequestProjectionStatus.IGNORED_EXTERNAL_ID_MISMATCH
     assert uow.store.saves == saves
     assert uow.store.row.head_sha == _HEAD
     assert uow.store.row.reviewer_requested is False
@@ -1211,8 +1211,80 @@ def test_external_id_collision_with_different_pr_number_is_unrelated() -> None:
 
     assert (
         asyncio.run(projector.execute(_event(number=8)))
-        == PullRequestProjectionStatus.IGNORED_UNRELATED
+        == PullRequestProjectionStatus.IGNORED_IDENTITY_CONFLICT
     )
+    assert uow.commits == 0
+
+
+class _ConflictingStore(FakeStore):
+    async def get_or_create_locked(
+        self, event: PullRequestEvent, now: datetime
+    ) -> LockedPullRequest | None:
+        raise PullRequestIdentityConflict
+
+
+def _store_with_pr_902() -> FakeStore:
+    return FakeStore(
+        row=PullRequestRecord.from_event(uuid4(), _REPOSITORY_ID, _event(external_id=902), _NOW)
+    )
+
+
+@pytest.mark.parametrize(
+    ("sender", "current_overrides", "store", "status"),
+    [
+        (("Bot", "Reviewer[bot]"), {}, FakeStore, "ignored_own_bot"),
+        ((None, None), {"number": 8}, FakeStore, "ignored_identity_mismatch"),
+        ((None, None), {}, _ConflictingStore, "ignored_identity_conflict"),
+        ((None, None), {}, _store_with_pr_902, "ignored_external_id_mismatch"),
+    ],
+    ids=["own-bot", "identity-mismatch", "identity-conflict", "external-id-mismatch"],
+)
+def test_ignored_label_projection_names_its_cause(
+    sender: tuple[str | None, str | None],
+    current_overrides: dict[str, object],
+    store: Callable[[], FakeStore],
+    status: str,
+) -> None:
+    uow = FakeUnitOfWork(store=store())
+    saves = uow.store.saves
+
+    class Current:
+        async def get_current(self, event: PullRequestEvent) -> PullRequestEvent:
+            return _event(
+                event.action, current_label_names=frozenset({"ai-review"}), **current_overrides
+            )
+
+    projector = ProjectGitHubPullRequest(
+        uow_factory=lambda: uow,
+        bot_login="reviewer[bot]",
+        current_provider=Current(),
+        projection_lock=FakeProjectionLock(),
+        now=lambda: _NOW,
+    )
+    event = _event("labeled", sender_type=sender[0], sender_login=sender[1])
+
+    assert asyncio.run(projector.execute(PullRequestLabelEvent(event, "ai-review"))) == status
+    assert uow.store.saves == saves
+    assert uow.commits == 0
+
+
+def test_pull_request_event_whose_current_pr_differs_is_an_identity_mismatch() -> None:
+    uow = FakeUnitOfWork()
+
+    class Current:
+        async def get_current(self, event: PullRequestEvent) -> PullRequestEvent:
+            return _event(event.action, number=8, current_label_names=frozenset())
+
+    projector = ProjectGitHubPullRequest(
+        uow_factory=lambda: uow,
+        bot_login="reviewer[bot]",
+        current_provider=Current(),
+        projection_lock=FakeProjectionLock(),
+        now=lambda: _NOW,
+    )
+
+    assert asyncio.run(projector.execute(_event("synchronize"))) == "ignored_identity_mismatch"
+    assert uow.store.row is None
     assert uow.commits == 0
 
 
@@ -1464,7 +1536,7 @@ def test_label_projection_reconciles_add_remove_readd_and_delayed_deliveries() -
     unrelated = PullRequestLabelEvent(_event("labeled"), "docs")
 
     assert (
-        asyncio.run(projector.execute(unrelated)) == PullRequestProjectionStatus.IGNORED_UNRELATED
+        asyncio.run(projector.execute(unrelated)) == PullRequestProjectionStatus.IGNORED_OTHER_LABEL
     )
     assert observations == []
     assert row.ai_review_labeled is False
@@ -2338,7 +2410,7 @@ def test_migration_backfills_legacy_pr_from_event_and_duplicate_keeps_clocks(
             )
             assert (
                 await projector.execute(_event(number=8))
-                == PullRequestProjectionStatus.IGNORED_UNRELATED
+                == PullRequestProjectionStatus.IGNORED_IDENTITY_CONFLICT
             )
             async with sessions() as session:
                 rows = (await session.scalars(select(CodeChange))).all()

@@ -133,9 +133,20 @@ Other details: `no open pull request` (a PR event or label whose PR is closed or
 nothing to enqueue), `no open pull request at this head` (a CI event for a head that no open PR
 has, for example CI of an old head that finished after a push),
 `not an ai-review labeled action`, `label is not ai-review` (a foreign label), and, when the
-trigger did not run, the projection result: `projected`, `ignored_stale`, `ignored_unrelated`
-(for example a label set by the App's own bot) or `unknown_repository`. `invalid_payload`
-(status `ignored_invalid_event`) means the payload could not be parsed into the event's shape,
+trigger did not run, the projection result: `projected`, `ignored_stale`, `unknown_repository`,
+or why the projection was ignored, for example `action=labeled ignored_own_bot` (status
+`ignored_irrelevant_event`, the receipt is acknowledged):
+
+| projection result | meaning |
+| --- | --- |
+| `ignored_own_bot` | the label event was sent by the App's own bot |
+| `ignored_identity_mismatch` | the current GitHub PR is not the PR the event names (its id, number, repository or installation differ) |
+| `ignored_identity_conflict` | the event's PR id and number belong to different stored PRs |
+| `ignored_external_id_mismatch` | the stored PR with this number has another GitHub PR id |
+| `ignored_other_label` | a label other than `ai-review`; the dispatcher answers `label is not ai-review` before the projection, so a delivered label does not show it |
+| `ignored_unrelated` | remains only for paths the dispatcher already filters (review requests, actions the projection does not handle), so it does not appear for a delivered label |
+
+`invalid_payload` (status `ignored_invalid_event`) means the payload could not be parsed into the event's shape,
 for example a `labeled` event with an empty `label`; for a `pull_request` event
 `action=<action>` precedes it. For a `pull_request` or CI event it is followed by
 `fields=<path>,...`, the schema paths of the failing fields (`label.name`,
@@ -166,8 +177,10 @@ characters).
 
 Failure log. When processing a delivery fails, the worker first writes one WARNING line with the
 action and a failure category, then the sweep writes its ERROR record
-`GitHub webhook projection failed for delivery <delivery_id>` with the traceback. The first line
-is the greppable outcome, the second the diagnosis:
+`GitHub webhook projection failed for delivery <delivery_id>` with the traceback. On the last
+failed attempt of a dispatch, the final WARNING
+`GitHub webhook delivery <delivery_id> failed after its last attempt: <ExceptionClass>` comes
+between them. The first line is the greppable outcome, the ERROR record the diagnosis:
 
 ```text
 GitHub webhook delivery <delivery_id> event=<event|-> action=<action|-> failed stage=<stage> category=<category> error=<ExceptionClass> [outcome=<status> detail=<detail>]
