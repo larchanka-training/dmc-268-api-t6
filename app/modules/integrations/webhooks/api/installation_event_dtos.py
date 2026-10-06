@@ -35,6 +35,15 @@ class UnsupportedInstallationAction(InstallationEventValidationError):
 
 _STRICT_GITHUB_PAYLOAD = ConfigDict(extra="ignore", frozen=True, strict=True)
 
+# ``owner/repo`` as GitHub allows it: one slash; an owner without dots (``_`` is
+# valid for Enterprise Managed User logins); a repo that is never only dots
+# (``.``/``..`` would walk the request path) but may start with one (``.github``).
+# pydantic compiles patterns with the Rust regex engine: no lookaround, and ``$``
+# matches only at the very end of the text, so a trailing newline is rejected.
+_REPOSITORY_FULL_NAME_PATTERN = (
+    r"^[A-Za-z0-9][A-Za-z0-9_-]*/[A-Za-z0-9._-]*[A-Za-z0-9_-][A-Za-z0-9._-]*$"
+)
+
 
 class _GitHubInstallation(BaseModel):
     model_config = _STRICT_GITHUB_PAYLOAD
@@ -56,7 +65,7 @@ class _RepositoryDto(BaseModel):
     model_config = _STRICT_GITHUB_PAYLOAD
 
     external_id: int = Field(alias="id", ge=1)
-    full_name: str = Field(min_length=1, max_length=512)
+    full_name: str = Field(min_length=1, max_length=512, pattern=_REPOSITORY_FULL_NAME_PATTERN)
     default_branch: str | None = Field(default=None, min_length=1, max_length=255)
     web_url: str | None = Field(default=None, alias="html_url", min_length=1)
 

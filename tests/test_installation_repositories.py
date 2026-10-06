@@ -282,6 +282,75 @@ def test_parse_still_requires_repository_id_and_full_name(
         parse_installation_repositories_event(event_name=event_name, payload=payload)
 
 
+_EVENT_SHAPES = [
+    ("installation", "installation_created", False, "repositories"),
+    ("installation", "installation_created", True, "repositories"),
+    ("installation_repositories", "installation_repositories_added", False, "repositories_added"),
+    ("installation_repositories", "installation_repositories_added", True, "repositories_removed"),
+]
+
+
+@pytest.mark.parametrize(("event_name", "fixture", "removal", "array"), _EVENT_SHAPES)
+@pytest.mark.parametrize(
+    "full_name",
+    [
+        "o/..",
+        "../r",
+        "o/.",
+        "o/r/x",
+        "o/",
+        "/r",
+        "o /r",
+        "o/r p",
+        "o/r\n",
+        "o/r\x00",
+        "o/r\t",
+        "o.x/r",
+        "o/...",
+        "o/%2e%2e",
+        "o/r\u0661",
+    ],
+)
+def test_parse_rejects_repository_names_outside_owner_slash_repo(
+    event_name: str, fixture: str, removal: bool, array: str, full_name: str
+) -> None:
+    """``full_name`` ends up in a request path carrying the installation token."""
+    payload = load_github_webhook_fixture(fixture)
+    if removal:
+        payload = removal_of(event_name, payload)
+    payload[array][0]["full_name"] = full_name
+
+    with pytest.raises(InstallationEventValidationError) as raised:
+        parse_installation_repositories_event(event_name=event_name, payload=payload)
+
+    assert [location for location, _ in raised.value.field_errors] == [f"{array}.0.full_name"]
+    assert "should match pattern" in raised.value.field_errors[0][1]
+
+
+@pytest.mark.parametrize(
+    "full_name",
+    [
+        "example-owner/example-repo",
+        "example-owner/example-repo-two",
+        "octo/.github",
+        "octo_acme/repo",
+        "owner/repo.js",
+        "o/r_",
+        "o/-x",
+        "o/r.",
+    ],
+)
+def test_parse_accepts_real_github_repository_names(full_name: str) -> None:
+    payload = load_github_webhook_fixture("installation_repositories_added")
+    payload["repositories_added"][0]["full_name"] = full_name
+
+    event = parse_installation_repositories_event(
+        event_name="installation_repositories", payload=payload
+    )
+
+    assert event.added_repositories[0].full_name == full_name
+
+
 def test_classify_tree_languages_is_deterministic_and_uses_blob_sizes() -> None:
     tree = (
         RepositoryTreeBlob(path="README.md", size=100, entry_type="blob"),
