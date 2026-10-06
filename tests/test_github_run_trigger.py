@@ -262,13 +262,28 @@ def _enqueue(
     return use_case, uow
 
 
-def test_an_ineligible_decision_reports_the_gate_reason() -> None:
-    blocked = CiEligibility(False, EligibilityReason.CI_BLOCKED, _HEAD)
-    use_case, uow = _enqueue(eligibility=Eligibility(decision=blocked))
+@pytest.mark.parametrize(
+    ("gate", "reason"),
+    [
+        (EligibilityReason.UNKNOWN_PR, "unknown_pr"),
+        (EligibilityReason.DISABLED_REPOSITORY, "disabled_repository"),
+        (EligibilityReason.CLOSED_PR, "closed_pr"),
+        (EligibilityReason.LABEL_NOT_ACTIVE, "label_not_active"),
+        (EligibilityReason.STALE_HEAD, "stale_head"),
+        (EligibilityReason.STALE_STATE, "stale_state"),
+        (EligibilityReason.WAITING_FOR_CI, "waiting_for_ci"),
+        (EligibilityReason.CI_BLOCKED, "ci_blocked"),
+    ],
+)
+def test_an_ineligible_decision_reports_the_gate_reason(
+    gate: EligibilityReason, reason: str
+) -> None:
+    decision = CiEligibility(False, gate, _HEAD)
+    use_case, uow = _enqueue(eligibility=Eligibility(decision=decision))
 
     result = asyncio.run(use_case.execute(_PR, _HEAD))
 
-    assert result == EnqueueResult(EnqueueStatus.INELIGIBLE, reason="ci_blocked")
+    assert result == EnqueueResult(EnqueueStatus.INELIGIBLE, reason=reason)
     assert uow.commits == 0
 
 
