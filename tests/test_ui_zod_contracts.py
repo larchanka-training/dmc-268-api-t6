@@ -20,6 +20,9 @@ from tests.portal_test_client import authenticated_test_client as TestClient
 
 CONTRACTS_PATH = Path(__file__).parent / "fixtures" / "ui_zod_contracts.json"
 RUN_ID = UUID("11111111-1111-4111-8111-111111111111")
+# The ui commit the snapshot was generated from: regenerate after every ui contract change
+# (`DMC_268_UI_DIR=<ui checkout after pnpm install> node tests/generate_ui_zod_contracts.mjs`).
+UI_CONTRACT_COMMIT = "84686243b7054604f849344abcb53c7ddba18fe1"
 
 
 class ContractRepository:
@@ -120,7 +123,7 @@ class ContractRepository:
 
 def _generated_schemas() -> dict[str, Any]:
     contracts = json.loads(CONTRACTS_PATH.read_text())
-    assert contracts["provenance"]["commit"] == "68c85e0219d92459100323291921be4e1dee3d46"
+    assert contracts["provenance"]["commit"] == UI_CONTRACT_COMMIT
     return cast(dict[str, Any], contracts["schemas"])
 
 
@@ -130,17 +133,23 @@ def test_api_responses_validate_against_json_schema_generated_from_ui_zod() -> N
     try:
         client = TestClient(app)
         # GET /api/runs/{id} returns RunDetail (api#20 D3); list items are RunSession.
-        run_session = client.get("/api/runs")
+        run_list_page = client.get("/api/runs")
+        run_detail = client.get(f"/api/runs/{RUN_ID}")
         run_actions = client.get(f"/api/runs/{RUN_ID}/actions")
         review_comments = client.get(f"/api/runs/{RUN_ID}/comments")
     finally:
         app.dependency_overrides.clear()
 
-    assert run_session.status_code == 200
+    assert run_list_page.status_code == 200
+    assert run_detail.status_code == 200
     assert run_actions.status_code == 200
     assert review_comments.status_code == 200
 
     schemas = _generated_schemas()
-    Draft202012Validator(schemas["runSession"]).validate(run_session.json()["items"][0])
+    Draft202012Validator(schemas["runListPage"]).validate(run_list_page.json())
+    Draft202012Validator(schemas["runSession"]).validate(run_list_page.json()["items"][0])
+    Draft202012Validator(schemas["runDetail"]).validate(run_detail.json())
+    assert run_detail.json()["findings"]
+    Draft202012Validator(schemas["findingView"]).validate(run_detail.json()["findings"][0])
     Draft202012Validator(schemas["runAction"]).validate(run_actions.json()[0])
     Draft202012Validator(schemas["reviewComment"]).validate(review_comments.json()[0])
