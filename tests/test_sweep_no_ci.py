@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from uuid import UUID
+
+import pytest
 
 from app.modules.reviews.application.sweep_no_ci import DueNoCiCandidate, SweepNoCi
 from app.modules.reviews.application.try_enqueue_webhook_run import (
@@ -61,3 +64,56 @@ def test_sweep_does_not_exclude_enqueued_candidate() -> None:
     asyncio.run(SweepNoCi(candidates=candidates, enqueuer=enqueuer, now=lambda: _NOW).execute())
 
     assert candidates.excluded == []
+
+
+_SWEEP_LOGGER = "app.modules.reviews.application.sweep_no_ci"
+
+
+def _sweep_lines(result: EnqueueResult, caplog: pytest.LogCaptureFixture) -> list[str]:
+    sweep = SweepNoCi(candidates=Candidates(), enqueuer=Enqueuer(result), now=lambda: _NOW)
+    with caplog.at_level(logging.INFO, logger=_SWEEP_LOGGER):
+        asyncio.run(sweep.execute())
+    return [
+        f"{record.levelname} {record.getMessage()}"
+        for record in caplog.records
+        if record.name == _SWEEP_LOGGER
+    ]
+
+
+def test_sweep_logs_the_outcome_of_an_enqueued_candidate(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    run_id = UUID("22222222-2222-2222-2222-222222222222")
+
+    lines = _sweep_lines(EnqueueResult(EnqueueStatus.ENQUEUED, run_id), caplog)
+
+    assert lines == [
+        "INFO No-CI sweep pr=11111111-1111-1111-1111-111111111111 head=aaaaaaa: enqueued "
+        "run=22222222-2222-2222-2222-222222222222"
+    ]
+
+
+@pytest.mark.parametrize(
+    ("result", "outcome"),
+    [
+        (
+            EnqueueResult(EnqueueStatus.UNCONFIGURED, reason="missing_rules"),
+            "unconfigured (missing_rules)",
+        ),
+        (
+            EnqueueResult(
+                EnqueueStatus.INELIGIBLE, reason="ci_blocked", detail="commit status failure"
+            ),
+            "ineligible (ci_blocked: commit status failure)",
+        ),
+    ],
+)
+def test_sweep_logs_the_outcome_of_an_excluded_candidate(
+    result: EnqueueResult, outcome: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    lines = _sweep_lines(result, caplog)
+
+    assert lines == [
+        "INFO No-CI sweep pr=11111111-1111-1111-1111-111111111111 head=aaaaaaa: "
+        f"{outcome}; excluded until the head or label changes"
+    ]
