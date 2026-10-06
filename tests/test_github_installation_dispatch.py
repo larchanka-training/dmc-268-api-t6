@@ -332,24 +332,29 @@ def test_the_run_trigger_outcome_becomes_the_dispatch_detail(
 
 
 @pytest.mark.parametrize(
-    ("projection", "status"),
+    ("projection", "status", "detail"),
     [
         (
             PullRequestProjectionStatus.UNKNOWN_REPOSITORY,
             InstallationDeliveryDispatchStatus.IGNORED_UNKNOWN_REPOSITORY,
+            "action=unlabeled unknown_repository",
         ),
         (
             PullRequestProjectionStatus.IGNORED_UNRELATED,
             InstallationDeliveryDispatchStatus.IGNORED_IRRELEVANT_EVENT,
+            "action=unlabeled ignored_unrelated",
         ),
         (
             PullRequestProjectionStatus.IGNORED_STALE,
             InstallationDeliveryDispatchStatus.PROJECTED_PR,
+            "action=unlabeled ignored_stale",
         ),
     ],
 )
 def test_a_projection_that_did_not_apply_the_label_names_itself_in_the_detail(
-    projection: PullRequestProjectionStatus, status: InstallationDeliveryDispatchStatus
+    projection: PullRequestProjectionStatus,
+    status: InstallationDeliveryDispatchStatus,
+    detail: str,
 ) -> None:
     class IntentProjector:
         async def execute(self, event: PullRequestLabelEvent) -> PullRequestProjectionStatus:
@@ -369,9 +374,7 @@ def test_a_projection_that_did_not_apply_the_label_names_itself_in_the_detail(
         )
     )
 
-    assert result == InstallationDeliveryDispatchResult(
-        status, f"action=unlabeled {projection.value}"
-    )
+    assert result == InstallationDeliveryDispatchResult(status, detail)
 
 
 @pytest.mark.parametrize("action", ["review_requested", "review_request_removed"])
