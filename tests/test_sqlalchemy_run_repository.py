@@ -85,6 +85,9 @@ class CancelSession:
     async def flush(self) -> None:
         return None
 
+    async def commit(self) -> None:
+        return None
+
     async def execute(self, statement: Select[Any]) -> None:
         return None
 
@@ -103,6 +106,9 @@ class CancelSessionContext(AbstractAsyncContextManager[CancelSession]):
 class CancelSessionFactory:
     def __init__(self, session: CancelSession) -> None:
         self._session = session
+
+    def __call__(self) -> CancelSessionContext:
+        return CancelSessionContext(self._session)
 
     def begin(self) -> CancelSessionContext:
         return CancelSessionContext(self._session)
@@ -505,6 +511,29 @@ def test_sqlalchemy_run_repository_requires_scope_unless_allow_unscoped() -> Non
         ValueError, match="Run authorization requires an AuthScope unless allow_unscoped=True"
     ):
         authorized_run(None, allow_unscoped=False)
+
+
+def test_pull_request_queries_requires_scope_unless_allow_unscoped() -> None:
+    from app.modules.reviews.infrastructure.pull_request_queries import SqlAlchemyPullRequestQueries
+
+    session = FakeSession([])
+    factory = cast(async_sessionmaker[AsyncSession], FakeSessionFactory(session))
+    with pytest.raises(ValueError, match="requires an AuthScope unless allow_unscoped=True"):
+        SqlAlchemyPullRequestQueries(factory)
+
+
+def test_repository_settings_store_requires_scope_unless_allow_unscoped() -> None:
+    from app.modules.repositories.infrastructure.repository_settings import (
+        SqlAlchemyRepositorySettingsStore,
+        SqlAlchemyRepositorySettingsUnitOfWork,
+    )
+
+    session = FakeSession([])
+    factory = cast(async_sessionmaker[AsyncSession], FakeSessionFactory(session))
+    with pytest.raises(ValueError, match="requires an AuthScope unless allow_unscoped=True"):
+        SqlAlchemyRepositorySettingsStore(cast(AsyncSession, session), None)
+    with pytest.raises(ValueError, match="requires an AuthScope unless allow_unscoped=True"):
+        SqlAlchemyRepositorySettingsUnitOfWork(factory, None)
 
 
 def test_sqlalchemy_run_repository_has_run_access() -> None:

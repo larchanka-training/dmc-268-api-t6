@@ -232,28 +232,67 @@ def test_handler_repeated_errors_route_to_dlq_across_worker_restarts(
 
     monkeypatch.setattr(asyncio, "sleep", no_sleep)
 
-    delivery = Delivery(VALID)
-
     async def failing_handler(run_id: UUID) -> DeliveryOutcome:
         raise RuntimeError("worker crash simulation")
 
-    # Worker 1 fails -> requeued
+    # Worker 1 gets fresh message (quorum delivery count 0) -> fails -> requeued
     amqp._clear_delivery_attempts("m")
-    incoming = cast(AbstractIncomingMessage, delivery)
-    asyncio.run(amqp.handle_run_delivery(incoming, failing_handler))
-    assert delivery.nacked == [True] and not delivery.acked
+    d1 = Delivery(VALID, message_id="m", headers={"x-delivery-count": 0})
+    asyncio.run(amqp.handle_run_delivery(cast(AbstractIncomingMessage, d1), failing_handler))
+    assert d1.nacked == [True] and not d1.acked
 
-    # Worker 2 restarts (empty process state), gets redelivery -> requeued
+    # Worker 2 restarts (empty process state), gets redelivery
+    # with quorum delivery count 1 -> requeued
     amqp._clear_delivery_attempts("m")
-    asyncio.run(amqp.handle_run_delivery(incoming, failing_handler))
-    assert delivery.nacked == [True, True] and not delivery.acked
+    d2 = Delivery(VALID, message_id="m", headers={"x-delivery-count": 1})
+    asyncio.run(amqp.handle_run_delivery(cast(AbstractIncomingMessage, d2), failing_handler))
+    assert d2.nacked == [True] and not d2.acked
 
-    # Worker 3 restarts (empty process state), gets redelivery -> reaches 3 -> DLQ!
+    # Worker 3 restarts (empty process state), gets redelivery
+    # with quorum delivery count 2 -> reaches 3 -> DLQ!
     amqp._clear_delivery_attempts("m")
+    d3 = Delivery(VALID, message_id="m", headers={"x-delivery-count": 2})
     with caplog.at_level(logging.ERROR):
-        asyncio.run(amqp.handle_run_delivery(incoming, failing_handler))
-    assert delivery.nacked == [True, True, False] and not delivery.acked
+        asyncio.run(amqp.handle_run_delivery(cast(AbstractIncomingMessage, d3), failing_handler))
+    assert d3.nacked == [False] and not d3.acked
     assert "exceeded maximum unexpected retry attempts (3); routing to DLQ" in caplog.text
+
+
+def test_handler_routes_to_dlq_with_x_death_headers(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    async def no_sleep(seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr(asyncio, "sleep", no_sleep)
+
+    async def failing_handler(run_id: UUID) -> DeliveryOutcome:
+        raise RuntimeError("retry error")
+
+    # Case 1: Returned from retry queue with x-death count=1.
+    # First delivery in worker: attempts = 2 (requeued)
+    amqp._clear_delivery_attempts("m1")
+    d1 = Delivery(VALID, message_id="m1", headers={"x-death": [{"count": 1}]})
+    incoming1 = cast(AbstractIncomingMessage, d1)
+    asyncio.run(amqp.handle_run_delivery(incoming1, failing_handler))
+    assert d1.nacked == [True] and not d1.acked
+
+    # Second delivery of same message in this worker: attempts = 3 -> DLQ!
+    d2 = Delivery(VALID, message_id="m1", headers={"x-death": [{"count": 1}]})
+    incoming2 = cast(AbstractIncomingMessage, d2)
+    with caplog.at_level(logging.ERROR):
+        asyncio.run(amqp.handle_run_delivery(incoming2, failing_handler))
+    assert d2.nacked == [False] and not d2.acked
+    assert "exceeded maximum unexpected retry attempts (3); routing to DLQ" in caplog.text
+
+    # Case 2: Message already dead-lettered twice (x-death count=2).
+    # Next failure immediately reaches 3 -> DLQ without infinite requeue!
+    amqp._clear_delivery_attempts("m2")
+    d3 = Delivery(VALID, message_id="m2", headers={"x-death": [{"count": 2}]})
+    incoming3 = cast(AbstractIncomingMessage, d3)
+    with caplog.at_level(logging.ERROR):
+        asyncio.run(amqp.handle_run_delivery(incoming3, failing_handler))
+    assert d3.nacked == [False] and not d3.acked
 
 
 def test_handler_routes_to_dlq_when_broker_delivery_count_reaches_limit(

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from uuid import UUID
 
-from sqlalchemy import and_, func, or_, select, true
+from sqlalchemy import ColumnElement, and_, func, or_, select, true
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.common.infrastructure.db.enums import CodeChangeState
@@ -24,15 +24,30 @@ _STATES = {
 
 class SqlAlchemyPullRequestQueries:
     def __init__(
-        self, session_factory: async_sessionmaker[AsyncSession], scope: AuthScope | None = None
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        scope: AuthScope | None = None,
+        *,
+        allow_unscoped: bool = False,
     ) -> None:
+        if scope is None and not allow_unscoped:
+            raise ValueError(
+                "SqlAlchemyPullRequestQueries requires an AuthScope unless allow_unscoped=True"
+            )
         self._session_factory = session_factory
         self._scope = scope
+        self._allow_unscoped = allow_unscoped
 
     async def list_pulls(
         self, repository_id: UUID, *, state: str, cursor: RunCursor | None, limit: int
     ) -> list[PullRequestRow] | None:
-        visible = true() if self._scope is None else repository_access_predicate(self._scope)
+        visible: ColumnElement[bool]
+        if self._scope is None:
+            if not self._allow_unscoped:
+                raise ValueError("SqlAlchemyPullRequestQueries requires an AuthScope")
+            visible = true()
+        else:
+            visible = repository_access_predicate(self._scope)
         updated_at = func.coalesce(CodeChange.provider_updated_at, CodeChange.updated_at)
         statement = (
             select(CodeChange, updated_at)

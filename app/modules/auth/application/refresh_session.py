@@ -19,6 +19,7 @@ from app.modules.auth.application.exchange_github_code import (
 from app.modules.auth.application.refresh_token_hash import hash_refresh_token
 
 DEFAULT_REFRESH_GRACE_PERIOD = timedelta(seconds=15)
+MAX_GRACE_REFRESH_SESSIONS: int = 5
 
 
 class InvalidRefreshToken(Exception):
@@ -52,6 +53,8 @@ class RefreshSessionStore(Protocol):
     async def current_identity(
         self, user_id: int
     ) -> tuple[AuthenticatedUser, tuple[UUID, ...]]: ...
+
+    async def count_family_sessions(self, family_id: UUID) -> int: ...
 
     async def rotate(
         self,
@@ -112,6 +115,11 @@ class RefreshLocalSession:
             at = self._now()
             if session.rotated_at is not None:
                 if at - session.rotated_at <= self._grace_period:
+                    count = await uow.sessions.count_family_sessions(family_id)
+                    if count >= MAX_GRACE_REFRESH_SESSIONS:
+                        await uow.sessions.revoke_family(family_id, at)
+                        await uow.commit()
+                        raise InvalidRefreshToken
                     user, workspace_ids = await uow.sessions.current_identity(session.user_id)
                     access_token = self._issuer.issue(user.id, workspace_ids)
                     replacement = self._new_refresh_token()

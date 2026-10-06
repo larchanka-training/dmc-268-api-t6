@@ -34,12 +34,27 @@ def _to_settings(repository: Repository) -> RepositorySettings:
 
 
 class SqlAlchemyRepositorySettingsStore:
-    def __init__(self, session: AsyncSession, scope: AuthScope | None) -> None:
+    def __init__(
+        self,
+        session: AsyncSession,
+        scope: AuthScope | None,
+        *,
+        allow_unscoped: bool = False,
+    ) -> None:
+        if scope is None and not allow_unscoped:
+            raise ValueError(
+                "SqlAlchemyRepositorySettingsStore requires an AuthScope unless allow_unscoped=True"
+            )
         self._session = session
         self._scope = scope
+        self._allow_unscoped = allow_unscoped
 
     def _visible(self) -> ColumnElement[bool]:
-        return true() if self._scope is None else repository_access_predicate(self._scope)
+        if self._scope is None:
+            if not self._allow_unscoped:
+                raise ValueError("SqlAlchemyRepositorySettingsStore requires an AuthScope")
+            return true()
+        return repository_access_predicate(self._scope)
 
     async def list_repositories(self) -> list[RepositorySettings]:
         rows = await self._session.scalars(
@@ -78,11 +93,23 @@ class SqlAlchemyRepositorySettingsStore:
 
 class SqlAlchemyRepositorySettingsUnitOfWork(SqlAlchemyUnitOfWork):
     def __init__(
-        self, session_factory: async_sessionmaker[AsyncSession], scope: AuthScope | None = None
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        scope: AuthScope | None = None,
+        *,
+        allow_unscoped: bool = False,
     ) -> None:
+        if scope is None and not allow_unscoped:
+            raise ValueError(
+                "SqlAlchemyRepositorySettingsUnitOfWork requires an AuthScope "
+                "unless allow_unscoped=True"
+            )
         super().__init__(session_factory)
         self._scope = scope
+        self._allow_unscoped = allow_unscoped
 
     @property
     def repositories(self) -> SqlAlchemyRepositorySettingsStore:
-        return SqlAlchemyRepositorySettingsStore(self.session, self._scope)
+        return SqlAlchemyRepositorySettingsStore(
+            self.session, self._scope, allow_unscoped=self._allow_unscoped
+        )

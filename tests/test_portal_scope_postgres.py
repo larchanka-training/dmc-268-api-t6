@@ -320,6 +320,8 @@ def test_portal_routes_intersect_claim_current_membership_and_repository_grant(
         app.dependency_overrides[get_auth_scope] = lambda: AuthScope(42, ())
         assert client.get("/api/runs").json() == {"items": [], "nextCursor": None}
         assert client.get(f"/api/runs/{RUNS[0]}").status_code == 404
+        assert client.get("/api/repos").status_code == 200
+        assert client.get("/api/repos").json() == []
         assert client.get("/api/auth/me").json()["workspaces"] == []
     finally:
         app.dependency_overrides.clear()

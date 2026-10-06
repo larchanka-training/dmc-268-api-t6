@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Protocol
 from uuid import UUID
 
+from app.common.application.unit_of_work import UnitOfWork
 from app.modules.reviews.application.list_runs import RunListItem
 from app.modules.reviews.application.run_events import RunUpdated, RunUpdatePublisher
 
@@ -31,24 +33,44 @@ class CancelRunRepository(Protocol):
     async def get_run(self, run_id: UUID) -> RunListItem | None: ...
 
 
+class CancelRunUnitOfWork(UnitOfWork, Protocol):
+    @property
+    def repository(self) -> CancelRunRepository: ...
+
+
 class CancelRun:
     def __init__(
         self,
-        repository: CancelRunRepository,
+        repository: CancelRunRepository | None = None,
         event_publisher: RunUpdatePublisher | None = None,
         signals: CancellationSignals | None = None,
+        *,
+        uow_factory: Callable[[], CancelRunUnitOfWork] | None = None,
     ) -> None:
+        if repository is None and uow_factory is None:
+            raise ValueError("Either repository or uow_factory must be provided")
         self._repository = repository
         self._event_publisher = event_publisher
         self._signals = signals
+        self._uow_factory = uow_factory
 
     async def execute(self, run_id: UUID) -> RunListItem | None:
-        cancellation = await self._repository.request_cancel(run_id)
-        if not cancellation.found:
-            return None
+        if self._uow_factory is not None:
+            async with self._uow_factory() as uow:
+                cancellation = await uow.repository.request_cancel(run_id)
+                if not cancellation.found:
+                    return None
+                item = await uow.repository.get_run(run_id)
+                await uow.commit()
+        else:
+            assert self._repository is not None
+            cancellation = await self._repository.request_cancel(run_id)
+            if not cancellation.found:
+                return None
+            item = await self._repository.get_run(run_id)
+
         if cancellation.signal_requested and self._signals is not None:
             await self._signals.publish_for((run_id,))
-        item = await self._repository.get_run(run_id)
         if cancellation.changed and item is not None and self._event_publisher is not None:
             await self._event_publisher.publish(RunUpdated(run_id=item.id, status=item.status))
         return item

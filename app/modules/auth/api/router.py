@@ -70,7 +70,12 @@ class MeDto(AuthUserDto):
     workspaces: list[WorkspaceDto]
 
 
-@auth_router.get("/me", response_model=MeDto)
+@auth_router.get(
+    "/me",
+    response_model=MeDto,
+    summary="Get current user profile",
+    description="Retrieve profile and accessible workspaces for the authenticated user.",
+)
 async def get_me(
     scope: Annotated[AuthScope, Depends(get_auth_scope)],
     use_case: Annotated[GetCurrentUser, Depends(get_current_user)],
@@ -90,7 +95,12 @@ async def get_me(
     )
 
 
-@auth_router.post("/github/callback", response_model=AuthSessionDto)
+@auth_router.post(
+    "/github/callback",
+    response_model=AuthSessionDto,
+    summary="Exchange GitHub OAuth code",
+    description="Exchange temporary authorization code for session tokens.",
+)
 async def exchange_github_code(
     body: AuthCallbackRequestDto,
     response: Response,
@@ -105,7 +115,12 @@ async def exchange_github_code(
     return _session_response(session, response)
 
 
-@auth_router.post("/refresh", response_model=AuthSessionDto)
+@auth_router.post(
+    "/refresh",
+    response_model=AuthSessionDto,
+    summary="Refresh auth session",
+    description="Issue a replacement session token within the rotation grace period.",
+)
 async def refresh_session(
     response: Response,
     use_case: Annotated[RefreshLocalSession, Depends(get_refresh_local_session)],
@@ -118,7 +133,12 @@ async def refresh_session(
     return _session_response(session, response)
 
 
-@auth_router.post("/logout", status_code=204)
+@auth_router.post(
+    "/logout",
+    status_code=204,
+    summary="Logout session",
+    description="Revoke the refresh token family and clear session cookies.",
+)
 async def logout_session(
     response: Response,
     use_case: Annotated[LogoutLocalSession, Depends(get_logout_local_session)],
