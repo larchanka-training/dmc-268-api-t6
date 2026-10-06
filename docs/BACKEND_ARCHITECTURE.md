@@ -24,8 +24,9 @@
 check-run, REST для UI. Дерево слоёв и пять entrypoints ниже описывают целевую организацию
 приложения; payment gateway и отдельные сервисы ещё предстоит реализовать. Весь код пока живёт в
 одном пакете `app/`; разнесение по сервисам `services/<name>/` (Р-12) реализуется в
-PR #10. Текущий Compose поднимает backend, worker, PostgreSQL, RabbitMQ и Redis, а не весь
-целевой runtime; worker и очередь описаны в разделе «Worker и очередь (#34)».
+PR #10. Текущий Compose поднимает backend, worker, PostgreSQL, RabbitMQ и Redis, а в профиле
+`webhooks` ещё `webhook-worker` (разбор квитанций вебхуков и создание Run, [WEBHOOK_WORKER.md](WEBHOOK_WORKER.md)),
+а не весь целевой runtime; worker и очередь описаны в разделе «Worker и очередь (#34)».
 
 ## Принципы
 
