@@ -21,7 +21,7 @@ _DISPATCH_TIMEOUT_SECONDS = 240.0
 _FAILURE_RETRY = timedelta(seconds=30)
 _UNKNOWN_INSTALLATION_RETRY = timedelta(minutes=5)
 _MAX_DISPATCH_ATTEMPTS = 3
-# Finished receipts (projected, failed or finally deferred) are kept this long.
+# Finished receipts (projected, failed, or deferred and not revived since) are kept this long.
 RECEIPT_RETENTION = timedelta(days=30)
 _LOGGER = logging.getLogger(__name__)
 _DEFERRED = frozenset(
@@ -62,7 +62,11 @@ class GitHubWebhookReceiptStore(Protocol):
         deferred_at: datetime,
         max_attempts: int,
     ) -> bool:
-        """Retry a deferred delivery later; the last attempt defers it for good (True)."""
+        """Retry a deferred delivery later; the last attempt sets projection_deferred_at (True).
+
+        The receipt is then not selected until it is revived: by ``wake_receipts`` or, for
+        installation events, by the hourly ``ReviveDeferredInstallationDeliveries``.
+        """
         ...
 
     async def purge_finished(self, before: datetime) -> int: ...
@@ -192,9 +196,11 @@ class ReceiveGitHubDelivery:
                     _MAX_DISPATCH_ATTEMPTS,
                 )
                 if final:
-                    # Linking the installation wakes it up again (wake_receipts).
+                    # Linking the installation wakes it up again (wake_receipts); installation
+                    # events of linked installations received within the revival window are
+                    # also revived hourly (ReviveDeferredInstallationDeliveries).
                     _LOGGER.warning(
-                        "GitHub webhook delivery %s deferred for good: %s",
+                        "GitHub webhook delivery %s deferred after its last attempt: %s",
                         delivery_id,
                         result.status.value,
                     )
