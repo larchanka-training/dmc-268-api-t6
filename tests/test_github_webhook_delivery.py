@@ -31,6 +31,7 @@ from alembic import command
 from app.bootstrap.reviews_api import get_github_webhook_receipt_uow_factory
 from app.main import (
     _has_valid_github_signature,
+    _is_github_delivery_id,
     app,
     get_github_webhook_secret,
 )
@@ -2097,6 +2098,22 @@ def test_delivery_id_in_the_guid_alphabet_is_stored_as_received(delivery_id: str
 
     assert (status, response) == (202, {"status": "pending"})
     assert list(receipts.rows) == [delivery_id]
+
+
+@pytest.mark.parametrize(
+    ("delivery_id", "expected"),
+    [
+        ("72d3162e-cc78-11e3-81ab-4c9367dc0958", True),
+        ("é", False),  # Latin small e with acute: a letter, not ASCII
+        ("٣", False),  # Arabic-Indic digit three
+        ("１", False),  # fullwidth digit one
+    ],
+)
+def test_delivery_id_rule_accepts_only_ascii_letters_digits_and_hyphens(
+    delivery_id: str, expected: bool
+) -> None:
+    # httpx sends only ASCII header strings, so non-ASCII ids are checked at the rule itself.
+    assert _is_github_delivery_id(delivery_id) is expected
 
 
 @pytest.mark.parametrize("constant", ["NaN", "Infinity", "-Infinity", "1e999", "-1e999"])

@@ -9,8 +9,6 @@ from enum import StrEnum
 from typing import Protocol
 from uuid import UUID
 
-# A GitHub-supplied status, conclusion or state goes into the outcome log line only when it is
-# a plain token; anything else is logged as ``?``.
 from app.common.application.log_token import log_token
 from app.modules.reviews.application.project_github_pull_request import PullRequestState
 
@@ -200,7 +198,11 @@ class DetermineCiEligibility:
 
 
 def _blocking_suites_detail(blocking: Sequence[CheckSuite]) -> str:
-    """Name the first blocking suite in GitHub's order and count the others."""
+    """Name the first blocking suite in GitHub's order and count the others.
+
+    A GitHub-supplied status or conclusion goes into the outcome log line only when it is a
+    plain token; anything else is logged as ``?`` (so is the commit status above).
+    """
     first = blocking[0]
     state = log_token(first.status) or "?"
     if first.conclusion is not None:

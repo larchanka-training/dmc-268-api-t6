@@ -421,8 +421,9 @@ tokens: a value is logged only when it is `[a-z_]`, 1 to 40 characters, and as `
 `event` is the `X-GitHub-Event` header, which the signature does not cover; the receipt stores
 and dispatches it as received, only the log is restricted. The delivery id is the stored
 receipt id, the `X-GitHub-Delivery` header (GitHub sends a GUID). Intake answers `400` and
-stores nothing unless it is 1 to 255 ASCII letters, digits and `-`, so the id is logged as
-received and cannot forge a field of the line.
+stores nothing unless it is 1 to 255 ASCII letters, digits and `-` (#80), so the id of a
+delivery stored since then is logged as received and cannot forge a field of the line.
+Receipts stored before that check are not re-validated: their id is logged as stored.
 
 Failure log. When processing a delivery fails, the worker first writes one WARNING line with the
 action and a failure category, then the sweep writes its ERROR record
