@@ -494,15 +494,18 @@ def test_a_label_on_a_disabled_repository_is_deferred_with_its_own_reason(
 
 
 @pytest.mark.integration
+@pytest.mark.parametrize("linked", [True, False], ids=["linked", "unlinked"])
 def test_a_label_from_an_installation_that_does_not_store_the_repository_names_the_other_one(
-    database: Database, caplog: pytest.LogCaptureFixture
+    database: Database, caplog: pytest.LogCaptureFixture, linked: bool
 ) -> None:
     # Repository 101 is stored only under installation 17; the event comes from installation 18.
+    # A label event is not checked against the linked installations, so 18 may be unlinked too.
     delivery = _pr_delivery("labeled")
     delivery["installation"] = {"id": 18}
 
     async def scenario(pipeline: Pipeline) -> list[tuple[Any, ...]]:
-        await _link_installation_18(pipeline, with_repository=False)
+        if linked:
+            await _link_installation_18(pipeline, with_repository=False)
         return await _first_deferral(pipeline, delivery)
 
     with caplog.at_level(logging.INFO):
