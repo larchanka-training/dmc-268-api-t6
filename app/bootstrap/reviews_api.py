@@ -46,6 +46,7 @@ from app.modules.integrations.webhooks.infrastructure.github_installation_resolv
 from app.modules.integrations.webhooks.infrastructure.github_installation_tree_provider import (
     GitHubInstallationAccessTokenProvider,
     GitHubInstallationTreeProvider,
+    TokenErrorClassifyingProvider,
 )
 from app.modules.integrations.webhooks.infrastructure.github_repository_details import (
     GitHubInstallationRepositoryDetailsProvider,
@@ -221,17 +222,19 @@ class ReviewsApiResources:
         With a ``run_publisher`` and the App id, PR, label and CI events create Runs
         through ``try_enqueue`` (T1) and cancellations signal the worker at once (T6).
         """
+        # Onboarding tells an installation-wide token failure from a repository error.
+        onboarding_tokens = TokenErrorClassifyingProvider(token_provider)
         tree_provider = GitHubInstallationTreeProvider(
             client=client,
-            token_provider=token_provider,
+            token_provider=onboarding_tokens,
         )
         label_provider = GitHubRepositoryLabelProvider(
             client=client,
-            token_provider=token_provider,
+            token_provider=onboarding_tokens,
         )
         details_provider = GitHubInstallationRepositoryDetailsProvider(
             client=client,
-            token_provider=token_provider,
+            token_provider=onboarding_tokens,
         )
         signals = (
             PublishCancellationSignals(
