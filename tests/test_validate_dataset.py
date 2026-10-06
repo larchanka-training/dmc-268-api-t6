@@ -439,6 +439,27 @@ def test_quoted_patch_steps_leave_an_exported_git_dir_alone(
     assert _repo_state(decoy) == before
 
 
+def test_patch_check_does_not_read_an_exported_git_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A trailing blank on the added line: git's default only warns about it.
+    dataset = _case(tmp_path, _metadata(), patch=PATCH.replace("return 1\n", "return 1 \n"))
+    decoy = tmp_path / "decoy"
+    subprocess.run(["git", "init", "-q", str(decoy)], env=_git_env(), check=True)
+    subprocess.run(
+        ["git", f"--git-dir={decoy / '.git'}", "config", "apply.whitespace", "error"],
+        env=_git_env(),
+        check=True,
+    )
+
+    without = _run(dataset, "--case", "SEC-01")
+    monkeypatch.setenv("GIT_DIR", str(decoy / ".git"))
+    exported = _run(dataset, "--case", "SEC-01")
+
+    assert without.returncode == 0, without.stdout + without.stderr
+    assert exported.returncode == 0, exported.stdout + exported.stderr
+
+
 def test_rejects_duplicate_truth_anchors_and_does_not_count_them_as_critical(
     tmp_path: Path,
 ) -> None:
