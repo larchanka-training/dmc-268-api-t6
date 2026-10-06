@@ -224,6 +224,49 @@ def test_sweep_summary_counts_deliveries_deferred_for_good(
 
 
 @pytest.mark.integration
+def test_purge_counts_projected_failed_and_deferred_receipts_past_retention(
+    database: Database,
+) -> None:
+    async def scenario() -> tuple[int, list[str]]:
+        clock = [START]
+        receiver, factory, engine = _receiver(database, UnknownInstallation(), clock)
+        old = START - timedelta(days=31)
+        fresh = START - timedelta(days=29)
+        async with factory() as session:
+            for delivery_id, projected, failed, deferred in (
+                ("projected-old", old, None, None),
+                ("failed-old", None, old, None),
+                ("deferred-old", None, None, old),
+                ("projected-fresh", fresh, None, None),
+            ):
+                await session.execute(
+                    text(
+                        "INSERT INTO webhook_events (id, delivery_id, event, payload, "
+                        "projected_at, projection_failed_at, projection_deferred_at) "
+                        "VALUES (gen_random_uuid(), :delivery_id, 'installation', "
+                        "CAST('{}' AS jsonb), :projected, :failed, :deferred)"
+                    ),
+                    {
+                        "delivery_id": delivery_id,
+                        "projected": projected,
+                        "failed": failed,
+                        "deferred": deferred,
+                    },
+                )
+            await session.commit()
+        purged = await receiver.purge_finished()
+        async with factory() as session:
+            left = list(await session.scalars(text("SELECT delivery_id FROM webhook_events")))
+        await engine.dispose()
+        return purged, left
+
+    purged, left = asyncio.run(scenario())
+
+    # The 30-day retention removes each kind of finished receipt and counts all of them.
+    assert (purged, left) == (3, ["projected-fresh"])
+
+
+@pytest.mark.integration
 @pytest.mark.parametrize(
     ("event", "payload"),
     [
