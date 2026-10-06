@@ -231,6 +231,27 @@ def test_projector_fetches_each_declared_default_branch_before_entering_sync() -
     ]
 
 
+def test_empty_repository_tree_onboards_the_repository_without_languages() -> None:
+    """Guard, green before the fix too: an empty tree must reach ``sync`` with no languages."""
+    sync = FakeSyncInstallationRepositories()
+
+    asyncio.run(
+        InstallationEventProjector(
+            tree_provider=FakeTreeProvider(trees={101: ()}),
+            label_provider=FakeLabelProvider(),
+            details_provider=FakeDetailsProvider(),
+            sync=sync,
+        ).execute(
+            provider_installation_id=uuid4(),
+            event=InstallationRepositoriesEvent(17, "added", (_reference(external_id=101),), ()),
+        )
+    )
+
+    assert [(item.snapshot.external_id, dict(item.languages)) for item in sync.calls[0][1]] == [
+        (101, {})
+    ]
+
+
 @pytest.mark.parametrize("action", ["deleted", "removed"])
 def test_projector_soft_disables_removed_repositories_without_a_vcs_request(action: str) -> None:
     provider = FakeTreeProvider()

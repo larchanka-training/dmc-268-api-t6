@@ -328,6 +328,85 @@ def test_tree_provider_propagates_github_provider_failures() -> None:
         raise AssertionError("expected the GitHub provider failure to propagate")
 
 
+@pytest.mark.parametrize(
+    "message",
+    ["Git Repository is empty.", "GIT REPOSITORY IS EMPTY."],
+    ids=["github-text", "upper-case"],
+)
+def test_tree_provider_treats_an_empty_repository_as_having_no_tree(message: str) -> None:
+    """GitHub answers 409 "Git Repository is empty." for a repository without commits."""
+    token_provider = FakeInstallationTokenProvider()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(409, request=request, json={"message": message})
+
+    async def fetch() -> tuple[RepositoryTreeBlob, ...]:
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(handler), base_url="https://api.github.com"
+        ) as client:
+            provider = GitHubInstallationTreeProvider(
+                client=client,
+                token_provider=token_provider,
+            )
+            return await provider.fetch_default_branch_tree(
+                installation_external_id=17,
+                repository=_repository(),
+            )
+
+    assert asyncio.run(fetch()) == ()
+
+
+@pytest.mark.parametrize(
+    "conflict",
+    [
+        httpx.Response(409, json={"message": "Merge conflict"}),
+        httpx.Response(409, json={"message": "The tree is not empty; conflict"}),
+        httpx.Response(409, json={"message": "Reference update failed: empty commit"}),
+        httpx.Response(409, content=b"<html>conflict</html>"),
+        httpx.Response(409, json=["Git Repository is empty."]),
+        httpx.Response(409, json={"message": None}),
+        httpx.Response(409, json={}),
+    ],
+    ids=[
+        "other-message",
+        "not-empty-message",
+        "empty-commit-message",
+        "non-json-body",
+        "list-body",
+        "null-message",
+        "no-message",
+    ],
+)
+def test_tree_provider_raises_for_a_409_that_is_not_the_empty_repository_answer(
+    conflict: httpx.Response,
+) -> None:
+    """A transient or unrelated 409 must stay retryable, not freeze a repository as empty."""
+    token_provider = FakeInstallationTokenProvider()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            409, headers=conflict.headers, content=conflict.content, request=request
+        )
+
+    async def fetch() -> None:
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(handler), base_url="https://api.github.com"
+        ) as client:
+            provider = GitHubInstallationTreeProvider(
+                client=client,
+                token_provider=token_provider,
+            )
+            await provider.fetch_default_branch_tree(
+                installation_external_id=17,
+                repository=_repository(),
+            )
+
+    with pytest.raises(httpx.HTTPStatusError) as raised:
+        asyncio.run(fetch())
+
+    assert raised.value.response.status_code == 409
+
+
 def test_tree_provider_rejects_a_truncated_recursive_tree() -> None:
     token_provider = FakeInstallationTokenProvider()
 
