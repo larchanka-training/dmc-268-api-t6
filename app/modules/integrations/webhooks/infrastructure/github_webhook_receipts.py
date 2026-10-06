@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import json
 from datetime import datetime
-from typing import cast
+from typing import Any, cast
 from uuid import UUID
 
 from sqlalchemy import case, delete, or_, select, update
 from sqlalchemy.dialects.postgresql import insert
+from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.common.infrastructure.db.unit_of_work import SqlAlchemyUnitOfWork
@@ -133,9 +134,12 @@ class SqlAlchemyGitHubWebhookReceiptStore:
                     WebhookEvent.projection_deferred_at < before,
                 )
             )
-            .returning(WebhookEvent.id)
+            .execution_options(synchronize_session=False)
         )
-        return len((await self._session.scalars(statement)).all())
+        # rowcount, not RETURNING: a large purge would load every deleted id into Python
+        # (the ORM's "fetch" session sync would add RETURNING back, hence no sync).
+        result = cast(CursorResult[Any], await self._session.execute(statement))
+        return result.rowcount
 
     async def revive_deferred_installation_deliveries(
         self, *, deferred_before: datetime, received_after: datetime
