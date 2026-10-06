@@ -162,14 +162,14 @@ error, the receipt release and the sweep's ERROR record are unchanged.
 | `dispatch` | the projection or the Run trigger failed (a GitHub request, the database, the 240 s timeout); a Run may already exist, see above. The receipt is released for a retry after 30 s and the third failure marks it failed; if the release itself fails, the line still names the dispatch error, but the receipt waits for the 5-minute claim lease and its attempt counter does not advance |
 | `finalize` | the dispatch finished but updating the receipt failed; `outcome` and `detail` repeat the dispatch result, so a Run may already exist. The claim lapses after 5 minutes and the delivery is replayed; the trigger answers `duplicate` instead of creating a second Run |
 
-The use case maps only the dispatch timeout itself. The other categories come from a
-classifier that the composition root supplies (`classify_failure`, in the webhooks
-infrastructure), because only that layer knows the HTTP and database libraries; without a
-classifier every other failure is `internal`.
+The use case maps only `timeout` itself: any builtin `TimeoutError`, which needs no library
+knowledge. The other categories come from a classifier that the composition root supplies
+(`classify_failure`, in the webhooks infrastructure), because only that layer knows the HTTP
+and database libraries; without a classifier every other failure is `internal`.
 
 | category | meaning |
 | --- | --- |
-| `timeout` | the dispatch exceeded its 240 s timeout (a builtin `TimeoutError`) |
+| `timeout` | the dispatch exceeded its timeout (240 s), or the dispatch raised another builtin `TimeoutError` |
 | `github_request` | a GitHub request failed: a refused connection, a request timeout, or an error status of any kind (401, 404, 5xx); the status is in the traceback record, not in the line |
 | `database` | a database error: the connection, a statement or the connection pool |
 | `internal` | anything else: our own bugs and failed invariants on a GitHub response (a `ValueError` for an unexpected response, such as inconsistent check-suite pagination or a changed pull request number, a pydantic `ValidationError`, a JSON error); the traceback record tells them apart |

@@ -459,7 +459,7 @@ def test_github_ci_adapter_rejects_a_malformed_run_count(count: object) -> None:
         ),
         (
             {"sha": _HEAD, "state": "unknown", "total_count": 0},
-            "_CombinedStatusDto\nstate\n  Input should be 'success', 'failure' or 'pending'",
+            "Input should be 'success', 'failure' or 'pending'",
         ),
     ],
 )
