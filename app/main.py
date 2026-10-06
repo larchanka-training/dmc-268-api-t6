@@ -19,6 +19,7 @@ from pydantic import ValidationError
 
 from app.bootstrap.portal_auth import get_auth_scope
 from app.bootstrap.reviews_api import (
+    get_cancel_run_uow_factory,
     get_cancellation_signals,
     get_file_blob_cache,
     get_github_webhook_receipt_uow_factory,
@@ -70,6 +71,7 @@ from app.modules.reviews.application.cancel_run import (
     CancellationSignals,
     CancelRun,
     CancelRunRepository,
+    CancelRunUnitOfWork,
 )
 from app.modules.reviews.application.get_run import (
     GetRunDetail,
@@ -191,7 +193,11 @@ def custom_openapi() -> dict[str, Any]:
 app.openapi = custom_openapi  # type: ignore[method-assign]
 
 
-@app.get("/healthcheck")
+@app.get(
+    "/healthcheck",
+    summary="Service healthcheck",
+    description="Return service operational health status.",
+)
 async def healthcheck() -> dict[str, str]:
     return {"status": "ok"}
 
@@ -558,8 +564,16 @@ async def cancel_run(
     repository: Annotated[CancelRunRepository, Depends(get_run_repository)],
     event_hub: Annotated[InMemoryRunUpdateHub, Depends(get_run_event_hub)],
     signals: Annotated[CancellationSignals | None, Depends(get_cancellation_signals)],
+    uow_factory: Annotated[
+        Callable[[], CancelRunUnitOfWork] | None, Depends(get_cancel_run_uow_factory)
+    ] = None,
 ) -> RunSessionDto:
-    item = await CancelRun(repository, event_hub, signals).execute(run_id)
+    if get_run_repository in getattr(app, "dependency_overrides", {}):
+        item = await CancelRun(repository, event_hub, signals).execute(run_id)
+    elif uow_factory is not None:
+        item = await CancelRun(None, event_hub, signals, uow_factory=uow_factory).execute(run_id)
+    else:
+        item = await CancelRun(repository, event_hub, signals).execute(run_id)
     if item is None:
         raise HTTPException(status_code=404, detail="run not found")
     return to_run_session_dto(item)

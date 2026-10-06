@@ -114,6 +114,15 @@ class SqlAlchemyAuthSessionStore:
             tuple(workspace_ids),
         )
 
+    async def count_family_sessions(self, family_id: UUID) -> int:
+        count = await self._session.scalar(
+            select(func.count(AuthRefreshSession.id)).where(
+                AuthRefreshSession.family_id == family_id,
+                AuthRefreshSession.revoked_at.is_(None),
+            )
+        )
+        return int(count or 0)
+
     async def rotate(
         self,
         session_id: UUID,

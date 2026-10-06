@@ -147,6 +147,13 @@ class FakeRefreshUow:
         assert user_id == self._database.user.id
         return self._database.user, self._database.workspace_ids
 
+    async def count_family_sessions(self, family_id: UUID) -> int:
+        return sum(
+            1
+            for session in self._database.sessions.values()
+            if session.family_id == family_id and session.revoked_at is None
+        )
+
     async def rotate(
         self,
         session_id: UUID,
@@ -305,6 +312,45 @@ def test_concurrent_same_token_refresh_within_grace_period_does_not_revoke() -> 
 
     # True replay after the 15-second grace period revokes the whole family
     database.now = now + timedelta(seconds=16)
+    with pytest.raises(InvalidRefreshToken):
+        asyncio.run(refresh.execute("original-secret"))
+    assert database.family.revoked_at == database.now
+
+
+def test_refresh_grace_window_enforces_max_session_limit() -> None:
+    now = datetime(2026, 9, 28, 12, tzinfo=UTC)
+    database = FakeRefreshDatabase(now)
+    database.seed("original-secret")
+    private, _ = _keys()
+    counter = 0
+
+    def next_token() -> str:
+        nonlocal counter
+        counter += 1
+        return f"token-{counter}"
+
+    refresh = RefreshLocalSession(
+        uow_factory=database.uow,
+        issuer=Rs256AccessTokenIssuer(
+            private, issuer="dmc-268-api", audience="dmc-268-ui", now=lambda: database.now
+        ),
+        now=lambda: database.now,
+        new_refresh_token=next_token,
+    )
+
+    # Initial rotation creates session 2 (total sessions in family = 2: original + token-1)
+    asyncio.run(refresh.execute("original-secret"))
+
+    # Grace period re-refreshes:
+    # 2nd call -> sessions = 3
+    asyncio.run(refresh.execute("original-secret"))
+    # 3rd call -> sessions = 4
+    asyncio.run(refresh.execute("original-secret"))
+    # 4th call -> sessions = 5 (reaches MAX_GRACE_REFRESH_SESSIONS = 5)
+    asyncio.run(refresh.execute("original-secret"))
+
+    # 5th call: count is 5 >= MAX_GRACE_REFRESH_SESSIONS ->
+    # revokes family and raises InvalidRefreshToken
     with pytest.raises(InvalidRefreshToken):
         asyncio.run(refresh.execute("original-secret"))
     assert database.family.revoked_at == database.now

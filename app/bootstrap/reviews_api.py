@@ -63,7 +63,11 @@ from app.modules.repositories.application.repository_settings import (
 from app.modules.repositories.infrastructure.repository_settings import (
     SqlAlchemyRepositorySettingsUnitOfWork,
 )
-from app.modules.reviews.application.cancel_run import CancellationSignals, CancelRunRepository
+from app.modules.reviews.application.cancel_run import (
+    CancellationSignals,
+    CancelRunRepository,
+    CancelRunUnitOfWork,
+)
 from app.modules.reviews.application.determine_ci_eligibility import DetermineCiEligibility
 from app.modules.reviews.application.get_run import RunDetailRepository
 from app.modules.reviews.application.get_run_actions import RunActionsRepository
@@ -95,7 +99,10 @@ from app.modules.reviews.infrastructure.github_pull_request_projection import (
 )
 from app.modules.reviews.infrastructure.pull_request_queries import SqlAlchemyPullRequestQueries
 from app.modules.reviews.infrastructure.rerun_store import SqlAlchemyRerunUnitOfWork
-from app.modules.reviews.infrastructure.run_repository import SqlAlchemyRunRepository
+from app.modules.reviews.infrastructure.run_repository import (
+    SqlAlchemyCancelRunUnitOfWork,
+    SqlAlchemyRunRepository,
+)
 from app.modules.reviews.infrastructure.webhook_run_targets import (
     SqlAlchemyRunTriggerUnitOfWork,
 )
@@ -339,6 +346,16 @@ def get_rerun_uow_factory(
     scope: Annotated[AuthScope, Depends(get_auth_scope)],
 ) -> Callable[[], RerunUnitOfWork]:
     return partial(SqlAlchemyRerunUnitOfWork, _resources(request).session_factory, scope)
+
+
+def get_cancel_run_uow_factory(
+    request: Request,
+    scope: Annotated[AuthScope, Depends(get_auth_scope)],
+) -> Callable[[], CancelRunUnitOfWork] | None:
+    resources = getattr(request.app.state, "reviews_api_resources", None)
+    if not isinstance(resources, ReviewsApiResources):
+        return None
+    return partial(SqlAlchemyCancelRunUnitOfWork, resources.session_factory, scope)
 
 
 def get_pull_requests(

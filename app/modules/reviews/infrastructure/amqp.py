@@ -6,7 +6,7 @@ import asyncio
 import json
 import logging
 from collections.abc import AsyncIterator, Awaitable, Callable
-from contextlib import AsyncExitStack, asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager, suppress
 from dataclasses import dataclass
 from functools import cache
 from pathlib import Path
@@ -197,30 +197,25 @@ def _clear_delivery_attempts(message_id: str | None) -> None:
 
 
 def _get_delivery_attempts(message: AbstractIncomingMessage) -> int:
+    key = str(message.message_id or id(message))
+    local_attempts = _unexpected_delivery_attempts.get(key, 0)
+    broker_attempts = 0
     headers = getattr(message, "headers", None)
     if isinstance(headers, dict):
         if "x-delivery-count" in headers:
-            try:
-                return int(headers["x-delivery-count"]) + 1
-            except (ValueError, TypeError):
-                pass
+            with suppress(ValueError, TypeError):
+                broker_attempts = max(broker_attempts, int(headers["x-delivery-count"]))
         if "x-death" in headers and isinstance(headers["x-death"], list):
-            try:
+            with suppress(ValueError, TypeError):
                 deaths = sum(
                     int(d.get("count", 1)) for d in headers["x-death"] if isinstance(d, dict)
                 )
-                if deaths > 0:
-                    return deaths + 1
-            except (ValueError, TypeError):
-                pass
-        for key in ("x-attempt", "x-retries", "attempt", "delivery_attempts"):
-            if key in headers:
-                try:
-                    return int(headers[key])
-                except (ValueError, TypeError):
-                    pass
-    key = str(message.message_id or id(message))
-    return _unexpected_delivery_attempts.get(key, 0) + 1
+                broker_attempts = max(broker_attempts, deaths)
+        for k in ("x-attempt", "x-retries", "attempt", "delivery_attempts"):
+            if k in headers:
+                with suppress(ValueError, TypeError):
+                    broker_attempts = max(broker_attempts, int(headers[k]))
+    return max(broker_attempts, local_attempts) + 1
 
 
 async def _requeue_after_error(
@@ -243,6 +238,7 @@ async def _requeue_after_error(
             max_retries,
             DEAD_LETTER_QUEUE,
         )
+        _clear_delivery_attempts(message.message_id)
         _clear_delivery_attempts(key)
         await message.nack(requeue=False)
         return

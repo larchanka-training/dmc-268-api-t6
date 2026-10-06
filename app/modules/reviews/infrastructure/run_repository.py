@@ -13,6 +13,7 @@ from sqlalchemy import ColumnElement, Row, String, and_, cast, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.common.infrastructure.db.enums import RunState
+from app.common.infrastructure.db.unit_of_work import SqlAlchemyUnitOfWork
 from app.modules.analytics.infrastructure.models import UsageEvent
 from app.modules.auth.application.scope import AuthScope
 from app.modules.repositories.infrastructure.models import (
@@ -473,8 +474,7 @@ class SqlAlchemyRunRepository:
         ``cancel_requested`` at a checkpoint.  Terminal rows are intentionally
         left untouched, making retries idempotent.
         """
-        assert self._session_factory is not None
-        async with self._session_factory.begin() as session:
+        async with self._session_scope() as session:
             run = await session.scalar(
                 select(Run).where(Run.id == run_id, self._authorized_run()).with_for_update()
             )
@@ -489,6 +489,8 @@ class SqlAlchemyRunRepository:
                     run.cancellation_signal_requested_at = now
                 await session.flush()
                 await notify_run_state(session, run_id, RunState.CANCELLED)
+                if self._session is None:
+                    await session.commit()
                 return CancelRequestResult(
                     found=True, changed=True, signal_requested=run.attempt >= 1
                 )
@@ -496,6 +498,9 @@ class SqlAlchemyRunRepository:
                 if run.cancel_requested:
                     return CancelRequestResult(found=True, changed=False)
                 run.cancel_requested = True
+                await session.flush()
+                if self._session is None:
+                    await session.commit()
                 return CancelRequestResult(found=True, changed=True)
         return CancelRequestResult(found=True, changed=False)
 
@@ -849,3 +854,22 @@ def _new_hunk_lines(filename: str, patch: str | None) -> frozenset[int]:
         for line in changed_file.lines
         if line.type in {"added", "context"}
     )
+
+
+class SqlAlchemyCancelRunUnitOfWork(SqlAlchemyUnitOfWork):
+    def __init__(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        scope: AuthScope | None = None,
+        *,
+        allow_unscoped: bool = False,
+    ) -> None:
+        super().__init__(session_factory)
+        self._scope = scope
+        self._allow_unscoped = allow_unscoped
+
+    @property
+    def repository(self) -> SqlAlchemyRunRepository:
+        return SqlAlchemyRunRepository(
+            session=self.session, scope=self._scope, allow_unscoped=self._allow_unscoped
+        )
