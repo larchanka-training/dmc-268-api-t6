@@ -585,7 +585,16 @@ def _facets(schema: Mapping[str, Any]) -> dict[str, object]:
         "enum": schema.get("enum", [schema["const"]] if "const" in schema else None),
         **{
             keyword: _bound(schema, keyword)
-            for keyword in ("minimum", "exclusiveMinimum", "maximum", "exclusiveMaximum")
+            for keyword in (
+                "minimum",
+                "exclusiveMinimum",
+                "maximum",
+                "exclusiveMaximum",
+                "minLength",
+                "maxLength",
+                "minItems",
+                "maxItems",
+            )
         },
     }
 
@@ -599,6 +608,9 @@ def _contract_mismatches(
     mismatches = []
     if spec_nullable != zod_nullable:
         mismatches.append(f"{path}: nullable {spec_nullable} != {zod_nullable}")
+    if "anyOf" in spec or "anyOf" in zod:
+        # Fail closed: a union of several non-null schemas has no single shape to compare.
+        return [*mismatches, f"{path}: a union of several non-null schemas is not compared"]
     spec_facets, zod_facets = _facets(spec), _facets(zod)
     mismatches += [
         f"{path}: {name} {spec_facets[name]!r} != {zod_facets[name]!r}"
@@ -616,9 +628,13 @@ def _contract_mismatches(
         zod_required = sorted(zod.get("required", []))
         if spec_required != zod_required:
             mismatches.append(f"{path}: required {spec_required} != {zod_required}")
-        if not spec.get("additionalProperties") is zod.get("additionalProperties") is False:
-            mismatches.append(f"{path}: additionalProperties is not false on both sides")
-        for name in spec_properties.keys() & zod_properties.keys():
+        spec_closed = spec.get("additionalProperties") is False
+        zod_closed = zod.get("additionalProperties") is False
+        if not (spec_closed and zod_closed):
+            mismatches.append(
+                f"{path}: additionalProperties false: spec {spec_closed}, zod {zod_closed}"
+            )
+        for name in sorted(spec_properties.keys() & zod_properties.keys()):
             mismatches += _contract_mismatches(
                 spec_properties[name], zod_properties[name], components, f"{path}.{name}"
             )
@@ -643,6 +659,15 @@ def test_component_schemas_mirror_the_ui_zod_contract(zod_name: str, component: 
     )
 
     assert mismatches == []
+
+
+def test_contract_mirror_does_not_pass_unions_it_cannot_compare() -> None:
+    spec = {"anyOf": [{"type": "string"}, {"type": "integer"}, {"type": "null"}]}
+    zod = {"anyOf": [{"type": "boolean"}, {"type": "object"}, {"type": "null"}]}
+
+    assert _contract_mismatches(spec, zod, {}, "field") == [
+        "field: a union of several non-null schemas is not compared"
+    ]
 
 
 @pytest.mark.parametrize(
@@ -691,6 +716,42 @@ def test_component_schemas_mirror_the_ui_zod_contract(zod_name: str, component: 
             "ReviewComment.severity",
             lambda schema: schema["enum"].reverse(),
             id="enum",
+        ),
+        pytest.param(
+            "RunStatus",
+            "RunSession.status",
+            lambda schema: schema["enum"].remove("skipped"),
+            id="enum-member",
+        ),
+        pytest.param(
+            "Workspace",
+            "Me.workspaces[]",
+            lambda schema: schema["required"].remove("installationId"),
+            id="array-items",
+        ),
+        pytest.param(
+            "Repository",
+            "Repository.maxComments",
+            lambda schema: schema["properties"]["maxComments"].update(maximum=11),
+            id="upper-bound",
+        ),
+        pytest.param(
+            "Repository",
+            "Repository.fullName",
+            lambda schema: schema["properties"]["fullName"].pop("minLength"),
+            id="string-bound",
+        ),
+        pytest.param(
+            "RawFileDiff",
+            "RawFileDiff",
+            lambda schema: schema.update(additionalProperties=True),
+            id="additional-properties",
+        ),
+        pytest.param(
+            "Repository",
+            "Repository.url",
+            lambda schema: schema["properties"]["url"].pop("format"),
+            id="format",
         ),
     ],
 )
