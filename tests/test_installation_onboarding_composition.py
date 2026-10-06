@@ -750,3 +750,116 @@ def test_unreadable_repository_details_defer_the_delivery_and_write_no_row(
     assert status is InstallationDeliveryDispatchStatus.DEFERRED_REPOSITORY_DETAILS
     assert persisted_rows == 0
     assert requests == [("GET", repository_path)]
+
+
+@pytest.mark.integration
+def test_unreadable_second_repository_defers_but_the_readable_first_one_is_persisted(
+    migrated_onboarding_database: tuple[str, str],
+) -> None:
+    """One 404 among two repositories defers the delivery without discarding the other row.
+
+    The dispatcher still returns ``DEFERRED_REPOSITORY_DETAILS`` (the receipt is retried and
+    revived, and a replay is idempotent), but the readable repository is connected with its
+    default rules in the same run.
+    """
+    database_url, schema = migrated_onboarding_database
+    installation_id = uuid4()
+    readable_path = "/repos/example-owner/example-repo-two"
+    unreadable_path = "/repos/example-owner/example-repo-three"
+    requests: list[tuple[str, str]] = []
+
+    class TokenProvider:
+        async def get_installation_access_token(self, installation_external_id: int) -> str:
+            assert installation_external_id == 1000001
+            return "test-installation-token"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append((request.method, request.url.path))
+        if request.method == "GET" and request.url.path == unreadable_path:
+            return httpx.Response(404, json={"message": "Not Found"})
+        if request.method == "GET" and request.url.path == readable_path:
+            return httpx.Response(
+                200,
+                json={
+                    "default_branch": "trunk",
+                    "html_url": "https://example.test/example-owner/example-repo-two",
+                },
+            )
+        if request.method == "GET" and request.url.path == f"{readable_path}/git/trees/trunk":
+            return httpx.Response(200, json={"tree": [{"path": "src/app.ts", "type": "blob"}]})
+        if request.method == "POST" and request.url.path == f"{readable_path}/labels":
+            return httpx.Response(201, json={})
+        return httpx.Response(500, json={"message": "unexpected request"})
+
+    async def exercise() -> tuple[InstallationDeliveryDispatchStatus, list[Repository]]:
+        engine = create_async_engine(
+            database_url, connect_args={"options": f"-csearch_path={schema}"}
+        )
+        session_factory = async_sessionmaker(engine, expire_on_commit=False)
+        client = httpx.AsyncClient(
+            transport=httpx.MockTransport(handler), base_url="https://api.github.com"
+        )
+        try:
+            async with session_factory() as session:
+                workspace = Workspace(id=uuid4(), name="partial", daily_budget_usd=Decimal("1"))
+                session.add(workspace)
+                await session.flush()
+                session.add(
+                    ProviderInstallation(
+                        id=installation_id,
+                        workspace_id=workspace.id,
+                        provider="github",
+                        external_id=1000001,
+                        provider_metadata={},
+                    )
+                )
+                await session.commit()
+
+            dispatcher = ReviewsApiResources(
+                engine, session_factory
+            ).github_installation_delivery_dispatcher(client=client, token_provider=TokenProvider())
+            delivery = load_github_webhook_fixture("installation_repositories_added")
+            delivery["repositories_added"].append(
+                {
+                    "id": 1000006,
+                    "node_id": "R_kgDOExampleThree",
+                    "name": "example-repo-three",
+                    "full_name": "example-owner/example-repo-three",
+                    "private": False,
+                }
+            )
+            deferred = await dispatcher.execute(
+                VerifiedGitHubDelivery(
+                    "delivery-partial", "installation_repositories", delivery
+                ).to_receipt()
+            )
+
+            async with session_factory() as session:
+                repositories = list(
+                    (
+                        await session.scalars(
+                            select(Repository).where(
+                                Repository.provider_installation_id == installation_id
+                            )
+                        )
+                    ).all()
+                )
+            return deferred.status, repositories
+        finally:
+            await client.aclose()
+            await engine.dispose()
+
+    status, repositories = asyncio.run(exercise())
+
+    assert status is InstallationDeliveryDispatchStatus.DEFERRED_REPOSITORY_DETAILS
+    assert [(row.external_id, row.full_name, row.enabled) for row in repositories] == [
+        (1000005, "example-owner/example-repo-two", True)
+    ]
+    assert sorted(requests) == sorted(
+        [
+            ("GET", readable_path),
+            ("GET", f"{readable_path}/git/trees/trunk"),
+            ("POST", f"{readable_path}/labels"),
+            ("GET", unreadable_path),
+        ]
+    )

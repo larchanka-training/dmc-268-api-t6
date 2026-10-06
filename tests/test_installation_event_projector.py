@@ -3,12 +3,20 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from dataclasses import dataclass, field
 from typing import Literal
 from uuid import UUID, uuid4
 
+import httpx
 import pytest
 
+from app.modules.integrations.webhooks.application.github_installation_dispatch import (
+    GitHubDispatchEvent,
+    GitHubInstallationDeliveryDispatcher,
+    InstallationDeliveryDispatchResult,
+    InstallationDeliveryDispatchStatus,
+)
 from app.modules.integrations.webhooks.application.installation_event_projector import (
     InstallationEventProjector,
     InstallationRepositoryDetailsProvider,
@@ -522,8 +530,12 @@ def test_unavailable_details_propagate_as_the_typed_error_before_any_write() -> 
     assert sync.calls == []
 
 
-def test_details_failure_on_a_later_repository_persists_nothing_for_the_batch() -> None:
-    """All-or-nothing: the first repository resolves, the second fails, ``sync`` never runs."""
+def test_details_failure_on_a_later_repository_still_persists_the_readable_ones() -> None:
+    """The first repository resolves, the second fails: only the first reaches ``sync``.
+
+    api#73 replaced the all-or-nothing batch (api#71); the failure still propagates, so
+    the receipt is retried, but it no longer discards the repositories that were read.
+    """
 
     @dataclass
     class FailingSecondDetails(FakeDetailsProvider):
@@ -567,6 +579,292 @@ def test_details_failure_on_a_later_repository_persists_nothing_for_the_batch() 
 
     assert details.calls == [(17, "example-owner/repo-101"), (17, "example-owner/repo-102")]
     assert tree.calls == [(17, 101, "trunk")]
+    assert len(sync.calls) == 1
+    assert [item.snapshot.external_id for item in sync.calls[0][1]] == [101]
+
+
+_PROJECTOR_LOGGER = "app.modules.integrations.webhooks.application.installation_event_projector"
+
+
+@dataclass
+class FailingTree(FakeTreeProvider):
+    """Reads the tree of every repository except the ones in ``errors``."""
+
+    errors: dict[int, BaseException] = field(default_factory=dict)
+
+    async def fetch_default_branch_tree(
+        self,
+        *,
+        installation_external_id: int,
+        repository: RepositorySnapshot,
+    ) -> tuple[RepositoryTreeBlob, ...]:
+        if repository.external_id in self.errors:
+            raise self.errors[repository.external_id]
+        return await super().fetch_default_branch_tree(
+            installation_external_id=installation_external_id, repository=repository
+        )
+
+
+def _not_found(repository_path: str) -> httpx.HTTPStatusError:
+    request = httpx.Request("GET", f"https://api.github.com/repos/{repository_path}")
+    return httpx.HTTPStatusError(
+        f"Client error '404 Not Found' for url '{request.url}'",
+        request=request,
+        response=httpx.Response(404, request=request),
+    )
+
+
+def test_tree_failure_on_a_later_repository_still_persists_the_readable_ones(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A 404 on the second repository (replication lag after creation) must not drop the first."""
+    failure = _not_found("octo/SENTINEL-repository-102")
+    tree = FailingTree(trees={101: ()}, errors={102: failure})
+    labels = FakeLabelProvider()
+    sync = FakeSyncInstallationRepositories()
+
+    with (
+        caplog.at_level(logging.WARNING, logger=_PROJECTOR_LOGGER),
+        pytest.raises(httpx.HTTPStatusError) as raised,
+    ):
+        asyncio.run(
+            InstallationEventProjector(
+                tree_provider=tree,
+                label_provider=labels,
+                details_provider=FakeDetailsProvider(),
+                sync=sync,
+            ).execute(
+                provider_installation_id=uuid4(),
+                event=InstallationRepositoriesEvent(
+                    17, "added", (_reference(external_id=101), _reference(external_id=102)), ()
+                ),
+            )
+        )
+
+    assert raised.value is failure
+    assert len(sync.calls) == 1
+    assert [item.snapshot.external_id for item in sync.calls[0][1]] == [101]
+    warnings = [
+        record
+        for record in caplog.records
+        if record.name == _PROJECTOR_LOGGER and record.levelno == logging.WARNING
+    ]
+    assert len(warnings) == 1
+    logged = warnings[0].getMessage()
+    assert "installation_id=17" in logged
+    assert "repository_id=102" in logged
+    assert "full_name=octo/repository-102" in logged
+    assert "error_type=HTTPStatusError" in logged
+    assert "status_code=404" in logged
+    assert "SENTINEL" not in caplog.text
+    assert warnings[0].exc_info is None
+
+
+def test_unavailable_details_are_logged_with_the_type_and_status_of_their_cause(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The typed details error has no response: the warning reports the error it wraps.
+
+    The details adapter raises it ``from`` the HTTP error (api#71), so a 404 and a 500
+    stay distinguishable per repository; the typed error itself still propagates.
+    """
+    unavailable = RepositoryDetailsUnavailableError("GitHub repository details request failed")
+    unavailable.__cause__ = _not_found("example-owner/SENTINEL-repo-101")
+    sync = FakeSyncInstallationRepositories()
+
+    with (
+        caplog.at_level(logging.WARNING, logger=_PROJECTOR_LOGGER),
+        pytest.raises(RepositoryDetailsUnavailableError) as raised,
+    ):
+        asyncio.run(
+            InstallationEventProjector(
+                tree_provider=FakeTreeProvider(),
+                label_provider=FakeLabelProvider(),
+                details_provider=FakeDetailsProvider(error=unavailable),
+                sync=sync,
+            ).execute(
+                provider_installation_id=uuid4(),
+                event=InstallationRepositoriesEvent(
+                    17, "added", (_bare_reference(external_id=101),), ()
+                ),
+            )
+        )
+
+    assert raised.value is unavailable
+    assert sync.calls == []
+    logged = [
+        record.getMessage()
+        for record in caplog.records
+        if record.name == _PROJECTOR_LOGGER and record.levelno == logging.WARNING
+    ]
+    assert len(logged) == 1
+    assert "repository_id=101" in logged[0]
+    assert "error_type=HTTPStatusError" in logged[0]
+    assert "status_code=404" in logged[0]
+    assert "SENTINEL" not in caplog.text
+
+
+def test_the_first_failure_in_event_order_is_raised_and_every_failure_is_logged(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    first_failure = RuntimeError("first failure")
+    second_failure = ValueError("second failure")
+    tree = FailingTree(trees={102: ()}, errors={101: first_failure, 103: second_failure})
+    sync = FakeSyncInstallationRepositories()
+
+    with (
+        caplog.at_level(logging.WARNING, logger=_PROJECTOR_LOGGER),
+        pytest.raises(RuntimeError) as raised,
+    ):
+        asyncio.run(
+            InstallationEventProjector(
+                tree_provider=tree,
+                label_provider=FakeLabelProvider(),
+                details_provider=FakeDetailsProvider(),
+                sync=sync,
+            ).execute(
+                provider_installation_id=uuid4(),
+                event=InstallationRepositoriesEvent(
+                    17,
+                    "added",
+                    tuple(_reference(external_id=item) for item in (101, 102, 103)),
+                    (),
+                ),
+            )
+        )
+
+    assert raised.value is first_failure
+    assert [item.snapshot.external_id for item in sync.calls[0][1]] == [102]
+    logged = [
+        record.getMessage()
+        for record in caplog.records
+        if record.name == _PROJECTOR_LOGGER and record.levelno == logging.WARNING
+    ]
+    assert len(logged) == 2
+    assert "repository_id=101" in logged[0] and "error_type=RuntimeError" in logged[0]
+    assert "repository_id=103" in logged[1] and "error_type=ValueError" in logged[1]
+    assert "status_code=None" in logged[0] and "status_code=None" in logged[1]
+
+
+@dataclass
+class FailingDetails(FakeDetailsProvider):
+    """Reads the details of every repository except the ones in ``errors``."""
+
+    errors: dict[str, Exception] = field(default_factory=dict)
+
+    async def fetch_repository_details(
+        self, *, installation_external_id: int, full_name: str
+    ) -> RepositoryDetails:
+        if full_name in self.errors:
+            self.calls.append((installation_external_id, full_name))
+            raise self.errors[full_name]
+        return await super().fetch_repository_details(
+            installation_external_id=installation_external_id, full_name=full_name
+        )
+
+
+@dataclass
+class _LinkedInstallation:
+    async def find_github_installation_id(self, external_id: int) -> UUID | None:
+        assert external_id == 17
+        return UUID("00000000-0000-4000-8000-000000000017")
+
+
+def _readable(*full_names: str) -> dict[str, RepositoryDetails]:
+    return {
+        name: RepositoryDetails(default_branch="trunk", web_url=f"https://example.test/{name}")
+        for name in full_names
+    }
+
+
+def _dispatch_three_bare_repositories(
+    details: InstallationRepositoryDetailsProvider,
+    tree: InstallationRepositoryTreeProvider,
+    sync: FakeSyncInstallationRepositories,
+) -> InstallationDeliveryDispatchResult:
+    """The real dispatcher over the projector, for an event of repositories 101, 102, 103."""
+    projector = InstallationEventProjector(
+        tree_provider=tree, label_provider=FakeLabelProvider(), details_provider=details, sync=sync
+    )
+    return asyncio.run(
+        GitHubInstallationDeliveryDispatcher(
+            resolver=_LinkedInstallation(), onboarding=projector
+        ).execute(
+            GitHubDispatchEvent(
+                "delivery-mixed",
+                InstallationRepositoriesEvent(
+                    17,
+                    "added",
+                    tuple(_bare_reference(external_id=item) for item in (101, 102, 103)),
+                    (),
+                ),
+            )
+        )
+    )
+
+
+def test_a_tree_failure_before_unavailable_details_takes_the_failed_dispatch_path() -> None:
+    """The first failure in event order decides the path: here a tree 404, not a deferral."""
+    tree_failure = _not_found("example-owner/repo-101/git/trees/trunk")
+    details = FailingDetails(
+        details=_readable("example-owner/repo-101", "example-owner/repo-103"),
+        errors={
+            "example-owner/repo-102": RepositoryDetailsUnavailableError(
+                "GitHub repository details request failed with HTTP 404"
+            )
+        },
+    )
+    tree = FailingTree(trees={103: ()}, errors={101: tree_failure})
+    sync = FakeSyncInstallationRepositories()
+
+    with pytest.raises(httpx.HTTPStatusError) as raised:
+        _dispatch_three_bare_repositories(details, tree, sync)
+
+    assert raised.value is tree_failure
+    assert [[item.snapshot.external_id for item in call[1]] for call in sync.calls] == [[103]]
+
+
+def test_unavailable_details_before_a_tree_failure_defer_the_delivery() -> None:
+    """The first failure in event order decides the path: here unreadable details, deferred."""
+    details = FailingDetails(
+        details=_readable("example-owner/repo-102", "example-owner/repo-103"),
+        errors={
+            "example-owner/repo-101": RepositoryDetailsUnavailableError(
+                "GitHub repository details request failed with HTTP 404"
+            )
+        },
+    )
+    tree = FailingTree(
+        trees={103: ()}, errors={102: _not_found("example-owner/repo-102/git/trees/trunk")}
+    )
+    sync = FakeSyncInstallationRepositories()
+
+    result = _dispatch_three_bare_repositories(details, tree, sync)
+
+    assert result.status is InstallationDeliveryDispatchStatus.DEFERRED_REPOSITORY_DETAILS
+    assert [[item.snapshot.external_id for item in call[1]] for call in sync.calls] == [[103]]
+
+
+def test_a_cancelled_repository_aborts_the_event_before_the_database_sync() -> None:
+    """Cancellation is not a repository failure: it is re-raised before sync runs."""
+    tree = FailingTree(trees={101: ()}, errors={102: asyncio.CancelledError()})
+    sync = FakeSyncInstallationRepositories()
+
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(
+            InstallationEventProjector(
+                tree_provider=tree,
+                label_provider=FakeLabelProvider(),
+                details_provider=FakeDetailsProvider(),
+                sync=sync,
+            ).execute(
+                provider_installation_id=uuid4(),
+                event=InstallationRepositoriesEvent(
+                    17, "added", (_reference(external_id=101), _reference(external_id=102)), ()
+                ),
+            )
+        )
+
     assert sync.calls == []
 
 

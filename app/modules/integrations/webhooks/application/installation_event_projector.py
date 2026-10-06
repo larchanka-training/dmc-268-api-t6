@@ -92,11 +92,15 @@ class InstallationEventProjector:
     A durable-delivery runner calls this projector after parsing a stored
     installation event.  Real events name a repository without its default branch
     and web URL; those are read through ``details_provider`` before the tree is
-    fetched, and not at all when the event already carries both.  Provider
-    failures deliberately propagate, leaving the delivery eligible for retry and
-    ensuring ``sync`` has not opened its unit of work.  Removed/deleted events
-    enter the explicit transactional soft-disable path without making a VCS
-    request.
+    fetched, and not at all when the event already carries both.  A repository
+    whose details or tree cannot be read does not discard the others: the
+    readable ones go to ``sync`` (which therefore never opens its unit of work
+    before every GitHub call is done), then the first failure in event order
+    propagates unchanged: the dispatcher defers the delivery when it is
+    ``RepositoryDetailsUnavailableError``, any other error leaves it eligible for
+    retry on the failed path.  Replaying the whole event is safe to repeat (replay
+    upserts and re-enables saved repositories).  Removed/deleted events enter the
+    explicit transactional soft-disable path without making a VCS request.
     """
 
     def __init__(
@@ -125,32 +129,67 @@ class InstallationEventProjector:
             )
             return ()
 
-        inputs: list[RepositoryOnboardingInput] = []
+        outcomes: list[RepositoryOnboardingInput | Exception] = []
         for reference in event.added_repositories:
-            repository = await self._resolve(event.installation_external_id, reference)
-            tree = await self._tree_provider.fetch_default_branch_tree(
-                installation_external_id=event.installation_external_id,
+            try:
+                outcomes.append(
+                    await self._onboard_repository(event.installation_external_id, reference)
+                )
+            except Exception as error:
+                outcomes.append(error)
+
+        inputs = tuple(item for item in outcomes if isinstance(item, RepositoryOnboardingInput))
+        failures = [
+            (reference, outcome)
+            for reference, outcome in zip(event.added_repositories, outcomes, strict=True)
+            if isinstance(outcome, Exception)
+        ]
+        for reference, failure in failures:
+            # The type and the HTTP status only: an HTTP error's text carries the request
+            # URL. The status is read by duck typing to keep httpx out of this layer.
+            # The typed details error stands for the failure that caused it.
+            cause = (
+                failure.__cause__
+                if isinstance(failure, RepositoryDetailsUnavailableError)
+                else None
+            )
+            reported = failure if cause is None else cause
+            _LOGGER.warning(
+                "Failed to onboard repository: installation_id=%s repository_id=%s "
+                "full_name=%s error_type=%s status_code=%s",
+                event.installation_external_id,
+                reference.external_id,
+                reference.full_name,
+                type(reported).__name__,
+                getattr(getattr(reported, "response", None), "status_code", None),
+            )
+        results: tuple[OnboardingResult, ...] = ()
+        if inputs:
+            results = await self._sync.execute(
+                provider_installation_id=provider_installation_id, repositories=inputs
+            )
+        if failures:
+            raise failures[0][1]
+        return results
+
+    async def _onboard_repository(
+        self, installation_external_id: int, reference: RepositoryReference
+    ) -> RepositoryOnboardingInput:
+        repository = await self._resolve(installation_external_id, reference)
+        tree = await self._tree_provider.fetch_default_branch_tree(
+            installation_external_id=installation_external_id,
+            repository=repository,
+        )
+        try:
+            await self._label_provider.create_ai_review_label(
+                installation_external_id=installation_external_id,
                 repository=repository,
             )
-            try:
-                await self._label_provider.create_ai_review_label(
-                    installation_external_id=event.installation_external_id,
-                    repository=repository,
-                )
-            except Exception:
-                _LOGGER.exception("Failed to create ai-review label for %s", repository.full_name)
-            inputs.append(
-                RepositoryOnboardingInput(
-                    snapshot=repository,
-                    languages=classify_tree_languages(tree),
-                )
-            )
-
-        if not inputs:
-            return ()
-        return await self._sync.execute(
-            provider_installation_id=provider_installation_id,
-            repositories=tuple(inputs),
+        except Exception:
+            _LOGGER.exception("Failed to create ai-review label for %s", repository.full_name)
+        return RepositoryOnboardingInput(
+            snapshot=repository,
+            languages=classify_tree_languages(tree),
         )
 
     async def _resolve(
