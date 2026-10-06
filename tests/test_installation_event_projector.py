@@ -794,10 +794,15 @@ def _dispatch_three_bare_repositories(
     details: InstallationRepositoryDetailsProvider,
     tree: InstallationRepositoryTreeProvider,
     sync: FakeSyncInstallationRepositories,
+    *,
+    labels: InstallationRepositoryLabelProvider | None = None,
 ) -> InstallationDeliveryDispatchResult:
     """The real dispatcher over the projector, for an event of repositories 101, 102, 103."""
     projector = InstallationEventProjector(
-        tree_provider=tree, label_provider=FakeLabelProvider(), details_provider=details, sync=sync
+        tree_provider=tree,
+        label_provider=labels or FakeLabelProvider(),
+        details_provider=details,
+        sync=sync,
     )
     return asyncio.run(
         GitHubInstallationDeliveryDispatcher(
@@ -1273,32 +1278,87 @@ def test_a_failure_that_is_not_a_token_failure_does_not_skip_the_rest(
     assert len(_warnings(caplog)) == 1
 
 
-def test_a_token_failure_of_the_label_request_is_not_fatal() -> None:
-    @dataclass
-    class TokenFailingLabels(FakeLabelProvider):
-        async def create_ai_review_label(
-            self, *, installation_external_id: int, repository: RepositorySnapshot
-        ) -> None:
-            await super().create_ai_review_label(
-                installation_external_id=installation_external_id, repository=repository
-            )
-            raise _token_failure()
+@dataclass
+class FailingLabels(FakeLabelProvider):
+    """Creates the label of every repository except the ones in ``errors``."""
 
-    labels = TokenFailingLabels()
+    errors: dict[str, Exception] = field(default_factory=dict)
+
+    async def create_ai_review_label(
+        self, *, installation_external_id: int, repository: RepositorySnapshot
+    ) -> None:
+        await super().create_ai_review_label(
+            installation_external_id=installation_external_id, repository=repository
+        )
+        if repository.full_name in self.errors:
+            raise self.errors[repository.full_name]
+
+
+def test_a_token_failure_of_the_label_request_stops_the_event() -> None:
+    """A label request without a token fails its repository like any token failure."""
+    failure = _token_failure()
+    labels = FailingLabels(errors={"octo/repository-102": failure})
     tree = StartRecordingTree()
     sync = FakeSyncInstallationRepositories()
 
-    _execute(
-        tree,
-        sync,
-        tuple(_reference(external_id=item) for item in (101, 102, 103)),
-        max_concurrent_repositories=1,
-        labels=labels,
-    )
+    with pytest.raises(InstallationAccessTokenError) as raised:
+        _execute(
+            tree,
+            sync,
+            tuple(_reference(external_id=item) for item in (101, 102, 103)),
+            max_concurrent_repositories=1,
+            labels=labels,
+        )
 
-    assert tree.started == [101, 102, 103]
-    assert len(labels.calls) == 3
-    assert [item.snapshot.external_id for item in sync.calls[0][1]] == [101, 102, 103]
+    assert raised.value is failure
+    assert tree.started == [101, 102]
+    assert labels.calls == [(17, "octo/repository-101"), (17, "octo/repository-102")]
+    assert [[item.snapshot.external_id for item in call[1]] for call in sync.calls] == [[101]]
+
+
+def _three_readable_repositories() -> tuple[FakeDetailsProvider, FakeTreeProvider]:
+    details = FakeDetailsProvider(
+        details=_readable(
+            "example-owner/repo-101", "example-owner/repo-102", "example-owner/repo-103"
+        )
+    )
+    return details, FakeTreeProvider(trees={101: (), 102: (), 103: ()})
+
+
+def test_a_token_failure_at_the_last_label_request_defers_the_delivery() -> None:
+    """Deferred, not onboarded: the token fails only at the label of the last repository."""
+    details, tree = _three_readable_repositories()
+    labels = FailingLabels(errors={"example-owner/repo-103": _token_failure()})
+    sync = FakeSyncInstallationRepositories()
+
+    result = _dispatch_three_bare_repositories(details, tree, sync, labels=labels)
+
+    assert result.status is InstallationDeliveryDispatchStatus.DEFERRED_REPOSITORY_DETAILS
+    assert [[item.snapshot.external_id for item in call[1]] for call in sync.calls] == [[101, 102]]
+
+
+def test_an_ordinary_label_error_still_onboards_every_repository(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Regression guard: a label POST answered 403 is only logged, as before."""
+    request = httpx.Request("POST", "https://api.github.com/repos/example-owner/repo-103/labels")
+    forbidden = httpx.HTTPStatusError(
+        f"Client error '403 Forbidden' for url '{request.url}'",
+        request=request,
+        response=httpx.Response(403, request=request),
+    )
+    details, tree = _three_readable_repositories()
+    labels = FailingLabels(errors={"example-owner/repo-103": forbidden})
+    sync = FakeSyncInstallationRepositories()
+
+    with caplog.at_level(logging.ERROR, logger=_PROJECTOR_LOGGER):
+        result = _dispatch_three_bare_repositories(details, tree, sync, labels=labels)
+
+    assert result.status is InstallationDeliveryDispatchStatus.ONBOARDED
+    assert [[item.snapshot.external_id for item in call[1]] for call in sync.calls] == [
+        [101, 102, 103]
+    ]
+    assert "Failed to create ai-review label for example-owner/repo-103" in caplog.text
 
 
 def test_a_token_failure_is_logged_with_the_type_and_status_of_its_cause(
