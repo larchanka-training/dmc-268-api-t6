@@ -4,6 +4,8 @@ import { registerHooks } from 'node:module'
 import { dirname, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
+// DMC_268_UI_DIR: a clean ui checkout after `pnpm install`; OUTPUT_PATH: where to write the
+// snapshot (default: the committed fixture).
 const uiDir = resolve(process.env.DMC_268_UI_DIR ?? '')
 const outputPath = resolve(
   process.env.OUTPUT_PATH ?? 'tests/fixtures/ui_zod_contracts.json',
@@ -14,24 +16,22 @@ if (!process.env.DMC_268_UI_DIR) {
 }
 
 // The ui imports its own modules without an extension (`../../review/model/schemas`), which
-// Vite resolves and Node does not: retry a failed relative specifier as `.ts`, then `/index.ts`.
+// Vite resolves and Node does not: retry a failed relative specifier as `.ts`. The schema files
+// import only files, never directories, so no `/index.ts` fallback is needed.
 registerHooks({
   resolve(specifier, context, nextResolve) {
     try {
       return nextResolve(specifier, context)
     } catch (error) {
       const relative = specifier.startsWith('./') || specifier.startsWith('../')
-      if (!relative || !['ERR_MODULE_NOT_FOUND', 'ERR_UNSUPPORTED_DIR_IMPORT'].includes(error.code)) {
+      if (!relative || error.code !== 'ERR_MODULE_NOT_FOUND') {
         throw error
       }
-      for (const candidate of [`${specifier}.ts`, `${specifier}/index.ts`]) {
-        try {
-          return nextResolve(candidate, context)
-        } catch {
-          // try the next candidate
-        }
+      try {
+        return nextResolve(`${specifier}.ts`, context)
+      } catch {
+        throw error
       }
-      throw error
     }
   },
 })
@@ -45,9 +45,12 @@ const review = await load('src/entities/review/model/schemas.ts')
 const run = await load('src/entities/run/model/schemas.ts')
 const user = await load('src/entities/user/model/schemas.ts')
 
-const commit = execFileSync('git', ['-C', uiDir, 'rev-parse', 'HEAD'], {
-  encoding: 'utf8',
-}).trim()
+const git = (...args) => execFileSync('git', ['-C', uiDir, ...args], { encoding: 'utf8' }).trim()
+// provenance.commit must describe exactly the schemas that were exported.
+if (git('status', '--porcelain', '--untracked-files=no') !== '') {
+  throw new Error(`${uiDir} has uncommitted changes: commit or stash them first`)
+}
+const commit = git('rev-parse', 'HEAD')
 
 // Keys are the snapshot names the api tests read; each maps to one ui Zod schema.
 const sources = {
