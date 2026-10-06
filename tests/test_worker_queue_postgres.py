@@ -1266,6 +1266,7 @@ def test_main_composition_reviews_through_the_llm_gateway(
     names = [action[0] for action in actions]
 
     assert state == ("succeeded", 1, None)
+    # "queued" is the state insert_run wrote; the three transitions come from NOTIFY.
     assert statuses == ["queued", "running", "publishing", "succeeded"]
     assert llm.tasks[-1] != "RepoConventionsDraft" and "RepoConventionsDraft" in llm.tasks
     assert names.count("llm.review_output") == 1

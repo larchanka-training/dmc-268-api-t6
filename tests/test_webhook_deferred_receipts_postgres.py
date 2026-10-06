@@ -258,9 +258,10 @@ def test_sweep_summary_counts_deliveries_deferred_for_good(
 def test_linking_wakes_a_pr_or_ci_delivery_deferred_for_good(
     database: Database, event: str, payload: dict[str, Any]
 ) -> None:
-    async def scenario() -> tuple[tuple[Any, ...], tuple[Any, ...]]:
+    async def scenario() -> tuple[tuple[Any, ...], tuple[Any, ...], int]:
         clock = [START]
-        receiver, factory, engine = _receiver(database, UnknownInstallation(), clock)
+        dispatcher = UnknownInstallation()
+        receiver, factory, engine = _receiver(database, dispatcher, clock)
         await receiver.execute(VerifiedGitHubDelivery("delivery-1", event, payload).to_receipt())
         for _ in range(3):
             await receiver.replay_pending()
@@ -281,11 +282,15 @@ def test_linking_wakes_a_pr_or_ci_delivery_deferred_for_good(
             await uow.links.wake_receipts(99)
             await uow.commit()
         woken = await row()
+        dispatcher.known = True
+        handled = await receiver.replay_pending()
         await engine.dispose()
-        return final, woken
+        return final, woken, handled
 
-    final, woken = asyncio.run(scenario())
+    final, woken, handled = asyncio.run(scenario())
 
     assert final == (3, True)
     # Only the projection_deferred_at branch of wake_receipts covers non-installation events.
     assert woken == (0, False)
+    # The sweep selects the woken delivery again.
+    assert handled == 1
