@@ -192,3 +192,28 @@ corpus fixed so this measurement can be reproduced. Multi-truth and range-truth
 cases, a real high/critical security case, and reconsideration of SEC-05 remain
 future curation work; expanding the corpus will require a separately recorded
 baseline and updated denominators.
+
+### Manual live evaluation in GitHub Actions
+
+[Live corpus evaluation](../.github/workflows/eval-live.yml) is a manual
+`workflow_dispatch` workflow, separate from required offline replay. It uses the
+fixed free model `nvidia/nemotron-3-super-120b-a12b:free` on OpenRouter with the
+baseline context/output limits and no fallback. Configure the repository Actions
+secret `OPENROUTER_API_KEY`; the key is exposed only to the live-evaluation step.
+After the workflow exists on the default branch, select **Actions → Live corpus
+evaluation → Run workflow** and choose the branch to evaluate.
+
+The workflow copies only `cases/` and `schema/` to the runner's temporary directory,
+validates the corpus, and records new responses there. It never replaces the
+committed baseline. The summary uses the same formatter and metrics as offline
+replay. Provider/infrastructure failures fail the job; available diagnostic metrics
+are still summarized and uploaded. Missing credentials fail before model calls.
+
+The 14-day artifact contains `eval-report.json` (without validator diagnostics) and
+`eval-response-metadata/` (per-case hashes, byte counts and statuses). It does not
+contain raw model text, provider envelopes or credentials. Raw responses and their
+manifest exist only on the temporary runner; use a local capture when preparing a
+new committed baseline. A run consumes the account's free request quota, including
+retries/repair, can take tens of minutes, and has a 60-minute job timeout. Concurrent
+runs of this workflow are serialized. This workflow does not verify conventions
+on the two selected EUrouter models.
