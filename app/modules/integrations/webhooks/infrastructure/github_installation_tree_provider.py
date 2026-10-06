@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
+from functools import partial
 from typing import Literal, Protocol, cast
 
 import httpx
@@ -90,7 +92,12 @@ def _encode_github_app_jwt(claims: dict[str, object], private_key: str) -> str:
 
 
 class GitHubAppInstallationAccessTokenProvider:
-    """Exchange a GitHub App JWT for an installation-scoped access token."""
+    """Exchange a GitHub App JWT for an installation-scoped access token.
+
+    Concurrent callers for one installation share a single exchange, its failure as
+    well as its token. A failure is not remembered: the next call after it exchanges
+    again.
+    """
 
     def __init__(
         self,
@@ -108,12 +115,34 @@ class GitHubAppInstallationAccessTokenProvider:
         self._jwt_encoder = jwt_encoder
         self._cache = cache
         self._now = now
+        self._in_flight: dict[int, asyncio.Task[str]] = {}
 
     async def get_installation_access_token(self, installation_external_id: int) -> str:
         cached = self._cache.get(installation_external_id)
         if cached is not None:
             return cached
+        mint = self._in_flight.get(installation_external_id)
+        if mint is None:
+            mint = asyncio.create_task(self._exchange(installation_external_id))
+            self._in_flight[installation_external_id] = mint
+            mint.add_done_callback(partial(self._finished, installation_external_id))
+        # Shielded, so that a waiter that is cancelled does not cancel the exchange the
+        # other callers wait for.
+        return await asyncio.shield(mint)
 
+    def _finished(self, installation_external_id: int, mint: asyncio.Task[str]) -> None:
+        """Forget the exchange once it ends, however it ends, and read its result.
+
+        A done callback and not a ``finally`` in the coroutine: a task cancelled before
+        its first step never enters the coroutine. Reading the result keeps an exchange
+        that every waiter has left from logging "exception was never retrieved".
+        """
+        if self._in_flight.get(installation_external_id) is mint:
+            del self._in_flight[installation_external_id]
+        if not mint.cancelled():
+            mint.exception()
+
+    async def _exchange(self, installation_external_id: int) -> str:
         now = int(self._now())
         app_jwt = self._jwt_encoder(
             {"iat": now - 60, "exp": now + 540, "iss": self._app_id}, self._private_key
