@@ -172,6 +172,9 @@ def test_stream_endpoint_uses_sse_event_and_camel_case_payload() -> None:
             return None
 
     class AuthorizedRunRepository:
+        async def has_run_access(self, run_id: UUID) -> bool:
+            return run_id == RUN_ID
+
         async def get_run(self, run_id: UUID) -> RunListItem | None:
             return make_item() if run_id == RUN_ID else None
 
@@ -270,6 +273,65 @@ def test_stream_emits_keepalive_when_idle(monkeypatch: pytest.MonkeyPatch) -> No
 
     assert response.status_code == 200
     assert ": keepalive\n\n" in response.text
+    expected_data = 'data: {"runId":"00000000-0000-0000-0000-000000000100","status":"running"}'
+    assert expected_data in response.text
+
+
+def test_stream_fails_closed_if_repository_lacks_has_run_access() -> None:
+    async def single_event() -> AsyncIterator[RunUpdated]:
+        yield RunUpdated(RUN_ID, "running")
+
+    class StreamHub:
+        def subscribe(self) -> object:
+            class _Sub:
+                async def __aenter__(self) -> AsyncIterator[RunUpdated]:
+                    return single_event()
+
+                async def __aexit__(self, *args: object) -> None:
+                    pass
+
+            return _Sub()
+
+    class RepositoryWithoutAccessCheck:
+        pass
+
+    app.dependency_overrides[get_run_event_hub] = StreamHub
+    app.dependency_overrides[get_run_repository] = RepositoryWithoutAccessCheck
+    try:
+        with pytest.raises(AttributeError, match="does not implement has_run_access"):
+            TestClient(app).get("/api/stream")
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_stream_drops_events_when_has_run_access_returns_false() -> None:
+    async def single_event() -> AsyncIterator[RunUpdated]:
+        yield RunUpdated(RUN_ID, "running")
+
+    class StreamHub:
+        def subscribe(self) -> object:
+            class _Sub:
+                async def __aenter__(self) -> AsyncIterator[RunUpdated]:
+                    return single_event()
+
+                async def __aexit__(self, *args: object) -> None:
+                    pass
+
+            return _Sub()
+
+    class DeniedRepository:
+        async def has_run_access(self, run_id: UUID) -> bool:
+            return False
+
+    app.dependency_overrides[get_run_event_hub] = StreamHub
+    app.dependency_overrides[get_run_repository] = DeniedRepository
+    try:
+        response = TestClient(app).get("/api/stream")
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    assert response.text == ""
 
 
 def test_stream_terminates_cleanly_when_jwt_expires() -> None:

@@ -77,6 +77,7 @@ from app.modules.reviews.application.publish_cancellation_signals import (
     PublishCancellationSignals,
 )
 from app.modules.reviews.application.rerun_run import RerunUnitOfWork
+from app.modules.reviews.application.run_events import RunAccessRepository
 from app.modules.reviews.application.trigger_from_delivery import TriggerFromDelivery
 from app.modules.reviews.application.try_enqueue_webhook_run import (
     RunMessagePublisher,
@@ -95,7 +96,9 @@ from app.modules.reviews.infrastructure.github_pull_request_projection import (
 from app.modules.reviews.infrastructure.pull_request_queries import SqlAlchemyPullRequestQueries
 from app.modules.reviews.infrastructure.rerun_store import SqlAlchemyRerunUnitOfWork
 from app.modules.reviews.infrastructure.run_repository import SqlAlchemyRunRepository
-from app.modules.reviews.infrastructure.webhook_run_targets import SqlAlchemyWebhookRunTargets
+from app.modules.reviews.infrastructure.webhook_run_targets import (
+    SqlAlchemyRunTriggerUnitOfWork,
+)
 from app.modules.reviews.infrastructure.webhook_runs import SqlAlchemyWebhookRunUnitOfWork
 from app.modules.workspaces.application.link_github_installations import LinkGitHubInstallations
 from app.modules.workspaces.infrastructure.github_installation_links import (
@@ -250,7 +253,7 @@ class ReviewsApiResources:
         )
         run_trigger = (
             TriggerFromDelivery(
-                targets=SqlAlchemyWebhookRunTargets(self._session_factory),
+                uow_factory=partial(SqlAlchemyRunTriggerUnitOfWork, self._session_factory),
                 enqueuer=TryEnqueueWebhookRun(
                     eligibility=DetermineCiEligibility(
                         candidates=SqlAlchemyEligibilityCandidateStore(self._session_factory),
@@ -316,6 +319,7 @@ def get_run_repository(
     | RunDiffRepository
     | RunFileRepository
     | CancelRunRepository
+    | RunAccessRepository
 ):
     """Provide a request-scoped repository backed by the application pool."""
     return _resources(request).run_repository(scope)

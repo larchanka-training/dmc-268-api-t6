@@ -8,7 +8,7 @@ import math
 import os
 import time
 from collections.abc import AsyncIterator, Callable
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from typing import Annotated, Any, Literal, NoReturn
 from uuid import UUID
 
@@ -113,7 +113,12 @@ from app.modules.reviews.application.rerun_run import (
     RerunRun,
     RerunUnitOfWork,
 )
-from app.modules.reviews.application.run_events import InMemoryRunUpdateHub, RunUpdateStream
+from app.modules.reviews.application.run_events import (
+    InMemoryRunUpdateHub,
+    RunAccessRepository,
+    RunUpdated,
+    RunUpdateStream,
+)
 from app.modules.reviews.application.try_enqueue_webhook_run import RunMessagePublisher
 
 api_router = APIRouter(prefix="/api", dependencies=[Depends(get_auth_scope)])
@@ -560,12 +565,10 @@ async def cancel_run(
     return to_run_session_dto(item)
 
 
-async def _check_run_access(repository: Any, run_id: UUID) -> bool:
-    if hasattr(repository, "has_run_access"):
-        return bool(await repository.has_run_access(run_id))
-    if hasattr(repository, "get_run"):
-        return await repository.get_run(run_id) is not None
-    return True
+async def _check_run_access(repository: RunAccessRepository, run_id: UUID) -> bool:
+    if not hasattr(repository, "has_run_access"):
+        raise AttributeError(f"{type(repository).__name__} does not implement has_run_access")
+    return bool(await repository.has_run_access(run_id))
 
 
 @api_router.get(
@@ -581,36 +584,52 @@ async def _check_run_access(repository: Any, run_id: UUID) -> bool:
 )
 async def stream_run_updates(
     event_hub: Annotated[RunUpdateStream, Depends(get_run_event_hub)],
-    repository: Annotated[Any, Depends(get_run_repository)],
+    repository: Annotated[RunAccessRepository, Depends(get_run_repository)],
     scope: Annotated[AuthScope, Depends(get_auth_scope)],
 ) -> StreamingResponse:
     async def events() -> AsyncIterator[str]:
         async with event_hub.subscribe() as updates:
-            while True:
-                if scope.expires_at is not None and time.time() >= scope.expires_at:
-                    break
-                timeout = KEEPALIVE_INTERVAL_SECONDS
-                if scope.expires_at is not None:
-                    remaining = max(0.0, scope.expires_at - time.time())
-                    if remaining <= 0:
-                        break
-                    timeout = min(timeout, remaining)
-                try:
-                    update = await asyncio.wait_for(anext(updates), timeout=timeout)
-                except TimeoutError:
+
+            async def _next_update() -> RunUpdated:
+                return await anext(updates)
+
+            read_task: asyncio.Task[RunUpdated] | None = None
+            try:
+                while True:
                     if scope.expires_at is not None and time.time() >= scope.expires_at:
                         break
-                    yield ": keepalive\n\n"
-                    continue
-                except StopAsyncIteration:
-                    break
+                    timeout = KEEPALIVE_INTERVAL_SECONDS
+                    if scope.expires_at is not None:
+                        remaining = max(0.0, scope.expires_at - time.time())
+                        if remaining <= 0:
+                            break
+                        timeout = min(timeout, remaining)
+                    if read_task is None:
+                        read_task = asyncio.create_task(_next_update())
+                    done, _ = await asyncio.wait([read_task], timeout=timeout)
+                    if not done:
+                        if scope.expires_at is not None and time.time() >= scope.expires_at:
+                            break
+                        yield ": keepalive\n\n"
+                        continue
+                    try:
+                        update = read_task.result()
+                    except StopAsyncIteration:
+                        break
+                    finally:
+                        read_task = None
 
-                if not await _check_run_access(repository, update.run_id):
-                    continue
-                yield (
-                    "event: run.updated\n"
-                    f'data: {{"runId":"{update.run_id}","status":"{update.status}"}}\n\n'
-                )
+                    if not await _check_run_access(repository, update.run_id):
+                        continue
+                    yield (
+                        "event: run.updated\n"
+                        f'data: {{"runId":"{update.run_id}","status":"{update.status}"}}\n\n'
+                    )
+            finally:
+                if read_task is not None and not read_task.done():
+                    read_task.cancel()
+                    with suppress(asyncio.CancelledError, StopAsyncIteration):
+                        await read_task
 
     return StreamingResponse(events(), media_type="text/event-stream")
 

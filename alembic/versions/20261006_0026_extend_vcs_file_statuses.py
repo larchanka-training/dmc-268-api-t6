@@ -1,16 +1,16 @@
 """Extend code_change_diffs status check constraint to include copied, changed, and unchanged.
 
-Revision ID: 20261004_0024
-Revises: 20260930_0023
-Create Date: 2026-10-04
+Revision ID: 20261006_0026
+Revises: 20261005_0025
+Create Date: 2026-10-06
 """
 
 from __future__ import annotations
 
 from alembic import op
 
-revision = "20261004_0024"
-down_revision = "20260930_0023"
+revision = "20261006_0026"
+down_revision = "20261005_0025"
 branch_labels = None
 depends_on = None
 

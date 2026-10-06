@@ -59,8 +59,12 @@ from app.modules.reviews.infrastructure.github_pull_request_projection import (
     SqlAlchemyPullRequestProjectionUnitOfWork,
 )
 from app.modules.reviews.infrastructure.models import CodeChange, Run
-from app.modules.reviews.infrastructure.no_ci_sweep_candidates import SqlAlchemyDueNoCiCandidates
-from app.modules.reviews.infrastructure.webhook_run_targets import SqlAlchemyWebhookRunTargets
+from app.modules.reviews.infrastructure.no_ci_sweep_candidates import (
+    SqlAlchemySweepNoCiUnitOfWork,
+)
+from app.modules.reviews.infrastructure.webhook_run_targets import (
+    SqlAlchemyRunTriggerUnitOfWork,
+)
 from app.modules.reviews.infrastructure.webhook_runs import SqlAlchemyWebhookRunUnitOfWork
 
 _PR = UUID("11111111-1111-1111-1111-111111111111")
@@ -379,6 +383,55 @@ def test_repeated_ci_delivery_routes_to_one_run() -> None:
 
     assert uow.commits == 2
     assert [message.run_id for message in publisher.messages] == [_RUN]
+
+
+def test_ci_delivery_commits_unit_of_work_before_enqueue() -> None:
+    @dataclass
+    class Targets:
+        async def for_pr(self, event: PullRequestEvent) -> ProjectedPullRequestTarget | None:
+            return None
+
+        async def for_ci(self, event: CiTriggerEvent) -> tuple[UUID, ...]:
+            return (_PR,)
+
+    @dataclass
+    class FakeTriggerUow:
+        targets: Targets = field(default_factory=Targets)
+        committed: bool = False
+
+        async def __aenter__(self) -> FakeTriggerUow:
+            return self
+
+        async def __aexit__(self, exc_type: object, exc: object, tb: object) -> None:
+            pass
+
+        async def commit(self) -> None:
+            self.committed = True
+
+        async def rollback(self) -> None:
+            pass
+
+    enqueued: list[tuple[UUID, str]] = []
+
+    class FakeEnqueuer:
+        def __init__(self, trigger_uow: FakeTriggerUow) -> None:
+            self._trigger_uow = trigger_uow
+
+        async def execute(self, code_change_id: UUID, expected_head_sha: str) -> EnqueueResult:
+            assert self._trigger_uow.committed is True
+            enqueued.append((code_change_id, expected_head_sha))
+            return EnqueueResult(EnqueueStatus.ENQUEUED)
+
+    fake_uow = FakeTriggerUow()
+    trigger = TriggerFromDelivery(
+        uow_factory=lambda: fake_uow,
+        enqueuer=FakeEnqueuer(fake_uow),
+    )
+
+    asyncio.run(trigger.on_ci(CiTriggerEvent(17, 101, _HEAD, "check_suite")))
+
+    assert fake_uow.committed is True
+    assert enqueued == [(_PR, _HEAD)]
 
 
 def test_delayed_label_enqueues_projected_head_instead_of_webhook_head() -> None:
@@ -995,7 +1048,7 @@ def test_postgres_no_ci_sweep_enqueues_once_and_skips_later_rest_calls(
                 now=lambda: _NOW + timedelta(minutes=2),
             )
             sweep = SweepNoCi(
-                candidates=SqlAlchemyDueNoCiCandidates(sessions),
+                uow_factory=lambda: SqlAlchemySweepNoCiUnitOfWork(sessions),
                 enqueuer=enqueuer,
                 now=lambda: _NOW + timedelta(minutes=2),
             )
@@ -1023,19 +1076,32 @@ def test_postgres_ci_event_cache_only_updates_current_head_for_check_suite_and_s
             database_url, connect_args={"options": f"-csearch_path={schema}"}
         )
         sessions = async_sessionmaker(engine, expire_on_commit=False)
-        targets = SqlAlchemyWebhookRunTargets(sessions)
+
+        def uow_factory() -> SqlAlchemyRunTriggerUnitOfWork:
+            return SqlAlchemyRunTriggerUnitOfWork(sessions)
+
         try:
-            assert await targets.for_ci(CiTriggerEvent(17, 101, "c" * 40, "check_suite")) == ()
+            async with uow_factory() as uow:
+                assert (
+                    await uow.targets.for_ci(CiTriggerEvent(17, 101, "c" * 40, "check_suite")) == ()
+                )
+                await uow.commit()
             async with sessions() as session:
                 pr = await session.get(CodeChange, _PR)
                 assert pr is not None and pr.ci_status == {}
 
-            assert await targets.for_ci(CiTriggerEvent(17, 101, _HEAD, "check_suite")) == (_PR,)
+            async with uow_factory() as uow:
+                assert await uow.targets.for_ci(CiTriggerEvent(17, 101, _HEAD, "check_suite")) == (
+                    _PR,
+                )
+                await uow.commit()
             async with sessions() as session:
                 pr = await session.get(CodeChange, _PR)
                 assert pr is not None and pr.ci_status == {"event": "check_suite"}
 
-            assert await targets.for_ci(CiTriggerEvent(17, 101, _HEAD, "status")) == (_PR,)
+            async with uow_factory() as uow:
+                assert await uow.targets.for_ci(CiTriggerEvent(17, 101, _HEAD, "status")) == (_PR,)
+                await uow.commit()
             async with sessions() as session:
                 pr = await session.get(CodeChange, _PR)
                 assert pr is not None and pr.ci_status == {"event": "status"}
@@ -1095,12 +1161,13 @@ def test_postgres_no_ci_sweep_races_current_head_check_suite_to_one_run(
                 now=lambda: _NOW + timedelta(minutes=2),
             )
             sweep = SweepNoCi(
-                candidates=SqlAlchemyDueNoCiCandidates(sessions),
+                uow_factory=lambda: SqlAlchemySweepNoCiUnitOfWork(sessions),
                 enqueuer=enqueuer,
                 now=lambda: _NOW + timedelta(minutes=2),
             )
             trigger = TriggerFromDelivery(
-                targets=SqlAlchemyWebhookRunTargets(sessions), enqueuer=enqueuer
+                uow_factory=lambda: SqlAlchemyRunTriggerUnitOfWork(sessions),
+                enqueuer=enqueuer,
             )
 
             await asyncio.gather(
@@ -1150,7 +1217,7 @@ def test_postgres_no_ci_sweep_excludes_failed_candidate_until_state_changes(
                 pr.ci_status = {}
                 await session.commit()
             sweep = SweepNoCi(
-                candidates=SqlAlchemyDueNoCiCandidates(sessions),
+                uow_factory=lambda: SqlAlchemySweepNoCiUnitOfWork(sessions),
                 enqueuer=rest,
                 now=lambda: _NOW + timedelta(minutes=2),
             )

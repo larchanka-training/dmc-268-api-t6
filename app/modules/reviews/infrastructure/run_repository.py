@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import AsyncIterator, Sequence
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
@@ -82,18 +83,29 @@ def authorized_run(scope: AuthScope | None, *, allow_unscoped: bool = False) -> 
 class SqlAlchemyRunRepository:
     def __init__(
         self,
-        session_factory: async_sessionmaker[AsyncSession],
+        session_factory: async_sessionmaker[AsyncSession] | None = None,
         scope: AuthScope | None = None,
         *,
         allow_unscoped: bool = False,
+        session: AsyncSession | None = None,
     ) -> None:
         if scope is None and not allow_unscoped:
             raise ValueError(
                 "SqlAlchemyRunRepository requires an AuthScope unless allow_unscoped=True"
             )
         self._session_factory = session_factory
+        self._session = session
         self._scope = scope
         self._allow_unscoped = allow_unscoped
+
+    @asynccontextmanager
+    async def _session_scope(self) -> AsyncIterator[AsyncSession]:
+        if self._session is not None:
+            yield self._session
+        else:
+            assert self._session_factory is not None
+            async with self._session_factory() as session:
+                yield session
 
     def _authorized_run(self) -> ColumnElement[bool]:
         return authorized_run(self._scope, allow_unscoped=self._allow_unscoped)
@@ -101,7 +113,7 @@ class SqlAlchemyRunRepository:
     async def has_run_access(self, run_id: UUID) -> bool:
         """Lightweight query verifying repository access for a Run without loading details."""
         statement = select(1).where(Run.id == run_id, self._authorized_run())
-        async with self._session_factory() as session:
+        async with self._session_scope() as session:
             return (await session.scalar(statement)) is not None
 
     async def list_runs(
@@ -146,7 +158,7 @@ class SqlAlchemyRunRepository:
                 )
             )
 
-        async with self._session_factory() as session:
+        async with self._session_scope() as session:
             rows = (await session.execute(statement)).all()
         return [self._to_run_list_item(*row) for row in rows]
 
@@ -172,12 +184,12 @@ class SqlAlchemyRunRepository:
             .where(Run.id == run_id)
             .where(self._authorized_run())
         )
-        async with self._session_factory() as session:
+        async with self._session_scope() as session:
             row = (await session.execute(statement)).one_or_none()
         return self._to_run_list_item(*row) if row is not None else None
 
     async def get_run_review(self, run_id: UUID) -> RunReview | None:
-        async with self._session_factory() as session:
+        async with self._session_scope() as session:
             pr = await session.scalar(
                 select(CodeChange)
                 .join(Run, Run.code_change_id == CodeChange.id)
@@ -250,7 +262,7 @@ class SqlAlchemyRunRepository:
             .where(self._authorized_run())
             .order_by(Finding.created_at.asc(), Finding.id.asc())
         )
-        async with self._session_factory() as session:
+        async with self._session_scope() as session:
             rows = (await session.execute(statement)).all()
         if not rows:
             return None
@@ -264,7 +276,7 @@ class SqlAlchemyRunRepository:
             .where(self._authorized_run())
             .order_by(RunAction.index.asc())
         )
-        async with self._session_factory() as session:
+        async with self._session_scope() as session:
             rows = (await session.execute(statement)).all()
         if not rows:
             return None
@@ -280,7 +292,7 @@ class SqlAlchemyRunRepository:
             )
             .where(Run.id == run_id, RunAction.index == index, self._authorized_run())
         )
-        async with self._session_factory() as session:
+        async with self._session_scope() as session:
             row = (await session.execute(statement)).one_or_none()
         if row is None:
             return None
@@ -298,7 +310,7 @@ class SqlAlchemyRunRepository:
             .where(self._authorized_run())
             .order_by(CodeChangeDiff.filename.asc())
         )
-        async with self._session_factory() as session:
+        async with self._session_scope() as session:
             rows = (await session.execute(statement)).all()
         if not rows:
             return None
@@ -312,7 +324,7 @@ class SqlAlchemyRunRepository:
             .where(self._authorized_run())
             .order_by(CodeChangeDiff.filename.asc())
         )
-        async with self._session_factory() as session:
+        async with self._session_scope() as session:
             rows = (await session.execute(statement)).all()
         if not rows or rows[0][0] is None:
             return None
@@ -325,7 +337,7 @@ class SqlAlchemyRunRepository:
         head_sha: str,
         snapshots: list[DiffSnapshot],
     ) -> list[DiffSnapshot]:
-        async with self._session_factory() as session:
+        async with self._session_scope() as session:
             run = await session.scalar(select(Run).where(Run.id == run_id).with_for_update())
             if run is None or run.code_change_id != code_change_id or run.head_sha != head_sha:
                 raise ValueError("run revision changed before diff snapshot storage")
@@ -361,12 +373,11 @@ class SqlAlchemyRunRepository:
             )
             run.diff_snapshotted_at = datetime.now(UTC)
             await session.flush()
-            await session.commit()
         return snapshots
 
     async def get_run_diff_input(self, run_id: UUID) -> RunDiffInput | None:
         statement = select(Run.code_change_id, Run.head_sha).where(Run.id == run_id)
-        async with self._session_factory() as session:
+        async with self._session_scope() as session:
             row = (await session.execute(statement)).one_or_none()
         if row is None:
             return None
@@ -391,7 +402,7 @@ class SqlAlchemyRunRepository:
             )
             .where(Run.id == run_id)
         )
-        async with self._session_factory() as session:
+        async with self._session_scope() as session:
             row = (await session.execute(statement)).one_or_none()
         if row is None:
             return None
@@ -419,7 +430,7 @@ class SqlAlchemyRunRepository:
             )
             .where(Run.id == run_id)
         )
-        async with self._session_factory() as session:
+        async with self._session_scope() as session:
             row = (await session.execute(statement)).one_or_none()
         if row is None:
             return None
@@ -445,7 +456,7 @@ class SqlAlchemyRunRepository:
             )
             .where(Run.id == run_id, CodeChangeDiff.blob_sha.is_not(None), self._authorized_run())
         )
-        async with self._session_factory() as session:
+        async with self._session_scope() as session:
             row = (await session.execute(statement)).one_or_none()
         if row is None:
             return None
@@ -460,6 +471,7 @@ class SqlAlchemyRunRepository:
         ``cancel_requested`` at a checkpoint.  Terminal rows are intentionally
         left untouched, making retries idempotent.
         """
+        assert self._session_factory is not None
         async with self._session_factory.begin() as session:
             run = await session.scalar(
                 select(Run).where(Run.id == run_id, self._authorized_run()).with_for_update()

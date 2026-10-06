@@ -137,6 +137,7 @@ class Delivery:
     message_id: str = "m"
     acked: bool = False
     nacked: list[bool] = field(default_factory=list)
+    headers: dict[str, Any] = field(default_factory=dict)
 
     async def ack(self) -> None:
         self.acked = True
@@ -220,6 +221,55 @@ def test_handler_repeated_errors_route_to_dlq_with_log(
     with caplog.at_level(logging.ERROR):
         d3, _ = _deliver(VALID, RuntimeError("unexpected error 3"))
     assert d3.nacked == [False] and not d3.acked
+    assert "exceeded maximum unexpected retry attempts (3); routing to DLQ" in caplog.text
+
+
+def test_handler_repeated_errors_route_to_dlq_across_worker_restarts(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    async def no_sleep(seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr(asyncio, "sleep", no_sleep)
+
+    delivery = Delivery(VALID)
+
+    async def failing_handler(run_id: UUID) -> DeliveryOutcome:
+        raise RuntimeError("worker crash simulation")
+
+    # Worker 1 fails -> requeued
+    amqp._clear_delivery_attempts("m")
+    incoming = cast(AbstractIncomingMessage, delivery)
+    asyncio.run(amqp.handle_run_delivery(incoming, failing_handler))
+    assert delivery.nacked == [True] and not delivery.acked
+
+    # Worker 2 restarts (empty process state), gets redelivery -> requeued
+    amqp._clear_delivery_attempts("m")
+    asyncio.run(amqp.handle_run_delivery(incoming, failing_handler))
+    assert delivery.nacked == [True, True] and not delivery.acked
+
+    # Worker 3 restarts (empty process state), gets redelivery -> reaches 3 -> DLQ!
+    amqp._clear_delivery_attempts("m")
+    with caplog.at_level(logging.ERROR):
+        asyncio.run(amqp.handle_run_delivery(incoming, failing_handler))
+    assert delivery.nacked == [True, True, False] and not delivery.acked
+    assert "exceeded maximum unexpected retry attempts (3); routing to DLQ" in caplog.text
+
+
+def test_handler_routes_to_dlq_when_broker_delivery_count_reaches_limit(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Message redelivered 2 times previously per broker quorum header -> this attempt is 3
+    delivery = Delivery(VALID, headers={"x-delivery-count": 2})
+    amqp._clear_delivery_attempts("m")
+
+    async def failing_handler(run_id: UUID) -> DeliveryOutcome:
+        raise RuntimeError("broken run")
+
+    with caplog.at_level(logging.ERROR):
+        incoming = cast(AbstractIncomingMessage, delivery)
+        asyncio.run(amqp.handle_run_delivery(incoming, failing_handler))
+    assert delivery.nacked == [False] and not delivery.acked
     assert "exceeded maximum unexpected retry attempts (3); routing to DLQ" in caplog.text
 
 

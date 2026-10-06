@@ -54,10 +54,15 @@ class SqlAlchemyBlobCache:
 
     def __init__(
         self,
-        session_factory: async_sessionmaker[AsyncSession],
+        session_or_factory: AsyncSession | async_sessionmaker[AsyncSession],
         now: Callable[[], datetime] | None = None,
     ) -> None:
-        self._session_factory = session_factory
+        if isinstance(session_or_factory, AsyncSession):
+            self._session: AsyncSession | None = session_or_factory
+            self._session_factory: async_sessionmaker[AsyncSession] | None = None
+        else:
+            self._session = None
+            self._session_factory = session_or_factory
         self._now = now or (lambda: datetime.now(UTC))
 
     async def put(self, key: BlobCacheKey, content: str, *, ttl: timedelta = SEVEN_DAYS) -> None:
@@ -72,20 +77,28 @@ class SqlAlchemyBlobCache:
             index_elements=[CachedFileBlob.repository_id, CachedFileBlob.blob_sha],
             set_={"content": content, "expires_at": expires_at},
         )
-        async with self._session_factory() as session:
-            await session.execute(statement)
-            if hasattr(session, "flush"):
-                await session.flush()
-            if hasattr(session, "commit"):
-                await session.commit()
+        if self._session is not None:
+            await self._session.execute(statement)
+            if hasattr(self._session, "flush"):
+                await self._session.flush()
+        else:
+            assert self._session_factory is not None
+            async with self._session_factory() as session:
+                await session.execute(statement)
+                if hasattr(session, "flush"):
+                    await session.flush()
 
     async def get(self, key: BlobCacheKey) -> BlobCacheEntry:
         statement = select(CachedFileBlob.content, CachedFileBlob.expires_at).where(
             CachedFileBlob.repository_id == key.repository_id,
             CachedFileBlob.blob_sha == key.blob_sha,
         )
-        async with self._session_factory() as session:
-            row = (await session.execute(statement)).one_or_none()
+        if self._session is not None:
+            row = (await self._session.execute(statement)).one_or_none()
+        else:
+            assert self._session_factory is not None
+            async with self._session_factory() as session:
+                row = (await session.execute(statement)).one_or_none()
         if row is None:
             return BlobCacheEntry(status=BlobCacheStatus.MISS, content=None)
         content, expires_at = row
