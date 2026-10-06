@@ -102,10 +102,17 @@ def test_concurrent_refresh_replay_revokes_every_family_token(
     )
     factory = async_sessionmaker(engine, expire_on_commit=False)
     clock = [datetime.now(UTC)]
+    token_index = 0
+
+    def next_token() -> str:
+        nonlocal token_index
+        token_index += 1
+        return f"replacement-secret-{token_index}"
+
     refresh = RefreshLocalSession(
         uow_factory=lambda: SqlAlchemyAuthSessionUnitOfWork(factory),
         issuer=FakeIssuer(),
-        new_refresh_token=lambda: "replacement-secret",
+        new_refresh_token=next_token,
         now=lambda: clock[0],
     )
 
@@ -147,7 +154,7 @@ def test_concurrent_refresh_replay_revokes_every_family_token(
             assert all(row.revoked_at is not None for row in rows)
 
         with pytest.raises(InvalidRefreshToken):
-            await refresh.execute("replacement-secret")
+            await refresh.execute("replacement-secret-1")
 
     try:
         asyncio.run(exercise())
