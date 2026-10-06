@@ -273,23 +273,23 @@ def test_an_ineligible_decision_reports_the_gate_reason() -> None:
 
 
 @pytest.mark.parametrize(
-    ("miss", "status"),
+    ("miss", "status", "reason"),
     [
-        (CandidateMiss.MISSING_INSTALLATION, EnqueueStatus.UNCONFIGURED),
-        (CandidateMiss.MISSING_RULES, EnqueueStatus.UNCONFIGURED),
-        (CandidateMiss.MISSING_PROMPT, EnqueueStatus.UNCONFIGURED),
-        (CandidateMiss.PULL_REQUEST_GONE, EnqueueStatus.STALE),
-        (CandidateMiss.REPOSITORY_GONE, EnqueueStatus.STALE),
+        (CandidateMiss.MISSING_INSTALLATION, EnqueueStatus.UNCONFIGURED, "missing_installation"),
+        (CandidateMiss.MISSING_RULES, EnqueueStatus.UNCONFIGURED, "missing_rules"),
+        (CandidateMiss.MISSING_PROMPT, EnqueueStatus.UNCONFIGURED, "missing_prompt"),
+        (CandidateMiss.PULL_REQUEST_GONE, EnqueueStatus.STALE, "pull_request_gone"),
+        (CandidateMiss.REPOSITORY_GONE, EnqueueStatus.STALE, "repository_gone"),
     ],
 )
 def test_a_missing_candidate_names_what_is_missing(
-    miss: CandidateMiss, status: EnqueueStatus
+    miss: CandidateMiss, status: EnqueueStatus, reason: str
 ) -> None:
     use_case, uow = _enqueue(store=Runs(candidate=miss))
 
     result = asyncio.run(use_case.execute(_PR, _HEAD))
 
-    assert result == EnqueueResult(status, reason=miss.value)
+    assert result == EnqueueResult(status, reason=reason)
     assert uow.commits == 0
     assert uow.store.pending is None
 
@@ -304,14 +304,22 @@ def test_a_candidate_that_moved_since_the_decision_is_stale_with_state_changed()
     assert uow.store.pending is None
 
 
-@pytest.mark.parametrize("reason", list(DuplicateReason))
-def test_a_duplicate_reports_why_no_second_run_was_created(reason: DuplicateReason) -> None:
+@pytest.mark.parametrize(
+    ("duplicate", "reason"),
+    [
+        (DuplicateReason.ACTIVE_RUN, "active_run"),
+        (DuplicateReason.HEAD_ALREADY_REVIEWED, "head_already_reviewed"),
+    ],
+)
+def test_a_duplicate_reports_why_no_second_run_was_created(
+    duplicate: DuplicateReason, reason: str
+) -> None:
     pending = PendingRunMessage.from_candidate(_RUN, _insert_candidate(), _NOW)
-    use_case, uow = _enqueue(store=Runs(pending=pending, duplicate=reason))
+    use_case, uow = _enqueue(store=Runs(pending=pending, duplicate=duplicate))
 
     result = asyncio.run(use_case.execute(_PR, _HEAD))
 
-    assert result == EnqueueResult(EnqueueStatus.DUPLICATE, reason=reason.value)
+    assert result == EnqueueResult(EnqueueStatus.DUPLICATE, reason=reason)
     assert uow.commits == 0
 
 
