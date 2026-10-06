@@ -8,6 +8,9 @@ from dataclasses import dataclass
 from typing import Protocol
 from uuid import UUID
 
+from app.modules.integrations.webhooks.application.installation_access_token import (
+    InstallationAccessTokenError,
+)
 from app.modules.repositories.application.installation_repositories import (
     InstallationRepositoriesEvent,
     RepositoryReference,
@@ -27,6 +30,13 @@ _LOGGER = logging.getLogger(__name__)
 # one repository stays small, see the class docstring) and stay far from GitHub's
 # concurrent-request limit (100 per token).
 _MAX_CONCURRENT_REPOSITORIES = 4
+
+
+class _Skipped:
+    """A repository that never started: the installation token failed before its turn."""
+
+
+_SKIPPED = _Skipped()
 
 
 @dataclass(frozen=True)
@@ -113,11 +123,15 @@ class InstallationEventProjector:
     cannot be read does not discard the others: the readable ones go to ``sync``
     (which therefore never opens its unit of work before every GitHub call is done),
     then the first failure in event order propagates unchanged: the dispatcher defers
-    the delivery when it is ``RepositoryDetailsUnavailableError``, any other error
-    leaves it eligible for retry on the failed path.  Replaying the whole event is safe
-    to repeat (replay upserts and re-enables saved repositories).  Removed/deleted
-    events enter the explicit transactional soft-disable path without making a VCS
-    request.
+    the delivery when it is ``RepositoryDetailsUnavailableError`` or a transient
+    ``InstallationAccessTokenError``, any other error leaves it eligible for retry on
+    the failed path.  Repositories are processed independently, except after a failure
+    to obtain the installation token: it concerns the whole installation, so the
+    repositories that have not started are skipped (one WARNING counts them), while the
+    running ones finish and the readable ones are still saved.  Replaying the whole
+    event is safe to repeat (replay upserts and re-enables saved repositories).
+    Removed/deleted events enter the explicit transactional soft-disable path without
+    making a VCS request.
     """
 
     def __init__(
@@ -151,12 +165,22 @@ class InstallationEventProjector:
             return ()
 
         slots = asyncio.Semaphore(self._max_concurrent_repositories)
+        token_failed = False
 
-        async def onboard(reference: RepositoryReference) -> RepositoryOnboardingInput:
+        async def onboard(reference: RepositoryReference) -> RepositoryOnboardingInput | _Skipped:
+            nonlocal token_failed
             async with slots:
-                return await self._onboard_repository(event.installation_external_id, reference)
+                # Set before the slot is released, so the next repository in line sees it.
+                if token_failed:
+                    return _SKIPPED
+                try:
+                    return await self._onboard_repository(event.installation_external_id, reference)
+                except InstallationAccessTokenError:
+                    token_failed = True
+                    raise
 
-        # No fail-fast: every repository runs to its end, results keep the event order.
+        # No fail-fast on a repository's own error: every repository runs to its end (a token
+        # failure only skips the ones that have not started); results keep the event order.
         outcomes = await asyncio.gather(
             *(onboard(reference) for reference in event.added_repositories),
             return_exceptions=True,
@@ -174,10 +198,12 @@ class InstallationEventProjector:
         for reference, failure in failures:
             # The type and the HTTP status only: an HTTP error's text carries the request
             # URL. The status is read by duck typing to keep httpx out of this layer.
-            # The typed details error stands for the failure that caused it.
+            # A typed details or token error stands for the failure that caused it.
             cause = (
                 failure.__cause__
-                if isinstance(failure, RepositoryDetailsUnavailableError)
+                if isinstance(
+                    failure, (RepositoryDetailsUnavailableError, InstallationAccessTokenError)
+                )
                 else None
             )
             reported = failure if cause is None else cause
@@ -189,6 +215,14 @@ class InstallationEventProjector:
                 reference.full_name,
                 type(reported).__name__,
                 getattr(getattr(reported, "response", None), "status_code", None),
+            )
+        skipped = sum(1 for outcome in outcomes if outcome is _SKIPPED)
+        if skipped:
+            _LOGGER.warning(
+                "Skipped repositories after an installation token failure: "
+                "installation_id=%s skipped=%s",
+                event.installation_external_id,
+                skipped,
             )
         results: tuple[OnboardingResult, ...] = ()
         if inputs:
