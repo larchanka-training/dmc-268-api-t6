@@ -170,7 +170,7 @@ class FakeReceiptUnitOfWork:
         retry_after: datetime,
         failed_at: datetime,
         max_attempts: int,
-    ) -> None:
+    ) -> bool:
         row = self.rows[delivery_id]
         assert row.claim_token == token
         row.projection_attempt_count += 1
@@ -179,8 +179,9 @@ class FakeReceiptUnitOfWork:
         if row.projection_attempt_count == max_attempts:
             row.projection_failed_at = failed_at
             row.retry_after = None
-        else:
-            row.retry_after = retry_after
+            return True
+        row.retry_after = retry_after
+        return False
 
     async def pending_ids(self, now: datetime, limit: int) -> tuple[str, ...]:
         return tuple(
@@ -908,7 +909,7 @@ def test_failure_line_survives_a_failing_release_of_the_receipt(
             retry_after: datetime,
             failed_at: datetime,
             max_attempts: int,
-        ) -> None:
+        ) -> bool:
             raise OperationalError("UPDATE", {}, Exception("connection lost"))
 
     uow = ReleaseFailsUnitOfWork()
@@ -932,6 +933,104 @@ def test_failure_line_survives_a_failing_release_of_the_receipt(
     (traceback_record,) = _traceback_records(caplog)
     assert traceback_record.exc_info is not None
     assert traceback_record.exc_info[0] is OperationalError
+
+
+def _warning_and_error_records(caplog: pytest.LogCaptureFixture) -> list[tuple[int, str]]:
+    return [
+        (record.levelno, record.getMessage())
+        for record in caplog.records
+        if record.name == _DELIVERY_LOGGER and record.levelno >= logging.WARNING
+    ]
+
+
+def test_only_the_last_failed_attempt_logs_that_the_delivery_failed(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    clock = [_NOW]
+    uow = FakeReceiptUnitOfWork()
+    receiver = ReceiveGitHubDelivery(
+        uow_factory=lambda: uow,
+        dispatcher=GitHubWebhookDispatchAdapter(
+            FailingTypedDispatcher(httpx.ConnectError("refused"))
+        ),
+        now=lambda: clock[0],
+        action_of=action_of,
+        classify_failure=classify_failure,
+    )
+    asyncio.run(receiver.execute(_pull_request_receipt("last-1")))
+
+    per_attempt: list[list[tuple[int, str]]] = []
+    for _ in range(3):
+        caplog.clear()
+        with caplog.at_level(logging.INFO, logger=_DELIVERY_LOGGER):
+            assert asyncio.run(receiver.replay_pending()) == 0
+        per_attempt.append(_warning_and_error_records(caplog))
+        clock[0] += timedelta(seconds=31)
+
+    failure = (
+        logging.WARNING,
+        "GitHub webhook delivery last-1 event=pull_request action=labeled "
+        "failed stage=dispatch category=github_request error=ConnectError",
+    )
+    traceback_line = (logging.ERROR, "GitHub webhook projection failed for delivery last-1")
+    assert per_attempt == [
+        [failure, traceback_line],
+        [failure, traceback_line],
+        [
+            failure,
+            (
+                logging.WARNING,
+                "GitHub webhook delivery last-1 failed after its last attempt: ConnectError",
+            ),
+            traceback_line,
+        ],
+    ]
+    assert uow.rows["last-1"].projection_failed_at == _NOW + timedelta(seconds=62)
+
+
+def test_last_failed_attempt_is_not_logged_as_final_when_its_release_is_not_committed(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    @dataclass
+    class FinalReleaseCommitFailsUnitOfWork(FakeReceiptUnitOfWork):
+        released: bool = False
+
+        async def release_after_dispatch_failure(
+            self,
+            delivery_id: str,
+            token: UUID,
+            retry_after: datetime,
+            failed_at: datetime,
+            max_attempts: int,
+        ) -> bool:
+            self.released = True
+            return True
+
+        async def commit(self) -> None:
+            if self.released:
+                raise OperationalError("COMMIT", {}, Exception("connection lost"))
+            await super().commit()
+
+    uow = FinalReleaseCommitFailsUnitOfWork()
+    receiver = ReceiveGitHubDelivery(
+        uow_factory=lambda: uow,
+        dispatcher=GitHubWebhookDispatchAdapter(FailingTypedDispatcher(RuntimeError("boom"))),
+        now=lambda: _NOW,
+        action_of=action_of,
+        classify_failure=classify_failure,
+    )
+    asyncio.run(receiver.execute(_pull_request_receipt("uncommitted-1")))
+    with caplog.at_level(logging.INFO, logger=_DELIVERY_LOGGER):
+        assert asyncio.run(receiver.replay_pending()) == 0
+
+    assert _warning_and_error_records(caplog) == [
+        (
+            logging.WARNING,
+            "GitHub webhook delivery uncommitted-1 event=pull_request action=labeled "
+            "failed stage=dispatch category=internal error=RuntimeError",
+        ),
+        (logging.ERROR, "GitHub webhook projection failed for delivery uncommitted-1"),
+    ]
 
 
 @pytest.mark.parametrize("failing_step", ["mark_projected", "commit"])
@@ -1947,6 +2046,7 @@ def test_postgresql_failed_dispatches_are_terminal_after_three_attempts(
                 assert await uow.receipts.save(delivery.to_receipt()) is True
                 await uow.commit()
 
+            finals: list[bool] = []
             for attempt in range(1, 4):
                 async with SqlAlchemyGitHubWebhookReceiptUnitOfWork(sessions) as uow:
                     token = uuid4()
@@ -1956,12 +2056,14 @@ def test_postgresql_failed_dispatches_are_terminal_after_three_attempts(
                         )
                         == delivery.to_receipt()
                     )
-                    await uow.receipts.release_after_dispatch_failure(
-                        delivery.delivery_id,
-                        token,
-                        now + timedelta(seconds=30),
-                        now,
-                        max_attempts=3,
+                    finals.append(
+                        await uow.receipts.release_after_dispatch_failure(
+                            delivery.delivery_id,
+                            token,
+                            now + timedelta(seconds=30),
+                            now,
+                            max_attempts=3,
+                        )
                     )
                     await uow.commit()
 
@@ -1971,10 +2073,69 @@ def test_postgresql_failed_dispatches_are_terminal_after_three_attempts(
                         expected_pending
                     )
                 now += timedelta(seconds=31)
+            # Only the release that marks the receipt failed reports it.
+            assert finals == [False, False, True]
         finally:
             await engine.dispose()
 
     asyncio.run(exercise())
+
+
+@pytest.mark.integration
+def test_postgresql_last_failed_dispatch_logs_that_the_delivery_failed(
+    isolated_webhook_database: tuple[Connection, str, str], caplog: pytest.LogCaptureFixture
+) -> None:
+    connection, database_url, schema = isolated_webhook_database
+    config = Config("alembic.ini")
+    config.attributes["connection"] = connection
+    command.upgrade(config, "head")
+
+    class AlwaysFailDispatcher:
+        async def execute(self, delivery: WebhookReceipt) -> InstallationDeliveryDispatchResult:
+            raise RuntimeError("GitHub unavailable")
+
+    async def exercise() -> list[list[str]]:
+        engine = create_async_engine(
+            database_url, connect_args={"options": f"-csearch_path={schema}"}
+        )
+        sessions = async_sessionmaker(engine, expire_on_commit=False)
+        clock = [datetime(2026, 9, 28, tzinfo=UTC)]
+        receiver = ReceiveGitHubDelivery(
+            uow_factory=lambda: SqlAlchemyGitHubWebhookReceiptUnitOfWork(sessions),
+            dispatcher=AlwaysFailDispatcher(),
+            now=lambda: clock[0],
+        )
+        warnings: list[list[str]] = []
+        try:
+            receipt = VerifiedGitHubDelivery("last-pg-1", "ping", {"zen": "hello"}).to_receipt()
+            await receiver.execute(receipt)
+            for _ in range(3):
+                caplog.clear()
+                assert await receiver.replay_pending() == 0
+                warnings.append(
+                    [
+                        record.getMessage()
+                        for record in caplog.records
+                        if record.name == _DELIVERY_LOGGER and record.levelno == logging.WARNING
+                    ]
+                )
+                clock[0] += timedelta(seconds=31)
+        finally:
+            await engine.dispose()
+        return warnings
+
+    with caplog.at_level(logging.INFO, logger=_DELIVERY_LOGGER):
+        per_attempt = asyncio.run(exercise())
+
+    failure = (
+        "GitHub webhook delivery last-pg-1 event=ping action=- "
+        "failed stage=dispatch category=internal error=RuntimeError"
+    )
+    assert per_attempt == [
+        [failure],
+        [failure],
+        [failure, "GitHub webhook delivery last-pg-1 failed after its last attempt: RuntimeError"],
+    ]
 
 
 @pytest.mark.integration

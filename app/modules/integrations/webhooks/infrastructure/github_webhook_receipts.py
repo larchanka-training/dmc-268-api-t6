@@ -168,7 +168,7 @@ class SqlAlchemyGitHubWebhookReceiptStore:
         retry_after: datetime,
         failed_at: datetime,
         max_attempts: int,
-    ) -> None:
+    ) -> bool:
         next_attempt_count = WebhookEvent.projection_attempt_count + 1
         is_final_attempt = next_attempt_count >= max_attempts
         statement = (
@@ -186,8 +186,9 @@ class SqlAlchemyGitHubWebhookReceiptStore:
                 projection_failed_at=case((is_final_attempt, failed_at), else_=None),
                 retry_after=case((is_final_attempt, None), else_=retry_after),
             )
+            .returning(WebhookEvent.projection_failed_at)
         )
-        await self._session.execute(statement)
+        return await self._session.scalar(statement) is not None
 
     async def pending_ids(self, now: datetime, limit: int) -> tuple[str, ...]:
         statement = (

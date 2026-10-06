@@ -37,7 +37,9 @@ eligibility and the no-CI sweep consider only open PRs (`docs/PIPELINE_SPEC.md` 
 example a GitHub error or the 240 s dispatch timeout) releases the receipt for a retry after
 30 s; the third failure marks it failed and it is no longer replayed (if the release itself fails,
 the receipt keeps its claim until the 5-minute lease lapses and the attempt counter does not
-advance). It also projects
+advance). Once that mark is committed, the worker logs a WARNING after the failure line,
+`GitHub webhook delivery <delivery_id> failed after its last attempt: <ExceptionClass>`
+(see "Failure log" below). It also projects
 installation events. A delivery for an unknown installation or repository, or for an
 installation event whose repository details GitHub cannot answer, is deferred instead, see
 "Deferred deliveries" below.
@@ -94,7 +96,7 @@ and a CI event joins one such outcome per open PR on that head with `; ` (and ha
 | --- | --- | --- |
 | `enqueued` | | the Run was inserted and published (`run=<id>`) |
 | `publication_pending` | | the Run was inserted, the broker publish failed; the review worker's leader loop replays it |
-| `ineligible` | the CI gate reason: `ci_blocked` (a foreign check suite or the commit status is not green), `waiting_for_ci` (no CI evidence yet with `wait_for_ci = always`, or still inside the 2-minute `auto` window), `label_not_active`, `stale_head`, `stale_state`, `closed_pr`, `disabled_repository`, `unknown_pr` | the gate decided not to start a Run |
+| `ineligible` | the CI gate reason: `ci_blocked` (a foreign check suite or the commit status is not green), `waiting_for_ci` (no CI evidence yet: with `wait_for_ci = always`, with `auto` while the label or head time is unknown, or with `auto` still inside the 2-minute window), `label_not_active`, `stale_head`, `stale_state`, `closed_pr`, `disabled_repository`, `unknown_pr` | the gate decided not to start a Run |
 | `unconfigured` | `missing_installation`, `missing_rules` (no active rule version), `missing_prompt` (no active `review.system` prompt and none pinned) | the repository lacks what a Run needs; a new label or CI event does not change that |
 | `stale` | `pull_request_gone`, `repository_gone`, `state_changed` (the PR changed between the gate and the locked read) | the decision no longer matches the current PR |
 | `duplicate` | `active_run` (a queued, running or publishing Run exists), `head_already_reviewed` (this head already has a webhook Run) | no second Run is created |
@@ -192,7 +194,7 @@ error, the receipt release and the sweep's ERROR record are unchanged.
 | stage | meaning |
 | --- | --- |
 | `claim` | the receipt could not be claimed; `event` and `action` are `-` |
-| `dispatch` | the projection or the Run trigger failed (a GitHub request, the database, the 240 s timeout); a Run may already exist, see above. The receipt is released for a retry after 30 s and the third failure marks it failed; if the release itself fails, the line still names the dispatch error, but the receipt waits for the 5-minute claim lease and its attempt counter does not advance |
+| `dispatch` | the projection or the Run trigger failed (a GitHub request, the database, the 240 s timeout); a Run may already exist, see above. The receipt is released for a retry after 30 s and the third failure marks it failed; once that is committed, a second WARNING follows the line, `GitHub webhook delivery <delivery_id> failed after its last attempt: <ExceptionClass>`, so the last attempt is told apart from one that is retried; if the release itself fails, the line still names the dispatch error, but the receipt waits for the 5-minute claim lease and its attempt counter does not advance |
 | `finalize` | the dispatch finished but updating the receipt failed; `outcome` and `detail` repeat the dispatch result, so a Run may already exist. The claim lapses after 5 minutes and the delivery is replayed; the trigger answers `duplicate` instead of creating a second Run |
 
 The use case maps only `timeout` itself: any builtin `TimeoutError`, which needs no library
