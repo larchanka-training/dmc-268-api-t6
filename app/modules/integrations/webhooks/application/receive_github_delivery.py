@@ -105,7 +105,12 @@ class GitHubWebhookReceiptStore(Protocol):
         retry_after: datetime,
         failed_at: datetime,
         max_attempts: int,
-    ) -> None: ...
+    ) -> bool:
+        """Retry a failed delivery later; the last attempt sets projection_failed_at (True).
+
+        A failed receipt is never selected again.
+        """
+        ...
 
     async def pending_ids(self, now: datetime, limit: int) -> tuple[str, ...]: ...
 
@@ -216,7 +221,7 @@ class ReceiveGitHubDelivery:
             self._log_failure(delivery_id, delivery, FailureStage.DISPATCH, exc)
             async with self._uow_factory() as uow:
                 failed_at = self._now()
-                await uow.receipts.release_after_dispatch_failure(
+                failed = await uow.receipts.release_after_dispatch_failure(
                     delivery_id,
                     token,
                     failed_at + _FAILURE_RETRY,
@@ -224,6 +229,13 @@ class ReceiveGitHubDelivery:
                     _MAX_DISPATCH_ATTEMPTS,
                 )
                 await uow.commit()
+            if failed:
+                # Logged after the commit: a failed commit leaves the receipt retryable.
+                _LOGGER.warning(
+                    "GitHub webhook delivery %s failed after its last attempt: %s",
+                    delivery_id,
+                    type(exc).__name__,
+                )
             raise
 
         retry_note = ""

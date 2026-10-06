@@ -159,7 +159,7 @@ class ReceiptStore:
         retry_after: datetime,
         failed_at: datetime,
         max_attempts: int,
-    ) -> None:
+    ) -> bool:
         raise AssertionError("successful full path must not release its receipt")
 
 
