@@ -15,7 +15,6 @@ from types import TracebackType
 from typing import Self, cast
 from uuid import UUID, uuid4
 
-import httpcore
 import httpx
 import psycopg
 import pytest
@@ -46,10 +45,11 @@ from app.modules.integrations.webhooks.application.github_installation_dispatch 
     PullRequestLabelIntentHandler,
 )
 from app.modules.integrations.webhooks.application.receive_github_delivery import (
+    FailureCategory,
     ReceiveGitHubDelivery,
     WebhookReceipt,
-    failure_category,
 )
+from app.modules.integrations.webhooks.infrastructure.failure_category import classify_failure
 from app.modules.integrations.webhooks.infrastructure.github_webhook_receipts import (
     SqlAlchemyGitHubWebhookReceiptUnitOfWork,
 )
@@ -738,6 +738,7 @@ def _dispatch_failure_run(
     *,
     dispatch_timeout_seconds: float = 1.0,
     reader: Callable[[WebhookReceipt], str | None] = action_of,
+    classifier: Callable[[BaseException], FailureCategory] | None = classify_failure,
 ) -> FakeReceiptUnitOfWork:
     uow = FakeReceiptUnitOfWork()
     receiver = ReceiveGitHubDelivery(
@@ -746,6 +747,7 @@ def _dispatch_failure_run(
         now=lambda: _NOW,
         dispatch_timeout_seconds=dispatch_timeout_seconds,
         action_of=reader,
+        classify_failure=classifier,
     )
     asyncio.run(receiver.execute(receipt))
     with caplog.at_level(logging.INFO, logger=_DELIVERY_LOGGER):
@@ -889,6 +891,7 @@ def test_failure_line_survives_a_failing_release_of_the_receipt(
         ),
         now=lambda: _NOW,
         action_of=action_of,
+        classify_failure=classify_failure,
     )
     asyncio.run(receiver.execute(_pull_request_receipt("release-1")))
     with caplog.at_level(logging.INFO, logger=_DELIVERY_LOGGER):
@@ -932,7 +935,11 @@ def test_failure_after_a_successful_dispatch_logs_the_outcome_that_may_exist(
             )
 
     receiver = ReceiveGitHubDelivery(
-        uow_factory=lambda: uow, dispatcher=Dispatcher(), now=lambda: _NOW, action_of=action_of
+        uow_factory=lambda: uow,
+        dispatcher=Dispatcher(),
+        now=lambda: _NOW,
+        action_of=action_of,
+        classify_failure=classify_failure,
     )
     asyncio.run(receiver.execute(_pull_request_receipt("final-1")))
     with caplog.at_level(logging.INFO, logger=_DELIVERY_LOGGER):
@@ -963,7 +970,11 @@ def test_failure_to_claim_a_receipt_logs_the_claim_stage_without_event_or_action
 
     uow = ClaimFailsUnitOfWork()
     receiver = ReceiveGitHubDelivery(
-        uow_factory=lambda: uow, dispatcher=FakeDispatcher(), now=lambda: _NOW, action_of=action_of
+        uow_factory=lambda: uow,
+        dispatcher=FakeDispatcher(),
+        now=lambda: _NOW,
+        action_of=action_of,
+        classify_failure=classify_failure,
     )
     asyncio.run(receiver.execute(_pull_request_receipt("claim-1")))
     with caplog.at_level(logging.INFO, logger=_DELIVERY_LOGGER):
@@ -1042,6 +1053,7 @@ def test_an_undecodable_payload_is_logged_as_a_reader_fallback_not_as_no_action(
         dispatcher=RaisingDispatcher(),
         now=lambda: _NOW,
         action_of=action_of,
+        classify_failure=classify_failure,
     )
     asyncio.run(receiver.execute(WebhookReceipt("undecodable-1", "pull_request", "not json")))
     with caplog.at_level(logging.INFO, logger=_DELIVERY_LOGGER):
@@ -1089,6 +1101,49 @@ def test_failure_line_has_no_action_without_a_reader(caplog: pytest.LogCaptureFi
     ]
 
 
+@pytest.mark.parametrize(
+    ("typed", "dispatch_timeout_seconds", "category", "error_name"),
+    [
+        pytest.param(
+            FailingTypedDispatcher(httpx.ConnectError("refused")),
+            1.0,
+            "internal",
+            "ConnectError",
+            id="library-error",
+        ),
+        pytest.param(FailingTypedDispatcher(), 0.001, "timeout", "TimeoutError", id="timeout"),
+        pytest.param(
+            FailingTypedDispatcher(TimeoutError("slow")),
+            1.0,
+            "timeout",
+            "TimeoutError",
+            id="builtin-timeout",
+        ),
+    ],
+)
+def test_without_a_classifier_only_a_timeout_has_a_category_of_its_own(
+    caplog: pytest.LogCaptureFixture,
+    typed: FailingTypedDispatcher,
+    dispatch_timeout_seconds: float,
+    category: str,
+    error_name: str,
+) -> None:
+    uow = _dispatch_failure_run(
+        _pull_request_receipt("unclassified-1"),
+        typed,
+        caplog,
+        dispatch_timeout_seconds=dispatch_timeout_seconds,
+        classifier=None,
+    )
+
+    assert _failure_lines(caplog) == [
+        "GitHub webhook delivery unclassified-1 event=pull_request action=labeled "
+        f"failed stage=dispatch category={category} error={error_name}"
+    ]
+    assert _fallback_records(caplog) == []
+    assert uow.rows["unclassified-1"].retry_after == _NOW + timedelta(seconds=30)
+
+
 def test_error_class_without_a_module_is_internal_and_still_released_for_retry(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -1109,20 +1164,16 @@ def test_error_class_without_a_module_is_internal_and_still_released_for_retry(
 
 
 def test_a_failing_classifier_still_writes_the_line_with_the_internal_category(
-    caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
-    def broken_category(exc: BaseException) -> str:
+    def broken_classifier(exc: BaseException) -> FailureCategory:
         raise LookupError(f"classifier bug {_SECRET_IN_MESSAGE}")
-
-    monkeypatch.setattr(
-        "app.modules.integrations.webhooks.application.receive_github_delivery.failure_category",
-        broken_category,
-    )
 
     uow = _dispatch_failure_run(
         _pull_request_receipt("mask-1"),
         FailingTypedDispatcher(httpx.ConnectError("refused")),
         caplog,
+        classifier=broken_classifier,
     )
 
     # The diagnostic record, then the failure line, then the sweep's traceback record.
@@ -1177,7 +1228,11 @@ def test_an_outcome_that_cannot_be_rendered_still_leaves_the_finalize_line(
 
     uow = MarkFailsUnitOfWork()
     receiver = ReceiveGitHubDelivery(
-        uow_factory=lambda: uow, dispatcher=Dispatcher(), now=lambda: _NOW, action_of=action_of
+        uow_factory=lambda: uow,
+        dispatcher=Dispatcher(),
+        now=lambda: _NOW,
+        action_of=action_of,
+        classify_failure=classify_failure,
     )
     asyncio.run(receiver.execute(_pull_request_receipt("outcome-1")))
     with caplog.at_level(logging.INFO, logger=_DELIVERY_LOGGER):
@@ -1248,7 +1303,11 @@ def test_final_deferral_is_logged_only_once_the_receipt_is_committed(
             )
 
     receiver = ReceiveGitHubDelivery(
-        uow_factory=lambda: uow, dispatcher=Dispatcher(), now=lambda: _NOW, action_of=action_of
+        uow_factory=lambda: uow,
+        dispatcher=Dispatcher(),
+        now=lambda: _NOW,
+        action_of=action_of,
+        classify_failure=classify_failure,
     )
     with caplog.at_level(logging.INFO, logger=_DELIVERY_LOGGER):
         assert asyncio.run(receiver.replay_pending()) == (0 if commit_fails else 1)
@@ -1314,29 +1373,37 @@ def test_action_reader_raises_for_a_payload_that_cannot_be_decoded(
 
 
 @pytest.mark.parametrize(
-    ("error", "category"),
+    ("error", "member", "logged"),
     [
-        (httpx.ConnectError("refused"), "github_request"),
-        (httpx.ReadTimeout("slow"), "github_request"),
+        (httpx.ConnectError("refused"), FailureCategory.GITHUB_REQUEST, "github_request"),
+        (httpx.ReadTimeout("slow"), FailureCategory.GITHUB_REQUEST, "github_request"),
         (
             httpx.HTTPStatusError(
                 "500", request=httpx.Request("GET", "https://x"), response=httpx.Response(500)
             ),
+            FailureCategory.GITHUB_REQUEST,
             "github_request",
         ),
-        (httpcore.ConnectError("refused"), "github_request"),
-        (OperationalError("SELECT 1", {}, Exception("lost")), "database"),
-        (PoolTimeoutError("QueuePool limit reached"), "database"),
-        (psycopg.OperationalError("lost"), "database"),
-        (TimeoutError(), "timeout"),
-        (ValueError("bad"), "internal"),
-        (KeyError("missing"), "internal"),
+        (
+            OperationalError("SELECT 1", {}, Exception("lost")),
+            FailureCategory.DATABASE,
+            "database",
+        ),
+        (PoolTimeoutError("QueuePool limit reached"), FailureCategory.DATABASE, "database"),
+        (psycopg.OperationalError("lost"), FailureCategory.DATABASE, "database"),
+        (ValueError("bad"), FailureCategory.INTERNAL, "internal"),
+        (KeyError("missing"), FailureCategory.INTERNAL, "internal"),
+        # The dispatch timeout is the application's own category, not a library family.
+        (TimeoutError(), FailureCategory.INTERNAL, "internal"),
     ],
 )
-def test_failure_category_names_the_library_family_of_the_error(
-    error: BaseException, category: str
+def test_failure_classifier_names_the_library_family_of_the_error(
+    error: BaseException, member: FailureCategory, logged: str
 ) -> None:
-    assert failure_category(error) == category
+    category = classify_failure(error)
+
+    assert category is member
+    assert f"{category}" == logged
 
 
 def test_commit_failure_cannot_acknowledge_receipt() -> None:

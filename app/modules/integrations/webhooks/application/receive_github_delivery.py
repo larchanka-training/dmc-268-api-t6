@@ -7,6 +7,7 @@ import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from enum import StrEnum
 from typing import Protocol
 from uuid import UUID, uuid4
 
@@ -32,27 +33,23 @@ _DEFERRED = frozenset(
         InstallationDeliveryDispatchStatus.DEFERRED_REPOSITORY_DETAILS,
     }
 )
-# Library families behind a failure, by top-level module (docs/WEBHOOK_WORKER.md, failure line).
-_CATEGORY_BY_LIBRARY = {
-    "httpx": "github_request",
-    "httpcore": "github_request",
-    "sqlalchemy": "database",
-    "psycopg": "database",
-}
 
 
-def failure_category(exc: BaseException) -> str:
-    """Coarse, message-free reason for a failure: timeout, github_request, database or internal."""
-    if isinstance(exc, TimeoutError):
-        return "timeout"
-    for cls in type(exc).__mro__:
-        module = getattr(cls, "__module__", None)
-        category = (
-            _CATEGORY_BY_LIBRARY.get(module.split(".")[0]) if isinstance(module, str) else None
-        )
-        if category is not None:
-            return category
-    return "internal"
+class FailureCategory(StrEnum):
+    """Coarse, message-free reason a delivery failed (docs/WEBHOOK_WORKER.md, failure log)."""
+
+    TIMEOUT = "timeout"
+    GITHUB_REQUEST = "github_request"
+    DATABASE = "database"
+    INTERNAL = "internal"
+
+
+class FailureStage(StrEnum):
+    """Where processing a delivery failed (docs/WEBHOOK_WORKER.md, failure log)."""
+
+    CLAIM = "claim"
+    DISPATCH = "dispatch"
+    FINALIZE = "finalize"
 
 
 @dataclass(frozen=True)
@@ -129,6 +126,7 @@ class ReceiveGitHubDelivery:
         now: Callable[[], datetime] = lambda: datetime.now(UTC),
         dispatch_timeout_seconds: float = _DISPATCH_TIMEOUT_SECONDS,
         action_of: Callable[[WebhookReceipt], str | None] | None = None,
+        classify_failure: Callable[[BaseException], FailureCategory] | None = None,
     ) -> None:
         if not 0 < dispatch_timeout_seconds < _LEASE.total_seconds():
             raise ValueError("dispatch timeout must be shorter than claim lease")
@@ -139,6 +137,9 @@ class ReceiveGitHubDelivery:
         # Reads the action out of the opaque receipt for the failure line; the transport
         # adapter supplies it, since only that layer decodes the payload.
         self._action_of = action_of
+        # Names the library family of a failure for the same line; the composition root
+        # supplies it, since only infrastructure knows the HTTP and database libraries.
+        self._classify_failure = classify_failure
 
     async def execute(self, delivery: WebhookReceipt) -> InstallationDeliveryDispatchStatus:
         async with self._uow_factory() as uow:
@@ -194,7 +195,7 @@ class ReceiveGitHubDelivery:
                     return None
                 await uow.commit()
         except Exception as exc:
-            self._log_failure(delivery_id, None, "claim", exc)
+            self._log_failure(delivery_id, None, FailureStage.CLAIM, exc)
             raise
 
         try:
@@ -203,7 +204,7 @@ class ReceiveGitHubDelivery:
             )
         except Exception as exc:
             # Logged before the release so the line exists even if the release fails too.
-            self._log_failure(delivery_id, delivery, "dispatch", exc)
+            self._log_failure(delivery_id, delivery, FailureStage.DISPATCH, exc)
             async with self._uow_factory() as uow:
                 failed_at = self._now()
                 await uow.receipts.release_after_dispatch_failure(
@@ -231,7 +232,7 @@ class ReceiveGitHubDelivery:
                     await uow.receipts.mark_projected(delivery_id, token, self._now())
                 await uow.commit()
         except Exception as exc:
-            self._log_failure(delivery_id, delivery, "finalize", exc, result)
+            self._log_failure(delivery_id, delivery, FailureStage.FINALIZE, exc, result)
             raise
         if final:
             # Logged after the commit: a failed commit leaves the receipt retryable.
@@ -259,7 +260,7 @@ class ReceiveGitHubDelivery:
         self,
         delivery_id: str,
         delivery: WebhookReceipt | None,
-        stage: str,
+        stage: FailureStage,
         exc: Exception,
         result: InstallationDeliveryDispatchResult | None = None,
     ) -> None:
@@ -274,9 +275,14 @@ class ReceiveGitHubDelivery:
         reader = self._action_of
         if delivery is not None and reader is not None:
             action = _failure_field(delivery_id, "action", "-", lambda: reader(delivery) or "-")
-        category = _failure_field(
-            delivery_id, "category", "internal", lambda: failure_category(exc)
-        )
+        classify = self._classify_failure
+        category: str = FailureCategory.INTERNAL
+        if isinstance(exc, TimeoutError):  # the dispatch timeout needs no library knowledge
+            category = FailureCategory.TIMEOUT
+        elif classify is not None:
+            category = _failure_field(
+                delivery_id, "category", FailureCategory.INTERNAL, lambda: classify(exc)
+            )
         outcome = ""
         if result is not None:
             rendered = _failure_field(
