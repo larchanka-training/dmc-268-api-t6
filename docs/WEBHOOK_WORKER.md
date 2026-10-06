@@ -420,8 +420,9 @@ Logged fields. In this line and in the failure line below, `event` and `action` 
 tokens: a value is logged only when it is `[a-z_]`, 1 to 40 characters, and as `-` otherwise.
 `event` is the `X-GitHub-Event` header, which the signature does not cover; the receipt stores
 and dispatches it as received, only the log is restricted. The delivery id is the stored
-receipt id, the `X-GitHub-Delivery` header, which intake checks only for length (1 to 255
-characters).
+receipt id, the `X-GitHub-Delivery` header (GitHub sends a GUID). Intake answers `400` and
+stores nothing unless it is 1 to 255 ASCII letters, digits and `-`, so the id is logged as
+received and cannot forge a field of the line.
 
 Failure log. When processing a delivery fails, the worker first writes one WARNING line with the
 action and a failure category, then the sweep writes its ERROR record
