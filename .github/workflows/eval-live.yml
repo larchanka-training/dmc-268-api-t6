@@ -1,6 +1,6 @@
 name: Live corpus evaluation
 
-# Manual, quota-consuming evaluation. Required CI uses the committed offline replay.
+# Manual, paid evaluation using the team EUrouter account. Required CI uses the committed offline replay.
 on:
   workflow_dispatch:
 
@@ -8,7 +8,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: eval-live-openrouter
+  group: eval-live-eurouter
   cancel-in-progress: false
 
 jobs:
@@ -17,12 +17,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     env:
-      LLM_PROVIDER: openrouter
-      LLM_BASE_URL: https://openrouter.ai/api/v1
-      LLM_MODEL: nvidia/nemotron-3-super-120b-a12b:free
-      LLM_FALLBACK_MODEL: ""
-      LLM_CONTEXT_WINDOW: "262144"
-      LLM_MAX_OUTPUT_TOKENS: "8192"
+      LLM_PROVIDER: eurouter
+      LLM_MODEL: ${{ vars.LLM_MODEL }}
+      LLM_FALLBACK_MODEL: ${{ vars.LLM_FALLBACK_MODEL }}
       LLM_STRUCTURED_OUTPUT: json_schema
     steps:
       - name: Checkout
@@ -51,10 +48,10 @@ jobs:
       - name: Evaluate live corpus
         shell: bash
         env:
-          LLM_API_KEYS: ${{ secrets.OPENROUTER_API_KEY }}
+          LLM_API_KEYS: ${{ secrets.AI_DMC268_T6 }}
         run: |
           if [[ -z "$LLM_API_KEYS" ]]; then
-            echo "::error::Configure the OPENROUTER_API_KEY repository secret before dispatch." >&2
+            echo "::error::Make the AI_DMC268_T6 organization secret available to this repository before dispatch." >&2
             exit 1
           fi
           uv run python review/scripts/eval_live.py \

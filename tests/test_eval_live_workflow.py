@@ -96,7 +96,7 @@ def test_missing_key_fails_before_provider_call(tmp_path: Path) -> None:
         {"RUNNER_TEMP": str(tmp_path), "LLM_API_KEYS": ""},
     )
     assert result.returncode != 0
-    assert "OPENROUTER_API_KEY" in result.stderr
+    assert "AI_DMC268_T6" in result.stderr
     assert not (tmp_path / "eval-report.json").exists()
 
 

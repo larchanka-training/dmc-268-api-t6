@@ -197,9 +197,12 @@ baseline and updated denominators.
 
 [Live corpus evaluation](../.github/workflows/eval-live.yml) is a manual
 `workflow_dispatch` workflow, separate from required offline replay. It uses the
-fixed free model `nvidia/nemotron-3-super-120b-a12b:free` on OpenRouter with the
-baseline context/output limits and no fallback. Configure the repository Actions
-secret `OPENROUTER_API_KEY`; the key is exposed only to the live-evaluation step.
+team EUrouter account: repository variables `LLM_MODEL` and `LLM_FALLBACK_MODEL`
+select the primary and fallback models (currently `mistral-small-4` and
+`mistral-small-3.2-24b`). Their endpoint, context window, output limit and pricing
+come from the gateway's known-model profiles. The organization Actions secret
+`AI_DMC268_T6` must be available to this repository; it is exposed only to the
+live-evaluation step. No local copy of the key is needed.
 After the workflow exists on the default branch, select **Actions → Live corpus
 evaluation → Run workflow** and choose the branch to evaluate.
 
@@ -213,7 +216,7 @@ The 14-day artifact contains `eval-report.json` (without validator diagnostics) 
 `eval-response-metadata/` (per-case hashes, byte counts and statuses). It does not
 contain raw model text, provider envelopes or credentials. Raw responses and their
 manifest exist only on the temporary runner; use a local capture when preparing a
-new committed baseline. A run consumes the account's free request quota, including
+new committed baseline. A run spends the team EUrouter balance, including
 retries/repair, can take tens of minutes, and has a 60-minute job timeout. Concurrent
 runs of this workflow are serialized. This workflow does not verify conventions
 on the two selected EUrouter models.
