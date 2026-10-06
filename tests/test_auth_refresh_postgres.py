@@ -133,7 +133,7 @@ def test_concurrent_refresh_replay_revokes_every_family_token(
                 )
             ).all()
             assert family is not None and family.revoked_at is None
-            assert len(rows) == 2 and any(row.revoked_at is None for row in rows)
+            assert len(rows) == 3 and all(row.revoked_at is None for row in rows)
             assert sum(row.rotated_at is not None for row in rows) == 1
 
         # Replay outside the grace period revokes the entire family
@@ -151,7 +151,7 @@ def test_concurrent_refresh_replay_revokes_every_family_token(
                 )
             ).all()
             assert family is not None and family.revoked_at is not None
-            assert all(row.revoked_at is not None for row in rows)
+            assert len(rows) == 3 and all(row.revoked_at is not None for row in rows)
 
         with pytest.raises(InvalidRefreshToken):
             await refresh.execute("replacement-secret-1")
