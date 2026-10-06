@@ -87,8 +87,8 @@ GitHub webhook delivery <delivery_id> event=<event> status=<status> detail=<deta
 `pull_request` event it starts with `action=<action>`, so `labeled` and `synchronize` can be
 told apart (an ignored action, such as `ready_for_review`, shows only that). For a Run trigger
 (label, `synchronize`, `reopened`, CI events) the rest is
-`pr=<pull request id> head=<first 7 of the head sha>: <status> (<reason>) run=<run id>`, and a
-CI event joins one such outcome per open PR on that head with `; ` (and has no action):
+`pr=<pull request id> head=<first 7 of the head sha>: <status> (<reason>[: <detail>]) run=<run id>`,
+and a CI event joins one such outcome per open PR on that head with `; ` (and has no action):
 
 | status | reason | meaning |
 | --- | --- | --- |
@@ -98,6 +98,20 @@ CI event joins one such outcome per open PR on that head with `; ` (and has no a
 | `unconfigured` | `missing_installation`, `missing_rules` (no active rule version), `missing_prompt` (no active `review.system` prompt and none pinned) | the repository lacks what a Run needs; a new label or CI event does not change that |
 | `stale` | `pull_request_gone`, `repository_gone`, `state_changed` (the PR changed between the gate and the locked read) | the decision no longer matches the current PR |
 | `duplicate` | `active_run` (a queued, running or publishing Run exists), `head_already_reviewed` (this head already has a webhook Run) | no second Run is created |
+
+`ci_blocked` and `waiting_for_ci` carry a detail that says what blocks or delays the gate,
+for example `ineligible (ci_blocked: check suite app=5111174 queued)`:
+
+| reason | detail | meaning |
+| --- | --- | --- |
+| `ci_blocked` | `check suite app=<app id> <status>`, or `<status>/<conclusion>` once the suite has a conclusion, then ` (+<n> more)` when `n` more suites block | the first blocking foreign check suite in GitHub's order |
+| `ci_blocked` | `commit status <state>` | the combined commit status of the head is not `success` |
+| `waiting_for_ci` | `no CI yet` | `wait_for_ci = always`, and the head has no CI evidence yet |
+| `waiting_for_ci` | `no CI yet, label or head time unknown` | `wait_for_ci = auto`, but the label or head time is missing, so the 2-minute window cannot start; only CI starts the Run |
+| `waiting_for_ci` | `no CI yet, auto start at <time>` | `wait_for_ci = auto` inside the window; `<time>` (ISO 8601, UTC) is 2 minutes after the later of the label and the first sight of the head |
+
+The status, conclusion and state come from GitHub and are logged like `event` below: as is when
+they are `[a-z_]`, 1 to 40 characters, and as `?` otherwise.
 
 Other details: `no open pull request` (a PR event or label whose PR is closed or unknown,
 nothing to enqueue), `no open pull request at this head` (a CI event for a head that no open PR

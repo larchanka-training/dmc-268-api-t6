@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+import re
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
@@ -10,6 +11,10 @@ from typing import Protocol
 from uuid import UUID
 
 from app.modules.reviews.application.project_github_pull_request import PullRequestState
+
+# A GitHub-supplied status, conclusion or state goes into the outcome log line only when it is
+# a plain token; anything else is logged as ``?``.
+_LOG_TOKEN = re.compile(r"[a-z_]{1,40}")
 
 
 class CiWaitMode(StrEnum):
@@ -69,6 +74,8 @@ class CiEligibility:
     reason: EligibilityReason
     head_sha: str | None
     candidate: EligibilityCandidate | None = field(default=None, compare=False)
+    # What blocks (``ci_blocked``) or delays (``waiting_for_ci``) the gate, for the outcome line.
+    detail: str | None = None
 
 
 class EligibilityCandidateStore(Protocol):
@@ -133,22 +140,48 @@ class DetermineCiEligibility:
             if suite.app_id != self._own_app_id
             and not (suite.status == "queued" and suite.latest_check_runs_count == 0)
         )
-        if any(
-            suite.status != "completed" or suite.conclusion not in {"success", "neutral", "skipped"}
+        blocking = tuple(
+            suite
             for suite in foreign
-        ):
-            return CiEligibility(False, EligibilityReason.CI_BLOCKED, candidate.head_sha)
+            if suite.status != "completed"
+            or suite.conclusion not in {"success", "neutral", "skipped"}
+        )
+        if blocking:
+            return CiEligibility(
+                False,
+                EligibilityReason.CI_BLOCKED,
+                candidate.head_sha,
+                detail=_blocking_suites_detail(blocking),
+            )
         if snapshot.combined_total_count > 0 and snapshot.combined_state != "success":
-            return CiEligibility(False, EligibilityReason.CI_BLOCKED, candidate.head_sha)
+            return CiEligibility(
+                False,
+                EligibilityReason.CI_BLOCKED,
+                candidate.head_sha,
+                detail=f"commit status {_log_token(snapshot.combined_state)}",
+            )
         if foreign or snapshot.combined_total_count > 0:
             return CiEligibility(True, EligibilityReason.ELIGIBLE, candidate.head_sha, candidate)
         if candidate.wait_for_ci == CiWaitMode.ALWAYS:
-            return CiEligibility(False, EligibilityReason.WAITING_FOR_CI, candidate.head_sha)
+            return CiEligibility(
+                False, EligibilityReason.WAITING_FOR_CI, candidate.head_sha, detail="no CI yet"
+            )
         if candidate.ai_review_labeled_at is None or candidate.head_first_seen_at is None:
-            return CiEligibility(False, EligibilityReason.WAITING_FOR_CI, candidate.head_sha)
+            return CiEligibility(
+                False,
+                EligibilityReason.WAITING_FOR_CI,
+                candidate.head_sha,
+                detail="no CI yet, label or head time unknown",
+            )
         window_start = max(candidate.ai_review_labeled_at, candidate.head_first_seen_at)
-        if self._now() < window_start + timedelta(minutes=2):
-            return CiEligibility(False, EligibilityReason.WAITING_FOR_CI, candidate.head_sha)
+        auto_start = window_start + timedelta(minutes=2)
+        if self._now() < auto_start:
+            return CiEligibility(
+                False,
+                EligibilityReason.WAITING_FOR_CI,
+                candidate.head_sha,
+                detail=f"no CI yet, auto start at {auto_start.astimezone(UTC).isoformat()}",
+            )
         return CiEligibility(True, EligibilityReason.ELIGIBLE, candidate.head_sha, candidate)
 
     @staticmethod
@@ -166,3 +199,19 @@ class DetermineCiEligibility:
         if not candidate.ai_review_labeled:
             return CiEligibility(False, EligibilityReason.LABEL_NOT_ACTIVE, candidate.head_sha)
         return None
+
+
+def _blocking_suites_detail(blocking: Sequence[CheckSuite]) -> str:
+    """Name the first blocking suite in GitHub's order and count the others."""
+    first = blocking[0]
+    state = _log_token(first.status)
+    if first.conclusion is not None:
+        state += f"/{_log_token(first.conclusion)}"
+    detail = f"check suite app={first.app_id} {state}"
+    if len(blocking) > 1:
+        detail += f" (+{len(blocking) - 1} more)"
+    return detail
+
+
+def _log_token(value: str) -> str:
+    return value if _LOG_TOKEN.fullmatch(value) else "?"

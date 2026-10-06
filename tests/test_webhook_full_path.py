@@ -690,7 +690,7 @@ def test_label_delivery_blocked_by_foreign_ci_logs_the_gate_reason(
 
     lines = _outcome_lines(state, caplog, _label_payload(), ci=BlockedCi(state))
 
-    assert lines == [f"{_PR_LINE} ineligible (ci_blocked)"]
+    assert lines == [f"{_PR_LINE} ineligible (ci_blocked: check suite app=7 in_progress)"]
     assert state.message is None
 
 
@@ -749,7 +749,7 @@ def test_completed_check_suite_logs_the_ci_outcome_of_each_open_pr_on_its_head(
     state = State()
     # The label arrives while CI still runs, so only the completed suite can start the Run.
     assert _outcome_lines(state, caplog, _label_payload(), ci=BlockedCi(state)) == [
-        f"{_PR_LINE} ineligible (ci_blocked)"
+        f"{_PR_LINE} ineligible (ci_blocked: check suite app=7 in_progress)"
     ]
     check_suite = {
         "action": "completed",

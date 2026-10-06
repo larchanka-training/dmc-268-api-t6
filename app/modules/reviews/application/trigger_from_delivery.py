@@ -69,7 +69,9 @@ class TriggerFromDelivery:
     async def _enqueue(self, code_change_id: UUID, head_sha: str) -> str:
         result = await self._enqueuer.execute(code_change_id, head_sha)
         outcome = f"pr={code_change_id} head={head_sha[:7]}: {result.status.value}"
-        if result.reason is not None:
+        if result.reason is not None and result.detail is not None:
+            outcome += f" ({result.reason}: {result.detail})"
+        elif result.reason is not None:
             outcome += f" ({result.reason})"
         if result.run_id is not None:
             outcome += f" run={result.run_id}"

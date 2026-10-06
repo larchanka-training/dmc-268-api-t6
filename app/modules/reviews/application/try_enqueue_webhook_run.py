@@ -69,6 +69,8 @@ class EnqueueResult:
     status: EnqueueStatus
     run_id: UUID | None = None
     reason: str | None = None
+    # What blocks or delays the CI gate of an INELIGIBLE result (``CiEligibility.detail``).
+    detail: str | None = None
 
 
 @dataclass(frozen=True)
@@ -180,7 +182,9 @@ class TryEnqueueWebhookRun:
     async def execute(self, code_change_id: UUID, expected_head_sha: str) -> EnqueueResult:
         decision = await self._eligibility.execute(code_change_id, expected_head_sha)
         if not decision.eligible or decision.candidate is None:
-            return EnqueueResult(EnqueueStatus.INELIGIBLE, reason=decision.reason.value)
+            return EnqueueResult(
+                EnqueueStatus.INELIGIBLE, reason=decision.reason.value, detail=decision.detail
+            )
         async with self._uow_factory() as uow:
             candidate = await uow.runs.lock_candidate(code_change_id)
             if isinstance(candidate, CandidateMiss):
