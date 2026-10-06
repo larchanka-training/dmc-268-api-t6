@@ -1060,6 +1060,38 @@ def test_push_during_the_github_post_ends_the_run_cancelled_not_succeeded(env: E
     )
 
 
+@pytest.mark.integration
+def test_publishing_is_persisted_in_runs_while_github_receives_the_review(env: Env) -> None:
+    engine = env.engine()
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    states_during_post: list[str] = []
+
+    async def read_state() -> None:
+        async with factory() as session:
+            states_during_post.append(str(await session.scalar(text("SELECT state FROM runs"))))
+
+    github = GitHub(during_post=read_state)
+    model = Model(factory)
+
+    async def scenario() -> tuple[Any, ...]:
+        run_id = await insert_run(factory, env)
+        async with (
+            amqp_channels(env.rabbitmq_url, SHORT_DELAYS) as channels,
+            running_worker(env, factory, model, github, channels),
+        ):
+            await publish_run(channels, factory, run_id)
+            state = await wait_for_state(factory, run_id, "succeeded")
+            await wait_for_check_run(github, "completed")
+        await engine.dispose()
+        return state
+
+    state = asyncio.run(scenario())
+
+    assert model.observed[0][0] == "running"
+    assert states_during_post == ["publishing"]
+    assert state == ("succeeded", 1, None)
+
+
 _APP_KEY = rsa.generate_private_key(public_exponent=65537, key_size=2048)
 _APP_PEM = _APP_KEY.private_bytes(Encoding.PEM, PrivateFormat.PKCS8, NoEncryption()).decode()
 _FILE_SHA = "f" * 40
