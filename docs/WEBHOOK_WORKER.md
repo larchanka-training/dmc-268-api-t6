@@ -77,17 +77,43 @@ repository, an event without a handler, or an installation event whose repositor
 GitHub cannot answer) is retried after 5 minutes, at most three attempts in total, like a
 failed dispatch. Deferrals and failed dispatches draw on the same three attempts: two
 deferrals followed by one failed dispatch (a failing tree request, for example) mark the
-receipt failed. After the third deferral it is deferred for good (`projection_deferred_at`)
-and no longer retried. Linking the installation (`wake_receipts`, which runs at every GitHub
-login of a user whose token lists the installation) clears that mark and gives the
-deliveries of the installation a fresh attempt budget. Residual risk: only that login
-revives a deferred receipt, and every login revives it again, so a receipt that keeps
-failing (a repository that is gone) costs three more attempts per login; one nobody wakes is
-deleted 30 days after `projection_deferred_at` (see Retention). Its repositories are then
-stored only by a delivery with a new GUID, for example after removing and re-adding the
-repository in the installation settings; a redelivery of the same GUID is ignored as a
-duplicate. Each sweep logs how many deliveries it handled and deferred, and every final
-deferral is logged with its reason.
+receipt failed. After the third deferral it is deferred (`projection_deferred_at`) and the
+sweep no longer selects it until something revives it with a fresh attempt budget. Once an
+hour, in the same tick as the purge, the worker revives the installation-event receipts
+(`installation` and `installation_repositories`) of linked installations that have been
+deferred for at least 45 minutes and were received within the last 7 days
+(`ReviveDeferredInstallationDeliveries`). The revival covers installation events only:
+pull-request, label and CI deliveries deferred as an unknown repository during the same
+outage are still revived only by linking (`wake_receipts`, below). A receipt is revived at
+the first hourly tick that comes at least 45 minutes after its deferral. A revived receipt
+spends its three attempts within about ten minutes, so that is usually the next tick and the
+receipt is retried about once an hour; when it was deferred less than 45 minutes before a
+tick (its first deferral, a cycle started by a login, a worker restart that shifts the tick,
+or a slow sweep), it is the tick after that, up to about two hours later. An outage of the
+details read therefore heals on its own, with no login, about an hour after it ends, unless
+the last attempt of a cycle fails the dispatch instead (a failing tree request, the 240 s
+dispatch timeout or a database error; a failed label request is only logged): the receipt is
+then marked failed (`projection_failed_at`), and neither the revival nor a login brings it
+back. The 45-minute delay and the 7-day window are the parameters the tech lead approved
+(api#71): a GitHub outage longer than a week is not a transient failure, and a `GET /repos`
+404 for a week means the repository is gone. Linking the installation (`wake_receipts`,
+which runs at every GitHub login of a user whose token lists the installation) clears the
+mark of every deferred delivery of the installation, whatever its event or age. Residual
+risks: every attempt runs the event again from its first repository, and each repository
+before the unreadable one costs a details read, a tree read and a label request, so an event
+whose k-th repository stays unreadable costs about 3 × (k - 1) + 1 GitHub requests per
+attempt, three attempts an hour for 7 days after it was received, plus three attempts per
+login; per-repository isolation, which would stop this, is the follow-up api#73. A revived
+`installation_repositories.added` is applied hours or days late without an ordering check
+against a later `removed` event of the same repository, so a public repository can come back
+enabled after it was removed from the installation (a private one answers 404 and stays
+deferred); the 5-minute retries and `wake_receipts` already had this gap. Outside the 7-day
+window only a login or a delivery with a new GUID revives a receipt, and one nobody revives
+is deleted 30 days after its last `projection_deferred_at` (see Retention). Its repositories
+are then stored only by a delivery with a new GUID, for example after removing and re-adding
+the repository in the installation settings; a redelivery of the same GUID is ignored as a
+duplicate. Each sweep logs how many deliveries it handled and deferred, every final deferral
+is logged with its reason, and a revival that resets receipts logs how many.
 
-Retention. Finished receipts (projected, failed or deferred for good) are deleted 30 days
-after they finished; the worker runs the purge once an hour.
+Retention. Finished receipts (projected, failed, or deferred and not revived since) are
+deleted 30 days after they finished; the worker runs the purge once an hour.
