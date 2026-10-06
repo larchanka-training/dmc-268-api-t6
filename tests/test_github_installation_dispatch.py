@@ -19,6 +19,12 @@ from app.modules.integrations.webhooks.application.github_installation_dispatch 
     InstallationDeliveryDispatchStatus,
     UnsupportedGitHubEvent,
 )
+from app.modules.integrations.webhooks.application.installation_event_projector import (
+    RepositoryDetailsUnavailableError,
+)
+from app.modules.integrations.webhooks.infrastructure.github_repository_details import (
+    GitHubRepositoryDetailsResponseError,
+)
 from app.modules.repositories.application.installation_repositories import (
     InstallationRepositoriesEvent,
 )
@@ -318,6 +324,73 @@ def test_unknown_installation_is_ignored_without_calling_onboarding() -> None:
     assert result.status is InstallationDeliveryDispatchStatus.IGNORED_UNKNOWN_INSTALLATION
     assert resolver.calls == [17]
     assert onboarding.calls == []
+
+
+_DISPATCHER_LOGGER = "app.modules.integrations.webhooks.application.github_installation_dispatch"
+
+
+@dataclass
+class RaisingOnboarding:
+    error: Exception
+
+    async def execute(
+        self,
+        *,
+        provider_installation_id: UUID,
+        event: InstallationRepositoriesEvent,
+    ) -> tuple[OnboardingResult, ...]:
+        raise self.error
+
+
+def test_unreadable_repository_details_defer_the_delivery_with_a_warning(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """GitHub cannot answer now: the receipt is deferred, not failed (api#71 AC2)."""
+    onboarding = RaisingOnboarding(
+        RepositoryDetailsUnavailableError("GitHub repository details request failed with HTTP 404")
+    )
+    dispatcher = GitHubInstallationDeliveryDispatcher(
+        resolver=FakeInstallationResolver(installations={17: uuid4()}), onboarding=onboarding
+    )
+
+    with caplog.at_level(logging.WARNING, logger=_DISPATCHER_LOGGER):
+        result = asyncio.run(
+            GitHubWebhookDispatchAdapter(dispatcher).execute(_added_delivery().to_receipt())
+        )
+
+    assert result.status is InstallationDeliveryDispatchStatus.DEFERRED_REPOSITORY_DETAILS
+    warnings = [
+        record
+        for record in caplog.records
+        if record.name == _DISPATCHER_LOGGER and record.levelno == logging.WARNING
+    ]
+    assert len(warnings) == 1
+    logged = warnings[0].getMessage()
+    assert "17" in logged
+    assert "HTTP 404" in logged
+    for payload_value in ("octo/api", "https://github.com/octo/api", "delivery-1"):
+        assert payload_value not in caplog.text
+
+
+@pytest.mark.parametrize(
+    "error",
+    [RuntimeError("boom"), GitHubRepositoryDetailsResponseError("no default_branch")],
+    ids=["unexpected-failure", "permanent-response-fault"],
+)
+def test_any_other_onboarding_failure_still_propagates_instead_of_deferring(
+    error: Exception,
+) -> None:
+    dispatcher = GitHubInstallationDeliveryDispatcher(
+        resolver=FakeInstallationResolver(installations={17: uuid4()}),
+        onboarding=RaisingOnboarding(error),
+    )
+
+    with pytest.raises(type(error)) as raised:
+        asyncio.run(
+            GitHubWebhookDispatchAdapter(dispatcher).execute(_added_delivery().to_receipt())
+        )
+
+    assert raised.value is error
 
 
 def test_malformed_or_unsupported_delivery_is_ignored_before_lookup() -> None:

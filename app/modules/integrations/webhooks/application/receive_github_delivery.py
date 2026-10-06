@@ -29,6 +29,7 @@ _DEFERRED = frozenset(
         InstallationDeliveryDispatchStatus.IGNORED_UNKNOWN_INSTALLATION,
         InstallationDeliveryDispatchStatus.IGNORED_UNKNOWN_REPOSITORY,
         InstallationDeliveryDispatchStatus.DEFERRED_KNOWN_EVENT,
+        InstallationDeliveryDispatchStatus.DEFERRED_REPOSITORY_DETAILS,
     }
 )
 

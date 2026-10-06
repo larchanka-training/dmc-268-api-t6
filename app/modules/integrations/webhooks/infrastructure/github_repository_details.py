@@ -9,6 +9,7 @@ import httpx
 
 from app.modules.integrations.webhooks.application.installation_event_projector import (
     RepositoryDetails,
+    RepositoryDetailsUnavailableError,
 )
 from app.modules.integrations.webhooks.infrastructure.github_installation_tree_provider import (
     GitHubInstallationAccessTokenProvider,
@@ -36,20 +37,37 @@ class GitHubInstallationRepositoryDetailsProvider:
     async def fetch_repository_details(
         self, *, installation_external_id: int, full_name: str
     ) -> RepositoryDetails:
-        access_token = await self._token_provider.get_installation_access_token(
-            installation_external_id
-        )
+        try:
+            access_token = await self._token_provider.get_installation_access_token(
+                installation_external_id
+            )
+        except httpx.HTTPError as error:
+            raise RepositoryDetailsUnavailableError(
+                _unavailable_message("installation token request", error)
+            ) from error
         repository_name = quote(full_name, safe="/")
-        response = await self._client.get(
-            f"/repos/{repository_name}",
-            headers={
-                "Accept": "application/vnd.github+json",
-                "Authorization": f"Bearer {access_token}",
-                "X-GitHub-Api-Version": _GITHUB_API_VERSION,
-            },
-        )
-        response.raise_for_status()
+        try:
+            response = await self._client.get(
+                f"/repos/{repository_name}",
+                headers={
+                    "Accept": "application/vnd.github+json",
+                    "Authorization": f"Bearer {access_token}",
+                    "X-GitHub-Api-Version": _GITHUB_API_VERSION,
+                },
+            )
+            response.raise_for_status()
+        except httpx.HTTPError as error:
+            raise RepositoryDetailsUnavailableError(
+                _unavailable_message("repository details request", error)
+            ) from error
         return _parse_repository_details(response.json())
+
+
+def _unavailable_message(request: str, error: httpx.HTTPError) -> str:
+    """Name the failing request and the status code or class: never URL, headers or body."""
+    if isinstance(error, httpx.HTTPStatusError):
+        return f"GitHub {request} failed with HTTP {error.response.status_code}"
+    return f"GitHub {request} failed: {type(error).__name__}"
 
 
 def _parse_repository_details(payload: object) -> RepositoryDetails:

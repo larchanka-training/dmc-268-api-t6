@@ -669,12 +669,13 @@ def test_real_delivery_fixture_is_onboarded_with_branch_and_url_read_from_github
 
 
 @pytest.mark.integration
-def test_unreadable_repository_details_raise_and_write_no_row(
+def test_unreadable_repository_details_defer_the_delivery_and_write_no_row(
     migrated_onboarding_database: tuple[str, str],
 ) -> None:
-    """``GET /repos`` answering 404 propagates, so the receipt takes the failed-dispatch path.
+    """``GET /repos`` answering 404 defers the delivery instead of raising (api#71 AC2).
 
-    The dispatcher must raise (not return an ignored status) and nothing may reach
+    The dispatcher must return ``DEFERRED_REPOSITORY_DETAILS`` so the receipt takes the
+    deferred path that ``wake_receipts`` can revive, and nothing may reach
     ``repositories``: no tree fetch, no label, no transaction.
     """
     database_url, schema = migrated_onboarding_database
@@ -693,7 +694,7 @@ def test_unreadable_repository_details_raise_and_write_no_row(
             return httpx.Response(404, json={"message": "Not Found"})
         return httpx.Response(500, json={"message": "unexpected request"})
 
-    async def exercise() -> tuple[int, int]:
+    async def exercise() -> tuple[InstallationDeliveryDispatchStatus, int]:
         engine = create_async_engine(
             database_url, connect_args={"options": f"-csearch_path={schema}"}
         )
@@ -720,14 +721,13 @@ def test_unreadable_repository_details_raise_and_write_no_row(
             dispatcher = ReviewsApiResources(
                 engine, session_factory
             ).github_installation_delivery_dispatcher(client=client, token_provider=TokenProvider())
-            with pytest.raises(httpx.HTTPStatusError) as raised:
-                await dispatcher.execute(
-                    VerifiedGitHubDelivery(
-                        "delivery-unreadable",
-                        "installation_repositories",
-                        load_github_webhook_fixture("installation_repositories_added"),
-                    ).to_receipt()
-                )
+            deferred = await dispatcher.execute(
+                VerifiedGitHubDelivery(
+                    "delivery-unreadable",
+                    "installation_repositories",
+                    load_github_webhook_fixture("installation_repositories_added"),
+                ).to_receipt()
+            )
 
             async with session_factory() as session:
                 repositories = list(
@@ -740,13 +740,13 @@ def test_unreadable_repository_details_raise_and_write_no_row(
                     ).all()
                 )
                 rule_versions = list((await session.scalars(select(RuleVersion))).all())
-            return raised.value.response.status_code, len(repositories) + len(rule_versions)
+            return deferred.status, len(repositories) + len(rule_versions)
         finally:
             await client.aclose()
             await engine.dispose()
 
-    status_code, persisted_rows = asyncio.run(exercise())
+    status, persisted_rows = asyncio.run(exercise())
 
-    assert status_code == 404
+    assert status is InstallationDeliveryDispatchStatus.DEFERRED_REPOSITORY_DETAILS
     assert persisted_rows == 0
     assert requests == [("GET", repository_path)]
