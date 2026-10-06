@@ -20,6 +20,7 @@ import psycopg
 import pytest
 from alembic.config import Config
 from fastapi.testclient import TestClient
+from pydantic import ValidationError
 from sqlalchemy import Connection, create_engine, text
 from sqlalchemy.exc import DatabaseError, OperationalError
 from sqlalchemy.exc import TimeoutError as PoolTimeoutError
@@ -1251,7 +1252,7 @@ def test_invalid_labeled_payload_logs_its_action_and_reason_without_payload_valu
 
     assert _outcome_lines(caplog) == [
         "GitHub webhook delivery invalid-label-1 event=pull_request "
-        "status=ignored_invalid_event detail=action=labeled invalid_payload"
+        "status=ignored_invalid_event detail=action=labeled invalid_payload fields=label.name"
     ]
     assert all(_PAYLOAD_SENTINEL not in record.getMessage() for record in caplog.records)
     assert _PAYLOAD_SENTINEL not in caplog.text
@@ -1274,14 +1275,16 @@ def test_invalid_labeled_payload_logs_its_action_and_reason_without_payload_valu
                     "pull_request": {"id": "901", "title": _PAYLOAD_SENTINEL},
                 }
             ),
-            "action=synchronize invalid_payload",
+            "action=synchronize invalid_payload fields=pull_request.id,pull_request.number,"
+            "pull_request.html_url,pull_request.user,pull_request.head,pull_request.base,"
+            "pull_request.state,pull_request.updated_at",
         ),
         ("pull_request", "not json", "invalid_payload"),
         ("pull_request", "[]", "invalid_payload"),
         (
             "check_suite",
             json.dumps({"action": "completed", "installation": {"id": 17}}),
-            "invalid_payload",
+            "invalid_payload fields=repository,check_suite",
         ),
     ],
     ids=["synchronize-broken-pull-request", "undecodable", "json-list", "check-suite"],
@@ -1301,6 +1304,121 @@ def test_every_invalid_payload_logs_the_invalid_payload_reason(
     assert row.projected is True
     assert row.retry_after is None
     assert row.projection_attempt_count == 0
+
+
+def _pull_request_payload(action: str = "labeled") -> dict[str, object]:
+    payload = json.loads(_pull_request_receipt("payload", action).payload_json)
+    assert isinstance(payload, dict)
+    return payload
+
+
+def _without_label() -> dict[str, object]:
+    payload = _pull_request_payload()
+    del payload["label"]
+    return payload
+
+
+def _mismatched_number() -> dict[str, object]:
+    return {**_pull_request_payload(), "number": 8}
+
+
+@pytest.mark.parametrize(
+    ("event_name", "payload", "detail"),
+    [
+        ("pull_request", _without_label(), "action=labeled invalid_payload fields=label"),
+        ("pull_request", _mismatched_number(), "action=labeled invalid_payload fields=number"),
+        (
+            "check_suite",
+            {
+                "action": "completed",
+                "installation": {"id": 17},
+                "repository": {"id": 101},
+                "check_suite": {"head_sha": _PAYLOAD_SENTINEL},
+            },
+            "invalid_payload fields=check_suite.head_sha",
+        ),
+        (
+            "pull_request",
+            {"action": "opened", "installation": {}, "repository": {}, "pull_request": {}},
+            "action=opened invalid_payload fields=installation.id,repository.id,"
+            "repository.full_name,pull_request.id,pull_request.number,pull_request.title,"
+            "pull_request.html_url,pull_request.user,pull_request.head,pull_request.base,+2",
+        ),
+    ],
+    ids=["label-missing", "number-mismatch", "check-suite-head-sha", "at-most-ten-fields"],
+)
+def test_invalid_payload_names_its_failing_fields_never_their_values(
+    caplog: pytest.LogCaptureFixture, event_name: str, payload: dict[str, object], detail: str
+) -> None:
+    payload = {**payload, "sender": {"type": "User", "login": _PAYLOAD_SENTINEL}}
+    receipt = VerifiedGitHubDelivery("fields-1", event_name, payload).to_receipt()
+
+    uow = _replay_invalid_receipt(receipt, caplog)
+
+    assert _outcome_lines(caplog) == [
+        f"GitHub webhook delivery fields-1 event={event_name} "
+        f"status=ignored_invalid_event detail={detail}"
+    ]
+    assert all(_PAYLOAD_SENTINEL not in record.getMessage() for record in caplog.records)
+    assert _PAYLOAD_SENTINEL not in caplog.text
+    assert uow.rows["fields-1"].projected is True
+
+
+def test_a_field_name_that_is_not_an_identifier_is_logged_as_a_question_mark(
+    caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def parse_with_odd_locations(event_name: str, payload: Mapping[str, object]) -> CiTriggerEvent:
+        raise ValidationError.from_exception_data(
+            "check_suite",
+            [
+                {
+                    "type": "missing",
+                    "loc": ("check_suite", f"{_PAYLOAD_SENTINEL}\n", 0),
+                    "input": {},
+                },
+                {"type": "missing", "loc": ("check_suite", "pull-requests", 0), "input": {}},
+                {"type": "missing", "loc": ("check_suite", "x" * 65), "input": {}},
+                {"type": "missing", "loc": ("check_suite", "_app_1"), "input": {}},
+            ],
+        )
+
+    monkeypatch.setattr(
+        "app.modules.integrations.webhooks.api.dispatch.parse_ci_event", parse_with_odd_locations
+    )
+    receipt = VerifiedGitHubDelivery(
+        "odd-fields-1", "check_suite", {"action": "completed"}
+    ).to_receipt()
+
+    _replay_invalid_receipt(receipt, caplog)
+
+    # The two odd segments of the same shape collapse into one location.
+    assert _outcome_lines(caplog) == [
+        "GitHub webhook delivery odd-fields-1 event=check_suite status=ignored_invalid_event "
+        "detail=invalid_payload fields=check_suite.?.0,check_suite.?,check_suite._app_1"
+    ]
+    assert _PAYLOAD_SENTINEL not in caplog.text
+
+
+def test_a_rejection_that_names_no_field_is_logged_as_plain_invalid_payload(
+    caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def parse_with_plain_error(event_name: str, payload: Mapping[str, object]) -> CiTriggerEvent:
+        raise ValueError(f"unexpected {_PAYLOAD_SENTINEL}")
+
+    monkeypatch.setattr(
+        "app.modules.integrations.webhooks.api.dispatch.parse_ci_event", parse_with_plain_error
+    )
+    receipt = VerifiedGitHubDelivery(
+        "plain-1", "workflow_run", {"action": "completed"}
+    ).to_receipt()
+
+    _replay_invalid_receipt(receipt, caplog)
+
+    assert _outcome_lines(caplog) == [
+        "GitHub webhook delivery plain-1 event=workflow_run status=ignored_invalid_event "
+        "detail=invalid_payload"
+    ]
+    assert _PAYLOAD_SENTINEL not in caplog.text
 
 
 def test_invalid_installation_payload_logs_the_reason_next_to_the_field_warning(

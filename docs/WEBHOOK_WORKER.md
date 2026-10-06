@@ -137,8 +137,15 @@ trigger did not run, the projection result: `projected`, `ignored_stale`, `ignor
 (for example a label set by the App's own bot) or `unknown_repository`. `invalid_payload`
 (status `ignored_invalid_event`) means the payload could not be parsed into the event's shape,
 for example a `labeled` event with an empty `label`; for a `pull_request` event
-`action=<action>` precedes it (`action=labeled invalid_payload`). The receipt is acknowledged
-and not retried, and no payload value is logged with this reason; for an installation event a
+`action=<action>` precedes it. For a `pull_request` or CI event it is followed by
+`fields=<path>,...`, the schema paths of the failing fields (`label.name`,
+`pull_request.head.sha`; `label` for a label event without a label, `number` when the top-level
+number differs from the pull request's), each once, at most 10, then `+<n>` for the rest:
+`action=labeled invalid_payload fields=label.name`. A path segment that is not an identifier
+(`[A-Za-z_][A-Za-z0-9_]*`, at most 64 characters) is logged as `?`, and a list index as its
+number. A payload that is not a JSON object, or any other rejection, is plain `invalid_payload`.
+The receipt is acknowledged and not retried, and no payload value or error message is logged
+with this reason, only field paths; for an installation event the reason stays plain and a
 separate WARNING names the failing fields. The line never carries the payload, an installation
 token or the webhook secret.
 

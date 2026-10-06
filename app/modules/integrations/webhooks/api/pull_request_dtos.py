@@ -29,6 +29,18 @@ PullRequestWebhookAction = Literal[
 SUPPORTED_PULL_REQUEST_ACTIONS = frozenset(get_args(PullRequestWebhookAction))
 
 
+class PullRequestPayloadValidationError(ValueError):
+    """A pull request payload breaks a rule the schema alone does not check.
+
+    ``fields`` names the failing payload fields, never their values, so a caller can
+    log why a payload was rejected safely.
+    """
+
+    def __init__(self, message: str, *, fields: tuple[str, ...]) -> None:
+        super().__init__(message)
+        self.fields = fields
+
+
 class _GitHubIdDto(BaseModel):
     model_config = ConfigDict(extra="ignore", strict=True)
 
@@ -102,14 +114,18 @@ def parse_pull_request_event(payload: Mapping[str, object]) -> PullRequestEvent:
 def parse_pull_request_label_event(payload: Mapping[str, object]) -> PullRequestLabelEvent:
     parsed = _GitHubPullRequestPayloadDto.model_validate(payload)
     if parsed.action not in {"labeled", "unlabeled"} or parsed.label is None:
-        raise ValueError("GitHub pull request label action requires a label name")
+        raise PullRequestPayloadValidationError(
+            "GitHub pull request label action requires a label name", fields=("label",)
+        )
     return PullRequestLabelEvent(_event_from_payload(parsed), parsed.label.name)
 
 
 def _event_from_payload(parsed: _GitHubPullRequestPayloadDto) -> PullRequestEvent:
     item = parsed.pull_request
     if parsed.number is not None and parsed.number != item.number:
-        raise ValueError("GitHub pull request number mismatch")
+        raise PullRequestPayloadValidationError(
+            "GitHub pull request number mismatch", fields=("number",)
+        )
     state = (
         PullRequestState.MERGED
         if item.merged
