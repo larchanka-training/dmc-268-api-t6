@@ -1108,6 +1108,8 @@ def test_two_hundred_bare_repositories_fit_the_delivery_budget(
     assert peak_in_flight == 4
     gaps = [later - earlier for earlier, later in pairwise(label_post_starts)]
     assert min(gaps) == pytest.approx(0.8)
+    # The first POST follows its repository's details and tree GETs, so their time shows.
+    assert label_post_starts[0] >= 2 * get_latency_seconds
     assert virtual_now <= _DISPATCH_TIMEOUT_SECONDS
 
 
