@@ -587,7 +587,7 @@ v1 — `GitHubProvider`. `GitLabProvider` (MR `changes`, `discussions`, `pipelin
 | Файлы | `GET /git/blobs/{sha}` по sha из `files[].sha` — кэшируется на 7 дней (содержимое неизменяемо по sha, §10); никогда `contents` по пути с ref |
 | Дерево | `GET /git/trees/{head_sha}?recursive=1` (лимит 100 000 записей → для монорепо только затронутые директории) |
 | Публикация (Р-5) | один `POST /pulls/{n}/reviews`: `commit_id = head_sha`, `event`, `body`, `comments[{path, line, side: "RIGHT", start_line?, body}]`; ≤ 10 inline по умолчанию, остальное — в `body`; строка вне диффа → в `body` (иначе 422); `suggestion` только если строка в диффе |
-| Check-run | `in_progress` при первом claim, `completed` с `conclusion: neutral` + summary для `succeeded` и `failed`; у `cancelled` и `skipped` — свои conclusion (PIPELINE_SPEC §7); `failure` никогда — бот не блокирует merge (настройка репозитория может изменить) |
+| Check-run | `in_progress` при первом claim, `completed` с `conclusion: neutral` + summary для `succeeded` и `failed`; вердикт (`blocking`, `clean` и т. д.) стоит в заголовке, например «AI-ревью: blocking», а conclusion остаётся `neutral` и при critical-находке (решение #70); у `cancelled` и `skipped` — свои conclusion (PIPELINE_SPEC §7); `failure` никогда — бот не блокирует merge (настройка репозитория может изменить) |
 | Обратная связь | **после MVP** (`FeedbackSignal`): `pull_request_review_thread.resolved` — вебхук; реакции — poll `GET /pulls/comments/{id}/reactions` раз в час по комментариям бота за 7 дней |
 
 ---

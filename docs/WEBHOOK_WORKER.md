@@ -242,7 +242,12 @@ hour, in the same tick as the purge, the worker revives the installation-event r
 deferred for at least 45 minutes and were received within the last 7 days
 (`ReviveDeferredInstallationDeliveries`). The revival covers installation events only:
 pull-request, label and CI deliveries deferred as an unknown repository during the same
-outage are still revived only by linking (`wake_receipts`, below). A receipt is revived at
+outage are still revived only by linking (`wake_receipts`, below). An
+`installation_repositories.added` event that later brings their repository in does not wake
+them either, by decision (#70): such a delivery describes a PR head of the time it was sent,
+and the next push, label or CI event of that PR creates the Run from the current head, while
+replaying a stale label or CI event could review a head the author no longer wants reviewed.
+A receipt is revived at
 the first hourly tick that comes at least 45 minutes after its deferral. A revived receipt
 spends its three attempts within about ten minutes, so that is usually the next tick and the
 receipt is retried about once an hour; when it was deferred less than 45 minutes before a
@@ -270,8 +275,15 @@ window only a login or a delivery with a new GUID revives a receipt, and one nob
 is deleted 30 days after its last `projection_deferred_at` (see Retention). Its repositories
 are then stored only by a delivery with a new GUID, for example after removing and re-adding
 the repository in the installation settings; a redelivery of the same GUID is ignored as a
-duplicate. Each sweep logs how many deliveries it handled and deferred, every final deferral
+duplicate. Each sweep logs how many deliveries it handled, deferred and deferred for good
+(`GitHub webhook sweep: N handled, M deferred, K deferred for good`), every final deferral
 is logged with its reason, and a revival that resets receipts logs how many.
 
 Retention. Finished receipts (projected, failed, or deferred and not revived since) are
-deleted 30 days after they finished; the worker runs the purge once an hour.
+deleted 30 days after they finished; the worker runs the purge once an hour. The purge is
+one `DELETE` without a batch limit and without an index on its condition, by decision (#70):
+at the current volume (tens of deliveries a day per installation) an hour of receipts is a
+few hundred rows and the scan of `webhook_events` is short. Add a batch limit and an index on
+the finished timestamps once the table holds about one million rows or one purge takes
+longer than 10 seconds (the `Purged N finished GitHub webhook receipts` log line gives the
+count per run).
