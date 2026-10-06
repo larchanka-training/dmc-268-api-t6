@@ -173,18 +173,25 @@ class ReceiveGitHubDelivery:
             raise ValueError("limit must be positive")
         async with self._uow_factory() as uow:
             delivery_ids = await uow.receipts.pending_ids(self._now(), limit)
-        projected = deferred = 0
+        projected = deferred = final = 0
         for delivery_id in delivery_ids:
             try:
-                status = await self._project(delivery_id)
+                outcome = await self._project(delivery_id)
             except Exception:
                 _LOGGER.exception("GitHub webhook projection failed for delivery %s", delivery_id)
                 continue
-            if status is not None:
+            if outcome is not None:
+                status, last_attempt = outcome
                 projected += 1
                 deferred += status in _DEFERRED
+                final += last_attempt
         if delivery_ids:
-            _LOGGER.info("GitHub webhook sweep: %d handled, %d deferred", projected, deferred)
+            _LOGGER.info(
+                "GitHub webhook sweep: %d handled, %d deferred, %d deferred for good",
+                projected,
+                deferred,
+                final,
+            )
         return projected
 
     async def purge_finished(self, retention: timedelta = RECEIPT_RETENTION) -> int:
@@ -196,7 +203,10 @@ class ReceiveGitHubDelivery:
             _LOGGER.info("Purged %d finished GitHub webhook receipts", purged)
         return purged
 
-    async def _project(self, delivery_id: str) -> InstallationDeliveryDispatchStatus | None:
+    async def _project(
+        self, delivery_id: str
+    ) -> tuple[InstallationDeliveryDispatchStatus, bool] | None:
+        """Dispatch one claimed receipt; the flag marks a deferral after its last attempt."""
         dispatcher = self._dispatcher
         if dispatcher is None:
             raise RuntimeError("webhook dispatcher is not configured")
@@ -275,7 +285,7 @@ class ReceiveGitHubDelivery:
             result.detail or "-",
             retry_note,
         )
-        return result.status
+        return result.status, final
 
     def _log_failure(
         self,
