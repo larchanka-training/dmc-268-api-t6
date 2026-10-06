@@ -948,7 +948,10 @@ def test_projector_rejects_a_concurrency_limit_below_one(limit: int) -> None:
         )
 
 
-def test_two_hundred_bare_repositories_fit_the_delivery_budget() -> None:
+@pytest.mark.parametrize("action", ["created", "added"])
+def test_two_hundred_bare_repositories_fit_the_delivery_budget(
+    action: Literal["created", "added"],
+) -> None:
     """api#73 AC 1: the real adapters onboard 200 repositories inside the 240 s budget.
 
     The details and tree GETs of up to four repositories overlap, while the label POSTs
@@ -1024,7 +1027,7 @@ def test_two_hundred_bare_repositories_fit_the_delivery_budget() -> None:
                     provider_installation_id=uuid4(),
                     event=InstallationRepositoriesEvent(
                         17,
-                        "added",
+                        action,
                         tuple(_bare_reference(external_id=item) for item in range(1, total + 1)),
                         (),
                     ),
