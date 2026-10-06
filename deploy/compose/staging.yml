@@ -142,8 +142,11 @@ services:
     restart: "no"
     pull_policy: always
 
+  # The stores are pinned by digest like the edge proxy: a redeploy or a rollback never moves them
+  # to another build. The tag only names the version; update tag and digest together
+  # (docs/CICD.md §3).
   postgres:
-    image: postgres:17-alpine
+    image: postgres:17.11-alpine@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-app}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
@@ -163,7 +166,7 @@ services:
         max-file: "3"
 
   rabbitmq:
-    image: rabbitmq:4-management-alpine
+    image: rabbitmq:4.3.6-management-alpine@sha256:3ef7f7e89fed709a78f79b8b5f4e30e1312a1d4089da752e23595566d9d61a95
     # The node name, and with it the data directory in the volume, comes from the hostname:
     # without a fixed one every recreate starts a new node and durable queues are lost.
     hostname: rabbitmq
@@ -188,7 +191,7 @@ services:
   # Cache only (SD §10), not a queue: no persistence and no volume. Bounded on the shared VPS: at
   # 128 MB the least recently used keys are evicted instead of writes failing.
   redis:
-    image: redis:8-alpine
+    image: redis:8.10.2-alpine@sha256:3811787313eba226a2ef38658c6ccb91cd5e110edc89c37767de373120a0e5a0
     user: redis
     # The password goes through a config file on tmpfs, not argv, so it stays out of ps.
     command:
