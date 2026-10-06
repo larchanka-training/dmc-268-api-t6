@@ -303,8 +303,7 @@ GitHub webhook delivery <delivery_id> event=<event> status=<status> detail=<deta
 `deferred_known_event`, `deferred_repository_details`; a deferral carries `retry_at`).
 `detail` is `-` or the reason. For a `pull_request` event it starts with `action=<action>`, so
 `labeled` and `synchronize` can be told apart (an ignored action, such as `ready_for_review`,
-shows only that). For a Run trigger
-(label, `synchronize`, `reopened`, CI events) the rest is
+shows only that). For a Run trigger (label, `synchronize`, `reopened`, CI events) the rest is
 `pr=<pull request id> head=<first 7 of the head sha>: <status>[ (<reason>[: <detail>])][ run=<run id>]`:
 `enqueued` and `publication_pending` have no reason and end with `run=`, every other status has
 a reason in parentheses and no `run=`. A CI event joins one such outcome per open PR on that
@@ -340,7 +339,7 @@ is never picked). It calls the same `try_enqueue` and writes one INFO line per c
 `worker` log, not the `webhook-worker` log, with the same outcome as above:
 
 ```text
-No-CI sweep pr=<pull request id> head=<first 7 of the head sha>: <status> (<reason>[: <detail>]) [run=<run id>][; excluded until the head or label changes]
+No-CI sweep pr=<pull request id> head=<first 7 of the head sha>: <status>[ (<reason>[: <detail>])][ run=<run id>][; excluded until the head or label changes]
 ```
 
 A candidate whose result is not `enqueued` gets the suffix: the sweep excludes it and does not
@@ -494,8 +493,8 @@ pull-request and label deliveries deferred with `ignored_unknown_repository` dur
 outage are still revived only by linking (`wake_receipts`, below). CI deliveries
 (`check_suite`, `workflow_run`, `status`) are not deferred by an outage: only a dispatcher
 composed without a Run trigger (no broker publisher or no App id) defers them
-(`deferred_known_event`), and `webhook-worker` does not start without either, so it never
-defers them.
+(`deferred_known_event`), and `webhook-worker` does not start without `GITHUB_APP_ID` and
+`RABBITMQ_URL`, so it never defers them.
 
 An `installation_repositories.added` event that later brings their repository in does not
 wake them either, by decision (#70). `webhook_events` has no repository column, so waking
@@ -548,16 +547,16 @@ them also logs `GitHub webhook delivery … deferred after its last attempt`. A 
 fails on its last attempt is not in any of the three numbers: it logs its own `… failed after
 its last attempt` WARNING. A revival that resets receipts logs how many.
 
-Retention. Finished receipts (projected, failed, or deferred and not revived since) are
-deleted 30 days after they finished; the worker runs the purge once an hour. The purge is
-one `DELETE` without a batch limit and without an index on its condition, by
-decision (#70): with a few installations the table stays small and the hourly scan is short.
-It counts the deleted rows from the statement's row count and returns no ids (no `RETURNING`),
-so a large purge does not load its ids into the worker. Add a batch limit and an index on the
-finished timestamps once the table holds about one million rows or one purge takes longer than
-10 seconds. Neither is logged: check the size with `SELECT count(*) FROM webhook_events` and
-the duration with `EXPLAIN ANALYZE` of the purge query inside a transaction that is rolled
-back, since `EXPLAIN ANALYZE` executes the `DELETE`:
+Retention. Finished receipts (projected, failed, or deferred and not revived since) are deleted
+30 days after they finished; the worker runs the purge once an hour. The purge is one `DELETE`
+without a batch limit and without an index on its condition, by decision (#70): with a few
+installations the table stays small and the hourly scan is short. It counts the deleted rows
+from the statement's row count and returns no ids (no `RETURNING`), so a large purge does not
+load its ids into the worker. Add a batch limit and an index on the finished timestamps once
+the table holds about one million rows or one purge takes longer than 10 seconds. Neither is
+logged: check the size with `SELECT count(*) FROM webhook_events` and the duration with
+`EXPLAIN ANALYZE` of the purge query inside a transaction that is rolled back, since
+`EXPLAIN ANALYZE` executes the `DELETE`:
 
 ```sql
 BEGIN;
