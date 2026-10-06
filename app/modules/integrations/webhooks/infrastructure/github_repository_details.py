@@ -43,6 +43,10 @@ class GitHubInstallationRepositoryDetailsProvider:
                 installation_external_id
             )
         except httpx.HTTPError as error:
+            # Not reached in the app: reviews_api wraps the provider in
+            # TokenErrorClassifyingProvider, which raises InstallationAccessTokenError. Kept
+            # because this adapter accepts any provider, and a raw one's HTTP error still
+            # means GitHub could not answer.
             raise RepositoryDetailsUnavailableError(
                 _unavailable_message("installation token request", error)
             ) from error
