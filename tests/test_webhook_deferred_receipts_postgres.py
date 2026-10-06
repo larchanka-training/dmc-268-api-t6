@@ -6,6 +6,7 @@ Opt-in with ``TEST_DATABASE_URL``.
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 from collections.abc import Iterator
 from dataclasses import dataclass
@@ -172,3 +173,49 @@ def test_deferred_delivery_is_final_after_three_attempts_and_wakes_on_linking(
     assert result["handled"] == 1 and result["projected"] is True
     # Finished receipts are purged after the 30-day retention.
     assert (result["purged"], result["left"]) == (1, 0)
+
+
+def _receiver(
+    database: Database, dispatcher: UnknownInstallation, clock: list[datetime]
+) -> tuple[ReceiveGitHubDelivery, async_sessionmaker[AsyncSession], Any]:
+    engine = create_async_engine(
+        database.url,
+        connect_args={"options": f"-csearch_path={database.schema}"},
+        poolclass=NullPool,
+    )
+    factory: async_sessionmaker[AsyncSession] = async_sessionmaker(engine, expire_on_commit=False)
+    receiver = ReceiveGitHubDelivery(
+        uow_factory=lambda: SqlAlchemyGitHubWebhookReceiptUnitOfWork(factory),
+        dispatcher=dispatcher,
+        now=lambda: clock[0],
+    )
+    return receiver, factory, engine
+
+
+@pytest.mark.integration
+def test_sweep_summary_counts_deliveries_deferred_for_good(
+    database: Database, caplog: pytest.LogCaptureFixture
+) -> None:
+    async def scenario() -> None:
+        clock = [START]
+        receiver, _, engine = _receiver(database, UnknownInstallation(), clock)
+        await receiver.execute(_delivery())
+        for _ in range(3):
+            await receiver.replay_pending()
+            clock[0] += timedelta(minutes=6)
+        await engine.dispose()
+
+    with caplog.at_level(logging.INFO):
+        asyncio.run(scenario())
+
+    sweeps = [r.getMessage() for r in caplog.records if "webhook sweep" in r.getMessage()]
+    assert sweeps == [
+        "GitHub webhook sweep: 1 handled, 1 deferred, 0 deferred for good",
+        "GitHub webhook sweep: 1 handled, 1 deferred, 0 deferred for good",
+        "GitHub webhook sweep: 1 handled, 1 deferred, 1 deferred for good",
+    ]
+    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert warnings == [
+        "GitHub webhook delivery delivery-1 deferred after its last attempt: "
+        "ignored_unknown_installation"
+    ]
