@@ -866,6 +866,55 @@ def test_unavailable_details_before_a_tree_failure_defer_the_delivery() -> None:
     assert [[item.snapshot.external_id for item in call[1]] for call in sync.calls] == [[103]]
 
 
+def test_an_earlier_repository_that_fails_later_still_decides_the_dispatch_path() -> None:
+    """Event order, not completion order: 101's details fail only after 103's tree did."""
+    tree_failed = asyncio.Event()
+    finished: list[int] = []
+
+    class DetailsAfterTheTreeFailure(FakeDetailsProvider):
+        async def fetch_repository_details(
+            self, *, installation_external_id: int, full_name: str
+        ) -> RepositoryDetails:
+            if full_name != "example-owner/repo-101":
+                return await super().fetch_repository_details(
+                    installation_external_id=installation_external_id, full_name=full_name
+                )
+            await tree_failed.wait()
+            finished.append(101)
+            raise RepositoryDetailsUnavailableError(
+                "GitHub repository details request failed with HTTP 404"
+            )
+
+    class TreeThatFailsFirst(FakeTreeProvider):
+        async def fetch_default_branch_tree(
+            self,
+            *,
+            installation_external_id: int,
+            repository: RepositorySnapshot,
+        ) -> tuple[RepositoryTreeBlob, ...]:
+            if repository.external_id != 103:
+                return await super().fetch_default_branch_tree(
+                    installation_external_id=installation_external_id, repository=repository
+                )
+            tree_failed.set()
+            finished.append(103)
+            raise _not_found("example-owner/repo-103/git/trees/trunk")
+
+    sync = FakeSyncInstallationRepositories()
+
+    result = _dispatch_three_bare_repositories(
+        DetailsAfterTheTreeFailure(
+            details=_readable("example-owner/repo-102", "example-owner/repo-103")
+        ),
+        TreeThatFailsFirst(trees={102: ()}),
+        sync,
+    )
+
+    assert finished == [103, 101]
+    assert result.status is InstallationDeliveryDispatchStatus.DEFERRED_REPOSITORY_DETAILS
+    assert [[item.snapshot.external_id for item in call[1]] for call in sync.calls] == [[102]]
+
+
 def test_a_cancelled_repository_aborts_the_event_before_the_database_sync() -> None:
     """Cancellation is not a repository failure: it is re-raised before sync runs."""
     tree = FailingTree(trees={101: ()}, errors={102: asyncio.CancelledError()})
