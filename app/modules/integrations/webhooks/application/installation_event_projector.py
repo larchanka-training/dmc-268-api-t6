@@ -128,8 +128,11 @@ class InstallationEventProjector:
     the failed path.  Repositories are processed independently, except after a failure
     to obtain the installation token: it concerns the whole installation, so the
     repositories that have not started are skipped (one WARNING counts them), while the
-    running ones finish and the readable ones are still saved.  Replaying the whole
-    event is safe to repeat (replay upserts and re-enables saved repositories).
+    running ones finish and the readable ones are still saved.  A failed label request
+    is only logged, unless the token behind it failed: that fails its repository like a
+    token failure at the details or tree request, so the repository is not saved in this
+    attempt.  Replaying the whole event is safe to repeat (replay upserts and re-enables
+    saved repositories).
     Removed/deleted events enter the explicit transactional soft-disable path without
     making a VCS request.
     """
@@ -246,6 +249,10 @@ class InstallationEventProjector:
                 installation_external_id=installation_external_id,
                 repository=repository,
             )
+        except InstallationAccessTokenError:
+            # The installation's token, not the label, failed: it stops the event as at the
+            # details or tree request, so a later attempt still creates the label.
+            raise
         except Exception:
             _LOGGER.exception("Failed to create ai-review label for %s", repository.full_name)
         return RepositoryOnboardingInput(
