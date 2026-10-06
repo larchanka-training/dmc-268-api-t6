@@ -85,7 +85,9 @@ class SqlAlchemyBlobCache:
             assert self._session_factory is not None
             async with self._session_factory() as session:
                 await session.execute(statement)
-                if hasattr(session, "flush"):
+                if hasattr(session, "commit"):
+                    await session.commit()
+                elif hasattr(session, "flush"):
                     await session.flush()
 
     async def get(self, key: BlobCacheKey) -> BlobCacheEntry:

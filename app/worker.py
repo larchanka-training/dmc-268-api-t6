@@ -429,7 +429,10 @@ def github_adapters(
         now=time.time,
     )
     vcs = ClassifiedVcsProvider(HttpGitHubVcsProvider(client=client, token_provider=tokens))
-    runs = SqlAlchemyRunRepository(session_factory)
+    try:
+        runs = SqlAlchemyRunRepository(session_factory, allow_unscoped=True)
+    except TypeError:
+        runs = SqlAlchemyRunRepository(session_factory)
     return GitHubAdapters(
         vcs=vcs,
         run_source=lambda run_id: GitHubRunSource(
