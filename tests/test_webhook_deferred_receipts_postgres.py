@@ -219,3 +219,73 @@ def test_sweep_summary_counts_deliveries_deferred_for_good(
         "GitHub webhook delivery delivery-1 deferred after its last attempt: "
         "ignored_unknown_installation"
     ]
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize(
+    ("event", "payload"),
+    [
+        (
+            "pull_request",
+            {
+                "action": "labeled",
+                "number": 7,
+                "installation": {"id": 99},
+                "repository": {"id": 101},
+                "sender": {"type": "User"},
+            },
+        ),
+        (
+            "check_suite",
+            {
+                "action": "completed",
+                "installation": {"id": 99},
+                "repository": {"id": 101},
+                "check_suite": {"head_sha": "e" * 40},
+            },
+        ),
+        (
+            "status",
+            {
+                "installation": {"id": 99},
+                "repository": {"id": 101},
+                "sha": "e" * 40,
+                "state": "success",
+            },
+        ),
+    ],
+)
+def test_linking_wakes_a_pr_or_ci_delivery_deferred_for_good(
+    database: Database, event: str, payload: dict[str, Any]
+) -> None:
+    async def scenario() -> tuple[tuple[Any, ...], tuple[Any, ...]]:
+        clock = [START]
+        receiver, factory, engine = _receiver(database, UnknownInstallation(), clock)
+        await receiver.execute(VerifiedGitHubDelivery("delivery-1", event, payload).to_receipt())
+        for _ in range(3):
+            await receiver.replay_pending()
+            clock[0] += timedelta(minutes=6)
+
+        async def row() -> tuple[Any, ...]:
+            async with factory() as session:
+                result = await session.execute(
+                    text(
+                        "SELECT projection_attempt_count, projection_deferred_at IS NOT NULL "
+                        "FROM webhook_events"
+                    )
+                )
+                return tuple(result.one())
+
+        final = await row()
+        async with SqlAlchemyGitHubInstallationLinkUnitOfWork(factory) as uow:
+            await uow.links.wake_receipts(99)
+            await uow.commit()
+        woken = await row()
+        await engine.dispose()
+        return final, woken
+
+    final, woken = asyncio.run(scenario())
+
+    assert final == (3, True)
+    # Only the projection_deferred_at branch of wake_receipts covers non-installation events.
+    assert woken == (0, False)
