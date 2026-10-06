@@ -1162,13 +1162,13 @@ components:
           type: string
         oldLine:
           type: [integer, "null"]
-          minimum: 0
+          minimum: 1
         newLine:
           type: [integer, "null"]
-          minimum: 0
+          minimum: 1
         endLine:
           type: [integer, "null"]
-          minimum: 0
+          minimum: 1
         body:
           type: string
         ruleName:
