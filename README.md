@@ -107,7 +107,10 @@ GitHub calls fail and it marks each delivery failed after three tries.
 ### webhook-worker
 
 webhook-worker replays stored deliveries every 30 s and projects installation and pull request
-events. It runs in the `webhooks` profile and needs `GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY`
+events. Label, push and CI deliveries create Runs and publish them to the review queue, so it
+needs RabbitMQ: without `RABBITMQ_URL` it does not start (the compose file passes it), and
+without an active `review.system` prompt (`python -m app.bootstrap.seed_prompts`) no Run is
+created. It runs in the `webhooks` profile and needs `GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY`
 (multi-line PEM, quoted as above) and `GITHUB_APP_BOT_LOGIN` in `.env`, plus optional
 `GITHUB_API_URL`:
 
@@ -120,8 +123,10 @@ Details: [docs/WEBHOOK_WORKER.md](docs/WEBHOOK_WORKER.md).
 ## LLM gateway
 
 The review worker (`python -m app.worker`) builds the gateway once per process from `LLM_*`
-and binds the models to each claimed attempt. Without `LLM_MODEL` it starts with a warning
-and every run fails with a message that names the missing configuration.
+and binds the models to each claimed attempt. Without `LLM_MODEL` it starts with a warning and
+every run fails with `llm_unavailable`. That code is retryable, so a run takes all three
+attempts (30 s and 2 min apart) before it ends `failed`; the message that names the missing
+configuration is in `runs.error_message` only after the third one.
 
 The review model is called through the LLM gateway (#33): one OpenAI-compatible adapter for
 EUrouter and self-hosted servers, key rotation, retries, a fallback model, the run cost limit
@@ -162,7 +167,11 @@ table per run.
 
 For a self-hosted model in dev (LM Studio, Ollama, vLLM): `LLM_BASE_URL=http://localhost:1234/v1`,
 `LLM_MODEL=<model>`, `LLM_CONTEXT_WINDOW=<tokens>` and, if the server has no strict JSON Schema
-mode, `LLM_STRUCTURED_OUTPUT=prompt_json` with `LLM_ALLOW_PROMPT_JSON=1`.
+mode, `LLM_STRUCTURED_OUTPUT=prompt_json` with `LLM_ALLOW_PROMPT_JSON=1`. Two limits of local
+models: a call has a fixed 90 s timeout for fast (`GatewayPolicy.call_timeout_s`, not set from
+env), which reasoning models on local hardware usually exceed; and LM Studio with gpt-oss
+answers HTTP 400 to the strict schema (`json_schema`), so it needs the two `prompt_json`
+settings above.
 
 ## Tests
 
