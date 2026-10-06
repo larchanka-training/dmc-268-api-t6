@@ -54,7 +54,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         path = self.path.split("?", 1)[0]
-        if path == f"/repos/{REPOSITORY}/pulls/7":
+        if path == f"/repos/{REPOSITORY}/pulls/{PULL_REQUEST['number']}":
             self._send(200, PULL_REQUEST)
         else:
             self._send(404, {"message": "Not Found"})
