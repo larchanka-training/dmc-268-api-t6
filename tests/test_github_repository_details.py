@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 import httpx
 import pytest
 
+from app.common.infrastructure.github_repository_path import InvalidGitHubPathSegment
 from app.modules.integrations.webhooks.application.installation_event_projector import (
     RepositoryDetails,
     RepositoryDetailsUnavailableError,
@@ -79,16 +80,15 @@ def test_provider_reads_the_default_branch_and_web_url_with_the_installation_tok
 
 
 @pytest.mark.parametrize(
-    ("full_name", "encoded_path"),
+    ("full_name", "raw_path"),
     [
-        ("o/r with space", "/repos/o/r%20with%20space"),
-        ("o/r?x", "/repos/o/r%3Fx"),
-        ("o/r#x", "/repos/o/r%23x"),
-        ("o/r%2Fx", "/repos/o/r%252Fx"),
+        ("example-owner/example-repo", "/repos/example-owner/example-repo"),
+        ("octo/.github", "/repos/octo/.github"),
+        ("owner/repo.js", "/repos/owner/repo.js"),
     ],
 )
-def test_provider_percent_encodes_the_repository_path_but_keeps_the_owner_separator(
-    full_name: str, encoded_path: str
+def test_provider_sends_a_valid_repository_name_in_the_path_unchanged(
+    full_name: str, raw_path: str
 ) -> None:
     requests: list[httpx.Request] = []
 
@@ -101,9 +101,27 @@ def test_provider_percent_encodes_the_repository_path_but_keeps_the_owner_separa
 
     _fetch(handler, FakeInstallationTokenProvider(), full_name)
 
-    assert requests[0].url.raw_path == encoded_path.encode()
+    assert requests[0].url.raw_path == raw_path.encode()
     assert requests[0].url.query == b""
     assert requests[0].url.fragment == ""
+
+
+@pytest.mark.parametrize("full_name", ["o/r with space", "o/r?x", "o/r#x", "o/r%2Fx"])
+def test_provider_rejects_a_repository_name_that_needs_percent_encoding_before_any_request(
+    full_name: str,
+) -> None:
+    requests: list[httpx.Request] = []
+    tokens = FakeInstallationTokenProvider()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        raise AssertionError("no request may be sent for a name outside owner/repo")
+
+    with pytest.raises(InvalidGitHubPathSegment):
+        _fetch(handler, tokens, full_name)
+
+    assert requests == []
+    assert tokens.calls == []
 
 
 def _assert_unavailable(
