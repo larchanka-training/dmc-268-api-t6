@@ -302,7 +302,14 @@ class Targets:
         )
 
     async def for_ci(self, event: CiTriggerEvent) -> tuple[UUID, ...]:
-        return ()
+        record = self.state.pull_request
+        return (
+            (record.id,)
+            if record is not None
+            and record.state == PullRequestState.OPEN
+            and record.head_sha == event.head_sha
+            else ()
+        )
 
 
 class ConfirmedPublisher:
@@ -620,6 +627,8 @@ def _outcome_lines(
     payload: dict[str, Any],
     *,
     ci: GreenCi | None = None,
+    event_name: str = "pull_request",
+    delivery_id: str = "delivery-outcome",
 ) -> list[str]:
     def uow_factory() -> MemoryUnitOfWork:
         return MemoryUnitOfWork(state)
@@ -649,15 +658,13 @@ def _outcome_lines(
         dispatcher=GitHubWebhookDispatchAdapter(dispatcher),
         now=lambda: _NOW,
     )
-    asyncio.run(
-        receiver.execute(WebhookReceipt("delivery-outcome", "pull_request", json.dumps(payload)))
-    )
+    asyncio.run(receiver.execute(WebhookReceipt(delivery_id, event_name, json.dumps(payload))))
     with caplog.at_level(logging.INFO, logger=_DELIVERY_LOGGER):
         assert asyncio.run(receiver.replay_pending()) == 1
     return [
         record.getMessage()
         for record in caplog.records
-        if record.name == _DELIVERY_LOGGER and "delivery-outcome" in record.getMessage()
+        if record.name == _DELIVERY_LOGGER and delivery_id in record.getMessage()
     ]
 
 
@@ -734,3 +741,30 @@ def test_label_delivery_from_the_apps_own_bot_logs_the_ignored_projection(
         f"{_LINE} status=ignored_irrelevant_event detail=action=labeled ignored_unrelated"
     ]
     assert state.pull_request is None
+
+
+def test_completed_check_suite_logs_the_ci_outcome_of_each_open_pr_on_its_head(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    state = State()
+    # The label arrives while CI still runs, so only the completed suite can start the Run.
+    assert _outcome_lines(state, caplog, _label_payload(), ci=BlockedCi(state)) == [
+        f"{_PR_LINE} ineligible (ci_blocked)"
+    ]
+    check_suite = {
+        "action": "completed",
+        "installation": {"id": 17},
+        "repository": {"id": 101, "full_name": "octo/repo"},
+        "check_suite": {"head_sha": _HEAD},
+    }
+
+    lines = _outcome_lines(
+        state, caplog, check_suite, event_name="check_suite", delivery_id="delivery-ci"
+    )
+
+    # A CI event has no action; it lists one outcome per open PR on the head.
+    assert lines == [
+        "GitHub webhook delivery delivery-ci event=check_suite status=processed_ci "
+        f"detail=pr={_PR_ID} head=aaaaaaa: enqueued run={_RUN_ID}"
+    ]
+    assert state.published

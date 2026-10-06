@@ -669,6 +669,34 @@ def test_deferred_delivery_logs_when_it_is_tried_again_and_then_that_it_is_final
     ]
 
 
+def test_known_event_without_a_handler_logs_that_it_is_tried_again(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    now = datetime(2026, 9, 28, tzinfo=UTC)
+    uow = FakeReceiptUnitOfWork()
+    delivery = VerifiedGitHubDelivery("known-1", "pull_request", {"action": "synchronize"})
+
+    class NoTriggerDispatcher:
+        async def execute(self, delivery: WebhookReceipt) -> InstallationDeliveryDispatchResult:
+            return InstallationDeliveryDispatchResult(
+                InstallationDeliveryDispatchStatus.DEFERRED_KNOWN_EVENT, "action=synchronize"
+            )
+
+    receiver = ReceiveGitHubDelivery(
+        uow_factory=lambda: uow, dispatcher=NoTriggerDispatcher(), now=lambda: now
+    )
+    asyncio.run(receiver.execute(delivery.to_receipt()))
+
+    with caplog.at_level(logging.INFO):
+        assert asyncio.run(receiver.replay_pending()) == 1
+
+    assert _outcome_lines(caplog) == [
+        "GitHub webhook delivery known-1 event=pull_request status=deferred_known_event "
+        "detail=action=synchronize retry_at=2026-09-28T00:05:00+00:00"
+    ]
+    assert uow.rows["known-1"].projected is False
+
+
 _DELIVERY_LOGGER = "app.modules.integrations.webhooks.application.receive_github_delivery"
 _SECRET_IN_MESSAGE = "ghs_t72_sentinel"
 _NOW = datetime(2026, 9, 28, tzinfo=UTC)
@@ -1409,21 +1437,22 @@ def test_action_reader_returns_only_a_plain_token(payload_json: str, expected: s
 
 
 @pytest.mark.parametrize(
-    ("payload_json", "error"),
+    ("payload_json", "error", "message"),
     [
-        ("not json", json.JSONDecodeError),
-        ("", json.JSONDecodeError),
-        pytest.param("[" * 100_000, RecursionError, id="deeply-nested"),
+        ("not json", json.JSONDecodeError, "Expecting value"),
+        ("", json.JSONDecodeError, "Expecting value"),
+        pytest.param(
+            "[" * 100_000, RecursionError, "maximum recursion depth exceeded", id="deeply-nested"
+        ),
     ],
 )
 def test_action_reader_raises_for_a_payload_that_cannot_be_decoded(
-    payload_json: str, error: type[Exception]
+    payload_json: str, error: type[Exception], message: str
 ) -> None:
     receipt = WebhookReceipt("reader", "pull_request", payload_json)
 
-    with pytest.raises(error) as raised:
+    with pytest.raises(error, match=message):
         action_of(receipt)
-    assert raised.type is error
 
 
 @pytest.mark.parametrize(
