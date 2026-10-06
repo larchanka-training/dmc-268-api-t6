@@ -47,7 +47,10 @@ def failure_category(exc: BaseException) -> str:
     if isinstance(exc, TimeoutError):
         return "timeout"
     for cls in type(exc).__mro__:
-        category = _CATEGORY_BY_LIBRARY.get(cls.__module__.split(".")[0])
+        module = getattr(cls, "__module__", None)
+        category = (
+            _CATEGORY_BY_LIBRARY.get(module.split(".")[0]) if isinstance(module, str) else None
+        )
         if category is not None:
             return category
     return "internal"
@@ -215,6 +218,7 @@ class ReceiveGitHubDelivery:
             raise
 
         retry_note = ""
+        final = False
         try:
             async with self._uow_factory() as uow:
                 if result.status in _DEFERRED:
@@ -224,21 +228,22 @@ class ReceiveGitHubDelivery:
                         delivery_id, token, retry_at, now, _MAX_DISPATCH_ATTEMPTS
                     )
                     retry_note = f" retry_at={'none' if final else retry_at.isoformat()}"
-                    if final:
-                        # Linking the installation wakes it up again (wake_receipts); installation
-                        # events of linked installations received within the revival window are
-                        # also revived hourly (ReviveDeferredInstallationDeliveries).
-                        _LOGGER.warning(
-                            "GitHub webhook delivery %s deferred after its last attempt: %s",
-                            delivery_id,
-                            result.status.value,
-                        )
                 else:
                     await uow.receipts.mark_projected(delivery_id, token, self._now())
                 await uow.commit()
         except Exception as exc:
             self._log_failure(delivery_id, delivery, "finalize", exc, result)
             raise
+        if final:
+            # Logged after the commit: a failed commit leaves the receipt retryable.
+            # Linking the installation wakes it up again (wake_receipts); installation
+            # events of linked installations received within the revival window are
+            # also revived hourly (ReviveDeferredInstallationDeliveries).
+            _LOGGER.warning(
+                "GitHub webhook delivery %s deferred after its last attempt: %s",
+                delivery_id,
+                result.status.value,
+            )
         # One line per delivery: why a label (or any event) did or did not become a Run.
         # Ids, statuses and reasons only; never the payload or a credential.
         _LOGGER.info(
@@ -265,22 +270,24 @@ class ReceiveGitHubDelivery:
         identifier, so it is never logged here. ``result`` is the dispatch outcome a failed
         finalize leaves behind (a Run may already exist).
         """
-        action = None
-        if delivery is not None and self._action_of is not None:
-            with suppress(Exception):  # a broken reader must not hide the failure it describes
-                action = self._action_of(delivery)
-        outcome = (
-            ""
-            if result is None
-            else f" outcome={result.status.value} detail={result.detail or '-'}"
-        )
-        _LOGGER.warning(
-            "GitHub webhook delivery %s event=%s action=%s failed stage=%s category=%s error=%s%s",
-            delivery_id,
-            delivery.event_name if delivery is not None else "-",
-            action or "-",
-            stage,
-            failure_category(exc),
-            type(exc).__name__,
-            outcome,
-        )
+        with suppress(Exception):  # logging a failure must never raise or replace it
+            action = None
+            if delivery is not None and self._action_of is not None:
+                with suppress(Exception):  # a broken reader still leaves the line
+                    action = self._action_of(delivery)
+            outcome = (
+                ""
+                if result is None
+                else f" outcome={result.status.value} detail={result.detail or '-'}"
+            )
+            _LOGGER.warning(
+                "GitHub webhook delivery %s event=%s action=%s failed stage=%s category=%s "
+                "error=%s%s",
+                delivery_id,
+                delivery.event_name if delivery is not None else "-",
+                action or "-",
+                stage,
+                failure_category(exc),
+                type(exc).__name__,
+                outcome,
+            )
