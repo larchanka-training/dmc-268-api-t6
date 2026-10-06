@@ -173,10 +173,11 @@ HTTP error, its status code, for unreadable details or a token failure those of 
 behind them; never the message or URL), and the first error in event order is then raised.
 That error decides the path of the receipt. Unreadable details and a token request GitHub
 could not answer defer the delivery like an unknown installation (`deferred_repository_details`:
-retried after 5 minutes, then revived once an hour, see "Deferred deliveries" below), and the
-dispatcher logs a WARNING with the installation id and the HTTP status or exception class of
-unreadable details, or that the installation access token is unavailable, never the URL or
-the token. A failed tree request, a malformed token response or an App key that cannot sign,
+retried after 5 minutes, then revived once an hour, see "Deferred deliveries" below). Despite
+their names, that status and the dispatcher's WARNING `Repository details unavailable for
+installation <id>: <reason>` cover both causes: the reason is the HTTP status or exception
+class of unreadable details, or `GitHub installation access token unavailable`, never the URL
+or the token. A failed tree request, a malformed token response or an App key that cannot sign,
 the 240 s dispatch timeout and any other error take the
 failed-dispatch path above (retry after 30 s, three attempts in total, then
 `projection_failed_at`). So a failed tree request of an earlier repository fails the
@@ -245,10 +246,11 @@ repository, an `added` event needs the ids filtered out of it, `repository_selec
 needs every page, and it does not touch the label requests, which are the bottleneck.
 
 Empty repositories. The tree request of a repository without a commit answers 409
-("Git Repository is empty."). A 409 with that message is read as an empty tree, so the
-repository is connected with no recognised languages and `select_default_rule_set` picks
-`backend`, as for any tie. Any other 409 is an error like any other status, so a retry can
-heal it and an unrelated 409 does not freeze a repository as empty. The default rule set is
+("Git Repository is empty."). A 409 whose JSON `message` contains `repository is empty`,
+compared case-insensitively, is read as an empty tree, so the repository is connected with no
+recognised languages and `select_default_rule_set` picks `backend`, as for any tie. Any other
+409 is an error like any other status, so a retry can heal it and an unrelated 409 does not
+freeze a repository as empty. The default rule set is
 chosen once, at the first connection: `OnboardRepository` returns the existing active rule
 version before it reads the languages, and connecting the repository again re-enables the
 same row without touching its rules. Nothing recomputes the languages, so an empty
