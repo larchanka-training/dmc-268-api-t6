@@ -211,7 +211,8 @@ the failed-dispatch path. One
 WARNING with the installation id and the count covers the skipped repositories, which get no
 WARNING of their own, and the WARNING of a failed repository names the type and status of the
 original error. A failed attempt therefore costs about one mint, not N: about three per cycle
-of three attempts, and for a transient failure a cycle about once an hour for up to 7 days. A
+of three attempts, and for a transient failure a cycle about once an hour for up to 7 days,
+plus a cycle per login. A
 failed label request is still only logged, unless the token behind it failed: a token failure
 at the label request is a failure of that repository like any token failure. The repository
 is not saved in this attempt, the repositories that have not started are skipped, and the
@@ -219,7 +220,7 @@ first failure in event order decides the path (transient: deferred and retried; 
 failed). So a transient token failure at the label request of the last repository alone
 defers the delivery instead of onboarding it without that label. The pull request and CI
 adapters, and the review worker that shares the provider class, still see the original HTTP
-errors.
+errors, so a token outage fails their dispatch instead of deferring it.
 
 Installation event budget. The dispatch of a receipt is limited to 240 s. Up to four
 repositories are processed at a time (details, tree, label), and the label requests are
@@ -452,10 +453,12 @@ spends its three attempts within about ten minutes, so that is usually the next 
 receipt is retried about once an hour; when it was deferred less than 45 minutes before a
 tick (its first deferral, a cycle started by a login, a worker restart that shifts the tick,
 or a slow sweep), it is the tick after that, up to about two hours later. An outage of the
-details read therefore heals on its own, with no login, about an hour after it ends, unless
-the last attempt of a cycle fails the dispatch instead (a failing tree request, the 240 s
-dispatch timeout or a database error; a failed label request is only logged, unless its token
-failed): the receipt is then marked failed (`projection_failed_at`), and neither the revival
+details read or of the token request therefore heals on its own, with no login, about an
+hour after it ends, unless the last attempt of a cycle fails the dispatch instead (a failing
+tree request, a malformed token response or an App key that cannot sign, the 240 s dispatch
+timeout or a database error; a failed label request is only logged, unless the token behind
+it is permanently unusable, while a transient token failure defers the delivery again): the
+receipt is then marked failed (`projection_failed_at`), and neither the revival
 nor a login brings it back. The 45-minute delay and the 7-day window are the parameters the
 tech lead approved
 (api#71): a GitHub outage longer than a week is not a transient failure, and a `GET /repos`
