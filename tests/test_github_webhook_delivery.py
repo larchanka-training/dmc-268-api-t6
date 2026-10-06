@@ -2518,3 +2518,27 @@ def isolated_webhook_database() -> Iterator[tuple[Connection, str, str]]:
                 connection.commit()
     finally:
         engine.dispose()
+
+
+def test_invalid_installation_event_logs_its_action_only_as_a_plain_token(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # The envelope fails on the installation id, so a free-text action reaches the warning.
+    receipt = VerifiedGitHubDelivery(
+        "invalid-installation-2",
+        "installation_repositories",
+        {"action": "zq7 status=projected", "installation": {"id": 0}},
+    ).to_receipt()
+
+    _replay_invalid_receipt(receipt, caplog)
+
+    (warning,) = [
+        record.getMessage()
+        for record in caplog.records
+        if record.name == _DISPATCH_LOGGER and record.levelno == logging.WARNING
+    ]
+    assert warning.startswith(
+        "Ignoring invalid GitHub installation event: delivery_id=invalid-installation-2 "
+        "event=installation_repositories action=- installation_id=0 error_count="
+    )
+    assert "zq7" not in caplog.text
