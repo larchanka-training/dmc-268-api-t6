@@ -8,6 +8,7 @@ import json
 import logging
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from decimal import Decimal
 from typing import Any, cast
 from uuid import UUID, uuid5
 
@@ -280,6 +281,76 @@ def test_worker_settings_read_llm_and_reject_a_partial_llm_config() -> None:
     )
     with pytest.raises(LlmConfigError):
         WorkerSettings.from_environment({**LLM_ENV, "LLM_BASE_URL": ""})
+
+
+@pytest.mark.parametrize(
+    "model_env",
+    [
+        {"LLM_MODEL": "mistral-small-4", "LLM_API_KEYS": "k"},
+        {
+            "LLM_MODEL": "test-model",
+            "LLM_BASE_URL": "https://llm.test/v1",
+            "LLM_CONTEXT_WINDOW": "100000",
+            "LLM_FALLBACK_MODEL": "mistral-small-3.2-24b",
+            "LLM_FALLBACK_API_KEYS": "k",
+        },
+        {
+            "LLM_MODEL": "test-model",
+            "LLM_BASE_URL": "https://api.eurouter.ai。/api/v1",
+            "LLM_CONTEXT_WINDOW": "100000",
+            "LLM_API_KEYS": "k",
+        },
+    ],
+)
+def test_worker_rejects_configured_eurouter_route_without_eur_rate(
+    model_env: dict[str, str],
+) -> None:
+    with pytest.raises(LlmConfigError, match="LLM_EUR_TO_USD_RATE"):
+        WorkerSettings.from_environment(
+            {
+                "DATABASE_URL": "postgresql+psycopg://test",
+                "RABBITMQ_URL": "amqp://test",
+                **model_env,
+            }
+        )
+
+
+def test_worker_allows_usd_only_route_and_no_model_without_eur_rate() -> None:
+    base_env = {"DATABASE_URL": "postgresql+psycopg://test", "RABBITMQ_URL": "amqp://test"}
+
+    usd_only = WorkerSettings.from_environment(
+        {
+            **base_env,
+            "LLM_MODEL": "mistral-small-4",
+            "LLM_BASE_URL": "https://usd-only.test/v1",
+            "LLM_API_KEYS": "k",
+        }
+    )
+    unconfigured = WorkerSettings.from_environment(
+        {**base_env, "LLM_FALLBACK_MODEL": "mistral-small-3.2-24b"}
+    )
+
+    assert usd_only.llm is not None
+    assert usd_only.llm.primary.base_url == "https://usd-only.test/v1"
+    assert usd_only.llm.eur_to_usd_rate is None
+    assert unconfigured.llm is None
+
+
+def test_worker_accepts_eurouter_route_with_explicit_eur_rate() -> None:
+    settings = WorkerSettings.from_environment(
+        {
+            "DATABASE_URL": "postgresql+psycopg://test",
+            "RABBITMQ_URL": "amqp://test",
+            "LLM_MODEL": "mistral-small-4",
+            "LLM_API_KEYS": "k",
+            "LLM_FALLBACK_MODEL": "mistral-small-3.2-24b",
+            "LLM_EUR_TO_USD_RATE": "1.1204",
+        }
+    )
+
+    assert settings.llm is not None
+    assert settings.llm.fallback is not None
+    assert settings.llm.eur_to_usd_rate == Decimal("1.1204")
 
 
 def _claimed() -> ClaimedAttempt:

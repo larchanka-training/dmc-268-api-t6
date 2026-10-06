@@ -125,7 +125,7 @@ from app.modules.reviews.infrastructure.llm.models import (
     GatewayConventionsModel,
     GatewayReviewModel,
 )
-from app.modules.reviews.infrastructure.llm.settings import LlmSettings
+from app.modules.reviews.infrastructure.llm.settings import LlmConfigError, LlmSettings
 from app.modules.reviews.infrastructure.no_ci_sweep_candidates import SqlAlchemyDueNoCiCandidates
 from app.modules.reviews.infrastructure.provider_conventions import (
     ProviderConventionsModel,
@@ -350,9 +350,15 @@ class WorkerSettings:
                 raise RuntimeError(f"{name} is required for the review worker")
             return value
 
+        database_url = required("DATABASE_URL")
+        rabbitmq_url = required("RABBITMQ_URL")
+        llm = LlmSettings.from_env(env) if env.get("LLM_MODEL") else None
+        if llm is not None and llm.has_eurouter_route and llm.eur_to_usd_rate is None:
+            raise LlmConfigError("LLM_EUR_TO_USD_RATE is required for an EUrouter route")
+
         return cls(
-            database_url=required("DATABASE_URL"),
-            rabbitmq_url=required("RABBITMQ_URL"),
+            database_url=database_url,
+            rabbitmq_url=rabbitmq_url,
             worker_id=env.get("WORKER_ID") or f"{socket.gethostname()}:{os.getpid()}",
             github_app_id=env.get("GITHUB_APP_ID") or None,
             github_private_key=env.get("GITHUB_APP_PRIVATE_KEY") or None,
@@ -360,7 +366,7 @@ class WorkerSettings:
             portal_url=env.get("PORTAL_URL") or None,
             heartbeat_file=heartbeat_file(env),
             # Partly set LLM_* fails the start; none at all starts with a warning.
-            llm=LlmSettings.from_env(env) if env.get("LLM_MODEL") else None,
+            llm=llm,
         )
 
 

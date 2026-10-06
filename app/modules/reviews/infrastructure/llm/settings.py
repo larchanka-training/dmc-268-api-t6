@@ -89,6 +89,21 @@ class LlmSettings:
     policy: GatewayPolicy = field(default_factory=GatewayPolicy)
     eur_to_usd_rate: Decimal | None = None
 
+    @property
+    def has_eurouter_route(self) -> bool:
+        """Whether either configured endpoint may return a EUR-denominated cost."""
+        for prefix, profile in (("LLM_", self.primary), ("LLM_FALLBACK_", self.fallback)):
+            if profile is None:
+                continue
+            host = _endpoint_identity(profile.base_url, prefix)[1]
+            try:
+                canonical_host = host.encode("idna").decode("ascii").rstrip(".")
+            except UnicodeError:
+                raise LlmConfigError(f"{prefix}BASE_URL host must be valid") from None
+            if canonical_host == "api.eurouter.ai":
+                return True
+        return False
+
     @classmethod
     def from_env(cls, env: Mapping[str, str]) -> LlmSettings:
         """Read ``LLM_*`` (primary) and ``LLM_FALLBACK_*`` (fallback) variables.
