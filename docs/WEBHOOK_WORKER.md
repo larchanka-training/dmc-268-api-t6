@@ -135,10 +135,19 @@ secret. The receipt is opaque to the receipt layer, so the action comes from a
 reader that the transport adapter supplies (`action_of`): it decodes the payload and returns the
 `action` only when it is a plain token (`[a-z_]`, 1 to 40 characters), so free text or a line
 break in a payload cannot reach the log. The reader runs for the `dispatch` and `finalize`
-stages, including a timeout, and a reader that fails never hides the failure: the line then shows
-`action=-`. `action=-` also means an event without an action (`status`) and a failure while
-claiming, where the receipt has not been read. The same token rule applies to the `action=` that
-starts the `detail` of an ignored event in the outcome line.
+stages, including a timeout, and a reader that fails never hides the failure. `action=-` without
+a diagnostic record means no error happened: the payload has no action (`status`) or its action
+is not a plain token; it also marks a failure while claiming, where the receipt has not been read.
+A payload that cannot be decoded is an error: the reader raises, and `action=-` is preceded by
+the diagnostic record described below. The same token rule applies to the `action=` that starts
+the `detail` of an ignored event in the outcome line.
+
+The line is written even when one of its fields cannot be computed: if the action reader, the
+failure classifier or the outcome rendering raises, the field falls back to `action=-`,
+`category=internal` or `outcome=-`, and a diagnostic WARNING comes first,
+`GitHub webhook delivery <delivery_id> failure line: <field> fell back to <default> after <ExceptionClass>`.
+It names the field and the error class only, never the message or a traceback. The original
+error, the receipt release and the sweep's ERROR record are unchanged.
 
 | stage | meaning |
 | --- | --- |
