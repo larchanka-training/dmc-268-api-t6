@@ -79,6 +79,7 @@ uv run python scripts/github_stub.py                                      # term
 uv run --env-file .env.local uvicorn app.main:app --port 8000             # terminal 2
 uv run --env-file .env.local python -m app.webhook_worker                 # terminal 3
 
+# terminal 4
 GITHUB_WEBHOOK_SECRET=local-secret uv run python scripts/webhook_smoke.py
 sleep 40                                 # the worker sweeps every 30 s
 docker compose exec -T postgres psql -U app -d app -c \
@@ -86,8 +87,10 @@ docker compose exec -T postgres psql -U app -d app -c \
 ```
 
 After the sweep the query shows one Run: `queued`, head `aaaa…`, trigger
-`webhook`, engine `fast`, published `t`, and the worker terminal logs `GitHub webhook delivery
-… event=pull_request status=…`. The repository waits for no CI (`wait_for_ci = never`), so the
+`webhook`, engine `fast`, published `t`. In the worker terminal the delivery line reads
+`GitHub webhook delivery … event=pull_request status=projected_pr … enqueued run=<id>`; a
+deferred delivery prints the same prefix with another status, such as
+`status=ignored_unknown_repository`. The repository waits for no CI (`wait_for_ci = never`), so the
 label alone starts the Run.
 
 The review worker is not needed for this check: started with the same `.env.local`, it would
