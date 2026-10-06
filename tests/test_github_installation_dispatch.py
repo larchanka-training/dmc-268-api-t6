@@ -886,6 +886,59 @@ def test_invalid_installation_event_is_ignored_with_a_warning_naming_the_failing
     assert "SENTINEL" not in caplog.text
 
 
+@pytest.mark.parametrize(
+    ("action", "array"),
+    [("added", "repositories_added"), ("removed", "repositories_removed")],
+)
+def test_repository_name_outside_owner_slash_repo_is_ignored_without_logging_the_value(
+    caplog: pytest.LogCaptureFixture, action: str, array: str
+) -> None:
+    """A path-traversal-shaped ``full_name`` never reaches onboarding or a GitHub request."""
+    resolver = FakeInstallationResolver()
+    onboarding = FakeOnboarding()
+    adapter = GitHubWebhookDispatchAdapter(
+        GitHubInstallationDeliveryDispatcher(resolver=resolver, onboarding=onboarding)
+    )
+    payload = {
+        "action": action,
+        "installation": {"id": 17},
+        "repositories_added": [],
+        "repositories_removed": [],
+        array: [
+            {
+                "id": 101,
+                "node_id": "SENTINEL-node-id",
+                "name": "SENTINEL-name",
+                "full_name": "SENTINEL-owner/../SENTINEL-name",
+                "private": False,
+            }
+        ],
+    }
+
+    with caplog.at_level(logging.WARNING, logger=_DISPATCH_LOGGER):
+        result = asyncio.run(
+            adapter.execute(
+                VerifiedGitHubDelivery(
+                    "delivery-bad-name", "installation_repositories", payload
+                ).to_receipt()
+            )
+        )
+
+    assert result.status is InstallationDeliveryDispatchStatus.IGNORED_INVALID_EVENT
+    assert resolver.calls == []
+    assert onboarding.calls == []
+    warnings = [
+        record
+        for record in caplog.records
+        if record.name == _DISPATCH_LOGGER and record.levelno == logging.WARNING
+    ]
+    assert len(warnings) == 1
+    logged = warnings[0].getMessage()
+    assert f"action={action}" in logged
+    assert f"{array}.0.full_name: String should match pattern" in logged
+    assert "SENTINEL" not in caplog.text
+
+
 def test_invalid_installation_event_warning_is_bounded_to_the_first_ten_field_errors(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
