@@ -320,7 +320,7 @@ def test_queued_foreign_suite_without_runs_alone_is_not_ci_evidence_for_wait_for
     [line] = _outcome_lines(caplog)
     assert re.fullmatch(
         r"GitHub webhook delivery delivery-1 event=pull_request status=projected_pr "
-        rf"detail=action=labeled pr={_UUID} head=eeeeeee: ineligible \(waiting_for_ci\)",
+        rf"detail=action=labeled pr={_UUID} head=eeeeeee: ineligible \(waiting_for_ci: no CI yet\)",
         line,
     ), line
 
@@ -424,7 +424,7 @@ def test_every_label_outcome_is_logged_with_its_reason_and_without_the_token(
         r"status=ignored_unknown_repository detail=action=labeled unknown_repository "
         r"retry_at=\d{4}-\d\d-\d\dT\S+",
         rf"GitHub webhook delivery delivery-2 event=pull_request status=projected_pr "
-        rf"detail=action=labeled {pr}: ineligible \(ci_blocked\)",
+        rf"detail=action=labeled {pr}: ineligible \(ci_blocked: check suite app=7 in_progress\)",
         rf"GitHub webhook delivery delivery-3 event=pull_request status=projected_pr "
         rf"detail=action=labeled {pr}: unconfigured \(missing_rules\)",
         rf"GitHub webhook delivery delivery-4 event=pull_request status=projected_pr "

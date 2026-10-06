@@ -287,6 +287,20 @@ def test_an_ineligible_decision_reports_the_gate_reason(
     assert uow.commits == 0
 
 
+def test_an_ineligible_decision_carries_what_blocks_or_delays_the_gate() -> None:
+    decision = CiEligibility(
+        False, EligibilityReason.CI_BLOCKED, _HEAD, detail="check suite app=5111174 queued"
+    )
+    use_case, uow = _enqueue(eligibility=Eligibility(decision=decision))
+
+    result = asyncio.run(use_case.execute(_PR, _HEAD))
+
+    assert result == EnqueueResult(
+        EnqueueStatus.INELIGIBLE, reason="ci_blocked", detail="check suite app=5111174 queued"
+    )
+    assert uow.commits == 0
+
+
 @pytest.mark.parametrize(
     ("miss", "status", "reason"),
     [
@@ -558,6 +572,65 @@ def test_a_ci_event_reports_every_target_and_the_absence_of_one() -> None:
     assert enqueuer.calls == [(_PR, _HEAD), (other, _HEAD)]
     nobody = TriggerFromDelivery(targets=OutcomeTargets(ci=()), enqueuer=OutcomeEnqueuer([]))
     assert asyncio.run(nobody.on_ci(event)) == "no open pull request at this head"
+
+
+@pytest.mark.parametrize(
+    ("gate", "detail", "expected"),
+    [
+        (
+            EligibilityReason.CI_BLOCKED,
+            "check suite app=5111174 queued",
+            f"pr={_PR} head=aaaaaaa: ineligible (ci_blocked: check suite app=5111174 queued)",
+        ),
+        (
+            EligibilityReason.CI_BLOCKED,
+            "check suite app=8 completed/timed_out (+1 more)",
+            f"pr={_PR} head=aaaaaaa: ineligible "
+            "(ci_blocked: check suite app=8 completed/timed_out (+1 more))",
+        ),
+        (
+            EligibilityReason.CI_BLOCKED,
+            "check suite app=8 completed/?",
+            f"pr={_PR} head=aaaaaaa: ineligible (ci_blocked: check suite app=8 completed/?)",
+        ),
+        (
+            EligibilityReason.CI_BLOCKED,
+            "commit status failure",
+            f"pr={_PR} head=aaaaaaa: ineligible (ci_blocked: commit status failure)",
+        ),
+        (
+            EligibilityReason.CI_BLOCKED,
+            "commit status ?",
+            f"pr={_PR} head=aaaaaaa: ineligible (ci_blocked: commit status ?)",
+        ),
+        (
+            EligibilityReason.WAITING_FOR_CI,
+            "no CI yet",
+            f"pr={_PR} head=aaaaaaa: ineligible (waiting_for_ci: no CI yet)",
+        ),
+        (
+            EligibilityReason.WAITING_FOR_CI,
+            "no CI yet, label or head time unknown",
+            f"pr={_PR} head=aaaaaaa: ineligible "
+            "(waiting_for_ci: no CI yet, label or head time unknown)",
+        ),
+        (
+            EligibilityReason.WAITING_FOR_CI,
+            "no CI yet, auto start at 2026-09-28T12:02:00+00:00",
+            f"pr={_PR} head=aaaaaaa: ineligible "
+            "(waiting_for_ci: no CI yet, auto start at 2026-09-28T12:02:00+00:00)",
+        ),
+    ],
+)
+def test_an_ineligible_outcome_names_what_blocks_or_delays_the_gate(
+    gate: EligibilityReason, detail: str, expected: str
+) -> None:
+    decision = CiEligibility(False, gate, _HEAD, detail=detail)
+    use_case, _ = _enqueue(eligibility=Eligibility(decision=decision))
+    trigger = TriggerFromDelivery(targets=OutcomeTargets(), enqueuer=use_case)
+
+    assert asyncio.run(trigger.on_pr(_outcome_event("synchronize"))) == expected
+    assert asyncio.run(trigger.on_ci(CiTriggerEvent(17, 101, _HEAD, "check_suite"))) == expected
 
 
 @pytest.fixture

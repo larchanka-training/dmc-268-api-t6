@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import re
 from dataclasses import dataclass, field, replace
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, timezone
 from uuid import UUID
 
 import httpx
@@ -159,11 +159,18 @@ def _idle(app_id: int = 8) -> CheckSuite:
 
 def test_queued_foreign_suite_without_runs_is_no_ci_evidence_in_always_and_auto() -> None:
     always, _, _ = _decide(_candidate(wait_for_ci=CiWaitMode.ALWAYS), _ci(_idle()))
-    assert always == CiEligibility(False, EligibilityReason.WAITING_FOR_CI, _HEAD)
+    assert always == CiEligibility(
+        False, EligibilityReason.WAITING_FOR_CI, _HEAD, detail="no CI yet"
+    )
 
     before, _, _ = _decide(_candidate(), _ci(_idle()), now=_AT + timedelta(minutes=1, seconds=59))
     after, _, _ = _decide(_candidate(), _ci(_idle()), now=_AT + timedelta(minutes=2))
-    assert before == CiEligibility(False, EligibilityReason.WAITING_FOR_CI, _HEAD)
+    assert before == CiEligibility(
+        False,
+        EligibilityReason.WAITING_FOR_CI,
+        _HEAD,
+        detail="no CI yet, auto start at 2026-09-28T12:02:00+00:00",
+    )
     assert after == CiEligibility(True, EligibilityReason.ELIGIBLE, _HEAD)
 
 
@@ -201,36 +208,56 @@ def test_queued_foreign_suite_without_runs_does_not_hide_failing_combined_status
 
 
 @pytest.mark.parametrize(
-    "suite",
+    ("suite", "detail"),
     [
-        CheckSuite(8, "in_progress", None, latest_check_runs_count=1),
-        CheckSuite(8, "queued", None, latest_check_runs_count=1),
-        CheckSuite(8, "queued", None, latest_check_runs_count=3),
-        CheckSuite(8, "queued", None),
+        (
+            CheckSuite(8, "in_progress", None, latest_check_runs_count=1),
+            "check suite app=8 in_progress",
+        ),
+        (CheckSuite(8, "queued", None, latest_check_runs_count=1), "check suite app=8 queued"),
+        (CheckSuite(8, "queued", None, latest_check_runs_count=3), "check suite app=8 queued"),
+        (CheckSuite(8, "queued", None), "check suite app=8 queued"),
     ],
 )
-def test_foreign_suite_with_runs_or_unknown_count_still_blocks(suite: CheckSuite) -> None:
+def test_foreign_suite_with_runs_or_unknown_count_still_blocks(
+    suite: CheckSuite, detail: str
+) -> None:
     for mode in (CiWaitMode.ALWAYS, CiWaitMode.AUTO):
         result, _, _ = _decide(
             _candidate(wait_for_ci=mode), _ci(suite, _idle(9)), now=_AT + timedelta(hours=1)
         )
-        assert result == CiEligibility(False, EligibilityReason.CI_BLOCKED, _HEAD), mode
+        assert result == CiEligibility(False, EligibilityReason.CI_BLOCKED, _HEAD, detail=detail), (
+            mode
+        )
 
 
 @pytest.mark.parametrize(
-    "suite",
+    ("suite", "detail"),
     [
-        CheckSuite(8, "in_progress", None, latest_check_runs_count=0),
-        CheckSuite(8, "completed", "failure", latest_check_runs_count=0),
-        CheckSuite(8, "completed", "cancelled", latest_check_runs_count=0),
+        (
+            CheckSuite(8, "in_progress", None, latest_check_runs_count=0),
+            "check suite app=8 in_progress",
+        ),
+        (
+            CheckSuite(8, "completed", "failure", latest_check_runs_count=0),
+            "check suite app=8 completed/failure",
+        ),
+        (
+            CheckSuite(8, "completed", "cancelled", latest_check_runs_count=0),
+            "check suite app=8 completed/cancelled",
+        ),
     ],
 )
-def test_only_a_queued_foreign_suite_without_runs_is_ignored(suite: CheckSuite) -> None:
+def test_only_a_queued_foreign_suite_without_runs_is_ignored(
+    suite: CheckSuite, detail: str
+) -> None:
     for mode in (CiWaitMode.ALWAYS, CiWaitMode.AUTO):
         result, _, _ = _decide(
             _candidate(wait_for_ci=mode), _ci(suite, _idle(9)), now=_AT + timedelta(hours=1)
         )
-        assert result == CiEligibility(False, EligibilityReason.CI_BLOCKED, _HEAD), mode
+        assert result == CiEligibility(False, EligibilityReason.CI_BLOCKED, _HEAD, detail=detail), (
+            mode
+        )
 
 
 def test_completed_green_foreign_suite_counts_as_ci_whatever_its_run_count() -> None:
@@ -248,7 +275,12 @@ def test_auto_no_ci_waits_from_later_label_or_head_at_inclusive_boundary() -> No
     empty = _ci()
     before, _, _ = _decide(candidate, empty, now=_AT + timedelta(minutes=2, seconds=59))
     at_boundary, _, _ = _decide(candidate, empty, now=_AT + timedelta(minutes=3))
-    assert before == CiEligibility(False, EligibilityReason.WAITING_FOR_CI, _HEAD)
+    assert before == CiEligibility(
+        False,
+        EligibilityReason.WAITING_FOR_CI,
+        _HEAD,
+        detail="no CI yet, auto start at 2026-09-28T12:03:00+00:00",
+    )
     assert at_boundary == CiEligibility(True, EligibilityReason.ELIGIBLE, _HEAD)
 
     label_later = _candidate(
@@ -269,6 +301,100 @@ def test_auto_green_ci_is_immediate_and_missing_head_clock_waits() -> None:
         _candidate(head_first_seen_at=None), _ci(), now=_AT + timedelta(hours=1)
     )
     assert no_head_clock.reason == EligibilityReason.WAITING_FOR_CI
+
+
+@pytest.mark.parametrize(
+    ("suites", "detail"),
+    [
+        ((CheckSuite(5111174, "queued", None),), "check suite app=5111174 queued"),
+        (
+            (
+                CheckSuite(42, "completed", "failure"),
+                _idle(9),
+                CheckSuite(7, "completed", "success"),
+                CheckSuite(8, "completed", "timed_out"),
+                CheckSuite(10, "in_progress", None),
+            ),
+            "check suite app=8 completed/timed_out (+1 more)",
+        ),
+        (
+            (
+                CheckSuite(8, "in_progress", None),
+                CheckSuite(9, "queued", None),
+                CheckSuite(10, "completed", "action_required"),
+            ),
+            "check suite app=8 in_progress (+2 more)",
+        ),
+        ((CheckSuite(8, "Queued", None),), "check suite app=8 ?"),
+        ((CheckSuite(8, "in progress\n", None),), "check suite app=8 ?"),
+        ((CheckSuite(8, "completed", ""),), "check suite app=8 completed/?"),
+        ((CheckSuite(8, "completed", "x" * 41),), "check suite app=8 completed/?"),
+        (
+            (CheckSuite(8, "completed", "x" * 40),),
+            "check suite app=8 completed/xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+        ),
+    ],
+)
+def test_ci_blocked_names_the_first_blocking_foreign_suite(
+    suites: tuple[CheckSuite, ...], detail: str
+) -> None:
+    for mode in (CiWaitMode.ALWAYS, CiWaitMode.AUTO):
+        # A failing commit status as well: the suite is reported, not the status.
+        result, _, _ = _decide(
+            _candidate(wait_for_ci=mode), _ci(*suites, status_state="failure", status_count=1)
+        )
+        assert result == CiEligibility(False, EligibilityReason.CI_BLOCKED, _HEAD, detail=detail), (
+            mode
+        )
+
+
+@pytest.mark.parametrize(
+    ("state", "detail"),
+    [
+        ("failure", "commit status failure"),
+        ("pending", "commit status pending"),
+        ("error", "commit status error"),
+        ("Failure", "commit status ?"),
+        ("x" * 41, "commit status ?"),
+    ],
+)
+def test_ci_blocked_by_the_commit_status_names_its_state(state: str, detail: str) -> None:
+    green = CheckSuite(7, "completed", "success")
+    for mode in (CiWaitMode.ALWAYS, CiWaitMode.AUTO):
+        result, _, _ = _decide(
+            _candidate(wait_for_ci=mode), _ci(green, status_state=state, status_count=2)
+        )
+        assert result == CiEligibility(False, EligibilityReason.CI_BLOCKED, _HEAD, detail=detail), (
+            mode
+        )
+
+
+def test_waiting_for_ci_says_what_it_waits_for() -> None:
+    always, _, _ = _decide(_candidate(wait_for_ci=CiWaitMode.ALWAYS), _ci())
+    assert always == CiEligibility(
+        False, EligibilityReason.WAITING_FOR_CI, _HEAD, detail="no CI yet"
+    )
+
+    for unknown in (_candidate(ai_review_labeled_at=None), _candidate(head_first_seen_at=None)):
+        result, _, _ = _decide(unknown, _ci(), now=_AT + timedelta(hours=1))
+        assert result == CiEligibility(
+            False,
+            EligibilityReason.WAITING_FOR_CI,
+            _HEAD,
+            detail="no CI yet, label or head time unknown",
+        )
+
+    # The label (12:01:30 UTC, stored with an offset) is later than the head (12:00 UTC).
+    labeled_at = datetime(2026, 9, 28, 15, 1, 30, tzinfo=timezone(timedelta(hours=3)))
+    result, _, _ = _decide(
+        _candidate(ai_review_labeled_at=labeled_at), _ci(), now=_AT + timedelta(minutes=2)
+    )
+    assert result == CiEligibility(
+        False,
+        EligibilityReason.WAITING_FOR_CI,
+        _HEAD,
+        detail="no CI yet, auto start at 2026-09-28T12:03:30+00:00",
+    )
 
 
 def test_pending_ci_never_times_out_and_stale_or_disabled_state_blocks() -> None:
