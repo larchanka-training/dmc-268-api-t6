@@ -136,8 +136,9 @@ class SqlAlchemyGitHubWebhookReceiptStore:
             )
             .execution_options(synchronize_session=False)
         )
-        # rowcount, not RETURNING: a large purge would load every deleted id into Python
-        # (the ORM's "fetch" session sync would add RETURNING back, hence no sync).
+        # rowcount, not RETURNING: a large purge would load every deleted id into Python.
+        # Turning the session sync off is defensive here: "auto" evaluates these comparisons
+        # without RETURNING, but a fallback to "fetch" would add it back.
         result = cast(CursorResult[Any], await self._session.execute(statement))
         return result.rowcount
 
@@ -161,9 +162,13 @@ class SqlAlchemyGitHubWebhookReceiptStore:
                 linked_installation.exists(),
             )
             .values(projection_deferred_at=None, retry_after=None, projection_attempt_count=0)
-            .returning(WebhookEvent.id)
+            .execution_options(synchronize_session=False)
         )
-        return len((await self._session.scalars(statement)).all())
+        # rowcount, not RETURNING: only the count is used. Turning the session sync off is
+        # required here: with the EXISTS subquery "auto" falls back to "fetch", which adds
+        # RETURNING back.
+        result = cast(CursorResult[Any], await self._session.execute(statement))
+        return result.rowcount
 
     async def release_after_dispatch_failure(
         self,
