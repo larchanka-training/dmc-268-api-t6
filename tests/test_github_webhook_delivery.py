@@ -1112,6 +1112,129 @@ def test_an_undecodable_payload_is_logged_as_a_reader_fallback_not_as_no_action(
     assert row.retry_after == _NOW + timedelta(seconds=30)
 
 
+_PAYLOAD_SENTINEL = "SENTINEL-t72-payload-value"
+_DISPATCH_LOGGER = "app.modules.integrations.webhooks.api.dispatch"
+
+
+class UnreachableTypedDispatcher:
+    """The typed dispatcher behind the real adapter: an invalid payload never reaches it."""
+
+    async def execute(self, delivery: GitHubDispatchEvent) -> InstallationDeliveryDispatchResult:
+        raise AssertionError("an invalid payload reached typed dispatch")
+
+
+def _replay_invalid_receipt(
+    receipt: WebhookReceipt, caplog: pytest.LogCaptureFixture
+) -> FakeReceiptUnitOfWork:
+    uow = FakeReceiptUnitOfWork()
+    receiver = ReceiveGitHubDelivery(
+        uow_factory=lambda: uow,
+        dispatcher=GitHubWebhookDispatchAdapter(UnreachableTypedDispatcher()),
+        now=lambda: _NOW,
+    )
+    asyncio.run(receiver.execute(receipt))
+    with caplog.at_level(logging.INFO, logger=_DELIVERY_LOGGER):
+        assert asyncio.run(receiver.replay_pending()) == 1
+    return uow
+
+
+def test_invalid_labeled_payload_logs_its_action_and_reason_without_payload_values(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A rejected ``labeled`` delivery still says which action it was and why no Run (api#72)."""
+    # A labeled payload that reaches typed dispatch, except for its empty label.
+    payload = json.loads(_pull_request_receipt("invalid-label-1").payload_json)
+    payload["label"] = {}
+    payload["pull_request"]["title"] = _PAYLOAD_SENTINEL
+    receipt = VerifiedGitHubDelivery("invalid-label-1", "pull_request", payload).to_receipt()
+
+    uow = _replay_invalid_receipt(receipt, caplog)
+
+    assert _outcome_lines(caplog) == [
+        "GitHub webhook delivery invalid-label-1 event=pull_request "
+        "status=ignored_invalid_event detail=action=labeled invalid_payload"
+    ]
+    assert all(_PAYLOAD_SENTINEL not in record.getMessage() for record in caplog.records)
+    assert _PAYLOAD_SENTINEL not in caplog.text
+    row = uow.rows["invalid-label-1"]
+    assert row.projected is True
+    assert row.retry_after is None
+    assert row.projection_attempt_count == 0
+
+
+@pytest.mark.parametrize(
+    ("event_name", "payload_json", "detail"),
+    [
+        (
+            "pull_request",
+            json.dumps(
+                {
+                    "action": "synchronize",
+                    "installation": {"id": 17},
+                    "repository": {"id": 101, "full_name": "octo/repo"},
+                    "pull_request": {"id": "901", "title": _PAYLOAD_SENTINEL},
+                }
+            ),
+            "action=synchronize invalid_payload",
+        ),
+        ("pull_request", "not json", "invalid_payload"),
+        ("pull_request", "[]", "invalid_payload"),
+        (
+            "check_suite",
+            json.dumps({"action": "completed", "installation": {"id": 17}}),
+            "invalid_payload",
+        ),
+    ],
+    ids=["synchronize-broken-pull-request", "undecodable", "json-list", "check-suite"],
+)
+def test_every_invalid_payload_logs_the_invalid_payload_reason(
+    caplog: pytest.LogCaptureFixture, event_name: str, payload_json: str, detail: str
+) -> None:
+    uow = _replay_invalid_receipt(WebhookReceipt("invalid-1", event_name, payload_json), caplog)
+
+    assert _outcome_lines(caplog) == [
+        f"GitHub webhook delivery invalid-1 event={event_name} "
+        f"status=ignored_invalid_event detail={detail}"
+    ]
+    assert [record for record in caplog.records if record.levelno >= logging.WARNING] == []
+    assert _PAYLOAD_SENTINEL not in caplog.text
+    row = uow.rows["invalid-1"]
+    assert row.projected is True
+    assert row.retry_after is None
+    assert row.projection_attempt_count == 0
+
+
+def test_invalid_installation_payload_logs_the_reason_next_to_the_field_warning(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    receipt = VerifiedGitHubDelivery(
+        "invalid-installation-1",
+        "installation",
+        {"action": "created", "installation": {"id": 17}},
+    ).to_receipt()
+
+    uow = _replay_invalid_receipt(receipt, caplog)
+
+    assert _outcome_lines(caplog) == [
+        "GitHub webhook delivery invalid-installation-1 event=installation "
+        "status=ignored_invalid_event detail=invalid_payload"
+    ]
+    # The failing field names stay in the dispatch warning (api#71), unchanged.
+    (warning,) = [
+        record
+        for record in caplog.records
+        if record.name == _DISPATCH_LOGGER and record.levelno == logging.WARNING
+    ]
+    assert warning.getMessage().startswith(
+        "Ignoring invalid GitHub installation event: delivery_id=invalid-installation-1 "
+        "event=installation action=created installation_id=17 error_count="
+    )
+    row = uow.rows["invalid-installation-1"]
+    assert row.projected is True
+    assert row.retry_after is None
+    assert row.projection_attempt_count == 0
+
+
 _EVENT_NAMES_AS_LOGGED = [
     ("pull_request", "pull_request"),
     ("pull_request\nx", "-"),

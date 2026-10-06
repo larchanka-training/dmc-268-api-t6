@@ -104,8 +104,13 @@ nothing to enqueue), `no open pull request at this head` (a CI event for a head 
 has, for example CI of an old head that finished after a push),
 `not an ai-review labeled action`, `label is not ai-review` (a foreign label), and, when the
 trigger did not run, the projection result: `projected`, `ignored_stale`, `ignored_unrelated`
-(for example a label set by the App's own bot) or `unknown_repository`. The line never carries
-the payload, an installation token or the webhook secret.
+(for example a label set by the App's own bot) or `unknown_repository`. `invalid_payload`
+(status `ignored_invalid_event`) means the payload could not be parsed into the event's shape,
+for example a `labeled` event with an empty `label`; for a `pull_request` event
+`action=<action>` precedes it (`action=labeled invalid_payload`). The receipt is acknowledged
+and not retried, and no payload value is logged with this reason; for an installation event a
+separate WARNING names the failing fields. The line never carries the payload, an installation
+token or the webhook secret.
 
 A deferred delivery's outcome line ends with `retry_at=<time>`, or `retry_at=none` after the
 third attempt, and that final deferral is also logged as a WARNING with its reason, once the
