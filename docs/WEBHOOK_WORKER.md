@@ -134,25 +134,103 @@ any receipt is claimed.
 Installation events. GitHub sends each repository of `installation.created`,
 `installation_repositories.added` and the removal events as `id`, `node_id`, `name`,
 `full_name` and `private` only. The parser requires `id` and `full_name` and ignores the
-rest; `default_branch` and `html_url` are used only when both are present. When either is
+rest; `default_branch` and `html_url` are used only when both are present. `full_name` must
+have the form `owner/repo`, because it goes into the path of GitHub requests that carry the
+installation token: exactly one slash, no dots in the owner (underscores are allowed, as in
+Enterprise Managed User logins), and a repo that does not consist of dots only (`.github`
+and `repo.js` pass, `.` and `..` do not). When either of `default_branch` and `html_url` is
 missing, the worker reads both with `GET /repos/{full_name}` using the installation token
 before it fetches the tree, outside any database transaction. A read that GitHub cannot
 answer (the token request or `GET /repos` fails with a network error, a timeout, a 404, a
-5xx or any other HTTP error status) defers the delivery like an unknown installation, see
-"Deferred deliveries" below, and logs a WARNING with the installation id and the HTTP
-status or exception class, never the URL or the token. A `GET /repos` answer that is HTTP
-200 but is not JSON or lacks the default branch or web URL (never stored as an empty value)
-and a malformed token response are not outages: they fail the dispatch (retry after 30 s,
-three attempts in total, then `projection_failed_at`, never replayed). The tree request is
-not part of this deferral; its failure still fails the dispatch, and so does the 240 s
-dispatch timeout, which a large installation event can exceed because its repositories are
-read one after another. The event is handled all or nothing: one repository that keeps
-failing (a 404 after a rename or removal, for example) keeps every other repository of the
-same event from being stored. `deleted` and `removed`
-make no GitHub request. An installation payload that fails validation is logged at WARNING
-(delivery, event, action, installation id, the total error count and the first ten failing
-field names and messages, never their values) and its receipt is marked projected, so it is
-not replayed.
+5xx or any other HTTP error status) is a details outage: it defers the delivery, see
+"Installation event failures" below. A `GET /repos` answer that is HTTP 200 but is not JSON
+or lacks the default branch or web URL (never stored as an empty value) and a malformed
+token response are not outages: they fail the dispatch (retry after 30 s, three attempts in
+total, then `projection_failed_at`, never replayed). `deleted` and `removed` make no GitHub
+request. An installation payload that fails validation is logged at WARNING (delivery,
+event, action, installation id, the total error count and the first ten failing field names
+and messages, never their values) and its receipt is marked projected, so it is not
+replayed. One invalid `full_name` among N repositories therefore drops the whole event at
+the parser, the valid repositories included.
+
+Installation event failures. Repositories are processed independently. One that cannot be
+read (a 404 right after the repository was created, a rename or a removal, for example)
+does not discard the others: the readable ones are saved in one transaction, each failure
+is logged at WARNING (installation id, repository id, full name, error type and, for an
+HTTP error, its status code, for unreadable details those of the HTTP error behind them;
+never the message or URL), and the first error in event order is then raised. That error
+decides the path of the receipt. Unreadable details defer the delivery like an unknown
+installation (`deferred_repository_details`: retried after 5 minutes, then revived once an
+hour, see "Deferred deliveries" below), and the dispatcher logs a WARNING with the
+installation id and the HTTP status or exception class, never the URL or the token. A
+failed tree request, the 240 s dispatch timeout and any other error take the
+failed-dispatch path above (retry after 30 s, three attempts in total, then
+`projection_failed_at`). So a failed tree request of an earlier repository fails the
+delivery even when a later repository's details are only unavailable, and unavailable
+details of an earlier repository defer it even when a later tree request failed. Every
+retry or revival replays the whole event, which is safe to repeat: every repository that
+was read is upserted again, and the upsert sets `enabled` to true, so a repository disabled
+between two attempts is enabled again. (The at-least-once replay of a delivery already did
+that; with partial persistence, replaying repositories that are already saved is now the
+normal path of a partly failed event.) The label request is sent again and a 422 (label
+exists) counts as success. A 404 caused by replication lag therefore heals on a later
+attempt. A repository whose tree keeps failing is a residual risk: a receipt that failed
+for good is not replayed, and neither the hourly revival nor `wake_receipts` clears that
+mark.
+
+Installation event budget. The dispatch of a receipt is limited to 240 s. Up to four
+repositories are processed at a time (details, tree, label), and the label requests are
+spaced at least 0.8 s apart, 75 a minute, on top of that. GitHub allows 80
+content-generating requests and 900 points (a POST costs 5) a minute, and the labels are
+the bottleneck. A slot stays held while its repository waits for the label pacer, so the
+throughput is min(1 / 0.8 s, 4 / (G + P)) repositories a second, where G + P is the
+details, tree and label-request latency of one repository. While G + P stays below about
+3.2 s the pacer is the limit: 200 repositories take about 160 s. The label lane alone
+allows 240 s / 0.8 s = 300 repositories; the ceiling of about 280 leaves about 16 s of the
+budget for the details and tree requests of the first repositories and for the commit.
+Slow large trees raise G + P and lower that ceiling, so 160 s is the best case, not a
+guarantee. (The 10 s httpx timeout applies to each phase of a call, connect, read, write
+and pool, not as a total deadline, so one call can take longer than 10 s.) The pace
+belongs to the label adapter, which the worker creates once, so it is shared by every
+event of the process. When the timeout fires it cancels the whole event before the
+commit: nothing is stored and the receipt takes the failed path above. The worker's sweep
+handles receipts one at a time, so an onboarding of about 160 s delays the other
+deliveries queued behind it.
+`GET /installation/repositories` is not used: it would replace one of the three calls per
+repository, an `added` event needs the ids filtered out of it, `repository_selection=all`
+needs every page, and it does not touch the label requests, which are the bottleneck.
+
+Empty repositories. The tree request of a repository without a commit answers 409
+("Git Repository is empty."). A 409 with that message is read as an empty tree, so the
+repository is connected with no recognised languages and `select_default_rule_set` picks
+`backend`, as for any tie. Any other 409 is an error like any other status, so a retry can
+heal it and an unrelated 409 does not freeze a repository as empty. The default rule set is
+chosen once, at the first connection: `OnboardRepository` returns the existing active rule
+version before it reads the languages, and connecting the repository again re-enables the
+same row without touching its rules. Nothing recomputes the languages, so an empty
+repository keeps the `backend` rules, even if it later gets frontend code, until its rules
+are replaced by another path; there is no automatic path.
+
+Residual risks of the budget. GitHub also caps content-generating requests at 500 an hour.
+A retry or a revival sends the label request again for every repository of the event that
+was read (a 422 is a success, but it still counts as a request). A repository that failed
+never reaches its label POST, so three attempts at N repositories make at most 3N - 2 POSTs
+(one repository failing twice and healing on the third attempt) or 3 × (N - 1) (one that
+keeps failing). Both pass 500 from N = 168, so about 170 repositories; label POSTs made in
+the same hour for other events share the same 500 budget. A repository whose details stay
+unreadable keeps the delivery deferred, and the hourly revival runs another cycle of three
+attempts about once an hour for up to 7 days after the delivery was received (see "Deferred
+deliveries"), so an event of about 170 or more repositories with one such repository can
+hit the cap every hour for up to 7 days. Once the cap is reached the label POSTs answer 403
+(or 429); each is logged and is not fatal, and the repositories are connected without the
+label. After a restart or an expiry the token cache is cold, and up to four parallel
+repositories each mint an installation token (`GitHubAppInstallationAccessTokenProvider`
+has no single-flight); this is not fixed here. A systemic failure, such as a suspended
+installation or a revoked or invalid App key, makes the token mint fail again for each of
+the N repositories: N mint attempts and N WARNINGs per attempt. A failed token request of
+the details read is a details outage, so the delivery is deferred and revived: up to 3 × N
+per cycle, about once an hour for up to 7 days. There is no fail-fast on token errors; that
+is a follow-up candidate.
 
 Outcome log. The process calls `logging.basicConfig(level=INFO)` and, once a delivery has been
 processed and its receipt updated, writes one INFO line to the `webhook-worker` log, so the log
@@ -343,11 +421,13 @@ back. The 45-minute delay and the 7-day window are the parameters the tech lead 
 404 for a week means the repository is gone. Linking the installation (`wake_receipts`,
 which runs at every GitHub login of a user whose token lists the installation) clears the
 mark of every deferred delivery of the installation, whatever its event or age. Residual
-risks: every attempt runs the event again from its first repository, and each repository
-before the unreadable one costs a details read, a tree read and a label request, so an event
-whose k-th repository stays unreadable costs about 3 × (k - 1) + 1 GitHub requests per
-attempt, three attempts an hour for 7 days after it was received, plus three attempts per
-login; per-repository isolation, which would stop this, is the follow-up api#73. A revived
+risks: every attempt runs the event again for all of its repositories, those already saved
+included (see "Installation event failures"), and each readable repository costs a details
+read, a tree read and a label request, the unreadable one its details read, so an event of
+N repositories with one that stays unreadable costs about 3 × (N - 1) + 1 GitHub requests
+per attempt, three attempts an hour for 7 days after it was received, plus three attempts
+per login; the label POSTs of the saved repositories repeat on every attempt (see "Residual
+risks of the budget"). A revived
 `installation_repositories.added` is applied hours or days late without an ordering check
 against a later `removed` event of the same repository, so a public repository can come back
 enabled after it was removed from the installation (a private one answers 404 and stays
