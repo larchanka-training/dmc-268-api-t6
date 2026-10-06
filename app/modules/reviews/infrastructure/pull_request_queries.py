@@ -41,13 +41,9 @@ class SqlAlchemyPullRequestQueries:
     async def list_pulls(
         self, repository_id: UUID, *, state: str, cursor: RunCursor | None, limit: int
     ) -> list[PullRequestRow] | None:
-        visible: ColumnElement[bool]
-        if self._scope is None:
-            if not self._allow_unscoped:
-                raise ValueError("SqlAlchemyPullRequestQueries requires an AuthScope")
-            visible = true()
-        else:
-            visible = repository_access_predicate(self._scope)
+        visible: ColumnElement[bool] = (
+            true() if self._scope is None else repository_access_predicate(self._scope)
+        )
         updated_at = func.coalesce(CodeChange.provider_updated_at, CodeChange.updated_at)
         statement = (
             select(CodeChange, updated_at)

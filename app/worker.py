@@ -177,10 +177,7 @@ async def process_review_run(
     ``trace`` (``run_actions`` steps); without them the answer is published inline.
     """
 
-    try:
-        repository = SqlAlchemyRunRepository(session_factory, allow_unscoped=True)
-    except TypeError:
-        repository = SqlAlchemyRunRepository(session_factory)
+    repository = SqlAlchemyRunRepository(session_factory, allow_unscoped=True)
     blob_cache = SqlAlchemyBlobCache(session_factory)
     conventions = GenerateRepoConventions(
         ProviderRepositoryConventionsSource(provider),
@@ -429,10 +426,7 @@ def github_adapters(
         now=time.time,
     )
     vcs = ClassifiedVcsProvider(HttpGitHubVcsProvider(client=client, token_provider=tokens))
-    try:
-        runs = SqlAlchemyRunRepository(session_factory, allow_unscoped=True)
-    except TypeError:
-        runs = SqlAlchemyRunRepository(session_factory)
+    runs = SqlAlchemyRunRepository(session_factory, allow_unscoped=True)
     return GitHubAdapters(
         vcs=vcs,
         run_source=lambda run_id: GitHubRunSource(

@@ -25,6 +25,7 @@ from referencing import Registry
 from referencing.jsonschema import DRAFT202012
 
 from app.bootstrap.reviews_api import (
+    get_cancel_run,
     get_pull_requests,
     get_repository_settings,
     get_rerun_uow_factory,
@@ -35,7 +36,7 @@ from app.modules.repositories.application.repository_settings import (
     RepositorySettings,
     RepositorySettingsChange,
 )
-from app.modules.reviews.application.cancel_run import CancelRequestResult
+from app.modules.reviews.application.cancel_run import CancelRequestResult, CancelRun
 from app.modules.reviews.application.get_run_actions import RunActionResponse
 from app.modules.reviews.application.get_run_diff import DiffSnapshot
 from app.modules.reviews.application.get_run_file_lines import (
@@ -216,6 +217,10 @@ class OpenApiContractRepository(ContractRepository):
     def runs(self) -> OpenApiContractRepository:
         return self
 
+    @property
+    def repository(self) -> OpenApiContractRepository:
+        return self
+
     async def __aenter__(self) -> Self:
         return self
 
@@ -341,6 +346,7 @@ def client() -> Iterator[TestClient]:
     app.dependency_overrides[get_rerun_uow_factory] = lambda: lambda: repository
     app.dependency_overrides[get_pull_requests] = lambda: pulls
     app.dependency_overrides[get_run_publisher] = lambda: None
+    app.dependency_overrides[get_cancel_run] = lambda: CancelRun(uow_factory=lambda: repository)
     try:
         yield authenticated_test_client(app)
     finally:

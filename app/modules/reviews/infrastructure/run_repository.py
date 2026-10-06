@@ -374,8 +374,6 @@ class SqlAlchemyRunRepository:
             )
             run.diff_snapshotted_at = datetime.now(UTC)
             await session.flush()
-            if self._session is None:
-                await session.commit()
         return snapshots
 
     async def get_run_diff_input(self, run_id: UUID) -> RunDiffInput | None:
@@ -489,8 +487,6 @@ class SqlAlchemyRunRepository:
                     run.cancellation_signal_requested_at = now
                 await session.flush()
                 await notify_run_state(session, run_id, RunState.CANCELLED)
-                if self._session is None:
-                    await session.commit()
                 return CancelRequestResult(
                     found=True, changed=True, signal_requested=run.attempt >= 1
                 )
@@ -499,8 +495,6 @@ class SqlAlchemyRunRepository:
                     return CancelRequestResult(found=True, changed=False)
                 run.cancel_requested = True
                 await session.flush()
-                if self._session is None:
-                    await session.commit()
                 return CancelRequestResult(found=True, changed=True)
         return CancelRequestResult(found=True, changed=False)
 

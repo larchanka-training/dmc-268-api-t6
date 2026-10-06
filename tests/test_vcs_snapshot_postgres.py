@@ -308,10 +308,17 @@ def test_file_endpoint_resolves_two_pr_paths_through_one_immutable_blob(
     factory = async_sessionmaker(engine, expire_on_commit=False)
     clock = [datetime(2026, 9, 28, tzinfo=UTC)]
     cache = SqlAlchemyBlobCache(factory, now=lambda: clock[0])
+
+    async def seed_blob() -> None:
+        async with factory() as session:
+            writer = SqlAlchemyBlobCache(session, now=lambda: clock[0])
+            await writer.put(
+                BlobCacheKey(repository_id, blob_sha), "same\nblob", ttl=timedelta(days=7)
+            )
+            await session.commit()
+
     try:
-        asyncio.run(
-            cache.put(BlobCacheKey(repository_id, blob_sha), "same\nblob", ttl=timedelta(days=7))
-        )
+        asyncio.run(seed_blob())
         app.dependency_overrides[get_run_repository] = lambda: SqlAlchemyRunRepository(
             factory, allow_unscoped=True
         )

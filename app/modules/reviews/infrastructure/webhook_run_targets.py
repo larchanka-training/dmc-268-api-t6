@@ -90,8 +90,6 @@ class SqlAlchemyWebhookRunTargets:
                     .values(ci_status={"event": event.event_name})
                 )
                 await session.flush()
-                if self._session is None:
-                    await session.commit()
             return ids
 
 

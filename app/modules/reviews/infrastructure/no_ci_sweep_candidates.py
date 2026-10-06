@@ -90,8 +90,6 @@ class SqlAlchemyDueNoCiCandidates:
                 .values(ci_status={"sweep": "excluded"})
             )
             await session.flush()
-            if self._session is None:
-                await session.commit()
 
 
 class SqlAlchemySweepNoCiUnitOfWork(SqlAlchemyUnitOfWork):

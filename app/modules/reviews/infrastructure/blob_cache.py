@@ -10,6 +10,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from typing import cast
 
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert
@@ -57,9 +58,11 @@ class SqlAlchemyBlobCache:
         session_or_factory: AsyncSession | async_sessionmaker[AsyncSession],
         now: Callable[[], datetime] | None = None,
     ) -> None:
-        if isinstance(session_or_factory, AsyncSession):
-            self._session: AsyncSession | None = session_or_factory
-            self._session_factory: async_sessionmaker[AsyncSession] | None = None
+        self._session: AsyncSession | None
+        self._session_factory: async_sessionmaker[AsyncSession] | None
+        if hasattr(session_or_factory, "execute"):
+            self._session = cast(AsyncSession, session_or_factory)
+            self._session_factory = None
         else:
             self._session = None
             self._session_factory = session_or_factory
@@ -77,18 +80,12 @@ class SqlAlchemyBlobCache:
             index_elements=[CachedFileBlob.repository_id, CachedFileBlob.blob_sha],
             set_={"content": content, "expires_at": expires_at},
         )
-        if self._session is not None:
-            await self._session.execute(statement)
-            if hasattr(self._session, "flush"):
-                await self._session.flush()
-        else:
-            assert self._session_factory is not None
-            async with self._session_factory() as session:
-                await session.execute(statement)
-                if hasattr(session, "commit"):
-                    await session.commit()
-                elif hasattr(session, "flush"):
-                    await session.flush()
+        if self._session is None:
+            raise RuntimeError(
+                "SqlAlchemyBlobCache.put requires an active session within a Unit of Work"
+            )
+        await self._session.execute(statement)
+        await self._session.flush()
 
     async def get(self, key: BlobCacheKey) -> BlobCacheEntry:
         statement = select(CachedFileBlob.content, CachedFileBlob.expires_at).where(

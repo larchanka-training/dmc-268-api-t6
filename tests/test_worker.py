@@ -81,8 +81,14 @@ def test_process_review_run_composes_repository_and_processor_from_a_shared_fact
             raise AssertionError("the composition test does not call the provider")
 
     class Repository:
-        def __init__(self, received_factory: async_sessionmaker[AsyncSession]) -> None:
+        def __init__(
+            self,
+            received_factory: async_sessionmaker[AsyncSession],
+            *,
+            allow_unscoped: bool = False,
+        ) -> None:
             assert received_factory is factory
+            assert allow_unscoped is True
 
     class Processor:
         def __init__(

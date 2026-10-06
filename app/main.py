@@ -19,8 +19,7 @@ from pydantic import ValidationError
 
 from app.bootstrap.portal_auth import get_auth_scope
 from app.bootstrap.reviews_api import (
-    get_cancel_run_uow_factory,
-    get_cancellation_signals,
+    get_cancel_run,
     get_file_blob_cache,
     get_github_webhook_receipt_uow_factory,
     get_pull_requests,
@@ -68,10 +67,7 @@ from app.modules.reviews.api.dtos import (
     SeverityCountsDto,
 )
 from app.modules.reviews.application.cancel_run import (
-    CancellationSignals,
     CancelRun,
-    CancelRunRepository,
-    CancelRunUnitOfWork,
 )
 from app.modules.reviews.application.get_run import (
     GetRunDetail,
@@ -142,11 +138,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 KEEPALIVE_INTERVAL_SECONDS = 15.0
 
 app = FastAPI(title="AI Code Reviewer browser API", lifespan=lifespan)
+app.state.run_update_hub = run_update_hub
 
 __all__ = [
     "KEEPALIVE_INTERVAL_SECONDS",
     "api_router",
     "app",
+    "get_cancel_run",
     "get_file_blob_cache",
     "get_repository_settings",
     "get_run_repository",
@@ -196,7 +194,10 @@ app.openapi = custom_openapi  # type: ignore[method-assign]
 @app.get(
     "/healthcheck",
     summary="Service healthcheck",
-    description="Return service operational health status.",
+    description=(
+        "Verify application liveness and basic process availability "
+        "without touching downstream resources."
+    ),
 )
 async def healthcheck() -> dict[str, str]:
     return {"status": "ok"}
@@ -561,19 +562,9 @@ async def rerun_run(
 )
 async def cancel_run(
     run_id: UUID,
-    repository: Annotated[CancelRunRepository, Depends(get_run_repository)],
-    event_hub: Annotated[InMemoryRunUpdateHub, Depends(get_run_event_hub)],
-    signals: Annotated[CancellationSignals | None, Depends(get_cancellation_signals)],
-    uow_factory: Annotated[
-        Callable[[], CancelRunUnitOfWork] | None, Depends(get_cancel_run_uow_factory)
-    ] = None,
+    use_case: Annotated[CancelRun, Depends(get_cancel_run)],
 ) -> RunSessionDto:
-    if get_run_repository in getattr(app, "dependency_overrides", {}):
-        item = await CancelRun(repository, event_hub, signals).execute(run_id)
-    elif uow_factory is not None:
-        item = await CancelRun(None, event_hub, signals, uow_factory=uow_factory).execute(run_id)
-    else:
-        item = await CancelRun(repository, event_hub, signals).execute(run_id)
+    item = await use_case.execute(run_id)
     if item is None:
         raise HTTPException(status_code=404, detail="run not found")
     return to_run_session_dto(item)

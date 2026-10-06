@@ -65,6 +65,7 @@ from app.modules.repositories.infrastructure.repository_settings import (
 )
 from app.modules.reviews.application.cancel_run import (
     CancellationSignals,
+    CancelRun,
     CancelRunRepository,
     CancelRunUnitOfWork,
 )
@@ -356,6 +357,21 @@ def get_cancel_run_uow_factory(
     if not isinstance(resources, ReviewsApiResources):
         return None
     return partial(SqlAlchemyCancelRunUnitOfWork, resources.session_factory, scope)
+
+
+def get_cancel_run(
+    request: Request,
+    scope: Annotated[AuthScope, Depends(get_auth_scope)],
+    signals: Annotated[CancellationSignals | None, Depends(get_cancellation_signals)],
+) -> CancelRun:
+    resources = _resources(request)
+    uow_factory = partial(SqlAlchemyCancelRunUnitOfWork, resources.session_factory, scope)
+    event_publisher = getattr(request.app.state, "run_update_hub", None)
+    return CancelRun(
+        uow_factory=uow_factory,
+        event_publisher=event_publisher,
+        signals=signals,
+    )
 
 
 def get_pull_requests(

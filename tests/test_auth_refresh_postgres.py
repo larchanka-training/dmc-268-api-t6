@@ -188,3 +188,112 @@ def test_logout_revokes_migrated_family_and_is_idempotent(
         asyncio.run(exercise())
     finally:
         asyncio.run(engine.dispose())
+
+
+@pytest.mark.integration
+def test_sequential_rotations_with_concurrent_refresh_postgres(
+    migrated_auth_family: tuple[str, str, UUID],
+) -> None:
+    database_url, schema, family_id = migrated_auth_family
+    engine = create_async_engine(
+        database_url,
+        connect_args={"options": f"-csearch_path={schema}"},
+        poolclass=NullPool,
+    )
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    clock = [datetime.now(UTC)]
+    token_index = 0
+
+    def next_token() -> str:
+        nonlocal token_index
+        token_index += 1
+        return f"seq-replacement-{token_index}"
+
+    refresh = RefreshLocalSession(
+        uow_factory=lambda: SqlAlchemyAuthSessionUnitOfWork(factory),
+        issuer=FakeIssuer(),
+        new_refresh_token=next_token,
+        now=lambda: clock[0],
+    )
+
+    async def exercise() -> None:
+        # Perform 4 sequential rotations spaced 15 minutes apart
+        current_token = "original-secret"
+        for _i in range(1, 5):
+            clock[0] += timedelta(minutes=15)
+            res = await refresh.execute(current_token)
+            current_token = res.refresh_token
+
+        # Now current_token is seq-replacement-4.
+        # seq-replacement-3 was rotated at t3 (last rotation).
+        # Replay seq-replacement-3 concurrently within 15s window:
+        # both replays must succeed because earlier rotations don't count towards the limit!
+        clock[0] += timedelta(seconds=2)
+        outcomes = await asyncio.gather(
+            refresh.execute("seq-replacement-3"),
+            refresh.execute("seq-replacement-3"),
+            return_exceptions=True,
+        )
+        assert all(isinstance(item, ExchangedSession) for item in outcomes)
+        async with factory() as session:
+            family = await session.scalar(
+                select(AuthRefreshFamily).where(AuthRefreshFamily.id == family_id)
+            )
+            assert family is not None and family.revoked_at is None
+
+    try:
+        asyncio.run(exercise())
+    finally:
+        asyncio.run(engine.dispose())
+
+
+@pytest.mark.integration
+def test_grace_limit_revocation_committed_to_postgres(
+    migrated_auth_family: tuple[str, str, UUID],
+) -> None:
+    database_url, schema, family_id = migrated_auth_family
+    engine = create_async_engine(
+        database_url,
+        connect_args={"options": f"-csearch_path={schema}"},
+        poolclass=NullPool,
+    )
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    clock = [datetime.now(UTC)]
+    token_index = 0
+
+    def next_token() -> str:
+        nonlocal token_index
+        token_index += 1
+        return f"limit-token-{token_index}"
+
+    refresh = RefreshLocalSession(
+        uow_factory=lambda: SqlAlchemyAuthSessionUnitOfWork(factory),
+        issuer=FakeIssuer(),
+        new_refresh_token=next_token,
+        now=lambda: clock[0],
+    )
+
+    async def exercise() -> None:
+        # Initial rotation: creates limit-token-1
+        await refresh.execute("original-secret")
+
+        # 4 grace reissues: create limit-token-2..5
+        for _ in range(4):
+            await refresh.execute("original-secret")
+
+        # 5th grace replay: count is 5 >= MAX_GRACE_REFRESH_SESSIONS (5) ->
+        # revokes family, commits the revocation in Postgres, and raises InvalidRefreshToken
+        with pytest.raises(InvalidRefreshToken):
+            await refresh.execute("original-secret")
+
+        # In a separate transaction, verify the revocation was durably committed to DB
+        async with factory() as session:
+            family = await session.scalar(
+                select(AuthRefreshFamily).where(AuthRefreshFamily.id == family_id)
+            )
+            assert family is not None and family.revoked_at is not None
+
+    try:
+        asyncio.run(exercise())
+    finally:
+        asyncio.run(engine.dispose())

@@ -119,7 +119,10 @@ async def exchange_github_code(
     "/refresh",
     response_model=AuthSessionDto,
     summary="Refresh auth session",
-    description="Issue a replacement session token within the rotation grace period.",
+    description=(
+        "Rotate the refresh token and issue a fresh access token, "
+        "or reissue within the concurrent rotation grace window."
+    ),
 )
 async def refresh_session(
     response: Response,

@@ -6,7 +6,7 @@ import asyncio
 import json
 import logging
 from collections.abc import AsyncIterator, Awaitable, Callable
-from contextlib import AsyncExitStack, asynccontextmanager, suppress
+from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass
 from functools import cache
 from pathlib import Path
@@ -202,19 +202,17 @@ def _get_delivery_attempts(message: AbstractIncomingMessage) -> int:
     broker_attempts = 0
     headers = getattr(message, "headers", None)
     if isinstance(headers, dict):
-        if "x-delivery-count" in headers:
-            with suppress(ValueError, TypeError):
-                broker_attempts = max(broker_attempts, int(headers["x-delivery-count"]))
-        if "x-death" in headers and isinstance(headers["x-death"], list):
-            with suppress(ValueError, TypeError):
-                deaths = sum(
-                    int(d.get("count", 1)) for d in headers["x-death"] if isinstance(d, dict)
-                )
-                broker_attempts = max(broker_attempts, deaths)
-        for k in ("x-attempt", "x-retries", "attempt", "delivery_attempts"):
+        for k in ("x-attempt", "x-delivery-count", "x-retries", "attempt", "delivery_attempts"):
             if k in headers:
-                with suppress(ValueError, TypeError):
+                try:
                     broker_attempts = max(broker_attempts, int(headers[k]))
+                except (ValueError, TypeError):
+                    _LOGGER.warning(
+                        "Invalid retry header %s=%r on message %s",
+                        k,
+                        headers[k],
+                        message.message_id,
+                    )
     return max(broker_attempts, local_attempts) + 1
 
 
@@ -229,7 +227,7 @@ async def _requeue_after_error(
     headers = getattr(message, "headers", None)
     if isinstance(headers, dict):
         headers["x-delivery-count"] = attempts
-        headers["x-attempt"] = attempts + 1
+        headers["x-attempt"] = attempts
 
     if attempts >= max_retries:
         _LOGGER.error(
@@ -237,6 +235,7 @@ async def _requeue_after_error(
             message.message_id,
             max_retries,
             DEAD_LETTER_QUEUE,
+            exc_info=True,
         )
         _clear_delivery_attempts(message.message_id)
         _clear_delivery_attempts(key)
@@ -251,6 +250,39 @@ async def _requeue_after_error(
     )
     # A short pause keeps a broken dependency from spinning redeliveries.
     await asyncio.sleep(1)
+
+    channel = getattr(message, "channel", None)
+    if channel is not None:
+        try:
+            exchange_name = getattr(message, "exchange", None)
+            if exchange_name:
+                exchange = await channel.get_exchange(exchange_name, ensure=False)
+            else:
+                exchange = channel.default_exchange
+            routing_key = getattr(message, "routing_key", "") or ""
+            new_headers = dict(headers or {})
+            new_headers["x-delivery-count"] = attempts
+            new_headers["x-attempt"] = attempts
+            await exchange.publish(
+                aio_pika.Message(
+                    body=message.body,
+                    headers=new_headers,
+                    priority=getattr(message, "priority", 0),
+                    message_id=getattr(message, "message_id", None),
+                    correlation_id=getattr(message, "correlation_id", None),
+                    content_type=getattr(message, "content_type", None),
+                    delivery_mode=aio_pika.DeliveryMode.PERSISTENT,
+                ),
+                routing_key=routing_key,
+            )
+            await message.ack()
+            return
+        except Exception:
+            _LOGGER.exception(
+                "Failed to republish message %s with attempt header; falling back to nack",
+                message.message_id,
+            )
+
     await message.nack(requeue=True)
 
 

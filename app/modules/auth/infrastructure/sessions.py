@@ -114,13 +114,22 @@ class SqlAlchemyAuthSessionStore:
             tuple(workspace_ids),
         )
 
-    async def count_family_sessions(self, family_id: UUID) -> int:
-        count = await self._session.scalar(
-            select(func.count(AuthRefreshSession.id)).where(
-                AuthRefreshSession.family_id == family_id,
-                AuthRefreshSession.revoked_at.is_(None),
-            )
+    async def count_family_sessions(
+        self,
+        family_id: UUID,
+        *,
+        since: datetime | None = None,
+        exclude_session_id: UUID | None = None,
+    ) -> int:
+        statement = select(func.count(AuthRefreshSession.id)).where(
+            AuthRefreshSession.family_id == family_id,
+            AuthRefreshSession.revoked_at.is_(None),
         )
+        if since is not None:
+            statement = statement.where(AuthRefreshSession.created_at >= since)
+        if exclude_session_id is not None:
+            statement = statement.where(AuthRefreshSession.id != exclude_session_id)
+        count = await self._session.scalar(statement)
         return int(count or 0)
 
     async def rotate(
@@ -149,6 +158,7 @@ class SqlAlchemyAuthSessionStore:
                 github_user_id=row.github_user_id,
                 token_hash=new_token_hash,
                 expires_at=expires_at,
+                created_at=at,
             )
         )
         await self._session.flush()
@@ -159,12 +169,15 @@ class SqlAlchemyAuthSessionStore:
         user_id: int,
         token_hash: str,
         expires_at: datetime,
+        *,
+        created_at: datetime | None = None,
     ) -> None:
         await self._session.execute(
             update(AuthRefreshFamily)
             .where(AuthRefreshFamily.id == family_id)
             .values(expires_at=expires_at)
         )
+        extra = {"created_at": created_at} if created_at is not None else {}
         self._session.add(
             AuthRefreshSession(
                 id=uuid4(),
@@ -172,6 +185,7 @@ class SqlAlchemyAuthSessionStore:
                 github_user_id=user_id,
                 token_hash=token_hash,
                 expires_at=expires_at,
+                **extra,
             )
         )
         await self._session.flush()
