@@ -25,6 +25,7 @@ from app.modules.integrations.webhooks.application.github_installation_dispatch 
     InstallationDeliveryDispatchResult,
     InstallationDeliveryDispatchStatus,
     UnsupportedGitHubEvent,
+    _with_action,
 )
 from app.modules.integrations.webhooks.application.receive_github_delivery import (
     WebhookReceipt,
@@ -40,6 +41,9 @@ from app.modules.reviews.application.project_github_pull_request import (
 from app.modules.reviews.application.trigger_from_delivery import CiTriggerEvent
 
 _CI_EVENTS = frozenset({"check_suite", "workflow_run"})
+# The outcome-line reason for a payload that cannot be parsed into its event's shape. Generic on
+# purpose: no field value, path or exception message (docs/WEBHOOK_WORKER.md, outcome log).
+_INVALID_PAYLOAD = "invalid_payload"
 _MAX_LOGGED_FIELD_ERRORS = 10
 _LOGGER = logging.getLogger(__name__)
 # The action goes into log lines, so it follows the same plain-token rule as the event name;
@@ -76,7 +80,7 @@ class GitHubWebhookDispatchAdapter:
             decoded = None
         if not isinstance(decoded, dict):
             return InstallationDeliveryDispatchResult(
-                InstallationDeliveryDispatchStatus.IGNORED_INVALID_EVENT
+                InstallationDeliveryDispatchStatus.IGNORED_INVALID_EVENT, _INVALID_PAYLOAD
             )
         payload: Mapping[str, object] = decoded
         action = _action_token(payload.get("action"))
@@ -100,14 +104,15 @@ class GitHubWebhookDispatchAdapter:
                     )
                 except (ValueError, ValidationError):
                     return InstallationDeliveryDispatchResult(
-                        InstallationDeliveryDispatchStatus.IGNORED_INVALID_EVENT
+                        InstallationDeliveryDispatchStatus.IGNORED_INVALID_EVENT,
+                        _with_action(action, _INVALID_PAYLOAD),
                     )
         elif event_name == "status" or (event_name in _CI_EVENTS and action == "completed"):
             try:
                 value = parse_ci_event(event_name, payload)
             except (ValueError, ValidationError):
                 return InstallationDeliveryDispatchResult(
-                    InstallationDeliveryDispatchStatus.IGNORED_INVALID_EVENT
+                    InstallationDeliveryDispatchStatus.IGNORED_INVALID_EVENT, _INVALID_PAYLOAD
                 )
         elif event_name in {"installation", "installation_repositories"}:
             try:
@@ -119,7 +124,7 @@ class GitHubWebhookDispatchAdapter:
             except InstallationEventValidationError as invalid:
                 _log_invalid_installation_event(delivery.delivery_id, event_name, payload, invalid)
                 return InstallationDeliveryDispatchResult(
-                    InstallationDeliveryDispatchStatus.IGNORED_INVALID_EVENT
+                    InstallationDeliveryDispatchStatus.IGNORED_INVALID_EVENT, _INVALID_PAYLOAD
                 )
         else:
             value = UnsupportedGitHubEvent(event_name, action)
