@@ -207,27 +207,36 @@ def _kind_weight(path: str) -> float:
     return 1.0
 
 
+def _rule_is_ignored(rule: ReviewRule) -> bool:
+    """Whether an include or exclude glob of ``rule`` exceeds the brace expansion limit.
+
+    Such a rule raises no file's priority. An oversized include disables it for every
+    path; an oversized exclude matters only for paths its include matches, and skipping
+    that exclude must not promote the file.
+    """
+    return any(_expand_braces(pattern) is None for pattern in (*rule.include, *rule.exclude))
+
+
 def _matches_rule(path: str, rule: ReviewRule) -> bool:
+    if _rule_is_ignored(rule):
+        return False
     candidate = PurePosixPath(path)
 
-    def matches(patterns: tuple[str, ...]) -> bool | None:
-        matched = False
-        for pattern in patterns:
-            expanded = _expand_braces(pattern)
-            if expanded is None:
-                return None
-            matched = matched or any(candidate.full_match(glob) for glob in expanded)
-        return matched
+    def matches(patterns: tuple[str, ...]) -> bool:
+        # Every pattern expands within the limit once the rule is not ignored.
+        return any(
+            candidate.full_match(glob)
+            for pattern in patterns
+            for glob in _expand_braces(pattern) or ()
+        )
 
-    # An over-limit include or exclude makes the entire rule inapplicable. In
-    # particular, skipping an oversized exclude must not promote the file.
-    return matches(rule.include) is True and matches(rule.exclude) is False
+    return matches(rule.include) and not matches(rule.exclude)
 
 
 def _warn_ignored_rules(rules: tuple[ReviewRule, ...]) -> None:
-    """Log each rule that ``_matches_rule`` ignores for every path, once per fit."""
+    """Log each rule that ``_rule_is_ignored`` drops from file priority, once per fit."""
     for rule in rules:
-        if any(_expand_braces(pattern) is None for pattern in (*rule.include, *rule.exclude)):
+        if _rule_is_ignored(rule):
             _LOGGER.warning(
                 "Custom rule %r is ignored for file priority: "
                 "a brace glob exceeds %d expansion units",

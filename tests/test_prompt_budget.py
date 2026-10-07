@@ -368,6 +368,22 @@ def test_over_limit_brace_glob_logs_one_warning_per_ignored_rule(
     ]
 
 
+def test_over_limit_brace_glob_is_not_logged_when_the_context_already_fits(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    rule = ReviewRule("Explosive", ("{a,b}" * 18,), (), ("Check.",))
+    original = context(changed_file("b" * 18, 20), rules=(rule,))
+
+    with caplog.at_level(logging.WARNING, logger="app.modules.reviews.application.prompt_budget"):
+        fitted = fit_review_context(
+            original, max_prompt_tokens=prompt_tokens(original, COUNTER), counter=COUNTER
+        )
+
+    # Priority only orders files for cutting; a context that fits never consults the rule.
+    assert fitted == original
+    assert caplog.records == []
+
+
 @pytest.mark.parametrize(
     ("name", "files", "budget"),
     (

@@ -312,7 +312,8 @@ on the two selected EUrouter models.
 ### Baseline drift
 
 The static digest includes gateway/settings inputs. The Mistral capture above
-replays without drift on its source commit and this publication change. Future
-changes to fingerprinted inputs can produce a drift warning; preserve the
-original capture and its provenance rather than editing its digest to hide drift.
+replayed without drift on its source commit and its publication change. Later
+changes to fingerprinted inputs have already produced a drift warning on `main`
+(see the recorded baseline above); preserve the original capture and its
+provenance rather than editing its digest to hide drift.
 Refresh the entire baseline in a separately authorized run when needed.
