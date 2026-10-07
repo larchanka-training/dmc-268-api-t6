@@ -33,7 +33,7 @@
 | `LLM_MODEL` | для ревью моделью | `mistral-small-4` (OQ-2, SD §15). Основная модель в repository variable; только `worker` |
 | `LLM_FALLBACK_MODEL` | нет | `mistral-small-3.2-24b` (OQ-2, SD §15). Значение передаётся только в `worker.env`; пустое или незаданное значение исключает fallback |
 
-Ранее созданная repository variable `LLM_EUR_TO_USD_RATE` больше не читается worker или workflow `LLM live run` и не попадает в `worker.env`. Удалить её из настроек GitHub можно после проверки нового пути на staging; курс вручную обновлять не нужно.
+Repository variable `LLM_EUR_TO_USD_RATE` удалена 06.10 после проверки нового пути на staging: worker и workflow `LLM live run` её не читают, в `worker.env` она не попадает; курс вручную обновлять не нужно.
 
 ### GitHub Environment `staging` — secrets
 
@@ -109,7 +109,7 @@ rm jwt.pem jwt.pub
 | `POSTGRES_DB` | нет | иначе `app` |
 | `GH_APP_BOT_LOGIN` | да: без него `webhook-worker` не стартует, выкат откатывается | `dmc268-t6-reviewer[bot]` — логин бота App. В контейнере `GITHUB_APP_BOT_LOGIN`, только у `webhook-worker` (`app/webhook_worker.py`). Префикс `GH_`, потому что GitHub не принимает `GITHUB_` и у variables; берётся из `vars.`, а не из `secrets.` |
 | `LLM_MODEL` | нет, переопределение repository | `mistral-small-4` (OQ-2, SD §15). В контейнере только у `worker`; обычное значение задано на уровне repository |
-| `LLM_FALLBACK_MODEL` | нет, переопределение repository | `mistral-small-3.2-24b`; пусто — без fallback. Только `worker` |
+| `LLM_FALLBACK_MODEL` | нет, переопределение repository | `mistral-small-3.2-24b`. Только `worker`. Чтобы отключить fallback, удалите repository variable и это переопределение: значение Environment перекрывает repository, а незаданная variable приходит в `vars` пустой строкой, и `LLM_FALLBACK_MODEL` не попадает в `worker.env` |
 
 ### LLM-шлюз — переменные приложения (#33)
 

@@ -1,5 +1,11 @@
 # Tasks: LLM live-run gaps (#66)
 
+> **Cancelled in part (#80).** The env-rate variant — a configured
+> `LLM_EUR_TO_USD_RATE` (Tasks 3, 6 and 7) — was superseded by the ECB
+> reference rate ([66-ecb-fx-rate-plan.md](66-ecb-fx-rate-plan.md)) and is
+> marked *(cancelled)* below. The repository variable was deleted on
+> 2026-10-06. Checked items record what was done at the time.
+
 Follow `66-plan.md`. A coordination comment was posted on open PR #65 before
 overlapping edits. This branch was rebased onto `origin/main` after #46; rebase
 again after PR #65 merges and before final review.
@@ -73,7 +79,8 @@ gateway's answer validation path. Keep Pydantic and the eval validator strict.
 
 **Description:** Keep amount and declared currency distinct until conversion.
 Add a positive, finite decimal `LLM_EUR_TO_USD_RATE` setting and its worker
-environment delivery after the rate policy is approved.
+environment delivery after the rate policy is approved. *(The configured rate
+is cancelled: superseded by the ECB rate, see the note at the top.)*
 
 **Acceptance criteria:**
 
@@ -178,7 +185,8 @@ budget explanation and repository-variable labels.
       to USD. For both known EUrouter models, the effective price is the
       componentwise maximum of the USD catalog floor and the highest known EUR
       route price times configured `LLM_EUR_TO_USD_RATE`; a lower env override
-      on the known EUrouter endpoint cannot weaken the floor.
+      on the known EUrouter endpoint cannot weaken the floor. *(The configured
+      rate is cancelled: the ECB quote replaced it.)*
 - [x] A boundary test using literal Regolo prices and a configured rate above
       1.1225 proves a call that could exceed $0.50 is rejected with
       `BUDGET_EXCEEDED` before any provider request. Update
@@ -233,6 +241,7 @@ tests alone.
 
 - [x] Repository variable `LLM_FALLBACK_MODEL=mistral-small-3.2-24b` is set;
       reviewed `LLM_EUR_TO_USD_RATE=1.1204` is also set at repository scope.
+      *(Cancelled: the rate variable was deleted on 2026-10-06.)*
 - [ ] After deployment, `worker.env` contains both nonsecret keys and the
       worker starts with the intended primary/fallback pair.
 - [ ] Verification captures the deployment/run links and results, without

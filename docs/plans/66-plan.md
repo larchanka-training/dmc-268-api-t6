@@ -1,5 +1,11 @@
 # Implementation Plan: LLM live-run gaps (#66)
 
+> **Cancelled in part (#80).** The env-rate variant — a configured
+> `LLM_EUR_TO_USD_RATE` (decisions 2 and 6, open question 1) — was superseded
+> by the ECB reference rate ([66-ecb-fx-rate-plan.md](66-ecb-fx-rate-plan.md))
+> and is marked *(cancelled)* below. The repository variable was deleted on
+> 2026-10-06. The rest of the plan stands as written.
+
 ## Overview
 
 Fix the live-run gaps: record provider cost in USD, accept two losslessly
@@ -48,6 +54,7 @@ LLM and deployment boundaries; no migration or new dependency is needed.
    rate to the staging bundle/allowlist and document its owner, update cadence,
    and behavior when absent. Confirm the precise failure and accounting policy
    with the tech lead before implementation; see Open questions.
+   *(Cancelled: superseded by the ECB rate, see the note at the top.)*
 3. **Normalize only after shape validation and before semantic validation.**
    In `validate_review_answer`, after JSON Schema accepts the object, change
    numeric `start_line == line` to `null`, then perform a stable sort by severity
@@ -84,7 +91,8 @@ LLM and deployment boundaries; no migration or new dependency is needed.
    weaken this floor on the known EUrouter endpoint; custom endpoints may use
    their explicitly configured price. This bounds the *published route prices*
    at the configured rate, not unknown future price changes or an undercounted
-   token estimate.
+   token estimate. *(The configured rate is cancelled: the ceiling is
+   converted at the ECB quote, see the note at the top.)*
 7. **Correct the budget explanation.** Four calls per attempt are shared by
    conventions and review, so 12 primary calls across three attempts are
    possible despite the 3+1 reservation inside one `generate()`. At 52,000
@@ -166,7 +174,8 @@ EUR rate configuration ────────> repository variable ─> deploy
 
 1. Confirm `LLM_EUR_TO_USD_RATE` as the explicit EUR source and identify who
    updates its repository variable. The observed 1.1225 on 2026-10-05 is
-   evidence, not a permanent default.
+   evidence, not a permanent default. *(Cancelled: superseded by the ECB rate,
+   see the note at the top.)*
 2. Choose the paid-answer policy if a response declares a non-USD currency but
    no usable rate exists. Recommended: fail the call explicitly, retain raw
    trace and token usage, and charge a conservative USD estimate from the model
