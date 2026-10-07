@@ -456,7 +456,6 @@ def test_eurouter_host_with_unrecognized_path_cannot_bypass_the_price_floor() ->
                 "LLM_MODEL": "mistral-small-4",
                 "LLM_BASE_URL": "https://api.eurouter.ai/api/%76%31",
                 "LLM_API_KEYS": "sk-eu-1",
-                "LLM_EUR_TO_USD_RATE": "1.20",
             }
         )
 
@@ -466,7 +465,6 @@ def test_unicode_dot_eurouter_host_cannot_bypass_the_price_floor(prefix: str) ->
     env = {
         "LLM_MODEL": "mistral-small-4",
         "LLM_API_KEYS": "sk-eu-1",
-        "LLM_EUR_TO_USD_RATE": "1.20",
         f"{prefix}BASE_URL": "https://api.eurouter.ai。/api/v1",
         f"{prefix}PRICE_INPUT_PER_MTOK": "0.01",
         f"{prefix}PRICE_OUTPUT_PER_MTOK": "0.01",
@@ -550,7 +548,6 @@ def test_custom_endpoint_keeps_its_explicit_price_for_a_known_model() -> None:
             "LLM_MODEL": "mistral-small-4",
             "LLM_BASE_URL": "https://custom.test/v1",
             "LLM_API_KEYS": "sk-custom",
-            "LLM_EUR_TO_USD_RATE": "1.20",
             "LLM_PRICE_INPUT_PER_MTOK": "0.1",
             "LLM_PRICE_OUTPUT_PER_MTOK": "0.2",
             "LLM_PRICE_CACHE_READ_PER_MTOK": "0.05",
@@ -1623,7 +1620,6 @@ def test_regolo_price_at_higher_fx_rejects_a_maximal_fast_call_before_request(
         {
             "LLM_MODEL": "mistral-small-4",
             "LLM_API_KEYS": "sk-eu-1",
-            "LLM_EUR_TO_USD_RATE": "1.20",
             **({"LLM_BASE_URL": base_url} if base_url is not None else {}),
         }
     )
@@ -2584,7 +2580,6 @@ def test_known_route_ceiling_prices_a_paid_answer_with_bad_currency() -> None:
         {
             "LLM_MODEL": "mistral-small-4",
             "LLM_API_KEYS": "sk-eu-1",
-            "LLM_EUR_TO_USD_RATE": "1.1204",
         }
     )
     harness = Harness(
@@ -2612,7 +2607,6 @@ def test_fallback_route_ceiling_prices_a_paid_answer_with_bad_currency() -> None
             "LLM_MODEL": "mistral-small-4",
             "LLM_API_KEYS": "sk-eu-1",
             "LLM_FALLBACK_MODEL": "mistral-small-3.2-24b",
-            "LLM_EUR_TO_USD_RATE": "1.1204",
         }
     )
     harness = Harness(

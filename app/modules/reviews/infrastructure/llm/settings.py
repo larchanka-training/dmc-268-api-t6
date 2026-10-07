@@ -88,13 +88,6 @@ class LlmSettings:
     fallback: ModelProfile | None
     policy: GatewayPolicy = field(default_factory=GatewayPolicy)
 
-    @property
-    def has_eurouter_route(self) -> bool:
-        """Whether either configured endpoint may return a EUR-denominated cost."""
-        return is_eurouter_route(self.primary) or (
-            self.fallback is not None and is_eurouter_route(self.fallback)
-        )
-
     @classmethod
     def from_env(cls, env: Mapping[str, str]) -> LlmSettings:
         """Read ``LLM_*`` (primary) and ``LLM_FALLBACK_*`` (fallback) variables.

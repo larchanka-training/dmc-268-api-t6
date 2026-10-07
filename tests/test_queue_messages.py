@@ -37,7 +37,7 @@ from app.modules.reviews.infrastructure.llm.models import (
     GatewayConventionsModel,
     GatewayReviewModel,
 )
-from app.modules.reviews.infrastructure.llm.settings import LlmConfigError
+from app.modules.reviews.infrastructure.llm.settings import LlmConfigError, is_eurouter_route
 from app.worker import (
     AttemptReviewProvider,
     GitHubAdapters,
@@ -298,26 +298,32 @@ def test_worker_with_an_empty_fallback_model_has_no_fallback_route() -> None:
 
 
 @pytest.mark.parametrize(
-    "model_env",
+    ("model_env", "eurouter"),
     [
-        {"LLM_MODEL": "mistral-small-4", "LLM_API_KEYS": "k"},
-        {
-            "LLM_MODEL": "test-model",
-            "LLM_BASE_URL": "https://llm.test/v1",
-            "LLM_CONTEXT_WINDOW": "100000",
-            "LLM_FALLBACK_MODEL": "mistral-small-3.2-24b",
-            "LLM_FALLBACK_API_KEYS": "k",
-        },
-        {
-            "LLM_MODEL": "test-model",
-            "LLM_BASE_URL": "https://api.eurouter.ai。/api/v1",
-            "LLM_CONTEXT_WINDOW": "100000",
-            "LLM_API_KEYS": "k",
-        },
+        ({"LLM_MODEL": "mistral-small-4", "LLM_API_KEYS": "k"}, "primary"),
+        (
+            {
+                "LLM_MODEL": "test-model",
+                "LLM_BASE_URL": "https://llm.test/v1",
+                "LLM_CONTEXT_WINDOW": "100000",
+                "LLM_FALLBACK_MODEL": "mistral-small-3.2-24b",
+                "LLM_FALLBACK_API_KEYS": "k",
+            },
+            "fallback",
+        ),
+        (
+            {
+                "LLM_MODEL": "test-model",
+                "LLM_BASE_URL": "https://api.eurouter.ai。/api/v1",
+                "LLM_CONTEXT_WINDOW": "100000",
+                "LLM_API_KEYS": "k",
+            },
+            "primary",
+        ),
     ],
 )
 def test_worker_starts_with_configured_eurouter_route_without_eur_rate(
-    model_env: dict[str, str],
+    model_env: dict[str, str], eurouter: str
 ) -> None:
     settings = WorkerSettings.from_environment(
         {
@@ -327,7 +333,9 @@ def test_worker_starts_with_configured_eurouter_route_without_eur_rate(
         }
     )
     assert settings.llm is not None
-    assert settings.llm.has_eurouter_route
+    # the gateway's own runtime check decides which calls need an ECB quote
+    route = settings.llm.primary if eurouter == "primary" else settings.llm.fallback
+    assert route is not None and is_eurouter_route(route)
 
 
 def test_worker_startup_creates_fx_provider_without_fetching_ecb(
