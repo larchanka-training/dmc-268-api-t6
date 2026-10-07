@@ -569,7 +569,7 @@ def test_sqlalchemy_run_repository_runs_updated_after_is_scoped_capped_and_oldes
     ]
     assert session.statement is not None
     sql = str(session.statement.compile())
-    assert "runs.updated_at >" in sql
+    assert "runs.updated_at > :updated_at_1" in sql
     assert "ORDER BY runs.updated_at DESC, runs.id DESC" in sql
     assert "LIMIT" in sql
     assert "WHERE code_changes.id = runs.code_change_id" in sql

@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
@@ -489,7 +491,23 @@ def test_event_id_is_integer_microseconds_since_the_epoch_and_round_trips() -> N
 
 @pytest.mark.parametrize(
     "value",
-    [None, "", "abc", "-5", "+5", "12.5", " 12", "12 ", "1_000", "\u0661\u0662", "9" * 30, "1\n"],
+    [
+        None,
+        "",
+        "abc",
+        "-5",
+        "+5",
+        "12.5",
+        " 12",
+        "12 ",
+        "1_000",
+        "\u0661\u0662",
+        "9" * 30,
+        "1\n",
+        # Plain decimals the regex accepts but the datetime range does not: year 10000 onwards.
+        "9" * 19,
+        "253402300800000000",
+    ],
 )
 def test_parse_event_id_rejects_anything_but_plain_decimal_microseconds(value: str | None) -> None:
     assert parse_run_event_id(value) is None
@@ -550,7 +568,52 @@ def test_stream_subscribes_before_it_replays() -> None:
     assert order == ["subscribe", "replay"]
 
 
-@pytest.mark.parametrize("value", ["", "abc", "-5", "12.5", "1_000", "9" * 30])
+def test_a_change_published_while_the_replay_query_runs_is_delivered_live() -> None:
+    from app.bootstrap.portal_auth import get_auth_scope
+    from app.modules.auth.application.scope import AuthScope
+
+    class FirstEventHub(InMemoryRunUpdateHub):
+        """The real hub, cut after its first event so the stream ends on its own."""
+
+        @asynccontextmanager
+        async def subscribe(self) -> AsyncIterator[AsyncIterator[RunUpdated]]:
+            async with super().subscribe() as updates:
+
+                async def first() -> AsyncIterator[RunUpdated]:
+                    yield await anext(updates)
+
+                yield first()
+
+    hub = FirstEventHub()
+
+    class CommitDuringReplayRepository(ReplayRepository):
+        async def runs_updated_after(self, after: datetime, limit: int) -> list[RunChange]:
+            await hub.publish(RunUpdated(RUN_ID, "running"))  # the change commits mid-query
+            return await super().runs_updated_after(after, limit)
+
+    repository = CommitDuringReplayRepository()
+    app.dependency_overrides[get_run_event_hub] = lambda: hub
+    app.dependency_overrides[get_run_repository] = lambda: repository
+    # A safety net only: a stream that never gets the event ends at the token expiry, and fails.
+    app.dependency_overrides[get_auth_scope] = lambda: AuthScope(
+        user_id=42, workspace_ids=(), expires_at=int(time.time()) + 5
+    )
+    try:
+        response = TestClient(app).get("/api/stream", headers={"Last-Event-ID": UPDATED_AT_ID})
+    finally:
+        app.dependency_overrides.clear()
+
+    assert repository.replay_calls != []
+    assert response.text == (
+        f"id: {UPDATED_AT_ID}\n"
+        "event: run.updated\n"
+        'data: {"runId":"00000000-0000-0000-0000-000000000100","status":"running"}\n\n'
+    )
+
+
+@pytest.mark.parametrize(
+    "value", ["", "abc", "-5", "12.5", "1_000", "9" * 30, "9" * 19, "253402300800000000"]
+)
 def test_stream_with_an_invalid_last_event_id_does_not_replay(value: str) -> None:
     repository = ReplayRepository([RunChange(RUN_ID, "succeeded", UPDATED_AT)])
 
