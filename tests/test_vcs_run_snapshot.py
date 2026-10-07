@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
-from typing import cast
+from typing import Any, cast
 from uuid import UUID
 
 import pytest
@@ -29,6 +29,7 @@ from app.modules.reviews.application.vcs_diff import (
     VcsPullRequest,
 )
 from app.modules.reviews.infrastructure.blob_cache import InMemoryBlobCache
+from tests.trigger_uow import ProcessingUow, processing_uow
 
 RUN_ID = UUID("00000000-0000-0000-0000-000000000101")
 CODE_CHANGE_ID = UUID("00000000-0000-0000-0000-000000000102")
@@ -126,6 +127,7 @@ def test_worker_snapshot_preserves_every_file_and_filters_model_input() -> None:
             blob_cache=cache,
             conventions=cast(GenerateRepoConventions, Conventions()),
             vcs_provider=GitHub(),
+            uow_factory=processing_uow(repository, cache),
         ).execute(RUN_ID)
     )
     assert [item.filename for item in repository.snapshots] == [
@@ -200,7 +202,11 @@ def test_large_generated_file_keeps_blob_sha_without_fetching_blob() -> None:
     repository = Repository()
     assert asyncio.run(
         ReviewRunProcessor(
-            repository, None, blob_cache=InMemoryBlobCache(), vcs_provider=GitHub()
+            repository,
+            None,
+            blob_cache=InMemoryBlobCache(),
+            vcs_provider=GitHub(),
+            uow_factory=processing_uow(repository),
         ).execute(RUN_ID)
     )
     assert repository.snapshots[0].blob_sha == "2" * 40
@@ -258,7 +264,11 @@ def test_failed_missing_patch_blob_stays_in_snapshot_and_run_continues(
     repository = Repository()
     assert asyncio.run(
         ReviewRunProcessor(
-            repository, None, blob_cache=InMemoryBlobCache(), vcs_provider=GitHub()
+            repository,
+            None,
+            blob_cache=InMemoryBlobCache(),
+            vcs_provider=GitHub(),
+            uow_factory=processing_uow(repository),
         ).execute(RUN_ID)
     )
     assert [snapshot.filename for snapshot in repository.snapshots] == [
@@ -320,7 +330,10 @@ def test_github_failure_cannot_fall_back_to_mutable_path_ref_provider() -> None:
     with pytest.raises(RuntimeError, match="GitHub unavailable"):
         asyncio.run(
             ReviewRunProcessor(
-                Repository(), MutableProvider(), vcs_provider=FailingGitHub()
+                Repository(),
+                MutableProvider(),
+                vcs_provider=FailingGitHub(),
+                uow_factory=processing_uow(Repository()),
             ).execute(RUN_ID)
         )
 
@@ -363,9 +376,51 @@ def test_retry_uses_persisted_run_snapshot_after_provider_head_and_base_change()
             raise AssertionError("retry must not rewrite the stored snapshot")
 
     cache = InMemoryBlobCache()
+    repo = Repository()
     assert asyncio.run(
-        ReviewRunProcessor(Repository(), None, blob_cache=cache, vcs_provider=GitHub()).execute(
-            RUN_ID
-        )
+        ReviewRunProcessor(
+            repo,
+            None,
+            blob_cache=cache,
+            vcs_provider=GitHub(),
+            uow_factory=processing_uow(repo, cache),
+        ).execute(RUN_ID)
     )
+    assert asyncio.run(cache.get(BlobCacheKey(REPOSITORY_ID, "1" * 40))).content == "saved\n"
+
+
+def test_blob_cache_writes_are_committed_by_the_processor() -> None:
+    """Mutating ``await uow.commit()`` in ``_store_vcs_blobs`` must break this test."""
+    stored = [DiffSnapshot("src/a.py", None, blob_sha="1" * 40)]
+
+    class GitHub:
+        async def get_blob(self, locator: PullRequestLocator, sha: str) -> bytes:
+            return b"saved\n"
+
+    class Repository:
+        async def get_run_vcs_input(self, run_id: UUID) -> RunVcsInput:
+            return RunVcsInput(CODE_CHANGE_ID, REPOSITORY_ID, HEAD, BASE, LOCATOR)
+
+        async def get_run_snapshots(self, run_id: UUID) -> list[DiffSnapshot]:
+            return stored
+
+    cache = InMemoryBlobCache()
+    repo = Repository()
+    opened: list[ProcessingUow] = []
+
+    def factory() -> Any:
+        uow = ProcessingUow(repo, cache)
+        opened.append(uow)
+        return uow
+
+    processor = ReviewRunProcessor(
+        cast(Any, repo),
+        None,
+        blob_cache=cache,
+        vcs_provider=cast(Any, GitHub()),
+        uow_factory=factory,
+    )
+    assert asyncio.run(processor.execute(RUN_ID)) is True
+
+    assert [uow.commits for uow in opened] == [1]
     assert asyncio.run(cache.get(BlobCacheKey(REPOSITORY_ID, "1" * 40))).content == "saved\n"

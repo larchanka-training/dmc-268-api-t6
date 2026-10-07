@@ -15,6 +15,7 @@ from app.modules.reviews.application.try_enqueue_webhook_run import (
     EnqueueResult,
     EnqueueStatus,
 )
+from tests.trigger_uow import candidates_uow
 
 _CANDIDATE = DueNoCiCandidate(UUID("11111111-1111-1111-1111-111111111111"), "a" * 40)
 _NOW = datetime(2026, 9, 30, tzinfo=UTC)
@@ -49,7 +50,9 @@ def test_sweep_excludes_non_enqueued_candidate_until_state_changes() -> None:
     enqueuer = Enqueuer(EnqueueResult(EnqueueStatus.INELIGIBLE))
 
     attempted = asyncio.run(
-        SweepNoCi(candidates=candidates, enqueuer=enqueuer, now=lambda: _NOW).execute()
+        SweepNoCi(
+            uow_factory=candidates_uow(candidates), enqueuer=enqueuer, now=lambda: _NOW
+        ).execute()
     )
 
     assert attempted == 1
@@ -61,7 +64,11 @@ def test_sweep_does_not_exclude_enqueued_candidate() -> None:
     candidates = Candidates()
     enqueuer = Enqueuer(EnqueueResult(EnqueueStatus.ENQUEUED))
 
-    asyncio.run(SweepNoCi(candidates=candidates, enqueuer=enqueuer, now=lambda: _NOW).execute())
+    asyncio.run(
+        SweepNoCi(
+            uow_factory=candidates_uow(candidates), enqueuer=enqueuer, now=lambda: _NOW
+        ).execute()
+    )
 
     assert candidates.excluded == []
 
@@ -70,7 +77,9 @@ _SWEEP_LOGGER = "app.modules.reviews.application.sweep_no_ci"
 
 
 def _sweep_lines(result: EnqueueResult, caplog: pytest.LogCaptureFixture) -> list[str]:
-    sweep = SweepNoCi(candidates=Candidates(), enqueuer=Enqueuer(result), now=lambda: _NOW)
+    sweep = SweepNoCi(
+        uow_factory=candidates_uow(Candidates()), enqueuer=Enqueuer(result), now=lambda: _NOW
+    )
     with caplog.at_level(logging.INFO, logger=_SWEEP_LOGGER):
         asyncio.run(sweep.execute())
     return [

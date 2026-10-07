@@ -57,7 +57,7 @@ from app.modules.reviews.application.conventions import (
 )
 from app.modules.reviews.application.determine_ci_eligibility import CiEligibility
 from app.modules.reviews.application.get_run_diff import DiffSnapshot
-from app.modules.reviews.application.handle_review_run import ClaimedAttempt
+from app.modules.reviews.application.handle_review_run import ClaimedAttempt, DeliveryOutcome
 from app.modules.reviews.application.prompt_builder import PullRequestMeta, ReviewContext
 from app.modules.reviews.application.publish_run_review import ReviewSubmission, SubmittedReview
 from app.modules.reviews.application.reconcile_runs import ReconcileRuns
@@ -471,11 +471,23 @@ async def running_worker(
     publish_q = await channels.consumer_queue(PUBLISH_QUEUE)
     tasks = [
         asyncio.create_task(
-            consume(run_q, partial(handle_run_delivery, handler=process.handle_run.execute))
+            consume(
+                run_q,
+                partial(
+                    handle_run_delivery,
+                    handler=process.handle_run.execute,
+                    publisher=channels.publisher,
+                ),
+            )
         ),
         asyncio.create_task(
             consume(
-                publish_q, partial(handle_publish_delivery, handler=process.publish_review.execute)
+                publish_q,
+                partial(
+                    handle_publish_delivery,
+                    handler=process.publish_review.execute,
+                    publisher=channels.publisher,
+                ),
             )
         ),
     ]
@@ -1352,3 +1364,107 @@ def test_main_composition_without_llm_config_names_the_missing_configuration(
     assert llm.tasks == []
     # The diff step succeeds: the missing LLM never masks a VCS step.
     assert fetches and all("error" not in (action[2] or {}) for action in fetches)
+
+
+@pytest.mark.integration
+def test_repeated_delivery_failures_route_to_dlq_across_reconnects(
+    env: Env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def no_sleep(seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr(asyncio, "sleep", no_sleep)
+
+    run_id = uuid4()
+    body = {
+        "schema": "review.run/v1",
+        "message_id": str(run_id),
+        "run_id": str(run_id),
+        "workspace_id": str(uuid4()),
+        "installation_id": 17,
+        "repo": {
+            "id": str(uuid4()),
+            "provider": "github",
+            "external_id": 101,
+            "full_name": "octo/repo",
+        },
+        "pr": {
+            "number": 7,
+            "head_sha": HEAD,
+            "base_sha": BASE,
+            "base_ref": "main",
+        },
+        "engine": "fast",
+        "rule_version_id": str(env.rule_id),
+        "prompt_version_id": str(env.prompt_id),
+        "trigger": "webhook",
+        "attempt": 0,
+        "requested_at": datetime.now(UTC).isoformat(),
+    }
+
+    async def publish_initial() -> None:
+        async with amqp_channels(env.rabbitmq_url, SHORT_DELAYS) as channels:
+            connection = channels.connection
+            channel = await connection.channel()
+            exchange = await channel.get_exchange(EXCHANGE, ensure=False)
+            await exchange.publish(
+                aio_pika.Message(
+                    json.dumps(body).encode(),
+                    content_type="application/json",
+                    delivery_mode=aio_pika.DeliveryMode.PERSISTENT,
+                    message_id=str(run_id),
+                ),
+                routing_key=run_queue("fast"),
+            )
+
+    asyncio.run(publish_initial())
+
+    deliveries_seen = 0
+
+    async def deliver_once_and_fail() -> None:
+        nonlocal deliveries_seen
+        from app.modules.reviews.infrastructure.amqp import _unexpected_delivery_attempts
+
+        _unexpected_delivery_attempts.clear()
+
+        async with amqp_channels(env.rabbitmq_url, SHORT_DELAYS) as channels:
+            queue = await channels.consumer_queue(run_queue("fast"))
+            async with queue.iterator() as messages:
+                async for message in messages:
+                    deliveries_seen += 1
+
+                    async def failing_handler(_: UUID) -> DeliveryOutcome:
+                        raise RuntimeError("handler failure")
+
+                    await handle_run_delivery(
+                        message,
+                        handler=failing_handler,
+                        publisher=channels.publisher,
+                    )
+                    break
+
+    for _ in range(3):
+        asyncio.run(deliver_once_and_fail())
+
+    assert deliveries_seen == 3
+
+    async def verify_dlq() -> tuple[int, dict[str, Any] | None]:
+        async with amqp_channels(env.rabbitmq_url, SHORT_DELAYS) as channels:
+            probe = await channels.connection.channel()
+            fast_q = await probe.declare_queue(run_queue("fast"), passive=True)
+            fast_count = fast_q.declaration_result.message_count
+            dlq = await channels.consumer_queue(DEAD_LETTER_QUEUE)
+
+            dlq_msg: aio_pika.abc.AbstractIncomingMessage | None = None
+            async with dlq.iterator() as messages:
+                async for msg in messages:
+                    await msg.ack()
+                    dlq_msg = msg
+                    break
+            dlq_headers = dict(dlq_msg.headers or {}) if dlq_msg is not None else None
+            return int(fast_count or 0), dlq_headers
+
+    fast_count, dlq_headers = asyncio.run(verify_dlq())
+    assert fast_count == 0
+    assert dlq_headers is not None
+    assert dlq_headers.get("x-attempt") == 2

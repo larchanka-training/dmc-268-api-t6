@@ -44,6 +44,7 @@ from app.modules.reviews.application.trigger_from_delivery import (
 )
 from app.modules.reviews.application.try_enqueue_webhook_run import EnqueueResult, EnqueueStatus
 from tests.github_webhook_fixtures import load_github_webhook_fixture
+from tests.trigger_uow import targets_uow
 
 _DISPATCH_LOGGER = "app.modules.integrations.webhooks.api.dispatch"
 
@@ -151,7 +152,9 @@ def test_projected_pr_actions_recheck_current_head_only_on_synchronize(
             resolver=FakeInstallationResolver(),
             onboarding=FakeOnboarding(),
             pull_request_projector=Projector(),
-            run_trigger=TriggerFromDelivery(targets=Targets(), enqueuer=Enqueuer()),
+            run_trigger=TriggerFromDelivery(
+                uow_factory=targets_uow(Targets()), enqueuer=Enqueuer()
+            ),
         )
     )
 

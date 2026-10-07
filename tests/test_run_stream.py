@@ -75,6 +75,17 @@ class CancelRepository:
         return self.item
 
 
+class CommitOrderCheckingHub(InMemoryRunUpdateHub):
+    def __init__(self, repository: CancelRepository) -> None:
+        super().__init__()
+        self.repository = repository
+        self.published_while_committed: list[bool] = []
+
+    async def publish(self, event: RunUpdated) -> None:
+        self.published_while_committed.append(self.repository.committed)
+        await super().publish(event)
+
+
 def test_hub_delivers_only_to_live_subscribers_and_cleans_up_after_disconnect() -> None:
     hub = InMemoryRunUpdateHub()
 
@@ -111,8 +122,8 @@ def test_hub_coalesces_stale_events_for_a_slow_subscriber() -> None:
 
 
 def test_cancel_publishes_a_durable_run_update_only_after_repository_commit() -> None:
-    hub = InMemoryRunUpdateHub()
     repository = CancelRepository(make_item())
+    hub = CommitOrderCheckingHub(repository)
 
     async def cancel_and_receive() -> tuple[RunListItem | None, RunUpdated]:
         async with hub.subscribe() as events:
@@ -125,6 +136,7 @@ def test_cancel_publishes_a_durable_run_update_only_after_repository_commit() ->
 
     assert result == repository.item
     assert repository.committed is True
+    assert hub.published_while_committed == [True]
     assert event == RunUpdated(RUN_ID, "running")
 
 

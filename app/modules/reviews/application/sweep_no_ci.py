@@ -48,39 +48,27 @@ class SweepNoCi:
     def __init__(
         self,
         *,
-        candidates: DueNoCiCandidates | None = None,
         enqueuer: WebhookRunEnqueuer,
+        uow_factory: Callable[[], SweepNoCiUnitOfWork],
         now: Callable[[], datetime] = lambda: datetime.now(UTC),
-        uow_factory: Callable[[], SweepNoCiUnitOfWork] | None = None,
     ) -> None:
-        if candidates is None and uow_factory is None:
-            raise ValueError("Either candidates or uow_factory must be provided")
-        self._candidates = candidates
         self._enqueuer = enqueuer
         self._now = now
         self._uow_factory = uow_factory
 
     async def execute(self, *, limit: int = 100) -> int:
         attempted = 0
-        if self._uow_factory is not None:
-            async with self._uow_factory() as uow:
-                candidates_list = await uow.candidates.list_due(self._now(), limit)
-        else:
-            assert self._candidates is not None
-            candidates_list = await self._candidates.list_due(self._now(), limit)
+        async with self._uow_factory() as uow:
+            candidates_list = await uow.candidates.list_due(self._now(), limit)
 
         for candidate in candidates_list:
             attempted += 1
             result = await self._enqueuer.execute(candidate.code_change_id, candidate.head_sha)
             excluded = result.status != EnqueueStatus.ENQUEUED
             if excluded:
-                if self._uow_factory is not None:
-                    async with self._uow_factory() as uow:
-                        await uow.candidates.exclude(candidate)
-                        await uow.commit()
-                else:
-                    assert self._candidates is not None
-                    await self._candidates.exclude(candidate)
+                async with self._uow_factory() as uow:
+                    await uow.candidates.exclude(candidate)
+                    await uow.commit()
             _log_outcome(candidate, result, excluded=excluded)
         return attempted
 

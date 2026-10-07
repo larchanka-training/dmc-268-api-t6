@@ -338,42 +338,46 @@ class SqlAlchemyRunRepository:
         head_sha: str,
         snapshots: list[DiffSnapshot],
     ) -> list[DiffSnapshot]:
-        async with self._session_scope() as session:
-            run = await session.scalar(select(Run).where(Run.id == run_id).with_for_update())
-            if run is None or run.code_change_id != code_change_id or run.head_sha != head_sha:
-                raise ValueError("run revision changed before diff snapshot storage")
-            if run.diff_snapshotted_at is not None:
-                rows = (
-                    await session.scalars(
-                        select(CodeChangeDiff)
-                        .where(CodeChangeDiff.run_id == run_id)
-                        .order_by(CodeChangeDiff.filename.asc())
-                    )
-                ).all()
-                return [self._to_diff_snapshot(row) for row in rows]
-            session.add_all(
-                [
-                    CodeChangeDiff(
-                        run_id=run_id,
-                        code_change_id=code_change_id,
-                        head_sha=head_sha,
-                        filename=snapshot.filename,
-                        patch=snapshot.patch,
-                        review_patch=snapshot.review_patch,
-                        blob_sha=snapshot.blob_sha,
-                        status=snapshot.status,
-                        previous_filename=snapshot.previous_filename,
-                        additions=snapshot.additions,
-                        deletions=snapshot.deletions,
-                        changes=snapshot.changes,
-                        omission_reason=snapshot.omission_reason,
-                        summary_only=snapshot.summary_only,
-                    )
-                    for snapshot in snapshots
-                ]
+        if self._session is None:
+            raise RuntimeError(
+                "store_diff_snapshots() requires an active session within a Unit of Work"
             )
-            run.diff_snapshotted_at = datetime.now(UTC)
-            await session.flush()
+        session = self._session
+        run = await session.scalar(select(Run).where(Run.id == run_id).with_for_update())
+        if run is None or run.code_change_id != code_change_id or run.head_sha != head_sha:
+            raise ValueError("run revision changed before diff snapshot storage")
+        if run.diff_snapshotted_at is not None:
+            rows = (
+                await session.scalars(
+                    select(CodeChangeDiff)
+                    .where(CodeChangeDiff.run_id == run_id)
+                    .order_by(CodeChangeDiff.filename.asc())
+                )
+            ).all()
+            return [self._to_diff_snapshot(row) for row in rows]
+        session.add_all(
+            [
+                CodeChangeDiff(
+                    run_id=run_id,
+                    code_change_id=code_change_id,
+                    head_sha=head_sha,
+                    filename=snapshot.filename,
+                    patch=snapshot.patch,
+                    review_patch=snapshot.review_patch,
+                    blob_sha=snapshot.blob_sha,
+                    status=snapshot.status,
+                    previous_filename=snapshot.previous_filename,
+                    additions=snapshot.additions,
+                    deletions=snapshot.deletions,
+                    changes=snapshot.changes,
+                    omission_reason=snapshot.omission_reason,
+                    summary_only=snapshot.summary_only,
+                )
+                for snapshot in snapshots
+            ]
+        )
+        run.diff_snapshotted_at = datetime.now(UTC)
+        await session.flush()
         return snapshots
 
     async def get_run_diff_input(self, run_id: UUID) -> RunDiffInput | None:
@@ -472,30 +476,30 @@ class SqlAlchemyRunRepository:
         ``cancel_requested`` at a checkpoint.  Terminal rows are intentionally
         left untouched, making retries idempotent.
         """
-        async with self._session_scope() as session:
-            run = await session.scalar(
-                select(Run).where(Run.id == run_id, self._authorized_run()).with_for_update()
-            )
-            if run is None:
-                return CancelRequestResult(found=False, changed=False)
-            if run.state is RunState.QUEUED:
-                now = datetime.now(UTC)
-                run.state = RunState.CANCELLED
-                run.error_code = "cancelled_by_user"
-                run.finished_at = now
-                if run.attempt >= 1:
-                    run.cancellation_signal_requested_at = now
-                await session.flush()
-                await notify_run_state(session, run_id, RunState.CANCELLED)
-                return CancelRequestResult(
-                    found=True, changed=True, signal_requested=run.attempt >= 1
-                )
-            elif run.state in {RunState.RUNNING, RunState.PUBLISHING}:
-                if run.cancel_requested:
-                    return CancelRequestResult(found=True, changed=False)
-                run.cancel_requested = True
-                await session.flush()
-                return CancelRequestResult(found=True, changed=True)
+        if self._session is None:
+            raise RuntimeError("request_cancel() requires an active session within a Unit of Work")
+        session = self._session
+        run = await session.scalar(
+            select(Run).where(Run.id == run_id, self._authorized_run()).with_for_update()
+        )
+        if run is None:
+            return CancelRequestResult(found=False, changed=False)
+        if run.state is RunState.QUEUED:
+            now = datetime.now(UTC)
+            run.state = RunState.CANCELLED
+            run.error_code = "cancelled_by_user"
+            run.finished_at = now
+            if run.attempt >= 1:
+                run.cancellation_signal_requested_at = now
+            await session.flush()
+            await notify_run_state(session, run_id, RunState.CANCELLED)
+            return CancelRequestResult(found=True, changed=True, signal_requested=run.attempt >= 1)
+        elif run.state in {RunState.RUNNING, RunState.PUBLISHING}:
+            if run.cancel_requested:
+                return CancelRequestResult(found=True, changed=False)
+            run.cancel_requested = True
+            await session.flush()
+            return CancelRequestResult(found=True, changed=True)
         return CancelRequestResult(found=True, changed=False)
 
     @staticmethod

@@ -65,32 +65,34 @@ class SqlAlchemyWebhookRunTargets:
             return ProjectedPullRequestTarget(*row) if row is not None else None
 
     async def for_ci(self, event: CiTriggerEvent) -> tuple[UUID, ...]:
-        async with self._session_scope() as session:
-            rows = await session.scalars(
-                select(CodeChange.id)
-                .join(Repository, CodeChange.repository_id == Repository.id)
-                .join(
-                    ProviderInstallation,
-                    Repository.provider_installation_id == ProviderInstallation.id,
-                )
-                .where(
-                    ProviderInstallation.provider == "github",
-                    ProviderInstallation.external_id == event.installation_external_id,
-                    Repository.external_id == event.repository_external_id,
-                    CodeChange.head_sha == event.head_sha,
-                    CodeChange.state == CodeChangeState.OPEN,
-                )
-                .order_by(CodeChange.id)
+        if self._session is None:
+            raise RuntimeError("for_ci() requires an active session within a Unit of Work")
+        session = self._session
+        rows = await session.scalars(
+            select(CodeChange.id)
+            .join(Repository, CodeChange.repository_id == Repository.id)
+            .join(
+                ProviderInstallation,
+                Repository.provider_installation_id == ProviderInstallation.id,
             )
-            ids = tuple(rows.all())
-            if ids and event.event_name in {"check_suite", "status"}:
-                await session.execute(
-                    update(CodeChange)
-                    .where(CodeChange.id.in_(ids), CodeChange.head_sha == event.head_sha)
-                    .values(ci_status={"event": event.event_name})
-                )
-                await session.flush()
-            return ids
+            .where(
+                ProviderInstallation.provider == "github",
+                ProviderInstallation.external_id == event.installation_external_id,
+                Repository.external_id == event.repository_external_id,
+                CodeChange.head_sha == event.head_sha,
+                CodeChange.state == CodeChangeState.OPEN,
+            )
+            .order_by(CodeChange.id)
+        )
+        ids = tuple(rows.all())
+        if ids and event.event_name in {"check_suite", "status"}:
+            await session.execute(
+                update(CodeChange)
+                .where(CodeChange.id.in_(ids), CodeChange.head_sha == event.head_sha)
+                .values(ci_status={"event": event.event_name})
+            )
+            await session.flush()
+        return ids
 
 
 class SqlAlchemyRunTriggerUnitOfWork(SqlAlchemyUnitOfWork):

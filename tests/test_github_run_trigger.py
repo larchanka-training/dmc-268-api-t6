@@ -66,6 +66,7 @@ from app.modules.reviews.infrastructure.webhook_run_targets import (
     SqlAlchemyRunTriggerUnitOfWork,
 )
 from app.modules.reviews.infrastructure.webhook_runs import SqlAlchemyWebhookRunUnitOfWork
+from tests.trigger_uow import targets_uow
 
 _PR = UUID("11111111-1111-1111-1111-111111111111")
 _RUN = UUID("22222222-2222-2222-2222-222222222222")
@@ -369,7 +370,7 @@ def test_repeated_ci_delivery_routes_to_one_run() -> None:
     uow = Uow()
     publisher = Publisher(uow)
     trigger = TriggerFromDelivery(
-        targets=Targets(),
+        uow_factory=targets_uow(Targets()),
         enqueuer=TryEnqueueWebhookRun(
             eligibility=Eligibility(),
             uow_factory=lambda: uow,
@@ -470,7 +471,7 @@ def test_delayed_label_enqueues_projected_head_instead_of_webhook_head() -> None
     )
 
     asyncio.run(
-        TriggerFromDelivery(targets=Targets(), enqueuer=Enqueuer()).on_label(
+        TriggerFromDelivery(uow_factory=targets_uow(Targets()), enqueuer=Enqueuer()).on_label(
             PullRequestLabelEvent(event, "ai-review")
         )
     )
@@ -553,7 +554,7 @@ def test_pr_and_label_triggers_report_the_enqueue_outcome(
     result: EnqueueResult, expected: str
 ) -> None:
     enqueuer = OutcomeEnqueuer([result, result])
-    trigger = TriggerFromDelivery(targets=OutcomeTargets(), enqueuer=enqueuer)
+    trigger = TriggerFromDelivery(uow_factory=targets_uow(OutcomeTargets()), enqueuer=enqueuer)
 
     assert asyncio.run(trigger.on_pr(_outcome_event("synchronize"))) == expected
     assert (
@@ -566,7 +567,7 @@ def test_pr_and_label_triggers_report_the_enqueue_outcome(
 def test_a_run_whose_publish_failed_is_reported_as_publication_pending_with_its_run() -> None:
     uow = Uow()
     trigger = TriggerFromDelivery(
-        targets=OutcomeTargets(),
+        uow_factory=targets_uow(OutcomeTargets()),
         enqueuer=TryEnqueueWebhookRun(
             eligibility=Eligibility(),
             uow_factory=lambda: uow,
@@ -582,7 +583,9 @@ def test_a_run_whose_publish_failed_is_reported_as_publication_pending_with_its_
 
 def test_a_pr_with_no_open_row_is_reported_without_enqueueing() -> None:
     enqueuer = OutcomeEnqueuer([])
-    trigger = TriggerFromDelivery(targets=OutcomeTargets(pull_request=None), enqueuer=enqueuer)
+    trigger = TriggerFromDelivery(
+        uow_factory=targets_uow(OutcomeTargets(pull_request=None)), enqueuer=enqueuer
+    )
 
     assert asyncio.run(trigger.on_pr(_outcome_event("reopened"))) == "no open pull request"
     assert (
@@ -597,7 +600,7 @@ def test_a_pr_with_no_open_row_is_reported_without_enqueueing() -> None:
 )
 def test_a_foreign_label_or_action_is_reported_without_enqueueing(label: str, action: str) -> None:
     enqueuer = OutcomeEnqueuer([])
-    trigger = TriggerFromDelivery(targets=OutcomeTargets(), enqueuer=enqueuer)
+    trigger = TriggerFromDelivery(uow_factory=targets_uow(OutcomeTargets()), enqueuer=enqueuer)
 
     outcome = asyncio.run(trigger.on_label(PullRequestLabelEvent(_outcome_event(action), label)))
 
@@ -613,7 +616,9 @@ def test_a_ci_event_reports_every_target_and_the_absence_of_one() -> None:
             EnqueueResult(EnqueueStatus.INELIGIBLE, reason="waiting_for_ci"),
         ]
     )
-    trigger = TriggerFromDelivery(targets=OutcomeTargets(ci=(_PR, other)), enqueuer=enqueuer)
+    trigger = TriggerFromDelivery(
+        uow_factory=targets_uow(OutcomeTargets(ci=(_PR, other))), enqueuer=enqueuer
+    )
     event = CiTriggerEvent(17, 101, _HEAD, "check_suite")
 
     outcome = asyncio.run(trigger.on_ci(event))
@@ -623,7 +628,9 @@ def test_a_ci_event_reports_every_target_and_the_absence_of_one() -> None:
         f"pr={other} head=aaaaaaa: ineligible (waiting_for_ci)"
     )
     assert enqueuer.calls == [(_PR, _HEAD), (other, _HEAD)]
-    nobody = TriggerFromDelivery(targets=OutcomeTargets(ci=()), enqueuer=OutcomeEnqueuer([]))
+    nobody = TriggerFromDelivery(
+        uow_factory=targets_uow(OutcomeTargets(ci=())), enqueuer=OutcomeEnqueuer([])
+    )
     assert asyncio.run(nobody.on_ci(event)) == "no open pull request at this head"
 
 
@@ -680,7 +687,7 @@ def test_an_ineligible_outcome_names_what_blocks_or_delays_the_gate(
 ) -> None:
     decision = CiEligibility(False, gate, _HEAD, detail=detail)
     use_case, _ = _enqueue(eligibility=Eligibility(decision=decision))
-    trigger = TriggerFromDelivery(targets=OutcomeTargets(), enqueuer=use_case)
+    trigger = TriggerFromDelivery(uow_factory=targets_uow(OutcomeTargets()), enqueuer=use_case)
 
     assert asyncio.run(trigger.on_pr(_outcome_event("synchronize"))) == expected
     assert asyncio.run(trigger.on_ci(CiTriggerEvent(17, 101, _HEAD, "check_suite"))) == expected

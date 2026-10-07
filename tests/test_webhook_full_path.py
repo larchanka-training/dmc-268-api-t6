@@ -60,6 +60,7 @@ from app.modules.reviews.application.try_enqueue_webhook_run import (
     TryEnqueueWebhookRun,
 )
 from app.modules.reviews.application.vcs_diff import PullRequestLocator, VcsFile, VcsPullRequest
+from tests.trigger_uow import targets_uow
 
 _SECRET = "full-path-secret"
 _NOW = datetime(2026, 9, 28, 12, 0, tzinfo=UTC)
@@ -416,7 +417,7 @@ def test_signed_former_reviewer_webhook_cannot_create_intent_or_run() -> None:
         pull_request_projector=ProjectGitHubPullRequest(
             uow_factory=uow_factory, bot_login="reviewer[bot]", now=lambda: _NOW
         ),
-        run_trigger=TriggerFromDelivery(targets=Targets(state), enqueuer=enqueuer),
+        run_trigger=TriggerFromDelivery(uow_factory=targets_uow(Targets(state)), enqueuer=enqueuer),
     )
     receiver = ReceiveGitHubDelivery(
         uow_factory=uow_factory,
@@ -511,7 +512,7 @@ def test_signed_ai_review_label_enqueues_after_current_head_green_ci() -> None:
         resolver=UnusedResolver(),
         onboarding=UnusedOnboarding(),
         label_intent_projector=projector,
-        run_trigger=TriggerFromDelivery(targets=Targets(state), enqueuer=enqueuer),
+        run_trigger=TriggerFromDelivery(uow_factory=targets_uow(Targets(state)), enqueuer=enqueuer),
     )
     receiver = ReceiveGitHubDelivery(
         uow_factory=uow_factory,
@@ -651,7 +652,7 @@ def _outcome_lines(
             projection_lock=LabelLock(),
             now=lambda: _NOW,
         ),
-        run_trigger=TriggerFromDelivery(targets=Targets(state), enqueuer=enqueuer),
+        run_trigger=TriggerFromDelivery(uow_factory=targets_uow(Targets(state)), enqueuer=enqueuer),
     )
     receiver = ReceiveGitHubDelivery(
         uow_factory=uow_factory,

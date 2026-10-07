@@ -21,6 +21,7 @@ from app.modules.reviews.application.process_run import (
     RunDiffProvider,
 )
 from tests.portal_test_client import authenticated_test_client as TestClient
+from tests.trigger_uow import processing_uow
 
 RUN_ID = UUID("00000000-0000-0000-0000-000000000100")
 CODE_CHANGE_ID = UUID("00000000-0000-0000-0000-000000000201")
@@ -241,7 +242,14 @@ def test_processing_populates_immutable_cache_before_file_endpoint_reads_it() ->
     from app.modules.reviews.infrastructure.blob_cache import InMemoryBlobCache
 
     cache = InMemoryBlobCache()
-    assert asyncio.run(ReviewRunProcessor(repository, Provider(), cache).execute(RUN_ID)) is True
+    assert (
+        asyncio.run(
+            ReviewRunProcessor(
+                repository, Provider(), cache, uow_factory=processing_uow(repository, cache)
+            ).execute(RUN_ID)
+        )
+        is True
+    )
 
     app.dependency_overrides[get_run_repository] = lambda: repository
     app.dependency_overrides[get_file_blob_cache] = lambda: cache
@@ -261,6 +269,8 @@ def test_processing_populates_immutable_cache_before_file_endpoint_reads_it() ->
 
 
 def test_sqlalchemy_blob_cache_is_readable_from_a_separate_adapter_instance() -> None:
+    from sqlalchemy.ext.asyncio import AsyncSession
+
     from app.modules.reviews.infrastructure.blob_cache import SqlAlchemyBlobCache
 
     class Result:
@@ -270,11 +280,11 @@ def test_sqlalchemy_blob_cache_is_readable_from_a_separate_adapter_instance() ->
         def one_or_none(self) -> tuple[str, datetime] | None:
             return self._row
 
-    class Session:
+    class Session(AsyncSession):
         def __init__(self, store: dict[BlobCacheKey, tuple[str, datetime]]) -> None:
             self._store = store
 
-        async def execute(self, statement: object) -> Result:
+        async def execute(self, statement: object) -> Result:  # type: ignore[override]
             compiled = statement.compile()  # type: ignore[attr-defined]
             params = compiled.params
             suffix = "" if "repository_id" in params else "_1"
@@ -287,7 +297,7 @@ def test_sqlalchemy_blob_cache_is_readable_from_a_separate_adapter_instance() ->
                 return Result(None)
             return Result(self._store.get(key))
 
-        async def flush(self) -> None:
+        async def flush(self, objects: object = None) -> None:
             pass
 
     class SessionContext:
@@ -313,7 +323,7 @@ def test_sqlalchemy_blob_cache_is_readable_from_a_separate_adapter_instance() ->
     factory = SessionFactory()
     clock = [datetime(2026, 9, 25, tzinfo=UTC)]
     producer_session = Session(factory.store)
-    producer = SqlAlchemyBlobCache(producer_session, now=lambda: clock[0])  # type: ignore[arg-type]
+    producer = SqlAlchemyBlobCache(producer_session, now=lambda: clock[0])
     consumer = SqlAlchemyBlobCache(factory, now=lambda: clock[0])  # type: ignore[arg-type]
 
     asyncio.run(producer.put(KEY, "written-by-worker", ttl=timedelta(days=7)))

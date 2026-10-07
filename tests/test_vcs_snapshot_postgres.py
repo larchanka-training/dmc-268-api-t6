@@ -6,6 +6,7 @@ import asyncio
 import os
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
+from typing import cast
 from uuid import UUID, uuid4
 
 import pytest
@@ -22,8 +23,18 @@ from app.modules.reviews.application.get_run_diff import (
     review_files_from_snapshots,
 )
 from app.modules.reviews.application.get_run_file_lines import BlobCacheKey
+from app.modules.reviews.application.process_run import ReviewRunProcessor
+from app.modules.reviews.application.prompt_builder import PullRequestMeta
+from app.modules.reviews.application.vcs_diff import (
+    PullRequestLocator,
+    VcsFile,
+    VcsPullRequest,
+)
 from app.modules.reviews.infrastructure.blob_cache import SqlAlchemyBlobCache
 from app.modules.reviews.infrastructure.models import CachedFileBlob, Run
+from app.modules.reviews.infrastructure.run_processing_unit_of_work import (
+    SqlAlchemyRunProcessingUnitOfWork,
+)
 from app.modules.reviews.infrastructure.run_repository import SqlAlchemyRunRepository
 from tests.portal_test_client import authenticated_test_client
 
@@ -399,4 +410,122 @@ def test_file_endpoint_resolves_two_pr_paths_through_one_immutable_blob(
         assert expired.status_code == 410
     finally:
         app.dependency_overrides.clear()
+        asyncio.run(engine.dispose())
+
+
+@pytest.mark.integration
+def test_review_run_processor_commits_blob_cache_to_postgres(
+    vcs_database: tuple[str, str, UUID, UUID, UUID, str, UUID, UUID],
+) -> None:
+    (
+        database_url,
+        schema,
+        first_run,
+        _second_run,
+        repository_id,
+        _blob_sha,
+        _duplicate_run,
+        _fresh_run,
+    ) = vcs_database
+    engine = create_async_engine(
+        database_url,
+        connect_args={"options": f"-csearch_path={schema}"},
+        poolclass=NullPool,
+    )
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    clock = [datetime(2026, 9, 28, tzinfo=UTC)]
+    cache = SqlAlchemyBlobCache(factory, now=lambda: clock[0])
+    target_blob_sha = "f" * 40
+    processor_run = uuid4()
+
+    class DummyVcsProvider:
+        async def get_pull_request(self, locator: PullRequestLocator) -> VcsPullRequest:
+            return VcsPullRequest(
+                locator=locator,
+                head_sha="e" * 40,
+                base_sha="b" * 40,
+                meta=PullRequestMeta(
+                    title="PR",
+                    description=None,
+                    author="octocat",
+                    source_branch="feature",
+                    target_branch="main",
+                    labels=(),
+                    files_changed=1,
+                    lines_added=1,
+                    lines_removed=0,
+                    is_draft=False,
+                    is_fork=False,
+                ),
+            )
+
+        async def get_diff(self, pull_request: VcsPullRequest) -> tuple[VcsFile, ...]:
+            return (
+                VcsFile(
+                    filename="src/fresh_file.py",
+                    status="modified",
+                    blob_sha=target_blob_sha,
+                    previous_filename=None,
+                    additions=1,
+                    deletions=0,
+                    changes=1,
+                    patch="@@ -0,0 +1 @@\n+fresh",
+                ),
+            )
+
+        async def get_blob(self, locator: PullRequestLocator, sha: str) -> bytes:
+            assert sha == target_blob_sha
+            return b"content_from_vcs\n"
+
+    try:
+
+        async def setup_and_process() -> None:
+            async with factory() as session:
+                first = await session.get(Run, first_run)
+                assert first is not None
+                run = Run(
+                    id=processor_run,
+                    code_change_id=first.code_change_id,
+                    base_sha=first.base_sha,
+                    head_sha=first.head_sha,
+                    state=first.state,
+                    trigger=first.trigger,
+                    idempotency_key="blob_commit_test_" + uuid4().hex,
+                    engine=first.engine,
+                    rule_version_id=first.rule_version_id,
+                    prompt_version_id=first.prompt_version_id,
+                    available_at=clock[0],
+                )
+                session.add(run)
+                await session.commit()
+
+            repo = SqlAlchemyRunRepository(factory, allow_unscoped=True)
+            processor = ReviewRunProcessor(
+                repo,
+                None,
+                blob_cache=cache,
+                vcs_provider=DummyVcsProvider(),
+                uow_factory=lambda: SqlAlchemyRunProcessingUnitOfWork(factory),
+            )
+            result = await processor.execute(processor_run)
+            assert result is True
+
+        asyncio.run(setup_and_process())
+
+        async def read_blob_from_fresh_session() -> CachedFileBlob | None:
+            async with factory() as session:
+                return cast(
+                    CachedFileBlob | None,
+                    await session.scalar(
+                        select(CachedFileBlob).where(
+                            CachedFileBlob.repository_id == repository_id,
+                            CachedFileBlob.blob_sha == target_blob_sha,
+                        )
+                    ),
+                )
+
+        row = asyncio.run(read_blob_from_fresh_session())
+        assert row is not None
+        assert row.content == "content_from_vcs\n"
+    finally:
         asyncio.run(engine.dispose())

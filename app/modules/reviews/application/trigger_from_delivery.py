@@ -58,23 +58,15 @@ class TriggerFromDelivery:
     def __init__(
         self,
         *,
-        targets: RunTriggerTargets | None = None,
         enqueuer: WebhookRunEnqueuer,
-        uow_factory: Callable[[], RunTriggerUnitOfWork] | None = None,
+        uow_factory: Callable[[], RunTriggerUnitOfWork],
     ) -> None:
-        if targets is None and uow_factory is None:
-            raise ValueError("Either targets or uow_factory must be provided")
-        self._targets = targets
         self._enqueuer = enqueuer
         self._uow_factory = uow_factory
 
     async def on_pr(self, event: PullRequestEvent) -> str:
-        if self._uow_factory is not None:
-            async with self._uow_factory() as uow:
-                target = await uow.targets.for_pr(event)
-        else:
-            assert self._targets is not None
-            target = await self._targets.for_pr(event)
+        async with self._uow_factory() as uow:
+            target = await uow.targets.for_pr(event)
         if target is None:
             return _NO_OPEN_PULL_REQUEST
         return await self._enqueue(target.code_change_id, target.head_sha)
@@ -85,13 +77,9 @@ class TriggerFromDelivery:
         return await self.on_pr(event.pull_request)
 
     async def on_ci(self, event: CiTriggerEvent) -> str:
-        if self._uow_factory is not None:
-            async with self._uow_factory() as uow:
-                targets = await uow.targets.for_ci(event)
-                await uow.commit()
-        else:
-            assert self._targets is not None
-            targets = await self._targets.for_ci(event)
+        async with self._uow_factory() as uow:
+            targets = await uow.targets.for_ci(event)
+            await uow.commit()
         if not targets:
             return _NO_OPEN_PULL_REQUEST_AT_HEAD
         return "; ".join([await self._enqueue(target, event.head_sha) for target in targets])

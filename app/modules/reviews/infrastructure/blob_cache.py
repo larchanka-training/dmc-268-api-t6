@@ -10,7 +10,6 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import cast
 
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert
@@ -60,8 +59,8 @@ class SqlAlchemyBlobCache:
     ) -> None:
         self._session: AsyncSession | None
         self._session_factory: async_sessionmaker[AsyncSession] | None
-        if hasattr(session_or_factory, "execute"):
-            self._session = cast(AsyncSession, session_or_factory)
+        if isinstance(session_or_factory, AsyncSession):
+            self._session = session_or_factory
             self._session_factory = None
         else:
             self._session = None
