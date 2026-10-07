@@ -28,6 +28,22 @@ def _replay_step() -> str:
     return textwrap.dedent(match.group("body"))
 
 
+def _python_job() -> str:
+    workflow = WORKFLOW.read_text(encoding="utf-8")
+    start = workflow.index("\n  python-lint-type-test:\n") + 1
+    next_job = re.compile(r"(?m)^  \S").search(workflow, start + 1)
+    return workflow[start : next_job.start() if next_job else len(workflow)]
+
+
+def _job_step(job: str, name: str) -> str:
+    """The whole step mapping, keys after ``run`` included."""
+    header = f"      - name: {name}\n"
+    assert job.count(header) == 1, f"step {name!r} must exist exactly once"
+    start = job.index(header)
+    end = job.find("\n      - name: ", start + len(header))
+    return job[start : end if end != -1 else len(job)]
+
+
 def _report() -> dict[str, Any]:
     return {
         "case_count": 2,
@@ -160,3 +176,15 @@ def test_required_ci_without_manifest_fails_with_summary(tmp_path: Path) -> None
         "Corpus: 24/24 valid; distribution passed.\n\n"
         "Recorded replay failed: baseline manifest is missing.\n"
     )
+
+
+def test_required_ci_replay_failure_is_not_softened_by_step_or_job_keys() -> None:
+    job = _python_job()
+    step = _job_step(job, "Gold corpus and recorded replay")
+
+    # A failed replay must fail the required check: a key placed anywhere in the step mapping,
+    # before or after its run body, or on the job must not turn it green or skip it.
+    assert "continue-on-error" not in step, "replay step must not continue on error"
+    assert not re.search(r"(?m)^        if:", step), "replay step must always run"
+    assert "continue-on-error" not in job, "Python lint / type / test must not continue on error"
+    assert not re.search(r"(?m)^    if:", job), "Python lint / type / test must always run"
