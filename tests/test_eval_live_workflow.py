@@ -321,7 +321,19 @@ def test_raw_export_preserves_only_mapped_answer_and_manifest_bytes(tmp_path: Pa
     assert (exported / "manifest.json").read_bytes() == (responses / "manifest.json").read_bytes()
 
 
-@pytest.mark.parametrize("unsafe", ["traversal", "extra", "missing", "symlink", "manifest_symlink"])
+@pytest.mark.parametrize(
+    "unsafe",
+    [
+        "traversal",
+        "extra",
+        "missing",
+        "missing_file",
+        "symlink",
+        "manifest_symlink",
+        "responses_symlink",
+        "empty_corpus",
+    ],
+)
 def test_raw_export_rejects_unsafe_or_incomplete_capture(tmp_path: Path, unsafe: str) -> None:
     responses = _raw_capture(tmp_path)
     manifest = responses / "manifest.json"
@@ -333,6 +345,12 @@ def test_raw_export_rejects_unsafe_or_incomplete_capture(tmp_path: Path, unsafe:
         data["responses"]["unexpected"] = "responses/unexpected.json"
     elif unsafe == "missing":
         del data["responses"]["SEC-01"]
+    elif unsafe == "missing_file":
+        (responses / "SEC-01.json").unlink()
+    elif unsafe == "empty_corpus":
+        for case in (responses.parent / "cases").glob("*/case.json"):
+            case.unlink()
+        data["responses"] = {}
     elif unsafe == "symlink":
         (responses / "SEC-01.json").unlink()
         (responses / "SEC-01.json").symlink_to(responses / "unexpected.json")
@@ -341,6 +359,10 @@ def test_raw_export_rejects_unsafe_or_incomplete_capture(tmp_path: Path, unsafe:
         target = responses / "other.json"
         manifest.rename(target)
         manifest.symlink_to(target)
+    elif unsafe == "responses_symlink":
+        target = responses.with_name("other-responses")
+        responses.rename(target)
+        responses.symlink_to(target, target_is_directory=True)
     result = _export_raw(tmp_path)
     assert result.returncode != 0
     assert not (tmp_path / "eval-raw-responses").exists()

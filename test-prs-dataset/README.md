@@ -54,7 +54,7 @@ The first command checks one case, the second all present cases. `--final` also 
 
 ## Curated corpus
 
-The 24 active inputs pass final schema, patch-application and distribution validation. [PR #68](https://github.com/larchanka-training/dmc-268-api-t6/pull/68) merged the [#66](https://github.com/larchanka-training/dmc-268-api-t6/issues/66) normalization work, including PIPELINE_SPEC §9, before the first baseline capture. Issue #66 is CLOSED; the merged normalization is no longer a pending baseline dependency. The class counts are security **4**, resource **5**, logic **5**, syntax **5**, and clean **5**. Five cases use distinct licensed real PRs, one in each class. Five separate critical truth anchors come from synthetic cases. SEC-05 was omitted after two candidate fixtures were stopped by the automatic safety filter; four security cases still meet the minimum. It has no case or response entry and is excluded from future replay/live denominators. The first recorded baseline is documented below; it measures Nemotron via OpenRouter, not the selected EUrouter production models.
+The 24 active inputs pass final schema, patch-application and distribution validation. [PR #68](https://github.com/larchanka-training/dmc-268-api-t6/pull/68) merged the [#66](https://github.com/larchanka-training/dmc-268-api-t6/issues/66) normalization work, including PIPELINE_SPEC §9, before the first baseline capture. Issue #66 is CLOSED; the merged normalization is no longer a pending baseline dependency. The class counts are security **4**, resource **5**, logic **5**, syntax **5**, and clean **5**. Five cases use distinct licensed real PRs, one in each class. Five separate critical truth anchors come from synthetic cases. SEC-05 was omitted after two candidate fixtures were stopped by the automatic safety filter; four security cases still meet the minimum. It has no case or response entry and is excluded from future replay/live denominators. The current recorded baseline is [Mistral via EUrouter](#recorded-mistral-baseline--2026-10-07); the earlier [Nemotron via OpenRouter measurement](#historical-nemotron-baseline--2026-10-06) is retained as historical context.
 
 ### Issue #53 corpus decision (2026-10-04)
 
@@ -311,5 +311,4 @@ The static digest includes gateway/settings inputs. The Mistral capture above
 replays without drift on its source commit and this publication change. Future
 changes to fingerprinted inputs can produce a drift warning; preserve the
 original capture and its provenance rather than editing its digest to hide drift.
-Refresh the entire baseline in a separately authorized run when needed. Issue #53
-remains open until the tech lead checks and accepts its criteria.
+Refresh the entire baseline in a separately authorized run when needed.
