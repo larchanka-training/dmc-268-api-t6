@@ -46,7 +46,10 @@ SECRET_ENV = "GITHUB_WEBHOOK_SECRET"
 _BODY_PREVIEW = 200
 _HINTS = {
     401: "the script's GITHUB_WEBHOOK_SECRET differs from the server's",
-    500: "are the migrations applied (alembic upgrade head)? see the server log",
+    500: (
+        "are the migrations applied (Compose: bootstrap applies them on up; "
+        "without Compose: uv run alembic upgrade head)? see the server log"
+    ),
     503: "the server has no DATABASE_URL or an empty GITHUB_WEBHOOK_SECRET",
 }
 
@@ -205,8 +208,8 @@ def main(argv: Sequence[str] | None = None, *, send: Sender = post_delivery) -> 
         print(
             f"error: no HTTP answer from {args.url}: {error}\n"
             "hint: does --url point at the API, and is the stack up "
-            "(docker compose up -d --wait backend postgres) and migrated "
-            "(docker compose run --rm backend alembic upgrade head)?",
+            "(docker compose up -d --wait backend postgres; bootstrap applies the migrations) "
+            "or, without Compose, migrated (uv run alembic upgrade head)?",
             file=sys.stderr,
         )
         return 2
