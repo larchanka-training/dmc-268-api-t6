@@ -47,7 +47,6 @@ class SqlAlchemyRepositorySettingsStore:
             )
         self._session = session
         self._scope = scope
-        self._allow_unscoped = allow_unscoped
 
     def _visible(self) -> ColumnElement[bool]:
         return true() if self._scope is None else repository_access_predicate(self._scope)

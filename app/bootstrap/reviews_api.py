@@ -67,7 +67,6 @@ from app.modules.reviews.application.cancel_run import (
     CancellationSignals,
     CancelRun,
     CancelRunRepository,
-    CancelRunUnitOfWork,
 )
 from app.modules.reviews.application.determine_ci_eligibility import DetermineCiEligibility
 from app.modules.reviews.application.get_run import RunDetailRepository
@@ -82,7 +81,11 @@ from app.modules.reviews.application.publish_cancellation_signals import (
     PublishCancellationSignals,
 )
 from app.modules.reviews.application.rerun_run import RerunUnitOfWork
-from app.modules.reviews.application.run_events import RunAccessRepository
+from app.modules.reviews.application.run_events import (
+    InMemoryRunUpdateHub,
+    RunAccessRepository,
+    RunUpdatePublisher,
+)
 from app.modules.reviews.application.trigger_from_delivery import TriggerFromDelivery
 from app.modules.reviews.application.try_enqueue_webhook_run import (
     RunMessagePublisher,
@@ -349,27 +352,24 @@ def get_rerun_uow_factory(
     return partial(SqlAlchemyRerunUnitOfWork, _resources(request).session_factory, scope)
 
 
-def get_cancel_run_uow_factory(
-    request: Request,
-    scope: Annotated[AuthScope, Depends(get_auth_scope)],
-) -> Callable[[], CancelRunUnitOfWork] | None:
-    resources = getattr(request.app.state, "reviews_api_resources", None)
-    if not isinstance(resources, ReviewsApiResources):
-        return None
-    return partial(SqlAlchemyCancelRunUnitOfWork, resources.session_factory, scope)
+def get_run_event_hub(request: Request) -> InMemoryRunUpdateHub:
+    hub = getattr(request.app.state, "run_update_hub", None)
+    if not isinstance(hub, InMemoryRunUpdateHub):
+        raise RuntimeError("run_update_hub is not configured on app.state")
+    return hub
 
 
 def get_cancel_run(
     request: Request,
     scope: Annotated[AuthScope, Depends(get_auth_scope)],
     signals: Annotated[CancellationSignals | None, Depends(get_cancellation_signals)],
+    event_hub: Annotated[RunUpdatePublisher, Depends(get_run_event_hub)],
 ) -> CancelRun:
     resources = _resources(request)
     uow_factory = partial(SqlAlchemyCancelRunUnitOfWork, resources.session_factory, scope)
-    event_publisher = getattr(request.app.state, "run_update_hub", None)
     return CancelRun(
         uow_factory=uow_factory,
-        event_publisher=event_publisher,
+        event_publisher=event_hub,
         signals=signals,
     )
 

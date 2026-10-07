@@ -625,13 +625,21 @@ async def run_worker(
                 tasks.create_task(
                     consume(
                         run_queue,
-                        partial(handle_run_delivery, handler=process.handle_run.execute),
+                        partial(
+                            handle_run_delivery,
+                            handler=process.handle_run.execute,
+                            publisher=channels.publisher,
+                        ),
                     )
                 )
                 tasks.create_task(
                     consume(
                         publish_queue,
-                        partial(handle_publish_delivery, handler=process.publish_review.execute),
+                        partial(
+                            handle_publish_delivery,
+                            handler=process.publish_review.execute,
+                            publisher=channels.publisher,
+                        ),
                     )
                 )
                 tasks.create_task(

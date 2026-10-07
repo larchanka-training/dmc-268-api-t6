@@ -21,6 +21,7 @@ from app.modules.reviews.application.process_run import (
 )
 from app.modules.reviews.application.prompt_builder import DiffLine, ReviewRule
 from tests.portal_test_client import authenticated_test_client as TestClient
+from tests.trigger_uow import processing_uow
 
 
 class FakeDiffRepository:
@@ -361,7 +362,11 @@ def test_processed_run_persists_provider_diff_before_the_diff_api_reads_it() -> 
 
     repository = LifecycleRepository([])
 
-    asyncio.run(ReviewRunProcessor(repository, Provider()).execute(run_id))
+    asyncio.run(
+        ReviewRunProcessor(repository, Provider(), uow_factory=processing_uow(repository)).execute(
+            run_id
+        )
+    )
 
     app.dependency_overrides[get_run_repository] = lambda: repository
     try:
@@ -439,8 +444,14 @@ def test_processor_passes_active_conventions_prompt_not_the_run_system_prompt() 
                 False,
             )
 
+    empty_repository = Repository([])
     result = asyncio.run(
-        ReviewRunProcessor(Repository([]), Provider(), conventions=Conventions()).prepare(run_id)  # type: ignore[arg-type]
+        ReviewRunProcessor(
+            empty_repository,
+            Provider(),
+            conventions=Conventions(),  # type: ignore[arg-type]
+            uow_factory=processing_uow(empty_repository),
+        ).prepare(run_id)
     )
 
     assert isinstance(result, GeneratedConventions)
@@ -488,6 +499,7 @@ def test_summary_only_run_passes_no_file_paths_to_conventions() -> None:
             repository,
             Provider(),
             conventions=Conventions(),  # type: ignore[arg-type]
+            uow_factory=processing_uow(repository),
         ).prepare(run_id)
     )
     assert isinstance(result, GeneratedConventions)

@@ -265,7 +265,7 @@ def test_handler_repeated_errors_route_to_dlq_across_worker_restarts(
     assert len(channel.published) == 1
     pub1, rk1 = channel.published[0]
     assert pub1.headers["x-attempt"] == 1
-    assert pub1.headers["x-delivery-count"] == 1
+    assert "x-delivery-count" not in pub1.headers
     assert rk1 == "review.run.fast"
 
     # Worker 2 restarts (empty process state), gets redelivery
@@ -283,7 +283,7 @@ def test_handler_repeated_errors_route_to_dlq_across_worker_restarts(
     assert len(channel.published) == 2
     pub2, _ = channel.published[1]
     assert pub2.headers["x-attempt"] == 2
-    assert pub2.headers["x-delivery-count"] == 2
+    assert "x-delivery-count" not in pub2.headers
 
     # Worker 3 restarts (empty process state), gets redelivery
     # instantiated from the second republished message -> reaches attempt 3 -> DLQ!
@@ -347,8 +347,8 @@ def test_corrupted_retry_headers_log_warning(
 def test_handler_routes_to_dlq_when_broker_delivery_count_reaches_limit(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    # Message redelivered 2 times previously per broker quorum header -> this attempt is 3
-    delivery = Delivery(VALID, headers={"x-delivery-count": 2})
+    # Message redelivered 2 times previously per broker x-attempt header -> this attempt is 3
+    delivery = Delivery(VALID, headers={"x-attempt": 2})
     amqp._clear_delivery_attempts("m")
 
     async def failing_handler(run_id: UUID) -> DeliveryOutcome:
@@ -359,6 +359,37 @@ def test_handler_routes_to_dlq_when_broker_delivery_count_reaches_limit(
         asyncio.run(amqp.handle_run_delivery(incoming, failing_handler))
     assert delivery.nacked == [False] and not delivery.acked
     assert "exceeded maximum unexpected retry attempts (3); routing to DLQ" in caplog.text
+
+
+def test_republish_failure_falls_back_to_nack_requeue(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def no_sleep(seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr(asyncio, "sleep", no_sleep)
+
+    class FailingExchange:
+        async def publish(self, message: aio_pika.Message, routing_key: str = "") -> None:
+            raise RuntimeError("broker publish error")
+
+    publisher = amqp.AmqpQueuePublisher(
+        cast(aio_pika.abc.AbstractExchange, FailingExchange()),
+        cast(aio_pika.abc.AbstractExchange, FailingExchange()),
+    )
+    delivery = Delivery(VALID, message_id="err-pub")
+
+    async def failing_handler(run_id: UUID) -> DeliveryOutcome:
+        raise RuntimeError("handler failed")
+
+    asyncio.run(
+        amqp.handle_run_delivery(
+            cast(AbstractIncomingMessage, delivery), failing_handler, publisher=publisher
+        )
+    )
+
+    assert delivery.acked is False
+    assert delivery.nacked == [True]
 
 
 class _Queue:

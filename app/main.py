@@ -29,6 +29,9 @@ from app.bootstrap.reviews_api import (
     get_run_repository,
     reviews_api_lifespan,
 )
+from app.bootstrap.reviews_api import (
+    get_run_event_hub as get_run_event_hub,
+)
 from app.bootstrap.run_update_listener import run_update_listener
 from app.common.infrastructure.db.enums import RunState
 from app.modules.auth.api.router import auth_router
@@ -201,10 +204,6 @@ app.openapi = custom_openapi  # type: ignore[method-assign]
 )
 async def healthcheck() -> dict[str, str]:
     return {"status": "ok"}
-
-
-def get_run_event_hub() -> InMemoryRunUpdateHub:
-    return run_update_hub
 
 
 def get_github_webhook_secret(request: Request) -> str:

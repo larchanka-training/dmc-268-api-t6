@@ -36,7 +36,6 @@ class SqlAlchemyPullRequestQueries:
             )
         self._session_factory = session_factory
         self._scope = scope
-        self._allow_unscoped = allow_unscoped
 
     async def list_pulls(
         self, repository_id: UUID, *, state: str, cursor: RunCursor | None, limit: int

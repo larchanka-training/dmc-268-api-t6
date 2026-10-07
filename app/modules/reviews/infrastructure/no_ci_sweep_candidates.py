@@ -79,17 +79,18 @@ class SqlAlchemyDueNoCiCandidates:
             return tuple(DueNoCiCandidate(*row) for row in rows)
 
     async def exclude(self, candidate: DueNoCiCandidate) -> None:
-        async with self._session_scope() as session:
-            await session.execute(
-                update(CodeChange)
-                .where(
-                    CodeChange.id == candidate.code_change_id,
-                    CodeChange.head_sha == candidate.head_sha,
-                    CodeChange.ci_status == {},
-                )
-                .values(ci_status={"sweep": "excluded"})
+        if self._session is None:
+            raise RuntimeError("exclude() requires an active session within a Unit of Work")
+        await self._session.execute(
+            update(CodeChange)
+            .where(
+                CodeChange.id == candidate.code_change_id,
+                CodeChange.head_sha == candidate.head_sha,
+                CodeChange.ci_status == {},
             )
-            await session.flush()
+            .values(ci_status={"sweep": "excluded"})
+        )
+        await self._session.flush()
 
 
 class SqlAlchemySweepNoCiUnitOfWork(SqlAlchemyUnitOfWork):

@@ -173,6 +173,36 @@ class AmqpQueuePublisher:
     async def publish_review(self, pointer: ReviewPublishPointer) -> None:
         await self._reviews.publish(self._message(publish_message_body(pointer), 0), PUBLISH_QUEUE)
 
+    async def republish_after_error(
+        self,
+        message: AbstractIncomingMessage,
+        attempts: int,
+    ) -> None:
+        routing_key = getattr(message, "routing_key", "") or ""
+        headers = dict(getattr(message, "headers", None) or {})
+        headers["x-attempt"] = attempts
+        headers.pop("x-delivery-count", None)
+        try:
+            await self._reviews.publish(
+                aio_pika.Message(
+                    body=message.body,
+                    headers=headers,
+                    priority=getattr(message, "priority", 0) or 0,
+                    message_id=getattr(message, "message_id", None),
+                    correlation_id=getattr(message, "correlation_id", None),
+                    content_type=getattr(message, "content_type", None),
+                    delivery_mode=aio_pika.DeliveryMode.PERSISTENT,
+                ),
+                routing_key=routing_key,
+            )
+            await message.ack()
+        except Exception:
+            _LOGGER.exception(
+                "Failed to republish message %s with attempt header; falling back to nack",
+                message.message_id,
+            )
+            await message.nack(requeue=True)
+
 
 def _decode[T: BaseModel](name: str, model: type[T], message: AbstractIncomingMessage) -> T | None:
     """Contract schema first (unknown major goes to the DLQ), then the transport model."""
@@ -201,24 +231,23 @@ def _get_delivery_attempts(message: AbstractIncomingMessage) -> int:
     local_attempts = _unexpected_delivery_attempts.get(key, 0)
     broker_attempts = 0
     headers = getattr(message, "headers", None)
-    if isinstance(headers, dict):
-        for k in ("x-attempt", "x-delivery-count", "x-retries", "attempt", "delivery_attempts"):
-            if k in headers:
-                try:
-                    broker_attempts = max(broker_attempts, int(headers[k]))
-                except (ValueError, TypeError):
-                    _LOGGER.warning(
-                        "Invalid retry header %s=%r on message %s",
-                        k,
-                        headers[k],
-                        message.message_id,
-                    )
+    if isinstance(headers, dict) and "x-attempt" in headers:
+        try:
+            broker_attempts = max(broker_attempts, int(headers["x-attempt"]))
+        except (ValueError, TypeError):
+            _LOGGER.warning(
+                "Invalid retry header %s=%r on message %s",
+                "x-attempt",
+                headers["x-attempt"],
+                message.message_id,
+            )
     return max(broker_attempts, local_attempts) + 1
 
 
 async def _requeue_after_error(
     message: AbstractIncomingMessage,
     max_retries: int = MAX_UNEXPECTED_RETRIES,
+    publisher: AmqpQueuePublisher | None = None,
 ) -> None:
     key = str(message.message_id or id(message))
     attempts = _get_delivery_attempts(message)
@@ -226,8 +255,8 @@ async def _requeue_after_error(
 
     headers = getattr(message, "headers", None)
     if isinstance(headers, dict):
-        headers["x-delivery-count"] = attempts
         headers["x-attempt"] = attempts
+        headers.pop("x-delivery-count", None)
 
     if attempts >= max_retries:
         _LOGGER.error(
@@ -251,32 +280,42 @@ async def _requeue_after_error(
     # A short pause keeps a broken dependency from spinning redeliveries.
     await asyncio.sleep(1)
 
-    channel = getattr(message, "channel", None)
-    if channel is not None:
+    if publisher is not None:
+        await publisher.republish_after_error(message, attempts)
+        return
+
+    channel = None
+    try:
+        channel = getattr(message, "channel", None)
+    except Exception:
+        channel = None
+
+    if channel is not None and hasattr(channel, "get_exchange"):
         try:
             exchange_name = getattr(message, "exchange", None)
             if exchange_name:
                 exchange = await channel.get_exchange(exchange_name, ensure=False)
             else:
-                exchange = channel.default_exchange
-            routing_key = getattr(message, "routing_key", "") or ""
-            new_headers = dict(headers or {})
-            new_headers["x-delivery-count"] = attempts
-            new_headers["x-attempt"] = attempts
-            await exchange.publish(
-                aio_pika.Message(
-                    body=message.body,
-                    headers=new_headers,
-                    priority=getattr(message, "priority", 0),
-                    message_id=getattr(message, "message_id", None),
-                    correlation_id=getattr(message, "correlation_id", None),
-                    content_type=getattr(message, "content_type", None),
-                    delivery_mode=aio_pika.DeliveryMode.PERSISTENT,
-                ),
-                routing_key=routing_key,
-            )
-            await message.ack()
-            return
+                exchange = getattr(channel, "default_exchange", None)
+            if exchange is not None:
+                routing_key = getattr(message, "routing_key", "") or ""
+                new_headers = dict(headers or {})
+                new_headers["x-attempt"] = attempts
+                new_headers.pop("x-delivery-count", None)
+                await exchange.publish(
+                    aio_pika.Message(
+                        body=message.body,
+                        headers=new_headers,
+                        priority=getattr(message, "priority", 0) or 0,
+                        message_id=getattr(message, "message_id", None),
+                        correlation_id=getattr(message, "correlation_id", None),
+                        content_type=getattr(message, "content_type", None),
+                        delivery_mode=aio_pika.DeliveryMode.PERSISTENT,
+                    ),
+                    routing_key=routing_key,
+                )
+                await message.ack()
+                return
         except Exception:
             _LOGGER.exception(
                 "Failed to republish message %s with attempt header; falling back to nack",
@@ -287,7 +326,9 @@ async def _requeue_after_error(
 
 
 async def handle_run_delivery(
-    message: AbstractIncomingMessage, handler: Callable[[UUID], Awaitable[DeliveryOutcome]]
+    message: AbstractIncomingMessage,
+    handler: Callable[[UUID], Awaitable[DeliveryOutcome]],
+    publisher: AmqpQueuePublisher | None = None,
 ) -> None:
     """Unknown ``schema`` or an invalid body goes to ``reviews.dlq`` without processing (§4.4)."""
     decoded = _decode("review.run.v1", ReviewRunMessage, message)
@@ -298,7 +339,7 @@ async def handle_run_delivery(
     try:
         outcome = await handler(decoded.run_id)
     except Exception:
-        await _requeue_after_error(message)
+        await _requeue_after_error(message, publisher=publisher)
         return
     _clear_delivery_attempts(message.message_id)
     if outcome is DeliveryOutcome.DEAD_LETTER:
@@ -308,7 +349,9 @@ async def handle_run_delivery(
 
 
 async def handle_publish_delivery(
-    message: AbstractIncomingMessage, handler: Callable[[ReviewPublishPointer], Awaitable[None]]
+    message: AbstractIncomingMessage,
+    handler: Callable[[ReviewPublishPointer], Awaitable[None]],
+    publisher: AmqpQueuePublisher | None = None,
 ) -> None:
     decoded = _decode("review.publish.v1", ReviewPublishMessage, message)
     if decoded is None:
@@ -318,7 +361,7 @@ async def handle_publish_delivery(
     try:
         await handler(decoded.to_pointer())
     except Exception:
-        await _requeue_after_error(message)
+        await _requeue_after_error(message, publisher=publisher)
         return
     _clear_delivery_attempts(message.message_id)
     await message.ack()

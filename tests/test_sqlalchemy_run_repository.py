@@ -207,10 +207,7 @@ def test_sqlalchemy_run_repository_cancels_only_the_locked_target_run() -> None:
     run_id = UUID("00000000-0000-0000-0000-000000000001")
     run = SimpleNamespace(state=RunState.QUEUED, cancel_requested=False, attempt=0)
     session = CancelSession(run)
-    repository = SqlAlchemyRunRepository(
-        cast(async_sessionmaker[AsyncSession], CancelSessionFactory(session)),
-        allow_unscoped=True,
-    )
+    repository = SqlAlchemyRunRepository(allow_unscoped=True, session=cast(AsyncSession, session))
 
     result = asyncio.run(repository.request_cancel(run_id))
 
@@ -228,8 +225,7 @@ def test_sqlalchemy_run_repository_cancels_only_the_locked_target_run() -> None:
 def test_sqlalchemy_run_repository_requests_cancellation_for_active_run(state: RunState) -> None:
     run = SimpleNamespace(state=state, cancel_requested=False)
     repository = SqlAlchemyRunRepository(
-        cast(async_sessionmaker[AsyncSession], CancelSessionFactory(CancelSession(run))),
-        allow_unscoped=True,
+        allow_unscoped=True, session=cast(AsyncSession, CancelSession(run))
     )
 
     result = asyncio.run(repository.request_cancel(UUID("00000000-0000-0000-0000-000000000001")))
@@ -574,3 +570,15 @@ def test_sqlalchemy_run_repository_with_scope_correlates_repository_access() -> 
     assert "WHERE runs.id =" in sql
     assert "WHERE code_changes.id = runs.code_change_id" in sql
     assert "provider_installations.workspace_id IN" in sql
+
+
+def test_sqlalchemy_run_repository_writes_fail_fast_without_a_unit_of_work_session() -> None:
+    repository = SqlAlchemyRunRepository(
+        cast(async_sessionmaker[AsyncSession], FakeSessionFactory(FakeSession([]))),
+        allow_unscoped=True,
+    )
+
+    with pytest.raises(RuntimeError, match="request_cancel"):
+        asyncio.run(repository.request_cancel(UUID(int=1)))
+    with pytest.raises(RuntimeError, match="store_diff_snapshots"):
+        asyncio.run(repository.store_diff_snapshots(UUID(int=1), UUID(int=2), "a" * 40, []))
