@@ -346,18 +346,54 @@ paths:
       summary: Subscribe to run status changes
       description: >-
         One stream per browser tab, read with `fetch` so it carries the Bearer header. Each
-        event is `event: run.updated` with a `data:` line holding a JSON `RunUpdatedEvent`.
-        The client refetches the run it shows after an event.
+        event is `event: run.updated` with an `id:` line and a `data:` line holding a JSON
+        `RunUpdatedEvent`. The client refetches the run it shows after an event.
+
+
+        **Keep-alive.** After 15 seconds without an event the server sends a comment frame,
+        `: keepalive` followed by a blank line, so proxies keep the connection open. A comment
+        frame is not an event and carries no `id:`.
+
+
+        **Event id.** The `id:` of a `run.updated` event is an opaque string that grows with the
+        run's last change. Clients must not parse it: they keep the `id:` of the last event they
+        received and send it back as `Last-Event-ID` when they reconnect.
+
+
+        **Replay.** A reconnect with `Last-Event-ID` first receives one `run.updated` event, with
+        its `id:`, for each run of the user that changed after that id, oldest change first, and
+        then the live events. The replay reaches back 30 seconds before the id, because changes
+        can be committed out of order, so an event the client already has can arrive again; the
+        client treats events as idempotent. At most 500 runs are replayed; when more changed,
+        the 500 most recently changed are sent. Replayed events carry the run's current status,
+        not every intermediate one. A missing or unrecognised `Last-Event-ID` is ignored: no
+        replay and no error.
+
+
+        **End of stream.** The server closes the stream when the access token expires (15
+        minutes); the client obtains a new token and reconnects with `Last-Event-ID`.
       x-service: portal-api
+      parameters:
+        - name: Last-Event-ID
+          in: header
+          required: false
+          description: >-
+            The `id:` of the last event the client received on a previous connection; see
+            Replay above. An opaque string; a value the server does not recognise is ignored.
+          schema:
+            type: string
       responses:
         "200":
-          description: A never-ending Server-Sent Events stream.
+          description: >-
+            A Server-Sent Events stream of `run.updated` events and `: keepalive` comment
+            frames; it ends when the access token expires.
           content:
             text/event-stream:
               schema:
                 type: string
                 description: >-
-                  SSE frames, e.g. `event: run.updated\ndata: {"runId":"…","status":"running"}`.
+                  SSE frames, e.g.
+                  `id: 1791376496123457\nevent: run.updated\ndata: {"runId":"…","status":"running"}`.
               x-events:
                 run.updated:
                   $ref: "#/components/schemas/RunUpdatedEvent"

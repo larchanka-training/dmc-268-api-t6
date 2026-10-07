@@ -9,10 +9,11 @@ import os
 import time
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager, suppress
+from datetime import datetime, timedelta
 from typing import Annotated, Any, Literal, NoReturn
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, FastAPI, HTTPException, Path, Query, Request
+from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Path, Query, Request
 from fastapi.openapi.utils import get_openapi
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import ValidationError
@@ -119,6 +120,8 @@ from app.modules.reviews.application.run_events import (
     RunAccessRepository,
     RunUpdated,
     RunUpdateStream,
+    parse_run_event_id,
+    run_event_id,
 )
 from app.modules.reviews.application.try_enqueue_webhook_run import RunMessagePublisher
 
@@ -139,12 +142,18 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 
 KEEPALIVE_INTERVAL_SECONDS = 15.0
+# `Last-Event-ID` replay: reaches back this far before the id, because `updated_at` is the
+# transaction start time and commits can land out of order; and sends at most this many runs.
+REPLAY_OVERLAP_SECONDS = 30.0
+REPLAY_LIMIT = 500
 
 app = FastAPI(title="AI Code Reviewer browser API", lifespan=lifespan)
 app.state.run_update_hub = run_update_hub
 
 __all__ = [
     "KEEPALIVE_INTERVAL_SECONDS",
+    "REPLAY_LIMIT",
+    "REPLAY_OVERLAP_SECONDS",
     "api_router",
     "app",
     "get_cancel_run",
@@ -569,17 +578,26 @@ async def cancel_run(
     return to_run_session_dto(item)
 
 
-async def _check_run_access(repository: RunAccessRepository, run_id: UUID) -> bool:
-    if not hasattr(repository, "has_run_access"):
-        raise AttributeError(f"{type(repository).__name__} does not implement has_run_access")
-    return bool(await repository.has_run_access(run_id))
+async def _run_updated_at(repository: RunAccessRepository, run_id: UUID) -> datetime | None:
+    if not hasattr(repository, "run_updated_at"):
+        raise AttributeError(f"{type(repository).__name__} does not implement run_updated_at")
+    return await repository.run_updated_at(run_id)
+
+
+def _run_updated_frame(run_id: UUID, status: str, updated_at: datetime) -> str:
+    return (
+        f"id: {run_event_id(updated_at)}\n"
+        "event: run.updated\n"
+        f'data: {{"runId":"{run_id}","status":"{status}"}}\n\n'
+    )
 
 
 @api_router.get(
     "/stream",
     summary="Stream live run updates",
     description=(
-        "Server-Sent Events stream delivering real-time lifecycle updates for visible review runs."
+        "Server-Sent Events stream delivering real-time lifecycle updates for visible review runs. "
+        "Each event carries an id; a reconnect with `Last-Event-ID` replays the runs changed since."
     ),
     responses={
         200: {"description": "SSE stream", "content": {"text/event-stream": {}}},
@@ -590,8 +608,12 @@ async def stream_run_updates(
     event_hub: Annotated[RunUpdateStream, Depends(get_run_event_hub)],
     repository: Annotated[RunAccessRepository, Depends(get_run_repository)],
     scope: Annotated[AuthScope, Depends(get_auth_scope)],
+    last_event_id: Annotated[str | None, Header(alias="Last-Event-ID")] = None,
 ) -> StreamingResponse:
+    since = parse_run_event_id(last_event_id)
+
     async def events() -> AsyncIterator[str]:
+        # Subscribe first, so a change made while the replay runs is delivered live.
         async with event_hub.subscribe() as updates:
 
             async def _next_update() -> RunUpdated:
@@ -599,6 +621,12 @@ async def stream_run_updates(
 
             read_task: asyncio.Task[RunUpdated] | None = None
             try:
+                if since is not None and (
+                    scope.expires_at is None or time.time() < scope.expires_at
+                ):
+                    after = since - timedelta(seconds=REPLAY_OVERLAP_SECONDS)
+                    for change in await repository.runs_updated_after(after, REPLAY_LIMIT):
+                        yield _run_updated_frame(change.run_id, change.status, change.updated_at)
                 while True:
                     if scope.expires_at is not None and time.time() >= scope.expires_at:
                         break
@@ -623,12 +651,10 @@ async def stream_run_updates(
                     finally:
                         read_task = None
 
-                    if not await _check_run_access(repository, update.run_id):
+                    updated_at = await _run_updated_at(repository, update.run_id)
+                    if updated_at is None:
                         continue
-                    yield (
-                        "event: run.updated\n"
-                        f'data: {{"runId":"{update.run_id}","status":"{update.status}"}}\n\n'
-                    )
+                    yield _run_updated_frame(update.run_id, update.status, updated_at)
             finally:
                 if read_task is not None and not read_task.done():
                     read_task.cancel()

@@ -481,16 +481,34 @@ def test_stream_events_validate_against_the_declared_event_schema() -> None:
         response = authenticated_test_client(app).get("/api/stream")
     finally:
         app.dependency_overrides.clear()
-    event, data = response.text.strip().split("\n")
+    # Comment frames (`: keepalive`) carry no event; every other frame is a field per line.
+    frames = [frame for frame in response.text.split("\n\n") if frame and frame[0] != ":"]
+    fields = dict(line.split(": ", 1) for line in frames[0].split("\n"))
     media_type = _escape("text/event-stream")
     pointer = f"/paths/{_escape('/api/stream')}/get/responses/200/content/{media_type}"
 
     assert response.status_code == 200
     assert response.headers["content-type"].startswith("text/event-stream")
-    assert event == "event: run.updated"
-    _validator_at(f"{pointer}/x-events/run.updated").validate(
-        json.loads(data.removeprefix("data: "))
-    )
+    assert len(frames) == 1
+    assert fields.keys() == {"id", "event", "data"}
+    assert fields["event"] == "run.updated"
+    assert fields["id"].isdecimal()
+    _validator_at(f"{pointer}/x-events/run.updated").validate(json.loads(fields["data"]))
+
+
+def test_stream_declares_the_last_event_id_header_the_app_accepts() -> None:
+    def headers(operation: dict[str, Any]) -> list[tuple[str, bool]]:
+        return [
+            (parameter["name"].lower(), parameter.get("required", False))
+            for parameter in operation.get("parameters", [])
+            if parameter["in"] == "header"
+        ]
+
+    app_operation = app.openapi()["paths"]["/api/stream"]["get"]
+    spec_operation = _spec()["paths"]["/api/stream"]["get"]
+
+    assert headers(spec_operation) == [("last-event-id", False)]
+    assert headers(app_operation) == headers(spec_operation)
 
 
 @pytest.mark.parametrize(
