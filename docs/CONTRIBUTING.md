@@ -188,12 +188,12 @@ Push, меняющий дифф PR (новые коммиты, rebase или Upd
 
 ## 7. Что проверяет GitHub, а что держится на договорённости
 
-Ruleset `main` одинаков в обоих репо, кроме обязательных CI-проверок: в api это `Python lint / type / test`, `OpenAPI lint` и `Webhook container smoke`, в ui — `Docker image build`.
+Ruleset `main` одинаков в обоих репо, кроме обязательных CI-проверок: в api это `Python lint / type / test`, `OpenAPI lint` и `Webhook container smoke`, в ui — `Docker image build` и `UI quality`.
 
 | Правило | Как соблюдается |
 |---|---|
 | В `main` попадают только PR: без прямого push, force push и удаления ветки | ruleset |
-| Обязательные CI-проверки зелёные: в api `Python lint / type / test`, `OpenAPI lint`, `Webhook container smoke`, в ui `Docker image build` | ruleset `required_status_checks` |
+| Обязательные CI-проверки зелёные: в api `Python lint / type / test`, `OpenAPI lint`, `Webhook container smoke`, в ui `Docker image build`, `UI quality` | ruleset `required_status_checks` |
 | Ветка на текущем `main` | ruleset `strict_required_status_checks_policy` |
 | Ветка обновлена rebase, а не merge `main` в ветку | договорённость; признак — команда 5б из §2 |
 | Есть минимум один Approve, и не от автора | ruleset `required_approving_review_count: 1` + GitHub |
@@ -211,6 +211,6 @@ Ruleset `main` одинаков в обоих репо, кроме обязат�
 | Перенос карточки в Done не закрывает issue | workflow «Auto-close issue» в Project 12 выключен |
 | Статусы Todo → In Progress → On Review | вручную; Done ставит workflow «Item closed», когда issue закрыт |
 
-Решение техлида 04.10.2026 (в рамках #56): в ruleset `main` обоих репо включены «Dismiss stale pull request approvals when new commits are pushed» (`dismiss_stale_reviews_on_push`), «Require approval of the most recent reviewable push» (`require_last_push_approval`) и «Require branches to be up to date before merging» (`strict_required_status_checks_policy`); в ui обязательной стала проверка `Docker image build`, иначе требование «up to date» там не действует. В api обязательными стали также `OpenAPI lint` и `Webhook container smoke` (джобы из #60): иначе PR с красной проверкой проходил бы мерж и останавливал только выкатку на staging. В Project 12 выключен workflow «Auto-close issue», а «Item closed» оставлен. Причина: в спринте 2 PR #38 смёржен без rebase на `main`, и `main` был красным около 3 ч; PR #42 одобрен на `dcdf95d`, а смёржен после rebase и новых коммитов, в том числе коммита ревьюера, без повторного Approve. Такое правило должно проверять GitHub, а не договорённость. Цена решения: каждый push, меняющий дифф PR (новые коммиты, rebase или Update branch после изменений в `main`, в том числе после мержа чужого PR), требует нового Approve, а ревьюер, запушивший коммит в PR, одобрить его не может — нужен другой участник.
+Решение техлида 04.10.2026 (в рамках #56): в ruleset `main` обоих репо включены «Dismiss stale pull request approvals when new commits are pushed» (`dismiss_stale_reviews_on_push`), «Require approval of the most recent reviewable push» (`require_last_push_approval`) и «Require branches to be up to date before merging» (`strict_required_status_checks_policy`); в ui обязательной стала проверка `Docker image build` (с 07.10 добавлена `UI quality`, ui#73), иначе требование «up to date» там не действует. В api обязательными стали также `OpenAPI lint` и `Webhook container smoke` (джобы из #60): иначе PR с красной проверкой проходил бы мерж и останавливал только выкатку на staging. В Project 12 выключен workflow «Auto-close issue», а «Item closed» оставлен. Причина: в спринте 2 PR #38 смёржен без rebase на `main`, и `main` был красным около 3 ч; PR #42 одобрен на `dcdf95d`, а смёржен после rebase и новых коммитов, в том числе коммита ревьюера, без повторного Approve. Такое правило должно проверять GitHub, а не договорённость. Цена решения: каждый push, меняющий дифф PR (новые коммиты, rebase или Update branch после изменений в `main`, в том числе после мержа чужого PR), требует нового Approve, а ревьюер, запушивший коммит в PR, одобрить его не может — нужен другой участник.
 
 При смене техлида обновите `dismissal_restriction` в ruleset обоих репо и упоминания техлида в этом файле.
