@@ -557,7 +557,7 @@ fails on its last attempt is not in any of the three numbers: it logs its own `â
 its last attempt` WARNING. A revival that resets receipts logs how many.
 
 Retention. Finished receipts (projected, failed, or deferred and not revived since) are deleted
-30 days after they finished; the worker runs the purge once an hour. The purge is one `DELETE`
+30 days after they finished; the worker runs the purge once an hour. The receipt purge is one `DELETE`
 without a batch limit and without an index on its condition, by decision (#70): with a few
 installations the table stays small and the hourly scan is short. It counts the deleted rows
 from the statement's row count and returns no ids (no `RETURNING`), so a large purge does not
@@ -576,5 +576,23 @@ WHERE projected_at < now() - interval '30 days'
 ROLLBACK;
 ```
 
-The `Purged N finished GitHub webhook receipts` line (written only when N > 0) gives the rows
-removed per run.
+Removal effects have a separate idempotency marker per delivery in
+`github_installation_removal_effects` (`GitHubInstallationRemovalEffect`). The webhook
+receipt/idempotency infrastructure owns its model and retention; the repository adapter
+records the marker in the same transaction as disabling repositories and revoking grants.
+Receipt finalization happens separately. If finalization fails after the removal commits,
+the marker prevents replay from revoking access restored by a later OAuth reconciliation.
+
+In the same hourly purge transaction, after deleting finished receipts, the worker deletes
+markers only when `created_at < before`, using the same cutoff (the worker's current time
+minus 30 days), and no `webhook_events` row with the same `delivery_id` remains. `created_at` is a non-null, timezone-aware timestamp with
+database default `now()` and an index for the cutoff. A marker at the cutoff or newer is
+retained; an older marker is retained while any matching receipt exists, including a pending,
+leased, or recently finished receipt. An expired finished receipt and an old marker can be
+deleted together, and rollback preserves both. Marker cleanup also runs when no receipts
+were deleted. This bounds retention for orphaned markers, but does not impose an age limit
+while a receipt remains replayable. The separate OAuth revocation records in
+`github_installation_access_revocations` are not covered by this purge.
+
+The `Purged N finished GitHub webhook receipts` line (written only when N > 0) and the purge
+return count include receipts only, not removal markers.
