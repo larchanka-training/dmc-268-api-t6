@@ -182,9 +182,10 @@ Replay the committed capture without credentials or network calls:
 uv run python review/scripts/eval_replay.py
 ```
 
-The existing required `Python lint / type / test` job runs the same replay unconditionally; a missing
-manifest fails the job and writes its metrics to the job summary. Quality values
-are reported rather than used as pass thresholds. Raw response files are excluded
+The existing required `Python lint / type / test` job runs the same replay
+unconditionally. A missing manifest fails the job and writes a missing-baseline
+error to the job summary. Replay metrics are included only when a replay report
+exists. Quality values are reported rather than used as pass thresholds. Raw response files are excluded
 from whitespace and end-of-file rewriting hooks so a commit preserves exact bytes.
 
 Corpus expansion is deferred for this baseline: keep the already curated 24-case
@@ -207,8 +208,12 @@ After the workflow exists on the default branch, select **Actions → Live corpu
 evaluation → Run workflow** and choose the branch to evaluate. Leave **model**
 empty to use `vars.LLM_MODEL`, or set `mistral-small-4` and
 `mistral-small-3.2-24b` in separate runs to evaluate each selected model as primary.
-This input does not change repository variables used by staging; the fallback
-remains `vars.LLM_FALLBACK_MODEL`.
+The input overrides only the primary model and does not change repository
+variables used by staging. The fallback remains `vars.LLM_FALLBACK_MODEL`, so
+selecting `mistral-small-3.2-24b` as primary can make both profiles use the same
+model. If fallback is reached, it makes an additional call to that same model.
+This does not change the raw-first metrics: they score the first primary response,
+not repair or fallback responses.
 
 The workflow copies only `cases/` and `schema/` to the runner's temporary directory,
 validates the corpus, and records new responses there. It never replaces the
