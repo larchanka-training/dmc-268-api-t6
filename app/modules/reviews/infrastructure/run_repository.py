@@ -590,11 +590,15 @@ class SqlAlchemyReviewOutputRepository:
     async def store_review_output(
         self,
         run_id: UUID,
-        raw_output: dict[str, object],
+        model_output: dict[str, object],
         parsed: ReviewOutput,
         processed: ProcessedReviewOutput,
     ) -> ReviewPublication | None:
-        """Flush one validated answer; the use case commits it before networking."""
+        """Flush one validated answer; the use case commits it before networking.
+
+        ``model_output`` is the gateway's normalized answer (PIPELINE_SPEC §9); the raw
+        provider answer stays only in the ``llm.call`` trace.
+        """
         run = await self._session.scalar(select(Run).where(Run.id == run_id).with_for_update())
         if run is None or run.state in {RunState.SUCCEEDED, RunState.CANCELLED}:
             return None
@@ -612,7 +616,7 @@ class SqlAlchemyReviewOutputRepository:
                 )
             )
             assert index is not None
-            response, response_ref = await place_response(self._session, run_id, raw_output)
+            response, response_ref = await place_response(self._session, run_id, model_output)
             self._session.add(
                 RunAction(
                     run_id=run_id,

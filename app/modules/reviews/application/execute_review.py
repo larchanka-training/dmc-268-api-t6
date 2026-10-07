@@ -101,5 +101,5 @@ class ExecuteReviewRun:
             changed_files=prompt_input.changed_files,
             omitted_files=prompt_input.omitted_files,
         )
-        raw_output = await self._model.draft_review(context=context)
-        return await self._publisher.execute(run_id, raw_output)
+        model_output = await self._model.draft_review(context=context)
+        return await self._publisher.execute(run_id, model_output)
