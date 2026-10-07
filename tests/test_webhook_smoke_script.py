@@ -204,6 +204,7 @@ def test_main_exits_2_with_a_hint_when_the_api_is_unreachable(
     # With Compose, bootstrap migrates before backend starts: no manual step for that stack.
     assert "uv run alembic upgrade head" in err
     assert "compose run" not in err
+    assert "(docker compose logs bootstrap)" in err
     _assert_no_secret(out + err, _SECRET)
 
 
