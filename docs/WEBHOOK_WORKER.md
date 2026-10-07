@@ -119,7 +119,16 @@ reviews only with `LLM_*` set: without `LLM_MODEL` the Run takes all three attem
 
 The worker serializes each PR's event projection with a PostgreSQL session advisory lock on an
 autocommit connection and stores the result in a separate short transaction, so the GitHub call
-never spans a database transaction. `labeled` / `unlabeled` of the `ai-review` label (events sent
+never spans a database transaction. Acquisition uses `lock_timeout = 10s`
+(`SqlAlchemyPullRequestProjectionLock` in
+[`github_pull_request_projection.py`](../app/modules/reviews/infrastructure/github_pull_request_projection.py)).
+`ReceiveGitHubDelivery` applies a 240 s dispatch timeout with `asyncio.wait_for`.
+On timeout it starts cancellation and waits for cancellation to complete. The lock
+context releases the session lock in `finally` during cleanup and resets
+`lock_timeout` before returning the connection. Cancellation and DB unlock cleanup
+can extend actual lock hold time beyond 240 s; this is a dispatch timeout, not a hard
+wall-clock ceiling on lock ownership. A lock acquisition timeout
+follows the failed-dispatch retry path described below. `labeled` / `unlabeled` of the `ai-review` label (events sent
 by the App's own bot are ignored) and `synchronize`, `closed`, `reopened`, and `edited` fetch the
 current GitHub PR once while holding that lock; `opened` is applied from the payload. Label
 events and `synchronize`, `closed`, and `reopened` reconcile `ai_review_labeled` from that PR's

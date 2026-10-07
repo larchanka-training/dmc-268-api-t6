@@ -277,7 +277,14 @@ Application управляет транзакцией через [UnitOfWork](..
 
 Конкретный UoW модуля предоставляет application интерфейсы repositories; инфраструктурная
 сборка передаёт всем этим repositories одну session. Репозитории могут делать `flush`,
-но не `commit`. Application не обращается к `uow.session` — это свойство предназначено
+но не `commit`. Узкое исключение —
+[`SqlAlchemyUsageLedger.record`](../app/modules/analytics/infrastructure/usage_ledger.py):
+после завершения вызова провайдера он записывает `usage_events` в собственной короткой
+транзакции (`session_factory.begin()`), чтобы оплаченная стоимость сохранилась при
+rollback основного run. Исключение касается только этого ledger, не обычных
+repositories; транзакция по-прежнему не охватывает сетевой вызов.
+
+Application не обращается к `uow.session` — это свойство предназначено
 только для инфраструктурной сборки и её тестов. Пока конкретных repositories нет,
 реализована общая транзакционная основа, а не полный UoW каждого use case.
 

@@ -82,6 +82,10 @@ modules hold only `infrastructure/` code and `app/entrypoints/` does not exist y
 - Do not add a dependency without a line in the PR body.
 - Do not let a repository call `commit()` — only the use case commits;
   repositories only `flush()`.
+  Narrow exception: `SqlAlchemyUsageLedger.record` writes `usage_events` in its own
+  short transaction after the provider call completes, so cost survives rollback of
+  the main run. This exception does not apply to ordinary repositories and does not
+  permit network calls inside a DB transaction (.agents/rules/backend.md §3.3).
 - Do not put business logic in a router — decode the transport contract and
   call a use case.
 - Do not skip the gates (`uv run ruff check .`, `uv run ruff format --check .`,

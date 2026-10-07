@@ -47,6 +47,10 @@ infrastructure}`, `app/modules/<m>/{domain,application,infrastructure}`,
 2. Ports (interfaces) live in the module that consumes them, not the module that
    implements them.
 3. `UnitOfWork`: repositories call `flush`, never `commit` — the use case commits.
+   Narrow exception: `SqlAlchemyUsageLedger.record` writes `usage_events` in its own
+   short transaction after the provider call completes, so cost survives rollback of
+   the main run. This exception does not apply to ordinary repositories and does not
+   permit network calls inside a DB transaction.
 4. No DB transaction spans an LLM or GitHub call; network calls happen outside the
    transaction boundary.
 5. Alembic revisions are frozen: a merged revision is never edited, not even by a
@@ -58,6 +62,11 @@ infrastructure}`, `app/modules/<m>/{domain,application,infrastructure}`,
    `ck_/ix_/uq_<table>_…` names. There is no `MetaData` naming convention, so PK,
    FK and most unique constraints keep PostgreSQL's default names; introducing a
    convention is a decision of its own (it would re-prefix the existing `ck_` names).
+
+Portal repository adapters must fail closed without `AuthScope`: the constructors of
+`SqlAlchemyRunRepository`, `SqlAlchemyRerunStore`, and `SqlAlchemyRerunUnitOfWork`
+raise `ValueError`. Trusted internal callers may bypass scope only by explicitly
+passing `allow_unscoped=True`; never infer this permission from a missing scope.
 
 ## 4. Language rules
 
