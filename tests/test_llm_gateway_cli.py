@@ -28,6 +28,23 @@ SELF_HOSTED = {
 }
 
 
+CONVENTIONS_OUTPUT = {
+    "files": [
+        {"path": "app/modules/billing/application/charge.py", "relevance": "check charge flow"},
+        {"path": "app/modules/billing/infrastructure/repository.py", "relevance": "check storage"},
+        {"path": "tests/test_charge.py", "relevance": "check coverage"},
+    ],
+    "key_patterns": ["application layer", "repository layer", "pytest tests"],
+    "recommendations": [
+        "Check input validation (from: standard/security)",
+        "Check error handling (from: standard/correctness)",
+        "Check query scope (from: standard/performance)",
+        "Check names (from: standard/readability)",
+        "Check transaction ownership (from: standard/correctness)",
+    ],
+}
+
+
 def _transport(handler: Any, requests: list[httpx.Request]) -> OpenAICompatibleTransport:
     def record(request: httpx.Request) -> httpx.Response:
         requests.append(request)
@@ -71,6 +88,113 @@ def test_cli_prints_the_run_summary_for_a_self_hosted_strict_model(
     body = json.loads(requests[0].content)
     assert str(requests[0].url) == "http://localhost:11434/v1/chat/completions"
     assert body["response_format"]["json_schema"]["strict"] is True
+
+
+@pytest.mark.parametrize("model", ["primary-model", "fallback-model"])
+def test_cli_checks_conventions_strict_schema_for_each_configured_model(
+    model: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    requests: list[httpx.Request] = []
+    answer = {
+        "model": model,
+        "choices": [
+            {"message": {"content": json.dumps(CONVENTIONS_OUTPUT)}, "finish_reason": "stop"}
+        ],
+        "usage": {"prompt_tokens": 500, "completion_tokens": 300},
+    }
+
+    code = main(
+        [SAMPLE_DIFF, "--task", "conventions"],
+        env={**SELF_HOSTED, "LLM_MODEL": model},
+        transport=_transport(lambda _: httpx.Response(200, json=answer), requests),
+    )
+
+    out = json.loads(capsys.readouterr().out)
+    assert code == 0
+    assert (out["provider"], out["model"], out["files"]) == ("self-hosted", model, 3)
+    assert out["output"] == CONVENTIONS_OUTPUT
+    assert [call["kind"] for call in out["calls"]] == ["primary"]
+    assert len(requests) == 1
+    body = json.loads(requests[0].content)
+    assert body["response_format"]["json_schema"]["name"] == "RepoConventionsDraft"
+    assert body["response_format"]["json_schema"]["strict"] is True
+    assert [message["role"] for message in body["messages"]] == ["system", "user"]
+    assert "version: 2" in body["messages"][0]["content"]
+    assert "[N more repository file contexts omitted]" in body["messages"][0]["content"]
+    assert "<changed_files>" in body["messages"][1]["content"]
+
+
+def test_cli_conventions_uses_ecb_quote_for_eur_cost(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    llm_requests: list[httpx.Request] = []
+    fx_requests: list[httpx.Request] = []
+    observation_date = datetime.now(UTC).date()
+    answer = {
+        "model": "mistral-small-3.2-24b",
+        "choices": [
+            {"message": {"content": json.dumps(CONVENTIONS_OUTPUT)}, "finish_reason": "stop"}
+        ],
+        "usage": {
+            "prompt_tokens": 500,
+            "completion_tokens": 300,
+            "cost": 0.125,
+            "cost_currency": "EUR",
+        },
+    }
+
+    def respond_fx(request: httpx.Request) -> httpx.Response:
+        fx_requests.append(request)
+        return httpx.Response(
+            200,
+            text=(
+                "KEY,FREQ,CURRENCY,CURRENCY_DENOM,EXR_TYPE,EXR_SUFFIX,TIME_PERIOD,OBS_VALUE\n"
+                f"EXR.D.USD.EUR.SP00.A,D,USD,EUR,SP00,A,{observation_date},1.20\n"
+            ),
+        )
+
+    code = main(
+        [SAMPLE_DIFF, "--task", "conventions"],
+        env={"LLM_MODEL": "mistral-small-3.2-24b", "LLM_API_KEYS": "sk-test"},
+        transport=_transport(lambda _: httpx.Response(200, json=answer), llm_requests),
+        fx_transport=httpx.MockTransport(respond_fx),
+    )
+
+    out = json.loads(capsys.readouterr().out)
+    assert code == 0
+    assert out["output"] == CONVENTIONS_OUTPUT
+    assert out["cost_usd"] == "0.150000"
+    assert out["calls"][0]["fx"] == {
+        "source": "EXR.D.USD.EUR.SP00.A",
+        "observation_date": observation_date.isoformat(),
+        "rate_usd_per_eur": "1.20",
+        "stale_cache": False,
+    }
+    assert len(llm_requests) == len(fx_requests) == 1
+    assert fx_requests[0].url.host == "data-api.ecb.europa.eu"
+
+
+def test_cli_reports_conventions_validator_failure_and_repair_call_shape(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    requests: list[httpx.Request] = []
+    answer = {
+        "model": "qwen3-1.7b-16k",
+        "choices": [{"message": {"content": json.dumps({**CONVENTIONS_OUTPUT, "files": []})}}],
+        "usage": {"prompt_tokens": 500, "completion_tokens": 300},
+    }
+
+    code = main(
+        [SAMPLE_DIFF, "--task", "conventions"],
+        env=SELF_HOSTED,
+        transport=_transport(lambda _: httpx.Response(200, json=answer), requests),
+    )
+
+    out = json.loads(capsys.readouterr().out)
+    assert code == 1
+    assert out["error_code"] == "llm_invalid_output"
+    assert [call["kind"] for call in out["calls"]] == ["primary", "repair"]
+    assert len(requests) == 2
 
 
 def test_cli_reports_a_gateway_failure_with_every_call(
@@ -161,6 +285,32 @@ def test_cli_cold_cache_ecb_outage_fails_before_llm_without_config_error(
 
     code = main(
         [SAMPLE_DIFF],
+        env={"LLM_MODEL": "mistral-small-4", "LLM_API_KEYS": "sk-test"},
+        transport=_transport(lambda _: httpx.Response(200), llm_requests),
+        fx_transport=httpx.MockTransport(unavailable_fx),
+    )
+
+    out = json.loads(capsys.readouterr().out)
+    assert code == 1
+    assert out["error_code"] == "llm_unavailable"
+    assert out["calls"] == []
+    assert out["cost_usd"] == "0"
+    assert len(fx_requests) == 1
+    assert llm_requests == []
+
+
+def test_cli_conventions_cold_ecb_failure_stops_before_llm(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    llm_requests: list[httpx.Request] = []
+    fx_requests: list[httpx.Request] = []
+
+    def unavailable_fx(request: httpx.Request) -> httpx.Response:
+        fx_requests.append(request)
+        return httpx.Response(503)
+
+    code = main(
+        [SAMPLE_DIFF, "--task", "conventions"],
         env={"LLM_MODEL": "mistral-small-4", "LLM_API_KEYS": "sk-test"},
         transport=_transport(lambda _: httpx.Response(200), llm_requests),
         fx_transport=httpx.MockTransport(unavailable_fx),

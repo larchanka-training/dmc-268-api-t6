@@ -11,6 +11,7 @@ its usage recorded as soon as the call returns, outside any database transaction
 | timeout         | 1 retry after 2 s + jitter         | fallback once     |
 | 429             | 1 retry after Retry-After <= 30 s, | fallback once     |
 |                 | or 2 s + jitter without the header |                   |
+| 402             | none                               | fallback once     |
 | 5xx, connection | 2 retries after 2 s, 8 s + jitter  | fallback once     |
 | invalid answer  | 1 repair call with validator errors| fallback once     |
 |                 | (skipped if it would overflow)     |                   |
@@ -99,7 +100,11 @@ class HeuristicTokenCounter:
         self._chars_per_token = chars_per_token
 
     def count(self, text: str) -> int:
-        return math.ceil(len(text) / self._chars_per_token)
+        return self.count_length(len(text))
+
+    def count_length(self, characters: int) -> int:
+        """Exact count for any text of this length; safe for additive prompt sizing."""
+        return math.ceil(characters / self._chars_per_token)
 
 
 @dataclass(frozen=True)
@@ -439,7 +444,7 @@ class LlmGateway:
                 profile, task.operation, paid_response, estimate, price, quote, conservative=True
             )
             await self._record_paid_answer(
-                context, state, record, duration_ms, paid_response, usage
+                context, state, record, duration_ms, paid_response, usage, paid_metadata_error=True
             )
             raise self._failed(LlmErrorCode.INVALID_OUTPUT, error.message, state) from None
         except TransportError as error:
@@ -491,7 +496,9 @@ class LlmGateway:
             usage = self._usage(
                 profile, task.operation, response, estimate, price, quote, conservative=True
             )
-            await self._record_paid_answer(context, state, record, duration_ms, response, usage)
+            await self._record_paid_answer(
+                context, state, record, duration_ms, response, usage, paid_metadata_error=True
+            )
             raise self._failed(LlmErrorCode.INVALID_OUTPUT, str(error), state) from None
         await self._record_paid_answer(context, state, record, duration_ms, response, usage)
         logger.info(
@@ -515,11 +522,20 @@ class LlmGateway:
         duration_ms: int,
         response: ChatResponse,
         usage: LlmUsage,
+        *,
+        paid_metadata_error: bool = False,
     ) -> None:
         async def write_once() -> None:
             state.usage.append(usage)
             await self._ledger.record(context, usage)
-            await self._record_trace(context, record.finish(duration_ms, response=response.raw))
+            await self._record_trace(
+                context,
+                record.finish(
+                    duration_ms,
+                    response=response.raw,
+                    paid_metadata_error=paid_metadata_error,
+                ),
+            )
 
         # Once a provider has answered, a watchdog cancellation must not drop its
         # usage and raw trace. Shield a single write task and wait for it to finish.
@@ -654,7 +670,12 @@ class _RecordDraft:
     fx: FxProvenance | None = None
 
     def finish(
-        self, duration_ms: int, *, response: object = None, error: LlmCallError | None = None
+        self,
+        duration_ms: int,
+        *,
+        response: object = None,
+        error: LlmCallError | None = None,
+        paid_metadata_error: bool = False,
     ) -> LlmCallRecord:
         return LlmCallRecord(
             kind=self.kind,
@@ -670,6 +691,7 @@ class _RecordDraft:
             response=response,
             error=error,
             fx=self.fx,
+            paid_metadata_error=paid_metadata_error,
         )
 
 

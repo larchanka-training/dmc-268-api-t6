@@ -42,6 +42,7 @@ class RepositoryFile:
     path: str
     size: int
     content: str | None = None
+    omitted_lines: int = 0
 
 
 @dataclass(frozen=True)
@@ -276,19 +277,24 @@ def _bound_context_files(
 ) -> tuple[RepositoryFile, ...]:
     """Keep the model input to the selected files and its per-file line budget."""
     files_by_path = {file.path: file for file in fetched_files}
-    return tuple(
-        RepositoryFile(
-            path=file.path,
-            size=file.size,
-            content=(
-                None
-                if file.content is None
-                else "".join(file.content.splitlines(keepends=True)[:_MAX_CONTEXT_LINES])
-            ),
+    bounded: list[RepositoryFile] = []
+    for path in selected_paths:
+        file = files_by_path.get(path)
+        if file is None:
+            continue
+        if file.content is None:
+            bounded.append(file)
+            continue
+        lines = file.content.splitlines(keepends=True)
+        bounded.append(
+            RepositoryFile(
+                path=file.path,
+                size=file.size,
+                content="".join(lines[:_MAX_CONTEXT_LINES]),
+                omitted_lines=file.omitted_lines + max(0, len(lines) - _MAX_CONTEXT_LINES),
+            )
         )
-        for path in selected_paths
-        if (file := files_by_path.get(path)) is not None
-    )
+    return tuple(bounded)
 
 
 def _trace_files_for_changed_paths(paths: tuple[str, ...]) -> tuple[ConventionsFile, ...]:

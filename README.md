@@ -179,8 +179,9 @@ result.calls    # the llm.call records: kind (primary/retry/repair/fallback), mo
 ```
 
 A failure raises `ReviewCaseFailed` — an `LlmCallFailed` with `error_code` (`llm_timeout`,
-`llm_rate_limited`, `llm_unavailable`, `llm_invalid_output`, `llm_context_overflow`,
-`budget_exceeded`, `deadline_exceeded`), `usage` and `trace` (every call with its error).
+`llm_rate_limited`, `llm_unavailable`, `llm_payment_required`, `llm_invalid_output`,
+`llm_context_overflow`, `budget_exceeded`, `deadline_exceeded`), `usage` and `trace`
+(every call with its error).
 Usage and the trace live in memory; `transport=` accepts a fake.
 
 Manual live run (needs `LLM_MODEL` and `LLM_API_KEYS`; not part of the required CI) — prints
@@ -189,11 +190,17 @@ gateway failed, 2 on a configuration error. `uv run` does not read `.env` by its
 
 ```bash
 uv run --env-file .env python -m app.bootstrap.llm_gateway review/examples/sample.diff
+uv run --env-file .env python -m app.bootstrap.llm_gateway --task conventions review/examples/sample.diff
 ```
 
-On EUrouter the same run is the manual workflow `LLM live run` (`.github/workflows/llm-live-run.yml`,
-Actions → Run workflow): it uses the organization secret `AI_DMC268_T6` and writes a summary
-table per run.
+The default task validates `ReviewOutput`; `--task conventions` validates
+`RepoConventionsDraft`. On EUrouter, dispatch the manual `LLM live run` workflow
+(`.github/workflows/llm-live-run.yml`, Actions → Run workflow) with the primary model,
+fallback model and diff. It runs four checks: primary review with fallback, fallback
+review alone, primary conventions with fallback, and fallback conventions alone. The
+workflow uses the organization secret `AI_DMC268_T6` and writes a per-step summary.
+Strict D7 is confirmed for a step only when its response validates and the trace is
+exactly `calls == [primary]`; repair, retry or fallback is reported separately.
 
 For a self-hosted model in dev (LM Studio, Ollama, vLLM): `LLM_BASE_URL=http://localhost:1234/v1`,
 `LLM_MODEL=<model>`, `LLM_CONTEXT_WINDOW=<tokens>` and, if the server has no strict JSON Schema

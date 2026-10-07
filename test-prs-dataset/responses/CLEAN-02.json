@@ -1,0 +1,1 @@
+{"findings": [], "summary": {"problem": "No defect was found in this change.", "done_well": "The change uses the modern Python 3 form of super() which is equivalent and more concise.", "effort": "none"}}

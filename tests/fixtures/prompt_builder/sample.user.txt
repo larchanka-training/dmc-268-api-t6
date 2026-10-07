@@ -1,0 +1,172 @@
+<custom_instructions>
+<rule name="Billing &amp; error handling" include="app/modules/billing/**/*.py" exclude="tests/**">
+1. Preserve gateway failures &amp; transaction boundaries.
+</rule>
+</custom_instructions>
+<agents_md>
+Use application ports; keep network calls outside DB transactions.
+</agents_md>
+<repo_conventions>
+<key_patterns>
+<pattern>Use cases live in application; SQL repositories live in infrastructure.</pattern>
+</key_patterns>
+<recommendations>
+<recommendation>Use cases own transactions (from: standard/correctness)</recommendation>
+</recommendations>
+</repo_conventions>
+<pr_meta>
+<title>Add &lt;billing&gt; charge flow</title>
+<description>Introduce a charge use case &amp; repository.</description>
+<author>example-author</author>
+<source_branch>feat/billing-charge</source_branch>
+<target_branch>main</target_branch>
+<labels>backend billing &amp; payments</labels>
+<files_changed>3</files_changed>
+<lines_added>127</lines_added>
+<lines_removed>0</lines_removed>
+<draft>false</draft>
+<fork>false</fork>
+<head_sha>0123456789abcdef0123456789abcdef01234567</head_sha>
+<commit_messages>
+<commit>feat: add charge &amp; repository</commit>
+<commit>test: cover &lt;failure&gt; path</commit>
+</commit_messages>
+</pr_meta>
+<changed_files>
+<file path="app/modules/billing/application/charge.py" status="added" language="Python">
+<line n="1" type="added">"""Charge application use case."""</line>
+<line n="2" type="added"></line>
+<line n="3" type="added">from __future__ import annotations</line>
+<line n="4" type="added"></line>
+<line n="5" type="added">from dataclasses import dataclass</line>
+<line n="6" type="added">from decimal import Decimal</line>
+<line n="7" type="added">from uuid import UUID</line>
+<line n="8" type="added"></line>
+<line n="9" type="added"></line>
+<line n="10" type="added">@dataclass(frozen=True)</line>
+<line n="11" type="added">class ChargeRequest:</line>
+<line n="12" type="added">    account_id: UUID</line>
+<line n="13" type="added">    amount: Decimal</line>
+<line n="14" type="added">    currency: str</line>
+<line n="15" type="added"></line>
+<line n="16" type="added"></line>
+<line n="17" type="added">class ChargeAccount:</line>
+<line n="18" type="added">    """Charges an account through the configured payment gateway."""</line>
+<line n="19" type="added"></line>
+<line n="20" type="added">    def __init__(self, gateway, repository) -&gt; None:</line>
+<line n="21" type="added">        self._gateway = gateway</line>
+<line n="22" type="added">        self._repository = repository</line>
+<line n="23" type="added"></line>
+<line n="24" type="added">    async def execute(self, request: ChargeRequest) -&gt; UUID | None:</line>
+<line n="25" type="added">        try:</line>
+<line n="26" type="added">            receipt = await self._gateway.charge(</line>
+<line n="27" type="added">                account_id=request.account_id,</line>
+<line n="28" type="added">                amount=request.amount,</line>
+<line n="29" type="added">                currency=request.currency,</line>
+<line n="30" type="added">            )</line>
+<line n="31" type="added">        except Exception:</line>
+<line n="32" type="added">            return None</line>
+<line n="33" type="added"></line>
+<line n="34" type="added">        charge_id = await self._repository.save(request, receipt.reference)</line>
+<line n="35" type="added">        return charge_id</line>
+</file>
+<file path="app/modules/billing/infrastructure/repository.py" status="added" language="Python">
+<line n="1" type="added">"""Charge repository backed by the billing database."""</line>
+<line n="2" type="added"></line>
+<line n="3" type="added">from __future__ import annotations</line>
+<line n="4" type="added"></line>
+<line n="5" type="added">from uuid import UUID</line>
+<line n="6" type="added"></line>
+<line n="7" type="added">from sqlalchemy import select</line>
+<line n="8" type="added"></line>
+<line n="9" type="added">from app.modules.billing.infrastructure.models import ChargeRow</line>
+<line n="10" type="added"></line>
+<line n="11" type="added"></line>
+<line n="12" type="added">class ChargeRepository:</line>
+<line n="13" type="added">    """Persists and reads charge records for an account."""</line>
+<line n="14" type="added"></line>
+<line n="15" type="added">    def __init__(self, session) -&gt; None:</line>
+<line n="16" type="added">        self._session = session</line>
+<line n="17" type="added"></line>
+<line n="18" type="added">    async def save(self, request, gateway_reference: str) -&gt; UUID:</line>
+<line n="19" type="added">        row = ChargeRow(</line>
+<line n="20" type="added">            account_id=request.account_id,</line>
+<line n="21" type="added">            amount=request.amount,</line>
+<line n="22" type="added">            currency=request.currency,</line>
+<line n="23" type="added">            gateway_reference=gateway_reference,</line>
+<line n="24" type="added">        )</line>
+<line n="25" type="added">        self._session.add(row)</line>
+<line n="26" type="added">        await self._session.flush()</line>
+<line n="27" type="added">        return row.id</line>
+<line n="28" type="added"></line>
+<line n="29" type="added">    async def get_latest(self, account_id: UUID) -&gt; ChargeRow | None:</line>
+<line n="30" type="added">        """Return the latest charge recorded for the account, if any."""</line>
+<line n="31" type="added">        stmt = select(ChargeRow).where(ChargeRow.account_id == account_id)</line>
+<line n="32" type="added">        result = await self._session.execute(stmt)</line>
+<line n="33" type="added">        return result.scalars().first()</line>
+</file>
+<file path="tests/test_charge.py" status="added" language="Python">
+<line n="1" type="added">"""Tests for the ChargeAccount use case."""</line>
+<line n="2" type="added"></line>
+<line n="3" type="added">from __future__ import annotations</line>
+<line n="4" type="added"></line>
+<line n="5" type="added">import asyncio</line>
+<line n="6" type="added">from dataclasses import dataclass</line>
+<line n="7" type="added">from decimal import Decimal</line>
+<line n="8" type="added">from uuid import UUID, uuid4</line>
+<line n="9" type="added"></line>
+<line n="10" type="added">from app.modules.billing.application.charge import ChargeAccount, ChargeRequest</line>
+<line n="11" type="added"></line>
+<line n="12" type="added"></line>
+<line n="13" type="added">@dataclass</line>
+<line n="14" type="added">class FakeReceipt:</line>
+<line n="15" type="added">    reference: str</line>
+<line n="16" type="added"></line>
+<line n="17" type="added"></line>
+<line n="18" type="added">class FakeGateway:</line>
+<line n="19" type="added">    def __init__(self, receipt: FakeReceipt | None = None, fails: bool = False) -&gt; None:</line>
+<line n="20" type="added">        self._receipt = receipt</line>
+<line n="21" type="added">        self._fails = fails</line>
+<line n="22" type="added"></line>
+<line n="23" type="added">    async def charge(self, account_id: UUID, amount: Decimal, currency: str) -&gt; FakeReceipt:</line>
+<line n="24" type="added">        if self._fails:</line>
+<line n="25" type="added">            raise RuntimeError("gateway unavailable")</line>
+<line n="26" type="added">        return self._receipt</line>
+<line n="27" type="added"></line>
+<line n="28" type="added"></line>
+<line n="29" type="added">class FakeRepository:</line>
+<line n="30" type="added">    def __init__(self) -&gt; None:</line>
+<line n="31" type="added">        self.saved = []</line>
+<line n="32" type="added"></line>
+<line n="33" type="added">    async def save(self, request: ChargeRequest, gateway_reference: str) -&gt; UUID:</line>
+<line n="34" type="added">        charge_id = uuid4()</line>
+<line n="35" type="added">        self.saved.append((charge_id, request, gateway_reference))</line>
+<line n="36" type="added">        return charge_id</line>
+<line n="37" type="added"></line>
+<line n="38" type="added"></line>
+<line n="39" type="added">def test_execute_saves_charge_on_success() -&gt; None:</line>
+<line n="40" type="added">    gateway = FakeGateway(receipt=FakeReceipt(reference="ref-1"))</line>
+<line n="41" type="added">    repository = FakeRepository()</line>
+<line n="42" type="added">    use_case = ChargeAccount(gateway=gateway, repository=repository)</line>
+<line n="43" type="added">    request = ChargeRequest(account_id=uuid4(), amount=Decimal("10.00"), currency="USD")</line>
+<line n="44" type="added"></line>
+<line n="45" type="added">    charge_id = asyncio.run(use_case.execute(request))</line>
+<line n="46" type="added"></line>
+<line n="47" type="added">    assert charge_id is not None</line>
+<line n="48" type="added">    assert repository.saved[0][2] == "ref-1"</line>
+<line n="49" type="added"></line>
+<line n="50" type="added"></line>
+<line n="51" type="added">def test_execute_returns_none_when_gateway_fails() -&gt; None:</line>
+<line n="52" type="added">    gateway = FakeGateway(fails=True)</line>
+<line n="53" type="added">    repository = FakeRepository()</line>
+<line n="54" type="added">    use_case = ChargeAccount(gateway=gateway, repository=repository)</line>
+<line n="55" type="added">    request = ChargeRequest(account_id=uuid4(), amount=Decimal("5.00"), currency="USD")</line>
+<line n="56" type="added"></line>
+<line n="57" type="added">    charge_id = asyncio.run(use_case.execute(request))</line>
+<line n="58" type="added"></line>
+<line n="59" type="added">    assert charge_id is None</line>
+</file>
+</changed_files>
+<omitted_files>
+
+</omitted_files>

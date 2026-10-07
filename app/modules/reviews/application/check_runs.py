@@ -13,6 +13,7 @@ from app.modules.reviews.application.verdict import SEVERITIES
 _ERROR_TEXTS = {
     "llm_timeout": "Модель не ответила вовремя. Прогон можно перезапустить из UI.",
     "llm_rate_limited": "Провайдер модели ограничил частоту запросов. Перезапустите прогон позже.",
+    "llm_payment_required": "AI-ревью временно недоступно.",
     "llm_unavailable": "Провайдер модели недоступен.",
     "llm_invalid_output": "Модель вернула ответ не по контракту.",
     "llm_context_overflow": "PR не помещается в контекст модели.",
@@ -95,12 +96,12 @@ def check_run_view(report: CheckRunReport) -> CheckRunView:
         )
     reason = _ERROR_TEXTS.get(report.error_code or "", report.error_code or "")
     if report.state == "failed":
-        return CheckRunView(
-            "completed",
-            "neutral",
-            "AI-ревью не выполнено",
-            f"`{report.error_code}`: {reason}{link}",
+        summary = (
+            f"{reason}{link}"
+            if report.error_code == "llm_payment_required"
+            else f"`{report.error_code}`: {reason}{link}"
         )
+        return CheckRunView("completed", "neutral", "AI-ревью не выполнено", summary)
     if report.state == "cancelled":
         return CheckRunView("completed", "cancelled", "AI-ревью отменено", reason)
     return CheckRunView("completed", "skipped", "AI-ревью пропущено", reason)

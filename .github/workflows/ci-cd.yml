@@ -203,19 +203,17 @@ jobs:
           corpus_report="${RUNNER_TEMP}/corpus-report.json"
           replay_report="${RUNNER_TEMP}/replay-report.json"
           uv run python review/scripts/validate_dataset.py --final --report-json "${corpus_report}"
-          if [[ -f test-prs-dataset/responses/manifest.json ]]; then
-            uv run python review/scripts/eval_replay.py --report-json "${replay_report}"
-          fi
+          replay_status=0
+          uv run python review/scripts/eval_replay.py --report-json "${replay_report}" || replay_status=$?
           CORPUS_REPORT="${corpus_report}" REPLAY_REPORT="${replay_report}" uv run python - <<'PYTHON'
           import json
           import os
           from pathlib import Path
 
+          from review.scripts.eval_replay import format_console
+
           corpus = json.loads(Path(os.environ["CORPUS_REPORT"]).read_text(encoding="utf-8"))
           replay_path = Path(os.environ["REPLAY_REPORT"])
-
-          def percent(value):
-              return "undefined" if value is None else f"{value * 100:.1f}%"
 
           with Path(os.environ["GITHUB_STEP_SUMMARY"]).open("a", encoding="utf-8") as summary:
               summary.write("## Gold benchmark\n\n")
@@ -225,19 +223,17 @@ jobs:
               )
               if replay_path.is_file():
                   replay = json.loads(replay_path.read_text(encoding="utf-8"))
-                  summary.write(
-                      f"Recorded replay ({replay['provenance']['model_id']}): "
-                      f"Validity {percent(replay['validity'])}, "
-                      f"micro Precision {percent(replay['micro']['precision'])}, "
-                      f"micro Recall {percent(replay['micro']['recall'])}, "
-                      f"Critical Recall {percent(replay['critical']['recall'])}.\n"
-                  )
+                  summary.write("Recorded replay:\n\n```text\n")
+                  summary.write(format_console(replay))
+                  summary.write("\n```\n\n")
                   for warning in replay["warnings"]:
                       print(f"::warning::{warning}")
-                      summary.write(f"\n> [!WARNING]\n> {warning}\n")
+              elif not Path("test-prs-dataset/responses/manifest.json").is_file():
+                  summary.write("Recorded replay failed: baseline manifest is missing.\n")
               else:
-                  summary.write("Recorded replay: pending baseline responses and manifest.\n")
+                  summary.write("Recorded replay failed; no report was produced.\n")
           PYTHON
+          exit "$replay_status"
 
       - name: Integration suite (zero skips)
         run: |

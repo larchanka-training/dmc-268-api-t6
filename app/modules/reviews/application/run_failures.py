@@ -1,4 +1,8 @@
-"""Run failure classes, retry policy and attempt limits (docs/PIPELINE_SPEC.md §3, §4, §6)."""
+"""Classify Run attempt failures and choose delays for retryable queue messages.
+
+Only codes in ``RETRYABLE_ERROR_CODES`` can enter T9 before ``MAX_ATTEMPTS``;
+``llm_payment_required`` and ``budget_exceeded`` are terminal codes.
+"""
 
 from __future__ import annotations
 
@@ -20,6 +24,7 @@ RETRYABLE_ERROR_CODES = frozenset(
 KNOWN_ERROR_CODES = RETRYABLE_ERROR_CODES | {
     "llm_invalid_output",
     "llm_context_overflow",
+    "llm_payment_required",
     "budget_exceeded",
     "deadline_exceeded",
     "github_forbidden",
@@ -38,7 +43,7 @@ def cancellation_reason(*, pr_open: bool, head_current: bool, cancel_requested: 
 
 
 class RunFailure(Exception):
-    """A failed attempt with an ``error_code`` from the §6 catalog."""
+    """An attempt error carrying a code; ``classify_failure`` checks external codes."""
 
     def __init__(
         self, error_code: str, message: str = "", *, retry_after: timedelta | None = None
@@ -56,9 +61,8 @@ class RunCancelled(Exception):
 def classify_failure(exc: BaseException) -> RunFailure:
     """Map an attempt exception to its catalog code; unknown errors are ``internal_error``.
 
-    The LLM gateway (#33) raises errors carrying a catalog ``error_code`` attribute; the
-    worker accepts any exception with such an attribute so the gateway needs no import
-    of this module.
+    Preserve recognized ``error_code`` values from gateway errors; unknown or
+    absent codes become ``internal_error``.
     """
     if isinstance(exc, RunFailure):
         return exc
@@ -72,14 +76,17 @@ def classify_failure(exc: BaseException) -> RunFailure:
 
 @dataclass(frozen=True)
 class RetryDelays:
-    """Delays of the retry queues; tests shorten them, queue TTLs use the same values."""
+    """Queue delays shared by T9 scheduling and RabbitMQ retry TTLs."""
 
     short: timedelta = timedelta(seconds=30)
     medium: timedelta = timedelta(minutes=2)
     long: timedelta = timedelta(minutes=10)
 
     def for_failure(self, attempt: int, failure: RunFailure) -> tuple[str, timedelta]:
-        """Return the retry queue key (``30s``, ``2m``, ``10m``) and delay for T9 (§4.2)."""
+        """Choose 10m for a long Retry-After, 2m for limits/later attempts, else 30s.
+
+        The caller checks retryability and the attempt cap before using this method.
+        """
         rate_limited = failure.error_code == "llm_rate_limited" or failure.retry_after is not None
         if rate_limited and failure.retry_after is not None and failure.retry_after > self.medium:
             return "10m", self.long

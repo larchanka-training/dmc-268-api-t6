@@ -1,7 +1,7 @@
-"""LLM gateway configuration: model profiles from env, failure policy from PIPELINE_SPEC.
+"""LLM gateway model profiles and code-defined call policy.
 
-EUrouter and a self-hosted server (LM Studio, Ollama, vLLM) are both OpenAI-compatible,
-so a provider is only a base URL, a model and a list of keys (docs/SECRETS.md).
+Environment variables select OpenAI-compatible endpoints, models, keys, output mode,
+limits and prices. ``GatewayPolicy`` supplies retry and budget defaults in code.
 """
 
 from __future__ import annotations
@@ -99,11 +99,13 @@ class LlmSettings:
     def from_env(cls, env: Mapping[str, str]) -> LlmSettings:
         """Read ``LLM_*`` (primary) and ``LLM_FALLBACK_*`` (fallback) variables.
 
-        A known fallback model keeps its own endpoint; an unknown one without
-        ``LLM_FALLBACK_BASE_URL`` uses the primary's. Keys, provider and output mode are
-        inherited only on the primary's endpoint, never sent to another host.
-        The prompt-JSON path is refused unless ``LLM_ALLOW_PROMPT_JSON=1``:
-        it exists for local and self-hosted models in dev and eval only (D7).
+        A known fallback model defaults to its catalog endpoint unless
+        ``LLM_FALLBACK_BASE_URL`` explicitly overrides it; an unknown fallback
+        without that override uses the primary endpoint. A fallback
+        inherits keys, provider and output mode only when its endpoint matches the
+        primary's; explicit fallback values override inheritance. ``prompt_json``
+        requires ``LLM_ALLOW_PROMPT_JSON=1``. That flag is intended for development
+        and evaluation; this parser does not restrict it by endpoint or environment.
         """
         allow_prompt_json = env.get("LLM_ALLOW_PROMPT_JSON", "") == "1"
         primary = _profile_from_env(env, "LLM_", None, allow_prompt_json)
@@ -249,7 +251,8 @@ def _profile_from_env(
         raw = env.get(f"{prefix}{name}")
         return raw if raw else None
 
-    # A known model keeps its own endpoint; only an unknown one inherits the primary's.
+    # Explicit BASE_URL wins; otherwise a known model uses its catalog endpoint.
+    # Only an unknown fallback inherits the primary endpoint.
     explicit_url = value("BASE_URL")
     if explicit_url is not None:
         base_url = explicit_url.rstrip("/")

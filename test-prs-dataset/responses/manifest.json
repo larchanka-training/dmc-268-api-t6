@@ -1,0 +1,316 @@
+{
+  "corpus_digest": "sha256-v1:1ab8ca9a16cc50c357b39e1571c73b1e6674752737c444bd8b58d3f2aab81dfa",
+  "model_id": "nvidia/nemotron-3-super-120b-a12b:free",
+  "prompt_path": "review/prompts/review.system.v2.md",
+  "prompt_sha": "9177e358c23d1a7cd8987cbf667cf8b705c2afb27eaf8b2237480e4531431d75",
+  "prompt_version": "v2",
+  "responses": {
+    "CLEAN-01": "responses/CLEAN-01.json",
+    "CLEAN-02": "responses/CLEAN-02.json",
+    "CLEAN-03": "responses/CLEAN-03.json",
+    "CLEAN-04": "responses/CLEAN-04.json",
+    "CLEAN-05": "responses/CLEAN-05.json",
+    "LOG-01": "responses/LOG-01.json",
+    "LOG-02": "responses/LOG-02.json",
+    "LOG-03": "responses/LOG-03.json",
+    "LOG-04": "responses/LOG-04.json",
+    "LOG-05": "responses/LOG-05.json",
+    "RES-01": "responses/RES-01.json",
+    "RES-02": "responses/RES-02.json",
+    "RES-03": "responses/RES-03.json",
+    "RES-04": "responses/RES-04.json",
+    "RES-05": "responses/RES-05.json",
+    "SEC-01": "responses/SEC-01.json",
+    "SEC-02": "responses/SEC-02.json",
+    "SEC-03": "responses/SEC-03.json",
+    "SEC-04": "responses/SEC-04.json",
+    "SYN-01": "responses/SYN-01.json",
+    "SYN-02": "responses/SYN-02.json",
+    "SYN-03": "responses/SYN-03.json",
+    "SYN-04": "responses/SYN-04.json",
+    "SYN-05": "responses/SYN-05.json"
+  },
+  "run_metadata": {
+    "baseline_publishable": true,
+    "cases": {
+      "CLEAN-01": {
+        "first_call": "answer",
+        "first_kind": "primary",
+        "first_model": "nvidia/nemotron-3-super-120b-a12b:free",
+        "first_provider_digest": "sha256-v1:6903649630881d2de78976de011006c49db83b4b727e184cce5ae1171124e7ba",
+        "first_provider_label": "custom",
+        "gateway_status": "accepted",
+        "paid_metadata_error": false
+      },
+      "CLEAN-02": {
+        "first_call": "answer",
+        "first_kind": "primary",
+        "first_model": "nvidia/nemotron-3-super-120b-a12b:free",
+        "first_provider_digest": "sha256-v1:6903649630881d2de78976de011006c49db83b4b727e184cce5ae1171124e7ba",
+        "first_provider_label": "custom",
+        "gateway_status": "accepted",
+        "paid_metadata_error": false
+      },
+      "CLEAN-03": {
+        "first_call": "empty_answer",
+        "first_kind": "primary",
+        "first_model": "nvidia/nemotron-3-super-120b-a12b:free",
+        "first_provider_digest": "sha256-v1:6903649630881d2de78976de011006c49db83b4b727e184cce5ae1171124e7ba",
+        "first_provider_label": "custom",
+        "gateway_status": "accepted",
+        "paid_metadata_error": false
+      },
+      "CLEAN-04": {
+        "first_call": "answer",
+        "first_kind": "primary",
+        "first_model": "nvidia/nemotron-3-super-120b-a12b:free",
+        "first_provider_digest": "sha256-v1:6903649630881d2de78976de011006c49db83b4b727e184cce5ae1171124e7ba",
+        "first_provider_label": "custom",
+        "gateway_status": "accepted",
+        "paid_metadata_error": false
+      },
+      "CLEAN-05": {
+        "first_call": "answer",
+        "first_kind": "primary",
+        "first_model": "nvidia/nemotron-3-super-120b-a12b:free",
+        "first_provider_digest": "sha256-v1:6903649630881d2de78976de011006c49db83b4b727e184cce5ae1171124e7ba",
+        "first_provider_label": "custom",
+        "gateway_status": "accepted",
+        "paid_metadata_error": false
+      },
+      "LOG-01": {
+        "first_call": "answer",
+        "first_kind": "primary",
+        "first_model": "nvidia/nemotron-3-super-120b-a12b:free",
+        "first_provider_digest": "sha256-v1:6903649630881d2de78976de011006c49db83b4b727e184cce5ae1171124e7ba",
+        "first_provider_label": "custom",
+        "gateway_status": "accepted",
+        "paid_metadata_error": false
+      },
+      "LOG-02": {
+        "first_call": "empty_answer",
+        "first_kind": "primary",
+        "first_model": "nvidia/nemotron-3-super-120b-a12b:free",
+        "first_provider_digest": "sha256-v1:6903649630881d2de78976de011006c49db83b4b727e184cce5ae1171124e7ba",
+        "first_provider_label": "custom",
+        "gateway_status": "accepted",
+        "paid_metadata_error": false
+      },
+      "LOG-03": {
+        "first_call": "answer",
+        "first_kind": "primary",
+        "first_model": "nvidia/nemotron-3-super-120b-a12b:free",
+        "first_provider_digest": "sha256-v1:6903649630881d2de78976de011006c49db83b4b727e184cce5ae1171124e7ba",
+        "first_provider_label": "custom",
+        "gateway_status": "llm_invalid_output",
+        "paid_metadata_error": false
+      },
+      "LOG-04": {
+        "first_call": "answer",
+        "first_kind": "primary",
+        "first_model": "nvidia/nemotron-3-super-120b-a12b:free",
+        "first_provider_digest": "sha256-v1:6903649630881d2de78976de011006c49db83b4b727e184cce5ae1171124e7ba",
+        "first_provider_label": "custom",
+        "gateway_status": "accepted",
+        "paid_metadata_error": false
+      },
+      "LOG-05": {
+        "first_call": "answer",
+        "first_kind": "primary",
+        "first_model": "nvidia/nemotron-3-super-120b-a12b:free",
+        "first_provider_digest": "sha256-v1:6903649630881d2de78976de011006c49db83b4b727e184cce5ae1171124e7ba",
+        "first_provider_label": "custom",
+        "gateway_status": "accepted",
+        "paid_metadata_error": false
+      },
+      "RES-01": {
+        "first_call": "answer",
+        "first_kind": "primary",
+        "first_model": "nvidia/nemotron-3-super-120b-a12b:free",
+        "first_provider_digest": "sha256-v1:6903649630881d2de78976de011006c49db83b4b727e184cce5ae1171124e7ba",
+        "first_provider_label": "custom",
+        "gateway_status": "accepted",
+        "paid_metadata_error": false
+      },
+      "RES-02": {
+        "first_call": "answer",
+        "first_kind": "primary",
+        "first_model": "nvidia/nemotron-3-super-120b-a12b:free",
+        "first_provider_digest": "sha256-v1:6903649630881d2de78976de011006c49db83b4b727e184cce5ae1171124e7ba",
+        "first_provider_label": "custom",
+        "gateway_status": "accepted",
+        "paid_metadata_error": false
+      },
+      "RES-03": {
+        "first_call": "empty_answer",
+        "first_kind": "primary",
+        "first_model": "nvidia/nemotron-3-super-120b-a12b:free",
+        "first_provider_digest": "sha256-v1:6903649630881d2de78976de011006c49db83b4b727e184cce5ae1171124e7ba",
+        "first_provider_label": "custom",
+        "gateway_status": "accepted",
+        "paid_metadata_error": false
+      },
+      "RES-04": {
+        "first_call": "answer",
+        "first_kind": "primary",
+        "first_model": "nvidia/nemotron-3-super-120b-a12b:free",
+        "first_provider_digest": "sha256-v1:6903649630881d2de78976de011006c49db83b4b727e184cce5ae1171124e7ba",
+        "first_provider_label": "custom",
+        "gateway_status": "accepted",
+        "paid_metadata_error": false
+      },
+      "RES-05": {
+        "first_call": "answer",
+        "first_kind": "primary",
+        "first_model": "nvidia/nemotron-3-super-120b-a12b:free",
+        "first_provider_digest": "sha256-v1:6903649630881d2de78976de011006c49db83b4b727e184cce5ae1171124e7ba",
+        "first_provider_label": "custom",
+        "gateway_status": "accepted",
+        "paid_metadata_error": false
+      },
+      "SEC-01": {
+        "first_call": "answer",
+        "first_kind": "primary",
+        "first_model": "nvidia/nemotron-3-super-120b-a12b:free",
+        "first_provider_digest": "sha256-v1:6903649630881d2de78976de011006c49db83b4b727e184cce5ae1171124e7ba",
+        "first_provider_label": "custom",
+        "gateway_status": "accepted",
+        "paid_metadata_error": false
+      },
+      "SEC-02": {
+        "first_call": "empty_answer",
+        "first_kind": "primary",
+        "first_model": "nvidia/nemotron-3-super-120b-a12b:free",
+        "first_provider_digest": "sha256-v1:6903649630881d2de78976de011006c49db83b4b727e184cce5ae1171124e7ba",
+        "first_provider_label": "custom",
+        "gateway_status": "accepted",
+        "paid_metadata_error": false
+      },
+      "SEC-03": {
+        "first_call": "empty_answer",
+        "first_kind": "primary",
+        "first_model": "nvidia/nemotron-3-super-120b-a12b:free",
+        "first_provider_digest": "sha256-v1:6903649630881d2de78976de011006c49db83b4b727e184cce5ae1171124e7ba",
+        "first_provider_label": "custom",
+        "gateway_status": "accepted",
+        "paid_metadata_error": false
+      },
+      "SEC-04": {
+        "first_call": "no_content",
+        "first_kind": "primary",
+        "first_model": "nvidia/nemotron-3-super-120b-a12b:free",
+        "first_provider_digest": null,
+        "first_provider_label": null,
+        "gateway_status": "accepted",
+        "paid_metadata_error": false
+      },
+      "SYN-01": {
+        "first_call": "answer",
+        "first_kind": "primary",
+        "first_model": "nvidia/nemotron-3-super-120b-a12b:free",
+        "first_provider_digest": "sha256-v1:6903649630881d2de78976de011006c49db83b4b727e184cce5ae1171124e7ba",
+        "first_provider_label": "custom",
+        "gateway_status": "accepted",
+        "paid_metadata_error": false
+      },
+      "SYN-02": {
+        "first_call": "answer",
+        "first_kind": "primary",
+        "first_model": "nvidia/nemotron-3-super-120b-a12b:free",
+        "first_provider_digest": "sha256-v1:6903649630881d2de78976de011006c49db83b4b727e184cce5ae1171124e7ba",
+        "first_provider_label": "custom",
+        "gateway_status": "accepted",
+        "paid_metadata_error": false
+      },
+      "SYN-03": {
+        "first_call": "answer",
+        "first_kind": "primary",
+        "first_model": "nvidia/nemotron-3-super-120b-a12b:free",
+        "first_provider_digest": "sha256-v1:6903649630881d2de78976de011006c49db83b4b727e184cce5ae1171124e7ba",
+        "first_provider_label": "custom",
+        "gateway_status": "accepted",
+        "paid_metadata_error": false
+      },
+      "SYN-04": {
+        "first_call": "answer",
+        "first_kind": "primary",
+        "first_model": "nvidia/nemotron-3-super-120b-a12b:free",
+        "first_provider_digest": "sha256-v1:6903649630881d2de78976de011006c49db83b4b727e184cce5ae1171124e7ba",
+        "first_provider_label": "custom",
+        "gateway_status": "accepted",
+        "paid_metadata_error": false
+      },
+      "SYN-05": {
+        "first_call": "answer",
+        "first_kind": "primary",
+        "first_model": "nvidia/nemotron-3-super-120b-a12b:free",
+        "first_provider_digest": "sha256-v1:6903649630881d2de78976de011006c49db83b4b727e184cce5ae1171124e7ba",
+        "first_provider_label": "custom",
+        "gateway_status": "accepted",
+        "paid_metadata_error": false
+      }
+    },
+    "effective_settings": {
+      "fallback": null,
+      "policy": {
+        "call_timeout_s": 90.0,
+        "input_token_limit": 60000,
+        "max_calls_per_attempt": 4,
+        "max_jitter_s": 1.0,
+        "max_retry_after_s": 30.0,
+        "rate_limit_default_delay_s": 2.0,
+        "run_cost_limit_usd": "0.5",
+        "timeout_retry_delays_s": [
+          2.0
+        ],
+        "unavailable_retry_delays_s": [
+          2.0,
+          8.0
+        ]
+      },
+      "primary": {
+        "chars_per_token": 3.0,
+        "context_window": 262144,
+        "endpoint_digest": "sha256-v1:3ca4e2c12c69c88b45fda3f85f8672b6ccaaf3f23ab16445df0dff94e2090526",
+        "extra_body_digest": "sha256-v1:d751c4e009ff68eaf68d721b6caf8ab262b35962f15e93840b0cc5e8933856e8",
+        "input_budget_tokens": 51808,
+        "max_output_tokens": 8192,
+        "model_id": "nvidia/nemotron-3-super-120b-a12b:free",
+        "price_usd_per_mtok": {
+          "cache_read": "0",
+          "input": "0",
+          "output": "0"
+        },
+        "provider_digest": "sha256-v1:5044b4f1c460e88a5fb9af9debfee5ecbbdd846289e93635ba781251ed4ba231",
+        "provider_label": "custom",
+        "structured_output": "json_schema"
+      }
+    },
+    "engine": "fast",
+    "fallback_model_id": null,
+    "nonpublishable_case_ids": [],
+    "recorded_at": "2026-10-06T20:43:54.136922Z"
+  },
+  "schema_version": 1,
+  "static_digest": "sha256-v1:1613fe1f343f28e5134335c1ab95af0b0aff53035f364c4666251d08e35b2024",
+  "static_inputs": [
+    "app/bootstrap/llm_gateway.py",
+    "app/common/application/languages.py",
+    "app/modules/reviews/application/llm.py",
+    "app/modules/reviews/application/prompt_budget.py",
+    "app/modules/reviews/application/prompt_builder.py",
+    "app/modules/reviews/application/review_output.py",
+    "app/modules/reviews/application/run_failures.py",
+    "app/modules/reviews/infrastructure/llm/answers.py",
+    "app/modules/reviews/infrastructure/llm/gateway.py",
+    "app/modules/reviews/infrastructure/llm/models.py",
+    "app/modules/reviews/infrastructure/llm/settings.py",
+    "app/modules/reviews/infrastructure/llm/transport.py",
+    "review/prompts/review.system.v2.md",
+    "review/rules/default-backend.v1.json",
+    "review/rules/default-frontend.v1.json",
+    "review/rules/schema.json",
+    "review/schemas/review-output.schema.json",
+    "review/scripts/eval_live.py"
+  ]
+}

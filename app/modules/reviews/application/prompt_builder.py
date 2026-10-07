@@ -227,19 +227,23 @@ class PromptBuilder:
 
     @staticmethod
     def _render_changed_files(files: tuple[ChangedFile, ...]) -> str:
-        rendered = []
-        for file in files:
-            body = [
-                f'<line n="{line.number}" type="{line.type}">{_text(line.content)}</line>'
-                for line in file.lines
-            ]
-            if file.total_lines is not None and file.total_lines > len(file.lines):
-                body.append(truncation_trailer(len(file.lines), file.total_lines))
-            attributes = f'path="{_attribute(file.path)}" status="{file.status}"'
-            if file.language is not None:
-                attributes += f' language="{_attribute(file.language)}"'
-            rendered.append(f"<file {attributes}>\n" + "\n".join(body) + "\n</file>")
-        return _container("changed_files", "\n".join(rendered))
+        return _container("changed_files", "\n".join(render_changed_file(file) for file in files))
+
+
+def render_changed_line(line: DiffLine) -> str:
+    """Render one diff line for both the prompt and its exact length budget."""
+    return f'<line n="{line.number}" type="{line.type}">{_text(line.content)}</line>'
+
+
+def render_changed_file(file: ChangedFile) -> str:
+    """Render one changed-file block for the prompt and length accounting."""
+    body = [render_changed_line(line) for line in file.lines]
+    if file.total_lines is not None and file.total_lines > len(file.lines):
+        body.append(truncation_trailer(len(file.lines), file.total_lines))
+    attributes = f'path="{_attribute(file.path)}" status="{file.status}"'
+    if file.language is not None:
+        attributes += f' language="{_attribute(file.language)}"'
+    return f"<file {attributes}>\n" + "\n".join(body) + "\n</file>"
 
 
 def _shorten(message: str) -> str:

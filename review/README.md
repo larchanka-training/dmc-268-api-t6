@@ -14,6 +14,7 @@ immutable — a file with a version in its name is never edited — and served f
 | `prompts/review.system.v1.md`           | review prompt: order, filters, attribution, output  |
 | `prompts/review.system.v2.md`           | v1 + input metadata and three few-shot examples     |
 | `prompts/review.conventions.v1.md`      | pre-review prompt: repository patterns, review plan |
+| `prompts/review.conventions.v2.md`      | v1 + explicit counts for omitted input context    |
 | `rules/schema.json`                     | JSON Schema (draft 2020-12) of a custom rule set    |
 | `rules/default-frontend.v1.json`        | default rules for a Vite/React/TypeScript repo      |
 | `rules/default-backend.v1.json`         | default rules for a FastAPI/SQLAlchemy repo         |
@@ -76,7 +77,10 @@ run of a repository, the diff is the varying tail (`docs/SYSTEM_DESIGN.md` §10)
 - `<omitted_files>` — changed paths not shown to the model, one per line.
 - `<repo_tree>`, `<repo_files>` — conventions prompt only: all paths, and up to 10 files of
   at most 300 lines as `<file path="…">` blocks with pre-numbered lines. A tree over the
-  token budget is cut from its end and closed with `[N more paths omitted]`.
+  token budget is cut from its end and closed with `[N more paths omitted]`. In v2,
+  `<repo_files>` also ends with `[N more repository file contexts omitted]` for tree files
+  with no shown content, including unselected or unavailable files. A truncated `<file>`
+  ends with `[N more lines omitted]`. Counts describe source input; markers are never paths.
 
 Rendered custom rule — one block per rule, globs space-separated, checks numbered from 1;
 this example is the second rule of `rules/default-backend.v1.json`, checks shortened:

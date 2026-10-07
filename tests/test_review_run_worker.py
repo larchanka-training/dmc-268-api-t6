@@ -30,6 +30,7 @@ from app.modules.reviews.application.handle_review_run import (
     HandleReviewRun,
     RunGuardSnapshot,
 )
+from app.modules.reviews.application.llm import LlmCallFailed, LlmErrorCode
 from app.modules.reviews.application.prompt_builder import ReviewContext
 from app.modules.reviews.application.review_output import InvalidReviewOutput
 from app.modules.reviews.application.run_failures import (
@@ -491,6 +492,48 @@ def test_gateway_deadline_exceeded_fails_without_retry() -> None:
 
     assert outcome is DeliveryOutcome.ACK
     assert (run.state, run.error_code) == ("failed", "deadline_exceeded")
+
+
+def test_payment_required_fails_run_after_one_attempt_without_retry() -> None:
+    run = FakeRun()
+    retry = RetryQueue()
+    check_runs = CheckRuns()
+
+    def failing(claimed: ClaimedAttempt) -> bool:
+        raise LlmCallFailed(LlmErrorCode.PAYMENT_REQUIRED, "HTTP 402: account has no credits")
+
+    outcome = asyncio.run(handler(run, failing, retry=retry, check_runs=check_runs).execute(RUN))
+
+    assert outcome is DeliveryOutcome.ACK
+    assert (run.state, run.error_code, run.attempt) == ("failed", "llm_payment_required", 1)
+    assert retry.published == []
+    assert (check_runs.views[-1].status, check_runs.views[-1].conclusion) == (
+        "completed",
+        "neutral",
+    )
+    assert check_runs.views[-1].summary == "AI-ревью временно недоступно."
+
+
+def test_payment_required_check_run_keeps_neutral_text_and_run_link() -> None:
+    run_url = f"https://review.example/runs/{RUN}"
+    report = CheckRunReport(
+        CheckRunTarget(1, "o/r", HEAD, RUN),
+        "failed",
+        1,
+        "llm_payment_required",
+        run_url=run_url,
+    )
+
+    view = check_run_view(report)
+
+    assert (view.status, view.conclusion, view.title) == (
+        "completed",
+        "neutral",
+        "AI-ревью не выполнено",
+    )
+    assert view.summary == f"AI-ревью временно недоступно.\n\n{run_url}"
+    assert "llm_payment_required" not in view.summary
+    assert "402" not in view.summary
 
 
 def test_checkpoint_after_the_deadline_fails_the_run_before_the_model_call() -> None:

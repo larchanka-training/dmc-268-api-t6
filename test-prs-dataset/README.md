@@ -54,7 +54,20 @@ The first command checks one case, the second all present cases. `--final` also 
 
 ## Curated corpus
 
-The 24 active inputs pass final schema, patch-application and distribution validation. The class counts are security **4**, resource **5**, logic **5**, syntax **5**, and clean **5**. Five cases use distinct licensed real PRs, one in each class. Five separate critical truth anchors come from synthetic cases. SEC-05 was omitted after two candidate fixtures were stopped by the automatic safety filter; four security cases still meet the minimum. It has no case or response entry and is excluded from future replay/live denominators. No model response or quality baseline has been recorded yet.
+The 24 active inputs pass final schema, patch-application and distribution validation. [PR #68](https://github.com/larchanka-training/dmc-268-api-t6/pull/68) merged the [#66](https://github.com/larchanka-training/dmc-268-api-t6/issues/66) normalization work, including PIPELINE_SPEC §9, before the first baseline capture. Issue #66 is CLOSED; the merged normalization is no longer a pending baseline dependency. The class counts are security **4**, resource **5**, logic **5**, syntax **5**, and clean **5**. Five cases use distinct licensed real PRs, one in each class. Five separate critical truth anchors come from synthetic cases. SEC-05 was omitted after two candidate fixtures were stopped by the automatic safety filter; four security cases still meet the minimum. It has no case or response entry and is excluded from future replay/live denominators. The first recorded baseline is documented below; it measures Nemotron via OpenRouter, not the selected EUrouter production models.
+
+### Issue #53 corpus decision (2026-10-04)
+
+Keep **24 active cases** for the first live baseline. No case was added or promoted: the validator proves patch and anchor mechanics, but it cannot supply an independent semantic or license review. The baseline still requires one raw first answer per active case, so its denominator remains 24.
+
+| Requested gap | Decision and reason |
+| --- | --- |
+| Multiple truths in one case | **Defer.** None of the 24 active cases has more than one expected finding. A new multi-truth patch needs two independently checked defects and distinct added-line anchors in the same coherent change; combining existing truths just to exercise the scorer would make the benchmark claim unsupported. Scorer unit tests cover duplicate/multiple-anchor mechanics. |
+| Range truth | **Defer.** Every active finding has `start_line: null`. A range case needs a reviewed defect spanning two added new-side anchors, with both endpoints and the semantic range checked; `git apply --check` and anchor validation alone cannot establish that truth. Scorer unit tests cover range mechanics. |
+| Licensed real high/critical security truth | **Defer.** The only real security case, SEC-04, is supported as **low** by its recorded Flask source and advisory; promoting its severity would contradict that evidence. No additional high/critical security PR has a curated source revision, license permission for the exact excerpt, and independently checked impact. The synthetic critical truths remain explicitly synthetic. |
+| SEC-05 | **Keep omitted.** Two earlier candidate fixtures were stopped by the automatic safety filter, and no independently reviewed safe replacement exists. Four security cases satisfy the final distribution rule; SEC-05 has no active input or response and is excluded from the 24-case denominator. |
+
+Any later addition must receive its own source/license and ground-truth review, pass `validate_dataset.py --final`, and change issue #53's literal 24-response criterion **before** live capture. A case or truth edit after capture requires a complete fresh baseline.
 
 ### Real PR provenance and checked truth
 
@@ -83,3 +96,149 @@ Each row points to one distinct new-side anchor. Severity is tied to the concret
 | [LOG-05](cases/LOG-05/README.md) | A declined publisher receipt removes ready jobs from the only pending store, causing durable job loss. |
 
 Case metadata deliberately contains **no model response or model/prompt provenance**. It is valid before #33 selects a model and before any baseline exists. Replay/live tasks will keep raw responses and a separate manifest with case ID, model ID, prompt path/version/SHA, run metadata, and response path. Missing or invalid recorded responses must remain visible to eval rather than being rewritten into valid answers. Quality metrics and manual semantic adjudication follow [TEST_PLAN §3](../docs/TEST_PLAN.md#3-методология-llm-eval).
+
+The recorder scores the **first call**, even if a retry, repair, or fallback later succeeds. A first-call HTTP 429 or timeout therefore records an empty response and counts as invalid; the later valid answer never replaces it. The manifest distinguishes `first_call: no_content` (a provider call failed before an answer), `empty_answer` (a provider answer had no text), and `no_call` (the gateway did not send a request). A successful later fallback can make a transient first-call failure part of a publishable, measured raw-first baseline, while its invalid response remains in the denominator.
+
+Terminal provider or infrastructure failure for a case, such as HTTP 402 on both primary and fallback or invalid accounting metadata on a paid HTTP 200 response, sets `run_metadata.baseline_publishable` to `false` and lists affected IDs in `nonpublishable_case_ids`. The safe per-case `paid_metadata_error` marker distinguishes the paid-metadata failure from ordinary invalid model text; the first raw answer remains recorded even when its JSON validates. The recorder saves all first raw responses, statuses, and the full manifest for diagnosis; both live and offline replay CLI return nonzero, and replay warns that the capture is not publishable. Capture is prepared in a same-filesystem temporary directory and promoted only after every response and the manifest are ready; an unexpected mid-corpus exception leaves no partial baseline, and an existing populated `responses/` is preserved. After inspecting the diagnostic capture and resolving the failure, manually delete or move `test-prs-dataset/responses/` out of the dataset before rerunning all 24 cases; the recorder refuses to overwrite an existing populated directory. Publish metrics or responses only from the complete replacement capture.
+
+For each case, `run_metadata.cases` records the requested `first_model` and the actual first response's serving `provider` as `first_provider_label` plus a domain-separated `first_provider_digest`. Known EUrouter route names use safe public labels; any other provider string becomes `custom` with its digest, and a first call with no provider response records nulls. A paid but rejected first response keeps its available provider identity. This differs from the configured provider in `effective_settings`. Report observed provider labels and any custom digests with the measured baseline, without copying raw provider strings, URLs, or keys into the manifest or README.
+
+The manifest also stores sorted `static_inputs`, `static_digest`, and `corpus_digest`. Each digest is `sha256-v1:<64 lowercase hex>` over a SHA-256 stream beginning with the bytes `review-eval-inputs-v1` followed by a NUL byte. For every unique relative POSIX path in sorted order, the stream then contains its UTF-8 path length as an unsigned 8-byte big-endian integer, the path bytes, its file-content length in the same format, and the exact file bytes. Static inputs are the selected review system prompt, all literal `review/rules/*.json` files (including the rule schema), selected custom rule files, and these code paths. Each remains in the byte-level digest because a change can affect the provider request, whether a response is accepted or retried, or which raw answer the recorder captures:
+
+| Static code path | Why it is included |
+| --- | --- |
+| `app/bootstrap/llm_gateway.py` | Composes requests and sets attempt deadlines. |
+| `app/common/application/languages.py` | Selects the case language and default rule set. |
+| `app/modules/reviews/application/llm.py` | Defines call kinds and retryability used by the gateway. |
+| `app/modules/reviews/application/prompt_budget.py` | Chooses whole, truncated, and omitted diff files. |
+| `app/modules/reviews/application/prompt_builder.py` | Renders the system/user message envelope. |
+| `app/modules/reviews/application/review_output.py` | Parses and validates review output. |
+| `app/modules/reviews/application/run_failures.py` | Supplies the gateway's attempt deadline and retryable codes. |
+| `app/modules/reviews/infrastructure/llm/answers.py` | Validates answers and prepares repair feedback. |
+| `app/modules/reviews/infrastructure/llm/gateway.py` | Controls calls, retries, repair, fallback, and budgets. |
+| `app/modules/reviews/infrastructure/llm/models.py` | Adapts gateway calls to review and conventions model ports. |
+| `app/modules/reviews/infrastructure/llm/settings.py` | Resolves model profiles, endpoints, and call policy. |
+| `app/modules/reviews/infrastructure/llm/transport.py` | Encodes provider requests and extracts response text. |
+| `review/schemas/review-output.schema.json` | Defines strict response format and validation. |
+| `review/scripts/eval_live.py` | Assembles each case request and selects first-call raw content. |
+| `app/modules/reviews/application/conventions_prompt.py` | Renders conventions input when a conventions prompt is supplied. |
+
+A supplied conventions prompt and its renderer are included only for that task. Byte hashing also warns on a docstring-only edit to any listed file; this conservative warning avoids missing a changed deadline or call policy. `run_failures.py` remains included because `FAST_ATTEMPT_DEADLINE` and `RETRYABLE_ERROR_CODES` are imported into the gateway path. Corpus inputs are every active `case.json`, patch, and recursive pre-image file. Every case ID maps exactly to `responses/<case-id>.json`; replay rejects unmapped extra files. Replay warns if either digest differs or a static file is missing; it never rewrites raw answers. Refresh the **entire** response set and manifest after any input edit, even if only one rule or case changes. Traversal and symlink inputs are rejected.
+
+## Recorded baseline — 2026-10-06
+
+The 24-case capture in [`responses/manifest.json`](responses/manifest.json) uses
+`nvidia/nemotron-3-super-120b-a12b:free` through OpenRouter with
+`review/prompts/review.system.v2.md` (version `v2`). Recording started at
+`2026-10-06T20:43:54.136922Z` (22:43:54 Europe/Warsaw). Capture source commit:
+`995059a6df811d111d8a10d65884d4c12ceff754`.
+
+This is a baseline for that free model and route, not evidence for the selected
+EUrouter Mistral models or their two-model live conventions/D7 acceptance criterion.
+No fallback model was configured. The engine was `fast`, structured output was
+`json_schema`, the context window was 262144 tokens, and the output limit was
+8192 tokens. The per-call timeout was 90 seconds. The full effective settings and
+input digests are in the manifest.
+
+Configured provider OpenRouter is recorded as `custom` with digest
+`sha256-v1:5044b4f1c460e88a5fb9af9debfee5ecbbdd846289e93635ba781251ed4ba231`.
+For the 23 first calls with provider responses, the observed serving-provider label
+is `custom` with digest
+`sha256-v1:6903649630881d2de78976de011006c49db83b4b727e184cce5ae1171124e7ba`;
+SEC-04 has no first-response provider identity. The manifest deliberately retains
+safe labels and digests rather than arbitrary provider strings; it does not
+provide a human-readable serving-provider name for this capture.
+
+| Metric | Baseline |
+| --- | --- |
+| First raw response validity | 66.7% (16/24) |
+| Micro TP / FP / FN | 3 / 5 / 16 |
+| Micro precision | 37.5% |
+| Micro recall | 15.8% |
+| Critical recall | 40.0% (2/5) |
+| Verdict agreement | 29.2% (7/24) |
+| Severity mismatches | 2 |
+
+| Category | TP | FP | FN | Precision | Recall |
+| --- | --- | --- | --- | --- | --- |
+| security | 1 | 0 | 3 | 100.0% | 25.0% |
+| correctness | 2 | 4 | 3 | 33.3% | 40.0% |
+| performance | 0 | 1 | 5 | 0.0% | 0.0% |
+| readability | 0 | 0 | 5 | undefined | 0.0% |
+
+These are mechanical scorer results, not a claim of manually adjudicated semantic
+accuracy. The first responses remain unchanged, including empty or invalid text.
+CLEAN-03, LOG-02, RES-03, SEC-02 and SEC-03 have `empty_answer`; SEC-04 has
+`no_content`. All six later reached `accepted`, but the missing first answers still
+count as invalid. LOG-03 ended with `llm_invalid_output` and has truncated JSON.
+SYN-04 fails the offline attribution-prefix check for its custom rule, accounting
+for the eighth invalid first answer. The manifest marks the
+capture publishable because no terminal infrastructure/provider failures remain;
+that flag does not imply high quality or completion of all issue #53 criteria.
+
+Replay the committed capture without credentials or network calls:
+
+```sh
+uv run python review/scripts/eval_replay.py
+```
+
+The existing required `Python lint / type / test` job runs the same replay
+unconditionally. A missing manifest fails the job and writes a missing-baseline
+error to the job summary. Replay metrics are included only when a replay report
+exists. Quality values are reported rather than used as pass thresholds. Raw response files are excluded
+from whitespace and end-of-file rewriting hooks so a commit preserves exact bytes.
+
+Corpus expansion is deferred for this baseline: keep the already curated 24-case
+corpus fixed so this measurement can be reproduced. Multi-truth and range-truth
+cases, a real high/critical security case, and reconsideration of SEC-05 remain
+future curation work; expanding the corpus will require a separately recorded
+baseline and updated denominators.
+
+### Manual live evaluation in GitHub Actions
+
+[Live corpus evaluation](../.github/workflows/eval-live.yml) is a manual
+`workflow_dispatch` workflow, separate from required offline replay. It uses the
+team EUrouter account: repository variables `LLM_MODEL` and `LLM_FALLBACK_MODEL`
+select the primary and fallback models (currently `mistral-small-4` and
+`mistral-small-3.2-24b`). Their endpoint, context window, output limit and pricing
+come from the gateway's known-model profiles. The organization Actions secret
+`AI_DMC268_T6` must be available to this repository; it is exposed only to the
+live-evaluation step. No local copy of the key is needed.
+After the workflow exists on the default branch, select **Actions → Live corpus
+evaluation → Run workflow** and choose the branch to evaluate. Leave **model**
+empty to use `vars.LLM_MODEL`, or set `mistral-small-4` and
+`mistral-small-3.2-24b` in separate runs to evaluate each selected model as primary.
+The input overrides only the primary model and does not change repository
+variables used by staging. The fallback remains `vars.LLM_FALLBACK_MODEL`, so
+selecting `mistral-small-3.2-24b` as primary can make both profiles use the same
+model. If fallback is reached, it makes an additional call to that same model.
+This does not change the raw-first metrics: they score the first primary response,
+not repair or fallback responses.
+
+The workflow copies only `cases/` and `schema/` to the runner's temporary directory,
+validates the corpus, and records new responses there. It never replaces the
+committed baseline. The summary uses the same formatter and metrics as offline
+replay. Provider/infrastructure failures fail the job; available diagnostic metrics
+are still summarized and uploaded. Missing credentials fail before model calls.
+
+The 14-day artifact contains `eval-report.json` (without validator diagnostics) and
+`eval-response-metadata/` (per-case hashes, byte counts and statuses, plus the
+generated safe manifest with first model and sanitized provider identity).
+The report and manifest provenance retain recording time,
+fallback model and sanitized effective settings; secrets, raw endpoint URLs and
+arbitrary provider metadata are excluded. It does not
+contain raw model text, provider envelopes or credentials. Raw responses exist only on the temporary runner; use a local capture when preparing a
+new committed baseline. A run spends the team EUrouter balance, including
+retries/repair, can take tens of minutes, and has a 60-minute job timeout. Concurrent
+runs of this workflow are serialized. This workflow does not verify conventions
+on the two selected EUrouter models.
+
+
+### Expected baseline drift
+
+The static digest includes gateway/settings inputs. Changes from #80 can therefore
+produce an expected static-input drift warning against the intermediate Nemotron
+capture. The warning is informative, not a quality gate; preserve the original
+capture and its provenance rather than editing its digest to hide drift. After
+merge, run the live workflow and collect the full selected Mistral baseline in a
+separate PR with `Refs #53`. Issue #53 remains open until that follow-up is accepted.

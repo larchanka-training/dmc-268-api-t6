@@ -1,0 +1,40 @@
+<custom_instructions>
+
+</custom_instructions>
+<agents_md>
+
+</agents_md>
+<repo_conventions>
+<key_patterns>
+
+</key_patterns>
+<recommendations>
+
+</recommendations>
+</repo_conventions>
+<pr_meta>
+<title>T</title>
+<description></description>
+<author>a</author>
+<source_branch>f</source_branch>
+<target_branch>main</target_branch>
+<labels></labels>
+<files_changed>2</files_changed>
+<lines_added>1</lines_added>
+<lines_removed>0</lines_removed>
+<draft>false</draft>
+<fork>false</fork>
+</pr_meta>
+<changed_files>
+<file path="app/a.py" status="modified" language="Python">
+<line n="1" type="added">xxxxxxxx</line>
+<line n="2" type="added">xxxxxxxx</line>
+<line n="3" type="added">xxxxxxxx</line>
+<line n="4" type="added">xxxxxxxx</line>
+<line n="5" type="added">xxxxxxxx</line>
+</file>
+</changed_files>
+<omitted_files>
+assets/logo.png
+tests/test_a.py
+</omitted_files>

@@ -1,0 +1,109 @@
+name: Live corpus evaluation
+
+# Manual, paid evaluation using the team EUrouter account. Required CI uses the committed offline replay.
+on:
+  workflow_dispatch:
+    inputs:
+      model:
+        description: "Primary EUrouter model (empty uses LLM_MODEL variable)"
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: eval-live-eurouter
+  cancel-in-progress: false
+
+jobs:
+  evaluate:
+    name: Live corpus evaluation
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      LLM_PROVIDER: eurouter
+      LLM_MODEL: ${{ inputs.model || vars.LLM_MODEL }}
+      LLM_FALLBACK_MODEL: ${{ vars.LLM_FALLBACK_MODEL }}
+      LLM_STRUCTURED_OUTPUT: json_schema
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          version: "0.12.11"
+          python-version: "3.13"
+
+      - name: Install dependencies
+        run: uv sync --locked --all-groups
+
+      - name: Prepare isolated corpus
+        shell: bash
+        run: |
+          mkdir "$RUNNER_TEMP/eval-corpus"
+          cp -R test-prs-dataset/cases test-prs-dataset/schema "$RUNNER_TEMP/eval-corpus/"
+
+      - name: Validate corpus
+        run: uv run python review/scripts/validate_dataset.py --root "$RUNNER_TEMP/eval-corpus" --final
+
+      - name: Evaluate live corpus
+        shell: bash
+        env:
+          LLM_API_KEYS: ${{ secrets.AI_DMC268_T6 }}
+        run: |
+          if [[ -z "$LLM_API_KEYS" ]]; then
+            echo "::error::Make the AI_DMC268_T6 organization secret available to this repository before dispatch." >&2
+            exit 1
+          fi
+          uv run python review/scripts/eval_live.py \
+            --root "$RUNNER_TEMP/eval-corpus" \
+            --report-json "$RUNNER_TEMP/eval-report.json" \
+            --redacted-responses "$RUNNER_TEMP/eval-response-metadata"
+
+      - name: Export safe provenance
+        if: always()
+        shell: bash
+        run: |
+          manifest="$RUNNER_TEMP/eval-corpus/responses/manifest.json"
+          if [[ -f "$manifest" ]]; then
+            mkdir -p "$RUNNER_TEMP/eval-response-metadata"
+            cp "$manifest" "$RUNNER_TEMP/eval-response-metadata/manifest.json"
+          fi
+
+      - name: Summarize evaluation
+        if: always()
+        shell: bash
+        run: |
+          uv run python - <<'PYTHON'
+          import html
+          import json
+          import os
+          from pathlib import Path
+
+          from review.scripts.eval_replay import format_console
+
+          report_path = Path(os.environ["RUNNER_TEMP"]) / "eval-report.json"
+          with Path(os.environ["GITHUB_STEP_SUMMARY"]).open("a", encoding="utf-8") as summary:
+              summary.write("## Live corpus evaluation\n\n")
+              if report_path.is_file():
+                  report = json.loads(report_path.read_text(encoding="utf-8"))
+                  summary.write("<pre>" + html.escape(format_console(report)) + "</pre>\n")
+              else:
+                  summary.write("No evaluation report was produced. See the failed step for details.\n")
+          PYTHON
+
+      # Export metrics and per-case hashes/statuses, not raw model text or diagnostics.
+      - name: Upload evaluation report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: eval-live-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/eval-report.json
+            ${{ runner.temp }}/eval-response-metadata/
+          if-no-files-found: warn
+          retention-days: 14
