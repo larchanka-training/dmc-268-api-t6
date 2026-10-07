@@ -184,7 +184,11 @@ def test_required_ci_replay_failure_is_not_softened_by_step_or_job_keys() -> Non
 
     # A failed replay must fail the required check: a key placed anywhere in the step mapping,
     # before or after its run body, or on the job must not turn it green or skip it.
-    assert "continue-on-error" not in step, "replay step must not continue on error"
+    continue_on_error = re.compile(r"(?m)^ +continue-on-error:")
+    assert not continue_on_error.search(step), "replay step must not continue on error"
     assert not re.search(r"(?m)^        if:", step), "replay step must always run"
-    assert "continue-on-error" not in job, "Python lint / type / test must not continue on error"
+    # Strict on purpose: any step of the required job that continues on error softens it too.
+    assert not continue_on_error.search(job), (
+        "neither Python lint / type / test nor any of its steps may continue on error"
+    )
     assert not re.search(r"(?m)^    if:", job), "Python lint / type / test must always run"
