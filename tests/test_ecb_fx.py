@@ -10,6 +10,7 @@ from decimal import Decimal
 import httpx
 import pytest
 
+from app.modules.reviews.application.run_failures import RetryDelays
 from app.modules.reviews.infrastructure.llm import ecb_fx
 from app.modules.reviews.infrastructure.llm.ecb_fx import (
     EcbFxError,
@@ -170,6 +171,40 @@ def test_failed_refresh_keeps_quote_and_backs_off_without_logging_body(
     assert "raw response body" not in caplog.text
 
 
+def test_cold_backoff_is_shorter_than_the_first_run_retry_delay() -> None:
+    # Without a cached quote the next run attempt must reach ECB again (PIPELINE_SPEC §4.5).
+    assert timedelta(seconds=ecb_fx.COLD_FAILURE_BACKOFF_SECONDS) < RetryDelays().short
+
+
+def test_cold_failure_lets_the_next_run_attempt_fetch_the_recovered_quote() -> None:
+    quote = FxQuote(Decimal("1.1204"), date(2026, 10, 5), "EXR.D.USD.EUR.SP00.A", NOW)
+
+    async def exercise() -> None:
+        clock = ControlledClock()
+        calls = 0
+
+        class Fetcher:
+            async def fetch_latest(self) -> FxQuote:
+                nonlocal calls
+                calls += 1
+                if calls == 1:
+                    raise EcbFxError("ECB offline")
+                return quote
+
+        cache = EcbFxQuoteCache(
+            Fetcher(), wall_clock=clock.wall_now, monotonic_clock=clock.monotonic_now
+        )
+        # attempt 1 of the run: ECB is down and nothing is cached
+        assert (await cache.get_quote()).quote is None
+        # attempt 2 comes back from retry.30s (PIPELINE_SPEC §4.2); ECB has recovered
+        clock.advance(RetryDelays().short.total_seconds())
+        recovered = await cache.get_quote()
+        assert recovered.quote is quote and recovered.stale_cache is False
+        assert calls == 2
+
+    asyncio.run(exercise())
+
+
 def test_cold_fetch_failure_returns_unavailable_and_retries_after_backoff() -> None:
     quote = FxQuote(Decimal("1.1204"), date(2026, 10, 5), "EXR.D.USD.EUR.SP00.A", NOW)
 
@@ -190,7 +225,7 @@ def test_cold_fetch_failure_returns_unavailable_and_retries_after_backoff() -> N
         )
         unavailable = await cache.get_quote()
         assert unavailable.quote is None and unavailable.stale_cache is False
-        clock.advance(299)
+        clock.advance(9)
         assert (await cache.get_quote()).quote is None
         assert calls == 1
         clock.advance(1)
@@ -231,7 +266,7 @@ def test_unexpected_fetch_failure_is_single_flight_and_recovers_after_backoff(
         results = await asyncio.gather(*tasks)
         assert calls == 1
         assert all(result.quote is None and result.stale_cache is False for result in results)
-        clock.advance(299)
+        clock.advance(9)
         assert (await cache.get_quote()).quote is None
         assert calls == 1
         clock.advance(1)

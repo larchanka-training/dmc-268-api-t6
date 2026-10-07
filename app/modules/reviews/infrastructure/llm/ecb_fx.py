@@ -20,6 +20,9 @@ MAX_CSV_BYTES = 65_536
 ECB_TIMEOUT_SECONDS = 5.0
 REFRESH_INTERVAL_SECONDS = 3_600.0
 FAILURE_BACKOFF_SECONDS = 300.0
+# Without a usable quote every EUrouter call fails, so the pause must end before the
+# 30 s run retry (PIPELINE_SPEC §4.2); twice the fetch timeout bounds the ECB load.
+COLD_FAILURE_BACKOFF_SECONDS = 10.0
 MAX_OBSERVATION_AGE_DAYS = 7
 logger = logging.getLogger(__name__)
 
@@ -77,7 +80,12 @@ class EcbFxQuoteCache:
                 or self._usable_quote() is None
             ):
                 last_failure = self._last_failure_mono
-                if last_failure is not None and now - last_failure < FAILURE_BACKOFF_SECONDS:
+                backoff = (
+                    FAILURE_BACKOFF_SECONDS
+                    if self._usable_quote() is not None
+                    else COLD_FAILURE_BACKOFF_SECONDS
+                )
+                if last_failure is not None and now - last_failure < backoff:
                     return self._result(stale_cache=True)
                 try:
                     quote = await self._fetcher.fetch_latest()
