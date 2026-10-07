@@ -167,6 +167,7 @@ def test_summary_uses_replay_metrics_without_model_diagnostics(tmp_path: Path) -
 
 
 def _assert_workflow_contract(text: str) -> None:
+    _assert_raw_export_contract(text)
     trigger = text.split("\non:\n", 1)[1].split("\npermissions:", 1)[0]
     assert re.findall(r"^  (\w+):", trigger, re.M) == ["workflow_dispatch"]
     assert "      model:\n" in trigger
@@ -198,6 +199,11 @@ def test_manual_workflow_security_and_selection_contract() -> None:
     "before,after",
     [
         ("on:\n", "on:\n  push:\n"),
+        ("default: false", "default: true"),
+        ("type: boolean", "type: string"),
+        ("always() && inputs.export_raw_responses", "always()"),
+        (" && steps.raw_export.outcome == 'success'", ""),
+        ("path: ${{ runner.temp }}/eval-raw-responses/", "path: ${{ runner.temp }}/"),
         ("contents: read", "contents: write"),
         ("if: always()", "if: success()"),
         ("retention-days: 14", "retention-days: 90"),
@@ -240,3 +246,123 @@ def test_missing_provenance_preserves_failed_run_summary(tmp_path: Path) -> None
     result = _run("Export safe provenance", tmp_path, {"RUNNER_TEMP": str(tmp_path)})
     assert result.returncode == 0, result.stderr
     assert not (tmp_path / "eval-response-metadata").exists()
+
+
+def _assert_raw_export_contract(text: str) -> None:
+    assert (
+        "      export_raw_responses:\n"
+        '        description: "Export raw first answers and manifest for baseline publication"\n'
+        "        required: false\n"
+        "        type: boolean\n"
+        "        default: false\n"
+    ) in text
+    assert (
+        "      - name: Stage raw responses\n"
+        "        id: raw_export\n"
+        "        if: ${{ always() && inputs.export_raw_responses }}\n"
+    ) in text
+    assert (
+        "      - name: Upload raw responses\n"
+        "        if: ${{ always() && inputs.export_raw_responses"
+        " && steps.raw_export.outcome == 'success' }}\n"
+    ) in text
+    upload = text.split("      - name: Upload raw responses\n", 1)[1]
+    assert "          path: ${{ runner.temp }}/eval-raw-responses/\n" in upload
+    assert "          retention-days: 14\n" in upload
+    assert "          if-no-files-found: error\n" in upload
+    assert text.count("uses: actions/upload-artifact@") == 2
+
+
+def _raw_capture(root: Path) -> Path:
+    responses = root / "eval-corpus/responses"
+    responses.mkdir(parents=True)
+    for case_id, content in (("SEC-01", b""), ("SEC-02", b"invalid\r\nanswer\x00")):
+        case = root / "eval-corpus/cases" / case_id
+        case.mkdir(parents=True)
+        (case / "case.json").write_text("{}")
+        (responses / f"{case_id}.json").write_bytes(content)
+    (responses / "manifest.json").write_text(
+        '{"responses":{"SEC-01":"responses/SEC-01.json","SEC-02":"responses/SEC-02.json"}}\n'
+    )
+    (responses / "unexpected.json").write_text("DO NOT EXPORT")
+    (responses / "diagnostics.log").write_text("DO NOT EXPORT")
+    return responses
+
+
+def _export_raw(root: Path) -> subprocess.CompletedProcess[str]:
+    bin_dir = root / "bin"
+    bin_dir.mkdir()
+    shim = bin_dir / "uv"
+    shim.write_text('#!/bin/bash\nexec "$PYTHON_EXE" -\n')
+    shim.chmod(0o755)
+    return _run(
+        "Stage raw responses",
+        root,
+        {
+            "RUNNER_TEMP": str(root),
+            "PATH": str(bin_dir) + os.pathsep + os.environ["PATH"],
+            "PYTHON_EXE": sys.executable,
+        },
+    )
+
+
+def test_raw_export_preserves_only_mapped_answer_and_manifest_bytes(tmp_path: Path) -> None:
+    responses = _raw_capture(tmp_path)
+    result = _export_raw(tmp_path)
+    assert result.returncode == 0, result.stderr
+    exported = tmp_path / "eval-raw-responses"
+    assert sorted(path.name for path in exported.iterdir()) == [
+        "SEC-01.json",
+        "SEC-02.json",
+        "manifest.json",
+    ]
+    assert (exported / "SEC-01.json").read_bytes() == b""
+    assert (exported / "SEC-02.json").read_bytes() == b"invalid\r\nanswer\x00"
+    assert (exported / "manifest.json").read_bytes() == (responses / "manifest.json").read_bytes()
+
+
+@pytest.mark.parametrize(
+    "unsafe",
+    [
+        "traversal",
+        "extra",
+        "missing",
+        "missing_file",
+        "symlink",
+        "manifest_symlink",
+        "responses_symlink",
+        "empty_corpus",
+    ],
+)
+def test_raw_export_rejects_unsafe_or_incomplete_capture(tmp_path: Path, unsafe: str) -> None:
+    responses = _raw_capture(tmp_path)
+    manifest = responses / "manifest.json"
+    data = json.loads(manifest.read_text())
+    if unsafe == "traversal":
+        data["responses"]["SEC-01"] = "responses/../private.json"
+        (responses.parent / "private.json").write_text("PRIVATE")
+    elif unsafe == "extra":
+        data["responses"]["unexpected"] = "responses/unexpected.json"
+    elif unsafe == "missing":
+        del data["responses"]["SEC-01"]
+    elif unsafe == "missing_file":
+        (responses / "SEC-01.json").unlink()
+    elif unsafe == "empty_corpus":
+        for case in (responses.parent / "cases").glob("*/case.json"):
+            case.unlink()
+        data["responses"] = {}
+    elif unsafe == "symlink":
+        (responses / "SEC-01.json").unlink()
+        (responses / "SEC-01.json").symlink_to(responses / "unexpected.json")
+    manifest.write_text(json.dumps(data))
+    if unsafe == "manifest_symlink":
+        target = responses / "other.json"
+        manifest.rename(target)
+        manifest.symlink_to(target)
+    elif unsafe == "responses_symlink":
+        target = responses.with_name("other-responses")
+        responses.rename(target)
+        responses.symlink_to(target, target_is_directory=True)
+    result = _export_raw(tmp_path)
+    assert result.returncode != 0
+    assert not (tmp_path / "eval-raw-responses").exists()
