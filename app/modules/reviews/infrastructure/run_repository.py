@@ -879,6 +879,8 @@ class SqlAlchemyCancelRunUnitOfWork(SqlAlchemyUnitOfWork):
         *,
         allow_unscoped: bool = False,
     ) -> None:
+        if scope is None and not allow_unscoped:
+            raise ValueError("AuthScope is required unless allow_unscoped=True")
         super().__init__(session_factory)
         self._scope = scope
         self._allow_unscoped = allow_unscoped

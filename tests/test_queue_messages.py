@@ -940,9 +940,12 @@ def test_retry_fallback_entries_expire_after_five_minutes(
     amqp._unexpected_delivery_attempts.clear()
     publisher, _ = fake_publisher(OfflineExchange())
     asyncio.run(_fail_retry_delivery(Delivery(VALID, message_id="old"), publisher))
+    now = 1299.9
+    asyncio.run(_fail_retry_delivery(Delivery(VALID, message_id="recent"), publisher))
+    assert len(amqp._unexpected_delivery_attempts) == 2
     now = 1300.0
     asyncio.run(_fail_retry_delivery(Delivery(VALID, message_id="new"), publisher))
-    assert len(amqp._unexpected_delivery_attempts) == 1
+    assert len(amqp._unexpected_delivery_attempts) == 2
     # The old count must not turn two new failures into the terminal third attempt.
     for _ in range(2):
         delivery = Delivery(VALID, message_id="old")
