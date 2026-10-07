@@ -34,6 +34,7 @@ from app.bootstrap.reviews_api import (
     get_run_event_hub as get_run_event_hub,
 )
 from app.bootstrap.run_update_listener import run_update_listener
+from app.common.application.github_repository_name import REPOSITORY_FULL_NAME_MAX_LENGTH
 from app.common.infrastructure.db.enums import RunState
 from app.modules.auth.api.router import auth_router
 from app.modules.auth.application.scope import AuthScope
@@ -485,7 +486,9 @@ def to_file_lines_dto(item: FileLinesPage) -> FileLinesDto:
 async def list_runs(
     repository: Annotated[RunRepository, Depends(get_run_repository)],
     status: RunState | None = None,
-    repo: Annotated[str | None, Query(min_length=1, max_length=512)] = None,
+    repo: Annotated[
+        str | None, Query(min_length=1, max_length=REPOSITORY_FULL_NAME_MAX_LENGTH)
+    ] = None,
     cursor: str | None = None,
     limit: Annotated[int, Query(ge=1, le=100)] = 50,
 ) -> RunListDto:

@@ -1,7 +1,8 @@
 """The shape of a GitHub repository name.
 
 Shared by the webhook DTOs, the review worker's pull request DTO (``github_vcs``), the
-request path builder and the ``repositories.full_name`` column.
+request path builder, the ``repositories.full_name`` column and the ``repo`` filter of
+``GET /api/runs``.
 """
 
 from __future__ import annotations
@@ -14,6 +15,6 @@ from __future__ import annotations
 REPOSITORY_FULL_NAME_PATTERN = (
     r"^[A-Za-z0-9][A-Za-z0-9_-]*/[A-Za-z0-9._-]*[A-Za-z0-9_-][A-Za-z0-9._-]*$"
 )
-# The ``repositories.full_name`` column, the webhook DTOs, the review worker's DTO and
-# the path builder allow 512 characters.
+# The ``repositories.full_name`` column, the webhook DTOs, the review worker's DTO, the
+# path builder and the runs list's ``repo`` filter allow 512 characters.
 REPOSITORY_FULL_NAME_MAX_LENGTH = 512

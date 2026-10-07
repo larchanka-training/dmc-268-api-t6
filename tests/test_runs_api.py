@@ -181,6 +181,23 @@ def test_runs_list_rejects_malformed_base64_and_non_utf8_cursors() -> None:
     assert non_ascii.status_code == 422
 
 
+def test_runs_list_accepts_a_repo_filter_of_512_characters_and_rejects_one_of_513() -> None:
+    longest = "o/" + "r" * 510
+    too_long = "o/" + "r" * 511
+    repository = FakeRunRepository([])
+    app.dependency_overrides[get_run_repository] = lambda: repository
+    try:
+        client = TestClient(app)
+        accepted = client.get("/api/runs", params={"repo": longest})
+        rejected = client.get("/api/runs", params={"repo": too_long})
+    finally:
+        app.dependency_overrides.clear()
+
+    assert accepted.status_code == 200
+    assert rejected.status_code == 422
+    assert repository.calls == [(None, longest, None, 51)]
+
+
 def test_run_detail_returns_pr_data_latest_model_and_action_count() -> None:
     item = replace(make_item(7, datetime(2026, 9, 24, tzinfo=UTC)), summary_only=True)
     repository: RunReviewRepository = FakeRunDetailRepository(item)
