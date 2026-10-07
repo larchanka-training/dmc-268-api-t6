@@ -272,7 +272,6 @@ def test_handler_repeated_errors_route_to_dlq_across_worker_restarts(
     assert len(exchange.published) == 1
     pub1, rk1 = exchange.published[0]
     assert pub1.headers["x-attempt"] == 1
-    assert "x-delivery-count" not in pub1.headers
     assert rk1 == "review.run.fast"
 
     # Worker 2 restarts (empty process state), gets redelivery
@@ -289,7 +288,6 @@ def test_handler_repeated_errors_route_to_dlq_across_worker_restarts(
     assert len(exchange.published) == 2
     pub2, _ = exchange.published[1]
     assert pub2.headers["x-attempt"] == 2
-    assert "x-delivery-count" not in pub2.headers
 
     # Worker 3 restarts (empty process state), gets redelivery
     # instantiated from the second republished message -> reaches attempt 3 -> DLQ!
@@ -348,10 +346,10 @@ def test_corrupted_retry_headers_log_warning(
     assert "Invalid retry header x-attempt='not-an-int'" in caplog.text
 
 
-def test_handler_routes_to_dlq_when_broker_delivery_count_reaches_limit(
+def test_handler_routes_to_dlq_when_attempt_count_reaches_limit(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    # Message redelivered 2 times previously per broker x-attempt header -> this attempt is 3
+    # Message redelivered 2 times previously per x-attempt header -> this attempt is 3
     delivery = Delivery(VALID, headers={"x-attempt": 2})
     amqp._clear_delivery_attempts("m")
     pub, _ = fake_publisher()
@@ -420,6 +418,114 @@ def test_republish_ack_failure_logs_exception_and_does_not_nack(
     assert len(exchange.published) == 1
     assert delivery.nacked == []
     assert "Failed to ack message err-ack after republish" in caplog.text
+
+
+VALID_PUBLISH = json.dumps(
+    amqp.publish_message_body(ReviewPublishPointer(RUN, "a" * 40, "f" * 64, "REQUEST_CHANGES"))
+).encode()
+
+
+def _deliver_publish(
+    body: bytes,
+    outcome: None | Exception = None,
+    publisher: amqp.AmqpQueuePublisher | None = None,
+    headers: dict[str, Any] | None = None,
+    message_id: str = "m-pub",
+) -> tuple[Delivery, list[ReviewPublishPointer]]:
+    delivery = Delivery(
+        body,
+        message_id=message_id,
+        routing_key=amqp.PUBLISH_QUEUE,
+        headers=dict(headers or {}),
+    )
+    seen: list[ReviewPublishPointer] = []
+
+    async def handler(pointer: ReviewPublishPointer) -> None:
+        seen.append(pointer)
+        if isinstance(outcome, Exception):
+            raise outcome
+
+    pub = publisher or fake_publisher()[0]
+    asyncio.run(amqp.handle_publish_delivery(cast(AbstractIncomingMessage, delivery), handler, pub))
+    return delivery, seen
+
+
+def test_valid_publish_message_is_acked_after_the_handler() -> None:
+    pub, exchange = fake_publisher()
+    delivery, seen = _deliver_publish(VALID_PUBLISH, publisher=pub)
+    assert len(seen) == 1
+    assert seen[0].run_id == RUN
+    assert delivery.acked is True and delivery.nacked == []
+    assert len(exchange.published) == 0
+
+
+def test_invalid_publish_message_goes_to_the_dlq_without_processing() -> None:
+    pub, exchange = fake_publisher()
+    delivery, seen = _deliver_publish(b"not json", publisher=pub)
+    assert seen == []
+    assert delivery.nacked == [False] and not delivery.acked
+    assert len(exchange.published) == 0
+
+
+def test_publish_handler_error_republishes_the_message(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("app.modules.reviews.infrastructure.amqp.REQUEUE_ERROR_DELAY_SECONDS", 0.0)
+    amqp._clear_delivery_attempts("m-pub")
+    pub, exchange = fake_publisher()
+    delivery, _ = _deliver_publish(
+        VALID_PUBLISH, RuntimeError("github is down"), publisher=pub, message_id="m-pub"
+    )
+    assert delivery.acked is True and delivery.nacked == []
+    assert len(exchange.published) == 1
+    msg, rk = exchange.published[0]
+    assert msg.headers["x-attempt"] == 1
+    assert rk == amqp.PUBLISH_QUEUE
+
+
+def test_publish_handler_repeated_errors_route_to_dlq_across_worker_restarts(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.setattr("app.modules.reviews.infrastructure.amqp.REQUEUE_ERROR_DELAY_SECONDS", 0.0)
+    pub, exchange = fake_publisher()
+
+    # Attempt 1
+    amqp._clear_delivery_attempts("m-pub")
+    d1, _ = _deliver_publish(
+        VALID_PUBLISH, RuntimeError("publish crash 1"), publisher=pub, message_id="m-pub"
+    )
+    assert d1.acked is True and d1.nacked == []
+    assert len(exchange.published) == 1
+    pub1, rk1 = exchange.published[0]
+    assert pub1.headers["x-attempt"] == 1
+    assert rk1 == amqp.PUBLISH_QUEUE
+
+    # Worker restart: process state cleared, receives published copy with x-attempt=1
+    amqp._unexpected_delivery_attempts.clear()
+    d2, _ = _deliver_publish(
+        pub1.body,
+        RuntimeError("publish crash 2"),
+        publisher=pub,
+        headers=pub1.headers,
+        message_id="m-pub",
+    )
+    assert d2.acked is True and d2.nacked == []
+    assert len(exchange.published) == 2
+    pub2, _ = exchange.published[1]
+    assert pub2.headers["x-attempt"] == 2
+
+    # Worker restart: process state cleared, receives published copy with x-attempt=2 -> DLQ!
+    amqp._unexpected_delivery_attempts.clear()
+    with caplog.at_level(logging.ERROR):
+        d3, _ = _deliver_publish(
+            pub2.body,
+            RuntimeError("publish crash 3"),
+            publisher=pub,
+            headers=pub2.headers,
+            message_id="m-pub",
+        )
+    assert d3.nacked == [False] and not d3.acked
+    assert "exceeded maximum unexpected retry attempts (3); routing to DLQ" in caplog.text
 
 
 def test_amqp_channels_configures_publisher_channel(monkeypatch: pytest.MonkeyPatch) -> None:

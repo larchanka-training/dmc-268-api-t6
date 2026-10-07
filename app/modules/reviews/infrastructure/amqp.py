@@ -199,7 +199,13 @@ class AmqpQueuePublisher:
                 "Failed to republish message %s with attempt header; falling back to nack",
                 message.message_id,
             )
-            await message.nack(requeue=True)
+            try:
+                await message.nack(requeue=True)
+            except Exception:
+                _LOGGER.exception(
+                    "Failed to nack message %s after republish error",
+                    message.message_id,
+                )
             return
 
         try:
