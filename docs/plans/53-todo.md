@@ -3,7 +3,8 @@
 Plan: [53-plan.md](53-plan.md). Status: user approved the plan, draft PR publication and exactly one paid run
 on 2026-10-07. Task 1 implementation, local verification and independent review complete;
 draft PR #93 published; the sole approved paid run succeeded. Capture verified
-and copied locally; final review and publication pending.
+and published unchanged; independent reviews and capture-head CI pass.
+Completion evidence is recorded below; PR remains draft for human review.
 
 ## Task 1: Secure optional raw-response export
 
@@ -72,7 +73,7 @@ Acceptance criteria:
 
 Verification:
 - [x] Validate corpus, run offline replay to a temporary JSON report and compare metrics/provenance.
-- [ ] Hash all 25 files before copy and after commit hooks; preserve manifest unchanged.
+- [x] Hash all 25 files before copy and after commit hooks; preserve manifest unchanged.
 - [x] Derive first-answer invalidity groups from validator output for PR, reconciling case counts.
 
 Dependencies: publishable task-3 run. Files: `test-prs-dataset/responses/*.json`,
@@ -89,14 +90,14 @@ one indivisible, mechanical 25-file capture; never split or hand-edit raw data.
 Description: Publish the verified baseline and prepare human review of the final PR.
 
 Acceptance criteria:
-- [ ] Four gates, dataset validation and required CI replay pass on final changes.
-- [ ] Standards/spec reviews pass; PR contains run link, measured metrics and invalidity breakdown.
-- [ ] Final branch is current with main and captured digests still match; issue remains for tech-lead acceptance.
+- [x] Four gates, dataset validation and required CI replay pass on final changes.
+- [x] Standards/spec reviews pass; PR contains run link, measured metrics and invalidity breakdown.
+- [x] Final branch is current with main and captured digests still match; issue remains for tech-lead acceptance.
 
 Verification:
-- [ ] Recheck static/corpus digests after any rebase; never modify provenance to hide drift.
-- [ ] Verify current-head review/threads requirements before any future merge; no merge in this task.
-- [ ] Update this task list with actual evidence and remaining external blockers.
+- [x] Recheck static/corpus digests after any rebase; never modify provenance to hide drift.
+- [x] Verify current-head review/threads requirements before any future merge; no merge in this task.
+- [x] Update this task list with actual evidence and remaining external blockers.
 
 Dependencies: task 4. Files: plan/task status and PR body. Estimated scope: small.
 
@@ -161,7 +162,7 @@ Dependencies: task 4. Files: plan/task status and PR body. Estimated scope: smal
   (2087 passed, 95 skipped, 2 dependency deprecation warnings; 66.92 seconds).
   Dataset validation passes 24/24; local replay matches live without drift.
 - Initial workflow-head PR CI passed, including Python lint/type/test
-  (run `37607282765`); final capture-head CI awaits publication.
+  (run `37607282765`); final capture-head CI is recorded below.
 - The 25-file data replacement is the approved indivisible mechanical batch;
   it changes no code and is verified by byte identity and replay, rather than
   new implementation tests. Task 1 retained its test-first proof.
@@ -169,6 +170,18 @@ Dependencies: task 4. Files: plan/task status and PR body. Estimated scope: smal
   capture hashes independently. All 25 pre-commit SHA-256 checks pass.
 - Publication refresh found main advanced to `6f25ffa` through #84, changing
   only `.env.example`, root README, secrets docs and webhook-worker docs.
-  Rebase and post-rebase replay will verify no captured-input drift.
-- Commit/push, post-hook hash verification and final-head CI remain pending.
+  Rebase completed without conflicts. Post-rebase replay is identical to the
+  verified capture replay and has no drift warnings.
+- Capture publication head `ad662e2ad17ab8c9713827e5587e129d089ca321` is
+  pushed. All 25 working-tree files and committed Git blobs match the downloaded
+  SHA-256 inventory after commit and rebase; no raw answer or manifest changed.
+- [Capture-head CI 37608517383](https://github.com/larchanka-training/dmc-268-api-t6/actions/runs/37608517383)
+  passed all eight checks, including Python lint/type/test, recorded replay,
+  zero-skip integration suite, Docker security and webhook smoke. Deployment
+  jobs are correctly skipped for this PR. This evidence-only follow-up will
+  receive its own final-head CI verification before handoff.
+- PR #93 body contains the run, measured metrics and all 19 invalidity reasons.
+  Review status is `REVIEW_REQUIRED`; no review threads exist. Human approval
+  on the current head is still required before any future merge, and #53
+  remains open for tech-lead acceptance. The approved publication stays draft.
   No second paid run, merge or issue closure has been performed.

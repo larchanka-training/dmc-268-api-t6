@@ -153,5 +153,11 @@ matches the live safe report exactly after removing local validator diagnostics.
 First-answer validity is 5/24; all 19 invalid cases remain in the denominator.
 Detailed measurement and invalidity evidence is recorded in the task list and
 dataset README. Final local gates and corpus validation pass; independent
-review, commit/push and final-head CI remain for task 5. Post-hook byte
-verification remains required. No additional paid run is authorized.
+standards/spec reviews report zero findings. Capture publication was rebased
+onto main `6f25ffa4fdaf8d88487a8823b5be1af2452b68b6` without input drift;
+all 25 files and committed Git blobs still match the download after commit.
+Capture-head CI `37608517383` passed all eight checks, including recorded replay
+and the integration suite. The evidence-only completion commit receives final
+CI verification before handoff. PR #93 stays draft; human current-head approval
+and tech-lead acceptance remain external steps. No additional paid run, merge
+or issue closure is authorized.
