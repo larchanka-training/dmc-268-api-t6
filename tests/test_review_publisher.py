@@ -62,11 +62,11 @@ class FakeRepository:
     async def store_review_output(
         self,
         run_id: UUID,
-        raw_output: dict[str, object],
+        model_output: dict[str, object],
         parsed: ReviewOutput,
         processed: ProcessedReviewOutput,
     ) -> ReviewPublication | None:
-        assert raw_output["findings"]
+        assert model_output["findings"]
         if self.publication is None:
             return None
         if not self.stored:
@@ -143,12 +143,12 @@ class ProcessingRepository:
     async def store_review_output(
         self,
         run_id: UUID,
-        raw_output: dict[str, object],
+        model_output: dict[str, object],
         parsed: ReviewOutput,
         processed: ProcessedReviewOutput,
     ) -> ReviewPublication | None:
         assert run_id == RUN_ID
-        assert raw_output == output_with_body_only()
+        assert model_output == output_with_body_only()
         assert parsed.summary.effort == "small"
         self.processed = processed
         findings = tuple(
@@ -307,12 +307,12 @@ def test_gateway_json_text_is_parsed_and_stored_as_the_exact_object(
         async def store_review_output(
             self,
             run_id: UUID,
-            raw_output: dict[str, object],
+            model_output: dict[str, object],
             parsed: ReviewOutput,
             processed: ProcessedReviewOutput,
         ) -> ReviewPublication | None:
-            self.raw.append(raw_output)
-            return await super().store_review_output(run_id, raw_output, parsed, processed)
+            self.raw.append(model_output)
+            return await super().store_review_output(run_id, model_output, parsed, processed)
 
     repository = RecordingRepository(
         [], ReviewPublication("a" * 40, (), "review body", idempotency_key="stable-key")

@@ -125,13 +125,13 @@ class RecordingRepository:
     async def store_review_output(
         self,
         run_id: UUID,
-        raw_output: dict[str, object],
+        model_output: dict[str, object],
         parsed: ReviewOutput,
         processed: ProcessedReviewOutput,
     ) -> ReviewPublication | None:
         assert run_id == RUN_ID
         assert parsed.findings[0].title == "Missing transaction boundary"
-        self.raw_objects.append(raw_output)
+        self.raw_objects.append(model_output)
         return self.publication
 
     async def mark_review_published(self, run_id: UUID) -> None:
