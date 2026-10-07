@@ -21,8 +21,17 @@ from uuid import UUID
 import httpx
 import pytest
 
-from app.bootstrap.llm_gateway import ReviewCase, review_case
-from app.modules.reviews.application.conventions import ConventionsRequest, RepositoryFile
+from app.bootstrap.llm_gateway import (
+    ConventionsCaseResult,
+    ReviewCase,
+    conventions_case,
+    review_case,
+)
+from app.modules.reviews.application.conventions import (
+    ConventionsDraft,
+    ConventionsRequest,
+    RepositoryFile,
+)
 from app.modules.reviews.application.llm import (
     LlmCallFailed,
     LlmCallKind,
@@ -2922,3 +2931,24 @@ def test_sample_diff_goes_through_prompt_builder_and_gateway_into_a_review_outpu
     for file in parse_unified_diff(diff):
         assert f'<file path="{file.path}"' in user
     assert harness.bodies()[0]["messages"][0]["content"] == system
+
+
+def test_conventions_case_returns_a_typed_result_like_review_case() -> None:
+    harness = Harness([completion(json.dumps(_conventions_answer()))])
+
+    async def scenario() -> ConventionsCaseResult:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(harness._handle)) as client:
+            return await conventions_case(
+                _conventions_request(),
+                LlmSettings(primary=PRIMARY, fallback=FALLBACK),
+                transport=OpenAICompatibleTransport(client),
+            )
+
+    result = asyncio.run(scenario())
+
+    assert isinstance(result, ConventionsCaseResult)
+    assert result.output == ConventionsDraft.model_validate(_conventions_answer())
+    assert (result.provider, result.model) == ("eurouter", "primary-model-2026-09-01")
+    assert [call.kind for call in result.calls] == [LlmCallKind.PRIMARY]
+    assert result.usage[0].tokens_in == 1200
+    assert result.latency_ms >= 0

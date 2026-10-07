@@ -152,6 +152,16 @@ class ReviewCaseResult:
     latency_ms: int
 
 
+@dataclass(frozen=True)
+class ConventionsCaseResult:
+    output: ConventionsDraft
+    provider: str
+    model: str
+    usage: tuple[LlmUsage, ...]
+    calls: tuple[LlmCallRecord, ...]
+    latency_ms: int
+
+
 async def _run_database_free_case[CaseOutput](
     settings: LlmSettings,
     engine: EngineName,
@@ -237,7 +247,7 @@ async def conventions_case(
     transport: ChatTransport | None = None,
     fx_provider: FxQuoteProvider | None = None,
     fx_transport: httpx.AsyncBaseTransport | None = None,
-) -> dict[str, object]:
+) -> ConventionsCaseResult:
     """Check the strict conventions call through the database-free gateway."""
     output, usage, calls, latency_ms = await _run_database_free_case(
         settings,
@@ -249,16 +259,14 @@ async def conventions_case(
         fx_provider=fx_provider,
         fx_transport=fx_transport,
     )
-    draft = ConventionsDraft.model_validate(output)
-    return {
-        "provider": usage[-1].provider,
-        "model": usage[-1].model,
-        "calls": [_call_json(item) for item in calls],
-        **_usage_json(usage),
-        "latency_ms": latency_ms,
-        "files": len(draft.files),
-        "output": draft.model_dump(mode="json"),
-    }
+    return ConventionsCaseResult(
+        output=ConventionsDraft.model_validate(output),
+        provider=usage[-1].provider,
+        model=usage[-1].model,
+        usage=usage,
+        calls=calls,
+        latency_ms=latency_ms,
+    )
 
 
 class _ClientScope:
@@ -321,7 +329,7 @@ def main(
                 languages={},
                 changed_files=paths,
             )
-            payload = asyncio.run(
+            drafted = asyncio.run(
                 conventions_case(
                     request,
                     settings,
@@ -330,6 +338,15 @@ def main(
                     fx_transport=fx_transport,
                 )
             )
+            payload = {
+                "provider": drafted.provider,
+                "model": drafted.model,
+                "calls": [_call_json(item) for item in drafted.calls],
+                **_usage_json(drafted.usage),
+                "latency_ms": drafted.latency_ms,
+                "files": len(drafted.output.files),
+                "output": drafted.output.model_dump(mode="json"),
+            }
         else:
             case = ReviewCase(
                 diff=diff,
