@@ -26,11 +26,12 @@ migration fails, the command fails and new `backend` and `worker` containers are
 so a fresh stack without the schema never looks healthy. Containers that were already running
 keep running: there the exit code of `up` is the only signal. `Can't locate revision` from
 `bootstrap` means another branch has migrated the database further: go back to that branch or
-reset with `docker compose down -v`. `immutable prompt changed` from `bootstrap` means that a
-seeded prompt file in `review/prompts/` was edited: a prompt version never changes once seeded.
-Revert the edit and put the change into a new version `<key>.v<N+1>.md` with `version: <N+1>`
-in its frontmatter (`bootstrap` activates the newest version), or reset with
-`docker compose down -v`.
+reset with `docker compose down -v`. `immutable prompt changed` from `bootstrap` means that the
+database holds another text for a prompt version `<key>.v<N>` from `review/prompts/`: a seeded
+version never changes. If you edited that file, revert the edit and put the change into a new
+version `<key>.v<N+1>.md` with `version: <N+1>` in its frontmatter (`bootstrap` activates the
+newest version). If another branch seeded its own `<key>.v<N>`, reverting does not help: go back
+to that branch. In both cases a reset with `docker compose down -v` also works.
 
 Run the same command after pulling new commits: `--build` rebuilds the image and `bootstrap`
 applies the new migrations. Without code changes `docker compose up --wait` is enough and,
