@@ -227,8 +227,23 @@ generated safe manifest with first model and sanitized provider identity).
 The report and manifest provenance retain recording time,
 fallback model and sanitized effective settings; secrets, raw endpoint URLs and
 arbitrary provider metadata are excluded. It does not
-contain raw model text, provider envelopes or credentials. Raw responses exist only on the temporary runner; use a local capture when preparing a
-new committed baseline. A run spends the team EUrouter balance, including
+contain raw model text, provider envelopes or credentials.
+
+The boolean **export_raw_responses** input defaults to `false`. Leave it unchecked
+for metrics-only runs. Explicitly enable it when preparing a committed baseline:
+the separate `eval-live-raw-<run-id>-<attempt>` artifact retains only the generated
+case-response files and `manifest.json` for 14 days. It preserves all answer bytes,
+including empty or invalid first answers, and excludes unexpected files, logs,
+prompts and provider envelopes. The export validates the manifest against the
+evaluated case IDs and rejects missing files or symlinks before upload. Raw model
+text becomes downloadable with this opt-in; review it before publication.
+Verify `run_metadata.baseline_publishable`, completeness and each response's
+SHA-256/byte count against the safe metadata artifact before copying the full
+capture unchanged into `responses/`. The manifest records paths and provenance;
+per-response hashes are in the safe metadata artifact. Replay the copied capture
+offline and check for drift before committing it.
+
+A run spends the team EUrouter balance, including
 retries/repair, can take tens of minutes, and has a 60-minute job timeout. Concurrent
 runs of this workflow are serialized. This workflow does not verify conventions
 on the two selected EUrouter models.

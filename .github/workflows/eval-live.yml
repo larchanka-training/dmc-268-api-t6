@@ -8,6 +8,11 @@ on:
         description: "Primary EUrouter model (empty uses LLM_MODEL variable)"
         required: false
         type: string
+      export_raw_responses:
+        description: "Export raw first answers and manifest for baseline publication"
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -106,4 +111,43 @@ jobs:
             ${{ runner.temp }}/eval-report.json
             ${{ runner.temp }}/eval-response-metadata/
           if-no-files-found: warn
+          retention-days: 14
+
+      - name: Stage raw responses
+        id: raw_export
+        if: ${{ always() && inputs.export_raw_responses }}
+        shell: bash
+        run: |
+          uv run python - <<'PYTHON'
+          import json
+          import os
+          import shutil
+          from pathlib import Path
+
+          root = Path(os.environ["RUNNER_TEMP"])
+          responses = root / "eval-corpus/responses"
+          manifest = responses / "manifest.json"
+          if responses.is_symlink() or manifest.is_symlink():
+              raise SystemExit("Raw capture must not use symlinks")
+          mapping = json.loads(manifest.read_text(encoding="utf-8"))["responses"]
+          case_ids = {path.parent.name for path in (root / "eval-corpus/cases").glob("*/case.json")}
+          expected = {case_id: f"responses/{case_id}.json" for case_id in case_ids}
+          if not expected or mapping != expected:
+              raise SystemExit("Raw capture must map exactly to the evaluated cases")
+          sources = [manifest, *(responses / f"{case_id}.json" for case_id in sorted(case_ids))]
+          if any(path.is_symlink() or not path.is_file() for path in sources):
+              raise SystemExit("Raw capture files must be regular files without symlinks")
+          export = root / "eval-raw-responses"
+          export.mkdir()
+          for source in sources:
+              shutil.copyfile(source, export / source.name)
+          PYTHON
+
+      - name: Upload raw responses
+        if: ${{ always() && inputs.export_raw_responses && steps.raw_export.outcome == 'success' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: eval-live-raw-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/eval-raw-responses/
+          if-no-files-found: error
           retention-days: 14
