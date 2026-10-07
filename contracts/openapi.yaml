@@ -84,8 +84,6 @@ paths:
             maximum: 100
             default: 50
       responses:
-        "503":
-          description: Authentication is not configured.
         "200":
           description: One page of runs.
           content:
@@ -102,6 +100,8 @@ paths:
                 anyOf:
                   - $ref: "#/components/schemas/HTTPValidationError"
                   - $ref: "#/components/schemas/ErrorResponse"
+        "503":
+          description: Authentication is not configured.
   /api/runs/{run_id}:
     parameters:
       - $ref: "#/components/parameters/RunId"
@@ -114,8 +114,6 @@ paths:
         budget (api#20 D3).
       x-service: portal-api
       responses:
-        "503":
-          description: Authentication is not configured.
         "200":
           description: The run with its review results.
           content:
@@ -128,6 +126,8 @@ paths:
           $ref: "#/components/responses/NotFound"
         "422":
           $ref: "#/components/responses/ValidationFailed"
+        "503":
+          description: Authentication is not configured.
   /api/runs/{run_id}/rerun:
     parameters:
       - $ref: "#/components/parameters/RunId"
@@ -141,8 +141,6 @@ paths:
         reviewer flag and CI are not checked (PIPELINE_SPEC T3). Returns the new, queued run.
       x-service: portal-api
       responses:
-        "503":
-          description: Authentication is not configured.
         "202":
           description: The new run was accepted and queued.
           content:
@@ -161,6 +159,8 @@ paths:
                 $ref: "#/components/schemas/ErrorResponse"
         "422":
           $ref: "#/components/responses/ValidationFailed"
+        "503":
+          description: Authentication is not configured.
   /api/runs/{run_id}/cancel:
     parameters:
       - $ref: "#/components/parameters/RunId"
@@ -173,8 +173,6 @@ paths:
         `cancelRequested: true` until the worker stops it. Terminal runs are returned unchanged.
       x-service: portal-api
       responses:
-        "503":
-          description: Authentication is not configured.
         "200":
           description: The run after the cancellation request.
           content:
@@ -187,6 +185,8 @@ paths:
           $ref: "#/components/responses/NotFound"
         "422":
           $ref: "#/components/responses/ValidationFailed"
+        "503":
+          description: Authentication is not configured.
   /api/runs/{run_id}/comments:
     parameters:
       - $ref: "#/components/parameters/RunId"
@@ -196,8 +196,6 @@ paths:
       summary: List the review comments a run published
       x-service: portal-api
       responses:
-        "503":
-          description: Authentication is not configured.
         "200":
           description: Published comments of the run.
           content:
@@ -212,6 +210,8 @@ paths:
           $ref: "#/components/responses/NotFound"
         "422":
           $ref: "#/components/responses/ValidationFailed"
+        "503":
+          description: Authentication is not configured.
   /api/runs/{run_id}/actions:
     parameters:
       - $ref: "#/components/parameters/RunId"
@@ -221,8 +221,6 @@ paths:
       summary: List the recorded steps of a run
       x-service: portal-api
       responses:
-        "503":
-          description: Authentication is not configured.
         "200":
           description: Run actions ordered by index.
           content:
@@ -237,6 +235,8 @@ paths:
           $ref: "#/components/responses/NotFound"
         "422":
           $ref: "#/components/responses/ValidationFailed"
+        "503":
+          description: Authentication is not configured.
   /api/runs/{run_id}/actions/{index}/response:
     parameters:
       - $ref: "#/components/parameters/RunId"
@@ -255,8 +255,6 @@ paths:
         inline responses.
       x-service: portal-api
       responses:
-        "503":
-          description: Authentication is not configured.
         "200":
           description: The stored response body, any JSON value.
           content:
@@ -268,6 +266,8 @@ paths:
           $ref: "#/components/responses/NotFound"
         "422":
           $ref: "#/components/responses/ValidationFailed"
+        "503":
+          description: Authentication is not configured.
   /api/runs/{run_id}/diff:
     parameters:
       - $ref: "#/components/parameters/RunId"
@@ -277,8 +277,6 @@ paths:
       summary: Get the raw per-file diff of a run
       x-service: portal-api
       responses:
-        "503":
-          description: Authentication is not configured.
         "200":
           description: One entry per changed file.
           content:
@@ -293,6 +291,8 @@ paths:
           $ref: "#/components/responses/NotFound"
         "422":
           $ref: "#/components/responses/ValidationFailed"
+        "503":
+          description: Authentication is not configured.
   /api/runs/{run_id}/files:
     parameters:
       - $ref: "#/components/parameters/RunId"
@@ -327,8 +327,6 @@ paths:
             maximum: 1000
             default: 200
       responses:
-        "503":
-          description: Authentication is not configured.
         "200":
           description: The requested lines.
           content:
@@ -357,6 +355,8 @@ paths:
                 anyOf:
                   - $ref: "#/components/schemas/HTTPValidationError"
                   - $ref: "#/components/schemas/ErrorResponse"
+        "503":
+          description: Authentication is not configured.
   /api/stream:
     get:
       operationId: streamRunUpdates
@@ -402,8 +402,6 @@ paths:
           schema:
             type: string
       responses:
-        "503":
-          description: Authentication is not configured.
         "200":
           description: >-
             A Server-Sent Events stream of `run.updated` events and `: keepalive` comment
@@ -420,6 +418,8 @@ paths:
                   $ref: "#/components/schemas/RunUpdatedEvent"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "503":
+          description: Authentication is not configured.
   /api/repos:
     get:
       operationId: listRepositories
@@ -430,8 +430,6 @@ paths:
         operation and no collection update.
       x-service: portal-api
       responses:
-        "503":
-          description: Authentication is not configured.
         "200":
           description: Repositories visible to the caller's workspaces.
           content:
@@ -442,6 +440,8 @@ paths:
                   $ref: "#/components/schemas/Repository"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "503":
+          description: Authentication is not configured.
   /api/repos/{repo_id}:
     parameters:
       - $ref: "#/components/parameters/RepoId"
@@ -451,8 +451,6 @@ paths:
       summary: Get one repository
       x-service: portal-api
       responses:
-        "503":
-          description: Authentication is not configured.
         "200":
           description: The repository.
           content:
@@ -465,6 +463,8 @@ paths:
           $ref: "#/components/responses/NotFound"
         "422":
           $ref: "#/components/responses/ValidationFailed"
+        "503":
+          description: Authentication is not configured.
     patch:
       operationId: updateRepository
       tags: [repositories]
@@ -477,8 +477,6 @@ paths:
             schema:
               $ref: "#/components/schemas/RepositoryUpdate"
       responses:
-        "503":
-          description: Authentication is not configured.
         "200":
           description: The updated repository.
           content:
@@ -491,6 +489,8 @@ paths:
           $ref: "#/components/responses/NotFound"
         "422":
           $ref: "#/components/responses/ValidationFailed"
+        "503":
+          description: Authentication is not configured.
   /api/repos/{repo_id}/pulls:
     parameters:
       - $ref: "#/components/parameters/RepoId"
@@ -509,8 +509,6 @@ paths:
             default: open
         - $ref: "#/components/parameters/Cursor"
       responses:
-        "503":
-          description: Authentication is not configured.
         "200":
           description: One page of pull requests, most recently updated first.
           content:
@@ -523,6 +521,8 @@ paths:
           $ref: "#/components/responses/NotFound"
         "422":
           $ref: "#/components/responses/ValidationFailed"
+        "503":
+          description: Authentication is not configured.
   /api/repos/{repo_id}/rules:
     parameters:
       - $ref: "#/components/parameters/RepoId"
@@ -534,8 +534,6 @@ paths:
       x-status: planned
       x-note: Post-MVP; the shape is indicative until the rules UI is scheduled.
       responses:
-        "503":
-          description: Authentication is not configured.
         "200":
           description: Rule set versions, newest first.
           content:
@@ -550,6 +548,8 @@ paths:
           $ref: "#/components/responses/NotFound"
         "422":
           $ref: "#/components/responses/ValidationFailed"
+        "503":
+          description: Authentication is not configured.
     post:
       operationId: createRuleVersion
       tags: [rules]
@@ -564,8 +564,6 @@ paths:
             schema:
               $ref: "#/components/schemas/RuleVersionCreate"
       responses:
-        "503":
-          description: Authentication is not configured.
         "201":
           description: The new active version.
           content:
@@ -578,6 +576,8 @@ paths:
           $ref: "#/components/responses/NotFound"
         "422":
           $ref: "#/components/responses/ValidationFailed"
+        "503":
+          description: Authentication is not configured.
   /api/rules/{rule_id}/preview:
     parameters:
       - name: rule_id
@@ -595,8 +595,6 @@ paths:
       x-status: planned
       x-note: Post-MVP; the shape is indicative until the rules UI is scheduled.
       responses:
-        "503":
-          description: Authentication is not configured.
         "200":
           description: Matching pull requests.
           content:
@@ -609,6 +607,8 @@ paths:
           $ref: "#/components/responses/NotFound"
         "422":
           $ref: "#/components/responses/ValidationFailed"
+        "503":
+          description: Authentication is not configured.
   /api/metrics/summary:
     get:
       operationId: getMetricsSummary
@@ -626,8 +626,6 @@ paths:
             enum: [24h, 7d, 30d]
             default: 24h
       responses:
-        "503":
-          description: Authentication is not configured.
         "200":
           description: Metrics for the requested range.
           content:
@@ -638,6 +636,8 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "422":
           $ref: "#/components/responses/ValidationFailed"
+        "503":
+          description: Authentication is not configured.
   /api/auth/github/callback:
     post:
       operationId: exchangeGithubCode
@@ -656,8 +656,6 @@ paths:
             schema:
               $ref: "#/components/schemas/AuthCallbackRequest"
       responses:
-        "503":
-          description: Authentication is not configured.
         "200":
           description: A new session.
           headers:
@@ -667,8 +665,6 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/AuthSession"
-        "502":
-          description: GitHub authentication is unavailable.
         "400":
           description: The code is invalid, expired or already used.
           content:
@@ -677,6 +673,10 @@ paths:
                 $ref: "#/components/schemas/ErrorResponse"
         "422":
           $ref: "#/components/responses/ValidationFailed"
+        "502":
+          description: GitHub authentication is unavailable.
+        "503":
+          description: Authentication is not configured.
   /api/auth/refresh:
     post:
       operationId: refreshSession
@@ -687,8 +687,6 @@ paths:
       security:
         - refreshCookie: []
       responses:
-        "503":
-          description: Authentication is not configured.
         "200":
           description: A new access token; the refresh cookie is rotated.
           headers:
@@ -704,6 +702,8 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
+        "503":
+          description: Authentication is not configured.
   /api/auth/me:
     get:
       operationId: getCurrentUser
@@ -712,8 +712,6 @@ paths:
       x-service: auth-api
       x-issue: "#11"
       responses:
-        "503":
-          description: Authentication is not configured.
         "200":
           description: The signed-in user.
           content:
@@ -722,6 +720,8 @@ paths:
                 $ref: "#/components/schemas/Me"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "503":
+          description: Authentication is not configured.
   /api/auth/logout:
     post:
       operationId: logout
@@ -734,8 +734,6 @@ paths:
       x-issue: "#11"
       security: []
       responses:
-        "503":
-          description: Authentication is not configured.
         "204":
           description: Signed out.
           headers:
@@ -743,6 +741,8 @@ paths:
               description: Expires the `refresh_token` cookie (`Max-Age=0; Path=/api/auth`).
               schema:
                 type: string
+        "503":
+          description: Authentication is not configured.
 components:
   securitySchemes:
     bearerAuth:
