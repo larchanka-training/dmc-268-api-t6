@@ -7,6 +7,7 @@ the truncation trailer of review/README.md "Input envelope", or is moved to
 
 from __future__ import annotations
 
+import logging
 import math
 import re
 from collections.abc import Callable
@@ -24,6 +25,8 @@ from app.modules.reviews.application.prompt_builder import (
     truncation_trailer,
     xml_text,
 )
+
+_LOGGER = logging.getLogger(__name__)
 
 _TEST_DIRECTORIES = frozenset({"tests", "test", "__tests__", "spec"})
 _TEST_NAME_MARKERS = ("test_", "_test.", ".test.", ".spec.")
@@ -68,6 +71,7 @@ def fit_review_context(
     if prompt_tokens(context, counter) <= max_prompt_tokens:
         return context
 
+    _warn_ignored_rules(context.rules)
     files = context.changed_files
     order = sorted(
         range(len(files)),
@@ -218,6 +222,18 @@ def _matches_rule(path: str, rule: ReviewRule) -> bool:
     # An over-limit include or exclude makes the entire rule inapplicable. In
     # particular, skipping an oversized exclude must not promote the file.
     return matches(rule.include) is True and matches(rule.exclude) is False
+
+
+def _warn_ignored_rules(rules: tuple[ReviewRule, ...]) -> None:
+    """Log each rule that ``_matches_rule`` ignores for every path, once per fit."""
+    for rule in rules:
+        if any(_expand_braces(pattern) is None for pattern in (*rule.include, *rule.exclude)):
+            _LOGGER.warning(
+                "Custom rule %r is ignored for file priority: "
+                "a brace glob exceeds %d expansion units",
+                rule.name,
+                _MAX_BRACE_EXPANSION_WORK,
+            )
 
 
 def _expand_braces(pattern: str) -> list[str] | None:

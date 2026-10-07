@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 from pathlib import Path
 from time import perf_counter
@@ -335,6 +336,36 @@ def test_oversized_exclude_glob_does_not_promote_a_file() -> None:
 
     kept = {file.path: file for file in fitted.changed_files}
     assert kept["aa.py"] == original.changed_files[1]
+
+
+def test_over_limit_brace_glob_logs_one_warning_per_ignored_rule(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    rules = (
+        ReviewRule("Explosive", ("{a,b}" * 18,), (), ("Check.",)),
+        ReviewRule("Exclusion", ("b" * 18,), ("{a,b}" * 18,), ("Check.",)),
+        ReviewRule("Plain", ("{src,lib}/*.py",), (), ("Check.",)),
+    )
+    original = context(
+        changed_file("b" * 18, 20),
+        changed_file("aa.py", 20),
+        changed_file("src/c.py", 20),
+        rules=rules,
+    )
+    budget = prompt_tokens(original, COUNTER) - 20 * 60
+
+    with caplog.at_level(logging.WARNING, logger="app.modules.reviews.application.prompt_budget"):
+        fit_review_context(original, max_prompt_tokens=budget, counter=COUNTER)
+
+    # Once per rule, not once per file; the glob itself and the paths stay out of the log.
+    assert [(record.levelname, record.getMessage()) for record in caplog.records] == [
+        (
+            "WARNING",
+            f"Custom rule {name!r} is ignored for file priority: "
+            "a brace glob exceeds 256 expansion units",
+        )
+        for name in ("Explosive", "Exclusion")
+    ]
 
 
 @pytest.mark.parametrize(
