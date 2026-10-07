@@ -249,6 +249,8 @@ def test_gateway_returns_normalized_output_and_keeps_raw_provider_trace() -> Non
         "app/modules/billing/application/charge.py",
     ]
     assert findings[0]["start_line"] is None
+    # accepted as it came: a lossless deviation costs no repair call
+    assert [record.kind.value for _, record in trace.records] == ["primary"]
     assert isinstance(ReviewOutput.model_validate(result.output), ReviewOutput)
     assert raw_response == expected_raw_response
     assert trace.records[0][1].response == expected_raw_response
