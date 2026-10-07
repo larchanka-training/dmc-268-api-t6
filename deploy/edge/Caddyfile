@@ -32,7 +32,6 @@
 staging-api.{$APP_DOMAIN} {
 	import hsts
 	reverse_proxy api-staging:8000
-}
 
 api.{$APP_DOMAIN} {
 	import hsts
