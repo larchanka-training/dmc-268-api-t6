@@ -1,8 +1,9 @@
 name: LLM live run
 
 # Manual live check of the LLM gateway on EUrouter (#33, OQ-2 / D7 in docs/SYSTEM_DESIGN.md §15).
-# Not part of the required checks: those run without network and keys. The org secret
-# AI_DMC268_T6 is used only here; GitHub masks it in the log, the gateway never logs keys.
+# Not part of the required checks: those run without network and keys. In CI the org secret
+# AI_DMC268_T6 is used only here and in eval-live.yml (besides the staging worker bundle of
+# ci-cd.yml); GitHub masks it in the log, the gateway never logs keys.
 # This manual job fetches ECB FX over outbound HTTPS from data-api.ecb.europa.eu.
 
 on:
