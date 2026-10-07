@@ -14,7 +14,6 @@ class FakeUow:
 
     attribute: str
     port: Any
-    rollbacks: int = 0
 
     def __getattr__(self, name: str) -> Any:
         if name == self.attribute:
@@ -36,7 +35,7 @@ class FakeUow:
         pass
 
     async def rollback(self) -> None:
-        self.rollbacks += 1
+        pass
 
 
 def targets_uow(targets: Any) -> Callable[[], Any]:
