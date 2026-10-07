@@ -355,9 +355,10 @@ paths:
         frame is not an event and carries no `id:`.
 
 
-        **Event id.** The `id:` of a `run.updated` event is an opaque string that grows with the
-        run's last change. Clients must not parse it: they keep the `id:` of the last event they
-        received and send it back as `Last-Event-ID` when they reconnect.
+        **Event id.** The `id:` of a `run.updated` event is an opaque string. Clients must not
+        parse, order or compare ids: a live event can carry a lower id than an event replayed
+        before it. They only keep the `id:` of the last event they received and send it back as
+        `Last-Event-ID` when they reconnect.
 
 
         **Replay.** A reconnect with `Last-Event-ID` first receives one `run.updated` event, with

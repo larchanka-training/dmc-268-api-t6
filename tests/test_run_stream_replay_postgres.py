@@ -128,6 +128,26 @@ def test_replay_skips_runs_older_than_the_window_and_keeps_the_newest_on_overflo
 
 
 @pytest.mark.integration
+def test_replay_window_edge_is_exclusive_to_the_microsecond(env: Env) -> None:
+    since = NOW
+    edge = since - timedelta(seconds=30)
+    with api(env, SCOPE) as (client, factory):
+        _set_updated_at(
+            factory,
+            {
+                RUN_DONE: edge,  # exactly at the edge: `updated_at > edge` leaves it out
+                RUN_ATTEMPTED: edge - timedelta(microseconds=1),
+                RUN_CLOSED: edge + timedelta(microseconds=1),
+            },
+        )
+        replayed = _replayed(client, since)
+
+    assert replayed == [
+        (run_event_id(edge + timedelta(microseconds=1)), str(RUN_CLOSED), "succeeded"),
+    ]
+
+
+@pytest.mark.integration
 def test_run_updated_at_returns_the_stored_value_only_for_visible_runs(env: Env) -> None:
     updated_at = NOW - timedelta(minutes=7)
     with api(env, SCOPE) as (_, factory):
