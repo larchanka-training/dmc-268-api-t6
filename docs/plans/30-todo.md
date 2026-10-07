@@ -141,7 +141,7 @@ T01–T04, C01–C04 and C06–C25 are complete; the corpus checkpoint has user 
 
 ## UI and documentation retirement
 
-User scope for this work is API only; UI PRs #60/#61 were closed without merging. The UI tasks now live elsewhere: T14 under ui PR #55 (merged 01.10.2026), per its Ownership note below; T15 and the UI portion of T17 in [api#55](https://github.com/larchanka-training/dmc-268-api-t6/issues/55) (ui PR #69, merged 05.10.2026); T16 in [ui#66](https://github.com/larchanka-training/dmc-268-ui-t6/issues/66), part 1.
+User scope for this work is API only; UI PRs #60/#61 were closed without merging. The UI tasks now live elsewhere: T14 under ui PR #55 (merged 01.10.2026), per its Ownership note below; T15 and the UI portion of T17 in [api#55](https://github.com/larchanka-training/dmc-268-api-t6/issues/55) (ui PR #69, merged 05.10.2026); T16 in [ui#66](https://github.com/larchanka-training/dmc-268-ui-t6/issues/66), part 1 (ui PR #73, merged 07.10.2026).
 
 ### T14 — UI auth client tests (ui; 2–4 new or existing test files)
 
@@ -155,8 +155,8 @@ User scope for this work is API only; UI PRs #60/#61 were closed without merging
 
 ### T16 — UI PR quality job and required ruleset (ui; 1–2 files + GitHub setting)
 
-- [ ] **Acceptance:** PR CI executes `pnpm lint`, `pnpm check-types`, `pnpm format:check`, `pnpm test`; resulting check is configured required in branch ruleset.
-- [ ] **Verify:** A UI PR shows the green job and repository ruleset lists its exact check name; `pnpm build` also passes locally. **Depends:** ui#50/PR #55 workflow merge or comment. **Likely files:** ui `.github/workflows/ci-cd.yml`; ruleset. **Ownership:** PR #55 currently owns workflow.
+- [x] **Acceptance:** PR CI executes `pnpm lint`, `pnpm check-types`, `pnpm format:check`, `pnpm test`; resulting check is configured required in branch ruleset. Done in [ui#73](https://github.com/larchanka-training/dmc-268-ui-t6/pull/73) (merged 07.10.2026, `ad86d7f`): ui `.github/workflows/ci-cd.yml` job `ui-quality` (check `UI quality`) runs on `pull_request` and executes these four commands plus `pnpm build`; ruleset `Protect Default Branch` (set by the repo admin) requires `Docker image build` and `UI quality`.
+- [x] **Verify:** A UI PR shows the green job and repository ruleset lists its exact check name; `pnpm build` also passes locally. `UI quality` is green on ui#73; on the probe [ui#75](https://github.com/larchanka-training/dmc-268-ui-t6/pull/75) (closed unmerged) it was red as a required check while `Docker image build` was green; `pnpm build` also passes: locally per the ui#73 description (head `e207ad0`) and in CI by the `Build` step of `UI quality`. **Depends:** ui#50/PR #55 workflow merge or comment. **Likely files:** ui `.github/workflows/ci-cd.yml`; ruleset. **Ownership:** none; the workflow change landed in ui#73.
 
 ### T17 — Canonical docs and old dataset retirement (api + ui; split PRs, 1–4 files each)
 
