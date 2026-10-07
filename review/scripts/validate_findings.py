@@ -4,8 +4,8 @@
 Usage: uv run python review/scripts/validate_findings.py <file.json>
 
 The kind is autodetected from the top-level key: `findings` -> ReviewOutput
-(review/prompts/review.system.v1.md, section 10), `files` -> RepoConventionsDraft
-(review/prompts/review.conventions.v1.md). A ReviewOutput's shape is checked
+(review/prompts/review.system.v2.md, section 10), `files` -> RepoConventionsDraft
+(review/prompts/review.conventions.v2.md). A ReviewOutput's shape is checked
 against review/schemas/review-output.schema.json (hence `jsonschema` and
 `uv run`); this script adds only the rules that schema cannot express. Exit
 codes: 0 = valid (prints "OK <kind> <n> items"), 1 = contract violations (one
