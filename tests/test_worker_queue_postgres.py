@@ -113,9 +113,13 @@ class Env:
     prompt_id: UUID
 
     def engine(self) -> AsyncEngine:
+        # application_name tells this test's sessions apart in pg_stat_activity.
         return create_async_engine(
             self.database_url,
-            connect_args={"options": f"-csearch_path={self.schema}"},
+            connect_args={
+                "options": f"-csearch_path={self.schema}",
+                "application_name": self.schema,
+            },
             poolclass=NullPool,
         )
 
@@ -342,7 +346,9 @@ class Model:
                     await session.scalar(
                         text(
                             "SELECT count(*) FROM pg_stat_activity WHERE datname = "
-                            "current_database() AND state LIKE 'idle in transaction%'"
+                            "current_database() AND application_name = "
+                            "current_setting('application_name') "
+                            "AND state LIKE 'idle in transaction%'"
                         )
                     )
                     or 0
