@@ -153,6 +153,9 @@ def test_stub_answers_503_only_when_the_upstream_is_unreachable() -> None:
     # The stub also answers for a deployed service that is down: it must not send prod users
     # to staging.
     assert "staging" not in stub.group(1).lower()
+    # ui.* has two upstreams: with ui-prod up and api-prod down, /api/* gets the stub while the
+    # host itself answers, so the text names the service behind the address, not the host.
+    assert stub.group(1) == '"The service behind this address is not running or is restarting."'
 
 
 def test_proxy_errors_stay_in_the_log_next_to_handle_errors() -> None:
