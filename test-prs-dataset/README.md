@@ -125,9 +125,64 @@ The manifest also stores sorted `static_inputs`, `static_digest`, and `corpus_di
 
 A supplied conventions prompt and its renderer are included only for that task. Byte hashing also warns on a docstring-only edit to any listed file; this conservative warning avoids missing a changed deadline or call policy. `run_failures.py` remains included because `FAST_ATTEMPT_DEADLINE` and `RETRYABLE_ERROR_CODES` are imported into the gateway path. Corpus inputs are every active `case.json`, patch, and recursive pre-image file. Every case ID maps exactly to `responses/<case-id>.json`; replay rejects unmapped extra files. Replay warns if either digest differs or a static file is missing; it never rewrites raw answers. Refresh the **entire** response set and manifest after any input edit, even if only one rule or case changes. Traversal and symlink inputs are rejected.
 
-## Recorded baseline — 2026-10-06
+## Recorded Mistral baseline — 2026-10-07
 
-The 24-case capture in [`responses/manifest.json`](responses/manifest.json) uses
+The complete 24-case capture in [`responses/manifest.json`](responses/manifest.json)
+uses `mistral-small-4` through EUrouter, with configured fallback
+`mistral-small-3.2-24b`. It was recorded by
+[Actions run 37607360909, attempt 1](https://github.com/larchanka-training/dmc-268-api-t6/actions/runs/37607360909)
+on source commit `36c976b05f383d4f4af79d3cbce1c9e61dab093e`, starting at
+`2026-10-07T10:26:17.148179Z` (12:26:17 Europe/Warsaw). This was one paid
+workflow run with empty `model` and `export_raw_responses=true`.
+
+The prompt is `review/prompts/review.system.v2.md` (`v2`), SHA-256
+`9177e358c23d1a7cd8987cbf667cf8b705c2afb27eaf8b2237480e4531431d75`.
+The engine is `fast`; primary structured output is `json_schema`, context window
+262144 tokens, output limit 8000 tokens, and per-call timeout 90 seconds.
+The manifest retains full effective settings and input digests. All 24 first calls
+used `mistral-small-4` and reported the serving-provider label `mistral`, digest
+`sha256-v1:8e1af0131864f4488dc577f497afcf5c87b74b237e86f0322abf99e8c2ef018a`.
+The configured provider label is `eurouter`. No arbitrary provider string is
+published. Every gateway case eventually reported `accepted` with no terminal
+provider/infrastructure failure; `baseline_publishable` is `true`.
+
+All 24 responses and the manifest were copied byte-for-byte from the opt-in raw
+artifact. Each response's SHA-256 and byte count match the separate safe metadata
+artifact; the raw and safe manifest copies also match. Offline replay has no drift
+warning, and its entire report after removing validator diagnostics matches the
+live safe report. These results score only the first raw answer; publishability
+and eventual gateway acceptance do not imply a quality threshold.
+
+| Metric | Baseline |
+| --- | --- |
+| First raw response validity | 20.8% (5/24) |
+| Micro TP / FP / FN | 1 / 1 / 18 |
+| Micro precision | 50.0% |
+| Micro recall | 5.3% |
+| Critical recall | 20.0% (1/5) |
+| Verdict agreement | 8.3% (2/24) |
+| Severity mismatches | 1 |
+
+| Category | TP | FP | FN | Precision | Recall |
+| --- | --- | --- | --- | --- | --- |
+| security | 0 | 0 | 4 | undefined | 0.0% |
+| correctness | 1 | 1 | 4 | 50.0% | 20.0% |
+| performance | 0 | 0 | 5 | undefined | 0.0% |
+| readability | 0 | 0 | 5 | undefined | 0.0% |
+
+The offline validator rejects 19 first answers. These disjoint groups account
+for all 19: custom-rule attribution-prefix failures only (11); attribution plus
+`start_line >= line` (4); attribution plus line-range and severity/confidence
+ordering failures (2); line-range failures only (2). There are no missing/empty
+first answers or JSON parse failures. All raw bytes remain unchanged, and all 24
+cases remain in the denominator. The one severity mismatch is LOG-02, predicted
+`high` versus ground-truth `critical`. These are mechanical scorer results, not
+manually adjudicated semantic accuracy.
+
+## Historical Nemotron baseline — 2026-10-06
+
+The prior 24-case capture in the
+[historical manifest](https://github.com/larchanka-training/dmc-268-api-t6/blob/cb365cb872f4ff6987b7abc631413017973c50d1/test-prs-dataset/responses/manifest.json) used
 `nvidia/nemotron-3-super-120b-a12b:free` through OpenRouter with
 `review/prompts/review.system.v2.md` (version `v2`). Recording started at
 `2026-10-06T20:43:54.136922Z` (22:43:54 Europe/Warsaw). Capture source commit:
@@ -166,8 +221,9 @@ provide a human-readable serving-provider name for this capture.
 | performance | 0 | 1 | 5 | 0.0% | 0.0% |
 | readability | 0 | 0 | 5 | undefined | 0.0% |
 
-These are mechanical scorer results, not a claim of manually adjudicated semantic
-accuracy. The first responses remain unchanged, including empty or invalid text.
+These historical mechanical scorer results are not a claim of manually adjudicated
+semantic accuracy. The historical responses remain accessible at the linked
+revision, including empty or invalid text.
 CLEAN-03, LOG-02, RES-03, SEC-02 and SEC-03 have `empty_answer`; SEC-04 has
 `no_content`. All six later reached `accepted`, but the missing first answers still
 count as invalid. LOG-03 ended with `llm_invalid_output` and has truncated JSON.
@@ -176,7 +232,7 @@ for the eighth invalid first answer. The manifest marks the
 capture publishable because no terminal infrastructure/provider failures remain;
 that flag does not imply high quality or completion of all issue #53 criteria.
 
-Replay the committed capture without credentials or network calls:
+Replay the current committed Mistral capture without credentials or network calls:
 
 ```sh
 uv run python review/scripts/eval_replay.py
@@ -249,11 +305,11 @@ runs of this workflow are serialized. This workflow does not verify conventions
 on the two selected EUrouter models.
 
 
-### Expected baseline drift
+### Baseline drift
 
-The static digest includes gateway/settings inputs. Changes from #80 can therefore
-produce an expected static-input drift warning against the intermediate Nemotron
-capture. The warning is informative, not a quality gate; preserve the original
-capture and its provenance rather than editing its digest to hide drift. After
-merge, run the live workflow and collect the full selected Mistral baseline in a
-separate PR with `Refs #53`. Issue #53 remains open until that follow-up is accepted.
+The static digest includes gateway/settings inputs. The Mistral capture above
+replays without drift on its source commit and this publication change. Future
+changes to fingerprinted inputs can produce a drift warning; preserve the
+original capture and its provenance rather than editing its digest to hide drift.
+Refresh the entire baseline in a separately authorized run when needed. Issue #53
+remains open until the tech lead checks and accepts its criteria.

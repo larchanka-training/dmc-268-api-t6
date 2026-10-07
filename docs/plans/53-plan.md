@@ -141,3 +141,17 @@ new secrets to configure locally. If final rebasing introduces drift, or the sin
 run cannot provide a publishable capture, keep completed work reviewable and report
 the blocker instead of dispatching again. Final PR sections are `What`, `Why`,
 `How to verify`, `Refs`, with no closing keyword or Development-panel issue link.
+
+## Execution checkpoint (2026-10-07)
+
+Tasks 1–3 completed through draft PR #93 and the sole authorized paid
+[run 37607360909, attempt 1](https://github.com/larchanka-training/dmc-268-api-t6/actions/runs/37607360909)
+at `36c976b05f383d4f4af79d3cbce1c9e61dab093e`. The capture is publishable and
+complete; all 25 downloaded files were copied unchanged, with response hashes
+and byte counts verified against safe metadata. Offline replay has no drift and
+matches the live safe report exactly after removing local validator diagnostics.
+First-answer validity is 5/24; all 19 invalid cases remain in the denominator.
+Detailed measurement and invalidity evidence is recorded in the task list and
+dataset README. Final local gates and corpus validation pass; independent
+review, commit/push and final-head CI remain for task 5. Post-hook byte
+verification remains required. No additional paid run is authorized.

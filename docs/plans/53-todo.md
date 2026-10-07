@@ -2,7 +2,8 @@
 
 Plan: [53-plan.md](53-plan.md). Status: user approved the plan, draft PR publication and exactly one paid run
 on 2026-10-07. Task 1 implementation, local verification and independent review complete;
-publication pending. No paid run yet.
+draft PR #93 published; the sole approved paid run succeeded. Capture verified
+and copied locally; final review and publication pending.
 
 ## Task 1: Secure optional raw-response export
 
@@ -28,13 +29,13 @@ Description: Publish the reviewed workflow change so the one live run uses the P
 
 Acceptance criteria:
 - [x] Main is refreshed, branch is rebased, ownership rechecked, export implementation reviewed.
-- [ ] Four mandatory gates pass; draft PR contains `What` / `Why` / `How to verify` / `Refs #53`.
-- [ ] PR is attached to chat and the exact clean branch SHA for dispatch is recorded.
+- [x] Four mandatory gates pass; draft PR contains `What` / `Why` / `How to verify` / `Refs #53`.
+- [x] PR is attached to chat and the exact clean branch SHA for dispatch is recorded.
 
 Verification:
 - [x] Run `uv run ruff check .`, `uv run ruff format --check .`, `uv run mypy .`, `uv run pytest`.
 - [x] Run dataset validation and offline replay; review any pre-existing Nemotron drift honestly.
-- [ ] Inspect pushed workflow and PR diff; no unrelated detached-checkout commits included.
+- [x] Inspect pushed workflow and PR diff; no unrelated detached-checkout commits included.
 
 Dependencies: task 1; approved draft publication. Files: plan status and task-1 files.
 Estimated scope: small publication operation.
@@ -42,20 +43,20 @@ Estimated scope: small publication operation.
 ## Checkpoint: Before spending
 
 - [x] Security regression coverage and local gates green.
-- [ ] Approval covers one paid run; branch inputs are final for this capture.
+- [x] Approval covers one paid run; branch inputs are final for this capture.
 
 ## Task 3: Capture the Mistral baseline once
 
 Description: Dispatch the approved workflow from the PR branch using team Actions credentials.
 
 Acceptance criteria:
-- [ ] Non-secret variables select Mistral primary/fallback; dispatch has empty `model` and true export flag.
-- [ ] Exactly one paid workflow run is started; record run URL, attempt and branch SHA.
-- [ ] Download raw and safe artifacts; if absent/nonpublishable, report in PR and preserve existing baseline.
+- [x] Non-secret variables select Mistral primary/fallback; dispatch has empty `model` and true export flag.
+- [x] Exactly one paid workflow run is started; record run URL, attempt and branch SHA.
+- [x] Download raw and safe artifacts; if absent/nonpublishable, report in PR and preserve existing baseline.
 
 Verification:
-- [ ] Inspect run completion, `run_metadata.baseline_publishable`, model and sanitized provider provenance.
-- [ ] Require exactly 24 active case responses plus manifest; verify case mapping and safe metadata hashes.
+- [x] Inspect run completion, `run_metadata.baseline_publishable`, model and sanitized provider provenance.
+- [x] Require exactly 24 active case responses plus manifest; verify case mapping and safe metadata hashes.
 
 Dependencies: task 2; Actions access, organization secret and credit availability.
 Files: temporary downloaded artifacts only. Estimated scope: small external operation.
@@ -65,14 +66,14 @@ Files: temporary downloaded artifacts only. Estimated scope: small external oper
 Description: Replace the full recorded response set and document the new measurement.
 
 Acceptance criteria:
-- [ ] All 24 response files and manifest equal downloaded bytes; response SHA/length match safe metadata.
-- [ ] Offline replay is drift-free and matches live metrics; no invalid answer is repaired or excluded.
-- [ ] README has new metrics/provenance/run link, old Nemotron metrics, and correct optional-export guidance.
+- [x] All 24 response files and manifest equal downloaded bytes; response SHA/length match safe metadata.
+- [x] Offline replay is drift-free and matches live metrics; no invalid answer is repaired or excluded.
+- [x] README has new metrics/provenance/run link, old Nemotron metrics, and correct optional-export guidance.
 
 Verification:
-- [ ] Validate corpus, run offline replay to a temporary JSON report and compare metrics/provenance.
+- [x] Validate corpus, run offline replay to a temporary JSON report and compare metrics/provenance.
 - [ ] Hash all 25 files before copy and after commit hooks; preserve manifest unchanged.
-- [ ] Derive first-answer invalidity groups from validator output for PR, reconciling case counts.
+- [x] Derive first-answer invalidity groups from validator output for PR, reconciling case counts.
 
 Dependencies: publishable task-3 run. Files: `test-prs-dataset/responses/*.json`,
 `test-prs-dataset/README.md`. Estimated scope: small authored documentation plus
@@ -80,8 +81,8 @@ one indivisible, mechanical 25-file capture; never split or hand-edit raw data.
 
 ## Checkpoint: Capture accepted for publication
 
-- [ ] Publishability, completeness, byte identity and no replay drift established.
-- [ ] No further paid run performed; failure/drift follows plan stop conditions.
+- [x] Publishability, completeness, byte identity and no replay drift established.
+- [x] No further paid run performed; failure/drift follows plan stop conditions.
 
 ## Task 5: Complete review and evidence
 
@@ -124,4 +125,50 @@ Dependencies: task 4. Files: plan/task status and PR body. Estimated scope: smal
   rechecked immediately before staging: the same eight PRs have no overlap.
   Only the workflow, its contract tests, dataset README and these two plan
   files are included; no dependency or recorded-response changes.
-- Commit/push, draft PR and paid capture remain pending.
+- Workflow publication commit: `36c976b05f383d4f4af79d3cbce1c9e61dab093e`;
+  [draft PR #93](https://github.com/larchanka-training/dmc-268-api-t6/pull/93)
+  is attached to the chat. No unrelated history or fingerprinted inputs changed.
+
+## Single paid capture evidence (2026-10-07)
+
+- Exactly one run was dispatched by the coordinator after user approval:
+  [37607360909, attempt 1](https://github.com/larchanka-training/dmc-268-api-t6/actions/runs/37607360909),
+  source SHA `36c976b05f383d4f4af79d3cbce1c9e61dab093e`, empty `model`,
+  `export_raw_responses=true`. Started 10:26:01 UTC; completed 10:28:11 UTC.
+- Primary `mistral-small-4`, fallback `mistral-small-3.2-24b`; all 24 first
+  provider labels are `mistral`, all gateway statuses are `accepted`.
+  `baseline_publishable=true`, no nonpublishable cases.
+- Downloaded raw and safe artifacts into `/tmp/issue-53-capture`. Exactly 24
+  response files plus manifest; each response SHA-256/byte count agrees with
+  safe metadata, and raw/safe manifests are byte-identical. The manifest format
+  remains unchanged; response hashes are in safe per-case metadata.
+- Copied all 25 files unchanged. SHA-256 inventory:
+  `/tmp/issue-53-capture-sha256.json`. Recheck it after commit hooks.
+- Offline report `/tmp/issue-53-mistral-replay.json` has no drift warnings;
+  removing only validator diagnostics makes it exactly equal to the live safe
+  report (including every metric, status and provenance field).
+- Measured validity 5/24 (20.8%), TP=1 FP=1 FN=18, precision 50%, recall 5.3%,
+  critical recall 1/5 (20%), verdict agreement 2/24 (8.3%), one severity
+  mismatch (LOG-02: high versus critical).
+- Actual validator diagnostics account for all 19 invalid first answers in
+  disjoint groups: attribution prefix only 11; attribution + line range 4;
+  attribution + line range + ordering 2; line range only 2. No empty/missing
+  first answers or JSON parse failures. PR-ready details:
+  `/tmp/issue-53-invalidity.md`. No repairs or exclusions of raw answers.
+- README records new metrics and provenance and preserves Nemotron metrics with
+  a historical manifest link pinned to `cb365cb872f4ff6987b7abc631413017973c50d1`.
+- Final local gates pass: Ruff lint and format, mypy (332 files), pytest
+  (2087 passed, 95 skipped, 2 dependency deprecation warnings; 66.92 seconds).
+  Dataset validation passes 24/24; local replay matches live without drift.
+- Initial workflow-head PR CI passed, including Python lint/type/test
+  (run `37607282765`); final capture-head CI awaits publication.
+- The 25-file data replacement is the approved indivisible mechanical batch;
+  it changes no code and is verified by byte identity and replay, rather than
+  new implementation tests. Task 1 retained its test-first proof.
+- Final independent standards and spec reviews: zero findings; both verified
+  capture hashes independently. All 25 pre-commit SHA-256 checks pass.
+- Publication refresh found main advanced to `6f25ffa` through #84, changing
+  only `.env.example`, root README, secrets docs and webhook-worker docs.
+  Rebase and post-rebase replay will verify no captured-input drift.
+- Commit/push, post-hook hash verification and final-head CI remain pending.
+  No second paid run, merge or issue closure has been performed.
