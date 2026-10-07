@@ -148,10 +148,14 @@ provider/infrastructure failure; `baseline_publishable` is `true`.
 
 All 24 responses and the manifest were copied byte-for-byte from the opt-in raw
 artifact. Each response's SHA-256 and byte count match the separate safe metadata
-artifact; the raw and safe manifest copies also match. Offline replay has no drift
-warning, and its entire report after removing validator diagnostics matches the
-live safe report. These results score only the first raw answer; publishability
-and eventual gateway acceptance do not imply a quality threshold.
+artifact; the raw and safe manifest copies also match. At the publication commit
+`ba99c11`, offline replay had no drift warning, and its entire report after
+removing validator diagnostics matched the live safe report. Later edits to
+fingerprinted gateway files make replay on `main` print a static-input drift
+warning (now `Static input digest mismatch; refresh the complete baseline`). It
+clears only when the complete baseline is re-captured, next planned in #82; see
+[Baseline drift](#baseline-drift). These results score only the first raw answer;
+publishability and eventual gateway acceptance do not imply a quality threshold.
 
 | Metric | Baseline |
 | --- | --- |
