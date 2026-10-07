@@ -22,6 +22,7 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = REPO_ROOT / ".github" / "workflows" / "ci-cd.yml"
+ROLLBACK_WORKFLOW = WORKFLOW.parent / "rollback.yml"
 STAGING_COMPOSE = REPO_ROOT / "deploy" / "compose" / "staging.yml"
 PROJECT = "dmc-268-api-staging"
 
@@ -773,6 +774,22 @@ def test_ci_validates_the_edge_caddyfile_before_the_push() -> None:
     ) in script
     # The deploy runs caddy reload with this file: a broken one must stop the pipeline first.
     assert "- edge-validate" in push_image
+
+
+def test_rollback_validates_the_edge_caddyfile_before_it_reaches_the_host() -> None:
+    rollback = ROLLBACK_WORKFLOW.read_text(encoding="utf-8")
+    step = _workflow_step("caddy validate", ROLLBACK_WORKFLOW)
+    order = [
+        rollback.index(f"      - name: {name}\n")
+        for name in ("Checkout", "caddy validate", "Upload deploy files", "Upload edge proxy files")
+    ]
+
+    # Rollback uploads the Caddyfile of its own checkout and reloads Caddy with it: the CI check
+    # runs on that revision before the first step that reaches the host, as in the edge mode only.
+    assert _run_script(step) == _run_script(_workflow_step("caddy validate"))
+    assert "        if: steps.target.outputs.deploy_mode == 'edge'\n" in step
+    assert order == sorted(order)
+    assert not re.search(r"\bcaddy(?::\d|@sha256:)", rollback)
 
 
 def test_ui_host_sends_api_paths_to_the_api_and_the_rest_to_the_ui() -> None:
