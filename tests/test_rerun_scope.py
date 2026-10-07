@@ -31,7 +31,10 @@ def test_rerun_adapters_accept_scope_or_explicit_internal_bypass() -> None:
 
 
 def test_cancel_unit_of_work_rejects_missing_scope_at_construction() -> None:
-    with pytest.raises(ValueError, match="AuthScope"):
+    with pytest.raises(
+        ValueError,
+        match="^SqlAlchemyCancelRunUnitOfWork requires an AuthScope unless allow_unscoped=True$",
+    ):
         SqlAlchemyCancelRunUnitOfWork(async_sessionmaker())
 
 

@@ -68,15 +68,15 @@ def _portal_routes() -> list[tuple[str, str]]:
         ("POST", "/api/auth/logout"),
     }
     for route in iter_route_contexts(app.routes):
-        if route.path is None:
-            continue
+        assert route.path is not None, f"Route has no path: {route.original_route!r}"
         path = (
             route.path.replace("{run_id}", dummy_uuid)
             .replace("{repo_id}", dummy_uuid)
             .replace("{index}", "0")
         )
-        if not route.methods:
-            continue
+        assert route.methods, (
+            f"Route has no HTTP methods: {route.original_route!r}; path={route.path!r}"
+        )
         for method in sorted(route.methods):
             if (method, route.path) not in public_routes:
                 routes.append((method, path))
