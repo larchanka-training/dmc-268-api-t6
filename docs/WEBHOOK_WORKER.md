@@ -128,9 +128,10 @@ context releases the session lock in `finally` during cleanup and resets
 `lock_timeout` before returning the connection. Cancellation and DB unlock cleanup
 can extend actual lock hold time beyond 240 s; this is a dispatch timeout, not a hard
 wall-clock ceiling on lock ownership. A lock acquisition timeout
-follows the failed-dispatch retry path described below. `labeled` / `unlabeled` of the `ai-review` label (events sent
-by the App's own bot are ignored) and `synchronize`, `closed`, `reopened`, and `edited` fetch the
-current GitHub PR once while holding that lock; `opened` is applied from the payload. Label
+follows the failed-dispatch retry path described below. `labeled` / `unlabeled` of the
+`ai-review` label (events sent by the App's own bot are ignored) and `synchronize`, `closed`,
+`reopened`, and `edited` fetch the current GitHub PR once while holding that lock; `opened` is
+applied from the payload. Label
 events and `synchronize`, `closed`, and `reopened` reconcile `ai_review_labeled` from that PR's
 current labels, so a closed PR keeps its label state; a new Run needs an open PR, since CI
 eligibility and the no-CI sweep consider only open PRs (`docs/PIPELINE_SPEC.md` §8.2);

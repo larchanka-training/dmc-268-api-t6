@@ -63,7 +63,7 @@ infrastructure}`, `app/modules/<m>/{domain,application,infrastructure}`,
    FK and most unique constraints keep PostgreSQL's default names; introducing a
    convention is a decision of its own (it would re-prefix the existing `ck_` names).
 
-Portal repository adapters must fail closed without `AuthScope`: the constructors of
+Portal repository adapters must fail closed without `AuthScope`: for example, constructors of
 `SqlAlchemyRunRepository`, `SqlAlchemyRerunStore`, and `SqlAlchemyRerunUnitOfWork`
 raise `ValueError`. Trusted internal callers may bypass scope only by explicitly
 passing `allow_unscoped=True`; never infer this permission from a missing scope.
