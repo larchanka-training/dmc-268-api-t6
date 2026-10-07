@@ -162,6 +162,8 @@ def test_main_truncates_an_unexpected_body(
     out, err = capsys.readouterr()
     assert "got 500" in out + err
     assert "Internal Server Error " * 20 not in out + err
+    # Compose migrates in bootstrap on the way up; only a stack without it migrates by hand.
+    assert "uv run alembic upgrade head" in out + err
     _assert_no_secret(out + err, _SECRET)
 
 
@@ -199,7 +201,9 @@ def test_main_exits_2_with_a_hint_when_the_api_is_unreachable(
     assert smoke.main(["--url", _URL], send=unreachable) == 2
 
     out, err = capsys.readouterr()
-    assert "alembic upgrade head" in err
+    # With Compose, bootstrap migrates before backend starts: no manual step for that stack.
+    assert "uv run alembic upgrade head" in err
+    assert "compose run" not in err
     _assert_no_secret(out + err, _SECRET)
 
 
