@@ -297,3 +297,146 @@ def test_grace_limit_revocation_committed_to_postgres(
         asyncio.run(exercise())
     finally:
         asyncio.run(engine.dispose())
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("rotated", [False, True])
+def test_legacy_extended_family_cannot_live_beyond_thirty_days_from_login(
+    migrated_auth_family: tuple[str, str, UUID], rotated: bool
+) -> None:
+    from fastapi.testclient import TestClient
+
+    from app.bootstrap.auth_api import get_refresh_local_session
+    from app.main import app
+
+    database_url, schema, family_id = migrated_auth_family
+    engine = create_async_engine(
+        database_url, connect_args={"options": f"-csearch_path={schema}"}, poolclass=NullPool
+    )
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    clock = [datetime(2026, 10, 28, 11, 59, 59, tzinfo=UTC)]
+    refresh = RefreshLocalSession(
+        uow_factory=lambda: SqlAlchemyAuthSessionUnitOfWork(factory),
+        issuer=FakeIssuer(),
+        new_refresh_token=lambda: "last-second-token",
+        now=lambda: clock[0],
+    )
+
+    async def exercise() -> None:
+        async with factory.begin() as session:
+            await session.execute(
+                text(
+                    "UPDATE auth_refresh_families SET created_at=:login, expires_at=:extended "
+                    "WHERE id=:family"
+                ),
+                {
+                    "login": datetime(2026, 9, 28, 12, tzinfo=UTC),
+                    "extended": datetime(2026, 11, 27, 12, tzinfo=UTC),
+                    "family": family_id,
+                },
+            )
+            await session.execute(
+                text(
+                    "UPDATE auth_refresh_sessions SET expires_at=:extended, rotated_at=:rotated "
+                    "WHERE family_id=:family"
+                ),
+                {
+                    "extended": datetime(2026, 11, 27, 12, tzinfo=UTC),
+                    "family": family_id,
+                    "rotated": datetime(2026, 10, 28, 11, 59, 50, tzinfo=UTC) if rotated else None,
+                },
+            )
+        assert (await refresh.execute("original-secret")).refresh_token == "last-second-token"
+        async with factory() as session:
+            replacement = await session.scalar(
+                select(AuthRefreshSession).where(
+                    AuthRefreshSession.token_hash
+                    == hashlib.sha256(b"last-second-token").hexdigest()
+                )
+            )
+            assert replacement is not None
+            assert replacement.expires_at == datetime(2026, 10, 28, 12, tzinfo=UTC)
+        clock[0] = datetime(2026, 10, 28, 12, tzinfo=UTC)
+        with pytest.raises(InvalidRefreshToken):
+            await refresh.execute("original-secret")
+
+    try:
+        asyncio.run(exercise())
+        app.dependency_overrides[get_refresh_local_session] = lambda: refresh
+        client = TestClient(app, base_url="https://testserver")
+        assert (
+            client.post(
+                "/api/auth/refresh", headers={"Cookie": "refresh_token=last-second-token"}
+            ).status_code
+            == 401
+        )
+    finally:
+        app.dependency_overrides.clear()
+        asyncio.run(engine.dispose())
+
+
+@pytest.mark.integration
+def test_repeated_normal_and_grace_rotations_preserve_persisted_login_deadline(
+    migrated_auth_family: tuple[str, str, UUID],
+) -> None:
+    database_url, schema, family_id = migrated_auth_family
+    engine = create_async_engine(
+        database_url, connect_args={"options": f"-csearch_path={schema}"}, poolclass=NullPool
+    )
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    clock = [datetime(2026, 9, 28, 12, tzinfo=UTC)]
+    tokens = iter(("day-one", "day-ten", "day-ten-grace", "last-day"))
+    refresh = RefreshLocalSession(
+        uow_factory=lambda: SqlAlchemyAuthSessionUnitOfWork(factory),
+        issuer=FakeIssuer(),
+        new_refresh_token=lambda: next(tokens),
+        now=lambda: clock[0],
+    )
+
+    async def exercise() -> None:
+        async with factory.begin() as session:
+            await session.execute(
+                text(
+                    "UPDATE auth_refresh_families SET created_at=:login, expires_at=:deadline "
+                    "WHERE id=:family"
+                ),
+                {
+                    "login": datetime(2026, 9, 28, 12, tzinfo=UTC),
+                    "deadline": datetime(2026, 10, 28, 12, tzinfo=UTC),
+                    "family": family_id,
+                },
+            )
+            await session.execute(
+                text(
+                    "UPDATE auth_refresh_sessions SET expires_at=:deadline WHERE family_id=:family"
+                ),
+                {"deadline": datetime(2026, 10, 28, 12, tzinfo=UTC), "family": family_id},
+            )
+        for at, presented, expected in (
+            (datetime(2026, 9, 29, 12, tzinfo=UTC), "original-secret", "day-one"),
+            (datetime(2026, 10, 8, 12, tzinfo=UTC), "day-one", "day-ten"),
+            (datetime(2026, 10, 8, 12, 0, 5, tzinfo=UTC), "day-one", "day-ten-grace"),
+            (datetime(2026, 10, 27, 12, tzinfo=UTC), "day-ten-grace", "last-day"),
+        ):
+            clock[0] = at
+            assert (await refresh.execute(presented)).refresh_token == expected
+            async with factory() as session:
+                family = await session.get(AuthRefreshFamily, family_id)
+                assert family is not None
+                assert family.expires_at == datetime(2026, 10, 28, 12, tzinfo=UTC)
+                deadlines = (
+                    await session.scalars(
+                        select(AuthRefreshSession.expires_at).where(
+                            AuthRefreshSession.family_id == family_id
+                        )
+                    )
+                ).all()
+                assert set(deadlines) == {datetime(2026, 10, 28, 12, tzinfo=UTC)}
+        clock[0] = datetime(2026, 10, 28, 12, tzinfo=UTC)
+        with pytest.raises(InvalidRefreshToken):
+            await refresh.execute("last-day")
+
+    try:
+        asyncio.run(exercise())
+    finally:
+        asyncio.run(engine.dispose())

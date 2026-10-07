@@ -79,3 +79,14 @@ class WebhookEvent(Base):
         DateTime(timezone=True), nullable=True
     )
     received_at: Mapped[datetime] = timestamp_column()
+
+
+class GitHubInstallationRemovalEffect(Base):
+    """Removal idempotency markers retained for 30 days and while a receipt exists."""
+
+    __tablename__ = "github_installation_removal_effects"
+    __table_args__ = (Index("ix_github_installation_removal_effects_created_at", "created_at"),)
+
+    delivery_id: Mapped[str] = mapped_column(String(255), primary_key=True)
+
+    created_at: Mapped[datetime] = timestamp_column()

@@ -14,7 +14,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.common.infrastructure.db.unit_of_work import SqlAlchemyUnitOfWork
 from app.modules.integrations.webhooks.application.receive_github_delivery import WebhookReceipt
-from app.modules.integrations.webhooks.infrastructure.models import WebhookEvent
+from app.modules.integrations.webhooks.infrastructure.models import (
+    GitHubInstallationRemovalEffect,
+    WebhookEvent,
+)
 from app.modules.repositories.infrastructure.models import ProviderInstallation
 
 
@@ -140,6 +143,19 @@ class SqlAlchemyGitHubWebhookReceiptStore:
         # Turning the session sync off is defensive here: "auto" evaluates these comparisons
         # without RETURNING, but a fallback to "fetch" would add it back.
         result = cast(CursorResult[Any], await self._session.execute(statement))
+        # Keep markers while their receipt can still be replayed. Delete receipts first
+        # so expired finished deliveries and their markers leave in the same transaction.
+        matching_receipt = select(WebhookEvent.id).where(
+            WebhookEvent.delivery_id == GitHubInstallationRemovalEffect.delivery_id
+        )
+        await self._session.execute(
+            delete(GitHubInstallationRemovalEffect)
+            .where(
+                GitHubInstallationRemovalEffect.created_at < before,
+                ~matching_receipt.exists(),
+            )
+            .execution_options(synchronize_session=False)
+        )
         return result.rowcount
 
     async def revive_deferred_installation_deliveries(

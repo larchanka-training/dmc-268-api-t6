@@ -6,6 +6,7 @@ import asyncio
 import os
 from collections.abc import Iterator
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from types import TracebackType
 from typing import Self, cast
 from uuid import UUID, uuid4
@@ -41,6 +42,7 @@ from app.modules.repositories.infrastructure.models import ProviderInstallation
 from app.modules.workspaces.application.link_github_installations import (
     AuthenticatedGitHubInstallations,
     GitHubInstallation,
+    InstallationSnapshotReservation,
     LinkGitHubInstallations,
 )
 from app.modules.workspaces.infrastructure.github_installation_links import (
@@ -102,10 +104,10 @@ class FakeLinks:
     async def rollback(self) -> None:
         pass
 
-    async def reserve_generation(self, user_id: int) -> int:
+    async def reserve_generation(self, user_id: int) -> InstallationSnapshotReservation:
         generation = self.generations.get(user_id, 0) + 1
         self.generations[user_id] = generation
-        return generation
+        return InstallationSnapshotReservation(generation, datetime.now(UTC))
 
     async def begin_apply(self, user_id: int, generation: int) -> bool:
         return generation > self.applied.get(user_id, 0)
@@ -123,7 +125,11 @@ class FakeLinks:
         return workspace_id
 
     async def reconcile_repositories(
-        self, user_id: int, installation_id: int, repository_ids: tuple[int, ...]
+        self,
+        user_id: int,
+        installation_id: int,
+        repository_ids: tuple[int, ...],
+        snapshot_started_at: datetime,
     ) -> None:
         self.repository_access = {
             entry
@@ -675,3 +681,26 @@ async def _installation_id(
                 )
             ),
         )
+
+
+def test_repeat_login_adds_installation_and_repository_without_losing_existing_grants() -> None:
+    github = FakeGitHub(
+        AuthenticatedGitHubInstallations(41, (GitHubInstallation(17, "alpha", (101,)),))
+    )
+    links = FakeLinks()
+    use_case = LinkGitHubInstallations(github=github, uow_factory=lambda: links)
+    first = asyncio.run(use_case.execute("first-login"))
+
+    github.user = AuthenticatedGitHubInstallations(
+        41,
+        (
+            GitHubInstallation(17, "alpha", (101, 102)),
+            GitHubInstallation(18, "beta", (201,)),
+        ),
+    )
+    second = asyncio.run(use_case.execute("sync-access-login"))
+
+    assert len(first) == 1
+    assert len(second) == 2
+    assert first[0] in second
+    assert links.repository_access == {(41, 17, 101), (41, 17, 102), (41, 18, 201)}

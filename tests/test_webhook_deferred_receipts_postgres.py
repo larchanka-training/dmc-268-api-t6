@@ -339,3 +339,116 @@ def test_linking_wakes_a_pr_or_ci_delivery_deferred_for_good(
     assert woken == (0, False)
     # The sweep selects the woken delivery again.
     assert handled == 1
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("commit", [False, True])
+def test_removal_markers_follow_receipt_retention_atomically(
+    database: Database, commit: bool
+) -> None:
+    async def scenario() -> None:
+        receiver, factory, engine = _receiver(database, UnknownInstallation(), [START])
+        cutoff = START - timedelta(days=30)
+        old = cutoff - timedelta(seconds=1)
+        marker_ids = [
+            "boundary",
+            "fresh",
+            "leased",
+            "old-finished",
+            "orphan",
+            "pending",
+            "recent-finished",
+        ]
+        try:
+            async with factory() as session:
+                for delivery_id in marker_ids:
+                    await session.execute(
+                        text(
+                            "INSERT INTO github_installation_removal_effects "
+                            "(delivery_id, created_at) VALUES (:id, :created_at)"
+                        ),
+                        {
+                            "id": delivery_id,
+                            "created_at": cutoff
+                            if delivery_id == "boundary"
+                            else START
+                            if delivery_id == "fresh"
+                            else old,
+                        },
+                    )
+                for delivery_id, projected, lease in (
+                    ("old-finished", old, None),
+                    ("recent-finished", START, None),
+                    ("pending", None, None),
+                    ("leased", None, START + timedelta(minutes=5)),
+                ):
+                    await session.execute(
+                        text(
+                            "INSERT INTO webhook_events (id, delivery_id, event, payload, "
+                            "projected_at, projection_claim_token, projection_lease_until) "
+                            "VALUES (gen_random_uuid(), :id, 'installation', '{}'::jsonb, "
+                            ":projected, :token, :lease)"
+                        ),
+                        {
+                            "id": delivery_id,
+                            "projected": projected,
+                            "token": uuid4() if lease else None,
+                            "lease": lease,
+                        },
+                    )
+                await session.commit()
+            async with SqlAlchemyGitHubWebhookReceiptUnitOfWork(factory) as uow:
+                assert await uow.receipts.purge_finished(cutoff) == 1
+                if commit:
+                    await uow.commit()
+            async with factory() as session:
+                markers = list(
+                    await session.scalars(
+                        text(
+                            "SELECT delivery_id FROM github_installation_removal_effects "
+                            "ORDER BY delivery_id"
+                        )
+                    )
+                )
+                receipts = list(
+                    await session.scalars(
+                        text("SELECT delivery_id FROM webhook_events ORDER BY delivery_id")
+                    )
+                )
+            assert markers == (
+                ["boundary", "fresh", "leased", "pending", "recent-finished"]
+                if commit
+                else marker_ids
+            )
+            assert receipts == (
+                ["leased", "pending", "recent-finished"]
+                if commit
+                else ["leased", "old-finished", "pending", "recent-finished"]
+            )
+            if commit:
+                # Marker-only cleanup must run even when no receipt is eligible.
+                async with factory() as session:
+                    await session.execute(
+                        text(
+                            "INSERT INTO github_installation_removal_effects "
+                            "(delivery_id, created_at) "
+                            "VALUES ('second-orphan', :old)"
+                        ),
+                        {"old": old},
+                    )
+                    await session.commit()
+                assert await receiver.purge_finished() == 0
+                async with factory() as session:
+                    assert (
+                        await session.scalar(
+                            text(
+                                "SELECT count(*) FROM github_installation_removal_effects "
+                                "WHERE delivery_id = 'second-orphan'"
+                            )
+                        )
+                        == 0
+                    )
+        finally:
+            await engine.dispose()
+
+    asyncio.run(scenario())

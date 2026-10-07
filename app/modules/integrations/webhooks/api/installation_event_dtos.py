@@ -96,6 +96,10 @@ class _InstallationSnapshotPayload(BaseModel):
     repositories: list[_RepositoryDto]
 
 
+class _InstallationDeletedPayload(_InstallationSnapshotPayload):
+    repositories: list[_RepositoryDto] = Field(default_factory=list)
+
+
 class _InstallationRepositoriesAddedPayload(BaseModel):
     model_config = _STRICT_GITHUB_PAYLOAD
 
@@ -131,7 +135,12 @@ def parse_installation_repositories_event(
         raise UnsupportedInstallationAction(envelope.action)
     if event_name == "installation":
         try:
-            parsed = _InstallationSnapshotPayload.model_validate(payload)
+            snapshot_dto = (
+                _InstallationDeletedPayload
+                if envelope.action == "deleted"
+                else _InstallationSnapshotPayload
+            )
+            parsed = snapshot_dto.model_validate(payload)
         except ValidationError as error:
             raise _invalid_payload(error) from error
         repositories = tuple(item.to_application() for item in parsed.repositories)

@@ -11,6 +11,7 @@ from typing import Any, cast
 from uuid import UUID, uuid4
 
 import pytest
+from sqlalchemy.sql.dml import Update
 
 from app.modules.repositories.application.installation_repositories import (
     RepositoryReference,
@@ -57,6 +58,12 @@ class FakeInstallationRepositoryStore:
             stored.snapshot = snapshot
             stored.enabled = True
         return stored.id
+
+    async def record_removal_delivery(self, delivery_id: str) -> bool:
+        return True
+
+    async def disable_installation(self, provider_installation_id: UUID) -> None:
+        raise AssertionError("unexpected installation deletion")
 
     async def disable_repository(self, provider_installation_id: UUID, external_id: int) -> None:
         if self.disable_error is not None:
@@ -232,12 +239,17 @@ def test_sync_soft_disables_only_matching_repositories_idempotently() -> None:
 
     asyncio.run(
         sync.disable(
+            delivery_id="removal-delivery",
             provider_installation_id=installation_id,
             repositories=(_reference(), _reference(full_name="unknown/repository")),
         )
     )
     asyncio.run(
-        sync.disable(provider_installation_id=installation_id, repositories=(_reference(),))
+        sync.disable(
+            delivery_id="removal-delivery",
+            provider_installation_id=installation_id,
+            repositories=(_reference(),),
+        )
     )
 
     assert store.repositories[(installation_id, 101)].enabled is False
@@ -257,7 +269,11 @@ def test_sync_readding_a_removed_repository_reenables_it() -> None:
 
     asyncio.run(sync.execute(provider_installation_id=installation_id, repositories=(input_,)))
     asyncio.run(
-        sync.disable(provider_installation_id=installation_id, repositories=(_reference(),))
+        sync.disable(
+            delivery_id="removal-delivery",
+            provider_installation_id=installation_id,
+            repositories=(_reference(),),
+        )
     )
     asyncio.run(sync.execute(provider_installation_id=installation_id, repositories=(input_,)))
 
@@ -275,6 +291,7 @@ def test_sync_rolls_back_and_never_commits_when_soft_disable_fails() -> None:
                 uow_factory=lambda: uow,
                 rule_sets=load_default_rule_sets(Path("review/rules")),
             ).disable(
+                delivery_id="removal-delivery",
                 provider_installation_id=uuid4(),
                 repositories=(_reference(),),
             )
@@ -338,8 +355,34 @@ def test_sqlalchemy_installation_store_soft_disables_matching_repository() -> No
 
     asyncio.run(store.disable_repository(installation_id, 101))
 
-    assert len(session.statements) == 1
-    compiled = cast(Any, session.statements[0]).compile()
+    repository_updates = [
+        statement
+        for statement in session.statements
+        if isinstance(statement, Update) and statement.table.compare(Repository.__table__)
+    ]
+    assert len(repository_updates) == 1
+    compiled = repository_updates[0].compile()
     assert compiled.params["enabled"] is False
     assert compiled.params["provider_installation_id_1"] == installation_id
     assert compiled.params["external_id_1"] == 101
+
+
+def test_disable_without_delivery_id_fails_before_opening_uow() -> None:
+    opened = 0
+
+    def uow_factory() -> FakeInstallationRepositoryUnitOfWork:
+        nonlocal opened
+        opened += 1
+        return FakeInstallationRepositoryUnitOfWork(FakeInstallationRepositoryStore())
+
+    sync = SyncInstallationRepositories(uow_factory=uow_factory, rule_sets={})
+    with pytest.raises(ValueError, match="removal requires a durable delivery id"):
+        asyncio.run(
+            sync.disable(
+                provider_installation_id=uuid4(),
+                repositories=(_reference(),),
+                delivery_id="",
+            )
+        )
+
+    assert opened == 0

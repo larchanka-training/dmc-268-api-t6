@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import StrEnum
 from typing import Protocol
 from uuid import UUID
@@ -223,7 +223,7 @@ class GitHubInstallationDeliveryDispatcher:
         try:
             await self._onboarding.execute(
                 provider_installation_id=provider_installation_id,
-                event=event,
+                event=replace(event, delivery_id=delivery.delivery_id),
             )
         except (RepositoryDetailsUnavailableError, InstallationAccessTokenError) as error:
             # A token GitHub could not issue is a read it cannot answer either: same deferral.

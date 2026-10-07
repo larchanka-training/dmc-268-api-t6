@@ -79,7 +79,7 @@ class SqlAlchemyAuthSessionStore:
         )
         if row is None:
             return None
-        return RefreshTokenFamily(row.id, row.expires_at, row.revoked_at)
+        return RefreshTokenFamily(row.id, row.expires_at, row.revoked_at, row.created_at)
 
     async def get_session(self, token_hash: str) -> RefreshSessionRecord | None:
         row = await self._session.scalar(
@@ -146,11 +146,6 @@ class SqlAlchemyAuthSessionStore:
         if row is None or row.rotated_at is not None or row.revoked_at is not None:
             raise RuntimeError("refresh session changed after family lock")
         row.rotated_at = at
-        await self._session.execute(
-            update(AuthRefreshFamily)
-            .where(AuthRefreshFamily.id == row.family_id)
-            .values(expires_at=expires_at)
-        )
         self._session.add(
             AuthRefreshSession(
                 id=uuid4(),
@@ -172,11 +167,6 @@ class SqlAlchemyAuthSessionStore:
         *,
         created_at: datetime | None = None,
     ) -> None:
-        await self._session.execute(
-            update(AuthRefreshFamily)
-            .where(AuthRefreshFamily.id == family_id)
-            .values(expires_at=expires_at)
-        )
         extra = {"created_at": created_at} if created_at is not None else {}
         self._session.add(
             AuthRefreshSession(

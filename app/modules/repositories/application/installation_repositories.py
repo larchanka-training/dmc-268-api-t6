@@ -41,6 +41,7 @@ class InstallationRepositoriesEvent:
     action: Literal["created", "deleted", "added", "removed"]
     added_repositories: tuple[RepositoryReference, ...]
     removed_repositories: tuple[RepositoryReference, ...]
+    delivery_id: str | None = None
 
 
 @dataclass(frozen=True)
