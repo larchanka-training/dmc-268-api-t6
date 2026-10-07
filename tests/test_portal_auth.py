@@ -14,11 +14,11 @@ from cryptography.hazmat.primitives.serialization import (
     PrivateFormat,
     PublicFormat,
 )
-from fastapi.routing import APIRoute
+from fastapi.routing import iter_route_contexts
 from fastapi.testclient import TestClient
 
 from app.bootstrap.auth_api import get_current_user
-from app.main import api_router, app, get_repository_settings, get_run_repository
+from app.main import app, get_run_repository
 from app.modules.auth.application.get_me import CurrentUser, GetCurrentUser, MyWorkspace
 from app.modules.auth.application.scope import AuthScope
 
@@ -53,8 +53,15 @@ def _token(private_key: str, **overrides: object) -> str:
 def _portal_routes() -> list[tuple[str, str]]:
     routes: list[tuple[str, str]] = []
     dummy_uuid = "00000000-0000-0000-0000-000000000001"
-    for route in api_router.routes:
-        if not isinstance(route, APIRoute):
+    # Enumerate the composed app, including auth_router and hidden/direct app routes.
+    # These three endpoints authenticate via an OAuth code or refresh cookie.
+    public_auth = {
+        ("POST", "/api/auth/github/callback"),
+        ("POST", "/api/auth/refresh"),
+        ("POST", "/api/auth/logout"),
+    }
+    for route in iter_route_contexts(app.routes):
+        if route.path is None or not route.path.startswith("/api/"):
             continue
         path = (
             route.path.replace("{run_id}", dummy_uuid)
@@ -64,9 +71,8 @@ def _portal_routes() -> list[tuple[str, str]]:
         if not route.methods:
             continue
         for method in sorted(route.methods):
-            if method in {"GET", "POST", "PATCH", "PUT", "DELETE"}:
+            if (method, route.path) not in public_auth:
                 routes.append((method, path))
-    routes.append(("GET", "/api/auth/me"))
     return routes
 
 
@@ -154,43 +160,10 @@ def test_portal_list_requires_strict_bearer_and_accepts_empty_workspace_claim(
         app.dependency_overrides.clear()
 
 
-class EmptyRepositoriesStore:
-    async def list_repositories(self) -> list[object]:
-        return []
-
-
-class EmptyRepositoriesUow:
-    @property
-    def repositories(self) -> EmptyRepositoriesStore:
-        return EmptyRepositoriesStore()
-
-    async def __aenter__(self) -> EmptyRepositoriesUow:
-        return self
-
-    async def __aexit__(self, *args: object) -> None:
-        return None
-
-
-def test_portal_repos_requires_strict_bearer_and_accepts_empty_workspace_claim(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    private, public = _keys()
-    monkeypatch.setenv("AUTH_JWT_PUBLIC_KEY", public)
-    monkeypatch.setenv("AUTH_JWT_ISSUER", "review-api")
-    monkeypatch.setenv("AUTH_JWT_AUDIENCE", "review-ui")
-    app.dependency_overrides[get_repository_settings] = lambda: lambda: EmptyRepositoriesUow()
-    try:
-        client = TestClient(app)
-        assert client.get("/api/repos").status_code == 401
-        assert client.get("/api/repos", headers={"Authorization": "Basic abc"}).status_code == 401
-        valid = client.get(
-            "/api/repos",
-            headers={"Authorization": f"Bearer {_token(private, workspaces=[])}"},
-        )
-        assert valid.status_code == 200
-        assert valid.json() == []
-    finally:
-        app.dependency_overrides.clear()
+# Empty workspace repository visibility is covered against real SQL by
+# test_portal_scope_postgres.py:
+# test_portal_routes_intersect_claim_current_membership_and_repository_grant.
+# An always-empty fake here cannot verify that authorization predicate.
 
 
 def test_me_requires_bearer_and_returns_current_profile_with_claimed_workspaces(

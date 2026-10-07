@@ -29,13 +29,26 @@ _ACTIVE = (RunState.QUEUED, RunState.RUNNING, RunState.PUBLISHING)
 class SqlAlchemyRerunStore:
     """Flushes only; ``RerunRun`` commits."""
 
-    def __init__(self, session: AsyncSession, scope: AuthScope | None) -> None:
+    def __init__(
+        self,
+        session: AsyncSession,
+        scope: AuthScope | None = None,
+        *,
+        allow_unscoped: bool = False,
+    ) -> None:
+        if scope is None and not allow_unscoped:
+            raise ValueError(
+                "SqlAlchemyRerunStore requires an AuthScope unless allow_unscoped=True"
+            )
         self._session = session
         self._scope = scope
+        self._allow_unscoped = allow_unscoped
 
     async def create_rerun(self, run_id: UUID, now: datetime) -> RerunResult:
         code_change_id = await self._session.scalar(
-            select(Run.code_change_id).where(Run.id == run_id, authorized_run(self._scope))
+            select(Run.code_change_id).where(
+                Run.id == run_id, authorized_run(self._scope, allow_unscoped=self._allow_unscoped)
+            )
         )
         if code_change_id is None:
             return RerunResult(RerunOutcome.NOT_FOUND)
@@ -90,11 +103,20 @@ class SqlAlchemyRerunStore:
 
 class SqlAlchemyRerunUnitOfWork(SqlAlchemyUnitOfWork):
     def __init__(
-        self, session_factory: async_sessionmaker[AsyncSession], scope: AuthScope | None = None
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        scope: AuthScope | None = None,
+        *,
+        allow_unscoped: bool = False,
     ) -> None:
+        if scope is None and not allow_unscoped:
+            raise ValueError(
+                "SqlAlchemyRerunUnitOfWork requires an AuthScope unless allow_unscoped=True"
+            )
         super().__init__(session_factory)
         self._scope = scope
+        self._allow_unscoped = allow_unscoped
 
     @property
     def runs(self) -> SqlAlchemyRerunStore:
-        return SqlAlchemyRerunStore(self.session, self._scope)
+        return SqlAlchemyRerunStore(self.session, self._scope, allow_unscoped=self._allow_unscoped)

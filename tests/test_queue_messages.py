@@ -11,7 +11,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from decimal import Decimal
-from typing import Any, cast
+from typing import Any, Never, cast
 from uuid import UUID, uuid5
 
 import aio_pika
@@ -153,7 +153,7 @@ def fake_publisher(
 @dataclass
 class Delivery:
     body: bytes
-    message_id: str = "m"
+    message_id: str | None = "m"
     acked: bool = False
     nacked: list[bool] = field(default_factory=list)
     headers: dict[str, Any] = field(default_factory=dict)
@@ -242,13 +242,18 @@ def test_handler_repeated_errors_route_to_dlq_with_log(
     assert len(exchange.published) == 1
 
     # Attempt 2: republished
-    d2, _ = _deliver(VALID, RuntimeError("unexpected error 2"), publisher=pub)
+    async def fail(run_id: UUID) -> DeliveryOutcome:
+        raise RuntimeError("unexpected error")
+
+    d2 = Delivery(VALID, headers=dict(exchange.published[0][0].headers))
+    asyncio.run(amqp.handle_run_delivery(cast(AbstractIncomingMessage, d2), fail, pub))
     assert d2.acked is True and d2.nacked == []
     assert len(exchange.published) == 2
 
     # Attempt 3: reached max (3) -> DLQ (nack requeue=False) with error log
     with caplog.at_level(logging.ERROR):
-        d3, _ = _deliver(VALID, RuntimeError("unexpected error 3"), publisher=pub)
+        d3 = Delivery(VALID, headers=dict(exchange.published[1][0].headers))
+        asyncio.run(amqp.handle_run_delivery(cast(AbstractIncomingMessage, d3), fail, pub))
     assert d3.nacked == [False] and not d3.acked
     assert "exceeded maximum unexpected retry attempts (3); routing to DLQ" in caplog.text
 
@@ -480,7 +485,7 @@ def test_publish_handler_error_republishes_the_message(
     assert len(exchange.published) == 1
     msg, rk = exchange.published[0]
     assert msg.headers["x-attempt"] == 1
-    assert rk == amqp.PUBLISH_QUEUE
+    assert rk == "review.publish"
 
 
 def test_publish_handler_repeated_errors_route_to_dlq_across_worker_restarts(
@@ -498,7 +503,7 @@ def test_publish_handler_repeated_errors_route_to_dlq_across_worker_restarts(
     assert len(exchange.published) == 1
     pub1, rk1 = exchange.published[0]
     assert pub1.headers["x-attempt"] == 1
-    assert rk1 == amqp.PUBLISH_QUEUE
+    assert rk1 == "review.publish"
 
     # Worker restart: process state cleared, receives published copy with x-attempt=1
     amqp._unexpected_delivery_attempts.clear()
@@ -870,3 +875,109 @@ def test_factory_without_llm_fails_the_model_call_and_names_the_missing_config()
     with pytest.raises(RunFailure, match="not configured") as raised:
         asyncio.run(provider.draft_review(context=cast(Any, None)))
     assert raised.value.error_code == "llm_unavailable"
+
+
+@pytest.mark.parametrize("publish", [False, True])
+def test_confirmed_retry_does_not_leave_local_state_when_another_worker_gets_copy(
+    monkeypatch: pytest.MonkeyPatch, publish: bool
+) -> None:
+    monkeypatch.setattr(amqp, "REQUEUE_ERROR_DELAY_SECONDS", 0.0)
+    amqp._unexpected_delivery_attempts.clear()
+    pub, exchange = fake_publisher()
+    if publish:
+        delivery, _ = _deliver_publish(VALID_PUBLISH, RuntimeError("offline"), publisher=pub)
+    else:
+        delivery, _ = _deliver(VALID, RuntimeError("offline"), publisher=pub)
+    assert delivery.acked
+    assert exchange.published[0][0].headers["x-attempt"] == 1
+    assert len(amqp._unexpected_delivery_attempts) == 0
+
+
+async def _fail_retry_delivery(delivery: Delivery, publisher: amqp.AmqpQueuePublisher) -> None:
+    async def fail(pointer: UUID | ReviewPublishPointer) -> Never:
+        raise RuntimeError("handler offline")
+
+    if delivery.routing_key == "review.publish":
+        await amqp.handle_publish_delivery(cast(AbstractIncomingMessage, delivery), fail, publisher)
+    else:
+        await amqp.handle_run_delivery(cast(AbstractIncomingMessage, delivery), fail, publisher)
+
+
+class OfflineExchange(FakeExchange):
+    async def publish(self, message: aio_pika.Message, routing_key: str = "") -> None:
+        raise RuntimeError("broker offline")
+
+
+@pytest.mark.parametrize("publish", [False, True])
+def test_retry_fallback_memory_is_bounded_for_distinct_failed_deliveries(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, publish: bool
+) -> None:
+    monkeypatch.setattr(amqp, "REQUEUE_ERROR_DELAY_SECONDS", 0.0)
+    caplog.set_level(logging.CRITICAL)
+    amqp._unexpected_delivery_attempts.clear()
+    publisher, _ = fake_publisher(OfflineExchange())
+
+    async def scenario() -> None:
+        for index in range(1025):
+            delivery = Delivery(
+                VALID_PUBLISH if publish else VALID,
+                message_id=f"offline-{index}",
+                routing_key="review.publish" if publish else "review.run.fast",
+            )
+            await _fail_retry_delivery(delivery, publisher)
+            assert delivery.nacked == [True]
+        assert len(amqp._unexpected_delivery_attempts) == 1024
+
+    asyncio.run(scenario())
+
+
+def test_retry_fallback_entries_expire_after_five_minutes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(amqp, "REQUEUE_ERROR_DELAY_SECONDS", 0.0)
+    now = 1000.0
+    monkeypatch.setattr(amqp, "monotonic", lambda: now, raising=False)
+    amqp._unexpected_delivery_attempts.clear()
+    publisher, _ = fake_publisher(OfflineExchange())
+    asyncio.run(_fail_retry_delivery(Delivery(VALID, message_id="old"), publisher))
+    now = 1300.0
+    asyncio.run(_fail_retry_delivery(Delivery(VALID, message_id="new"), publisher))
+    assert len(amqp._unexpected_delivery_attempts) == 1
+    # The old count must not turn two new failures into the terminal third attempt.
+    for _ in range(2):
+        delivery = Delivery(VALID, message_id="old")
+        asyncio.run(_fail_retry_delivery(delivery, publisher))
+        assert delivery.nacked == [True]
+
+
+@pytest.mark.parametrize("publish", [False, True])
+@pytest.mark.parametrize("ack_fails", [False, True])
+@pytest.mark.parametrize("message_id", ["retry-fallback", None])
+def test_retry_fallback_reaches_dlq_even_without_message_id(
+    monkeypatch: pytest.MonkeyPatch, publish: bool, ack_fails: bool, message_id: str | None
+) -> None:
+    monkeypatch.setattr(amqp, "REQUEUE_ERROR_DELAY_SECONDS", 0.0)
+    amqp._unexpected_delivery_attempts.clear()
+    publisher, exchange = fake_publisher(FakeExchange() if ack_fails else OfflineExchange())
+
+    class AckFailure(Delivery):
+        async def ack(self) -> None:
+            raise RuntimeError("ack offline")
+
+    deliveries = [
+        (AckFailure if ack_fails else Delivery)(
+            VALID_PUBLISH if publish else VALID,
+            message_id=message_id,
+            routing_key="review.publish" if publish else "review.run.fast",
+        )
+        for _ in range(3)
+    ]
+    for delivery in deliveries:
+        asyncio.run(_fail_retry_delivery(delivery, publisher))
+    assert [delivery.nacked for delivery in deliveries] == (
+        [[], [], [False]] if ack_fails else [[True], [True], [False]]
+    )
+    assert all(not delivery.acked for delivery in deliveries)
+    if ack_fails:
+        assert [message.headers["x-attempt"] for message, _ in exchange.published] == [1, 2]
+    assert len(amqp._unexpected_delivery_attempts) == 0
