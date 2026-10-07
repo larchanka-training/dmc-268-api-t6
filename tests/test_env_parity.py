@@ -96,6 +96,29 @@ def test_local_backend_waits_for_the_broker() -> None:
     assert re.search(r"^      rabbitmq:\n        condition: service_healthy$", block, re.MULTILINE)
 
 
+@pytest.mark.parametrize("compose", [LOCAL_COMPOSE, STAGING_COMPOSE], ids=["local", "staging"])
+def test_bootstrap_migrates_only_a_healthy_postgres(compose: Path) -> None:
+    block = _service_block(compose, "bootstrap")
+
+    # A started but not yet accepting server fails the migration, and with it the whole `up`.
+    assert re.search(r"^      postgres:\n        condition: service_healthy$", block, re.MULTILINE)
+
+
+def _rabbitmq_start_period(compose: Path) -> str | None:
+    block = _service_block(compose, "rabbitmq")
+    match = re.search(r"^      start_period: (\S+)$", block, re.MULTILINE)
+    return None if match is None else match.group(1)
+
+
+def test_local_broker_healthcheck_keeps_the_staging_start_period() -> None:
+    local = _rabbitmq_start_period(LOCAL_COMPOSE)
+
+    # Probes that fail while the broker boots do not count against the retries that backend
+    # and the workers wait on; the local stack keeps the staging grace period.
+    assert local is not None
+    assert local == _rabbitmq_start_period(STAGING_COMPOSE)
+
+
 @pytest.mark.parametrize("service", ["worker", "webhook-worker"])
 def test_local_worker_healthcheck_reads_its_heartbeat(service: str) -> None:
     block = _service_block(LOCAL_COMPOSE, service)
