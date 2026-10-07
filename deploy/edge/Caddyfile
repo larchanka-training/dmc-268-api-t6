@@ -10,7 +10,7 @@
 # Edge routes on the shared course VPS, one hostname per service and environment under
 # APP_DOMAIN. Certificates come from Let's Encrypt; HTTP redirects to HTTPS automatically.
 # Upstreams are aliases on the docker network dmc268-edge. When an upstream is not running, Caddy
-# itself still starts and serves the other routes: staging-api and staging-ui answer a bare 502,
+# itself still starts and serves the other routes: staging-api and staging-ui answer a bare 502;
 # api, ui, webhook and staging-webhook answer 503 with the not_deployed stub below.
 
 (hsts) {
@@ -19,9 +19,9 @@
 
 # Hosts whose service is not deployed yet (prod, the standalone webhook service) answer 503 with a
 # plain text instead of a bare 502. handle_errors runs whenever Caddy cannot reach the upstream:
-# before the first rollout and, after it, while the service is down or restarting. The text names
-# the service, not the host: on ui.* the API can be down behind a running UI. The routes below are
-# already final, so a rollout needs no Caddyfile change.
+# before the first rollout and, after it, while the service is down or restarting. The text speaks
+# of the service behind the address, not of the host: on ui.* the API can be down behind a running
+# UI. The routes below are already final, so a rollout needs no Caddyfile change.
 (not_deployed) {
 	handle_errors 502 {
 		import hsts
