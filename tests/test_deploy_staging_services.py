@@ -745,6 +745,24 @@ def test_ci_lints_the_openapi_contract_before_the_push() -> None:
     assert "- openapi-lint" in push_image
 
 
+def test_ci_validates_the_edge_caddyfile_before_the_push() -> None:
+    workflow = WORKFLOW.read_text(encoding="utf-8")
+    assert "\n  edge-validate:\n" in workflow
+    next_job = workflow.index("  terraform-lint-security:")
+    job = workflow[workflow.index("  edge-validate:") : next_job]
+    push_image = workflow[workflow.index("  push-image:") : workflow.index("  deploy-staging:")]
+
+    assert "name: Edge Caddyfile validate" in job
+    # The image the VPS runs comes from deploy/edge/compose.yml: no second tag to keep in step.
+    assert "deploy/edge/compose.yml" in job
+    assert not re.search(r"caddy:\d", workflow)
+    # The same command as docs/CICD.md §8.2; unset, APP_DOMAIN leaves the apex site keyless.
+    assert '-e APP_DOMAIN=example.test -v "$PWD/deploy/edge:/etc/caddy:ro"' in job
+    assert "caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile" in job
+    # The deploy runs caddy reload with this file: a broken one must stop the pipeline first.
+    assert "- edge-validate" in push_image
+
+
 def test_ui_host_sends_api_paths_to_the_api_and_the_rest_to_the_ui() -> None:
     caddyfile = _read("deploy", "edge", "Caddyfile")
     ui_site = caddyfile[caddyfile.index("staging-ui.{$APP_DOMAIN} {") :]

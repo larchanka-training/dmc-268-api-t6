@@ -55,6 +55,25 @@ jobs:
             terraform -chdir="${stack}" validate -no-color
           done
 
+  edge-validate:
+    name: Edge Caddyfile validate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: caddy validate
+        run: |
+          # The image the VPS runs, read from deploy/edge/compose.yml instead of a second pinned tag.
+          image="$(sed -n 's/^    image: //p' deploy/edge/compose.yml)"
+          if [[ -z "${image}" || "${image}" == *$'\n'* ]]; then
+            echo "deploy/edge/compose.yml must name exactly one image" >&2
+            exit 1
+          fi
+          # Unset APP_DOMAIN leaves the apex site without an address and fails the validation.
+          docker run --rm -e APP_DOMAIN=example.test -v "$PWD/deploy/edge:/etc/caddy:ro" "${image}" \
+            caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+
   terraform-lint-security:
     name: Terraform lint / security
     runs-on: ubuntu-latest
@@ -488,6 +507,7 @@ jobs:
     needs:
       - secret-scan
       - terraform-fmt-validate
+      - edge-validate
       - terraform-lint-security
       - python-lint-type-test
       - openapi-lint
