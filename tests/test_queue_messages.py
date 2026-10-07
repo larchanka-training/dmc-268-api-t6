@@ -289,6 +289,14 @@ def test_worker_settings_read_llm_and_reject_a_partial_llm_config() -> None:
         WorkerSettings.from_environment({**LLM_ENV, "LLM_BASE_URL": ""})
 
 
+def test_worker_with_an_empty_fallback_model_has_no_fallback_route() -> None:
+    # .env.example ships `LLM_FALLBACK_MODEL=` for a local run.
+    settings = WorkerSettings.from_environment({**LLM_ENV, "LLM_FALLBACK_MODEL": ""})
+
+    assert settings.llm is not None
+    assert settings.llm.fallback is None
+
+
 @pytest.mark.parametrize(
     "model_env",
     [
