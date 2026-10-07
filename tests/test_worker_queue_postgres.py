@@ -823,10 +823,13 @@ def test_second_leader_does_not_tick_while_the_first_holds_the_lock(env: Env) ->
 
         return run
 
+    # Advisory locks are database-wide: a fixed key collides with a concurrent test run.
+    key = uuid4().int >> 65
+
     async def scenario() -> None:
-        first = asyncio.create_task(run_as_leader(engine, 42_034, 0.05, tick("first"), name="a"))
+        first = asyncio.create_task(run_as_leader(engine, key, 0.05, tick("first"), name="a"))
         await asyncio.sleep(0.3)
-        second = asyncio.create_task(run_as_leader(engine, 42_034, 0.05, tick("second"), name="b"))
+        second = asyncio.create_task(run_as_leader(engine, key, 0.05, tick("second"), name="b"))
         await asyncio.sleep(0.5)
         assert ticks["first"] > 3 and ticks["second"] == 0
         first.cancel()

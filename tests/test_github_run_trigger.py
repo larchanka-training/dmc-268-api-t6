@@ -740,7 +740,7 @@ def test_postgres_enqueue_race_terminal_duplicate_rollback_and_notify(
             assert kind is RunPublicationKind.QUEUED
             self.messages.append(message)
 
-    async def exercise() -> UUID:
+    async def exercise() -> tuple[UUID, UUID]:
         engine = create_async_engine(
             database_url, connect_args={"options": f"-csearch_path={schema}"}
         )
@@ -755,6 +755,7 @@ def test_postgres_enqueue_race_terminal_duplicate_rollback_and_notify(
                 message = await uow.runs.insert_webhook_run(candidate, _NOW)
                 assert isinstance(message, PendingRunMessage)
                 await uow.runs.notify_run_updated(message.run_id, _WS, "queued")
+                rolled_back_run_id = message.run_id
             async with sessions() as session:
                 assert await session.scalar(select(Run.id)) is None
 
@@ -787,7 +788,7 @@ def test_postgres_enqueue_race_terminal_duplicate_rollback_and_notify(
             )
             assert len(publisher.messages) == 1
             assert publisher.messages[0].run_id == run_id
-            return run_id
+            return rolled_back_run_id, run_id
         finally:
             await engine.dispose()
 
@@ -795,14 +796,14 @@ def test_postgres_enqueue_race_terminal_duplicate_rollback_and_notify(
         database_url.replace("postgresql+psycopg://", "postgresql://"), autocommit=True
     ) as listener:
         listener.execute("LISTEN run_updated")
-        published_run_id = asyncio.run(exercise())
-        notifications = list(listener.notifies(timeout=1.0, stop_after=1))
-    assert len(notifications) == 1
-    assert json.loads(notifications[0].payload) == {
-        "run_id": str(published_run_id),
-        "workspace_id": str(_WS),
-        "status": "queued",
-    }
+        rolled_back_run_id, published_run_id = asyncio.run(exercise())
+        notifications = list(listener.notifies(timeout=1.0))
+    # Another test run against the same database notifies on the same channel.
+    own = {str(rolled_back_run_id), str(published_run_id)}
+    payloads = [json.loads(notification.payload) for notification in notifications]
+    assert [payload for payload in payloads if payload["run_id"] in own] == [
+        {"run_id": str(published_run_id), "workspace_id": str(_WS), "status": "queued"}
+    ]
 
 
 @pytest.mark.integration
