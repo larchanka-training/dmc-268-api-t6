@@ -3,9 +3,8 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import os
-from collections.abc import Iterator
+from collections.abc import AsyncIterator, Iterator
 from datetime import timedelta
 from uuid import UUID, uuid4
 
@@ -76,8 +75,16 @@ def test_worker_status_change_reaches_the_sse_hub_through_listen_notify(env: Env
     async def scenario() -> tuple[UUID, list[RunUpdated]]:
         run_id = await insert_queued_run(factory)
         received: list[RunUpdated] = []
+
+        async def read(events: AsyncIterator[RunUpdated]) -> None:
+            async for event in events:
+                received.append(event)
+
         async with hub.subscribe() as events:
             listener = asyncio.create_task(listen_forever(database_url, hub))
+            # Read from the start: the hub keeps only the latest unread status of a run, so a
+            # late reader would miss a "skipped" that escaped the rollback.
+            reader = asyncio.create_task(read(events))
             await asyncio.sleep(0.5)
             async with SqlAlchemyRunLifecycleUnitOfWork(factory) as uow:
                 await uow.runs.finish(
@@ -95,12 +102,10 @@ def test_worker_status_change_reaches_the_sse_hub_through_listen_notify(env: Env
                     run_id, worker_id="w", now=NOW, lease_until=NOW + timedelta(minutes=5)
                 )
                 await uow.commit()
-            with contextlib.suppress(TimeoutError):
-                async with asyncio.timeout(2):
-                    while True:
-                        received.append(await anext(events))
-            listener.cancel()
-            await asyncio.gather(listener, return_exceptions=True)
+            await asyncio.sleep(2)
+            for task in (reader, listener):
+                task.cancel()
+            await asyncio.gather(reader, listener, return_exceptions=True)
         await engine.dispose()
         return run_id, received
 
