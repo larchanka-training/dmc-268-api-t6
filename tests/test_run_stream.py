@@ -3,9 +3,10 @@ from __future__ import annotations
 import asyncio
 import json
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterable
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 from uuid import UUID
 
 import pytest
@@ -651,3 +652,53 @@ def test_stream_with_an_expired_token_does_not_replay() -> None:
 
     assert text == ""
     assert repository.replay_calls == []
+
+
+@pytest.mark.parametrize("last_event_id", [None, UPDATED_AT_ID])
+def test_idle_stream_closes_at_jwt_deadline_during_pending_event(
+    monkeypatch: pytest.MonkeyPatch,
+    last_event_id: str | None,
+) -> None:
+    import app.main as main_mod
+    from app.bootstrap.portal_auth import get_auth_scope
+    from app.modules.auth.application.scope import AuthScope
+
+    now = 100.0
+    waits = 0
+    hub = InMemoryRunUpdateHub()
+
+    async def elapse_wait(
+        tasks: Iterable[asyncio.Task[RunUpdated]], *, timeout: float
+    ) -> tuple[set[asyncio.Task[RunUpdated]], set[asyncio.Task[RunUpdated]]]:
+        nonlocal now, waits
+        # Model idle I/O: no event arrives, and the requested wait fully elapses.
+        # Yield once so the actual subscription starts waiting and needs cancellation.
+        await asyncio.sleep(0)
+        now += timeout
+        waits += 1
+        return set(), set(tasks)
+
+    class UnusedRepository(ReplayRepository):
+        async def run_updated_at(self, run_id: UUID) -> datetime | None:
+            raise AssertionError("An idle stream must not query run access")
+
+    monkeypatch.setattr(main_mod, "time", SimpleNamespace(time=lambda: now))
+    monkeypatch.setattr(asyncio, "wait", elapse_wait)
+    app.dependency_overrides[get_run_event_hub] = lambda: hub
+    app.dependency_overrides[get_run_repository] = UnusedRepository
+    app.dependency_overrides[get_auth_scope] = lambda: AuthScope(
+        user_id=42, workspace_ids=(), expires_at=101
+    )
+    try:
+        response = TestClient(app).get(
+            "/api/stream", headers={"Last-Event-ID": last_event_id} if last_event_id else {}
+        )
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/event-stream")
+    assert response.text == ""
+    assert waits == 1
+    assert now == 101.0
+    assert hub.subscriber_count == 0

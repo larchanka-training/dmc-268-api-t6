@@ -100,6 +100,10 @@ async def get_me(
     response_model=AuthSessionDto,
     summary="Exchange GitHub OAuth code",
     description="Exchange temporary authorization code for session tokens.",
+    responses={
+        400: {"description": "Invalid GitHub authorization code"},
+        502: {"description": "GitHub authentication is unavailable"},
+    },
 )
 async def exchange_github_code(
     body: AuthCallbackRequestDto,
@@ -123,6 +127,7 @@ async def exchange_github_code(
         "Rotate the refresh token and issue a fresh access token, "
         "or reissue within the concurrent rotation grace window."
     ),
+    responses={401: {"description": "Invalid or expired refresh token"}},
 )
 async def refresh_session(
     response: Response,

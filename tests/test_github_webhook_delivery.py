@@ -26,6 +26,7 @@ from sqlalchemy.exc import DatabaseError, OperationalError
 from sqlalchemy.exc import TimeoutError as PoolTimeoutError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.schema import CreateSchema, DropSchema
+from starlette.types import Message, Scope
 
 from alembic import command
 from app.bootstrap.reviews_api import get_github_webhook_receipt_uow_factory
@@ -2025,6 +2026,60 @@ def test_oversized_webhook_payload_returns_413_before_signature_validation() -> 
     }
     status, response = _post(oversized, headers, receipts)
     assert status == 413
+    assert receipts.rows == {}
+    assert receipts.commits == 0
+
+
+def test_chunked_oversized_webhook_returns_413_without_saving_receipt() -> None:
+    receipts = FakeReceiptUnitOfWork()
+    body = b'{"padding":"' + b"x" * (10 * 1024 * 1024) + b'"}'
+    # Each ASGI chunk is below the 10 MiB limit; only the accumulated body is too big.
+    chunks = iter(
+        (
+            (body[: 5 * 1024 * 1024], True),
+            (body[5 * 1024 * 1024 : -2], True),
+            (body[-2:], False),
+        )
+    )
+    headers = _headers(body, delivery_id="chunked-oversized")
+    headers["Transfer-Encoding"] = "chunked"
+    scope: Scope = {
+        "type": "http",
+        "asgi": {"version": "3.0"},
+        "http_version": "1.1",
+        "method": "POST",
+        "scheme": "http",
+        "path": "/webhooks/github",
+        "raw_path": b"/webhooks/github",
+        "query_string": b"",
+        "headers": [(key.lower().encode(), value.encode()) for key, value in headers.items()],
+        "server": ("testserver", 80),
+        "client": ("testclient", 123),
+    }
+    messages: list[Message] = []
+
+    async def receive() -> Message:
+        chunk, more_body = next(chunks)
+        return {"type": "http.request", "body": chunk, "more_body": more_body}
+
+    async def send(message: Message) -> None:
+        messages.append(message)
+
+    app.dependency_overrides[get_github_webhook_secret] = lambda: _SECRET
+    app.dependency_overrides[get_github_webhook_receipt_uow_factory] = lambda: lambda: receipts
+    try:
+        asyncio.run(app(scope, receive, send))
+    finally:
+        app.dependency_overrides.clear()
+
+    assert [
+        message["status"] for message in messages if message["type"] == "http.response.start"
+    ] == [413]
+    assert json.loads(b"".join(message.get("body", b"") for message in messages)) == {
+        "detail": "payload too large"
+    }
+    assert receipts.rows == {}
+    assert receipts.commits == 0
 
 
 def test_invalid_signature_never_saves_or_dispatches() -> None:

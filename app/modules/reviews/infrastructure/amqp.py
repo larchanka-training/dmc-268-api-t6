@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 from collections.abc import AsyncIterator, Awaitable, Callable
@@ -10,6 +11,7 @@ from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass
 from functools import cache
 from pathlib import Path
+from time import monotonic
 from typing import Any
 from uuid import UUID
 
@@ -177,7 +179,8 @@ class AmqpQueuePublisher:
         self,
         message: AbstractIncomingMessage,
         attempts: int,
-    ) -> None:
+    ) -> bool:
+        """Report a completed handoff only after both publisher confirm and original ACK."""
         routing_key = getattr(message, "routing_key", "") or ""
         headers = dict(getattr(message, "headers", None) or {})
         headers["x-attempt"] = attempts
@@ -206,7 +209,7 @@ class AmqpQueuePublisher:
                     "Failed to nack message %s after republish error",
                     message.message_id,
                 )
-            return
+            return False
 
         try:
             await message.ack()
@@ -215,6 +218,8 @@ class AmqpQueuePublisher:
                 "Failed to ack message %s after republish",
                 message.message_id,
             )
+            return False
+        return True
 
 
 def _decode[T: BaseModel](name: str, model: type[T], message: AbstractIncomingMessage) -> T | None:
@@ -232,7 +237,36 @@ def _decode[T: BaseModel](name: str, model: type[T], message: AbstractIncomingMe
 
 MAX_UNEXPECTED_RETRIES: int = 3
 REQUEUE_ERROR_DELAY_SECONDS: float = 1.0
-_unexpected_delivery_attempts: dict[str, int] = {}
+MAX_LOCAL_RETRY_ENTRIES: int = 1024
+LOCAL_RETRY_TTL_SECONDS: float = 300.0
+# Only an unconfirmed handoff needs local fallback state. Insertion order is expiry order.
+_unexpected_delivery_attempts: dict[str, tuple[int, float]] = {}
+
+
+def _delivery_key(message: AbstractIncomingMessage) -> str:
+    if message.message_id:
+        return str(message.message_id)
+    # Object ids change on broker redelivery. Keep a bounded, stable fallback identity.
+    route = str(getattr(message, "routing_key", "") or "").encode()
+    return "anonymous:" + hashlib.sha256(route + b"\0" + message.body).hexdigest()
+
+
+def _prune_delivery_attempts() -> None:
+    """Expire idle fallback entries lazily when another retry needs local state."""
+    now = monotonic()
+    while _unexpected_delivery_attempts:
+        oldest = next(iter(_unexpected_delivery_attempts))
+        if _unexpected_delivery_attempts[oldest][1] > now:
+            break
+        _unexpected_delivery_attempts.pop(oldest)
+
+
+def _remember_delivery_attempts(key: str, attempts: int) -> None:
+    _prune_delivery_attempts()
+    _unexpected_delivery_attempts.pop(key, None)
+    while len(_unexpected_delivery_attempts) >= MAX_LOCAL_RETRY_ENTRIES:
+        _unexpected_delivery_attempts.pop(next(iter(_unexpected_delivery_attempts)))
+    _unexpected_delivery_attempts[key] = (attempts, monotonic() + LOCAL_RETRY_TTL_SECONDS)
 
 
 def _clear_delivery_attempts(message_id: str | None) -> None:
@@ -241,8 +275,9 @@ def _clear_delivery_attempts(message_id: str | None) -> None:
 
 
 def _get_delivery_attempts(message: AbstractIncomingMessage) -> int:
-    key = str(message.message_id or id(message))
-    local_attempts = _unexpected_delivery_attempts.get(key, 0)
+    _prune_delivery_attempts()
+    key = _delivery_key(message)
+    local_attempts = _unexpected_delivery_attempts.get(key, (0, 0.0))[0]
     broker_attempts = 0
     headers = getattr(message, "headers", None)
     if isinstance(headers, dict) and "x-attempt" in headers:
@@ -263,9 +298,9 @@ async def _requeue_after_error(
     publisher: AmqpQueuePublisher,
     max_retries: int = MAX_UNEXPECTED_RETRIES,
 ) -> None:
-    key = str(message.message_id or id(message))
+    key = _delivery_key(message)
     attempts = _get_delivery_attempts(message)
-    _unexpected_delivery_attempts[key] = attempts
+    _remember_delivery_attempts(key, attempts)
 
     if attempts >= max_retries:
         _LOGGER.error(
@@ -275,7 +310,6 @@ async def _requeue_after_error(
             DEAD_LETTER_QUEUE,
             exc_info=True,
         )
-        _clear_delivery_attempts(message.message_id)
         _clear_delivery_attempts(key)
         await message.nack(requeue=False)
         return
@@ -290,7 +324,8 @@ async def _requeue_after_error(
     if REQUEUE_ERROR_DELAY_SECONDS > 0:
         await asyncio.sleep(REQUEUE_ERROR_DELAY_SECONDS)
 
-    await publisher.republish_after_error(message, attempts)
+    if await publisher.republish_after_error(message, attempts):
+        _clear_delivery_attempts(key)
 
 
 async def handle_run_delivery(
@@ -301,7 +336,7 @@ async def handle_run_delivery(
     """Unknown ``schema`` or an invalid body goes to ``reviews.dlq`` without processing (§4.4)."""
     decoded = _decode("review.run.v1", ReviewRunMessage, message)
     if decoded is None or decoded.message_id != decoded.run_id:
-        _clear_delivery_attempts(message.message_id)
+        _clear_delivery_attempts(_delivery_key(message))
         await message.nack(requeue=False)
         return
     try:
@@ -309,7 +344,7 @@ async def handle_run_delivery(
     except Exception:
         await _requeue_after_error(message, publisher)
         return
-    _clear_delivery_attempts(message.message_id)
+    _clear_delivery_attempts(_delivery_key(message))
     if outcome is DeliveryOutcome.DEAD_LETTER:
         await message.nack(requeue=False)
     else:
@@ -323,7 +358,7 @@ async def handle_publish_delivery(
 ) -> None:
     decoded = _decode("review.publish.v1", ReviewPublishMessage, message)
     if decoded is None:
-        _clear_delivery_attempts(message.message_id)
+        _clear_delivery_attempts(_delivery_key(message))
         await message.nack(requeue=False)
         return
     try:
@@ -331,7 +366,7 @@ async def handle_publish_delivery(
     except Exception:
         await _requeue_after_error(message, publisher)
         return
-    _clear_delivery_attempts(message.message_id)
+    _clear_delivery_attempts(_delivery_key(message))
     await message.ack()
 
 

@@ -237,7 +237,16 @@ def _has_valid_github_signature(*, raw_body: bytes, signature: str | None, secre
 MAX_WEBHOOK_PAYLOAD_BYTES: int = 10 * 1024 * 1024  # 10 MB
 
 
-@github_webhook_router.post("")
+@github_webhook_router.post(
+    "",
+    status_code=202,
+    responses={
+        400: {"description": "Invalid webhook headers or payload"},
+        401: {"description": "Invalid GitHub webhook signature"},
+        413: {"description": "Webhook payload exceeds the size limit"},
+        503: {"description": "GitHub webhook is not configured"},
+    },
+)
 async def receive_github_webhook(
     request: Request,
     secret: Annotated[str, Depends(get_github_webhook_secret)],

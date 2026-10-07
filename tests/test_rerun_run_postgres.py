@@ -86,3 +86,43 @@ def test_rerun_without_an_active_rule_version_is_not_a_conflict_and_creates_no_r
     assert response.status_code == 422
     assert tuple(runs) == (4,)
     assert asyncio.run(queued_messages(env)) == []
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("unscoped", [False, True])
+def test_rerun_scope_or_explicit_internal_bypass_reaches_persistence(unscoped: bool) -> None:
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    from app.modules.reviews.infrastructure.rerun_store import SqlAlchemyRerunUnitOfWork
+    from tests.portal_postgres import NOW
+
+    url = os.environ.get("TEST_DATABASE_URL")
+    if url is None:
+        pytest.skip("set TEST_DATABASE_URL to test rerun scope")
+    with portal_schema(url, None) as schema:
+
+        async def scenario() -> None:
+            engine = schema.engine()
+            factory = async_sessionmaker(engine)
+            try:
+                # Empty scopes are valid identities, but grant no run access.
+                async with SqlAlchemyRerunUnitOfWork(factory, AuthScope(42, ())) as uow:
+                    hidden = await uow.runs.create_rerun(RUN_DONE, NOW)
+                    assert hidden.outcome == "not_found"
+                scope = None if unscoped else AuthScope(42, (WS_A,))
+                async with SqlAlchemyRerunUnitOfWork(
+                    factory, scope, allow_unscoped=unscoped
+                ) as uow:
+                    result = await uow.runs.create_rerun(RUN_DONE, NOW)
+                    assert result.outcome == "created"
+                    assert result.message is not None
+                    await uow.commit()
+                async with factory() as session:
+                    persisted = await session.scalar(
+                        text("SELECT count(*) FROM runs WHERE trigger = 'rerun'")
+                    )
+                assert persisted == 1
+            finally:
+                await engine.dispose()
+
+        asyncio.run(scenario())
