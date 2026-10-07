@@ -1245,6 +1245,42 @@ def test_invalid_answers_end_in_llm_invalid_output_after_repair_and_fallback() -
     assert answers == ["not json", json.dumps(semantic), "[]"]
 
 
+def _wrong_order_answer(start_line: int) -> dict[str, Any]:
+    """A medium finding before a high one; the second finding spans ``start_line``..33."""
+    path = REPO_ROOT / "tests" / "fixtures" / "review_output" / "normalizable" / "wrong-order.json"
+    payload: dict[str, Any] = json.loads(path.read_text(encoding="utf-8"))
+    payload["findings"][1]["start_line"] = start_line
+    return payload
+
+
+def test_fallback_normalizable_answer_is_accepted_without_a_repair() -> None:
+    # §9: the gateway repairs lossless deviations for every call kind, and the
+    # fallback has no repair call of its own to fix them.
+    payload = _wrong_order_answer(start_line=33)
+    harness = Harness(
+        [error(402, "account has no credits"), completion(json.dumps(payload), model="fb-v2")]
+    )
+
+    result = harness.review()
+
+    assert harness.kinds() == ["primary", "fallback"]
+    assert result.model == "fb-v2"
+    charge, repository = payload["findings"]
+    assert result.output == {**payload, "findings": [dict(repository, start_line=None), charge]}
+
+
+def test_fallback_start_line_after_line_is_llm_invalid_output() -> None:
+    payload = _wrong_order_answer(start_line=34)
+    harness = Harness([error(402, "account has no credits"), completion(json.dumps(payload))])
+
+    failure = harness.failure()
+
+    assert failure.error_code is LlmErrorCode.INVALID_OUTPUT
+    assert failure.run_retryable is False
+    assert harness.kinds() == ["primary", "fallback"]
+    assert len(harness.requests) == 2
+
+
 @pytest.mark.parametrize(
     "reply",
     [
