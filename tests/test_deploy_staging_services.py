@@ -38,8 +38,9 @@ SECRET_SOURCES = {
     # Organization secret of the LLM gateway (decision of the tech lead in #35, 04.10).
     "LLM_API_KEYS": "AI_DMC268_T6",
 }
-# Non-secret configuration, routed like the secrets: variables of the Environment and the
-# organization variable with the endpoint of the LLM gateway.
+# Non-secret configuration, routed like the secrets: the bot login is a variable of the
+# Environment, the LLM models are repository variables (an Environment variable of the same
+# name overrides them), and the endpoint of the LLM gateway is an organization variable.
 VARIABLE_SOURCES = {
     "GITHUB_APP_BOT_LOGIN": "GH_APP_BOT_LOGIN",
     "LLM_BASE_URL": "AI_DMC268_URL",
