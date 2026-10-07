@@ -154,7 +154,13 @@ def test_composition_accepts_typed_event_and_internal_installation_id(
             observed["repositories"] = repositories
             return ()
 
-        async def disable(self, *, provider_installation_id: UUID, repositories: object) -> None:
+        async def disable(
+            self,
+            *,
+            provider_installation_id: UUID,
+            repositories: object,
+            all_repositories: bool = False,
+        ) -> None:
             raise AssertionError("added event must not disable repositories")
 
     monkeypatch.setattr(
@@ -253,7 +259,13 @@ def test_runtime_dispatcher_creates_label_only_for_linked_added_repositories(
             synchronized.append("added")
             return ()
 
-        async def disable(self, *, provider_installation_id: UUID, repositories: object) -> None:
+        async def disable(
+            self,
+            *,
+            provider_installation_id: UUID,
+            repositories: object,
+            all_repositories: bool = False,
+        ) -> None:
             synchronized.append("removed")
 
     class TokenProvider:

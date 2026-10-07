@@ -100,6 +100,7 @@ class InstallationRepositoriesSync(Protocol):
         *,
         provider_installation_id: UUID,
         repositories: tuple[RepositoryReference, ...],
+        all_repositories: bool = False,
     ) -> None: ...
 
 
@@ -160,10 +161,11 @@ class InstallationEventProjector:
         provider_installation_id: UUID,
         event: InstallationRepositoriesEvent,
     ) -> tuple[OnboardingResult, ...]:
-        if event.removed_repositories:
+        if event.action in {"removed", "deleted"}:
             await self._sync.disable(
                 provider_installation_id=provider_installation_id,
                 repositories=event.removed_repositories,
+                all_repositories=event.action == "deleted",
             )
             return ()
 

@@ -64,13 +64,14 @@ class FakeSession:
 class FakeFamily:
     id: UUID
     expires_at: datetime
+    created_at: datetime
     revoked_at: datetime | None = None
 
 
 class FakeRefreshDatabase:
     def __init__(self, now: datetime) -> None:
         self.now = now
-        self.family = FakeFamily(uuid4(), now + timedelta(days=30))
+        self.family = FakeFamily(uuid4(), now + timedelta(days=30), now)
         self.lock = asyncio.Lock()
         self.sessions: dict[str, FakeSession] = {}
         self.user = AuthenticatedUser(42, "octocat", "Octo Cat", None)
@@ -130,7 +131,9 @@ class FakeRefreshUow:
         family = self._database.family
         if family.id != family_id:
             return None
-        return RefreshTokenFamily(family.id, family.expires_at, family.revoked_at)
+        return RefreshTokenFamily(
+            family.id, family.expires_at, family.revoked_at, family.created_at
+        )
 
     async def get_session(self, token_hash: str) -> RefreshSessionRecord | None:
         session = self._database.sessions.get(token_hash)
@@ -175,7 +178,6 @@ class FakeRefreshUow:
     ) -> None:
         prior = next(item for item in self._database.sessions.values() if item.id == session_id)
         prior.rotated_at = at
-        self._database.family.expires_at = expires_at
         self._database.sessions[new_token_hash] = FakeSession(
             uuid4(), prior.family_id, prior.user_id, new_token_hash, expires_at, at
         )
@@ -189,7 +191,6 @@ class FakeRefreshUow:
         *,
         created_at: datetime | None = None,
     ) -> None:
-        self._database.family.expires_at = expires_at
         self._database.sessions[token_hash] = FakeSession(
             uuid4(),
             family_id,
@@ -268,25 +269,21 @@ def test_refresh_rotates_once_and_uses_current_workspace_memberships() -> None:
         asyncio.run(refresh.execute("replacement-secret"))
 
 
-def test_refresh_renews_thirty_day_family_expiry_near_boundary() -> None:
-    now = datetime(2026, 9, 28, 12, tzinfo=UTC)
-    database = FakeRefreshDatabase(now)
-    database.family.expires_at = now + timedelta(seconds=1)
+def test_refresh_preserves_login_deadline_near_thirty_day_boundary() -> None:
+    database = FakeRefreshDatabase(datetime(2026, 9, 28, 12, tzinfo=UTC))
     database.seed("near-expiry")
+    database.now = datetime(2026, 10, 28, 11, 59, 59, tzinfo=UTC)
     private, _ = _keys()
     refresh, _ = _use_cases(database, private)
 
     result = asyncio.run(refresh.execute("near-expiry"))
 
     replacement_hash = hashlib.sha256(result.refresh_token.encode()).hexdigest()
-    expected_expiry = now + timedelta(days=30)
-    assert database.family.expires_at == expected_expiry
-    assert database.sessions[replacement_hash].expires_at == expected_expiry
-    database.now = now + timedelta(days=29)
-    refresh_again, _ = _use_cases(database, private, new_token="second-replacement")
-    assert asyncio.run(refresh_again.execute(result.refresh_token)).refresh_token == (
-        "second-replacement"
-    )
+    assert database.family.expires_at == datetime(2026, 10, 28, 12, tzinfo=UTC)
+    assert database.sessions[replacement_hash].expires_at == datetime(2026, 10, 28, 12, tzinfo=UTC)
+    database.now = datetime(2026, 10, 28, 12, tzinfo=UTC)
+    with pytest.raises(InvalidRefreshToken):
+        asyncio.run(refresh.execute(result.refresh_token))
 
 
 def test_missing_unknown_expired_and_revoked_refresh_are_rejected() -> None:
@@ -547,3 +544,57 @@ def test_refresh_and_logout_http_cookie_contract() -> None:
     assert signed_out.content == no_cookie.content == b""
     assert "Max-Age=0" in signed_out.headers["set-cookie"]
     assert "Path=/api/auth" in no_cookie.headers["set-cookie"]
+
+
+@pytest.mark.parametrize("invalid_state", ["session_expired", "session_revoked", "family_expired"])
+def test_grace_refresh_rejects_invalid_session_or_family(invalid_state: str) -> None:
+    now = datetime(2026, 10, 28, 12, tzinfo=UTC)
+    database = FakeRefreshDatabase(now)
+    database.seed("rotated-secret")
+    original = database.sessions[hash_refresh_token("rotated-secret")]
+    original.rotated_at = now - timedelta(seconds=1)
+    if invalid_state == "session_expired":
+        original.expires_at = now
+    elif invalid_state == "session_revoked":
+        original.revoked_at = now - timedelta(seconds=1)
+    else:
+        database.family.expires_at = now
+    private, _ = _keys()
+    refresh, _ = _use_cases(database, private)
+
+    with pytest.raises(InvalidRefreshToken):
+        asyncio.run(refresh.execute("rotated-secret"))
+
+    assert database.commits == 0
+    assert len(database.sessions) == 1
+
+
+def test_grace_refresh_ends_at_login_deadline_even_inside_grace_window() -> None:
+    from app.bootstrap.auth_api import get_refresh_local_session
+
+    database = FakeRefreshDatabase(datetime(2026, 9, 28, 12, tzinfo=UTC))
+    database.seed("original-secret")
+    database.now = datetime(2026, 10, 28, 11, 59, 50, tzinfo=UTC)
+    private, _ = _keys()
+    refresh, _ = _use_cases(database, private, new_token="first-rotation")
+    asyncio.run(refresh.execute("original-secret"))
+    database.now = datetime(2026, 10, 28, 11, 59, 59, tzinfo=UTC)
+    grace, _ = _use_cases(database, private, new_token="grace-rotation")
+    asyncio.run(grace.execute("original-secret"))
+    assert database.family.expires_at == datetime(2026, 10, 28, 12, tzinfo=UTC)
+    assert database.sessions[hash_refresh_token("grace-rotation")].expires_at == datetime(
+        2026, 10, 28, 12, tzinfo=UTC
+    )
+
+    database.now = datetime(2026, 10, 28, 12, tzinfo=UTC)
+    app.dependency_overrides[get_refresh_local_session] = lambda: grace
+    try:
+        client = TestClient(app, base_url="https://testserver")
+        for token in ("original-secret", "first-rotation", "grace-rotation"):
+            client.cookies.clear()
+            response = client.post(
+                "/api/auth/refresh", headers={"Cookie": f"refresh_token={token}"}
+            )
+            assert response.status_code == 401
+    finally:
+        app.dependency_overrides.clear()

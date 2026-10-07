@@ -5,16 +5,20 @@ from __future__ import annotations
 from typing import cast
 from uuid import UUID
 
-from sqlalchemy import update
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.common.infrastructure.db.unit_of_work import SqlAlchemyUnitOfWork
 from app.modules.repositories.application.installation_repositories import RepositorySnapshot
 from app.modules.repositories.application.onboard_repository import PersistedRuleVersion
-from app.modules.repositories.infrastructure.models import Repository
+from app.modules.repositories.infrastructure.models import ProviderInstallation, Repository
 from app.modules.repositories.infrastructure.rule_version_repository import (
     SqlAlchemyRepositoryRuleVersionStore,
+)
+from app.modules.workspaces.infrastructure.models import (
+    GitHubInstallationAccessRevocation,
+    GitHubUserRepositoryAccess,
 )
 
 
@@ -60,6 +64,7 @@ class SqlAlchemyInstallationRepositoryStore:
         Updating a missing or already-disabled row is deliberately a no-op, so
         GitHub's at-least-once removal deliveries are safe to replay.
         """
+        await self._record_revocation(provider_installation_id, external_id)
         statement = (
             update(Repository)
             .where(
@@ -69,6 +74,49 @@ class SqlAlchemyInstallationRepositoryStore:
             .values(enabled=False)
         )
         await self._session.execute(statement)
+        await self._session.execute(
+            delete(GitHubUserRepositoryAccess).where(
+                GitHubUserRepositoryAccess.provider_installation_id == provider_installation_id,
+                GitHubUserRepositoryAccess.repository_external_id == external_id,
+            )
+        )
+
+    async def disable_installation(self, provider_installation_id: UUID) -> None:
+        await self._record_revocation(provider_installation_id, 0)
+        await self._session.execute(
+            update(Repository)
+            .where(Repository.provider_installation_id == provider_installation_id)
+            .values(enabled=False)
+        )
+        await self._session.execute(
+            delete(GitHubUserRepositoryAccess).where(
+                GitHubUserRepositoryAccess.provider_installation_id == provider_installation_id
+            )
+        )
+
+    async def _record_revocation(self, installation_id: UUID, repository_id: int) -> None:
+        # Serialize with OAuth reconciliation before touching grants. Database time
+        # after the lock also covers removals whose transaction began before OAuth.
+        await self._session.execute(
+            select(ProviderInstallation.id)
+            .where(ProviderInstallation.id == installation_id)
+            .with_for_update()
+        )
+        await self._session.execute(
+            insert(GitHubInstallationAccessRevocation)
+            .values(
+                provider_installation_id=installation_id,
+                repository_external_id=repository_id,
+                revoked_at=func.clock_timestamp(),
+            )
+            .on_conflict_do_update(
+                index_elements=[
+                    GitHubInstallationAccessRevocation.provider_installation_id,
+                    GitHubInstallationAccessRevocation.repository_external_id,
+                ],
+                set_={"revoked_at": func.clock_timestamp()},
+            )
+        )
 
     async def get_active_rule_version(self, repository_id: UUID) -> PersistedRuleVersion | None:
         return await self._rule_versions.get_active_rule_version(repository_id)

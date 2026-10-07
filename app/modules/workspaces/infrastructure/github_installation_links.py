@@ -2,19 +2,24 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from decimal import Decimal
 from typing import cast
 from uuid import UUID, uuid4
 
-from sqlalchemy import delete, or_, select, update
+from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.common.infrastructure.db.unit_of_work import SqlAlchemyUnitOfWork
 from app.modules.integrations.webhooks.infrastructure.models import WebhookEvent
 from app.modules.repositories.infrastructure.models import ProviderInstallation
-from app.modules.workspaces.application.link_github_installations import GitHubInstallation
+from app.modules.workspaces.application.link_github_installations import (
+    GitHubInstallation,
+    InstallationSnapshotReservation,
+)
 from app.modules.workspaces.infrastructure.models import (
+    GitHubInstallationAccessRevocation,
     GitHubUserInstallationSync,
     GitHubUserRepositoryAccess,
     GitHubUserWorkspaceAccess,
@@ -28,7 +33,7 @@ class SqlAlchemyGitHubInstallationLinkStore:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
 
-    async def reserve_generation(self, user_id: int) -> int:
+    async def reserve_generation(self, user_id: int) -> InstallationSnapshotReservation:
         generation = cast(
             int | None,
             await self._session.scalar(
@@ -49,7 +54,8 @@ class SqlAlchemyGitHubInstallationLinkStore:
         )
         if generation is None:
             raise RuntimeError("GitHub installation sync generation was not reserved")
-        return generation
+        started_at = cast(datetime, await self._session.scalar(select(func.clock_timestamp())))
+        return InstallationSnapshotReservation(generation, started_at)
 
     async def begin_apply(self, user_id: int, generation: int) -> bool:
         applied_generation = await self._session.scalar(
@@ -145,19 +151,44 @@ class SqlAlchemyGitHubInstallationLinkStore:
         return workspace_id
 
     async def reconcile_repositories(
-        self, user_id: int, installation_id: int, repository_ids: tuple[int, ...]
+        self,
+        user_id: int,
+        installation_id: int,
+        repository_ids: tuple[int, ...],
+        snapshot_started_at: datetime,
     ) -> None:
         provider_installation_id = cast(
             UUID | None,
             await self._session.scalar(
-                select(ProviderInstallation.id).where(
+                select(ProviderInstallation.id)
+                .where(
                     ProviderInstallation.provider == "github",
                     ProviderInstallation.external_id == installation_id,
                 )
+                .with_for_update()
             ),
         )
         if provider_installation_id is None:
             raise RuntimeError("GitHub installation must be linked before repositories")
+
+        # Apply holds the user generation lock, then installations in external-id order.
+        # Removal takes only this installation lock, so it cannot invert that order.
+        revoked = set(
+            (
+                await self._session.scalars(
+                    select(GitHubInstallationAccessRevocation.repository_external_id).where(
+                        GitHubInstallationAccessRevocation.provider_installation_id
+                        == provider_installation_id,
+                        GitHubInstallationAccessRevocation.revoked_at >= snapshot_started_at,
+                    )
+                )
+            ).all()
+        )
+        repository_ids = tuple(
+            repository_id
+            for repository_id in repository_ids
+            if 0 not in revoked and repository_id not in revoked
+        )
 
         stale = delete(GitHubUserRepositoryAccess).where(
             GitHubUserRepositoryAccess.github_user_id == user_id,

@@ -254,7 +254,13 @@ class _Sync:
         self.calls.append(repositories)
         return ()
 
-    async def disable(self, *, provider_installation_id: UUID, repositories: object) -> None:
+    async def disable(
+        self,
+        *,
+        provider_installation_id: UUID,
+        repositories: object,
+        all_repositories: bool = False,
+    ) -> None:
         raise AssertionError("an added event disables nothing")
 
 

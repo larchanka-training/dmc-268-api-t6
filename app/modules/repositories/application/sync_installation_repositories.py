@@ -39,6 +39,8 @@ class InstallationRepositoryStore(RepositoryRuleVersionStore, Protocol):
         self, provider_installation_id: UUID, external_id: int
     ) -> None: ...
 
+    async def disable_installation(self, provider_installation_id: UUID) -> None: ...
+
 
 class InstallationRepositoriesUnitOfWork(UnitOfWork, Protocol):
     """The sync use case owns the one repository-plus-rules transaction."""
@@ -88,6 +90,7 @@ class SyncInstallationRepositories:
         *,
         provider_installation_id: UUID,
         repositories: tuple[RepositoryReference, ...],
+        all_repositories: bool = False,
     ) -> None:
         """Soft-disable removed repositories in one short database transaction.
 
@@ -96,7 +99,9 @@ class SyncInstallationRepositories:
         updates are naturally idempotent for duplicated webhook deliveries.
         """
         async with self._uow_factory() as uow:
-            for repository in repositories:
+            if all_repositories:
+                await uow.repositories.disable_installation(provider_installation_id)
+            for repository in () if all_repositories else repositories:
                 await uow.repositories.disable_repository(
                     provider_installation_id, repository.external_id
                 )

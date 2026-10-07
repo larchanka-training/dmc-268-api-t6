@@ -58,6 +58,9 @@ class FakeInstallationRepositoryStore:
             stored.enabled = True
         return stored.id
 
+    async def disable_installation(self, provider_installation_id: UUID) -> None:
+        raise AssertionError("unexpected installation deletion")
+
     async def disable_repository(self, provider_installation_id: UUID, external_id: int) -> None:
         if self.disable_error is not None:
             raise self.disable_error
@@ -338,8 +341,8 @@ def test_sqlalchemy_installation_store_soft_disables_matching_repository() -> No
 
     asyncio.run(store.disable_repository(installation_id, 101))
 
-    assert len(session.statements) == 1
-    compiled = cast(Any, session.statements[0]).compile()
+    assert len(session.statements) == 4
+    compiled = cast(Any, session.statements[2]).compile()
     assert compiled.params["enabled"] is False
     assert compiled.params["provider_installation_id_1"] == installation_id
     assert compiled.params["external_id_1"] == 101

@@ -31,6 +31,7 @@ class RefreshTokenFamily:
     id: UUID
     expires_at: datetime
     revoked_at: datetime | None
+    created_at: datetime
 
 
 @dataclass(frozen=True)
@@ -121,6 +122,11 @@ class RefreshLocalSession:
             if session is None or session.family_id != family_id:
                 raise InvalidRefreshToken
             at = self._now()
+            # Older releases renewed expires_at. The original login time remains
+            # authoritative even for those already-extended persisted families.
+            deadline = min(family.expires_at, family.created_at + REFRESH_TOKEN_LIFETIME)
+            if session.revoked_at is not None or session.expires_at <= at or deadline <= at:
+                raise InvalidRefreshToken
             if session.rotated_at is not None:
                 if at - session.rotated_at <= self._grace_period:
                     count = await uow.sessions.count_family_sessions(
@@ -137,7 +143,7 @@ class RefreshLocalSession:
                         family_id=family_id,
                         user_id=session.user_id,
                         token_hash=hash_refresh_token(replacement),
-                        expires_at=at + REFRESH_TOKEN_LIFETIME,
+                        expires_at=deadline,
                         created_at=at,
                     )
                     await uow.commit()
@@ -146,12 +152,6 @@ class RefreshLocalSession:
                     await uow.sessions.revoke_family(family_id, at)
                     await uow.commit()
                     replayed = True
-            elif (
-                session.revoked_at is not None
-                or session.expires_at <= at
-                or family.expires_at <= at
-            ):
-                raise InvalidRefreshToken
             else:
                 user, workspace_ids = await uow.sessions.current_identity(session.user_id)
                 access_token = self._issuer.issue(user.id, workspace_ids)
@@ -160,7 +160,7 @@ class RefreshLocalSession:
                     session.id,
                     new_token_hash=hash_refresh_token(replacement),
                     at=at,
-                    expires_at=at + REFRESH_TOKEN_LIFETIME,
+                    expires_at=deadline,
                 )
                 await uow.commit()
                 return ExchangedSession(access_token, replacement, user)

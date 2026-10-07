@@ -113,6 +113,7 @@ class FakeSyncInstallationRepositories:
         *,
         provider_installation_id: UUID,
         repositories: tuple[RepositoryReference, ...],
+        all_repositories: bool = False,
     ) -> None:
         self.disable_calls.append((provider_installation_id, repositories))
 

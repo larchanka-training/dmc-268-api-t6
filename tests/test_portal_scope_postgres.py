@@ -327,3 +327,244 @@ def test_portal_routes_intersect_claim_current_membership_and_repository_grant(
         app.dependency_overrides.clear()
         del app.state.reviews_api_resources
         asyncio.run(engine.dispose())
+
+
+@pytest.mark.integration
+def test_installation_removal_revokes_all_users_but_manual_disable_preserves_access(
+    portal_database: tuple[str, str],
+) -> None:
+    from app.modules.repositories.application.installation_repositories import RepositoryReference
+    from app.modules.repositories.application.sync_installation_repositories import (
+        SyncInstallationRepositories,
+    )
+    from app.modules.repositories.infrastructure.installation_repository_unit_of_work import (
+        SqlAlchemyInstallationRepositoriesUnitOfWork,
+    )
+
+    database_url, schema = portal_database
+    engine = create_async_engine(
+        database_url, connect_args={"options": f"-csearch_path={schema}"}, poolclass=NullPool
+    )
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    sync = SyncInstallationRepositories(
+        uow_factory=lambda: SqlAlchemyInstallationRepositoriesUnitOfWork(factory), rule_sets={}
+    )
+
+    async def prepare() -> None:
+        async with factory.begin() as session:
+            await session.execute(
+                text(
+                    "INSERT INTO github_user_repository_access "
+                    "(github_user_id, provider_installation_id, repository_external_id) "
+                    "VALUES (43, :installation, 101)"
+                ),
+                {"installation": INSTALLATION_A},
+            )
+
+    asyncio.run(prepare())
+    app.state.reviews_api_resources = ReviewsApiResources(engine, factory)
+    app.dependency_overrides[get_auth_scope] = lambda: AuthScope(42, (WORKSPACE_A, WORKSPACE_B))
+    try:
+        client = TestClient(app)
+        assert client.patch(f"/api/repos/{REPOS[0]}", json={"enabled": False}).status_code == 200
+        assert {item["id"] for item in client.get("/api/repos").json()} == {
+            str(REPOS[0]),
+            str(REPOS[2]),
+        }
+        for _ in range(2):
+            asyncio.run(
+                sync.disable(
+                    provider_installation_id=INSTALLATION_A,
+                    repositories=(RepositoryReference(101, "octo/repo-1", None, None),),
+                )
+            )
+        assert [item["id"] for item in client.get("/api/repos").json()] == [str(REPOS[2])]
+        assert client.get(f"/api/runs/{RUNS[0]}").status_code == 404
+        app.dependency_overrides[get_auth_scope] = lambda: AuthScope(43, (WORKSPACE_A,))
+        assert [item["id"] for item in client.get("/api/repos").json()] == [str(REPOS[1])]
+        assert client.get(f"/api/runs/{RUNS[0]}").status_code == 404
+    finally:
+        app.dependency_overrides.clear()
+        del app.state.reviews_api_resources
+        asyncio.run(engine.dispose())
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("payload_repositories", [(), (101,)])
+def test_installation_deleted_revokes_unlisted_grants_without_github_calls(
+    portal_database: tuple[str, str], payload_repositories: tuple[int, ...]
+) -> None:
+    from typing import Any, cast
+
+    from app.modules.integrations.webhooks.application.installation_event_projector import (
+        InstallationEventProjector,
+    )
+    from app.modules.repositories.application.installation_repositories import (
+        InstallationRepositoriesEvent,
+        RepositoryReference,
+    )
+    from app.modules.repositories.application.sync_installation_repositories import (
+        SyncInstallationRepositories,
+    )
+    from app.modules.repositories.infrastructure.installation_repository_unit_of_work import (
+        SqlAlchemyInstallationRepositoriesUnitOfWork,
+    )
+
+    database_url, schema = portal_database
+    engine = create_async_engine(
+        database_url, connect_args={"options": f"-csearch_path={schema}"}, poolclass=NullPool
+    )
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    # Any attempt to call GitHub fails: deleted events need no provider methods.
+    no_github = cast(Any, object())
+    projector = InstallationEventProjector(
+        tree_provider=no_github,
+        label_provider=no_github,
+        details_provider=no_github,
+        sync=SyncInstallationRepositories(
+            uow_factory=lambda: SqlAlchemyInstallationRepositoriesUnitOfWork(factory), rule_sets={}
+        ),
+    )
+
+    async def exercise() -> None:
+        async with factory.begin() as session:
+            # A grant can exist before repository onboarding; deletion must clear it too.
+            await session.execute(
+                text(
+                    "INSERT INTO github_user_repository_access "
+                    "(github_user_id, provider_installation_id, repository_external_id) "
+                    "VALUES (43, :installation, 999)"
+                ),
+                {"installation": INSTALLATION_A},
+            )
+        for _ in range(2):
+            await projector.execute(
+                provider_installation_id=INSTALLATION_A,
+                event=InstallationRepositoriesEvent(
+                    installation_external_id=17,
+                    action="deleted",
+                    added_repositories=(),
+                    removed_repositories=tuple(
+                        RepositoryReference(repo_id, "octo/repo", None, None)
+                        for repo_id in payload_repositories
+                    ),
+                ),
+            )
+        async with factory() as session:
+            rows = (
+                await session.execute(
+                    text(
+                        "SELECT github_user_id, repository_external_id "
+                        "FROM github_user_repository_access ORDER BY github_user_id"
+                    )
+                )
+            ).all()
+            assert [tuple(row) for row in rows] == [(42, 103)]
+            enabled = (
+                await session.execute(
+                    text("SELECT external_id, enabled FROM repositories ORDER BY external_id")
+                )
+            ).all()
+            assert [tuple(row) for row in enabled] == [(101, False), (102, False), (103, True)]
+        await engine.dispose()
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("delete_installation", [False, True])
+@pytest.mark.parametrize("user_id", [42, 43])
+def test_removal_during_oauth_snapshot_cannot_restore_grants(
+    portal_database: tuple[str, str], delete_installation: bool, user_id: int
+) -> None:
+    from app.modules.repositories.application.installation_repositories import RepositoryReference
+    from app.modules.repositories.application.sync_installation_repositories import (
+        SyncInstallationRepositories,
+    )
+    from app.modules.repositories.infrastructure.installation_repository_unit_of_work import (
+        SqlAlchemyInstallationRepositoriesUnitOfWork,
+    )
+    from app.modules.workspaces.application.link_github_installations import (
+        AuthenticatedGitHubInstallations,
+        GitHubInstallation,
+        LinkGitHubInstallations,
+    )
+    from app.modules.workspaces.infrastructure.github_installation_links import (
+        SqlAlchemyGitHubInstallationLinkUnitOfWork,
+    )
+
+    database_url, schema = portal_database
+    engine = create_async_engine(
+        database_url, connect_args={"options": f"-csearch_path={schema}"}, poolclass=NullPool
+    )
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    sync = SyncInstallationRepositories(
+        uow_factory=lambda: SqlAlchemyInstallationRepositoriesUnitOfWork(factory), rule_sets={}
+    )
+
+    async def exercise() -> None:
+        snapshot_started = asyncio.Event()
+        snapshot_release = asyncio.Event()
+
+        class GitHub:
+            async def identify_user(self, access_token: str) -> int:
+                return user_id
+
+            async def list_for_user(self, access_token: str) -> AuthenticatedGitHubInstallations:
+                snapshot_started.set()
+                await snapshot_release.wait()
+                return AuthenticatedGitHubInstallations(
+                    user_id,
+                    (
+                        GitHubInstallation(17, "alpha", (101,)),
+                        GitHubInstallation(18, "beta", (103,)),
+                    ),
+                )
+
+        link = LinkGitHubInstallations(
+            github=GitHub(), uow_factory=lambda: SqlAlchemyGitHubInstallationLinkUnitOfWork(factory)
+        )
+        pending = asyncio.create_task(link.execute("stale-snapshot"))
+        await asyncio.wait_for(snapshot_started.wait(), timeout=5)
+        await sync.disable(
+            provider_installation_id=INSTALLATION_A,
+            repositories=(RepositoryReference(101, "octo/repo-1", None, None),),
+            all_repositories=delete_installation,
+        )
+        snapshot_release.set()
+        await asyncio.wait_for(pending, timeout=5)
+        async with factory() as session:
+            grants = (
+                (
+                    await session.execute(
+                        text(
+                            "SELECT repository_external_id FROM github_user_repository_access "
+                            "WHERE github_user_id=:user_id ORDER BY repository_external_id"
+                        ),
+                        {"user_id": user_id},
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            assert grants == [103]
+        # A fresh GitHub snapshot after re-adding access can grant it again.
+        await link.execute("fresh-snapshot")
+        async with factory() as session:
+            grants = (
+                (
+                    await session.execute(
+                        text(
+                            "SELECT repository_external_id FROM github_user_repository_access "
+                            "WHERE github_user_id=:user_id ORDER BY repository_external_id"
+                        ),
+                        {"user_id": user_id},
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            assert grants == [101, 103]
+        await engine.dispose()
+
+    asyncio.run(exercise())

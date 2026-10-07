@@ -97,3 +97,21 @@ class GitHubUserInstallationSync(Base):
     github_user_id: Mapped[int] = mapped_column(BIGINT, primary_key=True)
     reserved_generation: Mapped[int] = mapped_column(BIGINT, nullable=False)
     applied_generation: Mapped[int] = mapped_column(BIGINT, nullable=False)
+
+
+class GitHubInstallationAccessRevocation(Base):
+    """Latest App-side revocation; external id zero covers the whole installation."""
+
+    __tablename__ = "github_installation_access_revocations"
+    __table_args__ = (
+        CheckConstraint(
+            "repository_external_id >= 0",
+            name="ck_github_installation_access_revocations_repo_nonnegative",
+        ),
+    )
+
+    provider_installation_id: Mapped[UUID] = mapped_column(
+        ForeignKey("provider_installations.id"), primary_key=True
+    )
+    repository_external_id: Mapped[int] = mapped_column(BIGINT, primary_key=True)
+    revoked_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
