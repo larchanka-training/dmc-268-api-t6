@@ -64,9 +64,9 @@ infrastructure}`, `app/modules/<m>/{domain,application,infrastructure}`,
    convention is a decision of its own (it would re-prefix the existing `ck_` names).
 
 Portal repository adapters must fail closed without `AuthScope`: for example, constructors of
-`SqlAlchemyRunRepository`, `SqlAlchemyRerunStore`, and `SqlAlchemyRerunUnitOfWork`
-raise `ValueError`. Trusted internal callers may bypass scope only by explicitly
-passing `allow_unscoped=True`; never infer this permission from a missing scope.
+`SqlAlchemyRunRepository`, `SqlAlchemyRerunStore`, `SqlAlchemyRerunUnitOfWork`, and
+`SqlAlchemyCancelRunUnitOfWork` raise `ValueError`. Trusted internal callers may bypass scope
+only by explicitly passing `allow_unscoped=True`; never infer this permission from a missing scope.
 
 ## 4. Language rules
 

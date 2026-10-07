@@ -131,10 +131,10 @@ wall-clock ceiling on lock ownership. A lock acquisition timeout
 follows the failed-dispatch retry path described below. `labeled` / `unlabeled` of the
 `ai-review` label (events sent by the App's own bot are ignored) and `synchronize`, `closed`,
 `reopened`, and `edited` fetch the current GitHub PR once while holding that lock; `opened` is
-applied from the payload. Label
-events and `synchronize`, `closed`, and `reopened` reconcile `ai_review_labeled` from that PR's
-current labels, so a closed PR keeps its label state; a new Run needs an open PR, since CI
-eligibility and the no-CI sweep consider only open PRs (`docs/PIPELINE_SPEC.md` §8.2);
+applied from the payload. Label events and `synchronize`, `closed`, and `reopened`
+reconcile `ai_review_labeled` from that PR's current labels, so a closed PR keeps its
+label state; a new Run needs an open PR, since CI eligibility and the no-CI sweep consider
+only open PRs (`docs/PIPELINE_SPEC.md` §8.2);
 `edited` updates metadata only. The issue timeline is never fetched:
 `review_requested` and `review_request_removed` are dropped as irrelevant. A pull request payload
 whose repository name is outside `owner/repo` (the same shape as for installation events, below)
@@ -586,13 +586,14 @@ the marker prevents replay from revoking access restored by a later OAuth reconc
 
 In the same hourly purge transaction, after deleting finished receipts, the worker deletes
 markers only when `created_at < before`, using the same cutoff (the worker's current time
-minus 30 days), and no `webhook_events` row with the same `delivery_id` remains. `created_at` is a non-null, timezone-aware timestamp with
-database default `now()` and an index for the cutoff. A marker at the cutoff or newer is
-retained; an older marker is retained while any matching receipt exists, including a pending,
-leased, or recently finished receipt. An expired finished receipt and an old marker can be
-deleted together, and rollback preserves both. Marker cleanup also runs when no receipts
-were deleted. This bounds retention for orphaned markers, but does not impose an age limit
-while a receipt remains replayable. The separate OAuth revocation records in
+minus 30 days), and no `webhook_events` row with the same `delivery_id` remains.
+`created_at` is a non-null, timezone-aware timestamp with database default `now()` and an
+index for the cutoff. A marker at the cutoff or newer is retained; an older marker is
+retained while any matching receipt exists, including a pending, leased, or recently
+finished receipt. An expired finished receipt and an old marker can be deleted together,
+and rollback preserves both. Marker cleanup also runs when no receipts were deleted. This
+bounds retention for orphaned markers, but does not impose an age limit while a receipt
+remains replayable. The separate installation access revocation records in
 `github_installation_access_revocations` are not covered by this purge.
 
 The `Purged N finished GitHub webhook receipts` line (written only when N > 0) and the purge
