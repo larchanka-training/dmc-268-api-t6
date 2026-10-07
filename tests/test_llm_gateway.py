@@ -1577,26 +1577,30 @@ def test_run_cost_limit_boundary(spent: str, calls: int) -> None:
     assert len(harness.requests) == calls
 
 
+@pytest.mark.parametrize(
+    ("rate", "price"),
+    [
+        # Regolo's EUR 0.50 / 2.10 per 1M converted at the quote binds above 1.1225 USD/EUR
+        (Decimal("1.20"), ModelPrice(Decimal("0.60"), Decimal("2.52"))),
+        # below 1.1225 the catalog floor (the same EUR price at 1.1225) binds
+        (Decimal("1.10"), ModelPrice(Decimal("0.56125"), Decimal("2.35725"))),
+    ],
+    ids=["route-ceiling", "catalog-floor"],
+)
 @pytest.mark.parametrize(("over", "calls"), [(Decimal(0), 1), (Decimal("0.000001"), 0)])
-def test_run_cost_limit_boundary_at_the_oq2_primary_price(over: Decimal, calls: int) -> None:
-    settings = LlmSettings.from_env(
-        {
-            "LLM_MODEL": "mistral-small-4",
-            "LLM_API_KEYS": "sk-eu-1",
-            "LLM_EUR_TO_USD_RATE": "1.20",
-        }
-    )
-    primary = settings.primary
+def test_run_cost_limit_boundary_at_the_oq2_primary_price(
+    rate: Decimal, price: ModelPrice, over: Decimal, calls: int
+) -> None:
+    settings = LlmSettings.from_env({"LLM_MODEL": "mistral-small-4", "LLM_API_KEYS": "sk-eu-1"})
     # the gateway's own pre-call estimate: gateway.token_counter(primary) over both messages
-    estimate = prompt_tokens(CONTEXT, HeuristicTokenCounter(primary.chars_per_token))
-    next_cost = price_at_eur_quote(primary, Decimal("1.20")).cost_usd(
-        tokens_in=estimate, tokens_out=primary.max_output_tokens
-    )
+    estimate = prompt_tokens(CONTEXT, HeuristicTokenCounter(settings.primary.chars_per_token))
+    # literal prices, not price_at_eur_quote: a rolled-back price must not move both sides
+    next_cost = price.cost_usd(tokens_in=estimate, tokens_out=8_000)
     spent = settings.policy.run_cost_limit_usd["fast"] - next_cost + over
     harness = Harness(
         [valid(model="mistral/mistral-small-4")],
         settings=settings,
-        fx_provider=FixedFxProvider(Decimal("1.20")),
+        fx_provider=FixedFxProvider(rate),
     )
     asyncio.run(
         harness.ledger.record(
