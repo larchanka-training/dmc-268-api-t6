@@ -25,6 +25,7 @@ import os
 import re
 import sys
 from collections.abc import Mapping
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -281,6 +282,207 @@ def _effective_settings(settings: LlmSettings, engine: EngineName) -> dict[str, 
     }
 
 
+@dataclass(frozen=True)
+class _CaptureInputs:
+    """Provenance and prompt inputs, resolved and validated before the first model call."""
+
+    prompt_path: str
+    prompt_sha: str
+    prompt_version: str
+    system: str
+    static_inputs: list[str]
+    static_digest: str
+    corpus_digest: str
+    rules_by_language: dict[str, tuple[ReviewRule, ...]]
+    effective_settings: dict[str, object]
+    recorded_at: str
+
+
+def _relative_input(path: Path) -> str:
+    try:
+        return path.absolute().relative_to(REPO_ROOT).as_posix()
+    except ValueError as exc:
+        raise RecorderError("static input must be inside the repository") from exc
+
+
+def _selected_rule_sets(
+    records: list[tuple[Path, dict[str, Any]]], backend_rules: Path, frontend_rules: Path
+) -> list[tuple[Path, tuple[str, ...]]]:
+    """Each default rule file whose languages occur in the corpus, with those languages."""
+    languages = {record["language"] for _, record in records}
+    return [
+        (rule_path, matching)
+        for rule_path, supported in (
+            (backend_rules, ("python",)),
+            (frontend_rules, ("typescript", "tsx")),
+        )
+        if (matching := tuple(language for language in supported if language in languages))
+    ]
+
+
+def _input_digests(
+    root: Path,
+    records: list[tuple[Path, dict[str, Any]]],
+    relative_prompt: str,
+    selected_rules: list[str],
+) -> tuple[list[str], str, str]:
+    """Return the static input paths, the static digest and the corpus digest."""
+    try:
+        static_inputs = static_input_paths(
+            relative_prompt, [*rule_json_paths(REPO_ROOT), *selected_rules]
+        )
+        static_digest = digest_files(REPO_ROOT, static_inputs)
+        corpus_digest = digest_files(root, corpus_input_paths(root, records))
+    except DigestInputError as exc:
+        raise RecorderError(str(exc)) from exc
+    return static_inputs, static_digest, corpus_digest
+
+
+def _rules_by_language(
+    rule_sets: list[tuple[Path, tuple[str, ...]]],
+) -> dict[str, tuple[ReviewRule, ...]]:
+    by_language: dict[str, tuple[ReviewRule, ...]] = {}
+    for rule_path, matching in rule_sets:
+        parsed_rules = _rules(rule_path)
+        for language in matching:
+            by_language[language] = parsed_rules
+    return by_language
+
+
+def _capture_inputs(
+    root: Path,
+    records: list[tuple[Path, dict[str, Any]]],
+    settings: LlmSettings,
+    *,
+    system_prompt: Path,
+    backend_rules: Path,
+    frontend_rules: Path,
+    recorded_at: datetime | None,
+    engine: EngineName,
+) -> _CaptureInputs:
+    relative_prompt = _relative_input(system_prompt)
+    rule_sets = _selected_rule_sets(records, backend_rules, frontend_rules)
+    static_inputs, static_digest, corpus_digest = _input_digests(
+        root, records, relative_prompt, [_relative_input(path) for path, _ in rule_sets]
+    )
+    prompt_bytes = system_prompt.read_bytes()
+    system = prompt_bytes.decode("utf-8")
+    version = _PROMPT_VERSION.search(system)
+    if version is None:
+        raise RecorderError("system prompt has no version")
+    rules_by_language = _rules_by_language(rule_sets)
+    effective_settings = _effective_settings(settings, engine)
+    timestamp = (
+        (recorded_at or datetime.now(UTC)).astimezone(UTC).isoformat().replace("+00:00", "Z")
+    )
+    return _CaptureInputs(
+        prompt_path=relative_prompt,
+        prompt_sha=hashlib.sha256(prompt_bytes).hexdigest(),
+        prompt_version=f"v{version.group(1)}",
+        system=system,
+        static_inputs=static_inputs,
+        static_digest=static_digest,
+        corpus_digest=corpus_digest,
+        rules_by_language=rules_by_language,
+        effective_settings=effective_settings,
+        recorded_at=timestamp,
+    )
+
+
+def _first_call_status(first: LlmCallRecord | None, content: str) -> str:
+    if first is None:
+        return "no_call"
+    if not isinstance(first.response, dict):
+        return "no_content"
+    return "answer" if content else "empty_answer"
+
+
+async def _record_case(
+    case_dir: Path,
+    record: dict[str, Any],
+    inputs: _CaptureInputs,
+    settings: LlmSettings,
+    *,
+    engine: EngineName,
+    transport: ChatTransport | None,
+    staging_dir: Path,
+) -> dict[str, str | bool | None]:
+    """Stage one case's first-call text and return its redacted call status."""
+    case = _case_input(
+        case_dir,
+        record,
+        system=inputs.system,
+        rules=inputs.rules_by_language[record["language"]],
+        engine=engine,
+    )
+    try:
+        result = await review_case(case, settings, transport=transport)
+        calls = result.calls
+        gateway_status = "accepted"
+    except ReviewCaseFailed as failure:
+        calls = failure.trace
+        gateway_status = failure.error_code.value
+    first = calls[0] if calls else None
+    content = _first_text(first)
+    provider_label, provider_digest = _first_serving_provider(first)
+    (staging_dir / f"{record['id']}.json").write_bytes(content.encode("utf-8"))
+    return {
+        "first_call": _first_call_status(first, content),
+        "first_model": first.model if first else None,
+        "first_kind": first.kind.value if first else None,
+        "first_provider_label": provider_label,
+        "first_provider_digest": provider_digest,
+        "gateway_status": gateway_status,
+        "paid_metadata_error": any(call.paid_metadata_error for call in calls),
+    }
+
+
+def _manifest(
+    inputs: _CaptureInputs,
+    settings: LlmSettings,
+    *,
+    engine: EngineName,
+    statuses: dict[str, dict[str, str | bool | None]],
+    paths: dict[str, str],
+) -> dict[str, Any]:
+    nonpublishable_ids = nonpublishable_case_ids(statuses)
+    return {
+        "schema_version": 1,
+        "model_id": settings.primary.model,
+        "prompt_path": inputs.prompt_path,
+        "prompt_sha": inputs.prompt_sha,
+        "prompt_version": inputs.prompt_version,
+        "static_inputs": inputs.static_inputs,
+        "static_digest": inputs.static_digest,
+        "corpus_digest": inputs.corpus_digest,
+        "run_metadata": {
+            "recorded_at": inputs.recorded_at,
+            "engine": engine,
+            "fallback_model_id": settings.fallback.model if settings.fallback else None,
+            "effective_settings": inputs.effective_settings,
+            "baseline_publishable": not nonpublishable_ids,
+            "nonpublishable_case_ids": nonpublishable_ids,
+            "cases": statuses,
+        },
+        "responses": paths,
+    }
+
+
+def _publish_capture(staging_dir: Path, responses_dir: Path, manifest: dict[str, Any]) -> None:
+    """Write the manifest and move the complete capture into a still-empty ``responses/``."""
+    (staging_dir / "manifest.json").write_text(
+        json.dumps(manifest, indent=2, sort_keys=True, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+    if responses_dir.is_symlink():
+        raise RecorderError("responses directory cannot be a symlink")
+    if responses_dir.exists():
+        if any(responses_dir.iterdir()):
+            raise RecorderError("responses directory is not empty; preserve the existing baseline")
+        responses_dir.rmdir()
+    staging_dir.rename(responses_dir)
+
+
 async def record_live(
     root: Path,
     settings: LlmSettings,
@@ -299,45 +501,15 @@ async def record_live(
         raise RecorderError("responses directory is not empty; preserve the existing baseline")
     if responses_dir.is_symlink():
         raise RecorderError("responses directory cannot be a symlink")
-
-    def relative_input(path: Path) -> str:
-        try:
-            return path.absolute().relative_to(REPO_ROOT).as_posix()
-        except ValueError as exc:
-            raise RecorderError("static input must be inside the repository") from exc
-
-    relative_prompt = relative_input(system_prompt)
-    languages = {record["language"] for _, record in records}
-    selected_rule_sets = [
-        (rule_path, matching)
-        for rule_path, supported in (
-            (backend_rules, ("python",)),
-            (frontend_rules, ("typescript", "tsx")),
-        )
-        if (matching := tuple(language for language in supported if language in languages))
-    ]
-    selected_rules = [relative_input(path) for path, _ in selected_rule_sets]
-    try:
-        static_inputs = static_input_paths(
-            relative_prompt, [*rule_json_paths(REPO_ROOT), *selected_rules]
-        )
-        static_digest = digest_files(REPO_ROOT, static_inputs)
-        corpus_digest = digest_files(root, corpus_input_paths(root, records))
-    except DigestInputError as exc:
-        raise RecorderError(str(exc)) from exc
-    prompt_bytes = system_prompt.read_bytes()
-    system = prompt_bytes.decode("utf-8")
-    version = _PROMPT_VERSION.search(system)
-    if version is None:
-        raise RecorderError("system prompt has no version")
-    by_language: dict[str, tuple[ReviewRule, ...]] = {}
-    for rule_path, matching in selected_rule_sets:
-        parsed_rules = _rules(rule_path)
-        for language in matching:
-            by_language[language] = parsed_rules
-    effective_settings = _effective_settings(settings, engine)
-    timestamp = (
-        (recorded_at or datetime.now(UTC)).astimezone(UTC).isoformat().replace("+00:00", "Z")
+    inputs = _capture_inputs(
+        root,
+        records,
+        settings,
+        system_prompt=system_prompt,
+        backend_rules=backend_rules,
+        frontend_rules=frontend_rules,
+        recorded_at=recorded_at,
+        engine=engine,
     )
     statuses: dict[str, dict[str, str | bool | None]] = {}
     paths: dict[str, str] = {}
@@ -345,77 +517,18 @@ async def record_live(
         staging_dir = Path(staging_name)
         for case_dir, record in records:
             case_id = record["id"]
-            case = _case_input(
+            statuses[case_id] = await _record_case(
                 case_dir,
                 record,
-                system=system,
-                rules=by_language[record["language"]],
+                inputs,
+                settings,
                 engine=engine,
+                transport=transport,
+                staging_dir=staging_dir,
             )
-            try:
-                result = await review_case(case, settings, transport=transport)
-                calls = result.calls
-                gateway_status = "accepted"
-            except ReviewCaseFailed as failure:
-                calls = failure.trace
-                gateway_status = failure.error_code.value
-            first = calls[0] if calls else None
-            content = _first_text(first)
-            provider_label, provider_digest = _first_serving_provider(first)
-            relative_response = f"responses/{case_id}.json"
-            (staging_dir / f"{case_id}.json").write_bytes(content.encode("utf-8"))
-            paths[case_id] = relative_response
-            statuses[case_id] = {
-                "first_call": (
-                    "no_call"
-                    if first is None
-                    else "no_content"
-                    if not isinstance(first.response, dict)
-                    else "answer"
-                    if content
-                    else "empty_answer"
-                ),
-                "first_model": first.model if first else None,
-                "first_kind": first.kind.value if first else None,
-                "first_provider_label": provider_label,
-                "first_provider_digest": provider_digest,
-                "gateway_status": gateway_status,
-                "paid_metadata_error": any(call.paid_metadata_error for call in calls),
-            }
-        nonpublishable_ids = nonpublishable_case_ids(statuses)
-        manifest: dict[str, Any] = {
-            "schema_version": 1,
-            "model_id": settings.primary.model,
-            "prompt_path": relative_prompt,
-            "prompt_sha": hashlib.sha256(prompt_bytes).hexdigest(),
-            "prompt_version": f"v{version.group(1)}",
-            "static_inputs": static_inputs,
-            "static_digest": static_digest,
-            "corpus_digest": corpus_digest,
-            "run_metadata": {
-                "recorded_at": timestamp,
-                "engine": engine,
-                "fallback_model_id": settings.fallback.model if settings.fallback else None,
-                "effective_settings": effective_settings,
-                "baseline_publishable": not nonpublishable_ids,
-                "nonpublishable_case_ids": nonpublishable_ids,
-                "cases": statuses,
-            },
-            "responses": paths,
-        }
-        (staging_dir / "manifest.json").write_text(
-            json.dumps(manifest, indent=2, sort_keys=True, ensure_ascii=False) + "\n",
-            encoding="utf-8",
-        )
-        if responses_dir.is_symlink():
-            raise RecorderError("responses directory cannot be a symlink")
-        if responses_dir.exists():
-            if any(responses_dir.iterdir()):
-                raise RecorderError(
-                    "responses directory is not empty; preserve the existing baseline"
-                )
-            responses_dir.rmdir()
-        staging_dir.rename(responses_dir)
+            paths[case_id] = f"responses/{case_id}.json"
+        manifest = _manifest(inputs, settings, engine=engine, statuses=statuses, paths=paths)
+        _publish_capture(staging_dir, responses_dir, manifest)
     return manifest
 
 
