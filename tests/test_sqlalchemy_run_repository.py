@@ -92,28 +92,6 @@ class CancelSession:
         return None
 
 
-class CancelSessionContext(AbstractAsyncContextManager[CancelSession]):
-    def __init__(self, session: CancelSession) -> None:
-        self._session = session
-
-    async def __aenter__(self) -> CancelSession:
-        return self._session
-
-    async def __aexit__(self, *args: object) -> None:
-        return None
-
-
-class CancelSessionFactory:
-    def __init__(self, session: CancelSession) -> None:
-        self._session = session
-
-    def __call__(self) -> CancelSessionContext:
-        return CancelSessionContext(self._session)
-
-    def begin(self) -> CancelSessionContext:
-        return CancelSessionContext(self._session)
-
-
 def test_sqlalchemy_run_repository_filters_and_orders_with_a_tied_timestamp_cursor() -> None:
     created_at = datetime(2026, 9, 24, tzinfo=UTC)
     run = SimpleNamespace(

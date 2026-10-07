@@ -3,20 +3,18 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from types import TracebackType
 from typing import Any
 
 
 @dataclass
 class FakeUow:
-    """Exposes one fake repository under ``attribute`` and records commits."""
+    """Exposes one fake repository under ``attribute``."""
 
     attribute: str
     port: Any
-    commits: int = 0
     rollbacks: int = 0
-    _extra: dict[str, Any] = field(default_factory=dict)
 
     def __getattr__(self, name: str) -> Any:
         if name == self.attribute:
@@ -35,7 +33,7 @@ class FakeUow:
         return None
 
     async def commit(self) -> None:
-        self.commits += 1
+        pass
 
     async def rollback(self) -> None:
         self.rollbacks += 1
@@ -58,13 +56,37 @@ class _StagedCache:
 
 
 @dataclass
-class ProcessingUow:
-    """Run-processing UoW whose blob writes become visible in ``cache`` only on commit."""
+class _StagedRepository:
+    uow: ProcessingUow
+    target: Any
 
-    repository: Any
-    cache: Any | None = None
-    commits: int = 0
-    pending: list[tuple[Any, str, Any]] = field(default_factory=list)
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self.target, name)
+
+    async def store_diff_snapshots(
+        self,
+        run_id: Any,
+        code_change_id: Any,
+        head_sha: Any,
+        snapshots: Any,
+    ) -> Any:
+        self.uow.pending_snapshots.append((run_id, code_change_id, head_sha, snapshots))
+        return snapshots
+
+
+class ProcessingUow:
+    """Run-processing UoW whose diff snapshots and blob writes become visible only on commit."""
+
+    def __init__(self, repository: Any, cache: Any | None = None) -> None:
+        self._target_repository = repository
+        self.cache = cache
+        self.commits: int = 0
+        self.pending: list[tuple[Any, str, Any]] = []
+        self.pending_snapshots: list[tuple[Any, Any, Any, Any]] = []
+
+    @property
+    def repository(self) -> _StagedRepository:
+        return _StagedRepository(self, self._target_repository)
 
     @property
     def blob_cache(self) -> _StagedCache | None:
@@ -83,12 +105,18 @@ class ProcessingUow:
 
     async def commit(self) -> None:
         self.commits += 1
+        for run_id, code_change_id, head_sha, snapshots in self.pending_snapshots:
+            await self._target_repository.store_diff_snapshots(
+                run_id, code_change_id, head_sha, snapshots
+            )
+        self.pending_snapshots.clear()
         if self.cache is not None:
             for key, content, ttl in self.pending:
                 await self.cache.put(key, content, ttl=ttl)
         self.pending.clear()
 
     async def rollback(self) -> None:
+        self.pending_snapshots.clear()
         self.pending.clear()
 
 

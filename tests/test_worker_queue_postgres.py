@@ -1370,10 +1370,10 @@ def test_main_composition_without_llm_config_names_the_missing_configuration(
 def test_repeated_delivery_failures_route_to_dlq_across_reconnects(
     env: Env, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    async def no_sleep(seconds: float) -> None:
-        return None
-
-    monkeypatch.setattr(asyncio, "sleep", no_sleep)
+    monkeypatch.setattr(
+        "app.modules.reviews.infrastructure.amqp.REQUEUE_ERROR_DELAY_SECONDS",
+        0.0,
+    )
 
     run_id = uuid4()
     body = {
@@ -1398,8 +1398,8 @@ def test_repeated_delivery_failures_route_to_dlq_across_reconnects(
         "rule_version_id": str(env.rule_id),
         "prompt_version_id": str(env.prompt_id),
         "trigger": "webhook",
-        "attempt": 0,
-        "requested_at": datetime.now(UTC).isoformat(),
+        "attempt": 1,
+        "requested_at": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
     }
 
     async def publish_initial() -> None:
@@ -1430,18 +1430,23 @@ def test_repeated_delivery_failures_route_to_dlq_across_reconnects(
         async with amqp_channels(env.rabbitmq_url, SHORT_DELAYS) as channels:
             queue = await channels.consumer_queue(run_queue("fast"))
             async with queue.iterator() as messages:
-                async for message in messages:
-                    deliveries_seen += 1
 
-                    async def failing_handler(_: UUID) -> DeliveryOutcome:
-                        raise RuntimeError("handler failure")
+                async def _consume() -> None:
+                    nonlocal deliveries_seen
+                    async for message in messages:
+                        deliveries_seen += 1
 
-                    await handle_run_delivery(
-                        message,
-                        handler=failing_handler,
-                        publisher=channels.publisher,
-                    )
-                    break
+                        async def failing_handler(_: UUID) -> DeliveryOutcome:
+                            raise RuntimeError("handler failure")
+
+                        await handle_run_delivery(
+                            message,
+                            handler=failing_handler,
+                            publisher=channels.publisher,
+                        )
+                        break
+
+                await asyncio.wait_for(_consume(), timeout=10.0)
 
     for _ in range(3):
         asyncio.run(deliver_once_and_fail())
@@ -1457,10 +1462,15 @@ def test_repeated_delivery_failures_route_to_dlq_across_reconnects(
 
             dlq_msg: aio_pika.abc.AbstractIncomingMessage | None = None
             async with dlq.iterator() as messages:
-                async for msg in messages:
-                    await msg.ack()
-                    dlq_msg = msg
-                    break
+
+                async def _consume_dlq() -> None:
+                    nonlocal dlq_msg
+                    async for msg in messages:
+                        await msg.ack()
+                        dlq_msg = msg
+                        break
+
+                await asyncio.wait_for(_consume_dlq(), timeout=10.0)
             dlq_headers = dict(dlq_msg.headers or {}) if dlq_msg is not None else None
             return int(fast_count or 0), dlq_headers
 

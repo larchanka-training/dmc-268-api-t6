@@ -66,7 +66,6 @@ from app.modules.repositories.infrastructure.repository_settings import (
 from app.modules.reviews.application.cancel_run import (
     CancellationSignals,
     CancelRun,
-    CancelRunRepository,
 )
 from app.modules.reviews.application.determine_ci_eligibility import DetermineCiEligibility
 from app.modules.reviews.application.get_run import RunDetailRepository
@@ -154,7 +153,6 @@ class ReviewsApiResources:
         | RunActionsRepository
         | RunDiffRepository
         | RunFileRepository
-        | CancelRunRepository
     ):
         return SqlAlchemyRunRepository(self._session_factory, scope, allow_unscoped=allow_unscoped)
 
@@ -329,7 +327,6 @@ def get_run_repository(
     | RunActionsRepository
     | RunDiffRepository
     | RunFileRepository
-    | CancelRunRepository
     | RunAccessRepository
 ):
     """Provide a request-scoped repository backed by the application pool."""
