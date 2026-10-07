@@ -31,6 +31,7 @@ from app.bootstrap.reviews_api import (
     get_rerun_uow_factory,
     get_run_publisher,
 )
+from app.common.application.github_repository_name import REPOSITORY_FULL_NAME_MAX_LENGTH
 from app.main import app, get_file_blob_cache, get_run_event_hub, get_run_repository
 from app.modules.repositories.application.repository_settings import (
     RepositorySettings,
@@ -840,6 +841,17 @@ def test_enums_match_the_ui_contract_and_the_review_output_model() -> None:
     assert components["Category"]["enum"] == list(get_args(Category.__value__))
     assert components["Severity"]["enum"] == zod["reviewComment"]["properties"]["severity"]["enum"]
     assert components["Category"]["enum"] == zod["reviewComment"]["properties"]["category"]["enum"]
+
+
+def test_runs_repo_filter_bounds_match_the_repository_name_constant() -> None:
+    parameters = _spec()["paths"]["/api/runs"]["get"]["parameters"]
+    (repo,) = [parameter for parameter in parameters if parameter.get("name") == "repo"]
+
+    assert repo["in"] == "query"
+    assert (repo["schema"]["minLength"], repo["schema"]["maxLength"]) == (
+        1,
+        REPOSITORY_FULL_NAME_MAX_LENGTH,
+    )
 
 
 def test_repository_update_validates_and_returns_the_repository_schema(client: TestClient) -> None:
