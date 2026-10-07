@@ -16,15 +16,13 @@ uv run python -m app.webhook_worker
 ```
 
 For local Docker Compose, set `GITHUB_WEBHOOK_SECRET`, `GITHUB_APP_ID`,
-`GITHUB_APP_PRIVATE_KEY`, and `GITHUB_APP_BOT_LOGIN` in `.env`, apply the migrations, seed the
-prompts and start the `webhooks` profile (the compose file passes `RABBITMQ_URL` itself). A
-worker started outside Compose needs the same database, broker and GitHub App configuration.
+`GITHUB_APP_PRIVATE_KEY`, and `GITHUB_APP_BOT_LOGIN` in `.env` and start the `webhooks` profile
+(the compose file passes `RABBITMQ_URL` itself): the one-shot `bootstrap` service applies the
+migrations and seeds the prompts before `webhook-worker` starts. A worker started outside
+Compose needs the same database, broker and GitHub App configuration.
 Values of the dev GitHub App and its smee.io delivery path: [README](../README.md#local-dev-app).
 
 ```bash
-docker compose up -d postgres rabbitmq
-docker compose run --rm backend alembic upgrade head
-docker compose run --rm backend python -m app.bootstrap.seed_prompts
 docker compose --profile webhooks up --build
 ```
 
