@@ -134,13 +134,20 @@ def _service_block(name: str) -> str:
     return match.group(1)
 
 
-def _workflow_step(name: str) -> str:
-    workflow = WORKFLOW.read_text(encoding="utf-8")
+def _workflow_step(name: str, workflow_file: Path = WORKFLOW) -> str:
+    workflow = workflow_file.read_text(encoding="utf-8")
     header = f"      - name: {name}\n"
     assert workflow.count(header) == 1, f"step {name!r} must exist exactly once"
     start = workflow.index(header)
     end = workflow.find("\n      - name: ", start + len(header))
     return workflow[start : end if end != -1 else len(workflow)]
+
+
+def _run_script(step: str) -> str:
+    """The ``run: |`` block of a workflow step, dedented."""
+    match = re.search(r"^        run: \|\n((?:          .*\n|\n)*)", step, re.MULTILINE)
+    assert match is not None, "the step has no run block"
+    return textwrap.dedent(match.group(1)).strip("\n")
 
 
 def _bash_array(script: str, name: str) -> list[str]:
@@ -751,14 +758,19 @@ def test_ci_validates_the_edge_caddyfile_before_the_push() -> None:
     next_job = workflow.index("  terraform-lint-security:")
     job = workflow[workflow.index("  edge-validate:") : next_job]
     push_image = workflow[workflow.index("  push-image:") : workflow.index("  deploy-staging:")]
+    script = _run_script(_workflow_step("caddy validate"))
 
     assert "name: Edge Caddyfile validate" in job
+    assert "      - name: caddy validate\n" in job
     # The image the VPS runs comes from deploy/edge/compose.yml: no second tag to keep in step.
-    assert "deploy/edge/compose.yml" in job
-    assert not re.search(r"caddy:\d", workflow)
+    assert "image=\"$(sed -n 's/^    image: //p' deploy/edge/compose.yml)\"" in script.splitlines()
+    assert not re.search(r"\bcaddy(?::\d|@sha256:)", workflow)
     # The same command as docs/CICD.md §8.2; unset, APP_DOMAIN leaves the apex site keyless.
-    assert '-e APP_DOMAIN=example.test -v "$PWD/deploy/edge:/etc/caddy:ro"' in job
-    assert "caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile" in job
+    assert (
+        "docker run --rm -e APP_DOMAIN=example.test "
+        '-v "$PWD/deploy/edge:/etc/caddy:ro" "${image}" \\\n'
+        "  caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile"
+    ) in script
     # The deploy runs caddy reload with this file: a broken one must stop the pipeline first.
     assert "- edge-validate" in push_image
 
