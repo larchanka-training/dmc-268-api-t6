@@ -16,6 +16,7 @@
 flowchart TD
   pr["PR / push"] --> secrets["gitleaks"]
   pr --> tf["terraform fmt / validate\n(api + ui stacks)"]
+  pr --> caddy["caddy validate\n(deploy/edge/Caddyfile)"]
   pr --> lint["tflint + checkov"]
   pr --> py["ruff check / format, mypy, pytest\n(required check)"]
   pr --> oas["redocly lint openapi.yaml\n(required check)"]
@@ -25,6 +26,7 @@ flowchart TD
   secrets --> gate{"main?"}
   py --> gate
   tf --> gate
+  caddy --> gate
   lint --> gate
   scan --> gate
   oas --> gate
