@@ -107,7 +107,7 @@ class StoreReviewOutput:
         raw_output: Mapping[str, object] | str | bytes,
     ) -> bool:
         parsed = parse_review_output(raw_output)
-        raw_json = _as_json_object(raw_output)
+        answer = _as_json_object(raw_output)
         started_at = self._now()
         started = time.monotonic()
         async with self._uow_factory() as uow:
@@ -137,7 +137,7 @@ class StoreReviewOutput:
             ):
                 return False
             event = review_event(guard.repository_review_event, run_verdict)
-            if await uow.reviews.store_review_output(run_id, raw_json, parsed, processed) is None:
+            if await uow.reviews.store_review_output(run_id, answer, parsed, processed) is None:
                 return False
             await uow.reviews.enter_publishing(
                 run_id,

@@ -155,7 +155,7 @@ class ReviewOutputRepository(Protocol):
     async def store_review_output(
         self,
         run_id: UUID,
-        raw_output: dict[str, object],
+        model_output: dict[str, object],
         parsed: ReviewOutput,
         processed: ProcessedReviewOutput,
     ) -> ReviewPublication | None: ...
@@ -216,7 +216,7 @@ class PublishReviewOutput:
         raw_output: Mapping[str, object] | str | bytes,
     ) -> bool:
         parsed = parse_review_output(raw_output)
-        raw_json = _as_json_object(raw_output)
+        answer = _as_json_object(raw_output)
         from app.modules.reviews.application.findings_post_processor import FindingsPostProcessor
 
         # Anchoring and custom-rule attribution are an immutable run boundary:
@@ -233,7 +233,7 @@ class PublishReviewOutput:
             repository_max_inline=context.repository_max_inline,
         )
         async with self._uow_factory() as uow:
-            publication = await uow.reviews.store_review_output(run_id, raw_json, parsed, processed)
+            publication = await uow.reviews.store_review_output(run_id, answer, parsed, processed)
             if publication is None:
                 return False
             await uow.commit()
