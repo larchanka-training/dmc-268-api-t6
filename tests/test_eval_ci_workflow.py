@@ -65,6 +65,7 @@ def _run_step(
         'case "$3" in\n'
         '  review/scripts/validate_dataset.py) cp "$FIXTURE_CORPUS" "${@: -1}" ;;\n'
         "  review/scripts/eval_replay.py)\n"
+        "    if [[ ! -f test-prs-dataset/responses/manifest.json ]]; then exit 1; fi\n"
         '    if [[ "${FAIL_REPLAY:-}" == 1 ]]; then exit 27; fi\n'
         '    cp "$FIXTURE_REPLAY" "${@: -1}" ;;\n'
         '  -) exec "$PYTHON_EXE" - ;;\n'
@@ -147,15 +148,15 @@ def test_required_ci_replay_failure_fails_the_step(tmp_path: Path) -> None:
     result, summary = _run_step(tmp_path, manifest=True, fail_replay=True)
 
     assert result.returncode == 27
-    assert summary == ""
+    assert "Recorded replay failed; no report was produced." in summary
 
 
-def test_required_ci_without_manifest_reports_pending(tmp_path: Path) -> None:
+def test_required_ci_without_manifest_fails_with_summary(tmp_path: Path) -> None:
     result, summary = _run_step(tmp_path, manifest=False)
 
-    assert result.returncode == 0, result.stderr
+    assert result.returncode != 0
     assert summary == (
         "## Gold benchmark\n\n"
         "Corpus: 24/24 valid; distribution passed.\n\n"
-        "Recorded replay: pending baseline responses and manifest.\n"
+        "Recorded replay failed: baseline manifest is missing.\n"
     )

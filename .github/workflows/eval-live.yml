@@ -3,6 +3,11 @@ name: Live corpus evaluation
 # Manual, paid evaluation using the team EUrouter account. Required CI uses the committed offline replay.
 on:
   workflow_dispatch:
+    inputs:
+      model:
+        description: "Primary EUrouter model (empty uses LLM_MODEL variable)"
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -18,7 +23,7 @@ jobs:
     timeout-minutes: 60
     env:
       LLM_PROVIDER: eurouter
-      LLM_MODEL: ${{ vars.LLM_MODEL }}
+      LLM_MODEL: ${{ inputs.model || vars.LLM_MODEL }}
       LLM_FALLBACK_MODEL: ${{ vars.LLM_FALLBACK_MODEL }}
       LLM_STRUCTURED_OUTPUT: json_schema
     steps:
@@ -58,6 +63,16 @@ jobs:
             --root "$RUNNER_TEMP/eval-corpus" \
             --report-json "$RUNNER_TEMP/eval-report.json" \
             --redacted-responses "$RUNNER_TEMP/eval-response-metadata"
+
+      - name: Export safe provenance
+        if: always()
+        shell: bash
+        run: |
+          manifest="$RUNNER_TEMP/eval-corpus/responses/manifest.json"
+          if [[ -f "$manifest" ]]; then
+            mkdir -p "$RUNNER_TEMP/eval-response-metadata"
+            cp "$manifest" "$RUNNER_TEMP/eval-response-metadata/manifest.json"
+          fi
 
       - name: Summarize evaluation
         if: always()

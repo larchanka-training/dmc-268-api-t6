@@ -182,8 +182,8 @@ Replay the committed capture without credentials or network calls:
 uv run python review/scripts/eval_replay.py
 ```
 
-The existing required `Python lint / type / test` job runs the same replay when
-this manifest is present and writes its metrics to the job summary. Quality values
+The existing required `Python lint / type / test` job runs the same replay unconditionally; a missing
+manifest fails the job and writes its metrics to the job summary. Quality values
 are reported rather than used as pass thresholds. Raw response files are excluded
 from whitespace and end-of-file rewriting hooks so a commit preserves exact bytes.
 
@@ -204,7 +204,11 @@ come from the gateway's known-model profiles. The organization Actions secret
 `AI_DMC268_T6` must be available to this repository; it is exposed only to the
 live-evaluation step. No local copy of the key is needed.
 After the workflow exists on the default branch, select **Actions → Live corpus
-evaluation → Run workflow** and choose the branch to evaluate.
+evaluation → Run workflow** and choose the branch to evaluate. Leave **model**
+empty to use `vars.LLM_MODEL`, or set `mistral-small-4` and
+`mistral-small-3.2-24b` in separate runs to evaluate each selected model as primary.
+This input does not change repository variables used by staging; the fallback
+remains `vars.LLM_FALLBACK_MODEL`.
 
 The workflow copies only `cases/` and `schema/` to the runner's temporary directory,
 validates the corpus, and records new responses there. It never replaces the
@@ -213,10 +217,23 @@ replay. Provider/infrastructure failures fail the job; available diagnostic metr
 are still summarized and uploaded. Missing credentials fail before model calls.
 
 The 14-day artifact contains `eval-report.json` (without validator diagnostics) and
-`eval-response-metadata/` (per-case hashes, byte counts and statuses). It does not
-contain raw model text, provider envelopes or credentials. Raw responses and their
-manifest exist only on the temporary runner; use a local capture when preparing a
+`eval-response-metadata/` (per-case hashes, byte counts and statuses, plus the
+generated safe manifest with first model and sanitized provider identity).
+The report and manifest provenance retain recording time,
+fallback model and sanitized effective settings; secrets, raw endpoint URLs and
+arbitrary provider metadata are excluded. It does not
+contain raw model text, provider envelopes or credentials. Raw responses exist only on the temporary runner; use a local capture when preparing a
 new committed baseline. A run spends the team EUrouter balance, including
 retries/repair, can take tens of minutes, and has a 60-minute job timeout. Concurrent
 runs of this workflow are serialized. This workflow does not verify conventions
 on the two selected EUrouter models.
+
+
+### Expected baseline drift
+
+The static digest includes gateway/settings inputs. Changes from #80 can therefore
+produce an expected static-input drift warning against the intermediate Nemotron
+capture. The warning is informative, not a quality gate; preserve the original
+capture and its provenance rather than editing its digest to hide drift. After
+merge, run the live workflow and collect the full selected Mistral baseline in a
+separate PR with `Refs #53`. Issue #53 remains open until that follow-up is accepted.

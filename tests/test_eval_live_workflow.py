@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import subprocess
+import sys
 import textwrap
 from pathlib import Path
+
+import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = REPO_ROOT / ".github/workflows/eval-live.yml"
@@ -22,7 +26,7 @@ def _step(name: str) -> str:
 
 def _run(name: str, root: Path, env: dict[str, str]) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        ["bash", "-euo", "pipefail", "-c", _step(name)],
+        ["/bin/bash", "-euo", "pipefail", "-c", _step(name)],
         cwd=root,
         env={**os.environ, **env},
         capture_output=True,
@@ -90,20 +94,29 @@ def test_live_failure_is_not_hidden_and_diagnostics_remain(tmp_path: Path) -> No
 
 
 def test_missing_key_fails_before_provider_call(tmp_path: Path) -> None:
+    shim = tmp_path / "uv"
+    shim.write_text('#!/bin/bash\n: > "$RUNNER_TEMP/uv-called"\nexit 42\n')
+    shim.chmod(0o755)
     result = _run(
         "Evaluate live corpus",
         tmp_path,
-        {"RUNNER_TEMP": str(tmp_path), "LLM_API_KEYS": ""},
+        {"RUNNER_TEMP": str(tmp_path), "LLM_API_KEYS": "", "PATH": str(tmp_path)},
     )
     assert result.returncode != 0
     assert "AI_DMC268_T6" in result.stderr
+    assert not (tmp_path / "uv-called").exists()
     assert not (tmp_path / "eval-report.json").exists()
+    # Positive control: the same PATH-restricted shim must mark an invocation.
+    control = _run(
+        "Evaluate live corpus",
+        tmp_path,
+        {"RUNNER_TEMP": str(tmp_path), "LLM_API_KEYS": "test-key", "PATH": str(tmp_path)},
+    )
+    assert control.returncode == 42
+    assert (tmp_path / "uv-called").exists()
 
 
 def test_summary_uses_replay_metrics_without_model_diagnostics(tmp_path: Path) -> None:
-    import json
-    import sys
-
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     shim = bin_dir / "uv"
@@ -151,3 +164,79 @@ def test_summary_uses_replay_metrics_without_model_diagnostics(tmp_path: Path) -
     assert "Verdict agreement: 29.2% (7/24)" in content
     assert "Warning: Recorded capture is not publishable" in content
     assert "RAW MODEL TEXT MUST NOT APPEAR" not in content
+
+
+def _assert_workflow_contract(text: str) -> None:
+    trigger = text.split("\non:\n", 1)[1].split("\npermissions:", 1)[0]
+    assert re.findall(r"^  (\w+):", trigger, re.M) == ["workflow_dispatch"]
+    assert "      model:\n" in trigger
+    assert "        required: false\n" in trigger
+    assert "        type: string\n" in trigger
+    assert "permissions:\n  contents: read\n\n" in text
+    assert "LLM_MODEL: ${{ inputs.model || vars.LLM_MODEL }}" in text
+    assert text.count("${{ secrets.") == 1
+    evaluate = text.split("      - name: Evaluate live corpus\n")[1].split("\n      - name:")[0]
+    assert "${{ inputs.model" not in evaluate
+    assert "          LLM_API_KEYS: ${{ secrets.AI_DMC268_T6 }}" in evaluate
+    assert 'validate_dataset.py --root "$RUNNER_TEMP/eval-corpus" --final' in text
+    for name in ("Export safe provenance", "Summarize evaluation", "Upload evaluation report"):
+        assert f"      - name: {name}\n        if: always()\n" in text
+    upload = text.split("      - name: Upload evaluation report\n")[1]
+    paths = upload.split("          path: |\n")[1].split("          if-no-files-found:")[0]
+    assert paths.splitlines() == [
+        "            ${{ runner.temp }}/eval-report.json",
+        "            ${{ runner.temp }}/eval-response-metadata/",
+    ]
+    assert "          retention-days: 14\n" in upload
+
+
+def test_manual_workflow_security_and_selection_contract() -> None:
+    _assert_workflow_contract(WORKFLOW.read_text())
+
+
+@pytest.mark.parametrize(
+    "before,after",
+    [
+        ("on:\n", "on:\n  push:\n"),
+        ("contents: read", "contents: write"),
+        ("if: always()", "if: success()"),
+        ("retention-days: 14", "retention-days: 90"),
+        ("/eval-response-metadata/", "/eval-corpus/"),
+        ('--root "$RUNNER_TEMP/eval-corpus" --final', "--final"),
+        ("${{ inputs.model || vars.LLM_MODEL }}", "${{ vars.LLM_MODEL }}"),
+        ("    env:\n", "    env:\n      EXTRA_KEY: ${{ secrets.AI_DMC268_T6 }}\n"),
+    ],
+)
+def test_workflow_contract_rejects_unsafe_mutations(before: str, after: str) -> None:
+    original = WORKFLOW.read_text()
+    assert before in original
+    with pytest.raises(AssertionError):
+        _assert_workflow_contract(original.replace(before, after))
+
+
+def test_safe_provenance_exports_only_generated_manifest(tmp_path: Path) -> None:
+    responses = tmp_path / "eval-corpus/responses"
+    responses.mkdir(parents=True)
+    manifest = {
+        "run_metadata": {
+            "recorded_at": "2026-10-07T12:00:00Z",
+            "fallback_model_id": "fallback-model",
+            "effective_settings": {"context_window": 32768},
+            "cases": {
+                "SEC-01": {"first_provider_label": "scaleway", "first_model": "primary-model"}
+            },
+        }
+    }
+    (responses / "manifest.json").write_text(json.dumps(manifest))
+    (responses / "SEC-01.json").write_text("RAW_MODEL_TEXT_MUST_NOT_UPLOAD")
+    result = _run("Export safe provenance", tmp_path, {"RUNNER_TEMP": str(tmp_path)})
+    assert result.returncode == 0, result.stderr
+    exported = tmp_path / "eval-response-metadata"
+    assert [path.name for path in exported.iterdir()] == ["manifest.json"]
+    assert json.loads((exported / "manifest.json").read_text()) == manifest
+
+
+def test_missing_provenance_preserves_failed_run_summary(tmp_path: Path) -> None:
+    result = _run("Export safe provenance", tmp_path, {"RUNNER_TEMP": str(tmp_path)})
+    assert result.returncode == 0, result.stderr
+    assert not (tmp_path / "eval-response-metadata").exists()
