@@ -175,9 +175,9 @@ event failures" and "Installation token failures" below. A `GET /repos` answer t
 a malformed token response and an App key that cannot sign are not outages: they fail the
 dispatch (retry after 30 s, three attempts in total, then `projection_failed_at`, never
 replayed). `deleted` and `removed` make no GitHub
-request. An installation payload that fails validation is logged at WARNING (delivery,
-event, action, installation id, the total error count and the first ten failing field names
-and messages, never their values) and its receipt is marked projected, so it is not
+request. An installation payload that fails validation is logged at WARNING (delivery, event,
+action as a plain token or `-`, installation id, the total error count and the first ten failing
+field names and messages, never their values) and its receipt is marked projected, so it is not
 replayed. One invalid `full_name` among N repositories therefore drops the whole event at
 the parser, the valid repositories included.
 
@@ -420,8 +420,10 @@ Logged fields. In this line and in the failure line below, `event` and `action` 
 tokens: a value is logged only when it is `[a-z_]`, 1 to 40 characters, and as `-` otherwise.
 `event` is the `X-GitHub-Event` header, which the signature does not cover; the receipt stores
 and dispatches it as received, only the log is restricted. The delivery id is the stored
-receipt id, the `X-GitHub-Delivery` header, which intake checks only for length (1 to 255
-characters).
+receipt id, the `X-GitHub-Delivery` header (GitHub sends a GUID). Intake answers `400` and
+stores nothing unless it is 1 to 255 ASCII letters, digits and `-` (#80), so the id of a
+delivery stored since then is logged as received and cannot forge a field of the line.
+Receipts stored before that check are not re-validated: their id is logged as stored.
 
 Failure log. When processing a delivery fails, the worker first writes one WARNING line with the
 action and a failure category, then the sweep writes its ERROR record

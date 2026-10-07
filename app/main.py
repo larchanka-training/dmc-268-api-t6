@@ -182,6 +182,8 @@ async def receive_github_webhook(
     delivery_id = request.headers.get("X-GitHub-Delivery")
     if not event_name or not delivery_id or len(event_name) > 100 or len(delivery_id) > 255:
         raise HTTPException(status_code=400, detail="missing GitHub delivery headers")
+    if not _is_github_delivery_id(delivery_id):
+        raise HTTPException(status_code=400, detail="malformed GitHub delivery id")
 
     try:
         raw_payload = json.loads(
@@ -203,6 +205,17 @@ async def receive_github_webhook(
         ).to_receipt()
     )
     return JSONResponse(status_code=202, content={"status": status})
+
+
+def _is_github_delivery_id(value: str) -> bool:
+    """Whether ``value`` uses only GitHub's delivery GUID alphabet: ASCII letters, digits, ``-``.
+
+    The stored id goes into webhook-worker log lines as is, so a space or ``key=value`` in it
+    could forge a field there (docs/WEBHOOK_WORKER.md, outcome log).
+    """
+    return all(
+        character.isascii() and (character.isalnum() or character == "-") for character in value
+    )
 
 
 def _reject_nonfinite_json_constant(value: str) -> NoReturn:

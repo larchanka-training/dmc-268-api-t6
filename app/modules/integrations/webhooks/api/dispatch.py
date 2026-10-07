@@ -10,6 +10,7 @@ from typing import Protocol
 
 from pydantic import ValidationError
 
+from app.common.application.log_token import log_token
 from app.modules.integrations.webhooks.api.ci_event_dtos import parse_ci_event
 from app.modules.integrations.webhooks.api.installation_event_dtos import (
     InstallationEventValidationError,
@@ -29,10 +30,7 @@ from app.modules.integrations.webhooks.application.github_installation_dispatch 
     UnsupportedGitHubEvent,
     _with_action,
 )
-from app.modules.integrations.webhooks.application.receive_github_delivery import (
-    WebhookReceipt,
-    log_token,
-)
+from app.modules.integrations.webhooks.application.receive_github_delivery import WebhookReceipt
 from app.modules.repositories.application.installation_repositories import (
     InstallationRepositoriesEvent,
 )
@@ -196,7 +194,7 @@ def _log_invalid_installation_event(
         "installation_id=%s error_count=%d errors=%s%s",
         delivery_id,
         event_name,
-        action if isinstance(action, str) else None,
+        _action_token(action) or "-",
         installation_id if isinstance(installation_id, int) else None,
         len(error.field_errors),
         "; ".join(f"{location}: {message}" for location, message in shown),

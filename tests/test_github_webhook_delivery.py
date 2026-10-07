@@ -31,6 +31,7 @@ from alembic import command
 from app.bootstrap.reviews_api import get_github_webhook_receipt_uow_factory
 from app.main import (
     _has_valid_github_signature,
+    _is_github_delivery_id,
     app,
     get_github_webhook_secret,
 )
@@ -2045,6 +2046,10 @@ def test_missing_headers_and_malformed_signed_json_are_rejected() -> None:
     [
         ({"action": "added"}, "x" * 101, "valid-id"),
         ({"action": "added"}, "push", "x" * 256),
+        ({"action": "added"}, "push", "delivery 42"),
+        ({"action": "added"}, "push", "status=projected"),
+        ({"action": "added"}, "push", "delivery_42"),
+        ({"action": "added"}, "push", "delivery.42"),
         ({"action": 42}, "push", "valid-id"),
         ({"action": "x" * 101}, "push", "valid-id"),
         ({"installation": {"id": True}}, "push", "valid-id"),
@@ -2065,6 +2070,50 @@ def test_invalid_delivery_fields_do_not_store_or_dispatch(
 
     assert status == 400
     assert receipts.rows == {}
+
+
+def test_delivery_id_outside_the_guid_alphabet_is_rejected_without_logging_it(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # webhook-worker logs the stored id as is: spaces and ``key=value`` would forge fields.
+    sentinel = "zq7-forged status=projected detail=ok"
+    body = json.dumps({"action": "labeled"}).encode()
+    receipts = FakeReceiptUnitOfWork()
+
+    with caplog.at_level(logging.DEBUG):
+        status, response = _post(body, _headers(body, delivery_id=sentinel), receipts)
+
+    assert status == 400
+    assert response == {"detail": "malformed GitHub delivery id"}
+    assert receipts.rows == {}
+    assert "zq7-forged" not in caplog.text
+
+
+@pytest.mark.parametrize("delivery_id", ["72D3162E-cc78-11e3-81ab-4c9367dc0958", "x" * 255])
+def test_delivery_id_in_the_guid_alphabet_is_stored_as_received(delivery_id: str) -> None:
+    body = json.dumps({"action": "added"}).encode()
+    receipts = FakeReceiptUnitOfWork()
+
+    status, response = _post(body, _headers(body, delivery_id=delivery_id), receipts)
+
+    assert (status, response) == (202, {"status": "pending"})
+    assert list(receipts.rows) == [delivery_id]
+
+
+@pytest.mark.parametrize(
+    ("delivery_id", "expected"),
+    [
+        ("72d3162e-cc78-11e3-81ab-4c9367dc0958", True),
+        ("é", False),  # Latin small e with acute: a letter, not ASCII
+        ("٣", False),  # Arabic-Indic digit three
+        ("１", False),  # fullwidth digit one
+    ],
+)
+def test_delivery_id_rule_accepts_only_ascii_letters_digits_and_hyphens(
+    delivery_id: str, expected: bool
+) -> None:
+    # httpx sends only ASCII header strings, so non-ASCII ids are checked at the rule itself.
+    assert _is_github_delivery_id(delivery_id) is expected
 
 
 @pytest.mark.parametrize("constant", ["NaN", "Infinity", "-Infinity", "1e999", "-1e999"])
@@ -2469,3 +2518,27 @@ def isolated_webhook_database() -> Iterator[tuple[Connection, str, str]]:
                 connection.commit()
     finally:
         engine.dispose()
+
+
+def test_invalid_installation_event_logs_its_action_only_as_a_plain_token(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # The envelope fails on the installation id, so a free-text action reaches the warning.
+    receipt = VerifiedGitHubDelivery(
+        "invalid-installation-2",
+        "installation_repositories",
+        {"action": "zq7 status=projected", "installation": {"id": 0}},
+    ).to_receipt()
+
+    _replay_invalid_receipt(receipt, caplog)
+
+    (warning,) = [
+        record.getMessage()
+        for record in caplog.records
+        if record.name == _DISPATCH_LOGGER and record.levelno == logging.WARNING
+    ]
+    assert warning.startswith(
+        "Ignoring invalid GitHub installation event: delivery_id=invalid-installation-2 "
+        "event=installation_repositories action=- installation_id=0 error_count="
+    )
+    assert "zq7" not in caplog.text
