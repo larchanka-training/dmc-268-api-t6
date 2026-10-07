@@ -112,13 +112,13 @@ class Env:
     rule_id: UUID
     prompt_id: UUID
 
-    def engine(self) -> AsyncEngine:
+    def engine(self, role: str = "") -> AsyncEngine:
         # application_name tells this test's sessions apart in pg_stat_activity.
         return create_async_engine(
             self.database_url,
             connect_args={
                 "options": f"-csearch_path={self.schema}",
-                "application_name": self.schema,
+                "application_name": self.schema + role,
             },
             poolclass=NullPool,
         )
@@ -571,6 +571,9 @@ async def tools(factory: async_sessionmaker[AsyncSession], run_id: UUID) -> list
 def test_full_path_queued_running_publishing_succeeded_is_readable_over_rest(env: Env) -> None:
     engine = env.engine()
     factory = async_sessionmaker(engine, expire_on_commit=False)
+    # The state poller's read transactions stay out of the worker's idle-in-transaction count.
+    poll_engine = env.engine("-poll")
+    poll_factory = async_sessionmaker(poll_engine, expire_on_commit=False)
     model = Model(factory)
     github = GitHub()
 
@@ -583,10 +586,11 @@ def test_full_path_queued_running_publishing_succeeded_is_readable_over_rest(env
         ):
             await publish_run(channels, factory, run_id)
             claimed_before = datetime.now(UTC)
-            await wait_for_state(factory, run_id, "succeeded")
+            await wait_for_state(poll_factory, run_id, "succeeded")
             await wait_for_check_run(github, "completed")
             await asyncio.sleep(0.2)
         await engine.dispose()
+        await poll_engine.dispose()
         return run_id, events, claimed_before
 
     run_id, events, published_at = asyncio.run(scenario())
@@ -824,7 +828,7 @@ def test_second_leader_does_not_tick_while_the_first_holds_the_lock(env: Env) ->
         return run
 
     # Advisory locks are database-wide: a fixed key collides with a concurrent test run.
-    key = uuid4().int >> 65
+    key = uuid4().int >> 65  # 63-bit non-negative bigint (pg_try_advisory_lock takes bigint)
 
     async def scenario() -> None:
         first = asyncio.create_task(run_as_leader(engine, key, 0.05, tick("first"), name="a"))
