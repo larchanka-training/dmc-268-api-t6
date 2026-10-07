@@ -374,6 +374,7 @@ def test_installation_removal_revokes_all_users_but_manual_disable_preserves_acc
         for _ in range(2):
             asyncio.run(
                 sync.disable(
+                    delivery_id="removal-delivery",
                     provider_installation_id=INSTALLATION_A,
                     repositories=(RepositoryReference(101, "octo/repo-1", None, None),),
                 )
@@ -443,6 +444,7 @@ def test_installation_deleted_revokes_unlisted_grants_without_github_calls(
                 event=InstallationRepositoriesEvent(
                     installation_external_id=17,
                     action="deleted",
+                    delivery_id="deletion-delivery",
                     added_repositories=(),
                     removed_repositories=tuple(
                         RepositoryReference(repo_id, "octo/repo", None, None)
@@ -477,7 +479,29 @@ def test_installation_deleted_revokes_unlisted_grants_without_github_calls(
 def test_removal_during_oauth_snapshot_cannot_restore_grants(
     portal_database: tuple[str, str], delete_installation: bool, user_id: int
 ) -> None:
-    from app.modules.repositories.application.installation_repositories import RepositoryReference
+    import json
+    from typing import Any, cast
+
+    from app.modules.integrations.webhooks.api.dispatch import GitHubWebhookDispatchAdapter
+    from app.modules.integrations.webhooks.application.github_installation_dispatch import (
+        GitHubDispatchEvent,
+        GitHubInstallationDeliveryDispatcher,
+    )
+    from app.modules.integrations.webhooks.application.installation_event_projector import (
+        InstallationEventProjector,
+    )
+    from app.modules.integrations.webhooks.application.receive_github_delivery import (
+        ReceiveGitHubDelivery,
+        WebhookReceipt,
+    )
+    from app.modules.integrations.webhooks.infrastructure.github_webhook_receipts import (
+        SqlAlchemyGitHubWebhookReceiptStore,
+        SqlAlchemyGitHubWebhookReceiptUnitOfWork,
+    )
+    from app.modules.repositories.application.installation_repositories import (
+        InstallationRepositoriesEvent,
+        RepositoryReference,
+    )
     from app.modules.repositories.application.sync_installation_repositories import (
         SyncInstallationRepositories,
     )
@@ -502,7 +526,60 @@ def test_removal_during_oauth_snapshot_cannot_restore_grants(
         uow_factory=lambda: SqlAlchemyInstallationRepositoriesUnitOfWork(factory), rule_sets={}
     )
 
+    class Resolver:
+        async def find_github_installation_id(self, external_id: int) -> UUID | None:
+            return INSTALLATION_A
+
+    no_github = cast(Any, object())
+    dispatcher = GitHubInstallationDeliveryDispatcher(
+        resolver=Resolver(),
+        onboarding=InstallationEventProjector(
+            tree_provider=no_github,
+            label_provider=no_github,
+            details_provider=no_github,
+            sync=sync,
+        ),
+    )
+    removal = InstallationRepositoriesEvent(
+        installation_external_id=17,
+        action="deleted" if delete_installation else "removed",
+        added_repositories=(),
+        removed_repositories=(RepositoryReference(101, "octo/repo-1", None, None),),
+    )
+
     async def exercise() -> None:
+        now = datetime.now(UTC)
+        fail_finalize = True
+
+        class FailingReceiptStore(SqlAlchemyGitHubWebhookReceiptStore):
+            async def mark_projected(self, delivery_id: str, token: UUID, at: datetime) -> None:
+                if fail_finalize:
+                    raise RuntimeError("receipt finalization unavailable")
+                await super().mark_projected(delivery_id, token, at)
+
+        class ReceiptUow(SqlAlchemyGitHubWebhookReceiptUnitOfWork):
+            @property
+            def receipts(self) -> FailingReceiptStore:
+                return FailingReceiptStore(self.session)
+
+        receiver = ReceiveGitHubDelivery(
+            uow_factory=lambda: ReceiptUow(factory),
+            dispatcher=GitHubWebhookDispatchAdapter(dispatcher),
+            now=lambda: now,
+        )
+        receipt = WebhookReceipt(
+            "original-removal",
+            "installation" if delete_installation else "installation_repositories",
+            json.dumps(
+                {
+                    "installation": {"id": 17},
+                    "action": removal.action,
+                    "repositories": [],
+                    "repositories_removed": [{"id": 101, "full_name": "octo/repo-1"}],
+                }
+            ),
+        )
+        await receiver.execute(receipt)
         snapshot_started = asyncio.Event()
         snapshot_release = asyncio.Event()
 
@@ -526,11 +603,7 @@ def test_removal_during_oauth_snapshot_cannot_restore_grants(
         )
         pending = asyncio.create_task(link.execute("stale-snapshot"))
         await asyncio.wait_for(snapshot_started.wait(), timeout=5)
-        await sync.disable(
-            provider_installation_id=INSTALLATION_A,
-            repositories=(RepositoryReference(101, "octo/repo-1", None, None),),
-            all_repositories=delete_installation,
-        )
+        assert await receiver.replay_pending() == 0  # Effect commits, finalization fails.
         snapshot_release.set()
         await asyncio.wait_for(pending, timeout=5)
         async with factory() as session:
@@ -565,6 +638,207 @@ def test_removal_during_oauth_snapshot_cannot_restore_grants(
                 .all()
             )
             assert grants == [101, 103]
+        # Finalization may fail after the effect commits. Re-add the repository and
+        # replay that old delivery after fresh OAuth: it must preserve the grant.
+        async with factory.begin() as session:
+            await session.execute(text("UPDATE repositories SET enabled = true"))
+            revoked_at = await session.scalar(
+                text(
+                    "SELECT revoked_at FROM github_installation_access_revocations "
+                    "WHERE provider_installation_id = :installation"
+                ),
+                {"installation": INSTALLATION_A},
+            )
+        fail_finalize = False
+        now += timedelta(minutes=10)  # Expire the failed attempt's durable claim.
+        assert await receiver.replay_pending() == 1
+        async with factory() as session:
+            assert (
+                await session.scalar(
+                    text(
+                        "SELECT count(*) FROM github_user_repository_access "
+                        "WHERE github_user_id=:user_id AND repository_external_id=101"
+                    ),
+                    {"user_id": user_id},
+                )
+                == 1
+            )
+            assert (
+                await session.scalar(text("SELECT enabled FROM repositories WHERE external_id=101"))
+                is True
+            )
+            assert (
+                await session.scalar(
+                    text(
+                        "SELECT revoked_at FROM github_installation_access_revocations "
+                        "WHERE provider_installation_id=:installation"
+                    ),
+                    {"installation": INSTALLATION_A},
+                )
+                == revoked_at
+            )
+        # A genuinely new delivery must still revoke the restored access.
+        await dispatcher.execute(GitHubDispatchEvent("later-removal", removal))
+        async with factory() as session:
+            assert (
+                await session.scalar(
+                    text(
+                        "SELECT count(*) FROM github_user_repository_access "
+                        "WHERE github_user_id=:user_id AND repository_external_id=101"
+                    ),
+                    {"user_id": user_id},
+                )
+                == 0
+            )
+        await engine.dispose()
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.integration
+def test_removal_rollback_preserves_grant_and_allows_same_delivery_retry(
+    portal_database: tuple[str, str],
+) -> None:
+    from app.modules.repositories.application.installation_repositories import RepositoryReference
+    from app.modules.repositories.application.sync_installation_repositories import (
+        SyncInstallationRepositories,
+    )
+    from app.modules.repositories.infrastructure.installation_repository_unit_of_work import (
+        SqlAlchemyInstallationRepositoriesUnitOfWork,
+    )
+
+    database_url, schema = portal_database
+    engine = create_async_engine(
+        database_url, connect_args={"options": f"-csearch_path={schema}"}, poolclass=NullPool
+    )
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+
+    class FailingCommit(SqlAlchemyInstallationRepositoriesUnitOfWork):
+        async def commit(self) -> None:
+            raise RuntimeError("commit unavailable")
+
+    async def exercise() -> None:
+        arguments = (RepositoryReference(101, "octo/repo-1", None, None),)
+        failing = SyncInstallationRepositories(
+            uow_factory=lambda: FailingCommit(factory), rule_sets={}
+        )
+        with pytest.raises(RuntimeError, match="commit unavailable"):
+            await failing.disable(
+                provider_installation_id=INSTALLATION_A,
+                repositories=arguments,
+                delivery_id="retry-after-rollback",
+            )
+        async with factory() as session:
+            assert (
+                await session.scalar(
+                    text("SELECT count(*) FROM github_installation_removal_effects")
+                )
+                == 0
+            )
+            assert (
+                await session.scalar(
+                    text("SELECT count(*) FROM github_installation_access_revocations")
+                )
+                == 0
+            )
+            assert (
+                await session.scalar(
+                    text(
+                        "SELECT count(*) FROM github_user_repository_access "
+                        "WHERE github_user_id=42 AND repository_external_id=101"
+                    )
+                )
+                == 1
+            )
+            assert (
+                await session.scalar(text("SELECT enabled FROM repositories WHERE external_id=101"))
+                is True
+            )
+        retry = SyncInstallationRepositories(
+            uow_factory=lambda: SqlAlchemyInstallationRepositoriesUnitOfWork(factory), rule_sets={}
+        )
+        await retry.disable(
+            provider_installation_id=INSTALLATION_A,
+            repositories=arguments,
+            delivery_id="retry-after-rollback",
+        )
+        async with factory() as session:
+            assert (
+                await session.scalar(
+                    text("SELECT count(*) FROM github_installation_removal_effects")
+                )
+                == 1
+            )
+            assert (
+                await session.scalar(
+                    text(
+                        "SELECT count(*) FROM github_user_repository_access "
+                        "WHERE github_user_id=42 AND repository_external_id=101"
+                    )
+                )
+                == 0
+            )
+        await engine.dispose()
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("commit_first", [False, True])
+def test_concurrent_removal_marker_waits_for_first_commit_or_rollback(
+    portal_database: tuple[str, str],
+    commit_first: bool,
+) -> None:
+    from app.modules.repositories.infrastructure.installation_repository_unit_of_work import (
+        SqlAlchemyInstallationRepositoriesUnitOfWork,
+    )
+
+    database_url, schema = portal_database
+    engine = create_async_engine(
+        database_url, connect_args={"options": f"-csearch_path={schema}"}, poolclass=NullPool
+    )
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+
+    async def exercise() -> None:
+        started = asyncio.Event()
+
+        async def duplicate() -> bool:
+            async with SqlAlchemyInstallationRepositoriesUnitOfWork(factory) as second:
+                started.set()
+                inserted = await second.repositories.record_removal_delivery("concurrent-removal")
+                if inserted:
+                    await second.repositories.disable_repository(INSTALLATION_A, 101)
+                await second.commit()
+                return inserted
+
+        async with SqlAlchemyInstallationRepositoriesUnitOfWork(factory) as first:
+            assert await first.repositories.record_removal_delivery("concurrent-removal") is True
+            await first.repositories.disable_repository(INSTALLATION_A, 101)
+            pending = asyncio.create_task(duplicate())
+            await started.wait()
+            done, _ = await asyncio.wait({pending}, timeout=0.05)
+            assert not done, "duplicate must wait for the uncommitted delivery effect"
+            if commit_first:
+                await first.commit()
+            else:
+                await first.rollback()
+            assert await asyncio.wait_for(pending, timeout=5) is (not commit_first)
+        async with factory() as session:
+            assert (
+                await session.scalar(
+                    text("SELECT count(*) FROM github_installation_removal_effects")
+                )
+                == 1
+            )
+            assert (
+                await session.scalar(
+                    text(
+                        "SELECT count(*) FROM github_user_repository_access "
+                        "WHERE github_user_id=42 AND repository_external_id=101"
+                    )
+                )
+                == 0
+            )
         await engine.dispose()
 
     asyncio.run(exercise())

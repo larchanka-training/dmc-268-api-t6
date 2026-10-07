@@ -41,6 +41,10 @@ class InstallationRepositoryStore(RepositoryRuleVersionStore, Protocol):
 
     async def disable_installation(self, provider_installation_id: UUID) -> None: ...
 
+    async def record_removal_delivery(self, delivery_id: str) -> bool:
+        """Record once in this transaction; false means its effect already committed."""
+        ...
+
 
 class InstallationRepositoriesUnitOfWork(UnitOfWork, Protocol):
     """The sync use case owns the one repository-plus-rules transaction."""
@@ -90,15 +94,20 @@ class SyncInstallationRepositories:
         *,
         provider_installation_id: UUID,
         repositories: tuple[RepositoryReference, ...],
+        delivery_id: str,
         all_repositories: bool = False,
     ) -> None:
         """Soft-disable removed repositories in one short database transaction.
 
         This lifecycle path deliberately accepts transport references but
-        persists only their stable external ids.  It performs no VCS work and
-        updates are naturally idempotent for duplicated webhook deliveries.
+        persists only their stable external ids. The delivery marker commits with
+        the effect, so a retry cannot revoke access restored after the first commit.
         """
+        if not delivery_id:
+            raise ValueError("removal requires a durable delivery id")
         async with self._uow_factory() as uow:
+            if not await uow.repositories.record_removal_delivery(delivery_id):
+                return
             if all_repositories:
                 await uow.repositories.disable_installation(provider_installation_id)
             for repository in () if all_repositories else repositories:

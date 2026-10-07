@@ -10,6 +10,7 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.common.infrastructure.db.unit_of_work import SqlAlchemyUnitOfWork
+from app.modules.integrations.webhooks.infrastructure.models import GitHubInstallationRemovalEffect
 from app.modules.repositories.application.installation_repositories import RepositorySnapshot
 from app.modules.repositories.application.onboard_repository import PersistedRuleVersion
 from app.modules.repositories.infrastructure.models import ProviderInstallation, Repository
@@ -58,11 +59,22 @@ class SqlAlchemyInstallationRepositoryStore:
             raise RuntimeError("repository upsert did not return an id")
         return repository_id
 
+    async def record_removal_delivery(self, delivery_id: str) -> bool:
+        # PostgreSQL's unique key serializes concurrent copies. A failed transaction
+        # rolls the marker back along with grants, repository flags and tombstones.
+        recorded = await self._session.scalar(
+            insert(GitHubInstallationRemovalEffect)
+            .values(delivery_id=delivery_id)
+            .on_conflict_do_nothing(index_elements=[GitHubInstallationRemovalEffect.delivery_id])
+            .returning(GitHubInstallationRemovalEffect.delivery_id)
+        )
+        return recorded is not None
+
     async def disable_repository(self, provider_installation_id: UUID, external_id: int) -> None:
         """Disable a repository if it still belongs to this installation.
 
-        Updating a missing or already-disabled row is deliberately a no-op, so
-        GitHub's at-least-once removal deliveries are safe to replay.
+        The use case deduplicates delivery effects before calling this method.
+        A distinct later removal must revoke any access restored in the meantime.
         """
         await self._record_revocation(provider_installation_id, external_id)
         statement = (

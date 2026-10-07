@@ -100,6 +100,7 @@ class InstallationRepositoriesSync(Protocol):
         *,
         provider_installation_id: UUID,
         repositories: tuple[RepositoryReference, ...],
+        delivery_id: str,
         all_repositories: bool = False,
     ) -> None: ...
 
@@ -162,10 +163,13 @@ class InstallationEventProjector:
         event: InstallationRepositoriesEvent,
     ) -> tuple[OnboardingResult, ...]:
         if event.action in {"removed", "deleted"}:
+            if not event.delivery_id:
+                raise ValueError("removal requires a durable delivery id")
             await self._sync.disable(
                 provider_installation_id=provider_installation_id,
                 repositories=event.removed_repositories,
                 all_repositories=event.action == "deleted",
+                delivery_id=event.delivery_id,
             )
             return ()
 

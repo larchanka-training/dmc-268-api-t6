@@ -159,6 +159,7 @@ def test_composition_accepts_typed_event_and_internal_installation_id(
             *,
             provider_installation_id: UUID,
             repositories: object,
+            delivery_id: str,
             all_repositories: bool = False,
         ) -> None:
             raise AssertionError("added event must not disable repositories")
@@ -264,6 +265,7 @@ def test_runtime_dispatcher_creates_label_only_for_linked_added_repositories(
             *,
             provider_installation_id: UUID,
             repositories: object,
+            delivery_id: str,
             all_repositories: bool = False,
         ) -> None:
             synchronized.append("removed")

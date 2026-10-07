@@ -259,6 +259,7 @@ class _Sync:
         *,
         provider_installation_id: UUID,
         repositories: object,
+        delivery_id: str,
         all_repositories: bool = False,
     ) -> None:
         raise AssertionError("an added event disables nothing")

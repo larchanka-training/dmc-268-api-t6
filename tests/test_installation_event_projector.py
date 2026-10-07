@@ -113,6 +113,7 @@ class FakeSyncInstallationRepositories:
         *,
         provider_installation_id: UUID,
         repositories: tuple[RepositoryReference, ...],
+        delivery_id: str,
         all_repositories: bool = False,
     ) -> None:
         self.disable_calls.append((provider_installation_id, repositories))
@@ -295,6 +296,7 @@ def test_projector_soft_disables_removed_repositories_without_a_vcs_request(acti
             event=InstallationRepositoriesEvent(
                 installation_external_id=17,
                 action=action,  # type: ignore[arg-type]
+                delivery_id="removal-delivery",
                 added_repositories=(),
                 removed_repositories=(_reference(),),
             ),
@@ -1131,6 +1133,7 @@ def test_removal_of_bare_repositories_makes_no_github_request(action: str) -> No
             event=InstallationRepositoriesEvent(
                 installation_external_id=17,
                 action=action,  # type: ignore[arg-type]
+                delivery_id="removal-delivery",
                 added_repositories=(),
                 removed_repositories=removed,
             ),
@@ -1442,3 +1445,35 @@ def test_a_token_failure_is_logged_with_the_type_and_status_of_its_cause(
     assert "error_type=HTTPStatusError" in logged[0]
     assert "status_code=404" in logged[0]
     assert "access_tokens" not in caplog.text
+
+
+@pytest.mark.parametrize("action", ["removed", "deleted"])
+@pytest.mark.parametrize("delivery_id", [None, ""])
+def test_removal_without_delivery_id_fails_before_sync(
+    action: Literal["removed", "deleted"],
+    delivery_id: str | None,
+) -> None:
+    sync = FakeSyncInstallationRepositories()
+    projector = InstallationEventProjector(
+        tree_provider=FakeTreeProvider(),
+        label_provider=FakeLabelProvider(),
+        details_provider=FakeDetailsProvider(),
+        sync=sync,
+    )
+
+    with pytest.raises(ValueError, match="removal requires a durable delivery id"):
+        asyncio.run(
+            projector.execute(
+                provider_installation_id=uuid4(),
+                event=InstallationRepositoriesEvent(
+                    installation_external_id=17,
+                    action=action,
+                    added_repositories=(),
+                    removed_repositories=(_reference(),),
+                    delivery_id=delivery_id,
+                ),
+            )
+        )
+
+    assert sync.calls == []
+    assert sync.disable_calls == []

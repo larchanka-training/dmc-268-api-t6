@@ -79,3 +79,11 @@ class WebhookEvent(Base):
         DateTime(timezone=True), nullable=True
     )
     received_at: Mapped[datetime] = timestamp_column()
+
+
+class GitHubInstallationRemovalEffect(Base):
+    """Committed removal effects outlive receipt retention and retry leases."""
+
+    __tablename__ = "github_installation_removal_effects"
+
+    delivery_id: Mapped[str] = mapped_column(String(255), primary_key=True)
