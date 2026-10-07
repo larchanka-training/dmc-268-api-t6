@@ -193,6 +193,9 @@ def custom_openapi() -> dict[str, Any]:
                     if "security" not in operation:
                         operation["security"] = [{"bearerAuth": []}]
                     operation.setdefault("responses", {})
+                    operation["responses"].setdefault(
+                        "503", {"description": "Authentication is not configured"}
+                    )
                     if "401" not in operation["responses"]:
                         operation["responses"]["401"] = {
                             "description": "Missing or invalid Bearer access token"

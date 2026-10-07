@@ -31,7 +31,9 @@ def _protected_operations() -> list[tuple[str, str]]:
     return [
         (method.lower(), route.path_format)
         for route in iter_route_contexts(app.routes)
-        if route.path_format is not None and route.path_format.startswith("/api/")
+        if route.path_format is not None
+        and route.path_format.startswith("/api/")
+        and route.include_in_schema
         for method in sorted(route.methods or ())
         if (method.lower(), route.path_format) not in PUBLIC_AUTH
     ]
@@ -54,15 +56,16 @@ def test_runtime_openapi_protected_operations_declare_bearer_and_401(
 ) -> None:
     operation = document["paths"][path][method]
     assert operation["security"] == [{"bearerAuth": []}]
-    assert "401" in operation["responses"]
+    assert {"401", "503"} <= operation["responses"].keys()
 
 
 @pytest.mark.parametrize(
     ("path", "required_statuses"),
     [
         ("/webhooks/github", {"202", "400", "401", "413", "503"}),
-        ("/api/auth/refresh", {"200", "401"}),
-        ("/api/auth/github/callback", {"200", "400", "502"}),
+        ("/api/auth/logout", {"204", "503"}),
+        ("/api/auth/refresh", {"200", "401", "503"}),
+        ("/api/auth/github/callback", {"200", "400", "502", "503"}),
     ],
 )
 def test_runtime_openapi_webhook_and_auth_responses(

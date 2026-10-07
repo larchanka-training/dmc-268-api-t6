@@ -892,3 +892,13 @@ def test_pulls_page_derives_the_latest_run_verdict(client: TestClient) -> None:
     assert page["nextCursor"] is None
     assert client.get(f"/api/repos/{REPOSITORY_ID}/pulls?state=merged").status_code == 422
     assert client.get(f"/api/repos/{REPOSITORY_ID}/pulls?cursor=bad").status_code == 422
+
+
+def test_browser_contract_documents_auth_configuration_and_provider_failures() -> None:
+    paths = _spec()["paths"]
+    for path, item in paths.items():
+        if path.startswith("/api/"):
+            for method, operation in item.items():
+                if method in HTTP_METHODS:
+                    assert "503" in operation["responses"], (method, path)
+    assert "502" in paths["/api/auth/github/callback"]["post"]["responses"]

@@ -84,6 +84,8 @@ paths:
             maximum: 100
             default: 50
       responses:
+        "503":
+          description: Authentication is not configured.
         "200":
           description: One page of runs.
           content:
@@ -112,6 +114,8 @@ paths:
         budget (api#20 D3).
       x-service: portal-api
       responses:
+        "503":
+          description: Authentication is not configured.
         "200":
           description: The run with its review results.
           content:
@@ -137,6 +141,8 @@ paths:
         reviewer flag and CI are not checked (PIPELINE_SPEC T3). Returns the new, queued run.
       x-service: portal-api
       responses:
+        "503":
+          description: Authentication is not configured.
         "202":
           description: The new run was accepted and queued.
           content:
@@ -167,6 +173,8 @@ paths:
         `cancelRequested: true` until the worker stops it. Terminal runs are returned unchanged.
       x-service: portal-api
       responses:
+        "503":
+          description: Authentication is not configured.
         "200":
           description: The run after the cancellation request.
           content:
@@ -188,6 +196,8 @@ paths:
       summary: List the review comments a run published
       x-service: portal-api
       responses:
+        "503":
+          description: Authentication is not configured.
         "200":
           description: Published comments of the run.
           content:
@@ -211,6 +221,8 @@ paths:
       summary: List the recorded steps of a run
       x-service: portal-api
       responses:
+        "503":
+          description: Authentication is not configured.
         "200":
           description: Run actions ordered by index.
           content:
@@ -243,6 +255,8 @@ paths:
         inline responses.
       x-service: portal-api
       responses:
+        "503":
+          description: Authentication is not configured.
         "200":
           description: The stored response body, any JSON value.
           content:
@@ -263,6 +277,8 @@ paths:
       summary: Get the raw per-file diff of a run
       x-service: portal-api
       responses:
+        "503":
+          description: Authentication is not configured.
         "200":
           description: One entry per changed file.
           content:
@@ -311,6 +327,8 @@ paths:
             maximum: 1000
             default: 200
       responses:
+        "503":
+          description: Authentication is not configured.
         "200":
           description: The requested lines.
           content:
@@ -384,6 +402,8 @@ paths:
           schema:
             type: string
       responses:
+        "503":
+          description: Authentication is not configured.
         "200":
           description: >-
             A Server-Sent Events stream of `run.updated` events and `: keepalive` comment
@@ -410,6 +430,8 @@ paths:
         operation and no collection update.
       x-service: portal-api
       responses:
+        "503":
+          description: Authentication is not configured.
         "200":
           description: Repositories visible to the caller's workspaces.
           content:
@@ -429,6 +451,8 @@ paths:
       summary: Get one repository
       x-service: portal-api
       responses:
+        "503":
+          description: Authentication is not configured.
         "200":
           description: The repository.
           content:
@@ -453,6 +477,8 @@ paths:
             schema:
               $ref: "#/components/schemas/RepositoryUpdate"
       responses:
+        "503":
+          description: Authentication is not configured.
         "200":
           description: The updated repository.
           content:
@@ -483,6 +509,8 @@ paths:
             default: open
         - $ref: "#/components/parameters/Cursor"
       responses:
+        "503":
+          description: Authentication is not configured.
         "200":
           description: One page of pull requests, most recently updated first.
           content:
@@ -506,6 +534,8 @@ paths:
       x-status: planned
       x-note: Post-MVP; the shape is indicative until the rules UI is scheduled.
       responses:
+        "503":
+          description: Authentication is not configured.
         "200":
           description: Rule set versions, newest first.
           content:
@@ -534,6 +564,8 @@ paths:
             schema:
               $ref: "#/components/schemas/RuleVersionCreate"
       responses:
+        "503":
+          description: Authentication is not configured.
         "201":
           description: The new active version.
           content:
@@ -563,6 +595,8 @@ paths:
       x-status: planned
       x-note: Post-MVP; the shape is indicative until the rules UI is scheduled.
       responses:
+        "503":
+          description: Authentication is not configured.
         "200":
           description: Matching pull requests.
           content:
@@ -592,6 +626,8 @@ paths:
             enum: [24h, 7d, 30d]
             default: 24h
       responses:
+        "503":
+          description: Authentication is not configured.
         "200":
           description: Metrics for the requested range.
           content:
@@ -620,6 +656,8 @@ paths:
             schema:
               $ref: "#/components/schemas/AuthCallbackRequest"
       responses:
+        "503":
+          description: Authentication is not configured.
         "200":
           description: A new session.
           headers:
@@ -629,6 +667,8 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/AuthSession"
+        "502":
+          description: GitHub authentication is unavailable.
         "400":
           description: The code is invalid, expired or already used.
           content:
@@ -647,6 +687,8 @@ paths:
       security:
         - refreshCookie: []
       responses:
+        "503":
+          description: Authentication is not configured.
         "200":
           description: A new access token; the refresh cookie is rotated.
           headers:
@@ -670,6 +712,8 @@ paths:
       x-service: auth-api
       x-issue: "#11"
       responses:
+        "503":
+          description: Authentication is not configured.
         "200":
           description: The signed-in user.
           content:
@@ -690,6 +734,8 @@ paths:
       x-issue: "#11"
       security: []
       responses:
+        "503":
+          description: Authentication is not configured.
         "204":
           description: Signed out.
           headers:

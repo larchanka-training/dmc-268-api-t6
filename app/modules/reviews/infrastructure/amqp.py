@@ -269,9 +269,8 @@ def _remember_delivery_attempts(key: str, attempts: int) -> None:
     _unexpected_delivery_attempts[key] = (attempts, monotonic() + LOCAL_RETRY_TTL_SECONDS)
 
 
-def _clear_delivery_attempts(message_id: str | None) -> None:
-    if message_id:
-        _unexpected_delivery_attempts.pop(message_id, None)
+def _clear_delivery_attempts(key: str) -> None:
+    _unexpected_delivery_attempts.pop(key, None)
 
 
 def _get_delivery_attempts(message: AbstractIncomingMessage) -> int:

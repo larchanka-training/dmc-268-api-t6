@@ -54,14 +54,21 @@ def _portal_routes() -> list[tuple[str, str]]:
     routes: list[tuple[str, str]] = []
     dummy_uuid = "00000000-0000-0000-0000-000000000001"
     # Enumerate the composed app, including auth_router and hidden/direct app routes.
-    # These three endpoints authenticate via an OAuth code or refresh cookie.
-    public_auth = {
+    # Explicit exceptions: liveness, HMAC webhook, documentation, OAuth/refresh cookie.
+    public_routes = {
+        ("GET", "/healthcheck"),
+        ("POST", "/webhooks/github"),
+        *(
+            (method, path)
+            for method in ("GET", "HEAD")
+            for path in ("/openapi.json", "/docs", "/docs/oauth2-redirect", "/redoc")
+        ),
         ("POST", "/api/auth/github/callback"),
         ("POST", "/api/auth/refresh"),
         ("POST", "/api/auth/logout"),
     }
     for route in iter_route_contexts(app.routes):
-        if route.path is None or not route.path.startswith("/api/"):
+        if route.path is None:
             continue
         path = (
             route.path.replace("{run_id}", dummy_uuid)
@@ -71,7 +78,7 @@ def _portal_routes() -> list[tuple[str, str]]:
         if not route.methods:
             continue
         for method in sorted(route.methods):
-            if (method, route.path) not in public_auth:
+            if (method, route.path) not in public_routes:
                 routes.append((method, path))
     return routes
 
@@ -158,12 +165,6 @@ def test_portal_list_requires_strict_bearer_and_accepts_empty_workspace_claim(
         assert valid.json() == {"items": [], "nextCursor": None}
     finally:
         app.dependency_overrides.clear()
-
-
-# Empty workspace repository visibility is covered against real SQL by
-# test_portal_scope_postgres.py:
-# test_portal_routes_intersect_claim_current_membership_and_repository_grant.
-# An always-empty fake here cannot verify that authorization predicate.
 
 
 def test_me_requires_bearer_and_returns_current_profile_with_claimed_workspaces(

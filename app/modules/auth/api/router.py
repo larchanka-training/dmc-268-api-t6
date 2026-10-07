@@ -103,6 +103,7 @@ async def get_me(
     responses={
         400: {"description": "Invalid GitHub authorization code"},
         502: {"description": "GitHub authentication is unavailable"},
+        503: {"description": "Authentication is not configured"},
     },
 )
 async def exchange_github_code(
@@ -127,7 +128,10 @@ async def exchange_github_code(
         "Rotate the refresh token and issue a fresh access token, "
         "or reissue within the concurrent rotation grace window."
     ),
-    responses={401: {"description": "Invalid or expired refresh token"}},
+    responses={
+        401: {"description": "Invalid or expired refresh token"},
+        503: {"description": "Authentication is not configured"},
+    },
 )
 async def refresh_session(
     response: Response,
@@ -146,6 +150,7 @@ async def refresh_session(
     status_code=204,
     summary="Logout session",
     description="Revoke the refresh token family and clear session cookies.",
+    responses={503: {"description": "Authentication is not configured"}},
 )
 async def logout_session(
     response: Response,
