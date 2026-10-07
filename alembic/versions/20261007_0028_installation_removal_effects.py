@@ -20,6 +20,15 @@ def upgrade() -> None:
     op.create_table(
         "github_installation_removal_effects",
         sa.Column("delivery_id", sa.String(255), primary_key=True),
+        sa.Column(
+            "created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()
+        ),
+    )
+
+    op.create_index(
+        "ix_github_installation_removal_effects_created_at",
+        "github_installation_removal_effects",
+        ["created_at"],
     )
 
 

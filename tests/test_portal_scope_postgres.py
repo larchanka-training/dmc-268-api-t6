@@ -12,7 +12,7 @@ import pytest
 from alembic.config import Config
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, text
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
 from sqlalchemy.schema import CreateSchema, DropSchema
 
@@ -391,18 +391,18 @@ def test_installation_removal_revokes_all_users_but_manual_disable_preserves_acc
 
 
 @pytest.mark.integration
-@pytest.mark.parametrize("payload_repositories", [(), (101,)])
+@pytest.mark.parametrize("payload_repositories", [None, (), (101,)])
 def test_installation_deleted_revokes_unlisted_grants_without_github_calls(
-    portal_database: tuple[str, str], payload_repositories: tuple[int, ...]
+    portal_database: tuple[str, str], payload_repositories: tuple[int, ...] | None
 ) -> None:
+    from dataclasses import replace
     from typing import Any, cast
 
+    from app.modules.integrations.webhooks.api.installation_event_dtos import (
+        parse_installation_repositories_event,
+    )
     from app.modules.integrations.webhooks.application.installation_event_projector import (
         InstallationEventProjector,
-    )
-    from app.modules.repositories.application.installation_repositories import (
-        InstallationRepositoriesEvent,
-        RepositoryReference,
     )
     from app.modules.repositories.application.sync_installation_repositories import (
         SyncInstallationRepositories,
@@ -438,19 +438,19 @@ def test_installation_deleted_revokes_unlisted_grants_without_github_calls(
                 ),
                 {"installation": INSTALLATION_A},
             )
+        payload: dict[str, object] = {"action": "deleted", "installation": {"id": 17}}
+        if payload_repositories is not None:
+            payload["repositories"] = [
+                {"id": repo_id, "full_name": "octo/repo"} for repo_id in payload_repositories
+            ]
+        event = replace(
+            parse_installation_repositories_event(event_name="installation", payload=payload),
+            delivery_id="deletion-delivery",
+        )
         for _ in range(2):
             await projector.execute(
                 provider_installation_id=INSTALLATION_A,
-                event=InstallationRepositoriesEvent(
-                    installation_external_id=17,
-                    action="deleted",
-                    delivery_id="deletion-delivery",
-                    added_repositories=(),
-                    removed_repositories=tuple(
-                        RepositoryReference(repo_id, "octo/repo", None, None)
-                        for repo_id in payload_repositories
-                    ),
-                ),
+                event=event,
             )
         async with factory() as session:
             rows = (
@@ -800,45 +800,212 @@ def test_concurrent_removal_marker_waits_for_first_commit_or_rollback(
     factory = async_sessionmaker(engine, expire_on_commit=False)
 
     async def exercise() -> None:
-        started = asyncio.Event()
+        try:
+            contender_pid: asyncio.Future[int] = asyncio.get_running_loop().create_future()
 
-        async def duplicate() -> bool:
-            async with SqlAlchemyInstallationRepositoriesUnitOfWork(factory) as second:
-                started.set()
-                inserted = await second.repositories.record_removal_delivery("concurrent-removal")
-                if inserted:
-                    await second.repositories.disable_repository(INSTALLATION_A, 101)
-                await second.commit()
-                return inserted
-
-        async with SqlAlchemyInstallationRepositoriesUnitOfWork(factory) as first:
-            assert await first.repositories.record_removal_delivery("concurrent-removal") is True
-            await first.repositories.disable_repository(INSTALLATION_A, 101)
-            pending = asyncio.create_task(duplicate())
-            await started.wait()
-            done, _ = await asyncio.wait({pending}, timeout=0.05)
-            assert not done, "duplicate must wait for the uncommitted delivery effect"
-            if commit_first:
-                await first.commit()
-            else:
-                await first.rollback()
-            assert await asyncio.wait_for(pending, timeout=5) is (not commit_first)
-        async with factory() as session:
-            assert (
-                await session.scalar(
-                    text("SELECT count(*) FROM github_installation_removal_effects")
-                )
-                == 1
-            )
-            assert (
-                await session.scalar(
-                    text(
-                        "SELECT count(*) FROM github_user_repository_access "
-                        "WHERE github_user_id=42 AND repository_external_id=101"
+            async def duplicate() -> bool:
+                async with SqlAlchemyInstallationRepositoriesUnitOfWork(factory) as second:
+                    contender_pid.set_result(
+                        await second.session.scalar(text("SELECT pg_backend_pid()"))
                     )
+                    inserted = await second.repositories.record_removal_delivery(
+                        "concurrent-removal"
+                    )
+                    if inserted:
+                        await second.repositories.disable_repository(INSTALLATION_A, 101)
+                    await second.commit()
+                    return inserted
+
+            async with SqlAlchemyInstallationRepositoriesUnitOfWork(factory) as first:
+                assert (
+                    await first.repositories.record_removal_delivery("concurrent-removal") is True
                 )
-                == 0
-            )
-        await engine.dispose()
+                await first.repositories.disable_repository(INSTALLATION_A, 101)
+                pending = asyncio.create_task(duplicate())
+                try:
+                    pid = await asyncio.wait_for(contender_pid, timeout=5)
+                    await _wait_for_postgres_lock(engine, pid, pending)
+                    if commit_first:
+                        await first.commit()
+                    else:
+                        await first.rollback()
+                    assert await asyncio.wait_for(pending, timeout=5) is (not commit_first)
+                finally:
+                    pending.cancel()
+                    await asyncio.gather(pending, return_exceptions=True)
+            async with factory() as session:
+                assert (
+                    await session.scalar(
+                        text("SELECT count(*) FROM github_installation_removal_effects")
+                    )
+                    == 1
+                )
+                assert (
+                    await session.scalar(
+                        text(
+                            "SELECT count(*) FROM github_user_repository_access "
+                            "WHERE github_user_id=42 AND repository_external_id=101"
+                        )
+                    )
+                    == 0
+                )
+        finally:
+            await engine.dispose()
+
+    asyncio.run(exercise())
+
+
+async def _wait_for_postgres_lock[T](
+    engine: AsyncEngine, pid: int, pending: asyncio.Task[T]
+) -> None:
+    """Observe an already connected contender, without mistaking scheduling for a lock."""
+    async with engine.connect() as connection:
+        connection = await connection.execution_options(isolation_level="AUTOCOMMIT")
+        async with asyncio.timeout(5):
+            while True:
+                if pending.done():
+                    await pending
+                    pytest.fail("contender completed before waiting for the PostgreSQL lock")
+                waiting = await connection.scalar(
+                    text("SELECT wait_event_type = 'Lock' FROM pg_stat_activity WHERE pid = :pid"),
+                    {"pid": pid},
+                )
+                if waiting:
+                    return
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("removal_first", [True, False])
+def test_uncommitted_removal_and_oauth_apply_serialize_in_both_orders(
+    portal_database: tuple[str, str], removal_first: bool
+) -> None:
+    from app.modules.repositories.infrastructure.installation_repository_unit_of_work import (
+        SqlAlchemyInstallationRepositoryStore,
+    )
+    from app.modules.workspaces.infrastructure.github_installation_links import (
+        SqlAlchemyGitHubInstallationLinkStore,
+    )
+
+    database_url, schema = portal_database
+    engine = create_async_engine(
+        database_url, connect_args={"options": f"-csearch_path={schema}"}, poolclass=NullPool
+    )
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+
+    async def exercise() -> None:
+        pending: asyncio.Task[None] | None = None
+        try:
+            async with factory() as removal, factory() as oauth:
+                try:
+                    # Both connections exist before the contender. Snapshot predates removal.
+                    removal_pid = await removal.scalar(text("SELECT pg_backend_pid()"))
+                    oauth_pid = await oauth.scalar(text("SELECT pg_backend_pid()"))
+                    snapshot_started_at = await oauth.scalar(text("SELECT clock_timestamp()"))
+                    remover = SqlAlchemyInstallationRepositoryStore(removal)
+                    links = SqlAlchemyGitHubInstallationLinkStore(oauth)
+                    if removal_first:
+                        await remover.disable_repository(INSTALLATION_A, 101)
+                        pending = asyncio.create_task(
+                            links.reconcile_repositories(42, 17, (101,), snapshot_started_at)
+                        )
+                        await _wait_for_postgres_lock(engine, oauth_pid, pending)
+                        await removal.commit()
+                        await asyncio.wait_for(pending, timeout=5)
+                        await oauth.commit()
+                        user_id, expected = 42, [103]
+                    else:
+                        # User43 has 102; removal must also see the new, uncommitted 101 grant.
+                        await links.reconcile_repositories(43, 17, (101, 102), snapshot_started_at)
+                        pending = asyncio.create_task(
+                            remover.disable_repository(INSTALLATION_A, 101)
+                        )
+                        await _wait_for_postgres_lock(engine, removal_pid, pending)
+                        await oauth.commit()
+                        await asyncio.wait_for(pending, timeout=5)
+                        await removal.commit()
+                        user_id, expected = 43, [102]
+                    async with factory() as observer:
+                        grants = await observer.scalars(
+                            text(
+                                "SELECT repository_external_id FROM github_user_repository_access "
+                                "WHERE github_user_id=:user ORDER BY repository_external_id"
+                            ),
+                            {"user": user_id},
+                        )
+                        assert list(grants) == expected
+                finally:
+                    if pending is not None:
+                        pending.cancel()
+                        await asyncio.gather(pending, return_exceptions=True)
+        finally:
+            await engine.dispose()
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.integration
+def test_removal_lock_allows_onboarding_foreign_key_check_without_deadlock(
+    portal_database: tuple[str, str],
+) -> None:
+    from app.modules.repositories.application.installation_repositories import RepositorySnapshot
+    from app.modules.repositories.infrastructure.installation_repository_unit_of_work import (
+        SqlAlchemyInstallationRepositoryStore,
+    )
+
+    database_url, schema = portal_database
+    engine = create_async_engine(
+        database_url, connect_args={"options": f"-csearch_path={schema}"}, poolclass=NullPool
+    )
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+
+    async def exercise() -> None:
+        pending: asyncio.Task[None] | None = None
+        try:
+            async with factory() as onboarding, factory() as removal:
+                try:
+                    removal_pid = await removal.scalar(text("SELECT pg_backend_pid()"))
+                    # Onboarding owns a repository row before requesting an installation FK.
+                    await onboarding.execute(
+                        text(
+                            "UPDATE repositories SET full_name='octo/renamed' WHERE external_id=101"
+                        )
+                    )
+                    pending = asyncio.create_task(
+                        SqlAlchemyInstallationRepositoryStore(removal).disable_repository(
+                            INSTALLATION_A, 101
+                        )
+                    )
+                    await _wait_for_postgres_lock(engine, removal_pid, pending)
+                    await asyncio.wait_for(
+                        SqlAlchemyInstallationRepositoryStore(onboarding).upsert_repository(
+                            INSTALLATION_A,
+                            RepositorySnapshot(
+                                104, "octo/new", "main", "https://github.test/octo/new"
+                            ),
+                        ),
+                        timeout=5,
+                    )
+                    await onboarding.commit()
+                    await asyncio.wait_for(pending, timeout=5)
+                    await removal.commit()
+                    async with factory() as observer:
+                        assert (
+                            await observer.scalar(
+                                text("SELECT enabled FROM repositories WHERE external_id=101")
+                            )
+                            is False
+                        )
+                        assert (
+                            await observer.scalar(
+                                text("SELECT count(*) FROM repositories WHERE external_id=104")
+                            )
+                            == 1
+                        )
+                finally:
+                    if pending is not None:
+                        pending.cancel()
+                        await asyncio.gather(pending, return_exceptions=True)
+        finally:
+            await engine.dispose()
 
     asyncio.run(exercise())

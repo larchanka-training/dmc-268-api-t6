@@ -384,3 +384,28 @@ def test_classify_tree_languages_ignores_non_blob_entries() -> None:
     )
 
     assert languages == {"Python": 100}
+
+
+def test_parse_deleted_installation_without_repository_snapshot() -> None:
+    event = parse_installation_repositories_event(
+        event_name="installation", payload={"action": "deleted", "installation": {"id": 17}}
+    )
+    assert event.action == "deleted"
+    assert event.installation_external_id == 17
+    assert event.removed_repositories == ()
+
+
+def test_created_installation_still_requires_repository_snapshot() -> None:
+    with pytest.raises(InstallationEventValidationError):
+        parse_installation_repositories_event(
+            event_name="installation", payload={"action": "created", "installation": {"id": 17}}
+        )
+
+
+@pytest.mark.parametrize("repositories", [None, {}, "invalid", [None]])
+def test_deleted_installation_rejects_malformed_present_repositories(repositories: object) -> None:
+    with pytest.raises(InstallationEventValidationError):
+        parse_installation_repositories_event(
+            event_name="installation",
+            payload={"action": "deleted", "installation": {"id": 17}, "repositories": repositories},
+        )

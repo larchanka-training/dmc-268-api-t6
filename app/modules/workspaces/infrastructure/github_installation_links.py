@@ -165,14 +165,14 @@ class SqlAlchemyGitHubInstallationLinkStore:
                     ProviderInstallation.provider == "github",
                     ProviderInstallation.external_id == installation_id,
                 )
-                .with_for_update()
+                .with_for_update(key_share=True)
             ),
         )
         if provider_installation_id is None:
             raise RuntimeError("GitHub installation must be linked before repositories")
 
         # Apply holds the user generation lock, then installations in external-id order.
-        # Removal takes only this installation lock, so it cannot invert that order.
+        # NO KEY UPDATE serializes removals while allowing repository onboarding FK checks.
         revoked = set(
             (
                 await self._session.scalars(

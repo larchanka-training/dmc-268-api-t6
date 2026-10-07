@@ -109,10 +109,11 @@ class SqlAlchemyInstallationRepositoryStore:
     async def _record_revocation(self, installation_id: UUID, repository_id: int) -> None:
         # Serialize with OAuth reconciliation before touching grants. Database time
         # after the lock also covers removals whose transaction began before OAuth.
+        # NO KEY UPDATE allows onboarding FK KEY SHARE checks without a lock inversion.
         await self._session.execute(
             select(ProviderInstallation.id)
             .where(ProviderInstallation.id == installation_id)
-            .with_for_update()
+            .with_for_update(key_share=True)
         )
         await self._session.execute(
             insert(GitHubInstallationAccessRevocation)

@@ -11,6 +11,7 @@ from typing import Any, cast
 from uuid import UUID, uuid4
 
 import pytest
+from sqlalchemy.sql.dml import Update
 
 from app.modules.repositories.application.installation_repositories import (
     RepositoryReference,
@@ -354,8 +355,13 @@ def test_sqlalchemy_installation_store_soft_disables_matching_repository() -> No
 
     asyncio.run(store.disable_repository(installation_id, 101))
 
-    assert len(session.statements) == 4
-    compiled = cast(Any, session.statements[2]).compile()
+    repository_updates = [
+        statement
+        for statement in session.statements
+        if isinstance(statement, Update) and statement.table.compare(Repository.__table__)
+    ]
+    assert len(repository_updates) == 1
+    compiled = repository_updates[0].compile()
     assert compiled.params["enabled"] is False
     assert compiled.params["provider_installation_id_1"] == installation_id
     assert compiled.params["external_id_1"] == 101
