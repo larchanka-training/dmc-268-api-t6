@@ -23,6 +23,7 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = REPO_ROOT / ".github" / "workflows" / "ci-cd.yml"
 ROLLBACK_WORKFLOW = WORKFLOW.parent / "rollback.yml"
+EDGE_GUARD = "        if: steps.target.outputs.deploy_mode == 'edge'"
 STAGING_COMPOSE = REPO_ROOT / "deploy" / "compose" / "staging.yml"
 PROJECT = "dmc-268-api-staging"
 
@@ -142,6 +143,17 @@ def _workflow_step(name: str, workflow_file: Path = WORKFLOW) -> str:
     start = workflow.index(header)
     end = workflow.find("\n      - name: ", start + len(header))
     return workflow[start : end if end != -1 else len(workflow)]
+
+
+def _steps(workflow_file: Path) -> list[tuple[str, str]]:
+    """Every step of a workflow as (name, text), comment lines left out."""
+    chunks = workflow_file.read_text(encoding="utf-8").split("\n      - name: ")[1:]
+    steps = []
+    for chunk in chunks:
+        name, _, body = chunk.partition("\n")
+        lines = [line for line in body.splitlines() if not line.lstrip().startswith("#")]
+        steps.append((name, "\n".join(lines)))
+    return steps
 
 
 def _run_script(step: str) -> str:
@@ -763,6 +775,9 @@ def test_ci_validates_the_edge_caddyfile_before_the_push() -> None:
 
     assert "name: Edge Caddyfile validate" in job
     assert "      - name: caddy validate\n" in job
+    # Fail closed: a red validation must fail the job and with it push-image.
+    assert "continue-on-error" not in job
+    assert "|| true" not in script
     # The image the VPS runs comes from deploy/edge/compose.yml: no second tag to keep in step.
     assert "image=\"$(sed -n 's/^    image: //p' deploy/edge/compose.yml)\"" in script.splitlines()
     assert not re.search(r"\bcaddy(?::\d|@sha256:)", workflow)
@@ -787,9 +802,22 @@ def test_rollback_validates_the_edge_caddyfile_before_it_reaches_the_host() -> N
     # Rollback uploads the Caddyfile of its own checkout and reloads Caddy with it: the CI check
     # runs on that revision before the first step that reaches the host, as in the edge mode only.
     assert _run_script(step) == _run_script(_workflow_step("caddy validate"))
-    assert "        if: steps.target.outputs.deploy_mode == 'edge'\n" in step
+    assert "continue-on-error" not in step
+    assert "|| true" not in _run_script(step)
     assert order == sorted(order)
     assert not re.search(r"\bcaddy(?::\d|@sha256:)", rollback)
+    # The check runs exactly when the Caddyfile reaches the host: every step that uploads the edge
+    # files or reloads Caddy carries the same guard as the check.
+    edge_steps = [
+        (name, text)
+        for name, text in _steps(ROLLBACK_WORKFLOW)
+        if "deploy/edge" in text or "caddy reload" in text
+    ]
+    assert {"caddy validate", "Upload edge proxy files", "Prepare host"} <= {
+        name for name, _ in edge_steps
+    }
+    for name, text in edge_steps:
+        assert EDGE_GUARD in text.splitlines(), f"step {name!r} lacks the edge guard"
 
 
 def test_ui_host_sends_api_paths_to_the_api_and_the_rest_to_the_ui() -> None:
