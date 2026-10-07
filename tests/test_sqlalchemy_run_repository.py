@@ -510,18 +510,19 @@ def test_repository_settings_store_requires_scope_unless_allow_unscoped() -> Non
         SqlAlchemyRepositorySettingsUnitOfWork(factory, None)
 
 
-def test_sqlalchemy_run_repository_has_run_access() -> None:
+def test_sqlalchemy_run_repository_run_updated_at() -> None:
     run_id = UUID("00000000-0000-0000-0000-000000000001")
-    session = FakeSession([(1,)])
+    updated_at = datetime(2026, 10, 7, 12, 34, 56, 123457, tzinfo=UTC)
+    session = FakeSession([(updated_at,)])
     repository = SqlAlchemyRunRepository(
         cast(async_sessionmaker[AsyncSession], FakeSessionFactory(session)),
         allow_unscoped=True,
     )
 
-    has_access = asyncio.run(repository.has_run_access(run_id))
-    assert has_access is True
+    assert asyncio.run(repository.run_updated_at(run_id)) == updated_at
     assert session.statement is not None
     sql = str(session.statement.compile())
+    assert sql.startswith("SELECT runs.updated_at")
     assert "WHERE runs.id =" in sql
 
     # Test not found
@@ -530,22 +531,47 @@ def test_sqlalchemy_run_repository_has_run_access() -> None:
         cast(async_sessionmaker[AsyncSession], FakeSessionFactory(empty_session)),
         allow_unscoped=True,
     )
-    assert asyncio.run(empty_repo.has_run_access(run_id)) is False
+    assert asyncio.run(empty_repo.run_updated_at(run_id)) is None
 
 
 def test_sqlalchemy_run_repository_with_scope_correlates_repository_access() -> None:
     run_id = UUID("00000000-0000-0000-0000-000000000001")
     scope = AuthScope(user_id=42, workspace_ids=(UUID("00000000-0000-0000-0000-000000000099"),))
-    session = FakeSession([(1,)])
+    session = FakeSession([(datetime(2026, 10, 7, tzinfo=UTC),)])
     repository = SqlAlchemyRunRepository(
         cast(async_sessionmaker[AsyncSession], FakeSessionFactory(session)),
         scope=scope,
     )
 
-    assert asyncio.run(repository.has_run_access(run_id)) is True
+    assert asyncio.run(repository.run_updated_at(run_id)) == datetime(2026, 10, 7, tzinfo=UTC)
     assert session.statement is not None
     sql = str(session.statement.compile())
     assert "WHERE runs.id =" in sql
+    assert "WHERE code_changes.id = runs.code_change_id" in sql
+    assert "provider_installations.workspace_id IN" in sql
+
+
+def test_sqlalchemy_run_repository_runs_updated_after_is_scoped_capped_and_oldest_first() -> None:
+    older = (UUID(int=1), RunState.SUCCEEDED, datetime(2026, 10, 7, 12, tzinfo=UTC))
+    newer = (UUID(int=2), RunState.RUNNING, datetime(2026, 10, 7, 13, tzinfo=UTC))
+    scope = AuthScope(user_id=42, workspace_ids=(UUID("00000000-0000-0000-0000-000000000099"),))
+    session = FakeSession([newer, older])  # the query reads newest first
+    repository = SqlAlchemyRunRepository(
+        cast(async_sessionmaker[AsyncSession], FakeSessionFactory(session)),
+        scope=scope,
+    )
+
+    changes = asyncio.run(repository.runs_updated_after(datetime(2026, 10, 7, tzinfo=UTC), 2))
+
+    assert [(change.run_id, change.status, change.updated_at) for change in changes] == [
+        (UUID(int=1), "succeeded", older[2]),
+        (UUID(int=2), "running", newer[2]),
+    ]
+    assert session.statement is not None
+    sql = str(session.statement.compile())
+    assert "runs.updated_at >" in sql
+    assert "ORDER BY runs.updated_at DESC, runs.id DESC" in sql
+    assert "LIMIT" in sql
     assert "WHERE code_changes.id = runs.code_change_id" in sql
     assert "provider_installations.workspace_id IN" in sql
 

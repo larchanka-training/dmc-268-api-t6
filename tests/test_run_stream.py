@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import AsyncIterator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 import pytest
@@ -11,10 +11,20 @@ import pytest
 from app.main import app, get_run_event_hub, get_run_repository
 from app.modules.reviews.application.cancel_run import CancelRequestResult, CancelRun
 from app.modules.reviews.application.list_runs import RunListItem
-from app.modules.reviews.application.run_events import InMemoryRunUpdateHub, RunUpdated
+from app.modules.reviews.application.run_events import (
+    InMemoryRunUpdateHub,
+    RunChange,
+    RunUpdated,
+    parse_run_event_id,
+    run_event_id,
+)
 from tests.portal_test_client import authenticated_test_client as TestClient
 
 RUN_ID = UUID("00000000-0000-0000-0000-000000000100")
+OTHER_RUN_ID = UUID("00000000-0000-0000-0000-000000000101")
+# The id keeps the microseconds: 2026-10-07T12:34:56.123457Z since the Unix epoch.
+UPDATED_AT = datetime(2026, 10, 7, 12, 34, 56, 123457, tzinfo=UTC)
+UPDATED_AT_ID = "1791376496123457"
 
 
 def make_item(status: str = "running") -> RunListItem:
@@ -202,8 +212,8 @@ def test_stream_endpoint_uses_sse_event_and_camel_case_payload() -> None:
             return None
 
     class AuthorizedRunRepository:
-        async def has_run_access(self, run_id: UUID) -> bool:
-            return run_id == RUN_ID
+        async def run_updated_at(self, run_id: UUID) -> datetime | None:
+            return UPDATED_AT if run_id == RUN_ID else None
 
         async def get_run(self, run_id: UUID) -> RunListItem | None:
             return make_item() if run_id == RUN_ID else None
@@ -220,12 +230,14 @@ def test_stream_endpoint_uses_sse_event_and_camel_case_payload() -> None:
     frames = response.text.split("\n\n")
     assert frames == [
         (
+            f"id: {UPDATED_AT_ID}\n"
             "event: run.updated\n"
             'data: {"runId":"00000000-0000-0000-0000-000000000100","status":"cancelled"}'
         ),
         "",
     ]
-    event_line, data_line = frames[0].split("\n")
+    id_line, event_line, data_line = frames[0].split("\n")
+    assert id_line == f"id: {UPDATED_AT_ID}"
     assert event_line == "event: run.updated"
     assert data_line.startswith("data: ")
     assert json.loads(data_line.removeprefix("data: ")) == {
@@ -234,7 +246,7 @@ def test_stream_endpoint_uses_sse_event_and_camel_case_payload() -> None:
     }
 
 
-def test_stream_uses_has_run_access() -> None:
+def test_stream_uses_run_updated_at_for_access() -> None:
     calls: list[UUID] = []
 
     async def single_event() -> AsyncIterator[RunUpdated]:
@@ -252,9 +264,9 @@ def test_stream_uses_has_run_access() -> None:
             return _Sub()
 
     class LightRepository:
-        async def has_run_access(self, run_id: UUID) -> bool:
+        async def run_updated_at(self, run_id: UUID) -> datetime | None:
             calls.append(run_id)
-            return True
+            return UPDATED_AT
 
     app.dependency_overrides[get_run_event_hub] = StreamHub
     app.dependency_overrides[get_run_repository] = LightRepository
@@ -266,6 +278,7 @@ def test_stream_uses_has_run_access() -> None:
     assert response.status_code == 200
     expected_data = 'data: {"runId":"00000000-0000-0000-0000-000000000100","status":"succeeded"}'
     assert expected_data in response.text
+    assert calls == [RUN_ID]
 
 
 def test_stream_emits_keepalive_when_idle(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -291,8 +304,8 @@ def test_stream_emits_keepalive_when_idle(monkeypatch: pytest.MonkeyPatch) -> No
             return _Sub()
 
     class LightRepository:
-        async def has_run_access(self, run_id: UUID) -> bool:
-            return True
+        async def run_updated_at(self, run_id: UUID) -> datetime | None:
+            return UPDATED_AT
 
     app.dependency_overrides[get_run_event_hub] = StreamHub
     app.dependency_overrides[get_run_repository] = LightRepository
@@ -307,7 +320,7 @@ def test_stream_emits_keepalive_when_idle(monkeypatch: pytest.MonkeyPatch) -> No
     assert expected_data in response.text
 
 
-def test_stream_fails_closed_if_repository_lacks_has_run_access() -> None:
+def test_stream_fails_closed_if_repository_lacks_run_updated_at() -> None:
     async def single_event() -> AsyncIterator[RunUpdated]:
         yield RunUpdated(RUN_ID, "running")
 
@@ -328,13 +341,13 @@ def test_stream_fails_closed_if_repository_lacks_has_run_access() -> None:
     app.dependency_overrides[get_run_event_hub] = StreamHub
     app.dependency_overrides[get_run_repository] = RepositoryWithoutAccessCheck
     try:
-        with pytest.raises(AttributeError, match="does not implement has_run_access"):
+        with pytest.raises(AttributeError, match="does not implement run_updated_at"):
             TestClient(app).get("/api/stream")
     finally:
         app.dependency_overrides.clear()
 
 
-def test_stream_drops_events_when_has_run_access_returns_false() -> None:
+def test_stream_drops_events_when_run_updated_at_is_none() -> None:
     async def single_event() -> AsyncIterator[RunUpdated]:
         yield RunUpdated(RUN_ID, "running")
 
@@ -350,8 +363,8 @@ def test_stream_drops_events_when_has_run_access_returns_false() -> None:
             return _Sub()
 
     class DeniedRepository:
-        async def has_run_access(self, run_id: UUID) -> bool:
-            return False
+        async def run_updated_at(self, run_id: UUID) -> datetime | None:
+            return None
 
     app.dependency_overrides[get_run_event_hub] = StreamHub
     app.dependency_overrides[get_run_repository] = DeniedRepository
@@ -388,8 +401,8 @@ def test_stream_terminates_cleanly_when_jwt_expires() -> None:
             return _Sub()
 
     class LightRepository:
-        async def has_run_access(self, run_id: UUID) -> bool:
-            return True
+        async def run_updated_at(self, run_id: UUID) -> datetime | None:
+            return UPDATED_AT
 
     app.dependency_overrides[get_run_event_hub] = StreamHub
     app.dependency_overrides[get_run_repository] = LightRepository
@@ -402,3 +415,176 @@ def test_stream_terminates_cleanly_when_jwt_expires() -> None:
     assert response.status_code == 200
     # Stream terminates immediately without consuming infinite events
     assert response.text == ""
+
+
+class ReplayRepository:
+    """Every run is visible with `UPDATED_AT`; records the replay query."""
+
+    def __init__(
+        self, changes: list[RunChange] | None = None, order: list[str] | None = None
+    ) -> None:
+        self.changes = changes or []
+        self.order = order if order is not None else []
+        self.replay_calls: list[tuple[datetime, int]] = []
+
+    async def run_updated_at(self, run_id: UUID) -> datetime | None:
+        return UPDATED_AT
+
+    async def runs_updated_after(self, after: datetime, limit: int) -> list[RunChange]:
+        self.order.append("replay")
+        self.replay_calls.append((after, limit))
+        return self.changes
+
+
+def _stream(
+    repository: object,
+    live: list[RunUpdated] | None = None,
+    headers: dict[str, str] | None = None,
+    order: list[str] | None = None,
+) -> str:
+    async def events() -> AsyncIterator[RunUpdated]:
+        for update in live or []:
+            yield update
+
+    class StreamHub:
+        def subscribe(self) -> object:
+            class _Sub:
+                async def __aenter__(self) -> AsyncIterator[RunUpdated]:
+                    if order is not None:
+                        order.append("subscribe")
+                    return events()
+
+                async def __aexit__(self, *args: object) -> None:
+                    pass
+
+            return _Sub()
+
+    app.dependency_overrides[get_run_event_hub] = StreamHub
+    app.dependency_overrides[get_run_repository] = lambda: repository
+    try:
+        response = TestClient(app).get("/api/stream", headers=headers)
+    finally:
+        app.dependency_overrides.clear()
+    assert response.status_code == 200
+    body: str = response.text
+    return body
+
+
+def test_stream_live_event_id_is_the_updated_at_in_epoch_microseconds() -> None:
+    text = _stream(ReplayRepository(), live=[RunUpdated(RUN_ID, "running")])
+
+    assert text == (
+        f"id: {UPDATED_AT_ID}\n"
+        "event: run.updated\n"
+        'data: {"runId":"00000000-0000-0000-0000-000000000100","status":"running"}\n\n'
+    )
+
+
+def test_event_id_is_integer_microseconds_since_the_epoch_and_round_trips() -> None:
+    assert run_event_id(datetime(1970, 1, 1, tzinfo=UTC)) == "0"
+    assert run_event_id(datetime(1970, 1, 1, 0, 0, 0, 1, tzinfo=UTC)) == "1"
+    assert run_event_id(UPDATED_AT) == UPDATED_AT_ID
+    assert parse_run_event_id(UPDATED_AT_ID) == UPDATED_AT
+
+
+@pytest.mark.parametrize(
+    "value",
+    [None, "", "abc", "-5", "+5", "12.5", " 12", "12 ", "1_000", "\u0661\u0662", "9" * 30, "1\n"],
+)
+def test_parse_event_id_rejects_anything_but_plain_decimal_microseconds(value: str | None) -> None:
+    assert parse_run_event_id(value) is None
+
+
+def test_stream_replays_changed_runs_in_order_before_live_events() -> None:
+    first = RunChange(RUN_ID, "succeeded", UPDATED_AT - timedelta(seconds=10))
+    second = RunChange(OTHER_RUN_ID, "running", UPDATED_AT + timedelta(seconds=5))
+    repository = ReplayRepository([first, second])
+
+    text = _stream(
+        repository,
+        live=[RunUpdated(RUN_ID, "failed")],
+        headers={"Last-Event-ID": UPDATED_AT_ID},
+    )
+
+    assert text == (
+        f"id: {run_event_id(first.updated_at)}\n"
+        "event: run.updated\n"
+        'data: {"runId":"00000000-0000-0000-0000-000000000100","status":"succeeded"}\n\n'
+        f"id: {run_event_id(second.updated_at)}\n"
+        "event: run.updated\n"
+        'data: {"runId":"00000000-0000-0000-0000-000000000101","status":"running"}\n\n'
+        f"id: {UPDATED_AT_ID}\n"
+        "event: run.updated\n"
+        'data: {"runId":"00000000-0000-0000-0000-000000000100","status":"failed"}\n\n'
+    )
+
+
+def test_stream_replay_starts_30_seconds_before_the_last_event_id() -> None:
+    import app.main as main_mod
+
+    repository = ReplayRepository()
+
+    _stream(repository, headers={"Last-Event-ID": UPDATED_AT_ID})
+
+    assert repository.replay_calls == [(UPDATED_AT - timedelta(seconds=30), main_mod.REPLAY_LIMIT)]
+
+
+def test_stream_replay_is_capped(monkeypatch: pytest.MonkeyPatch) -> None:
+    import app.main as main_mod
+
+    assert main_mod.REPLAY_LIMIT == 500
+    monkeypatch.setattr(main_mod, "REPLAY_LIMIT", 3)
+    repository = ReplayRepository()
+
+    _stream(repository, headers={"Last-Event-ID": UPDATED_AT_ID})
+
+    assert [limit for _, limit in repository.replay_calls] == [3]
+
+
+def test_stream_subscribes_before_it_replays() -> None:
+    order: list[str] = []
+    repository = ReplayRepository(order=order)
+
+    _stream(repository, headers={"Last-Event-ID": UPDATED_AT_ID}, order=order)
+
+    assert order == ["subscribe", "replay"]
+
+
+@pytest.mark.parametrize("value", ["", "abc", "-5", "12.5", "1_000", "9" * 30])
+def test_stream_with_an_invalid_last_event_id_does_not_replay(value: str) -> None:
+    repository = ReplayRepository([RunChange(RUN_ID, "succeeded", UPDATED_AT)])
+
+    text = _stream(
+        repository, live=[RunUpdated(RUN_ID, "running")], headers={"Last-Event-ID": value}
+    )
+
+    assert repository.replay_calls == []
+    assert text == (
+        f"id: {UPDATED_AT_ID}\n"
+        "event: run.updated\n"
+        'data: {"runId":"00000000-0000-0000-0000-000000000100","status":"running"}\n\n'
+    )
+
+
+def test_stream_without_last_event_id_does_not_replay() -> None:
+    repository = ReplayRepository([RunChange(RUN_ID, "succeeded", UPDATED_AT)])
+
+    text = _stream(repository, live=[RunUpdated(RUN_ID, "running")])
+
+    assert repository.replay_calls == []
+    assert text.count("event: run.updated") == 1
+
+
+def test_stream_with_an_expired_token_does_not_replay() -> None:
+    from app.bootstrap.portal_auth import get_auth_scope
+    from app.modules.auth.application.scope import AuthScope
+
+    repository = ReplayRepository([RunChange(RUN_ID, "succeeded", UPDATED_AT)])
+    app.dependency_overrides[get_auth_scope] = lambda: AuthScope(
+        user_id=42, workspace_ids=(), expires_at=1
+    )
+
+    text = _stream(repository, headers={"Last-Event-ID": UPDATED_AT_ID})
+
+    assert text == ""
+    assert repository.replay_calls == []

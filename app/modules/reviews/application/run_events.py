@@ -3,11 +3,17 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from collections.abc import AsyncIterator
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from typing import Protocol
 from uuid import UUID
+
+_EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
+_MICROSECOND = timedelta(microseconds=1)
+_EVENT_ID = re.compile(r"[0-9]{1,19}")
 
 
 @dataclass(frozen=True)
@@ -26,8 +32,38 @@ class RunUpdateStream(RunUpdatePublisher, Protocol):
     def subscribe(self) -> AbstractAsyncContextManager[AsyncIterator[RunUpdated]]: ...
 
 
+@dataclass(frozen=True)
+class RunChange:
+    """The current state of a visible Run and the `updated_at` that names its SSE event."""
+
+    run_id: UUID
+    status: str
+    updated_at: datetime
+
+
 class RunAccessRepository(Protocol):
-    async def has_run_access(self, run_id: UUID) -> bool: ...
+    async def run_updated_at(self, run_id: UUID) -> datetime | None:
+        """`updated_at` of a Run the caller may see; `None` when it is not visible."""
+        ...
+
+    async def runs_updated_after(self, after: datetime, limit: int) -> list[RunChange]:
+        """Visible Runs with `updated_at > after`, oldest first; the newest `limit` on overflow."""
+        ...
+
+
+def run_event_id(updated_at: datetime) -> str:
+    """The SSE `id`: `updated_at` as whole microseconds since the Unix epoch (integer math)."""
+    return str((updated_at - _EPOCH) // _MICROSECOND)
+
+
+def parse_run_event_id(value: str | None) -> datetime | None:
+    """The `updated_at` a `Last-Event-ID` names, or `None` when it is not a plain decimal id."""
+    if value is None or _EVENT_ID.fullmatch(value) is None:
+        return None
+    try:
+        return _EPOCH + timedelta(microseconds=int(value))
+    except OverflowError:
+        return None
 
 
 class _Subscriber:

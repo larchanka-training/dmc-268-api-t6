@@ -49,6 +49,7 @@ from app.modules.reviews.application.review_output import (
     ReviewOutput,
     ReviewPublication,
 )
+from app.modules.reviews.application.run_events import RunChange
 from app.modules.reviews.application.store_review_output import PublishingGuard
 from app.modules.reviews.application.vcs_diff import PullRequestLocator
 from app.modules.reviews.infrastructure.models import (
@@ -111,11 +112,27 @@ class SqlAlchemyRunRepository:
     def _authorized_run(self) -> ColumnElement[bool]:
         return authorized_run(self._scope, allow_unscoped=self._allow_unscoped)
 
-    async def has_run_access(self, run_id: UUID) -> bool:
-        """Lightweight query verifying repository access for a Run without loading details."""
-        statement = select(1).where(Run.id == run_id, self._authorized_run())
+    async def run_updated_at(self, run_id: UUID) -> datetime | None:
+        """One scoped query: `updated_at` of a visible Run (its SSE event id), else `None`."""
+        statement = select(Run.updated_at).where(Run.id == run_id, self._authorized_run())
         async with self._session_scope() as session:
-            return (await session.scalar(statement)) is not None
+            updated_at: datetime | None = await session.scalar(statement)
+        return updated_at
+
+    async def runs_updated_after(self, after: datetime, limit: int) -> list[RunChange]:
+        """Visible Runs changed after `after`, oldest first; the newest `limit` on overflow."""
+        statement = (
+            select(Run.id, Run.state, Run.updated_at)
+            .where(Run.updated_at > after, self._authorized_run())
+            .order_by(Run.updated_at.desc(), Run.id.desc())
+            .limit(limit)
+        )
+        async with self._session_scope() as session:
+            rows = (await session.execute(statement)).all()
+        return [
+            RunChange(run_id, state.value, updated_at)
+            for run_id, state, updated_at in reversed(rows)
+        ]
 
     async def list_runs(
         self,

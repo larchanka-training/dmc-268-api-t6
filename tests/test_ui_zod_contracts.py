@@ -26,8 +26,8 @@ UI_CONTRACT_COMMIT = "fd4b5c8a8d3709fe5a4c69005b63e7fc99e4819f"
 
 
 class ContractRepository:
-    async def has_run_access(self, run_id: UUID) -> bool:
-        return run_id == RUN_ID
+    async def run_updated_at(self, run_id: UUID) -> datetime | None:
+        return datetime(2026, 9, 25, 0, 1, tzinfo=UTC) if run_id == RUN_ID else None
 
     async def get_run(self, run_id: UUID) -> RunListItem | None:
         if run_id != RUN_ID:
