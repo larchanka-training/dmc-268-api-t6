@@ -30,8 +30,8 @@
 |---|---|---|
 | `STAGING_SSH_FINGERPRINT` | да, для обеих целей | `SHA256:…` host key VPS (`ssh-keyscan -p 22 <VPS_DMC268_IP_T6> \| ssh-keygen -lf - -E sha256`). Значение в Environment `staging` перекрывает repository. При переключении между курсовым VPS и Terraform-хостом fingerprint нужно обновить: у хостов разные ключи, и при несовпадении jobs с SSH падают (fail-closed) |
 | `APP_DOMAIN` | да, для курсового VPS | `dmc268-t6.axyi.ru` — базовый домен маршрутов edge-прокси |
-| `LLM_MODEL` | для ревью моделью | `mistral-small-4` (OQ-2, SD §15). Основная модель в repository variable; только `worker` |
-| `LLM_FALLBACK_MODEL` | нет | `mistral-small-3.2-24b` (OQ-2, SD §15). Значение передаётся только в `worker.env`. Чтобы отключить fallback, удалите variable (и переопределение в Environment `staging`, если оно есть): незаданная variable не попадает в `worker.env` |
+| `LLM_MODEL` | для ревью моделью | `mistral-small-4` (OQ-2, SD §15). Основная модель в repository variable; передаётся в `worker.env` (деплой) и читается ручным workflow `eval-live.yml` |
+| `LLM_FALLBACK_MODEL` | нет | `mistral-small-3.2-24b` (OQ-2, SD §15). Значение передаётся в `worker.env` и в ручной workflow `eval-live.yml`. Чтобы отключить fallback, удалите variable (и переопределение в Environment `staging`, если оно есть): незаданная variable не попадает в `worker.env` |
 
 Repository variable `LLM_EUR_TO_USD_RATE` удалена 06.10 после проверки нового пути на staging: worker и workflow `LLM live run` её не читают, в `worker.env` она не попадает; курс вручную обновлять не нужно.
 

@@ -205,6 +205,38 @@ def test_cold_failure_lets_the_next_run_attempt_fetch_the_recovered_quote() -> N
     asyncio.run(exercise())
 
 
+def test_expired_quote_counts_as_cold_for_the_failure_backoff() -> None:
+    old = FxQuote(Decimal("1.1204"), date(2026, 10, 5), "EXR.D.USD.EUR.SP00.A", NOW)
+    fresh = FxQuote(Decimal("1.1300"), date(2026, 10, 13), "EXR.D.USD.EUR.SP00.A", NOW)
+
+    async def exercise() -> None:
+        clock = ControlledClock()
+        calls = 0
+
+        class Fetcher:
+            async def fetch_latest(self) -> FxQuote:
+                nonlocal calls
+                calls += 1
+                if calls == 2:
+                    raise EcbFxError("ECB offline")
+                return old if calls == 1 else fresh
+
+        cache = EcbFxQuoteCache(
+            Fetcher(), wall_clock=clock.wall_now, monotonic_clock=clock.monotonic_now
+        )
+        assert (await cache.get_quote()).quote is old
+        # the cached observation is now 9 calendar days old: cached, but not usable
+        clock.advance(8 * 86_400)
+        assert (await cache.get_quote()).quote is None
+        assert calls == 2
+        clock.advance(10)
+        recovered = await cache.get_quote()
+        assert recovered.quote is fresh and recovered.stale_cache is False
+        assert calls == 3
+
+    asyncio.run(exercise())
+
+
 def test_cold_fetch_failure_returns_unavailable_and_retries_after_backoff() -> None:
     quote = FxQuote(Decimal("1.1204"), date(2026, 10, 5), "EXR.D.USD.EUR.SP00.A", NOW)
 
