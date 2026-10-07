@@ -25,7 +25,7 @@ import app.worker as worker_module
 from app.bootstrap.llm_gateway import build_gateway as original_build_gateway
 from app.modules.reviews.application.handle_review_run import ClaimedAttempt, DeliveryOutcome
 from app.modules.reviews.application.queue_messages import ReviewPublishPointer, StoredRunMessage
-from app.modules.reviews.application.run_failures import RunFailure
+from app.modules.reviews.application.run_failures import RetryDelays, RunFailure
 from app.modules.reviews.application.try_enqueue_webhook_run import (
     PendingRunMessage,
     RunPublicationKind,
@@ -132,18 +132,22 @@ def test_priorities_and_routing_keys() -> None:
 
 
 @dataclass
-class FakeChannel:
+class FakeExchange:
     published: list[tuple[aio_pika.Message, str]] = field(default_factory=list)
-
-    @property
-    def default_exchange(self) -> FakeChannel:
-        return self
-
-    async def get_exchange(self, name: str, ensure: bool = False) -> FakeChannel:
-        return self
 
     async def publish(self, message: aio_pika.Message, routing_key: str = "") -> None:
         self.published.append((message, routing_key))
+
+
+def fake_publisher(
+    exchange: FakeExchange | None = None,
+) -> tuple[amqp.AmqpQueuePublisher, FakeExchange]:
+    ex = exchange or FakeExchange()
+    pub = amqp.AmqpQueuePublisher(
+        cast(aio_pika.abc.AbstractExchange, ex),
+        cast(aio_pika.abc.AbstractExchange, ex),
+    )
+    return pub, ex
 
 
 @dataclass
@@ -153,7 +157,6 @@ class Delivery:
     acked: bool = False
     nacked: list[bool] = field(default_factory=list)
     headers: dict[str, Any] = field(default_factory=dict)
-    channel: Any = None
     exchange: str = "reviews"
     routing_key: str = "review.run.fast"
     priority: int = 0
@@ -165,7 +168,11 @@ class Delivery:
         self.nacked.append(requeue)
 
 
-def _deliver(body: bytes, outcome: DeliveryOutcome | Exception) -> tuple[Delivery, list[UUID]]:
+def _deliver(
+    body: bytes,
+    outcome: DeliveryOutcome | Exception,
+    publisher: amqp.AmqpQueuePublisher | None = None,
+) -> tuple[Delivery, list[UUID]]:
     delivery = Delivery(body)
     seen: list[UUID] = []
 
@@ -175,7 +182,8 @@ def _deliver(body: bytes, outcome: DeliveryOutcome | Exception) -> tuple[Deliver
             raise outcome
         return outcome
 
-    asyncio.run(amqp.handle_run_delivery(cast(AbstractIncomingMessage, delivery), handler))
+    pub = publisher or fake_publisher()[0]
+    asyncio.run(amqp.handle_run_delivery(cast(AbstractIncomingMessage, delivery), handler, pub))
     return delivery, seen
 
 
@@ -209,36 +217,38 @@ def test_exhausted_run_is_dead_lettered() -> None:
     assert delivery.nacked == [False] and not delivery.acked
 
 
-def test_handler_error_requeues_the_message(monkeypatch: pytest.MonkeyPatch) -> None:
-    async def no_sleep(seconds: float) -> None:
-        return None
-
-    monkeypatch.setattr(asyncio, "sleep", no_sleep)
+def test_handler_error_republishes_the_message(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("app.modules.reviews.infrastructure.amqp.REQUEUE_ERROR_DELAY_SECONDS", 0.0)
     amqp._clear_delivery_attempts("m")
-    delivery, _ = _deliver(VALID, RuntimeError("database is down"))
-    assert delivery.nacked == [True]
+    pub, exchange = fake_publisher()
+    delivery, _ = _deliver(VALID, RuntimeError("database is down"), publisher=pub)
+    assert delivery.acked is True and delivery.nacked == []
+    assert len(exchange.published) == 1
+    msg, rk = exchange.published[0]
+    assert msg.headers["x-attempt"] == 1
+    assert rk == "review.run.fast"
 
 
 def test_handler_repeated_errors_route_to_dlq_with_log(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    async def no_sleep(seconds: float) -> None:
-        return None
-
-    monkeypatch.setattr(asyncio, "sleep", no_sleep)
+    monkeypatch.setattr("app.modules.reviews.infrastructure.amqp.REQUEUE_ERROR_DELAY_SECONDS", 0.0)
     amqp._clear_delivery_attempts("m")
+    pub, exchange = fake_publisher()
 
-    # Attempt 1: requeued
-    d1, _ = _deliver(VALID, RuntimeError("unexpected error 1"))
-    assert d1.nacked == [True] and not d1.acked
+    # Attempt 1: republished
+    d1, _ = _deliver(VALID, RuntimeError("unexpected error 1"), publisher=pub)
+    assert d1.acked is True and d1.nacked == []
+    assert len(exchange.published) == 1
 
-    # Attempt 2: requeued
-    d2, _ = _deliver(VALID, RuntimeError("unexpected error 2"))
-    assert d2.nacked == [True] and not d2.acked
+    # Attempt 2: republished
+    d2, _ = _deliver(VALID, RuntimeError("unexpected error 2"), publisher=pub)
+    assert d2.acked is True and d2.nacked == []
+    assert len(exchange.published) == 2
 
     # Attempt 3: reached max (3) -> DLQ (nack requeue=False) with error log
     with caplog.at_level(logging.ERROR):
-        d3, _ = _deliver(VALID, RuntimeError("unexpected error 3"))
+        d3, _ = _deliver(VALID, RuntimeError("unexpected error 3"), publisher=pub)
     assert d3.nacked == [False] and not d3.acked
     assert "exceeded maximum unexpected retry attempts (3); routing to DLQ" in caplog.text
 
@@ -246,24 +256,21 @@ def test_handler_repeated_errors_route_to_dlq_with_log(
 def test_handler_repeated_errors_route_to_dlq_across_worker_restarts(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    async def no_sleep(seconds: float) -> None:
-        return None
-
-    monkeypatch.setattr(asyncio, "sleep", no_sleep)
+    monkeypatch.setattr("app.modules.reviews.infrastructure.amqp.REQUEUE_ERROR_DELAY_SECONDS", 0.0)
 
     async def failing_handler(run_id: UUID) -> DeliveryOutcome:
         raise RuntimeError("worker crash simulation")
 
-    channel = FakeChannel()
+    pub, exchange = fake_publisher()
 
     # Worker 1 gets fresh message without broker retry headers -> fails ->
     # republishes copy with x-attempt=1 and ACKs original
     amqp._clear_delivery_attempts("m")
-    d1 = Delivery(VALID, message_id="m", channel=channel)
-    asyncio.run(amqp.handle_run_delivery(cast(AbstractIncomingMessage, d1), failing_handler))
+    d1 = Delivery(VALID, message_id="m")
+    asyncio.run(amqp.handle_run_delivery(cast(AbstractIncomingMessage, d1), failing_handler, pub))
     assert d1.acked is True and d1.nacked == []
-    assert len(channel.published) == 1
-    pub1, rk1 = channel.published[0]
+    assert len(exchange.published) == 1
+    pub1, rk1 = exchange.published[0]
     assert pub1.headers["x-attempt"] == 1
     assert "x-delivery-count" not in pub1.headers
     assert rk1 == "review.run.fast"
@@ -276,12 +283,11 @@ def test_handler_repeated_errors_route_to_dlq_across_worker_restarts(
         body=pub1.body,
         message_id="m",
         headers=pub1.headers,
-        channel=channel,
     )
-    asyncio.run(amqp.handle_run_delivery(cast(AbstractIncomingMessage, d2), failing_handler))
+    asyncio.run(amqp.handle_run_delivery(cast(AbstractIncomingMessage, d2), failing_handler, pub))
     assert d2.acked is True and d2.nacked == []
-    assert len(channel.published) == 2
-    pub2, _ = channel.published[1]
+    assert len(exchange.published) == 2
+    pub2, _ = exchange.published[1]
     assert pub2.headers["x-attempt"] == 2
     assert "x-delivery-count" not in pub2.headers
 
@@ -292,22 +298,20 @@ def test_handler_repeated_errors_route_to_dlq_across_worker_restarts(
         body=pub2.body,
         message_id="m",
         headers=pub2.headers,
-        channel=channel,
     )
     with caplog.at_level(logging.ERROR):
-        asyncio.run(amqp.handle_run_delivery(cast(AbstractIncomingMessage, d3), failing_handler))
+        asyncio.run(
+            amqp.handle_run_delivery(cast(AbstractIncomingMessage, d3), failing_handler, pub)
+        )
     assert d3.nacked == [False] and not d3.acked
-    assert len(channel.published) == 2
+    assert len(exchange.published) == 2
     assert "exceeded maximum unexpected retry attempts (3); routing to DLQ" in caplog.text
 
 
 def test_handler_x_death_headers_do_not_deplete_unexpected_retries(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    async def no_sleep(seconds: float) -> None:
-        return None
-
-    monkeypatch.setattr(asyncio, "sleep", no_sleep)
+    monkeypatch.setattr("app.modules.reviews.infrastructure.amqp.REQUEUE_ERROR_DELAY_SECONDS", 0.0)
 
     async def failing_handler(run_id: UUID) -> DeliveryOutcome:
         raise RuntimeError("retry error")
@@ -318,27 +322,27 @@ def test_handler_x_death_headers_do_not_deplete_unexpected_retries(
     amqp._clear_delivery_attempts("m1")
     d1 = Delivery(VALID, message_id="m1", headers={"x-death": [{"count": 1}]})
     incoming1 = cast(AbstractIncomingMessage, d1)
-    asyncio.run(amqp.handle_run_delivery(incoming1, failing_handler))
-    assert d1.nacked == [True] and not d1.acked
-    assert d1.headers["x-attempt"] == 1
+    pub, exchange = fake_publisher()
+    asyncio.run(amqp.handle_run_delivery(incoming1, failing_handler, pub))
+    assert d1.acked is True and not d1.nacked
+    assert len(exchange.published) == 1
+    assert exchange.published[0][0].headers["x-attempt"] == 1
 
 
 def test_corrupted_retry_headers_log_warning(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    async def no_sleep(seconds: float) -> None:
-        return None
-
-    monkeypatch.setattr(asyncio, "sleep", no_sleep)
+    monkeypatch.setattr("app.modules.reviews.infrastructure.amqp.REQUEUE_ERROR_DELAY_SECONDS", 0.0)
 
     async def failing_handler(run_id: UUID) -> DeliveryOutcome:
         raise RuntimeError("corrupted header error")
 
     amqp._clear_delivery_attempts("bad")
     delivery = Delivery(VALID, message_id="bad", headers={"x-attempt": "not-an-int"})
+    pub, _ = fake_publisher()
     with caplog.at_level(logging.WARNING):
         asyncio.run(
-            amqp.handle_run_delivery(cast(AbstractIncomingMessage, delivery), failing_handler)
+            amqp.handle_run_delivery(cast(AbstractIncomingMessage, delivery), failing_handler, pub)
         )
 
     assert "Invalid retry header x-attempt='not-an-int'" in caplog.text
@@ -350,13 +354,14 @@ def test_handler_routes_to_dlq_when_broker_delivery_count_reaches_limit(
     # Message redelivered 2 times previously per broker x-attempt header -> this attempt is 3
     delivery = Delivery(VALID, headers={"x-attempt": 2})
     amqp._clear_delivery_attempts("m")
+    pub, _ = fake_publisher()
 
     async def failing_handler(run_id: UUID) -> DeliveryOutcome:
         raise RuntimeError("broken run")
 
     with caplog.at_level(logging.ERROR):
         incoming = cast(AbstractIncomingMessage, delivery)
-        asyncio.run(amqp.handle_run_delivery(incoming, failing_handler))
+        asyncio.run(amqp.handle_run_delivery(incoming, failing_handler, pub))
     assert delivery.nacked == [False] and not delivery.acked
     assert "exceeded maximum unexpected retry attempts (3); routing to DLQ" in caplog.text
 
@@ -364,10 +369,7 @@ def test_handler_routes_to_dlq_when_broker_delivery_count_reaches_limit(
 def test_republish_failure_falls_back_to_nack_requeue(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    async def no_sleep(seconds: float) -> None:
-        return None
-
-    monkeypatch.setattr(asyncio, "sleep", no_sleep)
+    monkeypatch.setattr("app.modules.reviews.infrastructure.amqp.REQUEUE_ERROR_DELAY_SECONDS", 0.0)
 
     class FailingExchange:
         async def publish(self, message: aio_pika.Message, routing_key: str = "") -> None:
@@ -390,6 +392,75 @@ def test_republish_failure_falls_back_to_nack_requeue(
 
     assert delivery.acked is False
     assert delivery.nacked == [True]
+
+
+def test_republish_ack_failure_logs_exception_and_does_not_nack(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.setattr("app.modules.reviews.infrastructure.amqp.REQUEUE_ERROR_DELAY_SECONDS", 0.0)
+
+    pub, exchange = fake_publisher()
+
+    class AckFailingDelivery(Delivery):
+        async def ack(self) -> None:
+            raise RuntimeError("ack failed")
+
+    delivery = AckFailingDelivery(VALID, message_id="err-ack")
+
+    async def failing_handler(run_id: UUID) -> DeliveryOutcome:
+        raise RuntimeError("handler failed")
+
+    with caplog.at_level(logging.ERROR):
+        asyncio.run(
+            amqp.handle_run_delivery(
+                cast(AbstractIncomingMessage, delivery), failing_handler, publisher=pub
+            )
+        )
+
+    assert len(exchange.published) == 1
+    assert delivery.nacked == []
+    assert "Failed to ack message err-ack after republish" in caplog.text
+
+
+def test_amqp_channels_configures_publisher_channel(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured_channel_kwargs: list[dict[str, Any]] = []
+
+    class FakeRobustQueue:
+        async def bind(self, *a: Any, **kw: Any) -> Any:
+            return None
+
+    class FakeRobustChannel:
+        async def declare_exchange(self, *a: Any, **kw: Any) -> Any:
+            return FakeExchange()
+
+        async def declare_queue(self, *a: Any, **kw: Any) -> Any:
+            return FakeRobustQueue()
+
+        async def queue_bind(self, *a: Any, **kw: Any) -> Any:
+            return None
+
+        async def get_exchange(self, *a: Any, **kw: Any) -> Any:
+            return FakeExchange()
+
+    class FakeRobustConn:
+        async def channel(self, **kwargs: Any) -> Any:
+            captured_channel_kwargs.append(kwargs)
+            return FakeRobustChannel()
+
+        async def close(self) -> None:
+            pass
+
+    async def fake_connect_robust(url: str) -> Any:
+        return FakeRobustConn()
+
+    monkeypatch.setattr(aio_pika, "connect_robust", fake_connect_robust)
+
+    async def run() -> None:
+        async with amqp.amqp_channels("amqp://guest:guest@localhost/", RetryDelays()):
+            pass
+
+    asyncio.run(run())
+    assert captured_channel_kwargs == [{"publisher_confirms": True, "on_return_raises": True}]
 
 
 class _Queue:

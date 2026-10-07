@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
 from uuid import UUID
 
 from sqlalchemy import select, update
@@ -23,46 +21,32 @@ from app.modules.reviews.infrastructure.models import CodeChange
 class SqlAlchemyWebhookRunTargets:
     def __init__(
         self,
-        session_or_factory: AsyncSession | async_sessionmaker[AsyncSession],
+        session: AsyncSession | None = None,
     ) -> None:
-        self._session: AsyncSession | None
-        self._session_factory: async_sessionmaker[AsyncSession] | None
-        if isinstance(session_or_factory, AsyncSession):
-            self._session = session_or_factory
-            self._session_factory = None
-        else:
-            self._session = None
-            self._session_factory = session_or_factory
-
-    @asynccontextmanager
-    async def _session_scope(self) -> AsyncIterator[AsyncSession]:
-        if self._session is not None:
-            yield self._session
-        else:
-            assert self._session_factory is not None
-            async with self._session_factory() as session:
-                yield session
+        self._session = session
 
     async def for_pr(self, event: PullRequestEvent) -> ProjectedPullRequestTarget | None:
-        async with self._session_scope() as session:
-            row = (
-                await session.execute(
-                    select(CodeChange.id, CodeChange.head_sha)
-                    .join(Repository, CodeChange.repository_id == Repository.id)
-                    .join(
-                        ProviderInstallation,
-                        Repository.provider_installation_id == ProviderInstallation.id,
-                    )
-                    .where(
-                        ProviderInstallation.provider == "github",
-                        ProviderInstallation.external_id == event.installation_external_id,
-                        Repository.external_id == event.repository_external_id,
-                        CodeChange.external_id == event.external_id,
-                        CodeChange.state == CodeChangeState.OPEN,
-                    )
+        if self._session is None:
+            raise RuntimeError("for_pr() requires an active session within a Unit of Work")
+        session = self._session
+        row = (
+            await session.execute(
+                select(CodeChange.id, CodeChange.head_sha)
+                .join(Repository, CodeChange.repository_id == Repository.id)
+                .join(
+                    ProviderInstallation,
+                    Repository.provider_installation_id == ProviderInstallation.id,
                 )
-            ).one_or_none()
-            return ProjectedPullRequestTarget(*row) if row is not None else None
+                .where(
+                    ProviderInstallation.provider == "github",
+                    ProviderInstallation.external_id == event.installation_external_id,
+                    Repository.external_id == event.repository_external_id,
+                    CodeChange.external_id == event.external_id,
+                    CodeChange.state == CodeChangeState.OPEN,
+                )
+            )
+        ).one_or_none()
+        return ProjectedPullRequestTarget(*row) if row is not None else None
 
     async def for_ci(self, event: CiTriggerEvent) -> tuple[UUID, ...]:
         if self._session is None:
