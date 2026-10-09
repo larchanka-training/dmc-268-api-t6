@@ -8,6 +8,9 @@ fails if the dispatcher is composed without ``run_trigger``. Opt-in with
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import hmac
+import json
 import logging
 import os
 import re
@@ -25,18 +28,30 @@ from sqlalchemy.pool import NullPool
 from sqlalchemy.schema import CreateSchema, DropSchema
 
 from alembic import command
-from app.bootstrap.reviews_api import ReviewsApiResources
+from app.bootstrap.reviews_api import (
+    ReviewsApiResources,
+    get_github_webhook_receipt_uow_factory,
+)
+from app.main import app, get_github_webhook_secret
 from app.modules.integrations.webhooks.api.receipt import VerifiedGitHubDelivery
 from app.modules.integrations.webhooks.infrastructure.github_installation_tree_provider import (
     StaticGitHubInstallationAccessTokenProvider,
 )
+from app.modules.reviews.application.determine_ci_eligibility import DetermineCiEligibility
 from app.modules.reviews.application.try_enqueue_webhook_run import (
     PendingRunMessage,
     RunPublicationKind,
+    TryEnqueueWebhookRun,
 )
+from app.modules.reviews.infrastructure.ci_eligibility_candidates import (
+    SqlAlchemyEligibilityCandidateStore,
+)
+from app.modules.reviews.infrastructure.github_ci import HttpGitHubCurrentHeadCiProvider
+from app.modules.reviews.infrastructure.webhook_runs import SqlAlchemyWebhookRunUnitOfWork
 
 HEAD = "e" * 40
 NEW_HEAD = "d" * 40
+NEXT_HEAD = "c" * 40
 BASE = "b" * 40
 APP_ID = 42
 # A recognisable installation token: it must never show up in a log record.
@@ -113,14 +128,21 @@ class FakeGitHub:
     head: str = HEAD
     ci: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
     pull_request_status: int = 200
+    state: str = "open"
+    labeled: bool = True
+    updated_at: str = "2026-10-05T10:00:00Z"
 
     def __call__(self, request: httpx.Request) -> httpx.Response:
         path = request.url.path
         if path == "/repos/octo/repo/pulls/7":
             if self.pull_request_status != 200:
                 return httpx.Response(self.pull_request_status, json={"message": "Server Error"})
-            return httpx.Response(200, json=_pull_request(self.head))
-        for sha, suites in ((sha, self.ci.get(sha, [])) for sha in (HEAD, NEW_HEAD)):
+            current = _pull_request(self.head)
+            current["state"] = self.state
+            current["labels"] = [{"name": "ai-review"}] if self.labeled else []
+            current["updated_at"] = self.updated_at
+            return httpx.Response(200, json=current)
+        for sha, suites in ((sha, self.ci.get(sha, [])) for sha in (HEAD, NEW_HEAD, NEXT_HEAD)):
             if path == f"/repos/octo/repo/commits/{sha}/check-suites":
                 return httpx.Response(
                     200, json={"total_count": len(suites), "check_suites": suites}
@@ -173,7 +195,7 @@ def _pr_delivery(action: str, head: str = HEAD) -> dict[str, Any]:
         "sender": {"type": "User"},
         "pull_request": _pull_request(head),
     }
-    if action == "labeled":
+    if action in {"labeled", "unlabeled"}:
         payload["label"] = {"name": "ai-review"}
     return payload
 
@@ -190,43 +212,112 @@ def _check_suite(head: str) -> dict[str, Any]:
 @dataclass
 class Publisher:
     messages: list[tuple[PendingRunMessage, RunPublicationKind]] = field(default_factory=list)
+    fail: bool = False
 
     async def publish_confirmed(
         self, message: PendingRunMessage, *, kind: RunPublicationKind = RunPublicationKind.QUEUED
     ) -> None:
+        if self.fail:
+            raise RuntimeError("broker confirm unavailable")
         self.messages.append((message, kind))
 
 
 class Pipeline:
     def __init__(self, database: Database, github: FakeGitHub) -> None:
+        self.database = database
+        self.github = github
+        self.publisher = Publisher()
+        self.deliveries = 0
+        self._compose()
+
+    def _compose(self) -> None:
         self.engine = create_async_engine(
-            database.url,
-            connect_args={"options": f"-csearch_path={database.schema}"},
+            self.database.url,
+            connect_args={"options": f"-csearch_path={self.database.schema}"},
             poolclass=NullPool,
         )
         self.factory: async_sessionmaker[AsyncSession] = async_sessionmaker(
             self.engine, expire_on_commit=False
         )
-        self.github = github
-        self.publisher = Publisher()
-        self.deliveries = 0
-
-    async def deliver(self, event: str, payload: dict[str, Any]) -> None:
-        self.deliveries += 1
-        client = httpx.AsyncClient(
+        self.client = httpx.AsyncClient(
             base_url="https://api.github.test", transport=httpx.MockTransport(self.github)
         )
-        receiver = ReviewsApiResources(self.engine, self.factory).github_delivery_receiver(
-            client=client,
+        self.resources = ReviewsApiResources(self.engine, self.factory)
+        self.receiver = self.resources.github_delivery_receiver(
+            client=self.client,
             token_provider=StaticGitHubInstallationAccessTokenProvider(TOKEN),
             bot_login="reviewer[bot]",
             run_publisher=self.publisher,
             app_id=APP_ID,
         )
+
+    async def deliver(self, event: str, payload: dict[str, Any]) -> None:
+        self.deliveries += 1
         delivery = VerifiedGitHubDelivery(f"delivery-{self.deliveries}", event, payload)
-        await receiver.execute(delivery.to_receipt())
-        await receiver.replay_pending()
-        await client.aclose()
+        await self.receiver.execute(delivery.to_receipt())
+        await self.replay()
+
+    async def deliver_http(
+        self, event: str, payload: dict[str, Any], *, delivery_id: str | None = None
+    ) -> None:
+        self.deliveries += 1
+        body = json.dumps(payload).encode()
+        secret = "issue109-test-webhook-secret"
+        signature = hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
+        overrides = app.dependency_overrides.copy()
+        app.dependency_overrides[get_github_webhook_secret] = lambda: secret
+        app.dependency_overrides[get_github_webhook_receipt_uow_factory] = lambda: (
+            self.resources.github_webhook_receipts
+        )
+        try:
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app), base_url="http://test"
+            ) as client:
+                response = await client.post(
+                    "/webhooks/github",
+                    content=body,
+                    headers={
+                        "X-GitHub-Event": event,
+                        "X-GitHub-Delivery": delivery_id or f"delivery-{self.deliveries}",
+                        "X-Hub-Signature-256": f"sha256={signature}",
+                        "Content-Type": "application/json",
+                    },
+                )
+                assert response.status_code == 202, response.text
+        finally:
+            app.dependency_overrides.clear()
+            app.dependency_overrides.update(overrides)
+        await self.replay()
+
+    async def replay(self) -> int:
+        return await self.receiver.replay_pending()
+
+    async def restart(self) -> None:
+        await self.client.aclose()
+        await self.engine.dispose()
+        # Retain only the external publisher recorder and delivery count, not worker state.
+        self._compose()
+
+    async def due_retries(self) -> None:
+        await self.sql(
+            "UPDATE webhook_events SET retry_after = now() - interval '1 second' "
+            "WHERE projected_at IS NULL"
+        )
+
+    async def replay_publications(self) -> int:
+        enqueuer = TryEnqueueWebhookRun(
+            eligibility=DetermineCiEligibility(
+                candidates=SqlAlchemyEligibilityCandidateStore(self.factory),
+                ci=HttpGitHubCurrentHeadCiProvider(
+                    client=self.client,
+                    token_provider=StaticGitHubInstallationAccessTokenProvider(TOKEN),
+                ),
+                own_app_id=APP_ID,
+            ),
+            uow_factory=lambda: SqlAlchemyWebhookRunUnitOfWork(self.factory),
+            publisher=self.publisher,
+        )
+        return await enqueuer.replay_pending_publications()
 
     async def sql(self, statement: str, **values: Any) -> list[tuple[Any, ...]]:
         async with self.factory.begin() as session:
@@ -257,6 +348,7 @@ def _run(database: Database, github: FakeGitHub, scenario: Any) -> Any:
         try:
             return await scenario(pipeline)
         finally:
+            await pipeline.client.aclose()
             await pipeline.engine.dispose()
 
     return asyncio.run(main())
@@ -551,3 +643,299 @@ def test_labeled_delivery_whose_github_call_fails_logs_its_action_and_category(
     ]
     for logged in (caplog.text, *(repr(vars(record)) for record in caplog.records)):
         assert TOKEN not in logged
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("terminal_before_ci", [False, True], ids=["race", "terminal-control"])
+def test_successful_new_head_ci_survives_superseded_run_cancellation_without_another_event(
+    database: Database, caplog: pytest.LogCaptureFixture, terminal_before_ci: bool
+) -> None:
+    github = FakeGitHub(ci={HEAD: _green(HEAD)})
+
+    async def scenario(pipeline: Pipeline) -> None:
+        await pipeline.deliver_http("pull_request", _pr_delivery("labeled"))
+        await pipeline.sql("UPDATE runs SET state = 'running', attempt = 1")
+        github.head = NEW_HEAD
+        await pipeline.deliver_http("pull_request", _pr_delivery("synchronize", NEW_HEAD))
+        assert await pipeline.sql("SELECT head_sha, state, cancel_requested FROM runs") == [
+            ("e" * 40, "running", True)
+        ]
+
+        async def finalize_old_run() -> None:
+            # Simulate worker finalization only; cancellation is requested by real projection.
+            await pipeline.sql(
+                "UPDATE runs SET state = 'cancelled', error_code = 'superseded', "
+                "finished_at = now() WHERE head_sha = :head",
+                head=HEAD,
+            )
+
+        if terminal_before_ci:
+            await finalize_old_run()
+        github.ci[NEW_HEAD] = _green(NEW_HEAD)
+        await pipeline.deliver_http("check_suite", _check_suite(NEW_HEAD))
+        assert await pipeline.sql("SELECT ci_status FROM code_changes") == [
+            ({"event": "check_suite"},)
+        ]
+        assert await pipeline.sql("SELECT count(*) FROM webhook_events") == [(3,)]
+        if not terminal_before_ci:
+            assert await pipeline.runs() == [("e" * 40, "running", True)]
+            await finalize_old_run()
+        # Make a persisted retry due without a wall-clock wait or another delivery.
+        await pipeline.sql("UPDATE webhook_events SET retry_after = now() - interval '1 second'")
+        await pipeline.replay()
+        assert pipeline.deliveries == 3
+        assert await pipeline.sql("SELECT count(*) FROM webhook_events") == [(3,)]
+        assert await pipeline.runs() == [
+            ("e" * 40, "cancelled", True),
+            ("d" * 40, "queued", True),
+        ]
+        assert [
+            (message.head_sha, kind)
+            for message, kind in pipeline.publisher.messages
+            if kind == RunPublicationKind.QUEUED
+        ] == [("e" * 40, RunPublicationKind.QUEUED), ("d" * 40, RunPublicationKind.QUEUED)]
+
+    with caplog.at_level(logging.INFO):
+        _run(database, github, scenario)
+    if terminal_before_ci:
+        assert any(
+            "event=check_suite status=processed_ci" in line and ": enqueued run=" in line
+            for line in _outcome_lines(caplog)
+        )
+
+
+async def _wait_for_new_head(pipeline: Pipeline) -> None:
+    await pipeline.deliver_http("pull_request", _pr_delivery("labeled"))
+    await pipeline.sql("UPDATE runs SET state = 'running', attempt = 1")
+    pipeline.github.head = NEW_HEAD
+    await pipeline.deliver_http("pull_request", _pr_delivery("synchronize", NEW_HEAD))
+    pipeline.github.ci[NEW_HEAD] = _green(NEW_HEAD)
+    await pipeline.deliver_http("check_suite", _check_suite(NEW_HEAD))
+    assert await pipeline.sql("SELECT head_sha, state, cancel_requested FROM runs") == [
+        ("e" * 40, "running", True)
+    ]
+    assert await pipeline.sql(
+        "SELECT projected_at, projection_failed_at, projection_deferred_at, "
+        "projection_attempt_count, retry_after IS NOT NULL, "
+        "projection_claim_token, projection_lease_until FROM webhook_events "
+        "WHERE delivery_id = 'delivery-3'"
+    ) == [(None, None, None, 0, True, None, None)]
+
+
+async def _finish_old_head(pipeline: Pipeline) -> None:
+    # Worker terminal transition after successful B CI was durably processed while A ran.
+    await pipeline.sql(
+        "UPDATE runs SET state = 'cancelled', error_code = 'superseded', finished_at = now() "
+        "WHERE head_sha = :head",
+        head=HEAD,
+    )
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("publication_fails", [False, True], ids=["confirmed", "outbox-recovery"])
+def test_wait_survives_restart_redelivery_and_concurrent_replay_to_one_run(
+    database: Database, caplog: pytest.LogCaptureFixture, publication_fails: bool
+) -> None:
+    async def scenario(pipeline: Pipeline) -> None:
+        await _wait_for_new_head(pipeline)
+        await pipeline.deliver_http("check_suite", _check_suite(NEW_HEAD), delivery_id="delivery-3")
+        assert await pipeline.sql("SELECT count(*) FROM webhook_events") == [(3,)]
+        # A distinct equivalent receipt also waits; neither may create another B.
+        await pipeline.deliver_http("check_suite", _check_suite(NEW_HEAD))
+        assert await pipeline.sql("SELECT count(*) FROM webhook_events") == [(4,)]
+        for poll in range(4):
+            if poll == 2:
+                await pipeline.restart()
+                assert await pipeline.replay() == 0  # retry_after survived the restart
+            await pipeline.due_retries()
+            assert await pipeline.replay() == 2
+            assert await pipeline.sql(
+                "SELECT count(*) FROM webhook_events WHERE projected_at IS NULL "
+                "AND projection_failed_at IS NULL AND projection_deferred_at IS NULL "
+                "AND projection_attempt_count = 0 AND retry_after IS NOT NULL"
+            ) == [(2,)]
+            assert await pipeline.runs() == [("e" * 40, "running", True)]
+        deliveries = pipeline.deliveries
+        await _finish_old_head(pipeline)
+        pipeline.publisher.fail = publication_fails
+        await pipeline.due_retries()
+        await asyncio.gather(pipeline.replay(), pipeline.replay())
+        assert pipeline.deliveries == deliveries == 5
+        assert await pipeline.sql("SELECT count(*) FROM webhook_events") == [(4,)]
+        assert await pipeline.runs() == [
+            ("e" * 40, "cancelled", True),
+            ("d" * 40, "queued", not publication_fails),
+        ]
+        assert await pipeline.sql(
+            "SELECT count(*) FROM runs WHERE state IN ('queued', 'running', 'publishing')"
+        ) == [(1,)]
+        assert await pipeline.sql(
+            "SELECT count(*) FROM webhook_events WHERE projected_at IS NOT NULL"
+        ) == [(4,)]
+        if publication_fails:
+            await pipeline.restart()
+            pipeline.publisher.fail = False
+            assert await pipeline.replay_publications() == 1
+            assert await pipeline.replay_publications() == 0
+        queued = [
+            message
+            for message, kind in pipeline.publisher.messages
+            if kind == RunPublicationKind.QUEUED
+        ]
+        assert [message.head_sha for message in queued] == ["e" * 40, "d" * 40]
+        assert len({message.run_id for message in queued}) == 2
+        assert await pipeline.runs() == [("e" * 40, "cancelled", True), ("d" * 40, "queued", True)]
+        await pipeline.sql(
+            "UPDATE runs SET state = 'succeeded', finished_at = now() WHERE head_sha = :head",
+            head=NEW_HEAD,
+        )
+        await pipeline.deliver_http("check_suite", _check_suite(NEW_HEAD))
+        assert await pipeline.sql("SELECT count(*) FROM runs") == [(2,)]
+        assert len(pipeline.publisher.messages) == 2
+
+    with caplog.at_level(logging.INFO):
+        _run(database, FakeGitHub(ci={HEAD: _green(HEAD)}), scenario)
+    assert any("duplicate (head_already_reviewed)" in line for line in _outcome_lines(caplog))
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("mode", ["always", "auto", "never"])
+@pytest.mark.parametrize("invalidation", ["unlabeled", "closed", "disabled"])
+def test_waiting_ci_receipt_rechecks_current_pr_label_and_repository(
+    database: Database, mode: str, invalidation: str
+) -> None:
+    async def scenario(pipeline: Pipeline) -> None:
+        await pipeline.sql("UPDATE repositories SET wait_for_ci = :mode", mode=mode)
+        pipeline.github.ci[NEW_HEAD] = _green(NEW_HEAD)
+        await _wait_for_new_head(pipeline)
+        # An old labeled payload must use authoritative current PR/label state on retry too.
+        await pipeline.deliver_http("pull_request", _pr_delivery("labeled", NEW_HEAD))
+        assert await pipeline.sql(
+            "SELECT projected_at FROM webhook_events WHERE delivery_id IN "
+            "('delivery-2', 'delivery-4') ORDER BY delivery_id"
+        ) == [(None,), (None,)]
+        pipeline.github.updated_at = "2026-10-06T10:00:00Z"
+        if invalidation == "unlabeled":
+            pipeline.github.labeled = False
+            await pipeline.deliver_http("pull_request", _pr_delivery("unlabeled", NEW_HEAD))
+            assert await pipeline.sql("SELECT state, ai_review_labeled FROM code_changes") == [
+                ("open", False)
+            ]
+        elif invalidation == "closed":
+            pipeline.github.state = "closed"
+            await pipeline.deliver_http("pull_request", _pr_delivery("closed", NEW_HEAD))
+            assert await pipeline.sql("SELECT state FROM code_changes") == [("closed",)]
+        else:
+            await pipeline.sql("UPDATE repositories SET enabled = false")
+        deliveries = pipeline.deliveries
+        await _finish_old_head(pipeline)
+        await pipeline.restart()
+        await pipeline.due_retries()
+        await pipeline.replay()
+        assert pipeline.deliveries == deliveries
+        assert await pipeline.runs() == [("e" * 40, "cancelled", True)]
+        assert await pipeline.sql(
+            "SELECT projected_at IS NOT NULL, retry_after FROM webhook_events "
+            "WHERE delivery_id = 'delivery-3'"
+        ) == [(True, None)]
+        if invalidation != "disabled":
+            assert await pipeline.sql(
+                "SELECT projected_at IS NOT NULL FROM webhook_events "
+                "WHERE delivery_id IN ('delivery-2', 'delivery-4') ORDER BY delivery_id"
+            ) == [(True,), (True,)]
+            expected_state = "closed" if invalidation == "closed" else "open"
+            expected_label = invalidation == "closed"
+            assert await pipeline.sql(
+                "SELECT head_sha, state, ai_review_labeled FROM code_changes"
+            ) == [("d" * 40, expected_state, expected_label)]
+        assert [
+            message.head_sha
+            for message, kind in pipeline.publisher.messages
+            if kind == RunPublicationKind.QUEUED
+        ] == ["e" * 40]
+
+    _run(database, FakeGitHub(ci={HEAD: _green(HEAD)}), scenario)
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("mode", ["always", "auto", "never"])
+@pytest.mark.parametrize("ci_now", ["red", "pending"])
+def test_waiting_ci_receipt_reads_live_ci_again_before_launch(
+    database: Database, mode: str, ci_now: str
+) -> None:
+    async def scenario(pipeline: Pipeline) -> None:
+        await pipeline.sql("UPDATE repositories SET wait_for_ci = :mode", mode=mode)
+        await _wait_for_new_head(pipeline)
+        pipeline.github.ci[NEW_HEAD] = [
+            _suite(NEW_HEAD, 7, "completed", "failure", 1)
+            if ci_now == "red"
+            else _suite(NEW_HEAD, 7, "in_progress", None, 1)
+        ]
+        deliveries = pipeline.deliveries
+        await _finish_old_head(pipeline)
+        await pipeline.due_retries()
+        await pipeline.replay()
+        assert pipeline.deliveries == deliveries == 3
+        expected = [("e" * 40, "cancelled", True)]
+        if mode == "never":  # Existing contract deliberately ignores CI.
+            expected.append(("d" * 40, "queued", True))
+        assert await pipeline.runs() == expected
+        assert await pipeline.sql(
+            "SELECT projected_at IS NOT NULL, retry_after FROM webhook_events "
+            "WHERE delivery_id = 'delivery-3'"
+        ) == [(True, None)]
+
+    _run(database, FakeGitHub(ci={HEAD: _green(HEAD)}), scenario)
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("mode", ["always", "auto", "never"])
+def test_newer_head_during_wait_never_uses_obsolete_heads_successful_ci(
+    database: Database, mode: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    async def scenario(pipeline: Pipeline) -> None:
+        await pipeline.sql("UPDATE repositories SET wait_for_ci = :mode", mode=mode)
+        # Green B at synchronize time also leaves a PR receipt waiting in every mode.
+        pipeline.github.ci[NEW_HEAD] = _green(NEW_HEAD)
+        await _wait_for_new_head(pipeline)
+        assert await pipeline.sql(
+            "SELECT projected_at FROM webhook_events WHERE delivery_id = 'delivery-2'"
+        ) == [(None,)]
+        await pipeline.deliver_http("pull_request", _pr_delivery("labeled", NEW_HEAD))
+        pipeline.github.head = NEXT_HEAD
+        pipeline.github.updated_at = "2026-10-06T10:00:00Z"
+        pipeline.github.ci[NEXT_HEAD] = [_suite(NEXT_HEAD, 7, "in_progress", None, 1)]
+        await pipeline.deliver_http("pull_request", _pr_delivery("synchronize", NEXT_HEAD))
+        deliveries = pipeline.deliveries
+        await _finish_old_head(pipeline)
+        await pipeline.restart()
+        await pipeline.due_retries()
+        await pipeline.replay()
+        assert pipeline.deliveries == deliveries == 5
+        assert await pipeline.sql(
+            "SELECT head_sha, state, ai_review_labeled FROM code_changes"
+        ) == [("c" * 40, "open", True)]
+        assert await pipeline.sql(
+            "SELECT count(*) FROM runs WHERE head_sha = :head", head=NEW_HEAD
+        ) == [(0,)]
+        expected = [("e" * 40, "cancelled", True)]
+        if mode == "never":
+            expected.append(("c" * 40, "queued", True))
+        assert await pipeline.runs() == expected
+        assert await pipeline.sql(
+            "SELECT projected_at IS NOT NULL, retry_after FROM webhook_events "
+            "WHERE delivery_id = 'delivery-3'"
+        ) == [(True, None)]
+        # Only C's own success can enable C in modes that consult CI.
+        pipeline.github.ci[NEXT_HEAD] = _green(NEXT_HEAD)
+        await pipeline.deliver_http("check_suite", _check_suite(NEXT_HEAD))
+        assert await pipeline.runs() == [("e" * 40, "cancelled", True), ("c" * 40, "queued", True)]
+        assert [
+            message.head_sha
+            for message, kind in pipeline.publisher.messages
+            if kind == RunPublicationKind.QUEUED
+        ] == ["e" * 40, "c" * 40]
+
+    with caplog.at_level(logging.INFO):
+        _run(database, FakeGitHub(ci={HEAD: _green(HEAD)}), scenario)
+    assert any("no open pull request at this head" in line for line in _outcome_lines(caplog))

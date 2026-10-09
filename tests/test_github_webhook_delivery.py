@@ -143,6 +143,13 @@ class FakeReceiptUnitOfWork:
         row.claim_token = None
         row.lease_until = None
 
+    async def retry_run_trigger(self, delivery_id: str, token: UUID, retry_after: datetime) -> None:
+        row = self.rows[delivery_id]
+        assert row.claim_token == token
+        row.claim_token = None
+        row.lease_until = None
+        row.retry_after = retry_after
+
     async def release(
         self,
         delivery_id: str,
@@ -2610,3 +2617,116 @@ def test_invalid_installation_event_logs_its_action_only_as_a_plain_token(
         "event=installation_repositories action=- installation_id=0 error_count="
     )
     assert "zq7" not in caplog.text
+
+
+def test_superseded_run_wait_retries_beyond_three_polls_without_generic_attempts(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    now = datetime(2026, 10, 9, tzinfo=UTC)
+    uow = FakeReceiptUnitOfWork()
+
+    class WaitingDispatcher:
+        async def execute(self, delivery: WebhookReceipt) -> InstallationDeliveryDispatchResult:
+            return InstallationDeliveryDispatchResult(
+                InstallationDeliveryDispatchStatus.DEFERRED_RUN_TRIGGER,
+                "pr=p head=bbbbbbb: deferred (active_run)",
+            )
+
+    receiver = ReceiveGitHubDelivery(
+        uow_factory=lambda: uow, dispatcher=WaitingDispatcher(), now=lambda: now
+    )
+    asyncio.run(receiver.execute(WebhookReceipt("wait-1", "check_suite", "{}")))
+    with caplog.at_level(logging.INFO):
+        for _ in range(4):
+            assert asyncio.run(receiver.replay_pending()) == 1
+            row = uow.rows["wait-1"]
+            assert row.projected is False
+            assert row.projection_failed_at is None
+            assert row.projection_deferred_at is None
+            assert row.projection_attempt_count == 0
+            assert row.claim_token is None
+            assert row.lease_until is None
+            assert row.retry_after == now + timedelta(seconds=30)
+            assert asyncio.run(receiver.replay_pending()) == 0
+            now += timedelta(seconds=30)
+    assert uow.commits == 9
+    lines = [record.getMessage() for record in caplog.records]
+    assert sum("status=deferred_run_trigger" in line and "retry_at=" in line for line in lines) == 4
+    assert sum("1 handled, 1 deferred, 0 deferred for good" in line for line in lines) == 4
+
+
+@pytest.mark.integration
+def test_postgresql_run_wait_release_is_token_guarded_durable_and_flush_only(
+    isolated_webhook_database: tuple[Connection, str, str],
+) -> None:
+    connection, database_url, schema = isolated_webhook_database
+    config = Config("alembic.ini")
+    config.attributes["connection"] = connection
+    command.upgrade(config, "head")
+
+    async def exercise() -> None:
+        engine = create_async_engine(
+            database_url, connect_args={"options": f"-csearch_path={schema}"}
+        )
+        sessions = async_sessionmaker(engine, expire_on_commit=False)
+        receipt = WebhookReceipt("run-wait-1", "check_suite", "{}")
+        now = datetime(2026, 10, 9, tzinfo=UTC)
+        token, replacement = uuid4(), uuid4()
+
+        async def row() -> tuple[object, ...]:
+            async with sessions() as session:
+                result = await session.execute(
+                    text(
+                        "SELECT projected_at, projection_failed_at, projection_deferred_at, "
+                        "projection_attempt_count, projection_claim_token, projection_lease_until, "
+                        "retry_after FROM webhook_events WHERE delivery_id = 'run-wait-1'"
+                    )
+                )
+                return tuple(result.one())
+
+        try:
+            async with SqlAlchemyGitHubWebhookReceiptUnitOfWork(sessions) as uow:
+                await uow.receipts.save(receipt)
+                await uow.receipts.claim("run-wait-1", token, now, now + timedelta(minutes=5))
+                await uow.commit()
+            # Flush-only release must roll back when its use case does not commit.
+            async with SqlAlchemyGitHubWebhookReceiptUnitOfWork(sessions) as uow:
+                await uow.receipts.retry_run_trigger("run-wait-1", token, now)
+            assert (await row())[4] == token
+            now += timedelta(minutes=6)
+            async with SqlAlchemyGitHubWebhookReceiptUnitOfWork(sessions) as uow:
+                assert (
+                    await uow.receipts.claim(
+                        "run-wait-1", replacement, now, now + timedelta(minutes=5)
+                    )
+                    == receipt
+                )
+                await uow.commit()
+            async with SqlAlchemyGitHubWebhookReceiptUnitOfWork(sessions) as uow:
+                with pytest.raises(RuntimeError, match="claim was lost"):
+                    await uow.receipts.retry_run_trigger("run-wait-1", token, now)
+            for _ in range(4):
+                async with SqlAlchemyGitHubWebhookReceiptUnitOfWork(sessions) as uow:
+                    await uow.receipts.retry_run_trigger(
+                        "run-wait-1", replacement, now + timedelta(seconds=30)
+                    )
+                    await uow.commit()
+                assert await row() == (None, None, None, 0, None, None, now + timedelta(seconds=30))
+                async with SqlAlchemyGitHubWebhookReceiptUnitOfWork(sessions) as uow:
+                    assert await uow.receipts.pending_ids(now, 10) == ()
+                    assert await uow.receipts.purge_finished(now + timedelta(days=31)) == 0
+                    await uow.commit()
+                now += timedelta(seconds=30)
+                async with SqlAlchemyGitHubWebhookReceiptUnitOfWork(sessions) as uow:
+                    assert await uow.receipts.pending_ids(now, 10) == ("run-wait-1",)
+                    assert (
+                        await uow.receipts.claim(
+                            "run-wait-1", replacement, now, now + timedelta(minutes=5)
+                        )
+                        == receipt
+                    )
+                    await uow.commit()
+        finally:
+            await engine.dispose()
+
+    asyncio.run(exercise())

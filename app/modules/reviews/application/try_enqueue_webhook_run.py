@@ -27,6 +27,7 @@ class EnqueueStatus(StrEnum):
     UNCONFIGURED = "unconfigured"
     STALE = "stale"
     DUPLICATE = "duplicate"
+    DEFERRED = "deferred"
 
 
 class CandidateMiss(StrEnum):
@@ -44,6 +45,14 @@ class DuplicateReason(StrEnum):
 
     ACTIVE_RUN = "active_run"
     HEAD_ALREADY_REVIEWED = "head_already_reviewed"
+
+
+@dataclass(frozen=True)
+class ActiveRunBlocker:
+    """The locked PR has an active Run; cancellation is still nonterminal."""
+
+    head_sha: str
+    cancel_requested: bool
 
 
 # The PR changed between the gate and the locked read. Logged as the reason of a STALE
@@ -149,7 +158,7 @@ class WebhookRunStore(Protocol):
 
     async def insert_webhook_run(
         self, candidate: RunInsertCandidate, now: datetime
-    ) -> PendingRunMessage | DuplicateReason: ...
+    ) -> PendingRunMessage | DuplicateReason | ActiveRunBlocker: ...
 
     async def notify_run_updated(self, run_id: UUID, workspace_id: UUID, status: str) -> None: ...
 
@@ -209,6 +218,13 @@ class TryEnqueueWebhookRun:
             if candidate.ci != decision.candidate:
                 return EnqueueResult(EnqueueStatus.STALE, reason=STATE_CHANGED_REASON)
             message = await uow.runs.insert_webhook_run(candidate, self._now())
+            if isinstance(message, ActiveRunBlocker):
+                status = (
+                    EnqueueStatus.DEFERRED
+                    if message.head_sha != candidate.ci.head_sha and message.cancel_requested
+                    else EnqueueStatus.DUPLICATE
+                )
+                return EnqueueResult(status, reason=DuplicateReason.ACTIVE_RUN.value)
             if isinstance(message, DuplicateReason):
                 return EnqueueResult(EnqueueStatus.DUPLICATE, reason=message.value)
             await uow.runs.notify_run_updated(message.run_id, message.workspace_id, "queued")

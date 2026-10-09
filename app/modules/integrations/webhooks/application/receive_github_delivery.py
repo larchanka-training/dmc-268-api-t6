@@ -21,6 +21,7 @@ from app.modules.integrations.webhooks.application.github_installation_dispatch 
 _LEASE = timedelta(minutes=5)
 _DISPATCH_TIMEOUT_SECONDS = 240.0
 _FAILURE_RETRY = timedelta(seconds=30)
+_RUN_TRIGGER_RETRY = timedelta(seconds=30)
 _UNKNOWN_INSTALLATION_RETRY = timedelta(minutes=5)
 _MAX_DISPATCH_ATTEMPTS = 3
 # Finished receipts (projected, failed, or deferred and not revived since) are kept this long.
@@ -72,6 +73,10 @@ class GitHubWebhookReceiptStore(Protocol):
     ) -> WebhookReceipt | None: ...
 
     async def mark_projected(self, delivery_id: str, token: UUID, at: datetime) -> None: ...
+
+    async def retry_run_trigger(self, delivery_id: str, token: UUID, retry_after: datetime) -> None:
+        """Release a supersession wait without consuming attempts; lost claim raises."""
+        ...
 
     async def release(
         self,
@@ -175,7 +180,10 @@ class ReceiveGitHubDelivery:
             if outcome is not None:
                 status, last_attempt = outcome
                 projected += 1
-                deferred += status in _DEFERRED
+                deferred += (
+                    status in _DEFERRED
+                    or status == InstallationDeliveryDispatchStatus.DEFERRED_RUN_TRIGGER
+                )
                 final += last_attempt
         if delivery_ids:
             _LOGGER.info(
@@ -244,7 +252,11 @@ class ReceiveGitHubDelivery:
         final = False
         try:
             async with self._uow_factory() as uow:
-                if result.status in _DEFERRED:
+                if result.status == InstallationDeliveryDispatchStatus.DEFERRED_RUN_TRIGGER:
+                    retry_at = self._now() + _RUN_TRIGGER_RETRY
+                    await uow.receipts.retry_run_trigger(delivery_id, token, retry_at)
+                    retry_note = f" retry_at={retry_at.isoformat()}"
+                elif result.status in _DEFERRED:
                     now = self._now()
                     retry_at = now + _UNKNOWN_INSTALLATION_RETRY
                     final = await uow.receipts.release(
