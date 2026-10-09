@@ -24,6 +24,7 @@ from app.modules.reviews.application.determine_ci_eligibility import (
 )
 from app.modules.reviews.application.project_github_pull_request import PullRequestState
 from app.modules.reviews.application.try_enqueue_webhook_run import (
+    ActiveRunBlocker,
     CandidateMiss,
     DuplicateReason,
     PendingRunMessage,
@@ -92,16 +93,16 @@ class SqlAlchemyWebhookRunStore:
 
     async def insert_webhook_run(
         self, candidate: RunInsertCandidate, now: datetime
-    ) -> PendingRunMessage | DuplicateReason:
+    ) -> PendingRunMessage | DuplicateReason | ActiveRunBlocker:
         code_change_id = candidate.ci.code_change_id
         active = await self._session.scalar(
-            select(Run.id).where(
+            select(Run).where(
                 Run.code_change_id == code_change_id,
                 Run.state.in_([RunState.QUEUED, RunState.RUNNING, RunState.PUBLISHING]),
             )
         )
         if active is not None:
-            return DuplicateReason.ACTIVE_RUN
+            return ActiveRunBlocker(active.head_sha, active.cancel_requested)
         idempotency_key = sha256(
             f"webhook:{code_change_id}:{candidate.ci.head_sha}".encode()
         ).hexdigest()

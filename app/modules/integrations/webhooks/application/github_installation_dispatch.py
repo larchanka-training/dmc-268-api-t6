@@ -23,7 +23,7 @@ from app.modules.reviews.application.project_github_pull_request import (
     PullRequestLabelEvent,
     PullRequestProjectionStatus,
 )
-from app.modules.reviews.application.trigger_from_delivery import CiTriggerEvent
+from app.modules.reviews.application.trigger_from_delivery import CiTriggerEvent, RunTriggerOutcome
 
 _LOGGER = logging.getLogger(__name__)
 _RUN_TRIGGER_PR_ACTIONS = frozenset({"reopened", "synchronize"})
@@ -50,6 +50,7 @@ class InstallationDeliveryDispatchStatus(StrEnum):
     IGNORED_UNKNOWN_REPOSITORY = "ignored_unknown_repository"
     PROCESSED_CI = "processed_ci"
     DEFERRED_REPOSITORY_DETAILS = "deferred_repository_details"
+    DEFERRED_RUN_TRIGGER = "deferred_run_trigger"
 
 
 @dataclass(frozen=True)
@@ -110,13 +111,13 @@ class PullRequestLabelIntentHandler(Protocol):
 
 
 class WebhookRunTriggerHandler(Protocol):
-    """Each handler returns a short outcome line for the delivery log."""
+    """Only structured outcomes can request retry; legacy log strings are final."""
 
-    async def on_pr(self, event: PullRequestEvent) -> str | None: ...
+    async def on_pr(self, event: PullRequestEvent) -> RunTriggerOutcome | str | None: ...
 
-    async def on_label(self, event: PullRequestLabelEvent) -> str | None: ...
+    async def on_label(self, event: PullRequestLabelEvent) -> RunTriggerOutcome | str | None: ...
 
-    async def on_ci(self, event: CiTriggerEvent) -> str | None: ...
+    async def on_ci(self, event: CiTriggerEvent) -> RunTriggerOutcome | str | None: ...
 
 
 class GitHubInstallationDeliveryDispatcher:
@@ -172,10 +173,8 @@ class GitHubInstallationDeliveryDispatcher:
                         status=InstallationDeliveryDispatchStatus.DEFERRED_KNOWN_EVENT,
                         detail=_with_action(action, None),
                     )
-                detail = await self._run_trigger.on_label(event)
-                return InstallationDeliveryDispatchResult(
-                    result.status, _with_action(action, detail)
-                )
+                outcome = await self._run_trigger.on_label(event)
+                return self._trigger_result(outcome, result.status, action)
             return result
         if isinstance(event, PullRequestEvent):
             if event.action in {"review_requested", "review_request_removed"}:
@@ -198,16 +197,14 @@ class GitHubInstallationDeliveryDispatcher:
                         status=InstallationDeliveryDispatchStatus.DEFERRED_KNOWN_EVENT,
                         detail=_with_action(event.action, None),
                     )
-                detail = await self._run_trigger.on_pr(event)
-                return InstallationDeliveryDispatchResult(
-                    result.status, _with_action(event.action, detail)
-                )
+                outcome = await self._run_trigger.on_pr(event)
+                return self._trigger_result(outcome, result.status, event.action)
             return result
         if isinstance(event, CiTriggerEvent):
             if self._run_trigger is not None:
-                detail = await self._run_trigger.on_ci(event)
-                return InstallationDeliveryDispatchResult(
-                    status=InstallationDeliveryDispatchStatus.PROCESSED_CI, detail=detail
+                outcome = await self._run_trigger.on_ci(event)
+                return self._trigger_result(
+                    outcome, InstallationDeliveryDispatchStatus.PROCESSED_CI
                 )
             return InstallationDeliveryDispatchResult(
                 status=InstallationDeliveryDispatchStatus.DEFERRED_KNOWN_EVENT
@@ -241,6 +238,24 @@ class GitHubInstallationDeliveryDispatcher:
         return InstallationDeliveryDispatchResult(
             status=InstallationDeliveryDispatchStatus.ONBOARDED
         )
+
+    @staticmethod
+    def _trigger_result(
+        outcome: RunTriggerOutcome | str | None,
+        final_status: InstallationDeliveryDispatchStatus,
+        action: str | None = None,
+    ) -> InstallationDeliveryDispatchResult:
+        detail: str | None
+        if isinstance(outcome, RunTriggerOutcome):
+            status = (
+                InstallationDeliveryDispatchStatus.DEFERRED_RUN_TRIGGER
+                if outcome.retry_required
+                else final_status
+            )
+            detail = outcome.detail
+        else:
+            status, detail = final_status, outcome
+        return InstallationDeliveryDispatchResult(status, _with_action(action, detail))
 
     @staticmethod
     def _projection_result(

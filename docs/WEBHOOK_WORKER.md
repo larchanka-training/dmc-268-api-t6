@@ -308,7 +308,8 @@ GitHub webhook delivery <delivery_id> event=<event> status=<status> detail=<deta
 `status` is the dispatch status: `projected_pr`, `processed_ci`, `onboarded`, the final
 `ignored_irrelevant_event` and `ignored_invalid_event`, or a deferral, retried as described in
 "Deferred deliveries" below (`ignored_unknown_installation`, `ignored_unknown_repository`,
-`deferred_known_event`, `deferred_repository_details`; a deferral carries `retry_at`).
+`deferred_known_event`, `deferred_repository_details`, `deferred_run_trigger`; a deferral carries
+`retry_at`).
 `detail` is `-` or the reason. For a `pull_request` event it starts with `action=<action>`, so
 `labeled` and `synchronize` can be told apart (an ignored action, such as `ready_for_review`,
 shows only that). For a Run trigger (label, `synchronize`, `reopened`, CI events) the rest is
@@ -324,7 +325,8 @@ head with `; ` (and has no action):
 | `ineligible` | the CI gate reason: `ci_blocked` (a foreign check suite or the commit status is not green), `waiting_for_ci` (no CI evidence yet: with `wait_for_ci = always`, with `auto` while the label or head time is unknown, or with `auto` still inside the 2-minute window), `label_not_active`, `stale_head`, `stale_state`, `closed_pr`, `disabled_repository`, `unknown_pr` | the gate decided not to start a Run |
 | `unconfigured` | `missing_installation`, `missing_rules` (no active rule version), `missing_prompt` (no active `review.system` prompt and none pinned) | the repository lacks what a Run needs; a new label or CI event does not change that |
 | `stale` | `pull_request_gone`, `repository_gone`, `state_changed` (the PR changed between the gate and the locked read) | the decision no longer matches the current PR |
-| `duplicate` | `active_run` (a queued, running or publishing Run exists), `head_already_reviewed` (this head already has a webhook Run) | no second Run is created |
+| `deferred` | `active_run` (a different head still has a queued, running or publishing Run with cancellation requested) | the receipt stays retryable until the blocker is terminal |
+| `duplicate` | `active_run` (an active Run exists on this head, or a different active head has no cancellation requested), `head_already_reviewed` (this head already has a webhook Run) | no second Run is created |
 
 `ci_blocked` and `waiting_for_ci` carry a detail that says what blocks or delays the gate,
 for example `ineligible (ci_blocked: check suite app=5111174 queued)`:
@@ -415,7 +417,7 @@ with this reason, only field paths; for an installation event the reason stays p
 separate WARNING names the failing fields. The line never carries the payload, an installation
 token or the webhook secret.
 
-A deferred delivery's outcome line ends with `retry_at=<time>`, or `retry_at=none` after the
+A generic deferred delivery's outcome line ends with `retry_at=<time>`, or `retry_at=none` after the
 third attempt, and that final deferral is also logged as a WARNING with its reason, once the
 receipt is committed. `deferred_repository_details` is an installation event whose repository
 details or installation token GitHub cannot answer; like the other deferrals it is retried
@@ -487,6 +489,46 @@ and database libraries; without a classifier every other failure is `internal`.
 | `database` | a database error: the connection, a statement or the connection pool |
 | `internal` | anything else: our own bugs and failed invariants on a GitHub response (a `ValueError` for an unexpected response, such as inconsistent check-suite pagination or a changed pull request number, a pydantic `ValidationError`, a JSON error); the traceback record tells them apart |
 
+Superseded heads (api#109). A push can request cancellation of running head A while
+successful CI for head B arrives before A becomes terminal. Cancellation requested is
+still active: the one-active-Run index and active states (`queued`, `running`, `publishing`)
+are unchanged. Only a different head with `cancel_requested=true` is temporary contention;
+same-head active Runs and ordinary active blockers remain final duplicates.
+
+The trigger returns typed retry intent separately from its rendered detail. The dispatch
+status is `deferred_run_trigger`, for example
+`event=check_suite status=deferred_run_trigger detail=pr=<id> head=bbbbbbb: deferred (active_run) retry_at=<time>`.
+PR/label deliveries retain the `action=<action>` prefix. If one CI delivery targets several
+PRs, any temporarily blocked target keeps the whole receipt retryable; already-enqueued or
+reviewed targets are safe to replay.
+
+After dispatch, a short receipt transaction verifies the claim token, clears its lease and
+token, and commits a `retry_after` 30 seconds later. It leaves `projected_at`,
+`projection_failed_at`, `projection_deferred_at`, and the generic attempt counter untouched.
+Waiting has no attempt ceiling, so cancellation lasting more than three polls cannot finish
+the receipt. The existing worker poll processes it when due; a restart uses the saved
+payload and retry time without needing another webhook. If the process crashes before
+finalizing the receipt, its claim becomes available after the five-minute lease. A lost
+claim raises; it does not report a successful release. Pending waits are not finished
+receipts and cannot be purged by finished-receipt retention.
+
+Every retry runs target lookup and current eligibility again. An obsolete B CI event has no
+current target after push C; B's success cannot approve C. Current PR label/lifecycle
+projection, persisted repository `enabled`, current head and fresh GitHub CI govern any
+insertion. PR/label retry projection reads the authoritative current GitHub PR, so the old
+payload cannot restore B or a removed label. CI uses the existing modes: `always` and `auto`
+block on red/pending CI, while `never` deliberately ignores CI. The CI fetch stays outside
+DB transactions; the enqueue transaction locks and rechecks its candidate afterward. PR
+lifecycle/label evidence still comes from the existing projections, without a new remote
+PR polling mechanism for CI events. When eligibility no longer holds or the target is gone,
+the CI receipt becomes final without creating a Run. Generic repository refusal on PR/label
+projection keeps its existing deferral policy below.
+
+After B is inserted, failed broker confirmation is `publication_pending`, and the review
+worker's existing Run outbox recovers that Run. Receipt redelivery, distinct equivalent CI
+receipts and concurrent claim attempts cannot insert a second B. A completed B remains
+`duplicate (head_already_reviewed)`.
+
 Deferred deliveries. A delivery the dispatcher cannot handle yet (unknown installation or
 repository, an event without a handler, or an installation event whose repository details
 or installation token GitHub cannot answer) is retried after 5 minutes, at most three
@@ -501,10 +543,10 @@ deferred for at least 45 minutes and were received within the last 7 days
 (`ReviveDeferredInstallationDeliveries`). The revival covers installation events only:
 pull-request and label deliveries deferred with `ignored_unknown_repository` during the same
 outage are still revived only by linking (`wake_receipts`, below). CI deliveries
-(`check_suite`, `workflow_run`, `status`) are not deferred by an outage: only a dispatcher
-composed without a Run trigger (no broker publisher or no App id) defers them
-(`deferred_known_event`), and `webhook-worker` does not start without `GITHUB_APP_ID` and
-`RABBITMQ_URL`, so it never defers them.
+(`check_suite`, `workflow_run`, `status`) are not generically deferred by an outage: a
+dispatcher composed without a Run trigger (no broker publisher or no App id) returns
+`deferred_known_event`, and `webhook-worker` does not start without `GITHUB_APP_ID` and
+`RABBITMQ_URL`. Their supersession waits use the separate `deferred_run_trigger` path above.
 
 An `installation_repositories.added` event that later brings their repository in does not
 wake them either, by decision (#70). `webhook_events` has no repository column, so waking

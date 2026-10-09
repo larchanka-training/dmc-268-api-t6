@@ -40,6 +40,7 @@ from app.modules.reviews.application.project_github_pull_request import (
 from app.modules.reviews.application.trigger_from_delivery import (
     CiTriggerEvent,
     ProjectedPullRequestTarget,
+    RunTriggerOutcome,
     TriggerFromDelivery,
 )
 from app.modules.reviews.application.try_enqueue_webhook_run import EnqueueResult, EnqueueStatus
@@ -1170,3 +1171,44 @@ def test_invalid_receipt_never_enters_typed_dispatch() -> None:
             adapter.execute(VerifiedGitHubDelivery("delivery", event_name, payload).to_receipt())
         )
         assert result.status is expected
+
+
+@pytest.mark.parametrize(
+    ("delivery", "detail"),
+    [
+        (_pull_request_delivery("labeled", label={"name": "ai-review"}), "action=labeled waiting"),
+        (_pull_request_delivery("synchronize"), "action=synchronize waiting"),
+        (_check_suite_delivery(), "waiting"),
+    ],
+)
+def test_structured_run_trigger_retry_becomes_retryable_dispatch_status(
+    delivery: VerifiedGitHubDelivery, detail: str
+) -> None:
+    class Projector:
+        async def execute(
+            self, event: PullRequestEvent | PullRequestLabelEvent
+        ) -> PullRequestProjectionStatus:
+            return PullRequestProjectionStatus.PROJECTED
+
+    class Trigger:
+        async def on_pr(self, event: PullRequestEvent) -> RunTriggerOutcome:
+            return RunTriggerOutcome("waiting", retry_required=True)
+
+        async def on_label(self, event: PullRequestLabelEvent) -> RunTriggerOutcome:
+            return RunTriggerOutcome("waiting", retry_required=True)
+
+        async def on_ci(self, event: CiTriggerEvent) -> RunTriggerOutcome:
+            return RunTriggerOutcome("waiting", retry_required=True)
+
+    adapter = GitHubWebhookDispatchAdapter(
+        GitHubInstallationDeliveryDispatcher(
+            resolver=FakeInstallationResolver(),
+            onboarding=FakeOnboarding(),
+            pull_request_projector=Projector(),
+            label_intent_projector=Projector(),
+            run_trigger=Trigger(),
+        )
+    )
+    result = asyncio.run(adapter.execute(delivery.to_receipt()))
+    assert result.status == "deferred_run_trigger"
+    assert result.detail == detail
