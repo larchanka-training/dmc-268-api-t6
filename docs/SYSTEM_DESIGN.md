@@ -2,12 +2,20 @@
 
 | | |
 |---|---|
-| Статус | **утверждён командой** — PR #36 (#20) |
+| Статус | Базовый дизайн утверждён командой — PR #36 (#20); целевые дополнения #107 согласованы пользователем 2026-10-09, GitHub review этих дополнений ещё требуется |
 | Владелец | техлид (роль 1) |
 | Связанные документы | `BACKEND_ARCHITECTURE.md` (роль 6, ERD), [`PIPELINE_SPEC.md`](PIPELINE_SPEC.md) (жизненный цикл Run, retry, сбои), [`contracts/openapi.yaml`](../contracts/openapi.yaml) (HTTP API), [`FRONTEND_ARCHITECTURE.md`](https://github.com/larchanka-training/dmc-268-ui-t6/blob/main/docs/FRONTEND_ARCHITECTURE.md) (роль 5, Zod-контракты), [`TEST_PLAN.md`](TEST_PLAN.md) (роль 2, quality gates), инфраструктура (роль 3) |
 | Нумерация решений | `Р-1…Р-15`; `Р-1…Р-9` — общие с [`TEST_PLAN.md`](TEST_PLAN.md), не менять |
 
 **Продукт.** GitHub App, который ревьюит pull request с лейблом `ai-review`. После зелёного CI бот публикует одно ревью с inline-комментариями прямо в PR. Web UI показывает прогоны, трейс действий агента, метрики и расход.
+
+**Целевой контракт #107.** Формат правил и границу доверия определяет
+[RULES_FORMAT_SPEC.md](RULES_FORMAT_SPEC.md), контекст, проверку и VCS write-back —
+[CONTEXT_AND_VERIFICATION_SPEC.md](CONTEXT_AND_VERIFICATION_SPEC.md). Ниже эти
+решения внесены в соответствующие разделы. Новые схемы, таблицы, API/UI-поля и
+runtime-профиль требуют отдельной реализации; существующие JSON Schema/OpenAPI
+и код этим документационным изменением не обновлены. Исторические результаты
+и явно отмеченные сведения о текущем runtime не подтверждают выполнение #107.
 
 **Стек (зафиксирован).** Backend: Python 3.13, FastAPI, SQLAlchemy 2, Alembic, PostgreSQL 17, RabbitMQ, Redis, uv, ruff, mypy strict; объектного хранилища в MVP нет (S3 — после MVP, §10). Frontend: React 19, Vite 8, TypeScript 6, pnpm, Zustand + TanStack Query, Zod, Vitest 5. Инфра: Docker Compose; staging — курсовой VPS за edge-прокси Caddy (Terraform / Hetzner — альтернативная цель, [CICD.md](CICD.md) §8).
 
@@ -21,8 +29,8 @@
 | Р-2 | Один активный прогон на PR: ключ `(installation_id, repo_id, pr_number)`; новый пуш отменяет предыдущий прогон, побеждает последний `head_sha` | Иначе 10 пушей = 10 ревью и 10× цена. Разные PR, ветки, репозитории — параллельны |
 | Р-3 | Два движка за одним контрактом `ReviewOutput` (§5): **DiffEngine** (без диска, ≤ 40 с) и **SandboxEngine** (контейнер, ≤ 10 мин). v1 = DiffEngine | Движок будет меняться; всё ниже контракта об этом не знает |
 | Р-4 | Сандбокс: `--network=none`, без токенов внутри, клон монтирует контроллер снаружи | Промпт-инъекция в диффе — штатная ситуация |
-| Р-5 | Публикация **одним** `POST /pulls/{n}/reviews`; повтор безопасен по `findings_hash`; строки вне диффа — в тело ревью | N комментариев = N уведомлений и N вызовов к rate limit; 422 от GitHub на строку вне диффа |
-| Р-6 | Правила и промпты — неизменяемые версии; прогон ссылается на `rule_version_id`, `prompt_version_id` | Dry-run, откат, объяснимость — бесплатно |
+| Р-5 | GitHub: **один** review batch на run. Идентичность включает run/head/diff/final result и digest точного payload; после неоднозначной отправки — recovery без слепого POST. В тело допускаются только подтверждённые находки с существующим показанным якорем (§8.4) | Повтор доставки не создаёт новое ревью и не присваивает результат другого run; `findings_hash` недостаточен |
+| Р-6 | Неизменяемые `rule_version_id`, `prompt_version_id` и policy snapshot на run: оба base-документа, ignore, defaults, профили моделей/парсеров и checksums. Retry использует тот же снимок | Воспроизводимость правил, проверки и атрибуции |
 | Р-7 | Арендатор = **Workspace** (роль 6), к которому привязана `ProviderInstallation`; права на репозитории — из провайдера, не из своей таблицы ролей | Своя модель ролей разъедется с GitHub |
 | Р-8 | `usage_events` (токены, деньги, модель) — с первого вызова LLM, только вставка | Восстановить задним числом нельзя; основа для `CreditLedger` |
 | Р-9 | Бот односторонний: публикует, на комментарии не отвечает; **обязательно** игнорирует собственные события | Скорость запуска; защита от цикла «бот → CI → бот» |
@@ -31,7 +39,7 @@
 | Р-12 | Один monorepo и пять независимо собираемых сервисов (`portal-api`, `auth-api`, `webhook-api`, `worker`, `publisher`) с собственными зависимостями; у роли `webhook-api` второй процесс — `webhook-worker` (тот же образ, `python -m app.webhook_worker`, §4) | Изоляция релизов и зависимостей без потери единого lock-файла и локального окружения |
 | Р-13 | **RAG не входит в MVP.** Worker получает контекст через порт `ContextProvider`: в MVP — детерминированный сборщик L1–L4, позднее — `RagContextProvider`, возвращающий тот же `ContextPayload` | В MVP нет затрат и операционных рисков embeddings/vector DB, но RAG подключается без изменения LLM, post-processing и публикации |
 | Р-14 | Успешный прогон — статус **`succeeded`** везде: домен (`RunState.SUCCEEDED`), PG enum `run_state`, API, Zod фронтенда. Полный набор: `queued\|running\|publishing\|succeeded\|failed\|cancelled\|skipped` (§6.4); `completed` — только события и статусы GitHub (`check_suite`, `check_run`, `workflow_run`) | Одно имя от БД до UI без маппинга; код и миграция уже используют `succeeded` и `publishing` |
-| Р-15 | Снимок диффа для `GET /api/runs/{id}/diff` хранится в **PostgreSQL**: патчи по файлам с ключом `(code_change, head_sha)`; дифф > 3 000 строк → хранится только список файлов (API: `patch: null`, `RunSession.summaryOnly: true`); удаляется каскадом вместе с Workspace. Объектное хранилище для снимка не используется (в MVP его нет, §10) | UI получает дифф прогона без GitHub и object storage; объём ограничен порогом сводки; данные клиента удаляются вместе с арендатором |
+| Р-15 | Снимок диффа run хранится в **PostgreSQL** с ключом `(run_id, filename)` и отдельной неизменяемой `DiffMap`. Исходный доступный `patch` сохраняется для UI; `review_patch=null` для ignored и summary-only. Порог >3 000 добавленных/удалённых строк считается **после ignore** (§9); удаление каскадом с Workspace | UI сохраняет исходный diff; ограничения входа модели не стирают снимок и не смешивают разные runs одного head |
 
 ---
 
@@ -41,7 +49,7 @@
 |---|---|---|
 | **Frontend** (`dmc-268-ui-t6`) | Экраны: обзор + лента прогонов, карточка прогона с диффом и инлайн-комментариями, инспектор трейса (`RunSession → RunAction`), репозитории и правила, метрики. Клиентское состояние (Zustand), серверный кэш (TanStack Query) | Не считает метрики, не парсит дифф вручную (сырой unified-diff `RawFileDiff` разбирает библиотека — `react-diff-view` / `gitdiff-parser` — за адаптером), не знает про провайдеров |
 | **Backend** (`dmc-268-api-t6`) | Приём вебхуков, триггер, очередь, состояние прогонов, сборка контекста, вызов LLM, постобработка находок, публикация, метрики, авторизация, кэш | Не хранит код клиентов сверх сроков §10 (кэш блобов — 7 дней, снимки диффов и контексты — до удаления Workspace); не принимает решений о качестве кода — это LLM |
-| **LLM-сервисы** | Анализ контекста → находки в фиксированной схеме; промежуточный шаг «конвенции репозитория» (роль 7) | Не ходят в GitHub, не имеют токенов, не решают, что публиковать (фильтрует постобработка) |
+| **LLM-сервисы** | Общие конвенции по base; review → кандидаты; отдельный обязательный verifier → решения по каждому оставшемуся кандидату | Не ходят в GitHub, не имеют токенов; backend применяет технические фильтры и публикует только `supported` |
 
 ---
 
@@ -180,8 +188,8 @@ flowchart LR
 
   subgraph CC[ContextProvider → ContextPayload]
     direction TB
-    M[MetaLoader<br/>PR, ветка, AGENTS.md,<br/>конвенции репо] --> D[DiffFetcher<br/>L1 unified diff → FileDiff]
-    D --> F[FileFetcher<br/>блобы по sha, кэш Redis]
+    M[PolicyLoader<br/>rules.md + AGENTS.md на base,<br/>immutable snapshot] --> D[DiffFetcher<br/>DiffMap, ignore до порога 3000]
+    D --> F[FileFetcher<br/>блобы по sha, policy guard]
     F --> S[SurroundingExtractor<br/>L2 ±N строк / границы функции]
     F --> W[WholeFileLoader<br/>L3 при size ≤ лимита]
     F --> A[ASTIndexer<br/>L4 tree-sitter: импорты, символы]
@@ -189,16 +197,30 @@ flowchart LR
     R[RagContextProvider<br/>после MVP: retrieval-кандидаты] -. до BudgetAllocator .-> B
   end
 
-  B --> P[PromptBuilder<br/>prompt_version + rule_version<br/>+ конвенции]
+  B --> P[PromptBuilder<br/>раздельные роли источников,<br/>manifest после сокращения]
   P --> L[LLM Gateway<br/>OpenAI-совместимый адаптер, ротация ключей,<br/>ретраи, fallback-модель, prompt cache,<br/>usage_events, llm.call]
-  L --> PP[FindingsPostProcessor<br/>lint-фильтр ×2, порог confidence,<br/>дедуп, hunk-валидация, лимит N]
-  PP --> T[TraceRecorder<br/>RunAction: tool, request, response, ms]
+  L --> PP[CandidateFilter<br/>schema, координаты, evidence,<br/>ignore, lint, дедуп]
+  PP -->|есть кандидаты| V[VerifyCandidates<br/>отдельный LLM batch,<br/>supported / contradicted / insufficient]
+  V --> FR[BuildFinalResult<br/>supported findings, coverage,<br/>backend summary, immutable payload]
+  PP -->|пустой набор| FR
+  FR --> T[TraceRecorder<br/>manifests, решения, usage, RunAction]
   T --> OUT[(review.publish)]
   T --> PG[(PostgreSQL)]
   G -.checkpoints: после каждого уровня,<br/>перед каждым LLM-вызовом.-> PP
 ```
 
-Контракт между движками и всем остальным — **`ReviewOutput`**: `{findings: [≤ 10], summary: {problem, done_well, effort}}`. Форму задаёт [`review/schemas/review-output.schema.json`](../review/schemas/review-output.schema.json) (JSON Schema draft 2020-12, единственный источник формы); рантайм-модель — Pydantic `ReviewOutput` (`app/modules/reviews/application/review_output.py`), совпадение проверяет `tests/test_review_output_schema.py`. Все ключи обязательны, nullable-поля приходят со значением `null`, лишних ключей нет. Семантика, которую схема не выражает, правила `suggestion` и strict structured output провайдеров — [PIPELINE_SPEC](PIPELINE_SPEC.md) §9. Поля находки — для обзора, авторитетна схема:
+Целевой ответ движка — **`ReviewOutput v2`**: до 10 кандидатов, прежние координаты
+`path/start_line/line` с внутренней стороной `RIGHT`, обязательные `evidence_refs`
+и атрибуция по RULES_FORMAT_SPEC. Список содержит 1–8 refs, каждый указывает на
+показанный диапазон кода/сигнатуры из manifest принятого reviewer-call; metadata,
+конвенции и предыдущий ответ доказательством не служат. Verifier имеет отдельную схему решений по
+backend-generated `candidate_id` и не переписывает finding/suggestion.
+
+Текущая [`review-output.schema.json`](../review/schemas/review-output.schema.json)
+и Pydantic `ReviewOutput` — **legacy v1** до отдельной реализации v2; нынешние
+проверки совпадения схем не подтверждают новый контракт. Сводка старой формы ниже
+дополнена проектным `evidence_refs`; точный контракт v2 —
+[CONTEXT_AND_VERIFICATION_SPEC §6–8](CONTEXT_AND_VERIFICATION_SPEC.md#6-кандидаты-и-детерминированные-проходы):
 
 ```python
 class ReviewFinding:          # элемент ReviewOutput.findings
@@ -211,12 +233,47 @@ class ReviewFinding:          # элемент ReviewOutput.findings
     body: str                 # markdown, ≤ 1200 символов
     suggestion: str | None    # готовая замена строк start_line..line → ```suggestion
     confidence: float         # 0..1
-    rule_name: str | None     # имя пользовательского правила → префикс атрибуции (роль 7)
+    rule_name: str | None     # .review/rules.md | AGENTS.md | service-defaults:<ID> | null
+    evidence_refs: list       # v2: 1–8 {block_id, start_line, end_line}, все строки показаны
 ```
 
-`side` и SHA в выходе нет: сторону (`RIGHT`) ставит постпроцессор, SHA берётся из `Run.head_sha`. Маппинг якоря в БД, API и GitHub — PIPELINE_SPEC §10.
+`side` и SHA в v2 не генерирует модель: `RIGHT` и `Run.head_sha` закрепляет backend.
+LEFT требует отдельной сквозной v3, а deletion-only без реального RIGHT-якоря
+даёт `left_anchor_unsupported` и partial coverage. Публичный контракт — сохранённый
+`FinalReviewResult`: только supported findings, coverage, verdict и backend summary.
+Пустой итог при partial/none не означает `clean`; raw summary не публикуется.
 
-**LLM Gateway** (#33) — один адаптер OpenAI-совместимого API: EUrouter и self-hosted (LM Studio, Ollama, vLLM) различаются только конфигурацией — base URL, модель, список ключей (`docs/SECRETS.md`). Внутри шлюза: **ротация ключей** — несколько ключей на провайдера, при 401/403/429 запрос уходит со следующим ключом, и это не считается вызовом; **fallback-модель** — вторая модель со strict structured output (D7), вызывается один раз на попытку после исчерпания повторов основной модели. Повторы, repair-вызов, лимиты вызовов и стоимости, дедлайн попытки и нормализация ошибок в `error_code` — PIPELINE_SPEC §3, §4.5, §5.1, §6. Шлюз подгоняет L1-контекст под `min(окно модели, лимит §13) − резерв на ответ` (обрезка файла с трейлером, остальное — в `<omitted_files>`), пишет `usage_events` и по записи `llm.call` на каждый вызов провайдера через порты вне транзакции. Раскладка кода и выбор механизма структурного вывода — `BACKEND_ARCHITECTURE.md`, раздел «LLM Gateway».
+**LLM Gateway** (#33) сохраняет общий OpenAI-совместимый адаптер, ротацию ключей,
+usage ledger и ограниченное восстановление. Целевой профиль: основная
+`mistral-small-4`, fallback `mistral-small-3.2-24b`, отдельный verifier prompt,
+strict schema, `temperature=0`, tools выключены, выход verifier ≤8 000 токенов.
+Пригодность профиля verifier требует отдельного baseline; старые D7-прогоны её
+не подтверждают. Четыре generation-вызова на попытку и 12 на run общие для
+conventions/review/verifier/repair/fallback. До повторного вызова резервируются
+слоты, стоимость и время ещё не начатых обязательных стадий; резерв verifier
+освобождается только для пустого набора после детерминированных фильтров.
+На cache miss штатно C → R → V и один recovery; на hit R → V и два recovery.
+Сбой verifier не разрешает публикацию кандидатов. Возможный generation при
+transport retry учитывается консервативно; только доказанный отказ авторизации
+не расходует generation slot. Последний guard и manifest строятся **после**
+сокращений gateway, отдельно для repair/fallback. Документы политики не усекаются.
+Все LLM/VCS HTTP — вне DB-транзакции; usage записывается отдельной короткой
+транзакцией после provider call (PIPELINE_SPEC §4.5).
+
+Fast deadline — 8 мин от claim, один LLM call ≤90 с. До reviewer остаётся время
+для его вызова, verifier и 10 с локального завершения; до verifier — один call
+и 10 с. Recovery сохраняет downstream reserve, иначе `verification_deadline_exceeded`.
+Deep передаёт кандидаты verifier за ≥100 с до своего deadline либо переходит в fast
+с общими лимитами расходов/вызовов. После accepted review сохраняются кандидаты
+и manifest checkpoint: retry продолжает проверку того же набора. Accepted verifier
+и final result фиксируются атомарно до outbox; повтор публикации не запускает LLM.
+
+Verifier отвечает ровно по всем переданным ID, без неизвестных/пропущенных/повторных:
+`supported|contradicted|insufficient_context`, короткая причина, refs собственного
+manifest и requirement refs при атрибуции правила. Невалидный ответ целиком уходит
+в ограниченный recovery; удобное подмножество решений не принимается. Недостаток
+контекста отличается от опровержения. Contradicted не публикуется; insufficient
+не публикуется и отмечает partial. Неверная suggestion отклоняет кандидата целиком.
 
 ---
 
@@ -281,26 +338,41 @@ sequenceDiagram
 
   MQ->>W: review.run (run_id)
   W->>PG: run.state queued → running (lease, worker_id)
+  W->>GH: policy documents по закреплённому base_sha
   W->>GH: GET /pulls/{n} + files (patch на файл)
-  Note over W: дифф больше 3 000 строк → summary-only до ContextProvider, без L1–L4 (§9)
-  W->>GH: GET AGENTS.md (base_sha), дерево репо (head_sha)
+  W->>PG: policy snapshot + run diff snapshot + DiffMap
+  Note over W: ignore до подсчёта; все ignored → skipped; больше 3000 allowed строк → backend summary, без LLM (§9)
+  W->>GH: base-tree для конвенций, head/diff_old trees для кода
+  opt conventions cache miss и есть base-исходники
+    W->>PG: manifest разрешённого base-input
+    W->>LLM: общие conventions без PR/head-входов
+    LLM-->>W: conventions с сохранённым provenance
+  end
   loop файлы по приоритету, пока есть бюджет
     W->>R: blob(repo, sha)? AST(sha)?
     R-->>W: hit / miss
     W->>GH: GET /git/blobs/{sha} (при miss)
     W->>R: put blob, put AST
   end
-  W->>PG: context_payloads (summary, полный контекст в MVP не хранится)
-  W->>LLM: system(промпт vN + правила + конвенции) + контекст
-  LLM-->>W: ReviewOutput (JSON)
-  W->>PG: usage_events, run_actions, findings
+  W->>PG: manifest + точные evidence excerpts каждого вызова
+  W->>LLM: review с изолированными policy/code блоками
+  LLM-->>W: ReviewOutput v2 (кандидаты + evidence_refs)
+  Note over W: schema → координаты → evidence → ignore/lint/dedup
+  opt непустой набор после фильтров
+    W->>PG: manifest verifier, кандидаты и evidence
+    W->>LLM: обязательный verifier
+    LLM-->>W: решение по каждому candidate_id
+  end
+  W->>PG: final result, coverage, backend summary, точный publication plan
   W->>PG: cancel_requested? head_sha актуален?
-  W->>MQ: review.publish {run_id, findings_hash}
+  W->>MQ: review.publish {run_id} с закреплённым планом
   W->>MQ: ack review.run
   MQ->>P: review.publish
-  P->>PG: head_sha == code_changes.head_sha? findings_hash не опубликован?
+  P->>PG: lease + сохранённый payload и operation key
+  P->>GH: свежие head/diff + recovery своих операций
   P->>GH: POST /pulls/{n}/reviews (одно ревью) + check-run completed
-  P->>PG: comments (github ids), run.state → succeeded
+  P->>GH: проверить актуальность после POST
+  P->>PG: remote receipts; succeeded либо cancelled при гонке
   P->>MQ: ack review.publish
 ```
 
@@ -345,7 +417,8 @@ stateDiagram-v2
   queued --> running: worker claim (lease)
   queued --> cancelled: новый head_sha
   running --> cancelled: cancel_requested на checkpoint
-  running --> publishing: findings готовы
+  running --> publishing: FinalReviewResult и payload сохранены
+  running --> skipped: all_changes_ignored / no_changes
   running --> failed: сбой без retry или attempt ≥ 3
   running --> queued: исключение, attempt < 3 (retry с задержкой)
   publishing --> succeeded: ревью опубликовано
@@ -528,7 +601,10 @@ sequenceDiagram
 
 Параметры: сообщения `delivery_mode=2`, publisher confirms включены, `prefetch_count=1` на run-очередях (задачи длинные и неравные), ack **только после** фиксации состояния в PostgreSQL, `consumer_timeout=45min` (попытка в `running` — не дольше 28 мин с учётом lease и реконсилера, PIPELINE_SPEC §3). Retry, lease и таймауты — PIPELINE_SPEC §3–§4.
 
-Пока отдельного сервиса `publisher` нет, очередь `review.publish` потребляет отдельный consumer в процессе worker: сообщение `review.publish/v1`, переходы и идемпотентность по `findings_hash` те же (PIPELINE_SPEC §1).
+Пока отдельного сервиса `publisher` нет, очередь `review.publish` потребляет отдельный
+consumer в worker. Текущий wire envelope — `review.publish/v1`; новый профиль
+разрешает его `run_id` в сохранённый publication plan. `findings_hash` остаётся
+legacy/диагностическим полем и не определяет идентичность нового write-back (§8.4).
 
 ### 7.2 Форматы сообщений
 
@@ -539,13 +615,17 @@ sequenceDiagram
 | Сообщение | Схема · фикстура | Кто → кому | Поля |
 |---|---|---|---|
 | `review.run/v1` | [`contracts/schemas/review.run.v1.schema.json`](../contracts/schemas/review.run.v1.schema.json) · [`contracts/examples/review.run.v1.json`](../contracts/examples/review.run.v1.json) | webhook-worker (#52), Portal API (rerun, реконсилер), worker (sweep) → AI Worker | `schema`, `message_id` (= `run_id`, ключ идемпотентности), `run_id`, `workspace_id`, `installation_id`, `repo {id, provider, external_id, full_name}`, `pr {number, head_sha, base_sha, base_ref}`, `engine`, `rule_version_id`, `prompt_version_id`, `trigger`, `attempt`, `requested_at` |
-| `review.publish/v1` | [`contracts/schemas/review.publish.v1.schema.json`](../contracts/schemas/review.publish.v1.schema.json) · [`contracts/examples/review.publish.v1.json`](../contracts/examples/review.publish.v1.json) | AI Worker, реконсилер → GitHub Publisher (в MVP — consumer в worker) | `schema`, `message_id`, `run_id`, `head_sha`, `findings_hash` (идемпотентность Р-5), `review_event` |
+| `review.publish/v1` | [`contracts/schemas/review.publish.v1.schema.json`](../contracts/schemas/review.publish.v1.schema.json) · [`contracts/examples/review.publish.v1.json`](../contracts/examples/review.publish.v1.json) | AI Worker, реконсилер → GitHub Publisher (в MVP — consumer в worker) | Текущий envelope: `schema`, `message_id`, `run_id`, `head_sha`, `findings_hash`, `review_event`; в новом профиле authoritative payload/identity загружаются по run_id, не восстанавливаются из текущей конфигурации |
 
 ID — UUID без префиксов, как в БД; `findings_hash` — 64 hex; приоритет (rerun — 9) — свойство AMQP, а не поле. Отличия от прежних примеров этого раздела — PIPELINE_SPEC §12.
 
 Правила: заголовок `schema` версионируется, потребитель отвергает в DLQ незнакомую мажорную версию и сообщение, не прошедшее схему; `message_id` = детерминированный id из БД, повторная доставка безопасна; доменные попытки считает счётчик `runs.attempt` (инкремент при claim), `x-death` — только диагностика; отдельный заголовок `x-attempt` считает любые исключения, вылетевшие из обработчика, в обеих очередях (`review.run.*` и `review.publish`), гибель процесса не считается (§7.3); исчерпание трёх доменных попыток переводит Run в `failed` с `error_code`, а исчерпание трёх неожиданных ошибок отправляет сообщение в `reviews.dlq` без гарантии изменения состояния Run (PIPELINE_SPEC §4).
 
 ### 7.3 Реализация (#34): отступления
+
+Этот раздел фиксирует существующий runtime до внедрения #107. В частности,
+head-входы общего conventions cache и публикация raw summary ниже — legacy,
+а не разрешённые варианты целевых контрактов §5, §9–11.
 
 - `consumer_timeout=45min` не задаётся аргументом очереди: RabbitMQ 4 отклоняет `x-consumer-timeout` для classic-очереди (`PRECONDITION_FAILED`). Это настройка брокера (`consumer_timeout` в `rabbitmq.conf`, по умолчанию 30 мин). Попытка в `running` занимает не больше 18 мин (PIPELINE_SPEC §3), поэтому дефолта хватает; значение 45 мин задаётся конфигурацией брокера при деплое (#35).
 - `budget_paused` (PIPELINE_SPEC §5.3): `workspaces.daily_budget_usd = 0` означает «лимит не задан», проверка остатка идёт только при положительном лимите. Остаток считается по `usage_events.cost_usd` за текущие сутки UTC.
@@ -608,26 +688,100 @@ v1 — `GitHubProvider`. `GitLabProvider` (MR `changes`, `discussions`, `pipelin
 | Игнор собственных событий (Р-9) | Маршрут по `sender` не фильтрует: квитанция сохраняется, ответ — 202. `webhook-worker` пропускает событие лейбла `ai-review` (`labeled` / `unlabeled`), если `sender.type == "Bot"` ∧ `sender.login` совпадает с `GITHUB_APP_BOT_LOGIN` без учёта регистра, и помечает квитанцию разобранной (`projected_at`). В событиях бота `sender` — пользователь `<slug>[bot]`, и его id не равен App ID (staging: App ID `5111033`, `dmc268-t6-reviewer[bot]` — `335108304`, #37). App ID остаётся в `iss` App JWT и в исключении своего check suite по `app.id` (PIPELINE_SPEC §8.1) |
 | Installation-токен | живёт 1 ч; Redis `token:{installation_id}`, TTL 50 мин (сейчас — в памяти процесса, отступление §7.3); private key App — только в env `webhook-worker`/`worker`/`publisher` |
 | Rate limit | 5000 req/ч на installation; `X-RateLimit-Remaining` в метрики; `403/429` + `Retry-After` — повторы по PIPELINE_SPEC §5.2; вторичные лимиты — не более 1 мутации/сек |
-| Дифф | `GET /pulls/{n}/files` (patch на файл, ≤ 3000 файлов, patch пустой у бинарных и > 20 000 строк → файл помечается `too_large`) |
-| Файлы | `GET /git/blobs/{sha}` по sha из `files[].sha` — кэшируется на 7 дней (содержимое неизменяемо по sha, §10); никогда `contents` по пути с ref |
-| Дерево | `GET /git/trees/{head_sha}?recursive=1` (лимит 100 000 записей → для монорепо только затронутые директории) |
-| Публикация (Р-5) | один `POST /pulls/{n}/reviews`: `commit_id = head_sha`, `event`, `body`, `comments[{path, line, side: "RIGHT", start_line?, body}]`; ≤ 10 inline по умолчанию, остальное — в `body`; строка вне диффа → в `body` (иначе 422); `suggestion` только если строка в диффе |
-| Check-run | `in_progress` при первом claim, `completed` с `conclusion: neutral` + summary для `succeeded` и `failed`; вердикт (`blocking`, `attention` или `clean`, у summary-only — «только сводка», PIPELINE_SPEC §7, §11) стоит в заголовке, например «AI-ревью: blocking», а conclusion остаётся `neutral` и при critical-находке (решение #70); у `cancelled` и `skipped` — свои conclusion (PIPELINE_SPEC §7); `failure` никогда — бот не блокирует merge (настройка репозитория может изменить) |
+| Дифф | `GET /pulls/{n}/files` с полной пагинацией и сверкой версии; отсутствие/усечение patch не считается нулевым diff. `DiffMap` различает complete/missing/truncated/malformed/binary/unsupported/metadata_only |
+| Файлы | Точный путь разрешается в дереве закреплённой ревизии, затем `GET /git/blobs/{sha}`; policy — base, RIGHT — head, LEFT — подтверждённый diff_old. Кэш 7 дней; текущая ветка не заменяет недоступный снимок |
+| Дерево | `GET /git/trees/{revision_sha}?recursive=1`; усечённый ответ не доказывает отсутствие пути. Требуется полный целевой обход; policy guard повторяется на каждом использовании |
+| Публикация (Р-5) | Один `POST /pulls/{n}/reviews` с сохранённым payload: `commit_id=head_sha`, `event`, `body`, `comments[{path,line,side:"RIGHT",start_line?,start_side?,body}]`. Диапазон должен целиком входить в один hunk одной стороны. В body — только supported general-only и находки сверх inline cap, без применяемой suggestion |
+| Check-run | `in_progress` при claim; `neutral` для succeeded/failed, `skipped` для исключённого scope, `cancelled` для отмены. `blocking`/`attention` определяются supported severity; `clean` допустим только при complete coverage. Partial без значимых findings и summary-only имеют `verdict=null` и явное сообщение о неполноте; API, review и check-run читают один сохранённый final result |
 | Обратная связь | **после MVP** (`FeedbackSignal`): `pull_request_review_thread.resolved` — вебхук; реакции — poll `GET /pulls/comments/{id}/reactions` раз в час по комментариям бота за 7 дней |
+
+### 8.4 Координаты, GitLab и надёжная публикация (#107)
+
+`DiffMap/v1` хранит old/new path, blob/revision, provider diff refs и hunks с
+обеими однобазовыми координатами. В `@@ -A[,B] +C[,D] @@` пропущенный count = 1,
+явный 0 остаётся пустым диапазоном; context двигает оба курсора, `-` только old,
+`+` только new, `No newline` не создаёт строку. Счётчики и все строки диапазона
+проверяются; mapping не ищет похожую строку и не использует GitHub `position`.
+DiffMap описывает доступный diff, а видимость каждой evidence-строки отдельно
+подтверждается manifest фактически отправленного вызова. Вне hunk general-only
+допустим лишь для существующего полностью показанного RIGHT-диапазона; ложный
+якорь отбрасывается, а не превращается в общий комментарий.
+
+GitHub требует `start_side` вместе с многострочным `start_line`. LEFT проектируется
+в v3 и не получает suggestion. GitLab — отдельный последующий адаптер: закрепляет
+diff version и `base_sha/start_sha/head_sha`, old/new API paths и line cursors,
+строит `position`/`line_range`/`line_code`, не копирует GitHub JSON. Старый код
+GitLab берётся из `base_commit_sha`, а не `start_commit_sha`; точные формулы и
+ограничения suggestions — CONTEXT_AND_VERIFICATION_SPEC §9. Включение GitLab
+и LEFT требует сквозных изменений storage/API/eval, не заявлено этим документом.
+
+Перед `publishing` сохраняются final result и каждый точный payload. Ключ публикации
+включает provider/repository/PR, run_id, head_sha, diff_snapshot_id и final result
+digest; ключ операции — также ordinal и payload digest. Backend-marker включает
+run/head/op/payload. Recovery проверяет ожидаемого bot/app, PR/MR, все эти поля
+и точный payload с полной пагинацией; одного findings_hash или marker недостаточно.
+Новый run того же head получает новый ключ; повтор доставки не вызывает LLM снова.
+
+Перед каждым новым POST проверяются отмена, открытость PR/MR, актуальные head/diff
+и уже опубликованные операции. После POST сохраняются remote IDs и явное
+соответствие findings/comments, затем повторно читается актуальность. При гонке
+с push публикация остаётся связанной с исходным head, IDs не теряются, run становится
+cancelled; удаление/dismiss для сокрытия гонки не выполняется. HTTP находится вне
+транзакций, lease и фиксация результатов — в коротких транзакциях.
+
+Timeout или неоднозначный 5xx после возможной отправки означает `outcome_unknown`:
+восстановление по журналу/маркеру, без слепого повторного POST. Если исход неизвестен
+после бюджета восстановления, `failed/publication_outcome_unknown` блокирует
+автоматическую повторную отправку. Только явный отказ координат при актуальном
+diff допускает один сохранённый body-only вариант тех же supported findings;
+произвольный 400/422, ошибка доступа, stale diff или unknown outcome его не разрешают.
+GitLab хранит receipt каждой discussion отдельно и не повторяет успешные операции.
 
 ---
 
 ## 9. Сборщик контекста: 4 уровня
 
-Цель: дать модели ровно столько, чтобы не галлюцинировать про код вне диффа (TC-06 в тест-плане), и не больше бюджета. Уровни **накапливаются**: файл получает L1 всегда (кроме раннего пути `summary-only` для диффа > 3 000 строк — см. L1), дальше — по приоритету и бюджету. Для каждого файла в `context_payloads` записывается `level_used` — инспектор показывает, что модель видела.
+Цель — обеспечить проверяемое происхождение каждого показанного фрагмента в
+пределах бюджета. Контекст фиксирует `policy_base_sha=Run.base_sha`, `head_sha`
+и отдельный подтверждённый `diff_old_sha`: base политики может отличаться от
+старой стороны patch. Manifest каждого вызова содержит `levels_present` и точные
+показанные диапазоны; одного максимального `level_used` недостаточно для вывода
+о видимости кода. Нормативная детализация — CONTEXT_AND_VERIFICATION_SPEC §2–5.
 
 ### Граница MVP и будущего RAG
 
-Worker зависит от порта `ContextProvider`, который по PR и снимку `head_sha` возвращает неизменяемый `ContextPayload`. В **MVP** его единственная реализация — `DeterministicContextProvider`: описанные ниже L0–L4, фильтры файлов и `BudgetAllocator`. Это не «весь репозиторий в prompt»: source-файлы отбираются по приоритету, размеру и токен-бюджету; generated/binary/too-large файлы исключаются.
+Worker зависит от `ContextProvider`, возвращающего контекст по закреплённым
+policy/diff snapshots. В целевом детерминированном профиле используются L0–L4,
+`IgnorePolicy`, `DiffMap`, `BudgetAllocator` и manifest. Built-in exclusions и
+`review-ignore` применяются до сборки, подсчёта порога и любых conventions-вызовов.
+Недоступный patch разрешённого текстового файла отражает неполноту, не ignore.
 
 **RAG не реализуется в MVP:** нет embedding-модели, vector DB, фоновой индексации всего репозитория и отдельного ingestion worker. После MVP `RagContextProvider` сможет добавить кандидаты контекста **после Diff/AST-анализа и до `BudgetAllocator`**. Кандидаты проходят те же allowlist путей, лимиты размера и токенов, записываются в trace с причиной выбора и в итоге дают тот же `ContextPayload`. Поэтому LLM Gateway, постобработка, хранение результатов и Publisher от способа retrieval не зависят.
 
-### L0 — метаданные (всегда)
+### L0 — политика, метаданные и конвенции
+
+Только `.review/rules.md` и корневой `AGENTS.md` читаются целиком из
+`policy_base_sha`. Обычный Markdown не компилируется в правила; заголовки Security,
+Performance, Style рекомендованы. Единственное машинное расширение — top-level
+fenced `review-ignore` в `.review/rules.md`. Лимиты: 64 KiB на документ, 12 000
+rendered tokens суммарно, 256 масок; профиль CommonMark/matcher закреплён в снимке.
+Ошибки чтения, формата или переполнение не подменяются отсутствующим/усечённым
+файлом. Изменения этих документов в head являются кодом diff, не действующей политикой.
+
+Приоритет конкретного противоречия: обязательные ограничения сервиса → rules →
+AGENTS → наблюдаемые конвенции/код → версионированные defaults. Источники из
+репозитория сохраняют роль недоверенных данных; им нельзя менять schema, evidence,
+verifier, инструменты или адресата публикации. Defaults не отключаются языком репозитория,
+отсутствием секции или несовпадением structured priority rule. Backend передаёт
+отдельные типизированные/экранированные блоки, проверяет provenance до каждого
+вызова и не исполняет команды/ссылки документов; keyword-фильтр не заменяет эту
+границу. Семантическую применимость правил независимо оценивают review и verifier.
+
+Ignore исключает файл из всех L1–L4, trees/lists, retrieval и conventions-входов;
+старый и новый путь rename/copy проверяются вместе, deny-set не даёт вернуть файл
+через импорт под новым именем. В модельных списках исключённые пути заменяются
+счётчиком. Только два действующих base policy-документа читаются в своей policy-роли
+независимо от масок; их code-копия такого исключения не получает.
 
 ```python
 class PrMeta(BaseModel):
@@ -636,17 +790,35 @@ class PrMeta(BaseModel):
     is_draft: bool; is_fork: bool
 
 class RepoConventions(BaseModel):         # шаг «конвенции репозитория» (роль 7)
-    agents_md: str | None                 # AGENTS.md проверяемого репо, ≤ 8k токенов
-    key_patterns: list[str]               # выведены LLM один раз на base_sha, кэш
+    key_patterns: list[str]               # наблюдения только по разрешённой base-выборке
     recommendations: list[str]
-    languages: dict[str, int]             # {"python": 62, "typescript": 38} — % по дереву
+    languages: dict[str, int]             # состав отфильтрованного base-tree, не текущего PR
 ```
 
-### L1 — Diff (всегда, все файлы)
+Policy documents хранятся отдельно от производных конвенций. На cache miss выбираются
+до 10 source-файлов из base в лексикографическом порядке пути, суммарно ≤128 KiB,
+≤300 начальных строк каждого. Title/body PR, changed paths, head-tree и head-код
+в общий вызов запрещены; отдельного PR-specific conventions call v1 нет. Нет
+исходников — `conventions_not_applicable` без вызова; сбой непустого вызова после
+разрешённого recovery даёт failed/retry по классу ошибки, не пустые конвенции (§5).
 
-**Исключение — дифф > 3 000 строк.** «Всегда, все файлы» действует до этого порога. Больше — ранний путь `summary-only` **до** `ContextProvider`: L1–L4 не собираются, построчного ревью и inline-комментариев нет, публикуется одна сводка по списку файлов (§13); снимок диффа хранит только список файлов (Р-15): `GET /api/runs/{id}/diff` отдаёт `[{ filename, patch: null }]`, `RunSession` несёт `summaryOnly: true`, UI показывает список файлов и «дифф слишком большой».
+### L1 — Diff разрешённых изменений
 
-Модели ниже — формат для LLM. В UI по проводу уходит `RawFileDiff` `{ filename, patch }` (§12, `patch` = `raw_patch`); Zod `FileDiff`/`DiffLine` фронтенда (роль 5) — клиентская модель, которую UI строит из `patch` библиотекой за адаптером.
+**Порог — >3 000 добавленных и удалённых строк после ignore**; ровно 3 000 допускает
+обычную сборку. 4 000 исключённых + 50 разрешённых строк дают анализ 50 строк.
+Все изменения ignored → `running → skipped/all_changes_ignored`, пустой diff →
+`no_changes`; в обоих случаях LLM calls=0, verdict=null, check-run skipped.
+Неизвестные/неполные счётчики VCS дают `summary_only/diff_inventory_incomplete`.
+Summary-only строит backend по разрешённой статистике **без LLM**, L1–L4 и inline:
+`succeeded`, coverage partial, verdict=null, check-run neutral. Исходный доступный
+`patch` сохраняется для UI, очищается только `review_patch`; роль code не может
+вернуть запрещённый patch через другой источник. Snapshot использует
+`(run_id, filename)`; повтор попытки читает тот же снимок, rerun получает новый.
+
+Ниже — обзор внутренних типов сборщика, не разрешение сериализовать объект целиком
+в LLM. Prompt получает только прошедший guard `review_patch` и разрешённые блоки.
+UI получает `RawFileDiff {filename,patch}`, где patch — исходный raw_patch (§12),
+и строит клиентские FileDiff/DiffLine библиотекой за адаптером.
 
 ```python
 class DiffLine(BaseModel):
@@ -664,12 +836,15 @@ class FileDiff(BaseModel):
     language: str | None                  # по расширению
     blob_sha: str | None                  # новая версия (None для removed)
     hunks: list[Hunk]
-    raw_patch: str                        # unified diff файла — из него же собирается `patch` в API (§12)
+    raw_patch: str | None                 # исходный доступный UI patch
+    review_patch: str | None              # null для ignored/summary-only
+    patch_state: str                      # complete/missing/truncated/malformed/binary/unsupported/metadata_only
+    diff_snapshot_id: str                 # revisions и hunks с обеими координатами — в DiffMap
     is_binary: bool; is_generated: bool; is_too_large: bool
     tokens_est: int
 ```
 
-Фактический фильтр generated — `_is_generated` в
+Текущий built-in фильтр generated — `_is_generated` в
 [`vcs_diff.py`](../app/modules/reviews/application/vcs_diff.py): регистр пути игнорируется;
 имя файла входит в `_LOCK_FILES` (`package-lock.json`, `pnpm-lock.yaml`, `yarn.lock`,
 `bun.lock`, `bun.lockb`, `cargo.lock`, `gemfile.lock`, `poetry.lock`, `uv.lock`,
@@ -677,24 +852,28 @@ class FileDiff(BaseModel):
 либо путь начинается с корневого `dist/`, либо `.snap` лежит под `__snapshots__/`,
 либо имя содержит `snapshot` под каталогом `migrations/`. Эти файлы исключаются из
 входа модели с причиной `generated` (TC-07). Локали автоматически не исключаются;
-пользовательские globs в этом фильтре пока не реализованы. Семь значений status
-соответствуют `FileStatus` в `prompt_builder.py` и CHECK снимков диффа (миграция 0026).
+`review-ignore` добавляется отдельным слоем целевого профиля и не заменяет built-ins.
+Семь значений status соответствуют `FileStatus` в `prompt_builder.py` и CHECK
+снимков диффа (миграция 0026).
 
 ### L2 — Surrounding (по умолчанию для всех source-файлов)
 
 ```python
 class LineRange(BaseModel):
-    start: int; end: int                  # строки новой версии
+    start: int; end: int                  # исходные строки закреплённой revision/side
     lines: list[str]
     reason: Literal["hunk_window", "enclosing_symbol"]
 
 class Surrounding(BaseModel):
-    path: str
+    path: str; revision: str; side: str
     ranges: list[LineRange]               # окна ±N вокруг ханков, пересечения слиты
     window: int                           # N, по умолчанию 30
 ```
 
-Если для языка есть AST (L4) — окно расширяется до **границ объемлющего символа** (функция/класс/метод), а не по числу строк: модель видит функцию целиком.
+По умолчанию окно ±30. При наличии AST выбирается минимальный объемлющий символ,
+только если целиком помещается в лимит фрагмента ≤200 строк/2 000 токенов;
+иначе остаётся обычное окно. Частичный символ не маркируется полным. RIGHT читается
+на head, LEFT только на diff_old; диапазоны разных ревизий не объединяются.
 
 ### L3 — Whole File (по бюджету, топ-K файлов)
 
@@ -702,24 +881,34 @@ class Surrounding(BaseModel):
 class WholeFile(BaseModel):
     path: str; blob_sha: str; language: str | None
     content: str; loc: int; tokens_est: int
-    truncated: bool                       # > лимита → усечено по границам символов, не по строкам
+    truncated: bool                       # для полного L3 всегда false; усечение — отдельный L2 excerpt
 ```
 
-Условия: файл — source, `loc ≤ 1500` и `tokens_est ≤ 12 000`; иначе L2 с `window = 80`. Тесты и конфиги — L3 только если это единственные изменённые файлы.
+Условия: файл — source, `loc ≤ 1500` и `tokens_est ≤ 12 000`; иначе L2 с окном
+до ±80 и общим лимитом фрагмента. Тесты/конфиги получают L3 только когда все
+разрешённые изменения относятся к ним. L3 заменяет дублирующие RIGHT-окна L2,
+но сохраняет L1 provenance и старые строки patch.
 
 ### L4 — AST / Imports (source-файлы языков с парсером)
 
-Парсер: **tree-sitter** (`tree-sitter-python`, `tree-sitter-typescript`); остальные языки — только L1–L3. Индексируем не весь репозиторий, а **изменённые файлы + файлы, откуда импортированы затронутые символы** (одна степень). Дерево репозитория для резолва импортов (`resolved_path`) берётся на `head_sha`, а не на `base_sha`: иначе файлы, добавленные или перемещённые в PR, не резолвятся.
+AST v1: tree-sitter для `.py/.pyi` и `.ts/.tsx`, отдельная TSX-грамматика;
+JavaScript и остальные языки остаются L1–L3. Версии runtime/grammar/query/resolver
+закрепляются в `ast_profile_version` и lockfile при реализации. Индексируются
+разрешённые изменённые файлы и одна степень непосредственно используемых импортов.
+RIGHT разрешается по head-tree, LEFT — по diff_old-tree; политика всегда из base.
+Вставка между символами — module-level change, не произвольно соседняя функция.
 
 ```python
 class ImportRef(BaseModel):
     module: str; names: list[str]
-    resolved_path: str | None             # по дереву репо; None → внешняя зависимость
-    is_external: bool
+    resolved_path: str | None
+    resolution: str                       # resolved/external/ambiguous/dynamic/excluded/unsupported/missing
+    resolution_profile_version: str
 
 class Symbol(BaseModel):
     name: str; kind: Literal["function", "method", "class", "variable", "type"]
-    path: str; start_line: int; end_line: int
+    path: str; revision: str; blob_sha: str; start_line: int; end_line: int
+    signature_ranges: list; docstring_ranges: list  # точные исходные диапазоны
     signature: str                        # "def foo(a: int, *, b: str = '') -> Result"
     docstring: str | None
 
@@ -731,7 +920,21 @@ class SymbolContext(BaseModel):
     exported_symbols: list[str]           # что этот файл отдаёт наружу — для оценки радиуса поражения
 ```
 
-Именно `referenced_symbols` закрывает TC-06: метод родительского класса вне диффа попадает в контекст сигнатурой и докстрингой, а не полным файлом.
+Python v1 разрешает явные относительные и однозначные абсолютные imports из root/src;
+TypeScript/TSX — однозначные относительные статические imports. Aliases, dynamic
+imports, package exports и цепочки barrel re-export не разворачиваются; внешние
+зависимости не скачиваются. Stub не считается runtime-телом. `referenced_symbols`
+показывает сигнатуру/docstring, что не доказывает поведение непоказанного тела.
+
+Лимиты: blob ≤256 KiB с UTF-8, parser ≤1 с CPU/файл и ≤5 с/попытку, 128 MiB памяти;
+≤50 изменённых +20 импортированных AST-файлов, ≤10 imported symbols/файл и ≤100/run;
+L4 ≤8 000 токенов, фрагмент ≤200 строк/2 000 токенов. Парсер без сети/исполнения
+репозитория. Timeout, неоднозначность, ERROR/MISSING дают точные L1/L2 вместо
+догадок, с причиной неполноты. Если отсутствующее расширение необходимо для
+кандидата, verifier возвращает insufficient_context и coverage становится partial.
+Само отсутствие AST для языка не означает failed. Отказ обязательного diff/VCS
+снимка не маскируется AST fallback. Координаты tree-sitter переводятся из byte/row
+в исходные однобазовые строки с учётом exclusive end.
 
 ### Сборка и бюджет
 
@@ -741,30 +944,41 @@ class FileContext(BaseModel):
     surrounding: Surrounding | None
     whole_file: WholeFile | None
     symbols: SymbolContext | None
-    level_used: Literal[1, 2, 3, 4]
+    levels_present: list[int]             # manifest фиксирует реальный набор уровней
     priority: float                       # для инспектора: почему этот файл получил больше
 
 class ContextPayload(BaseModel):          # сущность роли 6
     run_id: str
+    policy_snapshot_id: str; diff_snapshot_id: str
     pr: PrMeta
     conventions: RepoConventions
     files: list[FileContext]
-    omitted_files: list[str]              # не влезли в бюджет — перечислены модели явно
+    omitted_files: list[str]              # только разрешённые непоместившиеся пути
+    excluded_files_count: int             # исключённые пути модели не перечисляются
     budget: dict                          # {"limit": 60000, "used": 48210, "engine": "fast"}
 ```
 
 Алгоритм `BudgetAllocator` (детерминированный):
 
-1. Приоритет файла = `source(1.0) | test(0.6) | config(0.4)` × `log(изменённых строк + 1)` × `1.5 если путь попал под пользовательское правило`. При равном весе порядок задаётся путём файла.
+1. Приоритет = `source/other(1.0) | test(0.6) | config(0.4)` × `ln(additions + deletions + 1)` × `1.5` при совпадении хотя бы одного **структурированного** priority rule, иначе ×1.0. Совпадения не перемножаются; tie-break — canonical path по Unicode code points. Свободный Markdown не преобразуется в маски и не меняет вес.
 
    Для glob с `{a,b}` раскрытие ограничено 256 единицами работы (рассмотренный кандидат или созданная альтернатива). Если хотя бы один include/exclude pattern правила превышает лимит, всё правило для данного пути считается неприменимым: множитель `1.5` не даётся, остаётся базовый вес типа файла. Превышение лимита у exclude также не может ошибочно повысить приоритет файла.
-2. L1 всем (кроме generated/binary/too_large). Если L1 сам не влезает — младшие по приоритету файлы уходят в `omitted_files`, модели сообщается их список.
+2. L1 разрешённых файлов получает первый бюджет. Сохраняются целые hunks, затем явно усечённый префикс последнего hunk с исходными координатами; пропуски отражаются в manifest/coverage. Полная доступная DiffMap не переписывается под prompt.
 3. L4 `changed_symbols` + `referenced_symbols` всем source-файлам с парсером (дёшево: сигнатуры).
 4. L2 всем source-файлам по приоритету.
 5. L3 — сверху вниз по приоритету, пока `used ≤ limit`.
-6. `level_used` фиксируется; `ContextPayload` → PostgreSQL (summary без содержимого); полный payload в MVP не хранится (S3 — после MVP, §10).
+6. После последнего сокращения и escaping — policy/provenance guard, затем manifest отдельного фактического review/conventions/verifier/repair/fallback call. Manifest содержит source roles, snapshot, SHA, origin paths, side, точные shown ranges, hashes и omissions; точные evidence excerpts сохраняются в PG. Ссылки результата разрешаются только по manifest его принятого вызова, не родительского ответа.
 
-Глубокий путь (фаза 3) отличается только тем, что шаги 3–5 выполняет агент в сандбоксе инструментами `read_file` / `grep` / `list_symbols` по клону, а не воркер по API; контракт `ContextPayload` тот же. Он также не требует RAG.
+Лимит всего входа с system/schema/framing: fast ≤60 000, deep ≤150 000 и не больше
+окна конкретной модели минус output reserve. Полные policy/defaults/system и
+обязательные verifier-кандидаты резервируются первыми; policy overflow — ошибка,
+не усечение. PR body ≤4 000 токенов, конвенции ≤4 000, trees/lists ≤2 000; сокращения
+маркируются. Непоказанная строка не становится evidence через одну лишь DiffMap.
+Обычный stdout содержит только IDs/digests/счётчики, не клиентский код.
+
+Глубокий путь (фаза 3) может собирать дополнения через инструменты сандбокса,
+но сохраняет те же snapshots, ignore/provenance guards, manifest и обязательный
+verifier. Исчерпание бюджета не разрешает публикацию незавершённых кандидатов.
 
 ---
 
@@ -774,25 +988,41 @@ class ContextPayload(BaseModel):          # сущность роли 6
 |---|---|---|---|---|
 | Installation-токен | `installation_id` | Redis (сейчас — в памяти процесса, отступление §7.3) | 50 мин | лимит 1 ч у GitHub |
 | Блоб файла | `(repo_id, blob_sha)` | Redis ≤ 256 КБ, иначе PostgreSQL (`cached_file_blobs`) | 7 дней; содержимое неизменяемо по sha | один и тот же файл в серии пушей |
-| AST / `SymbolContext` файла | `(blob_sha, parser_version)` | Redis | 7 дней | парсинг дороже сети |
-| Дерево репозитория | `(repo_id, head_sha)` | Redis | 1 ч | резолв импортов |
-| `RepoConventions` | `(repo_id, sha AGENTS.md, prompt_version)` | PostgreSQL + Redis | пока не изменился AGENTS.md в default-ветке (вебхук `push`) | это LLM-вызов, самый дорогой кэш |
-| Снимок диффа PR (Р-15) | `(code_change, head_sha)` | PostgreSQL: патчи по файлам; дифф > 3 000 строк — только список файлов (`patch: null`) | до удаления Workspace (каскад) | `GET /api/runs/{id}/diff`, dry-run, повтор, инспектор |
-| `ContextPayload` | `run_id` | PG: только summary (полный — после MVP, S3) | до удаления Workspace | инспектор, отладка |
-| Результат прогона | `(repo_id, pr, diff_hash, rule_version, prompt_version)` | PostgreSQL | — | совпал → прогон не запускается, переиспользуем |
-| Промпт у провайдера | стабильный префикс: system + правила + конвенции **в начале** промпта, дифф — в конце | prompt caching провайдера | 5 мин – 1 ч | ~70 % входа PR в серии пушей — общий префикс |
+| AST-факты файла | `(repository_id, blob_sha, language, grammar_version, query_version)` | Redis | 7 дней; без run-specific разрешения | повторный guard перед использованием |
+| Разрешённые импорты | `(repository_id, revision_tree_sha, importer_blob_sha, resolver_version)` | Redis | ≤7 дней; повторный policy guard | не смешивать head/diff_old или разрешения разных runs |
+| Дерево репозитория | `(repository_id, revision_sha)` | Redis | 1 ч; фильтрация перед каждым использованием | base-конвенции и правильная сторона импортов |
+| `RepoConventions` | Полный digest base-input/provenance, политика и версии (ниже) | PostgreSQL + Redis | immutable для ключа; TTL не заменяет provenance | старый head-influenced cache не переиспользуется |
+| Снимок диффа run (Р-15) | `(run_id, filename)` + diff_snapshot_id | PG: исходный доступный UI patch отдельно от review_patch/DiffMap | до удаления Workspace (каскад) | собственный снимок каждого run |
+| Контекст и доказательства | `call_id`/manifest_id + workspace-scoped content digest | PG: manifest и deduplicated точные excerpts; полный rendered prompt не обязателен | до удаления Workspace | аудит не зависит от TTL Redis |
+| Результат прогона | `run_id UNIQUE` + final result digest и snapshot bindings | PostgreSQL | immutable после publishing | retry доставки читает сохранённый итог; между head/run результаты не переносятся |
+| Промпт у провайдера | стабильные версионированные блоки с раздельными source roles | prompt caching провайдера | зависит от provider profile | кэш не повышает доверие документа/конвенций |
 
-Что **не** кэшируем: код клиента дольше 7 дней (снимки диффов и `ContextPayload` — хранение прогона, а не кэш: до удаления Workspace); ответы LLM для разных `head_sha`; ничего в сандбоксе.
+Ключ `repo-conventions-v2` включает repository_id, policy_base_sha, digest всех
+окончательных rendered messages и показанного base-tree, каждую source entry
+`path/blob_sha/shown_ranges/excerpt_sha256`, policy/ignore digests, matcher,
+defaults/conventions-prompt checksums, model/output-schema/selector/truncator/
+tokenizer profiles (точная формула — CONTEXT_AND_VERIFICATION_SPEC §4.2).
+Manifest и фактическая модель/маршрут сохраняются вместе с выводом. Одних SHA
+AGENTS или выбранных файлов недостаточно. Legacy cache без base-only provenance
+даёт cache miss; происхождение задним числом не выдумывается. При гонке побеждает
+первая успешно сохранённая валидная запись. Собранный контекст v1 не кэшируется.
 
-Тела ответов инструментов больше 64 КБ лежат в отдельной таблице PostgreSQL, на строку которой указывает `RunAction.response_ref` (PIPELINE_SPEC §2; таблица и миграция — #34); payload вебхуков — JSONB в `webhook_events` (колонка `payload_s3_ref TEXT nullable` сохранена в таблице с CHECK-ограничением `payload IS NOT NULL OR payload_s3_ref IS NOT NULL` для будущего выноса в S3, миграция 20260928_0012). Это строки PostgreSQL: тела ответов инструментов хранятся до удаления Workspace и удаляются каскадом вместе со снимками диффов, summary `ContextPayload` и `RunAction`. Квитанции `webhook_events` (`WebhookEvent`) живут короче: завершённые (спроецированные, упавшие или отложенные навсегда) удаляются через 30 дней после завершения, чистку раз в час запускает `webhook-worker` ([WEBHOOK_WORKER.md](WEBHOOK_WORKER.md), Retention).
+Что **не** кэшируем: блобы клиента дольше 7 дней; ответы LLM между разными
+head/run по одному diff/findings hash; ничего в сандбоксе. Снимки политики/diff,
+manifests, excerpts и результаты — данные аудита run до удаления Workspace.
 
-**Объектное хранилище (S3) — после MVP** (D1 по #20): MinIO community архивирован, его образы удалены с Docker Hub 11.09.2026. Когда S3 вернётся (полные `ContextPayload`, крупные тела), use case удаления Workspace должен удалять его объекты по ссылкам до каскада — S3 каскадов не знает.
+Тела ответов инструментов больше 64 КБ лежат в отдельной таблице PostgreSQL, на строку которой указывает `RunAction.response_ref` (PIPELINE_SPEC §2; таблица и миграция — #34); payload вебхуков — JSONB в `webhook_events` (колонка `payload_s3_ref TEXT nullable` сохранена в таблице с CHECK-ограничением `payload IS NOT NULL OR payload_s3_ref IS NOT NULL` для будущего выноса в S3, миграция 20260928_0012). Это строки PostgreSQL: тела ответов инструментов хранятся до удаления Workspace и удаляются каскадом вместе со снимками, manifests, evidence и `RunAction`. Квитанции `webhook_events` (`WebhookEvent`) живут короче: завершённые (спроецированные, упавшие или отложенные навсегда) удаляются через 30 дней после завершения, чистку раз в час запускает `webhook-worker` ([WEBHOOK_WORKER.md](WEBHOOK_WORKER.md), Retention).
+
+**Объектное хранилище (S3) — после MVP** (D1 по #20): MinIO community архивирован, его образы удалены с Docker Hub 11.09.2026. Обязательные excerpts/manifests #107 уже проектируются в PG и не ждут S3. Когда S3 вернётся для крупных объектов, use case удаления Workspace должен удалять их по ссылкам до каскада — S3 каскадов не знает.
 
 ---
 
 ## 11. Данные (согласование с ERD роли 6)
 
-Сущности — из `BACKEND_ARCHITECTURE.md`; здесь только поля, которые требует этот дизайн.
+Базовые сущности — из `BACKEND_ARCHITECTURE.md`; здесь поля целевого дизайна.
+Дополнения #107 ниже — требования к будущим миграциям и API, не описание уже
+существующих таблиц. Полные структуры — RULES_FORMAT_SPEC §7–8 и
+CONTEXT_AND_VERIFICATION_SPEC §5–8, §10.
 
 | Сущность (роль 6) | Требуемые поля |
 |---|---|
@@ -800,19 +1030,31 @@ class ContextPayload(BaseModel):          # сущность роли 6
 | `ProviderInstallation` | `provider`, `external_id`, `metadata` (JSON); токены App в БД не сохраняются (installation-токен — только кэш Redis, §8.3; сейчас — в памяти процесса, отступление §7.3); шифрование в MVP не заявлено — OQ-7 |
 | `Repository` | `enabled`, `default_engine`, `wait_for_ci: auto\|always\|never`, `review_event`, `max_comments` |
 | `CodeChange` (PR) | `number`, `head_sha`, `base_sha`, `ai_review_labeled` (стоит лейбл `ai-review`, Р-10), `ci_status` (jsonb по sha), `state` |
-| `Run` | `head_sha`, `state` (§6.4), `engine`, `rule_version_id`, `prompt_version_id`, `attempt`, `available_at`, `lease_until`, `cancel_requested`, `worker_id`, `trigger`, `error_code`, `error_message` (каталог — PIPELINE_SPEC §6); `summaryOnly` в API не хранится, а выводится из снимка диффа (Р-15: только список файлов) |
-| `ContextPayload` | §9; summary в jsonb; полный payload в MVP не хранится, `s3_ref` — после MVP (§10) |
-| `Finding` | поля `ReviewFinding` (§5); якорь канона `path` / `start_line` / `line` хранится как `file_path`, `line_start`, `line_end`, `side` (`RIGHT` ставит постпроцессор) — маппинг PIPELINE_SPEC §10; + `run_id`, `published: bool`, `inline_comment`, `drop_reason`; SHA не хранится — берётся из `Run.head_sha` |
-| `Comment` | `finding_id`, `github_review_id`, `github_comment_id`, `findings_hash` |
+| `Run` | `head_sha`, `base_sha`, `state` (§6.4), `engine`, `rule_version_id`, `prompt_version_id`, `attempt`, `available_at`, `lease_until`, `cancel_requested`, `worker_id`, `trigger`, `error_code`, `error_message`; дополнительно закреплённые policy/diff/profile/result bindings. `summaryOnly` — явный итог режима, не вывод из `patch=null` |
+| Контекст | §9; manifest каждого фактического call, source roles/revisions/ranges/hashes и PG evidence excerpts (§10); summary не заменяет доказательства |
+| `Finding` | итоговая проекция supported кандидатов для API; `file_path`, `line_start=start_line ?? line`, `line_end=line`, `side=RIGHT` v2, run/candidate bindings и размещение. Diagnostic drops хранятся отдельно; revision разрешается по закреплённому run/manifest |
+| `Comment` | `finding_id`, remote review/comment/discussion IDs, связь с publication item/operation key; `findings_hash` только диагностика |
 | `CreditLedger` | потребитель `usage_events`, не источник |
 | **Добавить:** `WebhookEvent` | `delivery_id UNIQUE`, `event`, `action`, `payload` (JSONB в PostgreSQL), `payload_s3_ref` (TEXT nullable, CHECK `payload IS NOT NULL OR payload_s3_ref IS NOT NULL` для будущего S3-оффлоада), `received_at` |
 | **Добавить:** `RuleVersion`, `PromptVersion` | неизменяемые (Р-6) |
 | **Добавить:** `UsageEvent` | `run_id`, `model`, `tokens_in/out`, `cache_read_tokens`, `cost_usd` — только вставка (Р-8) |
 | **Добавить:** `RunAction` | `run_id`, `index`, `tool` (каталог — PIPELINE_SPEC §2), `request jsonb`, `response jsonb?` (≤ 64 КБ) или `response_ref` (> 64 КБ — id строки отдельной таблицы PG, PIPELINE_SPEC §2), `started_at`, `duration_ms` — Zod `RunAction` фронта |
-| **Добавить:** снимок диффа (Р-15) | ключ `(code_change, head_sha)`; по файлу — `filename`, `patch` (дифф > 3 000 строк — только `filename`, в API `patch: null`); каскад от Workspace |
+| Снимок диффа (Р-15) | ключ `(run_id, filename)`; исходный доступный `patch`, отдельно `review_patch`, patch_state и rename/copy provenance; `run_diff_maps` хранит immutable revisions/provider refs/hunks/digest |
+| **#107:** `run_policy_snapshots` | один immutable snapshot на run: документы/absence, checksums, ignore и версии профилей; retry его не заменяет |
+| **#107:** `context_manifests`, `context_evidence_blobs` | manifest по call_id и workspace-scoped dedup точных excerpts; источник refs accepted call |
+| **#107:** `review_candidates`, `verification_results` | исходный v2 finding, candidate_id/digest, решения фильтров; решение verifier по каждому переданному ID и resolved refs |
+| **#107:** `final_review_results` | run_id UNIQUE, версия, supported findings, counts, coverage, verdict, backend summary и digest; immutable после publishing |
+| **#107:** `publication_plans/items` | точные payloads, keys/ordinals, отдельные body-only variants, receipts и состояние доставки; явный finding → remote comment mapping |
 | **После MVP:** `FeedbackSignal` | `finding_id`, `kind: resolved\|line_changed\|reaction`, `value`, `at` |
 
-В MVP всё хранится в PostgreSQL (D1): payload вебхуков — JSONB; полный `ContextPayload` не хранится, только summary; ответы инструментов до 64 КБ — в `run_actions.response`, больше — в отдельной таблице по `response_ref`. Данные хранятся до удаления Workspace и удаляются вместе с ним (§10); исключение — квитанции `webhook_events`: завершённые удаляются через 30 дней (§10).
+В MVP всё хранится в PostgreSQL (D1): raw prompt целиком не обязателен, но точные
+excerpts и manifests обязательны для нового профиля. Ответы инструментов до 64 КБ —
+в `run_actions.response`, больше — по `response_ref`. Данные доступны только
+Workspace и удаляются вместе с ним (§10); завершённые webhook-квитанции — через
+30 дней. Legacy terminal runs получают `verification_mode=legacy`, `coverage=null`
+в compatibility-проекции, без выдуманных evidence и подтверждения verifier. Начатые
+legacy runs завершаются своим профилем; новый включается целиком после миграций
+storage/API/UI, без смешивания версий внутри run.
 
 ---
 
@@ -822,11 +1064,22 @@ Zod-схемы фронта (роль 5) и бэкенд описывают од
 
 **Источник истины — [`contracts/openapi.yaml`](../contracts/openapi.yaml)** (OpenAPI 3.1): пути, параметры, схемы, коды ответа и ошибки. `x-service` на операции называет сервис, `x-status: planned` + `x-issue` помечают ещё не реализованное. Совпадение с FastAPI и ответами проверяет `tests/test_openapi_contract.py`, с Zod — `test_component_schemas_mirror_the_ui_zod_contract` там же (13 общих DTO поле в поле) и `tests/test_ui_zod_contracts.py` (ответы API по JSON Schema Zod). Ниже — только сводка.
 
+**Планируемое расширение #107:** RunDetail/RunSession/latestRun получают coverage,
+resultVersion и verificationMode из сохранённого final result. Эти поля ещё нужно
+одновременно добавить в OpenAPI, backend и UI; существующие схемы остаются
+источником истины текущего wire-протокола. Coverage нового результата —
+`complete|partial|none` с причинами и известными счётчиками; неизвестное число —
+null, не 0. У legacy coverage=null. `blocking` = supported critical/high,
+`attention` = supported medium/low; только info/пусто дают `clean` лишь при complete,
+иначе verdict=null. До succeeded и при failed/skipped/cancelled verdict также null.
+API, VCS и check-run показывают один backend summary из supported findings и scope;
+raw модельная похвала/неподтверждённые дефекты в публичную сводку не переносятся.
+
 Провод — **camelCase** (Ф-10): `defaultEngine`, `waitForCi`, `maxComments`, `reviewEvent`; snake_case — только в БД (и во внутренних сообщениях очереди, §7.2). Префикс `/api` без версии.
 
 | Группа | Операции | Сервис | Главное |
 |---|---|---|---|
-| Прогоны | `GET /api/runs`, `GET /api/runs/{id}`, `…/diff`, `…/files`, `…/comments`, `…/actions`, `…/actions/{index}/response` | `portal-api` | список — `RunListPage {items, nextCursor}`, фильтр `status` — семь состояний Р-14; run detail — `RunDetail` = `RunSession` + `verdict`, `summary`, `severityCounts`, `findings` (с `suggestion`, `confidence`), `budget` (D3, PIPELINE_SPEC §11); `/diff` — сырой unified-diff на файл из снимка Р-15, summary-only → `patch: null`; `/files` старше TTL кэша блобов (§10) → `404`/`410`; тело действия > 64 КБ — через `…/actions/{index}/response` |
+| Прогоны | `GET /api/runs`, `GET /api/runs/{id}`, `…/diff`, `…/files`, `…/comments`, `…/actions`, `…/actions/{index}/response` | `portal-api` | `RunListPage {items,nextCursor}`, семь состояний Р-14; detail = RunSession + verdict/summary/severityCounts/findings/budget и планируемые поля coverage/version выше. `/diff` сохраняет исходный доступный UI patch при ignored/summary-only; `patch=null` означает отсутствие исходного patch, не отсутствие AI-проверки. `/files` старше TTL → `404`/`410`; большие action bodies — через response endpoint |
 | Действия с прогоном | `POST /api/runs/{id}/rerun`, `POST /api/runs/{id}/cancel` | `portal-api` | rerun — новый Run `queued`, `202`; PR закрыт или есть активный Run → `409` (§6.7); cancel идемпотентен |
 | Поток | `GET /api/stream` | `portal-api` | SSE `run.updated {runId, status}`, один поток на вкладку, `fetch` с Bearer; между процессами — PG `LISTEN/NOTIFY` (D12 — дефолт по #20, §6.6) |
 | Репозитории | `GET /api/repos`, `GET/PATCH /api/repos/{id}`, `GET /api/repos/{id}/pulls` | `portal-api` | подключение — установкой App (§6.9): `POST /api/repos` и PATCH коллекции нет (D10); `GET /api/repos` → `Repository[]`; PATCH — `enabled`, `defaultEngine`, `waitForCi` (`auto\|always\|never`), `maxComments` (1..10), `reviewEvent` (`COMMENT\|REQUEST_CHANGES`); pulls → `{items: PullRequestSummary[], nextCursor}` с `latestRun {id, status, verdict}` (D11 — дефолт по #20) |
@@ -857,18 +1110,24 @@ Zod-схемы фронта (роль 5) и бэкенд описывают од
 | DiffEngine | p95 ≤ 40 с чистого времени движка | [TEST_PLAN §5](TEST_PLAN.md#5-критерии-приёмки-и-отчётность) |
 | Время до ревью (fast) | p50 ≤ 90 с, p95 ≤ 4 мин от выполнения триггера (очередь + движок + публикация) | этот документ |
 | SandboxEngine (фаза 3; до неё API принимает только `fast`, #52) | жёсткий таймаут 10 мин, затем тот же Run продолжается как fast (действие `engine.fallback` в трейсе) — это не `failed` | Р-3, PIPELINE_SPEC §5.3 |
-| Лимиты контекста | fast: 60 000 входных токенов; deep: 150 000; один файл L3 ≤ 12 000; ≤ 50 файлов с контекстом, остальные в `omitted_files`; дифф > 3 000 строк → ранний путь `summary-only` до `ContextProvider`: без построчного ревью, одна сводка «PR слишком большой» по списку файлов | §9 |
-| Выход | ≤ 10 inline-комментариев (настройка репозитория), тело ревью ≤ 4 000 символов, ответ модели — `ReviewOutput` по `review/schemas/review-output.schema.json` (§5) | Р-5 |
+| Лимиты контекста | fast ≤60 000 входных токенов, deep ≤150 000 и окно модели минус output reserve; L3 ≤12 000; AST ≤50 изменённых +20 imported файлов. Порог >3 000 allowed changed lines после ignore → backend summary без LLM; UI patch сохраняется | §9 |
+| Выход | ≤10 кандидатов v2 с evidence_refs, ≤10 inline по настройке; supported сверх inline cap — в body. Компактная backend `summary_text` ≤4 000 Unicode-символов; полное тело review дополнительно включает supported general findings. До первого POST выбранного варианта все payload сверяются с лимитами закреплённого профиля VCS-адаптера (явные единица и предел); превышение → `failed/publication_payload_too_large`, без усечения findings. `suggestion_unrenderable` позволяет убрать лишь применяемый блок. v2/verifier schemas требуют отдельной реализации | Р-5, §5; CONTEXT_AND_VERIFICATION_SPEC §8.2, §9.3, §10.1 |
 | Пропускная способность v1 | 100 PR/день, 5 параллельных прогонов; масштаб — реплики `worker` | |
 | Надёжность | ни одна задача не теряется: persistent-сообщения + состояние в PG + реконсилер 5 мин; приёмник вебхуков — отдельный процесс (GitHub не ретраит) | |
-| Схлопывание | Устаревший прогон не публикуется: publisher сверяет голову PR в GitHub непосредственно перед `POST /pulls/{n}/reviews` и при расхождении завершает прогон `cancelled`/`superseded`. Окно между этим чтением и POST (один HTTP-запрос) — принятый остаточный риск (решение техлида 05.10.2026) | [TEST_PLAN §5](TEST_PLAN.md#5-критерии-приёмки-и-отчётность) |
-| Стоимость | лимит на прогон: fast $0.50, deep $3 — сумма `usage_events` за все попытки плюс оценка следующего вызова, проверка до каждого вызова; превышение: deep — прервать и опубликовать, что успели, fast — `failed` (`budget_exceeded`); дневной бюджет на Workspace → деградация в fast, затем пауза (`skipped`). Лимиты вызовов, токенов и стоимости применяются по PIPELINE_SPEC §4.5, §5 | Р-8, PIPELINE_SPEC |
-| Качество | Precision ≥ 85 %, Critical Recall ≥ 75 %, Hallucination < 3 % на корпусе `test-prs-dataset` | [TEST_PLAN §5](TEST_PLAN.md#5-критерии-приёмки-и-отчётность) |
+| Схлопывание | Перед каждым POST проверяются актуальные head/diff и отмена; при расхождении cancelled/superseded. После POST повторно проверяется актуальность, remote IDs сохраняются даже при cancelled. Окно GET–POST остаётся; нового head такое ревью не подтверждает | §8.4, TEST_PLAN §5 |
+| Стоимость | fast $0.50, deep $3 на все попытки; до вызова учитываются usage + его оценка + резерв обязательных downstream стадий. Общие 4 вызова/попытку, 12/run, ≤3 попыток. Без завершённого verifier/final result публикация запрещена в обоих движках; verifier budget/deadline exhaustion → failed. Дневной бюджет Workspace → fast, затем skipped | Р-8, §5, PIPELINE_SPEC §4.5 |
+| Качество | Ориентиры Precision ≥85 %, Critical Recall ≥75 %, Hallucination <3 %. Raw review и final pipeline измеряются раздельно по независимой ручной разметке; verifier rejection/unsupported acceptance, insufficient/partial/failure и стоимость требуют собственного baseline | TEST_PLAN §3, §5 |
 | Безопасность | HMAC на вебхуках; секреты только через env из CI (роль 3); токены GitHub и LLM не попадают в сандбокс; сандбокс `--network=none`, non-root, read-only rootfs; PG/RabbitMQ/Redis — только внутренняя сеть | [TEST_PLAN 2.2](TEST_PLAN.md#22-webhook-и-триггер-р-9-р-10), [2.4](TEST_PLAN.md#24-sandboxengine-р-4-фаза-3), [2.6](TEST_PLAN.md#26-инфраструктура-и-безопасность) |
 | Данные клиента | блобы ≤ 7 дней в кэше; диффы, контексты и тела ответов инструментов — до удаления Workspace, payload вебхуков — 30 дней после завершения квитанции; ни один прогон не логирует содержимое файлов в stdout | |
 | Наблюдаемость | структурированные логи (JSON) с `run_id` во всех контейнерах; метрики: глубина очередей, длительность по этапам, `X-RateLimit-Remaining`, стоимость; self-hosted стек — отдельная задача | |
 
-**Риск схлопывания** (решение техлида 05.10.2026, #52; заменяет решение 04.10.2026): окно между чтением головы PR и публикацией — принятый остаточный риск. Перед `POST /pulls/{n}/reviews` publisher читает голову PR из GitHub и при расхождении с `head_sha` прогона не публикует (`stale_commit`, `app/modules/reviews/infrastructure/github_review_publication.py`, `_ensure_current_head`), поэтому push, который `webhook-worker` ещё не записал в PostgreSQL (§6.3), больше не даёт ревью старого sha. Остаётся окно между этим GET и POST (один HTTP-запрос). Закрыть его нельзя: GitHub API не даёт условной публикации ревью по голове PR (`commit_id` старого коммита принимается, `If-Match` или «ожидаемого head» нет). Ревью, опубликованное в этом окне, неотличимо от опубликованного за мгновение до push: GitHub помечает его outdated, а новый head запускает свой прогон. Компенсацию после POST (повторный GET, правка или dismiss ревью) не делаем: она даёт ложные срабатывания на легитимных ревью.
+**Риск схлопывания.** Реализованная в #52 проверка head перед POST сохраняется;
+целевой #107 добавляет идентичность diff и проверку актуальности после POST (§8.4).
+GitHub не предоставляет атомарного сравнения head с созданием review: в окне GET–POST
+может произойти push. Поэтому post-check не удаляет и не dismiss-ит публикацию:
+он сохраняет remote IDs и отмечает run cancelled при устаревании, не объявляя
+новый head проверенным. Историческое решение 05.10.2026 не делать post-GET заменено
+этим правилом; запрет компенсирующего удаления/редактирования сохраняется.
 
 ---
 
@@ -924,6 +1183,12 @@ flowchart TB
 | OQ-7 | Шифрование `ProviderInstallation` at rest | в MVP не заявлено: токены App не сохраняются, в `metadata` — только JSON-описание установки; вернуться, если в `metadata` появятся секреты | техлид + роль 6 |
 | OQ-8 | Кто создаёт лейбл `ai-review` в подключённом репозитории | **закрыт** решением техлида: лейбл создаёт App при подключении репозитория (`installation.created`, `installation_repositories.added`, §6.9), ответ 422 на существующий лейбл — успех. `POST /repos/{owner}/{repo}/labels` требует `issues: write`, а не `pull_requests: write`: право добавлено App 03.10.2026 по #37 (§8.2, [GitHub Docs](https://docs.github.com/en/rest/authentication/permissions-required-for-github-apps)). Ограничение: лейбл, удалённый мейнтейнером, вернётся только при повторном подключении репозитория | техлид; реализация — #11 |
 
+**Граница исторических свидетельств.** Прогоны, цены и описание текущего cache
+ниже относятся к legacy review/conventions профилю #46/#53. Они сохраняются для
+аудита, не подтверждают v2 evidence schema, base-only provenance или mandatory
+verifier #107. В новом профиле четыре слота делятся также с verifier и резервируются
+по §5; legacy схема «четыре для conventions/review» не применяется.
+
 **Строгий D7 и оговорка #46.** Строгий результат D7 для одного проверяемого задания означает, что шлюз отправил `response_format: json_schema` с `strict: true`, первый ответ прошёл соответствующий валидатор и трейс содержит ровно `calls == [primary]`: без repair, retry или fallback. Это свидетельство относится только к фактически обслужившему маршруту провайдера. В #46 техлид отдельно принял выбор пары, когда один repair после принятой strict-схемы исправлял только семантическое правило PIPELINE_SPEC §9; такие случаи показываются отдельно как доля `N из M` и не выдаются за буквальный одновызовный D7. После мержа #46 [run 37342619900](https://github.com/larchanka-training/dmc-268-api-t6/actions/runs/37342619900) на `main` дал `calls == [primary]` в обоих review-шагах; `validate_findings.py` подтвердил `OK ReviewOutput 1 items` и `OK ReviewOutput 3 items`. Этот run ещё не содержал шагов конвенций.
 
 **Production `commit_messages` — отложено.** После мержа PR [#64](https://github.com/larchanka-training/dmc-268-api-t6/pull/64) по #52 production-путь получает PR-метаданные через `GitHubRunSource.get_pull_request_meta`, а рендер `<commit_messages>` в prompt builder уже поддерживается #53. Однако этот source возвращает метаданные из `GET /pulls/{n}`; `HttpGitHubVcsProvider` не вызывает `GET /pulls/{n}/commits` и не заполняет `commit_messages`. Поэтому в production поле пока пустое и тег не попадает в промпт. Дополнительное чтение GitHub и его пагинацию откладываем, чтобы не менять зафиксированный вход оценки #53 перед первым baseline. Владелец follow-up — backend (роль 6); отдельная задача — [#82](https://github.com/larchanka-training/dmc-268-api-t6/issues/82). После #53 нужно добавить получение сообщений, ограничение объёма и проверку `<pr_meta>`. До включения этого пути нужно обновить golden prompt и static provenance; после включения — полностью переснять все ответы baseline и заново посчитать метрики, а не дописывать только изменившиеся кейсы.
@@ -973,4 +1238,3 @@ flowchart TB
 - [x] Диаграммы C4 (контекст, контейнеры, компоненты) и потоков — §3–§6, §14
 - [x] Нефункциональные требования: latency, лимиты контекста — §13
 - [x] Утверждено командой — PR-ревью (PR #36, #20)
-
