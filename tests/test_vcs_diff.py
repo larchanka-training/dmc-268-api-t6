@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 
 import pytest
 
+from app.modules.reviews.application.check_runs import RunProviderCheckpoint
 from app.modules.reviews.application.prompt_builder import ChangedFile, DiffLine, PullRequestMeta
 from app.modules.reviews.application.vcs_diff import (
     FetchVcsReviewInput,
@@ -16,6 +17,7 @@ from app.modules.reviews.application.vcs_diff import (
     VcsPullRequest,
     parse_file_patch,
 )
+from tests.installation_onboarding_fakes import provider_checkpoint
 
 _HEAD = "a" * 40
 _BASE = "b" * 40
@@ -115,18 +117,29 @@ def test_review_input_keeps_all_file_metadata_but_omits_nonreviewable_paths() ->
     class Provider:
         blobs_requested: list[str] = field(default_factory=list)
 
-        async def get_pull_request(self, locator: PullRequestLocator) -> VcsPullRequest:
+        async def get_pull_request(
+            self, locator: PullRequestLocator, *, checkpoint: RunProviderCheckpoint
+        ) -> VcsPullRequest:
+            await checkpoint()
             return _pull_request()
 
-        async def get_diff(self, pull_request: VcsPullRequest) -> tuple[VcsFile, ...]:
+        async def get_diff(
+            self, pull_request: VcsPullRequest, *, checkpoint: RunProviderCheckpoint
+        ) -> tuple[VcsFile, ...]:
+            await checkpoint()
             return files
 
-        async def get_blob(self, locator: PullRequestLocator, sha: str) -> bytes:
+        async def get_blob(
+            self, locator: PullRequestLocator, sha: str, *, checkpoint: RunProviderCheckpoint
+        ) -> bytes:
+            await checkpoint()
             self.blobs_requested.append(sha)
             return b"\x89PNG\r\n\x1a\nimage" if sha == "8" * 40 else b"text without a patch\n"
 
     provider = Provider()
-    result = asyncio.run(FetchVcsReviewInput(provider).execute(_locator(), _HEAD))
+    result = asyncio.run(
+        FetchVcsReviewInput(provider, checkpoint=provider_checkpoint).execute(_locator(), _HEAD)
+    )
 
     assert result.pull_request == _pull_request()
     assert result.files == files
@@ -196,22 +209,37 @@ def test_oversize_and_stale_head_fail_closed() -> None:
     class Provider:
         diff_calls: int = 0
 
-        async def get_pull_request(self, locator: PullRequestLocator) -> VcsPullRequest:
+        async def get_pull_request(
+            self, locator: PullRequestLocator, *, checkpoint: RunProviderCheckpoint
+        ) -> VcsPullRequest:
+            await checkpoint()
             return _pull_request()
 
-        async def get_diff(self, pull_request: VcsPullRequest) -> tuple[VcsFile, ...]:
+        async def get_diff(
+            self, pull_request: VcsPullRequest, *, checkpoint: RunProviderCheckpoint
+        ) -> tuple[VcsFile, ...]:
+            await checkpoint()
             self.diff_calls += 1
             return (huge,)
 
-        async def get_blob(self, locator: PullRequestLocator, sha: str) -> bytes:
+        async def get_blob(
+            self, locator: PullRequestLocator, sha: str, *, checkpoint: RunProviderCheckpoint
+        ) -> bytes:
+            await checkpoint()
             raise AssertionError("oversize patch must not request blob")
 
     provider = Provider()
     with pytest.raises(ValueError, match="head SHA"):
-        asyncio.run(FetchVcsReviewInput(provider).execute(_locator(), "c" * 40))
+        asyncio.run(
+            FetchVcsReviewInput(provider, checkpoint=provider_checkpoint).execute(
+                _locator(), "c" * 40
+            )
+        )
     assert provider.diff_calls == 0
 
-    result = asyncio.run(FetchVcsReviewInput(provider).execute(_locator(), _HEAD))
+    result = asyncio.run(
+        FetchVcsReviewInput(provider, checkpoint=provider_checkpoint).execute(_locator(), _HEAD)
+    )
     assert result.changed_files == ()
     assert result.omissions[0].reason == OmissionReason.TOO_LARGE
 
@@ -232,17 +260,28 @@ def test_large_patch_and_non_utf8_text_without_patch_are_distinct_omissions() ->
     )
 
     class Provider:
-        async def get_pull_request(self, locator: PullRequestLocator) -> VcsPullRequest:
+        async def get_pull_request(
+            self, locator: PullRequestLocator, *, checkpoint: RunProviderCheckpoint
+        ) -> VcsPullRequest:
+            await checkpoint()
             return _pull_request()
 
-        async def get_diff(self, pull_request: VcsPullRequest) -> tuple[VcsFile, ...]:
+        async def get_diff(
+            self, pull_request: VcsPullRequest, *, checkpoint: RunProviderCheckpoint
+        ) -> tuple[VcsFile, ...]:
+            await checkpoint()
             return files
 
-        async def get_blob(self, locator: PullRequestLocator, sha: str) -> bytes:
+        async def get_blob(
+            self, locator: PullRequestLocator, sha: str, *, checkpoint: RunProviderCheckpoint
+        ) -> bytes:
+            await checkpoint()
             assert sha == "2" * 40
             return b"\xff\xfe"
 
-    result = asyncio.run(FetchVcsReviewInput(Provider()).execute(_locator(), _HEAD))
+    result = asyncio.run(
+        FetchVcsReviewInput(Provider(), checkpoint=provider_checkpoint).execute(_locator(), _HEAD)
+    )
 
     assert result.changed_files == ()
     assert result.omitted_files == ("src/huge.py", "assets/icon.dat")
@@ -264,18 +303,29 @@ def test_missing_patch_blob_failures_do_not_hide_later_files(
     )
 
     class Provider:
-        async def get_pull_request(self, locator: PullRequestLocator) -> VcsPullRequest:
+        async def get_pull_request(
+            self, locator: PullRequestLocator, *, checkpoint: RunProviderCheckpoint
+        ) -> VcsPullRequest:
+            await checkpoint()
             return _pull_request()
 
-        async def get_diff(self, pull_request: VcsPullRequest) -> tuple[VcsFile, ...]:
+        async def get_diff(
+            self, pull_request: VcsPullRequest, *, checkpoint: RunProviderCheckpoint
+        ) -> tuple[VcsFile, ...]:
+            await checkpoint()
             return files
 
-        async def get_blob(self, locator: PullRequestLocator, sha: str) -> bytes:
+        async def get_blob(
+            self, locator: PullRequestLocator, sha: str, *, checkpoint: RunProviderCheckpoint
+        ) -> bytes:
+            await checkpoint()
             if sha == "1" * 40:
                 return b"x" * 1_048_577
             raise RuntimeError("one blob is unavailable")
 
-    result = asyncio.run(FetchVcsReviewInput(Provider()).execute(_locator(), _HEAD))
+    result = asyncio.run(
+        FetchVcsReviewInput(Provider(), checkpoint=provider_checkpoint).execute(_locator(), _HEAD)
+    )
 
     assert result.files == files
     assert result.omitted_files == ("src/oversized.py", "src/unavailable.py")
@@ -306,16 +356,27 @@ def test_unicode_separators_do_not_count_as_patch_lines() -> None:
     file = VcsFile("src/a.py", "added", "1" * 40, None, 1, 0, 1, f"@@ -0,0 +1 @@\n+{content}")
 
     class Provider:
-        async def get_pull_request(self, locator: PullRequestLocator) -> VcsPullRequest:
+        async def get_pull_request(
+            self, locator: PullRequestLocator, *, checkpoint: RunProviderCheckpoint
+        ) -> VcsPullRequest:
+            await checkpoint()
             return _pull_request()
 
-        async def get_diff(self, pull_request: VcsPullRequest) -> tuple[VcsFile, ...]:
+        async def get_diff(
+            self, pull_request: VcsPullRequest, *, checkpoint: RunProviderCheckpoint
+        ) -> tuple[VcsFile, ...]:
+            await checkpoint()
             return (file,)
 
-        async def get_blob(self, locator: PullRequestLocator, sha: str) -> bytes:
+        async def get_blob(
+            self, locator: PullRequestLocator, sha: str, *, checkpoint: RunProviderCheckpoint
+        ) -> bytes:
+            await checkpoint()
             raise AssertionError("patch is present")
 
-    result = asyncio.run(FetchVcsReviewInput(Provider()).execute(_locator(), _HEAD))
+    result = asyncio.run(
+        FetchVcsReviewInput(Provider(), checkpoint=provider_checkpoint).execute(_locator(), _HEAD)
+    )
     assert result.omissions == ()
     assert result.changed_files == (
         ChangedFile("src/a.py", "added", (DiffLine(1, "added", content),)),
@@ -324,14 +385,27 @@ def test_unicode_separators_do_not_count_as_patch_lines() -> None:
 
 def test_same_head_with_changed_base_is_rejected_before_file_fetch() -> None:
     class Provider:
-        async def get_pull_request(self, locator: PullRequestLocator) -> VcsPullRequest:
+        async def get_pull_request(
+            self, locator: PullRequestLocator, *, checkpoint: RunProviderCheckpoint
+        ) -> VcsPullRequest:
+            await checkpoint()
             return VcsPullRequest(locator, _HEAD, "c" * 40, _pull_request().meta)
 
-        async def get_diff(self, pull_request: VcsPullRequest) -> tuple[VcsFile, ...]:
+        async def get_diff(
+            self, pull_request: VcsPullRequest, *, checkpoint: RunProviderCheckpoint
+        ) -> tuple[VcsFile, ...]:
+            await checkpoint()
             raise AssertionError("base drift must stop before file fetch")
 
-        async def get_blob(self, locator: PullRequestLocator, sha: str) -> bytes:
+        async def get_blob(
+            self, locator: PullRequestLocator, sha: str, *, checkpoint: RunProviderCheckpoint
+        ) -> bytes:
+            await checkpoint()
             raise AssertionError("base drift must stop before blob fetch")
 
     with pytest.raises(ValueError, match="base SHA"):
-        asyncio.run(FetchVcsReviewInput(Provider()).execute(_locator(), _HEAD, _BASE))
+        asyncio.run(
+            FetchVcsReviewInput(Provider(), checkpoint=provider_checkpoint).execute(
+                _locator(), _HEAD, _BASE
+            )
+        )

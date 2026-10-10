@@ -119,6 +119,9 @@ class Store:
     async def cancellation_reason(self, run_id: UUID) -> str | None:
         raise AssertionError("not used by the reconciler")
 
+    async def provider_origin_active(self, run_id: UUID) -> bool:
+        return True
+
     async def check_run_report(self, run_id: UUID) -> CheckRunReport | None:
         raise AssertionError("not used by the reconciler")
 

@@ -226,6 +226,10 @@ class Run(Base):
 
     id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
     code_change_id: Mapped[UUID] = mapped_column(ForeignKey("code_changes.id"), nullable=False)
+    # Pinned at creation/backfill; Repository ownership may change after reinstall.
+    origin_provider_installation_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("provider_installations.id"), nullable=True
+    )
     base_sha: Mapped[str] = mapped_column(String(64), nullable=False)
     base_ref: Mapped[str | None] = mapped_column(String(255), nullable=True)
     head_sha: Mapped[str] = mapped_column(String(64), nullable=False)

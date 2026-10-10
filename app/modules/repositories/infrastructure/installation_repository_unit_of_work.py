@@ -30,6 +30,17 @@ class SqlAlchemyInstallationRepositoryStore:
         self._session = session
         self._rule_versions = SqlAlchemyRepositoryRuleVersionStore(session)
 
+    async def lock_active_installation(self, provider_installation_id: UUID) -> bool:
+        active = await self._session.scalar(
+            select(ProviderInstallation.id)
+            .where(
+                ProviderInstallation.id == provider_installation_id,
+                ProviderInstallation.deleted_at.is_(None),
+            )
+            .with_for_update(key_share=True)
+        )
+        return active is not None
+
     async def upsert_repository(
         self, provider_installation_id: UUID, snapshot: RepositorySnapshot
     ) -> UUID:
@@ -49,7 +60,7 @@ class SqlAlchemyInstallationRepositoryStore:
                     "full_name": snapshot.full_name,
                     "default_branch": snapshot.default_branch,
                     "web_url": snapshot.web_url,
-                    "enabled": True,
+                    "installation_available": True,
                 },
             )
             .returning(Repository.id)
@@ -71,7 +82,7 @@ class SqlAlchemyInstallationRepositoryStore:
         return recorded is not None
 
     async def disable_repository(self, provider_installation_id: UUID, external_id: int) -> None:
-        """Disable a repository if it still belongs to this installation.
+        """Remove App availability if the repository still belongs to this installation.
 
         The use case deduplicates delivery effects before calling this method.
         A distinct later removal must revoke any access restored in the meantime.
@@ -83,7 +94,7 @@ class SqlAlchemyInstallationRepositoryStore:
                 Repository.provider_installation_id == provider_installation_id,
                 Repository.external_id == external_id,
             )
-            .values(enabled=False)
+            .values(installation_available=False)
         )
         await self._session.execute(statement)
         await self._session.execute(
@@ -96,9 +107,16 @@ class SqlAlchemyInstallationRepositoryStore:
     async def disable_installation(self, provider_installation_id: UUID) -> None:
         await self._record_revocation(provider_installation_id, 0)
         await self._session.execute(
+            update(ProviderInstallation)
+            .where(ProviderInstallation.id == provider_installation_id)
+            .values(
+                deleted_at=func.coalesce(ProviderInstallation.deleted_at, func.clock_timestamp())
+            )
+        )
+        await self._session.execute(
             update(Repository)
             .where(Repository.provider_installation_id == provider_installation_id)
-            .values(enabled=False)
+            .values(installation_available=False)
         )
         await self._session.execute(
             delete(GitHubUserRepositoryAccess).where(

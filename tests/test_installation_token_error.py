@@ -50,6 +50,7 @@ from app.modules.repositories.application.sync_installation_repositories import 
     RepositoryOnboardingInput,
 )
 from app.modules.reviews.application.try_enqueue_webhook_run import RunMessagePublisher
+from tests.installation_onboarding_fakes import active_installation
 
 
 @dataclass
@@ -299,6 +300,7 @@ def _real_projector(
         )
     )
     return InstallationEventProjector(
+        installation_active=active_installation,
         tree_provider=GitHubInstallationTreeProvider(client=client, token_provider=tokens),
         label_provider=GitHubRepositoryLabelProvider(client=client, token_provider=tokens),
         details_provider=GitHubInstallationRepositoryDetailsProvider(

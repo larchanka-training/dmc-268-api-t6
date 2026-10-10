@@ -218,6 +218,7 @@ def test_postgres_cancelled_run_signal_replays_old_head_until_confirmed(
                 session.add(
                     Run(
                         id=run_id,
+                        origin_provider_installation_id=UUID(int=11),
                         code_change_id=_PR,
                         base_sha="b" * 40,
                         base_ref="main",

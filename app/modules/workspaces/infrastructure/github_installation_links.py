@@ -4,10 +4,11 @@ from __future__ import annotations
 
 from datetime import datetime
 from decimal import Decimal
+from hashlib import sha256
 from typing import cast
 from uuid import UUID, uuid4
 
-from sqlalchemy import delete, func, or_, select, update
+from sqlalchemy import and_, delete, func, or_, select, text, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -21,6 +22,9 @@ from app.modules.repositories.infrastructure.models import ProviderInstallation
 from app.modules.workspaces.application.link_github_installations import (
     GitHubInstallation,
     InstallationSnapshotReservation,
+)
+from app.modules.workspaces.infrastructure.github_repository_rebinding import (
+    SqlAlchemyGitHubRepositoryRebinding,
 )
 from app.modules.workspaces.infrastructure.models import (
     GitHubInstallationAccessRevocation,
@@ -81,6 +85,36 @@ class SqlAlchemyGitHubInstallationLinkStore:
             .values(applied_generation=generation)
         )
 
+    async def lock_installations(self, installations: tuple[GitHubInstallation, ...]) -> None:
+        accounts = sorted(
+            {
+                item.account_external_id
+                for item in installations
+                if item.account_external_id is not None
+            }
+        )
+        for account_id in accounts:
+            key = int.from_bytes(
+                sha256(f"github-reinstall-account:{account_id}".encode()).digest()[:8],
+                "big",
+                signed=True,
+            )
+            await self._session.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": key})
+        # Include missing-account snapshots in the same global row-lock ordering.
+        # Rebinding can read several archived rows before a later snapshot target.
+        await self._session.execute(
+            select(ProviderInstallation.id)
+            .where(
+                ProviderInstallation.provider == "github",
+                or_(
+                    ProviderInstallation.external_id.in_([item.id for item in installations]),
+                    ProviderInstallation.account_external_id.in_(accounts),
+                ),
+            )
+            .order_by(ProviderInstallation.external_id)
+            .with_for_update(key_share=True)
+        )
+
     async def current_workspace_ids(self, user_id: int) -> tuple[UUID, ...]:
         result = await self._session.scalars(
             select(GitHubUserWorkspaceAccess.workspace_id)
@@ -90,6 +124,9 @@ class SqlAlchemyGitHubInstallationLinkStore:
         return tuple(result.all())
 
     async def link(self, user_id: int, installation: GitHubInstallation) -> UUID:
+        archive_workspace = await SqlAlchemyGitHubRepositoryRebinding(
+            self._session
+        ).archived_workspace(installation)
         existing = await self._session.scalar(
             select(ProviderInstallation.workspace_id).where(
                 ProviderInstallation.provider == "github",
@@ -103,17 +140,19 @@ class SqlAlchemyGitHubInstallationLinkStore:
                 name=f"GitHub: {installation.account_login}"[:255],
                 daily_budget_usd=Decimal("0"),
             )
-            self._session.add(workspace)
-            await self._session.flush()
+            if archive_workspace is None:
+                self._session.add(workspace)
+                await self._session.flush()
             created_installation_id = cast(
                 UUID | None,
                 await self._session.scalar(
                     insert(ProviderInstallation)
                     .values(
                         id=uuid4(),
-                        workspace_id=workspace.id,
+                        workspace_id=archive_workspace or workspace.id,
                         provider="github",
                         external_id=installation.id,
+                        account_external_id=installation.account_external_id,
                         provider_metadata={"account_login": installation.account_login},
                     )
                     .on_conflict_do_nothing(
@@ -126,8 +165,9 @@ class SqlAlchemyGitHubInstallationLinkStore:
                 ),
             )
             if created_installation_id is None:
-                await self._session.delete(workspace)
-                await self._session.flush()
+                if archive_workspace is None:
+                    await self._session.delete(workspace)
+                    await self._session.flush()
                 workspace_id = cast(
                     UUID | None,
                     await self._session.scalar(
@@ -140,7 +180,45 @@ class SqlAlchemyGitHubInstallationLinkStore:
                 if workspace_id is None:
                     raise RuntimeError("concurrent GitHub installation link disappeared")
             else:
-                workspace_id = workspace.id
+                workspace_id = archive_workspace or workspace.id
+
+        if installation.account_external_id is not None:
+            # The conditional UPDATE locks the row and rechecks identity after a
+            # concurrent insert/update. An established owner is never overwritten.
+            verified_id = await self._session.scalar(
+                update(ProviderInstallation)
+                .where(
+                    ProviderInstallation.provider == "github",
+                    ProviderInstallation.external_id == installation.id,
+                    or_(
+                        and_(
+                            ProviderInstallation.account_external_id.is_(None),
+                            ProviderInstallation.deleted_at.is_(None),
+                        ),
+                        ProviderInstallation.account_external_id
+                        == installation.account_external_id,
+                    ),
+                )
+                .values(account_external_id=installation.account_external_id)
+                .returning(ProviderInstallation.id)
+            )
+            if verified_id is None:
+                stored = await self._session.scalar(
+                    select(ProviderInstallation)
+                    .where(
+                        ProviderInstallation.provider == "github",
+                        ProviderInstallation.external_id == installation.id,
+                    )
+                    .execution_options(populate_existing=True)
+                )
+                if (
+                    stored is None
+                    or stored.deleted_at is None
+                    or stored.account_external_id is not None
+                ):
+                    raise ValueError("GitHub installation account identity changed")
+                # Late OAuth cannot establish previously absent evidence for a
+                # retired installation and make its archive eligible for rebind.
 
         await self._session.execute(
             insert(GitHubUserWorkspaceAccess)
@@ -160,6 +238,7 @@ class SqlAlchemyGitHubInstallationLinkStore:
         installation_id: int,
         repository_ids: tuple[int, ...],
         snapshot_started_at: datetime,
+        account_external_id: int | None = None,
     ) -> None:
         provider_installation_id = cast(
             UUID | None,
@@ -192,6 +271,18 @@ class SqlAlchemyGitHubInstallationLinkStore:
             repository_id
             for repository_id in repository_ids
             if 0 not in revoked and repository_id not in revoked
+        )
+
+        target = await self._session.get(
+            ProviderInstallation, provider_installation_id, populate_existing=True
+        )
+        if target is None:
+            raise RuntimeError("GitHub installation disappeared during reconciliation")
+        if target.deleted_at is not None:
+            repository_ids = ()
+        await SqlAlchemyGitHubRepositoryRebinding(self._session).rebind(
+            target,
+            GitHubInstallation(installation_id, "", repository_ids, account_external_id),
         )
 
         stale = delete(GitHubUserRepositoryAccess).where(

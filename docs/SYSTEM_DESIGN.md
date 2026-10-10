@@ -546,6 +546,85 @@ sequenceDiagram
 
 ### 6.9 Подключение репозиториев: установка GitHub App (D10)
 
+**Контракт переустановки App [техлид, 10.10.2026, #113].** После удаления и
+новой установки сохраняются UUID Repository и Workspace, бюджет Workspace,
+история PR/Run с findings/actions/diff/context/cache, все настройки, версии и
+активные правила, конвенции и ручная пауза только для того же подтверждённого
+числового `account.id` владельца установки и точного внешнего repo ID, доступ к
+которому пользователь заново подтвердил OAuth. Числовой ID аккаунта старой
+установки должен быть сохранён из аутентифицированного GitHub listing до удаления;
+числовой ID аккаунта новой установки должен присутствовать в этом свежем полном
+user-token listing. ID OAuth-пользователя, прежнее знание аккаунта новой установки
+из чужой сверки и изменяемые login/full name не доказывают владельца.
+
+Новая установка получает собственную строку ProviderInstallation и внешний ID;
+старые ID не перезаписываются. Перенос FK только подтверждённых репозиториев и
+выдача новых грантов подтверждающему пользователю атомарны. Workspace повторно
+используется лишь при однозначной принадлежности тому же аккаунту: учитываются
+все известные удалённые установки аккаунта, включая пустые Workspace. Источник
+должен иметь долговечный маркер удаления всей установки; удаление отдельного
+репозитория этого не доказывает. Невыбранные репозитории остаются архивом без
+доступа. `created`/`added`, refresh, старый JWT и совпадение repo ID сами по себе
+доступ не возвращают: до OAuth списки `/api/repos` и `/api/runs` скрывают архив,
+detail и mutation отвечают 404. Другие пользователи подтверждают свои repo-гранты
+отдельно. Старый ещё действующий JWT подтверждающего пользователя может читать
+историю после появления его новых грантов в том же Workspace.
+
+При переносе в другой аккаунт создаётся новый Repository с настройками и правилами
+по умолчанию и включённым предпочтением; история, бюджет, правила, конвенции и
+пауза источника не копируются. Целевой Workspace может уже существовать. Login-only
+legacy, неоднозначные источники/Workspace и коллизия с уже существующим целевым
+Repository также не объединяются с архивом. Свежий OAuth может установить числовой
+ID только для той же ещё доступной установки; идентичность уже удалённого
+legacy-архива не угадывается.
+
+`Repository.enabled` хранит предпочтение пользователя, `installation_available` —
+доступность App. Эффективный API `enabled` и разрешение запускать ревью равны их AND.
+PATCH меняет лишь предпочтение; removal/deleted снимают доступность и гранты,
+created/added восстанавливают доступность после авторизованного связывания,
+сохраняя паузу и правила. Legacy `enabled=false` остаётся false: прежнюю причину
+выключения восстановить нельзя, после подтверждения пользователь может явно
+включить ревью. Видимость определяется Workspace/repo-грантами независимо от паузы.
+
+Старые квитанции и tombstones остаются у исходной установки: старое removal не
+отзывает новый доступ, а положительные события удалённой установки не оживляют её.
+`deleted_at` навсегда запрещает оживление той же физической установки, в том числе
+свежим OAuth. Удаление отдельного repo не устанавливает этот маркер и допускает
+новое подтверждение более свежим OAuth после отметки отзыва.
+
+`Run.origin_provider_installation_id` неизменно хранит исходную физическую
+установку. Миграция заполняет старую историю до переноса FK; оставшиеся NULL
+фиксируются до rebind. В момент rebind queued/running/publishing Runs исходной
+установки отменяются с `installation_replaced` под блокировками до переноса FK.
+Старые queued/retrying сообщения при отсутствии действующего origin завершаются
+существующим skipped/repo_disabled; claimed/publishing работа отменяется, а
+terminal redelivery не вызывает check-run. NULL, отсутствующий, удалённый и не
+совпадающий с текущей Repository origin закрывают provider-доступ без угадывания
+по текущему FK. Runtime использует `installation_unavailable`, а storage fence
+отклоняет не-RUNNING producer через `run_inactive`; это внутренние причины
+остановки, без новой публичной или очередной схемы.
+
+Проверки в закрытой UOW предшествуют получению installation-токена и каждому
+следующему GitHub HTTP-запросу: details/tree/labels, PR/timeline/CI страницы,
+VCS/stream, check-run и публикация с повторными запросами. LLM проверяет origin
+перед каждым фактическим POST, включая смену ключа, retry/fallback/JSON repair и
+ожидание FX/ledger; после финальной проверки должно оставаться время полного call
+timeout. Кэшированный locator не заменяет проверку. Только уже начатый внешний
+запрос может закончиться: его оплаченный LLM usage и append-only audit сохраняются.
+Существующие terminal Run state/payload, findings/comments/diff/context не
+переписываются; обычные diff/context записи требуют активного origin и RUNNING
+под атомарными блокировками. История и cache-only file/action routes по-прежнему
+авторизуются по текущей Repository и грантам; новый rerun использует новый origin.
+
+Выбор источника, создание установки и перенос сериализуются транзакционной
+блокировкой аккаунта PostgreSQL, затем блокировками установок в стабильном порядке.
+Provider-записи сохраняют порядок исходная установка → Repository/PR → Run.
+Поколения OAuth и timestamps отзыва сохраняются; tombstones целевой установки
+проверяются перед переносом, чтобы старый snapshot не восстановил доступ.
+GitHub/LLM calls остаются вне DB-транзакций. Миграции добавляют nullable positive
+BIGINT `account_external_id`, `deleted_at`, доступность и внутренний Run origin без
+угадывания по login; существующее пользовательское `enabled` сохраняется.
+
 ```mermaid
 sequenceDiagram
   autonumber
@@ -572,22 +651,22 @@ sequenceDiagram
   GH->>WH: installation_repositories.removed / installation.deleted
   WH->>PG: webhook_events INSERT (квитанция)
   WH-->>GH: 202
-  WW->>PG: repositories отключены + пользовательские repo-гранты удалены, без REST
+  WW->>PG: installation_available=false + repo-гранты удалены; deleted_at для всей установки, без REST
 ```
 
 Репозиторий подключается установкой App: `POST /api/repos` нет (D10), кнопка «Подключить» ведёт на установку App. После изменения выбранных в GitHub репозиториев пользователь нажимает «Обновить доступ»: повторный OAuth-вход без logout возвращает на `/repositories`. `ExchangeGitHubCode` вызывает `LinkGitHubInstallations`: по пользовательскому токену читает установки и их репозитории, связывает новые установки с Workspace, сохраняет актуальные пользовательские гранты и пробуждает отложенные квитанции. Это добавляет новую установку и новый репозиторий прежней установки, сохраняя по-прежнему разрешённые гранты. Refresh читает локальную идентичность; запросов к GitHub и обновления списка разрешённых репозиториев он не делает. Поэтому добавленный доступ появляется после повторного OAuth и проекции репозитория вебхуком, а не от одного refresh.
 
 Отзыв доступа пользователя на стороне GitHub (без удаления репозитория из установки App) обнаруживается при следующем успешном OAuth-входе, в том числе через «Обновить доступ». До этой сверки прежние локальные гранты сохраняются: refresh читает локальную идентичность и не проверяет права в GitHub. Без повторного OAuth сессия ограничена абсолютным сроком refresh-семьи — 30 дней от входа; последний выпущенный access JWT может действовать ещё до 15 минут после этого срока ([§12](#12-контракт-api--ui)). Это принятая задержка отзыва пользовательского доступа [техлид, 07.10.2026, #101]; отзыв через события установки App описан ниже.
 
-`installation_repositories.removed` удаляет гранты всех пользователей для перечисленных внешних repo ID в этой установке; `installation.deleted` удаляет все repo-гранты установки даже при пустом списке репозиториев в payload. Проекция отключает строки `repositories`, удаляет гранты и фиксирует маркер эффекта по `delivery_id` в одной транзакции. Маркер не позволяет повтору той же доставки снять доступ, восстановленный свежим OAuth после удаления, даже если финализация квитанции не удалась. Маркеры старше 30 дней удаляются только после удаления соответствующей квитанции (подробнее — [Retention в WEBHOOK_WORKER](WEBHOOK_WORKER.md#how-the-worker-handles-deliveries)). После commit проекции scoped-запросы закрывают доступ и со старым JWT, без ожидания refresh или его 15-минутного access TTL. До обработки квитанции сохраняется задержка очереди/повторов. Пользовательский `PATCH enabled=false` только выключает ревью: гранты и видимость репозитория сохраняются; `enabled` не является проверкой авторизации.
+`installation_repositories.removed` удаляет гранты всех пользователей для перечисленных внешних repo ID в этой установке; `installation.deleted` удаляет все repo-гранты установки даже при пустом списке репозиториев в payload. Проекция снимает `installation_available`, сохраняет предпочтение `enabled`, удаляет гранты и фиксирует маркер эффекта по `delivery_id` в одной транзакции. Маркер не позволяет повтору той же доставки снять доступ, восстановленный свежим OAuth после частичного repo-removal, даже если финализация квитанции не удалась. Полное удаление навсегда закрывает ту же физическую установку; при reinstall с новым внешним ID маркеры источника не воздействуют на перенесённый Repository. Маркеры старше 30 дней удаляются только после удаления соответствующей квитанции (подробнее — [Retention в WEBHOOK_WORKER](WEBHOOK_WORKER.md#how-the-worker-handles-deliveries)). После commit проекции scoped-запросы закрывают доступ и со старым JWT, без ожидания refresh или его 15-минутного access TTL. До обработки квитанции сохраняется задержка очереди/повторов. Пользовательский `PATCH enabled=false` только выключает ревью: гранты и видимость репозитория сохраняются; `enabled` не является проверкой авторизации.
 
 Удаление установки не удаляет Workspace, связь установки с ним и доступ пользователя к Workspace. До следующей OAuth-сверки удалённая установка остаётся пустой связью в `/api/auth/me`, а ID Workspace попадает и в свежий JWT при refresh. Доступ к её репозиториям уже отозван после commit проекции: наличие Workspace в JWT не заменяет repo-грант. Следующая OAuth-сверка удаляет пользовательский доступ к Workspace, если GitHub больше не возвращает соответствующую установку.
 
-Успешная проекция `installation.created` или `installation_repositories.added` устанавливает `enabled=true`, в том числе при повторной обработке и пробуждении отложенной квитанции воркером или после OAuth-сверки. Ручное выключение ревью не сохраняется после такой проекции, даже если репозиторий не удалялся и не добавлялся заново. Этот флаг сам по себе не возвращает пользовательский доступ: для него нужны актуальные repo-гранты после OAuth-сверки.
+Успешная проекция `installation.created` или `installation_repositories.added` устанавливает `installation_available=true` только для действующей связанной установки. Предпочтение `enabled` существующего Repository и его ручная пауза сохраняются, в том числе после replay и пробуждения квитанции. У нового Repository предпочтение по умолчанию true. Доступ определяется актуальными личными repo-грантами после OAuth; доступность App не заменяет их.
 
-Гонка removal с OAuth защищена блокировкой установки и отметкой отзыва `GitHubInstallationAccessRevocation`: снимок, начатый до отзыва или одновременно с ним, не восстанавливает соответствующие repo-гранты. Отметка привязана к установке и внешнему repo ID (ID `0` означает всю установку); она не запрещает новый доступ навсегда: более свежий OAuth-снимок может вновь подтвердить его у GitHub. Поколение пользовательского снимка отдельно не позволяет более старому callback перезаписать новый. Сетевые вызовы происходят вне DB-транзакций.
+Гонка removal с OAuth защищена блокировкой установки и отметкой отзыва `GitHubInstallationAccessRevocation`: снимок, начатый до отзыва или одновременно с ним, не восстанавливает соответствующие repo-гранты. Отметка привязана к установке и внешнему repo ID (ID `0` означает всю установку); для частичного repo-removal более свежий OAuth-снимок может вновь подтвердить доступ у GitHub; для полной установки дополнительный `deleted_at` постоянен и запрещает её возрождение независимо от свежести снимка. Поколение пользовательского снимка отдельно не позволяет более старому callback перезаписать новый. Сетевые вызовы происходят вне DB-транзакций.
 
-На `main` доставка для установки без Workspace подтверждается ответом 202, а `webhook-worker` откладывает её квитанцию: три попытки разбора с интервалом 5 мин, затем она ждёт, пока установку не свяжут с Workspace. События установки (`installation`, `installation_repositories`) уже связанной установки `webhook-worker` также возобновляет на каждом ежечасном проходе, если квитанция отложена не менее 45 мин назад и получена не более 7 дней назад, — то есть примерно раз в час. При подключении репозитория App создаёт в нём лейбл `ai-review` — триггер Р-10: `webhook-worker` вызывает `POST /repos/{owner}/{repo}/labels` вне транзакции; эндпоинт относится к правам Issues, поэтому у App есть `issues: write` (добавлено 03.10.2026 по #37). Ответ 422 (лейбл уже есть) — успех; другая ошибка логируется и подключение не отменяет [дефолт], кроме сбоя токена установки: он касается всей установки, поэтому этот репозиторий в попытке не сохраняется, ещё не начатые репозитории события пропускаются, начатые доходят до конца, и все прочитанные сохраняются; затем доставка откладывается (GitHub не ответил на запрос токена) или проваливается (некорректный ответ или ключ App, которым нельзя подписать), а повтор переигрывает событие целиком (WEBHOOK_WORKER.md, «Installation token failures»). Лейбл, удалённый мейнтейнером, вернётся только при повторном подключении репозитория (OQ-8).
+На `main` доставка для установки без Workspace подтверждается ответом 202, а `webhook-worker` откладывает её квитанцию: три попытки разбора с интервалом 5 мин, затем она ждёт, пока установку не свяжут с Workspace. События установки (`installation`, `installation_repositories`) уже связанной установки `webhook-worker` также возобновляет на каждом ежечасном проходе, если квитанция отложена не менее 45 мин назад и получена не более 7 дней назад, — то есть примерно раз в час. При подключении репозитория App создаёт в нём лейбл `ai-review` — триггер Р-10: `webhook-worker` вызывает `POST /repos/{owner}/{repo}/labels` вне транзакции; эндпоинт относится к правам Issues, поэтому у App есть `issues: write` (добавлено 03.10.2026 по #37). Ответ 422 (лейбл уже есть) — успех; другая ошибка логируется и подключение не отменяет [дефолт], кроме сбоя токена установки: он касается всей установки, поэтому этот репозиторий в попытке не сохраняется, ещё не начатые репозитории события пропускаются, уже начатые запросы могут закончиться, а прочитанные репозитории сохраняются только после повторной проверки действующей установки в транзакции записи; затем доставка откладывается (GitHub не ответил на запрос токена) или проваливается (некорректный ответ или ключ App, которым нельзя подписать), а повтор переигрывает событие целиком (WEBHOOK_WORKER.md, «Installation token failures»). Лейбл, удалённый мейнтейнером, вернётся только при повторном подключении репозитория (OQ-8).
 
 ---
 
@@ -640,7 +719,7 @@ head-входы общего conventions cache и публикация raw summa
 - Rerun (T3) пишет Run с `message_published_at = null` и снимает пометку после confirm, но в replay лидер-цикла worker не попадает: выборка outbox из #11 рассчитана на Run с `trigger = webhook` и лейблом `ai-review`. Неотправленный rerun переотправляет реконсилер (T18, через 10 мин).
 - Ответ `review.postprocess` дополнительно хранит `summary` из `ReviewOutput`: `llm.review_output` больше 1 МиБ усекается (D1), а run detail берёт сводку из маленького `review.postprocess`.
 - Все адаптеры, функции авторизации и фабрики с параметром `scope: AuthScope | None` обязаны работать fail-closed: создание или вызов без `AuthScope` вызывает `ValueError`, если доверенный внутренний вызывающий код явно не передал `allow_unscoped=True`. Актуальные примеры адаптеров: [`SqlAlchemyRunRepository`](../app/modules/reviews/infrastructure/run_repository.py), [`SqlAlchemyCancelRunUnitOfWork`](../app/modules/reviews/infrastructure/run_repository.py), [`SqlAlchemyRerunStore`](../app/modules/reviews/infrastructure/rerun_store.py), [`SqlAlchemyRerunUnitOfWork`](../app/modules/reviews/infrastructure/rerun_store.py), [`SqlAlchemyPullRequestQueries`](../app/modules/reviews/infrastructure/pull_request_queries.py), [`SqlAlchemyRepositorySettingsStore`](../app/modules/repositories/infrastructure/repository_settings.py) и [`SqlAlchemyRepositorySettingsUnitOfWork`](../app/modules/repositories/infrastructure/repository_settings.py). Функция авторизации [`authorized_run`](../app/modules/reviews/infrastructure/run_repository.py) проверяет scope напрямую; фабрика [`ReviewsApiResources.run_repository`](../app/bootstrap/reviews_api.py) делегирует защищённому конструктору репозитория. Отсутствие scope само по себе не разрешает обход. Scoped rerun использует тот же DB-предикат видимости, что чтение Run.
-- `POST /api/runs/{id}/rerun` отвечает 422, если у репозитория нет активной версии правил или промпта: это не конфликт T3 (409 только для активного Run или закрытого PR).
+- `POST /api/runs/{id}/rerun` отвечает 422, если у репозитория нет активной версии правил или промпта: это не конфликт T3 (409 для активного Run, закрытого PR либо paused/unavailable Repository).
 - `GET /api/runs/{id}` отдаёт `RunDetail`; `author`, `headRef` и `baseRef` в `PullRequestRef` заполняются только в нём, список `GET /api/runs` отдаёт `RunSession` без них. Zod-схема UI допускает оба ответа: с ui#59 (`4369e02`) эти поля `nullable().optional()`; снимок Zod-схем ui (`tests/fixtures/ui_zod_contracts.json`) сверяется со спекой поле в поле, порядок перегенерации — PIPELINE_SPEC §16; коммит ui, с которого он снят, — в `provenance.commit` и `UI_CONTRACT_COMMIT`.
 - Worker собирает LLM Gateway (#33) один раз на процесс, а модели ревью и конвенций на каждую попытку с её `RunCallContext` (дедлайн, номер попытки, версии). AGENTS.md читается на `base_sha`, дерево и файлы для конвенций читаются на `head_sha` через blob, метаданные PR берутся из GitHub. Без `LLM_MODEL` worker стартует с предупреждением, а Run завершается `failed` / `llm_unavailable` с сообщением о том, что шлюз не настроен (#52). `llm_unavailable` ретраится (`RETRYABLE_ERROR_CODES`), поэтому Run проходит все три попытки, и сообщение видно в `runs.error_message` только после третьей. Локальные модели: таймаут вызова fast фиксирован, 90 с (`GatewayPolicy.call_timeout_s`, из env не задаётся), и reasoning-модели на локальном железе в него обычно не укладываются; LM Studio с gpt-oss отвечает 400 на строгую схему (`json_schema`), ему нужны `LLM_STRUCTURED_OUTPUT=prompt_json` и `LLM_ALLOW_PROMPT_JSON=1` (README, «LLM gateway»).
 - Перед `POST /pulls/{n}/reviews` publisher сверяет голову PR в GitHub: push, который webhook-worker ещё не записал в PostgreSQL, превращает публикацию в `cancelled` / `superseded` (T15), а не в ревью на старый коммит (#52).
@@ -1101,10 +1180,10 @@ CONTEXT_AND_VERIFICATION_SPEC §5–8, §10.
 | Сущность (роль 6) | Требуемые поля |
 |---|---|
 | `Workspace` | арендатор (Р-7); дневной бюджет |
-| `ProviderInstallation` | `provider`, `external_id`, `metadata` (JSON); токены App в БД не сохраняются (installation-токен — только кэш Redis, §8.3; сейчас — в памяти процесса, отступление §7.3); шифрование в MVP не заявлено — OQ-7 |
-| `Repository` | `enabled`, `default_engine`, `wait_for_ci: auto\|always\|never`, `review_event`, `max_comments` |
+| `ProviderInstallation` | `provider`, неизменяемый `external_id`, nullable positive BIGINT `account_external_id`, постоянный `deleted_at`, `metadata` (JSON); токены App в БД не сохраняются (installation-токен — только кэш Redis, §8.3; сейчас — в памяти процесса, отступление §7.3); шифрование в MVP не заявлено — OQ-7 |
+| `Repository` | `enabled` (предпочтение), `installation_available` (доступность App), их AND в API и review eligibility; `default_engine`, `wait_for_ci: auto\|always\|never`, `review_event`, `max_comments` |
 | `CodeChange` (PR) | `number`, `head_sha`, `base_sha`, `ai_review_labeled` (стоит лейбл `ai-review`, Р-10), `ci_status` (jsonb по sha), `state` |
-| `Run` | `head_sha`, `base_sha`, `state` (§6.4), `engine`, `rule_version_id`, `prompt_version_id`, `attempt`, `available_at`, `lease_until`, `cancel_requested`, `worker_id`, `trigger`, `error_code`, `error_message`; дополнительно закреплённые policy/diff/profile/result bindings. `summaryOnly` — явный итог режима, не вывод из `patch=null` |
+| `Run` | `origin_provider_installation_id` (неизменяемая исходная физическая установка; NULL закрывает provider-доступ), `head_sha`, `base_sha`, `state` (§6.4), `engine`, `rule_version_id`, `prompt_version_id`, `attempt`, `available_at`, `lease_until`, `cancel_requested`, `worker_id`, `trigger`, `error_code`, `error_message`; дополнительно закреплённые policy/diff/profile/result bindings. `summaryOnly` — явный итог режима, не вывод из `patch=null` |
 | Контекст | §9; manifest каждого фактического call, source roles/revisions/ranges/hashes и PG evidence excerpts (§10); summary не заменяет доказательства |
 | `Finding` | итоговая проекция supported кандидатов для API; `file_path`, `line_start=start_line ?? line`, `line_end=line`, `side=RIGHT` v2, run/candidate bindings и размещение. Diagnostic drops хранятся отдельно; revision разрешается по закреплённому run/manifest |
 | `Comment` | `finding_id`, remote review/comment/discussion IDs, связь с publication item/operation key; `findings_hash` только диагностика |
@@ -1154,7 +1233,7 @@ raw модельная похвала/неподтверждённые дефе�
 | Группа | Операции | Сервис | Главное |
 |---|---|---|---|
 | Прогоны | `GET /api/runs`, `GET /api/runs/{id}`, `…/diff`, `…/files`, `…/comments`, `…/actions`, `…/actions/{index}/response` | `portal-api` | `RunListPage {items,nextCursor}`, семь состояний Р-14; detail = RunSession + verdict/summary/severityCounts/findings/budget и планируемые поля coverage/version выше. `/diff` сохраняет исходный доступный UI patch при ignored/summary-only; `patch=null` означает отсутствие исходного patch, не отсутствие AI-проверки. `/files` старше TTL → `404`/`410`; большие action bodies — через response endpoint |
-| Действия с прогоном | `POST /api/runs/{id}/rerun`, `POST /api/runs/{id}/cancel` | `portal-api` | rerun — новый Run `queued`, `202`; PR закрыт или есть активный Run → `409` (§6.7); cancel идемпотентен |
+| Действия с прогоном | `POST /api/runs/{id}/rerun`, `POST /api/runs/{id}/cancel` | `portal-api` | rerun — новый Run `queued`, `202`; PR закрыт, есть активный Run либо Repository paused/unavailable → `409` (§6.7); cancel идемпотентен |
 | Поток | `GET /api/stream` | `portal-api` | SSE `run.updated {runId, status}` (кадр с `id:`, повтор по `Last-Event-ID`) и `run.step {runId, tool, index, ok, startedAt, durationMs}` (без `id:`, не переигрывается); один поток на вкладку, `fetch` с Bearer; между процессами — PG `LISTEN/NOTIFY` каналов `run_updated` и `run_step` (D12 — дефолт по #20, §6.6, PIPELINE_SPEC §1) |
 | Репозитории | `GET /api/repos`, `GET/PATCH /api/repos/{id}`, `GET /api/repos/{id}/pulls` | `portal-api` | подключение — установкой App (§6.9): `POST /api/repos` и PATCH коллекции нет (D10); `GET /api/repos` → `Repository[]`; PATCH — `enabled`, `defaultEngine`, `waitForCi` (`auto\|always\|never`), `maxComments` (1..10), `reviewEvent` (`COMMENT\|REQUEST_CHANGES`); pulls → `{items: PullRequestSummary[], nextCursor}` с `latestRun {id, status, verdict}` (D11 — дефолт по #20) |
 | Правила, метрики | `GET/POST /api/repos/{id}/rules`, `POST /api/rules/{id}/preview`, `GET /api/metrics/summary` | `portal-api` | после MVP (`x-note` в спеке) |

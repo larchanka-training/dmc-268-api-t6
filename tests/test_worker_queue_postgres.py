@@ -49,7 +49,11 @@ from app.bootstrap.reviews_api import get_run_repository
 from app.common.infrastructure.db.leader import run_as_leader
 from app.common.infrastructure.heartbeat import is_fresh
 from app.main import app
-from app.modules.reviews.application.check_runs import CheckRunTarget, CheckRunView
+from app.modules.reviews.application.check_runs import (
+    CheckRunTarget,
+    CheckRunView,
+    RunProviderCheckpoint,
+)
 from app.modules.reviews.application.conventions import (
     ConventionsRequest,
     RepositoryFile,
@@ -105,6 +109,7 @@ SHORT_DELAYS = RetryDelays(
 
 @dataclass(frozen=True)
 class Env:
+    installation_id: UUID
     database_url: str
     schema: str
     rabbitmq_url: str
@@ -207,7 +212,9 @@ def env() -> Iterator[Env]:
             for statement, values in statements:
                 connection.execute(text(statement), values)
             connection.commit()
-            yield Env(database_url, schema, rabbitmq_url, pr_id, rule_id, prompt_id)
+            yield Env(
+                installation_id, database_url, schema, rabbitmq_url, pr_id, rule_id, prompt_id
+            )
             connection.rollback()
             connection.execute(text("SET search_path TO public"))
             connection.execute(DropSchema(schema, cascade=True))
@@ -221,6 +228,7 @@ async def insert_run(factory: async_sessionmaker[AsyncSession], env: Env, **valu
     run_id = uuid4()
     row = {
         "id": run_id,
+        "origin": env.installation_id,
         "pr": env.pr_id,
         "base": BASE,
         "head": HEAD,
@@ -239,8 +247,11 @@ async def insert_run(factory: async_sessionmaker[AsyncSession], env: Env, **valu
             text(
                 "INSERT INTO runs (id, code_change_id, base_sha, base_ref, head_sha, state, "
                 "trigger, idempotency_key, engine, rule_version_id, prompt_version_id, "
-                "available_at, attempt, lease_until) VALUES (:id, :pr, :base, 'main', :head, "
-                ":state, :trigger, :key, 'fast', :rule, :prompt, :available, :attempt, :lease)"
+                "available_at, attempt, lease_until, "
+                "origin_provider_installation_id) VALUES (:id, :pr, :base, "
+                "'main', :head, "
+                ":state, :trigger, :key, 'fast', :rule, :prompt, :available, "
+                ":attempt, :lease, :origin)"
             ),
             row,
         )
@@ -372,7 +383,10 @@ class Model:
 
 
 class Vcs:
-    async def get_pull_request(self, locator: PullRequestLocator) -> VcsPullRequest:
+    async def get_pull_request(
+        self, locator: PullRequestLocator, *, checkpoint: RunProviderCheckpoint
+    ) -> VcsPullRequest:
+        await checkpoint()
         return VcsPullRequest(
             locator=locator,
             head_sha=HEAD,
@@ -392,7 +406,10 @@ class Vcs:
             ),
         )
 
-    async def get_diff(self, pull_request: VcsPullRequest) -> tuple[VcsFile, ...]:
+    async def get_diff(
+        self, pull_request: VcsPullRequest, *, checkpoint: RunProviderCheckpoint
+    ) -> tuple[VcsFile, ...]:
+        await checkpoint()
         return (
             VcsFile(
                 filename="app/example.py",
@@ -407,7 +424,10 @@ class Vcs:
             ),
         )
 
-    async def get_blob(self, locator: PullRequestLocator, sha: str) -> bytes:
+    async def get_blob(
+        self, locator: PullRequestLocator, sha: str, *, checkpoint: RunProviderCheckpoint
+    ) -> bytes:
+        await checkpoint()
         return b"line10\nline11\nline12\n"
 
 
@@ -417,16 +437,28 @@ class GitHub:
     reviews: list[ReviewSubmission] = field(default_factory=list)
     during_post: Callable[[], Awaitable[None]] | None = None
 
-    async def upsert(self, target: CheckRunTarget, view: CheckRunView) -> None:
+    async def upsert(
+        self, target: CheckRunTarget, view: CheckRunView, *, checkpoint: RunProviderCheckpoint
+    ) -> None:
+        await checkpoint()
         self.check_runs.append((target.run_id, view.status, view.conclusion))
 
-    async def submit_review(self, submission: ReviewSubmission) -> SubmittedReview:
+    async def submit_review(
+        self, submission: ReviewSubmission, *, checkpoint: RunProviderCheckpoint
+    ) -> SubmittedReview:
+        await checkpoint()
         self.reviews.append(submission)
         if self.during_post is not None:
             await self.during_post()
         return SubmittedReview(7001, tuple(9000 + n for n in range(len(submission.findings))))
 
-    async def execute(self, code_change_id: UUID, expected_head_sha: str) -> CiEligibility:
+    async def execute(
+        self,
+        code_change_id: UUID,
+        expected_head_sha: str,
+        *,
+        expected_installation_external_id: int | None = None,
+    ) -> CiEligibility:
         raise AssertionError("eligibility is not used by these tests")
 
 

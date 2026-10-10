@@ -21,6 +21,7 @@ from app.bootstrap.portal_auth import get_auth_scope
 from app.bootstrap.reviews_api import ReviewsApiResources
 from app.main import app
 from app.modules.auth.application.scope import AuthScope
+from tests.installation_onboarding_fakes import active_installation
 
 WORKSPACE_A = UUID("00000000-0000-0000-0000-000000000011")
 WORKSPACE_B = UUID("00000000-0000-0000-0000-000000000012")
@@ -419,6 +420,7 @@ def test_installation_deleted_revokes_unlisted_grants_without_github_calls(
     # Any attempt to call GitHub fails: deleted events need no provider methods.
     no_github = cast(Any, object())
     projector = InstallationEventProjector(
+        installation_active=active_installation,
         tree_provider=no_github,
         label_provider=no_github,
         details_provider=no_github,
@@ -464,7 +466,10 @@ def test_installation_deleted_revokes_unlisted_grants_without_github_calls(
             assert [tuple(row) for row in rows] == [(42, 103)]
             enabled = (
                 await session.execute(
-                    text("SELECT external_id, enabled FROM repositories ORDER BY external_id")
+                    text(
+                        "SELECT external_id, enabled AND installation_available "
+                        "FROM repositories ORDER BY external_id"
+                    )
                 )
             ).all()
             assert [tuple(row) for row in enabled] == [(101, False), (102, False), (103, True)]
@@ -534,6 +539,7 @@ def test_removal_during_oauth_snapshot_cannot_restore_grants(
     dispatcher = GitHubInstallationDeliveryDispatcher(
         resolver=Resolver(),
         onboarding=InstallationEventProjector(
+            installation_active=active_installation,
             tree_provider=no_github,
             label_provider=no_github,
             details_provider=no_github,
@@ -621,7 +627,7 @@ def test_removal_during_oauth_snapshot_cannot_restore_grants(
                 .all()
             )
             assert grants == [103]
-        # A fresh GitHub snapshot after re-adding access can grant it again.
+        # Fresh OAuth may restore partial removal; a whole-deleted external ID stays retired.
         await link.execute("fresh-snapshot")
         async with factory() as session:
             grants = (
@@ -637,11 +643,17 @@ def test_removal_during_oauth_snapshot_cannot_restore_grants(
                 .scalars()
                 .all()
             )
-            assert grants == [101, 103]
-        # Finalization may fail after the effect commits. Re-add the repository and
-        # replay that old delivery after fresh OAuth: it must preserve the grant.
+            assert grants == ([103] if delete_installation else [101, 103])
+        # Retry finalization preserves a fresh partial-removal grant and leaves
+        # whole-deleted source identity permanently retired.
         async with factory.begin() as session:
-            await session.execute(text("UPDATE repositories SET enabled = true"))
+            await session.execute(
+                text(
+                    "UPDATE repositories SET enabled = true, installation_available = true "
+                    "WHERE (:whole IS FALSE OR provider_installation_id != :source)"
+                ),
+                {"whole": delete_installation, "source": INSTALLATION_A},
+            )
             revoked_at = await session.scalar(
                 text(
                     "SELECT revoked_at FROM github_installation_access_revocations "
@@ -653,20 +665,19 @@ def test_removal_during_oauth_snapshot_cannot_restore_grants(
         now += timedelta(minutes=10)  # Expire the failed attempt's durable claim.
         assert await receiver.replay_pending() == 1
         async with factory() as session:
-            assert (
-                await session.scalar(
-                    text(
-                        "SELECT count(*) FROM github_user_repository_access "
-                        "WHERE github_user_id=:user_id AND repository_external_id=101"
-                    ),
-                    {"user_id": user_id},
+            assert await session.scalar(
+                text(
+                    "SELECT count(*) FROM github_user_repository_access "
+                    "WHERE github_user_id=:user_id AND repository_external_id=101"
+                ),
+                {"user_id": user_id},
+            ) == (0 if delete_installation else 1)
+            assert await session.scalar(
+                text(
+                    "SELECT enabled AND installation_available "
+                    "FROM repositories WHERE external_id=101"
                 )
-                == 1
-            )
-            assert (
-                await session.scalar(text("SELECT enabled FROM repositories WHERE external_id=101"))
-                is True
-            )
+            ) is (not delete_installation)
             assert (
                 await session.scalar(
                     text(
@@ -751,7 +762,12 @@ def test_removal_rollback_preserves_grant_and_allows_same_delivery_retry(
                 == 1
             )
             assert (
-                await session.scalar(text("SELECT enabled FROM repositories WHERE external_id=101"))
+                await session.scalar(
+                    text(
+                        "SELECT enabled AND installation_available "
+                        "FROM repositories WHERE external_id=101"
+                    )
+                )
                 is True
             )
         retry = SyncInstallationRepositories(
@@ -991,7 +1007,10 @@ def test_removal_lock_allows_onboarding_foreign_key_check_without_deadlock(
                     async with factory() as observer:
                         assert (
                             await observer.scalar(
-                                text("SELECT enabled FROM repositories WHERE external_id=101")
+                                text(
+                                    "SELECT enabled AND installation_available "
+                                    "FROM repositories WHERE external_id=101"
+                                )
                             )
                             is False
                         )

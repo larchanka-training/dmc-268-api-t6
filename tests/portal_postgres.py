@@ -153,9 +153,11 @@ def _seed(connection: Any) -> None:
         run(
             "INSERT INTO runs (id, code_change_id, base_sha, base_ref, head_sha, state, trigger, "
             "idempotency_key, engine, rule_version_id, prompt_version_id, available_at, attempt, "
-            "created_at) VALUES (:id, :pr, :base, 'main', :head, :state, 'webhook', :key, 'fast', "
-            ":rule, :prompt, :now, :attempt, :now)",
+            "created_at, origin_provider_installation_id) VALUES (:id, :pr, "
+            ":base, 'main', :head, :state, 'webhook', :key, 'fast', "
+            ":rule, :prompt, :now, :attempt, :now, :origin)",
             id=run_id,
+            origin=INSTALL_B if run_id == RUN_B else INSTALL_A,
             pr=pr,
             base="b" * 40,
             head=HEAD,

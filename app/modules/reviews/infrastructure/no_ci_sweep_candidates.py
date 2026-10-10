@@ -50,6 +50,7 @@ class SqlAlchemyDueNoCiCandidates:
                 CodeChange.head_first_seen_at.is_not(None),
                 CodeChange.ci_status == {},
                 Repository.enabled.is_(True),
+                Repository.installation_available.is_(True),
                 Repository.wait_for_ci == WaitForCi.AUTO,
                 ~active_run,
                 ~webhook_run,

@@ -14,6 +14,7 @@ import pytest
 from app.modules.integrations.webhooks.infrastructure.github_installation_tree_provider import (
     StaticGitHubInstallationAccessTokenProvider,
 )
+from app.modules.reviews.application.check_runs import RunProviderCheckpoint
 from app.modules.reviews.application.conventions import RepositoryFile
 from app.modules.reviews.application.process_run import RunVcsInput
 from app.modules.reviews.application.vcs_diff import PullRequestLocator, VcsProvider
@@ -47,7 +48,10 @@ class Blobs:
 
     contents: dict[str, bytes] = field(default_factory=dict)
 
-    async def get_blob(self, locator: PullRequestLocator, sha: str) -> bytes:
+    async def get_blob(
+        self, locator: PullRequestLocator, sha: str, *, checkpoint: RunProviderCheckpoint
+    ) -> bytes:
+        await checkpoint()
         if sha not in self.contents:
             request = httpx.Request("GET", f"https://api.github.test/git/blobs/{sha}")
             raise httpx.HTTPStatusError(

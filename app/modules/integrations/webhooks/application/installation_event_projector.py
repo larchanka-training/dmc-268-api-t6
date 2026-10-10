@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from functools import partial
 from typing import Protocol
 from uuid import UUID
 
@@ -33,7 +35,7 @@ _MAX_CONCURRENT_REPOSITORIES = 4
 
 
 class _Skipped:
-    """A repository that never started: the installation token failed before its turn."""
+    """Repository onboarding stopped before its transactional positive write."""
 
 
 _SKIPPED = _Skipped()
@@ -58,11 +60,22 @@ class RepositoryDetailsUnavailableError(Exception):
     """
 
 
+type InstallationProviderCheckpoint = Callable[[], Awaitable[None]]
+
+
+class InstallationRetiredError(Exception):
+    """An installation retired between two provider HTTP requests."""
+
+
 class InstallationRepositoryDetailsProvider(Protocol):
     """Read a repository's default branch and web URL using the installation's token."""
 
     async def fetch_repository_details(
-        self, *, installation_external_id: int, full_name: str
+        self,
+        *,
+        checkpoint: InstallationProviderCheckpoint,
+        installation_external_id: int,
+        full_name: str,
     ) -> RepositoryDetails: ...
 
 
@@ -72,6 +85,7 @@ class InstallationRepositoryTreeProvider(Protocol):
     async def fetch_default_branch_tree(
         self,
         *,
+        checkpoint: InstallationProviderCheckpoint,
         installation_external_id: int,
         repository: RepositorySnapshot,
     ) -> tuple[RepositoryTreeBlob, ...]: ...
@@ -81,7 +95,11 @@ class InstallationRepositoryLabelProvider(Protocol):
     """Create the review trigger label using the installation's GitHub token."""
 
     async def create_ai_review_label(
-        self, *, installation_external_id: int, repository: RepositorySnapshot
+        self,
+        *,
+        checkpoint: InstallationProviderCheckpoint,
+        installation_external_id: int,
+        repository: RepositorySnapshot,
     ) -> None: ...
 
 
@@ -146,6 +164,7 @@ class InstallationEventProjector:
         label_provider: InstallationRepositoryLabelProvider,
         details_provider: InstallationRepositoryDetailsProvider,
         sync: InstallationRepositoriesSync,
+        installation_active: Callable[[UUID], Awaitable[bool]],
         max_concurrent_repositories: int = _MAX_CONCURRENT_REPOSITORIES,
     ) -> None:
         if max_concurrent_repositories < 1:
@@ -154,6 +173,7 @@ class InstallationEventProjector:
         self._label_provider = label_provider
         self._details_provider = details_provider
         self._sync = sync
+        self._installation_active = installation_active
         self._max_concurrent_repositories = max_concurrent_repositories
 
     async def execute(
@@ -173,6 +193,11 @@ class InstallationEventProjector:
             )
             return ()
 
+        if not event.added_repositories:
+            return ()
+        if not await self._installation_active(provider_installation_id):
+            return ()
+
         slots = asyncio.Semaphore(self._max_concurrent_repositories)
         token_failed = False
 
@@ -180,10 +205,14 @@ class InstallationEventProjector:
             nonlocal token_failed
             async with slots:
                 # Set before the slot is released, so the next repository in line sees it.
-                if token_failed:
+                if token_failed or not await self._installation_active(provider_installation_id):
                     return _SKIPPED
                 try:
-                    return await self._onboard_repository(event.installation_external_id, reference)
+                    return await self._onboard_repository(
+                        provider_installation_id, event.installation_external_id, reference
+                    )
+                except InstallationRetiredError:
+                    return _SKIPPED
                 except InstallationAccessTokenError:
                     token_failed = True
                     raise
@@ -226,7 +255,7 @@ class InstallationEventProjector:
                 getattr(getattr(reported, "response", None), "status_code", None),
             )
         skipped = sum(1 for outcome in outcomes if outcome is _SKIPPED)
-        if skipped:
+        if skipped and token_failed:
             _LOGGER.warning(
                 "Skipped repositories after an installation token failure: "
                 "installation_id=%s skipped=%s",
@@ -242,22 +271,37 @@ class InstallationEventProjector:
             raise failures[0][1]
         return results
 
+    async def _checkpoint(self, provider_installation_id: UUID) -> None:
+        # The predicate closes its read UOW before the next network/pacing boundary.
+        if not await self._installation_active(provider_installation_id):
+            raise InstallationRetiredError()
+
     async def _onboard_repository(
-        self, installation_external_id: int, reference: RepositoryReference
-    ) -> RepositoryOnboardingInput:
-        repository = await self._resolve(installation_external_id, reference)
+        self,
+        provider_installation_id: UUID,
+        installation_external_id: int,
+        reference: RepositoryReference,
+    ) -> RepositoryOnboardingInput | _Skipped:
+        checkpoint = partial(self._checkpoint, provider_installation_id)
+        repository = await self._resolve(installation_external_id, reference, checkpoint=checkpoint)
+        if not await self._installation_active(provider_installation_id):
+            return _SKIPPED
         tree = await self._tree_provider.fetch_default_branch_tree(
             installation_external_id=installation_external_id,
             repository=repository,
+            checkpoint=checkpoint,
         )
+        if not await self._installation_active(provider_installation_id):
+            return _SKIPPED
         try:
             await self._label_provider.create_ai_review_label(
                 installation_external_id=installation_external_id,
                 repository=repository,
+                checkpoint=checkpoint,
             )
-        except InstallationAccessTokenError:
-            # The installation's token, not the label, failed: it stops the event as at the
-            # details or tree request, so a later attempt still creates the label.
+        except (InstallationAccessTokenError, InstallationRetiredError):
+            # Retirement stops this repository; token failure keeps the existing retry
+            # behavior. Ordinary label errors below remain best-effort.
             raise
         except Exception:
             _LOGGER.exception("Failed to create ai-review label for %s", repository.full_name)
@@ -267,7 +311,11 @@ class InstallationEventProjector:
         )
 
     async def _resolve(
-        self, installation_external_id: int, reference: RepositoryReference
+        self,
+        installation_external_id: int,
+        reference: RepositoryReference,
+        *,
+        checkpoint: InstallationProviderCheckpoint,
     ) -> RepositorySnapshot:
         """Complete a reference; a missing branch or URL is read from GitHub for both."""
         if reference.default_branch is not None and reference.web_url is not None:
@@ -278,7 +326,9 @@ class InstallationEventProjector:
                 web_url=reference.web_url,
             )
         details = await self._details_provider.fetch_repository_details(
-            installation_external_id=installation_external_id, full_name=reference.full_name
+            installation_external_id=installation_external_id,
+            full_name=reference.full_name,
+            checkpoint=checkpoint,
         )
         return RepositorySnapshot(
             external_id=reference.external_id,

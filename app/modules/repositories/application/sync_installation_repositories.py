@@ -31,6 +31,8 @@ class RepositoryOnboardingInput:
 class InstallationRepositoryStore(RepositoryRuleVersionStore, Protocol):
     """Flush-only store used by installation synchronization."""
 
+    async def lock_active_installation(self, provider_installation_id: UUID) -> bool: ...
+
     async def upsert_repository(
         self, provider_installation_id: UUID, snapshot: RepositorySnapshot
     ) -> UUID: ...
@@ -72,6 +74,11 @@ class SyncInstallationRepositories:
         self._uow_factory = uow_factory
         self._rule_sets = rule_sets
 
+    async def is_active(self, provider_installation_id: UUID) -> bool:
+        # The short preflight UOW closes before the projector enters any provider.
+        async with self._uow_factory() as uow:
+            return await uow.repositories.lock_active_installation(provider_installation_id)
+
     async def execute(
         self,
         *,
@@ -79,6 +86,8 @@ class SyncInstallationRepositories:
         repositories: tuple[RepositoryOnboardingInput, ...],
     ) -> tuple[OnboardingResult, ...]:
         async with self._uow_factory() as uow:
+            if not await uow.repositories.lock_active_installation(provider_installation_id):
+                return ()
             onboarding = OnboardRepository(uow.repositories, self._rule_sets)
             results: list[OnboardingResult] = []
             for repository in repositories:

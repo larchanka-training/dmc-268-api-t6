@@ -24,6 +24,7 @@ class GitHubInstallation:
     id: int
     account_login: str
     repository_ids: tuple[int, ...] = ()
+    account_external_id: int | None = None
 
 
 @dataclass(frozen=True)
@@ -47,6 +48,8 @@ class GitHubInstallationLinkStore(Protocol):
 
     async def mark_applied(self, user_id: int, generation: int) -> None: ...
 
+    async def lock_installations(self, installations: tuple[GitHubInstallation, ...]) -> None: ...
+
     async def current_workspace_ids(self, user_id: int) -> tuple[UUID, ...]: ...
 
     async def link(self, user_id: int, installation: GitHubInstallation) -> UUID: ...
@@ -57,6 +60,7 @@ class GitHubInstallationLinkStore(Protocol):
         installation_id: int,
         repository_ids: tuple[int, ...],
         snapshot_started_at: datetime,
+        account_external_id: int | None = None,
     ) -> None: ...
 
     async def wake_receipts(self, installation_id: int) -> None: ...
@@ -109,6 +113,11 @@ class LinkGitHubInstallations:
                 for repository_id in installation.repository_ids
             ):
                 raise ValueError("GitHub repository ID must fit PostgreSQL BIGINT")
+            if installation.account_external_id is not None and (
+                type(installation.account_external_id) is not int
+                or not 0 < installation.account_external_id <= _MAX_BIGINT
+            ):
+                raise ValueError("GitHub account ID must fit PostgreSQL BIGINT")
             if installation.id in seen_installations:
                 continue
             seen_installations.add(installation.id)
@@ -117,6 +126,7 @@ class LinkGitHubInstallations:
                     installation.id,
                     installation.account_login,
                     tuple(sorted(set(installation.repository_ids))),
+                    account_external_id=installation.account_external_id,
                 )
             )
         unique_installations.sort(key=lambda item: item.id)
@@ -125,10 +135,15 @@ class LinkGitHubInstallations:
         async with self._uow_factory() as uow:
             if not await uow.links.begin_apply(user_id, reservation.generation):
                 return await uow.links.current_workspace_ids(user_id)
+            await uow.links.lock_installations(tuple(unique_installations))
             for installation in unique_installations:
                 workspace_id = await uow.links.link(user_id, installation)
                 await uow.links.reconcile_repositories(
-                    user_id, installation.id, installation.repository_ids, reservation.started_at
+                    user_id,
+                    installation.id,
+                    installation.repository_ids,
+                    reservation.started_at,
+                    account_external_id=installation.account_external_id,
                 )
                 await uow.links.wake_receipts(installation.id)
                 workspace_ids.append(workspace_id)

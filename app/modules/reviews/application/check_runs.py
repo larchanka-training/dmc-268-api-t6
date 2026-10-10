@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Protocol
 from uuid import UUID
@@ -97,10 +98,15 @@ class CheckRunReport:
     run_url: str | None = None
 
 
+type RunProviderCheckpoint = Callable[[], Awaitable[None]]
+
+
 class CheckRunGateway(Protocol):
     """Create or update the one check-run with ``external_id = run_id`` (idempotent)."""
 
-    async def upsert(self, target: CheckRunTarget, view: CheckRunView) -> None: ...
+    async def upsert(
+        self, target: CheckRunTarget, view: CheckRunView, *, checkpoint: RunProviderCheckpoint
+    ) -> None: ...
 
 
 def check_run_view(report: CheckRunReport) -> CheckRunView:

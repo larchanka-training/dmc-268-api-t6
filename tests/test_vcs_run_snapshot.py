@@ -9,6 +9,7 @@ from uuid import UUID
 
 import pytest
 
+from app.modules.reviews.application.check_runs import RunProviderCheckpoint
 from app.modules.reviews.application.conventions import (
     ActiveConventionsPrompt,
     CachedConventions,
@@ -51,7 +52,10 @@ def test_worker_snapshot_preserves_every_file_and_filters_model_input() -> None:
     )
 
     class GitHub:
-        async def get_pull_request(self, locator: PullRequestLocator) -> VcsPullRequest:
+        async def get_pull_request(
+            self, locator: PullRequestLocator, *, checkpoint: RunProviderCheckpoint
+        ) -> VcsPullRequest:
+            await checkpoint()
             assert locator == LOCATOR
             return VcsPullRequest(
                 locator,
@@ -60,11 +64,17 @@ def test_worker_snapshot_preserves_every_file_and_filters_model_input() -> None:
                 PullRequestMeta("PR", None, "octo", "feature", "main", (), 3, 3, 2, False, False),
             )
 
-        async def get_diff(self, pull_request: VcsPullRequest) -> tuple[VcsFile, ...]:
+        async def get_diff(
+            self, pull_request: VcsPullRequest, *, checkpoint: RunProviderCheckpoint
+        ) -> tuple[VcsFile, ...]:
+            await checkpoint()
             assert pull_request.head_sha == HEAD
             return files
 
-        async def get_blob(self, locator: PullRequestLocator, sha: str) -> bytes:
+        async def get_blob(
+            self, locator: PullRequestLocator, sha: str, *, checkpoint: RunProviderCheckpoint
+        ) -> bytes:
+            await checkpoint()
             assert locator == LOCATOR
             return b"\x89PNG\r\n\x1a\n" if sha == "3" * 40 else b"new\n"
 
@@ -154,7 +164,10 @@ def test_worker_snapshot_preserves_every_file_and_filters_model_input() -> None:
 
 def test_large_generated_file_keeps_blob_sha_without_fetching_blob() -> None:
     class GitHub:
-        async def get_pull_request(self, locator: PullRequestLocator) -> VcsPullRequest:
+        async def get_pull_request(
+            self, locator: PullRequestLocator, *, checkpoint: RunProviderCheckpoint
+        ) -> VcsPullRequest:
+            await checkpoint()
             return VcsPullRequest(
                 LOCATOR,
                 HEAD,
@@ -162,7 +175,10 @@ def test_large_generated_file_keeps_blob_sha_without_fetching_blob() -> None:
                 PullRequestMeta("PR", None, "octo", "feature", "main", (), 1, 0, 0, False, False),
             )
 
-        async def get_diff(self, pull_request: VcsPullRequest) -> tuple[VcsFile, ...]:
+        async def get_diff(
+            self, pull_request: VcsPullRequest, *, checkpoint: RunProviderCheckpoint
+        ) -> tuple[VcsFile, ...]:
+            await checkpoint()
             return (
                 VcsFile(
                     "dist/app.min.js",
@@ -177,7 +193,10 @@ def test_large_generated_file_keeps_blob_sha_without_fetching_blob() -> None:
                 ),
             )
 
-        async def get_blob(self, locator: PullRequestLocator, sha: str) -> bytes:
+        async def get_blob(
+            self, locator: PullRequestLocator, sha: str, *, checkpoint: RunProviderCheckpoint
+        ) -> bytes:
+            await checkpoint()
             raise AssertionError("omitted generated blob must not be downloaded")
 
     @dataclass
@@ -225,7 +244,10 @@ def test_failed_missing_patch_blob_stays_in_snapshot_and_run_continues(
     )
 
     class GitHub:
-        async def get_pull_request(self, locator: PullRequestLocator) -> VcsPullRequest:
+        async def get_pull_request(
+            self, locator: PullRequestLocator, *, checkpoint: RunProviderCheckpoint
+        ) -> VcsPullRequest:
+            await checkpoint()
             return VcsPullRequest(
                 LOCATOR,
                 HEAD,
@@ -233,10 +255,16 @@ def test_failed_missing_patch_blob_stays_in_snapshot_and_run_continues(
                 PullRequestMeta("PR", None, "octo", "feature", "main", (), 2, 2, 2, False, False),
             )
 
-        async def get_diff(self, pull_request: VcsPullRequest) -> tuple[VcsFile, ...]:
+        async def get_diff(
+            self, pull_request: VcsPullRequest, *, checkpoint: RunProviderCheckpoint
+        ) -> tuple[VcsFile, ...]:
+            await checkpoint()
             return files
 
-        async def get_blob(self, locator: PullRequestLocator, sha: str) -> bytes:
+        async def get_blob(
+            self, locator: PullRequestLocator, sha: str, *, checkpoint: RunProviderCheckpoint
+        ) -> bytes:
+            await checkpoint()
             blob_requests.append(sha)
             if sha == "1" * 40:
                 raise RuntimeError("GitHub blob unavailable")
@@ -294,13 +322,22 @@ def test_failed_missing_patch_blob_stays_in_snapshot_and_run_continues(
 
 def test_github_failure_cannot_fall_back_to_mutable_path_ref_provider() -> None:
     class FailingGitHub:
-        async def get_pull_request(self, locator: PullRequestLocator) -> VcsPullRequest:
+        async def get_pull_request(
+            self, locator: PullRequestLocator, *, checkpoint: RunProviderCheckpoint
+        ) -> VcsPullRequest:
+            await checkpoint()
             raise RuntimeError("GitHub unavailable")
 
-        async def get_diff(self, pull_request: VcsPullRequest) -> tuple[VcsFile, ...]:
+        async def get_diff(
+            self, pull_request: VcsPullRequest, *, checkpoint: RunProviderCheckpoint
+        ) -> tuple[VcsFile, ...]:
+            await checkpoint()
             raise AssertionError("no diff after failed PR fetch")
 
-        async def get_blob(self, locator: PullRequestLocator, sha: str) -> bytes:
+        async def get_blob(
+            self, locator: PullRequestLocator, sha: str, *, checkpoint: RunProviderCheckpoint
+        ) -> bytes:
+            await checkpoint()
             raise AssertionError("no blob after failed PR fetch")
 
     class MutableProvider:
@@ -350,13 +387,22 @@ def test_retry_uses_persisted_run_snapshot_after_provider_head_and_base_change()
     ]
 
     class GitHub:
-        async def get_pull_request(self, locator: PullRequestLocator) -> VcsPullRequest:
+        async def get_pull_request(
+            self, locator: PullRequestLocator, *, checkpoint: RunProviderCheckpoint
+        ) -> VcsPullRequest:
+            await checkpoint()
             raise AssertionError("retry must not fetch mutable PR metadata")
 
-        async def get_diff(self, pull_request: VcsPullRequest) -> tuple[VcsFile, ...]:
+        async def get_diff(
+            self, pull_request: VcsPullRequest, *, checkpoint: RunProviderCheckpoint
+        ) -> tuple[VcsFile, ...]:
+            await checkpoint()
             raise AssertionError("retry must not fetch a mutable file list")
 
-        async def get_blob(self, locator: PullRequestLocator, sha: str) -> bytes:
+        async def get_blob(
+            self, locator: PullRequestLocator, sha: str, *, checkpoint: RunProviderCheckpoint
+        ) -> bytes:
+            await checkpoint()
             assert (locator, sha) == (LOCATOR, "1" * 40)
             return b"saved\n"
 
@@ -394,7 +440,10 @@ def test_blob_cache_writes_are_committed_by_the_processor() -> None:
     stored = [DiffSnapshot("src/a.py", None, blob_sha="1" * 40)]
 
     class GitHub:
-        async def get_blob(self, locator: PullRequestLocator, sha: str) -> bytes:
+        async def get_blob(
+            self, locator: PullRequestLocator, sha: str, *, checkpoint: RunProviderCheckpoint
+        ) -> bytes:
+            await checkpoint()
             return b"saved\n"
 
     class Repository:

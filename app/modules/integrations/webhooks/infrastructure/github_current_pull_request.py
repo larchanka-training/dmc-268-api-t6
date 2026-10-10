@@ -12,6 +12,7 @@ from app.modules.integrations.webhooks.infrastructure.github_pull_request_dtos i
 )
 from app.modules.reviews.application.project_github_pull_request import (
     PullRequestEvent,
+    PullRequestProviderCheckpoint,
 )
 
 
@@ -29,12 +30,16 @@ class HttpGitHubCurrentPullRequestProvider:
         self._client = client
         self._tokens = token_provider
 
-    async def get_current(self, event: PullRequestEvent) -> PullRequestEvent:
+    async def get_current(
+        self, event: PullRequestEvent, *, checkpoint: PullRequestProviderCheckpoint
+    ) -> PullRequestEvent:
         full_name = event.repository_full_name
         if full_name is None:
             raise ValueError("GitHub repository name is required for current PR lookup")
         repository_path = repository_path_from_full_name(full_name)
+        await checkpoint()
         token = await self._tokens.get_installation_access_token(event.installation_external_id)
+        await checkpoint()
         response = await self._client.get(
             f"{repository_path}/pulls/{event.number}",
             headers={

@@ -16,7 +16,6 @@ from app.common.application.unit_of_work import UnitOfWork
 from app.modules.reviews.application.check_runs import (
     CheckRunGateway,
     CheckRunReport,
-    CheckRunTarget,
     check_run_view,
 )
 from app.modules.reviews.application.conventions import (
@@ -79,7 +78,6 @@ class RunGuardSnapshot:
     engine: EngineName
     prompt_version_id: UUID
     rule_version_id: UUID
-    check_run: CheckRunTarget
 
 
 @dataclass(frozen=True)
@@ -97,6 +95,8 @@ class ClaimedAttempt:
 
 
 class CheckRunReports(Protocol):
+    async def provider_origin_active(self, run_id: UUID) -> bool: ...
+
     async def check_run_report(self, run_id: UUID) -> CheckRunReport | None: ...
 
 
@@ -480,7 +480,16 @@ async def update_check_run(
     if report is None:
         return
     report = replace(report, run_url=run_url(run_id))
+
+    async def checkpoint() -> None:
+        async with uow_factory() as uow:
+            active = await uow.runs.provider_origin_active(run_id)
+        if not active:
+            raise RunCancelled("installation_unavailable")
+
     try:
-        await gateway.upsert(report.target, check_run_view(report))
+        await gateway.upsert(report.target, check_run_view(report), checkpoint=checkpoint)
+    except RunCancelled:
+        return
     except Exception:
         _LOGGER.exception("Check-run update failed for run %s", run_id)

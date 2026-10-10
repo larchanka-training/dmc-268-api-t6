@@ -20,7 +20,7 @@ from app.modules.reviews.application.handle_review_run import RunGuardSnapshot
 from app.modules.reviews.application.policy_errors import policy_error_detail
 from app.modules.reviews.application.publish_run_review import PublishContext
 from app.modules.reviews.application.queue_messages import ReviewPublishPointer, StoredRunMessage
-from app.modules.reviews.application.run_failures import cancellation_reason
+from app.modules.reviews.application.run_failures import RunCancelled, cancellation_reason
 from app.modules.reviews.application.try_enqueue_webhook_run import PendingRunMessage
 from app.modules.reviews.application.verdict import (
     HashedFinding,
@@ -39,19 +39,29 @@ from app.modules.reviews.infrastructure.models import (
 )
 from app.modules.reviews.infrastructure.run_action_records import insert_run_action
 from app.modules.reviews.infrastructure.run_notifications import notify_run_state
+from app.modules.reviews.infrastructure.run_origin import active_origin_condition, origin_active
 from app.modules.reviews.infrastructure.run_repository import _to_published_finding_row
 from app.modules.workspaces.infrastructure.models import Workspace
 
 _ROW = (Run, CodeChange, Repository, ProviderInstallation)
 
 
-def _joined() -> Any:
-    return (
+def _joined(*, provider: bool = False) -> Any:
+    statement = (
         select(*_ROW)
         .join(CodeChange, Run.code_change_id == CodeChange.id)
         .join(Repository, CodeChange.repository_id == Repository.id)
-        .join(ProviderInstallation, Repository.provider_installation_id == ProviderInstallation.id)
+        .join(
+            ProviderInstallation,
+            (
+                Run.origin_provider_installation_id
+                if provider
+                else Repository.provider_installation_id
+            )
+            == ProviderInstallation.id,
+        )
     )
+    return statement.where(active_origin_condition()) if provider else statement
 
 
 def _message(
@@ -91,6 +101,23 @@ def _hashed(finding: Finding) -> HashedFinding:
     )
 
 
+async def _lock_provider_rows(session: AsyncSession, run_id: UUID) -> None:
+    # Rebind takes installation → Repository → Run; claim retains that order.
+    await session.execute(
+        select(ProviderInstallation.id)
+        .join(Run, Run.origin_provider_installation_id == ProviderInstallation.id)
+        .where(Run.id == run_id)
+        .with_for_update(of=ProviderInstallation)
+    )
+    await session.execute(
+        select(Repository.id)
+        .join(CodeChange, CodeChange.repository_id == Repository.id)
+        .join(Run, Run.code_change_id == CodeChange.id)
+        .where(Run.id == run_id)
+        .with_for_update(of=Repository)
+    )
+
+
 class SqlAlchemyRunLifecycleStore:
     """Repositories flush only; the use case commits. NOTIFY rides the same transaction."""
 
@@ -112,6 +139,7 @@ class SqlAlchemyRunLifecycleStore:
         )
 
     async def lock_for_claim(self, run_id: UUID) -> RunGuardSnapshot | None:
+        await _lock_provider_rows(self._session, run_id)
         row = (
             await self._session.execute(
                 _joined()
@@ -142,15 +170,12 @@ class SqlAlchemyRunLifecycleStore:
             head_sha=run.head_sha,
             pr_head_sha=pr.head_sha,
             pr_open=pr.state == CodeChangeState.OPEN,
-            repository_enabled=repository.enabled,
+            repository_enabled=repository.enabled and origin_active(run, repository, installation),
             daily_budget_usd=Decimal(daily_budget),
             spent_today_usd=Decimal(spent or 0),
             engine=run.engine.value,
             prompt_version_id=run.prompt_version_id,
             rule_version_id=run.rule_version_id,
-            check_run=CheckRunTarget(
-                installation.external_id, repository.full_name, run.head_sha, run.id
-            ),
         )
 
     async def claim(
@@ -239,29 +264,37 @@ class SqlAlchemyRunLifecycleStore:
         await self._notify(run_id, RunState.QUEUED)
         return True
 
-    async def cancellation_reason(self, run_id: UUID) -> str | None:
-        row = (
-            await self._session.execute(
-                select(Run.cancel_requested, Run.head_sha, CodeChange.head_sha, CodeChange.state)
-                .join(CodeChange, Run.code_change_id == CodeChange.id)
-                .where(Run.id == run_id)
+    async def provider_origin_active(self, run_id: UUID) -> bool:
+        return (
+            await self._session.scalar(
+                _joined(provider=True).with_only_columns(Run.id).where(Run.id == run_id)
             )
-        ).one_or_none()
+            is not None
+        )
+
+    async def cancellation_reason(self, run_id: UUID) -> str | None:
+        row = (await self._session.execute(_joined().where(Run.id == run_id))).one_or_none()
         if row is None:
             return None
-        cancel_requested, head_sha, pr_head_sha, pr_state = row
+        run, pr, repository, installation = row
+        if not origin_active(run, repository, installation):
+            return "installation_unavailable"
         return cancellation_reason(
-            pr_open=pr_state == CodeChangeState.OPEN,
-            head_current=head_sha == pr_head_sha,
-            cancel_requested=cancel_requested,
+            pr_open=pr.state == CodeChangeState.OPEN,
+            head_current=run.head_sha == pr.head_sha,
+            cancel_requested=run.cancel_requested,
         )
 
     async def run_message(self, run_id: UUID) -> PendingRunMessage | None:
-        row = (await self._session.execute(_joined().where(Run.id == run_id))).one_or_none()
+        row = (
+            await self._session.execute(_joined(provider=True).where(Run.id == run_id))
+        ).one_or_none()
         return None if row is None else _message(*row)
 
     async def check_run_report(self, run_id: UUID) -> CheckRunReport | None:
-        row = (await self._session.execute(_joined().where(Run.id == run_id))).one_or_none()
+        row = (
+            await self._session.execute(_joined(provider=True).where(Run.id == run_id))
+        ).one_or_none()
         if row is None:
             return None
         run, _, repository, installation = row
@@ -318,7 +351,10 @@ class SqlAlchemyRunLifecycleStore:
             head_sha=run.head_sha,
             pr_head_sha=pr.head_sha,
             pr_open=pr.state == CodeChangeState.OPEN,
-            installation_id=installation.external_id,
+            origin_active=origin_active(run, repository, installation),
+            installation_id=installation.external_id
+            if origin_active(run, repository, installation)
+            else None,
             repository_full_name=repository.full_name,
             pr_number=pr.external_number,
             review_body=run.review_body or "",
@@ -342,20 +378,25 @@ class SqlAlchemyRunLifecycleStore:
     ) -> str | None:
         """T14 under the Run lock; a cancel or push seen during the POST wins (T15).
 
-        The review is already on GitHub either way, so findings and comment ids are
-        recorded; only the final state differs.
+        An active origin records the submitted findings and comment ids. A retired
+        or replaced origin cancels without altering those historical payloads.
         """
+        await _lock_provider_rows(self._session, run_id)
         row = (
-            await self._session.execute(
-                select(Run, CodeChange.head_sha, CodeChange.state)
-                .join(CodeChange, Run.code_change_id == CodeChange.id)
-                .where(Run.id == run_id)
-                .with_for_update(of=Run)
-            )
+            await self._session.execute(_joined().where(Run.id == run_id).with_for_update(of=Run))
         ).one_or_none()
         if row is None or row[0].state != RunState.PUBLISHING:
             return None
-        run, pr_head_sha, pr_state = row
+        run, pr, repository, installation = row
+        if not origin_active(run, repository, installation):
+            run.state = RunState.CANCELLED
+            run.error_code = "installation_unavailable"
+            run.finished_at = now
+            run.lease_until = None
+            await self._session.flush()
+            await self._notify(run_id, RunState.CANCELLED)
+            return RunState.CANCELLED.value
+        pr_head_sha, pr_state = pr.head_sha, pr.state
         findings = await self._published_findings(run_id)
         inline = [item for item in findings if item.inline_comment]
         if moved_to_body:
@@ -404,7 +445,7 @@ class SqlAlchemyRunLifecycleStore:
     ) -> tuple[ReviewPublishPointer, ...]:
         rows = (
             await self._session.execute(
-                _joined()
+                _joined(provider=True)
                 .where(Run.state == RunState.PUBLISHING, Run.lease_until < now)
                 .order_by(Run.lease_until)
                 .limit(limit)
@@ -419,7 +460,7 @@ class SqlAlchemyRunLifecycleStore:
     ) -> tuple[PendingRunMessage, ...]:
         rows = (
             await self._session.execute(
-                _joined()
+                _joined(provider=True)
                 .where(
                     Run.state == RunState.QUEUED,
                     Run.available_at < available_before,
@@ -468,6 +509,20 @@ class SqlAlchemyRunTraceStore:
         )
 
     async def save_context_payload(self, run_id: UUID, summary: dict[str, Any]) -> None:
+        # Context is durable review input, not an append-only provider audit.
+        await _lock_provider_rows(self._session, run_id)
+        row = (
+            await self._session.execute(
+                _joined()
+                .where(Run.id == run_id)
+                .with_for_update(of=Run)
+                .execution_options(populate_existing=True)
+            )
+        ).one_or_none()
+        if row is None or not origin_active(row[0], row[2], row[3]):
+            raise RunCancelled("installation_unavailable")
+        if row[0].state != RunState.RUNNING:
+            raise RunCancelled("run_inactive")
         await self._session.execute(
             insert(ContextPayload)
             .values(run_id=run_id, schema_version=1, summary=summary, s3_ref=None)

@@ -144,7 +144,13 @@ def test_projected_pr_actions_recheck_current_head_only_on_synchronize(
             return ()
 
     class Enqueuer:
-        async def execute(self, code_change_id: UUID, expected_head_sha: str) -> EnqueueResult:
+        async def execute(
+            self,
+            code_change_id: UUID,
+            expected_head_sha: str,
+            *,
+            expected_installation_external_id: int | None = None,
+        ) -> EnqueueResult:
             enqueued.append((code_change_id, expected_head_sha))
             return EnqueueResult(EnqueueStatus.ENQUEUED)
 

@@ -50,6 +50,7 @@ from app.modules.reviews.application.review_output import (
     ReviewPublication,
 )
 from app.modules.reviews.application.run_events import RunChange
+from app.modules.reviews.application.run_failures import RunCancelled
 from app.modules.reviews.application.store_review_output import PublishingGuard
 from app.modules.reviews.application.vcs_diff import PullRequestLocator
 from app.modules.reviews.infrastructure.models import (
@@ -63,6 +64,7 @@ from app.modules.reviews.infrastructure.models import (
 )
 from app.modules.reviews.infrastructure.run_action_records import insert_run_action
 from app.modules.reviews.infrastructure.run_notifications import notify_run_state
+from app.modules.reviews.infrastructure.run_origin import active_origin_condition, origin_active
 from app.modules.workspaces.infrastructure.repository_access import repository_access_predicate
 
 
@@ -360,9 +362,42 @@ class SqlAlchemyRunRepository:
                 "store_diff_snapshots() requires an active session within a Unit of Work"
             )
         session = self._session
-        run = await session.scalar(select(Run).where(Run.id == run_id).with_for_update())
-        if run is None or run.code_change_id != code_change_id or run.head_sha != head_sha:
+        # Rebind takes source installation → Repository → Run. Protect the final
+        # snapshot write with the same order after detached provider requests.
+        await session.execute(
+            select(ProviderInstallation.id)
+            .join(Run, Run.origin_provider_installation_id == ProviderInstallation.id)
+            .where(Run.id == run_id)
+            .with_for_update(of=ProviderInstallation)
+        )
+        await session.execute(
+            select(Repository.id)
+            .join(CodeChange, CodeChange.repository_id == Repository.id)
+            .join(Run, Run.code_change_id == CodeChange.id)
+            .where(Run.id == run_id)
+            .with_for_update(of=Repository)
+        )
+        row = (
+            await session.execute(
+                select(Run, Repository, ProviderInstallation)
+                .join(CodeChange, CodeChange.id == Run.code_change_id)
+                .join(Repository, Repository.id == CodeChange.repository_id)
+                .outerjoin(
+                    ProviderInstallation,
+                    ProviderInstallation.id == Run.origin_provider_installation_id,
+                )
+                .where(Run.id == run_id)
+                .with_for_update(of=Run)
+                .execution_options(populate_existing=True)
+            )
+        ).one_or_none()
+        if row is None or row[0].code_change_id != code_change_id or row[0].head_sha != head_sha:
             raise ValueError("run revision changed before diff snapshot storage")
+        run, repository, installation = row
+        if installation is None or not origin_active(run, repository, installation):
+            raise RunCancelled("installation_unavailable")
+        if run.state != RunState.RUNNING:
+            raise RunCancelled("run_inactive")
         if run.diff_snapshotted_at is not None:
             rows = (
                 await session.scalars(
@@ -420,9 +455,9 @@ class SqlAlchemyRunRepository:
             .join(CodeChange, CodeChange.id == Run.code_change_id)
             .join(Repository, Repository.id == CodeChange.repository_id)
             .join(
-                ProviderInstallation, ProviderInstallation.id == Repository.provider_installation_id
+                ProviderInstallation, ProviderInstallation.id == Run.origin_provider_installation_id
             )
-            .where(Run.id == run_id)
+            .where(Run.id == run_id, active_origin_condition())
         )
         async with self._session_scope() as session:
             row = (await session.execute(statement)).one_or_none()

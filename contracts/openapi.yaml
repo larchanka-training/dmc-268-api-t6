@@ -152,7 +152,9 @@ paths:
         "404":
           $ref: "#/components/responses/NotFound"
         "409":
-          description: The pull request already has an active run or is closed; no new run was created.
+          description: >-
+            The pull request already has an active run or is closed, or repository reviews are
+            paused or unavailable; no new run was created.
           content:
             application/json:
               schema:

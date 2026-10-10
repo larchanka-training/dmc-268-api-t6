@@ -24,7 +24,12 @@ class SqlAlchemyEligibilityCandidateStore:
         async with self._session_factory() as session:
             row = (
                 await session.execute(
-                    select(CodeChange, Repository, ProviderInstallation.external_id)
+                    select(
+                        CodeChange,
+                        Repository,
+                        ProviderInstallation.external_id,
+                        ProviderInstallation.deleted_at,
+                    )
                     .join(Repository, CodeChange.repository_id == Repository.id)
                     .join(
                         ProviderInstallation,
@@ -38,14 +43,16 @@ class SqlAlchemyEligibilityCandidateStore:
             ).one_or_none()
             if row is None:
                 return None
-            pr, repository, installation_external_id = row
+            pr, repository, installation_external_id, deleted_at = row
             return EligibilityCandidate(
                 code_change_id=pr.id,
                 installation_external_id=installation_external_id,
                 repository_full_name=repository.full_name,
                 head_sha=pr.head_sha,
                 state=PullRequestState(pr.state.value),
-                repository_enabled=repository.enabled,
+                repository_enabled=(
+                    repository.enabled and repository.installation_available and deleted_at is None
+                ),
                 ai_review_labeled=pr.ai_review_labeled,
                 ai_review_labeled_at=pr.ai_review_labeled_at,
                 head_first_seen_at=pr.head_first_seen_at,

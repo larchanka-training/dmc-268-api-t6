@@ -18,6 +18,9 @@ from app.common.infrastructure.github_repository_path import (
 from app.modules.integrations.webhooks.application.installation_access_token import (
     InstallationAccessTokenError,
 )
+from app.modules.integrations.webhooks.application.installation_event_projector import (
+    InstallationProviderCheckpoint,
+)
 from app.modules.repositories.application.installation_repositories import (
     RepositorySnapshot,
     RepositoryTreeBlob,
@@ -239,15 +242,18 @@ class GitHubInstallationTreeProvider:
     async def fetch_default_branch_tree(
         self,
         *,
+        checkpoint: InstallationProviderCheckpoint,
         installation_external_id: int,
         repository: RepositorySnapshot,
     ) -> tuple[RepositoryTreeBlob, ...]:
         """Fetch the recursive tree for the repository's declared default branch."""
         repository_path = repository_path_from_full_name(repository.full_name)
         branch = ref_segment(repository.default_branch)
+        await checkpoint()
         access_token = await self._token_provider.get_installation_access_token(
             installation_external_id
         )
+        await checkpoint()
         response = await self._client.get(
             f"{repository_path}/git/trees/{branch}",
             params={"recursive": "1"},

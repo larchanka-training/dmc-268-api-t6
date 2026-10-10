@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import asyncio
 from typing import cast
 from uuid import UUID
@@ -7,6 +9,7 @@ from pytest import MonkeyPatch
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 import app.worker as worker
+from app.modules.reviews.application.check_runs import RunProviderCheckpoint
 from app.modules.reviews.application.conventions import (
     ConventionsRequest,
     RepositoryFile,
@@ -26,13 +29,22 @@ def test_process_review_run_composes_repository_and_processor_from_a_shared_fact
     factory = cast(async_sessionmaker[AsyncSession], object())
 
     class Vcs:
-        async def get_pull_request(self, locator: PullRequestLocator) -> VcsPullRequest:
+        async def get_pull_request(
+            self, locator: PullRequestLocator, *, checkpoint: RunProviderCheckpoint
+        ) -> VcsPullRequest:
+            await checkpoint()
             raise AssertionError("composition only")
 
-        async def get_diff(self, pull_request: VcsPullRequest) -> tuple[VcsFile, ...]:
+        async def get_diff(
+            self, pull_request: VcsPullRequest, *, checkpoint: RunProviderCheckpoint
+        ) -> tuple[VcsFile, ...]:
+            await checkpoint()
             raise AssertionError("composition only")
 
-        async def get_blob(self, locator: PullRequestLocator, sha: str) -> bytes:
+        async def get_blob(
+            self, locator: PullRequestLocator, sha: str, *, checkpoint: RunProviderCheckpoint
+        ) -> bytes:
+            await checkpoint()
             raise AssertionError("composition only")
 
     vcs = Vcs()
@@ -184,13 +196,22 @@ def test_review_worker_disposes_its_single_engine_at_shutdown(monkeypatch: Monke
     engine = Engine()
 
     class Vcs:
-        async def get_pull_request(self, locator: PullRequestLocator) -> VcsPullRequest:
+        async def get_pull_request(
+            self, locator: PullRequestLocator, *, checkpoint: RunProviderCheckpoint
+        ) -> VcsPullRequest:
+            await checkpoint()
             raise AssertionError("lifecycle only")
 
-        async def get_diff(self, pull_request: VcsPullRequest) -> tuple[VcsFile, ...]:
+        async def get_diff(
+            self, pull_request: VcsPullRequest, *, checkpoint: RunProviderCheckpoint
+        ) -> tuple[VcsFile, ...]:
+            await checkpoint()
             raise AssertionError("lifecycle only")
 
-        async def get_blob(self, locator: PullRequestLocator, sha: str) -> bytes:
+        async def get_blob(
+            self, locator: PullRequestLocator, sha: str, *, checkpoint: RunProviderCheckpoint
+        ) -> bytes:
+            await checkpoint()
             raise AssertionError("lifecycle only")
 
     received: list[tuple[str, bool]] = []

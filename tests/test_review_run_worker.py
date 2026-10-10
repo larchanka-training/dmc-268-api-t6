@@ -18,6 +18,7 @@ from app.modules.reviews.application.check_runs import (
     CheckRunReport,
     CheckRunTarget,
     CheckRunView,
+    RunProviderCheckpoint,
     check_run_view,
 )
 from app.modules.reviews.application.conventions import ConventionsRequest
@@ -94,7 +95,6 @@ class FakeStore:
             engine="fast",
             prompt_version_id=UUID(int=3),
             rule_version_id=UUID(int=4),
-            check_run=CheckRunTarget(17, "octo/repo", run.head_sha, run_id),
         )
 
     async def claim(
@@ -172,6 +172,9 @@ class FakeStore:
             requested_at=NOW,
         )
 
+    async def provider_origin_active(self, run_id: UUID) -> bool:
+        return True
+
     async def check_run_report(self, run_id: UUID) -> CheckRunReport | None:
         return CheckRunReport(
             CheckRunTarget(17, "octo/repo", self.run.head_sha, run_id),
@@ -207,7 +210,10 @@ class FakeUow:
 class CheckRuns:
     views: list[CheckRunView] = field(default_factory=list)
 
-    async def upsert(self, target: CheckRunTarget, view: CheckRunView) -> None:
+    async def upsert(
+        self, target: CheckRunTarget, view: CheckRunView, *, checkpoint: RunProviderCheckpoint
+    ) -> None:
+        await checkpoint()
         assert target.run_id == RUN
         self.views.append(view)
 

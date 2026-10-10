@@ -52,7 +52,8 @@ class SqlAlchemyRerunStore:
         )
         if code_change_id is None:
             return RerunResult(RerunOutcome.NOT_FOUND)
-        # The PR row lock is the one the webhook path takes: one active-Run decision.
+        # Match webhook/projection source-before-PR ordering before the active-Run decision.
+        candidate = await SqlAlchemyWebhookRunStore(self._session).lock_candidate(code_change_id)
         pr_state = await self._session.scalar(
             select(CodeChange.state).where(CodeChange.id == code_change_id).with_for_update()
         )
@@ -61,15 +62,17 @@ class SqlAlchemyRerunStore:
         )
         if pr_state != CodeChangeState.OPEN or active is not None:
             return RerunResult(RerunOutcome.CONFLICT)
-        candidate = await SqlAlchemyWebhookRunStore(self._session).lock_candidate(code_change_id)
         if not isinstance(candidate, RunInsertCandidate):
             # No active rule or prompt version, or no GitHub installation: not a T3 conflict.
             return RerunResult(RerunOutcome.NOT_CONFIGURED)
+        if not candidate.ci.repository_enabled:
+            return RerunResult(RerunOutcome.CONFLICT)
         new_id = uuid4()
         self._session.add(
             Run(
                 id=new_id,
                 code_change_id=code_change_id,
+                origin_provider_installation_id=candidate.origin_provider_installation_id,
                 base_sha=candidate.base_sha,
                 base_ref=candidate.base_ref,
                 head_sha=candidate.ci.head_sha,

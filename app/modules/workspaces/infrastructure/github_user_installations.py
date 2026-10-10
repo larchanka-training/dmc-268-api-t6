@@ -23,6 +23,7 @@ class _GitHubUserDto(BaseModel):
 class _GitHubAccountDto(BaseModel):
     model_config = ConfigDict(extra="ignore", strict=True)
 
+    id: int | None = Field(default=None, gt=0, le=_MAX_BIGINT)
     login: str = Field(min_length=1)
 
 
@@ -89,6 +90,7 @@ class HttpGitHubUserInstallationsProvider:
                 item.id,
                 item.account.login if item.account else "GitHub",
                 await self._list_repository_ids(item.id, headers),
+                account_external_id=item.account.id if item.account else None,
             )
             for item in listed_installations
         ]

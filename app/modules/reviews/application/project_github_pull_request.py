@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
+from functools import partial
 from typing import Protocol
 from uuid import UUID
 
@@ -164,6 +165,10 @@ class LockedPullRequest:
 
 
 class PullRequestProjectionStore(Protocol):
+    async def lock_active_installation(self, event: PullRequestEvent) -> bool:
+        """Lock source; return false if unknown, raise repository refusal if retired."""
+        ...
+
     async def get_or_create_locked(
         self, event: PullRequestEvent, now: datetime
     ) -> LockedPullRequest | None: ...
@@ -194,17 +199,22 @@ class PullRequestProjectionUnitOfWork(UnitOfWork, Protocol):
     def runs(self) -> PullRequestRunCanceller: ...
 
 
+type PullRequestProviderCheckpoint = Callable[[], Awaitable[None]]
+
+
 class CurrentPullRequestProvider(Protocol):
     """Fetch a current provider snapshot before opening the projection transaction."""
 
-    async def get_current(self, event: PullRequestEvent) -> PullRequestEvent: ...
+    async def get_current(
+        self, event: PullRequestEvent, *, checkpoint: PullRequestProviderCheckpoint
+    ) -> PullRequestEvent: ...
 
 
 class ReviewerTimelineProvider(Protocol):
     """Return explicit reviewer and lifecycle intent in GitHub timeline order."""
 
     async def snapshot(
-        self, event: PullRequestEvent, bot_login: str
+        self, event: PullRequestEvent, bot_login: str, *, checkpoint: PullRequestProviderCheckpoint
     ) -> ReviewerTimelineSnapshot: ...
 
 
@@ -282,8 +292,16 @@ class ProjectGitHubPullRequest:
     async def _project_label_under_lock(
         self, event: PullRequestEvent
     ) -> PullRequestProjectionStatus:
+        source_refusal = await self._source_refusal(event)
+        if source_refusal is not None:
+            return source_refusal
         assert self._current_provider is not None
-        current = await self._current_provider.get_current(event)
+        try:
+            current = await self._current_provider.get_current(
+                event, checkpoint=partial(self._checkpoint, event)
+            )
+        except PullRequestRepositoryRefused as refused:
+            return refused.status
         if not self._same_identity(current, event):
             return PullRequestProjectionStatus.IGNORED_IDENTITY_MISMATCH
         if current.current_label_names is None:
@@ -327,12 +345,20 @@ class ProjectGitHubPullRequest:
         )
 
     async def _execute_under_lock(self, event: PullRequestEvent) -> PullRequestProjectionStatus:
+        source_refusal = await self._source_refusal(event)
+        if source_refusal is not None:
+            return source_refusal
         timeline: ReviewerTimelineSnapshot | None = None
         if (
             event.action in {"review_requested", "review_request_removed", "closed", "reopened"}
             and self._reviewer_timeline_provider is not None
         ):
-            timeline = await self._reviewer_timeline_provider.snapshot(event, self._bot_login)
+            try:
+                timeline = await self._reviewer_timeline_provider.snapshot(
+                    event, self._bot_login, checkpoint=partial(self._checkpoint, event)
+                )
+            except PullRequestRepositoryRefused as refused:
+                return refused.status
             if event.action in {"review_requested", "review_request_removed"}:
                 if timeline.intent is None:
                     raise ValueError("GitHub timeline has no explicit bot reviewer intent")
@@ -345,8 +371,16 @@ class ProjectGitHubPullRequest:
             "edited",
         }
         if authoritative:
+            source_refusal = await self._source_refusal(event)
+            if source_refusal is not None:
+                return source_refusal
             assert self._current_provider is not None
-            current = await self._current_provider.get_current(event)
+            try:
+                current = await self._current_provider.get_current(
+                    event, checkpoint=partial(self._checkpoint, event)
+                )
+            except PullRequestRepositoryRefused as refused:
+                return refused.status
             if not self._same_identity(current, event):
                 return PullRequestProjectionStatus.IGNORED_IDENTITY_MISMATCH
             if event.action in {"closed", "reopened"} and timeline is not None:
@@ -367,6 +401,20 @@ class ProjectGitHubPullRequest:
             trigger_updated_at=event.provider_updated_at,
             timeline=timeline,
         )
+
+    async def _checkpoint(self, event: PullRequestEvent) -> None:
+        refusal = await self._source_refusal(event)
+        if refusal is not None:
+            raise PullRequestRepositoryRefused(refusal)
+
+    async def _source_refusal(self, event: PullRequestEvent) -> PullRequestProjectionStatus | None:
+        # The UOW releases its installation lock before any GitHub provider call.
+        async with self._uow_factory() as uow:
+            try:
+                active = await uow.pull_requests.lock_active_installation(event)
+            except PullRequestRepositoryRefused as refused:
+                return refused.status
+            return None if active else PullRequestProjectionStatus.UNKNOWN_REPOSITORY
 
     async def _project(
         self,

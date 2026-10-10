@@ -21,6 +21,7 @@ from app.common.infrastructure.github_repository_path import (
     commit_sha_segment,
     repository_path_from_full_name,
 )
+from app.modules.reviews.application.check_runs import RunProviderCheckpoint
 from app.modules.reviews.application.prompt_builder import PullRequestMeta
 from app.modules.reviews.application.vcs_diff import (
     MAX_BLOB_BYTES,
@@ -141,9 +142,13 @@ class HttpGitHubVcsProvider:
         self._client = client
         self._tokens = token_provider
 
-    async def get_pull_request(self, locator: PullRequestLocator) -> VcsPullRequest:
+    async def get_pull_request(
+        self, locator: PullRequestLocator, *, checkpoint: RunProviderCheckpoint
+    ) -> VcsPullRequest:
         prefix = _repository_prefix(locator)
+        await checkpoint()
         token = await self._tokens.get_installation_access_token(locator.installation_external_id)
+        await checkpoint()
         response = await self._client.get(
             f"{prefix}/pulls/{locator.number}",
             headers=_headers(token),
@@ -175,15 +180,19 @@ class HttpGitHubVcsProvider:
             ),
         )
 
-    async def get_diff(self, pull_request: VcsPullRequest) -> tuple[VcsFile, ...]:
+    async def get_diff(
+        self, pull_request: VcsPullRequest, *, checkpoint: RunProviderCheckpoint
+    ) -> tuple[VcsFile, ...]:
         locator = pull_request.locator
         prefix = _repository_prefix(locator)
         expected = pull_request.meta.files_changed
         if expected > _MAX_FILES:
             raise ValueError("GitHub pull request exceeds the 3000-file API cap")
+        await checkpoint()
         token = await self._tokens.get_installation_access_token(locator.installation_external_id)
         files: list[VcsFile] = []
         for page in range(1, _MAX_FILES // _PAGE_SIZE + 1):
+            await checkpoint()
             response = await self._client.get(
                 f"{prefix}/pulls/{locator.number}/files",
                 params={"per_page": _PAGE_SIZE, "page": page},
@@ -218,20 +227,24 @@ class HttpGitHubVcsProvider:
             raise ValueError("GitHub file pagination exceeded the 3000-file API cap")
         if len({file.filename for file in files}) != len(files):
             raise ValueError("GitHub file pagination repeated a filename")
-        if await self.get_pull_request(locator) != pull_request:
+        if await self.get_pull_request(locator, checkpoint=checkpoint) != pull_request:
             raise ValueError("GitHub pull request changed during file pagination")
         return tuple(files)
 
-    async def get_merge_base(self, pull_request: VcsPullRequest) -> str:
+    async def get_merge_base(
+        self, pull_request: VcsPullRequest, *, checkpoint: RunProviderCheckpoint
+    ) -> str:
         """Return the merge base GitHub diffs the pull request head against (three-dot)."""
         locator = pull_request.locator
         prefix = _repository_prefix(locator)
         base = commit_sha_segment(pull_request.base_sha)
         head = commit_sha_segment(pull_request.head_sha)
         try:
+            await checkpoint()
             token = await self._tokens.get_installation_access_token(
                 locator.installation_external_id
             )
+            await checkpoint()
             response = await self._client.get(
                 f"{prefix}/compare/{base}...{head}",
                 # Only the merge base is read; one commit per page keeps the response small.
@@ -245,11 +258,15 @@ class HttpGitHubVcsProvider:
             # ValueError covers a body that is not JSON and an answer of another shape.
             raise MergeBaseUnavailable(f"GitHub comparison failed: {type(exc).__name__}") from exc
 
-    async def get_blob(self, locator: PullRequestLocator, sha: str) -> bytes:
+    async def get_blob(
+        self, locator: PullRequestLocator, sha: str, *, checkpoint: RunProviderCheckpoint
+    ) -> bytes:
         prefix = _repository_prefix(locator)
         if re.fullmatch(_SHA, sha) is None:
             raise ValueError("GitHub blob SHA must be 40 or 64 hexadecimal characters")
+        await checkpoint()
         token = await self._tokens.get_installation_access_token(locator.installation_external_id)
+        await checkpoint()
         async with self._client.stream(
             "GET",
             f"{prefix}/git/blobs/{sha}",

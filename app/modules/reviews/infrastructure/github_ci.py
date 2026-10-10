@@ -8,7 +8,11 @@ import httpx
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.common.infrastructure.github_repository_path import repository_path_from_full_name
-from app.modules.reviews.application.determine_ci_eligibility import CheckSuite, CiSnapshot
+from app.modules.reviews.application.determine_ci_eligibility import (
+    CheckSuite,
+    CiProviderCheckpoint,
+    CiSnapshot,
+)
 
 _SHA_PATTERN = r"^(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})$"
 
@@ -54,7 +58,12 @@ class HttpGitHubCurrentHeadCiProvider:
         self._tokens = token_provider
 
     async def get_current_head_ci(
-        self, installation_external_id: int, repository_full_name: str, head_sha: str
+        self,
+        installation_external_id: int,
+        repository_full_name: str,
+        head_sha: str,
+        *,
+        checkpoint: CiProviderCheckpoint,
     ) -> CiSnapshot:
         if repository_full_name.count("/") != 1:
             raise ValueError("GitHub repository name must be owner/repo")
@@ -67,6 +76,7 @@ class HttpGitHubCurrentHeadCiProvider:
         ):
             raise ValueError("Invalid GitHub repository or head SHA")
         repository_path = repository_path_from_full_name(repository_full_name)
+        await checkpoint()
         token = await self._tokens.get_installation_access_token(installation_external_id)
         headers = {
             "Accept": "application/vnd.github+json",
@@ -77,6 +87,7 @@ class HttpGitHubCurrentHeadCiProvider:
         suites: list[CheckSuite] = []
         expected_count: int | None = None
         for page in range(1, 1001):
+            await checkpoint()
             response = await self._client.get(
                 f"{prefix}/check-suites",
                 params={"per_page": 100, "page": page},
@@ -108,6 +119,7 @@ class HttpGitHubCurrentHeadCiProvider:
         else:
             raise ValueError("GitHub check suite pagination exceeded bound")
 
+        await checkpoint()
         response = await self._client.get(f"{prefix}/status", headers=headers)
         response.raise_for_status()
         status = _CombinedStatusDto.model_validate(response.json())

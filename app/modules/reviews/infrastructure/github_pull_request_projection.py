@@ -29,6 +29,7 @@ from app.modules.reviews.application.project_github_pull_request import (
 )
 from app.modules.reviews.application.try_enqueue_webhook_run import PendingRunMessage
 from app.modules.reviews.infrastructure.models import CodeChange, Run
+from app.modules.reviews.infrastructure.run_origin import active_origin_condition
 
 
 class SqlAlchemyPullRequestProjectionStore:
@@ -37,9 +38,30 @@ class SqlAlchemyPullRequestProjectionStore:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
 
+    async def lock_active_installation(self, event: PullRequestEvent) -> bool:
+        installation = await self._session.scalar(
+            select(ProviderInstallation)
+            .where(
+                ProviderInstallation.provider == "github",
+                ProviderInstallation.external_id == event.installation_external_id,
+            )
+            .with_for_update(key_share=True)
+            .execution_options(populate_existing=True)
+        )
+        if installation is None:
+            await self._raise_if_repository_refused(event)
+            return False
+        if installation.deleted_at is not None:
+            await self._raise_if_repository_refused(event)
+            raise PullRequestRepositoryRefused(PullRequestProjectionStatus.DISABLED_REPOSITORY)
+        return True
+
     async def get_or_create_locked(
         self, event: PullRequestEvent, now: datetime
     ) -> LockedPullRequest | None:
+        # Source installation precedes PR locks and remains locked through apply/commit.
+        if not await self.lock_active_installation(event):
+            return None
         repository_id = cast(
             UUID | None,
             await self._session.scalar(
@@ -53,6 +75,7 @@ class SqlAlchemyPullRequestProjectionStore:
                     ProviderInstallation.external_id == event.installation_external_id,
                     Repository.external_id == event.repository_external_id,
                     Repository.enabled.is_(True),
+                    Repository.installation_available.is_(True),
                 )
             ),
         )
@@ -260,6 +283,7 @@ class SqlAlchemyPullRequestRunCanceller:
             Run.cancellation_signal_requested_at.is_not(None),
             Run.cancellation_signal_published_at.is_(None),
             ProviderInstallation.provider == "github",
+            active_origin_condition(),
         ]
         if run_ids is not None:
             conditions.append(Run.id.in_(run_ids))
@@ -270,7 +294,7 @@ class SqlAlchemyPullRequestRunCanceller:
                 .join(Repository, CodeChange.repository_id == Repository.id)
                 .join(
                     ProviderInstallation,
-                    Repository.provider_installation_id == ProviderInstallation.id,
+                    Run.origin_provider_installation_id == ProviderInstallation.id,
                 )
                 .where(*conditions)
                 .order_by(Run.cancellation_signal_requested_at, Run.id)

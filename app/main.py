@@ -574,7 +574,11 @@ async def get_run(
         202: {"description": "Rerun enqueued"},
         401: {"description": "Unauthorized"},
         404: {"description": "Run not found"},
-        409: {"description": "Conflict: Active run exists or PR is closed"},
+        409: {
+            "description": (
+                "Conflict: Active run, closed PR, or repository reviews paused or unavailable"
+            )
+        },
         422: {"description": "Repository configuration missing"},
     },
 )
@@ -588,7 +592,11 @@ async def rerun_run(
         item = await RerunRun(uow_factory, runs, publisher).execute(run_id)
     except RerunConflict as error:
         raise HTTPException(
-            status_code=409, detail="the pull request has an active run or is closed"
+            status_code=409,
+            detail=(
+                "the pull request has an active run or is closed, "
+                "or repository reviews are paused or unavailable"
+            ),
         ) from error
     except RerunNotConfigured as error:
         raise HTTPException(

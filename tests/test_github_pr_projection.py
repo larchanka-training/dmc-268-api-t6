@@ -42,6 +42,7 @@ from app.modules.reviews.application.project_github_pull_request import (
     PullRequestIdentityConflict,
     PullRequestLabelEvent,
     PullRequestProjectionStatus,
+    PullRequestProviderCheckpoint,
     PullRequestRecord,
     PullRequestRepositoryRefused,
     PullRequestState,
@@ -56,6 +57,7 @@ from app.modules.reviews.infrastructure.github_pull_request_projection import (
     SqlAlchemyPullRequestProjectionUnitOfWork,
 )
 from app.modules.reviews.infrastructure.models import CodeChange
+from tests.installation_onboarding_fakes import provider_checkpoint
 
 _REPOSITORY_ID = UUID("11111111-1111-1111-1111-111111111111")
 _NOW = datetime(2026, 9, 28, 12, 0, tzinfo=UTC)
@@ -98,6 +100,9 @@ class FakeStore:
     row: PullRequestRecord | None = None
     repository_id: UUID | None = _REPOSITORY_ID
     saves: int = 0
+
+    async def lock_active_installation(self, event: PullRequestEvent) -> bool:
+        return True
 
     async def get_or_create_locked(
         self, event: PullRequestEvent, now: datetime
@@ -473,7 +478,11 @@ def test_same_second_human_removal_then_fresh_request_uses_latest_timeline_event
         latest: ReviewerTimelineIntent
 
         async def snapshot(
-            self, event: PullRequestEvent, bot_login: str
+            self,
+            event: PullRequestEvent,
+            bot_login: str,
+            *,
+            checkpoint: PullRequestProviderCheckpoint,
         ) -> ReviewerTimelineSnapshot:
             assert bot_login == "reviewer[bot]"
             return ReviewerTimelineSnapshot(self.latest, None)
@@ -521,7 +530,11 @@ def test_same_second_request_then_human_removal_uses_latest_timeline_event() -> 
         latest: ReviewerTimelineIntent
 
         async def snapshot(
-            self, event: PullRequestEvent, bot_login: str
+            self,
+            event: PullRequestEvent,
+            bot_login: str,
+            *,
+            checkpoint: PullRequestProviderCheckpoint,
         ) -> ReviewerTimelineSnapshot:
             return ReviewerTimelineSnapshot(self.latest, None)
 
@@ -552,7 +565,11 @@ def test_same_second_request_then_human_removal_uses_latest_timeline_event() -> 
 def test_timeline_uncertainty_raises_without_committing_reviewer_intent() -> None:
     class UnavailableTimeline:
         async def snapshot(
-            self, event: PullRequestEvent, bot_login: str
+            self,
+            event: PullRequestEvent,
+            bot_login: str,
+            *,
+            checkpoint: PullRequestProviderCheckpoint,
         ) -> ReviewerTimelineSnapshot:
             raise RuntimeError("GitHub timeline unavailable")
 
@@ -589,12 +606,18 @@ def test_same_second_reopen_then_request_restores_flag_in_both_delivery_orders()
 
     class Timeline:
         async def snapshot(
-            self, event: PullRequestEvent, bot_login: str
+            self,
+            event: PullRequestEvent,
+            bot_login: str,
+            *,
+            checkpoint: PullRequestProviderCheckpoint,
         ) -> ReviewerTimelineSnapshot:
             return snapshot
 
     class Current:
-        async def get_current(self, event: PullRequestEvent) -> PullRequestEvent:
+        async def get_current(
+            self, event: PullRequestEvent, *, checkpoint: PullRequestProviderCheckpoint
+        ) -> PullRequestEvent:
             return _event(event.action, provider_updated_at=same_time, state=PullRequestState.OPEN)
 
     for actions in ((closed, reopened, request), (request, closed, reopened)):
@@ -632,12 +655,18 @@ def test_same_second_request_before_reopen_stays_cleared_in_both_delivery_orders
 
     class Timeline:
         async def snapshot(
-            self, event: PullRequestEvent, bot_login: str
+            self,
+            event: PullRequestEvent,
+            bot_login: str,
+            *,
+            checkpoint: PullRequestProviderCheckpoint,
         ) -> ReviewerTimelineSnapshot:
             return snapshot
 
     class Current:
-        async def get_current(self, event: PullRequestEvent) -> PullRequestEvent:
+        async def get_current(
+            self, event: PullRequestEvent, *, checkpoint: PullRequestProviderCheckpoint
+        ) -> PullRequestEvent:
             return _event(event.action, provider_updated_at=same_time, state=PullRequestState.OPEN)
 
     for actions in ((request, closed, reopened), (closed, reopened, request)):
@@ -663,7 +692,9 @@ def test_reopen_before_delayed_close_clears_old_intent_but_preserves_new_request
     reopened_at = datetime(2026, 9, 28, 12, 3, tzinfo=UTC)
 
     class CurrentProvider:
-        async def get_current(self, event: PullRequestEvent) -> PullRequestEvent:
+        async def get_current(
+            self, event: PullRequestEvent, *, checkpoint: PullRequestProviderCheckpoint
+        ) -> PullRequestEvent:
             return _event(
                 event.action, state=PullRequestState.OPEN, provider_updated_at=reopened_at
             )
@@ -714,7 +745,9 @@ def test_equal_timestamp_pushes_reconcile_current_head_in_both_delivery_orders()
             unit_of_work: FakeUnitOfWork
             calls: int = 0
 
-            async def get_current(self, event: PullRequestEvent) -> PullRequestEvent:
+            async def get_current(
+                self, event: PullRequestEvent, *, checkpoint: PullRequestProviderCheckpoint
+            ) -> PullRequestEvent:
                 self.calls += 1
                 assert not self.unit_of_work.active
                 return _event(
@@ -757,7 +790,9 @@ def test_closed_new_head_then_delayed_sync_cannot_reopen_and_reopen_is_authorita
 
     @dataclass
     class CurrentProvider:
-        async def get_current(self, event: PullRequestEvent) -> PullRequestEvent:
+        async def get_current(
+            self, event: PullRequestEvent, *, checkpoint: PullRequestProviderCheckpoint
+        ) -> PullRequestEvent:
             assert not uow.active
             return _event(
                 event.action,
@@ -938,7 +973,9 @@ def test_postgresql_label_deliveries_persist_add_remove_readd_timestamps(
                     active_uow[0] = False
 
         class Current:
-            async def get_current(self, event: PullRequestEvent) -> PullRequestEvent:
+            async def get_current(
+                self, event: PullRequestEvent, *, checkpoint: PullRequestProviderCheckpoint
+            ) -> PullRequestEvent:
                 assert not active_uow[0]
                 rest_calls.append(event.action)
                 return _event(event.action, current_label_names=frozenset(labels))
@@ -1030,7 +1067,9 @@ def test_inverted_rest_observations_are_serialized_per_pr() -> None:
         provider_calls = 0
 
         class CurrentProvider:
-            async def get_current(self, event: PullRequestEvent) -> PullRequestEvent:
+            async def get_current(
+                self, event: PullRequestEvent, *, checkpoint: PullRequestProviderCheckpoint
+            ) -> PullRequestEvent:
                 nonlocal provider_calls
                 provider_calls += 1
                 if event.head_sha == "c" * 40:
@@ -1075,7 +1114,9 @@ def test_close_fetch_serializes_with_reviewer_request_and_keeps_closed_flag_clea
         release_close_fetch = asyncio.Event()
 
         class CurrentProvider:
-            async def get_current(self, event: PullRequestEvent) -> PullRequestEvent:
+            async def get_current(
+                self, event: PullRequestEvent, *, checkpoint: PullRequestProviderCheckpoint
+            ) -> PullRequestEvent:
                 close_fetch_started.set()
                 await release_close_fetch.wait()
                 return _event(
@@ -1264,7 +1305,9 @@ def test_a_stored_repository_that_refuses_the_event_names_its_reason_on_every_pa
             raise PullRequestRepositoryRefused(PullRequestProjectionStatus(reason))
 
     class Current:
-        async def get_current(self, event: PullRequestEvent) -> PullRequestEvent:
+        async def get_current(
+            self, event: PullRequestEvent, *, checkpoint: PullRequestProviderCheckpoint
+        ) -> PullRequestEvent:
             return _event(event.action, current_label_names=frozenset({"ai-review"}))
 
     uow = FakeUnitOfWork(store=RefusingStore())
@@ -1317,7 +1360,9 @@ def test_ignored_label_projection_names_its_cause(
     saves = uow.store.saves
 
     class Current:
-        async def get_current(self, event: PullRequestEvent) -> PullRequestEvent:
+        async def get_current(
+            self, event: PullRequestEvent, *, checkpoint: PullRequestProviderCheckpoint
+        ) -> PullRequestEvent:
             return _event(
                 event.action, current_label_names=frozenset({"ai-review"}), **current_overrides
             )
@@ -1340,7 +1385,9 @@ def test_pull_request_event_whose_current_pr_differs_is_an_identity_mismatch() -
     uow = FakeUnitOfWork()
 
     class Current:
-        async def get_current(self, event: PullRequestEvent) -> PullRequestEvent:
+        async def get_current(
+            self, event: PullRequestEvent, *, checkpoint: PullRequestProviderCheckpoint
+        ) -> PullRequestEvent:
             return _event(event.action, number=8, current_label_names=frozenset())
 
     projector = ProjectGitHubPullRequest(
@@ -1579,7 +1626,9 @@ def test_label_projection_reconciles_add_remove_readd_and_delayed_deliveries() -
     observations: list[str] = []
 
     class Current:
-        async def get_current(self, event: PullRequestEvent) -> PullRequestEvent:
+        async def get_current(
+            self, event: PullRequestEvent, *, checkpoint: PullRequestProviderCheckpoint
+        ) -> PullRequestEvent:
             assert not uow.active
             observations.append(event.action)
             return _event(
@@ -1648,7 +1697,9 @@ def test_human_unlabels_ai_review_without_cancelling_active_run_or_enqueuing() -
     labels = {"ai-review"}
 
     class Current:
-        async def get_current(self, event: PullRequestEvent) -> PullRequestEvent:
+        async def get_current(
+            self, event: PullRequestEvent, *, checkpoint: PullRequestProviderCheckpoint
+        ) -> PullRequestEvent:
             assert not uow.active
             return _event(event.action, current_label_names=frozenset(labels))
 
@@ -1737,7 +1788,9 @@ def test_self_bot_label_delivery_is_ignored_before_projection_and_trigger(
     trigger_calls: list[str] = []
 
     class Current:
-        async def get_current(self, event: PullRequestEvent) -> PullRequestEvent:
+        async def get_current(
+            self, event: PullRequestEvent, *, checkpoint: PullRequestProviderCheckpoint
+        ) -> PullRequestEvent:
             provider_calls.append(event.action)
             return _event(event.action, current_label_names=frozenset())
 
@@ -1804,7 +1857,9 @@ def test_delayed_label_projects_current_head_and_cancels_obsolete_run() -> None:
     current_at = datetime(2026, 9, 28, 12, 5, tzinfo=UTC)
 
     class Current:
-        async def get_current(self, event: PullRequestEvent) -> PullRequestEvent:
+        async def get_current(
+            self, event: PullRequestEvent, *, checkpoint: PullRequestProviderCheckpoint
+        ) -> PullRequestEvent:
             assert not uow.active
             return _event(
                 event.action,
@@ -1842,7 +1897,9 @@ def test_delayed_label_projects_current_closed_lifecycle() -> None:
     current_at = datetime(2026, 9, 28, 12, 5, tzinfo=UTC)
 
     class Current:
-        async def get_current(self, event: PullRequestEvent) -> PullRequestEvent:
+        async def get_current(
+            self, event: PullRequestEvent, *, checkpoint: PullRequestProviderCheckpoint
+        ) -> PullRequestEvent:
             assert not uow.active
             return _event(
                 event.action,
@@ -1877,7 +1934,9 @@ def test_current_label_reconciles_old_row_on_sync_and_survives_close_reopen() ->
     head = ["c" * 40]
 
     class Current:
-        async def get_current(self, event: PullRequestEvent) -> PullRequestEvent:
+        async def get_current(
+            self, event: PullRequestEvent, *, checkpoint: PullRequestProviderCheckpoint
+        ) -> PullRequestEvent:
             assert not uow.active
             return _event(
                 event.action,
@@ -1933,7 +1992,9 @@ def test_first_label_receipt_projects_through_typed_adapter_and_real_intent_proj
     uow = FakeUnitOfWork()
 
     class Current:
-        async def get_current(self, event: PullRequestEvent) -> PullRequestEvent:
+        async def get_current(
+            self, event: PullRequestEvent, *, checkpoint: PullRequestProviderCheckpoint
+        ) -> PullRequestEvent:
             assert not uow.active
             return _event(event.action, current_label_names=frozenset({"ai-review"}))
 
@@ -1977,7 +2038,9 @@ def test_same_second_edited_replay_uses_current_metadata_in_either_order(
     calls: list[str] = []
 
     class Current:
-        async def get_current(self, event: PullRequestEvent) -> PullRequestEvent:
+        async def get_current(
+            self, event: PullRequestEvent, *, checkpoint: PullRequestProviderCheckpoint
+        ) -> PullRequestEvent:
             assert not uow.active
             calls.append(event.title)
             return _event(
@@ -2054,7 +2117,7 @@ def test_current_pr_provider_fetches_authoritative_snapshot_with_installation_to
             transport=httpx.MockTransport(handler), base_url="https://api.github.com"
         ) as client:
             provider = HttpGitHubCurrentPullRequestProvider(client=client, token_provider=Tokens())
-            return await provider.get_current(_event("synchronize"))
+            return await provider.get_current(_event("synchronize"), checkpoint=provider_checkpoint)
 
     result = asyncio.run(exercise())
 
@@ -2083,7 +2146,7 @@ def test_current_pr_without_valid_labels_cannot_clear_label_state(labels: object
             transport=httpx.MockTransport(handler), base_url="https://api.github.com"
         ) as client:
             provider = HttpGitHubCurrentPullRequestProvider(client=client, token_provider=Tokens())
-            await provider.get_current(_event("synchronize"))
+            await provider.get_current(_event("synchronize"), checkpoint=provider_checkpoint)
 
     with pytest.raises(ValueError):
         asyncio.run(exercise())
@@ -2126,7 +2189,9 @@ def test_reviewer_timeline_paginates_and_ignores_automatic_bot_removal() -> None
             transport=httpx.MockTransport(handler), base_url="https://api.github.com"
         ) as client:
             provider = HttpGitHubReviewerTimelineProvider(client=client, token_provider=Tokens())
-            return await provider.snapshot(_event("review_requested"), "reviewer[bot]")
+            return await provider.snapshot(
+                _event("review_requested"), "reviewer[bot]", checkpoint=provider_checkpoint
+            )
 
     result = asyncio.run(exercise())
 
@@ -2153,7 +2218,9 @@ def test_reviewer_timeline_invalid_or_missing_intent_fails_for_receipt_retry() -
             base_url="https://api.github.com",
         ) as client:
             provider = HttpGitHubReviewerTimelineProvider(client=client, token_provider=Tokens())
-            return await provider.snapshot(_event("review_requested"), "reviewer[bot]")
+            return await provider.snapshot(
+                _event("review_requested"), "reviewer[bot]", checkpoint=provider_checkpoint
+            )
 
     for items in (
         [],
@@ -2187,7 +2254,9 @@ def test_reviewer_timeline_orders_same_second_lifecycle_and_request() -> None:
             base_url="https://api.github.com",
         ) as client:
             provider = HttpGitHubReviewerTimelineProvider(client=client, token_provider=Tokens())
-            return await provider.snapshot(_event("review_requested"), "reviewer[bot]")
+            return await provider.snapshot(
+                _event("review_requested"), "reviewer[bot]", checkpoint=provider_checkpoint
+            )
 
     result = asyncio.run(exercise())
     assert result.lifecycle == TimelineLifecycle(
@@ -2201,7 +2270,11 @@ def test_reviewer_timeline_orders_same_second_lifecycle_and_request() -> None:
 def test_missing_lifecycle_timeline_does_not_commit_close() -> None:
     class IncompleteTimeline:
         async def snapshot(
-            self, event: PullRequestEvent, bot_login: str
+            self,
+            event: PullRequestEvent,
+            bot_login: str,
+            *,
+            checkpoint: PullRequestProviderCheckpoint,
         ) -> ReviewerTimelineSnapshot:
             return ReviewerTimelineSnapshot(None, None)
 

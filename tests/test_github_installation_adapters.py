@@ -25,6 +25,7 @@ from app.modules.repositories.application.installation_repositories import (
     RepositorySnapshot,
     RepositoryTreeBlob,
 )
+from tests.installation_onboarding_fakes import provider_checkpoint
 
 
 class FakeSession:
@@ -93,7 +94,11 @@ def test_github_label_provider_creates_ai_review_with_installation_token(
         ) as client:
             await GitHubRepositoryLabelProvider(
                 client=client, token_provider=tokens
-            ).create_ai_review_label(installation_external_id=17, repository=_repository())
+            ).create_ai_review_label(
+                installation_external_id=17,
+                repository=_repository(),
+                checkpoint=provider_checkpoint,
+            )
 
     asyncio.run(create_label())
 
@@ -144,7 +149,9 @@ def test_github_label_provider_spaces_concurrent_label_posts_by_the_minimum_inte
             )
             await asyncio.gather(
                 *(
-                    provider.create_ai_review_label(installation_external_id=17, repository=repo)
+                    provider.create_ai_review_label(
+                        installation_external_id=17, repository=repo, checkpoint=provider_checkpoint
+                    )
                     for repo in (_repository(), _repository(), _repository())
                 )
             )
@@ -165,7 +172,11 @@ def test_github_label_provider_raises_for_non_422_http_errors() -> None:
         ) as client:
             await GitHubRepositoryLabelProvider(
                 client=client, token_provider=FakeInstallationTokenProvider()
-            ).create_ai_review_label(installation_external_id=17, repository=_repository())
+            ).create_ai_review_label(
+                installation_external_id=17,
+                repository=_repository(),
+                checkpoint=provider_checkpoint,
+            )
 
     with pytest.raises(httpx.HTTPStatusError):
         asyncio.run(create_label())
@@ -332,6 +343,7 @@ def test_tree_provider_fetches_the_recursive_default_branch_tree() -> None:
             return await provider.fetch_default_branch_tree(
                 installation_external_id=17,
                 repository=_repository(),
+                checkpoint=provider_checkpoint,
             )
 
     tree = asyncio.run(fetch())
@@ -366,6 +378,7 @@ def test_tree_provider_propagates_github_provider_failures() -> None:
             await provider.fetch_default_branch_tree(
                 installation_external_id=17,
                 repository=_repository(),
+                checkpoint=provider_checkpoint,
             )
 
     try:
@@ -399,6 +412,7 @@ def test_tree_provider_treats_an_empty_repository_as_having_no_tree(message: str
             return await provider.fetch_default_branch_tree(
                 installation_external_id=17,
                 repository=_repository(),
+                checkpoint=provider_checkpoint,
             )
 
     assert asyncio.run(fetch()) == ()
@@ -447,6 +461,7 @@ def test_tree_provider_raises_for_a_409_that_is_not_the_empty_repository_answer(
             await provider.fetch_default_branch_tree(
                 installation_external_id=17,
                 repository=_repository(),
+                checkpoint=provider_checkpoint,
             )
 
     with pytest.raises(httpx.HTTPStatusError) as raised:
@@ -478,6 +493,7 @@ def test_tree_provider_rejects_a_truncated_recursive_tree() -> None:
             await provider.fetch_default_branch_tree(
                 installation_external_id=17,
                 repository=_repository(),
+                checkpoint=provider_checkpoint,
             )
 
     with pytest.raises(GitHubTreeResponseIncompleteError):

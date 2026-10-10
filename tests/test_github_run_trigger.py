@@ -24,6 +24,7 @@ from app.common.infrastructure.db.enums import CodeChangeState, Engine, RunState
 from app.modules.repositories.infrastructure.models import Repository
 from app.modules.reviews.application.determine_ci_eligibility import (
     CiEligibility,
+    CiProviderCheckpoint,
     CiSnapshot,
     CiWaitMode,
     DetermineCiEligibility,
@@ -75,6 +76,7 @@ _REPO = UUID("33333333-3333-3333-3333-333333333333")
 _WS = UUID("44444444-4444-4444-4444-444444444444")
 _RULE = UUID("55555555-5555-5555-5555-555555555555")
 _PROMPT = UUID("66666666-6666-6666-6666-666666666666")
+_INSTALLATION = UUID("77777777-7777-7777-7777-777777777777")
 _HEAD = "a" * 40
 _BASE = "b" * 40
 _NOW = datetime(2026, 9, 28, 12, 0, tzinfo=UTC)
@@ -98,6 +100,7 @@ def _ci_candidate() -> EligibilityCandidate:
 def _insert_candidate() -> RunInsertCandidate:
     return RunInsertCandidate(
         ci=_ci_candidate(),
+        origin_provider_installation_id=_INSTALLATION,
         repository_id=_REPO,
         workspace_id=_WS,
         repository_external_id=101,
@@ -119,7 +122,13 @@ class Eligibility:
         )
     )
 
-    async def execute(self, code_change_id: UUID, expected_head_sha: str) -> CiEligibility:
+    async def execute(
+        self,
+        code_change_id: UUID,
+        expected_head_sha: str,
+        *,
+        expected_installation_external_id: int | None = None,
+    ) -> CiEligibility:
         self.calls += 1
         return self.decision
 
@@ -419,7 +428,13 @@ def test_ci_delivery_commits_unit_of_work_before_enqueue() -> None:
         def __init__(self, trigger_uow: FakeTriggerUow) -> None:
             self._trigger_uow = trigger_uow
 
-        async def execute(self, code_change_id: UUID, expected_head_sha: str) -> EnqueueResult:
+        async def execute(
+            self,
+            code_change_id: UUID,
+            expected_head_sha: str,
+            *,
+            expected_installation_external_id: int | None = None,
+        ) -> EnqueueResult:
             assert self._trigger_uow.committed is True
             enqueued.append((code_change_id, expected_head_sha))
             return EnqueueResult(EnqueueStatus.ENQUEUED)
@@ -449,7 +464,13 @@ def test_delayed_label_enqueues_projected_head_instead_of_webhook_head() -> None
             return ()
 
     class Enqueuer:
-        async def execute(self, code_change_id: UUID, expected_head_sha: str) -> EnqueueResult:
+        async def execute(
+            self,
+            code_change_id: UUID,
+            expected_head_sha: str,
+            *,
+            expected_installation_external_id: int | None = None,
+        ) -> EnqueueResult:
             observed.append((code_change_id, expected_head_sha))
             return EnqueueResult(EnqueueStatus.ENQUEUED)
 
@@ -517,7 +538,13 @@ class OutcomeEnqueuer:
     results: list[EnqueueResult]
     calls: list[tuple[UUID, str]] = field(default_factory=list)
 
-    async def execute(self, code_change_id: UUID, expected_head_sha: str) -> EnqueueResult:
+    async def execute(
+        self,
+        code_change_id: UUID,
+        expected_head_sha: str,
+        *,
+        expected_installation_external_id: int | None = None,
+    ) -> EnqueueResult:
         self.calls.append((code_change_id, expected_head_sha))
         return self.results.pop(0)
 
@@ -726,7 +753,7 @@ def webhook_run_database() -> Iterator[tuple[str, str]]:
                     "(id, workspace_id, provider, external_id, metadata) "
                     "VALUES (:id, :workspace_id, 'github', 17, '{}'::jsonb)"
                 ),
-                {"id": uuid4(), "workspace_id": _WS},
+                {"id": _INSTALLATION, "workspace_id": _WS},
             )
             installation_id = connection.execute(
                 text("SELECT id FROM provider_installations WHERE external_id = 17")
@@ -1021,7 +1048,12 @@ def test_postgres_no_ci_sweep_enqueues_once_and_skips_later_rest_calls(
         calls: list[tuple[int, str, str]] = field(default_factory=list)
 
         async def get_current_head_ci(
-            self, installation_id: int, repository_full_name: str, head_sha: str
+            self,
+            installation_id: int,
+            repository_full_name: str,
+            head_sha: str,
+            *,
+            checkpoint: CiProviderCheckpoint,
         ) -> CiSnapshot:
             self.calls.append((installation_id, repository_full_name, head_sha))
             return CiSnapshot(head_sha, (), "success", 0)
@@ -1134,7 +1166,12 @@ def test_postgres_no_ci_sweep_races_current_head_check_suite_to_one_run(
         calls: int = 0
 
         async def get_current_head_ci(
-            self, installation_id: int, repository_full_name: str, head_sha: str
+            self,
+            installation_id: int,
+            repository_full_name: str,
+            head_sha: str,
+            *,
+            checkpoint: CiProviderCheckpoint,
         ) -> CiSnapshot:
             self.calls += 1
             return CiSnapshot(head_sha, (), "success", 0)
@@ -1207,7 +1244,13 @@ def test_postgres_no_ci_sweep_excludes_failed_candidate_until_state_changes(
     class RestDecision:
         calls: list[tuple[UUID, str]] = field(default_factory=list)
 
-        async def execute(self, code_change_id: UUID, expected_head_sha: str) -> EnqueueResult:
+        async def execute(
+            self,
+            code_change_id: UUID,
+            expected_head_sha: str,
+            *,
+            expected_installation_external_id: int | None = None,
+        ) -> EnqueueResult:
             self.calls.append((code_change_id, expected_head_sha))
             return EnqueueResult(EnqueueStatus.INELIGIBLE)
 

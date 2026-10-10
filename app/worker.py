@@ -451,7 +451,13 @@ def run_url_factory(portal_url: str | None) -> Callable[[UUID], str | None]:
 
 
 class _EligibilityUnavailable:
-    async def execute(self, code_change_id: UUID, expected_head_sha: str) -> CiEligibility:
+    async def execute(
+        self,
+        code_change_id: UUID,
+        expected_head_sha: str,
+        *,
+        expected_installation_external_id: int | None = None,
+    ) -> CiEligibility:
         raise RuntimeError("CI eligibility needs the GitHub App")
 
 

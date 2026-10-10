@@ -9,6 +9,9 @@ from collections.abc import Awaitable, Callable
 import httpx
 
 from app.common.infrastructure.github_repository_path import repository_path_from_full_name
+from app.modules.integrations.webhooks.application.installation_event_projector import (
+    InstallationProviderCheckpoint,
+)
 from app.modules.integrations.webhooks.infrastructure.github_installation_tree_provider import (
     GitHubInstallationAccessTokenProvider,
 )
@@ -49,11 +52,18 @@ class GitHubRepositoryLabelProvider:
             self._next_post_at = self._clock() + self._min_interval_seconds
 
     async def create_ai_review_label(
-        self, *, installation_external_id: int, repository: RepositorySnapshot
+        self,
+        *,
+        checkpoint: InstallationProviderCheckpoint,
+        installation_external_id: int,
+        repository: RepositorySnapshot,
     ) -> None:
         repository_path = repository_path_from_full_name(repository.full_name)
+        await checkpoint()
         token = await self._token_provider.get_installation_access_token(installation_external_id)
+        await checkpoint()
         await self._wait_for_post_slot()
+        await checkpoint()
         response = await self._client.post(
             f"{repository_path}/labels",
             json={"name": "ai-review"},

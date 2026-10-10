@@ -18,6 +18,7 @@ from uuid import UUID
 
 import pytest
 
+from app.modules.reviews.application.check_runs import RunProviderCheckpoint
 from app.modules.reviews.application.llm import RunCallContext
 from app.modules.reviews.application.review_output import ReviewOutput
 from app.modules.reviews.infrastructure.llm.answers import (
@@ -38,6 +39,7 @@ from app.modules.reviews.infrastructure.llm.transport import (
     ChatResponse,
     ResponseSchema,
 )
+from tests.llm_fakes import context_checkpoint
 
 CORPUS = Path(__file__).parent / "fixtures" / "review_output"
 VALID = sorted((CORPUS / "valid").glob("*.json"))
@@ -196,7 +198,10 @@ def test_gateway_returns_normalized_output_and_keeps_raw_provider_trace() -> Non
     expected_raw_response = deepcopy(raw_response)
 
     class OneAnswerTransport:
-        async def complete(self, request: ChatRequest) -> ChatResponse:
+        async def complete(
+            self, request: ChatRequest, *, checkpoint: RunProviderCheckpoint
+        ) -> ChatResponse:
+            await checkpoint()
             return ChatResponse(
                 raw=raw_response,
                 content=raw_answer,
@@ -225,7 +230,12 @@ def test_gateway_returns_normalized_output_and_keeps_raw_provider_trace() -> Non
             )
 
     gateway = LlmGateway(
-        settings, OneAnswerTransport(), InMemoryUsageLedger(), trace, fx_provider=FixedQuote()
+        settings,
+        OneAnswerTransport(),
+        InMemoryUsageLedger(),
+        trace,
+        checkpoint=context_checkpoint,
+        fx_provider=FixedQuote(),
     )
     task = StructuredTask(
         operation="review",

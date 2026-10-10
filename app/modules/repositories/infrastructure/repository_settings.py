@@ -24,7 +24,7 @@ def _to_settings(repository: Repository) -> RepositorySettings:
         full_name=repository.full_name,
         url=repository.web_url,
         default_branch=repository.default_branch,
-        enabled=repository.enabled,
+        enabled=repository.enabled and repository.installation_available,
         default_engine=repository.default_engine.value,
         wait_for_ci=repository.wait_for_ci.value,
         max_comments=repository.max_comments,

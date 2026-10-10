@@ -28,8 +28,10 @@ from app.modules.integrations.webhooks.application.receive_github_delivery impor
     ReceiveGitHubDelivery,
     WebhookReceipt,
 )
+from app.modules.reviews.application.check_runs import RunProviderCheckpoint
 from app.modules.reviews.application.determine_ci_eligibility import (
     CheckSuite,
+    CiProviderCheckpoint,
     CiSnapshot,
     CiWaitMode,
     DetermineCiEligibility,
@@ -41,6 +43,7 @@ from app.modules.reviews.application.project_github_pull_request import (
     LockedPullRequest,
     ProjectGitHubPullRequest,
     PullRequestEvent,
+    PullRequestProviderCheckpoint,
     PullRequestRecord,
     PullRequestState,
 )
@@ -60,6 +63,7 @@ from app.modules.reviews.application.try_enqueue_webhook_run import (
     TryEnqueueWebhookRun,
 )
 from app.modules.reviews.application.vcs_diff import PullRequestLocator, VcsFile, VcsPullRequest
+from tests.installation_onboarding_fakes import provider_checkpoint
 from tests.trigger_uow import targets_uow
 
 _SECRET = "full-path-secret"
@@ -179,6 +183,9 @@ class ProjectionStore:
     def __init__(self, state: State) -> None:
         self.state = state
 
+    async def lock_active_installation(self, event: PullRequestEvent) -> bool:
+        return True
+
     async def get_or_create_locked(
         self, event: PullRequestEvent, now: datetime
     ) -> LockedPullRequest:
@@ -213,6 +220,7 @@ class RunStore:
             return self.state.miss
         return RunInsertCandidate(
             ci=ci,
+            origin_provider_installation_id=UUID("77777777-7777-7777-7777-777777777777"),
             repository_id=_REPO_ID,
             workspace_id=_WORKSPACE_ID,
             repository_external_id=101,
@@ -290,7 +298,12 @@ class GreenCi:
         self.state = state
 
     async def get_current_head_ci(
-        self, installation_external_id: int, repository_full_name: str, head_sha: str
+        self,
+        installation_external_id: int,
+        repository_full_name: str,
+        head_sha: str,
+        *,
+        checkpoint: CiProviderCheckpoint,
     ) -> CiSnapshot:
         assert self.state.open_transactions == 0
         assert (installation_external_id, repository_full_name, head_sha) == (
@@ -374,7 +387,10 @@ class Vcs:
     def __init__(self, state: State) -> None:
         self.state = state
 
-    async def get_pull_request(self, locator: PullRequestLocator) -> VcsPullRequest:
+    async def get_pull_request(
+        self, locator: PullRequestLocator, *, checkpoint: RunProviderCheckpoint
+    ) -> VcsPullRequest:
+        await checkpoint()
         assert self.state.open_transactions == 0
         assert locator == PullRequestLocator(17, "octo/repo", 7)
         return VcsPullRequest(
@@ -386,7 +402,10 @@ class Vcs:
             ),
         )
 
-    async def get_diff(self, pull_request: VcsPullRequest) -> tuple[VcsFile, ...]:
+    async def get_diff(
+        self, pull_request: VcsPullRequest, *, checkpoint: RunProviderCheckpoint
+    ) -> tuple[VcsFile, ...]:
+        await checkpoint()
         assert self.state.open_transactions == 0
         return (
             VcsFile(
@@ -404,7 +423,10 @@ class Vcs:
             ),
         )
 
-    async def get_blob(self, locator: PullRequestLocator, sha: str) -> bytes:
+    async def get_blob(
+        self, locator: PullRequestLocator, sha: str, *, checkpoint: RunProviderCheckpoint
+    ) -> bytes:
+        await checkpoint()
         raise AssertionError("both files have patches; blob download is unnecessary")
 
 
@@ -495,7 +517,9 @@ def test_signed_ai_review_label_enqueues_after_current_head_green_ci() -> None:
         return MemoryUnitOfWork(state)
 
     class Current:
-        async def get_current(self, event: PullRequestEvent) -> PullRequestEvent:
+        async def get_current(
+            self, event: PullRequestEvent, *, checkpoint: PullRequestProviderCheckpoint
+        ) -> PullRequestEvent:
             assert state.open_transactions == 0
             return replace(event, current_label_names=frozenset(labels))
 
@@ -586,16 +610,23 @@ _DELIVERY_LOGGER = "app.modules.integrations.webhooks.application.receive_github
 
 class BlockedCi(GreenCi):
     async def get_current_head_ci(
-        self, installation_external_id: int, repository_full_name: str, head_sha: str
+        self,
+        installation_external_id: int,
+        repository_full_name: str,
+        head_sha: str,
+        *,
+        checkpoint: CiProviderCheckpoint,
     ) -> CiSnapshot:
         snapshot = await super().get_current_head_ci(
-            installation_external_id, repository_full_name, head_sha
+            installation_external_id, repository_full_name, head_sha, checkpoint=provider_checkpoint
         )
         return replace(snapshot, check_suites=(CheckSuite(7, "in_progress", None),))
 
 
 class LabelCurrent:
-    async def get_current(self, event: PullRequestEvent) -> PullRequestEvent:
+    async def get_current(
+        self, event: PullRequestEvent, *, checkpoint: PullRequestProviderCheckpoint
+    ) -> PullRequestEvent:
         return replace(event, current_label_names=frozenset({"ai-review"}))
 
 

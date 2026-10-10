@@ -36,6 +36,7 @@ class StoredRepository:
     id: UUID
     snapshot: RepositorySnapshot
     enabled: bool = True
+    installation_available: bool = True
 
 
 @dataclass
@@ -45,6 +46,9 @@ class FakeInstallationRepositoryStore:
     created_versions: int = 0
     create_error: Exception | None = None
     disable_error: Exception | None = None
+
+    async def lock_active_installation(self, provider_installation_id: UUID) -> bool:
+        return True
 
     async def upsert_repository(
         self, provider_installation_id: UUID, snapshot: RepositorySnapshot
@@ -56,7 +60,7 @@ class FakeInstallationRepositoryStore:
             self.repositories[key] = stored
         else:
             stored.snapshot = snapshot
-            stored.enabled = True
+            stored.installation_available = True
         return stored.id
 
     async def record_removal_delivery(self, delivery_id: str) -> bool:
@@ -70,7 +74,7 @@ class FakeInstallationRepositoryStore:
             raise self.disable_error
         stored = self.repositories.get((provider_installation_id, external_id))
         if stored is not None:
-            stored.enabled = False
+            stored.installation_available = False
 
     async def get_active_rule_version(self, repository_id: UUID) -> PersistedRuleVersion | None:
         return self.active_versions.get(repository_id)
@@ -252,7 +256,8 @@ def test_sync_soft_disables_only_matching_repositories_idempotently() -> None:
         )
     )
 
-    assert store.repositories[(installation_id, 101)].enabled is False
+    assert store.repositories[(installation_id, 101)].installation_available is False
+    assert store.repositories[(installation_id, 101)].enabled is True
     assert uow.commits == 3
 
 
@@ -278,6 +283,7 @@ def test_sync_readding_a_removed_repository_reenables_it() -> None:
     asyncio.run(sync.execute(provider_installation_id=installation_id, repositories=(input_,)))
 
     assert store.repositories[(installation_id, 101)].enabled is True
+    assert store.repositories[(installation_id, 101)].installation_available is True
     assert store.created_versions == 1
 
 
@@ -362,7 +368,8 @@ def test_sqlalchemy_installation_store_soft_disables_matching_repository() -> No
     ]
     assert len(repository_updates) == 1
     compiled = repository_updates[0].compile()
-    assert compiled.params["enabled"] is False
+    assert compiled.params["installation_available"] is False
+    assert "enabled" not in compiled.params
     assert compiled.params["provider_installation_id_1"] == installation_id
     assert compiled.params["external_id_1"] == 101
 

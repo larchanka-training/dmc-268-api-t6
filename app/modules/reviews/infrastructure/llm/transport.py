@@ -18,6 +18,7 @@ from typing import Any, Literal, Protocol
 
 import httpx
 
+from app.modules.reviews.application.check_runs import RunProviderCheckpoint
 from app.modules.reviews.application.llm import LlmErrorCode
 from app.modules.reviews.infrastructure.llm.settings import ModelProfile
 
@@ -139,7 +140,9 @@ class TransportPaidAnswerError(TransportUnavailable):
 
 
 class ChatTransport(Protocol):
-    async def complete(self, request: ChatRequest) -> ChatResponse: ...
+    async def complete(
+        self, request: ChatRequest, *, checkpoint: RunProviderCheckpoint
+    ) -> ChatResponse: ...
 
 
 class OpenAICompatibleTransport:
@@ -153,7 +156,9 @@ class OpenAICompatibleTransport:
         self._client = client
         self._current_key: dict[tuple[str, tuple[str, ...]], int] = {}
 
-    async def complete(self, request: ChatRequest) -> ChatResponse:
+    async def complete(
+        self, request: ChatRequest, *, checkpoint: RunProviderCheckpoint
+    ) -> ChatResponse:
         profile = request.profile
         keys: tuple[str | None, ...] = profile.api_keys or (None,)
         pool = (profile.base_url, profile.api_keys)
@@ -163,6 +168,7 @@ class OpenAICompatibleTransport:
         rate_limited: TransportError | None = None
         for offset in range(len(keys)):
             index = (start + offset) % len(keys)
+            await checkpoint()
             try:
                 response = await self._post(request, body, keys[index])
             except TransportError as error:

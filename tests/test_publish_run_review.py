@@ -18,6 +18,7 @@ from app.modules.reviews.application.check_runs import (
     CheckRunReport,
     CheckRunTarget,
     CheckRunView,
+    RunProviderCheckpoint,
 )
 from app.modules.reviews.application.publish_run_review import (
     PublishContext,
@@ -32,6 +33,7 @@ from app.modules.reviews.infrastructure.github_review_publication import (
     GitHubCheckRunGateway,
     GitHubPullRequestReviewGateway,
 )
+from tests.installation_onboarding_fakes import provider_checkpoint
 
 RUN = UUID("11111111-1111-1111-1111-111111111111")
 NOW = datetime(2026, 9, 30, 12, 0, tzinfo=UTC)
@@ -73,6 +75,7 @@ def context(**change: Any) -> PublishContext:
         head_sha=HEAD,
         pr_head_sha=HEAD,
         pr_open=True,
+        origin_active=True,
         installation_id=17,
         repository_full_name="octo/repo",
         pr_number=7,
@@ -124,6 +127,9 @@ class Store:
     ) -> bool:
         assert from_state == "publishing"
         self.state, self.error_code = state, error_code
+        return True
+
+    async def provider_origin_active(self, run_id: UUID) -> bool:
         return True
 
     async def check_run_report(self, run_id: UUID) -> CheckRunReport | None:
@@ -183,7 +189,10 @@ class Reviews:
     results: list[SubmittedReview | PublishError]
     submissions: list[ReviewSubmission] = field(default_factory=list)
 
-    async def submit_review(self, submission: ReviewSubmission) -> SubmittedReview:
+    async def submit_review(
+        self, submission: ReviewSubmission, *, checkpoint: RunProviderCheckpoint
+    ) -> SubmittedReview:
+        await checkpoint()
         self.submissions.append(submission)
         result = self.results.pop(0)
         if isinstance(result, PublishError):
@@ -195,7 +204,10 @@ class Reviews:
 class CheckRuns:
     views: list[CheckRunView] = field(default_factory=list)
 
-    async def upsert(self, target: CheckRunTarget, view: CheckRunView) -> None:
+    async def upsert(
+        self, target: CheckRunTarget, view: CheckRunView, *, checkpoint: RunProviderCheckpoint
+    ) -> None:
+        await checkpoint()
         self.views.append(view)
 
 
@@ -386,7 +398,9 @@ def test_github_review_gateway_reuses_a_review_already_posted_for_the_hash() -> 
     )
     submission = ReviewSubmission(17, "octo/repo", 7, HEAD, "COMMENT", "body", (FINDING,), HASH)
 
-    assert asyncio.run(gateway.submit_review(submission)) == SubmittedReview(55, (900,))
+    assert asyncio.run(
+        gateway.submit_review(submission, checkpoint=provider_checkpoint)
+    ) == SubmittedReview(55, (900,))
     assert ("POST", "/repos/octo/repo/pulls/7/reviews") not in calls
 
 
@@ -427,7 +441,7 @@ def test_github_review_gateway_classifies_publication_errors(
     )
     submission = ReviewSubmission(17, "octo/repo", 7, HEAD, "COMMENT", "body", (FINDING,), HASH)
     with pytest.raises(PublishError) as raised:
-        asyncio.run(gateway.submit_review(submission))
+        asyncio.run(gateway.submit_review(submission, checkpoint=provider_checkpoint))
     assert raised.value.kind == kind
 
 
@@ -452,8 +466,20 @@ def test_check_run_gateway_creates_once_then_updates_the_same_check_run() -> Non
         token_provider=_Tokens(),
     )
     target = CheckRunTarget(17, "octo/repo", HEAD, RUN)
-    asyncio.run(gateway.upsert(target, CheckRunView("in_progress", None, "t", "попытка 1 из 3")))
-    asyncio.run(gateway.upsert(target, CheckRunView("completed", "neutral", "t", "done")))
+    asyncio.run(
+        gateway.upsert(
+            target,
+            CheckRunView("in_progress", None, "t", "попытка 1 из 3"),
+            checkpoint=provider_checkpoint,
+        )
+    )
+    asyncio.run(
+        gateway.upsert(
+            target,
+            CheckRunView("completed", "neutral", "t", "done"),
+            checkpoint=provider_checkpoint,
+        )
+    )
 
     methods = [(method, path) for method, path, _ in requests]
     assert methods == [
@@ -501,9 +527,11 @@ def test_failed_comment_read_is_retried_and_finds_the_posted_review() -> None:
     submission = ReviewSubmission(17, "octo/repo", 7, HEAD, "COMMENT", "body", (FINDING,), HASH)
 
     with pytest.raises(PublishError) as raised:
-        asyncio.run(gateway.submit_review(submission))
+        asyncio.run(gateway.submit_review(submission, checkpoint=provider_checkpoint))
     assert raised.value.kind == "retryable"
-    assert asyncio.run(gateway.submit_review(submission)) == SubmittedReview(55, (900,))
+    assert asyncio.run(
+        gateway.submit_review(submission, checkpoint=provider_checkpoint)
+    ) == SubmittedReview(55, (900,))
     assert len(posts) == 1
 
 
@@ -529,7 +557,7 @@ def test_review_gateway_does_not_post_on_a_head_that_moved_on_github() -> None:
     submission = ReviewSubmission(17, "octo/repo", 7, HEAD, "COMMENT", "body", (FINDING,), HASH)
 
     with pytest.raises(PublishError) as raised:
-        asyncio.run(gateway.submit_review(submission))
+        asyncio.run(gateway.submit_review(submission, checkpoint=provider_checkpoint))
     assert raised.value.kind == "stale_commit"
     assert posts == []
 

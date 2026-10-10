@@ -18,6 +18,7 @@ from app.modules.integrations.webhooks.infrastructure.github_repository_details 
     GitHubInstallationRepositoryDetailsProvider,
     GitHubRepositoryDetailsResponseError,
 )
+from tests.installation_onboarding_fakes import provider_checkpoint
 
 
 @dataclass
@@ -44,7 +45,9 @@ def _fetch(
         ) as client:
             return await GitHubInstallationRepositoryDetailsProvider(
                 client=client, token_provider=tokens
-            ).fetch_repository_details(installation_external_id=17, full_name=full_name)
+            ).fetch_repository_details(
+                installation_external_id=17, full_name=full_name, checkpoint=provider_checkpoint
+            )
 
     return asyncio.run(run())
 

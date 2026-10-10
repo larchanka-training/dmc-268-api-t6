@@ -11,7 +11,11 @@ from app.common.infrastructure.github_repository_path import (
     commit_sha_segment,
     repository_path_from_full_name,
 )
-from app.modules.reviews.application.check_runs import CheckRunTarget, CheckRunView
+from app.modules.reviews.application.check_runs import (
+    CheckRunTarget,
+    CheckRunView,
+    RunProviderCheckpoint,
+)
 from app.modules.reviews.application.publish_run_review import (
     PublishError,
     ReviewSubmission,
@@ -45,9 +49,12 @@ class GitHubCheckRunGateway:
         self._client = client
         self._tokens = token_provider
 
-    async def upsert(self, target: CheckRunTarget, view: CheckRunView) -> None:
+    async def upsert(
+        self, target: CheckRunTarget, view: CheckRunView, *, checkpoint: RunProviderCheckpoint
+    ) -> None:
         prefix = repository_path_from_full_name(target.repository_full_name)
         commit_check_runs = f"{prefix}/commits/{commit_sha_segment(target.head_sha)}/check-runs"
+        await checkpoint()
         headers = _headers(await self._tokens.get_installation_access_token(target.installation_id))
         payload: dict[str, Any] = {
             "status": view.status,
@@ -55,7 +62,8 @@ class GitHubCheckRunGateway:
         }
         if view.conclusion is not None:
             payload["conclusion"] = view.conclusion
-        existing = await self._find(commit_check_runs, headers, target)
+        existing = await self._find(commit_check_runs, headers, target, checkpoint)
+        await checkpoint()
         if existing is None:
             payload |= {
                 "name": CHECK_RUN_NAME,
@@ -74,7 +82,14 @@ class GitHubCheckRunGateway:
             )
         response.raise_for_status()
 
-    async def _find(self, path: str, headers: dict[str, str], target: CheckRunTarget) -> int | None:
+    async def _find(
+        self,
+        path: str,
+        headers: dict[str, str],
+        target: CheckRunTarget,
+        checkpoint: RunProviderCheckpoint,
+    ) -> int | None:
+        await checkpoint()
         response = await self._client.get(
             path,
             params={"check_name": CHECK_RUN_NAME, "filter": "all", "per_page": 100},
@@ -116,26 +131,34 @@ class GitHubPullRequestReviewGateway:
         self._client = client
         self._tokens = token_provider
 
-    async def submit_review(self, submission: ReviewSubmission) -> SubmittedReview:
+    async def submit_review(
+        self, submission: ReviewSubmission, *, checkpoint: RunProviderCheckpoint
+    ) -> SubmittedReview:
         repository_path = repository_path_from_full_name(submission.repository_full_name)
         prefix = f"{repository_path}/pulls/{submission.pr_number}"
         try:
+            await checkpoint()
             headers = _headers(
                 await self._tokens.get_installation_access_token(submission.installation_id)
             )
-            review_id = await self._find(prefix, headers, submission.findings_hash)
+            review_id = await self._find(prefix, headers, submission.findings_hash, checkpoint)
             if review_id is None:
-                await self._ensure_current_head(prefix, headers, submission.commit_sha)
-                review_id = await self._post(prefix, headers, submission)
+                await self._ensure_current_head(prefix, headers, submission.commit_sha, checkpoint)
+                review_id = await self._post(prefix, headers, submission, checkpoint)
             # A failed read raises: the retry finds the posted review by its marker.
-            return await self._with_comments(prefix, headers, review_id)
+            return await self._with_comments(prefix, headers, review_id, checkpoint)
         except httpx.TransportError as exc:
             raise PublishError("retryable", f"GitHub request failed: {exc}") from exc
 
     async def _ensure_current_head(
-        self, prefix: str, headers: dict[str, str], commit_sha: str
+        self,
+        prefix: str,
+        headers: dict[str, str],
+        commit_sha: str,
+        checkpoint: RunProviderCheckpoint,
     ) -> None:
         """GitHub, not PostgreSQL, knows a push that the webhook worker has not projected yet."""
+        await checkpoint()
         response = await self._client.get(prefix, headers=headers, timeout=_REQUEST_TIMEOUT)
         if response.is_error:
             raise _publish_error(response)
@@ -144,8 +167,13 @@ class GitHubPullRequestReviewGateway:
             raise PublishError("stale_commit", f"pull request head moved to {head}")
 
     async def _post(
-        self, prefix: str, headers: dict[str, str], submission: ReviewSubmission
+        self,
+        prefix: str,
+        headers: dict[str, str],
+        submission: ReviewSubmission,
+        checkpoint: RunProviderCheckpoint,
     ) -> int:
+        await checkpoint()
         response = await self._client.post(
             f"{prefix}/reviews",
             json={
@@ -170,7 +198,14 @@ class GitHubPullRequestReviewGateway:
             raise _publish_error(response)
         return int(response.json()["id"])
 
-    async def _find(self, prefix: str, headers: dict[str, str], findings_hash: str) -> int | None:
+    async def _find(
+        self,
+        prefix: str,
+        headers: dict[str, str],
+        findings_hash: str,
+        checkpoint: RunProviderCheckpoint,
+    ) -> int | None:
+        await checkpoint()
         response = await self._client.get(
             f"{prefix}/reviews",
             params={"per_page": 100},
@@ -186,8 +221,13 @@ class GitHubPullRequestReviewGateway:
         return None
 
     async def _with_comments(
-        self, prefix: str, headers: dict[str, str], review_id: int
+        self,
+        prefix: str,
+        headers: dict[str, str],
+        review_id: int,
+        checkpoint: RunProviderCheckpoint,
     ) -> SubmittedReview:
+        await checkpoint()
         response = await self._client.get(
             f"{prefix}/reviews/{review_id}/comments",
             params={"per_page": 100},

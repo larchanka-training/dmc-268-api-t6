@@ -6,6 +6,7 @@ from datetime import timedelta
 
 import httpx
 
+from app.modules.reviews.application.check_runs import RunProviderCheckpoint
 from app.modules.reviews.application.run_failures import RunFailure
 from app.modules.reviews.application.vcs_diff import (
     PullRequestLocator,
@@ -36,17 +37,23 @@ class ClassifiedVcsProvider:
     def __init__(self, inner: VcsProvider) -> None:
         self._inner = inner
 
-    async def get_pull_request(self, locator: PullRequestLocator) -> VcsPullRequest:
+    async def get_pull_request(
+        self, locator: PullRequestLocator, *, checkpoint: RunProviderCheckpoint
+    ) -> VcsPullRequest:
         try:
-            return await self._inner.get_pull_request(locator)
+            return await self._inner.get_pull_request(locator, checkpoint=checkpoint)
         except httpx.HTTPError as exc:
             raise classify_vcs_error(exc) from exc
 
-    async def get_diff(self, pull_request: VcsPullRequest) -> tuple[VcsFile, ...]:
+    async def get_diff(
+        self, pull_request: VcsPullRequest, *, checkpoint: RunProviderCheckpoint
+    ) -> tuple[VcsFile, ...]:
         try:
-            return await self._inner.get_diff(pull_request)
+            return await self._inner.get_diff(pull_request, checkpoint=checkpoint)
         except httpx.HTTPError as exc:
             raise classify_vcs_error(exc) from exc
 
-    async def get_blob(self, locator: PullRequestLocator, sha: str) -> bytes:
-        return await self._inner.get_blob(locator, sha)
+    async def get_blob(
+        self, locator: PullRequestLocator, sha: str, *, checkpoint: RunProviderCheckpoint
+    ) -> bytes:
+        return await self._inner.get_blob(locator, sha, checkpoint=checkpoint)
