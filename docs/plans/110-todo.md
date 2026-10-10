@@ -333,8 +333,8 @@ final gates/review evidence and hand the full change to the publishing agent.
       safe PEM handling and verified absence of values; document unique verifier invocation,
       two-image controlled B-at-M case and any local-pull wrapper limitations.
 - [x] All AC evidence is recorded and final four uv gates pass.
-- [ ] Final independent Standards/Spec review has zero findings, branch rebased on main,
-      draft PR prepared with required sections and
+- [x] Final independent Standards/Spec review has zero findings, branch rebased on main,
+      draft PR published with required sections and
       `Refs #110`, without closing keyword or Development-panel link.
 
 **Verification:** Run all four exact uv gates and relevant disposable integration suite;
@@ -418,13 +418,14 @@ removed. Publication remains pending at this checkpoint; no commit or push was m
 
 ## Final checkpoint
 
-- [ ] Every task above completed with RED/GREEN evidence and no unresolved review findings.
+- [x] Every task above completed with RED/GREEN evidence and no unresolved review findings.
 - [x] `uv run ruff check .`
 - [x] `uv run ruff format --check .`
 - [x] `uv run mypy .`
 - [x] `uv run pytest`
 - [x] Real isolated two-image/PostgreSQL acceptance results and secret scan retained.
-- [ ] Draft PR published, attached, and returned to user; tech-lead acceptance remains external.
+- [x] Draft PR published and attached; verified URL recorded for user delivery.
+      Tech-lead acceptance remains external.
 
 ## Publishing preflight (2026-10-10)
 
@@ -434,3 +435,18 @@ overlaps and its prior coordination comment applies; no implementation changes w
 The draft body is prepared with What / Why / How to verify / Refs and the required checklist.
 Final independent Standards/Spec review is 0/0; final gates and six real cases above apply.
 Commit, rebase confirmation, push, publication and attachment are pending.
+
+## Published draft (2026-10-10)
+
+Draft PR [#126](https://github.com/larchanka-training/dmc-268-api-t6/pull/126) is open on
+`fix/110-rollback-db-revision` against `main` and attached to this chat. Implementation commit:
+`303499d2f9813ea137d59d6434f844ddb03ff474`. `git rebase origin/main` confirmed the branch was
+already up to date with fetched base `92250a1fb3b65f88a2ea111d33613f9a4af1d1d2`. The published
+body has all required sections/checklist and `Refs #110`; GitHub reports no closing issue refs.
+No issue Development-panel link was added. No merge or issue closure was performed.
+
+The coordinator confirmed the separate disposable pytest PostgreSQL/RabbitMQ containers were
+removed after final gates; the live verifier invocation resources were independently confirmed
+absent. Prepared A and pinned store images were preserved. Final source, test and retained proof
+bytes are unchanged after their 0/0 review and passing gates; this follow-up updates only delivery
+metadata. Current-head approving review and tech-lead acceptance remain external requirements.
