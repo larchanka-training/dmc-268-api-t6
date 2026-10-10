@@ -14,8 +14,10 @@ from typing import Annotated, Any, Literal, NoReturn
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Path, Query, Request
+from fastapi.dependencies.models import Dependant
 from fastapi.openapi.utils import get_openapi
 from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.routing import APIRoute, iter_route_contexts
 from pydantic import ValidationError
 
 from app.bootstrap.portal_auth import get_auth_scope
@@ -164,14 +166,20 @@ __all__ = [
 ]
 
 
-def custom_openapi() -> dict[str, Any]:
-    if app.openapi_schema:
-        return app.openapi_schema
+def _verifies_bearer(dependant: Dependant) -> bool:
+    """Whether the dependency tree, nested dependencies included, calls ``get_auth_scope``."""
+    return dependant.call is get_auth_scope or any(
+        _verifies_bearer(dependency) for dependency in dependant.dependencies
+    )
+
+
+def build_openapi(application: FastAPI) -> dict[str, Any]:
+    """Describe ``application``; bearer security follows each route's dependencies, not its URL."""
     openapi_schema = get_openapi(
         title="AI Code Reviewer browser API",
         version="0.1.0",
         description="Browser-facing HTTP surface of the AI Code Reviewer service",
-        routes=app.routes,
+        routes=application.routes,
     )
     openapi_schema["components"] = openapi_schema.get("components", {})
     openapi_schema["components"]["securitySchemes"] = {
@@ -182,25 +190,32 @@ def custom_openapi() -> dict[str, Any]:
             "description": "Access JWT issued by auth-api, valid for 15 minutes.",
         }
     }
-    for path, path_item in openapi_schema.get("paths", {}).items():
-        if path.startswith("/api/") and not (
-            path.startswith("/api/auth/github/callback")
-            or path.startswith("/api/auth/refresh")
-            or path.startswith("/api/auth/logout")
-        ):
-            for method, operation in path_item.items():
-                if method.lower() in ("get", "post", "put", "delete", "patch"):
-                    if "security" not in operation:
-                        operation["security"] = [{"bearerAuth": []}]
-                    operation.setdefault("responses", {})
-                    operation["responses"].setdefault(
-                        "503", {"description": "Authentication is not configured"}
-                    )
-                    if "401" not in operation["responses"]:
-                        operation["responses"]["401"] = {
-                            "description": "Missing or invalid Bearer access token"
-                        }
-    app.openapi_schema = openapi_schema
+    paths = openapi_schema.get("paths", {})
+    for route in iter_route_contexts(application.routes):
+        if not isinstance(route.original_route, APIRoute) or not _verifies_bearer(route.dependant):
+            continue
+        path_item = paths.get(route.path_format, {})
+        for method in route.methods or ():
+            operation = path_item.get(method.lower())
+            if operation is None:
+                continue
+            if "security" not in operation:
+                operation["security"] = [{"bearerAuth": []}]
+            operation.setdefault("responses", {})
+            operation["responses"].setdefault(
+                "503", {"description": "Authentication is not configured"}
+            )
+            if "401" not in operation["responses"]:
+                operation["responses"]["401"] = {
+                    "description": "Missing or invalid Bearer access token"
+                }
+    return openapi_schema
+
+
+def custom_openapi() -> dict[str, Any]:
+    if app.openapi_schema:
+        return app.openapi_schema
+    app.openapi_schema = build_openapi(app)
     return app.openapi_schema
 
 
