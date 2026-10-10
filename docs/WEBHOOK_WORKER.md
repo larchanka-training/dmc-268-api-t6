@@ -90,9 +90,18 @@ In a fourth terminal, send the delivery and read the Run:
 
 ```bash
 GITHUB_WEBHOOK_SECRET=local-secret uv run python scripts/webhook_smoke.py
-sleep 40                                 # the worker sweeps every 30 s
-docker compose exec -T postgres psql -U app -d app -c \
-  "SELECT state, head_sha, trigger, engine, message_published_at IS NOT NULL FROM runs"
+# Poll the local stub result; do not wait for a fixed worker interval.
+result=
+for attempt in $(seq 1 40); do
+  result=$(docker compose exec -T postgres psql -U app -d app -tAc \
+    "SELECT state, head_sha, trigger, engine, message_published_at IS NOT NULL FROM runs WHERE message_published_at IS NOT NULL")
+  if [ -n "$result" ]; then
+    printf '%s\n' "$result"
+    break
+  fi
+  sleep 1
+done
+test -n "$result"
 ```
 
 After the sweep the query shows one Run: `queued`, head `aaaa…`, trigger
@@ -116,6 +125,31 @@ reviews only with `LLM_*` set: without `LLM_MODEL` the Run takes all three attem
 `prompt_json` (README, "LLM gateway").
 
 ## How the worker handles deliveries
+
+The worker scans the durable PostgreSQL queue immediately on startup. Saving a new
+receipt and OAuth installation reconciliation (`wake_receipts`) send an empty
+`NOTIFY webhook_work_available` in the same transaction as their queue change.
+PostgreSQL delivers the hint after commit and discards it on rollback; duplicate
+receipt insertion and OAuth updates matching no receipts send no hint.
+
+One dedicated autocommit connection runs `LISTEN`. Once LISTEN is registered,
+including after every reconnect, the listener requests another queue scan to cover
+receipts committed while it was disconnected. An idle worker wakes on a hint or
+on the existing 30-second fallback timeout. The timeout also finds retries when
+they become due. Processing exactly 100 deliveries continues immediately, yielding
+to the other tasks first. Repeated hints coalesce into one event; each scan still
+uses the existing claim tokens and five-minute leases. The event is cleared before
+scanning, so a hint received during dispatch survives the transition back to waiting.
+
+Notifications are transient hints; PostgreSQL receipts remain the durable queue.
+A listener connection failure is logged and retried after five seconds, while the
+worker keeps its periodic scans and heartbeat. Shutdown cancels and awaits the
+listener, closing its connection before publisher and database cleanup. Purge and
+revival still run on the first pass and hourly on monotonic time; frequent hints do
+not postpone that maintenance. A hint speeds up the next scan of an idle worker:
+ongoing dispatch, retry eligibility and GitHub calls still determine when onboarding
+finishes. The local smoke recipe polls for its result with a 40-second diagnostic
+bound; that bound is not a production onboarding guarantee.
 
 The worker serializes each PR's event projection with a PostgreSQL session advisory lock on an
 autocommit connection and stores the result in a separate short transaction, so the GitHub call
