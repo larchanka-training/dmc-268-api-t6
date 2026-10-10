@@ -63,10 +63,17 @@ infrastructure}`, `app/modules/<m>/{domain,application,infrastructure}`,
    FK and most unique constraints keep PostgreSQL's default names; introducing a
    convention is a decision of its own (it would re-prefix the existing `ck_` names).
 
-Portal repository adapters must fail closed without `AuthScope`: for example, constructors of
-`SqlAlchemyRunRepository`, `SqlAlchemyRerunStore`, `SqlAlchemyRerunUnitOfWork`, and
-`SqlAlchemyCancelRunUnitOfWork` raise `ValueError`. Trusted internal callers may bypass scope
-only by explicitly passing `allow_unscoped=True`; never infer this permission from a missing scope.
+All adapters accepting `scope: AuthScope | None` must fail closed: their constructors raise
+`ValueError` without `AuthScope`. Current examples are
+[`SqlAlchemyRunRepository`](../../app/modules/reviews/infrastructure/run_repository.py),
+[`SqlAlchemyCancelRunUnitOfWork`](../../app/modules/reviews/infrastructure/run_repository.py),
+[`SqlAlchemyRerunStore`](../../app/modules/reviews/infrastructure/rerun_store.py),
+[`SqlAlchemyRerunUnitOfWork`](../../app/modules/reviews/infrastructure/rerun_store.py),
+[`SqlAlchemyPullRequestQueries`](../../app/modules/reviews/infrastructure/pull_request_queries.py),
+[`SqlAlchemyRepositorySettingsStore`](../../app/modules/repositories/infrastructure/repository_settings.py),
+and [`SqlAlchemyRepositorySettingsUnitOfWork`](../../app/modules/repositories/infrastructure/repository_settings.py).
+Trusted internal callers may bypass scope only by explicitly passing `allow_unscoped=True`;
+never infer this permission from a missing scope.
 
 ## 4. Language rules
 
