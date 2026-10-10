@@ -57,6 +57,7 @@ from tests.test_ui_zod_contracts import (
     RUN_ORIGIN_CASES,
     ContractRepository,
     _generated_schemas,
+    run_origin_responses,
 )
 
 SPEC_PATH = Path(__file__).parents[1] / "contracts" / "openapi.yaml"
@@ -536,23 +537,10 @@ def test_response_validation_rejects_drift(client: TestClient, field: str, value
 
 @pytest.mark.parametrize("run_changes", RUN_ORIGIN_CASES)
 def test_run_origin_validates_against_the_declared_schema(run_changes: dict[str, Any]) -> None:
-    repository = ContractRepository()
-    repository.run_changes = run_changes
-    app.dependency_overrides[get_run_repository] = lambda: repository
-    try:
-        client = authenticated_test_client(app)
-        listed = client.get("/api/runs").json()
-        detail = client.get(RUN_URL).json()
-    finally:
-        app.dependency_overrides.clear()
+    listed, detail = run_origin_responses(run_changes)
 
     _validator_for("get", "/api/runs", "200").validate(listed)
     _validator_for("get", "/api/runs/{run_id}", "200").validate(detail)
-    for run in (listed["items"][0], detail):
-        assert run["trigger"] == run_changes["trigger"]
-        assert run["createdAt"] == "2026-09-24T23:59:30Z"
-        if "started_at" in run_changes:
-            assert run["startedAt"] is None
 
 
 @pytest.mark.parametrize("field", ["trigger", "createdAt"])

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, cast
@@ -34,6 +34,14 @@ RUN_ORIGIN_CASES = [
     pytest.param(
         {"trigger": "rerun", "status": "queued", "started_at": None, "finished_at": None},
         id="not-started",
+    ),
+    # The same instant as the fixture, as a database session outside UTC returns it.
+    pytest.param(
+        {
+            "trigger": "webhook",
+            "created_at": datetime(2026, 9, 25, 1, 59, 30, tzinfo=timezone(timedelta(hours=2))),
+        },
+        id="non-utc-session",
     ),
 ]
 
@@ -176,26 +184,32 @@ def test_api_responses_validate_against_json_schema_generated_from_ui_zod() -> N
     Draft202012Validator(schemas["reviewComment"]).validate(review_comments.json()[0])
 
 
-@pytest.mark.parametrize("run_changes", RUN_ORIGIN_CASES)
-def test_run_origin_validates_against_json_schema_generated_from_ui_zod(
-    run_changes: dict[str, Any],
-) -> None:
+def run_origin_responses(run_changes: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+    """The list page and the detail of the fixture run, with its origin fields checked."""
     repository = ContractRepository()
     repository.run_changes = run_changes
     app.dependency_overrides[get_run_repository] = lambda: repository
     try:
         client = TestClient(app)
-        listed = client.get("/api/runs").json()
-        detail = client.get(f"/api/runs/{RUN_ID}").json()
+        listed: dict[str, Any] = client.get("/api/runs").json()
+        detail: dict[str, Any] = client.get(f"/api/runs/{RUN_ID}").json()
     finally:
         app.dependency_overrides.clear()
-
-    schemas = _generated_schemas()
-    Draft202012Validator(schemas["runListPage"]).validate(listed)
-    Draft202012Validator(schemas["runDetail"]).validate(detail)
-    Draft202012Validator(schemas["runSession"]).validate(listed["items"][0])
     for run in (listed["items"][0], detail):
         assert run["trigger"] == run_changes["trigger"]
         assert run["createdAt"] == "2026-09-24T23:59:30Z"
         if "started_at" in run_changes:
             assert run["startedAt"] is None
+    return listed, detail
+
+
+@pytest.mark.parametrize("run_changes", RUN_ORIGIN_CASES)
+def test_run_origin_validates_against_json_schema_generated_from_ui_zod(
+    run_changes: dict[str, Any],
+) -> None:
+    listed, detail = run_origin_responses(run_changes)
+
+    schemas = _generated_schemas()
+    Draft202012Validator(schemas["runListPage"]).validate(listed)
+    Draft202012Validator(schemas["runDetail"]).validate(detail)
+    Draft202012Validator(schemas["runSession"]).validate(listed["items"][0])

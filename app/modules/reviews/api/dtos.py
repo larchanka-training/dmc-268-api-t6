@@ -1,15 +1,24 @@
 from __future__ import annotations
 
-from datetime import datetime
-from typing import Any
+from datetime import UTC, datetime
+from typing import Annotated, Any
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import AfterValidator, BaseModel, ConfigDict
 
 
 def to_camel(value: str) -> str:
     head, *tail = value.split("_")
     return head + "".join(part.capitalize() for part in tail)
+
+
+def _to_utc(value: datetime) -> datetime:
+    return value.astimezone(UTC)
+
+
+# The same instant in UTC, so the JSON always ends in ``Z`` whatever zone the database
+# session returned it in.
+UtcDatetime = Annotated[datetime, AfterValidator(_to_utc)]
 
 
 class ApiDto(BaseModel):
@@ -31,7 +40,7 @@ class RunSessionDto(ApiDto):
     attempt: int
     cancel_requested: bool
     trigger: str
-    created_at: datetime
+    created_at: UtcDatetime
     started_at: datetime | None
     finished_at: datetime | None
     error_code: str | None
