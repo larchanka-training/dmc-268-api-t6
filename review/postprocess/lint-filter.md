@@ -1,7 +1,7 @@
 # Lint filter #2 — deterministic post-processing of review findings
 
 This is filter #2. Filter #1 is the `Do not report` section of the `review.system` prompt
-(`../prompts/review.system.v1.md`, section 3), which asks the model not to report what a
+(`../prompts/review.system.v2.md`, section 3), which asks the model not to report what a
 linter, formatter or type checker enforces. This document specifies what the backend's
 `FindingsPostProcessor` does with the model's answer afterwards, so that the product does
 not depend on the model obeying filter #1. The filter is pure: same input, same output; no

@@ -647,20 +647,19 @@ hour after it ends, unless the last attempt of a cycle fails the dispatch instea
 tree request, a malformed token response or an App key that cannot sign, the 240 s dispatch
 timeout or a database error; a failed label request is only logged, unless the token behind
 it is permanently unusable, while a transient token failure defers the delivery again): the
-receipt is then marked failed (`projection_failed_at`), and neither the revival
-nor a login brings it back. The 45-minute delay and the 7-day window are the parameters the
-tech lead approved
-(api#71): a GitHub outage longer than a week is not a transient failure, and a `GET /repos`
-404 for a week means the repository is gone. Linking the installation (`wake_receipts`,
-which runs at every GitHub login of a user whose token lists the installation) clears the
-mark of every deferred delivery of the installation, whatever its event or age. Residual
-risks: every attempt runs the event again for all of its repositories, those already saved
-included (see "Installation event failures"), and each readable repository costs a details
-read, a tree read and a label request, the unreadable one its details read, so an event of
-N repositories with one that stays unreadable costs about 3 × (N - 1) + 1 GitHub requests
-per attempt, three attempts an hour for 7 days after it was received, plus three attempts
-per login; the label POSTs of the saved repositories repeat on every attempt (see "Residual
-risks of the budget"). A revived
+receipt is then marked failed (`projection_failed_at`), and neither the revival nor a login
+brings it back. The 45-minute delay and the 7-day window are the parameters the tech lead
+approved (api#71): a GitHub outage longer than a week is not a transient failure, and a `GET
+/repos` 404 for a week means the repository is gone. Linking the installation
+(`wake_receipts`, which runs at every GitHub login of a user whose token lists the
+installation) clears the mark of every deferred delivery of the installation, whatever its
+event or age. Residual risks: every attempt runs the event again for all of its
+repositories, those already saved included (see "Installation event failures"), and each
+readable repository costs a details read, a tree read and a label request, the unreadable
+one its details read, so an event of N repositories with one that stays unreadable costs
+about 3 × (N - 1) + 1 GitHub requests per attempt, three attempts an hour for 7 days after
+it was received, plus three attempts per login; the label POSTs of the saved repositories
+repeat on every attempt (see "Residual risks of the budget"). A revived
 `installation_repositories.added` is applied hours or days late without an ordering check
 against a later `removed` event of the same repository, so a public repository can come back
 enabled after it was removed from the installation (a private one answers 404 and stays
