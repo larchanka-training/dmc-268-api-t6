@@ -891,8 +891,10 @@ class WholeFile(BaseModel):
 
 ### L4 — AST / Imports (source-файлы языков с парсером)
 
-AST v1: tree-sitter для `.py/.pyi` и `.ts/.tsx`, отдельная TSX-грамматика;
-JavaScript и остальные языки остаются L1–L3. Версии runtime/grammar/query/resolver
+AST v1: tree-sitter для Python (`.py/.pyi`), TypeScript/TSX (`.ts/.tsx`),
+JavaScript/JSX (`.js/.jsx/.mjs/.cjs`) и Go (`.go`). Для TypeScript/TSX применяются
+отдельные grammars; JavaScript grammar включает JSX. Остальные языки сохраняют
+L1–L3. Версии runtime/grammar/query/resolver
 закрепляются в `ast_profile_version` и lockfile при реализации. Индексируются
 разрешённые изменённые файлы и одна степень непосредственно используемых импортов.
 RIGHT разрешается по head-tree, LEFT — по diff_old-tree; политика всегда из base.
@@ -906,7 +908,9 @@ class ImportRef(BaseModel):
     resolution_profile_version: str
 
 class Symbol(BaseModel):
-    name: str; kind: Literal["function", "method", "class", "variable", "type"]
+    name: str | None                     # null для анонимного default export
+    kind: Literal["function", "method", "class", "variable", "type"]
+    declaration_kind: str | None         # исходная форма: const, struct, interface и т. п.
     path: str; revision: str; blob_sha: str; start_line: int; end_line: int
     signature_ranges: list; docstring_ranges: list  # точные исходные диапазоны
     signature: str                        # "def foo(a: int, *, b: str = '') -> Result"
@@ -921,13 +925,32 @@ class SymbolContext(BaseModel):
 ```
 
 Python v1 разрешает явные относительные и однозначные абсолютные imports из root/src;
-TypeScript/TSX — однозначные относительные статические imports. Aliases, dynamic
-imports, package exports и цепочки barrel re-export не разворачиваются; внешние
-зависимости не скачиваются. Stub не считается runtime-телом. `referenced_symbols`
+TypeScript/TSX и JavaScript/JSX — однозначные относительные статические ES imports.
+Для JS разрешение ведёт к прямому export объявления или локального binding;
+CommonJS и `.cjs` как цель импорта не разрешаются, хотя локальный AST `.cjs` доступен.
+Aliases, dynamic imports, package exports и цепочки barrel re-export не
+разворачиваются; смешанное TS↔JS и TS extension substitution не угадываются.
+Для JS извлекаются также именованные arrow/function bindings, для Go — функции,
+методы, типы struct/interface и package-level const/var. Типы имеют `kind=type`,
+константы — `kind=variable`; исходная форма хранится отдельно.
+
+Go v1 разрешает только qualified exported declarations из пакетов одного
+локального module по корневому `go.mod` той же ревизии. Имя import по умолчанию
+берётся из package clause, не из имени каталога. Нужен полный ограниченный inventory
+непосредственных `.go` файлов пакета без `*_test.go`, `_*.go`, `.*.go`. Исключённый
+или неполный набор не даёт `resolved`. Build constraints, GOOS/GOARCH-суффиксы,
+cgo, `go.work`/`replace`/nested modules и dot imports в v1 не разрешаются;
+изменённые файлы сохраняют доступный локальный AST и L1–L3. Поиск по соседним
+файлам исходного пакета и вывод типа receiver не выполняются. Полные правила,
+источники и причины fallback — CONTEXT_AND_VERIFICATION_SPEC §3.3.
+
+Внешние зависимости не скачиваются, `npm`/`go list` и проектный код не запускаются.
+Stub не считается runtime-телом. `referenced_symbols`
 показывает сигнатуру/docstring, что не доказывает поведение непоказанного тела.
 
 Лимиты: blob ≤256 KiB с UTF-8, parser ≤1 с CPU/файл и ≤5 с/попытку, 128 MiB памяти;
-≤50 изменённых +20 импортированных AST-файлов, ≤10 imported symbols/файл и ≤100/run;
+≤50 изменённых +20 импортированных/служебных файлов, включая прочитанные Go package
+members и `go.mod`; ≤10 imported symbols/файл и ≤100/run;
 L4 ≤8 000 токенов, фрагмент ≤200 строк/2 000 токенов. Парсер без сети/исполнения
 репозитория. Timeout, неоднозначность, ERROR/MISSING дают точные L1/L2 вместо
 догадок, с причиной неполноты. Если отсутствующее расширение необходимо для
@@ -1110,7 +1133,7 @@ raw модельная похвала/неподтверждённые дефе�
 | DiffEngine | p95 ≤ 40 с чистого времени движка | [TEST_PLAN §5](TEST_PLAN.md#5-критерии-приёмки-и-отчётность) |
 | Время до ревью (fast) | p50 ≤ 90 с, p95 ≤ 4 мин от выполнения триггера (очередь + движок + публикация) | этот документ |
 | SandboxEngine (фаза 3; до неё API принимает только `fast`, #52) | жёсткий таймаут 10 мин, затем тот же Run продолжается как fast (действие `engine.fallback` в трейсе) — это не `failed` | Р-3, PIPELINE_SPEC §5.3 |
-| Лимиты контекста | fast ≤60 000 входных токенов, deep ≤150 000 и окно модели минус output reserve; L3 ≤12 000; AST ≤50 изменённых +20 imported файлов. Порог >3 000 allowed changed lines после ignore → backend summary без LLM; UI patch сохраняется | §9 |
+| Лимиты контекста | fast ≤60 000 входных токенов, deep ≤150 000 и окно модели минус output reserve; L3 ≤12 000; AST/resolver ≤50 изменённых +20 импортированных/служебных файлов. Порог >3 000 allowed changed lines после ignore → backend summary без LLM; UI patch сохраняется | §9 |
 | Выход | ≤10 кандидатов v2 с evidence_refs, ≤10 inline по настройке; supported сверх inline cap — в body. Компактная backend `summary_text` ≤4 000 Unicode-символов; полное тело review дополнительно включает supported general findings. До первого POST выбранного варианта все payload сверяются с лимитами закреплённого профиля VCS-адаптера (явные единица и предел); превышение → `failed/publication_payload_too_large`, без усечения findings. `suggestion_unrenderable` позволяет убрать лишь применяемый блок. v2/verifier schemas требуют отдельной реализации | Р-5, §5; CONTEXT_AND_VERIFICATION_SPEC §8.2, §9.3, §10.1 |
 | Пропускная способность v1 | 100 PR/день, 5 параллельных прогонов; масштаб — реплики `worker` | |
 | Надёжность | ни одна задача не теряется: persistent-сообщения + состояние в PG + реконсилер 5 мин; приёмник вебхуков — отдельный процесс (GitHub не ретраит) | |

@@ -7,7 +7,7 @@
 от 2026-10-09, разделы 1–12. Формат документов, приоритет требований, ignore и снимок политики
 определены в [RULES_FORMAT_SPEC](RULES_FORMAT_SPEC.md). Эти документы составляют
 одну спецификацию изменения. Содержание и добавленная детализация согласованы
-в рабочем обсуждении 2026-10-09. Документы подготовлены к рассмотрению в draft PR;
+в рабочем обсуждении 2026-10-09. Документы представлены на рассмотрение в PR;
 утверждающий review на текущем head ещё требуется по критериям #107.
 Реализация и прохождение проверок этим документом не заявляются.
 
@@ -139,14 +139,14 @@ tree-sitter, кэши, LLM gateway, persistence и публикацию. Router 
 | L1 | Разрешённые hunks с номерами обеих сторон | Только сохранённый DiffMap; список файлов сам по себе не доказательство кода |
 | L2 | Окна ±30 строк вокруг hunks, объединённые в пределах файла/стороны | RIGHT из head; LEFT только из подтверждённого diff_old_sha |
 | L3 | Полный разрешённый файл | Source: ≤1 500 строк и ≤12 000 токенов; иначе L2 с окном до ±80 |
-| L4 | Затронутые символы, сигнатуры и docstrings однозначно разрешённых импортов | Python/TypeScript/TSX; одна степень импортов, без выполнения кода |
+| L4 | Затронутые символы, сигнатуры и docstrings однозначно разрешённых импортов | Python, TypeScript/TSX, JavaScript/JSX, Go; одна степень импортов, без выполнения кода |
 
 Тесты и конфиги получают L3 только если разрешённые изменения содержат лишь такие
 файлы. L1 имеет преимущество перед дополнениями. Уровни могут комбинироваться:
 manifest содержит реальный набор, `levels_present`, а не вывод о видимости из
 одного максимального `level_used`.
 
-Для L2 по AST выбирается минимальный объемлющий function/method/class. Если целый
+Для L2 по AST выбирается минимальный объемлющий function/method/class/type. Если целый
 символ не укладывается в лимит фрагмента, остаётся обычное окно; нельзя маркировать
 усечённую функцию как показанную целиком. L3 заменяет дублирующие RIGHT-окна L2,
 но не удаляет происхождение L1 и старые строки patch. Фрагменты разных ревизий
@@ -154,12 +154,20 @@ manifest содержит реальный набор, `levels_present`, а не
 
 ### 3.3. AST v1
 
-Используются [tree-sitter-python](https://github.com/tree-sitter/tree-sitter-python)
-для `.py`/`.pyi` и [tree-sitter-typescript](https://github.com/tree-sitter/tree-sitter-typescript)
-с отдельными грамматиками TypeScript/TSX для `.ts`/`.tsx`. JavaScript и другие языки
-сохраняют L1–L3; отсутствие parser не отменяет базовые проверки. Точные версии
-runtime, grammar и queries закрепляются в `ast_profile_version` и lockfile при
-реализации. Здесь зависимости не добавляются.
+| Язык и расширения | Grammar | Извлекаемые объявления |
+| --- | --- | --- |
+| Python: `.py`, `.pyi` | [tree-sitter-python](https://github.com/tree-sitter/tree-sitter-python) | Функции, методы, классы, переменные |
+| TypeScript/TSX: `.ts`, `.tsx` | [tree-sitter-typescript](https://github.com/tree-sitter/tree-sitter-typescript), отдельные TypeScript/TSX grammars | Функции, именованные arrow/function bindings, методы, классы, переменные, типы и интерфейсы |
+| JavaScript/JSX: `.js`, `.jsx`, `.mjs`, `.cjs` | [tree-sitter-javascript](https://github.com/tree-sitter/tree-sitter-javascript), включая JSX | Функции, именованные arrow/function bindings, методы, классы, переменные, прямые ES exports |
+| Go: `.go` | [tree-sitter-go](https://github.com/tree-sitter/tree-sitter-go) | Функции, методы с receiver, объявления типов, struct/interface, package-level const/var |
+
+Go struct/interface и TypeScript interface имеют `kind=type`; const — `kind=variable`
+с `declaration_kind=const`. Языковая форма сохраняется в необязательном
+`declaration_kind`, не меняя общий набор `kind`. Для JS/Go `docstring_ranges`
+означает непосредственно примыкающие doc comments. Точные версии runtime, grammar,
+queries и resolver закрепляются в `ast_profile_version` и lockfile при реализации.
+Другие языки сохраняют L1–L3; отсутствие parser не отменяет базовые проверки.
+Здесь зависимости не добавляются.
 
 Индексируются изменённые разрешённые файлы, затем непосредственно импортированные
 ими определения. Дерево для RIGHT берётся на `head_sha`; для LEFT — на
@@ -171,9 +179,9 @@ runtime, grammar и queries закрепляются в `ast_profile_version` и
 ```text
 SymbolRef {
   symbol_id, language, kind: function|method|class|variable|type,
-  name, path, revision, blob_sha,
+  name: string|null, path, revision, blob_sha,
   declaration_range, signature_ranges[], docstring_ranges[],
-  enclosing_symbol_id?, exported, parser_profile_version
+  enclosing_symbol_id?, declaration_kind?, exported, parser_profile_version
 }
 ImportRef {
   importer_symbol_id?, module, names[], resolved_symbol_ids[],
@@ -200,10 +208,55 @@ ImportRef {
   `.ts`, `.tsx`, `.d.ts`, `index.ts`, `index.tsx` выбираются только при
   однозначности. Path aliases, package exports, dynamic import и цепочки barrel
   re-export в v1 не разворачиваются, причина `unsupported`/`dynamic` сохраняется.
+  Extension substitution по `tsconfig` не моделируется: import с JS-расширением
+  при возможном TS/stub кандидате → `unsupported`, а не выбор `.js` по совпадению
+  имени ([TypeScript resolution](https://www.typescriptlang.org/docs/handbook/modules/reference.html#file-extension-substitution)).
+- JavaScript/JSX: только относительные статические ES imports. Путь с расширением
+  читается точно; для пути без расширения рассматриваются `.js`, `.jsx`, `.mjs`
+  и соответствующие `index.*`; несколько кандидатов → `ambiguous`. Разрешаются
+  named/default imports и `namespace.Name` только к прямому export объявления
+  или локального binding в этом файле; анонимный default export сохраняет
+  координаты объявления и `name=null`. Side-effect import не выбирает
+  символ. CommonJS `require`/`module.exports`/`exports`, `.cjs` как цель импорта,
+  re-export, package imports/exports, aliases и смешанное TS↔JS разрешение —
+  `unsupported`, `import()` — `dynamic`. `.cjs` разбирается для локальных символов
+  и L2, но синтаксический ES export в нём не объявляется runtime export.
+- Go: только literal import path внутри одного локального module, заданного
+  `module` в корневом `go.mod` той же ревизии. Этот разрешённый политикой файл
+  читается как данные; `go.work`, `replace`, вложенная граница `go.mod` или
+  неподтверждённая полнота дерева → `unsupported`. Стандартная библиотека и
+  сторонние модули → `external`; пути не загружаются из сети или module cache.
+  В выражении `pkg.Name` выбирается однозначное экспортируемое package-level
+  объявление. Явный alias берётся из import, имя по умолчанию — из `package`
+  целевого пакета, **не** из последнего сегмента пути. `_` не выбирает символ,
+  dot import → `unsupported`. Вывод типа receiver, поиск методов через значения
+  и неявный поиск объявлений соседних файлов исходного пакета не выполняются.
 - Внешние зависимости не скачиваются. Проектные конфиги не исполняются, package
-  manager не запускается; symlink и submodule не обходят границу репозитория.
+  manager, `npm` и `go list` не запускаются; symlink и submodule не обходят границу
+  репозитория. Неподтверждённое связывание имени, включая локальное затенение
+  import binding, → `ambiguous`, а не предположение о целевом символе.
 - Повторный импорт того же symbol/blob использует один блок. Глубина — один
   переход от изменённого файла; циклы и рекурсивное раскрытие запрещены.
+
+Для разрешения Go-пакета нужна полная inventory его непосредственных non-test
+`.go` файлов; это не рекурсивная индексация. Файлы `*_test.go`, `_*.go` и `.*.go`
+не входят в целевой пакет; изменённые тесты разбираются как обычные изменённые
+файлы. Все прочитанные для разрешения файлы, включая `go.mod` и не давшие выбранного определения, входят
+в общий лимит **20 импортированных/служебных файлов**, с теми же blob/CPU limits.
+Неполная inventory или исчерпание лимита → `unsupported` с причиной `ast_limit`;
+исключённый член пакета не читается и даёт `excluded` для всего разрешения. Decode/parse failure члена
+пакета также запрещает `resolved`; сохраняются причина и `unsupported`.
+Уникальность имени нельзя выводить по оставшемуся подмножеству. Различные package
+names или несколько подходящих объявлений → `ambiguous`.
+
+Build target в v1 не задаётся: наличие у любого non-test члена пакета
+`//go:build`, legacy `// +build`, известного GOOS/GOARCH суффикса или `import "C"`
+даёт `unsupported` для разрешения пакета целиком. Списки распознаваемых суффиксов
+закреплены resolver profile; неизвестная форма, влияющая на состав пакета, не
+считается доказательством полноты. Изменённые условные/cgo файлы сохраняют локальный
+AST и L1–L3 с явной неопределённостью build context. Семантика имён пакетов и
+ограничений сборки: [Go imports](https://go.dev/ref/spec#Import_declarations),
+[Go build constraints](https://pkg.go.dev/cmd/go#hdr-Build_constraints).
 
 Tree-sitter задаёт нулевые byte/row координаты. Backend преобразует их в
 однобазовые строки; exclusive end на колонке 0 следующей строки не включает её.
@@ -218,7 +271,7 @@ Tree-sitter задаёт нулевые byte/row координаты. Backend �
 | Blob для разбора/окна | 256 KiB, строгий UTF-8 | L1 остаётся, `source_too_large`/`source_decode_failed` |
 | AST parsing | ≤1 с CPU на файл, ≤5 с суммарно на попытку | Остановка parser worker, L1/L2 по строкам, `ast_timeout` |
 | Память parser worker | 128 MiB | L1/L2, `ast_resource_limit` |
-| Файлы AST | ≤50 изменённых + ≤20 импортированных | По приоритету, остальные `ast_limit` |
+| Файлы AST/resolver | ≤50 изменённых + ≤20 импортированных/служебных | Включая все просмотренные Go package members и `go.mod`; остальные `ast_limit` |
 | Импортированные символы | ≤10 на изменённый файл, ≤100 на run | Оставшиеся записываются как `ast_limit` |
 | Фрагмент L2/L4 | ≤200 строк и ≤2 000 токенов | Уменьшение по явным границам/отказ от расширения |
 | L4 всего | ≤8 000 входных токенов | Остальные символы не передаются |
@@ -326,6 +379,10 @@ SHA256(canonical_json({
 Кэш собранного контекста v1 не вводится. Если появится, ключ включает policy,
 DiffMap, точные источники, budgets и версии сборки, а guard остаётся обязательным.
 Запрещено переносить результаты LLM между разными head/run только по findings hash.
+Закэшированное разрешение хранит весь список источников, от которых зависит
+однозначность, включая Go package inventory и `go.mod`: guard и лимиты применяются
+к каждому из них, а не только к файлу выбранного символа. Результат по неполной
+inventory нельзя переиспользовать как полное разрешение.
 
 ## 5. Manifest фактически отправленного контекста
 
@@ -726,6 +783,11 @@ runs завершаются закреплённым legacy pipeline; новые
 сообщение не содержит токенов, полного provider response или исключённого кода.
 
 ## 9. Карта diff и адаптеры VCS
+
+Распределение реализации: **createunix** отвечает за DiffMap (§§9.1–9.3),
+**инженер 5** — за VCS Publisher, адаптеры и восстановление публикации (§§9.4–10).
+Перед параллельной разработкой согласуется общий контракт карты, якорей и
+provenance; распределение ответственности не меняет описанные ниже интерфейсы.
 
 `DiffMap/v1` — неизменяемая карта конкретной версии diff. Её используют сборщик
 контекста, валидатор координат и VCS-адаптер. Номера строк исходных файлов начинаются
