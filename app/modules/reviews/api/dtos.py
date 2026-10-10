@@ -41,8 +41,8 @@ class RunSessionDto(ApiDto):
     cancel_requested: bool
     trigger: str
     created_at: UtcDatetime
-    started_at: datetime | None
-    finished_at: datetime | None
+    started_at: UtcDatetime | None
+    finished_at: UtcDatetime | None
     error_code: str | None
     model: str | None
     action_count: int
@@ -66,7 +66,7 @@ class ReviewCommentDto(ApiDto):
     title: str
     body: str
     rule_name: str | None
-    created_at: datetime
+    created_at: UtcDatetime
 
 
 class RunActionDto(ApiDto):
@@ -77,7 +77,7 @@ class RunActionDto(ApiDto):
     request: dict[str, Any]
     response: Any | None
     response_ref: str | None
-    started_at: datetime
+    started_at: UtcDatetime
     duration_ms: int
 
 
@@ -159,7 +159,7 @@ class PullRequestSummaryDto(ApiDto):
     url: str
     author: str | None
     head_sha: str
-    updated_at: datetime
+    updated_at: UtcDatetime
     latest_run: LatestRunDto | None
 
 
