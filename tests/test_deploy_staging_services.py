@@ -42,9 +42,11 @@ SECRET_SOURCES = {
 }
 # Non-secret configuration, routed like the secrets: the bot login is a variable of the
 # Environment, the LLM models are repository variables (an Environment variable of the same
-# name overrides them), and the endpoint of the LLM gateway is an organization variable.
+# name overrides them), the portal URL is an Environment variable, and the endpoint of the
+# LLM gateway is an organization variable.
 VARIABLE_SOURCES = {
     "GITHUB_APP_BOT_LOGIN": "GH_APP_BOT_LOGIN",
+    "PORTAL_URL": "PORTAL_URL",
     "LLM_BASE_URL": "AI_DMC268_URL",
     "LLM_MODEL": "LLM_MODEL",
     "LLM_FALLBACK_MODEL": "LLM_FALLBACK_MODEL",
@@ -64,7 +66,7 @@ ENV_FILES = {
     ),
     "worker.env": (
         "WORKER_ENV_KEYS",
-        {"LLM_API_KEYS", "LLM_BASE_URL", "LLM_MODEL", "LLM_FALLBACK_MODEL"},
+        {"LLM_API_KEYS", "LLM_BASE_URL", "LLM_MODEL", "LLM_FALLBACK_MODEL", "PORTAL_URL"},
     ),
     "webhook-worker.env": ("WEBHOOK_WORKER_ENV_KEYS", {"GITHUB_APP_BOT_LOGIN"}),
 }
@@ -83,6 +85,7 @@ CI_SECRETS = {
     "LLM_API_KEYS": "sk-test-1,sk-test-2",
     "LLM_BASE_URL": "https://llm.test/api/v1",
     "GITHUB_APP_BOT_LOGIN": "reviewer[bot]",
+    "PORTAL_URL": "https://staging-ui.example.test",
     "LLM_MODEL": "gpt-4.1-mini",
     "LLM_FALLBACK_MODEL": "mistral-small-3.2-24b",
 }
@@ -332,6 +335,39 @@ def test_bundle_step_without_secrets_outputs_an_empty_bundle(tmp_path: Path) -> 
     assert stdout.splitlines() == [f"not set: {name}" for name in names]
 
 
+def test_portal_url_from_ci_reaches_only_the_review_worker(tmp_path: Path, host: Host) -> None:
+    stdout, bundle = _run_bundle_step(tmp_path, {"PORTAL_URL": "https://staging-ui.example.test"})
+
+    result = host.deploy("ghcr.io/test/api@sha256:a", bundle=bundle)
+
+    assert result.returncode == 0, result.stderr
+    assert _read_env_file(host.app_dir / "worker.env") == {
+        "PORTAL_URL": "https://staging-ui.example.test"
+    }
+    assert "set: PORTAL_URL" in stdout.splitlines()
+    for name in ("app.env", "api.env", "webhook-worker.env"):
+        assert "PORTAL_URL" not in _read_env_file(host.app_dir / name)
+
+
+@pytest.mark.parametrize("portal_url", [None, ""], ids=["unset", "empty"])
+def test_optional_portal_url_is_omitted_from_env_files(
+    tmp_path: Path, host: Host, portal_url: str | None
+) -> None:
+    values = {**CI_SECRETS}
+    if portal_url is None:
+        values.pop("PORTAL_URL")
+    else:
+        values["PORTAL_URL"] = portal_url
+    stdout, bundle = _run_bundle_step(tmp_path, values)
+
+    result = host.deploy("ghcr.io/test/api@sha256:a", bundle=bundle)
+
+    assert result.returncode == 0, result.stderr
+    assert "not set: PORTAL_URL" in stdout.splitlines()
+    for name in ENV_FILES:
+        assert "PORTAL_URL" not in _read_env_file(host.app_dir / name)
+
+
 @pytest.mark.parametrize("fallback", [None, ""], ids=["unset", "empty"])
 def test_optional_fallback_model_is_omitted_from_worker_env(
     tmp_path: Path, host: Host, fallback: str | None
@@ -351,6 +387,7 @@ def test_optional_fallback_model_is_omitted_from_worker_env(
         "LLM_API_KEYS": "sk-test-1,sk-test-2",
         "LLM_BASE_URL": "https://llm.test/api/v1",
         "LLM_MODEL": "gpt-4.1-mini",
+        "PORTAL_URL": "https://staging-ui.example.test",
     }
 
 
