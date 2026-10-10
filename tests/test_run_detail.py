@@ -56,6 +56,7 @@ def run_item(status: str = "succeeded", *, summary_only: bool = False) -> RunLis
         url="https://github.test/o/r/pull/1",
         head_sha="a" * 40,
         created_at=NOW,
+        trigger="webhook",
         summary_only=summary_only,
     )
 

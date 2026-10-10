@@ -62,6 +62,28 @@ stateDiagram-v2
 - **RunGuard решает по PG** (SD §6.3). Если Run терминален и `attempt ≥ 1`, RunGuard идемпотентно доводит check-run до итогового conclusion (§7) и делает ack; эта проверка идёт первой. Иначе, если Run не в `queued` или `available_at > now`, доставка подтверждается ack без работы. Так закрываются check-run'ы Run, завершённых без воркера (T6, T13): сигнал T6 и повторная публикация T13 доставляют закрытие, не дожидаясь retry-очереди, а более поздняя копия того же Run подтверждается ack идемпотентно.
 - **Publisher в MVP.** Пока отдельного сервиса `publisher` нет (#34), очередь `review.publish` потребляет отдельный consumer в процессе worker. T8 и T17 идут через настоящее сообщение `review.publish/v1`, T14–T16 выполняет этот consumer; идемпотентность по `findings_hash` и переходы те же.
 
+### 1.1 Происхождение Run в API (#112)
+
+`RunSession` (а значит, и `RunDetail`) отдаёт два поля, которые пишутся при создании Run и больше не меняются. Они есть в списке `GET /api/runs`, в `GET /api/runs/{id}` и в ответах `rerun` и `cancel`.
+
+| Поле | Значения и формат | Что означает |
+|---|---|---|
+| `trigger` | `webhook \| manual \| rerun \| dry_run`, тот же enum, что в `review.run/v1` (§12) | `webhook`: Run создан `try_enqueue` по событию GitHub или sweep (T1, T2); `rerun`: Run создан `POST /api/runs/{id}/rerun` (T3). `manual` и `dry_run` зарезервированы, таких Run сейчас никто не создаёт |
+| `createdAt` | RFC 3339 в UTC с суффиксом `Z`, например `2026-09-25T10:00:00Z`; не бывает `null` | время вставки строки `runs`, то есть переход `[*]` → `queued`. По нему же отсортирован список и построен курсор |
+
+Что по ним можно установить:
+
+- **Чем запущен Run:** вебхуком или кнопкой «Перезапустить». Раньше это было видно только в БД.
+- **Сколько Run ждал в очереди:** `startedAt − createdAt`. `startedAt` ставится при первом claim и равен `null`, пока Run не взят воркером, поэтому Run в `queued` раньше не имел в API ни одной отметки времени.
+- **Какое событие его породило, приблизительно:** `createdAt` вместе с PR и `headSha` сопоставляется со временем доставки в Recent Deliveries или с `webhook_events.received_at`.
+
+Чего они не дают:
+
+- Историю переходов `queued → running → publishing → …`: она по-прежнему видна только в SSE и в `run_actions` (§2).
+- Доказательство связи с конкретной доставкой: совпадение по времени, PR и head остаётся косвенным.
+
+**`delivery_id` в `RunSession` не добавляется, решение отложено (#112).** Причины: связи `webhook_events → runs` в БД нет; Run создаётся из состояния PR, и к одному Run могут вести несколько доставок (`labeled`, `check_suite`, `workflow_run`), а у Run от sweep и от rerun доставки нет вовсе. Поле потребовало бы миграции и правила, какая из доставок считается источником. Это отдельный объём: задача заводится, когда приёмке или поддержке понадобится точная связь «доставка → Run».
+
 ---
 
 ## 2. Фазы внутри `running` и трейс `run_actions`
@@ -429,6 +451,7 @@ UI рисует диапазон `[newLine ?? oldLine, endLine ?? newLine ?? old
 | Контракт авторизации | GitHub App user authorization без OAuth scopes; `state` генерирует и хранит SPA. `POST /api/auth/github/callback {code}` → access JWT (15 мин, Bearer) и refresh в httpOnly-cookie (30 дней, ротация, `Path=/api/auth`). Дальше — `POST /api/auth/refresh`, `GET /api/auth/me`, `POST /api/auth/logout`; SSE — fetch-стрим с Bearer. Полный контракт — SD §12 и `contracts/openapi.yaml`, реализация — #11 | D4 [техлид]; access-токен в памяти, подпись в auth-api и проверка публичным ключом в portal-api, граница Workspace по Р-7 — [дефолт] |
 | Стадии, вердикт, якорь, retry | §2, §11, §10, §4 | D5, D3 [техлид]; имена `run_actions.tool` в стиле main — [дефолт]; D6 [техлид, формулы — дефолт]; D13 [дефолт] |
 | Rerun (T3) | `POST /api/runs/{id}/rerun` создаёт новый Run на текущий `head_sha`; флаг и CI не проверяются. `409`, если у PR есть активный Run или PR закрыт (§1) | `409` при активном Run и при закрытом PR — [дефолт] |
+| Происхождение Run в API | `RunSession` отдаёт `trigger` и `createdAt` (§1.1); `delivery_id` не добавляется, решение отложено до отдельной задачи | #112, #106 часть 7 |
 
 ---
 

@@ -571,6 +571,7 @@ class SqlAlchemyRunRepository:
             url=code_change.web_url,
             head_sha=run.head_sha,
             created_at=run.created_at,
+            trigger=run.trigger,
             summary_only=summary_only,
         )
 

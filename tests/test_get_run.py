@@ -35,6 +35,7 @@ def test_get_run_returns_the_repository_projection() -> None:
         url="https://example.test/1",
         head_sha="a" * 40,
         created_at=datetime(2026, 9, 24, tzinfo=UTC),
+        trigger="webhook",
     )
     repository = FakeRunDetailRepository(item)
 

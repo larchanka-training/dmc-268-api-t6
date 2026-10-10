@@ -11,6 +11,8 @@ def test_run_session_serializes_the_frontend_camel_case_contract() -> None:
         engine="fast",
         attempt=0,
         cancel_requested=False,
+        trigger="rerun",
+        created_at=datetime(2026, 9, 23, 23, 59, tzinfo=UTC),
         started_at=datetime(2026, 9, 24, tzinfo=UTC),
         finished_at=None,
         error_code=None,
@@ -28,4 +30,6 @@ def test_run_session_serializes_the_frontend_camel_case_contract() -> None:
 
     assert dto.model_dump(by_alias=True)["cancelRequested"] is False
     assert dto.model_dump(by_alias=True)["summaryOnly"] is False
+    assert dto.model_dump(by_alias=True, mode="json")["trigger"] == "rerun"
+    assert dto.model_dump(by_alias=True, mode="json")["createdAt"] == "2026-09-23T23:59:00Z"
     assert dto.model_dump(by_alias=True)["pullRequest"]["headSha"] == "a" * 40

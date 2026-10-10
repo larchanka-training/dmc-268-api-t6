@@ -370,6 +370,8 @@ def to_run_session_dto(item: RunListItem) -> RunSessionDto:
         engine=item.engine,
         attempt=item.attempt,
         cancel_requested=item.cancel_requested,
+        trigger=item.trigger,
+        created_at=item.created_at,
         started_at=item.started_at,
         finished_at=item.finished_at,
         error_code=item.error_code,

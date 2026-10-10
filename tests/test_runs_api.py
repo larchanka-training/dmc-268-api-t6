@@ -3,6 +3,8 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from uuid import UUID
 
+import pytest
+
 from app.main import app, get_run_repository
 from app.modules.reviews.application.get_run import RunReview, RunReviewRepository
 from app.modules.reviews.application.list_runs import RunCursor, RunListItem
@@ -71,6 +73,7 @@ def make_item(value: int, created_at: datetime) -> RunListItem:
         url=f"https://example.test/{value}",
         head_sha="a" * 40,
         created_at=created_at,
+        trigger="webhook",
     )
 
 
@@ -92,6 +95,8 @@ def test_runs_list_uses_the_camel_case_contract() -> None:
                 "engine": "fast",
                 "attempt": 0,
                 "cancelRequested": False,
+                "trigger": "webhook",
+                "createdAt": "2026-09-24T00:00:00Z",
                 "startedAt": "2026-09-24T00:00:00Z",
                 "finishedAt": None,
                 "errorCode": None,
@@ -221,6 +226,32 @@ def test_run_detail_returns_pr_data_latest_model_and_action_count() -> None:
     assert response.json()["model"] == "gpt-test"
     assert response.json()["actionCount"] == 2
     assert response.json()["summaryOnly"] is True
+
+
+@pytest.mark.parametrize("trigger", ["webhook", "rerun"])
+def test_runs_list_and_detail_return_the_stored_trigger_and_creation_time(trigger: str) -> None:
+    # Queued and never claimed: createdAt is the only timestamp the Run has.
+    item = replace(
+        make_item(9, datetime(2026, 9, 24, 10, 30, 15, 250000, tzinfo=UTC)),
+        status="queued",
+        started_at=None,
+        trigger=trigger,
+    )
+    try:
+        client = TestClient(app)
+        app.dependency_overrides[get_run_repository] = lambda: FakeRunRepository([item])
+        listed = client.get("/api/runs")
+        app.dependency_overrides[get_run_repository] = lambda: FakeRunDetailRepository(item)
+        detail = client.get(f"/api/runs/{item.id}")
+    finally:
+        app.dependency_overrides.clear()
+
+    assert listed.status_code == 200
+    assert detail.status_code == 200
+    for run in (listed.json()["items"][0], detail.json()):
+        assert run["trigger"] == trigger
+        assert run["createdAt"] == "2026-09-24T10:30:15.250000Z"
+        assert run["startedAt"] is None
 
 
 def test_run_detail_returns_null_model_when_the_run_has_no_usage_event() -> None:

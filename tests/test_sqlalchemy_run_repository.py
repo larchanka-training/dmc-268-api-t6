@@ -105,6 +105,7 @@ def test_sqlalchemy_run_repository_filters_and_orders_with_a_tied_timestamp_curs
         error_code=None,
         head_sha="a" * 40,
         created_at=created_at,
+        trigger="webhook",
     )
     code_change = SimpleNamespace(
         external_number=5, title="Review me", web_url="https://example.test/pull/5"
@@ -157,6 +158,7 @@ def test_sqlalchemy_run_repository_gets_detail_with_one_summary_query() -> None:
         error_code=None,
         head_sha="a" * 40,
         created_at=created_at,
+        trigger="rerun",
     )
     code_change = SimpleNamespace(
         external_number=5, title="Review me", web_url="https://example.test/pull/5"
@@ -172,6 +174,8 @@ def test_sqlalchemy_run_repository_gets_detail_with_one_summary_query() -> None:
     assert item is not None
     assert item.model is None
     assert item.action_count == 4
+    assert item.trigger == "rerun"
+    assert item.created_at == created_at
     assert session.statement is not None
     compiled = session.statement.compile()
     sql = str(compiled)

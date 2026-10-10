@@ -50,6 +50,7 @@ def test_list_runs_builds_a_cursor_from_the_last_returned_item() -> None:
         url="https://example.test/1",
         head_sha="a" * 40,
         created_at=created_at,
+        trigger="webhook",
     )
     second = RunListItem(
         id=UUID("00000000-0000-0000-0000-000000000002"),
@@ -68,6 +69,7 @@ def test_list_runs_builds_a_cursor_from_the_last_returned_item() -> None:
         url="https://example.test/2",
         head_sha="b" * 40,
         created_at=created_at,
+        trigger="webhook",
     )
 
     class FullPageRepository(FakeRunRepository):
