@@ -240,19 +240,46 @@ PR и `main` гоняют Gitleaks (`--redact`) и Trivy scanner `secret`. На�
 | Маскирование | GitHub скрывает значения `secrets.*` и `GITHUB_TOKEN` |
 | Нет `set -x` | `set +o xtrace` в SSH-скрипте и на VM |
 | Нет debug SSH | `debug: false` у appleboy |
-| Нет echo пароля | скрипты печатают только image ref |
+| Нет echo пароля | image ref, контролируемая причина отказа и имена env без значений |
 | Login в реестр | пароль в stdin, stdout login глушится |
 | Gitleaks | `--redact`, чтобы находка не продублировала секрет |
 
-Не делайте `echo "$POSTGRES_PASSWORD"`, `env`, `cat .env` в workflow.
+Не делайте `echo "$POSTGRES_PASSWORD"`, `env`, `cat .env`, resolved `compose config` или полный
+`docker inspect` в workflow: последние тоже содержат значения секретов.
 
-Имена переменных в контейнере без значений — не через `env | cut -d= -f1`: строки многострочного PEM не содержат `=` и печатаются целиком. Безопасно:
+После успешного application rollback общий `rollback.sh` выполняет `compose exec -T` с Python
+в работающих `api`, `worker` и `webhook-worker`. Python читает `os.environ.keys()`, оставляет
+ASCII-имена по `[A-Za-z_][A-Za-z0-9_]*` и печатает отсортированный JSON-список. Скрипт проверяет
+точный формат до вывода и добавляет фиксированную метку сервиса. Значения не читаются: реальные
+переводы строк PEM, `$` и обратные слэши не превращаются в строки лога. Имена с newline,
+кавычками, дефисом или Unicode исключаются. `env | cut -d= -f1` для этого запрещён: строки
+многострочного PEM без `=` он напечатает целиком.
 
-```bash
-cd /opt/dmc-268-api-staging
-docker compose -p dmc-268-api-staging -f compose.yml -f compose.edge.yml --env-file .env \
-  exec -T api python -c "import os; print(' '.join(sorted(os.environ)))"
+Пример полного вывода из изолированной проверки (набор имён зависит от образа и роли):
+
+```text
+api environment keys: ["AUTH_JWT_AUDIENCE", "AUTH_JWT_ISSUER", "AUTH_JWT_PRIVATE_KEY", "AUTH_JWT_PUBLIC_KEY", "DATABASE_URL", "GITHUB_CLIENT_SECRET", "GITHUB_WEBHOOK_SECRET", "GPG_KEY", "HOME", "HOSTNAME", "LC_CTYPE", "PATH", "POSTGRES_DB", "POSTGRES_HOST", "POSTGRES_PASSWORD", "POSTGRES_PORT", "POSTGRES_USER", "PYTHONDONTWRITEBYTECODE", "PYTHONUNBUFFERED", "PYTHON_SHA256", "PYTHON_VERSION", "RABBITMQ_URL", "REDIS_URL", "UV_COMPILE_BYTECODE", "UV_LINK_MODE"]
+worker environment keys: ["DATABASE_URL", "GITHUB_APP_ID", "GITHUB_APP_PRIVATE_KEY", "GPG_KEY", "HOME", "HOSTNAME", "LC_CTYPE", "LLM_API_KEYS", "PATH", "PYTHONDONTWRITEBYTECODE", "PYTHONUNBUFFERED", "PYTHON_SHA256", "PYTHON_VERSION", "RABBITMQ_URL", "UV_COMPILE_BYTECODE", "UV_LINK_MODE", "WORKER_HEARTBEAT_FILE"]
+webhook-worker environment keys: ["DATABASE_URL", "GITHUB_APP_BOT_LOGIN", "GITHUB_APP_ID", "GITHUB_APP_PRIVATE_KEY", "GPG_KEY", "HOME", "HOSTNAME", "LC_CTYPE", "PATH", "PYTHONDONTWRITEBYTECODE", "PYTHONUNBUFFERED", "PYTHON_SHA256", "PYTHON_VERSION", "RABBITMQ_URL", "UV_COMPILE_BYTECODE", "UV_LINK_MODE", "WORKER_HEARTBEAT_FILE"]
 ```
+
+Оба режима получают эти списки после здорового `up --wait`, перед success metadata и строкой
+`rolled back`. Отказ по ревизии или восстановление bootstrap nginx не запускает диагностику.
+Недоступный сервис, ошибка exec и неожиданный/шумный вывод дают фиксированную
+`rollback completion failed: <service> environment key diagnostics failed`; сырой stdout/stderr
+не попадает в job, успех не записывается. Поскольку up уже завершён, целевой стек может работать:
+сначала проверить его фактическое здоровье и устранить сбой диагностики ([CICD §5](CICD.md#5-rollback)).
+
+При admission вывод pull, выбранных полей image inspect и probe также захватывается или
+подавляется: ошибки идентификации image ID/RepoDigest дают только контролируемую причину.
+Списки registry digest и сырой Docker stderr не печатаются. Новое успешное состояние хранит
+immutable release ref, а probe и up используют один проверенный image ID.
+
+Регрессии выполняют настоящий Python payload с multiline PEM, canaries и hostile names в обоих
+режимах, включая ошибки Docker exec. [Изолированный verifier](CICD.md#изолированная-проверка-двумя-образами)
+проверил работающие контейнеры двух образов, exact key lists и отсутствие каждого синтетического
+секрета/строки PEM во всём захваченном выводе. Его [redacted evidence](plans/110-verification.md)
+содержит только имена, ID, ревизии и хеши; значения и private transcripts не сохраняются в git.
 
 ---
 

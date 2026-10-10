@@ -8,6 +8,7 @@ keeps across deploys and rollbacks, without a VPS or a Docker daemon.
 from __future__ import annotations
 
 import base64
+import json
 import os
 import re
 import shutil
@@ -26,6 +27,14 @@ ROLLBACK_WORKFLOW = WORKFLOW.parent / "rollback.yml"
 EDGE_GUARD = "        if: steps.target.outputs.deploy_mode == 'edge'"
 STAGING_COMPOSE = REPO_ROOT / "deploy" / "compose" / "staging.yml"
 PROJECT = "dmc-268-api-staging"
+IMAGE_A = "ghcr.io/test/api@sha256:" + "a" * 64
+IMAGE_B = "ghcr.io/test/api@sha256:" + "b" * 64
+IMAGE_C = "ghcr.io/test/api@sha256:" + "c" * 64
+IMAGE_EXPLICIT = "ghcr.io/test/api@sha256:" + "e" * 64
+IMAGE_BAD = "ghcr.io/test/api@sha256:" + "f" * 64
+A_ID = "sha256:" + "1" * 64
+B_ID = "sha256:" + "2" * 64
+EXPLICIT_ID = "sha256:" + "3" * 64
 
 # GitHub rejects secret names starting with GITHUB_, so the App secrets are GH_* in the
 # Environment (comment of the tech lead in #35); the container keeps the names of .env.example.
@@ -91,24 +100,73 @@ FAKE_DOCKER = """\
 #!/usr/bin/env bash
 # Fake docker CLI: logs every call and answers only what deploy.sh and rollback.sh ask.
 printf '%s\\n' "$*" >> "${STUB_LOG}"
+image_identity() {
+  case "$1" in
+    "${STUB_SELECTED_REF:-}")
+      if [[ -e "${STUB_TAG_MOVED}" ]]; then echo "${STUB_ID_B}"; else echo "${STUB_ID_A}"; fi ;;
+    "${STUB_REF_A}") echo "${STUB_ID_A}" ;;
+    "${STUB_REF_B}") echo "${STUB_ID_B}" ;;
+    "${STUB_REF_EXPLICIT}") echo "${STUB_ID_EXPLICIT}" ;;
+    sha256:*) echo "$1" ;;
+    *) echo "${STUB_ID_A}" ;;
+  esac
+}
 case "$1" in
   volume) [[ "$2" == inspect && -e "${STUB_VOLUMES}/$3" ]] ;;
   inspect) exit 1 ;;
+  image)
+    if [[ "${STUB_INSPECT_FAILURE:-}" == id && "$4" == '{{.Id}}' ]]; then
+      echo "${STUB_UNSAFE_ERROR}" >&2; exit 1
+    fi
+    if [[ "$4" == '{{.Id}}' ]]; then
+      if [[ -n "${STUB_ID_OUTPUT+x}" ]]; then printf '%s\\n' "$STUB_ID_OUTPUT";
+      elif [[ -n "${STUB_DIGEST_MISMATCH:-}" && "$5" == "${STUB_REF_A}" ]]; then
+        echo "${STUB_ID_B}";
+      else image_identity "$5"; fi
+    else
+      printf '%s\\n' "${STUB_REPODIGESTS-${STUB_REF_A}}"
+      exit "${STUB_REPODIGEST_STATUS:-0}"
+    fi
+    ;;
+  pull)
+    if [[ "$2" == "${STUB_PULL_FAILURE:-}" ]]; then
+      echo "${STUB_UNSAFE_ERROR:-raw-registry-secret}" >&2
+      exit 1
+    fi
+    ;;
   compose)
     shift
     project_dir=""
     env_file=""
     action=""
+    action_args=()
     while (( $# )); do
       case "$1" in
         -p) shift 2 ;;
         -f) [[ -n "${project_dir}" ]] || project_dir="$(dirname "$2")"; shift 2 ;;
         --env-file) env_file="$2"; shift 2 ;;
-        *) [[ -n "${action}" ]] || action="$1"; shift ;;
+        *)
+          if [[ -z "${action}" ]]; then action="$1"; else action_args+=("$1"); fi
+          shift ;;
       esac
     done
     case "${action}" in
+      run)
+        cat > "${STUB_PROBE_SOURCE}"
+        printf '%s\\n' "${IMAGE:-}" > "${STUB_PROBE_IMAGE}"
+        cp "${APP_DIR}/.env" "${STUB_PROBE_BEFORE}"
+        if [[ -f "${APP_DIR}/worker.env" ]]; then
+          echo present > "${STUB_PROBE_ROLE}"
+        else
+          echo absent > "${STUB_PROBE_ROLE}"
+        fi
+        cp "${project_dir}/probe.yml" "${STUB_PROBE_CONFIG}"
+        [[ "${STUB_MOVE_TAG:-}" != true ]] || touch "${STUB_TAG_MOVED}"
+        echo "${STUB_PROBE_OUTPUT:-rollback revision check: compatible}"
+        exit "${STUB_PROBE_STATUS:-0}"
+        ;;
       up)
+        printf '%s\\n' "${IMAGE:-}" > "${STUB_UP_IMAGE}"
         # Like Compose: env_file paths resolve against the directory of the first compose file.
         # Every file must exist: deploy and rollback keep each role's file in place.
         for name in app.env api.env worker.env webhook-worker.env; do
@@ -116,10 +174,35 @@ case "$1" in
         done
         ! grep -qxF "IMAGE=${STUB_FAILING_IMAGE:-}" "${env_file}"
         ;;
+      exec)
+        service="${action_args[1]}"
+        cp "${APP_DIR}/.deploy-state" "${STUB_DIAGNOSTIC_STATE}"
+        printf '%s\\n' "${service}" >> "${STUB_DIAGNOSTIC_CALLS}"
+        if [[ "${service}" == "${STUB_EXEC_FAILURE_SERVICE:-}" ]]; then
+          printf '%s\\n' "${STUB_EXEC_ERROR-raw-container-secret}"
+          exit "${STUB_EXEC_STATUS:-1}"
+        fi
+        uv run python "${STUB_EXEC_HELPER}" "${action_args[@]}"
+        ;;
       down) exit "${STUB_DOWN_STATUS:-0}" ;;
     esac
     ;;
 esac
+"""
+
+EXEC_HELPER = """\
+from __future__ import annotations
+import json
+import os
+import sys
+from pathlib import Path
+environments = json.loads(Path(os.environ['STUB_DIAGNOSTIC_ENV']).read_text())
+service = sys.argv[2]
+# macOS adds a CoreFoundation key at execve startup; set the fake container environment now.
+os.environ.clear()
+os.environ.update(environments[service])
+assert sys.argv[3:5] == ['python', '-c']
+exec(compile(sys.argv[5], '<docker-exec>', 'exec'))
 """
 
 _ENV_FILE_ENTRY = re.compile(r"^([A-Z][A-Z0-9_]*)='([^']*)'\n", re.MULTILINE)
@@ -225,6 +308,23 @@ class Host:
             "APP_DIR": str(self.app_dir),
             "STUB_LOG": str(self.log),
             "STUB_VOLUMES": str(self.volumes),
+            "STUB_PROBE_SOURCE": str(self.log.parent / "probe-source.py"),
+            "STUB_PROBE_IMAGE": str(self.log.parent / "probe-image"),
+            "STUB_PROBE_CONFIG": str(self.log.parent / "probe-config.yml"),
+            "STUB_PROBE_BEFORE": str(self.log.parent / "probe-dotenv"),
+            "STUB_PROBE_ROLE": str(self.log.parent / "probe-role"),
+            "STUB_UP_IMAGE": str(self.log.parent / "up-image"),
+            "STUB_TAG_MOVED": str(self.log.parent / "tag-moved"),
+            "STUB_REF_A": IMAGE_A,
+            "STUB_REF_B": IMAGE_B,
+            "STUB_REF_EXPLICIT": IMAGE_EXPLICIT,
+            "STUB_ID_A": A_ID,
+            "STUB_ID_B": B_ID,
+            "STUB_ID_EXPLICIT": EXPLICIT_ID,
+            "STUB_EXEC_HELPER": str(self.log.parent / "exec-helper.py"),
+            "STUB_DIAGNOSTIC_ENV": str(self.log.parent / "container-environments.json"),
+            "STUB_DIAGNOSTIC_STATE": str(self.log.parent / "diagnostic-before-state"),
+            "STUB_DIAGNOSTIC_CALLS": str(self.log.parent / "diagnostic-services"),
             "TMPDIR": str(self.tmp),
             **(env or {}),
         }
@@ -259,7 +359,10 @@ def host(tmp_path: Path) -> Host:
     # The same renames as the "Prepare host" step.
     shutil.copy(STAGING_COMPOSE, app_dir / "compose.yml")
     shutil.copy(REPO_ROOT / "deploy" / "compose" / "staging.edge.yml", app_dir / "compose.edge.yml")
-    for script in ("deploy.sh", "rollback.sh", "env-file.sh"):
+    shutil.copy(
+        REPO_ROOT / "deploy" / "compose" / "staging.ports.yml", app_dir / "compose.ports.yml"
+    )
+    for script in ("deploy.sh", "rollback.sh", "env-file.sh", "check-rollback-revision.py"):
         target = app_dir / script
         shutil.copy(REPO_ROOT / "deploy" / "scripts" / script, target)
         target.chmod(0o755)
@@ -272,6 +375,12 @@ def host(tmp_path: Path) -> Host:
     volumes.mkdir()
     tmp = tmp_path / "tmp"
     tmp.mkdir()
+    (tmp_path / "exec-helper.py").write_text(EXEC_HELPER)
+    (tmp_path / "container-environments.json").write_text(
+        json.dumps(
+            {service: {"LC_CTYPE": "UTF-8"} for service in ("api", "worker", "webhook-worker")}
+        )
+    )
     return Host(
         app_dir=app_dir, bin_dir=bin_dir, volumes=volumes, log=tmp_path / "docker.log", tmp=tmp
     )
@@ -343,7 +452,7 @@ def test_optional_fallback_model_is_omitted_from_worker_env(
         values["LLM_FALLBACK_MODEL"] = fallback
     stdout, bundle = _run_bundle_step(tmp_path, values)
 
-    result = host.deploy("ghcr.io/test/api@sha256:a", bundle=bundle)
+    result = host.deploy(IMAGE_A, bundle=bundle)
 
     assert result.returncode == 0, result.stderr
     assert "not set: LLM_FALLBACK_MODEL" in stdout.splitlines()
@@ -357,7 +466,7 @@ def test_optional_fallback_model_is_omitted_from_worker_env(
 def test_legacy_eur_rate_is_ignored_by_bundle_and_worker_env(tmp_path: Path, host: Host) -> None:
     stdout, bundle = _run_bundle_step(tmp_path, {**CI_SECRETS, "LLM_EUR_TO_USD_RATE": "1.1204"})
 
-    result = host.deploy("ghcr.io/test/api@sha256:a", bundle=bundle)
+    result = host.deploy(IMAGE_A, bundle=bundle)
 
     assert result.returncode == 0, result.stderr
     assert all("LLM_EUR_TO_USD_RATE" not in line for line in stdout.splitlines())
@@ -382,6 +491,149 @@ def test_deploy_step_forwards_the_bundle_to_the_host() -> None:
     assert "APP_SECRETS_B64" in envs.group(1).split(",")
 
 
+@pytest.mark.parametrize("workflow", [WORKFLOW, ROLLBACK_WORKFLOW], ids=["ci", "manual-edge"])
+def test_workflow_upload_delivers_host_supplied_revision_checker(workflow: Path) -> None:
+    step = _workflow_step("Upload deploy files", workflow)
+    source = re.search(r'^\s+source: "([^"]+)"$', step, re.MULTILINE)
+    assert source is not None
+    assert "deploy/scripts/rollback.sh" in source.group(1).split(",")
+    assert "deploy/scripts/check-rollback-revision.py" in source.group(1).split(",")
+
+
+@pytest.mark.parametrize("compatible", [False, True])
+def test_manual_ports_refreshes_old_rollback_before_execution(host: Host, compatible: bool) -> None:
+    assert host.deploy(IMAGE_A, bundle="").returncode == 0
+    assert host.deploy(IMAGE_B).returncode == 0
+    (host.app_dir / "rollback.sh").write_text("#!/usr/bin/env bash\necho old-unguarded-rollback\n")
+    (host.app_dir / "rollback.sh").chmod(0o600)
+    (host.app_dir / "check-rollback-revision.py").unlink()
+    upload = _workflow_step("Upload rollback scripts", ROLLBACK_WORKFLOW)
+    assert "        if: steps.target.outputs.deploy_mode == 'ports'" in upload.splitlines()
+    source = re.search(r'^\s+source: "([^"]+)"$', upload, re.MULTILINE)
+    assert source is not None
+    assert set(source.group(1).split(",")) == {
+        "deploy/scripts/rollback.sh",
+        "deploy/scripts/env-file.sh",
+        "deploy/scripts/check-rollback-revision.py",
+    }
+    assert "          strip_components: 2" in upload
+    for relative in source.group(1).split(","):
+        path = REPO_ROOT / relative
+        (host.app_dir / path.name).write_bytes(path.read_bytes())
+    rollback = _workflow_step("Rollback", ROLLBACK_WORKFLOW)
+    script = re.search(r"^          script: \|\n((?:            .*\n|\n)*)", rollback, re.MULTILINE)
+    assert script is not None
+    (host.app_dir / "manual-step.sh").write_text(
+        "#!/usr/bin/env bash\n" + textwrap.dedent(script.group(1))
+    )
+    (host.app_dir / "manual-step.sh").chmod(0o755)
+    before = host.files()
+    calls_before = len(host.calls())
+
+    result = host.run(
+        "manual-step.sh",
+        env={
+            "IMAGE": "",
+            "DEPLOY_MODE": "ports",
+            "STUB_PROBE_STATUS": "0" if compatible else "1",
+            "STUB_PROBE_OUTPUT": (
+                "rollback revision check: compatible"
+                if compatible
+                else "rollback revision check: refused: database revision is unknown"
+            ),
+        },
+    )
+
+    assert "old-unguarded-rollback" not in result.stdout
+    assert any(" run --rm --no-deps " in call for call in host.calls()[calls_before:])
+    if compatible:
+        assert result.returncode == 0, result.stderr
+        assert f"rolled back to {IMAGE_A}" in result.stdout
+        assert _read_dotenv(host.app_dir / ".deploy-state")["current_image"] == IMAGE_A
+    else:
+        assert result.returncode != 0
+        assert "database revision is unknown" in result.stderr
+        assert "rolled back" not in result.stdout
+        assert host.files() == before
+        assert not any(" up " in call for call in host.calls()[calls_before:])
+
+
+def test_manual_rollback_failure_keeps_followup_and_promotion_success_gated() -> None:
+    for name in ("Rollback", "Read deployed image", "Parse deployed image", "Health check"):
+        step = _workflow_step(name, ROLLBACK_WORKFLOW)
+        assert "continue-on-error" not in step
+        assert re.search(r"^        if:", step, re.MULTILINE) is None
+    workflow = ROLLBACK_WORKFLOW.read_text()
+    assert "    if: github.ref == 'refs/heads/main'" in workflow
+    assert "    needs: rollback" in workflow.split("  promote-staging:", 1)[1]
+    assert "format('rollback-ignored-{0}', github.run_id)" in workflow
+    assert "  cancel-in-progress: false" in workflow
+
+
+@pytest.mark.parametrize(
+    ("deploy", "health", "rollback"),
+    [
+        ("failure", "skipped", "failure"),
+        ("success", "failure", "failure"),
+        ("failure", "skipped", "success"),
+    ],
+)
+def test_failed_forward_deploy_never_promotes_and_reports_failed_auto_rollback(
+    deploy: str, health: str, rollback: str, tmp_path: Path
+) -> None:
+    values = {"deploy": deploy, "health": health, "rollback": rollback}
+
+    def render(script: str) -> str:
+        for step, outcome in values.items():
+            script = script.replace("${{ steps." + step + ".outcome }}", outcome)
+        return script
+
+    output = tmp_path / "github-output"
+    environment = {"PATH": os.environ["PATH"], "GITHUB_OUTPUT": str(output)}
+    promote = subprocess.run(
+        [
+            "bash",
+            "--noprofile",
+            "--norc",
+            "-eo",
+            "pipefail",
+            "-c",
+            render(_run_script(_workflow_step("Set promote flag"))),
+        ],
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert promote.returncode == 0
+    assert output.read_text() == "promote=false\n"
+    failed = subprocess.run(
+        [
+            "bash",
+            "--noprofile",
+            "--norc",
+            "-eo",
+            "pipefail",
+            "-c",
+            render(_run_script(_workflow_step("Fail the pipeline after rollback"))),
+        ],
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert failed.returncode == 1
+    assert ("rollback failed" in failed.stderr) is (rollback == "failure")
+    auto = _workflow_step("Rollback on failed deploy or health check")
+    assert "ROLLBACK_MODE=auto" in auto
+    assert (
+        "if: always() && (steps.deploy.outcome == 'failure' || steps.health.outcome == 'failure')"
+        in auto
+    )
+    promotion = WORKFLOW.read_text().split("  promote-staging:", 1)[1]
+    assert "needs.deploy-staging.outputs.promote == 'true'" in promotion
+
+
 def test_host_allowlist_follows_the_container_table() -> None:
     env_file = _read("deploy", "scripts", "env-file.sh")
 
@@ -401,7 +653,7 @@ def test_secrets_from_ci_land_in_the_right_files_unchanged(
 ) -> None:
     stdout, bundle = _run_bundle_step(tmp_path, secrets)
 
-    result = host.deploy("ghcr.io/test/api@sha256:a", bundle=bundle)
+    result = host.deploy(IMAGE_A, bundle=bundle)
 
     assert result.returncode == 0, result.stderr
     assert "BEGIN TEST" not in stdout
@@ -419,7 +671,7 @@ def test_secrets_from_ci_land_in_the_right_files_unchanged(
 def test_empty_value_in_the_bundle_is_left_out(host: Host) -> None:
     bundle = _bundle({"GITHUB_APP_ID": "7", "GITHUB_CLIENT_ID": ""})
 
-    assert host.deploy("ghcr.io/test/api@sha256:a", bundle=bundle).returncode == 0
+    assert host.deploy(IMAGE_A, bundle=bundle).returncode == 0
 
     assert _read_env_file(host.app_dir / "app.env") == {"GITHUB_APP_ID": "7"}
     for name in ("api.env", "worker.env", "webhook-worker.env"):
@@ -430,23 +682,23 @@ def test_empty_value_in_the_bundle_is_left_out(host: Host) -> None:
 
 
 def test_first_deploy_generates_store_passwords_once(host: Host) -> None:
-    assert host.deploy("ghcr.io/test/api@sha256:a", bundle="").returncode == 0
+    assert host.deploy(IMAGE_A, bundle="").returncode == 0
     first = _read_dotenv(host.env_file)
-    assert host.deploy("ghcr.io/test/api@sha256:b", bundle="").returncode == 0
+    assert host.deploy(IMAGE_B, bundle="").returncode == 0
     second = _read_dotenv(host.env_file)
 
     for name in ("POSTGRES_PASSWORD", "RABBITMQ_PASSWORD", "REDIS_PASSWORD"):
         assert re.fullmatch(r"[0-9a-f]{48}", first[name]), name
         assert second[name] == first[name], name
     assert first["RABBITMQ_USER"] == "app"
-    assert second["IMAGE"] == "ghcr.io/test/api@sha256:b"
+    assert second["IMAGE"] == IMAGE_B
     assert list(host.tmp.iterdir()) == []  # the per-run DOCKER_CONFIG is removed
 
 
 def test_rollbacks_keep_store_passwords_and_app_secrets(host: Host) -> None:
     bundle = _bundle(CI_SECRETS)
-    assert host.deploy("ghcr.io/test/api@sha256:a", bundle=bundle).returncode == 0
-    assert host.deploy("ghcr.io/test/api@sha256:b", bundle=bundle).returncode == 0
+    assert host.deploy(IMAGE_A, bundle=bundle).returncode == 0
+    assert host.deploy(IMAGE_B, bundle=bundle).returncode == 0
     deployed = _read_dotenv(host.env_file)
     secrets = {name: (host.app_dir / name).read_bytes() for name in ENV_FILES}
 
@@ -464,17 +716,17 @@ def test_rollbacks_keep_store_passwords_and_app_secrets(host: Host) -> None:
         "GITHUB_APP_BOT_LOGIN": "rotated[bot]",
     }
     failed = host.deploy(
-        "ghcr.io/test/api@sha256:bad",
+        IMAGE_BAD,
         bundle=_bundle(rotated),
-        env={"STUB_FAILING_IMAGE": "ghcr.io/test/api@sha256:bad"},
+        env={"STUB_FAILING_IMAGE": IMAGE_BAD},
     )
     after_auto = _read_dotenv(host.env_file)
 
     assert manual.returncode == 0, manual.stderr
-    assert after_manual["IMAGE"] == "ghcr.io/test/api@sha256:a"
+    assert after_manual["IMAGE"] == IMAGE_A
     assert failed.returncode != 0
-    assert "rolled back to ghcr.io/test/api@sha256:a" in failed.stdout
-    assert after_auto["IMAGE"] == "ghcr.io/test/api@sha256:a"
+    assert f"rolled back to {IMAGE_A}" in failed.stdout
+    assert after_auto["IMAGE"] == IMAGE_A
     for name in ("POSTGRES_PASSWORD", "RABBITMQ_USER", "RABBITMQ_PASSWORD", "REDIS_PASSWORD"):
         assert after_manual[name] == deployed[name], name
         assert after_auto[name] == deployed[name], name
@@ -488,8 +740,8 @@ def test_rollbacks_keep_store_passwords_and_app_secrets(host: Host) -> None:
 
 @pytest.mark.parametrize("name", ["POSTGRES_PASSWORD", "RABBITMQ_PASSWORD", "REDIS_PASSWORD"])
 def test_rollback_refuses_without_a_store_password(host: Host, name: str) -> None:
-    assert host.deploy("ghcr.io/test/api@sha256:a", bundle="").returncode == 0
-    assert host.deploy("ghcr.io/test/api@sha256:b", bundle="").returncode == 0
+    assert host.deploy(IMAGE_A, bundle="").returncode == 0
+    assert host.deploy(IMAGE_B, bundle="").returncode == 0
     env = host.env_file.read_text(encoding="utf-8")
     host.env_file.write_text(
         "".join(line for line in env.splitlines(True) if not line.startswith(f"{name}=")),
@@ -507,8 +759,8 @@ def test_rollback_refuses_without_a_store_password(host: Host, name: str) -> Non
 
 
 def test_rollback_recreates_missing_app_secret_files(host: Host) -> None:
-    assert host.deploy("ghcr.io/test/api@sha256:a", bundle="").returncode == 0
-    assert host.deploy("ghcr.io/test/api@sha256:b", bundle="").returncode == 0
+    assert host.deploy(IMAGE_A, bundle="").returncode == 0
+    assert host.deploy(IMAGE_B, bundle="").returncode == 0
     for name in ENV_FILES:
         (host.app_dir / name).unlink()
 
@@ -517,6 +769,370 @@ def test_rollback_recreates_missing_app_secret_files(host: Host) -> None:
     assert result.returncode == 0, result.stderr
     for name in ENV_FILES:
         assert _mode(host.app_dir / name) == 0o600
+
+
+@pytest.mark.parametrize("mode", ["manual", "auto"])
+@pytest.mark.parametrize("explicit", [False, True])
+def test_moved_tag_cannot_change_admitted_runtime_or_promotion_identity(
+    host: Host, mode: str, explicit: bool
+) -> None:
+    selected = "ghcr.io/test/api:requested" if explicit else "ghcr.io/test/api:previous"
+    assert host.deploy(selected, bundle="").returncode == 0
+    previous = (host.app_dir / ".deploy-state").read_bytes()
+    assert host.deploy(IMAGE_B).returncode == 0
+    current = (host.app_dir / ".deploy-state").read_bytes()
+    calls_before = len(host.calls())
+
+    result = host.run(
+        "rollback.sh",
+        *([selected] if explicit else []),
+        env={
+            "ROLLBACK_MODE": mode,
+            "STUB_SELECTED_REF": selected,
+            "STUB_MOVE_TAG": "true",
+            "STUB_REPODIGESTS": "ghcr.io/unrelated/api@sha256:" + "d" * 64 + "\n" + IMAGE_A,
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert (host.log.parent / "tag-moved").exists()
+    assert (host.log.parent / "probe-image").read_text().strip() == A_ID
+    assert (host.log.parent / "up-image").read_text().strip() == A_ID
+    assert _read_dotenv(host.env_file)["IMAGE"] == IMAGE_A
+    assert _read_dotenv(host.app_dir / ".deploy-state")["current_image"] == IMAGE_A
+    assert (host.app_dir / ".deploy-state.previous").read_bytes() == (
+        current if mode == "manual" else previous
+    )
+    calls = host.calls()[calls_before:]
+    assert calls.count(f"pull {selected}") == 1
+    assert any(" up --pull never " in call for call in calls)
+    for role in ("api", "worker", "webhook-worker", "bootstrap"):
+        assert "    image: ${IMAGE:?IMAGE is required}" in _service_block(role)
+    if mode == "manual":
+        promotion = _run_script(
+            _workflow_step("Promote rolled-back image to staging", ROLLBACK_WORKFLOW)
+        )
+        promotion = promotion.replace("${{ secrets.GITHUB_TOKEN }}", "synthetic-token")
+        promotion = promotion.replace("${{ github.actor }}", "synthetic-actor")
+        step = host.app_dir / "promote-step.sh"
+        step.write_text("#!/usr/bin/env bash\nset -euo pipefail\n" + promotion)
+        step.chmod(0o755)
+        promotion_before = len(host.calls())
+        promoted = host.run(
+            "promote-step.sh",
+            env={
+                "DEPLOYED_IMAGE": _read_dotenv(host.app_dir / ".deploy-state")["current_image"],
+                "STAGING_TAG": "ghcr.io/test/api:staging",
+                "PREVIOUS_TAG": "ghcr.io/test/api:staging-previous",
+                "REPOSITORY": "test/api",
+                "STUB_SELECTED_REF": selected,
+            },
+        )
+        assert promoted.returncode == 0, promoted.stderr
+        promotion_calls = host.calls()[promotion_before:]
+        assert f"pull {IMAGE_A}" in promotion_calls
+        assert f"tag {IMAGE_A} ghcr.io/test/api:staging" in promotion_calls
+        assert f"pull {selected}" not in promotion_calls
+
+
+@pytest.mark.parametrize("mode", ["manual", "auto"])
+@pytest.mark.parametrize("explicit", [False, True])
+@pytest.mark.parametrize("failure", ["pull", "probe", "noisy-probe", "false-success"])
+def test_rollback_refuses_before_any_persistent_or_stack_change(
+    host: Host, mode: str, explicit: bool, failure: str
+) -> None:
+    assert host.deploy(IMAGE_A, bundle=_bundle(CI_SECRETS)).returncode == 0
+    assert host.deploy(IMAGE_B).returncode == 0
+    # Missing role files and unusual permissions must survive a refused probe too.
+    (host.app_dir / "worker.env").unlink()
+    (host.app_dir / "api.env").chmod(0o640)
+    before = host.files()
+    modes = {path.name: _mode(path) for path in host.app_dir.iterdir()}
+    calls_before = len(host.calls())
+    target = IMAGE_EXPLICIT if explicit else IMAGE_A
+    secret = "SECRET-CANARY\n-----BEGIN PRIVATE KEY-----\nPEM-CANARY"
+    environment = {"ROLLBACK_MODE": mode, "STUB_UNSAFE_ERROR": secret}
+    if failure == "pull":
+        environment["STUB_PULL_FAILURE"] = target
+    else:
+        environment["STUB_PROBE_STATUS"] = "0" if failure == "false-success" else "1"
+        environment["STUB_PROBE_OUTPUT"] = (
+            "rollback revision check: refused: database revision is unknown"
+            if failure == "probe"
+            else secret
+        )
+
+    result = host.run("rollback.sh", *([target] if explicit else []), env=environment)
+
+    assert result.returncode != 0
+    assert host.files() == before
+    assert {path.name: _mode(path) for path in host.app_dir.iterdir()} == modes
+    calls = host.calls()[calls_before:]
+    assert f"pull {target}" in calls
+    assert not any(set(call.split()) & {"up", "rm", "down", "exec"} for call in calls)
+    assert calls[-1] == "logout ghcr.io"
+    assert list(host.tmp.iterdir()) == []
+    output = result.stdout + result.stderr
+    assert "rolled back" not in output
+    assert "Select a compatible image" in output
+    assert "SECRET-CANARY" not in output and "PEM-CANARY" not in output
+    if failure == "probe":
+        assert "database revision is unknown" in output
+
+
+@pytest.mark.parametrize("mode", ["manual", "auto"])
+@pytest.mark.parametrize(
+    "failure",
+    [
+        "inspect",
+        "short-id",
+        "uppercase-id",
+        "noisy-id",
+        "multiple-ids",
+        "extra-line",
+        "empty-digests",
+        "wrong-repository",
+        "malformed-digests",
+        "tagged-digest",
+        "ambiguous-digests",
+        "digest-error",
+        "digest-mismatch",
+        "local-id-mismatch",
+    ],
+)
+def test_unusable_immutable_identity_refuses_without_file_or_stack_mutation(
+    host: Host, mode: str, failure: str
+) -> None:
+    assert host.deploy(IMAGE_A, bundle="").returncode == 0
+    assert host.deploy(IMAGE_B).returncode == 0
+    (host.app_dir / "worker.env").unlink()
+    (host.app_dir / "api.env").chmod(0o640)
+    before = host.files()
+    modes = {p.name: _mode(p) for p in host.app_dir.iterdir()}
+    calls_before = len(host.calls())
+    secret = "IDENTITY-SECRET-CANARY\nPEM-BODY-CANARY"
+    selected = A_ID if failure == "local-id-mismatch" else "ghcr.io/test/api:movable"
+    options = {
+        "inspect": {"STUB_INSPECT_FAILURE": "id"},
+        "short-id": {"STUB_ID_OUTPUT": "sha256:abc"},
+        "uppercase-id": {"STUB_ID_OUTPUT": "sha256:" + "A" * 64},
+        "noisy-id": {"STUB_ID_OUTPUT": secret + "\n" + A_ID},
+        "multiple-ids": {"STUB_ID_OUTPUT": A_ID + "\n" + B_ID},
+        "extra-line": {"STUB_ID_OUTPUT": A_ID + "\n"},
+        "empty-digests": {"STUB_REPODIGESTS": ""},
+        "wrong-repository": {"STUB_REPODIGESTS": "ghcr.io/unrelated/api@sha256:" + "a" * 64},
+        "malformed-digests": {"STUB_REPODIGESTS": IMAGE_A + "\n" + secret},
+        "tagged-digest": {"STUB_REPODIGESTS": "ghcr.io/test/api:tag@sha256:" + "a" * 64},
+        "ambiguous-digests": {
+            "STUB_REPODIGESTS": IMAGE_A + "\nghcr.io/test/api@sha256:" + "9" * 64
+        },
+        "digest-error": {"STUB_REPODIGEST_STATUS": "1", "STUB_REPODIGESTS": secret},
+        "digest-mismatch": {"STUB_DIGEST_MISMATCH": "true"},
+        "local-id-mismatch": {"STUB_ID_OUTPUT": B_ID},
+    }[failure]
+    result = host.run(
+        "rollback.sh",
+        selected,
+        env={
+            "ROLLBACK_MODE": mode,
+            "STUB_SELECTED_REF": selected,
+            "STUB_UNSAFE_ERROR": secret,
+            **options,
+        },
+    )
+    assert result.returncode != 0
+    assert "rollback refused: target " in result.stderr
+    assert host.files() == before
+    assert {p.name: _mode(p) for p in host.app_dir.iterdir()} == modes
+    calls = host.calls()[calls_before:]
+    assert not any(" run " in call or " up " in call or " exec " in call for call in calls)
+    assert calls[-1] == "logout ghcr.io" and list(host.tmp.iterdir()) == []
+    assert "rolled back" not in result.stdout
+    assert "IDENTITY-SECRET-CANARY" not in result.stdout + result.stderr
+    assert "PEM-BODY-CANARY" not in result.stdout + result.stderr
+
+
+@pytest.mark.parametrize(
+    ("selected", "release"),
+    [
+        (IMAGE_A, IMAGE_A),
+        (A_ID, A_ID),
+        ("ghcr.io/test/api:tag@sha256:" + "a" * 64, "ghcr.io/test/api:tag@sha256:" + "a" * 64),
+        ("ghcr.io/test/api:" + "4" * 40, IMAGE_A),
+        ("registry.test:5000/team/api:version", "registry.test:5000/team/api@sha256:" + "a" * 64),
+    ],
+)
+def test_immutable_resolution_preserves_digest_refs_and_parses_registry_port(
+    host: Host, selected: str, release: str
+) -> None:
+    assert host.deploy(IMAGE_A, bundle="").returncode == 0
+    assert host.deploy(IMAGE_B).returncode == 0
+    result = host.run("rollback.sh", selected, env={"STUB_REPODIGESTS": release})
+    assert result.returncode == 0, result.stderr
+    assert _read_dotenv(host.env_file)["IMAGE"] == release
+    assert _read_dotenv(host.app_dir / ".deploy-state")["current_image"] == release
+    assert (host.log.parent / "probe-image").read_text().strip() == A_ID
+    assert (host.log.parent / "up-image").read_text().strip() == A_ID
+
+
+@pytest.mark.parametrize("mode", ["manual", "auto"])
+@pytest.mark.parametrize("explicit", [False, True])
+def test_compatible_rollback_probes_target_before_changes_and_keeps_mode_state(
+    host: Host, mode: str, explicit: bool
+) -> None:
+    assert host.deploy(IMAGE_A, bundle=_bundle(CI_SECRETS)).returncode == 0
+    previous = (host.app_dir / ".deploy-state").read_bytes()
+    assert host.deploy(IMAGE_B).returncode == 0
+    current = (host.app_dir / ".deploy-state").read_bytes()
+    before_env = host.env_file.read_bytes()
+    (host.app_dir / "worker.env").unlink()
+    secrets = {
+        name: (host.app_dir / name).read_bytes() for name in ENV_FILES if name != "worker.env"
+    }
+    calls_before = len(host.calls())
+    target = IMAGE_EXPLICIT if explicit else IMAGE_A
+
+    result = host.run("rollback.sh", *([target] if explicit else []), env={"ROLLBACK_MODE": mode})
+
+    assert result.returncode == 0, result.stderr
+    calls = host.calls()[calls_before:]
+    pull = calls.index(f"pull {target}")
+    probe = next(i for i, call in enumerate(calls) if " run " in call)
+    up = next(i for i, call in enumerate(calls) if " up " in call)
+    assert pull < probe < up
+    assert calls[probe].endswith("run --rm --no-deps -T bootstrap python -")
+    assert (host.log.parent / "probe-source.py").read_bytes() == (
+        REPO_ROOT / "deploy/scripts/check-rollback-revision.py"
+    ).read_bytes()
+    assert (host.log.parent / "probe-image").read_text().strip() == (
+        EXPLICIT_ID if explicit else A_ID
+    )
+    assert (host.log.parent / "probe-dotenv").read_bytes() == before_env
+    assert (host.log.parent / "probe-role").read_text() == "absent\n"
+    assert _read_dotenv(host.env_file)["IMAGE"] == target
+    assert (host.app_dir / ".deploy-state.previous").read_bytes() == (
+        current if mode == "manual" else previous
+    )
+    state = _read_dotenv(host.app_dir / ".deploy-state")
+    assert state["current_image"] == target and state["rolled_back"] == "true"
+    assert {name: (host.app_dir / name).read_bytes() for name in secrets} == secrets
+    assert (host.app_dir / "worker.env").read_bytes() == b""
+    assert _mode(host.app_dir / "worker.env") == 0o600
+    assert list(host.tmp.iterdir()) == []
+
+
+@pytest.mark.parametrize("mode", ["manual", "auto"])
+def test_successful_rollback_prints_only_sorted_running_container_keys(
+    host: Host, mode: str
+) -> None:
+    assert host.deploy(IMAGE_A, bundle=_bundle(CI_SECRETS)).returncode == 0
+    assert host.deploy(IMAGE_B).returncode == 0
+    current_state = (host.app_dir / ".deploy-state").read_bytes()
+    canary = "ENV-VALUE-CANARY$HOME\\backslash"
+    shared = {
+        "LC_CTYPE": "UTF-8",
+        "Z_KEY": canary,
+        "A_KEY": "BEGIN-SECRET\nPEM-LINE-CANARY\nEND-SECRET",
+        "bad\nHOSTILE-KEY-CANARY": "value",
+        "bad-key": "value",
+        'quote"key': "value",
+        "unicodeé": "value",
+    }
+    (host.log.parent / "container-environments.json").write_text(
+        json.dumps(
+            {
+                "api": {**shared, "AUTH_JWT_PRIVATE_KEY": FAKE_PEM},
+                "worker": {**shared, "GITHUB_APP_PRIVATE_KEY": FAKE_PEM, "lower_key": canary},
+                "webhook-worker": {**shared, "GITHUB_APP_BOT_LOGIN": canary},
+            }
+        )
+    )
+    calls_before = len(host.calls())
+
+    result = host.run("rollback.sh", env={"ROLLBACK_MODE": mode})
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.splitlines() == [
+        'api environment keys: ["AUTH_JWT_PRIVATE_KEY", "A_KEY", "LC_CTYPE", "Z_KEY"]',
+        'worker environment keys: ["A_KEY", "GITHUB_APP_PRIVATE_KEY", "LC_CTYPE", "Z_KEY", '
+        '"lower_key"]',
+        'webhook-worker environment keys: ["A_KEY", "GITHUB_APP_BOT_LOGIN", "LC_CTYPE", "Z_KEY"]',
+        f"rolled back to {IMAGE_A}",
+    ]
+    assert result.stderr == ""
+    assert (host.log.parent / "diagnostic-services").read_text() == "api\nworker\nwebhook-worker\n"
+    assert (host.log.parent / "diagnostic-before-state").read_bytes() == current_state
+    calls = host.calls()[calls_before:]
+    up = next(i for i, call in enumerate(calls) if " up " in call)
+    assert all(up < i for i, call in enumerate(calls) if " exec " in call)
+    assert sum(" exec -T " in call for call in calls) == 3
+    for value in (canary, "PEM-LINE-CANARY", "HOSTILE-KEY-CANARY", *FAKE_PEM.splitlines()):
+        assert value not in result.stdout + result.stderr
+
+
+@pytest.mark.parametrize("mode", ["manual", "auto"])
+@pytest.mark.parametrize("service", ["api", "worker", "webhook-worker"])
+@pytest.mark.parametrize("failure", ["exec", "noise", "invalid-list", "empty"])
+def test_diagnostic_failure_is_secret_safe_and_does_not_record_success(
+    host: Host, mode: str, service: str, failure: str
+) -> None:
+    assert host.deploy(IMAGE_A, bundle=_bundle(CI_SECRETS)).returncode == 0
+    assert host.deploy(IMAGE_B).returncode == 0
+    state = (host.app_dir / ".deploy-state").read_bytes()
+    previous = (host.app_dir / ".deploy-state.previous").read_bytes()
+    secret = "DOCKER-SECRET-CANARY\nPEM-BODY-CANARY"
+    output = {
+        "exec": secret,
+        "noise": secret + '\n["A_KEY"]',
+        "invalid-list": '["A_KEY", "bad\\nPEM-BODY-CANARY"]',
+        "empty": "",
+    }[failure]
+
+    result = host.run(
+        "rollback.sh",
+        env={
+            "ROLLBACK_MODE": mode,
+            "STUB_EXEC_FAILURE_SERVICE": service,
+            "STUB_EXEC_STATUS": "1" if failure == "exec" else "0",
+            "STUB_EXEC_ERROR": output,
+        },
+    )
+
+    assert result.returncode != 0
+    assert (host.app_dir / ".deploy-state").read_bytes() == state
+    assert (host.app_dir / ".deploy-state.previous").read_bytes() == previous
+    assert "rolled back" not in result.stdout + result.stderr
+    assert f"{service} environment key diagnostics failed" in result.stderr
+    assert "rollback completion failed:" in result.stderr
+    assert "target stack may be running" in result.stderr
+    assert "Inspect service health" in result.stderr
+    assert "rollback refused:" not in result.stderr
+    for canary in ("DOCKER-SECRET-CANARY", "PEM-BODY-CANARY"):
+        assert canary not in result.stdout + result.stderr
+    assert list(host.tmp.iterdir()) == []
+
+
+@pytest.mark.parametrize("mode", ["manual", "auto"])
+def test_failed_stack_start_does_not_run_diagnostics_or_record_success(
+    host: Host, mode: str
+) -> None:
+    assert host.deploy(IMAGE_A, bundle="").returncode == 0
+    assert host.deploy(IMAGE_B).returncode == 0
+    state = (host.app_dir / ".deploy-state").read_bytes()
+    previous = (host.app_dir / ".deploy-state.previous").read_bytes()
+    calls_before = len(host.calls())
+
+    result = host.run(
+        "rollback.sh",
+        env={"ROLLBACK_MODE": mode, "STUB_FAILING_IMAGE": IMAGE_A},
+    )
+
+    assert result.returncode != 0
+    assert not any(" exec " in call for call in host.calls()[calls_before:])
+    assert "environment keys" not in result.stdout
+    assert "rolled back" not in result.stdout
+    assert (host.app_dir / ".deploy-state").read_bytes() == state
+    assert (host.app_dir / ".deploy-state.previous").read_bytes() == previous
 
 
 def test_host_deployed_before_the_broker_keeps_its_postgres_password(host: Host) -> None:
@@ -529,7 +1145,7 @@ def test_host_deployed_before_the_broker_keeps_its_postgres_password(host: Host)
     )
     host.add_volume("postgres-data")
 
-    result = host.run("deploy.sh", "ghcr.io/test/api@sha256:a")
+    result = host.run("deploy.sh", IMAGE_A)
 
     assert result.returncode == 0, result.stderr
     env = _read_dotenv(host.env_file)
@@ -542,7 +1158,7 @@ def test_host_deployed_before_the_broker_keeps_its_postgres_password(host: Host)
 
 
 def test_broker_volume_without_a_password_is_never_given_a_new_one(host: Host) -> None:
-    assert host.deploy("ghcr.io/test/api@sha256:a", bundle="").returncode == 0
+    assert host.deploy(IMAGE_A, bundle="").returncode == 0
     env = host.env_file.read_text(encoding="utf-8")
     host.env_file.write_text(
         "".join(line for line in env.splitlines(True) if not line.startswith("RABBITMQ_PASSWORD=")),
@@ -551,7 +1167,7 @@ def test_broker_volume_without_a_password_is_never_given_a_new_one(host: Host) -
     host.add_volume("rabbitmq-data")
     before = host.files()
 
-    result = host.deploy("ghcr.io/test/api@sha256:b", bundle="")
+    result = host.deploy(IMAGE_B, bundle="")
 
     assert result.returncode != 0
     assert "refusing to generate a new password" in result.stderr
@@ -572,13 +1188,10 @@ def test_broker_volume_without_a_password_is_never_given_a_new_one(host: Host) -
 def test_invalid_bundle_fails_before_the_host_changes(
     host: Host, bundle: str, message: str
 ) -> None:
-    assert (
-        host.deploy("ghcr.io/test/api@sha256:a", bundle=_bundle({"GITHUB_APP_ID": "1"})).returncode
-        == 0
-    )
+    assert host.deploy(IMAGE_A, bundle=_bundle({"GITHUB_APP_ID": "1"})).returncode == 0
     before = host.files()
 
-    result = host.deploy("ghcr.io/test/api@sha256:b", bundle=bundle)
+    result = host.deploy(IMAGE_B, bundle=bundle)
 
     assert result.returncode != 0
     assert re.search(message, result.stderr)
@@ -588,22 +1201,23 @@ def test_invalid_bundle_fails_before_the_host_changes(
 
 def test_empty_bundle_clears_app_secrets_and_a_missing_one_keeps_them(host: Host) -> None:
     secrets = _bundle({"GITHUB_APP_ID": "1", "GITHUB_CLIENT_ID": "client"})
-    assert host.deploy("ghcr.io/test/api@sha256:a", bundle=secrets).returncode == 0
+    assert host.deploy(IMAGE_A, bundle=secrets).returncode == 0
 
-    assert host.deploy("ghcr.io/test/api@sha256:b").returncode == 0
+    assert host.deploy(IMAGE_B).returncode == 0
     kept = {name: _read_env_file(host.app_dir / name) for name in ("app.env", "api.env")}
-    assert host.deploy("ghcr.io/test/api@sha256:c", bundle="").returncode == 0
+    assert host.deploy(IMAGE_C, bundle="").returncode == 0
     cleared = {name: _read_env_file(host.app_dir / name) for name in ("app.env", "api.env")}
 
     assert kept == {"app.env": {"GITHUB_APP_ID": "1"}, "api.env": {"GITHUB_CLIENT_ID": "client"}}
     assert cleared == {"app.env": {}, "api.env": {}}
 
 
-def test_rollback_without_a_release_stops_the_stack_by_project_name(host: Host) -> None:
+@pytest.mark.parametrize("mode", ["manual", "auto"])
+def test_rollback_without_a_release_stops_the_stack_by_project_name(host: Host, mode: str) -> None:
     # A host whose .env predates the broker: loading compose.yml would fail on RABBITMQ_PASSWORD.
     host.env_file.write_text("DEPLOY_MODE=edge\nEDGE_ALIAS=api-staging\n", encoding="utf-8")
 
-    result = host.run("rollback.sh")
+    result = host.run("rollback.sh", env={"ROLLBACK_MODE": mode})
 
     assert result.returncode == 0, result.stderr
     calls = host.calls()
@@ -611,6 +1225,10 @@ def test_rollback_without_a_release_stops_the_stack_by_project_name(host: Host) 
     started = next(i for i, call in enumerate(calls) if call.startswith("run -d --name"))
     assert down < started
     assert "--network-alias api-staging" in calls[started]
+    assert not any(
+        " exec " in call or " run --rm " in call for call in calls if call.startswith("compose ")
+    )
+    assert "environment keys" not in result.stdout
 
 
 def test_rollback_does_not_start_the_bootstrap_next_to_a_running_stack(host: Host) -> None:

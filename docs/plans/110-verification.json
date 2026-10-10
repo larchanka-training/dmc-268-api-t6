@@ -1,0 +1,997 @@
+{
+  "project": "rollback110-26092e3b17624e53",
+  "revision_M": "20261007_0028",
+  "revision_N": "20261010_0110",
+  "cases": [
+    {
+      "case": "compatible-manual",
+      "exit_code": 0,
+      "before": {
+        "files": {
+          ".env": {
+            "sha256": "750d6fb19d4ab3946820a71ad63cf6584b47599226d946c73d8eb1bf205b1011",
+            "mode": "0o600"
+          },
+          "api.env": {
+            "sha256": "8f51291d00d1b319b7dcde11b4a065e1fc3e7316fd8ffae76a4c10850d1d9619",
+            "mode": "0o600"
+          },
+          "app.env": {
+            "sha256": "d9f689a518ed6915a8e7bce5f18297a2219294cd39b98da33ac60680cf510d5c",
+            "mode": "0o600"
+          },
+          "worker.env": {
+            "sha256": "a95527753146ff2b13aaafbeffbf74852bb2c9ec3b096996102c3a4310a3ad9c",
+            "mode": "0o600"
+          },
+          "webhook-worker.env": {
+            "sha256": "8b7c222c3f137254b9ee1babb30966289e7efb965b9b28c2595b3870cadce2f3",
+            "mode": "0o600"
+          },
+          ".deploy-state": {
+            "sha256": "f06c6a96525594ebeb9a7fb0edf314a3a39bc8ceff172b06b6d2f43aaa6e34a8",
+            "mode": "0o600"
+          },
+          ".deploy-state.previous": {
+            "sha256": "ae3a9d1b1c4cb80e1e5d9e8b863532dd108e863cf1754cb8ece550306e412103",
+            "mode": "0o600"
+          }
+        },
+        "containers": {
+          "api": {
+            "id": "b5c1f46ebff0a9f9630fb51c5da5aee306a4cc6481f66f1b3992a930d647a4ee",
+            "image": "sha256:45bdccc6965cf85027e2b7a7be7ca8c5b07386736e7975554574c6af30ab1057",
+            "status": "running",
+            "health": "healthy"
+          },
+          "worker": {
+            "id": "f2ecb63be45dd44589e5d6ad07fddb0a7aa5c5ff3cb3833eb8a5693964251c6a",
+            "image": "sha256:45bdccc6965cf85027e2b7a7be7ca8c5b07386736e7975554574c6af30ab1057",
+            "status": "running",
+            "health": "healthy"
+          },
+          "webhook-worker": {
+            "id": "4427d6b8eec2ef5c13aca932229a81509317dabd8cf0b8a3f943efe7e46db8aa",
+            "image": "sha256:45bdccc6965cf85027e2b7a7be7ca8c5b07386736e7975554574c6af30ab1057",
+            "status": "running",
+            "health": "healthy"
+          },
+          "postgres": {
+            "id": "ce1b2c2e25ec4b658964fc7913bf8c597ba00b1000d879350e7abe64daced074",
+            "image": "sha256:25a89970a83255ae96484d709005bb35aa71f7455f941bc1634514f31c5d5c62",
+            "status": "running",
+            "health": "healthy"
+          },
+          "rabbitmq": {
+            "id": "6223d8b087f37e2a7ad252279c9aa826a14f2bba224f44827f03c432acbf5e96",
+            "image": "sha256:c3b1d10b087d5e3113e097c5c237ae00b05c92480ab2d6a1df07aafe787bf2e6",
+            "status": "running",
+            "health": "healthy"
+          },
+          "redis": {
+            "id": "50d86d87c027c2781fc27deef8646d7d2f2e6be674d47a3642769303f264fe2a",
+            "image": "sha256:675f7644831d85995868250485bf7a71970257f74da31c62969a868d3f3eff2e",
+            "status": "running",
+            "health": "healthy"
+          },
+          "bootstrap": {
+            "id": "ee54e7c0b0d1941cca32b942081041fbee2d764609dbfd060da5d3772ab19573",
+            "image": "sha256:81c69606c3cda7f35c20bb0de5f8dc97b20a24a134259491e6a05f4777bfc937",
+            "status": "exited",
+            "health": "unhealthy"
+          }
+        },
+        "revision": "20261007_0028",
+        "sentinel": "t"
+      },
+      "after": {
+        "files": {
+          ".env": {
+            "sha256": "58e03840a65c78a967793a40ffca448bee2c61cb81e05f996327cf16367fb483",
+            "mode": "0o600"
+          },
+          "api.env": {
+            "sha256": "8f51291d00d1b319b7dcde11b4a065e1fc3e7316fd8ffae76a4c10850d1d9619",
+            "mode": "0o600"
+          },
+          "app.env": {
+            "sha256": "d9f689a518ed6915a8e7bce5f18297a2219294cd39b98da33ac60680cf510d5c",
+            "mode": "0o600"
+          },
+          "worker.env": {
+            "sha256": "a95527753146ff2b13aaafbeffbf74852bb2c9ec3b096996102c3a4310a3ad9c",
+            "mode": "0o600"
+          },
+          "webhook-worker.env": {
+            "sha256": "8b7c222c3f137254b9ee1babb30966289e7efb965b9b28c2595b3870cadce2f3",
+            "mode": "0o600"
+          },
+          ".deploy-state": {
+            "sha256": "e3a1642f465e50eed08d066342957f3ba9a553c0b962db2e641b85cb34523b85",
+            "mode": "0o600"
+          },
+          ".deploy-state.previous": {
+            "sha256": "f06c6a96525594ebeb9a7fb0edf314a3a39bc8ceff172b06b6d2f43aaa6e34a8",
+            "mode": "0o600"
+          }
+        },
+        "containers": {
+          "api": {
+            "id": "22ae02ae6584aea6dc7a8faa2e4b6f844a3cd9f12480545b0c154441c884f626",
+            "image": "sha256:81c69606c3cda7f35c20bb0de5f8dc97b20a24a134259491e6a05f4777bfc937",
+            "status": "running",
+            "health": "healthy"
+          },
+          "worker": {
+            "id": "076e326b5ec6486ceba259513f717eac8882856576f7cd7b93faa2a236817747",
+            "image": "sha256:81c69606c3cda7f35c20bb0de5f8dc97b20a24a134259491e6a05f4777bfc937",
+            "status": "running",
+            "health": "healthy"
+          },
+          "webhook-worker": {
+            "id": "ac0137596d4b06519393fa2461805766602086abb07788b126f791a044ec4b9f",
+            "image": "sha256:81c69606c3cda7f35c20bb0de5f8dc97b20a24a134259491e6a05f4777bfc937",
+            "status": "running",
+            "health": "healthy"
+          },
+          "postgres": {
+            "id": "ce1b2c2e25ec4b658964fc7913bf8c597ba00b1000d879350e7abe64daced074",
+            "image": "sha256:25a89970a83255ae96484d709005bb35aa71f7455f941bc1634514f31c5d5c62",
+            "status": "running",
+            "health": "healthy"
+          },
+          "rabbitmq": {
+            "id": "6223d8b087f37e2a7ad252279c9aa826a14f2bba224f44827f03c432acbf5e96",
+            "image": "sha256:c3b1d10b087d5e3113e097c5c237ae00b05c92480ab2d6a1df07aafe787bf2e6",
+            "status": "running",
+            "health": "healthy"
+          },
+          "redis": {
+            "id": "50d86d87c027c2781fc27deef8646d7d2f2e6be674d47a3642769303f264fe2a",
+            "image": "sha256:675f7644831d85995868250485bf7a71970257f74da31c62969a868d3f3eff2e",
+            "status": "running",
+            "health": "healthy"
+          },
+          "bootstrap": {
+            "id": "ee54e7c0b0d1941cca32b942081041fbee2d764609dbfd060da5d3772ab19573",
+            "image": "sha256:81c69606c3cda7f35c20bb0de5f8dc97b20a24a134259491e6a05f4777bfc937",
+            "status": "exited",
+            "health": "unhealthy"
+          }
+        },
+        "revision": "20261007_0028",
+        "sentinel": "t"
+      },
+      "keys": {
+        "api": [
+          "AUTH_JWT_AUDIENCE",
+          "AUTH_JWT_ISSUER",
+          "AUTH_JWT_PRIVATE_KEY",
+          "AUTH_JWT_PUBLIC_KEY",
+          "DATABASE_URL",
+          "GITHUB_CLIENT_SECRET",
+          "GITHUB_WEBHOOK_SECRET",
+          "GPG_KEY",
+          "HOME",
+          "HOSTNAME",
+          "LC_CTYPE",
+          "PATH",
+          "POSTGRES_DB",
+          "POSTGRES_HOST",
+          "POSTGRES_PASSWORD",
+          "POSTGRES_PORT",
+          "POSTGRES_USER",
+          "PYTHONDONTWRITEBYTECODE",
+          "PYTHONUNBUFFERED",
+          "PYTHON_SHA256",
+          "PYTHON_VERSION",
+          "RABBITMQ_URL",
+          "REDIS_URL",
+          "UV_COMPILE_BYTECODE",
+          "UV_LINK_MODE"
+        ],
+        "worker": [
+          "DATABASE_URL",
+          "GITHUB_APP_ID",
+          "GITHUB_APP_PRIVATE_KEY",
+          "GPG_KEY",
+          "HOME",
+          "HOSTNAME",
+          "LC_CTYPE",
+          "LLM_API_KEYS",
+          "PATH",
+          "PYTHONDONTWRITEBYTECODE",
+          "PYTHONUNBUFFERED",
+          "PYTHON_SHA256",
+          "PYTHON_VERSION",
+          "RABBITMQ_URL",
+          "UV_COMPILE_BYTECODE",
+          "UV_LINK_MODE",
+          "WORKER_HEARTBEAT_FILE"
+        ],
+        "webhook-worker": [
+          "DATABASE_URL",
+          "GITHUB_APP_BOT_LOGIN",
+          "GITHUB_APP_ID",
+          "GITHUB_APP_PRIVATE_KEY",
+          "GPG_KEY",
+          "HOME",
+          "HOSTNAME",
+          "LC_CTYPE",
+          "PATH",
+          "PYTHONDONTWRITEBYTECODE",
+          "PYTHONUNBUFFERED",
+          "PYTHON_SHA256",
+          "PYTHON_VERSION",
+          "RABBITMQ_URL",
+          "UV_COMPILE_BYTECODE",
+          "UV_LINK_MODE",
+          "WORKER_HEARTBEAT_FILE"
+        ]
+      },
+      "health": {
+        "API": {
+          "status_code": 200,
+          "json": {
+            "status": "ok"
+          }
+        },
+        "workers": "heartbeat age <=30 seconds"
+      },
+      "history_rule": "previous becomes B"
+    },
+    {
+      "case": "compatible-auto",
+      "exit_code": 0,
+      "before": {
+        "files": {
+          ".env": {
+            "sha256": "750d6fb19d4ab3946820a71ad63cf6584b47599226d946c73d8eb1bf205b1011",
+            "mode": "0o600"
+          },
+          "api.env": {
+            "sha256": "8f51291d00d1b319b7dcde11b4a065e1fc3e7316fd8ffae76a4c10850d1d9619",
+            "mode": "0o600"
+          },
+          "app.env": {
+            "sha256": "d9f689a518ed6915a8e7bce5f18297a2219294cd39b98da33ac60680cf510d5c",
+            "mode": "0o600"
+          },
+          "worker.env": {
+            "sha256": "a95527753146ff2b13aaafbeffbf74852bb2c9ec3b096996102c3a4310a3ad9c",
+            "mode": "0o600"
+          },
+          "webhook-worker.env": {
+            "sha256": "8b7c222c3f137254b9ee1babb30966289e7efb965b9b28c2595b3870cadce2f3",
+            "mode": "0o600"
+          },
+          ".deploy-state": {
+            "sha256": "f06c6a96525594ebeb9a7fb0edf314a3a39bc8ceff172b06b6d2f43aaa6e34a8",
+            "mode": "0o600"
+          },
+          ".deploy-state.previous": {
+            "sha256": "ae3a9d1b1c4cb80e1e5d9e8b863532dd108e863cf1754cb8ece550306e412103",
+            "mode": "0o600"
+          }
+        },
+        "containers": {
+          "api": {
+            "id": "ab6f286a58b13e315e96fbe6f322698694a48a5bc9139d903f632b8d31182d30",
+            "image": "sha256:45bdccc6965cf85027e2b7a7be7ca8c5b07386736e7975554574c6af30ab1057",
+            "status": "running",
+            "health": "healthy"
+          },
+          "worker": {
+            "id": "afa7890bfb33a57634ad59f103dd41dee63b38e0c043a5df80b8519aa8c4d718",
+            "image": "sha256:45bdccc6965cf85027e2b7a7be7ca8c5b07386736e7975554574c6af30ab1057",
+            "status": "running",
+            "health": "healthy"
+          },
+          "webhook-worker": {
+            "id": "4ab21b39ae4c0e5d4ff71a271b92631665069e546677dfa1ac7c09e2883fefff",
+            "image": "sha256:45bdccc6965cf85027e2b7a7be7ca8c5b07386736e7975554574c6af30ab1057",
+            "status": "running",
+            "health": "healthy"
+          },
+          "postgres": {
+            "id": "ce1b2c2e25ec4b658964fc7913bf8c597ba00b1000d879350e7abe64daced074",
+            "image": "sha256:25a89970a83255ae96484d709005bb35aa71f7455f941bc1634514f31c5d5c62",
+            "status": "running",
+            "health": "healthy"
+          },
+          "rabbitmq": {
+            "id": "6223d8b087f37e2a7ad252279c9aa826a14f2bba224f44827f03c432acbf5e96",
+            "image": "sha256:c3b1d10b087d5e3113e097c5c237ae00b05c92480ab2d6a1df07aafe787bf2e6",
+            "status": "running",
+            "health": "healthy"
+          },
+          "redis": {
+            "id": "50d86d87c027c2781fc27deef8646d7d2f2e6be674d47a3642769303f264fe2a",
+            "image": "sha256:675f7644831d85995868250485bf7a71970257f74da31c62969a868d3f3eff2e",
+            "status": "running",
+            "health": "healthy"
+          },
+          "bootstrap": {
+            "id": "ee54e7c0b0d1941cca32b942081041fbee2d764609dbfd060da5d3772ab19573",
+            "image": "sha256:81c69606c3cda7f35c20bb0de5f8dc97b20a24a134259491e6a05f4777bfc937",
+            "status": "exited",
+            "health": "unhealthy"
+          }
+        },
+        "revision": "20261007_0028",
+        "sentinel": "t"
+      },
+      "after": {
+        "files": {
+          ".env": {
+            "sha256": "58e03840a65c78a967793a40ffca448bee2c61cb81e05f996327cf16367fb483",
+            "mode": "0o600"
+          },
+          "api.env": {
+            "sha256": "8f51291d00d1b319b7dcde11b4a065e1fc3e7316fd8ffae76a4c10850d1d9619",
+            "mode": "0o600"
+          },
+          "app.env": {
+            "sha256": "d9f689a518ed6915a8e7bce5f18297a2219294cd39b98da33ac60680cf510d5c",
+            "mode": "0o600"
+          },
+          "worker.env": {
+            "sha256": "a95527753146ff2b13aaafbeffbf74852bb2c9ec3b096996102c3a4310a3ad9c",
+            "mode": "0o600"
+          },
+          "webhook-worker.env": {
+            "sha256": "8b7c222c3f137254b9ee1babb30966289e7efb965b9b28c2595b3870cadce2f3",
+            "mode": "0o600"
+          },
+          ".deploy-state": {
+            "sha256": "09c7a894612c167dbda24ceabcf12b09b715167dda914fd11e4c11e9ff554be5",
+            "mode": "0o600"
+          },
+          ".deploy-state.previous": {
+            "sha256": "ae3a9d1b1c4cb80e1e5d9e8b863532dd108e863cf1754cb8ece550306e412103",
+            "mode": "0o600"
+          }
+        },
+        "containers": {
+          "api": {
+            "id": "97d7a48e139de623c390a88b295e867b00a6599923ec9b044feb67e563d95f07",
+            "image": "sha256:81c69606c3cda7f35c20bb0de5f8dc97b20a24a134259491e6a05f4777bfc937",
+            "status": "running",
+            "health": "healthy"
+          },
+          "worker": {
+            "id": "93cf6d901a3c4997f9b7530b6a081bf5e0327669547cfbfff2a28d5b0b245be4",
+            "image": "sha256:81c69606c3cda7f35c20bb0de5f8dc97b20a24a134259491e6a05f4777bfc937",
+            "status": "running",
+            "health": "healthy"
+          },
+          "webhook-worker": {
+            "id": "9dffb7cc8d101b529605c5855404a53da62e29e2b94b6e9a71113db03bf7ca9c",
+            "image": "sha256:81c69606c3cda7f35c20bb0de5f8dc97b20a24a134259491e6a05f4777bfc937",
+            "status": "running",
+            "health": "healthy"
+          },
+          "postgres": {
+            "id": "ce1b2c2e25ec4b658964fc7913bf8c597ba00b1000d879350e7abe64daced074",
+            "image": "sha256:25a89970a83255ae96484d709005bb35aa71f7455f941bc1634514f31c5d5c62",
+            "status": "running",
+            "health": "healthy"
+          },
+          "rabbitmq": {
+            "id": "6223d8b087f37e2a7ad252279c9aa826a14f2bba224f44827f03c432acbf5e96",
+            "image": "sha256:c3b1d10b087d5e3113e097c5c237ae00b05c92480ab2d6a1df07aafe787bf2e6",
+            "status": "running",
+            "health": "healthy"
+          },
+          "redis": {
+            "id": "50d86d87c027c2781fc27deef8646d7d2f2e6be674d47a3642769303f264fe2a",
+            "image": "sha256:675f7644831d85995868250485bf7a71970257f74da31c62969a868d3f3eff2e",
+            "status": "running",
+            "health": "healthy"
+          },
+          "bootstrap": {
+            "id": "ee54e7c0b0d1941cca32b942081041fbee2d764609dbfd060da5d3772ab19573",
+            "image": "sha256:81c69606c3cda7f35c20bb0de5f8dc97b20a24a134259491e6a05f4777bfc937",
+            "status": "exited",
+            "health": "unhealthy"
+          }
+        },
+        "revision": "20261007_0028",
+        "sentinel": "t"
+      },
+      "keys": {
+        "api": [
+          "AUTH_JWT_AUDIENCE",
+          "AUTH_JWT_ISSUER",
+          "AUTH_JWT_PRIVATE_KEY",
+          "AUTH_JWT_PUBLIC_KEY",
+          "DATABASE_URL",
+          "GITHUB_CLIENT_SECRET",
+          "GITHUB_WEBHOOK_SECRET",
+          "GPG_KEY",
+          "HOME",
+          "HOSTNAME",
+          "LC_CTYPE",
+          "PATH",
+          "POSTGRES_DB",
+          "POSTGRES_HOST",
+          "POSTGRES_PASSWORD",
+          "POSTGRES_PORT",
+          "POSTGRES_USER",
+          "PYTHONDONTWRITEBYTECODE",
+          "PYTHONUNBUFFERED",
+          "PYTHON_SHA256",
+          "PYTHON_VERSION",
+          "RABBITMQ_URL",
+          "REDIS_URL",
+          "UV_COMPILE_BYTECODE",
+          "UV_LINK_MODE"
+        ],
+        "worker": [
+          "DATABASE_URL",
+          "GITHUB_APP_ID",
+          "GITHUB_APP_PRIVATE_KEY",
+          "GPG_KEY",
+          "HOME",
+          "HOSTNAME",
+          "LC_CTYPE",
+          "LLM_API_KEYS",
+          "PATH",
+          "PYTHONDONTWRITEBYTECODE",
+          "PYTHONUNBUFFERED",
+          "PYTHON_SHA256",
+          "PYTHON_VERSION",
+          "RABBITMQ_URL",
+          "UV_COMPILE_BYTECODE",
+          "UV_LINK_MODE",
+          "WORKER_HEARTBEAT_FILE"
+        ],
+        "webhook-worker": [
+          "DATABASE_URL",
+          "GITHUB_APP_BOT_LOGIN",
+          "GITHUB_APP_ID",
+          "GITHUB_APP_PRIVATE_KEY",
+          "GPG_KEY",
+          "HOME",
+          "HOSTNAME",
+          "LC_CTYPE",
+          "PATH",
+          "PYTHONDONTWRITEBYTECODE",
+          "PYTHONUNBUFFERED",
+          "PYTHON_SHA256",
+          "PYTHON_VERSION",
+          "RABBITMQ_URL",
+          "UV_COMPILE_BYTECODE",
+          "UV_LINK_MODE",
+          "WORKER_HEARTBEAT_FILE"
+        ]
+      },
+      "health": {
+        "API": {
+          "status_code": 200,
+          "json": {
+            "status": "ok"
+          }
+        },
+        "workers": "heartbeat age <=30 seconds"
+      },
+      "history_rule": "previous remains A"
+    },
+    {
+      "case": "incompatible-manual",
+      "exit_code": 1,
+      "reason": "database revision is unknown",
+      "before": {
+        "files": {
+          ".env": {
+            "sha256": "750d6fb19d4ab3946820a71ad63cf6584b47599226d946c73d8eb1bf205b1011",
+            "mode": "0o600"
+          },
+          "api.env": {
+            "sha256": "8f51291d00d1b319b7dcde11b4a065e1fc3e7316fd8ffae76a4c10850d1d9619",
+            "mode": "0o600"
+          },
+          "app.env": {
+            "sha256": "d9f689a518ed6915a8e7bce5f18297a2219294cd39b98da33ac60680cf510d5c",
+            "mode": "0o600"
+          },
+          "worker.env": {
+            "sha256": "a95527753146ff2b13aaafbeffbf74852bb2c9ec3b096996102c3a4310a3ad9c",
+            "mode": "0o600"
+          },
+          "webhook-worker.env": {
+            "sha256": "8b7c222c3f137254b9ee1babb30966289e7efb965b9b28c2595b3870cadce2f3",
+            "mode": "0o600"
+          },
+          ".deploy-state": {
+            "sha256": "0dd40c69633074cce5b4a3dee25971bfb3c5d4dce6248badae005a0ad1b810e7",
+            "mode": "0o600"
+          },
+          ".deploy-state.previous": {
+            "sha256": "09c7a894612c167dbda24ceabcf12b09b715167dda914fd11e4c11e9ff554be5",
+            "mode": "0o600"
+          }
+        },
+        "containers": {
+          "api": {
+            "id": "39c68da5e4d2929aee92358e0b97b230881ceb3e9acaf0291026b72f94f36c08",
+            "image": "sha256:45bdccc6965cf85027e2b7a7be7ca8c5b07386736e7975554574c6af30ab1057",
+            "status": "running",
+            "health": "healthy"
+          },
+          "worker": {
+            "id": "232ae1c0c088b71813bf14760a939d79d729305a1af6da8bad377893d71fe456",
+            "image": "sha256:45bdccc6965cf85027e2b7a7be7ca8c5b07386736e7975554574c6af30ab1057",
+            "status": "running",
+            "health": "healthy"
+          },
+          "webhook-worker": {
+            "id": "88ac30dbba5c6f8a8bfb53dc1cb5ad68d27a37256856779e4f9968b9d3256526",
+            "image": "sha256:45bdccc6965cf85027e2b7a7be7ca8c5b07386736e7975554574c6af30ab1057",
+            "status": "running",
+            "health": "healthy"
+          },
+          "postgres": {
+            "id": "ce1b2c2e25ec4b658964fc7913bf8c597ba00b1000d879350e7abe64daced074",
+            "image": "sha256:25a89970a83255ae96484d709005bb35aa71f7455f941bc1634514f31c5d5c62",
+            "status": "running",
+            "health": "healthy"
+          },
+          "rabbitmq": {
+            "id": "6223d8b087f37e2a7ad252279c9aa826a14f2bba224f44827f03c432acbf5e96",
+            "image": "sha256:c3b1d10b087d5e3113e097c5c237ae00b05c92480ab2d6a1df07aafe787bf2e6",
+            "status": "running",
+            "health": "healthy"
+          },
+          "redis": {
+            "id": "50d86d87c027c2781fc27deef8646d7d2f2e6be674d47a3642769303f264fe2a",
+            "image": "sha256:675f7644831d85995868250485bf7a71970257f74da31c62969a868d3f3eff2e",
+            "status": "running",
+            "health": "healthy"
+          },
+          "bootstrap": {
+            "id": "db72716c0fb8927eb80614839d7b57cf3d876ae82a72aa8e497f871fc79a5dd4",
+            "image": "sha256:45bdccc6965cf85027e2b7a7be7ca8c5b07386736e7975554574c6af30ab1057",
+            "status": "exited",
+            "health": "unhealthy"
+          }
+        },
+        "revision": "20261010_0110",
+        "sentinel": "rollback110-nonsecret-sentinel"
+      },
+      "after": {
+        "files": {
+          ".env": {
+            "sha256": "750d6fb19d4ab3946820a71ad63cf6584b47599226d946c73d8eb1bf205b1011",
+            "mode": "0o600"
+          },
+          "api.env": {
+            "sha256": "8f51291d00d1b319b7dcde11b4a065e1fc3e7316fd8ffae76a4c10850d1d9619",
+            "mode": "0o600"
+          },
+          "app.env": {
+            "sha256": "d9f689a518ed6915a8e7bce5f18297a2219294cd39b98da33ac60680cf510d5c",
+            "mode": "0o600"
+          },
+          "worker.env": {
+            "sha256": "a95527753146ff2b13aaafbeffbf74852bb2c9ec3b096996102c3a4310a3ad9c",
+            "mode": "0o600"
+          },
+          "webhook-worker.env": {
+            "sha256": "8b7c222c3f137254b9ee1babb30966289e7efb965b9b28c2595b3870cadce2f3",
+            "mode": "0o600"
+          },
+          ".deploy-state": {
+            "sha256": "0dd40c69633074cce5b4a3dee25971bfb3c5d4dce6248badae005a0ad1b810e7",
+            "mode": "0o600"
+          },
+          ".deploy-state.previous": {
+            "sha256": "09c7a894612c167dbda24ceabcf12b09b715167dda914fd11e4c11e9ff554be5",
+            "mode": "0o600"
+          }
+        },
+        "containers": {
+          "api": {
+            "id": "39c68da5e4d2929aee92358e0b97b230881ceb3e9acaf0291026b72f94f36c08",
+            "image": "sha256:45bdccc6965cf85027e2b7a7be7ca8c5b07386736e7975554574c6af30ab1057",
+            "status": "running",
+            "health": "healthy"
+          },
+          "worker": {
+            "id": "232ae1c0c088b71813bf14760a939d79d729305a1af6da8bad377893d71fe456",
+            "image": "sha256:45bdccc6965cf85027e2b7a7be7ca8c5b07386736e7975554574c6af30ab1057",
+            "status": "running",
+            "health": "healthy"
+          },
+          "webhook-worker": {
+            "id": "88ac30dbba5c6f8a8bfb53dc1cb5ad68d27a37256856779e4f9968b9d3256526",
+            "image": "sha256:45bdccc6965cf85027e2b7a7be7ca8c5b07386736e7975554574c6af30ab1057",
+            "status": "running",
+            "health": "healthy"
+          },
+          "postgres": {
+            "id": "ce1b2c2e25ec4b658964fc7913bf8c597ba00b1000d879350e7abe64daced074",
+            "image": "sha256:25a89970a83255ae96484d709005bb35aa71f7455f941bc1634514f31c5d5c62",
+            "status": "running",
+            "health": "healthy"
+          },
+          "rabbitmq": {
+            "id": "6223d8b087f37e2a7ad252279c9aa826a14f2bba224f44827f03c432acbf5e96",
+            "image": "sha256:c3b1d10b087d5e3113e097c5c237ae00b05c92480ab2d6a1df07aafe787bf2e6",
+            "status": "running",
+            "health": "healthy"
+          },
+          "redis": {
+            "id": "50d86d87c027c2781fc27deef8646d7d2f2e6be674d47a3642769303f264fe2a",
+            "image": "sha256:675f7644831d85995868250485bf7a71970257f74da31c62969a868d3f3eff2e",
+            "status": "running",
+            "health": "healthy"
+          },
+          "bootstrap": {
+            "id": "db72716c0fb8927eb80614839d7b57cf3d876ae82a72aa8e497f871fc79a5dd4",
+            "image": "sha256:45bdccc6965cf85027e2b7a7be7ca8c5b07386736e7975554574c6af30ab1057",
+            "status": "exited",
+            "health": "unhealthy"
+          }
+        },
+        "revision": "20261010_0110",
+        "sentinel": "rollback110-nonsecret-sentinel"
+      },
+      "health": {
+        "API": {
+          "status_code": 200,
+          "json": {
+            "status": "ok"
+          }
+        },
+        "workers": "heartbeat age <=30 seconds"
+      }
+    },
+    {
+      "case": "incompatible-auto",
+      "exit_code": 1,
+      "reason": "database revision is unknown",
+      "before": {
+        "files": {
+          ".env": {
+            "sha256": "750d6fb19d4ab3946820a71ad63cf6584b47599226d946c73d8eb1bf205b1011",
+            "mode": "0o600"
+          },
+          "api.env": {
+            "sha256": "8f51291d00d1b319b7dcde11b4a065e1fc3e7316fd8ffae76a4c10850d1d9619",
+            "mode": "0o600"
+          },
+          "app.env": {
+            "sha256": "d9f689a518ed6915a8e7bce5f18297a2219294cd39b98da33ac60680cf510d5c",
+            "mode": "0o600"
+          },
+          "worker.env": {
+            "sha256": "a95527753146ff2b13aaafbeffbf74852bb2c9ec3b096996102c3a4310a3ad9c",
+            "mode": "0o600"
+          },
+          "webhook-worker.env": {
+            "sha256": "8b7c222c3f137254b9ee1babb30966289e7efb965b9b28c2595b3870cadce2f3",
+            "mode": "0o600"
+          },
+          ".deploy-state": {
+            "sha256": "0dd40c69633074cce5b4a3dee25971bfb3c5d4dce6248badae005a0ad1b810e7",
+            "mode": "0o600"
+          },
+          ".deploy-state.previous": {
+            "sha256": "09c7a894612c167dbda24ceabcf12b09b715167dda914fd11e4c11e9ff554be5",
+            "mode": "0o600"
+          }
+        },
+        "containers": {
+          "api": {
+            "id": "39c68da5e4d2929aee92358e0b97b230881ceb3e9acaf0291026b72f94f36c08",
+            "image": "sha256:45bdccc6965cf85027e2b7a7be7ca8c5b07386736e7975554574c6af30ab1057",
+            "status": "running",
+            "health": "healthy"
+          },
+          "worker": {
+            "id": "232ae1c0c088b71813bf14760a939d79d729305a1af6da8bad377893d71fe456",
+            "image": "sha256:45bdccc6965cf85027e2b7a7be7ca8c5b07386736e7975554574c6af30ab1057",
+            "status": "running",
+            "health": "healthy"
+          },
+          "webhook-worker": {
+            "id": "88ac30dbba5c6f8a8bfb53dc1cb5ad68d27a37256856779e4f9968b9d3256526",
+            "image": "sha256:45bdccc6965cf85027e2b7a7be7ca8c5b07386736e7975554574c6af30ab1057",
+            "status": "running",
+            "health": "healthy"
+          },
+          "postgres": {
+            "id": "ce1b2c2e25ec4b658964fc7913bf8c597ba00b1000d879350e7abe64daced074",
+            "image": "sha256:25a89970a83255ae96484d709005bb35aa71f7455f941bc1634514f31c5d5c62",
+            "status": "running",
+            "health": "healthy"
+          },
+          "rabbitmq": {
+            "id": "6223d8b087f37e2a7ad252279c9aa826a14f2bba224f44827f03c432acbf5e96",
+            "image": "sha256:c3b1d10b087d5e3113e097c5c237ae00b05c92480ab2d6a1df07aafe787bf2e6",
+            "status": "running",
+            "health": "healthy"
+          },
+          "redis": {
+            "id": "50d86d87c027c2781fc27deef8646d7d2f2e6be674d47a3642769303f264fe2a",
+            "image": "sha256:675f7644831d85995868250485bf7a71970257f74da31c62969a868d3f3eff2e",
+            "status": "running",
+            "health": "healthy"
+          },
+          "bootstrap": {
+            "id": "db72716c0fb8927eb80614839d7b57cf3d876ae82a72aa8e497f871fc79a5dd4",
+            "image": "sha256:45bdccc6965cf85027e2b7a7be7ca8c5b07386736e7975554574c6af30ab1057",
+            "status": "exited",
+            "health": "unhealthy"
+          }
+        },
+        "revision": "20261010_0110",
+        "sentinel": "rollback110-nonsecret-sentinel"
+      },
+      "after": {
+        "files": {
+          ".env": {
+            "sha256": "750d6fb19d4ab3946820a71ad63cf6584b47599226d946c73d8eb1bf205b1011",
+            "mode": "0o600"
+          },
+          "api.env": {
+            "sha256": "8f51291d00d1b319b7dcde11b4a065e1fc3e7316fd8ffae76a4c10850d1d9619",
+            "mode": "0o600"
+          },
+          "app.env": {
+            "sha256": "d9f689a518ed6915a8e7bce5f18297a2219294cd39b98da33ac60680cf510d5c",
+            "mode": "0o600"
+          },
+          "worker.env": {
+            "sha256": "a95527753146ff2b13aaafbeffbf74852bb2c9ec3b096996102c3a4310a3ad9c",
+            "mode": "0o600"
+          },
+          "webhook-worker.env": {
+            "sha256": "8b7c222c3f137254b9ee1babb30966289e7efb965b9b28c2595b3870cadce2f3",
+            "mode": "0o600"
+          },
+          ".deploy-state": {
+            "sha256": "0dd40c69633074cce5b4a3dee25971bfb3c5d4dce6248badae005a0ad1b810e7",
+            "mode": "0o600"
+          },
+          ".deploy-state.previous": {
+            "sha256": "09c7a894612c167dbda24ceabcf12b09b715167dda914fd11e4c11e9ff554be5",
+            "mode": "0o600"
+          }
+        },
+        "containers": {
+          "api": {
+            "id": "39c68da5e4d2929aee92358e0b97b230881ceb3e9acaf0291026b72f94f36c08",
+            "image": "sha256:45bdccc6965cf85027e2b7a7be7ca8c5b07386736e7975554574c6af30ab1057",
+            "status": "running",
+            "health": "healthy"
+          },
+          "worker": {
+            "id": "232ae1c0c088b71813bf14760a939d79d729305a1af6da8bad377893d71fe456",
+            "image": "sha256:45bdccc6965cf85027e2b7a7be7ca8c5b07386736e7975554574c6af30ab1057",
+            "status": "running",
+            "health": "healthy"
+          },
+          "webhook-worker": {
+            "id": "88ac30dbba5c6f8a8bfb53dc1cb5ad68d27a37256856779e4f9968b9d3256526",
+            "image": "sha256:45bdccc6965cf85027e2b7a7be7ca8c5b07386736e7975554574c6af30ab1057",
+            "status": "running",
+            "health": "healthy"
+          },
+          "postgres": {
+            "id": "ce1b2c2e25ec4b658964fc7913bf8c597ba00b1000d879350e7abe64daced074",
+            "image": "sha256:25a89970a83255ae96484d709005bb35aa71f7455f941bc1634514f31c5d5c62",
+            "status": "running",
+            "health": "healthy"
+          },
+          "rabbitmq": {
+            "id": "6223d8b087f37e2a7ad252279c9aa826a14f2bba224f44827f03c432acbf5e96",
+            "image": "sha256:c3b1d10b087d5e3113e097c5c237ae00b05c92480ab2d6a1df07aafe787bf2e6",
+            "status": "running",
+            "health": "healthy"
+          },
+          "redis": {
+            "id": "50d86d87c027c2781fc27deef8646d7d2f2e6be674d47a3642769303f264fe2a",
+            "image": "sha256:675f7644831d85995868250485bf7a71970257f74da31c62969a868d3f3eff2e",
+            "status": "running",
+            "health": "healthy"
+          },
+          "bootstrap": {
+            "id": "db72716c0fb8927eb80614839d7b57cf3d876ae82a72aa8e497f871fc79a5dd4",
+            "image": "sha256:45bdccc6965cf85027e2b7a7be7ca8c5b07386736e7975554574c6af30ab1057",
+            "status": "exited",
+            "health": "unhealthy"
+          }
+        },
+        "revision": "20261010_0110",
+        "sentinel": "rollback110-nonsecret-sentinel"
+      },
+      "health": {
+        "API": {
+          "status_code": 200,
+          "json": {
+            "status": "ok"
+          }
+        },
+        "workers": "heartbeat age <=30 seconds"
+      }
+    },
+    {
+      "case": "unreachable-manual",
+      "exit_code": 1,
+      "reason": "cannot inspect target graph or database",
+      "elapsed_seconds": 9.45,
+      "before": {
+        "files": {
+          ".env": {
+            "sha256": "750d6fb19d4ab3946820a71ad63cf6584b47599226d946c73d8eb1bf205b1011",
+            "mode": "0o600"
+          },
+          "api.env": {
+            "sha256": "8f51291d00d1b319b7dcde11b4a065e1fc3e7316fd8ffae76a4c10850d1d9619",
+            "mode": "0o600"
+          },
+          "app.env": {
+            "sha256": "d9f689a518ed6915a8e7bce5f18297a2219294cd39b98da33ac60680cf510d5c",
+            "mode": "0o600"
+          },
+          "worker.env": {
+            "sha256": "a95527753146ff2b13aaafbeffbf74852bb2c9ec3b096996102c3a4310a3ad9c",
+            "mode": "0o600"
+          },
+          "webhook-worker.env": {
+            "sha256": "8b7c222c3f137254b9ee1babb30966289e7efb965b9b28c2595b3870cadce2f3",
+            "mode": "0o600"
+          },
+          ".deploy-state": {
+            "sha256": "0dd40c69633074cce5b4a3dee25971bfb3c5d4dce6248badae005a0ad1b810e7",
+            "mode": "0o600"
+          },
+          ".deploy-state.previous": {
+            "sha256": "09c7a894612c167dbda24ceabcf12b09b715167dda914fd11e4c11e9ff554be5",
+            "mode": "0o600"
+          }
+        }
+      },
+      "after": {
+        "files": {
+          ".env": {
+            "sha256": "750d6fb19d4ab3946820a71ad63cf6584b47599226d946c73d8eb1bf205b1011",
+            "mode": "0o600"
+          },
+          "api.env": {
+            "sha256": "8f51291d00d1b319b7dcde11b4a065e1fc3e7316fd8ffae76a4c10850d1d9619",
+            "mode": "0o600"
+          },
+          "app.env": {
+            "sha256": "d9f689a518ed6915a8e7bce5f18297a2219294cd39b98da33ac60680cf510d5c",
+            "mode": "0o600"
+          },
+          "worker.env": {
+            "sha256": "a95527753146ff2b13aaafbeffbf74852bb2c9ec3b096996102c3a4310a3ad9c",
+            "mode": "0o600"
+          },
+          "webhook-worker.env": {
+            "sha256": "8b7c222c3f137254b9ee1babb30966289e7efb965b9b28c2595b3870cadce2f3",
+            "mode": "0o600"
+          },
+          ".deploy-state": {
+            "sha256": "0dd40c69633074cce5b4a3dee25971bfb3c5d4dce6248badae005a0ad1b810e7",
+            "mode": "0o600"
+          },
+          ".deploy-state.previous": {
+            "sha256": "09c7a894612c167dbda24ceabcf12b09b715167dda914fd11e4c11e9ff554be5",
+            "mode": "0o600"
+          }
+        }
+      },
+      "primary_unchanged": true,
+      "health": {
+        "API": {
+          "status_code": 200,
+          "json": {
+            "status": "ok"
+          }
+        },
+        "workers": "heartbeat age <=30 seconds"
+      }
+    },
+    {
+      "case": "unreachable-auto",
+      "exit_code": 1,
+      "reason": "cannot inspect target graph or database",
+      "elapsed_seconds": 9.12,
+      "before": {
+        "files": {
+          ".env": {
+            "sha256": "750d6fb19d4ab3946820a71ad63cf6584b47599226d946c73d8eb1bf205b1011",
+            "mode": "0o600"
+          },
+          "api.env": {
+            "sha256": "8f51291d00d1b319b7dcde11b4a065e1fc3e7316fd8ffae76a4c10850d1d9619",
+            "mode": "0o600"
+          },
+          "app.env": {
+            "sha256": "d9f689a518ed6915a8e7bce5f18297a2219294cd39b98da33ac60680cf510d5c",
+            "mode": "0o600"
+          },
+          "worker.env": {
+            "sha256": "a95527753146ff2b13aaafbeffbf74852bb2c9ec3b096996102c3a4310a3ad9c",
+            "mode": "0o600"
+          },
+          "webhook-worker.env": {
+            "sha256": "8b7c222c3f137254b9ee1babb30966289e7efb965b9b28c2595b3870cadce2f3",
+            "mode": "0o600"
+          },
+          ".deploy-state": {
+            "sha256": "0dd40c69633074cce5b4a3dee25971bfb3c5d4dce6248badae005a0ad1b810e7",
+            "mode": "0o600"
+          },
+          ".deploy-state.previous": {
+            "sha256": "09c7a894612c167dbda24ceabcf12b09b715167dda914fd11e4c11e9ff554be5",
+            "mode": "0o600"
+          }
+        }
+      },
+      "after": {
+        "files": {
+          ".env": {
+            "sha256": "750d6fb19d4ab3946820a71ad63cf6584b47599226d946c73d8eb1bf205b1011",
+            "mode": "0o600"
+          },
+          "api.env": {
+            "sha256": "8f51291d00d1b319b7dcde11b4a065e1fc3e7316fd8ffae76a4c10850d1d9619",
+            "mode": "0o600"
+          },
+          "app.env": {
+            "sha256": "d9f689a518ed6915a8e7bce5f18297a2219294cd39b98da33ac60680cf510d5c",
+            "mode": "0o600"
+          },
+          "worker.env": {
+            "sha256": "a95527753146ff2b13aaafbeffbf74852bb2c9ec3b096996102c3a4310a3ad9c",
+            "mode": "0o600"
+          },
+          "webhook-worker.env": {
+            "sha256": "8b7c222c3f137254b9ee1babb30966289e7efb965b9b28c2595b3870cadce2f3",
+            "mode": "0o600"
+          },
+          ".deploy-state": {
+            "sha256": "0dd40c69633074cce5b4a3dee25971bfb3c5d4dce6248badae005a0ad1b810e7",
+            "mode": "0o600"
+          },
+          ".deploy-state.previous": {
+            "sha256": "09c7a894612c167dbda24ceabcf12b09b715167dda914fd11e4c11e9ff554be5",
+            "mode": "0o600"
+          }
+        }
+      },
+      "primary_unchanged": true,
+      "health": {
+        "API": {
+          "status_code": 200,
+          "json": {
+            "status": "ok"
+          }
+        },
+        "workers": "heartbeat age <=30 seconds"
+      }
+    }
+  ],
+  "compose_version": "2.19.1",
+  "image_A": "sha256:81c69606c3cda7f35c20bb0de5f8dc97b20a24a134259491e6a05f4777bfc937",
+  "image_B": "sha256:45bdccc6965cf85027e2b7a7be7ca8c5b07386736e7975554574c6af30ab1057",
+  "local_pull_substitution": "Only verified A/B image IDs; Compose up --pull never; probes and health run unchanged",
+  "initial_A_health": {
+    "API": {
+      "status_code": 200,
+      "json": {
+        "status": "ok"
+      }
+    },
+    "workers": "heartbeat age <=30 seconds"
+  },
+  "secret_scan": "all command output passed, including each PEM line",
+  "outcome": "passed",
+  "cleanup": "passed"
+}
