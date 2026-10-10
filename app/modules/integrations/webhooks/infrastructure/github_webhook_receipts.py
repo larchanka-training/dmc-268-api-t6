@@ -18,6 +18,9 @@ from app.modules.integrations.webhooks.infrastructure.models import (
     GitHubInstallationRemovalEffect,
     WebhookEvent,
 )
+from app.modules.integrations.webhooks.infrastructure.webhook_notifications import (
+    notify_webhook_work,
+)
 from app.modules.repositories.infrastructure.models import ProviderInstallation
 
 
@@ -48,7 +51,10 @@ class SqlAlchemyGitHubWebhookReceiptStore:
             .on_conflict_do_nothing(index_elements=[WebhookEvent.delivery_id])
             .returning(WebhookEvent.id)
         )
-        return await self._session.scalar(statement) is not None
+        inserted = await self._session.scalar(statement) is not None
+        if inserted:
+            await notify_webhook_work(self._session)
+        return inserted
 
     async def claim(
         self, delivery_id: str, token: UUID, now: datetime, until: datetime

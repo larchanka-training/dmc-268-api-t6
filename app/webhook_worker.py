@@ -10,6 +10,7 @@ import logging
 import os
 import time
 from collections.abc import Mapping
+from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -18,6 +19,7 @@ from typing import NoReturn
 import httpx
 
 from app.bootstrap.reviews_api import ReviewsApiResources
+from app.bootstrap.webhook_work_listener import listen_forever
 from app.common.infrastructure.heartbeat import beat, heartbeat_file, reset
 from app.modules.integrations.webhooks.application.receive_github_delivery import (
     ReceiveGitHubDelivery,
@@ -124,15 +126,25 @@ async def hourly_maintenance(
 
 
 async def sweep_forever(
-    receiver: ReceiveGitHubDelivery, reviver: ReviveDeferredInstallationDeliveries
+    receiver: ReceiveGitHubDelivery,
+    reviver: ReviveDeferredInstallationDeliveries,
+    wake: asyncio.Event,
+    *,
+    poll_interval: float = 30.0,
 ) -> NoReturn:
     next_maintenance = 0.0
     while True:
+        # Clear before scanning so hints arriving during processing survive the wait.
+        wake.clear()
         projected = await sweep_once(receiver)
         if time.monotonic() >= next_maintenance:
             await hourly_maintenance(receiver, reviver)
             next_maintenance = time.monotonic() + _MAINTENANCE_INTERVAL_SECONDS
-        await asyncio.sleep(0 if projected == 100 else 30)
+        if projected == 100:
+            await asyncio.sleep(0)
+        else:
+            with suppress(TimeoutError):
+                await asyncio.wait_for(wake.wait(), timeout=poll_interval)
 
 
 async def run_forever() -> None:
@@ -159,8 +171,10 @@ async def run_forever() -> None:
             reviver = ReviveDeferredInstallationDeliveries(
                 uow_factory=resources.github_webhook_receipts, now=lambda: datetime.now(UTC)
             )
+            wake = asyncio.Event()
             async with asyncio.TaskGroup() as tasks:
-                tasks.create_task(sweep_forever(receiver, reviver))
+                tasks.create_task(sweep_forever(receiver, reviver, wake))
+                tasks.create_task(listen_forever(config.database_url, wake))
                 if config.heartbeat_file is not None:
                     tasks.create_task(beat(config.heartbeat_file))
     finally:
