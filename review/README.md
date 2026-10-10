@@ -24,6 +24,9 @@ immutable — a file with a version in its name is never edited — and served f
 | `scripts/validate_findings.py`          | validator of model outputs: schema + semantic rules |
 | `examples/`                             | synthetic diff and sample outputs (proof run)       |
 
+The active prompts are `review.system.v2` and `review.conventions.v2` (the defaults in
+`app/bootstrap/llm_gateway.py`). The v1 files are history: a published version is never edited or removed.
+
 ## Seeding contract
 
 Prompts and default rule sets are loaded from this directory at deploy or migration time — an Alembic data
@@ -143,7 +146,7 @@ printed one per line), `2` when the file is not JSON or its kind is unknown. One
 `uv run python review/scripts/validate_findings.py review/examples/findings.sample.json`. The kind is
 detected from the top-level key: `findings` → `ReviewOutput`, `files` →
 `RepoConventionsDraft`. A file carrying both keys is rejected with exit `2`. The 120-word `body` limit of
-`review.system.v1.md` §7 is a prompt-level brevity target, not part of the backend schema: the validator
+`review.system.v2.md` §7 is a prompt-level brevity target, not part of the backend schema: the validator
 enforces only the 1200-character ceiling. The tests run it over `examples/*.sample.json`. Quality targets and
 the evaluation corpus (`test-prs-dataset/`) are defined in [`docs/TEST_PLAN.md`](../docs/TEST_PLAN.md) §3–5.
 
