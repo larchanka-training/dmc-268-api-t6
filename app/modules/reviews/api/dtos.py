@@ -30,6 +30,8 @@ class RunSessionDto(ApiDto):
     engine: str
     attempt: int
     cancel_requested: bool
+    trigger: str
+    created_at: datetime
     started_at: datetime | None
     finished_at: datetime | None
     error_code: str | None

@@ -97,6 +97,7 @@ def make_item(value: int, status: str) -> RunListItem:
         url=f"https://example.test/{value}",
         head_sha="a" * 40,
         created_at=created_at,
+        trigger="webhook",
     )
 
 

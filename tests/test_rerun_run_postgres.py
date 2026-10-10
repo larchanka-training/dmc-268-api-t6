@@ -69,6 +69,8 @@ def test_rerun_creates_a_priority_nine_run_and_rejects_active_or_closed_prs(env:
     messages = asyncio.run(queued_messages(env))
 
     assert created.status_code == 202 and created.json()["status"] == "queued"
+    assert created.json()["trigger"] == "rerun" and created.json()["startedAt"] is None
+    assert created.json()["createdAt"].endswith("Z")
     assert tuple(row) == ("rerun", "queued", 0, HEAD, True)
     assert again.status_code == 409 and closed.status_code == 409
     assert foreign.status_code == 404

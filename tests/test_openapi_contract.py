@@ -52,7 +52,12 @@ from app.modules.reviews.application.review_output import Category, Severity
 from app.modules.reviews.application.run_events import RunUpdated
 from app.modules.reviews.application.try_enqueue_webhook_run import PendingRunMessage
 from tests.portal_test_client import authenticated_test_client
-from tests.test_ui_zod_contracts import RUN_ID, ContractRepository, _generated_schemas
+from tests.test_ui_zod_contracts import (
+    RUN_ID,
+    RUN_ORIGIN_CASES,
+    ContractRepository,
+    _generated_schemas,
+)
 
 SPEC_PATH = Path(__file__).parents[1] / "contracts" / "openapi.yaml"
 HTTP_METHODS = frozenset({"get", "put", "post", "delete", "options", "head", "patch", "trace"})
@@ -514,7 +519,12 @@ def test_stream_declares_the_last_event_id_header_the_app_accepts() -> None:
 
 @pytest.mark.parametrize(
     ("field", "value"),
-    [("status", "completed"), ("pullRequest", {"repo": "org/repo"})],
+    [
+        ("status", "completed"),
+        ("pullRequest", {"repo": "org/repo"}),
+        ("trigger", "cron"),
+        ("createdAt", None),
+    ],
 )
 def test_response_validation_rejects_drift(client: TestClient, field: str, value: object) -> None:
     page = client.get("/api/runs?limit=1").json()
@@ -522,6 +532,40 @@ def test_response_validation_rejects_drift(client: TestClient, field: str, value
 
     with pytest.raises(ValidationError):
         _validator_for("get", "/api/runs", "200").validate(page)
+
+
+@pytest.mark.parametrize("run_changes", RUN_ORIGIN_CASES)
+def test_run_origin_validates_against_the_declared_schema(run_changes: dict[str, Any]) -> None:
+    repository = ContractRepository()
+    repository.run_changes = run_changes
+    app.dependency_overrides[get_run_repository] = lambda: repository
+    try:
+        client = authenticated_test_client(app)
+        listed = client.get("/api/runs").json()
+        detail = client.get(RUN_URL).json()
+    finally:
+        app.dependency_overrides.clear()
+
+    _validator_for("get", "/api/runs", "200").validate(listed)
+    _validator_for("get", "/api/runs/{run_id}", "200").validate(detail)
+    for run in (listed["items"][0], detail):
+        assert run["trigger"] == run_changes["trigger"]
+        assert run["createdAt"] == "2026-09-24T23:59:30Z"
+        if "started_at" in run_changes:
+            assert run["startedAt"] is None
+
+
+@pytest.mark.parametrize("field", ["trigger", "createdAt"])
+def test_run_origin_is_required_in_the_list_and_the_detail(client: TestClient, field: str) -> None:
+    page = client.get("/api/runs?limit=1").json()
+    detail = client.get(RUN_URL).json()
+    del page["items"][0][field]
+    del detail[field]
+
+    with pytest.raises(ValidationError):
+        _validator_for("get", "/api/runs", "200").validate(page)
+    with pytest.raises(ValidationError):
+        _validator_for("get", "/api/runs/{run_id}", "200").validate(detail)
 
 
 def test_run_detail_schema_accepts_a_complete_run(client: TestClient) -> None:
@@ -837,6 +881,10 @@ def test_enums_match_the_ui_contract_and_the_review_output_model() -> None:
 
     assert components["RunStatus"]["enum"] == zod["runSession"]["properties"]["status"]["enum"]
     assert len(components["RunStatus"]["enum"]) == 7
+    assert components["RunTrigger"]["enum"] == zod["runSession"]["properties"]["trigger"]["enum"]
+    queue_schema = json.loads((SPEC_PATH.parent / "schemas/review.run.v1.schema.json").read_text())
+    queue_run = queue_schema["$defs"]["ReviewRunV1"]
+    assert components["RunTrigger"]["enum"] == queue_run["properties"]["trigger"]["enum"]
     assert components["Severity"]["enum"] == list(get_args(Severity.__value__))
     assert components["Category"]["enum"] == list(get_args(Category.__value__))
     assert components["Severity"]["enum"] == zod["reviewComment"]["properties"]["severity"]["enum"]

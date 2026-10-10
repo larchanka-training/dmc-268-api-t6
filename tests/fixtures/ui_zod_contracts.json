@@ -1,7 +1,7 @@
 {
   "provenance": {
     "repository": "https://github.com/larchanka-training/dmc-268-ui-t6",
-    "commit": "fd4b5c8a8d3709fe5a4c69005b63e7fc99e4819f",
+    "commit": "df07e790ef95b91e92b8b071e4283a1bac89eaa7",
     "generator": "z.toJSONSchema (Zod 4)",
     "command": "DMC_268_UI_DIR=<ui checkout after pnpm install> node tests/generate_ui_zod_contracts.mjs"
   },
@@ -39,6 +39,20 @@
             "cancelled",
             "skipped"
           ]
+        },
+        "trigger": {
+          "type": "string",
+          "enum": [
+            "webhook",
+            "manual",
+            "rerun",
+            "dry_run"
+          ]
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
         },
         "startedAt": {
           "anyOf": [
@@ -141,6 +155,8 @@
         "engine",
         "model",
         "status",
+        "trigger",
+        "createdAt",
         "startedAt",
         "finishedAt",
         "attempt",
@@ -352,6 +368,20 @@
             "cancelled",
             "skipped"
           ]
+        },
+        "trigger": {
+          "type": "string",
+          "enum": [
+            "webhook",
+            "manual",
+            "rerun",
+            "dry_run"
+          ]
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
         },
         "startedAt": {
           "anyOf": [
@@ -700,6 +730,8 @@
         "engine",
         "model",
         "status",
+        "trigger",
+        "createdAt",
         "startedAt",
         "finishedAt",
         "attempt",
@@ -870,6 +902,20 @@
                   "skipped"
                 ]
               },
+              "trigger": {
+                "type": "string",
+                "enum": [
+                  "webhook",
+                  "manual",
+                  "rerun",
+                  "dry_run"
+                ]
+              },
+              "createdAt": {
+                "type": "string",
+                "format": "date-time",
+                "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+              },
               "startedAt": {
                 "anyOf": [
                   {
@@ -971,6 +1017,8 @@
               "engine",
               "model",
               "status",
+              "trigger",
+              "createdAt",
               "startedAt",
               "finishedAt",
               "attempt",

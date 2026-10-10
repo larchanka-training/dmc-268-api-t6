@@ -847,6 +847,13 @@ components:
         `review.postprocess`, plus the `engine.fallback` event); `github.publish_review` runs in
         `publishing` (docs/PIPELINE_SPEC.md §2).
       enum: [queued, running, publishing, succeeded, failed, cancelled, skipped]
+    RunTrigger:
+      type: string
+      description: >-
+        What created the Run, stored once and never changed (docs/PIPELINE_SPEC.md §1.1):
+        `webhook` - a GitHub event or the no-CI sweep, `rerun` - `POST /api/runs/{id}/rerun`.
+        `manual` and `dry_run` are reserved; nothing creates such runs yet.
+      enum: [webhook, manual, rerun, dry_run]
     Engine:
       type: string
       description: >-
@@ -920,6 +927,8 @@ components:
         - engine
         - model
         - status
+        - trigger
+        - createdAt
         - startedAt
         - finishedAt
         - attempt
@@ -939,9 +948,18 @@ components:
           description: Model of the latest LLM call; null before the first call.
         status:
           $ref: "#/components/schemas/RunStatus"
+        trigger:
+          $ref: "#/components/schemas/RunTrigger"
+        createdAt:
+          type: string
+          format: date-time
+          description: >-
+            When the Run row was created, RFC 3339 in UTC (`2026-09-25T10:00:00Z`). Never null
+            and never changed; the list is ordered by it.
         startedAt:
           type: [string, "null"]
           format: date-time
+          description: First claim by a worker; null while the Run has not been claimed.
         finishedAt:
           type: [string, "null"]
           format: date-time
@@ -977,6 +995,8 @@ components:
         - engine
         - model
         - status
+        - trigger
+        - createdAt
         - startedAt
         - finishedAt
         - attempt
@@ -1001,9 +1021,18 @@ components:
           description: Model of the latest LLM call; null before the first call.
         status:
           $ref: "#/components/schemas/RunStatus"
+        trigger:
+          $ref: "#/components/schemas/RunTrigger"
+        createdAt:
+          type: string
+          format: date-time
+          description: >-
+            When the Run row was created, RFC 3339 in UTC (`2026-09-25T10:00:00Z`). Never null
+            and never changed; the list is ordered by it.
         startedAt:
           type: [string, "null"]
           format: date-time
+          description: First claim by a worker; null while the Run has not been claimed.
         finishedAt:
           type: [string, "null"]
           format: date-time
