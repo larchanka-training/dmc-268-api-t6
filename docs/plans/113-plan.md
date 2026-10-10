@@ -512,7 +512,29 @@ have no feature exclusions. Configured final `uv run pytest -rs`:2712 passed,
 zero skips,330.91 s;409 marked integration cases were counted by collection and
 included in that full run. Ruff check passed, format368 files, mypy365 files.
 Detailed executed migration/public-route/race evidence is in `113-todo.md`.
-Technical implementation/documentation/verification is complete. Commit, push,
-PR creation/attachment remain publisher actions; current-head human approval,
-resolved review threads, tech-lead AC acceptance, board12 and issue closure remain
-external handoff steps. No merge or issue auto-close is inferred.
+Technical implementation/documentation/verification is complete. Publication is
+recorded below; current-head human approval, resolved review threads, tech-lead AC
+acceptance, board12 and issue closure remain external handoff steps. No merge or
+issue auto-close is inferred.
+
+
+## Publication handoff (2026-10-10)
+
+[Draft PR #132](https://github.com/larchanka-training/dmc-268-api-t6/pull/132) was
+created and attached to this chat on `feat/113-app-reinstall`, with no reviewer
+selected. Feature commit: `4b6942ca710ad293e96a5e146ed0c41583ff418d`. A fresh fetch
+confirmed main still equals the reviewed base
+`8cf3608d80d0d1cf79e56e333b50d6a4d2052ab8`; no rebase delta was needed.
+
+Available staged `uv run pre-commit run` checks passed (TOML had no staged files).
+The EOF hook removed one extra final blank line from `docs/SYSTEM_DESIGN.md` only;
+no source/test changes followed the final gates. No Git pre-commit hook was
+installed in this checkout; normal commits/pushes used no hook bypass.
+
+The earlier ownership table is a historical planning checkpoint. Later explicit
+`test_eval_live.py` RecordingTransport callback forwarding overlaps PR #124 and
+was covered before editing by the authorized
+[coordination comment](https://github.com/larchanka-training/dmc-268-api-t6/pull/124#issuecomment-6100999604).
+Other recorded ownership comments remain applicable. Combined-branch validation
+is not claimed. Current-head human approval, resolved review threads and tech-lead
+AC/board12/issue acceptance remain pending.

@@ -1,6 +1,6 @@
 # Task List: GitHub App reinstall (#113)
 
-**Status:** contract approved 2026-10-10; Tasks 1–5, Task6 durable/phase checkpoints and Task7a complete and reviewed; Task6c onboarding inner-request complete; Task6e CI repair complete; Task6d PR requests complete; Task7b1 rebind cancellation complete and reviewed; Task7b2a origin projections complete and reviewed; Task7b2b publication requests complete and reviewed; Task7b3 VCS requests and atomic persistence repair complete and reviewed; Task7b4 LLM/context guards complete and reviewed; Task8 public HTTP proof complete and reviewed; Task9 technical documentation, final gates and independent reviews complete; publication and human acceptance pending. Read `113-plan.md` for the complete
+**Status:** contract approved 2026-10-10; Tasks 1–5, Task6 durable/phase checkpoints and Task7a complete and reviewed; Task6c onboarding inner-request complete; Task6e CI repair complete; Task6d PR requests complete; Task7b1 rebind cancellation complete and reviewed; Task7b2a origin projections complete and reviewed; Task7b2b publication requests complete and reviewed; Task7b3 VCS requests and atomic persistence repair complete and reviewed; Task7b4 LLM/context guards complete and reviewed; Task8 public HTTP proof complete and reviewed; Task9 technical documentation, final gates and independent reviews complete; draft PR #132 published and attached; human acceptance pending. Read `113-plan.md` for the complete
 contract. Every implementation task uses TDD, literal spec assertions, no network
 inside DB transactions, flush-only repositories and use-case commits.
 
@@ -667,7 +667,7 @@ standards/spec reviews before an issue-referencing PR.
 - [x] Gates and all integration tests pass with zero integration skips; record test
   names/results and migration evidence. No new dependency expected.
 - [x] Independent final standards/spec reviews pass with no feature exclusions.
-- [ ] Publisher verifies branch against current main and creates/attaches the PR
+- [x] Publisher verifies branch against current main and creates/attaches the PR
   with What / Why / How to verify / Refs, no closing keyword/Development link.
 
 **Verification:** `uv run ruff check .`; `uv run ruff format --check .`;
@@ -701,6 +701,20 @@ field was added. Sources stop changing here for publisher handoff.
 
 - [x] Approved behavior implemented and verified by automated AC evidence.
 - [ ] Tech lead confirms issue #113 AC against the published current head.
-- [ ] PR attached to chat; current-head approve and resolved threads required
-  before merge; no merge authorization inferred from publication request.
+- [x] Draft PR #132 created and attached to chat.
+- [ ] Current-head human approve and resolved threads required before merge; no
+  merge authorization inferred from publication request.
 - [ ] Tech lead accepts AC, updates board 12 and closes issue without PR auto-close.
+
+
+Publication evidence: [draft PR #132](https://github.com/larchanka-training/dmc-268-api-t6/pull/132)
+was created and attached with What / Why / How to verify / Refs and the complete
+Before merge checklist, no reviewer, and `Refs #113` without an issue auto-close or
+Development-panel link. Feature commit `4b6942ca710ad293e96a5e146ed0c41583ff418d`
+was pushed after fresh main/base confirmation at
+`8cf3608d80d0d1cf79e56e333b50d6a4d2052ab8`. Applicable staged pre-commit checks
+passed; only an extra final blank line in SYSTEM_DESIGN was normalized. Source/tests
+remain unchanged after the final 2712-test gate. Later PR124 eval fake forwarding
+coordination and the exact authorized comment are recorded in the plan's publication
+handoff. Final approval, resolved threads, AC acceptance, board12 and closure remain
+pending human steps.
