@@ -55,6 +55,10 @@ VALID = json.dumps(
 INVALID = '{"findings":[]}'
 
 
+# The whole diagnostic, not its prefix: the second half tells the user what to do.
+RESPONSES_NOT_EMPTY = "responses directory is not empty; preserve the existing baseline"
+
+
 def fixture_root(tmp_path: Path, case_ids: tuple[str, ...]) -> Path:
     root = tmp_path / "dataset"
     for case_id in case_ids:
@@ -815,8 +819,9 @@ def test_newly_populated_baseline_is_not_overwritten_during_capture(tmp_path: Pa
             (responses / "existing.json").write_bytes(b"preserve existing baseline")
             return await super().complete(request)
 
-    with pytest.raises(RecorderError, match="responses directory is not empty"):
+    with pytest.raises(RecorderError) as not_empty:
         record(root, BaselineAppearsTransport([answer("primary-model", VALID)]))
+    assert str(not_empty.value) == RESPONSES_NOT_EMPTY
 
     assert (root / "responses/existing.json").read_bytes() == b"preserve existing baseline"
     assert list(root.glob(".responses-*")) == []
@@ -890,8 +895,9 @@ def test_existing_response_bytes_are_preserved_without_provider_calls(tmp_path: 
     existing.write_bytes(original)
     transport = FakeTransport([answer("primary-model", VALID)])
 
-    with pytest.raises(RecorderError, match="responses directory is not empty"):
+    with pytest.raises(RecorderError) as not_empty:
         record(root, transport)
+    assert str(not_empty.value) == RESPONSES_NOT_EMPTY
 
     assert existing.read_bytes() == original
     assert sorted(path.name for path in existing.parent.iterdir()) == ["SEC-01.json"]
