@@ -4,15 +4,15 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import logging
 import os
 from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Literal, cast
+from typing import Any, Literal, cast
 from uuid import uuid4
 
+import psycopg
 import pytest
 from sqlalchemy import text
 from sqlalchemy.engine import make_url
@@ -145,6 +145,7 @@ async def worker(
     *,
     dispatcher: Dispatcher | None = None,
     listener: bool = True,
+    listener_retry: float = 5.0,
     poll_interval: float = 30,
     clock: list[datetime] | None = None,
 ) -> AsyncIterator[Worker]:
@@ -167,7 +168,9 @@ async def worker(
     try:
         if listener:
             tasks.append(
-                asyncio.create_task(listen_forever(listener_url.render_as_string(False), wake))
+                asyncio.create_task(
+                    listen_forever(listener_url.render_as_string(False), wake, retry=listener_retry)
+                )
             )
             # Production LISTEN completion itself supplies readiness; no startup sleep.
             await asyncio.wait_for(wake.hints.get(), timeout=5)
@@ -311,44 +314,50 @@ def test_startup_backlog_is_processed_and_shutdown_closes_actual_listener(
 
 
 def test_actual_connection_loss_and_offline_insert_recover_after_reconnect(
-    database: Database,
+    database: Database, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     async def scenario() -> None:
-        disconnected = asyncio.Event()
+        reconnecting = asyncio.Event()
+        allow_reconnect = asyncio.Event()
+        original_connect = psycopg.AsyncConnection.connect
+        listener_connections = 0
 
-        class DisconnectHandler(logging.Handler):
-            def emit(self, record: logging.LogRecord) -> None:
-                if "listener lost its connection" in record.getMessage():
-                    disconnected.set()
+        async def controlled_connect(
+            conninfo: str = "", **kwargs: Any
+        ) -> psycopg.AsyncConnection[tuple[Any, ...]]:
+            nonlocal listener_connections
+            # SQLAlchemy also uses this driver; gate only the dedicated listener.
+            if "application_name=test_webhook_listener_" in conninfo:
+                listener_connections += 1
+                if listener_connections > 1:
+                    reconnecting.set()
+                    await allow_reconnect.wait()
+            return await original_connect(conninfo, **kwargs)
 
-        logger = logging.getLogger("app.bootstrap.webhook_work_listener")
-        handler = DisconnectHandler()
-        logger.addHandler(handler)
-        try:
-            async with worker(database) as running:
-                original_pid = await running.backend_pid()
-                assert original_pid is not None
-                async with running.factory() as session, session.begin():
-                    assert (
-                        await session.scalar(
-                            text("SELECT pg_terminate_backend(:pid)"), {"pid": original_pid}
-                        )
-                        is True
+        monkeypatch.setattr(psycopg.AsyncConnection, "connect", controlled_connect)
+        async with worker(database, listener_retry=0.01) as running:
+            original_pid = await running.backend_pid()
+            assert original_pid is not None
+            async with running.factory() as session, session.begin():
+                assert (
+                    await session.scalar(
+                        text("SELECT pg_terminate_backend(:pid)"), {"pid": original_pid}
                     )
-                await asyncio.wait_for(disconnected.wait(), timeout=5)
-                assert await running.backend_pid() is None
-                receipt = delivery()
-                await running.receiver.execute(receipt)
-                # Receipt committed during the real listener's five-second reconnect backoff.
-                assert await running.backend_pid() is None
-                assert running.dispatcher.calls == []
-                await asyncio.wait_for(running.wake.hints.get(), timeout=8)
-                new_pid = await running.backend_pid()
-                assert new_pid is not None and new_pid != original_pid
-                await running.wait_projected(receipt.delivery_id)
-                assert running.dispatcher.calls == [receipt.delivery_id]
-        finally:
-            logger.removeHandler(handler)
+                    is True
+                )
+            await asyncio.wait_for(reconnecting.wait(), timeout=5)
+            assert await running.backend_pid() is None
+            receipt = delivery()
+            await running.receiver.execute(receipt)
+            # Keep the real listener offline until the receipt commit and assertions finish.
+            assert await running.backend_pid() is None
+            assert running.dispatcher.calls == []
+            allow_reconnect.set()
+            await asyncio.wait_for(running.wake.hints.get(), timeout=5)
+            new_pid = await running.backend_pid()
+            assert new_pid is not None and new_pid != original_pid
+            await running.wait_projected(receipt.delivery_id)
+            assert running.dispatcher.calls == [receipt.delivery_id]
 
     asyncio.run(scenario())
 
