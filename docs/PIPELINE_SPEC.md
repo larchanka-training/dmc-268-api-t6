@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| Статус | Базовый контракт утверждён в PR #36 (#20); проектные изменения #107 согласованы пользователем 2026-10-09 и вынесены на review документации. Реализация новых контрактов этим документом не заявляется |
+| Статус | Базовый контракт утверждён в PR #36 (#20); спецификации #107 включены в main через PR #108. Уточнение обработки `unsupported_path` от 2026-10-11 — проект отдельного PR. Реализация новых контрактов этим документом не заявляется |
 | Владелец | техлид (роль 1) |
 | Область действия | Жизненный цикл `Run` от триггера до check-run: состояния, фазы, таймауты, retry, сбои, триггер Р-10, версионирование выхода LLM, якорь находки, итоговый результат и доставка публикации. Детали контекста и Write-Back — в спецификациях #107, HTTP API — в OpenAPI |
 | Связь с SD и #107 | [`SYSTEM_DESIGN.md`](SYSTEM_DESIGN.md) задаёт архитектуру, этот документ — жизненный цикл и сбои. Для новых policy/context/verifier/publication контрактов каноничны [`RULES_FORMAT_SPEC.md`](RULES_FORMAT_SPEC.md) и [`CONTEXT_AND_VERIFICATION_SPEC.md`](CONTEXT_AND_VERIFICATION_SPEC.md); приведённые здесь целевые положения синхронизированы с ними. Непересмотренные триггеры, состояния и инфраструктурные правила сохраняются |
@@ -55,7 +55,7 @@ stateDiagram-v2
 | T16 | `publishing` → `failed` | сбои публикации (§5.2) | publisher | — | `github_publish_failed` / `github_forbidden` / `publication_payload_too_large` / `publication_outcome_unknown` / `legacy_publication_unresolved`, ack · check-run `neutral`; при неизвестном исходе повторная отправка заблокирована |
 | T17 | `publishing` (без смены) | реконсилер | portal-api | `lease_until < now` | повторная доставка `review.publish/v1`; consumer восстанавливает операцию по run/head/snapshot/payload (§5.2), а не слепо повторяет POST |
 | T18 | `queued` (без смены) | реконсилер | portal-api | `available_at < now − 10 мин` | повторная публикация `review.run/v1` в `review.run.{engine}`. Run в retry-очереди имеет `available_at` в будущем и не трогается |
-| T19 | `running` → `skipped` | фильтрация согласованного VCS inventory | worker | все изменения исключены либо diff достоверно пуст | `error_code = all_changes_ignored` / `no_changes`, `verdict = null`, 0 LLM-вызовов; commit/NOTIFY и ack · существующий check-run завершается `skipped` |
+| T19 | `running` → `skipped` | фильтрация согласованного VCS inventory | worker | все изменения достоверно исключены либо diff достоверно пуст; записей `unsupported_path` нет | `error_code = all_changes_ignored` / `no_changes`, `verdict = null`, 0 LLM-вызовов; commit/NOTIFY и ack · существующий check-run завершается `skipped` |
 
 Правила для всех переходов:
 
@@ -95,7 +95,7 @@ stateDiagram-v2
 | Фаза | `tool` | Состояние | Кто | Что делает | Checkpoint |
 |---|---|---|---|---|---|
 | снимок политики | `policy.snapshot` | `running` | worker | закреплённые при enqueue версии, документы `.review/rules.md` и корневой `AGENTS.md` из `policy_base_sha`, defaults/model/prompt profiles; полный immutable snapshot по RULES_FORMAT_SPEC §7 | до следующих стадий |
-| загрузка и фильтрация diff | `vcs.fetch_diff` | `running` | worker, `VcsProvider` | согласованные inventory/provider refs, DiffMap, ignore по обоим путям rename/copy; исходный patch для UI сохраняется, запрещённый `review_patch=null`; пустой/исключённый scope → T19 | после фазы |
+| загрузка и фильтрация diff | `vcs.fetch_diff` | `running` | worker, `VcsProvider` | согласованные inventory/provider refs, DiffMap; локальный пропуск `unsupported_path` до ignore, проверка обоих путей rename/copy; исходный patch для UI сохраняется, запрещённый `review_patch=null`; достоверно пустой/исключённый scope → T19 | после фазы |
 | общие конвенции | `llm.repo_conventions`, `llm.call` только при generation | `running` | worker | разрешённые исходники исключительно base; cache hit или отсутствие источников не вызывает LLM; policy guard действует и при чтении кэша | перед вызовом |
 | сборка контекста | `context.build` | `running` | worker, `ContextProvider` | L0–L4, бюджет и coverage; summary в trace, точные показанные excerpts/manifest — отдельные записи PG | после каждого уровня |
 | фиксация отправки | `context.manifest` | `running` | worker | final pre-send policy guard, точный manifest для conventions/review/verifier и каждого repair/fallback; запрет на незаписанные/исключённые sources | перед каждым LLM-вызовом |
@@ -109,6 +109,10 @@ stateDiagram-v2
 Существующие имена `llm.review_output`, `llm.repo_conventions` сохраняются. Принятый reviewer response — checkpoint для возобновления с verifier, но не разрешение на публикацию. Единственный источник нового публичного результата — сохранённый `FinalReviewResult`; retry публикации не вызывает модель. Снимки/manifest/result фиксируются короткими транзакциями с проверкой lease; ни одна транзакция не охватывает сеть.
 
 Summary-only определяется после ignore: **более 3 000 добавленных и удалённых разрешённых строк** либо неподтверждённая полнота VCS inventory (`diff_inventory_incomplete`). Ровно 3 000 строк остаются обычным review. Backend строит одну сводку по разрешённой файловой статистике, **0 LLM-вызовов** (включая conventions/verifier), без L1–L4 анализа и inline. Исходный доступный patch для UI сохраняется, `review_patch=null`. Run заканчивается `succeeded`, `summaryOnly: true`, `coverage.status=partial`, `verdict=null`, check-run `neutral`; список файлов не служит доказательством дефекта. Это отличается от T19 с достоверно пустым/исключённым scope (CONTEXT_AND_VERIFICATION_SPEC §2.3).
+
+Неподдерживаемый путь изолируется как `unsupported_path` по CONTEXT_AND_VERIFICATION_SPEC §9.1: остальные допущенные файлы проходят pipeline, а итоговое coverage остаётся `partial`. Пропущенный файл не считается проверенным или исключённым ignore-политикой; его содержимое и автоматически добавленное имя не передаются LLM ни на одной стадии. Его строки не входят в допущенный diff для порога; неизвестные счётчики сохраняются как null и сами по себе не включают summary-only. Для rename/copy запрет охватывает всё изменение и повторное включение нового пути через AST/импорты.
+
+Если inventory полный и достоверный, есть `unsupported_path`, а все остальные изменения достоверно исключены, worker без conventions/review/verifier сохраняет backend-результат: `coverage.status=none`, причина `unsupported_path`, `verdict=null`, пустые findings. Далее действуют T8/T14 и обычные guards/recovery публикации; после успешной публикации — `succeeded`, check-run `neutral`. Это не T19 и само по себе не включает `summaryOnly`. Пропавший patch допущенного файла не считается исключением; неполный inventory сохраняет исходный summary-only путь.
 
 | `tool` | `request` (JSONB, только метаданные, ≤ 64 КБ) | `response` |
 |---|---|---|
@@ -308,11 +312,11 @@ Legacy marker `<!-- ai-review findings_hash=… -->` не используетс
 | Коды | Исход и retry |
 |---|---|
 | `policy_document_too_large`, `policy_document_decode_error`, `policy_document_control_character`, `policy_document_type_unsupported` | failed без retry; точная причина документа, без полного содержимого в публичном сообщении |
-| `policy_ignore_block_duplicate`, `policy_ignore_block_nested`, `policy_ignore_block_unclosed`, `policy_ignore_info_invalid`, `policy_ignore_pattern_invalid`, `policy_ignore_limit_exceeded`, `policy_path_invalid`, `policy_match_budget_exceeded`, `policy_prompt_budget_exceeded` | failed без retry; правила не заменяются пустыми и не усекаются |
+| `policy_ignore_block_duplicate`, `policy_ignore_block_nested`, `policy_ignore_block_unclosed`, `policy_ignore_info_invalid`, `policy_ignore_pattern_invalid`, `policy_ignore_limit_exceeded`, `policy_match_budget_exceeded`, `policy_prompt_budget_exceeded` | failed без retry; правила не заменяются пустыми и не усекаются |
 | `policy_access_denied`, `policy_revision_unavailable`, `policy_snapshot_integrity_error`, `policy_context_violation` | failed без retry; никакой смены закреплённой ревизии/профиля; context violation останавливает отправку |
 | `policy_fetch_transient`, `policy_rate_limited` | T9 с общими лимитами/дедлайном, затем failed после 3 попыток; Retry-After учитывается |
 
-Достоверно отсутствующий документ — `presence=missing`, не ошибка; ошибка доступа/чтения — не missing. `ast_*`, `insufficient_context` и технические drops отражают coverage reasons, сами по себе не переводят Run в failed; их влияние на полноту — CONTEXT_AND_VERIFICATION_SPEC §8.1/§8.4. Непроверенные кандидаты не становятся публичным результатом.
+Достоверно отсутствующий документ — `presence=missing`, не ошибка; ошибка доступа/чтения — не missing. `unsupported_path`, `ast_*`, `insufficient_context` и технические drops отражают coverage reasons, сами по себе не переводят Run в failed; их влияние на полноту — CONTEXT_AND_VERIFICATION_SPEC §8.1/§8.4. `policy_path_invalid` больше не используется для локального нарушения контракта пути. Если источник нельзя надёжно изолировать или нарушена целостность снимка, сохраняется `failed/snapshot_integrity_error`; попытка отправить запрещённый источник — `policy_context_violation`. Непроверенные кандидаты не становятся публичным результатом.
 
 ---
 
