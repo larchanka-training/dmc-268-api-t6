@@ -102,6 +102,12 @@ class VcsProvider(Protocol):
     async def get_blob(self, locator: PullRequestLocator, sha: str) -> bytes: ...
 
 
+class MergeBaseProvider(Protocol):
+    """Resolves the old side of a pull request diff: the merge base of its base and head."""
+
+    async def get_merge_base(self, pull_request: VcsPullRequest) -> str: ...
+
+
 class FetchVcsReviewInput:
     """Fetch current-head L1 inputs without a database transaction."""
 
