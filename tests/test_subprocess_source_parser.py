@@ -17,7 +17,14 @@ from app.modules.reviews.infrastructure.subprocess_source_parser import Subproce
 
 
 def _parse(*requests: ParseRequest) -> dict[str, AstFacts | AstFailureReason]:
-    return asyncio.run(SubprocessSourceParser().parse_many(requests))
+    async def run() -> dict[str, AstFacts | AstFailureReason]:
+        parser = SubprocessSourceParser()
+        try:
+            return await parser.parse_many(requests)
+        finally:
+            await parser.aclose()
+
+    return asyncio.run(run())
 
 
 def _python(key: str, source: bytes = b"def f():\n    return 1\n") -> ParseRequest:

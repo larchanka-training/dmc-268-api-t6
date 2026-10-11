@@ -147,6 +147,8 @@ class SourceParser(Protocol):
         self, requests: tuple[ParseRequest, ...]
     ) -> dict[str, AstFacts | AstFailureReason]: ...
 
+    async def aclose(self) -> None: ...
+
 
 def _range(value: Any) -> LineRange:
     return LineRange(int(value[0]), int(value[1]))

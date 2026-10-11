@@ -89,9 +89,10 @@ def extract_facts(
 ) -> AstFacts:
     """Parse valid UTF-8 ``source`` and return its facts.
 
-    The parse itself cannot be cancelled from Python: cancelling through the binding's
-    progress callback crashes the interpreter (tree-sitter 0.26). The caller bounds it
-    from outside the process; the budget here stops the Python walk that follows.
+    tree-sitter is pinned below 0.26: release 0.26.0 of the Python binding corrupts
+    memory on files with a few hundred declarations and crashes when a parse is
+    cancelled. A running parse is therefore bounded from outside the process; the
+    budget here stops the Python walk that follows it.
     """
     started = time.process_time()
     parser = Parser(_grammar(language))
