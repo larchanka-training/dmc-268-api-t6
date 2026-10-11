@@ -102,7 +102,7 @@ def test_file_without_a_complete_diff_has_no_hunk_provenance() -> None:
     diff_map = _diff_map(_file(patch="@@ -1 +1 @@\n-a\n+b", additions=7, deletions=1))
     file = diff_map.files[0]
 
-    with pytest.raises(ValueError, match="complete file"):
+    with pytest.raises(ValueError, match="complete diff"):
         hunk_source_ref(diff_map, file, file.hunks[0])
 
 
@@ -125,3 +125,23 @@ def test_source_roles_are_the_list_of_the_specification() -> None:
         "candidate",
         "previous_output",
     }
+
+
+def test_deleted_file_hunk_points_at_old_lines_of_the_old_revision() -> None:
+    removed = VcsFile(
+        filename="src/gone.py",
+        status="removed",
+        blob_sha=None,
+        previous_filename=None,
+        additions=0,
+        deletions=2,
+        changes=2,
+        patch="@@ -4,2 +0,0 @@\n-a\n-b",
+    )
+    diff_map = _diff_map(removed)
+    file = diff_map.files[0]
+
+    ref = hunk_source_ref(diff_map, file, file.hunks[0])
+
+    assert (ref.side, ref.path, ref.revision) == (DiffSide.LEFT, "src/gone.py", "c" * 40)
+    assert (ref.ranges, ref.blob_sha) == ((LineRange(4, 5),), None)

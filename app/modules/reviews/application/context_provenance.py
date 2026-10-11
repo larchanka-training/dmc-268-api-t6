@@ -53,10 +53,30 @@ class SourceRef:
 
 
 def hunk_source_ref(diff_map: DiffMap, file: DiffFile, hunk: DiffHunk) -> SourceRef:
-    """Provenance of the new side of one hunk of an anchorable file."""
-    if not file.anchorable or file.new_path is None:
-        raise ValueError("only a complete file with a new side has hunk provenance")
+    """Provenance of one hunk of an anchorable file.
+
+    A changed file is described by its new side at the head revision. A deleted file has
+    no new side: its hunk points at the old lines of the old revision of the diff.
+    """
+    if not file.anchorable:
+        raise ValueError("only a file with a complete diff has hunk provenance")
     old_path = file.old_path
+    if file.new_path is None:
+        if old_path is None:
+            raise ValueError("a changed file has at least one path")
+        return SourceRef(
+            role=SourceRole.DIFF,
+            repository_id=diff_map.repository_id,
+            revision=diff_map.diff_old_sha,
+            path=old_path,
+            blob_sha=None,
+            origin_paths=(),
+            side=DiffSide.LEFT,
+            ranges=(LineRange(hunk.old_start, hunk.old_start + hunk.old_count - 1),)
+            if hunk.old_count
+            else (),
+            reason="changed_hunk",
+        )
     return SourceRef(
         role=SourceRole.DIFF,
         repository_id=diff_map.repository_id,
