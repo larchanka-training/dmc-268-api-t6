@@ -63,6 +63,12 @@ class ReviewInputProcessor(Protocol):
     async def prepare(self, run_id: UUID) -> GeneratedConventions | bool | None: ...
 
 
+class ReviewContextObserver(Protocol):
+    """The policy and context steps behind a feature flag; it never fails the run."""
+
+    async def observe(self, run_id: UUID) -> object: ...
+
+
 class ExecuteReviewRun:
     """Finish an ordinary run after its diff and conventions have been saved.
 
@@ -76,16 +82,21 @@ class ExecuteReviewRun:
         repository: ReviewPromptRepository,
         model: ReviewModel,
         publisher: ReviewOutputHandler,
+        context_stage: ReviewContextObserver | None = None,
     ) -> None:
         self._processor = processor
         self._repository = repository
         self._model = model
         self._publisher = publisher
+        self._context_stage = context_stage
 
     async def execute(self, run_id: UUID) -> bool:
         conventions = await self._processor.prepare(run_id)
         if not isinstance(conventions, GeneratedConventions):
             return False
+        if self._context_stage is not None:
+            # Recorded for the run only: the prompt below is built as before.
+            await self._context_stage.observe(run_id)
         prompt_input = await self._repository.get_review_prompt_input(run_id, conventions)
         if prompt_input is None:
             return False
