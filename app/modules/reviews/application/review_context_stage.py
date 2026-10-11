@@ -45,6 +45,18 @@ class EstimatedTokenCounter:
         return -(-len(text) // 4)
 
 
+def _provider_patch(patch: str | None) -> str | None:
+    """The hunks as the provider sent them.
+
+    A stored snapshot keeps the patch for the UI under a ``diff --git`` header; the diff
+    map reads the hunks only. A stored patch without a hunk has no lines to map.
+    """
+    if patch is None or not patch.startswith("diff --git "):
+        return patch
+    hunk_start = patch.find("\n@@ ")
+    return None if hunk_start < 0 else patch[hunk_start + 1 :]
+
+
 def _vcs_file(snapshot: DiffSnapshot) -> VcsFile:
     return VcsFile(
         filename=snapshot.filename,
@@ -54,7 +66,7 @@ def _vcs_file(snapshot: DiffSnapshot) -> VcsFile:
         additions=snapshot.additions,
         deletions=snapshot.deletions,
         changes=snapshot.changes,
-        patch=snapshot.patch,
+        patch=_provider_patch(snapshot.patch),
     )
 
 

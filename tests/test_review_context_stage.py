@@ -140,11 +140,27 @@ class Trace:
         self.steps.append((tool, request, response))
 
 
+def _stored(path: str, patch: str) -> str:
+    """The patch as ``StoreDiffSnapshot`` keeps it for the UI: under a git header."""
+    return f"diff --git a/{path} b/{path}\n--- a/{path}\n+++ b/{path}\n{patch}"
+
+
 def _snapshots() -> list[DiffSnapshot]:
+    generated = "@@ -1 +1 @@\n-a\n+b"
     return [
-        DiffSnapshot("src/app.py", _PATCH, "d" * 40, "modified", None, 1, 0, 1),
         DiffSnapshot(
-            "generated/api.py", "@@ -1 +1 @@\n-a\n+b", "e" * 40, "modified", None, 1, 1, 2
+            "src/app.py", _stored("src/app.py", _PATCH), "d" * 40, "modified", None, 1, 0, 1
+        ),
+        DiffSnapshot(
+            "generated/api.py",
+            _stored("generated/api.py", generated),
+            "e" * 40,
+            "modified",
+            None,
+            1,
+            1,
+            2,
+            omission_reason="generated",
         ),
     ]
 
@@ -299,3 +315,20 @@ def test_feature_flag_is_off_unless_explicitly_enabled() -> None:
             {**env, "REVIEW_CONTEXT_PIPELINE_ENABLED": value}
         )
         assert disabled.review_context_pipeline is False
+
+
+def test_stored_patch_without_hunks_and_an_unwrapped_patch_are_both_accepted() -> None:
+    header_only = "diff --git a/img.png b/img.png\n--- a/img.png\n+++ b/img.png\n"
+    snapshots = [
+        DiffSnapshot("src/app.py", _PATCH, "d" * 40, "modified", None, 1, 0, 1),
+        DiffSnapshot("img.png", header_only, "e" * 40, "modified", None, 0, 0, 0),
+    ]
+    trace = Trace()
+
+    asyncio.run(_stage(trace, snapshots=snapshots).execute(_RUN))
+
+    context = trace.steps[1][2]
+    assert context["status"] == "review"
+    assert context["omissions"] == [
+        {"reason": "patch_metadata_only", "path": "img.png", "count": 1}
+    ]
