@@ -9,10 +9,14 @@ from uuid import UUID, uuid4
 
 from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert
+from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.common.infrastructure.db.unit_of_work import SqlAlchemyUnitOfWork
 from app.modules.integrations.webhooks.infrastructure.models import WebhookEvent
+from app.modules.integrations.webhooks.infrastructure.webhook_notifications import (
+    notify_webhook_work,
+)
 from app.modules.repositories.infrastructure.models import ProviderInstallation
 from app.modules.workspaces.application.link_github_installations import (
     GitHubInstallation,
@@ -223,7 +227,7 @@ class SqlAlchemyGitHubInstallationLinkStore:
             )
 
     async def wake_receipts(self, installation_id: int) -> None:
-        await self._session.execute(
+        result = await self._session.execute(
             update(WebhookEvent)
             .where(
                 WebhookEvent.installation_external_id == installation_id,
@@ -237,6 +241,9 @@ class SqlAlchemyGitHubInstallationLinkStore:
             )
             .values(retry_after=None, projection_deferred_at=None, projection_attempt_count=0)
         )
+
+        if cast(CursorResult[tuple[object, ...]], result).rowcount > 0:
+            await notify_webhook_work(self._session)
 
     async def revoke_unlisted(
         self, user_id: int, workspace_ids: tuple[UUID, ...], installation_ids: tuple[int, ...]

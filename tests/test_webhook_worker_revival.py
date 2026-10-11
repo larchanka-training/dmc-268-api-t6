@@ -4,12 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from types import SimpleNamespace
-from typing import cast
+from typing import Literal, cast
 
 import pytest
 
-from app import webhook_worker
 from app.modules.integrations.webhooks.application.receive_github_delivery import (
     ReceiveGitHubDelivery,
 )
@@ -90,31 +88,34 @@ def test_a_failed_purge_does_not_skip_the_revival() -> None:
     assert calls == ["purge", "revive"]
 
 
-class _LoopEnded(Exception):
-    """Raised by the fake sleep to end the worker loop after its first iteration."""
+def test_the_worker_loop_runs_the_hourly_tick_with_its_reviver_on_the_first_iteration() -> None:
+    async def scenario() -> list[str]:
+        calls: list[str] = []
+        waiting = asyncio.Event()
 
+        class LoopReceiver(Receiver):
+            async def replay_pending(self) -> int:
+                calls.append("sweep")
+                return 0
 
-def test_the_worker_loop_runs_the_hourly_tick_with_its_reviver_on_the_first_iteration(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    calls: list[tuple[object, object]] = []
+        class Wake(asyncio.Event):
+            async def wait(self) -> Literal[True]:
+                waiting.set()
+                return await super().wait()
 
-    async def fake_sweep_once(receiver: object) -> int:
-        return 0
+        task = asyncio.create_task(
+            sweep_forever(
+                cast(ReceiveGitHubDelivery, LoopReceiver(calls)),
+                cast(ReviveDeferredInstallationDeliveries, Reviver(calls)),
+                Wake(),
+            )
+        )
+        try:
+            await asyncio.wait_for(waiting.wait(), timeout=1)
+            return calls
+        finally:
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
 
-    async def fake_hourly_maintenance(receiver: object, reviver: object) -> None:
-        calls.append((receiver, reviver))
-
-    async def fake_sleep(seconds: float) -> None:
-        raise _LoopEnded
-
-    monkeypatch.setattr(webhook_worker, "sweep_once", fake_sweep_once)
-    monkeypatch.setattr(webhook_worker, "hourly_maintenance", fake_hourly_maintenance)
-    monkeypatch.setattr(webhook_worker, "asyncio", SimpleNamespace(sleep=fake_sleep))
-    receiver = cast(ReceiveGitHubDelivery, object())
-    reviver = cast(ReviveDeferredInstallationDeliveries, object())
-
-    with pytest.raises(_LoopEnded):
-        asyncio.run(sweep_forever(receiver, reviver))
-
-    assert calls == [(receiver, reviver)]
+    assert asyncio.run(scenario()) == ["sweep", "purge", "revive"]
