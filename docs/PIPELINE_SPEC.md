@@ -2,11 +2,11 @@
 
 | | |
 |---|---|
-| Статус | **утверждён командой** — PR #36 (#20) |
+| Статус | Базовый контракт утверждён в PR #36 (#20); проектные изменения #107 согласованы пользователем 2026-10-09 и вынесены на review документации. Реализация новых контрактов этим документом не заявляется |
 | Владелец | техлид (роль 1) |
-| Область действия | Жизненный цикл `Run` от триггера до check-run: состояния и переходы, фазы внутри `running`, таймауты, retry, сбои LLM и GitHub, каталог `error_code`, триггер Р-10, контракт выхода LLM, якорь находки, вердикт, сообщения очереди. Архитектура, топология, сборка контекста, кэш и HTTP API здесь не описываются |
-| Связь с SD | [`SYSTEM_DESIGN.md`](SYSTEM_DESIGN.md) — канон архитектуры, этот документ — контракт жизненного цикла и сбоев. SD §6.4 и §7 ссылаются сюда. Здесь стоят ссылки на разделы SD, их текст не копируется. При расхождении по жизненному циклу и сбоям прав этот документ, по архитектуре — SD |
-| Машиночитаемые контракты | `review/schemas/review-output.schema.json` (выход LLM), `contracts/schemas/review.{run,publish}.v1.schema.json` и `contracts/examples/*.json` (очередь), `contracts/openapi.yaml` (HTTP API). Все появляются в этом же PR; проверки — §16 |
+| Область действия | Жизненный цикл `Run` от триггера до check-run: состояния, фазы, таймауты, retry, сбои, триггер Р-10, версионирование выхода LLM, якорь находки, итоговый результат и доставка публикации. Детали контекста и Write-Back — в спецификациях #107, HTTP API — в OpenAPI |
+| Связь с SD и #107 | [`SYSTEM_DESIGN.md`](SYSTEM_DESIGN.md) задаёт архитектуру, этот документ — жизненный цикл и сбои. Для новых policy/context/verifier/publication контрактов каноничны [`RULES_FORMAT_SPEC.md`](RULES_FORMAT_SPEC.md) и [`CONTEXT_AND_VERIFICATION_SPEC.md`](CONTEXT_AND_VERIFICATION_SPEC.md); приведённые здесь целевые положения синхронизированы с ними. Непересмотренные триггеры, состояния и инфраструктурные правила сохраняются |
+| Машиночитаемые контракты | Текущие: `review/schemas/review-output.schema.json` (legacy v1), `contracts/schemas/review.{run,publish}.v1.schema.json`, `contracts/examples/*.json`, `contracts/openapi.yaml`. ReviewOutput v2, verifier schema, новые snapshots/manifests/results и API-поля ещё требуют реализации и согласованного обновления схем; документация их наличия не обещает. Проверки контрактов — §16 |
 | Метки решений | **[техлид]** — решение техлида в #20; **[дефолт]** — дефолт, утверждённый вместе с планом #20; решением становится после аппрува этого PR |
 
 ---
@@ -22,7 +22,8 @@ stateDiagram-v2
   queued --> cancelled: новый head_sha · PR закрыт · cancel
   queued --> skipped: RunGuard при claim
   running --> queued: retry-класс и attempt < 3 · lease истёк
-  running --> publishing: постобработка завершена
+  running --> publishing: FinalReviewResult и publication plan сохранены
+  running --> skipped: all_changes_ignored · no_changes
   running --> cancelled: cancel_requested на checkpoint
   running --> failed: класс без retry · attempt ≥ 3
   publishing --> succeeded: ревью опубликовано
@@ -43,24 +44,25 @@ stateDiagram-v2
 | T5 | `queued` → `skipped` | RunGuard при claim | worker | `repo_disabled` / `rule_not_matched` / `budget_paused` (§6) | `error_code` = причина, ack · check-run сразу `completed/skipped`, при `repo_disabled` не создаётся |
 | T6 | `queued` → `cancelled` | `synchronize` (новый `head_sha`), `pull_request.closed`, `POST /api/runs/{id}/cancel`; то же, найденное RunGuard при claim | webhook-worker, portal-api, worker | — | `error_code` = `superseded` / `pr_closed` / `cancelled_by_user`; исходное сообщение остаётся в брокере; при `attempt ≥ 1` webhook-worker (#52) и portal-api после commit публикуют сигнал закрытия — `review.run/v1` в `review.run.{engine}` с AMQP priority 9 [дефолт] · check-run (если `attempt ≥ 1`) закрывает RunGuard при доставке сигнала; T6, найденный RunGuard при claim, закрывает его в той же доставке, без сигнала; при `attempt = 0` нет ни check-run, ни сигнала |
 | T7 | `running` → `running` | heartbeat раз в 60 с; смена движка (§5.3) | worker | heartbeat шлётся, пока `now` < дедлайна текущей попытки (§3) [дефолт]; UPDATE по своему `worker_id` ∧ `state = running`; 0 строк → воркер бросает работу без записей | `lease_until = now + 5 мин`; при fallback — действие `engine.fallback`, `engine = fast` |
-| T8 | `running` → `publishing` | постобработка (`review.postprocess`) завершена | worker | ¬`cancel_requested` ∧ `head_sha` актуален | `findings`, вердикт → `review_event` (§11), `lease_until = now + 5 мин`; после commit — `review.publish/v1`, после confirm — ack `review.run` |
+| T8 | `running` → `publishing` | сохранены `FinalReviewResult` и publication plan (§2, §11) | worker | ¬`cancel_requested` ∧ `head_sha`/diff актуальны ∧ все final findings получили `supported` | Итоговые findings/coverage/summary/verdict, выбранный `review_event` и immutable payloads фиксируются до outbox публикации; `lease_until = now + 5 мин`; после commit — `review.publish/v1`, после confirm — ack `review.run` |
 | T9 | `running` → `queued` | сбой класса с retry (§6) | worker | `attempt < 3` | `available_at = now + задержка` (§4.2), `lease_until = null`; копия сообщения в `reviews.retry`, после confirm — ack · check-run остаётся `in_progress` |
 | T10 | `running` → `failed` | сбой класса без retry или `attempt ≥ 3` | worker | — | `error_code`, `error_message`, `finished_at`; попытки исчерпаны → `nack(requeue=false)` → `reviews.dlq`, иначе ack · check-run `neutral` (§7) |
-| T11 | `running` → `cancelled` | checkpoint: после каждого уровня контекста и перед каждым LLM-вызовом (SD §5) | worker | `cancel_requested` | причина по PG: PR закрыт → `pr_closed`, `head_sha` устарел → `superseded`, иначе `cancelled_by_user`; ack · check-run `cancelled` |
+| T11 | `running` → `cancelled` | checkpoint после snapshot/уровня контекста, перед каждым LLM-вызовом и сохранением результата | worker | `cancel_requested` или обнаружено устаревание | причина по PG/VCS: PR закрыт → `pr_closed`, `head_sha`/diff устарел → `superseded`, иначе `cancelled_by_user`; ack · check-run `cancelled` |
 | T12 | `running` → `queued` | реконсилер | portal-api, leader-цикл | `lease_until < now` ∧ `attempt < 3` | повторная публикация `review.run/v1`; попытка засчитывается при следующем claim |
 | T13 | `running` → `failed` | реконсилер | portal-api, leader-цикл | `lease_until < now` ∧ `attempt ≥ 3` | `error_code = lease_expired`; публикация `review.run/v1`, чтобы RunGuard закрыл check-run · `neutral` через RunGuard |
-| T14 | `publishing` → `succeeded` | `POST /pulls/{n}/reviews` → 2xx, в том числе после переноса 422 в тело (§5.2) | publisher (MVP — worker) | `head_sha` актуален ∧ ¬`cancel_requested`; `findings_hash` уже опубликован → только переход и ack | `comments`, `findings.published = true`, `finished_at`, ack · check-run `neutral` с вердиктом (§7) |
-| T15 | `publishing` → `cancelled` | перед POST: `head_sha` устарел, PR закрыт или `cancel_requested`; 422 «commit не в PR» | publisher | — | причина как в T11, ack · check-run `cancelled` |
-| T16 | `publishing` → `failed` | сбои публикации (§5.2) | publisher | — | `github_publish_failed` / `github_forbidden`, ack · check-run `neutral` |
-| T17 | `publishing` (без смены) | реконсилер | portal-api | `lease_until < now` | повторная публикация `review.publish/v1` (идемпотентна по `findings_hash`, Р-5) |
+| T14 | `publishing` → `succeeded` | Подтверждённый POST или восстановлена собственная операция по marker/payload (§5.2) | publisher (MVP — worker) | `head_sha`/diff актуальны ∧ ¬`cancel_requested`, сверено после отправки | remote receipts и точный mapping finding → comment, `findings.published = true`, `finished_at`, ack · check-run `neutral` с сохранённым итогом (§7) |
+| T15 | `publishing` → `cancelled` | до или после POST обнаружены устаревшие head/diff, закрытие PR либо отмена; недопустимый commit подтверждён сверкой VCS | publisher | — | причина как в T11; уже созданные remote IDs сохраняются, новый POST запрещён; ack · check-run `cancelled` |
+| T16 | `publishing` → `failed` | сбои публикации (§5.2) | publisher | — | `github_publish_failed` / `github_forbidden` / `publication_payload_too_large` / `publication_outcome_unknown` / `legacy_publication_unresolved`, ack · check-run `neutral`; при неизвестном исходе повторная отправка заблокирована |
+| T17 | `publishing` (без смены) | реконсилер | portal-api | `lease_until < now` | повторная доставка `review.publish/v1`; consumer восстанавливает операцию по run/head/snapshot/payload (§5.2), а не слепо повторяет POST |
 | T18 | `queued` (без смены) | реконсилер | portal-api | `available_at < now − 10 мин` | повторная публикация `review.run/v1` в `review.run.{engine}`. Run в retry-очереди имеет `available_at` в будущем и не трогается |
+| T19 | `running` → `skipped` | фильтрация согласованного VCS inventory | worker | все изменения исключены либо diff достоверно пуст | `error_code = all_changes_ignored` / `no_changes`, `verdict = null`, 0 LLM-вызовов; commit/NOTIFY и ack · существующий check-run завершается `skipped` |
 
 Правила для всех переходов:
 
 - **SSE.** Создание Run и каждая смена `state` — `NOTIFY run_updated` в той же транзакции (D12); T7, T17 и T18 состояние не меняют и уведомления не шлют [дефолт]. Payload — JSON в snake_case, как сообщения очереди: `{"run_id": "<uuid>", "workspace_id": "<uuid>", "status": "<run_state>"}` (PostgreSQL принимает payload короче 8000 байт); `workspace_id` позволяет portal-api раздать событие подписчикам Workspace этого Run (Р-7) без SELECT на каждое событие [техлид]. Шлют webhook-worker (T1, T6), worker и portal-api (#34). Наружу portal-api отдаёт только SSE `run.updated` = `RunUpdatedEvent {runId, status}` из `contracts/openapi.yaml`; `workspace_id` наружу не выходит.
 - **Сначала commit, потом сообщение.** Публикация в RabbitMQ — после commit, с publisher confirms; ack входящего сообщения — после confirm исходящего (SD §7.1). Вызовы GitHub и LLM — вне транзакции БД.
 - **RunGuard решает по PG** (SD §6.3). Если Run терминален и `attempt ≥ 1`, RunGuard идемпотентно доводит check-run до итогового conclusion (§7) и делает ack; эта проверка идёт первой. Иначе, если Run не в `queued` или `available_at > now`, доставка подтверждается ack без работы. Так закрываются check-run'ы Run, завершённых без воркера (T6, T13): сигнал T6 и повторная публикация T13 доставляют закрытие, не дожидаясь retry-очереди, а более поздняя копия того же Run подтверждается ack идемпотентно.
-- **Publisher в MVP.** Пока отдельного сервиса `publisher` нет (#34), очередь `review.publish` потребляет отдельный consumer в процессе worker. T8 и T17 идут через настоящее сообщение `review.publish/v1`, T14–T16 выполняет этот consumer; идемпотентность по `findings_hash` и переходы те же.
+- **Publisher в MVP.** Пока отдельного сервиса `publisher` нет (#34), очередь `review.publish` потребляет отдельный consumer в процессе worker. T8 и T17 идут через настоящее сообщение `review.publish/v1`, T14–T16 выполняет этот consumer. Целевая идентичность #107 включает run/head/snapshot/result и точный payload; старый `findings_hash` остаётся диагностикой, не ключом дедупликации (§5.2).
 
 ### 1.1 Происхождение Run в API (#112)
 
@@ -88,33 +90,42 @@ stateDiagram-v2
 
 ## 2. Фазы внутри `running` и трейс `run_actions`
 
-Фазы — D5 [техлид]: новых состояний нет, каждая фаза видна в инспекторе трейса как записи `run_actions`. Имена `tool` [дефолт] следуют точечному стилю, который уже пишет код на main.
+Фазы — D5 [техлид]: новых состояний нет, каждая фаза видна в инспекторе трейса как записи `run_actions`. Ниже целевая последовательность #107; имена новых действий — проектный контракт. Legacy runs продолжают закреплённый старый pipeline; новые запускаются целиком с новым профилем после миграций, схем и API/UI (CONTEXT_AND_VERIFICATION_SPEC §8.3).
 
 | Фаза | `tool` | Состояние | Кто | Что делает | Checkpoint |
 |---|---|---|---|---|---|
-| загрузка диффа | `vcs.fetch_diff` | `running` | worker, `VcsProvider.get_diff` (#11; тип диффа — `ChangedFile` / `DiffLine` из кода на main) | `GET /pulls/{n}` и `/files`, снимок диффа в PG (Р-15); дифф > 3 000 строк → summary-only (SD §13) | после фазы |
-| сборка контекста | `context.build`; `llm.repo_conventions` — вызов модели для конвенций репозитория (есть на main) | `running` | worker, `ContextProvider` | L0–L4 и `BudgetAllocator` (SD §9); в PG — summary `ContextPayload` | после каждого уровня |
-| ревью моделью | `llm.call` — **одна запись на вызов провайдера** (`kind`: primary, retry, repair, fallback); `llm.review_output` — принятый валидный ответ, одна запись на Run | `running` | worker → LLM Gateway (#33) | вызовы модели по политике §5.1 | перед каждым вызовом |
-| постобработка | `review.postprocess` | `running` | worker, `FindingsPostProcessor` | фильтр `review/postprocess/lint-filter.md`, запись `findings`, вердикт и `review_event` (§11), `findings_hash` | перед T8 |
-| публикация | `github.publish_review` | `publishing` | publisher (MVP — consumer `review.publish` в worker) | `POST /pulls/{n}/reviews` и check-run; одна запись на HTTP-попытку | перед POST |
+| снимок политики | `policy.snapshot` | `running` | worker | закреплённые при enqueue версии, документы `.review/rules.md` и корневой `AGENTS.md` из `policy_base_sha`, defaults/model/prompt profiles; полный immutable snapshot по RULES_FORMAT_SPEC §7 | до следующих стадий |
+| загрузка и фильтрация diff | `vcs.fetch_diff` | `running` | worker, `VcsProvider` | согласованные inventory/provider refs, DiffMap, ignore по обоим путям rename/copy; исходный patch для UI сохраняется, запрещённый `review_patch=null`; пустой/исключённый scope → T19 | после фазы |
+| общие конвенции | `llm.repo_conventions`, `llm.call` только при generation | `running` | worker | разрешённые исходники исключительно base; cache hit или отсутствие источников не вызывает LLM; policy guard действует и при чтении кэша | перед вызовом |
+| сборка контекста | `context.build` | `running` | worker, `ContextProvider` | L0–L4, бюджет и coverage; summary в trace, точные показанные excerpts/manifest — отдельные записи PG | после каждого уровня |
+| фиксация отправки | `context.manifest` | `running` | worker | final pre-send policy guard, точный manifest для conventions/review/verifier и каждого repair/fallback; запрет на незаписанные/исключённые sources | перед каждым LLM-вызовом |
+| ревью моделью | `llm.call` — **одна запись на фактический generation-вызов**; `llm.review_output` — принятый валидный ответ | `running` | worker → LLM Gateway | ReviewOutput v2, checkpoint принятого ответа/candidates/manifest; лимиты и downstream reserve §4.5 | до вызова и после checkpoint |
+| детерминированные проходы | `review.postprocess` | `running` | worker | schema → координаты всех строк → evidence/manifest → политика, lint и точные дубли; frozen candidate IDs/digests, без публичного сырого summary | перед verifier |
+| смысловая проверка | `llm.verify`, `llm.call` | `running` | worker, `VerifyCandidates` | один обязательный batch всех оставшихся кандидатов; supported/contradicted/insufficient_context; пустой набор не вызывает verifier | до вызова |
+| итог | `review.finalize` | `running` | worker, `BuildFinalResult` | атомарно сохранить decisions, `FinalReviewResult`, supported findings, coverage, backend summary, verdict/event и точный publication plan | перед T8 |
+| публикация | `github.publish_review` | `publishing` | publisher (MVP — consumer `review.publish` в worker) | восстановить/отправить immutable operation, сохранить remote receipts и check-run; одна запись на HTTP-попытку | перед новым POST и после ответа |
 | смена движка | `engine.fallback` | `running` | worker | событие, не фаза: deep → fast (§5.3) | — |
 
-Записи `llm.call` — скоуп #33; `vcs.fetch_diff`, `context.build`, `review.postprocess`, `github.publish_review`, `engine.fallback` — #34. Имена, которые уже пишет код на main (`llm.review_output`, `llm.repo_conventions`), сохраняются, и `llm.review_output` остаётся маркером идемпотентности публикации.
+Существующие имена `llm.review_output`, `llm.repo_conventions` сохраняются. Принятый reviewer response — checkpoint для возобновления с verifier, но не разрешение на публикацию. Единственный источник нового публичного результата — сохранённый `FinalReviewResult`; retry публикации не вызывает модель. Снимки/manifest/result фиксируются короткими транзакциями с проверкой lease; ни одна транзакция не охватывает сеть.
 
-Summary-only (дифф > 3 000 строк, SD §13) — это не `skipped`. `context.build` и построчные вызовы модели пропускаются, публикуется одна сводка, Run заканчивается `succeeded` с `summaryOnly: true`.
+Summary-only определяется после ignore: **более 3 000 добавленных и удалённых разрешённых строк** либо неподтверждённая полнота VCS inventory (`diff_inventory_incomplete`). Ровно 3 000 строк остаются обычным review. Backend строит одну сводку по разрешённой файловой статистике, **0 LLM-вызовов** (включая conventions/verifier), без L1–L4 анализа и inline. Исходный доступный patch для UI сохраняется, `review_patch=null`. Run заканчивается `succeeded`, `summaryOnly: true`, `coverage.status=partial`, `verdict=null`, check-run `neutral`; список файлов не служит доказательством дефекта. Это отличается от T19 с достоверно пустым/исключённым scope (CONTEXT_AND_VERIFICATION_SPEC §2.3).
 
 | `tool` | `request` (JSONB, только метаданные, ≤ 64 КБ) | `response` |
 |---|---|---|
+| `policy.snapshot` | `{policy_base_sha, pinned_versions}` | `{policy_snapshot_id, digest, document_presence, ignore_counts}`; полные документы — в снимке |
 | `vcs.fetch_diff` | `{pr_number, head_sha, base_sha}` | `{files: [{filename, status, additions, deletions, too_large}], total_lines, summary_only}`; патчи не дублируются — они в снимке (Р-15) |
-| `context.build` | `{engine, token_limit}` | summary `ContextPayload`: `{files: [{path, level_used, priority}], omitted_files, budget: {limit, used}}` |
-| `llm.repo_conventions` | `{}` (как на main) | `{files: [...]}` из `RepoConventionsDraft` (review/README.md) |
-| `llm.call` | `{kind: primary \| retry \| repair \| fallback, model, call_no, attempt, timeout_s, prompt_version_id, rule_version_id, input_tokens_estimate, paid_metadata_error?: true}`; optional `fx` — при использовании курса (§4.5) | ответ провайдера как есть, в том числе невалидный, или `{error: {class, http_status, message}}`; токены и стоимость — в `usage_events` (Р-8) |
-| `llm.review_output` | `{}` (как на main) | принятый `ReviewOutput`, прошедший схему и Pydantic (§9) |
-| `review.postprocess` | `{min_confidence, max_inline}` | `{inline, body_only, dropped: [{index, drop_reason}], verdict, severity_counts, findings_hash}` |
-| `github.publish_review` | `{head_sha, findings_hash, review_event, inline_count, try}` | `{github_review_id}` или `{error: {http_status, message}}` |
+| `context.build` | `{engine, token_limit, policy_snapshot_id, diff_snapshot_id}` | summary: `{files: [{path, levels_present, priority}], omitted_files, budget: {limit, used}, coverage_reasons}` |
+| `llm.repo_conventions` | `{policy_base_sha, policy_snapshot_id, cache_key}` | `{files: [...], provenance, cache_status}`; источник всегда base |
+| `context.manifest` | `{call_id, stage, policy_snapshot_id, diff_snapshot_id}` | `{manifest_id, digest, block_count, input_tokens}`; точные блоки — в manifest/evidence storage |
+| `llm.call` | `{stage: conventions \| review \| verification, kind: primary \| retry \| repair \| fallback, model, call_no, attempt, timeout_s, prompt_version_id, rule_version_id, policy_snapshot_id, manifest_id, input_tokens_estimate, paid_metadata_error?: true}`; optional `fx` — при использовании курса (§4.5) | raw ответ либо `{error: {class, http_status, message}}`; токены/стоимость — `usage_events`; содержимое не становится публичным summary |
+| `llm.review_output` | `{accepted_call_id, manifest_id, schema_version}` | принятый `ReviewOutput` (§9), привязанный к checkpoint |
+| `review.postprocess` | `{accepted_call_id, min_confidence}` | `{candidate_ids, dropped: [{candidate_id, drop_reason}], coverage_reasons}` |
+| `llm.verify` | `{candidate_ids, accepted_call_id, manifest_id}` | валидированные решения verifier, сохраняемые с итогом; схема — CONTEXT_AND_VERIFICATION_SPEC §7.2 |
+| `review.finalize` | `{accepted_review_call_id, accepted_verifier_call_id}` | `{result_id, result_digest, publication_plan_id, verdict, severity_counts, coverage}` |
+| `github.publish_review` | `{head_sha, publication_key, operation_key, payload_digest, review_event, inline_count, try}` | `{github_review_id, remote_receipts, delivery_state}` либо `{error: {http_status, message}}` |
 | `engine.fallback` | `{from: "deep", to: "fast", reason: daily_budget \| sandbox_timeout}` | `null` |
 
-**Размер `response`** (D1, §14). Сериализованный JSON до 64 КБ включительно хранится в `run_actions.response`. Больший ответ — строка отдельной таблицы PG (таблица и миграция — #34): `run_actions.response_ref` хранит её id, `response = null` (CHECK `ck_run_actions_response_location` уже есть). UI читает тело через `GET /api/runs/{id}/actions/{index}/response`. Предел строки — 1 МиБ на всю сериализованную запись, включая обёртку [дефолт]. Больший ответ заменяется обёрткой `{"truncated": true, "original_bytes": N, "text": "<начало сериализованного JSON>"}`: `text` — самый длинный префикс сериализованного ответа, обрезанный по границе символа UTF-8, при котором сериализованная обёртка с экранированным `text` не превышает 1 МиБ. У `request` ссылки нет: туда пишутся только метаданные.
+**Размер `response`** (D1, §14). Сериализованный JSON до 64 КБ включительно хранится в `run_actions.response`. Больший ответ — строка отдельной таблицы PG (таблица и миграция — #34): `run_actions.response_ref` хранит её id, `response = null` (CHECK `ck_run_actions_response_location` уже есть). UI читает тело через `GET /api/runs/{id}/actions/{index}/response`. Предел строки — 1 МиБ на всю сериализованную запись, включая обёртку [дефолт]. Больший диагностический ответ заменяется обёрткой `{"truncated": true, "original_bytes": N, "text": "<начало сериализованного JSON>"}`: `text` — самый длинный префикс сериализованного ответа, обрезанный по границе символа UTF-8, при котором сериализованная обёртка с экранированным `text` не превышает 1 МиБ. У `request` ссылки нет: туда пишутся только метаданные. Эта обрезка диагностического trace не распространяется на обязательные документы политики, evidence/manifest, принятый checkpoint, итог и payload: они сохраняются полностью в целевом хранилище из RULES_FORMAT_SPEC §7 и CONTEXT_AND_VERIFICATION_SPEC §8.3.
 
 ---
 
@@ -125,11 +136,11 @@ Summary-only (дифф > 3 000 строк, SD §13) — это не `skipped`. `
 | Ack вебхука | p95 < 500 мс (SD §13) | webhook-api | — |
 | HTTP-запрос к GitHub | 10 с | webhook-worker (проекция и `try_enqueue`), worker, publisher | класс «5xx / таймаут» (§5.2) |
 | `vcs.fetch_diff` | своего лимита нет; ориентир — DiffEngine p95 ≤ 40 с на весь движок (SD §13) | worker | принудительный дедлайн попытки: watchdog прерывает фазу (ниже) |
-| `context.build`, `review.postprocess` | своего лимита нет | worker | принудительный дедлайн попытки: watchdog прерывает фазу (ниже) |
-| LLM-вызов fast / deep | 90 с / 300 с | LLM Gateway (#33) | класс «таймаут» (§5.1) |
+| `policy.snapshot`, `context.build`, `review.postprocess`, `review.finalize` | общий дедлайн попытки; AST имеет собственные ограничители CONTEXT_AND_VERIFICATION_SPEC §3.4 | worker | watchdog прерывает фазу (ниже) |
+| LLM-вызов fast / deep | 90 с / 300 с; verifier всегда ≤90 с | LLM Gateway | класс «таймаут» (§5.1), downstream reserve обязателен |
 | Дедлайн fast | 8 мин от claim каждой попытки (2 × p95 SD §13) | worker: watchdog на всю попытку в `running`; досрочно — перед вызовом и на checkpoint | `deadline_exceeded` |
 | SandboxEngine (deep, фаза 3) | 10 мин (SD §13); после fallback — новый дедлайн fast, 8 мин | worker, deep-пул | `engine.fallback` (§5.3) |
-| `github.publish_review` | 4 HTTP-попытки: паузы 2 с, 8 с, 30 с (или `Retry-After` ≤ 60 с) | publisher | `github_publish_failed` |
+| `github.publish_review` | не более 4 безопасных HTTP-попыток/чтений восстановления: паузы 2 с, 8 с, 30 с (или `Retry-After` ≤60 с в общем дедлайне) | publisher | `github_publish_failed` либо `publication_outcome_unknown`; timeout не разрешает слепой повтор POST |
 | Lease / heartbeat | 5 мин / 60 с | worker в `running`, heartbeat — только до дедлайна текущей попытки (T7); в `publishing` действует lease из T8, публикация короче его | реконсилер: T12, T13, T17 |
 | `consumer_timeout` | 45 мин (SD §7.1) | RabbitMQ | канал закрывается, сообщение возвращается; RunGuard решает по PG |
 | Реконсилер | раз в 5 мин (SD §6.4) | portal-api, лидер `pg_advisory_lock` | T12, T13, T17, T18 |
@@ -139,6 +150,8 @@ Summary-only (дифф > 3 000 строк, SD §13) — это не `skipped`. `
 | Задержки retry | 30 с / 2 мин / 10 мин | `reviews.retry` | §4.2 |
 
 **Дедлайн попытки и зависания.** Механизмов два, итоги у них разные. Первый — дедлайн принудительный [дефолт]: воркер ведёт попытку в `running` под watchdog с текущим дедлайном. Для fast это 8 мин от claim; для deep — 10 мин SandboxEngine, по их истечении `engine.fallback` (§5.3) и новый дедлайн fast 8 мин. Когда истекает дедлайн fast, watchdog прерывает работу в любой фазе, в том числе внутри `context.build` и `review.postprocess`: Run → `failed`, `deadline_exceeded` (T10), retry нет, check-run `neutral`. Проверки перед вызовом и на checkpoint остаются: они лишь завершают попытку раньше, если остатка не хватит на следующий вызов. У внешних вызовов внутри фаз свои лимиты (HTTP GitHub 10 с, LLM 90 / 300 с); watchdog покрывает локальную работу и зависания. Второй — heartbeat не продлевает lease после дедлайна текущей попытки (T7) [дефолт]. Если завис весь процесс (заблокирован event loop, работа не реагирует на отмену), встают и watchdog, и heartbeat: lease истекает, реконсилер применяет T12 / T13 (`lease_expired` после 3 попыток), а не `deadline_exceeded`. Верхняя граница `running` на попытку — дедлайн + lease 5 мин + период реконсилера 5 мин: fast 8 + 5 + 5 = 18 мин, deep 10 + 8 + 5 + 5 = 28 мин (граница heartbeat сдвигается вместе с дедлайном при fallback); обе меньше `consumer_timeout` 45 мин.
+
+В новом профиле admission перед reviewer резервирует его окно, один verifier call и 10 с локального завершения; перед verifier — 90 с и 10 с. Каждый recovery требует своё окно с сохранением downstream резерва; conventions его не расходуют. Недостаток окон даёт `verification_deadline_exceeded`, без непроверенной публикации. Deep передаёт кандидаты не позднее чем за 100 с до своего дедлайна либо переходит в fast с новым дедлайном и сохранёнными общими cost/call limits (CONTEXT_AND_VERIFICATION_SPEC §7.4). После checkpoint reviewer повтор продолжает с verifier; после сохранённого FinalReviewResult смысловые LLM-вызовы не повторяются.
 
 ---
 
@@ -186,8 +199,8 @@ RabbitMQ пересылает dead-letter с исходным routing key, ес�
 
 ### 4.5 Лимиты вызовов и стоимости
 
-- На попытку — не больше 4 вызовов провайдера (записей `llm.call`) всего, включая основной. Как класс сбоя их тратит, задаёт §5.1: таймаут — основной + повтор + fallback; 402 — основной + fallback при его наличии, без ротации ключей; 5xx — основной + 2 повтора + fallback; невалидный JSON — основной + repair + fallback. На Run — не больше 12. Ротация ключей внутри шлюза (#33) вызовом не считается. Лимит общий для всех вызовов попытки — и конвенций, и ревью: `call_no` в `llm.call` сквозной по попытке; когда лимит попытки исчерпан, шлюз не начинает следующую генерацию и возвращает `llm_unavailable` (retry прогона).
-- Стоимость проверяется **до** каждого вызова: сумма `usage_events.cost_usd` по Run за все попытки (включая вызов конвенций, если он был) плюс оценка следующего вызова (входные токены и максимум выхода по цене модели) не должна превышать лимит прогона: fast $0.50, deep $3 (SD §13). Для маршрута `api.eurouter.ai` шлюз перед этим чтением ledger получает пригодный курс ЕЦБ и использует его для верхней границы известной EUR-цены; каждый вызов получает один снимок курса. Если курс недоступен или цена при нём непредставима, LLM-запрос не отправляется, этот вызов не оплачивается, а ошибка `llm_unavailable` допускает retry прогона. Дедлайн повторно проверяется после ожидания ЕЦБ и после чтения ledger. Граница покрывает опубликованные цены маршрутов и оценочные токены, но не будущую смену цен или ошибку оценки токенов.
+- На попытку — не больше **4 фактических generation-вызовов**, на Run — **12** при максимуме трёх доменных попыток. Общий лимит включает conventions, reviewer, обязательный verifier и все repair/fallback; `call_no` сквозной. Cache miss обычно занимает C→R→V и оставляет один recovery, cache hit — R→V и два. До дополнительного вызова сохраняется по одному слоту для каждой ещё не начатой обязательной стадии; verifier reserve освобождается только после детерминированного пустого набора кандидатов. Неиспользованные слоты не разрешают новый поиск. Максимальные цепочки §5.1 ограничены этими резервами: reviewer не получает все четыре слота. Скрытые generation retries SDK и transport retry, который мог начать generation, учитываются консервативно; только ротация после доказанного отказа авторизации не считается generation. Исчерпание слотов сохраняет исходный класс последней ошибки и не превращает invalid output в retryable unavailable (CONTEXT_AND_VERIFICATION_SPEC §7.3).
+- Стоимость проверяется **до** каждого вызова: сумма `usage_events.cost_usd` по Run за все попытки **+ upper_bound(next_call) + reserved_remaining_calls** не должна превышать fast $0.50 / deep $3. Оценка использует вход и максимум выхода по цене закреплённого профиля. До формирования кандидатов резерв verifier считается по максимально разрешённому envelope с 10 кандидатами; затем может уменьшаться. Для recovery отдельная admission-проверка, гарантированного денежного резерва на repair нет. Сначала сокращается необязательный контекст; если обязательные стадии всё ещё не помещаются — `verification_budget_exceeded`, без непроверенных findings даже в deep. Для маршрута `api.eurouter.ai` шлюз перед чтением ledger получает пригодный курс ЕЦБ и использует его для верхней границы известной EUR-цены; каждый вызов получает один снимок курса. Если курс недоступен или цена при нём непредставима, LLM-запрос не отправляется, этот вызов не оплачивается, а ошибка `llm_unavailable` допускает retry прогона (для стадии verifier — `verification_unavailable`). Дедлайн и downstream reserve повторно проверяются после ожидания ЕЦБ и чтения ledger. Граница покрывает опубликованные цены маршрутов и оценочные токены, но не будущую смену цен или ошибку оценки токенов.
 - Курс — последний пригодный дневной USD за EUR из CSV ЕЦБ `EXR/D.USD.EUR.SP00.A` (SECRETS §1), без env-переменной и встроенного значения. Кэш процесса обновляется через час и использует последний проверенный курс не более 7 календарных дней от даты наблюдения по UTC. После сбоя запроса с пригодным курсом в кэше следующий запрос — не раньше чем через 5 минут. Без пригодного курса (холодный старт или курс старше 7 дней) пауза — 10 с (`COLD_FAILURE_BACKOFF_SECONDS`), короче задержки первого retry прогона (30 с, §4.2): иначе все три попытки попадали бы в 5-минутную паузу, и прогон уходил бы в `failed` и DLQ, даже если ЕЦБ восстановился раньше. Кэш у каждого процесса worker свой, поэтому повтор может попасть в другой процесс со своим холодным кэшем и своей паузой. Если обновление не удалось и пригодный курс остался, `stale_cache=true`. В метаданных запроса каждого использовавшего курс `llm.call` находятся `fx.source`, `fx.observation_date`, `fx.rate_usd_per_eur`, `fx.stale_cache`; сырой ответ провайдера в `response` не меняется. Тот же набор виден по вызовам в CLI JSON и ручном `LLM live run` Step Summary.
 - После оплаченного ответа шлюз сохраняет сумму `usage.cost` и `usage.cost_currency` отдельно до расчёта `LlmUsage`: USD записывает как USD, EUR умножает на курс, закреплённый за этим вызовом, затем один раз округляет до 6 знаков для `usage_events.cost_usd`. Для другого endpoint необходимость курса может выясниться только после оплаченного EUR-ответа: шлюз запрашивает его тогда же, без повторного LLM-вызова. Если `cost_currency` отсутствует, прежняя трактовка как USD сохраняется с предупреждением без содержимого ответа и ключей. Без `usage.cost` шлюз оценивает USD по цене модели.
 - При неизвестной валюте, некорректной стоимости или счётчиках токенов, недоступном курсе для уже оплаченного EUR-ответа либо невозможности представить результат в USD оплаченный ответ не теряется: сырой ответ остаётся в `llm.call`, корректные счётчики токенов сохраняются, а неизвестные заменяются предварительной оценкой входа, максимумом выхода и нулём чтения кэша. В `usage_events.cost_usd` записывается консервативная оценка по цене модели без скидки на кэш, не меньше предварительного резерва входа и максимума выхода. Если сумма `usage.cost` и валюта пригодны, при ошибке других метаданных берётся максимум этой суммы в USD и оценки; невалидная или непредставимая сумма в этот максимум не входит. Шлюз добавляет `paid_metadata_error: true` только в метаданные `request` записи `llm.call` для такого оплаченного ответа (в остальных вызовах поле отсутствует), завершает вызов явной ошибкой `llm_invalid_output` без repair, fallback и retry прогона; исходную EUR-сумму он никогда не записывает как USD. Если watchdog отменит ожидание курса после оплаченного ответа, запись консервативной стоимости и сырого ответа завершается перед распространением отмены, без второго LLM-вызова.
@@ -199,7 +212,7 @@ RabbitMQ пересылает dead-letter с исходным routing key, ес�
 
 ### 5.1 Классы сбоев LLM
 
-Fallback-модель — вторая модель шлюза с тем же strict structured output (D7): `mistral-small-3.2-24b` при основной `mistral-small-4` (OQ-2, §14, SD §15). Если исходный запрос не помещается в окно fallback-модели, она не вызывается — остаётся ошибка основной. Пауза перед повтором той же модели не делается, если после неё до дедлайна попытки останется меньше таймаута вызова: шлюз сразу переходит к fallback. Итог смешанной цепочки — класс последнего вызова: например, 429 у основной и невалидный ответ fallback дают `llm_invalid_output` без retry прогона.
+Fallback-модель — вторая модель шлюза с тем же strict structured output (D7): `mistral-small-3.2-24b` при основной `mistral-small-4` (OQ-2, §14, SD §15). Модели/маршруты/schema profiles закрепляются в snapshot; пригодность нового verifier отдельно проверяется при реализации. Если запрос не помещается в окно fallback, она не вызывается. Все количества повторов ниже — верхние пределы **при наличии свободного слота, стоимости и времени после downstream резерва** (§4.5). Пауза/повтор/fallback не расходуют резерв обязательных стадий. Итог смешанной цепочки сохраняет класс последнего вызова: 429 и затем invalid output дают terminal invalid output, а не retry из-за исчерпания слотов.
 
 | Класс | Обнаружение | Попытки и backoff | Repair / fallback / контекст | Итог Run, `error_code` | Автор PR (check-run) | UI |
 |---|---|---|---|---|---|---|
@@ -208,9 +221,11 @@ Fallback-модель — вторая модель шлюза с тем же st
 | 402 | HTTP 402 от модели | тот же запрос не повторяется, ключи не ротируются | fallback 1 раз, если настроен и помещается в контекст; если последний ответ — 402, retry прогона нет | `failed`, `llm_payment_required` после первой попытки | `neutral` «AI-ревью не выполнено» + текст §6; ревью нет | `failed` + `errorCode`; каждый вызов — `llm.call` |
 | 5xx / соединение | HTTP 5xx, отказ или обрыв соединения | 2 повтора: 2 с, 8 с (+ jitter до 1 с) | fallback 1 раз, retry прогона | `failed`, `llm_unavailable` | то же | то же |
 | Невалидный или нестрогий JSON | не JSON; вывод обрезан по длине; нарушена `review-output.schema.json` или семантика §9 (`InvalidReviewOutput`) | тот же запрос не повторяется | 1 repair-вызов той же модели с ошибками валидатора, затем fallback 1 раз; если repair-переписка (ответ модели + ошибки) не помещается в лимит контекста, repair пропускается и сразу идёт fallback с исходным запросом; retry прогона нет | `failed`, `llm_invalid_output` | то же | то же; ответ модели — в `response` записи `llm.call` |
-| Переполнение контекста | предварительный подсчёт > лимита SD §13, HTTP 400 провайдера о длине контекста или HTTP 413 | вызов того же размера не повторяется | 1 пересборка на уровень ниже: снимается последний добавленный уровень в обратном порядке SD §9 (L3 → L2 → L4, L1 остаётся); fallback и retry прогона нет. Пока контекст состоит только из L1 (спринт 2), пересборки нет — шлюз сразу возвращает `llm_context_overflow`; пересборка включается вместе с ContextProvider L2–L4 [техлид] | `failed`, `llm_context_overflow` | то же | то же; `context.build` дважды — после включения пересборки |
-| Бюджет прогона | сумма и оценка превышают лимит (§4.5) | вызов не делается | — | fast: `failed`, `budget_exceeded`; deep: публикуется сделанное (SD §13), `succeeded` | fast: как выше; deep: ревью, в check-run «прервано по бюджету» | fast: `failed`; deep: `succeeded` |
-| Дедлайн | перед вызовом осталось меньше таймаута вызова; на checkpoint дедлайн истёк; watchdog прервал фазу по дедлайну (§3) | вызов не делается; watchdog прерывает текущую фазу и вызов | — | `failed`, `deadline_exceeded` | как в первой строке | `failed` + `errorCode` |
+| Переполнение контекста | предварительный подсчёт > лимита, HTTP 400 о длине или 413 | тот же размер не повторяется | Сокращается только необязательный контекст по CONTEXT_AND_VERIFICATION_SPEC §4.1; новый вызов требует новый manifest и свободный слот. Документы политики, обязательный verifier envelope и ID не усекаются | `failed`, `llm_context_overflow`, `policy_prompt_budget_exceeded` либо `verification_context_overflow` по причине; retry нет | `neutral`, без ревью | `failed` + `errorCode` |
+| Бюджет прогона | spent + next + обязательный резерв превышают лимит (§4.5) | вызов не делается | сокращение необязательного контекста | `failed`, `verification_budget_exceeded`, если обязательные стадии не помещаются; общая ошибка legacy/прочего бюджета — `budget_exceeded`. Deep может публиковать только уже сохранённый подтверждённый FinalReviewResult | `neutral`; непроверенных кандидатов нет | сохранённые coverage/ошибка |
+| Дедлайн | нет окна вызова и downstream резерва; истёк watchdog (§3) | вызов не делается; watchdog прерывает работу | — | `failed`, `verification_deadline_exceeded` при admission, `deadline_exceeded` при общем watchdog | `neutral`, без непроверенной публикации | `failed` + `errorCode` |
+
+Для verifier используются отдельные итоговые коды: invalid schema/семантика/ID/refs → `verification_invalid_output` без retry; временные timeout/5xx/rate limit после доступного восстановления → `verification_unavailable` с bounded retry run (30 с/2 мин, Retry-After учитывается). Неуспешный verifier запрещает публикацию любого кандидата этого набора. Provider code остаётся в trace. Ошибки оплаченных metadata сохраняют существующую terminal-политику §4.5; резерв не разрешает повторить уже оплаченный ответ.
 
 ### 5.2 Сбои GitHub
 
@@ -218,11 +233,22 @@ Fallback-модель — вторая модель шлюза с тем же st
 |---|---|---|---|---|---|---|
 | 5xx / таймаут / лимит | `vcs.fetch_diff` | HTTP 5xx, таймаут 10 с, 403/429 с `Retry-After` или `X-RateLimit-Remaining: 0` | retry прогона (§4.2) | `failed`, `diff_fetch_failed` после 3 попыток | check-run `neutral` | `failed` |
 | Нет доступа | `vcs.fetch_diff`, `github.publish_review` | 403 без признаков лимита; 404 на PR или репозиторий | нет | `failed`, `github_forbidden` | check-run `neutral`, если его удалось обновить | `failed` |
-| 5xx / таймаут / вторичный лимит | `github.publish_review` | как в первой строке | 3 повтора в процессе: 2 с, 8 с, 30 с; `Retry-After` ≤ 60 с заменяет паузу | `failed`, `github_publish_failed` | check-run `neutral`, ревью нет | `failed`; каждая попытка — `github.publish_review` |
-| 422 на координатах | `github.publish_review` | 422: строка комментария вне диффа | 1 повтор: все inline переносятся в тело ревью (SD §8.3), `findings.inline_comment = false` | `succeeded` | одно ревью, находки в теле | `succeeded`; две записи `github.publish_review` |
-| 422 на устаревшем commit | `github.publish_review` | 422: `commit_id` не относится к PR (был новый пуш) | нет | `cancelled`, `superseded` | check-run `cancelled` | `cancelled` |
+| Запрос достоверно не отправлен / подтверждённый rate limit | `github.publish_review` | доказанный transport rejection либо 429/лимитный 403 | до 3 безопасных повторов с паузами 2 с, 8 с, 30 с; `Retry-After ≤60 с` заменяет паузу в дедлайне, больший планируется отложенно | после бюджета `failed`, `github_publish_failed` | check-run `neutral` | сохранённые delivery state и попытки |
+| Timeout/reset после возможной отправки, неоднозначный 5xx | `github.publish_review` | возможен side effect | поиск своей операции с полной пагинацией; слепой POST запрещён | если исход не восстановлен в бюджете — `failed`, `publication_outcome_unknown` | check-run `neutral`; существование remote review неизвестно | явный unknown, автоматическая повторная отправка блокируется |
+| Подтверждённые неверные path/line/side/range | `github.publish_review` | структурированная coordinates error при неизменном diff и достоверном отказе исходной операции | один заранее сохранённый body-only вариант тех же supported findings, собственные payload digest/key, без применяемых suggestions | `succeeded` только при подтверждённом успехе варианта | одно ревью, подтверждённые находки в теле | тот же result_id и фактически выбранный вариант |
+| Недопустимый commit/diff refs | `github.publish_review` | структурированная ошибка и сверка VCS подтверждают устаревание | нет | `cancelled`, `superseded` | check-run `cancelled` | `cancelled`; ранее полученные remote IDs сохраняются |
+| 400/422 по body/event/schema, spam/abuse или неизвестная validation error | `github.publish_review` | endpoint + structured fields/codes; один HTTP-код 422 недостаточен | нет координатного fallback; подтверждённый rate limit классифицируется отдельно | `failed`, `github_publish_failed` | check-run `neutral` | причина в trace |
+| 401 | `github.publish_review` | подтверждённый отказ авторизации | одно обновление токена, безопасный повтор; затем access failure | `failed`, `github_forbidden` | check-run `neutral`, если доступен | `failed` |
 
 Ошибка при обновлении check-run состояние Run не меняет: пишется лог и метрика.
+
+**План доставки #107.** Канонические формулы и marker заданы в CONTEXT_AND_VERIFICATION_SPEC §10: `publication_key` включает provider/repository/PR, `run_id`, `head_sha`, `diff_snapshot_id`, `final_result_digest`; `operation_key` — ключ публикации, ordinal и точный `payload_digest`. Публикационный план с основным и body-only вариантом фиксируется до T8. При retry запрещены новый LLM-вызов, пересборка summary текущим шаблоном, изменение event/координат или повторное хеширование старого `findings_hash` как идентичности. Rerun одного head, включая пустые findings, получает собственный ключ.
+
+Перед каждым новым POST publisher сверяет отмену, открытость PR, head/diff и ищет собственную операцию. Совпадение требует ожидаемого bot/app, PR, head, marker и точного payload; чтение всех страниц обязательно. `lookup_incomplete` и отсутствие marker после неоднозначной отправки не доказывают неуспеха. После POST сохраняются remote IDs и явный mapping по marker/координатам/body, затем повторно сверяется актуальность. Push между GET и POST оставляет публикацию на исходном head, а Run становится cancelled; созданные IDs не теряются. Lease не заменяет серверную идемпотентность и не обещает exactly-once. Для `publication_outcome_unknown` допустима последующая сверка чтением без автоматического повторного POST.
+
+Legacy marker `<!-- ai-review findings_hash=… -->` не используется для новых runs. Старый незавершённый publishing восстанавливается по сохранённому payload и remote IDs; legacy marker принимается только вместе с bot/head/body/event/полным набором координат и однозначной принадлежностью run. Иначе `legacy_publication_unresolved`, без присвоения чужого review или новой публикации. GitLab остаётся отдельной будущей реализацией; его несколько операций и частичные receipts определены в CONTEXT_AND_VERIFICATION_SPEC §9.5 и §10.
+
+Компактная backend `summary_text` ограничена 4 000 Unicode-символов; supported general findings добавляются в полное тело review сверх сводки. Перед первым POST выбранного варианта (включая body-only fallback) publisher сверяет все готовые payload и markers с лимитами закреплённого профиля VCS-адаптера, где явно заданы единицы и пределы. Превышение → `failed/publication_payload_too_large` до отправки этого варианта, без усечения findings или пересборки плана. При подготовке `suggestion_unrenderable` позволяет убрать только применяемый блок, сохранив подтверждённое замечание.
 
 ### 5.3 Деградация deep → fast (SD §13)
 
@@ -249,12 +275,21 @@ Fallback-модель — вторая модель шлюза с тем же st
 | `llm_payment_required` | `failed` | LLM | fallback, если настроен; ротации ключей, повтора той же модели и retry прогона нет | AI-ревью временно недоступно. |
 | `llm_unavailable` | `failed` | LLM | да | Провайдер модели недоступен. |
 | `llm_invalid_output` | `failed` | LLM | repair и fallback; прогон — нет | Модель вернула ответ не по контракту. |
-| `llm_context_overflow` | `failed` | LLM | пересборка контекста — с L2–L4, пока только L1 её нет; прогон — нет | PR не помещается в контекст модели. |
+| `llm_context_overflow` | `failed` | LLM | сокращение только необязательного контекста по §5.1; прогон — нет | PR не помещается в контекст модели. |
 | `budget_exceeded` | `failed` | локальный бюджет Run (§4.5) | нет | Превышен лимит стоимости прогона. |
 | `deadline_exceeded` | `failed` | время | нет | Прогон не уложился в лимит времени. |
 | `diff_fetch_failed` | `failed` | GitHub | да: прогон | Не удалось получить дифф из GitHub. |
 | `github_forbidden` | `failed` | GitHub | нет | У GitHub App нет доступа к репозиторию или PR. |
-| `github_publish_failed` | `failed` | GitHub | 3 повтора публикации; прогон — нет | GitHub не принял ревью. |
+| `github_publish_failed` | `failed` | GitHub | до 3 безопасных повторов §5.2; прогон — нет | Не удалось завершить публикацию ревью в GitHub. |
+| `publication_payload_too_large` | `failed` | payload | нет; выбранный вариант не отправляется | Результат превышает лимит публикации VCS. |
+| `publication_outcome_unknown` | `failed` | доставка | только последующая сверка чтением, автоматический повтор POST запрещён | Исход публикации не удалось подтвердить. Требуется сверка. |
+| `legacy_publication_unresolved` | `failed` | legacy-доставка | нет автоматического POST | Не удалось однозначно восстановить прежнюю публикацию. |
+| `verification_context_overflow` | `failed` | verifier | нет | Обязательные данные проверки не помещаются в контекст. |
+| `verification_invalid_output` | `failed` | verifier | bounded repair/fallback по §4.5; прогон — нет | Проверяющий вернул ответ не по контракту. |
+| `verification_unavailable` | `failed` | verifier | да, сохранённые candidates/manifest checkpoint; максимум 3 попытки | Проверяющий временно недоступен. |
+| `verification_budget_exceeded` | `failed` | бюджет | нет | Бюджета недостаточно для обязательной проверки. |
+| `verification_deadline_exceeded` | `failed` | время | нет | Недостаточно времени для обязательной проверки. |
+| `snapshot_integrity_error` | `failed` | diff/контекст | нет | Сохранённый снимок проверки не прошёл проверку целостности. |
 | `lease_expired` | `failed` | инфраструктура | да: реконсилер | Обработка прервалась 3 раза подряд. |
 | `internal_error` | `failed` | прочее | да: прогон | Внутренняя ошибка сервиса. |
 | `superseded` | `cancelled` | отмена | — | В PR новый коммит — ревью будет для него. |
@@ -263,8 +298,21 @@ Fallback-модель — вторая модель шлюза с тем же st
 | `repo_disabled` | `skipped` | отбор | — | — (check-run не создаётся) |
 | `rule_not_matched` | `skipped` | отбор | — | PR не прошёл правило отбора репозитория. |
 | `budget_paused` | `skipped` | бюджет | — | Дневной бюджет исчерпан, ревью на паузе. |
+| `all_changes_ignored` | `skipped` | политика после claim | — | Все изменения исключены из AI-ревью. |
+| `no_changes` | `skipped` | достоверно пустой diff после claim | — | Нет изменений для AI-ревью. |
 
 «Retry: да» означает T9 при `attempt < 3`. `summary_only` — не код: такой Run заканчивается `succeeded` с `summaryOnly: true` (§2).
+
+Полный каталог policy-кодов и безопасная диагностика `source_path`, `policy_base_sha`, nullable line/column/limit/actual заданы в [RULES_FORMAT_SPEC §9](RULES_FORMAT_SPEC.md#9-ошибки-и-наблюдаемость); все эти коды входят в контракт pipeline:
+
+| Коды | Исход и retry |
+|---|---|
+| `policy_document_too_large`, `policy_document_decode_error`, `policy_document_control_character`, `policy_document_type_unsupported` | failed без retry; точная причина документа, без полного содержимого в публичном сообщении |
+| `policy_ignore_block_duplicate`, `policy_ignore_block_nested`, `policy_ignore_block_unclosed`, `policy_ignore_info_invalid`, `policy_ignore_pattern_invalid`, `policy_ignore_limit_exceeded`, `policy_path_invalid`, `policy_match_budget_exceeded`, `policy_prompt_budget_exceeded` | failed без retry; правила не заменяются пустыми и не усекаются |
+| `policy_access_denied`, `policy_revision_unavailable`, `policy_snapshot_integrity_error`, `policy_context_violation` | failed без retry; никакой смены закреплённой ревизии/профиля; context violation останавливает отправку |
+| `policy_fetch_transient`, `policy_rate_limited` | T9 с общими лимитами/дедлайном, затем failed после 3 попыток; Retry-After учитывается |
+
+Достоверно отсутствующий документ — `presence=missing`, не ошибка; ошибка доступа/чтения — не missing. `ast_*`, `insufficient_context` и технические drops отражают coverage reasons, сами по себе не переводят Run в failed; их влияние на полноту — CONTEXT_AND_VERIFICATION_SPEC §8.1/§8.4. Непроверенные кандидаты не становятся публичным результатом.
 
 ---
 
@@ -275,10 +323,10 @@ Fallback-модель — вторая модель шлюза с тем же st
 | Итог Run | `status` / `conclusion` | Заголовок | Summary |
 |---|---|---|---|
 | выполняется | `in_progress` | AI-ревью выполняется | попытка N из 3 |
-| `succeeded` | `completed` / `neutral` | AI-ревью: `blocking` / `attention` / `clean` (§11); summary-only — «AI-ревью: только сводка» | `severityCounts`, сколько находок inline и сколько в теле, ссылка на прогон; summary-only — «PR слишком большой: только сводка»; deep по бюджету — «прервано по бюджету» |
-| `failed` | `completed` / `neutral` | AI-ревью не выполнено | текст §6 и ссылка; обычно также `error_code`, но для `llm_payment_required` код скрыт из публичного check-run; ревью и inline-комментариев нет |
+| `succeeded` | `completed` / `neutral` | AI-ревью: `blocking` / `attention` / `clean` (§11); partial с verdict null — «AI-ревью: проверка неполная»; summary-only — «AI-ревью: только сводка» | сохранённые summary/counts/coverage и размещение из одного result/варианта; summary-only — превышен лимит либо неполон список diff; неполнота не называется clean |
+| `failed` | `completed` / `neutral` | AI-ревью не выполнено | текст §6 и ссылка; обычно `error_code`, для `llm_payment_required` код скрыт. При verification failure новых findings нет; при publication_outcome_unknown существование удалённой публикации не утверждается |
 | `cancelled` | `completed` / `cancelled` | AI-ревью отменено | причина §6; до первого claim check-run'а нет |
-| `skipped` | `completed` / `skipped` | AI-ревью пропущено | причина §6; создаётся сразу завершённым, при `repo_disabled` не создаётся |
+| `skipped` | `completed` / `skipped` | AI-ревью пропущено | причина §6; T5 создаёт сразу завершённым (кроме repo_disabled), T19 завершает созданный при claim check-run; verdict null |
 
 Check-run Run, завершённого без воркера (T6 после первого claim, T13), закрывает RunGuard при доставке сигнала T6 или повторной публикации T13 (§1). Сигнал T6 ждёт не TTL retry-очереди, а только ближайшего свободного consumer пула (`prefetch_count=1`): priority 9 ставит его в голову очереди (`x-max-priority=10` на `review.run.*`, SD §7.1). Напрямую в T6 check-run не закрывается [техлид, #56, 04.10.2026]: у portal-api нет ключа App (SD §8.3; §15, вопрос 1), а webhook-worker ключ App имеет, но check-run не трогает. Состояние check-run пишет только RunGuard вместе с путём worker → publisher (выше): закрытие из T6 гонялось бы с claim и публикацией.
 
@@ -331,12 +379,15 @@ Check-run Run, завершённого без воркера (T6 после п�
 
 ## 9. Выход LLM: `ReviewOutput`
 
-Форма — `review/schemas/review-output.schema.json` (draft 2020-12); это единственный источник формы. Pydantic `ReviewOutput` (`app/modules/reviews/application/review_output.py`) повторяет её 1:1, совпадение проверяет `tests/test_review_output_schema.py`. Промпт — `review/prompts/review.system.v2.md` §7–§11 (§11 — few-shot примеры; v1 — предыдущая версия).
+Целевой **ReviewOutput v2** по CONTEXT_AND_VERIFICATION_SPEC §6.1 сохраняет `{findings: [≤10], summary: {problem, done_well, effort}}`, координаты `path/start_line/line` без `side` (внутренне RIGHT) и остальные существующие поля, добавляя каждой finding обязательные **1–8 `evidence_refs`** вида `{block_id,start_line,end_line}`. Все поля обязательны, nullable-поля сохраняют ключ, лишние поля запрещены. SHA и source roles модель не генерирует: backend разрешает их по manifest принятого call. Каждый evidence range должен целиком присутствовать в допустимом кодовом блоке; candidate/previous_output/модельные конвенции доказательством не являются.
 
-- `{findings: [≤ 10], summary: {problem, done_well, effort}}`. Все ключи обязательны. `start_line`, `suggestion`, `rule_name` допускают `null`, но ключ присутствует всегда. Лишних ключей нет ни на одном уровне.
-- `side` и SHA в выходе нет: сторону ставит постпроцессор (всегда `RIGHT`), SHA берётся из `Run.head_sha`.
+Атрибуция v2: `rule_name = ".review/rules.md" | "AGENTS.md" | "service-defaults:<ID>" | null`, где ID — stable check из закреплённого набора; значение задаётся реальным основанием, не случайным именем файла. Обязательного custom-prefix в body нет; backend строит отображение на основании разрешённых `requirement_refs` verifier (RULES_FORMAT_SPEC §8.2). Нельзя чинить ложную атрибуцию приписыванием префикса. Модельное summary сохраняется только как diagnostic output; все публичные поверхности используют backend summary (§11).
 
-Семантика, которую JSON Schema не выражает (набор кейсов закреплён корпусом `tests/fixtures/review_output/`):
+Новая версия схемы, Pydantic, prompt profile, fixtures/eval и storage вводятся согласованно. Будущая v3 добавляет явный `side` сквозь API/storage/hash/eval; для LEFT `suggestion=null`. Старому ответу v1 не приписываются evidence или успешный verifier.
+
+Обязательный отдельный verifier для непустого набора имеет собственную strict-схему из [CONTEXT_AND_VERIFICATION_SPEC §7.2](CONTEXT_AND_VERIFICATION_SPEC.md#72-ответ): ровно одно решение `supported|contradicted|insufficient_context` на каждый входной candidate ID, без новых/дублированных ID, валидные evidence refs своего manifest и requirement refs. Невалидна вся выдача, а не только неудобные решения. Verifier оценивает исходный текст, severity, якорь и suggestion; он не переписывает их и не создаёт findings. Только supported поступает в финальный результат. Предел inline применяется после verifier, излишек supported переносится в тело, не теряя counts.
+
+**Текущая реализация / legacy v1.** `review/schemas/review-output.schema.json` (draft 2020-12) и Pydantic `ReviewOutput` (`app/modules/reviews/application/review_output.py`) задают существующую форму без evidence; её проверяет `tests/test_review_output_schema.py`. `review/prompts/review.system.v2.md` — версия нынешнего prompt, не признак внедрённого ReviewOutput v2. Существующая семантика ниже описывает legacy-путь и корпус `tests/fixtures/review_output/`; строка о custom-prefix не переносится в новый профиль:
 
 | Правило | Нормализуется в шлюзе (после JSON Schema) | Pydantic напрямую | `validate_findings.py` (eval, #30) |
 |---|---|---|---|
@@ -347,29 +398,30 @@ Check-run Run, завершённого без воркера (T6 после п�
 | `summary.problem` — 1 предложение, `done_well` — 1–2 | отвергает нарушение | отвергает | отвергает |
 | `rule_name` ↔ префикс `body` «According to custom instructions in '<rule_name>' (» | не проверяет — постпроцессор чинит (lint-filter, шаг 6) | не проверяет | отвергает |
 
-Нормализация выполняется только на пути ответа шлюза после проверки формы JSON Schema: каждую находку сначала проверяют с её исходным индексом для сообщения repair, затем сортируют валидные находки. Принятый нормализованный ответ идёт в сохранение и публикацию; сырой ответ остаётся без изменений в `llm.call`. Прямой `parse_review_output`/Pydantic и `review/scripts/validate_findings.py` сохраняют строгий вердикт, если им подать сырой ответ: так проверяются исходные случаи в корпусе. Ручной workflow `LLM live run` передаёт валидатору нормализованное поле `.output` шлюза, поэтому его итоговая проверка не измеряет нарушения порядка или равенства строк в сыром ответе. Нарушения смысла, формы, заголовка и числа предложений по-прежнему отвергаются.
+В legacy-пути нормализация выполняется только после проверки JSON Schema: находки проверяются с исходным индексом, затем стабильно сортируются; сырой ответ остаётся в `llm.call`. Прямой `parse_review_output`/Pydantic и `review/scripts/validate_findings.py` строги к сырому ответу. `LLM live run` проверяет нормализованное `.output` и потому не измеряет исходные нарушения порядка или равенства строк. В v2 безопасная нормализация `start_line==line` в null и порядка возможна до freeze candidate IDs; принятый reviewer output далее проходит координаты/evidence/фильтры/verifier, а не сразу публикацию. Invalid output не равен успешному пустому review.
 
 **`suggestion`:**
 
 - Это готовая замена ровно строк `start_line..line` новой версии файла; при `start_line = null` — одной строки `line`. Код должен встать на место этих строк без правок: без прозы, без маркеров диффа (`+`, `-`, `@@`) и без ограждения ```` ``` ````. Блок ```` ```suggestion ```` добавляет публикатор (SD §8.3).
 - `null`, если готовой замены нет.
-- Публикуется только у inline-находки, строки которой лежат внутри hunk (lint-filter, шаг 4). Находка в теле ревью публикуется без `suggestion`.
-- Сторону `LEFT` модель не производит: `suggestion` всегда заменяет строки новой версии.
+- Применяемый блок публикуется только у supported inline-находки, **все** строки которой существуют, показаны и лежат в одном полном hunk на RIGHT. Пустая строка — удаление диапазона, `null` — отсутствие замены. General finding не получает применяемый suggestion; исходный кандидат остаётся в диагностике.
+- Неверный диапазон нельзя обрезать до последней/соседней строки с прежним suggestion. При невозможности корректного rendering подтверждённое замечание публикуется без применяемой замены с `suggestion_unrenderable` (CONTEXT_AND_VERIFICATION_SPEC §9.3).
+- Сторону LEFT модель v2 не производит; будущая v3 требует для неё `suggestion=null`.
 
-**Structured output провайдеров.** Строгий режим требует, чтобы все ключи были обязательными, а `additionalProperties` — `false`. Схема этому уже соответствует: nullable-поля заданы типом `[..., "null"]`. Условие для `start_line` и остальная семантика схемой не выражаются. После ответа шлюз применяет только нормализацию из таблицы выше, затем проверяет Pydantic; остальные нарушения относятся к классу «невалидный JSON» (§5.1). Какие ключевые слова схемы поддерживает конкретный провайдер, проверяет ручной workflow `LLM live run` (`.github/workflows/llm-live-run.yml`) в рамках OQ-2 (D7: strict structured output у основной и fallback-модели), результат — SD §15. Шлюз отправляет схему без `$`-аннотаций на любом уровне. Вторая схема руками не пишется: авторитетны `review-output.schema.json` и Pydantic. Итог #46: strict `json_schema` приняли маршруты Mistral AI (`mistral-small-4`), OVHcloud и Scaleway (`mistral-small-3.2-24b`, `qwen3-coder`, `qwen3.6`), Lyceum (`deepseek-v4-flash`) и Infercom (`gemma-4`); `minimax-m3` отвечает HTTP 400 «does not support JSON schema mode», хотя каталог EUrouter указывает у него `response_format`, — параметр в `supported_parameters` не доказывает поддержку `json_schema`. Strict подтверждается только для провайдера, обслужившего вызов: шлюз не отправляет `require_parameters`. В живых прогонах #46 схема принимала ответы со случаями `start_line == line`, неверного порядка находок и двумя предложениями в `summary.problem`. По текущему контракту шлюз нормализует первые два случая без дополнительного вызова (§9, таблица), а нарушение числа предложений направляет на repair основной модели или отвергает у fallback (§5.1).
+**Structured output: текущая schema v1 и исторические прогоны #46.** Строгий режим требует, чтобы все ключи были обязательными, а `additionalProperties` — `false`. Текущая v1 schema этому соответствует: nullable-поля заданы типом `[..., "null"]`. Условие для `start_line` и остальная семантика схемой не выражаются. После ответа шлюз применяет legacy-нормализацию из таблицы выше, затем проверяет Pydantic; остальные нарушения относятся к классу «невалидный JSON» (§5.1). Поддержку ключевых слов существующей схемы проверял ручной workflow `LLM live run` (`.github/workflows/llm-live-run.yml`) в рамках OQ-2; исторический результат — SD §15. Шлюз отправляет схему без `$`-аннотаций на любом уровне, без отдельной вручную написанной копии provider schema. Итог #46: strict `json_schema` приняли маршруты Mistral AI (`mistral-small-4`), OVHcloud и Scaleway (`mistral-small-3.2-24b`, `qwen3-coder`, `qwen3.6`), Lyceum (`deepseek-v4-flash`) и Infercom (`gemma-4`); `minimax-m3` отвечал HTTP 400 «does not support JSON schema mode», несмотря на `response_format` в каталоге EUrouter. Strict подтверждён только для маршрута обслуженного вызова; шлюз не отправляет `require_parameters`. В этих прогонах v1 схема принимала `start_line == line`, неверный порядок и два предложения в `summary.problem`: legacy gateway нормализует первые два случая, последнее направляет на repair либо отвергает у fallback. Эти результаты не подтверждают поддержку ReviewOutput v2 или verifier schema: их ещё нужно реализовать, синхронизировать с Pydantic и отдельно проверить на закреплённых маршрутах.
 
 ---
 
 ## 10. Якорь находки (D6)
 
-Канон — `path`, `start_line`, `line` (+ `side`): в JSON Schema, SD §5 и §11 и в датасете #30 [техлид]. БД и Zod не переименовываются. Формулы — [дефолт]:
+Канон v2 — `path`, `start_line`, `line`; внутренняя сторона RIGHT, обе стороны сохраняются в DiffMap заранее. Формулы ниже сохраняют проекцию БД/API, но новая реализация обязана проверить каждый элемент диапазона в **одном файле, ревизии, стороне и полном hunk**, разрешение policy и фактическую видимость по manifest. Канонические формулы обхода unified diff, identity rename/copy, нулевых hunks, CRLF/EOF и адаптеров GitHub/GitLab — CONTEXT_AND_VERIFICATION_SPEC §9. Проверки только концов диапазона недостаточно. Поля БД и Zod не переименовываются; поддержка LEFT требует отдельной v3 миграции.
 
 | Слой | Поля | Правило |
 |---|---|---|
 | LLM (`ReviewOutput`), датасет #30 | `path`, `start_line`, `line` | `start_line = null` — одна строка, иначе `start_line < line`; стороны нет |
 | БД `findings` | `file_path`, `line_start`, `line_end`, `side` | `file_path = path`; `line_start = start_line ?? line`; `line_end = start_line != null ? line : null`; `side = RIGHT` (постпроцессор) |
 | API / Zod (`ReviewComment`, `FindingView`) | `file`, `oldLine`, `newLine`, `endLine` (+ `side` в `FindingView`) | `file = file_path`; `newLine = side == RIGHT ? line_start : null`; `oldLine = side == LEFT ? line_start : null`; `endLine = line_end` |
-| GitHub `POST /pulls/{n}/reviews` | `path`, `line`, `side`, `start_line?` | `line = line_end ?? line_start`; `start_line = line_start` только при `line_end != null` |
+| GitHub `POST /pulls/{n}/reviews` | `path`, `line`, `side`, `start_line?`, `start_side?` | `commit_id = Run.head_sha`; `path` из provider filename; `line = line_end ?? line_start`; start-поля только для диапазона, `start_side=side`; `position` не используется |
 
 | Случай | LLM | БД (`line_start, line_end, side`) | API |
 |---|---|---|---|
@@ -378,13 +430,15 @@ Check-run Run, завершённого без воркера (T6 после п�
 
 UI рисует диапазон `[newLine ?? oldLine, endLine ?? newLine ?? oldLine]`; у однострочной находки `endLine = null`.
 
+Полностью показанный существующий RIGHT-диапазон вне hunk/через несколько hunks может получить `general_only` и пройти verifier для общего текста. Несуществующая/непоказанная строка либо неизвестный путь отбрасываются; evidence из другого файла ложный якорь не исправляют. Нельзя переносить координаты на ближайшую строку или другую сторону. Deletion-only finding без реального RIGHT-якоря в v2 получает `left_anchor_unsupported` и partial coverage; удалённый код при этом может быть evidence. GitLab и LEFT остаются целевыми отдельными реализациями.
+
 ---
 
 ## 11. Вердикт и бейджи (D3)
 
-- **Правило** [техлид]. Считается по находкам Run с `drop_reason IS NULL`: это inline-находки и находки в теле ревью; после публикации — ровно те, у которых `published = true`. Есть `critical` или `high` → `blocking`; иначе есть `medium` или `low` → `attention`; иначе (только `info` или пусто) → `clean`.
-- **Где считается.** Одна чистая функция вызывается в постобработке (`review.postprocess`, до T8 — от вердикта зависит `review_event`) и в portal-api при чтении run detail. Отдельной колонки нет. `ReviewOutput` и промпт не меняются: модель вердикт не выдаёт.
-- **Run detail** (`RunDetail` в `contracts/openapi.yaml`): `verdict: blocking | attention | clean | null`, `severityCounts {critical, high, medium, low, info}` по тому же набору находок, `summary {problem, doneWell, effort} | null`, `findings` с `suggestion` и `confidence`. `verdict = null`, пока Run не `succeeded`, и у summary-only прогона. В списке PR (D11) — `latestRun.verdict`.
+- **Правило #107.** Только итоговые supported findings, inline и general, определяют counts/verdict: critical/high → `blocking`; иначе medium/low → `attention`, включая partial coverage. Только info/пусто дают `clean` лишь при `coverage.status=complete`; partial/none дают `null`. API для ещё не succeeded, failed/cancelled/skipped всегда отдаёт `null`. Summary-only всегда partial/null. Полнота относится к разрешённому scope, исключённые строки не включаются в reviewed; неизвестный счётчик — null, не 0. Технические drops и insufficient context отражаются в coverage (CONTEXT_AND_VERIFICATION_SPEC §8).
+- **Где считается.** Backend сохраняет единый immutable `FinalReviewResult` до T8: supported findings, coverage, verdict/counts, детерминированный summary, result digest и publication plan. API, VCS body и check-run используют один result_id и выбранный вариант размещения; чтение не пересчитывает «пусто → clean». Модель verdict не назначает. Прежняя функция по `drop_reason/published` остаётся только legacy-проекцией и не заменяет новый итог.
+- **Run detail.** Существующие поля `verdict`, `severityCounts`, `summary {problem, doneWell, effort}` и findings сохраняются. Целевые дополнительные coverage/result bindings требуют обновления OpenAPI/Zod до активации нового профиля. Summary backend описывает только подтверждённые замечания и фактический scope/неполноту; исходный model summary остаётся raw diagnostic output без публичного fallback. Старые runs получают `verification_mode=legacy`, compatibility `coverage=null` («неизвестно»), без выдуманной проверки. В списке PR `latestRun.verdict` берётся из того же сохранённого итога.
 - **Бейджи** — только группировка в UI: Critical = `critical` + `high`, Warning = `medium` + `low`, Info = `info`. API отдаёт пять уровней.
 - **`review_event`** [дефолт]: `Repository.reviewEvent = REQUEST_CHANGES` ∧ `verdict = blocking` → `REQUEST_CHANGES`, иначе `COMMENT`. По умолчанию `reviewEvent = COMMENT` (D8).
 
@@ -392,7 +446,7 @@ UI рисует диапазон `[newLine ?? oldLine, endLine ?? newLine ?? old
 
 ## 12. Сообщения очереди
 
-Топология и общие правила — SD §7.1–§7.2, маршрут retry — §4.3.
+Топология и общие правила — SD §7.1–§7.2, маршрут retry — §4.3. Таблица фиксирует существующий wire v1. Для нового профиля consumer читает закреплённую версию поведения и publication plan по `run_id`; поля legacy message не заменяют snapshot/result/operation identity. Пока очередь остаётся v1, её schema и диагностический findings_hash могут сохраняться: новый payload/ключ доставки берётся из журнала, не вычисляется из этого hash. Расширение wire-полей требует отдельной версии схемы и согласованного обновления consumer; документационный PR очередь не меняет.
 
 | Сообщение | JSON Schema | Фикстура | Кто → кому |
 |---|---|---|---|
@@ -426,7 +480,7 @@ UI рисует диапазон `[newLine ?? oldLine, endLine ?? newLine ?? old
 | `GET /api/v1/reviews/{id}` | `GET /api/runs/{id}` → `RunDetail`; префикс `/api` без версии (D9) | `contracts/openapi.yaml`, SD §12 | #34, ui#57 |
 | список PR | `GET /api/repos/{id}/pulls` → `{items: PullRequestSummary[], nextCursor}` (D11) | `contracts/openapi.yaml` | #34 |
 | бейджи Critical / Warning / Info | пять уровней severity; три бейджа — группировка в UI | §11 | ui#57 |
-| «общий скор / вердикт» | `verdict: blocking \| attention \| clean`, выводится на сервере; скора нет | §11 (D3) | #34, ui#57, #30 (`expected_verdict`) |
+| «общий скор / вердикт» | `verdict: blocking \| attention \| clean \| null`, сохраняется backend вместе с coverage; скора нет | §11 (D3, #107) | #34, ui#57, #30 (`expected_verdict`) |
 | Diff Suggestion; предлагаемый diff-fix (карточка техлида) | `suggestion` находки: замена строк `start_line..line`; `null` — замены нет | §9 | #33, ui#57 |
 | запуск по `opened` / `synchronize` | конъюнкция Р-10: стоит лейбл `ai-review` ∧ CI зелёный; `synchronize` отменяет устаревший Run и запускает авто-повтор | §8 (D2) | #11 |
 | «GitHub / GitLab» (карточки Инженера 1 и Инженера 3) | в v1 только GitHub; GitLab — порт `VcsProvider` без реализации (Р-11) | SD §1, §8.1 | #11, ui#50 |
@@ -436,7 +490,7 @@ UI рисует диапазон `[newLine ?? oldLine, endLine ?? newLine ?? old
 | «Применить Terraform» (карточка DevOps) | окружение staging — курсовой VPS вне Terraform; стеки `terraform/` остаются задокументированной альтернативой, CI продолжает их проверять, apply не требуется | `docs/INFRASTRUCTURE.md` | #35 |
 | «по пушу в main/develop» (карточка DevOps) | ветки `develop` нет, базовая ветка — `main`; `main` выкатывается на staging, prod вне спринта | `docs/CICD.md` | #35 |
 | «Docker-образы бэкенда, воркеров» (карточка DevOps) | образ один: воркер запускается из того же образа, что `api`, своей командой (#34); per-service образы — вместе с разделением на сервисы (#16), не в этом спринте | SD §14 | #34, #35 |
-| Finding «от Теклида» (карточка LLM Gateway) | `ReviewOutput` по `review/schemas/review-output.schema.json`, а не `Finding[]` | §9 | #33, #30 |
+| Finding «от Теклида» (карточка LLM Gateway) | Обёртка `ReviewOutput`, не `Finding[]`: текущая schema — v1; целевая v2 с evidence и отдельной verifier schema требует реализации | §9 | #33, #30, #107 |
 
 ---
 
@@ -447,7 +501,8 @@ UI рисует диапазон `[newLine ?? oldLine, endLine ?? newLine ?? old
 | Р-10 / OQ-1 — триггер и повторное ревью | **закрыт**: конъюнкция Р-10 подтверждена; триггер — лейбл `ai-review`, потому что бота нельзя запросить ревьюером ([#37](https://github.com/larchanka-training/dmc-268-api-t6/issues/37#issuecomment-5874776355)); после пуша — авто-повтор, пока PR открыт и стоит лейбл (флаг `ai_review_labeled`, §8). #38 владеет портом выбора и `SweepNoCi`, #34 — advisory-lock leader-циклом и периодом 30 с. | D2 [техлид]; лейбл вместо запроса ревьюера — [техлид] по #37; определение «зелёного CI» (check suites без своего и combined status `success` или пусто) — REST в `try_enqueue`; guard включает отсутствие webhook Run на `(PR, head_sha)` |
 | OQ-2 — модель и бюджет | **закрыт** (#33, пара переназначена в #46): основная `mistral-small-4`, fallback `mistral-small-3.2-24b`; контекст ≥ 60 000 токенов и стоимость fast ≤ $0.50 проверены по каталогу EUrouter, strict `json_schema` у обеих подтверждён на обслуживших маршрутах прогонами workflow `LLM live run` (#46). Первый ответ валиден у `mistral-small-4` в 2 из 3 на ветке #46 (4 из 7 всего), у `mistral-small-3.2-24b` — в 2 из 3 (2 из 4); причина repair в артефактах ветки не сохраняется, в пробах с сырым ответом это была только семантика §9. Подробности — SD §15 | D7 [техлид]; выбор — #33 |
 | OQ-3 — `review_event` по умолчанию | **закрыт**: `COMMENT`; поле `reviewEvent` в `Repository`; `REQUEST_CHANGES` — только при `reviewEvent = REQUEST_CHANGES` ∧ `blocking` (§11) | D8, D3 [дефолт] |
-| Инфраструктура MVP | PostgreSQL 17 + RabbitMQ + Redis. Объектное хранилище (S3) отложено после MVP. Вместо него: тела ответов > 64 КБ — отдельная таблица PG (§2, миграция — #34); полный `ContextPayload` не хранится, в PG — только summary; payload вебхука — JSONB в PG (миграция — #11); блобы > 256 КБ — `cached_file_blobs` в PG | D1 [техлид, пересмотрено 27.09.2026] |
+| Инфраструктура MVP | PostgreSQL 17 + RabbitMQ + Redis, S3 отложено. В legacy PG хранит summary ContextPayload и большие тела trace отдельно; webhook payload — JSONB, крупные кэш-блобы — `cached_file_blobs`. Для #107 PG дополнительно сохраняет полный policy snapshot, manifests с точными evidence excerpts, candidates/decisions, immutable final result и publication plan (§2); прежнее «только summary» не распространяется на новые доказательства | D1 [техлид, пересмотрено 27.09.2026]; #107 |
+| Политика/контекст/проверка/доставка #107 | Целевые §2, §4.5, §5, §9–§11; канон деталей — RULES_FORMAT_SPEC и CONTEXT_AND_VERIFICATION_SPEC. Новые профили включаются после миграций, schema/API/UI и требуемых проверок; legacy runs не получают synthetic verified status | Согласовано пользователем 09.10.2026; реализация отдельно |
 | Контракт авторизации | GitHub App user authorization без OAuth scopes; `state` генерирует и хранит SPA. `POST /api/auth/github/callback {code}` → access JWT (15 мин, Bearer) и refresh в httpOnly-cookie (30 дней, ротация, `Path=/api/auth`). Дальше — `POST /api/auth/refresh`, `GET /api/auth/me`, `POST /api/auth/logout`; SSE — fetch-стрим с Bearer. Полный контракт — SD §12 и `contracts/openapi.yaml`, реализация — #11 | D4 [техлид]; access-токен в памяти, подпись в auth-api и проверка публичным ключом в portal-api, граница Workspace по Р-7 — [дефолт] |
 | Стадии, вердикт, якорь, retry | §2, §11, §10, §4 | D5, D3 [техлид]; имена `run_actions.tool` в стиле main — [дефолт]; D6 [техлид, формулы — дефолт]; D13 [дефолт] |
 | Rerun (T3) | `POST /api/runs/{id}/rerun` создаёт новый Run на текущий `head_sha`; флаг и CI не проверяются. `409`, если у PR есть активный Run или PR закрыт (§1) | `409` при активном Run и при закрытом PR — [дефолт] |
@@ -469,7 +524,7 @@ UI рисует диапазон `[newLine ?? oldLine, endLine ?? newLine ?? old
 
 ## 16. Проверки
 
-Команды запускаются из корня репозитория. Тесты не требуют БД и входят в required check `Python lint / type / test` (`uv run pytest`). Политику §1–§8 проверяют тесты реализаций (#11, #33, #34); этот PR фиксирует схемы.
+Ниже сохранены команды и ожидаемые результаты существующих проверок контрактов; их выполнение в документационной работе #107 не заявляется. По указанию пользователя проверки не запускались. Команды запускаются из корня репозитория; существующие contract tests не требуют БД и входят в required check `Python lint / type / test` (`uv run pytest`). Текущие схемы/тесты покрывают legacy-путь, а не ещё не реализованный новый профиль. При реализации #107 потребуются согласованное обновление схем/корпуса и сценарии [TEST_PLAN.md](TEST_PLAN.md), RULES_FORMAT_SPEC §11 и CONTEXT_AND_VERIFICATION_SPEC §11.
 
 | Контракт | Команда | Что проверяет |
 |---|---|---|
