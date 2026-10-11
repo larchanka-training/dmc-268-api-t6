@@ -21,6 +21,7 @@ from sqlalchemy import (
     DateTime,
     ForeignKey,
     Index,
+    LargeBinary,
     Numeric,
     String,
     UniqueConstraint,
@@ -262,6 +263,71 @@ class Run(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
     )
+
+
+class RunPolicyDocument(Base):
+    """One policy document of a run, staged once and never overwritten (RULES §7.2)."""
+
+    __tablename__ = "run_policy_documents"
+    __table_args__ = (
+        UniqueConstraint("run_id", "path", name="uq_run_policy_documents_run_path"),
+        CheckConstraint(
+            "presence IN ('present', 'missing')", name="ck_run_policy_documents_presence"
+        ),
+        CheckConstraint(
+            "(presence = 'missing') = (text IS NULL) "
+            "AND (presence = 'missing') = (raw_bytes IS NULL) "
+            "AND (presence = 'missing') = (raw_sha256 IS NULL) "
+            "AND (presence = 'missing') = (text_sha256 IS NULL) "
+            "AND (presence = 'missing') = (blob_oid IS NULL)",
+            name="ck_run_policy_documents_content_matches_presence",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
+    run_id: Mapped[UUID] = mapped_column(ForeignKey("runs.id", ondelete="CASCADE"), nullable=False)
+    path: Mapped[str] = mapped_column(String(255), nullable=False)
+    presence: Mapped[str] = mapped_column(String(16), nullable=False)
+    blob_oid: Mapped[str | None] = mapped_column(String(64))
+    raw_sha256: Mapped[str | None] = mapped_column(CHAR(64))
+    text_sha256: Mapped[str | None] = mapped_column(CHAR(64))
+    raw_bytes: Mapped[bytes | None] = mapped_column(LargeBinary)
+    text: Mapped[str | None] = mapped_column(TEXT)
+    byte_count: Mapped[int | None] = mapped_column(INTEGER)
+    line_count: Mapped[int | None] = mapped_column(INTEGER)
+    created_at: Mapped[datetime] = timestamp_column()
+
+
+class RunPolicySnapshot(Base):
+    """The immutable policy of a run; its documents are the staged rows of the same run."""
+
+    __tablename__ = "run_policy_snapshots"
+
+    run_id: Mapped[UUID] = mapped_column(
+        ForeignKey("runs.id", ondelete="CASCADE"), primary_key=True
+    )
+    snapshot_id: Mapped[UUID] = mapped_column(Uuid, nullable=False, unique=True)
+    repository_id: Mapped[UUID] = mapped_column(
+        ForeignKey("repositories.id", ondelete="CASCADE"), nullable=False
+    )
+    schema_version: Mapped[int] = mapped_column(INTEGER, nullable=False)
+    policy_base_sha: Mapped[str] = mapped_column(String(64), nullable=False)
+    ignore_patterns: Mapped[list[str]] = mapped_column(JSONB, nullable=False)
+    ignore_digest: Mapped[str] = mapped_column(CHAR(64), nullable=False)
+    parser_profile: Mapped[str] = mapped_column(String(64), nullable=False)
+    parser_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    matcher_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    limits_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    builtin_exclusions_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    priority_matcher_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    service_defaults_rule_version_id: Mapped[UUID] = mapped_column(
+        ForeignKey("rule_versions.id"), nullable=False
+    )
+    defaults_checksum: Mapped[str] = mapped_column(CHAR(64), nullable=False)
+    prompt_bindings: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    execution_profile: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    policy_digest: Mapped[str] = mapped_column(CHAR(64), nullable=False)
+    created_at: Mapped[datetime] = timestamp_column()
 
 
 class ContextPayload(Base):
