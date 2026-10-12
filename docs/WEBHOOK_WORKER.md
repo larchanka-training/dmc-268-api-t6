@@ -537,14 +537,34 @@ PRs, any temporarily blocked target keeps the whole receipt retryable; already-e
 reviewed targets are safe to replay.
 
 After dispatch, a short receipt transaction verifies the claim token, clears its lease and
-token, and commits a `retry_after` 30 seconds later. It leaves `projected_at`,
-`projection_failed_at`, `projection_deferred_at`, and the generic attempt counter untouched.
-Waiting has no attempt ceiling, so cancellation lasting more than three polls cannot finish
-the receipt. The existing worker poll processes it when due; a restart uses the saved
+token, resets `projection_attempt_count` to zero, and commits a `retry_after` 30 seconds
+later. A successful waiting dispatch breaks the sequence of dispatch failures, so three
+consecutive failures still mark a receipt failed, but failures separated by successful
+waits do not accumulate. Ordinary repository/installation deferrals keep their existing
+attempt policy. Waiting has no poll-count ceiling, so cancellation lasting more than three
+polls does not finish the receipt. The existing worker poll processes it when due; a restart uses the saved
 payload and retry time without needing another webhook. If the process crashes before
 finalizing the receipt, its claim becomes available after the five-minute lease. A lost
 claim raises; it does not report a successful release. Pending waits are not finished
 receipts and cannot be purged by finished-receipt retention.
+
+Continued supersession waiting is bounded to one hour from the original persisted
+`received_at`. On the first successful dispatch that still reports `deferred_run_trigger`
+at or after that deadline, the same token-guarded update sets `projection_failed_at`, resets
+the attempt counter and clears retry, claim and lease. After the use case commits, it logs
+`GitHub webhook delivery <delivery_id> failed after supersession wait reached its age limit`
+at WARNING. A failed commit emits no expiry warning and leaves the previous receipt state
+intact. Expired receipts never replay, even when A later completes; finished-receipt
+retention can purge them 30 days after failure. Dispatch still checks current state before
+applying this waiting limit: if A has already become terminal during delayed worker
+recovery, B can enqueue even after the receipt's one-hour deadline.
+
+The 30-second retry interval allows approximately 120 wait polls per hour. Each CI receipt
+poll in `always`/`auto` makes two GitHub requests; a PR/label receipt also fetches the current
+PR, for approximately 240/360 requests per hour respectively. Separate CI deliveries for
+the same head each incur that cost. The deadline is enforced on the next due successful
+wait poll; worker downtime, an in-progress dispatch, or GitHub failures can delay that
+poll. No backoff or additional GitHub request is introduced.
 
 Every retry runs target lookup and current eligibility again. An obsolete B CI event has no
 current target after push C; B's success cannot approve C. Current PR label/lifecycle

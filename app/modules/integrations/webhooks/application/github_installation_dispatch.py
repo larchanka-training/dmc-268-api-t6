@@ -111,13 +111,13 @@ class PullRequestLabelIntentHandler(Protocol):
 
 
 class WebhookRunTriggerHandler(Protocol):
-    """Only structured outcomes can request retry; legacy log strings are final."""
+    """Structured trigger detail and retry intent for each supported event."""
 
-    async def on_pr(self, event: PullRequestEvent) -> RunTriggerOutcome | str | None: ...
+    async def on_pr(self, event: PullRequestEvent) -> RunTriggerOutcome: ...
 
-    async def on_label(self, event: PullRequestLabelEvent) -> RunTriggerOutcome | str | None: ...
+    async def on_label(self, event: PullRequestLabelEvent) -> RunTriggerOutcome: ...
 
-    async def on_ci(self, event: CiTriggerEvent) -> RunTriggerOutcome | str | None: ...
+    async def on_ci(self, event: CiTriggerEvent) -> RunTriggerOutcome: ...
 
 
 class GitHubInstallationDeliveryDispatcher:
@@ -241,21 +241,18 @@ class GitHubInstallationDeliveryDispatcher:
 
     @staticmethod
     def _trigger_result(
-        outcome: RunTriggerOutcome | str | None,
+        outcome: RunTriggerOutcome,
         final_status: InstallationDeliveryDispatchStatus,
         action: str | None = None,
     ) -> InstallationDeliveryDispatchResult:
-        detail: str | None
-        if isinstance(outcome, RunTriggerOutcome):
-            status = (
-                InstallationDeliveryDispatchStatus.DEFERRED_RUN_TRIGGER
-                if outcome.retry_required
-                else final_status
-            )
-            detail = outcome.detail
-        else:
-            status, detail = final_status, outcome
-        return InstallationDeliveryDispatchResult(status, _with_action(action, detail))
+        status = (
+            InstallationDeliveryDispatchStatus.DEFERRED_RUN_TRIGGER
+            if outcome.retry_required
+            else final_status
+        )
+        return InstallationDeliveryDispatchResult(
+            status, _with_action(action, outcome.detail or None)
+        )
 
     @staticmethod
     def _projection_result(

@@ -16,6 +16,7 @@ import os
 import re
 from collections.abc import Iterator
 from dataclasses import dataclass, field
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import uuid4
 
@@ -34,6 +35,9 @@ from app.bootstrap.reviews_api import (
 )
 from app.main import app, get_github_webhook_secret
 from app.modules.integrations.webhooks.api.receipt import VerifiedGitHubDelivery
+from app.modules.integrations.webhooks.application.receive_github_delivery import (
+    ReceiveGitHubDelivery,
+)
 from app.modules.integrations.webhooks.infrastructure.github_installation_tree_provider import (
     StaticGitHubInstallationAccessTokenProvider,
 )
@@ -131,6 +135,7 @@ class FakeGitHub:
     state: str = "open"
     labeled: bool = True
     updated_at: str = "2026-10-05T10:00:00Z"
+    ci_status: int = 200
 
     def __call__(self, request: httpx.Request) -> httpx.Response:
         path = request.url.path
@@ -144,6 +149,8 @@ class FakeGitHub:
             return httpx.Response(200, json=current)
         for sha, suites in ((sha, self.ci.get(sha, [])) for sha in (HEAD, NEW_HEAD, NEXT_HEAD)):
             if path == f"/repos/octo/repo/commits/{sha}/check-suites":
+                if self.ci_status != 200:
+                    return httpx.Response(self.ci_status, json={"message": "Server Error"})
                 return httpx.Response(
                     200, json={"total_count": len(suites), "check_suites": suites}
                 )
@@ -729,6 +736,145 @@ async def _finish_old_head(pipeline: Pipeline) -> None:
         "WHERE head_sha = :head",
         head=HEAD,
     )
+
+
+@pytest.mark.integration
+def test_successful_wait_resets_transient_failures_before_new_head_queues(
+    database: Database,
+) -> None:
+    async def scenario(pipeline: Pipeline) -> None:
+        await _wait_for_new_head(pipeline)
+        for failure in range(3):
+            pipeline.github.ci_status = 502
+            await pipeline.due_retries()
+            assert await pipeline.replay() == 0
+            assert await pipeline.sql(
+                "SELECT projection_attempt_count, projection_failed_at, retry_after IS NOT NULL "
+                "FROM webhook_events WHERE delivery_id = 'delivery-3'"
+            ) == [(1, None, True)]
+            if failure < 2:
+                pipeline.github.ci_status = 200
+                await pipeline.due_retries()
+                assert await pipeline.replay() == 1
+                assert await pipeline.sql(
+                    "SELECT projection_attempt_count, projection_failed_at, "
+                    "retry_after IS NOT NULL FROM webhook_events WHERE delivery_id = 'delivery-3'"
+                ) == [(0, None, True)]
+                await pipeline.restart()
+        pipeline.github.ci_status = 200
+        await _finish_old_head(pipeline)
+        await pipeline.due_retries()
+        assert await pipeline.replay() == 1
+        assert pipeline.deliveries == 3
+        assert await pipeline.runs() == [("e" * 40, "cancelled", True), ("d" * 40, "queued", True)]
+        assert await pipeline.sql(
+            "SELECT count(*) FROM runs WHERE state IN ('queued', 'running', 'publishing')"
+        ) == [(1,)]
+        assert [
+            message.head_sha
+            for message, kind in pipeline.publisher.messages
+            if kind == RunPublicationKind.QUEUED
+        ] == ["e" * 40, "d" * 40]
+
+    _run(database, FakeGitHub(ci={HEAD: _green(HEAD)}), scenario)
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("blocker_terminal", [False, True], ids=["continued-wait", "recovered"])
+def test_wait_age_uses_original_receipt_and_only_expires_continued_waiting(
+    database: Database, caplog: pytest.LogCaptureFixture, blocker_terminal: bool
+) -> None:
+    received = datetime(2026, 10, 9, tzinfo=UTC)
+    now = received + timedelta(minutes=59, seconds=59)
+
+    async def scenario(pipeline: Pipeline) -> None:
+        nonlocal now
+        await _wait_for_new_head(pipeline)
+        await pipeline.sql(
+            "UPDATE webhook_events SET received_at = :received WHERE delivery_id = 'delivery-3'",
+            received=received,
+        )
+        # Use the public receiver clock with the production dispatcher and persistence.
+        pipeline.receiver = ReceiveGitHubDelivery(
+            uow_factory=pipeline.resources.github_webhook_receipts,
+            dispatcher=pipeline.resources.github_installation_delivery_dispatcher(
+                client=pipeline.client,
+                token_provider=StaticGitHubInstallationAccessTokenProvider(TOKEN),
+                bot_login="reviewer[bot]",
+                run_publisher=pipeline.publisher,
+                app_id=APP_ID,
+            ),
+            now=lambda: now,
+        )
+        await pipeline.sql("UPDATE webhook_events SET retry_after = :now", now=now)
+        assert await pipeline.replay() == 1
+        assert await pipeline.sql(
+            "SELECT projection_failed_at, retry_after FROM webhook_events "
+            "WHERE delivery_id = 'delivery-3'"
+        ) == [(None, received + timedelta(hours=1, seconds=29))]
+        now = received + timedelta(hours=1)
+        await pipeline.sql("UPDATE webhook_events SET retry_after = :now", now=now)
+        if blocker_terminal:
+            await _finish_old_head(pipeline)
+        assert await pipeline.replay() == 1
+        if blocker_terminal:
+            assert await pipeline.runs() == [
+                ("e" * 40, "cancelled", True),
+                ("d" * 40, "queued", True),
+            ]
+        else:
+            assert await pipeline.sql(
+                "SELECT projected_at, projection_failed_at, projection_attempt_count, "
+                "retry_after, projection_claim_token, projection_lease_until "
+                "FROM webhook_events WHERE delivery_id = 'delivery-3'"
+            ) == [(None, received + timedelta(hours=1), 0, None, None, None)]
+            await _finish_old_head(pipeline)
+            now += timedelta(days=1)
+            assert await pipeline.replay() == 0
+            assert await pipeline.runs() == [("e" * 40, "cancelled", True)]
+            assert [
+                message.head_sha
+                for message, kind in pipeline.publisher.messages
+                if kind == RunPublicationKind.QUEUED
+            ] == ["e" * 40]
+        assert pipeline.deliveries == 3
+
+    with caplog.at_level(logging.WARNING):
+        _run(database, FakeGitHub(ci={HEAD: _green(HEAD)}), scenario)
+    warnings = [
+        record.getMessage() for record in caplog.records if record.levelno == logging.WARNING
+    ]
+    assert warnings == (
+        []
+        if blocker_terminal
+        else [
+            "GitHub webhook delivery delivery-3 failed after supersession wait "
+            "reached its age limit"
+        ]
+    )
+
+
+@pytest.mark.integration
+def test_three_consecutive_wait_dispatch_failures_are_terminal(database: Database) -> None:
+    async def scenario(pipeline: Pipeline) -> None:
+        await _wait_for_new_head(pipeline)
+        pipeline.github.ci_status = 502
+        for attempt in (1, 2, 3):
+            await pipeline.due_retries()
+            assert await pipeline.replay() == 0
+            assert await pipeline.sql(
+                "SELECT projection_attempt_count, projection_failed_at IS NOT NULL, "
+                "retry_after IS NOT NULL FROM webhook_events WHERE delivery_id = 'delivery-3'"
+            ) == [(attempt, attempt == 3, attempt < 3)]
+        await pipeline.restart()
+        pipeline.github.ci_status = 200
+        await _finish_old_head(pipeline)
+        assert await pipeline.replay() == 0
+        assert await pipeline.runs() == [("e" * 40, "cancelled", True)]
+        assert pipeline.deliveries == 3
+        assert len(pipeline.publisher.messages) == 1
+
+    _run(database, FakeGitHub(ci={HEAD: _green(HEAD)}), scenario)
 
 
 @pytest.mark.integration

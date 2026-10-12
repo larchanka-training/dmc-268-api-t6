@@ -140,7 +140,15 @@ class ReceiptStore:
         row.projected = True
         row.claim_token = None
 
-    async def retry_run_trigger(self, delivery_id: str, token: UUID, retry_after: datetime) -> None:
+    async def retry_run_trigger(
+        self,
+        delivery_id: str,
+        token: UUID,
+        retry_after: datetime,
+        *,
+        now: datetime,
+        received_before: datetime,
+    ) -> bool:
         raise AssertionError("successful full path must not wait for a Run")
 
     async def release(
