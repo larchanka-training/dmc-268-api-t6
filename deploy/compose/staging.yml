@@ -56,7 +56,7 @@ services:
   worker:
     image: ${IMAGE:?IMAGE is required}
     command: ["python", "-m", "app.worker"]
-    # app.env: GitHub App credentials; worker.env: LLM gateway (docs/SECRETS.md).
+    # app.env: GitHub App credentials; worker.env: LLM gateway and portal links (docs/SECRETS.md).
     env_file:
       - app.env
       - worker.env

@@ -65,7 +65,7 @@ flowchart TD
 
 Стенд должен уже существовать ([INFRASTRUCTURE.md](INFRASTRUCTURE.md)). Secrets и variables — [SECRETS.md](SECRETS.md).
 
-1. Settings → Environments → `staging`: Deployment branches → только `main`; для Terraform-хоста заполнить secrets/variables environment (для курсового VPS хватает organization secrets и repository variables, §8). Required reviewers по умолчанию не включать — см. [SECRETS.md](SECRETS.md) §2.
+1. Settings → Environments → `staging`: Deployment branches → только `main`; для Terraform-хоста заполнить secrets/variables environment (доступ к курсовому VPS — organization secrets и repository variables, §8). Для ссылки на конкретный Run задать публичную Environment variable `PORTAL_URL` адресом UI (§2.1). Required reviewers по умолчанию не включать — см. [SECRETS.md](SECRETS.md) §2.
 2. Push (или merge) в `main`.
 3. Дождаться зелёных проверок и job **Push Docker image** (immutable `:sha` + digest в логах).
 4. Job **Deploy staging** выбирает цель (§8), копирует `deploy/` в `APP_DIR` (`/opt/dmc-268-api` на Terraform-хосте, `/opt/dmc-268-api-staging` на курсовом VPS), готовит хост и выкатывает образ по digest; bootstrap снимается только после `docker pull` и перед `compose up`.
@@ -81,6 +81,65 @@ docker build -t dmc-268-api:local .
 docker run --rm -p 8000:8000 dmc-268-api:local
 curl -fsS http://127.0.0.1:8000/healthcheck
 ```
+
+### 2.1. Проверка ссылки на Run (#111)
+
+До штатного выката настройте публичную variable (для текущего staging задана
+и прочитана обратно 10.10.2026):
+
+```bash
+gh variable set PORTAL_URL --env staging -R larchanka-training/dmc-268-api-t6 \
+  --body 'https://staging-ui.dmc268-t6.axyi.ru'
+gh variable list --env staging -R larchanka-training/dmc-268-api-t6 \
+  --json name,value --jq '.[] | select(.name == "PORTAL_URL")'
+```
+
+Workflow читает `vars.PORTAL_URL` в «Bundle application secrets», включает ключ
+в `names` → `APP_SECRETS_B64` → `env-file.sh` (`WORKER_ENV_KEYS`) → `worker.env`
+→ только review-worker (`worker`). Незаданное/пустое итоговое значение не создаёт
+ключ: worker стартует без ссылки. Environment перекрывает одноимённую repository
+variable. URL не выводится из `STAGING_HEALTH_URL` или API-домена; для отдельного
+UI на Terraform-хосте задайте его origin явно. Rollback сохраняет текущий
+`worker.env`, включая URL, записанный перед неуспешным выкатом.
+
+После reviewed merge в `main` и зелёного **Deploy staging** проверьте на хосте
+только публичный ключ, не печатая остальные переменные. Для курсового VPS:
+
+```bash
+cd /opt/dmc-268-api-staging
+docker compose -p dmc-268-api-staging -f compose.yml -f compose.edge.yml --env-file .env \
+  exec -T worker python -c 'import os; print(os.environ.get("PORTAL_URL"))'
+```
+
+Ожидается `https://staging-ui.dmc268-t6.axyi.ru`. На Terraform-хосте используйте
+`/opt/dmc-268-api`, проект `dmc-268-api` и `compose.ports.yml` (§8).
+В подключённом `axyi/dmc268-t6-sandbox` запустите новый обычный review с настоящим
+GitHub App/LLM: открытый PR, новый head с зелёным CI и активным `ai-review`.
+Дождитесь завершения и запишите UUID этого Run из портала. Старый check-run
+не подтверждает доставку новой настройки; PR CI не выкатывает staging.
+
+С рабочей машины получите check-runs нового head, выберите `id`, чей
+`external_id` совпадает с UUID нового Run, и проверьте его summary:
+
+```bash
+head_sha='<полный SHA нового sandbox head>'
+run_id='<UUID нового Run из портала>'
+gh api "repos/axyi/dmc268-t6-sandbox/commits/${head_sha}/check-runs?check_name=AI%20Review&filter=all&per_page=100" \
+  --paginate --jq '.check_runs[] | {id, external_id, html_url, status}'
+check_run_id='<id выбранного check-run>'
+gh api "repos/axyi/dmc268-t6-sandbox/check-runs/${check_run_id}" > /tmp/check-run-111.json
+jq -e --arg run_id "${run_id}" --arg head_sha "${head_sha}" \
+  --arg url "https://staging-ui.dmc268-t6.axyi.ru/runs/${run_id}" \
+  '.name == "AI Review" and .status == "completed" and .head_sha == $head_sha
+   and .external_id == $run_id and (.output.summary | contains($url))' /tmp/check-run-111.json
+jq -r '.html_url, .external_id, .head_sha, .output.summary' /tmp/check-run-111.json
+```
+
+Откройте URL `/runs/{run_id}` из summary в авторизованном портале и подтвердите
+тот же Run UUID. К PR/приёмке приложите свежий `html_url` check-run, UUID,
+SHA/digest staging и результат открытия страницы. Корневой `details_url` App
+не заменяет эту проверку. Пока нет штатного deployment или нужного доступа,
+live AC остаётся **pending**; зелёные локальные тесты его не подтверждают.
 
 ---
 
@@ -109,7 +168,7 @@ GET /healthcheck
 
 Образы хранилищ запиннены по digest (`<имя>:<версия>@sha256:…`), как Caddy в `deploy/edge/compose.yml`. При наличии digest Docker игнорирует тег, поэтому перевыкат и rollback не сдвигают хранилище на другую сборку; тег оставлен как подпись версии. Обновление — отдельным PR: `docker buildx imagetools inspect postgres:<версия>-alpine`, строка `Digest:` (digest multi-arch индекса), тег и digest меняются вместе. Rollback берёт compose из текущего checkout, поэтому пин хранилища вместе с образом приложения не откатывается: revert-коммит возвращает прежнюю ссылку на образ, но совместимость данных при возврате на старую версию не гарантирует — обновление хранилища проверять до мержа. Локальный `docker-compose.yml` и service-контейнеры CI остаются на плавающих тегах (`17-alpine`, `4-management-alpine`, `8-alpine`).
 
-`api` стартует после успешного `bootstrap` и здорового `postgres`. От RabbitMQ и Redis он не зависит: к брокеру API подключается при первой публикации (`LazyAmqpPublisher`), поэтому сбой брокера или кэша не мешает пересозданному `api` стартовать. `up --wait` всё равно ждёт healthcheck каждого сервиса, и падение любого запускает авто-rollback. Секреты приложения приходят в каждый контейнер только через env-файлы его роли: `api.env` → `api`, `app.env` (ключ App) → оба воркера, `worker.env` (LLM) → `worker`, `webhook-worker.env` (логин бота) → `webhook-worker` — [SECRETS.md](SECRETS.md) §1, §3.
+`api` стартует после успешного `bootstrap` и здорового `postgres`. От RabbitMQ и Redis он не зависит: к брокеру API подключается при первой публикации (`LazyAmqpPublisher`), поэтому сбой брокера или кэша не мешает пересозданному `api` стартовать. `up --wait` всё равно ждёт healthcheck каждого сервиса, и падение любого запускает авто-rollback. Секреты приложения приходят в каждый контейнер только через env-файлы его роли: `api.env` → `api`, `app.env` (ключ App) → оба воркера, `worker.env` (LLM и `PORTAL_URL`) → `worker`, `webhook-worker.env` (логин бота) → `webhook-worker` — [SECRETS.md](SECRETS.md) §1, §3.
 
 Воркеры стартуют после успешного `bootstrap` и здоровых `postgres` и `rabbitmq`: `worker` без брокера не объявит топологию очередей, а `webhook-worker` при проекции квитанций создаёт прогоны и публикует их в очередь ревью (#52). HTTP-порта у воркеров нет, поэтому HTTP-healthcheck образа у них заменён: процесс раз в 10 с трогает heartbeat-файл (`WORKER_HEARTBEAT_FILE`, `app/common/infrastructure/heartbeat.py`) — `worker` только после подключения обоих консьюмеров, — а healthcheck считает контейнер больным, если файлу больше 30 с. Воркер, упавший на старте (например, без `GITHUB_APP_BOT_LOGIN` или `RABBITMQ_URL`), или процесс с замороженным циклом событий не становится healthy, `up --wait` падает, и `deploy.sh` откатывает выкат. Heartbeat — отдельная задача того же цикла событий, поэтому зависшую работу он не ловит: застрявшее на одном сообщении ревью или проход `webhook-worker`, который каждый раз падает (например, с битым PEM App: ошибка уходит в лог, проход возвращает 0), оставляют контейнер healthy. Это намеренно: временная недоступность GitHub или БД не должна валить выкат; зависшую работу видно по логам и метрикам очередей, не по healthcheck. Docker не перезапускает контейнер, ставший unhealthy уже после выката: `restart: unless-stopped` срабатывает только при выходе процесса.
 
