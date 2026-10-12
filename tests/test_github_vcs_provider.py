@@ -382,3 +382,52 @@ def test_extended_file_statuses_copied_changed_unchanged_do_not_crash() -> None:
             assert [f.status for f in files] == ["copied", "changed", "unchanged"]
 
     asyncio.run(exercise())
+
+
+def test_merge_base_is_read_from_the_three_dot_comparison_of_base_and_head() -> None:
+    merge_base = "e" * 40
+    paths: list[str] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        paths.append(str(request.url))
+        assert request.headers["Authorization"] == "Bearer installation-token"
+        if request.url.path.endswith("/pulls/7"):
+            return httpx.Response(200, json=_pull_payload())
+        if "/compare/" in request.url.path:
+            return httpx.Response(
+                200, json={"merge_base_commit": {"sha": merge_base}, "commits": [], "files": []}
+            )
+        raise AssertionError(f"unexpected GitHub request: {request.url}")
+
+    async def exercise() -> str:
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(respond), base_url="https://api.github.test"
+        ) as client:
+            provider = HttpGitHubVcsProvider(client=client, token_provider=Tokens())
+            pr = await provider.get_pull_request(PullRequestLocator(17, "octo/repo", 7))
+            return await provider.get_merge_base(pr)
+
+    assert asyncio.run(exercise()) == merge_base
+    assert paths[1] == (
+        f"https://api.github.test/repos/octo/repo/compare/{_BASE}...{_HEAD}?per_page=1"
+    )
+
+
+def test_merge_base_fails_closed_on_an_error_or_a_response_without_a_commit() -> None:
+    async def exercise(response: httpx.Response) -> None:
+        def respond(request: httpx.Request) -> httpx.Response:
+            if request.url.path.endswith("/pulls/7"):
+                return httpx.Response(200, json=_pull_payload())
+            return response
+
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(respond), base_url="https://api.github.test"
+        ) as client:
+            provider = HttpGitHubVcsProvider(client=client, token_provider=Tokens())
+            pr = await provider.get_pull_request(PullRequestLocator(17, "octo/repo", 7))
+            await provider.get_merge_base(pr)
+
+    with pytest.raises(httpx.HTTPStatusError):
+        asyncio.run(exercise(httpx.Response(404, json={"message": "Not Found"})))
+    with pytest.raises(ValueError, match="merge_base_commit"):
+        asyncio.run(exercise(httpx.Response(200, json={"commits": []})))
