@@ -15,7 +15,10 @@ from app.modules.reviews.application.conventions import (
     GeneratedConventions,
     GenerateRepoConventions,
 )
-from app.modules.reviews.application.get_run_diff import DiffSnapshot
+from app.modules.reviews.application.get_run_diff import (
+    DiffSnapshot,
+    review_files_from_snapshots,
+)
 from app.modules.reviews.application.get_run_file_lines import BlobCacheKey
 from app.modules.reviews.application.process_run import (
     ReviewRunProcessor,
@@ -41,13 +44,19 @@ def _file(path: str, sha: str) -> VcsFile:
     return VcsFile(path, "modified", sha, None, 1, 1, 2, _PATCH)
 
 
+@dataclass
 class GitHub:
+    files: tuple[VcsFile, ...] = (
+        _file("src/new.py", "1" * 40),
+        _file("generated/api.py", "2" * 40),
+    )
+
     async def get_pull_request(self, locator: PullRequestLocator) -> VcsPullRequest:
         meta = PullRequestMeta("PR", None, "octo", "feature", "main", (), 2, 2, 2, False, False)
         return VcsPullRequest(locator, HEAD, BASE, meta)
 
     async def get_diff(self, pull_request: VcsPullRequest) -> tuple[VcsFile, ...]:
-        return (_file("src/new.py", "1" * 40), _file("generated/api.py", "2" * 40))
+        return self.files
 
     async def get_blob(self, locator: PullRequestLocator, sha: str) -> bytes:
         return b"new\n"
@@ -85,6 +94,7 @@ class Repository:
 class Conventions:
     events: list[str]
     changed_files: tuple[str, ...] | None = None
+    policy_key: str | None = None
 
     async def execute(
         self,
@@ -94,9 +104,11 @@ class Conventions:
         run_id: UUID,
         changed_files: tuple[str, ...],
         rules: tuple[object, ...],
+        policy_key: str | None = None,
     ) -> GeneratedConventions:
         self.events.append("conventions model")
         self.changed_files = changed_files
+        self.policy_key = policy_key
         return GeneratedConventions(
             CachedConventions(REPOSITORY_ID, None, RUN_ID, (), (), {}), None, False
         )
@@ -106,6 +118,10 @@ class Conventions:
 class Stage:
     events: list[str]
     skip: bool = False
+    policy_key: str | None = "1" * 64
+
+    async def begin(self, run_id: UUID) -> None:
+        self.events.append("policy loaded")
 
     async def run(self, run_id: UUID) -> object:
         self.events.append("policy stage")
@@ -114,7 +130,10 @@ class Stage:
         return None
 
     def excluded(self, path: str) -> bool:
-        return path.startswith("generated/")
+        return path.startswith(("generated/", "vendor/"))
+
+    def excludes_change(self, path: str, previous_path: str | None) -> bool:
+        return any(self.excluded(item) for item in (path, previous_path) if item)
 
 
 def _prepare(stage: Stage | None, events: list[str]) -> Conventions:
@@ -139,7 +158,8 @@ def test_stage_runs_after_the_diff_is_stored_and_before_the_conventions_model() 
 
     conventions = _prepare(Stage(events), events)
 
-    assert events == ["diff stored", "policy stage", "conventions model"]
+    assert events == ["policy loaded", "diff stored", "policy stage", "conventions model"]
+    assert conventions.policy_key == "1" * 64
     # An ignored file is not named to the conventions model either.
     assert conventions.changed_files == ("src/new.py",)
 
@@ -150,7 +170,7 @@ def test_skipped_run_never_reaches_a_model_call() -> None:
     with pytest.raises(RunSkipped):
         _prepare(Stage(events, skip=True), events)
 
-    assert events == ["diff stored", "policy stage"]
+    assert events == ["policy loaded", "diff stored", "policy stage"]
 
 
 def test_without_the_stage_the_processor_behaves_as_before() -> None:
@@ -160,3 +180,44 @@ def test_without_the_stage_the_processor_behaves_as_before() -> None:
 
     assert events == ["diff stored", "conventions model"]
     assert conventions.changed_files == ("src/new.py", "generated/api.py")
+    assert conventions.policy_key is None
+
+
+def test_ignored_lines_do_not_make_the_allowed_change_summary_only() -> None:
+    # The normative case: 4 000 ignored lines next to 50 allowed ones.
+    big = "@@ -0,0 +1,4000 @@\n" + "\n".join("+x = 1" for _ in range(4000))
+    small = "@@ -0,0 +1,50 @@\n" + "\n".join(f"+value_{n} = {n}" for n in range(50))
+    files = (
+        VcsFile("vendor/client.py", "added", "2" * 40, None, 4000, 0, 4000, big),
+        VcsFile("src/app.py", "added", "1" * 40, None, 50, 0, 50, small),
+    )
+
+    def stored(stage: Stage | None) -> list[DiffSnapshot]:
+        events: list[str] = []
+        repository = Repository(events)
+        options = {} if stage is None else {"context_stage": stage}
+        processor = ReviewRunProcessor(
+            repository,
+            None,
+            blob_cache=InMemoryBlobCache(),
+            conventions=cast(GenerateRepoConventions, Conventions(events)),
+            vcs_provider=GitHub(files),
+            uow_factory=processing_uow(repository),
+            **options,  # type: ignore[arg-type]
+        )
+        asyncio.run(processor.prepare(RUN_ID))
+        return repository.snapshots
+
+    with_policy = stored(Stage([]))
+    changed, omitted = review_files_from_snapshots(with_policy)
+    # What the review request is built from: the allowed file with all its 50 lines.
+    assert [(file.path, len(file.lines)) for file in changed] == [("src/app.py", 50)]
+    assert omitted == ("vendor/client.py",)
+    assert not any(snapshot.summary_only for snapshot in with_policy)
+    vendor = next(item for item in with_policy if item.filename == "vendor/client.py")
+    # The UI keeps the full patch of the ignored file; the model gets none of it.
+    assert vendor.patch is not None and vendor.review_patch is None
+
+    without_policy = stored(None)
+    assert all(snapshot.summary_only for snapshot in without_policy)
+    assert review_files_from_snapshots(without_policy)[0] == ()

@@ -12,7 +12,7 @@ from datetime import timedelta
 from typing import Literal
 
 import httpx
-from pydantic import Field, TypeAdapter
+from pydantic import Field, TypeAdapter, ValidationError
 
 from app.common.infrastructure.github_repository_path import commit_sha_segment
 from app.modules.reviews.application.policy_documents import (
@@ -40,7 +40,8 @@ _SYMLINK_MODE = "120000"
 
 class _TreeItem(_GitHubDto):
     path: str = Field(min_length=1)
-    mode: str
+    # GitHub always sends the mode; without it an entry cannot be told to be a symlink.
+    mode: str | None = None
     type: Literal["blob", "tree", "commit"]
     sha: str = Field(pattern=_SHA)
     size: int | None = Field(default=None, ge=0)
@@ -94,7 +95,13 @@ class GitHubPolicyDocumentSource:
             response.raise_for_status()
         except httpx.HTTPError as exc:
             raise self._classify(exc) from exc
-        tree = _TREE.validate_python(response.json())
+        try:
+            tree = _TREE.validate_python(response.json())
+        except ValidationError as exc:
+            # An answer that is not a tree listing proves nothing about the documents.
+            raise self._error(
+                PolicyErrorCode.FETCH_TRANSIENT, "GitHub returned an unreadable tree listing"
+            ) from exc
         if tree.truncated:
             # A cut listing cannot prove that a path is absent.
             raise self._error(

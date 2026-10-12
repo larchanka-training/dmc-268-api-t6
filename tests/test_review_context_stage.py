@@ -336,7 +336,30 @@ def test_policy_part_that_cannot_be_established_fails_the_attempt() -> None:
     stage = _stage(Trace(), vcs=Unreachable())
     with pytest.raises(RunFailure):
         asyncio.run(stage.run(_RUN))
+    # The policy was loaded before the diff could not be read: its masks already apply.
+    assert stage.excluded("generated/api.py") is True
+    assert stage.policy_key is not None
+
+
+def test_policy_is_established_before_the_diff_and_names_what_a_change_withholds() -> None:
+    trace = Trace()
+    stage = _stage(trace)
+
+    assert stage.policy_key is None
     assert stage.excluded("generated/api.py") is False
+    asyncio.run(stage.begin(_RUN))
+
+    assert [step[0] for step in trace.steps] == ["policy.load"]
+    assert stage.excluded("generated/other.py") is True
+    assert stage.excludes_change("src/moved.py", "generated/old.py") is True
+    assert stage.excludes_change("src/app.py", None) is False
+    assert stage.excludes_change("src/app.py", "src\\bad.py") is True
+    first_key = stage.policy_key
+
+    # The policy is not loaded twice within one attempt.
+    asyncio.run(stage.run(_RUN))
+    assert [step[0] for step in trace.steps] == ["policy.load", "context.build"]
+    assert stage.policy_key == first_key
 
 
 def test_review_prompt_gets_neither_the_content_nor_the_name_of_an_ignored_file() -> None:

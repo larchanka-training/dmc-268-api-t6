@@ -88,9 +88,16 @@ class RunVcsRepository(Protocol):
 class ReviewContextStagePort(Protocol):
     """The policy and context stage of an attempt."""
 
+    @property
+    def policy_key(self) -> str | None: ...
+
+    async def begin(self, run_id: UUID) -> None: ...
+
     async def run(self, run_id: UUID) -> object: ...
 
     def excluded(self, path: str) -> bool: ...
+
+    def excludes_change(self, path: str, previous_path: str | None) -> bool: ...
 
 
 class RunProcessingUnitOfWork(UnitOfWork, Protocol):
@@ -140,6 +147,15 @@ class ReviewRunProcessor:
             vcs_run = await vcs_repository.get_run_vcs_input(run_id)
             if vcs_run is None:
                 return None
+            excluded: Callable[[DiffSnapshot], bool] | None = None
+            if self._context_stage is not None:
+                # The policy comes first: it decides what the diff threshold counts.
+                await self._context_stage.begin(run_id)
+                stage = self._context_stage
+
+                def excluded(snapshot: DiffSnapshot) -> bool:
+                    return stage.excludes_change(snapshot.filename, snapshot.previous_filename)
+
             stored_files = await vcs_repository.get_run_snapshots(run_id)
             if stored_files is None:
                 request = {
@@ -175,6 +191,7 @@ class ReviewRunProcessor:
                             code_change_id=vcs_run.code_change_id,
                             head_sha=vcs_run.head_sha,
                             files=files,
+                            **({} if excluded is None else {"excluded": excluded}),
                         )
                         await uow.commit()
                     step.response = {
@@ -228,12 +245,14 @@ class ReviewRunProcessor:
             conventions_input = await conventions_repository.get_run_conventions_input(run_id)
             if conventions_input is None:
                 return None
+            policy_key = None if self._context_stage is None else self._context_stage.policy_key
             return await self._conventions.execute(
                 repository_id=conventions_input.repository_id,
                 conventions_prompt=conventions_input.conventions_prompt,
                 run_id=run_id,
                 changed_files=changed_paths,
                 rules=conventions_input.rules,
+                **({} if policy_key is None else {"policy_key": policy_key}),
             )
         return True
 

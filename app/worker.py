@@ -42,6 +42,8 @@ from app.modules.reviews.application.conventions import (
     ConventionsModel,
     ConventionsRequest,
     GenerateRepoConventions,
+    PolicyFilteredConventionsSource,
+    RepositoryConventionsSource,
     RepositoryFile,
     RepositorySnapshot,
 )
@@ -220,8 +222,14 @@ async def process_review_run(
 
     repository = SqlAlchemyRunRepository(session_factory, allow_unscoped=True)
     blob_cache = SqlAlchemyBlobCache(session_factory)
+    conventions_source: RepositoryConventionsSource = ProviderRepositoryConventionsSource(provider)
+    if context_stage is not None:
+        # The ignore policy applies to what the conventions model is shown as well.
+        conventions_source = PolicyFilteredConventionsSource(
+            conventions_source, context_stage.excluded
+        )
     conventions = GenerateRepoConventions(
-        ProviderRepositoryConventionsSource(provider),
+        conventions_source,
         ProviderConventionsModel(provider),
         lambda: SqlAlchemyRepositoryConventionsUnitOfWork(session_factory),
     )
@@ -616,7 +624,12 @@ def github_adapters(
         context_stage=context_stage,
         vcs=vcs,
         run_source=lambda run_id: GitHubRunSource(
-            client=client, token_provider=tokens, vcs=vcs, runs=runs, run_id=run_id
+            client=client,
+            token_provider=tokens,
+            vcs=vcs,
+            runs=runs,
+            run_id=run_id,
+            conventions_from_base=True,
         ),
         check_runs=GitHubCheckRunGateway(client=client, token_provider=tokens),
         reviews=GitHubPullRequestReviewGateway(client=client, token_provider=tokens),

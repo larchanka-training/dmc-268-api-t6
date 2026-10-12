@@ -197,3 +197,20 @@ def test_blob_failures_are_policy_errors() -> None:
         with pytest.raises(PolicyError) as caught:
             _run(respond, Blobs(error=error), lambda source: source.read_blob(_AGENTS))
         assert caught.value.code is code
+
+
+def test_unreadable_tree_listing_is_a_retryable_failure_and_a_missing_mode_is_a_file() -> None:
+    def broken(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"tree": [{"path": "AGENTS.md"}]})
+
+    with pytest.raises(PolicyError) as caught:
+        _run(broken, Blobs(), lambda source: source.list_entries(None))
+    assert (caught.value.code, caught.value.retryable) == (PolicyErrorCode.FETCH_TRANSIENT, True)
+
+    def without_mode(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200, json={"tree": [{"path": "AGENTS.md", "type": "blob", "sha": _AGENTS, "size": 9}]}
+        )
+
+    entries = _run(without_mode, Blobs(), lambda source: source.list_entries(None))
+    assert entries["AGENTS.md"].kind is PolicyEntryKind.FILE

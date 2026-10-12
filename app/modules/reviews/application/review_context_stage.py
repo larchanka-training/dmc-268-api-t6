@@ -179,10 +179,41 @@ class ReviewContextStage:
         self._trace = trace
         self._token_budget = token_budget
         self._denied_paths: frozenset[str] = frozenset()
+        self._snapshot: PolicySnapshot | None = None
+        self._matcher: IgnoreMatcher | None = None
+
+    @property
+    def policy_key(self) -> str | None:
+        """Identity of the ignore policy for caches that depend on what was withheld."""
+        return None if self._snapshot is None else self._snapshot.ignore_digest
 
     def excluded(self, path: str) -> bool:
-        """Whether the policy of this attempt withholds the path from every model input."""
-        return path in self._denied_paths or not is_supported_path(path)
+        """Whether the policy of this attempt withholds the path from every model input.
+
+        True for a path outside the path contract, for any name of an ignored changed
+        file, and for every repository path that matches a mask of the policy.
+        """
+        if not is_supported_path(path) or path in self._denied_paths:
+            return True
+        return self._matcher is not None and self._matcher.match(path) is not None
+
+    def excludes_change(self, path: str, previous_path: str | None) -> bool:
+        """Whether a changed file is withheld; a rename or copy is checked by both names."""
+        return any(self.excluded(item) for item in (path, previous_path) if item)
+
+    async def begin(self, run_id: UUID) -> None:
+        """Establish the policy of the attempt before its diff is stored or counted."""
+        run = await self._runs.get_run_vcs_input(run_id)
+        if run is None:
+            raise LookupError(f"run {run_id} has no VCS input")
+        request = {"policy_base_sha": run.base_sha}
+        async with traced_step(self._trace, run_id, "policy.load", request) as step:
+            self._snapshot = await self._prepare_policy.execute(run_id)
+            step.response = policy_summary(self._snapshot)
+        # The snapshot keeps validated masks; the matcher is rebuilt from them.
+        self._matcher = IgnoreMatcher(
+            IgnorePolicy(self._snapshot.ignore_patterns, (), self._snapshot.ignore_digest)
+        )
 
     async def run(self, run_id: UUID) -> ReviewContextPayload | None:
         """Enforce the policy of the run, then build its context.
@@ -194,15 +225,14 @@ class ReviewContextStage:
         force and the review continues with the diff.
         """
         self._denied_paths = frozenset()
+        if self._snapshot is None or self._matcher is None:
+            await self.begin(run_id)
+        snapshot, matcher = self._snapshot, self._matcher
+        assert snapshot is not None and matcher is not None
         run = await self._runs.get_run_vcs_input(run_id)
         stored = await self._runs.get_run_snapshots(run_id) if run is not None else None
         if run is None or stored is None:
             raise LookupError(f"run {run_id} has no stored diff")
-
-        request = {"policy_base_sha": run.base_sha}
-        async with traced_step(self._trace, run_id, "policy.load", request) as step:
-            snapshot = await self._prepare_policy.execute(run_id)
-            step.response = policy_summary(snapshot)
 
         pull_request = await self._vcs.get_pull_request(run.locator)
         if pull_request.head_sha != run.head_sha:
@@ -220,8 +250,6 @@ class ReviewContextStage:
             repository_id=run.repository_id,
             diff_old_sha=diff_old_sha,
         )
-        # The snapshot keeps validated masks; the matcher is rebuilt from them.
-        matcher = IgnoreMatcher(IgnorePolicy(snapshot.ignore_patterns, (), snapshot.ignore_digest))
         ignore = apply_ignore(matcher, diff_map)
         self._denied_paths = ignore.denied_paths
         if diff_map.files and all(
