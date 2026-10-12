@@ -10,7 +10,13 @@ from dataclasses import dataclass
 from enum import StrEnum
 from uuid import UUID
 
-from app.modules.reviews.application.diff_map import DiffFile, DiffHunk, DiffMap, DiffSide
+from app.modules.reviews.application.diff_map import (
+    DiffFile,
+    DiffHunk,
+    DiffMap,
+    DiffSide,
+    RowKind,
+)
 
 
 class SourceRole(StrEnum):
@@ -52,41 +58,44 @@ class SourceRef:
     reason: str
 
 
-def hunk_source_ref(diff_map: DiffMap, file: DiffFile, hunk: DiffHunk) -> SourceRef:
-    """Provenance of one hunk of an anchorable file.
+def hunk_source_refs(diff_map: DiffMap, file: DiffFile, hunk: DiffHunk) -> tuple[SourceRef, ...]:
+    """Provenance of one hunk of an anchorable file, one reference per side it has.
 
-    A changed file is described by its new side at the head revision. A deleted file has
-    no new side: its hunk points at the old lines of the old revision of the diff.
+    The new side is the head revision. The old side is given when the hunk removes lines
+    and the old revision of the diff is known: removed text is never attributed to the
+    head, and an unknown old revision is not presented as a confirmed source.
     """
     if not file.anchorable:
         raise ValueError("only a file with a complete diff has hunk provenance")
-    old_path = file.old_path
-    if file.new_path is None:
-        if old_path is None:
-            raise ValueError("a changed file has at least one path")
-        return SourceRef(
-            role=SourceRole.DIFF,
-            repository_id=diff_map.repository_id,
-            revision=diff_map.diff_old_sha,
-            path=old_path,
-            blob_sha=None,
-            origin_paths=(),
-            side=DiffSide.LEFT,
-            ranges=(LineRange(hunk.old_start, hunk.old_start + hunk.old_count - 1),)
-            if hunk.old_count
-            else (),
-            reason="changed_hunk",
+    refs: list[SourceRef] = []
+    old_path, new_path = file.old_path, file.new_path
+    if new_path is not None and hunk.new_count:
+        refs.append(
+            SourceRef(
+                role=SourceRole.DIFF,
+                repository_id=diff_map.repository_id,
+                revision=diff_map.head_sha,
+                path=new_path,
+                blob_sha=file.blob_sha,
+                origin_paths=(old_path,) if old_path is not None and old_path != new_path else (),
+                side=DiffSide.RIGHT,
+                ranges=(LineRange(hunk.new_start, hunk.new_start + hunk.new_count - 1),),
+                reason="changed_hunk",
+            )
         )
-    return SourceRef(
-        role=SourceRole.DIFF,
-        repository_id=diff_map.repository_id,
-        revision=diff_map.head_sha,
-        path=file.new_path,
-        blob_sha=file.blob_sha,
-        origin_paths=(old_path,) if old_path is not None and old_path != file.new_path else (),
-        side=DiffSide.RIGHT,
-        ranges=(LineRange(hunk.new_start, hunk.new_start + hunk.new_count - 1),)
-        if hunk.new_count
-        else (),
-        reason="changed_hunk",
-    )
+    removes = any(row.kind is RowKind.REMOVED for row in hunk.rows)
+    if old_path is not None and removes and diff_map.diff_old_sha is not None:
+        refs.append(
+            SourceRef(
+                role=SourceRole.DIFF,
+                repository_id=diff_map.repository_id,
+                revision=diff_map.diff_old_sha,
+                path=old_path,
+                blob_sha=None,
+                origin_paths=(),
+                side=DiffSide.LEFT,
+                ranges=(LineRange(hunk.old_start, hunk.old_start + hunk.old_count - 1),),
+                reason="changed_hunk",
+            )
+        )
+    return tuple(refs)

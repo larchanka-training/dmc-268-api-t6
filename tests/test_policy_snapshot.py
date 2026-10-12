@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import replace
+from dataclasses import FrozenInstanceError, fields, replace
 from uuid import UUID
 
 import pytest
@@ -12,8 +12,10 @@ from app.modules.reviews.application.policy_snapshot import (
     POLICY_SNAPSHOT_SCHEMA_VERSION,
     RULES_DOCUMENT_PATH,
     DocumentPresence,
+    ExecutionProfile,
     PolicyDocument,
     PolicySnapshot,
+    PromptBindings,
 )
 
 _EMPTY_SHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
@@ -48,8 +50,8 @@ def _snapshot(rules: PolicyDocument, agents: PolicyDocument) -> PolicySnapshot:
         priority_matcher_version="priority-matcher/v1",
         service_defaults_rule_version_id=UUID("00000000-0000-0000-0000-000000000004"),
         defaults_checksum="2" * 64,
-        prompt_bindings={},
-        execution_profile={},
+        prompt_bindings=PromptBindings("4" * 64, "5" * 64, "6" * 64),
+        execution_profile=ExecutionProfile.fast("model-a", "model-b"),
         policy_digest="3" * 64,
     )
 
@@ -77,3 +79,47 @@ def test_snapshot_binds_exactly_the_two_policy_documents() -> None:
     assert (snapshot.rules.path, snapshot.agents.path) == (".review/rules.md", "AGENTS.md")
     with pytest.raises(ValueError, match="fixed paths"):
         _snapshot(_missing(AGENTS_DOCUMENT_PATH), _missing(RULES_DOCUMENT_PATH))
+
+
+def test_prompt_bindings_are_complete_only_when_all_three_prompts_are_pinned() -> None:
+    complete = PromptBindings("4" * 64, "5" * 64, "6" * 64)
+
+    assert complete.is_complete is True
+    assert (complete.review_system_key, complete.conventions_key, complete.verifier_key) == (
+        "review.system",
+        "review.conventions",
+        "review.verifier",
+    )
+    assert PromptBindings("4" * 64, "5" * 64, "").is_complete is False
+
+
+def test_execution_profiles_carry_the_budgets_of_the_specification() -> None:
+    fast = ExecutionProfile.fast("model-a", "model-b")
+    deep = ExecutionProfile.deep("model-a", "model-b", "model-c")
+
+    assert (fast.profile_name, fast.max_policy_tokens, fast.max_input_tokens) == (
+        "fast",
+        12_000,
+        60_000,
+    )
+    assert (deep.profile_name, deep.max_policy_tokens, deep.max_input_tokens) == (
+        "deep",
+        12_000,
+        150_000,
+    )
+    assert (fast.max_calls_per_run, deep.max_calls_per_run) == (4, 4)
+    assert (fast.conventions_model, deep.conventions_model) == (None, "model-c")
+
+
+def test_pinned_versions_cannot_change_after_the_snapshot_is_built() -> None:
+    snapshot = _snapshot(_empty(RULES_DOCUMENT_PATH), _missing(AGENTS_DOCUMENT_PATH))
+
+    for pinned in (snapshot.prompt_bindings, snapshot.execution_profile):
+        # Scalars only: nothing inside can be mutated through a shared reference.
+        assert all(
+            isinstance(getattr(pinned, item.name), str | int | None) for item in fields(pinned)
+        )
+    with pytest.raises(FrozenInstanceError):
+        snapshot.prompt_bindings.verifier_checksum = "0" * 64  # type: ignore[misc]
+    with pytest.raises(FrozenInstanceError):
+        snapshot.execution_profile.max_policy_tokens = 1  # type: ignore[misc]

@@ -91,11 +91,19 @@ class DiffHunk:
 
 @dataclass(frozen=True)
 class DiffFile:
-    """One changed file; ``old_path`` is absent for an addition, ``new_path`` for a deletion."""
+    """One changed file; ``old_path`` is absent for an addition, ``new_path`` for a deletion.
+
+    ``old_path`` and ``new_path`` are canonical: a name that violates the path contract
+    is never stored there, so nothing built from them can carry it to a model. The names
+    as the provider sent them stay in ``provider_old_path`` and ``provider_new_path``
+    for diagnostics only.
+    """
 
     file_id: str
     old_path: str | None
     new_path: str | None
+    provider_old_path: str | None
+    provider_new_path: str | None
     change_type: ChangeType
     blob_sha: str | None
     additions: int
@@ -205,6 +213,8 @@ def _file_digest_entry(file: DiffFile) -> dict[str, object]:
         "file_id": file.file_id,
         "old_path": file.old_path,
         "new_path": file.new_path,
+        "provider_old_path": file.provider_old_path,
+        "provider_new_path": file.provider_new_path,
         "change_type": file.change_type.value,
         "blob_sha": file.blob_sha,
         "additions": file.additions,
@@ -247,14 +257,17 @@ def _paths(file: VcsFile, change_type: ChangeType) -> tuple[str | None, str | No
 def _build_file(identity: list[str | int], file: VcsFile) -> DiffFile:
     change_type = _change_type(file)
     old_path, new_path = _paths(file, change_type)
+    # The identity uses the provider names: two rejected names are still two files.
     file_id = _digest([*identity, change_type.value, old_path, new_path])[:32]
     omission = _omission(change_type, old_path, new_path)
     patch_digest = None if file.patch is None else sha256(file.patch.encode("utf-8")).hexdigest()
     state, hunks = _patch_state(file_id, file)
     return DiffFile(
         file_id=file_id,
-        old_path=old_path,
-        new_path=new_path,
+        old_path=_canonical(old_path),
+        new_path=_canonical(new_path),
+        provider_old_path=old_path,
+        provider_new_path=new_path,
         change_type=change_type,
         blob_sha=file.blob_sha,
         additions=file.additions,
@@ -265,6 +278,10 @@ def _build_file(identity: list[str | int], file: VcsFile) -> DiffFile:
         omission_reason=omission,
         hunks=() if omission is not None else hunks,
     )
+
+
+def _canonical(path: str | None) -> str | None:
+    return path if path is not None and is_supported_path(path) else None
 
 
 def _omission(
@@ -303,11 +320,18 @@ class _MalformedPatch(ValueError):
 
 
 def _split_patch(patch: str) -> list[str]:
-    """Split only on LF; a trailing CR is CRLF framing, other separators are content."""
+    """Split only on LF; other line separators can be literal source content.
+
+    A CR is removed only as CRLF framing of the patch itself, recognised when every
+    line, hunk headers included, ends with it. Otherwise a trailing CR belongs to the
+    source line (a file with CRLF endings) and is kept.
+    """
     lines = patch.split("\n")
     if lines[-1] == "":
         lines.pop()
-    return [line[:-1] if line.endswith("\r") else line for line in lines]
+    if lines and all(line.endswith("\r") for line in lines):
+        return [line[:-1] for line in lines]
+    return lines
 
 
 def _parse_hunks(file_id: str, lines: list[str]) -> tuple[DiffHunk, ...]:

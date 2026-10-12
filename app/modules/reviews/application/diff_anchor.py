@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 
 from app.modules.reviews.application.diff_map import (
+    ChangeType,
     DiffFile,
     DiffHunk,
     DiffMap,
@@ -51,8 +52,13 @@ def resolve_anchor(
         raise ValueError("anchor lines must satisfy 1 <= start_line < line")
     file = next((item for item in diff_map.files if item.new_path == path), None)
     if file is None:
-        deleted = any(item.old_path == path and item.new_path is None for item in diff_map.files)
-        return AnchorRejection.WRONG_SIDE if deleted else AnchorRejection.UNKNOWN_PATH
+        for item in diff_map.files:
+            if item.change_type is ChangeType.DELETED and item.old_path == path:
+                return AnchorRejection.WRONG_SIDE
+            if item.omission_reason is not None and item.provider_new_path == path:
+                # The file is in the diff, but its content is withheld.
+                return AnchorRejection.INCOMPLETE_DIFF
+        return AnchorRejection.UNKNOWN_PATH
     if not file.anchorable:
         return _unanchorable(file)
     hunk = _hunk_with_new_line(file, line)

@@ -143,6 +143,19 @@ def test_unknown_path_and_the_old_name_of_a_rename_are_not_anchors() -> None:
     assert isinstance(resolve_anchor(diff_map, path="src/new.py", start_line=None, line=4), Anchor)
 
 
+def test_valid_old_name_of_a_rename_with_a_rejected_new_name_is_not_a_deleted_file() -> None:
+    diff_map = _diff_map(_file("bad\\new.py", status="renamed", previous_filename="src/old.py"))
+
+    assert (
+        resolve_anchor(diff_map, path="src/old.py", start_line=None, line=4)
+        is AnchorRejection.UNKNOWN_PATH
+    )
+    assert (
+        resolve_anchor(diff_map, path="bad\\new.py", start_line=None, line=4)
+        is AnchorRejection.INCOMPLETE_DIFF
+    )
+
+
 def test_deleted_file_exists_only_on_the_other_side() -> None:
     diff_map = _diff_map(
         _file("gone.py", status="removed", patch="@@ -1 +0,0 @@\n-one", additions=0, deletions=1)

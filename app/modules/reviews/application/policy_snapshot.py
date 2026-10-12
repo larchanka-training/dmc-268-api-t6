@@ -1,15 +1,16 @@
 """Immutable policy snapshot handed from the policy loader to the LLM pipeline.
 
 Shape of RULES_FORMAT_SPEC §7.1 and §7.4. This module is the contract only: loading,
-validation and storage arrive with the loader. The contents of ``prompt_bindings`` and
-``execution_profile`` are defined by the LLM pipeline (#120) and stay opaque here.
+validation and storage arrive with the loader. ``PromptBindings`` and
+``ExecutionProfile`` are the part of the contract defined by the LLM pipeline (#120);
+they live here so that the snapshot has one description.
 """
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
+from typing import Literal
 from uuid import UUID
 
 POLICY_SNAPSHOT_SCHEMA_VERSION = 1
@@ -55,6 +56,58 @@ class PolicyDocument:
 
 
 @dataclass(frozen=True)
+class PromptBindings:
+    """Pinned prompt keys, versions and checksums of the three review pipeline stages.
+
+    Bound when the run is created, before any VCS read. A checksum stays empty until the
+    run pins that prompt, and ``is_complete`` is false until all three are pinned.
+    """
+
+    review_system_checksum: str
+    conventions_checksum: str
+    verifier_checksum: str
+    review_system_key: str = "review.system"
+    review_system_version: str = "v2"
+    conventions_key: str = "review.conventions"
+    conventions_version: str = "v2"
+    verifier_key: str = "review.verifier"
+    verifier_version: str = "v1"
+
+    @property
+    def is_complete(self) -> bool:
+        return bool(
+            self.review_system_checksum and self.conventions_checksum and self.verifier_checksum
+        )
+
+
+@dataclass(frozen=True)
+class ExecutionProfile:
+    """Models, token budgets and call limits of a run."""
+
+    profile_name: Literal["fast", "deep"]
+    review_model: str
+    verifier_model: str
+    conventions_model: str | None = None
+    max_policy_tokens: int = 12_000
+    max_input_tokens: int = 60_000
+    max_calls_per_run: int = 4
+
+    @classmethod
+    def fast(
+        cls, review_model: str, verifier_model: str, conventions_model: str | None = None
+    ) -> ExecutionProfile:
+        return cls("fast", review_model, verifier_model, conventions_model)
+
+    @classmethod
+    def deep(
+        cls, review_model: str, verifier_model: str, conventions_model: str | None = None
+    ) -> ExecutionProfile:
+        return cls(
+            "deep", review_model, verifier_model, conventions_model, max_input_tokens=150_000
+        )
+
+
+@dataclass(frozen=True)
 class PolicySnapshot:
     """The policy of one run: both documents, the ignore policy and every pinned version."""
 
@@ -75,8 +128,8 @@ class PolicySnapshot:
     priority_matcher_version: str
     service_defaults_rule_version_id: UUID
     defaults_checksum: str
-    prompt_bindings: Mapping[str, object]
-    execution_profile: Mapping[str, object]
+    prompt_bindings: PromptBindings
+    execution_profile: ExecutionProfile
     policy_digest: str
 
     def __post_init__(self) -> None:

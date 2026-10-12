@@ -10,7 +10,7 @@ from app.modules.reviews.application.context_provenance import (
     LineRange,
     SourceRef,
     SourceRole,
-    hunk_source_ref,
+    hunk_source_refs,
 )
 from app.modules.reviews.application.diff_map import (
     DiffMap,
@@ -26,7 +26,7 @@ _BLOB = "d" * 40
 _REPOSITORY_ID = UUID("00000000-0000-0000-0000-000000000001")
 
 
-def _diff_map(file: VcsFile) -> DiffMap:
+def _diff_map(file: VcsFile, *, diff_old_sha: str | None = "c" * 40) -> DiffMap:
     pull_request = VcsPullRequest(
         locator=PullRequestLocator(17, "octo/repo", 7),
         head_sha=_HEAD,
@@ -50,7 +50,7 @@ def _diff_map(file: VcsFile) -> DiffMap:
         (file,),
         provider=VcsProviderName.GITHUB,
         repository_id=_REPOSITORY_ID,
-        diff_old_sha="c" * 40,
+        diff_old_sha=diff_old_sha,
     )
 
 
@@ -67,35 +67,82 @@ def _file(*, patch: str | None, additions: int, deletions: int, renamed: bool = 
     )
 
 
-def test_hunk_provenance_points_at_new_side_lines_of_the_head_revision() -> None:
+def test_added_lines_have_new_side_provenance_only() -> None:
     diff_map = _diff_map(_file(patch="@@ -3,2 +3,3 @@\n a\n+b\n c", additions=1, deletions=0))
     file = diff_map.files[0]
 
-    assert hunk_source_ref(diff_map, file, file.hunks[0]) == SourceRef(
-        role=SourceRole.DIFF,
-        repository_id=_REPOSITORY_ID,
-        revision=_HEAD,
-        path="src/new.py",
-        blob_sha=_BLOB,
-        origin_paths=(),
-        side=DiffSide.RIGHT,
-        ranges=(LineRange(3, 5),),
-        reason="changed_hunk",
+    assert hunk_source_refs(diff_map, file, file.hunks[0]) == (
+        SourceRef(
+            role=SourceRole.DIFF,
+            repository_id=_REPOSITORY_ID,
+            revision=_HEAD,
+            path="src/new.py",
+            blob_sha=_BLOB,
+            origin_paths=(),
+            side=DiffSide.RIGHT,
+            ranges=(LineRange(3, 5),),
+            reason="changed_hunk",
+        ),
     )
 
 
-def test_renamed_file_keeps_its_earlier_path_as_origin() -> None:
-    diff_map = _diff_map(_file(patch="@@ -1 +1 @@\n-a\n+b", additions=1, deletions=1, renamed=True))
+def test_mixed_hunk_has_both_sides_and_removed_text_points_at_the_old_revision() -> None:
+    diff_map = _diff_map(
+        _file(patch="@@ -7,3 +9,3 @@\n a\n-old\n+new\n c", additions=1, deletions=1, renamed=True)
+    )
     file = diff_map.files[0]
 
-    assert hunk_source_ref(diff_map, file, file.hunks[0]).origin_paths == ("generated/old.py",)
+    right, left = hunk_source_refs(diff_map, file, file.hunks[0])
+
+    assert (right.side, right.revision, right.path, right.ranges) == (
+        DiffSide.RIGHT,
+        _HEAD,
+        "src/new.py",
+        (LineRange(9, 11),),
+    )
+    assert right.origin_paths == ("generated/old.py",)
+    assert (left.side, left.revision, left.path, left.ranges) == (
+        DiffSide.LEFT,
+        "c" * 40,
+        "generated/old.py",
+        (LineRange(7, 9),),
+    )
+    assert left.blob_sha is None
 
 
-def test_hunk_that_only_removes_lines_has_no_new_side_range() -> None:
+def test_removal_only_hunk_of_a_modified_file_has_old_side_provenance() -> None:
     diff_map = _diff_map(_file(patch="@@ -4,2 +3,0 @@\n-a\n-b", additions=0, deletions=2))
     file = diff_map.files[0]
 
-    assert hunk_source_ref(diff_map, file, file.hunks[0]).ranges == ()
+    (left,) = hunk_source_refs(diff_map, file, file.hunks[0])
+
+    assert (left.side, left.revision, left.path, left.ranges) == (
+        DiffSide.LEFT,
+        "c" * 40,
+        "src/new.py",
+        (LineRange(4, 5),),
+    )
+
+
+def test_deleted_file_hunk_points_at_old_lines_of_the_old_revision() -> None:
+    diff_map = _diff_map(_removed())
+    file = diff_map.files[0]
+
+    (ref,) = hunk_source_refs(diff_map, file, file.hunks[0])
+
+    assert (ref.side, ref.path, ref.revision) == (DiffSide.LEFT, "src/gone.py", "c" * 40)
+    assert (ref.ranges, ref.blob_sha) == ((LineRange(4, 5),), None)
+
+
+def test_unknown_old_revision_gives_no_confirmed_old_side_provenance() -> None:
+    mixed = _file(patch="@@ -7,3 +9,3 @@\n a\n-old\n+new\n c", additions=1, deletions=1)
+
+    changed = _diff_map(mixed, diff_old_sha=None)
+    refs = hunk_source_refs(changed, changed.files[0], changed.files[0].hunks[0])
+    assert [ref.side for ref in refs] == [DiffSide.RIGHT]
+
+    deleted = _diff_map(_removed(), diff_old_sha=None)
+    assert hunk_source_refs(deleted, deleted.files[0], deleted.files[0].hunks[0]) == ()
 
 
 def test_file_without_a_complete_diff_has_no_hunk_provenance() -> None:
@@ -103,7 +150,7 @@ def test_file_without_a_complete_diff_has_no_hunk_provenance() -> None:
     file = diff_map.files[0]
 
     with pytest.raises(ValueError, match="complete diff"):
-        hunk_source_ref(diff_map, file, file.hunks[0])
+        hunk_source_refs(diff_map, file, file.hunks[0])
 
 
 def test_line_range_is_one_based_and_ordered() -> None:
@@ -127,8 +174,8 @@ def test_source_roles_are_the_list_of_the_specification() -> None:
     }
 
 
-def test_deleted_file_hunk_points_at_old_lines_of_the_old_revision() -> None:
-    removed = VcsFile(
+def _removed() -> VcsFile:
+    return VcsFile(
         filename="src/gone.py",
         status="removed",
         blob_sha=None,
@@ -138,10 +185,3 @@ def test_deleted_file_hunk_points_at_old_lines_of_the_old_revision() -> None:
         changes=2,
         patch="@@ -4,2 +0,0 @@\n-a\n-b",
     )
-    diff_map = _diff_map(removed)
-    file = diff_map.files[0]
-
-    ref = hunk_source_ref(diff_map, file, file.hunks[0])
-
-    assert (ref.side, ref.path, ref.revision) == (DiffSide.LEFT, "src/gone.py", "c" * 40)
-    assert (ref.ranges, ref.blob_sha) == ((LineRange(4, 5),), None)

@@ -227,16 +227,44 @@ def test_no_newline_marker_is_not_a_row_and_crlf_framing_is_removed() -> None:
     )
 
 
+def test_carriage_return_of_a_source_line_is_kept_under_lf_framing() -> None:
+    # The hunk header ends with LF only, so the CR belongs to the lines of a CRLF file.
+    file = _build(_file(patch="@@ -1 +1 @@\n-old\r\n+new\r")).files[0]
+
+    assert file.patch_state is PatchState.COMPLETE
+    assert file.hunks[0].rows == (
+        DiffRow(RowKind.REMOVED, 1, None, "old\r"),
+        DiffRow(RowKind.ADDED, None, 1, "new\r"),
+    )
+
+
 def test_unsupported_path_keeps_the_file_in_the_map_without_its_content() -> None:
     diff_map = _build(_file("src\\app.py"), _file("src/ok.py"))
 
     bad, good = diff_map.files
-    assert bad.new_path == "src\\app.py"
+    # The rejected name is diagnostic only: no canonical path carries it further.
+    assert (bad.old_path, bad.new_path) == (None, None)
+    assert (bad.provider_old_path, bad.provider_new_path) == ("src\\app.py", "src\\app.py")
     assert bad.omission_reason is DiffOmissionReason.UNSUPPORTED_PATH
     assert bad.hunks == ()
     assert bad.anchorable is False
     assert good.omission_reason is None
     assert good.anchorable is True
+    assert (good.new_path, good.provider_new_path) == ("src/ok.py", "src/ok.py")
+
+
+def test_rename_with_one_rejected_side_keeps_the_valid_side_but_stays_withheld() -> None:
+    renamed = _file("src/ok.py", status="renamed", previous_filename="old\nname.py")
+    other = _file("src/other.py", status="renamed", previous_filename="old\tname.py")
+    diff_map = _build(renamed, other)
+
+    file = diff_map.files[0]
+    assert (file.old_path, file.new_path) == (None, "src/ok.py")
+    assert file.provider_old_path == "old\nname.py"
+    assert file.omission_reason is DiffOmissionReason.UNSUPPORTED_PATH
+    assert file.hunks == ()
+    # Two files with rejected names keep distinct identities.
+    assert file.file_id != diff_map.files[1].file_id
 
 
 def test_path_contract_of_the_specification() -> None:
