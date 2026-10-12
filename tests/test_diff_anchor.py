@@ -191,6 +191,15 @@ def test_incomplete_or_unusable_file_gives_no_anchor() -> None:
     assert reject("moved.py") is AnchorRejection.LINE_ABSENT
 
 
+def test_file_with_a_c1_control_character_in_its_name_gives_no_inline_anchor() -> None:
+    diff_map = _diff_map(_file("src/a\x85b.py"))
+
+    assert (
+        resolve_anchor(diff_map, path="src/a\x85b.py", start_line=None, line=4)
+        is AnchorRejection.INCOMPLETE_DIFF
+    )
+
+
 def test_lines_outside_the_finding_contract_are_a_caller_error() -> None:
     diff_map = _diff_map(_file("src/app.py"))
 

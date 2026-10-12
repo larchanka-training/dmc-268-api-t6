@@ -9,6 +9,8 @@ they live here so that the snapshot has one description.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
+from decimal import Decimal, InvalidOperation
 from enum import StrEnum
 from typing import Literal
 from uuid import UUID
@@ -57,9 +59,10 @@ class PolicyDocument:
 
 @dataclass(frozen=True)
 class PromptBindings:
-    """Pinned prompt keys, versions and checksums of the three review pipeline stages.
+    """Pinned prompts of the three review pipeline stages (RULES_FORMAT_SPEC §7.1).
 
-    Bound when the run is created, before any VCS read. A checksum stays empty until the
+    Each prompt is pinned by the immutable id of its stored version and by its checksum.
+    Bound when the run is created, before any VCS read. A value stays empty until the
     run pins that prompt, and ``is_complete`` is false until all three are pinned.
     """
 
@@ -72,17 +75,30 @@ class PromptBindings:
     conventions_version: str = "v2"
     verifier_key: str = "review.verifier"
     verifier_version: str = "v1"
+    review_system_id: UUID | None = None
+    conventions_id: UUID | None = None
+    verifier_id: UUID | None = None
 
     @property
     def is_complete(self) -> bool:
-        return bool(
-            self.review_system_checksum and self.conventions_checksum and self.verifier_checksum
-        )
+        checksums = (self.review_system_checksum, self.conventions_checksum, self.verifier_checksum)
+        ids = (self.review_system_id, self.conventions_id, self.verifier_id)
+        return all(checksums) and all(item is not None for item in ids)
+
+    def pins_review_prompt(self, prompt_version_id: UUID) -> bool:
+        """Whether the review prompt is the one the run pinned as ``prompt_version_id``."""
+        return self.review_system_id == prompt_version_id
 
 
 @dataclass(frozen=True)
 class ExecutionProfile:
-    """Models, token budgets and call limits of a run."""
+    """Everything about model execution that stays the same on a retry (RULES §7.1).
+
+    Primary and fallback model ids, provider routes, tokenizer and counter versions,
+    temperature, the response schema and the recovery and budget profiles. A value that
+    the run has not pinned yet is ``None``; ``is_complete`` tells when none is missing.
+    A stage without a fallback model keeps its fallback ``None``.
+    """
 
     profile_name: Literal["fast", "deep"]
     review_model: str
@@ -91,6 +107,40 @@ class ExecutionProfile:
     max_policy_tokens: int = 12_000
     max_input_tokens: int = 60_000
     max_calls_per_run: int = 4
+    fallback_review_model: str | None = None
+    fallback_verifier_model: str | None = None
+    fallback_conventions_model: str | None = None
+    primary_provider_route: str | None = None
+    fallback_provider_route: str | None = None
+    tokenizer_version: str | None = None
+    counter_version: str | None = None
+    # A decimal string, as canonical policy JSON carries configuration numbers.
+    temperature: str | None = None
+    response_schema_version: str | None = None
+    recovery_profile_version: str | None = None
+    budget_profile_version: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.temperature is not None:
+            try:
+                Decimal(self.temperature)
+            except InvalidOperation as exc:
+                raise ValueError("temperature must be a decimal string") from exc
+
+    @property
+    def is_complete(self) -> bool:
+        required = (
+            self.review_model,
+            self.verifier_model,
+            self.primary_provider_route,
+            self.tokenizer_version,
+            self.counter_version,
+            self.temperature,
+            self.response_schema_version,
+            self.recovery_profile_version,
+            self.budget_profile_version,
+        )
+        return all(required)
 
     @classmethod
     def fast(
@@ -131,6 +181,8 @@ class PolicySnapshot:
     prompt_bindings: PromptBindings
     execution_profile: ExecutionProfile
     policy_digest: str
+    # When the snapshot was stored; it is not part of ``policy_digest``.
+    created_at: datetime | None = None
 
     def __post_init__(self) -> None:
         if self.rules.path != RULES_DOCUMENT_PATH or self.agents.path != AGENTS_DOCUMENT_PATH:

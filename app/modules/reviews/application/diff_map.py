@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import re
+import unicodedata
 from dataclasses import dataclass
 from enum import StrEnum
 from hashlib import sha256
@@ -73,6 +74,7 @@ class RowKind(StrEnum):
 class DiffRow:
     """One line of a hunk; a side the line does not exist on has no number."""
 
+    row_id: str
     kind: RowKind
     old_line: int | None
     new_line: int | None
@@ -86,6 +88,8 @@ class DiffHunk:
     old_count: int
     new_start: int
     new_count: int
+    # Both sides consumed exactly their declared line counts.
+    complete: bool
     rows: tuple[DiffRow, ...]
 
 
@@ -148,7 +152,8 @@ def is_supported_path(path: str) -> bool:
         return False
     if not path or len(encoded) > MAX_PATH_BYTES or "\\" in path:
         return False
-    if any(ord(char) < 0x20 or ord(char) == 0x7F for char in path):
+    # Every Unicode control character: C0, DEL and C1 (U+0080-U+009F) alike.
+    if any(unicodedata.category(char) == "Cc" for char in path):
         return False
     segments = path.split("/")
     return len(segments) <= MAX_PATH_SEGMENTS and all(
@@ -337,7 +342,7 @@ def _split_patch(patch: str) -> list[str]:
 def _parse_hunks(file_id: str, lines: list[str]) -> tuple[DiffHunk, ...]:
     hunks: list[DiffHunk] = []
     header: tuple[int, int, int, int] | None = None
-    rows: list[DiffRow] = []
+    rows: list[tuple[RowKind, int | None, int | None, str]] = []
     old_line = new_line = old_left = new_left = 0
     old_end = new_end = 0
 
@@ -346,7 +351,12 @@ def _parse_hunks(file_id: str, lines: list[str]) -> tuple[DiffHunk, ...]:
             return
         if old_left or new_left:
             raise _MalformedPatch("hunk ended before its declared line counts")
-        hunks.append(DiffHunk(f"{file_id}:{len(hunks)}", *header, tuple(rows)))
+        hunk_id = f"{file_id}:{len(hunks)}"
+        numbered = tuple(
+            DiffRow(f"{hunk_id}:{index}", kind, old, new, text)
+            for index, (kind, old, new, text) in enumerate(rows)
+        )
+        hunks.append(DiffHunk(hunk_id, *header, True, numbered))
 
     for line in lines:
         match = _HUNK.match(line)
@@ -369,13 +379,13 @@ def _parse_hunks(file_id: str, lines: list[str]) -> tuple[DiffHunk, ...]:
         if line == _NO_NEWLINE:
             continue
         if line.startswith("+"):
-            rows.append(DiffRow(RowKind.ADDED, None, new_line, line[1:]))
+            rows.append((RowKind.ADDED, None, new_line, line[1:]))
             new_line, new_left = new_line + 1, new_left - 1
         elif line.startswith("-"):
-            rows.append(DiffRow(RowKind.REMOVED, old_line, None, line[1:]))
+            rows.append((RowKind.REMOVED, old_line, None, line[1:]))
             old_line, old_left = old_line + 1, old_left - 1
         elif line.startswith(" "):
-            rows.append(DiffRow(RowKind.CONTEXT, old_line, new_line, line[1:]))
+            rows.append((RowKind.CONTEXT, old_line, new_line, line[1:]))
             old_line, new_line = old_line + 1, new_line + 1
             old_left, new_left = old_left - 1, new_left - 1
         else:

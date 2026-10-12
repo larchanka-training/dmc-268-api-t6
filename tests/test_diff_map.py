@@ -6,9 +6,9 @@ from uuid import UUID
 
 from app.modules.reviews.application.diff_map import (
     ChangeType,
+    DiffHunk,
     DiffMap,
     DiffOmissionReason,
-    DiffRow,
     PatchState,
     RowKind,
     VcsProviderName,
@@ -80,6 +80,10 @@ def _build(*files: VcsFile, files_changed: int | None = None, head_sha: str = _H
     )
 
 
+def _rows(hunk: DiffHunk) -> tuple[tuple[RowKind, int | None, int | None, str], ...]:
+    return tuple((row.kind, row.old_line, row.new_line, row.text) for row in hunk.rows)
+
+
 def test_hunk_rows_carry_the_line_number_of_each_side() -> None:
     patch = (
         "@@ -3,3 +3,4 @@ def f():\n context\n-old\n+new\n+extra\n tail\n"
@@ -93,18 +97,24 @@ def test_hunk_rows_carry_the_line_number_of_each_side() -> None:
         (3, 3, 3, 4),
         (10, 1, 20, 1),
     ]
-    assert file.hunks[0].rows == (
-        DiffRow(RowKind.CONTEXT, 3, 3, "context"),
-        DiffRow(RowKind.REMOVED, 4, None, "old"),
-        DiffRow(RowKind.ADDED, None, 4, "new"),
-        DiffRow(RowKind.ADDED, None, 5, "extra"),
-        DiffRow(RowKind.CONTEXT, 5, 6, "tail"),
+    assert _rows(file.hunks[0]) == (
+        (RowKind.CONTEXT, 3, 3, "context"),
+        (RowKind.REMOVED, 4, None, "old"),
+        (RowKind.ADDED, None, 4, "new"),
+        (RowKind.ADDED, None, 5, "extra"),
+        (RowKind.CONTEXT, 5, 6, "tail"),
     )
-    assert file.hunks[1].rows == (
-        DiffRow(RowKind.REMOVED, 10, None, "gone"),
-        DiffRow(RowKind.ADDED, None, 20, "added"),
+    assert _rows(file.hunks[1]) == (
+        (RowKind.REMOVED, 10, None, "gone"),
+        (RowKind.ADDED, None, 20, "added"),
     )
     assert file.hunks[0].hunk_id != file.hunks[1].hunk_id
+    assert all(hunk.complete for hunk in file.hunks)
+    row_ids = [row.row_id for hunk in file.hunks for row in hunk.rows]
+    assert len(set(row_ids)) == len(row_ids) == 7
+    assert all(
+        row.row_id.startswith(f"{hunk.hunk_id}:") for hunk in file.hunks for row in hunk.rows
+    )
 
 
 def test_map_keeps_both_revisions_apart_from_the_policy_base() -> None:
@@ -221,9 +231,9 @@ def test_no_newline_marker_is_not_a_row_and_crlf_framing_is_removed() -> None:
     file = _build(_file(patch=patch)).files[0]
 
     assert file.patch_state is PatchState.COMPLETE
-    assert file.hunks[0].rows == (
-        DiffRow(RowKind.REMOVED, 1, None, "old"),
-        DiffRow(RowKind.ADDED, None, 1, "new"),
+    assert _rows(file.hunks[0]) == (
+        (RowKind.REMOVED, 1, None, "old"),
+        (RowKind.ADDED, None, 1, "new"),
     )
 
 
@@ -232,9 +242,9 @@ def test_carriage_return_of_a_source_line_is_kept_under_lf_framing() -> None:
     file = _build(_file(patch="@@ -1 +1 @@\n-old\r\n+new\r")).files[0]
 
     assert file.patch_state is PatchState.COMPLETE
-    assert file.hunks[0].rows == (
-        DiffRow(RowKind.REMOVED, 1, None, "old\r"),
-        DiffRow(RowKind.ADDED, None, 1, "new\r"),
+    assert _rows(file.hunks[0]) == (
+        (RowKind.REMOVED, 1, None, "old\r"),
+        (RowKind.ADDED, None, 1, "new\r"),
     )
 
 
@@ -267,6 +277,17 @@ def test_rename_with_one_rejected_side_keeps_the_valid_side_but_stays_withheld()
     assert file.file_id != diff_map.files[1].file_id
 
 
+def test_c1_control_character_in_a_path_is_rejected_like_any_other_control() -> None:
+    # U+0085 NEXT LINE is a control character outside the C0 range and DEL.
+    file = _build(_file("src/a\x85b.py")).files[0]
+
+    assert file.omission_reason is DiffOmissionReason.UNSUPPORTED_PATH
+    assert (file.old_path, file.new_path) == (None, None)
+    assert file.provider_new_path == "src/a\x85b.py"
+    assert file.hunks == ()
+    assert file.anchorable is False
+
+
 def test_path_contract_of_the_specification() -> None:
     assert is_supported_path("README.md")
     assert is_supported_path("src/файл с пробелом.py")
@@ -284,6 +305,9 @@ def test_path_contract_of_the_specification() -> None:
         "a\x00b.py",
         "a\nb.py",
         "a\x7fb.py",
+        "a\x80b.py",
+        "a\x85b.py",
+        "a\x9fb.py",
         "a" * 1025,
         "/".join(["s"] * 129),
         "bad\ud800.py",
