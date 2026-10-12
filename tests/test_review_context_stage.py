@@ -1,4 +1,4 @@
-"""Flagged policy and context stage: recorded in the trace, never failing the review."""
+"""Policy and context stage of a run: what it enforces and what it records."""
 
 from __future__ import annotations
 
@@ -398,21 +398,13 @@ def test_policy_codes_have_a_retry_class_and_an_author_facing_text() -> None:
     assert codes | {"all_changes_ignored"} <= set(_ERROR_TEXTS)
 
 
-def test_feature_flag_is_off_unless_explicitly_enabled() -> None:
+def test_redis_address_is_optional_for_the_worker() -> None:
     env = {"DATABASE_URL": "postgresql://x", "RABBITMQ_URL": "amqp://x"}
 
-    assert WorkerSettings.from_environment(env).review_context_pipeline is False
-    for value in ("1", "true", "TRUE", "yes"):
-        enabled = WorkerSettings.from_environment(
-            {**env, "REVIEW_CONTEXT_PIPELINE_ENABLED": value, "REDIS_URL": "redis://r:6379/0"}
-        )
-        assert enabled.review_context_pipeline is True
-        assert enabled.redis_url == "redis://r:6379/0"
-    for value in ("", "0", "false", "off"):
-        disabled = WorkerSettings.from_environment(
-            {**env, "REVIEW_CONTEXT_PIPELINE_ENABLED": value}
-        )
-        assert disabled.review_context_pipeline is False
+    assert WorkerSettings.from_environment(env).redis_url is None
+    assert WorkerSettings.from_environment({**env, "REDIS_URL": ""}).redis_url is None
+    configured = WorkerSettings.from_environment({**env, "REDIS_URL": "redis://r:6379/0"})
+    assert configured.redis_url == "redis://r:6379/0"
 
 
 def test_stored_patch_without_hunks_and_an_unwrapped_patch_are_both_accepted() -> None:

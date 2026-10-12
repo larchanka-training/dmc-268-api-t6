@@ -243,7 +243,7 @@ async def process_review_run(
     if trace is not None:
         prompts = TracedReviewPromptRepository(prompts, trace, trace, engine=engine)
     if context_stage is None:
-        # Flag off: the composition is exactly the one before the context stage existed.
+        # A caller without GitHub App adapters: the run is composed without the stage.
         return await ExecuteReviewRun(processor, prompts, provider, publisher).execute(run_id)
     return await ExecuteReviewRun(
         processor, prompts, provider, publisher, context_filter=context_stage
@@ -399,7 +399,6 @@ class WorkerSettings:
     llm: LlmSettings | None = None
     gitlab_token: str | None = None
     gitlab_base_url: str = "https://gitlab.com"
-    review_context_pipeline: bool = False
     redis_url: str | None = None
 
     @property
@@ -431,9 +430,7 @@ class WorkerSettings:
             llm=llm,
             gitlab_token=env.get("GITLAB_TOKEN") or None,
             gitlab_base_url=env.get("GITLAB_BASE_URL") or "https://gitlab.com",
-            # Feature flag: the policy and context steps are recorded, not enforced.
-            review_context_pipeline=env.get("REVIEW_CONTEXT_PIPELINE_ENABLED", "").lower()
-            in {"1", "true", "yes"},
+            # Optional: the cache of AST facts and file trees of the context stage.
             redis_url=env.get("REDIS_URL") or None,
         )
 
@@ -494,7 +491,7 @@ def review_context_stage_factory(
     redis: RedisLike | None,
     execution_profile: ExecutionProfile = UNPINNED_EXECUTION_PROFILE,
 ) -> Callable[[RunTrace | None], ReviewContextStage]:
-    """Compose the flagged policy and context stage; every run gets its own parser."""
+    """Compose the policy and context stage; every run gets its own parser."""
 
     def context_builder(run: RunVcsInput) -> BuildReviewContext:
         return BuildReviewContext(
@@ -605,18 +602,14 @@ def github_adapters(
     github_vcs = HttpGitHubVcsProvider(client=client, token_provider=tokens)
     vcs = ClassifiedVcsProvider(github_vcs)
     runs = SqlAlchemyRunRepository(session_factory, allow_unscoped=True)
-    context_stage = (
-        review_context_stage_factory(
-            client=client,
-            tokens=tokens,
-            vcs=github_vcs,
-            runs=runs,
-            session_factory=session_factory,
-            redis=redis,
-            execution_profile=execution_profile_of(settings.llm),
-        )
-        if settings.review_context_pipeline
-        else None
+    context_stage = review_context_stage_factory(
+        client=client,
+        tokens=tokens,
+        vcs=github_vcs,
+        runs=runs,
+        session_factory=session_factory,
+        redis=redis,
+        execution_profile=execution_profile_of(settings.llm),
     )
     return GitHubAdapters(
         context_stage=context_stage,
@@ -822,7 +815,7 @@ async def run_worker(
                 fx_provider=EcbFxQuoteCache(EcbFxRateAdapter(fx_client)),
             )
         redis: Redis | None = None
-        if settings.review_context_pipeline and settings.redis_url is not None:
+        if settings.redis_url is not None:
             # Only a cache: the pool connects on first use and a failure reads as a miss.
             redis = Redis.from_url(settings.redis_url)
             stack.push_async_callback(redis.aclose)

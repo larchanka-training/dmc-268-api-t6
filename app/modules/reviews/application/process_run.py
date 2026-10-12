@@ -86,7 +86,7 @@ class RunVcsRepository(Protocol):
 
 
 class ReviewContextStagePort(Protocol):
-    """The flagged policy and context stage of an attempt."""
+    """The policy and context stage of an attempt."""
 
     async def run(self, run_id: UUID) -> object: ...
 

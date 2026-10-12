@@ -39,7 +39,6 @@ services:
       DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-app}:${POSTGRES_PASSWORD:-app}@postgres:5432/${POSTGRES_DB:-app}
       RABBITMQ_URL: amqp://${RABBITMQ_USER:-app}:${RABBITMQ_PASSWORD:-app}@rabbitmq:5672/
       REDIS_URL: redis://redis:6379/0
-      REVIEW_CONTEXT_PIPELINE_ENABLED: ${REVIEW_CONTEXT_PIPELINE_ENABLED:-false}
       WORKER_HEARTBEAT_FILE: /tmp/worker.heartbeat
       GITHUB_APP_ID: ${GITHUB_APP_ID:-}
       GITHUB_APP_PRIVATE_KEY: ${GITHUB_APP_PRIVATE_KEY:-}

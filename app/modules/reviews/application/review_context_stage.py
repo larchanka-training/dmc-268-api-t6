@@ -1,4 +1,4 @@
-"""Run the policy and context steps of a review run behind a feature flag.
+"""Run the policy and context steps of a review run.
 
 The stage runs after the diff of the attempt is stored and before any model call. It
 enforces the policy: an invalid or unreadable policy fails the run with its code, a
