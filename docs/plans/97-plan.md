@@ -132,14 +132,22 @@ uv run pytest tests/test_publish_run_review.py tests/test_review_publisher.py te
      body. That body already contains the overview.
    - Marker, same string GitHub already uses:
      `<!-- ai-review findings_hash={hash} summary -->` on the summary, and
-     `<!-- ai-review findings_hash={hash} inline={path}:{line} -->` on each
-     inline note. Before creating a discussion, list discussions with
-     pagination. A failed or truncated list is retryable, not "nothing was
-     posted". Skip a discussion whose marker is already present. A retry with
-     the same hash therefore does not add a second summary or a second copy
-     of an inline note.
+     `<!-- ai-review findings_hash={hash} inline={path}:{line} finding={id} -->`
+     on each inline note. `{id}` is the first 16 hex characters of SHA-256
+     over the inline comment text, so two findings on one line stay distinct.
+     Before creating a discussion, list discussions with pagination. A failed
+     or truncated list is retryable, not "nothing was posted". If the summary
+     marker is already present, including a fallback summary that carries the
+     moved findings, return that note and do not post further discussions.
+     Otherwise skip an inline whose own marker is already present. A retry
+     with the same hash therefore does not add a second summary or a second
+     copy of an inline note.
    - A position rejection (GitLab 400 that names line, position, or diff
-     refs, with the head still current) uses the existing one-shot
+     refs) re-reads versions. GitLab lists the current version first and
+     keeps older versions after it. Only the first version's `head_commit_sha`
+     decides whether the head is still current; a historical match is not
+     enough. When that head moved, raise stale-commit (`cancelled` /
+     `superseded`). While it is current, use the existing one-shot
      `move_inline_to_body` path: stop further inline posts, put the remaining
      inline text into the summary, post that summary once. Do not post a
      second summary.

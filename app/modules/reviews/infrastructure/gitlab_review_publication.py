@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import re
 from typing import Any
 
@@ -24,8 +25,18 @@ def _summary_marker(findings_hash: str) -> str:
     return f"<!-- ai-review findings_hash={findings_hash} summary -->"
 
 
-def _inline_marker(findings_hash: str, path: str, line: int) -> str:
-    return f"<!-- ai-review findings_hash={findings_hash} inline={path}:{line} -->"
+def _finding_id(finding: PublishedFinding) -> str:
+    """Identity of one inline note. Path and line alone collide on one line."""
+    return hashlib.sha256(
+        comment_body(finding.title, finding.body, finding.suggestion).encode()
+    ).hexdigest()[:16]
+
+
+def _inline_marker(findings_hash: str, finding: PublishedFinding) -> str:
+    return (
+        f"<!-- ai-review findings_hash={findings_hash} "
+        f"inline={finding.path}:{finding.line} finding={_finding_id(finding)} -->"
+    )
 
 
 def _detail(response: httpx.Response) -> str:
@@ -88,6 +99,16 @@ def _matching_version(payload: Any, head_sha: str) -> dict[str, str]:
             }
         raise PublishError("retryable", "GitLab diff version is missing commit SHAs")
     raise PublishError("stale_commit", f"merge request head moved from {head_sha}")
+
+
+def _latest_head_sha(payload: Any) -> str:
+    """GitLab returns the current diff version first and keeps older versions after it."""
+    if not isinstance(payload, list) or not payload or not isinstance(payload[0], dict):
+        raise PublishError("retryable", "GitLab version list is short")
+    head = payload[0].get("head_commit_sha")
+    if not isinstance(head, str) or not head:
+        raise PublishError("retryable", "GitLab diff version is missing commit SHAs")
+    return head
 
 
 def _position(version: dict[str, str], finding: PublishedFinding) -> dict[str, Any]:
@@ -157,9 +178,13 @@ class GitLabMergeRequestDiscussionGateway:
                 submission.commit_sha,
             )
             discussions = await self._discussions(f"{prefix}/discussions")
+            summary = _summary_marker(submission.findings_hash)
+            existing = _note_id_for_marker(discussions, summary)
+            if existing is not None:
+                return SubmittedReview(existing, ())
             pending = list(submission.findings)
             for finding in submission.findings:
-                marker = _inline_marker(submission.findings_hash, finding.path, finding.line)
+                marker = _inline_marker(submission.findings_hash, finding)
                 if _note_id_for_marker(discussions, marker) is not None:
                     pending.pop(0)
                     continue
@@ -181,25 +206,20 @@ class GitLabMergeRequestDiscussionGateway:
                         unposted=tuple(pending),
                     ) from exc
                 pending.pop(0)
-            summary = _summary_marker(submission.findings_hash)
-            existing = _note_id_for_marker(discussions, summary)
-            summary_id = existing
-            if summary_id is None:
-                summary_id = await self._create(
-                    f"{prefix}/discussions",
-                    body=f"{submission.body}\n\n{summary}",
-                    position=None,
-                )
+            summary_id = await self._create(
+                f"{prefix}/discussions",
+                body=f"{submission.body}\n\n{summary}",
+                position=None,
+            )
             return SubmittedReview(summary_id, ())
         except httpx.TransportError as exc:
             raise PublishError("retryable", f"GitLab request failed: {exc}") from exc
 
     async def _require_current_head(self, prefix: str, head_sha: str) -> None:
-        """A position 400 is coordinates only while the posted head is still the MR head."""
-        _matching_version(
-            _decoded(await self._send("GET", f"{prefix}/versions")),
-            head_sha,
-        )
+        """A position 400 is coordinates only while the latest version is still this head."""
+        latest = _latest_head_sha(_decoded(await self._send("GET", f"{prefix}/versions")))
+        if latest != head_sha:
+            raise PublishError("stale_commit", f"merge request head moved from {head_sha}")
 
     async def _discussions(self, url: str) -> list[dict[str, Any]]:
         collected: list[dict[str, Any]] = []
