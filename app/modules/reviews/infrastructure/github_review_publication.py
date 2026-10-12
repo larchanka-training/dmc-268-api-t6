@@ -17,6 +17,7 @@ from app.modules.reviews.application.publish_run_review import (
     ReviewSubmission,
     SubmittedReview,
 )
+from app.modules.reviews.application.review_output import comment_body
 from app.modules.reviews.infrastructure.github_vcs import InstallationTokenProvider
 
 CHECK_RUN_NAME = "AI Review"
@@ -196,11 +197,3 @@ class GitHubPullRequestReviewGateway:
         if response.is_error:
             raise _publish_error(response)
         return SubmittedReview(review_id, tuple(int(item["id"]) for item in response.json()))
-
-
-def comment_body(title: str, body: str, suggestion: str | None) -> str:
-    """Inline comment text shared by GitHub reviews and GitLab discussions."""
-    text = f"**{title}**\n\n{body}"
-    if suggestion:
-        text += f"\n\n```suggestion\n{suggestion}\n```"
-    return text

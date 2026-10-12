@@ -12,13 +12,12 @@ from app.modules.reviews.application.publish_run_review import (
     ReviewSubmission,
     SubmittedReview,
 )
-from app.modules.reviews.application.review_output import PublishedFinding
-from app.modules.reviews.infrastructure.github_review_publication import comment_body
+from app.modules.reviews.application.review_output import PublishedFinding, comment_body
 
 _TIMEOUT = 10.0
 _MAX_DISCUSSION_PAGES = 20
 _PER_PAGE = 100
-_POSITION_REJECTION = re.compile(r"\b(?:line_code|line|position|diff(?: refs)?)\b")
+_POSITION_REJECTION = re.compile(r"\b(?:line_code|line|position|diff refs)\b")
 
 
 def _summary_marker(findings_hash: str) -> str:
@@ -158,16 +157,30 @@ class GitLabMergeRequestDiscussionGateway:
                 submission.commit_sha,
             )
             discussions = await self._discussions(f"{prefix}/discussions")
+            pending = list(submission.findings)
             for finding in submission.findings:
                 marker = _inline_marker(submission.findings_hash, finding.path, finding.line)
                 if _note_id_for_marker(discussions, marker) is not None:
+                    pending.pop(0)
                     continue
                 comment = comment_body(finding.title, finding.body, finding.suggestion)
-                await self._create(
-                    f"{prefix}/discussions",
-                    body=f"{comment}\n\n{marker}",
-                    position=_position(version, finding),
-                )
+                try:
+                    await self._create(
+                        f"{prefix}/discussions",
+                        body=f"{comment}\n\n{marker}",
+                        position=_position(version, finding),
+                    )
+                except PublishError as exc:
+                    if exc.kind != "coordinates":
+                        raise
+                    await self._require_current_head(prefix, submission.commit_sha)
+                    raise PublishError(
+                        "coordinates",
+                        str(exc),
+                        http_status=exc.http_status,
+                        unposted=tuple(pending),
+                    ) from exc
+                pending.pop(0)
             summary = _summary_marker(submission.findings_hash)
             existing = _note_id_for_marker(discussions, summary)
             summary_id = existing
@@ -180,6 +193,13 @@ class GitLabMergeRequestDiscussionGateway:
             return SubmittedReview(summary_id, ())
         except httpx.TransportError as exc:
             raise PublishError("retryable", f"GitLab request failed: {exc}") from exc
+
+    async def _require_current_head(self, prefix: str, head_sha: str) -> None:
+        """A position 400 is coordinates only while the posted head is still the MR head."""
+        _matching_version(
+            _decoded(await self._send("GET", f"{prefix}/versions")),
+            head_sha,
+        )
 
     async def _discussions(self, url: str) -> list[dict[str, Any]]:
         collected: list[dict[str, Any]] = []

@@ -8,7 +8,7 @@ import os
 import time
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 from typing import Annotated, Any, Literal, NoReturn
 from uuid import UUID
 
@@ -130,6 +130,7 @@ from app.modules.reviews.application.run_events import (
     iter_visible_run_events,
     parse_run_event_id,
     run_event_id,
+    utc_rfc3339,
 )
 from app.modules.reviews.application.try_enqueue_webhook_run import RunMessagePublisher
 
@@ -626,20 +627,13 @@ def _run_updated_frame(run_id: UUID, status: str, updated_at: datetime) -> str:
     )
 
 
-def _started_at_wire(started_at: datetime) -> str:
-    text = started_at.astimezone(UTC).isoformat()
-    if text.endswith("+00:00"):
-        return f"{text[:-6]}Z"
-    return text
-
-
 def _run_step_frame(step: RunStep) -> str:
     payload = {
         "runId": str(step.run_id),
         "tool": step.tool,
         "index": step.index,
         "ok": step.ok,
-        "startedAt": _started_at_wire(step.started_at),
+        "startedAt": utc_rfc3339(step.started_at),
         "durationMs": step.duration_ms,
     }
     return f"event: run.step\ndata: {json.dumps(payload)}\n\n"

@@ -156,8 +156,9 @@ uv run pytest tests/test_publish_run_review.py tests/test_review_publisher.py te
      comment id. Pass an empty `comment_ids` tuple so the current insert is
      skipped. Remote identity for a retry is the marker, not that table.
 
-   `PublishContext` gains `provider` (`github` or `gitlab`), numeric project id
-   (`repositories.external_id`), and `base_sha`. The consumer keeps the GitHub
+   `PublishContext` gains `provider` (`github` or `gitlab`) and numeric project id
+   (`repositories.external_id`). Discussion SHAs come from the GitLab versions
+   row, so the context does not copy `Run.base_sha`. The consumer keeps the GitHub
    gateway for `provider=github` and the GitLab gateway for `provider=gitlab`.
    GitHub request JSON, marker lookup, 422 fallback, and check-run title stay
    as they are. This issue does not create GitLab installations, webhooks, or

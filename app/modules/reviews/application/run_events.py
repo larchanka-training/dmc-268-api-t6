@@ -36,6 +36,14 @@ class RunStep:
     duration_ms: int
 
 
+def utc_rfc3339(value: datetime) -> str:
+    """UTC timestamp with a ``Z`` suffix, shared by ``NOTIFY`` payloads and SSE frames."""
+    text = value.astimezone(UTC).isoformat()
+    if text.endswith("+00:00"):
+        return f"{text[:-6]}Z"
+    return text
+
+
 class RunUpdatePublisher(Protocol):
     async def publish(self, event: RunUpdated) -> None: ...
 
@@ -183,6 +191,56 @@ async def _visible_updated_at(repository: RunAccessRepository, run_id: UUID) -> 
     return await repository.run_updated_at(run_id)
 
 
+class _HubClosed:
+    """The live iterator for one hub ended."""
+
+
+_HUB_CLOSED = _HubClosed()
+
+
+async def _replay_status(
+    repository: RunAccessRepository,
+    *,
+    since: datetime | None,
+    expires_at: int | None,
+    now: Callable[[], float],
+    replay_overlap: timedelta,
+    replay_limit: int,
+) -> AsyncIterator[RunChange]:
+    """Last-Event-ID replay is status only. Steps are not replayed."""
+    if since is None or (expires_at is not None and now() >= expires_at):
+        return
+    after = since - replay_overlap
+    for change in await repository.runs_updated_after(after, replay_limit):
+        yield change
+
+
+async def _live_status(
+    task: asyncio.Task[RunUpdated], repository: RunAccessRepository
+) -> RunChange | _HubClosed | None:
+    try:
+        update = task.result()
+    except StopAsyncIteration:
+        return _HUB_CLOSED
+    updated_at = await _visible_updated_at(repository, update.run_id)
+    if updated_at is None:
+        return None
+    return RunChange(update.run_id, update.status, updated_at)
+
+
+async def _live_step(
+    task: asyncio.Task[RunStep], repository: RunAccessRepository
+) -> RunStep | _HubClosed | None:
+    try:
+        step = task.result()
+    except StopAsyncIteration:
+        return _HUB_CLOSED
+    visible_at = await _visible_updated_at(repository, step.run_id)
+    if visible_at is None:
+        return None
+    return step
+
+
 async def iter_visible_run_events(
     event_hub: RunUpdateStream,
     step_hub: RunStepStream,
@@ -214,10 +272,15 @@ async def iter_visible_run_events(
         status_open = True
         step_open = True
         try:
-            if since is not None and (expires_at is None or now() < expires_at):
-                after = since - replay_overlap
-                for change in await repository.runs_updated_after(after, replay_limit):
-                    yield change
+            async for change in _replay_status(
+                repository,
+                since=since,
+                expires_at=expires_at,
+                now=now,
+                replay_overlap=replay_overlap,
+                replay_limit=replay_limit,
+            ):
+                yield change
             while status_open or step_open:
                 if expires_at is not None and now() >= expires_at:
                     break
@@ -247,25 +310,19 @@ async def iter_visible_run_events(
                 if status_next is not None and status_next in done:
                     finished = status_next
                     status_next = None
-                    try:
-                        update = finished.result()
-                    except StopAsyncIteration:
+                    status_item = await _live_status(finished, repository)
+                    if isinstance(status_item, _HubClosed):
                         status_open = False
-                    else:
-                        updated_at = await _visible_updated_at(repository, update.run_id)
-                        if updated_at is not None:
-                            yield RunChange(update.run_id, update.status, updated_at)
+                    elif status_item is not None:
+                        yield status_item
                 if step_next is not None and step_next in done:
                     finished_step = step_next
                     step_next = None
-                    try:
-                        step = finished_step.result()
-                    except StopAsyncIteration:
+                    step_item = await _live_step(finished_step, repository)
+                    if isinstance(step_item, _HubClosed):
                         step_open = False
-                    else:
-                        visible_at = await _visible_updated_at(repository, step.run_id)
-                        if visible_at is not None:
-                            yield step
+                    elif step_item is not None:
+                        yield step_item
                 # A finite status iterator ends the response. Drain steps already
                 # queued; do not wait for a step that has not been published.
                 if not status_open and step_open:

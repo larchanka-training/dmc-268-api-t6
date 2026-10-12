@@ -321,7 +321,6 @@ class SqlAlchemyRunLifecycleStore:
             findings_hash=findings_hash(_hashed(item) for item in findings),
             provider=installation.provider,
             project_id=repository.external_id,
-            base_sha=run.base_sha,
         )
 
     async def complete_publication(

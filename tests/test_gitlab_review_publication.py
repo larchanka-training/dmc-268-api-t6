@@ -207,8 +207,60 @@ def test_position_400_raises_coordinates_once(message: str) -> None:
     assert raised.value.kind == "coordinates"
     assert raised.value.http_status == 400
     assert str(raised.value) == message
+    assert raised.value.unposted == (FINDING_APP, FINDING_OTHER)
     assert len(posts) == 1
     assert posts[0]["position"]["new_line"] == 3
+
+
+def test_position_400_after_one_inline_reports_only_the_unposted_finding() -> None:
+    posts = 0
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        nonlocal posts
+        if request.method == "GET" and request.url.path == VERSIONS:
+            return httpx.Response(200, json=_versions())
+        if request.method == "GET" and request.url.path == DISCUSSIONS:
+            return httpx.Response(200, json=[])
+        posts += 1
+        if posts == 1:
+            return httpx.Response(201, json={"id": "disc", "notes": [{"id": 601}]})
+        return httpx.Response(400, json={"message": "line must be part of the diff"})
+
+    with pytest.raises(PublishError) as raised:
+        _submit(respond)
+
+    assert raised.value.kind == "coordinates"
+    assert raised.value.unposted == (FINDING_OTHER,)
+
+
+def test_position_400_after_the_head_moves_is_stale_commit() -> None:
+    version_reads = 0
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        nonlocal version_reads
+        if request.method == "GET" and request.url.path == VERSIONS:
+            version_reads += 1
+            if version_reads == 1:
+                return httpx.Response(200, json=_versions())
+            return httpx.Response(
+                200,
+                json=[
+                    {
+                        "head_commit_sha": OTHER_HEAD,
+                        "base_commit_sha": OTHER_BASE,
+                        "start_commit_sha": OTHER_START,
+                    }
+                ],
+            )
+        if request.method == "GET" and request.url.path == DISCUSSIONS:
+            return httpx.Response(200, json=[])
+        return httpx.Response(400, json={"message": "position is invalid"})
+
+    with pytest.raises(PublishError) as raised:
+        _submit(respond)
+
+    assert raised.value.kind == "stale_commit"
+    assert version_reads == 2
 
 
 def test_moved_head_raises_stale_commit() -> None:
@@ -300,7 +352,10 @@ def test_version_missing_shas_is_retryable() -> None:
     assert str(raised.value) == "GitLab diff version is missing commit SHAs"
 
 
-@pytest.mark.parametrize("message", ["quota exceeded", "deadline exceeded"])
+@pytest.mark.parametrize(
+    "message",
+    ["quota exceeded", "deadline exceeded", "the diff is unavailable"],
+)
 def test_unrelated_400_is_retryable(message: str) -> None:
     posts: list[dict[str, Any]] = []
 

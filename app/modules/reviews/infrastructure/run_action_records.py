@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime
+from datetime import datetime
 from typing import Any
 from uuid import UUID
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.modules.reviews.application.run_events import utc_rfc3339
 from app.modules.reviews.infrastructure.models import Run, RunAction
 from app.modules.reviews.infrastructure.run_action_payloads import place_response
 
@@ -19,13 +20,6 @@ CHANNEL = "run_step"
 def step_succeeded(response: Any) -> bool:
     """False only when the response object contains ``error``; null and other values are true."""
     return not (isinstance(response, dict) and "error" in response)
-
-
-def _started_at(started_at: datetime) -> str:
-    text = started_at.astimezone(UTC).isoformat()
-    if text.endswith("+00:00"):
-        return f"{text[:-6]}Z"
-    return text
 
 
 async def insert_run_action(
@@ -70,7 +64,7 @@ async def insert_run_action(
             "tool": tool,
             "index": index,
             "ok": ok,
-            "started_at": _started_at(started_at),
+            "started_at": utc_rfc3339(started_at),
             "duration_ms": duration_ms,
         },
         separators=(",", ":"),

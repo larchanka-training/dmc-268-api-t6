@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
-import contextlib
 import json
 import logging
 from collections.abc import AsyncIterator
@@ -12,9 +10,7 @@ from datetime import datetime
 from typing import Protocol
 from uuid import UUID
 
-import psycopg
-from sqlalchemy.engine import make_url
-
+from app.bootstrap.postgres_listen import listen_notify, notify_listener
 from app.modules.reviews.application.run_events import RunStep
 from app.modules.reviews.infrastructure.run_action_records import CHANNEL
 
@@ -46,35 +42,27 @@ def _event(payload: str) -> RunStep | None:
         return None
 
 
+async def _publish(payload: str, hub: RunStepPublisher) -> None:
+    event = _event(payload)
+    if event is not None:
+        await hub.publish(event)
+
+
 async def listen_forever(database_url: str, hub: RunStepPublisher, retry: float = 5.0) -> None:
     """LISTEN on a dedicated autocommit connection; reconnect after a lost connection."""
-    conninfo = (
-        make_url(database_url).set(drivername="postgresql").render_as_string(hide_password=False)
+    await listen_notify(
+        database_url,
+        CHANNEL,
+        lambda payload: _publish(payload, hub),
+        retry,
     )
-    while True:
-        try:
-            async with await psycopg.AsyncConnection.connect(conninfo, autocommit=True) as conn:
-                await conn.execute(f"LISTEN {CHANNEL}")
-                async for notify in conn.notifies():
-                    event = _event(notify.payload)
-                    if event is not None:
-                        await hub.publish(event)
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            _LOGGER.exception("%s listener lost its connection; reconnecting", CHANNEL)
-            await asyncio.sleep(retry)
 
 
 @asynccontextmanager
 async def run_step_listener(database_url: str | None, hub: RunStepPublisher) -> AsyncIterator[None]:
-    if not database_url:
+    async with notify_listener(
+        database_url,
+        CHANNEL,
+        lambda payload: _publish(payload, hub),
+    ):
         yield
-        return
-    task = asyncio.create_task(listen_forever(database_url, hub))
-    try:
-        yield
-    finally:
-        task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await task

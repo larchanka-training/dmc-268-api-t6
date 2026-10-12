@@ -738,10 +738,12 @@ GitLab пишет discussions через `GitLabMergeRequestDiscussionGateway`: 
 список — повторяемая ошибка, а не «ничего не опубликовано». Тот же `findings_hash`
 не создаёт вторую сводку и вторую копию inline. Идентификаторы discussion в
 `comments` не пишутся (`comment_ids` пустой): повтор узнаёт публикацию по маркеру,
-а не по `github_comment_id`. Отказ позиции (HTTP 400, в тексте по границам слова
-есть `line_code`, `line`, `position`, `diff` или `diff refs`, поэтому `deadline` не
-совпадает с `line`; голова всё ещё текущая) один раз переносит оставшийся inline в тело
-сводки. Прочие сбои пишут на прогон `gitlab_forbidden` (401 и 403) или
+а не по `github_comment_id`. Отказ позиции — HTTP 400, в тексте которого по границам
+слова есть `line_code`, `line`, `position` или `diff refs`. Отдельное слово `diff` и
+`deadline` таким отказом не являются. После такого 400 шлюз ещё раз читает versions:
+если `head_commit_sha` уже другой, прогон становится `cancelled` / `superseded`.
+Пока голова та же, в тело сводки один раз попадают только те inline, которые эта
+попытка ещё не опубликовала. Прочие сбои пишут на прогон `gitlab_forbidden` (401 и 403) или
 `gitlab_publish_failed`. Коды `github_*` для GitLab не используются, и шлюз
 check-run GitHub для такого прогона не вызывается. Запись трейса —
 `gitlab.publish_review`.

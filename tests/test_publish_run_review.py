@@ -51,7 +51,6 @@ FINDING = PublishedFinding(
 )
 POINTER = ReviewPublishPointer(RUN, HEAD, HASH, "COMMENT")
 PROJECT_ID = 5150
-BASE = "b" * 40
 STORED_BODY = "\n".join(
     [
         "## Review summary",
@@ -82,7 +81,6 @@ def context(**change: Any) -> PublishContext:
         findings_hash=HASH,
         provider="github",
         project_id=101,
-        base_sha=BASE,
     )
     return replace(base, **change)
 
@@ -256,7 +254,7 @@ def run(
 
 
 def gitlab_context(**change: Any) -> PublishContext:
-    return context(provider="gitlab", project_id=PROJECT_ID, base_sha=BASE, **change)
+    return context(provider="gitlab", project_id=PROJECT_ID, **change)
 
 
 def test_publication_succeeds_with_one_trace_record_and_a_neutral_check_run() -> None:
@@ -680,6 +678,47 @@ def test_gitlab_retryable_failures_store_gitlab_publish_failed() -> None:
     assert sleeps == [2.0, 8.0, 30.0]
     assert len(trace.records) == 4
     assert {record[0] for record in trace.records} == {"gitlab.publish_review"}
+    assert check_runs.views == []
+
+
+def test_gitlab_coordinate_failure_moves_only_unposted_findings() -> None:
+    other = PublishedFinding(
+        path="src/other.py",
+        line=9,
+        start_line=None,
+        severity="medium",
+        category="correctness",
+        title="Narrow check",
+        body="The guard is too wide.",
+        suggestion=None,
+        confidence=0.8,
+        rule_name=None,
+    )
+    store = Store(gitlab_context(findings=(FINDING, other)))
+    gitlab = GitLabReviews(
+        [
+            PublishError("coordinates", "line outside diff", http_status=400, unposted=(other,)),
+            SubmittedReview(880, ()),
+        ],
+        store,
+    )
+    _, check_runs = run(store, Reviews([]), gitlab=gitlab)
+
+    assert store.state == "succeeded"
+    assert gitlab.calls[1][0].findings == ()
+    assert "`src/other.py:9`" in gitlab.calls[1][0].body
+    assert "`src/app.py:3`" not in gitlab.calls[1][0].body
+    assert check_runs.views == []
+
+
+def test_unsupported_provider_stays_publishing_without_a_gateway_call() -> None:
+    store = Store(context(provider="bitbucket"))
+    reviews = Reviews([])
+    trace, check_runs = run(store, reviews)
+
+    assert store.state == "publishing"
+    assert reviews.submissions == []
+    assert trace.records == []
     assert check_runs.views == []
 
 
