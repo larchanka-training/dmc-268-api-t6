@@ -131,3 +131,70 @@ evidence. Полную задачу не объявлять завершённо
 утверждения этого плана пользователем. Утверждение охватывает описанную ветку,
 реализацию, тесты, документацию, настройку публичной variable и публикацию PR.
 Merge, выдача approve и обход deployment policy в этот план не входят.
+
+## Коррекционный раунд PR #125 — 12.10.2026
+
+Основание: review на `f5a1e56` и прямое поручение пользователя исправить
+замечания через agent-loop. Это продолжение утверждённого scope #111;
+новое утверждение не требуется. Исторические результаты выше сохранены и
+не являются результатами текущего head. Координатор сообщил об успешном rebase:
+`HEAD=a8259ba` поверх `origin/main=46a9077`.
+
+1. **P3-1: закрепить env → URL** (Small, 1 новый файл):
+   `tests/test_worker_portal_url.py` проверяет существующие
+   `WorkerSettings.from_environment` и `run_url_factory` без БД, брокера,
+   GitHub и LLM. Ожидания — литералы: для фиксированного UUID возвращается
+   `https://ui.test/runs/<UUID>`; базовый URL без слеша, с одним или несколькими
+   завершающими слешами даёт один и тот же адрес; пустой/незаданный URL даёт
+   `None`; mapping с `PORTAL_URL` читается в `settings.portal_url`, без ключа
+   или с пустым значением получается `None`. Mapping задаёт только обязательные
+   `DATABASE_URL`, `RABBITMQ_URL` и проверяемую настройку.
+   Продакшен уже корректен: TDD RED подтверждается изолированными мутациями
+   `/runs/` → `/run/`, удаления `rstrip("/")` и `PORTAL_URL` → `PORTAL_URI`.
+   Каждая мутация должна краснить новую проверку; изменения мутаций не остаются
+   в checkout и не попадают в PR. GREEN — немутированный focused-набор.
+2. **P3-2: завершить документацию настройки** (Small, 2 файла):
+   в `deploy/compose/staging.yml` комментарий `worker.env` включает portal links;
+   в `docs/SECRETS.md` §2 п.3 checklist variables Environment `staging`
+   называет опциональный `PORTAL_URL` для ссылки на Run. Runtime/Compose
+   поведение не меняется. Координационные комментарии перед пересекающимися
+   правками уже опубликованы в PR #126 (`issuecomment-6121802405`) и
+   PR #136 (`issuecomment-6121802800`).
+3. **Checkpoint и публикация в существующий PR**: после задач 1–2 выполнить
+   focused-наборы и четыре uv-гейта, независимые Standards/Spec review, затем
+   commit/push в `fix/111-worker-portal-url`. Обновить фактические counts и
+   rebase-checkbox в PR, добавить оба plan/todo-файла в What, ответить на review
+   с SHA исправления. Треды разрешает reviewer; merge не выполняется.
+
+Порядок: rebase → задача 1 → задача 2 → checkpoint → publisher; независимые
+правки теста и документации могут выполнять разные developer-агенты. Файлы
+`app/worker.py`, delivery workflow/allowlist и спецификации менять не требуется.
+Точный checklist текущего раунда — в [111-todo.md](111-todo.md).
+
+Проверки: `uv run pytest tests/test_worker_portal_url.py`,
+`uv run pytest tests/test_deploy_staging_services.py`,
+`uv run ruff check .`, `uv run ruff format --check .`, `uv run mypy .`,
+`uv run pytest`. Counts/skips записываются по текущему запуску; прежние 2260/128
+нельзя переносить как новую проверку после rebase.
+
+Гейты запускаются без подключения к Docker-инфраструктуре других PR;
+PostgreSQL/broker integration skips честно фиксируются по факту.
+
+Риски: мутации уже корректного production выполнять в изоляции; сохранять
+чужие untracked plan-файлы и main-версии планов #129; staging live AC остаётся
+pending до reviewed merge/deployment по решению техлида. Для последующей
+живой приёмки нужен `succeeded` sandbox-прогон и URL check-run, Run UUID,
+ссылка из summary, SHA/digest staging; актуальный источник URL-контракта —
+SYSTEM_DESIGN §8.3. Дрейф PIPELINE_SPEC §7 вне scope этого раунда.
+
+Development Tasks 1–2 выполнены 12.10.2026: добавлены 8 буквальных unit-проверок
+двух утверждённых public seams и две точечные правки комментария/checklist.
+Изолированные mutation-RED запуски поймали все три мутации (3, 2 и 1 failure);
+production `app/worker.py` не менялся. Focused-наборы зелёные: 8 worker URL
+и 45 deploy tests. Логи, текущие результаты гейтов и честные integration skips
+дописаны в correction evidence [111-todo.md](111-todo.md). Первый полный
+pytest обнаружил ограничения sandbox на localhost bind; повтор выполнен
+с разрешением loopback sockets без подключения к контейнерам других PR.
+Повтор завершился зелёным: **2310 passed, 145 skipped, 2 warnings in 89.51s**.
+Все четыре обязательных uv-гейта зелёные; Standards/Spec — **0/0 findings**.
+Изменения переданы publisher без commit/push со стороны developer.
