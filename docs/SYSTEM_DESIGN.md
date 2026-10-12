@@ -631,7 +631,21 @@ VCS/stream, check-run и публикация с повторными запро
 timeout. Кэшированный locator не заменяет проверку. Только уже начатый внешний
 запрос может закончиться: его оплаченный LLM usage и append-only audit сохраняются. Если успешный review POST
 вернул ID перед снятием origin, `github.publish_review` сохраняет этот ID даже без
-следующего GET комментариев; storage fence отменяет Run и не обновляет findings/comments.
+следующего GET комментариев. Если origin неактивен при `complete_publication`,
+storage fence отменяет Run и не обновляет findings/comments.
+
+**Принятое ограничение квитанции (#113).** Если checkpoint после успешного review
+POST обнаружит недоступность origin до GET комментариев, квитанция содержит
+`review_id` и пустой `comment_ids`: пустой список здесь не отличает неизвестные
+комментарии от их отсутствия. Новый HTTP-запрос не начинается, пока origin
+недоступен. При редкой гонке remove → re-add той же Repository до
+`complete_publication` origin снова может быть активен: Run может завершиться `succeeded`,
+findings получат `published=true`, но локальные строки `Comment` не появятся, хотя
+inline-комментарии на GitHub могут существовать. Поэтому локальный список
+комментариев не гарантирует полноту внешнего ревью в этом окне. Это принятое
+ограничение; различение неизвестных/пустых comment IDs и расширение контракта
+идентичности квитанции не входят в этот PR.
+
 Существующие terminal Run state/payload, findings/comments/diff/context не
 переписываются; обычные diff/context записи требуют активного origin и RUNNING
 под атомарными блокировками. История и cache-only file/action routes по-прежнему

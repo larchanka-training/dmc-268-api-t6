@@ -1,6 +1,6 @@
 # Developer A correction evidence (#113 / PR #132)
 
-Worktree: `/Users/qx/.codex/worktrees/132-review-fixes/dmc-268-api-t6`.
+Worktree: `<worktree>`.
 Development base: rebased `69505ab`, current main `46a9077`.
 
 ## P2-1 archive projection
@@ -59,7 +59,7 @@ statistics snapshots are refreshed between observations.
 
 ## Focused verification
 
-Dedicated `TEST_DATABASE_URL=postgresql+psycopg://app:app@127.0.0.1:55628/issue113`:
+Dedicated `TEST_DATABASE_URL=<dev-db>`:
 `uv run pytest tests/test_installation_repository_sync.py tests/test_app_reinstall_postgres.py tests/test_app_reinstall_schema_postgres.py -q`
 — **35 passed** (9 sync unit, 23 reinstall PostgreSQL, 3 schema PostgreSQL),
 zero skips, 21.88 seconds.

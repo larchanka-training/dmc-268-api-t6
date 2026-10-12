@@ -247,7 +247,9 @@ repeat: every eligible repository that was read is upserted again, setting
 manual pause. A repository in a unique deleted archive under the same numeric account
 and Workspace waits for fresh OAuth confirmation of its exact external ID: sync returns
 an explicit deferred result, creates neither a clean target nor default rules, and grants
-no access. A persisted exact personal repo grant for the new installation can
+no access. This defers only PostgreSQL onboarding: the projector may already have
+issued the GitHub tree GET and labels POST before sync decides to defer.
+A persisted exact personal repo grant for the new installation can
 explicitly accept a clean target when that fresh OAuth snapshot omitted numeric account
 identity and therefore did not authorize archive transfer (SYSTEM_DESIGN §6.9).
 The receipt may finish normally; a later fresh OAuth authorizes the rebind.

@@ -81,6 +81,11 @@ async def prepare(factory: async_sessionmaker[AsyncSession], origin: str, state:
                 text("UPDATE provider_installations SET deleted_at=clock_timestamp() WHERE id=:id"),
                 {"id": INSTALL_A},
             )
+        elif origin == "repo_removed":
+            await session.execute(
+                text("UPDATE repositories SET installation_available=false WHERE id=:id"),
+                {"id": REPO_A},
+            )
         elif origin == "rebound":
             await session.execute(
                 text("UPDATE provider_installations SET external_id=29 WHERE id=:id"),
@@ -93,7 +98,7 @@ async def prepare(factory: async_sessionmaker[AsyncSession], origin: str, state:
 
 
 @pytest.mark.integration
-@pytest.mark.parametrize("origin", ["active", "retired", "rebound", "unknown"])
+@pytest.mark.parametrize("origin", ["active", "retired", "rebound", "unknown", "repo_removed"])
 @pytest.mark.parametrize("state", ["queued", "publishing", "cancelled"])
 def test_provider_projections_never_reconstruct_another_or_unknown_installation(
     guard_env: Env,
@@ -450,7 +455,7 @@ def test_source_replacement_while_claim_waits_refuses_old_work_but_new_origin_st
 
 
 @pytest.mark.integration
-@pytest.mark.parametrize("origin", ["retired", "rebound", "unknown"])
+@pytest.mark.parametrize("origin", ["retired", "rebound", "unknown", "repo_removed"])
 @pytest.mark.parametrize("state", ["queued", "running", "publishing"])
 def test_reconciliation_terminalizes_stale_inactive_origins_without_queue_messages(
     guard_env: Env, origin: str, state: str
@@ -492,7 +497,7 @@ def test_reconciliation_terminalizes_stale_inactive_origins_without_queue_messag
 
 
 @pytest.mark.integration
-@pytest.mark.parametrize("origin", ["retired", "rebound", "unknown"])
+@pytest.mark.parametrize("origin", ["retired", "rebound", "unknown", "repo_removed"])
 @pytest.mark.parametrize("attempt", [1, 2])
 @pytest.mark.parametrize("failure_code", ["diff_fetch_failed", "llm_invalid_output"])
 def test_retryable_worker_failure_after_retirement_terminalizes_without_retry(
@@ -739,6 +744,193 @@ def test_reconciler_releases_first_origin_before_waiting_for_next_origin(guard_e
             ]
         finally:
             event.remove(engine.sync_engine, "before_cursor_execute", observe)
+            await engine.dispose()
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("origin", ["active", "retired", "rebound", "unknown", "repo_removed"])
+@pytest.mark.parametrize("state", ["running", "publishing"])
+def test_owning_worker_failure_terminalizes_inactive_origin_and_preserves_history(
+    guard_env: Env, origin: str, state: str
+) -> None:
+    async def exercise() -> None:
+        engine = guard_env.engine()
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        try:
+            await prepare(factory, origin, state)
+            async with factory.begin() as session:
+                await session.execute(
+                    text(
+                        "UPDATE runs SET worker_id='owner',"
+                        "lease_until=clock_timestamp()+interval '1 hour' WHERE id=:id"
+                    ),
+                    {"id": RUN_ATTEMPTED},
+                )
+                history_before = (
+                    (
+                        await session.execute(
+                            text("SELECT id,to_jsonb(r) FROM runs r WHERE id<>:id ORDER BY id"),
+                            {"id": RUN_ATTEMPTED},
+                        )
+                    )
+                    .tuples()
+                    .all()
+                )
+            now = datetime.now(UTC)
+            async with factory.begin() as session:
+                assert (
+                    await SqlAlchemyRunLifecycleStore(session).finish(
+                        RUN_ATTEMPTED,
+                        from_state=state,
+                        worker_id="owner",
+                        state="failed",
+                        error_code="diff_fetch_failed",
+                        error_message="provider failure",
+                        now=now,
+                    )
+                    is True
+                )
+            async with factory() as session:
+                result = (
+                    await session.execute(
+                        text(
+                            "SELECT state::text,error_code,error_message,lease_until,finished_at,"
+                            "worker_id,origin_provider_installation_id FROM runs WHERE id=:id"
+                        ),
+                        {"id": RUN_ATTEMPTED},
+                    )
+                ).one()
+                if origin == "active":
+                    assert tuple(result[:3]) == ("failed", "diff_fetch_failed", "provider failure")
+                else:
+                    assert tuple(result[:3]) == ("cancelled", "installation_unavailable", None)
+                assert tuple(result[3:6]) == (None, now, "owner")
+                assert result.origin_provider_installation_id == (
+                    None if origin == "unknown" else INSTALL_A
+                )
+                finished_before = await session.scalar(
+                    text("SELECT to_jsonb(r) FROM runs r WHERE id=:id"), {"id": RUN_ATTEMPTED}
+                )
+                history_after = (
+                    (
+                        await session.execute(
+                            text("SELECT id,to_jsonb(r) FROM runs r WHERE id<>:id ORDER BY id"),
+                            {"id": RUN_ATTEMPTED},
+                        )
+                    )
+                    .tuples()
+                    .all()
+                )
+            assert history_after == history_before
+            async with factory.begin() as session:
+                assert (
+                    await SqlAlchemyRunLifecycleStore(session).finish(
+                        RUN_ATTEMPTED,
+                        from_state=state,
+                        worker_id="owner",
+                        state="failed",
+                        error_code="llm_invalid_output",
+                        error_message="late failure",
+                        now=now + timedelta(minutes=1),
+                    )
+                    is False
+                )
+            async with factory() as session:
+                finished_after = await session.scalar(
+                    text("SELECT to_jsonb(r) FROM runs r WHERE id=:id"), {"id": RUN_ATTEMPTED}
+                )
+            assert finished_after == finished_before
+        finally:
+            await engine.dispose()
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("state", ["queued", "running", "publishing"])
+def test_retire_stale_origin_preserves_work_when_origin_is_active_again(
+    guard_env: Env, state: str
+) -> None:
+    async def exercise() -> None:
+        engine = guard_env.engine()
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        try:
+            await prepare(factory, "repo_removed", state)
+            async with factory.begin() as session:
+                await session.execute(
+                    text("UPDATE repositories SET installation_available=true WHERE id=:id"),
+                    {"id": REPO_A},
+                )
+                before = await session.scalar(
+                    text("SELECT to_jsonb(r) FROM runs r WHERE id=:id"), {"id": RUN_ATTEMPTED}
+                )
+            async with factory.begin() as session:
+                assert (
+                    await SqlAlchemyRunLifecycleStore(session).retire_stale_origin(
+                        RUN_ATTEMPTED, datetime.now(UTC), datetime.now(UTC)
+                    )
+                    is False
+                )
+            async with factory() as session:
+                after = await session.scalar(
+                    text("SELECT to_jsonb(r) FROM runs r WHERE id=:id"), {"id": RUN_ATTEMPTED}
+                )
+            assert after == before
+        finally:
+            await engine.dispose()
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("origin", ["active", "retired", "rebound", "unknown", "repo_removed"])
+def test_inactive_origin_cancellation_takes_priority_over_user_pause(
+    guard_env: Env, origin: str
+) -> None:
+    async def exercise() -> None:
+        engine = guard_env.engine()
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        calls: list[str] = []
+        queue = RetryQueue()
+
+        async def pipeline(claimed: ClaimedAttempt) -> bool:
+            calls.append("pipeline")
+            return False
+
+        try:
+            await prepare(factory, origin, "queued")
+            async with factory.begin() as session:
+                await session.execute(
+                    text("UPDATE repositories SET enabled=false WHERE id=:id"), {"id": REPO_A}
+                )
+            assert (
+                await HandleReviewRun(
+                    uow_factory=lambda: SqlAlchemyRunLifecycleUnitOfWork(factory),
+                    pipeline=pipeline,
+                    retry_queue=queue,
+                    check_runs=None,
+                    worker_id="owner",
+                ).execute(RUN_ATTEMPTED)
+                == "ack"
+            )
+            assert calls == [] and queue.published == []
+            async with factory() as session:
+                result = (
+                    await session.execute(
+                        text(
+                            "SELECT state::text,error_code,attempt,lease_until "
+                            "FROM runs WHERE id=:id"
+                        ),
+                        {"id": RUN_ATTEMPTED},
+                    )
+                ).one()
+            if origin == "active":
+                assert tuple(result) == ("skipped", "repo_disabled", 1, None)
+            else:
+                assert tuple(result) == ("cancelled", "installation_unavailable", 1, None)
+        finally:
             await engine.dispose()
 
     asyncio.run(exercise())

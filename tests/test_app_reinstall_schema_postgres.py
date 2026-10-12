@@ -78,6 +78,7 @@ def test_existing_schema_upgrade_keeps_pause_and_unknown_identity(
         (105, partial, True),
         (106, partial, True),
         (107, deleted, True),
+        (108, partial, False),
     ):
         connection.execute(
             text(
@@ -101,7 +102,8 @@ def test_existing_schema_upgrade_keeps_pause_and_unknown_identity(
             "VALUES (:deleted, 0, '2026-10-07T12:00:00Z'), "
             "(:partial, 102, '2026-10-07T12:00:00Z'), "
             "(:partial, 105, '2026-10-07T12:00:00Z'), "
-            "(:partial, 106, '2026-10-07T12:00:00Z')"
+            "(:partial, 106, '2026-10-07T12:00:00Z'), "
+            "(:partial, 108, '2026-10-07T12:00:00Z')"
         ),
         {"deleted": deleted, "partial": partial},
     )
@@ -109,7 +111,8 @@ def test_existing_schema_upgrade_keeps_pause_and_unknown_identity(
         text(
             "INSERT INTO github_user_repository_access "
             "(github_user_id, provider_installation_id, repository_external_id, created_at) "
-            "VALUES (41, :partial, 105, '2026-10-08T12:00:00Z')"
+            "VALUES (41, :partial, 105, '2026-10-08T12:00:00Z'), "
+            "(41, :partial, 108, '2026-10-08T12:00:00Z')"
         ),
         {"partial": partial},
     )
@@ -131,6 +134,7 @@ def test_existing_schema_upgrade_keeps_pause_and_unknown_identity(
         (105, True, True),
         (106, True, True),
         (107, True, False),
+        (108, False, True),
     ]
     installations = connection.execute(
         text(

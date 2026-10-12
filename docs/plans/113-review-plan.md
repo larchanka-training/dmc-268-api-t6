@@ -156,8 +156,8 @@ this evidence as a UI follow-up limitation, without silently modifying another r
 ### Checkpoint 2 — Full proof and review
 
 Use uv for everything. Dedicated services are ready at
-`TEST_DATABASE_URL=postgresql+psycopg://app:app@127.0.0.1:55628/issue113` and
-`TEST_RABBITMQ_URL=amqp://app:app@127.0.0.1:55634/issue113`; fixtures migrate random
+`TEST_DATABASE_URL=<dev-db>` and
+`TEST_RABBITMQ_URL=<dev-broker>`; fixtures migrate random
 schemas. With those variables exported,
 run `uv run ruff check .`, `uv run ruff format --check .`, `uv run mypy .`,
 `uv run pytest -rs`. Confirm all integration cases execute with zero skips; collect

@@ -680,8 +680,8 @@ two #113 plan files, optional `113-verification.md` with executed evidence.
 **Estimated scope:** Medium.
 
 Final technical evidence: all gates used both isolated infra URLs
-`TEST_DATABASE_URL=postgresql+psycopg://app:app@127.0.0.1:55628/issue113` and
-`TEST_RABBITMQ_URL=amqp://app:app@127.0.0.1:55634/issue113`.
+`TEST_DATABASE_URL=<dev-db>` and
+`TEST_RABBITMQ_URL=<dev-broker>`.
 `uv run ruff check .` passed; `uv run ruff format --check .` reported368 formatted
 files; `uv run mypy .` passed365 source files. `uv run pytest -rs` passed2712 tests
 in330.91 s with zero skips and two existing dependency deprecation warnings.

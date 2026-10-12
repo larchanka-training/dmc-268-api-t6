@@ -169,10 +169,14 @@ GET /healthcheck
 Образы хранилищ запиннены по digest (`<имя>:<версия>@sha256:…`), как Caddy в `deploy/edge/compose.yml`. При наличии digest Docker игнорирует тег, поэтому перевыкат и rollback не сдвигают хранилище на другую сборку; тег оставлен как подпись версии. Обновление — отдельным PR: `docker buildx imagetools inspect postgres:<версия>-alpine`, строка `Digest:` (digest multi-arch индекса), тег и digest меняются вместе. Rollback берёт compose из текущего checkout, поэтому пин хранилища вместе с образом приложения не откатывается: revert-коммит возвращает прежнюю ссылку на образ, но совместимость данных при возврате на старую версию не гарантирует — обновление хранилища проверять до мержа. Локальный `docker-compose.yml` и service-контейнеры CI остаются на плавающих тегах (`17-alpine`, `4-management-alpine`, `8-alpine`).
 
 Первый выкат миграции `20261010_0030` (origin Run) требует остановить все старые
-процессы, создающие Run, **до** запуска `bootstrap`: `api`, `webhook-worker` и
-`worker` (включая retry/rerun writers и отдельные экземпляры вне compose).
-`depends_on: service_completed_successfully` управляет запуском новых контейнеров
-и не останавливает старые writers. Использовать env/compose текущего релиза. Для курсового VPS из `/opt/dmc-268-api-staging` выполнить
+процессы, создающие Run, **до мержа #132 в main**: `api`, `webhook-worker`,
+`worker` (включая retry/rerun writers) и все независимые writers вне compose.
+`Deploy staging` запускается автоматически после push в `main`
+(`.github/workflows/ci-cd.yml`, job `deploy-staging`), поэтому момент мержа нужно
+согласовать с техлидом @axyi заранее. Все старые writers должны оставаться
+остановленными до завершения `bootstrap`; затем запускаются только сервисы нового
+образа. `depends_on: service_completed_successfully` управляет запуском новых
+контейнеров и не останавливает старые writers. Использовать env/compose текущего релиза. Для курсового VPS из `/opt/dmc-268-api-staging` выполнить
 `docker compose -p dmc-268-api-staging --env-file .env -f compose.yml -f compose.edge.yml stop api webhook-worker worker`
 (для Terraform-хоста использовать его APP_DIR, имя compose-проекта и `compose.ports.yml`),
 проверить отсутствие других старых writers, затем выполнить выкат с новым образом.

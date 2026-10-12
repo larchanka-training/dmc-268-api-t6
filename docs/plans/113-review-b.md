@@ -1,6 +1,6 @@
 # PR132 developer B lifecycle evidence (#113)
 
-Worktree: `/Users/qx/.codex/worktrees/132-review-fixes/dmc-268-api-t6`.
+Worktree: `<worktree>`.
 Branch/base supplied by coordinator: `fix/113-pr132-review`, rebased
 `69505ab` / `46a9077`. No Git mutation or dependency change by B.
 
@@ -26,7 +26,7 @@ Branch/base supplied by coordinator: `fix/113-pr132-review`, rebased
 
 ## Red-green proof
 
-Real PostgreSQL uses `TEST_DATABASE_URL=postgresql+psycopg://app:app@127.0.0.1:55628/issue113`.
+Real PostgreSQL uses `TEST_DATABASE_URL=<dev-db>`.
 
 1. Queued delivery retired/rebound/NULL origin: 3 failed, 3 terminal-history controls
    passed before correction; then all 18 claim/projection cases passed.
