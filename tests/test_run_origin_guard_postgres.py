@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
@@ -14,13 +14,19 @@ from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.modules.auth.application.scope import AuthScope
+from app.modules.reviews.application import handle_review_run
 from app.modules.reviews.application.check_runs import (
+    CheckRunGateway,
     CheckRunTarget,
     CheckRunView,
     RunProviderCheckpoint,
 )
 from app.modules.reviews.application.get_run_diff import DiffSnapshot
-from app.modules.reviews.application.handle_review_run import ClaimedAttempt, HandleReviewRun
+from app.modules.reviews.application.handle_review_run import (
+    CheckRunReportUnitOfWork,
+    ClaimedAttempt,
+    HandleReviewRun,
+)
 from app.modules.reviews.application.reconcile_runs import ReconcileRuns
 from app.modules.reviews.application.run_failures import RunFailure
 from app.modules.reviews.infrastructure.github_pull_request_projection import (
@@ -887,13 +893,37 @@ def test_retire_stale_origin_preserves_work_when_origin_is_active_again(
 @pytest.mark.integration
 @pytest.mark.parametrize("origin", ["active", "retired", "rebound", "unknown", "repo_removed"])
 def test_inactive_origin_cancellation_takes_priority_over_user_pause(
-    guard_env: Env, origin: str
+    guard_env: Env, origin: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     async def exercise() -> None:
         engine = guard_env.engine()
         factory = async_sessionmaker(engine, expire_on_commit=False)
         calls: list[str] = []
+        check_updates: list[UUID] = []
         queue = RetryQueue()
+        original_update = handle_review_run.update_check_run
+
+        async def record_update(
+            uow_factory: Callable[[], CheckRunReportUnitOfWork],
+            gateway: CheckRunGateway | None,
+            run_id: UUID,
+            run_url: Callable[[UUID], str | None],
+        ) -> None:
+            check_updates.append(run_id)
+            await original_update(uow_factory, gateway, run_id, run_url)
+
+        monkeypatch.setattr(handle_review_run, "update_check_run", record_update)
+
+        class Checks:
+            async def upsert(
+                self,
+                target: CheckRunTarget,
+                view: CheckRunView,
+                *,
+                checkpoint: RunProviderCheckpoint,
+            ) -> None:
+                calls.append("check")
+                await checkpoint()
 
         async def pipeline(claimed: ClaimedAttempt) -> bool:
             calls.append("pipeline")
@@ -910,7 +940,7 @@ def test_inactive_origin_cancellation_takes_priority_over_user_pause(
                     uow_factory=lambda: SqlAlchemyRunLifecycleUnitOfWork(factory),
                     pipeline=pipeline,
                     retry_queue=queue,
-                    check_runs=None,
+                    check_runs=Checks(),
                     worker_id="owner",
                 ).execute(RUN_ATTEMPTED)
                 == "ack"
@@ -928,8 +958,10 @@ def test_inactive_origin_cancellation_takes_priority_over_user_pause(
                 ).one()
             if origin == "active":
                 assert tuple(result) == ("skipped", "repo_disabled", 1, None)
+                assert check_updates == []
             else:
                 assert tuple(result) == ("cancelled", "installation_unavailable", 1, None)
+                assert check_updates == [RUN_ATTEMPTED]
         finally:
             await engine.dispose()
 

@@ -174,20 +174,43 @@ GET /healthcheck
 `Deploy staging` запускается автоматически после push в `main`
 (`.github/workflows/ci-cd.yml`, job `deploy-staging`), поэтому момент мержа нужно
 согласовать с техлидом @axyi заранее. Все старые writers должны оставаться
-остановленными до завершения `bootstrap`; затем запускаются только сервисы нового
-образа. `depends_on: service_completed_successfully` управляет запуском новых
-контейнеров и не останавливает старые writers. Использовать env/compose текущего релиза. Для курсового VPS из `/opt/dmc-268-api-staging` выполнить
+остановленными до завершения `bootstrap`; при успешном выкате затем запускаются
+только сервисы нового образа. `depends_on: service_completed_successfully`
+управляет запуском новых контейнеров и не останавливает старые writers. Использовать env/compose текущего релиза. Для курсового VPS из `/opt/dmc-268-api-staging` выполнить
 `docker compose -p dmc-268-api-staging --env-file .env -f compose.yml -f compose.edge.yml stop api webhook-worker worker`
 (для Terraform-хоста использовать его APP_DIR, имя compose-проекта и `compose.ports.yml`),
 проверить отсутствие других старых writers, затем выполнить выкат с новым образом.
-После успешного `bootstrap` возобновить только сервисы нового образа обычным
-`up -d --wait`. Иначе вставка старого кода после backfill получит NULL origin и
-новый worker отменит такой Run как `installation_unavailable`, без provider calls.
-При rollback до 0028 downgrade 0029 сохраняет отзыв через
-`enabled = enabled AND installation_available`, но удаляет `account_external_id`
-безвозвратно: повторный upgrade не восстановит lineage и переустановка получит
-чистую цель. Откат образа сам по себе не откатывает схему; совместимость и необходимость
-явного downgrade проверить до остановки сервисов.
+При успешном выкате после `bootstrap` возобновить только сервисы нового образа
+обычным `up -d --wait`.
+
+Пока `api` остановлен, `/webhooks/github` не принимает доставки. GitHub не
+повторяет неуспешные доставки автоматически ([политика GitHub](https://docs.github.com/en/webhooks/using-webhooks/handling-failed-webhook-deliveries)).
+После успешного выката владелец или manager App должен открыть настройки App:
+**GitHub Apps → Edit → Advanced → Recent Deliveries**, выбрать GUID неуспешной
+доставки и нажать **Redeliver**. GitHub разрешает повторную доставку только за
+последние три дня; более старые доставки этой кнопкой восстановить нельзя
+([инструкция GitHub](https://docs.github.com/en/webhooks/testing-and-troubleshooting-webhooks/redelivering-webhooks)).
+
+При ошибке `deploy.sh` или внешнего health check автоматический rollback может
+снова запустить предыдущий образ вместе со старыми writers (§5), хотя схема
+останется на 0030, если миграция уже завершилась. Старый writer после backfill
+вставляет Run с NULL origin. Старый worker не имеет origin guard; отмена таких
+Run не гарантируется, пока работает старый образ. После возврата на новый образ
+его origin-aware worker отменяет ещё нетерминальные Run с NULL origin как
+`cancelled/installation_unavailable` при обработке или stale reconciliation,
+без provider calls для этих Run. Завершённую старым кодом историю он не переписывает.
+
+Откат образа сам по себе не выполняет downgrade схемы. Совместимость целевого
+образа с текущей ревизией и необходимость отдельного ручного downgrade проверить
+до остановки сервисов. Downgrade 0030 удаляет сохранённый origin Run; при ручном
+возврате до 0028 downgrade 0029 сохраняет отзыв через
+`enabled = enabled AND installation_available`, но безвозвратно удаляет
+`account_external_id`: повторный upgrade не восстановит lineage и переустановка
+получит чистую цель. На main `620c81d` rollback ещё не проверяет ревизию схемы;
+[PR #126](https://github.com/larchanka-training/dmc-268-api-t6/pull/126) добавляет
+такую защиту и пока открыт. После его мержа проверить фактическое поведение
+совмещённого релиза перед первым выкатом 0030; этот runbook не отменяет защиту
+и не предписывает downgrade для обхода проверки.
 
 `api` стартует после успешного `bootstrap` и здорового `postgres`. От RabbitMQ и Redis он не зависит: к брокеру API подключается при первой публикации (`LazyAmqpPublisher`), поэтому сбой брокера или кэша не мешает пересозданному `api` стартовать. `up --wait` всё равно ждёт healthcheck каждого сервиса, и падение любого запускает авто-rollback. Секреты приложения приходят в каждый контейнер только через env-файлы его роли: `api.env` → `api`, `app.env` (ключ App) → оба воркера, `worker.env` (LLM и `PORTAL_URL`) → `worker`, `webhook-worker.env` (логин бота) → `webhook-worker` — [SECRETS.md](SECRETS.md) §1, §3.
 

@@ -23,7 +23,7 @@ portable historical references and the #108/#134/#138 integration evidence.
 Fresh independent Standards and Spec review of the frozen base-to-working-tree delta
 reported zero actionable findings on each axis. Reviewers made no changes or test runs.
 
-## Current verification checkpoint
+## Historical verification checkpoint
 
 All temporary mutation windows ended before the coordinator's full repository gates.
 The coordinator fingerprinted 389 tracked Python files for subsequent hook/commit
@@ -36,20 +36,14 @@ integrity comparison. Commands ran in `<worktree>` with disposable PostgreSQL 17
 - `TEST_DATABASE_URL='<dev-db>' TEST_RABBITMQ_URL='<dev-broker>' uv run pytest -rs`:
   **2886 passed, 2 existing deprecation warnings in 534.49s (8m54s), zero failures and zero skips.**
 
-`git diff --check` passed. Initial remote PR/base checks matched after the gates,
-but #127 merged during commit preparation and advanced main to `488475e`. The
-pre-push safety check detected this movement; publication sequencing mistakenly
-continued with a fast-forward push of `abb00e2`. No foreign PR changes were
-overwritten. Review replies/re-request were held while a fresh agent rebased onto
-`488475e`; the corrected publication uses an explicit lease against `abb00e2`.
+`git diff --check` passed. Main advanced to `488475e` through #127 before
+final publication; the resulting documentation rebase is described below.
 All 389 tracked Python hashes matched the pre-gate snapshot. Aggregate
 SHA-256 (canonical sorted path-to-hash JSON):
 `dacbccbbde6ff191881e7000c339c3fbbbb1fece19976734530dcdb6de10b2fe`. The tested source snapshot precedes publication metadata.
 Configured staged-file hooks passed (text checks, Ruff lint/format and mypy);
 all 389 tracked Python hashes still matched after hooks. No hook modified a file.
-Normal commit verification remains enabled; published SHA and final integrity
-comparison are recorded in the publication receipt.
-The resulting published SHA and review replies are recorded in the existing
+The resulting publication and review replies are recorded in the existing
 [PR #132 timeline](https://github.com/larchanka-training/dmc-268-api-t6/pull/132).
 The rebase changed only `.agents/rules/backend.md`, SYSTEM_DESIGN and the new
 `115-plan.md` / `115-todo.md` inherited from #127. Conflict resolution preserves
@@ -61,14 +55,11 @@ reported 382 source files. Full pytest was not rerun after this docs-only rebase
 the 2886-pass evidence above applies to its unchanged source/runtime tree.
 This round adds no production, migration or dependency change.
 
-The full Russian frontend issue draft was shown after implementation and documentation
-were complete while full gates ran. Creation awaits explicit `Create`; no issue or
-tracker follow-up is claimed here.
+## External prerequisites at the round-three checkpoint
 
-## External prerequisites
-
-#127 has merged and is included through main `488475e`. #125/#126/#121 must still
-land before #132. Rebase #132 last after those companions, preserve #121
+#127 had merged and was included through main `488475e`. #125/#126/#121 were
+still open; their integration remained required before #132. Rebase #132 last after
+those companions, preserve #121
 `RunTriggerOutcome` and mandatory keyword-only `expected_installation_external_id`,
 #127 fail-closed `AuthScope` and #125/#126 deployment contracts, verify the waiting
 old CI receipt outcome, then rerun combined-head gates. Current-head human approval,
@@ -76,3 +67,9 @@ reviewer-resolved threads and required CI remain necessary. Stop every old Run w
 before merge and coordinate timing with axyi because main deployment is automatic.
 No companion merge, thread resolution, service stop, deployment or issue closure
 is part of this proof.
+
+## Subsequent frontend follow-up
+
+Rerun 409 wording is tracked in [UI #105](https://github.com/larchanka-training/dmc-268-ui-t6/issues/105),
+with the related [API #106 reference](https://github.com/larchanka-training/dmc-268-api-t6/issues/106#issuecomment-6131037958).
+This follow-up does not change the historical round-three test evidence above.

@@ -1,6 +1,6 @@
 # Final review and gate evidence — PR #132 / #113
 
-Tested base: `9aedfa8e25185a8c3daf00fe37de7a4236f9a70c` (current fetched main,
+Historical tested base: `9aedfa8e25185a8c3daf00fe37de7a4236f9a70c` (fetched main at this checkpoint,
 including #134). Reviewed working tree: HEAD
 `ed62aad4154ed65409b4ae1ab65d76fbc4afe297` plus intended correction delta.
 The correction commit adds the reviewed source/tests and documentation evidence.
@@ -19,8 +19,8 @@ are historical execution records, not claims about the final base.
   same full execution; no standalone integration-subset execution is claimed.
 
 Dedicated real PostgreSQL and RabbitMQ were configured for that full execution.
-The full suite completed successfully before publication/commit. Coordinator logs:
-`/tmp/pr132-pytest-main9aed.log` and `/tmp/pr132-integration-main9aed.log`.
+The full suite and integration collection completed successfully before publication/commit
+on the source snapshot identified above; their commands, counts and timings are recorded here.
 
 The initial full correction run exposed two stale worker eligibility assertions:
 unavailable origin now requires `cancelled/installation_unavailable`, while active
@@ -72,10 +72,10 @@ Publication/gates are still pending coordinator work. Companion #127/#125/#126/#
 
 Summary: Standards 0 findings (no worst issue); Spec 0 actionable findings (no worst issue). Full gates and publication remain coordinator-owned.
 
-## Remaining external requirements
+## External requirements at this historical checkpoint
 
-Companion #127/#125/#126/#121 remain open. Their required merge order, subsequent
-rebase and full combined-head validation are not complete. Preserve #121 outcome
+Companion #127/#125/#126/#121 were open at this checkpoint. Their required merge
+order, subsequent rebase and full combined-head validation were incomplete. Preserve #121 outcome
 and mandatory origin kwarg, #127 fail-closed AuthScope text, and check the old
 waiting CI receipt outcome at that integration. Current-head human approval,
 reviewer-resolved threads and required CI remain before-merge requirements.

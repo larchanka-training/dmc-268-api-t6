@@ -7,10 +7,11 @@ of `d6820df35fbc860696b89be30eb493cb06cf5928`. Update existing PR #132; do not o
 another PR, merge companion PRs, resolve the reviewer's threads, or close #113.
 Original `113-plan.md` and `113-todo.md` remain historical evidence.
 
-Sources: `/tmp/pr132-review.json`, `/tmp/pr132-review-body.md`, issue #113, current
+Sources: [PR #132 review timeline](https://github.com/larchanka-training/dmc-268-api-t6/pull/132),
+[issue #113](https://github.com/larchanka-training/dmc-268-api-t6/issues/113),
 AGENTS.md, backend/git rules, original #113 plans and relevant adapters/tests.
-Current fetched main is `46a9077`; #127, #125, #126 and #121 remain open. Rebase now
-onto current main, and disclose that their future combined-head validation is still
+At this planning checkpoint, fetched main was `46a9077`; #127, #125, #126 and #121
+were open. Rebase now onto current main, and disclose that their future combined-head validation is still
 pending. The user requested the agent-loop correction work. Present these saved artifacts for
 the planning skill's human plan approval before implementation.
 
