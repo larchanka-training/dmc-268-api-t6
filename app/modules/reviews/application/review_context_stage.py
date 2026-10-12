@@ -9,9 +9,11 @@ feeding it to the model belongs to the integration with the LLM pipeline (§12).
 
 from __future__ import annotations
 
+import json
 import logging
 from collections import Counter
 from collections.abc import Callable
+from hashlib import sha256
 from typing import Any
 from uuid import UUID
 
@@ -22,6 +24,7 @@ from app.modules.reviews.application.diff_map import (
     is_supported_path,
 )
 from app.modules.reviews.application.get_run_diff import DiffSnapshot
+from app.modules.reviews.application.policy_errors import PolicyError
 from app.modules.reviews.application.policy_snapshot import PolicySnapshot
 from app.modules.reviews.application.prepare_policy_snapshot import PreparePolicySnapshot
 from app.modules.reviews.application.process_run import RunVcsInput, RunVcsRepository
@@ -170,6 +173,7 @@ class ReviewContextStage:
         context_builder: Callable[[RunVcsInput], BuildReviewContext],
         trace: RunTrace | None = None,
         token_budget: int = FAST_CONTEXT_TOKEN_BUDGET,
+        builtin_excluded: Callable[[str], bool] = lambda path: False,
     ) -> None:
         self._runs = runs
         self._vcs = vcs
@@ -178,22 +182,45 @@ class ReviewContextStage:
         self._context_builder = context_builder
         self._trace = trace
         self._token_budget = token_budget
+        # Built-in exclusions of the service (generated files): part of the effective
+        # exclusion next to the masks of the repository.
+        self._builtin_excluded = builtin_excluded
         self._denied_paths: frozenset[str] = frozenset()
         self._snapshot: PolicySnapshot | None = None
         self._matcher: IgnoreMatcher | None = None
 
     @property
     def policy_key(self) -> str | None:
-        """Identity of the ignore policy for caches that depend on what was withheld."""
-        return None if self._snapshot is None else self._snapshot.ignore_digest
+        """Identity of what this attempt withholds, for caches derived from repository files.
+
+        The masks and built-in exclusions are in ``ignore_digest``. A rename or copy also
+        withholds names no mask matches; they are part of the identity, so an entry made
+        while such a file was still allowed is not reused once it is tainted.
+        """
+        if self._snapshot is None or self._matcher is None:
+            return None
+        tainted = sorted(
+            path
+            for path in self._denied_paths
+            if is_supported_path(path)
+            and not self._builtin_excluded(path)
+            and self._matcher.match(path) is None
+        )
+        if not tainted:
+            return self._snapshot.ignore_digest
+        payload = json.dumps([self._snapshot.ignore_digest, tainted], separators=(",", ":"))
+        return sha256(payload.encode("utf-8")).hexdigest()
 
     def excluded(self, path: str) -> bool:
         """Whether the policy of this attempt withholds the path from every model input.
 
-        True for a path outside the path contract, for any name of an ignored changed
-        file, and for every repository path that matches a mask of the policy.
+        The effective exclusion: a path outside the path contract, any name of an
+        ignored changed file, a built-in exclusion of the service, and every repository
+        path that matches a mask of the policy.
         """
         if not is_supported_path(path) or path in self._denied_paths:
+            return True
+        if self._builtin_excluded(path):
             return True
         return self._matcher is not None and self._matcher.match(path) is not None
 
@@ -269,6 +296,10 @@ class ReviewContextStage:
                     token_budget=self._token_budget,
                 )
                 step.response = context_summary(diff_map, payload)
+        except PolicyError:
+            # The policy is also evaluated while the context is built (paths behind an
+            # import). Its failure is never an optional fallback: it stops the run.
+            raise
         except Exception:
             _LOGGER.warning("Review context build failed run_id=%s", run_id, exc_info=True)
             return None

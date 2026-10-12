@@ -13,7 +13,6 @@ from pydantic import (
     ConfigDict,
     Field,
     TypeAdapter,
-    ValidationError,
     model_validator,
 )
 
@@ -229,8 +228,10 @@ class HttpGitHubVcsProvider:
         prefix = _repository_prefix(locator)
         base = commit_sha_segment(pull_request.base_sha)
         head = commit_sha_segment(pull_request.head_sha)
-        token = await self._tokens.get_installation_access_token(locator.installation_external_id)
         try:
+            token = await self._tokens.get_installation_access_token(
+                locator.installation_external_id
+            )
             response = await self._client.get(
                 f"{prefix}/compare/{base}...{head}",
                 # Only the merge base is read; one commit per page keeps the response small.
@@ -240,7 +241,8 @@ class HttpGitHubVcsProvider:
             )
             response.raise_for_status()
             return _Comparison.model_validate(response.json()).merge_base_commit.sha
-        except (httpx.HTTPError, ValidationError) as exc:
+        except (httpx.HTTPError, ValueError) as exc:
+            # ValueError covers a body that is not JSON and an answer of another shape.
             raise MergeBaseUnavailable(f"GitHub comparison failed: {type(exc).__name__}") from exc
 
     async def get_blob(self, locator: PullRequestLocator, sha: str) -> bytes:

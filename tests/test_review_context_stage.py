@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
@@ -34,6 +34,7 @@ from app.modules.reviews.application.vcs_diff import (
     MergeBaseUnavailable,
     PullRequestLocator,
     VcsPullRequest,
+    _is_generated,
 )
 from app.modules.reviews.infrastructure.tree_sitter_facts import extract_facts
 from app.worker import WorkerSettings
@@ -177,6 +178,7 @@ def _stage(
     vcs: Vcs | None = None,
     snapshots: list[DiffSnapshot] | None = None,
     none: bool = False,
+    builtin_excluded: Callable[[str], bool] = lambda path: False,
 ) -> ReviewContextStage:
     shared = store or Store()
     provider = vcs or Vcs()
@@ -191,6 +193,7 @@ def _stage(
             source=Repository(), parser=Parser(), counter=EstimatedTokenCounter()
         ),
         trace=trace,
+        builtin_excluded=builtin_excluded,
     )
 
 
@@ -312,6 +315,56 @@ def test_failed_context_build_keeps_the_exclusions_and_does_not_fail_the_review(
     assert stage.excluded("src/app.py") is False
     assert [step[0] for step in trace.steps] == ["policy.load", "context.build"]
     assert trace.steps[1][2]["error"]["type"] == "RuntimeError"
+
+
+def test_policy_error_while_the_context_is_built_stops_the_run() -> None:
+    class OverBudget:
+        async def execute(self, **kwargs: object) -> object:
+            # What the matcher raises for a path behind an import.
+            raise PolicyError(PolicyErrorCode.MATCH_BUDGET_EXCEEDED, "over the budget")
+
+    stage = _stage(Trace())
+    stage._context_builder = lambda run: OverBudget()  # type: ignore[assignment,return-value]
+
+    with pytest.raises(PolicyError) as failure:
+        asyncio.run(stage.run(_RUN))
+
+    assert failure.value.error_code == "policy_match_budget_exceeded"
+
+
+def test_builtin_exclusions_are_withheld_without_any_mask_of_the_repository() -> None:
+    stage = _stage(Trace(), policy=Policy(rules=None), builtin_excluded=_is_generated)
+    asyncio.run(stage.begin(_RUN))
+
+    assert stage.excluded("dist/bundle.ts") is True
+    assert stage.excluded("api/client.pb.go") is True
+    assert stage.excluded("src/app.py") is False
+    # A file copied or renamed out of a built-in exclusion is withheld under its new name.
+    assert stage.excludes_change("src/bundle.ts", "dist/bundle.ts") is True
+
+
+def test_cache_identity_changes_when_a_rename_withholds_a_name_no_mask_matches() -> None:
+    plain = _stage(Trace())
+    asyncio.run(plain.run(_RUN))
+
+    moved = DiffSnapshot(
+        "src/moved.py",
+        _stored("src/moved.py", "@@ -1 +1 @@\n-a\n+b"),
+        "f" * 40,
+        "renamed",
+        "generated/moved.py",
+        1,
+        1,
+        2,
+    )
+    tainted = _stage(Trace(), snapshots=[*_snapshots(), moved])
+    asyncio.run(tainted.run(_RUN))
+
+    assert tainted.excluded("src/moved.py") is True
+    # The same masks, another set of withheld names: an entry cached while
+    # ``src/moved.py`` was allowed is not reused.
+    assert plain.policy_key is not None and tainted.policy_key is not None
+    assert plain.policy_key != tainted.policy_key
 
 
 def test_path_outside_the_contract_is_always_withheld() -> None:

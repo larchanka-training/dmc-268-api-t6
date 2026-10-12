@@ -534,6 +534,7 @@ def review_context_stage_factory(
             ),
             context_builder=context_builder,
             trace=trace,
+            builtin_excluded=_is_generated,
         )
 
     locators: dict[UUID, PullRequestLocator] = {}

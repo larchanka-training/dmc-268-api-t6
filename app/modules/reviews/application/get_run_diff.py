@@ -77,7 +77,9 @@ class StoreDiffSnapshot:
         """
         withheld = [excluded is not None and excluded(file) for file in files]
         allowed = [file for file, skip in zip(files, withheld, strict=True) if not skip]
-        summary_only = _total_line_count(allowed) > MAX_DIFF_LINES
+        summary_only = (
+            _total_line_count(files) if excluded is None else _changed_line_count(allowed)
+        ) > MAX_DIFF_LINES
         snapshots = []
         for file, skip in zip(files, withheld, strict=True):
             snapshot = _normalize_snapshot(file)
@@ -113,6 +115,24 @@ def _normalize_snapshot(snapshot: DiffSnapshot) -> DiffSnapshot:
             f"+++ b/{snapshot.filename}\n"
             f"{snapshot.patch}"
         ),
+    )
+
+
+# Binary and generated files are exclusions and add nothing to the threshold. A text file
+# whose patch is missing or too large is incompleteness: its lines still count.
+_UNCOUNTED_OMISSIONS = frozenset({"binary", "generated"})
+
+
+def _changed_line_count(files: list[DiffSnapshot]) -> int:
+    """Added and removed lines of the allowed changes by the counters of the VCS.
+
+    Hunk headers and context lines of a patch are not changes, and a file whose patch
+    the provider did not send is not zero changes.
+    """
+    return sum(
+        file.additions + file.deletions
+        for file in files
+        if file.omission_reason not in _UNCOUNTED_OMISSIONS
     )
 
 

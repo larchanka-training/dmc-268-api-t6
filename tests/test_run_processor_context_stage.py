@@ -20,6 +20,7 @@ from app.modules.reviews.application.get_run_diff import (
     review_files_from_snapshots,
 )
 from app.modules.reviews.application.get_run_file_lines import BlobCacheKey
+from app.modules.reviews.application.policy_errors import PolicyError, PolicyErrorCode
 from app.modules.reviews.application.process_run import (
     ReviewRunProcessor,
     RunConventionsInput,
@@ -181,6 +182,54 @@ def test_without_the_stage_the_processor_behaves_as_before() -> None:
     assert events == ["diff stored", "conventions model"]
     assert conventions.changed_files == ("src/new.py", "generated/api.py")
     assert conventions.policy_key is None
+
+
+def _summary_only(*files: VcsFile) -> bool:
+    events: list[str] = []
+    repository = Repository(events)
+    processor = ReviewRunProcessor(
+        repository,
+        None,
+        blob_cache=InMemoryBlobCache(),
+        conventions=cast(GenerateRepoConventions, Conventions(events)),
+        vcs_provider=GitHub(files),
+        uow_factory=processing_uow(repository),
+        context_stage=Stage(events),
+    )
+    asyncio.run(processor.prepare(RUN_ID))
+    return any(snapshot.summary_only for snapshot in repository.snapshots)
+
+
+def _added(count: int, *, context: int = 0, patch: bool = True) -> VcsFile:
+    lines = [f"+value_{n} = {n}" for n in range(count)] + [" kept"] * context
+    body = f"@@ -1,{context} +1,{count + context} @@\n" + "\n".join(lines)
+    return VcsFile(
+        "src/app.py", "modified", "1" * 40, None, count, 0, count, body if patch else None
+    )
+
+
+def test_summary_only_threshold_counts_added_and_removed_lines_of_the_vcs() -> None:
+    # Exactly 3 000 changed lines are still reviewed; the hunk header is not a change.
+    assert _summary_only(_added(3000)) is False
+    assert _summary_only(_added(3001)) is True
+    # Context lines of a hunk are not changes either.
+    assert _summary_only(_added(100, context=3500)) is False
+    # A patch the provider did not send is not zero changes.
+    assert _summary_only(_added(4000, patch=False)) is True
+
+
+def test_policy_error_of_the_stage_ends_the_attempt_before_any_model_call() -> None:
+    class Failing(Stage):
+        async def run(self, run_id: UUID) -> object:
+            self.events.append("policy stage")
+            raise PolicyError(PolicyErrorCode.MATCH_BUDGET_EXCEEDED, "over the budget")
+
+    events: list[str] = []
+
+    with pytest.raises(PolicyError):
+        _prepare(Failing(events), events)
+
+    assert events == ["policy loaded", "diff stored", "policy stage"]
 
 
 def test_ignored_lines_do_not_make_the_allowed_change_summary_only() -> None:
