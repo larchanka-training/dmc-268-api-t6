@@ -4,11 +4,10 @@ from __future__ import annotations
 
 from datetime import datetime
 from decimal import Decimal
-from hashlib import sha256
 from typing import cast
 from uuid import UUID, uuid4
 
-from sqlalchemy import and_, delete, func, or_, select, text, update
+from sqlalchemy import and_, delete, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -23,6 +22,7 @@ from app.modules.workspaces.application.link_github_installations import (
     GitHubInstallation,
     InstallationSnapshotReservation,
 )
+from app.modules.workspaces.infrastructure.github_installation_locks import lock_github_account
 from app.modules.workspaces.infrastructure.github_repository_rebinding import (
     SqlAlchemyGitHubRepositoryRebinding,
 )
@@ -94,12 +94,7 @@ class SqlAlchemyGitHubInstallationLinkStore:
             }
         )
         for account_id in accounts:
-            key = int.from_bytes(
-                sha256(f"github-reinstall-account:{account_id}".encode()).digest()[:8],
-                "big",
-                signed=True,
-            )
-            await self._session.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": key})
+            await lock_github_account(self._session, account_id)
         # Include missing-account snapshots in the same global row-lock ordering.
         # Rebinding can read several archived rows before a later snapshot target.
         await self._session.execute(

@@ -7,7 +7,7 @@ from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import ColumnElement, and_, func, select, update
+from sqlalchemy import ColumnElement, and_, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -107,14 +107,14 @@ async def _lock_provider_rows(session: AsyncSession, run_id: UUID) -> None:
         select(ProviderInstallation.id)
         .join(Run, Run.origin_provider_installation_id == ProviderInstallation.id)
         .where(Run.id == run_id)
-        .with_for_update(of=ProviderInstallation)
+        .with_for_update(of=ProviderInstallation, read=True)
     )
     await session.execute(
         select(Repository.id)
         .join(CodeChange, CodeChange.repository_id == Repository.id)
         .join(Run, Run.code_change_id == CodeChange.id)
         .where(Run.id == run_id)
-        .with_for_update(of=Repository)
+        .with_for_update(of=Repository, read=True)
     )
 
 
@@ -170,7 +170,8 @@ class SqlAlchemyRunLifecycleStore:
             head_sha=run.head_sha,
             pr_head_sha=pr.head_sha,
             pr_open=pr.state == CodeChangeState.OPEN,
-            repository_enabled=repository.enabled and origin_active(run, repository, installation),
+            repository_enabled=repository.enabled,
+            origin_active=origin_active(run, repository, installation),
             daily_budget_usd=Decimal(daily_budget),
             spent_today_usd=Decimal(spent or 0),
             engine=run.engine.value,
@@ -220,6 +221,19 @@ class SqlAlchemyRunLifecycleStore:
         error_message: str | None,
         now: datetime,
     ) -> bool:
+        await _lock_provider_rows(self._session, run_id)
+        row = (
+            await self._session.execute(
+                _joined()
+                .where(Run.id == run_id)
+                .with_for_update(of=Run)
+                .execution_options(populate_existing=True)
+            )
+        ).one_or_none()
+        if row is None:
+            return False
+        if not origin_active(row[0], row[2], row[3]):
+            state, error_code, error_message = "cancelled", "installation_unavailable", None
         target = RunState(state)
         changed = await self._session.scalar(
             update(Run)
@@ -253,6 +267,29 @@ class SqlAlchemyRunLifecycleStore:
         return changed is not None
 
     async def requeue(self, run_id: UUID, *, worker_id: str | None, available_at: datetime) -> bool:
+        # Retirement/rebind must not turn an owned attempt into an orphaned queue row.
+        await _lock_provider_rows(self._session, run_id)
+        row = (
+            await self._session.execute(
+                _joined()
+                .where(Run.id == run_id)
+                .with_for_update(of=Run)
+                .execution_options(populate_existing=True)
+            )
+        ).one_or_none()
+        if row is None:
+            return False
+        if not origin_active(row[0], row[2], row[3]):
+            await self.finish(
+                run_id,
+                from_state="running",
+                worker_id=worker_id,
+                state="cancelled",
+                error_code="installation_unavailable",
+                error_message=None,
+                now=datetime.now(UTC),
+            )
+            return False
         changed = await self._session.scalar(
             update(Run)
             .where(Run.id == run_id, self._owned("running", worker_id, available_at))
@@ -430,6 +467,58 @@ class SqlAlchemyRunLifecycleStore:
         await self._session.flush()
         await self._notify(run_id, final)
         return final.value
+
+    @staticmethod
+    def _stale(now: datetime, available_before: datetime) -> ColumnElement[bool]:
+        return or_(
+            and_(Run.state == RunState.QUEUED, Run.available_at < available_before),
+            and_(Run.state.in_([RunState.RUNNING, RunState.PUBLISHING]), Run.lease_until < now),
+        )
+
+    async def stale_inactive_origins(
+        self, now: datetime, available_before: datetime, limit: int
+    ) -> tuple[UUID, ...]:
+        """Discover retired work without ever projecting a replacement provider pointer."""
+        inactive = or_(
+            Run.origin_provider_installation_id.is_(None),
+            Run.origin_provider_installation_id != Repository.provider_installation_id,
+            ProviderInstallation.deleted_at.is_not(None),
+            Repository.installation_available.is_(False),
+        )
+        candidates = await self._session.scalars(
+            _joined()
+            .with_only_columns(Run.id)
+            .where(self._stale(now, available_before), inactive)
+            .order_by(Run.id)
+            .limit(limit)
+        )
+        return tuple(candidates.all())
+
+    async def retire_stale_origin(
+        self, run_id: UUID, now: datetime, available_before: datetime
+    ) -> bool:
+        # One candidate per transaction: never acquire another origin after a Run,
+        # since OAuth locks every affected installation before Repository/Run rows.
+        await _lock_provider_rows(self._session, run_id)
+        row = (
+            await self._session.execute(
+                _joined()
+                .where(Run.id == run_id, self._stale(now, available_before))
+                .with_for_update(of=Run)
+                .execution_options(populate_existing=True)
+            )
+        ).one_or_none()
+        if row is None or origin_active(row[0], row[2], row[3]):
+            return False
+        return await self.finish(
+            run_id,
+            from_state=row[0].state.value,
+            worker_id=None,
+            state="cancelled",
+            error_code="installation_unavailable",
+            error_message=None,
+            now=now,
+        )
 
     async def expired_running(self, now: datetime, limit: int) -> tuple[tuple[UUID, int], ...]:
         rows = await self._session.execute(

@@ -332,7 +332,7 @@ def test_origin_change_while_snapshot_writer_waits_refreshes_cached_run_and_refu
         ) -> None:
             if (
                 statement.startswith("SELECT provider_installations.id")
-                and "FOR UPDATE" in statement
+                and "FOR SHARE" in statement
             ):
                 waiting.set()
 

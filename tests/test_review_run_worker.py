@@ -30,6 +30,7 @@ from app.modules.reviews.application.handle_review_run import (
     DeliveryOutcome,
     HandleReviewRun,
     RunGuardSnapshot,
+    update_check_run,
 )
 from app.modules.reviews.application.llm import LlmCallFailed, LlmErrorCode
 from app.modules.reviews.application.policy_errors import PolicyError, PolicyErrorCode
@@ -796,3 +797,22 @@ def test_invalid_policy_fails_the_run_at_once_with_its_code() -> None:
     assert (run.state, run.error_code, run.attempt) == ("failed", "policy_document_too_large", 1)
     assert "`policy_document_too_large`" in check_runs.views[-1].summary
     assert "64 КиБ" in check_runs.views[-1].summary
+
+
+def test_check_run_cancellation_logs_run_and_reason_at_info(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    class RetiredStore(FakeStore):
+        async def provider_origin_active(self, run_id: UUID) -> bool:
+            return False
+
+    store = RetiredStore(FakeRun(state="running", attempt=1))
+    with caplog.at_level("INFO"):
+        asyncio.run(update_check_run(lambda: FakeUow(store), CheckRuns(), RUN, lambda _: None))
+    assert [(record.levelname, record.getMessage()) for record in caplog.records] == [
+        (
+            "INFO",
+            "Check-run update cancelled for run "
+            "11111111-1111-1111-1111-111111111111: installation_unavailable",
+        )
+    ]

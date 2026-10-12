@@ -22,6 +22,7 @@ from app.modules.repositories.application.onboard_repository import (
     load_default_rule_sets,
 )
 from app.modules.repositories.application.sync_installation_repositories import (
+    InstallationIdentityChanged,
     RepositoryOnboardingInput,
     SyncInstallationRepositories,
 )
@@ -46,8 +47,14 @@ class FakeInstallationRepositoryStore:
     created_versions: int = 0
     create_error: Exception | None = None
     disable_error: Exception | None = None
+    identity_changes_remaining: int = 0
+    lock_attempts: int = 0
 
     async def lock_active_installation(self, provider_installation_id: UUID) -> bool:
+        self.lock_attempts += 1
+        if self.identity_changes_remaining:
+            self.identity_changes_remaining -= 1
+            raise InstallationIdentityChanged("account identity changed before row lock")
         return True
 
     async def upsert_repository(
@@ -312,6 +319,9 @@ class FakeSqlAlchemySession:
         self.repository: Repository | None = None
         self.flushes = 0
 
+    async def get(self, model: object, identity: UUID, **kwargs: object) -> None:
+        return None
+
     async def scalar(self, statement: object) -> UUID:
         params = cast(dict[str, object], cast(Any, statement).compile().params)
         if self.repository is None:
@@ -393,3 +403,31 @@ def test_disable_without_delivery_id_fails_before_opening_uow() -> None:
         )
 
     assert opened == 0
+
+
+@pytest.mark.parametrize("preflight", [False, True])
+@pytest.mark.parametrize("changes", [1, 2])
+def test_sync_identity_transition_retries_once_and_reports_installation(
+    preflight: bool, changes: int, caplog: pytest.LogCaptureFixture
+) -> None:
+    installation = UUID(int=11313)
+    store = FakeInstallationRepositoryStore(identity_changes_remaining=changes)
+    uow = FakeInstallationRepositoryUnitOfWork(store)
+    sync = SyncInstallationRepositories(uow_factory=lambda: uow, rule_sets={})
+
+    async def exercise() -> bool | tuple[object, ...]:
+        if preflight:
+            return await sync.is_active(installation)
+        return await sync.execute(provider_installation_id=installation, repositories=())
+
+    with caplog.at_level("INFO"):
+        if changes == 2:
+            with pytest.raises(InstallationIdentityChanged):
+                asyncio.run(exercise())
+        else:
+            assert asyncio.run(exercise()) == (True if preflight else ())
+    assert store.lock_attempts == 2
+    assert uow.rollbacks == changes
+    assert uow.commits == (1 if changes == 1 and not preflight else 0)
+    assert str(installation) in caplog.text
+    assert "account identity changed before row lock" in caplog.text

@@ -20,6 +20,7 @@ from app.modules.integrations.webhooks.infrastructure.github_installation_tree_p
 from app.modules.reviews.application.handle_review_run import update_check_run
 from app.modules.reviews.application.publish_run_review import PublishRunReview
 from app.modules.reviews.application.queue_messages import ReviewPublishPointer
+from app.modules.reviews.application.run_trace import TransactionalRunTrace
 from app.modules.reviews.infrastructure.github_review_publication import (
     GitHubCheckRunGateway,
     GitHubPullRequestReviewGateway,
@@ -27,6 +28,7 @@ from app.modules.reviews.infrastructure.github_review_publication import (
 from app.modules.reviews.infrastructure.run_lifecycle_store import (
     SqlAlchemyRunLifecycleStore,
     SqlAlchemyRunLifecycleUnitOfWork,
+    SqlAlchemyRunTraceUnitOfWork,
 )
 from tests.portal_postgres import HEAD, INSTALL_A, RUN_ATTEMPTED, Env, portal_schema
 from tests.test_app_reinstall_postgres import FreshGitHub, apply
@@ -223,17 +225,20 @@ def test_retirement_during_token_stops_next_http_request_with_live_positive_cont
                         )
                         assert context is not None
                     marker_hash = context.findings_hash
-                    await PublishRunReview(
+                    publisher = PublishRunReview(
                         uow_factory=uow,
                         reviews=GitHubPullRequestReviewGateway(
                             client=client, token_provider=tokens
                         ),
                         check_runs=None,
-                        trace=Trace(),
+                        trace=TransactionalRunTrace(lambda: SqlAlchemyRunTraceUnitOfWork(factory)),
                         sleep=sleep,
-                    ).execute(
-                        ReviewPublishPointer(RUN_ATTEMPTED, HEAD, context.findings_hash, "COMMENT")
                     )
+                    pointer = ReviewPublishPointer(
+                        RUN_ATTEMPTED, HEAD, context.findings_hash, "COMMENT"
+                    )
+                    await publisher.execute(pointer)
+                    await publisher.execute(pointer)  # Terminal redelivery starts no new HTTP.
             token = "POST /app/installations/17/access_tokens"
             lookup = "GET /repos/octo/a/pulls/3/reviews"
             head = "GET /repos/octo/a/pulls/3"
@@ -283,6 +288,24 @@ def test_retirement_during_token_stops_next_http_request_with_live_positive_cont
                     if retired and operation == "review"
                     else ("succeeded", None)
                 )
+                if retired and operation == "review" and stage in ("post", "rebind", "last"):
+                    assert (
+                        await session.scalar(
+                            text(
+                                "SELECT count(*) FROM run_actions WHERE run_id=:id "
+                                "AND tool='github.publish_review'"
+                            ),
+                            {"id": RUN_ATTEMPTED},
+                        )
+                        == 1
+                    )
+                    assert await session.scalar(
+                        text(
+                            "SELECT response FROM run_actions WHERE run_id=:id "
+                            "AND tool='github.publish_review'"
+                        ),
+                        {"id": RUN_ATTEMPTED},
+                    ) == {"github_review_id": 55}
                 if retired:
                     assert (
                         await session.scalar(

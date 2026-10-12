@@ -51,6 +51,7 @@ from app.modules.reviews.application.prompt_builder import (
     parse_unified_diff,
 )
 from app.modules.reviews.application.review_output import ReviewOutput, parse_review_output
+from app.modules.reviews.application.run_failures import RunCancelled
 from app.modules.reviews.infrastructure.llm.ecb_fx import EcbFxQuoteCache, FxQuote, FxQuoteResult
 from app.modules.reviews.infrastructure.llm.gateway import (
     GatewayResult,
@@ -67,6 +68,7 @@ from app.modules.reviews.infrastructure.llm.models import (
     GatewayReviewModel,
 )
 from app.modules.reviews.infrastructure.llm.settings import (
+    GatewayPolicy,
     LlmConfigError,
     LlmSettings,
     ModelPrice,
@@ -3013,3 +3015,51 @@ def test_actual_key_post_rechecks_deadline_after_final_live_checkpoint(
         int(boundary == "rotate") if slow else (2 if boundary == "rotate" else 1)
     )
     assert len(harness.ledger.events) == int(not slow)
+
+
+def test_retirement_after_pricing_does_not_consume_provider_attempt_budget() -> None:
+    async def exercise() -> None:
+        retired = False
+        armed = True
+        harness = Harness([valid()], fallback=None)
+
+        class Ledger(InMemoryUsageLedger):
+            async def run_cost_usd(self, run_id: UUID) -> Decimal:
+                nonlocal retired, armed
+                if armed:
+                    retired, armed = True, False
+                return await super().run_cost_usd(run_id)
+
+        ledger = Ledger()
+
+        async def checkpoint(context: RunCallContext) -> None:
+            if retired:
+                raise RunCancelled("installation_unavailable")
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(harness._handle)) as client:
+            gateway = LlmGateway(
+                LlmSettings(
+                    primary=PRIMARY, fallback=None, policy=GatewayPolicy(max_calls_per_attempt=1)
+                ),
+                OpenAICompatibleTransport(client),
+                ledger,
+                harness.trace,
+                checkpoint=checkpoint,
+                clock=harness.clock,
+            )
+            model = GatewayReviewModel(gateway, harness.run, _NoMeta())
+            with pytest.raises(RunCancelled, match="installation_unavailable"):
+                await model.draft_review(context=CONTEXT)
+            assert harness.requests == []
+            assert ledger.events == []
+            assert harness.trace.records == []
+            # A transient cancellation predicate in this fake clears; another generation
+            # of the same attempt still has its single paid-call allowance.
+            retired = False
+            await model.draft_review(context=CONTEXT)
+            assert model.last_result is not None
+            assert model.last_result.calls == 1
+            assert len(harness.requests) == 1
+            assert len(ledger.events) == 1
+
+    asyncio.run(exercise())

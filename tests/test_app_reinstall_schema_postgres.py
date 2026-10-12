@@ -76,6 +76,8 @@ def test_existing_schema_upgrade_keeps_pause_and_unknown_identity(
         (103, active, False),
         (104, active, True),
         (105, partial, True),
+        (106, partial, True),
+        (107, deleted, True),
     ):
         connection.execute(
             text(
@@ -98,7 +100,8 @@ def test_existing_schema_upgrade_keeps_pause_and_unknown_identity(
             "(provider_installation_id, repository_external_id, revoked_at) "
             "VALUES (:deleted, 0, '2026-10-07T12:00:00Z'), "
             "(:partial, 102, '2026-10-07T12:00:00Z'), "
-            "(:partial, 105, '2026-10-07T12:00:00Z')"
+            "(:partial, 105, '2026-10-07T12:00:00Z'), "
+            "(:partial, 106, '2026-10-07T12:00:00Z')"
         ),
         {"deleted": deleted, "partial": partial},
     )
@@ -126,6 +129,8 @@ def test_existing_schema_upgrade_keeps_pause_and_unknown_identity(
         (103, False, True),
         (104, True, True),
         (105, True, True),
+        (106, True, True),
+        (107, True, False),
     ]
     installations = connection.execute(
         text(
@@ -170,3 +175,49 @@ def test_fresh_schema_enforces_positive_bigint_account_and_nullable_legacy(
         connection.scalar(text("SELECT account_external_id FROM provider_installations"))
         == 9223372036854775807
     )
+
+
+@pytest.mark.integration
+def test_data_bearing_downgrade_keeps_unavailable_repositories_disabled(
+    reinstall_schema: Connection,
+) -> None:
+    connection = reinstall_schema
+    _upgrade(connection, "head")
+    installation = _installation(connection, 17)
+    connection.execute(
+        text(
+            "UPDATE provider_installations SET account_external_id=700, "
+            "deleted_at=clock_timestamp()"
+        )
+    )
+    for external_id, enabled, available in (
+        (101, True, False),
+        (102, False, False),
+        (103, False, True),
+        (104, True, True),
+    ):
+        connection.execute(
+            text(
+                "INSERT INTO repositories (id, provider_installation_id, external_id, full_name, "
+                "default_branch, web_url, enabled, installation_available) "
+                "VALUES (:id, :installation, :external, 'octo/repo', 'main', "
+                "'https://github.com/octo/repo', :enabled, :available)"
+            ),
+            {
+                "id": str(uuid4()),
+                "installation": installation,
+                "external": external_id,
+                "enabled": enabled,
+                "available": available,
+            },
+        )
+    connection.commit()
+    config = Config("alembic.ini")
+    config.attributes["connection"] = connection
+    command.downgrade(config, "20261007_0028")
+    assert [
+        tuple(row)
+        for row in connection.execute(
+            text("SELECT external_id, enabled FROM repositories ORDER BY external_id")
+        ).all()
+    ] == [(101, False), (102, False), (103, False), (104, True)]

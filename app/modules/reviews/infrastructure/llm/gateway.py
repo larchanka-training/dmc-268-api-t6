@@ -379,6 +379,8 @@ class LlmGateway:
                 state,
             )
 
+        # Detect retirement during FX/ledger awaits before consuming the shared
+        # attempt call allowance; transport also fences every actual HTTP request.
         await self._checkpoint(context)
         remaining = self._seconds_left(context)
         if remaining < timeout_s:

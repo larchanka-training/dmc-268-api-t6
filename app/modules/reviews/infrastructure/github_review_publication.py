@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import timedelta
 from typing import Any
 
@@ -22,7 +23,10 @@ from app.modules.reviews.application.publish_run_review import (
     SubmittedReview,
 )
 from app.modules.reviews.application.review_output import comment_body
+from app.modules.reviews.application.run_failures import RunCancelled
 from app.modules.reviews.infrastructure.github_vcs import InstallationTokenProvider
+
+_LOGGER = logging.getLogger(__name__)
 
 CHECK_RUN_NAME = "AI Review"
 _REQUEST_TIMEOUT = 10.0
@@ -145,8 +149,17 @@ class GitHubPullRequestReviewGateway:
             if review_id is None:
                 await self._ensure_current_head(prefix, headers, submission.commit_sha, checkpoint)
                 review_id = await self._post(prefix, headers, submission, checkpoint)
-            # A failed read raises: the retry finds the posted review by its marker.
-            return await self._with_comments(prefix, headers, review_id, checkpoint)
+            # Keep the successful receipt for append-only audit if retirement fences
+            # the next request. Finalization independently fences findings/comments.
+            try:
+                return await self._with_comments(prefix, headers, review_id, checkpoint)
+            except RunCancelled as exc:
+                _LOGGER.info(
+                    "Review receipt retained without comment lookup: review_id=%s reason=%s",
+                    review_id,
+                    str(exc),
+                )
+                return SubmittedReview(review_id, ())
         except httpx.TransportError as exc:
             raise PublishError("retryable", f"GitHub request failed: {exc}") from exc
 

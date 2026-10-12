@@ -368,14 +368,14 @@ class SqlAlchemyRunRepository:
             select(ProviderInstallation.id)
             .join(Run, Run.origin_provider_installation_id == ProviderInstallation.id)
             .where(Run.id == run_id)
-            .with_for_update(of=ProviderInstallation)
+            .with_for_update(of=ProviderInstallation, read=True)
         )
         await session.execute(
             select(Repository.id)
             .join(CodeChange, CodeChange.repository_id == Repository.id)
             .join(Run, Run.code_change_id == CodeChange.id)
             .where(Run.id == run_id)
-            .with_for_update(of=Repository)
+            .with_for_update(of=Repository, read=True)
         )
         row = (
             await session.execute(

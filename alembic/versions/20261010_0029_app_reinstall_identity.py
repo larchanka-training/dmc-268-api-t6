@@ -50,7 +50,7 @@ def upgrade() -> None:
     """)
     )
     # Keep the user's ambiguous legacy enabled preference exactly as stored.
-    # A fresh persisted repo grant can prove reconfirmation after a partial removal;
+    # Legacy enabled=true or a fresh persisted grant proves a later positive projection;
     # a whole-installation deletion remains retired regardless of grants.
     op.execute(
         sa.text("""
@@ -65,6 +65,7 @@ def upgrade() -> None:
                   SELECT 1 FROM github_installation_access_revocations AS revocation
                   WHERE revocation.provider_installation_id = installation.id
                     AND revocation.repository_external_id = repository.external_id
+                    AND repository.enabled = false
                     AND NOT EXISTS (
                         SELECT 1 FROM github_user_repository_access AS access
                         WHERE access.provider_installation_id = installation.id
@@ -78,6 +79,8 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    # Old writers only understand enabled; never revive an unavailable repository.
+    op.execute(sa.text("UPDATE repositories SET enabled = enabled AND installation_available"))
     op.drop_column("repositories", "installation_available")
     op.drop_index("ix_provider_installations_provider_account", table_name="provider_installations")
     op.drop_constraint(

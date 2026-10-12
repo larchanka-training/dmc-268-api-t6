@@ -78,6 +78,7 @@ class RunGuardSnapshot:
     engine: EngineName
     prompt_version_id: UUID
     rule_version_id: UUID
+    origin_active: bool = True
 
 
 @dataclass(frozen=True)
@@ -335,6 +336,8 @@ class HandleReviewRun:
 
     @staticmethod
     def _guard(snapshot: RunGuardSnapshot, matches: bool) -> tuple[str, str] | None:
+        if not snapshot.origin_active:
+            return "cancelled", "installation_unavailable"
         reason = cancellation_reason(
             pr_open=snapshot.pr_open,
             head_current=snapshot.head_sha == snapshot.pr_head_sha,
@@ -416,6 +419,9 @@ class HandleReviewRun:
         return DeliveryOutcome.ACK
 
     async def _fail(self, claimed: ClaimedAttempt, failure: RunFailure) -> DeliveryOutcome:
+        reason = await self._cancellation_reason(claimed.run_id)
+        if reason == "installation_unavailable":
+            return await self._cancel(claimed, reason)
         retryable = failure.error_code in RETRYABLE_ERROR_CODES
         if retryable and claimed.attempt < MAX_ATTEMPTS:
             key, delay = self._delays.for_failure(claimed.attempt, failure)
@@ -444,6 +450,8 @@ class HandleReviewRun:
         ):
             return DeliveryOutcome.ACK
         await self._update_check_run(claimed.run_id)
+        if await self._cancellation_reason(claimed.run_id) == "installation_unavailable":
+            return DeliveryOutcome.ACK
         return DeliveryOutcome.DEAD_LETTER if retryable else DeliveryOutcome.ACK
 
     async def _finish_running(
@@ -489,7 +497,8 @@ async def update_check_run(
 
     try:
         await gateway.upsert(report.target, check_run_view(report), checkpoint=checkpoint)
-    except RunCancelled:
+    except RunCancelled as cancelled:
+        _LOGGER.info("Check-run update cancelled for run %s: %s", run_id, cancelled)
         return
     except Exception:
         _LOGGER.exception("Check-run update failed for run %s", run_id)

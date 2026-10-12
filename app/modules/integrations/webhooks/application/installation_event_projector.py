@@ -151,8 +151,9 @@ class InstallationEventProjector:
     running ones finish and the readable ones are still saved.  A failed label request
     is only logged, unless the token behind it failed: that fails its repository like a
     token failure at the details or tree request, so the repository is not saved in this
-    attempt.  Replaying the whole event is safe to repeat (replay upserts and re-enables
-    saved repositories).
+    attempt. Replaying the whole event restores App availability for saved repositories
+    while preserving their user preference and pause. Eligible same-account archives
+    wait for fresh OAuth repository confirmation before positive upsert.
     Removed/deleted events enter the explicit transactional soft-disable path without
     making a VCS request.
     """
@@ -212,6 +213,12 @@ class InstallationEventProjector:
                         provider_installation_id, event.installation_external_id, reference
                     )
                 except InstallationRetiredError:
+                    _LOGGER.info(
+                        "Skipped repository onboarding: installation_id=%s repository_id=%s "
+                        "reason=installation_unavailable",
+                        event.installation_external_id,
+                        reference.external_id,
+                    )
                     return _SKIPPED
                 except InstallationAccessTokenError:
                     token_failed = True

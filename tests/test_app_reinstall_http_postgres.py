@@ -6,6 +6,8 @@ import asyncio
 import hashlib
 import hmac
 import json
+import os
+from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
@@ -39,8 +41,18 @@ from tests.portal_postgres import (
     RUN_DONE,
     WS_A,
     Env,
+    portal_schema,
 )
-from tests.test_app_reinstall_postgres import reinstall_env as reinstall_env
+
+
+@pytest.fixture
+def reinstall_env() -> Iterator[Env]:
+    database_url = os.environ.get("TEST_DATABASE_URL")
+    if database_url is None:
+        pytest.skip("set TEST_DATABASE_URL to run PostgreSQL integration tests")
+    with portal_schema(database_url, None) as env:
+        yield env
+
 
 _SECRET = "issue113-signed-delivery"
 _BLOB = "f" * 40

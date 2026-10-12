@@ -9,6 +9,7 @@ import pytest
 
 from app.modules.reviews.application.check_runs import RunProviderCheckpoint
 from app.modules.reviews.application.prompt_builder import ChangedFile, DiffLine, PullRequestMeta
+from app.modules.reviews.application.run_failures import RunCancelled
 from app.modules.reviews.application.vcs_diff import (
     FetchVcsReviewInput,
     OmissionReason,
@@ -409,3 +410,43 @@ def test_same_head_with_changed_base_is_rejected_before_file_fetch() -> None:
                 _locator(), _HEAD, _BASE
             )
         )
+
+
+def test_blob_classification_retirement_propagates_without_omissions_or_warnings(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    calls: list[str] = []
+
+    class Provider:
+        async def get_pull_request(
+            self, locator: PullRequestLocator, *, checkpoint: RunProviderCheckpoint
+        ) -> VcsPullRequest:
+            return _pull_request()
+
+        async def get_diff(
+            self, pull_request: VcsPullRequest, *, checkpoint: RunProviderCheckpoint
+        ) -> tuple[VcsFile, ...]:
+            return tuple(
+                VcsFile(f"src/{name}.py", "modified", sha * 40, None, 1, 1, 2, None)
+                for name, sha in (("first", "1"), ("second", "2"))
+            )
+
+        async def get_blob(
+            self, locator: PullRequestLocator, sha: str, *, checkpoint: RunProviderCheckpoint
+        ) -> bytes:
+            calls.append(sha)
+            # The real adapter's pre-request checkpoint detects retirement here.
+            raise RunCancelled("installation_unavailable")
+
+    results = []
+    with pytest.raises(RunCancelled, match="installation_unavailable"):
+        results.append(
+            asyncio.run(
+                FetchVcsReviewInput(Provider(), checkpoint=provider_checkpoint).execute(
+                    _locator(), _HEAD
+                )
+            )
+        )
+    assert results == []  # No review input containing fabricated omission entries escapes.
+    assert calls == ["1" * 40]
+    assert "VCS blob classification failed" not in caplog.text

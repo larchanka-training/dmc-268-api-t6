@@ -7,6 +7,8 @@ import os
 from collections.abc import Iterator
 from dataclasses import dataclass
 from decimal import Decimal
+from hashlib import sha256
+from pathlib import Path
 from uuid import UUID
 
 import pytest
@@ -15,7 +17,16 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.modules.auth.application.scope import AuthScope
 from app.modules.repositories.application.installation_repositories import RepositorySnapshot
+from app.modules.repositories.application.onboard_repository import (
+    OnboardingResult,
+    load_default_rule_sets,
+)
+from app.modules.repositories.application.sync_installation_repositories import (
+    RepositoryOnboardingInput,
+    SyncInstallationRepositories,
+)
 from app.modules.repositories.infrastructure.installation_repository_unit_of_work import (
+    SqlAlchemyInstallationRepositoriesUnitOfWork,
     SqlAlchemyInstallationRepositoryStore,
 )
 from app.modules.workspaces.application.link_github_installations import (
@@ -309,13 +320,15 @@ def test_unverified_or_ambiguous_lineage_keeps_archive_and_onboards_clean_target
                         101, "new-owner/a", "main", "https://github.test/new-owner/a"
                     ),
                 )
+            assert isinstance(repo_id, UUID)
             assert repo_id != REPO_A
             async with factory() as session:
                 old = (
                     await session.execute(
                         text(
                             "SELECT "
-                            "provider_installation_id,enabled,installation_available,max_comments "
+                            "provider_installation_id,enabled,installation_available,"
+                            "max_comments "
                             "FROM repositories WHERE id=:id"
                         ),
                         {"id": REPO_A},
@@ -780,6 +793,562 @@ def test_unique_empty_deleted_workspace_preserves_budget_with_new_repository_ide
                     == 77
                 )
         finally:
+            await engine.dispose()
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("first_user_repositories", [(), (103,)])
+def test_positive_sync_waits_for_fresh_user_confirmation_before_preserving_archive(
+    reinstall_env: Env,
+    first_user_repositories: tuple[int, ...],
+) -> None:
+    """Created replay and added projections cannot preempt another user's archive."""
+
+    async def exercise() -> None:
+        engine = reinstall_env.engine()
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        try:
+            await seed_archive(factory)
+            assert await apply(
+                factory,
+                FreshGitHub(
+                    installation=GitHubInstallation(29, "org", first_user_repositories, 700)
+                ),
+            ) == (WS_A,)
+            async with factory() as session:
+                target = await session.scalar(
+                    text("SELECT id FROM provider_installations WHERE external_id=29")
+                )
+                assert isinstance(target, UUID)
+            sync = SyncInstallationRepositories(
+                uow_factory=lambda: SqlAlchemyInstallationRepositoriesUnitOfWork(factory),
+                rule_sets=load_default_rule_sets(Path("review/rules")),
+            )
+            for _ in range(2):
+                assert (
+                    await sync.execute(
+                        provider_installation_id=target,
+                        repositories=(
+                            RepositoryOnboardingInput(
+                                RepositorySnapshot(
+                                    101, "org/a", "main", "https://github.test/org/a"
+                                ),
+                                {"Python": 100},
+                            ),
+                        ),
+                    )
+                    == ()
+                )
+            async with factory() as session:
+                assert (
+                    await session.scalar(
+                        text("SELECT count(*) FROM repositories WHERE external_id=101")
+                    )
+                    == 1
+                )
+                assert (
+                    await session.scalar(
+                        text("SELECT count(*) FROM rule_versions WHERE repository_id=:repo"),
+                        {"repo": REPO_A},
+                    )
+                    == 1
+                )
+                assert (
+                    await session.scalar(
+                        text(
+                            "SELECT count(*) FROM github_user_repository_access WHERE "
+                            "repository_external_id=101"
+                        )
+                    )
+                    == 0
+                )
+            assert await apply(factory, FreshGitHub(user_id=43)) == (WS_A,)
+            async with factory() as session:
+                row = (
+                    await session.execute(
+                        text(
+                            "SELECT provider_installation_id, enabled, installation_available, "
+                            "default_engine, "
+                            "wait_for_ci, max_comments, review_event, prompt_version_id FROM "
+                            "repositories WHERE id=:repo"
+                        ),
+                        {"repo": REPO_A},
+                    )
+                ).one()
+                assert tuple(row) == (
+                    target,
+                    False,
+                    True,
+                    "fast",
+                    "always",
+                    7,
+                    "request_changes",
+                    PROMPT,
+                )
+                assert (
+                    await session.scalar(
+                        text("SELECT count(*) FROM code_changes WHERE repository_id=:repo"),
+                        {"repo": REPO_A},
+                    )
+                    == 3
+                )
+                assert await session.scalar(text("SELECT count(*) FROM runs")) == 4
+                assert tuple(
+                    (
+                        await session.scalars(
+                            text(
+                                "SELECT github_user_id FROM github_user_repository_access WHERE "
+                                "repository_external_id=101"
+                            )
+                        )
+                    ).all()
+                ) == (43,)
+                assert (
+                    await session.scalar(
+                        text("SELECT agents_md FROM repo_conventions WHERE id=:id"),
+                        {"id": _CONVENTIONS},
+                    )
+                    == "custom rules"
+                )
+                assert (
+                    await session.scalar(
+                        text("SELECT tool FROM run_actions WHERE id=:id"), {"id": _ACTION}
+                    )
+                    == "fetch_diff"
+                )
+        finally:
+            await engine.dispose()
+
+    asyncio.run(exercise())
+    with api(reinstall_env, AuthScope(42, (WS_A,))) as (client, _):
+        assert client.get(f"/api/repos/{REPO_A}").status_code == 404
+    with api(reinstall_env, AuthScope(43, (WS_A,))) as (client, _):
+        assert client.get(f"/api/repos/{REPO_A}").status_code == 200
+        assert client.get(f"/api/runs/{RUN_DONE}").status_code == 200
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("onboard_before_delete", [False, True])
+def test_late_source_deletion_permanently_keeps_clean_target_identity(
+    reinstall_env: Env,
+    onboard_before_delete: bool,
+) -> None:
+    async def exercise() -> None:
+        engine = reinstall_env.engine()
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        try:
+            await seed_archive(factory)
+            async with factory.begin() as session:
+                await session.execute(
+                    text("UPDATE provider_installations SET deleted_at=NULL WHERE id=:id"),
+                    {"id": INSTALL_A},
+                )
+            (workspace,) = await apply(factory, FreshGitHub())
+            assert workspace != WS_A
+            async with factory() as session:
+                target = await session.scalar(
+                    text("SELECT id FROM provider_installations WHERE external_id=29")
+                )
+                assert isinstance(target, UUID)
+            sync = SyncInstallationRepositories(
+                uow_factory=lambda: SqlAlchemyInstallationRepositoriesUnitOfWork(factory),
+                rule_sets=load_default_rule_sets(Path("review/rules")),
+            )
+
+            async def onboard() -> UUID:
+                results = await sync.execute(
+                    provider_installation_id=target,
+                    repositories=(
+                        RepositoryOnboardingInput(
+                            RepositorySnapshot(101, "org/a", "main", "https://github.test/org/a"),
+                            {"Python": 100},
+                        ),
+                    ),
+                )
+                assert len(results) == 1
+                return results[0].rule_version.repository_id
+
+            clean_id = await onboard() if onboard_before_delete else None
+            async with factory.begin() as session:
+                await SqlAlchemyInstallationRepositoryStore(session).disable_installation(INSTALL_A)
+            assert await apply(factory, FreshGitHub()) == (workspace,)
+            if clean_id is None:
+                clean_id = await onboard()
+            assert await apply(factory, FreshGitHub()) == (workspace,)
+            assert await onboard() == clean_id
+            assert clean_id != REPO_A
+            async with factory() as session:
+                assert tuple(
+                    (
+                        await session.execute(
+                            text(
+                                "SELECT "
+                                "provider_installation_id,enabled,installation_available,"
+                                "max_comments "
+                                "FROM repositories WHERE id=:id"
+                            ),
+                            {"id": REPO_A},
+                        )
+                    ).one()
+                ) == (INSTALL_A, False, False, 7)
+                assert tuple(
+                    (
+                        await session.execute(
+                            text(
+                                "SELECT "
+                                "provider_installation_id,enabled,installation_available,"
+                                "max_comments "
+                                "FROM repositories WHERE id=:id"
+                            ),
+                            {"id": clean_id},
+                        )
+                    ).one()
+                ) == (target, True, True, 10)
+                assert (
+                    await session.scalar(
+                        text("SELECT count(*) FROM code_changes WHERE repository_id=:repo"),
+                        {"repo": REPO_A},
+                    )
+                    == 3
+                )
+                assert (
+                    await session.scalar(
+                        text("SELECT count(*) FROM code_changes WHERE repository_id=:repo"),
+                        {"repo": clean_id},
+                    )
+                    == 0
+                )
+                assert await session.scalar(text("SELECT count(*) FROM runs")) == 4
+                assert (
+                    await session.scalar(
+                        text("SELECT count(*) FROM rule_versions WHERE repository_id=:repo"),
+                        {"repo": clean_id},
+                    )
+                    == 1
+                )
+                assert (
+                    await session.scalar(
+                        text(
+                            "SELECT count(*) FROM github_user_repository_access WHERE "
+                            "github_user_id=43"
+                        )
+                    )
+                    == 0
+                )
+        finally:
+            await engine.dispose()
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.integration
+def test_callback_account_lock_waits_for_retirement_before_creating_missing_target(
+    reinstall_env: Env,
+) -> None:
+    """No target rows exist: only the account advisory fence can block OAuth."""
+
+    async def exercise() -> None:
+        engine = reinstall_env.engine()
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        oauth: asyncio.Task[tuple[UUID, ...]] | None = None
+        try:
+            await seed_archive(factory)
+            async with factory.begin() as session:
+                await session.execute(
+                    text("UPDATE provider_installations SET deleted_at=NULL WHERE id=:id"),
+                    {"id": INSTALL_A},
+                )
+            async with factory.begin() as retiring:
+                blocker_pid = await retiring.scalar(text("SELECT pg_backend_pid()"))
+                key = int.from_bytes(
+                    sha256(b"github-reinstall-account:700").digest()[:8], "big", signed=True
+                )
+                await retiring.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": key})
+                oauth = asyncio.create_task(apply(factory, FreshGitHub()))
+                async with asyncio.timeout(5):
+                    async with factory() as observer:
+                        while not await observer.scalar(
+                            text(
+                                "SELECT EXISTS (SELECT 1 FROM pg_stat_activity "
+                                "WHERE wait_event='advisory' AND :pid = ANY(pg_blocking_pids(pid)))"
+                            ),
+                            {"pid": blocker_pid},
+                        ):
+                            assert not oauth.done(), (
+                                "OAuth bypassed the account lock before retirement"
+                            )
+                            await observer.execute(text("SELECT pg_stat_clear_snapshot()"))
+                            await asyncio.sleep(0.01)
+                await SqlAlchemyInstallationRepositoryStore(retiring).disable_installation(
+                    INSTALL_A
+                )
+            assert await asyncio.wait_for(oauth, 5) == (WS_A,)
+            async with factory() as session:
+                assert tuple(
+                    (
+                        await session.execute(
+                            text(
+                                "SELECT i.external_id, i.workspace_id, r.id, r.enabled, "
+                                "r.max_comments "
+                                "FROM repositories r JOIN provider_installations i ON "
+                                "i.id=r.provider_installation_id "
+                                "WHERE r.external_id=101"
+                            )
+                        )
+                    ).one()
+                ) == (29, WS_A, REPO_A, False, 7)
+                assert await session.scalar(text("SELECT count(*) FROM runs")) == 4
+        finally:
+            if oauth is not None and not oauth.done():
+                oauth.cancel()
+                await asyncio.gather(oauth, return_exceptions=True)
+            await engine.dispose()
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.integration
+def test_callback_and_positive_sync_wait_in_account_order_without_deadlock(
+    reinstall_env: Env,
+) -> None:
+    async def exercise() -> None:
+        engine = reinstall_env.engine()
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        tasks: list[asyncio.Task[object]] = []
+        try:
+            await seed_archive(factory)
+            target = UUID(int=11311)
+            async with factory.begin() as session:
+                await session.execute(
+                    text(
+                        "INSERT INTO provider_installations "
+                        "(id,workspace_id,provider,external_id,account_external_id,metadata) "
+                        "VALUES (:id,:ws,'github',29,700,'{}')"
+                    ),
+                    {"id": target, "ws": WS_A},
+                )
+            sync = SyncInstallationRepositories(
+                uow_factory=lambda: SqlAlchemyInstallationRepositoriesUnitOfWork(factory),
+                rule_sets=load_default_rule_sets(Path("review/rules")),
+            )
+            async with factory.begin() as blocker:
+                blocker_pid = await blocker.scalar(text("SELECT pg_backend_pid()"))
+                key = int.from_bytes(
+                    sha256(b"github-reinstall-account:700").digest()[:8], "big", signed=True
+                )
+                await blocker.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": key})
+                callback = asyncio.create_task(apply(factory, FreshGitHub()))
+                tasks.append(callback)
+                async with factory() as observer:
+
+                    async def wait_for_blocked(count: int) -> None:
+                        async with asyncio.timeout(5):
+                            while True:
+                                await observer.execute(text("SELECT pg_stat_clear_snapshot()"))
+                                waiting = await observer.scalar(
+                                    text(
+                                        "SELECT count(*) FROM pg_stat_activity WHERE "
+                                        "wait_event='advisory' "
+                                        "AND :pid=ANY(pg_blocking_pids(pid))"
+                                    ),
+                                    {"pid": blocker_pid},
+                                )
+                                if waiting == count:
+                                    return
+                                assert all(not task.done() for task in tasks)
+                                await asyncio.sleep(0.01)
+
+                    await wait_for_blocked(1)
+                    projection = asyncio.create_task(
+                        sync.execute(
+                            provider_installation_id=target,
+                            repositories=(
+                                RepositoryOnboardingInput(
+                                    RepositorySnapshot(
+                                        101, "org/a", "main", "https://github.test/org/a"
+                                    ),
+                                    {"Python": 100},
+                                ),
+                            ),
+                        )
+                    )
+                    tasks.append(projection)
+                    await wait_for_blocked(2)
+            assert await asyncio.wait_for(callback, 5) == (WS_A,)
+            results = await asyncio.wait_for(projection, 5)
+            assert len(results) == 1
+            assert results[0].created is False
+            assert results[0].rule_version.repository_id == REPO_A
+            async with factory() as session:
+                assert (
+                    await session.scalar(
+                        text("SELECT count(*) FROM repositories WHERE external_id=101")
+                    )
+                    == 1
+                )
+                assert tuple(
+                    (
+                        await session.execute(
+                            text(
+                                "SELECT provider_installation_id, enabled, max_comments "
+                                "FROM repositories WHERE id=:id"
+                            ),
+                            {"id": REPO_A},
+                        )
+                    ).one()
+                ) == (target, False, 7)
+        finally:
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            await engine.dispose()
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("preflight", [False, True])
+def test_sync_restarts_after_null_account_becomes_numeric_without_callback_deadlock(
+    reinstall_env: Env,
+    preflight: bool,
+) -> None:
+    async def exercise() -> None:
+        engine = reinstall_env.engine()
+        from typing import Any
+
+        from sqlalchemy import event
+
+        @event.listens_for(engine.sync_engine, "connect")
+        def set_lock_timeout(connection: Any, record: Any) -> None:
+            cursor = connection.cursor()
+            cursor.execute("SET lock_timeout = '2s'")
+            cursor.close()
+
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        saw_null, resume_null = asyncio.Event(), asyncio.Event()
+        saw_numeric, resume_numeric = asyncio.Event(), asyncio.Event()
+        target = UUID(int=11312)
+        sync_pid: int | None = None
+        paused_null = False
+        paused_numeric = False
+
+        class TransitionSession(AsyncSession):
+            async def get(self, entity: Any, ident: Any, **kwargs: Any) -> Any:
+                nonlocal paused_null, paused_numeric, sync_pid
+                row = await super().get(entity, ident, **kwargs)
+                if ident == target and row is not None:
+                    if row.account_external_id is None and not paused_null:
+                        paused_null = True
+                        saw_null.set()
+                        await resume_null.wait()
+                    elif row.account_external_id == 700 and not paused_numeric:
+                        paused_numeric = True
+                        sync_pid = await self.scalar(text("SELECT pg_backend_pid()"))
+                        saw_numeric.set()
+                        await resume_numeric.wait()
+                return row
+
+        sync_factory = async_sessionmaker[AsyncSession](
+            engine, class_=TransitionSession, expire_on_commit=False
+        )
+        tasks: list[asyncio.Task[object]] = []
+        try:
+            await seed_archive(factory)
+            async with factory.begin() as session:
+                await session.execute(
+                    text(
+                        "INSERT INTO provider_installations "
+                        "(id,workspace_id,provider,external_id,account_external_id,metadata) "
+                        "VALUES (:id,:ws,'github',29,NULL,'{}')"
+                    ),
+                    {"id": target, "ws": WS_B},
+                )
+            sync = SyncInstallationRepositories(
+                uow_factory=lambda: SqlAlchemyInstallationRepositoriesUnitOfWork(sync_factory),
+                rule_sets=load_default_rule_sets(Path("review/rules")),
+            )
+
+            async def sync_operation() -> tuple[OnboardingResult, ...] | bool:
+                if preflight:
+                    return await sync.is_active(target)
+                return await sync.execute(
+                    provider_installation_id=target,
+                    repositories=(
+                        RepositoryOnboardingInput(
+                            RepositorySnapshot(101, "org/a", "main", "https://github.test/org/a"),
+                            {"Python": 100},
+                        ),
+                    ),
+                )
+
+            projection = asyncio.create_task(sync_operation())
+            tasks.append(projection)
+            await asyncio.wait_for(saw_null.wait(), 5)
+            github = FreshGitHub(installation=GitHubInstallation(29, "org", (), 700))
+            assert await asyncio.wait_for(apply(factory, github), 5) == (WS_B,)
+            resume_null.set()
+            await asyncio.wait_for(saw_numeric.wait(), 5)
+            callback = asyncio.create_task(apply(factory, github))
+            tasks.append(callback)
+            async with asyncio.timeout(5):
+                async with factory() as observer:
+                    while not callback.done():
+                        await observer.execute(text("SELECT pg_stat_clear_snapshot()"))
+                        blocked = await observer.scalar(
+                            text(
+                                "SELECT EXISTS (SELECT 1 FROM pg_stat_activity "
+                                "WHERE wait_event_type='Lock' AND :pid=ANY(pg_blocking_pids(pid)))"
+                            ),
+                            {"pid": sync_pid},
+                        )
+                        if blocked:
+                            break
+                        await asyncio.sleep(0.01)
+            resume_numeric.set()
+            assert await asyncio.wait_for(callback, 5) == (WS_B,)
+            results = await asyncio.wait_for(projection, 5)
+            async with factory() as session:
+                if preflight:
+                    assert results is True
+                    assert (
+                        await session.scalar(
+                            text(
+                                "SELECT count(*) FROM repositories "
+                                "WHERE provider_installation_id=:id"
+                            ),
+                            {"id": target},
+                        )
+                        == 0
+                    )
+                else:
+                    assert isinstance(results, tuple)
+                    assert len(results) == 1
+                    clean_id = results[0].rule_version.repository_id
+                    assert clean_id != REPO_A
+                    assert (
+                        await session.scalar(
+                            text("SELECT provider_installation_id FROM repositories WHERE id=:id"),
+                            {"id": clean_id},
+                        )
+                        == target
+                    )
+                assert (
+                    await session.scalar(
+                        text("SELECT provider_installation_id FROM repositories WHERE id=:id"),
+                        {"id": REPO_A},
+                    )
+                    == INSTALL_A
+                )
+        finally:
+            resume_null.set()
+            resume_numeric.set()
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
             await engine.dispose()
 
     asyncio.run(exercise())

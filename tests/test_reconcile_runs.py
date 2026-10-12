@@ -55,6 +55,16 @@ def message(run: Run) -> PendingRunMessage:
 class Store:
     runs: dict[UUID, Run]
 
+    async def stale_inactive_origins(
+        self, now: datetime, available_before: datetime, limit: int
+    ) -> tuple[UUID, ...]:
+        return ()
+
+    async def retire_stale_origin(
+        self, run_id: UUID, now: datetime, available_before: datetime
+    ) -> bool:
+        raise AssertionError("no retired origins in this fixture")
+
     async def expired_running(self, now: datetime, limit: int) -> tuple[tuple[UUID, int], ...]:
         return tuple(
             (run.id, run.attempt)

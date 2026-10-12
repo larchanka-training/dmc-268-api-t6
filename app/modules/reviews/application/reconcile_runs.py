@@ -23,6 +23,14 @@ _LOGGER = logging.getLogger(__name__)
 
 
 class ReconcilerStore(RunLifecycleStore, Protocol):
+    async def stale_inactive_origins(
+        self, now: datetime, available_before: datetime, limit: int
+    ) -> tuple[UUID, ...]: ...
+
+    async def retire_stale_origin(
+        self, run_id: UUID, now: datetime, available_before: datetime
+    ) -> bool: ...
+
     async def expired_running(self, now: datetime, limit: int) -> tuple[tuple[UUID, int], ...]: ...
 
     async def expired_publishing(
@@ -56,6 +64,13 @@ class ReconcileRuns:
     async def execute(self, *, limit: int = 100) -> int:
         """Return how many Runs were republished."""
         now = self._now()
+        available_before = now - RECONCILER_QUEUED_GRACE
+        async with self._uow_factory() as uow:
+            retired = await uow.runs.stale_inactive_origins(now, available_before, limit)
+        for run_id in retired:
+            async with self._uow_factory() as uow:
+                await uow.runs.retire_stale_origin(run_id, now, available_before)
+                await uow.commit()
         async with self._uow_factory() as uow:
             running = await uow.runs.expired_running(now, limit)
             publishing = await uow.runs.expired_publishing(now, limit)

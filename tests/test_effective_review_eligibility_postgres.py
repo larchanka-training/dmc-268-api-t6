@@ -327,9 +327,9 @@ class RetryQueue:
     ("preference", "available", "state", "attempt", "error", "pipeline_calls"),
     [
         (True, True, "running", 2, None, 1),
-        (True, False, "skipped", 1, "repo_disabled", 0),
+        (True, False, "cancelled", 1, "installation_unavailable", 0),
         (False, True, "skipped", 1, "repo_disabled", 0),
-        (False, False, "skipped", 1, "repo_disabled", 0),
+        (False, False, "cancelled", 1, "installation_unavailable", 0),
     ],
 )
 def test_worker_refuses_paused_or_unavailable_repo_before_pipeline(

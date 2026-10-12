@@ -10,6 +10,7 @@ from dataclasses import dataclass
 import httpx
 import pytest
 
+from app.modules.reviews.application.run_failures import RunCancelled
 from app.modules.reviews.application.vcs_diff import (
     BlobTooLargeError,
     FetchVcsReviewInput,
@@ -479,9 +480,53 @@ def test_merge_base_fails_closed_when_the_installation_token_is_not_issued() -> 
             transport=httpx.MockTransport(respond), base_url="https://api.github.test"
         ) as client:
             provider = HttpGitHubVcsProvider(client=client, token_provider=tokens)
-            pr = await provider.get_pull_request(PullRequestLocator(17, "octo/repo", 7))
+            pr = await provider.get_pull_request(
+                PullRequestLocator(17, "octo/repo", 7), checkpoint=provider_checkpoint
+            )
             tokens.fail = True
-            await provider.get_merge_base(pr)
+            await provider.get_merge_base(pr, checkpoint=provider_checkpoint)
 
     with pytest.raises(MergeBaseUnavailable, match="ConnectError"):
         asyncio.run(exercise())
+
+
+@pytest.mark.parametrize("cancel_checkpoint", [1, 2, None])
+def test_merge_base_fences_token_and_http_after_retirement(
+    cancel_checkpoint: int | None,
+) -> None:
+    async def exercise() -> None:
+        comparison_calls = 0
+
+        def respond(request: httpx.Request) -> httpx.Response:
+            nonlocal comparison_calls
+            if request.url.path.endswith("/pulls/7"):
+                return httpx.Response(200, json=_pull_payload())
+            assert "/compare/" in request.url.path
+            comparison_calls += 1
+            return httpx.Response(200, json={"merge_base_commit": {"sha": "e" * 40}})
+
+        checkpoint_calls = 0
+
+        async def checkpoint() -> None:
+            nonlocal checkpoint_calls
+            checkpoint_calls += 1
+            if checkpoint_calls == cancel_checkpoint:
+                raise RunCancelled("installation_unavailable")
+
+        tokens = Tokens()
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(respond), base_url="https://api.github.test"
+        ) as client:
+            provider = HttpGitHubVcsProvider(client=client, token_provider=tokens)
+            pr = await provider.get_pull_request(
+                PullRequestLocator(17, "octo/repo", 7), checkpoint=provider_checkpoint
+            )
+            if cancel_checkpoint is None:
+                assert await provider.get_merge_base(pr, checkpoint=checkpoint) == "e" * 40
+            else:
+                with pytest.raises(RunCancelled, match="installation_unavailable"):
+                    await provider.get_merge_base(pr, checkpoint=checkpoint)
+        assert tokens.calls == (1 if cancel_checkpoint == 1 else 2)
+        assert comparison_calls == (1 if cancel_checkpoint is None else 0)
+
+    asyncio.run(exercise())

@@ -27,6 +27,7 @@ from app.modules.integrations.webhooks.application.installation_event_projector 
     InstallationRepositoryDetailsProvider,
     InstallationRepositoryLabelProvider,
     InstallationRepositoryTreeProvider,
+    InstallationRetiredError,
     RepositoryDetails,
     RepositoryDetailsUnavailableError,
 )
@@ -1557,3 +1558,30 @@ def test_removal_without_delivery_id_fails_before_sync(
 
     assert sync.calls == []
     assert sync.disable_calls == []
+
+
+def test_projector_logs_retirement_during_repository_onboarding(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    installation = UUID(int=11311)
+    tree = FakeTreeProvider(error=InstallationRetiredError())
+    sync = FakeSyncInstallationRepositories()
+    projector = InstallationEventProjector(
+        tree_provider=tree,
+        label_provider=FakeLabelProvider(),
+        details_provider=FakeDetailsProvider(),
+        sync=sync,
+        installation_active=active_installation,
+    )
+    with caplog.at_level(logging.INFO, logger=_PROJECTOR_LOGGER):
+        result = asyncio.run(
+            projector.execute(
+                provider_installation_id=installation,
+                event=InstallationRepositoriesEvent(17, "added", (_reference(),), ()),
+            )
+        )
+    assert result == ()
+    assert sync.calls == []
+    assert "installation_id=17" in caplog.text
+    assert "repository_id=101" in caplog.text
+    assert "reason=installation_unavailable" in caplog.text

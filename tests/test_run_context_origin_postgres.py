@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+from collections.abc import Iterator
 from functools import partial
 from typing import Any
 from uuid import UUID
@@ -40,14 +42,22 @@ from app.modules.reviews.infrastructure.review_prompt_repository import (
     SqlAlchemyReviewPromptRepository,
 )
 from app.modules.reviews.infrastructure.run_lifecycle_store import SqlAlchemyRunTraceUnitOfWork
-from tests.portal_postgres import INSTALL_A, PROMPT, REPO_A, RUN_ATTEMPTED, Env
+from tests.portal_postgres import INSTALL_A, PROMPT, REPO_A, RUN_ATTEMPTED, Env, portal_schema
 from tests.test_app_reinstall_postgres import FreshGitHub, apply
 from tests.test_llm_gateway import PRIMARY, completion, valid
 from tests.test_run_diff_origin_postgres import history
-from tests.test_run_llm_origin_postgres import llm_env as llm_env
 from tests.test_run_llm_origin_postgres import run_context
 from tests.test_run_origin_guard_postgres import prepare
 from tests.test_run_publication_origin_postgres import retire
+
+
+@pytest.fixture
+def llm_env() -> Iterator[Env]:
+    database_url = os.environ.get("TEST_DATABASE_URL")
+    if database_url is None:
+        pytest.skip("set TEST_DATABASE_URL to run PostgreSQL integration tests")
+    with portal_schema(database_url, None) as env:
+        yield env
 
 
 async def context_row(factory: async_sessionmaker[AsyncSession]) -> Any:
@@ -196,6 +206,47 @@ def test_paid_conventions_context_build_preserves_terminal_payload(
                     text("SELECT count(*) FROM run_actions WHERE run_id=:id AND tool='llm.call'"),
                     {"id": RUN_ATTEMPTED},
                 ) == (2 if boundary == "active" else 1)
+        finally:
+            await engine.dispose()
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("retired", [False, True])
+@pytest.mark.parametrize("existing", [False, True])
+def test_running_context_write_fences_retired_origin_without_changing_history(
+    llm_env: Env, retired: bool, existing: bool
+) -> None:
+    async def exercise() -> None:
+        engine = llm_env.engine()
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        try:
+            await prepare(factory, "active", "running")
+            if existing:
+                async with factory.begin() as session:
+                    await session.execute(
+                        text(
+                            "INSERT INTO context_payloads(id,run_id,schema_version,summary) "
+                            "VALUES (:id,:id,1,'{\"preserve\": true}')"
+                        ),
+                        {"id": RUN_ATTEMPTED},
+                    )
+            if retired:
+                await retire(factory)
+            before_context = await context_row(factory)
+            before_history = await history(factory)
+            trace = TransactionalRunTrace(partial(SqlAlchemyRunTraceUnitOfWork, factory))
+            if retired:
+                with pytest.raises(RunCancelled, match="installation_unavailable"):
+                    await trace.save_context_payload(RUN_ATTEMPTED, {"late": True})
+                assert await context_row(factory) == before_context
+            else:
+                await trace.save_context_payload(RUN_ATTEMPTED, {"late": True})
+                assert (await context_row(factory))["summary"] == {"late": True}
+            after_history = await history(factory)
+            for key in ("run", "code_change_diffs", "findings", "comments"):
+                assert after_history[key] == before_history[key]
         finally:
             await engine.dispose()
 

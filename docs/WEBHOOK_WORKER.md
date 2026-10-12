@@ -242,10 +242,17 @@ sign, the 240 s dispatch timeout and any other error take the failed-dispatch pa
 request of an earlier repository fails the delivery even when a later repository's details
 are only unavailable, and unavailable details of an earlier repository defer it even when a
 later tree request failed. Every retry or revival replays the whole event, which is safe to
-repeat: every repository that was read is upserted again, and the upsert sets `enabled` to
-true, so a repository disabled between two attempts is enabled again. (The at-least-once
-replay of a delivery already did that; with partial persistence, replaying repositories that
-are already saved is now the normal path of a partly failed event.) The label request is sent
+repeat: every eligible repository that was read is upserted again, setting
+`installation_available=true` while preserving its existing `enabled` preference and
+manual pause. A repository in a unique deleted archive under the same numeric account
+and Workspace waits for fresh OAuth confirmation of its exact external ID: sync returns
+an explicit deferred result, creates neither a clean target nor default rules, and grants
+no access. A persisted exact personal repo grant for the new installation can
+explicitly accept a clean target when that fresh OAuth snapshot omitted numeric account
+identity and therefore did not authorize archive transfer (SYSTEM_DESIGN §6.9).
+The receipt may finish normally; a later fresh OAuth authorizes the rebind.
+With partial persistence, replaying already saved repositories is the normal path of a
+partly failed event. The label request is sent
 again and a 422 (label exists) counts as success. A 404 caused by replication lag therefore
 heals on a later attempt. A repository whose tree keeps failing is a residual risk: a receipt
 that failed for good is not replayed, and neither the hourly revival nor `wake_receipts`
@@ -310,7 +317,10 @@ recognised languages and `select_default_rule_set` picks `backend`, as for any t
 409 is an error like any other status, so a retry can heal it and an unrelated 409 does not
 freeze a repository as empty. The default rule set is chosen once, at the first connection:
 `OnboardRepository` returns the existing active rule version before it reads the languages,
-and connecting the repository again re-enables the same row without touching its rules.
+and connecting the repository again restores App availability on the same row without
+changing its rules or user pause. It does not merge an established clean target with
+an archive; late deletion after the first OAuth leaves that clean identity permanent
+(SYSTEM_DESIGN §6.9).
 Nothing recomputes the languages, so an empty repository keeps the `backend` rules, even if
 it later gets frontend code, until its rules are replaced by another path; there is no
 automatic path.
