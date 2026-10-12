@@ -218,7 +218,7 @@ class ReceiveGitHubDelivery:
     async def _project(
         self, delivery_id: str
     ) -> tuple[InstallationDeliveryDispatchStatus, bool] | None:
-        """Dispatch one claimed receipt; the flag marks a final deferral or expired wait."""
+        """Dispatch one claimed receipt; the flag marks an ordinary final deferral."""
         dispatcher = self._dispatcher
         if dispatcher is None:
             raise RuntimeError("webhook dispatcher is not configured")
@@ -275,7 +275,6 @@ class ReceiveGitHubDelivery:
                         now=now,
                         received_before=now - _RUN_TRIGGER_MAX_WAIT,
                     )
-                    final = wait_expired
                     retry_note = f" retry_at={'none' if wait_expired else retry_at.isoformat()}"
                 elif result.status in _DEFERRED:
                     now = self._now()

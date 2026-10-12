@@ -542,11 +542,11 @@ later. A successful waiting dispatch breaks the sequence of dispatch failures, s
 consecutive failures still mark a receipt failed, but failures separated by successful
 waits do not accumulate. Ordinary repository/installation deferrals keep their existing
 attempt policy. Waiting has no poll-count ceiling, so cancellation lasting more than three
-polls does not finish the receipt. The existing worker poll processes it when due; a restart uses the saved
-payload and retry time without needing another webhook. If the process crashes before
-finalizing the receipt, its claim becomes available after the five-minute lease. A lost
-claim raises; it does not report a successful release. Pending waits are not finished
-receipts and cannot be purged by finished-receipt retention.
+polls does not finish the receipt. The existing worker poll processes it when due; a restart
+uses the saved payload and retry time without needing another webhook. If the process crashes
+before finalizing the receipt, its claim becomes available after the five-minute lease. A lost
+claim raises; it does not report a successful release. Pending waits are not finished receipts
+and cannot be purged by finished-receipt retention.
 
 Continued supersession waiting is bounded to one hour from the original persisted
 `received_at`. On the first successful dispatch that still reports `deferred_run_trigger`
@@ -558,6 +558,18 @@ intact. Expired receipts never replay, even when A later completes; finished-rec
 retention can purge them 30 days after failure. Dispatch still checks current state before
 applying this waiting limit: if A has already become terminal during delayed worker
 recovery, B can enqueue even after the receipt's one-hour deadline.
+
+Receipt age includes webhook-worker downtime. After more than an hour offline, the worker
+can expire a still-blocked receipt on its first successful waiting dispatch after restart.
+The ceiling bounds waiting for the superseded Run, not CI duration: pending CI finishes the
+receipt as `processed_ci` before it reaches this waiting path.
+
+If B's current-head `check_suite` has already set `ci_status={"event":"check_suite"}`, the
+no-CI sweep cannot rescue B after expiry: it selects only PRs with empty `ci_status`, even
+after A becomes terminal. In this case, a new push or label event gives another launch
+opportunity, subject to current eligibility. A's original check-run still promises review
+for the new commit (`В PR новый коммит — ревью будет для него.`). Expiry has no UI or check-run
+alert; the WARNING is its only failure signal.
 
 The 30-second retry interval allows approximately 120 wait polls per hour. Each CI receipt
 poll in `always`/`auto` makes two GitHub requests; a PR/label receipt also fetches the current
@@ -651,7 +663,8 @@ and deferred for good (`GitHub webhook sweep: N handled, M deferred, K deferred 
 sweep with nothing due logs nothing. K counts the final deferrals and is part of M; each of
 them also logs `GitHub webhook delivery … deferred after its last attempt`. A dispatch that
 fails on its last attempt is not in any of the three numbers: it logs its own `… failed after
-its last attempt` WARNING. A revival that resets receipts logs how many.
+its last attempt` WARNING. An expired supersession wait counts in handled and deferred, but
+not K; it logs the age-limit WARNING above. A revival that resets receipts logs how many.
 
 Retention. Finished receipts (projected, failed, or deferred and not revived since) are deleted
 30 days after they finished; the worker runs the purge once an hour. The receipt purge is one `DELETE`

@@ -133,3 +133,73 @@ PR metadata. **Scope:** small documentation and verification.
   P2 thread reply and P3 summary. GitHub records the published commit SHA and
   verification evidence. Reviewer thread resolution and current-head GitHub
   approval remain later reviewer/merge steps.
+
+## Round-three follow-up checklist
+
+Baseline: head `93ab9c7a33ab40a629cf5252796ff6763a90ae28`, main
+`834dd24c554e62d725060ecbaf19901dc709542e`; approved review submitted
+`2026-10-12T16:10:38Z` in `/tmp/pr121-review-round3.json`.
+
+### Task 6: Correct expiry accounting in the sweep summary
+
+- [x] RED: sweep an expiring wait together with an ordinary final deferral;
+  literal N/M/K summary proves expiry is excluded from K and ordinary final
+  deferral remains included.
+- [x] GREEN: remove `final = wait_expired`, correct the flag's docstring, retain
+  expiry state/WARNING/retry semantics, and pass receipt unit regressions.
+
+**Verification:** targeted `uv run pytest tests/test_github_webhook_delivery.py`
+and captured red/green evidence. **Dependencies:** authorized baseline above.
+**Files:** receiver application and delivery test (two files).
+
+### Task 7: Document the existing expiry consequence
+
+- [x] Coordinator posted overlap notices on #137/#135/#132/#124 before doc edits.
+- [x] Worker prose is reflowed around 90–100 columns and explains receipt age
+  during downtime, new push/label recovery after expiry, `ci_status` preventing
+  no-CI rescue, stale A check-run promise, and WARNING-only expiry visibility.
+- [x] Pipeline §8.2 `synchronize` row describes one-hour superseded-blocker waiting
+  from receipt and links worker docs; mechanism remains unchanged.
+
+**Verification:** compare the two docs with existing trigger/sweep behavior;
+no new timestamp origin, reset, alert, provider call, dependency, or migration.
+**Dependencies:** overlap notices; independent of task 6.
+**Files:** `docs/WEBHOOK_WORKER.md`, `docs/PIPELINE_SPEC.md` (two files).
+
+### Task 8: Verify, review, and publish
+
+- [x] Run `uv run ruff check .`, `uv run ruff format --check .`, `uv run mypy .`,
+  and `uv run pytest` against fresh isolated PostgreSQL/RabbitMQ, with zero
+  integration skips and #131 notification coverage.
+- [x] Standards and Spec reviews find no blocking findings; record actual
+  validation results and preserve prior historical evidence.
+- [x] Publish to existing PR #121 and reply with commit SHA; preserve #132's
+  later integration order, current-head approval and thread-owner resolution.
+
+**Dependencies:** tasks 6–7. **Scope:** verification and PR evidence; no merge.
+
+## Round-three implementation evidence
+
+- RED: the public sweep with an expired wait and an ordinary final repository
+  deferral logged `2 handled, 2 deferred, 2 deferred for good`; the regression
+  expected literal K=1. **1 failed, 2 existing warnings in 1.19 s**.
+- GREEN: removed only expiry's final-deferral assignment and corrected the flag
+  docstring. **1 passed, 2 existing warnings in 0.81 s**; receipt unit regressions
+  **146 passed, 6 integration tests deselected, 2 existing warnings in 0.79 s**.
+  Integration tests are included in the final full gates below.
+- Worker and pipeline docs retain the one-hour policy and describe downtime,
+  cached CI/no-CI exclusion, another launch opportunity from a new push or label,
+  the original check-run promise and WARNING-only failure visibility.
+- Final gates: Ruff lint passed; format check **363 files unchanged**; mypy
+  **360 source files clean**; full isolated PostgreSQL/RabbitMQ pytest
+  **2549 passed, 0 skipped, 2 existing warnings in 193.20 s**. #131 notification
+  coverage ran. The initial sandboxed attempt was interrupted after localhost
+  access denial; the complete run used authorized escalation. Summary:
+  `/private/tmp/pr121-round3-gates.log`; full pytest output:
+  `/private/tmp/pr121-round3-pytest.log`.
+- Independent Standards and Spec reviews each reported zero findings. Publication
+  updates existing PR #121 with current results and the four-P3 response; GitHub
+  records the published SHA. Fresh remote main/head matched the baseline, allowing
+  a normal fast-forward push. GraphQL confirmed the P2 thread is owner-resolved.
+  The human approval on `93ab9c7` is historical; the new pushed head needs its own
+  approval. PR #132 stays last in the integration order; this task does not merge.

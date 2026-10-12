@@ -2633,6 +2633,45 @@ def test_invalid_installation_event_logs_its_action_only_as_a_plain_token(
     assert "zq7" not in caplog.text
 
 
+def test_sweep_summary_counts_only_ordinary_final_deferral_as_deferred_for_good(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    received = datetime(2026, 10, 9, tzinfo=UTC)
+    now = received + timedelta(hours=1)
+    wait = WebhookReceipt("expired-wait", "check_suite", "{}")
+    refusal = WebhookReceipt("unknown-repository", "pull_request", "{}")
+    uow = FakeReceiptUnitOfWork(
+        rows={
+            wait.delivery_id: FakeClaimedReceipt(wait, received_at=received),
+            refusal.delivery_id: FakeClaimedReceipt(
+                refusal, received_at=received, projection_attempt_count=2
+            ),
+        }
+    )
+
+    class Dispatcher:
+        async def execute(self, delivery: WebhookReceipt) -> InstallationDeliveryDispatchResult:
+            return InstallationDeliveryDispatchResult(
+                InstallationDeliveryDispatchStatus.DEFERRED_RUN_TRIGGER
+                if delivery.delivery_id == wait.delivery_id
+                else InstallationDeliveryDispatchStatus.IGNORED_UNKNOWN_REPOSITORY
+            )
+
+    receiver = ReceiveGitHubDelivery(
+        uow_factory=lambda: uow, dispatcher=Dispatcher(), now=lambda: now
+    )
+    with caplog.at_level(logging.INFO, logger=_DELIVERY_LOGGER):
+        assert asyncio.run(receiver.replay_pending()) == 2
+
+    assert uow.rows[wait.delivery_id].projection_failed_at == now
+    assert uow.rows[refusal.delivery_id].projection_deferred_at == now
+    assert [
+        record.getMessage()
+        for record in caplog.records
+        if record.getMessage().startswith("GitHub webhook sweep:")
+    ] == ["GitHub webhook sweep: 2 handled, 2 deferred, 1 deferred for good"]
+
+
 def test_superseded_run_wait_retries_beyond_three_polls_without_generic_attempts(
     caplog: pytest.LogCaptureFixture,
 ) -> None:

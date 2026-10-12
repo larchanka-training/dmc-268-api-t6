@@ -116,3 +116,66 @@ approval, all threads resolved by their owners, current main, and green checks.
 ## Open questions
 
 None requiring user input for the authorized review fixes.
+
+## Round-three follow-up: four P3 findings
+
+Review snapshot `/tmp/pr121-review-round3.json` contains the approved review submitted
+`2026-10-12T16:10:38Z`. This follow-up starts from head
+`93ab9c7a33ab40a629cf5252796ff6763a90ae28`, already up to date with main
+`834dd24c554e62d725060ecbaf19901dc709542e`. Prior evidence above remains historical.
+The user has authorized this follow-up through the agent loop.
+
+1. **Sweep-summary correction (small, two files).** In
+   `app/modules/integrations/webhooks/application/receive_github_delivery.py`, remove
+   `final = wait_expired` and describe the returned flag as ordinary final deferral.
+   Keep expiry persistence, WARNING, dispatch status, and retry behavior unchanged.
+   First add a failing regression in `tests/test_github_webhook_delivery.py` that
+   runs the sweep with an expiring supersession wait and an ordinary final
+   repository/installation deferral. Assert the literal summary counts: expiry
+   contributes to handled/deferred, but only the ordinary final deferral contributes
+   to K (`deferred for good`). Then pass the regression and existing receipt units.
+2. **Documentation synchronization (small, two files; after overlap notices).**
+   Reflow the supersession paragraph in `docs/WEBHOOK_WORKER.md` around 90–100 columns.
+   Explain that absolute receipt age includes worker downtime: recovery may expire
+   a still-blocked receipt on its first successful waiting dispatch. Once expired,
+   B needs a new push or label event; a current-head `check_suite` has populated
+   `ci_status`, so the no-CI sweep cannot rescue it. The old A check-run message
+   still promises review for the new commit; expiry provides only a WARNING, with
+   no UI/check-run signal. Update `docs/PIPELINE_SPEC.md` §8.2's `synchronize` row
+   with the one-hour superseded-blocker wait from receipt and a worker-doc link.
+   Keep the mechanism unchanged: no new age origin, `ci_status` reset, alert,
+   provider call, dependency, or migration.
+3. **Checkpoint, review, publication (depends on 1–2).** Run the four `uv` gates
+   with the coordinator's fresh isolated PostgreSQL/RabbitMQ and zero integration
+   skips, preserving #131 notification coverage. Review Standards and Spec, then
+   update PR #121 evidence/reviewer replies with the published SHA. Preserve
+   #121-before-#132 integration order; current-head approval and owner-resolved
+   threads remain merge prerequisites.
+
+No genuine ambiguity remains. The coordinator posted overlap notices to
+#137/#135/#132/#124 before documentation edits; this planning slice does not post.
+Fresh isolated services are PostgreSQL 17 at
+`TEST_DATABASE_URL=postgresql+psycopg://app:app@127.0.0.1:55640/app` and RabbitMQ 4
+at `TEST_RABBITMQ_URL=amqp://app:app@127.0.0.1:55641/`; use
+`UV_CACHE_DIR=/private/tmp/pr121-uv-cache`. `uv sync --locked` is complete.
+Review: https://github.com/larchanka-training/dmc-268-api-t6/pull/121#pullrequestreview-5493358282.
+
+### Round-three development results
+
+The sweep-summary regression failed with K=2 instead of the literal expected K=1
+(1 failed in 1.19 s), then passed after removing only `final = wait_expired` and
+correcting its docstring (1 passed in 0.81 s). Existing receipt unit regressions
+passed: 146 passed, 6 integration tests deselected in 0.79 s; the full gates include
+integration tests. Both runs reported the same two existing deprecation warnings.
+Worker and pipeline documentation now explain the unchanged absolute-age policy
+and expiry consequences. Final gates passed: Ruff lint; format check 363 files
+unchanged; mypy 360 source files clean; full isolated PostgreSQL/RabbitMQ pytest
+2549 passed, 0 skipped, 2 existing warnings in 193.20 s, including #131 notification
+coverage. The complete run used authorized escalation after the sandbox denied
+localhost access. Gate summary: `/private/tmp/pr121-round3-gates.log`.
+The coordinator's independent Standards and Spec reviews each returned zero
+findings. The publication package updates existing PR #121 with these results and
+a response to all four P3 findings; GitHub records the published SHA and response.
+Fresh refs matched the baseline above, so publication uses a normal fast-forward
+push. The P2 thread is owner-resolved; approval on the updated head remains a
+later merge prerequisite. PR #132 stays last in the integration order.
