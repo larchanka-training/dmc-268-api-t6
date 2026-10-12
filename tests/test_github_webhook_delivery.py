@@ -2640,11 +2640,15 @@ def test_sweep_summary_counts_only_ordinary_final_deferral_as_deferred_for_good(
     now = received + timedelta(hours=1)
     wait = WebhookReceipt("expired-wait", "check_suite", "{}")
     refusal = WebhookReceipt("unknown-repository", "pull_request", "{}")
+    second_refusal = WebhookReceipt("another-unknown-repository", "pull_request", "{}")
     uow = FakeReceiptUnitOfWork(
         rows={
             wait.delivery_id: FakeClaimedReceipt(wait, received_at=received),
             refusal.delivery_id: FakeClaimedReceipt(
                 refusal, received_at=received, projection_attempt_count=2
+            ),
+            second_refusal.delivery_id: FakeClaimedReceipt(
+                second_refusal, received_at=received, projection_attempt_count=2
             ),
         }
     )
@@ -2661,15 +2665,25 @@ def test_sweep_summary_counts_only_ordinary_final_deferral_as_deferred_for_good(
         uow_factory=lambda: uow, dispatcher=Dispatcher(), now=lambda: now
     )
     with caplog.at_level(logging.INFO, logger=_DELIVERY_LOGGER):
-        assert asyncio.run(receiver.replay_pending()) == 2
+        assert asyncio.run(receiver.replay_pending()) == 3
 
     assert uow.rows[wait.delivery_id].projection_failed_at == now
-    assert uow.rows[refusal.delivery_id].projection_deferred_at == now
+    assert uow.rows[wait.delivery_id].projection_deferred_at is None
+    for delivery in (refusal, second_refusal):
+        row = uow.rows[delivery.delivery_id]
+        assert row.projection_deferred_at == now
+        assert row.projection_failed_at is None
+    for row in uow.rows.values():
+        assert row.projected is False
+        assert row.retry_after is None
+        assert row.claim_token is None
+        assert row.lease_until is None
+    assert asyncio.run(receiver.replay_pending()) == 0
     assert [
         record.getMessage()
         for record in caplog.records
         if record.getMessage().startswith("GitHub webhook sweep:")
-    ] == ["GitHub webhook sweep: 2 handled, 2 deferred, 1 deferred for good"]
+    ] == ["GitHub webhook sweep: 3 handled, 3 deferred, 2 deferred for good"]
 
 
 def test_superseded_run_wait_retries_beyond_three_polls_without_generic_attempts(
