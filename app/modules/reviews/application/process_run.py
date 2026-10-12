@@ -85,6 +85,14 @@ class RunVcsRepository(Protocol):
     async def get_run_snapshots(self, run_id: UUID) -> list[DiffSnapshot] | None: ...
 
 
+class ReviewContextStagePort(Protocol):
+    """The flagged policy and context stage of an attempt."""
+
+    async def run(self, run_id: UUID) -> object: ...
+
+    def excluded(self, path: str) -> bool: ...
+
+
 class RunProcessingUnitOfWork(UnitOfWork, Protocol):
     @property
     def repository(self) -> RunProcessingRepository: ...
@@ -106,6 +114,7 @@ class ReviewRunProcessor:
         trace: RunTrace | None = None,
         *,
         uow_factory: Callable[[], RunProcessingUnitOfWork],
+        context_stage: ReviewContextStagePort | None = None,
     ) -> None:
         self._repository = repository
         self._provider = provider
@@ -114,6 +123,7 @@ class ReviewRunProcessor:
         self._vcs_provider = vcs_provider
         self._trace = trace
         self._uow_factory = uow_factory
+        self._context_stage = context_stage
 
     async def execute(self, run_id: UUID) -> bool:
         """Fetch and snapshot the exact head associated with a durable run."""
@@ -205,6 +215,14 @@ class ReviewRunProcessor:
             await self._store_vcs_blobs(run_id, vcs_run, stored_files, failed_blob_shas)
         else:
             await self._store_file_blobs(run, files)
+        changed_paths = tuple(file.path for file in review_files_from_snapshots(stored_files)[0])
+        if self._context_stage is not None:
+            # After the diff is stored and before the first model call: a policy error
+            # or a fully ignored change ends the attempt here.
+            await self._context_stage.run(run_id)
+            changed_paths = tuple(
+                path for path in changed_paths if not self._context_stage.excluded(path)
+            )
         if self._conventions is not None:
             conventions_repository = cast(RunConventionsRepository, self._repository)
             conventions_input = await conventions_repository.get_run_conventions_input(run_id)
@@ -214,9 +232,7 @@ class ReviewRunProcessor:
                 repository_id=conventions_input.repository_id,
                 conventions_prompt=conventions_input.conventions_prompt,
                 run_id=run_id,
-                changed_files=tuple(
-                    file.path for file in review_files_from_snapshots(stored_files)[0]
-                ),
+                changed_files=changed_paths,
                 rules=conventions_input.rules,
             )
         return True

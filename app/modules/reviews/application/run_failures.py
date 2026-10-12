@@ -18,19 +18,56 @@ FAST_ATTEMPT_DEADLINE = timedelta(minutes=8)
 RECONCILER_QUEUED_GRACE = timedelta(minutes=10)
 
 # "Retry: да" in the §6 catalog: T9 while attempt < 3, then failed and a copy in reviews.dlq.
-RETRYABLE_ERROR_CODES = frozenset(
-    {"llm_timeout", "llm_rate_limited", "llm_unavailable", "diff_fetch_failed", "internal_error"}
+# Policy codes of RULES_FORMAT_SPEC §9 (``PolicyErrorCode``); only reads of the policy
+# documents that can succeed later are retried.
+RETRYABLE_POLICY_ERROR_CODES = frozenset({"policy_fetch_transient", "policy_rate_limited"})
+TERMINAL_POLICY_ERROR_CODES = frozenset(
+    {
+        "policy_document_too_large",
+        "policy_document_decode_error",
+        "policy_document_control_character",
+        "policy_document_type_unsupported",
+        "policy_ignore_block_duplicate",
+        "policy_ignore_block_nested",
+        "policy_ignore_block_unclosed",
+        "policy_ignore_info_invalid",
+        "policy_ignore_pattern_invalid",
+        "policy_ignore_limit_exceeded",
+        "policy_path_invalid",
+        "policy_match_budget_exceeded",
+        "policy_prompt_budget_exceeded",
+        "policy_access_denied",
+        "policy_revision_unavailable",
+        "policy_snapshot_integrity_error",
+        "policy_context_violation",
+    }
 )
-KNOWN_ERROR_CODES = RETRYABLE_ERROR_CODES | {
-    "llm_invalid_output",
-    "llm_context_overflow",
-    "llm_payment_required",
-    "budget_exceeded",
-    "deadline_exceeded",
-    "github_forbidden",
-    "github_publish_failed",
-    "lease_expired",
-}
+RETRYABLE_ERROR_CODES = (
+    frozenset(
+        {
+            "llm_timeout",
+            "llm_rate_limited",
+            "llm_unavailable",
+            "diff_fetch_failed",
+            "internal_error",
+        }
+    )
+    | RETRYABLE_POLICY_ERROR_CODES
+)
+KNOWN_ERROR_CODES = (
+    RETRYABLE_ERROR_CODES
+    | TERMINAL_POLICY_ERROR_CODES
+    | {
+        "llm_invalid_output",
+        "llm_context_overflow",
+        "llm_payment_required",
+        "budget_exceeded",
+        "deadline_exceeded",
+        "github_forbidden",
+        "github_publish_failed",
+        "lease_expired",
+    }
+)
 
 
 def cancellation_reason(*, pr_open: bool, head_current: bool, cancel_requested: bool) -> str | None:
@@ -56,6 +93,14 @@ class RunFailure(Exception):
 
 class RunCancelled(Exception):
     """``cancel_requested`` was seen on a checkpoint (T11)."""
+
+
+class RunSkipped(Exception):
+    """The running attempt has nothing to review: ``running → skipped`` without a verdict."""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
 
 
 def classify_failure(exc: BaseException) -> RunFailure:

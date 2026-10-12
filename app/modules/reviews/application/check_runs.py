@@ -28,6 +28,36 @@ _ERROR_TEXTS = {
     "cancelled_by_user": "Прогон отменён из UI.",
     "pr_closed": "PR закрыт.",
     "rule_not_matched": "PR не прошёл правило отбора репозитория.",
+    "all_changes_ignored": "Все изменения исключены из AI-ревью.",
+    "policy_document_too_large": (
+        "Документ правил превышает 64 КиБ. Ревью не выполнено; уменьшите документ."
+    ),
+    "policy_document_decode_error": (
+        "Документ правил должен быть корректным UTF-8. Исправьте кодировку."
+    ),
+    "policy_document_control_character": (
+        "В документе правил есть недопустимый управляющий символ."
+    ),
+    "policy_document_type_unsupported": "Документ правил должен быть обычным файлом в Git.",
+    "policy_ignore_block_duplicate": "В .review/rules.md допустим один блок review-ignore.",
+    "policy_ignore_block_nested": (
+        "Блок review-ignore должен быть на верхнем уровне .review/rules.md."
+    ),
+    "policy_ignore_block_unclosed": "Блок review-ignore в .review/rules.md не закрыт.",
+    "policy_ignore_info_invalid": "review-ignore не принимает дополнительные параметры.",
+    "policy_ignore_pattern_invalid": "В блоке review-ignore недопустимая маска.",
+    "policy_ignore_limit_exceeded": "В блоке review-ignore слишком много масок или маска длинна.",
+    "policy_path_invalid": "В изменениях есть недопустимый путь файла.",
+    "policy_match_budget_exceeded": (
+        "Маски review-ignore слишком дороги в проверке. Упростите политику."
+    ),
+    "policy_prompt_budget_exceeded": ("Документы правил не помещаются целиком в контекст модели."),
+    "policy_access_denied": "Нет доступа к документам правил репозитория.",
+    "policy_revision_unavailable": "Закреплённая ревизия правил недоступна.",
+    "policy_fetch_transient": "Не удалось прочитать документы правил из GitHub.",
+    "policy_rate_limited": "GitHub ограничил частоту запросов при чтении правил.",
+    "policy_snapshot_integrity_error": "Снимок правил прогона повреждён или противоречив.",
+    "policy_context_violation": "В контекст модели попал запрещённый источник.",
     "budget_paused": "Дневной бюджет исчерпан, ревью на паузе.",
 }
 

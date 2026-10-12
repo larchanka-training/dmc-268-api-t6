@@ -1,9 +1,10 @@
 """Run the policy and context steps of a review run behind a feature flag.
 
-The stage observes: it stores the policy snapshot and records what the context would be,
-and it never changes or fails the review itself. Enforcing its outcomes (failing a run on
-an invalid policy, skipping a fully ignored change, feeding the model) belongs to the
-integration with the LLM pipeline, CONTEXT_AND_VERIFICATION_SPEC §12.
+The stage runs after the diff of the attempt is stored and before any model call. It
+enforces the policy: an invalid or unreadable policy fails the run with its code, a
+change whose every file is ignored is skipped, and ignored files are withheld from the
+prompt of the review. The assembled context itself is recorded in the run trace;
+feeding it to the model belongs to the integration with the LLM pipeline (§12).
 """
 
 from __future__ import annotations
@@ -18,11 +19,13 @@ import httpx
 
 from app.modules.reviews.application.diff_map import DiffMap, VcsProviderName, build_diff_map
 from app.modules.reviews.application.get_run_diff import DiffSnapshot
+from app.modules.reviews.application.policy_errors import PolicyError
 from app.modules.reviews.application.policy_snapshot import PolicySnapshot
 from app.modules.reviews.application.prepare_policy_snapshot import PreparePolicySnapshot
 from app.modules.reviews.application.process_run import RunVcsInput, RunVcsRepository
 from app.modules.reviews.application.review_context import (
     BuildReviewContext,
+    ContextStatus,
     ReviewContextPayload,
 )
 from app.modules.reviews.application.review_ignore import (
@@ -30,6 +33,7 @@ from app.modules.reviews.application.review_ignore import (
     IgnorePolicy,
     apply_ignore,
 )
+from app.modules.reviews.application.run_failures import RunSkipped
 from app.modules.reviews.application.run_trace import RunTrace, traced_step
 from app.modules.reviews.application.vcs_diff import MergeBaseProvider, VcsFile, VcsProvider
 
@@ -167,14 +171,30 @@ class ReviewContextStage:
         self._context_builder = context_builder
         self._trace = trace
         self._token_budget = token_budget
+        self._denied_paths: frozenset[str] = frozenset()
 
-    async def observe(self, run_id: UUID) -> ReviewContextPayload | None:
-        """Run the stage for its record only: a failure is logged and never raised."""
+    def excluded(self, path: str) -> bool:
+        """Whether the last run of the stage withheld this path from model inputs."""
+        return path in self._denied_paths
+
+    async def run(self, run_id: UUID) -> ReviewContextPayload | None:
+        """Enforce the policy of the run; a failure of the context itself is not fatal.
+
+        A policy error and a fully ignored change propagate: they end the attempt before
+        any model call. Any other failure is logged, and the review continues with the
+        diff as it does without the stage.
+        """
+        self._denied_paths = frozenset()
         try:
-            return await self.execute(run_id)
+            payload = await self.execute(run_id)
+        except PolicyError:
+            raise
         except Exception:
             _LOGGER.warning("Review context stage failed run_id=%s", run_id, exc_info=True)
             return None
+        if payload.status is ContextStatus.ALL_CHANGES_IGNORED:
+            raise RunSkipped("all_changes_ignored")
+        return payload
 
     async def execute(self, run_id: UUID) -> ReviewContextPayload:
         run = await self._runs.get_run_vcs_input(run_id)
@@ -208,12 +228,14 @@ class ReviewContextStage:
             # The snapshot keeps validated masks; the matcher is rebuilt from them.
             policy = IgnorePolicy(snapshot.ignore_patterns, (), snapshot.ignore_digest)
             matcher = IgnoreMatcher(policy)
+            ignore = apply_ignore(matcher, diff_map)
             payload = await self._context_builder(run).execute(
                 diff_map=diff_map,
                 snapshot=snapshot,
                 matcher=matcher,
-                ignore=apply_ignore(matcher, diff_map),
+                ignore=ignore,
                 token_budget=self._token_budget,
             )
+            self._denied_paths = ignore.denied_paths
             step.response = context_summary(diff_map, payload)
         return payload

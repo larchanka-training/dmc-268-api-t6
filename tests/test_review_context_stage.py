@@ -30,6 +30,7 @@ from app.modules.reviews.application.review_context_stage import (
     EstimatedTokenCounter,
     ReviewContextStage,
 )
+from app.modules.reviews.application.run_failures import RunSkipped
 from app.modules.reviews.application.vcs_diff import PullRequestLocator, VcsPullRequest
 from app.modules.reviews.infrastructure.tree_sitter_facts import extract_facts
 from app.worker import WorkerSettings
@@ -246,60 +247,155 @@ def test_unknown_merge_base_is_recorded_as_unknown_not_as_the_policy_base() -> N
     assert trace.steps[1][2]["diff"]["diff_old_sha"] is None
 
 
-def test_observe_swallows_a_policy_error_and_leaves_it_in_the_trace() -> None:
+def test_policy_error_ends_the_attempt_and_stays_in_the_trace() -> None:
     trace = Trace()
-    broken = Policy(error=PolicyError(PolicyErrorCode.ACCESS_DENIED, "GitHub answered 403"))
+    broken = Policy(rules=b"```review-ignore\na?.py\n```\n")
+    stage = _stage(trace, policy=broken)
 
-    assert asyncio.run(_stage(trace, policy=broken).observe(_RUN)) is None
+    with pytest.raises(PolicyError) as caught:
+        asyncio.run(stage.run(_RUN))
 
+    assert caught.value.error_code == "policy_ignore_pattern_invalid"
     assert [step[0] for step in trace.steps] == ["policy.load"]
     assert trace.steps[0][2]["error"]["type"] == "PolicyError"
-    assert "policy_access_denied" in trace.steps[0][2]["error"]["message"]
+    assert "policy_ignore_pattern_invalid" in trace.steps[0][2]["error"]["message"]
 
 
-def test_execute_raises_what_observe_swallows() -> None:
+def test_unreadable_policy_is_a_retryable_failure_not_an_empty_policy() -> None:
+    denied = Policy(error=PolicyError(PolicyErrorCode.FETCH_TRANSIENT, "GitHub answered 502"))
+
+    with pytest.raises(PolicyError) as caught:
+        asyncio.run(_stage(Trace(), policy=denied).run(_RUN))
+
+    assert caught.value.retryable is True
+
+
+def test_change_with_every_file_ignored_skips_the_run() -> None:
+    trace = Trace()
+    stage = _stage(trace, policy=Policy(rules=b"```review-ignore\n**\n```\n"))
+
+    with pytest.raises(RunSkipped) as caught:
+        asyncio.run(stage.run(_RUN))
+
+    assert caught.value.reason == "all_changes_ignored"
+    assert trace.steps[1][2]["status"] == "all_changes_ignored"
+    assert trace.steps[1][2]["blocks"] == []
+
+
+def test_stage_names_what_it_withheld_from_model_inputs() -> None:
+    stage = _stage(Trace())
+
+    assert stage.excluded("generated/api.py") is False
+    asyncio.run(stage.run(_RUN))
+
+    assert stage.excluded("generated/api.py") is True
+    assert stage.excluded("src/app.py") is False
+
+
+def test_failure_of_the_context_itself_does_not_fail_the_review() -> None:
+    changed_head = _stage(Trace(), vcs=Vcs(head_sha="f" * 40))
+    assert asyncio.run(changed_head.run(_RUN)) is None
+    assert changed_head.excluded("generated/api.py") is False
+    assert asyncio.run(_stage(Trace(), none=True).run(_RUN)) is None
+
     with pytest.raises(ValueError, match="head changed"):
         asyncio.run(_stage(Trace(), vcs=Vcs(head_sha="f" * 40)).execute(_RUN))
     with pytest.raises(LookupError, match="no stored diff"):
         asyncio.run(_stage(Trace(), none=True).execute(_RUN))
-    assert asyncio.run(_stage(Trace(), none=True).observe(_RUN)) is None
 
 
-def test_review_run_calls_the_stage_after_the_diff_is_stored_and_ignores_its_result() -> None:
+def test_review_prompt_gets_neither_the_content_nor_the_name_of_an_ignored_file() -> None:
     from app.modules.reviews.application.conventions import GeneratedConventions
+    from app.modules.reviews.application.execute_review import ReviewPromptInput
+    from app.modules.reviews.application.prompt_builder import (
+        ChangedFile,
+        RepoConventions,
+        ReviewContext,
+    )
 
-    calls: list[str] = []
+    seen: list[ReviewContext] = []
+    meta = asyncio.run(Vcs().get_pull_request(_LOCATOR)).meta
 
     class Processor:
         async def prepare(self, run_id: UUID) -> object:
-            calls.append("prepare")
             return GeneratedConventions.__new__(GeneratedConventions)
 
-    class Observer:
-        async def observe(self, run_id: UUID) -> object:
-            calls.append("observe")
-            return None
-
     class Prompts:
-        async def get_review_prompt_input(self, run_id: UUID, conventions: object) -> None:
-            calls.append("prompt")
-            return None
+        async def get_review_prompt_input(
+            self, run_id: UUID, conventions: object
+        ) -> ReviewPromptInput:
+            return ReviewPromptInput(
+                system="system",
+                rules=(),
+                agents_md=None,
+                conventions=RepoConventions((), ()),
+                changed_files=(
+                    ChangedFile("src/app.py", "modified", ()),
+                    ChangedFile("generated/api.py", "modified", ()),
+                ),
+                omitted_files=("generated/big.py", "assets/logo.png"),
+            )
 
-    def run(observer: Observer | None) -> bool:
+    class Model:
+        async def get_pull_request_meta(self, run_id: UUID) -> PullRequestMeta:
+            return meta
+
+        async def draft_review(self, *, context: ReviewContext) -> dict[str, object]:
+            seen.append(context)
+            return {}
+
+    class Publisher:
+        async def execute(self, run_id: UUID, model_output: object) -> bool:
+            return True
+
+    class Withheld:
+        def excluded(self, path: str) -> bool:
+            return path.startswith("generated/")
+
+    def run(context_filter: Withheld | None) -> ReviewContext:
+        seen.clear()
         pipeline = ExecuteReviewRun(
             Processor(),  # type: ignore[arg-type]
             Prompts(),
-            object(),  # type: ignore[arg-type]
-            object(),  # type: ignore[arg-type]
-            context_stage=observer,
+            Model(),
+            Publisher(),
+            context_filter=context_filter,
         )
-        return asyncio.run(pipeline.execute(_RUN))
+        assert asyncio.run(pipeline.execute(_RUN)) is True
+        return seen[0]
 
-    assert run(Observer()) is False
-    assert calls == ["prepare", "observe", "prompt"]
-    calls.clear()
-    assert run(None) is False
-    assert calls == ["prepare", "prompt"]
+    filtered = run(Withheld())
+    assert [file.path for file in filtered.changed_files] == ["src/app.py"]
+    assert filtered.omitted_files == ("assets/logo.png",)
+
+    untouched = run(None)
+    assert [file.path for file in untouched.changed_files] == ["src/app.py", "generated/api.py"]
+    assert untouched.omitted_files == ("generated/big.py", "assets/logo.png")
+
+
+def test_policy_codes_have_a_retry_class_and_an_author_facing_text() -> None:
+    from app.modules.reviews.application.check_runs import _ERROR_TEXTS
+    from app.modules.reviews.application.policy_errors import RETRYABLE_POLICY_ERROR_CODES
+    from app.modules.reviews.application.run_failures import (
+        KNOWN_ERROR_CODES,
+        RETRYABLE_ERROR_CODES,
+        TERMINAL_POLICY_ERROR_CODES,
+    )
+
+    codes = {code.value for code in PolicyErrorCode}
+    retryable = {code.value for code in RETRYABLE_POLICY_ERROR_CODES}
+
+    assert codes <= KNOWN_ERROR_CODES
+    assert (
+        codes & RETRYABLE_ERROR_CODES
+        == retryable
+        == {
+            "policy_fetch_transient",
+            "policy_rate_limited",
+        }
+    )
+    assert codes - retryable == TERMINAL_POLICY_ERROR_CODES
+    assert codes | {"all_changes_ignored"} <= set(_ERROR_TEXTS)
 
 
 def test_feature_flag_is_off_unless_explicitly_enabled() -> None:

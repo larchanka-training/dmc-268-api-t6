@@ -225,6 +225,7 @@ async def process_review_run(
         ProviderConventionsModel(provider),
         lambda: SqlAlchemyRepositoryConventionsUnitOfWork(session_factory),
     )
+    stage_options = {} if context_stage is None else {"context_stage": context_stage}
     processor = ReviewRunProcessor(
         repository,
         provider,
@@ -233,6 +234,7 @@ async def process_review_run(
         vcs_provider=vcs_provider,
         trace=trace,
         uow_factory=lambda: SqlAlchemyRunProcessingUnitOfWork(session_factory),
+        **stage_options,
     )
     publisher = output or PublishReviewOutput(
         lambda: SqlAlchemyReviewOutputUnitOfWork(session_factory), provider
@@ -244,7 +246,7 @@ async def process_review_run(
         # Flag off: the composition is exactly the one before the context stage existed.
         return await ExecuteReviewRun(processor, prompts, provider, publisher).execute(run_id)
     return await ExecuteReviewRun(
-        processor, prompts, provider, publisher, context_stage=context_stage
+        processor, prompts, provider, publisher, context_filter=context_stage
     ).execute(run_id)
 
 

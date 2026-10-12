@@ -42,6 +42,7 @@ from app.modules.reviews.application.run_failures import (
     RetryDelays,
     RunCancelled,
     RunFailure,
+    RunSkipped,
     cancellation_reason,
     classify_failure,
 )
@@ -367,6 +368,10 @@ class HandleReviewRun:
         except RunCancelled as cancelled:
             reason = await self._cancellation_reason(claimed.run_id)
             return await self._cancel(claimed, reason or str(cancelled))
+        except RunSkipped as skipped:
+            if await self._finish_running(claimed, "skipped", skipped.reason, None):
+                await self._update_check_run(claimed.run_id)
+            return DeliveryOutcome.ACK
         except _DeadlineReached:
             failure = RunFailure("deadline_exceeded", "the attempt watchdog stopped the run")
         except Exception as exc:
