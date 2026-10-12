@@ -17,6 +17,7 @@ from app.modules.analytics.infrastructure.models import UsageEvent
 from app.modules.repositories.infrastructure.models import ProviderInstallation, Repository
 from app.modules.reviews.application.check_runs import CheckRunReport, CheckRunTarget
 from app.modules.reviews.application.handle_review_run import RunGuardSnapshot
+from app.modules.reviews.application.policy_errors import policy_error_detail
 from app.modules.reviews.application.publish_run_review import PublishContext
 from app.modules.reviews.application.queue_messages import ReviewPublishPointer, StoredRunMessage
 from app.modules.reviews.application.run_failures import cancellation_reason
@@ -268,7 +269,13 @@ class SqlAlchemyRunLifecycleStore:
             installation.external_id, repository.full_name, run.head_sha, run.id
         )
         if run.state != RunState.SUCCEEDED:
-            return CheckRunReport(target, run.state.value, run.attempt, run.error_code)
+            return CheckRunReport(
+                target,
+                run.state.value,
+                run.attempt,
+                run.error_code,
+                error_detail=policy_error_detail(run.error_message),
+            )
         findings = await self._published_findings(run_id)
         severities = [item.severity.value for item in findings]
         summary_only = await self._session.scalar(

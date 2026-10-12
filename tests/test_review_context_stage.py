@@ -496,3 +496,44 @@ def test_execution_profile_takes_what_the_worker_knows_about_its_models() -> Non
     # The verifier model and the versioned profiles are not known to the worker yet.
     assert profile.verifier_model == ""
     assert profile.is_complete is False
+
+
+def test_check_run_says_where_a_policy_failure_is() -> None:
+    from app.modules.reviews.application.check_runs import (
+        CheckRunReport,
+        CheckRunTarget,
+        check_run_view,
+    )
+    from app.modules.reviews.application.policy_documents import normalize_document
+    from app.modules.reviews.application.policy_errors import policy_error_detail
+    from app.modules.reviews.application.review_ignore import parse_review_ignore
+
+    def summary(error: PolicyError) -> str:
+        report = CheckRunReport(
+            CheckRunTarget(17, "octo/repo", _HEAD, _RUN),
+            "failed",
+            1,
+            error.error_code,
+            error_detail=policy_error_detail(error.message),
+        )
+        return check_run_view(report).summary
+
+    with pytest.raises(PolicyError) as mask:
+        parse_review_ignore("# Ignore\n\n```review-ignore\nok/**\nsrc/a?.py\n```\n")
+    assert summary(mask.value) == (
+        "`policy_ignore_pattern_invalid`: В блоке review-ignore недопустимая маска. "
+        "Где: файл `.review/rules.md`, строка 5, позиция 6."
+    )
+
+    with pytest.raises(PolicyError) as size:
+        normalize_document("AGENTS.md", b"a" * 87_040, blob_oid="f" * 40)
+    assert summary(size.value).endswith("Где: файл `AGENTS.md`, фактически 87040, допустимо 65536.")
+
+    # A failure without a location keeps the plain text of its code.
+    plain = PolicyError(PolicyErrorCode.ACCESS_DENIED, "GitHub answered 403")
+    assert policy_error_detail(plain.message) is None
+    assert summary(plain) == (
+        "`policy_access_denied`: Нет доступа к документам правил репозитория."
+    )
+    assert policy_error_detail(None) is None
+    assert policy_error_detail("llm_timeout: slow") is None

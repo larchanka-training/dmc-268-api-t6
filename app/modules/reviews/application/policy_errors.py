@@ -35,8 +35,23 @@ RETRYABLE_POLICY_ERROR_CODES = frozenset(
 )
 
 
+# Separates the technical message from the author-facing location in a stored message.
+POLICY_DETAIL_SEPARATOR = " | "
+
+
+def policy_error_detail(error_message: str | None) -> str | None:
+    """The author-facing location of a stored policy failure, when it has one."""
+    if not error_message or POLICY_DETAIL_SEPARATOR not in error_message:
+        return None
+    return error_message.split(POLICY_DETAIL_SEPARATOR, 1)[1]
+
+
 class PolicyError(RunFailure):
-    """A policy failure; the message is safe to show and never carries document content."""
+    """A policy failure; the message is safe to show and never carries document content.
+
+    The message ends with where the problem is: the document, the line and position,
+    and the limit with the actual value when they are known.
+    """
 
     def __init__(
         self,
@@ -52,6 +67,20 @@ class PolicyError(RunFailure):
         actual: int | None = None,
         retry_after: timedelta | None = None,
     ) -> None:
+        parts = []
+        if source_path is not None:
+            parts.append(f"файл `{source_path}`")
+        if line is not None:
+            parts.append(f"строка {line}")
+        if column is not None:
+            parts.append(f"позиция {column}")
+        if actual is not None and limit is not None:
+            parts.append(f"фактически {actual}, допустимо {limit}")
+        elif limit is not None:
+            parts.append(f"допустимо {limit}")
+        detail = ", ".join(parts)
+        if detail:
+            message = f"{message}{POLICY_DETAIL_SEPARATOR}{detail}"
         super().__init__(code.value, message, retry_after=retry_after)
         self.code = code
         self.source_path = source_path

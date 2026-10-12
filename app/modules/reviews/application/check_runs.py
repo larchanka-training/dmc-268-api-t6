@@ -86,6 +86,8 @@ class CheckRunReport:
     state: str
     attempt: int
     error_code: str | None = None
+    # Where a policy failure is: document, line and position, limit and actual value.
+    error_detail: str | None = None
     verdict: str | None = None
     severity_counts: dict[str, int] = field(default_factory=dict)
     inline_count: int = 0
@@ -125,6 +127,8 @@ def check_run_view(report: CheckRunReport) -> CheckRunView:
             f"{counts}\ninline: {report.inline_count}, в теле ревью: {report.body_count}{link}",
         )
     reason = _ERROR_TEXTS.get(report.error_code or "", report.error_code or "")
+    if report.error_detail:
+        reason = f"{reason} Где: {report.error_detail}."
     if report.state == "failed":
         summary = (
             f"{reason}{link}"
