@@ -7,7 +7,7 @@ import os
 import runpy
 import shutil
 import subprocess
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any, cast
 
@@ -282,3 +282,155 @@ def test_prepare_derives_fixture_parent_from_a_graph_or_refuses_before_build(
     finally:
         os.umask(previous_umask)
         shutil.rmtree(verifier.root)
+
+
+@pytest.fixture
+def prepared_verifier(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> Iterator[Callable[[object, bool], Any]]:
+    api = runpy.run_path(str(VERIFIER))
+    image_a = "sha256:" + "a" * 64
+    image_b = "sha256:" + "b" * 64
+    original_config = tmp_path / "user-config"
+    original_config.mkdir()
+    (original_config / "config.json").write_text(
+        '{"auths":{"registry.example":{"auth":"PRIVATE-CANARY"}}}'
+    )
+    monkeypatch.setenv("DOCKER_CONFIG", str(original_config))
+    verifiers: list[Any] = []
+    real_run = subprocess.run
+
+    def prepare(graph_b: object, user_plugin: bool) -> Any:
+        plugin = (
+            original_config if user_plugin else tmp_path / "system"
+        ) / "cli-plugins/docker-compose"
+        plugin.parent.mkdir(parents=True, exist_ok=True)
+        plugin.write_text("plugin fixture")
+        verifier = api["LiveVerifier"](
+            "/fake/docker", "rollback110-0123456789abcdef", "prepared:a", image_a
+        )
+        verifiers.append(verifier)
+
+        def run(args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+            if args[0] == "bash":
+                return real_run(args, **kwargs)
+            output = ""
+            if args[1] == "info":
+                output = str(plugin)
+            elif args[1:3] == ["compose", "version"]:
+                # User-config-only plugin must remain available in the private config.
+                private = Path(verifier.environment["DOCKER_CONFIG"])
+                if user_plugin:
+                    assert (private / "cli-plugins/docker-compose").resolve() == plugin
+                else:
+                    assert not (private / "cli-plugins/docker-compose").exists()
+                assert not (private / "config.json").exists()
+                output = "5.6.0"
+            elif args[1:3] == ["image", "inspect"]:
+                output = image_a if args[-1] == "prepared:a" else image_b
+            elif args[1] == "run":
+                if "import os,json" in args[-1]:
+                    output = "[]"
+                elif image_a in args:
+                    output = json.dumps(
+                        {"heads": ["20300101_0099"], "revisions": ["20300101_0099"]}
+                    )
+                else:
+                    output = json.dumps(graph_b)
+            return subprocess.CompletedProcess(args, 0, output, "")
+
+        monkeypatch.setattr(subprocess, "run", run)
+        return verifier
+
+    yield prepare
+    for verifier in verifiers:
+        shutil.rmtree(verifier.root)
+
+
+@pytest.mark.parametrize("user_plugin", [False, True])
+def test_prepare_accepts_b_child_and_exposes_only_user_config_plugin(
+    prepared_verifier: Callable[[object, bool], Any], tmp_path: Path, user_plugin: bool
+) -> None:
+    verifier = prepared_verifier(
+        {
+            "heads": ["20261010_0110"],
+            "revisions": ["20261010_0110", "20300101_0099"],
+            "parents": {"20261010_0110": "20300101_0099"},
+        },
+        user_plugin,
+    )
+    verifier.prepare()
+    assert verifier.app.is_dir()
+    assert verifier.report["revision_M"] == "20300101_0099"
+    wrapper = verifier.root / "bin/docker"
+    real = tmp_path / "real-docker"
+    real.write_text("#!/usr/bin/env bash\nexit 0\n")
+    real.chmod(0o700)
+    wrapper.write_text(wrapper.read_text().replace("real=/fake/docker", f"real={real}"))
+    private = tmp_path / "per-run-config"
+    result = subprocess.run(
+        ["bash", str(wrapper), "compose", "-p", "isolated", "up", "-d"],
+        env={**os.environ, "DOCKER_CONFIG": str(private)},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    # Use the actual subprocess, bypassing only prepare's Docker fake.
+    assert result.returncode == 0
+    if user_plugin:
+        assert (private / "cli-plugins/docker-compose").is_symlink()
+    else:
+        assert not (private / "cli-plugins").exists()
+    assert not (private / "config.json").exists()
+
+
+@pytest.mark.parametrize(
+    "graph_b",
+    [
+        [],
+        {
+            "heads": [],
+            "revisions": ["20261010_0110", "20300101_0099"],
+            "parents": {"20261010_0110": "20300101_0099"},
+        },
+        {
+            "heads": ["wrong"],
+            "revisions": ["20261010_0110", "20300101_0099"],
+            "parents": {"20261010_0110": "20300101_0099"},
+        },
+        {
+            "heads": ["20261010_0110"],
+            "revisions": ["20261010_0110"],
+            "parents": {"20261010_0110": "20300101_0099"},
+        },
+        {
+            "heads": ["20261010_0110"],
+            "revisions": "malformed",
+            "parents": {"20261010_0110": "20300101_0099"},
+        },
+        {"heads": ["20261010_0110"], "revisions": ["20261010_0110", "20300101_0099"]},
+        {
+            "heads": ["20261010_0110"],
+            "revisions": ["20261010_0110", "20300101_0099"],
+            "parents": [],
+        },
+        {
+            "heads": ["20261010_0110"],
+            "revisions": ["20261010_0110", "20300101_0099"],
+            "parents": {},
+        },
+        {
+            "heads": ["20261010_0110"],
+            "revisions": ["20261010_0110", "20300101_0099"],
+            "parents": {"20261010_0110": "wrong"},
+        },
+    ],
+)
+def test_prepare_refuses_invalid_b_graph_before_application_files(
+    prepared_verifier: Callable[[object, bool], Any], graph_b: object
+) -> None:
+    verifier = prepared_verifier(graph_b, False)
+    with pytest.raises(Exception, match="B graph is not the synthetic child of A"):
+        verifier.prepare()
+    assert not verifier.app.exists()
+    assert verifier.compose == []

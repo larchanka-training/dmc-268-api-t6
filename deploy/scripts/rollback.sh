@@ -144,7 +144,7 @@ PROBE_COMPOSE
       "rollback revision check: refused: database revision is not an ancestor of target head"$'\n.'|\
       "rollback revision check: refused: cannot inspect target graph or database"$'\n.')
         refuse_rollback "${probe_output%$'\n.'}" ;;
-      *) refuse_rollback "target revision probe failed" ;;
+      *) refuse_rollback "target revision probe failed (exit ${probe_status})" ;;
     esac
   fi
   [[ "${probe_output}" == "rollback revision check: compatible"$'\n.' ]] || \
@@ -153,12 +153,12 @@ PROBE_COMPOSE
 
 diagnostics_failed() {
   echo "rollback completion failed: $1 environment key diagnostics failed" >&2
-  echo "The healthy target release is recorded. Inspect service health and retry diagnostics before completing the job." >&2
+  echo "The healthy target release is recorded. Inspect service health and retry only the standalone diagnostics in SECRETS.md; do not rerun rollback.sh or rollback.yml." >&2
   exit 1
 }
 
 print_environment_keys() {
-  local service keys python_source key_list_pattern
+  local service keys output python_source key_list_pattern
   key_list_pattern='^\[("[A-Za-z_][A-Za-z0-9_]*"(, "[A-Za-z_][A-Za-z0-9_]*")*)?\]$'
   python_source="$(cat <<'PYTHON'
 import json
@@ -168,9 +168,17 @@ print(json.dumps(sorted(name for name in os.environ.keys() if re.fullmatch(r"[A-
 PYTHON
   )"
   for service in api worker webhook-worker; do
-    if ! keys="$("${COMPOSE[@]}" exec -T "${service}" python -c "${python_source}" 2>&1)"; then
+    # Capture stdout only and retain its final newline; stderr is never part of the protocol.
+    if ! output="$(
+      "${COMPOSE[@]}" exec -T "${service}" python -c "${python_source}" 2>/dev/null
+      status=$?
+      printf '.'
+      exit "${status}"
+    )"; then
       diagnostics_failed "${service}"
     fi
+    [[ "${output}" == *$'\n.' ]] || diagnostics_failed "${service}"
+    keys="${output%$'\n.'}"
     # Never echo raw exec output: only a JSON list of validated ASCII names can reach the log.
     if [[ ! "${keys}" =~ ${key_list_pattern} ]]; then
       diagnostics_failed "${service}"

@@ -193,6 +193,7 @@ case "$1" in
           printf '%s\\n' "${STUB_EXEC_ERROR-raw-container-secret}"
           exit "${STUB_EXEC_STATUS:-1}"
         fi
+        printf '%s\\n' "${STUB_EXEC_STDERR:-}" >&2
         uv run python "${STUB_EXEC_HELPER}" "${action_args[@]}"
         ;;
       down) exit "${STUB_DOWN_STATUS:-0}" ;;
@@ -1600,3 +1601,63 @@ def test_failed_deploy_then_refused_auto_rollback_preserves_rollback_entry(host:
     pull = calls.index(f"pull {IMAGE_B}")
     assert not any(set(c.split()) & {"up", "rm", "down", "exec"} for c in calls[pull:])
     assert list(host.tmp.iterdir()) == []
+
+
+@pytest.mark.parametrize("mode", ["manual", "auto"])
+def test_environment_key_protocol_ignores_secret_bearing_exec_stderr(host: Host, mode: str) -> None:
+    assert host.deploy(IMAGE_A, bundle="").returncode == 0
+    assert host.deploy(IMAGE_B).returncode == 0
+    result = host.run(
+        "rollback.sh",
+        env={"ROLLBACK_MODE": mode, "STUB_EXEC_STDERR": "Compose progress\nEXEC-SECRET-CANARY"},
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.count("environment keys:") == 3
+    assert f"rolled back to {IMAGE_A}" in result.stdout
+    assert "Compose progress" not in result.stdout + result.stderr
+    assert "EXEC-SECRET-CANARY" not in result.stdout + result.stderr
+
+
+@pytest.mark.parametrize(
+    "status, output", [(1, '["A_KEY"]'), (0, '["A_KEY"]\n'), (0, '["A_KEY"]\n[]')]
+)
+def test_environment_key_protocol_rejects_failed_exit_and_extra_stdout(
+    host: Host, status: int, output: str
+) -> None:
+    assert host.deploy(IMAGE_A, bundle="").returncode == 0
+    assert host.deploy(IMAGE_B).returncode == 0
+    result = host.run(
+        "rollback.sh",
+        env={
+            "STUB_EXEC_FAILURE_SERVICE": "api",
+            "STUB_EXEC_STATUS": str(status),
+            "STUB_EXEC_ERROR": output,
+        },
+    )
+    assert result.returncode == 1
+    assert "api environment key diagnostics failed" in result.stderr
+    assert "environment keys:" not in result.stdout
+    assert "rolled back" not in result.stdout
+    assert _read_dotenv(host.app_dir / ".deploy-state")["current_image"] == IMAGE_A
+
+
+@pytest.mark.parametrize("status", [1, 125, 126, 127])
+def test_generic_probe_failure_reports_only_controlled_numeric_exit(
+    host: Host, status: int
+) -> None:
+    assert host.deploy(IMAGE_A, bundle="").returncode == 0
+    assert host.deploy(IMAGE_B).returncode == 0
+    before = host.files()
+    result = host.run(
+        "rollback.sh",
+        env={
+            "STUB_PROBE_STATUS": str(status),
+            "STUB_PROBE_OUTPUT": "PROBE-SECRET-CANARY",
+            "STUB_PROBE_STDERR": "DRIVER-SECRET-CANARY",
+        },
+    )
+    assert result.returncode == 1
+    assert f"rollback refused: target revision probe failed (exit {status})\n" in result.stderr
+    assert "PROBE-SECRET-CANARY" not in result.stdout + result.stderr
+    assert "DRIVER-SECRET-CANARY" not in result.stdout + result.stderr
+    assert host.files() == before

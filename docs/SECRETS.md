@@ -279,12 +279,59 @@ worker environment keys: ["DATABASE_URL", "GITHUB_APP_ID", "GITHUB_APP_PRIVATE_K
 webhook-worker environment keys: ["DATABASE_URL", "GITHUB_APP_BOT_LOGIN", "GITHUB_APP_ID", "GITHUB_APP_PRIVATE_KEY", "GPG_KEY", "HOME", "HOSTNAME", "LC_CTYPE", "PATH", "PYTHONDONTWRITEBYTECODE", "PYTHONUNBUFFERED", "PYTHON_SHA256", "PYTHON_VERSION", "RABBITMQ_URL", "UV_COMPILE_BYTECODE", "UV_LINK_MODE", "WORKER_HEARTBEAT_FILE"]
 ```
 
-Оба режима получают эти списки после здорового `up --wait`, перед success metadata и строкой
-`rolled back`. Отказ по ревизии или восстановление bootstrap nginx не запускает диагностику.
-Недоступный сервис, ошибка exec и неожиданный/шумный вывод дают фиксированную
+В обоих режимах после здорового `up --wait` сначала записывается identity текущего релиза и
+previous по manual/auto правилам, затем выполняется диагностика, затем печатается `rolled back`.
+Отказ по ревизии или восстановление bootstrap nginx не запускает диагностику. Диагностика
+принимает только stdout с точным JSON-списком и нулевым кодом; stderr отбрасывается.
+Недоступный сервис, ошибка exec и неожиданный/шумный stdout дают фиксированную
 `rollback completion failed: <service> environment key diagnostics failed`; сырой stdout/stderr
-не попадает в job, успех не записывается. Поскольку up уже завершён, целевой стек может работать:
-сначала проверить его фактическое здоровье и устранить сбой диагностики ([CICD §5](CICD.md#5-rollback)).
+не попадает в job. Identity здорового целевого релиза уже сохранена, job остаётся красным,
+promotion не продолжается. Проверьте фактические образы и здоровье сервисов, устраните сбой exec
+и повторите **только независимую диагностику** ниже ([CICD §5](CICD.md#5-rollback)).
+Не перезапускайте `rollback.yml` или `rollback.sh`: manual rollback уже записал уходящий релиз
+в previous, поэтому повторный откат без явной цели переключит стек обратно.
+
+Для независимой диагностики на хосте задайте `APP_DIR`, `COMPOSE_PROJECT` и `DEPLOY_MODE`
+из фактической конфигурации этого deployment (например, staging имеет свой APP_DIR и проект).
+Используйте его `compose.yml`, `compose.edge.yml` или `compose.ports.yml` и `.env`;
+не выбирайте другой проект и не печатайте содержимое `.env`. Запустите этот отдельный Bash-рецепт:
+
+```bash
+set +o xtrace
+set -euo pipefail
+: "${APP_DIR:?Set the actual host application directory}"
+: "${COMPOSE_PROJECT:?Set the actual deployed Compose project}"
+: "${DEPLOY_MODE:?Set the actual deployed mode: edge or ports}"
+[[ "$DEPLOY_MODE" == edge || "$DEPLOY_MODE" == ports ]] || exit 1
+unset IMAGE  # Compose reads the recorded release from this deployment's .env.
+recovery_compose=(docker compose -p "$COMPOSE_PROJECT"
+  -f "$APP_DIR/compose.yml" -f "$APP_DIR/compose.$DEPLOY_MODE.yml"
+  --env-file "$APP_DIR/.env")
+recovery_python='import json,os,re; print(json.dumps(sorted(k for k in os.environ.keys() if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", k))))'
+recovery_pattern='^\[("[A-Za-z_][A-Za-z0-9_]*"(, "[A-Za-z_][A-Za-z0-9_]*")*)?\]$'
+for recovery_role in api worker webhook-worker; do
+  if ! recovery_output="$(
+    "${recovery_compose[@]}" exec -T "$recovery_role" python -c "$recovery_python" 2>/dev/null
+    recovery_status=$?
+    printf '.'
+    exit "$recovery_status"
+  )"; then
+    printf '%s\n' "$recovery_role environment key diagnostics failed" >&2
+    exit 1
+  fi
+  [[ "$recovery_output" == *$'\n.' ]] || {
+    printf '%s\n' "$recovery_role environment key diagnostics failed" >&2; exit 1;
+  }
+  recovery_keys="${recovery_output%$'\n.'}"
+  [[ "$recovery_keys" =~ $recovery_pattern ]] || {
+    printf '%s\n' "$recovery_role environment key diagnostics failed" >&2; exit 1;
+  }
+  printf '%s environment keys: %s\n' "$recovery_role" "$recovery_keys"
+done
+```
+
+Рецепт выполняет только exec и печатает проверенные имена; он не меняет release metadata,
+контейнеры или registry pointers и не возобновляет упавший workflow/promotion автоматически.
 
 При admission вывод pull, выбранных полей image inspect и probe также захватывается или
 подавляется: ошибки идентификации image ID/RepoDigest дают только контролируемую причину.
