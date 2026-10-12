@@ -67,6 +67,7 @@ from app.modules.reviews.application.publish_cancellation_signals import (
     PublishCancellationSignals,
 )
 from app.modules.reviews.application.publish_run_review import (
+    GitLabDiscussionGateway,
     PublishRunReview,
     PullRequestReviewGateway,
 )
@@ -120,6 +121,9 @@ from app.modules.reviews.infrastructure.github_review_publication import (
 )
 from app.modules.reviews.infrastructure.github_run_source import GitHubRunSource
 from app.modules.reviews.infrastructure.github_vcs import HttpGitHubVcsProvider
+from app.modules.reviews.infrastructure.gitlab_review_publication import (
+    GitLabMergeRequestDiscussionGateway,
+)
 from app.modules.reviews.infrastructure.llm.ecb_fx import EcbFxQuoteCache, EcbFxRateAdapter
 from app.modules.reviews.infrastructure.llm.gateway import LlmGateway
 from app.modules.reviews.infrastructure.llm.models import (
@@ -349,6 +353,8 @@ class WorkerSettings:
     portal_url: str | None
     heartbeat_file: Path | None = None
     llm: LlmSettings | None = None
+    gitlab_token: str | None = None
+    gitlab_base_url: str = "https://gitlab.com"
 
     @property
     def github_app_configured(self) -> bool:
@@ -377,6 +383,8 @@ class WorkerSettings:
             heartbeat_file=heartbeat_file(env),
             # Partly set LLM_* fails the start; none at all starts with a warning.
             llm=llm,
+            gitlab_token=env.get("GITLAB_TOKEN") or None,
+            gitlab_base_url=env.get("GITLAB_BASE_URL") or "https://gitlab.com",
         )
 
 
@@ -442,6 +450,17 @@ def github_adapters(
     )
 
 
+def gitlab_review_gateway(
+    settings: WorkerSettings,
+    client: httpx.AsyncClient | None,
+) -> GitLabMergeRequestDiscussionGateway | None:
+    """GitLab discussions when ``GITLAB_TOKEN`` is set. Unset leaves the run publishing."""
+    token = settings.gitlab_token
+    if not token or client is None:
+        return None
+    return GitLabMergeRequestDiscussionGateway(client=client, token=token)
+
+
 def attempt_provider_factory(
     gateway: LlmGateway | None, github: GitHubAdapters | None
 ) -> ProviderFactory:
@@ -492,6 +511,7 @@ def compose_worker_process(
     session_factory: async_sessionmaker[AsyncSession],
     queue: WorkerQueue,
     github: GitHubAdapters | None,
+    gitlab_reviews: GitLabDiscussionGateway | None = None,
     gateway: LlmGateway | None = None,
     provider_factory: ProviderFactory | None = None,
     delays: RetryDelays | None = None,
@@ -549,6 +569,7 @@ def compose_worker_process(
         publish_review=PublishRunReview(
             uow_factory=lifecycle,
             reviews=github.reviews if github is not None else None,
+            gitlab_reviews=gitlab_reviews,
             check_runs=github.check_runs if github is not None else None,
             trace=trace,
             run_url=run_url,
@@ -595,6 +616,13 @@ async def run_worker(
             if settings.github_app_configured
             else None
         )
+        gitlab_client = (
+            await stack.enter_async_context(
+                httpx.AsyncClient(base_url=settings.gitlab_base_url, timeout=10.0)
+            )
+            if settings.gitlab_token
+            else None
+        )
         gateway: LlmGateway | None = None
         if settings.llm is None:
             _LOGGER.warning("LLM_MODEL is not set: %s; every review run fails", LLM_NOT_CONFIGURED)
@@ -614,6 +642,7 @@ async def run_worker(
                 session_factory=session_factory,
                 queue=channels.publisher,
                 github=github_adapters(settings, client, session_factory),
+                gitlab_reviews=gitlab_review_gateway(settings, gitlab_client),
                 gateway=gateway,
                 provider_factory=provider_factory,
                 delays=delays,

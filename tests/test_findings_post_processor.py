@@ -7,7 +7,13 @@ from pathlib import Path
 from typing import cast
 
 from app.modules.reviews.application.findings_post_processor import FindingsPostProcessor
-from app.modules.reviews.application.review_output import ReviewFinding, ReviewOutput, ReviewSummary
+from app.modules.reviews.application.publish_run_review import move_inline_to_body
+from app.modules.reviews.application.review_output import (
+    PublishedFinding,
+    ReviewFinding,
+    ReviewOutput,
+    ReviewSummary,
+)
 
 
 def finding(**overrides: object) -> dict[str, object]:
@@ -48,10 +54,16 @@ def output(*findings: dict[str, object]) -> ReviewOutput:
     )
 
 
-def process(*findings: dict[str, object], max_inline: int | None = None):  # type: ignore[no-untyped-def]
+def process(  # type: ignore[no-untyped-def]
+    *findings: dict[str, object],
+    max_inline: int | None = None,
+    hunk_lines: dict[str, frozenset[int]] | None = None,
+):
     return FindingsPostProcessor.from_default_patterns().process(
         output(*findings),
-        hunk_lines={"app/example.py": frozenset({10, 11, 12, 13, 14})},
+        hunk_lines=hunk_lines
+        if hunk_lines is not None
+        else {"app/example.py": frozenset({10, 11, 12, 13, 14})},
         rule_names=frozenset({"Naming Consistency"}),
         repository_max_inline=max_inline,
     )
@@ -177,3 +189,124 @@ def test_default_cap_classifies_fixture_as_ten_inline_and_four_body_only() -> No
     assert [item.finding.title for item in result.body_only] == [
         f"Finding {number:02d}" for number in range(11, 15)
     ]
+
+
+def test_review_body_starts_with_verdict_risk_summary_and_checked_paths() -> None:
+    result = process(
+        finding(title="Blocking defect", severity="high"),
+        finding(
+            title="Unused import of os",
+            body="The unused import should be removed.",
+        ),
+        finding(path="missing.py", title="Unknown critical", severity="critical"),
+        finding(title="Quiet note", severity="info", confidence=0.4),
+        hunk_lines={
+            "z/last.py": frozenset({12}),
+            "app/example.py": frozenset({10, 11, 12, 13, 14}),
+        },
+    )
+
+    assert result.review_body.startswith(
+        "\n".join(
+            (
+                "## Review summary",
+                "",
+                "**Verdict:** blocking",
+                "**Risk summary:** critical: 0, high: 1, medium: 0, low: 0, info: 1",
+                "**Checked files:**",
+                "- app/example.py",
+                "- z/last.py",
+                "",
+                "**Main issue:** A required value is not validated.",
+                "",
+                "**Done well:** The endpoint remains small.",
+                "",
+                "**Effort:** small",
+            )
+        )
+    )
+    assert "## Additional findings" in result.review_body
+    assert "Quiet note" in result.review_body
+    assert "Unused import of os" not in result.review_body
+    assert "Unknown critical" not in result.review_body
+    appended = move_inline_to_body(result.review_body, (_moved_finding(),))
+    assert appended.index("**Verdict:**") < appended.index("## Inline findings")
+    assert "- **Moved note** (`src/app.py:3`): outside the diff" in appended
+
+
+def test_checked_files_are_none_when_the_diff_has_no_paths() -> None:
+    result = process(finding(severity="high"), hunk_lines={})
+
+    assert result.review_body == "\n".join(
+        (
+            "## Review summary",
+            "",
+            "**Verdict:** clean",
+            "**Risk summary:** critical: 0, high: 0, medium: 0, low: 0, info: 0",
+            "**Checked files:**",
+            "(none)",
+            "",
+            "**Main issue:** A required value is not validated.",
+            "",
+            "**Done well:** The endpoint remains small.",
+            "",
+            "**Effort:** small",
+        )
+    )
+
+
+def test_character_cap_drops_only_additional_findings() -> None:
+    notes = tuple(
+        finding(title=f"Overflow {number}", confidence=0.4, body="x" * 1200)
+        for number in range(1, 7)
+    )
+    capped = process(finding(title="Blocking defect", severity="high"), *notes)
+    assert capped.review_body.startswith(
+        "\n".join(
+            (
+                "## Review summary",
+                "",
+                "**Verdict:** blocking",
+                "**Risk summary:** critical: 0, high: 1, medium: 0, low: 6, info: 0",
+                "**Checked files:**",
+                "- app/example.py",
+            )
+        )
+    )
+    assert len(capped.review_body) == 4000
+    assert "**Effort:** small" in capped.review_body
+    assert "Overflow 1" in capped.review_body
+    assert "Overflow 6" not in capped.review_body
+
+    long_paths = {f"pkg/file_{index:03d}_{'n' * 60}.py": frozenset({1}) for index in range(50)}
+    long_paths["app/example.py"] = frozenset({10, 11, 12, 13, 14})
+    long_body = process(
+        finding(title="Blocking defect", severity="high"),
+        finding(title="Spill note", confidence=0.4),
+        hunk_lines=long_paths,
+    )
+    assert len(long_body.review_body) > 4000
+    assert "**Verdict:** blocking" in long_body.review_body
+    assert (
+        long_body.review_body.index("- app/example.py")
+        < long_body.review_body.index("- pkg/file_000_")
+        < long_body.review_body.index("- pkg/file_049_")
+    )
+    assert "**Effort:** small" in long_body.review_body
+    assert "## Additional findings" not in long_body.review_body
+    assert "Spill note" not in long_body.review_body
+
+
+def _moved_finding() -> PublishedFinding:
+    return PublishedFinding(
+        path="src/app.py",
+        line=3,
+        start_line=None,
+        severity="high",
+        category="correctness",
+        title="Moved note",
+        body="outside the diff",
+        suggestion=None,
+        confidence=0.9,
+        rule_name=None,
+    )

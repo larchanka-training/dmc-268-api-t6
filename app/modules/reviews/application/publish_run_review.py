@@ -42,6 +42,9 @@ class PublishContext:
     review_body: str
     findings: tuple[PublishedFinding, ...]
     findings_hash: str
+    provider: str
+    project_id: int
+    base_sha: str
 
 
 @dataclass(frozen=True)
@@ -62,7 +65,7 @@ class SubmittedReview:
     comment_ids: tuple[int, ...]
 
 
-class GitHubPublishError(Exception):
+class PublishError(Exception):
     """``kind``: ``retryable``, ``forbidden``, ``coordinates`` or ``stale_commit`` (§5.2)."""
 
     def __init__(
@@ -83,6 +86,14 @@ class PullRequestReviewGateway(Protocol):
     """Idempotent by ``findings_hash``: a review already posted for it is returned, not reposted."""
 
     async def submit_review(self, submission: ReviewSubmission) -> SubmittedReview: ...
+
+
+class GitLabDiscussionGateway(Protocol):
+    """GitLab discussions for one project. Idempotent by the same ``findings_hash`` markers."""
+
+    async def submit_review(
+        self, submission: ReviewSubmission, *, project_id: int
+    ) -> SubmittedReview: ...
 
 
 class ReviewPublicationStore(CheckRunReports, Protocol):
@@ -139,9 +150,11 @@ class PublishRunReview:
         run_url: Callable[[UUID], str | None] = lambda _: None,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         now: Callable[[], datetime] = lambda: datetime.now(UTC),
+        gitlab_reviews: GitLabDiscussionGateway | None = None,
     ) -> None:
         self._uow_factory = uow_factory
         self._reviews = reviews
+        self._gitlab_reviews = gitlab_reviews
         self._check_runs = check_runs
         self._trace = trace
         self._run_url = run_url
@@ -149,9 +162,6 @@ class PublishRunReview:
         self._now = now
 
     async def execute(self, pointer: ReviewPublishPointer) -> None:
-        if self._reviews is None:
-            _LOGGER.warning("GitHub App is not configured; run %s stays publishing", pointer.run_id)
-            return
         async with self._uow_factory() as uow:
             context = await uow.runs.publish_context(pointer.run_id)
         if context is None or context.state != "publishing":
@@ -159,13 +169,16 @@ class PublishRunReview:
         if (context.head_sha, context.findings_hash) != (pointer.head_sha, pointer.findings_hash):
             _LOGGER.warning("Stale review.publish/v1 for run %s is ignored", pointer.run_id)
             return
+        gitlab = context.provider == "gitlab"
+        if not self._gateway_ready(pointer.run_id, gitlab=gitlab):
+            return
         reason = cancellation_reason(
             pr_open=context.pr_open,
             head_current=context.head_sha == context.pr_head_sha,
             cancel_requested=context.cancel_requested,
         )
         if reason is not None:
-            await self._finish(pointer.run_id, "cancelled", reason, None)
+            await self._finish(pointer.run_id, "cancelled", reason, None, check_run=not gitlab)
             return
 
         submission = ReviewSubmission(
@@ -178,12 +191,20 @@ class PublishRunReview:
             findings=context.findings,
             findings_hash=context.findings_hash,
         )
+        vendor = "gitlab" if gitlab else "github"
+        project_id = context.project_id if gitlab else None
         moved = False
         retries = 0
         try_no = 0
         while True:
             try_no += 1
-            result = await self._submit(submission, pointer, try_no)
+            result = await self._submit(
+                submission,
+                pointer,
+                try_no,
+                project_id=project_id,
+                tool=f"{vendor}.publish_review",
+            )
             if isinstance(result, SubmittedReview):
                 break
             error = result
@@ -196,10 +217,18 @@ class PublishRunReview:
                 )
                 continue
             if error.kind == "stale_commit":
-                await self._finish(pointer.run_id, "cancelled", "superseded", None)
+                await self._finish(
+                    pointer.run_id, "cancelled", "superseded", None, check_run=not gitlab
+                )
                 return
             if error.kind == "forbidden":
-                await self._finish(pointer.run_id, "failed", "github_forbidden", str(error))
+                await self._finish(
+                    pointer.run_id,
+                    "failed",
+                    f"{vendor}_forbidden",
+                    str(error),
+                    check_run=not gitlab,
+                )
                 return
             if error.kind == "retryable" and retries < len(PUBLISH_RETRY_PAUSES):
                 pause = PUBLISH_RETRY_PAUSES[retries]
@@ -208,28 +237,52 @@ class PublishRunReview:
                 retries += 1
                 await self._sleep(pause.total_seconds())
                 continue
-            await self._finish(pointer.run_id, "failed", "github_publish_failed", str(error))
+            await self._finish(
+                pointer.run_id,
+                "failed",
+                f"{vendor}_publish_failed",
+                str(error),
+                check_run=not gitlab,
+            )
             return
 
+        # GitLab discussion ids are not GitHub comment ids; the marker is the retry identity.
+        comment_ids = () if gitlab else result.comment_ids
         async with self._uow_factory() as uow:
             completed = await uow.runs.complete_publication(
                 pointer.run_id,
                 review_id=result.review_id,
-                comment_ids=result.comment_ids,
+                comment_ids=comment_ids,
                 findings_hash=context.findings_hash,
                 moved_to_body=moved,
                 now=self._now(),
             )
             await uow.commit()
-        if completed:
+        if completed and not gitlab:
             await update_check_run(
                 self._uow_factory, self._check_runs, pointer.run_id, self._run_url
             )
 
+    def _gateway_ready(self, run_id: UUID, *, gitlab: bool) -> bool:
+        if gitlab:
+            if self._gitlab_reviews is None:
+                _LOGGER.warning("GITLAB_TOKEN is not set; run %s stays publishing", run_id)
+                return False
+            return True
+        if self._reviews is None:
+            _LOGGER.warning("GitHub App is not configured; run %s stays publishing", run_id)
+            return False
+        return True
+
     async def _submit(
-        self, submission: ReviewSubmission, pointer: ReviewPublishPointer, try_no: int
-    ) -> SubmittedReview | GitHubPublishError:
-        assert self._reviews is not None
+        self,
+        submission: ReviewSubmission,
+        pointer: ReviewPublishPointer,
+        try_no: int,
+        *,
+        project_id: int | None,
+        tool: str,
+    ) -> SubmittedReview | PublishError:
         request = {
             "head_sha": submission.commit_sha,
             "findings_hash": submission.findings_hash,
@@ -239,21 +292,31 @@ class PublishRunReview:
         }
         started_at = self._now()
         started = asyncio.get_running_loop().time()
-        result: SubmittedReview | GitHubPublishError
+        result: SubmittedReview | PublishError
         try:
-            result = await self._reviews.submit_review(submission)
-            response: object = {"github_review_id": result.review_id}
-        except GitHubPublishError as exc:
+            if project_id is None:
+                assert self._reviews is not None
+                result = await self._reviews.submit_review(submission)
+                response: object = {"github_review_id": result.review_id}
+            else:
+                assert self._gitlab_reviews is not None
+                result = await self._gitlab_reviews.submit_review(submission, project_id=project_id)
+                response = {"gitlab_review_id": result.review_id}
+        except PublishError as exc:
             result = exc
             response = {"error": {"http_status": exc.http_status, "message": str(exc)[:1000]}}
         duration_ms = int((asyncio.get_running_loop().time() - started) * 1000)
-        await self._trace.record(
-            pointer.run_id, "github.publish_review", request, response, started_at, duration_ms
-        )
+        await self._trace.record(pointer.run_id, tool, request, response, started_at, duration_ms)
         return result
 
     async def _finish(
-        self, run_id: UUID, state: str, error_code: str, error_message: str | None
+        self,
+        run_id: UUID,
+        state: str,
+        error_code: str,
+        error_message: str | None,
+        *,
+        check_run: bool,
     ) -> None:
         async with self._uow_factory() as uow:
             finished = await uow.runs.finish(
@@ -266,5 +329,5 @@ class PublishRunReview:
                 now=self._now(),
             )
             await uow.commit()
-        if finished:
+        if finished and check_run:
             await update_check_run(self._uow_factory, self._check_runs, run_id, self._run_url)

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from types import TracebackType
@@ -19,8 +20,8 @@ from app.modules.reviews.application.check_runs import (
     CheckRunView,
 )
 from app.modules.reviews.application.publish_run_review import (
-    GitHubPublishError,
     PublishContext,
+    PublishError,
     PublishRunReview,
     ReviewSubmission,
     SubmittedReview,
@@ -49,6 +50,20 @@ FINDING = PublishedFinding(
     rule_name=None,
 )
 POINTER = ReviewPublishPointer(RUN, HEAD, HASH, "COMMENT")
+PROJECT_ID = 5150
+BASE = "b" * 40
+STORED_BODY = "\n".join(
+    [
+        "## Review summary",
+        "",
+        "**Verdict:** blocking",
+        "**Risk summary:** critical: 0, high: 1, medium: 0, low: 0, info: 0",
+        "**Checked files:**",
+        "- src/app.py",
+        "",
+        "**Main issue:** inverted branch",
+    ]
+)
 
 
 def context(**change: Any) -> PublishContext:
@@ -65,6 +80,9 @@ def context(**change: Any) -> PublishContext:
         review_body="## Review summary",
         findings=(FINDING,),
         findings_hash=HASH,
+        provider="github",
+        project_id=101,
+        base_sha=BASE,
     )
     return replace(base, **change)
 
@@ -74,6 +92,7 @@ class Store:
     context: PublishContext
     state: str = "publishing"
     error_code: str | None = None
+    open_units: int = 0
     completed: list[tuple[int, tuple[int, ...], bool]] = field(default_factory=list)
 
     async def publish_context(self, run_id: UUID) -> PublishContext | None:
@@ -122,8 +141,10 @@ class Store:
 class Uow:
     def __init__(self, store: Store) -> None:
         self.runs = store
+        self._store = store
 
     async def __aenter__(self) -> Self:
+        self._store.open_units += 1
         return self
 
     async def __aexit__(
@@ -132,6 +153,7 @@ class Uow:
         exc: BaseException | None,
         traceback: TracebackType | None,
     ) -> None:
+        self._store.open_units -= 1
         return None
 
     async def commit(self) -> None:
@@ -160,13 +182,13 @@ class Trace:
 
 @dataclass
 class Reviews:
-    results: list[SubmittedReview | GitHubPublishError]
+    results: list[SubmittedReview | PublishError]
     submissions: list[ReviewSubmission] = field(default_factory=list)
 
     async def submit_review(self, submission: ReviewSubmission) -> SubmittedReview:
         self.submissions.append(submission)
         result = self.results.pop(0)
-        if isinstance(result, GitHubPublishError):
+        if isinstance(result, PublishError):
             raise result
         return result
 
@@ -179,14 +201,45 @@ class CheckRuns:
         self.views.append(view)
 
 
+@dataclass
+class GitLabReviews:
+    """Fake GitLab discussions gateway. Records posts and refuses work inside a unit of work."""
+
+    results: list[SubmittedReview | PublishError]
+    store: Store
+    calls: list[tuple[ReviewSubmission, int]] = field(default_factory=list)
+    inlines: list[tuple[str, int]] = field(default_factory=list)
+    summaries: list[str] = field(default_factory=list)
+
+    async def submit_review(
+        self, submission: ReviewSubmission, *, project_id: int
+    ) -> SubmittedReview:
+        assert self.store.open_units == 0
+        self.calls.append((submission, project_id))
+        result = self.results.pop(0)
+        if isinstance(result, PublishError):
+            raise result
+        for finding in submission.findings:
+            self.inlines.append((finding.path, finding.line))
+        self.summaries.append(submission.body)
+        return result
+
+
 def run(
-    store: Store, reviews: Reviews, sleeps: list[float] | None = None
+    store: Store,
+    reviews: Reviews | None,
+    sleeps: list[float] | None = None,
+    gitlab: GitLabReviews | None = None,
 ) -> tuple[Trace, CheckRuns]:
     trace, check_runs = Trace(), CheckRuns()
     pauses = sleeps if sleeps is not None else []
 
     async def sleep(seconds: float) -> None:
         pauses.append(seconds)
+
+    publisher_kwargs: dict[str, Any] = {}
+    if gitlab is not None:
+        publisher_kwargs["gitlab_reviews"] = gitlab
 
     asyncio.run(
         PublishRunReview(
@@ -196,9 +249,14 @@ def run(
             trace=trace,
             sleep=sleep,
             now=lambda: NOW,
+            **publisher_kwargs,
         ).execute(POINTER)
     )
     return trace, check_runs
+
+
+def gitlab_context(**change: Any) -> PublishContext:
+    return context(provider="gitlab", project_id=PROJECT_ID, base_sha=BASE, **change)
 
 
 def test_publication_succeeds_with_one_trace_record_and_a_neutral_check_run() -> None:
@@ -232,7 +290,7 @@ def test_coordinate_422_moves_inline_findings_into_the_body_once() -> None:
     store = Store(context())
     reviews = Reviews(
         [
-            GitHubPublishError("coordinates", "line outside diff", http_status=422),
+            PublishError("coordinates", "line outside diff", http_status=422),
             SubmittedReview(7, ()),
         ]
     )
@@ -247,15 +305,13 @@ def test_coordinate_422_moves_inline_findings_into_the_body_once() -> None:
 
 def test_stale_commit_422_cancels_as_superseded() -> None:
     store = Store(context())
-    run(store, Reviews([GitHubPublishError("stale_commit", "commit_id", http_status=422)]))
+    run(store, Reviews([PublishError("stale_commit", "commit_id", http_status=422)]))
     assert (store.state, store.error_code) == ("cancelled", "superseded")
 
 
 def test_forbidden_fails_without_retry() -> None:
     store = Store(context())
-    trace, check_runs = run(
-        store, Reviews([GitHubPublishError("forbidden", "no", http_status=403)])
-    )
+    trace, check_runs = run(store, Reviews([PublishError("forbidden", "no", http_status=403)]))
     assert (store.state, store.error_code) == ("failed", "github_forbidden")
     assert len(trace.records) == 1
     assert check_runs.views[-1].conclusion == "neutral"
@@ -263,7 +319,7 @@ def test_forbidden_fails_without_retry() -> None:
 
 def test_server_errors_retry_three_times_with_spec_pauses_then_fail() -> None:
     store = Store(context())
-    error = GitHubPublishError("retryable", "bad gateway", http_status=502)
+    error = PublishError("retryable", "bad gateway", http_status=502)
     sleeps: list[float] = []
     trace, _ = run(store, Reviews([error, error, error, error]), sleeps)
 
@@ -275,7 +331,7 @@ def test_server_errors_retry_three_times_with_spec_pauses_then_fail() -> None:
 
 def test_retry_after_up_to_sixty_seconds_replaces_the_pause() -> None:
     store = Store(context())
-    limited = GitHubPublishError(
+    limited = PublishError(
         "retryable", "secondary limit", http_status=403, retry_after=timedelta(seconds=45)
     )
     sleeps: list[float] = []
@@ -372,7 +428,7 @@ def test_github_review_gateway_classifies_publication_errors(
         token_provider=_Tokens(),
     )
     submission = ReviewSubmission(17, "octo/repo", 7, HEAD, "COMMENT", "body", (FINDING,), HASH)
-    with pytest.raises(GitHubPublishError) as raised:
+    with pytest.raises(PublishError) as raised:
         asyncio.run(gateway.submit_review(submission))
     assert raised.value.kind == kind
 
@@ -446,7 +502,7 @@ def test_failed_comment_read_is_retried_and_finds_the_posted_review() -> None:
     )
     submission = ReviewSubmission(17, "octo/repo", 7, HEAD, "COMMENT", "body", (FINDING,), HASH)
 
-    with pytest.raises(GitHubPublishError) as raised:
+    with pytest.raises(PublishError) as raised:
         asyncio.run(gateway.submit_review(submission))
     assert raised.value.kind == "retryable"
     assert asyncio.run(gateway.submit_review(submission)) == SubmittedReview(55, (900,))
@@ -474,7 +530,184 @@ def test_review_gateway_does_not_post_on_a_head_that_moved_on_github() -> None:
     )
     submission = ReviewSubmission(17, "octo/repo", 7, HEAD, "COMMENT", "body", (FINDING,), HASH)
 
-    with pytest.raises(GitHubPublishError) as raised:
+    with pytest.raises(PublishError) as raised:
         asyncio.run(gateway.submit_review(submission))
     assert raised.value.kind == "stale_commit"
     assert posts == []
+
+
+def test_gitlab_publication_posts_the_stored_overview_and_skips_the_check_run() -> None:
+    store = Store(gitlab_context(review_body=STORED_BODY))
+    gitlab = GitLabReviews([SubmittedReview(880, (4242,))], store)
+    trace, check_runs = run(store, Reviews([]), gitlab=gitlab)
+
+    assert store.state == "succeeded"
+    assert store.completed == [(880, (), False)]
+    assert [(call[0].body, call[1]) for call in gitlab.calls] == [(STORED_BODY, PROJECT_ID)]
+    assert gitlab.inlines == [("src/app.py", 3)]
+    assert gitlab.summaries == [STORED_BODY]
+    assert "**Verdict:** blocking" in gitlab.summaries[0]
+    assert (
+        "**Risk summary:** critical: 0, high: 1, medium: 0, low: 0, info: 0" in gitlab.summaries[0]
+    )
+    assert "**Checked files:**" in gitlab.summaries[0]
+    assert check_runs.views == []
+    assert trace.records == [
+        (
+            "gitlab.publish_review",
+            {
+                "head_sha": HEAD,
+                "findings_hash": HASH,
+                "review_event": "COMMENT",
+                "inline_count": 1,
+                "try": 1,
+            },
+            {"gitlab_review_id": 880},
+        )
+    ]
+
+
+def test_gitlab_execute_again_with_the_same_hash_does_not_post_again() -> None:
+    store = Store(gitlab_context(review_body=STORED_BODY))
+    gitlab = GitLabReviews(
+        [SubmittedReview(880, (4242,)), SubmittedReview(881, (4243,))],
+        store,
+    )
+    run(store, Reviews([]), gitlab=gitlab)
+    trace, check_runs = run(store, Reviews([]), gitlab=gitlab)
+
+    assert gitlab.inlines == [("src/app.py", 3)]
+    assert gitlab.summaries == [STORED_BODY]
+    assert len(gitlab.results) == 1
+    assert store.completed == [(880, (), False)]
+    assert trace.records == []
+    assert check_runs.views == []
+
+
+def test_unset_gitlab_token_leaves_the_run_publishing_without_an_http_call(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    store = Store(gitlab_context(review_body=STORED_BODY))
+    github = Reviews([SubmittedReview(1, (2,))])
+    with caplog.at_level(logging.WARNING):
+        trace, check_runs = run(store, github)
+
+    assert store.state == "publishing"
+    assert store.completed == []
+    assert github.submissions == []
+    assert trace.records == []
+    assert check_runs.views == []
+    assert "GITLAB_TOKEN is not set" in caplog.text
+    assert "GitHub App is not configured" not in caplog.text
+
+    neither = Store(gitlab_context(review_body=STORED_BODY))
+    caplog.clear()
+    with caplog.at_level(logging.WARNING):
+        trace, check_runs = run(neither, None)
+    assert neither.state == "publishing"
+    assert trace.records == []
+    assert check_runs.views == []
+    assert "GITLAB_TOKEN is not set" in caplog.text
+    assert "GitHub App" not in caplog.text
+
+
+def test_unset_github_gateway_leaves_the_run_publishing(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    store = Store(context())
+    with caplog.at_level(logging.WARNING):
+        trace, check_runs = run(store, None)
+
+    assert store.state == "publishing"
+    assert store.completed == []
+    assert trace.records == []
+    assert check_runs.views == []
+    assert "GitHub App is not configured" in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("change", "reason"),
+    [
+        ({"pr_open": False}, "pr_closed"),
+        ({"pr_head_sha": "c" * 40}, "superseded"),
+        ({"cancel_requested": True}, "cancelled_by_user"),
+    ],
+)
+def test_gitlab_publisher_cancels_before_post_without_a_check_run(
+    change: dict[str, Any], reason: str
+) -> None:
+    store = Store(gitlab_context(**change))
+    gitlab = GitLabReviews([], store)
+    trace, check_runs = run(store, Reviews([]), gitlab=gitlab)
+
+    assert (store.state, store.error_code) == ("cancelled", reason)
+    assert gitlab.calls == []
+    assert gitlab.summaries == []
+    assert trace.records == []
+    assert check_runs.views == []
+
+
+def test_gitlab_stale_commit_cancels_as_superseded_without_a_check_run() -> None:
+    store = Store(gitlab_context())
+    gitlab = GitLabReviews([PublishError("stale_commit", "head moved", http_status=400)], store)
+    trace, check_runs = run(store, Reviews([]), gitlab=gitlab)
+
+    assert (store.state, store.error_code) == ("cancelled", "superseded")
+    assert gitlab.summaries == []
+    assert check_runs.views == []
+    assert [record[0] for record in trace.records] == ["gitlab.publish_review"]
+
+
+def test_gitlab_forbidden_stores_gitlab_forbidden_and_skips_the_check_run() -> None:
+    store = Store(gitlab_context())
+    gitlab = GitLabReviews([PublishError("forbidden", "no", http_status=403)], store)
+    trace, check_runs = run(store, Reviews([]), gitlab=gitlab)
+
+    assert (store.state, store.error_code) == ("failed", "gitlab_forbidden")
+    assert check_runs.views == []
+    assert gitlab.summaries == []
+    assert trace.records[0][0] == "gitlab.publish_review"
+
+
+def test_gitlab_retryable_failures_store_gitlab_publish_failed() -> None:
+    store = Store(gitlab_context())
+    error = PublishError("retryable", "bad gateway", http_status=502)
+    gitlab = GitLabReviews([error, error, error, error], store)
+    sleeps: list[float] = []
+    trace, check_runs = run(store, Reviews([]), sleeps, gitlab)
+
+    assert (store.state, store.error_code) == ("failed", "gitlab_publish_failed")
+    assert sleeps == [2.0, 8.0, 30.0]
+    assert len(trace.records) == 4
+    assert {record[0] for record in trace.records} == {"gitlab.publish_review"}
+    assert check_runs.views == []
+
+
+def test_worker_constructs_the_gitlab_gateway_only_when_the_token_is_set() -> None:
+    from app.modules.reviews.infrastructure.gitlab_review_publication import (
+        GitLabMergeRequestDiscussionGateway,
+    )
+    from app.worker import WorkerSettings, gitlab_review_gateway
+
+    env = {"DATABASE_URL": "postgresql+psycopg://test", "RABBITMQ_URL": "amqp://test"}
+    unset = WorkerSettings.from_environment(env)
+    assert unset.gitlab_token is None
+    idle = httpx.AsyncClient()
+    try:
+        assert gitlab_review_gateway(unset, idle) is None
+    finally:
+        asyncio.run(idle.aclose())
+
+    configured = WorkerSettings.from_environment(
+        {**env, "GITLAB_TOKEN": "glpat-test", "GITLAB_BASE_URL": "https://gitlab.example"}
+    )
+    assert configured.gitlab_base_url == "https://gitlab.example"
+    client = httpx.AsyncClient(base_url=configured.gitlab_base_url)
+    try:
+        gateway = gitlab_review_gateway(configured, client)
+        assert isinstance(gateway, GitLabMergeRequestDiscussionGateway)
+    finally:
+        asyncio.run(client.aclose())
+
+    default_base = WorkerSettings.from_environment({**env, "GITLAB_TOKEN": "glpat-test"})
+    assert default_base.gitlab_base_url == "https://gitlab.com"

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import asdict, dataclass
 from hashlib import sha256
 from typing import Literal
@@ -34,6 +34,11 @@ def severity_counts(severities: Iterable[str]) -> dict[str, int]:
     for severity in severities:
         counts[severity] += 1
     return counts
+
+
+def severity_count_phrase(counts: Mapping[str, int]) -> str:
+    """``critical: N, high: N, medium: N, low: N, info: N`` for the body and check-run."""
+    return ", ".join(f"{name}: {counts.get(name, 0)}" for name in SEVERITIES)
 
 
 def verdict(severities: Iterable[str]) -> Verdict:

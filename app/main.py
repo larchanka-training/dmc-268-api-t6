@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import hmac
 import json
@@ -8,8 +7,8 @@ import math
 import os
 import time
 from collections.abc import AsyncIterator, Callable
-from contextlib import asynccontextmanager, suppress
-from datetime import datetime, timedelta
+from contextlib import asynccontextmanager
+from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any, Literal, NoReturn
 from uuid import UUID
 
@@ -35,6 +34,7 @@ from app.bootstrap.reviews_api import (
 from app.bootstrap.reviews_api import (
     get_run_event_hub as get_run_event_hub,
 )
+from app.bootstrap.run_step_listener import run_step_listener
 from app.bootstrap.run_update_listener import run_update_listener
 from app.common.application.github_repository_name import REPOSITORY_FULL_NAME_MAX_LENGTH
 from app.common.infrastructure.db.enums import RunState
@@ -119,10 +119,15 @@ from app.modules.reviews.application.rerun_run import (
     RerunUnitOfWork,
 )
 from app.modules.reviews.application.run_events import (
+    InMemoryRunStepHub,
     InMemoryRunUpdateHub,
     RunAccessRepository,
-    RunUpdated,
+    RunChange,
+    RunStep,
+    RunStepStream,
     RunUpdateStream,
+    StreamKeepalive,
+    iter_visible_run_events,
     parse_run_event_id,
     run_event_id,
 )
@@ -132,14 +137,16 @@ api_router = APIRouter(prefix="/api", dependencies=[Depends(get_auth_scope)])
 github_webhook_router = APIRouter(prefix="/webhooks/github")
 
 run_update_hub = InMemoryRunUpdateHub()
+run_step_hub = InMemoryRunStepHub()
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-    """Process resources plus the NOTIFY bridge from worker processes into ``/api/stream``."""
+    """Process resources plus the NOTIFY bridges from worker processes into ``/api/stream``."""
     async with (
         reviews_api_lifespan(app),
         run_update_listener(os.environ.get("DATABASE_URL"), run_update_hub),
+        run_step_listener(os.environ.get("DATABASE_URL"), run_step_hub),
     ):
         yield
 
@@ -152,6 +159,7 @@ REPLAY_LIMIT = 500
 
 app = FastAPI(title="AI Code Reviewer browser API", lifespan=lifespan)
 app.state.run_update_hub = run_update_hub
+app.state.run_step_hub = run_step_hub
 
 __all__ = [
     "KEEPALIVE_INTERVAL_SECONDS",
@@ -610,12 +618,6 @@ async def cancel_run(
     return to_run_session_dto(item)
 
 
-async def _run_updated_at(repository: RunAccessRepository, run_id: UUID) -> datetime | None:
-    if not hasattr(repository, "run_updated_at"):
-        raise AttributeError(f"{type(repository).__name__} does not implement run_updated_at")
-    return await repository.run_updated_at(run_id)
-
-
 def _run_updated_frame(run_id: UUID, status: str, updated_at: datetime) -> str:
     return (
         f"id: {run_event_id(updated_at)}\n"
@@ -624,12 +626,39 @@ def _run_updated_frame(run_id: UUID, status: str, updated_at: datetime) -> str:
     )
 
 
+def _started_at_wire(started_at: datetime) -> str:
+    text = started_at.astimezone(UTC).isoformat()
+    if text.endswith("+00:00"):
+        return f"{text[:-6]}Z"
+    return text
+
+
+def _run_step_frame(step: RunStep) -> str:
+    payload = {
+        "runId": str(step.run_id),
+        "tool": step.tool,
+        "index": step.index,
+        "ok": step.ok,
+        "startedAt": _started_at_wire(step.started_at),
+        "durationMs": step.duration_ms,
+    }
+    return f"event: run.step\ndata: {json.dumps(payload)}\n\n"
+
+
+def get_run_step_hub(request: Request) -> InMemoryRunStepHub:
+    hub = getattr(request.app.state, "run_step_hub", None)
+    if not isinstance(hub, InMemoryRunStepHub):
+        raise RuntimeError("run_step_hub is not configured on app.state")
+    return hub
+
+
 @api_router.get(
     "/stream",
     summary="Stream live run updates",
     description=(
-        "Server-Sent Events stream delivering real-time lifecycle updates for visible review runs. "
-        "Each event carries an id; a reconnect with `Last-Event-ID` replays the runs changed since."
+        "Server-Sent Events stream of visible review runs. "
+        "Only `run.updated` is id-addressed and replayed; a reconnect with `Last-Event-ID` "
+        "replays those status events. `run.step` has no id and is not replayed."
     ),
     responses={
         200: {"description": "SSE stream", "content": {"text/event-stream": {}}},
@@ -638,6 +667,7 @@ def _run_updated_frame(run_id: UUID, status: str, updated_at: datetime) -> str:
 )
 async def stream_run_updates(
     event_hub: Annotated[RunUpdateStream, Depends(get_run_event_hub)],
+    step_hub: Annotated[RunStepStream, Depends(get_run_step_hub)],
     repository: Annotated[RunAccessRepository, Depends(get_run_repository)],
     scope: Annotated[AuthScope, Depends(get_auth_scope)],
     last_event_id: Annotated[str | None, Header(alias="Last-Event-ID")] = None,
@@ -645,53 +675,23 @@ async def stream_run_updates(
     since = parse_run_event_id(last_event_id)
 
     async def events() -> AsyncIterator[str]:
-        # Subscribe first, so a change made while the replay runs is delivered live.
-        async with event_hub.subscribe() as updates:
-
-            async def _next_update() -> RunUpdated:
-                return await anext(updates)
-
-            read_task: asyncio.Task[RunUpdated] | None = None
-            try:
-                if since is not None and (
-                    scope.expires_at is None or time.time() < scope.expires_at
-                ):
-                    after = since - timedelta(seconds=REPLAY_OVERLAP_SECONDS)
-                    for change in await repository.runs_updated_after(after, REPLAY_LIMIT):
-                        yield _run_updated_frame(change.run_id, change.status, change.updated_at)
-                while True:
-                    if scope.expires_at is not None and time.time() >= scope.expires_at:
-                        break
-                    timeout = KEEPALIVE_INTERVAL_SECONDS
-                    if scope.expires_at is not None:
-                        remaining = max(0.0, scope.expires_at - time.time())
-                        if remaining <= 0:
-                            break
-                        timeout = min(timeout, remaining)
-                    if read_task is None:
-                        read_task = asyncio.create_task(_next_update())
-                    done, _ = await asyncio.wait([read_task], timeout=timeout)
-                    if not done:
-                        if scope.expires_at is not None and time.time() >= scope.expires_at:
-                            break
-                        yield ": keepalive\n\n"
-                        continue
-                    try:
-                        update = read_task.result()
-                    except StopAsyncIteration:
-                        break
-                    finally:
-                        read_task = None
-
-                    updated_at = await _run_updated_at(repository, update.run_id)
-                    if updated_at is None:
-                        continue
-                    yield _run_updated_frame(update.run_id, update.status, updated_at)
-            finally:
-                if read_task is not None and not read_task.done():
-                    read_task.cancel()
-                    with suppress(asyncio.CancelledError, StopAsyncIteration):
-                        await read_task
+        async for item in iter_visible_run_events(
+            event_hub,
+            step_hub,
+            repository,
+            since=since,
+            expires_at=scope.expires_at,
+            now=time.time,
+            keepalive_interval=KEEPALIVE_INTERVAL_SECONDS,
+            replay_overlap=timedelta(seconds=REPLAY_OVERLAP_SECONDS),
+            replay_limit=REPLAY_LIMIT,
+        ):
+            if isinstance(item, RunChange):
+                yield _run_updated_frame(item.run_id, item.status, item.updated_at)
+            elif isinstance(item, RunStep):
+                yield _run_step_frame(item)
+            elif isinstance(item, StreamKeepalive):
+                yield ": keepalive\n\n"
 
     return StreamingResponse(events(), media_type="text/event-stream")
 

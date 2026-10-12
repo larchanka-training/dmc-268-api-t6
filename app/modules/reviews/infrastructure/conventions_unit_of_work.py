@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from uuid import UUID
 
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.common.infrastructure.db.unit_of_work import SqlAlchemyUnitOfWork
@@ -14,8 +14,7 @@ from app.modules.reviews.application.conventions import (
     CachedConventions,
     ConventionsFile,
 )
-from app.modules.reviews.infrastructure.models import RunAction
-from app.modules.reviews.infrastructure.run_action_payloads import place_response
+from app.modules.reviews.infrastructure.run_action_records import insert_run_action
 
 
 class SqlAlchemyRepositoryConventionsStore:
@@ -70,26 +69,15 @@ class SqlAlchemyRepositoryConventionsStore:
             self._session.add(row)
             await self._session.flush()
             saved = conventions
-        index = await self._session.scalar(
-            select(func.coalesce(func.max(RunAction.index), -1)).where(RunAction.run_id == run_id)
+        await insert_run_action(
+            self._session,
+            run_id=run_id,
+            tool="llm.repo_conventions",
+            request={},
+            response={"files": [file.model_dump() for file in trace_files]},
+            started_at=datetime.now(UTC),
+            duration_ms=0,
         )
-        assert index is not None
-        response, response_ref = await place_response(
-            self._session, run_id, {"files": [file.model_dump() for file in trace_files]}
-        )
-        self._session.add(
-            RunAction(
-                run_id=run_id,
-                index=index + 1,
-                tool="llm.repo_conventions",
-                request={},
-                response=response,
-                response_ref=response_ref,
-                started_at=datetime.now(UTC),
-                duration_ms=0,
-            )
-        )
-        await self._session.flush()
         return saved
 
 

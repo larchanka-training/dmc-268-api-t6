@@ -61,7 +61,7 @@ from app.modules.reviews.infrastructure.models import (
     RunAction,
     RunActionResponseBody,
 )
-from app.modules.reviews.infrastructure.run_action_payloads import place_response
+from app.modules.reviews.infrastructure.run_action_records import insert_run_action
 from app.modules.reviews.infrastructure.run_notifications import notify_run_state
 from app.modules.workspaces.infrastructure.repository_access import repository_access_predicate
 
@@ -664,24 +664,14 @@ class SqlAlchemyReviewOutputRepository:
             )
         )
         if existing is None:
-            index = await self._session.scalar(
-                select(func.coalesce(func.max(RunAction.index), -1)).where(
-                    RunAction.run_id == run_id
-                )
-            )
-            assert index is not None
-            response, response_ref = await place_response(self._session, run_id, model_output)
-            self._session.add(
-                RunAction(
-                    run_id=run_id,
-                    index=index + 1,
-                    tool="llm.review_output",
-                    request={},
-                    response=response,
-                    response_ref=response_ref,
-                    started_at=datetime.now(UTC),
-                    duration_ms=0,
-                )
+            await insert_run_action(
+                self._session,
+                run_id=run_id,
+                tool="llm.review_output",
+                request={},
+                response=model_output,
+                started_at=datetime.now(UTC),
+                duration_ms=0,
             )
             findings = tuple(_to_published_finding(item.finding) for item in processed.inline)
             records = (*processed.inline, *processed.body_only, *processed.dropped)
@@ -755,22 +745,14 @@ class SqlAlchemyReviewOutputRepository:
         duration_ms: int,
     ) -> None:
         """Record ``review.postprocess``, the publishing lease and NOTIFY (T8); flush only."""
-        index = await self._session.scalar(
-            select(func.coalesce(func.max(RunAction.index), -1)).where(RunAction.run_id == run_id)
-        )
-        assert index is not None
-        response, response_ref = await place_response(self._session, run_id, postprocess_response)
-        self._session.add(
-            RunAction(
-                run_id=run_id,
-                index=index + 1,
-                tool="review.postprocess",
-                request=postprocess_request,
-                response=response,
-                response_ref=response_ref,
-                started_at=started_at,
-                duration_ms=duration_ms,
-            )
+        await insert_run_action(
+            self._session,
+            run_id=run_id,
+            tool="review.postprocess",
+            request=postprocess_request,
+            response=postprocess_response,
+            started_at=started_at,
+            duration_ms=duration_ms,
         )
         await self._session.execute(
             update(Run).where(Run.id == run_id).values(lease_until=lease_until)

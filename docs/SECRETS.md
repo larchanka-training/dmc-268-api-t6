@@ -138,6 +138,15 @@ rm jwt.pem jwt.pub
 
 Ключи не попадают в логи, тексты исключений, `run_actions` и `usage_events`: транспорт вычищает их из текстов ошибок провайдера, у `ModelProfile` ключи скрыты из `repr` — это проверяет `tests/test_llm_gateway.py::test_keys_never_reach_logs_exceptions_or_the_trace`. Required CI работает без сети и без LLM-ключей: все тесты шлюза идут на фейковом HTTP-транспорте; живой прогон — вручную (README, раздел «LLM gateway»).
 
+### Публикация GitLab — переменные worker (#97)
+
+Их читает `WorkerSettings.from_environment` (`app/worker.py`). Имена совпадают с `.env.example`. Это не секреты GitHub Actions и не ключи бандла `worker.env` на staging: выкат их сам не подставляет. В процесс worker их задаёт окружение, в котором процесс запущен.
+
+| Переменная | Секрет | Кто читает | Значение |
+|---|---|---|---|
+| `GITLAB_TOKEN` | **да** | `worker` | токен в заголовке `PRIVATE-TOKEN`. Один токен на все проекты. Пустое значение: прогон GitLab остаётся в `publishing`, HTTP к GitLab нет |
+| `GITLAB_BASE_URL` | нет | `worker` | базовый URL API GitLab; по умолчанию `https://gitlab.com` |
+
 ### Только локально у оператора
 
 CI **не** делает `terraform apply`. Эти значения в GitHub Actions не заводят.

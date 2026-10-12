@@ -4,19 +4,21 @@ import asyncio
 import json
 import time
 from collections.abc import AsyncIterator, Iterable
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from uuid import UUID
 
 import pytest
 
-from app.main import app, get_run_event_hub, get_run_repository
+from app.main import app, get_run_event_hub, get_run_repository, get_run_step_hub
 from app.modules.reviews.application.cancel_run import CancelRequestResult, CancelRun
 from app.modules.reviews.application.list_runs import RunListItem
 from app.modules.reviews.application.run_events import (
+    InMemoryRunStepHub,
     InMemoryRunUpdateHub,
     RunChange,
+    RunStep,
     RunUpdated,
     parse_run_event_id,
     run_event_id,
@@ -132,6 +134,42 @@ def test_hub_coalesces_stale_events_for_a_slow_subscriber() -> None:
             return await anext(events)
 
     assert asyncio.run(reconnect()) == RunUpdated(RUN_ID, "succeeded")
+    assert hub.subscriber_count == 0
+
+
+def test_step_hub_delivers_both_unread_steps_of_one_run_in_order() -> None:
+    hub = InMemoryRunStepHub()
+    first = RunStep(RUN_ID, "llm.call", 0, True, UPDATED_AT, 12)
+    second = RunStep(RUN_ID, 'say "ok"', 1, False, UPDATED_AT, 40)
+
+    async def receive_both() -> list[RunStep]:
+        async with hub.subscribe() as events:
+            await hub.publish(first)
+            await hub.publish(second)
+            received = [await anext(events)]
+            with suppress(TimeoutError):
+                received.append(await asyncio.wait_for(anext(events), timeout=0.01))
+            return received
+
+    assert asyncio.run(receive_both()) == [first, second]
+    assert hub.subscriber_count == 0
+
+
+def test_step_hub_fans_each_step_out_to_every_live_subscriber() -> None:
+    hub = InMemoryRunStepHub()
+    first = RunStep(RUN_ID, "vcs.fetch_diff", 0, True, UPDATED_AT, 5)
+    second = RunStep(OTHER_RUN_ID, "llm.call", 1, True, UPDATED_AT, 6)
+
+    async def receive() -> tuple[list[RunStep], list[RunStep]]:
+        async with hub.subscribe() as left, hub.subscribe() as right:
+            await hub.publish(first)
+            await hub.publish(second)
+            return (
+                [await anext(left), await anext(left)],
+                [await anext(right), await anext(right)],
+            )
+
+    assert asyncio.run(receive()) == ([first, second], [first, second])
     assert hub.subscriber_count == 0
 
 
@@ -669,8 +707,11 @@ def test_idle_stream_closes_at_jwt_deadline_during_pending_event(
     hub = InMemoryRunUpdateHub()
 
     async def elapse_wait(
-        tasks: Iterable[asyncio.Task[RunUpdated]], *, timeout: float
-    ) -> tuple[set[asyncio.Task[RunUpdated]], set[asyncio.Task[RunUpdated]]]:
+        tasks: Iterable[asyncio.Task[object]],
+        *,
+        timeout: float,
+        return_when: str = "ALL_COMPLETED",
+    ) -> tuple[set[asyncio.Task[object]], set[asyncio.Task[object]]]:
         nonlocal now, waits
         # Model idle I/O: no event arrives, and the requested wait fully elapses.
         # Yield once so the actual subscription starts waiting and needs cancellation.
@@ -703,3 +744,235 @@ def test_idle_stream_closes_at_jwt_deadline_during_pending_event(
     assert waits == 1
     assert now == 101.0
     assert hub.subscriber_count == 0
+
+
+class _EmptyStatusHub:
+    """No live status events, and the iterator ends so the test client can finish."""
+
+    @asynccontextmanager
+    async def subscribe(self) -> AsyncIterator[AsyncIterator[RunUpdated]]:
+        async def events() -> AsyncIterator[RunUpdated]:
+            updates: tuple[RunUpdated, ...] = ()
+            for update in updates:
+                yield update
+
+        yield events()
+
+
+class _QueuedStepHub(InMemoryRunStepHub):
+    def __init__(self, steps: list[RunStep]) -> None:
+        super().__init__()
+        self._steps = steps
+
+    @asynccontextmanager
+    async def subscribe(self) -> AsyncIterator[AsyncIterator[RunStep]]:
+        async with super().subscribe() as events:
+            for step in self._steps:
+                await self.publish(step)
+            yield events
+
+
+def test_stream_emits_each_step_frame_in_order_without_an_id() -> None:
+    first = RunStep(RUN_ID, "llm.call", 0, True, UPDATED_AT, 12)
+    second = RunStep(RUN_ID, 'say "ok"', 1, False, UPDATED_AT, 40)
+
+    class VisibleRepository:
+        async def run_updated_at(self, run_id: UUID) -> datetime | None:
+            assert run_id == RUN_ID
+            return UPDATED_AT
+
+    app.dependency_overrides[get_run_event_hub] = _EmptyStatusHub
+    app.dependency_overrides[get_run_step_hub] = lambda: _QueuedStepHub([first, second])
+    app.dependency_overrides[get_run_repository] = VisibleRepository
+    try:
+        response = TestClient(app).get("/api/stream")
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    assert response.text == (
+        "event: run.step\n"
+        'data: {"runId": "00000000-0000-0000-0000-000000000100", "tool": "llm.call", '
+        '"index": 0, "ok": true, "startedAt": "2026-10-07T12:34:56.123457Z", '
+        '"durationMs": 12}\n'
+        "\n"
+        "event: run.step\n"
+        'data: {"runId": "00000000-0000-0000-0000-000000000100", "tool": "say \\"ok\\"", '
+        '"index": 1, "ok": false, "startedAt": "2026-10-07T12:34:56.123457Z", '
+        '"durationMs": 40}\n'
+        "\n"
+    )
+    assert "event: run.updated" not in response.text
+    assert not any(line.startswith("id:") for line in response.text.splitlines())
+
+
+def test_stream_drops_a_step_when_the_run_is_not_visible() -> None:
+    hidden = RunStep(OTHER_RUN_ID, "llm.call", 0, True, UPDATED_AT, 3)
+    visible = RunStep(RUN_ID, "context.build", 1, True, UPDATED_AT, 4)
+
+    class SelectiveRepository:
+        async def run_updated_at(self, run_id: UUID) -> datetime | None:
+            return UPDATED_AT if run_id == RUN_ID else None
+
+    app.dependency_overrides[get_run_event_hub] = _EmptyStatusHub
+    app.dependency_overrides[get_run_step_hub] = lambda: _QueuedStepHub([hidden, visible])
+    app.dependency_overrides[get_run_repository] = SelectiveRepository
+    try:
+        response = TestClient(app).get("/api/stream")
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    assert response.text == (
+        "event: run.step\n"
+        'data: {"runId": "00000000-0000-0000-0000-000000000100", "tool": "context.build", '
+        '"index": 1, "ok": true, "startedAt": "2026-10-07T12:34:56.123457Z", '
+        '"durationMs": 4}\n'
+        "\n"
+    )
+    assert str(OTHER_RUN_ID) not in response.text
+    assert "event: run.updated" not in response.text
+
+
+def test_stream_subscribes_to_both_hubs_before_status_replay() -> None:
+    order: list[str] = []
+
+    class StatusHub:
+        @asynccontextmanager
+        async def subscribe(self) -> AsyncIterator[AsyncIterator[RunUpdated]]:
+            order.append("status")
+
+            async def events() -> AsyncIterator[RunUpdated]:
+                updates: tuple[RunUpdated, ...] = ()
+                for update in updates:
+                    yield update
+
+            yield events()
+
+    class StepHub:
+        @asynccontextmanager
+        async def subscribe(self) -> AsyncIterator[AsyncIterator[RunStep]]:
+            order.append("step")
+
+            async def events() -> AsyncIterator[RunStep]:
+                steps: tuple[RunStep, ...] = ()
+                for step in steps:
+                    yield step
+
+            yield events()
+
+    class QuietReplay(ReplayRepository):
+        async def runs_updated_after(self, after: datetime, limit: int) -> list[RunChange]:
+            order.append("replay")
+            return []
+
+    app.dependency_overrides[get_run_event_hub] = StatusHub
+    app.dependency_overrides[get_run_step_hub] = StepHub
+    app.dependency_overrides[get_run_repository] = QuietReplay
+    try:
+        response = TestClient(app).get("/api/stream", headers={"Last-Event-ID": UPDATED_AT_ID})
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    assert response.text == ""
+    assert order == ["status", "step", "replay"]
+
+
+def test_last_event_id_replay_emits_only_run_updated() -> None:
+    step = RunStep(RUN_ID, "github.publish_review", 2, False, UPDATED_AT, 9)
+    step_hub = InMemoryRunStepHub()
+
+    class ReplayThenStep(ReplayRepository):
+        async def runs_updated_after(self, after: datetime, limit: int) -> list[RunChange]:
+            await step_hub.publish(step)
+            return await super().runs_updated_after(after, limit)
+
+    repository = ReplayThenStep([RunChange(RUN_ID, "succeeded", UPDATED_AT)])
+    app.dependency_overrides[get_run_event_hub] = _EmptyStatusHub
+    app.dependency_overrides[get_run_step_hub] = lambda: step_hub
+    app.dependency_overrides[get_run_repository] = lambda: repository
+    try:
+        response = TestClient(app).get("/api/stream", headers={"Last-Event-ID": UPDATED_AT_ID})
+    finally:
+        app.dependency_overrides.clear()
+
+    frames = [frame for frame in response.text.split("\n\n") if frame]
+    assert frames == [
+        (
+            f"id: {UPDATED_AT_ID}\n"
+            "event: run.updated\n"
+            'data: {"runId":"00000000-0000-0000-0000-000000000100","status":"succeeded"}'
+        ),
+        (
+            "event: run.step\n"
+            'data: {"runId": "00000000-0000-0000-0000-000000000100", '
+            '"tool": "github.publish_review", "index": 2, "ok": false, '
+            '"startedAt": "2026-10-07T12:34:56.123457Z", "durationMs": 9}'
+        ),
+    ]
+    assert "id:" not in frames[1]
+
+
+def test_slow_subscriber_keeps_the_latest_status_and_every_step() -> None:
+    first = RunStep(RUN_ID, "llm.call", 0, True, UPDATED_AT, 12)
+    second = RunStep(RUN_ID, "review.postprocess", 1, True, UPDATED_AT, 8)
+
+    class OneStatus(InMemoryRunUpdateHub):
+        @asynccontextmanager
+        async def subscribe(self) -> AsyncIterator[AsyncIterator[RunUpdated]]:
+            async with super().subscribe() as updates:
+
+                async def one() -> AsyncIterator[RunUpdated]:
+                    yield await anext(updates)
+
+                yield one()
+
+    status_hub = OneStatus()
+    step_hub = InMemoryRunStepHub()
+
+    class PublishDuringReplay(ReplayRepository):
+        async def runs_updated_after(self, after: datetime, limit: int) -> list[RunChange]:
+            await status_hub.publish(RunUpdated(RUN_ID, "running"))
+            await step_hub.publish(first)
+            await status_hub.publish(RunUpdated(RUN_ID, "cancelled"))
+            await step_hub.publish(second)
+            return []
+
+    app.dependency_overrides[get_run_event_hub] = lambda: status_hub
+    app.dependency_overrides[get_run_step_hub] = lambda: step_hub
+    app.dependency_overrides[get_run_repository] = PublishDuringReplay
+    try:
+        response = TestClient(app).get("/api/stream", headers={"Last-Event-ID": UPDATED_AT_ID})
+    finally:
+        app.dependency_overrides.clear()
+
+    frames = [frame for frame in response.text.split("\n\n") if frame]
+    status_frames = [frame for frame in frames if "event: run.updated" in frame]
+    step_frames = [frame for frame in frames if frame.startswith("event: run.step")]
+
+    assert response.status_code == 200
+    assert status_frames == [
+        (
+            f"id: {UPDATED_AT_ID}\n"
+            "event: run.updated\n"
+            'data: {"runId":"00000000-0000-0000-0000-000000000100","status":"cancelled"}'
+        )
+    ]
+    assert step_frames == [
+        (
+            "event: run.step\n"
+            'data: {"runId": "00000000-0000-0000-0000-000000000100", "tool": "llm.call", '
+            '"index": 0, "ok": true, "startedAt": "2026-10-07T12:34:56.123457Z", '
+            '"durationMs": 12}'
+        ),
+        (
+            "event: run.step\n"
+            'data: {"runId": "00000000-0000-0000-0000-000000000100", '
+            '"tool": "review.postprocess", "index": 1, "ok": true, '
+            '"startedAt": "2026-10-07T12:34:56.123457Z", "durationMs": 8}'
+        ),
+    ]
+    assert '"status":"running"' not in response.text
+    assert status_hub.subscriber_count == 0
+    assert step_hub.subscriber_count == 0

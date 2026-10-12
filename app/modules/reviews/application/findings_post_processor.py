@@ -14,6 +14,11 @@ from app.modules.reviews.application.review_output import (
     finding_order_key,
     render_review_body,
 )
+from app.modules.reviews.application.verdict import (
+    severity_count_phrase,
+    severity_counts,
+    verdict,
+)
 
 DropReason = Literal["lint_pattern", "duplicate", "unknown_path"]
 Bucket = Literal["inline", "body_only", "dropped"]
@@ -147,7 +152,12 @@ class FindingsPostProcessor:
             inline=tuple(inline),
             body_only=tuple(body_only),
             dropped=tuple(dropped),
-            review_body=_render_body(output, tuple(body_only)),
+            review_body=_render_body(
+                output,
+                tuple(inline + body_only),
+                tuple(body_only),
+                hunk_lines,
+            ),
         )
 
     def _drop_lint_patterns(
@@ -222,13 +232,39 @@ def _quality(item: ProcessedFinding) -> tuple[int, float, int]:
     return (*finding_order_key(item.finding.severity, item.finding.confidence), item.position)
 
 
-def _render_body(output: ReviewOutput, body_only: tuple[ProcessedFinding, ...]) -> str:
-    body = render_review_body(output.summary)
-    if body_only:
-        lines = [body, "", "## Additional findings"]
-        lines.extend(_render_body_only_finding(item) for item in body_only)
-        body = "\n".join(lines)
+def _render_body(
+    output: ReviewOutput,
+    kept: tuple[ProcessedFinding, ...],
+    body_only: tuple[ProcessedFinding, ...],
+    hunk_lines: dict[str, frozenset[int]],
+) -> str:
+    prose = render_review_body(output.summary)
+    heading, separator, rest = prose.partition("\n\n")
+    prefix = f"{heading}{separator}{_overview(kept, hunk_lines)}\n\n{rest}"
+    if not body_only:
+        return prefix
+    lines = [prefix, "", "## Additional findings"]
+    lines.extend(_render_body_only_finding(item) for item in body_only)
+    body = "\n".join(lines)
+    if len(prefix) >= 4000:
+        return prefix
     return body[:4000]
+
+
+def _overview(kept: tuple[ProcessedFinding, ...], hunk_lines: dict[str, frozenset[int]]) -> str:
+    severities = [item.finding.severity for item in kept]
+    counts = severity_counts(severities)
+    count_text = severity_count_phrase(counts)
+    paths = sorted(hunk_lines)
+    checked = "\n".join(f"- {path}" for path in paths) if paths else "(none)"
+    return "\n".join(
+        (
+            f"**Verdict:** {verdict(severities)}",
+            f"**Risk summary:** {count_text}",
+            "**Checked files:**",
+            checked,
+        )
+    )
 
 
 def _render_body_only_finding(item: ProcessedFinding) -> str:
