@@ -91,8 +91,8 @@ def test_unsupported_revision_state_is_refused(
         == 1
     )
     output = capsys.readouterr()
-    assert output.out == ""
-    assert output.err == f"rollback revision check: refused: {reason}\n"
+    assert output.err == ""
+    assert output.out == f"rollback revision check: refused: {reason}\n"
 
 
 @pytest.mark.parametrize("failure", ["factory", "heads", "revisions", "ancestors", "query"])
@@ -134,9 +134,9 @@ def test_probe_errors_fail_closed_without_secrets(
 
     assert checker_main()(graph_factory=graph_factory, revision_reader=reader) == 1
     output = capsys.readouterr()
-    assert output.out == ""
+    assert output.err == ""
     assert (
-        output.err == "rollback revision check: refused: cannot inspect target graph or database\n"
+        output.out == "rollback revision check: refused: cannot inspect target graph or database\n"
     )
     assert caplog.text == ""
 
@@ -266,9 +266,9 @@ def test_invalid_database_configuration_fails_closed(
         monkeypatch.setenv("DATABASE_URL", database_url)
     assert checker_main()(graph_factory=Graph) == 1
     output = capsys.readouterr()
-    assert output.out == ""
+    assert output.err == ""
     assert (
-        output.err == "rollback revision check: refused: cannot inspect target graph or database\n"
+        output.out == "rollback revision check: refused: cannot inspect target graph or database\n"
     )
 
 
@@ -284,8 +284,8 @@ def test_host_source_on_stdin_returns_safe_nonzero_for_unusable_target() -> None
         timeout=20,
     )
     assert result.returncode == 1
-    assert result.stdout == ""
+    assert result.stderr == ""
     assert (
-        result.stderr
+        result.stdout
         == "rollback revision check: refused: cannot inspect target graph or database\n"
     )

@@ -22,8 +22,7 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 
 REPO = Path(__file__).resolve().parents[1]
-M = "20261007_0028"
-N = "20261010_0110"
+FIXTURE_REVISION = "20261010_0110"
 ROLES = ("api", "worker", "webhook-worker")
 SERVICES = (*ROLES, "postgres", "rabbitmq", "redis", "bootstrap")
 HOST_FILES = (
@@ -174,6 +173,8 @@ class LiveVerifier:
         self.image_a = image_a
         self.a = expected_a
         self.b = ""
+        self.m = ""
+        self.n = ""
         self.b_tag = f"dmc268-rollback110:{project.removeprefix('rollback110-')}-b"
         self.root = Path(tempfile.mkdtemp(prefix=project + "-"))
         self.app = self.root / "host"
@@ -192,8 +193,6 @@ class LiveVerifier:
         self.compose: list[str] = []
         self.report: dict[str, object] = {
             "project": project,
-            "revision_M": M,
-            "revision_N": N,
             "cases": [],
         }
         self.cases: list[dict[str, object]] = []
@@ -258,8 +257,17 @@ class LiveVerifier:
         if not Path(plugin).is_file():
             raise VerificationError("real Compose plugin is unavailable")
         private_config = self.root / "docker-config"
-        (private_config / "cli-plugins").mkdir(parents=True, mode=0o700)
-        (private_config / "cli-plugins/docker-compose").symlink_to(plugin)
+        private_config.mkdir(mode=0o700)
+        # A user-config-only plugin becomes hidden when switching to the private config.
+        original_config = Path(os.environ.get("DOCKER_CONFIG", str(Path.home() / ".docker")))
+        private_plugin = (
+            str(Path(plugin).resolve())
+            if Path(plugin).resolve().is_relative_to(original_config.resolve())
+            else None
+        )
+        if private_plugin:
+            (private_config / "cli-plugins").mkdir(mode=0o700)
+            (private_config / "cli-plugins/docker-compose").symlink_to(private_plugin)
         self.environment["DOCKER_CONFIG"] = str(private_config)
         self.report["compose_version"] = self.docker_command(
             ["compose", "version", "--short"], "real Compose version"
@@ -275,7 +283,8 @@ class LiveVerifier:
             "from alembic.config import Config; from alembic.script import ScriptDirectory; "
             "import json; s=ScriptDirectory.from_config(Config('/srv/alembic.ini')); "
             "print(json.dumps({'heads':list(s.get_heads()),"
-            "'revisions':sorted(r.revision for r in s.walk_revisions())}))"
+            "'revisions':sorted(r.revision for r in s.walk_revisions()),"
+            "'parents':{r.revision:r.down_revision for r in s.walk_revisions()}}))"
         )
         graph_a = json.loads(
             self.docker_command(
@@ -283,14 +292,41 @@ class LiveVerifier:
                 "A graph",
             ).stdout
         )
-        if graph_a["heads"] != [M]:
-            raise VerificationError("A graph does not have the expected head")
+        if (
+            not isinstance(graph_a, dict)
+            or not isinstance(graph_a.get("heads"), list)
+            or len(graph_a["heads"]) != 1
+            or not isinstance(graph_a.get("revisions"), list)
+            or not graph_a["revisions"]
+            or any(
+                not isinstance(revision, str)
+                or re.fullmatch(r"[A-Za-z0-9_]{1,32}", revision) is None
+                for revision in [*graph_a["heads"], *graph_a["revisions"]]
+            )
+            or graph_a["heads"][0] not in graph_a["revisions"]
+            or len(set(graph_a["revisions"])) != len(graph_a["revisions"])
+        ):
+            raise VerificationError("A graph must have exactly one valid head")
+        self.m = graph_a["heads"][0]
+        self.n = FIXTURE_REVISION
+        suffix = 0
+        while self.n in graph_a["revisions"]:
+            suffix += 1
+            self.n = f"{FIXTURE_REVISION}_{suffix}"
+        self.report.update(revision_M=self.m, revision_N=self.n)
         context = self.root / "build"
         context.mkdir(mode=0o700)
-        shutil.copy(REPO / "tests/fixtures/rollback/new_revision.py", context / "new_revision.py")
+        fixture = (REPO / "tests/fixtures/rollback/new_revision.py").read_text()
+        (context / "new_revision.py").write_text(
+            fixture.replace('revision = "__FIXTURE_REVISION__"', f'revision = "{self.n}"').replace(
+                'down_revision = "__PARENT_REVISION__"', f'down_revision = "{self.m}"'
+            )
+        )
+        # Synthetic source has no credentials and must be readable by image A's non-root user.
+        (context / "new_revision.py").chmod(0o644)
         (context / "Dockerfile").write_text(
             f"FROM {self.image_a}\n"
-            "COPY new_revision.py /srv/alembic/versions/20261010_0110_rollback_fixture.py\n"
+            f"COPY new_revision.py /srv/alembic/versions/{self.n}_rollback_fixture.py\n"
         )
         self.b_owned = True
         self.docker_command(["build", "--pull=false", "-t", self.b_tag, str(context)], "build B")
@@ -303,13 +339,20 @@ class LiveVerifier:
                 "B graph",
             ).stdout
         )
-        if graph_b["heads"] != [N] or M not in graph_b["revisions"]:
+        if (
+            not isinstance(graph_b, dict)
+            or graph_b.get("heads") != [self.n]
+            or graph_b.get("revisions") != sorted([*graph_a["revisions"], self.n])
+            or not isinstance(graph_b.get("parents"), dict)
+            or graph_b["parents"].get(self.n) != self.m
+        ):
             raise VerificationError("B graph is not the synthetic child of A")
         self.report.update(
             image_A=self.a,
             image_B=self.b,
             local_pull_substitution=(
-                "Only verified A/B image IDs; Compose up --pull never; "
+                "Verifier-only pull boundary substitution for verified local A/B IDs; "
+                "rollback up --pull missing with immutable app IDs; "
                 "probes and health run unchanged"
             ),
         )
@@ -321,7 +364,7 @@ class LiveVerifier:
             (self.app / name).chmod(0o700)
         wrapper_dir = self.root / "bin"
         wrapper_dir.mkdir(mode=0o700)
-        write_docker_wrapper(wrapper_dir / "docker", self.docker, [self.a, self.b], plugin)
+        write_docker_wrapper(wrapper_dir / "docker", self.docker, [self.a, self.b], private_plugin)
         self.environment["PATH"] = str(wrapper_dir) + os.pathsep + self.environment["PATH"]
         self.compose = [
             str(wrapper_dir / "docker"),
@@ -573,7 +616,7 @@ class LiveVerifier:
         revision = self.revision()
         sentinel = (
             self.sql("SELECT sentinel FROM rollback110_fixture ORDER BY sentinel")
-            if revision == N
+            if revision == self.n
             else self.sql("SELECT to_regclass('public.rollback110_fixture') IS NULL")
         )
         return {
@@ -612,7 +655,7 @@ class LiveVerifier:
         )
         self.health(self.b)
         if (
-            self.revision() != M
+            self.revision() != self.m
             or self.sql("SELECT to_regclass('public.rollback110_fixture') IS NULL") != "t"
         ):
             raise VerificationError("controlled B fixture did not retain M")
@@ -630,7 +673,7 @@ class LiveVerifier:
         expected_previous = current if mode == "manual" else previous
         if (
             self.app / ".deploy-state.previous"
-        ).read_bytes() != expected_previous or self.revision() != M:
+        ).read_bytes() != expected_previous or self.revision() != self.m:
             raise VerificationError("compatible state semantics were unexpected")
         state = (self.app / ".deploy-state").read_text()
         if (
@@ -722,14 +765,14 @@ class LiveVerifier:
     def execute(self) -> None:
         self.prepare()
         self.command([str(self.app / "deploy.sh"), self.a], "deploy A")
-        if self.revision() != M:
+        if self.revision() != self.m:
             raise VerificationError("A normal bootstrap did not reach M")
         self.report["initial_A_health"] = self.health(self.a)
         print("A normal deployment: passed", flush=True)
         self.compatible("manual")
         self.compatible("auto")
         self.command([str(self.app / "deploy.sh"), self.b], "deploy B")
-        if self.revision() != N:
+        if self.revision() != self.n:
             raise VerificationError("B normal bootstrap did not reach N")
         self.sql(
             "INSERT INTO rollback110_fixture(sentinel) VALUES ('rollback110-nonsecret-sentinel')"

@@ -1,84 +1,101 @@
 # Issue #110: isolated rollback acceptance evidence
 
-Latest proof rerun on 2026-10-10 after binding rollback admission/up/state to immutable image
-identity, using Docker 24 on arm64 and the installed Compose 2.19.1 plugin. The B fixture
-includes the required future-annotations import.
-The redacted machine report is [110-verification.json](110-verification.json); it retains
-all service IDs/images/status/health and host file hashes/modes before and after each case.
-No environment values, credentials, raw logs or PEM lines are included.
+The latest run on 2026-10-12 used Docker 24.0.2 on arm64 and official Compose **5.6.0**.
+The host scripts include review corrections applied atop rebased head
+`d5e5ec5bdb47f763958fa38f8df0762f80f98c2b`, base
+`46a90772f65c04aa3cc4db11b198e6d052bf1207`. Script hashes are recorded in the
+[redacted machine report](110-verification.json), along with actual revisions, service
+identities/health and host file hashes/modes. It contains no credentials, raw command output
+or personal filesystem paths.
 
-Prepared image A was built from the actual repository Dockerfile and uv.lock at base
-`92250a1fb3b65f88a2ea111d33613f9a4af1d1d2`; deployment-script changes do not change that image.
+Prepared image A was reused from the repository Dockerfile and lockfile at application base
+`92250a1fb3b65f88a2ea111d33613f9a4af1d1d2`. This is evidence for the corrected host scripts
+against that real historical application image; it is not a freshly built current application.
 
 - A: `sha256:81c69606c3cda7f35c20bb0de5f8dc97b20a24a134259491e6a05f4777bfc937`.
-- B: `sha256:45bdccc6965cf85027e2b7a7be7ca8c5b07386736e7975554574c6af30ab1057`.
-- A's actual image Alembic head M: `20261007_0028`.
-- B's test-only child head N: `20261010_0110`, creating `rollback110_fixture`.
-- Unique project: `rollback110-26092e3b17624e53`; offline network has suffix `-offline`.
+- B: `sha256:dba1432cea684508b5af6fc145660c882c10a823a78e4b96547f93a4ccda7253`.
+- Actual A head M: `20261007_0028`.
+- Synthetic child N: `20261010_0110`.
+- Unique project: `rollback110-4e855f368aff46dd`; its offline network uses the `-offline` suffix.
 
-The verifier copies the production staging base unchanged, including its pinned PostgreSQL
-17.11, RabbitMQ 4.3.6 and Redis 8.10.2 images. Its local override publishes no host ports and
-makes the default network internal. Synthetic App credentials, a generated RSA PEM and long
-secret canaries exercise real worker startup and name-only diagnostics. `LLM_MODEL` is absent.
-No messages, installations, review requests, webhook deliveries or provider calls are created.
+M is derived from A's single validated migration head. B's fixture is rendered with M as
+`down_revision` and a collision-safe N; B's actual graph verifies the child edge. Production
+migrations are untouched. The fixture source is readable by A's non-root runtime despite the
+verifier's private umask.
 
-| Real-script case | Exit | Observed result |
+The unchanged staging base uses pinned PostgreSQL 17.11, RabbitMQ 4.3.6 and Redis 8.10.2.
+The verifier owns fresh volumes and an internal network, publishes no host ports, generates
+synthetic credentials and a valid RSA PEM, and sends no GitHub/LLM requests. Normal A deploy
+reached M and normal B deploy reached N with the actual bootstrap and a nonsecret fixture
+sentinel. API literal HTTP 200 `{"status":"ok"}` and both worker heartbeats passed.
+
+| Real-script case | Exit | Result |
 | --- | --- | --- |
-| Normal A deploy | 0 | Actual bootstrap reached M; API literal HTTP 200 `{"status":"ok"}` and both worker heartbeats healthy. |
-| Compatible manual B→A at M | 0 | A healthy, DB remains M, synthetic N table absent; previous becomes B. |
-| Compatible auto B→A at M | 0 | A healthy, DB remains M; previous remains A. |
-| Normal B deploy | 0 | Actual bootstrap reached N; nonsecret sentinel inserted in the synthetic table. |
-| Incompatible manual B→A at N | 1 | Controlled unknown-revision refusal; all files/modes, application/store/bootstrap IDs/images/health, N and sentinel unchanged. |
-| Incompatible auto B→A at N | 1 | Same refusal and unchanged invariants. |
-| Unreachable DB, manual | 1 | Controlled graph/database inspection refusal in 9.45 seconds; offline files and healthy primary B unchanged. |
-| Unreachable DB, auto | 1 | Same refusal in 9.12 seconds; offline files and primary B unchanged. |
+| compatible-manual | 0 | Healthy A; DB retains M; previous becomes B. |
+| compatible-auto | 0 | Healthy A; DB retains M; previous remains A. |
+| incompatible-manual | 1 | Controlled refusal; all entry invariants unchanged. |
+| incompatible-auto | 1 | Controlled refusal; all entry invariants unchanged. |
+| unreachable-manual | 1 | Controlled unreachable-DB refusal in 10.93s; offline files and primary B unchanged. |
+| unreachable-auto | 1 | Controlled unreachable-DB refusal in 9.84s; offline files and primary B unchanged. |
 
-The compatible fixture deliberately replaces only application services with B using
-`up --no-deps`, retaining M and skipping B bootstrap solely for that controlled setup. Normal
-B deployment subsequently runs its bootstrap and reaches N. Both accepted rollback cases run
-the real host `rollback.sh`, checker stdin probe, Compose recreation and diagnostics. Runtime
-key lists match exact expected image/role names; all captured command output passes checks for
-each long synthetic secret, complete PEM and every PEM line. Refusals have no success or key
-diagnostics. The offline fixture has its own empty internal network; primary PostgreSQL is
-never stopped to simulate failure.
+Compatible B-at-M is a controlled setup: replace only application services using `up --no-deps`
+and skip B bootstrap solely to retain M. The accepted rollback itself runs real `rollback.sh`,
+stdin checker, Compose recreation, health wait and diagnostics. Refused cases retain every
+application/store/bootstrap container, database revision/sentinel and persistent file/mode from
+rollback entry, with no completion or diagnostic output. Each diagnostic key list matches the
+expected literal role/image keys. All command output passed scans for synthetic secrets,
+complete PEMs and every PEM line. An empty separate offline network tests unreachable DB
+without stopping the primary project's PostgreSQL.
 
-Reproduce after building A from the intended Dockerfile/lockfile inputs and resolving its ID:
+Reproduce after building A from the intended checkout and resolving its ID:
 
 ```bash
+docker build -t dmc268-rollback110-prepared:a .
+rollback_a_id="$(docker image inspect --format '{{.Id}}' dmc268-rollback110-prepared:a)"
 uv run python scripts/verify_rollback.py \
-  --image-a dmc268-rollback110-prepared:a \
-  --expect-image-a sha256:81c69606c3cda7f35c20bb0de5f8dc97b20a24a134259491e6a05f4777bfc937 \
-  --report /private/tmp/rollback110-new-report.json
+  --image-a dmc268-rollback110-prepared:a --expect-image-a "$rollback_a_id" \
+  --report "$(mktemp -d)/report.json"
 ```
 
-Choose a new report path; existing files are refused. The CLI generates a unique project and
-refuses existing network/volume/container resources before mutations. Cleanup removed only
-that invocation's projects, volumes, offline network, B tag and successful private temp root.
-Ephemeral probes were absent before cleanup. Prepared A, pinned store images and the separate
-pytest database/broker services are preserved.
+The report path must be new. CLI resource checks refuse preexisting project networks, volumes
+or containers before mutation. All owned resources, B tag and successful private temporary root
+were removed; ephemeral probes were absent before cleanup. Prepared A and pinned store images
+remain. Separate pytest integration services belong to this review's coordinator and are
+cleaned after all gates/reviews finish.
 
-Local artifact/runtime substitutions: the scoped Docker wrapper treats pulls of only the
-verified A/B immutable IDs as successful after real image inspection, and adds `--pull never`
-to actual Compose `up` only when the command does not already supply it. Registry pulling is therefore outside this proof. All probes, migrations,
-service operations, health checks and SQL queries run against real Docker. The same installed
-Compose plugin is exposed by a symlink inside private `DOCKER_CONFIG` directories, because
-this machine installs it only under the user's original config. No original credential config
-is copied, and the verifier uses its own private config for rollback registry cleanup.
+The local-ID seam is **verifier-only after the pull boundary**: a scoped wrapper substitutes
+pulls only for inspected A/B local IDs, adds `up --pull never` only to fixture/forward commands
+without a pull flag, and preserves production rollback's `up --pull missing`. Production
+rollback binds app/bootstrap to already-inspected immutable IDs and permits absent pinned
+storage images to be pulled. The pinned stores were already local in this live run; it does
+not simulate their download from an empty cache. Registry delivery, mutable-tag resolution and matching repository
+digests remain behavioral regression coverage, not claims made by this live proof. A plugin
+installed inside the user's selected Docker config is exposed by symlink in private configs
+only when required; no credential config is copied. System-installed plugins need no exposure.
 
-First attempt `rollback110-706f25e9315342a2` failed during normal A deployment because a private
-registry config hid that local Compose plugin (`unknown shorthand flag: 'p' in -p`). It ran no
-acceptance cases; its owned Docker resources and B tag were cleaned. The fixture plugin exposure
-resolved this without a production-script change or relaxed probe validation. A separate RED
-regression showed timeout/secret-output cleanup failures could interrupt later removals; cleanup
-now attempts every owned resource and retains a controlled failed outcome. Safety tests cover
-isolation, invariant corruption, unexpected refusal/success output, exact key evidence, real
-wrapper forwarding/plugin exposure and best-effort cleanup. Required gate results are recorded
-in [110-todo.md](110-todo.md).
+After this live run, one additional test-first verifier correction makes a collision-suffixed N
+also select a collision-suffixed migration filename, preserving an existing fixture in A.
+The actual run used unsuffixed N, so its generated Dockerfile/migration bytes remain identical;
+host rollback/checker scripts are unchanged. Final gates are rerun after this correction.
 
-The latest host rollback resolves a strict local ID after pull, runs both the checker and all
-application/bootstrap up roles with that ID, and carries `--pull never` itself. This real proof
-uses local immutable IDs and confirms actual runtime image identity and canonical local state.
-Registry-tag movement and matching-repository digest resolution are modeled separately in
-behavioral tests, including extracted promotion pulling/tagging the immutable digest. No private
-registry canonicalization is claimed by this live report. Prepared A was reused; B was derived
-from the unchanged corrected fixture bytes, with its actual resulting ID recorded above.
+The historical 2026-10-10 Compose 2.19.1 evidence is preserved in Git history and summarized in
+JSON metadata; it does not verify the modern Compose output correction. The first modern attempt
+ran no acceptance cases because generated source inherited mode 0600 and A's non-root user
+could not read it. Its controlled failure and cleanup passed. A new failing umask regression
+preceded the fixture permission correction and this successful repeat run.
+
+Current/previous metadata is recorded immediately after healthy rollback `up --wait`, before
+fallible environment diagnostics. Diagnostic failure leaves the job failed and prevents
+promotion while preserving the truthful release for the next forward deploy. Behavioral tests
+cover this in both modes and preserve state after failed up/admission. Guarantees begin at
+entry into `rollback.sh`; prior forward deploy or manual edge upload/provision/proxy changes
+are outside that boundary. The ancestor check is retained as defense for malformed or alternate
+graph adapters even though ordinary single-head Alembic reachability makes it redundant.
+
+Both formerly surviving configuration mutations were rejected in a separate temporary source
+copy: `external: false` produced **4 failures** and `@db:5432` produced **4 failures**. The
+literal YAML assertion verifies the existing external network and `@postgres:5432` DSN.
+Focused deployment/checker/verifier coverage totals **206 passing tests**. All four final
+exact gates passed: Ruff lint, **358** files formatted, mypy **355** source files, and pytest
+**2608 passed, 0 skipped, 2 warnings** in **336.75 seconds** with separate owned PostgreSQL
+and RabbitMQ test infrastructure. Full gate records are in [110-todo.md](110-todo.md).

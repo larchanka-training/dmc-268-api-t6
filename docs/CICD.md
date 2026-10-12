@@ -220,13 +220,15 @@ GET /healthcheck
 release ref выбирается только из валидных `.RepoDigests` того же полного repository (порт
 registry сохраняется); отсутствующая, неоднозначная или не совпадающая по `.Id` запись означает
 безопасный отказ. Явный `repo@sha256:...` сохраняется точно, включая допустимый tag@digest;
-локальный `sha256:<image-id>` поддерживается для изолированной проверки. Короткие Docker aliases
+локальный `sha256:<image-id>` — только seam verifier после pull boundary: обычный Docker
+не pull-ит такой ref, а wrapper проверяет уже собранный ID. Короткие Docker aliases
 repository не нормализуются: без полного repository и подтверждённого digest допуска нет.
 Probe и все четыре app roles (`api`, `worker`, `webhook-worker`, `bootstrap`) получают один
-image ID через явный `IMAGE` override; rollback up использует `--pull never`. Поэтому перемещение
+image ID через явный `IMAGE` override; rollback up использует `--pull missing`. Поэтому перемещение
 remote/local тега между probe и up не меняет проверенный образ. `.env` и `current_image` содержат
-immutable release ref, по которому ручной workflow делает promotion. Pinned store images должны
-уже быть локально: при их отсутствии rollback up падает; pull policy обычного deploy не меняется.
+immutable release ref, по которому ручной workflow делает promotion. Pinned store images могут
+скачиваться, если отсутствуют локально. App ID уже есть после
+проверенного pull и не переопределяется; pull policy обычного deploy не меняется.
 
 Допуск требует ровно одну записанную ревизию БД и одну голову целевого графа. Ревизия должна
 быть известна образу и совпадать с головой либо быть её предком. Известный предок после допуска
@@ -241,15 +243,21 @@ immutable release ref, по которому ручной workflow делает 
 ручные read-image/health/promotion не продолжаются. При автоматическом откате исходный deploy
 остаётся красным, ошибка rollback видна отдельно, `:staging` не продвигается. Уже неудавшийся
 forward deploy мог применить миграцию или заменить контейнеры **до** вызова rollback: отказ
-не отменяет эти предыдущие изменения.
+не отменяет эти предыдущие изменения. Гарантия начинается при входе в `rollback.sh`: ручной
+edge workflow до него уже мог загрузить bundle, подготовить host и изменить edge-прокси.
+Отказ не восстанавливает эти workflow-изменения.
 
 Граф — необходимое условие допуска, а не доказательство совместимости приложения, схемы,
 данных или секретов. Автоматического downgrade нет. Lock `staging-deploy` сериализует обычные
 workflow; оператор должен отдельно исключить параллельные ручные миграции между probe и up.
-После успешного `up --wait` скрипт получает только имена env из работающих `api`, `worker` и
-`webhook-worker` в отсортированных JSON-списках ([SECRETS.md](SECRETS.md#5-логи-ci)). Только
-после этих проверок записывается успешное состояние. `rollback completion failed` означает
-ошибку диагностики после up: целевой стек уже может работать; успешная metadata не записана.
+Checker печатает ровно один контролируемый verdict в stdout; stderr Compose и driver
+отбрасывается. Нулевой код с точным compatible verdict допускает rollback; любой другой
+вывод или код безопасно отклоняется без печати сырых сообщений.
+После успешного `up --wait` скрипт сразу сохраняет current/previous по manual/auto правилам,
+затем получает только имена env из работающих `api`, `worker` и
+`webhook-worker` в отсортированных JSON-списках ([SECRETS.md](SECRETS.md#5-логи-ci)). `rollback completion failed` означает
+ошибку диагностики после healthy up: identity работающего релиза уже записана, job остаётся
+красным и promotion не продолжается. Следующий deploy берёт truthful current release.
 Проверьте фактические образы и здоровье сервисов, устраните причину exec/диагностики и повторите
 проверку завершения. Это отличается от отказа preflight, который оставляет стек нетронутым.
 
@@ -294,11 +302,12 @@ docker build -t dmc268-rollback110-prepared:a .
 rollback_a_id="$(docker image inspect --format '{{.Id}}' dmc268-rollback110-prepared:a)"
 uv run python scripts/verify_rollback.py \
   --image-a dmc268-rollback110-prepared:a --expect-image-a "$rollback_a_id" \
-  --report /private/tmp/rollback110-new-report.json
+  --report "$(mktemp -d)/report.json"
 ```
 
 Путь отчёта должен быть новым. Verifier создаёт B только с fixture-миграцией N, дочерней к
-голове A=M; production Alembic не меняется. Совместимый B-at-M — контролируемая подготовка,
+единственной валидной голове A=M, полученной из реального image graph; parent fixture
+генерируется из M, revision N выбирается без коллизии. Production Alembic не меняется. Совместимый B-at-M — контролируемая подготовка,
 в которой заменяются только app services и пропускается bootstrap B. Затем обычный deploy B
 применяет N: ручной и auto rollback на A должны отказать с неизменными контейнерами, файлами,
 ревизией и sentinel. Отдельная пустая сеть проверяет недоступную БД без остановки основного
@@ -306,12 +315,14 @@ PostgreSQL. Проверяются literal HTTP 200 `{"status":"ok"}`, heartbeat
 значений/строк PEM в выводе. Cleanup удаляет только ресурсы этого запуска и B; A сохраняется.
 
 Для локальных A/B wrapper заменяет только их pull после проверки ID и добавляет `--pull never`
-к реальному Compose up, если флаг ещё не задан rollback; registry delivery этим не проверяется.
+к реальному Compose up, если флаг ещё не задан; rollback сохраняет production `--pull missing`.
+Это verifier-only замена pull boundary: registry delivery и разрешение registry-тегов
+не входят в live proof.
 Регрессионная модель отдельно проверяет перемещение registry-тега и matching RepoDigest;
 живой verifier использует настоящие local image IDs. На машине, где Compose plugin
 установлен только в пользовательском Docker config, тот же plugin доступен через symlink в
 приватном config, без копирования credentials. Реальные шесть acceptance cases, полные ID,
-ревизии, снимки контейнеров, хеши файлов и cleanup от 2026-10-10:
+ревизии, снимки контейнеров, хеши файлов и cleanup от 2026-10-12:
 [отчёт и ограничения](plans/110-verification.md), [redacted JSON](plans/110-verification.json).
 
 ---

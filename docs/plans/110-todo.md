@@ -140,8 +140,8 @@ shared success path so automatic and manual jobs receive identical evidence.
       dollar signs, backslashes and unusual/newline keys; every value and PEM line is absent.
 - [x] GREEN collects `os.environ.keys()` with validated names and sorted JSON output from
       `compose exec -T` for `api`, `worker`, `webhook-worker`; includes each service label.
-- [x] Diagnostics happen only after successful application `up --wait`, before completion
-      metadata/success message; failed admission and bootstrap fallback do not run them;
+- [x] Diagnostics happen only after successful application `up --wait` and truthful release
+      metadata, before the completion message; failed admission and bootstrap fallback do not run them;
       missing expected service is a clear failure, never raw env output.
 
 **Verification:** `uv run pytest tests/test_deploy_staging_services.py`; inspect captured
@@ -169,8 +169,9 @@ JSON list of valid names; failed exec or unexpected output emits a fixed service
 completion failure and explains that the target stack may already be running. Operators are
 directed to inspect running services and retry diagnostics. This is distinct from the preflight
 refusal's compatible-image/database-recovery guidance. Current/previous state and success output
-are withheld on diagnostics failure. All diagnostics follow successful `up --wait` and precede
-metadata; refused admission and no-previous bootstrap restoration never execute them.
+were withheld on diagnostics failure in the historical implementation. The 2026-10-12 review
+correction below supersedes that ordering: metadata follows healthy up and precedes diagnostics;
+refused admission and no-previous bootstrap restoration never execute diagnostics.
 
 The test helper sets its fake process environment immediately before executing the payload to
 avoid macOS inserting `__CF_USER_TEXT_ENCODING` during `execve`. The expected ASCII order was
@@ -387,7 +388,8 @@ Final repeat review found a **P2 mutable-tag race**: the admitted selector could
 Compose's second pull or later registry promotion. Necessary AC correction resolves a strict
 local image ID after the single pull, selects only one matching-repository immutable digest
 for tags and verifies its local ID, pins probe/all four application roles to that ID with
-rollback up `--pull never`, and persists immutable RELEASE_REF in env/current state. Explicit
+rollback up `--pull never` in that historical implementation (now `--pull missing`), and
+persists immutable RELEASE_REF in env/current state. Explicit
 repo@digest strings and manual/auto history rules are preserved; local IDs remain supported
 for the verifier. No host Python, dependency, shared pull-policy or workflow permission change.
 
@@ -450,3 +452,38 @@ removed after final gates; the live verifier invocation resources were independe
 absent. Prepared A and pinned store images were preserved. Final source, test and retained proof
 bytes are unchanged after their 0/0 review and passing gates; this follow-up updates only delivery
 metadata. Current-head approving review and tech-lead acceptance remain external requirements.
+
+## PR #126 review corrections (2026-10-12)
+
+The historical Task 3 ordering above is superseded: healthy `up --wait` now writes the
+current/previous release ledger before diagnostics. Diagnostic failure keeps the job failed
+and emits no completion message; the next deploy uses the actual healthy target identity.
+Rollback up uses `--pull missing` for absent pinned storage images while binding app roles to
+an inspected immutable ID. Checker verdicts use exact stdout and stderr is suppressed.
+
+RED evidence: noisy Compose stderr regressions had **4 failures / 10 passes**, state/pull
+regressions had **24 failures / 6 passes**, dynamic graph fixture regressions had **2 failures /
+6 passes**, and restrictive-umask fixture readability had **1 failure / 7 passes**. The
+latter arose in real non-root image execution; its first live attempt cleaned owned resources
+and ran no acceptance cases. Focused deployment/checker GREEN: **182 passed**; verifier GREEN:
+**24 passed**. YAML assertions use literal existing external network and PostgreSQL DSN;
+nested failed forward deploy/refused automatic rollback compares snapshots at rollback entry.
+The graph ancestry predicate remains defensive for malformed/alternate graph adapters.
+
+Final verifier collision-path slice: **1 failed / 7 passed → 24 verifier tests passed**.
+The generated destination now follows selected N, preserving a prior A fixture migration.
+The live case used unsuffixed N and identical generated image inputs; see proof limits.
+
+Final authoritative gates after the collision-path correction, 2026-10-12:
+
+- `uv run ruff check .`: passed.
+- `uv run ruff format --check .`: **358 files** already formatted.
+- `uv run mypy .`: no issues in **355 source files**.
+- `uv run pytest`: **2608 passed, 0 skipped, 2 warnings** in **336.75 seconds**,
+  using separate owned PostgreSQL/RabbitMQ and the dedicated test vhost.
+- Modern Compose **5.6.0** disposable verifier: six cases passed; owned Docker cleanup passed.
+- `bash -n deploy/scripts/rollback.sh` and `git diff --check`: passed.
+
+The earlier complete pass (2608 tests, 368.48 seconds) preceded the final generated-filename
+correction and is not the authoritative final gate. Both current tests and saved evidence
+identify the exact limits of the modern live acceptance run.

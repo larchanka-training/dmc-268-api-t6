@@ -102,7 +102,7 @@ def main(
     if reason is None:
         print("rollback revision check: compatible")
         return 0
-    print(f"rollback revision check: refused: {reason}", file=sys.stderr)
+    print(f"rollback revision check: refused: {reason}")
     return 1
 
 

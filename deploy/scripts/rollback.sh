@@ -75,6 +75,8 @@ resolve_target_identity() {
   TARGET_IMAGE_ID="$(inspect_image_id "${IMAGE}")" || refuse_rollback "target image identity is unavailable"
   if [[ "${IMAGE}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
     [[ "${TARGET_IMAGE_ID}" == "${IMAGE}" ]] || refuse_rollback "target image identity is inconsistent"
+    # Verifier-only: its scoped wrapper validates a prebuilt local ID at the pull boundary.
+    # Operators use registry refs; ordinary docker pull does not accept a raw local image ID.
     RELEASE_REF="${IMAGE}"
   elif [[ "${IMAGE}" =~ ${digest_pattern} ]]; then
     # Preserve the supplied immutable ref for forward promotion's state equality guard.
@@ -101,7 +103,7 @@ resolve_target_identity() {
 }
 
 check_target_revision() {
-  local probe_output
+  local probe_output probe_status
   [[ -r "${SCRIPT_DIR}/check-rollback-revision.py" ]] || refuse_rollback "target checker is unavailable"
   umask 077
   PROBE_DIR="$(mktemp -d)"
@@ -120,32 +122,38 @@ networks:
     external: true
     name: ${COMPOSE_PROJECT:?COMPOSE_PROJECT is required}_default
 PROBE_COMPOSE
-  if ! probe_output="$(
+  # Keep the checker protocol on stdout; Compose progress and driver stderr are never forwarded.
+  # The sentinel preserves trailing newlines so extra output cannot resemble a valid verdict.
+  probe_status=0
+  probe_output="$(
     IMAGE="${TARGET_IMAGE_ID}" COMPOSE_PROJECT="${COMPOSE_PROJECT}" COMPOSE_IGNORE_ORPHANS=true \
       POSTGRES_USER="${POSTGRES_USER:-app}" POSTGRES_PASSWORD="${POSTGRES_PASSWORD}" \
       POSTGRES_DB="${POSTGRES_DB:-app}" \
       docker compose -p "${COMPOSE_PROJECT}" -f "${PROBE_DIR}/probe.yml" \
         run --rm --no-deps -T bootstrap python - \
-        < "${SCRIPT_DIR}/check-rollback-revision.py" 2>&1
-  )"; then
-    # Docker/driver output can contain secrets. Only exact checker messages may cross this boundary.
+        < "${SCRIPT_DIR}/check-rollback-revision.py" 2>/dev/null
+    status=$?
+    printf '.'
+    exit "${status}"
+  )" || probe_status=$?
+  if [[ "${probe_status}" != 0 ]]; then
     case "${probe_output}" in
-      "rollback revision check: refused: target must have exactly one head"|\
-      "rollback revision check: refused: database must have exactly one tracked revision"|\
-      "rollback revision check: refused: database revision is unknown"|\
-      "rollback revision check: refused: database revision is not an ancestor of target head"|\
-      "rollback revision check: refused: cannot inspect target graph or database")
-        refuse_rollback "${probe_output}" ;;
+      "rollback revision check: refused: target must have exactly one head"$'\n.'|\
+      "rollback revision check: refused: database must have exactly one tracked revision"$'\n.'|\
+      "rollback revision check: refused: database revision is unknown"$'\n.'|\
+      "rollback revision check: refused: database revision is not an ancestor of target head"$'\n.'|\
+      "rollback revision check: refused: cannot inspect target graph or database"$'\n.')
+        refuse_rollback "${probe_output%$'\n.'}" ;;
       *) refuse_rollback "target revision probe failed" ;;
     esac
   fi
-  [[ "${probe_output}" == "rollback revision check: compatible" ]] || \
+  [[ "${probe_output}" == "rollback revision check: compatible"$'\n.' ]] || \
     refuse_rollback "target revision probe returned an unexpected result"
 }
 
 diagnostics_failed() {
   echo "rollback completion failed: $1 environment key diagnostics failed" >&2
-  echo "The target stack may be running. Inspect service health and retry diagnostics before recording completion." >&2
+  echo "The healthy target release is recorded. Inspect service health and retry diagnostics before completing the job." >&2
   exit 1
 }
 
@@ -276,13 +284,12 @@ write_compose_env_file \
 # App secrets are not tied to an image: the files of the last deploy stay as they are.
 ensure_app_env_files "${APP_DIR}"
 
-IMAGE="${TARGET_IMAGE_ID}" "${COMPOSE[@]}" up --pull never -d --remove-orphans --wait --wait-timeout 180
+IMAGE="${TARGET_IMAGE_ID}" "${COMPOSE[@]}" up --pull missing -d --remove-orphans --wait --wait-timeout 180
 
 # Shared root account: drop the GHCR credential after the last pull (compose up, pull_policy: always).
 logout_registry
 
-print_environment_keys
-
+# Healthy up has changed the running release; persist its identity before fallible diagnostics.
 if [[ "${ROLLBACK_MODE}" == "manual" && -f "${STATE_FILE}" ]]; then
   cp "${STATE_FILE}" "${PREVIOUS_FILE}"
 fi
@@ -292,5 +299,7 @@ fi
   echo "deployed_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   echo "rolled_back=true"
 } > "${STATE_FILE}"
+
+print_environment_keys
 
 echo "rolled back to ${RELEASE_REF}"

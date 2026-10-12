@@ -165,7 +165,8 @@ case "$1" in
         fi
         cp "${project_dir}/probe.yml" "${STUB_PROBE_CONFIG}"
         [[ "${STUB_MOVE_TAG:-}" != true ]] || touch "${STUB_TAG_MOVED}"
-        echo "${STUB_PROBE_OUTPUT:-rollback revision check: compatible}"
+        printf '%s\\n' "${STUB_PROBE_STDERR:-}" >&2
+        echo "${STUB_PROBE_OUTPUT-rollback revision check: compatible}"
         exit "${STUB_PROBE_STATUS:-0}"
         ;;
       up)
@@ -175,7 +176,14 @@ case "$1" in
         for name in app.env api.env worker.env webhook-worker.env; do
           [[ -f "${project_dir}/${name}" ]] || { echo "env file ${name} not found" >&2; exit 1; }
         done
-        ! grep -qxF "IMAGE=${STUB_FAILING_IMAGE:-}" "${env_file}"
+        if grep -qxF "IMAGE=${STUB_FAILING_IMAGE:-}" "${env_file}"; then
+          if [[ -n "${STUB_ROLLBACK_ENTRY:-}" ]]; then
+            mkdir -p "${STUB_ROLLBACK_ENTRY}"
+            cp -p "${APP_DIR}/"* "${APP_DIR}/.env" "${APP_DIR}/.deploy-state"* \\
+              "${STUB_ROLLBACK_ENTRY}/"
+          fi
+          exit 1
+        fi
         ;;
       exec)
         service="${action_args[1]}"
@@ -842,7 +850,7 @@ def test_moved_tag_cannot_change_admitted_runtime_or_promotion_identity(
     )
     calls = host.calls()[calls_before:]
     assert calls.count(f"pull {selected}") == 1
-    assert any(" up --pull never " in call for call in calls)
+    assert any(" up --pull missing " in call for call in calls)
     for role in ("api", "worker", "webhook-worker", "bootstrap"):
         assert "    image: ${IMAGE:?IMAGE is required}" in _service_block(role)
     if mode == "manual":
@@ -870,6 +878,63 @@ def test_moved_tag_cannot_change_admitted_runtime_or_promotion_identity(
         assert f"pull {IMAGE_A}" in promotion_calls
         assert f"tag {IMAGE_A} ghcr.io/test/api:staging" in promotion_calls
         assert f"pull {selected}" not in promotion_calls
+
+
+@pytest.mark.parametrize("mode", ["manual", "auto"])
+@pytest.mark.parametrize(
+    ("status", "verdict", "reason"),
+    [
+        (0, "rollback revision check: compatible", None),
+        (
+            1,
+            "rollback revision check: refused: database revision is unknown",
+            "database revision is unknown",
+        ),
+        (1, "rollback revision check: compatible", "target revision probe failed"),
+        (0, "rollback revision check: refused: database revision is unknown", "unexpected result"),
+        (
+            1,
+            "rollback revision check: refused: database revision is unknown\nSECRET-CANARY",
+            "target revision probe failed",
+        ),
+        (0, "rollback revision check: compatible\n", "unexpected result"),
+        (0, "", "unexpected result"),
+    ],
+)
+def test_probe_stdout_protocol_ignores_secret_bearing_compose_stderr(
+    host: Host, mode: str, status: int, verdict: str, reason: str | None
+) -> None:
+    assert host.deploy(IMAGE_A, bundle="").returncode == 0
+    assert host.deploy(IMAGE_B).returncode == 0
+    before = host.files()
+    modes = {p.name: _mode(p) for p in host.app_dir.iterdir()}
+    calls_before = len(host.calls())
+    result = host.run(
+        "rollback.sh",
+        env={
+            "ROLLBACK_MODE": mode,
+            "STUB_PROBE_STATUS": str(status),
+            "STUB_PROBE_OUTPUT": verdict,
+            "STUB_PROBE_STDERR": (
+                "Container project-bootstrap-run Creating\nSECRET-CANARY\nPEM-CANARY"
+            ),
+        },
+    )
+    output = result.stdout + result.stderr
+    assert "SECRET-CANARY" not in output and "PEM-CANARY" not in output
+    assert "Creating" not in output
+    if reason is None:
+        assert result.returncode == 0, result.stderr
+        assert f"rolled back to {IMAGE_A}" in result.stdout
+    else:
+        assert result.returncode != 0
+        assert reason in result.stderr
+        assert host.files() == before
+        assert {p.name: _mode(p) for p in host.app_dir.iterdir()} == modes
+        assert not any(
+            set(c.split()) & {"up", "rm", "down", "exec"} for c in host.calls()[calls_before:]
+        )
+    assert list(host.tmp.iterdir()) == []
 
 
 @pytest.mark.parametrize("mode", ["manual", "auto"])
@@ -1046,6 +1111,20 @@ def test_compatible_rollback_probes_target_before_changes_and_keeps_mode_state(
     )
     assert (host.log.parent / "probe-dotenv").read_bytes() == before_env
     assert (host.log.parent / "probe-role").read_text() == "absent\n"
+    assert (host.log.parent / "probe-config.yml").read_text() == (
+        "services:\n"
+        "  bootstrap:\n"
+        "    image: ${IMAGE:?IMAGE is required}\n"
+        "    environment:\n"
+        "      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-app}:"
+        "${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}"
+        "@postgres:5432/${POSTGRES_DB:-app}\n"
+        '    restart: "no"\n'
+        "networks:\n"
+        "  default:\n"
+        "    external: true\n"
+        "    name: ${COMPOSE_PROJECT:?COMPOSE_PROJECT is required}_default\n"
+    )
     assert _read_dotenv(host.env_file)["IMAGE"] == target
     assert (host.app_dir / ".deploy-state.previous").read_bytes() == (
         current if mode == "manual" else previous
@@ -1064,7 +1143,6 @@ def test_successful_rollback_prints_only_sorted_running_container_keys(
 ) -> None:
     assert host.deploy(IMAGE_A, bundle=_bundle(CI_SECRETS)).returncode == 0
     assert host.deploy(IMAGE_B).returncode == 0
-    current_state = (host.app_dir / ".deploy-state").read_bytes()
     canary = "ENV-VALUE-CANARY$HOME\\backslash"
     shared = {
         "LC_CTYPE": "UTF-8",
@@ -1098,7 +1176,7 @@ def test_successful_rollback_prints_only_sorted_running_container_keys(
     ]
     assert result.stderr == ""
     assert (host.log.parent / "diagnostic-services").read_text() == "api\nworker\nwebhook-worker\n"
-    assert (host.log.parent / "diagnostic-before-state").read_bytes() == current_state
+    assert _read_dotenv(host.log.parent / "diagnostic-before-state")["current_image"] == IMAGE_A
     calls = host.calls()[calls_before:]
     up = next(i for i, call in enumerate(calls) if " up " in call)
     assert all(up < i for i, call in enumerate(calls) if " exec " in call)
@@ -1110,7 +1188,7 @@ def test_successful_rollback_prints_only_sorted_running_container_keys(
 @pytest.mark.parametrize("mode", ["manual", "auto"])
 @pytest.mark.parametrize("service", ["api", "worker", "webhook-worker"])
 @pytest.mark.parametrize("failure", ["exec", "noise", "invalid-list", "empty"])
-def test_diagnostic_failure_is_secret_safe_and_does_not_record_success(
+def test_diagnostic_failure_is_secret_safe_and_records_the_healthy_release(
     host: Host, mode: str, service: str, failure: str
 ) -> None:
     assert host.deploy(IMAGE_A, bundle=_bundle(CI_SECRETS)).returncode == 0
@@ -1136,12 +1214,18 @@ def test_diagnostic_failure_is_secret_safe_and_does_not_record_success(
     )
 
     assert result.returncode != 0
-    assert (host.app_dir / ".deploy-state").read_bytes() == state
-    assert (host.app_dir / ".deploy-state.previous").read_bytes() == previous
+    assert _read_dotenv(host.app_dir / ".deploy-state")["current_image"] == IMAGE_A
+    assert _read_dotenv(host.app_dir / ".deploy-state")["rolled_back"] == "true"
+    assert (host.app_dir / ".deploy-state.previous").read_bytes() == (
+        state if mode == "manual" else previous
+    )
+    assert (host.log.parent / "diagnostic-before-state").read_bytes() == (
+        host.app_dir / ".deploy-state"
+    ).read_bytes()
     assert "rolled back" not in result.stdout + result.stderr
     assert f"{service} environment key diagnostics failed" in result.stderr
     assert "rollback completion failed:" in result.stderr
-    assert "target stack may be running" in result.stderr
+    assert "healthy target release is recorded" in result.stderr
     assert "Inspect service health" in result.stderr
     assert "rollback refused:" not in result.stderr
     for canary in ("DOCKER-SECRET-CANARY", "PEM-BODY-CANARY"):
@@ -1486,3 +1570,33 @@ def test_ui_host_sends_api_paths_to_the_api_and_the_rest_to_the_ui() -> None:
     assert api_route.group(1).strip() == "reverse_proxy api-staging:8000"
     assert fallback.group(1).strip() == "reverse_proxy ui-staging:8080"
     assert api_route.start() < fallback.start()
+
+
+def test_failed_deploy_then_refused_auto_rollback_preserves_rollback_entry(host: Host) -> None:
+    assert host.deploy(IMAGE_A, bundle=_bundle(CI_SECRETS)).returncode == 0
+    assert host.deploy(IMAGE_B).returncode == 0
+    entry = host.log.parent / "rollback-entry"
+    calls_before = len(host.calls())
+    result = host.deploy(
+        IMAGE_BAD,
+        env={
+            "STUB_FAILING_IMAGE": IMAGE_BAD,
+            "STUB_ROLLBACK_ENTRY": str(entry),
+            "STUB_PROBE_STATUS": "1",
+            "STUB_PROBE_OUTPUT": "rollback revision check: refused: database revision is unknown",
+            "STUB_PROBE_STDERR": "Container Creating\nSECRET-CANARY",
+        },
+    )
+    assert result.returncode != 0
+    assert "compose up failed; rolling back" in result.stderr
+    assert "rollback refused:" in result.stderr and "database revision is unknown" in result.stderr
+    assert "SECRET-CANARY" not in result.stdout + result.stderr
+    assert "rolled back" not in result.stdout and "environment keys:" not in result.stdout
+    assert host.files() == {p.name: p.read_bytes() for p in entry.iterdir()}
+    assert {p.name: _mode(p) for p in host.app_dir.iterdir()} == {
+        p.name: _mode(p) for p in entry.iterdir()
+    }
+    calls = host.calls()[calls_before:]
+    pull = calls.index(f"pull {IMAGE_B}")
+    assert not any(set(c.split()) & {"up", "rm", "down", "exec"} for c in calls[pull:])
+    assert list(host.tmp.iterdir()) == []

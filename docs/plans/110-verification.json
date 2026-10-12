@@ -1,7 +1,5 @@
 {
-  "project": "rollback110-26092e3b17624e53",
-  "revision_M": "20261007_0028",
-  "revision_N": "20261010_0110",
+  "project": "rollback110-4e855f368aff46dd",
   "cases": [
     {
       "case": "compatible-manual",
@@ -9,19 +7,19 @@
       "before": {
         "files": {
           ".env": {
-            "sha256": "750d6fb19d4ab3946820a71ad63cf6584b47599226d946c73d8eb1bf205b1011",
+            "sha256": "07954629734df37beb87f899fc3e28065eb123eb8968a3bc76b94eaca2c6a5ef",
             "mode": "0o600"
           },
           "api.env": {
-            "sha256": "8f51291d00d1b319b7dcde11b4a065e1fc3e7316fd8ffae76a4c10850d1d9619",
+            "sha256": "2e0bde37fe4aca108341f2237a4fb77b6657534b3e3e18802aabc79827833b9b",
             "mode": "0o600"
           },
           "app.env": {
-            "sha256": "d9f689a518ed6915a8e7bce5f18297a2219294cd39b98da33ac60680cf510d5c",
+            "sha256": "070a2a51cd2efc962616996f8031264345329bc0144cc9a7afd16765425ffce5",
             "mode": "0o600"
           },
           "worker.env": {
-            "sha256": "a95527753146ff2b13aaafbeffbf74852bb2c9ec3b096996102c3a4310a3ad9c",
+            "sha256": "68ab2ebd7dc8e9735bffc1119cad88fb912dbd91afe395eb3b46428266fd64ff",
             "mode": "0o600"
           },
           "webhook-worker.env": {
@@ -29,7 +27,7 @@
             "mode": "0o600"
           },
           ".deploy-state": {
-            "sha256": "f06c6a96525594ebeb9a7fb0edf314a3a39bc8ceff172b06b6d2f43aaa6e34a8",
+            "sha256": "acde1a65399f2219c87224d116e41f71bd3dcc0cd3a7a065f6c77f9835ac78a1",
             "mode": "0o600"
           },
           ".deploy-state.previous": {
@@ -39,43 +37,43 @@
         },
         "containers": {
           "api": {
-            "id": "b5c1f46ebff0a9f9630fb51c5da5aee306a4cc6481f66f1b3992a930d647a4ee",
-            "image": "sha256:45bdccc6965cf85027e2b7a7be7ca8c5b07386736e7975554574c6af30ab1057",
+            "id": "0f446c90f5589463fd42509bc989112d4f9375e154cd3b3c1da7be91e389c944",
+            "image": "sha256:dba1432cea684508b5af6fc145660c882c10a823a78e4b96547f93a4ccda7253",
             "status": "running",
             "health": "healthy"
           },
           "worker": {
-            "id": "f2ecb63be45dd44589e5d6ad07fddb0a7aa5c5ff3cb3833eb8a5693964251c6a",
-            "image": "sha256:45bdccc6965cf85027e2b7a7be7ca8c5b07386736e7975554574c6af30ab1057",
+            "id": "cea6ae5037c168f100073e9f2b0b8ab038a41892edd8a410a10d846fec9cb185",
+            "image": "sha256:dba1432cea684508b5af6fc145660c882c10a823a78e4b96547f93a4ccda7253",
             "status": "running",
             "health": "healthy"
           },
           "webhook-worker": {
-            "id": "4427d6b8eec2ef5c13aca932229a81509317dabd8cf0b8a3f943efe7e46db8aa",
-            "image": "sha256:45bdccc6965cf85027e2b7a7be7ca8c5b07386736e7975554574c6af30ab1057",
+            "id": "994e657c51e23b76c51783656dee7982b0a595ad32af86cfae0efb04bce3926f",
+            "image": "sha256:dba1432cea684508b5af6fc145660c882c10a823a78e4b96547f93a4ccda7253",
             "status": "running",
             "health": "healthy"
           },
           "postgres": {
-            "id": "ce1b2c2e25ec4b658964fc7913bf8c597ba00b1000d879350e7abe64daced074",
+            "id": "c7054fe70d6ac19b733ddcc8d78083dfa50eb40682f6ed5df4e8dffb562e4a42",
             "image": "sha256:25a89970a83255ae96484d709005bb35aa71f7455f941bc1634514f31c5d5c62",
             "status": "running",
             "health": "healthy"
           },
           "rabbitmq": {
-            "id": "6223d8b087f37e2a7ad252279c9aa826a14f2bba224f44827f03c432acbf5e96",
+            "id": "a4159be60878ec5114a8c2298e4a2db5cc004deb0346b0f0bc2ca038393b43ca",
             "image": "sha256:c3b1d10b087d5e3113e097c5c237ae00b05c92480ab2d6a1df07aafe787bf2e6",
             "status": "running",
             "health": "healthy"
           },
           "redis": {
-            "id": "50d86d87c027c2781fc27deef8646d7d2f2e6be674d47a3642769303f264fe2a",
+            "id": "3bcd3d1b86dac083243e08d9c34efbc71fc8209467dc039bc8784ecb8d79feba",
             "image": "sha256:675f7644831d85995868250485bf7a71970257f74da31c62969a868d3f3eff2e",
             "status": "running",
             "health": "healthy"
           },
           "bootstrap": {
-            "id": "ee54e7c0b0d1941cca32b942081041fbee2d764609dbfd060da5d3772ab19573",
+            "id": "f8398154480c18bf43ca1d62ced6e97def12108fafa3d90b254e92f9423a2f40",
             "image": "sha256:81c69606c3cda7f35c20bb0de5f8dc97b20a24a134259491e6a05f4777bfc937",
             "status": "exited",
             "health": "unhealthy"
@@ -87,19 +85,19 @@
       "after": {
         "files": {
           ".env": {
-            "sha256": "58e03840a65c78a967793a40ffca448bee2c61cb81e05f996327cf16367fb483",
+            "sha256": "646fed481a796440ac15d03a7ca209e11f0e165604f6bf29a52f68686997ba50",
             "mode": "0o600"
           },
           "api.env": {
-            "sha256": "8f51291d00d1b319b7dcde11b4a065e1fc3e7316fd8ffae76a4c10850d1d9619",
+            "sha256": "2e0bde37fe4aca108341f2237a4fb77b6657534b3e3e18802aabc79827833b9b",
             "mode": "0o600"
           },
           "app.env": {
-            "sha256": "d9f689a518ed6915a8e7bce5f18297a2219294cd39b98da33ac60680cf510d5c",
+            "sha256": "070a2a51cd2efc962616996f8031264345329bc0144cc9a7afd16765425ffce5",
             "mode": "0o600"
           },
           "worker.env": {
-            "sha256": "a95527753146ff2b13aaafbeffbf74852bb2c9ec3b096996102c3a4310a3ad9c",
+            "sha256": "68ab2ebd7dc8e9735bffc1119cad88fb912dbd91afe395eb3b46428266fd64ff",
             "mode": "0o600"
           },
           "webhook-worker.env": {
@@ -107,53 +105,53 @@
             "mode": "0o600"
           },
           ".deploy-state": {
-            "sha256": "e3a1642f465e50eed08d066342957f3ba9a553c0b962db2e641b85cb34523b85",
+            "sha256": "70c155535011878e7514e6dcb4ef42b225cc100c857cd9405c6aa3eeb6059ec9",
             "mode": "0o600"
           },
           ".deploy-state.previous": {
-            "sha256": "f06c6a96525594ebeb9a7fb0edf314a3a39bc8ceff172b06b6d2f43aaa6e34a8",
+            "sha256": "acde1a65399f2219c87224d116e41f71bd3dcc0cd3a7a065f6c77f9835ac78a1",
             "mode": "0o600"
           }
         },
         "containers": {
           "api": {
-            "id": "22ae02ae6584aea6dc7a8faa2e4b6f844a3cd9f12480545b0c154441c884f626",
+            "id": "3219a031838eea92bb001d65c7ab632fe070ab6673da1f19c0bd4e309c8ba4e6",
             "image": "sha256:81c69606c3cda7f35c20bb0de5f8dc97b20a24a134259491e6a05f4777bfc937",
             "status": "running",
             "health": "healthy"
           },
           "worker": {
-            "id": "076e326b5ec6486ceba259513f717eac8882856576f7cd7b93faa2a236817747",
+            "id": "546482c817dc7a41b9d2c5d3ef5686f43aa1f1bdc90d03f275c1d9dc55e824c5",
             "image": "sha256:81c69606c3cda7f35c20bb0de5f8dc97b20a24a134259491e6a05f4777bfc937",
             "status": "running",
             "health": "healthy"
           },
           "webhook-worker": {
-            "id": "ac0137596d4b06519393fa2461805766602086abb07788b126f791a044ec4b9f",
+            "id": "324bce8db8e6ca9f6b1424de1b050716eed7893cbfe5996d9e68516408cfd80f",
             "image": "sha256:81c69606c3cda7f35c20bb0de5f8dc97b20a24a134259491e6a05f4777bfc937",
             "status": "running",
             "health": "healthy"
           },
           "postgres": {
-            "id": "ce1b2c2e25ec4b658964fc7913bf8c597ba00b1000d879350e7abe64daced074",
+            "id": "c7054fe70d6ac19b733ddcc8d78083dfa50eb40682f6ed5df4e8dffb562e4a42",
             "image": "sha256:25a89970a83255ae96484d709005bb35aa71f7455f941bc1634514f31c5d5c62",
             "status": "running",
             "health": "healthy"
           },
           "rabbitmq": {
-            "id": "6223d8b087f37e2a7ad252279c9aa826a14f2bba224f44827f03c432acbf5e96",
+            "id": "a4159be60878ec5114a8c2298e4a2db5cc004deb0346b0f0bc2ca038393b43ca",
             "image": "sha256:c3b1d10b087d5e3113e097c5c237ae00b05c92480ab2d6a1df07aafe787bf2e6",
             "status": "running",
             "health": "healthy"
           },
           "redis": {
-            "id": "50d86d87c027c2781fc27deef8646d7d2f2e6be674d47a3642769303f264fe2a",
+            "id": "3bcd3d1b86dac083243e08d9c34efbc71fc8209467dc039bc8784ecb8d79feba",
             "image": "sha256:675f7644831d85995868250485bf7a71970257f74da31c62969a868d3f3eff2e",
             "status": "running",
             "health": "healthy"
           },
           "bootstrap": {
-            "id": "ee54e7c0b0d1941cca32b942081041fbee2d764609dbfd060da5d3772ab19573",
+            "id": "f8398154480c18bf43ca1d62ced6e97def12108fafa3d90b254e92f9423a2f40",
             "image": "sha256:81c69606c3cda7f35c20bb0de5f8dc97b20a24a134259491e6a05f4777bfc937",
             "status": "exited",
             "health": "unhealthy"
@@ -246,19 +244,19 @@
       "before": {
         "files": {
           ".env": {
-            "sha256": "750d6fb19d4ab3946820a71ad63cf6584b47599226d946c73d8eb1bf205b1011",
+            "sha256": "07954629734df37beb87f899fc3e28065eb123eb8968a3bc76b94eaca2c6a5ef",
             "mode": "0o600"
           },
           "api.env": {
-            "sha256": "8f51291d00d1b319b7dcde11b4a065e1fc3e7316fd8ffae76a4c10850d1d9619",
+            "sha256": "2e0bde37fe4aca108341f2237a4fb77b6657534b3e3e18802aabc79827833b9b",
             "mode": "0o600"
           },
           "app.env": {
-            "sha256": "d9f689a518ed6915a8e7bce5f18297a2219294cd39b98da33ac60680cf510d5c",
+            "sha256": "070a2a51cd2efc962616996f8031264345329bc0144cc9a7afd16765425ffce5",
             "mode": "0o600"
           },
           "worker.env": {
-            "sha256": "a95527753146ff2b13aaafbeffbf74852bb2c9ec3b096996102c3a4310a3ad9c",
+            "sha256": "68ab2ebd7dc8e9735bffc1119cad88fb912dbd91afe395eb3b46428266fd64ff",
             "mode": "0o600"
           },
           "webhook-worker.env": {
@@ -266,7 +264,7 @@
             "mode": "0o600"
           },
           ".deploy-state": {
-            "sha256": "f06c6a96525594ebeb9a7fb0edf314a3a39bc8ceff172b06b6d2f43aaa6e34a8",
+            "sha256": "acde1a65399f2219c87224d116e41f71bd3dcc0cd3a7a065f6c77f9835ac78a1",
             "mode": "0o600"
           },
           ".deploy-state.previous": {
@@ -276,43 +274,43 @@
         },
         "containers": {
           "api": {
-            "id": "ab6f286a58b13e315e96fbe6f322698694a48a5bc9139d903f632b8d31182d30",
-            "image": "sha256:45bdccc6965cf85027e2b7a7be7ca8c5b07386736e7975554574c6af30ab1057",
+            "id": "98d8036d75ddaeaa7d004b7319ac98dcad0af1a5b6ed6f827664daf54c983936",
+            "image": "sha256:dba1432cea684508b5af6fc145660c882c10a823a78e4b96547f93a4ccda7253",
             "status": "running",
             "health": "healthy"
           },
           "worker": {
-            "id": "afa7890bfb33a57634ad59f103dd41dee63b38e0c043a5df80b8519aa8c4d718",
-            "image": "sha256:45bdccc6965cf85027e2b7a7be7ca8c5b07386736e7975554574c6af30ab1057",
+            "id": "fa12de66d06a0fbe7da651e787afc19e50318b0a5463db173725c93bbf0faf00",
+            "image": "sha256:dba1432cea684508b5af6fc145660c882c10a823a78e4b96547f93a4ccda7253",
             "status": "running",
             "health": "healthy"
           },
           "webhook-worker": {
-            "id": "4ab21b39ae4c0e5d4ff71a271b92631665069e546677dfa1ac7c09e2883fefff",
-            "image": "sha256:45bdccc6965cf85027e2b7a7be7ca8c5b07386736e7975554574c6af30ab1057",
+            "id": "95f3c2dee34fce3f2fde1e2cb66bb5ee75acef0ddabf78b45476ebe2e56a8fc4",
+            "image": "sha256:dba1432cea684508b5af6fc145660c882c10a823a78e4b96547f93a4ccda7253",
             "status": "running",
             "health": "healthy"
           },
           "postgres": {
-            "id": "ce1b2c2e25ec4b658964fc7913bf8c597ba00b1000d879350e7abe64daced074",
+            "id": "c7054fe70d6ac19b733ddcc8d78083dfa50eb40682f6ed5df4e8dffb562e4a42",
             "image": "sha256:25a89970a83255ae96484d709005bb35aa71f7455f941bc1634514f31c5d5c62",
             "status": "running",
             "health": "healthy"
           },
           "rabbitmq": {
-            "id": "6223d8b087f37e2a7ad252279c9aa826a14f2bba224f44827f03c432acbf5e96",
+            "id": "a4159be60878ec5114a8c2298e4a2db5cc004deb0346b0f0bc2ca038393b43ca",
             "image": "sha256:c3b1d10b087d5e3113e097c5c237ae00b05c92480ab2d6a1df07aafe787bf2e6",
             "status": "running",
             "health": "healthy"
           },
           "redis": {
-            "id": "50d86d87c027c2781fc27deef8646d7d2f2e6be674d47a3642769303f264fe2a",
+            "id": "3bcd3d1b86dac083243e08d9c34efbc71fc8209467dc039bc8784ecb8d79feba",
             "image": "sha256:675f7644831d85995868250485bf7a71970257f74da31c62969a868d3f3eff2e",
             "status": "running",
             "health": "healthy"
           },
           "bootstrap": {
-            "id": "ee54e7c0b0d1941cca32b942081041fbee2d764609dbfd060da5d3772ab19573",
+            "id": "f8398154480c18bf43ca1d62ced6e97def12108fafa3d90b254e92f9423a2f40",
             "image": "sha256:81c69606c3cda7f35c20bb0de5f8dc97b20a24a134259491e6a05f4777bfc937",
             "status": "exited",
             "health": "unhealthy"
@@ -324,19 +322,19 @@
       "after": {
         "files": {
           ".env": {
-            "sha256": "58e03840a65c78a967793a40ffca448bee2c61cb81e05f996327cf16367fb483",
+            "sha256": "646fed481a796440ac15d03a7ca209e11f0e165604f6bf29a52f68686997ba50",
             "mode": "0o600"
           },
           "api.env": {
-            "sha256": "8f51291d00d1b319b7dcde11b4a065e1fc3e7316fd8ffae76a4c10850d1d9619",
+            "sha256": "2e0bde37fe4aca108341f2237a4fb77b6657534b3e3e18802aabc79827833b9b",
             "mode": "0o600"
           },
           "app.env": {
-            "sha256": "d9f689a518ed6915a8e7bce5f18297a2219294cd39b98da33ac60680cf510d5c",
+            "sha256": "070a2a51cd2efc962616996f8031264345329bc0144cc9a7afd16765425ffce5",
             "mode": "0o600"
           },
           "worker.env": {
-            "sha256": "a95527753146ff2b13aaafbeffbf74852bb2c9ec3b096996102c3a4310a3ad9c",
+            "sha256": "68ab2ebd7dc8e9735bffc1119cad88fb912dbd91afe395eb3b46428266fd64ff",
             "mode": "0o600"
           },
           "webhook-worker.env": {
@@ -344,7 +342,7 @@
             "mode": "0o600"
           },
           ".deploy-state": {
-            "sha256": "09c7a894612c167dbda24ceabcf12b09b715167dda914fd11e4c11e9ff554be5",
+            "sha256": "ef66ac218c2da5b8d94417d5afa56714b2556dd3fbab84f04b61245e5cf9310f",
             "mode": "0o600"
           },
           ".deploy-state.previous": {
@@ -354,43 +352,43 @@
         },
         "containers": {
           "api": {
-            "id": "97d7a48e139de623c390a88b295e867b00a6599923ec9b044feb67e563d95f07",
+            "id": "90696c4e9ba9a08e909f6e37e01f643a60a4f7da6299172598f322add79e03aa",
             "image": "sha256:81c69606c3cda7f35c20bb0de5f8dc97b20a24a134259491e6a05f4777bfc937",
             "status": "running",
             "health": "healthy"
           },
           "worker": {
-            "id": "93cf6d901a3c4997f9b7530b6a081bf5e0327669547cfbfff2a28d5b0b245be4",
+            "id": "d4002d28ea45a06a301233167a6d59b7a759ef043b86edeb1513c42d352bd6b0",
             "image": "sha256:81c69606c3cda7f35c20bb0de5f8dc97b20a24a134259491e6a05f4777bfc937",
             "status": "running",
             "health": "healthy"
           },
           "webhook-worker": {
-            "id": "9dffb7cc8d101b529605c5855404a53da62e29e2b94b6e9a71113db03bf7ca9c",
+            "id": "6e6ace1ca14647b5e1f6ab6dbf86dfb755a552cf8f5e2802018013cc217c760a",
             "image": "sha256:81c69606c3cda7f35c20bb0de5f8dc97b20a24a134259491e6a05f4777bfc937",
             "status": "running",
             "health": "healthy"
           },
           "postgres": {
-            "id": "ce1b2c2e25ec4b658964fc7913bf8c597ba00b1000d879350e7abe64daced074",
+            "id": "c7054fe70d6ac19b733ddcc8d78083dfa50eb40682f6ed5df4e8dffb562e4a42",
             "image": "sha256:25a89970a83255ae96484d709005bb35aa71f7455f941bc1634514f31c5d5c62",
             "status": "running",
             "health": "healthy"
           },
           "rabbitmq": {
-            "id": "6223d8b087f37e2a7ad252279c9aa826a14f2bba224f44827f03c432acbf5e96",
+            "id": "a4159be60878ec5114a8c2298e4a2db5cc004deb0346b0f0bc2ca038393b43ca",
             "image": "sha256:c3b1d10b087d5e3113e097c5c237ae00b05c92480ab2d6a1df07aafe787bf2e6",
             "status": "running",
             "health": "healthy"
           },
           "redis": {
-            "id": "50d86d87c027c2781fc27deef8646d7d2f2e6be674d47a3642769303f264fe2a",
+            "id": "3bcd3d1b86dac083243e08d9c34efbc71fc8209467dc039bc8784ecb8d79feba",
             "image": "sha256:675f7644831d85995868250485bf7a71970257f74da31c62969a868d3f3eff2e",
             "status": "running",
             "health": "healthy"
           },
           "bootstrap": {
-            "id": "ee54e7c0b0d1941cca32b942081041fbee2d764609dbfd060da5d3772ab19573",
+            "id": "f8398154480c18bf43ca1d62ced6e97def12108fafa3d90b254e92f9423a2f40",
             "image": "sha256:81c69606c3cda7f35c20bb0de5f8dc97b20a24a134259491e6a05f4777bfc937",
             "status": "exited",
             "health": "unhealthy"
@@ -484,19 +482,19 @@
       "before": {
         "files": {
           ".env": {
-            "sha256": "750d6fb19d4ab3946820a71ad63cf6584b47599226d946c73d8eb1bf205b1011",
+            "sha256": "07954629734df37beb87f899fc3e28065eb123eb8968a3bc76b94eaca2c6a5ef",
             "mode": "0o600"
           },
           "api.env": {
-            "sha256": "8f51291d00d1b319b7dcde11b4a065e1fc3e7316fd8ffae76a4c10850d1d9619",
+            "sha256": "2e0bde37fe4aca108341f2237a4fb77b6657534b3e3e18802aabc79827833b9b",
             "mode": "0o600"
           },
           "app.env": {
-            "sha256": "d9f689a518ed6915a8e7bce5f18297a2219294cd39b98da33ac60680cf510d5c",
+            "sha256": "070a2a51cd2efc962616996f8031264345329bc0144cc9a7afd16765425ffce5",
             "mode": "0o600"
           },
           "worker.env": {
-            "sha256": "a95527753146ff2b13aaafbeffbf74852bb2c9ec3b096996102c3a4310a3ad9c",
+            "sha256": "68ab2ebd7dc8e9735bffc1119cad88fb912dbd91afe395eb3b46428266fd64ff",
             "mode": "0o600"
           },
           "webhook-worker.env": {
@@ -504,54 +502,54 @@
             "mode": "0o600"
           },
           ".deploy-state": {
-            "sha256": "0dd40c69633074cce5b4a3dee25971bfb3c5d4dce6248badae005a0ad1b810e7",
+            "sha256": "92b71a21586e6b32a69a9386265140567356d9f57f541dbe51575bd55779197b",
             "mode": "0o600"
           },
           ".deploy-state.previous": {
-            "sha256": "09c7a894612c167dbda24ceabcf12b09b715167dda914fd11e4c11e9ff554be5",
+            "sha256": "ef66ac218c2da5b8d94417d5afa56714b2556dd3fbab84f04b61245e5cf9310f",
             "mode": "0o600"
           }
         },
         "containers": {
           "api": {
-            "id": "39c68da5e4d2929aee92358e0b97b230881ceb3e9acaf0291026b72f94f36c08",
-            "image": "sha256:45bdccc6965cf85027e2b7a7be7ca8c5b07386736e7975554574c6af30ab1057",
+            "id": "7ea95928744966d8f5f38d6eb4aaa4bf75aeb08018b51d77e93dff0c4ee32782",
+            "image": "sha256:dba1432cea684508b5af6fc145660c882c10a823a78e4b96547f93a4ccda7253",
             "status": "running",
             "health": "healthy"
           },
           "worker": {
-            "id": "232ae1c0c088b71813bf14760a939d79d729305a1af6da8bad377893d71fe456",
-            "image": "sha256:45bdccc6965cf85027e2b7a7be7ca8c5b07386736e7975554574c6af30ab1057",
+            "id": "293fb4d4fcd2f887b213e821f92b5526f9f8d928d21667d3914d4b85bbcfc1f7",
+            "image": "sha256:dba1432cea684508b5af6fc145660c882c10a823a78e4b96547f93a4ccda7253",
             "status": "running",
             "health": "healthy"
           },
           "webhook-worker": {
-            "id": "88ac30dbba5c6f8a8bfb53dc1cb5ad68d27a37256856779e4f9968b9d3256526",
-            "image": "sha256:45bdccc6965cf85027e2b7a7be7ca8c5b07386736e7975554574c6af30ab1057",
+            "id": "42e0ec5435d99a30d9e1505819b2eb2ef6c1a9841c29b3b822e4d3ce7a57574e",
+            "image": "sha256:dba1432cea684508b5af6fc145660c882c10a823a78e4b96547f93a4ccda7253",
             "status": "running",
             "health": "healthy"
           },
           "postgres": {
-            "id": "ce1b2c2e25ec4b658964fc7913bf8c597ba00b1000d879350e7abe64daced074",
+            "id": "c7054fe70d6ac19b733ddcc8d78083dfa50eb40682f6ed5df4e8dffb562e4a42",
             "image": "sha256:25a89970a83255ae96484d709005bb35aa71f7455f941bc1634514f31c5d5c62",
             "status": "running",
             "health": "healthy"
           },
           "rabbitmq": {
-            "id": "6223d8b087f37e2a7ad252279c9aa826a14f2bba224f44827f03c432acbf5e96",
+            "id": "a4159be60878ec5114a8c2298e4a2db5cc004deb0346b0f0bc2ca038393b43ca",
             "image": "sha256:c3b1d10b087d5e3113e097c5c237ae00b05c92480ab2d6a1df07aafe787bf2e6",
             "status": "running",
             "health": "healthy"
           },
           "redis": {
-            "id": "50d86d87c027c2781fc27deef8646d7d2f2e6be674d47a3642769303f264fe2a",
+            "id": "3bcd3d1b86dac083243e08d9c34efbc71fc8209467dc039bc8784ecb8d79feba",
             "image": "sha256:675f7644831d85995868250485bf7a71970257f74da31c62969a868d3f3eff2e",
             "status": "running",
             "health": "healthy"
           },
           "bootstrap": {
-            "id": "db72716c0fb8927eb80614839d7b57cf3d876ae82a72aa8e497f871fc79a5dd4",
-            "image": "sha256:45bdccc6965cf85027e2b7a7be7ca8c5b07386736e7975554574c6af30ab1057",
+            "id": "61cad082fc8b9a11c735e13d6323faad287baf960b88dc27aec6ea2df58d2edc",
+            "image": "sha256:dba1432cea684508b5af6fc145660c882c10a823a78e4b96547f93a4ccda7253",
             "status": "exited",
             "health": "unhealthy"
           }
@@ -562,19 +560,19 @@
       "after": {
         "files": {
           ".env": {
-            "sha256": "750d6fb19d4ab3946820a71ad63cf6584b47599226d946c73d8eb1bf205b1011",
+            "sha256": "07954629734df37beb87f899fc3e28065eb123eb8968a3bc76b94eaca2c6a5ef",
             "mode": "0o600"
           },
           "api.env": {
-            "sha256": "8f51291d00d1b319b7dcde11b4a065e1fc3e7316fd8ffae76a4c10850d1d9619",
+            "sha256": "2e0bde37fe4aca108341f2237a4fb77b6657534b3e3e18802aabc79827833b9b",
             "mode": "0o600"
           },
           "app.env": {
-            "sha256": "d9f689a518ed6915a8e7bce5f18297a2219294cd39b98da33ac60680cf510d5c",
+            "sha256": "070a2a51cd2efc962616996f8031264345329bc0144cc9a7afd16765425ffce5",
             "mode": "0o600"
           },
           "worker.env": {
-            "sha256": "a95527753146ff2b13aaafbeffbf74852bb2c9ec3b096996102c3a4310a3ad9c",
+            "sha256": "68ab2ebd7dc8e9735bffc1119cad88fb912dbd91afe395eb3b46428266fd64ff",
             "mode": "0o600"
           },
           "webhook-worker.env": {
@@ -582,54 +580,54 @@
             "mode": "0o600"
           },
           ".deploy-state": {
-            "sha256": "0dd40c69633074cce5b4a3dee25971bfb3c5d4dce6248badae005a0ad1b810e7",
+            "sha256": "92b71a21586e6b32a69a9386265140567356d9f57f541dbe51575bd55779197b",
             "mode": "0o600"
           },
           ".deploy-state.previous": {
-            "sha256": "09c7a894612c167dbda24ceabcf12b09b715167dda914fd11e4c11e9ff554be5",
+            "sha256": "ef66ac218c2da5b8d94417d5afa56714b2556dd3fbab84f04b61245e5cf9310f",
             "mode": "0o600"
           }
         },
         "containers": {
           "api": {
-            "id": "39c68da5e4d2929aee92358e0b97b230881ceb3e9acaf0291026b72f94f36c08",
-            "image": "sha256:45bdccc6965cf85027e2b7a7be7ca8c5b07386736e7975554574c6af30ab1057",
+            "id": "7ea95928744966d8f5f38d6eb4aaa4bf75aeb08018b51d77e93dff0c4ee32782",
+            "image": "sha256:dba1432cea684508b5af6fc145660c882c10a823a78e4b96547f93a4ccda7253",
             "status": "running",
             "health": "healthy"
           },
           "worker": {
-            "id": "232ae1c0c088b71813bf14760a939d79d729305a1af6da8bad377893d71fe456",
-            "image": "sha256:45bdccc6965cf85027e2b7a7be7ca8c5b07386736e7975554574c6af30ab1057",
+            "id": "293fb4d4fcd2f887b213e821f92b5526f9f8d928d21667d3914d4b85bbcfc1f7",
+            "image": "sha256:dba1432cea684508b5af6fc145660c882c10a823a78e4b96547f93a4ccda7253",
             "status": "running",
             "health": "healthy"
           },
           "webhook-worker": {
-            "id": "88ac30dbba5c6f8a8bfb53dc1cb5ad68d27a37256856779e4f9968b9d3256526",
-            "image": "sha256:45bdccc6965cf85027e2b7a7be7ca8c5b07386736e7975554574c6af30ab1057",
+            "id": "42e0ec5435d99a30d9e1505819b2eb2ef6c1a9841c29b3b822e4d3ce7a57574e",
+            "image": "sha256:dba1432cea684508b5af6fc145660c882c10a823a78e4b96547f93a4ccda7253",
             "status": "running",
             "health": "healthy"
           },
           "postgres": {
-            "id": "ce1b2c2e25ec4b658964fc7913bf8c597ba00b1000d879350e7abe64daced074",
+            "id": "c7054fe70d6ac19b733ddcc8d78083dfa50eb40682f6ed5df4e8dffb562e4a42",
             "image": "sha256:25a89970a83255ae96484d709005bb35aa71f7455f941bc1634514f31c5d5c62",
             "status": "running",
             "health": "healthy"
           },
           "rabbitmq": {
-            "id": "6223d8b087f37e2a7ad252279c9aa826a14f2bba224f44827f03c432acbf5e96",
+            "id": "a4159be60878ec5114a8c2298e4a2db5cc004deb0346b0f0bc2ca038393b43ca",
             "image": "sha256:c3b1d10b087d5e3113e097c5c237ae00b05c92480ab2d6a1df07aafe787bf2e6",
             "status": "running",
             "health": "healthy"
           },
           "redis": {
-            "id": "50d86d87c027c2781fc27deef8646d7d2f2e6be674d47a3642769303f264fe2a",
+            "id": "3bcd3d1b86dac083243e08d9c34efbc71fc8209467dc039bc8784ecb8d79feba",
             "image": "sha256:675f7644831d85995868250485bf7a71970257f74da31c62969a868d3f3eff2e",
             "status": "running",
             "health": "healthy"
           },
           "bootstrap": {
-            "id": "db72716c0fb8927eb80614839d7b57cf3d876ae82a72aa8e497f871fc79a5dd4",
-            "image": "sha256:45bdccc6965cf85027e2b7a7be7ca8c5b07386736e7975554574c6af30ab1057",
+            "id": "61cad082fc8b9a11c735e13d6323faad287baf960b88dc27aec6ea2df58d2edc",
+            "image": "sha256:dba1432cea684508b5af6fc145660c882c10a823a78e4b96547f93a4ccda7253",
             "status": "exited",
             "health": "unhealthy"
           }
@@ -654,19 +652,19 @@
       "before": {
         "files": {
           ".env": {
-            "sha256": "750d6fb19d4ab3946820a71ad63cf6584b47599226d946c73d8eb1bf205b1011",
+            "sha256": "07954629734df37beb87f899fc3e28065eb123eb8968a3bc76b94eaca2c6a5ef",
             "mode": "0o600"
           },
           "api.env": {
-            "sha256": "8f51291d00d1b319b7dcde11b4a065e1fc3e7316fd8ffae76a4c10850d1d9619",
+            "sha256": "2e0bde37fe4aca108341f2237a4fb77b6657534b3e3e18802aabc79827833b9b",
             "mode": "0o600"
           },
           "app.env": {
-            "sha256": "d9f689a518ed6915a8e7bce5f18297a2219294cd39b98da33ac60680cf510d5c",
+            "sha256": "070a2a51cd2efc962616996f8031264345329bc0144cc9a7afd16765425ffce5",
             "mode": "0o600"
           },
           "worker.env": {
-            "sha256": "a95527753146ff2b13aaafbeffbf74852bb2c9ec3b096996102c3a4310a3ad9c",
+            "sha256": "68ab2ebd7dc8e9735bffc1119cad88fb912dbd91afe395eb3b46428266fd64ff",
             "mode": "0o600"
           },
           "webhook-worker.env": {
@@ -674,54 +672,54 @@
             "mode": "0o600"
           },
           ".deploy-state": {
-            "sha256": "0dd40c69633074cce5b4a3dee25971bfb3c5d4dce6248badae005a0ad1b810e7",
+            "sha256": "92b71a21586e6b32a69a9386265140567356d9f57f541dbe51575bd55779197b",
             "mode": "0o600"
           },
           ".deploy-state.previous": {
-            "sha256": "09c7a894612c167dbda24ceabcf12b09b715167dda914fd11e4c11e9ff554be5",
+            "sha256": "ef66ac218c2da5b8d94417d5afa56714b2556dd3fbab84f04b61245e5cf9310f",
             "mode": "0o600"
           }
         },
         "containers": {
           "api": {
-            "id": "39c68da5e4d2929aee92358e0b97b230881ceb3e9acaf0291026b72f94f36c08",
-            "image": "sha256:45bdccc6965cf85027e2b7a7be7ca8c5b07386736e7975554574c6af30ab1057",
+            "id": "7ea95928744966d8f5f38d6eb4aaa4bf75aeb08018b51d77e93dff0c4ee32782",
+            "image": "sha256:dba1432cea684508b5af6fc145660c882c10a823a78e4b96547f93a4ccda7253",
             "status": "running",
             "health": "healthy"
           },
           "worker": {
-            "id": "232ae1c0c088b71813bf14760a939d79d729305a1af6da8bad377893d71fe456",
-            "image": "sha256:45bdccc6965cf85027e2b7a7be7ca8c5b07386736e7975554574c6af30ab1057",
+            "id": "293fb4d4fcd2f887b213e821f92b5526f9f8d928d21667d3914d4b85bbcfc1f7",
+            "image": "sha256:dba1432cea684508b5af6fc145660c882c10a823a78e4b96547f93a4ccda7253",
             "status": "running",
             "health": "healthy"
           },
           "webhook-worker": {
-            "id": "88ac30dbba5c6f8a8bfb53dc1cb5ad68d27a37256856779e4f9968b9d3256526",
-            "image": "sha256:45bdccc6965cf85027e2b7a7be7ca8c5b07386736e7975554574c6af30ab1057",
+            "id": "42e0ec5435d99a30d9e1505819b2eb2ef6c1a9841c29b3b822e4d3ce7a57574e",
+            "image": "sha256:dba1432cea684508b5af6fc145660c882c10a823a78e4b96547f93a4ccda7253",
             "status": "running",
             "health": "healthy"
           },
           "postgres": {
-            "id": "ce1b2c2e25ec4b658964fc7913bf8c597ba00b1000d879350e7abe64daced074",
+            "id": "c7054fe70d6ac19b733ddcc8d78083dfa50eb40682f6ed5df4e8dffb562e4a42",
             "image": "sha256:25a89970a83255ae96484d709005bb35aa71f7455f941bc1634514f31c5d5c62",
             "status": "running",
             "health": "healthy"
           },
           "rabbitmq": {
-            "id": "6223d8b087f37e2a7ad252279c9aa826a14f2bba224f44827f03c432acbf5e96",
+            "id": "a4159be60878ec5114a8c2298e4a2db5cc004deb0346b0f0bc2ca038393b43ca",
             "image": "sha256:c3b1d10b087d5e3113e097c5c237ae00b05c92480ab2d6a1df07aafe787bf2e6",
             "status": "running",
             "health": "healthy"
           },
           "redis": {
-            "id": "50d86d87c027c2781fc27deef8646d7d2f2e6be674d47a3642769303f264fe2a",
+            "id": "3bcd3d1b86dac083243e08d9c34efbc71fc8209467dc039bc8784ecb8d79feba",
             "image": "sha256:675f7644831d85995868250485bf7a71970257f74da31c62969a868d3f3eff2e",
             "status": "running",
             "health": "healthy"
           },
           "bootstrap": {
-            "id": "db72716c0fb8927eb80614839d7b57cf3d876ae82a72aa8e497f871fc79a5dd4",
-            "image": "sha256:45bdccc6965cf85027e2b7a7be7ca8c5b07386736e7975554574c6af30ab1057",
+            "id": "61cad082fc8b9a11c735e13d6323faad287baf960b88dc27aec6ea2df58d2edc",
+            "image": "sha256:dba1432cea684508b5af6fc145660c882c10a823a78e4b96547f93a4ccda7253",
             "status": "exited",
             "health": "unhealthy"
           }
@@ -732,19 +730,19 @@
       "after": {
         "files": {
           ".env": {
-            "sha256": "750d6fb19d4ab3946820a71ad63cf6584b47599226d946c73d8eb1bf205b1011",
+            "sha256": "07954629734df37beb87f899fc3e28065eb123eb8968a3bc76b94eaca2c6a5ef",
             "mode": "0o600"
           },
           "api.env": {
-            "sha256": "8f51291d00d1b319b7dcde11b4a065e1fc3e7316fd8ffae76a4c10850d1d9619",
+            "sha256": "2e0bde37fe4aca108341f2237a4fb77b6657534b3e3e18802aabc79827833b9b",
             "mode": "0o600"
           },
           "app.env": {
-            "sha256": "d9f689a518ed6915a8e7bce5f18297a2219294cd39b98da33ac60680cf510d5c",
+            "sha256": "070a2a51cd2efc962616996f8031264345329bc0144cc9a7afd16765425ffce5",
             "mode": "0o600"
           },
           "worker.env": {
-            "sha256": "a95527753146ff2b13aaafbeffbf74852bb2c9ec3b096996102c3a4310a3ad9c",
+            "sha256": "68ab2ebd7dc8e9735bffc1119cad88fb912dbd91afe395eb3b46428266fd64ff",
             "mode": "0o600"
           },
           "webhook-worker.env": {
@@ -752,54 +750,54 @@
             "mode": "0o600"
           },
           ".deploy-state": {
-            "sha256": "0dd40c69633074cce5b4a3dee25971bfb3c5d4dce6248badae005a0ad1b810e7",
+            "sha256": "92b71a21586e6b32a69a9386265140567356d9f57f541dbe51575bd55779197b",
             "mode": "0o600"
           },
           ".deploy-state.previous": {
-            "sha256": "09c7a894612c167dbda24ceabcf12b09b715167dda914fd11e4c11e9ff554be5",
+            "sha256": "ef66ac218c2da5b8d94417d5afa56714b2556dd3fbab84f04b61245e5cf9310f",
             "mode": "0o600"
           }
         },
         "containers": {
           "api": {
-            "id": "39c68da5e4d2929aee92358e0b97b230881ceb3e9acaf0291026b72f94f36c08",
-            "image": "sha256:45bdccc6965cf85027e2b7a7be7ca8c5b07386736e7975554574c6af30ab1057",
+            "id": "7ea95928744966d8f5f38d6eb4aaa4bf75aeb08018b51d77e93dff0c4ee32782",
+            "image": "sha256:dba1432cea684508b5af6fc145660c882c10a823a78e4b96547f93a4ccda7253",
             "status": "running",
             "health": "healthy"
           },
           "worker": {
-            "id": "232ae1c0c088b71813bf14760a939d79d729305a1af6da8bad377893d71fe456",
-            "image": "sha256:45bdccc6965cf85027e2b7a7be7ca8c5b07386736e7975554574c6af30ab1057",
+            "id": "293fb4d4fcd2f887b213e821f92b5526f9f8d928d21667d3914d4b85bbcfc1f7",
+            "image": "sha256:dba1432cea684508b5af6fc145660c882c10a823a78e4b96547f93a4ccda7253",
             "status": "running",
             "health": "healthy"
           },
           "webhook-worker": {
-            "id": "88ac30dbba5c6f8a8bfb53dc1cb5ad68d27a37256856779e4f9968b9d3256526",
-            "image": "sha256:45bdccc6965cf85027e2b7a7be7ca8c5b07386736e7975554574c6af30ab1057",
+            "id": "42e0ec5435d99a30d9e1505819b2eb2ef6c1a9841c29b3b822e4d3ce7a57574e",
+            "image": "sha256:dba1432cea684508b5af6fc145660c882c10a823a78e4b96547f93a4ccda7253",
             "status": "running",
             "health": "healthy"
           },
           "postgres": {
-            "id": "ce1b2c2e25ec4b658964fc7913bf8c597ba00b1000d879350e7abe64daced074",
+            "id": "c7054fe70d6ac19b733ddcc8d78083dfa50eb40682f6ed5df4e8dffb562e4a42",
             "image": "sha256:25a89970a83255ae96484d709005bb35aa71f7455f941bc1634514f31c5d5c62",
             "status": "running",
             "health": "healthy"
           },
           "rabbitmq": {
-            "id": "6223d8b087f37e2a7ad252279c9aa826a14f2bba224f44827f03c432acbf5e96",
+            "id": "a4159be60878ec5114a8c2298e4a2db5cc004deb0346b0f0bc2ca038393b43ca",
             "image": "sha256:c3b1d10b087d5e3113e097c5c237ae00b05c92480ab2d6a1df07aafe787bf2e6",
             "status": "running",
             "health": "healthy"
           },
           "redis": {
-            "id": "50d86d87c027c2781fc27deef8646d7d2f2e6be674d47a3642769303f264fe2a",
+            "id": "3bcd3d1b86dac083243e08d9c34efbc71fc8209467dc039bc8784ecb8d79feba",
             "image": "sha256:675f7644831d85995868250485bf7a71970257f74da31c62969a868d3f3eff2e",
             "status": "running",
             "health": "healthy"
           },
           "bootstrap": {
-            "id": "db72716c0fb8927eb80614839d7b57cf3d876ae82a72aa8e497f871fc79a5dd4",
-            "image": "sha256:45bdccc6965cf85027e2b7a7be7ca8c5b07386736e7975554574c6af30ab1057",
+            "id": "61cad082fc8b9a11c735e13d6323faad287baf960b88dc27aec6ea2df58d2edc",
+            "image": "sha256:dba1432cea684508b5af6fc145660c882c10a823a78e4b96547f93a4ccda7253",
             "status": "exited",
             "health": "unhealthy"
           }
@@ -821,23 +819,23 @@
       "case": "unreachable-manual",
       "exit_code": 1,
       "reason": "cannot inspect target graph or database",
-      "elapsed_seconds": 9.45,
+      "elapsed_seconds": 10.93,
       "before": {
         "files": {
           ".env": {
-            "sha256": "750d6fb19d4ab3946820a71ad63cf6584b47599226d946c73d8eb1bf205b1011",
+            "sha256": "07954629734df37beb87f899fc3e28065eb123eb8968a3bc76b94eaca2c6a5ef",
             "mode": "0o600"
           },
           "api.env": {
-            "sha256": "8f51291d00d1b319b7dcde11b4a065e1fc3e7316fd8ffae76a4c10850d1d9619",
+            "sha256": "2e0bde37fe4aca108341f2237a4fb77b6657534b3e3e18802aabc79827833b9b",
             "mode": "0o600"
           },
           "app.env": {
-            "sha256": "d9f689a518ed6915a8e7bce5f18297a2219294cd39b98da33ac60680cf510d5c",
+            "sha256": "070a2a51cd2efc962616996f8031264345329bc0144cc9a7afd16765425ffce5",
             "mode": "0o600"
           },
           "worker.env": {
-            "sha256": "a95527753146ff2b13aaafbeffbf74852bb2c9ec3b096996102c3a4310a3ad9c",
+            "sha256": "68ab2ebd7dc8e9735bffc1119cad88fb912dbd91afe395eb3b46428266fd64ff",
             "mode": "0o600"
           },
           "webhook-worker.env": {
@@ -845,11 +843,11 @@
             "mode": "0o600"
           },
           ".deploy-state": {
-            "sha256": "0dd40c69633074cce5b4a3dee25971bfb3c5d4dce6248badae005a0ad1b810e7",
+            "sha256": "92b71a21586e6b32a69a9386265140567356d9f57f541dbe51575bd55779197b",
             "mode": "0o600"
           },
           ".deploy-state.previous": {
-            "sha256": "09c7a894612c167dbda24ceabcf12b09b715167dda914fd11e4c11e9ff554be5",
+            "sha256": "ef66ac218c2da5b8d94417d5afa56714b2556dd3fbab84f04b61245e5cf9310f",
             "mode": "0o600"
           }
         }
@@ -857,19 +855,19 @@
       "after": {
         "files": {
           ".env": {
-            "sha256": "750d6fb19d4ab3946820a71ad63cf6584b47599226d946c73d8eb1bf205b1011",
+            "sha256": "07954629734df37beb87f899fc3e28065eb123eb8968a3bc76b94eaca2c6a5ef",
             "mode": "0o600"
           },
           "api.env": {
-            "sha256": "8f51291d00d1b319b7dcde11b4a065e1fc3e7316fd8ffae76a4c10850d1d9619",
+            "sha256": "2e0bde37fe4aca108341f2237a4fb77b6657534b3e3e18802aabc79827833b9b",
             "mode": "0o600"
           },
           "app.env": {
-            "sha256": "d9f689a518ed6915a8e7bce5f18297a2219294cd39b98da33ac60680cf510d5c",
+            "sha256": "070a2a51cd2efc962616996f8031264345329bc0144cc9a7afd16765425ffce5",
             "mode": "0o600"
           },
           "worker.env": {
-            "sha256": "a95527753146ff2b13aaafbeffbf74852bb2c9ec3b096996102c3a4310a3ad9c",
+            "sha256": "68ab2ebd7dc8e9735bffc1119cad88fb912dbd91afe395eb3b46428266fd64ff",
             "mode": "0o600"
           },
           "webhook-worker.env": {
@@ -877,11 +875,11 @@
             "mode": "0o600"
           },
           ".deploy-state": {
-            "sha256": "0dd40c69633074cce5b4a3dee25971bfb3c5d4dce6248badae005a0ad1b810e7",
+            "sha256": "92b71a21586e6b32a69a9386265140567356d9f57f541dbe51575bd55779197b",
             "mode": "0o600"
           },
           ".deploy-state.previous": {
-            "sha256": "09c7a894612c167dbda24ceabcf12b09b715167dda914fd11e4c11e9ff554be5",
+            "sha256": "ef66ac218c2da5b8d94417d5afa56714b2556dd3fbab84f04b61245e5cf9310f",
             "mode": "0o600"
           }
         }
@@ -901,23 +899,23 @@
       "case": "unreachable-auto",
       "exit_code": 1,
       "reason": "cannot inspect target graph or database",
-      "elapsed_seconds": 9.12,
+      "elapsed_seconds": 9.84,
       "before": {
         "files": {
           ".env": {
-            "sha256": "750d6fb19d4ab3946820a71ad63cf6584b47599226d946c73d8eb1bf205b1011",
+            "sha256": "07954629734df37beb87f899fc3e28065eb123eb8968a3bc76b94eaca2c6a5ef",
             "mode": "0o600"
           },
           "api.env": {
-            "sha256": "8f51291d00d1b319b7dcde11b4a065e1fc3e7316fd8ffae76a4c10850d1d9619",
+            "sha256": "2e0bde37fe4aca108341f2237a4fb77b6657534b3e3e18802aabc79827833b9b",
             "mode": "0o600"
           },
           "app.env": {
-            "sha256": "d9f689a518ed6915a8e7bce5f18297a2219294cd39b98da33ac60680cf510d5c",
+            "sha256": "070a2a51cd2efc962616996f8031264345329bc0144cc9a7afd16765425ffce5",
             "mode": "0o600"
           },
           "worker.env": {
-            "sha256": "a95527753146ff2b13aaafbeffbf74852bb2c9ec3b096996102c3a4310a3ad9c",
+            "sha256": "68ab2ebd7dc8e9735bffc1119cad88fb912dbd91afe395eb3b46428266fd64ff",
             "mode": "0o600"
           },
           "webhook-worker.env": {
@@ -925,11 +923,11 @@
             "mode": "0o600"
           },
           ".deploy-state": {
-            "sha256": "0dd40c69633074cce5b4a3dee25971bfb3c5d4dce6248badae005a0ad1b810e7",
+            "sha256": "92b71a21586e6b32a69a9386265140567356d9f57f541dbe51575bd55779197b",
             "mode": "0o600"
           },
           ".deploy-state.previous": {
-            "sha256": "09c7a894612c167dbda24ceabcf12b09b715167dda914fd11e4c11e9ff554be5",
+            "sha256": "ef66ac218c2da5b8d94417d5afa56714b2556dd3fbab84f04b61245e5cf9310f",
             "mode": "0o600"
           }
         }
@@ -937,19 +935,19 @@
       "after": {
         "files": {
           ".env": {
-            "sha256": "750d6fb19d4ab3946820a71ad63cf6584b47599226d946c73d8eb1bf205b1011",
+            "sha256": "07954629734df37beb87f899fc3e28065eb123eb8968a3bc76b94eaca2c6a5ef",
             "mode": "0o600"
           },
           "api.env": {
-            "sha256": "8f51291d00d1b319b7dcde11b4a065e1fc3e7316fd8ffae76a4c10850d1d9619",
+            "sha256": "2e0bde37fe4aca108341f2237a4fb77b6657534b3e3e18802aabc79827833b9b",
             "mode": "0o600"
           },
           "app.env": {
-            "sha256": "d9f689a518ed6915a8e7bce5f18297a2219294cd39b98da33ac60680cf510d5c",
+            "sha256": "070a2a51cd2efc962616996f8031264345329bc0144cc9a7afd16765425ffce5",
             "mode": "0o600"
           },
           "worker.env": {
-            "sha256": "a95527753146ff2b13aaafbeffbf74852bb2c9ec3b096996102c3a4310a3ad9c",
+            "sha256": "68ab2ebd7dc8e9735bffc1119cad88fb912dbd91afe395eb3b46428266fd64ff",
             "mode": "0o600"
           },
           "webhook-worker.env": {
@@ -957,11 +955,11 @@
             "mode": "0o600"
           },
           ".deploy-state": {
-            "sha256": "0dd40c69633074cce5b4a3dee25971bfb3c5d4dce6248badae005a0ad1b810e7",
+            "sha256": "92b71a21586e6b32a69a9386265140567356d9f57f541dbe51575bd55779197b",
             "mode": "0o600"
           },
           ".deploy-state.previous": {
-            "sha256": "09c7a894612c167dbda24ceabcf12b09b715167dda914fd11e4c11e9ff554be5",
+            "sha256": "ef66ac218c2da5b8d94417d5afa56714b2556dd3fbab84f04b61245e5cf9310f",
             "mode": "0o600"
           }
         }
@@ -978,10 +976,12 @@
       }
     }
   ],
-  "compose_version": "2.19.1",
+  "compose_version": "5.6.0",
+  "revision_M": "20261007_0028",
+  "revision_N": "20261010_0110",
   "image_A": "sha256:81c69606c3cda7f35c20bb0de5f8dc97b20a24a134259491e6a05f4777bfc937",
-  "image_B": "sha256:45bdccc6965cf85027e2b7a7be7ca8c5b07386736e7975554574c6af30ab1057",
-  "local_pull_substitution": "Only verified A/B image IDs; Compose up --pull never; probes and health run unchanged",
+  "image_B": "sha256:dba1432cea684508b5af6fc145660c882c10a823a78e4b96547f93a4ccda7253",
+  "local_pull_substitution": "Verifier-only pull boundary substitution for verified local A/B IDs; rollback up --pull missing with immutable app IDs; probes and health run unchanged",
   "initial_A_health": {
     "API": {
       "status_code": 200,
@@ -993,5 +993,39 @@
   },
   "secret_scan": "all command output passed, including each PEM line",
   "outcome": "passed",
-  "cleanup": "passed"
+  "cleanup": "passed",
+  "verified_on": "2026-10-12",
+  "host_checkout_head": "d5e5ec5bdb47f763958fa38f8df0762f80f98c2b",
+  "host_checkout_base": "46a90772f65c04aa3cc4db11b198e6d052bf1207",
+  "host_source_state": "review corrections applied, not yet committed",
+  "prepared_A_application_base": "92250a1fb3b65f88a2ea111d33613f9a4af1d1d2",
+  "host_script_sha256": {
+    "rollback.sh": "0a7339abcf0a7fdebdd58d90a6249d1e5b60d9fb4334a18189ab9d40f9659070",
+    "check-rollback-revision.py": "d39e94f98e4d53c66738dc8683e3a33f502d46097461922a2b4787ebc01f0493"
+  },
+  "previous_proof": {
+    "verified_on": "2026-10-10",
+    "compose_version": "2.19.1",
+    "project": "rollback110-26092e3b17624e53",
+    "context": "Historical proof predates these review corrections; preserved in Git history."
+  },
+  "post_live_verifier_correction": "After this live run, collision-suffixed N also selects a collision-suffixed fixture filename. Actual run N was unsuffixed, so generated Dockerfile/migration bytes are identical. Host rollback/checker scripts unchanged; final gates rerun.",
+  "final_gates": {
+    "ruff_check": "passed",
+    "ruff_format_check": {
+      "outcome": "passed",
+      "files": 358
+    },
+    "mypy": {
+      "outcome": "passed",
+      "source_files": 355
+    },
+    "pytest": {
+      "passed": 2608,
+      "skipped": 0,
+      "warnings": 2,
+      "seconds": 336.75,
+      "infrastructure": "Separate owned PostgreSQL and RabbitMQ with dedicated test vhost"
+    }
+  }
 }

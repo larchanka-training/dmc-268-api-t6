@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import runpy
 import shutil
@@ -218,4 +219,66 @@ def test_cleanup_attempts_all_owned_resources_after_one_operation_fails(
         assert any(args[1:3] == ["image", "rm"] for args in calls)
         assert verifier.report["cleanup"] == "failed"
     finally:
+        shutil.rmtree(verifier.root)
+
+
+@pytest.mark.parametrize(
+    "graph",
+    [
+        {"heads": ["20300101_0099"], "revisions": ["20300101_0099", "20261010_0110"]},
+        {"heads": [], "revisions": []},
+        {"heads": ["a", "b"], "revisions": ["a", "b"]},
+        {"heads": ["bad\nSECRET"], "revisions": ["bad\nSECRET"]},
+        {"heads": ["missing"], "revisions": ["other"]},
+        {"heads": "a", "revisions": ["a"]},
+        {"heads": ["a"], "revisions": "a"},
+        ["unexpected"],
+    ],
+)
+def test_prepare_derives_fixture_parent_from_a_graph_or_refuses_before_build(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, graph: object
+) -> None:
+    api = runpy.run_path(str(VERIFIER))
+    image = "sha256:" + "a" * 64
+    verifier = api["LiveVerifier"](
+        "/fake/docker", "rollback110-0123456789abcdef", "prepared:a", image
+    )
+    plugin = tmp_path / "docker-compose"
+    plugin.touch()
+    builds: list[Path] = []
+
+    def run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        output = ""
+        if args[1] == "info":
+            output = str(plugin)
+        elif args[1:3] == ["image", "inspect"]:
+            output = image
+        elif args[1] == "run":
+            output = json.dumps(graph)
+        elif args[1] == "build":
+            builds.append(Path(args[-1]))
+            raise api["VerificationError"]("fixture build boundary")
+        return subprocess.CompletedProcess(args, 0, output, "")
+
+    monkeypatch.setattr(subprocess, "run", run)
+    previous_umask = os.umask(0o077)
+    try:
+        with pytest.raises(api["VerificationError"]):
+            verifier.prepare()
+        if isinstance(graph, dict) and graph.get("heads") == ["20300101_0099"]:
+            assert len(builds) == 1
+            assert (builds[0] / "Dockerfile").read_text() == (
+                "FROM prepared:a\n"
+                "COPY new_revision.py /srv/alembic/versions/20261010_0110_1_rollback_fixture.py\n"
+            )
+            assert (builds[0] / "new_revision.py").stat().st_mode & 0o777 == 0o644
+            fixture = runpy.run_path(str(builds[0] / "new_revision.py"))
+            assert fixture["down_revision"] == "20300101_0099"
+            assert fixture["revision"] == "20261010_0110_1"
+            assert verifier.report["revision_M"] == "20300101_0099"
+            assert verifier.report["revision_N"] == "20261010_0110_1"
+        else:
+            assert builds == []
+    finally:
+        os.umask(previous_umask)
         shutil.rmtree(verifier.root)

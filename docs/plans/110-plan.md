@@ -4,8 +4,8 @@
 
 Issue: <https://github.com/larchanka-training/dmc-268-api-t6/issues/110>.
 Base: `92250a1fb3b65f88a2ea111d33613f9a4af1d1d2`, verified equal to local
-`origin/main` and remote `main` on 2026-10-10. The isolated managed worktree is
-`/Users/qx/.codex/worktrees/110-rollback-db-revision/dmc-268-api-t6`.
+`origin/main` and remote `main` on 2026-10-10. Implementation uses an isolated checkout;
+the original working directory stays untouched.
 
 Approved by the user with “делай” on 2026-10-10. The approved checker/test seams and routine
 task execution may proceed without another approval request.
@@ -65,10 +65,13 @@ while repository tools and host test utilities always run through `uv`.
    after the single pull. Registry tags also require exactly one matching-repository RepoDigest
    whose local ID equals that target ID. Preserve explicit digest refs; local IDs remain supported
    for the disposable verifier. Probe and all application/bootstrap up roles receive the ID via
-   explicit IMAGE override, with rollback up `--pull never`; persist immutable release ref in
+   explicit IMAGE override, with rollback up `--pull missing` so absent pinned storage images
+   can be fetched; persist immutable release ref in
    `.env`/current_image for later promotion. This closes remote/local tag movement across the
    admission/up/promotion boundary without changing normal deploy's pull policy or permissions.
-5. Checker failures produce controlled, secret-safe messages. Safe revision identifiers may be
+5. Checker stdout is a strict controlled single-line verdict protocol; suppress Compose stderr
+   and reject unexpected stdout or status. Checker failures produce controlled, secret-safe
+   messages. Safe revision identifiers may be
    included after validation; do not print URLs, passwords, SQL parameters, exception repr,
    traceback, full env, or raw Docker output. Captured unexpected target-container failures must
    be replaced with a generic preflight error, with no fallback to proceeding.
@@ -78,8 +81,9 @@ while repository tools and host test utilities always run through `uv`.
    the service label plus a sorted JSON list of keys. Do not read or print values or split line
    oriented `env` output. JSON escaping/name validation prevents malicious names/newlines from
    creating uncontrolled output. This covers manual and automatic job logs with one behavior.
-   A missing expected running service makes diagnostics fail explicitly; define successful
-   completion only after the health wait and diagnostics succeed, then update state.
+   After healthy `up --wait`, record the actual current/previous release before diagnostics.
+   Diagnostics failure keeps the job failed and prevents promotion, while the next deploy
+   sees the truthful release ledger. Failed admission/up never record a healthy release.
 7. Preserve the existing no-previous-release bootstrap-nginx restoration branch. It has no
    target application image and therefore no target migration graph or worker diagnostics.
    Its destructive restoration semantics are unchanged and documented separately.
@@ -191,3 +195,8 @@ Independent review must report zero Standards and Spec findings. Publish a draft
 on `fix/110-rollback-db-revision`, with What / Why / How to verify / Refs, no closing keyword,
 no Development-panel issue link, and no new dependency. Attach the created PR to the chat.
 The tech lead closes #110 after acceptance; do not merge or close it automatically.
+
+Review correction (2026-10-12): admission guarantees begin at entry into `rollback.sh`.
+The edge workflow may already have uploaded/provisioned files and changed its proxy.
+The ancestry check remains a defensive contract for malformed or alternate graph adapters;
+normal single-head Alembic reachability makes it redundant, but removing it weakens that contract.
