@@ -126,12 +126,12 @@ anyio BlockingPortal. Live AC остаётся pending до штатного mer
 - [x] `uv run pytest` зелёный; skipped integrations отдельно перечислены.
 - [x] Ветка актуальна относительно main; повторное review требуется, если
   rebase меняет проверенный diff.
-- [ ] Publisher проверил status, staged explicit new paths / `git add -u`,
+- [x] Publisher проверил status, staged explicit new paths / `git add -u`,
   создал Conventional Commit с `(#111)` без `--no-verify`, push и draft PR
   (пользователь выбрал «Черновик PR»).
-- [ ] PR содержит What / Why / How to verify / Refs, `Refs #111`, `Refs #106`,
+- [x] PR содержит What / Why / How to verify / Refs, `Refs #111`, `Refs #106`,
   результаты проверок и pending-статус live AC, без closing keyword.
-- [ ] PR URL возвращён координатору и прикреплён к этому чату.
+- [x] PR URL возвращён координатору и прикреплён к этому чату.
 
 Evidence перед публикацией 10.10.2026: `git fetch origin main` подтвердил
 `HEAD=origin/main=92250a1fb3b65f88a2ea111d33613f9a4af1d1d2`; rebase не нужен.
@@ -216,11 +216,11 @@ Review baseline `f5a1e56`; исторические evidence выше не за�
 - [x] `uv run mypy .`.
 - [x] `uv run pytest`; актуальные counts/skips/warnings записаны отдельно.
 - [x] Свежие Standards/Spec reviews без findings; correction tasks выполнены.
-- [ ] Publisher staged только изменения PR #125, сохранил чужие untracked
+- [x] Publisher staged только изменения PR #125, сохранил чужие untracked
   планы, создал Conventional Commit с `(#111)` без `--no-verify` и push.
-- [ ] В What названы `docs/plans/111-plan.md` и `docs/plans/111-todo.md`;
+- [x] В What названы `docs/plans/111-plan.md` и `docs/plans/111-todo.md`;
   How to verify/counts и rebase-checkbox обновлены на текущий head.
-- [ ] Review получил ответ с SHA исправления; resolving оставлен reviewer.
+- [x] Review получил ответ с SHA исправления; resolving оставлен reviewer.
 - [x] Live sandbox AC явно pending до approve/merge/Deploy staging;
   handoff требует `succeeded` Run, check-run URL, Run UUID, ссылку из summary
   и SHA/digest staging. Merge и исправление дрейфа PIPELINE_SPEC не выполнялись.
@@ -279,3 +279,32 @@ Starlette/httpx и anyio BlockingPortal. `git diff --check` прошёл;
 `git diff --exit-code -- app/worker.py` подтвердил отсутствие production-правок.
 Чужие untracked планы #113/#117 сохранены; commit/push не выполнял developer.
 Live sandbox AC остаётся pending после штатного reviewed merge/Deploy staging.
+
+Evidence публикации correction round (12.10.2026): `git fetch origin main`
+подтвердил актуальный baseline `46a90772f65c04aa3cc4db11b198e6d052bf1207`;
+он является предком rebased branch. Correction commit
+`1e017c338c398b5168732ae914be9d8b00571345` создан с Conventional Commit
+`test(worker): cover portal URL configuration and links (#111)` без обхода hooks.
+Staged только пять intended paths: `tests/test_worker_portal_url.py` явно,
+четыре tracked файла через `git add -u -- <paths>`. Чужие untracked планы
+#113/#117 сохранились; backups #129 из `/tmp/pr125-preserved-plans` не staged.
+Push в существующую ветку выполнен с pin
+`--force-with-lease=refs/heads/fix/111-worker-portal-url:f5a1e56a8259636f17d3c2862f8de89e53762e8b`;
+`git ls-remote` подтвердил published correction SHA и неизменный main.
+
+Существующий [PR #125](https://github.com/larchanka-training/dmc-268-api-t6/pull/125)
+обновлён через `gh pr edit --body-file`: What включает оба plan/todo-файла,
+counts относятся к текущему rebase, approve-checkbox пустой, live AC pending.
+GraphQL подтвердил отсутствие inline review threads и Development closing links.
+[Ответ на review](https://github.com/larchanka-training/dmc-268-api-t6/pull/125#issuecomment-6121996742)
+опубликован через `gh pr comment --body-file`, содержит P3-1/P3-2, SHA,
+гейты и операционный handoff. PR URL передан координатору и прикреплён к чату
+через `attach_artifact`; новая PR не создавалась, треды не разрешались,
+approve/merge не выполнялись. Этот последующий docs-only commit сохраняет
+уже состоявшееся evidence; production/test content после гейтов не менялся.
+
+Исторические publication-checkpoints также подтверждены: PR #125 создан
+10.10.2026 в `08:47:19Z`, timeline содержит `ReadyForReviewEvent` в `11:20:17Z`
+и не содержит `ConvertToDraftEvent` — первоначальный draft PR опубликован,
+затем переведён в ready for review. Его обязательные body/Refs и attachment
+проверены повторно текущим раундом; исторические гейты выше не переизмерялись.
