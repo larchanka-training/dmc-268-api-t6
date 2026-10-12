@@ -9,13 +9,13 @@ same map and the map can be rebuilt from the stored patches.
 from __future__ import annotations
 
 import json
-import re
 import unicodedata
 from dataclasses import dataclass
 from enum import StrEnum
 from hashlib import sha256
 from uuid import UUID
 
+from app.modules.reviews.application.unified_diff import UnifiedDiffError, parse_hunks, split_lf
 from app.modules.reviews.application.vcs_diff import VcsFile, VcsPullRequest
 
 DIFF_MAP_SCHEMA_VERSION = 1
@@ -23,8 +23,6 @@ DIFF_MAP_PARSER_VERSION = "unified-hunks/v1"
 MAX_PATH_BYTES = 1024
 MAX_PATH_SEGMENTS = 128
 
-_HUNK = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
-_NO_NEWLINE = "\\ No newline at end of file"
 _FILE_COUNT_MISMATCH = "file_count_mismatch"
 
 
@@ -325,74 +323,41 @@ class _MalformedPatch(ValueError):
 
 
 def _split_patch(patch: str) -> list[str]:
-    """Split only on LF; other line separators can be literal source content.
+    """Patch lines for the diff map: a CR is kept unless it frames the whole patch.
 
     A CR is removed only as CRLF framing of the patch itself, recognised when every
     line, hunk headers included, ends with it. Otherwise a trailing CR belongs to the
     source line (a file with CRLF endings) and is kept.
     """
-    lines = patch.split("\n")
-    if lines[-1] == "":
-        lines.pop()
+    lines = split_lf(patch)
     if lines and all(line.endswith("\r") for line in lines):
         return [line[:-1] for line in lines]
     return lines
 
 
 def _parse_hunks(file_id: str, lines: list[str]) -> tuple[DiffHunk, ...]:
+    try:
+        parsed = parse_hunks(lines)
+    except UnifiedDiffError as exc:
+        raise _MalformedPatch(str(exc)) from exc
     hunks: list[DiffHunk] = []
-    header: tuple[int, int, int, int] | None = None
-    rows: list[tuple[RowKind, int | None, int | None, str]] = []
-    old_line = new_line = old_left = new_left = 0
     old_end = new_end = 0
-
-    def close() -> None:
-        if header is None:
-            return
-        if old_left or new_left:
-            raise _MalformedPatch("hunk ended before its declared line counts")
+    for hunk in parsed:
+        # Checks of the map beyond the line counts: every existing line has a number,
+        # and hunks follow each other on both sides.
+        if (hunk.old_count and not hunk.old_start) or (hunk.new_count and not hunk.new_start):
+            raise _MalformedPatch("an existing line cannot have number zero")
+        if hunk.old_start < old_end or hunk.new_start < new_end:
+            raise _MalformedPatch("hunks overlap or are out of order")
+        old_end, new_end = hunk.old_start + hunk.old_count, hunk.new_start + hunk.new_count
         hunk_id = f"{file_id}:{len(hunks)}"
-        numbered = tuple(
-            DiffRow(f"{hunk_id}:{index}", kind, old, new, text)
-            for index, (kind, old, new, text) in enumerate(rows)
+        rows = tuple(
+            DiffRow(f"{hunk_id}:{index}", RowKind(row.kind), row.old_line, row.new_line, row.text)
+            for index, row in enumerate(hunk.rows)
         )
-        hunks.append(DiffHunk(hunk_id, *header, True, numbered))
-
-    for line in lines:
-        match = _HUNK.match(line)
-        if match is not None:
-            close()
-            old_start, new_start = int(match.group(1)), int(match.group(3))
-            old_count = 1 if match.group(2) is None else int(match.group(2))
-            new_count = 1 if match.group(4) is None else int(match.group(4))
-            if (old_count and not old_start) or (new_count and not new_start):
-                raise _MalformedPatch("an existing line cannot have number zero")
-            if old_start < old_end or new_start < new_end:
-                raise _MalformedPatch("hunks overlap or are out of order")
-            old_end, new_end = old_start + old_count, new_start + new_count
-            header = (old_start, old_count, new_start, new_count)
-            rows = []
-            old_line, new_line, old_left, new_left = old_start, new_start, old_count, new_count
-            continue
-        if header is None:
-            raise _MalformedPatch("patch has no hunk header")
-        if line == _NO_NEWLINE:
-            continue
-        if line.startswith("+"):
-            rows.append((RowKind.ADDED, None, new_line, line[1:]))
-            new_line, new_left = new_line + 1, new_left - 1
-        elif line.startswith("-"):
-            rows.append((RowKind.REMOVED, old_line, None, line[1:]))
-            old_line, old_left = old_line + 1, old_left - 1
-        elif line.startswith(" "):
-            rows.append((RowKind.CONTEXT, old_line, new_line, line[1:]))
-            old_line, new_line = old_line + 1, new_line + 1
-            old_left, new_left = old_left - 1, new_left - 1
-        else:
-            raise _MalformedPatch("hunk has an unknown line prefix")
-        if old_left < 0 or new_left < 0:
-            raise _MalformedPatch("hunk exceeded its declared line counts")
-    close()
-    if not hunks:
-        raise _MalformedPatch("patch has no hunk")
+        hunks.append(
+            DiffHunk(
+                hunk_id, hunk.old_start, hunk.old_count, hunk.new_start, hunk.new_count, True, rows
+            )
+        )
     return tuple(hunks)
