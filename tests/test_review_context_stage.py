@@ -214,7 +214,9 @@ def test_stage_records_the_policy_and_the_context_without_any_document_or_code_t
     )
     assert context["diff"]["diff_old_sha"] == "c" * 40
     assert context["levels_present"] == ["L1", "L3"]
-    assert context["omissions"] == [{"reason": "ignored", "path": None, "count": 1}]
+    assert context["omissions"] == [
+        {"reason": "ignored", "path": None, "count": 1, "diagnostic_path": None}
+    ]
     assert {block["path"] for block in context["blocks"]} == {"src/app.py"}
     assert context["blocks"][0]["ranges"] == [[1, 3]]
     recorded = repr(trace.steps)
@@ -330,5 +332,21 @@ def test_stored_patch_without_hunks_and_an_unwrapped_patch_are_both_accepted() -
     context = trace.steps[1][2]
     assert context["status"] == "review"
     assert context["omissions"] == [
-        {"reason": "patch_metadata_only", "path": "img.png", "count": 1}
+        {"reason": "patch_metadata_only", "path": "img.png", "count": 1, "diagnostic_path": None}
     ]
+
+
+def test_execution_profile_takes_what_the_worker_knows_about_its_models() -> None:
+    from app.modules.reviews.infrastructure.llm.settings import LlmSettings
+    from app.worker import execution_profile_of
+
+    assert execution_profile_of(None).review_model == ""
+    settings = LlmSettings.from_env({"LLM_MODEL": "mistral-small-4", "LLM_API_KEYS": "sk-test"})
+    profile = execution_profile_of(settings)
+
+    assert (profile.profile_name, profile.review_model) == ("fast", "mistral-small-4")
+    assert profile.primary_provider_route == settings.primary.provider
+    assert profile.fallback_review_model is None
+    # The verifier model and the versioned profiles are not known to the worker yet.
+    assert profile.verifier_model == ""
+    assert profile.is_complete is False

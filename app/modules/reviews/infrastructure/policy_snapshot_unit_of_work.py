@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import fields
+from typing import Any
 from uuid import UUID
 
 from sqlalchemy import select
@@ -16,10 +18,15 @@ from app.modules.reviews.application.policy_snapshot import (
     AGENTS_DOCUMENT_PATH,
     RULES_DOCUMENT_PATH,
     DocumentPresence,
+    ExecutionProfile,
     PolicyDocument,
     PolicySnapshot,
+    PromptBindings,
 )
-from app.modules.reviews.application.prepare_policy_snapshot import RunPolicyPins
+from app.modules.reviews.application.prepare_policy_snapshot import (
+    RunPolicyPins,
+    pinned_to_json,
+)
 from app.modules.reviews.infrastructure.models import (
     CodeChange,
     PromptVersion,
@@ -28,7 +35,24 @@ from app.modules.reviews.infrastructure.models import (
     RunPolicySnapshot,
 )
 
-_REVIEW_PROMPT_BINDING = "review.system"
+_PROMPT_ID_FIELDS = frozenset({"review_system_id", "conventions_id", "verifier_id"})
+UNPINNED_EXECUTION_PROFILE = ExecutionProfile.fast(review_model="", verifier_model="")
+
+
+def _bindings(stored: dict[str, Any]) -> PromptBindings:
+    """Read stored bindings; a key added by a later version of the type is ignored."""
+    known = {item.name for item in fields(PromptBindings)}
+    values: dict[str, Any] = {
+        name: UUID(value) if name in _PROMPT_ID_FIELDS and value is not None else value
+        for name, value in stored.items()
+        if name in known
+    }
+    return PromptBindings(**values)
+
+
+def _profile(stored: dict[str, Any]) -> ExecutionProfile:
+    known = {item.name for item in fields(ExecutionProfile)}
+    return ExecutionProfile(**{name: value for name, value in stored.items() if name in known})
 
 
 def _document(row: RunPolicyDocument) -> LoadedPolicyDocument:
@@ -48,13 +72,25 @@ def _document(row: RunPolicyDocument) -> LoadedPolicyDocument:
 class SqlAlchemyPolicySnapshotStore:
     """Session-bound adapter; it only flushes and never owns a commit."""
 
-    def __init__(self, session: AsyncSession) -> None:
+    def __init__(
+        self,
+        session: AsyncSession,
+        *,
+        execution_profile: ExecutionProfile = UNPINNED_EXECUTION_PROFILE,
+    ) -> None:
         self._session = session
+        self._execution_profile = execution_profile
 
     async def get_pins(self, run_id: UUID) -> RunPolicyPins | None:
         row = (
             await self._session.execute(
-                select(Run, CodeChange.repository_id, RuleVersion.checksum, PromptVersion.checksum)
+                select(
+                    Run,
+                    CodeChange.repository_id,
+                    RuleVersion.checksum,
+                    PromptVersion.checksum,
+                    PromptVersion.version,
+                )
                 .join(CodeChange, CodeChange.id == Run.code_change_id)
                 .join(RuleVersion, RuleVersion.id == Run.rule_version_id)
                 .join(PromptVersion, PromptVersion.id == Run.prompt_version_id)
@@ -63,22 +99,25 @@ class SqlAlchemyPolicySnapshotStore:
         ).one_or_none()
         if row is None:
             return None
-        run, repository_id, defaults_checksum, prompt_checksum = row
+        run, repository_id, defaults_checksum, prompt_checksum, prompt_version = row
         return RunPolicyPins(
             run_id=run.id,
             repository_id=repository_id,
             policy_base_sha=run.base_sha,
             service_defaults_rule_version_id=run.rule_version_id,
             defaults_checksum=defaults_checksum,
-            # The run pins only the review prompt today; the other bindings and the
-            # execution profile arrive with the LLM pipeline contract (#120).
-            prompt_bindings={
-                _REVIEW_PROMPT_BINDING: {
-                    "id": str(run.prompt_version_id),
-                    "checksum": prompt_checksum,
-                }
-            },
-            execution_profile={},
+            # A run pins only its review prompt today. The conventions and verifier
+            # prompts stay unpinned until runs store them (#120), so the bindings are
+            # not complete yet. The execution profile is the worker's current one,
+            # fixed for the run by the first stored snapshot.
+            prompt_bindings=PromptBindings(
+                review_system_checksum=prompt_checksum,
+                conventions_checksum="",
+                verifier_checksum="",
+                review_system_version=f"v{prompt_version}",
+                review_system_id=run.prompt_version_id,
+            ),
+            execution_profile=self._execution_profile,
         )
 
     async def get_staged_documents(self, run_id: UUID) -> tuple[LoadedPolicyDocument, ...]:
@@ -145,9 +184,10 @@ class SqlAlchemyPolicySnapshotStore:
             priority_matcher_version=row.priority_matcher_version,
             service_defaults_rule_version_id=row.service_defaults_rule_version_id,
             defaults_checksum=row.defaults_checksum,
-            prompt_bindings=dict(row.prompt_bindings),
-            execution_profile=dict(row.execution_profile),
+            prompt_bindings=_bindings(row.prompt_bindings),
+            execution_profile=_profile(row.execution_profile),
             policy_digest=row.policy_digest,
+            created_at=row.created_at,
         )
 
     async def create_snapshot(self, snapshot: PolicySnapshot) -> PolicySnapshot:
@@ -169,8 +209,8 @@ class SqlAlchemyPolicySnapshotStore:
                 priority_matcher_version=snapshot.priority_matcher_version,
                 service_defaults_rule_version_id=snapshot.service_defaults_rule_version_id,
                 defaults_checksum=snapshot.defaults_checksum,
-                prompt_bindings=dict(snapshot.prompt_bindings),
-                execution_profile=dict(snapshot.execution_profile),
+                prompt_bindings=pinned_to_json(snapshot.prompt_bindings),
+                execution_profile=pinned_to_json(snapshot.execution_profile),
                 policy_digest=snapshot.policy_digest,
             )
             # A concurrent worker's snapshot wins; the caller compares the digests.
@@ -185,9 +225,17 @@ class SqlAlchemyPolicySnapshotStore:
 class SqlAlchemyPolicySnapshotUnitOfWork(SqlAlchemyUnitOfWork):
     """Expose policy snapshot persistence in one explicit transaction."""
 
-    def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
+    def __init__(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        *,
+        execution_profile: ExecutionProfile = UNPINNED_EXECUTION_PROFILE,
+    ) -> None:
         super().__init__(session_factory)
+        self._execution_profile = execution_profile
 
     @property
     def policy(self) -> SqlAlchemyPolicySnapshotStore:
-        return SqlAlchemyPolicySnapshotStore(self.session)
+        return SqlAlchemyPolicySnapshotStore(
+            self.session, execution_profile=self._execution_profile
+        )

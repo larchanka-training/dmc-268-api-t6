@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from uuid import UUID
 
 from app.modules.reviews.application.ast_resolution import ImportResolution, RevisionTree
@@ -19,6 +19,8 @@ from app.modules.reviews.application.policy_documents import missing_document
 from app.modules.reviews.application.policy_snapshot import (
     AGENTS_DOCUMENT_PATH,
     RULES_DOCUMENT_PATH,
+    ExecutionProfile,
+    PromptBindings,
 )
 from app.modules.reviews.application.prepare_policy_snapshot import (
     RunPolicyPins,
@@ -185,7 +187,15 @@ def _build(
 ) -> ReviewContextPayload:
     policy = parse_review_ignore(rules_text)
     snapshot = build_policy_snapshot(
-        RunPolicyPins(UUID(int=2), _REPOSITORY, "b" * 40, UUID(int=4), "2" * 64, {}, {}),
+        RunPolicyPins(
+            UUID(int=2),
+            _REPOSITORY,
+            "b" * 40,
+            UUID(int=4),
+            "2" * 64,
+            PromptBindings("3" * 64, "", ""),
+            ExecutionProfile.fast("model-a", ""),
+        ),
         rules=missing_document(RULES_DOCUMENT_PATH),
         agents=missing_document(AGENTS_DOCUMENT_PATH),
         ignore=policy,
@@ -376,9 +386,10 @@ def test_unusable_files_are_withheld_with_a_reason_and_the_rest_is_reviewed() ->
     payload = _build(repository, diff_map)
 
     assert payload.status is ContextStatus.REVIEW
-    assert {(item.reason, item.path) for item in payload.omissions} == {
-        ("unsupported_path", "src\\bad.py"),
-        ("patch_missing", "pkg/secret.py"),
+    # The rejected name is diagnostic only; the canonical path of that omission is empty.
+    assert {(item.reason, item.path, item.diagnostic_path) for item in payload.omissions} == {
+        ("unsupported_path", None, "src\\bad.py"),
+        ("patch_missing", "pkg/secret.py", None),
     }
     assert {block.source.path for block in payload.blocks if block.level is ContextLevel.L1} == {
         "pkg/service.py"
@@ -461,6 +472,48 @@ def test_deleted_file_is_shown_as_a_diff_of_the_old_side_only() -> None:
     assert payload.levels_present == (ContextLevel.L1,)
     assert payload.blocks[0].source.path == "pkg/gone.py"
     assert payload.blocks[0].source.revision == "c" * 40
+
+
+def test_removed_lines_of_a_changed_file_point_at_the_old_revision() -> None:
+    repository = _service_repository()
+    patch = (
+        "@@ -9,5 +9,4 @@\n def greet(user_id):\n"
+        '     """Greet a user."""\n     user = User(user_id)\n-    gone = 1\n'
+        '     return "hi " + user.name'
+    )
+    repository.files["pkg/service.py"] = _SERVICE.replace("    extra = 1\n", "")
+    diff_map = _diff_map(_vcs_file(repository, "pkg/service.py", patch, additions=0, deletions=1))
+
+    payload = _build(repository, diff_map)
+
+    diff = next(block for block in payload.blocks if block.level is ContextLevel.L1)
+    assert (diff.source.revision, diff.source.ranges) == (_HEAD, (LineRange(9, 12),))
+    (old_side,) = diff.related_sources
+    assert (old_side.revision, old_side.path, old_side.ranges) == (
+        "c" * 40,
+        "pkg/service.py",
+        (LineRange(9, 13),),
+    )
+
+
+def test_deleted_file_of_an_unknown_old_revision_has_no_confirmed_source_to_show() -> None:
+    repository = _service_repository()
+    removed = _vcs_file(
+        repository,
+        "pkg/gone.py",
+        "@@ -1,2 +0,0 @@\n-a = 1\n-b = 2",
+        additions=0,
+        deletions=2,
+        status="removed",
+    )
+    diff_map = replace(_diff_map(removed), diff_old_sha=None)
+
+    payload = _build(repository, diff_map)
+
+    assert payload.blocks == ()
+    assert [(item.reason, item.path) for item in payload.omissions] == [
+        ("old_revision_unknown", "pkg/gone.py")
+    ]
 
 
 def test_cached_facts_skip_the_parser_but_not_the_ignore_guard() -> None:

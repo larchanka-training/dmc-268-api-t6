@@ -8,8 +8,8 @@ call is allowed before the snapshot exists.
 from __future__ import annotations
 
 import json
-from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from collections.abc import Callable
+from dataclasses import asdict, dataclass
 from hashlib import sha256
 from typing import Protocol
 from uuid import UUID, uuid4
@@ -25,8 +25,10 @@ from app.modules.reviews.application.policy_snapshot import (
     AGENTS_DOCUMENT_PATH,
     POLICY_SNAPSHOT_SCHEMA_VERSION,
     RULES_DOCUMENT_PATH,
+    ExecutionProfile,
     PolicyDocument,
     PolicySnapshot,
+    PromptBindings,
 )
 from app.modules.reviews.application.review_ignore import (
     BUILTIN_EXCLUSIONS_VERSION,
@@ -50,8 +52,8 @@ class RunPolicyPins:
     policy_base_sha: str
     service_defaults_rule_version_id: UUID
     defaults_checksum: str
-    prompt_bindings: Mapping[str, object]
-    execution_profile: Mapping[str, object]
+    prompt_bindings: PromptBindings
+    execution_profile: ExecutionProfile
 
 
 class PolicySnapshotStore(Protocol):
@@ -81,6 +83,13 @@ class PolicySnapshotUnitOfWorkFactory(Protocol):
     def __call__(self) -> PolicySnapshotUnitOfWork: ...
 
 
+def pinned_to_json(value: PromptBindings | ExecutionProfile) -> dict[str, str | int | None]:
+    """A JSON form of pinned versions for the digest and for storage."""
+    return {
+        name: str(item) if isinstance(item, UUID) else item for name, item in asdict(value).items()
+    }
+
+
 def build_policy_snapshot(
     pins: RunPolicyPins,
     *,
@@ -107,8 +116,8 @@ def build_policy_snapshot(
         "exact_parser_version": PARSER_VERSION,
         "limits_version": LIMITS_VERSION,
         "defaults_checksum": pins.defaults_checksum,
-        "prompt_bindings": pins.prompt_bindings,
-        "execution_profile": pins.execution_profile,
+        "prompt_bindings": pinned_to_json(pins.prompt_bindings),
+        "execution_profile": pinned_to_json(pins.execution_profile),
         "priority_matcher_version": PRIORITY_MATCHER_VERSION,
     }
     canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True)

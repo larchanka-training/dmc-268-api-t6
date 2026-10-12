@@ -112,7 +112,12 @@ def context_summary(diff_map: DiffMap, payload: ReviewContextPayload) -> dict[st
         "tokens_used": payload.tokens_used,
         "imports": dict(Counter(ref.resolution.value for ref in payload.imports)),
         "omissions": [
-            {"reason": item.reason, "path": item.path, "count": item.count}
+            {
+                "reason": item.reason,
+                "path": item.path,
+                "count": item.count,
+                "diagnostic_path": item.diagnostic_path,
+            }
             for item in payload.omissions
         ],
         "blocks": [
@@ -120,7 +125,17 @@ def context_summary(diff_map: DiffMap, payload: ReviewContextPayload) -> dict[st
                 "level": block.level.value,
                 "role": block.source.role.value,
                 "path": block.source.path,
+                "side": None if block.source.side is None else block.source.side.value,
                 "ranges": [[item.start_line, item.end_line] for item in block.source.ranges],
+                "related": [
+                    {
+                        "side": None if ref.side is None else ref.side.value,
+                        "path": ref.path,
+                        "revision": ref.revision,
+                        "ranges": [[item.start_line, item.end_line] for item in ref.ranges],
+                    }
+                    for ref in block.related_sources
+                ],
                 "representation": block.representation.value,
                 "tokens": block.tokens,
                 "truncated": block.truncated,

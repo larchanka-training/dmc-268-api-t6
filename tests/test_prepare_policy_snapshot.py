@@ -23,7 +23,9 @@ from app.modules.reviews.application.policy_snapshot import (
     AGENTS_DOCUMENT_PATH,
     RULES_DOCUMENT_PATH,
     DocumentPresence,
+    ExecutionProfile,
     PolicySnapshot,
+    PromptBindings,
 )
 from app.modules.reviews.application.prepare_policy_snapshot import (
     PreparePolicySnapshot,
@@ -44,8 +46,8 @@ def _pins(**changes: object) -> RunPolicyPins:
         "policy_base_sha": _BASE,
         "service_defaults_rule_version_id": UUID("00000000-0000-0000-0000-000000000004"),
         "defaults_checksum": "2" * 64,
-        "prompt_bindings": {"review.system": {"id": "p1", "checksum": "3" * 64}},
-        "execution_profile": {},
+        "prompt_bindings": PromptBindings("3" * 64, "", "", review_system_id=UUID(int=31)),
+        "execution_profile": ExecutionProfile.fast("model-a", ""),
     }
     return RunPolicyPins(**{**values, **changes})  # type: ignore[arg-type]
 
@@ -250,7 +252,19 @@ def test_policy_digest_is_content_only_and_changes_with_any_policy_input() -> No
     assert (
         base.policy_digest
         != _snapshot(
-            _RULES_TEXT, prompt_bindings={"review.system": {"id": "p2", "checksum": "3" * 64}}
+            _RULES_TEXT,
+            prompt_bindings=PromptBindings("3" * 64, "", "", review_system_id=UUID(int=32)),
+        ).policy_digest
+    )
+
+
+def test_policy_digest_changes_with_the_pinned_execution_profile() -> None:
+    base = _snapshot(_RULES_TEXT)
+
+    assert (
+        base.policy_digest
+        != _snapshot(
+            _RULES_TEXT, execution_profile=ExecutionProfile.fast("model-b", "")
         ).policy_digest
     )
 

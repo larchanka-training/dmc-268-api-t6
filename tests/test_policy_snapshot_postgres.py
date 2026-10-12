@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import os
 from collections.abc import Iterator
+from dataclasses import replace
 from uuid import UUID
 
 import pytest
@@ -21,6 +22,7 @@ from app.modules.reviews.application.policy_snapshot import (
     AGENTS_DOCUMENT_PATH,
     RULES_DOCUMENT_PATH,
     DocumentPresence,
+    ExecutionProfile,
 )
 from app.modules.reviews.application.prepare_policy_snapshot import build_policy_snapshot
 from app.modules.reviews.application.review_ignore import parse_review_ignore
@@ -64,7 +66,10 @@ def test_pins_documents_and_snapshot_round_trip_and_stay_write_once(env: Env) ->
         factory = async_sessionmaker(engine)
 
         def uow() -> SqlAlchemyPolicySnapshotUnitOfWork:
-            return SqlAlchemyPolicySnapshotUnitOfWork(factory)
+            return SqlAlchemyPolicySnapshotUnitOfWork(
+                factory,
+                execution_profile=ExecutionProfile.fast("model-a", "", "model-c"),
+            )
 
         try:
             async with uow() as work:
@@ -74,7 +79,12 @@ def test_pins_documents_and_snapshot_round_trip_and_stay_write_once(env: Env) ->
                 assert await work.policy.get_pins(UUID(int=7)) is None
             assert pins is not None
             assert (pins.repository_id, pins.service_defaults_rule_version_id) == (REPO_A, RULE_A)
-            assert pins.prompt_bindings["review.system"]["id"] == str(PROMPT)  # type: ignore[index]
+            assert pins.prompt_bindings.pins_review_prompt(PROMPT)
+            assert pins.prompt_bindings.review_system_checksum == "c" * 64
+            assert pins.prompt_bindings.review_system_version == "v1"
+            # Only the review prompt is pinned by a run today.
+            assert pins.prompt_bindings.is_complete is False
+            assert pins.execution_profile.review_model == "model-a"
             assert len(pins.defaults_checksum) == 64
 
             rules, agents = _documents()
@@ -107,7 +117,12 @@ def test_pins_documents_and_snapshot_round_trip_and_stay_write_once(env: Env) ->
             async with uow() as work:
                 stored = await work.policy.create_snapshot(snapshot)
                 await work.commit()
-            assert stored == snapshot
+            # The stored snapshot is the built one plus the time the database fixed it.
+            assert stored.created_at is not None
+            assert replace(stored, created_at=None) == snapshot
+            assert stored.execution_profile == ExecutionProfile.fast("model-a", "", "model-c")
+            assert stored.prompt_bindings.review_system_id == PROMPT
+            snapshot = stored
 
             rival = build_policy_snapshot(
                 pins,

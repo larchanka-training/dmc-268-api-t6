@@ -66,6 +66,7 @@ from app.modules.reviews.application.policy_documents import (
     PolicyDocumentSource,
     PolicyTreeEntry,
 )
+from app.modules.reviews.application.policy_snapshot import ExecutionProfile
 from app.modules.reviews.application.prepare_policy_snapshot import PreparePolicySnapshot
 from app.modules.reviews.application.process_run import (
     ReviewRunProcessor,
@@ -160,6 +161,7 @@ from app.modules.reviews.infrastructure.no_ci_sweep_candidates import (
     SqlAlchemySweepNoCiUnitOfWork,
 )
 from app.modules.reviews.infrastructure.policy_snapshot_unit_of_work import (
+    UNPINNED_EXECUTION_PROFILE,
     SqlAlchemyPolicySnapshotUnitOfWork,
 )
 from app.modules.reviews.infrastructure.provider_conventions import (
@@ -460,6 +462,26 @@ class GitHubAdapters:
     context_stage: Callable[[RunTrace | None], ReviewContextStage] | None = None
 
 
+def execution_profile_of(llm: LlmSettings | None) -> ExecutionProfile:
+    """The model settings of this worker that a policy snapshot fixes for its run.
+
+    Only what the worker knows today: the review model, its fallback and their providers.
+    The verifier model and the versioned profiles arrive with #120; until then the
+    profile is not complete.
+    """
+    if llm is None:
+        return UNPINNED_EXECUTION_PROFILE
+    fallback = llm.fallback
+    return ExecutionProfile(
+        profile_name="fast",
+        review_model=llm.primary.model,
+        verifier_model="",
+        fallback_review_model=None if fallback is None else fallback.model,
+        primary_provider_route=llm.primary.provider,
+        fallback_provider_route=None if fallback is None else fallback.provider,
+    )
+
+
 def review_context_stage_factory(
     *,
     client: httpx.AsyncClient,
@@ -468,6 +490,7 @@ def review_context_stage_factory(
     runs: SqlAlchemyRunRepository,
     session_factory: async_sessionmaker[AsyncSession],
     redis: RedisLike | None,
+    execution_profile: ExecutionProfile = UNPINNED_EXECUTION_PROFILE,
 ) -> Callable[[RunTrace | None], ReviewContextStage]:
     """Compose the flagged policy and context stage; every run gets its own parser."""
 
@@ -496,7 +519,9 @@ def review_context_stage_factory(
             vcs=vcs,
             merge_base=vcs,
             prepare_policy=PreparePolicySnapshot(
-                uow_factory=lambda: SqlAlchemyPolicySnapshotUnitOfWork(session_factory),
+                uow_factory=lambda: SqlAlchemyPolicySnapshotUnitOfWork(
+                    session_factory, execution_profile=execution_profile
+                ),
                 source_factory=lambda pins: _policy_source(pins.run_id, pins.policy_base_sha),
             ),
             context_builder=context_builder,
@@ -586,6 +611,7 @@ def github_adapters(
             runs=runs,
             session_factory=session_factory,
             redis=redis,
+            execution_profile=execution_profile_of(settings.llm),
         )
         if settings.review_context_pipeline
         else None

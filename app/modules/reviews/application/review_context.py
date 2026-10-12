@@ -41,7 +41,7 @@ from app.modules.reviews.application.context_provenance import (
     LineRange,
     SourceRef,
     SourceRole,
-    hunk_source_ref,
+    hunk_source_refs,
 )
 from app.modules.reviews.application.diff_map import (
     DiffFile,
@@ -106,15 +106,22 @@ class ContextBlock:
     text: str
     tokens: int
     truncated: bool
+    # The other side of a diff hunk: removed lines come from the old revision.
+    related_sources: tuple[SourceRef, ...] = ()
 
 
 @dataclass(frozen=True)
 class ContextOmission:
-    """Something that was not shown and why; an ignored file is counted, never named."""
+    """Something that was not shown and why; an ignored file is counted, never named.
+
+    ``path`` is canonical and may be listed for a model. A name rejected by the path
+    contract is kept only in ``diagnostic_path``, for the trace and the UI.
+    """
 
     reason: str
     path: str | None = None
     count: int = 1
+    diagnostic_path: str | None = None
 
 
 @dataclass(frozen=True)
@@ -300,7 +307,12 @@ class BuildReviewContext:
         for file in diff_map.files:
             path = file.new_path or file.old_path or ""
             if file.omission_reason is not None:
-                omissions.append(ContextOmission(file.omission_reason.value, path))
+                omissions.append(
+                    ContextOmission(
+                        file.omission_reason.value,
+                        diagnostic_path=file.provider_new_path or file.provider_old_path,
+                    )
+                )
             elif ignore.decision_for(file.file_id) is not None or any(
                 self._builtin_excluded(item) for item in (file.old_path, file.new_path) if item
             ):
@@ -367,15 +379,21 @@ class BuildReviewContext:
                 if truncated:
                     omissions.append(ContextOmission("budget", path))
                     break
-                text = _hunk_text(hunk)
-                block = self._hunk_block(diff_map, file, hunk, text, cut=False)
+                block = self._hunk_block(diff_map, file, hunk, _hunk_text(hunk), cut=False)
+                if block is None:
+                    # Removed text of an unknown old revision has no confirmed source.
+                    omissions.append(ContextOmission("old_revision_unknown", path))
+                    continue
                 if take(block):
                     continue
                 truncated = True
                 rows = self._fitting_rows(hunk, remaining)
-                if rows:
-                    take(self._hunk_block(diff_map, file, hunk, _hunk_text(hunk, rows), cut=True))
-                else:
+                cut = (
+                    self._hunk_block(diff_map, file, hunk, _hunk_text(hunk, rows), cut=True)
+                    if rows
+                    else None
+                )
+                if cut is None or not take(cut):
                     omissions.append(ContextOmission("budget", path))
         if truncated:
             return payload(ContextStatus.REVIEW, None, tuple(blocks))
@@ -490,16 +508,20 @@ class BuildReviewContext:
 
     def _hunk_block(
         self, diff_map: DiffMap, file: DiffFile, hunk: DiffHunk, text: str, *, cut: bool
-    ) -> ContextBlock:
+    ) -> ContextBlock | None:
+        refs = hunk_source_refs(diff_map, file, hunk)
+        if not refs:
+            return None
         return ContextBlock(
             block_id=f"L1:{hunk.hunk_id}",
             level=ContextLevel.L1,
             file_id=file.file_id,
-            source=hunk_source_ref(diff_map, file, hunk),
+            source=refs[0],
             representation=Representation.EXACT_LINES,
             text=text,
             tokens=self._counter.count(text),
             truncated=cut,
+            related_sources=refs[1:],
         )
 
     def _fitting_rows(self, hunk: DiffHunk, budget: int) -> int:
