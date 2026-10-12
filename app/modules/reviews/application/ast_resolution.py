@@ -361,8 +361,6 @@ class ImportResolver:
                             importer_path, facts.language, item, binding, wanted, members
                         )
                     resolution, reason, found = outcome
-                    symbols_in_file += len(found)
-                    self._symbols_in_run += len(found)
                     # A Python submodule binding is resolved through the members taken from it.
                     through_members = (
                         facts.language is AstLanguage.PYTHON
@@ -371,9 +369,31 @@ class ImportResolver:
                         and found[0].name != binding.name
                     )
                     names = members if through_members else wanted
-                    refs.append(
-                        ImportRef(importer_id, item.module, names, found, resolution, reason)
+                    # One import can bring several definitions: only those that fit both
+                    # remaining limits are shown, the rest are reported, not presented.
+                    room = min(
+                        MAX_IMPORTED_SYMBOLS_PER_FILE - symbols_in_file,
+                        MAX_IMPORTED_SYMBOLS_PER_RUN - self._symbols_in_run,
                     )
+                    kept, dropped = found[:room], found[room:]
+                    symbols_in_file += len(kept)
+                    self._symbols_in_run += len(kept)
+                    if kept or not found:
+                        shown = names[: len(kept)] if dropped else names
+                        refs.append(
+                            ImportRef(importer_id, item.module, shown, kept, resolution, reason)
+                        )
+                    if dropped:
+                        refs.append(
+                            ImportRef(
+                                importer_id,
+                                item.module,
+                                names[len(kept) :],
+                                (),
+                                ImportResolution.UNSUPPORTED,
+                                "ast_limit",
+                            )
+                        )
         return tuple(refs)
 
     async def _go_package_name(self, item: AstImport, binding: AstImportName) -> str | None:

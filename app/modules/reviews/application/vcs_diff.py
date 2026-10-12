@@ -101,8 +101,16 @@ class VcsProvider(Protocol):
     async def get_blob(self, locator: PullRequestLocator, sha: str) -> bytes: ...
 
 
+class MergeBaseUnavailable(Exception):
+    """The provider could not tell the merge base; the old side of the diff stays unknown."""
+
+
 class MergeBaseProvider(Protocol):
-    """Resolves the old side of a pull request diff: the merge base of its base and head."""
+    """Resolves the old side of a pull request diff: the merge base of its base and head.
+
+    An implementation raises ``MergeBaseUnavailable`` for any failure of its transport or
+    of the provider answer, never an error of its own client library.
+    """
 
     async def get_merge_base(self, pull_request: VcsPullRequest) -> str: ...
 

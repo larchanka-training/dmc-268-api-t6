@@ -565,11 +565,57 @@ class BuildReviewContext:
         ranges.extend(covered)
         for hunk in file.hunks:
             first = max(hunk.new_start, 1)
-            final = max(hunk.new_start + hunk.new_count - 1, first)
+            final = min(max(hunk.new_start + hunk.new_count - 1, first), last)
             inside = any(item.start_line <= first and final <= item.end_line for item in covered)
-            if not inside:
-                ranges.append(LineRange(max(1, first - radius), min(last, final + radius)))
-        return [item for item in _merge(ranges) if item.start_line <= last]
+            window = None if inside else self._window(lines, first, final, radius, last)
+            if window is not None:
+                ranges.append(window)
+        return self._merge_within_limits(ranges, lines)
+
+    def _fits(self, lines: list[str], item: LineRange) -> bool:
+        """Whether a fragment respects the per-fragment limits of lines and tokens."""
+        if item.end_line - item.start_line + 1 > FRAGMENT_MAX_LINES:
+            return False
+        text = "\n".join(lines[item.start_line - 1 : item.end_line])
+        return self._counter.count(text) <= FRAGMENT_MAX_TOKENS
+
+    def _window(
+        self, lines: list[str], first: int, final: int, radius: int, last: int
+    ) -> LineRange | None:
+        """The widest window around a hunk that fits a fragment, or none at all.
+
+        The expansion is reduced until the fragment fits. A hunk that does not fit by
+        itself gets no window: the diff block already shows its lines.
+        """
+        if first > last or not self._fits(lines, LineRange(first, final)):
+            return None
+        low, high = 0, radius
+        while low < high:
+            middle = (low + high + 1) // 2
+            candidate = LineRange(max(1, first - middle), min(last, final + middle))
+            if self._fits(lines, candidate):
+                low = middle
+            else:
+                high = middle - 1
+        return LineRange(max(1, first - low), min(last, final + low))
+
+    def _merge_within_limits(self, ranges: list[LineRange], lines: list[str]) -> list[LineRange]:
+        """Join touching fragments only while the result still fits one fragment."""
+        merged: list[LineRange] = []
+        for item in sorted(ranges, key=lambda value: (value.start_line, value.end_line)):
+            if not merged or item.start_line > merged[-1].end_line + 1:
+                merged.append(item)
+                continue
+            previous = merged[-1]
+            if item.end_line <= previous.end_line:
+                continue
+            union = LineRange(previous.start_line, item.end_line)
+            if self._fits(lines, union):
+                merged[-1] = union
+            else:
+                # Kept apart and without a repeated line.
+                merged.append(LineRange(previous.end_line + 1, item.end_line))
+        return merged
 
     def _excerpt(
         self,

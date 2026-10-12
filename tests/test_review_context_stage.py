@@ -9,7 +9,6 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-import httpx
 import pytest
 
 from app.modules.reviews.application.ast_resolution import RevisionTree
@@ -30,8 +29,12 @@ from app.modules.reviews.application.review_context_stage import (
     EstimatedTokenCounter,
     ReviewContextStage,
 )
-from app.modules.reviews.application.run_failures import RunSkipped
-from app.modules.reviews.application.vcs_diff import PullRequestLocator, VcsPullRequest
+from app.modules.reviews.application.run_failures import RunFailure, RunSkipped
+from app.modules.reviews.application.vcs_diff import (
+    MergeBaseUnavailable,
+    PullRequestLocator,
+    VcsPullRequest,
+)
 from app.modules.reviews.infrastructure.tree_sitter_facts import extract_facts
 from app.worker import WorkerSettings
 from tests.test_prepare_policy_snapshot import Store, Uow
@@ -194,8 +197,9 @@ def _stage(
 def test_stage_records_the_policy_and_the_context_without_any_document_or_code_text() -> None:
     trace = Trace()
 
-    payload = asyncio.run(_stage(trace).execute(_RUN))
+    payload = asyncio.run(_stage(trace).run(_RUN))
 
+    assert payload is not None
     assert payload.status is ContextStatus.REVIEW
     assert [step[0] for step in trace.steps] == ["policy.load", "context.build"]
     policy, context = trace.steps[0][2], trace.steps[1][2]
@@ -228,11 +232,11 @@ def test_stage_records_the_policy_and_the_context_without_any_document_or_code_t
 def test_retry_reuses_the_stored_policy_snapshot() -> None:
     store = Store()
     first = Trace()
-    asyncio.run(_stage(first, store=store).execute(_RUN))
+    asyncio.run(_stage(first, store=store).run(_RUN))
 
     changed = Policy(rules=b"# other rules\n")
     second = Trace()
-    asyncio.run(_stage(second, store=store, policy=changed).execute(_RUN))
+    asyncio.run(_stage(second, store=store, policy=changed).run(_RUN))
 
     assert second.steps[0][2]["policy_digest"] == first.steps[0][2]["policy_digest"]
     assert second.steps[0][2]["ignore_patterns"] == 1
@@ -240,9 +244,9 @@ def test_retry_reuses_the_stored_policy_snapshot() -> None:
 
 def test_unknown_merge_base_is_recorded_as_unknown_not_as_the_policy_base() -> None:
     trace = Trace()
-    failing = Vcs(merge_base=httpx.ConnectError("down"))
+    failing = Vcs(merge_base=MergeBaseUnavailable("down"))
 
-    asyncio.run(_stage(trace, vcs=failing).execute(_RUN))
+    asyncio.run(_stage(trace, vcs=failing).run(_RUN))
 
     assert trace.steps[1][2]["diff"]["diff_old_sha"] is None
 
@@ -292,16 +296,47 @@ def test_stage_names_what_it_withheld_from_model_inputs() -> None:
     assert stage.excluded("src/app.py") is False
 
 
-def test_failure_of_the_context_itself_does_not_fail_the_review() -> None:
-    changed_head = _stage(Trace(), vcs=Vcs(head_sha="f" * 40))
-    assert asyncio.run(changed_head.run(_RUN)) is None
-    assert changed_head.excluded("generated/api.py") is False
-    assert asyncio.run(_stage(Trace(), none=True).run(_RUN)) is None
+def test_failed_context_build_keeps_the_exclusions_and_does_not_fail_the_review() -> None:
+    class Broken:
+        async def execute(self, **kwargs: object) -> object:
+            raise RuntimeError("the tree is unavailable")
 
-    with pytest.raises(ValueError, match="head changed"):
-        asyncio.run(_stage(Trace(), vcs=Vcs(head_sha="f" * 40)).execute(_RUN))
+    trace = Trace()
+    stage = _stage(trace)
+    stage._context_builder = lambda run: Broken()  # type: ignore[assignment,return-value]
+
+    assert asyncio.run(stage.run(_RUN)) is None
+
+    # The policy was established before the enrichment failed: it stays in force.
+    assert stage.excluded("generated/api.py") is True
+    assert stage.excluded("src/app.py") is False
+    assert [step[0] for step in trace.steps] == ["policy.load", "context.build"]
+    assert trace.steps[1][2]["error"]["type"] == "RuntimeError"
+
+
+def test_path_outside_the_contract_is_always_withheld() -> None:
+    stage = _stage(Trace())
+
+    assert stage.excluded("src\\bad.py") is True
+    assert stage.excluded("a\x85b.py") is True
+
+
+def test_policy_part_that_cannot_be_established_fails_the_attempt() -> None:
+    with pytest.raises(RunFailure) as changed:
+        asyncio.run(_stage(Trace(), vcs=Vcs(head_sha="f" * 40)).run(_RUN))
+    assert changed.value.error_code == "diff_fetch_failed"
+
     with pytest.raises(LookupError, match="no stored diff"):
-        asyncio.run(_stage(Trace(), none=True).execute(_RUN))
+        asyncio.run(_stage(Trace(), none=True).run(_RUN))
+
+    class Unreachable(Vcs):
+        async def get_pull_request(self, locator: PullRequestLocator) -> VcsPullRequest:
+            raise RunFailure("diff_fetch_failed", "GitHub answered 502")
+
+    stage = _stage(Trace(), vcs=Unreachable())
+    with pytest.raises(RunFailure):
+        asyncio.run(stage.run(_RUN))
+    assert stage.excluded("generated/api.py") is False
 
 
 def test_review_prompt_gets_neither_the_content_nor_the_name_of_an_ignored_file() -> None:
@@ -415,7 +450,7 @@ def test_stored_patch_without_hunks_and_an_unwrapped_patch_are_both_accepted() -
     ]
     trace = Trace()
 
-    asyncio.run(_stage(trace, snapshots=snapshots).execute(_RUN))
+    asyncio.run(_stage(trace, snapshots=snapshots).run(_RUN))
 
     context = trace.steps[1][2]
     assert context["status"] == "review"

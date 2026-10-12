@@ -29,8 +29,16 @@ from app.modules.reviews.infrastructure.tree_sitter_facts import (
 
 
 def _limit_memory() -> None:
-    with open("/proc/self/statm", encoding="ascii") as statm:
-        current = int(statm.read().split()[0]) * resource.getpagesize()
+    """Cap the address space above what the loaded grammars already use.
+
+    The current size is read from ``/proc``, which only Linux has. Elsewhere (a developer
+    machine) the cap is skipped: the parent still stops a worker that does not answer.
+    """
+    try:
+        with open("/proc/self/statm", encoding="ascii") as statm:
+            current = int(statm.read().split()[0]) * resource.getpagesize()
+    except OSError:
+        return
     limit = current + MAX_PARSER_MEMORY_BYTES
     resource.setrlimit(resource.RLIMIT_AS, (limit, limit))
 

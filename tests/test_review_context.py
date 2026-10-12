@@ -444,6 +444,60 @@ def test_change_outside_any_declaration_gets_a_line_window() -> None:
     assert window.source.ranges == (LineRange(919, 1081),)
 
 
+def test_window_around_a_hunk_is_reduced_to_the_fragment_limits() -> None:
+    lines = [f"value_{n} = {n}" for n in range(1, 2001)]
+    for index in range(999, 1179):
+        lines[index] = f"changed_{index} = 1"
+    repository = Repository({"data.py": "\n".join(lines) + "\n"})
+    rows = "\n".join(f"+changed_{index} = 1" for index in range(999, 1179))
+    patch = f"@@ -1000,0 +1000,180 @@\n{rows}"
+    diff_map = _diff_map(_vcs_file(repository, "data.py", patch, additions=180))
+
+    payload = _build(repository, diff_map)
+
+    windows = [block for block in payload.blocks if block.level is ContextLevel.L2]
+    # 180 changed lines leave room for ten lines on each side, not for eighty.
+    assert [block.source.ranges for block in windows] == [(LineRange(990, 1189),)]
+    assert len(windows[0].text.split("\n")) == 200
+
+
+def test_hunk_larger_than_a_fragment_gets_no_window_and_token_limit_also_applies() -> None:
+    lines = [f"value_{n} = {n}" for n in range(1, 2001)]
+    repository = Repository({"data.py": "\n".join(lines) + "\n"})
+    rows = "\n".join(f"+value_{n} = {n}" for n in range(1000, 1500))
+    large = f"@@ -1000,0 +1000,500 @@\n{rows}"
+
+    payload = _build(repository, _diff_map(_vcs_file(repository, "data.py", large, additions=500)))
+    assert not [block for block in payload.blocks if block.level is ContextLevel.L2]
+    assert ContextLevel.L1 in payload.levels_present
+
+    wide = ["w " * 40 for _ in range(2000)]
+    wide_repository = Repository({"wide.txt": "\n".join(wide) + "\n"})
+    patch = "@@ -1000 +1000 @@\n-old\n+" + wide[999]
+    built = _build(
+        wide_repository,
+        _diff_map(_vcs_file(wide_repository, "wide.txt", patch, deletions=1)),
+    )
+    (window,) = [block for block in built.blocks if block.level is ContextLevel.L2]
+    # Forty words a line: fifty lines are the 2 000 token limit of one fragment.
+    assert window.tokens <= 2000
+    assert window.source.ranges == (LineRange(976, 1024),)
+
+
+def test_neighbouring_windows_merge_only_within_one_fragment() -> None:
+    lines = [f"value_{n} = {n}" for n in range(1, 2001)]
+    repository = Repository({"data.py": "\n".join(lines) + "\n"})
+    patch = "@@ -500 +500 @@\n-old\n+value_500 = 500\n@@ -620 +620 @@\n-old\n+value_620 = 620"
+    diff_map = _diff_map(_vcs_file(repository, "data.py", patch, additions=2, deletions=2))
+
+    payload = _build(repository, diff_map)
+
+    ranges = [block.source.ranges[0] for block in payload.blocks if block.level is ContextLevel.L2]
+    # Each window is 161 lines; joined they would be 281, so they stay two fragments
+    # that share no line.
+    assert ranges == [LineRange(420, 580), LineRange(581, 700)]
+
+
 def test_language_without_a_grammar_keeps_line_based_context() -> None:
     repository = Repository({"notes.md": "# Title\n\ntext\n"})
     diff_map = _diff_map(_vcs_file(repository, "notes.md", "@@ -3 +3 @@\n-old\n+text", deletions=1))

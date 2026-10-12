@@ -515,7 +515,8 @@ def review_context_stage_factory(
     def stage(trace: RunTrace | None) -> ReviewContextStage:
         return ReviewContextStage(
             runs=runs,
-            vcs=vcs,
+            # The diff of the attempt is mandatory: its read failures get run error codes.
+            vcs=ClassifiedVcsProvider(vcs),
             merge_base=vcs,
             prepare_policy=PreparePolicySnapshot(
                 uow_factory=lambda: SqlAlchemyPolicySnapshotUnitOfWork(

@@ -13,6 +13,7 @@ import pytest
 from app.modules.reviews.application.vcs_diff import (
     BlobTooLargeError,
     FetchVcsReviewInput,
+    MergeBaseUnavailable,
     OmissionReason,
     PullRequestLocator,
 )
@@ -427,7 +428,8 @@ def test_merge_base_fails_closed_on_an_error_or_a_response_without_a_commit() ->
             pr = await provider.get_pull_request(PullRequestLocator(17, "octo/repo", 7))
             await provider.get_merge_base(pr)
 
-    with pytest.raises(httpx.HTTPStatusError):
+    # The port answers with its own error, never one of the HTTP client.
+    with pytest.raises(MergeBaseUnavailable, match="HTTPStatusError"):
         asyncio.run(exercise(httpx.Response(404, json={"message": "Not Found"})))
-    with pytest.raises(ValueError, match="merge_base_commit"):
+    with pytest.raises(MergeBaseUnavailable, match="ValidationError"):
         asyncio.run(exercise(httpx.Response(200, json={"commits": []})))

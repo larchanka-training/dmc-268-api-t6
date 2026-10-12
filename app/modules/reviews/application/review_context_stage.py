@@ -15,11 +15,13 @@ from collections.abc import Callable
 from typing import Any
 from uuid import UUID
 
-import httpx
-
-from app.modules.reviews.application.diff_map import DiffMap, VcsProviderName, build_diff_map
+from app.modules.reviews.application.diff_map import (
+    DiffMap,
+    VcsProviderName,
+    build_diff_map,
+    is_supported_path,
+)
 from app.modules.reviews.application.get_run_diff import DiffSnapshot
-from app.modules.reviews.application.policy_errors import PolicyError
 from app.modules.reviews.application.policy_snapshot import PolicySnapshot
 from app.modules.reviews.application.prepare_policy_snapshot import PreparePolicySnapshot
 from app.modules.reviews.application.process_run import RunVcsInput, RunVcsRepository
@@ -33,9 +35,14 @@ from app.modules.reviews.application.review_ignore import (
     IgnorePolicy,
     apply_ignore,
 )
-from app.modules.reviews.application.run_failures import RunSkipped
+from app.modules.reviews.application.run_failures import RunFailure, RunSkipped
 from app.modules.reviews.application.run_trace import RunTrace, traced_step
-from app.modules.reviews.application.vcs_diff import MergeBaseProvider, VcsFile, VcsProvider
+from app.modules.reviews.application.vcs_diff import (
+    MergeBaseProvider,
+    MergeBaseUnavailable,
+    VcsFile,
+    VcsProvider,
+)
 
 _LOGGER = logging.getLogger(__name__)
 FAST_CONTEXT_TOKEN_BUDGET = 60_000
@@ -174,29 +181,19 @@ class ReviewContextStage:
         self._denied_paths: frozenset[str] = frozenset()
 
     def excluded(self, path: str) -> bool:
-        """Whether the last run of the stage withheld this path from model inputs."""
-        return path in self._denied_paths
+        """Whether the policy of this attempt withholds the path from every model input."""
+        return path in self._denied_paths or not is_supported_path(path)
 
     async def run(self, run_id: UUID) -> ReviewContextPayload | None:
-        """Enforce the policy of the run; a failure of the context itself is not fatal.
+        """Enforce the policy of the run, then build its context.
 
-        A policy error and a fully ignored change propagate: they end the attempt before
-        any model call. Any other failure is logged, and the review continues with the
-        diff as it does without the stage.
+        The policy part is mandatory: the snapshot, the diff of the attempt and the
+        ignore decisions. If it cannot be established the attempt fails, and a change
+        whose every file is ignored is skipped, both before any model call. Only then
+        comes the optional enrichment: its failure is logged, the exclusions stay in
+        force and the review continues with the diff.
         """
         self._denied_paths = frozenset()
-        try:
-            payload = await self.execute(run_id)
-        except PolicyError:
-            raise
-        except Exception:
-            _LOGGER.warning("Review context stage failed run_id=%s", run_id, exc_info=True)
-            return None
-        if payload.status is ContextStatus.ALL_CHANGES_IGNORED:
-            raise RunSkipped("all_changes_ignored")
-        return payload
-
-    async def execute(self, run_id: UUID) -> ReviewContextPayload:
         run = await self._runs.get_run_vcs_input(run_id)
         stored = await self._runs.get_run_snapshots(run_id) if run is not None else None
         if run is None or stored is None:
@@ -207,35 +204,59 @@ class ReviewContextStage:
             snapshot = await self._prepare_policy.execute(run_id)
             step.response = policy_summary(snapshot)
 
+        pull_request = await self._vcs.get_pull_request(run.locator)
+        if pull_request.head_sha != run.head_sha:
+            raise RunFailure("diff_fetch_failed", "pull request head changed after the diff")
+        try:
+            diff_old_sha: str | None = await self._merge_base.get_merge_base(pull_request)
+        except MergeBaseUnavailable:
+            # The old side stays unknown; it is never replaced by the policy base.
+            _LOGGER.warning("Merge base is unavailable run_id=%s", run_id, exc_info=True)
+            diff_old_sha = None
+        diff_map = build_diff_map(
+            pull_request,
+            tuple(_vcs_file(item) for item in stored),
+            provider=VcsProviderName.GITHUB,
+            repository_id=run.repository_id,
+            diff_old_sha=diff_old_sha,
+        )
+        # The snapshot keeps validated masks; the matcher is rebuilt from them.
+        matcher = IgnoreMatcher(IgnorePolicy(snapshot.ignore_patterns, (), snapshot.ignore_digest))
+        ignore = apply_ignore(matcher, diff_map)
+        self._denied_paths = ignore.denied_paths
+        if diff_map.files and all(
+            ignore.decision_for(file.file_id) is not None for file in diff_map.files
+        ):
+            await self._record_all_ignored(run_id, snapshot, diff_map)
+            raise RunSkipped("all_changes_ignored")
+
         request = {"head_sha": run.head_sha, "policy_snapshot_id": str(snapshot.snapshot_id)}
-        async with traced_step(self._trace, run_id, "context.build", request) as step:
-            pull_request = await self._vcs.get_pull_request(run.locator)
-            if pull_request.head_sha != run.head_sha:
-                raise ValueError("pull request head changed after the diff was stored")
-            try:
-                diff_old_sha: str | None = await self._merge_base.get_merge_base(pull_request)
-            except httpx.HTTPError:
-                # The old side stays unknown; it is never replaced by the policy base.
-                _LOGGER.warning("Merge base read failed run_id=%s", run_id, exc_info=True)
-                diff_old_sha = None
-            diff_map = build_diff_map(
-                pull_request,
-                tuple(_vcs_file(item) for item in stored),
-                provider=VcsProviderName.GITHUB,
-                repository_id=run.repository_id,
-                diff_old_sha=diff_old_sha,
-            )
-            # The snapshot keeps validated masks; the matcher is rebuilt from them.
-            policy = IgnorePolicy(snapshot.ignore_patterns, (), snapshot.ignore_digest)
-            matcher = IgnoreMatcher(policy)
-            ignore = apply_ignore(matcher, diff_map)
-            payload = await self._context_builder(run).execute(
-                diff_map=diff_map,
-                snapshot=snapshot,
-                matcher=matcher,
-                ignore=ignore,
-                token_budget=self._token_budget,
-            )
-            self._denied_paths = ignore.denied_paths
-            step.response = context_summary(diff_map, payload)
+        try:
+            async with traced_step(self._trace, run_id, "context.build", request) as step:
+                payload = await self._context_builder(run).execute(
+                    diff_map=diff_map,
+                    snapshot=snapshot,
+                    matcher=matcher,
+                    ignore=ignore,
+                    token_budget=self._token_budget,
+                )
+                step.response = context_summary(diff_map, payload)
+        except Exception:
+            _LOGGER.warning("Review context build failed run_id=%s", run_id, exc_info=True)
+            return None
+        if payload.status is ContextStatus.ALL_CHANGES_IGNORED:
+            raise RunSkipped("all_changes_ignored")
         return payload
+
+    async def _record_all_ignored(
+        self, run_id: UUID, snapshot: PolicySnapshot, diff_map: DiffMap
+    ) -> None:
+        request = {"head_sha": diff_map.head_sha, "policy_snapshot_id": str(snapshot.snapshot_id)}
+        async with traced_step(self._trace, run_id, "context.build", request) as step:
+            step.response = {
+                "status": ContextStatus.ALL_CHANGES_IGNORED.value,
+                "reason": "all_changes_ignored",
+                "diff": {"digest": diff_map.digest, "files": len(diff_map.files)},
+                "ignored_files": len(diff_map.files),
+                "blocks": [],
+            }

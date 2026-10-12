@@ -451,3 +451,50 @@ def test_excluded_python_target_is_reported_and_not_shown() -> None:
     ref = _one(sources, "pkg/app.py", "f", unavailable={"pkg/client.py": "excluded"})
 
     assert (ref.resolution, ref.resolved_symbols) == (ImportResolution.EXCLUDED, ())
+
+
+def _many_exports(count: int) -> dict[str, str]:
+    exports = "".join(f"export function f{n}() {{ return {n} }}\n" for n in range(count))
+    calls = " + ".join(f"lib.f{n}()" for n in range(count))
+    return {
+        "src/app.ts": (
+            f'import * as lib from "./lib";\nexport function run() {{ return {calls} }}\n'
+        ),
+        "src/lib.ts": exports,
+    }
+
+
+def test_one_import_cannot_bring_more_symbols_than_the_file_limit() -> None:
+    refs, _ = _resolve(_many_exports(11), "src/app.ts", "run")
+
+    shown, over = refs
+    assert (shown.resolution, len(shown.resolved_symbols), len(shown.names)) == (
+        ImportResolution.RESOLVED,
+        10,
+        10,
+    )
+    assert (over.resolution, over.reason, over.resolved_symbols) == (
+        ImportResolution.UNSUPPORTED,
+        "ast_limit",
+        (),
+    )
+    assert len(over.names) == 1
+    assert set(shown.names).isdisjoint(over.names)
+
+
+def test_last_import_of_a_run_is_cut_to_the_remaining_run_limit() -> None:
+    sources = _many_exports(8)
+    provider = Provider(sources)
+    tree = RevisionTree(_HEAD, {path: "b" * 40 for path in sources}, True)
+    resolver = ImportResolver(tree=tree, provider=provider)
+    resolver._symbols_in_run = 95
+    facts = _facts("src/app.ts", sources["src/app.ts"])
+    symbols = [item for item in facts.symbols if item.name == "run"]
+
+    shown, over = asyncio.run(
+        resolver.resolve(importer_path="src/app.ts", facts=facts, symbols=symbols)
+    )
+
+    assert len(shown.resolved_symbols) == 5
+    assert (over.reason, len(over.names)) == ("ast_limit", 3)
+    assert resolver._symbols_in_run == 100
