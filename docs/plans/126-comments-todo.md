@@ -19,7 +19,7 @@
 - [x] `uv run pytest` with real integration services and zero skips.
 - [x] Refresh proof, head/base and counts.
 - [x] Coordinator final review against every comment.
-- [ ] Update PR #126 body and reply with commit/evidence; reviewer resolves threads.
+- [x] Update PR #126 body and reply with commit/evidence; reviewer resolves threads.
 
 Modern proof: Compose 5.6.0, six accepted/refused/offline cases and owned cleanup passed.
 Both literal probe mutations: 4 failures each in separate temporary source copies.
@@ -29,4 +29,11 @@ Final gates: lint passed; format 358 files; mypy 355 sources; pytest 2608 passed
 
 Final independent review after the filename collision correction: **Standards 0 findings;
 Spec 0 findings**. The coordinator confirmed the exact gates and final development handoff.
-Publication is prepared; external delivery is recorded after the push and reviewer reply.
+Publication completed at correction commit `e4c739fa0de6dddf305a61e395660170cca05ba2`.
+The existing [PR #126](https://github.com/larchanka-training/dmc-268-api-t6/pull/126)
+body was refreshed and the author posted the required
+[reviewer-thread reply](https://github.com/larchanka-training/dmc-268-api-t6/pull/126#discussion_r4246884745).
+GitHub and `git ls-remote` confirmed the correction as the remote branch head;
+`main` remains `46a90772f65c04aa3cc4db11b198e6d052bf1207`. This follow-up changes only
+delivery metadata. CI had passing preliminary checks and remaining jobs in progress at
+that check; current-head approval and reviewer thread resolution remain external.

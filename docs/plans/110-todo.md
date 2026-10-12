@@ -487,3 +487,25 @@ Final authoritative gates after the collision-path correction, 2026-10-12:
 The earlier complete pass (2608 tests, 368.48 seconds) preceded the final generated-filename
 correction and is not the authoritative final gate. Both current tests and saved evidence
 identify the exact limits of the modern live acceptance run.
+
+## Published review corrections (2026-10-12)
+
+Correction commit `e4c739fa0de6dddf305a61e395660170cca05ba2` was pushed to existing
+`fix/110-rollback-db-revision` using an explicit force-with-lease against its original
+`af43dacebbf5e2ab8e0e5c613a96ecc626ae19c3` head after rebase. Immediately before publishing,
+fetched `main` remained `46a90772f65c04aa3cc4db11b198e6d052bf1207` and was an ancestor
+of the reviewed tree. Final independent review including the verifier filename delta:
+**Standards 0 findings; Spec 0 findings**.
+
+The complete [PR #126](https://github.com/larchanka-training/dmc-268-api-t6/pull/126)
+description now records the updated behavior, exact final gates and modern proof limits.
+The author replied in the existing
+[reviewer thread](https://github.com/larchanka-training/dmc-268-api-t6/pull/126#discussion_r4246884745)
+with this correction SHA, evidence and all review dispositions. The PR is attached to this
+chat; remote branch and GitHub head were confirmed. GitHub reports no closing issue refs.
+No review was requested, thread resolved, PR merged or issue closed.
+
+This follow-up records delivery only; reviewed source/tests and live proof bytes are unchanged.
+CI had passing preliminary checks and remaining jobs in progress when delivery was recorded.
+Current-head approval, reviewer resolution and tech-lead issue acceptance remain external;
+the coordinator owns cleanup of the separate gate services.
