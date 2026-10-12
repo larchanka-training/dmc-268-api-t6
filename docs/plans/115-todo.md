@@ -1,91 +1,85 @@
-# Задачи #115
+# Tasks #115
 
-## 1. SYSTEM_DESIGN (S, 1 файл)
+## 1. SYSTEM_DESIGN (S, 1 file)
 
-**Описание:** Обновить два абзаца §7.3 по символам из `115-plan.md`.
+**Description:** Update the two relevant §7.3 bullets using the symbols in
+[115-plan.md](115-plan.md).
 
-**Критерии приёмки:**
+**Acceptance criteria:**
 
-- [x] Все семь scope-адаптеров перечислены; без scope — `ValueError`, обход
-      только явным `allow_unscoped=True` для доверенных внутренних вызовов.
-- [x] Указаны три места создания кэша через файлы/символы без номеров строк;
-      условная композиция `review_worker`, process-local семантика, 60 с и #62 сохранены.
-- [x] Diff ограничен двумя абзацами, изменения #108/#122 и область #107 сохранены.
+- [x] Seven adapter examples, `authorized_run` and the delegating
+      `ReviewsApiResources.run_repository` factory follow the same fail-closed rule:
+      construction or invocation without scope raises `ValueError`; bypass requires
+      explicit `allow_unscoped=True` from a trusted internal caller.
+- [x] All three cache creation sites use file/symbol links without line numbers;
+      production `github_adapters` composition is distinct from the obsolete
+      `review_worker` prototype. App/client prerequisites, process-local semantics,
+      the 60-second skew and Redis/#62 are preserved.
+- [x] SYSTEM_DESIGN changes stay within the two bullets; neighboring documentation
+      and scoped rerun's shared authorization predicate are preserved.
 
-**Проверка:** Сверить через `rg` и чтение конструкторов/функций; проверить ссылки
-и diff. **Зависимости:** Одобрение плана, сверка diff PR #108/#122 (scope-комментарии
-уже опубликованы). **Файл:** `docs/SYSTEM_DESIGN.md`.
+**Verification:** Compare signatures, constructors and functions using `rg` and
+source reads; resolve links and inspect the diff.
+**Dependencies:** Plan approval, overlapping PR diff checks and required scope notices.
+**File:** `docs/SYSTEM_DESIGN.md`.
 
-## 2. Правило backend (S, 1 файл)
+## 2. Backend rule (S, 1 file)
 
-**Описание:** Согласовать fail-closed правило backend §3 с SYSTEM_DESIGN.
+**Description:** Align the fail-closed rule in backend §3 with SYSTEM_DESIGN.
 
-**Критерии приёмки:**
+**Acceptance criteria:**
 
-- [x] Правило охватывает все адаптеры с `scope: AuthScope | None`, содержит
-      семь актуальных примеров и явный внутренний обход.
-- [x] Формулировки согласованы с SYSTEM_DESIGN и кодом.
-- [x] Зеркала проверены по README/SYNC; backend per-repo, AGENTS не меняется
-      без изменения дублируемых пунктов.
+- [x] The rule covers adapters, authorization helpers and factories accepting
+      `scope: AuthScope | None`, with seven adapter examples and explicit internal bypass.
+- [x] Both documents use matching example wording, adapter order and helper/factory roles.
+- [x] Mirror requirements are checked against README/SYNC: backend is per-repo;
+      AGENTS needs no edit when its mirrored rules are unchanged.
 
-**Проверка:** Сопоставить текст, код, sync map и итоговый diff.
-**Зависимости:** Задача 1. **Файл:** `.agents/rules/backend.md`.
+**Verification:** Compare documentation, code, the sync map and the final diff.
+**Dependencies:** Task 1. **File:** `.agents/rules/backend.md`.
 
-## Контрольная точка после задач 1–2
+## Checkpoint after tasks 1–2
 
-- [x] Оба AC #115 подтверждены; ссылки/символы корректны, diff в согласованных
-      границах, без runtime/OpenAPI изменений и искусственных тестов документации.
+- [x] Both #115 acceptance criteria are supported by code. Links and symbols resolve;
+      the scope excludes runtime/OpenAPI changes and synthetic documentation tests.
+- [x] Plan artifacts are in English and contain no transient PR, reviewer or issue status.
 
-## 3. Проверки и ревью (S, проверки + статус задач)
+## 3. Verification and review (S, checks and evidence)
 
-**Описание:** Выполнить гейты и передать diff на Standards/Spec review.
+**Description:** Run the required gates and submit the diff for independent
+Standards/Spec review. Record dated verification evidence below; review and
+publication requirements follow the process in the plan.
 
-**Критерии приёмки:**
-
-- [x] Четыре гейта зелёные; фактические результаты и skips записаны.
-- [x] Standards/Spec review завершены, замечания исправлены и повторно проверены.
-- [x] Rebase на main выполнен; русский Draft PR подготовлен по процессу из плана.
-
-**Проверка:**
+**Verification:**
 
 - [x] `uv run ruff check .`
 - [x] `uv run ruff format --check .`
 - [x] `uv run mypy .`
 - [x] `uv run pytest`
-- [x] `git diff --check`, финальное чтение diff и проверка ссылок/символов.
+- [x] `git diff --check`, final diff read and link/symbol verification.
 
-**Зависимости:** Задачи 1–2. **Файл:** `docs/plans/115-todo.md` (статус/результаты).
+**Dependencies:** Tasks 1–2. **File:** `docs/plans/115-todo.md` (verification evidence).
 
-## Фактические результаты
+## Verification evidence
 
-- База реализации: `92250a1fb3b65f88a2ea111d33613f9a4af1d1d2`.
-- Задачи 1–2: изменены только два абзаца SYSTEM_DESIGN §7.3 и правило backend §3;
-  runtime, OpenAPI, зависимости и тестовый код не менялись.
-- Полный поиск `scope: AuthScope | None` в `app/`: семь конструкторов адаптеров,
-  `authorized_run` и фабрика `ReviewsApiResources.run_repository`.
-  Все семь конструкторов проверены: `scope is None and not allow_unscoped` → `ValueError`.
-- Поиск созданий кэша и AST-сверка подтвердили ровно три функции: `run_forever`,
-  `review_worker`, `github_adapters`. Условие композиции `review_worker`,
-  process-local семантика и `_INSTALLATION_TOKEN_SAFETY_SKEW_SECONDS = 60` сверены с кодом.
-- Относительные Python-ссылки в обоих документах существуют, символы подтверждены;
-  `git diff --check` завершился успешно, diff прочитан.
-- PR #108 добавляет вводный текст §7.3 и меняет другие разделы, целевые два абзаца
-  не затрагивает; PR #122 меняет только абзац Access §9.5. Их scope сохранён.
-- Зеркала: backend — per-repo по `.agents/README.md`; изменён только AuthScope §3,
-  дублируемые в AGENTS пункты §1/§2 и transaction rule не менялись.
-  `CLAUDE.md` импортирует AGENTS, `.claude/skills` и `.claude/agents` — symlink.
+Snapshot: **2026-10-12**, against the documentation tree rebased onto main commit
+`46a90772f65c04aa3cc4db11b198e6d052bf1207`.
+
+- Exactly four documentation files changed: the two §7.3 bullets, backend §3 and
+  these plan artifacts. Runtime, OpenAPI, dependencies and test code are unchanged.
+- Source search and AST checks confirm three cache creation sites and nine optional
+  AuthScope signatures: seven adapter constructors, `authorized_run` and the factory
+  `ReviewsApiResources.run_repository`. All seven guards, helper enforcement, factory
+  delegation and production/prototype composition were checked against the code.
+- All local links in the edited rule, bullets and plan artifacts resolve;
+  linked authorization symbols exist and both adapter example lists have the same order.
+  `git diff --check` is clean. The mirror rationale was checked against README/SYNC,
+  the `.claude` symlinks and `CLAUDE.md`'s AGENTS import.
 - `uv run ruff check .`: **All checks passed!**
-- `uv run ruff format --check .`: **346 files already formatted**.
-- `uv run mypy .`: **Success: no issues found in 343 source files**.
-- `uv run pytest`: **2257 passed, 128 skipped, 2 warnings in 135.63s** (2385 collected).
-  128 skips — opt-in интеграционные тесты PostgreSQL/RabbitMQ: `TEST_DATABASE_URL`
-  и `TEST_RABBITMQ_URL` не заданы. Два предупреждения — deprecation из
-  `starlette.testclient`/`anyio`, не ошибки проверок.
-- Независимые Standards/Spec review завершены: **0 findings** по обоим направлениям.
-- Перед публикацией выполнены `git fetch origin main` и
-  `git rebase --autostash origin/main`: ветка уже актуальна, база осталась
-  `92250a1fb3b65f88a2ea111d33613f9a4af1d1d2`, изменения восстановлены без конфликтов.
-- Для публикации подготовлен русский Draft PR: `What / Why / How to verify / Refs`,
-  Refs #115/#106 и Before merge checklist. Reviewer не выбран; approve на текущем
-  head, разрешение тредов, merge и приёмка техлидом остаются последующими шагами.
-  Issue остаётся In Progress с assignee `ndovnar`; новых зависимостей нет.
+- `uv run ruff format --check .`: **353 files already formatted**.
+- `uv run mypy .`: **Success: no issues found in 350 source files**.
+- `uv run pytest`: **2444 passed, 0 skipped, 2 warnings in 210.71s**.
+  Both `TEST_DATABASE_URL` and `TEST_RABBITMQ_URL` were configured against isolated,
+  disposable PostgreSQL 17 and RabbitMQ 4 containers. Existing containers were not used.
+  The warnings were the Starlette `httpx` TestClient deprecation and the AnyIO
+  `BlockingPortal` alias deprecation.

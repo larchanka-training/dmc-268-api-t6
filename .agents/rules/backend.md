@@ -63,8 +63,9 @@ infrastructure}`, `app/modules/<m>/{domain,application,infrastructure}`,
    FK and most unique constraints keep PostgreSQL's default names; introducing a
    convention is a decision of its own (it would re-prefix the existing `ck_` names).
 
-All adapters accepting `scope: AuthScope | None` must fail closed: their constructors raise
-`ValueError` without `AuthScope`. Current examples are
+All adapters, authorization helpers and factories accepting `scope: AuthScope | None` must
+fail closed: construction or invocation raises `ValueError` without `AuthScope` unless a
+trusted internal caller explicitly passes `allow_unscoped=True`. Current adapter examples are
 [`SqlAlchemyRunRepository`](../../app/modules/reviews/infrastructure/run_repository.py),
 [`SqlAlchemyCancelRunUnitOfWork`](../../app/modules/reviews/infrastructure/run_repository.py),
 [`SqlAlchemyRerunStore`](../../app/modules/reviews/infrastructure/rerun_store.py),
@@ -72,8 +73,11 @@ All adapters accepting `scope: AuthScope | None` must fail closed: their constru
 [`SqlAlchemyPullRequestQueries`](../../app/modules/reviews/infrastructure/pull_request_queries.py),
 [`SqlAlchemyRepositorySettingsStore`](../../app/modules/repositories/infrastructure/repository_settings.py),
 and [`SqlAlchemyRepositorySettingsUnitOfWork`](../../app/modules/repositories/infrastructure/repository_settings.py).
-Trusted internal callers may bypass scope only by explicitly passing `allow_unscoped=True`;
-never infer this permission from a missing scope.
+The authorization helper
+[`authorized_run`](../../app/modules/reviews/infrastructure/run_repository.py) checks scope
+directly; the factory [`ReviewsApiResources.run_repository`](../../app/bootstrap/reviews_api.py)
+delegates to the protected repository constructor. Never infer permission to bypass scope
+from a missing scope.
 
 ## 4. Language rules
 
