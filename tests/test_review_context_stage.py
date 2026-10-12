@@ -522,8 +522,16 @@ def test_check_run_says_where_a_policy_failure_is() -> None:
         parse_review_ignore("# Ignore\n\n```review-ignore\nok/**\nsrc/a?.py\n```\n")
     assert summary(mask.value) == (
         "`policy_ignore_pattern_invalid`: В блоке review-ignore недопустимая маска. "
-        "Где: файл `.review/rules.md`, строка 5, позиция 6."
+        "Где: файл `.review/rules.md`, строка 5, позиция 6, маска `src/a?.py`."
     )
+
+    # A long or hostile mask is quoted short and cannot break the markup around it.
+    hostile = "a?" + "`" + "x" * 200
+    with pytest.raises(PolicyError) as long_mask:
+        parse_review_ignore(f"```review-ignore\n{hostile}\n```\n")
+    quoted = summary(long_mask.value).split("маска ")[1]
+    assert quoted == "`a?'" + "x" * 77 + "...`."
+    assert quoted.count("`") == 2
 
     with pytest.raises(PolicyError) as size:
         normalize_document("AGENTS.md", b"a" * 87_040, blob_oid="f" * 40)

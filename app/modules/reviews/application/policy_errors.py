@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import unicodedata
 from datetime import timedelta
 from enum import StrEnum
 
@@ -46,11 +47,23 @@ def policy_error_detail(error_message: str | None) -> str | None:
     return error_message.split(POLICY_DETAIL_SEPARATOR, 1)[1]
 
 
+_MAX_EXCERPT_CHARS = 80
+
+
+def _safe_excerpt(text: str) -> str:
+    """A short quote of author-written text that cannot break the markup around it."""
+    cleaned = "".join(
+        "?" if unicodedata.category(char) == "Cc" else "'" if char == "`" else char for char in text
+    )
+    return cleaned if len(cleaned) <= _MAX_EXCERPT_CHARS else cleaned[:_MAX_EXCERPT_CHARS] + "..."
+
+
 class PolicyError(RunFailure):
     """A policy failure; the message is safe to show and never carries document content.
 
     The message ends with where the problem is: the document, the line and position,
-    and the limit with the actual value when they are known.
+    the offending mask, and the limit with the actual value when they are known. The
+    mask is the only author-written text quoted, shortened and made safe for markup.
     """
 
     def __init__(
@@ -65,6 +78,7 @@ class PolicyError(RunFailure):
         pattern_index: int | None = None,
         limit: int | None = None,
         actual: int | None = None,
+        excerpt: str | None = None,
         retry_after: timedelta | None = None,
     ) -> None:
         parts = []
@@ -74,6 +88,8 @@ class PolicyError(RunFailure):
             parts.append(f"строка {line}")
         if column is not None:
             parts.append(f"позиция {column}")
+        if excerpt is not None:
+            parts.append(f"маска `{_safe_excerpt(excerpt)}`")
         if actual is not None and limit is not None:
             parts.append(f"фактически {actual}, допустимо {limit}")
         elif limit is not None:

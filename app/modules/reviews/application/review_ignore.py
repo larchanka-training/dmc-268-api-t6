@@ -89,6 +89,7 @@ def parse_review_ignore(
         pattern_index: int | None = None,
         limit: int | None = None,
         actual: int | None = None,
+        excerpt: str | None = None,
     ) -> PolicyError:
         return PolicyError(
             code,
@@ -100,6 +101,7 @@ def parse_review_ignore(
             pattern_index=pattern_index,
             limit=limit,
             actual=actual,
+            excerpt=excerpt,
         )
 
     if not rules_text:
@@ -166,6 +168,7 @@ def parse_review_ignore(
                 "A review-ignore mask is too long",
                 line=item.line,
                 pattern_index=index,
+                excerpt=item.pattern,
                 limit=MAX_PATTERN_BYTES if too_long else MAX_PATTERN_SEGMENTS,
                 actual=size if too_long else segments,
             )
@@ -178,6 +181,7 @@ def parse_review_ignore(
                 line=item.line,
                 column=column,
                 pattern_index=index,
+                excerpt=item.pattern,
             )
     return _policy(tuple(lines))
 
