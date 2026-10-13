@@ -11,14 +11,14 @@ from typing import Protocol
 from uuid import UUID
 
 from app.common.application.unit_of_work import UnitOfWork
-from app.modules.reviews.application.check_runs import CheckRunGateway
+from app.modules.reviews.application.check_runs import CheckRunGateway, RunProviderCheckpoint
 from app.modules.reviews.application.handle_review_run import (
     CheckRunReports,
     update_check_run,
 )
 from app.modules.reviews.application.queue_messages import ReviewPublishPointer
 from app.modules.reviews.application.review_output import PublishedFinding
-from app.modules.reviews.application.run_failures import cancellation_reason
+from app.modules.reviews.application.run_failures import RunCancelled, cancellation_reason
 from app.modules.reviews.application.run_trace import RunTrace
 
 _LOGGER = logging.getLogger(__name__)
@@ -36,7 +36,8 @@ class PublishContext:
     head_sha: str
     pr_head_sha: str
     pr_open: bool
-    installation_id: int
+    origin_active: bool
+    installation_id: int | None
     repository_full_name: str
     pr_number: int
     review_body: str
@@ -87,7 +88,9 @@ class PublishError(Exception):
 class PullRequestReviewGateway(Protocol):
     """Idempotent by ``findings_hash``: a review already posted for it is returned, not reposted."""
 
-    async def submit_review(self, submission: ReviewSubmission) -> SubmittedReview: ...
+    async def submit_review(
+        self, submission: ReviewSubmission, *, checkpoint: RunProviderCheckpoint
+    ) -> SubmittedReview: ...
 
 
 class GitLabDiscussionGateway(Protocol):
@@ -200,6 +203,11 @@ class PublishRunReview:
             context = await uow.runs.publish_context(pointer.run_id)
         if context is None or context.state != "publishing":
             return
+        if not context.origin_active:
+            await self._finish(
+                pointer.run_id, "cancelled", "installation_unavailable", None, check_run=False
+            )
+            return
         if (context.head_sha, context.findings_hash) != (pointer.head_sha, pointer.findings_hash):
             _LOGGER.warning("Stale review.publish/v1 for run %s is ignored", pointer.run_id)
             return
@@ -228,6 +236,7 @@ class PublishRunReview:
             )
             return
 
+        assert context.installation_id is not None
         submission = ReviewSubmission(
             installation_id=context.installation_id,
             repository_full_name=context.repository_full_name,
@@ -243,7 +252,17 @@ class PublishRunReview:
         try_no = 0
         while True:
             try_no += 1
-            result = await self._submit(submission, pointer, try_no, route=route)
+            try:
+                result = await self._submit(submission, pointer, try_no, route=route)
+            except RunCancelled:
+                await self._finish(
+                    pointer.run_id,
+                    "cancelled",
+                    "installation_unavailable",
+                    None,
+                    check_run=route.writes_check_run,
+                )
+                return
             if isinstance(result, SubmittedReview):
                 break
             error = result
@@ -337,6 +356,13 @@ class PublishRunReview:
         started = asyncio.get_running_loop().time()
         result: SubmittedReview | PublishError
         try:
+
+            async def checkpoint() -> None:
+                async with self._uow_factory() as uow:
+                    active = await uow.runs.provider_origin_active(pointer.run_id)
+                if not active:
+                    raise RunCancelled("installation_unavailable")
+
             if route.gitlab:
                 assert self._gitlab_reviews is not None
                 assert route.project_id is not None
@@ -346,7 +372,7 @@ class PublishRunReview:
                 response: object = {"gitlab_review_id": result.review_id}
             else:
                 assert self._reviews is not None
-                result = await self._reviews.submit_review(submission)
+                result = await self._reviews.submit_review(submission, checkpoint=checkpoint)
                 response = {"github_review_id": result.review_id}
         except PublishError as exc:
             result = exc

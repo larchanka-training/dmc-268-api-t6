@@ -10,8 +10,13 @@ from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.common.infrastructure.db.enums import RunState
 from app.common.infrastructure.db.unit_of_work import SqlAlchemyUnitOfWork
-from app.modules.repositories.infrastructure.models import RuleVersion
+from app.modules.repositories.infrastructure.models import (
+    ProviderInstallation,
+    Repository,
+    RuleVersion,
+)
 from app.modules.reviews.application.policy_documents import LoadedPolicyDocument
 from app.modules.reviews.application.policy_errors import PolicyError, PolicyErrorCode
 from app.modules.reviews.application.policy_snapshot import (
@@ -27,6 +32,7 @@ from app.modules.reviews.application.prepare_policy_snapshot import (
     RunPolicyPins,
     pinned_to_json,
 )
+from app.modules.reviews.application.run_failures import RunCancelled
 from app.modules.reviews.infrastructure.models import (
     CodeChange,
     PromptVersion,
@@ -34,6 +40,7 @@ from app.modules.reviews.infrastructure.models import (
     RunPolicyDocument,
     RunPolicySnapshot,
 )
+from app.modules.reviews.infrastructure.run_origin import origin_active
 
 _PROMPT_ID_FIELDS = frozenset({"review_system_id", "conventions_id", "verifier_id"})
 UNPINNED_EXECUTION_PROFILE = ExecutionProfile.fast(review_model="", verifier_model="")
@@ -131,6 +138,7 @@ class SqlAlchemyPolicySnapshotStore:
     async def stage_documents(
         self, run_id: UUID, documents: tuple[LoadedPolicyDocument, ...]
     ) -> tuple[LoadedPolicyDocument, ...]:
+        await self._lock_active_run(run_id)
         for item in documents:
             document = item.document
             await self._session.execute(
@@ -191,6 +199,7 @@ class SqlAlchemyPolicySnapshotStore:
         )
 
     async def create_snapshot(self, snapshot: PolicySnapshot) -> PolicySnapshot:
+        await self._lock_active_run(snapshot.run_id)
         await self._session.execute(
             insert(RunPolicySnapshot)
             .values(
@@ -220,6 +229,41 @@ class SqlAlchemyPolicySnapshotStore:
         stored = await self.get_snapshot(snapshot.run_id)
         assert stored is not None
         return stored
+
+    async def _lock_active_run(self, run_id: UUID) -> None:
+        # Rebind locks installation → Repository → Run. These locks and the
+        # authority check stay in the same transaction as either policy insert.
+        await self._session.execute(
+            select(ProviderInstallation.id)
+            .join(Run, Run.origin_provider_installation_id == ProviderInstallation.id)
+            .where(Run.id == run_id)
+            .with_for_update(of=ProviderInstallation, read=True)
+        )
+        await self._session.execute(
+            select(Repository.id)
+            .join(CodeChange, CodeChange.repository_id == Repository.id)
+            .join(Run, Run.code_change_id == CodeChange.id)
+            .where(Run.id == run_id)
+            .with_for_update(of=Repository, read=True)
+        )
+        row = (
+            await self._session.execute(
+                select(Run, Repository, ProviderInstallation)
+                .join(CodeChange, CodeChange.id == Run.code_change_id)
+                .join(Repository, Repository.id == CodeChange.repository_id)
+                .outerjoin(
+                    ProviderInstallation,
+                    ProviderInstallation.id == Run.origin_provider_installation_id,
+                )
+                .where(Run.id == run_id)
+                .with_for_update(of=Run)
+                .execution_options(populate_existing=True)
+            )
+        ).one_or_none()
+        if row is None or row[2] is None or not origin_active(row[0], row[1], row[2]):
+            raise RunCancelled("installation_unavailable")
+        if row[0].state != RunState.RUNNING:
+            raise RunCancelled("run_inactive")
 
 
 class SqlAlchemyPolicySnapshotUnitOfWork(SqlAlchemyUnitOfWork):

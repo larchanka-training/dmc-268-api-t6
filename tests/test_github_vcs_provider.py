@@ -10,6 +10,7 @@ from dataclasses import dataclass
 import httpx
 import pytest
 
+from app.modules.reviews.application.run_failures import RunCancelled
 from app.modules.reviews.application.vcs_diff import (
     BlobTooLargeError,
     FetchVcsReviewInput,
@@ -18,6 +19,7 @@ from app.modules.reviews.application.vcs_diff import (
     PullRequestLocator,
 )
 from app.modules.reviews.infrastructure.github_vcs import HttpGitHubVcsProvider
+from tests.installation_onboarding_fakes import provider_checkpoint
 
 _HEAD = "a" * 40
 _BASE = "b" * 40
@@ -100,9 +102,9 @@ def test_provider_paginates_101_files_at_100_and_reads_blob_by_sha() -> None:
         ) as client:
             provider = HttpGitHubVcsProvider(client=client, token_provider=Tokens())
             locator = PullRequestLocator(17, "octo/repo", 7)
-            pr = await provider.get_pull_request(locator)
-            files = await provider.get_diff(pr)
-            blob = await provider.get_blob(locator, _BLOB)
+            pr = await provider.get_pull_request(locator, checkpoint=provider_checkpoint)
+            files = await provider.get_diff(pr, checkpoint=provider_checkpoint)
+            blob = await provider.get_blob(locator, _BLOB, checkpoint=provider_checkpoint)
         assert pr.head_sha == _HEAD
         # the commit context of the review prompt (#33)
         assert pr.meta.head_sha == _HEAD
@@ -136,9 +138,11 @@ def test_provider_rejects_pr_exceeding_github_3000_file_cap() -> None:
             transport=httpx.MockTransport(respond), base_url="https://api.github.test"
         ) as client:
             provider = HttpGitHubVcsProvider(client=client, token_provider=Tokens())
-            pr = await provider.get_pull_request(PullRequestLocator(17, "octo/repo", 7))
+            pr = await provider.get_pull_request(
+                PullRequestLocator(17, "octo/repo", 7), checkpoint=provider_checkpoint
+            )
             with pytest.raises(ValueError, match="3000"):
-                await provider.get_diff(pr)
+                await provider.get_diff(pr, checkpoint=provider_checkpoint)
 
     asyncio.run(exercise())
 
@@ -156,9 +160,11 @@ def test_provider_rejects_overfull_page_even_when_pr_count_matches() -> None:
             transport=httpx.MockTransport(respond), base_url="https://api.github.test"
         ) as client:
             provider = HttpGitHubVcsProvider(client=client, token_provider=Tokens())
-            pr = await provider.get_pull_request(PullRequestLocator(17, "octo/repo", 7))
+            pr = await provider.get_pull_request(
+                PullRequestLocator(17, "octo/repo", 7), checkpoint=provider_checkpoint
+            )
             with pytest.raises(ValueError, match="page exceeded 100"):
-                await provider.get_diff(pr)
+                await provider.get_diff(pr, checkpoint=provider_checkpoint)
 
     asyncio.run(exercise())
 
@@ -178,8 +184,10 @@ def test_provider_accepts_exactly_3000_files_without_requesting_page_31() -> Non
             transport=httpx.MockTransport(respond), base_url="https://api.github.test"
         ) as client:
             provider = HttpGitHubVcsProvider(client=client, token_provider=Tokens())
-            pr = await provider.get_pull_request(PullRequestLocator(17, "octo/repo", 7))
-            files = await provider.get_diff(pr)
+            pr = await provider.get_pull_request(
+                PullRequestLocator(17, "octo/repo", 7), checkpoint=provider_checkpoint
+            )
+            files = await provider.get_diff(pr, checkpoint=provider_checkpoint)
         assert len(files) == 3000
         assert files[-1].filename == "src/file2999.py"
 
@@ -208,7 +216,8 @@ def test_removed_file_has_no_new_blob_and_missing_patch_is_not_called_binary() -
             transport=httpx.MockTransport(respond), base_url="https://api.github.test"
         ) as client:
             result = await FetchVcsReviewInput(
-                HttpGitHubVcsProvider(client=client, token_provider=Tokens())
+                HttpGitHubVcsProvider(client=client, token_provider=Tokens()),
+                checkpoint=provider_checkpoint,
             ).execute(PullRequestLocator(17, "octo/repo", 7), _HEAD)
         assert result.files[0].blob_sha is None
         assert result.changed_files == ()
@@ -243,9 +252,11 @@ def test_provider_rejects_early_pagination_and_changed_head() -> None:
             transport=httpx.MockTransport(respond), base_url="https://api.github.test"
         ) as client:
             provider = HttpGitHubVcsProvider(client=client, token_provider=Tokens())
-            pr = await provider.get_pull_request(PullRequestLocator(17, "octo/repo", 7))
+            pr = await provider.get_pull_request(
+                PullRequestLocator(17, "octo/repo", 7), checkpoint=provider_checkpoint
+            )
             with pytest.raises(ValueError, match="changed" if stale_head else "pagination"):
-                await provider.get_diff(pr)
+                await provider.get_diff(pr, checkpoint=provider_checkpoint)
             assert pr_calls == (2 if stale_head else 1)
 
     asyncio.run(exercise(stale_head=False))
@@ -267,9 +278,11 @@ def test_provider_rejects_duplicate_filename_across_pages() -> None:
             transport=httpx.MockTransport(respond), base_url="https://api.github.test"
         ) as client:
             provider = HttpGitHubVcsProvider(client=client, token_provider=Tokens())
-            pr = await provider.get_pull_request(PullRequestLocator(17, "octo/repo", 7))
+            pr = await provider.get_pull_request(
+                PullRequestLocator(17, "octo/repo", 7), checkpoint=provider_checkpoint
+            )
             with pytest.raises(ValueError, match="repeated a filename"):
-                await provider.get_diff(pr)
+                await provider.get_diff(pr, checkpoint=provider_checkpoint)
 
     asyncio.run(exercise())
 
@@ -284,7 +297,9 @@ def test_http_rate_limit_and_invalid_blob_fail_closed() -> None:
         ) as client:
             provider = HttpGitHubVcsProvider(client=client, token_provider=Tokens())
             with pytest.raises(httpx.HTTPStatusError):
-                await provider.get_pull_request(PullRequestLocator(17, "octo/repo", 7))
+                await provider.get_pull_request(
+                    PullRequestLocator(17, "octo/repo", 7), checkpoint=provider_checkpoint
+                )
 
         async with httpx.AsyncClient(
             transport=httpx.MockTransport(
@@ -297,7 +312,9 @@ def test_http_rate_limit_and_invalid_blob_fail_closed() -> None:
         ) as client:
             provider = HttpGitHubVcsProvider(client=client, token_provider=Tokens())
             with pytest.raises(ValueError, match="base64"):
-                await provider.get_blob(PullRequestLocator(17, "octo/repo", 7), _BLOB)
+                await provider.get_blob(
+                    PullRequestLocator(17, "octo/repo", 7), _BLOB, checkpoint=provider_checkpoint
+                )
 
     asyncio.run(exercise())
 
@@ -324,7 +341,9 @@ def test_blob_retrieval_stops_before_consuming_an_oversized_response() -> None:
         ) as client:
             provider = HttpGitHubVcsProvider(client=client, token_provider=Tokens())
             with pytest.raises(BlobTooLargeError):
-                await provider.get_blob(PullRequestLocator(17, "octo/repo", 7), _BLOB)
+                await provider.get_blob(
+                    PullRequestLocator(17, "octo/repo", 7), _BLOB, checkpoint=provider_checkpoint
+                )
 
     asyncio.run(exercise())
     assert stream.chunks_read < 100
@@ -343,7 +362,9 @@ def test_blob_declared_over_one_mebibyte_is_rejected_before_decoding() -> None:
         ) as client:
             provider = HttpGitHubVcsProvider(client=client, token_provider=Tokens())
             with pytest.raises(BlobTooLargeError):
-                await provider.get_blob(PullRequestLocator(17, "octo/repo", 7), _BLOB)
+                await provider.get_blob(
+                    PullRequestLocator(17, "octo/repo", 7), _BLOB, checkpoint=provider_checkpoint
+                )
 
     asyncio.run(exercise())
 
@@ -378,8 +399,8 @@ def test_extended_file_statuses_copied_changed_unchanged_do_not_crash() -> None:
         ) as client:
             provider = HttpGitHubVcsProvider(client=client, token_provider=Tokens())
             locator = PullRequestLocator(17, "octo/repo", 7)
-            pr = await provider.get_pull_request(locator)
-            files = await provider.get_diff(pr)
+            pr = await provider.get_pull_request(locator, checkpoint=provider_checkpoint)
+            files = await provider.get_diff(pr, checkpoint=provider_checkpoint)
             assert [f.status for f in files] == ["copied", "changed", "unchanged"]
 
     asyncio.run(exercise())
@@ -405,8 +426,10 @@ def test_merge_base_is_read_from_the_three_dot_comparison_of_base_and_head() -> 
             transport=httpx.MockTransport(respond), base_url="https://api.github.test"
         ) as client:
             provider = HttpGitHubVcsProvider(client=client, token_provider=Tokens())
-            pr = await provider.get_pull_request(PullRequestLocator(17, "octo/repo", 7))
-            return await provider.get_merge_base(pr)
+            pr = await provider.get_pull_request(
+                PullRequestLocator(17, "octo/repo", 7), checkpoint=provider_checkpoint
+            )
+            return await provider.get_merge_base(pr, checkpoint=provider_checkpoint)
 
     assert asyncio.run(exercise()) == merge_base
     assert paths[1] == (
@@ -425,8 +448,10 @@ def test_merge_base_fails_closed_on_an_error_or_a_response_without_a_commit() ->
             transport=httpx.MockTransport(respond), base_url="https://api.github.test"
         ) as client:
             provider = HttpGitHubVcsProvider(client=client, token_provider=Tokens())
-            pr = await provider.get_pull_request(PullRequestLocator(17, "octo/repo", 7))
-            await provider.get_merge_base(pr)
+            pr = await provider.get_pull_request(
+                PullRequestLocator(17, "octo/repo", 7), checkpoint=provider_checkpoint
+            )
+            await provider.get_merge_base(pr, checkpoint=provider_checkpoint)
 
     # The port answers with its own error, never one of the HTTP client.
     with pytest.raises(MergeBaseUnavailable, match="HTTPStatusError"):
@@ -455,9 +480,53 @@ def test_merge_base_fails_closed_when_the_installation_token_is_not_issued() -> 
             transport=httpx.MockTransport(respond), base_url="https://api.github.test"
         ) as client:
             provider = HttpGitHubVcsProvider(client=client, token_provider=tokens)
-            pr = await provider.get_pull_request(PullRequestLocator(17, "octo/repo", 7))
+            pr = await provider.get_pull_request(
+                PullRequestLocator(17, "octo/repo", 7), checkpoint=provider_checkpoint
+            )
             tokens.fail = True
-            await provider.get_merge_base(pr)
+            await provider.get_merge_base(pr, checkpoint=provider_checkpoint)
 
     with pytest.raises(MergeBaseUnavailable, match="ConnectError"):
         asyncio.run(exercise())
+
+
+@pytest.mark.parametrize("cancel_checkpoint", [1, 2, None])
+def test_merge_base_fences_token_and_http_after_retirement(
+    cancel_checkpoint: int | None,
+) -> None:
+    async def exercise() -> None:
+        comparison_calls = 0
+
+        def respond(request: httpx.Request) -> httpx.Response:
+            nonlocal comparison_calls
+            if request.url.path.endswith("/pulls/7"):
+                return httpx.Response(200, json=_pull_payload())
+            assert "/compare/" in request.url.path
+            comparison_calls += 1
+            return httpx.Response(200, json={"merge_base_commit": {"sha": "e" * 40}})
+
+        checkpoint_calls = 0
+
+        async def checkpoint() -> None:
+            nonlocal checkpoint_calls
+            checkpoint_calls += 1
+            if checkpoint_calls == cancel_checkpoint:
+                raise RunCancelled("installation_unavailable")
+
+        tokens = Tokens()
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(respond), base_url="https://api.github.test"
+        ) as client:
+            provider = HttpGitHubVcsProvider(client=client, token_provider=tokens)
+            pr = await provider.get_pull_request(
+                PullRequestLocator(17, "octo/repo", 7), checkpoint=provider_checkpoint
+            )
+            if cancel_checkpoint is None:
+                assert await provider.get_merge_base(pr, checkpoint=checkpoint) == "e" * 40
+            else:
+                with pytest.raises(RunCancelled, match="installation_unavailable"):
+                    await provider.get_merge_base(pr, checkpoint=checkpoint)
+        assert tokens.calls == (1 if cancel_checkpoint == 1 else 2)
+        assert comparison_calls == (1 if cancel_checkpoint is None else 0)
+
+    asyncio.run(exercise())

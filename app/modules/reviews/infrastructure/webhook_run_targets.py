@@ -25,10 +25,26 @@ class SqlAlchemyWebhookRunTargets:
     ) -> None:
         self._session = session
 
+    async def _lock_active_installation(self, session: AsyncSession, external_id: int) -> bool:
+        return (
+            await session.scalar(
+                select(ProviderInstallation.id)
+                .where(
+                    ProviderInstallation.provider == "github",
+                    ProviderInstallation.external_id == external_id,
+                    ProviderInstallation.deleted_at.is_(None),
+                )
+                .with_for_update(key_share=True)
+            )
+            is not None
+        )
+
     async def for_pr(self, event: PullRequestEvent) -> ProjectedPullRequestTarget | None:
         if self._session is None:
             raise RuntimeError("for_pr() requires an active session within a Unit of Work")
         session = self._session
+        if not await self._lock_active_installation(session, event.installation_external_id):
+            return None
         row = (
             await session.execute(
                 select(CodeChange.id, CodeChange.head_sha)
@@ -52,6 +68,8 @@ class SqlAlchemyWebhookRunTargets:
         if self._session is None:
             raise RuntimeError("for_ci() requires an active session within a Unit of Work")
         session = self._session
+        if not await self._lock_active_installation(session, event.installation_external_id):
+            return ()
         rows = await session.scalars(
             select(CodeChange.id)
             .join(Repository, CodeChange.repository_id == Repository.id)

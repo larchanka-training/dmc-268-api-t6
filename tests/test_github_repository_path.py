@@ -60,6 +60,7 @@ from app.modules.reviews.infrastructure.github_review_publication import (
 )
 from app.modules.reviews.infrastructure.github_run_source import GitHubRunSource
 from app.modules.reviews.infrastructure.github_vcs import HttpGitHubVcsProvider
+from tests.installation_onboarding_fakes import provider_checkpoint
 
 _SHA_40 = "0123456789abcdef0123456789abcdef01234567"
 _SHA_64 = "0123456789abcdef" * 4
@@ -316,21 +317,27 @@ def _snapshot(full_name: str, default_branch: str = "main") -> RepositorySnapsho
 _WEBHOOK_SINKS: dict[str, Callable[[httpx.AsyncClient, _Tokens, str], Awaitable[object]]] = {
     "reviewer-timeline": lambda client, tokens, full_name: HttpGitHubReviewerTimelineProvider(
         client=client, token_provider=tokens
-    ).snapshot(_pull_request_event(full_name), "reviewer[bot]"),
+    ).snapshot(_pull_request_event(full_name), "reviewer[bot]", checkpoint=provider_checkpoint),
     "current-pull-request": lambda client, tokens, full_name: HttpGitHubCurrentPullRequestProvider(
         client=client, token_provider=tokens
-    ).get_current(_pull_request_event(full_name)),
+    ).get_current(_pull_request_event(full_name), checkpoint=provider_checkpoint),
     "repository-details": lambda client, tokens, full_name: (
         GitHubInstallationRepositoryDetailsProvider(
             client=client, token_provider=tokens
-        ).fetch_repository_details(installation_external_id=17, full_name=full_name)
+        ).fetch_repository_details(
+            installation_external_id=17, full_name=full_name, checkpoint=provider_checkpoint
+        )
     ),
     "repository-label": lambda client, tokens, full_name: GitHubRepositoryLabelProvider(
         client=client, token_provider=tokens
-    ).create_ai_review_label(installation_external_id=17, repository=_snapshot(full_name)),
+    ).create_ai_review_label(
+        installation_external_id=17, repository=_snapshot(full_name), checkpoint=provider_checkpoint
+    ),
     "installation-tree": lambda client, tokens, full_name: GitHubInstallationTreeProvider(
         client=client, token_provider=tokens
-    ).fetch_default_branch_tree(installation_external_id=17, repository=_snapshot(full_name)),
+    ).fetch_default_branch_tree(
+        installation_external_id=17, repository=_snapshot(full_name), checkpoint=provider_checkpoint
+    ),
 }
 
 _BAD_FULL_NAMES = ["o/..", "../r", "o/../../pulls/1", "o/r?x", "o/r#x", "o/r%2Fx", "a/b/c", "o /r"]
@@ -361,7 +368,9 @@ def test_tree_provider_rejects_a_default_branch_that_walks_the_path_before_any_r
             lambda client, t: GitHubInstallationTreeProvider(
                 client=client, token_provider=t
             ).fetch_default_branch_tree(
-                installation_external_id=17, repository=_snapshot("octo/api", default_branch)
+                installation_external_id=17,
+                repository=_snapshot("octo/api", default_branch),
+                checkpoint=provider_checkpoint,
             ),
             wire,
             tokens,
@@ -390,7 +399,9 @@ def test_tree_provider_sends_a_default_branch_as_one_encoded_path_segment(
         lambda client, t: GitHubInstallationTreeProvider(
             client=client, token_provider=t
         ).fetch_default_branch_tree(
-            installation_external_id=17, repository=_snapshot("octo/api", default_branch)
+            installation_external_id=17,
+            repository=_snapshot("octo/api", default_branch),
+            checkpoint=provider_checkpoint,
         ),
         wire,
         tokens,
@@ -519,12 +530,14 @@ def _check_run(
     return GitHubCheckRunGateway(client=client, token_provider=tokens).upsert(
         CheckRunTarget(17, full_name, sha, uuid4()),
         CheckRunView(status="in_progress", conclusion=None, title="AI Review", summary="s"),
+        checkpoint=provider_checkpoint,
     )
 
 
 def _review(client: httpx.AsyncClient, tokens: _Tokens, full_name: str) -> Awaitable[object]:
     return GitHubPullRequestReviewGateway(client=client, token_provider=tokens).submit_review(
-        ReviewSubmission(17, full_name, 7, _HEAD, "COMMENT", "body", (), "hash")
+        ReviewSubmission(17, full_name, 7, _HEAD, "COMMENT", "body", (), "hash"),
+        checkpoint=provider_checkpoint,
     )
 
 
@@ -532,13 +545,13 @@ def _vcs_pull_request(
     client: httpx.AsyncClient, tokens: _Tokens, full_name: str
 ) -> Awaitable[object]:
     return HttpGitHubVcsProvider(client=client, token_provider=tokens).get_pull_request(
-        PullRequestLocator(17, full_name, 7)
+        PullRequestLocator(17, full_name, 7), checkpoint=provider_checkpoint
     )
 
 
 def _vcs_blob(client: httpx.AsyncClient, tokens: _Tokens, full_name: str) -> Awaitable[object]:
     return HttpGitHubVcsProvider(client=client, token_provider=tokens).get_blob(
-        PullRequestLocator(17, full_name, 7), _HEAD
+        PullRequestLocator(17, full_name, 7), _HEAD, checkpoint=provider_checkpoint
     )
 
 
@@ -547,7 +560,7 @@ def _current_head_ci(
 ) -> Awaitable[object]:
     return HttpGitHubCurrentHeadCiProvider(
         client=client, token_provider=tokens
-    ).get_current_head_ci(17, full_name, _HEAD)
+    ).get_current_head_ci(17, full_name, _HEAD, checkpoint=provider_checkpoint)
 
 
 @dataclass

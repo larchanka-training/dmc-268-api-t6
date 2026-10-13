@@ -97,6 +97,7 @@ def describe_enqueue(code_change_id: UUID, head_sha: str, result: EnqueueResult)
 @dataclass(frozen=True)
 class RunInsertCandidate:
     ci: EligibilityCandidate
+    origin_provider_installation_id: UUID
     repository_id: UUID
     workspace_id: UUID
     repository_external_id: int
@@ -150,7 +151,13 @@ class PendingRunMessage:
 
 
 class EligibilityChecker(Protocol):
-    async def execute(self, code_change_id: UUID, expected_head_sha: str) -> CiEligibility: ...
+    async def execute(
+        self,
+        code_change_id: UUID,
+        expected_head_sha: str,
+        *,
+        expected_installation_external_id: int | None = None,
+    ) -> CiEligibility: ...
 
 
 class WebhookRunStore(Protocol):
@@ -200,8 +207,19 @@ class TryEnqueueWebhookRun:
         self._cancellation_signals = cancellation_signals
         self._now = now
 
-    async def execute(self, code_change_id: UUID, expected_head_sha: str) -> EnqueueResult:
-        decision = await self._eligibility.execute(code_change_id, expected_head_sha)
+    async def execute(
+        self,
+        code_change_id: UUID,
+        expected_head_sha: str,
+        *,
+        expected_installation_external_id: int | None = None,
+    ) -> EnqueueResult:
+        # Receipt paths require their origin; current-state sweeps have no receipt expectation.
+        decision = await self._eligibility.execute(
+            code_change_id,
+            expected_head_sha,
+            expected_installation_external_id=expected_installation_external_id,
+        )
         if not decision.eligible or decision.candidate is None:
             return EnqueueResult(
                 EnqueueStatus.INELIGIBLE, reason=decision.reason.value, detail=decision.detail
@@ -215,7 +233,10 @@ class TryEnqueueWebhookRun:
                     else EnqueueStatus.STALE
                 )
                 return EnqueueResult(status, reason=candidate.value)
-            if candidate.ci != decision.candidate:
+            if candidate.ci != decision.candidate or (
+                expected_installation_external_id is not None
+                and candidate.ci.installation_external_id != expected_installation_external_id
+            ):
                 return EnqueueResult(EnqueueStatus.STALE, reason=STATE_CHANGED_REASON)
             message = await uow.runs.insert_webhook_run(candidate, self._now())
             if isinstance(message, ActiveRunBlocker):

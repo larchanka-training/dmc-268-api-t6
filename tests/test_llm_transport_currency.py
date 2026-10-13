@@ -19,6 +19,7 @@ from app.modules.reviews.infrastructure.llm.transport import (
     OpenAICompatibleTransport,
     TransportPaidAnswerError,
 )
+from tests.installation_onboarding_fakes import provider_checkpoint
 
 _ENV = {"LLM_MODEL": "mistral-small-4", "LLM_API_KEYS": "sk-test"}
 
@@ -43,7 +44,9 @@ def _complete(body: str) -> ChatResponse:
         async with httpx.AsyncClient(
             transport=httpx.MockTransport(lambda _: httpx.Response(200, text=body))
         ) as client:
-            return await OpenAICompatibleTransport(client).complete(request)
+            return await OpenAICompatibleTransport(client).complete(
+                request, checkpoint=provider_checkpoint
+            )
 
     return asyncio.run(call())
 

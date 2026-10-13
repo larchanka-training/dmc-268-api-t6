@@ -53,7 +53,7 @@ from app.modules.reviews.application.prompt_builder import (
     parse_unified_diff,
 )
 from app.modules.reviews.application.review_output import ReviewOutput, parse_review_output
-from app.modules.reviews.application.run_failures import FAST_ATTEMPT_DEADLINE
+from app.modules.reviews.application.run_failures import FAST_ATTEMPT_DEADLINE, RunCancelled
 from app.modules.reviews.application.run_trace import TransactionalRunTrace
 from app.modules.reviews.infrastructure.llm.answers import review_output_schema
 from app.modules.reviews.infrastructure.llm.ecb_fx import (
@@ -76,7 +76,10 @@ from app.modules.reviews.infrastructure.llm.transport import (
     OpenAICompatibleTransport,
 )
 from app.modules.reviews.infrastructure.llm_call_trace import RunTraceLlmCalls
-from app.modules.reviews.infrastructure.run_lifecycle_store import SqlAlchemyRunTraceUnitOfWork
+from app.modules.reviews.infrastructure.run_lifecycle_store import (
+    SqlAlchemyRunLifecycleUnitOfWork,
+    SqlAlchemyRunTraceUnitOfWork,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_SYSTEM_PROMPT = REPO_ROOT / "review" / "prompts" / "review.system.v2.md"
@@ -97,6 +100,18 @@ def build_gateway(
     not the first review.
     """
     review_output_schema()
+
+    async def checkpoint(context: RunCallContext) -> None:
+        async with SqlAlchemyRunLifecycleUnitOfWork(session_factory) as uow:
+            active = await uow.runs.provider_origin_active(context.run_id)
+            reason = (
+                await uow.runs.cancellation_reason(context.run_id)
+                if active
+                else "installation_unavailable"
+            )
+        if reason is not None:
+            raise RunCancelled(reason)
+
     return LlmGateway(
         settings,
         OpenAICompatibleTransport(client),
@@ -104,8 +119,13 @@ def build_gateway(
         RunTraceLlmCalls(
             TransactionalRunTrace(partial(SqlAlchemyRunTraceUnitOfWork, session_factory))
         ),
+        checkpoint=checkpoint,
         fx_provider=fx_provider,
     )
+
+
+async def _standalone_case_checkpoint(context: RunCallContext) -> None:
+    """Database-free eval/manual cases have no persisted Run lifecycle to check."""
 
 
 @dataclass(frozen=True)
@@ -187,7 +207,14 @@ async def _run_database_free_case[CaseOutput](
         if fx_provider is None:
             fx_client = await stack.enter_async_context(httpx.AsyncClient(transport=fx_transport))
             fx_provider = EcbFxQuoteCache(EcbFxRateAdapter(fx_client))
-        gateway = LlmGateway(settings, effective, ledger, trace, fx_provider=fx_provider)
+        gateway = LlmGateway(
+            settings,
+            effective,
+            ledger,
+            trace,
+            checkpoint=_standalone_case_checkpoint,
+            fx_provider=fx_provider,
+        )
         try:
             output = await invoke(gateway, run)
         except LlmCallFailed as failure:

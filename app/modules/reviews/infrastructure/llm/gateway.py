@@ -165,6 +165,7 @@ class LlmGateway:
         ledger: UsageLedger,
         trace: LlmCallTrace,
         *,
+        checkpoint: Callable[[RunCallContext], Awaitable[None]],
         clock: Clock | None = None,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         jitter: Callable[[], float] | None = None,
@@ -172,6 +173,7 @@ class LlmGateway:
         fx_provider: FxQuoteProvider | None = None,
     ) -> None:
         self._settings = settings
+        self._checkpoint = checkpoint
         self._transport = transport
         self._ledger = ledger
         self._trace = trace
@@ -327,6 +329,7 @@ class LlmGateway:
         attempt: _AttemptCalls,
     ) -> _Outcome:
         """Check deadline, context and budget, then make one provider call."""
+        await self._checkpoint(context)
         policy = self._settings.policy
         timeout_s = policy.call_timeout_s[context.engine]
         remaining = self._seconds_left(context)
@@ -376,6 +379,9 @@ class LlmGateway:
                 state,
             )
 
+        # Detect retirement during FX/ledger awaits before consuming the shared
+        # attempt call allowance; transport also fences every actual HTTP request.
+        await self._checkpoint(context)
         remaining = self._seconds_left(context)
         if remaining < timeout_s:
             raise self._failed(
@@ -405,6 +411,18 @@ class LlmGateway:
             started_at=started_at,
             fx=_fx_provenance(quote_result),
         )
+
+        async def checkpoint() -> None:
+            await self._checkpoint(context)
+            remaining = self._seconds_left(context)
+            if remaining < timeout_s:
+                raise self._failed(
+                    LlmErrorCode.DEADLINE_EXCEEDED,
+                    f"{remaining:.0f} s left before the attempt deadline; "
+                    f"a call needs {timeout_s:g} s",
+                    state,
+                )
+
         try:
             response = await self._transport.complete(
                 ChatRequest(
@@ -412,7 +430,8 @@ class LlmGateway:
                     messages=messages,
                     response_schema=task.schema,
                     timeout_s=timeout_s,
-                )
+                ),
+                checkpoint=checkpoint,
             )
         except TransportPaidAnswerError as error:
             duration_ms = _elapsed_ms(started, self._monotonic())

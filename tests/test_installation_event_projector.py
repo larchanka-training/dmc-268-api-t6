@@ -23,9 +23,11 @@ from app.modules.integrations.webhooks.application.installation_access_token imp
 )
 from app.modules.integrations.webhooks.application.installation_event_projector import (
     InstallationEventProjector,
+    InstallationProviderCheckpoint,
     InstallationRepositoryDetailsProvider,
     InstallationRepositoryLabelProvider,
     InstallationRepositoryTreeProvider,
+    InstallationRetiredError,
     RepositoryDetails,
     RepositoryDetailsUnavailableError,
 )
@@ -51,6 +53,7 @@ from app.modules.repositories.application.onboard_repository import OnboardingRe
 from app.modules.repositories.application.sync_installation_repositories import (
     RepositoryOnboardingInput,
 )
+from tests.installation_onboarding_fakes import active_installation, provider_checkpoint
 
 
 def _reference(*, external_id: int = 101, branch: str = "main") -> RepositoryReference:
@@ -83,6 +86,7 @@ class FakeTreeProvider(InstallationRepositoryTreeProvider):
     async def fetch_default_branch_tree(
         self,
         *,
+        checkpoint: InstallationProviderCheckpoint,
         installation_external_id: int,
         repository: RepositorySnapshot,
     ) -> tuple[RepositoryTreeBlob, ...]:
@@ -125,7 +129,11 @@ class FakeLabelProvider(InstallationRepositoryLabelProvider):
     fail_for: set[str] = field(default_factory=set)
 
     async def create_ai_review_label(
-        self, *, installation_external_id: int, repository: RepositorySnapshot
+        self,
+        *,
+        checkpoint: InstallationProviderCheckpoint,
+        installation_external_id: int,
+        repository: RepositorySnapshot,
     ) -> None:
         self.calls.append((installation_external_id, repository.full_name))
         if repository.full_name in self.fail_for:
@@ -139,7 +147,11 @@ class FakeDetailsProvider(InstallationRepositoryDetailsProvider):
     calls: list[tuple[int, str]] = field(default_factory=list)
 
     async def fetch_repository_details(
-        self, *, installation_external_id: int, full_name: str
+        self,
+        *,
+        checkpoint: InstallationProviderCheckpoint,
+        installation_external_id: int,
+        full_name: str,
     ) -> RepositoryDetails:
         self.calls.append((installation_external_id, full_name))
         if self.error is not None:
@@ -174,6 +186,7 @@ def test_added_repositories_get_ai_review_label_before_database_sync(
     sync = Sync()
     asyncio.run(
         InstallationEventProjector(
+            installation_active=active_installation,
             tree_provider=tree_provider,
             label_provider=labels,
             details_provider=FakeDetailsProvider(),
@@ -199,6 +212,7 @@ def test_label_failure_is_logged_but_other_repositories_still_onboard(
 
     asyncio.run(
         InstallationEventProjector(
+            installation_active=active_installation,
             tree_provider=FakeTreeProvider(trees={101: (), 102: ()}),
             label_provider=labels,
             details_provider=FakeDetailsProvider(),
@@ -232,6 +246,7 @@ def test_projector_fetches_each_declared_default_branch_before_entering_sync() -
 
     asyncio.run(
         InstallationEventProjector(
+            installation_active=active_installation,
             tree_provider=provider,
             label_provider=FakeLabelProvider(),
             details_provider=FakeDetailsProvider(),
@@ -263,6 +278,7 @@ def test_empty_repository_tree_onboards_the_repository_without_languages() -> No
 
     asyncio.run(
         InstallationEventProjector(
+            installation_active=active_installation,
             tree_provider=FakeTreeProvider(trees={101: ()}),
             label_provider=FakeLabelProvider(),
             details_provider=FakeDetailsProvider(),
@@ -287,6 +303,7 @@ def test_projector_soft_disables_removed_repositories_without_a_vcs_request(acti
 
     asyncio.run(
         InstallationEventProjector(
+            installation_active=active_installation,
             tree_provider=provider,
             label_provider=labels,
             details_provider=FakeDetailsProvider(),
@@ -316,6 +333,7 @@ def test_provider_failure_is_propagated_before_the_database_sync_begins() -> Non
     with pytest.raises(RuntimeError, match="GitHub unavailable"):
         asyncio.run(
             InstallationEventProjector(
+                installation_active=active_installation,
                 tree_provider=provider,
                 label_provider=FakeLabelProvider(),
                 details_provider=FakeDetailsProvider(),
@@ -360,6 +378,7 @@ def test_missing_branch_and_url_are_fetched_once_and_feed_tree_label_and_sync() 
     sync = Sync()
     asyncio.run(
         InstallationEventProjector(
+            installation_active=active_installation,
             tree_provider=tree,
             label_provider=FakeLabelProvider(),
             details_provider=details,
@@ -391,6 +410,7 @@ def test_complete_repositories_need_no_details_request() -> None:
 
     asyncio.run(
         InstallationEventProjector(
+            installation_active=active_installation,
             tree_provider=tree,
             label_provider=FakeLabelProvider(),
             details_provider=details,
@@ -441,6 +461,7 @@ def test_one_missing_field_takes_both_from_the_details_provider(
 
     asyncio.run(
         InstallationEventProjector(
+            installation_active=active_installation,
             tree_provider=tree,
             label_provider=FakeLabelProvider(),
             details_provider=details,
@@ -471,6 +492,7 @@ def test_only_the_incomplete_repositories_of_a_batch_are_fetched() -> None:
 
     asyncio.run(
         InstallationEventProjector(
+            installation_active=active_installation,
             tree_provider=tree,
             label_provider=FakeLabelProvider(),
             details_provider=details,
@@ -507,7 +529,11 @@ def test_details_failure_is_propagated_before_tree_label_and_database_sync() -> 
     with pytest.raises(RuntimeError, match="GitHub unavailable"):
         asyncio.run(
             InstallationEventProjector(
-                tree_provider=tree, label_provider=labels, details_provider=details, sync=sync
+                installation_active=active_installation,
+                tree_provider=tree,
+                label_provider=labels,
+                details_provider=details,
+                sync=sync,
             ).execute(
                 provider_installation_id=uuid4(),
                 event=InstallationRepositoriesEvent(
@@ -533,7 +559,11 @@ def test_unavailable_details_propagate_as_the_typed_error_before_any_write() -> 
     with pytest.raises(RepositoryDetailsUnavailableError) as raised:
         asyncio.run(
             InstallationEventProjector(
-                tree_provider=tree, label_provider=labels, details_provider=details, sync=sync
+                installation_active=active_installation,
+                tree_provider=tree,
+                label_provider=labels,
+                details_provider=details,
+                sync=sync,
             ).execute(
                 provider_installation_id=uuid4(),
                 event=InstallationRepositoriesEvent(
@@ -559,13 +589,19 @@ def test_details_failure_on_a_later_repository_still_persists_the_readable_ones(
     @dataclass
     class FailingSecondDetails(FakeDetailsProvider):
         async def fetch_repository_details(
-            self, *, installation_external_id: int, full_name: str
+            self,
+            *,
+            checkpoint: InstallationProviderCheckpoint,
+            installation_external_id: int,
+            full_name: str,
         ) -> RepositoryDetails:
             if full_name == "example-owner/repo-102":
                 self.calls.append((installation_external_id, full_name))
                 raise RuntimeError("GitHub unavailable for the second repository")
             return await super().fetch_repository_details(
-                installation_external_id=installation_external_id, full_name=full_name
+                installation_external_id=installation_external_id,
+                full_name=full_name,
+                checkpoint=provider_checkpoint,
             )
 
     details = FailingSecondDetails(
@@ -581,6 +617,7 @@ def test_details_failure_on_a_later_repository_still_persists_the_readable_ones(
     with pytest.raises(RuntimeError, match="second repository"):
         asyncio.run(
             InstallationEventProjector(
+                installation_active=active_installation,
                 tree_provider=tree,
                 label_provider=FakeLabelProvider(),
                 details_provider=details,
@@ -614,13 +651,16 @@ class FailingTree(FakeTreeProvider):
     async def fetch_default_branch_tree(
         self,
         *,
+        checkpoint: InstallationProviderCheckpoint,
         installation_external_id: int,
         repository: RepositorySnapshot,
     ) -> tuple[RepositoryTreeBlob, ...]:
         if repository.external_id in self.errors:
             raise self.errors[repository.external_id]
         return await super().fetch_default_branch_tree(
-            installation_external_id=installation_external_id, repository=repository
+            installation_external_id=installation_external_id,
+            repository=repository,
+            checkpoint=provider_checkpoint,
         )
 
 
@@ -648,6 +688,7 @@ def test_tree_failure_on_a_later_repository_still_persists_the_readable_ones(
     ):
         asyncio.run(
             InstallationEventProjector(
+                installation_active=active_installation,
                 tree_provider=tree,
                 label_provider=labels,
                 details_provider=FakeDetailsProvider(),
@@ -697,6 +738,7 @@ def test_unavailable_details_are_logged_with_the_type_and_status_of_their_cause(
     ):
         asyncio.run(
             InstallationEventProjector(
+                installation_active=active_installation,
                 tree_provider=FakeTreeProvider(),
                 label_provider=FakeLabelProvider(),
                 details_provider=FakeDetailsProvider(error=unavailable),
@@ -737,6 +779,7 @@ def test_the_first_failure_in_event_order_is_raised_and_every_failure_is_logged(
     ):
         asyncio.run(
             InstallationEventProjector(
+                installation_active=active_installation,
                 tree_provider=tree,
                 label_provider=FakeLabelProvider(),
                 details_provider=FakeDetailsProvider(),
@@ -772,13 +815,19 @@ class FailingDetails(FakeDetailsProvider):
     errors: dict[str, Exception] = field(default_factory=dict)
 
     async def fetch_repository_details(
-        self, *, installation_external_id: int, full_name: str
+        self,
+        *,
+        checkpoint: InstallationProviderCheckpoint,
+        installation_external_id: int,
+        full_name: str,
     ) -> RepositoryDetails:
         if full_name in self.errors:
             self.calls.append((installation_external_id, full_name))
             raise self.errors[full_name]
         return await super().fetch_repository_details(
-            installation_external_id=installation_external_id, full_name=full_name
+            installation_external_id=installation_external_id,
+            full_name=full_name,
+            checkpoint=provider_checkpoint,
         )
 
 
@@ -805,6 +854,7 @@ def _dispatch_three_bare_repositories(
 ) -> InstallationDeliveryDispatchResult:
     """The real dispatcher over the projector, for an event of repositories 101, 102, 103."""
     projector = InstallationEventProjector(
+        installation_active=active_installation,
         tree_provider=tree,
         label_provider=labels or FakeLabelProvider(),
         details_provider=details,
@@ -876,11 +926,17 @@ def test_an_earlier_repository_that_fails_later_still_decides_the_dispatch_path(
 
     class DetailsAfterTheTreeFailure(FakeDetailsProvider):
         async def fetch_repository_details(
-            self, *, installation_external_id: int, full_name: str
+            self,
+            *,
+            checkpoint: InstallationProviderCheckpoint,
+            installation_external_id: int,
+            full_name: str,
         ) -> RepositoryDetails:
             if full_name != "example-owner/repo-101":
                 return await super().fetch_repository_details(
-                    installation_external_id=installation_external_id, full_name=full_name
+                    installation_external_id=installation_external_id,
+                    full_name=full_name,
+                    checkpoint=provider_checkpoint,
                 )
             await tree_failed.wait()
             finished.append(101)
@@ -892,12 +948,15 @@ def test_an_earlier_repository_that_fails_later_still_decides_the_dispatch_path(
         async def fetch_default_branch_tree(
             self,
             *,
+            checkpoint: InstallationProviderCheckpoint,
             installation_external_id: int,
             repository: RepositorySnapshot,
         ) -> tuple[RepositoryTreeBlob, ...]:
             if repository.external_id != 103:
                 return await super().fetch_default_branch_tree(
-                    installation_external_id=installation_external_id, repository=repository
+                    installation_external_id=installation_external_id,
+                    repository=repository,
+                    checkpoint=provider_checkpoint,
                 )
             tree_failed.set()
             finished.append(103)
@@ -926,6 +985,7 @@ def test_a_cancelled_repository_aborts_the_event_before_the_database_sync() -> N
     with pytest.raises(asyncio.CancelledError):
         asyncio.run(
             InstallationEventProjector(
+                installation_active=active_installation,
                 tree_provider=tree,
                 label_provider=FakeLabelProvider(),
                 details_provider=FakeDetailsProvider(),
@@ -951,6 +1011,7 @@ class HangingTree(FakeTreeProvider):
     async def fetch_default_branch_tree(
         self,
         *,
+        checkpoint: InstallationProviderCheckpoint,
         installation_external_id: int,
         repository: RepositorySnapshot,
     ) -> tuple[RepositoryTreeBlob, ...]:
@@ -969,6 +1030,7 @@ def test_the_dispatch_timeout_cancels_every_running_repository_and_never_syncs()
     labels = FakeLabelProvider()
     sync = FakeSyncInstallationRepositories()
     projector = InstallationEventProjector(
+        installation_active=active_installation,
         tree_provider=tree,
         label_provider=labels,
         details_provider=FakeDetailsProvider(),
@@ -1003,6 +1065,7 @@ def test_the_dispatch_timeout_cancels_every_running_repository_and_never_syncs()
 def test_projector_rejects_a_concurrency_limit_below_one(limit: int) -> None:
     with pytest.raises(ValueError, match="max_concurrent_repositories must be at least 1"):
         InstallationEventProjector(
+            installation_active=active_installation,
             tree_provider=FakeTreeProvider(),
             label_provider=FakeLabelProvider(),
             details_provider=FakeDetailsProvider(),
@@ -1081,6 +1144,7 @@ def test_two_hundred_bare_repositories_fit_the_delivery_budget(
         ) as client:
             tokens = TokenProvider()
             projector = InstallationEventProjector(
+                installation_active=active_installation,
                 tree_provider=GitHubInstallationTreeProvider(client=client, token_provider=tokens),
                 label_provider=GitHubRepositoryLabelProvider(
                     client=client, token_provider=tokens, clock=clock, sleep=virtual_sleep
@@ -1127,7 +1191,11 @@ def test_removal_of_bare_repositories_makes_no_github_request(action: str) -> No
 
     asyncio.run(
         InstallationEventProjector(
-            tree_provider=tree, label_provider=labels, details_provider=details, sync=sync
+            installation_active=active_installation,
+            tree_provider=tree,
+            label_provider=labels,
+            details_provider=details,
+            sync=sync,
         ).execute(
             provider_installation_id=provider_installation_id,
             event=InstallationRepositoriesEvent(
@@ -1176,6 +1244,7 @@ class StartRecordingTree(FakeTreeProvider):
     async def fetch_default_branch_tree(
         self,
         *,
+        checkpoint: InstallationProviderCheckpoint,
         installation_external_id: int,
         repository: RepositorySnapshot,
     ) -> tuple[RepositoryTreeBlob, ...]:
@@ -1199,6 +1268,7 @@ def _execute(
 ) -> None:
     asyncio.run(
         InstallationEventProjector(
+            installation_active=active_installation,
             tree_provider=tree,
             label_provider=labels or FakeLabelProvider(),
             details_provider=details or FakeDetailsProvider(),
@@ -1276,7 +1346,11 @@ def test_a_token_failure_of_the_details_request_also_skips_the_rest() -> None:
     @dataclass
     class TokenFailingDetails(FakeDetailsProvider):
         async def fetch_repository_details(
-            self, *, installation_external_id: int, full_name: str
+            self,
+            *,
+            checkpoint: InstallationProviderCheckpoint,
+            installation_external_id: int,
+            full_name: str,
         ) -> RepositoryDetails:
             self.calls.append((installation_external_id, full_name))
             raise _token_failure()
@@ -1348,10 +1422,16 @@ class FailingLabels(FakeLabelProvider):
     errors: dict[str, Exception] = field(default_factory=dict)
 
     async def create_ai_review_label(
-        self, *, installation_external_id: int, repository: RepositorySnapshot
+        self,
+        *,
+        checkpoint: InstallationProviderCheckpoint,
+        installation_external_id: int,
+        repository: RepositorySnapshot,
     ) -> None:
         await super().create_ai_review_label(
-            installation_external_id=installation_external_id, repository=repository
+            installation_external_id=installation_external_id,
+            repository=repository,
+            checkpoint=provider_checkpoint,
         )
         if repository.full_name in self.errors:
             raise self.errors[repository.full_name]
@@ -1455,6 +1535,7 @@ def test_removal_without_delivery_id_fails_before_sync(
 ) -> None:
     sync = FakeSyncInstallationRepositories()
     projector = InstallationEventProjector(
+        installation_active=active_installation,
         tree_provider=FakeTreeProvider(),
         label_provider=FakeLabelProvider(),
         details_provider=FakeDetailsProvider(),
@@ -1477,3 +1558,30 @@ def test_removal_without_delivery_id_fails_before_sync(
 
     assert sync.calls == []
     assert sync.disable_calls == []
+
+
+def test_projector_logs_retirement_during_repository_onboarding(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    installation = UUID(int=11311)
+    tree = FakeTreeProvider(error=InstallationRetiredError())
+    sync = FakeSyncInstallationRepositories()
+    projector = InstallationEventProjector(
+        tree_provider=tree,
+        label_provider=FakeLabelProvider(),
+        details_provider=FakeDetailsProvider(),
+        sync=sync,
+        installation_active=active_installation,
+    )
+    with caplog.at_level(logging.INFO, logger=_PROJECTOR_LOGGER):
+        result = asyncio.run(
+            projector.execute(
+                provider_installation_id=installation,
+                event=InstallationRepositoriesEvent(17, "added", (_reference(),), ()),
+            )
+        )
+    assert result == ()
+    assert sync.calls == []
+    assert "installation_id=17" in caplog.text
+    assert "repository_id=101" in caplog.text
+    assert "reason=installation_unavailable" in caplog.text

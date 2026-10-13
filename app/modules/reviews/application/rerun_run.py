@@ -35,7 +35,7 @@ class RerunResult:
 
 
 class RerunConflict(Exception):
-    """The PR already has an active Run or is closed; no Run was created."""
+    """The PR is closed/active or repository reviews are paused/unavailable; no Run created."""
 
 
 class RerunNotConfigured(Exception):

@@ -42,6 +42,7 @@ from app.modules.integrations.webhooks.application.github_installation_dispatch 
     InstallationDeliveryDispatchStatus,
 )
 from app.modules.integrations.webhooks.application.installation_event_projector import (
+    InstallationProviderCheckpoint,
     InstallationRepositoryDetailsProvider,
     InstallationRepositoryLabelProvider,
     InstallationRepositoryTreeProvider,
@@ -83,6 +84,7 @@ class FakeTreeProvider(InstallationRepositoryTreeProvider):
     async def fetch_default_branch_tree(
         self,
         *,
+        checkpoint: InstallationProviderCheckpoint,
         installation_external_id: int,
         repository: RepositorySnapshot,
     ) -> tuple[RepositoryTreeBlob, ...]:
@@ -95,7 +97,11 @@ class FakeLabelProvider(InstallationRepositoryLabelProvider):
     calls: list[tuple[int, str]] = field(default_factory=list)
 
     async def create_ai_review_label(
-        self, *, installation_external_id: int, repository: RepositorySnapshot
+        self,
+        *,
+        checkpoint: InstallationProviderCheckpoint,
+        installation_external_id: int,
+        repository: RepositorySnapshot,
     ) -> None:
         self.calls.append((installation_external_id, repository.full_name))
 
@@ -104,7 +110,11 @@ class UnusedDetailsProvider(InstallationRepositoryDetailsProvider):
     """Events in these tests carry branch and URL, so GitHub must not be asked for them."""
 
     async def fetch_repository_details(
-        self, *, installation_external_id: int, full_name: str
+        self,
+        *,
+        checkpoint: InstallationProviderCheckpoint,
+        installation_external_id: int,
+        full_name: str,
     ) -> RepositoryDetails:
         raise AssertionError("complete repositories need no details request")
 
@@ -146,6 +156,9 @@ def test_composition_accepts_typed_event_and_internal_installation_id(
     class FakeSync:
         def __init__(self, *, uow_factory: object, rule_sets: object) -> None:
             observed["rule_sets"] = rule_sets
+
+        async def is_active(self, provider_installation_id: UUID) -> bool:
+            return True
 
         async def execute(
             self, *, provider_installation_id: UUID, repositories: object
@@ -252,6 +265,9 @@ def test_runtime_dispatcher_creates_label_only_for_linked_added_repositories(
     class Sync:
         def __init__(self, *, uow_factory: object, rule_sets: object) -> None:
             pass
+
+        async def is_active(self, provider_installation_id: UUID) -> bool:
+            return True
 
         async def execute(
             self, *, provider_installation_id: UUID, repositories: object
@@ -537,7 +553,8 @@ def test_signed_runtime_delivery_onboards_replays_removes_and_ignores_unknown_in
     repository, versions, tree_fetches, label_creations = asyncio.run(exercise())
 
     assert repository is not None
-    assert repository.enabled is False
+    assert repository.enabled is True
+    assert repository.installation_available is False
     assert len(versions) == 1
     assert versions[0].version == 1
     assert versions[0].is_active is True
@@ -671,6 +688,7 @@ def test_real_delivery_fixture_is_onboarded_with_branch_and_url_read_from_github
     assert onboarded_row.default_branch == "trunk"
     assert onboarded_row.web_url == f"https://example.test/{full_name}"
     assert onboarded_row.enabled is True
+    assert onboarded_row.installation_available is True
     assert requests_after_onboarding == [
         ("GET", repository_path),
         ("GET", f"{repository_path}/git/trees/trunk"),
@@ -678,7 +696,8 @@ def test_real_delivery_fixture_is_onboarded_with_branch_and_url_read_from_github
     ]
     assert removed_status is InstallationDeliveryDispatchStatus.ONBOARDED
     assert removed_row is not None
-    assert removed_row.enabled is False
+    assert removed_row.enabled is True
+    assert removed_row.installation_available is False
     assert requests_after_removal == requests_after_onboarding
 
 

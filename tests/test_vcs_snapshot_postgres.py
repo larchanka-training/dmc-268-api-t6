@@ -11,13 +11,14 @@ from uuid import UUID, uuid4
 
 import pytest
 from alembic.config import Config
-from sqlalchemy import create_engine, func, inspect, select, text
+from sqlalchemy import create_engine, func, inspect, select, text, update
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
 from sqlalchemy.schema import CreateSchema, DropSchema
 
 from alembic import command
 from app.main import app, get_file_blob_cache, get_run_repository
+from app.modules.reviews.application.check_runs import RunProviderCheckpoint
 from app.modules.reviews.application.get_run_diff import (
     DiffSnapshot,
     review_files_from_snapshots,
@@ -75,7 +76,8 @@ def vcs_database() -> Iterator[tuple[str, str, UUID, UUID, UUID, str, UUID, UUID
                     "INSERT INTO repositories "
                     "(id, provider_installation_id, external_id, full_name, "
                     "default_branch, web_url) "
-                    "VALUES (:id, :installation, 101, 'octo/repo', 'main', 'https://github.test/octo/repo')"
+                    "VALUES (:id, :installation, 101, 'octo/repo', 'main', "
+                    "'https://github.test/octo/repo')"
                 ),
                 {"id": repository_id, "installation": installation_id},
             )
@@ -263,12 +265,14 @@ def vcs_database() -> Iterator[tuple[str, str, UUID, UUID, UUID, str, UUID, UUID
                 text(
                     "INSERT INTO runs "
                     "(id, code_change_id, base_sha, head_sha, state, trigger, idempotency_key, "
-                    "engine, rule_version_id, prompt_version_id, available_at) "
+                    "engine, rule_version_id, prompt_version_id, available_at, "
+                    "origin_provider_installation_id) "
                     "VALUES (:id, :pr, :base, :head, 'succeeded', 'manual', :key, "
-                    "'fast', :rule, :prompt, :available)"
+                    "'fast', :rule, :prompt, :available, :origin)"
                 ),
                 {
                     "id": fresh_run,
+                    "origin": installation_id,
                     "pr": first_pr,
                     "base": "b" * 40,
                     "head": "e" * 40,
@@ -381,6 +385,10 @@ def test_file_endpoint_resolves_two_pr_paths_through_one_immutable_blob(
 
         async def store_fresh_run() -> tuple[list[DiffSnapshot], list[DiffSnapshot]]:
             async with factory() as session:
+                # This producer models a claimed attempt; portal histories stay terminal.
+                await session.execute(
+                    update(Run).where(Run.id == fresh_run).values(state="running")
+                )
                 code_change_id = await session.scalar(
                     select(Run.code_change_id).where(Run.id == fresh_run)
                 )
@@ -439,7 +447,10 @@ def test_review_run_processor_commits_blob_cache_to_postgres(
     processor_run = uuid4()
 
     class DummyVcsProvider:
-        async def get_pull_request(self, locator: PullRequestLocator) -> VcsPullRequest:
+        async def get_pull_request(
+            self, locator: PullRequestLocator, *, checkpoint: RunProviderCheckpoint
+        ) -> VcsPullRequest:
+            await checkpoint()
             return VcsPullRequest(
                 locator=locator,
                 head_sha="e" * 40,
@@ -459,7 +470,10 @@ def test_review_run_processor_commits_blob_cache_to_postgres(
                 ),
             )
 
-        async def get_diff(self, pull_request: VcsPullRequest) -> tuple[VcsFile, ...]:
+        async def get_diff(
+            self, pull_request: VcsPullRequest, *, checkpoint: RunProviderCheckpoint
+        ) -> tuple[VcsFile, ...]:
+            await checkpoint()
             return (
                 VcsFile(
                     filename="src/fresh_file.py",
@@ -473,7 +487,10 @@ def test_review_run_processor_commits_blob_cache_to_postgres(
                 ),
             )
 
-        async def get_blob(self, locator: PullRequestLocator, sha: str) -> bytes:
+        async def get_blob(
+            self, locator: PullRequestLocator, sha: str, *, checkpoint: RunProviderCheckpoint
+        ) -> bytes:
+            await checkpoint()
             assert sha == target_blob_sha
             return b"content_from_vcs\n"
 
@@ -485,10 +502,11 @@ def test_review_run_processor_commits_blob_cache_to_postgres(
                 assert first is not None
                 run = Run(
                     id=processor_run,
+                    origin_provider_installation_id=first.origin_provider_installation_id,
                     code_change_id=first.code_change_id,
                     base_sha=first.base_sha,
                     head_sha=first.head_sha,
-                    state=first.state,
+                    state="running",
                     trigger=first.trigger,
                     idempotency_key="blob_commit_test_" + uuid4().hex,
                     engine=first.engine,

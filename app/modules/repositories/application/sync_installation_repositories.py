@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Protocol
@@ -19,6 +20,12 @@ from app.modules.repositories.application.onboard_repository import (
     RepositoryRuleVersionStore,
 )
 
+_LOGGER = logging.getLogger(__name__)
+
+
+class InstallationIdentityChanged(RuntimeError):
+    """Restart the short UOW so newly assigned account locks precede row locks."""
+
 
 @dataclass(frozen=True)
 class RepositoryOnboardingInput:
@@ -31,9 +38,13 @@ class RepositoryOnboardingInput:
 class InstallationRepositoryStore(RepositoryRuleVersionStore, Protocol):
     """Flush-only store used by installation synchronization."""
 
+    async def lock_active_installation(self, provider_installation_id: UUID) -> bool: ...
+
     async def upsert_repository(
         self, provider_installation_id: UUID, snapshot: RepositorySnapshot
-    ) -> UUID: ...
+    ) -> UUID | None:
+        """Return None when fresh OAuth must confirm a preserved archive first."""
+        ...
 
     async def disable_repository(
         self, provider_installation_id: UUID, external_id: int
@@ -72,20 +83,60 @@ class SyncInstallationRepositories:
         self._uow_factory = uow_factory
         self._rule_sets = rule_sets
 
+    async def is_active(self, provider_installation_id: UUID) -> bool:
+        # The short preflight UOW closes before the projector enters any provider.
+        retried = False
+        while True:
+            try:
+                async with self._uow_factory() as uow:
+                    return await uow.repositories.lock_active_installation(provider_installation_id)
+            except InstallationIdentityChanged:
+                _LOGGER.info(
+                    "Retrying installation preflight %s: account identity changed before row lock",
+                    provider_installation_id,
+                )
+                if retried:
+                    raise
+                retried = True
+
     async def execute(
         self,
         *,
         provider_installation_id: UUID,
         repositories: tuple[RepositoryOnboardingInput, ...],
     ) -> tuple[OnboardingResult, ...]:
+        # Account identity is immutable once assigned, so one NULL-to-numeric
+        # transition can require one retry. Exiting the failed UOW releases every
+        # row lock before the replacement transaction acquires its account fence.
+        retried = False
+        while True:
+            try:
+                return await self._execute_transaction(provider_installation_id, repositories)
+            except InstallationIdentityChanged:
+                _LOGGER.info(
+                    "Retrying installation sync %s: account identity changed before row lock",
+                    provider_installation_id,
+                )
+                if retried:
+                    raise
+                retried = True
+
+    async def _execute_transaction(
+        self,
+        provider_installation_id: UUID,
+        repositories: tuple[RepositoryOnboardingInput, ...],
+    ) -> tuple[OnboardingResult, ...]:
         async with self._uow_factory() as uow:
+            if not await uow.repositories.lock_active_installation(provider_installation_id):
+                return ()
             onboarding = OnboardRepository(uow.repositories, self._rule_sets)
             results: list[OnboardingResult] = []
             for repository in repositories:
                 repository_id = await uow.repositories.upsert_repository(
                     provider_installation_id, repository.snapshot
                 )
-                results.append(await onboarding.execute(repository_id, repository.languages))
+                if repository_id is not None:
+                    results.append(await onboarding.execute(repository_id, repository.languages))
             await uow.commit()
         return tuple(results)
 

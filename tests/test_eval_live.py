@@ -14,6 +14,7 @@ from typing import Any
 import pytest
 
 import review.scripts.eval_live as eval_live_module
+from app.modules.reviews.application.check_runs import RunProviderCheckpoint
 from app.modules.reviews.infrastructure.llm.settings import (
     GatewayPolicy,
     LlmSettings,
@@ -116,7 +117,10 @@ class FakeTransport:
     outcomes: list[ChatResponse | TransportError]
     requests: list[ChatRequest] = field(default_factory=list)
 
-    async def complete(self, request: ChatRequest) -> ChatResponse:
+    async def complete(
+        self, request: ChatRequest, *, checkpoint: RunProviderCheckpoint
+    ) -> ChatResponse:
+        await checkpoint()
         self.requests.append(request)
         outcome = self.outcomes.pop(0)
         if isinstance(outcome, TransportError):
@@ -809,11 +813,13 @@ def test_newly_populated_baseline_is_not_overwritten_during_capture(tmp_path: Pa
     root = fixture_root(tmp_path, ("SEC-01",))
 
     class BaselineAppearsTransport(FakeTransport):
-        async def complete(self, request: ChatRequest) -> ChatResponse:
+        async def complete(
+            self, request: ChatRequest, *, checkpoint: RunProviderCheckpoint
+        ) -> ChatResponse:
             responses = root / "responses"
             responses.mkdir()
             (responses / "existing.json").write_bytes(b"preserve existing baseline")
-            return await super().complete(request)
+            return await super().complete(request, checkpoint=checkpoint)
 
     with pytest.raises(RecorderError, match="responses directory is not empty"):
         record(root, BaselineAppearsTransport([answer("primary-model", VALID)]))

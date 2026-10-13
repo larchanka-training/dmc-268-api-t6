@@ -65,6 +65,7 @@ class InstallationOnboarding:
             label_provider=label_provider,
             details_provider=details_provider,
             sync=sync,
+            installation_active=sync.is_active,
         )
 
     async def execute(

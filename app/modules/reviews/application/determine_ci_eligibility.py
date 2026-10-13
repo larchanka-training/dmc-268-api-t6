@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
+from functools import partial
 from typing import Protocol
 from uuid import UUID
 
@@ -80,9 +81,23 @@ class EligibilityCandidateStore(Protocol):
     async def get(self, code_change_id: UUID) -> EligibilityCandidate | None: ...
 
 
+type CiProviderCheckpoint = Callable[[], Awaitable[None]]
+
+
+class _CiCandidateChanged(Exception):
+    def __init__(self, decision: CiEligibility) -> None:
+        self.decision = decision
+        super().__init__(decision.reason.value)
+
+
 class CurrentHeadCiProvider(Protocol):
     async def get_current_head_ci(
-        self, installation_external_id: int, repository_full_name: str, head_sha: str
+        self,
+        installation_external_id: int,
+        repository_full_name: str,
+        head_sha: str,
+        *,
+        checkpoint: CiProviderCheckpoint,
     ) -> CiSnapshot: ...
 
 
@@ -104,22 +119,32 @@ class DetermineCiEligibility:
         self._own_app_id = own_app_id
         self._now = now
 
-    async def execute(self, code_change_id: UUID, expected_head_sha: str) -> CiEligibility:
+    async def execute(
+        self,
+        code_change_id: UUID,
+        expected_head_sha: str,
+        *,
+        expected_installation_external_id: int | None = None,
+    ) -> CiEligibility:
         candidate = await self._candidates.get(code_change_id)
-        precheck = self._precheck(candidate, expected_head_sha)
+        precheck = self._precheck(candidate, expected_head_sha, expected_installation_external_id)
         if precheck is not None:
             return precheck
         assert candidate is not None
         if candidate.wait_for_ci == CiWaitMode.NEVER:
             return CiEligibility(True, EligibilityReason.ELIGIBLE, candidate.head_sha, candidate)
 
-        snapshot = await self._ci.get_current_head_ci(
-            candidate.installation_external_id,
-            candidate.repository_full_name,
-            candidate.head_sha,
-        )
+        try:
+            snapshot = await self._ci.get_current_head_ci(
+                candidate.installation_external_id,
+                candidate.repository_full_name,
+                candidate.head_sha,
+                checkpoint=partial(self._checkpoint, candidate),
+            )
+        except _CiCandidateChanged as changed:
+            return changed.decision
         current = await self._candidates.get(code_change_id)
-        precheck = self._precheck(current, expected_head_sha)
+        precheck = self._precheck(current, expected_head_sha, expected_installation_external_id)
         if precheck is not None:
             return precheck
         if current != candidate or snapshot.head_sha != candidate.head_sha:
@@ -180,12 +205,30 @@ class DetermineCiEligibility:
             )
         return CiEligibility(True, EligibilityReason.ELIGIBLE, candidate.head_sha, candidate)
 
+    async def _checkpoint(self, candidate: EligibilityCandidate) -> None:
+        """Close the detached read before the next request; pin the original source/head."""
+        current = await self._candidates.get(candidate.code_change_id)
+        decision = self._precheck(current, candidate.head_sha, candidate.installation_external_id)
+        if decision is not None:
+            raise _CiCandidateChanged(decision)
+        if current != candidate:
+            raise _CiCandidateChanged(
+                CiEligibility(False, EligibilityReason.STALE_STATE, candidate.head_sha)
+            )
+
     @staticmethod
     def _precheck(
-        candidate: EligibilityCandidate | None, expected_head_sha: str
+        candidate: EligibilityCandidate | None,
+        expected_head_sha: str,
+        expected_installation_external_id: int | None = None,
     ) -> CiEligibility | None:
         if candidate is None:
             return CiEligibility(False, EligibilityReason.UNKNOWN_PR, None)
+        if (
+            expected_installation_external_id is not None
+            and candidate.installation_external_id != expected_installation_external_id
+        ):
+            return CiEligibility(False, EligibilityReason.STALE_STATE, candidate.head_sha)
         if candidate.head_sha != expected_head_sha:
             return CiEligibility(False, EligibilityReason.STALE_HEAD, candidate.head_sha)
         if not candidate.repository_enabled:

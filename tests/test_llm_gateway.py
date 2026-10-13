@@ -27,6 +27,7 @@ from app.bootstrap.llm_gateway import (
     conventions_case,
     review_case,
 )
+from app.modules.reviews.application.check_runs import RunProviderCheckpoint
 from app.modules.reviews.application.conventions import (
     ConventionsDraft,
     ConventionsRequest,
@@ -50,6 +51,7 @@ from app.modules.reviews.application.prompt_builder import (
     parse_unified_diff,
 )
 from app.modules.reviews.application.review_output import ReviewOutput, parse_review_output
+from app.modules.reviews.application.run_failures import RunCancelled
 from app.modules.reviews.infrastructure.llm.ecb_fx import EcbFxQuoteCache, FxQuote, FxQuoteResult
 from app.modules.reviews.infrastructure.llm.gateway import (
     GatewayResult,
@@ -66,6 +68,7 @@ from app.modules.reviews.infrastructure.llm.models import (
     GatewayReviewModel,
 )
 from app.modules.reviews.infrastructure.llm.settings import (
+    GatewayPolicy,
     LlmConfigError,
     LlmSettings,
     ModelPrice,
@@ -79,6 +82,7 @@ from app.modules.reviews.infrastructure.llm.transport import (
     OpenAICompatibleTransport,
     ResponseSchema,
 )
+from tests.llm_fakes import context_checkpoint
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 RUN_ID = UUID("00000000-0000-0000-0000-000000003301")
@@ -272,6 +276,7 @@ class Harness:
             OpenAICompatibleTransport(client),
             self.ledger,
             self.trace,
+            checkpoint=context_checkpoint,
             clock=self.clock,
             sleep=self.clock.sleep,
             jitter=lambda: 0.25,
@@ -2000,9 +2005,11 @@ def test_paid_answer_keeps_its_quote_during_concurrent_cache_refresh() -> None:
             inner = OpenAICompatibleTransport(client)
 
             class RefreshingTransport:
-                async def complete(self, request: ChatRequest) -> ChatResponse:
+                async def complete(
+                    self, request: ChatRequest, *, checkpoint: RunProviderCheckpoint
+                ) -> ChatResponse:
                     nonlocal monotonic_time
-                    response = await inner.complete(request)
+                    response = await inner.complete(request, checkpoint=checkpoint)
                     monotonic_time += 3600
                     assert (await cache.get_quote()).quote is second
                     return response
@@ -2012,6 +2019,7 @@ def test_paid_answer_keeps_its_quote_during_concurrent_cache_refresh() -> None:
                 RefreshingTransport(),
                 harness.ledger,
                 harness.trace,
+                checkpoint=context_checkpoint,
                 clock=harness.clock,
                 monotonic=harness.clock.monotonic,
                 fx_provider=cache,
@@ -2952,3 +2960,106 @@ def test_conventions_case_returns_a_typed_result_like_review_case() -> None:
     assert [call.kind for call in result.calls] == [LlmCallKind.PRIMARY]
     assert result.usage[0].tokens_in == 1200
     assert result.latency_ms >= 0
+
+
+@pytest.mark.parametrize("boundary", ["first", "rotate"])
+@pytest.mark.parametrize("slow", [False, True])
+def test_actual_key_post_rechecks_deadline_after_final_live_checkpoint(
+    boundary: str, slow: bool
+) -> None:
+    harness = Harness(
+        [error(401), valid()] if boundary == "rotate" else [valid()],
+        primary=replace(PRIMARY, api_keys=("sk-a", "sk-b")),
+        fallback=None,
+        deadline_in_s=100,
+    )
+    in_transport = False
+
+    async def checkpoint(context: RunCallContext) -> None:
+        assert context.run_id == RUN_ID
+        if in_transport and (boundary == "first" or harness.requests):
+            await harness.clock.sleep(11 if slow else 0.001)
+
+    async def exercise() -> GatewayResult:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(harness._handle)) as client:
+            transport = OpenAICompatibleTransport(client)
+
+            class Transport:
+                async def complete(
+                    self, request: ChatRequest, *, checkpoint: RunProviderCheckpoint
+                ) -> ChatResponse:
+                    nonlocal in_transport
+                    in_transport = True
+                    return await transport.complete(request, checkpoint=checkpoint)
+
+            gateway = LlmGateway(
+                LlmSettings(primary=harness.primary, fallback=None),
+                Transport(),
+                harness.ledger,
+                harness.trace,
+                checkpoint=checkpoint,
+                clock=harness.clock,
+            )
+            model = GatewayReviewModel(gateway, harness.run, _NoMeta())
+            await model.draft_review(context=CONTEXT)
+            assert model.last_result is not None
+            return model.last_result
+
+    if slow:
+        with pytest.raises(LlmCallFailed) as caught:
+            asyncio.run(exercise())
+        assert caught.value.error_code is LlmErrorCode.DEADLINE_EXCEEDED
+    else:
+        assert asyncio.run(exercise()).output["summary"]
+    assert len(harness.requests) == (
+        int(boundary == "rotate") if slow else (2 if boundary == "rotate" else 1)
+    )
+    assert len(harness.ledger.events) == int(not slow)
+
+
+def test_retirement_after_pricing_does_not_consume_provider_attempt_budget() -> None:
+    async def exercise() -> None:
+        retired = False
+        armed = True
+        harness = Harness([valid()], fallback=None)
+
+        class Ledger(InMemoryUsageLedger):
+            async def run_cost_usd(self, run_id: UUID) -> Decimal:
+                nonlocal retired, armed
+                if armed:
+                    retired, armed = True, False
+                return await super().run_cost_usd(run_id)
+
+        ledger = Ledger()
+
+        async def checkpoint(context: RunCallContext) -> None:
+            if retired:
+                raise RunCancelled("installation_unavailable")
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(harness._handle)) as client:
+            gateway = LlmGateway(
+                LlmSettings(
+                    primary=PRIMARY, fallback=None, policy=GatewayPolicy(max_calls_per_attempt=1)
+                ),
+                OpenAICompatibleTransport(client),
+                ledger,
+                harness.trace,
+                checkpoint=checkpoint,
+                clock=harness.clock,
+            )
+            model = GatewayReviewModel(gateway, harness.run, _NoMeta())
+            with pytest.raises(RunCancelled, match="installation_unavailable"):
+                await model.draft_review(context=CONTEXT)
+            assert harness.requests == []
+            assert ledger.events == []
+            assert harness.trace.records == []
+            # A transient cancellation predicate in this fake clears; another generation
+            # of the same attempt still has its single paid-call allowance.
+            retired = False
+            await model.draft_review(context=CONTEXT)
+            assert model.last_result is not None
+            assert model.last_result.calls == 1
+            assert len(harness.requests) == 1
+            assert len(ledger.events) == 1
+
+    asyncio.run(exercise())

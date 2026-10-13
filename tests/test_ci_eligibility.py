@@ -14,6 +14,7 @@ import pytest
 from app.modules.reviews.application.determine_ci_eligibility import (
     CheckSuite,
     CiEligibility,
+    CiProviderCheckpoint,
     CiSnapshot,
     CiWaitMode,
     DetermineCiEligibility,
@@ -22,6 +23,7 @@ from app.modules.reviews.application.determine_ci_eligibility import (
 )
 from app.modules.reviews.application.project_github_pull_request import PullRequestState
 from app.modules.reviews.infrastructure.github_ci import HttpGitHubCurrentHeadCiProvider
+from tests.installation_onboarding_fakes import provider_checkpoint
 
 _PR_ID = UUID("11111111-1111-1111-1111-111111111111")
 _AT = datetime(2026, 9, 28, 12, 0, tzinfo=UTC)
@@ -64,7 +66,12 @@ class CiProvider:
     change_on_fetch: EligibilityCandidate | None = None
 
     async def get_current_head_ci(
-        self, installation_external_id: int, repository_full_name: str, head_sha: str
+        self,
+        installation_external_id: int,
+        repository_full_name: str,
+        head_sha: str,
+        *,
+        checkpoint: CiProviderCheckpoint,
     ) -> CiSnapshot:
         self.calls.append((installation_external_id, repository_full_name, head_sha))
         if self.store is not None and self.change_on_fetch is not None:
@@ -457,7 +464,12 @@ def test_candidate_reads_complete_before_and_after_github_fetch() -> None:
 
     class Provider:
         async def get_current_head_ci(
-            self, installation_external_id: int, repository_full_name: str, head_sha: str
+            self,
+            installation_external_id: int,
+            repository_full_name: str,
+            head_sha: str,
+            *,
+            checkpoint: CiProviderCheckpoint,
         ) -> CiSnapshot:
             events.append("github-fetch")
             return _ci(CheckSuite(7, "completed", "success"))
@@ -507,7 +519,9 @@ def test_github_ci_adapter_paginates_suites_and_reads_combined_status_for_exact_
             transport=httpx.MockTransport(handler), base_url="https://api.github.com"
         ) as client:
             provider = HttpGitHubCurrentHeadCiProvider(client=client, token_provider=Tokens())
-            return await provider.get_current_head_ci(17, "octo/repo", _HEAD)
+            return await provider.get_current_head_ci(
+                17, "octo/repo", _HEAD, checkpoint=provider_checkpoint
+            )
 
     result = asyncio.run(exercise())
     assert len(result.check_suites) == 101
@@ -536,7 +550,9 @@ def _fetch_suites(suites: list[dict[str, object]]) -> CiSnapshot:
             transport=httpx.MockTransport(handler), base_url="https://api.github.com"
         ) as client:
             provider = HttpGitHubCurrentHeadCiProvider(client=client, token_provider=Tokens())
-            return await provider.get_current_head_ci(17, "octo/repo", _HEAD)
+            return await provider.get_current_head_ci(
+                17, "octo/repo", _HEAD, checkpoint=provider_checkpoint
+            )
 
     return asyncio.run(exercise())
 
@@ -606,7 +622,9 @@ def test_github_ci_adapter_rejects_uncertain_combined_status(
             transport=httpx.MockTransport(handler), base_url="https://api.github.com"
         ) as client:
             provider = HttpGitHubCurrentHeadCiProvider(client=client, token_provider=Tokens())
-            return await provider.get_current_head_ci(17, "octo/repo", _HEAD)
+            return await provider.get_current_head_ci(
+                17, "octo/repo", _HEAD, checkpoint=provider_checkpoint
+            )
 
     with pytest.raises(ValueError, match=re.escape(reason)):
         asyncio.run(exercise())

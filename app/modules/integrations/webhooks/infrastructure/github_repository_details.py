@@ -8,6 +8,7 @@ import httpx
 
 from app.common.infrastructure.github_repository_path import repository_path_from_full_name
 from app.modules.integrations.webhooks.application.installation_event_projector import (
+    InstallationProviderCheckpoint,
     RepositoryDetails,
     RepositoryDetailsUnavailableError,
 )
@@ -35,9 +36,14 @@ class GitHubInstallationRepositoryDetailsProvider:
         self._token_provider = token_provider
 
     async def fetch_repository_details(
-        self, *, installation_external_id: int, full_name: str
+        self,
+        *,
+        checkpoint: InstallationProviderCheckpoint,
+        installation_external_id: int,
+        full_name: str,
     ) -> RepositoryDetails:
         repository_path = repository_path_from_full_name(full_name)
+        await checkpoint()
         try:
             access_token = await self._token_provider.get_installation_access_token(
                 installation_external_id
@@ -50,6 +56,7 @@ class GitHubInstallationRepositoryDetailsProvider:
             raise RepositoryDetailsUnavailableError(
                 _unavailable_message("installation token request", error)
             ) from error
+        await checkpoint()
         try:
             response = await self._client.get(
                 repository_path,

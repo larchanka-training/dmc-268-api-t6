@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import cast
 from uuid import UUID
 
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -13,9 +13,17 @@ from app.common.infrastructure.db.unit_of_work import SqlAlchemyUnitOfWork
 from app.modules.integrations.webhooks.infrastructure.models import GitHubInstallationRemovalEffect
 from app.modules.repositories.application.installation_repositories import RepositorySnapshot
 from app.modules.repositories.application.onboard_repository import PersistedRuleVersion
+from app.modules.repositories.application.sync_installation_repositories import (
+    InstallationIdentityChanged,
+)
 from app.modules.repositories.infrastructure.models import ProviderInstallation, Repository
 from app.modules.repositories.infrastructure.rule_version_repository import (
     SqlAlchemyRepositoryRuleVersionStore,
+)
+from app.modules.workspaces.application.link_github_installations import GitHubInstallation
+from app.modules.workspaces.infrastructure.github_installation_locks import lock_github_account
+from app.modules.workspaces.infrastructure.github_repository_rebinding import (
+    SqlAlchemyGitHubRepositoryRebinding,
 )
 from app.modules.workspaces.infrastructure.models import (
     GitHubInstallationAccessRevocation,
@@ -30,10 +38,96 @@ class SqlAlchemyInstallationRepositoryStore:
         self._session = session
         self._rule_versions = SqlAlchemyRepositoryRuleVersionStore(session)
 
+    async def lock_active_installation(self, provider_installation_id: UUID) -> bool:
+        # Account first, then installations in OAuth's global order. The initial
+        # read owns no row lock; recheck activity after acquiring the account fence.
+        installation = await self._session.get(ProviderInstallation, provider_installation_id)
+        if installation is None:
+            return False
+        initial_account_id = installation.account_external_id
+        if installation.provider == "github" and initial_account_id is not None:
+            await lock_github_account(self._session, initial_account_id)
+            await self._session.execute(
+                select(ProviderInstallation.id)
+                .where(
+                    ProviderInstallation.provider == "github",
+                    or_(
+                        ProviderInstallation.id == provider_installation_id,
+                        ProviderInstallation.account_external_id == initial_account_id,
+                    ),
+                )
+                .order_by(ProviderInstallation.external_id)
+                .with_for_update(key_share=True)
+            )
+        active = await self._session.scalar(
+            select(ProviderInstallation)
+            .where(
+                ProviderInstallation.id == provider_installation_id,
+                ProviderInstallation.deleted_at.is_(None),
+            )
+            .with_for_update(key_share=True)
+            .execution_options(populate_existing=True)
+        )
+        if active is not None and active.account_external_id != initial_account_id:
+            # Never acquire a new account fence or earlier archive row while the
+            # target row is held. The application restarts the entire short UOW.
+            raise InstallationIdentityChanged("account identity changed before row lock")
+        return active is not None
+
     async def upsert_repository(
         self, provider_installation_id: UUID, snapshot: RepositorySnapshot
-    ) -> UUID:
-        """Create or update a repository without a select-then-insert race."""
+    ) -> UUID | None:
+        """Defer preserved archives until OAuth, otherwise upsert atomically.
+
+        The use case holds the account and installation locks across this decision
+        and write. A permanently clean target in a different Workspace can onboard.
+        """
+        target = await self._session.get(
+            ProviderInstallation, provider_installation_id, populate_existing=True
+        )
+        if (
+            target is not None
+            and target.provider == "github"
+            and target.account_external_id is not None
+        ):
+            existing = await self._session.scalar(
+                select(Repository.id).where(
+                    Repository.provider_installation_id == provider_installation_id,
+                    Repository.external_id == snapshot.external_id,
+                )
+            )
+            accepted = await self._session.scalar(
+                select(GitHubUserRepositoryAccess.github_user_id)
+                .where(
+                    GitHubUserRepositoryAccess.provider_installation_id == provider_installation_id,
+                    GitHubUserRepositoryAccess.repository_external_id == snapshot.external_id,
+                )
+                .limit(1)
+            )
+            # OAuth may explicitly accept a clean target while rebinding is denied
+            # (for example, its snapshot has no numeric account evidence).
+            if existing is None and accepted is None:
+                archive = await SqlAlchemyGitHubRepositoryRebinding(
+                    self._session
+                ).archived_workspace(
+                    GitHubInstallation(
+                        target.external_id, "", (snapshot.external_id,), target.account_external_id
+                    )
+                )
+                if archive == target.workspace_id:
+                    archived_repository = await self._session.scalar(
+                        select(Repository.id)
+                        .join(ProviderInstallation)
+                        .where(
+                            ProviderInstallation.provider == "github",
+                            ProviderInstallation.external_id != target.external_id,
+                            ProviderInstallation.account_external_id == target.account_external_id,
+                            ProviderInstallation.deleted_at.is_not(None),
+                            Repository.external_id == snapshot.external_id,
+                        )
+                    )
+                    if archived_repository is not None:
+                        return None
         statement = (
             insert(Repository)
             .values(
@@ -49,7 +143,7 @@ class SqlAlchemyInstallationRepositoryStore:
                     "full_name": snapshot.full_name,
                     "default_branch": snapshot.default_branch,
                     "web_url": snapshot.web_url,
-                    "enabled": True,
+                    "installation_available": True,
                 },
             )
             .returning(Repository.id)
@@ -71,7 +165,7 @@ class SqlAlchemyInstallationRepositoryStore:
         return recorded is not None
 
     async def disable_repository(self, provider_installation_id: UUID, external_id: int) -> None:
-        """Disable a repository if it still belongs to this installation.
+        """Remove App availability if the repository still belongs to this installation.
 
         The use case deduplicates delivery effects before calling this method.
         A distinct later removal must revoke any access restored in the meantime.
@@ -83,7 +177,7 @@ class SqlAlchemyInstallationRepositoryStore:
                 Repository.provider_installation_id == provider_installation_id,
                 Repository.external_id == external_id,
             )
-            .values(enabled=False)
+            .values(installation_available=False)
         )
         await self._session.execute(statement)
         await self._session.execute(
@@ -96,9 +190,16 @@ class SqlAlchemyInstallationRepositoryStore:
     async def disable_installation(self, provider_installation_id: UUID) -> None:
         await self._record_revocation(provider_installation_id, 0)
         await self._session.execute(
+            update(ProviderInstallation)
+            .where(ProviderInstallation.id == provider_installation_id)
+            .values(
+                deleted_at=func.coalesce(ProviderInstallation.deleted_at, func.clock_timestamp())
+            )
+        )
+        await self._session.execute(
             update(Repository)
             .where(Repository.provider_installation_id == provider_installation_id)
-            .values(enabled=False)
+            .values(installation_available=False)
         )
         await self._session.execute(
             delete(GitHubUserRepositoryAccess).where(

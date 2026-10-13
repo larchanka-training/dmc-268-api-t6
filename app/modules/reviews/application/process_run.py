@@ -9,6 +9,7 @@ from typing import Protocol, cast
 from uuid import UUID
 
 from app.common.application.unit_of_work import UnitOfWork
+from app.modules.reviews.application.check_runs import RunProviderCheckpoint
 from app.modules.reviews.application.conventions import (
     ActiveConventionsPrompt,
     GeneratedConventions,
@@ -27,6 +28,7 @@ from app.modules.reviews.application.get_run_file_lines import (
     BlobCacheWriter,
 )
 from app.modules.reviews.application.prompt_builder import ReviewRule
+from app.modules.reviews.application.run_failures import RunCancelled
 from app.modules.reviews.application.run_trace import RunTrace, traced_step
 from app.modules.reviews.application.vcs_diff import (
     MAX_BLOB_BYTES,
@@ -164,9 +166,11 @@ class ReviewRunProcessor:
                     "base_sha": vcs_run.base_sha,
                 }
                 async with traced_step(self._trace, run_id, "vcs.fetch_diff", request) as step:
-                    fetched = await FetchVcsReviewInput(self._vcs_provider, run_id=run_id).execute(
-                        vcs_run.locator, vcs_run.head_sha, vcs_run.base_sha
-                    )
+                    fetched = await FetchVcsReviewInput(
+                        self._vcs_provider,
+                        run_id=run_id,
+                        checkpoint=self._provider_checkpoint(run_id),
+                    ).execute(vcs_run.locator, vcs_run.head_sha, vcs_run.base_sha)
                     failed_blob_shas = fetched.failed_blob_shas
                     omission_by_path = {
                         item.file.filename: item.reason.value for item in fetched.omissions
@@ -256,6 +260,14 @@ class ReviewRunProcessor:
             )
         return True
 
+    def _provider_checkpoint(self, run_id: UUID) -> RunProviderCheckpoint:
+        async def checkpoint() -> None:
+            repository = cast(RunVcsRepository, self._repository)
+            if await repository.get_run_vcs_input(run_id) is None:
+                raise RunCancelled("installation_unavailable")
+
+        return checkpoint
+
     async def _store_file_blobs(self, run: RunDiffInput, files: list[DiffSnapshot]) -> None:
         assert self._provider is not None
         blobs: list[tuple[BlobCacheKey, str]] = []
@@ -306,7 +318,11 @@ class ReviewRunProcessor:
             ):
                 continue
             try:
-                blob = await self._vcs_provider.get_blob(run.locator, file.blob_sha)
+                blob = await self._vcs_provider.get_blob(
+                    run.locator, file.blob_sha, checkpoint=self._provider_checkpoint(run_id)
+                )
+            except RunCancelled:
+                raise
             except Exception:
                 # Blob cache is optional; a single unavailable file must not abort the Run.
                 _LOGGER.warning(

@@ -187,6 +187,9 @@ def test_reconciler_republishes_fast_runs_but_not_into_the_deep_queue(
     deep = _add_run(connection, ids, 1, "queued")
     # Positive control: a stale queued fast run is republished.
     fast = _add_run(connection, ids, 2, "queued", engine="fast")
+    connection.execute(
+        text("UPDATE runs SET origin_provider_installation_id=:origin"), {"origin": ids["inst"]}
+    )
     connection.commit()
     connection.close()
 

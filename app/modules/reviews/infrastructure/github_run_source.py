@@ -16,6 +16,7 @@ from app.common.infrastructure.github_repository_path import commit_sha_segment
 from app.modules.reviews.application.conventions import RepositoryFile, RepositorySnapshot
 from app.modules.reviews.application.process_run import RunVcsInput, RunVcsRepository
 from app.modules.reviews.application.prompt_builder import PullRequestMeta
+from app.modules.reviews.application.run_failures import RunCancelled
 from app.modules.reviews.application.vcs_diff import VcsProvider
 from app.modules.reviews.infrastructure.github_vcs import (
     _REQUEST_TIMEOUT,
@@ -57,15 +58,21 @@ class GitHubRunSource:
         if self._run is None:
             run = await self._runs.get_run_vcs_input(self._run_id)
             if run is None:
-                raise LookupError(f"run {self._run_id} has no VCS input")
+                raise RunCancelled("installation_unavailable")
             self._run = run
         return self._run
 
+    async def _checkpoint(self) -> None:
+        if await self._runs.get_run_vcs_input(self._run_id) is None:
+            raise RunCancelled("installation_unavailable")
+
     async def _tree(self, run: RunVcsInput, sha: str, *, recursive: bool) -> list[dict[str, Any]]:
         path = f"{_repository_prefix(run.locator)}/git/trees/{commit_sha_segment(sha)}"
+        await self._checkpoint()
         token = await self._tokens.get_installation_access_token(
             run.locator.installation_external_id
         )
+        await self._checkpoint()
         response = await self._client.get(
             path,
             params={"recursive": "1"} if recursive else None,
@@ -92,7 +99,7 @@ class GitHubRunSource:
         if entry is None:
             # A repository without AGENTS.md is ordinary; conventions use the code only.
             return RepositorySnapshot(content=None, sha=None)
-        blob = await self._vcs.get_blob(run.locator, str(entry["sha"]))
+        blob = await self._vcs.get_blob(run.locator, str(entry["sha"]), checkpoint=self._checkpoint)
         return RepositorySnapshot(content=blob.decode("utf-8", errors="replace"), sha=entry["sha"])
 
     async def fetch_tree(self, repository_id: UUID) -> tuple[RepositoryFile, ...]:
@@ -115,7 +122,7 @@ class GitHubRunSource:
             if sha is None:
                 continue
             try:
-                blob = await self._vcs.get_blob(run.locator, sha)
+                blob = await self._vcs.get_blob(run.locator, sha, checkpoint=self._checkpoint)
                 content = blob.decode("utf-8")
             except (httpx.HTTPError, ValueError):
                 # Context files are best effort, like the blob cache of the diff step.
@@ -126,4 +133,4 @@ class GitHubRunSource:
 
     async def get_pull_request_meta(self, run_id: UUID) -> PullRequestMeta | None:
         run = await self._input()
-        return (await self._vcs.get_pull_request(run.locator)).meta
+        return (await self._vcs.get_pull_request(run.locator, checkpoint=self._checkpoint)).meta

@@ -47,12 +47,18 @@ class ProviderInstallation(Base):
     __table_args__ = (
         UniqueConstraint("provider", "external_id"),
         Index("ix_provider_installations_workspace_id", "workspace_id"),
+        CheckConstraint(
+            "account_external_id > 0", name="ck_provider_installations_account_positive"
+        ),
+        Index("ix_provider_installations_provider_account", "provider", "account_external_id"),
     )
 
     id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
     workspace_id: Mapped[UUID] = mapped_column(ForeignKey("workspaces.id"), nullable=False)
     provider: Mapped[str] = mapped_column(String(50), nullable=False)
     external_id: Mapped[int] = mapped_column(BIGINT, nullable=False)
+    account_external_id: Mapped[int | None] = mapped_column(BIGINT, nullable=True)
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     provider_metadata: Mapped[dict[str, Any]] = mapped_column("metadata", JSONB, nullable=False)
     created_at: Mapped[datetime] = timestamp_column()
     updated_at: Mapped[datetime] = mapped_column(
@@ -76,6 +82,9 @@ class Repository(Base):
     default_branch: Mapped[str] = mapped_column(String(255), nullable=False)
     web_url: Mapped[str] = mapped_column(TEXT, nullable=False)
     enabled: Mapped[bool] = mapped_column(BOOLEAN, nullable=False, server_default=text("true"))
+    installation_available: Mapped[bool] = mapped_column(
+        BOOLEAN, nullable=False, server_default=text("true")
+    )
     default_engine: Mapped[Engine] = mapped_column(
         pg_enum(Engine, "engine"), nullable=False, server_default=Engine.FAST.value
     )

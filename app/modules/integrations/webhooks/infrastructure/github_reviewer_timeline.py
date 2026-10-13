@@ -10,6 +10,7 @@ from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
 from app.common.infrastructure.github_repository_path import repository_path_from_full_name
 from app.modules.reviews.application.project_github_pull_request import (
     PullRequestEvent,
+    PullRequestProviderCheckpoint,
     ReviewerTimelineIntent,
     ReviewerTimelineSnapshot,
     TimelineLifecycle,
@@ -53,17 +54,21 @@ class HttpGitHubReviewerTimelineProvider:
         self._client = client
         self._tokens = token_provider
 
-    async def snapshot(self, event: PullRequestEvent, bot_login: str) -> ReviewerTimelineSnapshot:
+    async def snapshot(
+        self, event: PullRequestEvent, bot_login: str, *, checkpoint: PullRequestProviderCheckpoint
+    ) -> ReviewerTimelineSnapshot:
         full_name = event.repository_full_name
         if full_name is None:
             raise ValueError("GitHub repository name is required for timeline lookup")
         repository_path = repository_path_from_full_name(full_name)
+        await checkpoint()
         token = await self._tokens.get_installation_access_token(event.installation_external_id)
         latest: ReviewerTimelineIntent | None = None
         lifecycle: TimelineLifecycle | None = None
         position = 0
         path = f"{repository_path}/issues/{event.number}/timeline"
         for page in range(1, 1001):
+            await checkpoint()
             response = await self._client.get(
                 path,
                 params={"per_page": 100, "page": page},

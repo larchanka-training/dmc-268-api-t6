@@ -8,12 +8,14 @@ from enum import StrEnum
 from typing import Protocol
 from uuid import UUID
 
+from app.modules.reviews.application.check_runs import RunProviderCheckpoint
 from app.modules.reviews.application.prompt_builder import (
     ChangedFile,
     DiffLine,
     FileStatus,
     PullRequestMeta,
 )
+from app.modules.reviews.application.run_failures import RunCancelled
 from app.modules.reviews.application.unified_diff import HunkRow, parse_hunks, split_lf
 
 _LOGGER = logging.getLogger(__name__)
@@ -94,11 +96,17 @@ class FetchedVcsReviewInput:
 
 
 class VcsProvider(Protocol):
-    async def get_pull_request(self, locator: PullRequestLocator) -> VcsPullRequest: ...
+    async def get_pull_request(
+        self, locator: PullRequestLocator, *, checkpoint: RunProviderCheckpoint
+    ) -> VcsPullRequest: ...
 
-    async def get_diff(self, pull_request: VcsPullRequest) -> tuple[VcsFile, ...]: ...
+    async def get_diff(
+        self, pull_request: VcsPullRequest, *, checkpoint: RunProviderCheckpoint
+    ) -> tuple[VcsFile, ...]: ...
 
-    async def get_blob(self, locator: PullRequestLocator, sha: str) -> bytes: ...
+    async def get_blob(
+        self, locator: PullRequestLocator, sha: str, *, checkpoint: RunProviderCheckpoint
+    ) -> bytes: ...
 
 
 class MergeBaseUnavailable(Exception):
@@ -112,14 +120,23 @@ class MergeBaseProvider(Protocol):
     of the provider answer, never an error of its own client library.
     """
 
-    async def get_merge_base(self, pull_request: VcsPullRequest) -> str: ...
+    async def get_merge_base(
+        self, pull_request: VcsPullRequest, *, checkpoint: RunProviderCheckpoint
+    ) -> str: ...
 
 
 class FetchVcsReviewInput:
     """Fetch current-head L1 inputs without a database transaction."""
 
-    def __init__(self, provider: VcsProvider, *, run_id: UUID | None = None) -> None:
+    def __init__(
+        self,
+        provider: VcsProvider,
+        *,
+        checkpoint: RunProviderCheckpoint,
+        run_id: UUID | None = None,
+    ) -> None:
         self._provider = provider
+        self._checkpoint = checkpoint
         self._run_id = run_id
 
     async def execute(
@@ -128,12 +145,12 @@ class FetchVcsReviewInput:
         expected_head_sha: str,
         expected_base_sha: str | None = None,
     ) -> FetchedVcsReviewInput:
-        pull_request = await self._provider.get_pull_request(locator)
+        pull_request = await self._provider.get_pull_request(locator, checkpoint=self._checkpoint)
         if pull_request.locator != locator or pull_request.head_sha != expected_head_sha:
             raise ValueError("GitHub pull request head SHA changed")
         if expected_base_sha is not None and pull_request.base_sha != expected_base_sha:
             raise ValueError("GitHub pull request base SHA changed")
-        files = await self._provider.get_diff(pull_request)
+        files = await self._provider.get_diff(pull_request, checkpoint=self._checkpoint)
         changed: list[ChangedFile] = []
         omitted: list[VcsFileOmission] = []
         failed_blob_shas: set[str] = set()
@@ -144,9 +161,13 @@ class FetchVcsReviewInput:
                     reason = OmissionReason.MISSING_PATCH
                 else:
                     try:
-                        blob = await self._provider.get_blob(locator, file.blob_sha)
+                        blob = await self._provider.get_blob(
+                            locator, file.blob_sha, checkpoint=self._checkpoint
+                        )
                     except BlobTooLargeError:
                         reason = OmissionReason.TOO_LARGE
+                    except RunCancelled:
+                        raise
                     except Exception:
                         # Blob classification is best effort; retain this file as an omission.
                         _LOGGER.warning(

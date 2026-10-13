@@ -58,7 +58,13 @@ class RunTriggerUnitOfWork(UnitOfWork, Protocol):
 
 
 class WebhookRunEnqueuer(Protocol):
-    async def execute(self, code_change_id: UUID, expected_head_sha: str) -> EnqueueResult: ...
+    async def execute(
+        self,
+        code_change_id: UUID,
+        expected_head_sha: str,
+        *,
+        expected_installation_external_id: int,
+    ) -> EnqueueResult: ...
 
 
 class TriggerFromDelivery:
@@ -78,7 +84,9 @@ class TriggerFromDelivery:
             target = await uow.targets.for_pr(event)
         if target is None:
             return RunTriggerOutcome(_NO_OPEN_PULL_REQUEST)
-        return await self._enqueue(target.code_change_id, target.head_sha)
+        return await self._enqueue(
+            target.code_change_id, target.head_sha, event.installation_external_id
+        )
 
     async def on_label(self, event: PullRequestLabelEvent) -> RunTriggerOutcome:
         if event.label_name != "ai-review" or event.pull_request.action != "labeled":
@@ -91,14 +99,23 @@ class TriggerFromDelivery:
             await uow.commit()
         if not targets:
             return RunTriggerOutcome(_NO_OPEN_PULL_REQUEST_AT_HEAD)
-        outcomes = [await self._enqueue(target, event.head_sha) for target in targets]
+        outcomes = [
+            await self._enqueue(target, event.head_sha, event.installation_external_id)
+            for target in targets
+        ]
         return RunTriggerOutcome(
             "; ".join(outcome.detail for outcome in outcomes),
             retry_required=any(outcome.retry_required for outcome in outcomes),
         )
 
-    async def _enqueue(self, code_change_id: UUID, head_sha: str) -> RunTriggerOutcome:
-        result = await self._enqueuer.execute(code_change_id, head_sha)
+    async def _enqueue(
+        self, code_change_id: UUID, head_sha: str, installation_external_id: int
+    ) -> RunTriggerOutcome:
+        result = await self._enqueuer.execute(
+            code_change_id,
+            head_sha,
+            expected_installation_external_id=installation_external_id,
+        )
         return RunTriggerOutcome(
             describe_enqueue(code_change_id, head_sha, result),
             retry_required=result.status == EnqueueStatus.DEFERRED,

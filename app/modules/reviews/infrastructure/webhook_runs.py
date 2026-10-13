@@ -38,6 +38,15 @@ class SqlAlchemyWebhookRunStore:
         self._session = session
 
     async def lock_candidate(self, code_change_id: UUID) -> RunInsertCandidate | CandidateMiss:
+        # Installation locks precede PR/Run locks, matching retirement and OAuth apply.
+        installation = await self._session.scalar(
+            select(ProviderInstallation)
+            .join(Repository, Repository.provider_installation_id == ProviderInstallation.id)
+            .join(CodeChange, CodeChange.repository_id == Repository.id)
+            .where(CodeChange.id == code_change_id)
+            .with_for_update(of=ProviderInstallation, key_share=True)
+            .execution_options(populate_existing=True)
+        )
         pr = await self._session.scalar(
             select(CodeChange).where(CodeChange.id == code_change_id).with_for_update()
         )
@@ -46,10 +55,11 @@ class SqlAlchemyWebhookRunStore:
         repository = await self._session.get(Repository, pr.repository_id)
         if repository is None:
             return CandidateMiss.REPOSITORY_GONE
-        installation = await self._session.get(
-            ProviderInstallation, repository.provider_installation_id
-        )
-        if installation is None or installation.provider != "github":
+        if (
+            installation is None
+            or installation.provider != "github"
+            or installation.id != repository.provider_installation_id
+        ):
             return CandidateMiss.MISSING_INSTALLATION
         rule_version_id = await self._session.scalar(
             select(RuleVersion.id).where(
@@ -74,12 +84,17 @@ class SqlAlchemyWebhookRunStore:
                 repository_full_name=repository.full_name,
                 head_sha=pr.head_sha,
                 state=PullRequestState(pr.state.value),
-                repository_enabled=repository.enabled,
+                repository_enabled=(
+                    repository.enabled
+                    and repository.installation_available
+                    and installation.deleted_at is None
+                ),
                 ai_review_labeled=pr.ai_review_labeled,
                 ai_review_labeled_at=pr.ai_review_labeled_at,
                 head_first_seen_at=pr.head_first_seen_at,
                 wait_for_ci=CiWaitMode(repository.wait_for_ci.value),
             ),
+            origin_provider_installation_id=installation.id,
             repository_id=repository.id,
             workspace_id=installation.workspace_id,
             repository_external_id=repository.external_id,
@@ -112,6 +127,7 @@ class SqlAlchemyWebhookRunStore:
             .values(
                 id=run_id,
                 code_change_id=code_change_id,
+                origin_provider_installation_id=candidate.origin_provider_installation_id,
                 base_sha=candidate.base_sha,
                 base_ref=candidate.base_ref,
                 head_sha=candidate.ci.head_sha,
@@ -172,6 +188,7 @@ class SqlAlchemyWebhookRunStore:
                     CodeChange.head_sha == Run.head_sha,
                     CodeChange.ai_review_labeled.is_(True),
                     Repository.enabled.is_(True),
+                    Repository.installation_available.is_(True),
                     ProviderInstallation.provider == "github",
                 )
                 .order_by(Run.created_at, Run.id)

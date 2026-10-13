@@ -22,6 +22,7 @@ from app.modules.repositories.application.onboard_repository import (
     load_default_rule_sets,
 )
 from app.modules.repositories.application.sync_installation_repositories import (
+    InstallationIdentityChanged,
     RepositoryOnboardingInput,
     SyncInstallationRepositories,
 )
@@ -36,6 +37,7 @@ class StoredRepository:
     id: UUID
     snapshot: RepositorySnapshot
     enabled: bool = True
+    installation_available: bool = True
 
 
 @dataclass
@@ -45,6 +47,15 @@ class FakeInstallationRepositoryStore:
     created_versions: int = 0
     create_error: Exception | None = None
     disable_error: Exception | None = None
+    identity_changes_remaining: int = 0
+    lock_attempts: int = 0
+
+    async def lock_active_installation(self, provider_installation_id: UUID) -> bool:
+        self.lock_attempts += 1
+        if self.identity_changes_remaining:
+            self.identity_changes_remaining -= 1
+            raise InstallationIdentityChanged("account identity changed before row lock")
+        return True
 
     async def upsert_repository(
         self, provider_installation_id: UUID, snapshot: RepositorySnapshot
@@ -56,7 +67,7 @@ class FakeInstallationRepositoryStore:
             self.repositories[key] = stored
         else:
             stored.snapshot = snapshot
-            stored.enabled = True
+            stored.installation_available = True
         return stored.id
 
     async def record_removal_delivery(self, delivery_id: str) -> bool:
@@ -70,7 +81,7 @@ class FakeInstallationRepositoryStore:
             raise self.disable_error
         stored = self.repositories.get((provider_installation_id, external_id))
         if stored is not None:
-            stored.enabled = False
+            stored.installation_available = False
 
     async def get_active_rule_version(self, repository_id: UUID) -> PersistedRuleVersion | None:
         return self.active_versions.get(repository_id)
@@ -252,7 +263,8 @@ def test_sync_soft_disables_only_matching_repositories_idempotently() -> None:
         )
     )
 
-    assert store.repositories[(installation_id, 101)].enabled is False
+    assert store.repositories[(installation_id, 101)].installation_available is False
+    assert store.repositories[(installation_id, 101)].enabled is True
     assert uow.commits == 3
 
 
@@ -278,6 +290,7 @@ def test_sync_readding_a_removed_repository_reenables_it() -> None:
     asyncio.run(sync.execute(provider_installation_id=installation_id, repositories=(input_,)))
 
     assert store.repositories[(installation_id, 101)].enabled is True
+    assert store.repositories[(installation_id, 101)].installation_available is True
     assert store.created_versions == 1
 
 
@@ -305,6 +318,9 @@ class FakeSqlAlchemySession:
     def __init__(self) -> None:
         self.repository: Repository | None = None
         self.flushes = 0
+
+    async def get(self, model: object, identity: UUID, **kwargs: object) -> None:
+        return None
 
     async def scalar(self, statement: object) -> UUID:
         params = cast(dict[str, object], cast(Any, statement).compile().params)
@@ -362,7 +378,8 @@ def test_sqlalchemy_installation_store_soft_disables_matching_repository() -> No
     ]
     assert len(repository_updates) == 1
     compiled = repository_updates[0].compile()
-    assert compiled.params["enabled"] is False
+    assert compiled.params["installation_available"] is False
+    assert "enabled" not in compiled.params
     assert compiled.params["provider_installation_id_1"] == installation_id
     assert compiled.params["external_id_1"] == 101
 
@@ -386,3 +403,31 @@ def test_disable_without_delivery_id_fails_before_opening_uow() -> None:
         )
 
     assert opened == 0
+
+
+@pytest.mark.parametrize("preflight", [False, True])
+@pytest.mark.parametrize("changes", [1, 2])
+def test_sync_identity_transition_retries_once_and_reports_installation(
+    preflight: bool, changes: int, caplog: pytest.LogCaptureFixture
+) -> None:
+    installation = UUID(int=11313)
+    store = FakeInstallationRepositoryStore(identity_changes_remaining=changes)
+    uow = FakeInstallationRepositoryUnitOfWork(store)
+    sync = SyncInstallationRepositories(uow_factory=lambda: uow, rule_sets={})
+
+    async def exercise() -> bool | tuple[object, ...]:
+        if preflight:
+            return await sync.is_active(installation)
+        return await sync.execute(provider_installation_id=installation, repositories=())
+
+    with caplog.at_level("INFO"):
+        if changes == 2:
+            with pytest.raises(InstallationIdentityChanged):
+                asyncio.run(exercise())
+        else:
+            assert asyncio.run(exercise()) == (True if preflight else ())
+    assert store.lock_attempts == 2
+    assert uow.rollbacks == changes
+    assert uow.commits == (1 if changes == 1 and not preflight else 0)
+    assert str(installation) in caplog.text
+    assert "account identity changed before row lock" in caplog.text

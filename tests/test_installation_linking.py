@@ -75,6 +75,7 @@ class FakeGitHub:
 @dataclass
 class FakeLinks:
     installations: dict[int, UUID] = field(default_factory=dict)
+    account_ids: dict[int, int | None] = field(default_factory=dict)
     access: set[tuple[int, UUID]] = field(default_factory=set)
     repository_access: set[tuple[int, int, int]] = field(default_factory=set)
     replayable: set[int] = field(default_factory=set)
@@ -112,6 +113,9 @@ class FakeLinks:
     async def begin_apply(self, user_id: int, generation: int) -> bool:
         return generation > self.applied.get(user_id, 0)
 
+    async def lock_installations(self, installations: tuple[GitHubInstallation, ...]) -> None:
+        pass
+
     async def mark_applied(self, user_id: int, generation: int) -> None:
         self.applied[user_id] = generation
 
@@ -120,6 +124,7 @@ class FakeLinks:
 
     async def link(self, user_id: int, installation: GitHubInstallation) -> UUID:
         self.link_order.append(installation.id)
+        self.account_ids[installation.id] = installation.account_external_id
         workspace_id = self.installations.setdefault(installation.id, uuid4())
         self.access.add((user_id, workspace_id))
         return workspace_id
@@ -130,6 +135,7 @@ class FakeLinks:
         installation_id: int,
         repository_ids: tuple[int, ...],
         snapshot_started_at: datetime,
+        account_external_id: int | None = None,
     ) -> None:
         self.repository_access = {
             entry
@@ -704,3 +710,213 @@ def test_repeat_login_adds_installation_and_repository_without_losing_existing_g
     assert len(second) == 2
     assert first[0] in second
     assert links.repository_access == {(41, 17, 101), (41, 17, 102), (41, 18, 201)}
+
+
+def test_github_adapter_carries_numeric_account_identity_separately_from_login() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/user":
+            return httpx.Response(200, json={"id": 41})
+        if request.url.path == "/user/installations":
+            return httpx.Response(
+                200,
+                json={
+                    "total_count": 1,
+                    "installations": [{"id": 17, "account": {"id": 700, "login": "renamed"}}],
+                },
+            )
+        return httpx.Response(200, json={"total_count": 1, "repositories": [{"id": 101}]})
+
+    async def exercise() -> AuthenticatedGitHubInstallations:
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(handler), base_url="https://api.github.com"
+        ) as client:
+            return await HttpGitHubUserInstallationsProvider(client).list_for_user("user-token")
+
+    installation = asyncio.run(exercise()).installations[0]
+    assert installation.account_external_id == 700
+    assert installation.account_login == "renamed"
+    assert installation.repository_ids == (101,)
+
+
+@pytest.mark.parametrize("account_id", [True, "700", 700.0, 0, -1, 9223372036854775808])
+def test_github_adapter_rejects_malformed_account_id(account_id: object) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/user":
+            return httpx.Response(200, json={"id": 41})
+        if request.url.path == "/user/installations":
+            return httpx.Response(
+                200,
+                json={
+                    "total_count": 1,
+                    "installations": [{"id": 17, "account": {"id": account_id, "login": "octo"}}],
+                },
+            )
+        return httpx.Response(200, json={"total_count": 0, "repositories": []})
+
+    async def exercise() -> None:
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(handler), base_url="https://api.github.com"
+        ) as client:
+            await HttpGitHubUserInstallationsProvider(client).list_for_user("t")
+
+    with pytest.raises(ValueError):
+        asyncio.run(exercise())
+
+
+def test_github_adapter_missing_account_evidence_is_explicitly_unknown() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/user":
+            return httpx.Response(200, json={"id": 41})
+        if request.url.path == "/user/installations":
+            return httpx.Response(
+                200,
+                json={
+                    "total_count": 1,
+                    "installations": [{"id": 17, "account": {"login": "octo"}}],
+                },
+            )
+        return httpx.Response(200, json={"total_count": 0, "repositories": []})
+
+    async def exercise() -> AuthenticatedGitHubInstallations:
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(handler), base_url="https://api.github.com"
+        ) as client:
+            return await HttpGitHubUserInstallationsProvider(client).list_for_user("t")
+
+    assert asyncio.run(exercise()).installations[0].account_external_id is None
+
+
+def test_linking_carries_verified_account_id_through_repository_normalization() -> None:
+    github = FakeGitHub(
+        AuthenticatedGitHubInstallations(
+            41, (GitHubInstallation(17, "octo", (102, 101, 101), account_external_id=700),)
+        )
+    )
+    links = FakeLinks()
+    asyncio.run(LinkGitHubInstallations(github=github, uow_factory=lambda: links).execute("t"))
+    assert links.account_ids == {17: 700}
+    assert links.repository_access == {(41, 17, 101), (41, 17, 102)}
+
+
+@pytest.mark.parametrize("account_id", [True, "700", 700.0, 0, -1, 9223372036854775808])
+def test_linking_rejects_malformed_numeric_account_evidence(account_id: object) -> None:
+    github = FakeGitHub(
+        AuthenticatedGitHubInstallations(
+            41, (GitHubInstallation(17, "octo", (101,), account_external_id=cast(int, account_id)),)
+        )
+    )
+    links = FakeLinks()
+    with pytest.raises(ValueError, match="account ID must fit PostgreSQL BIGINT"):
+        asyncio.run(LinkGitHubInstallations(github=github, uow_factory=lambda: links).execute("t"))
+    assert links.account_ids == {}
+    assert links.access == set()
+
+
+@pytest.mark.integration
+def test_database_numeric_account_survives_rename_and_conflict_rolls_back_grants(
+    migrated_link_database: tuple[str, str],
+) -> None:
+    database_url, schema = migrated_link_database
+
+    async def exercise() -> None:
+        engine = create_async_engine(
+            database_url, connect_args={"options": f"-csearch_path={schema}"}
+        )
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        github = FakeGitHub(
+            AuthenticatedGitHubInstallations(
+                41, (GitHubInstallation(17, "octo", (101,), account_external_id=700),)
+            )
+        )
+        use_case = LinkGitHubInstallations(
+            github=github, uow_factory=lambda: SqlAlchemyGitHubInstallationLinkUnitOfWork(factory)
+        )
+        try:
+            original_workspaces = await use_case.execute("first")
+            async with factory() as session:
+                original = await session.scalar(select(ProviderInstallation))
+                assert original is not None
+                assert original.account_external_id == 700
+                original_id = original.id
+            github.user = AuthenticatedGitHubInstallations(
+                41, (GitHubInstallation(17, "renamed", (101,), account_external_id=700),)
+            )
+            assert await use_case.execute("renamed") == original_workspaces
+            github.user = AuthenticatedGitHubInstallations(
+                99, (GitHubInstallation(17, "renamed", (102,), account_external_id=701),)
+            )
+            with pytest.raises(ValueError, match="installation account identity changed"):
+                await use_case.execute("conflicting")
+            async with factory() as session:
+                persisted = await session.scalar(select(ProviderInstallation))
+                assert persisted is not None
+                assert persisted.id == original_id
+                assert persisted.account_external_id == 700
+                assert (
+                    await session.scalars(select(GitHubUserWorkspaceAccess.github_user_id))
+                ).all() == [41]
+                assert (
+                    await session.scalars(select(GitHubUserRepositoryAccess.repository_external_id))
+                ).all() == [101]
+        finally:
+            await engine.dispose()
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.integration
+def test_database_fresh_oauth_establishes_only_exact_legacy_installation_identity(
+    migrated_link_database: tuple[str, str],
+) -> None:
+    database_url, schema = migrated_link_database
+
+    async def exercise() -> None:
+        engine = create_async_engine(
+            database_url, connect_args={"options": f"-csearch_path={schema}"}
+        )
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        github = FakeGitHub(
+            AuthenticatedGitHubInstallations(
+                41, (GitHubInstallation(17, "octo"), GitHubInstallation(18, "octo"))
+            )
+        )
+        use_case = LinkGitHubInstallations(
+            github=github, uow_factory=lambda: SqlAlchemyGitHubInstallationLinkUnitOfWork(factory)
+        )
+        try:
+            original = await use_case.execute("legacy")
+            github.user = AuthenticatedGitHubInstallations(
+                41,
+                (
+                    GitHubInstallation(17, "renamed", account_external_id=700),
+                    GitHubInstallation(18, "octo"),
+                ),
+            )
+            assert await use_case.execute("fresh") == original
+            async with factory() as session:
+                identities = (
+                    await session.execute(
+                        select(
+                            ProviderInstallation.external_id,
+                            ProviderInstallation.account_external_id,
+                        ).order_by(ProviderInstallation.external_id)
+                    )
+                ).all()
+                assert [tuple(row) for row in identities] == [(17, 700), (18, None)]
+            github.user = AuthenticatedGitHubInstallations(
+                41, (GitHubInstallation(17, "renamed"), GitHubInstallation(18, "octo"))
+            )
+            assert await use_case.execute("missing-evidence") == original
+            async with factory() as session:
+                assert (
+                    await session.scalar(
+                        select(ProviderInstallation.account_external_id).where(
+                            ProviderInstallation.external_id == 17
+                        )
+                    )
+                    == 700
+                )
+        finally:
+            await engine.dispose()
+
+    asyncio.run(exercise())

@@ -55,6 +55,16 @@ def message(run: Run) -> PendingRunMessage:
 class Store:
     runs: dict[UUID, Run]
 
+    async def stale_inactive_origins(
+        self, now: datetime, available_before: datetime, limit: int
+    ) -> tuple[UUID, ...]:
+        return ()
+
+    async def retire_stale_origin(
+        self, run_id: UUID, now: datetime, available_before: datetime
+    ) -> bool:
+        raise AssertionError("no retired origins in this fixture")
+
     async def expired_running(self, now: datetime, limit: int) -> tuple[tuple[UUID, int], ...]:
         return tuple(
             (run.id, run.attempt)
@@ -118,6 +128,9 @@ class Store:
 
     async def cancellation_reason(self, run_id: UUID) -> str | None:
         raise AssertionError("not used by the reconciler")
+
+    async def provider_origin_active(self, run_id: UUID) -> bool:
+        return True
 
     async def check_run_report(self, run_id: UUID) -> CheckRunReport | None:
         raise AssertionError("not used by the reconciler")
