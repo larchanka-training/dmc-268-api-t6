@@ -336,6 +336,30 @@ def test_position_400_after_the_head_moves_is_stale_commit() -> None:
     ]
 
 
+def test_historical_version_is_stale_before_any_post() -> None:
+    posts: list[dict[str, Any]] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET" and request.url.path == VERSIONS:
+            return httpx.Response(200, json=_current_versions(OTHER_HEAD))
+        if request.method == "GET" and request.url.path == DISCUSSIONS:
+            return httpx.Response(200, json=[])
+        if request.method == "POST" and request.url.path == DISCUSSIONS:
+            posts.append(_json(request))
+            return httpx.Response(201, json={"id": "disc", "notes": [{"id": 601}]})
+        raise AssertionError(f"unexpected {request.method} {request.url}")
+
+    with pytest.raises(PublishError) as raised:
+        _submit(respond)
+
+    assert raised.value.kind == "stale_commit"
+    assert posts == []
+    assert [item["head_commit_sha"] for item in _current_versions(OTHER_HEAD)] == [
+        OTHER_HEAD,
+        HEAD,
+    ]
+
+
 def test_moved_head_raises_stale_commit() -> None:
     def respond(request: httpx.Request) -> httpx.Response:
         if request.method == "POST":
@@ -559,18 +583,8 @@ def _submission() -> ReviewSubmission:
 
 
 def _versions() -> list[dict[str, str]]:
-    return [
-        {
-            "head_commit_sha": OTHER_HEAD,
-            "base_commit_sha": OTHER_BASE,
-            "start_commit_sha": OTHER_START,
-        },
-        {
-            "head_commit_sha": HEAD,
-            "base_commit_sha": BASE,
-            "start_commit_sha": START,
-        },
-    ]
+    """Current diff version first; GitLab keeps the previous version after it."""
+    return _current_versions(HEAD)
 
 
 def _current_versions(head_sha: str) -> list[dict[str, str]]:

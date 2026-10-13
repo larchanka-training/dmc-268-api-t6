@@ -117,12 +117,15 @@ uv run pytest tests/test_publish_run_review.py tests/test_review_publisher.py te
 
    - Read `GET /api/v4/projects/{id}/merge_requests/{iid}/versions` outside
      any database transaction. Use the version whose `head_commit_sha` equals
-     the run head. Take `base_commit_sha`, `start_commit_sha`, and
-     `head_commit_sha` from that version. Do not copy `head_sha` into
-     `base_sha` or `start_sha`. If that version is gone because the MR head
-     moved, raise the existing stale-commit outcome (`cancelled` /
-     `superseded`). A closed MR is still rejected from `PublishContext`
-     before HTTP.
+     the run head. GitLab lists the current version first and keeps older
+     versions after it. Before the first new discussion, compare the first
+     version's `head_commit_sha` with the run head. A match only on a later
+     row does not authorize a POST: raise stale-commit (`cancelled` /
+     `superseded`). Take `base_commit_sha`, `start_commit_sha`, and
+     `head_commit_sha` from the row whose head is the run head. Do not copy
+     `head_sha` into `base_sha` or `start_sha`. If that version is gone
+     because the MR head moved, raise the same stale-commit outcome. A closed
+     MR is still rejected from `PublishContext` before HTTP.
    - Inline discussion, one per finding, new side only:
      `POST .../discussions` with `position.position_type=text`, both paths set
      to the finding path, `new_line` set to the finding line, and the three
@@ -143,11 +146,10 @@ uv run pytest tests/test_publish_run_review.py tests/test_review_publisher.py te
      with the same hash therefore does not add a second summary or a second
      copy of an inline note.
    - A position rejection (GitLab 400 that names line, position, or diff
-     refs) re-reads versions. GitLab lists the current version first and
-     keeps older versions after it. Only the first version's `head_commit_sha`
-     decides whether the head is still current; a historical match is not
-     enough. When that head moved, raise stale-commit (`cancelled` /
-     `superseded`). While it is current, use the existing one-shot
+     refs) re-reads versions and applies the same first-version head check.
+     When the head moved during publication, raise stale-commit (`cancelled` /
+     `superseded`) even if an older version still lists the run head. While it
+     is current, use the existing one-shot
      `move_inline_to_body` path: stop further inline posts, put the remaining
      inline text into the summary, post that summary once. Do not post a
      second summary.

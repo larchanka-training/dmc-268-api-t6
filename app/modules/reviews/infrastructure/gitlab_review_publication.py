@@ -111,6 +111,12 @@ def _latest_head_sha(payload: Any) -> str:
     return head
 
 
+def _require_latest_head(payload: Any, head_sha: str) -> None:
+    """A historical versions row supplies diff SHAs only while it is still the MR head."""
+    if _latest_head_sha(payload) != head_sha:
+        raise PublishError("stale_commit", f"merge request head moved from {head_sha}")
+
+
 def _position(version: dict[str, str], finding: PublishedFinding) -> dict[str, Any]:
     return {
         "position_type": "text",
@@ -173,10 +179,9 @@ class GitLabMergeRequestDiscussionGateway:
     ) -> SubmittedReview:
         prefix = f"/api/v4/projects/{project_id}/merge_requests/{submission.pr_number}"
         try:
-            version = _matching_version(
-                _decoded(await self._send("GET", f"{prefix}/versions")),
-                submission.commit_sha,
-            )
+            versions = _decoded(await self._send("GET", f"{prefix}/versions"))
+            _require_latest_head(versions, submission.commit_sha)
+            version = _matching_version(versions, submission.commit_sha)
             discussions = await self._discussions(f"{prefix}/discussions")
             summary = _summary_marker(submission.findings_hash)
             existing = _note_id_for_marker(discussions, summary)
@@ -217,9 +222,7 @@ class GitLabMergeRequestDiscussionGateway:
 
     async def _require_current_head(self, prefix: str, head_sha: str) -> None:
         """A position 400 is coordinates only while the latest version is still this head."""
-        latest = _latest_head_sha(_decoded(await self._send("GET", f"{prefix}/versions")))
-        if latest != head_sha:
-            raise PublishError("stale_commit", f"merge request head moved from {head_sha}")
+        _require_latest_head(_decoded(await self._send("GET", f"{prefix}/versions")), head_sha)
 
     async def _discussions(self, url: str) -> list[dict[str, Any]]:
         collected: list[dict[str, Any]] = []
