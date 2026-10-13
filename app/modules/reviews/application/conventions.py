@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import PurePosixPath
 from typing import Annotated, Protocol
@@ -117,6 +117,8 @@ class CachedConventions:
     key_patterns: tuple[str, ...]
     recommendations: tuple[str, ...]
     languages: dict[str, int]
+    # Identity of the ignore policy the entry was generated under; ``None`` without one.
+    policy_key: str | None = None
 
 
 @dataclass(frozen=True)
@@ -140,6 +142,32 @@ class RepositoryConventionsSource(Protocol):
     ) -> tuple[RepositoryFile, ...]: ...
 
 
+class PolicyFilteredConventionsSource:
+    """A conventions source that never lists or loads a file the policy withholds.
+
+    The masks are applied before files are selected and loaded, so an ignored file
+    reaches the conventions model neither by its name nor by its content.
+    """
+
+    def __init__(self, inner: RepositoryConventionsSource, excluded: Callable[[str], bool]) -> None:
+        self._inner = inner
+        self._excluded = excluded
+
+    async def fetch_agents_md(self, repository_id: UUID) -> RepositorySnapshot:
+        return await self._inner.fetch_agents_md(repository_id)
+
+    async def fetch_tree(self, repository_id: UUID) -> tuple[RepositoryFile, ...]:
+        tree = await self._inner.fetch_tree(repository_id)
+        return tuple(file for file in tree if not self._excluded(file.path))
+
+    async def fetch_files(
+        self, repository_id: UUID, paths: tuple[str, ...]
+    ) -> tuple[RepositoryFile, ...]:
+        allowed = tuple(path for path in paths if not self._excluded(path))
+        files = await self._inner.fetch_files(repository_id, allowed)
+        return tuple(file for file in files if not self._excluded(file.path))
+
+
 class ConventionsModel(Protocol):
     """Network boundary for the constrained conventions draft."""
 
@@ -154,7 +182,11 @@ class RepositoryConventionsStore(Protocol):
     """Short database operations; implementations must not perform network calls."""
 
     async def get(
-        self, repository_id: UUID, agents_md_sha: str | None, prompt_version_id: UUID
+        self,
+        repository_id: UUID,
+        agents_md_sha: str | None,
+        prompt_version_id: UUID,
+        policy_key: str | None = None,
     ) -> CachedConventions | None: ...
 
     async def save_and_record_trace(
@@ -197,12 +229,20 @@ class GenerateRepoConventions:
         run_id: UUID,
         changed_files: tuple[str, ...],
         rules: tuple[ReviewRule, ...] = (),
+        policy_key: str | None = None,
     ) -> GeneratedConventions:
         # Fetching the revision happens outside every database operation; it is the
         # exact cache key and therefore cannot be inferred from a stale repository row.
         agents_md = await self._source.fetch_agents_md(repository_id)
         async with self._uow_factory() as uow:
-            cached = await uow.conventions.get(repository_id, agents_md.sha, conventions_prompt.id)
+            # Conventions generated under another ignore policy may describe files that
+            # are withheld now, so the policy is part of the cache identity.
+            cached = await uow.conventions.get(
+                repository_id,
+                agents_md.sha,
+                conventions_prompt.id,
+                **({} if policy_key is None else {"policy_key": policy_key}),
+            )
         if cached is not None:
             async with self._uow_factory() as uow:
                 await uow.conventions.save_and_record_trace(
@@ -238,6 +278,7 @@ class GenerateRepoConventions:
             key_patterns=tuple(draft.key_patterns),
             recommendations=tuple(draft.recommendations),
             languages=languages,
+            policy_key=policy_key,
         )
         async with self._uow_factory() as uow:
             saved = await uow.conventions.save_and_record_trace(

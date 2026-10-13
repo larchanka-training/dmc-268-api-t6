@@ -8,7 +8,13 @@ import re
 from typing import Literal, Protocol
 
 import httpx
-from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    TypeAdapter,
+    model_validator,
+)
 
 from app.common.application.github_repository_name import REPOSITORY_FULL_NAME_MAX_LENGTH
 from app.common.infrastructure.github_repository_path import (
@@ -19,6 +25,7 @@ from app.modules.reviews.application.prompt_builder import PullRequestMeta
 from app.modules.reviews.application.vcs_diff import (
     MAX_BLOB_BYTES,
     BlobTooLargeError,
+    MergeBaseUnavailable,
     PullRequestLocator,
     VcsFile,
     VcsPullRequest,
@@ -221,16 +228,22 @@ class HttpGitHubVcsProvider:
         prefix = _repository_prefix(locator)
         base = commit_sha_segment(pull_request.base_sha)
         head = commit_sha_segment(pull_request.head_sha)
-        token = await self._tokens.get_installation_access_token(locator.installation_external_id)
-        response = await self._client.get(
-            f"{prefix}/compare/{base}...{head}",
-            # Only the merge base is read; one commit per page keeps the response small.
-            params={"per_page": 1},
-            headers=_headers(token),
-            timeout=_REQUEST_TIMEOUT,
-        )
-        response.raise_for_status()
-        return _Comparison.model_validate(response.json()).merge_base_commit.sha
+        try:
+            token = await self._tokens.get_installation_access_token(
+                locator.installation_external_id
+            )
+            response = await self._client.get(
+                f"{prefix}/compare/{base}...{head}",
+                # Only the merge base is read; one commit per page keeps the response small.
+                params={"per_page": 1},
+                headers=_headers(token),
+                timeout=_REQUEST_TIMEOUT,
+            )
+            response.raise_for_status()
+            return _Comparison.model_validate(response.json()).merge_base_commit.sha
+        except (httpx.HTTPError, ValueError) as exc:
+            # ValueError covers a body that is not JSON and an answer of another shape.
+            raise MergeBaseUnavailable(f"GitHub comparison failed: {type(exc).__name__}") from exc
 
     async def get_blob(self, locator: PullRequestLocator, sha: str) -> bytes:
         prefix = _repository_prefix(locator)

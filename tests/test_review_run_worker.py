@@ -31,6 +31,7 @@ from app.modules.reviews.application.handle_review_run import (
     RunGuardSnapshot,
 )
 from app.modules.reviews.application.llm import LlmCallFailed, LlmErrorCode
+from app.modules.reviews.application.policy_errors import PolicyError, PolicyErrorCode
 from app.modules.reviews.application.prompt_builder import ReviewContext
 from app.modules.reviews.application.review_output import InvalidReviewOutput
 from app.modules.reviews.application.run_failures import (
@@ -38,6 +39,7 @@ from app.modules.reviews.application.run_failures import (
     RetryDelays,
     RunCancelled,
     RunFailure,
+    RunSkipped,
 )
 from app.modules.reviews.application.run_trace import traced_step
 from app.modules.reviews.application.try_enqueue_webhook_run import PendingRunMessage
@@ -751,3 +753,40 @@ def test_vcs_errors_map_to_their_error_code(
 def test_vcs_transport_error_is_a_retryable_diff_failure() -> None:
     failure = classify_vcs_error(httpx.ConnectTimeout("timed out"))
     assert failure.error_code == "diff_fetch_failed"
+
+
+def test_skipped_attempt_finishes_the_run_as_skipped_with_its_reason() -> None:
+    run = FakeRun()
+    check_runs = CheckRuns()
+
+    def pipeline(claimed: ClaimedAttempt) -> bool:
+        raise RunSkipped("all_changes_ignored")
+
+    outcome = asyncio.run(handler(run, pipeline, check_runs=check_runs).execute(RUN))
+
+    assert outcome is DeliveryOutcome.ACK
+    assert (run.state, run.error_code) == ("skipped", "all_changes_ignored")
+    view = check_runs.views[-1]
+    assert (view.status, view.conclusion, view.title) == (
+        "completed",
+        "skipped",
+        "AI-ревью пропущено",
+    )
+    assert view.summary == "Все изменения исключены из AI-ревью."
+
+
+def test_invalid_policy_fails_the_run_at_once_with_its_code() -> None:
+    run = FakeRun()
+    check_runs = CheckRuns()
+
+    def pipeline(claimed: ClaimedAttempt) -> bool:
+        raise PolicyError(
+            PolicyErrorCode.DOCUMENT_TOO_LARGE, "The policy document exceeds 65536 bytes"
+        )
+
+    outcome = asyncio.run(handler(run, pipeline, check_runs=check_runs).execute(RUN))
+
+    assert outcome is DeliveryOutcome.ACK
+    assert (run.state, run.error_code, run.attempt) == ("failed", "policy_document_too_large", 1)
+    assert "`policy_document_too_large`" in check_runs.views[-1].summary
+    assert "64 КиБ" in check_runs.views[-1].summary

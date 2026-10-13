@@ -115,3 +115,38 @@ def test_unreadable_or_binary_context_files_are_skipped_with_a_warning(
     assert files == (RepositoryFile(path="ok.py", size=9, content="print(1)\n"),)
     assert "Skipping context file logo.png" in caplog.text
     assert "Skipping context file lost.py" in caplog.text
+
+
+def test_conventions_tree_and_files_come_from_the_base_revision_when_asked() -> None:
+    requested: list[str] = []
+
+    def github(request: httpx.Request) -> httpx.Response:
+        requested.append(request.url.path)
+        return httpx.Response(200, json={"tree": [_blob("src/app.py", "1" * 40)]})
+
+    def source(*, from_base: bool) -> GitHubRunSource:
+        return GitHubRunSource(
+            client=httpx.AsyncClient(
+                base_url="https://api.github.test", transport=httpx.MockTransport(github)
+            ),
+            token_provider=StaticGitHubInstallationAccessTokenProvider("token"),
+            vcs=cast(VcsProvider, Blobs({"1" * 40: b"base content"})),
+            runs=Runs(),
+            run_id=uuid4(),
+            conventions_from_base=from_base,
+        )
+
+    async def read(from_base: bool) -> tuple[RepositoryFile, ...]:
+        reader = source(from_base=from_base)
+        await reader.fetch_tree(uuid4())
+        return await reader.fetch_files(uuid4(), ("src/app.py",))
+
+    files = asyncio.run(read(True))
+    asyncio.run(read(False))
+
+    # Shared conventions never see the tree or the code of the pull request head.
+    assert requested == [
+        f"/repos/octo/repo/git/trees/{BASE}",
+        f"/repos/octo/repo/git/trees/{HEAD}",
+    ]
+    assert files[0].content == "base content"

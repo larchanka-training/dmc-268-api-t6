@@ -63,6 +63,8 @@ services:
     environment:
       DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-app}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/${POSTGRES_DB:-app}
       RABBITMQ_URL: amqp://${RABBITMQ_USER:-app}:${RABBITMQ_PASSWORD:?RABBITMQ_PASSWORD is required}@rabbitmq:5672/
+      # Cache of AST facts and file trees of the review context stage; optional.
+      REDIS_URL: redis://:${REDIS_PASSWORD:?REDIS_PASSWORD is required}@redis:6379/0
       WORKER_HEARTBEAT_FILE: /tmp/worker.heartbeat
     # Unlike the API, the worker cannot start without the broker: it declares the topology first.
     depends_on:

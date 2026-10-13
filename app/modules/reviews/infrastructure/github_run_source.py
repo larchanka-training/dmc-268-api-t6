@@ -40,12 +40,16 @@ class GitHubRunSource:
         vcs: VcsProvider,
         runs: RunVcsRepository,
         run_id: UUID,
+        conventions_from_base: bool = False,
     ) -> None:
         self._client = client
         self._tokens = token_provider
         self._vcs = vcs
         self._runs = runs
         self._run_id = run_id
+        # Shared conventions describe the repository, not the pull request: with this
+        # set, their tree and files come from the base revision only (CONTEXT §4.2).
+        self._conventions_from_base = conventions_from_base
         self._run: RunVcsInput | None = None
         self._head_blobs: dict[str, str] = {}
 
@@ -93,7 +97,8 @@ class GitHubRunSource:
 
     async def fetch_tree(self, repository_id: UUID) -> tuple[RepositoryFile, ...]:
         run = await self._input()
-        entries = await self._tree(run, run.head_sha, recursive=True)
+        revision = run.base_sha if self._conventions_from_base else run.head_sha
+        entries = await self._tree(run, revision, recursive=True)
         self._head_blobs = {str(item["path"]): str(item["sha"]) for item in entries}
         return tuple(
             RepositoryFile(path=str(item["path"]), size=int(item.get("size") or 0))

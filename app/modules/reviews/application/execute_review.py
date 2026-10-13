@@ -63,6 +63,12 @@ class ReviewInputProcessor(Protocol):
     async def prepare(self, run_id: UUID) -> GeneratedConventions | bool | None: ...
 
 
+class ReviewContextFilter(Protocol):
+    """Which paths the policy stage of this attempt withheld from model inputs."""
+
+    def excluded(self, path: str) -> bool: ...
+
+
 class ExecuteReviewRun:
     """Finish an ordinary run after its diff and conventions have been saved.
 
@@ -76,11 +82,13 @@ class ExecuteReviewRun:
         repository: ReviewPromptRepository,
         model: ReviewModel,
         publisher: ReviewOutputHandler,
+        context_filter: ReviewContextFilter | None = None,
     ) -> None:
         self._processor = processor
         self._repository = repository
         self._model = model
         self._publisher = publisher
+        self._context_filter = context_filter
 
     async def execute(self, run_id: UUID) -> bool:
         conventions = await self._processor.prepare(run_id)
@@ -92,14 +100,20 @@ class ExecuteReviewRun:
         meta = await self._model.get_pull_request_meta(run_id)
         if meta is None:
             return False
+        changed_files, omitted_files = prompt_input.changed_files, prompt_input.omitted_files
+        if self._context_filter is not None:
+            # An ignored file is neither shown nor named: it is dropped from both lists.
+            excluded = self._context_filter.excluded
+            changed_files = tuple(file for file in changed_files if not excluded(file.path))
+            omitted_files = tuple(path for path in omitted_files if not excluded(path))
         context = ReviewContext(
             system=prompt_input.system,
             rules=prompt_input.rules,
             agents_md=prompt_input.agents_md,
             conventions=prompt_input.conventions,
             pr_meta=meta,
-            changed_files=prompt_input.changed_files,
-            omitted_files=prompt_input.omitted_files,
+            changed_files=changed_files,
+            omitted_files=omitted_files,
         )
         model_output = await self._model.draft_review(context=context)
         return await self._publisher.execute(run_id, model_output)

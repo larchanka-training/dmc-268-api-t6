@@ -13,6 +13,7 @@ import pytest
 from app.modules.reviews.application.vcs_diff import (
     BlobTooLargeError,
     FetchVcsReviewInput,
+    MergeBaseUnavailable,
     OmissionReason,
     PullRequestLocator,
 )
@@ -427,7 +428,36 @@ def test_merge_base_fails_closed_on_an_error_or_a_response_without_a_commit() ->
             pr = await provider.get_pull_request(PullRequestLocator(17, "octo/repo", 7))
             await provider.get_merge_base(pr)
 
-    with pytest.raises(httpx.HTTPStatusError):
+    # The port answers with its own error, never one of the HTTP client.
+    with pytest.raises(MergeBaseUnavailable, match="HTTPStatusError"):
         asyncio.run(exercise(httpx.Response(404, json={"message": "Not Found"})))
-    with pytest.raises(ValueError, match="merge_base_commit"):
+    with pytest.raises(MergeBaseUnavailable, match="ValidationError"):
         asyncio.run(exercise(httpx.Response(200, json={"commits": []})))
+    with pytest.raises(MergeBaseUnavailable, match="JSONDecodeError"):
+        asyncio.run(exercise(httpx.Response(200, content=b"<html>proxy</html>")))
+
+
+def test_merge_base_fails_closed_when_the_installation_token_is_not_issued() -> None:
+    class FailingTokens(Tokens):
+        fail: bool = False
+
+        async def get_installation_access_token(self, installation_external_id: int) -> str:
+            if self.fail:
+                raise httpx.ConnectError("no route")
+            return await super().get_installation_access_token(installation_external_id)
+
+    async def exercise() -> None:
+        def respond(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json=_pull_payload())
+
+        tokens = FailingTokens()
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(respond), base_url="https://api.github.test"
+        ) as client:
+            provider = HttpGitHubVcsProvider(client=client, token_provider=tokens)
+            pr = await provider.get_pull_request(PullRequestLocator(17, "octo/repo", 7))
+            tokens.fail = True
+            await provider.get_merge_base(pr)
+
+    with pytest.raises(MergeBaseUnavailable, match="ConnectError"):
+        asyncio.run(exercise())
