@@ -16,7 +16,7 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
       POSTGRES_DB: ${POSTGRES_DB:-app}
       RABBITMQ_URL: amqp://${RABBITMQ_USER:-app}:${RABBITMQ_PASSWORD:?RABBITMQ_PASSWORD is required}@rabbitmq:5672/
-      # Cache per SD §10; the application does not read it yet.
+      # Cache per SD §10; the API does not read it yet, the two workers do.
       REDIS_URL: redis://:${REDIS_PASSWORD:?REDIS_PASSWORD is required}@redis:6379/0
       AUTH_JWT_ISSUER: dmc-268-api
       AUTH_JWT_AUDIENCE: dmc-268-ui
@@ -69,7 +69,8 @@ services:
     environment:
       DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-app}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/${POSTGRES_DB:-app}
       RABBITMQ_URL: amqp://${RABBITMQ_USER:-app}:${RABBITMQ_PASSWORD:?RABBITMQ_PASSWORD is required}@rabbitmq:5672/
-      # Cache of AST facts and file trees of the review context stage; optional.
+      # Cache of installation tokens (shared with webhook-worker), AST facts and file trees
+      # of the review context stage; optional.
       REDIS_URL: redis://:${REDIS_PASSWORD:?REDIS_PASSWORD is required}@redis:6379/0
       WORKER_HEARTBEAT_FILE: /tmp/worker.heartbeat
     # Unlike the API, the worker cannot start without the broker: it declares the topology first.
@@ -110,6 +111,8 @@ services:
     environment:
       DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-app}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/${POSTGRES_DB:-app}
       RABBITMQ_URL: amqp://${RABBITMQ_USER:-app}:${RABBITMQ_PASSWORD:?RABBITMQ_PASSWORD is required}@rabbitmq:5672/
+      # Cache of installation tokens, shared with worker; optional.
+      REDIS_URL: redis://:${REDIS_PASSWORD:?REDIS_PASSWORD is required}@redis:6379/0
       WORKER_HEARTBEAT_FILE: /tmp/webhook-worker.heartbeat
     # The projection creates Runs and publishes them to the review queue (#52).
     depends_on:
