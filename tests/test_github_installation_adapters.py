@@ -59,10 +59,12 @@ class FakeInstallationTokenCache:
     tokens: dict[int, str] = field(default_factory=dict)
     set_calls: list[tuple[int, str]] = field(default_factory=list)
 
-    def get(self, installation_external_id: int) -> str | None:
+    async def get(self, installation_external_id: int) -> str | None:
         return self.tokens.get(installation_external_id)
 
-    def set(self, installation_external_id: int, access_token: str, expires_at: object) -> None:
+    async def set(
+        self, installation_external_id: int, access_token: str, expires_at: object
+    ) -> None:
         del expires_at
         self.tokens[installation_external_id] = access_token
         self.set_calls.append((installation_external_id, access_token))

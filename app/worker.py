@@ -38,6 +38,9 @@ from app.modules.integrations.webhooks.infrastructure.github_installation_tree_p
     GitHubAppInstallationAccessTokenProvider,
     InMemoryInstallationAccessTokenCache,
 )
+from app.modules.integrations.webhooks.infrastructure.redis_installation_token_cache import (
+    installation_token_cache,
+)
 from app.modules.reviews.application.check_runs import CheckRunGateway, RunProviderCheckpoint
 from app.modules.reviews.application.conventions import (
     ConventionsModel,
@@ -624,7 +627,7 @@ def github_adapters(
         client=client,
         app_id=settings.github_app_id,
         private_key=settings.github_private_key,
-        cache=InMemoryInstallationAccessTokenCache(now=time.time),
+        cache=installation_token_cache(redis),
         now=time.time,
     )
     github_vcs = HttpGitHubVcsProvider(client=client, token_provider=tokens)
@@ -851,7 +854,8 @@ async def run_worker(
             )
         redis: Redis | None = None
         if settings.redis_url is not None:
-            # Only a cache: the pool connects on first use and a failure reads as a miss.
+            # Only a cache (context stage and installation tokens): the pool connects on
+            # first use and a failure reads as a miss.
             redis = Redis.from_url(settings.redis_url)
             stack.push_async_callback(redis.aclose)
         async with amqp_channels(settings.rabbitmq_url, delays or RetryDelays()) as channels:
