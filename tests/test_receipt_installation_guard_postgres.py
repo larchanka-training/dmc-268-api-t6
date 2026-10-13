@@ -28,6 +28,7 @@ from app.modules.reviews.application.project_github_pull_request import (
 )
 from app.modules.reviews.application.trigger_from_delivery import (
     CiTriggerEvent,
+    RunTriggerOutcome,
     TriggerFromDelivery,
 )
 from app.modules.reviews.application.try_enqueue_webhook_run import (
@@ -131,14 +132,14 @@ class RebindingEnqueuer:
     factory: async_sessionmaker[AsyncSession]
     pending_rebind: bool = True
     wait_mode: str = "always"
-    origins: list[int | None] = field(default_factory=list)
+    origins: list[int] = field(default_factory=list)
 
     async def execute(
         self,
         code_change_id: UUID,
         expected_head_sha: str,
         *,
-        expected_installation_external_id: int | None = None,
+        expected_installation_external_id: int,
     ) -> EnqueueResult:
         self.origins.append(expected_installation_external_id)
         if self.pending_rebind:
@@ -149,8 +150,6 @@ class RebindingEnqueuer:
                     text("UPDATE repositories SET wait_for_ci=:mode WHERE id=:id"),
                     {"mode": self.wait_mode, "id": REPO_A},
                 )
-        if expected_installation_external_id is None:
-            return await self.real.execute(code_change_id, expected_head_sha)
         return await self.real.execute(
             code_change_id,
             expected_head_sha,
@@ -190,7 +189,7 @@ def test_source_receipt_rebind_between_target_read_and_enqueue_never_uses_new_in
                 uow_factory=lambda: SqlAlchemyRunTriggerUnitOfWork(factory), enqueuer=enqueue
             )
 
-            async def dispatch(installation_id: int) -> str:
+            async def dispatch(installation_id: int) -> RunTriggerOutcome:
                 source = replace(event(), installation_external_id=installation_id)
                 if kind == "ci":
                     return await trigger.on_ci(
@@ -201,12 +200,15 @@ def test_source_receipt_rebind_between_target_read_and_enqueue_never_uses_new_in
                 return await trigger.on_pr(source)
 
             outcome = await dispatch(17)
-            assert "ineligible (stale_state)" in outcome
+            assert "ineligible (stale_state)" in outcome.detail
+            assert outcome.retry_required is False
             assert enqueue.origins == [17]
             assert ci.calls == [] and publisher.messages == []
             async with factory() as session:
                 assert await session.scalar(text("SELECT count(*) FROM runs")) == 4
-            assert "enqueued run=" in await dispatch(29)
+            fresh_outcome = await dispatch(29)
+            assert "enqueued run=" in fresh_outcome.detail
+            assert fresh_outcome.retry_required is False
             assert enqueue.origins == [17, 29] and ci.calls == fresh_ci_calls
             assert len(publisher.messages) == 1
             assert publisher.messages[0].installation_id == 29
@@ -240,13 +242,15 @@ def test_source_ci_observation_that_rebinds_during_read_cannot_enqueue_target_ru
                     publisher=publisher,
                 ),
             )
-            assert "ineligible (stale_state)" in await trigger.on_pr(event())
+            outcome = await trigger.on_pr(event())
+            assert "ineligible (stale_state)" in outcome.detail
+            assert outcome.retry_required is False
             assert ci.calls == [17] and publisher.messages == []
             async with factory() as session:
                 assert await session.scalar(text("SELECT count(*) FROM runs")) == 4
-            assert "enqueued run=" in await trigger.on_pr(
-                replace(event(), installation_external_id=29)
-            )
+            fresh_outcome = await trigger.on_pr(replace(event(), installation_external_id=29))
+            assert "enqueued run=" in fresh_outcome.detail
+            assert fresh_outcome.retry_required is False
             assert ci.calls == [17, 29] and publisher.messages[0].installation_id == 29
         finally:
             await engine.dispose()

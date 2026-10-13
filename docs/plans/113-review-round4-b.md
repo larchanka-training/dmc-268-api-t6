@@ -32,22 +32,28 @@ confirms no automatic redelivery. Its
 confirms App owner/manager access through Edit → Advanced → Recent Deliveries →
 GUID → Redeliver, limited to deliveries from the past three days.
 
-Read `deploy/scripts/deploy.sh`, `deploy/scripts/rollback.sh`, staging compose and
-`.github/workflows/ci-cd.yml`: failed compose startup or external health check can
-restore the previous image; image rollback does not run Alembic downgrade.
-Migration 0030 permits NULL origin for old writers after backfill. The new worker's
-claim/lifecycle and stale-origin reconciliation cancel eligible nonterminal work
-as `installation_unavailable`; terminal history is not rewritten. The old image
-has no origin guard, so it cannot be credited with that cancellation behavior.
+Source inspection of `deploy/scripts/deploy.sh`, `deploy/scripts/rollback.sh`,
+`deploy/compose/staging.yml` and `alembic/versions` corrects the earlier recovery
+claim: after 0030, an image lacking that revision fails bootstrap's
+`alembic upgrade head` with unknown revision. API and both workers require
+successful bootstrap and cannot start. Pre-#126 rollback could replace containers
+and leave staging unavailable. Merged #126 performs read-only revision admission
+before application-container or release-config changes; it rejects that old image.
+A failed deploy may already have affected services, so recovery requires a
+fix-forward image containing 0030. No runtime old-image reproduction is claimed.
+
+0030 leaves origin nullable after backfill. An independent old writer outside
+Compose can insert NULL origin; only the new origin-aware worker cancels eligible
+nonterminal Runs as `installation_unavailable` during lifecycle processing or
+stale reconciliation. Terminal history remains unchanged.
 Read migrations 0029/0030: manual downgrade removes origin, then account identity;
 0029 conservatively folds installation availability into enabled. Re-upgrade does
 not reconstruct lost lineage.
 
-Read-only GitHub checks returned #121 and #126 OPEN with `mergedAt: null`;
-#126 head was `c6b7b2bc6b46119490e48d2cbc09b1b6095d1634` and #121 head was
-`03f539b7fd4f0e4353104db894d6f938ea071467`. Main `620c81d` has no rollback revision
-guard. CICD describes current behavior separately from #126 and requires checking
-actual combined behavior after its merge, without bypassing a compatibility guard.
+At the historical round-four main `620c81d`, #121 and #126 were open and rollback
+had no revision guard. Both are now merged into main
+`11ddfabf31a3345e6d21cdf57586281cb62cee7c`; the corrected runbook describes the
+actual guard while preserving that historical verification boundary.
 
 ## Executed documentation checks
 
@@ -57,7 +63,5 @@ rg -n '/(tm[p]|User[s]|hom[e]|privat[e])/|localhos[t]:[0-9]+|127[.]0[.]0[.]1:[0-
 ```
 
 Diff check: exit 0, no output. Private-path/service-address/DSN sweep: exit 1,
-no matches. Only assigned prose and B checklist entries were changed; no application,
-test, migration, dependency or deployment implementation edits were made here.
-Repository gates and independent review remain the coordinator's combined-head
-verification; this document claims documentation checks only.
+no matches. These are documentation checks only. Full combined-head repository gates and
+independent review are recorded separately in the final proof.

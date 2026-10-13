@@ -6,11 +6,6 @@ Historical plan/todo and prior gate counts remain historical evidence.
 
 - [x] Read the 19:08 UTC review and repository rules/skills.
 - [x] Verify actual main 620c81d; #125 merged, #121/#126 still open.
-- [x] Audit current open-PR ownership; CICD overlaps #126 only.
-- [x] Prepare narrow #126 coordination body before editing CICD.
-- [x] Split development ownership: A origin-guard test; B docs/CICD and 113 proofs.
-- [x] Recheck UI exact/recent/semantic duplicates; no narrow existing task found.
-- [x] Post #126 coordination comment: issuecomment-6130965248.
 - [x] Rebase before edits: e417c2ec5af2f7e5556614c38474743e31ebaa98 on main620c81d.
 - [x] Preserve upstream #125 env/config/tests and both CICD bootstrap/rollout contracts.
 - [x] Record rebase: only CICD conflict; app/alembic unchanged; nine upstream main files.
@@ -29,7 +24,7 @@ Historical plan/todo and prior gate counts remain historical evidence.
 - [x] Preserve truthful historical SHAs, source scope, counts and timings.
 - [x] Make round-three final proof reader-facing; retain verified historical evidence.
 - [x] CICD documents missed webhook deliveries and operator manual redelivery.
-- [x] CICD documents failed-deploy/healthcheck image rollback and NULL-origin cancellation.
+- [x] CICD recovery description corrected in round five: blocked bootstrap and fix-forward; independent old writers only.
 - [x] New-image-only wording qualified to successful path; preserve #125/#126 contracts.
 - [x] Verify webhook wording against primary GitHub documentation and runbook against source.
 - [x] Private-reference sweep and git diff --check clean; save portable proof.
@@ -53,16 +48,19 @@ on each axis. See [round-four final proof](113-review-round4-final.md).
 
 ## UI issue and existing PR publication
 
-- [x] Fresh UI preflight/body/check/create script; reuse existing duplicate if found.
 - [x] Verify [UI #105](https://github.com/larchanka-training/dmc-268-ui-t6/issues/105) read-back and board 12 Todo placement; link in [API #106](https://github.com/larchanka-training/dmc-268-api-t6/issues/106#issuecomment-6131037958).
-- [ ] Link UI #105 in the published PR #132 body.
+- [x] Link UI #105 in the published PR #132 body on `8a87fe9`.
 - [x] Prepare PR body cleanup and links to historical/current plans/todos.
 - [x] Record tested base/source, evidence and companion status; no future-integration claims.
-- [ ] Normal-hook commit Refs #113, explicit intended staging and verified leased push.
-- [ ] Publish one concise summary responding to all four P3 observations and UI #105, with SHA/evidence; do not resolve threads.
-- [ ] Required CI green on published head; report existing PR and follow-up issue URLs.
+- [x] Normal-hook commit Refs #113, explicit intended staging and verified leased push.
+- [x] Publish one concise summary responding to all four P3 observations and UI #105, with SHA/evidence; do not resolve threads.
+- [x] Required CI green on published head; report existing PR and follow-up issue URLs.
 
-## External merge prerequisites (not execution tasks in this round)
+Published head `8a87fe9d10794ba92002f537b349f84ee7dbdac9`; required
+[CI run 38298570137](https://github.com/larchanka-training/dmc-268-api-t6/actions/runs/38298570137)
+succeeded. See the historical publication section of the round-four final proof.
+
+## External merge prerequisites pending at this historical checkpoint
 
 - [ ] #121/#126 merged; #132 rebased last on actual combined main.
 - [ ] Both RunTriggerOutcome and expected_installation_external_id retained.

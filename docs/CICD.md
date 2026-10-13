@@ -191,26 +191,30 @@ GET /healthcheck
 последние три дня; более старые доставки этой кнопкой восстановить нельзя
 ([инструкция GitHub](https://docs.github.com/en/webhooks/testing-and-troubleshooting-webhooks/redelivering-webhooks)).
 
-При ошибке `deploy.sh` или внешнего health check автоматический rollback может
-снова запустить предыдущий образ вместе со старыми writers (§5), хотя схема
-останется на 0030, если миграция уже завершилась. Старый writer после backfill
-вставляет Run с NULL origin. Старый worker не имеет origin guard; отмена таких
-Run не гарантируется, пока работает старый образ. После возврата на новый образ
-его origin-aware worker отменяет ещё нетерминальные Run с NULL origin как
-`cancelled/installation_unavailable` при обработке или stale reconciliation,
-без provider calls для этих Run. Завершённую старым кодом историю он не переписывает.
+Если миграция уже завершилась и БД находится на 0030, предыдущий образ без
+этой ревизии не может восстановить сервисы: его `bootstrap` запускает
+`alembic upgrade head` и завершается с unknown revision. `api`, `worker` и
+`webhook-worker` зависят от `service_completed_successfully`, поэтому не стартуют.
+До [PR #126](https://github.com/larchanka-training/dmc-268-api-t6/pull/126)
+rollback мог пересоздать контейнеры этим образом и оставить staging без сервисов.
+Теперь ручной и автоматический rollback проверяют граф целевого образа и ревизию
+БД до изменения конфигурации и application-контейнеров (§5); образ без 0030
+отклоняется. Guard не восстанавливает сервисы, уже затронутые неуспешным deploy.
+Для восстановления после 0030 нужен исправленный forward release, знающий эту
+ревизию. Не обходить admission и не выполнять downgrade ради запуска старого образа.
 
-Откат образа сам по себе не выполняет downgrade схемы. Совместимость целевого
-образа с текущей ревизией и необходимость отдельного ручного downgrade проверить
-до остановки сервисов. Downgrade 0030 удаляет сохранённый origin Run; при ручном
-возврате до 0028 downgrade 0029 сохраняет отзыв через
-`enabled = enabled AND installation_available`, но безвозвратно удаляет
+Независимый старый writer вне этого Compose stack, если он не остановлен, может
+после backfill вставить Run с NULL origin. Только новый origin-aware worker
+отменяет подходящие нетерминальные Run как `cancelled/installation_unavailable`
+при обработке или stale reconciliation без provider calls для этих Run.
+Старый worker не имеет origin guard; завершённая история не переписывается.
+
+Откат образа сам по себе не выполняет downgrade схемы. Downgrade 0030 удаляет
+сохранённый origin Run; при ручном возврате до 0028 downgrade 0029 сохраняет отзыв
+через `enabled = enabled AND installation_available`, но безвозвратно удаляет
 `account_external_id`: повторный upgrade не восстановит lineage и переустановка
-получит чистую цель. На main `620c81d` rollback ещё не проверяет ревизию схемы;
-[PR #126](https://github.com/larchanka-training/dmc-268-api-t6/pull/126) добавляет
-такую защиту и пока открыт. После его мержа проверить фактическое поведение
-совмещённого релиза перед первым выкатом 0030; этот runbook не отменяет защиту
-и не предписывает downgrade для обхода проверки.
+получит чистую цель. Отдельное восстановление БД требует согласованного плана,
+backup и образа под восстановленную схему (§5).
 
 `api` стартует после успешного `bootstrap` и здорового `postgres`. От RabbitMQ и Redis он не зависит: к брокеру API подключается при первой публикации (`LazyAmqpPublisher`), поэтому сбой брокера или кэша не мешает пересозданному `api` стартовать. `up --wait` всё равно ждёт healthcheck каждого сервиса, и падение любого запускает авто-rollback. Секреты приложения приходят в каждый контейнер только через env-файлы его роли: `api.env` → `api`, `app.env` (ключ App) → оба воркера, `worker.env` (LLM и `PORTAL_URL`) → `worker`, `webhook-worker.env` (логин бота) → `webhook-worker` — [SECRETS.md](SECRETS.md) §1, §3.
 

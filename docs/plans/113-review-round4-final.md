@@ -1,6 +1,6 @@
 # Round-four final verification — PR #132 / #113
 
-## Tested source and integration
+## Historical tested source and integration
 
 Tested main: `620c81d927cebf3deb0721e5dacb7b70b721ad7e`.
 Rebased parent: `e417c2ec5af2f7e5556614c38474743e31ebaa98` plus the
@@ -8,7 +8,7 @@ round-four test/documentation delta. #125 is included and changes configuration
 and tests, so the full gates below ran again on this actual combined source.
 #108/#134/#138 behavior and #127 AuthScope are retained. Both CICD bootstrap
 paragraphs, including LLM/`PORTAL_URL`, and the first 0030 writer-stop contract
-are preserved. #121 and #126 remain OPEN at this checkpoint.
+are preserved. #121 and #126 were OPEN at this historical checkpoint.
 
 Every temporary mutation was restored before full gates. The tested snapshot
 contains 390 tracked Python files; canonical sorted path-to-SHA-256 JSON hash:
@@ -45,10 +45,13 @@ passed. Original production source bytes were restored exactly.
 [Documentation proof](113-review-round4-b.md): every historical 113 proof document
 is portable while retaining actual SHAs, commands, counts and timings. Historical
 round-three evidence and Accepted limits remain reader-facing. CICD documents
-manual GitHub webhook redelivery within three days and previous-image rollback
-on failed deployment or health check. NULL-origin cancellation applies to eligible
-nonterminal Runs when the new worker processes them; the old worker has no origin
-guard and terminal history is not rewritten.
+manual GitHub webhook redelivery within three days. Its recovery description is
+corrected in round five: after 0030, an old image missing that revision fails
+bootstrap and blocks API and both workers. Historical pre-#126 rollback could
+replace containers and cause an outage; merged #126 rejects that image before
+application-container changes. Recovery requires a fix-forward image knowing
+0030. Independent old writers outside Compose can insert NULL-origin Runs; only
+the new worker cancels eligible nonterminal work, preserving terminal history.
 
 UI rerun 409 wording is tracked in
 [UI #105](https://github.com/larchanka-training/dmc-268-ui-t6/issues/105), verified
@@ -56,7 +59,7 @@ on course board 12 with Todo status and linked in
 [API #106](https://github.com/larchanka-training/dmc-268-api-t6/issues/106#issuecomment-6131037958).
 No frontend implementation is included.
 
-## Remaining external prerequisites
+## Prerequisites pending at the round-four checkpoint
 
 After #121/#126 merge, rebase #132 last on actual combined main. Keep both
 `RunTriggerOutcome` and mandatory keyword-only `expected_installation_external_id`,
@@ -65,5 +68,14 @@ old-head CI receipt outcome and repeat full combined-head gates/CI. That future
 integration is not claimed as tested. Obtain human approval on the final head;
 reviewers resolve their own threads. Coordinate merge timing with axyi and stop
 all old Run writers before merge, because main deployment is automatic.
-No companion merge, thread resolution, service stop, deployment or issue closure
-is part of this correction.
+Round-five integration and verification are recorded separately; the historical
+2897-pass result above does not prove the later combined source.
+
+## Historical publication
+
+Published round-four head: `8a87fe9d10794ba92002f537b349f84ee7dbdac9`. Normal hooks
+and source-fingerprint checks passed. UI #105 and the review response were published
+on PR #132. Required [CI run 38298570137](https://github.com/larchanka-training/dmc-268-api-t6/actions/runs/38298570137)
+succeeded on that head: full suite 2897 passed in 509.89s; separate integration
+execution 503 passed / 2394 deselected in 396.05s; both reported 2 existing warnings
+and zero skips. Deploy staging was skipped. These are historical CI results.
