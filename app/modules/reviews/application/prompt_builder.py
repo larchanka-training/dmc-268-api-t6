@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import PurePosixPath
@@ -10,6 +11,12 @@ from typing import Literal
 from xml.sax.saxutils import escape
 
 from app.common.application.languages import LANGUAGE_BY_SUFFIX
+from app.modules.reviews.application.policy_snapshot import (
+    CallManifest,
+    ManifestBlock,
+    PolicySnapshot,
+    StageName,
+)
 
 type LineType = Literal["added", "removed", "context"]
 
@@ -98,6 +105,7 @@ class ReviewContext:
     pr_meta: PullRequestMeta
     changed_files: tuple[ChangedFile, ...]
     omitted_files: tuple[str, ...]
+    policy_snapshot: PolicySnapshot | None = None
 
 
 @dataclass(frozen=True)
@@ -155,10 +163,17 @@ class PromptBuilder:
 
     def render_input(self, context: ReviewContext) -> str:
         """Render the tags after the system prompt, in the documented order."""
+        if context.policy_snapshot is not None:
+            rules_part = self._render_policy_rules(context.policy_snapshot)
+            agents_part = self._render_policy_agents(context.policy_snapshot)
+        else:
+            rules_part = self._render_rules(context.rules)
+            agents_part = _container("agents_md", _text(context.agents_md or ""))
+
         return "\n".join(
             (
-                self._render_rules(context.rules),
-                _container("agents_md", _text(context.agents_md or "")),
+                rules_part,
+                agents_part,
                 self._render_conventions(context.conventions),
                 self._render_pr_meta(context.pr_meta),
                 self._render_changed_files(context.changed_files),
@@ -166,6 +181,119 @@ class PromptBuilder:
                     "omitted_files", "\n".join(_text(path) for path in context.omitted_files)
                 ),
             )
+        )
+
+    @staticmethod
+    def _render_policy_rules(snapshot: PolicySnapshot) -> str:
+        doc = snapshot.rules
+        if not doc.is_present or not (doc.text or "").strip():
+            return (
+                '<repository_rules block_id="policy-rules" '
+                'path=".review/rules.md" status="absent" />'
+            )
+        text = doc.text or ""
+        lines = [
+            f'<line n="{index}">{_text(line)}</line>'
+            for index, line in enumerate(text.splitlines(), start=1)
+        ]
+        content = "\n".join(lines)
+        path_attr = _attribute(doc.path)
+        return (
+            f'<repository_rules block_id="policy-rules" path="{path_attr}">\n'
+            f"{content}\n"
+            "</repository_rules>"
+        )
+
+    @staticmethod
+    def _render_policy_agents(snapshot: PolicySnapshot) -> str:
+        doc = snapshot.agents
+        if not doc.is_present or not (doc.text or "").strip():
+            return (
+                '<project_conventions_document block_id="policy-agents" '
+                'path="AGENTS.md" status="absent" />'
+            )
+        text = doc.text or ""
+        lines = [
+            f'<line n="{index}">{_text(line)}</line>'
+            for index, line in enumerate(text.splitlines(), start=1)
+        ]
+        content = "\n".join(lines)
+        path_attr = _attribute(doc.path)
+        return (
+            f'<project_conventions_document block_id="policy-agents" path="{path_attr}">\n'
+            f"{content}\n"
+            "</project_conventions_document>"
+        )
+
+    def build_manifest(
+        self,
+        context: ReviewContext,
+        *,
+        call_id: uuid.UUID,
+        stage: StageName = "review",
+    ) -> CallManifest:
+        """Construct the exact CallManifest presented in this prompt."""
+        run_id = context.policy_snapshot.run_id if context.policy_snapshot else uuid.uuid4()
+        blocks: list[ManifestBlock] = []
+
+        if context.policy_snapshot is not None:
+            rules_doc = context.policy_snapshot.rules
+            if rules_doc.is_present and (rules_doc.line_count or 0) > 0:
+                line_count = rules_doc.line_count or 0
+                blocks.append(
+                    ManifestBlock(
+                        block_id="policy-rules",
+                        source_role="policy_document",
+                        source_kind="repository_rules",
+                        path=rules_doc.path,
+                        revision=context.policy_snapshot.policy_base_sha,
+                        content_sha256=rules_doc.text_sha256,
+                        start_line=1,
+                        end_line=line_count,
+                        shown_line_count=line_count,
+                    )
+                )
+
+            agents_doc = context.policy_snapshot.agents
+            if agents_doc.is_present and (agents_doc.line_count or 0) > 0:
+                line_count = agents_doc.line_count or 0
+                blocks.append(
+                    ManifestBlock(
+                        block_id="policy-agents",
+                        source_role="policy_document",
+                        source_kind="project_conventions_document",
+                        path=agents_doc.path,
+                        revision=context.policy_snapshot.policy_base_sha,
+                        content_sha256=agents_doc.text_sha256,
+                        start_line=1,
+                        end_line=line_count,
+                        shown_line_count=line_count,
+                    )
+                )
+
+        for file in context.changed_files:
+            slug = re.sub(r"[^a-zA-Z0-9]+", "-", file.path).strip("-")
+            block_id = f"file-{slug}"
+            line_numbers = [line.number for line in file.lines]
+            start_line = min(line_numbers) if line_numbers else None
+            end_line = max(line_numbers) if line_numbers else None
+            blocks.append(
+                ManifestBlock(
+                    block_id=block_id,
+                    source_role="diff",
+                    source_kind="diff",
+                    path=file.path,
+                    start_line=start_line,
+                    end_line=end_line,
+                    shown_line_count=len(file.lines),
+                )
+            )
+
+        return CallManifest(
+            call_id=call_id,
+            run_id=run_id,
+            stage=stage,
+            blocks=tuple(blocks),
         )
 
     @staticmethod

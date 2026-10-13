@@ -11,11 +11,16 @@ from app.modules.reviews.application.policy_snapshot import (
     AGENTS_DOCUMENT_PATH,
     POLICY_SNAPSHOT_SCHEMA_VERSION,
     RULES_DOCUMENT_PATH,
+    CallManifest,
     DocumentPresence,
     ExecutionProfile,
+    ManifestBlock,
     PolicyDocument,
     PolicySnapshot,
     PromptBindings,
+    make_policy_document_empty,
+    make_policy_document_missing,
+    make_policy_document_present,
 )
 
 _EMPTY_SHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
@@ -229,3 +234,99 @@ def test_complete_pinned_configuration_fits_the_snapshot_and_stays_out_of_its_ti
         snapshot.execution_profile.tokenizer_version = "other"  # type: ignore[misc]
     with pytest.raises(FrozenInstanceError):
         snapshot.prompt_bindings.review_system_id = UUID(int=99)  # type: ignore[misc]
+
+
+# --- Tests for Issue #120 extensions (PromptBindings, ExecutionProfile, CallManifest) ---
+
+
+def test_policy_document_properties_and_helpers() -> None:
+    present = make_policy_document_present(".review/rules.md", "# My Rule\n")
+    assert present.is_present is True
+    assert present.is_missing is False
+    assert present.line_count == 1
+    assert present.byte_count == len(b"# My Rule\n")
+
+    missing = make_policy_document_missing("AGENTS.md")
+    assert missing.is_present is False
+    assert missing.is_missing is True
+    assert missing.text is None
+
+    empty = make_policy_document_empty("AGENTS.md")
+    assert empty.is_present is True
+    assert empty.is_missing is False
+    assert empty.text == ""
+
+
+def test_policy_snapshot_composition_and_readiness() -> None:
+    rules_doc = make_policy_document_present(".review/rules.md", "# Rules\nRule 1\n")
+    agents_doc = make_policy_document_missing("AGENTS.md")
+    bindings = PromptBindings(
+        review_system_checksum="cs1",
+        conventions_checksum="cs2",
+        verifier_checksum="cs3",
+    )
+    profile = ExecutionProfile.fast("model1", "model2")
+
+    snapshot = PolicySnapshot(
+        schema_version=1,
+        snapshot_id=UUID("00000000-0000-0000-0000-000000000001"),
+        run_id=UUID("00000000-0000-0000-0000-000000000002"),
+        repository_id=UUID("00000000-0000-0000-0000-000000000003"),
+        policy_base_sha="base_sha_123",
+        rules=rules_doc,
+        agents=agents_doc,
+        ignore_patterns=("node_modules/**", "dist/**"),
+        ignore_digest="ignore_digest_123",
+        parser_profile="rules-markdown/v1",
+        parser_version="4.0.0",
+        matcher_version="review-ignore/v1",
+        limits_version="policy-limits/v1",
+        builtin_exclusions_version="builtin-exclusions/v1",
+        priority_matcher_version="priority-matcher/v1",
+        service_defaults_rule_version_id=UUID("00000000-0000-0000-0000-000000000004"),
+        defaults_checksum="defaults_123",
+        prompt_bindings=bindings,
+        execution_profile=profile,
+        policy_digest="digest_abc",
+    )
+
+    assert snapshot.is_ready_for_llm is True
+    assert snapshot.has_custom_rules is True
+    assert snapshot.has_agents_doc is False
+
+
+def test_call_manifest_tracks_shown_ranges() -> None:
+    call_id = UUID("00000000-0000-0000-0000-000000000010")
+    run_id = UUID("00000000-0000-0000-0000-000000000020")
+    block1 = ManifestBlock(
+        block_id="code-1",
+        source_role="diff",
+        source_kind="diff",
+        path="app/service.py",
+        start_line=10,
+        end_line=25,
+        shown_line_count=16,
+    )
+    block2 = ManifestBlock(
+        block_id="policy-rules",
+        source_role="policy_document",
+        source_kind="repository_rules",
+        path=".review/rules.md",
+        start_line=1,
+        end_line=20,
+        shown_line_count=20,
+    )
+
+    manifest = CallManifest(
+        call_id=call_id,
+        run_id=run_id,
+        stage="review",
+        blocks=(block1, block2),
+    )
+
+    assert manifest.get_block("code-1") == block1
+    assert manifest.get_block("unknown") is None
+    assert manifest.is_range_shown("code-1", start_line=10, end_line=15) is True
+    assert manifest.is_range_shown("code-1", start_line=5, end_line=15) is False
+    assert manifest.is_range_shown("code-1", start_line=20, end_line=30) is False
+    assert manifest.is_range_shown("nonexistent", start_line=1, end_line=2) is False
