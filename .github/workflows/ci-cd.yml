@@ -673,7 +673,7 @@ jobs:
           key: ${{ steps.target.outputs.mode == 'terraform' && secrets.STAGING_SSH_KEY || '' }}
           password: ${{ steps.target.outputs.mode == 'course' && secrets.VPS_DMC268_P || '' }}
           fingerprint: ${{ vars.STAGING_SSH_FINGERPRINT }}
-          source: "deploy/compose/staging.yml,deploy/compose/staging.ports.yml,deploy/compose/staging.edge.yml,deploy/scripts/provision.sh,deploy/scripts/deploy.sh,deploy/scripts/rollback.sh,deploy/scripts/healthcheck.sh,deploy/scripts/env-file.sh"
+          source: "deploy/compose/staging.yml,deploy/compose/staging.ports.yml,deploy/compose/staging.edge.yml,deploy/scripts/provision.sh,deploy/scripts/deploy.sh,deploy/scripts/rollback.sh,deploy/scripts/check-rollback-revision.py,deploy/scripts/healthcheck.sh,deploy/scripts/env-file.sh"
           target: ${{ steps.target.outputs.app_dir }}
           strip_components: 2
 

@@ -183,7 +183,23 @@ jobs:
           key: ${{ steps.target.outputs.mode == 'terraform' && secrets.STAGING_SSH_KEY || '' }}
           password: ${{ steps.target.outputs.mode == 'course' && secrets.VPS_DMC268_P || '' }}
           fingerprint: ${{ vars.STAGING_SSH_FINGERPRINT }}
-          source: "deploy/compose/staging.yml,deploy/compose/staging.ports.yml,deploy/compose/staging.edge.yml,deploy/scripts/provision.sh,deploy/scripts/deploy.sh,deploy/scripts/rollback.sh,deploy/scripts/healthcheck.sh,deploy/scripts/env-file.sh"
+          source: "deploy/compose/staging.yml,deploy/compose/staging.ports.yml,deploy/compose/staging.edge.yml,deploy/scripts/provision.sh,deploy/scripts/deploy.sh,deploy/scripts/rollback.sh,deploy/scripts/check-rollback-revision.py,deploy/scripts/healthcheck.sh,deploy/scripts/env-file.sh"
+          target: ${{ steps.target.outputs.app_dir }}
+          strip_components: 2
+
+      # Terraform hosts also need the current guard, even before their next forward deploy.
+      # Refresh scripts only: preserve their existing Compose files, secrets and provisioning.
+      - name: Upload rollback scripts
+        if: steps.target.outputs.deploy_mode == 'ports'
+        uses: appleboy/scp-action@ff85246acaad7bdce478db94a363cd2bf7c90345 # v1.0.0
+        with:
+          host: ${{ steps.target.outputs.host }}
+          port: ${{ steps.target.outputs.port }}
+          username: ${{ steps.target.outputs.mode == 'course' && secrets.VPS_DMC268_U || vars.STAGING_SSH_USER }}
+          key: ${{ steps.target.outputs.mode == 'terraform' && secrets.STAGING_SSH_KEY || '' }}
+          password: ${{ steps.target.outputs.mode == 'course' && secrets.VPS_DMC268_P || '' }}
+          fingerprint: ${{ vars.STAGING_SSH_FINGERPRINT }}
+          source: "deploy/scripts/rollback.sh,deploy/scripts/check-rollback-revision.py,deploy/scripts/env-file.sh"
           target: ${{ steps.target.outputs.app_dir }}
           strip_components: 2
 
@@ -273,6 +289,7 @@ jobs:
           script: |
             set -euo pipefail
             set +o xtrace
+            chmod +x "${APP_DIR}/rollback.sh"
             if [[ -n "${IMAGE}" ]]; then
               "${APP_DIR}/rollback.sh" "${IMAGE}"
             else
