@@ -16,6 +16,7 @@ from app.modules.reviews.application.verdict import SeverityThresholdValue
 
 if TYPE_CHECKING:
     from app.modules.reviews.application.findings_post_processor import ProcessedReviewOutput
+    from app.modules.reviews.application.policy_snapshot import CallManifest
 
 type Severity = Literal["critical", "high", "medium", "low", "info"]
 type Category = Literal["security", "correctness", "performance", "readability"]
@@ -97,6 +98,129 @@ class ReviewOutput(BaseModel):
         return self
 
 
+class EvidenceRef(BaseModel):
+    """A direct coordinate reference to code shown in the call manifest."""
+
+    model_config = _STRICT
+
+    block_id: Annotated[str, Field(min_length=1)]
+    start_line: Annotated[int, Field(ge=1)]
+    end_line: Annotated[int, Field(ge=1)]
+
+    @model_validator(mode="after")
+    def validate_range(self) -> EvidenceRef:
+        if self.start_line > self.end_line:
+            raise ValueError("start_line must be <= end_line")
+        return self
+
+
+class RequirementRef(BaseModel):
+    """A reference to an existing rule requirement or service default check."""
+
+    model_config = _STRICT
+
+    block_id: Annotated[str, Field(min_length=1)]
+    start_line: Annotated[int, Field(ge=1)]
+    end_line: Annotated[int, Field(ge=1)]
+    check_id: Annotated[str | None, Field(min_length=1)] = None
+
+    @model_validator(mode="after")
+    def validate_range(self) -> RequirementRef:
+        if self.start_line > self.end_line:
+            raise ValueError("start_line must be <= end_line")
+        return self
+
+
+ALLOWED_V2_RULE_NAMES = frozenset({".review/rules.md", "AGENTS.md"})
+
+
+class ReviewFindingV2(BaseModel):
+    """ReviewOutput v2 finding with required evidence references and strict rule attribution."""
+
+    model_config = _STRICT
+
+    path: Annotated[str, Field(min_length=1)]
+    line: Annotated[int, Field(ge=1)]
+    start_line: Annotated[int | None, Field(ge=1)]
+    severity: Severity
+    category: Category
+    title: Annotated[str, Field(min_length=1, max_length=80)]
+    body: Annotated[str, Field(min_length=1, max_length=1200)]
+    suggestion: str | None
+    confidence: Annotated[float, Field(ge=0, le=1)]
+    rule_name: str | None
+    evidence_refs: Annotated[list[EvidenceRef], Field(min_length=1, max_length=8)]
+
+    @model_validator(mode="after")
+    def validate_range_and_rule(self) -> ReviewFindingV2:
+        if self.start_line is not None and self.start_line >= self.line:
+            raise ValueError("start_line must be strictly earlier than line")
+        if self.title.endswith("."):
+            raise ValueError("title must not end with a period")
+        title_lines = self.title.splitlines()
+        if len(title_lines) != 1 or title_lines[0] != self.title:
+            raise ValueError("title must be one line")
+        if self.rule_name is not None and (
+            self.rule_name not in ALLOWED_V2_RULE_NAMES
+            and not (
+                self.rule_name.startswith("service-defaults:")
+                and len(self.rule_name) > len("service-defaults:")
+            )
+        ):
+            raise ValueError(
+                "rule_name must be '.review/rules.md', 'AGENTS.md', "
+                "'service-defaults:<ID>', or null"
+            )
+        return self
+
+
+class ReviewOutputV2(BaseModel):
+    """The closed ReviewOutput v2 response contract with evidence refs."""
+
+    model_config = _STRICT
+
+    findings: Annotated[list[ReviewFindingV2], Field(max_length=10)]
+    summary: ReviewSummary
+
+    @model_validator(mode="after")
+    def validate_finding_order(self) -> ReviewOutputV2:
+        ordering = [finding_order_key(item.severity, item.confidence) for item in self.findings]
+        if ordering != sorted(ordering):
+            raise ValueError("findings must be severity then confidence ordered")
+        return self
+
+
+def validate_v2_attribution(
+    finding: ReviewFindingV2, manifest: CallManifest
+) -> tuple[bool, str | None]:
+    """Validate that finding evidence and policy references exist in the call manifest."""
+    for ref in finding.evidence_refs:
+        block = manifest.get_block(ref.block_id)
+        if block is None:
+            return False, f"evidence block '{ref.block_id}' not found in manifest"
+        if block.source_role not in {"diff", "source_excerpt", "ast_excerpt"}:
+            return False, f"evidence block '{ref.block_id}' has invalid role '{block.source_role}'"
+        if not manifest.is_range_shown(ref.block_id, ref.start_line, ref.end_line):
+            return (
+                False,
+                f"lines {ref.start_line}-{ref.end_line} not shown in block '{ref.block_id}'",
+            )
+
+    if finding.rule_name == ".review/rules.md":
+        has_rules = any(b.source_kind == "repository_rules" for b in manifest.blocks)
+        if not has_rules:
+            return False, "rule_name is '.review/rules.md' but no repository_rules in manifest"
+    elif finding.rule_name == "AGENTS.md":
+        has_agents = any(b.source_kind == "project_conventions_document" for b in manifest.blocks)
+        if not has_agents:
+            return (
+                False,
+                "rule_name is 'AGENTS.md' but no project_conventions_document in manifest",
+            )
+
+    return True, None
+
+
 class InvalidReviewOutput(ValueError):
     """A provider answer did not satisfy the immutable ReviewOutput contract."""
 
@@ -104,11 +228,33 @@ class InvalidReviewOutput(ValueError):
 def parse_review_output(raw_output: Mapping[str, object] | str | bytes) -> ReviewOutput:
     """Parse provider JSON without letting malformed output reach persistence."""
     try:
-        if isinstance(raw_output, (str, bytes)):
-            return ReviewOutput.model_validate_json(raw_output)
-        return ReviewOutput.model_validate(raw_output)
+        data: object = (
+            json.loads(raw_output) if isinstance(raw_output, (str, bytes)) else dict(raw_output)
+        )
+        if isinstance(data, dict) and isinstance(data.get("findings"), list):
+            cleaned = []
+            has_v2 = False
+            for item in data["findings"]:
+                if isinstance(item, dict) and "evidence_refs" in item:
+                    has_v2 = True
+                    cleaned.append({k: v for k, v in item.items() if k != "evidence_refs"})
+                else:
+                    cleaned.append(item)
+            if has_v2:
+                data = {**data, "findings": cleaned}
+        return ReviewOutput.model_validate(data)
     except (ValidationError, ValueError, json.JSONDecodeError) as exc:
         raise InvalidReviewOutput("invalid review output") from exc
+
+
+def parse_review_output_v2(raw_output: Mapping[str, object] | str | bytes) -> ReviewOutputV2:
+    """Parse provider JSON against the v2 ReviewOutput schema with evidence_refs."""
+    try:
+        if isinstance(raw_output, (str, bytes)):
+            return ReviewOutputV2.model_validate_json(raw_output)
+        return ReviewOutputV2.model_validate(raw_output)
+    except (ValidationError, ValueError, json.JSONDecodeError) as exc:
+        raise InvalidReviewOutput("invalid review output v2") from exc
 
 
 @dataclass(frozen=True)

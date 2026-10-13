@@ -12,12 +12,28 @@ from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from enum import StrEnum
+from hashlib import sha256
 from typing import Literal
 from uuid import UUID
 
 POLICY_SNAPSHOT_SCHEMA_VERSION = 1
 RULES_DOCUMENT_PATH = ".review/rules.md"
 AGENTS_DOCUMENT_PATH = "AGENTS.md"
+
+_EMPTY_SHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+
+type StageName = Literal["conventions", "review", "verifier", "repair", "fallback"]
+type SourceRole = Literal[
+    "policy_document",
+    "service_defaults",
+    "conventions",
+    "pr_metadata",
+    "diff",
+    "source_excerpt",
+    "ast_excerpt",
+    "candidate",
+    "previous_output",
+]
 
 
 class DocumentPresence(StrEnum):
@@ -55,6 +71,62 @@ class PolicyDocument:
             raise ValueError("a missing policy document carries no content")
         if self.presence is DocumentPresence.PRESENT and any(item is None for item in content):
             raise ValueError("a present policy document carries its full content")
+
+    @property
+    def is_present(self) -> bool:
+        return self.presence is DocumentPresence.PRESENT
+
+    @property
+    def is_missing(self) -> bool:
+        return self.presence is DocumentPresence.MISSING
+
+
+def make_policy_document_present(
+    path: str,
+    text: str,
+    *,
+    blob_oid: str = "d" * 40,
+) -> PolicyDocument:
+    """Create a present PolicyDocument with auto-calculated checksums and counts."""
+    digest = sha256(text.encode("utf-8")).hexdigest()
+    return PolicyDocument(
+        path=path,
+        presence=DocumentPresence.PRESENT,
+        blob_oid=blob_oid,
+        raw_sha256=digest,
+        text_sha256=digest,
+        text=text,
+        byte_count=len(text.encode("utf-8")),
+        line_count=len(text.splitlines()),
+    )
+
+
+def make_policy_document_missing(path: str) -> PolicyDocument:
+    """Create a missing PolicyDocument with all content fields None."""
+    return PolicyDocument(
+        path=path,
+        presence=DocumentPresence.MISSING,
+        blob_oid=None,
+        raw_sha256=None,
+        text_sha256=None,
+        text=None,
+        byte_count=None,
+        line_count=None,
+    )
+
+
+def make_policy_document_empty(path: str, *, blob_oid: str = "f" * 40) -> PolicyDocument:
+    """Create an empty PolicyDocument (present with empty content)."""
+    return PolicyDocument(
+        path=path,
+        presence=DocumentPresence.PRESENT,
+        blob_oid=blob_oid,
+        raw_sha256=_EMPTY_SHA256,
+        text_sha256=_EMPTY_SHA256,
+        text="",
+        byte_count=0,
+        line_count=0,
+    )
 
 
 @dataclass(frozen=True)
@@ -187,3 +259,66 @@ class PolicySnapshot:
     def __post_init__(self) -> None:
         if self.rules.path != RULES_DOCUMENT_PATH or self.agents.path != AGENTS_DOCUMENT_PATH:
             raise ValueError("policy snapshot documents are bound to their fixed paths")
+
+    @property
+    def has_custom_rules(self) -> bool:
+        return self.rules.presence is DocumentPresence.PRESENT and bool(
+            (self.rules.text or "").strip()
+        )
+
+    @property
+    def has_agents_doc(self) -> bool:
+        return self.agents.presence is DocumentPresence.PRESENT and bool(
+            (self.agents.text or "").strip()
+        )
+
+    @property
+    def is_ready_for_llm(self) -> bool:
+        return bool(
+            self.policy_digest
+            and self.prompt_bindings.review_system_checksum
+            and self.prompt_bindings.conventions_checksum
+            and self.prompt_bindings.verifier_checksum
+        )
+
+
+@dataclass(frozen=True)
+class ManifestBlock:
+    """One rendered block in a call manifest with exact coordinate boundaries."""
+
+    block_id: str
+    source_role: SourceRole
+    source_kind: str
+    path: str | None = None
+    revision: str | None = None
+    content_sha256: str | None = None
+    start_line: int | None = None
+    end_line: int | None = None
+    shown_line_count: int = 0
+
+
+@dataclass(frozen=True)
+class CallManifest:
+    """The exact record of blocks and coordinate ranges presented to an LLM call.
+
+    Used by attribution and verification passes to validate evidence and requirement references.
+    """
+
+    call_id: UUID
+    run_id: UUID
+    stage: StageName
+    blocks: tuple[ManifestBlock, ...]
+
+    def get_block(self, block_id: str) -> ManifestBlock | None:
+        for block in self.blocks:
+            if block.block_id == block_id:
+                return block
+        return None
+
+    def is_range_shown(self, block_id: str, start_line: int, end_line: int) -> bool:
+        block = self.get_block(block_id)
+        if block is None:
+            return False
+        if block.start_line is None or block.end_line is None:
+            return False
+        return block.start_line <= start_line and end_line <= block.end_line
