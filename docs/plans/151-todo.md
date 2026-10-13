@@ -1,12 +1,16 @@
 # Task list: PR #132 follow-up (#151)
 
 Approved by the user on 2026-10-13; see [151-plan.md](151-plan.md). Current branch
-`fix/151-pr132-followup` addresses P3-1/2/3/4/6. P3-5 remains a separate future
-worktree and PR; this branch must not mark the whole issue complete.
+`fix/151-pr132-followup` addresses P3-1/2/3/4/6 in PR #152. P3-5 is delivered
+separately in [PR #153](https://github.com/larchanka-training/dmc-268-api-t6/pull/153),
+based independently on the same main. All technical implementation/publication
+tasks below are complete; issue acceptance remains external.
 Tasks 1-6 are verified; [151-verification.md](151-verification.md) records **3427
 passed, zero skips in 1118.15s** and both independent reviews. The first PR is
 published and attached as [#152](https://github.com/larchanka-training/dmc-268-api-t6/pull/152);
-it is initially Draft while remote CI runs.
+it was initially Draft, then marked Ready after all nine CI jobs passed on
+`604423349f45bdc977cd770bd0414f22c9a97f41`. The latest metadata-head checks are
+tracked separately under the external requirements below.
 
 ## Task 1: Establish baseline and ownership coordination
 
@@ -149,10 +153,6 @@ present-tense claims; run required gates.
   [PR #152](https://github.com/larchanka-training/dmc-268-api-t6/pull/152) with
   What / Why / How to verify / Refs and explicit P3-5 follow-up scope.
 - [x] Refresh main before publication: base remains `c1d8f59`; no rebase is needed.
-- [ ] Remote required CI passes on the latest published head; mark Ready afterward,
-  without reviewer assignment as explicitly requested by the user.
-- [ ] Current-head approving human review and resolved threads remain required
-  before merge; board stays In Progress until both independent PRs are ready.
 
 **Verification:** Record exact tested head and relevant infrastructure/skips,
 mutation proof, gates, reviews, and PR URL. No closing keywords or issue Development
@@ -161,7 +161,7 @@ link; tech lead owns issue closure.
 **Dependencies:** Tasks 2-6. **Files likely touched:** this checklist, verification
 proof if added. **Estimated scope:** Small.
 
-## Separate future Task F1: Create origin-lock refactor worktree (P3-5)
+## Separate Task F1: Create origin-lock refactor worktree (P3-5)
 
 **Description:** After the first PR, create a separate managed worktree from refreshed
 main with `chore/151-origin-locks`, and save its detailed implementation plan.
@@ -171,44 +171,63 @@ Publish independently without waiting for the first PR merge or importing its di
 
 **Acceptance criteria:**
 
-- [ ] Refactor has its own worktree/branch/PR; no P3-5 implementation enters this branch.
-- [ ] Real PostgreSQL three-file baseline passes without skips before the refactor.
-- [ ] Caller inventory and SQL/guard/transaction invariants in 151-plan.md are retained.
+- [x] Refactor has its own worktree/branch/PR; no P3-5 implementation enters this branch.
+- [x] Real PostgreSQL three-file baseline passes without skips before the refactor.
+- [x] Caller inventory and SQL/guard/transaction invariants in 151-plan.md are retained.
 
-**Verification:** Inspect separate worktree's baseline and PR diff.
+**Verification:** Independent [PR #153](https://github.com/larchanka-training/dmc-268-api-t6/pull/153)
+records a baseline of **140 passed, zero skips in 180.94s**, branch
+`chore/151-origin-locks`, base `c1d8f59`, and unchanged caller invariants.
 
 **Dependencies:** Task 7 (published; merge is not a prerequisite). **Files likely touched:** future
 plan/todo documents. **Estimated scope:** Small.
 
-## Separate future Task F2: Consolidate origin lock ordering
+## Separate Task F2: Consolidate origin lock ordering
 
 **Description:** Extract shared installation FOR SHARE -> Repository FOR SHARE ->
 Run FOR UPDATE sequencing; retain caller-specific selects and guards.
 
 **Acceptance criteria:**
 
-- [ ] Policy documents/snapshot, diff storage, five lifecycle paths and the trace-store
+- [x] Policy documents/snapshot, diff storage, five lifecycle paths and the trace-store
   context writer use a shared
   typed helper without changing origin/running/revision checks or row refresh.
-- [ ] Transaction boundaries, exception codes, repository flush-only behavior and
+- [x] Transaction boundaries, exception codes, repository flush-only behavior and
   network-outside-transaction invariant remain unchanged.
-- [ ] Real PostgreSQL retirement and competing rebind/lock-wait regressions listed
+- [x] Real PostgreSQL retirement and competing rebind/lock-wait regressions listed
   in the plan pass, including row refresh after blocking and NOWAIT probes.
 
-**Verification:** Run the baseline plus diff/context/publication/origin/reinstall
-PostgreSQL suites in this second worktree, and rerun the composition regression
-in the first worktree if still unmerged; all four gates and fresh Standards/Spec
-review must pass with exact heads recorded.
+**Verification:** PR #153 records **256 focused passed, zero skips in 372.57s**,
+**3425 full-suite passed, zero skips in 753.16s**, all static gates and fresh
+Standards/Spec reviews with zero findings. A Run-first mutation caused five
+meaningful NOWAIT failures; exact restored source passes. External first-PR
+composition control passes **2 tests, zero skips in 49.91s** while all 196 loaded
+app files originate in the refactor worktree. No first-PR test/source is copied
+into the refactor branch.
 
 **Dependencies:** F1. **Files likely touched:** new `run_origin_locks.py`,
 `policy_snapshot_unit_of_work.py`, `run_lifecycle_store.py`, `run_repository.py`
 in reviews infrastructure; modify at most one focused regression file if needed.
 **Estimated scope:** Medium (four primary files).
 
-## Separate future Task F3: Publish refactor PR and finish issue evidence
+## Separate Task F3: Publish refactor PR and finish issue evidence
 
-- [ ] Publisher opens and attaches a separate `refactor(reviews)` PR referencing #151.
-- [ ] Current-head approval, resolved threads and required CI satisfied before merge.
-- [ ] Issue/board evidence lists both PRs and all six P3 outcomes; tech lead closes #151.
+- [x] Publisher opens and attaches independent `refactor(reviews)`
+  [PR #153](https://github.com/larchanka-training/dmc-268-api-t6/pull/153), referencing #151.
+- [x] This combined technical ledger cross-references both PRs and all six P3 outcomes;
+  external review, CI, merge, board transition and issue acceptance remain below.
 
 **Dependencies:** F2. **Verification:** Inspect both PR diffs/evidence and issue AC.
+
+## External Before merge and issue acceptance
+
+These items are intentionally separate from completed implementation/publication.
+
+- [ ] Required CI passes on the latest published heads of both PRs; coordinator
+  verifies Ready status without assigning reviewers, as requested by the user.
+- [ ] Board moves to On Review after both PRs are ready.
+- [ ] Each PR is refreshed/rebased on current main before merge.
+- [ ] Each PR has an approving human review on its current head.
+- [ ] Reviewer-owned review threads are all resolved on each PR.
+- [ ] Both PRs are merged under repository rules.
+- [ ] Tech lead checks issue AC/DoD evidence and closes #151.

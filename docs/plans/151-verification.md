@@ -4,7 +4,8 @@ Implementation checkpoint: 2026-10-13, branch `fix/151-pr132-followup`, based so
 on refreshed `main` at `c1d8f59d9ff3f332a3595857dbe612115ad559e8`.
 The verified implementation/test source is published in commit
 `8699e7eb59379fd3ee594267c3be1590adf68180`. This checkpoint covers Tasks 1-6
-(P3-1/2/3/4/6); the P3-5 refactor remains a separate PR from refreshed main.
+(P3-1/2/3/4/6); P3-5 is delivered separately in
+[PR #153](https://github.com/larchanka-training/dmc-268-api-t6/pull/153) from refreshed main.
 A subsequent publication-metadata commit changes only these plan/proof/checklist
 documents; it does not change the source exercised by the recorded tests.
 
@@ -126,10 +127,10 @@ Coordinator recorded fresh independent Standards and Spec reviews of Tasks 1-2,
 then of the complete first-PR working-tree diff (P3-1/2/3/4/6) against pinned base
 `c1d8f59d9ff3f332a3595857dbe612115ad559e8`: **zero actionable findings on each axis**.
 The migration backfill wording was clarified before final review. Tasks 1-6 are
-complete; commit/push/PR publication is recorded below. P3-5 stays in its own
-future worktree/PR, based solely on refreshed main without importing this first PR
-diff. No claim is made that all issue AC are complete or that human merge approval
-has been obtained.
+complete; commit/push/PR publication is recorded below. P3-5 is delivered in its
+own worktree/PR #153, based solely on refreshed main without importing this first
+PR diff. Both technical scopes are delivered; this does not establish human merge
+approval or tech-lead issue acceptance.
 
 ## Publication
 
@@ -148,3 +149,33 @@ monitor the latest head and mark Ready after required CI passes. Current-head
 human approval and resolved review threads remain external merge prerequisites.
 The issue stays open and its board status remains In Progress until both
 independent PRs are ready. No issue-closing keyword or Development link was added.
+
+## Combined technical delivery checkpoint
+
+The coordinator verified all nine CI jobs successful on first PR #152 head
+`604423349f45bdc977cd770bd0414f22c9a97f41` and marked it Ready with no review
+requests. Conditional push/deploy/promote jobs were appropriately skipped. This
+ledger update is metadata only; CI must be checked again on the latest head.
+
+P3-5 is published and attached as independent
+[PR #153](https://github.com/larchanka-training/dmc-268-api-t6/pull/153), branch
+`chore/151-origin-locks`, with verified source commit
+`84641aaba9f03dd5fed074521736a3c0c812f706`. Both branches start from main
+`c1d8f59d9ff3f332a3595857dbe612115ad559e8`; the refactor contains no first-PR diff.
+Its separate proof records:
+
+- Baseline: **140 passed, zero skips in 180.94s**.
+- Restored focused acceptance: **256 passed, zero skips in 372.57s**.
+- Full suite: **3425 passed, zero skips in 753.16s**; two existing deprecation warnings.
+- Ruff check passed; format passed on 434 files; mypy passed on 431 source files.
+- Run-first lock-order mutation: **five meaningful NOWAIT failures in 4.91s**;
+  exact helper restored before acceptance.
+- External first-PR composition test: **2 passed, zero skips in 49.91s**, with all
+  **196** loaded app files verified from the second worktree.
+- Fresh Standards/Spec reviews: **zero findings**; zero remaining fixture schemas.
+
+All six P3 technical outcomes and both publications are complete. Latest-head
+remote CI and readiness/board verification remain with the coordinator; current-
+head human approval, resolved threads, merge and tech-lead issue closure are still
+external requirements. No full test repeat is needed for these three metadata
+documents because the exercised implementation/test source is unchanged.

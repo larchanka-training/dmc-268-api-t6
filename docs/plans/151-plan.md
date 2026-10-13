@@ -3,10 +3,13 @@
 ## Status and baseline
 
 Approved by the user on 2026-10-13 under the agent-loop skill. Tasks 1-6 are
-implemented, verified and independently reviewed; the first PR is published as
-[#152](https://github.com/larchanka-training/dmc-268-api-t6/pull/152), initially Draft
-while remote CI runs. Both branches must start solely from refreshed main; the
-later refactor must not import this branch.
+implemented, verified and independently reviewed in
+[#152](https://github.com/larchanka-training/dmc-268-api-t6/pull/152). The independent
+P3-5 refactor is also implemented, verified, reviewed and published in
+[#153](https://github.com/larchanka-training/dmc-268-api-t6/pull/153). All six P3
+items are technically delivered across these two PRs. Both branches started solely
+from refreshed main; the refactor did not import this branch. Latest metadata-head
+CI, human approval, merge and tech-lead acceptance remain external requirements.
 Issue: https://github.com/larchanka-training/dmc-268-api-t6/issues/151
 Baseline: refreshed `origin/main`, `c1d8f59d9ff3f332a3595857dbe612115ad559e8`.
 Current worktree: `/Users/qx/.codex/worktrees/151-review-quality/dmc-268-api-t6`.
@@ -16,8 +19,9 @@ refactor plan records details without another approval gate unless scope changes
 
 The issue covers six nonblocking P3 findings from final review #132, not the rest
 of backlog #106. Production checkpoint wiring is already correct. The first PR
-adds its missing regression and fixes documentation (P3-1/2/3/4/6). P3-5 is a
-separate future refactor PR from a separate worktree; do not put it on this branch.
+adds its missing regression and fixes documentation (P3-1/2/3/4/6). P3-5 is
+delivered in the separate refactor [PR #153](https://github.com/larchanka-training/dmc-268-api-t6/pull/153)
+from its own worktree; its implementation is not on this branch.
 No migration, dependency, public contract, queue, or deployment change is planned.
 
 ## Evidence and design decisions
@@ -131,7 +135,11 @@ Each notice names checkpoint `d88725771ef89a94756ea3a06befd37b44b425d4` on base
 checkpoint, not of current main or the #151 branch. Rewrite present-tense claims
 such as current-base/current-head prerequisites where they suggest current status.
 
-## Separate future P3-5 worktree and PR
+## Separate P3-5 worktree and PR (delivered)
+
+The approved execution plan below was completed in independent PR #153, with
+source commit `84641aaba9f03dd5fed074521736a3c0c812f706`. Its detailed plan/checklist/
+verification are in that PR under `docs/plans/151-origin-locks-*.md`.
 
 After the first PR is reviewed/published, create a separate managed worktree from
 refreshed main with branch `chore/151-origin-locks`. Record its own plan/todo and
@@ -226,7 +234,8 @@ Configure dedicated RabbitMQ for any full-suite broker integrations (they reset
 review topology); never point them at another session's broker. Run with PostgreSQL
 configured and report any unavailable broker or other intentional skips explicitly.
 Focused PostgreSQL acceptance regressions must never be counted as passing if skipped.
-Do not claim all acceptance criteria met until the separate P3-5 PR is published.
+Both independent PRs are now published; issue acceptance remains the tech lead's
+responsibility after review and merge.
 
 ## Ownership, assumptions, and blockers
 
