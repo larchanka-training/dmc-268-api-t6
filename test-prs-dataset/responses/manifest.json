@@ -305,10 +305,10 @@
     "engine": "fast",
     "fallback_model_id": "mistral-small-3.2-24b",
     "nonpublishable_case_ids": [],
-    "recorded_at": "2026-10-07T10:26:17.148179Z"
+    "recorded_at": "2026-10-13T21:06:56.682693Z"
   },
   "schema_version": 1,
-  "static_digest": "sha256-v1:1613fe1f343f28e5134335c1ab95af0b0aff53035f364c4666251d08e35b2024",
+  "static_digest": "sha256-v1:9b28cf4c284ac07a03a5a35a62e3c2e48dc38264076a55d1a3d31724bacc2c17",
   "static_inputs": [
     "app/bootstrap/llm_gateway.py",
     "app/common/application/languages.py",
@@ -317,11 +317,13 @@
     "app/modules/reviews/application/prompt_builder.py",
     "app/modules/reviews/application/review_output.py",
     "app/modules/reviews/application/run_failures.py",
+    "app/modules/reviews/infrastructure/github_run_source.py",
     "app/modules/reviews/infrastructure/llm/answers.py",
     "app/modules/reviews/infrastructure/llm/gateway.py",
     "app/modules/reviews/infrastructure/llm/models.py",
     "app/modules/reviews/infrastructure/llm/settings.py",
     "app/modules/reviews/infrastructure/llm/transport.py",
+    "review/eval/pr-commit-messages.json",
     "review/prompts/review.system.v2.md",
     "review/rules/default-backend.v1.json",
     "review/rules/default-frontend.v1.json",

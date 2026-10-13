@@ -142,12 +142,12 @@ The pre-capture full-service gate and remaining readiness checkboxes stay pendin
 
 - [x] Complete offline gates green; current old-baseline drift explicitly expected until replacement.
 - [x] Recheck/rebase main and open-PR ownership; all source/prompt/provenance changes final.
-- [ ] Verify exact branch SHA, model, org-secret availability by workflow preflight, and human paid-run/raw-export authorization.
+- [x] Verify exact branch SHA, model, org-secret availability by workflow preflight, and human paid-run/raw-export authorization.
 
 Pre-capture source readiness is verified by the Task 5 evidence below. The user
-already authorized one complete fast capture with raw export; the selected primary
-model is `mistral-small-4`. The final dispatch SHA and workflow secret preflight
-remain publisher actions, so their combined checkbox is intentionally pending.
+authorized one complete fast capture with raw export and primary `mistral-small-4`.
+The exact dispatched source SHA and successful workflow secret preflight/provider
+execution are recorded in Task 6; the readiness prerequisite is now satisfied.
 
 ## Task 5: Scope documentation
 
@@ -187,12 +187,84 @@ authorized paid capture; secret availability and actual spend are not claimed he
 `model=mistral-small-4`, `export_raw_responses=true`, using the team org secret.
 
 **Acceptance criteria:**
-- [ ] One approved complete 24-case fast run; record exact run ID/attempt/SHA/effective models and exported configured pricing/policy limits; explicitly state actual spend and billed-token totals are unavailable from these artifacts.
-- [ ] `baseline_publishable=true`; safe artifact confirms every raw file hash/size and exact active-case mapping; no SEC-05.
-- [ ] Copy all 24 answers and manifest byte-for-byte; no mixed capture, repair selection, or hand-edited digest.
+- [x] One approved complete 24-case fast run; record exact run ID/attempt/SHA/effective models and exported configured pricing/policy limits; explicitly state actual spend and billed-token totals are unavailable from these artifacts.
+- [x] `baseline_publishable=true`; safe artifact confirms every raw file hash/size and exact active-case mapping; no SEC-05.
+- [x] Copy all 24 answers and manifest byte-for-byte; no mixed capture, repair selection, or hand-edited digest.
 
 **Verification:** Download raw and safe artifacts into separate directories; verify
 regular files, completeness and matching SHA-256/size before replacing responses.
+**Observed evidence (Task 6):** The single approved raw-export workflow succeeded:
+[run 38468081001, attempt 1](https://github.com/larchanka-training/dmc-268-api-t6/actions/runs/38468081001),
+source SHA `80ede3cd274d745616b8a24082ff7d1d00f5b736`, recorded at
+`2026-10-13T21:06:56.682693Z`. Its successful secret preflight/provider execution
+satisfies the pending org-secret prerequisite without copying or exposing the key.
+The exported engine is `fast`, primary `mistral-small-4`, fallback
+`mistral-small-3.2-24b`; all 24 first calls are `answer` / `primary` using
+`mistral-small-4` with serving-provider label `mistral` and accepted gateway status.
+Every paid-metadata error is false; `baseline_publishable=true` and the
+nonpublishable-case list is empty.
+
+Independent verification found exactly the active 24 case IDs, no `SEC-05`,
+canonical response mapping, and only regular files with no symlinks in both exports.
+All 24 raw hashes and byte counts match their safe per-case metadata; the raw/safe
+manifests are byte-equal. All 25 response-directory files were replaced as one set,
+byte-for-byte from this capture, then rechecked against the downloaded raw bytes.
+No answer normalization, repair selection, mixed capture or hand-edited digest was
+used. The 24 raw answers total 42,174 bytes. Previous responses remain backed up
+outside the checkout at `/tmp/82-task6-previous-responses`.
+
+Exported configured prices in USD per million tokens (input/cache-read/output):
+primary `0.56125 / 0.56125 / 2.35725`; fallback
+`0.2245 / 0.2245 / 0.449`. Both use input budget 52,000, output cap 8,000,
+`json_schema` structured output and 3 characters/token; context windows are
+262,144 primary and 128,000 fallback. Exported policy: nominal per-case cost limit
+USD 0.50 (USD 12 across 24 cases), input-token limit 60,000, maximum 4 calls/attempt,
+90s call timeout, timeout retry delays `[2]`, unavailable delays `[2, 8]`, rate-limit
+default delay 2s, maximum Retry-After 30s and jitter 1s. These are configured pricing
+and policy values; actual spend, billed-token totals and remaining balance are not
+exported and are unavailable from these artifacts.
+
+Final corpus validation passed 24/24. Two offline JSON reports are byte-identical
+with `warnings=[]`; redacting only validator diagnostics produces byte-identical
+JSON to the live safe report. Independently confirmed first-answer metrics are
+7/24 valid, TP 2 / FP 2 / FN 17, critical recall 2/5 and verdict agreement 4/24.
+Existing metric documentation remains unchanged until Task 7. Focused replay,
+recorded-baseline CI-contract and provenance tests: 100 passed in 8.90s, no skips.
+Ruff lint, format check (435 files) and mypy (432 source files) pass. The Task 7
+final full dedicated-stack gate and independent artifact review remain pending.
+
+Verification hashes (SHA-256):
+- Raw and safe manifest: `00ed7404809d86fea4beb7ba1b6cf52800591740ea0f38ea8cb54b7553a4992e`.
+- Live safe/redacted offline report: `a875e1489fe7a47d35222f9b9feca95b757a19b792c70ba0b44d2a59d0425bad`.
+- Each complete offline report: `918123f7a490c479410834b664f9834d694c66e123c3b4b6688de35801b9ceae`.
+
+| Case | Raw bytes | Raw SHA-256, matched to safe metadata |
+| --- | ---: | --- |
+| CLEAN-01 | 1581 | `460edbc600f88736427a445c15b3f2bf438c2ab08a437d19a88c32cc0d3ba82a` |
+| CLEAN-02 | 261 | `f9791ceaecb29792c4b649ac8968c7a9aa87fb5d577e24f289b18058db9827a8` |
+| CLEAN-03 | 6455 | `161c03fe0caf14600215ba7cf3ecc1aa31a5bc4441c655869f034747d4b2d72f` |
+| CLEAN-04 | 1077 | `39509236f596345c4f36fab40466f7712a710ca30e6f0916dfd3dcad0c4dc5cb` |
+| CLEAN-05 | 227 | `33409e200e9bda8b4659c337de0c9ecea1d47ee7b996b3a65d65f919b6cae99a` |
+| LOG-01 | 1676 | `02fecad5b64b93984a5382bfb661f857649a0df9ddb738ec56b7c60849bb1ad4` |
+| LOG-02 | 901 | `c3ff9ab7d450b9bf52305cadc8a70f42f9b04a6281f3ed9105c94a96a777fda8` |
+| LOG-03 | 3683 | `0755ecac456b5b7ab57de3aef0e903bbf003d410143ede8cf98a75c280a6cc12` |
+| LOG-04 | 1061 | `a7982d9c184d92ef3087622d03de4c155dc9ed82f6f72800e9a650f3c70bc792` |
+| LOG-05 | 1036 | `563e99af6d1bb959e8b7566aecb2747c0c608f3c94e3c6a213fb82c847391b37` |
+| RES-01 | 1774 | `ef14ac40ca69731fc4f326ded308ae8fd1763290258c97cf5d4b4cebabe22a92` |
+| RES-02 | 1026 | `1680bd8979dfb89d64cd149e433ee6931d709008090ae3d17ec84b464ffcc05e` |
+| RES-03 | 2875 | `b2f0ebbf8a307d7b4e36b5090eb5596b96cc2bedb963bd38e42cb18a04c69b2b` |
+| RES-04 | 1029 | `42376b653fed2089c25eb4b920bbfcec5b33e37e9f7ec8c37503bf2325678759` |
+| RES-05 | 876 | `645a6f4ab02a831eaf592da88900ee93d226398563b3c6669b423bf5db177212` |
+| SEC-01 | 1427 | `4467075e4f8727e0fd1eea2263fac920e4dc4a1052578957aa4198b0fdcb9756` |
+| SEC-02 | 3141 | `c37b1ec757a457b248733bc5f15c820463897aca3fc468851f28e27323950009` |
+| SEC-03 | 247 | `43aeb074fbd71b20d6673e82732e821aa6020fd7d676e9a2358850827d1c2065` |
+| SEC-04 | 1542 | `d5a7124f46138fc862913168d4891647c877e628a6d5a90a2a9ebda46b515375` |
+| SYN-01 | 267 | `c765d7ac52650157f4d05c7fa279ef23f0f6422bb28dbef1de2d38220f9417e4` |
+| SYN-02 | 2143 | `c5c66b382b3aed406c41bc42e3b3c5231c33e69ee5f4857c4024b3cd22597b18` |
+| SYN-03 | 1820 | `45efc1510310173ac5011f3b1dd0fc3f1c731e54fb4bd0ce07c0af7495bf88eb` |
+| SYN-04 | 5033 | `65b8c6cb5f762eaad344e5c0f890b3f4a8e2995f230452985870baaa61c8fe76` |
+| SYN-05 | 1016 | `32599342d7ea34be88f330af59c6dd10e81801ff641edbc4ea83f72276764406` |
+
 **Dependencies:** Task 5; explicit paid-run/export approval; external secret/balance/dispatch access.
 **Files likely touched:** All 24 `test-prs-dataset/responses/<id>.json` plus
 `manifest.json` as one atomic artifact publication (deliberate exception to the
