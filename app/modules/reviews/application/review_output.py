@@ -126,6 +126,14 @@ class PublishedFinding:
     rule_name: str | None
 
 
+def comment_body(title: str, body: str, suggestion: str | None) -> str:
+    """Inline comment text shared by GitHub reviews and GitLab discussions."""
+    text = f"**{title}**\n\n{body}"
+    if suggestion:
+        text += f"\n\n```suggestion\n{suggestion}\n```"
+    return text
+
+
 @dataclass(frozen=True)
 class ReviewPublication:
     """The durable publication payload reconstructed from one immutable run."""

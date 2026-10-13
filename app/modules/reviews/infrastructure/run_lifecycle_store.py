@@ -35,9 +35,8 @@ from app.modules.reviews.infrastructure.models import (
     ContextPayload,
     Finding,
     Run,
-    RunAction,
 )
-from app.modules.reviews.infrastructure.run_action_payloads import place_response
+from app.modules.reviews.infrastructure.run_action_records import insert_run_action
 from app.modules.reviews.infrastructure.run_notifications import notify_run_state
 from app.modules.reviews.infrastructure.run_repository import _to_published_finding_row
 from app.modules.workspaces.infrastructure.models import Workspace
@@ -320,6 +319,8 @@ class SqlAlchemyRunLifecycleStore:
                 _to_published_finding_row(item) for item in findings if item.inline_comment
             ),
             findings_hash=findings_hash(_hashed(item) for item in findings),
+            provider=installation.provider,
+            project_id=repository.external_id,
         )
 
     async def complete_publication(
@@ -449,26 +450,15 @@ class SqlAlchemyRunTraceStore:
         started_at: datetime,
         duration_ms: int,
     ) -> None:
-        # The Run row lock serializes the next action index.
-        await self._session.execute(select(Run.id).where(Run.id == run_id).with_for_update())
-        index = await self._session.scalar(
-            select(func.coalesce(func.max(RunAction.index), -1)).where(RunAction.run_id == run_id)
+        await insert_run_action(
+            self._session,
+            run_id=run_id,
+            tool=tool,
+            request=request,
+            response=response,
+            started_at=started_at,
+            duration_ms=duration_ms,
         )
-        assert index is not None
-        stored, response_ref = await place_response(self._session, run_id, response)
-        self._session.add(
-            RunAction(
-                run_id=run_id,
-                index=index + 1,
-                tool=tool,
-                request=request,
-                response=stored,
-                response_ref=response_ref,
-                started_at=started_at,
-                duration_ms=duration_ms,
-            )
-        )
-        await self._session.flush()
 
     async def save_context_payload(self, run_id: UUID, summary: dict[str, Any]) -> None:
         await self._session.execute(

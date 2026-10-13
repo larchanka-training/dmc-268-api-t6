@@ -7,7 +7,7 @@ from typing import Protocol
 from uuid import UUID
 
 from app.modules.reviews.application.run_failures import MAX_ATTEMPTS
-from app.modules.reviews.application.verdict import SEVERITIES
+from app.modules.reviews.application.verdict import severity_count_phrase
 
 # Author-facing texts of the §6 error_code catalog.
 _ERROR_TEXTS = {
@@ -87,7 +87,7 @@ def check_run_view(report: CheckRunReport) -> CheckRunView:
                 "AI-ревью: только сводка",
                 f"PR слишком большой: только сводка{link}",
             )
-        counts = ", ".join(f"{name}: {report.severity_counts.get(name, 0)}" for name in SEVERITIES)
+        counts = severity_count_phrase(report.severity_counts)
         return CheckRunView(
             "completed",
             "neutral",

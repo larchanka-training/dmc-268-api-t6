@@ -363,9 +363,11 @@ paths:
       tags: [stream]
       summary: Subscribe to run status changes
       description: >-
-        One stream per browser tab, read with `fetch` so it carries the Bearer header. Each
-        event is `event: run.updated` with an `id:` line and a `data:` line holding a JSON
-        `RunUpdatedEvent`. The client refetches the run it shows after an event.
+        One stream per browser tab, read with `fetch` so it carries the Bearer header.
+        `run.updated` is the status event: `event: run.updated` with an `id:` line and a
+        `data:` line holding a JSON `RunUpdatedEvent`. The client refetches the run it shows
+        after a status event. `run.step` is not replayed and has no `id:` line: `event:
+        run.step` and a `data:` line holding a JSON `RunStepEvent`.
 
 
         **Keep-alive.** After 15 seconds without an event the server sends a comment frame,
@@ -404,8 +406,8 @@ paths:
       responses:
         "200":
           description: >-
-            A Server-Sent Events stream of `run.updated` events and `: keepalive` comment
-            frames; it ends when the access token expires.
+            A Server-Sent Events stream of `run.updated` status events, `run.step` events,
+            and `: keepalive` comment frames; it ends when the access token expires.
           content:
             text/event-stream:
               schema:
@@ -416,6 +418,8 @@ paths:
               x-events:
                 run.updated:
                   $ref: "#/components/schemas/RunUpdatedEvent"
+                run.step:
+                  $ref: "#/components/schemas/RunStepEvent"
         "401":
           $ref: "#/components/responses/Unauthorized"
         "503":
@@ -1339,6 +1343,32 @@ components:
           format: uuid
         status:
           $ref: "#/components/schemas/RunStatus"
+      additionalProperties: false
+    RunStepEvent:
+      type: object
+      description: >-
+        Data of a `run.step` SSE event. A step frame has `event:` and `data:` and no `id:`
+        line, and it is not replayed on reconnect.
+      required: [runId, tool, index, ok, startedAt, durationMs]
+      properties:
+        runId:
+          type: string
+          format: uuid
+        tool:
+          type: string
+          description: "`run_actions.tool`; not an enum."
+        index:
+          type: integer
+          minimum: 0
+        ok:
+          type: boolean
+        startedAt:
+          type: string
+          format: date-time
+          description: UTC RFC 3339 with a `Z` suffix.
+        durationMs:
+          type: integer
+          minimum: 0
       additionalProperties: false
     Repository:
       type: object
