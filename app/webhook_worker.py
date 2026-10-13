@@ -14,9 +14,10 @@ from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import NoReturn
+from typing import NoReturn, cast
 
 import httpx
+from redis.asyncio import Redis
 
 from app.bootstrap.reviews_api import ReviewsApiResources
 from app.bootstrap.webhook_work_listener import listen_forever
@@ -30,7 +31,10 @@ from app.modules.integrations.webhooks.application.revive_deferred_installation_
 from app.modules.integrations.webhooks.infrastructure.github_installation_tree_provider import (
     GitHubAppInstallationAccessTokenProvider,
     GitHubInstallationAccessTokenProvider,
-    InMemoryInstallationAccessTokenCache,
+)
+from app.modules.integrations.webhooks.infrastructure.redis_installation_token_cache import (
+    RedisLike,
+    installation_token_cache,
 )
 from app.modules.reviews.application.try_enqueue_webhook_run import RunMessagePublisher
 from app.modules.reviews.infrastructure.amqp import LazyAmqpPublisher
@@ -48,6 +52,7 @@ class WorkerConfig:
     github_api_url: str
     rabbitmq_url: str
     heartbeat_file: Path | None = None
+    redis_url: str | None = None
 
     @classmethod
     def from_environment(cls, env: Mapping[str, str]) -> WorkerConfig:
@@ -74,6 +79,7 @@ class WorkerConfig:
             # Run pointers go to the review queue (T1); see docs/WEBHOOK_WORKER.md.
             rabbitmq_url=required("RABBITMQ_URL"),
             heartbeat_file=heartbeat_file(env),
+            redis_url=env.get("REDIS_URL") or None,
         )
 
 
@@ -154,6 +160,9 @@ async def run_forever() -> None:
     resources = ReviewsApiResources.from_database_url(config.database_url)
     # Connects on the first Run; an unpublished Run is replayed by the review worker.
     publisher = LazyAmqpPublisher(config.rabbitmq_url)
+    # Only the cache of installation tokens, shared with the review worker: the pool
+    # connects on first use and without Redis the tokens stay in this process.
+    redis = Redis.from_url(config.redis_url) if config.redis_url is not None else None
     try:
         async with httpx.AsyncClient(
             base_url=config.github_api_url,
@@ -163,7 +172,7 @@ async def run_forever() -> None:
                 client=client,
                 app_id=str(config.app_id),
                 private_key=config.private_key,
-                cache=InMemoryInstallationAccessTokenCache(now=time.time),
+                cache=installation_token_cache(cast(RedisLike | None, redis)),
                 now=time.time,
             )
             receiver = compose_worker(resources, client, tokens, config, publisher)
@@ -178,6 +187,8 @@ async def run_forever() -> None:
                 if config.heartbeat_file is not None:
                     tasks.create_task(beat(config.heartbeat_file))
     finally:
+        if redis is not None:
+            await redis.aclose()
         await publisher.aclose()
         await resources.aclose()
 
