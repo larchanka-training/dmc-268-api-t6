@@ -95,6 +95,11 @@ class GitHubPolicyDocumentSource:
             response.raise_for_status()
         except httpx.HTTPError as exc:
             raise self._classify(exc) from exc
+        except ValueError as exc:
+            # The token answer of GitHub has another shape.
+            raise self._error(
+                PolicyErrorCode.FETCH_TRANSIENT, "GitHub returned an unreadable token"
+            ) from exc
         try:
             tree = _TREE.validate_python(response.json())
         except ValueError as exc:

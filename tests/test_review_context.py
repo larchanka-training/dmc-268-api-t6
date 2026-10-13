@@ -376,6 +376,28 @@ def test_go_mod_counts_toward_the_limit_of_imported_files() -> None:
     assert len([path for path in repository.read if path != "cmd/main.go"]) <= 20
 
 
+def test_changed_file_past_the_ast_limit_is_not_parsed_through_an_import() -> None:
+    # 51 changed files; the first one imports the last, which is past the limit of 50.
+    files = {f"pkg/m{n:02d}.py": f"def f{n}():\n    return {n}\n" for n in range(1, 51)}
+    files["pkg/m00.py"] = "from .m50 import f50\n\n\ndef f0():\n    return f50()\n"
+    repository = Repository(dict(sorted(files.items())))
+    patches = {
+        path: "@@ -1,2 +1,2 @@\n def f{0}():\n-    return 0\n+    return {0}".format(int(path[5:7]))
+        for path in repository.files
+    }
+    patches["pkg/m00.py"] = "@@ -4,2 +4,2 @@\n def f0():\n-    return 0\n+    return f50()"
+    diff_map = _diff_map(
+        *(_vcs_file(repository, path, patches[path], deletions=1) for path in repository.files)
+    )
+    parser = InProcessParser()
+
+    payload = _build(repository, diff_map, parser=parser)
+
+    assert "pkg/m50.py" not in parser.parsed
+    assert len(parser.parsed) == 50
+    assert all(ref.resolution is not ImportResolution.RESOLVED for ref in payload.imports)
+
+
 def test_all_changes_ignored_and_an_empty_diff_are_their_own_outcomes() -> None:
     repository = _service_repository()
     only = _diff_map(_vcs_file(repository, "pkg/service.py", _GREET_PATCH))

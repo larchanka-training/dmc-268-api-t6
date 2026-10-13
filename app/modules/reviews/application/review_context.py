@@ -198,6 +198,8 @@ class _Files:
         self._facts: dict[str, AstFacts | FileUnavailable] = {}
         self.imported: set[str] = set()
         self.changed: set[str] = set()
+        # Changed files past the limit of AST files: an import does not bring them back.
+        self.over_limit: set[str] = set()
 
     async def text(self, path: str, blob_sha: str | None = None) -> str | FileUnavailable:
         if path in self._texts:
@@ -236,6 +238,8 @@ class _Files:
 
     async def facts_for(self, path: str) -> AstFacts | FileUnavailable:
         """Facts of a file reached through an import; counts toward the file limit."""
+        if path in self.over_limit:
+            return FileUnavailable(AstFailureReason.AST_LIMIT.value)
         if path not in self.changed and path not in self.imported:
             if len(self.imported) >= MAX_IMPORTED_FILES:
                 return FileUnavailable(AstFailureReason.AST_LIMIT.value)
@@ -422,6 +426,11 @@ class BuildReviewContext:
             tree=tree, source=self._source, parser=self._parser, cache=self._cache, denied=denied
         )
         files.changed = {path for file, path in allowed if file.new_path is not None}
+        files.over_limit = {
+            path
+            for position, (file, path) in enumerate(allowed)
+            if position >= MAX_AST_FILES and file.new_path is not None
+        }
         go_module = None
         if "go.mod" in tree.blob_shas and any(path.endswith(".go") for _, path in allowed):
             go_mod = await files.service_text("go.mod")

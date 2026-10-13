@@ -71,6 +71,10 @@ def _provider_patch(patch: str | None) -> str | None:
     return None if hunk_start < 0 else patch[hunk_start + 1 :]
 
 
+# Stored omissions that are exclusions of the service, not incompleteness of the diff.
+_SERVICE_EXCLUSIONS = frozenset({"binary", "generated"})
+
+
 def _vcs_file(snapshot: DiffSnapshot) -> VcsFile:
     return VcsFile(
         filename=snapshot.filename,
@@ -279,19 +283,24 @@ class ReviewContextStage:
         )
         ignore = apply_ignore(matcher, diff_map, builtin_excluded=self._builtin_excluded)
         self._denied_paths = ignore.denied_paths
-        # The effective exclusion: a mask of the repository or a built-in exclusion of any
-        # name of the file. Decided here, so a skip never depends on the optional build.
-        if diff_map.files and all(
-            ignore.decision_for(file.file_id) is not None
-            or (
-                file.omission_reason is None
-                and any(
-                    path in ignore.denied_paths
-                    for path in (file.old_path, file.new_path)
-                    if path is not None
+        # The effective exclusion: a mask of the repository, a built-in exclusion of any
+        # name of the file, or a binary file. Decided here, so a skip never depends on the
+        # optional build. An incomplete file list does not prove that all is excluded.
+        service_excluded = {
+            item.filename for item in stored if item.omission_reason in _SERVICE_EXCLUSIONS
+        }
+        if (
+            diff_map.files
+            and diff_map.file_list_complete
+            and all(
+                ignore.decision_for(file.file_id) is not None
+                or file.provider_new_path in service_excluded
+                or (
+                    file.omission_reason is None
+                    and (file.new_path or file.old_path) in ignore.denied_paths
                 )
+                for file in diff_map.files
             )
-            for file in diff_map.files
         ):
             await self._record_all_ignored(run_id, snapshot, diff_map)
             raise RunSkipped("all_changes_ignored")

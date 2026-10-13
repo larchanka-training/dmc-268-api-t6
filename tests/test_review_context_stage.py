@@ -63,6 +63,7 @@ class Runs:
 class Vcs:
     head_sha: str = _HEAD
     merge_base: str | Exception = "c" * 40
+    files_changed: int = 2
 
     async def get_pull_request(self, locator: PullRequestLocator) -> VcsPullRequest:
         meta = PullRequestMeta(
@@ -72,7 +73,7 @@ class Vcs:
             source_branch="f",
             target_branch="main",
             labels=(),
-            files_changed=2,
+            files_changed=self.files_changed,
             lines_added=0,
             lines_removed=0,
             is_draft=False,
@@ -334,7 +335,11 @@ def test_change_of_builtin_excluded_files_only_is_skipped_before_the_context_bui
     )
     trace = Trace()
     stage = _stage(
-        trace, policy=Policy(rules=None), snapshots=[moved], builtin_excluded=_is_generated
+        trace,
+        policy=Policy(rules=None),
+        vcs=Vcs(files_changed=1),
+        snapshots=[moved],
+        builtin_excluded=_is_generated,
     )
     stage._context_builder = lambda run: Broken()  # type: ignore[assignment,return-value]
 
@@ -345,6 +350,63 @@ def test_change_of_builtin_excluded_files_only_is_skipped_before_the_context_bui
     assert skipped.value.reason == "all_changes_ignored"
     assert stage.excluded("src/client.py") is True
     assert trace.steps[-1][2]["status"] == "all_changes_ignored"
+
+
+def _binary(path: str = "logo.png") -> DiffSnapshot:
+    return DiffSnapshot(path, None, "9" * 40, "modified", None, 0, 0, 0, omission_reason="binary")
+
+
+def test_binary_files_count_as_exclusions_when_the_whole_change_is_excluded() -> None:
+    generated = _snapshots()[1]
+
+    # A masked file next to a binary one, and binary files alone: nothing to review.
+    for snapshots in ([generated, _binary()], [_binary(), _binary("icon.png")]):
+        stage = _stage(Trace(), snapshots=snapshots)
+        with pytest.raises(RunSkipped):
+            asyncio.run(stage.run(_RUN))
+
+    # One reviewable file next to them keeps the run going.
+    mixed = _stage(Trace(), vcs=Vcs(files_changed=3), snapshots=[*_snapshots(), _binary()])
+    assert asyncio.run(mixed.run(_RUN)) is not None
+
+
+def test_incomplete_file_list_does_not_prove_that_every_change_is_excluded() -> None:
+    # The pull request reports two files, one is known and it is ignored.
+    stage = _stage(Trace(), snapshots=[_snapshots()[1]])
+
+    payload = asyncio.run(stage.run(_RUN))
+
+    assert payload is not None
+    assert (payload.status, payload.reason) == (
+        ContextStatus.SUMMARY_ONLY,
+        "diff_inventory_incomplete",
+    )
+
+
+def test_source_of_a_copy_into_an_excluded_place_stays_reviewable() -> None:
+    copied = DiffSnapshot(
+        "dist/app.py",
+        _stored("dist/app.py", "@@ -1 +1 @@\n-a\n+b"),
+        "f" * 40,
+        "copied",
+        "src/app.py",
+        1,
+        1,
+        2,
+        omission_reason="generated",
+    )
+    stage = _stage(
+        Trace(),
+        policy=Policy(rules=None),
+        snapshots=[_snapshots()[0], copied],
+        builtin_excluded=_is_generated,
+    )
+
+    payload = asyncio.run(stage.run(_RUN))
+
+    assert payload is not None and payload.status is ContextStatus.REVIEW
+    assert stage.excluded("dist/app.py") is True
+    assert stage.excluded("src/app.py") is False
 
 
 def test_policy_error_while_the_context_is_built_stops_the_run() -> None:

@@ -18,7 +18,7 @@ from hashlib import sha256
 import markdown_it
 from markdown_it import MarkdownIt
 
-from app.modules.reviews.application.diff_map import DiffMap, is_supported_path
+from app.modules.reviews.application.diff_map import ChangeType, DiffMap, is_supported_path
 from app.modules.reviews.application.policy_errors import PolicyError, PolicyErrorCode
 from app.modules.reviews.application.policy_snapshot import RULES_DOCUMENT_PATH
 
@@ -323,16 +323,22 @@ def apply_ignore(
     denied: set[str] = set()
     for file in diff_map.files:
         names = [path for path in (file.old_path, file.new_path) if path is not None]
+        # The source of a copy still exists and is its own file: it is withheld only by
+        # an exclusion of its own name, never because its copy landed in an excluded place.
+        withheld = (
+            [file.new_path]
+            if file.change_type is ChangeType.COPIED and file.new_path is not None
+            else names
+        )
         if any(builtin_excluded(path) for path in names):
-            denied.update(names)
+            denied.update(withheld)
         if file.omission_reason is not None:
             # Its paths cannot be matched reliably and its content is already withheld.
             continue
-        paths = [path for path in (file.old_path, file.new_path) if path is not None]
-        for path in dict.fromkeys(paths):
+        for path in dict.fromkeys(names):
             pattern = matcher.match(path)
             if pattern is not None:
                 decisions.append(IgnoreDecision(file.file_id, pattern, path))
-                denied.update(paths)
+                denied.update(withheld)
                 break
     return IgnoreResult(tuple(decisions), frozenset(denied))

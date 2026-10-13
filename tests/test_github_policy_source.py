@@ -207,6 +207,27 @@ def test_answer_that_cannot_be_decoded_is_a_policy_fetch_failure_not_an_internal
         _run(proxy, Blobs(), lambda source: source.list_entries(None))
     assert (tree.value.code, tree.value.retryable) == (PolicyErrorCode.FETCH_TRANSIENT, True)
 
+    class BrokenTokens:
+        async def get_installation_access_token(self, installation_external_id: int) -> str:
+            raise ValueError("GitHub token response is not valid")
+
+    async def with_broken_tokens() -> None:
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(proxy), base_url="https://api.github.test"
+        ) as client:
+            source = GitHubPolicyDocumentSource(
+                client=client,
+                token_provider=BrokenTokens(),
+                vcs=Blobs(),  # type: ignore[arg-type]
+                locator=_LOCATOR,
+                policy_base_sha=_BASE,
+            )
+            await source.list_entries(None)
+
+    with pytest.raises(PolicyError) as token:
+        asyncio.run(with_broken_tokens())
+    assert (token.value.code, token.value.retryable) == (PolicyErrorCode.FETCH_TRANSIENT, True)
+
     # What the blob adapter raises for an answer that is not JSON or not base64.
     with pytest.raises(PolicyError) as blob:
         _run(
