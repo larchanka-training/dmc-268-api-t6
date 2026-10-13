@@ -279,8 +279,19 @@ class ReviewContextStage:
         )
         ignore = apply_ignore(matcher, diff_map, builtin_excluded=self._builtin_excluded)
         self._denied_paths = ignore.denied_paths
+        # The effective exclusion: a mask of the repository or a built-in exclusion of any
+        # name of the file. Decided here, so a skip never depends on the optional build.
         if diff_map.files and all(
-            ignore.decision_for(file.file_id) is not None for file in diff_map.files
+            ignore.decision_for(file.file_id) is not None
+            or (
+                file.omission_reason is None
+                and any(
+                    path in ignore.denied_paths
+                    for path in (file.old_path, file.new_path)
+                    if path is not None
+                )
+            )
+            for file in diff_map.files
         ):
             await self._record_all_ignored(run_id, snapshot, diff_map)
             raise RunSkipped("all_changes_ignored")

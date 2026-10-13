@@ -317,6 +317,36 @@ def test_failed_context_build_keeps_the_exclusions_and_does_not_fail_the_review(
     assert trace.steps[1][2]["error"]["type"] == "RuntimeError"
 
 
+def test_change_of_builtin_excluded_files_only_is_skipped_before_the_context_build() -> None:
+    class Broken:
+        async def execute(self, **kwargs: object) -> object:
+            raise RuntimeError("the tree is unavailable")
+
+    moved = DiffSnapshot(
+        "src/client.py",
+        _stored("src/client.py", "@@ -1 +1 @@\n-a\n+b"),
+        "f" * 40,
+        "renamed",
+        "dist/client.py",
+        1,
+        1,
+        2,
+    )
+    trace = Trace()
+    stage = _stage(
+        trace, policy=Policy(rules=None), snapshots=[moved], builtin_excluded=_is_generated
+    )
+    stage._context_builder = lambda run: Broken()  # type: ignore[assignment,return-value]
+
+    # No mask of the repository and a failing builder: the skip is still mandatory.
+    with pytest.raises(RunSkipped) as skipped:
+        asyncio.run(stage.run(_RUN))
+
+    assert skipped.value.reason == "all_changes_ignored"
+    assert stage.excluded("src/client.py") is True
+    assert trace.steps[-1][2]["status"] == "all_changes_ignored"
+
+
 def test_policy_error_while_the_context_is_built_stops_the_run() -> None:
     class OverBudget:
         async def execute(self, **kwargs: object) -> object:
