@@ -82,11 +82,26 @@ test, system golden only if wording actually changes (at most 4).
 one repository-side JSON sidecar; use these snapshots in `_case_input` offline.
 
 **Acceptance criteria:**
-- [ ] Every real case has verified case ID/source URL/revision/commit URL/message; no invented historical PR list or synthetic history.
-- [ ] All 19 synthetic cases stay empty; existing patch, pre-image and truth remain untouched.
-- [ ] Missing, duplicate, mismatched or malformed records fail before paid calls; recorder tests prove nonempty context reaches the real-case provider request.
+- [x] Every real case has verified case ID/source URL/revision/commit URL/message; no invented historical PR list or synthetic history.
+- [x] All 19 synthetic cases stay empty; existing patch, pre-image and truth remain untouched.
+- [x] Missing, duplicate, mismatched or malformed records fail before paid calls; recorder tests prove nonempty context reaches the real-case provider request.
 
 **Verification:** Focused recorder tests and `uv run python review/scripts/validate_dataset.py --final`; safe GitHub revision lookups provide metadata evidence without credential output.
+**Observed evidence (Task 3):** The first real-case provider-request test failed with no
+commit block, then passed with the verified frozen snapshot. Six late `SYN-04`
+missing/duplicate/mismatch/type regressions failed before validation, then passed
+with zero provider requests and no capture staging. Malformed JSON, nested JSON,
+invalid schema/record/Unicode data, and invented synthetic-history regressions also
+pass before any provider call. A 24-case fixture capture with HTTP sends forbidden
+proved exactly five literal real commit blocks and nineteen synthetic requests with
+no commit block. The `LOG-03` snapshot retains all 878 characters verbatim; its
+literal provider context is 500 characters including ellipsis, matching production.
+All five sidecar records and verification evidence equal the verified research
+artifact; `test-prs-dataset` has no changes. Final corpus validation passed 24/24.
+Recorder/workflow suite: 108 passed in 122.08s. Lint, format, mypy and patch whitespace
+checks pass. The parser stays inside already-pinned `eval_live.py`; Task 4 must pin
+the new sidecar and production source. Final full-service gates and paid replacement
+remain pending; no evaluation quality or billed-cost improvement is claimed.
 **Dependencies:** Task 2; authorized #124 scope comment before `tests/test_eval_live.py` edit.
 **Files likely touched:** `review/eval/pr-commit-messages.json`,
 `review/scripts/eval_live.py`, optional `review/scripts/eval_commit_context.py`,
@@ -138,7 +153,7 @@ and retire the #82 deferral without claiming a completed baseline prematurely.
 `model=mistral-small-4`, `export_raw_responses=true`, using the team org secret.
 
 **Acceptance criteria:**
-- [ ] One approved complete 24-case fast run; record exact run ID/attempt/SHA/effective models and safe usage/cost metadata.
+- [ ] One approved complete 24-case fast run; record exact run ID/attempt/SHA/effective models and exported configured pricing/policy limits; explicitly state actual spend and billed-token totals are unavailable from these artifacts.
 - [ ] `baseline_publishable=true`; safe artifact confirms every raw file hash/size and exact active-case mapping; no SEC-05.
 - [ ] Copy all 24 answers and manifest byte-for-byte; no mixed capture, repair selection, or hand-edited digest.
 

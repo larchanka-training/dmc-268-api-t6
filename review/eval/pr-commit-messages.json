@@ -1,0 +1,53 @@
+{
+  "schema_version": 1,
+  "context_kind": "source_revision_snapshot",
+  "description": "Exact messages of the five pinned source.revision commits; not a reconstructed complete historical PR commit list. Synthetic cases have no recorded commit history.",
+  "verified_at": "2026-10-13T19:29:39.995409+00:00",
+  "records": [
+    {
+      "case_id": "CLEAN-03",
+      "source_url": "https://github.com/pmndrs/zustand/pull/663",
+      "revision": "2593c915195c0a75f8afbf02a5b90945721d27e1",
+      "commit_url": "https://github.com/pmndrs/zustand/commit/2593c915195c0a75f8afbf02a5b90945721d27e1",
+      "message": "refactor(core): extract react.ts from index.ts",
+      "verified_via": "https://api.github.com/repos/pmndrs/zustand/commits/2593c915195c0a75f8afbf02a5b90945721d27e1",
+      "verification": "GitHub commits REST response sha exactly equals case.json source.revision; message copied verbatim from commit.message. This is the pinned source revision, not a full historical PR commit list."
+    },
+    {
+      "case_id": "LOG-03",
+      "source_url": "https://github.com/gijzelaerr/python-snap7/pull/806",
+      "revision": "bd11af442dd0a710b816c408d4ec180a8f5e89ee",
+      "commit_url": "https://github.com/gijzelaerr/python-snap7/commit/bd11af442dd0a710b816c408d4ec180a8f5e89ee",
+      "message": "fix(server): reassemble COTP fragments and fix INT/DINT byte count (#804)\n\nTwo bugs in the pure-Python server:\n\n1. COTP fragmentation not reassembled: the server's Connection Confirm\n   omitted the TPDU size parameter, causing spec-compliant clients to\n   fall back to the ISO 8073 default of 128 bytes and fragment requests.\n   The server then tried to process each fragment as a standalone PDU.\n   Fix: parse TPDU size from the client's Connection Request, echo it\n   in the Connection Confirm, and reassemble DT fragments by looping\n   until the EOT bit is set.\n\n2. INT and DINT word lengths missing from byte-count conversion: read\n   requests using word_len=INT or word_len=DINT returned count bytes\n   instead of count*2 or count*4 bytes. Fix: add INT to the 2-byte\n   branch and DINT to the 4-byte branch in both _handle_read_area\n   and _parse_read_address.\n\nCloses #804",
+      "verified_via": "https://api.github.com/repos/gijzelaerr/python-snap7/commits/bd11af442dd0a710b816c408d4ec180a8f5e89ee",
+      "verification": "GitHub commits REST response sha exactly equals case.json source.revision; message copied verbatim from commit.message. This is the pinned source revision, not a full historical PR commit list."
+    },
+    {
+      "case_id": "RES-03",
+      "source_url": "https://github.com/aio-libs/aiohttp/pull/7944",
+      "revision": "ac55d6466963b7bb2834fe3d19a4f3c2a67e82a3",
+      "commit_url": "https://github.com/aio-libs/aiohttp/commit/ac55d6466963b7bb2834fe3d19a4f3c2a67e82a3",
+      "message": "Update test_cookiejar.py",
+      "verified_via": "https://api.github.com/repos/aio-libs/aiohttp/commits/ac55d6466963b7bb2834fe3d19a4f3c2a67e82a3",
+      "verification": "GitHub commits REST response sha exactly equals case.json source.revision; message copied verbatim from commit.message. This is the pinned source revision, not a full historical PR commit list."
+    },
+    {
+      "case_id": "SEC-04",
+      "source_url": "https://github.com/pallets/flask/pull/5632",
+      "revision": "e13373f838ab34027c5a80e16a6cb8262d41eab7",
+      "commit_url": "https://github.com/pallets/flask/commit/e13373f838ab34027c5a80e16a6cb8262d41eab7",
+      "message": "enable secret key rotation",
+      "verified_via": "https://api.github.com/repos/pallets/flask/commits/e13373f838ab34027c5a80e16a6cb8262d41eab7",
+      "verification": "GitHub commits REST response sha exactly equals case.json source.revision; message copied verbatim from commit.message. This is the pinned source revision, not a full historical PR commit list."
+    },
+    {
+      "case_id": "SYN-04",
+      "source_url": "https://github.com/pmndrs/zustand/pull/725",
+      "revision": "9d6e7e2050a5b9b4b541f0df7708f30d74cbe760",
+      "commit_url": "https://github.com/pmndrs/zustand/commit/9d6e7e2050a5b9b4b541f0df7708f30d74cbe760",
+      "message": "Merge branch 'main' into add-hkm-types",
+      "verified_via": "https://api.github.com/repos/pmndrs/zustand/commits/9d6e7e2050a5b9b4b541f0df7708f30d74cbe760",
+      "verification": "GitHub commits REST response sha exactly equals case.json source.revision; message copied verbatim from commit.message. This is the pinned source revision, not a full historical PR commit list."
+    }
+  ]
+}

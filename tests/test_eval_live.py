@@ -11,6 +11,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
+import httpx
 import pytest
 
 import review.scripts.eval_live as eval_live_module
@@ -162,6 +163,9 @@ def test_selected_custom_rules_outside_default_rule_glob_are_hashed(
     custom_rules = json.loads(BACKEND_RULES.read_text(encoding="utf-8"))
     custom_rules["rules"][0]["name"] = "Custom Source Review"
     custom.write_text(json.dumps(custom_rules), encoding="utf-8")
+    sidecar = repo / "review/eval/pr-commit-messages.json"
+    sidecar.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(REPO_ROOT / "review/eval/pr-commit-messages.json", sidecar)
     monkeypatch.setattr(eval_live_module, "REPO_ROOT", repo)
 
     first_root = fixture_root(tmp_path / "first", ("SEC-01",))
@@ -1269,3 +1273,239 @@ def test_report_cannot_overwrite_static_input_before_recording(
     )
     assert protected.read_bytes() == original
     assert not (root / "responses").exists()
+
+
+def test_frozen_revision_message_reaches_the_real_case_provider_request(tmp_path: Path) -> None:
+    root = fixture_root(tmp_path, ("CLEAN-03",))
+    transport = FakeTransport([answer("primary-model", VALID)])
+
+    record(root, transport)
+
+    assert len(transport.requests) == 1
+    assert (
+        "<commit_messages>\n"
+        "<commit>refactor(core): extract react.ts from index.ts</commit>\n"
+        "</commit_messages>"
+    ) in transport.requests[0].messages[1].content
+
+
+def commit_context_repo(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    payload: object,
+) -> Path:
+    repo = tmp_path / "repo"
+    for relative in static_input_paths(
+        "review/prompts/review.system.v2.md", rule_json_paths(REPO_ROOT)
+    ):
+        destination = repo / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(REPO_ROOT / relative, destination)
+    sidecar = repo / "review/eval/pr-commit-messages.json"
+    sidecar.parent.mkdir(parents=True, exist_ok=True)
+    sidecar.write_text(json.dumps(payload), encoding="utf-8")
+    monkeypatch.setattr(eval_live_module, "REPO_ROOT", repo)
+    return repo
+
+
+def record_with_repo(root: Path, repo: Path, transport: FakeTransport) -> dict[str, Any]:
+    return asyncio.run(
+        record_live(
+            root,
+            settings(),
+            system_prompt=repo / "review/prompts/review.system.v2.md",
+            backend_rules=repo / "review/rules/default-backend.v1.json",
+            frontend_rules=repo / "review/rules/default-frontend.v1.json",
+            transport=transport,
+            recorded_at=RECORDED_AT,
+        )
+    )
+
+
+@pytest.mark.parametrize(
+    "defect",
+    [
+        "missing",
+        "duplicate",
+        "source_url",
+        "revision",
+        "commit_url",
+        "message",
+    ],
+)
+def test_invalid_late_real_snapshot_fails_before_any_provider_call(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    defect: str,
+) -> None:
+    root = fixture_root(tmp_path, ("CLEAN-03", "SYN-04"))
+    payload = json.loads((REPO_ROOT / "review/eval/pr-commit-messages.json").read_text())
+    late = payload["records"][-1]
+    assert late["case_id"] == "SYN-04"
+    if defect == "missing":
+        payload["records"].pop()
+    elif defect == "duplicate":
+        payload["records"].append(dict(late))
+    else:
+        late[defect] = {
+            "source_url": "https://github.com/evil/repo/pull/999",
+            "revision": "f" * 40,
+            "commit_url": "https://github.com/evil/repo/commit/" + "f" * 40,
+            "message": None,
+        }[defect]
+    repo = commit_context_repo(tmp_path, monkeypatch, payload)
+    transport = FakeTransport([answer("primary-model", VALID)] * 2)
+
+    with pytest.raises(RecorderError, match="commit context"):
+        record_with_repo(root, repo, transport)
+
+    assert transport.requests == []
+    assert not (root / "responses").exists()
+    assert list(root.glob(".responses-*")) == []
+
+
+@pytest.mark.parametrize(
+    "defect",
+    [
+        "invalid_json",
+        "nested_json",
+        "missing_file",
+        "root_array",
+        "missing_records",
+        "records_object",
+        "unknown_schema",
+        "bool_schema",
+        "unknown_kind",
+        "nonobject_record",
+        "missing_field",
+        "invalid_message",
+        "empty_case_id",
+        "bad_revision",
+        "bad_source_url",
+        "bad_commit_url",
+        "bad_unicode",
+        "synthetic_record",
+    ],
+)
+def test_malformed_commit_sidecar_is_rejected_before_calls_or_capture_staging(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    defect: str,
+) -> None:
+    root = fixture_root(tmp_path, ("CLEAN-03", "SEC-01", "SYN-04"))
+    payload = json.loads((REPO_ROOT / "review/eval/pr-commit-messages.json").read_text())
+    unused = payload["records"][2]
+    if defect == "root_array":
+        payload = []
+    elif defect == "missing_records":
+        del payload["records"]
+    elif defect == "records_object":
+        payload["records"] = {}
+    elif defect in {"unknown_schema", "bool_schema"}:
+        payload["schema_version"] = True if defect == "bool_schema" else 2
+    elif defect == "unknown_kind":
+        payload["context_kind"] = "complete_historical_pr"
+    elif defect == "nonobject_record":
+        payload["records"].append(None)
+    elif defect == "missing_field":
+        del unused["message"]
+    elif defect == "invalid_message":
+        unused["message"] = ["invented history"]
+    elif defect == "empty_case_id":
+        unused["case_id"] = ""
+    elif defect == "bad_revision":
+        unused["revision"] = "not-an-immutable-sha"
+    elif defect == "bad_source_url":
+        unused["source_url"] = "http://github.com/aio-libs/aiohttp/pull/7944"
+    elif defect == "bad_commit_url":
+        unused["commit_url"] = "https://github.com/aio-libs/aiohttp/commit/" + "f" * 40
+    elif defect == "bad_unicode":
+        unused["message"] = "\ud800"
+    elif defect == "synthetic_record":
+        invented = dict(payload["records"][0])
+        invented["case_id"] = "SEC-01"
+        payload["records"].append(invented)
+    repo = commit_context_repo(tmp_path, monkeypatch, payload)
+    sidecar = repo / "review/eval/pr-commit-messages.json"
+    if defect == "invalid_json":
+        sidecar.write_text("private invalid sidecar text", encoding="utf-8")
+    elif defect == "nested_json":
+        sidecar.write_text("[" * 10_000 + "]" * 10_000, encoding="utf-8")
+    elif defect == "missing_file":
+        sidecar.unlink()
+    transport = FakeTransport([answer("primary-model", VALID)] * 3)
+
+    with pytest.raises(RecorderError, match="commit context") as raised:
+        record_with_repo(root, repo, transport)
+
+    assert "private invalid sidecar text" not in str(raised.value)
+    assert transport.requests == []
+    assert not (root / "responses").exists()
+    assert list(root.glob(".responses-*")) == []
+
+
+def test_all_active_cases_capture_offline_with_only_five_real_snapshots(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def forbidden_http(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("offline corpus capture must not query external APIs")
+
+    monkeypatch.setattr(httpx.AsyncClient, "send", forbidden_http)
+    case_ids = tuple(sorted(path.name for path in (DATASET_ROOT / "cases").iterdir()))
+    assert len(case_ids) == 24
+    root = fixture_root(tmp_path, case_ids)
+    transport = FakeTransport([answer("primary-model", VALID)] * 24)
+
+    manifest = record(root, transport)
+
+    expected = {
+        "CLEAN-03": "refactor(core): extract react.ts from index.ts",
+        "LOG-03": (
+            "fix(server): reassemble COTP fragments and fix INT/DINT byte count (#804)\n\n"
+            "Two bugs in the pure-Python server:\n\n"
+            "1. COTP fragmentation not reassembled: the server's Connection Confirm\n"
+            "   omitted the TPDU size parameter, causing spec-compliant clients to\n"
+            "   fall back to the ISO 8073 default of 128 bytes and fragment requests.\n"
+            "   The server then tried to process each fragment as a standalone PDU.\n"
+            "   Fix: parse TPDU size from the client's Connection Request, echo it\n"
+            "   in the Connection Confirm, an…"
+        ),
+        "RES-03": "Update test_cookiejar.py",
+        "SEC-04": "enable secret key rotation",
+        "SYN-04": "Merge branch 'main' into add-hkm-types",
+    }
+    assert len(expected["LOG-03"]) == 500
+    assert len(transport.requests) == 24
+    assert len(manifest["responses"]) == 24
+    for case_id, request in zip(case_ids, transport.requests, strict=True):
+        if case_id in expected:
+            block = (
+                "<commit_messages>\n<commit>" + expected[case_id] + "</commit>\n</commit_messages>"
+            )
+            assert block in request.messages[1].content
+        else:
+            assert "<commit_messages>" not in request.messages[1].content
+    assert sum("<commit_messages>" in r.messages[1].content for r in transport.requests) == 5
+    payload = json.loads((REPO_ROOT / "review/eval/pr-commit-messages.json").read_text())
+    assert len(payload["records"]) == 5
+    long_snapshot = next(item for item in payload["records"] if item["case_id"] == "LOG-03")
+    assert len(long_snapshot["message"]) == 878
+    assert long_snapshot["message"].endswith("\n\nCloses #804")
+
+
+def test_empty_string_snapshot_is_a_valid_real_commit_message(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = fixture_root(tmp_path, ("CLEAN-03",))
+    payload = json.loads((REPO_ROOT / "review/eval/pr-commit-messages.json").read_text())
+    payload["records"][0]["message"] = ""
+    repo = commit_context_repo(tmp_path, monkeypatch, payload)
+    transport = FakeTransport([answer("primary-model", VALID)])
+
+    record_with_repo(root, repo, transport)
+
+    assert "<commit_messages>\n<commit></commit>\n</commit_messages>" in (
+        transport.requests[0].messages[1].content
+    )

@@ -118,9 +118,12 @@ Record the actual run ID/attempt, evaluated head SHA, selected model and effecti
 fallback model. Use the current baseline primary model `mistral-small-4` to keep
 comparison interpretable. Workflow defaults to fast: its nominal per-case policy
 budget is USD 0.50, or USD 12 across 24 cases. This is not an exact invoice or a
-strict pre-call spending guarantee: retries/repair/fallback can spend balance and
-actual price/account state must be checked from safe usage metadata. Approval is
-for one complete 24-case run using the current fast policy, including retries and
+strict pre-call spending guarantee: retries/repair/fallback can spend balance.
+Safe artifacts record configured model pricing and effective policy limits, but
+export no billed-token totals or actual spend. Record those available settings
+and state actual spend is unavailable from these artifacts; do not infer an
+invoice or account balance. Approval remains for one complete 24-case run using
+the current fast policy, including retries and
 raw artifact export; a replacement rerun after failure needs fresh cost approval.
 
 Verify all 24 active case IDs, no SEC-05, `baseline_publishable=true`, regular files,
