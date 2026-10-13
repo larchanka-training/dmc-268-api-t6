@@ -17,6 +17,7 @@ from typing import Protocol
 from uuid import UUID
 
 from app.modules.reviews.application.ast_resolution import (
+    BINARY_SOURCE,
     MAX_IMPORTED_FILES,
     FileUnavailable,
     ImportRef,
@@ -59,6 +60,7 @@ from app.modules.reviews.application.prompt_budget import (
 )
 from app.modules.reviews.application.prompt_builder import ReviewRule
 from app.modules.reviews.application.review_ignore import IgnoreMatcher, IgnoreResult
+from app.modules.reviews.application.vcs_diff import _is_binary
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -220,6 +222,11 @@ class _Files:
             else:
                 if len(raw) > MAX_SOURCE_BYTES:
                     result = FileUnavailable(AstFailureReason.SOURCE_TOO_LARGE.value)
+                elif _is_binary(raw):
+                    # The service excludes binary content wherever it is found: a file
+                    # outside the diff reached through an import is no exception, and
+                    # the check runs before the parser and before the facts cache.
+                    result = FileUnavailable(BINARY_SOURCE)
                 else:
                     try:
                         result = raw.decode("utf-8", errors="strict")

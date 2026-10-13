@@ -30,6 +30,8 @@ from app.modules.reviews.application.diff_map import DiffFile, RowKind
 
 RESOLVER_VERSION = "resolver/v1"
 MAX_IMPORTED_FILES = 20
+# Why a file is unavailable when its content is binary: an exclusion, not a failure.
+BINARY_SOURCE = "binary"
 MAX_IMPORTED_SYMBOLS_PER_FILE = 10
 MAX_IMPORTED_SYMBOLS_PER_RUN = 100
 
@@ -476,7 +478,7 @@ class ImportResolver:
     async def _lookup(self, files: list[str], wanted: tuple[str, ...]) -> _Outcome:
         loaded = await self._load(files)
         if isinstance(loaded, FileUnavailable):
-            excluded = loaded.reason == "excluded"
+            excluded = loaded.reason in {"excluded", BINARY_SOURCE}
             return (
                 ImportResolution.EXCLUDED if excluded else ImportResolution.UNSUPPORTED,
                 loaded.reason,

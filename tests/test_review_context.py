@@ -677,6 +677,26 @@ def test_deleted_file_of_an_unknown_old_revision_has_no_confirmed_source_to_show
     ]
 
 
+def test_unchanged_binary_file_is_not_imported_even_from_the_facts_cache() -> None:
+    # Only ``pkg/service.py`` is changed; the imported file is outside the diff.
+    repository = _service_repository()
+    diff_map = _diff_map(_vcs_file(repository, "pkg/service.py", _GREET_PATCH))
+    cache = MemoryCache()
+    _build(repository, diff_map, cache=cache)
+
+    # The same blob id now holds binary content: text after a NUL byte.
+    repository.files["pkg/models.py"] = "\x00\n" + _MODELS
+    parser = InProcessParser()
+    payload = _build(repository, diff_map, parser=parser, cache=cache)
+
+    assert [(ref.resolution, ref.reason) for ref in payload.imports] == [
+        (ImportResolution.EXCLUDED, "binary")
+    ]
+    assert ContextLevel.L4 not in payload.levels_present
+    assert all(block.source.path != "pkg/models.py" for block in payload.blocks)
+    assert "pkg/models.py" not in parser.parsed
+
+
 def test_cached_facts_skip_the_parser_but_not_the_ignore_guard() -> None:
     repository = _service_repository()
     diff_map = _diff_map(_vcs_file(repository, "pkg/service.py", _GREET_PATCH))
