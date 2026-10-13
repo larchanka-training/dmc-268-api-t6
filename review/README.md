@@ -82,6 +82,30 @@ run of a repository, the diff is the varying tail (`docs/SYSTEM_DESIGN.md` §10)
   with no shown content, including unselected or unavailable files. A truncated `<file>`
   ends with `[N more lines omitted]`. Counts describe source input; markers are never paths.
 
+Production commit context comes from `GitHubRunSource.get_pull_request_meta`. It reads
+at most two numeric PR-commit pages of 10 entries, retaining the first 20 messages
+in API order. Each message keeps at most 500 Unicode characters, including the
+truncation ellipsis. `Link` URLs are ignored; a full prefix does not establish a
+total omitted count. The renderer XML-escapes text and retains its defensive
+20-by-500 limits. Empty lists omit the commit block; an empty message remains an
+empty `<commit>` element.
+
+A page is streamed within a 1 MiB response budget before JSON parsing. Commit
+requests require identity encoding and reject compressed responses before reading
+or decoding. Malformed JSON, oversized pages, and missing/non-string messages fail
+explicitly; HTTP failures use the existing safe classification. Installation
+checkpoints precede token acquisition and every page request, with GitHub calls
+outside database transactions.
+
+Evaluation reads the frozen five source-revision snapshots from
+[`eval/pr-commit-messages.json`](eval/pr-commit-messages.json) offline. These are
+messages of the exact recorded revisions, rather than a complete historical PR
+commit list. All nineteen synthetic cases retain empty commit context. The
+recorder validates every snapshot and active real-case binding before any model
+call; neither live evaluation nor replay queries GitHub. The snapshot file and
+production source are fingerprinted. The existing recorded baseline remains
+unchanged pending the complete #82 recapture and measured metric update.
+
 Rendered custom rule — one block per rule, globs space-separated, checks numbered from 1;
 this example is the second rule of `rules/default-backend.v1.json`, checks shortened:
 

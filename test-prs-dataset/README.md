@@ -103,9 +103,32 @@ Terminal provider or infrastructure failure for a case, such as HTTP 402 on both
 
 For each case, `run_metadata.cases` records the requested `first_model` and the actual first response's serving `provider` as `first_provider_label` plus a domain-separated `first_provider_digest`. Known EUrouter route names use safe public labels; any other provider string becomes `custom` with its digest, and a first call with no provider response records nulls. A paid but rejected first response keeps its available provider identity. This differs from the configured provider in `effective_settings`. Report observed provider labels and any custom digests with the measured baseline, without copying raw provider strings, URLs, or keys into the manifest or README.
 
-The manifest also stores sorted `static_inputs`, `static_digest`, and `corpus_digest`. Each digest is `sha256-v1:<64 lowercase hex>` over a SHA-256 stream beginning with the bytes `review-eval-inputs-v1` followed by a NUL byte. For every unique relative POSIX path in sorted order, the stream then contains its UTF-8 path length as an unsigned 8-byte big-endian integer, the path bytes, its file-content length in the same format, and the exact file bytes. Static inputs are the selected review system prompt, all literal `review/rules/*.json` files (including the rule schema), selected custom rule files, and these code paths. Each remains in the byte-level digest because a change can affect the provider request, whether a response is accepted or retried, or which raw answer the recorder captures:
+### Frozen commit context (#82)
 
-| Static code path | Why it is included |
+[`review/eval/pr-commit-messages.json`](../review/eval/pr-commit-messages.json) stores
+verified commit messages for the exact `source.revision` of CLEAN-03, LOG-03,
+RES-03, SEC-04, and SYN-04. Each record binds its case ID, source URL, revision and
+commit URL to the original message and verification evidence. These five records
+are source-revision snapshots, not a reconstructed complete historical PR commit
+list. The nineteen synthetic cases have no recorded commit history and keep empty
+commit tuples; no source or message is invented for them.
+
+The recorder reads the checked-in sidecar offline and validates all records and
+active real-case bindings before any model call or capture staging. Missing,
+duplicate, mismatched or malformed records fail preflight. Original messages stay
+verbatim in the sidecar; the existing prompt renderer limits each shown message
+to 500 Unicode characters including an ellipsis, matching production. LOG-03's
+878-character snapshot therefore renders as 500 characters. Live evaluation and
+replay never retrieve commit metadata from GitHub. Existing case metadata, patches,
+pre-images and ground truth remain unchanged.
+
+The new context is implemented and fingerprinted; the complete replacement of
+all 24 raw-first responses and the measured #53 metric update are still pending.
+The 2026-10-07 capture and its original provenance remain intact until replacement.
+
+The manifest also stores sorted `static_inputs`, `static_digest`, and `corpus_digest`. Each digest is `sha256-v1:<64 lowercase hex>` over a SHA-256 stream beginning with the bytes `review-eval-inputs-v1` followed by a NUL byte. For every unique relative POSIX path in sorted order, the stream then contains its UTF-8 path length as an unsigned 8-byte big-endian integer, the path bytes, its file-content length in the same format, and the exact file bytes. Static inputs are the selected review system prompt, all literal `review/rules/*.json` files (including the rule schema), selected custom rule files, and these checked-in paths. Each remains in the byte-level digest because a change can affect the provider request, whether a response is accepted or retried, or which raw answer the recorder captures:
+
+| Static input path | Why it is included |
 | --- | --- |
 | `app/bootstrap/llm_gateway.py` | Composes requests and sets attempt deadlines. |
 | `app/common/application/languages.py` | Selects the case language and default rule set. |
@@ -114,11 +137,13 @@ The manifest also stores sorted `static_inputs`, `static_digest`, and `corpus_di
 | `app/modules/reviews/application/prompt_builder.py` | Renders the system/user message envelope. |
 | `app/modules/reviews/application/review_output.py` | Parses and validates review output. |
 | `app/modules/reviews/application/run_failures.py` | Supplies the gateway's attempt deadline and retryable codes. |
+| `app/modules/reviews/infrastructure/github_run_source.py` | Retrieves and bounds production PR commit context. |
 | `app/modules/reviews/infrastructure/llm/answers.py` | Validates answers and prepares repair feedback. |
 | `app/modules/reviews/infrastructure/llm/gateway.py` | Controls calls, retries, repair, fallback, and budgets. |
 | `app/modules/reviews/infrastructure/llm/models.py` | Adapts gateway calls to review and conventions model ports. |
 | `app/modules/reviews/infrastructure/llm/settings.py` | Resolves model profiles, endpoints, and call policy. |
 | `app/modules/reviews/infrastructure/llm/transport.py` | Encodes provider requests and extracts response text. |
+| `review/eval/pr-commit-messages.json` | Supplies frozen source-revision messages for the five real cases. |
 | `review/schemas/review-output.schema.json` | Defines strict response format and validation. |
 | `review/scripts/eval_live.py` | Assembles each case request and selects first-call raw content. |
 | `app/modules/reviews/application/conventions_prompt.py` | Renders conventions input when a conventions prompt is supplied. |
@@ -152,8 +177,9 @@ artifact; the raw and safe manifest copies also match. At the publication commit
 `ba99c11`, offline replay had no drift warning, and its entire report after
 removing validator diagnostics matched the live safe report. Later edits to
 fingerprinted gateway files make replay on `main` print a static-input drift
-warning (now `Static input digest mismatch; refresh the complete baseline`). It
-clears only when the complete baseline is re-captured, next planned in #82; see
+warning. The #82 source/sidecar pins now also produce
+`Static input path set changed; refresh the complete baseline` until the complete
+24-case replacement is captured; see
 [Baseline drift](#baseline-drift). These results score only the first raw answer;
 publishability and eventual gateway acceptance do not imply a quality threshold.
 
