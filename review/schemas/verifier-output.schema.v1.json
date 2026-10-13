@@ -1,0 +1,106 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/larchanka-training/dmc-268-api-t6/main/review/schemas/verifier-output.schema.v1.json",
+  "title": "VerificationOutput",
+  "description": "Structured output of the Reflection Pass verifier model (CONTEXT_AND_VERIFICATION_SPEC §7.2).",
+  "type": "object",
+  "required": ["decisions"],
+  "additionalProperties": false,
+  "properties": {
+    "decisions": {
+      "type": "array",
+      "description": "Exactly one decision per input candidate, 1 to 10 decisions.",
+      "minItems": 1,
+      "maxItems": 10,
+      "items": { "$ref": "#/$defs/VerificationDecision" }
+    }
+  },
+  "$defs": {
+    "EvidenceRef": {
+      "type": "object",
+      "description": "A coordinate reference to code shown in the verifier manifest.",
+      "required": ["block_id", "start_line", "end_line"],
+      "additionalProperties": false,
+      "properties": {
+        "block_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "start_line": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "end_line": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "RequirementRef": {
+      "type": "object",
+      "description": "A reference to a rule in the policy documents or service defaults check.",
+      "required": ["block_id", "start_line", "end_line", "check_id"],
+      "additionalProperties": false,
+      "properties": {
+        "block_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "start_line": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "end_line": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "check_id": {
+          "type": ["string", "null"]
+        }
+      }
+    },
+    "VerificationDecision": {
+      "type": "object",
+      "description": "Verifier judgment for one candidate finding.",
+      "required": [
+        "candidate_id",
+        "status",
+        "reason",
+        "evidence_refs",
+        "requirement_refs"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "candidate_id": {
+          "type": "string",
+          "description": "The UUID of the input candidate.",
+          "minLength": 1
+        },
+        "status": {
+          "type": "string",
+          "enum": ["supported", "contradicted", "insufficient_context"]
+        },
+        "reason": {
+          "type": "string",
+          "description": "Concise justification for the decision.",
+          "minLength": 1,
+          "maxLength": 600
+        },
+        "evidence_refs": {
+          "type": "array",
+          "description": "1 to 8 refs for supported/contradicted; 0 to 8 for insufficient_context.",
+          "minItems": 0,
+          "maxItems": 8,
+          "items": { "$ref": "#/$defs/EvidenceRef" }
+        },
+        "requirement_refs": {
+          "type": "array",
+          "description": "0 to 8 refs to policy blocks or service defaults.",
+          "minItems": 0,
+          "maxItems": 8,
+          "items": { "$ref": "#/$defs/RequirementRef" }
+        }
+      }
+    }
+  }
+}

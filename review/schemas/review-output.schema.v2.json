@@ -1,0 +1,142 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/larchanka-training/dmc-268-api-t6/main/review/schemas/review-output.schema.v2.json",
+  "title": "ReviewOutputV2",
+  "description": "ReviewOutput v2 contract with mandatory evidence references (CONTEXT_AND_VERIFICATION_SPEC §6.1).",
+  "type": "object",
+  "required": ["findings", "summary"],
+  "additionalProperties": false,
+  "properties": {
+    "findings": {
+      "type": "array",
+      "description": "At most 10 findings, ordered by severity, then by confidence descending. May be empty.",
+      "maxItems": 10,
+      "items": { "$ref": "#/$defs/ReviewFindingV2" }
+    },
+    "summary": { "$ref": "#/$defs/ReviewSummary" }
+  },
+  "$defs": {
+    "EvidenceRef": {
+      "type": "object",
+      "description": "A coordinate reference to code shown in the call manifest.",
+      "required": ["block_id", "start_line", "end_line"],
+      "additionalProperties": false,
+      "properties": {
+        "block_id": {
+          "type": "string",
+          "description": "The manifest block ID.",
+          "minLength": 1
+        },
+        "start_line": {
+          "type": "integer",
+          "description": "1-indexed start line within the shown block.",
+          "minimum": 1
+        },
+        "end_line": {
+          "type": "integer",
+          "description": "1-indexed end line within the shown block, >= start_line.",
+          "minimum": 1
+        }
+      }
+    },
+    "ReviewFindingV2": {
+      "type": "object",
+      "description": "One finding anchored to new-version lines of a file in the diff with evidence references.",
+      "required": [
+        "path",
+        "line",
+        "start_line",
+        "severity",
+        "category",
+        "title",
+        "body",
+        "suggestion",
+        "confidence",
+        "rule_name",
+        "evidence_refs"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "path": {
+          "type": "string",
+          "description": "File path relative to the repository root, as it appears in the diff.",
+          "minLength": 1
+        },
+        "line": {
+          "type": "integer",
+          "description": "The anchor line in the new version of the file; the last line of a multi-line range.",
+          "minimum": 1
+        },
+        "start_line": {
+          "type": ["integer", "null"],
+          "description": "The first line of a multi-line range, strictly before line; null for a single-line anchor.",
+          "minimum": 1
+        },
+        "severity": {
+          "type": "string",
+          "enum": ["critical", "high", "medium", "low", "info"]
+        },
+        "category": {
+          "type": "string",
+          "enum": ["security", "correctness", "performance", "readability"]
+        },
+        "title": {
+          "type": "string",
+          "description": "One line, no trailing period.",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "body": {
+          "type": "string",
+          "description": "The explanation in Markdown.",
+          "minLength": 1,
+          "maxLength": 1200
+        },
+        "suggestion": {
+          "type": ["string", "null"],
+          "description": "A drop-in replacement for lines start_line..line (or line); null when there is none."
+        },
+        "confidence": {
+          "type": "number",
+          "description": "The model's confidence in the finding.",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "rule_name": {
+          "type": ["string", "null"],
+          "description": "Attribution target: '.review/rules.md', 'AGENTS.md', 'service-defaults:<ID>', or null."
+        },
+        "evidence_refs": {
+          "type": "array",
+          "description": "1 to 8 references to shown code blocks.",
+          "minItems": 1,
+          "maxItems": 8,
+          "items": { "$ref": "#/$defs/EvidenceRef" }
+        }
+      }
+    },
+    "ReviewSummary": {
+      "type": "object",
+      "description": "The summary rendered into the review body.",
+      "required": ["problem", "done_well", "effort"],
+      "additionalProperties": false,
+      "properties": {
+        "problem": {
+          "type": "string",
+          "description": "One sentence naming the main issue.",
+          "minLength": 1
+        },
+        "done_well": {
+          "type": "string",
+          "description": "One or two sentences on what is done well.",
+          "minLength": 1
+        },
+        "effort": {
+          "type": "string",
+          "description": "The work needed before merge.",
+          "enum": ["none", "small", "medium", "large"]
+        }
+      }
+    }
+  }
+}

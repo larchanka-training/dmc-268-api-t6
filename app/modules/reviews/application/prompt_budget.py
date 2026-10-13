@@ -15,6 +15,7 @@ from dataclasses import replace
 from pathlib import PurePosixPath
 from typing import Protocol, runtime_checkable
 
+from app.modules.reviews.application.policy_snapshot import ExecutionProfile, PolicySnapshot
 from app.modules.reviews.application.prompt_builder import (
     ChangedFile,
     PromptBuilder,
@@ -47,6 +48,66 @@ class LengthAwareTokenCounter(TokenCounter, Protocol):
     """``count_length(n)`` equals ``count(text)`` for every text of length ``n``."""
 
     def count_length(self, characters: int) -> int: ...
+
+
+class PolicyBudgetExceededError(ValueError):
+    """Rendered policy documents exceed the maximum token budget (RULES_FORMAT_SPEC §3.3)."""
+
+
+class PreSendGuardError(ValueError):
+    """Rendered prompt exceeds the maximum input token budget or context window."""
+
+
+def policy_tokens(snapshot: PolicySnapshot, counter: TokenCounter) -> int:
+    """Measure the token count of rendered policy documents."""
+    rendered_rules = PromptBuilder._render_policy_rules(snapshot)
+    rendered_agents = PromptBuilder._render_policy_agents(snapshot)
+    return counter.count(rendered_rules) + counter.count(rendered_agents)
+
+
+def verify_policy_budget(
+    snapshot: PolicySnapshot,
+    counter: TokenCounter,
+    *,
+    max_policy_tokens: int = 12_000,
+) -> None:
+    """Ensure rendered policy documents do not exceed max_policy_tokens.
+
+    Fails closed with policy_prompt_budget_exceeded if limit is violated.
+    """
+    count = policy_tokens(snapshot, counter)
+    if count > max_policy_tokens:
+        raise PolicyBudgetExceededError(
+            f"policy_prompt_budget_exceeded: rendered policy is {count} tokens, "
+            f"limit is {max_policy_tokens}"
+        )
+
+
+def verify_pre_send_guard(
+    context: ReviewContext,
+    counter: TokenCounter,
+    *,
+    max_input_tokens: int,
+) -> None:
+    """Pre-send guard verifying total input budget and policy budget before an LLM call."""
+    if context.policy_snapshot is not None:
+        exec_profile = context.policy_snapshot.execution_profile
+        if isinstance(exec_profile, ExecutionProfile):
+            max_policy = exec_profile.max_policy_tokens
+        else:
+            raw = exec_profile.get("max_policy_tokens", 12_000)
+            max_policy = int(raw) if isinstance(raw, (int, str)) else 12_000
+        verify_policy_budget(
+            context.policy_snapshot,
+            counter,
+            max_policy_tokens=max_policy,
+        )
+
+    total = prompt_tokens(context, counter)
+    if total > max_input_tokens:
+        raise PreSendGuardError(
+            f"llm_context_overflow: rendered prompt is {total} tokens, limit is {max_input_tokens}"
+        )
 
 
 def prompt_tokens(context: ReviewContext, counter: TokenCounter) -> int:
