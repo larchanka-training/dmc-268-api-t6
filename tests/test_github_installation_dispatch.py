@@ -40,6 +40,7 @@ from app.modules.reviews.application.project_github_pull_request import (
 from app.modules.reviews.application.trigger_from_delivery import (
     CiTriggerEvent,
     ProjectedPullRequestTarget,
+    RunTriggerOutcome,
     TriggerFromDelivery,
 )
 from app.modules.reviews.application.try_enqueue_webhook_run import EnqueueResult, EnqueueStatus
@@ -184,14 +185,16 @@ def test_exact_ai_review_label_reaches_typed_intent_projector_and_only_add_trigg
         prs: list[PullRequestEvent] = field(default_factory=list)
         labels: list[PullRequestLabelEvent] = field(default_factory=list)
 
-        async def on_pr(self, event: PullRequestEvent) -> None:
+        async def on_pr(self, event: PullRequestEvent) -> RunTriggerOutcome:
             self.prs.append(event)
+            return RunTriggerOutcome("")
 
-        async def on_ci(self, event: CiTriggerEvent) -> None:
-            pass
+        async def on_ci(self, event: CiTriggerEvent) -> RunTriggerOutcome:
+            return RunTriggerOutcome("")
 
-        async def on_label(self, event: PullRequestLabelEvent) -> None:
+        async def on_label(self, event: PullRequestLabelEvent) -> RunTriggerOutcome:
             self.labels.append(event)
+            return RunTriggerOutcome("")
 
     intent = IntentProjector()
     trigger = Trigger()
@@ -284,27 +287,45 @@ def _check_suite_delivery() -> VerifiedGitHubDelivery:
 
 
 @pytest.mark.parametrize(
-    ("delivery", "status", "detail"),
+    ("delivery", "status", "detail", "trigger_detail"),
     [
         (
             _pull_request_delivery("labeled", label={"name": "ai-review"}),
             InstallationDeliveryDispatchStatus.PROJECTED_PR,
             "action=labeled label outcome",
+            "label outcome",
         ),
         (
             _pull_request_delivery("synchronize"),
             InstallationDeliveryDispatchStatus.PROJECTED_PR,
             "action=synchronize pr outcome",
+            "pr outcome",
         ),
         (
             _check_suite_delivery(),
             InstallationDeliveryDispatchStatus.PROCESSED_CI,
             "ci outcome",
+            "ci outcome",
+        ),
+        (
+            _pull_request_delivery("labeled", label={"name": "ai-review"}),
+            InstallationDeliveryDispatchStatus.PROJECTED_PR,
+            "action=labeled",
+            "",
+        ),
+        (
+            _check_suite_delivery(),
+            InstallationDeliveryDispatchStatus.PROCESSED_CI,
+            None,
+            "",
         ),
     ],
 )
 def test_the_run_trigger_outcome_becomes_the_dispatch_detail(
-    delivery: VerifiedGitHubDelivery, status: InstallationDeliveryDispatchStatus, detail: str
+    delivery: VerifiedGitHubDelivery,
+    status: InstallationDeliveryDispatchStatus,
+    detail: str | None,
+    trigger_detail: str,
 ) -> None:
     class Projector:
         async def execute(
@@ -313,14 +334,14 @@ def test_the_run_trigger_outcome_becomes_the_dispatch_detail(
             return PullRequestProjectionStatus.PROJECTED
 
     class Trigger:
-        async def on_pr(self, event: PullRequestEvent) -> str:
-            return "pr outcome"
+        async def on_pr(self, event: PullRequestEvent) -> RunTriggerOutcome:
+            return RunTriggerOutcome(trigger_detail)
 
-        async def on_label(self, event: PullRequestLabelEvent) -> str:
-            return "label outcome"
+        async def on_label(self, event: PullRequestLabelEvent) -> RunTriggerOutcome:
+            return RunTriggerOutcome(trigger_detail)
 
-        async def on_ci(self, event: CiTriggerEvent) -> str:
-            return "ci outcome"
+        async def on_ci(self, event: CiTriggerEvent) -> RunTriggerOutcome:
+            return RunTriggerOutcome(trigger_detail)
 
     adapter = GitHubWebhookDispatchAdapter(
         GitHubInstallationDeliveryDispatcher(
@@ -426,14 +447,14 @@ def test_former_reviewer_actions_do_not_project_intent_or_enqueue(action: str) -
             raise AssertionError("former reviewer action reached PR projector")
 
     class Trigger:
-        async def on_pr(self, event: PullRequestEvent) -> None:
+        async def on_pr(self, event: PullRequestEvent) -> RunTriggerOutcome:
             raise AssertionError("former reviewer action enqueued")
 
-        async def on_label(self, event: PullRequestLabelEvent) -> None:
+        async def on_label(self, event: PullRequestLabelEvent) -> RunTriggerOutcome:
             raise AssertionError("former reviewer action enqueued")
 
-        async def on_ci(self, event: CiTriggerEvent) -> None:
-            pass
+        async def on_ci(self, event: CiTriggerEvent) -> RunTriggerOutcome:
+            return RunTriggerOutcome("")
 
     adapter = GitHubWebhookDispatchAdapter(
         GitHubInstallationDeliveryDispatcher(
@@ -1170,3 +1191,44 @@ def test_invalid_receipt_never_enters_typed_dispatch() -> None:
             adapter.execute(VerifiedGitHubDelivery("delivery", event_name, payload).to_receipt())
         )
         assert result.status is expected
+
+
+@pytest.mark.parametrize(
+    ("delivery", "detail"),
+    [
+        (_pull_request_delivery("labeled", label={"name": "ai-review"}), "action=labeled waiting"),
+        (_pull_request_delivery("synchronize"), "action=synchronize waiting"),
+        (_check_suite_delivery(), "waiting"),
+    ],
+)
+def test_structured_run_trigger_retry_becomes_retryable_dispatch_status(
+    delivery: VerifiedGitHubDelivery, detail: str
+) -> None:
+    class Projector:
+        async def execute(
+            self, event: PullRequestEvent | PullRequestLabelEvent
+        ) -> PullRequestProjectionStatus:
+            return PullRequestProjectionStatus.PROJECTED
+
+    class Trigger:
+        async def on_pr(self, event: PullRequestEvent) -> RunTriggerOutcome:
+            return RunTriggerOutcome("waiting", retry_required=True)
+
+        async def on_label(self, event: PullRequestLabelEvent) -> RunTriggerOutcome:
+            return RunTriggerOutcome("waiting", retry_required=True)
+
+        async def on_ci(self, event: CiTriggerEvent) -> RunTriggerOutcome:
+            return RunTriggerOutcome("waiting", retry_required=True)
+
+    adapter = GitHubWebhookDispatchAdapter(
+        GitHubInstallationDeliveryDispatcher(
+            resolver=FakeInstallationResolver(),
+            onboarding=FakeOnboarding(),
+            pull_request_projector=Projector(),
+            label_intent_projector=Projector(),
+            run_trigger=Trigger(),
+        )
+    )
+    result = asyncio.run(adapter.execute(delivery.to_receipt()))
+    assert result.status == "deferred_run_trigger"
+    assert result.detail == detail

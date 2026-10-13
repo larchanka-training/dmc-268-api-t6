@@ -40,6 +40,7 @@ from app.modules.reviews.application.sweep_no_ci import SweepNoCi
 from app.modules.reviews.application.trigger_from_delivery import (
     CiTriggerEvent,
     ProjectedPullRequestTarget,
+    RunTriggerOutcome,
     TriggerFromDelivery,
 )
 from app.modules.reviews.application.try_enqueue_webhook_run import (
@@ -556,11 +557,10 @@ def test_pr_and_label_triggers_report_the_enqueue_outcome(
     enqueuer = OutcomeEnqueuer([result, result])
     trigger = TriggerFromDelivery(uow_factory=targets_uow(OutcomeTargets()), enqueuer=enqueuer)
 
-    assert asyncio.run(trigger.on_pr(_outcome_event("synchronize"))) == expected
-    assert (
-        asyncio.run(trigger.on_label(PullRequestLabelEvent(_outcome_event(), "ai-review")))
-        == expected
-    )
+    assert asyncio.run(trigger.on_pr(_outcome_event("synchronize"))) == RunTriggerOutcome(expected)
+    assert asyncio.run(
+        trigger.on_label(PullRequestLabelEvent(_outcome_event(), "ai-review"))
+    ) == RunTriggerOutcome(expected)
     assert enqueuer.calls == [(_PR, _HEAD), (_PR, _HEAD)]
 
 
@@ -578,7 +578,7 @@ def test_a_run_whose_publish_failed_is_reported_as_publication_pending_with_its_
 
     outcome = asyncio.run(trigger.on_pr(_outcome_event("synchronize")))
 
-    assert outcome == f"pr={_PR} head=aaaaaaa: publication_pending run={_RUN}"
+    assert outcome == RunTriggerOutcome(f"pr={_PR} head=aaaaaaa: publication_pending run={_RUN}")
 
 
 def test_a_pr_with_no_open_row_is_reported_without_enqueueing() -> None:
@@ -587,11 +587,12 @@ def test_a_pr_with_no_open_row_is_reported_without_enqueueing() -> None:
         uow_factory=targets_uow(OutcomeTargets(pull_request=None)), enqueuer=enqueuer
     )
 
-    assert asyncio.run(trigger.on_pr(_outcome_event("reopened"))) == "no open pull request"
-    assert (
-        asyncio.run(trigger.on_label(PullRequestLabelEvent(_outcome_event(), "ai-review")))
-        == "no open pull request"
+    assert asyncio.run(trigger.on_pr(_outcome_event("reopened"))) == RunTriggerOutcome(
+        "no open pull request"
     )
+    assert asyncio.run(
+        trigger.on_label(PullRequestLabelEvent(_outcome_event(), "ai-review"))
+    ) == RunTriggerOutcome("no open pull request")
     assert enqueuer.calls == []
 
 
@@ -604,7 +605,7 @@ def test_a_foreign_label_or_action_is_reported_without_enqueueing(label: str, ac
 
     outcome = asyncio.run(trigger.on_label(PullRequestLabelEvent(_outcome_event(action), label)))
 
-    assert outcome == "not an ai-review labeled action"
+    assert outcome == RunTriggerOutcome("not an ai-review labeled action")
     assert enqueuer.calls == []
 
 
@@ -623,7 +624,7 @@ def test_a_ci_event_reports_every_target_and_the_absence_of_one() -> None:
 
     outcome = asyncio.run(trigger.on_ci(event))
 
-    assert outcome == (
+    assert outcome == RunTriggerOutcome(
         f"pr={_PR} head=aaaaaaa: enqueued run={_RUN}; "
         f"pr={other} head=aaaaaaa: ineligible (waiting_for_ci)"
     )
@@ -631,7 +632,9 @@ def test_a_ci_event_reports_every_target_and_the_absence_of_one() -> None:
     nobody = TriggerFromDelivery(
         uow_factory=targets_uow(OutcomeTargets(ci=())), enqueuer=OutcomeEnqueuer([])
     )
-    assert asyncio.run(nobody.on_ci(event)) == "no open pull request at this head"
+    assert asyncio.run(nobody.on_ci(event)) == RunTriggerOutcome(
+        "no open pull request at this head"
+    )
 
 
 @pytest.mark.parametrize(
@@ -689,8 +692,10 @@ def test_an_ineligible_outcome_names_what_blocks_or_delays_the_gate(
     use_case, _ = _enqueue(eligibility=Eligibility(decision=decision))
     trigger = TriggerFromDelivery(uow_factory=targets_uow(OutcomeTargets()), enqueuer=use_case)
 
-    assert asyncio.run(trigger.on_pr(_outcome_event("synchronize"))) == expected
-    assert asyncio.run(trigger.on_ci(CiTriggerEvent(17, 101, _HEAD, "check_suite"))) == expected
+    assert asyncio.run(trigger.on_pr(_outcome_event("synchronize"))) == RunTriggerOutcome(expected)
+    assert asyncio.run(
+        trigger.on_ci(CiTriggerEvent(17, 101, _HEAD, "check_suite"))
+    ) == RunTriggerOutcome(expected)
 
 
 @pytest.fixture
@@ -1325,3 +1330,121 @@ def test_postgres_projection_cancels_queued_and_flags_running_run(
             await engine.dispose()
 
     asyncio.run(exercise())
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("state", [RunState.RUNNING, RunState.PUBLISHING])
+@pytest.mark.parametrize(
+    ("head", "cancel_requested", "status"),
+    [
+        ("c" * 40, True, "deferred"),
+        ("c" * 40, False, "duplicate"),
+        ("a" * 40, True, "duplicate"),
+        ("a" * 40, False, "duplicate"),
+    ],
+)
+def test_postgres_old_head_cancellation_is_temporary_enqueue_blocker(
+    webhook_run_database: tuple[str, str],
+    state: RunState,
+    head: str,
+    cancel_requested: bool,
+    status: str,
+) -> None:
+    database_url, schema = webhook_run_database
+
+    async def exercise() -> None:
+        engine = create_async_engine(
+            database_url, connect_args={"options": f"-csearch_path={schema}"}
+        )
+        sessions = async_sessionmaker(engine, expire_on_commit=False)
+
+        class ConfirmedPublisher:
+            async def publish_confirmed(
+                self,
+                message: PendingRunMessage,
+                *,
+                kind: RunPublicationKind = RunPublicationKind.QUEUED,
+            ) -> None:
+                raise AssertionError("B cannot publish before A becomes terminal")
+
+        try:
+            async with sessions.begin() as session:
+                session.add(
+                    Run(
+                        id=_RUN,
+                        code_change_id=_PR,
+                        base_sha=_BASE,
+                        base_ref="main",
+                        head_sha=head,
+                        state=state,
+                        trigger="webhook",
+                        idempotency_key="f" * 64,
+                        engine=Engine.FAST,
+                        rule_version_id=_RULE,
+                        prompt_version_id=_PROMPT,
+                        attempt=1,
+                        available_at=_NOW,
+                        created_at=_NOW,
+                        cancel_requested=cancel_requested,
+                    )
+                )
+            enqueuer = TryEnqueueWebhookRun(
+                eligibility=Eligibility(),
+                uow_factory=lambda: SqlAlchemyWebhookRunUnitOfWork(sessions),
+                publisher=ConfirmedPublisher(),
+                now=lambda: _NOW,
+            )
+            result = await enqueuer.execute(_PR, _HEAD)
+            assert result.status == status
+            assert result.reason == "active_run"
+            assert result.run_id is None
+            async with sessions() as session:
+                runs = (await session.scalars(select(Run))).all()
+                assert [(run.head_sha, run.state.value) for run in runs] == [(head, state.value)]
+        finally:
+            await engine.dispose()
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.parametrize(
+    "other_result",
+    [
+        EnqueueResult(EnqueueStatus.ENQUEUED, _RUN),
+        EnqueueResult(EnqueueStatus.DUPLICATE, reason="head_already_reviewed"),
+    ],
+)
+@pytest.mark.parametrize("deferred_first", [False, True])
+def test_ci_delivery_retains_retry_intent_when_any_target_waits(
+    other_result: EnqueueResult, deferred_first: bool
+) -> None:
+    other = UUID("77777777-7777-7777-7777-777777777777")
+    deferred = EnqueueResult(EnqueueStatus.DEFERRED, reason="active_run")
+    enqueuer = OutcomeEnqueuer(
+        [deferred, other_result] if deferred_first else [other_result, deferred]
+    )
+    trigger = TriggerFromDelivery(
+        uow_factory=targets_uow(OutcomeTargets(ci=(_PR, other))), enqueuer=enqueuer
+    )
+    outcome = asyncio.run(trigger.on_ci(CiTriggerEvent(17, 101, _HEAD, "check_suite")))
+    assert outcome.retry_required is True
+    assert "deferred (active_run)" in outcome.detail
+    assert "; " in outcome.detail
+    assert enqueuer.calls == [(_PR, _HEAD), (other, _HEAD)]
+
+
+@pytest.mark.parametrize("action", ["synchronize", "labeled"])
+def test_pr_and_label_triggers_return_structured_retry_intent(action: str) -> None:
+    trigger = TriggerFromDelivery(
+        uow_factory=targets_uow(OutcomeTargets()),
+        enqueuer=OutcomeEnqueuer([EnqueueResult(EnqueueStatus.DEFERRED, reason="active_run")]),
+    )
+    event = _outcome_event(action)
+    outcome = asyncio.run(
+        trigger.on_label(PullRequestLabelEvent(event, "ai-review"))
+        if action == "labeled"
+        else trigger.on_pr(event)
+    )
+    assert outcome == RunTriggerOutcome(
+        f"pr={_PR} head=aaaaaaa: deferred (active_run)", retry_required=True
+    )

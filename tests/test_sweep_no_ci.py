@@ -29,7 +29,7 @@ class Candidates:
     async def list_due(self, now: datetime, limit: int) -> tuple[DueNoCiCandidate, ...]:
         assert now == _NOW
         assert limit == 100
-        return self.due
+        return tuple(candidate for candidate in self.due if candidate not in self.excluded)
 
     async def exclude(self, candidate: DueNoCiCandidate) -> None:
         self.excluded.append(candidate)
@@ -70,6 +70,22 @@ def test_sweep_does_not_exclude_enqueued_candidate() -> None:
         ).execute()
     )
 
+    assert candidates.excluded == []
+
+
+def test_sweep_retries_temporary_contention_without_head_or_label_change(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    candidates = Candidates()
+    enqueuer = Enqueuer(EnqueueResult(EnqueueStatus.DEFERRED, reason="active_run"))
+    sweep = SweepNoCi(uow_factory=candidates_uow(candidates), enqueuer=enqueuer, now=lambda: _NOW)
+    with caplog.at_level(logging.INFO, logger="app.modules.reviews.application.sweep_no_ci"):
+        assert asyncio.run(sweep.execute()) == 1
+    assert candidates.excluded == []
+    assert "excluded until" not in caplog.text
+    enqueuer.result = EnqueueResult(EnqueueStatus.ENQUEUED)
+    assert asyncio.run(sweep.execute()) == 1
+    assert enqueuer.calls == [_CANDIDATE, _CANDIDATE]
     assert candidates.excluded == []
 
 

@@ -11,7 +11,10 @@ import httpx
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, model_validator
 
 from app.common.application.github_repository_name import REPOSITORY_FULL_NAME_MAX_LENGTH
-from app.common.infrastructure.github_repository_path import repository_path_from_full_name
+from app.common.infrastructure.github_repository_path import (
+    commit_sha_segment,
+    repository_path_from_full_name,
+)
 from app.modules.reviews.application.prompt_builder import PullRequestMeta
 from app.modules.reviews.application.vcs_diff import (
     MAX_BLOB_BYTES,
@@ -97,6 +100,14 @@ class _Blob(_GitHubDto):
     encoding: Literal["base64"]
     content: str
     size: int = Field(ge=0)
+
+
+class _Commit(_GitHubDto):
+    sha: str = Field(pattern=_SHA)
+
+
+class _Comparison(_GitHubDto):
+    merge_base_commit: _Commit
 
 
 _FILES = TypeAdapter(list[_File])
@@ -203,6 +214,23 @@ class HttpGitHubVcsProvider:
         if await self.get_pull_request(locator) != pull_request:
             raise ValueError("GitHub pull request changed during file pagination")
         return tuple(files)
+
+    async def get_merge_base(self, pull_request: VcsPullRequest) -> str:
+        """Return the merge base GitHub diffs the pull request head against (three-dot)."""
+        locator = pull_request.locator
+        prefix = _repository_prefix(locator)
+        base = commit_sha_segment(pull_request.base_sha)
+        head = commit_sha_segment(pull_request.head_sha)
+        token = await self._tokens.get_installation_access_token(locator.installation_external_id)
+        response = await self._client.get(
+            f"{prefix}/compare/{base}...{head}",
+            # Only the merge base is read; one commit per page keeps the response small.
+            params={"per_page": 1},
+            headers=_headers(token),
+            timeout=_REQUEST_TIMEOUT,
+        )
+        response.raise_for_status()
+        return _Comparison.model_validate(response.json()).merge_base_commit.sha
 
     async def get_blob(self, locator: PullRequestLocator, sha: str) -> bytes:
         prefix = _repository_prefix(locator)

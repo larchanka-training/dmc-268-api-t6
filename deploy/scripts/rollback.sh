@@ -28,6 +28,7 @@ fi
 # Per-run registry credentials (see deploy.sh). Started by deploy.sh, the rollback inherits its
 # DOCKER_CONFIG, which still holds the login needed to pull the previous image.
 OWN_DOCKER_CONFIG=""
+PROBE_DIR=""
 if [[ -z "${DOCKER_CONFIG:-}" ]]; then
   DOCKER_CONFIG="$(mktemp -d)"
   OWN_DOCKER_CONFIG="${DOCKER_CONFIG}"
@@ -39,11 +40,152 @@ logout_registry() {
 }
 cleanup_registry() {
   logout_registry
+  if [[ -n "${PROBE_DIR}" ]]; then
+    rm -rf "${PROBE_DIR}"
+  fi
   if [[ -n "${OWN_DOCKER_CONFIG}" ]]; then
     rm -rf "${OWN_DOCKER_CONFIG}"
   fi
 }
 trap cleanup_registry EXIT
+
+refuse_rollback() {
+  echo "rollback refused: $1" >&2
+  echo "Select a compatible image or follow the PostgreSQL recovery runbook." >&2
+  exit 1
+}
+
+inspect_image_id() {
+  local output id_pattern
+  # Sentinel retains the CLI newline: reject noise, multiple IDs and extra output lines.
+  if ! output="$(docker image inspect --format '{{.Id}}' "$1" 2>/dev/null && printf '.')"; then
+    return 1
+  fi
+  id_pattern='^sha256:[0-9a-f]{64}'$'\n''\.$'
+  [[ "${output}" =~ ${id_pattern} ]] || return 1
+  printf '%s' "${output%$'\n.'}"
+}
+
+resolve_target_identity() {
+  local repository_pattern digest_pattern candidate_pattern tag_pattern repository candidates candidate candidate_id matches
+  repository_pattern='[a-z0-9][a-z0-9.-]*(:[0-9]+)?/[a-z0-9]+([._-][a-z0-9]+)*(/[a-z0-9]+([._-][a-z0-9]+)*)*'
+  digest_pattern="^(${repository_pattern})(:[A-Za-z0-9_][A-Za-z0-9_.-]{0,127})?@sha256:[0-9a-f]{64}$"
+  candidate_pattern="^(${repository_pattern})@sha256:[0-9a-f]{64}$"
+  tag_pattern="^(${repository_pattern})(:[A-Za-z0-9_][A-Za-z0-9_.-]{0,127})?$"
+  TARGET_IMAGE_ID="$(inspect_image_id "${IMAGE}")" || refuse_rollback "target image identity is unavailable"
+  if [[ "${IMAGE}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+    [[ "${TARGET_IMAGE_ID}" == "${IMAGE}" ]] || refuse_rollback "target image identity is inconsistent"
+    # Verifier-only: its scoped wrapper validates a prebuilt local ID at the pull boundary.
+    # Operators use registry refs; ordinary docker pull does not accept a raw local image ID.
+    RELEASE_REF="${IMAGE}"
+  elif [[ "${IMAGE}" =~ ${digest_pattern} ]]; then
+    # Preserve the supplied immutable ref for forward promotion's state equality guard.
+    RELEASE_REF="${IMAGE}"
+  elif [[ "${IMAGE}" =~ ${tag_pattern} ]]; then
+    repository="${BASH_REMATCH[1]}"
+    if ! candidates="$(docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "${TARGET_IMAGE_ID}" 2>/dev/null)"; then
+      refuse_rollback "target release digest is unavailable"
+    fi
+    matches=0
+    while IFS= read -r candidate; do
+      [[ "${candidate}" =~ ${candidate_pattern} ]] || refuse_rollback "target release digest is unavailable"
+      if [[ "${BASH_REMATCH[1]}" == "${repository}" ]]; then
+        RELEASE_REF="${candidate}"
+        matches=$((matches + 1))
+      fi
+    done <<< "${candidates}"
+    [[ "${matches}" == 1 ]] || refuse_rollback "target release digest is unavailable"
+    candidate_id="$(inspect_image_id "${RELEASE_REF}")" || refuse_rollback "target release digest is unavailable"
+    [[ "${candidate_id}" == "${TARGET_IMAGE_ID}" ]] || refuse_rollback "target release digest is inconsistent"
+  else
+    refuse_rollback "target release reference is unsupported"
+  fi
+}
+
+check_target_revision() {
+  local probe_output probe_status
+  [[ -r "${SCRIPT_DIR}/check-rollback-revision.py" ]] || refuse_rollback "target checker is unavailable"
+  umask 077
+  PROBE_DIR="$(mktemp -d)"
+  # Compose loads every role's env_file before service filtering. A private bootstrap-only
+  # config avoids requiring/recreating missing app files before admission. It joins the existing
+  # project's DB network only; external=true prevents creating a replacement network.
+  cat > "${PROBE_DIR}/probe.yml" <<'PROBE_COMPOSE'
+services:
+  bootstrap:
+    image: ${IMAGE:?IMAGE is required}
+    environment:
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-app}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/${POSTGRES_DB:-app}
+    restart: "no"
+networks:
+  default:
+    external: true
+    name: ${COMPOSE_PROJECT:?COMPOSE_PROJECT is required}_default
+PROBE_COMPOSE
+  # Keep the checker protocol on stdout; Compose progress and driver stderr are never forwarded.
+  # The sentinel preserves trailing newlines so extra output cannot resemble a valid verdict.
+  probe_status=0
+  probe_output="$(
+    IMAGE="${TARGET_IMAGE_ID}" COMPOSE_PROJECT="${COMPOSE_PROJECT}" COMPOSE_IGNORE_ORPHANS=true \
+      POSTGRES_USER="${POSTGRES_USER:-app}" POSTGRES_PASSWORD="${POSTGRES_PASSWORD}" \
+      POSTGRES_DB="${POSTGRES_DB:-app}" \
+      docker compose -p "${COMPOSE_PROJECT}" -f "${PROBE_DIR}/probe.yml" \
+        run --rm --no-deps -T bootstrap python - \
+        < "${SCRIPT_DIR}/check-rollback-revision.py" 2>/dev/null
+    status=$?
+    printf '.'
+    exit "${status}"
+  )" || probe_status=$?
+  if [[ "${probe_status}" != 0 ]]; then
+    case "${probe_output}" in
+      "rollback revision check: refused: target must have exactly one head"$'\n.'|\
+      "rollback revision check: refused: database must have exactly one tracked revision"$'\n.'|\
+      "rollback revision check: refused: database revision is unknown"$'\n.'|\
+      "rollback revision check: refused: database revision is not an ancestor of target head"$'\n.'|\
+      "rollback revision check: refused: cannot inspect target graph or database"$'\n.')
+        refuse_rollback "${probe_output%$'\n.'}" ;;
+      *) refuse_rollback "target revision probe failed (exit ${probe_status})" ;;
+    esac
+  fi
+  [[ "${probe_output}" == "rollback revision check: compatible"$'\n.' ]] || \
+    refuse_rollback "target revision probe returned an unexpected result"
+}
+
+diagnostics_failed() {
+  echo "rollback completion failed: $1 environment key diagnostics failed" >&2
+  echo "The healthy target release is recorded. Inspect service health and retry only the standalone diagnostics in SECRETS.md; do not rerun rollback.sh or rollback.yml." >&2
+  exit 1
+}
+
+print_environment_keys() {
+  local service keys output python_source key_list_pattern
+  key_list_pattern='^\[("[A-Za-z_][A-Za-z0-9_]*"(, "[A-Za-z_][A-Za-z0-9_]*")*)?\]$'
+  python_source="$(cat <<'PYTHON'
+import json
+import os
+import re
+print(json.dumps(sorted(name for name in os.environ.keys() if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name))))
+PYTHON
+  )"
+  for service in api worker webhook-worker; do
+    # Capture stdout only and retain its final newline; stderr is never part of the protocol.
+    if ! output="$(
+      "${COMPOSE[@]}" exec -T "${service}" python -c "${python_source}" 2>/dev/null
+      status=$?
+      printf '.'
+      exit "${status}"
+    )"; then
+      diagnostics_failed "${service}"
+    fi
+    [[ "${output}" == *$'\n.' ]] || diagnostics_failed "${service}"
+    keys="${output%$'\n.'}"
+    # Never echo raw exec output: only a JSON list of validated ASCII names can reach the log.
+    if [[ ! "${keys}" =~ ${key_list_pattern} ]]; then
+      diagnostics_failed "${service}"
+    fi
+    echo "${service} environment keys: ${keys}"
+  done
+}
 
 restore_bootstrap() {
   # By project name only, without compose.yml: an older .env may lack variables the current file
@@ -123,13 +265,21 @@ done
 cd "${APP_DIR}"
 
 if [[ -n "${GHCR_TOKEN:-}" ]]; then
-  echo "${GHCR_TOKEN}" | docker login ghcr.io -u "${GHCR_USER:-github}" --password-stdin >/dev/null
+  if ! echo "${GHCR_TOKEN}" | docker login ghcr.io -u "${GHCR_USER:-github}" --password-stdin >/dev/null 2>&1; then
+    refuse_rollback "registry login failed"
+  fi
   unset GHCR_TOKEN
 fi
 
+if ! docker pull "${IMAGE}" >/dev/null 2>&1; then
+  refuse_rollback "target image pull failed"
+fi
+resolve_target_identity
+check_target_revision
+
 write_compose_env_file \
   "${ENV_FILE}" \
-  "${IMAGE}" \
+  "${RELEASE_REF}" \
   "${POSTGRES_USER:-app}" \
   "${POSTGRES_PASSWORD}" \
   "${POSTGRES_DB:-app}" \
@@ -142,20 +292,22 @@ write_compose_env_file \
 # App secrets are not tied to an image: the files of the last deploy stay as they are.
 ensure_app_env_files "${APP_DIR}"
 
-docker pull "${IMAGE}"
-"${COMPOSE[@]}" up -d --remove-orphans --wait --wait-timeout 180
+IMAGE="${TARGET_IMAGE_ID}" "${COMPOSE[@]}" up --pull missing -d --remove-orphans --wait --wait-timeout 180
 
 # Shared root account: drop the GHCR credential after the last pull (compose up, pull_policy: always).
 logout_registry
 
+# Healthy up has changed the running release; persist its identity before fallible diagnostics.
 if [[ "${ROLLBACK_MODE}" == "manual" && -f "${STATE_FILE}" ]]; then
   cp "${STATE_FILE}" "${PREVIOUS_FILE}"
 fi
 
 {
-  echo "current_image=${IMAGE}"
+  echo "current_image=${RELEASE_REF}"
   echo "deployed_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   echo "rolled_back=true"
 } > "${STATE_FILE}"
 
-echo "rolled back to ${IMAGE}"
+print_environment_keys
+
+echo "rolled back to ${RELEASE_REF}"

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import re
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Protocol
@@ -15,9 +14,9 @@ from app.modules.reviews.application.prompt_builder import (
     FileStatus,
     PullRequestMeta,
 )
+from app.modules.reviews.application.unified_diff import HunkRow, parse_hunks, split_lf
 
 _LOGGER = logging.getLogger(__name__)
-_HUNK = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
 _MAX_PATCH_LINES = 20_000
 _MAX_PATCH_BYTES = 1_048_576
 MAX_BLOB_BYTES = 1_048_576
@@ -100,6 +99,12 @@ class VcsProvider(Protocol):
     async def get_diff(self, pull_request: VcsPullRequest) -> tuple[VcsFile, ...]: ...
 
     async def get_blob(self, locator: PullRequestLocator, sha: str) -> bytes: ...
+
+
+class MergeBaseProvider(Protocol):
+    """Resolves the old side of a pull request diff: the merge base of its base and head."""
+
+    async def get_merge_base(self, pull_request: VcsPullRequest) -> str: ...
 
 
 class FetchVcsReviewInput:
@@ -209,52 +214,22 @@ def _is_binary(blob: bytes) -> bool:
 
 
 def _patch_lines(patch: str) -> list[str]:
-    """Split only on LF; Unicode line separators can be literal source content."""
-    if not patch:
-        return []
-    lines = patch.split("\n")
-    if lines[-1] == "":
-        lines.pop()
-    return [line[:-1] if line.endswith("\r") else line for line in lines]
+    """Patch lines for the L1 prompt input: a trailing CR is dropped from every line."""
+    return [line[:-1] if line.endswith("\r") else line for line in split_lf(patch)]
 
 
 def parse_file_patch(path: str, status: FileStatus, patch: str) -> ChangedFile:
     """Parse GitHub's per-file hunks, preserving old-side removal anchors."""
-    lines: list[DiffLine] = []
-    old_number = new_number = old_remaining = new_remaining = 0
-    saw_hunk = False
-    for raw_line in _patch_lines(patch):
-        header = _HUNK.match(raw_line)
-        if header is not None:
-            if saw_hunk and (old_remaining or new_remaining):
-                raise ValueError("GitHub diff hunk ended before its declared line counts")
-            old_number, new_number = int(header.group(1)), int(header.group(3))
-            old_remaining = int(header.group(2)) if header.group(2) is not None else 1
-            new_remaining = int(header.group(4)) if header.group(4) is not None else 1
-            saw_hunk = True
-            continue
-        if not saw_hunk:
-            raise ValueError("GitHub diff has no hunk header")
-        if raw_line == "\\ No newline at end of file":
-            continue
-        if raw_line.startswith("+"):
-            lines.append(DiffLine(new_number, "added", raw_line[1:]))
-            new_number += 1
-            new_remaining -= 1
-        elif raw_line.startswith("-"):
-            lines.append(DiffLine(old_number, "removed", raw_line[1:]))
-            old_number += 1
-            old_remaining -= 1
-        elif raw_line.startswith(" "):
-            lines.append(DiffLine(new_number, "context", raw_line[1:]))
-            old_number += 1
-            new_number += 1
-            old_remaining -= 1
-            new_remaining -= 1
-        else:
-            raise ValueError("GitHub diff hunk has an unknown line")
-        if old_remaining < 0 or new_remaining < 0:
-            raise ValueError("GitHub diff hunk exceeded its declared line counts")
-    if not saw_hunk or old_remaining or new_remaining:
-        raise ValueError("GitHub diff hunk is incomplete")
-    return ChangedFile(path, status, tuple(lines))
+    lines = tuple(
+        DiffLine(_line_number(row), row.kind, row.text)
+        for hunk in parse_hunks(_patch_lines(patch))
+        for row in hunk.rows
+    )
+    return ChangedFile(path, status, lines)
+
+
+def _line_number(row: HunkRow) -> int:
+    """A removed line keeps its old number; every other line is numbered by the new side."""
+    number = row.old_line if row.kind == "removed" else row.new_line
+    assert number is not None
+    return number
