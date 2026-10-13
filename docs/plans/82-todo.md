@@ -282,7 +282,7 @@ update documentation with measured results and provenance.
 **Acceptance criteria:**
 - [x] Two offline JSON reports equal, no static/corpus drift, all 24 cases represented.
 - [x] README/test strategy show actual first-answer validity, TP/FP/FN and requested quality metrics with denominators and run evidence; no unsupported improvement claim.
-- [ ] Four required gates pass; CI replay passes; integration skips/limitations reported honestly.
+- [x] Four required gates pass; CI replay passes; integration skips/limitations reported honestly.
 
 **Verification:** Commands in `82-plan.md`: final corpus validation, replay twice,
 `uv run ruff check .`, `uv run ruff format --check .`, `uv run mypy .`, `uv run pytest`.
@@ -302,8 +302,8 @@ Final corpus validation passes 24/24. `/tmp/82-final-replay-1.json` and
 JSON remains byte-identical to the accepted live safe report. The exact gold-corpus
 and replay shell step from `.github/workflows/ci-cd.yml` passes **locally**, produces
 24/24 distribution-passed summary, and gives the same JSON report with no warnings
-(`/tmp/82-final-local-ci-yc14d7n6`). Hosted CI replay remains pending until publisher
-creates the draft PR; local execution is not hosted evidence.
+(`/tmp/82-final-local-ci-yc14d7n6`). Hosted evidence is recorded below separately
+from this local verification.
 
 Mandatory final Ruff lint, format (435 files) and mypy (432 source files) pass.
 The final complete dedicated PostgreSQL/RabbitMQ pytest gate passed 3,508 tests,
@@ -319,16 +319,32 @@ corrections. The coordinator independently verified remote main remains
 Mandatory Ruff lint, format and mypy were rerun after the documentation fixes and
 pass. No shaping input or raw artifact bytes changed after capture; no additional
 paid call was made. Local implementation, capture, review and four-gate evidence
-are complete; Task 7's combined final checkbox remains pending only for hosted CI
-replay, to be verified by the publisher after draft-PR creation. Publication and
-whole-issue completion are not claimed by this local checkpoint.
+are complete. Draft [PR #154](https://github.com/larchanka-training/dmc-268-api-t6/pull/154)
+is published without a selected reviewer; no merge or issue closure was performed.
+
+Hosted [CI run 38474716329](https://github.com/larchanka-training/dmc-268-api-t6/actions/runs/38474716329)
+succeeded on publication head `570a073e6ab577dc26a5f8fa96a8ef76cccf7b17`. All nine
+active checks passed; the three main-only image-push/deploy/promotion jobs were
+skipped as expected for a PR. Hosted Ruff lint and format check (435 files), mypy
+(432 source files), and the complete pytest gate passed: 3,508 tests, no skips,
+2 existing deprecation warnings in 707.96s, with required line/branch coverage 100%.
+Gold corpus validation passed 24/24; recorded replay printed the accepted metrics
+and no drift warnings (the workflow prints every replay warning). The separate
+integration suite passed 616 tests, 2,892 deselected and 2 existing warnings in
+535.69s; its XML gate explicitly reported 616 collected and zero skipped.
+Publisher retained the job log at `/tmp/82-ci-38474716329-python.log`.
+
+This final evidence update changes only this task document. The resulting final
+PR head is checked again by hosted CI; its run is reported in the PR body and final
+publication response without another evidence commit. All 25 artifact files remain
+byte-identical to the accepted capture, and replay has no input drift.
 **Dependencies:** Task 6.
 **Files likely touched:** `test-prs-dataset/README.md`, `docs/TEST_PLAN.md` (at most 2).
 **Estimated scope:** Small.
 
 ## Checkpoint: Complete
 
-- [ ] Issue #82 retrieval, tests, golden/provenance and full replacement criteria met.
-- [ ] Final main rebase does not change shaping inputs after capture; if it does,
+- [x] Issue #82 retrieval, tests, golden/provenance and full replacement criteria met.
+- [x] Final main rebase does not change shaping inputs after capture; if it does,
   obtain replacement-run approval and recapture all 24 before claiming completion.
-- [ ] Ready for standards/spec review and conventional PR referencing #82.
+- [x] Ready for standards/spec review and conventional PR referencing #82.
