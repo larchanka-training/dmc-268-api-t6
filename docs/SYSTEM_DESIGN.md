@@ -625,8 +625,8 @@ created/added восстанавливают доступность после �
 
 Проверки в закрытой UOW предшествуют получению installation-токена и каждому
 следующему GitHub HTTP-запросу: details/tree/labels, PR/timeline/CI страницы,
-VCS/stream, check-run и публикация с повторными запросами. LLM проверяет origin
-перед каждым фактическим POST, включая смену ключа, retry/fallback/JSON repair и
+VCS/stream, policy/AST context tree и blob, check-run и публикация с повторными
+запросами. LLM проверяет origin перед каждым фактическим POST, включая смену ключа, retry/fallback/JSON repair и
 ожидание FX/ledger; после финальной проверки должно оставаться время полного call
 timeout. Кэшированный locator не заменяет проверку. Только уже начатый внешний
 запрос может закончиться: его оплаченный LLM usage и append-only audit сохраняются. Если успешный review POST
@@ -647,9 +647,9 @@ inline-комментарии на GitHub могут существовать. �
 идентичности квитанции не входят в этот PR.
 
 Существующие terminal Run state/payload, findings/comments/diff/context не
-переписываются; обычные diff/context записи требуют активного origin и RUNNING
-под атомарными блокировками. История и cache-only file/action routes по-прежнему
-авторизуются по текущей Repository и грантам; новый rerun использует новый origin.
+переписываются; обычные diff/context записи, policy documents и policy snapshots
+требуют активного origin и RUNNING под атомарными блокировками. История и cache-only
+file/action routes по-прежнему авторизуются по текущей Repository и грантам; новый rerun использует новый origin.
 
 Выбор источника, создание установки и перенос сериализуются транзакционной
 блокировкой аккаунта PostgreSQL, затем блокировками установок в стабильном порядке.
@@ -662,10 +662,22 @@ FK `KEY SHARE` совместимы, retirement/rebind блокируются. �
 GitHub/LLM calls остаются вне DB-транзакций. Миграции добавляют nullable positive
 BIGINT `account_external_id`, `deleted_at`, доступность и внутренний Run origin без
 угадывания по login; существующее пользовательское `enabled` сохраняется. При
-откате `20261010_0029` доступность сворачивается в `enabled AND installation_available`, чтобы
-снятая App не ожила на 0028; `account_external_id` удаляется безвозвратно. Повторный
-upgrade не восстанавливает числовую идентичность и будущая переустановка такого
-архива создаёт чистую цель. Уже удалённая legacy-установка 168453694 из #106
+ручном downgrade **до `20261012_0030`** уже откатываются
+`20261010_0030` и `20261010_0029`: удаляются Run origin, `account_external_id`,
+`deleted_at` и `installation_available`. Доступность сворачивается в
+`enabled AND installation_available`; `enabled=true/installation_available=false`
+становится `enabled=false`. Повторный upgrade сохраняет false и не восстанавливает
+исходное пользовательское предпочтение или удалённую числовую идентичность.
+Backfill может заполнить `deleted_at` из сохранившейся квитанции полного отзыва и
+Run origin из текущего FK Repository, но не гарантирует восстановление прежних
+исторических значений удалённых колонок. Будущая переустановка такого архива без
+account evidence создаёт чистую цель.
+
+Более глубокий downgrade **до `20261007_0028`** дополнительно удаляет policy
+documents/snapshots, conventions с `policy_key IS NOT NULL` и сам policy key.
+Откат образа сам по себе не выполняет downgrade схемы; восстановление удалённых
+данных требует проверенного backup ([CICD](CICD.md), §5). Уже удалённая
+legacy-установка 168453694 из #106
 не имеет подтверждённого числового ID: история приёмки #57 этим изменением не
 восстанавливается. Backfill квитанций и расширение контракта не входят в #113.
 
@@ -836,6 +848,13 @@ DiffMap описывает доступный diff, а видимость каж
 
 GitHub требует `start_side` вместе с многострочным `start_line`. LEFT проектируется
 в v3 и не получает suggestion.
+
+Общий origin fence (§6.4) защищает записи diff/context, policy documents и policy
+snapshots: нужны активный исходный origin и RUNNING, проверенные атомарно в короткой
+транзакции. Перед installation-токеном и каждым policy/AST context tree/blob
+HTTP-запросом повторяется checkpoint claimed Run; кэшированный locator или дерево
+не заменяет разрешение. GitHub/LLM calls выполняются вне DB-транзакций. Существующие
+terminal payload и append-only audit сохраняются по правилам §6.4.
 
 Публикация обсуждений реализована для GitHub и для GitLab (#97). Bitbucket не
 реализован. Приём GitLab — вебхуки, diff и блобы — не реализован: прогон

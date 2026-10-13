@@ -18,7 +18,10 @@ Changed source files:
 - `app/modules/reviews/application/review_context_stage.py`
 
 Policy tree reads check immediately before token acquisition and before the actual
-GET. Revision-tree reads check before cache lookup/token acquisition and before GET.
+GET. Revision-tree reads check immediately after an awaited cache miss before token
+acquisition, and again before GET. The initial pre-cache check and the top-level
+`ReviewContextStage.begin/run` checks are **defense in depth**: the recorded tests
+do not establish a separate zero-cache-access guarantee for these earlier checks.
 Delegated blob, PR and comparison reads forward the required checkpoint to the
 existing VCS adapter. Missing origin input produces `RunCancelled`.
 
@@ -67,10 +70,13 @@ source, so cancellation assertions cannot pass on a path that never attempts enr
 
 ## Cache-await checkpoint correction
 
-An awaited Redis tree-cache miss now rechecks the Run immediately before token
-acquisition. The initial pre-cache checkpoint cannot authorize work after the cache
-await returns. This adds one checkpoint without changing cache hits, misses or
-complete/incomplete tree handling.
+An awaited Redis tree-cache miss rechecks the Run immediately before token
+acquisition. The initial pre-cache checkpoint is defense in depth and cannot
+authorize work after the cache await returns. The post-cache-await and per-token/
+per-request checks carry the request-boundary guarantees recorded below; no separate
+zero-cache-call guarantee is claimed for pre-cache or top-level stage checks. The
+correction added one checkpoint without changing cache hits, misses or complete/
+incomplete tree handling.
 
 The regression first failed in both unit variants: cancellation and deadline were
 propagated only after the token recorder had received installation 17, while zero
@@ -88,6 +94,17 @@ requests. Focused Ruff check, format check and strict mypy are clean on the thre
 changed Python files. Combined gates on the corrected source are recorded in
 the [final proof](113-review-round8-final.md); the interrupted preliminary full
 run is excluded from passing-gate evidence.
+
+## Separate #151 public composition proof
+
+The counts above are historical round-eight executions, not current-head gate
+results. The [#151 verification](151-verification.md) separately records the public
+`compose_worker_process(...).handle_run.execute(...)` regression with real PostgreSQL
+and the production context factory. Its active control reaches imported context and
+publication; retirement during the base-policy root-tree response blocks subsequent
+HTTP requests. Replacing only the checkpoint forwarded into the stage with a no-op
+fails the request-count assertion; restored wiring passes. This adds composition
+coverage without claiming an independent zero-cache-access guarantee.
 
 ## Reproduce
 
