@@ -378,6 +378,45 @@ def test_binary_files_count_as_exclusions_when_the_whole_change_is_excluded() ->
     assert asyncio.run(mixed.run(_RUN)) is not None
 
 
+def test_binary_file_of_the_change_is_not_read_through_an_import() -> None:
+    class Sources(Repository):
+        read: list[str] = []
+
+        async def tree(self, revision: str) -> RevisionTree:
+            return RevisionTree(
+                revision, {"src/app.py": "d" * 40, "src/models.py": "8" * 40}, complete=True
+            )
+
+        async def read_blob(self, blob_sha: str) -> bytes:
+            Sources.read.append(blob_sha)
+            if blob_sha == "8" * 40:
+                return b"\x00\nclass User:\n    pass\n"
+            return b"from .models import User\n\n\ndef greet(name):\n    return User()\n"
+
+    app = DiffSnapshot(
+        "src/app.py",
+        _stored("src/app.py", "@@ -4,1 +4,2 @@\n def greet(name):\n+    return User()"),
+        "d" * 40,
+        "modified",
+        None,
+        1,
+        0,
+        1,
+    )
+    stage = _stage(Trace(), policy=Policy(rules=None), snapshots=[app, _binary("src/models.py")])
+    stage._context_builder = lambda run: BuildReviewContext(
+        source=Sources(), parser=Parser(), counter=EstimatedTokenCounter()
+    )
+
+    payload = asyncio.run(stage.run(_RUN))
+
+    assert payload is not None
+    assert stage.excluded("src/models.py") is True
+    assert [ref.resolution.value for ref in payload.imports] == ["excluded"]
+    assert all(block.source.path != "src/models.py" for block in payload.blocks)
+    assert "8" * 40 not in Sources.read
+
+
 def test_incomplete_file_list_does_not_prove_that_every_change_is_excluded() -> None:
     # The pull request reports two files, one is known and it is ignored.
     stage = _stage(Trace(), snapshots=[_snapshots()[1]])

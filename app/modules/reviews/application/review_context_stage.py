@@ -13,6 +13,7 @@ import json
 import logging
 from collections import Counter
 from collections.abc import Callable
+from dataclasses import replace
 from hashlib import sha256
 from typing import Any
 from uuid import UUID
@@ -73,6 +74,21 @@ def _provider_patch(patch: str | None) -> str | None:
 
 # Stored omissions that are exclusions of the service, not incompleteness of the diff.
 _SERVICE_EXCLUSIONS = frozenset({"binary", "generated"})
+
+
+def _service_excluded_names(stored: list[DiffSnapshot]) -> frozenset[str]:
+    """Names of stored files that the service excluded, as the deny-set holds them.
+
+    The source of a copy stays its own file: only the copy is withheld.
+    """
+    names: set[str] = set()
+    for item in stored:
+        if item.omission_reason not in _SERVICE_EXCLUSIONS:
+            continue
+        names.add(item.filename)
+        if item.previous_filename is not None and item.status != "copied":
+            names.add(item.previous_filename)
+    return frozenset(name for name in names if is_supported_path(name))
 
 
 def _vcs_file(snapshot: DiffSnapshot) -> VcsFile:
@@ -288,6 +304,9 @@ class ReviewContextStage:
             diff_old_sha=diff_old_sha,
         )
         ignore = apply_ignore(matcher, diff_map, builtin_excluded=self._builtin_excluded)
+        # A file the service stored as binary or generated is an exclusion for every
+        # consumer, also when an allowed file imports it: its names join the deny-set.
+        ignore = replace(ignore, denied_paths=ignore.denied_paths | _service_excluded_names(stored))
         self._denied_paths = ignore.denied_paths
         # The effective exclusion: a mask of the repository, a built-in exclusion of any
         # name of the file, or a binary file. Decided here, so a skip never depends on the
