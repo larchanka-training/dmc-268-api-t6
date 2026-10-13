@@ -114,11 +114,24 @@ remain pending; no evaluation quality or billed-cost improvement is claimed.
 evaluation commit context so replay detects input changes honestly.
 
 **Acceptance criteria:**
-- [ ] GitHubRunSource, sidecar and any new shaping helper are pinned; existing `eval_live.py` pin remains.
-- [ ] Tests prove changes to each new input produce drift; no old manifest digest is edited.
-- [ ] Fixture capture/replay stays deterministic and covers populated commit context.
+- [x] GitHubRunSource, sidecar and any new shaping helper are pinned; existing `eval_live.py` pin remains.
+- [x] Tests prove changes to each new input produce drift; no old manifest digest is edited.
+- [x] Fixture capture/replay stays deterministic and covers populated commit context.
 
 **Verification:** Focused provenance/replay tests; two fixture replay reports compare equal.
+**Observed evidence (Task 4):** Public capture/replay tests first failed because edits
+to either new input produced no warning. Adding exactly two static paths made both
+mutations report the literal static-digest drift warning, retaining the existing
+`eval_live.py` pin and preserving captured raw bytes and all manifest bytes. Two
+populated-context fixture captures produced identical provider messages/manifests
+and two byte-identical JSON replay reports with `warnings=[]`, including the JSON
+sidecar's existing custom-rule path inference. The first broader focused run found
+18 outdated fixture-inventory failures; adding the same two required paths to
+`_record_with_digests` fixed them without changing replay code or assertions.
+The complete focused provenance/replay/recorder suite passed 175 tests in 30.12s;
+lint, format, mypy and patch whitespace checks pass. The historical corpus/manifest
+is unchanged and its old-baseline drift remains expected until complete replacement.
+The pre-capture full-service gate and remaining readiness checkboxes stay pending.
 **Dependencies:** Task 3.
 **Files likely touched:** `review/scripts/eval_provenance.py`,
 `tests/test_eval_provenance.py` (if existing) or new focused provenance tests,
