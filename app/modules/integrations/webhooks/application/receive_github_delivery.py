@@ -21,6 +21,8 @@ from app.modules.integrations.webhooks.application.github_installation_dispatch 
 _LEASE = timedelta(minutes=5)
 _DISPATCH_TIMEOUT_SECONDS = 240.0
 _FAILURE_RETRY = timedelta(seconds=30)
+_RUN_TRIGGER_RETRY = timedelta(seconds=30)
+_RUN_TRIGGER_MAX_WAIT = timedelta(hours=1)
 _UNKNOWN_INSTALLATION_RETRY = timedelta(minutes=5)
 _MAX_DISPATCH_ATTEMPTS = 3
 # Finished receipts (projected, failed, or deferred and not revived since) are kept this long.
@@ -72,6 +74,21 @@ class GitHubWebhookReceiptStore(Protocol):
     ) -> WebhookReceipt | None: ...
 
     async def mark_projected(self, delivery_id: str, token: UUID, at: datetime) -> None: ...
+
+    async def retry_run_trigger(
+        self,
+        delivery_id: str,
+        token: UUID,
+        retry_after: datetime,
+        *,
+        now: datetime,
+        received_before: datetime,
+    ) -> bool:
+        """Reset consecutive failures and release or expire a wait; lost claim raises.
+
+        Return True when the original receipt timestamp is at/before the age cutoff.
+        """
+        ...
 
     async def release(
         self,
@@ -175,7 +192,10 @@ class ReceiveGitHubDelivery:
             if outcome is not None:
                 status, last_attempt = outcome
                 projected += 1
-                deferred += status in _DEFERRED
+                deferred += (
+                    status in _DEFERRED
+                    or status == InstallationDeliveryDispatchStatus.DEFERRED_RUN_TRIGGER
+                )
                 final += last_attempt
         if delivery_ids:
             _LOGGER.info(
@@ -198,7 +218,7 @@ class ReceiveGitHubDelivery:
     async def _project(
         self, delivery_id: str
     ) -> tuple[InstallationDeliveryDispatchStatus, bool] | None:
-        """Dispatch one claimed receipt; the flag marks a deferral after its last attempt."""
+        """Dispatch one claimed receipt; the flag marks an ordinary final deferral."""
         dispatcher = self._dispatcher
         if dispatcher is None:
             raise RuntimeError("webhook dispatcher is not configured")
@@ -242,9 +262,21 @@ class ReceiveGitHubDelivery:
 
         retry_note = ""
         final = False
+        wait_expired = False
         try:
             async with self._uow_factory() as uow:
-                if result.status in _DEFERRED:
+                if result.status == InstallationDeliveryDispatchStatus.DEFERRED_RUN_TRIGGER:
+                    now = self._now()
+                    retry_at = now + _RUN_TRIGGER_RETRY
+                    wait_expired = await uow.receipts.retry_run_trigger(
+                        delivery_id,
+                        token,
+                        retry_at,
+                        now=now,
+                        received_before=now - _RUN_TRIGGER_MAX_WAIT,
+                    )
+                    retry_note = f" retry_at={'none' if wait_expired else retry_at.isoformat()}"
+                elif result.status in _DEFERRED:
                     now = self._now()
                     retry_at = now + _UNKNOWN_INSTALLATION_RETRY
                     final = await uow.receipts.release(
@@ -257,7 +289,12 @@ class ReceiveGitHubDelivery:
         except Exception as exc:
             self._log_failure(delivery_id, delivery, FailureStage.FINALIZE, exc, result)
             raise
-        if final:
+        if wait_expired:
+            _LOGGER.warning(
+                "GitHub webhook delivery %s failed after supersession wait reached its age limit",
+                delivery_id,
+            )
+        elif final:
             # Logged after the commit: a failed commit leaves the receipt retryable.
             # Linking the installation wakes it up again (wake_receipts); installation
             # events of linked installations received within the revival window are

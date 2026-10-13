@@ -105,6 +105,40 @@ class SqlAlchemyGitHubWebhookReceiptStore:
         if result.scalar_one_or_none() is None:
             raise RuntimeError("webhook projection claim was lost")
 
+    async def retry_run_trigger(
+        self,
+        delivery_id: str,
+        token: UUID,
+        retry_after: datetime,
+        *,
+        now: datetime,
+        received_before: datetime,
+    ) -> bool:
+        expired = WebhookEvent.received_at <= received_before
+        statement = (
+            update(WebhookEvent)
+            .where(
+                WebhookEvent.delivery_id == delivery_id,
+                WebhookEvent.projection_claim_token == token,
+                WebhookEvent.projected_at.is_(None),
+                WebhookEvent.projection_failed_at.is_(None),
+                WebhookEvent.projection_deferred_at.is_(None),
+            )
+            .values(
+                projection_claim_token=None,
+                projection_lease_until=None,
+                projection_attempt_count=0,
+                projection_failed_at=case((expired, now), else_=None),
+                retry_after=case((expired, None), else_=retry_after),
+            )
+            .returning(WebhookEvent.projection_failed_at)
+        )
+        result = await self._session.execute(statement)
+        row = result.one_or_none()
+        if row is None:
+            raise RuntimeError("webhook projection claim was lost")
+        return row[0] is not None
+
     async def release(
         self,
         delivery_id: str,
