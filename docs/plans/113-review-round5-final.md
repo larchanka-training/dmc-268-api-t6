@@ -1,18 +1,24 @@
-# Round-five final verification — PR #132 / #113
+# Historical round-five final verification — PR #132 / #113
 
-## Combined source
+This proof records round-five checkpoint `b5e0cec92c24a8e702a90e75de5a10350f89cdaa`
+on main `11ddfabf31a3345e6d21cdf57586281cb62cee7c`. Its results do not verify later
+rebases or review corrections.
+
+## Round-five combined source
 
 Combined main: `11ddfabf31a3345e6d21cdf57586281cb62cee7c`, including merged
 #121 and #126. Rebased parent: `b4fb4a24c4ff8cbcf6256c289565283c51b80851`,
-plus the receipt-test adaptation and documentation corrections in this commit.
+plus the receipt-test adaptation and documentation corrections published at the
+round-five checkpoint above.
 The trigger retains `RunTriggerOutcome.detail`/`retry_required` and mandatory
 keyword-only `expected_installation_external_id`. Upstream deployment and
 AuthScope contracts are preserved.
 
 The tested snapshot contains 412 tracked Python, runtime and configuration files.
-Their SHA-256 fingerprints match the current source. Canonical sorted JSON
+Their SHA-256 fingerprints matched the round-five tested source after hooks and
+commit. Canonical sorted JSON
 SHA-256: `72d7f7838ba3161084d4917d323c379e25e4511c269ec879e32ce04b5896adb4`.
-Source changes after this snapshot require verification before publication.
+Later source changes require their own verification.
 
 ## Repository gates
 
@@ -24,8 +30,8 @@ Source changes after this snapshot require verification before publication.
 
 Integration collection selected 538 / 3132 tests, with 2594 deselected in 1.38s.
 All 538 ran in the full suite above; there was no separate local integration run.
-These results verify the current combined source and are distinct from historical
-round-four executions.
+These results verify the round-five checkpoint only and are distinct from
+round-four and later executions.
 
 ## Focused integration and review
 
@@ -52,21 +58,25 @@ the new worker cancels eligible nonterminal work. No old-image runtime reproduct
 or production deployment is claimed.
 
 Round-four publication steps are marked complete against historical head `8a87fe9`
-and its successful CI. Historical counts, timings and SHAs remain distinct. Current
-corrected round-four documents are published in this commit. UI #105 remains the
-separate frontend wording follow-up linked in API #106.
+and its successful CI. Historical counts, timings and SHAs remain distinct. The
+corrected round-four documents were published at the round-five checkpoint.
+UI #105 remains the separate frontend wording follow-up linked in API #106.
 
 ## Publication and remaining prerequisites
 
 `git diff --check` and configured staged-file checks passed: trailing whitespace,
 end of file, merge conflicts, Ruff check, Ruff format and mypy. YAML/TOML checks
 had no applicable staged files. No hook changed a file; all 412 tested fingerprints
-matched after the checks. Publication and review-response results are recorded
-in the [PR #132 body](https://github.com/larchanka-training/dmc-268-api-t6/pull/132);
-required CI is visible in its checks on the exact published head. These receipts
-remain separate from the local results above.
+matched after the checks. Round-five publication completed at
+`b5e0cec92c24a8e702a90e75de5a10350f89cdaa`; the
+[review response](https://github.com/larchanka-training/dmc-268-api-t6/pull/132#issuecomment-6142077501)
+was posted. All nine required jobs succeeded in
+[CI run 38373267208](https://github.com/larchanka-training/dmc-268-api-t6/actions/runs/38373267208):
+3132 full-suite passes in 599.18s and a separate 538 integration passes in 427.93s,
+with zero failures/skips and 2 existing warnings in each execution. These receipts
+verify that historical head and remain separate from the local results above.
 
-Before merge, recheck actual main, obtain approval on the current head and confirm
-reviewer-owned thread resolution. Stop all old Run writers before merge and agree
-the merge time with the tech lead. A main push starts staging deployment, so writer
-shutdown remains a prerequisite before that push.
+At this checkpoint, current-head approval, reviewer-owned thread resolution and
+writer shutdown at the agreed merge time remained external prerequisites. A main
+push starts staging deployment, so old writers had to stop before merge. Later
+heads require a fresh main check and their own verification.

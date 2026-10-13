@@ -17,8 +17,17 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app.modules.integrations.webhooks.infrastructure.github_installation_tree_provider import (
     GitHubAppInstallationAccessTokenProvider,
 )
+from app.modules.reviews.application.check_runs import (
+    CheckRunTarget,
+    CheckRunView,
+    RunProviderCheckpoint,
+)
 from app.modules.reviews.application.handle_review_run import update_check_run
-from app.modules.reviews.application.publish_run_review import PublishRunReview
+from app.modules.reviews.application.publish_run_review import (
+    PublishRunReview,
+    ReviewSubmission,
+    SubmittedReview,
+)
 from app.modules.reviews.application.queue_messages import ReviewPublishPointer
 from app.modules.reviews.application.run_trace import TransactionalRunTrace
 from app.modules.reviews.infrastructure.github_review_publication import (
@@ -463,6 +472,88 @@ def test_inactive_publication_has_no_target_and_terminalizes_without_payload_wri
                     await session.execute(text("SELECT id,to_jsonb(f) FROM findings f ORDER BY id"))
                 ).tuples().all() == findings
                 assert await session.scalar(text("SELECT count(*) FROM comments")) == 0
+        finally:
+            await engine.dispose()
+
+    asyncio.run(exercise())
+
+
+class GitLabReviews:
+    def __init__(self) -> None:
+        self.calls: list[int] = []
+
+    async def submit_review(
+        self, submission: ReviewSubmission, *, project_id: int
+    ) -> SubmittedReview:
+        self.calls.append(project_id)
+        return SubmittedReview(880, ())
+
+
+class ObservedCheckRuns:
+    def __init__(self) -> None:
+        self.calls: list[CheckRunTarget] = []
+
+    async def upsert(
+        self, target: CheckRunTarget, view: CheckRunView, *, checkpoint: RunProviderCheckpoint
+    ) -> None:
+        self.calls.append(target)
+        raise AssertionError("GitLab publication must not write GitHub check-runs")
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("origin", ["active", "unknown"])
+def test_gitlab_run_publishes_only_with_an_active_origin(
+    publication_env: Env,
+    origin: str,
+) -> None:
+    async def exercise() -> None:
+        engine = publication_env.engine()
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        gitlab = GitLabReviews()
+        check_runs = ObservedCheckRuns()
+        trace = Trace()
+        try:
+            await prepare(factory, origin, "publishing")
+            async with factory.begin() as session:
+                await session.execute(
+                    text("UPDATE provider_installations SET provider='gitlab' WHERE id=:id"),
+                    {"id": INSTALL_A},
+                )
+            async with factory() as session:
+                store = SqlAlchemyRunLifecycleStore(session)
+                context = await store.publish_context(RUN_ATTEMPTED)
+                assert context is not None
+                assert (context.provider, context.project_id) == ("gitlab", 101)
+                assert context.origin_active is (origin == "active")
+                guard = await store.lock_for_claim(RUN_ATTEMPTED)
+                assert guard is not None
+                assert guard.origin_active is (origin == "active")
+            await PublishRunReview(
+                uow_factory=lambda: SqlAlchemyRunLifecycleUnitOfWork(factory),
+                reviews=None,
+                check_runs=check_runs,
+                trace=trace,
+                gitlab_reviews=gitlab,
+            ).execute(ReviewPublishPointer(RUN_ATTEMPTED, HEAD, context.findings_hash, "COMMENT"))
+            async with factory() as session:
+                row = (
+                    await session.execute(
+                        text("SELECT state::text,error_code FROM runs WHERE id=:id"),
+                        {"id": RUN_ATTEMPTED},
+                    )
+                ).one()
+            if origin == "active":
+                assert tuple(row) == ("succeeded", None)
+                assert gitlab.calls == [101]
+                assert [record[0] for record in trace.records] == ["gitlab.publish_review"]
+            else:
+                assert tuple(row) == ("cancelled", "installation_unavailable")
+                assert gitlab.calls == []
+                assert trace.records == []
+            assert [
+                record for record in trace.records if record[0] == "github.publish_review"
+            ] == []
+            assert check_runs.calls == []
         finally:
             await engine.dispose()
 

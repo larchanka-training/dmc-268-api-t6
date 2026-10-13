@@ -72,6 +72,11 @@ def test_pins_documents_and_snapshot_round_trip_and_stay_write_once(env: Env) ->
             )
 
         try:
+            # Policy inputs are written during the running attempt.
+            async with factory.begin() as session:
+                await session.execute(
+                    text("UPDATE runs SET state='running' WHERE id=:id"), {"id": RUN_DONE}
+                )
             async with uow() as work:
                 pins = await work.policy.get_pins(RUN_DONE)
                 assert await work.policy.get_snapshot(RUN_DONE) is None

@@ -7,6 +7,8 @@ from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from uuid import UUID
 
+import pytest
+
 from app.modules.reviews.application.ast_resolution import ImportResolution, RevisionTree
 from app.modules.reviews.application.ast_symbols import (
     AstFacts,
@@ -721,3 +723,49 @@ def test_cached_facts_skip_the_parser_but_not_the_ignore_guard() -> None:
     )
     assert ContextLevel.L4 not in guarded.levels_present
     assert guarded.imports[0].resolution is ImportResolution.EXCLUDED
+
+
+@pytest.mark.parametrize("boundary", ["tree", "blob"])
+@pytest.mark.parametrize("failure", ["cancel", "deadline", "policy"])
+def test_run_control_and_policy_errors_escape_optional_reads(boundary: str, failure: str) -> None:
+    from app.modules.reviews.application.policy_errors import PolicyError, PolicyErrorCode
+    from app.modules.reviews.application.run_failures import RunCancelled, RunFailure
+
+    error = {
+        "cancel": RunCancelled("installation_unavailable"),
+        "deadline": RunFailure("deadline_exceeded"),
+        "policy": PolicyError(PolicyErrorCode.CONTEXT_VIOLATION, "untrusted context"),
+    }[failure]
+
+    class Unavailable(Repository):
+        async def tree(self, revision: str) -> RevisionTree:
+            if boundary == "tree":
+                raise error
+            return await super().tree(revision)
+
+        async def read_blob(self, blob_sha: str) -> bytes:
+            raise error
+
+    repository = Unavailable({"app.py": "x = 2\n"})
+    diff_map = _diff_map(
+        _vcs_file(repository, "app.py", "@@ -1 +1 @@\n-x = 1\n+x = 2", deletions=1)
+    )
+    with pytest.raises(type(error)) as caught:
+        _build(repository, diff_map)
+    assert caught.value is error
+
+
+def test_optional_source_failure_remains_an_omission() -> None:
+    from app.modules.reviews.application.run_failures import RunFailure
+
+    class Unavailable(Repository):
+        async def read_blob(self, blob_sha: str) -> bytes:
+            raise RunFailure("diff_fetch_failed", "optional source unavailable")
+
+    repository = Unavailable({"app.py": "x = 2\n"})
+    diff_map = _diff_map(
+        _vcs_file(repository, "app.py", "@@ -1 +1 @@\n-x = 1\n+x = 2", deletions=1)
+    )
+    payload = _build(repository, diff_map)
+    assert payload.status is ContextStatus.REVIEW
+    assert any(item.reason == "source_read_failed" for item in payload.omissions)

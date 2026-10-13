@@ -52,6 +52,7 @@ from app.modules.reviews.application.diff_map import (
     RowKind,
     is_supported_path,
 )
+from app.modules.reviews.application.policy_errors import PolicyError
 from app.modules.reviews.application.policy_snapshot import PolicySnapshot
 from app.modules.reviews.application.prompt_budget import (
     TokenCounter,
@@ -60,6 +61,7 @@ from app.modules.reviews.application.prompt_budget import (
 )
 from app.modules.reviews.application.prompt_builder import ReviewRule
 from app.modules.reviews.application.review_ignore import IgnoreMatcher, IgnoreResult
+from app.modules.reviews.application.run_failures import RunCancelled, RunFailure
 from app.modules.reviews.application.vcs_diff import _is_binary
 
 _LOGGER = logging.getLogger(__name__)
@@ -215,7 +217,11 @@ class _Files:
         else:
             try:
                 raw = await self._source.read_blob(sha)
-            except Exception:
+            except Exception as exc:
+                if isinstance(exc, (RunCancelled, PolicyError)) or (
+                    isinstance(exc, RunFailure) and exc.error_code == "deadline_exceeded"
+                ):
+                    raise
                 # Extra context is best effort: the diff itself stays available.
                 _LOGGER.warning("Context file read failed blob_sha=%s", sha, exc_info=True)
                 result = FileUnavailable("source_read_failed")
@@ -424,7 +430,11 @@ class BuildReviewContext:
 
         try:
             tree = await self._source.tree(diff_map.head_sha)
-        except Exception:
+        except Exception as exc:
+            if isinstance(exc, (RunCancelled, PolicyError)) or (
+                isinstance(exc, RunFailure) and exc.error_code == "deadline_exceeded"
+            ):
+                raise
             _LOGGER.warning(
                 "Context tree read failed head_sha=%s", diff_map.head_sha, exc_info=True
             )

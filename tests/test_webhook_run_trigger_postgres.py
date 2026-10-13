@@ -136,9 +136,11 @@ class FakeGitHub:
     labeled: bool = True
     updated_at: str = "2026-10-05T10:00:00Z"
     ci_status: int = 200
+    calls: list[tuple[str, str]] = field(default_factory=list)
 
     def __call__(self, request: httpx.Request) -> httpx.Response:
         path = request.url.path
+        self.calls.append((request.method, path))
         if path == "/repos/octo/repo/pulls/7":
             if self.pull_request_status != 200:
                 return httpx.Response(self.pull_request_status, json={"message": "Server Error"})
@@ -229,11 +231,21 @@ class Publisher:
         self.messages.append((message, kind))
 
 
+@dataclass
+class TokenRecorder:
+    installations: list[int] = field(default_factory=list)
+
+    async def get_installation_access_token(self, installation_external_id: int) -> str:
+        self.installations.append(installation_external_id)
+        return TOKEN
+
+
 class Pipeline:
     def __init__(self, database: Database, github: FakeGitHub) -> None:
         self.database = database
         self.github = github
         self.publisher = Publisher()
+        self.tokens = TokenRecorder()
         self.deliveries = 0
         self._compose()
 
@@ -252,7 +264,7 @@ class Pipeline:
         self.resources = ReviewsApiResources(self.engine, self.factory)
         self.receiver = self.resources.github_delivery_receiver(
             client=self.client,
-            token_provider=StaticGitHubInstallationAccessTokenProvider(TOKEN),
+            token_provider=self.tokens,
             bot_login="reviewer[bot]",
             run_publisher=self.publisher,
             app_id=APP_ID,
@@ -736,6 +748,198 @@ async def _finish_old_head(pipeline: Pipeline) -> None:
         "WHERE head_sha = :head",
         head=HEAD,
     )
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("rebind", [False, True], ids=["control", "rebound"])
+@pytest.mark.parametrize("redeliver", [False, True], ids=["retry", "redelivery"])
+def test_waiting_ci_receipt_keeps_its_installation_after_rebind(
+    database: Database, rebind: bool, redeliver: bool
+) -> None:
+    async def scenario(pipeline: Pipeline) -> None:
+        now = datetime(2026, 10, 13, 12, tzinfo=UTC)
+        pipeline.receiver = ReceiveGitHubDelivery(
+            uow_factory=pipeline.resources.github_webhook_receipts,
+            dispatcher=pipeline.resources.github_installation_delivery_dispatcher(
+                client=pipeline.client,
+                token_provider=pipeline.tokens,
+                bot_login="reviewer[bot]",
+                run_publisher=pipeline.publisher,
+                app_id=APP_ID,
+            ),
+            now=lambda: now,
+        )
+        await _wait_for_new_head(pipeline)
+        pending_receipt = await pipeline.sql(
+            "SELECT id, received_at, installation_external_id, provider_installation_id, "
+            "payload->'installation'->>'id', projected_at, projection_failed_at, "
+            "projection_deferred_at, retry_after, projection_attempt_count, "
+            "projection_claim_token, projection_lease_until FROM webhook_events "
+            "WHERE delivery_id = 'delivery-3'"
+        )
+        [(receipt_id, received_at, *pending_fields)] = pending_receipt
+        assert pending_fields == [
+            17,
+            None,
+            "17",
+            None,
+            None,
+            None,
+            datetime(2026, 10, 13, 12, 0, 30, tzinfo=UTC),
+            0,
+            None,
+            None,
+        ]
+        [(old_origin,)] = await pipeline.sql(
+            "SELECT origin_provider_installation_id FROM runs WHERE head_sha = :head",
+            head=HEAD,
+        )
+        assert await pipeline.sql(
+            "SELECT external_id FROM provider_installations WHERE id = :id", id=old_origin
+        ) == [(17,)]
+        if rebind:
+            replacement = uuid4()
+            await pipeline.sql(
+                "INSERT INTO provider_installations "
+                "(id, workspace_id, provider, external_id, metadata) "
+                "SELECT :id, workspace_id, 'github', 29, '{}'::jsonb "
+                "FROM provider_installations WHERE external_id = 17",
+                id=replacement,
+            )
+            await pipeline.sql(
+                "UPDATE provider_installations SET deleted_at = now() WHERE external_id = 17"
+            )
+            await pipeline.sql(
+                "UPDATE repositories SET provider_installation_id = :id", id=replacement
+            )
+            assert await pipeline.sql(
+                "SELECT i.external_id FROM repositories r JOIN provider_installations i "
+                "ON i.id = r.provider_installation_id"
+            ) == [(29,)]
+        await _finish_old_head(pipeline)
+        pipeline.github.calls.clear()
+        pipeline.tokens.installations.clear()
+        if redeliver:
+            # Same GUID remains the original pending row, including its due time.
+            await pipeline.deliver_http(
+                "check_suite", _check_suite(NEW_HEAD), delivery_id="delivery-3"
+            )
+            assert await pipeline.sql("SELECT count(*) FROM webhook_events") == [(3,)]
+            assert (
+                await pipeline.sql(
+                    "SELECT id, received_at, installation_external_id, provider_installation_id, "
+                    "payload->'installation'->>'id', projected_at, projection_failed_at, "
+                    "projection_deferred_at, retry_after, projection_attempt_count, "
+                    "projection_claim_token, projection_lease_until FROM webhook_events "
+                    "WHERE delivery_id = 'delivery-3'"
+                )
+                == pending_receipt
+            )
+            assert pipeline.github.calls == []
+            assert pipeline.tokens.installations == []
+            # A new GUID is a separate receipt, but retains the retired source identity.
+            await pipeline.deliver_http(
+                "check_suite", _check_suite(NEW_HEAD), delivery_id="delivery-redelivered"
+            )
+            assert await pipeline.sql("SELECT count(*) FROM webhook_events") == [(4,)]
+            assert await pipeline.sql(
+                "SELECT id != :old_id, installation_external_id, provider_installation_id, "
+                "payload->'installation'->>'id', projected_at, projection_failed_at, "
+                "projection_deferred_at, retry_after, projection_attempt_count, "
+                "projection_claim_token, projection_lease_until FROM webhook_events "
+                "WHERE delivery_id = 'delivery-redelivered'",
+                old_id=receipt_id,
+            ) == [
+                (
+                    True,
+                    17,
+                    None,
+                    "17",
+                    datetime(2026, 10, 13, 12, tzinfo=UTC),
+                    None,
+                    None,
+                    None,
+                    0,
+                    None,
+                    None,
+                )
+            ]
+        now = datetime(2026, 10, 13, 12, 0, 30, tzinfo=UTC)
+        assert await pipeline.replay() == 1
+        assert await pipeline.replay() == 0
+        assert pipeline.deliveries == (5 if redeliver else 3)
+        assert await pipeline.sql("SELECT count(*) FROM webhook_events") == [
+            (4 if redeliver else 3,)
+        ]
+        assert await pipeline.sql(
+            "SELECT id, received_at, installation_external_id, provider_installation_id, "
+            "payload->'installation'->>'id', projected_at, projection_failed_at, "
+            "projection_deferred_at, retry_after, projection_attempt_count, "
+            "projection_claim_token, projection_lease_until FROM webhook_events "
+            "WHERE delivery_id = 'delivery-3'"
+        ) == [
+            (
+                receipt_id,
+                received_at,
+                17,
+                None,
+                "17",
+                datetime(2026, 10, 13, 12, 0, 30, tzinfo=UTC),
+                None,
+                None,
+                None,
+                0,
+                None,
+                None,
+            )
+        ]
+        assert await pipeline.sql(
+            "SELECT origin_provider_installation_id FROM runs WHERE head_sha = :head",
+            head=HEAD,
+        ) == [(old_origin,)]
+        if rebind:
+            assert await pipeline.runs() == [("e" * 40, "cancelled", True)]
+            assert await pipeline.sql(
+                "SELECT count(*) FROM runs WHERE head_sha = :head", head=NEW_HEAD
+            ) == [(0,)]
+            assert await pipeline.sql(
+                "SELECT count(*) FROM runs r JOIN provider_installations i "
+                "ON i.id = r.origin_provider_installation_id WHERE i.external_id = 29"
+            ) == [(0,)]
+            assert pipeline.github.calls == []
+            assert pipeline.tokens.installations == []
+            assert [
+                (message.head_sha, message.installation_id, kind)
+                for message, kind in pipeline.publisher.messages
+            ] == [("e" * 40, 17, RunPublicationKind.QUEUED)]
+        else:
+            assert await pipeline.runs() == [
+                ("e" * 40, "cancelled", True),
+                ("d" * 40, "queued", True),
+            ]
+            assert await pipeline.sql(
+                "SELECT r.origin_provider_installation_id, i.external_id FROM runs r "
+                "JOIN provider_installations i ON i.id = r.origin_provider_installation_id "
+                "WHERE r.head_sha = :head",
+                head=NEW_HEAD,
+            ) == [(old_origin, 17)]
+            assert pipeline.github.calls == [
+                ("GET", f"/repos/octo/repo/commits/{'d' * 40}/check-suites"),
+                ("GET", f"/repos/octo/repo/commits/{'d' * 40}/status"),
+            ] * (2 if redeliver else 1)
+            assert pipeline.tokens.installations == ([17, 17] if redeliver else [17])
+            assert [
+                (message.head_sha, message.installation_id, kind)
+                for message, kind in pipeline.publisher.messages
+            ] == [
+                ("e" * 40, 17, RunPublicationKind.QUEUED),
+                ("d" * 40, 17, RunPublicationKind.QUEUED),
+            ]
+            assert len({message.run_id for message, _ in pipeline.publisher.messages}) == 2
+        assert 29 not in pipeline.tokens.installations
+        assert all(message.installation_id == 17 for message, _ in pipeline.publisher.messages)
+
+    _run(database, FakeGitHub(ci={HEAD: _green(HEAD)}), scenario)
 
 
 @pytest.mark.integration

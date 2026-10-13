@@ -9,6 +9,7 @@ from pydantic import Field, TypeAdapter
 
 from app.common.infrastructure.github_repository_path import commit_sha_segment
 from app.modules.reviews.application.ast_resolution import RevisionTree
+from app.modules.reviews.application.check_runs import RunProviderCheckpoint
 from app.modules.reviews.application.vcs_diff import PullRequestLocator, VcsProvider
 from app.modules.reviews.infrastructure.github_vcs import (
     _REQUEST_TIMEOUT,
@@ -50,22 +51,27 @@ class GitHubRevisionSource:
         token_provider: InstallationTokenProvider,
         vcs: VcsProvider,
         locator: PullRequestLocator,
+        checkpoint: RunProviderCheckpoint,
         tree_cache: TreeCache | None = None,
     ) -> None:
         self._client = client
         self._tokens = token_provider
         self._vcs = vcs
         self._locator = locator
+        self._checkpoint = checkpoint
         self._tree_cache = tree_cache
 
     async def tree(self, revision: str) -> RevisionTree:
+        await self._checkpoint()
         if self._tree_cache is not None:
             cached = await self._tree_cache.get(revision)
             if cached is not None:
                 return cached
+        await self._checkpoint()
         token = await self._tokens.get_installation_access_token(
             self._locator.installation_external_id
         )
+        await self._checkpoint()
         response = await self._client.get(
             f"{_repository_prefix(self._locator)}/git/trees/{commit_sha_segment(revision)}",
             params={"recursive": "1"},
@@ -84,4 +90,4 @@ class GitHubRevisionSource:
         return tree
 
     async def read_blob(self, blob_sha: str) -> bytes:
-        return await self._vcs.get_blob(self._locator, blob_sha)
+        return await self._vcs.get_blob(self._locator, blob_sha, checkpoint=self._checkpoint)

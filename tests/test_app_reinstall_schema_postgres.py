@@ -8,6 +8,7 @@ from uuid import uuid4
 
 import pytest
 from alembic.config import Config
+from alembic.script import ScriptDirectory
 from sqlalchemy import Connection, create_engine, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.schema import CreateSchema, DropSchema
@@ -61,12 +62,23 @@ def _installation(connection: Connection, external_id: int) -> str:
     return installation_id
 
 
+def test_reinstall_schema_has_one_upgrade_head_after_deployed_policy_schema() -> None:
+    graph = ScriptDirectory.from_config(Config("alembic.ini"))
+    assert graph.get_heads() == ["20261010_0030"]
+    assert [revision.revision for revision in graph.iterate_revisions("head", "20261012_0030")] == [
+        "20261010_0030",
+        "20261010_0029",
+    ]
+
+
 @pytest.mark.integration
+@pytest.mark.parametrize("starting_revision", ["20261007_0028", "20261012_0030"])
 def test_existing_schema_upgrade_keeps_pause_and_unknown_identity(
     reinstall_schema: Connection,
+    starting_revision: str,
 ) -> None:
     connection = reinstall_schema
-    _upgrade(connection, "20261007_0028")
+    _upgrade(connection, starting_revision)
     deleted = _installation(connection, 17)
     partial = _installation(connection, 18)
     active = _installation(connection, 19)

@@ -15,6 +15,7 @@ import httpx
 from pydantic import Field, TypeAdapter
 
 from app.common.infrastructure.github_repository_path import commit_sha_segment
+from app.modules.reviews.application.check_runs import RunProviderCheckpoint
 from app.modules.reviews.application.policy_documents import (
     MAX_DOCUMENT_BYTES,
     PolicyEntryKind,
@@ -73,21 +74,25 @@ class GitHubPolicyDocumentSource:
         token_provider: InstallationTokenProvider,
         vcs: VcsProvider,
         locator: PullRequestLocator,
+        checkpoint: RunProviderCheckpoint,
         policy_base_sha: str,
     ) -> None:
         self._client = client
         self._tokens = token_provider
         self._vcs = vcs
         self._locator = locator
+        self._checkpoint = checkpoint
         self._base_sha = policy_base_sha
 
     async def list_entries(self, tree_oid: str | None) -> Mapping[str, PolicyTreeEntry]:
         sha = commit_sha_segment(self._base_sha if tree_oid is None else tree_oid)
         prefix = _repository_prefix(self._locator)
         try:
+            await self._checkpoint()
             token = await self._tokens.get_installation_access_token(
                 self._locator.installation_external_id
             )
+            await self._checkpoint()
             response = await self._client.get(
                 f"{prefix}/git/trees/{sha}",
                 headers=_headers(token),
@@ -118,7 +123,7 @@ class GitHubPolicyDocumentSource:
 
     async def read_blob(self, oid: str) -> bytes:
         try:
-            return await self._vcs.get_blob(self._locator, oid)
+            return await self._vcs.get_blob(self._locator, oid, checkpoint=self._checkpoint)
         except BlobTooLargeError as exc:
             raise PolicyError(
                 PolicyErrorCode.DOCUMENT_TOO_LARGE,

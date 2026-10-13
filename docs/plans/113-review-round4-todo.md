@@ -60,10 +60,16 @@ Published head `8a87fe9d10794ba92002f537b349f84ee7dbdac9`; required
 [CI run 38298570137](https://github.com/larchanka-training/dmc-268-api-t6/actions/runs/38298570137)
 succeeded. See the historical publication section of the round-four final proof.
 
-## External merge prerequisites pending at this historical checkpoint
+## Later integration completion and external merge prerequisites
 
-- [ ] #121/#126 merged; #132 rebased last on actual combined main.
-- [ ] Both RunTriggerOutcome and expected_installation_external_id retained.
-- [ ] Waiting old-head CI receipt regression and all gates/CI verified on combined head.
+- [x] #121/#126 merged; #132 rebased on combined main `11ddfab` in round five and `2251b59` in round six.
+- [x] Both RunTriggerOutcome and expected_installation_external_id retained; verified in round-five/six integration.
+- [x] Waiting old-head CI receipt regression and all gates/CI verified on those combined heads.
+
+Completion evidence: [round-five integration](113-review-round5-integration.md),
+[round-five final proof](113-review-round5-final.md) and
+[round-six final proof](113-review-round6-final.md). These results verify their
+stated historical checkpoints, not later heads.
+
 - [ ] Current-head human approve and reviewer-owned thread resolution.
 - [ ] Tech lead coordinates merge timing and stops every old writer before merge.

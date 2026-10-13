@@ -1,7 +1,7 @@
 """Preserve verified account evidence and App lifecycle state.
 
 Revision ID: 20261010_0029
-Revises: 20261007_0028
+Revises: 20261012_0030
 """
 
 from __future__ import annotations
@@ -11,7 +11,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision = "20261010_0029"
-down_revision = "20261007_0028"
+down_revision = "20261012_0030"
 branch_labels = None
 depends_on = None
 

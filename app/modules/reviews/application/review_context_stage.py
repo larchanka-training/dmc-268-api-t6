@@ -18,6 +18,7 @@ from hashlib import sha256
 from typing import Any
 from uuid import UUID
 
+from app.modules.reviews.application.check_runs import RunProviderCheckpoint
 from app.modules.reviews.application.diff_map import (
     DiffMap,
     VcsProviderName,
@@ -39,7 +40,7 @@ from app.modules.reviews.application.review_ignore import (
     IgnorePolicy,
     apply_ignore,
 )
-from app.modules.reviews.application.run_failures import RunFailure, RunSkipped
+from app.modules.reviews.application.run_failures import RunCancelled, RunFailure, RunSkipped
 from app.modules.reviews.application.run_trace import RunTrace, traced_step
 from app.modules.reviews.application.vcs_diff import (
     MergeBaseProvider,
@@ -187,6 +188,7 @@ class ReviewContextStage:
         self,
         *,
         runs: RunVcsRepository,
+        checkpoint: RunProviderCheckpoint,
         vcs: VcsProvider,
         merge_base: MergeBaseProvider,
         prepare_policy: PreparePolicySnapshot,
@@ -196,6 +198,7 @@ class ReviewContextStage:
         builtin_excluded: Callable[[str], bool] = lambda path: False,
     ) -> None:
         self._runs = runs
+        self._checkpoint = checkpoint
         self._vcs = vcs
         self._merge_base = merge_base
         self._prepare_policy = prepare_policy
@@ -250,9 +253,10 @@ class ReviewContextStage:
 
     async def begin(self, run_id: UUID) -> None:
         """Establish the policy of the attempt before its diff is stored or counted."""
+        await self._checkpoint()
         run = await self._runs.get_run_vcs_input(run_id)
         if run is None:
-            raise LookupError(f"run {run_id} has no VCS input")
+            raise RunCancelled("installation_unavailable")
         request = {"policy_base_sha": run.base_sha}
         async with traced_step(self._trace, run_id, "policy.load", request) as step:
             self._snapshot = await self._prepare_policy.execute(run_id)
@@ -276,12 +280,15 @@ class ReviewContextStage:
             await self.begin(run_id)
         snapshot, matcher = self._snapshot, self._matcher
         assert snapshot is not None and matcher is not None
+        await self._checkpoint()
         run = await self._runs.get_run_vcs_input(run_id)
         stored = await self._runs.get_run_snapshots(run_id) if run is not None else None
-        if run is None or stored is None:
+        if run is None:
+            raise RunCancelled("installation_unavailable")
+        if stored is None:
             raise LookupError(f"run {run_id} has no stored diff")
 
-        pull_request = await self._vcs.get_pull_request(run.locator)
+        pull_request = await self._vcs.get_pull_request(run.locator, checkpoint=self._checkpoint)
         if pull_request.head_sha != run.head_sha:
             raise RunFailure("diff_fetch_failed", "pull request head changed after the diff")
         if not stored and pull_request.meta.files_changed == 0:
@@ -291,7 +298,9 @@ class ReviewContextStage:
             )
             raise RunSkipped("no_changes")
         try:
-            diff_old_sha: str | None = await self._merge_base.get_merge_base(pull_request)
+            diff_old_sha: str | None = await self._merge_base.get_merge_base(
+                pull_request, checkpoint=self._checkpoint
+            )
         except MergeBaseUnavailable:
             # The old side stays unknown; it is never replaced by the policy base.
             _LOGGER.warning("Merge base is unavailable run_id=%s", run_id, exc_info=True)
@@ -348,11 +357,13 @@ class ReviewContextStage:
                     token_budget=self._token_budget,
                 )
                 step.response = context_summary(diff_map, payload)
-        except PolicyError:
+        except (PolicyError, RunCancelled):
             # The policy is also evaluated while the context is built (paths behind an
             # import). Its failure is never an optional fallback: it stops the run.
             raise
-        except Exception:
+        except Exception as exc:
+            if isinstance(exc, RunFailure) and exc.error_code == "deadline_exceeded":
+                raise
             _LOGGER.warning("Review context build failed run_id=%s", run_id, exc_info=True)
             return None
         if payload.status is ContextStatus.ALL_CHANGES_IGNORED:

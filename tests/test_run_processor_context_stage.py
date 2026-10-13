@@ -9,6 +9,7 @@ from uuid import UUID
 
 import pytest
 
+from app.modules.reviews.application.check_runs import RunProviderCheckpoint
 from app.modules.reviews.application.conventions import (
     ActiveConventionsPrompt,
     CachedConventions,
@@ -52,14 +53,23 @@ class GitHub:
         _file("generated/api.py", "2" * 40),
     )
 
-    async def get_pull_request(self, locator: PullRequestLocator) -> VcsPullRequest:
+    async def get_pull_request(
+        self, locator: PullRequestLocator, *, checkpoint: RunProviderCheckpoint
+    ) -> VcsPullRequest:
+        await checkpoint()
         meta = PullRequestMeta("PR", None, "octo", "feature", "main", (), 2, 2, 2, False, False)
         return VcsPullRequest(locator, HEAD, BASE, meta)
 
-    async def get_diff(self, pull_request: VcsPullRequest) -> tuple[VcsFile, ...]:
+    async def get_diff(
+        self, pull_request: VcsPullRequest, *, checkpoint: RunProviderCheckpoint
+    ) -> tuple[VcsFile, ...]:
+        await checkpoint()
         return self.files
 
-    async def get_blob(self, locator: PullRequestLocator, sha: str) -> bytes:
+    async def get_blob(
+        self, locator: PullRequestLocator, sha: str, *, checkpoint: RunProviderCheckpoint
+    ) -> bytes:
+        await checkpoint()
         return b"new\n"
 
 

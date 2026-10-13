@@ -12,6 +12,7 @@ import pytest
 from app.modules.integrations.webhooks.infrastructure.github_installation_tree_provider import (
     StaticGitHubInstallationAccessTokenProvider,
 )
+from app.modules.reviews.application.check_runs import RunProviderCheckpoint
 from app.modules.reviews.application.policy_documents import LoadPolicyDocuments, PolicyEntryKind
 from app.modules.reviews.application.policy_errors import PolicyError, PolicyErrorCode
 from app.modules.reviews.application.policy_snapshot import DocumentPresence
@@ -25,12 +26,19 @@ _RULES = "3" * 40
 _LOCATOR = PullRequestLocator(17, "octo/repo", 7)
 
 
+async def _checkpoint() -> None:
+    return None
+
+
 @dataclass
 class Blobs:
     contents: dict[str, bytes] = field(default_factory=dict)
     error: Exception | None = None
 
-    async def get_blob(self, locator: PullRequestLocator, sha: str) -> bytes:
+    async def get_blob(
+        self, locator: PullRequestLocator, sha: str, *, checkpoint: RunProviderCheckpoint
+    ) -> bytes:
+        await checkpoint()
         assert locator == _LOCATOR
         if self.error is not None:
             raise self.error
@@ -51,6 +59,7 @@ def _run(respond: Any, blobs: Blobs, action: Any) -> Any:
                 token_provider=StaticGitHubInstallationAccessTokenProvider("token"),
                 vcs=blobs,  # type: ignore[arg-type]
                 locator=_LOCATOR,
+                checkpoint=_checkpoint,
                 policy_base_sha=_BASE,
             )
             return await action(source)
@@ -220,6 +229,7 @@ def test_answer_that_cannot_be_decoded_is_a_policy_fetch_failure_not_an_internal
                 token_provider=BrokenTokens(),
                 vcs=Blobs(),  # type: ignore[arg-type]
                 locator=_LOCATOR,
+                checkpoint=_checkpoint,
                 policy_base_sha=_BASE,
             )
             await source.list_entries(None)

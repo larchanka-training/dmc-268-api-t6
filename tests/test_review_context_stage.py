@@ -17,6 +17,7 @@ from app.modules.reviews.application.ast_symbols import (
     AstFailureReason,
     ParseRequest,
 )
+from app.modules.reviews.application.check_runs import RunProviderCheckpoint
 from app.modules.reviews.application.execute_review import ExecuteReviewRun
 from app.modules.reviews.application.get_run_diff import DiffSnapshot
 from app.modules.reviews.application.policy_documents import PolicyEntryKind, PolicyTreeEntry
@@ -29,7 +30,7 @@ from app.modules.reviews.application.review_context_stage import (
     EstimatedTokenCounter,
     ReviewContextStage,
 )
-from app.modules.reviews.application.run_failures import RunFailure, RunSkipped
+from app.modules.reviews.application.run_failures import RunCancelled, RunFailure, RunSkipped
 from app.modules.reviews.application.vcs_diff import (
     MergeBaseUnavailable,
     PullRequestLocator,
@@ -46,6 +47,10 @@ _BASE = "b" * 40
 _LOCATOR = PullRequestLocator(17, "octo/repo", 7)
 _SOURCE = "def greet(name):\n    extra = 1\n    return name\n"
 _PATCH = "@@ -1,2 +1,3 @@\n def greet(name):\n+    extra = 1\n     return name"
+
+
+async def _checkpoint() -> None:
+    return None
 
 
 @dataclass
@@ -65,7 +70,10 @@ class Vcs:
     merge_base: str | Exception = "c" * 40
     files_changed: int = 2
 
-    async def get_pull_request(self, locator: PullRequestLocator) -> VcsPullRequest:
+    async def get_pull_request(
+        self, locator: PullRequestLocator, *, checkpoint: RunProviderCheckpoint
+    ) -> VcsPullRequest:
+        await checkpoint()
         meta = PullRequestMeta(
             title="t",
             description=None,
@@ -81,15 +89,22 @@ class Vcs:
         )
         return VcsPullRequest(locator, self.head_sha, _BASE, meta)
 
-    async def get_merge_base(self, pull_request: VcsPullRequest) -> str:
+    async def get_merge_base(
+        self, pull_request: VcsPullRequest, *, checkpoint: RunProviderCheckpoint
+    ) -> str:
+        await checkpoint()
         if isinstance(self.merge_base, Exception):
             raise self.merge_base
         return self.merge_base
 
-    async def get_diff(self, pull_request: VcsPullRequest) -> tuple[Any, ...]:
+    async def get_diff(
+        self, pull_request: VcsPullRequest, *, checkpoint: RunProviderCheckpoint
+    ) -> tuple[Any, ...]:
         raise AssertionError("the stored diff is reused")
 
-    async def get_blob(self, locator: PullRequestLocator, sha: str) -> bytes:
+    async def get_blob(
+        self, locator: PullRequestLocator, sha: str, *, checkpoint: RunProviderCheckpoint
+    ) -> bytes:
         raise AssertionError("blobs are read through the revision source")
 
 
@@ -181,18 +196,23 @@ def _stage(
     none: bool = False,
     empty: bool = False,
     builtin_excluded: Callable[[str], bool] = lambda path: False,
+    context_builder: Callable[[RunVcsInput], BuildReviewContext] | None = None,
 ) -> ReviewContextStage:
     shared = store or Store()
     provider = vcs or Vcs()
     return ReviewContextStage(
+        checkpoint=_checkpoint,
         runs=Runs(None if none else [] if empty else (snapshots or _snapshots())),
         vcs=provider,
         merge_base=provider,
         prepare_policy=PreparePolicySnapshot(
             uow_factory=lambda: Uow(shared), source_factory=lambda pins: policy or Policy()
         ),
-        context_builder=lambda run: BuildReviewContext(
-            source=Repository(), parser=Parser(), counter=EstimatedTokenCounter()
+        context_builder=context_builder
+        or (
+            lambda run: BuildReviewContext(
+                source=Repository(), parser=Parser(), counter=EstimatedTokenCounter()
+            )
         ),
         trace=trace,
         builtin_excluded=builtin_excluded,
@@ -564,7 +584,10 @@ def test_policy_part_that_cannot_be_established_fails_the_attempt() -> None:
         asyncio.run(_stage(Trace(), none=True).run(_RUN))
 
     class Unreachable(Vcs):
-        async def get_pull_request(self, locator: PullRequestLocator) -> VcsPullRequest:
+        async def get_pull_request(
+            self, locator: PullRequestLocator, *, checkpoint: RunProviderCheckpoint
+        ) -> VcsPullRequest:
+            await checkpoint()
             raise RunFailure("diff_fetch_failed", "GitHub answered 502")
 
     stage = _stage(Trace(), vcs=Unreachable())
@@ -606,7 +629,7 @@ def test_review_prompt_gets_neither_the_content_nor_the_name_of_an_ignored_file(
     )
 
     seen: list[ReviewContext] = []
-    meta = asyncio.run(Vcs().get_pull_request(_LOCATOR)).meta
+    meta = asyncio.run(Vcs().get_pull_request(_LOCATOR, checkpoint=_checkpoint)).meta
 
     class Processor:
         async def prepare(self, run_id: UUID) -> object:
@@ -779,3 +802,32 @@ def test_check_run_says_where_a_policy_failure_is() -> None:
     )
     assert policy_error_detail(None) is None
     assert policy_error_detail("llm_timeout: slow") is None
+
+
+@pytest.mark.parametrize("failure", ["cancel", "deadline", "optional"])
+def test_context_stage_propagates_control_but_preserves_optional_fallback(failure: str) -> None:
+    error = {
+        "cancel": RunCancelled("installation_unavailable"),
+        "deadline": RunFailure("deadline_exceeded"),
+        "optional": RunFailure("diff_fetch_failed", "optional enrichment"),
+    }[failure]
+
+    class Broken(BuildReviewContext):
+        async def execute(self, **kwargs: Any) -> Any:
+            raise error
+
+    trace = Trace()
+    stage = _stage(
+        trace,
+        context_builder=lambda run: Broken(
+            source=Repository(), parser=Parser(), counter=EstimatedTokenCounter()
+        ),
+    )
+    if failure == "optional":
+        assert asyncio.run(stage.run(_RUN)) is None
+        assert stage.excluded("generated/api.py")
+    else:
+        with pytest.raises(type(error)) as caught:
+            asyncio.run(stage.run(_RUN))
+        assert caught.value is error
+    assert trace.steps[-1][2]["error"]["type"] == type(error).__name__

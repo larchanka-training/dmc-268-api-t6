@@ -1,4 +1,7 @@
-# Round-five documentation verification — PR #132 / #113
+# Historical round-five documentation verification — PR #132 / #113
+
+This source inspection and its results belong to round-five published checkpoint
+`b5e0cec92c24a8e702a90e75de5a10350f89cdaa`; they do not verify later heads.
 
 Combined main: `11ddfabf31a3345e6d21cdf57586281cb62cee7c`, including #121 and
 #126. Rebased parent: `b4fb4a24c4ff8cbcf6256c289565283c51b80851`. Scope: the two
@@ -56,5 +59,9 @@ on course board 12 with Todo status and linked in
 found no private filesystem paths, local service addresses or credential-bearing
 DSNs. Only documentation was changed for these findings. The [final proof](113-review-round5-final.md)
 records all four completed combined-head gates and independent reviews.
-Publication hooks and required CI will be reported from their own executions. The [integration proof](113-review-round5-integration.md)
+Publication hooks passed without modifying files at that round-five checkpoint.
+All nine required jobs succeeded in
+[CI run 38373267208](https://github.com/larchanka-training/dmc-268-api-t6/actions/runs/38373267208):
+3132 full-suite passes in 599.18s and a separate 538 integration passes in 427.93s,
+zero failures/skips and 2 existing warnings in each execution. The [integration proof](113-review-round5-integration.md)
 records the completed PostgreSQL receipt checks (333 focused passes, zero skips).

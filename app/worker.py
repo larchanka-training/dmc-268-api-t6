@@ -37,7 +37,7 @@ from app.modules.integrations.webhooks.infrastructure.github_installation_tree_p
     GitHubAppInstallationAccessTokenProvider,
     InMemoryInstallationAccessTokenCache,
 )
-from app.modules.reviews.application.check_runs import CheckRunGateway
+from app.modules.reviews.application.check_runs import CheckRunGateway, RunProviderCheckpoint
 from app.modules.reviews.application.conventions import (
     ConventionsModel,
     ConventionsRequest,
@@ -100,6 +100,7 @@ from app.modules.reviews.application.run_failures import (
     FAST_ATTEMPT_DEADLINE,
     HEARTBEAT_INTERVAL,
     RetryDelays,
+    RunCancelled,
     RunFailure,
 )
 from app.modules.reviews.application.run_trace import (
@@ -472,7 +473,9 @@ class GitHubAdapters:
     reviews: PullRequestReviewGateway
     eligibility: EligibilityChecker
     run_source: Callable[[UUID], GitHubRunSource]
-    context_stage: Callable[[RunTrace | None], ReviewContextStage] | None = None
+    context_stage: Callable[[RunTrace | None, RunProviderCheckpoint], ReviewContextStage] | None = (
+        None
+    )
 
 
 def execution_profile_of(llm: LlmSettings | None) -> ExecutionProfile:
@@ -504,31 +507,50 @@ def review_context_stage_factory(
     session_factory: async_sessionmaker[AsyncSession],
     redis: RedisLike | None,
     execution_profile: ExecutionProfile = UNPINNED_EXECUTION_PROFILE,
-) -> Callable[[RunTrace | None], ReviewContextStage]:
+) -> Callable[[RunTrace | None, RunProviderCheckpoint], ReviewContextStage]:
     """Compose the policy and context stage; every run gets its own parser."""
 
-    def context_builder(run: RunVcsInput) -> BuildReviewContext:
-        return BuildReviewContext(
-            source=GitHubRevisionSource(
-                client=client,
-                token_provider=tokens,
-                vcs=vcs,
-                locator=run.locator,
-                tree_cache=None
+    def stage(trace: RunTrace | None, checkpoint: RunProviderCheckpoint) -> ReviewContextStage:
+        def context_builder(run: RunVcsInput) -> BuildReviewContext:
+            return BuildReviewContext(
+                source=GitHubRevisionSource(
+                    client=client,
+                    token_provider=tokens,
+                    vcs=vcs,
+                    locator=run.locator,
+                    checkpoint=checkpoint,
+                    tree_cache=None
+                    if redis is None
+                    else RedisTreeCache(redis, repository_id=run.repository_id),
+                ),
+                parser=SubprocessSourceParser(),
+                counter=EstimatedTokenCounter(),
+                cache=None
                 if redis is None
-                else RedisTreeCache(redis, repository_id=run.repository_id),
-            ),
-            parser=SubprocessSourceParser(),
-            counter=EstimatedTokenCounter(),
-            cache=None
-            if redis is None
-            else RedisAstFactsCache(redis, repository_id=run.repository_id),
-            builtin_excluded=_is_generated,
-        )
+                else RedisAstFactsCache(redis, repository_id=run.repository_id),
+                builtin_excluded=_is_generated,
+            )
 
-    def stage(trace: RunTrace | None) -> ReviewContextStage:
+        locators: dict[UUID, PullRequestLocator] = {}
+
+        def _policy_source(run_id: UUID, policy_base_sha: str) -> PolicyDocumentSource:
+            return _LazyPolicySource(
+                runs=runs,
+                run_id=run_id,
+                build=lambda locator: GitHubPolicyDocumentSource(
+                    client=client,
+                    token_provider=tokens,
+                    vcs=vcs,
+                    locator=locator,
+                    policy_base_sha=policy_base_sha,
+                    checkpoint=checkpoint,
+                ),
+                locators=locators,
+            )
+
         return ReviewContextStage(
             runs=runs,
+            checkpoint=checkpoint,
             # The diff of the attempt is mandatory: its read failures get run error codes.
             vcs=ClassifiedVcsProvider(vcs),
             merge_base=vcs,
@@ -541,22 +563,6 @@ def review_context_stage_factory(
             context_builder=context_builder,
             trace=trace,
             builtin_excluded=_is_generated,
-        )
-
-    locators: dict[UUID, PullRequestLocator] = {}
-
-    def _policy_source(run_id: UUID, policy_base_sha: str) -> PolicyDocumentSource:
-        return _LazyPolicySource(
-            runs=runs,
-            run_id=run_id,
-            build=lambda locator: GitHubPolicyDocumentSource(
-                client=client,
-                token_provider=tokens,
-                vcs=vcs,
-                locator=locator,
-                policy_base_sha=policy_base_sha,
-            ),
-            locators=locators,
         )
 
     return stage
@@ -583,7 +589,7 @@ class _LazyPolicySource:
         if self._source is None:
             run = await self._runs.get_run_vcs_input(self._run_id)
             if run is None:
-                raise LookupError(f"run {self._run_id} has no VCS input")
+                raise RunCancelled("installation_unavailable")
             self._source = self._build(run.locator)
         return self._source
 
@@ -740,7 +746,7 @@ def compose_worker_process(
             output=output,
             trace=trace,
             engine=claimed.engine,
-            context_stage=github.context_stage(trace) if github.context_stage else None,
+            context_stage=github.context_stage(trace, checkpoint) if github.context_stage else None,
         )
 
     enqueue = TryEnqueueWebhookRun(

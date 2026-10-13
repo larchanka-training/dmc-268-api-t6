@@ -662,7 +662,7 @@ FK `KEY SHARE` совместимы, retirement/rebind блокируются. �
 GitHub/LLM calls остаются вне DB-транзакций. Миграции добавляют nullable positive
 BIGINT `account_external_id`, `deleted_at`, доступность и внутренний Run origin без
 угадывания по login; существующее пользовательское `enabled` сохраняется. При
-откате 0029 доступность сворачивается в `enabled AND installation_available`, чтобы
+откате `20261010_0029` доступность сворачивается в `enabled AND installation_available`, чтобы
 снятая App не ожила на 0028; `account_external_id` удаляется безвозвратно. Повторный
 upgrade не восстанавливает числовую идентичность и будущая переустановка такого
 архива создаёт чистую цель. Уже удалённая legacy-установка 168453694 из #106
@@ -840,6 +840,12 @@ GitHub требует `start_side` вместе с многострочным `s
 Публикация обсуждений реализована для GitHub и для GitLab (#97). Bitbucket не
 реализован. Приём GitLab — вебхуки, diff и блобы — не реализован: прогон
 `provider=gitlab` этот код из вебхука не создаёт.
+
+При реализации приёма GitLab каждый писатель Run обязан при создании выставлять
+`origin_provider_installation_id` исходной физической установки: поле nullable
+без default, а NULL закрывает provider-доступ и отменяет прогон с
+`installation_unavailable`. Тогда же нужно уточнить пользовательскую формулировку
+этого кода для не-GitHub провайдера: сейчас она говорит про GitHub App.
 
 GitLab пишет discussions через `GitLabMergeRequestDiscussionGateway`: заголовок
 `PRIVATE-TOKEN` из `GITLAB_TOKEN`, базовый URL `GITLAB_BASE_URL` (по умолчанию
