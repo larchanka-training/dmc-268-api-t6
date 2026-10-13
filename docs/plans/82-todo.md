@@ -26,9 +26,10 @@ The first dedicated-stack full gate produced 3,469 passed / 2 failed in 859.21s;
 failures were the worker GitHub fake missing the new commits endpoint. That fixture
 is corrected, and the focused source/origin/PostgreSQL suite plus both worker cases
 now passes all 90 tests (14 other worker cases deliberately deselected). Lint,
-format and mypy pass. An intermediate broad pytest gate with DB/Rabbit variables
-unset is running; its integration skips must be reported. The final complete
-stand-backed gate remains required after later source/provenance edits.
+format and mypy pass. The intermediate broad pytest gate with DB/Rabbit variables
+unset passed: 2,860 passed / 616 skipped / 2 existing deprecation warnings in 286.00s.
+The final complete stand-backed gate remains required after later source/provenance
+edits; the intermediate skipped tests are not claimed as executed.
 The three real PostgreSQL commit scenarios observed SQLAlchemy transaction begin/end
 events and verified no open transaction at token or HTTP calls, including retirement
 between pages and during the second-page token. Later tasks and whole-issue
@@ -45,11 +46,25 @@ optional adjacent commit helper, `tests/test_github_commit_messages.py`,
 realistic golden fixtures, keeping existing XML escape and shortening behavior.
 
 **Acceptance criteria:**
-- [ ] Literal prompt assertions cover markup, multiline, empty and capped messages from fetched context.
-- [ ] Golden fixture reflects agreed bounded context; no fabricated total omission marker.
-- [ ] Required scope comment exists before editing any #133-owned file; otherwise use independent source/prompt tests and fixtures.
+- [x] Literal prompt assertions cover markup, multiline, empty and capped messages from fetched context.
+- [x] Golden fixture reflects agreed bounded context; no fabricated total omission marker.
+- [x] Required scope comment exists before editing any #133-owned file; otherwise use independent source/prompt tests and fixtures.
 
 **Verification:** `uv run pytest tests/test_prompt_builder.py tests/test_github_commit_messages.py`.
+**Observed evidence (Task 2):** The updated realistic sample context first failed the
+old user golden at byte 1,146; a literal commit-block fixture update passed. The
+fixture covers multiline markup, an empty message, and a 542-character summary
+shortened to 500 including ellipsis. Public source-to-`build_prompt` assertions prove
+literal escaped text, a 20-message API-order prefix, the Unicode cap, and no guessed
+omission marker. The focused suite passed 61 tests with the dedicated PostgreSQL
+service enabled (2 existing deprecation warnings, no skips); lint, format and mypy
+pass. No #133-owned source or test file was edited; the renderer and system golden
+remain unchanged. A real end-of-file hook added a terminal newline to the exact-byte
+user golden and reproduced its failure. Only that hook-added byte was restored from
+the staged intended fixture. Both whitespace-mutating hooks now narrowly exclude
+`tests/fixtures/prompt_builder/*.txt`, preserving system/user wire-byte goldens while
+keeping existing raw-artifact exclusions. The restored golden and scoped pre-commit
+run pass. Later evaluation work and final full-service gates remain pending.
 **Dependencies:** Task 1.
 **Files likely touched:** `tests/test_prompt_builder.py`,
 `tests/fixtures/prompt_builder/sample.user.txt`, optional independent integration
@@ -58,8 +73,8 @@ test, system golden only if wording actually changes (at most 4).
 
 ## Checkpoint: Production behavior
 
-- [ ] Retrieval and rendering tests green; no database/network-boundary regression.
-- [ ] Existing renderer caps preserved; needed collision comments posted with authorization.
+- [x] Retrieval and rendering tests green; no database/network-boundary regression.
+- [x] Existing renderer caps preserved; needed collision comments posted with authorization.
 
 ## Task 3: Honest deterministic evaluation context
 

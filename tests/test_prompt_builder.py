@@ -349,7 +349,12 @@ def _sample_review_context() -> ReviewContext:
             is_draft=False,
             is_fork=False,
             head_sha="0123456789abcdef0123456789abcdef01234567",
-            commit_messages=("feat: add charge & repository", "test: cover <failure> path"),
+            commit_messages=(
+                "feat: add charge & repository\n\nKeep <gateway> failures outside transactions.",
+                "test: cover <failure> path",
+                "docs: explain billing " + "charge flow. " * 40,
+                "",
+            ),
         ),
         changed_files=parse_unified_diff((root / "review/examples/sample.diff").read_text()),
         omitted_files=(),

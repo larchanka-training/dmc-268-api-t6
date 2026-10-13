@@ -19,7 +19,13 @@ from app.modules.integrations.webhooks.infrastructure.github_installation_tree_p
     GitHubAppInstallationAccessTokenProvider,
 )
 from app.modules.reviews.application.process_run import RunVcsInput
-from app.modules.reviews.application.prompt_builder import PullRequestMeta
+from app.modules.reviews.application.prompt_builder import (
+    PromptBuilder,
+    PullRequestMeta,
+    RepoConventions,
+    ReviewContext,
+    ReviewPrompt,
+)
 from app.modules.reviews.application.run_failures import RunCancelled, RunFailure
 from app.modules.reviews.application.vcs_diff import PullRequestLocator
 from app.modules.reviews.infrastructure.github_run_source import GitHubRunSource
@@ -476,3 +482,61 @@ def test_excessive_json_nesting_is_a_safe_malformed_response_failure() -> None:
         _read(lambda request: httpx.Response(200, content=body))
     assert raised.value.error_code == "diff_fetch_failed"
     assert raised.value.message == "GitHub commit response is malformed"
+
+
+def _provider_prompt(meta: PullRequestMeta) -> ReviewPrompt:
+    return PromptBuilder().build_prompt(
+        ReviewContext(
+            system="SYSTEM",
+            rules=(),
+            agents_md=None,
+            conventions=RepoConventions(key_patterns=(), recommendations=()),
+            pr_meta=meta,
+            changed_files=(),
+            omitted_files=(),
+        )
+    )
+
+
+def test_fetched_prefix_reaches_prompt_with_literal_escaping_multiline_and_caps() -> None:
+    def github(request: httpx.Request) -> httpx.Response:
+        if request.url.params["page"] == "1":
+            messages = [
+                "fix: <escape> & keep\n\nExplain <gateway> failures.",
+                "",
+                "😀" * 501,
+            ] + ["same summary"] * 7
+        else:
+            messages = ["tail summary"] * 10
+        return httpx.Response(
+            200,
+            json=[{"commit": {"message": m}} for m in messages],
+            headers={"Link": '<https://evil.test/commits?page=3>; rel="next"'},
+        )
+
+    prompt = _provider_prompt(_read(github))
+
+    expected = (
+        "<commit_messages>\n"
+        "<commit>fix: &lt;escape&gt; &amp; keep\n\nExplain &lt;gateway&gt; failures.</commit>\n"
+        "<commit></commit>\n"
+        "<commit>"
+        + "😀" * 499
+        + "…</commit>\n"
+        + "<commit>same summary</commit>\n" * 7
+        + "<commit>tail summary</commit>\n" * 10
+        + "</commit_messages>"
+    )
+    assert prompt.system == "SYSTEM"
+    assert expected in prompt.user
+    assert prompt.user.count("<commit>") == 20
+    assert "more commits omitted" not in prompt.user
+    assert "<gateway>" not in prompt.user
+    assert "<title>Fix parser</title>" in prompt.user
+    assert "<head_sha>" + "a" * 40 + "</head_sha>" in prompt.user
+
+
+def test_empty_fetched_commit_list_keeps_the_prompt_without_a_commit_block() -> None:
+    prompt = _provider_prompt(_read(lambda request: httpx.Response(200, json=[])))
+    assert "<commit_messages>" not in prompt.user
+    assert "<title>Fix parser</title>" in prompt.user
