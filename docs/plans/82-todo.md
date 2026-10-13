@@ -308,6 +308,9 @@ creates the draft PR; local execution is not hosted evidence.
 Mandatory final Ruff lint, format (435 files) and mypy (432 source files) pass.
 The final complete dedicated PostgreSQL/RabbitMQ pytest gate is running with output
 at `/tmp/82-final-pytest.log`; its result and integration skip count are pending.
+Standards review found stale pending-capture notes in `review/README.md` and
+`docs/SYSTEM_DESIGN.md`; documentation-only corrections now link the completed run
+and measured metric documents under the already-authorized #124/#148 scope.
 Docs are frozen for independent review during this gate. No shaping input or raw
 artifact bytes changed after capture; no additional paid call was made.
 **Dependencies:** Task 6.

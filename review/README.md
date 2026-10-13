@@ -103,8 +103,11 @@ messages of the exact recorded revisions, rather than a complete historical PR
 commit list. All nineteen synthetic cases retain empty commit context. The
 recorder validates every snapshot and active real-case binding before any model
 call; neither live evaluation nor replay queries GitHub. The snapshot file and
-production source are fingerprinted. The existing recorded baseline remains
-unchanged pending the complete #82 recapture and measured metric update.
+production source are fingerprinted. The complete 24-case #82 replacement was
+captured by [run 38468081001, attempt 1](https://github.com/larchanka-training/dmc-268-api-t6/actions/runs/38468081001)
+and imported byte-for-byte with no replay drift. Measured first-answer results and
+provenance are in the [corpus README](../test-prs-dataset/README.md#recorded-mistral-baseline--2026-10-13)
+and [canonical test plan](../docs/TEST_PLAN.md#321-зафиксированный-raw-baseline-82-2026-10-13).
 
 Rendered custom rule — one block per rule, globs space-separated, checks numbered from 1;
 this example is the second rule of `rules/default-backend.v1.json`, checks shortened:
