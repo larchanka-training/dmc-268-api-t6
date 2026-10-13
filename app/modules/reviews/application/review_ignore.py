@@ -333,7 +333,9 @@ def apply_ignore(
         if any(builtin_excluded(path) for path in names):
             denied.update(withheld)
         if file.omission_reason is not None:
-            # Its paths cannot be matched reliably and its content is already withheld.
+            # Its paths cannot be matched reliably: no name of it is a source until its
+            # identity is resolved, also when an allowed file imports it.
+            denied.update(names)
             continue
         for path in dict.fromkeys(names):
             pattern = matcher.match(path)

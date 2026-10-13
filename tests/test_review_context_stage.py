@@ -365,6 +365,13 @@ def test_binary_files_count_as_exclusions_when_the_whole_change_is_excluded() ->
         with pytest.raises(RunSkipped):
             asyncio.run(stage.run(_RUN))
 
+    # A removed binary file is an exclusion as well.
+    removed = DiffSnapshot(
+        "old.png", None, None, "removed", None, 0, 0, 0, omission_reason="binary"
+    )
+    with pytest.raises(RunSkipped):
+        asyncio.run(_stage(Trace(), vcs=Vcs(files_changed=1), snapshots=[removed]).run(_RUN))
+
     # One reviewable file next to them keeps the run going.
     mixed = _stage(Trace(), vcs=Vcs(files_changed=3), snapshots=[*_snapshots(), _binary()])
     assert asyncio.run(mixed.run(_RUN)) is not None

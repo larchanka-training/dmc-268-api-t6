@@ -294,7 +294,7 @@ class ReviewContextStage:
             and diff_map.file_list_complete
             and all(
                 ignore.decision_for(file.file_id) is not None
-                or file.provider_new_path in service_excluded
+                or (file.provider_new_path or file.provider_old_path) in service_excluded
                 or (
                     file.omission_reason is None
                     and (file.new_path or file.old_path) in ignore.denied_paths

@@ -398,6 +398,28 @@ def test_changed_file_past_the_ast_limit_is_not_parsed_through_an_import() -> No
     assert all(ref.resolution is not ImportResolution.RESOLVED for ref in payload.imports)
 
 
+def test_file_of_an_unresolved_identity_is_not_read_through_an_import() -> None:
+    # The old name breaks the path contract, so the file has no reliable identity.
+    repository = _service_repository()
+    diff_map = _diff_map(
+        _vcs_file(repository, "pkg/service.py", _GREET_PATCH),
+        _vcs_file(
+            repository,
+            "pkg/models.py",
+            "@@ -1 +1 @@\n-class Old:\n+class User:",
+            deletions=1,
+            status="renamed",
+            previous="generated/../models.py",
+        ),
+    )
+
+    payload = _build(repository, diff_map, rules_text="```review-ignore\ngenerated/**\n```\n")
+
+    assert all(block.source.path != "pkg/models.py" for block in payload.blocks)
+    assert [ref.resolution for ref in payload.imports] == [ImportResolution.EXCLUDED]
+    assert "pkg/models.py" not in repository.read
+
+
 def test_all_changes_ignored_and_an_empty_diff_are_their_own_outcomes() -> None:
     repository = _service_repository()
     only = _diff_map(_vcs_file(repository, "pkg/service.py", _GREET_PATCH))

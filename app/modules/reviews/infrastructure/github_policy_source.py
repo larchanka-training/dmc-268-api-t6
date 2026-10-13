@@ -83,12 +83,13 @@ class GitHubPolicyDocumentSource:
 
     async def list_entries(self, tree_oid: str | None) -> Mapping[str, PolicyTreeEntry]:
         sha = commit_sha_segment(self._base_sha if tree_oid is None else tree_oid)
+        prefix = _repository_prefix(self._locator)
         try:
             token = await self._tokens.get_installation_access_token(
                 self._locator.installation_external_id
             )
             response = await self._client.get(
-                f"{_repository_prefix(self._locator)}/git/trees/{sha}",
+                f"{prefix}/git/trees/{sha}",
                 headers=_headers(token),
                 timeout=_REQUEST_TIMEOUT,
             )
