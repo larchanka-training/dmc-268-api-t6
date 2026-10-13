@@ -50,7 +50,7 @@ from app.modules.reviews.application.project_github_pull_request import (
     RunCancellationNotice,
     TimelineLifecycle,
 )
-from app.modules.reviews.application.trigger_from_delivery import CiTriggerEvent
+from app.modules.reviews.application.trigger_from_delivery import CiTriggerEvent, RunTriggerOutcome
 from app.modules.reviews.infrastructure.github_pull_request_projection import (
     SqlAlchemyPullRequestProjectionLock,
     SqlAlchemyPullRequestProjectionUnitOfWork,
@@ -1396,13 +1396,15 @@ def test_edited_receipt_updates_metadata_without_changing_intent_clock_or_enqueu
         prs: list[PullRequestEvent] = field(default_factory=list)
         ci: list[CiTriggerEvent] = field(default_factory=list)
 
-        async def on_pr(self, event: PullRequestEvent) -> None:
+        async def on_pr(self, event: PullRequestEvent) -> RunTriggerOutcome:
             self.prs.append(event)
+            return RunTriggerOutcome("")
 
-        async def on_ci(self, event: CiTriggerEvent) -> None:
+        async def on_ci(self, event: CiTriggerEvent) -> RunTriggerOutcome:
             self.ci.append(event)
+            return RunTriggerOutcome("")
 
-        async def on_label(self, event: PullRequestLabelEvent) -> None:
+        async def on_label(self, event: PullRequestLabelEvent) -> RunTriggerOutcome:
             raise AssertionError("edited must not enqueue")
 
     uow = FakeUnitOfWork()
@@ -1662,14 +1664,17 @@ def test_human_unlabels_ai_review_without_cancelling_active_run_or_enqueuing() -
     class Trigger:
         calls: list[str] = field(default_factory=list)
 
-        async def on_pr(self, event: PullRequestEvent) -> None:
+        async def on_pr(self, event: PullRequestEvent) -> RunTriggerOutcome:
             self.calls.append(event.action)
+            return RunTriggerOutcome("")
 
-        async def on_label(self, event: PullRequestLabelEvent) -> None:
+        async def on_label(self, event: PullRequestLabelEvent) -> RunTriggerOutcome:
             self.calls.append(event.pull_request.action)
+            return RunTriggerOutcome("")
 
-        async def on_ci(self, event: CiTriggerEvent) -> None:
+        async def on_ci(self, event: CiTriggerEvent) -> RunTriggerOutcome:
             self.calls.append("ci")
+            return RunTriggerOutcome("")
 
     signals = Signals()
     trigger = Trigger()
@@ -1737,14 +1742,17 @@ def test_self_bot_label_delivery_is_ignored_before_projection_and_trigger(
             return _event(event.action, current_label_names=frozenset())
 
     class Trigger:
-        async def on_pr(self, event: PullRequestEvent) -> None:
+        async def on_pr(self, event: PullRequestEvent) -> RunTriggerOutcome:
             trigger_calls.append(event.action)
+            return RunTriggerOutcome("")
 
-        async def on_label(self, event: PullRequestLabelEvent) -> None:
+        async def on_label(self, event: PullRequestLabelEvent) -> RunTriggerOutcome:
             trigger_calls.append(event.pull_request.action)
+            return RunTriggerOutcome("")
 
-        async def on_ci(self, event: CiTriggerEvent) -> None:
+        async def on_ci(self, event: CiTriggerEvent) -> RunTriggerOutcome:
             trigger_calls.append("ci")
+            return RunTriggerOutcome("")
 
     projector = ProjectGitHubPullRequest(
         uow_factory=lambda: uow,
@@ -2228,13 +2236,15 @@ def test_dispatcher_projects_reopened_pr_event_from_durable_delivery() -> None:
         prs: list[PullRequestEvent] = field(default_factory=list)
         ci: list[CiTriggerEvent] = field(default_factory=list)
 
-        async def on_pr(self, event: PullRequestEvent) -> None:
+        async def on_pr(self, event: PullRequestEvent) -> RunTriggerOutcome:
             self.prs.append(event)
+            return RunTriggerOutcome("")
 
-        async def on_ci(self, event: CiTriggerEvent) -> None:
+        async def on_ci(self, event: CiTriggerEvent) -> RunTriggerOutcome:
             self.ci.append(event)
+            return RunTriggerOutcome("")
 
-        async def on_label(self, event: PullRequestLabelEvent) -> None:
+        async def on_label(self, event: PullRequestLabelEvent) -> RunTriggerOutcome:
             raise AssertionError("reopened is not a label event")
 
     trigger = Trigger()
@@ -2291,13 +2301,14 @@ def test_pr_metadata_delivery_projects_without_triggering_run(
     class Trigger:
         prs: list[PullRequestEvent] = field(default_factory=list)
 
-        async def on_pr(self, event: PullRequestEvent) -> None:
+        async def on_pr(self, event: PullRequestEvent) -> RunTriggerOutcome:
             self.prs.append(event)
+            return RunTriggerOutcome("")
 
-        async def on_ci(self, event: CiTriggerEvent) -> None:
-            pass
+        async def on_ci(self, event: CiTriggerEvent) -> RunTriggerOutcome:
+            return RunTriggerOutcome("")
 
-        async def on_label(self, event: PullRequestLabelEvent) -> None:
+        async def on_label(self, event: PullRequestLabelEvent) -> RunTriggerOutcome:
             raise AssertionError("metadata must not enqueue")
 
     projector = Projector()

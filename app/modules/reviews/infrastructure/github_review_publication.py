@@ -13,10 +13,11 @@ from app.common.infrastructure.github_repository_path import (
 )
 from app.modules.reviews.application.check_runs import CheckRunTarget, CheckRunView
 from app.modules.reviews.application.publish_run_review import (
-    GitHubPublishError,
+    PublishError,
     ReviewSubmission,
     SubmittedReview,
 )
+from app.modules.reviews.application.review_output import comment_body
 from app.modules.reviews.infrastructure.github_vcs import InstallationTokenProvider
 
 CHECK_RUN_NAME = "AI Review"
@@ -87,7 +88,7 @@ class GitHubCheckRunGateway:
         return None
 
 
-def _publish_error(response: httpx.Response) -> GitHubPublishError:
+def _publish_error(response: httpx.Response) -> PublishError:
     status = response.status_code
     try:
         message = str(response.json().get("message", ""))
@@ -101,11 +102,11 @@ def _publish_error(response: httpx.Response) -> GitHubPublishError:
     if status == 422:
         lowered = detail.lower()
         if "commit_id" in lowered or "not part of the pull request" in lowered:
-            return GitHubPublishError("stale_commit", detail, http_status=status)
-        return GitHubPublishError("coordinates", detail, http_status=status)
+            return PublishError("stale_commit", detail, http_status=status)
+        return PublishError("coordinates", detail, http_status=status)
     if status == 404 or (status == 403 and not rate_limited):
-        return GitHubPublishError("forbidden", detail, http_status=status)
-    return GitHubPublishError("retryable", detail, http_status=status, retry_after=delay)
+        return PublishError("forbidden", detail, http_status=status)
+    return PublishError("retryable", detail, http_status=status, retry_after=delay)
 
 
 class GitHubPullRequestReviewGateway:
@@ -129,7 +130,7 @@ class GitHubPullRequestReviewGateway:
             # A failed read raises: the retry finds the posted review by its marker.
             return await self._with_comments(prefix, headers, review_id)
         except httpx.TransportError as exc:
-            raise GitHubPublishError("retryable", f"GitHub request failed: {exc}") from exc
+            raise PublishError("retryable", f"GitHub request failed: {exc}") from exc
 
     async def _ensure_current_head(
         self, prefix: str, headers: dict[str, str], commit_sha: str
@@ -140,7 +141,7 @@ class GitHubPullRequestReviewGateway:
             raise _publish_error(response)
         head = response.json().get("head", {}).get("sha")
         if head != commit_sha:
-            raise GitHubPublishError("stale_commit", f"pull request head moved to {head}")
+            raise PublishError("stale_commit", f"pull request head moved to {head}")
 
     async def _post(
         self, prefix: str, headers: dict[str, str], submission: ReviewSubmission
@@ -157,7 +158,7 @@ class GitHubPullRequestReviewGateway:
                         "line": item.line,
                         "side": "RIGHT",
                         **({"start_line": item.start_line} if item.start_line else {}),
-                        "body": _comment_body(item.title, item.body, item.suggestion),
+                        "body": comment_body(item.title, item.body, item.suggestion),
                     }
                     for item in submission.findings
                 ],
@@ -196,10 +197,3 @@ class GitHubPullRequestReviewGateway:
         if response.is_error:
             raise _publish_error(response)
         return SubmittedReview(review_id, tuple(int(item["id"]) for item in response.json()))
-
-
-def _comment_body(title: str, body: str, suggestion: str | None) -> str:
-    text = f"**{title}**\n\n{body}"
-    if suggestion:
-        text += f"\n\n```suggestion\n{suggestion}\n```"
-    return text

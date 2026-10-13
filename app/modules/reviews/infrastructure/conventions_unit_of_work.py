@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from uuid import UUID
 
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.common.infrastructure.db.unit_of_work import SqlAlchemyUnitOfWork
@@ -14,8 +14,7 @@ from app.modules.reviews.application.conventions import (
     CachedConventions,
     ConventionsFile,
 )
-from app.modules.reviews.infrastructure.models import RunAction
-from app.modules.reviews.infrastructure.run_action_payloads import place_response
+from app.modules.reviews.infrastructure.run_action_records import insert_run_action
 
 
 class SqlAlchemyRepositoryConventionsStore:
@@ -25,13 +24,19 @@ class SqlAlchemyRepositoryConventionsStore:
         self._session = session
 
     async def get(
-        self, repository_id: UUID, agents_md_sha: str | None, prompt_version_id: UUID
+        self,
+        repository_id: UUID,
+        agents_md_sha: str | None,
+        prompt_version_id: UUID,
+        policy_key: str | None = None,
     ) -> CachedConventions | None:
         result = await self._session.execute(
             select(RepoConventions).where(
                 RepoConventions.repository_id == repository_id,
+                # ``==`` with None is rendered as IS NULL, which is the wanted match.
                 RepoConventions.agents_md_sha == agents_md_sha,
                 RepoConventions.prompt_version_id == prompt_version_id,
+                RepoConventions.policy_key == policy_key,
             )
         )
         item = result.scalar_one_or_none()
@@ -45,6 +50,7 @@ class SqlAlchemyRepositoryConventionsStore:
             key_patterns=tuple(conventions.key_patterns),
             recommendations=tuple(conventions.recommendations),
             languages=dict(conventions.languages),
+            policy_key=conventions.policy_key,
         )
 
     async def save_and_record_trace(
@@ -54,7 +60,10 @@ class SqlAlchemyRepositoryConventionsStore:
         trace_files: tuple[ConventionsFile, ...],
     ) -> CachedConventions:
         existing = await self.get(
-            conventions.repository_id, conventions.agents_md_sha, conventions.prompt_version_id
+            conventions.repository_id,
+            conventions.agents_md_sha,
+            conventions.prompt_version_id,
+            conventions.policy_key,
         )
         saved = existing
         if saved is None:
@@ -62,6 +71,7 @@ class SqlAlchemyRepositoryConventionsStore:
                 repository_id=conventions.repository_id,
                 agents_md_sha=conventions.agents_md_sha,
                 prompt_version_id=conventions.prompt_version_id,
+                policy_key=conventions.policy_key,
                 agents_md=None,
                 key_patterns=list(conventions.key_patterns),
                 recommendations=list(conventions.recommendations),
@@ -70,26 +80,15 @@ class SqlAlchemyRepositoryConventionsStore:
             self._session.add(row)
             await self._session.flush()
             saved = conventions
-        index = await self._session.scalar(
-            select(func.coalesce(func.max(RunAction.index), -1)).where(RunAction.run_id == run_id)
+        await insert_run_action(
+            self._session,
+            run_id=run_id,
+            tool="llm.repo_conventions",
+            request={},
+            response={"files": [file.model_dump() for file in trace_files]},
+            started_at=datetime.now(UTC),
+            duration_ms=0,
         )
-        assert index is not None
-        response, response_ref = await place_response(
-            self._session, run_id, {"files": [file.model_dump() for file in trace_files]}
-        )
-        self._session.add(
-            RunAction(
-                run_id=run_id,
-                index=index + 1,
-                tool="llm.repo_conventions",
-                request={},
-                response=response,
-                response_ref=response_ref,
-                started_at=datetime.now(UTC),
-                duration_ms=0,
-            )
-        )
-        await self._session.flush()
         return saved
 
 

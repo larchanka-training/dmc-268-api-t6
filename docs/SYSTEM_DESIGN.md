@@ -35,7 +35,7 @@ runtime-профиль требуют отдельной реализации; �
 | Р-8 | `usage_events` (токены, деньги, модель) — с первого вызова LLM, только вставка | Восстановить задним числом нельзя; основа для `CreditLedger` |
 | Р-9 | Бот односторонний: публикует, на комментарии не отвечает; **обязательно** игнорирует собственные события | Скорость запуска; защита от цикла «бот → CI → бот» |
 | Р-10 | Триггер — **конъюнкция двух событий в любом порядке**: на PR стоит лейбл `ai-review` ∧ CI успешен для текущего `head_sha`. Бота нельзя запросить ревьюером: GitHub отвечает 201 с пустым `requested_reviewers`, событие `review_requested` не приходит ([#37](https://github.com/larchanka-training/dmc-268-api-t6/issues/37#issuecomment-5874776355)). **После пуша — авто-повтор**, пока PR открыт и стоит лейбл (наш флаг `ai_review_labeled`): бот лейбл не снимает; флаг сверяется с текущими лейблами PR, поэтому его снимает `unlabeled` не от нашего бота, а закрытие PR флаг не трогает — новые Run для закрытого PR не создаются (решения техлида по #20, OQ-1, по #37 и #56). Условие «CI успешен» и sweep «2 мин без CI» — §6.1, [PIPELINE_SPEC](PIPELINE_SPEC.md) §8 | Решение мита; события независимы, порядок не гарантирован. Лейбл ставит только участник с правом triage и выше: внешний автор PR не запустит ревью и не потратит бюджет LLM |
-| Р-11 | Провайдер VCS — за портом `VcsProvider`; v1 реализует только GitHub | ТЗ упоминает GitLab, роль 6 — Bitbucket; порт дешёвый, реализации — нет |
+| Р-11 | Провайдер VCS — за портом `VcsProvider`. Публикация обсуждений реализована для GitHub и GitLab; Bitbucket не реализован. Приём GitLab (вебхуки, diff, блобы) не реализован | Запись в GitLab — discussions и маркеры `findings_hash` (§8.4, #97). Модель [CONTEXT_AND_VERIFICATION_SPEC](CONTEXT_AND_VERIFICATION_SPEC.md) §9.5 и §10 этот код не исполняет |
 | Р-12 | Один monorepo и пять независимо собираемых сервисов (`portal-api`, `auth-api`, `webhook-api`, `worker`, `publisher`) с собственными зависимостями; у роли `webhook-api` второй процесс — `webhook-worker` (тот же образ, `python -m app.webhook_worker`, §4) | Изоляция релизов и зависимостей без потери единого lock-файла и локального окружения |
 | Р-13 | **RAG не входит в MVP.** Worker получает контекст через порт `ContextProvider`: в MVP — детерминированный сборщик L1–L4, позднее — `RagContextProvider`, возвращающий тот же `ContextPayload` | В MVP нет затрат и операционных рисков embeddings/vector DB, но RAG подключается без изменения LLM, post-processing и публикации |
 | Р-14 | Успешный прогон — статус **`succeeded`** везде: домен (`RunState.SUCCEEDED`), PG enum `run_state`, API, Zod фронтенда. Полный набор: `queued\|running\|publishing\|succeeded\|failed\|cancelled\|skipped` (§6.4); `completed` — только события и статусы GitHub (`check_suite`, `check_run`, `workflow_run`) | Одно имя от БД до UI без маппинга; код и миграция уже используют `succeeded` и `publishing` |
@@ -475,17 +475,21 @@ sequenceDiagram
   participant W as AI Worker
 
   P->>PG: LISTEN run_updated
+  P->>PG: LISTEN run_step
   B->>P: GET /api/stream (fetch, Authorization: Bearer)
   B->>P: GET /api/runs (status, repo, cursor)
   P->>PG: SELECT runs по Workspace из JWT
   P-->>B: RunListPage
   W->>PG: UPDATE runs.state + NOTIFY run_updated (одна транзакция)
   PG-->>P: уведомление после commit
-  P-->>B: event run.updated {runId, status}
+  P-->>B: event run.updated {runId, status} с id:
+  W->>PG: INSERT run_actions + NOTIFY run_step (одна транзакция)
+  PG-->>P: уведомление после commit
+  P-->>B: event run.step {runId, tool, index, ok, startedAt, durationMs} без id:
   B->>P: GET /api/runs/{id} → RunDetail
 ```
 
-Каждая смена статуса Run шлёт `NOTIFY run_updated` в своей транзакции (D12 — дефолт по #20; payload и отправители — PIPELINE_SPEC §1): уведомление приходит только после commit, и UI не видит незафиксированных состояний. Поток читается через `fetch` с Bearer — `EventSource` заголовки не передаёт. Мост LISTEN/NOTIFY → SSE — #34.
+Каждая смена статуса Run шлёт `NOTIFY run_updated` в своей транзакции (D12 — дефолт по #20; payload и отправители — PIPELINE_SPEC §1): уведомление приходит только после commit, и UI не видит незафиксированных состояний. Вставка `run_actions` в той же транзакции шлёт `NOTIFY run_step`; наружу это `run.step` без строки `id:`, и повтор `Last-Event-ID` шаги не переигрывает. Поток читается через `fetch` с Bearer — `EventSource` заголовки не передаёт. Мост LISTEN/NOTIFY → SSE — #34; канал шага — #97.
 
 ### 6.7 Перезапуск
 
@@ -635,13 +639,13 @@ head-входы общего conventions cache и публикация raw summa
 - Без `GITHUB_APP_ID` и `GITHUB_APP_PRIVATE_KEY` worker стартует, но diff получить не может: доставленный `review.run/v1` завершает Run как `failed` / `github_forbidden` без retry.
 - Rerun (T3) пишет Run с `message_published_at = null` и снимает пометку после confirm, но в replay лидер-цикла worker не попадает: выборка outbox из #11 рассчитана на Run с `trigger = webhook` и лейблом `ai-review`. Неотправленный rerun переотправляет реконсилер (T18, через 10 мин).
 - Ответ `review.postprocess` дополнительно хранит `summary` из `ReviewOutput`: `llm.review_output` больше 1 МиБ усекается (D1), а run detail берёт сводку из маленького `review.postprocess`.
-- Scope для portal обязателен: например, `SqlAlchemyRunRepository`, `SqlAlchemyRerunStore`, `SqlAlchemyRerunUnitOfWork` и `SqlAlchemyCancelRunUnitOfWork` сразу отклоняют отсутствие `AuthScope` (`ValueError`). Для доверенных внутренних вызовов обход доступен только явным `allow_unscoped=True`; scoped rerun использует тот же DB-предикат видимости, что чтение Run.
+- Все адаптеры, функции авторизации и фабрики с параметром `scope: AuthScope | None` обязаны работать fail-closed: создание или вызов без `AuthScope` вызывает `ValueError`, если доверенный внутренний вызывающий код явно не передал `allow_unscoped=True`. Актуальные примеры адаптеров: [`SqlAlchemyRunRepository`](../app/modules/reviews/infrastructure/run_repository.py), [`SqlAlchemyCancelRunUnitOfWork`](../app/modules/reviews/infrastructure/run_repository.py), [`SqlAlchemyRerunStore`](../app/modules/reviews/infrastructure/rerun_store.py), [`SqlAlchemyRerunUnitOfWork`](../app/modules/reviews/infrastructure/rerun_store.py), [`SqlAlchemyPullRequestQueries`](../app/modules/reviews/infrastructure/pull_request_queries.py), [`SqlAlchemyRepositorySettingsStore`](../app/modules/repositories/infrastructure/repository_settings.py) и [`SqlAlchemyRepositorySettingsUnitOfWork`](../app/modules/repositories/infrastructure/repository_settings.py). Функция авторизации [`authorized_run`](../app/modules/reviews/infrastructure/run_repository.py) проверяет scope напрямую; фабрика [`ReviewsApiResources.run_repository`](../app/bootstrap/reviews_api.py) делегирует защищённому конструктору репозитория. Отсутствие scope само по себе не разрешает обход. Scoped rerun использует тот же DB-предикат видимости, что чтение Run.
 - `POST /api/runs/{id}/rerun` отвечает 422, если у репозитория нет активной версии правил или промпта: это не конфликт T3 (409 только для активного Run или закрытого PR).
 - `GET /api/runs/{id}` отдаёт `RunDetail`; `author`, `headRef` и `baseRef` в `PullRequestRef` заполняются только в нём, список `GET /api/runs` отдаёт `RunSession` без них. Zod-схема UI допускает оба ответа: с ui#59 (`4369e02`) эти поля `nullable().optional()`; снимок Zod-схем ui (`tests/fixtures/ui_zod_contracts.json`) сверяется со спекой поле в поле, порядок перегенерации — PIPELINE_SPEC §16; коммит ui, с которого он снят, — в `provenance.commit` и `UI_CONTRACT_COMMIT`.
 - Worker собирает LLM Gateway (#33) один раз на процесс, а модели ревью и конвенций на каждую попытку с её `RunCallContext` (дедлайн, номер попытки, версии). AGENTS.md читается на `base_sha`, дерево и файлы для конвенций читаются на `head_sha` через blob, метаданные PR берутся из GitHub. Без `LLM_MODEL` worker стартует с предупреждением, а Run завершается `failed` / `llm_unavailable` с сообщением о том, что шлюз не настроен (#52). `llm_unavailable` ретраится (`RETRYABLE_ERROR_CODES`), поэтому Run проходит все три попытки, и сообщение видно в `runs.error_message` только после третьей. Локальные модели: таймаут вызова fast фиксирован, 90 с (`GatewayPolicy.call_timeout_s`, из env не задаётся), и reasoning-модели на локальном железе в него обычно не укладываются; LM Studio с gpt-oss отвечает 400 на строгую схему (`json_schema`), ему нужны `LLM_STRUCTURED_OUTPUT=prompt_json` и `LLM_ALLOW_PROMPT_JSON=1` (README, «LLM gateway»).
 - Перед `POST /pulls/{n}/reviews` publisher сверяет голову PR в GitHub: push, который webhook-worker ещё не записал в PostgreSQL, превращает публикацию в `cancelled` / `superseded` (T15), а не в ревью на старый коммит (#52).
 - `deep` (SandboxEngine) относится к фазе 3: `PATCH /api/repos/{id}` принимает только `fast`, реконсилер не публикует в `review.run.deep`, очередь только объявляется (#52).
-- Installation-токены кэшируются в памяти процесса (`InMemoryInstallationAccessTokenCache`: `app/webhook_worker.py:133`, `app/worker.py:409`): каждый процесс выпускает свой токен и держит его до `expires_at` из ответа GitHub минус 60 с. Цель — Redis `token:{installation_id}` (§8.3, §10); перенос в Redis — бэклог, #62.
+- Installation-токены кэшируются в памяти процесса: в боевом runtime `InMemoryInstallationAccessTokenCache` создаётся в [`app/webhook_worker.py` → `run_forever`](../app/webhook_worker.py) и [`app/worker.py` → `github_adapters`](../app/worker.py). Боевой `worker.run_worker` вызывает `github_adapters` и использует `compose_worker_process` / `WorkerProcess`; фабрика создаёт один общий кэш для GitHub-адаптеров только при настроенном GitHub App и доступном HTTP-клиенте, иначе возвращает `None` с предупреждением. Третье место создания — [`app/worker.py` → `review_worker`](../app/worker.py), устаревший прототип из §16, вызываемый тестами: в нём кэш создаётся при отсутствии внедрённого `vcs_provider` и настроенном GitHub App. Кэши process-local: каждый процесс получает installation-токен и держит его до `expires_at` из ответа GitHub минус 60 с ([`InMemoryInstallationAccessTokenCache.get`, `_INSTALLATION_TOKEN_SAFETY_SKEW_SECONDS`](../app/modules/integrations/webhooks/infrastructure/github_installation_tree_provider.py)). Цель — Redis `token:{installation_id}` (§8.3, §10); перенос в Redis — бэклог, #62.
 - **Лимит повторов AMQP и маршрутизация в DLQ при неожиданных ошибках (#54).** Очереди `review.run.*` объявлены как классические очереди RabbitMQ из-за несовместимости `x-max-priority` с кворум-очередями брокера. Classic-очереди RabbitMQ не выставляют заголовок `x-delivery-count`. Доменные повторы отслеживаются через `runs.attempt` в PostgreSQL и проявляются в AMQP через `x-death` после возвращения из exchange `reviews.retry` и очередей задержки `retry.{30s,2m,10m}.{fast,deep}` (§6.8, §7.2). Для защиты от необработанных исключений потребителя вводится второй, отдельный счётчик повторов через заголовок `x-attempt`: он считает любые исключения, вылетевшие из обработчика, в обеих очередях (`review.run.*` и `review.publish`); гибель процесса не считается. При возникновении исключения обработчик воркера выполняет confirmed-перепубликацию копии сообщения с инкрементированным заголовком `x-attempt: attempts` через exchange `reviews` с последующим подтверждением `ack()` исходной доставки. Если перепубликация завершается ошибкой (сбой соединения или брокера), воркер перехватывает исключение и выполняет fallback на `nack(requeue=True)`. Заголовок `x-death` отложенных очередей не расходует бюджет неожиданных сбоев. Некорректные или повреждённые заголовки попыток логируются с уровнем `WARNING` и fallback на 1. При достижении порога `MAX_UNEXPECTED_RETRIES = 3` сообщение маршрутизируется в `reviews.dlq` через `nack(requeue=False)`, в лог пишется `ERROR` с полным `exc_info=True`, а локальный кэш попыток процесса очищается. Локальное fallback-состояние ограничено 1024 записями (`MAX_LOCAL_RETRY_ENTRIES`) с TTL 300 с от последнего сохранения (`LOCAL_RETRY_TTL_SECONDS`); истёкшие записи удаляются лениво при следующем обращении retry к состоянию, при заполнении вытесняются старейшие. Успешная confirmed-перепубликация и ack оригинала очищают локальную запись; ошибка publish или ack сохраняет ограниченный fallback. Между процессами счётчик переносит заголовок `x-attempt`. Без `message_id` локальный ключ — стабильный SHA-256 routing key и тела сообщения. Остаточные риски: 1) внезапная гибель процесса (SIGKILL, OOM-killer) не считается счётчиком, так как обработчик не успевает выполнить перепубликацию до падения процесса; 2) если копия опубликована, а `ack` оригинала упал, в очереди окажутся и оригинал, и копия; это безопасно благодаря идемпотентности обработчиков (Р-5, §7.2).
 
 ---
@@ -663,7 +667,7 @@ class VcsProvider(Protocol):
     async def list_feedback(self, repo: RepoRef, number: int) -> list[FeedbackSignal]: ...   # после MVP
 ```
 
-v1 — `GitHubProvider`. `GitLabProvider` (MR `changes`, `discussions`, `pipeline` events, bot-user token) и `BitbucketProvider` — по портy, без реализации.
+Реализованы публикация GitHub (вебхуки, diff, блобы, check-run, `post_review`) и публикация обсуждений GitLab (`GitLabMergeRequestDiscussionGateway`, §8.4). Приём GitLab — вебхуки, diff, блобы — не реализован: отдельного `GitLabProvider` для этих методов нет. `BitbucketProvider` не реализован.
 
 ### 8.2 GitHub: события и права
 
@@ -708,12 +712,59 @@ DiffMap описывает доступный diff, а видимость каж
 якорь отбрасывается, а не превращается в общий комментарий.
 
 GitHub требует `start_side` вместе с многострочным `start_line`. LEFT проектируется
-в v3 и не получает suggestion. GitLab — отдельный последующий адаптер: закрепляет
-diff version и `base_sha/start_sha/head_sha`, old/new API paths и line cursors,
-строит `position`/`line_range`/`line_code`, не копирует GitHub JSON. Старый код
-GitLab берётся из `base_commit_sha`, а не `start_commit_sha`; точные формулы и
-ограничения suggestions — CONTEXT_AND_VERIFICATION_SPEC §9. Включение GitLab
-и LEFT требует сквозных изменений storage/API/eval, не заявлено этим документом.
+в v3 и не получает suggestion.
+
+Публикация обсуждений реализована для GitHub и для GitLab (#97). Bitbucket не
+реализован. Приём GitLab — вебхуки, diff и блобы — не реализован: прогон
+`provider=gitlab` этот код из вебхука не создаёт.
+
+GitLab пишет discussions через `GitLabMergeRequestDiscussionGateway`: заголовок
+`PRIVATE-TOKEN` из `GITLAB_TOKEN`, базовый URL `GITLAB_BASE_URL` (по умолчанию
+`https://gitlab.com`). Без `GITLAB_TOKEN` прогон остаётся в `publishing`, HTTP
+к GitLab нет. Версия diff — строка `GET /api/v4/projects/{id}/merge_requests/{iid}/versions`,
+у которой `head_commit_sha` равен голове прогона. У строки versions имена
+`base_commit_sha`, `start_commit_sha` и `head_commit_sha`; в payload позиции те же
+значения уходят как `base_sha`, `start_sha` и `head_sha`, и `head_sha` не копируется
+в `base_sha` или `start_sha`. Если такой версии нет, прогон становится
+`cancelled` / `superseded`. GitLab отдаёт текущую версию первой и сохраняет
+предыдущие следом. Перед первой новой discussion шлюз сравнивает
+`head_commit_sha` первой версии с головой прогона. Совпадение только с более
+поздней строкой списка не разрешает публикацию: прогон становится `cancelled` /
+`superseded`, и POST не выполняется. Строка с головой прогона задаёт SHA позиции.
+Inline — только новая сторона: `position.position_type=text`,
+`old_path` и `new_path` равны пути находки, `new_line` — строка находки. Полей
+`old_line`, `line_range` и `line_code` нет. Сводка — одно discussion без `position`.
+Маркеры, дословно:
+
+- сводка: `<!-- ai-review findings_hash={hash} summary -->`
+- inline: `<!-- ai-review findings_hash={hash} inline={path}:{line} finding={id} -->`
+
+`{id}` — первые 16 hex-символов SHA-256 от текста inline-комментария (заголовок,
+тело и suggestion). Две находки на одной строке с разным текстом получают разные
+маркеры. Перед циклом inline шлюз ищет маркер сводки: уже опубликованная сводка
+этого `findings_hash`, в том числе сводка fallback с перенесёнными находками,
+завершает публикацию и не создаёт новые discussions.
+
+Перед созданием список discussions читается с пагинацией. Усечённый или битый
+список — повторяемая ошибка, а не «ничего не опубликовано». Тот же `findings_hash`
+не создаёт вторую сводку и вторую копию inline. Идентификаторы discussion в
+`comments` не пишутся (`comment_ids` пустой): повтор узнаёт публикацию по маркеру,
+а не по `github_comment_id`. Отказ позиции — HTTP 400, в тексте которого по границам
+слова есть `line_code`, `line`, `position` или `diff refs`. Отдельное слово `diff` и
+`deadline` таким отказом не являются. После такого 400 шлюз ещё раз читает versions
+и снова сравнивает первую версию с головой прогона. Если за время публикации голова
+сменилась, прогон становится
+`cancelled` / `superseded`, даже когда более старая версия всё ещё содержит эту
+голову. Пока первая версия — голова прогона, в тело сводки один раз попадают только
+те inline, которые эта попытка ещё не опубликовала. Прочие сбои пишут на прогон `gitlab_forbidden` (401 и 403) или
+`gitlab_publish_failed`. Коды `github_*` для GitLab не используются, и шлюз
+check-run GitHub для такого прогона не вызывается. Запись трейса —
+`gitlab.publish_review`.
+
+[CONTEXT_AND_VERIFICATION_SPEC](CONTEXT_AND_VERIFICATION_SPEC.md) §9.5 и §10
+описывают более позднюю модель (`line_code`, `line_range`, отдельный receipt
+каждой операции, `publication_key`). Этот код её не реализует. Абзацы ниже —
+эта целевая модель #107, а не контракт текущего адаптера.
 
 Перед `publishing` сохраняются final result и каждый точный payload. Ключ публикации
 включает provider/repository/PR, run_id, head_sha, diff_snapshot_id и final result
@@ -1104,7 +1155,7 @@ raw модельная похвала/неподтверждённые дефе�
 |---|---|---|---|
 | Прогоны | `GET /api/runs`, `GET /api/runs/{id}`, `…/diff`, `…/files`, `…/comments`, `…/actions`, `…/actions/{index}/response` | `portal-api` | `RunListPage {items,nextCursor}`, семь состояний Р-14; detail = RunSession + verdict/summary/severityCounts/findings/budget и планируемые поля coverage/version выше. `/diff` сохраняет исходный доступный UI patch при ignored/summary-only; `patch=null` означает отсутствие исходного patch, не отсутствие AI-проверки. `/files` старше TTL → `404`/`410`; большие action bodies — через response endpoint |
 | Действия с прогоном | `POST /api/runs/{id}/rerun`, `POST /api/runs/{id}/cancel` | `portal-api` | rerun — новый Run `queued`, `202`; PR закрыт или есть активный Run → `409` (§6.7); cancel идемпотентен |
-| Поток | `GET /api/stream` | `portal-api` | SSE `run.updated {runId, status}`, один поток на вкладку, `fetch` с Bearer; между процессами — PG `LISTEN/NOTIFY` (D12 — дефолт по #20, §6.6) |
+| Поток | `GET /api/stream` | `portal-api` | SSE `run.updated {runId, status}` (кадр с `id:`, повтор по `Last-Event-ID`) и `run.step {runId, tool, index, ok, startedAt, durationMs}` (без `id:`, не переигрывается); один поток на вкладку, `fetch` с Bearer; между процессами — PG `LISTEN/NOTIFY` каналов `run_updated` и `run_step` (D12 — дефолт по #20, §6.6, PIPELINE_SPEC §1) |
 | Репозитории | `GET /api/repos`, `GET/PATCH /api/repos/{id}`, `GET /api/repos/{id}/pulls` | `portal-api` | подключение — установкой App (§6.9): `POST /api/repos` и PATCH коллекции нет (D10); `GET /api/repos` → `Repository[]`; PATCH — `enabled`, `defaultEngine`, `waitForCi` (`auto\|always\|never`), `maxComments` (1..10), `reviewEvent` (`COMMENT\|REQUEST_CHANGES`); pulls → `{items: PullRequestSummary[], nextCursor}` с `latestRun {id, status, verdict}` (D11 — дефолт по #20) |
 | Правила, метрики | `GET/POST /api/repos/{id}/rules`, `POST /api/rules/{id}/preview`, `GET /api/metrics/summary` | `portal-api` | после MVP (`x-note` в спеке) |
 | Вход и сессия | `POST /api/auth/github/callback`, `POST /api/auth/refresh`, `GET /api/auth/me`, `POST /api/auth/logout` | `auth-api` | ниже; поток — §6.5 |
@@ -1254,7 +1305,7 @@ verifier #107. В новом профиле четыре слота делятс
 ## 17. Проверка DoD
 
 - [x] Компоненты, потоки данных, границы backend / frontend / LLM — §2, §3–§5
-- [x] Правила взаимодействия с VCS (GitHub, порт для GitLab) — §8
+- [x] Правила взаимодействия с VCS (публикация GitHub и GitLab; приём GitLab и Bitbucket нет) — §8
 - [x] Форматы очереди задач (RabbitMQ) — §7
 - [x] Стратегия кэширования контекстов — §10
 - [x] Сборщик контекста: структуры данных на 4 уровнях — §9

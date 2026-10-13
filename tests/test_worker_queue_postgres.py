@@ -1184,6 +1184,8 @@ class FakeGitHubApi:
             return self.blob(_FILE_SHA, _FILE_TEXT)
         if path == f"{repo}/git/blobs/{'a' * 40}" and self.agents_md is not None:
             return self.blob("a" * 40, self.agents_md)
+        if path == f"{repo}/compare/{BASE}...{HEAD}":
+            return httpx.Response(200, json={"merge_base_commit": {"sha": BASE}})
         if path == f"{repo}/git/trees/{BASE}":
             tree = [{"path": "README.md", "type": "blob", "sha": "c" * 40, "size": 3}]
             if self.agents_md is not None:

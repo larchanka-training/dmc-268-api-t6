@@ -1,0 +1,380 @@
+"""Run the policy and context steps of a review run.
+
+The stage runs after the diff of the attempt is stored and before any model call. It
+enforces the policy: an invalid or unreadable policy fails the run with its code, a
+change whose every file is ignored is skipped, and ignored files are withheld from the
+prompt of the review. The assembled context itself is recorded in the run trace;
+feeding it to the model belongs to the integration with the LLM pipeline (§12).
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+from collections import Counter
+from collections.abc import Callable
+from dataclasses import replace
+from hashlib import sha256
+from typing import Any
+from uuid import UUID
+
+from app.modules.reviews.application.diff_map import (
+    DiffMap,
+    VcsProviderName,
+    build_diff_map,
+    is_supported_path,
+)
+from app.modules.reviews.application.get_run_diff import DiffSnapshot
+from app.modules.reviews.application.policy_errors import PolicyError
+from app.modules.reviews.application.policy_snapshot import PolicySnapshot
+from app.modules.reviews.application.prepare_policy_snapshot import PreparePolicySnapshot
+from app.modules.reviews.application.process_run import RunVcsInput, RunVcsRepository
+from app.modules.reviews.application.review_context import (
+    BuildReviewContext,
+    ContextStatus,
+    ReviewContextPayload,
+)
+from app.modules.reviews.application.review_ignore import (
+    IgnoreMatcher,
+    IgnorePolicy,
+    apply_ignore,
+)
+from app.modules.reviews.application.run_failures import RunFailure, RunSkipped
+from app.modules.reviews.application.run_trace import RunTrace, traced_step
+from app.modules.reviews.application.vcs_diff import (
+    MergeBaseProvider,
+    MergeBaseUnavailable,
+    VcsFile,
+    VcsProvider,
+)
+
+_LOGGER = logging.getLogger(__name__)
+FAST_CONTEXT_TOKEN_BUDGET = 60_000
+_MAX_TRACED_BLOCKS = 200
+
+
+class EstimatedTokenCounter:
+    """Four characters per token, rounded up: an estimate until the model counter is wired."""
+
+    def count(self, text: str) -> int:
+        return -(-len(text) // 4)
+
+
+def _provider_patch(patch: str | None) -> str | None:
+    """The hunks as the provider sent them.
+
+    A stored snapshot keeps the patch for the UI under a ``diff --git`` header; the diff
+    map reads the hunks only. A stored patch without a hunk has no lines to map.
+    """
+    if patch is None or not patch.startswith("diff --git "):
+        return patch
+    hunk_start = patch.find("\n@@ ")
+    return None if hunk_start < 0 else patch[hunk_start + 1 :]
+
+
+# Stored omissions that are exclusions of the service, not incompleteness of the diff.
+_SERVICE_EXCLUSIONS = frozenset({"binary", "generated"})
+
+
+def _service_excluded_names(stored: list[DiffSnapshot]) -> frozenset[str]:
+    """Names of stored files that the service excluded, as the deny-set holds them.
+
+    The source of a copy stays its own file: only the copy is withheld.
+    """
+    names: set[str] = set()
+    for item in stored:
+        if item.omission_reason not in _SERVICE_EXCLUSIONS:
+            continue
+        names.add(item.filename)
+        if item.previous_filename is not None and item.status != "copied":
+            names.add(item.previous_filename)
+    return frozenset(name for name in names if is_supported_path(name))
+
+
+def _vcs_file(snapshot: DiffSnapshot) -> VcsFile:
+    return VcsFile(
+        filename=snapshot.filename,
+        status=snapshot.status,
+        blob_sha=snapshot.blob_sha,
+        previous_filename=snapshot.previous_filename,
+        additions=snapshot.additions,
+        deletions=snapshot.deletions,
+        changes=snapshot.changes,
+        patch=_provider_patch(snapshot.patch),
+    )
+
+
+def policy_summary(snapshot: PolicySnapshot) -> dict[str, Any]:
+    """What was loaded, without any document content."""
+    return {
+        "policy_snapshot_id": str(snapshot.snapshot_id),
+        "policy_base_sha": snapshot.policy_base_sha,
+        "policy_digest": snapshot.policy_digest,
+        "documents": [
+            {
+                "path": document.path,
+                "presence": document.presence.value,
+                "bytes": document.byte_count,
+                "lines": document.line_count,
+            }
+            for document in (snapshot.rules, snapshot.agents)
+        ],
+        "ignore_patterns": len(snapshot.ignore_patterns),
+        "ignore_digest": snapshot.ignore_digest,
+    }
+
+
+def context_summary(diff_map: DiffMap, payload: ReviewContextPayload) -> dict[str, Any]:
+    """Counts and source ranges of the context; the text of a block is never stored here."""
+    tokens: Counter[str] = Counter()
+    for block in payload.blocks:
+        tokens[block.level.value] += block.tokens
+    return {
+        "status": payload.status.value,
+        "reason": payload.reason,
+        "diff": {
+            "digest": diff_map.digest,
+            "files": len(diff_map.files),
+            "diff_old_sha": diff_map.diff_old_sha,
+            "file_list_complete": diff_map.file_list_complete,
+        },
+        "reviewable_lines": payload.reviewable_lines,
+        "ignored_files": payload.ignored_files,
+        "levels_present": [level.value for level in payload.levels_present],
+        "blocks_by_level": dict(Counter(block.level.value for block in payload.blocks)),
+        "tokens_by_level": dict(tokens),
+        "tokens_used": payload.tokens_used,
+        "imports": dict(Counter(ref.resolution.value for ref in payload.imports)),
+        "omissions": [
+            {
+                "reason": item.reason,
+                "path": item.path,
+                "count": item.count,
+                "diagnostic_path": item.diagnostic_path,
+            }
+            for item in payload.omissions
+        ],
+        "blocks": [
+            {
+                "level": block.level.value,
+                "role": block.source.role.value,
+                "path": block.source.path,
+                "side": None if block.source.side is None else block.source.side.value,
+                "ranges": [[item.start_line, item.end_line] for item in block.source.ranges],
+                "related": [
+                    {
+                        "side": None if ref.side is None else ref.side.value,
+                        "path": ref.path,
+                        "revision": ref.revision,
+                        "ranges": [[item.start_line, item.end_line] for item in ref.ranges],
+                    }
+                    for ref in block.related_sources
+                ],
+                "representation": block.representation.value,
+                "tokens": block.tokens,
+                "truncated": block.truncated,
+                "reason": block.source.reason,
+            }
+            for block in payload.blocks[:_MAX_TRACED_BLOCKS]
+        ],
+    }
+
+
+class ReviewContextStage:
+    """Policy snapshot, diff map, ignore and context of one run, recorded in its trace."""
+
+    def __init__(
+        self,
+        *,
+        runs: RunVcsRepository,
+        vcs: VcsProvider,
+        merge_base: MergeBaseProvider,
+        prepare_policy: PreparePolicySnapshot,
+        context_builder: Callable[[RunVcsInput], BuildReviewContext],
+        trace: RunTrace | None = None,
+        token_budget: int = FAST_CONTEXT_TOKEN_BUDGET,
+        builtin_excluded: Callable[[str], bool] = lambda path: False,
+    ) -> None:
+        self._runs = runs
+        self._vcs = vcs
+        self._merge_base = merge_base
+        self._prepare_policy = prepare_policy
+        self._context_builder = context_builder
+        self._trace = trace
+        self._token_budget = token_budget
+        # Built-in exclusions of the service (generated files): part of the effective
+        # exclusion next to the masks of the repository.
+        self._builtin_excluded = builtin_excluded
+        self._denied_paths: frozenset[str] = frozenset()
+        self._snapshot: PolicySnapshot | None = None
+        self._matcher: IgnoreMatcher | None = None
+
+    @property
+    def policy_key(self) -> str | None:
+        """Identity of what this attempt withholds, for caches derived from repository files.
+
+        The masks and built-in exclusions are in ``ignore_digest``. A rename or copy also
+        withholds names no mask matches; they are part of the identity, so an entry made
+        while such a file was still allowed is not reused once it is tainted.
+        """
+        if self._snapshot is None or self._matcher is None:
+            return None
+        tainted = sorted(
+            path
+            for path in self._denied_paths
+            if is_supported_path(path)
+            and not self._builtin_excluded(path)
+            and self._matcher.match(path) is None
+        )
+        if not tainted:
+            return self._snapshot.ignore_digest
+        payload = json.dumps([self._snapshot.ignore_digest, tainted], separators=(",", ":"))
+        return sha256(payload.encode("utf-8")).hexdigest()
+
+    def excluded(self, path: str) -> bool:
+        """Whether the policy of this attempt withholds the path from every model input.
+
+        The effective exclusion: a path outside the path contract, any name of an
+        ignored changed file, a built-in exclusion of the service, and every repository
+        path that matches a mask of the policy.
+        """
+        if not is_supported_path(path) or path in self._denied_paths:
+            return True
+        if self._builtin_excluded(path):
+            return True
+        return self._matcher is not None and self._matcher.match(path) is not None
+
+    def excludes_change(self, path: str, previous_path: str | None) -> bool:
+        """Whether a changed file is withheld; a rename or copy is checked by both names."""
+        return any(self.excluded(item) for item in (path, previous_path) if item)
+
+    async def begin(self, run_id: UUID) -> None:
+        """Establish the policy of the attempt before its diff is stored or counted."""
+        run = await self._runs.get_run_vcs_input(run_id)
+        if run is None:
+            raise LookupError(f"run {run_id} has no VCS input")
+        request = {"policy_base_sha": run.base_sha}
+        async with traced_step(self._trace, run_id, "policy.load", request) as step:
+            self._snapshot = await self._prepare_policy.execute(run_id)
+            step.response = policy_summary(self._snapshot)
+        # The snapshot keeps validated masks; the matcher is rebuilt from them.
+        self._matcher = IgnoreMatcher(
+            IgnorePolicy(self._snapshot.ignore_patterns, (), self._snapshot.ignore_digest)
+        )
+
+    async def run(self, run_id: UUID) -> ReviewContextPayload | None:
+        """Enforce the policy of the run, then build its context.
+
+        The policy part is mandatory: the snapshot, the diff of the attempt and the
+        ignore decisions. If it cannot be established the attempt fails, and a change
+        whose every file is ignored is skipped, both before any model call. Only then
+        comes the optional enrichment: its failure is logged, the exclusions stay in
+        force and the review continues with the diff.
+        """
+        self._denied_paths = frozenset()
+        if self._snapshot is None or self._matcher is None:
+            await self.begin(run_id)
+        snapshot, matcher = self._snapshot, self._matcher
+        assert snapshot is not None and matcher is not None
+        run = await self._runs.get_run_vcs_input(run_id)
+        stored = await self._runs.get_run_snapshots(run_id) if run is not None else None
+        if run is None or stored is None:
+            raise LookupError(f"run {run_id} has no stored diff")
+
+        pull_request = await self._vcs.get_pull_request(run.locator)
+        if pull_request.head_sha != run.head_sha:
+            raise RunFailure("diff_fetch_failed", "pull request head changed after the diff")
+        if not stored and pull_request.meta.files_changed == 0:
+            # The file list and the counter of the provider agree: nothing was changed.
+            await self._record_nothing_to_review(
+                run_id, snapshot, run.head_sha, ContextStatus.NO_CHANGES, digest=None, files=0
+            )
+            raise RunSkipped("no_changes")
+        try:
+            diff_old_sha: str | None = await self._merge_base.get_merge_base(pull_request)
+        except MergeBaseUnavailable:
+            # The old side stays unknown; it is never replaced by the policy base.
+            _LOGGER.warning("Merge base is unavailable run_id=%s", run_id, exc_info=True)
+            diff_old_sha = None
+        diff_map = build_diff_map(
+            pull_request,
+            tuple(_vcs_file(item) for item in stored),
+            provider=VcsProviderName.GITHUB,
+            repository_id=run.repository_id,
+            diff_old_sha=diff_old_sha,
+        )
+        ignore = apply_ignore(matcher, diff_map, builtin_excluded=self._builtin_excluded)
+        # A file the service stored as binary or generated is an exclusion for every
+        # consumer, also when an allowed file imports it: its names join the deny-set.
+        ignore = replace(ignore, denied_paths=ignore.denied_paths | _service_excluded_names(stored))
+        self._denied_paths = ignore.denied_paths
+        # The effective exclusion: a mask of the repository, a built-in exclusion of any
+        # name of the file, or a binary file. Decided here, so a skip never depends on the
+        # optional build. An incomplete file list does not prove that all is excluded.
+        service_excluded = {
+            item.filename for item in stored if item.omission_reason in _SERVICE_EXCLUSIONS
+        }
+        if (
+            diff_map.files
+            and diff_map.file_list_complete
+            and all(
+                ignore.decision_for(file.file_id) is not None
+                or (file.provider_new_path or file.provider_old_path) in service_excluded
+                or (
+                    file.omission_reason is None
+                    and (file.new_path or file.old_path) in ignore.denied_paths
+                )
+                for file in diff_map.files
+            )
+        ):
+            await self._record_nothing_to_review(
+                run_id,
+                snapshot,
+                diff_map.head_sha,
+                ContextStatus.ALL_CHANGES_IGNORED,
+                digest=diff_map.digest,
+                files=len(diff_map.files),
+            )
+            raise RunSkipped("all_changes_ignored")
+
+        request = {"head_sha": run.head_sha, "policy_snapshot_id": str(snapshot.snapshot_id)}
+        try:
+            async with traced_step(self._trace, run_id, "context.build", request) as step:
+                payload = await self._context_builder(run).execute(
+                    diff_map=diff_map,
+                    snapshot=snapshot,
+                    matcher=matcher,
+                    ignore=ignore,
+                    token_budget=self._token_budget,
+                )
+                step.response = context_summary(diff_map, payload)
+        except PolicyError:
+            # The policy is also evaluated while the context is built (paths behind an
+            # import). Its failure is never an optional fallback: it stops the run.
+            raise
+        except Exception:
+            _LOGGER.warning("Review context build failed run_id=%s", run_id, exc_info=True)
+            return None
+        if payload.status is ContextStatus.ALL_CHANGES_IGNORED:
+            raise RunSkipped("all_changes_ignored")
+        return payload
+
+    async def _record_nothing_to_review(
+        self,
+        run_id: UUID,
+        snapshot: PolicySnapshot,
+        head_sha: str,
+        status: ContextStatus,
+        *,
+        digest: str | None,
+        files: int,
+    ) -> None:
+        request = {"head_sha": head_sha, "policy_snapshot_id": str(snapshot.snapshot_id)}
+        async with traced_step(self._trace, run_id, "context.build", request) as step:
+            step.response = {
+                "status": status.value,
+                "reason": status.value,
+                "diff": {"digest": digest, "files": files},
+                "ignored_files": files,
+                "blocks": [],
+            }

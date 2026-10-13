@@ -9,3 +9,6 @@ contracts/openapi.yaml:
     # Referenced from x-events.run.updated of GET /api/stream, which Redocly does not follow;
     # tests/test_openapi_contract.py validates SSE events against it. Do not delete.
     - '#/components/schemas/RunUpdatedEvent'
+    # Referenced from x-events.run.step of GET /api/stream, which Redocly does not follow;
+    # tests/test_openapi_contract.py validates SSE events against it. Do not delete.
+    - '#/components/schemas/RunStepEvent'

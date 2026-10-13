@@ -33,6 +33,7 @@ from app.modules.reviews.application.conventions import (
     ConventionsFile,
     ConventionsRequest,
     GenerateRepoConventions,
+    PolicyFilteredConventionsSource,
     RepositoryFile,
     RepositorySnapshot,
     derive_languages,
@@ -142,13 +143,23 @@ class FakeStore:
     saved: list[CachedConventions] = field(default_factory=list)
     traces: list[tuple[UUID, tuple[ConventionsFile, ...]]] = field(default_factory=list)
     requested_keys: list[tuple[UUID, str | None, UUID]] = field(default_factory=list)
+    requested_policy_keys: list[str | None] = field(default_factory=list)
     fail_on_save: bool = False
 
     async def get(
-        self, repository_id: UUID, agents_md_sha: str | None, prompt_version_id: UUID
+        self,
+        repository_id: UUID,
+        agents_md_sha: str | None,
+        prompt_version_id: UUID,
+        policy_key: str | None = None,
     ) -> CachedConventions | None:
         self.requested_keys.append((repository_id, agents_md_sha, prompt_version_id))
-        if self.cached is not None and self.cached.prompt_version_id == prompt_version_id:
+        self.requested_policy_keys.append(policy_key)
+        if (
+            self.cached is not None
+            and self.cached.prompt_version_id == prompt_version_id
+            and self.cached.policy_key == policy_key
+        ):
             return self.cached
         return None
 
@@ -985,3 +996,82 @@ def test_a_pull_request_over_the_traced_limit_keeps_every_path_in_the_trace() ->
     traced = store.traces[0][1]
     assert [file.path for file in traced] == list(changed)
     assert traced[-1].relevance.startswith("Changed in this pull request")
+
+
+def test_cache_miss_shows_the_conventions_model_nothing_the_policy_withholds() -> None:
+    source = FakeSource()
+    model = FakeModel(draft())
+    store = FakeStore()
+    filtered = PolicyFilteredConventionsSource(source, lambda path: path.startswith("web/"))
+
+    result = asyncio.run(
+        GenerateRepoConventions(filtered, model, FakeUnitOfWorkFactory(store)).execute(
+            repository_id=REPOSITORY_ID,
+            conventions_prompt=ActiveConventionsPrompt(PROMPT_VERSION_ID, "conventions v1"),
+            run_id=RUN_ID,
+            changed_files=("app/main.py",),
+            policy_key="1" * 64,
+        )
+    )
+
+    # The actual conventions request: neither the name nor the content of web/app.ts.
+    request = model.calls[0]
+    assert request.repo_tree == ("app/main.py", "README.md")
+    assert [file.path for file in request.repo_files] == ["app/main.py"]
+    assert "web/app.ts" not in repr(request)
+    # The ignored file is not even loaded.
+    assert source.calls == ["agents", "tree", "files:app/main.py"]
+    # Language shares are computed over what is left after the policy.
+    assert request.languages == {"Python": 100}
+    assert result.conventions.policy_key == "1" * 64
+    assert store.requested_policy_keys == ["1" * 64]
+
+
+def test_conventions_cached_under_another_ignore_policy_are_not_reused() -> None:
+    cached = CachedConventions(
+        repository_id=REPOSITORY_ID,
+        agents_md_sha=AGENTS_SHA,
+        prompt_version_id=PROMPT_VERSION_ID,
+        key_patterns=("One.", "Two.", "Three."),
+        recommendations=("One.", "Two.", "Three.", "Four.", "Five."),
+        languages={"Python": 100},
+        policy_key="1" * 64,
+    )
+
+    def generate(policy_key: str | None) -> tuple[bool, FakeModel]:
+        model = FakeModel(draft())
+        result = asyncio.run(
+            GenerateRepoConventions(
+                FakeSource(), model, FakeUnitOfWorkFactory(FakeStore(cached=cached))
+            ).execute(
+                repository_id=REPOSITORY_ID,
+                conventions_prompt=ActiveConventionsPrompt(PROMPT_VERSION_ID, "conventions v1"),
+                run_id=RUN_ID,
+                changed_files=("app/main.py",),
+                policy_key=policy_key,
+            )
+        )
+        return result.cache_hit, model
+
+    assert generate("1" * 64)[0] is True
+    changed_policy_hit, model = generate("2" * 64)
+    assert changed_policy_hit is False
+    assert len(model.calls) == 1
+    assert generate(None)[0] is False
+
+
+def test_filtered_source_drops_a_withheld_file_even_if_the_inner_source_returns_it() -> None:
+    class Leaky(FakeSource):
+        async def fetch_files(
+            self, repository_id: UUID, paths: tuple[str, ...]
+        ) -> tuple[RepositoryFile, ...]:
+            return (
+                RepositoryFile("app/main.py", 10, content="ok"),
+                RepositoryFile("web/app.ts", 10, content="leak"),
+            )
+
+    filtered = PolicyFilteredConventionsSource(Leaky(), lambda path: path.startswith("web/"))
+
+    files = asyncio.run(filtered.fetch_files(REPOSITORY_ID, ("app/main.py", "web/app.ts")))
+
+    assert [file.path for file in files] == ["app/main.py"]

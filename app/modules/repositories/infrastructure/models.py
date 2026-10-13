@@ -152,6 +152,7 @@ class RepoConventions(Base):
             "repository_id",
             "agents_md_sha",
             "prompt_version_id",
+            "policy_key",
             name="uq_repo_conventions_snapshot",
             postgresql_nulls_not_distinct=True,
         ),
@@ -163,6 +164,9 @@ class RepoConventions(Base):
     prompt_version_id: Mapped[UUID] = mapped_column(
         ForeignKey("prompt_versions.id"), nullable=False
     )
+    # Digest of the ignore policy the entry was generated under; NULL for entries made
+    # without one, which a run with a policy never reuses.
+    policy_key: Mapped[str | None] = mapped_column(CHAR(64))
     agents_md: Mapped[str | None] = mapped_column(TEXT)
     key_patterns: Mapped[list[str]] = mapped_column(JSONB, nullable=False)
     recommendations: Mapped[list[str]] = mapped_column(JSONB, nullable=False)

@@ -64,7 +64,7 @@ class SweepNoCi:
         for candidate in candidates_list:
             attempted += 1
             result = await self._enqueuer.execute(candidate.code_change_id, candidate.head_sha)
-            excluded = result.status != EnqueueStatus.ENQUEUED
+            excluded = result.status not in {EnqueueStatus.ENQUEUED, EnqueueStatus.DEFERRED}
             if excluded:
                 async with self._uow_factory() as uow:
                     await uow.candidates.exclude(candidate)

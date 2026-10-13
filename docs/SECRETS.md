@@ -44,7 +44,7 @@ Repository variable `LLM_EUR_TO_USD_RATE` удалена 06.10 после про
 | `STAGING_SSH_KEY` | да, для Terraform-хоста | SCP/SSH на VM | приватный ключ к `hcloud_ssh_key.ci` |
 | `POSTGRES_PASSWORD` | нет | `<APP_DIR>/.env` на хосте | пароль PostgreSQL. Если не задан, `deploy.sh` генерирует его при первом выкате и хранит в `.env` (0600). После инициализации тома пароль не менять: Postgres его не перечитывает |
 
-Секреты приложения. GitHub не принимает имена секретов и variables с префиксом `GITHUB_` (HTTP 422), поэтому секреты App заведены как `GH_*`, а в контейнере у них имена из `.env.example`. Сопоставление делает шаг «Bundle application secrets» в `deploy-staging`; тем же путём идут organization secret `AI_DMC268_T6`, organization variable `AI_DMC268_URL` и `vars.GH_APP_BOT_LOGIN`, `vars.LLM_MODEL`, `vars.LLM_FALLBACK_MODEL`. Последние два задаются на уровне repository и могут быть переопределены в Environment `staging`. Незаданное значение в контейнер не попадает совсем, а не приходит пустой строкой.
+Секреты приложения. GitHub не принимает имена секретов и variables с префиксом `GITHUB_` (HTTP 422), поэтому секреты App заведены как `GH_*`, а в контейнере у них имена из `.env.example`. Сопоставление делает шаг «Bundle application secrets» в `deploy-staging`; тем же путём идут organization secret `AI_DMC268_T6`, organization variable `AI_DMC268_URL` и `vars.GH_APP_BOT_LOGIN`, `vars.PORTAL_URL`, `vars.LLM_MODEL`, `vars.LLM_FALLBACK_MODEL`. Последние два задаются на уровне repository и могут быть переопределены в Environment `staging`. Незаданное значение в контейнер не попадает совсем, а не приходит пустой строкой.
 
 **Ограничение на значения:** без одинарной кавычки `'` и без `\` в конце. Значения пишутся в env-файл в одинарных кавычках (§3, п. 5), и `deploy.sh` такие значения отклоняет: выкат останавливается до изменений на хосте. На первом выкате после #35, пока в `.env` хоста нет `RABBITMQ_PASSWORD`, следующий за этим авто-откат падает с `RABBITMQ_PASSWORD is required` — стек не тронут, прогон красный. Завершающий перевод строки значения срезается; разбору PEM это безразлично.
 
@@ -54,7 +54,7 @@ Repository variable `LLM_EUR_TO_USD_RATE` удалена 06.10 после про
 |---|---|---|
 | `api.env` | `GITHUB_WEBHOOK_SECRET`, `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET`, `AUTH_JWT_PRIVATE_KEY`, `AUTH_JWT_PUBLIC_KEY` | `api` |
 | `app.env` | `GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY` | `worker`, `webhook-worker` |
-| `worker.env` | `LLM_API_KEYS`, `LLM_BASE_URL`, `LLM_MODEL`, `LLM_FALLBACK_MODEL` (fallback — только при непустом значении) | `worker` |
+| `worker.env` | `LLM_API_KEYS`, `LLM_BASE_URL`, `LLM_MODEL`, `LLM_FALLBACK_MODEL`, `PORTAL_URL` (опциональные ключи — только при непустом значении) | `worker` |
 | `webhook-worker.env` | `GITHUB_APP_BOT_LOGIN` | `webhook-worker` |
 
 | Secret | Тип значения | Переменная в контейнере | Контейнеры | Зачем |
@@ -108,8 +108,19 @@ rm jwt.pem jwt.pub
 | `POSTGRES_USER` | нет | иначе `app` |
 | `POSTGRES_DB` | нет | иначе `app` |
 | `GH_APP_BOT_LOGIN` | да: без него `webhook-worker` не стартует, выкат откатывается | `dmc268-t6-reviewer[bot]` — логин бота App. В контейнере `GITHUB_APP_BOT_LOGIN`, только у `webhook-worker` (`app/webhook_worker.py`). Префикс `GH_`, потому что GitHub не принимает `GITHUB_` и у variables; берётся из `vars.`, а не из `secrets.` |
+| `PORTAL_URL` | для ссылки на Run в staging check-run | `https://staging-ui.dmc268-t6.axyi.ru` — публичный UI-origin. Читается из `vars.PORTAL_URL`, записывается только в `worker.env` → review-worker (`worker`); в `api` и `webhook-worker` не передаётся |
 | `LLM_MODEL` | нет, переопределение repository | `mistral-small-4` (OQ-2, SD §15). В контейнере только у `worker`; обычное значение задано на уровне repository |
 | `LLM_FALLBACK_MODEL` | нет, переопределение repository | `mistral-small-3.2-24b`. Только `worker`. Чтобы отключить fallback, удалите repository variable и это переопределение: значение Environment перекрывает repository, а незаданная variable приходит в `vars` пустой строкой, и `LLM_FALLBACK_MODEL` не попадает в `worker.env` |
+
+`PORTAL_URL` задан в Environment `staging` и прочитан обратно 10.10.2026:
+`https://staging-ui.dmc268-t6.axyi.ru` (#111). Это адрес UI, не API health URL;
+для Terraform-хоста с отдельным UI задайте его origin явно. Repository variable
+может служить общим значением, Environment `staging` перекрывает её.
+Если итоговое значение отсутствует или пустое, ключ не записывается в env-файлы:
+worker стартует, но summary завершившегося успешного/неуспешного check-run не
+содержит ссылку. При заданном значении ссылка — `{PORTAL_URL}/runs/{run_id}`
+(завершающий `/` базового URL удаляется). Настройка применяется при следующем
+штатном выкате; live-проверка свежего sandbox-прогона — [CICD.md §2.1](CICD.md#21-проверка-ссылки-на-run-111).
 
 ### LLM-шлюз — переменные приложения (#33)
 
@@ -137,6 +148,15 @@ rm jwt.pem jwt.pub
 **Проверка стоимости.** Каждый `llm.call`, использовавший курс, содержит `request.fx` с `source`, `observation_date`, `rate_usd_per_eur` и `stale_cache`; тот же набор виден для каждого вызова в JSON CLI и в GitHub Step Summary ручного `LLM live run`, включая сбой после оплаченного ответа. Сырой ответ провайдера хранится отдельно без изменения, а `usage_events.cost_usd` остаётся суммой в USD. Required CI работает без сети и ключей: HTTP ЕЦБ и LLM в тестах подменён; живую проверку выполняют вручную после выката.
 
 Ключи не попадают в логи, тексты исключений, `run_actions` и `usage_events`: транспорт вычищает их из текстов ошибок провайдера, у `ModelProfile` ключи скрыты из `repr` — это проверяет `tests/test_llm_gateway.py::test_keys_never_reach_logs_exceptions_or_the_trace`. Required CI работает без сети и без LLM-ключей: все тесты шлюза идут на фейковом HTTP-транспорте; живой прогон — вручную (README, раздел «LLM gateway»).
+
+### Публикация GitLab — переменные worker (#97)
+
+Их читает `WorkerSettings.from_environment` (`app/worker.py`). Имена совпадают с `.env.example`. Это не секреты GitHub Actions и не ключи бандла `worker.env` на staging: выкат их сам не подставляет. В процесс worker их задаёт окружение, в котором процесс запущен.
+
+| Переменная | Секрет | Кто читает | Значение |
+|---|---|---|---|
+| `GITLAB_TOKEN` | **да** | `worker` | токен в заголовке `PRIVATE-TOKEN`. Один токен на все проекты. Пустое значение: прогон GitLab остаётся в `publishing`, HTTP к GitLab нет |
+| `GITLAB_BASE_URL` | нет | `worker` | базовый URL API GitLab; по умолчанию `https://gitlab.com` |
 
 ### Только локально у оператора
 
@@ -170,7 +190,7 @@ callback; в PostgreSQL хранится только хеш локальног�
 
 1. Settings → Environments → **staging**.
 2. Secrets: `STAGING_SSH_KEY` (только для Terraform-хоста), при желании `POSTGRES_PASSWORD`, секреты приложения из §1. Для выката на курсовой VPS из environment secrets обязательны только `GH_APP_ID` и `GH_APP_PRIVATE_KEY`, остальное дают organization secrets и repository variables. Если нет хотя бы одного из них или variable `GH_APP_BOT_LOGIN` (п. 3), стенд не поднимается: `webhook-worker` получает эти значения как `GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY` и `GITHUB_APP_BOT_LOGIN` из `app.env` и `webhook-worker.env` (`deploy/compose/staging.yml`) и без любого из них не стартует (`app/webhook_worker.py`), `up --wait` не проходит, и `deploy.sh` откатывает выкат. `worker` без App ID и ключа стартует с предупреждением, но выкат всё равно падает на `webhook-worker`. Без секретов `api` (`GH_WEBHOOK_SECRET`, `GH_CLIENT_ID`, `GH_CLIENT_SECRET`, `AUTH_JWT_PRIVATE_KEY`, `AUTH_JWT_PUBLIC_KEY`) стенд поднимается, отключается только их функция: без `GH_WEBHOOK_SECRET` `POST /webhooks/github` отвечает 503, без `GH_CLIENT_ID`, `GH_CLIENT_SECRET` или `AUTH_JWT_PRIVATE_KEY` вход отвечает 503, без `AUTH_JWT_PUBLIC_KEY` — каждый эндпоинт с авторизацией.
-3. Variables: хост, SSH-порт, SHA256 SSH fingerprint, SSH-пользователь, логин бота App `GH_APP_BOT_LOGIN` (обязателен, п. 2), опционально health URL и имя БД.
+3. Variables: хост, SSH-порт, SHA256 SSH fingerprint, SSH-пользователь, логин бота App `GH_APP_BOT_LOGIN` (обязателен, п. 2), опционально health URL, имя БД и `PORTAL_URL` (ссылка на Run).
 
    Fingerprint после `terraform apply` (формат appleboy — строка `SHA256:…` из вывода):
 
@@ -211,6 +231,11 @@ flowchart LR
 
 Rollback ничего из GitHub не шлёт повторно: пароли Postgres, RabbitMQ и Redis берёт из лежащего `.env`, а env-файлы секретов не трогает — откатанные контейнеры стартуют с теми же секретами. Секреты не привязаны к образу: откат образа не возвращает предыдущие значения секретов.
 
+Это относится и к `PORTAL_URL`: workflow включает `vars.PORTAL_URL` в массив
+`names` бандла `APP_SECRETS_B64`, а `WORKER_ENV_KEYS` в `env-file.sh` разрешает
+его только для `worker.env`. Ручной и автоматический rollback сохраняют текущее
+значение этого файла, даже если неуспешный выкат уже записал новый URL.
+
 ---
 
 ## 4. Git
@@ -240,19 +265,93 @@ PR и `main` гоняют Gitleaks (`--redact`) и Trivy scanner `secret`. На�
 | Маскирование | GitHub скрывает значения `secrets.*` и `GITHUB_TOKEN` |
 | Нет `set -x` | `set +o xtrace` в SSH-скрипте и на VM |
 | Нет debug SSH | `debug: false` у appleboy |
-| Нет echo пароля | скрипты печатают только image ref |
+| Нет echo пароля | image ref, контролируемая причина отказа и имена env без значений |
 | Login в реестр | пароль в stdin, stdout login глушится |
 | Gitleaks | `--redact`, чтобы находка не продублировала секрет |
 
-Не делайте `echo "$POSTGRES_PASSWORD"`, `env`, `cat .env` в workflow.
+Не делайте `echo "$POSTGRES_PASSWORD"`, `env`, `cat .env`, resolved `compose config` или полный
+`docker inspect` в workflow: последние тоже содержат значения секретов.
 
-Имена переменных в контейнере без значений — не через `env | cut -d= -f1`: строки многострочного PEM не содержат `=` и печатаются целиком. Безопасно:
+После успешного application rollback общий `rollback.sh` выполняет `compose exec -T` с Python
+в работающих `api`, `worker` и `webhook-worker`. Python читает `os.environ.keys()`, оставляет
+ASCII-имена по `[A-Za-z_][A-Za-z0-9_]*` и печатает отсортированный JSON-список. Скрипт проверяет
+точный формат до вывода и добавляет фиксированную метку сервиса. Значения не читаются: реальные
+переводы строк PEM, `$` и обратные слэши не превращаются в строки лога. Имена с newline,
+кавычками, дефисом или Unicode исключаются. `env | cut -d= -f1` для этого запрещён: строки
+многострочного PEM без `=` он напечатает целиком.
+
+Пример полного вывода из изолированной проверки (набор имён зависит от образа и роли):
+
+```text
+api environment keys: ["AUTH_JWT_AUDIENCE", "AUTH_JWT_ISSUER", "AUTH_JWT_PRIVATE_KEY", "AUTH_JWT_PUBLIC_KEY", "DATABASE_URL", "GITHUB_CLIENT_SECRET", "GITHUB_WEBHOOK_SECRET", "GPG_KEY", "HOME", "HOSTNAME", "LC_CTYPE", "PATH", "POSTGRES_DB", "POSTGRES_HOST", "POSTGRES_PASSWORD", "POSTGRES_PORT", "POSTGRES_USER", "PYTHONDONTWRITEBYTECODE", "PYTHONUNBUFFERED", "PYTHON_SHA256", "PYTHON_VERSION", "RABBITMQ_URL", "REDIS_URL", "UV_COMPILE_BYTECODE", "UV_LINK_MODE"]
+worker environment keys: ["DATABASE_URL", "GITHUB_APP_ID", "GITHUB_APP_PRIVATE_KEY", "GPG_KEY", "HOME", "HOSTNAME", "LC_CTYPE", "LLM_API_KEYS", "PATH", "PYTHONDONTWRITEBYTECODE", "PYTHONUNBUFFERED", "PYTHON_SHA256", "PYTHON_VERSION", "RABBITMQ_URL", "UV_COMPILE_BYTECODE", "UV_LINK_MODE", "WORKER_HEARTBEAT_FILE"]
+webhook-worker environment keys: ["DATABASE_URL", "GITHUB_APP_BOT_LOGIN", "GITHUB_APP_ID", "GITHUB_APP_PRIVATE_KEY", "GPG_KEY", "HOME", "HOSTNAME", "LC_CTYPE", "PATH", "PYTHONDONTWRITEBYTECODE", "PYTHONUNBUFFERED", "PYTHON_SHA256", "PYTHON_VERSION", "RABBITMQ_URL", "UV_COMPILE_BYTECODE", "UV_LINK_MODE", "WORKER_HEARTBEAT_FILE"]
+```
+
+В обоих режимах после здорового `up --wait` сначала записывается identity текущего релиза и
+previous по manual/auto правилам, затем выполняется диагностика, затем печатается `rolled back`.
+Отказ по ревизии или восстановление bootstrap nginx не запускает диагностику. Диагностика
+принимает только stdout с точным JSON-списком и нулевым кодом; stderr отбрасывается.
+Недоступный сервис, ошибка exec и неожиданный/шумный stdout дают фиксированную
+`rollback completion failed: <service> environment key diagnostics failed`; сырой stdout/stderr
+не попадает в job. Identity здорового целевого релиза уже сохранена, job остаётся красным,
+promotion не продолжается. Проверьте фактические образы и здоровье сервисов, устраните сбой exec
+и повторите **только независимую диагностику** ниже ([CICD §5](CICD.md#5-rollback)).
+Не перезапускайте `rollback.yml` или `rollback.sh`: manual rollback уже записал уходящий релиз
+в previous, поэтому повторный откат без явной цели переключит стек обратно.
+
+Для независимой диагностики на хосте задайте `APP_DIR`, `COMPOSE_PROJECT` и `DEPLOY_MODE`
+из фактической конфигурации этого deployment (например, staging имеет свой APP_DIR и проект).
+Используйте его `compose.yml`, `compose.edge.yml` или `compose.ports.yml` и `.env`;
+не выбирайте другой проект и не печатайте содержимое `.env`. Запустите этот отдельный Bash-рецепт:
 
 ```bash
-cd /opt/dmc-268-api-staging
-docker compose -p dmc-268-api-staging -f compose.yml -f compose.edge.yml --env-file .env \
-  exec -T api python -c "import os; print(' '.join(sorted(os.environ)))"
+set +o xtrace
+set -euo pipefail
+: "${APP_DIR:?Set the actual host application directory}"
+: "${COMPOSE_PROJECT:?Set the actual deployed Compose project}"
+: "${DEPLOY_MODE:?Set the actual deployed mode: edge or ports}"
+[[ "$DEPLOY_MODE" == edge || "$DEPLOY_MODE" == ports ]] || exit 1
+unset IMAGE  # Compose reads the recorded release from this deployment's .env.
+recovery_compose=(docker compose -p "$COMPOSE_PROJECT"
+  -f "$APP_DIR/compose.yml" -f "$APP_DIR/compose.$DEPLOY_MODE.yml"
+  --env-file "$APP_DIR/.env")
+recovery_python='import json,os,re; print(json.dumps(sorted(k for k in os.environ.keys() if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", k))))'
+recovery_pattern='^\[("[A-Za-z_][A-Za-z0-9_]*"(, "[A-Za-z_][A-Za-z0-9_]*")*)?\]$'
+for recovery_role in api worker webhook-worker; do
+  if ! recovery_output="$(
+    "${recovery_compose[@]}" exec -T "$recovery_role" python -c "$recovery_python" 2>/dev/null
+    recovery_status=$?
+    printf '.'
+    exit "$recovery_status"
+  )"; then
+    printf '%s\n' "$recovery_role environment key diagnostics failed" >&2
+    exit 1
+  fi
+  [[ "$recovery_output" == *$'\n.' ]] || {
+    printf '%s\n' "$recovery_role environment key diagnostics failed" >&2; exit 1;
+  }
+  recovery_keys="${recovery_output%$'\n.'}"
+  [[ "$recovery_keys" =~ $recovery_pattern ]] || {
+    printf '%s\n' "$recovery_role environment key diagnostics failed" >&2; exit 1;
+  }
+  printf '%s environment keys: %s\n' "$recovery_role" "$recovery_keys"
+done
 ```
+
+Рецепт выполняет только exec и печатает проверенные имена; он не меняет release metadata,
+контейнеры или registry pointers и не возобновляет упавший workflow/promotion автоматически.
+
+При admission вывод pull, выбранных полей image inspect и probe также захватывается или
+подавляется: ошибки идентификации image ID/RepoDigest дают только контролируемую причину.
+Списки registry digest и сырой Docker stderr не печатаются. Новое успешное состояние хранит
+immutable release ref, а probe и up используют один проверенный image ID.
+
+Регрессии выполняют настоящий Python payload с multiline PEM, canaries и hostile names в обоих
+режимах, включая ошибки Docker exec. [Изолированный verifier](CICD.md#изолированная-проверка-двумя-образами)
+проверил работающие контейнеры двух образов, exact key lists и отсутствие каждого синтетического
+секрета/строки PEM во всём захваченном выводе. Его [redacted evidence](plans/110-verification.md)
+содержит только имена, ID, ревизии и хеши; значения и private transcripts не сохраняются в git.
 
 ---
 

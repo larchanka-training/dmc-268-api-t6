@@ -503,6 +503,44 @@ def test_stream_events_validate_against_the_declared_event_schema() -> None:
     _validator_at(f"{pointer}/x-events/run.updated").validate(json.loads(fields["data"]))
 
 
+def test_stream_declares_run_step_beside_the_status_event() -> None:
+    operation = _spec()["paths"]["/api/stream"]["get"]
+    content = operation["responses"]["200"]["content"]["text/event-stream"]
+    events = content["x-events"]
+
+    assert set(events) == {"run.updated", "run.step"}
+    assert events["run.step"] == {"$ref": "#/components/schemas/RunStepEvent"}
+
+    description = operation["description"]
+    assert "`run.updated` is the status event" in description
+    assert "`run.step` is not replayed and has no `id:` line" in description
+
+    app_description = app.openapi()["paths"]["/api/stream"]["get"]["description"]
+    assert "Each event carries an id" not in app_description
+    assert "Only `run.updated` is id-addressed and replayed" in app_description
+    assert "`run.step` has no id and is not replayed" in app_description
+
+    media_type = _escape("text/event-stream")
+    pointer = (
+        f"/paths/{_escape('/api/stream')}/get/responses/200/content/{media_type}/x-events/run.step"
+    )
+    step: dict[str, Any] = {
+        "runId": "11111111-1111-4111-8111-111111111111",
+        "tool": "llm.call",
+        "index": 0,
+        "ok": True,
+        "startedAt": "2026-10-12T09:00:00Z",
+        "durationMs": 12,
+    }
+    _validator_at(pointer).validate(step)
+
+    with pytest.raises(ValidationError):
+        _validator_at(pointer).validate({**step, "status": "running"})
+    without_tool = {key: value for key, value in step.items() if key != "tool"}
+    with pytest.raises(ValidationError):
+        _validator_at(pointer).validate(without_tool)
+
+
 def test_stream_declares_the_last_event_id_header_the_app_accepts() -> None:
     def headers(operation: dict[str, Any]) -> list[tuple[str, bool]]:
         return [

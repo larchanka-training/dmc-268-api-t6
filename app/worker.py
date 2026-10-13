@@ -18,10 +18,11 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from functools import partial
 from pathlib import Path
-from typing import Protocol
+from typing import Protocol, cast
 from uuid import UUID
 
 import httpx
+from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -41,6 +42,8 @@ from app.modules.reviews.application.conventions import (
     ConventionsModel,
     ConventionsRequest,
     GenerateRepoConventions,
+    PolicyFilteredConventionsSource,
+    RepositoryConventionsSource,
     RepositoryFile,
     RepositorySnapshot,
 )
@@ -61,16 +64,32 @@ from app.modules.reviews.application.handle_review_run import (
     HandleReviewRun,
 )
 from app.modules.reviews.application.llm import RunCallContext
-from app.modules.reviews.application.process_run import ReviewRunProcessor, RunDiffProvider
+from app.modules.reviews.application.policy_documents import (
+    PolicyDocumentSource,
+    PolicyTreeEntry,
+)
+from app.modules.reviews.application.policy_snapshot import ExecutionProfile
+from app.modules.reviews.application.prepare_policy_snapshot import PreparePolicySnapshot
+from app.modules.reviews.application.process_run import (
+    ReviewRunProcessor,
+    RunDiffProvider,
+    RunVcsInput,
+)
 from app.modules.reviews.application.prompt_builder import PullRequestMeta, ReviewContext
 from app.modules.reviews.application.publish_cancellation_signals import (
     PublishCancellationSignals,
 )
 from app.modules.reviews.application.publish_run_review import (
+    GitLabDiscussionGateway,
     PublishRunReview,
     PullRequestReviewGateway,
 )
 from app.modules.reviews.application.queue_messages import ReviewPublishQueue, RunRetryQueue
+from app.modules.reviews.application.review_context import BuildReviewContext
+from app.modules.reviews.application.review_context_stage import (
+    EstimatedTokenCounter,
+    ReviewContextStage,
+)
 from app.modules.reviews.application.review_output import (
     PublishedFinding,
     PublishReviewOutput,
@@ -84,6 +103,7 @@ from app.modules.reviews.application.run_failures import (
     RunFailure,
 )
 from app.modules.reviews.application.run_trace import (
+    RunTrace,
     TracedReviewPromptRepository,
     TransactionalRunTrace,
 )
@@ -94,7 +114,11 @@ from app.modules.reviews.application.try_enqueue_webhook_run import (
     RunMessagePublisher,
     TryEnqueueWebhookRun,
 )
-from app.modules.reviews.application.vcs_diff import VcsProvider
+from app.modules.reviews.application.vcs_diff import (
+    PullRequestLocator,
+    VcsProvider,
+    _is_generated,
+)
 from app.modules.reviews.infrastructure.amqp import (
     PUBLISH_QUEUE,
     amqp_channels,
@@ -111,6 +135,7 @@ from app.modules.reviews.infrastructure.conventions_unit_of_work import (
     SqlAlchemyRepositoryConventionsUnitOfWork,
 )
 from app.modules.reviews.infrastructure.github_ci import HttpGitHubCurrentHeadCiProvider
+from app.modules.reviews.infrastructure.github_policy_source import GitHubPolicyDocumentSource
 from app.modules.reviews.infrastructure.github_pull_request_projection import (
     SqlAlchemyPullRequestProjectionUnitOfWork,
 )
@@ -118,8 +143,15 @@ from app.modules.reviews.infrastructure.github_review_publication import (
     GitHubCheckRunGateway,
     GitHubPullRequestReviewGateway,
 )
+from app.modules.reviews.infrastructure.github_revision_source import GitHubRevisionSource
 from app.modules.reviews.infrastructure.github_run_source import GitHubRunSource
-from app.modules.reviews.infrastructure.github_vcs import HttpGitHubVcsProvider
+from app.modules.reviews.infrastructure.github_vcs import (
+    HttpGitHubVcsProvider,
+    InstallationTokenProvider,
+)
+from app.modules.reviews.infrastructure.gitlab_review_publication import (
+    GitLabMergeRequestDiscussionGateway,
+)
 from app.modules.reviews.infrastructure.llm.ecb_fx import EcbFxQuoteCache, EcbFxRateAdapter
 from app.modules.reviews.infrastructure.llm.gateway import LlmGateway
 from app.modules.reviews.infrastructure.llm.models import (
@@ -130,10 +162,19 @@ from app.modules.reviews.infrastructure.llm.settings import LlmSettings
 from app.modules.reviews.infrastructure.no_ci_sweep_candidates import (
     SqlAlchemySweepNoCiUnitOfWork,
 )
+from app.modules.reviews.infrastructure.policy_snapshot_unit_of_work import (
+    UNPINNED_EXECUTION_PROFILE,
+    SqlAlchemyPolicySnapshotUnitOfWork,
+)
 from app.modules.reviews.infrastructure.provider_conventions import (
     ProviderConventionsModel,
     ProviderRepositoryConventionsSource,
     ReviewConventionsProvider,
+)
+from app.modules.reviews.infrastructure.redis_context_cache import (
+    RedisAstFactsCache,
+    RedisLike,
+    RedisTreeCache,
 )
 from app.modules.reviews.infrastructure.review_output_unit_of_work import (
     SqlAlchemyReviewOutputUnitOfWork,
@@ -149,6 +190,7 @@ from app.modules.reviews.infrastructure.run_processing_unit_of_work import (
     SqlAlchemyRunProcessingUnitOfWork,
 )
 from app.modules.reviews.infrastructure.run_repository import SqlAlchemyRunRepository
+from app.modules.reviews.infrastructure.subprocess_source_parser import SubprocessSourceParser
 from app.modules.reviews.infrastructure.vcs_failures import ClassifiedVcsProvider
 from app.modules.reviews.infrastructure.webhook_runs import SqlAlchemyWebhookRunUnitOfWork
 
@@ -170,6 +212,7 @@ async def process_review_run(
     output: ReviewOutputHandler | None = None,
     trace: TransactionalRunTrace | None = None,
     engine: str = "fast",
+    context_stage: ReviewContextStage | None = None,
 ) -> bool:
     """Process one run using the worker's already-created database pool.
 
@@ -179,11 +222,18 @@ async def process_review_run(
 
     repository = SqlAlchemyRunRepository(session_factory, allow_unscoped=True)
     blob_cache = SqlAlchemyBlobCache(session_factory)
+    conventions_source: RepositoryConventionsSource = ProviderRepositoryConventionsSource(provider)
+    if context_stage is not None:
+        # The ignore policy applies to what the conventions model is shown as well.
+        conventions_source = PolicyFilteredConventionsSource(
+            conventions_source, context_stage.excluded
+        )
     conventions = GenerateRepoConventions(
-        ProviderRepositoryConventionsSource(provider),
+        conventions_source,
         ProviderConventionsModel(provider),
         lambda: SqlAlchemyRepositoryConventionsUnitOfWork(session_factory),
     )
+    stage_options = {} if context_stage is None else {"context_stage": context_stage}
     processor = ReviewRunProcessor(
         repository,
         provider,
@@ -192,6 +242,7 @@ async def process_review_run(
         vcs_provider=vcs_provider,
         trace=trace,
         uow_factory=lambda: SqlAlchemyRunProcessingUnitOfWork(session_factory),
+        **stage_options,
     )
     publisher = output or PublishReviewOutput(
         lambda: SqlAlchemyReviewOutputUnitOfWork(session_factory), provider
@@ -199,7 +250,12 @@ async def process_review_run(
     prompts: ReviewPromptRepository = SqlAlchemyReviewPromptRepository(session_factory)
     if trace is not None:
         prompts = TracedReviewPromptRepository(prompts, trace, trace, engine=engine)
-    return await ExecuteReviewRun(processor, prompts, provider, publisher).execute(run_id)
+    if context_stage is None:
+        # A caller without GitHub App adapters: the run is composed without the stage.
+        return await ExecuteReviewRun(processor, prompts, provider, publisher).execute(run_id)
+    return await ExecuteReviewRun(
+        processor, prompts, provider, publisher, context_filter=context_stage
+    ).execute(run_id)
 
 
 class ReviewWorker:
@@ -349,6 +405,9 @@ class WorkerSettings:
     portal_url: str | None
     heartbeat_file: Path | None = None
     llm: LlmSettings | None = None
+    gitlab_token: str | None = None
+    gitlab_base_url: str = "https://gitlab.com"
+    redis_url: str | None = None
 
     @property
     def github_app_configured(self) -> bool:
@@ -377,6 +436,10 @@ class WorkerSettings:
             heartbeat_file=heartbeat_file(env),
             # Partly set LLM_* fails the start; none at all starts with a warning.
             llm=llm,
+            gitlab_token=env.get("GITLAB_TOKEN") or None,
+            gitlab_base_url=env.get("GITLAB_BASE_URL") or "https://gitlab.com",
+            # Optional: the cache of AST facts and file trees of the context stage.
+            redis_url=env.get("REDIS_URL") or None,
         )
 
 
@@ -403,12 +466,133 @@ class GitHubAdapters:
     reviews: PullRequestReviewGateway
     eligibility: EligibilityChecker
     run_source: Callable[[UUID], GitHubRunSource]
+    context_stage: Callable[[RunTrace | None], ReviewContextStage] | None = None
+
+
+def execution_profile_of(llm: LlmSettings | None) -> ExecutionProfile:
+    """The model settings of this worker that a policy snapshot fixes for its run.
+
+    Only what the worker knows today: the review model, its fallback and their providers.
+    The verifier model and the versioned profiles arrive with #120; until then the
+    profile is not complete.
+    """
+    if llm is None:
+        return UNPINNED_EXECUTION_PROFILE
+    fallback = llm.fallback
+    return ExecutionProfile(
+        profile_name="fast",
+        review_model=llm.primary.model,
+        verifier_model="",
+        fallback_review_model=None if fallback is None else fallback.model,
+        primary_provider_route=llm.primary.provider,
+        fallback_provider_route=None if fallback is None else fallback.provider,
+    )
+
+
+def review_context_stage_factory(
+    *,
+    client: httpx.AsyncClient,
+    tokens: InstallationTokenProvider,
+    vcs: HttpGitHubVcsProvider,
+    runs: SqlAlchemyRunRepository,
+    session_factory: async_sessionmaker[AsyncSession],
+    redis: RedisLike | None,
+    execution_profile: ExecutionProfile = UNPINNED_EXECUTION_PROFILE,
+) -> Callable[[RunTrace | None], ReviewContextStage]:
+    """Compose the policy and context stage; every run gets its own parser."""
+
+    def context_builder(run: RunVcsInput) -> BuildReviewContext:
+        return BuildReviewContext(
+            source=GitHubRevisionSource(
+                client=client,
+                token_provider=tokens,
+                vcs=vcs,
+                locator=run.locator,
+                tree_cache=None
+                if redis is None
+                else RedisTreeCache(redis, repository_id=run.repository_id),
+            ),
+            parser=SubprocessSourceParser(),
+            counter=EstimatedTokenCounter(),
+            cache=None
+            if redis is None
+            else RedisAstFactsCache(redis, repository_id=run.repository_id),
+            builtin_excluded=_is_generated,
+        )
+
+    def stage(trace: RunTrace | None) -> ReviewContextStage:
+        return ReviewContextStage(
+            runs=runs,
+            # The diff of the attempt is mandatory: its read failures get run error codes.
+            vcs=ClassifiedVcsProvider(vcs),
+            merge_base=vcs,
+            prepare_policy=PreparePolicySnapshot(
+                uow_factory=lambda: SqlAlchemyPolicySnapshotUnitOfWork(
+                    session_factory, execution_profile=execution_profile
+                ),
+                source_factory=lambda pins: _policy_source(pins.run_id, pins.policy_base_sha),
+            ),
+            context_builder=context_builder,
+            trace=trace,
+            builtin_excluded=_is_generated,
+        )
+
+    locators: dict[UUID, PullRequestLocator] = {}
+
+    def _policy_source(run_id: UUID, policy_base_sha: str) -> PolicyDocumentSource:
+        return _LazyPolicySource(
+            runs=runs,
+            run_id=run_id,
+            build=lambda locator: GitHubPolicyDocumentSource(
+                client=client,
+                token_provider=tokens,
+                vcs=vcs,
+                locator=locator,
+                policy_base_sha=policy_base_sha,
+            ),
+            locators=locators,
+        )
+
+    return stage
+
+
+class _LazyPolicySource:
+    """Bind the policy source to the repository of its run on the first read."""
+
+    def __init__(
+        self,
+        *,
+        runs: SqlAlchemyRunRepository,
+        run_id: UUID,
+        build: Callable[[PullRequestLocator], PolicyDocumentSource],
+        locators: dict[UUID, PullRequestLocator],
+    ) -> None:
+        self._runs = runs
+        self._run_id = run_id
+        self._build = build
+        self._locators = locators
+        self._source: PolicyDocumentSource | None = None
+
+    async def _bound(self) -> PolicyDocumentSource:
+        if self._source is None:
+            run = await self._runs.get_run_vcs_input(self._run_id)
+            if run is None:
+                raise LookupError(f"run {self._run_id} has no VCS input")
+            self._source = self._build(run.locator)
+        return self._source
+
+    async def list_entries(self, tree_oid: str | None) -> Mapping[str, PolicyTreeEntry]:
+        return await (await self._bound()).list_entries(tree_oid)
+
+    async def read_blob(self, oid: str) -> bytes:
+        return await (await self._bound()).read_blob(oid)
 
 
 def github_adapters(
     settings: WorkerSettings,
     client: httpx.AsyncClient | None,
     session_factory: async_sessionmaker[AsyncSession],
+    redis: RedisLike | None = None,
 ) -> GitHubAdapters | None:
     """GitHub App adapters, or ``None`` with a warning when the App is not configured."""
     if not settings.github_app_configured or client is None:
@@ -425,12 +609,28 @@ def github_adapters(
         cache=InMemoryInstallationAccessTokenCache(now=time.time),
         now=time.time,
     )
-    vcs = ClassifiedVcsProvider(HttpGitHubVcsProvider(client=client, token_provider=tokens))
+    github_vcs = HttpGitHubVcsProvider(client=client, token_provider=tokens)
+    vcs = ClassifiedVcsProvider(github_vcs)
     runs = SqlAlchemyRunRepository(session_factory, allow_unscoped=True)
+    context_stage = review_context_stage_factory(
+        client=client,
+        tokens=tokens,
+        vcs=github_vcs,
+        runs=runs,
+        session_factory=session_factory,
+        redis=redis,
+        execution_profile=execution_profile_of(settings.llm),
+    )
     return GitHubAdapters(
+        context_stage=context_stage,
         vcs=vcs,
         run_source=lambda run_id: GitHubRunSource(
-            client=client, token_provider=tokens, vcs=vcs, runs=runs, run_id=run_id
+            client=client,
+            token_provider=tokens,
+            vcs=vcs,
+            runs=runs,
+            run_id=run_id,
+            conventions_from_base=True,
         ),
         check_runs=GitHubCheckRunGateway(client=client, token_provider=tokens),
         reviews=GitHubPullRequestReviewGateway(client=client, token_provider=tokens),
@@ -440,6 +640,17 @@ def github_adapters(
             own_app_id=int(settings.github_app_id),
         ),
     )
+
+
+def gitlab_review_gateway(
+    settings: WorkerSettings,
+    client: httpx.AsyncClient | None,
+) -> GitLabMergeRequestDiscussionGateway | None:
+    """GitLab discussions when ``GITLAB_TOKEN`` is set. Unset leaves the run publishing."""
+    token = settings.gitlab_token
+    if not token or client is None:
+        return None
+    return GitLabMergeRequestDiscussionGateway(client=client, token=token)
 
 
 def attempt_provider_factory(
@@ -492,6 +703,7 @@ def compose_worker_process(
     session_factory: async_sessionmaker[AsyncSession],
     queue: WorkerQueue,
     github: GitHubAdapters | None,
+    gitlab_reviews: GitLabDiscussionGateway | None = None,
     gateway: LlmGateway | None = None,
     provider_factory: ProviderFactory | None = None,
     delays: RetryDelays | None = None,
@@ -522,6 +734,7 @@ def compose_worker_process(
             output=output,
             trace=trace,
             engine=claimed.engine,
+            context_stage=github.context_stage(trace) if github.context_stage else None,
         )
 
     enqueue = TryEnqueueWebhookRun(
@@ -549,6 +762,7 @@ def compose_worker_process(
         publish_review=PublishRunReview(
             uow_factory=lifecycle,
             reviews=github.reviews if github is not None else None,
+            gitlab_reviews=gitlab_reviews,
             check_runs=github.check_runs if github is not None else None,
             trace=trace,
             run_url=run_url,
@@ -595,6 +809,13 @@ async def run_worker(
             if settings.github_app_configured
             else None
         )
+        gitlab_client = (
+            await stack.enter_async_context(
+                httpx.AsyncClient(base_url=settings.gitlab_base_url, timeout=10.0)
+            )
+            if settings.gitlab_token
+            else None
+        )
         gateway: LlmGateway | None = None
         if settings.llm is None:
             _LOGGER.warning("LLM_MODEL is not set: %s; every review run fails", LLM_NOT_CONFIGURED)
@@ -608,12 +829,20 @@ async def run_worker(
                 session_factory,
                 fx_provider=EcbFxQuoteCache(EcbFxRateAdapter(fx_client)),
             )
+        redis: Redis | None = None
+        if settings.redis_url is not None:
+            # Only a cache: the pool connects on first use and a failure reads as a miss.
+            redis = Redis.from_url(settings.redis_url)
+            stack.push_async_callback(redis.aclose)
         async with amqp_channels(settings.rabbitmq_url, delays or RetryDelays()) as channels:
             process = compose_worker_process(
                 settings=settings,
                 session_factory=session_factory,
                 queue=channels.publisher,
-                github=github_adapters(settings, client, session_factory),
+                github=github_adapters(
+                    settings, client, session_factory, cast(RedisLike | None, redis)
+                ),
+                gitlab_reviews=gitlab_review_gateway(settings, gitlab_client),
                 gateway=gateway,
                 provider_factory=provider_factory,
                 delays=delays,

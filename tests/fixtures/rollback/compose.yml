@@ -1,0 +1,6 @@
+# Local acceptance override: no published ports and no outbound provider access.
+# The unmodified production staging base supplies the exact store images and healthchecks.
+services: {}
+networks:
+  default:
+    internal: true

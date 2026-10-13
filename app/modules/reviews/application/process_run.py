@@ -85,6 +85,21 @@ class RunVcsRepository(Protocol):
     async def get_run_snapshots(self, run_id: UUID) -> list[DiffSnapshot] | None: ...
 
 
+class ReviewContextStagePort(Protocol):
+    """The policy and context stage of an attempt."""
+
+    @property
+    def policy_key(self) -> str | None: ...
+
+    async def begin(self, run_id: UUID) -> None: ...
+
+    async def run(self, run_id: UUID) -> object: ...
+
+    def excluded(self, path: str) -> bool: ...
+
+    def excludes_change(self, path: str, previous_path: str | None) -> bool: ...
+
+
 class RunProcessingUnitOfWork(UnitOfWork, Protocol):
     @property
     def repository(self) -> RunProcessingRepository: ...
@@ -106,6 +121,7 @@ class ReviewRunProcessor:
         trace: RunTrace | None = None,
         *,
         uow_factory: Callable[[], RunProcessingUnitOfWork],
+        context_stage: ReviewContextStagePort | None = None,
     ) -> None:
         self._repository = repository
         self._provider = provider
@@ -114,6 +130,7 @@ class ReviewRunProcessor:
         self._vcs_provider = vcs_provider
         self._trace = trace
         self._uow_factory = uow_factory
+        self._context_stage = context_stage
 
     async def execute(self, run_id: UUID) -> bool:
         """Fetch and snapshot the exact head associated with a durable run."""
@@ -130,6 +147,15 @@ class ReviewRunProcessor:
             vcs_run = await vcs_repository.get_run_vcs_input(run_id)
             if vcs_run is None:
                 return None
+            excluded: Callable[[DiffSnapshot], bool] | None = None
+            if self._context_stage is not None:
+                # The policy comes first: it decides what the diff threshold counts.
+                await self._context_stage.begin(run_id)
+                stage = self._context_stage
+
+                def excluded(snapshot: DiffSnapshot) -> bool:
+                    return stage.excludes_change(snapshot.filename, snapshot.previous_filename)
+
             stored_files = await vcs_repository.get_run_snapshots(run_id)
             if stored_files is None:
                 request = {
@@ -165,6 +191,7 @@ class ReviewRunProcessor:
                             code_change_id=vcs_run.code_change_id,
                             head_sha=vcs_run.head_sha,
                             files=files,
+                            **({} if excluded is None else {"excluded": excluded}),
                         )
                         await uow.commit()
                     step.response = {
@@ -205,19 +232,27 @@ class ReviewRunProcessor:
             await self._store_vcs_blobs(run_id, vcs_run, stored_files, failed_blob_shas)
         else:
             await self._store_file_blobs(run, files)
+        changed_paths = tuple(file.path for file in review_files_from_snapshots(stored_files)[0])
+        if self._context_stage is not None:
+            # After the diff is stored and before the first model call: a policy error
+            # or a fully ignored change ends the attempt here.
+            await self._context_stage.run(run_id)
+            changed_paths = tuple(
+                path for path in changed_paths if not self._context_stage.excluded(path)
+            )
         if self._conventions is not None:
             conventions_repository = cast(RunConventionsRepository, self._repository)
             conventions_input = await conventions_repository.get_run_conventions_input(run_id)
             if conventions_input is None:
                 return None
+            policy_key = None if self._context_stage is None else self._context_stage.policy_key
             return await self._conventions.execute(
                 repository_id=conventions_input.repository_id,
                 conventions_prompt=conventions_input.conventions_prompt,
                 run_id=run_id,
-                changed_files=tuple(
-                    file.path for file in review_files_from_snapshots(stored_files)[0]
-                ),
+                changed_files=changed_paths,
                 rules=conventions_input.rules,
+                **({} if policy_key is None else {"policy_key": policy_key}),
             )
         return True
 
