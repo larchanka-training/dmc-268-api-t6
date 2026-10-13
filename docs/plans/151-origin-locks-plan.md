@@ -10,7 +10,9 @@ that branch are copied or used as this branch's base.
 
 F1 and F2 are implemented and verified: 256 focused and 3425 full tests pass
 with zero skips; static gates are green. Fresh Standards/Spec review has zero
-findings. Awaiting independent publication by the publisher.
+findings. Published independently as PR #153:
+https://github.com/larchanka-training/dmc-268-api-t6/pull/153.
+CI/Ready status is tracked by the coordinator; no reviewers are assigned.
 
 ## Design and contracts
 

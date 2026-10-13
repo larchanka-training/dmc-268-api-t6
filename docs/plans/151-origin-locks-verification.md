@@ -105,3 +105,20 @@ findings** on 2026-10-13. Exact comparison base:
 new helper. The coordinator also checked all eight call sites and the helper:
 SQL sequence, typed row shape, joins, refresh options and caller guards match the
 baseline. No subsequent production source changes are made before final gates.
+
+## Publication
+
+Independent PR: [#153](https://github.com/larchanka-training/dmc-268-api-t6/pull/153).
+Source/proof commit: `84641aa` (`refactor(reviews): centralize run origin lock order (#151)`).
+Fresh publisher fetch found origin/main unchanged at the exact base above;
+`git rebase origin/main` reported the branch up to date. Commit hooks passed,
+including Ruff lint/format and mypy. Exactly four production files and these
+three separate documents are committed; no first-PR diff, tests, dependency or
+migration is included.
+
+The PR was created as Draft against main to run remote CI, with no reviewers
+assigned as explicitly requested. The coordinator tracks the final documentation
+push's CI and marks Ready after all relevant checks pass. This publication entry
+and the plan/todo URL updates form a separate documentation-only commit; reviewed
+production source and its recorded gates remain unchanged. Human approval on the
+current head, merge, and issue acceptance remain external Before merge steps.
