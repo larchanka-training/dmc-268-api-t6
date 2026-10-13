@@ -65,6 +65,7 @@ from app.modules.reviews.infrastructure.models import (
 from app.modules.reviews.infrastructure.run_action_records import insert_run_action
 from app.modules.reviews.infrastructure.run_notifications import notify_run_state
 from app.modules.reviews.infrastructure.run_origin import active_origin_condition, origin_active
+from app.modules.reviews.infrastructure.run_origin_locks import lock_run_origin_row
 from app.modules.workspaces.infrastructure.repository_access import repository_access_predicate
 
 
@@ -364,33 +365,19 @@ class SqlAlchemyRunRepository:
         session = self._session
         # Rebind takes source installation → Repository → Run. Protect the final
         # snapshot write with the same order after detached provider requests.
-        await session.execute(
-            select(ProviderInstallation.id)
-            .join(Run, Run.origin_provider_installation_id == ProviderInstallation.id)
-            .where(Run.id == run_id)
-            .with_for_update(of=ProviderInstallation, read=True)
-        )
-        await session.execute(
-            select(Repository.id)
-            .join(CodeChange, CodeChange.repository_id == Repository.id)
-            .join(Run, Run.code_change_id == CodeChange.id)
-            .where(Run.id == run_id)
-            .with_for_update(of=Repository, read=True)
-        )
-        row = (
-            await session.execute(
-                select(Run, Repository, ProviderInstallation)
-                .join(CodeChange, CodeChange.id == Run.code_change_id)
-                .join(Repository, Repository.id == CodeChange.repository_id)
-                .outerjoin(
-                    ProviderInstallation,
-                    ProviderInstallation.id == Run.origin_provider_installation_id,
-                )
-                .where(Run.id == run_id)
-                .with_for_update(of=Run)
-                .execution_options(populate_existing=True)
+        row = await lock_run_origin_row(
+            session,
+            run_id,
+            select(Run, Repository, ProviderInstallation)
+            .join(CodeChange, CodeChange.id == Run.code_change_id)
+            .join(Repository, Repository.id == CodeChange.repository_id)
+            .outerjoin(
+                ProviderInstallation,
+                ProviderInstallation.id == Run.origin_provider_installation_id,
             )
-        ).one_or_none()
+            .where(Run.id == run_id)
+            .execution_options(populate_existing=True),
+        )
         if row is None or row[0].code_change_id != code_change_id or row[0].head_sha != head_sha:
             raise ValueError("run revision changed before diff snapshot storage")
         run, repository, installation = row

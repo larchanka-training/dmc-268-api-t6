@@ -7,7 +7,7 @@ from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import ColumnElement, and_, func, or_, select, update
+from sqlalchemy import ColumnElement, Select, and_, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -40,13 +40,16 @@ from app.modules.reviews.infrastructure.models import (
 from app.modules.reviews.infrastructure.run_action_records import insert_run_action
 from app.modules.reviews.infrastructure.run_notifications import notify_run_state
 from app.modules.reviews.infrastructure.run_origin import active_origin_condition, origin_active
+from app.modules.reviews.infrastructure.run_origin_locks import lock_run_origin_row
 from app.modules.reviews.infrastructure.run_repository import _to_published_finding_row
 from app.modules.workspaces.infrastructure.models import Workspace
 
 _ROW = (Run, CodeChange, Repository, ProviderInstallation)
 
 
-def _joined(*, provider: bool = False) -> Any:
+def _joined(
+    *, provider: bool = False
+) -> Select[tuple[Run, CodeChange, Repository, ProviderInstallation]]:
     statement = (
         select(*_ROW)
         .join(CodeChange, Run.code_change_id == CodeChange.id)
@@ -101,23 +104,6 @@ def _hashed(finding: Finding) -> HashedFinding:
     )
 
 
-async def _lock_provider_rows(session: AsyncSession, run_id: UUID) -> None:
-    # Rebind takes installation → Repository → Run; claim retains that order.
-    await session.execute(
-        select(ProviderInstallation.id)
-        .join(Run, Run.origin_provider_installation_id == ProviderInstallation.id)
-        .where(Run.id == run_id)
-        .with_for_update(of=ProviderInstallation, read=True)
-    )
-    await session.execute(
-        select(Repository.id)
-        .join(CodeChange, CodeChange.repository_id == Repository.id)
-        .join(Run, Run.code_change_id == CodeChange.id)
-        .where(Run.id == run_id)
-        .with_for_update(of=Repository, read=True)
-    )
-
-
 class SqlAlchemyRunLifecycleStore:
     """Repositories flush only; the use case commits. NOTIFY rides the same transaction."""
 
@@ -139,16 +125,14 @@ class SqlAlchemyRunLifecycleStore:
         )
 
     async def lock_for_claim(self, run_id: UUID) -> RunGuardSnapshot | None:
-        await _lock_provider_rows(self._session, run_id)
-        row = (
-            await self._session.execute(
-                _joined()
-                .add_columns(Workspace.daily_budget_usd)
-                .join(Workspace, Workspace.id == ProviderInstallation.workspace_id)
-                .where(Run.id == run_id)
-                .with_for_update(of=Run)
-            )
-        ).one_or_none()
+        row = await lock_run_origin_row(
+            self._session,
+            run_id,
+            _joined()
+            .add_columns(Workspace.daily_budget_usd)
+            .join(Workspace, Workspace.id == ProviderInstallation.workspace_id)
+            .where(Run.id == run_id),
+        )
         if row is None:
             return None
         run, pr, repository, installation, daily_budget = row
@@ -221,15 +205,11 @@ class SqlAlchemyRunLifecycleStore:
         error_message: str | None,
         now: datetime,
     ) -> bool:
-        await _lock_provider_rows(self._session, run_id)
-        row = (
-            await self._session.execute(
-                _joined()
-                .where(Run.id == run_id)
-                .with_for_update(of=Run)
-                .execution_options(populate_existing=True)
-            )
-        ).one_or_none()
+        row = await lock_run_origin_row(
+            self._session,
+            run_id,
+            _joined().where(Run.id == run_id).execution_options(populate_existing=True),
+        )
         if row is None:
             return False
         if not origin_active(row[0], row[2], row[3]):
@@ -268,15 +248,11 @@ class SqlAlchemyRunLifecycleStore:
 
     async def requeue(self, run_id: UUID, *, worker_id: str | None, available_at: datetime) -> bool:
         # Retirement/rebind must not turn an owned attempt into an orphaned queue row.
-        await _lock_provider_rows(self._session, run_id)
-        row = (
-            await self._session.execute(
-                _joined()
-                .where(Run.id == run_id)
-                .with_for_update(of=Run)
-                .execution_options(populate_existing=True)
-            )
-        ).one_or_none()
+        row = await lock_run_origin_row(
+            self._session,
+            run_id,
+            _joined().where(Run.id == run_id).execution_options(populate_existing=True),
+        )
         if row is None:
             return False
         if not origin_active(row[0], row[2], row[3]):
@@ -418,10 +394,11 @@ class SqlAlchemyRunLifecycleStore:
         An active origin records the submitted findings and comment ids. A retired
         or replaced origin cancels without altering those historical payloads.
         """
-        await _lock_provider_rows(self._session, run_id)
-        row = (
-            await self._session.execute(_joined().where(Run.id == run_id).with_for_update(of=Run))
-        ).one_or_none()
+        row = await lock_run_origin_row(
+            self._session,
+            run_id,
+            _joined().where(Run.id == run_id),
+        )
         if row is None or row[0].state != RunState.PUBLISHING:
             return None
         run, pr, repository, installation = row
@@ -499,15 +476,13 @@ class SqlAlchemyRunLifecycleStore:
     ) -> bool:
         # One candidate per transaction: never acquire another origin after a Run,
         # since OAuth locks every affected installation before Repository/Run rows.
-        await _lock_provider_rows(self._session, run_id)
-        row = (
-            await self._session.execute(
-                _joined()
-                .where(Run.id == run_id, self._stale(now, available_before))
-                .with_for_update(of=Run)
-                .execution_options(populate_existing=True)
-            )
-        ).one_or_none()
+        row = await lock_run_origin_row(
+            self._session,
+            run_id,
+            _joined()
+            .where(Run.id == run_id, self._stale(now, available_before))
+            .execution_options(populate_existing=True),
+        )
         if row is None or origin_active(row[0], row[2], row[3]):
             return False
         return await self.finish(
@@ -599,15 +574,11 @@ class SqlAlchemyRunTraceStore:
 
     async def save_context_payload(self, run_id: UUID, summary: dict[str, Any]) -> None:
         # Context is durable review input, not an append-only provider audit.
-        await _lock_provider_rows(self._session, run_id)
-        row = (
-            await self._session.execute(
-                _joined()
-                .where(Run.id == run_id)
-                .with_for_update(of=Run)
-                .execution_options(populate_existing=True)
-            )
-        ).one_or_none()
+        row = await lock_run_origin_row(
+            self._session,
+            run_id,
+            _joined().where(Run.id == run_id).execution_options(populate_existing=True),
+        )
         if row is None or not origin_active(row[0], row[2], row[3]):
             raise RunCancelled("installation_unavailable")
         if row[0].state != RunState.RUNNING:
