@@ -204,10 +204,9 @@ class PublishRunReview:
         if context is None or context.state != "publishing":
             return
         if not context.origin_active:
-            await self._finish(pointer.run_id, "cancelled", "installation_unavailable", None)
-            return
-        if self._reviews is None:
-            _LOGGER.warning("GitHub App is not configured; run %s stays publishing", pointer.run_id)
+            await self._finish(
+                pointer.run_id, "cancelled", "installation_unavailable", None, check_run=False
+            )
             return
         if (context.head_sha, context.findings_hash) != (pointer.head_sha, pointer.findings_hash):
             _LOGGER.warning("Stale review.publish/v1 for run %s is ignored", pointer.run_id)
@@ -256,7 +255,13 @@ class PublishRunReview:
             try:
                 result = await self._submit(submission, pointer, try_no, route=route)
             except RunCancelled:
-                await self._finish(pointer.run_id, "cancelled", "installation_unavailable", None)
+                await self._finish(
+                    pointer.run_id,
+                    "cancelled",
+                    "installation_unavailable",
+                    None,
+                    check_run=route.writes_check_run,
+                )
                 return
             if isinstance(result, SubmittedReview):
                 break

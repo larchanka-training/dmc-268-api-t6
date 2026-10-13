@@ -562,10 +562,13 @@ def test_review_gateway_does_not_post_on_a_head_that_moved_on_github() -> None:
     assert posts == []
 
 
-def test_gitlab_publication_posts_the_stored_overview_and_skips_the_check_run() -> None:
+@pytest.mark.parametrize("github_configured", [False, True])
+def test_gitlab_publication_posts_the_stored_overview_and_skips_the_check_run(
+    github_configured: bool,
+) -> None:
     store = Store(gitlab_context(review_body=STORED_BODY))
     gitlab = GitLabReviews([SubmittedReview(880, (4242,))], store)
-    trace, check_runs = run(store, Reviews([]), gitlab=gitlab)
+    trace, check_runs = run(store, Reviews([]) if github_configured else None, gitlab=gitlab)
 
     assert store.state == "succeeded"
     assert store.completed == [(880, (), False)]
