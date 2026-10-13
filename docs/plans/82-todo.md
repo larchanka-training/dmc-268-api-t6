@@ -231,7 +231,10 @@ JSON to the live safe report. Independently confirmed first-answer metrics are
 Existing metric documentation remains unchanged until Task 7. Focused replay,
 recorded-baseline CI-contract and provenance tests: 100 passed in 8.90s, no skips.
 Ruff lint, format check (435 files) and mypy (432 source files) pass. The Task 7
-final full dedicated-stack gate and independent artifact review remain pending.
+final full dedicated-stack gate remains pending. Independent artifact review at
+`fef42a4` completed with Standards 0 / Spec 0; both reviewers verified the 25 file
+bytes, hashes/statuses, capture input digests, deterministic replay and live-report
+equality.
 
 Verification hashes (SHA-256):
 - Raw and safe manifest: `00ed7404809d86fea4beb7ba1b6cf52800591740ea0f38ea8cb54b7553a4992e`.
@@ -277,12 +280,36 @@ Verification hashes (SHA-256):
 update documentation with measured results and provenance.
 
 **Acceptance criteria:**
-- [ ] Two offline JSON reports equal, no static/corpus drift, all 24 cases represented.
-- [ ] README/test strategy show actual first-answer validity, TP/FP/FN and requested quality metrics with denominators and run evidence; no unsupported improvement claim.
+- [x] Two offline JSON reports equal, no static/corpus drift, all 24 cases represented.
+- [x] README/test strategy show actual first-answer validity, TP/FP/FN and requested quality metrics with denominators and run evidence; no unsupported improvement claim.
 - [ ] Four required gates pass; CI replay passes; integration skips/limitations reported honestly.
 
 **Verification:** Commands in `82-plan.md`: final corpus validation, replay twice,
 `uv run ruff check .`, `uv run ruff format --check .`, `uv run mypy .`, `uv run pytest`.
+**Observed evidence (Task 7, frozen docs checkpoint):** The corpus README and
+canonical test plan now record the accepted 2026-10-13 run/source SHA/models,
+first-provider identity, static/corpus digests, 24-case denominator, complete raw
+import proof and actual raw-first metrics. Tables include category and case-class
+counts, all 17 invalid answers grouped by mechanical reason (8 prefix only,
+4 prefix + range, 2 prefix + range + ordering, 3 range only), and historical
+Mistral/Nemotron measurements. No causal quality attribution, manual semantic
+accuracy, Hallucination Rate or actual billing estimate is claimed. All five real
+first answers are invalid; all synthetic/real cases remain in the denominator.
+The existing historic response bytes are linked at their original revision.
+
+Final corpus validation passes 24/24. `/tmp/82-final-replay-1.json` and
+`/tmp/82-final-replay-2.json` are byte-identical with `warnings=[]`; redacted offline
+JSON remains byte-identical to the accepted live safe report. The exact gold-corpus
+and replay shell step from `.github/workflows/ci-cd.yml` passes **locally**, produces
+24/24 distribution-passed summary, and gives the same JSON report with no warnings
+(`/tmp/82-final-local-ci-yc14d7n6`). Hosted CI replay remains pending until publisher
+creates the draft PR; local execution is not hosted evidence.
+
+Mandatory final Ruff lint, format (435 files) and mypy (432 source files) pass.
+The final complete dedicated PostgreSQL/RabbitMQ pytest gate is running with output
+at `/tmp/82-final-pytest.log`; its result and integration skip count are pending.
+Docs are frozen for independent review during this gate. No shaping input or raw
+artifact bytes changed after capture; no additional paid call was made.
 **Dependencies:** Task 6.
 **Files likely touched:** `test-prs-dataset/README.md`, `docs/TEST_PLAN.md` (at most 2).
 **Estimated scope:** Small.

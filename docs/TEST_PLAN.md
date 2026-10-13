@@ -123,7 +123,7 @@ API baseline gates локально и в обязательном CI: `uv run r
 
 Каждый кейс имеет JSON metadata/ground truth, исходное состояние файла (pre-image), применимый unified `.patch` и источник; raw responses хранятся отдельно от кейса, в `test-prs-dataset/responses/`. Для real PR обязательны URL PR/commit, revision, название и URL лицензии, attribution и ручная проверка права на конкретный excerpt. Ground truth использует `path`, `start_line`, `line`, `severity`, `category` из Finding; `start_line: null` означает одну строку, иначе `< line`. Ожидаемый `verdict` выводится из severity по [PIPELINE_SPEC §11](PIPELINE_SPEC.md#11-вердикт-и-бейджи-d3): `critical/high → blocking`, иначе `medium/low → attention`, иначе `clean`. Case schema собственная; [ReviewOutput schema](../review/schemas/review-output.schema.json) применяется только к ответу модели. `git apply --check` выполняется на копии pre-image, truth якорится в добавленных строках новой стороны; answer-hint комментарии запрещены.
 
-Оценивать **сырой** ответ модели до post-processing, hunk-фильтра, severity threshold, production verifier, cap inline и публикации: иначе качество промпта скрывается правилами выпуска. Replay читает committed raw response без сети и ключа, с model ID, prompt version/SHA и run metadata. Для существующего legacy harness валиден только ответ, для которого `uv run python review/scripts/validate_findings.py <response.json>` завершился кодом 0 **и** напечатал `OK ReviewOutput`; exit 1/2 и `RepoConventionsDraft` невалидны. Это не проверка целевого v2 с evidence/manifests. Live использует PromptBuilder и `review/prompts/`, выбранную модель и внешние credentials, сохраняет raw output и ту же provenance для replay. Live запускается вручную (§2, `eval-live.yml`); закоммиченный baseline — ответы и `manifest.json` в `test-prs-dataset/responses/`, его модель и provenance описаны в [README корпуса](../test-prs-dataset/README.md); следующая полная пересъёмка всех ответов запланирована в #82. LLM-as-a-judge для оценки этого raw benchmark не используется. Обязательный production verifier по #107 — часть продукта, качество которого оценивается отдельно (§3.4).
+Оценивать **сырой** ответ модели до post-processing, hunk-фильтра, severity threshold, production verifier, cap inline и публикации: иначе качество промпта скрывается правилами выпуска. Replay читает committed raw response без сети и ключа, с model ID, prompt version/SHA и run metadata. Для существующего legacy harness валиден только ответ, для которого `uv run python review/scripts/validate_findings.py <response.json>` завершился кодом 0 **и** напечатал `OK ReviewOutput`; exit 1/2 и `RepoConventionsDraft` невалидны. Это не проверка целевого v2 с evidence/manifests. Live использует PromptBuilder и `review/prompts/`, выбранную модель и внешние credentials, сохраняет raw output и ту же provenance для replay. Live запускается вручную (§2, `eval-live.yml`); закоммиченный baseline — ответы и `manifest.json` в `test-prs-dataset/responses/`, его модель и provenance описаны в [README корпуса](../test-prs-dataset/README.md); полная пересъёмка всех 24 первых ответов с frozen commit context выполнена в #82 (результат §3.2.1). LLM-as-a-judge для оценки этого raw benchmark не используется. Обязательный production verifier по #107 — часть продукта, качество которого оценивается отдельно (§3.4).
 
 ### 3.2. Однозначное сопоставление и счётчики
 
@@ -132,6 +132,66 @@ API baseline gates локально и в обязательном CI: `uv run r
 Каждая пара = TP; непарная prediction = FP (включая дубликат и любую находку на чистом кейсе); непарный truth = FN. Неверная категория/путь/якорь даёт FP и FN. Severity пары сохраняется в отчёте как есть, не нормализуется: `critical` truth, совпавший с `high` prediction, считается найденным для Critical Recall, но severity mismatch виден отдельно. Невалидный raw response остаётся в знаменателе validity: его predictions не интерпретируются, все truths кейса дают FN, FP=0; такой кейс не может дать verdict agreement.
 
 Суммировать TP/FP/FN **по всему корпусу** (micro), не усреднять проценты кейсов. `Precision = TP/(TP+FP)`, `Recall = TP/(TP+FN)`. `Critical Recall = matched critical truths / all critical truths`. По каждой категории truth показывать TP/FN, по категории prediction — FP; per-category Precision = `TP_c/(TP_c+FP_c)`, Recall = `TP_c/(TP_c+FN_c)`. Если знаменатель ноль, метрика `null`/«не определена», а не 0 или 100; счётчики всегда выводятся. `Validity = valid raw responses / all cases`; пустой корпус делает validity неопределённой. `Verdict agreement = cases with derived predicted verdict == expected_verdict / all cases`; невалидный ответ считается несогласием. Предсказанный verdict выводится из **сырого** набора findings по тому же severity-правилу, без поля модели.
+
+### 3.2.1. Зафиксированный raw baseline #82 (2026-10-13)
+
+[Actions run 38468081001, attempt 1](https://github.com/larchanka-training/dmc-268-api-t6/actions/runs/38468081001)
+снял все 24 первых ответа на source SHA `80ede3cd274d745616b8a24082ff7d1d00f5b736`;
+начало `2026-10-13T21:06:56.682693Z`. Engine `fast`, primary `mistral-small-4`,
+configured fallback `mistral-small-3.2-24b`, configured provider `eurouter`.
+Все первые вызовы — `answer` / `primary`, модель `mistral-small-4`, serving-provider
+label `mistral`; все gateway statuses `accepted`, paid-metadata errors отсутствуют,
+`baseline_publishable=true`. Prompt `review/prompts/review.system.v2.md` (`v2`),
+SHA-256 `9177e358c23d1a7cd8987cbf667cf8b705c2afb27eaf8b2237480e4531431d75`.
+Static digest `sha256-v1:9b28cf4c284ac07a03a5a35a62e3c2e48dc38264076a55d1a3d31724bacc2c17`,
+corpus digest `sha256-v1:1ab8ca9a16cc50c357b39e1571c73b1e6674752737c444bd8b58d3f2aab81dfa`.
+
+Пять real-кейсов получают проверенные offline snapshots сообщений точной
+`source.revision` из `review/eval/pr-commit-messages.json`, а не восстановленный
+полный исторический PR commit list. Все 19 synthetic-кейсов сохраняют пустые commit
+tuples; SEC-05 исключён. Patch/pre-image/truth не менялись. Все 24 raw ответа и
+manifest скопированы целиком byte-for-byte; SHA-256/размер каждого ответа сверены
+с safe metadata, оба manifest идентичны. Final validation: 24/24; два offline JSON
+отчёта byte-identical, `warnings=[]`; отчёт после удаления validator diagnostics
+byte-identical live safe report.
+
+| Метрика | Измеренный raw baseline |
+| --- | --- |
+| Validity | 29.2% (7/24 первых ответов) |
+| Micro TP / FP / FN | 2 / 2 / 17 |
+| Precision | 50.0% (2/4 predictions) |
+| Recall | 10.5% (2/19 truths) |
+| Critical Recall | 40.0% (2/5 critical truths) |
+| Verdict agreement | 16.7% (4/24 кейсов) |
+| Severity mismatches | 1/2 matched findings: LOG-02, predicted high / truth critical |
+
+| Категория | TP / FP / FN | Precision | Recall |
+| --- | --- | --- | --- |
+| security | 1 / 1 / 3 | 50.0% (1/2) | 25.0% (1/4) |
+| correctness | 1 / 1 / 4 | 50.0% (1/2) | 20.0% (1/5) |
+| performance | 0 / 0 / 5 | Не определена (0 predictions) | 0.0% (0/5) |
+| readability | 0 / 0 / 5 | Не определена (0 predictions) | 0.0% (0/5) |
+
+Невалидны 17/24 первых ответов: только custom-rule attribution prefix — 8;
+prefix + `start_line >= line` — 4; prefix + range + severity/confidence ordering — 2;
+только range — 3. Нет пустых/отсутствующих первых ответов или JSON parse failures.
+Их predictions не интерпретируются; истины остаются FN, кейсы не исключаются из
+знаменателя. Validity real — 0/5, synthetic — 7/19; по классам security 2/4,
+resource 1/5, logic 1/5, syntax 1/5, clean 2/5. Полные case IDs, class counts,
+проверка artifact hashes и сравнение с историческими Mistral/Nemotron измерениями
+даны в [README корпуса](../test-prs-dataset/README.md#recorded-mistral-baseline--2026-10-13).
+
+Исторический Mistral 2026-10-07: validity 5/24, TP/FP/FN 1/1/18, precision 1/2,
+recall 1/19, critical recall 1/5, verdict agreement 2/24. Это два отдельных захвата
+с разными static inputs; различия не доказывают причинное улучшение от commit
+context. Ручной semantic/Hallucination Rate oracle не выполнялся; raw baseline
+не устанавливает качество production verifier/final output и целевые quality gates.
+
+Экспорт содержит configured цены USD/миллион input/cache-read/output tokens:
+primary `0.56125 / 0.56125 / 2.35725`, fallback `0.2245 / 0.2245 / 0.449`;
+nominal fast policy limit USD 0.50/кейс (USD 12 для 24 кейсов), 4 calls/attempt,
+90s timeout. Полные настройки сохранены в manifest. Actual spend, billed-token
+totals и остаток баланса в artifacts отсутствуют; они не выводятся из policy limits.
 
 ### 3.3. Ручной оракул семантики
 
