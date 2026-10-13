@@ -140,9 +140,14 @@ The pre-capture full-service gate and remaining readiness checkboxes stay pendin
 
 ## Checkpoint: Ready for one capture
 
-- [ ] Complete offline gates green; current old-baseline drift explicitly expected until replacement.
-- [ ] Recheck/rebase main and open-PR ownership; all source/prompt/provenance changes final.
+- [x] Complete offline gates green; current old-baseline drift explicitly expected until replacement.
+- [x] Recheck/rebase main and open-PR ownership; all source/prompt/provenance changes final.
 - [ ] Verify exact branch SHA, model, org-secret availability by workflow preflight, and human paid-run/raw-export authorization.
+
+Pre-capture source readiness is verified by the Task 5 evidence below. The user
+already authorized one complete fast capture with raw export; the selected primary
+model is `mistral-small-4`. The final dispatch SHA and workflow secret preflight
+remain publisher actions, so their combined checkbox is intentionally pending.
 
 ## Task 5: Scope documentation
 
@@ -150,11 +155,27 @@ The pre-capture full-service gate and remaining readiness checkboxes stay pendin
 and retire the #82 deferral without claiming a completed baseline prematurely.
 
 **Acceptance criteria:**
-- [ ] Docs state bounds/order/error behavior and honest 5-real/19-synthetic metadata policy.
-- [ ] Scope comments exist before editing #124/#148-owned documentation.
-- [ ] Review branch contains all final shaping inputs before dispatch; no new dependency.
+- [x] Docs state bounds/order/error behavior and honest 5-real/19-synthetic metadata policy.
+- [x] Scope comments exist before editing #124/#148-owned documentation.
+- [x] Review branch contains all final shaping inputs before dispatch; no new dependency.
 
 **Verification:** Inspect docs against literal retrieval tests; run all four required gates.
+**Observed evidence (Task 5):** The architecture, prompt-contract and corpus READMEs
+now describe numeric two-page retrieval, 20-by-500 API-order limits, the 1 MiB
+identity-response cap, explicit failure/installation checkpoints, and frozen
+5-real/19-synthetic revision snapshots. Required #124/#148 scope comments preceded
+these edits. The original response set/manifest and old measured metrics remain
+intact; complete recapture and new metrics are explicitly pending. A read-only
+GitHub PR-64 commits request with `per_page=10` and identity encoding returned 200
+JSON with no Content-Encoding, as verified by the coordinator.
+Publisher's main rebase was a no-op at `c1d8f59d`; integrated source/docs review at
+`68ed8b1` reported Standards 0 / Spec 0. Mandatory Ruff lint, format check and mypy
+passed. The complete dedicated PostgreSQL/RabbitMQ pytest gate passed 3,508 tests,
+zero skips, and 2 existing deprecation warnings in 662.32s (11:02), including both
+previously failing worker composition scenarios. Log: `/tmp/82-pre-capture-pytest.log`.
+No source tuning or dependency change followed these checks. Publisher will record
+the exact dispatch head and run the workflow secret preflight before the single
+authorized paid capture; secret availability and actual spend are not claimed here.
 **Dependencies:** Task 4; collision-comment authorization.
 **Files likely touched:** `docs/SYSTEM_DESIGN.md`, `review/README.md`,
 `test-prs-dataset/README.md` (at most 3).
