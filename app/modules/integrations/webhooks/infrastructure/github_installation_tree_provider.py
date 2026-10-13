@@ -25,7 +25,7 @@ from app.modules.repositories.application.installation_repositories import (
 
 _GITHUB_TREE_ENTRY_TYPES = {"blob", "tree", "commit"}
 _GITHUB_API_VERSION = "2022-11-28"
-_INSTALLATION_TOKEN_SAFETY_SKEW_SECONDS = 60
+INSTALLATION_TOKEN_SAFETY_SKEW_SECONDS = 60
 
 
 class GitHubTreeResponseIncompleteError(RuntimeError):
@@ -41,9 +41,9 @@ class GitHubInstallationAccessTokenProvider(Protocol):
 class InstallationAccessTokenCache(Protocol):
     """Cache short-lived tokens separately for each GitHub installation."""
 
-    def get(self, installation_external_id: int) -> str | None: ...
+    async def get(self, installation_external_id: int) -> str | None: ...
 
-    def set(
+    async def set(
         self,
         installation_external_id: int,
         access_token: str,
@@ -54,21 +54,21 @@ class InstallationAccessTokenCache(Protocol):
 class InMemoryInstallationAccessTokenCache:
     """Process-local expiring cache for installation access tokens.
 
-    The cache boundary is deliberately injectable: a deployment can replace this
-    with Redis without changing the GitHub HTTP adapter.
+    The cache of a process without ``REDIS_URL``; with it the processes share
+    ``RedisInstallationAccessTokenCache``, which keeps this one as its fallback.
     """
 
     def __init__(
         self,
         *,
         now: Callable[[], float],
-        safety_skew_seconds: float = _INSTALLATION_TOKEN_SAFETY_SKEW_SECONDS,
+        safety_skew_seconds: float = INSTALLATION_TOKEN_SAFETY_SKEW_SECONDS,
     ) -> None:
         self._now = now
         self._safety_skew_seconds = safety_skew_seconds
         self._tokens: dict[int, tuple[str, float]] = {}
 
-    def get(self, installation_external_id: int) -> str | None:
+    async def get(self, installation_external_id: int) -> str | None:
         cached = self._tokens.get(installation_external_id)
         if cached is None:
             return None
@@ -78,7 +78,7 @@ class InMemoryInstallationAccessTokenCache:
             return None
         return token
 
-    def set(
+    async def set(
         self,
         installation_external_id: int,
         access_token: str,
@@ -121,7 +121,7 @@ class GitHubAppInstallationAccessTokenProvider:
         self._in_flight: dict[int, asyncio.Task[str]] = {}
 
     async def get_installation_access_token(self, installation_external_id: int) -> str:
-        cached = self._cache.get(installation_external_id)
+        cached = await self._cache.get(installation_external_id)
         if cached is not None:
             return cached
         mint = self._in_flight.get(installation_external_id)
@@ -160,8 +160,8 @@ class GitHubAppInstallationAccessTokenProvider:
         )
         response.raise_for_status()
         access_token, expires_at = _parse_installation_access_token_response(response.json())
-        if expires_at.timestamp() > self._now() + _INSTALLATION_TOKEN_SAFETY_SKEW_SECONDS:
-            self._cache.set(installation_external_id, access_token, expires_at)
+        if expires_at.timestamp() > self._now() + INSTALLATION_TOKEN_SAFETY_SKEW_SECONDS:
+            await self._cache.set(installation_external_id, access_token, expires_at)
         return access_token
 
 
