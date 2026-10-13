@@ -306,13 +306,22 @@ and replay shell step from `.github/workflows/ci-cd.yml` passes **locally**, pro
 creates the draft PR; local execution is not hosted evidence.
 
 Mandatory final Ruff lint, format (435 files) and mypy (432 source files) pass.
-The final complete dedicated PostgreSQL/RabbitMQ pytest gate is running with output
-at `/tmp/82-final-pytest.log`; its result and integration skip count are pending.
+The final complete dedicated PostgreSQL/RabbitMQ pytest gate passed 3,508 tests,
+zero skips and 2 existing Starlette/httpx/anyio deprecation warnings in 624.38s
+(10:24). Log: `/tmp/82-final-pytest.log`. Both worker main-composition scenarios
+pass. These are the final full-suite results after accepted capture and metric docs.
 Standards review found stale pending-capture notes in `review/README.md` and
 `docs/SYSTEM_DESIGN.md`; documentation-only corrections now link the completed run
 and measured metric documents under the already-authorized #124/#148 scope.
-Docs are frozen for independent review during this gate. No shaping input or raw
-artifact bytes changed after capture; no additional paid call was made.
+Final whole-branch review at `4319b4b` reports Standards 0 / Spec 0, including those
+corrections. The coordinator independently verified remote main remains
+`c1d8f59d`; current static/corpus digests still match the paid source inputs.
+Mandatory Ruff lint, format and mypy were rerun after the documentation fixes and
+pass. No shaping input or raw artifact bytes changed after capture; no additional
+paid call was made. Local implementation, capture, review and four-gate evidence
+are complete; Task 7's combined final checkbox remains pending only for hosted CI
+replay, to be verified by the publisher after draft-PR creation. Publication and
+whole-issue completion are not claimed by this local checkpoint.
 **Dependencies:** Task 6.
 **Files likely touched:** `test-prs-dataset/README.md`, `docs/TEST_PLAN.md` (at most 2).
 **Estimated scope:** Small.
