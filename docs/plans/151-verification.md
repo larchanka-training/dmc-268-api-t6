@@ -2,8 +2,11 @@
 
 Implementation checkpoint: 2026-10-13, branch `fix/151-pr132-followup`, based solely
 on refreshed `main` at `c1d8f59d9ff3f332a3595857dbe612115ad559e8`.
-Working-tree changes have not been committed. This checkpoint covers Tasks 1-6
+The verified implementation/test source is published in commit
+`8699e7eb59379fd3ee594267c3be1590adf68180`. This checkpoint covers Tasks 1-6
 (P3-1/2/3/4/6); the P3-5 refactor remains a separate PR from refreshed main.
+A subsequent publication-metadata commit changes only these plan/proof/checklist
+documents; it does not change the source exercised by the recorded tests.
 
 ## Isolated environment
 
@@ -123,7 +126,25 @@ Coordinator recorded fresh independent Standards and Spec reviews of Tasks 1-2,
 then of the complete first-PR working-tree diff (P3-1/2/3/4/6) against pinned base
 `c1d8f59d9ff3f332a3595857dbe612115ad559e8`: **zero actionable findings on each axis**.
 The migration backfill wording was clarified before final review. Tasks 1-6 are
-complete; commit/push/PR publication is delegated to the publisher and remains
-pending here. P3-5 stays in its own future worktree/PR, based solely on refreshed
-main without importing this first PR diff. No claim is made that all issue AC are
-complete or that human merge approval has been obtained.
+complete; commit/push/PR publication is recorded below. P3-5 stays in its own
+future worktree/PR, based solely on refreshed main without importing this first PR
+diff. No claim is made that all issue AC are complete or that human merge approval
+has been obtained.
+
+## Publication
+
+Published and attached to the originating chat as
+[PR #152](https://github.com/larchanka-training/dmc-268-api-t6/pull/152), from
+`fix/151-pr132-followup` into `main`. A fresh fetch immediately before publication
+confirmed base `c1d8f59d9ff3f332a3595857dbe612115ad559e8`; no rebase was needed.
+All configured commit hooks passed; no hook bypass was used. The first publication
+commit is `8699e7eb59379fd3ee594267c3be1590adf68180`.
+
+The PR was created Draft to trigger CI, with no assigned/requested reviewers as
+explicitly requested by the user. At initial publication, Python lint/type/test,
+OpenAPI lint, Edge Caddyfile validation and the other started CI checks were still
+in progress; no passing remote-CI result is claimed here. The coordinator will
+monitor the latest head and mark Ready after required CI passes. Current-head
+human approval and resolved review threads remain external merge prerequisites.
+The issue stays open and its board status remains In Progress until both
+independent PRs are ready. No issue-closing keyword or Development link was added.

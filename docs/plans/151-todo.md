@@ -4,7 +4,9 @@ Approved by the user on 2026-10-13; see [151-plan.md](151-plan.md). Current bran
 `fix/151-pr132-followup` addresses P3-1/2/3/4/6. P3-5 remains a separate future
 worktree and PR; this branch must not mark the whole issue complete.
 Tasks 1-6 are verified; [151-verification.md](151-verification.md) records **3427
-passed, zero skips in 1118.15s** and both independent reviews. Publication is pending.
+passed, zero skips in 1118.15s** and both independent reviews. The first PR is
+published and attached as [#152](https://github.com/larchanka-training/dmc-268-api-t6/pull/152);
+it is initially Draft while remote CI runs.
 
 ## Task 1: Establish baseline and ownership coordination
 
@@ -143,10 +145,14 @@ present-tense claims; run required gates.
   and `uv run pytest` pass; focused PostgreSQL AC tests run without skips.
 - [x] Fresh independent Standards/Spec review has zero actionable findings on
   both axes for the complete first-PR diff based on `c1d8f59`.
-- [ ] Publisher commits with issue reference and opens/attaches a PR with
+- [x] Publisher commits with issue reference and opens/attaches
+  [PR #152](https://github.com/larchanka-training/dmc-268-api-t6/pull/152) with
   What / Why / How to verify / Refs and explicit P3-5 follow-up scope.
-- [ ] Rebase on refreshed main before review; current-head approving human review
-  and resolved threads remain required before merge; board status reflects reality.
+- [x] Refresh main before publication: base remains `c1d8f59`; no rebase is needed.
+- [ ] Remote required CI passes on the latest published head; mark Ready afterward,
+  without reviewer assignment as explicitly requested by the user.
+- [ ] Current-head approving human review and resolved threads remain required
+  before merge; board stays In Progress until both independent PRs are ready.
 
 **Verification:** Record exact tested head and relevant infrastructure/skips,
 mutation proof, gates, reviews, and PR URL. No closing keywords or issue Development

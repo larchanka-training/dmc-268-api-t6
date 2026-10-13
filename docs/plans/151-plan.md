@@ -3,7 +3,10 @@
 ## Status and baseline
 
 Approved by the user on 2026-10-13 under the agent-loop skill. Tasks 1-6 are
-implemented, verified and independently reviewed; first-PR publication is pending. Both branches must start solely from refreshed main; the later refactor must not import this branch.
+implemented, verified and independently reviewed; the first PR is published as
+[#152](https://github.com/larchanka-training/dmc-268-api-t6/pull/152), initially Draft
+while remote CI runs. Both branches must start solely from refreshed main; the
+later refactor must not import this branch.
 Issue: https://github.com/larchanka-training/dmc-268-api-t6/issues/151
 Baseline: refreshed `origin/main`, `c1d8f59d9ff3f332a3595857dbe612115ad559e8`.
 Current worktree: `/Users/qx/.codex/worktrees/151-review-quality/dmc-268-api-t6`.
