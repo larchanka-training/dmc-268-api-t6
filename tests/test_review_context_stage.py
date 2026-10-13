@@ -367,6 +367,35 @@ def test_cache_identity_changes_when_a_rename_withholds_a_name_no_mask_matches()
     assert plain.policy_key != tainted.policy_key
 
 
+def test_rename_out_of_a_builtin_exclusion_stays_withheld_after_the_whole_stage() -> None:
+    plain = _stage(Trace(), policy=Policy(rules=None), builtin_excluded=_is_generated)
+    asyncio.run(plain.run(_RUN))
+
+    moved = DiffSnapshot(
+        "src/client.py",
+        _stored("src/client.py", "@@ -1 +1 @@\n-a\n+b"),
+        "f" * 40,
+        "renamed",
+        "dist/client.py",
+        1,
+        1,
+        2,
+    )
+    stage = _stage(
+        Trace(),
+        policy=Policy(rules=None),
+        snapshots=[*_snapshots(), moved],
+        builtin_excluded=_is_generated,
+    )
+    asyncio.run(stage.run(_RUN))
+
+    # No mask of the repository matches the new name: the built-in exclusion of the old
+    # one withholds it for conventions, the review lists and the context alike.
+    assert stage.excluded("src/client.py") is True
+    assert stage.excluded("src/app.py") is False
+    assert plain.policy_key != stage.policy_key
+
+
 def test_path_outside_the_contract_is_always_withheld() -> None:
     stage = _stage(Trace())
 

@@ -199,6 +199,24 @@ def test_blob_failures_are_policy_errors() -> None:
         assert caught.value.code is code
 
 
+def test_answer_that_cannot_be_decoded_is_a_policy_fetch_failure_not_an_internal_one() -> None:
+    def proxy(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=b"<html>proxy error</html>")
+
+    with pytest.raises(PolicyError) as tree:
+        _run(proxy, Blobs(), lambda source: source.list_entries(None))
+    assert (tree.value.code, tree.value.retryable) == (PolicyErrorCode.FETCH_TRANSIENT, True)
+
+    # What the blob adapter raises for an answer that is not JSON or not base64.
+    with pytest.raises(PolicyError) as blob:
+        _run(
+            proxy,
+            Blobs(error=ValueError("GitHub blob response is not valid")),
+            lambda source: source.read_blob(_AGENTS),
+        )
+    assert (blob.value.code, blob.value.retryable) == (PolicyErrorCode.FETCH_TRANSIENT, True)
+
+
 def test_unreadable_tree_listing_is_a_retryable_failure_and_a_missing_mode_is_a_file() -> None:
     def broken(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json={"tree": [{"path": "AGENTS.md"}]})

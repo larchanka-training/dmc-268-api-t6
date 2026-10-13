@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from uuid import UUID
 
@@ -39,7 +40,12 @@ from app.modules.reviews.application.review_ignore import (
     apply_ignore,
     parse_review_ignore,
 )
-from app.modules.reviews.application.vcs_diff import PullRequestLocator, VcsFile, VcsPullRequest
+from app.modules.reviews.application.vcs_diff import (
+    PullRequestLocator,
+    VcsFile,
+    VcsPullRequest,
+    _is_generated,
+)
 from app.modules.reviews.infrastructure.tree_sitter_facts import extract_facts
 
 _HEAD = "a" * 40
@@ -184,6 +190,7 @@ def _build(
     budget: int = 100_000,
     parser: InProcessParser | None = None,
     cache: MemoryCache | None = None,
+    builtin_excluded: Callable[[str], bool] = lambda path: False,
 ) -> ReviewContextPayload:
     policy = parse_review_ignore(rules_text)
     snapshot = build_policy_snapshot(
@@ -210,7 +217,7 @@ def _build(
             diff_map=diff_map,
             snapshot=snapshot,
             matcher=matcher,
-            ignore=apply_ignore(matcher, diff_map),
+            ignore=apply_ignore(matcher, diff_map, builtin_excluded=builtin_excluded),
             token_budget=budget,
         )
     )
@@ -311,6 +318,62 @@ def test_file_renamed_out_of_an_ignored_path_stays_excluded_everywhere() -> None
     assert all(block.source.path != "pkg/models.py" for block in payload.blocks)
     assert payload.imports[0].resolution is ImportResolution.EXCLUDED
     assert "pkg/models.py" not in repository.read
+
+
+def test_file_renamed_out_of_a_builtin_exclusion_is_never_read_through_an_import() -> None:
+    # No mask of the repository: only the built-in exclusion of ``dist/``.
+    repository = _service_repository()
+    diff_map = _diff_map(
+        _vcs_file(repository, "pkg/service.py", _GREET_PATCH),
+        _vcs_file(
+            repository,
+            "pkg/models.py",
+            "@@ -1 +1 @@\n-class Old:\n+class User:",
+            deletions=1,
+            status="renamed",
+            previous="dist/models.py",
+        ),
+    )
+
+    payload = _build(repository, diff_map, builtin_excluded=_is_generated)
+
+    assert payload.ignored_files == 1
+    assert all(block.source.path != "pkg/models.py" for block in payload.blocks)
+    assert [ref.resolution for ref in payload.imports] == [ImportResolution.EXCLUDED]
+    assert ContextLevel.L4 not in payload.levels_present
+    assert "pkg/models.py" not in repository.read
+
+
+def _go_repository(members: int) -> Repository:
+    main = 'package main\n\nimport "example.com/m/pkg"\n\nfunc main() {\n\tpkg.Foo()\n}\n'
+    files = {"go.mod": "module example.com/m\n\ngo 1.22\n", "cmd/main.go": main}
+    for index in range(members):
+        name = "Foo" if index == 0 else f"Other{index}"
+        files[f"pkg/f{index:02d}.go"] = (
+            f"package pkg\n\n// {name} does a thing.\nfunc {name}() {{}}\n"
+        )
+    return Repository(files)
+
+
+def test_go_mod_counts_toward_the_limit_of_imported_files() -> None:
+    patch = "@@ -5,2 +5,3 @@\n func main() {\n+\tpkg.Foo()\n }"
+
+    def build(members: int) -> tuple[ReviewContextPayload, Repository]:
+        repository = _go_repository(members)
+        return _build(
+            repository, _diff_map(_vcs_file(repository, "cmd/main.go", patch))
+        ), repository
+
+    payload, repository = build(19)
+    # ``go.mod`` and 19 members of the package: exactly the limit of 20 files.
+    assert [ref.resolution for ref in payload.imports] == [ImportResolution.RESOLVED]
+    assert ContextLevel.L4 in payload.levels_present
+
+    payload, repository = build(20)
+    # One file over the limit: the package is not fully known, so nothing is resolved.
+    assert [ref.resolution for ref in payload.imports] != [ImportResolution.RESOLVED]
+    assert ContextLevel.L4 not in payload.levels_present
+    assert len([path for path in repository.read if path != "cmd/main.go"]) <= 20
 
 
 def test_all_changes_ignored_and_an_empty_diff_are_their_own_outcomes() -> None:

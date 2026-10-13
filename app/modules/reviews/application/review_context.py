@@ -226,6 +226,14 @@ class _Files:
         self._texts[path] = result
         return result
 
+    async def service_text(self, path: str) -> str | FileUnavailable:
+        """A file read only to resolve imports (``go.mod``); counts toward the file limit."""
+        if path not in self.imported:
+            if len(self.imported) >= MAX_IMPORTED_FILES:
+                return FileUnavailable(AstFailureReason.AST_LIMIT.value)
+            self.imported.add(path)
+        return await self.text(path)
+
     async def facts_for(self, path: str) -> AstFacts | FileUnavailable:
         """Facts of a file reached through an import; counts toward the file limit."""
         if path not in self.changed and path not in self.imported:
@@ -314,7 +322,11 @@ class BuildReviewContext:
                     )
                 )
             elif ignore.decision_for(file.file_id) is not None or any(
-                self._builtin_excluded(item) for item in (file.old_path, file.new_path) if item
+                # The deny-set of the run already holds both names of a file that a
+                # built-in exclusion withholds.
+                item in ignore.denied_paths or self._builtin_excluded(item)
+                for item in (file.old_path, file.new_path)
+                if item
             ):
                 ignored += 1
             elif not file.anchorable:
@@ -412,7 +424,7 @@ class BuildReviewContext:
         files.changed = {path for file, path in allowed if file.new_path is not None}
         go_module = None
         if "go.mod" in tree.blob_shas and any(path.endswith(".go") for _, path in allowed):
-            go_mod = await files.text("go.mod")
+            go_mod = await files.service_text("go.mod")
             go_module = None if isinstance(go_mod, FileUnavailable) else go_module_path(go_mod)
         resolver = ImportResolver(tree=tree, provider=files, go_module=go_module)
 

@@ -12,7 +12,7 @@ from datetime import timedelta
 from typing import Literal
 
 import httpx
-from pydantic import Field, TypeAdapter, ValidationError
+from pydantic import Field, TypeAdapter
 
 from app.common.infrastructure.github_repository_path import commit_sha_segment
 from app.modules.reviews.application.policy_documents import (
@@ -97,8 +97,9 @@ class GitHubPolicyDocumentSource:
             raise self._classify(exc) from exc
         try:
             tree = _TREE.validate_python(response.json())
-        except ValidationError as exc:
-            # An answer that is not a tree listing proves nothing about the documents.
+        except ValueError as exc:
+            # An answer that is not JSON or not a tree listing proves nothing about the
+            # documents.
             raise self._error(
                 PolicyErrorCode.FETCH_TRANSIENT, "GitHub returned an unreadable tree listing"
             ) from exc
@@ -121,6 +122,11 @@ class GitHubPolicyDocumentSource:
             ) from exc
         except httpx.HTTPError as exc:
             raise self._classify(exc) from exc
+        except ValueError as exc:
+            # The blob answer is not JSON, not base64 or of another shape.
+            raise self._error(
+                PolicyErrorCode.FETCH_TRANSIENT, "GitHub returned an unreadable blob"
+            ) from exc
 
     def _error(
         self, code: PolicyErrorCode, message: str, *, retry_after: timedelta | None = None

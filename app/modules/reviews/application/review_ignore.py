@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import re
 import unicodedata
+from collections.abc import Callable
 from dataclasses import dataclass
 from hashlib import sha256
 
@@ -307,11 +308,23 @@ class IgnoreMatcher:
         return all(char == "*" for char in mask[mask_index:])
 
 
-def apply_ignore(matcher: IgnoreMatcher, diff_map: DiffMap) -> IgnoreResult:
-    """Decide which changed files are excluded; a rename or copy is checked by both paths."""
+def apply_ignore(
+    matcher: IgnoreMatcher,
+    diff_map: DiffMap,
+    *,
+    builtin_excluded: Callable[[str], bool] = lambda path: False,
+) -> IgnoreResult:
+    """Decide which changed files are excluded; a rename or copy is checked by both paths.
+
+    A built-in exclusion of the service withholds every name of the file as a mask does,
+    so a file renamed or copied out of it stays withheld under its new name.
+    """
     decisions: list[IgnoreDecision] = []
     denied: set[str] = set()
     for file in diff_map.files:
+        names = [path for path in (file.old_path, file.new_path) if path is not None]
+        if any(builtin_excluded(path) for path in names):
+            denied.update(names)
         if file.omission_reason is not None:
             # Its paths cannot be matched reliably and its content is already withheld.
             continue

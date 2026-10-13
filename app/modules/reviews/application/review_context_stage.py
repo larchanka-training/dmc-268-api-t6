@@ -277,7 +277,7 @@ class ReviewContextStage:
             repository_id=run.repository_id,
             diff_old_sha=diff_old_sha,
         )
-        ignore = apply_ignore(matcher, diff_map)
+        ignore = apply_ignore(matcher, diff_map, builtin_excluded=self._builtin_excluded)
         self._denied_paths = ignore.denied_paths
         if diff_map.files and all(
             ignore.decision_for(file.file_id) is not None for file in diff_map.files
