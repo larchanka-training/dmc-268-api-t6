@@ -16,12 +16,23 @@ it into PullRequestMeta while preserving installation checkpoints and failure po
 `tests/test_github_commit_messages.py`); mocked pagination, length boundaries,
 Unicode, malicious Link, error/status, cancellation and transaction assertions.
 **Observed evidence (Task 1):** Incremental red/green failures proved missing messages,
-numeric pagination, Unicode truncation, malformed payloads, streamed/gzip limits and
-HTTP classification. Focused source + PostgreSQL tests: 83 passed. Lint, format and
-mypy gates pass; the full 3,471-test pytest gate is running. The three real PostgreSQL
-commit scenarios observed SQLAlchemy transaction begin/end events and verified no
-open transaction at token or HTTP calls, including retirement between pages and
-during the second-page token. Later tasks and whole-issue completion remain pending.
+numeric pagination, Unicode truncation, malformed payloads, streamed limits and HTTP
+classification. Independent review identified pre-cap gzip expansion and JSON
+recursion errors; red/green regressions now prove compressed responses are rejected
+before any stream read and excessive nesting raises safe `diff_fetch_failed`.
+Commit requests use `Accept-Encoding: identity`; nonidentity response encodings fail
+explicitly before decoding, so the streamed cap bounds buffered response bytes.
+The first dedicated-stack full gate produced 3,469 passed / 2 failed in 859.21s; both
+failures were the worker GitHub fake missing the new commits endpoint. That fixture
+is corrected, and the focused source/origin/PostgreSQL suite plus both worker cases
+now passes all 90 tests (14 other worker cases deliberately deselected). Lint,
+format and mypy pass. An intermediate broad pytest gate with DB/Rabbit variables
+unset is running; its integration skips must be reported. The final complete
+stand-backed gate remains required after later source/provenance edits.
+The three real PostgreSQL commit scenarios observed SQLAlchemy transaction begin/end
+events and verified no open transaction at token or HTTP calls, including retirement
+between pages and during the second-page token. Later tasks and whole-issue
+completion remain pending.
 **Dependencies:** Human plan approval; open-PR ownership refresh.
 **Files likely touched:** `app/modules/reviews/infrastructure/github_run_source.py`,
 optional adjacent commit helper, `tests/test_github_commit_messages.py`,

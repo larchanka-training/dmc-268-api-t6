@@ -282,10 +282,10 @@ def test_streaming_limit_stops_before_buffering_the_remaining_page() -> None:
     assert stream.closed
 
 
-def test_response_limit_applies_to_decoded_gzip_bytes() -> None:
-    body = gzip.compress(b"[]" + b" " * 1_048_575)
+def test_compressed_response_is_rejected_before_any_read_or_decompression() -> None:
+    body = gzip.compress(b"[]" + b" " * 8_388_608)
     stream = PageStream((body,))
-    with pytest.raises(RunFailure, match="exceeds the 1 MiB retrieval budget"):
+    with pytest.raises(RunFailure, match="uses unsupported content encoding"):
         _read(
             lambda request: httpx.Response(
                 200,
@@ -293,6 +293,7 @@ def test_response_limit_applies_to_decoded_gzip_bytes() -> None:
                 headers={"Content-Encoding": "gzip", "Content-Length": str(len(body))},
             )
         )
+    assert stream.read_chunks == 0
     assert stream.closed
 
 
@@ -444,3 +445,34 @@ def test_commit_http_and_tokens_run_after_postgres_transactions_close(
             await engine.dispose()
 
     asyncio.run(exercise())
+
+
+@pytest.mark.parametrize("encoding", ["br", "deflate", "identity, gzip"])
+def test_nonidentity_encodings_are_rejected_before_streaming(encoding: str) -> None:
+    stream = PageStream((b"[]",))
+    with pytest.raises(RunFailure, match="uses unsupported content encoding"):
+        _read(
+            lambda request: httpx.Response(
+                200, stream=stream, headers={"Content-Encoding": encoding}
+            )
+        )
+    assert stream.read_chunks == 0
+    assert stream.closed
+
+
+def test_commit_page_requests_identity_encoding_and_accepts_identity_response() -> None:
+    def github(request: httpx.Request) -> httpx.Response:
+        assert request.headers["Accept-Encoding"] == "identity"
+        return httpx.Response(
+            200, stream=PageStream((b"[]",)), headers={"Content-Encoding": "identity"}
+        )
+
+    assert _read(github).commit_messages == ()
+
+
+def test_excessive_json_nesting_is_a_safe_malformed_response_failure() -> None:
+    body = b"[" * 10_000 + b"]" * 10_000
+    with pytest.raises(RunFailure) as raised:
+        _read(lambda request: httpx.Response(200, content=body))
+    assert raised.value.error_code == "diff_fetch_failed"
+    assert raised.value.message == "GitHub commit response is malformed"

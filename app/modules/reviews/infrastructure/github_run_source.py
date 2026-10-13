@@ -150,10 +150,20 @@ class GitHubRunSource:
                     "GET",
                     path,
                     params={"per_page": 10, "page": page},
-                    headers=_headers(token),
+                    headers=_headers(token) | {"Accept-Encoding": "identity"},
                     timeout=_REQUEST_TIMEOUT,
                 ) as response:
                     response.raise_for_status()
+                    # Reject compression before httpx decodes any transport chunk: a
+                    # small compressed chunk could otherwise allocate above the cap.
+                    if response.headers.get("Content-Encoding", "").strip().casefold() not in {
+                        "",
+                        "identity",
+                    }:
+                        raise RunFailure(
+                            "diff_fetch_failed",
+                            "GitHub commit response uses unsupported content encoding",
+                        )
                     body = bytearray()
                     async for chunk in response.aiter_bytes():
                         if len(body) + len(chunk) > 1_048_576:
@@ -166,7 +176,7 @@ class GitHubRunSource:
                 raise classify_vcs_error(exc) from None
             try:
                 batch = json.loads(body)
-            except ValueError:
+            except (ValueError, RecursionError):
                 raise RunFailure(
                     "diff_fetch_failed", "GitHub commit response is malformed"
                 ) from None

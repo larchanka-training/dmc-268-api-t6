@@ -1197,6 +1197,8 @@ class FakeGitHubApi:
                     "deletions": 0,
                 },
             )
+        if path == f"{repo}/pulls/7/commits":
+            return httpx.Response(200, json=[])
         if path == f"{repo}/pulls/7/files":
             return httpx.Response(
                 200,
