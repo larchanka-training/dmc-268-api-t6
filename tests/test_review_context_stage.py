@@ -179,12 +179,13 @@ def _stage(
     vcs: Vcs | None = None,
     snapshots: list[DiffSnapshot] | None = None,
     none: bool = False,
+    empty: bool = False,
     builtin_excluded: Callable[[str], bool] = lambda path: False,
 ) -> ReviewContextStage:
     shared = store or Store()
     provider = vcs or Vcs()
     return ReviewContextStage(
-        runs=Runs(None if none else (snapshots or _snapshots())),
+        runs=Runs(None if none else [] if empty else (snapshots or _snapshots())),
         vcs=provider,
         merge_base=provider,
         prepare_policy=PreparePolicySnapshot(
@@ -416,6 +417,19 @@ def test_source_of_a_copy_into_an_excluded_place_stays_reviewable() -> None:
     assert stage.excluded("src/app.py") is False
 
 
+def test_change_without_files_is_skipped_only_when_the_provider_counts_none() -> None:
+    trace = Trace()
+    with pytest.raises(RunSkipped) as skipped:
+        asyncio.run(_stage(trace, vcs=Vcs(files_changed=0), snapshots=[], empty=True).run(_RUN))
+
+    assert skipped.value.reason == "no_changes"
+    assert trace.steps[-1][2]["status"] == "no_changes"
+
+    # The provider counts two files and none is known: that is not an empty change.
+    payload = asyncio.run(_stage(Trace(), snapshots=[], empty=True).run(_RUN))
+    assert payload is not None and payload.reason == "diff_inventory_incomplete"
+
+
 def test_policy_error_while_the_context_is_built_stops_the_run() -> None:
     class OverBudget:
         async def execute(self, **kwargs: object) -> object:
@@ -634,7 +648,7 @@ def test_policy_codes_have_a_retry_class_and_an_author_facing_text() -> None:
         }
     )
     assert codes - retryable == TERMINAL_POLICY_ERROR_CODES
-    assert codes | {"all_changes_ignored"} <= set(_ERROR_TEXTS)
+    assert codes | {"all_changes_ignored", "no_changes"} <= set(_ERROR_TEXTS)
 
 
 def test_redis_address_is_optional_for_the_worker() -> None:

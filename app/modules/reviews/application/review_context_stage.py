@@ -268,6 +268,12 @@ class ReviewContextStage:
         pull_request = await self._vcs.get_pull_request(run.locator)
         if pull_request.head_sha != run.head_sha:
             raise RunFailure("diff_fetch_failed", "pull request head changed after the diff")
+        if not stored and pull_request.meta.files_changed == 0:
+            # The file list and the counter of the provider agree: nothing was changed.
+            await self._record_nothing_to_review(
+                run_id, snapshot, run.head_sha, ContextStatus.NO_CHANGES, digest=None, files=0
+            )
+            raise RunSkipped("no_changes")
         try:
             diff_old_sha: str | None = await self._merge_base.get_merge_base(pull_request)
         except MergeBaseUnavailable:
@@ -302,7 +308,14 @@ class ReviewContextStage:
                 for file in diff_map.files
             )
         ):
-            await self._record_all_ignored(run_id, snapshot, diff_map)
+            await self._record_nothing_to_review(
+                run_id,
+                snapshot,
+                diff_map.head_sha,
+                ContextStatus.ALL_CHANGES_IGNORED,
+                digest=diff_map.digest,
+                files=len(diff_map.files),
+            )
             raise RunSkipped("all_changes_ignored")
 
         request = {"head_sha": run.head_sha, "policy_snapshot_id": str(snapshot.snapshot_id)}
@@ -327,15 +340,22 @@ class ReviewContextStage:
             raise RunSkipped("all_changes_ignored")
         return payload
 
-    async def _record_all_ignored(
-        self, run_id: UUID, snapshot: PolicySnapshot, diff_map: DiffMap
+    async def _record_nothing_to_review(
+        self,
+        run_id: UUID,
+        snapshot: PolicySnapshot,
+        head_sha: str,
+        status: ContextStatus,
+        *,
+        digest: str | None,
+        files: int,
     ) -> None:
-        request = {"head_sha": diff_map.head_sha, "policy_snapshot_id": str(snapshot.snapshot_id)}
+        request = {"head_sha": head_sha, "policy_snapshot_id": str(snapshot.snapshot_id)}
         async with traced_step(self._trace, run_id, "context.build", request) as step:
             step.response = {
-                "status": ContextStatus.ALL_CHANGES_IGNORED.value,
-                "reason": "all_changes_ignored",
-                "diff": {"digest": diff_map.digest, "files": len(diff_map.files)},
-                "ignored_files": len(diff_map.files),
+                "status": status.value,
+                "reason": status.value,
+                "diff": {"digest": digest, "files": files},
+                "ignored_files": files,
                 "blocks": [],
             }

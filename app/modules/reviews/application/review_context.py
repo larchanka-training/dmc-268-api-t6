@@ -364,10 +364,11 @@ class BuildReviewContext:
                 tokens_used=sum(block.tokens for block in blocks),
             )
 
-        if not diff_map.files:
-            return payload(ContextStatus.NO_CHANGES, "no_changes")
+        # Completeness first: an empty list the provider does not confirm is not "no changes".
         if not diff_map.file_list_complete:
             return payload(ContextStatus.SUMMARY_ONLY, "diff_inventory_incomplete")
+        if not diff_map.files:
+            return payload(ContextStatus.NO_CHANGES, "no_changes")
         if not allowed:
             if ignored and len(omissions) == 1:
                 return payload(ContextStatus.ALL_CHANGES_IGNORED, "all_changes_ignored")
