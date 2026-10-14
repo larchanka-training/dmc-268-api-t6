@@ -28,7 +28,7 @@ _ERROR_TEXTS = {
     "superseded": "В PR новый коммит — ревью будет для него.",
     "cancelled_by_user": "Прогон отменён из UI.",
     "pr_closed": "PR закрыт.",
-    "rule_not_matched": "PR не прошёл правило отбора репозитория.",
+    "rule_not_matched": "Целевая ветка PR не подходит под фильтр веток репозитория.",
     "all_changes_ignored": "Все изменения исключены из AI-ревью.",
     "no_changes": "В PR нет изменённых файлов. Ревью не выполнялось.",
     "policy_document_too_large": (
