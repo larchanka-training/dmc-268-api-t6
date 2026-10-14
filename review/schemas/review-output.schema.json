@@ -20,7 +20,7 @@
     "ReviewFinding": {
       "type": "object",
       "description": "One finding anchored to new-version lines of a file in the diff.",
-      "$comment": "No `side` key: the model always anchors on the new version (RIGHT); the post-processor sets `side` (api#20 D6). Enforced outside this schema by the Pydantic model and validate_findings.py: start_line < line when start_line is not null; title is a single line (str.splitlines) and does not end with a period. Enforced by validate_findings.py only: a non-null rule_name requires the body to start with \"According to custom instructions in '<rule_name>' (\", and a null rule_name forbids that prefix; at runtime the post-processor repairs this binding instead (review/postprocess/lint-filter.md, step 6).",
+      "$comment": "No `side` key: the model always anchors on the new version (RIGHT); the post-processor sets `side` (api#20 D6). Enforced outside this schema by the Pydantic model and validate_findings.py: start_line < line when start_line is not null; title is a single line (str.splitlines) and does not end with a period. Enforced by validate_findings.py only: a non-null rule_name requires the body to start with \"According to custom instructions in '<rule_name>' (\", and a null rule_name forbids that prefix; at runtime the post-processor repairs this binding instead (review/postprocess/lint-filter.md, step 7).",
       "required": [
         "path",
         "line",
