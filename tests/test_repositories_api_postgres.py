@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 from collections.abc import Iterator
 from pathlib import Path
@@ -197,8 +198,11 @@ def test_invalid_review_settings_are_rejected_without_a_write(env: Env) -> None:
         accepted = client.patch(
             url, json={"branchFilter": ["main"], "severityThreshold": "warning"}
         )
+        # Escaped JSON text: httpx's ``json=`` cannot UTF-8-encode a lone surrogate (#149).
         rejected = {
-            name: client.patch(url, json=body).status_code
+            name: client.patch(
+                url, content=json.dumps(body), headers={"Content-Type": "application/json"}
+            ).status_code
             for name, body in INVALID_REVIEW_SETTINGS.items()
         }
         stored_row = tuple(

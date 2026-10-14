@@ -20,8 +20,8 @@ def _pattern_error(pattern: str) -> str | None:
         return "must not be empty"
     if len(pattern) > BRANCH_PATTERN_MAX_LENGTH:
         return f"must be at most {BRANCH_PATTERN_MAX_LENGTH} characters"
-    if any(char.isspace() or unicodedata.category(char) == "Cc" for char in pattern):
-        return "must not contain whitespace or control characters"
+    if any(char.isspace() or unicodedata.category(char) in {"Cc", "Cs"} for char in pattern):
+        return "must not contain whitespace, control or surrogate characters"
     if "***" in pattern:
         return "must not contain three or more '*' in a row"
     if _FORBIDDEN_CHARACTERS.intersection(pattern):

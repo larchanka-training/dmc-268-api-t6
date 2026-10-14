@@ -16,7 +16,7 @@ from app.modules.reviews.application.review_output import (
 )
 from app.modules.reviews.application.verdict import (
     PUBLISHED_SEVERITIES,
-    SeverityThreshold,
+    SeverityThresholdValue,
     severity_count_phrase,
     severity_counts,
     verdict,
@@ -76,7 +76,7 @@ class ProcessedReviewOutput:
 
 
 class FindingsPostProcessor:
-    """Apply the six specified finding-filter stages and the severity threshold without I/O."""
+    """Apply the documented finding-filter stages, severity threshold included, without I/O."""
 
     def __init__(self, patterns: LintFilterPatterns) -> None:
         self._patterns = patterns
@@ -98,9 +98,9 @@ class FindingsPostProcessor:
         hunk_lines: dict[str, frozenset[int]],
         rule_names: frozenset[str],
         repository_max_inline: int | None = None,
-        severity_threshold: SeverityThreshold = "all",
+        severity_threshold: SeverityThresholdValue = "all",
     ) -> ProcessedReviewOutput:
-        """Classify every finding once in the documented six-stage order.
+        """Classify every finding once in the documented stage order.
 
         The repository severity threshold runs after lint and dedupe, before routing and the
         inline cap (docs/PIPELINE_SPEC.md §9).
@@ -217,7 +217,7 @@ class FindingsPostProcessor:
 
     @staticmethod
     def _drop_below_threshold(
-        candidates: list[ProcessedFinding], threshold: SeverityThreshold
+        candidates: list[ProcessedFinding], threshold: SeverityThresholdValue
     ) -> tuple[list[ProcessedFinding], list[ProcessedFinding]]:
         published = PUBLISHED_SEVERITIES[threshold]
         kept: list[ProcessedFinding] = []
@@ -264,7 +264,7 @@ def _render_body(
     kept: tuple[ProcessedFinding, ...],
     body_only: tuple[ProcessedFinding, ...],
     hunk_lines: dict[str, frozenset[int]],
-    severity_threshold: SeverityThreshold,
+    severity_threshold: SeverityThresholdValue,
     below_threshold: int,
 ) -> str:
     prose = render_review_body(output.summary)
@@ -284,7 +284,7 @@ def _render_body(
 def _overview(
     kept: tuple[ProcessedFinding, ...],
     hunk_lines: dict[str, frozenset[int]],
-    severity_threshold: SeverityThreshold,
+    severity_threshold: SeverityThresholdValue,
     below_threshold: int,
 ) -> str:
     severities = [item.finding.severity for item in kept]

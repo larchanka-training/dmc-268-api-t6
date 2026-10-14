@@ -12,7 +12,7 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from app.common.application.unit_of_work import UnitOfWork
-from app.modules.reviews.application.verdict import SeverityThreshold
+from app.modules.reviews.application.verdict import SeverityThresholdValue
 
 if TYPE_CHECKING:
     from app.modules.reviews.application.findings_post_processor import ProcessedReviewOutput
@@ -152,7 +152,7 @@ class FindingPostProcessingInput:
     hunk_lines: dict[str, frozenset[int]]
     rule_names: frozenset[str]
     repository_max_inline: int | None = None
-    severity_threshold: SeverityThreshold = "all"
+    severity_threshold: SeverityThresholdValue = "all"
 
 
 class ReviewOutputRepository(Protocol):

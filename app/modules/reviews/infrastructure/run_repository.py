@@ -12,7 +12,7 @@ from uuid import UUID
 from sqlalchemy import ColumnElement, Row, String, and_, cast, func, or_, select, true, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.common.infrastructure.db.enums import RunState
+from app.common.infrastructure.db.enums import RunState, SeverityThreshold
 from app.common.infrastructure.db.unit_of_work import SqlAlchemyUnitOfWork
 from app.modules.analytics.infrastructure.models import UsageEvent
 from app.modules.auth.application.scope import AuthScope
@@ -53,6 +53,7 @@ from app.modules.reviews.application.run_events import RunChange
 from app.modules.reviews.application.run_failures import RunCancelled
 from app.modules.reviews.application.store_review_output import PublishingGuard
 from app.modules.reviews.application.vcs_diff import PullRequestLocator
+from app.modules.reviews.application.verdict import SeverityThresholdValue
 from app.modules.reviews.infrastructure.models import (
     CodeChange,
     CodeChangeDiff,
@@ -656,7 +657,7 @@ class SqlAlchemyReviewOutputRepository:
         ).one_or_none()
         if row is None:
             return None
-        _, _, rules, max_comments, severity_threshold = row
+        _, _, rules, max_comments, severity_threshold = row._tuple()
         snapshots = (
             await self._session.execute(
                 select(CodeChangeDiff.filename, CodeChangeDiff.patch).where(
@@ -670,7 +671,7 @@ class SqlAlchemyReviewOutputRepository:
             hunk_lines=hunk_lines,
             rule_names=rule_names,
             repository_max_inline=max_comments,
-            severity_threshold=severity_threshold.value,
+            severity_threshold=_severity_threshold_value(severity_threshold),
         )
 
     async def store_review_output(
@@ -868,6 +869,17 @@ def _to_published_finding_row(item: Finding) -> PublishedFinding:
         confidence=float(item.confidence),
         rule_name=item.rule_name,
     )
+
+
+def _severity_threshold_value(threshold: SeverityThreshold) -> SeverityThresholdValue:
+    """Map the stored threshold onto the post-processor's value; mypy checks every member."""
+    match threshold:
+        case SeverityThreshold.ALL:
+            return "all"
+        case SeverityThreshold.WARNING:
+            return "warning"
+        case SeverityThreshold.CRITICAL:
+            return "critical"
 
 
 def _new_hunk_lines(filename: str, patch: str | None) -> frozenset[int]:
