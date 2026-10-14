@@ -32,9 +32,6 @@ from app.modules.integrations.webhooks.application.github_installation_dispatch 
 from app.modules.integrations.webhooks.infrastructure.github_current_pull_request import (
     HttpGitHubCurrentPullRequestProvider,
 )
-from app.modules.integrations.webhooks.infrastructure.github_reviewer_timeline import (
-    HttpGitHubReviewerTimelineProvider,
-)
 from app.modules.reviews.application.project_github_pull_request import (
     LockedPullRequest,
     ProjectGitHubPullRequest,
@@ -46,10 +43,7 @@ from app.modules.reviews.application.project_github_pull_request import (
     PullRequestRecord,
     PullRequestRepositoryRefused,
     PullRequestState,
-    ReviewerTimelineIntent,
-    ReviewerTimelineSnapshot,
     RunCancellationNotice,
-    TimelineLifecycle,
 )
 from app.modules.reviews.application.trigger_from_delivery import CiTriggerEvent, RunTriggerOutcome
 from app.modules.reviews.infrastructure.github_pull_request_projection import (
@@ -89,10 +83,6 @@ def _event(action: str = "opened", **overrides: object) -> PullRequestEvent:
     }
     values.update(overrides)
     return PullRequestEvent(**values)  # type: ignore[arg-type]
-
-
-def _fake_uow_factory(uow: FakeUnitOfWork) -> Callable[[], FakeUnitOfWork]:
-    return lambda: uow
 
 
 @dataclass
@@ -181,6 +171,124 @@ class FakeProjectionLock:
             yield
 
 
+@pytest.mark.parametrize("action", ["review_requested", "review_request_removed"])
+def test_reviewer_deliveries_are_ignored_before_any_projection_work(action: str) -> None:
+    def forbidden_uow() -> FakeUnitOfWork:
+        raise AssertionError("reviewer delivery opened a UOW")
+
+    class ForbiddenLock:
+        @asynccontextmanager
+        async def hold(self, event: PullRequestEvent) -> AsyncIterator[None]:
+            raise AssertionError("reviewer delivery acquired the projection lock")
+            yield
+
+    class ForbiddenProvider:
+        async def get_current(
+            self, event: PullRequestEvent, *, checkpoint: PullRequestProviderCheckpoint
+        ) -> PullRequestEvent:
+            raise AssertionError("reviewer delivery read GitHub")
+
+    class ForbiddenSignals:
+        async def publish_for(self, run_ids: tuple[UUID, ...]) -> int:
+            raise AssertionError("reviewer delivery published cancellation")
+
+    projector = ProjectGitHubPullRequest(
+        uow_factory=forbidden_uow,
+        bot_login="reviewer[bot]",
+        current_provider=ForbiddenProvider(),
+        projection_lock=ForbiddenLock(),
+        cancellation_signals=ForbiddenSignals(),
+    )
+    result = asyncio.run(
+        projector.execute(
+            _event(action, requested_reviewer_login="Reviewer[bot]", sender_type="User")
+        )
+    )
+    assert result == PullRequestProjectionStatus.IGNORED_UNRELATED
+
+
+@pytest.mark.parametrize(
+    ("action", "state", "head", "labels", "cancellation"),
+    [
+        ("edited", PullRequestState.OPEN, _HEAD, frozenset(), None),
+        ("synchronize", PullRequestState.CLOSED, "c" * 40, frozenset({"ai-review"}), "pr_closed"),
+        ("closed", PullRequestState.CLOSED, _HEAD, frozenset(), "pr_closed"),
+        ("reopened", PullRequestState.OPEN, _HEAD, frozenset(), None),
+        ("labeled", PullRequestState.OPEN, "c" * 40, frozenset({"ai-review"}), "superseded"),
+    ],
+)
+def test_live_projection_preserves_all_historical_reviewer_fields(
+    action: str,
+    state: PullRequestState,
+    head: str,
+    labels: frozenset[str],
+    cancellation: str | None,
+) -> None:
+    row = PullRequestRecord.from_event(uuid4(), _REPOSITORY_ID, _event(), _NOW)
+    row.reviewer_requested = True
+    row.reviewer_requested_at = datetime(2026, 9, 20, 10, tzinfo=UTC)
+    row.reviewer_intent_updated_at = datetime(2026, 9, 20, 11, tzinfo=UTC)
+    row.reviewer_timeline_event_id = 4321
+    row.reviewer_timeline_position = 17
+    row.reviewer_barrier_at = datetime(2026, 9, 19, 10, tzinfo=UTC)
+    row.reviewer_barrier_position = 16
+    if action == "reopened":
+        row.state = PullRequestState.CLOSED
+    uow = FakeUnitOfWork(store=FakeStore(row=row))
+
+    class CurrentProvider:
+        async def get_current(
+            self, event: PullRequestEvent, *, checkpoint: PullRequestProviderCheckpoint
+        ) -> PullRequestEvent:
+            assert not uow.active
+            await checkpoint()
+            assert not uow.active
+            return _event(
+                action,
+                title="Current metadata",
+                state=state,
+                head_sha=head,
+                current_label_names=labels,
+                provider_updated_at=_NOW,
+            )
+
+    projector = ProjectGitHubPullRequest(
+        uow_factory=lambda: uow,
+        bot_login="reviewer[bot]",
+        current_provider=CurrentProvider(),
+        projection_lock=FakeProjectionLock(),
+        now=lambda: _NOW,
+    )
+    event = _event(action, state=state, provider_updated_at=_NOW)
+    delivery = PullRequestLabelEvent(event, "ai-review") if action == "labeled" else event
+    assert asyncio.run(projector.execute(delivery)) == PullRequestProjectionStatus.PROJECTED
+    assert (
+        row.reviewer_requested,
+        row.reviewer_requested_at,
+        row.reviewer_intent_updated_at,
+        row.reviewer_timeline_event_id,
+        row.reviewer_timeline_position,
+        row.reviewer_barrier_at,
+        row.reviewer_barrier_position,
+    ) == (
+        True,
+        datetime(2026, 9, 20, 10, tzinfo=UTC),
+        datetime(2026, 9, 20, 11, tzinfo=UTC),
+        4321,
+        17,
+        datetime(2026, 9, 19, 10, tzinfo=UTC),
+        16,
+    )
+    assert row.state == state
+    assert row.head_sha == head
+    assert row.ai_review_labeled is ("ai-review" in labels)
+    assert row.ai_review_labeled_at == (_NOW if "ai-review" in labels else None)
+    if action in {"edited", "synchronize", "labeled"}:
+        assert row.title == "Current metadata"
+    assert uow.run_store.calls == ([(row.id, cancellation)] if cancellation else [])
+    assert uow.commits == 1
+
+
 def test_opened_creates_metadata_and_starts_head_clock() -> None:
     uow = FakeUnitOfWork()
     projector = ProjectGitHubPullRequest(
@@ -205,7 +313,7 @@ def test_opened_creates_metadata_and_starts_head_clock() -> None:
     assert uow.commits == 1
 
 
-def test_bot_assignment_survives_push_and_only_new_head_resets_head_clock() -> None:
+def test_historical_assignment_survives_push_and_only_new_head_resets_head_clock() -> None:
     uow = FakeUnitOfWork()
     clock = [_NOW]
     projector = ProjectGitHubPullRequest(
@@ -213,16 +321,9 @@ def test_bot_assignment_survives_push_and_only_new_head_resets_head_clock() -> N
     )
     asyncio.run(projector.execute(_event()))
     clock[0] = datetime(2026, 9, 28, 12, 1, tzinfo=UTC)
-    asyncio.run(
-        projector.execute(
-            _event(
-                "review_requested",
-                requested_reviewer_login="Reviewer[bot]",
-                provider_updated_at=datetime(2026, 9, 28, 12, 1, tzinfo=UTC),
-            )
-        )
-    )
     assert uow.store.row is not None
+    uow.store.row.reviewer_requested = True
+    uow.store.row.reviewer_requested_at = datetime(2026, 9, 28, 12, 1, tzinfo=UTC)
     uow.store.row.ci_status = {"head": "old"}
     clock[0] = datetime(2026, 9, 28, 12, 2, tzinfo=UTC)
     asyncio.run(
@@ -258,69 +359,6 @@ def test_bot_assignment_survives_push_and_only_new_head_resets_head_clock() -> N
     assert uow.store.row.reviewer_requested is True
     assert uow.store.row.reviewer_requested_at == datetime(2026, 9, 28, 12, 1, tzinfo=UTC)
     assert uow.store.row.ci_status == {}
-
-
-def test_duplicate_bot_request_preserves_first_assignment_time() -> None:
-    uow = FakeUnitOfWork()
-    clock = [_NOW]
-    projector = ProjectGitHubPullRequest(
-        uow_factory=lambda: uow, bot_login="reviewer[bot]", now=lambda: clock[0]
-    )
-    asyncio.run(projector.execute(_event()))
-    request = _event("review_requested", requested_reviewer_login="reviewer[bot]")
-    asyncio.run(projector.execute(request))
-    clock[0] = datetime(2026, 9, 28, 12, 5, tzinfo=UTC)
-    asyncio.run(projector.execute(request))
-
-    assert uow.store.row is not None
-    assert uow.store.row.reviewer_requested_at == _NOW
-
-
-def test_delayed_reviewer_intent_applies_across_new_head_in_both_orders() -> None:
-    requested_at = datetime(2026, 9, 28, 12, 1, tzinfo=UTC)
-    removed_at = datetime(2026, 9, 28, 12, 2, tzinfo=UTC)
-    pushed_at = datetime(2026, 9, 28, 12, 3, tzinfo=UTC)
-    request = _event(
-        "review_requested",
-        requested_reviewer_login="reviewer[bot]",
-        provider_updated_at=requested_at,
-    )
-    remove = _event(
-        "review_request_removed",
-        requested_reviewer_login="reviewer[bot]",
-        sender_type="User",
-        provider_updated_at=removed_at,
-    )
-    push = _event("synchronize", head_sha="c" * 40, provider_updated_at=pushed_at)
-
-    for actions in ((request, push), (push, request)):
-        uow = FakeUnitOfWork()
-        projector = ProjectGitHubPullRequest(
-            uow_factory=_fake_uow_factory(uow), bot_login="reviewer[bot]", now=lambda: _NOW
-        )
-        asyncio.run(projector.execute(_event()))
-        for action in actions:
-            asyncio.run(projector.execute(action))
-        assert uow.store.row is not None
-        assert uow.store.row.head_sha == "c" * 40
-        assert uow.store.row.reviewer_requested is True
-        assert uow.store.row.reviewer_requested_at == _NOW
-
-        asyncio.run(projector.execute(remove))
-        assert uow.store.row.reviewer_requested is False
-        assert uow.store.row.reviewer_requested_at is None
-
-    for sequence in ((request, remove, push), (request, push, remove)):
-        uow = FakeUnitOfWork()
-        projector = ProjectGitHubPullRequest(
-            uow_factory=_fake_uow_factory(uow), bot_login="reviewer[bot]", now=lambda: _NOW
-        )
-        asyncio.run(projector.execute(_event()))
-        for action in sequence:
-            asyncio.run(projector.execute(action))
-        assert uow.store.row is not None
-        assert uow.store.row.head_sha == "c" * 40
-        assert uow.store.row.reviewer_requested is False
 
 
 def test_head_change_and_close_cancel_runs_in_projection_transaction() -> None:
@@ -406,333 +444,6 @@ def test_synchronize_and_close_publish_cancellation_ids_only_after_commit() -> N
     assert uow.run_store.notices == [first, second]
 
 
-def test_close_barrier_and_equal_time_removal_keep_reviewer_intent_fail_closed() -> None:
-    uow = FakeUnitOfWork()
-    projector = ProjectGitHubPullRequest(
-        uow_factory=lambda: uow, bot_login="reviewer[bot]", now=lambda: _NOW
-    )
-    asyncio.run(projector.execute(_event()))
-    intent_time = datetime(2026, 9, 28, 12, 1, tzinfo=UTC)
-    request = _event(
-        "review_requested",
-        requested_reviewer_login="reviewer[bot]",
-        provider_updated_at=intent_time,
-    )
-    removal = _event(
-        "review_request_removed",
-        requested_reviewer_login="reviewer[bot]",
-        sender_type="User",
-        provider_updated_at=intent_time,
-    )
-    asyncio.run(projector.execute(request))
-    asyncio.run(projector.execute(removal))
-    asyncio.run(projector.execute(request))
-    assert uow.store.row is not None
-    assert uow.store.row.reviewer_requested is False
-
-    reverse_uow = FakeUnitOfWork()
-    reverse = ProjectGitHubPullRequest(
-        uow_factory=lambda: reverse_uow, bot_login="reviewer[bot]", now=lambda: _NOW
-    )
-    asyncio.run(reverse.execute(_event()))
-    asyncio.run(reverse.execute(removal))
-    asyncio.run(reverse.execute(request))
-    assert reverse_uow.store.row is not None
-    assert reverse_uow.store.row.reviewer_requested is False
-
-    closed_at = datetime(2026, 9, 28, 12, 2, tzinfo=UTC)
-    asyncio.run(
-        projector.execute(
-            _event("closed", provider_updated_at=closed_at, state=PullRequestState.CLOSED)
-        )
-    )
-    asyncio.run(projector.execute(_event("reopened", provider_updated_at=closed_at)))
-    asyncio.run(projector.execute(request))
-    assert uow.store.row.reviewer_requested is False
-
-    later_request = _event(
-        "review_requested",
-        requested_reviewer_login="reviewer[bot]",
-        provider_updated_at=datetime(2026, 9, 28, 12, 3, tzinfo=UTC),
-    )
-    asyncio.run(projector.execute(later_request))
-    assert uow.store.row.reviewer_requested is True
-
-
-def test_same_second_human_removal_then_fresh_request_uses_latest_timeline_event() -> None:
-    same_time = datetime(2026, 9, 28, 12, 1, tzinfo=UTC)
-    remove = _event(
-        "review_request_removed",
-        requested_reviewer_login="reviewer[bot]",
-        sender_type="User",
-        provider_updated_at=same_time,
-    )
-    request = _event(
-        "review_requested",
-        requested_reviewer_login="reviewer[bot]",
-        provider_updated_at=same_time,
-    )
-
-    @dataclass
-    class Timeline:
-        latest: ReviewerTimelineIntent
-
-        async def snapshot(
-            self,
-            event: PullRequestEvent,
-            bot_login: str,
-            *,
-            checkpoint: PullRequestProviderCheckpoint,
-        ) -> ReviewerTimelineSnapshot:
-            assert bot_login == "reviewer[bot]"
-            return ReviewerTimelineSnapshot(self.latest, None)
-
-    for delivery_order in ((remove, request), (request, remove)):
-        uow = FakeUnitOfWork()
-        timeline = Timeline(ReviewerTimelineIntent(20, same_time, requested=False, position=1))
-        projector = ProjectGitHubPullRequest(
-            uow_factory=_fake_uow_factory(uow),
-            bot_login="reviewer[bot]",
-            reviewer_timeline_provider=timeline,
-            projection_lock=FakeProjectionLock(),
-            now=lambda: _NOW,
-        )
-        asyncio.run(projector.execute(_event()))
-        if delivery_order[0] == remove:
-            asyncio.run(projector.execute(remove))
-            timeline.latest = ReviewerTimelineIntent(11, same_time, requested=True, position=2)
-            asyncio.run(projector.execute(request))
-        else:
-            timeline.latest = ReviewerTimelineIntent(11, same_time, requested=True, position=2)
-            asyncio.run(projector.execute(request))
-            asyncio.run(projector.execute(remove))
-        assert uow.store.row is not None
-        assert uow.store.row.reviewer_requested is True
-        assert uow.store.row.reviewer_timeline_event_id == 11
-
-
-def test_same_second_request_then_human_removal_uses_latest_timeline_event() -> None:
-    same_time = datetime(2026, 9, 28, 12, 1, tzinfo=UTC)
-    request = _event(
-        "review_requested",
-        requested_reviewer_login="reviewer[bot]",
-        provider_updated_at=same_time,
-    )
-    remove = _event(
-        "review_request_removed",
-        requested_reviewer_login="reviewer[bot]",
-        sender_type="User",
-        provider_updated_at=same_time,
-    )
-
-    @dataclass
-    class Timeline:
-        latest: ReviewerTimelineIntent
-
-        async def snapshot(
-            self,
-            event: PullRequestEvent,
-            bot_login: str,
-            *,
-            checkpoint: PullRequestProviderCheckpoint,
-        ) -> ReviewerTimelineSnapshot:
-            return ReviewerTimelineSnapshot(self.latest, None)
-
-    for delivery_order in ((request, remove), (remove, request)):
-        uow = FakeUnitOfWork()
-        timeline = Timeline(ReviewerTimelineIntent(20, same_time, requested=True, position=1))
-        projector = ProjectGitHubPullRequest(
-            uow_factory=_fake_uow_factory(uow),
-            bot_login="reviewer[bot]",
-            reviewer_timeline_provider=timeline,
-            projection_lock=FakeProjectionLock(),
-            now=lambda: _NOW,
-        )
-        asyncio.run(projector.execute(_event()))
-        if delivery_order[0] == request:
-            asyncio.run(projector.execute(request))
-            timeline.latest = ReviewerTimelineIntent(11, same_time, requested=False, position=2)
-            asyncio.run(projector.execute(remove))
-        else:
-            timeline.latest = ReviewerTimelineIntent(11, same_time, requested=False, position=2)
-            asyncio.run(projector.execute(remove))
-            asyncio.run(projector.execute(request))
-        assert uow.store.row is not None
-        assert uow.store.row.reviewer_requested is False
-        assert uow.store.row.reviewer_timeline_event_id == 11
-
-
-def test_timeline_uncertainty_raises_without_committing_reviewer_intent() -> None:
-    class UnavailableTimeline:
-        async def snapshot(
-            self,
-            event: PullRequestEvent,
-            bot_login: str,
-            *,
-            checkpoint: PullRequestProviderCheckpoint,
-        ) -> ReviewerTimelineSnapshot:
-            raise RuntimeError("GitHub timeline unavailable")
-
-    uow = FakeUnitOfWork()
-    projector = ProjectGitHubPullRequest(
-        uow_factory=lambda: uow,
-        bot_login="reviewer[bot]",
-        reviewer_timeline_provider=UnavailableTimeline(),
-        projection_lock=FakeProjectionLock(),
-        now=lambda: _NOW,
-    )
-    asyncio.run(projector.execute(_event()))
-    commits = uow.commits
-    with pytest.raises(RuntimeError, match="timeline unavailable"):
-        asyncio.run(
-            projector.execute(_event("review_requested", requested_reviewer_login="reviewer[bot]"))
-        )
-    assert uow.commits == commits
-
-
-def test_same_second_reopen_then_request_restores_flag_in_both_delivery_orders() -> None:
-    same_time = datetime(2026, 9, 28, 12, 2, tzinfo=UTC)
-    closed = _event("closed", provider_updated_at=same_time, state=PullRequestState.CLOSED)
-    reopened = _event("reopened", provider_updated_at=same_time)
-    request = _event(
-        "review_requested",
-        provider_updated_at=same_time,
-        requested_reviewer_login="reviewer[bot]",
-    )
-    snapshot = ReviewerTimelineSnapshot(
-        intent=ReviewerTimelineIntent(13, same_time, requested=True, position=3),
-        lifecycle=TimelineLifecycle(12, same_time, "reopened", position=2),
-    )
-
-    class Timeline:
-        async def snapshot(
-            self,
-            event: PullRequestEvent,
-            bot_login: str,
-            *,
-            checkpoint: PullRequestProviderCheckpoint,
-        ) -> ReviewerTimelineSnapshot:
-            return snapshot
-
-    class Current:
-        async def get_current(
-            self, event: PullRequestEvent, *, checkpoint: PullRequestProviderCheckpoint
-        ) -> PullRequestEvent:
-            return _event(event.action, provider_updated_at=same_time, state=PullRequestState.OPEN)
-
-    for actions in ((closed, reopened, request), (request, closed, reopened)):
-        uow = FakeUnitOfWork()
-        projector = ProjectGitHubPullRequest(
-            uow_factory=_fake_uow_factory(uow),
-            bot_login="reviewer[bot]",
-            current_provider=Current(),
-            reviewer_timeline_provider=Timeline(),
-            projection_lock=FakeProjectionLock(),
-            now=lambda: _NOW,
-        )
-        asyncio.run(projector.execute(_event()))
-        for action in actions:
-            asyncio.run(projector.execute(action))
-        assert uow.store.row is not None
-        assert uow.store.row.state == PullRequestState.OPEN
-        assert uow.store.row.reviewer_requested is True
-        assert uow.store.row.reviewer_barrier_position == 2
-
-
-def test_same_second_request_before_reopen_stays_cleared_in_both_delivery_orders() -> None:
-    same_time = datetime(2026, 9, 28, 12, 2, tzinfo=UTC)
-    closed = _event("closed", provider_updated_at=same_time, state=PullRequestState.CLOSED)
-    reopened = _event("reopened", provider_updated_at=same_time)
-    request = _event(
-        "review_requested",
-        provider_updated_at=same_time,
-        requested_reviewer_login="reviewer[bot]",
-    )
-    snapshot = ReviewerTimelineSnapshot(
-        intent=ReviewerTimelineIntent(11, same_time, requested=True, position=1),
-        lifecycle=TimelineLifecycle(13, same_time, "reopened", position=3),
-    )
-
-    class Timeline:
-        async def snapshot(
-            self,
-            event: PullRequestEvent,
-            bot_login: str,
-            *,
-            checkpoint: PullRequestProviderCheckpoint,
-        ) -> ReviewerTimelineSnapshot:
-            return snapshot
-
-    class Current:
-        async def get_current(
-            self, event: PullRequestEvent, *, checkpoint: PullRequestProviderCheckpoint
-        ) -> PullRequestEvent:
-            return _event(event.action, provider_updated_at=same_time, state=PullRequestState.OPEN)
-
-    for actions in ((request, closed, reopened), (closed, reopened, request)):
-        uow = FakeUnitOfWork()
-        projector = ProjectGitHubPullRequest(
-            uow_factory=_fake_uow_factory(uow),
-            bot_login="reviewer[bot]",
-            current_provider=Current(),
-            reviewer_timeline_provider=Timeline(),
-            projection_lock=FakeProjectionLock(),
-            now=lambda: _NOW,
-        )
-        asyncio.run(projector.execute(_event()))
-        for action in actions:
-            asyncio.run(projector.execute(action))
-        assert uow.store.row is not None
-        assert uow.store.row.reviewer_requested is False
-
-
-def test_reopen_before_delayed_close_clears_old_intent_but_preserves_new_request() -> None:
-    uow = FakeUnitOfWork()
-    closed_at = datetime(2026, 9, 28, 12, 2, tzinfo=UTC)
-    reopened_at = datetime(2026, 9, 28, 12, 3, tzinfo=UTC)
-
-    class CurrentProvider:
-        async def get_current(
-            self, event: PullRequestEvent, *, checkpoint: PullRequestProviderCheckpoint
-        ) -> PullRequestEvent:
-            return _event(
-                event.action, state=PullRequestState.OPEN, provider_updated_at=reopened_at
-            )
-
-    projector = ProjectGitHubPullRequest(
-        uow_factory=lambda: uow,
-        bot_login="reviewer[bot]",
-        current_provider=CurrentProvider(),
-        projection_lock=FakeProjectionLock(),
-        now=lambda: _NOW,
-    )
-    asyncio.run(projector.execute(_event()))
-    old_request = _event(
-        "review_requested",
-        requested_reviewer_login="reviewer[bot]",
-        provider_updated_at=datetime(2026, 9, 28, 12, 1, tzinfo=UTC),
-    )
-    asyncio.run(projector.execute(old_request))
-    asyncio.run(projector.execute(_event("reopened", provider_updated_at=reopened_at)))
-    assert uow.store.row is not None
-    assert uow.store.row.state == PullRequestState.OPEN
-    assert uow.store.row.reviewer_requested is False
-
-    asyncio.run(projector.execute(_event("closed", provider_updated_at=closed_at)))
-    asyncio.run(projector.execute(old_request))
-    assert uow.store.row.state == PullRequestState.OPEN
-    assert uow.store.row.reviewer_requested is False
-
-    fresh_request = _event(
-        "review_requested",
-        requested_reviewer_login="reviewer[bot]",
-        provider_updated_at=datetime(2026, 9, 28, 12, 4, tzinfo=UTC),
-    )
-    asyncio.run(projector.execute(fresh_request))
-    asyncio.run(projector.execute(_event("closed", provider_updated_at=closed_at)))
-    assert uow.store.row.reviewer_requested is True
-
-
 def test_equal_timestamp_pushes_reconcile_current_head_in_both_delivery_orders() -> None:
     head_b, head_c = "c" * 40, "d" * 40
     same_time = datetime(2026, 9, 28, 12, 1, tzinfo=UTC)
@@ -809,9 +520,6 @@ def test_closed_new_head_then_delayed_sync_cannot_reopen_and_reopen_is_authorita
         now=lambda: _NOW,
     )
     asyncio.run(projector.execute(_event()))
-    asyncio.run(
-        projector.execute(_event("review_requested", requested_reviewer_login="reviewer[bot]"))
-    )
     asyncio.run(projector.execute(_event("closed", head_sha=head_b, state=PullRequestState.CLOSED)))
     assert uow.store.row is not None
     assert uow.store.row.head_sha == head_b
@@ -1106,7 +814,7 @@ def test_inverted_rest_observations_are_serialized_per_pr() -> None:
     asyncio.run(exercise())
 
 
-def test_close_fetch_serializes_with_reviewer_request_and_keeps_closed_flag_clear() -> None:
+def test_close_fetch_serializes_with_reopen_and_keeps_current_closed_state() -> None:
     uow = FakeUnitOfWork()
 
     async def exercise() -> None:
@@ -1137,11 +845,10 @@ def test_close_fetch_serializes_with_reviewer_request_and_keeps_closed_flag_clea
             projector.execute(_event("closed", state=PullRequestState.CLOSED))
         )
         await close_fetch_started.wait()
-        request = asyncio.create_task(
+        reopen = asyncio.create_task(
             projector.execute(
                 _event(
-                    "review_requested",
-                    requested_reviewer_login="reviewer[bot]",
+                    "reopened",
                     provider_updated_at=datetime(2026, 9, 28, 12, 3, tzinfo=UTC),
                 )
             )
@@ -1150,98 +857,11 @@ def test_close_fetch_serializes_with_reviewer_request_and_keeps_closed_flag_clea
         assert uow.store.row is not None
         assert uow.store.row.reviewer_requested is False
         release_close_fetch.set()
-        await asyncio.gather(close, request)
+        await asyncio.gather(close, reopen)
         assert uow.store.row.state == PullRequestState.CLOSED
         assert uow.store.row.reviewer_requested is False
 
     asyncio.run(exercise())
-
-
-def test_closed_state_always_clears_reviewer_flag_even_if_intent_timestamp_is_later() -> None:
-    uow = FakeUnitOfWork()
-    projector = ProjectGitHubPullRequest(
-        uow_factory=lambda: uow, bot_login="reviewer[bot]", now=lambda: _NOW
-    )
-    asyncio.run(projector.execute(_event()))
-    asyncio.run(
-        projector.execute(
-            _event(
-                "review_requested",
-                requested_reviewer_login="reviewer[bot]",
-                provider_updated_at=datetime(2026, 9, 28, 12, 4, tzinfo=UTC),
-            )
-        )
-    )
-    asyncio.run(
-        projector.execute(
-            _event(
-                "closed",
-                state=PullRequestState.CLOSED,
-                provider_updated_at=datetime(2026, 9, 28, 12, 2, tzinfo=UTC),
-            )
-        )
-    )
-    assert uow.store.row is not None
-    assert uow.store.row.state == PullRequestState.CLOSED
-    assert uow.store.row.reviewer_requested is False
-
-
-def test_only_human_removal_of_our_bot_clears_assignment_and_close_clears_it() -> None:
-    uow = FakeUnitOfWork()
-    projector = ProjectGitHubPullRequest(
-        uow_factory=lambda: uow, bot_login="reviewer[bot]", now=lambda: _NOW
-    )
-    asyncio.run(projector.execute(_event()))
-    asyncio.run(
-        projector.execute(_event("review_requested", requested_reviewer_login="reviewer[bot]"))
-    )
-    assert uow.store.row is not None
-    assert uow.store.row.reviewer_requested is True
-
-    foreign = asyncio.run(
-        projector.execute(
-            _event(
-                "review_request_removed",
-                requested_reviewer_login="another-bot[bot]",
-                sender_type="User",
-            )
-        )
-    )
-    bot_origin = asyncio.run(
-        projector.execute(
-            _event(
-                "review_request_removed",
-                requested_reviewer_login="reviewer[bot]",
-                sender_type="Bot",
-            )
-        )
-    )
-    assert foreign == PullRequestProjectionStatus.IGNORED_UNRELATED
-    assert bot_origin == PullRequestProjectionStatus.IGNORED_UNRELATED
-    assert uow.store.row.reviewer_requested is True
-
-    human = asyncio.run(
-        projector.execute(
-            _event(
-                "review_request_removed",
-                requested_reviewer_login="reviewer[bot]",
-                sender_type="User",
-            )
-        )
-    )
-    assert human == PullRequestProjectionStatus.PROJECTED
-    assert uow.store.row.reviewer_requested is False
-    assert uow.store.row.reviewer_requested_at is None
-
-    asyncio.run(
-        projector.execute(_event("review_requested", requested_reviewer_login="reviewer[bot]"))
-    )
-    asyncio.run(projector.execute(_event("closed", state=PullRequestState.MERGED)))
-    assert uow.store.row.state == PullRequestState.MERGED
-    assert uow.store.row.reviewer_requested is False
-    assert uow.store.row.reviewer_requested_at is None
-    asyncio.run(projector.execute(_event("reopened", state=PullRequestState.OPEN)))
-    assert uow.store.row.state == PullRequestState.OPEN
 
 
 def test_stale_sha_unknown_repository_and_unrelated_pr_do_not_mutate_record() -> None:
@@ -2152,147 +1772,6 @@ def test_current_pr_without_valid_labels_cannot_clear_label_state(labels: object
         asyncio.run(exercise())
 
 
-def test_reviewer_timeline_paginates_and_ignores_automatic_bot_removal() -> None:
-    seen: list[httpx.Request] = []
-
-    class Tokens:
-        async def get_installation_access_token(self, installation_external_id: int) -> str:
-            assert installation_external_id == 17
-            return "installation-token"
-
-    def reviewer_event(
-        event_id: int, action: str, *, actor_type: str = "User"
-    ) -> dict[str, object]:
-        return {
-            "id": event_id,
-            "event": action,
-            "created_at": "2026-09-28T12:01:00Z",
-            "actor": {"type": actor_type},
-            "requested_reviewer": {"login": "reviewer[bot]"},
-        }
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        seen.append(request)
-        if request.url.params["page"] == "1":
-            return httpx.Response(200, json=[{"event": "committed"}] * 100)
-        return httpx.Response(
-            200,
-            json=[
-                reviewer_event(10, "review_request_removed"),
-                reviewer_event(11, "review_requested"),
-                reviewer_event(12, "review_request_removed", actor_type="Bot"),
-            ],
-        )
-
-    async def exercise() -> ReviewerTimelineSnapshot:
-        async with httpx.AsyncClient(
-            transport=httpx.MockTransport(handler), base_url="https://api.github.com"
-        ) as client:
-            provider = HttpGitHubReviewerTimelineProvider(client=client, token_provider=Tokens())
-            return await provider.snapshot(
-                _event("review_requested"), "reviewer[bot]", checkpoint=provider_checkpoint
-            )
-
-    result = asyncio.run(exercise())
-
-    assert result == ReviewerTimelineSnapshot(
-        ReviewerTimelineIntent(
-            11, datetime(2026, 9, 28, 12, 1, tzinfo=UTC), requested=True, position=102
-        ),
-        None,
-    )
-    assert len(seen) == 2
-    assert seen[1].url.path == "/repos/octo/repo/issues/7/timeline"
-    assert seen[1].url.params["per_page"] == "100"
-    assert seen[1].headers["Authorization"] == "Bearer installation-token"
-
-
-def test_reviewer_timeline_invalid_or_missing_intent_fails_for_receipt_retry() -> None:
-    class Tokens:
-        async def get_installation_access_token(self, installation_external_id: int) -> str:
-            return "installation-token"
-
-    async def exercise(items: object) -> ReviewerTimelineSnapshot:
-        async with httpx.AsyncClient(
-            transport=httpx.MockTransport(lambda request: httpx.Response(200, json=items)),
-            base_url="https://api.github.com",
-        ) as client:
-            provider = HttpGitHubReviewerTimelineProvider(client=client, token_provider=Tokens())
-            return await provider.snapshot(
-                _event("review_requested"), "reviewer[bot]", checkpoint=provider_checkpoint
-            )
-
-    for items in (
-        [],
-        [{"event": "review_requested", "requested_reviewer": {"login": "reviewer[bot]"}}],
-        {"message": "incomplete"},
-    ):
-        with pytest.raises(ValueError):
-            asyncio.run(exercise(items))
-
-
-def test_reviewer_timeline_orders_same_second_lifecycle_and_request() -> None:
-    class Tokens:
-        async def get_installation_access_token(self, installation_external_id: int) -> str:
-            return "installation-token"
-
-    entries = [
-        {"id": 20, "event": "closed", "created_at": "2026-09-28T12:02:00Z"},
-        {"id": 19, "event": "reopened", "created_at": "2026-09-28T12:02:00Z"},
-        {
-            "id": 18,
-            "event": "review_requested",
-            "created_at": "2026-09-28T12:02:00Z",
-            "requested_reviewer": {"login": "reviewer[bot]"},
-            "actor": {"type": "User"},
-        },
-    ]
-
-    async def exercise() -> ReviewerTimelineSnapshot:
-        async with httpx.AsyncClient(
-            transport=httpx.MockTransport(lambda request: httpx.Response(200, json=entries)),
-            base_url="https://api.github.com",
-        ) as client:
-            provider = HttpGitHubReviewerTimelineProvider(client=client, token_provider=Tokens())
-            return await provider.snapshot(
-                _event("review_requested"), "reviewer[bot]", checkpoint=provider_checkpoint
-            )
-
-    result = asyncio.run(exercise())
-    assert result.lifecycle == TimelineLifecycle(
-        19, datetime(2026, 9, 28, 12, 2, tzinfo=UTC), "reopened", position=2
-    )
-    assert result.intent == ReviewerTimelineIntent(
-        18, datetime(2026, 9, 28, 12, 2, tzinfo=UTC), requested=True, position=3
-    )
-
-
-def test_missing_lifecycle_timeline_does_not_commit_close() -> None:
-    class IncompleteTimeline:
-        async def snapshot(
-            self,
-            event: PullRequestEvent,
-            bot_login: str,
-            *,
-            checkpoint: PullRequestProviderCheckpoint,
-        ) -> ReviewerTimelineSnapshot:
-            return ReviewerTimelineSnapshot(None, None)
-
-    uow = FakeUnitOfWork()
-    projector = ProjectGitHubPullRequest(
-        uow_factory=lambda: uow,
-        bot_login="reviewer[bot]",
-        reviewer_timeline_provider=IncompleteTimeline(),
-        projection_lock=FakeProjectionLock(),
-        now=lambda: _NOW,
-    )
-    asyncio.run(projector.execute(_event()))
-    commits = uow.commits
-    with pytest.raises(ValueError, match="lifecycle"):
-        asyncio.run(projector.execute(_event("closed", state=PullRequestState.CLOSED)))
-    assert uow.commits == commits
-
-
 def test_dispatcher_projects_reopened_pr_event_from_durable_delivery() -> None:
     @dataclass
     class Projector:
@@ -2535,11 +2014,12 @@ def test_migration_backfills_legacy_pr_from_event_and_duplicate_keeps_clocks(
                 assert row.provider_updated_at == _UPDATED
 
             clock[0] = datetime(2026, 9, 28, 12, 1, tzinfo=UTC)
-            request = _event(
-                "review_requested",
-                requested_reviewer_login="reviewer[bot]",
-                provider_updated_at=clock[0],
-            )
+            async with sessions.begin() as session:
+                legacy = await session.get(CodeChange, legacy_pr_id)
+                assert legacy is not None
+                legacy.reviewer_requested = True
+                legacy.reviewer_requested_at = datetime(2026, 9, 28, 12, 1, tzinfo=UTC)
+            request = _event()
             assert await projector.execute(request) == PullRequestProjectionStatus.PROJECTED
             clock[0] = datetime(2026, 9, 28, 12, 2, tzinfo=UTC)
             assert await projector.execute(request) == PullRequestProjectionStatus.PROJECTED
