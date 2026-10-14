@@ -119,6 +119,8 @@ Application зависит от узких интерфейсов, сгрупп�
 | `VcsProvider` | использующий модуль | минимальные операции конкретного VCS-сценария |
 | `ContextProvider` | `reviews` | собирает ограниченный и трассируемый `ContextPayload` для конкретного `head_sha` |
 | `LlmGateway` | `reviews` | structured результат анализа неизменяемого контекста |
+| `GraphRetriever` | `reviews` | кандидаты графа символов RAG v1 по `repository_id`; реализация — в `code_index.infrastructure` |
+| `CodeIndexPurger` | `repositories` | немедленное удаление индекса репозитория при снятии доступа и выключении RAG; реализация — в `code_index.infrastructure` |
 | `PaymentGateway` | `billing` | создание и подтверждение оплаты |
 | `UnitOfWork` | общий контракт; расширение в использующем модуле | граница транзакции и доступ к интерфейсам repositories |
 | `Clock`, `IdGenerator` | `common` | детерминированные тесты и технические значения |
@@ -129,10 +131,23 @@ Application зависит от узких интерфейсов, сгрупп�
 
 `ContextProvider` также не знает о публикации или состоянии Run. В MVP container
 подставляет `DeterministicContextProvider`: diff, ограниченное окружение, целые файлы
-по бюджету и AST/imports (L0–L4 из SYSTEM_DESIGN). `RagContextProvider` — будущая
-реализация того же порта; он добавит retrieval-кандидаты перед общим
-`BudgetAllocator`, но вернёт тот же `ContextPayload`. Поэтому RAG не требует новой
-ORM-модели, миграции или изменения use case в рамках MVP.
+по бюджету и AST/imports (L0–L4 из SYSTEM_DESIGN). `RagContextProvider` — реализация
+того же порта для RAG v1 ([ADR 0001](adr/0001-graph-rag-v1.md#5-модуль-индексатор-и-порты)):
+через `GraphRetriever` он получает кандидатов графа символов, ставит их в слот
+`BudgetAllocator` после L4 и возвращает тот же `ContextPayload`; LLM gateway,
+постобработка и публикация не меняются.
+
+Прежнее утверждение «RAG не требует новой ORM-модели и миграции» больше не
+действует: индекс хранится в PostgreSQL. Таблицами индекса (`code_index_states` —
+одна строка на репозиторий, файлы, символы, рёбра; `repository_id NOT NULL` на
+каждой строке, методов repositories без `repository_id` нет) и индексатором
+владеет новый модуль `code_index`; DDL и миграции — #141. Процесс индексатора —
+отдельный потребитель очереди `index.repo` (exchange `code_index`) со своим каналом
+и prefetch в процессе `worker`, не в `webhook-worker` и не в потребителе
+`review.run`; вынос в отдельный сервис того же образа контракт не меняет. Сверку с
+HEAD default branch и TTL-очистку выполняют leader-задачи `WorkerProcess.leader_tick`.
+Порты принадлежат потребителям: `GraphRetriever` — `reviews`, `CodeIndexPurger` —
+`repositories`; экстрактор и резолвер AST v1 переиспользуются, а не дублируются.
 
 ## LLM Gateway (#33)
 
@@ -221,6 +236,10 @@ app/
       domain/
       application/
       infrastructure/
+    code_index/                # RAG v1, ADR 0001: индекс графа символов
+      domain/                  # логический ключ символа, виды рёбер, статусы индекса
+      application/             # построение и обновление индекса, fencing по поколению, очистка
+      infrastructure/          # модели индекса, repos, реализации GraphRetriever и CodeIndexPurger
     integrations/
       github/                  # общая provider infrastructure: gateway, parser, tokens
       webhooks/
@@ -239,7 +258,7 @@ app/
     portal/                    # portal-api: FastAPI routes и response schemas
     auth/                      # auth-api: GitHub OAuth, JWT и сессии
     webhook/                   # webhook-api: GitHub webhook FastAPI app
-    worker/                    # worker: review.run AMQP consumer
+    worker/                    # worker: review.run и index.repo (RAG v1) AMQP consumers
     publisher/                 # publisher: review.publish AMQP consumer
 ```
 
