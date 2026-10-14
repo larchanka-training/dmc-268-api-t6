@@ -94,6 +94,8 @@ class CheckRunReport:
     severity_counts: dict[str, int] = field(default_factory=dict)
     inline_count: int = 0
     body_count: int = 0
+    # Findings stored with ``drop_reason = severity_threshold`` (PIPELINE_SPEC §7, §9).
+    below_threshold_count: int = 0
     summary_only: bool = False
     run_url: str | None = None
 
@@ -127,11 +129,17 @@ def check_run_view(report: CheckRunReport) -> CheckRunView:
                 f"PR слишком большой: только сводка{link}",
             )
         counts = severity_count_phrase(report.severity_counts)
+        below = (
+            f"\nниже порога severity: {report.below_threshold_count}"
+            if report.below_threshold_count
+            else ""
+        )
         return CheckRunView(
             "completed",
             "neutral",
             f"AI-ревью: {report.verdict or 'clean'}",
-            f"{counts}\ninline: {report.inline_count}, в теле ревью: {report.body_count}{link}",
+            f"{counts}\ninline: {report.inline_count}, в теле ревью: {report.body_count}"
+            f"{below}{link}",
         )
     reason = _ERROR_TEXTS.get(report.error_code or "", report.error_code or "")
     if report.error_detail:

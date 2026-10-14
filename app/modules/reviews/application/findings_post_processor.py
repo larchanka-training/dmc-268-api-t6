@@ -15,12 +15,14 @@ from app.modules.reviews.application.review_output import (
     render_review_body,
 )
 from app.modules.reviews.application.verdict import (
+    PUBLISHED_SEVERITIES,
+    SeverityThreshold,
     severity_count_phrase,
     severity_counts,
     verdict,
 )
 
-DropReason = Literal["lint_pattern", "duplicate", "unknown_path"]
+DropReason = Literal["lint_pattern", "duplicate", "severity_threshold", "unknown_path"]
 Bucket = Literal["inline", "body_only", "dropped"]
 
 _ATTRIBUTION_PREFIX = "According to custom instructions in '"
@@ -74,7 +76,7 @@ class ProcessedReviewOutput:
 
 
 class FindingsPostProcessor:
-    """Apply the six specified finding-filter stages without I/O."""
+    """Apply the six specified finding-filter stages and the severity threshold without I/O."""
 
     def __init__(self, patterns: LintFilterPatterns) -> None:
         self._patterns = patterns
@@ -96,8 +98,13 @@ class FindingsPostProcessor:
         hunk_lines: dict[str, frozenset[int]],
         rule_names: frozenset[str],
         repository_max_inline: int | None = None,
+        severity_threshold: SeverityThreshold = "all",
     ) -> ProcessedReviewOutput:
-        """Classify every finding once in the documented six-stage order."""
+        """Classify every finding once in the documented six-stage order.
+
+        The repository severity threshold runs after lint and dedupe, before routing and the
+        inline cap (docs/PIPELINE_SPEC.md §9).
+        """
         cap = min(
             self._patterns.max_inline,
             repository_max_inline
@@ -114,6 +121,8 @@ class FindingsPostProcessor:
         dropped.extend(lint_dropped)
         candidates, duplicate_dropped = self._deduplicate(candidates)
         dropped.extend(duplicate_dropped)
+        candidates, below_threshold = self._drop_below_threshold(candidates, severity_threshold)
+        dropped.extend(below_threshold)
 
         prepared: list[ProcessedFinding] = []
         for item in candidates:
@@ -157,6 +166,8 @@ class FindingsPostProcessor:
                 tuple(inline + body_only),
                 tuple(body_only),
                 hunk_lines,
+                severity_threshold,
+                len(below_threshold),
             ),
         )
 
@@ -205,6 +216,22 @@ class FindingsPostProcessor:
         return sorted(winners.values(), key=lambda item: item.position), dropped
 
     @staticmethod
+    def _drop_below_threshold(
+        candidates: list[ProcessedFinding], threshold: SeverityThreshold
+    ) -> tuple[list[ProcessedFinding], list[ProcessedFinding]]:
+        published = PUBLISHED_SEVERITIES[threshold]
+        kept: list[ProcessedFinding] = []
+        dropped: list[ProcessedFinding] = []
+        for item in candidates:
+            if item.finding.severity in published:
+                kept.append(item)
+            else:
+                dropped.append(
+                    ProcessedFinding(item.finding, item.position, "dropped", "severity_threshold")
+                )
+        return kept, dropped
+
+    @staticmethod
     def _repair_attribution(item: ProcessedFinding, rule_names: frozenset[str]) -> ProcessedFinding:
         finding = item.finding
         match = _ATTRIBUTION_RE.match(finding.body)
@@ -237,10 +264,13 @@ def _render_body(
     kept: tuple[ProcessedFinding, ...],
     body_only: tuple[ProcessedFinding, ...],
     hunk_lines: dict[str, frozenset[int]],
+    severity_threshold: SeverityThreshold,
+    below_threshold: int,
 ) -> str:
     prose = render_review_body(output.summary)
     heading, separator, rest = prose.partition("\n\n")
-    prefix = f"{heading}{separator}{_overview(kept, hunk_lines)}\n\n{rest}"
+    overview = _overview(kept, hunk_lines, severity_threshold, below_threshold)
+    prefix = f"{heading}{separator}{overview}\n\n{rest}"
     if not body_only:
         return prefix
     lines = [prefix, "", "## Additional findings"]
@@ -251,16 +281,27 @@ def _render_body(
     return body[:4000]
 
 
-def _overview(kept: tuple[ProcessedFinding, ...], hunk_lines: dict[str, frozenset[int]]) -> str:
+def _overview(
+    kept: tuple[ProcessedFinding, ...],
+    hunk_lines: dict[str, frozenset[int]],
+    severity_threshold: SeverityThreshold,
+    below_threshold: int,
+) -> str:
     severities = [item.finding.severity for item in kept]
     counts = severity_counts(severities)
     count_text = severity_count_phrase(counts)
     paths = sorted(hunk_lines)
     checked = "\n".join(f"- {path}" for path in paths) if paths else "(none)"
+    below = (
+        (f"**Below severity threshold ({severity_threshold}):** {below_threshold}",)
+        if below_threshold
+        else ()
+    )
     return "\n".join(
         (
             f"**Verdict:** {verdict(severities)}",
             f"**Risk summary:** {count_text}",
+            *below,
             "**Checked files:**",
             checked,
         )

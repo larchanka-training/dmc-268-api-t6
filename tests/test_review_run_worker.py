@@ -675,6 +675,46 @@ def test_check_run_view_follows_the_pipeline_spec_table(
     assert view.conclusion != "failure"
 
 
+@pytest.mark.parametrize(
+    ("below_threshold", "expected"),
+    [
+        (
+            0,
+            "critical: 0, high: 1, medium: 0, low: 0, info: 0\n"
+            "inline: 1, в теле ревью: 0\n\nhttps://app.test/runs/1",
+        ),
+        (
+            3,
+            "critical: 0, high: 1, medium: 0, low: 0, info: 0\n"
+            "inline: 1, в теле ревью: 0\nниже порога severity: 3\n\nhttps://app.test/runs/1",
+        ),
+    ],
+    ids=["none-below", "three-below"],
+)
+def test_succeeded_check_run_counts_findings_below_the_severity_threshold_only_when_present(
+    below_threshold: int, expected: str
+) -> None:
+    view = check_run_view(
+        CheckRunReport(
+            CheckRunTarget(1, "o/r", HEAD, RUN),
+            "succeeded",
+            1,
+            verdict="blocking",
+            severity_counts={"high": 1},
+            inline_count=1,
+            below_threshold_count=below_threshold,
+            run_url="https://app.test/runs/1",
+        )
+    )
+
+    assert (view.status, view.conclusion, view.title) == (
+        "completed",
+        "neutral",
+        "AI-ревью: blocking",
+    )
+    assert view.summary == expected
+
+
 def test_failed_step_records_its_error_and_duration() -> None:
     records: list[tuple[str, object, int]] = []
 

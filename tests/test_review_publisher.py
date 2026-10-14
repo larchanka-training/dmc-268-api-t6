@@ -20,6 +20,7 @@ from app.modules.reviews.application.review_output import (
     ReviewOutput,
     ReviewPublication,
 )
+from app.modules.reviews.application.verdict import SeverityThreshold
 
 RUN_ID = UUID("00000000-0000-0000-0000-000000000401")
 
@@ -54,10 +55,15 @@ class FakeRepository:
     publication: ReviewPublication | None
     marked: int = 0
     processed: ProcessedReviewOutput | None = None
+    severity_threshold: SeverityThreshold = "all"
 
     async def get_post_processing_input(self, run_id: UUID) -> FindingPostProcessingInput | None:
         assert run_id == RUN_ID
-        return FindingPostProcessingInput({"app/example.py": frozenset({12})}, frozenset())
+        return FindingPostProcessingInput(
+            {"app/example.py": frozenset({12})},
+            frozenset(),
+            severity_threshold=self.severity_threshold,
+        )
 
     async def store_review_output(
         self,
@@ -275,6 +281,33 @@ def test_publisher_uses_durable_context_when_callers_do_not_supply_it() -> None:
     assert [item.finding.title for item in processed.body_only] == ["Missing transaction boundary"]
     assert processed.body_only[0].finding.rule_name is None
     assert processed.body_only[0].finding.body == "Unsafe use."
+
+
+def test_legacy_publisher_applies_the_repository_severity_threshold() -> None:
+    repository = FakeRepository(
+        [],
+        ReviewPublication("a" * 40, (), "review body", idempotency_key="stable-key"),
+        severity_threshold="critical",
+    )
+    factory = FakeUnitOfWorkFactory(repository, [])
+    provider = FakeProvider([])
+    value = output()
+    findings = cast(list[dict[str, object]], value["findings"])
+    value["findings"] = [
+        findings[0],
+        {**findings[0], "title": "Medium follow-up", "severity": "medium"},
+    ]
+
+    assert asyncio.run(PublishReviewOutput(factory, provider).execute(RUN_ID, value)) is True
+
+    assert repository.processed is not None
+    processed = repository.processed
+    assert [item.finding.title for item in processed.inline] == ["Missing transaction boundary"]
+    assert processed.body_only == ()
+    assert [(item.finding.title, item.drop_reason) for item in processed.dropped] == [
+        ("Medium follow-up", "severity_threshold")
+    ]
+    assert "**Below severity threshold (critical):** 1" in processed.review_body
 
 
 def test_publisher_does_not_allow_callers_to_override_durable_anchor_context() -> None:

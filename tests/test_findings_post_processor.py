@@ -6,6 +6,8 @@ import json
 from pathlib import Path
 from typing import cast
 
+import pytest
+
 from app.modules.reviews.application.findings_post_processor import FindingsPostProcessor
 from app.modules.reviews.application.publish_run_review import move_inline_to_body
 from app.modules.reviews.application.review_output import (
@@ -14,6 +16,7 @@ from app.modules.reviews.application.review_output import (
     ReviewOutput,
     ReviewSummary,
 )
+from app.modules.reviews.application.verdict import SeverityThreshold
 
 
 def finding(**overrides: object) -> dict[str, object]:
@@ -58,6 +61,7 @@ def process(  # type: ignore[no-untyped-def]
     *findings: dict[str, object],
     max_inline: int | None = None,
     hunk_lines: dict[str, frozenset[int]] | None = None,
+    severity_threshold: SeverityThreshold = "all",
 ):
     return FindingsPostProcessor.from_default_patterns().process(
         output(*findings),
@@ -66,6 +70,7 @@ def process(  # type: ignore[no-untyped-def]
         else {"app/example.py": frozenset({10, 11, 12, 13, 14})},
         rule_names=frozenset({"Naming Consistency"}),
         repository_max_inline=max_inline,
+        severity_threshold=severity_threshold,
     )
 
 
@@ -295,6 +300,200 @@ def test_character_cap_drops_only_additional_findings() -> None:
     assert "**Effort:** small" in long_body.review_body
     assert "## Additional findings" not in long_body.review_body
     assert "Spill note" not in long_body.review_body
+
+
+def test_critical_threshold_drops_medium_low_and_info_and_turns_attention_into_clean() -> None:
+    findings = (
+        finding(title="Medium defect", severity="medium"),
+        finding(title="Low defect", severity="low", line=13),
+        finding(title="Info note", severity="info", line=14),
+    )
+
+    control = process(*findings)
+    result = process(*findings, severity_threshold="critical")
+
+    assert control.review_body.startswith("## Review summary\n\n**Verdict:** attention\n")
+    assert "Below severity threshold" not in control.review_body
+    assert result.inline == ()
+    assert result.body_only == ()
+    assert [(item.finding.title, item.drop_reason) for item in result.dropped] == [
+        ("Medium defect", "severity_threshold"),
+        ("Low defect", "severity_threshold"),
+        ("Info note", "severity_threshold"),
+    ]
+    assert result.review_body == "\n".join(
+        (
+            "## Review summary",
+            "",
+            "**Verdict:** clean",
+            "**Risk summary:** critical: 0, high: 0, medium: 0, low: 0, info: 0",
+            "**Below severity threshold (critical):** 3",
+            "**Checked files:**",
+            "- app/example.py",
+            "",
+            "**Main issue:** A required value is not validated.",
+            "",
+            "**Done well:** The endpoint remains small.",
+            "",
+            "**Effort:** small",
+        )
+    )
+
+
+@pytest.mark.parametrize(
+    ("threshold", "published", "below", "line"),
+    [
+        ("all", ["critical", "high", "medium", "low", "info"], [], None),
+        (
+            "warning",
+            ["critical", "high", "medium", "low"],
+            ["info"],
+            "**Below severity threshold (warning):** 1",
+        ),
+        (
+            "critical",
+            ["critical", "high"],
+            ["medium", "low", "info"],
+            "**Below severity threshold (critical):** 3",
+        ),
+    ],
+)
+def test_threshold_publishes_only_its_severity_group(
+    threshold: SeverityThreshold, published: list[str], below: list[str], line: str | None
+) -> None:
+    result = process(
+        *(
+            finding(title=f"{severity.title()} finding", severity=severity, line=10 + index)
+            for index, severity in enumerate(("critical", "high", "medium", "low", "info"))
+        ),
+        severity_threshold=threshold,
+    )
+
+    assert [item.finding.severity for item in result.inline] == published
+    assert result.body_only == ()
+    assert [(item.finding.severity, item.drop_reason) for item in result.dropped] == [
+        (severity, "severity_threshold") for severity in below
+    ]
+    if line is None:
+        assert "Below severity threshold" not in result.review_body
+    else:
+        assert line in result.review_body
+
+
+def test_risk_summary_counts_only_findings_that_pass_the_threshold() -> None:
+    result = process(
+        finding(title="Blocking defect", severity="high"),
+        finding(title="Minor defect", severity="low", line=13),
+        finding(title="Quiet note", severity="info", line=14),
+        severity_threshold="warning",
+    )
+
+    assert result.review_body.startswith(
+        "\n".join(
+            (
+                "## Review summary",
+                "",
+                "**Verdict:** blocking",
+                "**Risk summary:** critical: 0, high: 1, medium: 0, low: 1, info: 0",
+                "**Below severity threshold (warning):** 1",
+                "**Checked files:**",
+            )
+        )
+    )
+
+
+def test_inline_cap_counts_only_findings_that_pass_the_threshold() -> None:
+    blocking = tuple(
+        finding(title=f"Blocking {number}", severity="high", line=10 + number)
+        for number in range(4)
+    )
+    minor = tuple(
+        finding(title=f"Minor {number}", severity="low", line=10 + number % 5)
+        for number in range(8)
+    )
+    # Twelve findings exceed the model contract's ten; built like the 14-finding fixture above.
+    parsed = ReviewOutput.model_construct(
+        findings=[ReviewFinding.model_validate(item) for item in (*blocking, *minor)],
+        summary=output().summary,
+    )
+
+    result = FindingsPostProcessor.from_default_patterns().process(
+        parsed,
+        hunk_lines={"app/example.py": frozenset({10, 11, 12, 13, 14})},
+        rule_names=frozenset(),
+        severity_threshold="critical",
+    )
+
+    assert [item.finding.title for item in result.inline] == [
+        "Blocking 0",
+        "Blocking 1",
+        "Blocking 2",
+        "Blocking 3",
+    ]
+    assert result.body_only == ()
+    assert [(item.finding.title, item.drop_reason) for item in result.dropped] == [
+        (f"Minor {number}", "severity_threshold") for number in range(8)
+    ]
+    assert "**Below severity threshold (critical):** 8" in result.review_body
+
+
+def test_threshold_runs_after_lint_and_dedupe_and_before_path_and_confidence_routing() -> None:
+    result = process(
+        finding(path="other.py", title="Unknown blocking file", severity="high"),
+        finding(title="Unused import of os", body="The unused import should be removed."),
+        finding(title="Missing null check", line=13),
+        finding(path="other.py", title="Unknown minor file"),
+        finding(title="missing null-check", line=13, confidence=0.7),
+        finding(title="Low confidence", confidence=0.4),
+        severity_threshold="critical",
+    )
+
+    assert result.inline == ()
+    assert result.body_only == ()
+    assert [(item.finding.title, item.drop_reason) for item in result.dropped] == [
+        ("Unknown blocking file", "unknown_path"),
+        ("Unused import of os", "lint_pattern"),
+        ("Missing null check", "severity_threshold"),
+        ("Unknown minor file", "severity_threshold"),
+        ("missing null-check", "duplicate"),
+        ("Low confidence", "severity_threshold"),
+    ]
+    assert "**Below severity threshold (critical):** 3" in result.review_body
+
+
+@pytest.mark.parametrize("threshold", [None, "all"])
+def test_all_threshold_keeps_the_ten_findings_fixture_result(
+    threshold: SeverityThreshold | None,
+) -> None:
+    fixture = Path(__file__).parent / "fixtures" / "review_output" / "valid" / "ten-findings.json"
+    parsed = ReviewOutput.model_validate_json(fixture.read_text(encoding="utf-8"))
+    processor = FindingsPostProcessor.from_default_patterns()
+    hunk_lines = {"app/modules/billing/application/charge.py": frozenset(range(10, 20))}
+
+    result = (
+        processor.process(parsed, hunk_lines=hunk_lines, rule_names=frozenset())
+        if threshold is None
+        else processor.process(
+            parsed, hunk_lines=hunk_lines, rule_names=frozenset(), severity_threshold=threshold
+        )
+    )
+
+    assert [item.finding.line for item in result.inline] == list(range(10, 18))
+    assert [item.finding.line for item in result.body_only] == [18, 19]
+    assert result.dropped == ()
+    assert result.review_body.startswith(
+        "\n".join(
+            (
+                "## Review summary",
+                "",
+                "**Verdict:** attention",
+                "**Risk summary:** critical: 0, high: 0, medium: 10, low: 0, info: 0",
+                "**Checked files:**",
+                "- app/modules/billing/application/charge.py",
+            )
+        )
+    )
+    assert "Below severity threshold" not in result.review_body
 
 
 def _moved_finding() -> PublishedFinding:
