@@ -123,7 +123,7 @@ API baseline gates локально и в обязательном CI: `uv run r
 
 Каждый кейс имеет JSON metadata/ground truth, исходное состояние файла (pre-image), применимый unified `.patch` и источник; raw responses хранятся отдельно от кейса, в `test-prs-dataset/responses/`. Для real PR обязательны URL PR/commit, revision, название и URL лицензии, attribution и ручная проверка права на конкретный excerpt. Ground truth использует `path`, `start_line`, `line`, `severity`, `category` из Finding; `start_line: null` означает одну строку, иначе `< line`. Ожидаемый `verdict` выводится из severity по [PIPELINE_SPEC §11](PIPELINE_SPEC.md#11-вердикт-и-бейджи-d3): `critical/high → blocking`, иначе `medium/low → attention`, иначе `clean`. Case schema собственная; [ReviewOutput schema](../review/schemas/review-output.schema.json) применяется только к ответу модели. `git apply --check` выполняется на копии pre-image, truth якорится в добавленных строках новой стороны; answer-hint комментарии запрещены.
 
-Оценивать **сырой** ответ модели до post-processing, hunk-фильтра, severity threshold, production verifier, cap inline и публикации: иначе качество промпта скрывается правилами выпуска. Replay читает committed raw response без сети и ключа, с model ID, prompt version/SHA и run metadata. Для существующего legacy harness валиден только ответ, для которого `uv run python review/scripts/validate_findings.py <response.json>` завершился кодом 0 **и** напечатал `OK ReviewOutput`; exit 1/2 и `RepoConventionsDraft` невалидны. Это не проверка целевого v2 с evidence/manifests. Live использует PromptBuilder и `review/prompts/`, выбранную модель и внешние credentials, сохраняет raw output и ту же provenance для replay. Live запускается вручную (§2, `eval-live.yml`); закоммиченный baseline — ответы и `manifest.json` в `test-prs-dataset/responses/`, его модель и provenance описаны в [README корпуса](../test-prs-dataset/README.md); историческая съёмка 2026-10-13 использовала одиночные revision snapshots (результат §3.2.1); полная замена всех 24 ответов с проверенными PR prefixes ожидает source freeze и одобренную съёмку. LLM-as-a-judge для оценки этого raw benchmark не используется. Обязательный production verifier по #107 — часть продукта, качество которого оценивается отдельно (§3.4).
+Оценивать **сырой** ответ модели до post-processing, hunk-фильтра, severity threshold, production verifier, cap inline и публикации: иначе качество промпта скрывается правилами выпуска. Replay читает committed raw response без сети и ключа, с model ID, prompt version/SHA и run metadata. Для существующего legacy harness валиден только ответ, для которого `uv run python review/scripts/validate_findings.py <response.json>` завершился кодом 0 **и** напечатал `OK ReviewOutput`; exit 1/2 и `RepoConventionsDraft` невалидны. Это не проверка целевого v2 с evidence/manifests. Live использует PromptBuilder и `review/prompts/`, выбранную модель и внешние credentials, сохраняет raw output и ту же provenance для replay. Live запускается вручную (§2, `eval-live.yml`); закоммиченный baseline — ответы и `manifest.json` в `test-prs-dataset/responses/`, его модель и provenance описаны в [README корпуса](../test-prs-dataset/README.md); историческая съёмка 2026-10-13 использовала одиночные revision snapshots (результат §3.2.1); полная замена всех 24 ответов с проверенными PR prefixes опубликована как baseline §3.2.2. LLM-as-a-judge для оценки этого raw benchmark не используется. Обязательный production verifier по #107 — часть продукта, качество которого оценивается отдельно (§3.4).
 
 ### 3.2. Однозначное сопоставление и счётчики
 
@@ -135,14 +135,15 @@ API baseline gates локально и в обязательном CI: `uv run r
 
 ### 3.2.1. Зафиксированный raw baseline #82 (2026-10-13)
 
-Этот capture сохраняется без изменения raw bytes/digests. После remediation #154
-его static inputs устарели: текущий replay показывает ожидаемый drift. Новый
+Это историческое измерение; исходные raw bytes/digests доступны на
+[`76df6d4`](https://github.com/larchanka-training/dmc-268-api-t6/tree/76df6d4d0f431ce4c02e6708410c000c66f6135a/test-prs-dataset/responses).
+Baseline §3.2.2 заменяет весь response set одной новой съёмкой без drift. Новый
 sidecar содержит проверенные API-order prefixes при совпадающих PR head/revision:
 CLEAN-03/LOG-03/SEC-04 по 1 сообщению, RES-03/SYN-04 по 20 и uncertainty marker.
 Strict schema и canonical/active binding проверяются до calls/staging; все
 canonical case.json identity inputs и shaping modules входят в static provenance.
-Новая полная 24-case съёмка ожидает source freeze; результаты ниже относятся
-только к capture 2026-10-13 и не измеряют новые prefixes.
+Результаты ниже относятся только к capture 2026-10-13 и не измеряют новые
+prefixes; новая полная съёмка описана в §3.2.2.
 
 [Actions run 38468081001, attempt 1](https://github.com/larchanka-training/dmc-268-api-t6/actions/runs/38468081001)
 снял все 24 первых ответа на source SHA `80ede3cd274d745616b8a24082ff7d1d00f5b736`;
@@ -201,6 +202,51 @@ primary `0.56125 / 0.56125 / 2.35725`, fallback `0.2245 / 0.2245 / 0.449`;
 nominal fast policy limit USD 0.50/кейс (USD 12 для 24 кейсов), 4 calls/attempt,
 90s timeout. Полные настройки сохранены в manifest. Actual spend, billed-token
 totals и остаток баланса в artifacts отсутствуют; они не выводятся из policy limits.
+
+### 3.2.2. Зафиксированный PR-prefix raw baseline #82 (2026-10-14)
+
+[Actions run 38560319651, attempt 1](https://github.com/larchanka-training/dmc-268-api-t6/actions/runs/38560319651)
+снял все 24 первых raw ответа на frozen source SHA `5173792fd2997d5401aed4b5787d536254249a26`;
+начало `2026-10-14T11:58:17.004986Z`. Один согласованный платный capture,
+engine `fast`, primary `mistral-small-4`, configured fallback `mistral-small-3.2-24b`,
+configured provider `eurouter`, raw export включён. Пять real cases получают
+проверенные API-order PR prefixes: CLEAN-03/LOG-03/SEC-04 по 1 сообщению,
+RES-03/SYN-04 первые 20 плюс `[Additional commits may be omitted]`.
+Все 19 synthetic histories пусты; SEC-05 исключён, corpus/truth не менялись.
+
+Prompt v2 SHA-256 `9177e358c23d1a7cd8987cbf667cf8b705c2afb27eaf8b2237480e4531431d75`.
+Static digest `sha256-v1:09c0c809ca0469f300c50c281848edded260fdbe3373d414e294bbb39c012736`,
+corpus digest `sha256-v1:1ab8ca9a16cc50c357b39e1571c73b1e6674752737c444bd8b58d3f2aab81dfa`.
+Все первые calls `answer`, модель `mistral-small-4`, serving-provider label `mistral`
+(digest `sha256-v1:8e1af0131864f4488dc577f497afcf5c87b74b237e86f0322abf99e8c2ef018a`).
+Gateway statuses `accepted`, paid-metadata errors отсутствуют,
+`baseline_publishable=true`, nonpublishable list пуст. Все 25 файлов импортированы
+byte-for-byte; hashes/sizes 24 ответов совпали с safe metadata, оба manifest
+идентичны, SHA-256 `264dde15691f1fba3bdea64d81276c1d644c7820628e8a29e1a64860b4c94673`.
+Final corpus 24/24, два replay JSON byte-identical/`warnings=[]`; redacted offline
+report byte-identical live safe report. Поздние repair/fallback ответы не подставлялись.
+
+| Метрика | Измеренный PR-prefix raw baseline |
+| --- | --- |
+| Validity | 33.3% (8/24) |
+| Micro TP / FP / FN | 2 / 1 / 17 |
+| Precision | 66.7% (2/3 predictions) |
+| Recall | 10.5% (2/19 truths) |
+| Critical Recall | 40.0% (2/5) |
+| Verdict agreement | 16.7% (4/24) |
+| Severity mismatches | 2/2: LOG-02/LOG-05, predicted high / truth critical |
+
+Security TP/FP/FN 0/0/4; correctness 2/1/3; performance 0/0/5; readability 0/0/5.
+Validity real 0/5, synthetic 8/19. Невалидные 16 первых ответов остаются в знаменателе;
+их predictions не интерпретируются, truths остаются FN. Полные case IDs/class
+counts приведены в [README корпуса](../test-prs-dataset/README.md#recorded-mistral-baseline--2026-10-14).
+Сравнение с исторической snapshot съёмкой §3.2.1 не является controlled experiment
+и не доказывает эффект commit context. Manual semantic/Hallucination Rate oracle
+не выполнялся; production verifier/final-output quality оцениваются отдельно.
+
+Configured цены/fast policy совпадают с §3.2.1 и полными настройками manifest:
+nominal USD 0.50/кейс (USD 12 для 24), 4 calls/attempt, 90s timeout. Actual spend,
+billed-token totals и остаток баланса отсутствуют в artifacts.
 
 ### 3.3. Ручной оракул семантики
 

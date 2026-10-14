@@ -54,7 +54,7 @@ The first command checks one case, the second all present cases. `--final` also 
 
 ## Curated corpus
 
-The 24 active inputs pass final schema, patch-application and distribution validation. [PR #68](https://github.com/larchanka-training/dmc-268-api-t6/pull/68) merged the [#66](https://github.com/larchanka-training/dmc-268-api-t6/issues/66) normalization work, including PIPELINE_SPEC §9, before the first baseline capture. Issue #66 is CLOSED; the merged normalization is no longer a pending baseline dependency. The class counts are security **4**, resource **5**, logic **5**, syntax **5**, and clean **5**. Five cases use distinct licensed real PRs, one in each class. Five separate critical truth anchors come from synthetic cases. SEC-05 was omitted after two candidate fixtures were stopped by the automatic safety filter; four security cases still meet the minimum. It has no case or response entry and is excluded from future replay/live denominators. The committed historical capture is [Mistral via EUrouter](#recorded-mistral-baseline--2026-10-13); the earlier [Nemotron via OpenRouter measurement](#historical-nemotron-baseline--2026-10-06) is retained as historical context.
+The 24 active inputs pass final schema, patch-application and distribution validation. [PR #68](https://github.com/larchanka-training/dmc-268-api-t6/pull/68) merged the [#66](https://github.com/larchanka-training/dmc-268-api-t6/issues/66) normalization work, including PIPELINE_SPEC §9, before the first baseline capture. Issue #66 is CLOSED; the merged normalization is no longer a pending baseline dependency. The class counts are security **4**, resource **5**, logic **5**, syntax **5**, and clean **5**. Five cases use distinct licensed real PRs, one in each class. Five separate critical truth anchors come from synthetic cases. SEC-05 was omitted after two candidate fixtures were stopped by the automatic safety filter; four security cases still meet the minimum. It has no case or response entry and is excluded from future replay/live denominators. The current recorded baseline is [Mistral via EUrouter](#recorded-mistral-baseline--2026-10-14); the earlier [Nemotron via OpenRouter measurement](#historical-nemotron-baseline--2026-10-06) is retained as historical context.
 
 ### Issue #53 corpus decision (2026-10-04)
 
@@ -137,11 +137,11 @@ custom synthetic subsets remain supported, and new real cases require curated
 canonical identity and prefix evidence. Live evaluation and replay never query
 GitHub. Corpus case metadata, patches, pre-images and truth remain unchanged.
 
-The committed 2026-10-13 capture below used the previous single-revision snapshots.
-Its raw bytes, manifest and historical metrics are preserved, and current replay
-reports expected static-input drift. The approved complete 24-case replacement
-with these actual prefixes is pending source freeze and paid capture; no answers
-or manifest digests have been patched or mixed across captures.
+The complete 2026-10-14 capture below uses these actual prefixes. The previous
+single-revision snapshot capture remains historical evidence at
+[`76df6d4`](https://github.com/larchanka-training/dmc-268-api-t6/tree/76df6d4d0f431ce4c02e6708410c000c66f6135a/test-prs-dataset/responses)
+with its original bytes/digests and measured metrics. No answers or manifest
+digests have been patched or mixed across captures.
 
 The manifest also stores sorted `static_inputs`, `static_digest`, and `corpus_digest`. Each digest is `sha256-v1:<64 lowercase hex>` over a SHA-256 stream beginning with the bytes `review-eval-inputs-v1` followed by a NUL byte. For every unique relative POSIX path in sorted order, the stream then contains its UTF-8 path length as an unsigned 8-byte big-endian integer, the path bytes, its file-content length in the same format, and the exact file bytes. Static inputs are the selected review system prompt, all literal `review/rules/*.json` files (including the rule schema), selected custom rule files, and these checked-in paths. Each remains in the byte-level digest because a change can affect the provider request, whether a response is accepted or retried, or which raw answer the recorder captures:
 
@@ -173,10 +173,90 @@ The manifest also stores sorted `static_inputs`, `static_digest`, and `corpus_di
 
 A supplied conventions prompt and its renderer are included only for that task. Byte hashing also warns on a docstring-only edit to any listed file; this conservative warning avoids missing a changed deadline or call policy. `run_failures.py` remains included because `FAST_ATTEMPT_DEADLINE` and `RETRYABLE_ERROR_CODES` are imported into the gateway path. Corpus inputs are every active `case.json`, patch, and recursive pre-image file. Every case ID maps exactly to `responses/<case-id>.json`; replay rejects unmapped extra files. Replay warns if either digest differs or a static file is missing; it never rewrites raw answers. Refresh the **entire** response set and manifest after any input edit, even if only one rule or case changes. Traversal and symlink inputs are rejected.
 
+## Recorded Mistral baseline — 2026-10-14
+
+[Actions run 38560319651, attempt 1](https://github.com/larchanka-training/dmc-268-api-t6/actions/runs/38560319651)
+captured all 24 first raw answers at frozen source
+`5173792fd2997d5401aed4b5787d536254249a26`, starting `2026-10-14T11:58:17.004986Z`
+(13:58:17 Europe/Warsaw). This was the one newly approved paid replacement with
+`model=mistral-small-4` and `export_raw_responses=true`; engine `fast`, configured
+provider `eurouter`, primary `mistral-small-4`, fallback `mistral-small-3.2-24b`.
+The five real cases received the actual bounded PR prefixes above: 1/1/1 messages
+for CLEAN-03/LOG-03/SEC-04, first 20 plus uncertainty for RES-03/SYN-04. Nineteen
+synthetic histories stay empty. SEC-05 remains excluded; corpus inputs/truth are unchanged.
+
+Prompt `review/prompts/review.system.v2.md` (`v2`), SHA-256
+`9177e358c23d1a7cd8987cbf667cf8b705c2afb27eaf8b2237480e4531431d75`.
+Static digest `sha256-v1:09c0c809ca0469f300c50c281848edded260fdbe3373d414e294bbb39c012736`.
+Corpus digest `sha256-v1:1ab8ca9a16cc50c357b39e1571c73b1e6674752737c444bd8b58d3f2aab81dfa`.
+All 24 first calls are `answer`, model `mistral-small-4`, with observed serving-provider
+label `mistral` and digest
+`sha256-v1:8e1af0131864f4488dc577f497afcf5c87b74b237e86f0322abf99e8c2ef018a`.
+Every gateway status is `accepted`; paid-metadata-error markers are false,
+`baseline_publishable=true`, and the nonpublishable list is empty. Publishability
+does not imply a quality threshold.
+
+All 24 first raw answers and the manifest were imported together byte-for-byte.
+Each answer's SHA-256/byte count matches safe metadata; raw and safe manifests
+are byte-identical, SHA-256 `264dde15691f1fba3bdea64d81276c1d644c7820628e8a29e1a64860b4c94673`.
+Corpus final validation passes 24/24. Two offline JSON reports are byte-identical
+with `warnings=[]`; removing only validator diagnostics yields the byte-identical
+live safe report. No repaired/later/fallback answer replaced a first response.
+The historical snapshot capture remains accessible at the previous revision and
+in the section below; no historical digest was rewritten.
+
+| Metric | Current baseline |
+| --- | --- |
+| First raw response validity | 33.3% (8/24) |
+| Micro TP / FP / FN | 2 / 1 / 17 |
+| Micro precision | 66.7% (2/3 predictions) |
+| Micro recall | 10.5% (2/19 truths) |
+| Critical recall | 40.0% (2/5 critical truths) |
+| Verdict agreement | 16.7% (4/24 cases) |
+| Severity mismatches | 2/2 matched findings: LOG-02/LOG-05, high versus critical |
+
+| Category | TP | FP | FN | Precision | Recall |
+| --- | --- | --- | --- | --- | --- |
+| security | 0 | 0 | 4 | undefined (0 predictions) | 0.0% (0/4) |
+| correctness | 2 | 1 | 3 | 66.7% (2/3) | 40.0% (2/5) |
+| performance | 0 | 0 | 5 | undefined (0 predictions) | 0.0% (0/5) |
+| readability | 0 | 0 | 5 | undefined (0 predictions) | 0.0% (0/5) |
+
+| Case class | Valid first answers | TP / FP / FN | Verdict agreement |
+| --- | --- | --- | --- |
+| security | 1/4 | 0 / 0 / 4 | 0/4 |
+| resource | 1/5 | 0 / 1 / 5 | 0/5 |
+| logic | 2/5 | 2 / 0 / 3 | 2/5 |
+| syntax | 2/5 | 0 / 0 / 5 | 0/5 |
+| clean | 2/5 | 0 / 0 / 0 | 2/5 |
+
+Valid first answers: CLEAN-02, CLEAN-05, LOG-02, LOG-05, RES-02, SEC-03, SYN-01, SYN-05. All five real answers
+are invalid (0/5); synthetic validity is 8/19. Invalid first answers: CLEAN-01, CLEAN-03, CLEAN-04, LOG-01, LOG-03, LOG-04, RES-01, RES-03, RES-04, RES-05, SEC-01, SEC-02, SEC-04, SYN-02, SYN-03, SYN-04.
+All 24 first responses contain answer text; invalid predictions are not scored,
+their truths remain FN, and all 24 cases remain in the denominator.
+
+Compared with the historical 2026-10-13 snapshot capture, validity is 8/24 versus 7/24,
+TP/FP/FN 2/1/17 versus 2/2/17, precision 66.7% versus 50.0%, recall 10.5% in both,
+critical recall 2/5 in both, and verdict agreement 4/24 in both. These separate
+captures use different static inputs and do not establish causality or semantic
+accuracy. Manual semantic/Hallucination Rate adjudication was not performed;
+production-verifier/final-output quality and product targets remain separate.
+
+Configured prices USD/million input/cache-read/output tokens remain primary
+`0.56125 / 0.56125 / 2.35725`, fallback `0.2245 / 0.2245 / 0.449`. Both use input
+budget 52,000/output cap 8,000; context windows 262,144/128,000 and `json_schema`.
+Fast policy remains nominal USD 0.50/case (USD 12 for 24), input-token limit 60,000,
+4 calls/attempt, 90s timeout, with full retry/jitter settings in the manifest.
+These configured values do not measure actual spend, billed tokens or balance,
+which are unavailable from the artifacts.
+
 ## Recorded Mistral baseline — 2026-10-13
 
-The complete 24-case first-answer capture in
-[`responses/manifest.json`](responses/manifest.json) was recorded by
+This historical snapshot capture is superseded by the 2026-10-14 PR-prefix capture.
+Original raw bytes and manifest remain at [revision 76df6d4](https://github.com/larchanka-training/dmc-268-api-t6/tree/76df6d4d0f431ce4c02e6708410c000c66f6135a/test-prs-dataset/responses).
+
+The complete historical 24-case first-answer capture in
+[its original manifest](https://github.com/larchanka-training/dmc-268-api-t6/blob/76df6d4d0f431ce4c02e6708410c000c66f6135a/test-prs-dataset/responses/manifest.json) was recorded by
 [Actions run 38468081001, attempt 1](https://github.com/larchanka-training/dmc-268-api-t6/actions/runs/38468081001)
 on source commit `80ede3cd274d745616b8a24082ff7d1d00f5b736`, starting at
 `2026-10-13T21:06:56.682693Z` (23:06:56 Europe/Warsaw). This was the single approved
@@ -207,7 +287,7 @@ hash audit is in [the #82 task evidence](../docs/plans/82-todo.md#task-6-complet
 No answer was normalized, repaired, selected from fallback or combined with an older
 capture.
 
-| Metric | Current baseline |
+| Metric | Historical snapshot baseline |
 | --- | --- |
 | First raw response validity | 29.2% (7/24) |
 | Micro TP / FP / FN | 2 / 2 / 17 |
@@ -249,7 +329,7 @@ are not scored; their truths remain FN and all 24 cases remain in every case-lev
 denominator. The two matched critical truths are SEC-01 and LOG-02; LOG-02 is the
 one severity mismatch, predicted `high` versus truth `critical`.
 
-| Metric | Historical Mistral 2026-10-07 | Current Mistral 2026-10-13 |
+| Metric | Historical Mistral 2026-10-07 | Historical Mistral 2026-10-13 |
 | --- | --- | --- |
 | First-answer validity | 20.8% (5/24) | 29.2% (7/24) |
 | TP / FP / FN | 1 / 1 / 18 | 2 / 2 / 17 |
@@ -463,8 +543,8 @@ on the two selected EUrouter models.
 ### Baseline drift
 
 The static digest includes gateway/settings, production commit retrieval and frozen
-commit-context inputs. The complete 2026-10-13 replacement replays with no static
-or corpus drift on the captured inputs; the old 2026-10-07 drift is historical.
+commit-context inputs. The complete 2026-10-14 PR-prefix replacement replays with no static
+or corpus drift. The 2026-10-13 snapshot and 2026-10-07 captures remain historical.
 Later changes to fingerprinted inputs require another complete separately authorized
 capture. Preserve each original capture's provenance rather than editing a digest
 to hide drift; refresh the entire response set and manifest together.

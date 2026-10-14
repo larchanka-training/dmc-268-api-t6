@@ -348,3 +348,38 @@ byte-identical to the accepted capture, and replay has no input drift.
 - [x] Final main rebase does not change shaping inputs after capture; if it does,
   obtain replacement-run approval and recapture all 24 before claiming completion.
 - [x] Ready for standards/spec review and conventional PR referencing #82.
+
+## PR154 review remediation capture evidence — 2026-10-14
+
+The approved actual-PR-prefix remediation passed independent Standards/Spec
+reviews with zero findings and all four uv source gates. Dedicated PostgreSQL/
+RabbitMQ pytest passed 3,575 tests with zero skips and two existing warnings in
+778.89s; required ReviewOutput/answers coverage is 245 lines/42 branches, 100%.
+Hooks preserved all reviewed source bytes. Main was ancestor at source freeze.
+
+[Run 38560319651, attempt 1](https://github.com/larchanka-training/dmc-268-api-t6/actions/runs/38560319651)
+is the one newly approved paid raw-export capture at source
+`5173792fd2997d5401aed4b5787d536254249a26`, starting `2026-10-14T11:58:17.004986Z`.
+Fast primary `mistral-small-4`, fallback `mistral-small-3.2-24b`; actual bounded
+PR prefixes for five real cases, empty histories for nineteen synthetic cases.
+All 24 first calls contain answers; all gateway statuses accepted, no paid metadata
+errors, `baseline_publishable=true`. All 25 raw files were imported byte-for-byte;
+safe/raw manifests identical, SHA-256 `264dde15691f1fba3bdea64d81276c1d644c7820628e8a29e1a64860b4c94673`.
+Every answer hash/byte count matched the separate safe metadata. Static digest
+`sha256-v1:09c0c809ca0469f300c50c281848edded260fdbe3373d414e294bbb39c012736`, corpus
+`sha256-v1:1ab8ca9a16cc50c357b39e1571c73b1e6674752737c444bd8b58d3f2aab81dfa`. No pinned source or corpus input changed afterward.
+Corpus final validation passed 24/24; two offline reports were byte-identical with
+`warnings=[]`, and the redacted offline report matched the live safe report.
+
+Measured first-answer validity 8/24; TP/FP/FN 2/1/17; precision 2/3, recall 2/19,
+critical recall 2/5, verdict agreement 4/24, two severity mismatches. The previous
+2026-10-13 snapshot metrics/raw bytes remain historical evidence at `76df6d4`;
+no historical digest was rewritten and no later answer replaced a first answer.
+These observations do not establish causal improvement or semantic/final-output
+quality; actual spend/billed tokens/balance are unavailable from the artifacts.
+
+Post-import recorder/replay/provenance regressions passed 204 tests in 44.46s.
+Independent post-import Standards and Spec reviews reported zero findings.
+Final publication, current-head hosted CI and eight review-thread replies are
+tracked in [PR #154](https://github.com/larchanka-training/dmc-268-api-t6/pull/154),
+whose full body records the final head separately from this capture's source SHA.
