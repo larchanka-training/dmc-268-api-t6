@@ -311,6 +311,8 @@ sequenceDiagram
 
 Ответ 202 подтверждает только приём: HMAC и одна вставка квитанции в `webhook_events`, без REST-вызовов; проекцию события и `try_enqueue` выполняет `webhook-worker` после ответа ([WEBHOOK_WORKER.md](WEBHOOK_WORKER.md); `try_enqueue` из доставки реализован в #52). `try_enqueue` — одна функция, вызывается из обоих обработчиков и из sweep; условие проверяется по состоянию, а не по тому, какое событие пришло последним. «CI зелёный» (дефолт по #20): все check suites для `head_sha`, **кроме suite самого App** (`app.id`) и чужих suites в `queued` без единого check run (`latest_check_runs_count = 0`, решение #72 ниже), завершены с `success` / `neutral` / `skipped`, а combined status коммита — `success` или статусов нет; проверяется REST-запросами check-suites и status внутри `try_enqueue`. Свой suite исключён: GitHub создаёт его для App с `checks: write`, а завершает его только наш check-run (§8.3) — иначе условие ждало бы само себя. Если у репозитория нет CI (`wait_for_ci = auto` и ни одного чужого check suite, кроме `queued` без check run, или статуса для `head_sha` за 2 минуты) — прогон стартует по одному лейблу. Это правило реализует sweep раз в 30 с в leader-цикле `worker` (лидер через `pg_advisory_lock`, дефолт по #20): он вызывает тот же `try_enqueue`; реконсилер (раз в 5 мин, §6.4) его не заменяет. После пуша — авто-повтор, пока стоит лейбл `ai-review` (флаг `ai_review_labeled`, Р-10). Полное условие, `wait_for_ci` и жизненный цикл флага — [PIPELINE_SPEC](PIPELINE_SPEC.md) §8.
 
+**Фильтр веток [техлид, 14.10.2026, #149].** `try_enqueue` и sweep фильтр веток репозитория (`branchFilter`, §12) не проверяют: Run создаётся по условию Р-10, а фильтр проверяет RunGuard при каждом claim, в том числе у rerun (§6.7; PIPELINE_SPEC T5). С фильтром сравнивается целевая ветка PR `run.base_ref or pr.target_branch` — то же выражение, что уже использует claim (`lock_for_claim`). Пустой список (по умолчанию) подходит под любую ветку. Синтаксис шаблона: `*` — любые символы, кроме `/`; `**` — любые символы, включая `/`; остальные символы буквальны; правила валидации — §12. Run, целевая ветка которого не подходит ни под один шаблон, завершается `skipped` с `error_code = rule_not_matched`, check-run создаётся сразу `completed/skipped` с текстом причины (PIPELINE_SPEC §6, §7). Фильтр читается при claim, поэтому его изменение действует и на уже поставленные в очередь Run. **Известный пробел, в #149 не исправляется:** смена целевой ветки PR (`pull_request.edited`, §8.2) отбор заново не запускает, а `Run.base_ref` сохраняет прежнюю ветку.
+
 Проекция события одного PR сериализуется session advisory lock
 `SqlAlchemyPullRequestProjectionLock` на AUTOCOMMIT-соединении. Ожидание захвата
 ограничено `lock_timeout = 10s`. Таймаут dispatch квитанции — 240 с
@@ -512,7 +514,7 @@ sequenceDiagram
   end
 ```
 
-Флаг `ai_review_labeled` и CI не проверяются; дальше — как §6.2 (PIPELINE_SPEC T3).
+Флаг `ai_review_labeled` и CI не проверяются; дальше — как §6.2 (PIPELINE_SPEC T3). Фильтр веток репозитория при создании rerun тоже не проверяется и 409 не вызывает: как у Run от вебхука, его проверяет RunGuard при claim (§6.1), и rerun на неподходящую целевую ветку завершается `skipped/rule_not_matched` (PIPELINE_SPEC T5).
 
 ### 6.8 Retry и DLQ
 
@@ -600,6 +602,16 @@ created/added восстанавливают доступность после �
 сохраняя паузу и правила. Legacy `enabled=false` остаётся false: прежнюю причину
 выключения восстановить нельзя, после подтверждения пользователь может явно
 включить ревью. Видимость определяется Workspace/repo-грантами независимо от паузы.
+
+**Автоматическое ревью [техлид, 14.10.2026, #149].** Переключатель автоматического
+ревью в UI — это `enabled`, отдельной колонки нет: UI читает и пишет `enabled`.
+PATCH `enabled` сохраняет только предпочтение, `GET` отдаёт эффективное
+`enabled AND installation_available`, как после #132. Обязательное поле только для
+чтения `installationAvailable` в `Repository` (§12) отличает паузу пользователя
+(`enabled=false`, `installationAvailable=true`) от недоступной установки
+(`installationAvailable=false`). Лейбл `ai-review` по-прежнему нужен на каждом PR
+(Р-10). При `enabled=false` всё как раньше: проекция PR, precheck, replay, sweep и
+RunGuard останавливаются, rerun отвечает 409.
 
 Старые квитанции и tombstones остаются у исходной установки: старое removal не
 отзывает новый доступ, а положительные события удалённой установки не оживляют её.
@@ -768,7 +780,7 @@ head-входы общего conventions cache и публикация raw summa
 
 - `consumer_timeout=45min` не задаётся аргументом очереди: RabbitMQ 4 отклоняет `x-consumer-timeout` для classic-очереди (`PRECONDITION_FAILED`). Это настройка брокера (`consumer_timeout` в `rabbitmq.conf`, по умолчанию 30 мин). Попытка в `running` занимает не больше 18 мин (PIPELINE_SPEC §3), поэтому дефолта хватает; значение 45 мин задаётся конфигурацией брокера при деплое (#35).
 - `budget_paused` (PIPELINE_SPEC §5.3): `workspaces.daily_budget_usd = 0` означает «лимит не задан», проверка остатка идёт только при положительном лимите. Остаток считается по `usage_events.cost_usd` за текущие сутки UTC.
-- `rule_not_matched`: правила отбора PR в схеме пока нет. RunGuard спрашивает порт `RunSelectionRule`, текущая реализация пропускает любой PR; условия отбора подключаются к этому порту отдельной задачей.
+- `rule_not_matched`: порт `RunSelectionRule` реализует фильтр веток репозитория (§6.1, #149). `SqlAlchemyBranchSelectionRule` (`reviews/infrastructure`) читает `run.base_ref`, `code_changes.target_branch` и `repositories.branch_filter` в собственной короткой сессии; RunGuard вызывает порт до транзакции claim. Пустой фильтр подходит под любую ветку; при отсутствующей строке правило отвечает `True` и оставляет решение RunGuard. Worker подключает правило параметром `selection=` в `app/worker.py`.
 - Идемпотентность публикации (Р-5): в тело ревью добавляется скрытый маркер `<!-- ai-review findings_hash=... -->`. Перед `POST /pulls/{n}/reviews` publisher ищет ревью с этим маркером и при находке не публикует повторно.
 - Check-run называется `AI Review`, ссылка на прогон строится из `PORTAL_URL` (`{PORTAL_URL}/runs/{run_id}`); без `PORTAL_URL` ссылки нет.
 - Без `GITHUB_APP_ID` и `GITHUB_APP_PRIVATE_KEY` worker стартует, но diff получить не может: доставленный `review.run/v1` завершает Run как `failed` / `github_forbidden` без retry.
@@ -1250,7 +1262,7 @@ CONTEXT_AND_VERIFICATION_SPEC §5–8, §10.
 |---|---|
 | `Workspace` | арендатор (Р-7); дневной бюджет |
 | `ProviderInstallation` | `provider`, неизменяемый `external_id`, nullable positive BIGINT `account_external_id`, постоянный `deleted_at`, `metadata` (JSON); токены App в БД не сохраняются (installation-токен — только кэш Redis, §8.3; сейчас — в памяти процесса, отступление §7.3); шифрование в MVP не заявлено — OQ-7 |
-| `Repository` | `enabled` (предпочтение), `installation_available` (доступность App), их AND в API и review eligibility; `default_engine`, `wait_for_ci: auto\|always\|never`, `review_event`, `max_comments` |
+| `Repository` | `enabled` (предпочтение), `installation_available` (доступность App), их AND в API и review eligibility; `default_engine`, `wait_for_ci: auto\|always\|never`, `review_event`, `max_comments`; `branch_filter` (массив строк, NOT NULL, по умолчанию `{}` — все ветки, §6.1), `severity_threshold` (PG enum `severity_threshold`: `all\|warning\|critical`, NOT NULL, по умолчанию `all`, PIPELINE_SPEC §9, §11) |
 | `CodeChange` (PR) | `number`, `head_sha`, `base_sha`, `ai_review_labeled` (стоит лейбл `ai-review`, Р-10), `ci_status` (jsonb по sha), `state` |
 | `Run` | `origin_provider_installation_id` (неизменяемая исходная физическая установка; NULL закрывает provider-доступ), `head_sha`, `base_sha`, `state` (§6.4), `engine`, `rule_version_id`, `prompt_version_id`, `attempt`, `available_at`, `lease_until`, `cancel_requested`, `worker_id`, `trigger`, `error_code`, `error_message`; дополнительно закреплённые policy/diff/profile/result bindings. `summaryOnly` — явный итог режима, не вывод из `patch=null` |
 | Контекст | §9; manifest каждого фактического call, source roles/revisions/ranges/hashes и PG evidence excerpts (§10); summary не заменяет доказательства |
@@ -1297,16 +1309,30 @@ null, не 0. У legacy coverage=null. `blocking` = supported critical/high,
 API, VCS и check-run показывают один backend summary из supported findings и scope;
 raw модельная похвала/неподтверждённые дефекты в публичную сводку не переносятся.
 
-Провод — **camelCase** (Ф-10): `defaultEngine`, `waitForCi`, `maxComments`, `reviewEvent`; snake_case — только в БД (и во внутренних сообщениях очереди, §7.2). Префикс `/api` без версии.
+Провод — **camelCase** (Ф-10): `defaultEngine`, `waitForCi`, `maxComments`, `reviewEvent`, `branchFilter`, `severityThreshold`, `installationAvailable`; snake_case — только в БД (и во внутренних сообщениях очереди, §7.2). Префикс `/api` без версии.
 
 | Группа | Операции | Сервис | Главное |
 |---|---|---|---|
 | Прогоны | `GET /api/runs`, `GET /api/runs/{id}`, `…/diff`, `…/files`, `…/comments`, `…/actions`, `…/actions/{index}/response` | `portal-api` | `RunListPage {items,nextCursor}`, семь состояний Р-14; detail = RunSession + verdict/summary/severityCounts/findings/budget и планируемые поля coverage/version выше. `/diff` сохраняет исходный доступный UI patch при ignored/summary-only; `patch=null` означает отсутствие исходного patch, не отсутствие AI-проверки. `/files` старше TTL → `404`/`410`; большие action bodies — через response endpoint |
 | Действия с прогоном | `POST /api/runs/{id}/rerun`, `POST /api/runs/{id}/cancel` | `portal-api` | rerun — новый Run `queued`, `202`; PR закрыт, есть активный Run либо Repository paused/unavailable → `409` (§6.7); cancel идемпотентен |
 | Поток | `GET /api/stream` | `portal-api` | SSE `run.updated {runId, status}` (кадр с `id:`, повтор по `Last-Event-ID`) и `run.step {runId, tool, index, ok, startedAt, durationMs}` (без `id:`, не переигрывается); один поток на вкладку, `fetch` с Bearer; между процессами — PG `LISTEN/NOTIFY` каналов `run_updated` и `run_step` (D12 — дефолт по #20, §6.6, PIPELINE_SPEC §1) |
-| Репозитории | `GET /api/repos`, `GET/PATCH /api/repos/{id}`, `GET /api/repos/{id}/pulls` | `portal-api` | подключение — установкой App (§6.9): `POST /api/repos` и PATCH коллекции нет (D10); `GET /api/repos` → `Repository[]`; PATCH — `enabled`, `defaultEngine`, `waitForCi` (`auto\|always\|never`), `maxComments` (1..10), `reviewEvent` (`COMMENT\|REQUEST_CHANGES`); pulls → `{items: PullRequestSummary[], nextCursor}` с `latestRun {id, status, verdict}` (D11 — дефолт по #20) |
+| Репозитории | `GET /api/repos`, `GET/PATCH /api/repos/{id}`, `GET /api/repos/{id}/pulls` | `portal-api` | подключение — установкой App (§6.9): `POST /api/repos` и PATCH коллекции нет (D10); `GET /api/repos` → `Repository[]`; PATCH — `enabled`, `defaultEngine`, `waitForCi` (`auto\|always\|never`), `maxComments` (1..10), `reviewEvent` (`COMMENT\|REQUEST_CHANGES`), `branchFilter` (до 20 шаблонов по 1–255 символов, `[]` очищает), `severityThreshold` (`all\|warning\|critical`); `Repository` дополнительно отдаёт только для чтения `installationAvailable` (§6.9), в теле PATCH оно → `422`; pulls → `{items: PullRequestSummary[], nextCursor}` с `latestRun {id, status, verdict}` (D11 — дефолт по #20) |
 | Правила, метрики | `GET/POST /api/repos/{id}/rules`, `POST /api/rules/{id}/preview`, `GET /api/metrics/summary` | `portal-api` | после MVP (`x-note` в спеке) |
 | Вход и сессия | `POST /api/auth/github/callback`, `POST /api/auth/refresh`, `GET /api/auth/me`, `POST /api/auth/logout` | `auth-api` | ниже; поток — §6.5 |
+
+**Настройки ревью репозитория [техлид, 14.10.2026, #149].** В `Repository` обязательны
+`branchFilter` (`string[]`), `severityThreshold` (схема `SeverityThreshold`:
+`all | warning | critical`) и `installationAvailable` (boolean, только чтение);
+по умолчанию `branchFilter = []` (все ветки, §6.1) и `severityThreshold = all`
+(PIPELINE_SPEC §11). В `RepositoryUpdate` оба записываемых поля необязательны;
+схема закрыта (`additionalProperties: false`), поэтому `installationAvailable` в теле
+PATCH даёт 422. Шаблон `branchFilter` (синтаксис — §6.1) отклоняется с 422, если
+он пуст, длиннее 255 символов или содержит пробельные либо управляющие символы;
+содержит три `*` подряд или больше; содержит любой из `? [ ] { } ! \ ~ ^ :`;
+содержит `..` или `//` либо его сегмент начинается с `.`; начинается с `/` или `-`
+либо заканчивается на `/`, `.` или `.lock`; равен `@`. Список — не больше 20
+шаблонов, без повторов. Zod-схема UI делает три поля ответа обязательными, поэтому
+API с ними выкатывается раньше, чем мёржится соответствующий PR UI.
 
 **Контракт авторизации** (D4 — решение техлида по #20; хранение access в памяти, подпись в `auth-api` с проверкой публичным ключом и граница Workspace — дефолт по #20):
 
