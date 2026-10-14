@@ -120,7 +120,7 @@ Application зависит от узких интерфейсов, сгрупп�
 | `ContextProvider` | `reviews` | собирает ограниченный и трассируемый `ContextPayload` для конкретного `head_sha` |
 | `LlmGateway` | `reviews` | structured результат анализа неизменяемого контекста |
 | `GraphRetriever` | `reviews` | кандидаты графа символов RAG v1 по `repository_id`; реализация — в `code_index.infrastructure` |
-| `CodeIndexPurger` | `repositories` | немедленное удаление индекса репозитория при снятии доступа и выключении RAG; реализация — в `code_index.infrastructure` |
+| `CodeIndexPurger` | `repositories` | логическая очистка индекса репозитория при снятии доступа и выключении RAG на сессии и в транзакции вызывающего use case; реализация — в `code_index.infrastructure` |
 | `PaymentGateway` | `billing` | создание и подтверждение оплаты |
 | `UnitOfWork` | общий контракт; расширение в использующем модуле | граница транзакции и доступ к интерфейсам repositories |
 | `Clock`, `IdGenerator` | `common` | детерминированные тесты и технические значения |
@@ -139,13 +139,15 @@ Application зависит от узких интерфейсов, сгрупп�
 
 Прежнее утверждение «RAG не требует новой ORM-модели и миграции» больше не
 действует: индекс хранится в PostgreSQL. Таблицами индекса (`code_index_states` —
-одна строка на репозиторий, файлы, символы, рёбра; `repository_id NOT NULL` на
-каждой строке, методов repositories без `repository_id` нет) и индексатором
+одна строка на репозиторий, файлы, символы, рёбра, записи импортов;
+`repository_id NOT NULL` и `generation` на каждой строке, методов repositories без
+`repository_id` нет) и индексатором
 владеет новый модуль `code_index`; DDL и миграции — #141. Процесс индексатора —
 отдельный потребитель очереди `index.repo` (exchange `code_index`) со своим каналом
 и prefetch в процессе `worker`, не в `webhook-worker` и не в потребителе
 `review.run`; вынос в отдельный сервис того же образа контракт не меняет. Сверку с
-HEAD default branch и TTL-очистку выполняют leader-задачи `WorkerProcess.leader_tick`.
+HEAD default branch, TTL-очистку и физическое удаление строк порциями (сборку
+мусора) выполняют leader-задачи `WorkerProcess.leader_tick`.
 Порты принадлежат потребителям: `GraphRetriever` — `reviews`, `CodeIndexPurger` —
 `repositories`; экстрактор и резолвер AST v1 переиспользуются, а не дублируются.
 

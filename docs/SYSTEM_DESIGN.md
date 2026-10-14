@@ -194,7 +194,7 @@ flowchart LR
     F --> W[WholeFileLoader<br/>L3 при size ≤ лимита]
     F --> A[ASTIndexer<br/>L4 tree-sitter: импорты, символы]
     S & W & A --> B[BudgetAllocator<br/>приоритеты файлов, лимит токенов]
-    R[RagContextProvider<br/>RAG v1: кандидаты графа символов] -. до BudgetAllocator .-> B
+    R[RagContextProvider<br/>RAG v1: кандидаты графа символов] -. слот после L4, до L2/L3 .-> B
   end
 
   B --> P[PromptBuilder<br/>раздельные роли источников,<br/>manifest после сокращения]
@@ -1187,7 +1187,7 @@ class ContextPayload(BaseModel):          # сущность роли 6
     pr: PrMeta
     conventions: RepoConventions
     files: list[FileContext]
-    retrieved: list                       # RAG v1: блоки кандидатов графа; пуст без RAG, форма — #144
+    retrieved: list[RetrievedBlock]       # RAG v1: блоки кандидатов графа на ревизии PR; пуст без RAG, поля — #144
     omitted_files: list[str]              # только разрешённые непоместившиеся пути
     excluded_files_count: int             # исключённые пути модели не перечисляются
     budget: dict                          # {"limit": 60000, "used": 48210, "engine": "fast"}
@@ -1232,7 +1232,7 @@ verifier. Исчерпание бюджета не разрешает публи
 | Контекст и доказательства | `call_id`/manifest_id + workspace-scoped content digest | PG: manifest и deduplicated точные excerpts; полный rendered prompt не обязателен | до удаления Workspace | аудит не зависит от TTL Redis |
 | Результат прогона | `run_id UNIQUE` + final result digest и snapshot bindings | PostgreSQL | immutable после publishing | retry доставки читает сохранённый итог; между head/run результаты не переносятся |
 | Промпт у провайдера | стабильные версионированные блоки с раздельными source roles | prompt caching провайдера | зависит от provider profile | кэш не повышает доверие документа/конвенций |
-| Индекс графа RAG v1 (Р-13) | `repository_id` на каждой строке; символ — `(repository_id, path, qualified_name, kind, disambiguator)` | PostgreSQL, модуль `code_index`: `code_index_states`, файлы, символы, рёбра | 30 дней с `last_used_at` (чтение при ревью или успешное обновление), настраивается, удаляет leader-задача; немедленно — `installation_repositories.removed`, `installation.deleted`, выключение тумблера | обратные рёбра для кандидатов RAG; текст читается из кэша блобов на ревизии PR |
+| Индекс графа RAG v1 (Р-13) | `repository_id` на каждой строке; символ — `(repository_id, path, qualified_name, kind, disambiguator)` | PostgreSQL, модуль `code_index`: `code_index_states`, файлы, символы, рёбра, записи импортов | 30 дней с `last_used_at` (сдвигает только чтение при ревью, включение задаёт начальное значение), настраивается, очищает leader-задача; немедленно нечитаем после `installation_repositories.removed`, `installation.deleted`, выключения тумблера; физическое удаление — не позже чем через 1 ч | обратные рёбра для кандидатов RAG; текст читается из кэша блобов на ревизии PR |
 
 Ключ `repo-conventions-v2` включает repository_id, policy_base_sha, digest всех
 окончательных rendered messages и показанного base-tree, каждую source entry
@@ -1257,9 +1257,12 @@ sha, рёбра; тела, литералы, комментарии и docstring
 блобов до 7 дней; кроме того, сигнатура кандидата всё равно заново извлекается из
 blob ревизии PR, и сохранённая копия с default branch в prompt не попала бы.
 Правило 7 дней не меняется: текст для RAG читается из того же кэша блобов.
-Удаление — явный DELETE по `repository_id` в одной транзакции с повышением
-поколения индекса; FK `ON DELETE CASCADE` — только страховка. Методов repositories
-индекса без `repository_id` нет.
+Удаление двухфазное: в транзакции вызывающего (вместе с отметкой доставки вебхука
+или сменой настроек) поколение индекса повышается, статус становится `empty`, а
+публикация снимается — все строки сразу нечитаемы; физический DELETE по
+`repository_id` выполняет порциями leader-задача сборки мусора не позже чем через
+1 ч, чтобы транзакция вебхука не держала долгую блокировку. FK `ON DELETE CASCADE`
+— только страховка. Методов repositories индекса без `repository_id` нет.
 
 Тела ответов инструментов больше 64 КБ лежат в отдельной таблице PostgreSQL, на строку которой указывает `RunAction.response_ref` (PIPELINE_SPEC §2; таблица и миграция — #34); payload вебхуков — JSONB в `webhook_events` (колонка `payload_s3_ref TEXT nullable` сохранена в таблице с CHECK-ограничением `payload IS NOT NULL OR payload_s3_ref IS NOT NULL` для будущего выноса в S3, миграция 20260928_0012). Это строки PostgreSQL: тела ответов инструментов хранятся до удаления Workspace и удаляются каскадом вместе со снимками, manifests, evidence и `RunAction`. Квитанции `webhook_events` (`WebhookEvent`) живут короче: завершённые (спроецированные, упавшие или отложенные навсегда) удаляются через 30 дней после завершения, чистку раз в час запускает `webhook-worker` ([WEBHOOK_WORKER.md](WEBHOOK_WORKER.md), Retention).
 
@@ -1382,7 +1385,7 @@ API с ними выкатывается раньше, чем мёржится �
 | Стоимость | fast $0.50, deep $3 на все попытки; до вызова учитываются usage + его оценка + резерв обязательных downstream стадий. Общие 4 вызова/попытку, 12/run, ≤3 попыток. Без завершённого verifier/final result публикация запрещена в обоих движках; verifier budget/deadline exhaustion → failed. Дневной бюджет Workspace → fast, затем skipped | Р-8, §5, PIPELINE_SPEC §4.5 |
 | Качество | Ориентиры Precision ≥85 %, Critical Recall ≥75 %, Hallucination <3 %. Raw review и final pipeline измеряются раздельно по независимой ручной разметке; verifier rejection/unsupported acceptance, insufficient/partial/failure и стоимость требуют собственного baseline | TEST_PLAN §3, §5 |
 | Безопасность | HMAC на вебхуках; секреты только через env из CI (роль 3); токены GitHub и LLM не попадают в сандбокс; сандбокс `--network=none`, non-root, read-only rootfs; PG/RabbitMQ/Redis — только внутренняя сеть | [TEST_PLAN 2.2](TEST_PLAN.md#22-webhook-и-триггер-р-9-р-10), [2.4](TEST_PLAN.md#24-sandboxengine-р-4-фаза-3), [2.6](TEST_PLAN.md#26-инфраструктура-и-безопасность) |
-| Данные клиента | блобы ≤ 7 дней в кэше; диффы, контексты и тела ответов инструментов — до удаления Workspace, payload вебхуков — 30 дней после завершения квитанции; индекс RAG — производные метаданные кода без текста и сигнатур (ключ `repository_id`), 30 дней без использования, немедленное удаление по `installation_repositories.removed`, `installation.deleted` и выключению тумблера; архив дерева при индексации разбирается в памяти и не хранится сверх задачи; ни один прогон не логирует содержимое файлов в stdout | §10, [ADR 0001 §4](adr/0001-graph-rag-v1.md#4-хранение-очистка-и-изоляция) |
+| Данные клиента | блобы ≤ 7 дней в кэше; диффы, контексты и тела ответов инструментов — до удаления Workspace, payload вебхуков — 30 дней после завершения квитанции; индекс RAG — производные метаданные кода без текста и сигнатур (ключ `repository_id`), 30 дней без использования в ревью; после `installation_repositories.removed`, `installation.deleted` и выключения тумблера сразу нечитаем, физически удаляется не позже чем через 1 ч; архив дерева при индексации разбирается в памяти и не хранится сверх задачи; ни один прогон не логирует содержимое файлов в stdout | §10, [ADR 0001 §4](adr/0001-graph-rag-v1.md#4-хранение-очистка-и-изоляция) |
 | Наблюдаемость | структурированные логи (JSON) с `run_id` во всех контейнерах; метрики: глубина очередей, длительность по этапам, `X-RateLimit-Remaining`, стоимость; self-hosted стек — отдельная задача | |
 
 **Риск схлопывания.** Реализованная в #52 проверка head перед POST сохраняется;
