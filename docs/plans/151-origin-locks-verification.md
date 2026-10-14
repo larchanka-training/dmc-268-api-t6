@@ -116,9 +116,55 @@ including Ruff lint/format and mypy. Exactly four production files and these
 three separate documents are committed; no first-PR diff, tests, dependency or
 migration is included.
 
-The PR was created as Draft against main to run remote CI, with no reviewers
-assigned as explicitly requested. The coordinator tracks the final documentation
-push's CI and marks Ready after all relevant checks pass. This publication entry
-and the plan/todo URL updates form a separate documentation-only commit; reviewed
-production source and its recorded gates remain unchanged. Human approval on the
+The PR was initially created as Draft against main, with no reviewers assigned as
+requested. On 2026-10-14 it was Ready and all applicable CI checks were green on
+historical head `205f1a6ab8ed405e0fe56df7bf63cb7be40519b9`. That observation does
+not establish CI status for the review follow-up head. Human approval on the
 current head, merge, and issue acceptance remain external Before merge steps.
+
+## PR #153 review follow-up (2026-10-14)
+
+The helper docstring now requires the caller's select to target the same
+`Run.id` as `run_id` and contain no existing lock clause; the helper executes it
+with `FOR UPDATE OF runs`. Executable SQL, caller selects and guards are unchanged.
+
+Independent reviewer [ax yi (`axyi`)](https://github.com/larchanka-training/dmc-268-api-t6/pull/153#pullrequestreview-5516285256)
+reported on historical head `205f1a6` that moving Repository before installation
+produced genuine PostgreSQL `40P01` deadlocks in the claim and diff rebind tests,
+plus two watcher timeouts. This supplements the original Run-first proof above.
+It is reviewer evidence: no command, logs, timing or environment detail beyond
+the review is inferred, and this follow-up did not rerun that mutation. No source
+mutation was made in this round.
+
+The same review reported 3425 full tests passed (613 integration), zero skips,
+and 256 local eight-file PostgreSQL cases passed. These are separate reviewer
+observations, not the developer's updated-run results.
+
+Optional concurrency cases for `finish`, `requeue`, `complete_publication`, and
+`save_context_payload` are deferred as a separate follow-up associated with
+[#106](https://github.com/larchanka-training/dmc-268-api-t6/issues/106), as suggested
+in the PR review; the exact gaps are tracked here, without changing #106.
+This behavior-preserving refactor retains their selects/guards and existing
+public behavior regressions; extending the concurrency matrix is a separate
+focused task, beyond #151 P3-5's acceptance criteria.
+
+Follow-up required gates on this working tree: `uv run ruff check .` passed;
+`uv run ruff format --check .` reports 434 files formatted; `uv run mypy .`
+reports no issues in 431 source files. Full `uv run pytest` with dedicated
+PostgreSQL 17/RabbitMQ and exclusive broker use completed: **3425 passed, zero
+skipped**, 2 existing third-party deprecation warnings, **728.41s**. This is the
+follow-up developer's run, separate from the historical/reviewer results above.
+`git diff --check` is clean; comparison against original PR head `205f1a6`
+confirms identical executable helper AST and an empty tests diff. Post-suite
+remaining non-system/non-public fixture schemas: **0**.
+
+Fresh independent Standards/Spec reviews both report zero findings on 2026-10-14
+against base `c1d8f59`, covering the original PR diff and stable docstring-only
+production correction plus documentation. Subsequent evidence bookkeeping does
+not change executable source. Published-head CI remains a separate observation.
+
+Publication receipt: the publisher confirmed unchanged current main `c1d8f59`
+and rebased the detached PR checkout before publication. The resulting SHA and
+actual revised-head CI observation are recorded in the updated PR body and the
+single four-item author reply; they are not inferred from historical CI or local
+gates. Human approval, merge and issue acceptance remain external.

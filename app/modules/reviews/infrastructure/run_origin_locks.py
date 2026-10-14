@@ -15,7 +15,11 @@ from app.modules.reviews.infrastructure.models import CodeChange, Run
 async def lock_run_origin_row[RowT: tuple[Any, ...]](
     session: AsyncSession, run_id: UUID, statement: Select[RowT]
 ) -> Row[RowT] | None:
-    """Keep rebind's installation -> Repository -> Run order in the caller's transaction."""
+    """Keep rebind's installation -> Repository -> Run order in the caller's transaction.
+
+    The caller must constrain statement to the same Run.id as run_id and supply
+    no existing lock clause. The helper executes it with FOR UPDATE OF runs.
+    """
     await session.execute(
         select(ProviderInstallation.id)
         .join(Run, Run.origin_provider_installation_id == ProviderInstallation.id)

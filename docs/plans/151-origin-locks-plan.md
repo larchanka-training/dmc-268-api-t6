@@ -12,7 +12,9 @@ F1 and F2 are implemented and verified: 256 focused and 3425 full tests pass
 with zero skips; static gates are green. Fresh Standards/Spec review has zero
 findings. Published independently as PR #153:
 https://github.com/larchanka-training/dmc-268-api-t6/pull/153.
-CI/Ready status is tracked by the coordinator; no reviewers are assigned.
+PR #153 was Ready and all applicable CI checks were green on historical head
+`205f1a6ab8ed405e0fe56df7bf63cb7be40519b9` on 2026-10-14. This records that head
+only; the review follow-up must verify and report its own final head separately.
 
 ## Design and contracts
 
@@ -53,3 +55,34 @@ Read-only open-PR file check on 2026-10-13 found no overlap with #152, #148, #13
 or #124 for the four production files and these separate plan documents. No
 coordination comment is needed. Commit/push/PR creation are publisher tasks.
 Refs #151; no closing keyword or Development link. No merge in this task.
+
+## PR #153 review follow-up (2026-10-14)
+
+The user authorized addressing the four P3 comments from reviewer
+[ax yi (`axyi`)](https://github.com/larchanka-training/dmc-268-api-t6/pull/153#pullrequestreview-5516285256)
+under agent-loop. Reuse this plan and todo; preserve all original proof provenance in
+the verification record. The follow-up is a helper docstring and evidence/tracking
+correction, with unchanged SQL, caller behavior, dependencies and test scope.
+
+1. R1: document same-`Run.id` and no-existing-lock-clause caller preconditions,
+   plus `FOR UPDATE OF runs`, in `run_origin_locks.py`. Inspect the docstring-only
+   production diff; add no implementation-mirroring tests.
+2. R2: retain original proof and attribute the reviewer's Repository-first mutation
+   (`40P01` in claim/diff, two watcher timeouts) in verification.md. A developer
+   rerun is optional and must be separate evidence with source restored in
+   `finally`. Track the four optional concurrency gaps here as a follow-up
+   associated with #106, without claiming its issue body was updated. Correct stale
+   publication wording using the historical head above.
+3. R3 (after R1/R2): run `uv run ruff check .`, `uv run ruff format --check .`,
+   `uv run mypy .`, and `uv run pytest` with real PostgreSQL/RabbitMQ and zero
+   skips; record actual results. Fresh Standards/Spec review must have no
+   unresolved findings. Confirm proof provenance and unchanged executable code.
+4. Publisher (after R3): update existing PR #153 and reply once to all four P3s
+   with the revised SHA and actual CI status. No review threads exist. Current-head
+   human approval, merge and issue acceptance remain external.
+
+R1–R4 are complete in the publication bundle. The publisher confirmed current
+`main` remains `c1d8f59d9ff3f332a3595857dbe612115ad559e8` and the detached checkout
+is up to date after rebase. Actual publication SHA and observed revised-head CI
+are recorded in the PR body and the single author reply; CI completion and
+current-head human approval remain external before-merge requirements.
