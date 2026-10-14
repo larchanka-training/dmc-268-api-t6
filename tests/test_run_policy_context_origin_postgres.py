@@ -377,7 +377,6 @@ def test_worker_composition_passes_claimed_checkpoint_to_context_stage(
         calls: list[str] = []
         stage_claims: list[tuple[object, ...]] = []
         published: list[ReviewPublishPointer] = []
-        stopped_at: int | None = None
 
         class Queue:
             async def publish_confirmed(
@@ -415,7 +414,6 @@ def test_worker_composition_passes_claimed_checkpoint_to_context_stage(
                 }
 
         async def http(request: httpx.Request) -> httpx.Response:
-            nonlocal stopped_at
             path = request.url.path
             calls.append(request.method + " " + path)
             # Independent connections must acquire all three locks during every HTTP call.
@@ -438,7 +436,6 @@ def test_worker_composition_passes_claimed_checkpoint_to_context_stage(
                 if sha == _BASE:
                     if origin != "active":
                         await retire(factory)
-                        stopped_at = len(calls)
                     tree = [
                         {"path": ".review", "mode": "040000", "type": "tree", "sha": _REVIEW},
                         {"path": "AGENTS.md", "mode": "100644", "type": "blob", "sha": _AGENTS},
@@ -568,10 +565,10 @@ def test_worker_composition_passes_claimed_checkpoint_to_context_stage(
                 if "access_tokens" in call
             )
             if origin != "active":
-                assert stopped_at is not None
-                assert len(calls) == stopped_at, (
-                    "context-stage checkpoint allowed a request after retirement"
-                )
+                assert calls == [
+                    "POST /app/installations/17/access_tokens",
+                    f"GET /repos/octo/a/git/trees/{_BASE}",
+                ], "context-stage checkpoint allowed a request after retirement"
                 assert model.review_calls == 0
                 assert published == []
             else:
