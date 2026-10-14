@@ -7,7 +7,7 @@ from uuid import UUID
 from sqlalchemy import ColumnElement, select, true, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.common.infrastructure.db.enums import Engine, ReviewEvent, WaitForCi
+from app.common.infrastructure.db.enums import Engine, ReviewEvent, SeverityThreshold, WaitForCi
 from app.common.infrastructure.db.unit_of_work import SqlAlchemyUnitOfWork
 from app.modules.auth.application.scope import AuthScope
 from app.modules.repositories.application.repository_settings import (
@@ -30,6 +30,9 @@ def _to_settings(repository: Repository) -> RepositorySettings:
         max_comments=repository.max_comments,
         # The API spells GitHub's review event; the PG enum stores it in lower case.
         review_event=repository.review_event.value.upper(),
+        branch_filter=tuple(repository.branch_filter),
+        severity_threshold=repository.severity_threshold.value,
+        installation_available=repository.installation_available,
     )
 
 
@@ -77,6 +80,10 @@ class SqlAlchemyRepositorySettingsStore:
             values["max_comments"] = change.max_comments
         if change.review_event is not None:
             values["review_event"] = ReviewEvent(change.review_event.lower())
+        if change.branch_filter is not None:
+            values["branch_filter"] = list(change.branch_filter)
+        if change.severity_threshold is not None:
+            values["severity_threshold"] = SeverityThreshold(change.severity_threshold)
         row = await self._session.scalar(
             update(Repository)
             .where(Repository.id == repository_id, self._visible())

@@ -19,6 +19,12 @@ class ReviewEvent(StrEnum):
     REQUEST_CHANGES = "request_changes"
 
 
+class SeverityThreshold(StrEnum):
+    ALL = "all"
+    WARNING = "warning"
+    CRITICAL = "critical"
+
+
 class CodeChangeState(StrEnum):
     OPEN = "open"
     CLOSED = "closed"

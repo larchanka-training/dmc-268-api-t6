@@ -17,6 +17,7 @@ from app.common.infrastructure.db.enums import (
     PaymentStatus,
     ReviewEvent,
     RunState,
+    SeverityThreshold,
     WaitForCi,
 )
 
@@ -30,6 +31,7 @@ def pg_enum(
         Engine
         | WaitForCi
         | ReviewEvent
+        | SeverityThreshold
         | CodeChangeState
         | RunState
         | FindingSeverity

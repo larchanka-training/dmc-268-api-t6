@@ -1,7 +1,7 @@
 {
   "provenance": {
     "repository": "https://github.com/larchanka-training/dmc-268-ui-t6",
-    "commit": "df07e790ef95b91e92b8b071e4283a1bac89eaa7",
+    "commit": "3d3071ed4b801eab836962fa83131ab131cac9c1",
     "generator": "z.toJSONSchema (Zod 4)",
     "command": "DMC_268_UI_DIR=<ui checkout after pnpm install> node tests/generate_ui_zod_contracts.mjs"
   },
@@ -1121,6 +1121,26 @@
             "COMMENT",
             "REQUEST_CHANGES"
           ]
+        },
+        "branchFilter": {
+          "maxItems": 20,
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 255
+          }
+        },
+        "severityThreshold": {
+          "type": "string",
+          "enum": [
+            "all",
+            "warning",
+            "critical"
+          ]
+        },
+        "installationAvailable": {
+          "type": "boolean"
         }
       },
       "required": [
@@ -1132,7 +1152,10 @@
         "defaultEngine",
         "waitForCi",
         "maxComments",
-        "reviewEvent"
+        "reviewEvent",
+        "branchFilter",
+        "severityThreshold",
+        "installationAvailable"
       ],
       "additionalProperties": false
     },
@@ -1167,6 +1190,23 @@
           "enum": [
             "COMMENT",
             "REQUEST_CHANGES"
+          ]
+        },
+        "branchFilter": {
+          "maxItems": 20,
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 255
+          }
+        },
+        "severityThreshold": {
+          "type": "string",
+          "enum": [
+            "all",
+            "warning",
+            "critical"
           ]
         }
       },
