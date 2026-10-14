@@ -202,7 +202,7 @@ def test_invalid_review_settings_are_rejected_without_a_write(env: Env) -> None:
         rejected = {
             name: client.patch(
                 url, content=json.dumps(body), headers={"Content-Type": "application/json"}
-            ).status_code
+            )
             for name, body in INVALID_REVIEW_SETTINGS.items()
         }
         stored_row = tuple(
@@ -215,7 +215,14 @@ def test_invalid_review_settings_are_rejected_without_a_write(env: Env) -> None:
         )
 
     assert accepted.status_code == 200
-    assert rejected == dict.fromkeys(INVALID_REVIEW_SETTINGS, 422)
+    assert {name: response.status_code for name, response in rejected.items()} == dict.fromkeys(
+        INVALID_REVIEW_SETTINGS, 422
+    )
+    # The ASCII-escaped fallback body keeps FastAPI's default shape (app/main.py).
+    assert rejected["branch-filter-lone-surrogate"].json()["detail"][0]["loc"] == [
+        "body",
+        "branchFilter",
+    ]
     assert stored_row == (["main"], "warning", True)
 
 

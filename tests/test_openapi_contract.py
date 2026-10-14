@@ -1001,10 +1001,10 @@ def test_repository_review_settings_round_trip_and_clear(client: TestClient) -> 
 
 
 @pytest.mark.parametrize(
-    "body", INVALID_REVIEW_SETTINGS.values(), ids=INVALID_REVIEW_SETTINGS.keys()
+    ("name", "body"), INVALID_REVIEW_SETTINGS.items(), ids=INVALID_REVIEW_SETTINGS.keys()
 )
 def test_repository_update_rejects_invalid_review_settings(
-    client: TestClient, body: dict[str, object]
+    client: TestClient, name: str, body: dict[str, object]
 ) -> None:
     url = f"/api/repos/{REPOSITORY_ID}"
 
@@ -1015,6 +1015,9 @@ def test_repository_update_rejects_invalid_review_settings(
     stored = client.get(url).json()
 
     assert rejected.status_code == 422
+    if name == "branch-filter-lone-surrogate":
+        # The ASCII-escaped fallback body keeps FastAPI's default shape (app/main.py).
+        assert rejected.json()["detail"][0]["loc"] == ["body", "branchFilter"]
     assert (stored["branchFilter"], stored["severityThreshold"]) == ([], "all")
 
 

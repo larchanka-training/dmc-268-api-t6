@@ -657,7 +657,7 @@ class SqlAlchemyReviewOutputRepository:
         ).one_or_none()
         if row is None:
             return None
-        _, _, rules, max_comments, severity_threshold = row._tuple()
+        _, _, rules, max_comments, severity_threshold = row
         snapshots = (
             await self._session.execute(
                 select(CodeChangeDiff.filename, CodeChangeDiff.patch).where(
