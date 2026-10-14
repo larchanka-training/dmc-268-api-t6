@@ -45,6 +45,7 @@ from tests.portal_postgres import (
     portal_schema,
     scalar,
 )
+from tests.test_openapi_contract import INVALID_REVIEW_SETTINGS
 
 
 @pytest.fixture
@@ -119,14 +120,17 @@ def test_unavailable_repository_reports_effective_disabled_but_keeps_preference_
         asyncio.run(make_unavailable())
         detail = client.get(f"/api/repos/{REPO_A}")
         assert detail.status_code == 200
-        assert detail.json()["enabled"] is False
-        assert client.get("/api/repos").json()[0]["enabled"] is False
-        assert (
-            client.patch(f"/api/repos/{REPO_A}", json={"enabled": False}).json()["enabled"] is False
-        )
+        assert (detail.json()["enabled"], detail.json()["installationAvailable"]) == (False, False)
+        listed = client.get("/api/repos").json()[0]
+        assert (listed["enabled"], listed["installationAvailable"]) == (False, False)
+        paused = client.patch(f"/api/repos/{REPO_A}", json={"enabled": False}).json()
+        assert (paused["enabled"], paused["installationAvailable"]) == (False, False)
         resumed = client.patch(f"/api/repos/{REPO_A}", json={"enabled": True})
         assert resumed.status_code == 200
-        assert resumed.json()["enabled"] is False
+        assert (resumed.json()["enabled"], resumed.json()["installationAvailable"]) == (
+            False,
+            False,
+        )
         assert tuple(
             scalar(
                 factory,
@@ -140,6 +144,75 @@ def test_unavailable_repository_reports_effective_disabled_but_keeps_preference_
                 "SELECT count(*) FROM github_user_repository_access WHERE github_user_id=42",
             )
         ) == (2,)
+
+
+@pytest.mark.integration
+def test_review_settings_default_persist_and_clear(env: Env) -> None:
+    url = f"/api/repos/{REPO_A}"
+    stored_sql = "SELECT branch_filter, severity_threshold FROM repositories WHERE id=:id"
+    with api(env, AuthScope(42, (WS_A,))) as (client, factory):
+        defaults = client.get(url).json()
+        listed = client.get("/api/repos").json()[0]
+        patched = client.patch(
+            url, json={"branchFilter": ["main", "release/*"], "severityThreshold": "warning"}
+        )
+        stored = client.get(url).json()
+        stored_row = tuple(scalar(factory, stored_sql, id=REPO_A))
+        threshold_only = client.patch(url, json={"severityThreshold": "critical"}).json()
+        cleared = client.patch(url, json={"branchFilter": []})
+        cleared_row = tuple(scalar(factory, stored_sql, id=REPO_A))
+
+    for repository in (defaults, listed):
+        assert (
+            repository["branchFilter"],
+            repository["severityThreshold"],
+            repository["installationAvailable"],
+        ) == ([], "all", True)
+    assert patched.status_code == 200
+    assert (patched.json()["branchFilter"], patched.json()["severityThreshold"]) == (
+        ["main", "release/*"],
+        "warning",
+    )
+    assert (stored["branchFilter"], stored["severityThreshold"]) == (
+        ["main", "release/*"],
+        "warning",
+    )
+    assert stored_row == (["main", "release/*"], "warning")
+    assert (threshold_only["branchFilter"], threshold_only["severityThreshold"]) == (
+        ["main", "release/*"],
+        "critical",
+    )
+    assert cleared.status_code == 200
+    assert (cleared.json()["branchFilter"], cleared.json()["severityThreshold"]) == (
+        [],
+        "critical",
+    )
+    assert cleared_row == ([], "critical")
+
+
+@pytest.mark.integration
+def test_invalid_review_settings_are_rejected_without_a_write(env: Env) -> None:
+    url = f"/api/repos/{REPO_A}"
+    with api(env, AuthScope(42, (WS_A,))) as (client, factory):
+        accepted = client.patch(
+            url, json={"branchFilter": ["main"], "severityThreshold": "warning"}
+        )
+        rejected = {
+            name: client.patch(url, json=body).status_code
+            for name, body in INVALID_REVIEW_SETTINGS.items()
+        }
+        stored_row = tuple(
+            scalar(
+                factory,
+                "SELECT branch_filter, severity_threshold, installation_available "
+                "FROM repositories WHERE id=:id",
+                id=REPO_A,
+            )
+        )
+
+    assert accepted.status_code == 200
+    assert rejected == dict.fromkeys(INVALID_REVIEW_SETTINGS, 422)
+    assert stored_row == (["main"], "warning", True)
 
 
 @pytest.mark.integration

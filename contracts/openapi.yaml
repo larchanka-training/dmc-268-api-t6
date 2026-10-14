@@ -898,6 +898,13 @@ components:
       type: string
       description: GitHub review event used when publishing a `blocking` review.
       enum: [COMMENT, REQUEST_CHANGES]
+    SeverityThreshold:
+      type: string
+      description: >-
+        Lowest severity group a review publishes (PIPELINE_SPEC §9, §11): `all` - every
+        severity, `warning` - critical, high, medium and low, `critical` - critical and high.
+        Findings below it are not published and do not count towards the verdict. Default `all`.
+      enum: [all, warning, critical]
     PullRequestRef:
       type: object
       required: [repo, number, title, url, headSha]
@@ -1384,6 +1391,9 @@ components:
         - waitForCi
         - maxComments
         - reviewEvent
+        - branchFilter
+        - severityThreshold
+        - installationAvailable
       properties:
         id:
           type: string
@@ -1410,6 +1420,26 @@ components:
           maximum: 10
         reviewEvent:
           $ref: "#/components/schemas/ReviewEvent"
+        branchFilter:
+          type: array
+          description: >-
+            Target-branch patterns a pull request must match to be reviewed (SD §6.1); `[]`, the
+            default, matches every branch. `*` matches any characters except `/`, `**` any
+            characters including `/`; every other character is literal.
+          maxItems: 20
+          items:
+            type: string
+            minLength: 1
+            maxLength: 255
+        severityThreshold:
+          $ref: "#/components/schemas/SeverityThreshold"
+        installationAvailable:
+          type: boolean
+          readOnly: true
+          description: >-
+            Whether the GitHub App installation can still access the repository (SD §6.9).
+            `enabled` is the stored preference AND this value, so `enabled: false` with
+            `installationAvailable: true` is a pause by the user. Not accepted by `PATCH`.
       additionalProperties: false
     RepositoryUpdate:
       type: object
@@ -1428,6 +1458,22 @@ components:
           maximum: 10
         reviewEvent:
           $ref: "#/components/schemas/ReviewEvent"
+        branchFilter:
+          type: array
+          description: >-
+            Replaces the target-branch patterns; `[]` clears them, so every branch matches.
+            Syntax as in `Repository.branchFilter`. Rejected with 422: more than 20 patterns,
+            a repeated pattern, or a pattern that is empty, longer than 255 characters, holds
+            whitespace or a control character, holds `***`, any of `? [ ] { } ! \ ~ ^ :`, `..`
+            or `//`, has a segment starting with `.`, starts with `/` or `-`, ends with `/`, `.`
+            or `.lock`, or is `@`.
+          maxItems: 20
+          items:
+            type: string
+            minLength: 1
+            maxLength: 255
+        severityThreshold:
+          $ref: "#/components/schemas/SeverityThreshold"
       additionalProperties: false
     LatestRun:
       type: object

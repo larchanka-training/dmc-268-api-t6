@@ -52,6 +52,7 @@ from app.modules.reviews.application.review_output import Category, Severity
 from app.modules.reviews.application.run_events import RunUpdated
 from app.modules.reviews.application.try_enqueue_webhook_run import PendingRunMessage
 from tests.portal_test_client import authenticated_test_client
+from tests.test_branch_patterns import INVALID_BRANCH_PATTERNS
 from tests.test_ui_zod_contracts import (
     RUN_ID,
     RUN_ORIGIN_CASES,
@@ -89,6 +90,20 @@ EXPIRED_PATH = "expired.py"
 RUN_URL = f"/api/runs/{RUN_ID}"
 REPOSITORY_ID = UUID("22222222-2222-4222-8222-222222222222")
 CONFLICT_RUN_ID = UUID("88888888-8888-4888-8888-888888888888")
+# PATCH /api/repos/{id} bodies the API rejects with 422 (#149); the PostgreSQL API test reuses them.
+INVALID_REVIEW_SETTINGS: dict[str, dict[str, object]] = {
+    **{
+        f"branch-filter-{name}": {"branchFilter": [pattern]}
+        for name, pattern in INVALID_BRANCH_PATTERNS.items()
+    },
+    "branch-filter-21-patterns": {"branchFilter": [f"release/{number}" for number in range(21)]},
+    "branch-filter-duplicates": {"branchFilter": ["main", "main"]},
+    "branch-filter-null": {"branchFilter": None},
+    "branch-filter-not-a-list": {"branchFilter": "main"},
+    "severity-threshold-unknown": {"severityThreshold": "high"},
+    "severity-threshold-null": {"severityThreshold": None},
+    "installation-available": {"installationAvailable": True},
+}
 
 
 @cache
@@ -251,6 +266,9 @@ REPOSITORY = RepositorySettings(
     wait_for_ci="auto",
     max_comments=10,
     review_event="COMMENT",
+    branch_filter=(),
+    severity_threshold="all",
+    installation_available=True,
 )
 
 
@@ -954,6 +972,47 @@ def test_repository_update_validates_and_returns_the_repository_schema(client: T
     _validator_for("patch", "/api/repos/{repo_id}", "200").validate(updated.json())
     assert [response.status_code for response in invalid] == [422] * 8
     assert missing.status_code == 404
+
+
+def test_repository_review_settings_round_trip_and_clear(client: TestClient) -> None:
+    url = f"/api/repos/{REPOSITORY_ID}"
+    defaults = client.get(url).json()
+    patched = client.patch(
+        url, json={"branchFilter": ["main", "release/**"], "severityThreshold": "critical"}
+    )
+    stored = client.get(url).json()
+    twenty = client.patch(url, json={"branchFilter": [f"release/{n}" for n in range(20)]})
+    cleared = client.patch(url, json={"branchFilter": []})
+
+    assert (
+        defaults["branchFilter"],
+        defaults["severityThreshold"],
+        defaults["installationAvailable"],
+    ) == ([], "all", True)
+    assert patched.status_code == 200
+    _validator_for("patch", "/api/repos/{repo_id}", "200").validate(patched.json())
+    assert (stored["branchFilter"], stored["severityThreshold"]) == (
+        ["main", "release/**"],
+        "critical",
+    )
+    assert twenty.status_code == 200 and len(twenty.json()["branchFilter"]) == 20
+    assert cleared.status_code == 200
+    assert (cleared.json()["branchFilter"], cleared.json()["severityThreshold"]) == ([], "critical")
+
+
+@pytest.mark.parametrize(
+    "body", INVALID_REVIEW_SETTINGS.values(), ids=INVALID_REVIEW_SETTINGS.keys()
+)
+def test_repository_update_rejects_invalid_review_settings(
+    client: TestClient, body: dict[str, object]
+) -> None:
+    url = f"/api/repos/{REPOSITORY_ID}"
+
+    rejected = client.patch(url, json=body)
+    stored = client.get(url).json()
+
+    assert rejected.status_code == 422
+    assert (stored["branchFilter"], stored["severityThreshold"]) == ([], "all")
 
 
 def test_pulls_page_derives_the_latest_run_verdict(client: TestClient) -> None:

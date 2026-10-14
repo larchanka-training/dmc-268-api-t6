@@ -21,17 +21,22 @@ class RepositorySettings:
     wait_for_ci: str
     max_comments: int
     review_event: str
+    branch_filter: tuple[str, ...]
+    severity_threshold: str
+    installation_available: bool
 
 
 @dataclass(frozen=True)
 class RepositorySettingsChange:
-    """Settings to change; ``None`` keeps the stored value."""
+    """Settings to change; ``None`` keeps the stored value, an empty ``branch_filter`` clears it."""
 
     enabled: bool | None = None
     default_engine: str | None = None
     wait_for_ci: str | None = None
     max_comments: int | None = None
     review_event: str | None = None
+    branch_filter: tuple[str, ...] | None = None
+    severity_threshold: str | None = None
 
 
 class RepositorySettingsStore(Protocol):

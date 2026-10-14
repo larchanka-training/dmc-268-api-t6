@@ -867,6 +867,8 @@ async def update_repository(
             wait_for_ci=body.wait_for_ci,
             max_comments=body.max_comments,
             review_event=body.review_event,
+            branch_filter=None if body.branch_filter is None else tuple(body.branch_filter),
+            severity_threshold=body.severity_threshold,
         ),
     )
     if item is None:

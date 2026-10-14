@@ -29,15 +29,17 @@ from sqlalchemy import (
     func,
     text,
 )
-from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import ARRAY, JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
+from app.common.application.branch_patterns import BRANCH_PATTERN_MAX_LENGTH
 from app.common.application.github_repository_name import REPOSITORY_FULL_NAME_MAX_LENGTH
 from app.common.infrastructure.db.base import Base
 from app.common.infrastructure.db.columns import pg_enum, timestamp_column
 from app.common.infrastructure.db.enums import (
     Engine,
     ReviewEvent,
+    SeverityThreshold,
     WaitForCi,
 )
 
@@ -100,6 +102,15 @@ class Repository(Base):
         server_default=ReviewEvent.COMMENT.value,
     )
     max_comments: Mapped[int] = mapped_column(SMALLINT, nullable=False, server_default=text("10"))
+    # Target-branch patterns (SD §6.1); the empty default selects every branch.
+    branch_filter: Mapped[list[str]] = mapped_column(
+        ARRAY(String(BRANCH_PATTERN_MAX_LENGTH)), nullable=False, server_default=text("'{}'")
+    )
+    severity_threshold: Mapped[SeverityThreshold] = mapped_column(
+        pg_enum(SeverityThreshold, "severity_threshold"),
+        nullable=False,
+        server_default=SeverityThreshold.ALL.value,
+    )
     created_at: Mapped[datetime] = timestamp_column()
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()

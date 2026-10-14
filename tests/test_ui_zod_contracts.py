@@ -24,7 +24,7 @@ CONTRACTS_PATH = Path(__file__).parent / "fixtures" / "ui_zod_contracts.json"
 RUN_ID = UUID("11111111-1111-4111-8111-111111111111")
 # The ui commit the snapshot was generated from: regenerate after every ui contract change
 # (`DMC_268_UI_DIR=<ui checkout after pnpm install> node tests/generate_ui_zod_contracts.mjs`).
-UI_CONTRACT_COMMIT = "df07e790ef95b91e92b8b071e4283a1bac89eaa7"
+UI_CONTRACT_COMMIT = "3d3071ed4b801eab836962fa83131ab131cac9c1"
 
 
 # Where a Run came from, as the shared RunSession contract must carry it (#112).
