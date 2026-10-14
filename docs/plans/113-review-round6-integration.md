@@ -1,5 +1,13 @@
 # PR #132 integration proof after GitLab publication (#113)
 
+> **Historical — round six.** This document records checkpoint
+> `d88725771ef89a94756ea3a06befd37b44b425d4`, based on main
+> `2251b5936822827fc75b38cfc6b352c6a5e89a6b`, plus the integration changes
+> described in this round. Its plans, counts, gates, reviews and merge prerequisites
+> apply to that historical scope; they do not approve or verify current main or
+> the current PR head. Current #151 evidence is recorded in
+> [151-verification.md](151-verification.md).
+
 ## Tested base and scope
 
 Main: `2251b5936822827fc75b38cfc6b352c6a5e89a6b` (merged #137).
@@ -29,8 +37,8 @@ in 30.38 s** on the same inherited selection.
 
 Inactive-origin terminalization explicitly disables check-run publication before
 route/configuration selection. Checkpoint cancellation uses the selected route's
-check-run policy; the GitHub report remains origin fenced. Gateway readiness now
-uses the merged provider route. The GitLab success regression additionally covers
+check-run policy; the GitHub report remains origin fenced. Gateway readiness at
+this checkpoint used the merged provider route. The GitLab success regression additionally covers
 both configured and unconfigured GitHub adapters, extending the already observed
 readiness failure with a positive control.
 
@@ -50,10 +58,10 @@ engine persistence. It uses `uv run pytest -q --tb=short -rs` with both
 Result: **537 passed, zero skips in 179.65 s** across 22 test files.
 Two FastAPI/Starlette dependency deprecation warnings were reported.
 
-Focused `uv run ruff check`, `uv run ruff format --check` and `uv run mypy` pass
+Focused `uv run ruff check`, `uv run ruff format --check` and `uv run mypy` passed
 for `publish_run_review.py`, `github_review_publication.py` and
 `test_publish_run_review.py`; mypy reports no issues in three source files.
-`git diff --check` passes.
+`git diff --check` passed.
 
 ## Source preservation
 
@@ -66,9 +74,10 @@ during this integration. Shared action insertion preserves origin-fenced context
 model-output and publication persistence around the new commit-bound notifications.
 Provider calls remain outside database transaction boundaries.
 
-## Remaining verification
+## Recorded final verification and prerequisites
 
 The [final proof](113-review-round6-final.md) records all four repository gates and
-fresh independent Standards/Spec reviews. Exact-head publication and required CI
-are recorded in the PR body and checks. Current-head human approval, latest-main
-verification and agreed writer shutdown remain merge prerequisites.
+the independent Standards/Spec reviews for this round. Exact-head publication and
+required CI are recorded in the PR body and checks. Human approval on the
+then-current head, a fresh main check and agreed writer shutdown were merge
+prerequisites at this historical checkpoint.

@@ -1,8 +1,16 @@
 # Final verification after GitLab integration — PR #132 / #113
 
+> **Historical — round six.** This document records checkpoint
+> `d88725771ef89a94756ea3a06befd37b44b425d4`, based on main
+> `2251b5936822827fc75b38cfc6b352c6a5e89a6b`, plus the integration changes
+> described in this round. Its plans, counts, gates, reviews and merge prerequisites
+> apply to that historical scope; they do not approve or verify current main or
+> the current PR head. Current #151 evidence is recorded in
+> [151-verification.md](151-verification.md).
+
 ## Integrated source
 
-Verified main: `2251b5936822827fc75b38cfc6b352c6a5e89a6b`, including merged
+Historical verified base: `2251b5936822827fc75b38cfc6b352c6a5e89a6b`, including merged
 #137 GitLab review publication and pipeline steps, #121 receipt retries and #126
 rollback revision admission. Rebased checkpoint:
 `d88725771ef89a94756ea3a06befd37b44b425d4`, plus the publication integration
@@ -40,18 +48,18 @@ results verify `b5e0cec` on main `11ddfab` and do not verify this integrated sou
 
 Integration collection selected 543 / 3190 tests, with 2647 deselected in 1.33s.
 All 543 integration tests ran in the full suite above; there was no separate local
-integration execution. These current combined-source results are distinct from
-the historical round-five executions.
+integration execution. These recorded round-six combined-source results are
+distinct from the historical round-five executions.
 
 The tested snapshot contains 418 tracked Python/runtime/configuration files.
 All SHA-256 fingerprints match the frozen source. Canonical sorted JSON SHA-256:
 `52caf06dd6bcea53a1ad4416c3cd1c70947d79abea1f1a94bb93936fb4d2efb2`.
 
 Independent Standards and Spec reviews of the actual main-to-working-tree delta
-reported zero actionable findings on each axis. No historical gate or review
-result substitutes for the current final verification.
+reported zero actionable findings on each axis. No gate or review result in this
+document substitutes for verification of a subsequent head.
 
-## Publication and merge prerequisites
+## Recorded publication and merge prerequisites
 
 `git diff --check` and configured staged-file checks passed: trailing whitespace,
 end of file, merge conflicts, Ruff check, Ruff format and mypy. YAML/TOML checks
@@ -61,7 +69,7 @@ matched after the checks. Publication and review-response results are recorded i
 required CI is visible in its checks on the exact published head. These receipts
 remain separate from the local evidence above.
 
-Before merge, recheck actual main, obtain approval on the current head and confirm
-reviewer-owned thread resolution. Stop all old Run writers before merge and agree
-the merge time with the tech lead. A main push starts staging deployment, so writer
-shutdown remains a prerequisite before that push.
+At this checkpoint, merge prerequisites were a fresh main check, approval on the
+then-current head, reviewer-owned thread resolution and agreed shutdown of old Run
+writers before the main push that would trigger staging deployment. This historical
+record does not assert that any later head satisfies those prerequisites.

@@ -5,28 +5,39 @@ from __future__ import annotations
 import asyncio
 import base64
 import os
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from datetime import UTC, datetime, timedelta
 from functools import partial
+from uuid import UUID
 
 import httpx
 import pytest
-from sqlalchemy import text
+from sqlalchemy import create_engine, text
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from app.modules.integrations.webhooks.infrastructure.github_installation_tree_provider import (
     GitHubAppInstallationAccessTokenProvider,
 )
+from app.modules.reviews.application.check_runs import RunProviderCheckpoint
+from app.modules.reviews.application.conventions import ConventionsRequest
 from app.modules.reviews.application.get_run_diff import DiffSnapshot, StoreDiffSnapshot
 from app.modules.reviews.application.handle_review_run import AttemptCheckpoint
+from app.modules.reviews.application.prompt_builder import ReviewContext
+from app.modules.reviews.application.queue_messages import ReviewPublishPointer
+from app.modules.reviews.application.review_context_stage import ReviewContextStage
 from app.modules.reviews.application.run_failures import RunCancelled
+from app.modules.reviews.application.run_trace import RunTrace
+from app.modules.reviews.application.try_enqueue_webhook_run import (
+    PendingRunMessage,
+    RunPublicationKind,
+)
 from app.modules.reviews.infrastructure.github_vcs import HttpGitHubVcsProvider
 from app.modules.reviews.infrastructure.run_lifecycle_store import SqlAlchemyRunLifecycleUnitOfWork
 from app.modules.reviews.infrastructure.run_processing_unit_of_work import (
     SqlAlchemyRunProcessingUnitOfWork,
 )
 from app.modules.reviews.infrastructure.run_repository import SqlAlchemyRunRepository
-from app.worker import review_context_stage_factory
+from app.worker import GitHubAdapters, compose_worker_process, review_context_stage_factory
 from tests.portal_postgres import HEAD, INSTALL_A, REPO_A, RUN_ATTEMPTED, Env, portal_schema
 from tests.test_app_reinstall_postgres import FreshGitHub, apply
 from tests.test_github_vcs_provider import _pull_payload
@@ -34,6 +45,12 @@ from tests.test_retired_installation_postgres import DiscardTokenCache
 from tests.test_review_context import _GREET_PATCH, _MODELS, _SERVICE
 from tests.test_run_origin_guard_postgres import prepare
 from tests.test_run_publication_origin_postgres import retire
+from tests.test_worker_queue_postgres import (
+    SETTINGS,
+    GitHub,
+    Model,
+    _no_run_source,
+)
 
 _BASE = "b" * 40
 _REVIEW = "1" * 40
@@ -338,6 +355,250 @@ def test_awaited_redis_tree_miss_rechecks_run_before_token_acquisition(
                 assert calls == []
                 assert cache_writes == []
         finally:
+            await engine.dispose()
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("origin", ["active", "deleted"])
+def test_worker_composition_passes_claimed_checkpoint_to_context_stage(
+    context_env: Env, origin: str
+) -> None:
+    """The public worker stops the next policy request after a claimed origin retires."""
+
+    async def exercise() -> None:
+        engine = context_env.engine()
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        observer = create_engine(
+            context_env.database_url,
+            connect_args={"options": f"-csearch_path={context_env.schema}"},
+        )
+        calls: list[str] = []
+        stage_claims: list[tuple[object, ...]] = []
+        published: list[ReviewPublishPointer] = []
+
+        class Queue:
+            async def publish_confirmed(
+                self,
+                message: PendingRunMessage,
+                *,
+                kind: RunPublicationKind = RunPublicationKind.QUEUED,
+            ) -> None:
+                raise AssertionError("the claimed run is already queued")
+
+            async def publish_retry(self, message: PendingRunMessage, delay_key: str) -> None:
+                raise AssertionError("the composed attempt must not retry")
+
+            async def publish_review(self, pointer: ReviewPublishPointer) -> None:
+                published.append(pointer)
+
+        class ReviewModel(Model):
+            async def draft_conventions(
+                self, *, request: ConventionsRequest
+            ) -> Mapping[str, object]:
+                return {
+                    **await super().draft_conventions(request=request),
+                    "files": [{"path": "pkg/service.py", "relevance": "Changed module."}],
+                }
+
+            async def draft_review(self, *, context: ReviewContext) -> Mapping[str, object]:
+                self.review_calls += 1
+                return {
+                    "findings": [],
+                    "summary": {
+                        "problem": "No problems found.",
+                        "done_well": "The change is small.",
+                        "effort": "none",
+                    },
+                }
+
+        async def http(request: httpx.Request) -> httpx.Response:
+            path = request.url.path
+            calls.append(request.method + " " + path)
+            # Independent connections must acquire all three locks during every HTTP call.
+            async with factory.begin() as session:
+                for table, row_id in (
+                    ("provider_installations", INSTALL_A),
+                    ("repositories", REPO_A),
+                    ("runs", RUN_ATTEMPTED),
+                ):
+                    await session.execute(
+                        text(f"SELECT id FROM {table} WHERE id=:id FOR UPDATE NOWAIT"),
+                        {"id": row_id},
+                    )
+            if path == "/app/installations/17/access_tokens":
+                return httpx.Response(
+                    201, json={"token": "token", "expires_at": "2030-01-01T00:00:00Z"}
+                )
+            if "/git/trees/" in path:
+                sha = path.rsplit("/", 1)[1]
+                if sha == _BASE:
+                    if origin != "active":
+                        await retire(factory)
+                    tree = [
+                        {"path": ".review", "mode": "040000", "type": "tree", "sha": _REVIEW},
+                        {"path": "AGENTS.md", "mode": "100644", "type": "blob", "sha": _AGENTS},
+                    ]
+                elif sha == _REVIEW:
+                    tree = [{"path": "rules.md", "mode": "100644", "type": "blob", "sha": _RULES}]
+                else:
+                    assert sha == HEAD
+                    tree = [
+                        {"path": "pkg/service.py", "type": "blob", "sha": _APP},
+                        {"path": "pkg/models.py", "type": "blob", "sha": _MODELS_SHA},
+                    ]
+                return httpx.Response(200, json={"tree": tree, "truncated": False})
+            if "/git/blobs/" in path:
+                sha = path.rsplit("/", 1)[1]
+                raw = {
+                    _RULES: b"rules",
+                    _AGENTS: b"agents",
+                    _APP: _SERVICE.encode(),
+                    _MODELS_SHA: _MODELS.encode(),
+                }[sha]
+                return httpx.Response(
+                    200,
+                    json={
+                        "sha": sha,
+                        "encoding": "base64",
+                        "content": base64.b64encode(raw).decode(),
+                        "size": len(raw),
+                    },
+                )
+            if path.endswith("/pulls/3"):
+                payload = _pull_payload(changed_files=1, head_sha=HEAD)
+                payload["number"] = 3
+                base = payload["base"]
+                assert isinstance(base, dict)
+                base["sha"] = _BASE
+                return httpx.Response(200, json=payload)
+            if path.endswith("/pulls/3/files"):
+                return httpx.Response(
+                    200,
+                    json=[
+                        {
+                            "filename": "pkg/service.py",
+                            "status": "modified",
+                            "sha": _APP,
+                            "additions": 1,
+                            "deletions": 0,
+                            "changes": 1,
+                            "patch": _GREET_PATCH,
+                        }
+                    ],
+                )
+            if "/compare/" in path:
+                return httpx.Response(200, json={"merge_base_commit": {"sha": "c" * 40}})
+            raise AssertionError(f"unexpected request {request.url}")
+
+        try:
+            await prepare(factory, "active", "queued")
+            async with factory.begin() as session:
+                await session.execute(
+                    text("UPDATE provider_installations SET account_external_id=700 WHERE id=:id"),
+                    {"id": INSTALL_A},
+                )
+                await session.execute(
+                    text(
+                        "INSERT INTO prompt_versions "
+                        "(id,key,version,content,checksum,is_active) "
+                        "VALUES (:id,'review.conventions',1,'conventions',:checksum,true)"
+                    ),
+                    {"id": UUID(int=151), "checksum": "d" * 64},
+                )
+            model = ReviewModel(factory)
+            github = GitHub()
+            runs = SqlAlchemyRunRepository(factory, allow_unscoped=True)
+            async with httpx.AsyncClient(
+                base_url="https://api.github.test", transport=httpx.MockTransport(http)
+            ) as client:
+                tokens = GitHubAppInstallationAccessTokenProvider(
+                    client=client,
+                    app_id="42",
+                    private_key="unused",
+                    jwt_encoder=lambda claims, key: "jwt",
+                    cache=DiscardTokenCache(),
+                    now=lambda: datetime(2026, 10, 10, tzinfo=UTC).timestamp(),
+                )
+                vcs = HttpGitHubVcsProvider(client=client, token_provider=tokens)
+                build_stage = review_context_stage_factory(
+                    client=client,
+                    tokens=tokens,
+                    vcs=vcs,
+                    runs=runs,
+                    session_factory=factory,
+                    redis=None,
+                )
+
+                def stage(
+                    trace: RunTrace | None, checkpoint: RunProviderCheckpoint
+                ) -> ReviewContextStage:
+                    # Observe the public composition input after the real claim commits.
+                    with observer.connect() as connection:
+                        row = connection.execute(
+                            text("SELECT state::text,worker_id,attempt FROM runs WHERE id=:id"),
+                            {"id": RUN_ATTEMPTED},
+                        ).one()
+                        stage_claims.append(tuple(row))
+                    return build_stage(trace, checkpoint)
+
+                process = compose_worker_process(
+                    settings=SETTINGS,
+                    session_factory=factory,
+                    queue=Queue(),
+                    github=GitHubAdapters(
+                        vcs=vcs,
+                        check_runs=github,
+                        reviews=github,
+                        eligibility=github,
+                        run_source=_no_run_source,
+                        context_stage=stage,
+                    ),
+                    provider_factory=model.for_attempt,
+                )
+                assert await process.handle_run.execute(RUN_ATTEMPTED) == "ack"
+            assert stage_claims == [("running", "worker-it", 2)]
+            assert all(
+                call == "POST /app/installations/17/access_tokens"
+                for call in calls
+                if "access_tokens" in call
+            )
+            if origin != "active":
+                assert calls == [
+                    "POST /app/installations/17/access_tokens",
+                    f"GET /repos/octo/a/git/trees/{_BASE}",
+                ], "context-stage checkpoint allowed a request after retirement"
+                assert model.review_calls == 0
+                assert published == []
+            else:
+                assert f"GET /repos/octo/a/git/trees/{_REVIEW}" in calls
+                assert f"GET /repos/octo/a/git/blobs/{_MODELS_SHA}" in calls
+                assert model.review_calls == 1
+                assert [pointer.run_id for pointer in published] == [RUN_ATTEMPTED]
+            async with factory() as session:
+                terminal = (
+                    await session.execute(
+                        text("SELECT state::text,error_code FROM runs WHERE id=:id"),
+                        {"id": RUN_ATTEMPTED},
+                    )
+                ).one()
+                if origin == "active":
+                    assert tuple(terminal) == ("publishing", None)
+                    context = await session.scalar(
+                        text(
+                            "SELECT response FROM run_actions "
+                            "WHERE run_id=:id AND tool='context.build'"
+                        ),
+                        {"id": RUN_ATTEMPTED},
+                    )
+                    assert context is not None
+                    assert context["status"] == "review"
+                    assert any(block["path"] == "pkg/models.py" for block in context["blocks"])
+                else:
+                    assert tuple(terminal) == ("cancelled", "installation_unavailable")
+        finally:
+            observer.dispose()
             await engine.dispose()
 
     asyncio.run(exercise())
