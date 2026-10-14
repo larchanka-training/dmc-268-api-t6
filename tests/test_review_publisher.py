@@ -20,7 +20,7 @@ from app.modules.reviews.application.review_output import (
     ReviewOutput,
     ReviewPublication,
 )
-from app.modules.reviews.application.verdict import SeverityThreshold
+from app.modules.reviews.application.verdict import SeverityThresholdValue
 
 RUN_ID = UUID("00000000-0000-0000-0000-000000000401")
 
@@ -55,7 +55,7 @@ class FakeRepository:
     publication: ReviewPublication | None
     marked: int = 0
     processed: ProcessedReviewOutput | None = None
-    severity_threshold: SeverityThreshold = "all"
+    severity_threshold: SeverityThresholdValue = "all"
 
     async def get_post_processing_input(self, run_id: UUID) -> FindingPostProcessingInput | None:
         assert run_id == RUN_ID

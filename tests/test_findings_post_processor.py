@@ -16,7 +16,7 @@ from app.modules.reviews.application.review_output import (
     ReviewOutput,
     ReviewSummary,
 )
-from app.modules.reviews.application.verdict import SeverityThreshold
+from app.modules.reviews.application.verdict import SeverityThresholdValue
 
 
 def finding(**overrides: object) -> dict[str, object]:
@@ -61,7 +61,7 @@ def process(  # type: ignore[no-untyped-def]
     *findings: dict[str, object],
     max_inline: int | None = None,
     hunk_lines: dict[str, frozenset[int]] | None = None,
-    severity_threshold: SeverityThreshold = "all",
+    severity_threshold: SeverityThresholdValue = "all",
 ):
     return FindingsPostProcessor.from_default_patterns().process(
         output(*findings),
@@ -359,7 +359,7 @@ def test_critical_threshold_drops_medium_low_and_info_and_turns_attention_into_c
     ],
 )
 def test_threshold_publishes_only_its_severity_group(
-    threshold: SeverityThreshold, published: list[str], below: list[str], line: str | None
+    threshold: SeverityThresholdValue, published: list[str], below: list[str], line: str | None
 ) -> None:
     result = process(
         *(
@@ -403,6 +403,10 @@ def test_risk_summary_counts_only_findings_that_pass_the_threshold() -> None:
 
 
 def test_inline_cap_counts_only_findings_that_pass_the_threshold() -> None:
+    # The cap keeps the highest severities, so threshold-then-cap and cap-then-threshold agree
+    # here: this does not pin the threshold before the cap. The order against lint, dedupe and
+    # routing is pinned by the next test,
+    # test_threshold_runs_after_lint_and_dedupe_and_before_path_and_confidence_routing.
     blocking = tuple(
         finding(title=f"Blocking {number}", severity="high", line=10 + number)
         for number in range(4)
@@ -463,7 +467,7 @@ def test_threshold_runs_after_lint_and_dedupe_and_before_path_and_confidence_rou
 
 @pytest.mark.parametrize("threshold", [None, "all"])
 def test_all_threshold_keeps_the_ten_findings_fixture_result(
-    threshold: SeverityThreshold | None,
+    threshold: SeverityThresholdValue | None,
 ) -> None:
     fixture = Path(__file__).parent / "fixtures" / "review_output" / "valid" / "ten-findings.json"
     parsed = ReviewOutput.model_validate_json(fixture.read_text(encoding="utf-8"))

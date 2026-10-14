@@ -1008,7 +1008,10 @@ def test_repository_update_rejects_invalid_review_settings(
 ) -> None:
     url = f"/api/repos/{REPOSITORY_ID}"
 
-    rejected = client.patch(url, json=body)
+    # Escaped JSON text: httpx's ``json=`` cannot UTF-8-encode a lone surrogate (#149).
+    rejected = client.patch(
+        url, content=json.dumps(body), headers={"Content-Type": "application/json"}
+    )
     stored = client.get(url).json()
 
     assert rejected.status_code == 422

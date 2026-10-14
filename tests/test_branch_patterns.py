@@ -17,6 +17,7 @@ INVALID_BRANCH_PATTERNS = {
     "newline": "release\n",
     "control": "release\x01x",
     "delete": "release\x7fx",
+    "lone-surrogate": "release/\ud800",
     "three-stars": "release/***",
     "question-mark": "release?",
     "open-bracket": "release[0",

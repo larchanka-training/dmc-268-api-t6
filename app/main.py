@@ -14,8 +14,11 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Path, Query, Request
 from fastapi.dependencies.models import Dependant
+from fastapi.encoders import jsonable_encoder
+from fastapi.exception_handlers import request_validation_exception_handler
+from fastapi.exceptions import RequestValidationError
 from fastapi.openapi.utils import get_openapi
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 from fastapi.routing import APIRoute, iter_route_contexts
 from pydantic import ValidationError
 
@@ -229,6 +232,20 @@ def custom_openapi() -> dict[str, Any]:
 
 
 app.openapi = custom_openapi  # type: ignore[method-assign]
+
+
+@app.exception_handler(RequestValidationError)
+async def render_validation_error(request: Request, exc: RequestValidationError) -> Response:
+    """Render FastAPI's default 422 body, ASCII-escaped when UTF-8 cannot encode it.
+
+    The default body echoes the rejected input; a lone surrogate in it would turn the 422 into
+    a 500 (#149).
+    """
+    try:
+        return await request_validation_exception_handler(request, exc)
+    except UnicodeEncodeError:
+        body = json.dumps({"detail": jsonable_encoder(exc.errors())})
+        return Response(body, status_code=422, media_type="application/json")
 
 
 @app.get(

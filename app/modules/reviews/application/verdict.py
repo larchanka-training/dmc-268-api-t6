@@ -10,11 +10,11 @@ from typing import Literal
 from uuid import UUID, uuid5
 
 type Verdict = Literal["blocking", "attention", "clean"]
-type SeverityThreshold = Literal["all", "warning", "critical"]
+type SeverityThresholdValue = Literal["all", "warning", "critical"]
 
 SEVERITIES = ("critical", "high", "medium", "low", "info")
 # The lowest published severity group of a repository threshold (PIPELINE_SPEC §9, §11).
-PUBLISHED_SEVERITIES: Mapping[SeverityThreshold, frozenset[str]] = {
+PUBLISHED_SEVERITIES: Mapping[SeverityThresholdValue, frozenset[str]] = {
     "all": frozenset(SEVERITIES),
     "warning": frozenset(("critical", "high", "medium", "low")),
     "critical": frozenset(("critical", "high")),

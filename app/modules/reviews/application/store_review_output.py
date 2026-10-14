@@ -146,6 +146,7 @@ class StoreReviewOutput:
                 postprocess_request={
                     "min_confidence": processor.patterns.min_confidence,
                     "max_inline": context.repository_max_inline,
+                    "severity_threshold": context.severity_threshold,
                 },
                 postprocess_response={
                     "inline": len(processed.inline),
