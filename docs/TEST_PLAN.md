@@ -22,7 +22,7 @@ GitHub webhook → `webhook-api` (HMAC, delivery idempotency) → PostgreSQL `Ru
 | Р-8 | `usage_events` записываются для каждого вызова LLM, только вставкой. |
 | Р-9 | Бот игнорирует собственные webhook-события и не отвечает на комментарии. |
 
-Дополнительные инварианты: Р-10 — запуск по лейблу `ai-review` и зелёному CI для текущего `head_sha`, независимо от порядка событий; Р-14 — состояния `queued | running | publishing | succeeded | failed | cancelled | skipped`; Р-15 — снимок файлов хранится в PostgreSQL по `(run_id, filename)`. Ignore применяется до порога **более 3 000 разрешённых добавленных и удалённых строк**: исходный доступный `patch` для UI сохраняется, `review_patch=null` для исключённых файлов и summary-only. Ровно 3 000 строк не включают этот режим. Summary-only строится backend по разрешённой статистике без LLM; итог `succeeded`, coverage partial, verdict null. Неполный список VCS даёт summary-only с явной причиной; отсутствие patch не считается нулём изменений. Полностью исключённый или пустой scope даёт `skipped`, verdict null, ноль LLM-вызовов. Р-11 ограничивает первое внедрение GitHub, Р-12 задаёт топологию, Р-13 исключает RAG из MVP. Сборщик контекста [SD §9](SYSTEM_DESIGN.md#9-сборщик-контекста-4-уровня): L0 метаданные PR/репозитория и раздельные источники политики; L1 unified diff; L2 окружающие строки; L3 целый файл в лимите; L4 AST/символы. Проверять состав, ограничения и ранний summary-only путь отдельно по мере реализации уровней.
+Дополнительные инварианты: Р-10 — запуск по лейблу `ai-review` и зелёному CI для текущего `head_sha`, независимо от порядка событий; Р-14 — состояния `queued | running | publishing | succeeded | failed | cancelled | skipped`; Р-15 — снимок файлов хранится в PostgreSQL по `(run_id, filename)`. Ignore применяется до порога **более 3 000 разрешённых добавленных и удалённых строк**: исходный доступный `patch` для UI сохраняется, `review_patch=null` для исключённых файлов и summary-only. Ровно 3 000 строк не включают этот режим. Summary-only строится backend по разрешённой статистике без LLM; итог `succeeded`, coverage partial, verdict null. Неполный список VCS даёт summary-only с явной причиной; отсутствие patch не считается нулём изменений. Полностью исключённый или пустой scope даёт `skipped`, verdict null, ноль LLM-вызовов. Р-11 ограничивает первое внедрение GitHub, Р-12 задаёт топологию, Р-13 задаёт RAG v1 как граф символов с указателями, без embeddings и текста кода, и выключенный по умолчанию тумблер ([ADR 0001](adr/0001-graph-rag-v1.md)); сценарии и гейт v2 — §3.5. Сборщик контекста [SD §9](SYSTEM_DESIGN.md#9-сборщик-контекста-4-уровня): L0 метаданные PR/репозитория и раздельные источники политики; L1 unified diff; L2 окружающие строки; L3 целый файл в лимите; L4 AST/символы. Проверять состав, ограничения и ранний summary-only путь отдельно по мере реализации уровней.
 
 Текущий legacy `ReviewOutput` — объект `{findings, summary}`, максимум 10 findings, форма из [JSON Schema](../review/schemas/review-output.schema.json). Целевой `ReviewOutput v2` сохраняет предел и координаты `path/start_line/line` на **новой** стороне diff, добавляет обязательные `evidence_refs` и атрибуцию по [RULES_FORMAT_SPEC §8](RULES_FORMAT_SPEC.md#8-атрибуция-prompt-envelope-и-защита-от-инъекций). `side: RIGHT` задаёт backend, SHA берётся из `Run.head_sha`; схема и prompt обновляются вместе. Однострочная находка: `start_line: null`, API `newLine = line`, `endLine = null`; диапазон: `start_line < line`, API `newLine = start_line`, `endLine = line`. Будущий v3 добавит явный side сквозь API/storage/eval/hash; для LEFT и GitLab предусмотрены отдельные contract fixtures, без заявления о готовой интеграции.
 
@@ -55,7 +55,7 @@ API baseline gates локально и в обязательном CI: `uv run r
 
 ### 2.3. Движки, контекст и post-processing (Р-3, Р-5, Р-6, Р-8, Р-13)
 
-Целевой DiffEngine создаёт кандидаты `ReviewOutput v2`; проверять схему и семантику, L0–L4, фактическую видимость всех строк evidence, неизменность snapshots и учёт каждого generation-вызова. После deterministic passes отдельный verifier обязателен для непустого набора; `supported`, `contradicted` и `insufficient_context` не взаимозаменяемы. `FinalReviewResult`, summary и payload фиксируются до `publishing`. Ветка > 3 000 разрешённых строк после ignore не выполняет LLM-вызовов, сохраняет доступный UI patch и отключает только review_patch. Проверять точные hunk/range coordinates без угадывания якоря, `side=RIGHT`, `start_side`, `commit_id`, cap 10 inline и строго ограниченный general-only путь. `suggestion` — готовая замена указанного диапазона новых строк, без diff-маркеров; GitHub code fence добавляет publisher, general/body-only не получает применимую suggestion. Идентичность публикации включает run/head/diff/final result и точный payload; повтор publish не вызывает модель. Подробная матрица #107 — §2.7. Проверять, что сеть GitHub/LLM вызывается вне DB-транзакции; отдельная запись usage после provider call не разрешает network внутри transaction.
+Целевой DiffEngine создаёт кандидаты `ReviewOutput v2`; проверять схему и семантику, L0–L4, фактическую видимость всех строк evidence, неизменность snapshots и учёт каждого generation-вызова. После deterministic passes отдельный verifier обязателен для непустого набора; `supported`, `contradicted` и `insufficient_context` не взаимозаменяемы. `FinalReviewResult`, summary и payload фиксируются до `publishing`. Ветка > 3 000 разрешённых строк после ignore не выполняет LLM-вызовов, сохраняет доступный UI patch и отключает только review_patch. Проверять точные hunk/range coordinates без угадывания якоря, `side=RIGHT`, `start_side`, `commit_id`, cap 10 inline и строго ограниченный general-only путь. `suggestion` — готовая замена указанного диапазона новых строк, без diff-маркеров; GitHub code fence добавляет publisher, general/body-only не получает применимую suggestion. Идентичность публикации включает run/head/diff/final result и точный payload; повтор publish не вызывает модель. Подробная матрица #107 — §2.7. Проверять, что сеть GitHub/LLM вызывается вне DB-транзакции; отдельная запись usage после provider call не разрешает network внутри transaction. RAG v1 (Р-13): с выключенным тумблером обращений к индексу и действия `context.rag` нет; функциональные сценарии индекса и кандидатов графа — §3.5.
 
 ### 2.4. SandboxEngine (Р-4, фаза 3)
 
@@ -327,9 +327,55 @@ billed-token totals или баланс — этих величин в artifacts
 
 Adversarial eval использует пары одинакового дефекта/контекста с инъекцией и без неё и отдельные допустимые текстовые исключения. Измеряются навязанные ложные findings, подавленные реальные дефекты и нарушения законных исключений reviewer/verifier; отдельно проверяется перенос через conventions/cache/repair. Schema validity, отсутствие запрещённых tools и детерминированный guard оцениваются независимо от смысловой устойчивости модели. Результат корпуса не заявляет полной защиты от произвольного Prompt Injection.
 
+### 3.5. Вклад графа RAG v1 и гейт v2 (#146)
+
+Решение — [ADR 0001](adr/0001-graph-rag-v1.md#12-замер-вклада-и-гейт-v2), правила
+контекста — [CONTEXT_AND_VERIFICATION_SPEC §3.5](CONTEXT_AND_VERIFICATION_SPEC.md#35-кандидаты-графа-символов-rag-v1).
+Метрика и порог ниже объявлены до замера #146 и после него не меняются.
+
+Функциональные сценарии (unit/contract и integration, добавляются вместе с #141–#145):
+
+| Сценарий | Ожидаемый результат |
+| --- | --- |
+| Fencing: задача скачала архив, затем выключили тумблер или удалили App/репозиторий | Очистка повышает поколение; устаревшая задача не пишет ни одной строки и не повторяется; публикация после этого невозможна |
+| Очистка по `installation_repositories.removed`, `installation.deleted`, выключению тумблера и TTL 30 дней | Все строки индекса репозитория удалены явным DELETE по `repository_id`, статус `empty`; строки других репозиториев не затронуты |
+| Incremental после force push, смены default branch, >500 файлов, смены ignore или версии экстрактора | Full вместо incremental; `indexed_commit_sha = C` только при полностью проиндексированном дереве на `C` |
+| Тумблер включён, индекс `empty`/`building`/`failed` | Ревью без RAG и без ожидания, trace `rag: not_ready` с причиной |
+| Ребро не подтверждается резолвером на ревизии PR; кандидат отсутствует на ней | Omission `rag_edge_unconfirmed` / `rag_candidate_missing`, блока нет |
+| Удалённый экспорт всё ещё импортируется на `head_sha` | Кандидат `rag_broken_reference`: два блока, RIGHT на `head_sha` и LEFT на `diff_old_sha`, без склейки ревизий |
+| Блок с ревизией индекса вместо ревизии PR | `policy_context_violation` до отправки |
+| Превышение лимита индексации, небезопасные entries архива | `failed` с `limit_exceeded:<лимит>`, без retry; entries с `..`, абсолютным путём, symlink, hardlink, устройством, FIFO не индексируются; ревью без RAG |
+| Инъекция внутри извлечённого кода | Блок передаётся типизированной недоверенной секцией `retrieved_excerpt` и не меняет роли, schema или адресата; влияние на ответ модели измеряется в корпусе ниже и по §3.4 |
+
+Корпус для замера — не меньше 24 кейсов, каждый со снимком репозитория на ревизии
+кейса (§4): 10 дефектов, видимых только через обратное ребро (3 из них — удалённые
+или переименованные экспорты); 6 контрольных, где достаточно L4; 4 глубины 2
+(ожидаемые промахи v1, задел для v2); 2 с инъекцией внутри извлечённого кода; 2
+без дефектов. Разметка и сопоставление — по §3.2–3.3.
+
+A/B на одном корпусе: одна версия промпта и одна модель; плечо A без RAG, плечо B
+с RAG; offline replay с замороженным снимком индекса; 3 прогона на плечо. Метрика
+вклада графа — ΔRecall (B − A) на подмножестве кейсов с обратным ребром.
+
+Гейт открытия v2 (#147) — должны выполниться все условия:
+
+| Условие | Порог |
+| --- | --- |
+| ΔRecall на подмножестве обратных рёбер | ≥ +15 п. п. |
+| Precision на всём корпусе | падает не больше чем на 5 п. п. |
+| Critical Recall на всём корпусе | не ниже, чем в плече A |
+| Hallucination Rate на всём корпусе | растёт не больше чем на 2 п. п. |
+| Медиана входных токенов на run | не больше +30 % к плечу A |
+| Исполненные инъекции из извлечённого кода | 0 |
+
+Это решение о гейте, а не обязательная проверка CI: режимы §5 не меняются. Гейт не
+пройден — #147 закрывается как not planned со ссылкой на отчёт #146.
+
 ## 4. Эталонные данные и исполнение
 
 Целевой каталог — `test-prs-dataset/cases/<id>/` с metadata JSON, `diff.patch` и pre-image; raw responses и manifest версионируются отдельно. Минимальный шаблон metadata (форма в [case schema](../test-prs-dataset/schema/case.schema.json)): `id`, `class`, `language`, `source {kind, url, revision, license_name, license_url, attribution}`, `base_path`, `patch_path`, `expected_verdict`, `expected_findings [{path, start_line, line, severity, category}]`. Для synthetic source URL/license могут быть неприменимы, но attribution обязателен. Отдельный response manifest после baseline хранит `model_id`, `prompt_sha`, `prompt_version`, metadata прогона и путь raw response. В case README фиксируются замены категорий и ручной оракул.
+
+Кейсам RAG v1 (§3.5) pre-image и patch недостаточно: каждый дополнительно хранит снимок разрешённого дерева репозитория на ревизии кейса и замороженный снимок индекса, построенный по этому дереву, чтобы обратные рёбра и replay были воспроизводимы без сети. Для real PR лицензия и attribution должны покрывать весь снимок, а не только показанный excerpt. Формат снимков закрепляет #146.
 
 Старые UI TC-01…06 — идеи для переработки в корректные pre-image/patch и канонические verdict; их YAML и patch не считаются валидным корпусом. TC-07 становится unit-тестом фильтра generated files, TC-08 — webhook integration, TC-09 — sandbox phase 3. Старый UI каталог `tests/golden_dataset/` уже удалён ([ui#69](https://github.com/larchanka-training/dmc-268-ui-t6/pull/69)): ui `docs/TEST_PLAN.md` отсылает к этому плану, последняя версия старого плана — [ui `d8c9172`](https://github.com/larchanka-training/dmc-268-ui-t6/blob/d8c9172/docs/TEST_PLAN.md).
 
