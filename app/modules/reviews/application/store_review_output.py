@@ -120,6 +120,7 @@ class StoreReviewOutput:
             hunk_lines=context.hunk_lines,
             rule_names=context.rule_names,
             repository_max_inline=context.repository_max_inline,
+            severity_threshold=context.severity_threshold,
         )
         findings = hashed_findings(processed)
         severities = [item.severity for item in findings]

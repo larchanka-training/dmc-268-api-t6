@@ -12,6 +12,7 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from app.common.application.unit_of_work import UnitOfWork
+from app.modules.reviews.application.verdict import SeverityThreshold
 
 if TYPE_CHECKING:
     from app.modules.reviews.application.findings_post_processor import ProcessedReviewOutput
@@ -151,6 +152,7 @@ class FindingPostProcessingInput:
     hunk_lines: dict[str, frozenset[int]]
     rule_names: frozenset[str]
     repository_max_inline: int | None = None
+    severity_threshold: SeverityThreshold = "all"
 
 
 class ReviewOutputRepository(Protocol):
@@ -239,6 +241,7 @@ class PublishReviewOutput:
             hunk_lines=context.hunk_lines,
             rule_names=context.rule_names,
             repository_max_inline=context.repository_max_inline,
+            severity_threshold=context.severity_threshold,
         )
         async with self._uow_factory() as uow:
             publication = await uow.reviews.store_review_output(run_id, answer, parsed, processed)

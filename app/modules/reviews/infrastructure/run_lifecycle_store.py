@@ -329,6 +329,11 @@ class SqlAlchemyRunLifecycleStore:
                 CodeChangeDiff.run_id == run_id
             )
         )
+        below_threshold = await self._session.scalar(
+            select(func.count())
+            .select_from(Finding)
+            .where(Finding.run_id == run_id, Finding.drop_reason == "severity_threshold")
+        )
         inline = sum(1 for item in findings if item.inline_comment)
         return CheckRunReport(
             target,
@@ -338,6 +343,7 @@ class SqlAlchemyRunLifecycleStore:
             severity_counts=severity_counts(severities),
             inline_count=inline,
             body_count=len(findings) - inline,
+            below_threshold_count=below_threshold or 0,
             summary_only=bool(summary_only),
         )
 
