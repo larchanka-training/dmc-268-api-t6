@@ -41,6 +41,7 @@ from app.modules.reviews.infrastructure.models import (
     RunPolicySnapshot,
 )
 from app.modules.reviews.infrastructure.run_origin import origin_active
+from app.modules.reviews.infrastructure.run_origin_locks import lock_run_origin_row
 
 _PROMPT_ID_FIELDS = frozenset({"review_system_id", "conventions_id", "verifier_id"})
 UNPINNED_EXECUTION_PROFILE = ExecutionProfile.fast(review_model="", verifier_model="")
@@ -233,33 +234,19 @@ class SqlAlchemyPolicySnapshotStore:
     async def _lock_active_run(self, run_id: UUID) -> None:
         # Rebind locks installation → Repository → Run. These locks and the
         # authority check stay in the same transaction as either policy insert.
-        await self._session.execute(
-            select(ProviderInstallation.id)
-            .join(Run, Run.origin_provider_installation_id == ProviderInstallation.id)
-            .where(Run.id == run_id)
-            .with_for_update(of=ProviderInstallation, read=True)
-        )
-        await self._session.execute(
-            select(Repository.id)
-            .join(CodeChange, CodeChange.repository_id == Repository.id)
-            .join(Run, Run.code_change_id == CodeChange.id)
-            .where(Run.id == run_id)
-            .with_for_update(of=Repository, read=True)
-        )
-        row = (
-            await self._session.execute(
-                select(Run, Repository, ProviderInstallation)
-                .join(CodeChange, CodeChange.id == Run.code_change_id)
-                .join(Repository, Repository.id == CodeChange.repository_id)
-                .outerjoin(
-                    ProviderInstallation,
-                    ProviderInstallation.id == Run.origin_provider_installation_id,
-                )
-                .where(Run.id == run_id)
-                .with_for_update(of=Run)
-                .execution_options(populate_existing=True)
+        row = await lock_run_origin_row(
+            self._session,
+            run_id,
+            select(Run, Repository, ProviderInstallation)
+            .join(CodeChange, CodeChange.id == Run.code_change_id)
+            .join(Repository, Repository.id == CodeChange.repository_id)
+            .outerjoin(
+                ProviderInstallation,
+                ProviderInstallation.id == Run.origin_provider_installation_id,
             )
-        ).one_or_none()
+            .where(Run.id == run_id)
+            .execution_options(populate_existing=True),
+        )
         if row is None or row[2] is None or not origin_active(row[0], row[1], row[2]):
             raise RunCancelled("installation_unavailable")
         if row[0].state != RunState.RUNNING:
