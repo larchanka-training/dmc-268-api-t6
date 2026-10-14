@@ -6,7 +6,9 @@ The plan was approved by the sprint tech lead (axyi) on 2026-10-14. Specificatio
 https://github.com/larchanka-training/dmc-268-api-t6/issues/140, epic #139.
 Checked against `origin/main` `362f758`. The deliverable is documentation only: no code, no
 migration, no dependency. The ADR is approved separately by ndovnar on the PR head;
-implementation (#141–#147, ui#102) stays blocked until then.
+implementation (#141–#147, ui#102) stays blocked until then. Where this brief and
+`docs/adr/0001-graph-rag-v1.md` differ, the ADR prevails: review rounds 1–2 refined R3, R7,
+R9, R10, R13 and R18.
 
 Inputs the ADR must not reopen: epic decisions D1–D4 (2026-10-12) and the accepted answers to
 the tech-lead review F1–F6 (2026-10-13, accepted 2026-10-14 in
