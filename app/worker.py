@@ -129,6 +129,9 @@ from app.modules.reviews.infrastructure.amqp import (
 )
 from app.modules.reviews.infrastructure.amqp import run_queue as run_queue_name
 from app.modules.reviews.infrastructure.blob_cache import SqlAlchemyBlobCache
+from app.modules.reviews.infrastructure.branch_selection_rule import (
+    SqlAlchemyBranchSelectionRule,
+)
 from app.modules.reviews.infrastructure.ci_eligibility_candidates import (
     SqlAlchemyEligibilityCandidateStore,
 )
@@ -765,6 +768,7 @@ def compose_worker_process(
             retry_queue=queue,
             check_runs=github.check_runs if github is not None else None,
             worker_id=settings.worker_id,
+            selection=SqlAlchemyBranchSelectionRule(session_factory),
             delays=delays,
             attempt_deadline=attempt_deadline,
             heartbeat_interval=heartbeat_interval,

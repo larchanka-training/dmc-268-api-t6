@@ -148,7 +148,7 @@ class RunSelectionRule(Protocol):
 
 
 class MatchAllRuns:
-    """No selection rule exists in the schema yet: every PR passes."""
+    """Without a selection rule every PR passes; the worker wires the repository branch filter."""
 
     async def matches(self, run_id: UUID) -> bool:
         return True
