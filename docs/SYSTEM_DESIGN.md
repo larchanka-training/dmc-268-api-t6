@@ -849,12 +849,12 @@ DiffMap описывает доступный diff, а видимость каж
 GitHub требует `start_side` вместе с многострочным `start_line`. LEFT проектируется
 в v3 и не получает suggestion.
 
-Общий origin fence (§6.4) защищает записи diff/context, policy documents и policy
+Общий origin fence (§6.9) защищает записи diff/context, policy documents и policy
 snapshots: нужны активный исходный origin и RUNNING, проверенные атомарно в короткой
 транзакции. Перед installation-токеном и каждым policy/AST context tree/blob
 HTTP-запросом повторяется checkpoint claimed Run; кэшированный locator или дерево
 не заменяет разрешение. GitHub/LLM calls выполняются вне DB-транзакций. Существующие
-terminal payload и append-only audit сохраняются по правилам §6.4.
+terminal payload и append-only audit сохраняются по правилам §6.9.
 
 Публикация обсуждений реализована для GitHub и для GitLab (#97). Bitbucket не
 реализован. Приём GitLab — вебхуки, diff и блобы — не реализован: прогон

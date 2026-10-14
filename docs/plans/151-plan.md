@@ -12,7 +12,6 @@ from refreshed main; the refactor did not import this branch. Latest metadata-he
 CI, human approval, merge and tech-lead acceptance remain external requirements.
 Issue: https://github.com/larchanka-training/dmc-268-api-t6/issues/151
 Baseline: refreshed `origin/main`, `c1d8f59d9ff3f332a3595857dbe612115ad559e8`.
-Current worktree: `/Users/qx/.codex/worktrees/151-review-quality/dmc-268-api-t6`.
 Current branch: `fix/151-pr132-followup`.
 Human approval of this combined plan authorizes both independent PRs; the later
 refactor plan records details without another approval gate unless scope changes.

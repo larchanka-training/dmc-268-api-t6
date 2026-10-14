@@ -18,19 +18,22 @@ service or data was modified. Each PostgreSQL fixture creates, migrates, then dr
 its own random schema. The full-suite broker is dedicated because its tests reset
 the review topology. Keep these containers until both independent PRs are published.
 
-Local replay environment: `/private/tmp/dmc268-151-tests.env` (synthetic disposable
-test connection settings, no production credentials). In this worktree:
+For replay, configure `TEST_DATABASE_URL` for a disposable PostgreSQL test database
+whose user can create and drop fixture schemas. Configure `TEST_RABBITMQ_URL` for
+a dedicated RabbitMQ instance before running the full suite; its tests reset the
+review topology. Use synthetic test settings, with no production credentials:
 
 ```sh
-source /private/tmp/dmc268-151-tests.env
 uv run pytest tests/test_run_policy_context_origin_postgres.py tests/test_run_policy_snapshot_origin_postgres.py tests/test_run_origin_guard_postgres.py -rs
 ```
 
 ## Baseline
 
 Before test implementation, the exact three-file command above passed **140 tests,
-zero skips in 98.55 seconds**, with two dependency deprecation warnings. Log:
-`/private/tmp/dmc268-151-baseline.log`. The fixture's random schemas were cleaned up.
+zero skips in 98.55 seconds**, with two dependency deprecation warnings, on main
+`c1d8f59d9ff3f332a3595857dbe612115ad559e8`. This is the pre-change baseline; the
+reviewed PR head's same suite contains 142 tests. The fixture's random schemas
+were cleaned up.
 
 ## Public composition regression
 
@@ -52,7 +55,7 @@ Existing stage-level active/deleted/rebound coverage remains intact. The new pub
 proof is intentionally active/deleted: a full installation replacement callback
 has its separate `installation_replaced` terminalization semantics.
 
-## Mutation RED and restoration
+## Historical stage-wrapper mutation RED and restoration
 
 Only the new test's stage-factory wrapper was temporarily changed from forwarding
 the received checkpoint to forwarding an async no-op. `app/worker.py`,
@@ -63,27 +66,64 @@ pipeline was accessed or replaced. The mutant was restored immediately after pyt
 uv run pytest tests/test_run_policy_context_origin_postgres.py -k 'worker_composition and deleted' -rs
 ```
 
-On the final test version the mutant failed the exact request-boundary assertion:
+On that implementation checkpoint the mutant failed the mutable request-boundary assertion:
 **8 HTTP requests versus 2 at retirement**; **1 failed, 25 deselected, zero skips in
-1.95 seconds**. Log: `/private/tmp/dmc268-151-mutation.log`. The additional requests
+1.95 seconds**. The additional requests
 include the nested policy tree and policy blobs, before persistence guards reject
 the retired origin. This is behavioral RED, not a signature/model failure.
 
-Restored composition control: **2 passed, 24 deselected, zero skips in 3.99 seconds**;
-log `/private/tmp/dmc268-151-composition.log`.
+Restored composition control: **2 passed, 24 deselected, zero skips in 3.99 seconds**.
 
-## Final checks
+## Review follow-up production-seam proof (2026-10-14)
 
-- `uv run ruff check .`: passed (`/private/tmp/dmc268-151-ruff.log`).
-- `uv run ruff format --check .`: passed, 433 files
-  (`/private/tmp/dmc268-151-format.log`).
-- `uv run mypy .`: passed, 430 source files (`/private/tmp/dmc268-151-mypy.log`).
+The follow-up starts from reviewed PR head
+`8f0fd34135ebcd430dfe8615d7b74f06f6b91ac6`. Before changing the assertion, the public
+composition control passed **2 tests, 24 deselected, zero skips in 12.20 seconds**.
+The deleted-origin case now asserts the literal sequence: installation-17 token
+POST, then base-policy tree GET. It no longer measures a mutable retirement index;
+repeated base-tree reads and any later request fail the same oracle.
+
+For this new mutation experiment, only the checkpoint argument supplied by
+`compose_worker_process` to `github.context_stage` in `app/worker.py` was replaced
+temporarily by a typed async no-op. `CheckpointedProvider` kept the real claimed
+checkpoint, and every origin/persistence guard stayed intact. The deleted case
+failed at the literal request assertion with **8 requests instead of 2**:
+**1 failed, 25 deselected, zero skips in 2.00 seconds**. This production call-site
+experiment is separate from the historical stage-wrapper experiment above.
+
+The exact worker source bytes were restored in `finally`, with no production diff.
+The restored active/deleted cases passed **2 tests, 24 deselected, zero skips in
+4.18 seconds**. The claim, imported-context, model/publication, terminal-state and
+independent `FOR UPDATE NOWAIT` assertions remain intact.
+
+Ownership coordination preceded the transient worker mutation and documentation
+edits: [#124](https://github.com/larchanka-training/dmc-268-api-t6/pull/124#issuecomment-6167588600),
+[#148](https://github.com/larchanka-training/dmc-268-api-t6/pull/148#issuecomment-6167590311)
+and [#154](https://github.com/larchanka-training/dmc-268-api-t6/pull/154#issuecomment-6167591495).
+
+Fresh follow-up checks against the restored production source and strengthened test:
+
+- Three-file PostgreSQL suite: **142 passed, zero skips in 97.95 seconds**.
+- Six-file policy/context suite: **184 passed, zero skips in 103.42 seconds**.
+- `uv run ruff check .`: passed; `uv run ruff format --check .`: passed, 433 files;
+  `uv run mypy .`: passed, 430 source files.
+- `uv run pytest`: **3427 passed, zero failures/skips in 717.04 seconds (0:11:57)**,
+  using the dedicated PostgreSQL and RabbitMQ services. Both focused suites and
+  the full suite emitted the same two existing dependency deprecation warnings.
+- Fresh independent Standards and Spec reviews of the complete PR diff against
+  pinned main `c1d8f59d9ff3f332a3595857dbe612115ad559e8`: **zero actionable findings**
+  on both axes. `git diff --check` is clean; no worker-source mutation remains.
+
+## Historical implementation checks
+
+- `uv run ruff check .`: passed.
+- `uv run ruff format --check .`: passed, 433 files.
+- `uv run mypy .`: passed, 430 source files.
 - Final six-file focused suite: **184 passed, zero skips in 83.88 seconds**, with
-  two dependency deprecation warnings. Final log
-  `/private/tmp/dmc268-151-focused-final.log` supersedes earlier development runs.
+  two dependency deprecation warnings; this supersedes earlier development runs.
 - `uv run pytest`: **3427 passed, zero failures/skips in 1118.15 seconds
   (0:18:38)** with two existing dependency deprecation warnings, against both
-  dedicated services; log `/private/tmp/dmc268-151-pytest.log`.
+  dedicated services.
 - Final database cleanup check: zero non-system/private test schemas remain.
   Both dedicated containers remain live for the separately published refactor.
 - `git diff --check`: clean.
@@ -106,7 +146,7 @@ The coordinated SYSTEM_DESIGN corrections are described below.
   `20261007_0028` policy documents/snapshots and non-NULL-policy conventions loss.
   Retained revocations/current Repository FK can backfill deletion/origin fields,
   without guaranteed restoration of their former historical values.
-- SYSTEM_DESIGN §8.4 and its §6.4 origin-fence summary explicitly include policy
+- SYSTEM_DESIGN §8.4 and its §6.9 origin-fence summary explicitly include policy
   documents/snapshots writes and policy/AST tree/blob requests, with short
   transactions and GitHub/LLM I/O outside them.
 - Four round-six documents carry Historical notices with full checkpoint/base SHAs;
