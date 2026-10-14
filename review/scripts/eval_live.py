@@ -51,6 +51,7 @@ from app.modules.reviews.application.prompt_builder import (  # noqa: E402
     parse_unified_diff,
     review_rule_from_stored,
 )
+from app.modules.reviews.application.vcs_diff import CommitMessagePrefix  # noqa: E402
 from app.modules.reviews.infrastructure.llm.settings import (  # noqa: E402
     LlmConfigError,
     LlmSettings,
@@ -60,8 +61,15 @@ from app.modules.reviews.infrastructure.llm.transport import (  # noqa: E402
     ChatTransport,
     extract_text_content,
 )
+from review.scripts.commit_context import (  # noqa: E402
+    CommitContextError,
+    bind_commit_context,
+    load_canonical_identities,
+    parse_commit_context,
+)
 from review.scripts.eval_provenance import (  # noqa: E402
     DigestInputError,
+    canonical_identity_paths,
     corpus_input_paths,
     digest_files,
     rule_json_paths,
@@ -160,72 +168,16 @@ def _first_serving_provider(record: LlmCallRecord | None) -> tuple[str | None, s
     return label, "sha256-v1:" + digest
 
 
-def _commit_context(records: list[tuple[Path, dict[str, Any]]]) -> dict[str, tuple[str, ...]]:
-    """Validate all frozen snapshots before calls; never invent historical PR lists."""
+def _commit_context(records: list[tuple[Path, dict[str, Any]]]) -> dict[str, CommitMessagePrefix]:
+    """Validate evidence, then bind all cohort identities and active configured cases."""
     try:
-        payload = json.loads(
-            (REPO_ROOT / "review/eval/pr-commit-messages.json").read_text(encoding="utf-8")
-        )
-    except OSError:
-        raise RecorderError("cannot read commit context sidecar") from None
-    except (ValueError, RecursionError):
-        raise RecorderError("malformed commit context sidecar") from None
-    if (
-        not isinstance(payload, dict)
-        or type(payload.get("schema_version")) is not int
-        or payload["schema_version"] != 1
-        or payload.get("context_kind") != "source_revision_snapshot"
-        or not isinstance(payload.get("records"), list)
-    ):
-        raise RecorderError("malformed commit context sidecar")
-    snapshots: dict[str, dict[str, str]] = {}
-    fields = ("case_id", "source_url", "revision", "commit_url", "message")
-    for item in payload["records"]:
-        if not isinstance(item, dict) or any(
-            not isinstance(item.get(name), str) for name in fields
-        ):
-            raise RecorderError("malformed commit context record")
-        try:
-            item["message"].encode("utf-8")
-        except UnicodeError:
-            raise RecorderError("malformed commit context message") from None
-        case_id = item["case_id"]
-        source_match = re.fullmatch(
-            r"(https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)/pull/[1-9][0-9]*",
-            item["source_url"],
-        )
-        if (
-            re.fullmatch(r"(?:CLEAN|LOG|RES|SEC|SYN)-[0-9]{2}", case_id) is None
-            or re.fullmatch(r"[0-9a-fA-F]{40}(?:[0-9a-fA-F]{24})?", item["revision"]) is None
-            or source_match is None
-        ):
-            raise RecorderError("malformed commit context record")
-        if item["commit_url"] != source_match.group(1) + "/commit/" + item["revision"]:
-            raise RecorderError("mismatched commit context commit URL")
-        if case_id in snapshots:
-            raise RecorderError("duplicate commit context record")
-        snapshots[case_id] = {name: item[name] for name in fields}
-    messages: dict[str, tuple[str, ...]] = {}
-    for _, record in records:
-        case_id = record["id"]
-        source = record["source"]
-        if source["kind"] != "real":
-            if case_id in snapshots:
-                raise RecorderError(f"synthetic case has commit context: {case_id}")
-            messages[case_id] = ()
-            continue
-        snapshot = snapshots.get(case_id)
-        if snapshot is None:
-            raise RecorderError(f"missing commit context for real case {case_id}")
-        commit_url = source["url"].split("/pull/", 1)[0] + "/commit/" + source["revision"]
-        if (
-            snapshot["source_url"] != source["url"]
-            or snapshot["revision"] != source["revision"]
-            or snapshot["commit_url"] != commit_url
-        ):
-            raise RecorderError(f"mismatched commit context for real case {case_id}")
-        messages[case_id] = (snapshot["message"],)
-    return messages
+        sidecar = parse_commit_context(REPO_ROOT / "review/eval/pr-commit-messages.json")
+        identity_paths = canonical_identity_paths(REPO_ROOT)
+        digest_files(REPO_ROOT, identity_paths)
+        cohort = load_canonical_identities(REPO_ROOT, identity_paths)
+        return bind_commit_context(sidecar, [record for _, record in records], cohort)
+    except (CommitContextError, DigestInputError, OSError):
+        raise RecorderError("invalid commit context evidence or case binding") from None
 
 
 def _case_input(
@@ -235,7 +187,7 @@ def _case_input(
     system: str,
     rules: tuple[ReviewRule, ...],
     engine: EngineName,
-    commit_messages: tuple[str, ...],
+    commit_prefix: CommitMessagePrefix,
 ) -> ReviewCase:
     diff = (case_dir / record["patch_path"]).read_text(encoding="utf-8")
     files = parse_unified_diff(diff)
@@ -256,7 +208,8 @@ def _case_input(
             is_draft=False,
             is_fork=False,
             head_sha=None,
-            commit_messages=commit_messages,
+            commit_messages=commit_prefix.messages,
+            commit_messages_incomplete=commit_prefix.incomplete,
         ),
         engine=engine,
     )
@@ -398,7 +351,7 @@ def _input_digests(
     """Return the static input paths, the static digest and the corpus digest."""
     try:
         static_inputs = static_input_paths(
-            relative_prompt, [*rule_json_paths(REPO_ROOT), *selected_rules]
+            relative_prompt, [*rule_json_paths(REPO_ROOT), *selected_rules], repo_root=REPO_ROOT
         )
         static_digest = digest_files(REPO_ROOT, static_inputs)
         corpus_digest = digest_files(root, corpus_input_paths(root, records))
@@ -475,7 +428,7 @@ async def _record_case(
     engine: EngineName,
     transport: ChatTransport | None,
     staging_dir: Path,
-    commit_messages: tuple[str, ...],
+    commit_prefix: CommitMessagePrefix,
 ) -> dict[str, str | bool | None]:
     """Stage one case's first-call text and return its redacted call status."""
     case = _case_input(
@@ -484,7 +437,7 @@ async def _record_case(
         system=inputs.system,
         rules=inputs.rules_by_language[record["language"]],
         engine=engine,
-        commit_messages=commit_messages,
+        commit_prefix=commit_prefix,
     )
     try:
         result = await review_case(case, settings, transport=transport)
@@ -597,7 +550,7 @@ async def record_live(
                 engine=engine,
                 transport=transport,
                 staging_dir=staging_dir,
-                commit_messages=commit_context[case_id],
+                commit_prefix=commit_context[case_id],
             )
             paths[case_id] = f"responses/{case_id}.json"
         manifest = _manifest(inputs, settings, engine=engine, statuses=statuses, paths=paths)

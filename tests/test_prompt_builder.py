@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 from app.modules.reviews.application.prompt_builder import (
@@ -367,3 +368,17 @@ def test_sample_review_provider_messages_match_golden_bytes() -> None:
 
     assert messages.system.encode("utf-8") == (fixture / "sample.system.txt").read_bytes()
     assert messages.user.encode("utf-8") == (fixture / "sample.user.txt").read_bytes()
+
+
+def test_incomplete_commit_prefix_renders_literal_uncertainty_without_a_count() -> None:
+    context = _metadata_context(commit_messages=("fix: <escape> & keep\nreason", ""))
+    context = replace(context, pr_meta=replace(context.pr_meta, commit_messages_incomplete=True))
+    prompt = PromptBuilder().build_prompt(context)
+    assert (
+        "<commit_messages>\n"
+        "<commit>fix: &lt;escape&gt; &amp; keep\nreason</commit>\n"
+        "<commit></commit>\n"
+        "<commit>[Additional commits may be omitted]</commit>\n"
+        "</commit_messages>"
+    ) in prompt.user
+    assert "more commits omitted" not in prompt.user

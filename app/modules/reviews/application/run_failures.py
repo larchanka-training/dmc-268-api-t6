@@ -49,6 +49,7 @@ RETRYABLE_ERROR_CODES = (
             "llm_rate_limited",
             "llm_unavailable",
             "diff_fetch_failed",
+            "commit_messages_fetch_failed",
             "internal_error",
         }
     )

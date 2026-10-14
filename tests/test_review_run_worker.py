@@ -856,3 +856,82 @@ def test_check_run_cancellation_logs_run_and_reason_at_info(
             "11111111-1111-1111-1111-111111111111: installation_unavailable",
         )
     ]
+
+
+def test_failed_commit_fetch_check_run_names_commit_messages() -> None:
+    view = check_run_view(
+        CheckRunReport(
+            CheckRunTarget(17, "octo/repo", HEAD, RUN),
+            "failed",
+            3,
+            "commit_messages_fetch_failed",
+        )
+    )
+    assert (view.status, view.conclusion, view.title) == (
+        "completed",
+        "neutral",
+        "AI-ревью не выполнено",
+    )
+    assert view.summary == (
+        "`commit_messages_fetch_failed`: Не удалось получить сообщения коммитов PR из GitHub."
+    )
+
+
+@pytest.mark.parametrize(
+    ("retry_after", "queues", "waits"),
+    [
+        (None, ("30s", "2m"), (30, 120)),
+        (timedelta(seconds=120), ("2m", "2m"), (120, 120)),
+        (timedelta(seconds=300), ("10m", "10m"), (600, 600)),
+    ],
+)
+def test_commit_fetch_failures_retry_then_finish_with_commit_error(
+    retry_after: timedelta | None, queues: tuple[str, str], waits: tuple[int, int]
+) -> None:
+    run = FakeRun()
+    retry = RetryQueue()
+    check_runs = CheckRuns()
+    clock = Clock()
+    outcomes: list[DeliveryOutcome] = []
+    due_dates: list[datetime] = []
+
+    def failing(claimed: ClaimedAttempt) -> bool:
+        raise RunFailure(
+            "commit_messages_fetch_failed", "GitHub answered 502", retry_after=retry_after
+        )
+
+    for _ in range(3):
+        clock.value = run.available_at
+        outcomes.append(
+            asyncio.run(
+                handler(run, failing, retry=retry, check_runs=check_runs, clock=clock).execute(RUN)
+            )
+        )
+        due_dates.append(run.available_at)
+
+    assert outcomes == [DeliveryOutcome.ACK, DeliveryOutcome.ACK, DeliveryOutcome.DEAD_LETTER]
+    assert retry.published == [(queues[0], 2), (queues[1], 3)]
+    assert due_dates[:2] == [
+        NOW + timedelta(seconds=waits[0]),
+        NOW + timedelta(seconds=waits[0] + waits[1]),
+    ]
+    assert (run.state, run.error_code, run.error_message, run.attempt) == (
+        "failed",
+        "commit_messages_fetch_failed",
+        "GitHub answered 502",
+        3,
+    )
+    assert check_runs.views[-1].summary == (
+        "`commit_messages_fetch_failed`: Не удалось получить сообщения коммитов PR из GitHub."
+    )
+
+
+def test_commit_fetch_gateway_code_is_recognized_by_failure_classifier() -> None:
+    from app.modules.reviews.application.run_failures import classify_failure
+
+    class CommitGatewayFailure(Exception):
+        error_code = "commit_messages_fetch_failed"
+
+    failure = classify_failure(CommitGatewayFailure("GitHub answered 502"))
+    assert failure.error_code == "commit_messages_fetch_failed"
+    assert failure.message == "GitHub answered 502"

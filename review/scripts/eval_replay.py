@@ -330,6 +330,7 @@ def _digest_warnings(
                 manifest["prompt_path"],
                 [*rules, *selected_custom_rules],
                 conventions_prompt=conventions_prompt,
+                repo_root=prompt_root,
             )
             digest_files(prompt_root, current_inputs)
         except DigestInputMissing as exc:

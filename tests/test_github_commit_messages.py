@@ -27,10 +27,15 @@ from app.modules.reviews.application.prompt_builder import (
     ReviewPrompt,
 )
 from app.modules.reviews.application.run_failures import RunCancelled, RunFailure
-from app.modules.reviews.application.vcs_diff import PullRequestLocator
+from app.modules.reviews.application.vcs_diff import (
+    CommitMessagePrefix,
+    PullRequestLocator,
+    VcsMetadataProvider,
+)
 from app.modules.reviews.infrastructure.github_run_source import GitHubRunSource
 from app.modules.reviews.infrastructure.github_vcs import HttpGitHubVcsProvider
 from app.modules.reviews.infrastructure.run_repository import SqlAlchemyRunRepository
+from app.modules.reviews.infrastructure.vcs_failures import ClassifiedVcsProvider
 from tests.portal_postgres import HEAD, RUN_ATTEMPTED, Env
 from tests.test_github_vcs_provider import _pull_payload
 from tests.test_retired_installation_postgres import DiscardTokenCache
@@ -231,7 +236,7 @@ def test_empty_first_page_succeeds_without_further_requests() -> None:
 def test_malformed_commit_page_fails_without_exposing_provider_content(payload: object) -> None:
     with pytest.raises(RunFailure) as raised:
         _read(lambda request: httpx.Response(200, json=payload))
-    assert raised.value.error_code == "diff_fetch_failed"
+    assert raised.value.error_code == "commit_messages_fetch_failed"
     assert "GitHub commit response" in raised.value.message
     assert "installation-token" not in str(raised.value)
     assert "private commit text" not in str(raised.value)
@@ -241,7 +246,7 @@ def test_malformed_commit_page_fails_without_exposing_provider_content(payload: 
 def test_invalid_json_or_encoding_is_an_explicit_safe_failure(body: bytes) -> None:
     with pytest.raises(RunFailure) as raised:
         _read(lambda request: httpx.Response(200, content=body))
-    assert raised.value.error_code == "diff_fetch_failed"
+    assert raised.value.error_code == "commit_messages_fetch_failed"
     assert raised.value.message == "GitHub commit response is malformed"
 
 
@@ -282,7 +287,7 @@ def test_streaming_limit_stops_before_buffering_the_remaining_page() -> None:
     stream = PageStream((b" " * 524_288, b" " * 524_288, b" ", b"private commit text"))
     with pytest.raises(RunFailure) as raised:
         _read(lambda request: httpx.Response(200, stream=stream))
-    assert raised.value.error_code == "diff_fetch_failed"
+    assert raised.value.error_code == "commit_messages_fetch_failed"
     assert raised.value.message == "GitHub commit response exceeds the 1 MiB retrieval budget"
     assert stream.read_chunks == 3
     assert stream.closed
@@ -308,12 +313,12 @@ def test_compressed_response_is_rejected_before_any_read_or_decompression() -> N
     [
         (403, {}, "github_forbidden", None),
         (404, {}, "github_forbidden", None),
-        (403, {"X-RateLimit-Remaining": "0"}, "diff_fetch_failed", None),
-        (429, {"Retry-After": "120"}, "diff_fetch_failed", 120),
-        (502, {}, "diff_fetch_failed", None),
+        (403, {"X-RateLimit-Remaining": "0"}, "commit_messages_fetch_failed", None),
+        (429, {"Retry-After": "120"}, "commit_messages_fetch_failed", 120),
+        (502, {}, "commit_messages_fetch_failed", None),
     ],
 )
-def test_http_status_failures_use_existing_safe_classification(
+def test_http_status_failures_use_safe_commit_classification(
     status: int,
     headers: dict[str, str],
     code: str,
@@ -338,7 +343,7 @@ def test_network_timeout_is_classified_without_exposing_request_details() -> Non
 
     with pytest.raises(RunFailure) as raised:
         _read(github)
-    assert raised.value.error_code == "diff_fetch_failed"
+    assert raised.value.error_code == "commit_messages_fetch_failed"
     assert raised.value.message == "GitHub request failed: ReadTimeout"
 
 
@@ -480,7 +485,7 @@ def test_excessive_json_nesting_is_a_safe_malformed_response_failure() -> None:
     body = b"[" * 10_000 + b"]" * 10_000
     with pytest.raises(RunFailure) as raised:
         _read(lambda request: httpx.Response(200, content=body))
-    assert raised.value.error_code == "diff_fetch_failed"
+    assert raised.value.error_code == "commit_messages_fetch_failed"
     assert raised.value.message == "GitHub commit response is malformed"
 
 
@@ -525,11 +530,12 @@ def test_fetched_prefix_reaches_prompt_with_literal_escaping_multiline_and_caps(
         + "…</commit>\n"
         + "<commit>same summary</commit>\n" * 7
         + "<commit>tail summary</commit>\n" * 10
+        + "<commit>[Additional commits may be omitted]</commit>\n"
         + "</commit_messages>"
     )
     assert prompt.system == "SYSTEM"
     assert expected in prompt.user
-    assert prompt.user.count("<commit>") == 20
+    assert prompt.user.count("<commit>") == 21
     assert "more commits omitted" not in prompt.user
     assert "<gateway>" not in prompt.user
     assert "<title>Fix parser</title>" in prompt.user
@@ -540,3 +546,245 @@ def test_empty_fetched_commit_list_keeps_the_prompt_without_a_commit_block() -> 
     prompt = _provider_prompt(_read(lambda request: httpx.Response(200, json=[])))
     assert "<commit_messages>" not in prompt.user
     assert "<title>Fix parser</title>" in prompt.user
+
+
+def test_provider_reads_commit_messages_without_fetching_pull_request() -> None:
+    pages: list[str] = []
+    runs = Runs()
+    tokens = Tokens(runs)
+
+    def github(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/repos/octo/repo/pulls/7/commits"
+        assert request.headers["Authorization"] == "Bearer installation-token"
+        assert request.headers["Accept-Encoding"] == "identity"
+        assert request.url.params["per_page"] == "10"
+        pages.append(request.url.params["page"])
+        return httpx.Response(
+            200,
+            json=[
+                {"sha": "ignored", "commit": {"message": "", "author": {"name": "ignored"}}},
+                {"commit": {"message": "😀" * 501}},
+                {"commit": {"message": "last\n<fix>&"}},
+            ],
+        )
+
+    async def exercise() -> CommitMessagePrefix:
+        async with httpx.AsyncClient(
+            base_url="https://api.github.test", transport=httpx.MockTransport(github)
+        ) as client:
+            provider = HttpGitHubVcsProvider(client=client, token_provider=tokens)
+
+            async def checkpoint() -> None:
+                assert not runs.transaction_open
+
+            return await provider.get_commit_messages(
+                PullRequestLocator(17, "octo/repo", 7), checkpoint=checkpoint
+            )
+
+    assert asyncio.run(exercise()) == CommitMessagePrefix(
+        ("", "😀" * 499 + "…", "last\n<fix>&"), False
+    )
+    assert pages == ["1"]
+    assert tokens.calls == 1
+
+
+def test_source_delegates_commit_context_to_metadata_provider_port() -> None:
+    from app.modules.reviews.application.check_runs import RunProviderCheckpoint
+    from app.modules.reviews.application.vcs_diff import VcsFile, VcsPullRequest
+
+    calls: list[str] = []
+    meta = PullRequestMeta("title", None, "author", "head", "base", (), 0, 0, 0, False, False)
+
+    class MetadataProvider:
+        async def get_pull_request(
+            self, locator: PullRequestLocator, *, checkpoint: RunProviderCheckpoint
+        ) -> VcsPullRequest:
+            await checkpoint()
+            calls.append("metadata")
+            return VcsPullRequest(locator, "a" * 40, "b" * 40, meta)
+
+        async def get_commit_messages(
+            self, locator: PullRequestLocator, *, checkpoint: RunProviderCheckpoint
+        ) -> CommitMessagePrefix:
+            await checkpoint()
+            calls.append("commits")
+            return CommitMessagePrefix(("provider-neutral context",), True)
+
+        async def get_diff(
+            self, pull_request: VcsPullRequest, *, checkpoint: RunProviderCheckpoint
+        ) -> tuple[VcsFile, ...]:
+            raise AssertionError("metadata retrieval does not read diffs")
+
+        async def get_blob(
+            self, locator: PullRequestLocator, sha: str, *, checkpoint: RunProviderCheckpoint
+        ) -> bytes:
+            raise AssertionError("metadata retrieval does not read blobs")
+
+    def github(request: httpx.Request) -> httpx.Response:
+        raise AssertionError("source delegates metadata transport to its port")
+
+    async def exercise() -> PullRequestMeta | None:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(github)) as client:
+            source = GitHubRunSource(
+                client=client,
+                token_provider=Tokens(Runs()),
+                vcs=MetadataProvider(),
+                runs=Runs(),
+                run_id=uuid4(),
+            )
+            return await source.get_pull_request_meta(uuid4())
+
+    actual = asyncio.run(exercise())
+    assert actual is not None
+    assert actual.title == "title"
+    assert actual.commit_messages == ("provider-neutral context",)
+    assert actual.commit_messages_incomplete is True
+    assert calls == ["metadata", "commits"]
+
+
+def _read_commit_prefix(
+    respond: Callable[[httpx.Request], httpx.Response], *, classified: bool = False
+) -> CommitMessagePrefix:
+    async def exercise() -> CommitMessagePrefix:
+        async with httpx.AsyncClient(
+            base_url="https://api.github.test", transport=httpx.MockTransport(respond)
+        ) as client:
+            provider: VcsMetadataProvider = HttpGitHubVcsProvider(
+                client=client, token_provider=Tokens(Runs())
+            )
+            if classified:
+                provider = ClassifiedVcsProvider(provider)
+
+            async def checkpoint() -> None:
+                return None
+
+            return await provider.get_commit_messages(
+                PullRequestLocator(17, "octo/repo", 7), checkpoint=checkpoint
+            )
+
+    return asyncio.run(exercise())
+
+
+def test_provider_rejects_oversized_declared_page_before_reading() -> None:
+    stream = PageStream((b"[]",))
+    with pytest.raises(RunFailure, match="exceeds the 1 MiB retrieval budget"):
+        _read_commit_prefix(
+            lambda request: httpx.Response(
+                200, stream=stream, headers={"Content-Length": "1048577"}
+            )
+        )
+    assert stream.read_chunks == 0
+    assert stream.closed
+
+
+@pytest.mark.parametrize("classified", [False, True])
+@pytest.mark.parametrize(
+    ("status", "headers", "code", "retry_seconds"),
+    [
+        (403, {}, "github_forbidden", None),
+        (404, {}, "github_forbidden", None),
+        (403, {"X-RateLimit-Remaining": "0"}, "commit_messages_fetch_failed", None),
+        (429, {"Retry-After": "300"}, "commit_messages_fetch_failed", 300),
+        (502, {}, "commit_messages_fetch_failed", None),
+    ],
+)
+def test_provider_commit_http_failures_preserve_safe_codes_and_retry_after(
+    classified: bool, status: int, headers: dict[str, str], code: str, retry_seconds: int | None
+) -> None:
+    with pytest.raises(RunFailure) as raised:
+        _read_commit_prefix(
+            lambda request: httpx.Response(
+                status, headers=headers, content=b"private commit text installation-token"
+            ),
+            classified=classified,
+        )
+    assert raised.value.error_code == code
+    assert raised.value.message == f"GitHub answered {status}"
+    assert raised.value.retry_after == (
+        timedelta(seconds=retry_seconds) if retry_seconds is not None else None
+    )
+    assert "private commit text" not in str(raised.value)
+    assert "installation-token" not in str(raised.value)
+
+
+@pytest.mark.parametrize("classified", [False, True])
+def test_provider_commit_timeout_has_safe_source_specific_error(classified: bool) -> None:
+    def github(request: httpx.Request) -> httpx.Response:
+        raise httpx.ReadTimeout("private commit text installation-token", request=request)
+
+    with pytest.raises(RunFailure) as raised:
+        _read_commit_prefix(github, classified=classified)
+    assert raised.value.error_code == "commit_messages_fetch_failed"
+    assert raised.value.message == "GitHub request failed: ReadTimeout"
+
+
+@pytest.mark.parametrize(
+    ("sizes", "links", "incomplete", "expected_pages"),
+    [
+        ((0,), (None,), False, ["1"]),
+        ((0,), ('<https://evil.test/page3>; rel="next"',), True, ["1"]),
+        ((3,), (None,), False, ["1"]),
+        ((3,), ('<https://evil.test/page3>; rel="next"',), True, ["1"]),
+        ((3,), ('<https://evil.test/page3>; rel="last NEXT"',), True, ["1"]),
+        ((3,), ('<https://evil.test/page3>; REL="next"',), True, ["1"]),
+        ((3,), ('<https://evil.test/page3>; rel="prev"; title="next"',), False, ["1"]),
+        ((3,), ('<https://evil.test/rel=next>; rel="last"',), False, ["1"]),
+        (
+            (3,),
+            ('<https://evil.test/page3>; rel="prev", <https://evil.test/page4>; rel="next"',),
+            True,
+            ["1"],
+        ),
+        ((10, 0), ('<https://evil.test/page2>; rel="next"', None), False, ["1", "2"]),
+        ((10, 3), ('<https://evil.test/page2>; rel="next"', None), False, ["1", "2"]),
+        ((10, 3), (None, '<https://evil.test/page3>; rel="next"'), True, ["1", "2"]),
+        ((10, 0), (None, '<https://evil.test/page3>; rel="next"'), True, ["1", "2"]),
+        ((10, 10), (None, None), True, ["1", "2"]),
+        ((10, 10), (None, '<https://evil.test/page2>; rel="last"'), True, ["1", "2"]),
+    ],
+)
+def test_final_commit_page_metadata_controls_honest_prompt_marker(
+    sizes: tuple[int, ...],
+    links: tuple[str | None, ...],
+    incomplete: bool,
+    expected_pages: list[str],
+) -> None:
+    pages: list[str] = []
+
+    def github(request: httpx.Request) -> httpx.Response:
+        assert request.url.host == "api.github.test"
+        page = request.url.params["page"]
+        pages.append(page)
+        index = int(page) - 1
+        link = links[index]
+        return httpx.Response(
+            200,
+            json=[{"commit": {"message": "first" if page == "1" else "second"}}] * sizes[index],
+            headers={"Link": link} if link is not None else {},
+        )
+
+    meta = _read(github)
+    prompt = _provider_prompt(meta)
+    assert meta.commit_messages_incomplete is incomplete
+    assert pages == expected_pages
+    assert ("[Additional commits may be omitted]" in prompt.user) is incomplete
+    assert "more commits omitted" not in prompt.user
+    assert ("<commit_messages>" in prompt.user) is (sum(sizes) > 0 or incomplete)
+    assert prompt.user.count("<commit>first</commit>") == sizes[0]
+    assert prompt.user.count("<commit>second</commit>") == (sizes[1] if len(sizes) > 1 else 0)
+
+
+@pytest.mark.parametrize("classified", [False, True])
+def test_provider_retains_prefix_and_tail_flag_through_classified_port(classified: bool) -> None:
+    pages: list[str] = []
+
+    def github(request: httpx.Request) -> httpx.Response:
+        pages.append(request.url.params["page"])
+        return httpx.Response(
+            200,
+            json=[{"commit": {"message": "", "author": "ignored"}}],
+            headers={"Link": '<https://evil.test/next>; rel="next"'},
+        )
+
+    assert _read_commit_prefix(github, classified=classified) == CommitMessagePrefix(("",), True)
+    assert pages == ["1"]

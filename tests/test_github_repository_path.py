@@ -52,7 +52,7 @@ from app.modules.reviews.application.project_github_pull_request import (
     PullRequestState,
 )
 from app.modules.reviews.application.publish_run_review import ReviewSubmission
-from app.modules.reviews.application.vcs_diff import PullRequestLocator, VcsProvider
+from app.modules.reviews.application.vcs_diff import PullRequestLocator, VcsMetadataProvider
 from app.modules.reviews.infrastructure.github_ci import HttpGitHubCurrentHeadCiProvider
 from app.modules.reviews.infrastructure.github_review_publication import (
     GitHubCheckRunGateway,
@@ -583,7 +583,7 @@ def _run_source(client: httpx.AsyncClient, tokens: _Tokens, runs: _Runs) -> GitH
     return GitHubRunSource(
         client=client,
         token_provider=tokens,
-        vcs=cast(VcsProvider, None),
+        vcs=cast(VcsMetadataProvider, None),
         runs=runs,  # type: ignore[arg-type]
         run_id=uuid4(),
     )

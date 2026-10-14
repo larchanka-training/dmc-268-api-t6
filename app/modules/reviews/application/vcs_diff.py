@@ -109,6 +109,26 @@ class VcsProvider(Protocol):
     ) -> bytes: ...
 
 
+@dataclass(frozen=True)
+class CommitMessagePrefix:
+    """Retained API-order messages; incomplete means an additional tail may exist."""
+
+    messages: tuple[str, ...]
+    incomplete: bool = False
+
+
+class CommitMessagesProvider(Protocol):
+    """A bounded API-order commit prefix, fetched independently of ordinary PR reads."""
+
+    async def get_commit_messages(
+        self, locator: PullRequestLocator, *, checkpoint: RunProviderCheckpoint
+    ) -> CommitMessagePrefix: ...
+
+
+class VcsMetadataProvider(VcsProvider, CommitMessagesProvider, Protocol):
+    """Capabilities consumed by the run's metadata and repository context source."""
+
+
 class MergeBaseUnavailable(Exception):
     """The provider could not tell the merge base; the old side of the diff stays unknown."""
 

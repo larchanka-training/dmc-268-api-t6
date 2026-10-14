@@ -123,7 +123,7 @@ API baseline gates локально и в обязательном CI: `uv run r
 
 Каждый кейс имеет JSON metadata/ground truth, исходное состояние файла (pre-image), применимый unified `.patch` и источник; raw responses хранятся отдельно от кейса, в `test-prs-dataset/responses/`. Для real PR обязательны URL PR/commit, revision, название и URL лицензии, attribution и ручная проверка права на конкретный excerpt. Ground truth использует `path`, `start_line`, `line`, `severity`, `category` из Finding; `start_line: null` означает одну строку, иначе `< line`. Ожидаемый `verdict` выводится из severity по [PIPELINE_SPEC §11](PIPELINE_SPEC.md#11-вердикт-и-бейджи-d3): `critical/high → blocking`, иначе `medium/low → attention`, иначе `clean`. Case schema собственная; [ReviewOutput schema](../review/schemas/review-output.schema.json) применяется только к ответу модели. `git apply --check` выполняется на копии pre-image, truth якорится в добавленных строках новой стороны; answer-hint комментарии запрещены.
 
-Оценивать **сырой** ответ модели до post-processing, hunk-фильтра, severity threshold, production verifier, cap inline и публикации: иначе качество промпта скрывается правилами выпуска. Replay читает committed raw response без сети и ключа, с model ID, prompt version/SHA и run metadata. Для существующего legacy harness валиден только ответ, для которого `uv run python review/scripts/validate_findings.py <response.json>` завершился кодом 0 **и** напечатал `OK ReviewOutput`; exit 1/2 и `RepoConventionsDraft` невалидны. Это не проверка целевого v2 с evidence/manifests. Live использует PromptBuilder и `review/prompts/`, выбранную модель и внешние credentials, сохраняет raw output и ту же provenance для replay. Live запускается вручную (§2, `eval-live.yml`); закоммиченный baseline — ответы и `manifest.json` в `test-prs-dataset/responses/`, его модель и provenance описаны в [README корпуса](../test-prs-dataset/README.md); полная пересъёмка всех 24 первых ответов с frozen commit context выполнена в #82 (результат §3.2.1). LLM-as-a-judge для оценки этого raw benchmark не используется. Обязательный production verifier по #107 — часть продукта, качество которого оценивается отдельно (§3.4).
+Оценивать **сырой** ответ модели до post-processing, hunk-фильтра, severity threshold, production verifier, cap inline и публикации: иначе качество промпта скрывается правилами выпуска. Replay читает committed raw response без сети и ключа, с model ID, prompt version/SHA и run metadata. Для существующего legacy harness валиден только ответ, для которого `uv run python review/scripts/validate_findings.py <response.json>` завершился кодом 0 **и** напечатал `OK ReviewOutput`; exit 1/2 и `RepoConventionsDraft` невалидны. Это не проверка целевого v2 с evidence/manifests. Live использует PromptBuilder и `review/prompts/`, выбранную модель и внешние credentials, сохраняет raw output и ту же provenance для replay. Live запускается вручную (§2, `eval-live.yml`); закоммиченный baseline — ответы и `manifest.json` в `test-prs-dataset/responses/`, его модель и provenance описаны в [README корпуса](../test-prs-dataset/README.md); историческая съёмка 2026-10-13 использовала одиночные revision snapshots (результат §3.2.1); полная замена всех 24 ответов с проверенными PR prefixes ожидает source freeze и одобренную съёмку. LLM-as-a-judge для оценки этого raw benchmark не используется. Обязательный production verifier по #107 — часть продукта, качество которого оценивается отдельно (§3.4).
 
 ### 3.2. Однозначное сопоставление и счётчики
 
@@ -134,6 +134,15 @@ API baseline gates локально и в обязательном CI: `uv run r
 Суммировать TP/FP/FN **по всему корпусу** (micro), не усреднять проценты кейсов. `Precision = TP/(TP+FP)`, `Recall = TP/(TP+FN)`. `Critical Recall = matched critical truths / all critical truths`. По каждой категории truth показывать TP/FN, по категории prediction — FP; per-category Precision = `TP_c/(TP_c+FP_c)`, Recall = `TP_c/(TP_c+FN_c)`. Если знаменатель ноль, метрика `null`/«не определена», а не 0 или 100; счётчики всегда выводятся. `Validity = valid raw responses / all cases`; пустой корпус делает validity неопределённой. `Verdict agreement = cases with derived predicted verdict == expected_verdict / all cases`; невалидный ответ считается несогласием. Предсказанный verdict выводится из **сырого** набора findings по тому же severity-правилу, без поля модели.
 
 ### 3.2.1. Зафиксированный raw baseline #82 (2026-10-13)
+
+Этот capture сохраняется без изменения raw bytes/digests. После remediation #154
+его static inputs устарели: текущий replay показывает ожидаемый drift. Новый
+sidecar содержит проверенные API-order prefixes при совпадающих PR head/revision:
+CLEAN-03/LOG-03/SEC-04 по 1 сообщению, RES-03/SYN-04 по 20 и uncertainty marker.
+Strict schema и canonical/active binding проверяются до calls/staging; все
+canonical case.json identity inputs и shaping modules входят в static provenance.
+Новая полная 24-case съёмка ожидает source freeze; результаты ниже относятся
+только к capture 2026-10-13 и не измеряют новые prefixes.
 
 [Actions run 38468081001, attempt 1](https://github.com/larchanka-training/dmc-268-api-t6/actions/runs/38468081001)
 снял все 24 первых ответа на source SHA `80ede3cd274d745616b8a24082ff7d1d00f5b736`;
@@ -146,9 +155,9 @@ SHA-256 `9177e358c23d1a7cd8987cbf667cf8b705c2afb27eaf8b2237480e4531431d75`.
 Static digest `sha256-v1:9b28cf4c284ac07a03a5a35a62e3c2e48dc38264076a55d1a3d31724bacc2c17`,
 corpus digest `sha256-v1:1ab8ca9a16cc50c357b39e1571c73b1e6674752737c444bd8b58d3f2aab81dfa`.
 
-Пять real-кейсов получают проверенные offline snapshots сообщений точной
+Пять real-кейсов в этой исторической съёмке получили проверенные offline snapshots сообщений точной
 `source.revision` из `review/eval/pr-commit-messages.json`, а не восстановленный
-полный исторический PR commit list. Все 19 synthetic-кейсов сохраняют пустые commit
+полный исторический PR commit list. Все 19 synthetic-кейсов получили пустые commit
 tuples; SEC-05 исключён. Patch/pre-image/truth не менялись. Все 24 raw ответа и
 manifest скопированы целиком byte-for-byte; SHA-256/размер каждого ответа сверены
 с safe metadata, оба manifest идентичны. Final validation: 24/24; два offline JSON

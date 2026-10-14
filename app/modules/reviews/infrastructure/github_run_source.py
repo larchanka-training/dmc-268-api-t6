@@ -6,7 +6,6 @@ file contents come from SHA-addressed blobs, never from ``contents`` by path (SD
 
 from __future__ import annotations
 
-import json
 import logging
 from dataclasses import replace
 from typing import Any
@@ -18,8 +17,8 @@ from app.common.infrastructure.github_repository_path import commit_sha_segment
 from app.modules.reviews.application.conventions import RepositoryFile, RepositorySnapshot
 from app.modules.reviews.application.process_run import RunVcsInput, RunVcsRepository
 from app.modules.reviews.application.prompt_builder import PullRequestMeta
-from app.modules.reviews.application.run_failures import RunCancelled, RunFailure
-from app.modules.reviews.application.vcs_diff import VcsProvider
+from app.modules.reviews.application.run_failures import RunCancelled
+from app.modules.reviews.application.vcs_diff import VcsMetadataProvider
 from app.modules.reviews.infrastructure.github_vcs import (
     _REQUEST_TIMEOUT,
     InstallationTokenProvider,
@@ -41,7 +40,7 @@ class GitHubRunSource:
         *,
         client: httpx.AsyncClient,
         token_provider: InstallationTokenProvider,
-        vcs: VcsProvider,
+        vcs: VcsMetadataProvider,
         runs: RunVcsRepository,
         run_id: UUID,
         conventions_from_base: bool = False,
@@ -137,58 +136,12 @@ class GitHubRunSource:
     async def get_pull_request_meta(self, run_id: UUID) -> PullRequestMeta | None:
         run = await self._input()
         meta = (await self._vcs.get_pull_request(run.locator, checkpoint=self._checkpoint)).meta
-        path = f"{_repository_prefix(run.locator)}/pulls/{run.locator.number}/commits"
-        messages: list[str] = []
-        for page in (1, 2):
-            try:
-                await self._checkpoint()
-                token = await self._tokens.get_installation_access_token(
-                    run.locator.installation_external_id
-                )
-                await self._checkpoint()
-                async with self._client.stream(
-                    "GET",
-                    path,
-                    params={"per_page": 10, "page": page},
-                    headers=_headers(token) | {"Accept-Encoding": "identity"},
-                    timeout=_REQUEST_TIMEOUT,
-                ) as response:
-                    response.raise_for_status()
-                    # Reject compression before httpx decodes any transport chunk: a
-                    # small compressed chunk could otherwise allocate above the cap.
-                    if response.headers.get("Content-Encoding", "").strip().casefold() not in {
-                        "",
-                        "identity",
-                    }:
-                        raise RunFailure(
-                            "diff_fetch_failed",
-                            "GitHub commit response uses unsupported content encoding",
-                        )
-                    body = bytearray()
-                    async for chunk in response.aiter_bytes():
-                        if len(body) + len(chunk) > 1_048_576:
-                            raise RunFailure(
-                                "diff_fetch_failed",
-                                "GitHub commit response exceeds the 1 MiB retrieval budget",
-                            )
-                        body.extend(chunk)
-            except httpx.HTTPError as exc:
-                raise classify_vcs_error(exc) from None
-            try:
-                batch = json.loads(body)
-            except (ValueError, RecursionError):
-                raise RunFailure(
-                    "diff_fetch_failed", "GitHub commit response is malformed"
-                ) from None
-            if not isinstance(batch, list) or len(batch) > 10:
-                raise RunFailure("diff_fetch_failed", "GitHub commit response is malformed")
-            for item in batch:
-                if not isinstance(item, dict) or not isinstance(item.get("commit"), dict):
-                    raise RunFailure("diff_fetch_failed", "GitHub commit response is malformed")
-                message = item["commit"].get("message")
-                if not isinstance(message, str):
-                    raise RunFailure("diff_fetch_failed", "GitHub commit response is malformed")
-                messages.append(message if len(message) <= 500 else message[:499] + "…")
-            if len(batch) < 10:
-                break
-        return replace(meta, commit_messages=tuple(messages))
+        try:
+            prefix = await self._vcs.get_commit_messages(run.locator, checkpoint=self._checkpoint)
+        except httpx.HTTPError as exc:
+            raise classify_vcs_error(exc, fetch_error_code="commit_messages_fetch_failed") from None
+        return replace(
+            meta,
+            commit_messages=prefix.messages,
+            commit_messages_incomplete=prefix.incomplete,
+        )

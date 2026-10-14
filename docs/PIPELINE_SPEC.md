@@ -293,6 +293,7 @@ Legacy marker `<!-- ai-review findings_hash=… -->` не используетс
 | `budget_exceeded` | `failed` | локальный бюджет Run (§4.5) | нет | Превышен лимит стоимости прогона. |
 | `deadline_exceeded` | `failed` | время | нет | Прогон не уложился в лимит времени. |
 | `diff_fetch_failed` | `failed` | GitHub | да: прогон | Не удалось получить дифф из GitHub. |
+| `commit_messages_fetch_failed` | `failed` | GitHub | да: прогон | Не удалось получить сообщения коммитов PR из GitHub. |
 | `github_forbidden` | `failed` | GitHub | нет | У GitHub App нет доступа к репозиторию или PR. |
 | `github_publish_failed` | `failed` | GitHub | до 3 безопасных повторов §5.2; прогон — нет | Не удалось завершить публикацию ревью в GitHub. |
 | `gitlab_forbidden` | `failed` | GitLab | нет | check-run GitHub не вызывается |

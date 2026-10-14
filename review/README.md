@@ -82,32 +82,48 @@ run of a repository, the diff is the varying tail (`docs/SYSTEM_DESIGN.md` §10)
   with no shown content, including unselected or unavailable files. A truncated `<file>`
   ends with `[N more lines omitted]`. Counts describe source input; markers are never paths.
 
-Production commit context comes from `GitHubRunSource.get_pull_request_meta`. It reads
-at most two numeric PR-commit pages of 10 entries, retaining the first 20 messages
-in API order. Each message keeps at most 500 Unicode characters, including the
-truncation ellipsis. `Link` URLs are ignored; a full prefix does not establish a
-total omitted count. The renderer XML-escapes text and retains its defensive
-20-by-500 limits. Empty lists omit the commit block; an empty message remains an
-empty `<commit>` element.
+Production commit context comes from `GitHubRunSource.get_pull_request_meta`, which
+delegates retrieval to `HttpGitHubVcsProvider` through the commit-metadata port.
+The provider reads at most two numeric PR-commit pages of 10 entries, retaining
+first 20 messages in API order. Shared application shortening retains at most
+500 Unicode characters per message, including the ellipsis. The renderer
+XML-escapes text and retains its defensive 20-by-500 limits. `Link` URLs are never
+followed. A next relation on the final page or a full capped second page sets
+an explicit incomplete-tail flag and renders `[Additional commits may be omitted]`.
+An earlier next relation is cleared by a short complete second page. A complete
+empty list omits the block; an uncertain empty list renders the marker alone,
+and an empty message remains an empty `<commit>` element. Larger in-memory tuples
+retain the existing known-count `[N more commits omitted]` marker.
 
-A page is streamed within a 1 MiB response budget before JSON parsing. Commit
-requests require identity encoding and reject compressed responses before reading
-or decoding. Malformed JSON, oversized pages, and missing/non-string messages fail
-explicitly; HTTP failures use the existing safe classification. Installation
-checkpoints precede token acquisition and every page request, with GitHub calls
+Commit pages and blobs share a capped reader. Each commit page has a 1 MiB budget
+before strict nested Pydantic validation; identity encoding is requested, and
+other encodings are rejected before reading or decoding to prevent decompression
+allocation above that cap. Invalid pages, transport errors and rate limits use
+retryable `commit_messages_fetch_failed`; 404/nonlimited 403 remain
+`github_forbidden`. Diagnostics omit response text and credentials, Retry-After
+is preserved, and author-facing check-runs name commit messages. Installation
+checkpoints precede token acquisition and every page request; GitHub calls occur
 outside database transactions.
 
-Evaluation reads the frozen five source-revision snapshots from
-[`eval/pr-commit-messages.json`](eval/pr-commit-messages.json) offline. These are
-messages of the exact recorded revisions, rather than a complete historical PR
-commit list. All nineteen synthetic cases retain empty commit context. The
-recorder validates every snapshot and active real-case binding before any model
-call; neither live evaluation nor replay queries GitHub. The snapshot file and
-production source are fingerprinted. The complete 24-case #82 replacement was
-captured by [run 38468081001, attempt 1](https://github.com/larchanka-training/dmc-268-api-t6/actions/runs/38468081001)
-and imported byte-for-byte with no replay drift. Measured first-answer results and
-provenance are in the [corpus README](../test-prs-dataset/README.md#recorded-mistral-baseline--2026-10-13)
-and [canonical test plan](../docs/TEST_PLAN.md#321-зафиксированный-raw-baseline-82-2026-10-13).
+Evaluation reads the verified frozen API-order PR prefixes from
+[`eval/pr-commit-messages.json`](eval/pr-commit-messages.json) offline. All five PR
+heads match their cases' pinned revisions. CLEAN-03, LOG-03 and SEC-04 each retain
+one message; RES-03 and SYN-04 retain the first 20 plus the same uncertainty marker
+as production. All nineteen synthetic cases retain empty history. Sidecar schema
+validation is separate from canonical cohort and selected-case binding, and all
+preflight checks finish before any model call or staging. Custom synthetic
+subsets remain supported; new real cases require curated canonical identity and
+prefix evidence. Live evaluation and replay never query GitHub.
+
+The sidecar, production retrieval/Link shaping, recorder/schema, existing inputs,
+and every canonical `case.json` identity consulted by binding are conservatively
+fingerprinted. The committed [2026-10-13 capture](https://github.com/larchanka-training/dmc-268-api-t6/actions/runs/38468081001)
+used single source-revision snapshots and is historical evidence. Its bytes and
+digests are preserved; current replay reports expected static-input drift.
+A complete 24-case replacement with these actual prefixes is pending source
+freeze and the separately approved paid run. Historical measured results remain
+in the [corpus README](../test-prs-dataset/README.md#recorded-mistral-baseline--2026-10-13)
+and [test plan](../docs/TEST_PLAN.md#321-зафиксированный-raw-baseline-82-2026-10-13).
 
 Rendered custom rule — one block per rule, globs space-separated, checks numbered from 1;
 this example is the second rule of `rules/default-backend.v1.json`, checks shortened:

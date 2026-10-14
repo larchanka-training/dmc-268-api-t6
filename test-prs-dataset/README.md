@@ -54,7 +54,7 @@ The first command checks one case, the second all present cases. `--final` also 
 
 ## Curated corpus
 
-The 24 active inputs pass final schema, patch-application and distribution validation. [PR #68](https://github.com/larchanka-training/dmc-268-api-t6/pull/68) merged the [#66](https://github.com/larchanka-training/dmc-268-api-t6/issues/66) normalization work, including PIPELINE_SPEC §9, before the first baseline capture. Issue #66 is CLOSED; the merged normalization is no longer a pending baseline dependency. The class counts are security **4**, resource **5**, logic **5**, syntax **5**, and clean **5**. Five cases use distinct licensed real PRs, one in each class. Five separate critical truth anchors come from synthetic cases. SEC-05 was omitted after two candidate fixtures were stopped by the automatic safety filter; four security cases still meet the minimum. It has no case or response entry and is excluded from future replay/live denominators. The current recorded baseline is [Mistral via EUrouter](#recorded-mistral-baseline--2026-10-13); the earlier [Nemotron via OpenRouter measurement](#historical-nemotron-baseline--2026-10-06) is retained as historical context.
+The 24 active inputs pass final schema, patch-application and distribution validation. [PR #68](https://github.com/larchanka-training/dmc-268-api-t6/pull/68) merged the [#66](https://github.com/larchanka-training/dmc-268-api-t6/issues/66) normalization work, including PIPELINE_SPEC §9, before the first baseline capture. Issue #66 is CLOSED; the merged normalization is no longer a pending baseline dependency. The class counts are security **4**, resource **5**, logic **5**, syntax **5**, and clean **5**. Five cases use distinct licensed real PRs, one in each class. Five separate critical truth anchors come from synthetic cases. SEC-05 was omitted after two candidate fixtures were stopped by the automatic safety filter; four security cases still meet the minimum. It has no case or response entry and is excluded from future replay/live denominators. The committed historical capture is [Mistral via EUrouter](#recorded-mistral-baseline--2026-10-13); the earlier [Nemotron via OpenRouter measurement](#historical-nemotron-baseline--2026-10-06) is retained as historical context.
 
 ### Issue #53 corpus decision (2026-10-04)
 
@@ -106,26 +106,42 @@ For each case, `run_metadata.cases` records the requested `first_model` and the 
 ### Frozen commit context (#82)
 
 [`review/eval/pr-commit-messages.json`](../review/eval/pr-commit-messages.json) stores
-verified commit messages for the exact `source.revision` of CLEAN-03, LOG-03,
-RES-03, SEC-04, and SYN-04. Each record binds its case ID, source URL, revision and
-commit URL to the original message and verification evidence. These five records
-are source-revision snapshots, not a reconstructed complete historical PR commit
-list. The nineteen synthetic cases have no recorded commit history and keep empty
-commit tuples; no source or message is invented for them.
+verified API-order prefixes of five actual PR commit lists. Verification ran
+2026-10-14 11:19:37–11:20:32 UTC: head/state/count were checked before and after
+reading the numeric pages; heads remained equal to each pinned `source.revision`.
+Each record preserves original ordered SHA/message pairs, head evidence, request
+URLs/parameters, response dates/byte lengths, encoding and final-page Link data.
 
-The recorder reads the checked-in sidecar offline and validates all records and
-active real-case bindings before any model call or capture staging. Missing,
-duplicate, mismatched or malformed records fail preflight. Original messages stay
-verbatim in the sidecar; the existing prompt renderer limits each shown message
-to 500 Unicode characters including an ellipsis, matching production. LOG-03's
-878-character snapshot therefore renders as 500 characters. Live evaluation and
-replay never retrieve commit metadata from GitHub. Existing case metadata, patches,
-pre-images and ground truth remain unchanged.
+| Case | Source PR | PR commits at verification | Retained messages | Possible tail |
+| --- | --- | --- | --- | --- |
+| CLEAN-03 | pmndrs/zustand#663 | 1 | 1 | No |
+| LOG-03 | gijzelaerr/python-snap7#806 | 1 | 1 | No |
+| RES-03 | aio-libs/aiohttp#7944 | 31 | First 20 | Yes |
+| SEC-04 | pallets/flask#5632 | 1 | 1 | No |
+| SYN-04 | pmndrs/zustand#725 | 250 | First 20 | Yes |
 
-The complete 2026-10-13 capture below includes these frozen inputs. All 24 raw-first
-responses and the manifest were replaced together; the earlier Mistral measurement
-remains documented as history, with its original response bytes accessible at the
-linked historical revision.
+RES-03 starts with `e91ec9d8f5ac36c361840303b6e7a6acead50932` / `#7583`;
+SYN-04 starts with `cf511cff525d864bc93459dbed50e21bb43a3f28` /
+`imaginary code that uses uSES`. Both full second pages have `rel="next"` for page
+3; capture stops at page 2 and renders `[Additional commits may be omitted]`.
+No omitted count is inferred for the model. The nineteen synthetic cases have
+empty history. Messages remain verbatim in the sidecar; production's shared
+shortening caps each at 500 Unicode characters including ellipsis. LOG-03's
+878-character message therefore renders as 500 characters.
+
+Strict evidence-schema parsing is separate from canonical cohort and configured
+case binding. Missing, duplicate, unexpected, synthetic, mismatched or malformed
+records fail before any model call or staging. Canonical identity fields are
+read from every checked-in `case.json`, with those exact files in static pins;
+custom synthetic subsets remain supported, and new real cases require curated
+canonical identity and prefix evidence. Live evaluation and replay never query
+GitHub. Corpus case metadata, patches, pre-images and truth remain unchanged.
+
+The committed 2026-10-13 capture below used the previous single-revision snapshots.
+Its raw bytes, manifest and historical metrics are preserved, and current replay
+reports expected static-input drift. The approved complete 24-case replacement
+with these actual prefixes is pending source freeze and paid capture; no answers
+or manifest digests have been patched or mixed across captures.
 
 The manifest also stores sorted `static_inputs`, `static_digest`, and `corpus_digest`. Each digest is `sha256-v1:<64 lowercase hex>` over a SHA-256 stream beginning with the bytes `review-eval-inputs-v1` followed by a NUL byte. For every unique relative POSIX path in sorted order, the stream then contains its UTF-8 path length as an unsigned 8-byte big-endian integer, the path bytes, its file-content length in the same format, and the exact file bytes. Static inputs are the selected review system prompt, all literal `review/rules/*.json` files (including the rule schema), selected custom rule files, and these checked-in paths. Each remains in the byte-level digest because a change can affect the provider request, whether a response is accepted or retried, or which raw answer the recorder captures:
 
@@ -138,15 +154,21 @@ The manifest also stores sorted `static_inputs`, `static_digest`, and `corpus_di
 | `app/modules/reviews/application/prompt_builder.py` | Renders the system/user message envelope. |
 | `app/modules/reviews/application/review_output.py` | Parses and validates review output. |
 | `app/modules/reviews/application/run_failures.py` | Supplies the gateway's attempt deadline and retryable codes. |
-| `app/modules/reviews/infrastructure/github_run_source.py` | Retrieves and bounds production PR commit context. |
+| `app/modules/reviews/application/vcs_diff.py` | Defines provider-neutral commit-prefix/metadata ports. |
+| `app/common/infrastructure/github_link_header.py` | Shares next-relation parsing between production and evidence validation. |
+| `app/modules/reviews/infrastructure/github_run_source.py` | Carries bounded commit prefixes into run metadata. |
+| `app/modules/reviews/infrastructure/github_vcs.py` | Retrieves typed production commit pages and caps streaming. |
+| `app/modules/reviews/infrastructure/vcs_failures.py` | Classifies commit retrieval failures and retry delays. |
 | `app/modules/reviews/infrastructure/llm/answers.py` | Validates answers and prepares repair feedback. |
 | `app/modules/reviews/infrastructure/llm/gateway.py` | Controls calls, retries, repair, fallback, and budgets. |
 | `app/modules/reviews/infrastructure/llm/models.py` | Adapts gateway calls to review and conventions model ports. |
 | `app/modules/reviews/infrastructure/llm/settings.py` | Resolves model profiles, endpoints, and call policy. |
 | `app/modules/reviews/infrastructure/llm/transport.py` | Encodes provider requests and extracts response text. |
-| `review/eval/pr-commit-messages.json` | Supplies frozen source-revision messages for the five real cases. |
+| `review/eval/pr-commit-messages.json` | Supplies verified bounded PR prefixes and tail evidence. |
 | `review/schemas/review-output.schema.json` | Defines strict response format and validation. |
 | `review/scripts/eval_live.py` | Assembles each case request and selects first-call raw content. |
+| `review/scripts/commit_context.py` | Validates prefix schema and binds cohort/active identities. |
+| `test-prs-dataset/cases/*/case.json` (each canonical file) | Supplies the complete cohort identity used by sidecar binding, including subset captures. |
 | `app/modules/reviews/application/conventions_prompt.py` | Renders conventions input when a conventions prompt is supplied. |
 
 A supplied conventions prompt and its renderer are included only for that task. Byte hashing also warns on a docstring-only edit to any listed file; this conservative warning avoids missing a changed deadline or call policy. `run_failures.py` remains included because `FAST_ATTEMPT_DEADLINE` and `RETRYABLE_ERROR_CODES` are imported into the gateway path. Corpus inputs are every active `case.json`, patch, and recursive pre-image file. Every case ID maps exactly to `responses/<case-id>.json`; replay rejects unmapped extra files. Replay warns if either digest differs or a static file is missing; it never rewrites raw answers. Refresh the **entire** response set and manifest after any input edit, even if only one rule or case changes. Traversal and symlink inputs are rejected.

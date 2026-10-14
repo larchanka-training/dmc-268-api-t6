@@ -1,53 +1,346 @@
 {
-  "schema_version": 1,
-  "context_kind": "source_revision_snapshot",
-  "description": "Exact messages of the five pinned source.revision commits; not a reconstructed complete historical PR commit list. Synthetic cases have no recorded commit history.",
-  "verified_at": "2026-10-13T19:29:39.995409+00:00",
+  "schema_version": 2,
+  "context_kind": "bounded_pr_prefix",
+  "description": "Exact API-order PR prefixes from two numeric ten-entry pages at heads matching the pinned case revisions. Original messages are preserved; production shortening and conservative incomplete-tail markers apply at capture. Synthetic cases have no recorded history.",
+  "verification_started_at": "2026-10-14T11:19:37+00:00",
+  "verification_finished_at": "2026-10-14T11:20:32+00:00",
+  "retrieval": {
+    "per_page": 10,
+    "max_pages": 2,
+    "max_messages": 20,
+    "max_message_chars": 500,
+    "max_response_bytes": 1048576,
+    "accept_encoding": "identity"
+  },
   "records": [
     {
       "case_id": "CLEAN-03",
       "source_url": "https://github.com/pmndrs/zustand/pull/663",
       "revision": "2593c915195c0a75f8afbf02a5b90945721d27e1",
-      "commit_url": "https://github.com/pmndrs/zustand/commit/2593c915195c0a75f8afbf02a5b90945721d27e1",
-      "message": "refactor(core): extract react.ts from index.ts",
-      "verified_via": "https://api.github.com/repos/pmndrs/zustand/commits/2593c915195c0a75f8afbf02a5b90945721d27e1",
-      "verification": "GitHub commits REST response sha exactly equals case.json source.revision; message copied verbatim from commit.message. This is the pinned source revision, not a full historical PR commit list."
+      "head_evidence": {
+        "verified_via": "https://api.github.com/repos/pmndrs/zustand/pulls/663",
+        "before_sha": "2593c915195c0a75f8afbf02a5b90945721d27e1",
+        "after_sha": "2593c915195c0a75f8afbf02a5b90945721d27e1",
+        "state": "closed",
+        "merged": true,
+        "total_commits": 1
+      },
+      "pages": [
+        {
+          "page": 1,
+          "verified_via": "https://api.github.com/repos/pmndrs/zustand/pulls/663/commits?per_page=10&page=1",
+          "response_date": "2026-10-14T11:19:43+00:00",
+          "response_bytes": 3199,
+          "content_encoding": null,
+          "link_header": null,
+          "next_relation": false,
+          "entries": [
+            {
+              "sha": "2593c915195c0a75f8afbf02a5b90945721d27e1",
+              "message": "refactor(core): extract react.ts from index.ts"
+            }
+          ]
+        }
+      ],
+      "incomplete": false
     },
     {
       "case_id": "LOG-03",
       "source_url": "https://github.com/gijzelaerr/python-snap7/pull/806",
       "revision": "bd11af442dd0a710b816c408d4ec180a8f5e89ee",
-      "commit_url": "https://github.com/gijzelaerr/python-snap7/commit/bd11af442dd0a710b816c408d4ec180a8f5e89ee",
-      "message": "fix(server): reassemble COTP fragments and fix INT/DINT byte count (#804)\n\nTwo bugs in the pure-Python server:\n\n1. COTP fragmentation not reassembled: the server's Connection Confirm\n   omitted the TPDU size parameter, causing spec-compliant clients to\n   fall back to the ISO 8073 default of 128 bytes and fragment requests.\n   The server then tried to process each fragment as a standalone PDU.\n   Fix: parse TPDU size from the client's Connection Request, echo it\n   in the Connection Confirm, and reassemble DT fragments by looping\n   until the EOT bit is set.\n\n2. INT and DINT word lengths missing from byte-count conversion: read\n   requests using word_len=INT or word_len=DINT returned count bytes\n   instead of count*2 or count*4 bytes. Fix: add INT to the 2-byte\n   branch and DINT to the 4-byte branch in both _handle_read_area\n   and _parse_read_address.\n\nCloses #804",
-      "verified_via": "https://api.github.com/repos/gijzelaerr/python-snap7/commits/bd11af442dd0a710b816c408d4ec180a8f5e89ee",
-      "verification": "GitHub commits REST response sha exactly equals case.json source.revision; message copied verbatim from commit.message. This is the pinned source revision, not a full historical PR commit list."
+      "head_evidence": {
+        "verified_via": "https://api.github.com/repos/gijzelaerr/python-snap7/pulls/806",
+        "before_sha": "bd11af442dd0a710b816c408d4ec180a8f5e89ee",
+        "after_sha": "bd11af442dd0a710b816c408d4ec180a8f5e89ee",
+        "state": "closed",
+        "merged": true,
+        "total_commits": 1
+      },
+      "pages": [
+        {
+          "page": 1,
+          "verified_via": "https://api.github.com/repos/gijzelaerr/python-snap7/pulls/806/commits?per_page=10&page=1",
+          "response_date": "2026-10-14T11:19:43+00:00",
+          "response_bytes": 4196,
+          "content_encoding": null,
+          "link_header": null,
+          "next_relation": false,
+          "entries": [
+            {
+              "sha": "bd11af442dd0a710b816c408d4ec180a8f5e89ee",
+              "message": "fix(server): reassemble COTP fragments and fix INT/DINT byte count (#804)\n\nTwo bugs in the pure-Python server:\n\n1. COTP fragmentation not reassembled: the server's Connection Confirm\n   omitted the TPDU size parameter, causing spec-compliant clients to\n   fall back to the ISO 8073 default of 128 bytes and fragment requests.\n   The server then tried to process each fragment as a standalone PDU.\n   Fix: parse TPDU size from the client's Connection Request, echo it\n   in the Connection Confirm, and reassemble DT fragments by looping\n   until the EOT bit is set.\n\n2. INT and DINT word lengths missing from byte-count conversion: read\n   requests using word_len=INT or word_len=DINT returned count bytes\n   instead of count*2 or count*4 bytes. Fix: add INT to the 2-byte\n   branch and DINT to the 4-byte branch in both _handle_read_area\n   and _parse_read_address.\n\nCloses #804"
+            }
+          ]
+        }
+      ],
+      "incomplete": false
     },
     {
       "case_id": "RES-03",
       "source_url": "https://github.com/aio-libs/aiohttp/pull/7944",
       "revision": "ac55d6466963b7bb2834fe3d19a4f3c2a67e82a3",
-      "commit_url": "https://github.com/aio-libs/aiohttp/commit/ac55d6466963b7bb2834fe3d19a4f3c2a67e82a3",
-      "message": "Update test_cookiejar.py",
-      "verified_via": "https://api.github.com/repos/aio-libs/aiohttp/commits/ac55d6466963b7bb2834fe3d19a4f3c2a67e82a3",
-      "verification": "GitHub commits REST response sha exactly equals case.json source.revision; message copied verbatim from commit.message. This is the pinned source revision, not a full historical PR commit list."
+      "head_evidence": {
+        "verified_via": "https://api.github.com/repos/aio-libs/aiohttp/pulls/7944",
+        "before_sha": "ac55d6466963b7bb2834fe3d19a4f3c2a67e82a3",
+        "after_sha": "ac55d6466963b7bb2834fe3d19a4f3c2a67e82a3",
+        "state": "closed",
+        "merged": true,
+        "total_commits": 31
+      },
+      "pages": [
+        {
+          "page": 1,
+          "verified_via": "https://api.github.com/repos/aio-libs/aiohttp/pulls/7944/commits?per_page=10&page=1",
+          "response_date": "2026-10-14T11:20:25+00:00",
+          "response_bytes": 36082,
+          "content_encoding": null,
+          "link_header": "<https://api.github.com/repositories/13258039/pulls/7944/commits?per_page=10&page=2>; rel=\"next\", <https://api.github.com/repositories/13258039/pulls/7944/commits?per_page=10&page=4>; rel=\"last\"",
+          "next_relation": true,
+          "entries": [
+            {
+              "sha": "e91ec9d8f5ac36c361840303b6e7a6acead50932",
+              "message": "#7583"
+            },
+            {
+              "sha": "d901fcff0c012cea3aa892a9307d745c5a68187c",
+              "message": "[pre-commit.ci] auto fixes from pre-commit.com hooks\n\nfor more information, see https://pre-commit.ci"
+            },
+            {
+              "sha": "4bbf230c7e688c9eec951e5264cdee4fbf0daaeb",
+              "message": "Update aiohttp/cookiejar.py\n\nCo-authored-by: Sam Bull <aa6bs0@sambull.org>"
+            },
+            {
+              "sha": "9a8a869b022e9fba309a1e6523edb69bf1f1e594",
+              "message": "Update aiohttp/cookiejar.py\n\nCo-authored-by: Sam Bull <aa6bs0@sambull.org>"
+            },
+            {
+              "sha": "93250eb318db458dce362ba51e0c04cb667ddd5b",
+              "message": "Update aiohttp/cookiejar.py\n\nCo-authored-by: Sam Bull <aa6bs0@sambull.org>"
+            },
+            {
+              "sha": "26deaeeb6bfd597067dc03f2f7107734562d0811",
+              "message": "remove print"
+            },
+            {
+              "sha": "48f4efc843888f8f054294450c32c9c90befa746",
+              "message": "modify to suggetions"
+            },
+            {
+              "sha": "53057958c543611b70c4d0910723b65a2ee189dd",
+              "message": "[pre-commit.ci] auto fixes from pre-commit.com hooks\n\nfor more information, see https://pre-commit.ci"
+            },
+            {
+              "sha": "4fcbd0840bc79bfe6ad7560fd8ba734e82e841ce",
+              "message": "modify tests to suggestions"
+            },
+            {
+              "sha": "b176af3ae21bf1fc9d30e0664e77c2a0ae6d94bd",
+              "message": "[pre-commit.ci] auto fixes from pre-commit.com hooks\n\nfor more information, see https://pre-commit.ci"
+            }
+          ]
+        },
+        {
+          "page": 2,
+          "verified_via": "https://api.github.com/repos/aio-libs/aiohttp/pulls/7944/commits?per_page=10&page=2",
+          "response_date": "2026-10-14T11:19:44+00:00",
+          "response_bytes": 38575,
+          "content_encoding": null,
+          "link_header": "<https://api.github.com/repositories/13258039/pulls/7944/commits?per_page=10&page=1>; rel=\"prev\", <https://api.github.com/repositories/13258039/pulls/7944/commits?per_page=10&page=3>; rel=\"next\", <https://api.github.com/repositories/13258039/pulls/7944/commits?per_page=10&page=4>; rel=\"last\", <https://api.github.com/repositories/13258039/pulls/7944/commits?per_page=10&page=1>; rel=\"first\"",
+          "next_relation": true,
+          "entries": [
+            {
+              "sha": "02b6baaa06109e2f76b3fba0b7f3818670521443",
+              "message": "Update aiohttp/cookiejar.py\n\nCo-authored-by: Sam Bull <aa6bs0@sambull.org>"
+            },
+            {
+              "sha": "c7a0d3a8e2d0d66d525e8600da2213e253887f1a",
+              "message": "modify tests to suggestions"
+            },
+            {
+              "sha": "72c88db06af4371402ee090e0ba392801371f241",
+              "message": "[pre-commit.ci] auto fixes from pre-commit.com hooks\n\nfor more information, see https://pre-commit.ci"
+            },
+            {
+              "sha": "80c83e4aa8bd5fc657dca70110e18eb0503b3ad3",
+              "message": "Update tests/test_cookiejar.py\n\nCo-authored-by: Sam Bull <aa6bs0@sambull.org>"
+            },
+            {
+              "sha": "f6b4d48046a35804c3404135b32553b335387ac6",
+              "message": "modify cookiejar to handle no-path-cookie"
+            },
+            {
+              "sha": "9841d1955a15a9d12d10957cf067ae3618e32b13",
+              "message": "Nitpicks"
+            },
+            {
+              "sha": "1d5c61515eb5e65db5ca2f97e849a0613c721fff",
+              "message": "Update aiohttp/cookiejar.py\n\nCo-authored-by: Sam Bull <git@sambull.org>"
+            },
+            {
+              "sha": "736d768d8dbd621d9c2dbb8efa7924fe77c72ed6",
+              "message": "[pre-commit.ci] auto fixes from pre-commit.com hooks\n\nfor more information, see https://pre-commit.ci"
+            },
+            {
+              "sha": "c7ae0e16b423a1e39dca6b5c969a8ebdb2e8829a",
+              "message": "Update test_cookiejar.py"
+            },
+            {
+              "sha": "95e02409abdbbbedbe1f2ad7aa89121f884b7643",
+              "message": "Update 7583.feature"
+            }
+          ]
+        }
+      ],
+      "incomplete": true
     },
     {
       "case_id": "SEC-04",
       "source_url": "https://github.com/pallets/flask/pull/5632",
       "revision": "e13373f838ab34027c5a80e16a6cb8262d41eab7",
-      "commit_url": "https://github.com/pallets/flask/commit/e13373f838ab34027c5a80e16a6cb8262d41eab7",
-      "message": "enable secret key rotation",
-      "verified_via": "https://api.github.com/repos/pallets/flask/commits/e13373f838ab34027c5a80e16a6cb8262d41eab7",
-      "verification": "GitHub commits REST response sha exactly equals case.json source.revision; message copied verbatim from commit.message. This is the pinned source revision, not a full historical PR commit list."
+      "head_evidence": {
+        "verified_via": "https://api.github.com/repos/pallets/flask/pulls/5632",
+        "before_sha": "e13373f838ab34027c5a80e16a6cb8262d41eab7",
+        "after_sha": "e13373f838ab34027c5a80e16a6cb8262d41eab7",
+        "state": "closed",
+        "merged": true,
+        "total_commits": 1
+      },
+      "pages": [
+        {
+          "page": 1,
+          "verified_via": "https://api.github.com/repos/pallets/flask/pulls/5632/commits?per_page=10&page=1",
+          "response_date": "2026-10-14T11:19:43+00:00",
+          "response_bytes": 4308,
+          "content_encoding": null,
+          "link_header": null,
+          "next_relation": false,
+          "entries": [
+            {
+              "sha": "e13373f838ab34027c5a80e16a6cb8262d41eab7",
+              "message": "enable secret key rotation"
+            }
+          ]
+        }
+      ],
+      "incomplete": false
     },
     {
       "case_id": "SYN-04",
       "source_url": "https://github.com/pmndrs/zustand/pull/725",
       "revision": "9d6e7e2050a5b9b4b541f0df7708f30d74cbe760",
-      "commit_url": "https://github.com/pmndrs/zustand/commit/9d6e7e2050a5b9b4b541f0df7708f30d74cbe760",
-      "message": "Merge branch 'main' into add-hkm-types",
-      "verified_via": "https://api.github.com/repos/pmndrs/zustand/commits/9d6e7e2050a5b9b4b541f0df7708f30d74cbe760",
-      "verification": "GitHub commits REST response sha exactly equals case.json source.revision; message copied verbatim from commit.message. This is the pinned source revision, not a full historical PR commit list."
+      "head_evidence": {
+        "verified_via": "https://api.github.com/repos/pmndrs/zustand/pulls/725",
+        "before_sha": "9d6e7e2050a5b9b4b541f0df7708f30d74cbe760",
+        "after_sha": "9d6e7e2050a5b9b4b541f0df7708f30d74cbe760",
+        "state": "closed",
+        "merged": true,
+        "total_commits": 250
+      },
+      "pages": [
+        {
+          "page": 1,
+          "verified_via": "https://api.github.com/repos/pmndrs/zustand/pulls/725/commits?per_page=10&page=1",
+          "response_date": "2026-10-14T11:20:25+00:00",
+          "response_bytes": 32180,
+          "content_encoding": null,
+          "link_header": "<https://api.github.com/repositories/180328715/pulls/725/commits?per_page=10&page=2>; rel=\"next\", <https://api.github.com/repositories/180328715/pulls/725/commits?per_page=10&page=25>; rel=\"last\"",
+          "next_relation": true,
+          "entries": [
+            {
+              "sha": "cf511cff525d864bc93459dbed50e21bb43a3f28",
+              "message": "imaginary code that uses uSES"
+            },
+            {
+              "sha": "5570b10b81db6601de320913997b849303bac4eb",
+              "message": "revert backward compatibility code as this is not going to be v4"
+            },
+            {
+              "sha": "b03b226eb2c45873c75fa820d4bcf34d89fc505d",
+              "message": "use use-sync-external-store"
+            },
+            {
+              "sha": "811228584323780940acc9586074a82f9b72a3e7",
+              "message": "revert to react 17"
+            },
+            {
+              "sha": "50f2963ba5ad2e8de04c2f704a28d5458b6864ae",
+              "message": "handle error by our own"
+            },
+            {
+              "sha": "94d9d4ae3d78c302c678651387fc10e94eebde25",
+              "message": "v4.0.0-alpha.2"
+            },
+            {
+              "sha": "d36611b2e89cbfcc9af3c3490f22f99a0795375b",
+              "message": "fix&refactor a bit"
+            },
+            {
+              "sha": "453e59a439227802ba52dff3c39a5e7d37754151",
+              "message": "Merge branch 'main' into use-sync-external-store"
+            },
+            {
+              "sha": "ef89673a5d8c06b74d8ebb497b3c1d4af35bf5fd",
+              "message": "update uSES experimental package"
+            },
+            {
+              "sha": "d61a0b7de4c3371e111a70afc931247c107b9b27",
+              "message": "remove error propagation hack"
+            }
+          ]
+        },
+        {
+          "page": 2,
+          "verified_via": "https://api.github.com/repos/pmndrs/zustand/pulls/725/commits?per_page=10&page=2",
+          "response_date": "2026-10-14T11:19:43+00:00",
+          "response_bytes": 32231,
+          "content_encoding": null,
+          "link_header": "<https://api.github.com/repositories/180328715/pulls/725/commits?per_page=10&page=1>; rel=\"prev\", <https://api.github.com/repositories/180328715/pulls/725/commits?per_page=10&page=3>; rel=\"next\", <https://api.github.com/repositories/180328715/pulls/725/commits?per_page=10&page=25>; rel=\"last\", <https://api.github.com/repositories/180328715/pulls/725/commits?per_page=10&page=1>; rel=\"first\"",
+          "next_relation": true,
+          "entries": [
+            {
+              "sha": "ec117e68752a643d4835bfc0f2ca6b588ffb1f86",
+              "message": "update size snapshot"
+            },
+            {
+              "sha": "e2081c803dbce3211eb6cb1f109de6e5eda166a9",
+              "message": "update uSES and add dts"
+            },
+            {
+              "sha": "1fee70e838f5b2c1da9e4345c1d7eb067209f815",
+              "message": "split react.ts and no export wild"
+            },
+            {
+              "sha": "9aaeb5e46e0031c15857384bcd81e571f28403e9",
+              "message": "split useStore impl"
+            },
+            {
+              "sha": "a914052ce5ec3437c49dea53352c003bf45f6cdc",
+              "message": "context to follow the new api, export wild again"
+            },
+            {
+              "sha": "902145674e65bd20e7b52d90449a831be58c9349",
+              "message": "v4.0.0-alpha.3"
+            },
+            {
+              "sha": "b9a70f2700264c1edc24d902fb98ae805f1acd65",
+              "message": "add missing await"
+            },
+            {
+              "sha": "98c59d36caeda9bbebc18c02dfec1705d4938cf0",
+              "message": "merge main"
+            },
+            {
+              "sha": "c9c8ae9e48e2ae6c99a9176a3956d86b2842093d",
+              "message": "merge main"
+            },
+            {
+              "sha": "cc391bc3f119ff5f0659da9d9d829704a2cb41f8",
+              "message": "update uSES"
+            }
+          ]
+        }
+      ],
+      "incomplete": true
     }
   ]
 }

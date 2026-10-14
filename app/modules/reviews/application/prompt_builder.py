@@ -84,6 +84,7 @@ class PullRequestMeta:
     is_fork: bool
     head_sha: str | None = None
     commit_messages: tuple[str, ...] = ()
+    commit_messages_incomplete: bool = False
 
 
 @dataclass(frozen=True)
@@ -218,12 +219,14 @@ class PromptBuilder:
         elements = [_element(name, _text(value)) for name, value in values]
         if meta.head_sha is not None:
             elements.append(_element("head_sha", _text(meta.head_sha)))
-        if meta.commit_messages:
+        if meta.commit_messages or meta.commit_messages_incomplete:
             shown = meta.commit_messages[:MAX_COMMIT_MESSAGES]
-            commits = [_element("commit", _text(_shorten(item))) for item in shown]
+            commits = [_element("commit", _text(shorten_commit_message(item))) for item in shown]
             if len(meta.commit_messages) > len(shown):
                 hidden = len(meta.commit_messages) - len(shown)
                 commits.append(_element("commit", f"[{hidden} more commits omitted]"))
+            if meta.commit_messages_incomplete:
+                commits.append(_element("commit", "[Additional commits may be omitted]"))
             elements.append(_container("commit_messages", "\n".join(commits)))
         return _container("pr_meta", "\n".join(elements))
 
@@ -248,7 +251,8 @@ def render_changed_file(file: ChangedFile) -> str:
     return f"<file {attributes}>\n" + "\n".join(body) + "\n</file>"
 
 
-def _shorten(message: str) -> str:
+def shorten_commit_message(message: str) -> str:
+    """Bound commit text by Unicode characters, including its truncation ellipsis."""
     if len(message) <= MAX_COMMIT_MESSAGE_CHARS:
         return message
     return message[: MAX_COMMIT_MESSAGE_CHARS - 1] + "…"

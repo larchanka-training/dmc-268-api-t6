@@ -21,19 +21,30 @@ from tests.test_eval_live import (
 
 SOURCE = "app/modules/reviews/infrastructure/github_run_source.py"
 SIDECAR = "review/eval/pr-commit-messages.json"
+SHAPING_INPUTS = (
+    SOURCE,
+    SIDECAR,
+    "app/modules/reviews/infrastructure/github_vcs.py",
+    "app/modules/reviews/application/vcs_diff.py",
+    "app/modules/reviews/infrastructure/vcs_failures.py",
+    "review/scripts/commit_context.py",
+    "app/common/infrastructure/github_link_header.py",
+    "test-prs-dataset/cases/SYN-04/case.json",
+)
 
 
 def capture_repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     payload = json.loads((REPO_ROOT / SIDECAR).read_text(encoding="utf-8"))
     repo = commit_context_repo(tmp_path, monkeypatch, payload)
-    # Copy independently of the pin list, so a missing provenance pin is observable.
-    source = repo / SOURCE
-    source.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(REPO_ROOT / SOURCE, source)
+    # Copy independently of the pin list, so missing pins are observable.
+    for relative in SHAPING_INPUTS:
+        source = repo / relative
+        source.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(REPO_ROOT / relative, source)
     return repo
 
 
-@pytest.mark.parametrize("changed", [SOURCE, SIDECAR])
+@pytest.mark.parametrize("changed", SHAPING_INPUTS)
 def test_each_commit_shaping_input_causes_replay_drift_without_rewriting_capture(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -51,16 +62,20 @@ def test_each_commit_shaping_input_causes_replay_drift_without_rewriting_capture
     )
 
     target = repo / changed
-    if changed == SOURCE:
+    if changed.endswith(".py"):
         target.write_bytes(target.read_bytes() + b"\n# Changed retrieval contract.\n")
     else:
         payload = json.loads(target.read_text(encoding="utf-8"))
-        payload["records"][0]["message"] += " changed snapshot"
+        if changed == SIDECAR:
+            payload["records"][0]["pages"][0]["entries"][0]["message"] += " changed prefix"
+        else:
+            payload["source"]["revision"] = "f" * 40
         target.write_text(json.dumps(payload), encoding="utf-8")
 
     report = replay(root, prompt_root=repo)
 
     assert report["warnings"] == ["Static input digest mismatch; refresh the complete baseline"]
+    assert changed in manifest["static_inputs"]
     assert SOURCE in manifest["static_inputs"]
     assert SIDECAR in manifest["static_inputs"]
     assert "review/scripts/eval_live.py" in manifest["static_inputs"]
