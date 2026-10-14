@@ -21,9 +21,6 @@ from app.modules.integrations.webhooks.infrastructure.github_current_pull_reques
 from app.modules.integrations.webhooks.infrastructure.github_installation_tree_provider import (
     GitHubAppInstallationAccessTokenProvider,
 )
-from app.modules.integrations.webhooks.infrastructure.github_reviewer_timeline import (
-    HttpGitHubReviewerTimelineProvider,
-)
 from app.modules.reviews.application.project_github_pull_request import (
     ProjectGitHubPullRequest,
     PullRequestEvent,
@@ -31,8 +28,6 @@ from app.modules.reviews.application.project_github_pull_request import (
     PullRequestProjectionStatus,
     PullRequestProviderCheckpoint,
     PullRequestState,
-    ReviewerTimelineSnapshot,
-    TimelineLifecycle,
 )
 from app.modules.reviews.infrastructure.github_pull_request_projection import (
     SqlAlchemyPullRequestProjectionLock,
@@ -87,7 +82,7 @@ def event(action: str) -> PullRequestEvent:
 @dataclass
 class Provider:
     factory: async_sessionmaker[AsyncSession]
-    retire_after_timeline: bool = False
+    retire_during_current: bool = False
     rebind_during_current: bool = False
     calls: list[str] = field(default_factory=list)
 
@@ -100,11 +95,11 @@ class Provider:
             )
         self.calls.append(name)
 
-    async def snapshot(
-        self, event: PullRequestEvent, bot_login: str, *, checkpoint: PullRequestProviderCheckpoint
-    ) -> ReviewerTimelineSnapshot:
-        await self.enter_provider("timeline")
-        if self.retire_after_timeline:
+    async def get_current(
+        self, event: PullRequestEvent, *, checkpoint: PullRequestProviderCheckpoint
+    ) -> PullRequestEvent:
+        await self.enter_provider("current")
+        if self.retire_during_current:
             async with self.factory.begin() as session:
                 await session.execute(
                     text(
@@ -113,12 +108,6 @@ class Provider:
                     ),
                     {"id": INSTALL_A},
                 )
-        return ReviewerTimelineSnapshot(None, TimelineLifecycle(11, _NOW, "closed", 0))
-
-    async def get_current(
-        self, event: PullRequestEvent, *, checkpoint: PullRequestProviderCheckpoint
-    ) -> PullRequestEvent:
-        await self.enter_provider("current")
         if self.rebind_during_current:
             await self.rebind()
         return event
@@ -161,7 +150,6 @@ def test_projection_provider_reads_refuse_retired_source_and_keep_active_baselin
                 uow_factory=lambda: SqlAlchemyPullRequestProjectionUnitOfWork(factory),
                 bot_login="review-bot",
                 current_provider=provider,
-                reviewer_timeline_provider=provider,
                 projection_lock=SqlAlchemyPullRequestProjectionLock(engine),
             )
             request = event(action)
@@ -173,9 +161,7 @@ def test_projection_provider_reads_refuse_retired_source_and_keep_active_baselin
                 if retired
                 else PullRequestProjectionStatus.PROJECTED
             )
-            assert provider.calls == (
-                [] if retired else ["timeline", "current"] if action == "closed" else ["current"]
-            )
+            assert provider.calls == ([] if retired else ["current"])
             async with factory() as session:
                 row = (
                     await session.execute(
@@ -195,27 +181,40 @@ def test_projection_provider_reads_refuse_retired_source_and_keep_active_baselin
 
 
 @pytest.mark.integration
-def test_retiring_after_timeline_suppresses_next_current_provider_phase(
+@pytest.mark.parametrize("action", ["synchronize", "closed", "labeled"])
+def test_retiring_during_current_read_suppresses_projection_and_cancellation(
     projection_env: Env,
+    action: str,
 ) -> None:
     async def exercise() -> None:
         engine = projection_env.engine()
         factory = async_sessionmaker(engine, expire_on_commit=False)
-        provider = Provider(factory, retire_after_timeline=True)
+        provider = Provider(factory, retire_during_current=True)
         try:
             projector = ProjectGitHubPullRequest(
                 uow_factory=lambda: SqlAlchemyPullRequestProjectionUnitOfWork(factory),
                 bot_login="review-bot",
                 current_provider=provider,
-                reviewer_timeline_provider=provider,
                 projection_lock=SqlAlchemyPullRequestProjectionLock(engine),
             )
             assert (
-                await projector.execute(event("closed"))
+                await projector.execute(
+                    PullRequestLabelEvent(event(action), "ai-review")
+                    if action == "labeled"
+                    else event(action)
+                )
                 is PullRequestProjectionStatus.DISABLED_REPOSITORY
             )
-            assert provider.calls == ["timeline"]
+            assert provider.calls == ["current"]
             async with factory() as session:
+                assert (
+                    await session.execute(
+                        text(
+                            "SELECT title,head_sha,ai_review_labeled FROM code_changes WHERE id=:id"
+                        ),
+                        {"id": PR_NEW},
+                    )
+                ).one() == ("PR", HEAD, False)
                 assert (
                     await session.scalar(
                         text("SELECT state FROM runs WHERE id=:id"), {"id": RUN_ATTEMPTED}
@@ -229,7 +228,7 @@ def test_retiring_after_timeline_suppresses_next_current_provider_phase(
 
 
 @pytest.mark.integration
-@pytest.mark.parametrize("action", ["synchronize", "labeled"])
+@pytest.mark.parametrize("action", ["synchronize", "closed", "labeled"])
 @pytest.mark.parametrize("in_flight", [False, True])
 def test_inflight_source_read_cannot_modify_or_cancel_rebound_target_history(
     projection_env: Env,
@@ -350,22 +349,16 @@ def test_unknown_source_preserves_repository_refusal_without_provider_reads(
 
 
 @pytest.mark.integration
-@pytest.mark.parametrize("phase", ["current", "label", "timeline_token", "timeline_page"])
+@pytest.mark.parametrize("phase", ["current", "closed", "label"])
 @pytest.mark.parametrize("retire", [False, True])
-def test_projection_stops_next_http_after_token_or_timeline_page_retirement(
+def test_projection_stops_current_http_after_token_retirement(
     projection_env: Env, phase: str, retire: bool
 ) -> None:
     async def exercise() -> None:
         engine = projection_env.engine()
         factory = async_sessionmaker(engine, expire_on_commit=False)
         calls: list[str] = []
-        action = (
-            "closed"
-            if phase.startswith("timeline")
-            else "labeled"
-            if phase == "label"
-            else "synchronize"
-        )
+        action = "labeled" if phase == "label" else "closed" if phase == "closed" else "synchronize"
         request_event = replace(event(action), repository_full_name="octo/a")
 
         async def retire_source() -> None:
@@ -388,26 +381,11 @@ def test_projection_stops_next_http_after_token_or_timeline_page_retirement(
             if path.endswith("/access_tokens"):
                 calls.append("token")
                 assert path == "/app/installations/17/access_tokens"
-                if retire and phase != "timeline_page":
+                if retire:
                     await retire_source()
                 return httpx.Response(
                     201, json={"token": "token", "expires_at": "2030-01-01T00:00:00Z"}
                 )
-            if path.endswith("/timeline"):
-                page = int(request.url.params["page"])
-                calls.append(f"timeline{page}")
-                if retire and phase == "timeline_page" and page == 1:
-                    await retire_source()
-                indices = range(1, 101) if phase == "timeline_page" else range(1, 2)
-                items = (
-                    [
-                        {"id": index, "event": "closed", "created_at": _NOW.isoformat()}
-                        for index in indices
-                    ]
-                    if page == 1
-                    else []
-                )
-                return httpx.Response(200, json=items)
             calls.append("current")
             assert path == "/repos/octo/a/pulls/3"
             return httpx.Response(
@@ -421,7 +399,7 @@ def test_projection_stops_next_http_after_token_or_timeline_page_retirement(
                     "user": {"login": "octocat"},
                     "head": {"ref": "feature", "sha": "f" * 40},
                     "base": {"ref": "main", "sha": "b" * 40},
-                    "state": "closed" if phase.startswith("timeline") else "open",
+                    "state": "closed" if phase == "closed" else "open",
                     "merged": False,
                     "updated_at": _NOW.isoformat(),
                     "labels": [{"name": "ai-review"}],
@@ -456,9 +434,6 @@ def test_projection_stops_next_http_after_token_or_timeline_page_retirement(
                     current_provider=HttpGitHubCurrentPullRequestProvider(
                         client=client, token_provider=tokens
                     ),
-                    reviewer_timeline_provider=HttpGitHubReviewerTimelineProvider(
-                        client=client, token_provider=tokens
-                    ),
                 )
                 result = await projector.execute(
                     PullRequestLabelEvent(request_event, "ai-review")
@@ -471,17 +446,9 @@ def test_projection_stops_next_http_after_token_or_timeline_page_retirement(
                 else PullRequestProjectionStatus.PROJECTED
             )
             if retire:
-                assert calls == (["token", "timeline1"] if phase == "timeline_page" else ["token"])
+                assert calls == ["token"]
             else:
-                assert (
-                    calls
-                    == {
-                        "current": ["token", "current"],
-                        "label": ["token", "current"],
-                        "timeline_token": ["token", "timeline1", "token", "current"],
-                        "timeline_page": ["token", "timeline1", "timeline2", "token", "current"],
-                    }[phase]
-                )
+                assert calls == ["token", "current"]
             async with factory() as session:
                 after_pr = await session.scalar(
                     text("SELECT row_to_json(c) FROM code_changes c WHERE id=:id"), {"id": PR_NEW}
@@ -495,9 +462,9 @@ def test_projection_stops_next_http_after_token_or_timeline_page_retirement(
                             {"id": PR_NEW},
                         )
                     ).one() == (
-                        "PR" if phase.startswith("timeline") else "Fresh provider title",
+                        "PR" if phase == "closed" else "Fresh provider title",
                         "f" * 40,
-                        "closed" if phase.startswith("timeline") else "open",
+                        "closed" if phase == "closed" else "open",
                     )
                 after_runs = (
                     (await session.execute(text("SELECT row_to_json(r) FROM runs r ORDER BY id")))
@@ -515,7 +482,7 @@ def test_projection_stops_next_http_after_token_or_timeline_page_retirement(
                         )
                     ).one() == (
                         "cancelled",
-                        "pr_closed" if phase.startswith("timeline") else "superseded",
+                        "pr_closed" if phase == "closed" else "superseded",
                     )
                     assert [row for row in after_runs if row["id"] != str(RUN_ATTEMPTED)] == [
                         row for row in before_runs if row["id"] != str(RUN_ATTEMPTED)

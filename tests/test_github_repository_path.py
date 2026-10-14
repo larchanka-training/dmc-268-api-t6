@@ -41,9 +41,6 @@ from app.modules.integrations.webhooks.infrastructure.github_repository_details 
 from app.modules.integrations.webhooks.infrastructure.github_repository_labels import (
     GitHubRepositoryLabelProvider,
 )
-from app.modules.integrations.webhooks.infrastructure.github_reviewer_timeline import (
-    HttpGitHubReviewerTimelineProvider,
-)
 from app.modules.repositories.application.installation_repositories import RepositorySnapshot
 from app.modules.reviews.application.check_runs import CheckRunTarget, CheckRunView
 from app.modules.reviews.application.process_run import RunVcsInput
@@ -315,9 +312,6 @@ def _snapshot(full_name: str, default_branch: str = "main") -> RepositorySnapsho
 
 
 _WEBHOOK_SINKS: dict[str, Callable[[httpx.AsyncClient, _Tokens, str], Awaitable[object]]] = {
-    "reviewer-timeline": lambda client, tokens, full_name: HttpGitHubReviewerTimelineProvider(
-        client=client, token_provider=tokens
-    ).snapshot(_pull_request_event(full_name), "reviewer[bot]", checkpoint=provider_checkpoint),
     "current-pull-request": lambda client, tokens, full_name: HttpGitHubCurrentPullRequestProvider(
         client=client, token_provider=tokens
     ).get_current(_pull_request_event(full_name), checkpoint=provider_checkpoint),
