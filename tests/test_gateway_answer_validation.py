@@ -45,7 +45,7 @@ CORPUS = Path(__file__).parent / "fixtures" / "review_output"
 VALID = sorted((CORPUS / "valid").glob("*.json"))
 NORMALIZABLE = sorted((CORPUS / "normalizable").glob("*.json"))
 # The body prefix <-> rule_name binding is repaired by the post-processor at runtime
-# (review/postprocess/lint-filter.md, step 6), so the gateway accepts it (§9 table).
+# (review/postprocess/lint-filter.md, step 7), so the gateway accepts it (§9 table).
 REPAIRED_LATER = {"rule-name-without-prefix.json"}
 INVALID = sorted(
     path for path in (CORPUS / "invalid").glob("*.json") if path.name not in REPAIRED_LATER

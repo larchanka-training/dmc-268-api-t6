@@ -120,11 +120,12 @@ repository's own rules as a new version. A rule's `name` is quoted verbatim in t
 ## Post-processing hand-off
 
 The model's JSON is parsed and schema-checked by the backend (JSON shape, enums, lengths —
-not the attribution binding, which is repaired by the filter, step 6), then passed through
+not the attribution binding, which is repaired by the filter, step 7), then passed through
 the filter specified in [`postprocess/lint-filter.md`](postprocess/lint-filter.md) with the
-values of `postprocess/lint-filter-patterns.json`: lint-class drop, dedup, confidence
-threshold, hunk validation, inline cap, attribution consistency. Its buckets `inline`,
-`body_only` and `dropped` feed publication; a dropped finding is never published.
+values of `postprocess/lint-filter-patterns.json`: lint-class drop, dedup, severity
+threshold, confidence threshold, hunk validation, inline cap, attribution consistency. Its
+buckets `inline`, `body_only` and `dropped` feed publication; a dropped finding is never
+published.
 
 ## Evaluation
 

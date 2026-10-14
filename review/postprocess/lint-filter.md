@@ -12,7 +12,7 @@ model call, no network. The backend owns the implementation; this file owns the 
 - `ReviewOutput` as returned by the model and already parsed and schema-checked by the
   backend (`findings[]`, `summary`). A malformed answer never reaches this filter.
   Attribution consistency (a prefix that names no rule, or a `rule_name` the body does not
-  quote) is not a schema error: it reaches step 6 and is repaired there.
+  quote) is not a schema error: it reaches step 7 and is repaired there.
   `scripts/validate_findings.py` rejects the same case deliberately — it is the strict gate
   for proof-runs and fixtures, not the runtime contract.
 - The run's diff: for every changed file, the set of new-version line numbers that lie
@@ -24,6 +24,10 @@ model call, no network. The backend owns the implementation; this file owns the 
   lookbehind, and is applied with `re.search` and `re.IGNORECASE` to `title + "\n" + body`.
 - Optionally a repository setting for the inline cap; `max_inline` is the default and the
   upper bound.
+- Optionally the repository `severity_threshold` (`all | warning | critical`, default
+  `all`), the lowest published severity group: `all` publishes all five severities,
+  `warning` publishes `critical`, `high`, `medium` and `low`, `critical` publishes
+  `critical` and `high`.
 
 ## Outputs
 
@@ -32,17 +36,17 @@ Three buckets that together contain every input finding exactly once:
 - `inline` — findings published as inline review comments, at most `max_inline`, ordered.
 - `body_only` — findings rendered into the review body instead of inline comments.
 - `dropped` — findings not published, each with a `drop_reason`: `lint_pattern`,
-  `duplicate`, `unknown_path`.
+  `duplicate`, `severity_threshold`, `unknown_path`.
 
 The filter never edits `title`, `severity`, `category`, `confidence` or `suggestion`, and
-edits `body` in one case only: step 6 strips a prefix that names no rule. Otherwise it may
-only move a finding between buckets, set `drop_reason`, clear `rule_name` (step 6) and
-clear `start_line` (step 4).
+edits `body` in one case only: step 7 strips a prefix that names no rule. Otherwise it may
+only move a finding between buckets, set `drop_reason`, clear `rule_name` (step 7) and
+clear `start_line` (step 5).
 
 ## Pipeline
 
 Run the steps in this order; each step sees the findings the previous step left in play. In
-play means not dropped: a `body_only` finding stays in play and still passes steps 4 and 6.
+play means not dropped: a `body_only` finding stays in play and still passes steps 5 and 7.
 
 1. **Lint drop.** Let `text = title + "\n" + body`. Drop the finding with reason
    `lint_pattern` when any `drop_if_any` pattern matches `text`, unless a `keep_if_any`
@@ -53,18 +57,21 @@ play means not dropped: a `body_only` finding stays in play and still passes ste
    trimmed. For each key keep the finding with the highest severity, then the highest
    `confidence`, then the earliest position in the model's answer; drop the others with
    reason `duplicate`.
-3. **Confidence threshold.** `confidence < min_confidence` moves the finding to `body_only`.
-4. **Hunk validation.** A `path` that is not among the run's changed files drops the finding
+3. **Severity threshold.** Drop the finding with reason `severity_threshold` when its
+   `severity` is not published by the repository's `severity_threshold` (see Inputs). With
+   `all` nothing is dropped. The cap in step 6 counts only findings that pass this step.
+4. **Confidence threshold.** `confidence < min_confidence` moves the finding to `body_only`.
+5. **Hunk validation.** A `path` that is not among the run's changed files drops the finding
    with reason `unknown_path`. A `line` outside every hunk of that file (the extra context
    lines included) moves the finding to `body_only`. A `start_line` that is not inside a
    hunk, or not smaller than `line`, is cleared to `null`; the finding stays where it is. A
    finding in `body_only` is published without its `suggestion`.
-5. **Cap.** Sort the findings still `inline` by severity (`critical`, `high`, `medium`, `low`,
+6. **Cap.** Sort the findings still `inline` by severity (`critical`, `high`, `medium`, `low`,
    `info`), then by `confidence` descending, then by position in the model's answer. The
    first `N` stay `inline`, where `N` is the smaller of `max_inline` and the repository
    setting; the rest move to `body_only` and keep that order. A finding already in
-   `body_only` (steps 3 and 4) is never promoted back into the cap.
-6. **Attribution consistency.** `rule_name` stays set only when all three hold: `body`
+   `body_only` (steps 4 and 5) is never promoted back into the cap.
+7. **Attribution consistency.** `rule_name` stays set only when all three hold: `body`
    starts with `According to custom instructions in '`, the name quoted between the first
    pair of single quotes equals `rule_name`, and `rule_name` is one of the run's rule names.
    Otherwise `rule_name` is cleared to `null`. A `body` that carries the prefix while
@@ -81,6 +88,9 @@ for f in findings:
        and f.severity not in {critical, high}:
         drop(f, "lint_pattern")
 dedup by (f.path, f.line, normalize(f.title)); keep best(severity, confidence, position)
+for f in not_dropped:
+    if f.severity not in published_severities[severity_threshold]:
+        drop(f, "severity_threshold")
 for f in not_dropped:
     if f.confidence < min_confidence: to_body(f)
     if f.path not in changed_files: drop(f, "unknown_path")
@@ -103,7 +113,9 @@ The backend renders `body_only` findings and the model's `summary` into the sing
 body, in the order the cap step produced, and truncates the body to 4000 characters. Inline
 findings become one review comment each, anchored at `line` (and `start_line` when set) on
 the new version of the file. A finding in `dropped` is stored with its `drop_reason` and
-never published.
+never published. When step 3 dropped N > 0 findings, the overview at the top of the body
+shows `**Below severity threshold (<value>):** N` between `**Risk summary:**` and
+`**Checked files:**`; with N = 0 the line is omitted.
 
 ## Expected behaviour (cases for the backend's unit tests)
 
@@ -113,9 +125,10 @@ never published.
 - `title: "Line too long hides an SQL injection"`, severity `critical` — kept (severity).
 - Two findings with the same `path`, `line` and titles `"Missing null check"` and
   `"missing null-check"` — one kept, one dropped as `duplicate`.
+- `severity_threshold: critical`, severity `medium` — dropped, `severity_threshold`.
 - `confidence: 0.4` — `body_only`, even when the line is inside a hunk.
 - `line` not inside any hunk of its file — `body_only`, `suggestion` not published.
-- 14 findings still `inline` after steps 1–4 with `max_inline: 10` — 10 `inline`, 4 `body_only`.
+- 14 findings still `inline` after steps 1–5 with `max_inline: 10` — 10 `inline`, 4 `body_only`.
 - `rule_name: "Naming Consistency"` with a `body` that does not start with the prefix —
   published with `rule_name: null`.
 - `rule_name: null` with a `body` that starts with the prefix — prefix stripped, `body_only`.
