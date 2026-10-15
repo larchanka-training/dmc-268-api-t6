@@ -275,12 +275,17 @@ The AGENTS rule is per file. Then update the documentation:
 
 **Acceptance criteria:**
 
-- [ ] The coordination comments are posted on every open PR that touches
-  `docs/SYSTEM_DESIGN.md` before the docs commit. The comment links are recorded here.
-- [ ] AC7: SD §11, `docs/erd/erd.mmd` and BACKEND_ARCHITECTURE describe the five tables
+- [x] The coordination comments are posted on every open PR that touches
+  `docs/SYSTEM_DESIGN.md` before the docs commit. The comment links are recorded here:
+  - [#124](https://github.com/larchanka-training/dmc-268-api-t6/pull/124#issuecomment-6191839769);
+  - [#148](https://github.com/larchanka-training/dmc-268-api-t6/pull/148#issuecomment-6191840574);
+  - [#155](https://github.com/larchanka-training/dmc-268-api-t6/pull/155#issuecomment-6191841183).
+- [x] AC7: SD §11, `docs/erd/erd.mmd` and BACKEND_ARCHITECTURE describe the five tables
   and the owner module `code_index`. Each claim matches the code from Tasks 2–4.
-- [ ] `erd.svg` opens and contains `CODE_INDEX_STATES`, or the regeneration failure is
-  flagged for the PR body.
+  TEST_PLAN §3.5 is unchanged: its rows name no test locations.
+- [x] `erd.svg` opens and contains `CODE_INDEX_STATES`, or the regeneration failure is
+  flagged for the PR body. Regenerated with `@mermaid-js/mermaid-cli@12.0.0` (published
+  2026-09-24) and `-b transparent`, as the previous svg.
 
 **Verification:**
 

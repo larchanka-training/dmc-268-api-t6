@@ -1275,7 +1275,8 @@ blob ревизии PR, и сохранённая копия с default branch �
 
 Базовые сущности — из `BACKEND_ARCHITECTURE.md`; здесь поля целевого дизайна.
 Дополнения #107 ниже — требования к будущим миграциям и API, не описание уже
-существующих таблиц. Полные структуры — RULES_FORMAT_SPEC §7–8 и
+существующих таблиц; строки #141, напротив, описывают таблицы индекса графа,
+созданные ревизией `20261015_0032`. Полные структуры — RULES_FORMAT_SPEC §7–8 и
 CONTEXT_AND_VERIFICATION_SPEC §5–8, §10.
 
 | Сущность (роль 6) | Требуемые поля |
@@ -1299,6 +1300,8 @@ CONTEXT_AND_VERIFICATION_SPEC §5–8, §10.
 | **#107:** `review_candidates`, `verification_results` | исходный v2 finding, candidate_id/digest, решения фильтров; решение verifier по каждому переданному ID и resolved refs |
 | **#107:** `final_review_results` | run_id UNIQUE, версия, supported findings, counts, coverage, verdict, backend summary и digest; immutable после publishing |
 | **#107:** `publication_plans/items` | точные payloads, keys/ordinals, отдельные body-only variants, receipts и состояние доставки; явный finding → remote comment mapping |
+| **#141:** `code_index_states` | одна строка на репозиторий: `repository_id` (PK, FK `repositories` `ON DELETE CASCADE`); `generation` и номера публикаций `reserved_publication`, `published_publication`, `floor_publication` (BIGINT, по умолчанию 0); `status` (PG enum `code_index_status`: `empty\|building\|ready\|failed`, по умолчанию `empty`), `purge_reason` (`ttl\|removed\|disabled`, только при `empty`), `error_code` (задан ровно при `failed`), `last_error_code`; `indexed_commit_sha`, `target_commit_sha`, `published_at`, `last_used_at`; lease — `lease_token` и `lease_expires_at` (оба заданы или оба NULL); счётчики `file_count`, `symbol_count`, `edge_count` (считает публикация); версии `extractor_version`, `resolver_version`, `parser_profile_version`, `limits_profile_version`; `downloaded_bytes`, `build_duration_ms`, `github_request_count`; `created_at`, `updated_at` |
+| **#141:** `code_index_files`, `code_index_symbols`, `code_index_edges`, `code_index_imports` | строки графа без суррогатных id: натуральный PK — `(repository_id, generation, valid_from, path)` плюс ключ строки, nullable `valid_to` закрывает строку более поздней публикацией. Файл — `blob_sha`. Символ — ключ `qualified_name`, `kind` (`code_index_symbol_kind` из `SymbolKind`), `disambiguator` (порядковый номер среди дублей, уникальный — 0), `start_line ≥ 1`, `end_line ≥ start_line`; `defines` (ADR §3) — сама строка символа, не ребро. Ребро — ключ `kind` (`imports\|uses_imported`), `target_path`, `target_name` (`''` ровно у `imports`), индекс `ix_code_index_edges_target`. Запись импорта — ключ `specifier`, `resolution` (`code_index_import_resolution` из `ImportResolution`, в том числе неразрешённые исходы), nullable `target_path`, индекс `ix_code_index_imports_target`. Текста кода, сигнатур и embeddings нет |
 | **После MVP:** `FeedbackSignal` | `finding_id`, `kind: resolved\|line_changed\|reaction`, `value`, `at` |
 
 В MVP всё хранится в PostgreSQL (D1): raw prompt целиком не обязателен, но точные
@@ -1309,6 +1312,25 @@ Workspace и удаляются вместе с ним (§10); завершён�
 в compatibility-проекции, без выдуманных evidence и подтверждения verifier. Начатые
 legacy runs завершаются своим профилем; новый включается целиком после миграций
 storage/API/UI, без смешивания версий внутри run.
+
+Индекс графа (#141, [ADR 0001 §4](adr/0001-graph-rag-v1.md#4-хранение-очистка-и-изоляция))
+привязан к репозиторию, а не к Workspace: `workspace_id` в его таблицах нет, каждая
+строка несёт `repository_id NOT NULL` с FK `ON DELETE CASCADE`, а каждый метод порта
+`CodeIndexStore` принимает `repository_id` первым. Строки попытки пишутся невидимыми
+(`valid_from` — номер её публикации) и открываются compare-and-set публикации
+([ADR 0001 §6.2](adr/0001-graph-rag-v1.md#62-fencing)). Чтение видит только строки
+текущего `generation` с `valid_from` в `[floor_publication, published_publication]`
+и `valid_to` NULL или больше `published_publication`, и только при `status = ready`.
+Очистка явная и двухфазная. Логическая — `purge` в транзакции вызывающего: `generation`
+растёт, статус `empty`, `purge_reason` записан, публикация, lease, commit sha, коды
+ошибок, версии и счётчики сброшены (`reserved_publication` и `last_used_at` сохраняются) — строки сразу
+нечитаемы, повторный `purge` ничего не меняет. Строка состояния удаляется только
+каскадом: иначе повторное включение снова началось бы с поколения 1 и задача прежнего
+поколения прошла бы сверку. Физическая — `collect_garbage` порциями:
+строки прежних поколений, неопубликованных попыток (кроме номера текущего lease) и
+вытесненные строки, последние — не раньше чем через 10 мин после публикации.
+Leader-задачи TTL и сборки мусора с удалением не позже чем через 1 ч — #143. Каскад FK
+при удалении репозитория — только страховка.
 
 ---
 
