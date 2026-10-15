@@ -330,9 +330,10 @@ class SqlAlchemyCodeIndexStore:
         if state is None:
             return
         if state.purge_reason is not None:
-            # Only a TTL reason yields, keeping the generation: the next review request
-            # re-arms a TTL purge (ADR §4), a removal or a toggle-off must not be re-armed,
-            # and the reason tells them apart for #143 and the #145 status (ADR §6.1).
+            # Only a TTL reason yields, keeping the generation. After a TTL purge the leader
+            # leaves the `empty` row alone and the next review request (or an enable) brings
+            # the index back (ADR §4); `purge_reason` tells TTL from loss of access (ADR §6.1,
+            # leader row), so a later removal or toggle-off replaces `ttl`.
             if state.purge_reason == PurgeReason.TTL and reason != PurgeReason.TTL:
                 await self._update_state(repository_id, purge_reason=reason)
             return
