@@ -21,6 +21,7 @@ _ERROR_TEXTS = {
     "budget_exceeded": "Превышен лимит стоимости прогона.",
     "deadline_exceeded": "Прогон не уложился в лимит времени.",
     "diff_fetch_failed": "Не удалось получить дифф из GitHub.",
+    "commit_messages_fetch_failed": "Не удалось получить сообщения коммитов PR из GitHub.",
     "github_forbidden": "У GitHub App нет доступа к репозиторию или PR.",
     "github_publish_failed": "GitHub не принял ревью.",
     "lease_expired": "Обработка прервалась 3 раза подряд.",

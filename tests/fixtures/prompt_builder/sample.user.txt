@@ -28,8 +28,12 @@ Use application ports; keep network calls outside DB transactions.
 <fork>false</fork>
 <head_sha>0123456789abcdef0123456789abcdef01234567</head_sha>
 <commit_messages>
-<commit>feat: add charge &amp; repository</commit>
+<commit>feat: add charge &amp; repository
+
+Keep &lt;gateway&gt; failures outside transactions.</commit>
 <commit>test: cover &lt;failure&gt; path</commit>
+<commit>docs: explain billing charge flow. charge flow. charge flow. charge flow. charge flow. charge flow. charge flow. charge flow. charge flow. charge flow. charge flow. charge flow. charge flow. charge flow. charge flow. charge flow. charge flow. charge flow. charge flow. charge flow. charge flow. charge flow. charge flow. charge flow. charge flow. charge flow. charge flow. charge flow. charge flow. charge flow. charge flow. charge flow. charge flow. charge flow. charge flow. charge flow. charge fl…</commit>
+<commit></commit>
 </commit_messages>
 </pr_meta>
 <changed_files>

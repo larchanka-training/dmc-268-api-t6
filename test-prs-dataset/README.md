@@ -54,7 +54,7 @@ The first command checks one case, the second all present cases. `--final` also 
 
 ## Curated corpus
 
-The 24 active inputs pass final schema, patch-application and distribution validation. [PR #68](https://github.com/larchanka-training/dmc-268-api-t6/pull/68) merged the [#66](https://github.com/larchanka-training/dmc-268-api-t6/issues/66) normalization work, including PIPELINE_SPEC §9, before the first baseline capture. Issue #66 is CLOSED; the merged normalization is no longer a pending baseline dependency. The class counts are security **4**, resource **5**, logic **5**, syntax **5**, and clean **5**. Five cases use distinct licensed real PRs, one in each class. Five separate critical truth anchors come from synthetic cases. SEC-05 was omitted after two candidate fixtures were stopped by the automatic safety filter; four security cases still meet the minimum. It has no case or response entry and is excluded from future replay/live denominators. The current recorded baseline is [Mistral via EUrouter](#recorded-mistral-baseline--2026-10-07); the earlier [Nemotron via OpenRouter measurement](#historical-nemotron-baseline--2026-10-06) is retained as historical context.
+The 24 active inputs pass final schema, patch-application and distribution validation. [PR #68](https://github.com/larchanka-training/dmc-268-api-t6/pull/68) merged the [#66](https://github.com/larchanka-training/dmc-268-api-t6/issues/66) normalization work, including PIPELINE_SPEC §9, before the first baseline capture. Issue #66 is CLOSED; the merged normalization is no longer a pending baseline dependency. The class counts are security **4**, resource **5**, logic **5**, syntax **5**, and clean **5**. Five cases use distinct licensed real PRs, one in each class. Five separate critical truth anchors come from synthetic cases. SEC-05 was omitted after two candidate fixtures were stopped by the automatic safety filter; four security cases still meet the minimum. It has no case or response entry and is excluded from future replay/live denominators. The current recorded baseline is [Mistral via EUrouter](#recorded-mistral-baseline--2026-10-15); the earlier [Nemotron via OpenRouter measurement](#historical-nemotron-baseline--2026-10-06) is retained as historical context.
 
 ### Issue #53 corpus decision (2026-10-04)
 
@@ -103,9 +103,50 @@ Terminal provider or infrastructure failure for a case, such as HTTP 402 on both
 
 For each case, `run_metadata.cases` records the requested `first_model` and the actual first response's serving `provider` as `first_provider_label` plus a domain-separated `first_provider_digest`. Known EUrouter route names use safe public labels; any other provider string becomes `custom` with its digest, and a first call with no provider response records nulls. A paid but rejected first response keeps its available provider identity. This differs from the configured provider in `effective_settings`. Report observed provider labels and any custom digests with the measured baseline, without copying raw provider strings, URLs, or keys into the manifest or README.
 
-The manifest also stores sorted `static_inputs`, `static_digest`, and `corpus_digest`. Each digest is `sha256-v1:<64 lowercase hex>` over a SHA-256 stream beginning with the bytes `review-eval-inputs-v1` followed by a NUL byte. For every unique relative POSIX path in sorted order, the stream then contains its UTF-8 path length as an unsigned 8-byte big-endian integer, the path bytes, its file-content length in the same format, and the exact file bytes. Static inputs are the selected review system prompt, all literal `review/rules/*.json` files (including the rule schema), selected custom rule files, and these code paths. Each remains in the byte-level digest because a change can affect the provider request, whether a response is accepted or retried, or which raw answer the recorder captures:
+### Frozen commit context (#82)
 
-| Static code path | Why it is included |
+[`review/eval/pr-commit-messages.json`](../review/eval/pr-commit-messages.json) stores
+verified API-order prefixes of five actual PR commit lists. Verification ran
+2026-10-14 11:19:37–11:20:32 UTC: head/state/count were checked before and after
+reading the numeric pages; heads remained equal to each pinned `source.revision`.
+Each record preserves original ordered SHA/message pairs, head evidence, request
+URLs/parameters, response dates/byte lengths, encoding and final-page Link data.
+
+| Case | Source PR | PR commits at verification | Retained messages | Possible tail |
+| --- | --- | --- | --- | --- |
+| CLEAN-03 | pmndrs/zustand#663 | 1 | 1 | No |
+| LOG-03 | gijzelaerr/python-snap7#806 | 1 | 1 | No |
+| RES-03 | aio-libs/aiohttp#7944 | 31 | First 20 | Yes |
+| SEC-04 | pallets/flask#5632 | 1 | 1 | No |
+| SYN-04 | pmndrs/zustand#725 | 250 | First 20 | Yes |
+
+RES-03 starts with `e91ec9d8f5ac36c361840303b6e7a6acead50932` / `#7583`;
+SYN-04 starts with `cf511cff525d864bc93459dbed50e21bb43a3f28` /
+`imaginary code that uses uSES`. Both full second pages have `rel="next"` for page
+3; capture stops at page 2 and renders `[Additional commits may be omitted]`.
+No omitted count is inferred for the model. The nineteen synthetic cases have
+empty history. Messages remain verbatim in the sidecar; production's shared
+shortening caps each at 500 Unicode characters including ellipsis. LOG-03's
+878-character message therefore renders as 500 characters.
+
+Strict evidence-schema parsing is separate from canonical cohort and configured
+case binding. Missing, duplicate, unexpected, synthetic, mismatched or malformed
+records fail before any model call or staging. Canonical identity fields are
+read from every checked-in `case.json`, with those exact files in static pins;
+custom synthetic subsets remain supported, and new real cases require curated
+canonical identity and prefix evidence. Live evaluation and replay never query
+GitHub. Corpus case metadata, patches, pre-images and truth remain unchanged.
+
+The complete 2026-10-15 capture below uses these unchanged actual prefixes. The 2026-10-14
+PR-prefix capture remains historical; the previous
+single-revision snapshot capture remains historical evidence at
+[`76df6d4`](https://github.com/larchanka-training/dmc-268-api-t6/tree/76df6d4d0f431ce4c02e6708410c000c66f6135a/test-prs-dataset/responses)
+with its original bytes/digests and measured metrics. No answers or manifest
+digests have been patched or mixed across captures.
+
+The manifest also stores sorted `static_inputs`, `static_digest`, and `corpus_digest`. Each digest is `sha256-v1:<64 lowercase hex>` over a SHA-256 stream beginning with the bytes `review-eval-inputs-v1` followed by a NUL byte. For every unique relative POSIX path in sorted order, the stream then contains its UTF-8 path length as an unsigned 8-byte big-endian integer, the path bytes, its file-content length in the same format, and the exact file bytes. Static inputs are the selected review system prompt, all literal `review/rules/*.json` files (including the rule schema), selected custom rule files, and these checked-in paths. Each remains in the byte-level digest because a change can affect the provider request, whether a response is accepted or retried, or which raw answer the recorder captures:
+
+| Static input path | Why it is included |
 | --- | --- |
 | `app/bootstrap/llm_gateway.py` | Composes requests and sets attempt deadlines. |
 | `app/common/application/languages.py` | Selects the case language and default rule set. |
@@ -114,20 +155,296 @@ The manifest also stores sorted `static_inputs`, `static_digest`, and `corpus_di
 | `app/modules/reviews/application/prompt_builder.py` | Renders the system/user message envelope. |
 | `app/modules/reviews/application/review_output.py` | Parses and validates review output. |
 | `app/modules/reviews/application/run_failures.py` | Supplies the gateway's attempt deadline and retryable codes. |
+| `app/modules/reviews/application/vcs_diff.py` | Defines provider-neutral commit-prefix/metadata ports. |
+| `app/common/infrastructure/github_link_header.py` | Shares next-relation parsing between production and evidence validation. |
+| `app/modules/reviews/infrastructure/github_run_source.py` | Carries bounded commit prefixes into run metadata. |
+| `app/modules/reviews/infrastructure/github_vcs.py` | Retrieves typed production commit pages and caps streaming. |
+| `app/modules/reviews/infrastructure/vcs_failures.py` | Classifies commit retrieval failures and retry delays. |
 | `app/modules/reviews/infrastructure/llm/answers.py` | Validates answers and prepares repair feedback. |
 | `app/modules/reviews/infrastructure/llm/gateway.py` | Controls calls, retries, repair, fallback, and budgets. |
 | `app/modules/reviews/infrastructure/llm/models.py` | Adapts gateway calls to review and conventions model ports. |
 | `app/modules/reviews/infrastructure/llm/settings.py` | Resolves model profiles, endpoints, and call policy. |
 | `app/modules/reviews/infrastructure/llm/transport.py` | Encodes provider requests and extracts response text. |
+| `review/eval/pr-commit-messages.json` | Supplies verified bounded PR prefixes and tail evidence. |
 | `review/schemas/review-output.schema.json` | Defines strict response format and validation. |
 | `review/scripts/eval_live.py` | Assembles each case request and selects first-call raw content. |
+| `review/scripts/commit_context.py` | Validates prefix schema and binds cohort/active identities. |
+| `test-prs-dataset/cases/*/case.json` (each canonical file) | Supplies the complete cohort identity used by sidecar binding, including subset captures. |
 | `app/modules/reviews/application/conventions_prompt.py` | Renders conventions input when a conventions prompt is supplied. |
 
 A supplied conventions prompt and its renderer are included only for that task. Byte hashing also warns on a docstring-only edit to any listed file; this conservative warning avoids missing a changed deadline or call policy. `run_failures.py` remains included because `FAST_ATTEMPT_DEADLINE` and `RETRYABLE_ERROR_CODES` are imported into the gateway path. Corpus inputs are every active `case.json`, patch, and recursive pre-image file. Every case ID maps exactly to `responses/<case-id>.json`; replay rejects unmapped extra files. Replay warns if either digest differs or a static file is missing; it never rewrites raw answers. Refresh the **entire** response set and manifest after any input edit, even if only one rule or case changes. Traversal and symlink inputs are rejected.
 
-## Recorded Mistral baseline — 2026-10-07
+## Recorded Mistral baseline — 2026-10-15
 
-The complete 24-case capture in [`responses/manifest.json`](responses/manifest.json)
+[Actions run 38701845865, attempt 1](https://github.com/larchanka-training/dmc-268-api-t6/actions/runs/38701845865)
+captured all 24 first raw answers at frozen source
+`a1cc6229c6a6fdba65ecb640c60ca823e262a6aa`, starting `2026-10-15T07:53:56.845426Z`
+(09:53:56 Europe/Warsaw). This was the one additional explicitly approved paid
+replacement after rebasing on main `f27d4c2ccd5854ac736ad8c0ecc1fe30d3b08140`:
+merged #149 changed the pinned review-output parser and schema. The prompt,
+frozen PR prefixes and corpus/truth are unchanged. Engine `fast`, configured
+provider `eurouter`, primary `mistral-small-4`, fallback `mistral-small-3.2-24b`,
+`model=mistral-small-4`, `export_raw_responses=true`.
+
+The five real cases retain the verified bounded API-order PR prefixes:
+CLEAN-03/LOG-03/SEC-04 each one message; RES-03/SYN-04 the first 20 plus
+`[Additional commits may be omitted]`. All nineteen synthetic histories are empty;
+SEC-05 remains excluded. Prompt `review/prompts/review.system.v2.md` (`v2`), SHA-256
+`9177e358c23d1a7cd8987cbf667cf8b705c2afb27eaf8b2237480e4531431d75`.
+Static digest `sha256-v1:77d46f9c731dc26aded94c7ec60cb860314fe7835e6041a318d63b8ddc690449`;
+corpus digest `sha256-v1:1ab8ca9a16cc50c357b39e1571c73b1e6674752737c444bd8b58d3f2aab81dfa`.
+The complete static path list is preserved. All 24 first calls are `answer`, primary
+`mistral-small-4`, serving-provider label `mistral` with digest
+`sha256-v1:8e1af0131864f4488dc577f497afcf5c87b74b237e86f0322abf99e8c2ef018a`.
+All gateway statuses are `accepted`, all paid-metadata-error markers false,
+`baseline_publishable=true`, and the nonpublishable list is empty. Publishability
+is a capture-integrity condition, not a model-quality threshold.
+
+All 24 first raw answers and manifest were imported together byte-for-byte.
+Every response SHA-256/byte count matches separate safe metadata; raw and safe
+manifests are byte-identical, SHA-256
+`c7f52e42004f2d1149b9d3dd80956eea1d3e17cee9fa93ff0e5625686c0694df`.
+Final corpus validation passes 24/24; two offline JSON reports are byte-identical
+with `warnings=[]`. Removing only validator diagnostics yields the byte-identical
+live safe report. No later repair/fallback answer replaces a first answer.
+
+| Metric | Current baseline |
+| --- | --- |
+| First raw response validity | 29.2% (7/24) |
+| Micro TP / FP / FN | 2 / 2 / 17 |
+| Micro precision | 50.0% (2/4 predictions) |
+| Micro recall | 10.5% (2/19 truths) |
+| Critical recall | 40.0% (2/5 critical truths) |
+| Verdict agreement | 20.8% (5/24 cases) |
+| Severity mismatches | 1/2 matched findings: LOG-02, high versus critical |
+
+| Category | TP | FP | FN | Precision | Recall |
+| --- | --- | --- | --- | --- | --- |
+| security | 1 | 1 | 3 | 50.0% (1/2) | 25.0% (1/4) |
+| correctness | 1 | 1 | 4 | 50.0% (1/2) | 20.0% (1/5) |
+| performance | 0 | 0 | 5 | undefined (0 predictions) | 0.0% (0/5) |
+| readability | 0 | 0 | 5 | undefined (0 predictions) | 0.0% (0/5) |
+
+| Case class | Valid first answers | TP / FP / FN | Verdict agreement |
+| --- | --- | --- | --- |
+| security | 2/4 | 1 / 2 / 3 | 1/4 |
+| resource | 0/5 | 0 / 0 / 5 | 0/5 |
+| logic | 1/5 | 1 / 0 / 4 | 1/5 |
+| syntax | 1/5 | 0 / 0 / 5 | 0/5 |
+| clean | 3/5 | 0 / 0 / 0 | 3/5 |
+
+Valid first answers: CLEAN-02, CLEAN-03, CLEAN-05, LOG-02, SEC-01, SEC-03, SYN-01.
+Real validity is 1/5; synthetic validity is 6/19. Invalid first answers: CLEAN-01,
+CLEAN-04, LOG-01, LOG-03, LOG-04, LOG-05, RES-01, RES-02, RES-03, RES-04, RES-05,
+SEC-02, SEC-04, SYN-02, SYN-03, SYN-04, SYN-05. All 24 first responses contain
+answer text; the 17 invalid responses remain in the denominator, their predictions
+are not interpreted and their truths remain FN. Category FP counts classify the
+prediction; class counts classify the case, so the two FP distributions differ.
+
+The [2026-10-14 PR-prefix capture](#recorded-mistral-baseline--2026-10-14) and
+[2026-10-13 snapshot capture](#recorded-mistral-baseline--2026-10-13) remain historical
+with their original raw bytes, manifests, digests and measured results. These
+separate captures use different static inputs and do not establish causality or
+semantic accuracy. Manual semantic/Hallucination Rate adjudication was not performed;
+production-verifier/final-output quality and product targets remain separate.
+
+Effective settings match the previous approved configuration: USD/million
+input/cache-read/output primary `0.56125 / 0.56125 / 2.35725`, fallback
+`0.2245 / 0.2245 / 0.449`; both input budgets 52,000/output caps 8,000,
+context windows 262,144/128,000, `json_schema`. Fast policy is nominal USD
+0.50/case (USD 12 for 24), input-token limit 60,000, 4 calls/attempt, 90s timeout;
+full retry/jitter settings are in the manifest. These configured limits/prices do
+not measure actual spend, billed tokens or balance, which the artifacts do not report.
+
+## Recorded Mistral baseline — 2026-10-14
+
+This historical PR-prefix capture is superseded by the 2026-10-15 post-rebase capture.
+Original raw bytes and manifest remain at [revision bf09117](https://github.com/larchanka-training/dmc-268-api-t6/tree/bf0911713b3f530add49443b5b13df5720e6521e/test-prs-dataset/responses).
+
+[Actions run 38560319651, attempt 1](https://github.com/larchanka-training/dmc-268-api-t6/actions/runs/38560319651)
+captured all 24 first raw answers at frozen source
+`5173792fd2997d5401aed4b5787d536254249a26`, starting `2026-10-14T11:58:17.004986Z`
+(13:58:17 Europe/Warsaw). This was the one newly approved paid replacement with
+`model=mistral-small-4` and `export_raw_responses=true`; engine `fast`, configured
+provider `eurouter`, primary `mistral-small-4`, fallback `mistral-small-3.2-24b`.
+The five real cases received the actual bounded PR prefixes above: 1/1/1 messages
+for CLEAN-03/LOG-03/SEC-04, first 20 plus uncertainty for RES-03/SYN-04. Nineteen
+synthetic histories stay empty. SEC-05 remains excluded; corpus inputs/truth are unchanged.
+
+Prompt `review/prompts/review.system.v2.md` (`v2`), SHA-256
+`9177e358c23d1a7cd8987cbf667cf8b705c2afb27eaf8b2237480e4531431d75`.
+Static digest `sha256-v1:09c0c809ca0469f300c50c281848edded260fdbe3373d414e294bbb39c012736`.
+Corpus digest `sha256-v1:1ab8ca9a16cc50c357b39e1571c73b1e6674752737c444bd8b58d3f2aab81dfa`.
+All 24 first calls are `answer`, model `mistral-small-4`, with observed serving-provider
+label `mistral` and digest
+`sha256-v1:8e1af0131864f4488dc577f497afcf5c87b74b237e86f0322abf99e8c2ef018a`.
+Every gateway status is `accepted`; paid-metadata-error markers are false,
+`baseline_publishable=true`, and the nonpublishable list is empty. Publishability
+does not imply a quality threshold.
+
+All 24 first raw answers and the manifest were imported together byte-for-byte.
+Each answer's SHA-256/byte count matches safe metadata; raw and safe manifests
+are byte-identical, SHA-256 `264dde15691f1fba3bdea64d81276c1d644c7820628e8a29e1a64860b4c94673`.
+Corpus final validation passes 24/24. Two offline JSON reports are byte-identical
+with `warnings=[]`; removing only validator diagnostics yields the byte-identical
+live safe report. No repaired/later/fallback answer replaced a first response.
+The historical snapshot capture remains accessible at the previous revision and
+in the section below; no historical digest was rewritten.
+
+| Metric | Historical PR-prefix baseline |
+| --- | --- |
+| First raw response validity | 33.3% (8/24) |
+| Micro TP / FP / FN | 2 / 1 / 17 |
+| Micro precision | 66.7% (2/3 predictions) |
+| Micro recall | 10.5% (2/19 truths) |
+| Critical recall | 40.0% (2/5 critical truths) |
+| Verdict agreement | 16.7% (4/24 cases) |
+| Severity mismatches | 2/2 matched findings: LOG-02/LOG-05, high versus critical |
+
+| Category | TP | FP | FN | Precision | Recall |
+| --- | --- | --- | --- | --- | --- |
+| security | 0 | 0 | 4 | undefined (0 predictions) | 0.0% (0/4) |
+| correctness | 2 | 1 | 3 | 66.7% (2/3) | 40.0% (2/5) |
+| performance | 0 | 0 | 5 | undefined (0 predictions) | 0.0% (0/5) |
+| readability | 0 | 0 | 5 | undefined (0 predictions) | 0.0% (0/5) |
+
+| Case class | Valid first answers | TP / FP / FN | Verdict agreement |
+| --- | --- | --- | --- |
+| security | 1/4 | 0 / 0 / 4 | 0/4 |
+| resource | 1/5 | 0 / 1 / 5 | 0/5 |
+| logic | 2/5 | 2 / 0 / 3 | 2/5 |
+| syntax | 2/5 | 0 / 0 / 5 | 0/5 |
+| clean | 2/5 | 0 / 0 / 0 | 2/5 |
+
+Valid first answers: CLEAN-02, CLEAN-05, LOG-02, LOG-05, RES-02, SEC-03, SYN-01, SYN-05. All five real answers
+are invalid (0/5); synthetic validity is 8/19. Invalid first answers: CLEAN-01, CLEAN-03, CLEAN-04, LOG-01, LOG-03, LOG-04, RES-01, RES-03, RES-04, RES-05, SEC-01, SEC-02, SEC-04, SYN-02, SYN-03, SYN-04.
+All 24 first responses contain answer text; invalid predictions are not scored,
+their truths remain FN, and all 24 cases remain in the denominator.
+
+Compared with the historical 2026-10-13 snapshot capture, validity is 8/24 versus 7/24,
+TP/FP/FN 2/1/17 versus 2/2/17, precision 66.7% versus 50.0%, recall 10.5% in both,
+critical recall 2/5 in both, and verdict agreement 4/24 in both. These separate
+captures use different static inputs and do not establish causality or semantic
+accuracy. Manual semantic/Hallucination Rate adjudication was not performed;
+production-verifier/final-output quality and product targets remain separate.
+
+Configured prices USD/million input/cache-read/output tokens remain primary
+`0.56125 / 0.56125 / 2.35725`, fallback `0.2245 / 0.2245 / 0.449`. Both use input
+budget 52,000/output cap 8,000; context windows 262,144/128,000 and `json_schema`.
+Fast policy remains nominal USD 0.50/case (USD 12 for 24), input-token limit 60,000,
+4 calls/attempt, 90s timeout, with full retry/jitter settings in the manifest.
+These configured values do not measure actual spend, billed tokens or balance,
+which are unavailable from the artifacts.
+
+## Recorded Mistral baseline — 2026-10-13
+
+This historical snapshot capture was superseded by the 2026-10-14 PR-prefix capture;
+the current complete post-rebase capture is dated 2026-10-15.
+Original raw bytes and manifest remain at [revision 76df6d4](https://github.com/larchanka-training/dmc-268-api-t6/tree/76df6d4d0f431ce4c02e6708410c000c66f6135a/test-prs-dataset/responses).
+
+The complete historical 24-case first-answer capture in
+[its original manifest](https://github.com/larchanka-training/dmc-268-api-t6/blob/76df6d4d0f431ce4c02e6708410c000c66f6135a/test-prs-dataset/responses/manifest.json) was recorded by
+[Actions run 38468081001, attempt 1](https://github.com/larchanka-training/dmc-268-api-t6/actions/runs/38468081001)
+on source commit `80ede3cd274d745616b8a24082ff7d1d00f5b736`, starting at
+`2026-10-13T21:06:56.682693Z` (23:06:56 Europe/Warsaw). This was the single approved
+paid run with `model=mistral-small-4` and `export_raw_responses=true`. The `fast`
+engine uses primary `mistral-small-4` and configured fallback
+`mistral-small-3.2-24b` through EUrouter. The five real cases received frozen
+source-revision commit snapshots; all nineteen synthetic cases received empty
+commit tuples. SEC-05 remains excluded. Corpus, patches, pre-images and truths
+are unchanged.
+
+Prompt: `review/prompts/review.system.v2.md` (`v2`), SHA-256
+`9177e358c23d1a7cd8987cbf667cf8b705c2afb27eaf8b2237480e4531431d75`.
+Static digest: `sha256-v1:9b28cf4c284ac07a03a5a35a62e3c2e48dc38264076a55d1a3d31724bacc2c17`.
+Corpus digest: `sha256-v1:1ab8ca9a16cc50c357b39e1571c73b1e6674752737c444bd8b58d3f2aab81dfa`.
+All 24 first calls are `answer` / `primary` using `mistral-small-4`, with observed
+serving-provider label `mistral` and digest
+`sha256-v1:8e1af0131864f4488dc577f497afcf5c87b74b237e86f0322abf99e8c2ef018a`.
+The configured provider label is `eurouter`. Every gateway status is `accepted`,
+all paid-metadata-error markers are false, `baseline_publishable=true` and the
+nonpublishable-case list is empty. Publishability does not imply a quality threshold.
+
+All 24 raw answers and the manifest match the accepted raw artifact byte-for-byte.
+Every answer SHA-256/byte count matches the separate safe metadata, and the raw/safe
+manifests are byte-equal. Final corpus validation passed 24/24; two offline JSON
+reports are byte-identical with `warnings=[]`. Removing only validator diagnostics
+makes the offline report byte-identical to the live safe report. The full import
+hash audit is in [the #82 task evidence](../docs/plans/82-todo.md#task-6-complete-paid-raw-first-capture).
+No answer was normalized, repaired, selected from fallback or combined with an older
+capture.
+
+| Metric | Historical snapshot baseline |
+| --- | --- |
+| First raw response validity | 29.2% (7/24) |
+| Micro TP / FP / FN | 2 / 2 / 17 |
+| Micro precision | 50.0% (2/4 predictions) |
+| Micro recall | 10.5% (2/19 truths) |
+| Critical recall | 40.0% (2/5 critical truths) |
+| Verdict agreement | 16.7% (4/24 cases) |
+| Severity mismatches | 1/2 matched findings |
+
+| Category | TP | FP | FN | Precision | Recall |
+| --- | --- | --- | --- | --- | --- |
+| security | 1 | 1 | 3 | 50.0% (1/2) | 25.0% (1/4) |
+| correctness | 1 | 1 | 4 | 50.0% (1/2) | 20.0% (1/5) |
+| performance | 0 | 0 | 5 | undefined (0 predictions) | 0.0% (0/5) |
+| readability | 0 | 0 | 5 | undefined (0 predictions) | 0.0% (0/5) |
+
+| Case class | Valid first answers | TP / FP / FN | Verdict agreement |
+| --- | --- | --- | --- |
+| security | 2/4 | 1 / 1 / 3 | 1/4 |
+| resource | 1/5 | 0 / 1 / 5 | 0/5 |
+| logic | 1/5 | 1 / 0 / 4 | 1/5 |
+| syntax | 1/5 | 0 / 0 / 5 | 0/5 |
+| clean | 2/5 | 0 / 0 / 0 | 2/5 |
+
+The seven valid first answers are CLEAN-02, CLEAN-05, LOG-02, RES-02, SEC-01,
+SEC-03 and SYN-01. All five real-case first answers are invalid (0/5 valid);
+synthetic validity is 7/19. These disjoint validator groups account for all
+17 invalid first answers:
+
+| Failure group | Count | Case IDs |
+| --- | ---: | --- |
+| Custom-rule attribution prefix only | 8 | CLEAN-01, CLEAN-03, CLEAN-04, LOG-01, LOG-05, RES-05, SEC-02, SYN-05 |
+| Attribution prefix and `start_line >= line` | 4 | LOG-03, RES-01, SYN-02, SYN-03 |
+| Attribution prefix, range and severity/confidence ordering | 2 | RES-03, SYN-04 |
+| `start_line >= line` only | 3 | LOG-04, RES-04, SEC-04 |
+
+There are no missing/empty first answers or JSON parse failures. Invalid predictions
+are not scored; their truths remain FN and all 24 cases remain in every case-level
+denominator. The two matched critical truths are SEC-01 and LOG-02; LOG-02 is the
+one severity mismatch, predicted `high` versus truth `critical`.
+
+| Metric | Historical Mistral 2026-10-07 | Historical Mistral 2026-10-13 |
+| --- | --- | --- |
+| First-answer validity | 20.8% (5/24) | 29.2% (7/24) |
+| TP / FP / FN | 1 / 1 / 18 | 2 / 2 / 17 |
+| Precision | 50.0% (1/2) | 50.0% (2/4) |
+| Recall | 5.3% (1/19) | 10.5% (2/19) |
+| Critical recall | 20.0% (1/5) | 40.0% (2/5) |
+| Verdict agreement | 8.3% (2/24) | 16.7% (4/24) |
+
+These are mechanical first-answer measurements from two separate captures. Static
+inputs differ, and this is not a controlled experiment or a causal quality claim
+for commit context. Semantic accuracy and Hallucination Rate require the manual
+oracle; they are not measured by this replay. Production-verifier/final-output
+quality and the product quality targets are not established by this raw baseline.
+
+The manifest exports configured prices (USD per million input/cache-read/output
+tokens): primary `0.56125 / 0.56125 / 2.35725`, fallback
+`0.2245 / 0.2245 / 0.449`. Both models use input budget 52,000 and output cap 8,000;
+context windows are 262,144 primary and 128,000 fallback, with `json_schema` output.
+Fast policy records a nominal USD 0.50 per-case limit (USD 12 across 24 cases),
+60,000 input-token limit, 4 calls/attempt and 90s call timeout; full retry/jitter
+settings remain in the manifest. These are configured settings, not actual billing.
+Actual spend, billed-token totals and remaining balance are unavailable from these
+artifacts.
+
+## Historical Mistral baseline — 2026-10-07
+
+The prior complete 24-case capture in the
+[historical manifest](https://github.com/larchanka-training/dmc-268-api-t6/blob/ba99c11/test-prs-dataset/responses/manifest.json)
 uses `mistral-small-4` through EUrouter, with configured fallback
 `mistral-small-3.2-24b`. It was recorded by
 [Actions run 37607360909, attempt 1](https://github.com/larchanka-training/dmc-268-api-t6/actions/runs/37607360909)
@@ -152,8 +469,9 @@ artifact; the raw and safe manifest copies also match. At the publication commit
 `ba99c11`, offline replay had no drift warning, and its entire report after
 removing validator diagnostics matched the live safe report. Later edits to
 fingerprinted gateway files make replay on `main` print a static-input drift
-warning (now `Static input digest mismatch; refresh the complete baseline`). It
-clears only when the complete baseline is re-captured, next planned in #82; see
+warning. The #82 source/sidecar pins also produced
+`Static input path set changed; refresh the complete baseline` before the complete
+2026-10-13 replacement; see
 [Baseline drift](#baseline-drift). These results score only the first raw answer;
 publishability and eventual gateway acceptance do not imply a quality threshold.
 
@@ -311,9 +629,10 @@ on the two selected EUrouter models.
 
 ### Baseline drift
 
-The static digest includes gateway/settings inputs. The Mistral capture above
-replayed without drift on its source commit and its publication change. Later
-changes to fingerprinted inputs have already produced a drift warning on `main`
-(see the recorded baseline above); preserve the original capture and its
-provenance rather than editing its digest to hide drift.
-Refresh the entire baseline in a separately authorized run when needed.
+The static digest includes gateway/settings, production commit retrieval and frozen
+commit-context inputs. The complete 2026-10-15 post-rebase replacement replays with no static
+or corpus drift after merged #149 changed the pinned parser/schema. The 2026-10-14
+PR-prefix, 2026-10-13 snapshot and 2026-10-07 captures remain historical.
+Later changes to fingerprinted inputs require another complete separately authorized
+capture. Preserve each original capture's provenance rather than editing a digest
+to hide drift; refresh the entire response set and manifest together.

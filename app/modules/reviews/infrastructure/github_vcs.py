@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import binascii
 import re
+from collections.abc import Callable
 from typing import Literal, Protocol
 
 import httpx
@@ -17,26 +18,37 @@ from pydantic import (
 )
 
 from app.common.application.github_repository_name import REPOSITORY_FULL_NAME_MAX_LENGTH
+from app.common.infrastructure.github_link_header import has_next_relation
 from app.common.infrastructure.github_repository_path import (
     commit_sha_segment,
     repository_path_from_full_name,
 )
 from app.modules.reviews.application.check_runs import RunProviderCheckpoint
-from app.modules.reviews.application.prompt_builder import PullRequestMeta
+from app.modules.reviews.application.prompt_builder import (
+    MAX_COMMIT_MESSAGES,
+    PullRequestMeta,
+    shorten_commit_message,
+)
+from app.modules.reviews.application.run_failures import RunFailure
 from app.modules.reviews.application.vcs_diff import (
     MAX_BLOB_BYTES,
     BlobTooLargeError,
+    CommitMessagePrefix,
     MergeBaseUnavailable,
     PullRequestLocator,
     VcsFile,
     VcsPullRequest,
 )
+from app.modules.reviews.infrastructure.vcs_failures import classify_vcs_error
 
 _SHA = r"^(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})$"
 _MAX_FILES = 3000
 _PAGE_SIZE = 100
 _REQUEST_TIMEOUT = 10.0
 _MAX_BLOB_RESPONSE_BYTES = 1_500_000  # 1 MiB of base64 content plus JSON envelope.
+_COMMIT_PAGE_SIZE = 10
+_MAX_COMMIT_PAGES = 2
+_MAX_COMMIT_RESPONSE_BYTES = 1_048_576
 _API_VERSION = "2022-11-28"
 
 
@@ -114,11 +126,20 @@ class _Commit(_GitHubDto):
     sha: str = Field(pattern=_SHA)
 
 
+class _CommitMessage(_GitHubDto):
+    message: str
+
+
+class _PullRequestCommit(_GitHubDto):
+    commit: _CommitMessage
+
+
 class _Comparison(_GitHubDto):
     merge_base_commit: _Commit
 
 
 _FILES = TypeAdapter(list[_File])
+_COMMITS = TypeAdapter(list[_PullRequestCommit])
 
 
 def _repository_prefix(locator: PullRequestLocator) -> str:
@@ -179,6 +200,63 @@ class HttpGitHubVcsProvider:
                 or item.head.repo.full_name != item.base.repo.full_name,
             ),
         )
+
+    async def get_commit_messages(
+        self, locator: PullRequestLocator, *, checkpoint: RunProviderCheckpoint
+    ) -> CommitMessagePrefix:
+        """Read the bounded API-order prefix separately from ordinary PR metadata."""
+        prefix = _repository_prefix(locator)
+        messages: list[str] = []
+        incomplete = False
+        page_count = min(
+            _MAX_COMMIT_PAGES,
+            (MAX_COMMIT_MESSAGES + _COMMIT_PAGE_SIZE - 1) // _COMMIT_PAGE_SIZE,
+        )
+        try:
+            for page in range(1, page_count + 1):
+                await checkpoint()
+                token = await self._tokens.get_installation_access_token(
+                    locator.installation_external_id
+                )
+                await checkpoint()
+                body, has_next = await self._get_capped_body(
+                    f"{prefix}/pulls/{locator.number}/commits",
+                    headers=_headers(token) | {"Accept-Encoding": "identity"},
+                    params={"per_page": _COMMIT_PAGE_SIZE, "page": page},
+                    max_bytes=_MAX_COMMIT_RESPONSE_BYTES,
+                    too_large=lambda: RunFailure(
+                        "commit_messages_fetch_failed",
+                        "GitHub commit response exceeds the 1 MiB retrieval budget",
+                    ),
+                    unsupported_encoding=lambda: RunFailure(
+                        "commit_messages_fetch_failed",
+                        "GitHub commit response uses unsupported content encoding",
+                    ),
+                )
+                try:
+                    batch = _COMMITS.validate_json(body)
+                except ValueError:
+                    raise RunFailure(
+                        "commit_messages_fetch_failed", "GitHub commit response is malformed"
+                    ) from None
+                if len(batch) > _COMMIT_PAGE_SIZE:
+                    raise RunFailure(
+                        "commit_messages_fetch_failed", "GitHub commit response is malformed"
+                    )
+                remaining = MAX_COMMIT_MESSAGES - len(messages)
+                messages.extend(
+                    shorten_commit_message(item.commit.message) for item in batch[:remaining]
+                )
+                incomplete = (
+                    has_next
+                    or len(batch) > remaining
+                    or (page == page_count and len(batch) == _COMMIT_PAGE_SIZE)
+                )
+                if len(batch) < _COMMIT_PAGE_SIZE:
+                    break
+        except httpx.HTTPError as exc:
+            raise classify_vcs_error(exc, fetch_error_code="commit_messages_fetch_failed") from None
+        return CommitMessagePrefix(tuple(messages), incomplete)
 
     async def get_diff(
         self, pull_request: VcsPullRequest, *, checkpoint: RunProviderCheckpoint
@@ -267,25 +345,15 @@ class HttpGitHubVcsProvider:
         await checkpoint()
         token = await self._tokens.get_installation_access_token(locator.installation_external_id)
         await checkpoint()
-        async with self._client.stream(
-            "GET",
+        body, _ = await self._get_capped_body(
             f"{prefix}/git/blobs/{sha}",
             headers=_headers(token),
-            timeout=_REQUEST_TIMEOUT,
-        ) as response:
-            response.raise_for_status()
-            content_length = response.headers.get("Content-Length")
-            if (
-                content_length is not None
-                and content_length.isdecimal()
-                and int(content_length) > _MAX_BLOB_RESPONSE_BYTES
-            ):
-                raise BlobTooLargeError("GitHub blob response exceeds the retrieval budget")
-            body = bytearray()
-            async for chunk in response.aiter_bytes(chunk_size=65_536):
-                if len(body) + len(chunk) > _MAX_BLOB_RESPONSE_BYTES:
-                    raise BlobTooLargeError("GitHub blob response exceeds the retrieval budget")
-                body.extend(chunk)
+            max_bytes=_MAX_BLOB_RESPONSE_BYTES,
+            too_large=lambda: BlobTooLargeError(
+                "GitHub blob response exceeds the retrieval budget"
+            ),
+            chunk_size=65_536,
+        )
         item = _Blob.model_validate_json(body)
         if item.sha.casefold() != sha.casefold():
             raise ValueError("GitHub blob SHA differs from the requested SHA")
@@ -298,3 +366,40 @@ class HttpGitHubVcsProvider:
         if len(data) != item.size:
             raise ValueError("GitHub blob decoded size differs from declared size")
         return data
+
+    async def _get_capped_body(
+        self,
+        path: str,
+        *,
+        headers: dict[str, str],
+        max_bytes: int,
+        too_large: Callable[[], Exception],
+        params: dict[str, int] | None = None,
+        unsupported_encoding: Callable[[], Exception] | None = None,
+        chunk_size: int | None = None,
+    ) -> tuple[bytearray, bool]:
+        """Bound a streamed JSON body while retaining each endpoint's failure contract."""
+        async with self._client.stream(
+            "GET", path, headers=headers, params=params, timeout=_REQUEST_TIMEOUT
+        ) as response:
+            response.raise_for_status()
+            # Check before httpx reads/decodes chunks: compression could allocate above
+            # the commit cap even when the compressed transport chunk fits the budget.
+            if unsupported_encoding is not None and response.headers.get(
+                "Content-Encoding", ""
+            ).strip().casefold() not in {"", "identity"}:
+                raise unsupported_encoding()
+            content_length = response.headers.get("Content-Length")
+            if (
+                content_length is not None
+                and content_length.isdecimal()
+                and int(content_length) > max_bytes
+            ):
+                raise too_large()
+            body = bytearray()
+            async for chunk in response.aiter_bytes(chunk_size=chunk_size):
+                if len(body) + len(chunk) > max_bytes:
+                    raise too_large()
+                body.extend(chunk)
+            has_next = has_next_relation(response.headers.get("Link"))
+        return body, has_next

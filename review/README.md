@@ -82,6 +82,55 @@ run of a repository, the diff is the varying tail (`docs/SYSTEM_DESIGN.md` §10)
   with no shown content, including unselected or unavailable files. A truncated `<file>`
   ends with `[N more lines omitted]`. Counts describe source input; markers are never paths.
 
+Production commit context comes from `GitHubRunSource.get_pull_request_meta`, which
+delegates retrieval to `HttpGitHubVcsProvider` through the commit-metadata port.
+The provider reads at most two numeric PR-commit pages of 10 entries, retaining
+first 20 messages in API order. Shared application shortening retains at most
+500 Unicode characters per message, including the ellipsis. The renderer
+XML-escapes text and retains its defensive 20-by-500 limits. `Link` URLs are never
+followed. A next relation on the final page or a full capped second page sets
+an explicit incomplete-tail flag and renders `[Additional commits may be omitted]`.
+An earlier next relation is cleared by a short complete second page. A complete
+empty list omits the block; an uncertain empty list renders the marker alone,
+and an empty message remains an empty `<commit>` element. Larger in-memory tuples
+retain the existing known-count `[N more commits omitted]` marker.
+
+Commit pages and blobs share a capped reader. Each commit page has a 1 MiB budget
+before strict nested Pydantic validation; identity encoding is requested, and
+other encodings are rejected before reading or decoding to prevent decompression
+allocation above that cap. Invalid pages, transport errors and rate limits use
+retryable `commit_messages_fetch_failed`; 404/nonlimited 403 remain
+`github_forbidden`. Diagnostics omit response text and credentials, Retry-After
+is preserved, and author-facing check-runs name commit messages. Installation
+checkpoints precede token acquisition and every page request; GitHub calls occur
+outside database transactions.
+
+Evaluation reads the verified frozen API-order PR prefixes from
+[`eval/pr-commit-messages.json`](eval/pr-commit-messages.json) offline. All five PR
+heads match their cases' pinned revisions. CLEAN-03, LOG-03 and SEC-04 each retain
+one message; RES-03 and SYN-04 retain the first 20 plus the same uncertainty marker
+as production. All nineteen synthetic cases retain empty history. Sidecar schema
+validation is separate from canonical cohort and selected-case binding, and all
+preflight checks finish before any model call or staging. Custom synthetic
+subsets remain supported; new real cases require curated canonical identity and
+prefix evidence. Live evaluation and replay never query GitHub.
+
+The sidecar, production retrieval/Link shaping, recorder/schema, existing inputs,
+and every canonical `case.json` identity consulted by binding are conservatively
+fingerprinted. [Run 38701845865, attempt 1](https://github.com/larchanka-training/dmc-268-api-t6/actions/runs/38701845865)
+captured all 24 first raw answers on 2026-10-15 at frozen source `a1cc6229c6a6fdba65ecb640c60ca823e262a6aa`
+with `mistral-small-4` and raw export. All 25 baseline files match the raw artifact
+byte-for-byte and safe hashes/sizes; two offline reports are identical with no
+drift and match the redacted live report. Current measured results are in the
+[corpus README](../test-prs-dataset/README.md#recorded-mistral-baseline--2026-10-15)
+and [test plan](../docs/TEST_PLAN.md#323-зафиксированный-post-rebase-raw-baseline-82-2026-10-15).
+This complete post-rebase replacement includes the merged #149 parser/schema changes;
+its static digest is `sha256-v1:77d46f9c731dc26aded94c7ec60cb860314fe7835e6041a318d63b8ddc690449`.
+The [2026-10-14 PR-prefix capture](../test-prs-dataset/README.md#recorded-mistral-baseline--2026-10-14)
+remains historical with original bytes/digests at revision bf09117.
+The [2026-10-13 snapshot capture](https://github.com/larchanka-training/dmc-268-api-t6/actions/runs/38468081001)
+remains historical evidence with its original bytes/digests at revision 76df6d4.
+
 Rendered custom rule — one block per rule, globs space-separated, checks numbered from 1;
 this example is the second rule of `rules/default-backend.v1.json`, checks shortened:
 

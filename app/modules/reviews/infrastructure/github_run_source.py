@@ -7,6 +7,7 @@ file contents come from SHA-addressed blobs, never from ``contents`` by path (SD
 from __future__ import annotations
 
 import logging
+from dataclasses import replace
 from typing import Any
 from uuid import UUID
 
@@ -17,13 +18,14 @@ from app.modules.reviews.application.conventions import RepositoryFile, Reposito
 from app.modules.reviews.application.process_run import RunVcsInput, RunVcsRepository
 from app.modules.reviews.application.prompt_builder import PullRequestMeta
 from app.modules.reviews.application.run_failures import RunCancelled
-from app.modules.reviews.application.vcs_diff import VcsProvider
+from app.modules.reviews.application.vcs_diff import VcsMetadataProvider
 from app.modules.reviews.infrastructure.github_vcs import (
     _REQUEST_TIMEOUT,
     InstallationTokenProvider,
     _headers,
     _repository_prefix,
 )
+from app.modules.reviews.infrastructure.vcs_failures import classify_vcs_error
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -38,7 +40,7 @@ class GitHubRunSource:
         *,
         client: httpx.AsyncClient,
         token_provider: InstallationTokenProvider,
-        vcs: VcsProvider,
+        vcs: VcsMetadataProvider,
         runs: RunVcsRepository,
         run_id: UUID,
         conventions_from_base: bool = False,
@@ -133,4 +135,13 @@ class GitHubRunSource:
 
     async def get_pull_request_meta(self, run_id: UUID) -> PullRequestMeta | None:
         run = await self._input()
-        return (await self._vcs.get_pull_request(run.locator, checkpoint=self._checkpoint)).meta
+        meta = (await self._vcs.get_pull_request(run.locator, checkpoint=self._checkpoint)).meta
+        try:
+            prefix = await self._vcs.get_commit_messages(run.locator, checkpoint=self._checkpoint)
+        except httpx.HTTPError as exc:
+            raise classify_vcs_error(exc, fetch_error_code="commit_messages_fetch_failed") from None
+        return replace(
+            meta,
+            commit_messages=prefix.messages,
+            commit_messages_incomplete=prefix.incomplete,
+        )

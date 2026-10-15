@@ -3,11 +3,11 @@ repos:
     rev: v6.0.0
     hooks:
       - id: trailing-whitespace
-        # Dataset patches and raw provider answers must retain their exact bytes.
-        exclude: ^test-prs-dataset/(?:.*\.patch|responses/(?!manifest\.json$)[^/]+\.json)$
+        # Prompt wire goldens, dataset patches and raw answers retain their exact bytes.
+        exclude: ^(?:tests/fixtures/prompt_builder/[^/]+\.txt|test-prs-dataset/(?:.*\.patch|responses/(?!manifest\.json$)[^/]+\.json))$
       - id: end-of-file-fixer
-        # Preserve generated SVG, dataset patches and raw provider answers byte-for-byte.
-        exclude: ^(?:docs/erd/erd\.svg|test-prs-dataset/(?:.*\.patch|responses/(?!manifest\.json$)[^/]+\.json))$
+        # Preserve generated SVG, prompt wire goldens, patches and raw answers byte-for-byte.
+        exclude: ^(?:docs/erd/erd\.svg|tests/fixtures/prompt_builder/[^/]+\.txt|test-prs-dataset/(?:.*\.patch|responses/(?!manifest\.json$)[^/]+\.json))$
       - id: check-yaml
       - id: check-toml
       - id: check-merge-conflict

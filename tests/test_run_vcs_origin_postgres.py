@@ -326,6 +326,8 @@ def test_cached_run_source_still_checks_original_identity_before_next_request(
                 return httpx.Response(
                     200, json={"sha": BLOB, "encoding": "base64", "content": "b2sK", "size": 3}
                 )
+            if request.url.path.endswith("/pulls/3/commits"):
+                return httpx.Response(200, json=[])
             payload = _pull_payload(changed_files=1, head_sha=HEAD)
             payload["number"] = 3
             return httpx.Response(200, json=payload)

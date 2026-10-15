@@ -1,1 +1,1 @@
-{"findings": [], "summary": {"problem": "No defect was found in this change.", "done_well": "The change simplifies the return type to a list while preserving the sorted, deduplicated behavior of the original set-based implementation.", "effort": "none"}}
+{"findings": [], "summary": {"problem": "No defect was found in this change.", "done_well": "The change preserves the sorted, deduplicated list while returning a list instead of a set, which is more predictable for downstream consumers.", "effort": "none"}}

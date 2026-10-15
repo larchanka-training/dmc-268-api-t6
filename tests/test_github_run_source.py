@@ -17,7 +17,7 @@ from app.modules.integrations.webhooks.infrastructure.github_installation_tree_p
 from app.modules.reviews.application.check_runs import RunProviderCheckpoint
 from app.modules.reviews.application.conventions import RepositoryFile
 from app.modules.reviews.application.process_run import RunVcsInput
-from app.modules.reviews.application.vcs_diff import PullRequestLocator, VcsProvider
+from app.modules.reviews.application.vcs_diff import PullRequestLocator, VcsMetadataProvider
 from app.modules.reviews.infrastructure.github_run_source import GitHubRunSource
 
 HEAD = "e" * 40
@@ -70,7 +70,7 @@ def _source(tree: dict[str, Any], blobs: Blobs) -> GitHubRunSource:
             base_url="https://api.github.test", transport=httpx.MockTransport(github)
         ),
         token_provider=StaticGitHubInstallationAccessTokenProvider("token"),
-        vcs=cast(VcsProvider, blobs),
+        vcs=cast(VcsMetadataProvider, blobs),
         runs=Runs(),
         run_id=uuid4(),
     )
@@ -134,7 +134,7 @@ def test_conventions_tree_and_files_come_from_the_base_revision_when_asked() -> 
                 base_url="https://api.github.test", transport=httpx.MockTransport(github)
             ),
             token_provider=StaticGitHubInstallationAccessTokenProvider("token"),
-            vcs=cast(VcsProvider, Blobs({"1" * 40: b"base content"})),
+            vcs=cast(VcsMetadataProvider, Blobs({"1" * 40: b"base content"})),
             runs=Runs(),
             run_id=uuid4(),
             conventions_from_base=from_base,

@@ -455,32 +455,18 @@ def _record_with_digests(root: Path, repo: Path) -> tuple[Path, Path]:
     rule.parent.mkdir(parents=True)
     prompt.write_text("recorded prompt\n")
     rule.write_text('{"rules": []}\n')
-    static_paths = sorted(
-        [
-            "review/prompts/review.system.v1.md",
-            "review/rules/default-backend.v1.json",
-            "review/rules/schema.json",
-            "review/schemas/review-output.schema.json",
-            "app/common/application/languages.py",
-            "app/bootstrap/llm_gateway.py",
-            "app/modules/reviews/application/llm.py",
-            "app/modules/reviews/application/prompt_builder.py",
-            "app/modules/reviews/application/prompt_budget.py",
-            "app/modules/reviews/application/review_output.py",
-            "app/modules/reviews/application/run_failures.py",
-            "app/modules/reviews/infrastructure/llm/answers.py",
-            "app/modules/reviews/infrastructure/llm/gateway.py",
-            "app/modules/reviews/infrastructure/llm/models.py",
-            "app/modules/reviews/infrastructure/llm/settings.py",
-            "app/modules/reviews/infrastructure/llm/transport.py",
-            "review/scripts/eval_live.py",
-        ]
+    static_paths = static_input_paths(
+        "review/prompts/review.system.v1.md",
+        ["review/rules/default-backend.v1.json", "review/rules/schema.json"],
     )
     for relative in static_paths:
         path = repo / relative
         if not path.exists():
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(f"fixture {relative}\n")
+            if relative.startswith("test-prs-dataset/cases/"):
+                shutil.copy2(REPO_ROOT / relative, path)
+            else:
+                path.write_text(f"fixture {relative}\n")
     manifest_path = root / "responses/manifest.json"
     manifest = json.loads(manifest_path.read_text())
     manifest["prompt_sha"] = hashlib.sha256(prompt.read_bytes()).hexdigest()

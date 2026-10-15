@@ -19,18 +19,25 @@ _MAGIC = b"review-eval-inputs-v1\0"
 _REVIEW_CODE = (
     "app/bootstrap/llm_gateway.py",
     "app/common/application/languages.py",
+    "app/common/infrastructure/github_link_header.py",
     "app/modules/reviews/application/llm.py",
     "app/modules/reviews/application/prompt_budget.py",
     "app/modules/reviews/application/prompt_builder.py",
     "app/modules/reviews/application/review_output.py",
     "app/modules/reviews/application/run_failures.py",
+    "app/modules/reviews/application/vcs_diff.py",
+    "app/modules/reviews/infrastructure/github_run_source.py",
+    "app/modules/reviews/infrastructure/github_vcs.py",
+    "app/modules/reviews/infrastructure/vcs_failures.py",
     "app/modules/reviews/infrastructure/llm/answers.py",
     "app/modules/reviews/infrastructure/llm/gateway.py",
     "app/modules/reviews/infrastructure/llm/models.py",
     "app/modules/reviews/infrastructure/llm/settings.py",
     "app/modules/reviews/infrastructure/llm/transport.py",
+    "review/eval/pr-commit-messages.json",
     "review/schemas/review-output.schema.json",
     "review/scripts/eval_live.py",
+    "review/scripts/commit_context.py",
 )
 _CONVENTIONS_RENDERER = "app/modules/reviews/application/conventions_prompt.py"
 
@@ -96,14 +103,39 @@ def rule_json_paths(root: Path) -> list[str]:
     return sorted(path.relative_to(root).as_posix() for path in rules_dir.glob("*.json"))
 
 
+def canonical_identity_paths(root: Path) -> list[str]:
+    """Pin the benchmark cohort identities consulted by offline sidecar binding."""
+    cases = root / "test-prs-dataset/cases"
+    for parent in (root, root / "test-prs-dataset", cases):
+        if parent.is_symlink():
+            raise DigestInputError("symlink canonical case directory")
+    if not cases.exists():
+        raise DigestInputMissing("missing canonical case directory")
+    if not cases.is_dir():
+        raise DigestInputError("canonical case path is not a directory")
+    paths = []
+    try:
+        case_dirs = sorted(cases.iterdir())
+    except OSError:
+        raise DigestInputError("cannot read canonical case directory") from None
+    for case in case_dirs:
+        if case.is_symlink():
+            raise DigestInputError("symlink canonical case identity")
+        if case.is_dir():
+            paths.append((case / "case.json").relative_to(root).as_posix())
+    return paths
+
+
 def static_input_paths(
     system_prompt: str,
     rule_paths: Iterable[str],
     *,
     conventions_prompt: str | None = None,
+    repo_root: Path | None = None,
 ) -> list[str]:
     """List every checked-in file that can shape this runner's provider messages."""
-    paths = [system_prompt, *_REVIEW_CODE, *rule_paths]
+    identity_root = repo_root if repo_root is not None else Path(__file__).resolve().parents[2]
+    paths = [system_prompt, *_REVIEW_CODE, *rule_paths, *canonical_identity_paths(identity_root)]
     if conventions_prompt is not None:
         paths.extend((conventions_prompt, _CONVENTIONS_RENDERER))
     return sorted(set(paths))
