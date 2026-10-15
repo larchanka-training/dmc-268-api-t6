@@ -11,6 +11,11 @@ erDiagram
     REPOSITORIES ||--o{ RULE_VERSIONS : versions
     REPOSITORIES ||--o{ CODE_CHANGES : contains
     REPOSITORIES ||--o{ REPO_CONVENTIONS : caches
+    REPOSITORIES ||--o| CODE_INDEX_STATES : indexes
+    REPOSITORIES ||--o{ CODE_INDEX_FILES : holds
+    REPOSITORIES ||--o{ CODE_INDEX_SYMBOLS : declares
+    REPOSITORIES ||--o{ CODE_INDEX_EDGES : links
+    REPOSITORIES ||--o{ CODE_INDEX_IMPORTS : records
     RULE_VERSIONS ||--o{ RUNS : snapshots
     CODE_CHANGES ||--o{ RUNS : triggers
     RUNS ||--o| CONTEXT_PAYLOADS : stores
@@ -155,4 +160,64 @@ erDiagram
       text response_ref
       timestamptz started_at
       int duration_ms
+    }
+    CODE_INDEX_STATES {
+      uuid repository_id PK, FK
+      bigint generation
+      bigint reserved_publication
+      bigint published_publication
+      bigint floor_publication
+      enum status
+      enum purge_reason
+      varchar error_code
+      varchar last_error_code
+      varchar indexed_commit_sha
+      varchar target_commit_sha
+      uuid lease_token
+      timestamptz lease_expires_at
+      timestamptz published_at
+      timestamptz last_used_at
+      int file_count
+      int symbol_count
+      int edge_count
+    }
+    CODE_INDEX_FILES {
+      uuid repository_id PK, FK
+      bigint generation PK
+      bigint valid_from PK
+      bigint valid_to
+      varchar path PK
+      varchar blob_sha
+    }
+    CODE_INDEX_SYMBOLS {
+      uuid repository_id PK, FK
+      bigint generation PK
+      bigint valid_from PK
+      bigint valid_to
+      varchar path PK
+      varchar qualified_name PK
+      enum kind PK
+      int disambiguator PK
+      int start_line
+      int end_line
+    }
+    CODE_INDEX_EDGES {
+      uuid repository_id PK, FK
+      bigint generation PK
+      bigint valid_from PK
+      bigint valid_to
+      varchar path PK
+      enum kind PK
+      varchar target_path PK
+      varchar target_name PK
+    }
+    CODE_INDEX_IMPORTS {
+      uuid repository_id PK, FK
+      bigint generation PK
+      bigint valid_from PK
+      bigint valid_to
+      varchar path PK
+      varchar specifier PK
+      enum resolution PK
+      varchar target_path
     }

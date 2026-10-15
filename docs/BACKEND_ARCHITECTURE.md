@@ -413,6 +413,7 @@ SQLModel не используется: ORM отделена от transport DTO 
 | [webhooks](../app/modules/integrations/webhooks/infrastructure/models.py) | WebhookEvent |
 | [billing](../app/modules/billing/infrastructure/models.py) | Payment, CreditLedger |
 | [analytics](../app/modules/analytics/infrastructure/models.py) | UsageEvent |
+| [code_index](../app/modules/code_index/infrastructure/models.py) | CodeIndexState, CodeIndexFile, CodeIndexSymbol, CodeIndexEdge, CodeIndexImport |
 
 Названия из задания сопоставляются так: `MergeRequest → CodeChange`,
 `ReviewJob → Run`. Это согласованные переименования, а не отсутствующие сущности.
@@ -428,8 +429,19 @@ Finding содержит результат анализа, включая `side
 `(run_id, created_at)`, что позволяет выбрать последнее потребление конкретного
 прогона. Поля SHA в Finding не дублируются.
 
+`code_index` владеет таблицами индекса графа RAG v1 (#141, ADR 0001 §4).
+`CodeIndexState` — одна строка на репозиторий: поколение, номера публикаций, статус,
+lease и счётчики. `CodeIndexFile`, `CodeIndexSymbol`, `CodeIndexEdge` и
+`CodeIndexImport` — версионные строки графа (`generation`, `valid_from`/`valid_to`) с
+натуральными составными ключами без суррогатных id. Каждая строка несёт
+`repository_id` с FK `ON DELETE CASCADE`; читает и пишет их только адаптер
+`SqlAlchemyCodeIndexStore` порта `CodeIndexStore`, который делает только `flush()`.
+ENUM видов символов и исходов импорта построены из `SymbolKind` и `ImportResolution`
+модуля `reviews`, а не дублируют их.
+
 ERD показывает связи и ключевые поля; он отражает актуальные поля состояния Run,
-enum Finding, inline response для RunAction и модель UsageEvent. Полный состав
+enum Finding, inline response для RunAction, модель UsageEvent и таблицы
+`code_index`. Полный состав
 колонок и ограничения следует смотреть в коде. Используются UUID, TIMESTAMPTZ,
 JSONB, точный Numeric для денежных значений, native ENUM и частичные unique indexes.
 Общая metadata нужна для FK между модулями и единой истории миграций; она не даёт
@@ -442,8 +454,10 @@ application права обходить интерфейсы.
 импортируют runtime-модели и не используют `Base.metadata.create_all/drop_all`.
 После начальной схемы добавлены отдельные ревизии: успешный статус запуска `succeeded`, enum для `Finding.severity`, `Finding.category` и
 `Finding.side`, индексы для списка runs и последнего UsageEvent, а также JSONB
-`RunAction.response` с check constraint для гибридного хранения ответа. Будущие
-изменения схемы оформляются новой ревизией, а не правкой уже применённой.
+`RunAction.response` с check constraint для гибридного хранения ответа. Ревизия
+`20261015_0032` (#141) создаёт пять таблиц индекса графа `code_index_*` и пять их
+ENUM; downgrade удаляет таблицы, затем типы. Будущие изменения схемы оформляются
+новой ревизией, а не правкой уже применённой.
 
 Миграции запускаются один раз отдельным deployment-шагом до старта процессов, не
 в lifespan каждого приложения. Из корня backend-проекта:
@@ -463,6 +477,12 @@ ENUM, rename, partial indexes и data migrations. Перед применени�
 [Интеграционные тесты](../tests/test_initial_migration.py) создают случайную отдельную
 схему в тестовой БД и удаляют только её. Проверяют два цикла upgrade/downgrade,
 совпадение миграции с ORM metadata, удаление ENUM при downgrade и commit/rollback UoW.
+Модели `code_index` попадают в эту проверку через `app/bootstrap/db_metadata.py`.
+[`test_code_index_store_postgres.py`](../tests/test_code_index_store_postgres.py)
+проверяет на PostgreSQL схему ревизии `20261015_0032` (колонки, натуральные PK,
+каскад от `repositories`, CHECK, ENUM, downgrade/upgrade) и поведение
+`SqlAlchemyCodeIndexStore`: изоляцию по `repository_id`, отказ записи и публикации с
+устаревшим fence, purge и сборку мусора, видимость публикаций.
 Пользователь тестовой БД должен иметь право CREATE SCHEMA. В Alembic передаётся
 готовое соединение: переменная `DATABASE_URL` приложения не может перенаправить тест
 в другую БД. Без `TEST_DATABASE_URL` интеграционные тесты пропускаются.
