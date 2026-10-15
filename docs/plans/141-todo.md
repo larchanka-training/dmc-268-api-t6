@@ -195,11 +195,11 @@ Also extend `tests/test_code_index_store_contract.py` with the adapter half:
 
 **Acceptance criteria:**
 
-- [ ] AC4 (adapter):
+- [x] AC4 (adapter):
   - the contract test covers the adapter's methods and constructor;
   - replacing the same file twice in one attempt leaves only the second version visible;
   - without `uow.commit()` nothing persists (flush-only).
-- [ ] AC3 and AC5:
+- [x] AC3 and AC5:
   - full c1 with `a.py`, then an incremental c2 that rewrites `a.py` → only the c2 rows
     are visible;
   - the state after publish equals literals (`ready`, `indexed_commit_sha`,
@@ -210,15 +210,15 @@ Also extend `tests/test_code_index_store_contract.py` with the adapter half:
     rows are intact;
   - enable after enable keeps the generation and the `ready` index; disable after enable
     rejects the old fence.
-- [ ] AC6: A and B have identical paths and names. Every read method for A returns only
+- [x] AC6: A and B have identical paths and names. Every read method for A returns only
   A's rows, checked against literal `blob_sha` values and rows.
-- [ ] AC8 (F1):
+- [x] AC8 (F1):
   - claim → purge → `replace_file`/`publish` with the old fence raises `IndexLeaseLost`,
     leaves no rows and leaves the state unchanged;
   - the same holds for disable+enable and for an expired lease;
   - two sessions: purge waits for the batch's FOR SHARE (shown with `pg_blocking_pids`),
     and a write with the old fence is rejected afterwards.
-- [ ] AC9 and AC10 (F4):
+- [x] AC9 and AC10 (F4):
   - c1 [foo, bar] → c2 [bar, baz, foo] keeps the foo/bar keys, and the importer's edge
     resolves;
   - an incremental build that deletes `a.py` and adds `c.py` with the same `foo` leaves

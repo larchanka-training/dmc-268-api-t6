@@ -1,4 +1,4 @@
-"""PostgreSQL evidence for the graph index schema (#141, ADR 0001 §4 and §6.2).
+"""PostgreSQL evidence for the graph index schema and store (#141, ADR 0001 §4 and §6.2).
 
 Opt-in: TEST_DATABASE_URL must target a test database whose user can create schemas.
 Each test migrates its own schema to head and drops it afterwards.
@@ -6,19 +6,44 @@ Each test migrates its own schema to head and drops it afterwards.
 
 from __future__ import annotations
 
+import asyncio
+import dataclasses
 import os
-from collections.abc import Iterator
+from collections.abc import Awaitable, Callable, Iterator, Sequence
+from dataclasses import dataclass
 from enum import StrEnum
-from uuid import uuid4
+from typing import Any
+from uuid import UUID, uuid4
 
 import pytest
 from alembic.config import Config
 from sqlalchemy import Connection, create_engine, inspect, text
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.pool import NullPool
 from sqlalchemy.schema import CreateSchema, DropSchema
 
 from alembic import command
+from app.modules.code_index.application.index_store import (
+    CodeIndexStore,
+    EdgeTarget,
+    ImportRecord,
+    IndexBuildStats,
+    IndexedEdge,
+    IndexedFile,
+    IndexedSymbol,
+    IndexFence,
+    IndexLeaseLost,
+    IndexProfile,
+    IndexState,
+)
 from app.modules.code_index.domain.enums import EdgeKind, IndexStatus, PurgeReason
+from app.modules.code_index.domain.keys import (
+    MAX_INDEX_KEY_BYTES,
+    SymbolKey,
+    assign_disambiguators,
+)
+from app.modules.code_index.infrastructure.index_store import SqlAlchemyCodeIndexUnitOfWork
 from app.modules.reviews.application.ast_resolution import ImportResolution
 from app.modules.reviews.application.ast_symbols import SymbolKind
 
@@ -186,7 +211,7 @@ def _migration_config(connection: Connection) -> Config:
     return config
 
 
-def _repository(connection: Connection) -> str:
+def _repository(connection: Connection, installation_external_id: int = 17) -> str:
     workspace_id, installation_id, repository_id = str(uuid4()), str(uuid4()), str(uuid4())
     connection.execute(
         text("INSERT INTO workspaces (id, name, daily_budget_usd) VALUES (:id, 'acme', 5)"),
@@ -196,9 +221,9 @@ def _repository(connection: Connection) -> str:
         text(
             "INSERT INTO provider_installations "
             "(id, workspace_id, provider, external_id, metadata) "
-            "VALUES (:id, :workspace, 'github', 17, '{\"account_login\": \"octo\"}')"
+            "VALUES (:id, :workspace, 'github', :external_id, '{\"account_login\": \"octo\"}')"
         ),
-        {"id": installation_id, "workspace": workspace_id},
+        {"id": installation_id, "workspace": workspace_id, "external_id": installation_external_id},
     )
     connection.execute(
         text(
@@ -533,3 +558,1018 @@ def test_downgrade_drops_index_tables_and_types_and_upgrade_restores_them(
         "code_index_import_resolution",
     }
     assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "20261015_0032"
+
+
+# Store behaviour: fencing, publication, purge, garbage collection and isolation.
+
+C1, C2, C3 = "1" * 40, "2" * 40, "3" * 40
+_PROFILE = IndexProfile("facts-3", "resolver-2", "parser-1", "limits-1")
+_STATS = IndexBuildStats(downloaded_bytes=48_213, build_duration_ms=1_250, github_request_count=3)
+_PROFILE_FIELDS = {
+    "extractor_version": "facts-3",
+    "resolver_version": "resolver-2",
+    "parser_profile_version": "parser-1",
+    "limits_profile_version": "limits-1",
+}
+_STATS_FIELDS = {"downloaded_bytes": 48_213, "build_duration_ms": 1_250, "github_request_count": 3}
+_COUNT_ROWS = (
+    "SELECT (SELECT count(*) FROM code_index_files WHERE repository_id = :repository), "
+    "(SELECT count(*) FROM code_index_symbols WHERE repository_id = :repository), "
+    "(SELECT count(*) FROM code_index_edges WHERE repository_id = :repository), "
+    "(SELECT count(*) FROM code_index_imports WHERE repository_id = :repository)"
+)
+_FILE_ROWS = (
+    "SELECT generation, valid_from, valid_to, path, blob_sha FROM code_index_files "
+    "WHERE repository_id = :repository ORDER BY generation, valid_from, path"
+)
+# 2, 2 and 4 UTF-8 bytes per character.
+_E, _A, _WIDE = "é", "ä", "\U0001d51e"
+
+
+@dataclass(frozen=True)
+class _Index:
+    factory: async_sessionmaker[AsyncSession]
+    a: UUID
+    b: UUID
+
+    def uow(self) -> SqlAlchemyCodeIndexUnitOfWork:
+        return SqlAlchemyCodeIndexUnitOfWork(self.factory)
+
+
+@pytest.fixture
+def index(code_index_database: Connection) -> Iterator[_Index]:
+    """Two workspace/installation/repository sets, committed so async sessions see them."""
+    connection = code_index_database
+    repository_a = UUID(_repository(connection, installation_external_id=17))
+    repository_b = UUID(_repository(connection, installation_external_id=18))
+    connection.commit()
+    schema = connection.scalar(text("SELECT current_schema()"))
+    engine = create_async_engine(
+        os.environ["TEST_DATABASE_URL"],
+        connect_args={"options": f"-csearch_path={schema}"},
+        poolclass=NullPool,
+    )
+    try:
+        yield _Index(async_sessionmaker(engine, expire_on_commit=False), repository_a, repository_b)
+    finally:
+        asyncio.run(engine.dispose())
+
+
+def _symbol(
+    path: str, name: str, start: int, end: int, kind: SymbolKind = SymbolKind.FUNCTION
+) -> IndexedSymbol:
+    return IndexedSymbol(SymbolKey(path, name, kind, 0), start, end)
+
+
+def _uses(path: str, target_path: str, name: str) -> IndexedEdge:
+    return IndexedEdge(path, EdgeKind.USES_IMPORTED, target_path, name)
+
+
+def _imports(path: str, target_path: str) -> IndexedEdge:
+    return IndexedEdge(path, EdgeKind.IMPORTS, target_path, "")
+
+
+def _module(blob: str, start: int) -> IndexedFile:
+    """`a.py` defining `foo` at line `start`."""
+    return IndexedFile("a.py", blob, symbols=(_symbol("a.py", "foo", start, start + 1),))
+
+
+def _importer(blob: str, start: int) -> IndexedFile:
+    """`b.py` declaring class `Bar`; it imports `a.py`, uses its `foo` and imports `requests`."""
+    return IndexedFile(
+        "b.py",
+        blob,
+        symbols=(_symbol("b.py", "Bar", start, start + 4, SymbolKind.CLASS),),
+        edges=(_imports("b.py", "a.py"), _uses("b.py", "a.py", "foo")),
+        imports=(
+            ImportRecord("b.py", ".a", ImportResolution.RESOLVED, "a.py"),
+            ImportRecord("b.py", "requests", ImportResolution.EXTERNAL, None),
+        ),
+    )
+
+
+async def _enable(index: _Index, repository_id: UUID) -> IndexState:
+    async with index.uow() as uow:
+        state = await uow.index.enable(repository_id)
+        await uow.commit()
+    return state
+
+
+async def _purge(
+    index: _Index, repository_id: UUID, reason: PurgeReason = PurgeReason.DISABLED
+) -> None:
+    async with index.uow() as uow:
+        await uow.index.purge(repository_id, reason)
+        await uow.commit()
+
+
+async def _try_claim(index: _Index, repository_id: UUID, generation: int) -> IndexFence | None:
+    async with index.uow() as uow:
+        fence = await uow.index.claim_lease(repository_id, generation, 600)
+        await uow.commit()
+    return fence
+
+
+async def _claim(index: _Index, repository_id: UUID, generation: int = 1) -> IndexFence:
+    fence = await _try_claim(index, repository_id, generation)
+    assert fence is not None
+    return fence
+
+
+async def _write(
+    index: _Index, repository_id: UUID, fence: IndexFence, *files: IndexedFile
+) -> None:
+    for file in files:
+        async with index.uow() as uow:
+            await uow.index.replace_file(repository_id, fence, file)
+            await uow.commit()
+
+
+async def _publish(
+    index: _Index,
+    repository_id: UUID,
+    fence: IndexFence,
+    commit: str,
+    *,
+    base: str | None = None,
+    full: bool = True,
+    deleted: Sequence[str] = (),
+) -> bool:
+    async with index.uow() as uow:
+        published = await uow.index.publish(
+            repository_id,
+            fence,
+            base_commit_sha=base,
+            commit_sha=commit,
+            full=full,
+            deleted_paths=deleted,
+            profile=_PROFILE,
+            stats=_STATS,
+        )
+        await uow.commit()
+    return published
+
+
+async def _build(
+    index: _Index,
+    repository_id: UUID,
+    commit: str,
+    *files: IndexedFile,
+    base: str | None = None,
+    full: bool = True,
+    deleted: Sequence[str] = (),
+) -> None:
+    fence = await _claim(index, repository_id)
+    await _write(index, repository_id, fence, *files)
+    assert await _publish(
+        index, repository_id, fence, commit, base=base, full=full, deleted=deleted
+    )
+
+
+async def _read[T](index: _Index, read: Callable[[CodeIndexStore], Awaitable[T]]) -> T:
+    async with index.uow() as uow:
+        return await read(uow.index)
+
+
+async def _state(index: _Index, repository_id: UUID) -> IndexState | None:
+    return await _read(index, lambda store: store.get_state(repository_id))
+
+
+async def _reads(index: _Index, repository_id: UUID) -> tuple[object, ...]:
+    """Every read method of the store, on the paths and names both repositories share."""
+    async with index.uow() as uow:
+        store = uow.index
+        return (
+            await store.get_file(repository_id, "a.py"),
+            await store.file_symbols(repository_id, "b.py"),
+            await store.outgoing_edges(repository_id, "b.py"),
+            await store.incoming_edges(repository_id, "a.py", "foo"),
+            await store.importers_of(repository_id, "a.py"),
+        )
+
+
+async def _collect(index: _Index, repository_id: UUID, limit: int) -> list[int]:
+    """Run garbage collection in portions until one deletes nothing."""
+    collected: list[int] = []
+    while not collected or collected[-1]:
+        async with index.uow() as uow:
+            collected.append(await uow.index.collect_garbage(repository_id, limit))
+            await uow.commit()
+    return collected
+
+
+async def _rows(index: _Index, statement: str, **values: object) -> list[tuple[Any, ...]]:
+    async with index.factory() as session:
+        return [tuple(row) for row in await session.execute(text(statement), values)]
+
+
+async def _execute(index: _Index, statement: str, repository_id: UUID) -> None:
+    async with index.factory.begin() as session:
+        await session.execute(text(statement), {"repository": repository_id})
+
+
+async def _expire_lease(index: _Index, repository_id: UUID) -> None:
+    await _execute(
+        index,
+        "UPDATE code_index_states SET lease_expires_at = clock_timestamp() - interval '1 second' "
+        "WHERE repository_id = :repository",
+        repository_id,
+    )
+
+
+def _fields(state: IndexState | None) -> dict[str, object]:
+    """The state without its clock values, which tests compare to the database clock."""
+    assert state is not None
+    fields = dataclasses.asdict(state)
+    for name in ("published_at", "last_used_at", "lease_expires_at", "updated_at"):
+        del fields[name]
+    return fields
+
+
+@pytest.mark.integration
+def test_store_flushes_and_only_the_callers_commit_persists(index: _Index) -> None:
+    async def scenario() -> None:
+        async with index.uow() as uow:
+            await uow.index.enable(index.a)
+            fence = await uow.index.claim_lease(index.a, 1, 600)
+            assert fence is not None
+            await uow.index.replace_file(index.a, fence, _module("aa01", 1))
+            own = await uow.session.execute(text(_COUNT_ROWS), {"repository": index.a})
+            # The rows reached the caller's transaction, and no other session sees them.
+            assert tuple(own.one()) == (1, 1, 0, 0)
+            assert await _rows(index, _COUNT_ROWS, repository=index.a) == [(0, 0, 0, 0)]
+        assert await _state(index, index.a) is None
+        assert await _rows(index, _COUNT_ROWS, repository=index.a) == [(0, 0, 0, 0)]
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.integration
+def test_replacing_a_file_twice_in_one_attempt_leaves_only_the_second_version(
+    index: _Index,
+) -> None:
+    async def scenario() -> None:
+        await _enable(index, index.a)
+        fence = await _claim(index, index.a)
+        second = IndexedFile("b.py", "ab02", symbols=(_symbol("b.py", "baz", 3, 4),))
+        await _write(index, index.a, fence, _module("aa01", 1), _importer("ab01", 1), second)
+        assert await _publish(index, index.a, fence, C1)
+
+        assert await _read(index, lambda store: store.get_file(index.a, "b.py")) == second
+        # The first version's symbol, edges and imports are deleted, not only hidden.
+        assert await _rows(index, _COUNT_ROWS, repository=index.a) == [(2, 2, 0, 0)]
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.integration
+def test_publications_record_literal_state_and_incremental_closes_rewritten_files(
+    index: _Index,
+) -> None:
+    async def scenario() -> None:
+        enabled = await _enable(index, index.a)
+        fence = await _claim(index, index.a)
+        assert (fence.generation, fence.publication) == (1, 1)
+        building = await _state(index, index.a)
+        assert building is not None
+        assert (building.status, building.reserved_publication) == ("building", 1)
+        await _write(index, index.a, fence, _module("aa01", 1), _importer("ab01", 1))
+        async with index.uow() as uow:
+            published_at = await uow.session.scalar(text("SELECT now()"))
+            assert await uow.index.publish(
+                index.a,
+                fence,
+                base_commit_sha=None,
+                commit_sha=C1,
+                full=True,
+                deleted_paths=(),
+                profile=_PROFILE,
+                stats=_STATS,
+            )
+            await uow.commit()
+
+        state = await _state(index, index.a)
+        assert _fields(state) == {
+            "generation": 1,
+            "status": "ready",
+            "purge_reason": None,
+            "error_code": None,
+            "last_error_code": None,
+            "indexed_commit_sha": C1,
+            "target_commit_sha": None,
+            "reserved_publication": 1,
+            "published_publication": 1,
+            "floor_publication": 1,
+            "file_count": 2,
+            "symbol_count": 2,
+            "edge_count": 2,
+            "profile": _PROFILE_FIELDS,
+            "stats": _STATS_FIELDS,
+        }
+        assert state is not None
+        assert (state.published_at, state.last_used_at) == (published_at, enabled.last_used_at)
+        # Publication spends the lease: the fence can no longer write visible rows.
+        assert state.lease_expires_at is None
+        async with index.uow() as uow:
+            with pytest.raises(IndexLeaseLost):
+                await uow.index.replace_file(index.a, fence, _module("aa0x", 1))
+
+        fence = await _claim(index, index.a)
+        rewritten = IndexedFile(
+            "a.py", "aa02", symbols=(_symbol("a.py", "foo", 3, 4), _symbol("a.py", "qux", 6, 7))
+        )
+        await _write(index, index.a, fence, rewritten)
+        assert await _publish(index, index.a, fence, C2, base=C1, full=False)
+
+        assert await _read(index, lambda store: store.get_file(index.a, "a.py")) == rewritten
+        assert await _read(index, lambda store: store.get_file(index.a, "b.py")) == _importer(
+            "ab01", 1
+        )
+        assert _fields(await _state(index, index.a)) == {
+            "generation": 1,
+            "status": "ready",
+            "purge_reason": None,
+            "error_code": None,
+            "last_error_code": None,
+            "indexed_commit_sha": C2,
+            "target_commit_sha": None,
+            "reserved_publication": 2,
+            "published_publication": 2,
+            "floor_publication": 1,
+            "file_count": 2,
+            "symbol_count": 3,
+            "edge_count": 2,
+            "profile": _PROFILE_FIELDS,
+            "stats": _STATS_FIELDS,
+        }
+        assert await _rows(index, _FILE_ROWS, repository=index.a) == [
+            (1, 1, 2, "a.py", "aa01"),
+            (1, 1, None, "b.py", "ab01"),
+            (1, 2, None, "a.py", "aa02"),
+        ]
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.integration
+def test_every_read_for_one_repository_returns_only_its_own_rows(index: _Index) -> None:
+    async def scenario() -> None:
+        for repository_id, prefix, start in ((index.a, "a", 1), (index.b, "b", 11)):
+            await _enable(index, repository_id)
+            await _build(
+                index,
+                repository_id,
+                C1,
+                _module(f"{prefix}a01", start),
+                _importer(f"{prefix}b01", start),
+            )
+
+        assert await _reads(index, index.a) == (
+            IndexedFile("a.py", "aa01", symbols=(_symbol("a.py", "foo", 1, 2),)),
+            [_symbol("b.py", "Bar", 1, 5, SymbolKind.CLASS)],
+            [
+                EdgeTarget(_imports("b.py", "a.py"), "aa01", ()),
+                EdgeTarget(_uses("b.py", "a.py", "foo"), "aa01", (_symbol("a.py", "foo", 1, 2),)),
+            ],
+            [_uses("b.py", "a.py", "foo")],
+            [ImportRecord("b.py", ".a", ImportResolution.RESOLVED, "a.py")],
+        )
+        assert await _reads(index, index.b) == (
+            IndexedFile("a.py", "ba01", symbols=(_symbol("a.py", "foo", 11, 12),)),
+            [_symbol("b.py", "Bar", 11, 15, SymbolKind.CLASS)],
+            [
+                EdgeTarget(_imports("b.py", "a.py"), "ba01", ()),
+                EdgeTarget(_uses("b.py", "a.py", "foo"), "ba01", (_symbol("a.py", "foo", 11, 12),)),
+            ],
+            [_uses("b.py", "a.py", "foo")],
+            [ImportRecord("b.py", ".a", ImportResolution.RESOLVED, "a.py")],
+        )
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.integration
+def test_writes_for_one_repository_leave_another_repositorys_rows_alone(index: _Index) -> None:
+    async def scenario() -> None:
+        for repository_id, prefix in ((index.a, "a"), (index.b, "b")):
+            await _enable(index, repository_id)
+            await _build(index, repository_id, C1, _module(f"{prefix}a01", 1))
+        fence_a = await _claim(index, index.a)
+        fence_b = await _claim(index, index.b)
+        # Same generation, publication number and path in both repositories.
+        assert (fence_a.generation, fence_a.publication) == (1, 2)
+        assert (fence_b.generation, fence_b.publication) == (1, 2)
+        await _write(index, index.b, fence_b, _module("ba02", 1))
+        await _write(index, index.a, fence_a, _module("aa0x", 1), _module("aa02", 1))
+        assert await _publish(index, index.a, fence_a, C2, base=C1, full=False)
+
+        assert await _read(index, lambda store: store.get_file(index.a, "a.py")) == _module(
+            "aa02", 1
+        )
+        assert await _read(index, lambda store: store.get_file(index.b, "a.py")) == _module(
+            "ba01", 1
+        )
+        assert await _rows(index, _FILE_ROWS, repository=index.b) == [
+            (1, 1, None, "a.py", "ba01"),
+            (1, 2, None, "a.py", "ba02"),
+        ]
+        assert await _publish(index, index.b, fence_b, C2, base=C1, full=False)
+        assert await _read(index, lambda store: store.get_file(index.b, "a.py")) == _module(
+            "ba02", 1
+        )
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.integration
+def test_purge_hides_every_row_gc_deletes_them_and_a_repeated_purge_is_a_no_op(
+    index: _Index,
+) -> None:
+    async def scenario() -> None:
+        for repository_id, prefix in ((index.a, "a"), (index.b, "b")):
+            await _enable(index, repository_id)
+            await _build(
+                index, repository_id, C1, _module(f"{prefix}a01", 1), _importer(f"{prefix}b01", 1)
+            )
+        enabled = await _state(index, index.a)
+        reads_b = await _reads(index, index.b)
+        await _purge(index, index.a, PurgeReason.DISABLED)
+
+        purged = await _state(index, index.a)
+        assert _fields(purged) == {
+            "generation": 2,
+            "status": "empty",
+            "purge_reason": "disabled",
+            "error_code": None,
+            "last_error_code": None,
+            "indexed_commit_sha": None,
+            "target_commit_sha": None,
+            "reserved_publication": 1,
+            "published_publication": 0,
+            "floor_publication": 0,
+            "file_count": 0,
+            "symbol_count": 0,
+            "edge_count": 0,
+            "profile": None,
+            "stats": {"downloaded_bytes": 0, "build_duration_ms": 0, "github_request_count": 0},
+        }
+        assert purged is not None and enabled is not None
+        assert (purged.published_at, purged.lease_expires_at) == (None, None)
+        assert purged.last_used_at == enabled.last_used_at
+        assert await _reads(index, index.a) == (None, [], [], [], [])
+
+        await _purge(index, index.a, PurgeReason.TTL)
+        assert await _state(index, index.a) == purged
+
+        # 2 files, 2 symbols, 2 edges and 2 imports, deleted in portions of 3.
+        assert await _collect(index, index.a, 3) == [3, 3, 2, 0]
+        assert await _rows(index, _COUNT_ROWS, repository=index.a) == [(0, 0, 0, 0)]
+        assert await _state(index, index.a) == purged
+        assert await _rows(index, _COUNT_ROWS, repository=index.b) == [(2, 2, 2, 2)]
+        assert await _reads(index, index.b) == reads_b
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.integration
+def test_enable_keeps_a_ready_index_and_disable_then_enable_rejects_the_old_fence(
+    index: _Index,
+) -> None:
+    async def scenario() -> None:
+        enabled = await _enable(index, index.a)
+        assert _fields(enabled) == {
+            "generation": 1,
+            "status": "empty",
+            "purge_reason": None,
+            "error_code": None,
+            "last_error_code": None,
+            "indexed_commit_sha": None,
+            "target_commit_sha": None,
+            "reserved_publication": 0,
+            "published_publication": 0,
+            "floor_publication": 0,
+            "file_count": 0,
+            "symbol_count": 0,
+            "edge_count": 0,
+            "profile": None,
+            "stats": {"downloaded_bytes": 0, "build_duration_ms": 0, "github_request_count": 0},
+        }
+        assert enabled.last_used_at is not None
+        await _build(index, index.a, C1, _module("aa01", 1))
+        ready = await _state(index, index.a)
+
+        assert await _enable(index, index.a) == ready
+        assert await _read(index, lambda store: store.get_file(index.a, "a.py")) == _module(
+            "aa01", 1
+        )
+
+        fence = await _claim(index, index.a)
+        await _purge(index, index.a, PurgeReason.DISABLED)
+        reenabled = await _enable(index, index.a)
+        assert (
+            reenabled.generation,
+            reenabled.status,
+            reenabled.purge_reason,
+            reenabled.reserved_publication,
+            reenabled.published_publication,
+        ) == (3, "empty", None, 2, 0)
+        assert reenabled.last_used_at is not None and reenabled.last_used_at > enabled.last_used_at
+        async with index.uow() as uow:
+            with pytest.raises(IndexLeaseLost):
+                await uow.index.replace_file(index.a, fence, _module("aa02", 1))
+        assert await _try_claim(index, index.a, 1) is None
+
+    asyncio.run(scenario())
+
+
+async def _purge_index(index: _Index, repository_id: UUID) -> None:
+    await _purge(index, repository_id, PurgeReason.REMOVED)
+
+
+async def _disable_and_enable(index: _Index, repository_id: UUID) -> None:
+    await _purge(index, repository_id, PurgeReason.DISABLED)
+    await _enable(index, repository_id)
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize(
+    ("invalidate", "generation"),
+    [
+        pytest.param(_purge_index, 2, id="purge"),
+        pytest.param(_disable_and_enable, 3, id="disable-enable"),
+        pytest.param(_expire_lease, 1, id="expired-lease"),
+    ],
+)
+def test_a_stale_fence_writes_and_publishes_nothing(
+    index: _Index,
+    invalidate: Callable[[_Index, UUID], Awaitable[None]],
+    generation: int,
+) -> None:
+    async def scenario() -> None:
+        await _enable(index, index.a)
+        fence = await _claim(index, index.a)
+        await _write(index, index.a, fence, _module("aa01", 1))
+        await invalidate(index, index.a)
+        stale = await _state(index, index.a)
+        assert stale is not None and stale.generation == generation
+
+        # Committed after each rejection: the check runs before any write of the same
+        # transaction, not merely before the caller's rollback.
+        async with index.uow() as uow:
+            with pytest.raises(IndexLeaseLost):
+                await uow.index.replace_file(index.a, fence, _module("aa02", 1))
+            with pytest.raises(IndexLeaseLost):
+                await uow.index.replace_file(index.a, fence, _importer("ab01", 1))
+            with pytest.raises(IndexLeaseLost):
+                await uow.index.discard_abandoned(index.a, fence, 100)
+            with pytest.raises(IndexLeaseLost):
+                await uow.index.publish(
+                    index.a,
+                    fence,
+                    base_commit_sha=None,
+                    commit_sha=C1,
+                    full=True,
+                    deleted_paths=(),
+                    profile=_PROFILE,
+                    stats=_STATS,
+                )
+            await uow.commit()
+
+        assert await _state(index, index.a) == stale
+        assert await _rows(index, _FILE_ROWS, repository=index.a) == [(1, 1, None, "a.py", "aa01")]
+        assert await _rows(index, _COUNT_ROWS, repository=index.a) == [(1, 1, 0, 0)]
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.integration
+def test_purge_waits_for_a_batch_write_and_then_rejects_the_old_fence(index: _Index) -> None:
+    async def scenario() -> None:
+        await _enable(index, index.a)
+        fence = await _claim(index, index.a)
+        async with index.uow() as writer:
+            await writer.index.replace_file(index.a, fence, _module("aa01", 1))
+            writer_pid = await writer.session.scalar(text("SELECT pg_backend_pid()"))
+            purge = asyncio.create_task(_purge(index, index.a))
+            async with asyncio.timeout(5), index.factory() as observer:
+                while not await observer.scalar(
+                    text(
+                        "SELECT EXISTS (SELECT 1 FROM pg_stat_activity "
+                        "WHERE wait_event_type = 'Lock' AND :pid = ANY(pg_blocking_pids(pid)))"
+                    ),
+                    {"pid": writer_pid},
+                ):
+                    assert not purge.done(), "purge did not wait for the batch's FOR SHARE"
+                    await observer.execute(text("SELECT pg_stat_clear_snapshot()"))
+                    await asyncio.sleep(0.01)
+            assert not purge.done()
+            await writer.commit()
+        await asyncio.wait_for(purge, 5)
+
+        purged = await _state(index, index.a)
+        assert purged is not None and (purged.generation, purged.status) == (2, "empty")
+        async with index.uow() as uow:
+            with pytest.raises(IndexLeaseLost):
+                await uow.index.replace_file(index.a, fence, _importer("ab01", 1))
+            await uow.commit()
+        # The batch committed before the purge; its rows are of an old generation.
+        assert await _rows(index, _FILE_ROWS, repository=index.a) == [(1, 1, None, "a.py", "aa01")]
+        assert await _reads(index, index.a) == (None, [], [], [], [])
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.integration
+def test_claim_takes_a_free_or_expired_lease_of_the_current_generation_only(
+    index: _Index,
+) -> None:
+    async def scenario() -> None:
+        assert await _try_claim(index, index.a, 1) is None
+        await _enable(index, index.a)
+        assert await _try_claim(index, index.a, 2) is None
+        first = await _claim(index, index.a)
+        assert (first.generation, first.publication) == (1, 1)
+        assert await _try_claim(index, index.a, 1) is None
+        building = await _state(index, index.a)
+        assert building is not None
+        assert (building.status, building.reserved_publication) == ("building", 1)
+        [(remaining,)] = await _rows(
+            index,
+            "SELECT extract(epoch FROM lease_expires_at - clock_timestamp()) "
+            "FROM code_index_states WHERE repository_id = :repository",
+            repository=index.a,
+        )
+        assert 590 < remaining <= 600
+
+        await _expire_lease(index, index.a)
+        second = await _claim(index, index.a)
+        assert (second.generation, second.publication) == (1, 2)
+        assert second.token != first.token
+
+        await _execute(
+            index,
+            "UPDATE code_index_states SET status = 'failed', error_code = 'archive_unsafe', "
+            "lease_token = NULL, lease_expires_at = NULL WHERE repository_id = :repository",
+            index.a,
+        )
+        third = await _claim(index, index.a)
+        assert third.publication == 3
+        claimed = await _state(index, index.a)
+        assert claimed is not None and (claimed.status, claimed.error_code) == ("building", None)
+
+        await _purge(index, index.a)
+        # Only enable re-arms a purged repository.
+        assert await _try_claim(index, index.a, 2) is None
+        purged = await _state(index, index.a)
+        assert purged is not None
+        assert (purged.generation, purged.status, purged.reserved_publication) == (2, "empty", 3)
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.integration
+def test_incremental_publication_waits_until_abandoned_rows_are_discarded(index: _Index) -> None:
+    async def scenario() -> None:
+        lost: dict[UUID, IndexFence] = {}
+        for repository_id, prefix in ((index.a, "a"), (index.b, "b")):
+            await _enable(index, repository_id)
+            await _build(index, repository_id, C1, _module(f"{prefix}a01", 1))
+            lost[repository_id] = await _claim(index, repository_id)
+            # Publication 2 writes 6 rows: a file, a symbol, two edges and two imports.
+            await _write(index, repository_id, lost[repository_id], _importer(f"{prefix}b02", 1))
+        await _expire_lease(index, index.a)
+        fence = await _claim(index, index.a)
+        assert fence.publication == 3
+        await _write(index, index.a, fence, IndexedFile("c.py", "ac03"))
+        ready = await _state(index, index.a)
+
+        # Publication 2's rows would turn visible once `published` passed them.
+        assert not await _publish(index, index.a, fence, C3, base=C1, full=False)
+        assert await _state(index, index.a) == ready
+        async with index.uow() as uow:
+            with pytest.raises(IndexLeaseLost):
+                await uow.index.discard_abandoned(index.a, lost[index.a], 100)
+
+        discarded: list[int] = []
+        while not discarded or discarded[-1]:
+            async with index.uow() as uow:
+                discarded.append(await uow.index.discard_abandoned(index.a, fence, 4))
+                await uow.commit()
+        assert discarded == [4, 2, 0]
+        assert await _rows(index, _FILE_ROWS, repository=index.a) == [
+            (1, 1, None, "a.py", "aa01"),
+            (1, 3, None, "c.py", "ac03"),
+        ]
+        assert await _rows(index, _COUNT_ROWS, repository=index.b) == [(2, 2, 2, 2)]
+
+        assert not await _publish(index, index.a, fence, C3, base=C2, full=False)
+        assert await _publish(index, index.a, fence, C3, base=C1, full=False)
+        published = await _state(index, index.a)
+        assert published is not None
+        assert (
+            published.published_publication,
+            published.floor_publication,
+            published.indexed_commit_sha,
+            published.file_count,
+            published.symbol_count,
+            published.edge_count,
+        ) == (3, 1, C3, 2, 1, 0)
+        assert await _read(index, lambda store: store.get_file(index.a, "b.py")) is None
+        assert await _read(index, lambda store: store.get_file(index.a, "c.py")) == IndexedFile(
+            "c.py", "ac03"
+        )
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.integration
+def test_gc_spares_the_lease_and_waits_ten_minutes_for_displaced_rows(index: _Index) -> None:
+    async def scenario() -> None:
+        async def revoke() -> bool:
+            async with index.uow() as uow:
+                revoked = await uow.index.revoke_expired_lease(index.a)
+                await uow.commit()
+            return revoked
+
+        for repository_id, prefix in ((index.a, "a"), (index.b, "b")):
+            await _enable(index, repository_id)
+            await _build(
+                index,
+                repository_id,
+                C1,
+                _module(f"{prefix}a01", 1),
+                IndexedFile("b.py", f"{prefix}b01"),
+            )
+        # A full build: its floor hides publication 1 without closing its rows.
+        await _build(index, index.a, C2, _module("aa02", 1), base=C1)
+        abandoned = await _claim(index, index.a)
+        await _write(index, index.a, abandoned, IndexedFile("c.py", "ac03"))
+
+        assert await revoke() is False
+        assert await _collect(index, index.a, 10) == [0]
+        await _expire_lease(index, index.a)
+        # An expired lease still protects its rows until it is revoked.
+        assert await _collect(index, index.a, 10) == [0]
+        assert await revoke() is True
+        assert await revoke() is False
+        live = await _claim(index, index.a)
+        assert live.publication == 4
+        await _write(index, index.a, live, IndexedFile("d.py", "ad04"))
+
+        assert await _collect(index, index.a, 10) == [1, 0]
+        assert await _rows(index, _FILE_ROWS, repository=index.a) == [
+            (1, 1, None, "a.py", "aa01"),
+            (1, 1, None, "b.py", "ab01"),
+            (1, 2, None, "a.py", "aa02"),
+            (1, 4, None, "d.py", "ad04"),
+        ]
+        await _execute(
+            index,
+            "UPDATE code_index_states SET published_at = published_at - interval '11 minutes' "
+            "WHERE repository_id = :repository",
+            index.a,
+        )
+        # Publication 1: two files and a symbol.
+        assert await _collect(index, index.a, 10) == [3, 0]
+        assert await _rows(index, _FILE_ROWS, repository=index.a) == [
+            (1, 2, None, "a.py", "aa02"),
+            (1, 4, None, "d.py", "ad04"),
+        ]
+        assert await _rows(index, _FILE_ROWS, repository=index.b) == [
+            (1, 1, None, "a.py", "ba01"),
+            (1, 1, None, "b.py", "bb01"),
+        ]
+        assert await _read(index, lambda store: store.get_file(index.a, "a.py")) == _module(
+            "aa02", 1
+        )
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.integration
+def test_symbol_keys_survive_reordering_and_a_new_commit_and_the_edge_resolves(
+    index: _Index,
+) -> None:
+    async def scenario() -> None:
+        function = SymbolKind.FUNCTION
+        foo = SymbolKey("a.py", "foo", function, 0)
+        bar = SymbolKey("a.py", "bar", function, 0)
+        baz = SymbolKey("a.py", "baz", function, 0)
+        importer = IndexedFile(
+            "b.py",
+            "ab01",
+            edges=(
+                _imports("b.py", "a.py"),
+                _uses("b.py", "a.py", "bar"),
+                _uses("b.py", "a.py", "foo"),
+            ),
+        )
+        c1 = assign_disambiguators("a.py", [("foo", function), ("bar", function)])
+        await _enable(index, index.a)
+        await _build(
+            index,
+            index.a,
+            C1,
+            IndexedFile(
+                "a.py", "aa01", symbols=(IndexedSymbol(c1[0], 1, 2), IndexedSymbol(c1[1], 4, 5))
+            ),
+            importer,
+        )
+        assert await _read(index, lambda store: store.outgoing_edges(index.a, "b.py")) == [
+            EdgeTarget(_imports("b.py", "a.py"), "aa01", ()),
+            EdgeTarget(_uses("b.py", "a.py", "bar"), "aa01", (IndexedSymbol(bar, 4, 5),)),
+            EdgeTarget(_uses("b.py", "a.py", "foo"), "aa01", (IndexedSymbol(foo, 1, 2),)),
+        ]
+
+        c2 = assign_disambiguators(
+            "a.py", [("bar", function), ("baz", function), ("foo", function)]
+        )
+        symbols = (
+            IndexedSymbol(c2[0], 1, 2),
+            IndexedSymbol(c2[1], 4, 5),
+            IndexedSymbol(c2[2], 7, 8),
+        )
+        await _build(
+            index, index.a, C2, IndexedFile("a.py", "aa02", symbols=symbols), base=C1, full=False
+        )
+
+        assert await _read(index, lambda store: store.file_symbols(index.a, "a.py")) == [
+            IndexedSymbol(bar, 1, 2),
+            IndexedSymbol(baz, 4, 5),
+            IndexedSymbol(foo, 7, 8),
+        ]
+        assert await _read(index, lambda store: store.outgoing_edges(index.a, "b.py")) == [
+            EdgeTarget(_imports("b.py", "a.py"), "aa02", ()),
+            EdgeTarget(_uses("b.py", "a.py", "bar"), "aa02", (IndexedSymbol(bar, 1, 2),)),
+            EdgeTarget(_uses("b.py", "a.py", "foo"), "aa02", (IndexedSymbol(foo, 7, 8),)),
+        ]
+        assert await _read(index, lambda store: store.incoming_edges(index.a, "a.py", "foo")) == [
+            _uses("b.py", "a.py", "foo")
+        ]
+        # The stored key carries neither the commit nor the declaration's position.
+        assert await _rows(
+            index,
+            "SELECT valid_from, qualified_name, kind::text, disambiguator, start_line "
+            "FROM code_index_symbols WHERE repository_id = :repository "
+            "ORDER BY valid_from, start_line",
+            repository=index.a,
+        ) == [
+            (1, "foo", "function", 0, 1),
+            (1, "bar", "function", 0, 4),
+            (2, "bar", "function", 0, 1),
+            (2, "baz", "function", 0, 4),
+            (2, "foo", "function", 0, 7),
+        ]
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.integration
+def test_deleting_the_target_file_leaves_the_edge_unresolved(index: _Index) -> None:
+    async def scenario() -> None:
+        importer = IndexedFile(
+            "b.py",
+            "ab01",
+            edges=(_imports("b.py", "a.py"), _uses("b.py", "a.py", "foo")),
+            imports=(ImportRecord("b.py", ".a", ImportResolution.RESOLVED, "a.py"),),
+        )
+        newcomer = IndexedFile("c.py", "ac02", symbols=(_symbol("c.py", "foo", 1, 2),))
+        await _enable(index, index.a)
+        await _build(index, index.a, C1, _module("aa01", 1), importer)
+        await _build(index, index.a, C2, newcomer, base=C1, full=False, deleted=("a.py",))
+
+        assert await _read(index, lambda store: store.get_file(index.a, "a.py")) is None
+        assert await _read(index, lambda store: store.outgoing_edges(index.a, "b.py")) == [
+            EdgeTarget(_imports("b.py", "a.py"), None, ()),
+            EdgeTarget(_uses("b.py", "a.py", "foo"), None, ()),
+        ]
+        # The same name in another file is not a target.
+        assert await _read(index, lambda store: store.incoming_edges(index.a, "c.py", "foo")) == []
+        assert await _read(index, lambda store: store.file_symbols(index.a, "c.py")) == [
+            _symbol("c.py", "foo", 1, 2)
+        ]
+        state = await _state(index, index.a)
+        assert state is not None
+        assert (state.file_count, state.symbol_count, state.edge_count) == (2, 1, 2)
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize(
+    ("accepted", "rejected"),
+    [
+        pytest.param(
+            IndexedFile(_WIDE * 500, "f1"), IndexedFile(_WIDE * 500 + "x", "f2"), id="file"
+        ),
+        pytest.param(
+            IndexedFile(_E * 998, "s1", symbols=(_symbol(_E * 998, "abcd", 1, 1),)),
+            IndexedFile(_E * 998, "s2", symbols=(_symbol(_E * 998, "abcde", 1, 1),)),
+            id="symbol",
+        ),
+        pytest.param(
+            IndexedFile("b.py", "e1", edges=(_uses("b.py", _E * 498, _A * 500),)),
+            IndexedFile("b.py", "e2", edges=(_uses("b.py", _E * 498 + "x", _A * 500),)),
+            id="edge",
+        ),
+        pytest.param(
+            IndexedFile(
+                "b.py",
+                "i1",
+                imports=(ImportRecord("b.py", _E * 998, ImportResolution.MISSING, None),),
+            ),
+            IndexedFile(
+                "b.py",
+                "i2",
+                imports=(ImportRecord("b.py", _E * 998 + "x", ImportResolution.MISSING, None),),
+            ),
+            id="import",
+        ),
+        pytest.param(
+            IndexedFile(
+                "b.py",
+                "t1",
+                imports=(ImportRecord("b.py", "pkg", ImportResolution.RESOLVED, _WIDE * 500),),
+            ),
+            IndexedFile(
+                "b.py",
+                "t2",
+                imports=(
+                    ImportRecord("b.py", "pkg", ImportResolution.RESOLVED, _WIDE * 500 + "x"),
+                ),
+            ),
+            id="import-target",
+        ),
+    ],
+)
+def test_replace_file_rejects_a_key_over_the_btree_bound_before_any_write(
+    index: _Index, accepted: IndexedFile, rejected: IndexedFile
+) -> None:
+    # Each accepted key is exactly 2000 UTF-8 bytes; each rejected key is one byte more.
+    assert MAX_INDEX_KEY_BYTES == 2000
+
+    async def scenario() -> None:
+        await _enable(index, index.a)
+        fence = await _claim(index, index.a)
+        await _write(index, index.a, fence, accepted)
+        async with index.uow() as uow:
+            with pytest.raises(ValueError, match="2001 UTF-8 bytes"):
+                await uow.index.replace_file(index.a, fence, rejected)
+            await uow.commit()
+        assert await _publish(index, index.a, fence, C1)
+
+        assert await _rows(
+            index,
+            "SELECT path, blob_sha FROM code_index_files WHERE repository_id = :repository",
+            repository=index.a,
+        ) == [(accepted.path, accepted.blob_sha)]
+        assert await _read(index, lambda store: store.get_file(index.a, accepted.path)) == accepted
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.integration
+def test_replace_file_rejects_rows_that_belong_to_another_path(index: _Index) -> None:
+    async def scenario() -> None:
+        await _enable(index, index.a)
+        fence = await _claim(index, index.a)
+        stray = IndexedFile("a.py", "aa01", symbols=(_symbol("b.py", "foo", 1, 2),))
+        async with index.uow() as uow:
+            with pytest.raises(ValueError, match="must carry the file's path"):
+                await uow.index.replace_file(index.a, fence, stray)
+            await uow.commit()
+
+        assert await _rows(index, _COUNT_ROWS, repository=index.a) == [(0, 0, 0, 0)]
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.integration
+def test_replace_file_collapses_duplicate_edges_and_imports_onto_their_keys(
+    index: _Index,
+) -> None:
+    async def scenario() -> None:
+        resolved = ImportRecord("b.py", ".a", ImportResolution.RESOLVED, "a.py")
+        dynamic = ImportRecord("b.py", ".a", ImportResolution.DYNAMIC, None)
+        await _enable(index, index.a)
+        fence = await _claim(index, index.a)
+        await _write(
+            index,
+            index.a,
+            fence,
+            IndexedFile(
+                "b.py",
+                "ab01",
+                edges=(_uses("b.py", "a.py", "foo"), _uses("b.py", "a.py", "foo")),
+                imports=(resolved, resolved, dynamic),
+            ),
+        )
+        assert await _publish(index, index.a, fence, C1)
+
+        # A static and a dynamic import of one specifier are two records.
+        assert await _read(index, lambda store: store.get_file(index.a, "b.py")) == IndexedFile(
+            "b.py", "ab01", edges=(_uses("b.py", "a.py", "foo"),), imports=(resolved, dynamic)
+        )
+        assert await _rows(index, _COUNT_ROWS, repository=index.a) == [(1, 0, 1, 2)]
+
+    asyncio.run(scenario())
