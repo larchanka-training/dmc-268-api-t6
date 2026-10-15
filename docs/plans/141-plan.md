@@ -247,6 +247,12 @@ Binding for the implementer; they close the planning hand-back's open points.
   mine`) would fall inside the visibility range once `published := mine`. The CAS refuses
   while any remain, so the caller must run `discard_abandoned` first. Full publication does
   not need it: `floor := mine` hides every lower number.
+- Btree key size (Task 2 hand-back): a PostgreSQL index entry is capped at ~2.7 KB, and the
+  widest keys (edges: `path` + `target_path` + `target_name`; imports: `path` + `specifier`)
+  can exceed it with long or multibyte values. `replace_file` validates every row before any
+  write and raises `ValueError` when the UTF-8 bytes of a row's text key columns exceed
+  `MAX_INDEX_KEY_BYTES = 2000` (a domain constant); nothing is written. Filtering such files
+  before extraction is #142's job — name it as a hand-off in the PR body.
 - mermaid-cli: pick the newest `@mermaid-js/mermaid-cli` release published at least 14 days
   ago (`npm view @mermaid-js/mermaid-cli time`) and pin that exact version in the PR body.
 
