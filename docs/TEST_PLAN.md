@@ -123,7 +123,7 @@ API baseline gates локально и в обязательном CI: `uv run r
 
 Каждый кейс имеет JSON metadata/ground truth, исходное состояние файла (pre-image), применимый unified `.patch` и источник; raw responses хранятся отдельно от кейса, в `test-prs-dataset/responses/`. Для real PR обязательны URL PR/commit, revision, название и URL лицензии, attribution и ручная проверка права на конкретный excerpt. Ground truth использует `path`, `start_line`, `line`, `severity`, `category` из Finding; `start_line: null` означает одну строку, иначе `< line`. Ожидаемый `verdict` выводится из severity по [PIPELINE_SPEC §11](PIPELINE_SPEC.md#11-вердикт-и-бейджи-d3): `critical/high → blocking`, иначе `medium/low → attention`, иначе `clean`. Case schema собственная; [ReviewOutput schema](../review/schemas/review-output.schema.json) применяется только к ответу модели. `git apply --check` выполняется на копии pre-image, truth якорится в добавленных строках новой стороны; answer-hint комментарии запрещены.
 
-Оценивать **сырой** ответ модели до post-processing, hunk-фильтра, severity threshold, production verifier, cap inline и публикации: иначе качество промпта скрывается правилами выпуска. Replay читает committed raw response без сети и ключа, с model ID, prompt version/SHA и run metadata. Для существующего legacy harness валиден только ответ, для которого `uv run python review/scripts/validate_findings.py <response.json>` завершился кодом 0 **и** напечатал `OK ReviewOutput`; exit 1/2 и `RepoConventionsDraft` невалидны. Это не проверка целевого v2 с evidence/manifests. Live использует PromptBuilder и `review/prompts/`, выбранную модель и внешние credentials, сохраняет raw output и ту же provenance для replay. Live запускается вручную (§2, `eval-live.yml`); закоммиченный baseline — ответы и `manifest.json` в `test-prs-dataset/responses/`, его модель и provenance описаны в [README корпуса](../test-prs-dataset/README.md); историческая съёмка 2026-10-13 использовала одиночные revision snapshots (результат §3.2.1); полная замена всех 24 ответов с проверенными PR prefixes опубликована как baseline §3.2.2. LLM-as-a-judge для оценки этого raw benchmark не используется. Обязательный production verifier по #107 — часть продукта, качество которого оценивается отдельно (§3.4).
+Оценивать **сырой** ответ модели до post-processing, hunk-фильтра, severity threshold, production verifier, cap inline и публикации: иначе качество промпта скрывается правилами выпуска. Replay читает committed raw response без сети и ключа, с model ID, prompt version/SHA и run metadata. Для существующего legacy harness валиден только ответ, для которого `uv run python review/scripts/validate_findings.py <response.json>` завершился кодом 0 **и** напечатал `OK ReviewOutput`; exit 1/2 и `RepoConventionsDraft` невалидны. Это не проверка целевого v2 с evidence/manifests. Live использует PromptBuilder и `review/prompts/`, выбранную модель и внешние credentials, сохраняет raw output и ту же provenance для replay. Live запускается вручную (§2, `eval-live.yml`); закоммиченный baseline — ответы и `manifest.json` в `test-prs-dataset/responses/`, его модель и provenance описаны в [README корпуса](../test-prs-dataset/README.md); историческая съёмка 2026-10-13 использовала одиночные revision snapshots (результат §3.2.1); полная замена всех 24 ответов с проверенными PR prefixes сохранена как исторический baseline §3.2.2; текущий post-rebase baseline после merged #149 — §3.2.3. LLM-as-a-judge для оценки этого raw benchmark не используется. Обязательный production verifier по #107 — часть продукта, качество которого оценивается отдельно (§3.4).
 
 ### 3.2. Однозначное сопоставление и счётчики
 
@@ -205,6 +205,9 @@ totals и остаток баланса в artifacts отсутствуют; о�
 
 ### 3.2.2. Зафиксированный PR-prefix raw baseline #82 (2026-10-14)
 
+Исторический capture, заменённый текущим post-rebase baseline §3.2.3; original
+raw bytes/manifest доступны на [revision bf09117](https://github.com/larchanka-training/dmc-268-api-t6/tree/bf0911713b3f530add49443b5b13df5720e6521e/test-prs-dataset/responses).
+
 [Actions run 38560319651, attempt 1](https://github.com/larchanka-training/dmc-268-api-t6/actions/runs/38560319651)
 снял все 24 первых raw ответа на frozen source SHA `5173792fd2997d5401aed4b5787d536254249a26`;
 начало `2026-10-14T11:58:17.004986Z`. Один согласованный платный capture,
@@ -247,6 +250,55 @@ counts приведены в [README корпуса](../test-prs-dataset/README.
 Configured цены/fast policy совпадают с §3.2.1 и полными настройками manifest:
 nominal USD 0.50/кейс (USD 12 для 24), 4 calls/attempt, 90s timeout. Actual spend,
 billed-token totals и остаток баланса отсутствуют в artifacts.
+
+### 3.2.3. Зафиксированный post-rebase raw baseline #82 (2026-10-15)
+
+[Actions run 38701845865, attempt 1](https://github.com/larchanka-training/dmc-268-api-t6/actions/runs/38701845865)
+снял все 24 первых raw ответа на frozen source SHA `a1cc6229c6a6fdba65ecb640c60ca823e262a6aa`;
+начало `2026-10-15T07:53:56.845426Z` (09:53:56 Europe/Warsaw). Это один дополнительно
+разрешённый платный capture после rebase на main `f27d4c2ccd5854ac736ad8c0ecc1fe30d3b08140`:
+merged #149 изменил pinned parser/schema ReviewOutput. Prompt, frozen API-order
+PR prefixes и corpus/truth не менялись. Engine `fast`, primary `mistral-small-4`,
+configured fallback `mistral-small-3.2-24b`, provider `eurouter`, raw export включён.
+Real prefixes: CLEAN-03/LOG-03/SEC-04 по 1 сообщению, RES-03/SYN-04 первые 20 плюс
+`[Additional commits may be omitted]`; 19 synthetic histories пусты, SEC-05 исключён.
+
+Prompt v2 SHA-256 `9177e358c23d1a7cd8987cbf667cf8b705c2afb27eaf8b2237480e4531431d75`.
+Static digest `sha256-v1:77d46f9c731dc26aded94c7ec60cb860314fe7835e6041a318d63b8ddc690449`,
+corpus digest `sha256-v1:1ab8ca9a16cc50c357b39e1571c73b1e6674752737c444bd8b58d3f2aab81dfa`.
+Все 24 первых calls — `answer`, primary `mistral-small-4`, serving-provider label
+`mistral` (digest `sha256-v1:8e1af0131864f4488dc577f497afcf5c87b74b237e86f0322abf99e8c2ef018a`).
+Gateway statuses `accepted`, paid-metadata errors отсутствуют,
+`baseline_publishable=true`, nonpublishable list пуст. Все 25 файлов импортированы
+вместе byte-for-byte: hashes/sizes ответов совпали с safe metadata, raw/safe
+manifest идентичны, SHA-256 `c7f52e42004f2d1149b9d3dd80956eea1d3e17cee9fa93ff0e5625686c0694df`.
+Final corpus 24/24; два replay JSON byte-identical, `warnings=[]`, redacted offline
+report byte-identical live safe report. Repair/fallback не подменяют первый ответ.
+
+| Метрика | Текущий измеренный raw baseline |
+| --- | --- |
+| Validity | 29.2% (7/24) |
+| Micro TP / FP / FN | 2 / 2 / 17 |
+| Precision | 50.0% (2/4 predictions) |
+| Recall | 10.5% (2/19 truths) |
+| Critical Recall | 40.0% (2/5) |
+| Verdict agreement | 20.8% (5/24) |
+| Severity mismatches | 1/2: LOG-02, predicted high / truth critical |
+
+Security TP/FP/FN 1/1/3, precision 1/2, recall 1/4; correctness 1/1/4,
+precision 1/2, recall 1/5; performance и readability по 0/0/5, precision не определена,
+recall 0/5. Validity real 1/5, synthetic 6/19. Все 17 невалидных первых ответов
+остаются в знаменателе: predictions не интерпретируются, truths остаются FN.
+Case IDs и распределение по классам — [README корпуса](../test-prs-dataset/README.md#recorded-mistral-baseline--2026-10-15).
+§3.2.1 и §3.2.2 сохраняют исторические capture/метрики/digests. Сравнение разных
+captures не является controlled experiment и не доказывает качество или эффект
+изменения parser/schema/commit context. Manual semantic/Hallucination Rate oracle
+не выполнялся; production verifier/final-output quality оцениваются отдельно.
+
+Effective settings совпадают с предыдущей согласованной конфигурацией (§3.2.1/§3.2.2):
+nominal USD 0.50/кейс (USD 12 для 24), 4 calls/attempt, 90s timeout, полные
+настройки в manifest. Configured цены/лимиты не измеряют actual spend,
+billed-token totals или баланс — этих величин в artifacts нет.
 
 ### 3.3. Ручной оракул семантики
 

@@ -1,1 +1,1 @@
-{"findings": [], "summary": {"problem": "No defect was found in this change.", "done_well": "The function was simplified to a concise dictionary comprehension, reducing boilerplate while preserving behavior.", "effort": "none"}}
+{"findings": [], "summary": {"problem": "No defect was found in this change.", "done_well": "The function was simplified to a single dictionary comprehension, reducing boilerplate while preserving behavior.", "effort": "none"}}

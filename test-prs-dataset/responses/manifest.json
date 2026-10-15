@@ -305,10 +305,10 @@
     "engine": "fast",
     "fallback_model_id": "mistral-small-3.2-24b",
     "nonpublishable_case_ids": [],
-    "recorded_at": "2026-10-14T11:58:17.004986Z"
+    "recorded_at": "2026-10-15T07:53:56.845426Z"
   },
   "schema_version": 1,
-  "static_digest": "sha256-v1:09c0c809ca0469f300c50c281848edded260fdbe3373d414e294bbb39c012736",
+  "static_digest": "sha256-v1:77d46f9c731dc26aded94c7ec60cb860314fe7835e6041a318d63b8ddc690449",
   "static_inputs": [
     "app/bootstrap/llm_gateway.py",
     "app/common/application/languages.py",

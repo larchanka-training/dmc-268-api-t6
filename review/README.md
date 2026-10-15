@@ -117,13 +117,17 @@ prefix evidence. Live evaluation and replay never query GitHub.
 
 The sidecar, production retrieval/Link shaping, recorder/schema, existing inputs,
 and every canonical `case.json` identity consulted by binding are conservatively
-fingerprinted. [Run 38560319651, attempt 1](https://github.com/larchanka-training/dmc-268-api-t6/actions/runs/38560319651)
-captured all 24 first raw answers at frozen source `5173792fd2997d5401aed4b5787d536254249a26`
+fingerprinted. [Run 38701845865, attempt 1](https://github.com/larchanka-training/dmc-268-api-t6/actions/runs/38701845865)
+captured all 24 first raw answers on 2026-10-15 at frozen source `a1cc6229c6a6fdba65ecb640c60ca823e262a6aa`
 with `mistral-small-4` and raw export. All 25 baseline files match the raw artifact
 byte-for-byte and safe hashes/sizes; two offline reports are identical with no
 drift and match the redacted live report. Current measured results are in the
-[corpus README](../test-prs-dataset/README.md#recorded-mistral-baseline--2026-10-14)
-and [test plan](../docs/TEST_PLAN.md#322-зафиксированный-pr-prefix-raw-baseline-82-2026-10-14).
+[corpus README](../test-prs-dataset/README.md#recorded-mistral-baseline--2026-10-15)
+and [test plan](../docs/TEST_PLAN.md#323-зафиксированный-post-rebase-raw-baseline-82-2026-10-15).
+This complete post-rebase replacement includes the merged #149 parser/schema changes;
+its static digest is `sha256-v1:77d46f9c731dc26aded94c7ec60cb860314fe7835e6041a318d63b8ddc690449`.
+The [2026-10-14 PR-prefix capture](../test-prs-dataset/README.md#recorded-mistral-baseline--2026-10-14)
+remains historical with original bytes/digests at revision bf09117.
 The [2026-10-13 snapshot capture](https://github.com/larchanka-training/dmc-268-api-t6/actions/runs/38468081001)
 remains historical evidence with its original bytes/digests at revision 76df6d4.
 

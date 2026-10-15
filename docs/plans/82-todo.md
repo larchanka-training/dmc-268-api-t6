@@ -367,7 +367,8 @@ errors, `baseline_publishable=true`. All 25 raw files were imported byte-for-byt
 safe/raw manifests identical, SHA-256 `264dde15691f1fba3bdea64d81276c1d644c7820628e8a29e1a64860b4c94673`.
 Every answer hash/byte count matched the separate safe metadata. Static digest
 `sha256-v1:09c0c809ca0469f300c50c281848edded260fdbe3373d414e294bbb39c012736`, corpus
-`sha256-v1:1ab8ca9a16cc50c357b39e1571c73b1e6674752737c444bd8b58d3f2aab81dfa`. No pinned source or corpus input changed afterward.
+`sha256-v1:1ab8ca9a16cc50c357b39e1571c73b1e6674752737c444bd8b58d3f2aab81dfa`. No pinned source or corpus input changed during that publication; the subsequent
+main parser/schema update is covered by the complete 2026-10-15 replacement below.
 Corpus final validation passed 24/24; two offline reports were byte-identical with
 `warnings=[]`, and the redacted offline report matched the live safe report.
 
@@ -383,3 +384,35 @@ Independent post-import Standards and Spec reviews reported zero findings.
 Final publication, current-head hosted CI and eight review-thread replies are
 tracked in [PR #154](https://github.com/larchanka-training/dmc-268-api-t6/pull/154),
 whose full body records the final head separately from this capture's source SHA.
+
+
+## Post-rebase complete baseline replacement — 2026-10-15
+
+- [x] One additional paid 24-case raw-export capture explicitly approved by the user; no repeated dispatch or rerun.
+- [x] Rebase on main `f27d4c2ccd5854ac736ad8c0ecc1fe30d3b08140` preserves all feature patches; merged #149 parser/schema changes are honestly fingerprinted.
+- [x] Import all 24 first raw responses and manifest together byte-for-byte, preserving invalid first answers and all prior captures as history.
+- [x] Corpus 24/24; replay twice identical with `warnings=[]`; redacted offline report equals live safe report.
+- [x] Current evidence and links updated consistently in corpus/review README, TEST_PLAN and SYSTEM_DESIGN; no pinned source/corpus edits after capture.
+
+[Run 38701845865, attempt 1](https://github.com/larchanka-training/dmc-268-api-t6/actions/runs/38701845865)
+succeeded at frozen source `a1cc6229c6a6fdba65ecb640c60ca823e262a6aa`, recorded
+`2026-10-15T07:53:56.845426Z`. Engine fast, primary `mistral-small-4`, configured
+fallback `mistral-small-3.2-24b`, EUrouter/json_schema; effective settings unchanged.
+All 24 first calls are primary answers, serving-provider label mistral, gateway
+accepted, no paid metadata errors; `baseline_publishable=true`, nonpublishable list empty.
+All response hashes/byte counts match safe metadata; safe/raw manifests identical,
+SHA-256 `c7f52e42004f2d1149b9d3dd80956eea1d3e17cee9fa93ff0e5625686c0694df`.
+Static digest `sha256-v1:77d46f9c731dc26aded94c7ec60cb860314fe7835e6041a318d63b8ddc690449`,
+corpus digest `sha256-v1:1ab8ca9a16cc50c357b39e1571c73b1e6674752737c444bd8b58d3f2aab81dfa`.
+Prompt, frozen PR prefixes, canonical identities and corpus/truth are unchanged.
+
+Measured validity 7/24 (real 1/5, synthetic 6/19), TP/FP/FN 2/2/17, precision 2/4,
+recall 2/19, critical recall 2/5, verdict agreement 5/24; severity mismatch 1/2
+matched findings (LOG-02, predicted high/truth critical). The 17 invalid first
+answers remain evidence. Original 2026-10-14 bytes/manifest remain at bf09117,
+2026-10-13 snapshot at 76df6d4; original metrics/digests are retained above.
+No causal quality claim or actual spend/billed-token/balance estimate is inferred.
+
+Current publication head, independent review, final-head hosted gates and fresh
+approval/merge state are tracked in [PR #154](https://github.com/larchanka-training/dmc-268-api-t6/pull/154),
+separately from the immutable capture source SHA. Issue #82 remains open for tech-lead AC review.
