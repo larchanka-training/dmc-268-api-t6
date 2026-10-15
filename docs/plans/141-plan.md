@@ -253,6 +253,16 @@ Binding for the implementer; they close the planning hand-back's open points.
   write and raises `ValueError` when the UTF-8 bytes of a row's text key columns exceed
   `MAX_INDEX_KEY_BYTES = 2000` (a domain constant); nothing is written. Filtering such files
   before extraction is #142's job — name it as a hand-off in the PR body.
+- Publication spends the lease (review round 1, item 5): `publish` clears `lease_token` and
+  `lease_expires_at` both on success and on a compare-and-set miss with a valid fence (base
+  mismatch, `published >= mine`, or abandoned rows for an incremental build), and returns
+  `False` on the miss. The spent fence cannot write rows that would already be visible, and
+  the next wake-up claims at once. Releasing the lease at the soft cutoff and the fenced
+  move to `failed` with `error_code` are not added here; they are hand-offs to #142.
+- Purge of a purged row (review round 1, item 6): it keeps the generation and every other
+  field, except that `removed` or `disabled` replaces a `ttl` reason, because the leader's
+  reconciliation skips `ttl` and must not revive a removed or disabled repository. Between
+  `disabled` and `removed` the first reason stays.
 - mermaid-cli: pick the newest `@mermaid-js/mermaid-cli` release published at least 14 days
   ago (`npm view @mermaid-js/mermaid-cli time`) and pin that exact version in the PR body.
 

@@ -132,6 +132,10 @@ class CodeIndexStore(Protocol):
 
     Every method takes `repository_id` first and reads or writes only that repository's
     rows. Reads see only the published rows of the current generation of a `ready` index.
+    Each read statement is consistent on its own, but a read of several statements
+    (`get_file`, `outgoing_edges`, or a sequence of reads) sees one snapshot only inside
+    the caller's REPEATABLE READ read-only transaction (ADR §6.2): the #144 retriever
+    opens one.
     """
 
     async def get_state(self, repository_id: UUID) -> IndexState | None: ...
@@ -141,7 +145,11 @@ class CodeIndexStore(Protocol):
         ...
 
     async def purge(self, repository_id: UUID, reason: PurgeReason) -> None:
-        """T1: logical purge; a missing or already purged row is a no-op."""
+        """T1: logical purge; a missing or already purged row keeps its generation.
+
+        A repeated purge changes nothing, except that `removed` or `disabled` replaces a
+        `ttl` reason.
+        """
         ...
 
     async def claim_lease(
@@ -170,7 +178,10 @@ class CodeIndexStore(Protocol):
         profile: IndexProfile,
         stats: IndexBuildStats,
     ) -> bool:
-        """T5: publication compare-and-set; raises `IndexLeaseLost`, `False` on another miss."""
+        """T5: publication compare-and-set; raises `IndexLeaseLost`, `False` on another miss.
+
+        Both a publication and a miss spend the lease.
+        """
         ...
 
     async def revoke_expired_lease(self, repository_id: UUID) -> bool:

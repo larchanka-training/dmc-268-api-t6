@@ -7,6 +7,7 @@ row is locked, never with the transaction start time.
 
 from __future__ import annotations
 
+from collections import Counter
 from collections.abc import Callable, Iterator, Sequence
 from datetime import datetime, timedelta
 from typing import Any, cast
@@ -15,7 +16,9 @@ from uuid import UUID, uuid4
 from sqlalchemy import (
     ColumnElement,
     CursorResult,
+    Enum,
     ScalarSelect,
+    String,
     and_,
     delete,
     func,
@@ -68,6 +71,15 @@ _GRAPH_MODELS: tuple[_GraphModel, ...] = (
 )
 # Displaced rows stay for in-flight readers this long after a publication (ADR §6.2).
 _DISPLACED_GRACE = timedelta(minutes=10)
+# Character limits of the graph tables' varchar columns, read from the models.
+_TEXT_LIMITS = {
+    (model.__tablename__, column.name): column.type.length
+    for model in _GRAPH_MODELS
+    for column in model.__table__.columns
+    if isinstance(column.type, String)
+    and not isinstance(column.type, Enum)
+    and column.type.length is not None
+}
 
 
 def _visible(
@@ -97,6 +109,21 @@ def _readable(model: _GraphModel, repository_id: UUID) -> list[ColumnElement[boo
     ]
 
 
+def _text_values(file: IndexedFile) -> Iterator[tuple[str, str, str]]:
+    """Every text value `file` writes as (table, column, value); its paths equal `file.path`."""
+    yield "code_index_files", "path", file.path
+    yield "code_index_files", "blob_sha", file.blob_sha
+    for symbol in file.symbols:
+        yield "code_index_symbols", "qualified_name", symbol.key.qualified_name
+    for edge in file.edges:
+        yield "code_index_edges", "target_path", edge.target_path
+        yield "code_index_edges", "target_name", edge.target_name
+    for record in file.imports:
+        yield "code_index_imports", "specifier", record.specifier
+        if record.target_path is not None:
+            yield "code_index_imports", "target_path", record.target_path
+
+
 def _index_keys(file: IndexedFile) -> Iterator[tuple[str, tuple[str, ...]]]:
     """The text columns of every btree key each row of `file` adds."""
     yield "code_index_files", (file.path,)
@@ -117,6 +144,21 @@ def _validate(file: IndexedFile) -> None:
     paths |= {record.path for record in file.imports}
     if paths - {file.path}:
         raise ValueError("every symbol, edge and import of a file must carry the file's path")
+    for table, column, value in _text_values(file):
+        limit = _TEXT_LIMITS[table, column]
+        if len(value) > limit:
+            raise ValueError(
+                f"{table}.{column} is {len(value)} characters, over its limit of {limit}"
+            )
+    if any((edge.kind == EdgeKind.IMPORTS) != (edge.target_name == "") for edge in file.edges):
+        raise ValueError("only an imports edge has an empty target_name")
+    declared = Counter(symbol.key for symbol in file.symbols)
+    for symbol_key, count in declared.items():
+        if count > 1:
+            raise ValueError(
+                f"duplicate symbol key {symbol_key.qualified_name!r} ({symbol_key.kind}, "
+                f"disambiguator {symbol_key.disambiguator}) in one file"
+            )
     for table, key in _index_keys(file):
         size = sum(len(value.encode()) for value in key)
         if size > MAX_INDEX_KEY_BYTES:
@@ -285,7 +327,13 @@ class SqlAlchemyCodeIndexStore:
 
     async def purge(self, repository_id: UUID, reason: PurgeReason) -> None:
         state = await self._state(repository_id, lock=True)
-        if state is None or state.purge_reason is not None:
+        if state is None:
+            return
+        if state.purge_reason is not None:
+            # Only the reason of a TTL purge yields, to a removal or a toggle-off that the
+            # leader's reconciliation must not revive; the generation stays.
+            if state.purge_reason == PurgeReason.TTL and reason != PurgeReason.TTL:
+                await self._update_state(repository_id, purge_reason=reason)
             return
         # reserved_publication stays monotonic and last_used_at stays for the TTL.
         await self._update_state(
@@ -372,21 +420,22 @@ class SqlAlchemyCodeIndexStore:
             "path": file.path,
         }
         await self._session.execute(insert(CodeIndexFile).values(**row, blob_sha=file.blob_sha))
+        # executemany, batched by insertmanyvalues: one multi-row VALUES statement would
+        # pass PostgreSQL's 65,535 bind parameters at ~7,000 rows.
         if file.symbols:
             await self._session.execute(
-                insert(CodeIndexSymbol).values(
-                    [
-                        {
-                            **row,
-                            "qualified_name": symbol.key.qualified_name,
-                            "kind": symbol.key.kind,
-                            "disambiguator": symbol.key.disambiguator,
-                            "start_line": symbol.start_line,
-                            "end_line": symbol.end_line,
-                        }
-                        for symbol in file.symbols
-                    ]
-                )
+                insert(CodeIndexSymbol),
+                [
+                    {
+                        **row,
+                        "qualified_name": symbol.key.qualified_name,
+                        "kind": symbol.key.kind,
+                        "disambiguator": symbol.key.disambiguator,
+                        "start_line": symbol.start_line,
+                        "end_line": symbol.end_line,
+                    }
+                    for symbol in file.symbols
+                ],
             )
         # Duplicate edges and imports of one file collapse onto their natural key.
         edges = dict.fromkeys(
@@ -394,29 +443,27 @@ class SqlAlchemyCodeIndexStore:
         )
         if edges:
             await self._session.execute(
-                insert(CodeIndexEdge).values(
-                    [
-                        {**row, "kind": kind, "target_path": target_path, "target_name": name}
-                        for kind, target_path, name in edges
-                    ]
-                )
+                insert(CodeIndexEdge),
+                [
+                    {**row, "kind": kind, "target_path": target_path, "target_name": name}
+                    for kind, target_path, name in edges
+                ],
             )
         imports: dict[tuple[str, ImportResolution], str | None] = {}
         for record in file.imports:
             imports.setdefault((record.specifier, record.resolution), record.target_path)
         if imports:
             await self._session.execute(
-                insert(CodeIndexImport).values(
-                    [
-                        {
-                            **row,
-                            "specifier": specifier,
-                            "resolution": resolution,
-                            "target_path": target_path,
-                        }
-                        for (specifier, resolution), target_path in imports.items()
-                    ]
-                )
+                insert(CodeIndexImport),
+                [
+                    {
+                        **row,
+                        "specifier": specifier,
+                        "resolution": resolution,
+                        "target_path": target_path,
+                    }
+                    for (specifier, resolution), target_path in imports.items()
+                ],
             )
 
     async def publish(
@@ -435,28 +482,17 @@ class SqlAlchemyCodeIndexStore:
         state = await self._fenced(repository_id, fence, share=False)
         mine, published = fence.publication, state.published_publication
         floor = state.floor_publication
-        if state.indexed_commit_sha != base_commit_sha or published >= mine:
+        # Incremental: rows of an abandoned attempt between `published` and `mine` would
+        # turn visible, so the caller runs discard_abandoned first.
+        if (
+            state.indexed_commit_sha != base_commit_sha
+            or published >= mine
+            or (not full and await self._has_abandoned(repository_id, fence, published))
+        ):
+            # A miss spends the lease like a publication, so the next wake-up claims at once.
+            await self._update_state(repository_id, lease_token=None, lease_expires_at=None)
             return False
         if not full:
-            # Rows of an abandoned attempt between `published` and `mine` would turn
-            # visible: the caller runs discard_abandoned first.
-            abandoned = select(
-                or_(
-                    *(
-                        select(model.path)
-                        .where(
-                            model.repository_id == repository_id,
-                            model.generation == fence.generation,
-                            model.valid_from > published,
-                            model.valid_from < mine,
-                        )
-                        .exists()
-                        for model in _GRAPH_MODELS
-                    )
-                )
-            )
-            if await self._session.scalar(abandoned):
-                return False
             written = select(CodeIndexFile.path).where(
                 CodeIndexFile.repository_id == repository_id,
                 CodeIndexFile.generation == fence.generation,
@@ -510,6 +546,24 @@ class SqlAlchemyCodeIndexStore:
             github_request_count=stats.github_request_count,
         )
         return True
+
+    async def _has_abandoned(self, repository_id: UUID, fence: IndexFence, published: int) -> bool:
+        abandoned = select(
+            or_(
+                *(
+                    select(model.path)
+                    .where(
+                        model.repository_id == repository_id,
+                        model.generation == fence.generation,
+                        model.valid_from > published,
+                        model.valid_from < fence.publication,
+                    )
+                    .exists()
+                    for model in _GRAPH_MODELS
+                )
+            )
+        )
+        return bool(await self._session.scalar(abandoned))
 
     async def revoke_expired_lease(self, repository_id: UUID) -> bool:
         state = await self._state(repository_id, lock=True)
