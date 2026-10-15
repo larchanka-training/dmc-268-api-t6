@@ -84,21 +84,21 @@ Implementer instructions carried over from the plan:
 
 **Acceptance criteria:**
 
-- [ ] AC1: `uv run alembic heads` shows exactly one head, `20261015_0032`. Upgrade →
+- [x] AC1: `uv run alembic heads` shows exactly one head, `20261015_0032`. Upgrade →
   downgrade → upgrade passes on a clean database. `tests/test_initial_migration.py` stays
   green without edits; first check that it holds no hard-coded table or enum lists. It
   confirms that metadata matches the migration and that no ENUM types are left behind.
-- [ ] AC2: the PG test asserts:
+- [x] AC2: the PG test asserts:
   - the exact column set of each of the five tables (literals);
   - `repository_id` NOT NULL with FK `confdeltype='c'` on every table;
   - no columns for code text, signatures or embeddings.
-- [ ] AC3 (columns): `code_index_states` has every column in the plan, including:
+- [x] AC3 (columns): `code_index_states` has every column in the plan, including:
   - the four versions;
   - `target_commit_sha`;
   - `downloaded_bytes`/`build_duration_ms`/`github_request_count`;
   - the CHECK constraints `ck_code_index_states_failed_error`,
     `ck_code_index_states_lease_pair` and `ck_code_index_states_purge_reason`.
-- [ ] Each PG ENUM's `enum_range` equals its StrEnum members, including
+- [x] Each PG ENUM's `enum_range` equals its StrEnum members, including
   `SymbolKind`/`ImportResolution` from #130. Extractor drift fails CI.
 
 **Verification:**
