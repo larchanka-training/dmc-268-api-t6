@@ -260,9 +260,10 @@ Binding for the implementer; they close the planning hand-back's open points.
   the next wake-up claims at once. Releasing the lease at the soft cutoff and the fenced
   move to `failed` with `error_code` are not added here; they are hand-offs to #142.
 - Purge of a purged row (review round 1, item 6): it keeps the generation and every other
-  field, except that `removed` or `disabled` replaces a `ttl` reason, because the leader's
-  reconciliation skips `ttl` and must not revive a removed or disabled repository. Between
-  `disabled` and `removed` the first reason stays.
+  field, except that `removed` or `disabled` replaces a `ttl` reason. The next review
+  request re-arms a `ttl` purge (ADR §4); a removal or a toggle-off must not be re-armed
+  that way, and `purge_reason` tells TTL apart from them for #143 and the #145 status
+  (ADR §6.1). Between `disabled` and `removed` the first reason stays.
 - mermaid-cli: pick the newest `@mermaid-js/mermaid-cli` release published at least 14 days
   ago (`npm view @mermaid-js/mermaid-cli time`) and pin that exact version in the PR body.
 
