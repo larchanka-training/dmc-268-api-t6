@@ -147,14 +147,14 @@ Test-first:
 
 **Acceptance criteria:**
 
-- [ ] AC9 (unit): the key does not depend on revision or declaration order.
+- [x] AC9 (unit): the key does not depend on revision or declaration order.
   - `disambiguator` is the 0-based ordinal among duplicates of
     (path, qualified_name, kind), and a unique symbol gets 0.
   - c1 [foo, bar] → c2 [bar, baz, foo] keeps the keys of foo and bar.
-- [ ] AC4 (port): every `CodeIndexStore` method has `repository_id` as its first
+- [x] AC4 (port): every `CodeIndexStore` method has `repository_id` as its first
   parameter. That includes `revoke_expired_lease` and `collect_garbage`. There is no
   leader enumeration or TTL seam; those belong to #143.
-- [ ] The unit tests fail before the code exists and pass after.
+- [x] The unit tests fail before the code exists and pass after.
 
 **Verification:** Run the common verification block.
 
