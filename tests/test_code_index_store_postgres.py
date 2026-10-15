@@ -11,6 +11,7 @@ import dataclasses
 import os
 from collections.abc import Awaitable, Callable, Iterator, Sequence
 from dataclasses import dataclass
+from datetime import datetime
 from enum import StrEnum
 from typing import Any
 from uuid import UUID, uuid4
@@ -43,7 +44,10 @@ from app.modules.code_index.domain.keys import (
     SymbolKey,
     assign_disambiguators,
 )
-from app.modules.code_index.infrastructure.index_store import SqlAlchemyCodeIndexUnitOfWork
+from app.modules.code_index.infrastructure.index_store import (
+    SqlAlchemyCodeIndexStore,
+    SqlAlchemyCodeIndexUnitOfWork,
+)
 from app.modules.reviews.application.ast_resolution import ImportResolution
 from app.modules.reviews.application.ast_symbols import SymbolKind
 
@@ -777,6 +781,50 @@ async def _expire_lease(index: _Index, repository_id: UUID) -> None:
     )
 
 
+async def _wait_until_blocked(
+    index: _Index, blocker_pid: int, waiters: int, *tasks: asyncio.Task[Any]
+) -> None:
+    """Wait until `waiters` sessions wait on `blocker_pid`, directly or behind another waiter.
+
+    A second waiter on one row queues behind the first for the tuple lock, so the chain
+    is followed rather than only the direct blocker.
+    """
+    async with asyncio.timeout(5), index.factory() as observer:
+        while (
+            await observer.scalar(
+                text(
+                    "WITH RECURSIVE blocked(pid) AS ("
+                    "SELECT pid FROM pg_stat_activity WHERE :pid = ANY(pg_blocking_pids(pid)) "
+                    "UNION SELECT a.pid FROM pg_stat_activity a "
+                    "JOIN blocked b ON b.pid = ANY(pg_blocking_pids(a.pid))) "
+                    "SELECT count(*) FROM blocked"
+                ),
+                {"pid": blocker_pid},
+            )
+            < waiters
+        ):
+            assert not any(task.done() for task in tasks), "a session did not wait for the lock"
+            await observer.execute(text("SELECT pg_stat_clear_snapshot()"))
+            await asyncio.sleep(0.01)
+    assert not any(task.done() for task in tasks)
+
+
+def _pause_after_lock(
+    monkeypatch: pytest.MonkeyPatch, store: SqlAlchemyCodeIndexStore
+) -> tuple[asyncio.Event, asyncio.Event]:
+    """Hold `store` at its clock read, which every fenced step makes after its row lock."""
+    locked, release = asyncio.Event(), asyncio.Event()
+    clock = store._clock
+
+    async def paused() -> datetime:
+        locked.set()
+        await release.wait()
+        return await clock()
+
+    monkeypatch.setattr(store, "_clock", paused)
+    return locked, release
+
+
 def _fields(state: IndexState | None) -> dict[str, object]:
     """The state without its clock values, which tests compare to the database clock."""
     assert state is not None
@@ -1151,18 +1199,7 @@ def test_purge_waits_for_a_batch_write_and_then_rejects_the_old_fence(index: _In
             await writer.index.replace_file(index.a, fence, _module("aa01", 1))
             writer_pid = await writer.session.scalar(text("SELECT pg_backend_pid()"))
             purge = asyncio.create_task(_purge(index, index.a))
-            async with asyncio.timeout(5), index.factory() as observer:
-                while not await observer.scalar(
-                    text(
-                        "SELECT EXISTS (SELECT 1 FROM pg_stat_activity "
-                        "WHERE wait_event_type = 'Lock' AND :pid = ANY(pg_blocking_pids(pid)))"
-                    ),
-                    {"pid": writer_pid},
-                ):
-                    assert not purge.done(), "purge did not wait for the batch's FOR SHARE"
-                    await observer.execute(text("SELECT pg_stat_clear_snapshot()"))
-                    await asyncio.sleep(0.01)
-            assert not purge.done()
+            await _wait_until_blocked(index, writer_pid, 1, purge)
             await writer.commit()
         await asyncio.wait_for(purge, 5)
 
@@ -1238,31 +1275,31 @@ def test_incremental_publication_waits_until_abandoned_rows_are_discarded(index:
             # Publication 2 writes 6 rows: a file, a symbol, two edges and two imports.
             await _write(index, repository_id, lost[repository_id], _importer(f"{prefix}b02", 1))
         await _expire_lease(index, index.a)
-        fence = await _claim(index, index.a)
-        assert fence.publication == 3
-        await _write(index, index.a, fence, IndexedFile("c.py", "ac03"))
-        ready = await _state(index, index.a)
+        missed = await _claim(index, index.a)
+        assert missed.publication == 3
+        await _write(index, index.a, missed, IndexedFile("c.py", "ac03"))
 
         # Publication 2's rows would turn visible once `published` passed them.
-        assert not await _publish(index, index.a, fence, C3, base=C1, full=False)
-        assert await _state(index, index.a) == ready
+        assert not await _publish(index, index.a, missed, C3, base=C1, full=False)
         async with index.uow() as uow:
-            with pytest.raises(IndexLeaseLost):
-                await uow.index.discard_abandoned(index.a, lost[index.a], 100)
+            for stale in (lost[index.a], missed):
+                with pytest.raises(IndexLeaseLost):
+                    await uow.index.discard_abandoned(index.a, stale, 100)
 
+        # The miss spent the lease: the next wake-up claims at once and discards first.
+        fence = await _claim(index, index.a)
+        assert fence.publication == 4
         discarded: list[int] = []
         while not discarded or discarded[-1]:
             async with index.uow() as uow:
                 discarded.append(await uow.index.discard_abandoned(index.a, fence, 4))
                 await uow.commit()
-        assert discarded == [4, 2, 0]
-        assert await _rows(index, _FILE_ROWS, repository=index.a) == [
-            (1, 1, None, "a.py", "aa01"),
-            (1, 3, None, "c.py", "ac03"),
-        ]
+        # Publication 2's six rows and publication 3's file row.
+        assert discarded == [4, 3, 0]
+        assert await _rows(index, _FILE_ROWS, repository=index.a) == [(1, 1, None, "a.py", "aa01")]
         assert await _rows(index, _COUNT_ROWS, repository=index.b) == [(2, 2, 2, 2)]
 
-        assert not await _publish(index, index.a, fence, C3, base=C2, full=False)
+        await _write(index, index.a, fence, IndexedFile("c.py", "ac04"))
         assert await _publish(index, index.a, fence, C3, base=C1, full=False)
         published = await _state(index, index.a)
         assert published is not None
@@ -1273,10 +1310,10 @@ def test_incremental_publication_waits_until_abandoned_rows_are_discarded(index:
             published.file_count,
             published.symbol_count,
             published.edge_count,
-        ) == (3, 1, C3, 2, 1, 0)
+        ) == (4, 1, C3, 2, 1, 0)
         assert await _read(index, lambda store: store.get_file(index.a, "b.py")) is None
         assert await _read(index, lambda store: store.get_file(index.a, "c.py")) == IndexedFile(
-            "c.py", "ac03"
+            "c.py", "ac04"
         )
 
     asyncio.run(scenario())
@@ -1571,5 +1608,312 @@ def test_replace_file_collapses_duplicate_edges_and_imports_onto_their_keys(
             "b.py", "ab01", edges=(_uses("b.py", "a.py", "foo"),), imports=(resolved, dynamic)
         )
         assert await _rows(index, _COUNT_ROWS, repository=index.a) == [(1, 0, 1, 2)]
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.integration
+def test_replace_file_writes_more_rows_than_one_insert_statement_can_bind(index: _Index) -> None:
+    # One multi-row INSERT binds 9 values per symbol and 7 per edge or import, so under
+    # PostgreSQL's 65,535 parameters it tops out at 7,281 symbols and 9,362 edges or imports.
+    large = IndexedFile(
+        "a.py",
+        "aa01",
+        symbols=tuple(_symbol("a.py", f"s{line:05d}", line, line) for line in range(1, 8_001)),
+        edges=tuple(_uses("a.py", "b.py", f"n{number:05d}") for number in range(9_400)),
+        imports=tuple(
+            ImportRecord("a.py", f"m{number:05d}", ImportResolution.EXTERNAL, None)
+            for number in range(9_400)
+        ),
+    )
+
+    async def scenario() -> None:
+        await _enable(index, index.a)
+        await _build(index, index.a, C1, large)
+
+        state = await _state(index, index.a)
+        assert state is not None
+        assert (state.file_count, state.symbol_count, state.edge_count) == (1, 8_000, 9_400)
+        assert await _rows(index, _COUNT_ROWS, repository=index.a) == [(1, 8_000, 9_400, 9_400)]
+        assert await _read(index, lambda store: store.get_file(index.a, "a.py")) == large
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize(
+    ("invalid", "message"),
+    [
+        pytest.param(
+            IndexedFile("p" * 1025, "f1"),
+            "code_index_files.path is 1025 characters, over its limit of 1024",
+            id="path",
+        ),
+        pytest.param(
+            IndexedFile("a.py", "f" * 65),
+            "code_index_files.blob_sha is 65 characters, over its limit of 64",
+            id="blob-sha",
+        ),
+        pytest.param(
+            IndexedFile("a.py", "s1", symbols=(_symbol("a.py", "q" * 513, 1, 1),)),
+            "code_index_symbols.qualified_name is 513 characters, over its limit of 512",
+            id="qualified-name",
+        ),
+        pytest.param(
+            IndexedFile("a.py", "e1", edges=(_uses("a.py", "t" * 1025, "foo"),)),
+            "code_index_edges.target_path is 1025 characters, over its limit of 1024",
+            id="edge-target-path",
+        ),
+        pytest.param(
+            IndexedFile("a.py", "e2", edges=(_uses("a.py", "b.py", "n" * 513),)),
+            "code_index_edges.target_name is 513 characters, over its limit of 512",
+            id="target-name",
+        ),
+        pytest.param(
+            IndexedFile(
+                "a.py",
+                "i1",
+                imports=(ImportRecord("a.py", "m" * 1025, ImportResolution.MISSING, None),),
+            ),
+            "code_index_imports.specifier is 1025 characters, over its limit of 1024",
+            id="specifier",
+        ),
+        pytest.param(
+            IndexedFile(
+                "a.py",
+                "i2",
+                imports=(ImportRecord("a.py", "m", ImportResolution.RESOLVED, "t" * 1025),),
+            ),
+            "code_index_imports.target_path is 1025 characters, over its limit of 1024",
+            id="import-target-path",
+        ),
+        pytest.param(
+            IndexedFile(
+                "a.py", "d1", symbols=(_symbol("a.py", "foo", 1, 2), _symbol("a.py", "foo", 4, 5))
+            ),
+            "duplicate symbol key",
+            id="duplicate-symbol-key",
+        ),
+        pytest.param(
+            IndexedFile(
+                "a.py", "k1", edges=(IndexedEdge("a.py", EdgeKind.IMPORTS, "b.py", "foo"),)
+            ),
+            "only an imports edge has an empty target_name",
+            id="imports-edge-with-name",
+        ),
+        pytest.param(
+            IndexedFile(
+                "a.py", "k2", edges=(IndexedEdge("a.py", EdgeKind.USES_IMPORTED, "b.py", ""),)
+            ),
+            "only an imports edge has an empty target_name",
+            id="uses-edge-without-name",
+        ),
+    ],
+)
+def test_replace_file_rejects_rows_the_schema_would_refuse_before_any_write(
+    index: _Index, invalid: IndexedFile, message: str
+) -> None:
+    async def scenario() -> None:
+        await _enable(index, index.a)
+        fence = await _claim(index, index.a)
+        await _write(index, index.a, fence, _module("aa01", 1))
+        async with index.uow() as uow:
+            with pytest.raises(ValueError, match=message):
+                await uow.index.replace_file(index.a, fence, invalid)
+            await uow.commit()
+
+        assert await _rows(index, _FILE_ROWS, repository=index.a) == [(1, 1, None, "a.py", "aa01")]
+        assert await _rows(index, _COUNT_ROWS, repository=index.a) == [(1, 1, 0, 0)]
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.integration
+def test_publish_holds_the_state_row_for_update_against_toggle_and_gc(
+    index: _Index, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def scenario() -> None:
+        await _enable(index, index.a)
+        fence = await _claim(index, index.a)
+        await _write(index, index.a, fence, _module("aa01", 1))
+        async with index.uow() as publisher:
+            publisher_pid = await publisher.session.scalar(text("SELECT pg_backend_pid()"))
+            store = publisher.index
+            locked, release = _pause_after_lock(monkeypatch, store)
+            publishing = asyncio.create_task(
+                store.publish(
+                    index.a,
+                    fence,
+                    base_commit_sha=None,
+                    commit_sha=C1,
+                    full=True,
+                    deleted_paths=(),
+                    profile=_PROFILE,
+                    stats=_STATS,
+                )
+            )
+            await asyncio.wait_for(locked.wait(), 5)
+            # FOR UPDATE blocks the collector's FOR SHARE; it is started first so that it
+            # waits on the publisher itself, not in the queue behind the toggle.
+            collecting = asyncio.create_task(_collect(index, index.a, 100))
+            await _wait_until_blocked(index, publisher_pid, 1, collecting)
+            toggling = asyncio.create_task(_disable_and_enable(index, index.a))
+            await _wait_until_blocked(index, publisher_pid, 2, toggling, collecting)
+            release.set()
+            assert await publishing is True
+            await publisher.commit()
+        await asyncio.wait_for(asyncio.gather(toggling, collecting), 5)
+
+        state = await _state(index, index.a)
+        assert state is not None
+        assert (
+            state.generation,
+            state.status,
+            state.purge_reason,
+            state.published_publication,
+            state.indexed_commit_sha,
+        ) == (3, "empty", None, 0, None)
+        assert await _reads(index, index.a) == (None, [], [], [], [])
+        assert await _read(index, lambda store: store.get_file(index.a, "a.py")) is None
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.integration
+def test_a_duplicate_claim_waits_for_the_first_and_does_not_take_over(
+    index: _Index, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def scenario() -> None:
+        await _enable(index, index.a)
+        async with index.uow() as first:
+            first_pid = await first.session.scalar(text("SELECT pg_backend_pid()"))
+            store = first.index
+            locked, release = _pause_after_lock(monkeypatch, store)
+            claiming = asyncio.create_task(store.claim_lease(index.a, 1, 600))
+            await asyncio.wait_for(locked.wait(), 5)
+            duplicate = asyncio.create_task(_try_claim(index, index.a, 1))
+            await _wait_until_blocked(index, first_pid, 1, duplicate)
+            release.set()
+            fence = await claiming
+            await first.commit()
+
+        assert await asyncio.wait_for(duplicate, 5) is None
+        assert fence is not None and (fence.generation, fence.publication) == (1, 1)
+        state = await _state(index, index.a)
+        assert state is not None
+        assert (state.status, state.reserved_publication) == ("building", 1)
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.integration
+def test_lease_expiry_is_checked_against_the_clock_not_the_transaction_start(
+    index: _Index,
+) -> None:
+    async def scenario() -> None:
+        await _enable(index, index.a)
+        async with index.uow() as uow:
+            fence = await uow.index.claim_lease(index.a, 1, 1)
+            await uow.commit()
+        assert fence is not None
+        async with index.uow() as uow:
+            started = await uow.session.scalar(text("SELECT now()"))
+            state = await uow.index.get_state(index.a)
+            # By the transaction's start time the lease is still live.
+            assert state is not None and state.lease_expires_at is not None
+            assert state.lease_expires_at > started
+            await asyncio.sleep(1.2)
+            with pytest.raises(IndexLeaseLost):
+                await uow.index.replace_file(index.a, fence, _module("aa01", 1))
+            await uow.commit()
+
+        assert await _rows(index, _COUNT_ROWS, repository=index.a) == [(0, 0, 0, 0)]
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.integration
+def test_a_publication_miss_spends_the_lease_so_the_next_wake_up_claims_at_once(
+    index: _Index,
+) -> None:
+    async def scenario() -> None:
+        await _enable(index, index.a)
+        await _build(index, index.a, C1, _module("aa01", 1))
+        fence = await _claim(index, index.a)
+        await _write(index, index.a, fence, _module("aa02", 1))
+        # The build started from C2, but the published index is at C1.
+        assert not await _publish(index, index.a, fence, C3, base=C2, full=False)
+
+        missed = await _state(index, index.a)
+        assert _fields(missed) == {
+            "generation": 1,
+            "status": "ready",
+            "purge_reason": None,
+            "error_code": None,
+            "last_error_code": None,
+            "indexed_commit_sha": C1,
+            "target_commit_sha": None,
+            "reserved_publication": 2,
+            "published_publication": 1,
+            "floor_publication": 1,
+            "file_count": 1,
+            "symbol_count": 1,
+            "edge_count": 0,
+            "profile": _PROFILE_FIELDS,
+            "stats": _STATS_FIELDS,
+        }
+        assert missed is not None and missed.lease_expires_at is None
+        async with index.uow() as uow:
+            with pytest.raises(IndexLeaseLost):
+                await uow.index.replace_file(index.a, fence, _module("aa03", 1))
+            await uow.commit()
+        assert (await _claim(index, index.a)).publication == 3
+        assert await _read(index, lambda store: store.get_file(index.a, "a.py")) == _module(
+            "aa01", 1
+        )
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.integration
+def test_a_later_purge_replaces_only_a_ttl_reason(index: _Index) -> None:
+    async def scenario() -> None:
+        expired: dict[UUID, IndexState] = {}
+        for repository_id in (index.a, index.b):
+            await _enable(index, repository_id)
+            await _build(index, repository_id, C1, _module("aa01", 1))
+            await _purge(index, repository_id, PurgeReason.TTL)
+            state = await _state(index, repository_id)
+            assert state is not None
+            assert (state.generation, state.purge_reason) == (2, "ttl")
+            expired[repository_id] = state
+
+        async def purge(repository_id: UUID, reason: PurgeReason) -> IndexState:
+            await _purge(index, repository_id, reason)
+            state = await _state(index, repository_id)
+            assert state is not None
+            return state
+
+        removed = await purge(index.a, PurgeReason.REMOVED)
+        assert (removed.generation, removed.purge_reason) == (2, "removed")
+        assert (
+            dataclasses.replace(
+                removed, purge_reason=PurgeReason.TTL, updated_at=expired[index.a].updated_at
+            )
+            == expired[index.a]
+        )
+        assert await purge(index.a, PurgeReason.DISABLED) == removed
+        assert await purge(index.a, PurgeReason.TTL) == removed
+
+        disabled = await purge(index.b, PurgeReason.DISABLED)
+        assert (disabled.generation, disabled.purge_reason) == (2, "disabled")
+        assert (
+            dataclasses.replace(
+                disabled, purge_reason=PurgeReason.TTL, updated_at=expired[index.b].updated_at
+            )
+            == expired[index.b]
+        )
+        assert await purge(index.b, PurgeReason.REMOVED) == disabled
+        assert await purge(index.b, PurgeReason.TTL) == disabled
 
     asyncio.run(scenario())
