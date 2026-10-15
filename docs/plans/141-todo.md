@@ -315,13 +315,14 @@ in this PR (user decision of 2026-10-15).
 
 **Acceptance criteria:**
 
-- [x] One commit changes only the ADR header status, with the exact subject above.
+- [x] One commit changes only the ADR header row and this checklist, with the exact
+  subject above.
 - [x] No other ADR content changes.
 
 **Verification:**
 
 - Run the common verification block.
-- `git show --stat HEAD` lists only `docs/adr/0001-graph-rag-v1.md`.
+- `git show --stat HEAD` lists only `docs/adr/0001-graph-rag-v1.md` and this checklist.
 
 **Dependencies:** Task 5. **Files touched:** `docs/adr/0001-graph-rag-v1.md`.
 **Estimated scope:** Extra small (XS).
