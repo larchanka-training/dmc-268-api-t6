@@ -315,8 +315,8 @@ in this PR (user decision of 2026-10-15).
 
 **Acceptance criteria:**
 
-- [ ] One commit changes only the ADR header status, with the exact subject above.
-- [ ] No other ADR content changes.
+- [x] One commit changes only the ADR header status, with the exact subject above.
+- [x] No other ADR content changes.
 
 **Verification:**
 

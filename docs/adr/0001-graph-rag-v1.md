@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| Статус | **Предложено.** Утверждает: @ndovnar — approve на текущем head PR (D1). До утверждения реализация #141–#147 и ui#102 заблокирована |
+| Статус | **Принято.** Утвердил @ndovnar — approve PR #157, мерж 2026-10-15 |
 | Дата | 2026-10-14 |
 | Владелец | axyi (автор #140) |
 | Задача | [#140](https://github.com/larchanka-training/dmc-268-api-t6/issues/140), эпик [#139](https://github.com/larchanka-training/dmc-268-api-t6/issues/139) |
