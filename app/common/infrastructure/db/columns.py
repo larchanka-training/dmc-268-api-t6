@@ -3,43 +3,15 @@
 from __future__ import annotations
 
 from datetime import datetime
+from enum import StrEnum
 
 from sqlalchemy import DateTime, Enum, func
 from sqlalchemy.orm import Mapped, mapped_column
-
-from app.common.infrastructure.db.enums import (
-    CodeChangeState,
-    Engine,
-    FindingCategory,
-    FindingSeverity,
-    FindingSide,
-    LedgerKind,
-    PaymentStatus,
-    ReviewEvent,
-    RunState,
-    SeverityThreshold,
-    WaitForCi,
-)
 
 
 def timestamp_column() -> Mapped[datetime]:
     return mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
 
-def pg_enum(
-    enum_class: type[
-        Engine
-        | WaitForCi
-        | ReviewEvent
-        | SeverityThreshold
-        | CodeChangeState
-        | RunState
-        | FindingSeverity
-        | FindingCategory
-        | FindingSide
-        | PaymentStatus
-        | LedgerKind
-    ],
-    name: str,
-) -> Enum:
+def pg_enum(enum_class: type[StrEnum], name: str) -> Enum:
     return Enum(enum_class, name=name, values_callable=lambda cls: [member.value for member in cls])
