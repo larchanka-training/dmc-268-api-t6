@@ -348,17 +348,23 @@ docker compose up -d worker        # сервис worker в docker-compose.yml
 все три попытки (`llm_unavailable` ретраится) и завершается `failed` с сообщением о
 ненастроенном шлюзе; `GITHUB_APP_ID` и
 `GITHUB_APP_PRIVATE_KEY` необязательны: без них процесс стартует, пишет предупреждение,
-а sweep «2 мин без CI» и публикация в GitHub (ревью и check-run) выключены. `WORKER_ID`
+а sweep «2 мин без CI», публикация в GitHub (ревью и check-run) и consumer `index.repo`
+выключены. `WORKER_ID`
 (по умолчанию `hostname:pid`) пишется в `runs.worker_id`, `PORTAL_URL` даёт ссылку на
-прогон в check-run.
+прогон в check-run. `CODE_INDEX_*` (#142) настраивают индексатор графа: все необязательны,
+значения по умолчанию — в коде (`.env.example`), недопустимое значение не даёт процессу
+стартовать.
 
-При старте worker объявляет топологию SD §7.1 целиком
-([amqp.py](../app/modules/reviews/infrastructure/amqp.py)) и запускает три задачи:
+При старте worker объявляет топологию SD §7.1 целиком — ревью
+([amqp.py](../app/modules/reviews/infrastructure/amqp.py)) и, на своём confirm-канале,
+`code_index` ([amqp.py](../app/modules/code_index/infrastructure/amqp.py),
+[code_index_worker.py](../app/bootstrap/code_index_worker.py)) — и запускает четыре задачи:
 
 | Задача | Что делает | Use case |
 |---|---|---|
 | consumer `review.run.fast` (prefetch 1) | RunGuard, claim по lease, попытка под watchdog, retry и DLQ | [HandleReviewRun](../app/modules/reviews/application/handle_review_run.py) |
 | consumer `review.publish` (prefetch 1) | T14-T16: ревью в GitHub, check-run | [PublishRunReview](../app/modules/reviews/application/publish_run_review.py) |
+| consumer `index.repo` (prefetch 1, #142) | задание графа RAG: claim lease, HEAD default branch, архив, публикация; retry и DLQ по исходу (SD §7.4). Свой `SubprocessSourceParser` и HTTP-клиент GitHub; без GitHub App не запускается | [BuildRepositoryIndex](../app/modules/code_index/application/build_index.py) |
 | лидер-цикл (`pg_advisory_lock`, 30 с) | sweep «2 мин без CI» и повторная отправка outbox (`message_published_at IS NULL`, сигналы отмены T6) | `SweepNoCi`, `TryEnqueueWebhookRun.replay_pending_publications` |
 
 Consumer `review.run.deep` не запускается, очередь только объявляется. Реконсилер
