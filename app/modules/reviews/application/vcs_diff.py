@@ -220,7 +220,7 @@ class FetchVcsReviewInput:
 
 
 def _known_omission(file: VcsFile) -> OmissionReason | None:
-    if _is_generated(file.filename):
+    if is_generated_path(file.filename):
         return OmissionReason.GENERATED
     if file.patch is not None and "\x00" in file.patch:
         return OmissionReason.BINARY
@@ -239,7 +239,8 @@ def _known_omission(file: VcsFile) -> OmissionReason | None:
     return None
 
 
-def _is_generated(path: str) -> bool:
+def is_generated_path(path: str) -> bool:
+    """A generated or lock file by its path; built-in exclusion of the service."""
     parts = path.casefold().split("/")
     filename = parts[-1]
     return (
@@ -251,10 +252,16 @@ def _is_generated(path: str) -> bool:
     )
 
 
-def _is_binary(blob: bytes) -> bool:
+def is_binary_content(blob: bytes) -> bool:
+    """A binary blob by a NUL byte in its first 8 KiB or a known magic number."""
     return b"\x00" in blob[:8192] or blob.startswith(
         (b"\x89PNG\r\n\x1a\n", b"\xff\xd8\xff", b"GIF8", b"%PDF-", b"PK\x03\x04", b"\x7fELF")
     )
+
+
+# The names the review callers import; the graph indexer uses the public ones (#142).
+_is_generated = is_generated_path
+_is_binary = is_binary_content
 
 
 def _patch_lines(patch: str) -> list[str]:
