@@ -214,7 +214,7 @@ The adapter constructor stays `(session)`; the store flushes and never commits.
   - full and incremental publications set `stored_bytes`;
   - Python = SQL parity of the estimate;
   - repository and Workspace quotas → QUOTA with the right code; another Workspace is
-    unaffected; other builds' pending bytes count.
+    unaffected; pending bytes of other builds count only while their lease is live.
 - [ ] Record the RED run and the GREEN run.
 
 **Verification:**
