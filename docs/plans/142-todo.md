@@ -714,6 +714,7 @@ Tests first: `run_worker` wires the index consumer.
 - [ ] AC1: the index consumer runs in the `worker` process, separate from the review
   consumers.
 - [ ] The #148 coordination comment is posted before the edit; its link is recorded here.
+  - #148: https://github.com/larchanka-training/dmc-268-api-t6/pull/148#issuecomment-6225258841
 
 **Verification:** Run the common verification block.
 
@@ -785,7 +786,15 @@ their files and comments in each open PR that touches the edited docs (planned f
 **Acceptance criteria:**
 
 - [ ] The coordination comments are posted before the docs commit; their links are
-  recorded here.
+  recorded here:
+  - #148 (`app/worker.py`, `.env.example`, `staging.yml`, SD): https://github.com/larchanka-training/dmc-268-api-t6/pull/148#issuecomment-6225258841
+  - #161 (SD, PIPELINE_SPEC, BACKEND_ARCHITECTURE, TEST_PLAN): https://github.com/larchanka-training/dmc-268-api-t6/pull/161#issuecomment-6225259061
+  - #133 (TEST_PLAN:44): https://github.com/larchanka-training/dmc-268-api-t6/pull/133#issuecomment-6225259343
+  - #124 (SD): https://github.com/larchanka-training/dmc-268-api-t6/pull/124#issuecomment-6225259591
+  - #155 (SD): https://github.com/larchanka-training/dmc-268-api-t6/pull/155#issuecomment-6225259869
+  - opened after these comments and touching the edited docs, not commented yet: #180
+    (PIPELINE_SPEC, SD, TEST_PLAN) and #181 (PIPELINE_SPEC); none of their sections is
+    edited here.
 - [ ] Each documented queue argument, delay, limit and outcome matches the code of Tasks
   16–22.
 
