@@ -8,7 +8,7 @@ import re
 from collections.abc import AsyncIterator, Callable, Iterator, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta, timezone
 from functools import cache
 from pathlib import Path
 from typing import Any, Self, get_args
@@ -16,6 +16,7 @@ from uuid import UUID
 
 import pytest
 from fastapi.testclient import TestClient
+from jsonschema import Draft202012Validator
 from jsonschema.exceptions import ValidationError
 from jsonschema.protocols import Validator
 from openapi_schema_validator import OAS31Validator
@@ -33,6 +34,8 @@ from app.bootstrap.reviews_api import (
 )
 from app.common.application.github_repository_name import REPOSITORY_FULL_NAME_MAX_LENGTH
 from app.main import app, get_file_blob_cache, get_run_event_hub, get_run_repository
+from app.modules.code_index.domain.enums import RagIndexStatus
+from app.modules.code_index.domain.rag_index import RagIndex
 from app.modules.repositories.application.repository_settings import (
     RepositorySettings,
     RepositorySettingsChange,
@@ -90,7 +93,8 @@ EXPIRED_PATH = "expired.py"
 RUN_URL = f"/api/runs/{RUN_ID}"
 REPOSITORY_ID = UUID("22222222-2222-4222-8222-222222222222")
 CONFLICT_RUN_ID = UUID("88888888-8888-4888-8888-888888888888")
-# PATCH /api/repos/{id} bodies the API rejects with 422 (#149); the PostgreSQL API test reuses them.
+# PATCH /api/repos/{id} bodies the API rejects with 422 (#149, #145); the PostgreSQL API test
+# reuses them.
 INVALID_REVIEW_SETTINGS: dict[str, dict[str, object]] = {
     **{
         f"branch-filter-{name}": {"branchFilter": [pattern]}
@@ -103,6 +107,17 @@ INVALID_REVIEW_SETTINGS: dict[str, dict[str, object]] = {
     "severity-threshold-unknown": {"severityThreshold": "high"},
     "severity-threshold-null": {"severityThreshold": None},
     "installation-available": {"installationAvailable": True},
+    "rag-enabled-null": {"ragEnabled": None},
+    "rag-index": {
+        "ragIndex": {
+            "status": "ready",
+            "indexedCommitSha": "a" * 40,
+            "indexedAt": "2026-10-16T09:30:00Z",
+            "fileCount": 1,
+            "symbolCount": 1,
+            "lastErrorCode": None,
+        }
+    },
 }
 
 
@@ -269,6 +284,8 @@ REPOSITORY = RepositorySettings(
     branch_filter=(),
     severity_threshold="all",
     installation_available=True,
+    rag_enabled=False,
+    rag_index=RagIndex(RagIndexStatus.DISABLED, None, None, 0, 0, None),
 )
 
 
@@ -307,6 +324,10 @@ class ContractRepositories:
             return None
         values = {key: value for key, value in vars(change).items() if value is not None}
         self.item = replace(self.item, **values)
+        if change.rag_enabled is not None:
+            # As the store reads it for a repository without a state row (#145).
+            status = RagIndexStatus.EMPTY if change.rag_enabled else RagIndexStatus.DISABLED
+            self.item = replace(self.item, rag_index=RagIndex(status, None, None, 0, 0, None))
         return self.item
 
 
@@ -933,6 +954,7 @@ def test_enums_match_the_ui_contract_and_the_review_output_model() -> None:
     assert components["Category"]["enum"] == list(get_args(Category.__value__))
     assert components["Severity"]["enum"] == zod["reviewComment"]["properties"]["severity"]["enum"]
     assert components["Category"]["enum"] == zod["reviewComment"]["properties"]["category"]["enum"]
+    assert components["RagIndexStatus"]["enum"] == [status.value for status in RagIndexStatus]
 
 
 def test_runs_repo_filter_bounds_match_the_repository_name_constant() -> None:
@@ -1000,6 +1022,72 @@ def test_repository_review_settings_round_trip_and_clear(client: TestClient) -> 
     assert (cleared.json()["branchFilter"], cleared.json()["severityThreshold"]) == ([], "critical")
 
 
+def test_repository_rag_toggle_round_trip(client: TestClient) -> None:
+    url = f"/api/repos/{REPOSITORY_ID}"
+    disabled = {
+        "status": "disabled",
+        "indexedCommitSha": None,
+        "indexedAt": None,
+        "fileCount": 0,
+        "symbolCount": 0,
+        "lastErrorCode": None,
+    }
+    defaults = client.get(url).json()
+    listed = client.get("/api/repos").json()
+    enabled = client.patch(url, json={"ragEnabled": True})
+    stored = client.get(url).json()
+    disabled_again = client.patch(url, json={"ragEnabled": False})
+
+    assert (defaults["ragEnabled"], defaults["ragIndex"]) == (False, disabled)
+    assert (listed[0]["ragEnabled"], listed[0]["ragIndex"]) == (False, disabled)
+    assert enabled.status_code == 200
+    _validator_for("patch", "/api/repos/{repo_id}", "200").validate(enabled.json())
+    assert (enabled.json()["ragEnabled"], enabled.json()["ragIndex"]) == (
+        True,
+        {**disabled, "status": "empty"},
+    )
+    assert (stored["ragEnabled"], stored["ragIndex"]["status"]) == (True, "empty")
+    assert disabled_again.status_code == 200
+    assert (disabled_again.json()["ragEnabled"], disabled_again.json()["ragIndex"]) == (
+        False,
+        disabled,
+    )
+
+
+def test_published_rag_index_validates_against_the_spec_and_the_ui_zod_schema(
+    client: TestClient,
+) -> None:
+    repositories = ContractRepositories()
+    repositories.item = replace(
+        REPOSITORY,
+        rag_enabled=True,
+        rag_index=RagIndex(
+            RagIndexStatus.STALE,
+            "a" * 40,
+            # The same instant as a database session outside UTC returns it.
+            datetime(2026, 10, 16, 11, 30, tzinfo=timezone(timedelta(hours=2))),
+            12,
+            340,
+            "github_rate_limited",
+        ),
+    )
+    app.dependency_overrides[get_repository_settings] = lambda: lambda: repositories
+
+    response = client.get(f"/api/repos/{REPOSITORY_ID}")
+
+    assert response.status_code == 200
+    assert response.json()["ragIndex"] == {
+        "status": "stale",
+        "indexedCommitSha": "a" * 40,
+        "indexedAt": "2026-10-16T09:30:00Z",
+        "fileCount": 12,
+        "symbolCount": 340,
+        "lastErrorCode": "github_rate_limited",
+    }
+    _validator_for("get", "/api/repos/{repo_id}", "200").validate(response.json())
+    Draft202012Validator(_generated_schemas()["repository"]).validate(response.json())
+
+
 @pytest.mark.parametrize(
     ("name", "body"), INVALID_REVIEW_SETTINGS.items(), ids=INVALID_REVIEW_SETTINGS.keys()
 )
@@ -1019,6 +1107,7 @@ def test_repository_update_rejects_invalid_review_settings(
         # The ASCII-escaped fallback body keeps FastAPI's default shape (app/main.py).
         assert rejected.json()["detail"][0]["loc"] == ["body", "branchFilter"]
     assert (stored["branchFilter"], stored["severityThreshold"]) == ([], "all")
+    assert (stored["ragEnabled"], stored["ragIndex"]["status"]) == (False, "disabled")
 
 
 def test_pulls_page_derives_the_latest_run_verdict(client: TestClient) -> None:

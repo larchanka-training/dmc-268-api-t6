@@ -8,6 +8,7 @@ from typing import Protocol
 from uuid import UUID
 
 from app.common.application.unit_of_work import UnitOfWork
+from app.modules.code_index.domain.rag_index import RagIndex
 
 
 @dataclass(frozen=True)
@@ -24,6 +25,10 @@ class RepositorySettings:
     branch_filter: tuple[str, ...]
     severity_threshold: str
     installation_available: bool
+    # Like ``enabled``: the stored preference AND ``installation_available``; ``rag_index``
+    # is derived from this effective value (#145).
+    rag_enabled: bool
+    rag_index: RagIndex
 
 
 @dataclass(frozen=True)
@@ -37,6 +42,7 @@ class RepositorySettingsChange:
     review_event: str | None = None
     branch_filter: tuple[str, ...] | None = None
     severity_threshold: str | None = None
+    rag_enabled: bool | None = None
 
 
 class RepositorySettingsStore(Protocol):
