@@ -386,7 +386,10 @@ def test_oauth_moves_only_confirmed_repository_and_preserves_deep_setting(
             await seed_archive(factory)
             async with factory.begin() as session:
                 await session.execute(
-                    text("UPDATE repositories SET default_engine='deep' WHERE id=:repo"),
+                    text(
+                        "UPDATE repositories SET default_engine='deep',rag_enabled=true "
+                        "WHERE id=:repo"
+                    ),
                     {"repo": REPO_A},
                 )
                 await session.execute(
@@ -406,6 +409,13 @@ def test_oauth_moves_only_confirmed_repository_and_preserves_deep_setting(
                         {"repo": REPO_A},
                     )
                     == "deep"
+                )
+                assert (
+                    await session.scalar(
+                        text("SELECT rag_enabled FROM repositories WHERE id=:repo"),
+                        {"repo": REPO_A},
+                    )
+                    is True
                 )
                 row = (
                     await session.execute(
