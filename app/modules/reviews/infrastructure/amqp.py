@@ -181,45 +181,58 @@ class AmqpQueuePublisher:
         attempts: int,
     ) -> bool:
         """Report a completed handoff only after both publisher confirm and original ACK."""
-        routing_key = getattr(message, "routing_key", "") or ""
-        headers = dict(getattr(message, "headers", None) or {})
-        headers["x-attempt"] = attempts
-        try:
-            await self._reviews.publish(
-                aio_pika.Message(
-                    body=message.body,
-                    headers=headers,
-                    priority=getattr(message, "priority", 0) or 0,
-                    message_id=getattr(message, "message_id", None),
-                    correlation_id=getattr(message, "correlation_id", None),
-                    content_type=getattr(message, "content_type", None),
-                    delivery_mode=aio_pika.DeliveryMode.PERSISTENT,
-                ),
-                routing_key=routing_key,
-            )
-        except Exception:
-            _LOGGER.exception(
-                "Failed to republish message %s with attempt header; falling back to nack",
-                message.message_id,
-            )
-            try:
-                await message.nack(requeue=True)
-            except Exception:
-                _LOGGER.exception(
-                    "Failed to nack message %s after republish error",
-                    message.message_id,
-                )
-            return False
+        return await republish_with_attempt(self._reviews, message, attempts)
 
+
+async def republish_with_attempt(
+    exchange: AbstractExchange,
+    message: AbstractIncomingMessage,
+    attempts: int,
+) -> bool:
+    """Republish a copy with ``x-attempt`` under the delivery's own routing key, then ACK it.
+
+    True only after both the publisher confirm and the original ACK; a failed publish
+    falls back to ``nack(requeue=True)``.
+    """
+    routing_key = getattr(message, "routing_key", "") or ""
+    headers = dict(getattr(message, "headers", None) or {})
+    headers["x-attempt"] = attempts
+    try:
+        await exchange.publish(
+            aio_pika.Message(
+                body=message.body,
+                headers=headers,
+                priority=getattr(message, "priority", 0) or 0,
+                message_id=getattr(message, "message_id", None),
+                correlation_id=getattr(message, "correlation_id", None),
+                content_type=getattr(message, "content_type", None),
+                delivery_mode=aio_pika.DeliveryMode.PERSISTENT,
+            ),
+            routing_key=routing_key,
+        )
+    except Exception:
+        _LOGGER.exception(
+            "Failed to republish message %s with attempt header; falling back to nack",
+            message.message_id,
+        )
         try:
-            await message.ack()
+            await message.nack(requeue=True)
         except Exception:
             _LOGGER.exception(
-                "Failed to ack message %s after republish",
+                "Failed to nack message %s after republish error",
                 message.message_id,
             )
-            return False
-        return True
+        return False
+
+    try:
+        await message.ack()
+    except Exception:
+        _LOGGER.exception(
+            "Failed to ack message %s after republish",
+            message.message_id,
+        )
+        return False
+    return True
 
 
 def _decode[T: BaseModel](name: str, model: type[T], message: AbstractIncomingMessage) -> T | None:
@@ -296,6 +309,8 @@ async def _requeue_after_error(
     message: AbstractIncomingMessage,
     publisher: AmqpQueuePublisher,
     max_retries: int = MAX_UNEXPECTED_RETRIES,
+    *,
+    dead_letter_queue: str = DEAD_LETTER_QUEUE,
 ) -> None:
     key = _delivery_key(message)
     attempts = _get_delivery_attempts(message)
@@ -306,7 +321,7 @@ async def _requeue_after_error(
             "Message %s exceeded maximum unexpected retry attempts (%d); routing to DLQ %s",
             message.message_id,
             max_retries,
-            DEAD_LETTER_QUEUE,
+            dead_letter_queue,
             exc_info=True,
         )
         _clear_delivery_attempts(key)
@@ -325,6 +340,10 @@ async def _requeue_after_error(
 
     if await publisher.republish_after_error(message, attempts):
         _clear_delivery_attempts(key)
+
+
+# Public for the index queue (#142); both queues share the local fallback state per delivery.
+requeue_after_error = _requeue_after_error
 
 
 async def handle_run_delivery(
