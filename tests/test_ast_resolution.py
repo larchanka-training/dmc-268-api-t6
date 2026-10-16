@@ -9,6 +9,9 @@ import time
 from dataclasses import dataclass, field
 from uuid import UUID
 
+import pytest
+
+from app.modules.reviews.application import ast_resolution
 from app.modules.reviews.application.ast_resolution import (
     FileUnavailable,
     GoLayout,
@@ -466,10 +469,10 @@ def test_go_module_with_replace_is_not_resolved() -> None:
 
 
 def test_go_module_path_reads_a_go_mod_of_blank_lines_in_linear_time() -> None:
-    # Review #142: a `replace` pattern whose leading blanks crossed newlines took minutes
-    # on a 256 KiB `go.mod` of empty lines, on the shared event loop.
-    module = "module example.com/m\n"
-    go_mod = module + "\n" * (256 * 1024 - len(module))
+    # Review #142: a `replace` pattern whose leading blanks crossed newlines was quadratic
+    # on a `go.mod` of empty lines, on the shared event loop: 5 s for these 64,000 lines,
+    # 90 s at 256 KiB.
+    go_mod = "module example.com/m\n" + "\n" * 64_000
     started = time.monotonic()
 
     assert go_module_path(go_mod) == "example.com/m"
@@ -629,7 +632,9 @@ def test_go_package_target_lists_the_members_of_one_local_package() -> None:
     )
 
 
-def test_go_package_target_reads_a_prebuilt_layout_as_it_reads_the_tree() -> None:
+def test_go_package_target_reads_a_prebuilt_layout_as_it_reads_the_tree(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     tree = _tree(
         "go.mod",
         "main.go",
@@ -669,6 +674,11 @@ def test_go_package_target_reads_a_prebuilt_layout_as_it_reads_the_tree() -> Non
         "example.com/other": ModuleTarget(ImportResolution.EXTERNAL, "other_module"),
     }
 
+    def no_layout(tree: RevisionTree) -> GoLayout:
+        raise AssertionError("the review path walks the tree itself")
+
+    # Without a layout, the review's two walks of the tree answer; none is built.
+    monkeypatch.setattr(ast_resolution, "go_layout", no_layout)
     for path, target in expected.items():
         assert go_package_target(path, tree, module) == target, path
         assert go_package_target(path, tree, module, layout=layout) == target, path

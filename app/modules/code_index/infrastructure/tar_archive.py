@@ -7,8 +7,9 @@ toward the same limit as it is read, with the slack of the header blocks, so a h
 hides its size (a pax `size`, a negative size, a GNU sparse map) cannot read past it. The
 single root directory of a provider archive is stripped. An absolute path, a `..`
 segment, a NUL character in a path or a link target, a hardlink, a device, a FIFO, a
-sparse file, any other entry type, a second root, a repeated path or a metadata header
-over 64 KiB is unsafe. A symlink joins the path set but is never read.
+sparse file (a pax sparse member before `tarfile` reads its map), any other entry type, a
+second root, a repeated path or a metadata header over 64 KiB is unsafe. A symlink joins
+the path set but is never read.
 
 The gzip stream is decoded by `gzip`, not by `tarfile`: a truncated stream then fails
 instead of ending the listing early. An archive that cannot be read, a forged header
@@ -130,6 +131,19 @@ def _open(stack: ExitStack, content: bytes, budget: _Budget) -> tarfile.TarFile:
         def _proc_member(self, tarfile: tarfile.TarFile) -> tarfile.TarInfo:
             budget.header(self)
             return super()._proc_member(tarfile)  # type: ignore[misc, no-any-return]
+
+        # The pax GNU sparse formats 0.0, 0.1 and 1.0. A sparse member is unsafe anyway,
+        # and `tarfile` would first read its map into a list: format 1.0 reads it from the
+        # member's data, a list slot for every two decoded bytes. These are private hooks
+        # of `_proc_pax`; the forged-map test pins that they still run.
+        def _proc_gnusparse_00(self, *args: object) -> None:
+            raise ArchiveUnsafe("An archive entry is a sparse file")
+
+        def _proc_gnusparse_01(self, *args: object) -> None:
+            raise ArchiveUnsafe("An archive entry is a sparse file")
+
+        def _proc_gnusparse_10(self, *args: object) -> None:
+            raise ArchiveUnsafe("An archive entry is a sparse file")
 
     decoded = stack.enter_context(gzip.GzipFile(fileobj=io.BytesIO(content), mode="rb"))
     stream = _Counted(decoded, budget)

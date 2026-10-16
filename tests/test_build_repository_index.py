@@ -19,6 +19,7 @@ from uuid import UUID
 
 import pytest
 
+from app.modules.code_index.application import build_index
 from app.modules.code_index.application.build_index import (
     BuildMode,
     BuildOutcome,
@@ -302,10 +303,12 @@ class Store:
 class Uow:
     tracker: Tracker
     store: Store
+    entered_at: int = 0
 
     async def __aenter__(self) -> Self:
         self.tracker.open += 1
         self.tracker.transactions += 1
+        self.entered_at = len(self.tracker.log)
         return self
 
     async def __aexit__(
@@ -314,7 +317,16 @@ class Uow:
         exc: BaseException | None,
         traceback: TracebackType | None,
     ) -> None:
-        self.tracker.open -= 1
+        try:
+            # `hold="claim_exit"` parks the end of the claim transaction, after its commit.
+            if (
+                self.store.hold == "claim_exit"
+                and "claim_lease" in self.tracker.log[self.entered_at :]
+            ):
+                self.store.held.set()
+                await asyncio.sleep(3600)
+        finally:
+            self.tracker.open -= 1
 
     async def commit(self) -> None:
         self.tracker.store("commit")
@@ -421,6 +433,9 @@ class Parser:
     parsed: list[str] = field(default_factory=list)
     # Seconds the first file takes.
     first_delay: float = 0.0
+    # `hang` parks every parse once `entered` is set.
+    hang: bool = False
+    entered: asyncio.Event = field(default_factory=asyncio.Event)
 
     async def parse_many(
         self, requests: tuple[ParseRequest, ...]
@@ -429,6 +444,9 @@ class Parser:
             raise self.error
         if self.first_delay and not self.parsed:
             await asyncio.sleep(self.first_delay)
+        if self.hang:
+            self.entered.set()
+            await asyncio.sleep(3600)
         results: dict[str, AstFacts | AstFailureReason] = {}
         for request in requests:
             self.parsed.append(request.key)
@@ -981,20 +999,30 @@ def test_a_publication_miss_wakes_the_repository() -> None:
     assert world.store.releases == []
 
 
-@pytest.mark.parametrize(
-    ("target", "woken"),
-    [("d" * 40, [(_REPO, _GENERATION)]), (None, [])],
-)
+# The target of the claim snapshot, the target on the state row at the end, and whether
+# it moved: only a row that differs from the snapshot wakes the repository.
+_TARGETS = [
+    pytest.param(None, "d" * 40, True, id="none-then-a-target"),
+    pytest.param(None, None, False, id="none-then-none"),
+    pytest.param("d" * 40, "d" * 40, False, id="same-target"),
+    pytest.param("d" * 40, "e" * 40, True, id="another-target"),
+]
+
+
+@pytest.mark.parametrize(("claimed", "target", "moved"), _TARGETS)
 def test_a_target_that_moved_during_the_build_wakes_the_repository(
-    target: str | None, woken: list[tuple[UUID, int]]
+    claimed: str | None, target: str | None, moved: bool
 ) -> None:
-    world = _world(after_publish=_state(indexed_commit_sha=_HEAD, target_commit_sha=target))
+    world = _world(
+        claim=LeaseClaim(_FENCE, claimed),
+        after_publish=_state(indexed_commit_sha=_HEAD, target_commit_sha=target),
+    )
 
     outcome = world.run()
 
     assert outcome.status is BuildStatus.PUBLISHED
-    assert world.wakeups.woken == woken
-    assert world.tracker.log[-2:] == (["get_state", "wake"] if woken else ["commit", "get_state"])
+    assert world.wakeups.woken == ([(_REPO, _GENERATION)] if moved else [])
+    assert world.tracker.log[-2:] == (["get_state", "wake"] if moved else ["commit", "get_state"])
 
 
 def _unsafe_archive(world: World) -> None:
@@ -1030,23 +1058,23 @@ def _access_denied(world: World) -> None:
     ],
     ids=["unchanged", "empty", "released"],
 )
-@pytest.mark.parametrize(
-    ("target", "woken"),
-    [("d" * 40, [(_REPO, _GENERATION)]), (None, [])],
-    ids=["moved", "not-moved"],
-)
+@pytest.mark.parametrize(("claimed", "target", "moved"), _TARGETS)
 def test_a_target_that_moved_before_a_release_wakes_the_repository(
-    arrange: Any, status: BuildStatus, target: str | None, woken: list[tuple[UUID, int]]
+    arrange: Any, status: BuildStatus, claimed: str | None, target: str | None, moved: bool
 ) -> None:
     # A wake-up refused as LEASED during the job left its target on the state row.
-    world = _world(state=_state(), after_release=_state(target_commit_sha=target))
+    world = _world(
+        state=_state(),
+        claim=LeaseClaim(_FENCE, claimed),
+        after_release=_state(target_commit_sha=target),
+    )
     arrange(world)
 
     outcome = world.run()
 
     assert outcome.status is status
-    assert world.wakeups.woken == woken
-    expected = ["release", "commit", "get_state", *(["wake"] if woken else [])]
+    assert world.wakeups.woken == ([(_REPO, _GENERATION)] if moved else [])
+    expected = ["release", "commit", "get_state", *(["wake"] if moved else [])]
     assert world.tracker.log[-len(expected) :] == expected
 
 
@@ -1370,8 +1398,14 @@ def _failing_source_factory(world: World) -> None:
     ],
 )
 def test_every_release_records_the_job_metrics(
-    arrange: Any, status: BuildStatus | None, downloaded: int, requests: int
+    arrange: Any,
+    status: BuildStatus | None,
+    downloaded: int,
+    requests: int,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # The module function, not `time.monotonic`, which asyncio reads too.
+    monkeypatch.setattr(build_index, "_elapsed_ms", lambda started: 1234)
     world = _world(state=_state())
     arrange(world)
     # A full discard portion outlasts the zero soft cutoff; the other paths discard none.
@@ -1383,10 +1417,7 @@ def test_every_release_records_the_job_metrics(
     else:
         assert world.run(settings=settings).status is status
 
-    (stats,) = world.store.release_stats
-    assert stats is not None
-    assert stats == IndexBuildStats(downloaded, stats.build_duration_ms, requests)
-    assert stats.build_duration_ms >= 0
+    assert world.store.release_stats == [IndexBuildStats(downloaded, 1234, requests)]
 
 
 @pytest.mark.parametrize(
@@ -1418,6 +1449,42 @@ def test_a_cancellation_during_the_closing_write_does_not_cut_it(
     assert [code for code, _ in world.store.failures] == failures
     assert world.store.releases == releases
     assert world.tracker.log[-2:] == [held, "commit"]
+
+
+def _parked_parse(world: World) -> asyncio.Event:
+    world.parser.hang = True
+    return world.parser.entered
+
+
+def _parked_claim_exit(world: World) -> asyncio.Event:
+    world.store.hold = "claim_exit"
+    return world.store.held
+
+
+@pytest.mark.parametrize(
+    "park",
+    [
+        pytest.param(_parked_parse, id="while-parsing"),
+        pytest.param(_parked_claim_exit, id="leaving-the-claim-transaction"),
+    ],
+)
+def test_a_cancelled_job_releases_its_lease(park: Any) -> None:
+    # A worker shutdown cancels the job: `CancelledError` is not an `Exception`.
+    world = _world()
+    parked = park(world)
+
+    async def scenario() -> None:
+        job = asyncio.create_task(world.use_case().execute(_REPO, _GENERATION))
+        await asyncio.wait_for(parked.wait(), 5)
+        job.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await job
+
+    asyncio.run(scenario())
+
+    assert world.store.releases == [None]
+    assert world.store.failures == []
+    assert world.tracker.log[-2:] == ["release", "commit"]
 
 
 def test_no_transaction_is_open_during_a_vcs_call_or_a_wake_up() -> None:
