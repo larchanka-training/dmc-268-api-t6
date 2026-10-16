@@ -788,9 +788,7 @@ async def _raw_rows(database: _Database, repository_id: UUID) -> tuple[int, ...]
 
 
 @pytest.mark.integration
-def test_a_redelivery_neither_duplicates_rows_nor_moves_the_commit_back(
-    database: _Database,
-) -> None:
+def test_a_redelivery_at_the_indexed_head_is_an_unchanged_no_op(database: _Database) -> None:
     async def scenario(indexer: Indexer) -> None:
         await indexer.start({"lib.py": b"def target():\n    return 1\n", "user.py": _USER})
         head = indexer.branch.push({"lib.py": b"def target():\n    return 2\n", "user.py": _USER})
@@ -806,6 +804,135 @@ def test_a_redelivery_neither_duplicates_rows_nor_moves_the_commit_back(
         assert (await indexer.state(database.a)).indexed_commit_sha == head
 
     _run(database, scenario)
+
+
+_PACKAGE: Tree = {
+    "pkg/__init__.py": b"def one():\n    return 1\n",
+    "pkg/a.py": b"from pkg import one\n\n\ndef a1():\n    return one()\n",
+    "pkg/b.py": b"from pkg.a import a1\n\n\nclass B:\n    def m(self):\n        return a1()\n",
+    "top.py": b"import pkg.a\nfrom pkg import one\n\n\ndef t():\n    return one()\n",
+}
+# Rule I: the changed `__init__.py` re-extracts `pkg/a.py` and `top.py`.
+_PACKAGE_V2: Tree = {
+    **_PACKAGE,
+    "pkg/__init__.py": b"def one():\n    return 1\n\n\ndef extra():\n    return 3\n",
+}
+
+
+@dataclass
+class _CrashOnParse:
+    """The parser, raising at its `call`-th file; 0 never raises."""
+
+    inner: SourceParser
+    call: int = 0
+    calls: int = 0
+
+    async def parse_many(
+        self, requests: tuple[ParseRequest, ...]
+    ) -> dict[str, AstFacts | AstFailureReason]:
+        self.calls += 1
+        if self.calls == self.call:
+            raise RuntimeError("the parser crashed")
+        return await self.inner.parse_many(requests)
+
+    async def aclose(self) -> None:
+        await self.inner.aclose()
+
+
+@pytest.mark.integration
+def test_a_retry_after_a_crash_in_an_incremental_build_equals_a_fresh_full_build(
+    database: _Database,
+) -> None:
+    parsers: list[_CrashOnParse] = []
+
+    def crashing(real: SourceParser) -> SourceParser:
+        parsers.append(_CrashOnParse(real))
+        return parsers[0]
+
+    async def scenario(indexer: Indexer) -> None:
+        before = await indexer.start(_PACKAGE)
+        indexed, rows = indexer.branch.head, await _raw_rows(database, database.a)
+        indexer.branch.push(_PACKAGE_V2)
+        parser = parsers[0]
+        # The summary of `pkg/__init__.py`, then one file per batch: the third parse
+        # crashes after the attempt wrote `pkg/__init__.py`.
+        parser.calls, parser.call = 0, 3
+
+        with pytest.raises(RuntimeError, match="crashed"):
+            await indexer.build(database.a)
+
+        # The attempt's rows stay behind, unpublished; the lease is released.
+        assert await _raw_rows(database, database.a) != rows
+        state = await indexer.state(database.a)
+        assert (state.indexed_commit_sha, state.lease_expires_at) == (indexed, None)
+        parser.call = 0
+        await indexer.incremental_equals_full(await indexer.build(database.a), before)
+
+    _run(database, scenario, settings=replace(_SETTINGS, batch_files=1), parser=crashing)
+
+
+@dataclass
+class _GateOnParse:
+    """The parser, parking its first file until `go` is set."""
+
+    inner: SourceParser
+    reached: asyncio.Event = field(default_factory=asyncio.Event)
+    go: asyncio.Event = field(default_factory=asyncio.Event)
+    calls: int = 0
+
+    async def parse_many(
+        self, requests: tuple[ParseRequest, ...]
+    ) -> dict[str, AstFacts | AstFailureReason]:
+        self.calls += 1
+        if self.calls == 1:
+            self.reached.set()
+            await self.go.wait()
+        return await self.inner.parse_many(requests)
+
+    async def aclose(self) -> None:
+        await self.inner.aclose()
+
+
+@pytest.mark.integration
+def test_a_job_that_resumes_after_its_lease_was_taken_over_writes_nothing(
+    database: _Database,
+) -> None:
+    gates: list[_GateOnParse] = []
+
+    def gated(real: SourceParser) -> SourceParser:
+        gates.append(_GateOnParse(real))
+        return gates[0]
+
+    async def scenario(indexer: Indexer) -> None:
+        gate = gates[0]
+        await indexer.enable(database.a)
+        indexer.branch.push(_PACKAGE)
+        zombie = asyncio.create_task(indexer.build(database.a))
+        await asyncio.wait_for(gate.reached.wait(), 30)
+        # The parked job read the first HEAD; its lease expires, and a second job takes
+        # it over and publishes a later HEAD.
+        head = indexer.branch.push(_PACKAGE_V2)
+        async with indexer.database.factory() as session:
+            await session.execute(
+                text(
+                    "UPDATE code_index_states SET lease_expires_at = now() - interval '1 second'"
+                    " WHERE repository_id = :id"
+                ),
+                {"id": database.a},
+            )
+            await session.commit()
+        second = await indexer.build(database.a)
+        assert (second.status, second.commit_sha) == (BuildStatus.PUBLISHED, head)
+        rows = await _raw_rows(database, database.a)
+
+        gate.go.set()
+        first = await asyncio.wait_for(zombie, 60)
+
+        assert first.status is BuildStatus.LEASE_LOST
+        assert await _raw_rows(database, database.a) == rows
+        assert (await indexer.state(database.a)).indexed_commit_sha == head
+
+    _run(database, scenario, parser=gated)
 
 
 @dataclass
