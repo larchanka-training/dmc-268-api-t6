@@ -169,13 +169,15 @@ _NO_INDEX = _state(
 class Store:
     tracker: Tracker
     state: IndexState | None
-    claim: LeaseClaim | ClaimRefused = LeaseClaim(_FENCE, None, 0)
+    claim: LeaseClaim | ClaimRefused = LeaseClaim(_FENCE, None)
     # Rows each discard portion deletes; the last value repeats.
     discards: list[int] = field(default_factory=lambda: [0])
     files: dict[str, str] = field(default_factory=dict)
     imports: list[ImportRecord] = field(default_factory=list)
     counts: dict[str, tuple[int, int]] = field(default_factory=dict)
     bytes_per_file: int = 0
+    # The stored and live pending bytes of the Workspace's other repositories.
+    other_bytes: int = 0
     published: bool = True
     after_publish: IndexState | None = None
     # The state once the job released its lease or failed the index.
@@ -185,6 +187,7 @@ class Store:
     publications: list[dict[str, Any]] = field(default_factory=list)
     failures: list[tuple[str, IndexBuildStats | None]] = field(default_factory=list)
     releases: list[str | None] = field(default_factory=list)
+    release_stats: list[IndexBuildStats | None] = field(default_factory=list)
     pending: int = 0
     admission: IndexAdmission | None = None
     # A store call that waits for `proceed` once `held` is set; `finished` follows it.
@@ -232,7 +235,7 @@ class Store:
         self.written.append((self.tracker.transactions, file))
         self.pending += self.bytes_per_file
         stored = self.state.stored_bytes if self.state is not None else 0
-        return IndexStorage(stored, self.pending)
+        return IndexStorage(stored, self.pending, stored + self.pending + self.other_bytes)
 
     async def publish(self, repository_id: UUID, fence: IndexFence, **values: Any) -> bool:
         self._call("publish")
@@ -253,11 +256,17 @@ class Store:
         self.finished.set()
 
     async def release(
-        self, repository_id: UUID, fence: IndexFence, *, last_error_code: str | None = None
+        self,
+        repository_id: UUID,
+        fence: IndexFence,
+        *,
+        last_error_code: str | None = None,
+        stats: IndexBuildStats | None = None,
     ) -> IndexStatus:
         self._call("release")
         await self._wait_if_held("release")
         self.releases.append(last_error_code)
+        self.release_stats.append(stats)
         self.finished.set()
         return IndexStatus.READY
 
@@ -1128,29 +1137,29 @@ def test_an_archive_failure_fails_the_index_with_its_code_and_the_request_count(
 
 
 @pytest.mark.parametrize(
-    ("limits", "admission", "claim", "code"),
+    ("limits", "admission", "other_bytes", "code"),
     [
-        (replace(_LIMITS, parsed_files=1), _ADMISSION, None, "limit_exceeded:parsed_files"),
-        (replace(_LIMITS, symbols=1), _ADMISSION, None, "limit_exceeded:symbols"),
-        (replace(_LIMITS, edges=1), _ADMISSION, None, "limit_exceeded:edges"),
+        (replace(_LIMITS, parsed_files=1), _ADMISSION, 0, "limit_exceeded:parsed_files"),
+        (replace(_LIMITS, symbols=1), _ADMISSION, 0, "limit_exceeded:symbols"),
+        (replace(_LIMITS, edges=1), _ADMISSION, 0, "limit_exceeded:edges"),
         (
             _LIMITS,
             replace(_ADMISSION, repository_storage_bytes=150),
-            None,
+            0,
             "limit_exceeded:repository_storage",
         ),
         (
             _LIMITS,
             replace(_ADMISSION, workspace_storage_bytes=1_000),
-            LeaseClaim(_FENCE, None, 950),
+            950,
             "limit_exceeded:workspace_storage",
         ),
     ],
 )
 def test_a_build_limit_fails_the_index_before_writing_over_it(
-    limits: IndexLimits, admission: IndexAdmission, claim: LeaseClaim | None, code: str
+    limits: IndexLimits, admission: IndexAdmission, other_bytes: int, code: str
 ) -> None:
-    world = _world(bytes_per_file=100, claim=claim or LeaseClaim(_FENCE, None, 0))
+    world = _world(bytes_per_file=100, other_bytes=other_bytes)
 
     outcome = world.run(limits, replace(_SETTINGS, admission=admission, batch_files=1))
 
@@ -1185,6 +1194,30 @@ def test_the_repository_quota_counts_the_published_bytes_too() -> None:
         "limit_exceeded:repository_storage",
     )
     assert len(world.store.written) == 2
+    assert world.store.publications == []
+
+
+def test_the_workspace_quota_counts_the_sum_of_the_write_and_rolls_the_batch_back() -> None:
+    # The other repositories of the Workspace hold 850 bytes: the second file of the
+    # batch brings the sum that `replace_file` returns to 1050, over 1000.
+    world = _world(bytes_per_file=100, other_bytes=850)
+    admission = replace(_ADMISSION, workspace_storage_bytes=1_000)
+
+    outcome = world.run(settings=replace(_SETTINGS, admission=admission, batch_files=2))
+
+    assert (outcome.status, outcome.error_code) == (
+        BuildStatus.FAILED,
+        "limit_exceeded:workspace_storage",
+    )
+    # Both writes ran in one transaction, and it ended without a commit.
+    assert len({transaction for transaction, _ in world.store.written}) == 1
+    log = world.tracker.log
+    assert log[log.index("replace_file") :] == [
+        "replace_file",
+        "replace_file",
+        "mark_failed",
+        "commit",
+    ]
     assert world.store.publications == []
 
 
@@ -1305,6 +1338,55 @@ def test_an_unexpected_error_releases_the_lease_and_propagates() -> None:
 
     assert world.store.releases == [None]
     assert world.store.failures == []
+
+
+def _unfinished_discard(world: World) -> None:
+    world.store.discards = [2]
+
+
+def _policy_error(world: World) -> None:
+    world.archives.tree = {**world.archives.tree, _RULES: b"```review-ignore\nlegacy/**\n"}
+
+
+def _unavailable_archive(world: World) -> None:
+    world.source.errors["archive"] = VcsUnavailable("down")
+
+
+def _failing_source_factory(world: World) -> None:
+    world.source_error = RuntimeError("no source for this repository")
+
+
+@pytest.mark.parametrize(
+    ("arrange", "status", "downloaded", "requests"),
+    [
+        pytest.param(_unfinished_discard, BuildStatus.REWAKE, 0, 0, id="soft-cutoff"),
+        pytest.param(_empty, BuildStatus.EMPTY, 0, 1, id="empty"),
+        pytest.param(_unchanged, BuildStatus.UNCHANGED, 0, 1, id="unchanged"),
+        pytest.param(_access_denied, BuildStatus.RELEASED, 0, 1, id="released-access"),
+        pytest.param(_policy_error, BuildStatus.RELEASED, 7, 3, id="released-policy"),
+        pytest.param(_unavailable_archive, BuildStatus.TRANSIENT, 0, 3, id="transient"),
+        pytest.param(_crashing_parser, None, 7, 3, id="after-an-error"),
+        pytest.param(_failing_source_factory, None, 0, 0, id="after-the-claim"),
+    ],
+)
+def test_every_release_records_the_job_metrics(
+    arrange: Any, status: BuildStatus | None, downloaded: int, requests: int
+) -> None:
+    world = _world(state=_state())
+    arrange(world)
+    # A full discard portion outlasts the zero soft cutoff; the other paths discard none.
+    settings = replace(_SETTINGS, discard_batch_rows=2, soft_cutoff_seconds=0)
+
+    if status is None:
+        with pytest.raises(RuntimeError):
+            world.run(settings=settings)
+    else:
+        assert world.run(settings=settings).status is status
+
+    (stats,) = world.store.release_stats
+    assert stats is not None
+    assert stats == IndexBuildStats(downloaded, stats.build_duration_ms, requests)
+    assert stats.build_duration_ms >= 0
 
 
 @pytest.mark.parametrize(
