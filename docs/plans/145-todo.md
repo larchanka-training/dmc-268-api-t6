@@ -219,9 +219,10 @@ step 9.
 
 **Acceptance criteria:**
 
-- [ ] The coordination comments are posted before the docs commit.
-- [ ] SD, PIPELINE_SPEC, TEST_PLAN §3.5, BACKEND_ARCHITECTURE and the ERD match the code
-  of Tasks 2–7.
+- [x] The coordination comments are posted before the docs commit.
+- [x] SD, PIPELINE_SPEC, TEST_PLAN §3.5, BACKEND_ARCHITECTURE and the ERD match the code
+  of Tasks 2–7. `erd.svg` is regenerated with `@mermaid-js/mermaid-cli@12.0.0` and
+  `-b transparent`, as in `9623e86`.
 
 **Dependencies:** Task 7.
 

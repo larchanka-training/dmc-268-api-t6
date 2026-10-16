@@ -440,6 +440,15 @@ lease и счётчики. `CodeIndexFile`, `CodeIndexSymbol`, `CodeIndexEdge` �
 ENUM видов символов и исходов импорта построены из `SymbolKind` и `ImportResolution`
 модуля `reviews`, а не дублируют их.
 
+Статус индекса для читателей (#145) — `RagIndexStatus` и `rag_index(...)` в
+`code_index/domain`: чистая функция над тумблером `Repository.rag_enabled` и колонками
+строки состояния, без хранения. Адаптер настроек репозитория
+(`repositories/infrastructure/repository_settings.py`) читает `Repository` и восемь
+колонок `CodeIndexState` одним запросом с outer join — без N+1 и без нового порта
+(порт очистки и включения появится в #143); PATCH обновляет строку и перечитывает её
+тем же запросом. Read model `RepositorySettings` несёт `RagIndex` из домена
+`code_index` как публичный контракт этого модуля.
+
 ERD показывает связи и ключевые поля; он отражает актуальные поля состояния Run,
 enum Finding, inline response для RunAction, модель UsageEvent и таблицы
 `code_index`. Полный состав
@@ -457,8 +466,9 @@ application права обходить интерфейсы.
 `Finding.side`, индексы для списка runs и последнего UsageEvent, а также JSONB
 `RunAction.response` с check constraint для гибридного хранения ответа. Ревизия
 `20261015_0032` (#141) создаёт пять таблиц индекса графа `code_index_*` и пять их
-ENUM; downgrade удаляет таблицы, затем типы. Будущие изменения схемы оформляются
-новой ревизией, а не правкой уже применённой.
+ENUM; downgrade удаляет таблицы, затем типы. Ревизия `20261016_0033` (#145) добавляет
+`repositories.rag_enabled BOOLEAN NOT NULL DEFAULT false`; downgrade удаляет колонку.
+Будущие изменения схемы оформляются новой ревизией, а не правкой уже применённой.
 
 Миграции запускаются один раз отдельным deployment-шагом до старта процессов, не
 в lifespan каждого приложения. Из корня backend-проекта:
@@ -484,6 +494,9 @@ ENUM, rename, partial indexes и data migrations. Перед применени�
 каскад от `repositories`, CHECK, ENUM, downgrade/upgrade) и поведение
 `SqlAlchemyCodeIndexStore`: изоляцию по `repository_id`, отказ записи и публикации с
 устаревшим fence, purge и сборку мусора, видимость публикаций.
+[`test_repository_rag_postgres.py`](../tests/test_repository_rag_postgres.py)
+проверяет ревизию `20261016_0033`, онбординг без включения RAG и статус индекса в
+`GET`/`PATCH /api/repos/{id}` по строкам `code_index_states`.
 Пользователь тестовой БД должен иметь право CREATE SCHEMA. В Alembic передаётся
 готовое соединение: переменная `DATABASE_URL` приложения не может перенаправить тест
 в другую БД. Без `TEST_DATABASE_URL` интеграционные тесты пропускаются.
