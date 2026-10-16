@@ -10,12 +10,15 @@ from typing import Literal
 from xml.sax.saxutils import escape
 
 from app.common.application.languages import LANGUAGE_BY_SUFFIX
+from app.modules.reviews.application.commit_prefix_limits import (
+    MAX_COMMIT_MESSAGE_CHARS as MAX_COMMIT_MESSAGE_CHARS,
+)
+from app.modules.reviews.application.commit_prefix_limits import (
+    MAX_COMMIT_MESSAGES as MAX_COMMIT_MESSAGES,
+)
 
 type LineType = Literal["added", "removed", "context"]
 
-# Commit messages are a fixed cost outside the diff budget: keep them bounded.
-MAX_COMMIT_MESSAGES = 20
-MAX_COMMIT_MESSAGE_CHARS = 500
 type FileStatus = Literal[
     "added", "modified", "removed", "renamed", "copied", "changed", "unchanged"
 ]
