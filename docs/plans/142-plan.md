@@ -373,33 +373,44 @@ and the importer's content, not on the target's facts.
 ### Algorithm `BuildRepositoryIndex.execute(repository_id, generation)`
 
 Every store call is its own short transaction; no network call runs inside a
-transaction.
+transaction. Every release below is `release(..., stats=…)`: a job that ends without a
+publication records its `github_request_count`, `build_duration_ms` and
+`downloaded_bytes` too (#142 comment 6218093384), with what the job has at that point.
 
 1. **No repository** → STALE.
 2. **Claim the lease:** lease = deadline + 5 min. A refusal → the outcome (STALE, LEASED,
    BUSY or QUOTA).
 3. **`discard_abandoned` in portions.** If it does not fit in the soft cutoff → release,
    wake, REWAKE.
-4. **`head()` = None** → release → EMPTY. Empty repository or no default branch, without
-   an error (AC8).
-5. **HEAD == indexed** with the same versions and branch → release → UNCHANGED.
+4. **`head()` = None** → release → the target re-check of step 12 → EMPTY. Empty
+   repository or no default branch, without an error (AC8).
+5. **HEAD == indexed** with the same versions and branch → release → the target re-check
+   → UNCHANGED.
 6. **Mode choice.**
    - Full: no index, the profile changed, or the default branch changed.
    - Otherwise compare. A `None` result, ancestry other than AHEAD, an incomplete list, or
      a touched `go.mod`/`go.work` → full.
 7. **Archive, pass 1, policy.** `PolicyError` → release with
-   `last_error_code="policy_<code>"`. A different `exclusions_digest` → full.
+   `last_error_code="policy_<code>"` → the target re-check → RELEASED. A different
+   `exclusions_digest` → full.
 8. **Incremental only:** C = the compare paths ∪ the blob-SHA diff against `iter_files`;
    R = the importers by rules W/I/G. More than 500 → full.
 9. **Parse, pass 2.** The needed Go and `__init__` facts are read separately; memory holds
    fact summaries, not content.
 10. **Limits on every batch:** `parsed_files`, `symbols`, `edges` (for incremental: the
     state counters − `visible_counts(closed)` + the new ones), storage, deadline.
+    Storage is checked on every `IndexStorage` that `replace_file` returns: the
+    repository quota on `stored_bytes + pending_bytes`, the Workspace quota on
+    `workspace_bytes`, the live sum read in the write transaction, not a claim snapshot.
+    Over a quota → raise before the batch commits, so the batch rolls back.
 11. **`replace_file` in batches** of ~50 files per transaction.
 12. **`publish(deleted_paths = (stored ∩ (C ∪ R)) − written)`.**
     - `False` → wake.
     - `True` → `get_state`; if `target_commit_sha` differs from the snapshot taken at
       claim → wake.
+    - The same target re-check runs after the UNCHANGED, EMPTY and RELEASED releases
+      (review SP-6); not after TRANSIENT (its retry comes back anyway), FAILED or
+      LEASE_LOST.
 
 **Error outcomes.** The codes are provider-neutral and carried by the port exceptions; the
 use case only passes the code on (AC9).
@@ -409,10 +420,12 @@ use case only passes the code on (AC9).
 - `ArchiveUnsafe` → `mark_failed("archive_unsafe", stats=…)`;
 - `VcsUnavailable` → release with `vcs_rate_limited` or `vcs_unavailable` →
   TRANSIENT(retry_after);
-- `VcsAccessDenied` → release with `vcs_access_denied`;
+- `VcsAccessDenied` → release with `vcs_access_denied` → the target re-check → RELEASED;
 - `IndexLeaseLost` → stop without a write and without retry;
 - deadline → `mark_failed("limit_exceeded:deadline")`;
-- any other exception → release (best effort, fresh transaction, shield) → re-raise.
+- any other exception → release (best effort, fresh transaction, shield) → re-raise; an
+  exception between the claim commit and the job start (the source factory, review SP-5)
+  releases the same way, with the elapsed time only.
 
 **Deadline inside threads.** `asyncio.timeout` does not interrupt work in `to_thread`.
 So a monotonic deadline is passed into `scan`/`contents`, and a pass over 1 GiB stops in
@@ -443,7 +456,8 @@ reviews behind 15-minute jobs.
   request counts, the 300-file threshold;
 - `test_build_repository_index.py` (fakes): every mode decision, every code, the soft
   cutoff, a CAS miss, wake on a target change, no transaction during a VCS call,
-  skip-counter literals;
+  skip-counter literals, the stats of every release, a Workspace sum over the quota
+  failing the build before its batch commits;
 - layer boundary (AC9): the `code_index/application/*` modules import neither
   `integrations` nor the GitHub adapters (AST or import check).
 
@@ -458,7 +472,10 @@ normalized sets of symbol keys, edges and import records are compared.
 - a file that became >256 KiB, binary or a symlink loses its rows;
 - a redelivery does not duplicate rows and does not move the sha backwards;
 - purge between batches;
-- one test per exclusion class and per limit.
+- one test per exclusion class and per limit;
+- two live builds of one Workspace: A publishes, B fails with
+  `limit_exceeded:workspace_storage`, and the committed rows stay within both quotas;
+- a job released without a publication records its metrics.
 
 ## PR 3: `feat(code_index): consume index.repo in the worker`
 

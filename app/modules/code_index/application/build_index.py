@@ -454,9 +454,11 @@ class BuildRepositoryIndex:
             )
         except BaseException:
             # The lease is held from its commit on: the end of the claim transaction and
-            # the source factory must not leave it to expire.
+            # the source factory must not leave it to expire. No source has made a
+            # request yet, and nothing was downloaded.
             if leased is not None:
-                await _abandon(self._uow, repository.repository_id, leased.fence)
+                stats = IndexBuildStats(0, _elapsed_ms(started), 0)
+                await _abandon(self._uow, repository.repository_id, leased.fence, stats)
             raise
         return await job.run()
 
@@ -466,18 +468,23 @@ async def _release_lease(
     repository_id: UUID,
     fence: IndexFence,
     last_error_code: str | None,
+    stats: IndexBuildStats,
 ) -> None:
+    # A job that ends without a publication records its metrics too (#142).
     async with uow() as unit:
-        await unit.index.release(repository_id, fence, last_error_code=last_error_code)
+        await unit.index.release(repository_id, fence, last_error_code=last_error_code, stats=stats)
         await unit.commit()
 
 
 async def _abandon(
-    uow: Callable[[], CodeIndexUnitOfWork], repository_id: UUID, fence: IndexFence
+    uow: Callable[[], CodeIndexUnitOfWork],
+    repository_id: UUID,
+    fence: IndexFence,
+    stats: IndexBuildStats,
 ) -> None:
     """Best effort after an unexpected error: release the lease, keep the error."""
     try:
-        await asyncio.shield(_release_lease(uow, repository_id, fence, None))
+        await asyncio.shield(_release_lease(uow, repository_id, fence, None, stats))
     except Exception:
         _LOGGER.warning(
             "code_index lease release after an error failed repository_id=%s",
@@ -628,10 +635,10 @@ class _Job:
         return self._outcome(status, error_code, retry_after)
 
     async def _abandon(self) -> None:
-        await _abandon(self._uow, self._id, self._fence)
+        await _abandon(self._uow, self._id, self._fence, self._stats())
 
     async def _release_lease(self, last_error_code: str | None) -> None:
-        await _release_lease(self._uow, self._id, self._fence, last_error_code)
+        await _release_lease(self._uow, self._id, self._fence, last_error_code, self._stats())
 
     async def _wake(self) -> None:
         await self._wakeups.wake(self._id, self._fence.generation)
@@ -967,9 +974,11 @@ class _Job:
             await uow.commit()
 
     def _check_storage(self, storage: IndexStorage) -> None:
-        # ADR §7: the quotas count the published rows and the rows of this build.
+        # ADR §7: the quotas count the published rows and the rows of this build; the
+        # Workspace's also count every other build's, as `replace_file` read them in this
+        # write transaction, so two builds of one Workspace cannot exceed it together.
         admission = self._settings.admission
         if storage.stored_bytes + storage.pending_bytes > admission.repository_storage_bytes:
             raise IndexLimitExceeded("repository_storage")
-        if self._claim.workspace_bytes + storage.pending_bytes > admission.workspace_storage_bytes:
+        if storage.workspace_bytes > admission.workspace_storage_bytes:
             raise IndexLimitExceeded("workspace_storage")
