@@ -10,9 +10,9 @@ import pytest
 from pydantic import ValidationError
 
 from app.modules.reviews.application.policy_snapshot import (
-    ExecutionProfile,
     PolicySnapshot,
-    PromptBindings,
+    make_complete_execution_profile,
+    make_complete_prompt_bindings,
     make_policy_document_missing,
     make_policy_document_present,
 )
@@ -59,8 +59,8 @@ def make_snapshot() -> PolicySnapshot:
         priority_matcher_version="priority-matcher/v1",
         service_defaults_rule_version_id=uuid.uuid4(),
         defaults_checksum="defaults_0",
-        prompt_bindings=PromptBindings("cs1", "cs2", "cs3"),
-        execution_profile=ExecutionProfile.fast("m1", "m2"),
+        prompt_bindings=make_complete_prompt_bindings(),
+        execution_profile=make_complete_execution_profile(),
         policy_digest="digest_123",
     )
 
@@ -185,7 +185,7 @@ async def test_reflection_pass_skips_when_no_candidates() -> None:
 async def test_reflection_pass_verifies_and_filters_candidates() -> None:
     cand1 = make_candidate("c-1", title="True Defect")
     cand2 = make_candidate("c-2", title="Hallucinated Defect")
-    cand3 = make_candidate("c-3", title="Unclear Assertion")
+    cand3 = make_candidate("c-3", title="Unclear Assertion", rule_name=None)
 
     fake_response = {
         "decisions": [
@@ -212,7 +212,14 @@ async def test_reflection_pass_verifies_and_filters_candidates() -> None:
                 "evidence_refs": [
                     {"block_id": "file-app-query-py", "start_line": 10, "end_line": 10}
                 ],
-                "requirement_refs": [],
+                "requirement_refs": [
+                    {
+                        "block_id": "policy-rules",
+                        "start_line": 1,
+                        "end_line": 2,
+                        "check_id": None,
+                    }
+                ],
             },
             {
                 "candidate_id": "c-3",

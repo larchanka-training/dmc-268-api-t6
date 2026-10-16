@@ -9,6 +9,7 @@ from importlib.resources import files
 from typing import Literal
 
 from app.modules.reviews.application.review_output import (
+    ALLOWED_V2_RULE_NAMES,
     ReviewFinding,
     ReviewOutput,
     finding_order_key,
@@ -234,6 +235,10 @@ class FindingsPostProcessor:
     @staticmethod
     def _repair_attribution(item: ProcessedFinding, rule_names: frozenset[str]) -> ProcessedFinding:
         finding = item.finding
+        if finding.rule_name in ALLOWED_V2_RULE_NAMES or (
+            finding.rule_name is not None and finding.rule_name.startswith("service-defaults:")
+        ):
+            return item
         match = _ATTRIBUTION_RE.match(finding.body)
         quoted_name = match.group("name") if match is not None else None
         valid = (

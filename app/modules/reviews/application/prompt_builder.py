@@ -163,38 +163,47 @@ class PromptBuilder:
 
     def render_input(self, context: ReviewContext) -> str:
         """Render the tags after the system prompt, in the documented order."""
+        blocks: list[str] = []
+        include_block_id = context.policy_snapshot is not None
         if context.policy_snapshot is not None:
-            rules_part = self._render_policy_rules(context.policy_snapshot)
-            agents_part = self._render_policy_agents(context.policy_snapshot)
+            blocks.append(self._render_policy_rules(context.policy_snapshot))
+            blocks.append(self._render_policy_agents(context.policy_snapshot))
+            if context.rules:
+                blocks.append(self._render_service_defaults(context.rules))
         else:
-            rules_part = self._render_rules(context.rules)
-            agents_part = _container("agents_md", _text(context.agents_md or ""))
+            blocks.append(self._render_rules(context.rules))
+            blocks.append(_container("agents_md", _text(context.agents_md or "")))
 
-        return "\n".join(
+        blocks.extend(
             (
-                rules_part,
-                agents_part,
                 self._render_conventions(context.conventions),
                 self._render_pr_meta(context.pr_meta),
-                self._render_changed_files(context.changed_files),
+                self._render_changed_files(
+                    context.changed_files, include_block_id=include_block_id
+                ),
                 _container(
                     "omitted_files", "\n".join(_text(path) for path in context.omitted_files)
                 ),
             )
         )
+        return "\n".join(blocks)
 
     @staticmethod
     def _render_policy_rules(snapshot: PolicySnapshot) -> str:
         doc = snapshot.rules
-        if not doc.is_present or not (doc.text or "").strip():
+        if not doc.is_present:
             return (
                 '<repository_rules block_id="policy-rules" '
                 'path=".review/rules.md" status="absent" />'
             )
-        text = doc.text or ""
+        if not (doc.text or ""):
+            return (
+                f'<repository_rules block_id="policy-rules" '
+                f'path="{_attribute(doc.path)}" status="empty" />'
+            )
         lines = [
             f'<line n="{index}">{_text(line)}</line>'
-            for index, line in enumerate(text.splitlines(), start=1)
+            for index, line in enumerate(_split_policy_lines(doc.text or ""), start=1)
         ]
         content = "\n".join(lines)
         path_attr = _attribute(doc.path)
@@ -207,15 +216,19 @@ class PromptBuilder:
     @staticmethod
     def _render_policy_agents(snapshot: PolicySnapshot) -> str:
         doc = snapshot.agents
-        if not doc.is_present or not (doc.text or "").strip():
+        if not doc.is_present:
             return (
                 '<project_conventions_document block_id="policy-agents" '
                 'path="AGENTS.md" status="absent" />'
             )
-        text = doc.text or ""
+        if not (doc.text or ""):
+            return (
+                f'<project_conventions_document block_id="policy-agents" '
+                f'path="{_attribute(doc.path)}" status="empty" />'
+            )
         lines = [
             f'<line n="{index}">{_text(line)}</line>'
-            for index, line in enumerate(text.splitlines(), start=1)
+            for index, line in enumerate(_split_policy_lines(doc.text or ""), start=1)
         ]
         content = "\n".join(lines)
         path_attr = _attribute(doc.path)
@@ -224,6 +237,24 @@ class PromptBuilder:
             f"{content}\n"
             "</project_conventions_document>"
         )
+
+    @staticmethod
+    def _render_service_defaults(rules: tuple[ReviewRule, ...]) -> str:
+        blocks = []
+        for rule in rules:
+            attributes = " ".join(
+                (
+                    f'name="{_attribute(rule.name)}"',
+                    f'include="{_attribute(" ".join(rule.include))}"',
+                    f'exclude="{_attribute(" ".join(rule.exclude))}"',
+                )
+            )
+            checks = "\n".join(
+                f"{index}. {_text(check)}" for index, check in enumerate(rule.checks, start=1)
+            )
+            blocks.append(f"<rule {attributes}>\n{checks}\n</rule>")
+        content = "\n".join(blocks)
+        return f'<service_defaults block_id="service-defaults">\n{content}\n</service_defaults>'
 
     def build_manifest(
         self,
@@ -238,45 +269,91 @@ class PromptBuilder:
 
         if context.policy_snapshot is not None:
             rules_doc = context.policy_snapshot.rules
-            if rules_doc.is_present and (rules_doc.line_count or 0) > 0:
+            if rules_doc.is_present:
                 line_count = rules_doc.line_count or 0
-                blocks.append(
-                    ManifestBlock(
-                        block_id="policy-rules",
-                        source_role="policy_document",
-                        source_kind="repository_rules",
-                        path=rules_doc.path,
-                        revision=context.policy_snapshot.policy_base_sha,
-                        content_sha256=rules_doc.text_sha256,
-                        start_line=1,
-                        end_line=line_count,
-                        shown_line_count=line_count,
+                if line_count > 0:
+                    blocks.append(
+                        ManifestBlock(
+                            block_id="policy-rules",
+                            source_role="policy_document",
+                            source_kind="repository_rules",
+                            path=rules_doc.path,
+                            revision=context.policy_snapshot.policy_base_sha,
+                            content_sha256=rules_doc.text_sha256,
+                            start_line=1,
+                            end_line=line_count,
+                            shown_line_count=line_count,
+                            shown_ranges=((1, line_count),),
+                        )
                     )
-                )
+                else:
+                    blocks.append(
+                        ManifestBlock(
+                            block_id="policy-rules",
+                            source_role="policy_document",
+                            source_kind="repository_rules",
+                            path=rules_doc.path,
+                            revision=context.policy_snapshot.policy_base_sha,
+                            content_sha256=rules_doc.text_sha256,
+                            start_line=None,
+                            end_line=None,
+                            shown_line_count=0,
+                        )
+                    )
 
             agents_doc = context.policy_snapshot.agents
-            if agents_doc.is_present and (agents_doc.line_count or 0) > 0:
+            if agents_doc.is_present:
                 line_count = agents_doc.line_count or 0
+                if line_count > 0:
+                    blocks.append(
+                        ManifestBlock(
+                            block_id="policy-agents",
+                            source_role="policy_document",
+                            source_kind="project_conventions_document",
+                            path=agents_doc.path,
+                            revision=context.policy_snapshot.policy_base_sha,
+                            content_sha256=agents_doc.text_sha256,
+                            start_line=1,
+                            end_line=line_count,
+                            shown_line_count=line_count,
+                            shown_ranges=((1, line_count),),
+                        )
+                    )
+                else:
+                    blocks.append(
+                        ManifestBlock(
+                            block_id="policy-agents",
+                            source_role="policy_document",
+                            source_kind="project_conventions_document",
+                            path=agents_doc.path,
+                            revision=context.policy_snapshot.policy_base_sha,
+                            content_sha256=agents_doc.text_sha256,
+                            start_line=None,
+                            end_line=None,
+                            shown_line_count=0,
+                        )
+                    )
+
+            if context.rules:
+                defaults_lines = sum(len(r.checks) for r in context.rules) or 1
                 blocks.append(
                     ManifestBlock(
-                        block_id="policy-agents",
-                        source_role="policy_document",
-                        source_kind="project_conventions_document",
-                        path=agents_doc.path,
-                        revision=context.policy_snapshot.policy_base_sha,
-                        content_sha256=agents_doc.text_sha256,
+                        block_id="service-defaults",
+                        source_role="service_defaults",
+                        source_kind="service_defaults",
                         start_line=1,
-                        end_line=line_count,
-                        shown_line_count=line_count,
+                        end_line=defaults_lines,
+                        shown_line_count=defaults_lines,
+                        shown_ranges=((1, defaults_lines),),
                     )
                 )
 
         for file in context.changed_files:
             slug = re.sub(r"[^a-zA-Z0-9]+", "-", file.path).strip("-")
             block_id = f"file-{slug}"
-            line_numbers = [line.number for line in file.lines]
-            start_line = min(line_numbers) if line_numbers else None
-            end_line = max(line_numbers) if line_numbers else None
+            shown_ranges = _calculate_shown_ranges(file.lines)
+            start_line = min((r[0] for r in shown_ranges), default=None)
+            end_line = max((r[1] for r in shown_ranges), default=None)
             blocks.append(
                 ManifestBlock(
                     block_id=block_id,
@@ -286,6 +363,7 @@ class PromptBuilder:
                     start_line=start_line,
                     end_line=end_line,
                     shown_line_count=len(file.lines),
+                    shown_ranges=shown_ranges,
                 )
             )
 
@@ -359,8 +437,46 @@ class PromptBuilder:
         return _container("pr_meta", "\n".join(elements))
 
     @staticmethod
-    def _render_changed_files(files: tuple[ChangedFile, ...]) -> str:
-        return _container("changed_files", "\n".join(render_changed_file(file) for file in files))
+    def _render_changed_files(
+        files: tuple[ChangedFile, ...], *, include_block_id: bool = False
+    ) -> str:
+        return _container(
+            "changed_files",
+            "\n".join(
+                render_changed_file(file, include_block_id=include_block_id) for file in files
+            ),
+        )
+
+
+def _split_policy_lines(text: str) -> list[str]:
+    """Split policy document text strictly by newline to match policy loader counts."""
+    if not text:
+        return []
+    if text.endswith("\n"):
+        text = text[:-1]
+    return text.split("\n")
+
+
+def _calculate_shown_ranges(lines: tuple[DiffLine, ...]) -> tuple[tuple[int, int], ...]:
+    """Calculate contiguous shown line ranges for the visible file diff."""
+    if not lines:
+        return ()
+    right_numbers = sorted({line.number for line in lines if line.type != "removed"})
+    target_numbers = right_numbers if right_numbers else sorted({line.number for line in lines})
+    if not target_numbers:
+        return ()
+    ranges: list[tuple[int, int]] = []
+    start = target_numbers[0]
+    prev = target_numbers[0]
+    for num in target_numbers[1:]:
+        if num == prev + 1:
+            prev = num
+        else:
+            ranges.append((start, prev))
+            start = num
+            prev = num
+    ranges.append((start, prev))
+    return tuple(ranges)
 
 
 def render_changed_line(line: DiffLine) -> str:
@@ -368,12 +484,20 @@ def render_changed_line(line: DiffLine) -> str:
     return f'<line n="{line.number}" type="{line.type}">{_text(line.content)}</line>'
 
 
-def render_changed_file(file: ChangedFile) -> str:
+def render_changed_file(file: ChangedFile, *, include_block_id: bool = False) -> str:
     """Render one changed-file block for the prompt and length accounting."""
     body = [render_changed_line(line) for line in file.lines]
     if file.total_lines is not None and file.total_lines > len(file.lines):
         body.append(truncation_trailer(len(file.lines), file.total_lines))
-    attributes = f'path="{_attribute(file.path)}" status="{file.status}"'
+    if include_block_id:
+        slug = re.sub(r"[^a-zA-Z0-9]+", "-", file.path).strip("-")
+        block_id = f"file-{slug}"
+        attributes = (
+            f'block_id="{_attribute(block_id)}" path="{_attribute(file.path)}" '
+            f'status="{file.status}"'
+        )
+    else:
+        attributes = f'path="{_attribute(file.path)}" status="{file.status}"'
     if file.language is not None:
         attributes += f' language="{_attribute(file.language)}"'
     return f"<file {attributes}>\n" + "\n".join(body) + "\n</file>"
