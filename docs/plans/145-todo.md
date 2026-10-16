@@ -60,16 +60,16 @@ Test-first: write `tests/test_rag_index_status.py` and watch it fail, then add
 
 **Acceptance criteria:**
 
-- [ ] `RagIndexStatus` members, in this order: disabled, empty, building, ready, stale,
+- [x] `RagIndexStatus` members, in this order: disabled, empty, building, ready, stale,
   failed (D-B). The order is the contract order for OpenAPI and Zod.
-- [ ] The literal table covers: flag off → `disabled` with null/0 fields; no state row →
+- [x] The literal table covers: flag off → `disabled` with null/0 fields; no state row →
   `empty`; READY with target ≠ indexed → `stale`; READY without a target or with
   target = indexed → `ready`; EMPTY/BUILDING/FAILED map 1:1; `last_error_code` comes from
   `error_code` when failed, otherwise from `last_error_code`; the publication fields are
   filled only for ready/stale.
-- [ ] AC4: disabled → not usable and no reason; empty/building/failed → not usable with a
+- [x] AC4: disabled → not usable and no reason; empty/building/failed → not usable with a
   reason; ready/stale → usable.
-- [ ] The unit test fails before the code exists and passes after.
+- [x] The unit test fails before the code exists and passes after.
 
 **Verification:** Run the common verification block.
 
