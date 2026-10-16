@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import posixpath
+import random
 from dataclasses import dataclass, field
 from uuid import UUID
 
@@ -11,14 +13,32 @@ from app.modules.reviews.application.ast_resolution import (
     ImportRef,
     ImportResolution,
     ImportResolver,
+    ImportWatch,
+    ModuleTarget,
     RevisionTree,
     affected_symbols,
+    exported_symbols,
     go_module_path,
+    go_package_name,
+    go_package_target,
+    import_watch,
+    module_target,
+    python_module_target,
+    python_submodule_files,
+    script_module_target,
 )
-from app.modules.reviews.application.ast_symbols import AstFacts, language_for_path
+from app.modules.reviews.application.ast_symbols import AstFacts, AstLanguage, language_for_path
 from app.modules.reviews.application.diff_map import DiffFile, VcsProviderName, build_diff_map
 from app.modules.reviews.application.prompt_builder import PullRequestMeta
-from app.modules.reviews.application.vcs_diff import PullRequestLocator, VcsFile, VcsPullRequest
+from app.modules.reviews.application.vcs_diff import (
+    PullRequestLocator,
+    VcsFile,
+    VcsPullRequest,
+    _is_binary,
+    _is_generated,
+    is_binary_content,
+    is_generated_path,
+)
 from app.modules.reviews.infrastructure.tree_sitter_facts import extract_facts
 
 _HEAD = "a" * 40
@@ -498,3 +518,275 @@ def test_last_import_of_a_run_is_cut_to_the_remaining_run_limit() -> None:
     assert len(shown.resolved_symbols) == 5
     assert (over.reason, len(over.names)) == ("ast_limit", 3)
     assert resolver._symbols_in_run == 100
+
+
+# --- Public helpers shared with the graph indexer (#142) -------------------------------
+
+
+def _tree(*paths: str) -> RevisionTree:
+    return RevisionTree(_HEAD, dict.fromkeys(paths, "b" * 40), True)
+
+
+def test_python_module_target_is_the_resolver_lookup_of_a_module_path() -> None:
+    tree = _tree("pkg/models.py", "pkg/__init__.py", "src/util.py", "util.py", "lib.pyi")
+
+    assert python_module_target("pkg/app.py", ".models", tree) == ModuleTarget(
+        ImportResolution.RESOLVED, None, ("pkg/models.py",)
+    )
+    assert python_module_target("pkg/app.py", ".", tree) == ModuleTarget(
+        ImportResolution.RESOLVED, None, ("pkg/__init__.py",)
+    )
+    assert python_module_target("pkg/app.py", "...x", tree) == ModuleTarget(
+        ImportResolution.MISSING, "above_repository_root"
+    )
+    assert python_module_target("pkg/app.py", ".gone", tree) == ModuleTarget(
+        ImportResolution.MISSING, "no_candidate"
+    )
+    assert python_module_target("app.py", "util", tree) == ModuleTarget(
+        ImportResolution.AMBIGUOUS, "several_candidates"
+    )
+    assert python_module_target("app.py", "lib", tree) == ModuleTarget(
+        ImportResolution.RESOLVED, None, ("lib.pyi",)
+    )
+    assert python_module_target("app.py", "requests", tree) == ModuleTarget(
+        ImportResolution.EXTERNAL, "no_candidate"
+    )
+
+
+def test_script_module_target_keeps_every_reason_of_the_resolver() -> None:
+    tree = _tree("src/x.ts", "src/y/index.tsx", "src/z.js", "src/z.mjs", "src/w.d.ts")
+
+    def target(module: str, *, typescript: bool = True) -> ModuleTarget:
+        return script_module_target("src/app.ts", module, tree, typescript=typescript)
+
+    assert target("./x") == ModuleTarget(ImportResolution.RESOLVED, None, ("src/x.ts",))
+    assert target("./x.ts") == ModuleTarget(ImportResolution.RESOLVED, None, ("src/x.ts",))
+    assert target("./y") == ModuleTarget(ImportResolution.RESOLVED, None, ("src/y/index.tsx",))
+    assert target("./w") == ModuleTarget(ImportResolution.RESOLVED, None, ("src/w.d.ts",))
+    assert target("./x.js") == ModuleTarget(ImportResolution.UNSUPPORTED, "extension_not_resolved")
+    assert target("@/x") == ModuleTarget(ImportResolution.UNSUPPORTED, "path_alias")
+    assert target("/x") == ModuleTarget(ImportResolution.UNSUPPORTED, "path_alias")
+    assert target("lodash") == ModuleTarget(ImportResolution.EXTERNAL, "package")
+    assert target("../../x") == ModuleTarget(ImportResolution.MISSING, "above_repository_root")
+    assert target("./gone") == ModuleTarget(ImportResolution.MISSING, "no_candidate")
+    assert target("./z", typescript=False) == ModuleTarget(
+        ImportResolution.AMBIGUOUS, "several_candidates"
+    )
+
+
+def test_go_package_target_lists_the_members_of_one_local_package() -> None:
+    tree = _tree(
+        "go.mod",
+        "internal/store/open.go",
+        "internal/store/close.go",
+        "internal/store/open_test.go",
+        "internal/store/_skip.go",
+        "internal/empty/README.md",
+        "internal/cfg/cfg_linux.go",
+        "nested/go.mod",
+        "nested/pkg/a.go",
+    )
+    module = "example.com/m"
+
+    def target(path: str, go_module: str | None = module) -> ModuleTarget:
+        return go_package_target(path, tree, go_module)
+
+    assert target("example.com/m/internal/store") == ModuleTarget(
+        ImportResolution.RESOLVED, None, ("internal/store/close.go", "internal/store/open.go")
+    )
+    assert target("fmt") == ModuleTarget(ImportResolution.EXTERNAL, "standard_library")
+    assert target("example.com/other/x") == ModuleTarget(ImportResolution.EXTERNAL, "other_module")
+    assert target("example.com/m/internal/store", None) == ModuleTarget(
+        ImportResolution.UNSUPPORTED, "module_not_resolved"
+    )
+    assert target("example.com/m/nested/pkg") == ModuleTarget(
+        ImportResolution.UNSUPPORTED, "nested_module"
+    )
+    assert target("example.com/m/internal/empty") == ModuleTarget(
+        ImportResolution.MISSING, "no_package_files"
+    )
+    assert target("example.com/m/internal/cfg") == ModuleTarget(
+        ImportResolution.UNSUPPORTED, "build_constrained"
+    )
+    workspace = RevisionTree(_HEAD, {**tree.blob_shas, "go.work": "c" * 40}, True)
+    assert go_package_target("example.com/m/internal/store", workspace, module) == ModuleTarget(
+        ImportResolution.UNSUPPORTED, "workspace_or_incomplete_tree"
+    )
+
+
+def test_module_target_dispatches_by_the_importer_language() -> None:
+    tree = _tree("pkg/x.py", "src/x.ts", "src/x.js", "internal/x/x.go")
+
+    def target(importer: str, module: str, language: AstLanguage) -> ModuleTarget:
+        return module_target(importer, module, language, tree, "example.com/m")
+
+    resolved = ImportResolution.RESOLVED
+    assert target("pkg/a.py", ".x", AstLanguage.PYTHON) == ModuleTarget(
+        resolved, None, ("pkg/x.py",)
+    )
+    assert target("src/a.ts", "./x", AstLanguage.TYPESCRIPT) == ModuleTarget(
+        resolved, None, ("src/x.ts",)
+    )
+    assert target("src/a.tsx", "./x", AstLanguage.TSX) == ModuleTarget(
+        resolved, None, ("src/x.ts",)
+    )
+    assert target("src/a.js", "./x", AstLanguage.JAVASCRIPT) == ModuleTarget(
+        resolved, None, ("src/x.js",)
+    )
+    assert target("cmd/a.go", "example.com/m/internal/x", AstLanguage.GO) == ModuleTarget(
+        resolved, None, ("internal/x/x.go",)
+    )
+
+
+def test_python_submodule_files_follow_the_package_of_its_init() -> None:
+    tree = _tree("pkg/__init__.py", "pkg/helpers.py", "pkg/helpers.pyi", "pkg/sub/__init__.py")
+
+    assert python_submodule_files("pkg/__init__.py", "helpers", tree) == ["pkg/helpers.py"]
+    assert python_submodule_files("pkg/__init__.py", "sub", tree) == ["pkg/sub/__init__.py"]
+    assert python_submodule_files("pkg/__init__.py", "gone", tree) == []
+    assert python_submodule_files("__init__.py", "pkg", tree) == ["pkg/__init__.py"]
+
+
+def test_exported_symbols_follow_the_export_rules_of_each_language() -> None:
+    python = _facts("a.py", "def f():\n    pass\n\nclass C:\n    def f(self):\n        pass\n")
+    go = _facts("a.go", "package a\n\nfunc Open() {}\n\nfunc open() {}\n")
+    script = _facts(
+        "a.ts", "function local() {}\nexport { local as shown };\nexport default function () {}\n"
+    )
+
+    assert [(item.name, item.enclosing) for item in exported_symbols(python, "f")] == [("f", None)]
+    assert [item.name for item in exported_symbols(go, "Open")] == ["Open"]
+    assert exported_symbols(go, "open") == ()
+    assert [item.name for item in exported_symbols(script, "shown")] == ["local"]
+    assert [item.name for item in exported_symbols(script, "default")] == [None]
+    assert exported_symbols(script, "local") == ()
+
+
+def test_go_package_name_is_the_one_package_clause_or_the_path_tail() -> None:
+    db = _facts("s/a.go", "package db\n")
+    other = _facts("s/b.go", "package other\n")
+
+    assert go_package_name("example.com/m/store", [db, db]) == "db"
+    assert go_package_name("example.com/m/store", [db, other]) == "store"
+    assert go_package_name("example.com/m/store", None) == "store"
+
+
+def test_import_watch_lists_the_paths_that_decide_a_python_target() -> None:
+    relative = import_watch("pkg/app.py", ".models", AstLanguage.PYTHON, None)
+    assert relative == ImportWatch(
+        frozenset({"pkg/models.py", "pkg/models/__init__.py", "pkg/models.pyi"}),
+        frozenset({"pkg/models"}),
+    )
+    assert import_watch("app.py", ".", AstLanguage.PYTHON, None) == ImportWatch(
+        frozenset({"__init__.py"}), frozenset({""})
+    )
+    assert import_watch("pkg/sub/app.py", "..", AstLanguage.PYTHON, None) == ImportWatch(
+        frozenset({"pkg.py", "pkg/__init__.py", "pkg.pyi"}), frozenset({"pkg"})
+    )
+    assert import_watch("app.py", "a.b", AstLanguage.PYTHON, None) == ImportWatch(
+        frozenset(
+            {
+                *("a/b.py", "a/b/__init__.py", "a/b.pyi"),
+                *("src/a/b.py", "src/a/b/__init__.py", "src/a/b.pyi"),
+            }
+        ),
+        frozenset({"a/b", "src/a/b"}),
+    )
+    assert import_watch("pkg/app.py", "...x", AstLanguage.PYTHON, None) == ImportWatch(
+        frozenset(), frozenset()
+    )
+    package = import_watch("pkg/app.py", ".", AstLanguage.PYTHON, None)
+    assert package.touched_by("pkg/helpers.py")
+    assert package.touched_by("pkg/helpers.pyi")
+    assert package.touched_by("pkg/helpers/__init__.py")
+    assert not package.touched_by("pkg/helpers/inner.py")
+    assert not package.touched_by("pkg/README.md")
+
+
+def test_import_watch_lists_the_candidates_of_a_script_target() -> None:
+    def watch(module: str, language: AstLanguage = AstLanguage.TYPESCRIPT) -> ImportWatch:
+        return import_watch("src/app.ts", module, language, None)
+
+    assert watch("./x") == ImportWatch(
+        frozenset({"src/x.ts", "src/x.tsx", "src/x.d.ts", "src/x/index.ts", "src/x/index.tsx"}),
+        frozenset(),
+    )
+    assert watch("./x", AstLanguage.JAVASCRIPT) == ImportWatch(
+        frozenset(
+            {"src/x.js", "src/x.jsx", "src/x.mjs", "src/x/index.js", "src/x/index.jsx"}
+            | {"src/x/index.mjs"}
+        ),
+        frozenset(),
+    )
+    assert watch("./x.ts") == ImportWatch(frozenset({"src/x.ts"}), frozenset())
+    for fixed in ("./x.js", "@/x", "lodash", "../../x"):
+        assert watch(fixed) == ImportWatch(frozenset(), frozenset())
+
+
+def test_import_watch_of_a_go_import_is_its_package_directory() -> None:
+    def watch(module: str, go_module: str | None = "example.com/m") -> ImportWatch:
+        return import_watch("cmd/main.go", module, AstLanguage.GO, go_module)
+
+    assert watch("example.com/m/internal/store") == ImportWatch(
+        frozenset(), frozenset({"internal/store"})
+    )
+    assert watch("example.com/m") == ImportWatch(frozenset(), frozenset({""}))
+    for fixed in ("fmt", "example.com/other/x"):
+        assert watch(fixed) == ImportWatch(frozenset(), frozenset())
+    assert watch("example.com/m/x", None) == ImportWatch(frozenset(), frozenset())
+    store = watch("example.com/m/internal/store")
+    assert store.touched_by("internal/store/new.go")
+    assert not store.touched_by("internal/store/sub/new.go")
+    assert watch("example.com/m").touched_by("main.go")
+
+
+_UNIVERSE = (
+    *("pkg/models.py", "pkg/models/__init__.py", "pkg/models.pyi", "pkg/__init__.py"),
+    *("pkg/helpers.py", "pkg/sub/x.py", "util.py", "util/__init__.py", "src/util.py"),
+    *("src/util/__init__.py", "src/util.pyi", "__init__.py", "x.py", "other.py"),
+    *("src/x.ts", "src/x.tsx", "src/x.d.ts", "src/x/index.ts", "src/x/index.tsx"),
+    *("src/x.js", "src/x.jsx", "src/x.mjs", "src/x/index.js", "src/x/index.mjs", "src/y.ts"),
+    *("internal/store/open.go", "internal/store/open_linux.go", "internal/store/open_test.go"),
+    *("internal/store/_skip.go", "internal/store/sub/a.go", "main.go"),
+    *("internal/go.mod", "go.work"),
+)
+_SPECIFIERS = (
+    *(("pkg/app.py", ".models"), ("pkg/app.py", "."), ("pkg/sub/app.py", "..")),
+    *(("app.py", "util"), ("app.py", "pkg.models"), ("app.py", "."), ("pkg/app.py", "...x")),
+    *(("src/app.ts", "./x"), ("src/app.ts", "./x.ts"), ("src/app.ts", "./x.js")),
+    *(("src/a/app.ts", "../x"), ("src/app.js", "./x"), ("src/app.ts", "@/x")),
+    *(("cmd/main.go", "example.com/m/internal/store"), ("cmd/main.go", "example.com/m")),
+    *(("cmd/main.go", "fmt"), ("cmd/main.go", "example.com/other/x")),
+)
+
+
+def test_a_path_outside_the_watch_never_changes_the_module_target() -> None:
+    """Rule W of #142: the path set decides a target only through its watch."""
+    rng = random.Random(142)
+    bases = [frozenset(), frozenset(_UNIVERSE)]
+    bases += [frozenset(rng.sample(_UNIVERSE, rng.randrange(len(_UNIVERSE)))) for _ in range(30)]
+    for importer, module in _SPECIFIERS:
+        language = language_for_path(importer)
+        assert language is not None
+        watch = import_watch(importer, module, language, "example.com/m")
+        for base in bases:
+            before = module_target(
+                importer, module, language, _tree(*sorted(base)), "example.com/m"
+            )
+            for path in _UNIVERSE:
+                if watch.touched_by(path) or posixpath.basename(path) in {"go.mod", "go.work"}:
+                    continue
+                toggled = _tree(*sorted(base ^ {path}))
+                after = module_target(importer, module, language, toggled, "example.com/m")
+                assert after == before, (importer, module, path)
+
+
+def test_generated_and_binary_checks_are_public_with_the_private_aliases_kept() -> None:
+    assert _is_generated is is_generated_path
+    assert _is_binary is is_binary_content
+    assert is_generated_path("web/package-lock.json")
+    assert is_generated_path("dist/app.js")
+    assert not is_generated_path("src/app.js")
+    assert is_binary_content(b"\x89PNG\r\n\x1a\nrest")
+    assert is_binary_content(b"text\x00more")
+    assert not is_binary_content(b"print('hello')\n")
