@@ -20,6 +20,7 @@ from sqlalchemy import (
     Enum,
     String,
     and_,
+    case,
     delete,
     func,
     insert,
@@ -293,11 +294,16 @@ class SqlAlchemyCodeIndexStore:
         self._session = session
 
     async def _state(
-        self, repository_id: UUID, *, lock: bool = False, share: bool = False
+        self,
+        repository_id: UUID,
+        *,
+        lock: bool = False,
+        share: bool = False,
+        key_share: bool = False,
     ) -> CodeIndexState | None:
         statement = select(CodeIndexState).where(CodeIndexState.repository_id == repository_id)
         if lock:
-            statement = statement.with_for_update(read=share)
+            statement = statement.with_for_update(read=share, key_share=key_share)
         return cast(
             CodeIndexState | None,
             await self._session.scalar(statement.execution_options(populate_existing=True)),
@@ -309,9 +315,9 @@ class SqlAlchemyCodeIndexStore:
         return cast(datetime, await self._session.scalar(select(func.clock_timestamp())))
 
     async def _fenced(
-        self, repository_id: UUID, fence: IndexFence, *, share: bool
+        self, repository_id: UUID, fence: IndexFence, *, share: bool, key_share: bool = False
     ) -> CodeIndexState:
-        state = await self._state(repository_id, lock=True, share=share)
+        state = await self._state(repository_id, lock=True, share=share, key_share=key_share)
         if state is None or not _holds(state, fence, await self._clock()):
             raise IndexLeaseLost("the index lease of this attempt is lost")
         return state
@@ -443,7 +449,7 @@ class SqlAlchemyCodeIndexStore:
             return ClaimRefused(ClaimRefusal.LEASED)
         # The claim drops the pending bytes of an expired attempt, so only its own
         # stored bytes count for this repository.
-        workspace_bytes = state.stored_bytes + await self._workspace_bytes(repository_id)
+        workspace_bytes = state.stored_bytes + await self._workspace_bytes(repository_id, now)
         quota = None
         if state.stored_bytes > admission.repository_storage_bytes:
             quota = REPOSITORY_STORAGE_EXCEEDED
@@ -470,20 +476,31 @@ class SqlAlchemyCodeIndexStore:
         )
         return LeaseClaim(fence, state.target_commit_sha, workspace_bytes)
 
-    async def _workspace_bytes(self, repository_id: UUID) -> int:
-        """Stored and pending bytes of the other repositories of this one's Workspace."""
+    async def _workspace_bytes(self, repository_id: UUID, now: datetime) -> int:
+        """Stored bytes of the other repositories of this one's Workspace, and their
+        pending bytes under a lease still live at `now`.
+
+        An expired attempt keeps its pending bytes until its repository is claimed again
+        or its lease is revoked; they would fail a healthy repository for its Workspace.
+        """
         workspace = (
             select(ProviderInstallation.workspace_id)
             .join(Repository, Repository.provider_installation_id == ProviderInstallation.id)
             .where(Repository.id == repository_id)
             .scalar_subquery()
         )
+        live_pending = case(
+            (
+                and_(
+                    CodeIndexState.lease_token.is_not(None),
+                    CodeIndexState.lease_expires_at > now,
+                ),
+                CodeIndexState.pending_bytes,
+            ),
+            else_=0,
+        )
         total = await self._session.scalar(
-            select(
-                func.coalesce(
-                    func.sum(CodeIndexState.stored_bytes + CodeIndexState.pending_bytes), 0
-                )
-            )
+            select(func.coalesce(func.sum(CodeIndexState.stored_bytes + live_pending), 0))
             .join(Repository, Repository.id == CodeIndexState.repository_id)
             .join(
                 ProviderInstallation, ProviderInstallation.id == Repository.provider_installation_id
@@ -534,7 +551,11 @@ class SqlAlchemyCodeIndexStore:
         self, repository_id: UUID, fence: IndexFence, file: IndexedFile
     ) -> IndexStorage:
         _validate(file)
-        await self._fenced(repository_id, fence, share=True)
+        # FOR NO KEY UPDATE, not ADR §6.2's FOR SHARE: the batch updates the state row's
+        # pending bytes, so it takes the lock it ends up holding. Two batches of one lease
+        # run one after the other instead of deadlocking on that UPDATE; a claim, purge or
+        # publication (FOR UPDATE) still waits for the batch.
+        await self._fenced(repository_id, fence, share=False, key_share=True)
         removed = 0
         for model in _GRAPH_MODELS:
             # The rows of an earlier write of this path in this attempt leave the pending

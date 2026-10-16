@@ -1473,6 +1473,45 @@ def test_purge_waits_for_a_batch_write_and_then_rejects_the_old_fence(index: _In
 
 
 @pytest.mark.integration
+def test_two_batch_writes_of_one_lease_run_one_after_the_other(
+    index: _Index, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def scenario() -> None:
+        await _enable(index, index.a)
+        fence = await _claim(index, index.a)
+
+        async def write_importer() -> IndexStorage:
+            async with index.uow() as uow:
+                storage = await uow.index.replace_file(index.a, fence, _importer("ab01", 1))
+                await uow.commit()
+            return storage
+
+        async with index.uow() as first:
+            first_pid = await first.session.scalar(text("SELECT pg_backend_pid()"))
+            store = first.index
+            locked, release = _pause_after_lock(monkeypatch, store)
+            writing = asyncio.create_task(store.replace_file(index.a, fence, _module("aa01", 1)))
+            await asyncio.wait_for(locked.wait(), 5)
+            # Two writers sharing the state row would deadlock on the UPDATE of the pending
+            # bytes; the second one waits for the row lock of the first instead.
+            second = asyncio.create_task(write_importer())
+            await _wait_until_blocked(index, first_pid, 1, second)
+            release.set()
+            assert await writing == IndexStorage(stored_bytes=0, pending_bytes=_MODULE_BYTES)
+            await first.commit()
+
+        assert await asyncio.wait_for(second, 5) == IndexStorage(
+            stored_bytes=0, pending_bytes=_MODULE_BYTES + _IMPORTER_BYTES
+        )
+        assert await _rows(index, _FILE_ROWS, repository=index.a) == [
+            (1, 1, None, "a.py", "aa01"),
+            (1, 1, None, "b.py", "ab01"),
+        ]
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.integration
 def test_claim_takes_a_free_or_expired_lease_of_the_current_generation_only(
     index: _Index,
 ) -> None:
@@ -2225,8 +2264,9 @@ def test_claim_is_busy_at_two_live_leases_or_one_per_installation(
         assert await _try_claim(index, a2, 1) == _BUSY
         await _claim(index, index.b)
         assert await _try_claim(index, c, 1) == _BUSY
-        # STALE and LEASED are decided before BUSY.
+        # STALE and LEASED are decided before BUSY, and STALE before LEASED.
         assert await _try_claim(index, index.a, 1) == _LEASED
+        assert await _try_claim(index, index.a, 2) == _STALE
         assert await _try_claim(index, c, 2) == _STALE
         assert await _try_claim(index, uuid4(), 1) == _STALE
         refused = await _state(index, c)
@@ -2586,6 +2626,11 @@ def test_repository_quota_refuses_the_claim_and_fails_the_index(index: _Index) -
             C2,
             stored,
         )
+        held = await _state(index, index.a)
+        # LEASED is decided before QUOTA, so a live lease is never failed by a quota.
+        assert await _try_claim(index, index.a, 1, over_quota) == _LEASED
+        assert await _state(index, index.a) == held
+        assert held is not None and (held.status, held.error_code) == ("ready", None)
         assert await _release(index, index.a, claim.fence) == "ready"
 
         assert await _try_claim(index, index.a, 1, over_quota) == ClaimRefused(
@@ -2643,6 +2688,9 @@ def test_workspace_quota_counts_other_builds_and_spares_another_workspace(
         claim = await _try_claim(index, index.a, 1, at_quota)
         assert isinstance(claim, LeaseClaim) and claim.workspace_bytes == workspace
         assert await _release(index, index.a, claim.fence) == "ready"
+        other = await _try_claim(index, index.b, 1, over_quota)
+        assert isinstance(other, LeaseClaim) and other.workspace_bytes == _MODULE_BYTES
+        # S and B now hold both live leases: QUOTA is decided before BUSY.
         # A ready repository fails too; its publication is no longer used.
         assert await _try_claim(index, index.a, 1, over_quota) == ClaimRefused(
             ClaimRefusal.QUOTA, "limit_exceeded:workspace_storage"
@@ -2656,12 +2704,35 @@ def test_workspace_quota_counts_other_builds_and_spares_another_workspace(
             failed.stored_bytes,
         ) == ("failed", "limit_exceeded:workspace_storage", 0, 0)
 
-        other = await _try_claim(index, index.b, 1, over_quota)
-        assert isinstance(other, LeaseClaim) and other.workspace_bytes == _MODULE_BYTES
         # The build that filled the Workspace keeps running.
         running = await _state(index, s)
         assert running is not None
         assert (running.status, running.pending_bytes) == ("building", _IMPORTER_BYTES)
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.integration
+def test_workspace_quota_skips_the_pending_bytes_of_an_expired_lease(
+    index: _Index, code_index_database: Connection
+) -> None:
+    s = _sibling(code_index_database, index.a, external_id=101, installation_external_id=19)
+
+    async def scenario() -> None:
+        for repository_id in (index.a, s):
+            await _enable(index, repository_id)
+        await _build(index, index.a, C1, _module("aa01", 1))
+        abandoned = await _claim(index, s)
+        await _write(index, s, abandoned, _importer("sb01", 1))
+        # S's worker died: its pending bytes stay on the row until S is claimed again.
+        await _expire_lease(index, s)
+        only_a = dataclasses.replace(_ADMISSION, workspace_storage_bytes=_MODULE_BYTES)
+
+        claim = await _try_claim(index, index.a, 1, only_a)
+        assert isinstance(claim, LeaseClaim) and claim.workspace_bytes == _MODULE_BYTES
+        stale = await _state(index, s)
+        assert stale is not None
+        assert (stale.status, stale.pending_bytes) == ("building", _IMPORTER_BYTES)
 
     asyncio.run(scenario())
 
