@@ -1,4 +1,5 @@
-"""The repository RAG toggle on PostgreSQL: off by default, onboarding never turns it on (#145)."""
+"""The repository RAG toggle on PostgreSQL: off by default, onboarding never turns it on, and the
+settings API serves it with the index status (#145)."""
 
 from __future__ import annotations
 
@@ -6,6 +7,7 @@ import asyncio
 import os
 from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 from uuid import UUID, uuid4
 
 import pytest
@@ -15,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.schema import CreateSchema, DropSchema
 
 from alembic import command
+from app.modules.auth.application.scope import AuthScope
 from app.modules.repositories.application.installation_repositories import RepositorySnapshot
 from app.modules.repositories.application.onboard_repository import load_default_rule_sets
 from app.modules.repositories.application.sync_installation_repositories import (
@@ -24,12 +27,40 @@ from app.modules.repositories.application.sync_installation_repositories import 
 from app.modules.repositories.infrastructure.installation_repository_unit_of_work import (
     SqlAlchemyInstallationRepositoriesUnitOfWork,
 )
-from tests.portal_postgres import INSTALL_A, REPO_A, Env, portal_schema
+from tests.portal_postgres import INSTALL_A, REPO_A, REPO_B, WS_A, Env, api, portal_schema, scalar
 
 _RAG_COLUMN = (
     "SELECT is_nullable, column_default FROM information_schema.columns "
     "WHERE table_schema = current_schema() AND table_name = 'repositories' "
     "AND column_name = 'rag_enabled'"
+)
+SHA_A = "a" * 40
+SHA_B = "b" * 40
+DISABLED = {
+    "status": "disabled",
+    "indexedCommitSha": None,
+    "indexedAt": None,
+    "fileCount": 0,
+    "symbolCount": 0,
+    "lastErrorCode": None,
+}
+# A published index of octo/a: 12 files, 340 symbols at SHA_A.
+_PUBLISHED = {
+    "status": "ready",
+    "indexed_commit_sha": SHA_A,
+    "target_commit_sha": None,
+    "published_at": "2026-10-16 11:30:00+02",
+    "file_count": 12,
+    "symbol_count": 340,
+    "error_code": None,
+    "last_error_code": None,
+}
+_INSERT_STATE = (
+    "INSERT INTO code_index_states (repository_id, status, indexed_commit_sha, "
+    "target_commit_sha, published_at, file_count, symbol_count, error_code, last_error_code) "
+    "VALUES (:repository, CAST(:status AS code_index_status), :indexed_commit_sha, "
+    ":target_commit_sha, CAST(:published_at AS timestamptz), :file_count, :symbol_count, "
+    ":error_code, :last_error_code)"
 )
 
 
@@ -76,6 +107,14 @@ def _sync(factory: async_sessionmaker[AsyncSession]) -> SyncInstallationReposito
         uow_factory=lambda: SqlAlchemyInstallationRepositoriesUnitOfWork(factory),
         rule_sets=load_default_rule_sets(Path("review/rules")),
     )
+
+
+def _execute(factory: async_sessionmaker[AsyncSession], sql: str, **values: Any) -> None:
+    async def write() -> None:
+        async with factory.begin() as session:
+            await session.execute(text(sql), values)
+
+    asyncio.run(write())
 
 
 async def _onboard(sync: SyncInstallationRepositories, external_id: int, name: str) -> UUID:
@@ -174,3 +213,174 @@ def test_onboarding_an_existing_repository_again_keeps_rag_enabled(rag_env: Env)
             await engine.dispose()
 
     assert asyncio.run(exercise()) == (REPO_A, True)
+
+
+@pytest.mark.integration
+def test_settings_api_reads_rag_disabled_by_default(rag_env: Env) -> None:
+    with api(rag_env, AuthScope(42, (WS_A,))) as (client, _):
+        detail = client.get(f"/api/repos/{REPO_A}").json()
+        listed = client.get("/api/repos").json()
+
+    assert (detail["ragEnabled"], detail["ragIndex"]) == (False, DISABLED)
+    assert listed == [detail]
+
+
+@pytest.mark.integration
+def test_settings_api_patch_stores_the_rag_toggle(rag_env: Env) -> None:
+    url = f"/api/repos/{REPO_A}"
+    stored = "SELECT rag_enabled FROM repositories WHERE id = :id"
+    with api(rag_env, AuthScope(42, (WS_A,))) as (client, factory):
+        enabled = client.patch(url, json={"ragEnabled": True})
+        stored_enabled = tuple(scalar(factory, stored, id=REPO_A))
+        detail = client.get(url).json()
+        disabled = client.patch(url, json={"ragEnabled": False})
+        stored_disabled = tuple(scalar(factory, stored, id=REPO_A))
+
+    assert enabled.status_code == 200
+    # Enabling creates no state row: the index stays empty until a build (#143).
+    assert (enabled.json()["ragEnabled"], enabled.json()["ragIndex"]) == (
+        True,
+        {**DISABLED, "status": "empty"},
+    )
+    assert stored_enabled == (True,)
+    assert detail == enabled.json()
+    assert disabled.status_code == 200
+    assert (disabled.json()["ragEnabled"], disabled.json()["ragIndex"]) == (False, DISABLED)
+    assert stored_disabled == (False,)
+
+
+@pytest.mark.integration
+def test_settings_api_hides_another_workspace_repository_from_the_rag_toggle(
+    rag_env: Env,
+) -> None:
+    with api(rag_env, AuthScope(42, (WS_A,))) as (client, factory):
+        patched = client.patch(f"/api/repos/{REPO_B}", json={"ragEnabled": True})
+        read = client.get(f"/api/repos/{REPO_B}")
+        stored = tuple(
+            scalar(
+                factory, "SELECT rag_enabled, enabled FROM repositories WHERE id = :id", id=REPO_B
+            )
+        )
+
+    assert (patched.status_code, read.status_code) == (404, 404)
+    assert stored == (False, True)
+
+
+@pytest.mark.integration
+def test_unavailable_repository_reads_rag_disabled_but_keeps_the_preference(
+    rag_env: Env,
+) -> None:
+    url = f"/api/repos/{REPO_A}"
+    with api(rag_env, AuthScope(42, (WS_A,))) as (client, factory):
+        _execute(factory, _INSERT_STATE, repository=REPO_A, **_PUBLISHED)
+        _execute(
+            factory,
+            "UPDATE repositories SET rag_enabled = true, installation_available = false "
+            "WHERE id = :id",
+            id=REPO_A,
+        )
+        detail = client.get(url).json()
+        listed = client.get("/api/repos").json()
+        patched = client.patch(url, json={"ragEnabled": True})
+        stored = tuple(
+            scalar(factory, "SELECT rag_enabled FROM repositories WHERE id = :id", id=REPO_A)
+        )
+
+    assert (detail["ragEnabled"], detail["ragIndex"]) == (False, DISABLED)
+    assert listed == [detail]
+    assert patched.status_code == 200
+    assert (patched.json()["ragEnabled"], patched.json()["ragIndex"]) == (False, DISABLED)
+    assert stored == (True,)
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize(
+    ("rag_enabled", "state", "expected"),
+    [
+        pytest.param(True, None, {**DISABLED, "status": "empty"}, id="no-row"),
+        pytest.param(
+            True,
+            {
+                **_PUBLISHED,
+                "status": "building",
+                "indexed_commit_sha": None,
+                "published_at": None,
+                "file_count": 0,
+                "symbol_count": 0,
+            },
+            {**DISABLED, "status": "building"},
+            id="building",
+        ),
+        pytest.param(
+            True,
+            _PUBLISHED,
+            {
+                "status": "ready",
+                "indexedCommitSha": SHA_A,
+                "indexedAt": "2026-10-16T09:30:00Z",
+                "fileCount": 12,
+                "symbolCount": 340,
+                "lastErrorCode": None,
+            },
+            id="ready-without-target",
+        ),
+        pytest.param(
+            True,
+            {**_PUBLISHED, "target_commit_sha": SHA_B},
+            {
+                "status": "stale",
+                "indexedCommitSha": SHA_A,
+                "indexedAt": "2026-10-16T09:30:00Z",
+                "fileCount": 12,
+                "symbolCount": 340,
+                "lastErrorCode": None,
+            },
+            id="stale",
+        ),
+        pytest.param(
+            True,
+            {
+                **_PUBLISHED,
+                "status": "failed",
+                "error_code": "limit_exceeded:symbols",
+                "last_error_code": "github_rate_limited",
+            },
+            {**DISABLED, "status": "failed", "lastErrorCode": "limit_exceeded:symbols"},
+            id="failed",
+        ),
+        pytest.param(
+            True,
+            {**_PUBLISHED, "last_error_code": "github_rate_limited"},
+            {
+                "status": "ready",
+                "indexedCommitSha": SHA_A,
+                "indexedAt": "2026-10-16T09:30:00Z",
+                "fileCount": 12,
+                "symbolCount": 340,
+                "lastErrorCode": "github_rate_limited",
+            },
+            id="ready-with-soft-code",
+        ),
+        pytest.param(False, _PUBLISHED, DISABLED, id="toggle-off-while-ready"),
+    ],
+)
+def test_settings_api_derives_the_rag_index_from_the_state_row(
+    rag_env: Env,
+    rag_enabled: bool,
+    state: dict[str, object] | None,
+    expected: dict[str, object],
+) -> None:
+    with api(rag_env, AuthScope(42, (WS_A,))) as (client, factory):
+        _execute(
+            factory,
+            "UPDATE repositories SET rag_enabled = :enabled WHERE id = :id",
+            enabled=rag_enabled,
+            id=REPO_A,
+        )
+        if state is not None:
+            _execute(factory, _INSERT_STATE, repository=REPO_A, **state)
+        detail = client.get(f"/api/repos/{REPO_A}").json()
+        listed = client.get("/api/repos").json()
+
+    assert (detail["ragEnabled"], detail["ragIndex"]) == (rag_enabled, expected)
+    assert listed == [detail]

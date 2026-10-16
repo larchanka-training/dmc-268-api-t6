@@ -21,7 +21,7 @@ TEST_DATABASE_URL=postgresql+psycopg://app:app@127.0.0.1:5432/dmc_145 \
   uv run pytest -m integration -rs tests/test_repository_rag_postgres.py \
   tests/test_code_index_store_postgres.py tests/test_repositories_api_postgres.py \
   tests/test_app_reinstall_schema_postgres.py tests/test_app_reinstall_postgres.py \
-  tests/test_initial_migration.py
+  tests/test_initial_migration.py tests/test_llm_gateway_postgres.py
 ```
 
 - The focused integration run must report **zero skips**. A skipped PostgreSQL acceptance
@@ -197,14 +197,14 @@ the whole contract in one commit, as in plan step 6.
 
 **Acceptance criteria:**
 
-- [ ] AC2: GET returns `ragEnabled` and `ragIndex`; PATCH changes `ragEnabled`; another
+- [x] AC2: GET returns `ragEnabled` and `ragIndex`; PATCH changes `ragEnabled`; another
   tenant's repository → 404 with the row intact; OpenAPI is updated.
-- [ ] AC1: default false in GET and in the list.
-- [ ] AC3: the status matrix from SQL rows of `code_index_states` gives literal
+- [x] AC1: default false in GET and in the list.
+- [x] AC3: the status matrix from SQL rows of `code_index_states` gives literal
   `ragIndex` values; an unavailable repository → false + `disabled` with the stored value
   kept.
-- [ ] The contract tests reject `{"ragEnabled": null}` and `{"ragIndex": {...}}` with 422.
-- [ ] The Zod fixture is regenerated and `UI_CONTRACT_COMMIT` = the U1 SHA.
+- [x] The contract tests reject `{"ragEnabled": null}` and `{"ragIndex": {...}}` with 422.
+- [x] The Zod fixture is regenerated and `UI_CONTRACT_COMMIT` = the U1 SHA.
 
 **Verification:** Run the common verification block with zero skips.
 

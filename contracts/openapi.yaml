@@ -905,6 +905,16 @@ components:
         severity, `warning` - critical, high, medium and low, `critical` - critical and high.
         Findings below it are not published and do not count towards the verdict. Default `all`.
       enum: [all, warning, critical]
+    RagIndexStatus:
+      type: string
+      description: >-
+        State of the repository's RAG code index as readers see it (#145), derived and never
+        stored: `disabled` - RAG is off for the repository (`ragEnabled: false`); `empty` - no
+        index yet; `building` - an index is being built and none is published; `ready` - a
+        published index; `stale` - a published index behind the target commit, still used;
+        `failed` - the build was refused for good (`lastErrorCode` is `limit_exceeded:<limit>` or
+        `archive_unsafe`), no index is used. `disabled` extends the ADR 0001 list.
+      enum: [disabled, empty, building, ready, stale, failed]
     PullRequestRef:
       type: object
       required: [repo, number, title, url, headSha]
@@ -1379,6 +1389,38 @@ components:
           type: integer
           minimum: 0
       additionalProperties: false
+    RagIndex:
+      type: object
+      description: >-
+        The repository's RAG code index: pointers and counters, never code text. The publication
+        fields (`indexedCommitSha`, `indexedAt`, `fileCount`, `symbolCount`) describe the index
+        reviews read and are set only for `ready` and `stale`; otherwise they are null or 0.
+      required: [status, indexedCommitSha, indexedAt, fileCount, symbolCount, lastErrorCode]
+      properties:
+        status:
+          $ref: "#/components/schemas/RagIndexStatus"
+        indexedCommitSha:
+          type: [string, "null"]
+          description: Commit of the published index.
+        indexedAt:
+          type: [string, "null"]
+          format: date-time
+          description: When the index was published.
+        fileCount:
+          type: integer
+          minimum: 0
+          description: Files in the published index.
+        symbolCount:
+          type: integer
+          minimum: 0
+          description: Symbols in the published index.
+        lastErrorCode:
+          type: [string, "null"]
+          description: >-
+            For `failed`, why the build was refused; otherwise the code of the last build attempt
+            that ended without a publication, null when there is none. Always null for
+            `disabled`.
+      additionalProperties: false
     Repository:
       type: object
       required:
@@ -1394,6 +1436,8 @@ components:
         - branchFilter
         - severityThreshold
         - installationAvailable
+        - ragEnabled
+        - ragIndex
       properties:
         id:
           type: string
@@ -1440,6 +1484,18 @@ components:
             Whether the GitHub App installation can still access the repository (SD §6.9).
             `enabled` is the stored preference AND this value, so `enabled: false` with
             `installationAvailable: true` is a pause by the user. Not accepted by `PATCH`.
+        ragEnabled:
+          type: boolean
+          description: >-
+            Whether reviews of the repository may use the RAG code index (#145). Like `enabled`,
+            the stored preference AND `installationAvailable`; the preference is false by default
+            and repository onboarding never turns it on.
+        ragIndex:
+          $ref: "#/components/schemas/RagIndex"
+          readOnly: true
+          description: >-
+            Derived from the effective `ragEnabled`, so `disabled` whenever it is false. Not
+            accepted by `PATCH`.
       additionalProperties: false
     RepositoryUpdate:
       type: object
@@ -1474,6 +1530,11 @@ components:
             maxLength: 255
         severityThreshold:
           $ref: "#/components/schemas/SeverityThreshold"
+        ragEnabled:
+          type: boolean
+          description: >-
+            Stores the RAG preference; the response's `ragEnabled` is it AND
+            `installationAvailable`.
       additionalProperties: false
     LatestRun:
       type: object
