@@ -209,12 +209,21 @@ The adapter constructor stays `(session)`; the store flushes and never commits.
 - [ ] AC8 and AC12 (store side): `mark_failed` and `release` cover both status branches
   and `last_error_code`; a stale fence raises `IndexLeaseLost`; after `mark_failed`, GC
   removes everything.
+- [ ] AC2 (store side): a job that ends without a publication records its metrics, and
+  the publication counters stay: `release(stats=…)` with and without a publication
+  (`test_release_records_the_job_metrics_and_keeps_the_publication_counters`) and a
+  publication miss (`test_a_publication_miss_spends_the_lease_so_the_next_wake_up_claims_at_once`).
 - [ ] AC10 (quotas) and AC7 (no double count):
   - a repeated replace is not counted twice;
   - full and incremental publications set `stored_bytes`;
   - Python = SQL parity of the estimate;
   - repository and Workspace quotas → QUOTA with the right code; another Workspace is
-    unaffected; pending bytes of other builds count only while their lease is live.
+    unaffected; pending bytes of other builds count only while their lease is live;
+  - `replace_file` returns the live Workspace bytes: another live build's committed
+    batch counts and a rolled-back batch does not
+    (`test_a_batch_counts_the_pending_bytes_of_other_builds_against_the_workspace_quota`);
+  - a batch and a claim wait for an open batch on the admission lock, then count its
+    bytes (`test_a_batch_and_a_claim_wait_for_an_open_batch_and_then_count_its_bytes`).
 - [ ] Record the RED run and the GREEN run.
 
 **Verification:**
@@ -500,6 +509,10 @@ Tests first:
 - [ ] AC3: the skip counters equal literals.
 - [ ] AC9: no `code_index/application/*` module imports `integrations` or the GitHub
   adapters.
+- [ ] AC10 (Workspace quota at write): after each `replace_file` the build checks the
+  Workspace quota on the returned live `workspace_bytes` before the batch commit, so a
+  batch over it rolls back and the job ends with `limit_exceeded:workspace_storage`. PG
+  test: two live builds of one Workspace; the batch that crosses the quota is rolled back.
 
 **Verification:** Run the common verification block.
 
