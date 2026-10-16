@@ -3,11 +3,13 @@
 The use case knows no provider (AC9, compatible with #97). Every error carries the
 provider-neutral `code` the use case writes as is: `error_code` of a failed index for
 `IndexLimitExceeded` and `ArchiveUnsafe`, `last_error_code` of a released lease for
-`VcsUnavailable` and `VcsAccessDenied`.
+`VcsUnavailable` and `VcsAccessDenied`. `ArchiveReader` reads a downloaded archive in two
+passes: the path set first, then the contents the build parses.
 """
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator, Mapping, Set
 from dataclasses import dataclass, field
 from datetime import timedelta
 from enum import StrEnum
@@ -79,6 +81,41 @@ class SourceArchive:
     content: bytes = field(repr=False)
 
 
+@dataclass(frozen=True)
+class ArchiveEntry:
+    """A file or symlink of an archive, by its path below the archive root."""
+
+    path: str
+    size: int
+    symlink: bool = False
+    # The git blob SHA-1 of a file within the read limit; a symlink is never read.
+    blob_sha: str | None = None
+
+
+@dataclass(frozen=True)
+class ArchiveCounters:
+    """Every header of the archive, pax and long-name headers included, and the bytes
+    they declare."""
+
+    headers: int
+    unpacked_bytes: int
+
+
+@dataclass(frozen=True)
+class ArchiveScan:
+    """Pass 1 over an archive: its path set, the captured documents and the counters.
+
+    `entries` holds every file and symlink; directories are implied by the paths.
+    `documents` holds the content of each requested document that is a file within the
+    read limit.
+    """
+
+    commit_sha: str
+    entries: Mapping[str, ArchiveEntry]
+    documents: Mapping[str, bytes] = field(repr=False)
+    counters: ArchiveCounters
+
+
 class VcsUnavailable(Exception):
     """The provider did not answer usefully; a later attempt can heal it.
 
@@ -143,4 +180,28 @@ class RepositorySnapshotSource(Protocol):
     async def archive(self, commit_sha: str, *, max_bytes: int) -> SourceArchive:
         """The archive of `commit_sha`; more than `max_bytes` downloaded raises
         `IndexLimitExceeded("download_bytes")`."""
+        ...
+
+
+class ArchiveReader(Protocol):
+    """Reads an archive in memory, never on disk, off the event loop (ADR 0001 §7).
+
+    Both passes stop at the `time.monotonic()` `deadline` with
+    `IndexLimitExceeded("deadline")`, at the entries or unpacked-bytes limit with
+    `IndexLimitExceeded`, at an unsafe entry with `ArchiveUnsafe`, and at an archive that
+    cannot be read with `VcsUnavailable`.
+    """
+
+    async def scan(
+        self, archive: SourceArchive, *, documents: Set[str], deadline: float
+    ) -> ArchiveScan:
+        """Pass 1: the path set, the blob SHA-1 of every file within the read limit and
+        the content of `documents`."""
+        ...
+
+    def contents(
+        self, archive: SourceArchive, paths: Set[str], *, deadline: float, batch_files: int
+    ) -> AsyncIterator[tuple[tuple[str, bytes], ...]]:
+        """Pass 2: `(path, content)` of the files of `paths` within the read limit, in
+        archive order, at most `batch_files` per batch; a symlink is never read."""
         ...
