@@ -667,15 +667,16 @@ deferred); the 5-minute retries and `wake_receipts` already had this gap. Outsid
 window only a login or a delivery with a new GUID revives a receipt, and one nobody revives
 is deleted 30 days after its last `projection_deferred_at` (see Retention). Its repositories
 that no earlier attempt saved are then stored only by a delivery with a new GUID, for example
-after removing and re-adding
-the repository in the installation settings; a redelivery of the same GUID is ignored as a
-duplicate. Each sweep that selects at least one delivery logs how many it handled, deferred
-and deferred for good (`GitHub webhook sweep: N handled, M deferred, K deferred for good`); a
-sweep with nothing due logs nothing. K counts the final deferrals and is part of M; each of
-them also logs `GitHub webhook delivery … deferred after its last attempt`. A dispatch that
-fails on its last attempt is not in any of the three numbers: it logs its own `… failed after
-its last attempt` WARNING. An expired supersession wait counts in handled and deferred, but
-not K; it logs the age-limit WARNING above. A revival that resets receipts logs how many.
+after removing and re-adding the repository in the installation settings; a redelivery of
+the same GUID is ignored as a duplicate. Each sweep that selects at least one delivery logs
+how many it handled, deferred and deferred for good
+(`GitHub webhook sweep: N handled, M deferred, K deferred for good`); a sweep with nothing
+due logs nothing. K counts the final deferrals and is part of M; each of them also logs
+`GitHub webhook delivery … deferred after its last attempt`. A dispatch that fails on its
+last attempt is not in any of the three numbers: it logs its own
+`… failed after its last attempt` WARNING. An expired supersession wait counts in handled
+and deferred, but not K; it logs the age-limit WARNING above. A revival that resets receipts
+logs how many.
 
 Retention. Finished receipts (projected, failed, or deferred and not revived since) are deleted
 30 days after they finished; the worker runs the purge once an hour. The receipt purge is one `DELETE`
