@@ -225,7 +225,10 @@ The adapter constructor stays `(session)`; the store flushes and never commits.
   - a batch and a claim wait for an open batch on the admission lock, then count its
     bytes (`test_a_batch_and_a_claim_wait_for_an_open_batch_and_then_count_its_bytes`);
   - a batch waits for an open publication whose lease expired, then counts its stored
-    bytes (`test_a_batch_waits_for_an_open_publication_and_counts_its_stored_bytes`).
+    bytes (`test_a_batch_waits_for_an_open_publication_and_counts_its_stored_bytes`);
+  - a duplicate claim waits for an open publication without a deadlock, so the
+    publication takes the admission lock before the state row
+    (`test_a_duplicate_claim_waits_for_an_open_publication_without_a_deadlock`).
 - [ ] Record the RED run and the GREEN run.
 
 **Verification:**
