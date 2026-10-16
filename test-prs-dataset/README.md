@@ -468,7 +468,7 @@ artifact. Each response's SHA-256 and byte count match the separate safe metadat
 artifact; the raw and safe manifest copies also match. At the publication commit
 `ba99c11`, offline replay had no drift warning, and its entire report after
 removing validator diagnostics matched the live safe report. Later edits to
-fingerprinted gateway files make replay on `main` print a static-input drift
+fingerprinted gateway files made replay of this capture print a static-input drift
 warning. The #82 source/sidecar pins also produced
 `Static input path set changed; refresh the complete baseline` before the complete
 2026-10-13 replacement; see

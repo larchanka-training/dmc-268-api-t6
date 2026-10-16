@@ -137,13 +137,13 @@ API baseline gates локально и в обязательном CI: `uv run r
 
 Это историческое измерение; исходные raw bytes/digests доступны на
 [`76df6d4`](https://github.com/larchanka-training/dmc-268-api-t6/tree/76df6d4d0f431ce4c02e6708410c000c66f6135a/test-prs-dataset/responses).
-Baseline §3.2.2 заменяет весь response set одной новой съёмкой без drift. Новый
+Baseline §3.2.2 заменил весь response set одной новой съёмкой без drift. Новый
 sidecar содержит проверенные API-order prefixes при совпадающих PR head/revision:
 CLEAN-03/LOG-03/SEC-04 по 1 сообщению, RES-03/SYN-04 по 20 и uncertainty marker.
 Strict schema и canonical/active binding проверяются до calls/staging; все
 canonical case.json identity inputs и shaping modules входят в static provenance.
 Результаты ниже относятся только к capture 2026-10-13 и не измеряют новые
-prefixes; новая полная съёмка описана в §3.2.2.
+prefixes; новая полная съёмка описана в §3.2.2; текущий baseline — §3.2.3.
 
 [Actions run 38468081001, attempt 1](https://github.com/larchanka-training/dmc-268-api-t6/actions/runs/38468081001)
 снял все 24 первых ответа на source SHA `80ede3cd274d745616b8a24082ff7d1d00f5b736`;
