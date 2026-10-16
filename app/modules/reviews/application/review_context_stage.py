@@ -128,8 +128,10 @@ def policy_summary(snapshot: PolicySnapshot) -> dict[str, Any]:
 def context_summary(diff_map: DiffMap, payload: ReviewContextPayload) -> dict[str, Any]:
     """Counts and source ranges of the context; the text of a block is never stored here."""
     tokens: Counter[str] = Counter()
+    tokens_by_role: Counter[str] = Counter()
     for block in payload.blocks:
         tokens[block.level.value] += block.tokens
+        tokens_by_role[block.source.role.value] += block.tokens
     return {
         "status": payload.status.value,
         "reason": payload.reason,
@@ -144,6 +146,7 @@ def context_summary(diff_map: DiffMap, payload: ReviewContextPayload) -> dict[st
         "levels_present": [level.value for level in payload.levels_present],
         "blocks_by_level": dict(Counter(block.level.value for block in payload.blocks)),
         "tokens_by_level": dict(tokens),
+        "tokens_by_role": dict(tokens_by_role),
         "tokens_used": payload.tokens_used,
         "imports": dict(Counter(ref.resolution.value for ref in payload.imports)),
         "omissions": [
