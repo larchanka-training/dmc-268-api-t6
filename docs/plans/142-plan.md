@@ -165,8 +165,8 @@ The first parameter of every method is `repository_id`; the adapter constructor 
     stays READY (stale).
 - **`replace_file(...) -> IndexStorage`.** `pending_bytes += added − removed`; rewriting a
   path within the same attempt is not counted twice (`DELETE … RETURNING`).
-  - Locks: the admission advisory lock, then the state row, so batches and claims run
-    one at a time with one lock order.
+  - Locks: the admission advisory lock, then the state row, so batches, claims and
+    publications run one at a time with one lock order.
   - `workspace_bytes` is read in the write transaction after the pending update: this
     repository's stored and pending bytes plus the other repositories' stored bytes and
     live pending bytes. A claim-time snapshot would let two builds of one Workspace
@@ -174,6 +174,9 @@ The first parameter of every method is `repository_id`; the adapter constructor 
   - The caller checks both quotas on the returned value and raises before its commit,
     so a batch over a quota rolls back.
 - **`publish`:**
+  - takes the admission advisory lock before the state row, so a batch of another
+    build waits for an open publication, even one whose lease expired meanwhile, and
+    then counts its stored bytes (#159 review, round 2);
   - writes the new profile columns;
   - one aggregate per table (count + bytes) → `stored_bytes`; `pending_bytes = 0`;
   - success clears `last_error_code`.

@@ -320,9 +320,10 @@ class SqlAlchemyCodeIndexStore:
         )
 
     async def _admission_lock(self) -> None:
-        # Claims and batch writes take it first, before any state row lock, so they run
-        # one at a time without a lock-order cycle: a claim counts live leases, and a
-        # batch reads the Workspace bytes, with every earlier batch committed (ADR §6.2).
+        # Claims, batch writes and publications take it first, before any state row lock,
+        # so they run one at a time without a lock-order cycle: a claim counts live
+        # leases, and a batch reads the Workspace bytes, with every earlier batch and
+        # publication committed (ADR §6.2).
         await self._session.execute(
             text("SELECT pg_advisory_xact_lock(:key)"), {"key": CODE_INDEX_ADMISSION_LOCK}
         )
@@ -566,7 +567,8 @@ class SqlAlchemyCodeIndexStore:
     ) -> IndexStorage:
         _validate(file)
         # The Workspace bytes this batch returns must include every other batch's pending
-        # bytes, so batches serialize with each other and with claims on this lock.
+        # bytes and every publication's stored bytes, so batches serialize with each
+        # other, with claims and with publications on this lock.
         await self._admission_lock()
         # FOR NO KEY UPDATE, not ADR §6.2's FOR SHARE: the batch updates the state row's
         # pending bytes, so it takes the lock it ends up holding. A purge or a
@@ -673,6 +675,9 @@ class SqlAlchemyCodeIndexStore:
         stats: IndexBuildStats,
     ) -> bool:
         """`deleted_paths` closes paths of an incremental build; a full one ignores them."""
+        # The lease may expire while this transaction is open; a batch of another build
+        # waits for it, so it counts these bytes as stored once they are committed.
+        await self._admission_lock()
         state = await self._fenced(repository_id, fence, share=False)
         mine, published = fence.publication, state.published_publication
         floor = state.floor_publication

@@ -243,10 +243,11 @@ class CodeIndexStore(Protocol):
 
         The pending bytes gain the new rows and lose the replaced ones, so a rewrite of
         a path is counted once. It takes the admission lock of `claim_lease` and then
-        the state row, so batches and claims run one at a time and each reads the
-        Workspace bytes after every earlier batch committed; a purge or a publication
-        waits for the batch. The caller checks both storage quotas on the returned
-        `IndexStorage` and raises before its commit, so a batch over a quota rolls back.
+        the state row, so batches, claims and publications run one at a time and each
+        batch reads the Workspace bytes after every earlier batch and publication
+        committed; a purge waits for the batch. The caller checks both storage quotas
+        on the returned `IndexStorage` and raises before its commit, so a batch over a
+        quota rolls back.
 
         Like `claim_lease`, its transaction takes no state row lock before its first
         `replace_file`: the admission lock orders before every state row lock.
@@ -271,6 +272,11 @@ class CodeIndexStore(Protocol):
         of its visible rows into the stored bytes and clears `last_error_code`. A miss
         records `stats` as `release` does; the counters and stored bytes stay those of
         the visible publication.
+
+        It takes the admission lock before the state row, so a batch of another build
+        waits for the publication, even one whose lease expired meanwhile, and then
+        counts its stored bytes. Like `claim_lease`, its transaction takes no state row
+        lock before it.
         """
         ...
 

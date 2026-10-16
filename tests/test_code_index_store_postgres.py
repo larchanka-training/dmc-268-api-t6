@@ -1034,6 +1034,19 @@ async def _expire_lease(index: _Index, repository_id: UUID) -> None:
     )
 
 
+async def _wait_until_lease_expired(index: _Index, repository_id: UUID) -> None:
+    """Wait until the committed lease of `repository_id` is past the database clock."""
+    async with asyncio.timeout(10), index.factory() as observer:
+        while not await observer.scalar(
+            text(
+                "SELECT lease_expires_at <= clock_timestamp() FROM code_index_states "
+                "WHERE repository_id = :repository"
+            ),
+            {"repository": repository_id},
+        ):
+            await asyncio.sleep(0.05)
+
+
 async def _wait_until_blocked(
     index: _Index, blocker_pid: int, waiters: int, *tasks: asyncio.Task[Any]
 ) -> None:
@@ -2957,6 +2970,73 @@ def test_a_batch_and_a_claim_wait_for_an_open_batch_and_then_count_its_bytes(
         ]
         # The claim counted the two live leases of A and S.
         assert await asyncio.wait_for(claim, 5) == _BUSY
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.integration
+def test_a_batch_waits_for_an_open_publication_and_counts_its_stored_bytes(
+    index: _Index, code_index_database: Connection
+) -> None:
+    # The #159 review case, round 2: 512 B per repository, 2,048 B per Workspace; four
+    # published repositories of A's Workspace hold 1,384 B. X's lease expires while its
+    # publication of 346 B is open. A batch of Y, in another installation, that did not
+    # wait would count neither X's pending bytes (expired lease) nor its stored ones
+    # (uncommitted): 1,730 B, and X's commit would then make it 2,076 B.
+    published = [
+        index.a,
+        *(_sibling(code_index_database, index.a, external_id=n) for n in (102, 103, 104)),
+    ]
+    x = _sibling(code_index_database, index.a, external_id=105)
+    y = _sibling(code_index_database, index.a, external_id=101, installation_external_id=19)
+    quota = dataclasses.replace(
+        _ADMISSION, repository_storage_bytes=512, workspace_storage_bytes=2_048
+    )
+
+    async def measure_y(fence: IndexFence) -> IndexStorage:
+        async with index.uow() as uow:
+            # The store only measures; the build refuses a batch over a quota before its
+            # commit, so this one is never committed.
+            return await uow.index.replace_file(y, fence, _module("ya01", 1))
+
+    async def scenario() -> None:
+        for repository_id in (*published, x, y):
+            await _enable(index, repository_id)
+        for number, repository_id in enumerate(published):
+            await _build(index, repository_id, C1, _module(f"aa0{number}", 1))
+        fence_y = await _claim(index, y, admission=quota)
+        async with index.uow() as uow:
+            claim = await uow.index.claim_lease(x, 1, 3, quota)
+            await uow.commit()
+        assert isinstance(claim, LeaseClaim)
+        assert await _write(index, x, claim.fence, _module("xa01", 1)) == [
+            IndexStorage(stored_bytes=0, pending_bytes=346, workspace_bytes=1_730)
+        ]
+
+        async with index.uow() as publisher:
+            assert await publisher.index.publish(
+                x,
+                claim.fence,
+                base_commit_sha=None,
+                commit_sha=C1,
+                full=True,
+                deleted_paths=(),
+                profile=_PROFILE,
+                stats=_STATS,
+            )
+            publisher_pid = await publisher.session.scalar(text("SELECT pg_backend_pid()"))
+            await _wait_until_lease_expired(index, x)
+            batch = asyncio.create_task(measure_y(fence_y))
+            await _wait_until_blocked(index, publisher_pid, 1, batch)
+            await publisher.commit()
+
+        # Y's batch read X's committed publication: over the Workspace quota.
+        assert await asyncio.wait_for(batch, 5) == IndexStorage(
+            stored_bytes=0, pending_bytes=346, workspace_bytes=2_076
+        )
+        published_x = await _state(index, x)
+        assert published_x is not None
+        assert (published_x.status, published_x.stored_bytes) == ("ready", 346)
 
     asyncio.run(scenario())
 
