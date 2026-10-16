@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from functools import cache
 from pathlib import Path
 from time import monotonic
-from typing import Any
+from typing import Any, Protocol
 from uuid import UUID
 
 import aio_pika
@@ -305,9 +305,17 @@ def _get_delivery_attempts(message: AbstractIncomingMessage) -> int:
     return max(broker_attempts, local_attempts) + 1
 
 
+class ErrorRepublisher(Protocol):
+    """The ``x-attempt`` handoff of one queue, as ``republish_with_attempt`` does it."""
+
+    async def republish_after_error(
+        self, message: AbstractIncomingMessage, attempts: int
+    ) -> bool: ...
+
+
 async def _requeue_after_error(
     message: AbstractIncomingMessage,
-    publisher: AmqpQueuePublisher,
+    publisher: ErrorRepublisher,
     max_retries: int = MAX_UNEXPECTED_RETRIES,
     *,
     dead_letter_queue: str = DEAD_LETTER_QUEUE,
@@ -344,6 +352,11 @@ async def _requeue_after_error(
 
 # Public for the index queue (#142); both queues share the local fallback state per delivery.
 requeue_after_error = _requeue_after_error
+
+
+def forget_unexpected_attempts(message: AbstractIncomingMessage) -> None:
+    """Drop the local fallback count of a delivery that ended without an exception."""
+    _clear_delivery_attempts(_delivery_key(message))
 
 
 async def handle_run_delivery(
