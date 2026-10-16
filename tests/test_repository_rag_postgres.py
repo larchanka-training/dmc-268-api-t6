@@ -313,6 +313,21 @@ def test_unavailable_repository_reads_rag_disabled_but_keeps_the_preference(
         ),
         pytest.param(
             True,
+            {
+                **_PUBLISHED,
+                "status": "empty",
+                "indexed_commit_sha": None,
+                "target_commit_sha": SHA_B,
+                "published_at": None,
+                "file_count": 0,
+                "symbol_count": 0,
+                "last_error_code": "github_rate_limited",
+            },
+            {**DISABLED, "status": "empty", "lastErrorCode": "github_rate_limited"},
+            id="empty-with-last-error",
+        ),
+        pytest.param(
+            True,
             _PUBLISHED,
             {
                 "status": "ready",
@@ -336,6 +351,19 @@ def test_unavailable_repository_reads_rag_disabled_but_keeps_the_preference(
                 "lastErrorCode": None,
             },
             id="stale",
+        ),
+        pytest.param(
+            True,
+            {**_PUBLISHED, "target_commit_sha": SHA_B, "last_error_code": "github_rate_limited"},
+            {
+                "status": "stale",
+                "indexedCommitSha": SHA_A,
+                "indexedAt": "2026-10-16T09:30:00Z",
+                "fileCount": 12,
+                "symbolCount": 340,
+                "lastErrorCode": "github_rate_limited",
+            },
+            id="stale-with-last-error",
         ),
         pytest.param(
             True,

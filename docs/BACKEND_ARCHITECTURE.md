@@ -446,7 +446,10 @@ ENUM видов символов и исходов импорта построе
 (`repositories/infrastructure/repository_settings.py`) читает `Repository` и восемь
 колонок `CodeIndexState` одним запросом с outer join — без N+1 и без нового порта
 (порт очистки и включения появится в #143); PATCH обновляет строку и перечитывает её
-тем же запросом. Read model `RepositorySettings` несёт `RagIndex` из домена
+тем же запросом. Импорт ORM-модели `CodeIndexState` модуля `code_index` в этот адаптер —
+осознанное исключение на стороне чтения из правила «infrastructure зависит только от
+своего модуля» (§ «Слои Clean Architecture»); его заменит порт, когда #143 добавит
+`CodeIndexPurger`. Read model `RepositorySettings` несёт `RagIndex` из домена
 `code_index` как публичный контракт этого модуля.
 
 ERD показывает связи и ключевые поля; он отражает актуальные поля состояния Run,

@@ -175,7 +175,7 @@ the approved plan's labels.
    — the whole contract in one commit:
    - read model += `rag_enabled`, `rag_index: RagIndex`; change += `rag_enabled: bool | None`;
    - adapter:
-     - a shared select of `Repository` plus 9 columns of `CodeIndexState` through
+     - a shared select of `Repository` plus 8 columns of `CodeIndexState` through
        `outerjoin` (no N+1, no new port — the infra-join precedent; the port appears in
        #143 as `CodeIndexPurger`);
      - `_to_settings` calls `rag_index(...)`;

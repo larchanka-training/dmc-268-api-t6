@@ -180,13 +180,14 @@ footer `Refs larchanka-training/dmc-268-api-t6#145`, as in plan step 5.
 
 **Acceptance criteria:**
 
-- [ ] `RagIndexStatusSchema` in the same order as `RagIndexStatus`; `RagIndexSchema`;
+- [x] `RagIndexStatusSchema` in the same order as `RagIndexStatus`; `RagIndexSchema`;
   `RepositorySchema` += `ragEnabled`, `ragIndex`; `UpdateRepositorySchema` += optional
   `ragEnabled`.
-- [ ] `schemas.test.ts` cases; mocks in `app-state.ts` and `mockTransport.ts`; test
+- [x] `schemas.test.ts` cases; mocks in `app-state.ts` and `mockTransport.ts`; test
   literals use `disabledRagIndex`.
-- [ ] `pnpm lint`, `pnpm format:check`, `pnpm check-types`, `pnpm test` pass.
-- [ ] Pushed; draft PR ui#102 with base `feat/api-149-repo-review-settings`.
+- [x] `pnpm lint`, `pnpm format:check`, `pnpm check-types`, `pnpm test` pass (1658 tests).
+- [x] Pushed (ui commit `9bfb931`); draft ui PR #109 (issue ui#102) with base
+  `feat/api-149-repo-review-settings`.
 
 **Dependencies:** Task 2 (the status order).
 
