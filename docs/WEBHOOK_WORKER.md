@@ -649,8 +649,8 @@ timeout or a database error; a failed label request is only logged, unless the t
 it is permanently unusable, while a transient token failure defers the delivery again): the
 receipt is then marked failed (`projection_failed_at`), and neither the revival nor a login
 brings it back. The 45-minute delay and the 7-day window are the parameters the tech lead
-approved (api#71): a GitHub outage longer than a week is not a transient failure, and a `GET
-/repos` 404 for a week means the repository is gone. Linking the installation
+approved (api#71): a GitHub outage longer than a week is not a transient failure, and a
+`GET /repos` 404 for a week means the repository is gone. Linking the installation
 (`wake_receipts`, which runs at every GitHub login of a user whose token lists the
 installation) clears the mark of every deferred delivery of the installation, whatever its
 event or age. Residual risks: every attempt runs the event again for all of its

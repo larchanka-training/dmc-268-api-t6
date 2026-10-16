@@ -1,0 +1,24 @@
+# Todo: issue #116 / existing PR #124
+
+- [x] Read AGENTS.md, issue #116, PR #124 and current overlapping PR ownership.
+- [x] Record coordination before shared-file edits on PRs #133, #148, #155, #159.
+- [x] Save the plan and task checklist in the isolated worktree.
+- [x] Rebase PR head onto latest origin/main; resolve conflicts while preserving current main behavior.
+- [x] Verify complete static error in both eval_live baseline rejection tests, with tmp_path roots and existing preservation assertions.
+- [x] Demonstrate a RED regression if `; preserve the existing baseline` is removed; restore and run focused eval_live GREEN.
+- [x] Align current v2 replay/doc examples and links; preserve explicitly historical v1 entries.
+- [x] Document exact brace-limit WARNING, 256 work units and per-rule/per-fit over-budget trigger.
+- [x] Keep WEBHOOK_WORKER change formatting-only relative to current main.
+- [x] Checkpoint: focused tests pass; no accidental baseline/prompt/runtime changes or unrelated checkout edits.
+- [x] Start dedicated disposable PostgreSQL and RabbitMQ with explicit test URLs and isolated vhost.
+- [x] `uv run ruff check .` passes.
+- [x] `uv run ruff format --check .` passes.
+- [x] `uv run mypy .` passes.
+- [x] `uv run pytest` passes with zero skips; record counts.
+- [x] `uv run pytest -m integration -rs` passes with zero skips; record counts.
+- [x] Stop/remove only disposable verification services after checks.
+- [x] Independent Standards review: zero findings, or all findings fixed and reviewed again.
+- [x] Independent Spec review: zero findings, or all findings fixed and reviewed again.
+- [x] Commit reviewed changes with issue reference; publish to existing PR #124 branch using verified lease.
+- [x] Update PR body and AC/DoD report with exact heads, commands, counts and remaining human gates.
+- [x] Confirm PR remains open/unmerged and issue #116 remains open; leave final acceptance to tech lead.
