@@ -268,7 +268,9 @@ class CodeIndexStore(Protocol):
         """T5: publication compare-and-set; raises `IndexLeaseLost`, `False` on another miss.
 
         Both a publication and a miss spend the lease. A publication moves the estimate
-        of its visible rows into the stored bytes and clears `last_error_code`.
+        of its visible rows into the stored bytes and clears `last_error_code`. A miss
+        records `stats` as `release` does; the counters and stored bytes stay those of
+        the visible publication.
         """
         ...
 

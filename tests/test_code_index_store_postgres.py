@@ -950,6 +950,7 @@ async def _publish(
     base: str | None = None,
     full: bool = True,
     deleted: Sequence[str] = (),
+    stats: IndexBuildStats = _STATS,
 ) -> bool:
     async with index.uow() as uow:
         published = await uow.index.publish(
@@ -960,7 +961,7 @@ async def _publish(
             full=full,
             deleted_paths=deleted,
             profile=_PROFILE,
-            stats=_STATS,
+            stats=stats,
         )
         await uow.commit()
     return published
@@ -2161,13 +2162,19 @@ def test_lease_expiry_is_checked_against_the_clock_not_the_transaction_start(
 def test_a_publication_miss_spends_the_lease_so_the_next_wake_up_claims_at_once(
     index: _Index,
 ) -> None:
+    missed_stats = IndexBuildStats(
+        downloaded_bytes=81_920, build_duration_ms=42_000, github_request_count=4
+    )
+
     async def scenario() -> None:
         await _enable(index, index.a)
         await _build(index, index.a, C1, _module("aa01", 1))
         fence = await _claim(index, index.a)
         await _write(index, index.a, fence, _module("aa02", 1))
         # The build started from C2, but the published index is at C1.
-        assert not await _publish(index, index.a, fence, C3, base=C2, full=False)
+        assert not await _publish(
+            index, index.a, fence, C3, base=C2, full=False, stats=missed_stats
+        )
 
         missed = await _state(index, index.a)
         assert _fields(missed) == {
@@ -2188,7 +2195,13 @@ def test_a_publication_miss_spends_the_lease_so_the_next_wake_up_claims_at_once(
             "stored_bytes": _MODULE_BYTES,
             "pending_bytes": 0,
             "profile": _PROFILE_FIELDS,
-            "stats": _STATS_FIELDS,
+            # The missed job's metrics, as a release records them; the counters above
+            # stay those of the visible publication.
+            "stats": {
+                "downloaded_bytes": 81_920,
+                "build_duration_ms": 42_000,
+                "github_request_count": 4,
+            },
         }
         assert missed is not None and missed.lease_expires_at is None
         async with index.uow() as uow:
@@ -2849,6 +2862,10 @@ def test_workspace_quota_skips_the_pending_bytes_of_an_expired_lease(
     asyncio.run(scenario())
 
 
+class _OverQuota(Exception):
+    """What the build raises on a batch over a storage quota, before its commit."""
+
+
 @pytest.mark.integration
 def test_a_batch_counts_the_pending_bytes_of_other_builds_against_the_workspace_quota(
     index: _Index, code_index_database: Connection
@@ -2877,18 +2894,28 @@ def test_a_batch_counts_the_pending_bytes_of_other_builds_against_the_workspace_
         assert await _write(index, x, fence_x, _module("xa01", 1)) == [
             IndexStorage(stored_bytes=0, pending_bytes=346, workspace_bytes=1_730)
         ]
-        async with index.uow() as uow:
-            # Y is within its own quota, but with X's committed batch the Workspace
-            # holds 2,076 B: the caller raises before its commit.
-            assert await uow.index.replace_file(y, fence_y, _module("ya01", 1)) == IndexStorage(
-                stored_bytes=0, pending_bytes=346, workspace_bytes=2_076
-            )
+        # The store only measures; the caller refuses. Y is within its own quota, but
+        # with X's committed batch the Workspace holds 2,076 B, so the caller raises
+        # before its commit and the batch rolls back.
+        with pytest.raises(_OverQuota):
+            async with index.uow() as uow:
+                storage = await uow.index.replace_file(y, fence_y, _module("ya01", 1))
+                assert storage == IndexStorage(
+                    stored_bytes=0, pending_bytes=346, workspace_bytes=2_076
+                )
+                assert storage.stored_bytes + storage.pending_bytes <= (
+                    quota.repository_storage_bytes
+                )
+                assert storage.workspace_bytes > quota.workspace_storage_bytes
+                raise _OverQuota
         # The rolled-back batch left neither rows nor pending bytes.
         rolled_back = await _state(index, y)
         assert rolled_back is not None and rolled_back.pending_bytes == 0
         assert await _rows(index, _COUNT_ROWS, repository=y) == [(0, 0, 0, 0)]
-        assert await _write(index, x, fence_x, IndexedFile("c.py", "xc01")) == [
-            IndexStorage(stored_bytes=0, pending_bytes=518, workspace_bytes=1_902)
+        # X rewrites its file: the Workspace is back at 1,730 B, without Y's 346 B, and
+        # every committed state stays within the repository quota.
+        assert await _write(index, x, fence_x, _module("xa02", 1)) == [
+            IndexStorage(stored_bytes=0, pending_bytes=346, workspace_bytes=1_730)
         ]
 
     asyncio.run(scenario())
