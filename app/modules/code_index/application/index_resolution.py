@@ -173,12 +173,10 @@ class IndexImportResolver:
         )
 
     async def resolve_import(
-        self, path: str, facts: AstFacts, item: AstImport, reads: _Reads | None = None
+        self, path: str, facts: AstFacts, item: AstImport, reads: _Reads
     ) -> IndexedImport:
         """The record and edges of one import specifier of the file at `path`; `reads`
-        are `facts` read once, for a caller that resolves every import of the file."""
-        if reads is None:
-            reads = _reads(facts)
+        are `facts` read once for all the imports of the file."""
 
         def unresolved(
             resolution: ImportResolution, reason: str | None, target: str | None = None
