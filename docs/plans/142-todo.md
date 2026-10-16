@@ -223,7 +223,9 @@ The adapter constructor stays `(session)`; the store flushes and never commits.
     batch counts and a rolled-back batch does not
     (`test_a_batch_counts_the_pending_bytes_of_other_builds_against_the_workspace_quota`);
   - a batch and a claim wait for an open batch on the admission lock, then count its
-    bytes (`test_a_batch_and_a_claim_wait_for_an_open_batch_and_then_count_its_bytes`).
+    bytes (`test_a_batch_and_a_claim_wait_for_an_open_batch_and_then_count_its_bytes`);
+  - a batch waits for an open publication whose lease expired, then counts its stored
+    bytes (`test_a_batch_waits_for_an_open_publication_and_counts_its_stored_bytes`).
 - [ ] Record the RED run and the GREEN run.
 
 **Verification:**
