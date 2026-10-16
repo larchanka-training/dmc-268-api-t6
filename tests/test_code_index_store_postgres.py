@@ -915,21 +915,30 @@ async def _claim(
 
 
 async def _release(
-    index: _Index, repository_id: UUID, fence: IndexFence, last_error_code: str | None = None
+    index: _Index,
+    repository_id: UUID,
+    fence: IndexFence,
+    last_error_code: str | None = None,
+    stats: IndexBuildStats | None = None,
 ) -> IndexStatus:
     async with index.uow() as uow:
-        status = await uow.index.release(repository_id, fence, last_error_code=last_error_code)
+        status = await uow.index.release(
+            repository_id, fence, last_error_code=last_error_code, stats=stats
+        )
         await uow.commit()
     return status
 
 
 async def _write(
     index: _Index, repository_id: UUID, fence: IndexFence, *files: IndexedFile
-) -> None:
+) -> list[IndexStorage]:
+    """One committed batch per file; the storage each batch returned."""
+    storages: list[IndexStorage] = []
     for file in files:
         async with index.uow() as uow:
-            await uow.index.replace_file(repository_id, fence, file)
+            storages.append(await uow.index.replace_file(repository_id, fence, file))
             await uow.commit()
+    return storages
 
 
 async def _publish(
@@ -1493,15 +1502,20 @@ def test_two_batch_writes_of_one_lease_run_one_after_the_other(
             writing = asyncio.create_task(store.replace_file(index.a, fence, _module("aa01", 1)))
             await asyncio.wait_for(locked.wait(), 5)
             # Two writers sharing the state row would deadlock on the UPDATE of the pending
-            # bytes; the second one waits for the row lock of the first instead.
+            # bytes; the second one queues behind the first on the admission lock, which
+            # every batch takes before the row lock.
             second = asyncio.create_task(write_importer())
             await _wait_until_blocked(index, first_pid, 1, second)
             release.set()
-            assert await writing == IndexStorage(stored_bytes=0, pending_bytes=_MODULE_BYTES)
+            assert await writing == IndexStorage(
+                stored_bytes=0, pending_bytes=_MODULE_BYTES, workspace_bytes=_MODULE_BYTES
+            )
             await first.commit()
 
         assert await asyncio.wait_for(second, 5) == IndexStorage(
-            stored_bytes=0, pending_bytes=_MODULE_BYTES + _IMPORTER_BYTES
+            stored_bytes=0,
+            pending_bytes=_MODULE_BYTES + _IMPORTER_BYTES,
+            workspace_bytes=_MODULE_BYTES + _IMPORTER_BYTES,
         )
         assert await _rows(index, _FILE_ROWS, repository=index.a) == [
             (1, 1, None, "a.py", "aa01"),
@@ -2506,6 +2520,84 @@ def test_release_keeps_the_last_publication_and_records_the_last_error_code(
 
 
 @pytest.mark.integration
+def test_release_records_the_job_metrics_and_keeps_the_publication_counters(
+    index: _Index,
+) -> None:
+    # A job that ends without a publication records its metrics too; the counters and
+    # stored bytes stay those of the visible publication.
+    stats = IndexBuildStats(
+        downloaded_bytes=2_048, build_duration_ms=30_000, github_request_count=2
+    )
+    stats_fields = {
+        "downloaded_bytes": 2_048,
+        "build_duration_ms": 30_000,
+        "github_request_count": 2,
+    }
+
+    async def scenario() -> None:
+        for repository_id in (index.a, index.b):
+            await _enable(index, repository_id)
+        # A is published with `_STATS`; its rebuild gives up after writing a file.
+        await _build(index, index.a, C1, _module("aa01", 1), _importer("ab01", 1))
+        fence = await _claim(index, index.a)
+        await _write(index, index.a, fence, _module("aa02", 1))
+        assert await _release(index, index.a, fence, "vcs_unavailable", stats) == "ready"
+        assert _fields(await _state(index, index.a)) == {
+            "generation": 1,
+            "status": "ready",
+            "purge_reason": None,
+            "error_code": None,
+            "last_error_code": "vcs_unavailable",
+            "indexed_commit_sha": C1,
+            "target_commit_sha": None,
+            "reserved_publication": 2,
+            "published_publication": 1,
+            "floor_publication": 1,
+            "file_count": 2,
+            "symbol_count": 2,
+            "edge_count": 2,
+            "stored_bytes": _MODULE_BYTES + _IMPORTER_BYTES,
+            "pending_bytes": 0,
+            "profile": _PROFILE_FIELDS,
+            "stats": stats_fields,
+        }
+
+        # B was never published: it returns to empty with zero counters and the metrics.
+        fence = await _claim(index, index.b)
+        await _write(index, index.b, fence, _module("ba01", 1))
+        assert await _release(index, index.b, fence, "vcs_access_denied", stats) == "empty"
+        assert _fields(await _state(index, index.b)) == {
+            "generation": 1,
+            "status": "empty",
+            "purge_reason": None,
+            "error_code": None,
+            "last_error_code": "vcs_access_denied",
+            "indexed_commit_sha": None,
+            "target_commit_sha": None,
+            "reserved_publication": 1,
+            "published_publication": 0,
+            "floor_publication": 0,
+            "file_count": 0,
+            "symbol_count": 0,
+            "edge_count": 0,
+            "stored_bytes": 0,
+            "pending_bytes": 0,
+            "profile": None,
+            "stats": stats_fields,
+        }
+
+        # Without stats a release keeps the recorded metrics.
+        for repository_id, status in ((index.a, "ready"), (index.b, "empty")):
+            assert await _release(index, repository_id, await _claim(index, repository_id)) == (
+                status
+            )
+            kept = await _state(index, repository_id)
+            assert kept is not None and dataclasses.asdict(kept.stats) == stats_fields
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.integration
 def test_estimate_weights_count_the_indexes_on_each_text_column(
     code_index_database: Connection,
 ) -> None:
@@ -2569,13 +2661,18 @@ def test_pending_bytes_count_a_rewritten_file_once_and_publish_stores_them(
                 storages.append(await uow.index.replace_file(index.a, fence, file))
                 await uow.commit()
         # A rewrite first subtracts the SQL estimate of the rows it deletes, so the
-        # Python estimate of the new rows is never counted on top of the old ones.
+        # Python estimate of the new rows is never counted on top of the old ones. A is
+        # alone in its Workspace, so the Workspace holds its stored and pending bytes.
         assert storages == [
-            IndexStorage(stored_bytes=0, pending_bytes=wide_bytes),
-            IndexStorage(stored_bytes=0, pending_bytes=wide_bytes),
-            IndexStorage(stored_bytes=0, pending_bytes=172),
-            IndexStorage(stored_bytes=0, pending_bytes=wide_bytes),
-            IndexStorage(stored_bytes=0, pending_bytes=wide_bytes + _MODULE_BYTES),
+            IndexStorage(stored_bytes=0, pending_bytes=wide_bytes, workspace_bytes=wide_bytes),
+            IndexStorage(stored_bytes=0, pending_bytes=wide_bytes, workspace_bytes=wide_bytes),
+            IndexStorage(stored_bytes=0, pending_bytes=172, workspace_bytes=172),
+            IndexStorage(stored_bytes=0, pending_bytes=wide_bytes, workspace_bytes=wide_bytes),
+            IndexStorage(
+                stored_bytes=0,
+                pending_bytes=wide_bytes + _MODULE_BYTES,
+                workspace_bytes=wide_bytes + _MODULE_BYTES,
+            ),
         ]
         # The SQL half over the published rows equals the Python half of the writes.
         assert await _publish(index, index.a, fence, C1)
@@ -2589,7 +2686,9 @@ def test_pending_bytes_count_a_rewritten_file_once_and_publish_stores_them(
         )
         async with index.uow() as uow:
             assert await uow.index.replace_file(index.a, fence, rewritten) == IndexStorage(
-                stored_bytes=wide_bytes + _MODULE_BYTES, pending_bytes=520
+                stored_bytes=wide_bytes + _MODULE_BYTES,
+                pending_bytes=520,
+                workspace_bytes=wide_bytes + _MODULE_BYTES + 520,
             )
             await uow.commit()
         assert await _publish(index, index.a, fence, C2, base=C1, full=False)
@@ -2615,17 +2714,16 @@ def test_repository_quota_refuses_the_claim_and_fails_the_index(index: _Index) -
             "WHERE repository_id = :repository",
             index.a,
         )
-        at_quota = dataclasses.replace(_ADMISSION, repository_storage_bytes=stored)
+        # A's Workspace holds A's bytes only, so a claim at both quotas is granted.
+        at_quota = dataclasses.replace(
+            _ADMISSION, repository_storage_bytes=stored, workspace_storage_bytes=stored
+        )
         over_quota = dataclasses.replace(_ADMISSION, repository_storage_bytes=stored - 1)
 
         claim = await _try_claim(index, index.a, 1, at_quota)
         assert isinstance(claim, LeaseClaim)
-        # The target snapshot, and the bytes of A's Workspace: A's own.
-        assert (claim.fence.publication, claim.target_commit_sha, claim.workspace_bytes) == (
-            2,
-            C2,
-            stored,
-        )
+        # The target snapshot is taken with the lease.
+        assert (claim.fence.publication, claim.target_commit_sha) == (2, C2)
         held = await _state(index, index.a)
         # LEASED is decided before QUOTA, so a live lease is never failed by a quota.
         assert await _try_claim(index, index.a, 1, over_quota) == _LEASED
@@ -2678,18 +2776,26 @@ def test_workspace_quota_counts_other_builds_and_spares_another_workspace(
         await _build(index, index.a, C1, _module("aa01", 1))
         await _build(index, index.b, C1, _module("ba01", 1))
         building = await _try_claim(index, s, 1)
-        assert isinstance(building, LeaseClaim) and building.workspace_bytes == _MODULE_BYTES
-        await _write(index, s, building.fence, _importer("sb01", 1))
+        assert isinstance(building, LeaseClaim)
         # A's stored bytes and the pending bytes of S's build.
         workspace = _MODULE_BYTES + _IMPORTER_BYTES
+        assert await _write(index, s, building.fence, _importer("sb01", 1)) == [
+            IndexStorage(stored_bytes=0, pending_bytes=_IMPORTER_BYTES, workspace_bytes=workspace)
+        ]
         at_quota = dataclasses.replace(_ADMISSION, workspace_storage_bytes=workspace)
         over_quota = dataclasses.replace(_ADMISSION, workspace_storage_bytes=workspace - 1)
 
         claim = await _try_claim(index, index.a, 1, at_quota)
-        assert isinstance(claim, LeaseClaim) and claim.workspace_bytes == workspace
+        assert isinstance(claim, LeaseClaim)
         assert await _release(index, index.a, claim.fence) == "ready"
         other = await _try_claim(index, index.b, 1, over_quota)
-        assert isinstance(other, LeaseClaim) and other.workspace_bytes == _MODULE_BYTES
+        assert isinstance(other, LeaseClaim)
+        # B's Workspace counts neither A's stored bytes nor S's pending ones.
+        assert await _write(index, index.b, other.fence, IndexedFile("c.py", "bc01")) == [
+            IndexStorage(
+                stored_bytes=_MODULE_BYTES, pending_bytes=172, workspace_bytes=_MODULE_BYTES + 172
+            )
+        ]
         # S and B now hold both live leases: QUOTA is decided before BUSY.
         # A ready repository fails too; its publication is no longer used.
         assert await _try_claim(index, index.a, 1, over_quota) == ClaimRefused(
@@ -2729,10 +2835,101 @@ def test_workspace_quota_skips_the_pending_bytes_of_an_expired_lease(
         only_a = dataclasses.replace(_ADMISSION, workspace_storage_bytes=_MODULE_BYTES)
 
         claim = await _try_claim(index, index.a, 1, only_a)
-        assert isinstance(claim, LeaseClaim) and claim.workspace_bytes == _MODULE_BYTES
+        assert isinstance(claim, LeaseClaim)
+        # A write skips them too: A's stored bytes and its own pending ones.
+        assert await _write(index, index.a, claim.fence, IndexedFile("c.py", "ac02")) == [
+            IndexStorage(
+                stored_bytes=_MODULE_BYTES, pending_bytes=172, workspace_bytes=_MODULE_BYTES + 172
+            )
+        ]
         stale = await _state(index, s)
         assert stale is not None
         assert (stale.status, stale.pending_bytes) == ("building", _IMPORTER_BYTES)
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.integration
+def test_a_batch_counts_the_pending_bytes_of_other_builds_against_the_workspace_quota(
+    index: _Index, code_index_database: Connection
+) -> None:
+    # The #159 review case: 512 B per repository, 2,048 B per Workspace. Four published
+    # repositories of A's Workspace hold 4 · 346 = 1,384 B; X and Y, in two installations
+    # of it, build 346 B each, so each claim is granted on 1,384 B.
+    published = [
+        index.a,
+        *(_sibling(code_index_database, index.a, external_id=n) for n in (102, 103, 104)),
+    ]
+    x = _sibling(code_index_database, index.a, external_id=105)
+    y = _sibling(code_index_database, index.a, external_id=101, installation_external_id=19)
+    quota = dataclasses.replace(
+        _ADMISSION, repository_storage_bytes=512, workspace_storage_bytes=2_048
+    )
+
+    async def scenario() -> None:
+        for repository_id in (*published, x, y):
+            await _enable(index, repository_id)
+        for number, repository_id in enumerate(published):
+            await _build(index, repository_id, C1, _module(f"aa0{number}", 1))
+        fence_x = await _claim(index, x, admission=quota)
+        fence_y = await _claim(index, y, admission=quota)
+
+        assert await _write(index, x, fence_x, _module("xa01", 1)) == [
+            IndexStorage(stored_bytes=0, pending_bytes=346, workspace_bytes=1_730)
+        ]
+        async with index.uow() as uow:
+            # Y is within its own quota, but with X's committed batch the Workspace
+            # holds 2,076 B: the caller raises before its commit.
+            assert await uow.index.replace_file(y, fence_y, _module("ya01", 1)) == IndexStorage(
+                stored_bytes=0, pending_bytes=346, workspace_bytes=2_076
+            )
+        # The rolled-back batch left neither rows nor pending bytes.
+        rolled_back = await _state(index, y)
+        assert rolled_back is not None and rolled_back.pending_bytes == 0
+        assert await _rows(index, _COUNT_ROWS, repository=y) == [(0, 0, 0, 0)]
+        assert await _write(index, x, fence_x, IndexedFile("c.py", "xc01")) == [
+            IndexStorage(stored_bytes=0, pending_bytes=518, workspace_bytes=1_902)
+        ]
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.integration
+def test_a_batch_and_a_claim_wait_for_an_open_batch_and_then_count_its_bytes(
+    index: _Index, code_index_database: Connection
+) -> None:
+    # S shares A's Workspace through another installation; B is in a Workspace of its own.
+    s = _sibling(code_index_database, index.a, external_id=101, installation_external_id=19)
+
+    async def scenario() -> None:
+        for repository_id in (index.a, s, index.b):
+            await _enable(index, repository_id)
+        fence_a = await _claim(index, index.a)
+        fence_s = await _claim(index, s)
+        async with index.uow() as writer:
+            assert await writer.index.replace_file(
+                index.a, fence_a, _module("aa01", 1)
+            ) == IndexStorage(
+                stored_bytes=0, pending_bytes=_MODULE_BYTES, workspace_bytes=_MODULE_BYTES
+            )
+            writer_pid = await writer.session.scalar(text("SELECT pg_backend_pid()"))
+            # Other state rows, and B even another Workspace: only the admission lock,
+            # held until A's batch commits, holds them back.
+            batch = asyncio.create_task(_write(index, s, fence_s, _importer("sb01", 1)))
+            claim = asyncio.create_task(_try_claim(index, index.b, 1))
+            await _wait_until_blocked(index, writer_pid, 2, batch, claim)
+            await writer.commit()
+
+        # S's batch read A's pending bytes after A's commit.
+        assert await asyncio.wait_for(batch, 5) == [
+            IndexStorage(
+                stored_bytes=0,
+                pending_bytes=_IMPORTER_BYTES,
+                workspace_bytes=_MODULE_BYTES + _IMPORTER_BYTES,
+            )
+        ]
+        # The claim counted the two live leases of A and S.
+        assert await asyncio.wait_for(claim, 5) == _BUSY
 
     asyncio.run(scenario())
 

@@ -135,8 +135,8 @@ The first parameter of every method is `repository_id`; the adapter constructor 
   - `IndexState` += `stored_bytes`, `pending_bytes`;
   - new: `ClaimRefusal{STALE, LEASED, BUSY, QUOTA}`, `IndexAdmission(max_leases,
     max_installation_leases, repository_storage_bytes, workspace_storage_bytes)`,
-    `LeaseClaim(fence, target_commit_sha, workspace_bytes)`, `ClaimRefused(reason,
-    error_code)`, `IndexStorage`;
+    `LeaseClaim(fence, target_commit_sha)`, `ClaimRefused(reason, error_code)`,
+    `IndexStorage(stored_bytes, pending_bytes, workspace_bytes)`;
   - `domain/codes.py` with `FAILED_ERROR_CODES`.
 - **`claim_lease(..., admission) -> LeaseClaim | ClaimRefused`.** Locks: the advisory
   transaction lock `CODE_INDEX_ADMISSION_LOCK = 3_468_003` (in
@@ -153,15 +153,26 @@ The first parameter of every method is `repository_id`; the adapter constructor 
   - status FAILED; lease and pending are reset;
   - the publication is not used: published and floor → 0, profile and sha → NULL,
     counters → 0. GC removes the rows.
-- **`release(fence, *, last_error_code=None) -> IndexStatus`**, fenced:
+- **`release(fence, *, last_error_code=None, stats=None) -> IndexStatus`**, fenced:
   - status READY if there was a publication, otherwise EMPTY; lease and pending are reset;
   - `None` keeps the previous `last_error_code`;
+  - `stats` records `github_request_count`, `build_duration_ms` and `downloaded_bytes`
+    (#142 comment 6218093384); the file, symbol and edge counters and `stored_bytes` stay
+    those of the visible publication, and `None` keeps the recorded stats;
   - used for: the soft cutoff, an empty repository or no default branch, a transient
     error after retry, cleanup after an unexpected error;
   - limitation (stated in the PR): a repository that was published and later became empty
     stays READY (stale).
 - **`replace_file(...) -> IndexStorage`.** `pending_bytes += added − removed`; rewriting a
   path within the same attempt is not counted twice (`DELETE … RETURNING`).
+  - Locks: the admission advisory lock, then the state row, so batches and claims run
+    one at a time with one lock order.
+  - `workspace_bytes` is read in the write transaction after the pending update: this
+    repository's stored and pending bytes plus the other repositories' stored bytes and
+    live pending bytes. A claim-time snapshot would let two builds of one Workspace
+    exceed its quota together (#159 review).
+  - The caller checks both quotas on the returned value and raises before its commit,
+    so a batch over a quota rolls back.
 - **`publish`:**
   - writes the new profile columns;
   - one aggregate per table (count + bytes) → `stored_bytes`; `pending_bytes = 0`;

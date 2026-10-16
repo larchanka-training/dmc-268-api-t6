@@ -156,13 +156,10 @@ class IndexAdmission:
 
 @dataclass(frozen=True)
 class LeaseClaim:
-    """A granted lease, the target commit snapshot taken with it, and the Workspace's
-    estimated bytes at the claim: every repository's stored bytes and the pending bytes
-    of its live lease, this new attempt's pending bytes being zero."""
+    """A granted lease and the target commit snapshot taken with it."""
 
     fence: IndexFence
     target_commit_sha: str | None
-    workspace_bytes: int
 
 
 @dataclass(frozen=True)
@@ -175,10 +172,13 @@ class ClaimRefused:
 
 @dataclass(frozen=True)
 class IndexStorage:
-    """A repository's estimated bytes after a write: published, and of this attempt."""
+    """A repository's estimated bytes after a write: published, and of this attempt; and
+    its Workspace's: every repository's stored bytes and the pending bytes of its live
+    lease, this write included."""
 
     stored_bytes: int
     pending_bytes: int
+    workspace_bytes: int
 
 
 @dataclass(frozen=True)
@@ -194,9 +194,9 @@ class CodeIndexStore(Protocol):
     """Index rows of one repository per call; flushes, never commits.
 
     Every method takes `repository_id` first and reads or writes only that repository's
-    rows; admission in `claim_lease` also reads sums over other repositories' state rows,
-    never their graph rows. Reads see only the published rows of the current generation
-    of a `ready` index.
+    rows; admission in `claim_lease` and the Workspace bytes of `replace_file` also read
+    sums over other repositories' state rows, never their graph rows. Reads see only the
+    published rows of the current generation of a `ready` index.
     Each read statement is consistent on its own, but a read of several statements
     (`get_file`, `outgoing_edges`, or a sequence of reads) sees one snapshot only inside
     the caller's REPEATABLE READ read-only transaction (ADR §6.2): the #144 retriever
@@ -242,8 +242,14 @@ class CodeIndexStore(Protocol):
         """T4: replace this attempt's rows of `file.path`; raises `IndexLeaseLost`.
 
         The pending bytes gain the new rows and lose the replaced ones, so a rewrite of
-        a path is counted once. It holds the state row for that update, so the writes of
-        one lease run one at a time; a claim or a purge waits for the batch.
+        a path is counted once. It takes the admission lock of `claim_lease` and then
+        the state row, so batches and claims run one at a time and each reads the
+        Workspace bytes after every earlier batch committed; a purge or a publication
+        waits for the batch. The caller checks both storage quotas on the returned
+        `IndexStorage` and raises before its commit, so a batch over a quota rolls back.
+
+        Like `claim_lease`, its transaction takes no state row lock before its first
+        `replace_file`: the admission lock orders before every state row lock.
         """
         ...
 
@@ -282,11 +288,18 @@ class CodeIndexStore(Protocol):
         ...
 
     async def release(
-        self, repository_id: UUID, fence: IndexFence, *, last_error_code: str | None = None
+        self,
+        repository_id: UUID,
+        fence: IndexFence,
+        *,
+        last_error_code: str | None = None,
+        stats: IndexBuildStats | None = None,
     ) -> IndexStatus:
         """Spend the lease without publishing: `ready` with a publication, else `empty`.
 
-        `None` keeps the previous `last_error_code`. Raises `IndexLeaseLost`.
+        `stats` records the job's metrics; the file, symbol and edge counters and the
+        stored bytes stay those of the visible publication. `None` keeps the previous
+        `last_error_code` or the recorded stats. Raises `IndexLeaseLost`.
         """
         ...
 
