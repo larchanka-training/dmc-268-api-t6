@@ -252,7 +252,10 @@ comment in each open PR that touches `docs/SYSTEM_DESIGN.md`. Planned: #124, #14
 **Acceptance criteria:**
 
 - [ ] The coordination comments are posted before the docs commit; their links are
-  recorded here.
+  recorded here:
+  - #124: https://github.com/larchanka-training/dmc-268-api-t6/pull/124#issuecomment-6214950766
+  - #155: https://github.com/larchanka-training/dmc-268-api-t6/pull/155#issuecomment-6214951136
+  - #148: https://github.com/larchanka-training/dmc-268-api-t6/pull/148#issuecomment-6214951477
 - [ ] Each documented column matches migration 0033.
 
 **Verification:** Run the common verification block.
