@@ -8,6 +8,7 @@ limits stop a pass in time.
 from __future__ import annotations
 
 import asyncio
+import gzip
 import io
 import os
 import tarfile
@@ -85,6 +86,53 @@ def _archive(*members: Member, gnu: Iterable[Member] = ()) -> SourceArchive:
         for info, data in gnu:
             archive.addfile(info, io.BytesIO(data) if data else None)
     return SourceArchive(_COMMIT, buffer.getvalue())
+
+
+def _raw_header(
+    name: str, kind: bytes = tarfile.REGTYPE, size: int | bytes = 0, *, extended: bool = False
+) -> bytes:
+    """One GNU header block as a forged stream writes it: `size` may be a raw field, and
+    `extended` continues the map of a sparse header."""
+    block = bytearray(tarfile.BLOCKSIZE)
+    block[: len(name)] = name.encode()
+    block[124:136] = size if isinstance(size, bytes) else b"%011o\0" % size
+    block[156:157] = kind
+    block[257:265] = tarfile.GNU_MAGIC
+    block[482] = extended
+    block[148:156] = b" " * 8
+    block[148:156] = b"%06o\0 " % sum(block)
+    return bytes(block)
+
+
+def _padded(data: bytes) -> bytes:
+    return data + b"\0" * (-len(data) % tarfile.BLOCKSIZE)
+
+
+def _raw_pax(key: str, value: str) -> bytes:
+    """A pax header with one record, `"<length> <key>=<value>\\n"`."""
+    record = f" {key}={value}\n".encode()
+    length = len(record) + 1
+    while len(str(length)) + len(record) != length:
+        length += 1
+    body = str(length).encode() + record
+    return _raw_header("PaxHeader", tarfile.XHDTYPE, len(body)) + _padded(body)
+
+
+def _raw_long_name(name: str = "a") -> bytes:
+    data = name.encode() + b"\0"
+    return _raw_header("././@LongLink", tarfile.GNUTYPE_LONGNAME, len(data)) + _padded(data)
+
+
+def _sparse_extension(*, extended: bool) -> bytes:
+    block = bytearray(tarfile.BLOCKSIZE)
+    block[504] = extended
+    return bytes(block)
+
+
+def _raw_archive(*blocks: bytes, end: bool = True) -> SourceArchive:
+    """A forged stream: the root directory, `blocks`, then the end blocks if `end`."""
+    raw = _raw_header(_ROOT, tarfile.DIRTYPE) + b"".join(blocks)
+    return SourceArchive(_COMMIT, gzip.compress(raw + b"\0" * 1024 * end, compresslevel=1))
 
 
 def _reader(**limits: int) -> TarArchiveReader:
@@ -187,6 +235,17 @@ def test_a_file_over_the_read_limit_is_listed_without_a_blob_and_never_captured(
         pytest.param(_file("b.py", b"x", root="another-root"), False, id="second-root"),
         pytest.param(_file("a.py", b"again"), False, id="duplicate-path"),
         pytest.param(_file("a" * 70_000 + ".py", b"x"), False, id="metadata-header-over-64-kib"),
+        # A ustar name ends at its first NUL; a pax record carries one through.
+        pytest.param(
+            _special(f"{_ROOT}/x.py", tarfile.REGTYPE, pax_headers={"path": f"{_ROOT}/a\0b.py"}),
+            False,
+            id="nul-in-a-pax-path",
+        ),
+        pytest.param(
+            _special(f"{_ROOT}/x.py", tarfile.SYMTYPE, pax_headers={"linkpath": "a\0b.py"}),
+            False,
+            id="nul-in-a-pax-link-path",
+        ),
     ],
 )
 def test_an_unsafe_entry_stops_both_passes(member: Member, gnu: bool) -> None:
@@ -221,6 +280,76 @@ def test_the_unpacked_bytes_limit_counts_declared_sizes_before_reading_them() ->
     with pytest.raises(IndexLimitExceeded) as caught:
         _scan(archive, _reader(unpacked_bytes=limit - 1))
     assert caught.value.code == "limit_exceeded:unpacked_bytes"
+
+
+_DATA = b"x" * 100_000
+# A base-256 size field that `tarfile` decodes as -(2**40).
+_NEGATIVE_SIZE = b"\xff" + (2**88 - 2**40).to_bytes(11, "big")
+
+
+@pytest.mark.parametrize(
+    ("archive", "limit"),
+    [
+        pytest.param(
+            _raw_archive(_raw_pax("size", "100000"), _raw_header(f"{_ROOT}/a.py"), _padded(_DATA)),
+            10_000,
+            id="pax-size-over-a-zero-header-size",
+        ),
+        pytest.param(
+            _raw_archive(
+                _raw_header(f"{_ROOT}/d", tarfile.DIRTYPE, _NEGATIVE_SIZE),
+                _raw_header(f"{_ROOT}/a.py", size=len(_DATA)),
+                _padded(_DATA),
+            ),
+            10_000,
+            id="negative-size-before-a-file",
+        ),
+        pytest.param(
+            _raw_archive(
+                _raw_header(f"{_ROOT}/s.py", tarfile.GNUTYPE_SPARSE, extended=True),
+                _sparse_extension(extended=True) * 999,
+                _sparse_extension(extended=False),
+            ),
+            1_000,
+            id="gnu-sparse-map-of-1000-blocks",
+        ),
+    ],
+)
+def test_the_unpacked_bytes_limit_counts_the_bytes_read_when_a_header_hides_its_size(
+    archive: SourceArchive, limit: int
+) -> None:
+    reader = _reader(unpacked_bytes=limit)
+
+    with pytest.raises(IndexLimitExceeded) as caught:
+        _scan(archive, reader)
+    assert caught.value.code == "limit_exceeded:unpacked_bytes"
+    with pytest.raises(IndexLimitExceeded):
+        _contents(archive, {"a.py"}, reader=reader)
+
+
+def test_a_pass_keeps_only_the_current_header(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Stream mode still lists every header in `TarFile.members`, each with its own copy of
+    # the global pax headers; directories are never yielded, so they must not pile up.
+    listed: list[int] = []
+    next_header = tarfile.TarFile.next
+
+    def counting_next(archive: tarfile.TarFile) -> tarfile.TarInfo | None:
+        member = next_header(archive)
+        listed.append(len(archive.members))  # type: ignore[attr-defined]
+        return member
+
+    monkeypatch.setattr(tarfile.TarFile, "next", counting_next)
+    archive = _archive(
+        *(_directory(f"d{index}") for index in range(200)),
+        *(_file(f"m{index}.py", b"x") for index in range(200)),
+    )
+
+    _scan(archive)
+    _contents(archive, {"m1.py"})
+
+    # Both passes went through `next` for every member.
+    assert len(listed) > 2 * 400
+    assert max(listed) == 1
 
 
 def test_many_small_files_are_listed_and_read_in_batches_in_archive_order() -> None:
@@ -309,6 +438,42 @@ def test_a_truncated_archive_is_a_transient_vcs_failure() -> None:
         _scan(truncated)
     with pytest.raises(VcsUnavailable):
         _contents(truncated, {"m1.py"})
+
+
+@pytest.mark.parametrize(
+    "archive",
+    [
+        # `ValueError` from `int()` of the pax record.
+        pytest.param(
+            _raw_archive(_raw_pax("GNU.sparse.size", "abc"), _raw_header(f"{_ROOT}/a.py")),
+            id="pax-number-that-is-not-a-number",
+        ),
+        # `IndexError`: the map continues past the end of the stream.
+        pytest.param(
+            _raw_archive(
+                _raw_header(f"{_ROOT}/s.py", tarfile.GNUTYPE_SPARSE, extended=True), end=False
+            ),
+            id="gnu-sparse-map-cut-at-the-end",
+        ),
+        # `RecursionError`: `tarfile` recurses once per metadata header.
+        pytest.param(
+            _raw_archive(_raw_pax("comment", "x") * 1_500, _raw_header(f"{_ROOT}/a.py")),
+            id="1500-chained-pax-headers",
+        ),
+        pytest.param(
+            _raw_archive(_raw_long_name() * 1_500, _raw_header(f"{_ROOT}/a.py")),
+            id="1500-chained-gnu-long-names",
+        ),
+    ],
+)
+def test_a_forged_header_tarfile_cannot_parse_is_a_transient_vcs_failure(
+    archive: SourceArchive,
+) -> None:
+    with pytest.raises(VcsUnavailable) as caught:
+        _scan(archive)
+    assert caught.value.code == "vcs_unavailable"
+    with pytest.raises(VcsUnavailable):
+        _contents(archive, {"a.py"})
 
 
 def test_a_non_utf8_name_stays_in_the_path_set() -> None:

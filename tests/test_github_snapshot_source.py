@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import logging
+import tracemalloc
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import timedelta
@@ -66,6 +68,7 @@ def _run(
     action: Callable[[GitHubRepositorySnapshotSource], Awaitable[Any]],
     *,
     tokens: Tokens | None = None,
+    auth: httpx.Auth | None = None,
 ) -> tuple[Any, int]:
     """Run `action`; return its result (or the raised error) and the request count."""
 
@@ -77,6 +80,7 @@ def _run(
             base_url="https://api.github.com",
             follow_redirects=True,
             headers={"Authorization": "Bearer client-default"},
+            auth=auth,
         ) as client:
             source = GitHubRepositorySnapshotSource(
                 client=client,
@@ -242,6 +246,9 @@ def test_head_an_unreadable_repository_answer_is_unavailable() -> None:
         (500, {}, "vcs_unavailable", None),
         (503, {"Retry-After": "5"}, "vcs_unavailable", timedelta(seconds=5)),
         (400, {}, "vcs_unavailable", None),
+        # As in `reviews/infrastructure/vcs_failures.py`: a fresh installation token can
+        # heal a 401.
+        (401, {}, "vcs_unavailable", None),
     ],
 )
 def test_transient_answers_are_unavailable(
@@ -258,7 +265,29 @@ def test_transient_answers_are_unavailable(
     assert requests == 1
 
 
-@pytest.mark.parametrize("status", [401, 403, 404])
+@pytest.mark.parametrize("status", [429, 503])
+@pytest.mark.parametrize(
+    "retry_after",
+    ["\u00b2", "-5", "9" * 30, "soon", "Wed, 21 Oct 2026 07:28:00 GMT"],
+    ids=["superscript-two", "negative", "overflow", "word", "http-date"],
+)
+def test_an_unreadable_retry_after_is_no_delay(status: int, retry_after: str) -> None:
+    github = GitHub(
+        {
+            "api.github.com/repos/octo/repo": _answer(
+                status, headers=[(b"Retry-After", retry_after.encode())]
+            )
+        }
+    )
+
+    error, _ = _run(github, lambda source: source.head())
+
+    assert isinstance(error, VcsUnavailable)
+    assert error.rate_limited is (status == 429)
+    assert error.retry_after is None
+
+
+@pytest.mark.parametrize("status", [403, 404])
 def test_access_answers_are_access_denied(status: int) -> None:
     github = GitHub({"api.github.com/repos/octo/repo": _answer(status)})
 
@@ -503,6 +532,84 @@ def test_archive_follows_the_redirect_to_codeload_without_auth() -> None:
     assert "Authorization" not in download.headers
     assert str(download.url) == _CODELOAD
     assert download.headers["Accept-Encoding"] == "identity"
+
+
+def test_archive_download_ignores_the_auth_of_the_client() -> None:
+    github = GitHub({_TARBALL: _redirect(), _CODELOAD_KEY: _answer(200, content=b"\x1f\x8b")})
+
+    archive, _ = _run(
+        github,
+        lambda source: source.archive(_HEAD, max_bytes=_MAX),
+        auth=httpx.BasicAuth("client-user", "client-pass"),
+    )
+
+    assert archive == SourceArchive(commit_sha=_HEAD, content=b"\x1f\x8b")
+    download = github.seen[-1]
+    assert download.url.host == "codeload.github.com"
+    assert "Authorization" not in download.headers
+
+
+def _httpx_lines(caplog: pytest.LogCaptureFixture) -> list[str]:
+    return [record.getMessage() for record in caplog.records if record.name == "httpx"]
+
+
+def test_the_httpx_log_line_of_the_download_has_no_token(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.INFO, logger="httpx")
+    github = GitHub({_TARBALL: _redirect(), _CODELOAD_KEY: _answer(200, content=b"\x1f\x8b")})
+
+    archive, _ = _run(github, lambda source: source.archive(_HEAD, max_bytes=_MAX))
+
+    assert isinstance(archive, SourceArchive)
+    lines = _httpx_lines(caplog)
+    assert any(
+        f"GET https://codeload.github.com/octo/repo/legacy.tar.gz/{_HEAD}?redacted " in line
+        for line in lines
+    )
+    assert not any("token" in line or "temporary" in line for line in lines)
+
+
+def test_the_httpx_log_keeps_a_url_outside_codeload_as_it_is(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.INFO, logger="httpx")
+    github = GitHub({_COMPARE: _comparison()})
+
+    _run(github, lambda source: source.compare(_BASE, _HEAD))
+
+    url = f"https://api.github.com/repos/octo/repo/compare/{_BASE}...{_HEAD}?per_page=1"
+    assert any(f"GET {url} " in line for line in _httpx_lines(caplog))
+
+
+def test_the_httpx_log_filter_is_installed_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    logger = logging.getLogger("httpx")
+    monkeypatch.setattr(logger, "filters", [])
+
+    for _ in range(2):
+        _run(GitHub({}), lambda source: asyncio.sleep(0))
+
+    assert len(logger.filters) == 1
+
+
+def test_archive_holds_the_download_once() -> None:
+    size = 32 * 1_048_576
+
+    async def body() -> AsyncIterator[bytes]:
+        for _ in range(32):
+            yield b"x" * 1_048_576
+
+    github = GitHub({_TARBALL: _redirect(), _CODELOAD_KEY: _answer(200, content=body())})
+    tracemalloc.start()
+    try:
+        archive, _ = _run(github, lambda source: source.archive(_HEAD, max_bytes=size))
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+
+    assert len(archive.content) == size
+    # A growing buffer copied out at the end peaks at twice the archive.
+    assert peak < 1.5 * size
 
 
 @pytest.mark.parametrize(
