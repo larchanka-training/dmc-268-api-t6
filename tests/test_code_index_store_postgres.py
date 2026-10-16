@@ -26,10 +26,14 @@ from sqlalchemy.schema import CreateSchema, DropSchema
 
 from alembic import command
 from app.modules.code_index.application.index_store import (
+    ClaimRefusal,
+    ClaimRefused,
     CodeIndexStore,
     EdgeTarget,
     ImportRecord,
+    IndexAdmission,
     IndexBuildStats,
+    IndexCounts,
     IndexedEdge,
     IndexedFile,
     IndexedSymbol,
@@ -37,13 +41,17 @@ from app.modules.code_index.application.index_store import (
     IndexLeaseLost,
     IndexProfile,
     IndexState,
+    IndexStorage,
+    LeaseClaim,
 )
+from app.modules.code_index.domain.codes import FAILED_ERROR_CODES
 from app.modules.code_index.domain.enums import EdgeKind, IndexStatus, PurgeReason
 from app.modules.code_index.domain.keys import (
     MAX_INDEX_KEY_BYTES,
     SymbolKey,
     assign_disambiguators,
 )
+from app.modules.code_index.domain.storage import COLUMN_WEIGHTS, ROW_OVERHEAD_BYTES, row_bytes
 from app.modules.code_index.infrastructure.index_store import (
     SqlAlchemyCodeIndexStore,
     SqlAlchemyCodeIndexUnitOfWork,
@@ -90,6 +98,10 @@ _COLUMNS = {
         "github_request_count": ("int4", False, None),
         "created_at": ("timestamptz", False, None),
         "updated_at": ("timestamptz", False, None),
+        "indexed_default_branch": ("varchar", True, 255),
+        "exclusions_digest": ("varchar", True, 64),
+        "stored_bytes": ("int8", False, None),
+        "pending_bytes": ("int8", False, None),
     },
     "code_index_files": {**_GRAPH_KEY, "blob_sha": ("varchar", False, 64)},
     "code_index_symbols": {
@@ -145,11 +157,18 @@ _PRIMARY_KEYS = {
     ],
 }
 
+_CHECKS_0032 = {
+    "ck_code_index_states_failed_error",
+    "ck_code_index_states_lease_pair",
+    "ck_code_index_states_purge_reason",
+}
 _CHECKS = {
     "code_index_states": {
-        "ck_code_index_states_failed_error",
-        "ck_code_index_states_lease_pair",
-        "ck_code_index_states_purge_reason",
+        *_CHECKS_0032,
+        "ck_code_index_states_profile_complete",
+        "ck_code_index_states_bytes",
+        "ck_code_index_states_pending_leased",
+        "ck_code_index_states_failed_code",
     },
     "code_index_files": set(),
     "code_index_symbols": {"ck_code_index_symbols_lines"},
@@ -158,7 +177,7 @@ _CHECKS = {
 }
 
 _INDEXES = {
-    "code_index_states": {},
+    "code_index_states": {"ix_code_index_states_live_lease": ["repository_id"]},
     "code_index_files": {},
     "code_index_symbols": {},
     "code_index_edges": {
@@ -239,6 +258,44 @@ def _repository(connection: Connection, installation_external_id: int = 17) -> s
         {"id": repository_id, "installation": installation_id},
     )
     return repository_id
+
+
+def _sibling(
+    connection: Connection,
+    repository_id: UUID,
+    *,
+    external_id: int,
+    installation_external_id: int | None = None,
+) -> UUID:
+    """Another repository in `repository_id`'s installation, or, given an installation
+    external id, in a new installation of its Workspace; committed for async sessions."""
+    installation = connection.scalar(
+        text("SELECT provider_installation_id FROM repositories WHERE id = :id"),
+        {"id": repository_id},
+    )
+    if installation_external_id is not None:
+        installation = connection.scalar(
+            text(
+                "INSERT INTO provider_installations "
+                "(id, workspace_id, provider, external_id, metadata) "
+                "SELECT gen_random_uuid(), workspace_id, 'github', :external_id, "
+                '\'{"account_login": "octo"}\' FROM provider_installations WHERE id = :id '
+                "RETURNING id"
+            ),
+            {"id": installation, "external_id": installation_external_id},
+        )
+    sibling = uuid4()
+    connection.execute(
+        text(
+            "INSERT INTO repositories "
+            "(id, provider_installation_id, external_id, full_name, default_branch, web_url) "
+            "VALUES (:id, :installation, :external_id, 'octo/sibling', 'main', "
+            "'https://github.com/octo/sibling')"
+        ),
+        {"id": sibling, "installation": installation, "external_id": external_id},
+    )
+    connection.commit()
+    return sibling
 
 
 def _index_tables(connection: Connection) -> set[str]:
@@ -403,7 +460,8 @@ def test_state_row_defaults_to_an_empty_unpublished_index(
             "lease_expires_at, file_count, symbol_count, edge_count, extractor_version, "
             "resolver_version, parser_profile_version, limits_profile_version, "
             "downloaded_bytes, build_duration_ms, github_request_count, "
-            "created_at IS NOT NULL, updated_at IS NOT NULL FROM code_index_states"
+            "created_at IS NOT NULL, updated_at IS NOT NULL, indexed_default_branch, "
+            "exclusions_digest, stored_bytes, pending_bytes FROM code_index_states"
         )
     ).one()
     assert tuple(row) == (
@@ -415,6 +473,8 @@ def test_state_row_defaults_to_an_empty_unpublished_index(
         *(0, 0, 0),
         True,
         True,
+        *(None, None),
+        *(0, 0),
     )
 
 
@@ -455,6 +515,41 @@ def test_state_row_defaults_to_an_empty_unpublished_index(
             {},
             "ck_code_index_states_purge_reason",
             id="purge-reason-outside-empty",
+        ),
+        pytest.param(
+            "INSERT INTO code_index_states (repository_id, extractor_version, resolver_version, "
+            "parser_profile_version, limits_profile_version) "
+            "VALUES (:repository, 'facts-3', 'resolver-2', 'parser-1', 'limits-1')",
+            {},
+            "ck_code_index_states_profile_complete",
+            id="profile-without-branch-and-digest",
+        ),
+        pytest.param(
+            "INSERT INTO code_index_states (repository_id, stored_bytes) VALUES (:repository, -1)",
+            {},
+            "ck_code_index_states_bytes",
+            id="negative-stored-bytes",
+        ),
+        pytest.param(
+            "INSERT INTO code_index_states "
+            "(repository_id, pending_bytes, lease_token, lease_expires_at) "
+            "VALUES (:repository, -1, gen_random_uuid(), now())",
+            {},
+            "ck_code_index_states_bytes",
+            id="negative-pending-bytes",
+        ),
+        pytest.param(
+            "INSERT INTO code_index_states (repository_id, pending_bytes) VALUES (:repository, 1)",
+            {},
+            "ck_code_index_states_pending_leased",
+            id="pending-bytes-without-lease",
+        ),
+        pytest.param(
+            "INSERT INTO code_index_states (repository_id, status, error_code) "
+            "VALUES (:repository, 'failed', 'parse_failed')",
+            {},
+            "ck_code_index_states_failed_code",
+            id="failed-with-another-code",
         ),
         pytest.param(
             _SYMBOL, {"start": 0, "end": 1}, "ck_code_index_symbols_lines", id="line-zero"
@@ -498,15 +593,19 @@ def test_check_constraints_accept_consistent_rows(code_index_database: Connectio
     connection.execute(
         text(
             "INSERT INTO code_index_states "
-            "(repository_id, status, error_code, lease_token, lease_expires_at) "
-            "VALUES (:repository, 'failed', 'parse_failed', gen_random_uuid(), now())"
+            "(repository_id, status, error_code, lease_token, lease_expires_at, pending_bytes, "
+            "stored_bytes, extractor_version, resolver_version, parser_profile_version, "
+            "limits_profile_version, indexed_default_branch, exclusions_digest) "
+            "VALUES (:repository, 'failed', 'limit_exceeded:edges', gen_random_uuid(), now(), "
+            "7, 9, 'facts-3', 'resolver-2', 'parser-1', 'limits-1', 'main', 'digest')"
         ),
         {"repository": repository_id},
     )
     connection.execute(
         text(
             "UPDATE code_index_states SET status = 'empty', error_code = NULL, "
-            "purge_reason = 'disabled', lease_token = NULL, lease_expires_at = NULL"
+            "purge_reason = 'disabled', lease_token = NULL, lease_expires_at = NULL, "
+            "pending_bytes = 0"
         )
     )
     connection.execute(
@@ -564,17 +663,147 @@ def test_downgrade_drops_index_tables_and_types_and_upgrade_restores_them(
     assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "20261016_0033"
 
 
+# ADR 0001 §7: only a limit or an unsafe archive fails an index.
+_FAILED_CODES = (
+    "archive_unsafe",
+    "limit_exceeded:download_bytes",
+    "limit_exceeded:unpacked_bytes",
+    "limit_exceeded:archive_entries",
+    "limit_exceeded:parsed_files",
+    "limit_exceeded:symbols",
+    "limit_exceeded:edges",
+    "limit_exceeded:deadline",
+    "limit_exceeded:repository_storage",
+    "limit_exceeded:workspace_storage",
+)
+
+
+@pytest.mark.integration
+def test_failed_code_check_admits_every_failed_error_code(
+    code_index_database: Connection,
+) -> None:
+    connection = code_index_database
+    repository_id = _repository(connection)
+    connection.execute(
+        text("INSERT INTO code_index_states (repository_id) VALUES (:id)"), {"id": repository_id}
+    )
+    for code in _FAILED_CODES:
+        connection.execute(
+            text("UPDATE code_index_states SET status = 'failed', error_code = :code"),
+            {"code": code},
+        )
+        assert connection.scalar(text("SELECT error_code FROM code_index_states")) == code
+    assert frozenset(_FAILED_CODES) == FAILED_ERROR_CODES
+
+
+def _state_schema(connection: Connection) -> tuple[set[str], set[str], dict[str, str]]:
+    """The columns, CHECK names and index predicates of `code_index_states`."""
+    columns = set(
+        connection.scalars(
+            text(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_schema = current_schema() AND table_name = 'code_index_states'"
+            )
+        )
+    )
+    checks = set(
+        connection.scalars(
+            text(
+                "SELECT conname FROM pg_constraint WHERE contype = 'c' "
+                "AND conrelid = 'code_index_states'::regclass"
+            )
+        )
+    )
+    indexes = {
+        name: predicate
+        for name, predicate in connection.execute(
+            text(
+                "SELECT indexrelid::regclass::text, pg_get_expr(indpred, indrelid) FROM pg_index "
+                "WHERE indrelid = 'code_index_states'::regclass AND NOT indisprimary"
+            )
+        )
+    }
+    return columns, checks, indexes
+
+
+@pytest.mark.integration
+def test_downgrade_to_0032_drops_the_indexer_columns_and_upgrade_resets_profiles(
+    code_index_database: Connection,
+) -> None:
+    connection = code_index_database
+    config = _migration_config(connection)
+    head_columns = set(_COLUMNS["code_index_states"])
+    new_columns = {"indexed_default_branch", "exclusions_digest", "stored_bytes", "pending_bytes"}
+    assert _state_schema(connection) == (
+        head_columns,
+        _CHECKS["code_index_states"],
+        {"ix_code_index_states_live_lease": "(lease_token IS NOT NULL)"},
+    )
+    connection.rollback()
+    command.downgrade(config, "20261015_0032")
+    assert _state_schema(connection) == (head_columns - new_columns, _CHECKS_0032, {})
+    assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "20261015_0032"
+    repository_id = _repository(connection)
+    connection.execute(
+        text(
+            "INSERT INTO code_index_states (repository_id, status, indexed_commit_sha, "
+            "extractor_version, resolver_version, parser_profile_version, "
+            "limits_profile_version) "
+            "VALUES (:id, 'ready', :sha, 'facts-3', 'resolver-2', 'parser-1', 'limits-1')"
+        ),
+        {"id": repository_id, "sha": C1},
+    )
+    connection.commit()
+
+    command.upgrade(config, "head")
+    # The reset forces a full build: no publication on 0032 recorded a branch or digest.
+    assert connection.execute(
+        text(
+            "SELECT status::text, indexed_commit_sha, extractor_version, resolver_version, "
+            "parser_profile_version, limits_profile_version, indexed_default_branch, "
+            "exclusions_digest, stored_bytes, pending_bytes FROM code_index_states"
+        )
+    ).one() == ("ready", C1, *(None,) * 6, 0, 0)
+    assert _state_schema(connection) == (
+        head_columns,
+        _CHECKS["code_index_states"],
+        {"ix_code_index_states_live_lease": "(lease_token IS NOT NULL)"},
+    )
+    assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "20261016_0033"
+
+
 # Store behaviour: fencing, publication, purge, garbage collection and isolation.
 
 C1, C2, C3 = "1" * 40, "2" * 40, "3" * 40
-_PROFILE = IndexProfile("facts-3", "resolver-2", "parser-1", "limits-1")
+_DIGEST = "d" * 64
+_PROFILE = IndexProfile("facts-3", "resolver-2", "parser-1", "limits-1", "main", _DIGEST)
 _STATS = IndexBuildStats(downloaded_bytes=48_213, build_duration_ms=1_250, github_request_count=3)
 _PROFILE_FIELDS = {
     "extractor_version": "facts-3",
     "resolver_version": "resolver-2",
     "parser_profile_version": "parser-1",
     "limits_profile_version": "limits-1",
+    "default_branch": "main",
+    "exclusions_digest": _DIGEST,
 }
+_NO_STATS = {"downloaded_bytes": 0, "build_duration_ms": 0, "github_request_count": 0}
+# ADR 0001 §7: 2 jobs in all, 1 per installation, 512 MiB per repository, 2 GiB per Workspace.
+_ADMISSION = IndexAdmission(
+    max_leases=2,
+    max_installation_leases=1,
+    repository_storage_bytes=512 * 1024 * 1024,
+    workspace_storage_bytes=2 * 1024 * 1024 * 1024,
+)
+_STALE = ClaimRefused(ClaimRefusal.STALE)
+_LEASED = ClaimRefused(ClaimRefusal.LEASED)
+_BUSY = ClaimRefused(ClaimRefusal.BUSY)
+# Estimated bytes (160 per row + w(c) · UTF-8 bytes) of the rows of `_module` and
+# `_importer`:
+# - `_module`: file a.py/aa01 160+2·4+4 = 172, symbol foo 160+2·4+2·3 = 174;
+# - `_importer`: file 172, symbol Bar 174, imports edge 160+2·4+3·4 = 180, uses edge
+#   180+3·3 = 189, import `.a` 160+2·4+2·2+2·4 = 180, import `requests` 160+2·4+2·8 = 184.
+_MODULE_BYTES = 346
+_IMPORTER_BYTES = 1_079
 _STATS_FIELDS = {"downloaded_bytes": 48_213, "build_duration_ms": 1_250, "github_request_count": 3}
 _COUNT_ROWS = (
     "SELECT (SELECT count(*) FROM code_index_files WHERE repository_id = :repository), "
@@ -667,17 +896,31 @@ async def _purge(
         await uow.commit()
 
 
-async def _try_claim(index: _Index, repository_id: UUID, generation: int) -> IndexFence | None:
+async def _try_claim(
+    index: _Index, repository_id: UUID, generation: int, admission: IndexAdmission = _ADMISSION
+) -> LeaseClaim | ClaimRefused:
     async with index.uow() as uow:
-        fence = await uow.index.claim_lease(repository_id, generation, 600)
+        claim = await uow.index.claim_lease(repository_id, generation, 600, admission)
+        # Committed on a refusal too: a QUOTA refusal writes `failed`.
         await uow.commit()
-    return fence
+    return claim
 
 
-async def _claim(index: _Index, repository_id: UUID, generation: int = 1) -> IndexFence:
-    fence = await _try_claim(index, repository_id, generation)
-    assert fence is not None
-    return fence
+async def _claim(
+    index: _Index, repository_id: UUID, generation: int = 1, admission: IndexAdmission = _ADMISSION
+) -> IndexFence:
+    claim = await _try_claim(index, repository_id, generation, admission)
+    assert isinstance(claim, LeaseClaim)
+    return claim.fence
+
+
+async def _release(
+    index: _Index, repository_id: UUID, fence: IndexFence, last_error_code: str | None = None
+) -> IndexStatus:
+    async with index.uow() as uow:
+        status = await uow.index.release(repository_id, fence, last_error_code=last_error_code)
+        await uow.commit()
+    return status
 
 
 async def _write(
@@ -839,9 +1082,9 @@ def test_store_flushes_and_only_the_callers_commit_persists(index: _Index) -> No
     async def scenario() -> None:
         async with index.uow() as uow:
             await uow.index.enable(index.a)
-            fence = await uow.index.claim_lease(index.a, 1, 600)
-            assert fence is not None
-            await uow.index.replace_file(index.a, fence, _module("aa01", 1))
+            claim = await uow.index.claim_lease(index.a, 1, 600, _ADMISSION)
+            assert isinstance(claim, LeaseClaim)
+            await uow.index.replace_file(index.a, claim.fence, _module("aa01", 1))
             own = await uow.session.execute(text(_COUNT_ROWS), {"repository": index.a})
             # The rows reached the caller's transaction, and no other session sees them.
             assert tuple(own.one()) == (1, 1, 0, 0)
@@ -911,6 +1154,8 @@ def test_publications_record_literal_state_and_incremental_closes_rewritten_file
             "file_count": 2,
             "symbol_count": 2,
             "edge_count": 2,
+            "stored_bytes": _MODULE_BYTES + _IMPORTER_BYTES,
+            "pending_bytes": 0,
             "profile": _PROFILE_FIELDS,
             "stats": _STATS_FIELDS,
         }
@@ -947,6 +1192,9 @@ def test_publications_record_literal_state_and_incremental_closes_rewritten_file
             "file_count": 2,
             "symbol_count": 3,
             "edge_count": 2,
+            # The rewritten a.py (172 + foo 174 + qux 174) and the untouched b.py.
+            "stored_bytes": 520 + _IMPORTER_BYTES,
+            "pending_bytes": 0,
             "profile": _PROFILE_FIELDS,
             "stats": _STATS_FIELDS,
         }
@@ -1058,8 +1306,10 @@ def test_purge_hides_every_row_gc_deletes_them_and_a_repeated_purge_is_a_no_op(
             "file_count": 0,
             "symbol_count": 0,
             "edge_count": 0,
+            "stored_bytes": 0,
+            "pending_bytes": 0,
             "profile": None,
-            "stats": {"downloaded_bytes": 0, "build_duration_ms": 0, "github_request_count": 0},
+            "stats": _NO_STATS,
         }
         assert purged is not None and enabled is not None
         assert (purged.published_at, purged.lease_expires_at) == (None, None)
@@ -1099,8 +1349,10 @@ def test_enable_keeps_a_ready_index_and_disable_then_enable_rejects_the_old_fenc
             "file_count": 0,
             "symbol_count": 0,
             "edge_count": 0,
+            "stored_bytes": 0,
+            "pending_bytes": 0,
             "profile": None,
-            "stats": {"downloaded_bytes": 0, "build_duration_ms": 0, "github_request_count": 0},
+            "stats": _NO_STATS,
         }
         assert enabled.last_used_at is not None
         await _build(index, index.a, C1, _module("aa01", 1))
@@ -1125,7 +1377,7 @@ def test_enable_keeps_a_ready_index_and_disable_then_enable_rejects_the_old_fenc
         async with index.uow() as uow:
             with pytest.raises(IndexLeaseLost):
                 await uow.index.replace_file(index.a, fence, _module("aa02", 1))
-        assert await _try_claim(index, index.a, 1) is None
+        assert await _try_claim(index, index.a, 1) == _STALE
 
     asyncio.run(scenario())
 
@@ -1181,6 +1433,10 @@ def test_a_stale_fence_writes_and_publishes_nothing(
                     profile=_PROFILE,
                     stats=_STATS,
                 )
+            with pytest.raises(IndexLeaseLost):
+                await uow.index.mark_failed(index.a, fence, "limit_exceeded:symbols")
+            with pytest.raises(IndexLeaseLost):
+                await uow.index.release(index.a, fence, last_error_code="vcs_unavailable")
             await uow.commit()
 
         assert await _state(index, index.a) == stale
@@ -1221,12 +1477,12 @@ def test_claim_takes_a_free_or_expired_lease_of_the_current_generation_only(
     index: _Index,
 ) -> None:
     async def scenario() -> None:
-        assert await _try_claim(index, index.a, 1) is None
+        assert await _try_claim(index, index.a, 1) == _STALE
         await _enable(index, index.a)
-        assert await _try_claim(index, index.a, 2) is None
+        assert await _try_claim(index, index.a, 2) == _STALE
         first = await _claim(index, index.a)
         assert (first.generation, first.publication) == (1, 1)
-        assert await _try_claim(index, index.a, 1) is None
+        assert await _try_claim(index, index.a, 1) == _LEASED
         building = await _state(index, index.a)
         assert building is not None
         assert (building.status, building.reserved_publication) == ("building", 1)
@@ -1249,17 +1505,26 @@ def test_claim_takes_a_free_or_expired_lease_of_the_current_generation_only(
             "lease_token = NULL, lease_expires_at = NULL WHERE repository_id = :repository",
             index.a,
         )
-        third = await _claim(index, index.a)
-        assert third.publication == 3
-        claimed = await _state(index, index.a)
-        assert claimed is not None and (claimed.status, claimed.error_code) == ("building", None)
+        failed = await _state(index, index.a)
+        # ADR §7: a failed index is not rebuilt until the toggle is switched on again.
+        assert await _try_claim(index, index.a, 1) == _STALE
+        assert await _state(index, index.a) == failed
+        assert failed is not None
+        assert (failed.status, failed.error_code, failed.reserved_publication) == (
+            "failed",
+            "archive_unsafe",
+            2,
+        )
 
         await _purge(index, index.a)
         # Only enable re-arms a purged repository.
-        assert await _try_claim(index, index.a, 2) is None
+        assert await _try_claim(index, index.a, 2) == _STALE
         purged = await _state(index, index.a)
         assert purged is not None
-        assert (purged.generation, purged.status, purged.reserved_publication) == (2, "empty", 3)
+        assert (purged.generation, purged.status, purged.reserved_publication) == (2, "empty", 2)
+        await _enable(index, index.a)
+        rearmed = await _claim(index, index.a, 3)
+        assert (rearmed.generation, rearmed.publication) == (3, 3)
 
     asyncio.run(scenario())
 
@@ -1347,7 +1612,12 @@ def test_gc_spares_the_lease_and_waits_ten_minutes_for_displaced_rows(index: _In
         await _expire_lease(index, index.a)
         # An expired lease still protects its rows until it is revoked.
         assert await _collect(index, index.a, 10) == [0]
+        expired = await _state(index, index.a)
+        # c.py/ac03: 160 + 2·4 + 4.
+        assert expired is not None and expired.pending_bytes == 172
         assert await revoke() is True
+        revoked = await _state(index, index.a)
+        assert revoked is not None and revoked.pending_bytes == 0
         assert await revoke() is False
         live = await _claim(index, index.a)
         assert live.publication == 4
@@ -1789,16 +2059,17 @@ def test_a_duplicate_claim_waits_for_the_first_and_does_not_take_over(
             first_pid = await first.session.scalar(text("SELECT pg_backend_pid()"))
             store = first.index
             locked, release = _pause_after_lock(monkeypatch, store)
-            claiming = asyncio.create_task(store.claim_lease(index.a, 1, 600))
+            claiming = asyncio.create_task(store.claim_lease(index.a, 1, 600, _ADMISSION))
             await asyncio.wait_for(locked.wait(), 5)
             duplicate = asyncio.create_task(_try_claim(index, index.a, 1))
             await _wait_until_blocked(index, first_pid, 1, duplicate)
             release.set()
-            fence = await claiming
+            claim = await claiming
             await first.commit()
 
-        assert await asyncio.wait_for(duplicate, 5) is None
-        assert fence is not None and (fence.generation, fence.publication) == (1, 1)
+        assert await asyncio.wait_for(duplicate, 5) == _LEASED
+        assert isinstance(claim, LeaseClaim)
+        assert (claim.fence.generation, claim.fence.publication) == (1, 1)
         state = await _state(index, index.a)
         assert state is not None
         assert (state.status, state.reserved_publication) == ("building", 1)
@@ -1813,9 +2084,10 @@ def test_lease_expiry_is_checked_against_the_clock_not_the_transaction_start(
     async def scenario() -> None:
         await _enable(index, index.a)
         async with index.uow() as uow:
-            fence = await uow.index.claim_lease(index.a, 1, 1)
+            claim = await uow.index.claim_lease(index.a, 1, 1, _ADMISSION)
             await uow.commit()
-        assert fence is not None
+        assert isinstance(claim, LeaseClaim)
+        fence = claim.fence
         async with index.uow() as uow:
             started = await uow.session.scalar(text("SELECT now()"))
             state = await uow.index.get_state(index.a)
@@ -1859,6 +2131,9 @@ def test_a_publication_miss_spends_the_lease_so_the_next_wake_up_claims_at_once(
             "file_count": 1,
             "symbol_count": 1,
             "edge_count": 0,
+            # The miss also drops the attempt's pending bytes.
+            "stored_bytes": _MODULE_BYTES,
+            "pending_bytes": 0,
             "profile": _PROFILE_FIELDS,
             "stats": _STATS_FIELDS,
         }
@@ -1915,5 +2190,533 @@ def test_a_later_purge_replaces_only_a_ttl_reason(index: _Index) -> None:
         )
         assert await purge(index.b, PurgeReason.REMOVED) == disabled
         assert await purge(index.b, PurgeReason.TTL) == disabled
+
+    asyncio.run(scenario())
+
+
+# The indexer's store (#142): admission, failure, release, byte accounting and reads.
+
+
+async def _mark_failed(
+    index: _Index,
+    repository_id: UUID,
+    fence: IndexFence,
+    error_code: str,
+    stats: IndexBuildStats | None = None,
+) -> None:
+    async with index.uow() as uow:
+        await uow.index.mark_failed(repository_id, fence, error_code, stats=stats)
+        await uow.commit()
+
+
+@pytest.mark.integration
+def test_claim_is_busy_at_two_live_leases_or_one_per_installation(
+    index: _Index, code_index_database: Connection
+) -> None:
+    # A and A2 share an installation; B and C each have a Workspace of their own.
+    a2 = _sibling(code_index_database, index.a, external_id=102)
+    c = UUID(_repository(code_index_database, installation_external_id=19))
+    code_index_database.commit()
+
+    async def scenario() -> None:
+        for repository_id in (index.a, a2, index.b, c):
+            await _enable(index, repository_id)
+        await _claim(index, index.a)
+        assert await _try_claim(index, a2, 1) == _BUSY
+        await _claim(index, index.b)
+        assert await _try_claim(index, c, 1) == _BUSY
+        # STALE and LEASED are decided before BUSY.
+        assert await _try_claim(index, index.a, 1) == _LEASED
+        assert await _try_claim(index, c, 2) == _STALE
+        assert await _try_claim(index, uuid4(), 1) == _STALE
+        refused = await _state(index, c)
+        assert refused is not None
+        assert (refused.status, refused.reserved_publication, refused.lease_expires_at) == (
+            "empty",
+            0,
+            None,
+        )
+
+        # An expired lease counts neither for its installation nor in the total.
+        await _expire_lease(index, index.a)
+        assert (await _claim(index, a2)).publication == 1
+        assert await _try_claim(index, c, 1) == _BUSY
+        await _expire_lease(index, index.b)
+        assert (await _claim(index, c)).publication == 1
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.integration
+def test_concurrent_claims_wait_for_the_admission_lock(
+    index: _Index, code_index_database: Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    a2 = _sibling(code_index_database, index.a, external_id=102)
+
+    async def scenario() -> None:
+        for repository_id in (index.a, a2):
+            await _enable(index, repository_id)
+        async with index.uow() as first:
+            first_pid = await first.session.scalar(text("SELECT pg_backend_pid()"))
+            store = first.index
+            locked, release = _pause_after_lock(monkeypatch, store)
+            claiming = asyncio.create_task(store.claim_lease(index.a, 1, 600, _ADMISSION))
+            await asyncio.wait_for(locked.wait(), 5)
+            # Another state row: only the admission lock can hold this claim back.
+            sibling = asyncio.create_task(_try_claim(index, a2, 1))
+            await _wait_until_blocked(index, first_pid, 1, sibling)
+            release.set()
+            assert isinstance(await claiming, LeaseClaim)
+            await first.commit()
+
+        # It counted the committed lease of its installation instead of racing it.
+        assert await asyncio.wait_for(sibling, 5) == _BUSY
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.integration
+def test_a_claim_waits_for_a_purge_without_a_deadlock(index: _Index) -> None:
+    async def scenario() -> None:
+        for repository_id in (index.a, index.b):
+            await _enable(index, repository_id)
+        async with index.uow() as purger:
+            await purger.index.purge(index.a, PurgeReason.DISABLED)
+            purger_pid = await purger.session.scalar(text("SELECT pg_backend_pid()"))
+            # A's claim holds the admission lock while it waits for A's state row; B's
+            # claim queues behind it on the admission lock.
+            claim_a = asyncio.create_task(_try_claim(index, index.a, 1))
+            await _wait_until_blocked(index, purger_pid, 1, claim_a)
+            claim_b = asyncio.create_task(_try_claim(index, index.b, 1))
+            await _wait_until_blocked(index, purger_pid, 2, claim_a, claim_b)
+            await purger.commit()
+
+        assert await asyncio.wait_for(claim_a, 5) == _STALE
+        granted = await asyncio.wait_for(claim_b, 5)
+        assert isinstance(granted, LeaseClaim) and granted.fence.publication == 1
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.integration
+def test_mark_failed_drops_the_publication_and_gc_removes_every_row(index: _Index) -> None:
+    async def scenario() -> None:
+        failed_stats = IndexBuildStats(
+            downloaded_bytes=1_024, build_duration_ms=900_000, github_request_count=4
+        )
+        for repository_id in (index.a, index.b):
+            await _enable(index, repository_id)
+        # A is published and carries an earlier error code; B was never published.
+        await _build(index, index.a, C1, _module("aa01", 1), _importer("ab01", 1))
+        assert await _release(index, index.a, await _claim(index, index.a), "vcs_unavailable") == (
+            "ready"
+        )
+        fence_a = await _claim(index, index.a)
+        await _write(index, index.a, fence_a, IndexedFile("c.py", "ac03"))
+        fence_b = await _claim(index, index.b)
+        await _write(index, index.b, fence_b, _module("ba01", 1))
+
+        building = await _state(index, index.a)
+        async with index.uow() as uow:
+            with pytest.raises(ValueError, match="'vcs_unavailable' is not an error code"):
+                await uow.index.mark_failed(index.a, fence_a, "vcs_unavailable")
+            await uow.commit()
+        assert await _state(index, index.a) == building
+
+        await _mark_failed(index, index.a, fence_a, "limit_exceeded:symbols")
+        await _mark_failed(index, index.b, fence_b, "archive_unsafe", failed_stats)
+
+        failed_a = await _state(index, index.a)
+        assert _fields(failed_a) == {
+            "generation": 1,
+            "status": "failed",
+            "purge_reason": None,
+            "error_code": "limit_exceeded:symbols",
+            "last_error_code": "vcs_unavailable",
+            "indexed_commit_sha": None,
+            "target_commit_sha": None,
+            "reserved_publication": 3,
+            "published_publication": 0,
+            "floor_publication": 0,
+            "file_count": 0,
+            "symbol_count": 0,
+            "edge_count": 0,
+            "stored_bytes": 0,
+            "pending_bytes": 0,
+            "profile": None,
+            # Without stats a failure keeps the recorded ones.
+            "stats": _STATS_FIELDS,
+        }
+        assert failed_a is not None
+        assert (failed_a.published_at, failed_a.lease_expires_at) == (None, None)
+        assert _fields(await _state(index, index.b)) == {
+            "generation": 1,
+            "status": "failed",
+            "purge_reason": None,
+            "error_code": "archive_unsafe",
+            "last_error_code": None,
+            "indexed_commit_sha": None,
+            "target_commit_sha": None,
+            "reserved_publication": 1,
+            "published_publication": 0,
+            "floor_publication": 0,
+            "file_count": 0,
+            "symbol_count": 0,
+            "edge_count": 0,
+            "stored_bytes": 0,
+            "pending_bytes": 0,
+            "profile": None,
+            "stats": {
+                "downloaded_bytes": 1_024,
+                "build_duration_ms": 900_000,
+                "github_request_count": 4,
+            },
+        }
+        assert await _reads(index, index.a) == (None, [], [], [], [])
+        async with index.uow() as uow:
+            with pytest.raises(IndexLeaseLost):
+                await uow.index.replace_file(index.a, fence_a, _module("aa04", 1))
+            with pytest.raises(IndexLeaseLost):
+                await uow.index.mark_failed(index.a, fence_a, "limit_exceeded:edges")
+            with pytest.raises(IndexLeaseLost):
+                await uow.index.release(index.a, fence_a)
+
+        # A: publication 1 (8 rows) and the failed attempt's file; B: a file and a symbol.
+        assert await _collect(index, index.a, 100) == [9, 0]
+        assert await _collect(index, index.b, 100) == [2, 0]
+        assert await _rows(index, _COUNT_ROWS, repository=index.a) == [(0, 0, 0, 0)]
+        assert await _try_claim(index, index.a, 1) == _STALE
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.integration
+def test_release_keeps_the_last_publication_and_records_the_last_error_code(
+    index: _Index,
+) -> None:
+    async def scenario() -> None:
+        for repository_id in (index.a, index.b):
+            await _enable(index, repository_id)
+        # B was never published: a release returns it to empty.
+        fence = await _claim(index, index.b)
+        await _write(index, index.b, fence, _module("ba01", 1))
+        assert await _release(index, index.b, fence, "vcs_unavailable") == "empty"
+        released = await _state(index, index.b)
+        assert _fields(released) == {
+            "generation": 1,
+            "status": "empty",
+            "purge_reason": None,
+            "error_code": None,
+            "last_error_code": "vcs_unavailable",
+            "indexed_commit_sha": None,
+            "target_commit_sha": None,
+            "reserved_publication": 1,
+            "published_publication": 0,
+            "floor_publication": 0,
+            "file_count": 0,
+            "symbol_count": 0,
+            "edge_count": 0,
+            "stored_bytes": 0,
+            "pending_bytes": 0,
+            "profile": None,
+            "stats": _NO_STATS,
+        }
+        assert released is not None and released.lease_expires_at is None
+        assert await _collect(index, index.b, 100) == [2, 0]
+        assert await _release(index, index.b, await _claim(index, index.b)) == "empty"
+        kept = await _state(index, index.b)
+        assert kept is not None
+        assert (kept.status, kept.last_error_code) == ("empty", "vcs_unavailable")
+
+        # A keeps its publication readable through a rebuild that gave up.
+        await _build(index, index.a, C1, _module("aa01", 1))
+        fence = await _claim(index, index.a)
+        await _write(index, index.a, fence, _module("aa02", 1))
+        assert await _release(index, index.a, fence, "vcs_access_denied") == "ready"
+        stale = await _state(index, index.a)
+        assert stale is not None
+        assert (
+            stale.status,
+            stale.last_error_code,
+            stale.indexed_commit_sha,
+            stale.published_publication,
+            stale.stored_bytes,
+            stale.pending_bytes,
+            stale.lease_expires_at,
+        ) == ("ready", "vcs_access_denied", C1, 1, _MODULE_BYTES, 0, None)
+        assert await _read(index, lambda store: store.get_file(index.a, "a.py")) == _module(
+            "aa01", 1
+        )
+        async with index.uow() as uow:
+            with pytest.raises(IndexLeaseLost):
+                await uow.index.release(index.a, fence)
+            with pytest.raises(IndexLeaseLost):
+                await uow.index.replace_file(index.a, fence, _module("aa03", 1))
+        assert await _release(index, index.a, await _claim(index, index.a)) == "ready"
+        kept = await _state(index, index.a)
+        assert kept is not None and kept.last_error_code == "vcs_access_denied"
+
+        # A publication clears it.
+        await _build(index, index.a, C2, _module("aa04", 1), base=C1)
+        published = await _state(index, index.a)
+        assert published is not None
+        assert (published.indexed_commit_sha, published.last_error_code) == (C2, None)
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.integration
+def test_estimate_weights_count_the_indexes_on_each_text_column(
+    code_index_database: Connection,
+) -> None:
+    # w(c) = 1 + the number of indexes, the primary key included, that contain column c.
+    weights: dict[str, dict[str, int]] = {}
+    for table, column, indexes in code_index_database.execute(
+        text(
+            "SELECT c.relname, a.attname, count(i.indexrelid) FROM pg_attribute a "
+            "JOIN pg_class c ON c.oid = a.attrelid "
+            "LEFT JOIN pg_index i ON i.indrelid = a.attrelid AND a.attnum = ANY(i.indkey) "
+            "WHERE c.relnamespace = current_schema()::regnamespace "
+            "AND c.relname IN ('code_index_files', 'code_index_symbols', 'code_index_edges', "
+            "'code_index_imports') AND a.attnum > 0 AND NOT a.attisdropped "
+            "AND a.atttypid = 'character varying'::regtype GROUP BY 1, 2"
+        )
+    ):
+        weights.setdefault(table, {})[column] = 1 + indexes
+    assert weights == {
+        "code_index_files": {"path": 2, "blob_sha": 1},
+        "code_index_symbols": {"path": 2, "qualified_name": 2},
+        "code_index_edges": {"path": 2, "target_path": 3, "target_name": 3},
+        "code_index_imports": {"path": 2, "specifier": 2, "target_path": 2},
+    }
+    assert weights == COLUMN_WEIGHTS
+
+
+@pytest.mark.integration
+def test_pending_bytes_count_a_rewritten_file_once_and_publish_stores_them(
+    index: _Index,
+) -> None:
+    path = f"{_E}.py"  # 5 UTF-8 bytes
+    wide = IndexedFile(
+        path,
+        "b1",
+        symbols=(_symbol(path, _A, 1, 1),),
+        # A duplicate edge collapses onto one row and is counted once.
+        edges=(_uses(path, _WIDE, _A), _uses(path, _WIDE, _A)),
+        imports=(
+            ImportRecord(path, _WIDE, ImportResolution.RESOLVED, _E),
+            ImportRecord(path, "x", ImportResolution.MISSING, None),
+        ),
+    )
+    # The Python half: file 160+2·5+2, symbol 160+2·5+2·2, edge 160+2·5+3·4+3·2, imports
+    # 160+2·5+2·4+2·2 and 160+2·5+2·1.
+    assert ROW_OVERHEAD_BYTES == 160
+    assert [
+        row_bytes("code_index_files", {"path": path, "blob_sha": "b1"}),
+        row_bytes("code_index_symbols", {"path": path, "qualified_name": _A}),
+        row_bytes("code_index_edges", {"path": path, "target_path": _WIDE, "target_name": _A}),
+        row_bytes("code_index_imports", {"path": path, "specifier": _WIDE, "target_path": _E}),
+        row_bytes("code_index_imports", {"path": path, "specifier": "x", "target_path": None}),
+    ] == [172, 174, 188, 182, 172]
+    wide_bytes = 888
+
+    async def scenario() -> None:
+        await _enable(index, index.a)
+        fence = await _claim(index, index.a)
+        storages: list[IndexStorage] = []
+        for file in (wide, wide, IndexedFile(path, "b2"), wide, _module("aa01", 1)):
+            async with index.uow() as uow:
+                storages.append(await uow.index.replace_file(index.a, fence, file))
+                await uow.commit()
+        # A rewrite first subtracts the SQL estimate of the rows it deletes, so the
+        # Python estimate of the new rows is never counted on top of the old ones.
+        assert storages == [
+            IndexStorage(stored_bytes=0, pending_bytes=wide_bytes),
+            IndexStorage(stored_bytes=0, pending_bytes=wide_bytes),
+            IndexStorage(stored_bytes=0, pending_bytes=172),
+            IndexStorage(stored_bytes=0, pending_bytes=wide_bytes),
+            IndexStorage(stored_bytes=0, pending_bytes=wide_bytes + _MODULE_BYTES),
+        ]
+        # The SQL half over the published rows equals the Python half of the writes.
+        assert await _publish(index, index.a, fence, C1)
+        full = await _state(index, index.a)
+        assert full is not None
+        assert (full.stored_bytes, full.pending_bytes) == (wide_bytes + _MODULE_BYTES, 0)
+
+        fence = await _claim(index, index.a)
+        rewritten = IndexedFile(
+            "a.py", "aa02", symbols=(_symbol("a.py", "foo", 3, 4), _symbol("a.py", "qux", 6, 7))
+        )
+        async with index.uow() as uow:
+            assert await uow.index.replace_file(index.a, fence, rewritten) == IndexStorage(
+                stored_bytes=wide_bytes + _MODULE_BYTES, pending_bytes=520
+            )
+            await uow.commit()
+        assert await _publish(index, index.a, fence, C2, base=C1, full=False)
+        incremental = await _state(index, index.a)
+        assert incremental is not None
+        assert (incremental.stored_bytes, incremental.pending_bytes) == (wide_bytes + 520, 0)
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.integration
+def test_repository_quota_refuses_the_claim_and_fails_the_index(index: _Index) -> None:
+    async def scenario() -> None:
+        stored = _MODULE_BYTES + _IMPORTER_BYTES
+        for repository_id, prefix in ((index.a, "a"), (index.b, "b")):
+            await _enable(index, repository_id)
+            await _build(
+                index, repository_id, C1, _module(f"{prefix}a01", 1), _importer(f"{prefix}b01", 1)
+            )
+        await _execute(
+            index,
+            f"UPDATE code_index_states SET target_commit_sha = '{C2}' "
+            "WHERE repository_id = :repository",
+            index.a,
+        )
+        at_quota = dataclasses.replace(_ADMISSION, repository_storage_bytes=stored)
+        over_quota = dataclasses.replace(_ADMISSION, repository_storage_bytes=stored - 1)
+
+        claim = await _try_claim(index, index.a, 1, at_quota)
+        assert isinstance(claim, LeaseClaim)
+        # The target snapshot, and the bytes of A's Workspace: A's own.
+        assert (claim.fence.publication, claim.target_commit_sha, claim.workspace_bytes) == (
+            2,
+            C2,
+            stored,
+        )
+        assert await _release(index, index.a, claim.fence) == "ready"
+
+        assert await _try_claim(index, index.a, 1, over_quota) == ClaimRefused(
+            ClaimRefusal.QUOTA, "limit_exceeded:repository_storage"
+        )
+        assert _fields(await _state(index, index.a)) == {
+            "generation": 1,
+            "status": "failed",
+            "purge_reason": None,
+            "error_code": "limit_exceeded:repository_storage",
+            "last_error_code": None,
+            "indexed_commit_sha": None,
+            "target_commit_sha": C2,
+            "reserved_publication": 2,
+            "published_publication": 0,
+            "floor_publication": 0,
+            "file_count": 0,
+            "symbol_count": 0,
+            "edge_count": 0,
+            "stored_bytes": 0,
+            "pending_bytes": 0,
+            "profile": None,
+            "stats": _STATS_FIELDS,
+        }
+        assert await _reads(index, index.a) == (None, [], [], [], [])
+        assert await _collect(index, index.a, 100) == [8, 0]
+        # The quota is per repository: B holds as many bytes and keeps its index.
+        b = await _state(index, index.b)
+        assert b is not None and (b.status, b.stored_bytes) == ("ready", stored)
+        assert await _rows(index, _COUNT_ROWS, repository=index.b) == [(2, 2, 2, 2)]
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.integration
+def test_workspace_quota_counts_other_builds_and_spares_another_workspace(
+    index: _Index, code_index_database: Connection
+) -> None:
+    # S shares A's Workspace through another installation, so it never makes A busy.
+    s = _sibling(code_index_database, index.a, external_id=101, installation_external_id=19)
+
+    async def scenario() -> None:
+        for repository_id in (index.a, s, index.b):
+            await _enable(index, repository_id)
+        await _build(index, index.a, C1, _module("aa01", 1))
+        await _build(index, index.b, C1, _module("ba01", 1))
+        building = await _try_claim(index, s, 1)
+        assert isinstance(building, LeaseClaim) and building.workspace_bytes == _MODULE_BYTES
+        await _write(index, s, building.fence, _importer("sb01", 1))
+        # A's stored bytes and the pending bytes of S's build.
+        workspace = _MODULE_BYTES + _IMPORTER_BYTES
+        at_quota = dataclasses.replace(_ADMISSION, workspace_storage_bytes=workspace)
+        over_quota = dataclasses.replace(_ADMISSION, workspace_storage_bytes=workspace - 1)
+
+        claim = await _try_claim(index, index.a, 1, at_quota)
+        assert isinstance(claim, LeaseClaim) and claim.workspace_bytes == workspace
+        assert await _release(index, index.a, claim.fence) == "ready"
+        # A ready repository fails too; its publication is no longer used.
+        assert await _try_claim(index, index.a, 1, over_quota) == ClaimRefused(
+            ClaimRefusal.QUOTA, "limit_exceeded:workspace_storage"
+        )
+        failed = await _state(index, index.a)
+        assert failed is not None
+        assert (
+            failed.status,
+            failed.error_code,
+            failed.published_publication,
+            failed.stored_bytes,
+        ) == ("failed", "limit_exceeded:workspace_storage", 0, 0)
+
+        other = await _try_claim(index, index.b, 1, over_quota)
+        assert isinstance(other, LeaseClaim) and other.workspace_bytes == _MODULE_BYTES
+        # The build that filled the Workspace keeps running.
+        running = await _state(index, s)
+        assert running is not None
+        assert (running.status, running.pending_bytes) == ("building", _IMPORTER_BYTES)
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.integration
+def test_incremental_reads_page_through_the_visible_files_and_imports(index: _Index) -> None:
+    resolved = ImportRecord("c.py", ".a", ImportResolution.RESOLVED, "a.py")
+    dynamic = ImportRecord("c.py", ".a", ImportResolution.DYNAMIC, None)
+
+    async def scenario() -> None:
+        for repository_id in (index.a, index.b):
+            await _enable(index, repository_id)
+        await _build(
+            index,
+            index.a,
+            C1,
+            _module("aa01", 1),
+            _importer("ab01", 1),
+            IndexedFile("c.py", "ac01", imports=(resolved, dynamic)),
+        )
+        await _build(index, index.b, C1, IndexedFile("a.py", "ba01"))
+        # An unpublished attempt's rows stay invisible.
+        fence = await _claim(index, index.a)
+        await _write(
+            index,
+            index.a,
+            fence,
+            IndexedFile("d.py", "ad02", symbols=(_symbol("d.py", "foo", 1, 1),)),
+        )
+
+        async with index.uow() as uow:
+            store = uow.index
+            assert await store.iter_files(index.a, None, 2) == [("a.py", "aa01"), ("b.py", "ab01")]
+            assert await store.iter_files(index.a, "b.py", 2) == [("c.py", "ac01")]
+            assert await store.iter_files(index.a, "c.py", 2) == []
+            first = await store.iter_imports(index.a, None, 2)
+            assert first == [
+                ImportRecord("b.py", ".a", ImportResolution.RESOLVED, "a.py"),
+                ImportRecord("b.py", "requests", ImportResolution.EXTERNAL, None),
+            ]
+            # The keyset includes the resolution: one specifier, two records.
+            assert await store.iter_imports(index.a, first[-1], 1) == [resolved]
+            assert await store.iter_imports(index.a, resolved, 1) == [dynamic]
+            assert await store.iter_imports(index.a, dynamic, 1) == []
+            assert await store.visible_counts(
+                index.a, ["a.py", "b.py", "d.py", "e.py"]
+            ) == IndexCounts(file_count=2, symbol_count=2, edge_count=2)
+            assert await store.visible_counts(index.a, []) == IndexCounts(0, 0, 0)
+            assert await store.iter_files(index.b, None, 10) == [("a.py", "ba01")]
+            assert await store.iter_imports(index.b, None, 10) == []
+
+        await _purge(index, index.a)
+        async with index.uow() as uow:
+            assert await uow.index.iter_files(index.a, None, 10) == []
+            assert await uow.index.iter_imports(index.a, None, 10) == []
+            assert await uow.index.visible_counts(index.a, ["a.py", "b.py"]) == IndexCounts(0, 0, 0)
 
     asyncio.run(scenario())
