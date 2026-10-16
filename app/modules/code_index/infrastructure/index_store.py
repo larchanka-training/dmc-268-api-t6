@@ -135,7 +135,7 @@ def _failure(error_code: str) -> dict[str, Any]:
 
 
 def _stats(stats: IndexBuildStats) -> dict[str, int]:
-    """The job metrics a failure or a release records."""
+    """The job metrics a failure, a release or a publication miss records."""
     return {
         "downloaded_bytes": stats.downloaded_bytes,
         "build_duration_ms": stats.build_duration_ms,
@@ -683,9 +683,14 @@ class SqlAlchemyCodeIndexStore:
             or published >= mine
             or (not full and await self._has_abandoned(repository_id, fence, published))
         ):
-            # A miss spends the lease like a publication, so the next wake-up claims at once.
+            # A miss spends the lease like a publication, so the next wake-up claims at once,
+            # and records the job's metrics as a release does.
             await self._update_state(
-                repository_id, lease_token=None, lease_expires_at=None, pending_bytes=0
+                repository_id,
+                lease_token=None,
+                lease_expires_at=None,
+                pending_bytes=0,
+                **_stats(stats),
             )
             return False
         if not full:
