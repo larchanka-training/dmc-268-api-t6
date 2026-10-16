@@ -464,12 +464,14 @@ _FORGED_SPARSE_MAP = b"1000000000000\n" + b"1\n" * 150_000
 @pytest.mark.parametrize(
     ("records", "data"),
     [
+        # Malformed maps: a well-formed one is refused later anyway, as a sparse member,
+        # while `int()` of a malformed one would end the pass as `vcs_unavailable`.
         pytest.param(
-            {"GNU.sparse.size": "10", "GNU.sparse.offset": "0", "GNU.sparse.numbytes": "1"},
+            {"GNU.sparse.size": "10", "GNU.sparse.offset": "x", "GNU.sparse.numbytes": "1"},
             b"x",
             id="pax-sparse-0.0",
         ),
-        pytest.param({"GNU.sparse.map": "0,1", "GNU.sparse.size": "10"}, b"x", id="pax-sparse-0.1"),
+        pytest.param({"GNU.sparse.map": "x", "GNU.sparse.size": "10"}, b"x", id="pax-sparse-0.1"),
         pytest.param(
             {
                 "GNU.sparse.major": "1",
