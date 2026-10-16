@@ -14,7 +14,8 @@ _LOGGER = logging.getLogger(__name__)
 WORKER_LEADER_LOCK = 3_468_001
 RECONCILER_LEADER_LOCK = 3_468_002
 # Not a leader lock: a transaction advisory lock, held by every index lease claim while
-# it counts live leases (ADR 0001 §6.2, §7); listed here so the keys stay distinct.
+# it counts live leases and by every index batch write while it sums its Workspace's
+# bytes (ADR 0001 §6.2, §7); listed here so the keys stay distinct.
 CODE_INDEX_ADMISSION_LOCK = 3_468_003
 
 

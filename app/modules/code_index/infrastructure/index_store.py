@@ -1,9 +1,10 @@
 """PostgreSQL adapter of the graph index store, fenced per ADR 0001 §6.2 (#141, #142).
 
 Every statement filters by `repository_id`, except the admission sums of `claim_lease`
-over other repositories' state rows. The store runs on the caller's session and never
-commits. Lease expiry is compared with `clock_timestamp()` read after the state row is
-locked, never with the transaction start time.
+and the Workspace sum of `replace_file` over other repositories' state rows. The store
+runs on the caller's session and never commits. Lease expiry is compared with
+`clock_timestamp()` read after the state row is locked, never with the transaction start
+time.
 """
 
 from __future__ import annotations
@@ -130,6 +131,15 @@ def _failure(error_code: str) -> dict[str, Any]:
         "symbol_count": 0,
         "edge_count": 0,
         "stored_bytes": 0,
+    }
+
+
+def _stats(stats: IndexBuildStats) -> dict[str, int]:
+    """The job metrics a failure or a release records."""
+    return {
+        "downloaded_bytes": stats.downloaded_bytes,
+        "build_duration_ms": stats.build_duration_ms,
+        "github_request_count": stats.github_request_count,
     }
 
 
@@ -309,6 +319,14 @@ class SqlAlchemyCodeIndexStore:
             await self._session.scalar(statement.execution_options(populate_existing=True)),
         )
 
+    async def _admission_lock(self) -> None:
+        # Claims and batch writes take it first, before any state row lock, so they run
+        # one at a time without a lock-order cycle: a claim counts live leases, and a
+        # batch reads the Workspace bytes, with every earlier batch committed (ADR §6.2).
+        await self._session.execute(
+            text("SELECT pg_advisory_xact_lock(:key)"), {"key": CODE_INDEX_ADMISSION_LOCK}
+        )
+
     async def _clock(self) -> datetime:
         # Read after the lock: an expiry compared with now() would use the start of the
         # transaction (ADR §6.2).
@@ -431,11 +449,7 @@ class SqlAlchemyCodeIndexStore:
     async def claim_lease(
         self, repository_id: UUID, generation: int, lease_seconds: int, admission: IndexAdmission
     ) -> LeaseClaim | ClaimRefused:
-        # Claims count live leases one at a time (ADR §6.2). No other step takes this
-        # lock, so it orders before every state row lock without a cycle.
-        await self._session.execute(
-            text("SELECT pg_advisory_xact_lock(:key)"), {"key": CODE_INDEX_ADMISSION_LOCK}
-        )
+        await self._admission_lock()
         state = await self._state(repository_id, lock=True)
         if (
             state is None
@@ -474,7 +488,7 @@ class SqlAlchemyCodeIndexStore:
             pending_bytes=0,
             status=IndexStatus.BUILDING if state.status == IndexStatus.EMPTY else state.status,
         )
-        return LeaseClaim(fence, state.target_commit_sha, workspace_bytes)
+        return LeaseClaim(fence, state.target_commit_sha)
 
     async def _workspace_bytes(self, repository_id: UUID, now: datetime) -> int:
         """Stored bytes of the other repositories of this one's Workspace, and their
@@ -551,9 +565,11 @@ class SqlAlchemyCodeIndexStore:
         self, repository_id: UUID, fence: IndexFence, file: IndexedFile
     ) -> IndexStorage:
         _validate(file)
+        # The Workspace bytes this batch returns must include every other batch's pending
+        # bytes, so batches serialize with each other and with claims on this lock.
+        await self._admission_lock()
         # FOR NO KEY UPDATE, not ADR §6.2's FOR SHARE: the batch updates the state row's
-        # pending bytes, so it takes the lock it ends up holding. Two batches of one lease
-        # run one after the other instead of deadlocking on that UPDATE; a claim, purge or
+        # pending bytes, so it takes the lock it ends up holding. A purge or a
         # publication (FOR UPDATE) still waits for the batch.
         await self._fenced(repository_id, fence, share=False, key_share=True)
         removed = 0
@@ -637,7 +653,12 @@ class SqlAlchemyCodeIndexStore:
                 .execution_options(synchronize_session=False)
             )
         ).one()
-        return IndexStorage(stored_bytes=storage[0], pending_bytes=storage[1])
+        others = await self._workspace_bytes(repository_id, await self._clock())
+        return IndexStorage(
+            stored_bytes=storage[0],
+            pending_bytes=storage[1],
+            workspace_bytes=storage[0] + storage[1] + others,
+        )
 
     async def publish(
         self,
@@ -743,18 +764,20 @@ class SqlAlchemyCodeIndexStore:
         await self._fenced(repository_id, fence, share=False)
         values = _failure(error_code)
         if stats is not None:
-            values |= {
-                "downloaded_bytes": stats.downloaded_bytes,
-                "build_duration_ms": stats.build_duration_ms,
-                "github_request_count": stats.github_request_count,
-            }
+            values |= _stats(stats)
         await self._update_state(repository_id, **values)
 
     async def release(
-        self, repository_id: UUID, fence: IndexFence, *, last_error_code: str | None = None
+        self,
+        repository_id: UUID,
+        fence: IndexFence,
+        *,
+        last_error_code: str | None = None,
+        stats: IndexBuildStats | None = None,
     ) -> IndexStatus:
         state = await self._fenced(repository_id, fence, share=False)
-        # The last publication stays readable; GC removes this attempt's rows.
+        # The last publication stays readable; GC removes this attempt's rows. Its
+        # counters and stored bytes stay; only the job metrics are this attempt's.
         status = IndexStatus.READY if state.published_publication > 0 else IndexStatus.EMPTY
         values: dict[str, Any] = {
             "status": status,
@@ -764,6 +787,8 @@ class SqlAlchemyCodeIndexStore:
         }
         if last_error_code is not None:
             values["last_error_code"] = last_error_code
+        if stats is not None:
+            values |= _stats(stats)
         await self._update_state(repository_id, **values)
         return status
 
