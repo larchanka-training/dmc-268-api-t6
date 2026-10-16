@@ -30,11 +30,18 @@ class SubprocessSourceParser:
     """``SourceParser`` backed by a worker process that lives until ``aclose``.
 
     The worker is started on the first file and restarted after it is killed or dies, so
-    a run pays for one process start in the usual case.
+    a run pays for one process start in the usual case. ``attempt_cpu_seconds`` is the CPU
+    budget of the parser's lifetime; ``None`` leaves only the per-file limit.
     """
 
-    def __init__(self, *, python: str = sys.executable) -> None:
+    def __init__(
+        self,
+        *,
+        python: str = sys.executable,
+        attempt_cpu_seconds: float | None = MAX_PARSE_CPU_SECONDS_PER_ATTEMPT,
+    ) -> None:
         self._python = python
+        self._attempt_cpu_seconds = attempt_cpu_seconds
         self._process: asyncio.subprocess.Process | None = None
         self._cpu_spent = 0.0
 
@@ -60,7 +67,8 @@ class SubprocessSourceParser:
         return results
 
     async def _parse(self, request: ParseRequest) -> AstFacts | AstFailureReason:
-        if self._cpu_spent >= MAX_PARSE_CPU_SECONDS_PER_ATTEMPT:
+        budget = self._attempt_cpu_seconds
+        if budget is not None and self._cpu_spent >= budget:
             return AstFailureReason.AST_TIMEOUT
         first = self._process is None or self._process.returncode is not None
         if first:
