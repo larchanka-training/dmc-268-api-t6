@@ -1761,6 +1761,79 @@ def test_an_answer_without_usage_is_charged_by_the_estimate(empty_usage: bool) -
     assert usage.cost_usd > 0
 
 
+# A retrieved block of 1 200 characters next to 300 system and 600 user characters, at the
+# default 3 characters per token: 100 + 200 + 400 = 700 tokens wherever the block sits.
+_RETRIEVED = "r" * 1_200
+_BLOCK_POSITIONS = [
+    pytest.param(
+        (ChatMessage("system", "s" * 300 + _RETRIEVED), ChatMessage("user", "u" * 600)),
+        id="system-message",
+    ),
+    pytest.param(
+        (ChatMessage("system", "s" * 300), ChatMessage("user", "u" * 600 + _RETRIEVED)),
+        id="user-message",
+    ),
+    pytest.param(
+        (
+            ChatMessage("system", "s" * 300),
+            ChatMessage("user", "u" * 600),
+            ChatMessage("user", _RETRIEVED),
+        ),
+        id="extra-message",
+    ),
+]
+
+
+async def _generate_messages(harness: Harness, messages: tuple[ChatMessage, ...]) -> GatewayResult:
+    async with httpx.AsyncClient(transport=httpx.MockTransport(harness._handle)) as client:
+        return await harness.gateway(client).generate(
+            StructuredTask(
+                operation="review",
+                messages=messages,
+                schema=ResponseSchema("ReviewOutput", {"type": "object"}),
+                validate=lambda content: json.loads(content),
+            ),
+            harness.run,
+        )
+
+
+@pytest.mark.parametrize("messages", _BLOCK_POSITIONS)
+def test_every_prompt_block_is_estimated_and_charged_to_its_run(
+    messages: tuple[ChatMessage, ...],
+) -> None:
+    body = {"model": "local", "choices": [{"message": {"content": "{}"}, "finish_reason": "stop"}]}
+    harness = Harness([httpx.Response(200, json=body)])
+
+    asyncio.run(_generate_messages(harness, messages))
+
+    assert harness.trace.records[0][1].input_tokens_estimate == 700
+    ((context, usage),) = harness.ledger.events
+    assert (context.run_id, context.workspace_id, usage.tokens_in) == (RUN_ID, WORKSPACE_ID, 700)
+
+
+@pytest.mark.parametrize("messages", _BLOCK_POSITIONS)
+@pytest.mark.parametrize(("spent", "calls"), [("0.497300", 1), ("0.497301", 0)])
+def test_run_cost_limit_prices_every_prompt_block_before_the_call(
+    messages: tuple[ChatMessage, ...], spent: str, calls: int
+) -> None:
+    # PRIMARY: 700 input tokens x $1/Mtok + 1 000 reserved output tokens x $2/Mtok = $0.002700;
+    # the fast run limit is $0.50, so $0.497300 already spent still allows the call.
+    harness = Harness([completion("{}")])
+    asyncio.run(
+        harness.ledger.record(
+            harness.run, LlmUsage("eurouter", "m", "review", 1, 1, 0, Decimal(spent))
+        )
+    )
+
+    if calls:
+        asyncio.run(_generate_messages(harness, messages))
+    else:
+        with pytest.raises(LlmCallFailed) as caught:
+            asyncio.run(_generate_messages(harness, messages))
+        assert caught.value.error_code is LlmErrorCode.BUDGET_EXCEEDED
+    assert len(harness.requests) == calls
+
+
 def test_a_failed_trace_write_does_not_discard_the_answer(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
