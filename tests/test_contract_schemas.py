@@ -1,4 +1,5 @@
-"""Contract tests for the review.run/v1 and review.publish/v1 queue message schemas (#20).
+"""Contract tests for the review.run/v1, review.publish/v1 (#20) and index.repo/v1 (#142)
+queue message schemas.
 
 No database involved: these schemas and fixtures describe RabbitMQ pointer messages
 (SYSTEM_DESIGN.md §7.2), not HTTP or persistence contracts.
@@ -20,7 +21,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 SCHEMAS_DIR = REPO_ROOT / "contracts" / "schemas"
 EXAMPLES_DIR = REPO_ROOT / "contracts" / "examples"
 
-MESSAGES = ["review.run.v1", "review.publish.v1"]
+MESSAGES = ["review.run.v1", "review.publish.v1", "index.repo.v1"]
 
 Mutator = Callable[[dict[str, Any]], dict[str, Any]]
 
@@ -109,6 +110,15 @@ PUBLISH_REQUIRED_KEYS = [
     "review_event",
 ]
 
+INDEX_REQUIRED_KEYS = [
+    "schema",
+    "message_id",
+    "repository_id",
+    "generation",
+    "attempt",
+    "requested_at",
+]
+
 
 def _missing_key_cases(name: str, keys: list[str]) -> list[Any]:
     return [
@@ -187,7 +197,39 @@ PUBLISH_MUTATIONS = [
 ]
 
 
-@pytest.mark.parametrize(("name", "mutate"), [*RUN_MUTATIONS, *PUBLISH_MUTATIONS])
+INDEX_MUTATIONS = [
+    *_missing_key_cases("index.repo.v1", INDEX_REQUIRED_KEYS),
+    pytest.param("index.repo.v1", _add_extra, id="index.repo.v1-extra-key"),
+    pytest.param(
+        "index.repo.v1",
+        (lambda d: _set(d, "generation", 0)),
+        id="index.repo.v1-generation-zero",
+    ),
+    pytest.param(
+        "index.repo.v1", (lambda d: _set(d, "attempt", 0)), id="index.repo.v1-attempt-zero"
+    ),
+    pytest.param(
+        "index.repo.v1", (lambda d: _set(d, "attempt", 4)), id="index.repo.v1-attempt-four"
+    ),
+    pytest.param(
+        "index.repo.v1",
+        (lambda d: _set(d, "message_id", "b3c1…")),
+        id="index.repo.v1-placeholder-id",
+    ),
+    pytest.param(
+        "index.repo.v1",
+        (lambda d: _set(d, "repository_id", "repo_1")),
+        id="index.repo.v1-prefixed-id",
+    ),
+    pytest.param(
+        "index.repo.v1",
+        (lambda d: _set(d, "schema", "index.repo/v2")),
+        id="index.repo.v1-foreign-schema",
+    ),
+]
+
+
+@pytest.mark.parametrize(("name", "mutate"), [*RUN_MUTATIONS, *PUBLISH_MUTATIONS, *INDEX_MUTATIONS])
 def test_mutation_is_rejected(name: str, mutate: Mutator) -> None:
     mutated = mutate(_example(name))
 
