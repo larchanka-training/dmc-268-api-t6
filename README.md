@@ -265,7 +265,7 @@ uv run pytest -m integration -rs
 | Variable | Needed by | Notes |
 |---|---|---|
 | `TEST_DATABASE_URL` | every integration test | Each test creates a random schema, migrates it and drops only it, so the database of the local stack is safe to use. The user needs `CREATE SCHEMA`. |
-| `TEST_RABBITMQ_URL` | worker, rerun and cancel tests | The tests delete and redeclare the review topology. Give them their own virtual host (`/test` above), never `/`, where the compose `worker` consumes. |
+| `TEST_RABBITMQ_URL` | worker, index queue, rerun and cancel tests | The tests delete and redeclare the review and index topologies. Give them their own virtual host (`/test` above), never `/`, where the compose `worker` consumes. |
 
 CI runs the same tests in the job `Python lint / type / test` and fails on a skipped one.
 

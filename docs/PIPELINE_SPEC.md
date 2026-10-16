@@ -216,11 +216,13 @@ RabbitMQ пересылает dead-letter с исходным routing key, ес�
 |---|---|---|---|
 | `retry.30s.fast`, `retry.2m.fast`, `retry.10m.fast` | 30 000 / 120 000 / 600 000 | `reviews` | `review.run.fast` |
 | `retry.30s.deep`, `retry.2m.deep`, `retry.10m.deep` | 30 000 / 120 000 / 600 000 | `reviews` | `review.run.deep` |
+| `index.repo.retry.30s`, `index.repo.retry.2m`, `index.repo.retry.10m` — routing key в `code_index.retry` (#142) | 30 000 / 120 000 / 600 000 | `code_index` | `index.repo` |
 
 - TTL задан на очереди, а не на сообщении, поэтому в очереди одной задержки сообщения истекают по порядку.
 - Аргументы очереди после объявления не меняются. #34 объявляет их сразу в таком виде, иначе понадобятся удаление и повторное объявление.
 - Свойство `priority` (rerun — 9) при dead-letter сохраняется.
 - У `review.publish` retry-очереди нет: публикация повторяется внутри процесса (§5.2).
+- Retry-очереди `index.repo` объявляет consumer индексатора на своём канале вместе с `code_index` и `code_index.dlx` (SD §7.4); TTL — из тех же задержек.
 
 ### 4.4 DLQ
 
@@ -228,6 +230,7 @@ RabbitMQ пересылает dead-letter с исходным routing key, ес�
 - `runs.attempt` и AMQP `x-attempt` — независимые бюджеты: первый увеличивается при доменном claim, второй — при исключении, вышедшем из обработчика. `x-death` — диагностика, в бюджет неожиданных сбоев не входит. Копия после неожиданной ошибки публикуется в `reviews` с исходным routing key доставки (`review.run.{fast,deep}` или `review.publish`).
 - Сбои классов без retry подтверждаются ack без DLQ: причина уже записана в PG (`error_code`, `run_actions`).
 - DLQ читает оператор. Реконсилер её не разбирает. При исчерпании доменных попыток Run уже `failed` и повторяется через rerun; при невалидном сообщении или неожиданных ошибках оператор сначала сверяет PG и логи: Run может отсутствовать или остаться в прежнем состоянии.
+- В `code_index.dlq` (через `code_index.dlx`, хранение 7 дней) попадают сообщение `index.repo`, не прошедшее `contracts/schemas/index.repo.v1.schema.json`, с чужим `schema` или с `message_id`, не выведенным из полей, и сообщение после третьей неожиданной ошибки обработчика (`x-attempt`, копия — в `code_index` с ключом `index.repo`). Исходы FAILED, RELEASED, LEASE_LOST и TRANSIENT на третьей попытке подтверждаются ack без DLQ: причина уже в `code_index_states` (`error_code`, `last_error_code`), SD §7.4.
 
 ### 4.5 Лимиты вызовов и стоимости
 
@@ -238,6 +241,30 @@ RabbitMQ пересылает dead-letter с исходным routing key, ес�
 - При неизвестной валюте, некорректной стоимости или счётчиках токенов, недоступном курсе для уже оплаченного EUR-ответа либо невозможности представить результат в USD оплаченный ответ не теряется: сырой ответ остаётся в `llm.call`, корректные счётчики токенов сохраняются, а неизвестные заменяются предварительной оценкой входа, максимумом выхода и нулём чтения кэша. В `usage_events.cost_usd` записывается консервативная оценка по цене модели без скидки на кэш, не меньше предварительного резерва входа и максимума выхода. Если сумма `usage.cost` и валюта пригодны, при ошибке других метаданных берётся максимум этой суммы в USD и оценки; невалидная или непредставимая сумма в этот максимум не входит. Шлюз добавляет `paid_metadata_error: true` только в метаданные `request` записи `llm.call` для такого оплаченного ответа (в остальных вызовах поле отсутствует), завершает вызов явной ошибкой `llm_invalid_output` без repair, fallback и retry прогона; исходную EUR-сумму он никогда не записывает как USD. Если watchdog отменит ожидание курса после оплаченного ответа, запись консервативной стоимости и сырого ответа завершается перед распространением отмены, без второго LLM-вызова.
 - Входные токены: fast 60 000, deep 150 000 (SD §13). Превышение по предварительному подсчёту — класс «переполнение контекста».
 - Предварительная оценка входа (`input_tokens_estimate`) считает каждый блок prompt — в system, user и любом дополнительном сообщении; её же получают ответ без `usage` (`tokens_in` в `usage_events`) и проверка лимита run до вызова (#145). Поэтому блоки RAG учитываются, как только они отрендерены в сообщения (#144); фактический расход пишется в `usage_events` своего run (`run_id` NOT NULL, FK `runs`), и дневной бюджет Workspace считает его как прежде.
+
+### 4.6 Очередь `index.repo` (#142)
+
+Задание индекса — не Run: доменного счётчика нет, номер попытки несёт поле `attempt`
+сообщения (1–3), а `x-attempt` считает исключения обработчика, как в §4.1. Исходы и действия
+с доставкой — SD §7.4.
+
+| Ситуация | Задержка | Очередь |
+|---|---|---|
+| TRANSIENT после попытки 1 | 30 с | `index.repo.retry.30s` |
+| TRANSIENT после попытки 2 | 2 мин | `index.repo.retry.2m` |
+| `vcs_rate_limited` или `Retry-After` | не меньше 2 мин; `Retry-After` > 2 мин → 10 мин, consumer не ждёт в процессе | `index.repo.retry.2m` / `index.repo.retry.10m` |
+| TRANSIENT на попытке 3 | — | ack: `last_error_code` записан, последняя публикация остаётся |
+| BUSY: лимит параллельности | 30 с, тот же `attempt` | `index.repo.retry.30s` |
+| LEASED повторной доставки | 10 мин, не больше двух раз (`x-lease-wait`) | `index.repo.retry.10m` |
+
+- Лимит параллельности — `CODE_INDEX_MAX_CONCURRENT` = 2 lease на весь деплой и
+  `CODE_INDEX_MAX_CONCURRENT_PER_INSTALLATION` = 1 на установку. Его проверяет claim под
+  advisory-локом `CODE_INDEX_ADMISSION_LOCK`, отказ — BUSY. Процесс берёт одну доставку за
+  раз (`prefetch_count=1`).
+- Дедлайн задания `CODE_INDEX_DEADLINE_SECONDS` = 900 с, не больше 1500 с: ack приходит
+  раньше `consumer_timeout` брокера. Lease `CODE_INDEX_LEASE_SECONDS` = 1200 с, не меньше
+  дедлайна + 60 с. Soft cutoff очистки `CODE_INDEX_SOFT_CUTOFF_SECONDS` = 300 с, меньше
+  дедлайна. Недопустимое значение любой `CODE_INDEX_*` не даёт worker стартовать.
 
 ---
 
@@ -275,6 +302,8 @@ Fallback-модель — вторая модель шлюза с тем же st
 | 401 | `github.publish_review` | подтверждённый отказ авторизации | одно обновление токена, безопасный повтор; затем access failure | `failed`, `github_forbidden` | check-run `neutral`, если доступен | `failed` |
 
 Ошибка при обновлении check-run состояние Run не меняет: пишется лог и метрика.
+
+**Индексатор (#142).** Источник снимка ([github_snapshot_source.py](../app/modules/code_index/infrastructure/github_snapshot_source.py)) переводит ответы GitHub в коды порта без привязки к провайдеру. 5xx, таймаут 10 с, сбой транспорта и 401 → `vcs_unavailable`; 429 и 403 с `Retry-After` или `X-RateLimit-Remaining: 0` → `vcs_rate_limited`. Оба — TRANSIENT, retry по §4.6; `Retry-After` читается в целых секундах и не больше суток, иной формат задержки не даёт. 403 без признаков лимита и 404 → `vcs_access_denied`: RELEASED, lease снимается с `last_error_code`, без retry. Пустой репозиторий (409) или репозиторий без default branch — `empty` без ошибки. Редирект архива не на `codeload.github.com` → `vcs_unavailable`; архив больше `CODE_INDEX_MAX_DOWNLOAD_BYTES` → `failed`, `limit_exceeded:download_bytes`. Installation-токен каждое задание получает заново, поэтому попытка после 401 идёт с новым токеном.
 
 **План доставки #107.** Канонические формулы и marker заданы в CONTEXT_AND_VERIFICATION_SPEC §10: `publication_key` включает provider/repository/PR, `run_id`, `head_sha`, `diff_snapshot_id`, `final_result_digest`; `operation_key` — ключ публикации, ordinal и точный `payload_digest`. Публикационный план с основным и body-only вариантом фиксируется до T8. При retry запрещены новый LLM-вызов, пересборка summary текущим шаблоном, изменение event/координат или повторное хеширование старого `findings_hash` как идентичности. Rerun одного head, включая пустые findings, получает собственный ключ.
 
@@ -494,6 +523,9 @@ UI рисует диапазон `[newLine ?? oldLine, endLine ?? newLine ?? old
 |---|---|---|---|
 | `review.run/v1` | `contracts/schemas/review.run.v1.schema.json` | `contracts/examples/review.run.v1.json` | webhook-worker (T1, T6), worker (sweep, T2), portal-api (T3, T6, реконсилер) → worker |
 | `review.publish/v1` | `contracts/schemas/review.publish.v1.schema.json` | `contracts/examples/review.publish.v1.json` | worker (T8), реконсилер (T17) → publisher (MVP — consumer `review.publish` в процессе worker) |
+| `index.repo/v1` | `contracts/schemas/index.repo.v1.schema.json` | `contracts/examples/index.repo.v1.json` | worker (`AmqpIndexWakeups`: повторное пробуждение задания), триггеры #143 → индексатор графа в worker (#142) |
+
+В `index.repo/v1` `message_id` — UUIDv5 от `repository_id:generation:requested_at` в пространстве имён `MESSAGE_ID_NAMESPACE` ([amqp.py](../app/modules/code_index/infrastructure/amqp.py)); схемой это не выражается (указано в `description`), consumer отвергает в DLQ сообщение с другим id. Фикстура несёт выведенный так id.
 
 Фикстуры — строгий JSON вместо jsonc из SD §7.2. Что изменилось по сравнению с SD §7.2:
 
