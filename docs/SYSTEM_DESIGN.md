@@ -504,15 +504,30 @@ sequenceDiagram
   participant MQ as RabbitMQ
 
   B->>P: POST /api/runs/{id}/rerun
-  P->>PG: PR открыт? есть активный Run по PR?
-  alt PR закрыт или активный Run есть
-    P-->>B: 409
+  alt Невалидный UUID
+    P-->>B: 422 HTTPValidationError (detail — массив)
   else
-    P->>PG: runs INSERT (queued, trigger = rerun, текущий head_sha) + NOTIFY
-    P->>MQ: review.run/v1 → review.run.{engine}, priority 9, после commit
-    P-->>B: 202 RunSession (queued)
+    P->>PG: Проверки rerun по PIPELINE_SPEC §6.1
+    alt Результат проверок: конфликт (активный Run, закрытый PR, пауза репозитория или недоступная App)
+      P-->>B: 409 ErrorResponse (общий detail)
+    else Результат проверок: нет кандидата запуска (правил, промпта или связанной установки)
+      P-->>B: 422 ErrorResponse (detail — строка)
+    else Результат проверок: запуск разрешён
+      P->>PG: runs INSERT (queued, trigger = rerun, текущий head_sha) + NOTIFY
+      P->>MQ: review.run/v1 → review.run.{engine}, priority 9, после commit
+      P-->>B: 202 RunSession (queued)
+    end
   end
 ```
+
+Четыре причины 409 — активный Run, закрытый PR, пауза ревью репозитория и
+недоступная GitHub App — возвращают один `detail`:
+`the pull request has an active run or is closed, or repository reviews are paused or unavailable`.
+Машиночитаемого кода причины нет. Порядок проверок `409`/`422`, различие
+отсутствующей и недоступной установки и точное тело строкового 422 заданы в
+[PIPELINE_SPEC §6.1](PIPELINE_SPEC.md#61-http-отказы-rerun); диаграмма перечисляет
+исходы, а порядок определяется этим разделом. Оба тела 422 описаны в
+[OpenAPI](../contracts/openapi.yaml).
 
 Флаг `ai_review_labeled` и CI не проверяются; дальше — как §6.2 (PIPELINE_SPEC T3). Фильтр веток репозитория при создании rerun тоже не проверяется и 409 не вызывает: как у Run от вебхука, его проверяет RunGuard при claim (§6.1), и rerun на неподходящую целевую ветку завершается `skipped/rule_not_matched` (PIPELINE_SPEC T5).
 
@@ -611,7 +626,8 @@ PATCH `enabled` сохраняет только предпочтение, `GET` 
 (`enabled=false`, `installationAvailable=true`) от недоступной установки
 (`installationAvailable=false`). Лейбл `ai-review` по-прежнему нужен на каждом PR
 (Р-10). При `enabled=false` всё как раньше: проекция PR, precheck, replay, sweep и
-RunGuard останавливаются, rerun отвечает 409.
+RunGuard останавливаются; HTTP-отказы rerun определены в
+[PIPELINE_SPEC §6.1](PIPELINE_SPEC.md#61-http-отказы-rerun).
 
 **Тумблер RAG [техлид, 16.10.2026, #145].** `Repository.rag_enabled` хранит
 предпочтение пользователя для графа RAG v1 ([ADR 0001](adr/0001-graph-rag-v1.md));
@@ -799,7 +815,7 @@ head-входы общего conventions cache и публикация raw summa
 - Rerun (T3) пишет Run с `message_published_at = null` и снимает пометку после confirm, но в replay лидер-цикла worker не попадает: выборка outbox из #11 рассчитана на Run с `trigger = webhook` и лейблом `ai-review`. Неотправленный rerun переотправляет реконсилер (T18, через 10 мин).
 - Ответ `review.postprocess` дополнительно хранит `summary` из `ReviewOutput`: `llm.review_output` больше 1 МиБ усекается (D1), а run detail берёт сводку из маленького `review.postprocess`.
 - Все адаптеры, функции авторизации и фабрики с параметром `scope: AuthScope | None` обязаны работать fail-closed: создание или вызов без `AuthScope` вызывает `ValueError`, если доверенный внутренний вызывающий код явно не передал `allow_unscoped=True`. Актуальные примеры адаптеров: [`SqlAlchemyRunRepository`](../app/modules/reviews/infrastructure/run_repository.py), [`SqlAlchemyCancelRunUnitOfWork`](../app/modules/reviews/infrastructure/run_repository.py), [`SqlAlchemyRerunStore`](../app/modules/reviews/infrastructure/rerun_store.py), [`SqlAlchemyRerunUnitOfWork`](../app/modules/reviews/infrastructure/rerun_store.py), [`SqlAlchemyPullRequestQueries`](../app/modules/reviews/infrastructure/pull_request_queries.py), [`SqlAlchemyRepositorySettingsStore`](../app/modules/repositories/infrastructure/repository_settings.py) и [`SqlAlchemyRepositorySettingsUnitOfWork`](../app/modules/repositories/infrastructure/repository_settings.py). Функция авторизации [`authorized_run`](../app/modules/reviews/infrastructure/run_repository.py) проверяет scope напрямую; фабрика [`ReviewsApiResources.run_repository`](../app/bootstrap/reviews_api.py) делегирует защищённому конструктору репозитория. Отсутствие scope само по себе не разрешает обход. Scoped rerun использует тот же DB-предикат видимости, что чтение Run.
-- `POST /api/runs/{id}/rerun` отвечает 422, если у репозитория нет активной версии правил или промпта: это не конфликт T3 (409 для активного Run, закрытого PR либо paused/unavailable Repository).
+- `POST /api/runs/{id}/rerun` допускает 422 с массивом `detail` при невалидном UUID и со строковым `detail` при отсутствии кандидата запуска (в частности, активной версии правил или промпта). Причины 409 и порядок решений — [PIPELINE_SPEC §6.1](PIPELINE_SPEC.md#61-http-отказы-rerun).
 - `GET /api/runs/{id}` отдаёт `RunDetail`; `author`, `headRef` и `baseRef` в `PullRequestRef` заполняются только в нём, список `GET /api/runs` отдаёт `RunSession` без них. Zod-схема UI допускает оба ответа: с ui#59 (`4369e02`) эти поля `nullable().optional()`; снимок Zod-схем ui (`tests/fixtures/ui_zod_contracts.json`) сверяется со спекой поле в поле, порядок перегенерации — PIPELINE_SPEC §16; коммит ui, с которого он снят, — в `provenance.commit` и `UI_CONTRACT_COMMIT`.
 - Worker собирает LLM Gateway (#33) один раз на процесс, а модели ревью и конвенций на каждую попытку с её `RunCallContext` (дедлайн, номер попытки, версии). AGENTS.md читается на `base_sha`, дерево и файлы для конвенций читаются на `head_sha` через blob, метаданные PR берутся из GitHub. Без `LLM_MODEL` worker стартует с предупреждением, а Run завершается `failed` / `llm_unavailable` с сообщением о том, что шлюз не настроен (#52). `llm_unavailable` ретраится (`RETRYABLE_ERROR_CODES`), поэтому Run проходит все три попытки, и сообщение видно в `runs.error_message` только после третьей. Локальные модели: таймаут вызова fast фиксирован, 90 с (`GatewayPolicy.call_timeout_s`, из env не задаётся), и reasoning-модели на локальном железе в него обычно не укладываются; LM Studio с gpt-oss отвечает 400 на строгую схему (`json_schema`), ему нужны `LLM_STRUCTURED_OUTPUT=prompt_json` и `LLM_ALLOW_PROMPT_JSON=1` (README, «LLM gateway»).
 - Перед `POST /pulls/{n}/reviews` publisher сверяет голову PR в GitHub: push, который webhook-worker ещё не записал в PostgreSQL, превращает публикацию в `cancelled` / `superseded` (T15), а не в ревью на старый коммит (#52).
@@ -1387,7 +1403,7 @@ raw модельная похвала/неподтверждённые дефе�
 | Группа | Операции | Сервис | Главное |
 |---|---|---|---|
 | Прогоны | `GET /api/runs`, `GET /api/runs/{id}`, `…/diff`, `…/files`, `…/comments`, `…/actions`, `…/actions/{index}/response` | `portal-api` | `RunListPage {items,nextCursor}`, семь состояний Р-14; detail = RunSession + verdict/summary/severityCounts/findings/budget и планируемые поля coverage/version выше. `/diff` сохраняет исходный доступный UI patch при ignored/summary-only; `patch=null` означает отсутствие исходного patch, не отсутствие AI-проверки. `/files` старше TTL → `404`/`410`; большие action bodies — через response endpoint |
-| Действия с прогоном | `POST /api/runs/{id}/rerun`, `POST /api/runs/{id}/cancel` | `portal-api` | rerun — новый Run `queued`, `202`; PR закрыт, есть активный Run либо Repository paused/unavailable → `409` (§6.7); cancel идемпотентен |
+| Действия с прогоном | `POST /api/runs/{id}/rerun`, `POST /api/runs/{id}/cancel` | `portal-api` | rerun — новый Run `queued`, `202`; отказы `409`/`422` — [§6.7](#67-перезапуск) и [PIPELINE_SPEC §6.1](PIPELINE_SPEC.md#61-http-отказы-rerun); cancel идемпотентен |
 | Поток | `GET /api/stream` | `portal-api` | SSE `run.updated {runId, status}` (кадр с `id:`, повтор по `Last-Event-ID`) и `run.step {runId, tool, index, ok, startedAt, durationMs}` (без `id:`, не переигрывается); один поток на вкладку, `fetch` с Bearer; между процессами — PG `LISTEN/NOTIFY` каналов `run_updated` и `run_step` (D12 — дефолт по #20, §6.6, PIPELINE_SPEC §1) |
 | Репозитории | `GET /api/repos`, `GET/PATCH /api/repos/{id}`, `GET /api/repos/{id}/pulls` | `portal-api` | подключение — установкой App (§6.9): `POST /api/repos` и PATCH коллекции нет (D10); `GET /api/repos` → `Repository[]`; PATCH — `enabled`, `defaultEngine`, `waitForCi` (`auto\|always\|never`), `maxComments` (1..10), `reviewEvent` (`COMMENT\|REQUEST_CHANGES`), `branchFilter` (до 20 шаблонов по 1–255 символов, `[]` очищает), `severityThreshold` (`all\|warning\|critical`), `ragEnabled`; `Repository` дополнительно отдаёт только для чтения `installationAvailable` (§6.9) и `ragIndex` (§11), в теле PATCH они → `422`; pulls → `{items: PullRequestSummary[], nextCursor}` с `latestRun {id, status, verdict}` (D11 — дефолт по #20) |
 | Правила, метрики | `GET/POST /api/repos/{id}/rules`, `POST /api/rules/{id}/preview`, `GET /api/metrics/summary` | `portal-api` | после MVP (`x-note` в спеке) |
