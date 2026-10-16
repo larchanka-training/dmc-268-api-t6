@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import random
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass, field
 
 from app.modules.code_index.application.index_resolution import (
@@ -571,6 +571,43 @@ def test_go_package_facts_are_read_once_per_build() -> None:
     asyncio.run(run())
 
     assert sorted(provider.asked) == ["internal/store/open.go", "pkg/util/name.go"]
+
+
+class _Walks(Mapping[str, str]):
+    """A path listing that counts its full walks; a lookup by path is not one."""
+
+    def __init__(self, paths: Iterable[str]) -> None:
+        self._paths = dict.fromkeys(paths, "b" * 40)
+        self.walks = 0
+
+    def __getitem__(self, path: str) -> str:
+        return self._paths[path]
+
+    def __len__(self) -> int:
+        return len(self._paths)
+
+    def __iter__(self) -> Iterator[str]:
+        self.walks += 1
+        return iter(self._paths)
+
+
+def test_go_packages_of_one_build_walk_the_path_listing_once() -> None:
+    sources = {f"pkg/p{index}/a.go": f"package p{index}\n\nfunc A() {{}}\n" for index in range(5)}
+    imports = "".join(f'\t"example.com/m/pkg/p{index}"\n' for index in range(5))
+    calls = "".join(f"\tp{index}.A()\n" for index in range(5))
+    source = f"package main\n\nimport (\n{imports})\n\nfunc Run() {{\n{calls}}}\n"
+    paths = _Walks([_GO, *sources, *(f"docs/f{index}.txt" for index in range(50))])
+    resolver = IndexImportResolver(
+        tree=RevisionTree(_HEAD, paths, True),
+        facts=Provider(sources),
+        path_exclusion=lambda path: None,
+        go_module=_MODULE,
+    )
+
+    resolved = asyncio.run(resolver.resolve_file(_GO, _facts(_GO, source)))
+
+    assert [item.record.target_path for item in resolved] == [f"pkg/p{i}" for i in range(5)]
+    assert paths.walks == 1
 
 
 # --- No per-run caps -------------------------------------------------------------------

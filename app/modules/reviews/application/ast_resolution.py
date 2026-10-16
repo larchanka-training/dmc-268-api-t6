@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import posixpath
 import re
+from collections import defaultdict
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from enum import StrEnum
@@ -40,7 +41,9 @@ _TS_EXTENSIONS = (".ts", ".tsx", ".d.ts")
 _JS_EXTENSIONS = (".js", ".jsx", ".mjs")
 _ALIAS_PREFIXES = ("@/", "~/", "#")
 _GO_MODULE = re.compile(r"^module\s+(\S+)\s*$", re.MULTILINE)
-_GO_REPLACE = re.compile(r"^\s*replace\b", re.MULTILINE)
+# Blanks but not newlines before `replace`: `\s*` would rescan every following empty line
+# from each line start, quadratic on a `go.mod` of empty lines.
+_GO_REPLACE = re.compile(r"^[^\S\n]*replace\b", re.MULTILINE)
 _GO_PLATFORMS = frozenset(
     {
         *("aix", "android", "darwin", "dragonfly", "freebsd", "illumos", "ios", "js"),
@@ -292,7 +295,49 @@ def go_module_path(go_mod: str) -> str | None:
     return None if match is None else match.group(1).strip('"')
 
 
-def go_package_target(module: str, tree: RevisionTree, go_module: str | None) -> ModuleTarget:
+@dataclass(frozen=True)
+class GoLayout:
+    """The Go files of one tree, read once for many imports of it.
+
+    `members` maps a directory prefix (`""` or `"dir/"`) to the sorted candidate members
+    of its package; `module_prefixes` holds the prefix of every `go.mod` below the root.
+    """
+
+    members: Mapping[str, tuple[str, ...]]
+    module_prefixes: frozenset[str]
+
+
+def _go_member_candidate(path: str) -> bool:
+    return (
+        path.endswith(".go")
+        and not path.endswith("_test.go")
+        and not posixpath.basename(path).startswith(("_", "."))
+    )
+
+
+def go_layout(tree: RevisionTree) -> GoLayout:
+    """One walk of `tree` for `go_package_target`."""
+    members: defaultdict[str, list[str]] = defaultdict(list)
+    module_prefixes: set[str] = set()
+    for path in tree.blob_shas:
+        if path.endswith("/go.mod"):
+            module_prefixes.add(path.removesuffix("go.mod"))
+        if _go_member_candidate(path):
+            members[path[: path.rfind("/") + 1]].append(path)
+    return GoLayout(
+        {prefix: tuple(sorted(files)) for prefix, files in members.items()},
+        frozenset(module_prefixes),
+    )
+
+
+def go_package_target(
+    module: str, tree: RevisionTree, go_module: str | None, *, layout: GoLayout | None = None
+) -> ModuleTarget:
+    """Where the Go import `module` resolves in `tree`.
+
+    `layout` is `go_layout(tree)`, for a caller that resolves many imports of one tree;
+    without it, a call that reaches the package lookup walks the tree once.
+    """
     if "." not in module.split("/")[0]:
         return ModuleTarget(ImportResolution.EXTERNAL, "standard_library")
     if "go.work" in tree.blob_shas or not tree.complete:
@@ -303,22 +348,16 @@ def go_package_target(module: str, tree: RevisionTree, go_module: str | None) ->
         return ModuleTarget(ImportResolution.EXTERNAL, "other_module")
     directory = module[len(go_module) :].strip("/")
     prefix = f"{directory}/" if directory else ""
-    nested = [
-        path
-        for path in tree.blob_shas
-        if path.endswith("/go.mod") and prefix.startswith(path.removesuffix("go.mod"))
-    ]
-    if nested:
+    if layout is None:
+        layout = go_layout(tree)
+    # A `go.mod` in the package directory or in one above it, below the root.
+    if any(
+        prefix[: index + 1] in layout.module_prefixes
+        for index, character in enumerate(prefix)
+        if character == "/"
+    ):
         return ModuleTarget(ImportResolution.UNSUPPORTED, "nested_module")
-    members = sorted(
-        path
-        for path in tree.blob_shas
-        if path.startswith(prefix)
-        and "/" not in path[len(prefix) :]
-        and path.endswith(".go")
-        and not path.endswith("_test.go")
-        and not posixpath.basename(path).startswith(("_", "."))
-    )
+    members = layout.members.get(prefix, ())
     if not members:
         return ModuleTarget(ImportResolution.MISSING, "no_package_files")
     if any(_go_platform_file(path) for path in members):
