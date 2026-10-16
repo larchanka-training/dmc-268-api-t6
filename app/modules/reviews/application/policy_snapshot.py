@@ -89,6 +89,7 @@ def make_policy_document_present(
 ) -> PolicyDocument:
     """Create a present PolicyDocument with auto-calculated checksums and counts."""
     digest = sha256(text.encode("utf-8")).hexdigest()
+    line_count = text.count("\n") + (1 if text and not text.endswith("\n") else 0)
     return PolicyDocument(
         path=path,
         presence=DocumentPresence.PRESENT,
@@ -97,7 +98,7 @@ def make_policy_document_present(
         text_sha256=digest,
         text=text,
         byte_count=len(text.encode("utf-8")),
-        line_count=len(text.splitlines()),
+        line_count=line_count,
     )
 
 
@@ -229,6 +230,72 @@ class ExecutionProfile:
         )
 
 
+PINNED_PROMPT_CHECKSUMS: dict[str, str] = {
+    "review.system:v2": "17e1818842ee744aae9cd32c3554bc33b2b6ac1f7182f5330c3a057010783bd4",
+    "review.conventions:v2": "225a8f7d56835cf1307ddb25feac602c3d10e03c34ee51afc90a1f99af101454",
+    "review.verifier:v1": "7f1d1a93ce64c587709785faec1f679153722d6d83df0de77ec631d1cb95ef3d",
+}
+
+_DEFAULT_REVIEW_SYSTEM_ID = UUID("00000000-0000-0000-0000-000000000001")
+_DEFAULT_CONVENTIONS_ID = UUID("00000000-0000-0000-0000-000000000002")
+_DEFAULT_VERIFIER_ID = UUID("00000000-0000-0000-0000-000000000003")
+
+
+def make_complete_prompt_bindings(
+    *,
+    review_system_id: UUID = _DEFAULT_REVIEW_SYSTEM_ID,
+    conventions_id: UUID = _DEFAULT_CONVENTIONS_ID,
+    verifier_id: UUID = _DEFAULT_VERIFIER_ID,
+    review_system_checksum: str = PINNED_PROMPT_CHECKSUMS["review.system:v2"],
+    conventions_checksum: str = PINNED_PROMPT_CHECKSUMS["review.conventions:v2"],
+    verifier_checksum: str = PINNED_PROMPT_CHECKSUMS["review.verifier:v1"],
+) -> PromptBindings:
+    """Create complete PromptBindings with pinned IDs and checksums."""
+    return PromptBindings(
+        review_system_checksum=review_system_checksum,
+        conventions_checksum=conventions_checksum,
+        verifier_checksum=verifier_checksum,
+        review_system_id=review_system_id,
+        conventions_id=conventions_id,
+        verifier_id=verifier_id,
+    )
+
+
+def make_complete_execution_profile(
+    profile_name: Literal["fast", "deep"] = "fast",
+    *,
+    review_model: str = "mistral-small-4",
+    verifier_model: str = "mistral-small-4",
+    conventions_model: str | None = None,
+    primary_provider_route: str = "primary",
+    fallback_provider_route: str | None = None,
+    tokenizer_version: str = "tokenizer/v1",
+    counter_version: str = "counter/v1",
+    temperature: str = "0.0",
+    response_schema_version: str = "review-output/v2",
+    recovery_profile_version: str = "recovery/v1",
+    budget_profile_version: str = "budget/v1",
+) -> ExecutionProfile:
+    """Create complete ExecutionProfile with all required fields set."""
+    max_input = 150_000 if profile_name == "deep" else 60_000
+    return ExecutionProfile(
+        profile_name=profile_name,
+        review_model=review_model,
+        verifier_model=verifier_model,
+        conventions_model=conventions_model,
+        max_policy_tokens=12_000,
+        max_input_tokens=max_input,
+        primary_provider_route=primary_provider_route,
+        fallback_provider_route=fallback_provider_route,
+        tokenizer_version=tokenizer_version,
+        counter_version=counter_version,
+        temperature=temperature,
+        response_schema_version=response_schema_version,
+        recovery_profile_version=recovery_profile_version,
+        budget_profile_version=budget_profile_version,
+    )
+
+
 @dataclass(frozen=True)
 class PolicySnapshot:
     """The policy of one run: both documents, the ignore policy and every pinned version."""
@@ -276,9 +343,8 @@ class PolicySnapshot:
     def is_ready_for_llm(self) -> bool:
         return bool(
             self.policy_digest
-            and self.prompt_bindings.review_system_checksum
-            and self.prompt_bindings.conventions_checksum
-            and self.prompt_bindings.verifier_checksum
+            and self.prompt_bindings.is_complete
+            and self.execution_profile.is_complete
         )
 
 
@@ -295,6 +361,7 @@ class ManifestBlock:
     start_line: int | None = None
     end_line: int | None = None
     shown_line_count: int = 0
+    shown_ranges: tuple[tuple[int, int], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -319,6 +386,10 @@ class CallManifest:
         block = self.get_block(block_id)
         if block is None:
             return False
+        if block.shown_ranges:
+            return any(
+                r_start <= start_line and end_line <= r_end for r_start, r_end in block.shown_ranges
+            )
         if block.start_line is None or block.end_line is None:
             return False
         return block.start_line <= start_line and end_line <= block.end_line

@@ -132,6 +132,7 @@ class RequirementRef(BaseModel):
 
 
 ALLOWED_V2_RULE_NAMES = frozenset({".review/rules.md", "AGENTS.md"})
+_SERVICE_DEFAULTS_ID_RE = re.compile(r"^[a-zA-Z0-9_\-]+$")
 
 
 class ReviewFindingV2(BaseModel):
@@ -160,17 +161,21 @@ class ReviewFindingV2(BaseModel):
         title_lines = self.title.splitlines()
         if len(title_lines) != 1 or title_lines[0] != self.title:
             raise ValueError("title must be one line")
-        if self.rule_name is not None and (
-            self.rule_name not in ALLOWED_V2_RULE_NAMES
-            and not (
-                self.rule_name.startswith("service-defaults:")
-                and len(self.rule_name) > len("service-defaults:")
-            )
-        ):
-            raise ValueError(
-                "rule_name must be '.review/rules.md', 'AGENTS.md', "
-                "'service-defaults:<ID>', or null"
-            )
+        if self.rule_name is not None:
+            if self.rule_name in ALLOWED_V2_RULE_NAMES:
+                pass
+            elif self.rule_name.startswith("service-defaults:"):
+                rule_id = self.rule_name.removeprefix("service-defaults:")
+                if not rule_id or not _SERVICE_DEFAULTS_ID_RE.match(rule_id):
+                    raise ValueError(
+                        "rule_name format for service-defaults must be 'service-defaults:<ID>' "
+                        "where <ID> contains only letters, digits, underscores, or hyphens"
+                    )
+            else:
+                raise ValueError(
+                    "rule_name must be '.review/rules.md', 'AGENTS.md', "
+                    "'service-defaults:<ID>', or null"
+                )
         return self
 
 

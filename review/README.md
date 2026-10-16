@@ -12,7 +12,8 @@ immutable — a file with a version in its name is never edited — and served f
 | Path                                    | What it is                                          |
 | --------------------------------------- | --------------------------------------------------- |
 | `prompts/review.system.v1.md`           | review prompt: order, filters, attribution, output  |
-| `prompts/review.system.v2.md`           | v1 + input metadata and three few-shot examples     |
+| `prompts/review.system.v2.md`           | v1 + input metadata, few-shot examples, trust      |
+| `prompts/review.verifier.v1.md`         | reflection verifier prompt: validates candidates    |
 | `prompts/review.conventions.v1.md`      | pre-review prompt: repository patterns, review plan |
 | `prompts/review.conventions.v2.md`      | v1 + explicit counts for omitted input context    |
 | `rules/schema.json`                     | JSON Schema (draft 2020-12) of a custom rule set    |
@@ -20,7 +21,9 @@ immutable — a file with a version in its name is never edited — and served f
 | `rules/default-backend.v1.json`         | default rules for a FastAPI/SQLAlchemy repo         |
 | `postprocess/lint-filter.md`            | filter #2: what the backend drops or demotes        |
 | `postprocess/lint-filter-patterns.json` | regex lists, confidence threshold, inline cap       |
-| `schemas/review-output.schema.json`     | JSON Schema (draft 2020-12) of the model output     |
+| `schemas/review-output.schema.json`     | JSON Schema (draft 2020-12) of v1 model output      |
+| `schemas/review-output.schema.v2.json`  | JSON Schema (draft 2020-12) of v2 model output      |
+| `schemas/verifier-output.schema.v1.json`| JSON Schema of reflection verifier decisions        |
 | `scripts/validate_findings.py`          | validator of model outputs: schema + semantic rules |
 | `examples/`                             | synthetic diff and sample outputs (proof run)       |
 
@@ -39,16 +42,17 @@ validation of the model output (LLM gateway, api #33). Prompts are global rows o
 A `rule_versions` row belongs to one repository, so a default set becomes a repository's first `rule_versions`
 row when that repository is onboarded; where the backend keeps the defaults until then is its choice.
 
-| Column                      | Value                                                     |
-| --------------------------- | --------------------------------------------------------- |
-| `prompt_versions.key`       | frontmatter `key` (`review.system`, `review.conventions`) |
-| `prompt_versions.version`   | frontmatter `version`; equals the `vN` in the file name   |
-| `prompt_versions.content`   | the full file bytes, frontmatter included                 |
-| `prompt_versions.checksum`  | `sha256(content)`, hex — verifiable against the file      |
-| `prompt_versions.is_active` | managed by the backend; one active version per `key`      |
-| `rule_versions.rules`       | the `rules` array of a rule set file                      |
-| `rule_versions.version`     | the file's `version`                                      |
-| `rule_versions.checksum`    | `sha256` of the canonical `rules` JSON, hex (see below)   |
+| Column                      | Value                                                                        |
+| --------------------------- | ---------------------------------------------------------------------------- |
+| `prompt_versions.key`       | frontmatter `key` (`review.system`, `review.conventions`, `review.verifier`) |
+| `prompt_versions.version`   | frontmatter `version`; equals the `vN` in the file name                      |
+| `prompt_versions.content`   | the full file bytes, frontmatter included                                    |
+| `prompt_versions.checksum`  | `sha256(content)`, hex — verifiable against the file                         |
+| `prompt_versions.is_active` | managed by the backend; one active version per `key`                         |
+| `rule_versions.rules`       | the `rules` array of a rule set file                                         |
+| `rule_versions.version`     | the file's `version`                                                         |
+| `rule_versions.checksum`    | `sha256` of the canonical `rules` JSON, hex (see below)                      |
+
 
 Canonical JSON is `json.dumps(rules, sort_keys=True, separators=(",", ":"))` in UTF-8, so
 the checksum is recomputable from the row. A change to a prompt or a rule set is a new file
@@ -87,6 +91,25 @@ run of a repository, the diff is the varying tail (`docs/SYSTEM_DESIGN.md` §10)
   `<repo_files>` also ends with `[N more repository file contexts omitted]` for tree files
   with no shown content, including unselected or unavailable files. A truncated `<file>`
   ends with `[N more lines omitted]`. Counts describe source input; markers are never paths.
+
+### Policy snapshot v2 envelope and reflection pass
+
+Under Policy Snapshot v2 (`policy_snapshot` present), prompts and candidate findings use an immutable manifest and content-addressed blocks:
+- `<repository_rules block_id="...">`: rules from `.review/rules.md` (or empty block when missing).
+- `<project_conventions_document block_id="...">`: conventions from `AGENTS.md` (or empty block when missing).
+- `<service_defaults block_id="...">`: builtin platform review defaults (`defaults_checksum`).
+- `<conventions_excerpt block_id="...">`: cached repository conventions.
+- `<pull_request_metadata block_id="...">`: PR title, commit history, base/head revisions.
+- `<changed_files>`: each `<file path="..." block_id="..." status="..." language="...">` carries a stable `block_id`. Contiguous ranges shown to the model are recorded in `CallManifest.shown_ranges`.
+
+**Reflection Pass (`prompts/review.verifier.v1.md`)**:
+- Two-pass verification architecture to eliminate hallucinated findings.
+- **Pass 1 (Reviewer)** generates candidate findings conforming to `schemas/review-output.schema.v2.json` with required `evidence_refs` (pointing to visible `block_id` line ranges).
+- **Pass 2 (Verifier)** checks each candidate against visible code and requirements using `prompts/review.verifier.v1.md`.
+  - Verifier prompt envelope: `<candidate_findings>`, `<code_context>`, and `<policy_documents>`.
+  - Verifier output: validated against `schemas/verifier-output.schema.v1.json` (`decisions`: `candidate_id`, `status` in `supported` / `contradicted` / `unverifiable`, `reason`, `evidence_refs`, `requirement_refs`).
+  - Strict filtering: only candidates with `status="supported"` survive; unverified candidates are dropped, and the review summary is cleansed of hallucinated defects.
+
 
 Production commit context comes from `GitHubRunSource.get_pull_request_meta`, which
 delegates retrieval to `HttpGitHubVcsProvider` through the commit-metadata port.
@@ -186,11 +209,18 @@ published.
 
 The shape of a review output (`ReviewOutput`: `findings` ≤ 10 and `summary`) is defined by
 [`schemas/review-output.schema.json`](schemas/review-output.schema.json) (JSON Schema draft 2020-12), the single
-source of truth for the shape: every key required, nullable keys present as `null`, no other keys. The runtime
+source of truth for the v1 shape: every key required, nullable keys present as `null`, no other keys. The runtime
 Pydantic model (`app/modules/reviews/application/review_output.py`) mirrors it one to one, checked by
 `tests/test_review_output_schema.py`. Rules the schema cannot express (finding order, `start_line < line`, a
 one-line title without a trailing period, the `rule_name` ↔ attribution-prefix binding) are listed in
 `docs/PIPELINE_SPEC.md` §9.
+
+For Policy Snapshot v2, [`schemas/review-output.schema.v2.json`](schemas/review-output.schema.v2.json) defines
+`ReviewOutputV2` with required `evidence_refs` (array of `EvidenceRef{block_id, start_line, end_line}`)
+and closed `rule_name` attribution (`.review/rules.md`, `AGENTS.md`, `service-defaults:<ID>`, or null).
+[`schemas/verifier-output.schema.v1.json`](schemas/verifier-output.schema.v1.json) defines the reflection pass contract
+(`decisions[]` with `candidate_id`, `status`, `reason`, `evidence_refs`, and `requirement_refs`).
+
 
 `uv run python review/scripts/validate_findings.py <json>` checks one model output: the shape against the
 schema, then the semantic rules on top. Exit `0` when valid, `1` when it violates the contract (violations
