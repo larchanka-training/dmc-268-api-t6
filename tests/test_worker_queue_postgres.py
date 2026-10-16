@@ -1162,7 +1162,7 @@ class FakeGitHubApi:
 
     def __init__(self, *, agents_md: bytes | None = None, commits: tuple[str, ...] = ()) -> None:
         self.agents_md = agents_md
-        # Keep it under 10: the handler ignores ``page``, so a full page would repeat as page 2.
+        assert len(commits) < 10, "the handler ignores page: a full page would repeat as page 2"
         self.commits = commits
         self.reviews: list[dict[str, Any]] = []
         self.requests: list[str] = []
