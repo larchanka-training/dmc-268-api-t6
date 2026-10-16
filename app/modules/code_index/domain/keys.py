@@ -10,6 +10,10 @@ from app.modules.reviews.application.ast_symbols import SymbolKind
 # A PostgreSQL btree entry is capped at ~2.7 KB: the UTF-8 bytes of a row's text key
 # columns must stay within this bound, or the row is not written (#141, Task 4).
 MAX_INDEX_KEY_BYTES = 2000
+# Character limits of the text columns of graph rows: a path, a target path or an import
+# specifier, and a qualified or target name. A parity test pins them to the models.
+MAX_PATH_CHARS = 1024
+MAX_NAME_CHARS = 512
 
 
 @dataclass(frozen=True)
