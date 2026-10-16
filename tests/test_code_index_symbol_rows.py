@@ -238,6 +238,23 @@ def test_the_row_filter_drops_every_row_validate_would_reject() -> None:
     assert file.edges == (_edge("src/t.ts", ""), _edge("src/t.ts"))
 
 
+def test_the_row_filter_drops_every_row_with_a_nul_character() -> None:
+    # PostgreSQL text cannot hold U+0000: one such row would fail the whole file's write.
+    symbols = (_row("a"), _row('A."m\0n"'))
+    imports = (
+        (_record("./t"), (_edge("src/t.ts", ""), _edge("src/t.ts", "a"), _edge("src/t.ts", "b\0"))),
+        # The record goes, and every edge it produced with it.
+        (_record("./a\0b"), (_edge("src/ab.ts", ""), _edge("src/ab.ts", "c"))),
+        (_record("./u", "src/u\0.ts"), (_edge("src/u.ts", ""),)),
+    )
+
+    file = file_rows(_PATH, _SHA, symbols, imports)
+
+    assert file.symbols == (_row("a"),)
+    assert file.imports == (_record("./t"),)
+    assert file.edges == (_edge("src/t.ts", ""), _edge("src/t.ts", "a"))
+
+
 def test_duplicate_edges_and_imports_collapse_like_the_store() -> None:
     edge = _edge("src/t.ts")
     file = file_rows(

@@ -5,11 +5,13 @@ from __future__ import annotations
 import asyncio
 import posixpath
 import random
+import time
 from dataclasses import dataclass, field
 from uuid import UUID
 
 from app.modules.reviews.application.ast_resolution import (
     FileUnavailable,
+    GoLayout,
     ImportRef,
     ImportResolution,
     ImportResolver,
@@ -18,6 +20,7 @@ from app.modules.reviews.application.ast_resolution import (
     RevisionTree,
     affected_symbols,
     exported_symbols,
+    go_layout,
     go_module_path,
     go_package_name,
     go_package_target,
@@ -462,6 +465,18 @@ def test_go_module_with_replace_is_not_resolved() -> None:
     assert go_module_path("go 1.22\n") is None
 
 
+def test_go_module_path_reads_a_go_mod_of_blank_lines_in_linear_time() -> None:
+    # Review #142: a `replace` pattern whose leading blanks crossed newlines took minutes
+    # on a 256 KiB `go.mod` of empty lines, on the shared event loop.
+    module = "module example.com/m\n"
+    go_mod = module + "\n" * (256 * 1024 - len(module))
+    started = time.monotonic()
+
+    assert go_module_path(go_mod) == "example.com/m"
+    assert go_module_path(go_mod + " \treplace example.com/x => ../x\n") is None
+    assert time.monotonic() - started < 1.0
+
+
 def test_excluded_python_target_is_reported_and_not_shown() -> None:
     sources = {
         "pkg/app.py": "from .client import Client\n\ndef f():\n    return Client()\n",
@@ -612,6 +627,71 @@ def test_go_package_target_lists_the_members_of_one_local_package() -> None:
     assert go_package_target("example.com/m/internal/store", workspace, module) == ModuleTarget(
         ImportResolution.UNSUPPORTED, "workspace_or_incomplete_tree"
     )
+
+
+def test_go_package_target_reads_a_prebuilt_layout_as_it_reads_the_tree() -> None:
+    tree = _tree(
+        "go.mod",
+        "main.go",
+        "main_test.go",
+        "internal/store/open.go",
+        "internal/store/close.go",
+        "internal/store/open_test.go",
+        "internal/store/_skip.go",
+        "internal/store/.hidden.go",
+        "internal/store/sub/inner.go",
+        "internal/storex/x.go",
+        "internal/cfg/cfg_linux.go",
+        "internal/empty/README.md",
+        "nested/go.mod",
+        "nested/pkg/a.go",
+        "own/go.mod",
+        "own/own.go",
+    )
+    module = "example.com/m"
+    layout = go_layout(tree)
+    resolved, unsupported = ImportResolution.RESOLVED, ImportResolution.UNSUPPORTED
+    expected = {
+        module: ModuleTarget(resolved, None, ("main.go",)),
+        f"{module}/internal/store": ModuleTarget(
+            resolved, None, ("internal/store/close.go", "internal/store/open.go")
+        ),
+        f"{module}/internal/store/sub": ModuleTarget(
+            resolved, None, ("internal/store/sub/inner.go",)
+        ),
+        f"{module}/internal/storex": ModuleTarget(resolved, None, ("internal/storex/x.go",)),
+        f"{module}/internal/cfg": ModuleTarget(unsupported, "build_constrained"),
+        f"{module}/internal/empty": ModuleTarget(ImportResolution.MISSING, "no_package_files"),
+        # A `go.mod` above the package directory, and one in it.
+        f"{module}/nested/pkg": ModuleTarget(unsupported, "nested_module"),
+        f"{module}/own": ModuleTarget(unsupported, "nested_module"),
+        "fmt": ModuleTarget(ImportResolution.EXTERNAL, "standard_library"),
+        "example.com/other": ModuleTarget(ImportResolution.EXTERNAL, "other_module"),
+    }
+
+    for path, target in expected.items():
+        assert go_package_target(path, tree, module) == target, path
+        assert go_package_target(path, tree, module, layout=layout) == target, path
+    assert layout == GoLayout(
+        members={
+            "": ("main.go",),
+            "internal/store/": ("internal/store/close.go", "internal/store/open.go"),
+            "internal/store/sub/": ("internal/store/sub/inner.go",),
+            "internal/storex/": ("internal/storex/x.go",),
+            "internal/cfg/": ("internal/cfg/cfg_linux.go",),
+            "nested/pkg/": ("nested/pkg/a.go",),
+            "own/": ("own/own.go",),
+        },
+        module_prefixes=frozenset({"nested/", "own/"}),
+    )
+    # A workspace or an incomplete tree is refused before the layout is read.
+    for other in (
+        RevisionTree(_HEAD, {**tree.blob_shas, "go.work": "c" * 40}, True),
+        RevisionTree(_HEAD, tree.blob_shas, False),
+    ):
+        assert go_package_target(
+            f"{module}/internal/store", other, module, layout=layout
+        ) == ModuleTarget(unsupported, "workspace_or_incomplete_tree")
 
 
 def test_module_target_dispatches_by_the_importer_language() -> None:

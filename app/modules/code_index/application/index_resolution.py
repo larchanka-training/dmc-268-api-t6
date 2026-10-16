@@ -12,7 +12,11 @@ files.
 
 The #130 resolver of the review is reused path by path, but without its per-run caps:
 every import of an indexed file gets a record, resolved or not, and every name it binds
-gets its edge.
+gets its edge. One cap stays, the extractor's: it keeps the first 400 sorted
+`references`, `member_references` and `local_bindings` of each symbol
+(`MAX_REFERENCES_PER_SYMBOL`), so a declaration that reads more names loses the edges of
+the last ones, and one that binds more locals may lose a rebinding. Full and incremental
+builds read the same facts, so they agree.
 """
 
 from __future__ import annotations
@@ -29,10 +33,12 @@ from app.modules.reviews.application.ast_resolution import (
     RESOLVER_VERSION,
     FactsProvider,
     FileUnavailable,
+    GoLayout,
     ImportResolution,
     ModuleTarget,
     RevisionTree,
     exported_symbols,
+    go_layout,
     go_package_name,
     go_package_target,
     import_watch,
@@ -100,7 +106,11 @@ def _edges(edges: Iterable[IndexedEdge]) -> tuple[IndexedEdge, ...]:
 
 
 def _uses(facts: AstFacts, alias: str) -> bool:
-    """`alias` is referenced by a declaration that does not rebind it."""
+    """`alias` is referenced by a declaration that does not rebind it.
+
+    Both name sets are the extractor's first 400 sorted names of the symbol
+    (`MAX_REFERENCES_PER_SYMBOL`), not all of them.
+    """
     return any(
         alias in symbol.references and alias not in symbol.local_bindings
         for symbol in facts.symbols
@@ -108,7 +118,11 @@ def _uses(facts: AstFacts, alias: str) -> bool:
 
 
 def _members(facts: AstFacts, alias: str) -> list[str]:
-    """The names read as `alias.name` by declarations that do not rebind `alias`."""
+    """The names read as `alias.name` by declarations that do not rebind `alias`.
+
+    Up to the extractor's first 400 sorted member references and local bindings of each
+    symbol (`MAX_REFERENCES_PER_SYMBOL`).
+    """
     return sorted(
         {
             name
@@ -126,7 +140,8 @@ class IndexImportResolver:
     `tree` lists every path of the archive; its blob ids are not read. `path_exclusion`
     names the exclusion class of a path (ADR 0001 §7, classes 1-7), and such a target is
     `excluded` and never stored. `facts` gives the facts of a Go package member or of a
-    package `__init__.py`. One resolver serves one build: Go packages are memoized.
+    package `__init__.py`. One resolver serves one build: Go packages are memoized, and
+    the Go layout of `tree` is read once, at the first Go import.
     """
 
     def __init__(
@@ -142,6 +157,7 @@ class IndexImportResolver:
         self._path_exclusion = path_exclusion
         self._go_module = go_module
         self._go_packages: dict[str, _GoPackage] = {}
+        self._go_layout: GoLayout | None = None
 
     async def resolve_file(self, path: str, facts: AstFacts) -> tuple[IndexedImport, ...]:
         return tuple([await self.resolve_import(path, facts, item) for item in facts.imports])
@@ -250,7 +266,9 @@ class IndexImportResolver:
 
     async def _go_package(self, module: str) -> _GoPackage:
         if module not in self._go_packages:
-            target = go_package_target(module, self._tree, self._go_module)
+            if self._go_layout is None:
+                self._go_layout = go_layout(self._tree)
+            target = go_package_target(module, self._tree, self._go_module, layout=self._go_layout)
             self._go_packages[module] = await self._go_members(module, target)
         return self._go_packages[module]
 
