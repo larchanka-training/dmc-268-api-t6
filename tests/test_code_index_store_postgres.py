@@ -3042,6 +3042,47 @@ def test_a_batch_waits_for_an_open_publication_and_counts_its_stored_bytes(
 
 
 @pytest.mark.integration
+def test_a_duplicate_claim_waits_for_an_open_publication_without_a_deadlock(
+    index: _Index, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def scenario() -> None:
+        await _enable(index, index.a)
+        fence = await _claim(index, index.a)
+        await _write(index, index.a, fence, _module("aa01", 1))
+        async with index.uow() as publisher:
+            publisher_pid = await publisher.session.scalar(text("SELECT pg_backend_pid()"))
+            store = publisher.index
+            locked, release = _pause_after_lock(monkeypatch, store)
+            publishing = asyncio.create_task(
+                store.publish(
+                    index.a,
+                    fence,
+                    base_commit_sha=None,
+                    commit_sha=C1,
+                    full=True,
+                    deleted_paths=(),
+                    profile=_PROFILE,
+                    stats=_STATS,
+                )
+            )
+            await asyncio.wait_for(locked.wait(), 5)
+            # A duplicate claim of the same repository takes the admission lock first and
+            # then wants the state row; a publication that took the row first would meet
+            # it in a lock-order cycle.
+            duplicate = asyncio.create_task(_try_claim(index, index.a, 1))
+            await _wait_until_blocked(index, publisher_pid, 1, duplicate)
+            release.set()
+            assert await publishing is True
+            await publisher.commit()
+
+        # The publication spent the lease, so the claim takes the next number.
+        granted = await asyncio.wait_for(duplicate, 5)
+        assert isinstance(granted, LeaseClaim) and granted.fence.publication == 2
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.integration
 def test_incremental_reads_page_through_the_visible_files_and_imports(index: _Index) -> None:
     resolved = ImportRecord("c.py", ".a", ImportResolution.RESOLVED, "a.py")
     dynamic = ImportRecord("c.py", ".a", ImportResolution.DYNAMIC, None)
