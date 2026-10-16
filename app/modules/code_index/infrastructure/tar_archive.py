@@ -2,16 +2,20 @@
 
 ADR 0001 §7: the archive is never written to disk. Every header counts toward the entries
 limit, pax and GNU long-name headers included, and the sizes they declare count toward
-the unpacked-bytes limit before any of those bytes is read. The single root directory of
-a provider archive is stripped. An absolute path, a `..` segment, a hardlink, a device, a
-FIFO, a sparse file, any other entry type, a second root, a repeated path or a metadata
-header over 64 KiB is unsafe. A symlink joins the path set but is never read.
+the unpacked-bytes limit before any of those bytes is read. Every decoded byte counts
+toward the same limit as it is read, with the slack of the header blocks, so a header that
+hides its size (a pax `size`, a negative size, a GNU sparse map) cannot read past it. The
+single root directory of a provider archive is stripped. An absolute path, a `..`
+segment, a NUL character in a path or a link target, a hardlink, a device, a FIFO, a
+sparse file, any other entry type, a second root, a repeated path or a metadata header
+over 64 KiB is unsafe. A symlink joins the path set but is never read.
 
 The gzip stream is decoded by `gzip`, not by `tarfile`: a truncated stream then fails
-instead of ending the listing early. An archive that cannot be read is a transient
-`VcsUnavailable`.
+instead of ending the listing early. An archive that cannot be read, a forged header
+`tarfile` fails to parse included, is a transient `VcsUnavailable`.
 Each pass runs in `asyncio.to_thread` and checks the monotonic deadline at every header
-and every read, so a pass over the whole unpacked limit stops in time.
+and every read, so a pass over the whole unpacked limit stops in time. A pass holds one
+header at a time: stream mode would keep them all in `TarFile.members`.
 """
 
 from __future__ import annotations
@@ -51,8 +55,20 @@ _METADATA_TYPES = frozenset(
 _MAX_METADATA_BYTES = 65_536
 _FILE_TYPES = frozenset({tarfile.REGTYPE, tarfile.AREGTYPE, tarfile.CONTTYPE})
 _SAFE_TYPES = _FILE_TYPES | {tarfile.DIRTYPE, tarfile.SYMTYPE}
-# A broken gzip or tar stream; `gzip.BadGzipFile` is an `OSError`.
-_UNREADABLE = (tarfile.TarError, EOFError, OSError, zlib.error)
+# A broken gzip or tar stream; `gzip.BadGzipFile` is an `OSError`. On a forged header
+# `tarfile` also raises `ValueError` (a pax number that is not one), `IndexError` (a GNU
+# sparse map cut short), `RecursionError` (one recursion per chained metadata header)
+# and, for a number out of range, `OverflowError`.
+_UNREADABLE = (
+    tarfile.TarError,
+    EOFError,
+    OSError,
+    zlib.error,
+    ValueError,
+    IndexError,
+    RecursionError,
+    OverflowError,
+)
 
 
 class _Budget:
@@ -63,6 +79,7 @@ class _Budget:
         self._deadline = deadline
         self.headers = 0
         self.unpacked_bytes = 0
+        self.decoded_bytes = 0
 
     def check_deadline(self) -> None:
         if time.monotonic() > self._deadline:
@@ -79,9 +96,18 @@ class _Budget:
         if self.unpacked_bytes > self._limits.unpacked_bytes:
             raise IndexLimitExceeded("unpacked_bytes")
 
+    def decoded(self, size: int) -> None:
+        # Beyond the declared sizes a stream holds, per header, its 512-byte block and at
+        # most 511 bytes of padding (the end blocks count as one more header), and
+        # `tarfile` reads up to two records ahead of the header it counts.
+        self.decoded_bytes += size
+        slack = 1024 * (self.headers + 1) + 2 * tarfile.RECORDSIZE
+        if self.decoded_bytes > self._limits.unpacked_bytes + slack:
+            raise IndexLimitExceeded("unpacked_bytes")
+
 
 class _Counted(io.RawIOBase):
-    """The decoded stream, with a deadline check on every read."""
+    """The decoded stream, with a deadline check and a byte count on every read."""
 
     def __init__(self, stream: gzip.GzipFile, budget: _Budget) -> None:
         self._stream = stream
@@ -92,7 +118,9 @@ class _Counted(io.RawIOBase):
 
     def read(self, size: int = -1) -> bytes:
         self._budget.check_deadline()
-        return self._stream.read(size)
+        data = self._stream.read(size)
+        self._budget.decoded(len(data))
+        return data
 
 
 def _open(stack: ExitStack, content: bytes, budget: _Budget) -> tarfile.TarFile:
@@ -113,7 +141,13 @@ def _entries(archive: tarfile.TarFile) -> Iterator[tuple[str, tarfile.TarInfo]]:
     root: str | None = None
     seen: set[str] = set()
     for member in archive:
+        # The current member is all a pass needs; the earlier ones, each with its copy of
+        # the global pax headers, are dropped, directories included. typeshed does not
+        # declare the `members` list.
+        archive.members.clear()  # type: ignore[attr-defined]
         name = member.name
+        if "\0" in name or "\0" in member.linkname:
+            raise ArchiveUnsafe("An archive entry has a NUL character in its path or link")
         if name.startswith("/") or ".." in name.split("/"):
             raise ArchiveUnsafe("An archive entry has an absolute or parent path")
         if member.issparse() or member.type not in _SAFE_TYPES:

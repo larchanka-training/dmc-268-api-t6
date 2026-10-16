@@ -3,8 +3,13 @@
 One instance serves one repository and one job. It counts every request it sends to
 the API and to codeload, failed ones included; the token exchange is not counted.
 Failures map to the port's provider-neutral errors as in PIPELINE_SPEC §5.2 (model:
-`reviews/infrastructure/vcs_failures.py`). No error carries a URL or chains an httpx
-error: the codeload URL of a private repository carries a download token.
+`reviews/infrastructure/vcs_failures.py`, a 401 included: it stays retryable).
+
+The codeload URL of a private repository carries a download token, so no error carries a
+URL or chains an httpx error, and no log line carries the token. `httpx` logs every
+request with its URL at INFO; the adapter adds one `logging.Filter` to the `httpx` logger,
+once per process, that redacts the query of a codeload URL in that line. Other URLs are
+logged as they are.
 
 GitHub REST docs, checked 2026-10-16:
 
@@ -21,6 +26,8 @@ repository answers 409 "Git Repository is empty." (`_is_empty_repository_answer`
 
 from __future__ import annotations
 
+import io
+import logging
 import re
 from datetime import timedelta
 from typing import Literal, Protocol
@@ -115,15 +122,46 @@ def _headers(token: str, *, accept: str = "application/vnd.github+json") -> dict
     }
 
 
+class _ArchiveUrlRedaction(logging.Filter):
+    """Redacts the query of a codeload URL in the request line `httpx` logs."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if isinstance(record.args, tuple):
+            record.args = tuple(_redacted(arg) for arg in record.args)
+        return True
+
+
+def _redacted(value: object) -> object:
+    if isinstance(value, httpx.URL) and value.host == _ARCHIVE_HOST and value.query:
+        return value.copy_with(query=b"redacted")
+    return value
+
+
+# One instance: `addFilter` adds it once however many sources are built.
+_ARCHIVE_URL_REDACTION = _ArchiveUrlRedaction()
+
+
+def _retry_after(value: str | None) -> timedelta | None:
+    """The delay a `Retry-After` of whole seconds asks for; a date, a sign, a non-ASCII
+    digit or a value too large for a `timedelta` is no delay."""
+    if not value or not (value.isascii() and value.isdecimal()):
+        return None
+    try:
+        return timedelta(seconds=int(value))
+    except OverflowError:
+        return None
+
+
 def _classify(response: httpx.Response) -> VcsUnavailable | VcsAccessDenied:
     status = response.status_code
-    retry_after = response.headers.get("Retry-After")
-    delay = timedelta(seconds=int(retry_after)) if retry_after and retry_after.isdigit() else None
+    delay = _retry_after(response.headers.get("Retry-After"))
     limited = response.headers.get("X-RateLimit-Remaining") == "0" or delay is not None
     message = f"GitHub answered {status}"
     if status == 429 or (status == 403 and limited):
         return VcsUnavailable(message, rate_limited=True, retry_after=delay)
-    if status in {401, 403, 404}:
+    # A 401 is not here: as in the model, it retries, and a fresh installation token can
+    # heal it.
+    if status in {403, 404}:
         return VcsAccessDenied(message)
     return VcsUnavailable(message, retry_after=delay)
 
@@ -177,6 +215,7 @@ class GitHubRepositorySnapshotSource:
     ) -> None:
         if installation_external_id <= 0:
             raise ValueError("GitHub installation id must be positive")
+        logging.getLogger("httpx").addFilter(_ARCHIVE_URL_REDACTION)
         self._client = client
         self._tokens = token_provider
         self._installation = installation_external_id
@@ -278,14 +317,14 @@ class GitHubRepositorySnapshotSource:
         )
 
     async def _download(self, url: httpx.URL, max_bytes: int) -> bytes:
-        # Built by hand so that no default header of the client adds credentials: the
-        # codeload URL authorizes the download itself.
+        # Built by hand so that no default header or auth of the client adds credentials:
+        # the codeload URL authorizes the download itself.
         request = self._client.build_request(
             "GET", url, headers={"Accept-Encoding": "identity"}, timeout=_REQUEST_TIMEOUT
         )
         request.headers.pop("Authorization", None)
         self._requests += 1
-        response = await self._client.send(request, stream=True, follow_redirects=False)
+        response = await self._client.send(request, stream=True, auth=None, follow_redirects=False)
         try:
             if not response.is_success:
                 raise _classify(response)
@@ -297,11 +336,12 @@ class GitHubRepositorySnapshotSource:
             declared = response.headers.get("Content-Length")
             if declared is not None and declared.isdecimal() and int(declared) > max_bytes:
                 raise IndexLimitExceeded("download_bytes")
-            body = bytearray()
+            # `getvalue()` hands over the buffer without a copy, so the archive is held once.
+            body = io.BytesIO()
             async for chunk in response.aiter_bytes():
-                if len(body) + len(chunk) > max_bytes:
+                if body.tell() + len(chunk) > max_bytes:
                     raise IndexLimitExceeded("download_bytes")
-                body.extend(chunk)
-            return bytes(body)
+                body.write(chunk)
+            return body.getvalue()
         finally:
             await response.aclose()
