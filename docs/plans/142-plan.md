@@ -207,7 +207,8 @@ test.
   `IndexLeaseLost`; after `mark_failed`, GC removes everything.
 - **Quotas:** no double count on a repeated replace; full and incremental publications;
   Python = SQL parity; repository and Workspace → QUOTA with the right code; another
-  Workspace is unaffected; other builds' pending bytes count.
+  Workspace is unaffected; pending bytes of other builds count only while their lease
+  is live.
 - **Target snapshot:** the claim returns `target_commit_sha`.
 
 ### PR 1 documents
