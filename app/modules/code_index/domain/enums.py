@@ -23,3 +23,18 @@ class EdgeKind(StrEnum):
 
     IMPORTS = "imports"
     USES_IMPORTED = "uses_imported"
+
+
+class RagIndexStatus(StrEnum):
+    """The index status readers see (#145): the ADR list plus `disabled`.
+
+    Derived from the repository toggle and the state row, never stored: `stale` is a
+    READY row whose target commit moved on. The member order is the API contract order.
+    """
+
+    DISABLED = "disabled"
+    EMPTY = "empty"
+    BUILDING = "building"
+    READY = "ready"
+    STALE = "stale"
+    FAILED = "failed"
