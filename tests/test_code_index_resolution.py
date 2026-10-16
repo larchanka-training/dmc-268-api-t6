@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import random
+import time
 from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass, field
 
@@ -24,7 +25,7 @@ from app.modules.reviews.application.ast_resolution import (
     ImportResolution,
     RevisionTree,
 )
-from app.modules.reviews.application.ast_symbols import AstFacts, language_for_path
+from app.modules.reviews.application.ast_symbols import AstFacts, AstLanguage, language_for_path
 from app.modules.reviews.infrastructure.tree_sitter_facts import extract_facts
 
 _HEAD = "a" * 40
@@ -638,6 +639,47 @@ def test_no_caps_a_namespace_import_keeps_every_member() -> None:
 
     assert len(item.edges) == 121
     assert item.edges[-1] == _uses(_TS, "src/lib.ts", "f99")
+
+
+def test_a_name_rebound_in_one_declaration_still_counts_where_another_reads_it() -> None:
+    source = (
+        'import { User } from "./models";\n'
+        'import * as db from "./db";\n'
+        "export function shadow(User, db) { return User() + db.query(); }\n"
+        "export function use() { return User() + db.save(); }\n"
+        "export function local(db) { return db.drop(); }\n"
+    )
+
+    imports, _ = _resolve(_TS, source, paths=["src/models.ts", "src/db.ts"])
+
+    assert [item.edges for item in imports] == [
+        (_imports(_TS, "src/models.ts"), _uses(_TS, "src/models.ts", "User")),
+        (_imports(_TS, "src/db.ts"), _uses(_TS, "src/db.ts", "save")),
+    ]
+
+
+def test_a_file_of_many_imports_and_declarations_reads_its_facts_once() -> None:
+    # Review #142: per binding, a scan of every declaration's names was quadratic.
+    imports = "".join(f'import * as m{index} from "./t{index}";\n' for index in range(1_200))
+    bodies = "".join(
+        f"export function f{index}() {{ "
+        + " ".join(f"m{index + call}.a{call}();" for call in range(30))
+        + " }\n"
+        for index in range(600)
+    )
+    facts = extract_facts(AstLanguage.TYPESCRIPT, (imports + bodies).encode(), cpu_seconds=60.0)
+    resolver = _resolver(Provider({}), [_TS, *(f"src/t{index}.ts" for index in range(1_200))])
+    started = time.monotonic()
+
+    resolved = asyncio.run(resolver.resolve_file(_TS, facts))
+
+    elapsed = time.monotonic() - started
+    uses = [edge for item in resolved for edge in item.edges if edge.kind is EdgeKind.USES_IMPORTED]
+    assert len(resolved) == 1_200
+    # `m{index + call}.a{call}` is a distinct pair for each function and call.
+    assert len(uses) == 600 * 30
+    assert _uses(_TS, "src/t628.ts", "a29") in uses
+    assert elapsed < 0.75
 
 
 # --- Rules W, I, G and F ---------------------------------------------------------------

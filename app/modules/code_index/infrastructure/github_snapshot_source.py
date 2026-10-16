@@ -6,10 +6,12 @@ Failures map to the port's provider-neutral errors as in PIPELINE_SPEC §5.2 (mo
 `reviews/infrastructure/vcs_failures.py`, a 401 included: it stays retryable).
 
 The codeload URL of a private repository carries a download token, so no error carries a
-URL or chains an httpx error, and no log line carries the token. `httpx` logs every
-request with its URL at INFO; the adapter adds one `logging.Filter` to the `httpx` logger,
-once per process, that redacts the query of a codeload URL in that line. Other URLs are
-logged as they are.
+URL or chains an httpx error. `httpx` logs every request with its URL at INFO; the adapter
+adds one `logging.Filter` to the `httpx` logger, once per process, that redacts the query
+of a codeload URL in that request line. Other URLs are logged as they are. That covers
+the INFO request lines only: at DEBUG, `httpcore` logs the response headers, the
+tarball's 302 `Location` with its token included. The worker entrypoints log at INFO, so
+that line is not written today; a worker turned to DEBUG writes it.
 
 GitHub REST docs, checked 2026-10-16:
 
@@ -61,6 +63,8 @@ _ARCHIVE_HOST = "codeload.github.com"
 # GitHub lists at most 300 files of a comparison, so 300 may be a cut list.
 _COMPARE_FILE_CAP = 300
 _MAX_COMPARE_RESPONSE_BYTES = 8 * 1024 * 1024
+# The longest delay a `Retry-After` can ask for.
+_MAX_RETRY_AFTER_SECONDS = 86_400
 _SHA = re.compile(r"[0-9a-fA-F]{40}|[0-9a-fA-F]{64}")
 
 _ANCESTRY = {
@@ -142,14 +146,16 @@ _ARCHIVE_URL_REDACTION = _ArchiveUrlRedaction()
 
 
 def _retry_after(value: str | None) -> timedelta | None:
-    """The delay a `Retry-After` of whole seconds asks for; a date, a sign, a non-ASCII
-    digit or a value too large for a `timedelta` is no delay."""
+    """The delay a `Retry-After` of whole seconds asks for, at most one day; a date, a
+    sign, a non-ASCII digit or more digits than `int()` reads is no delay."""
     if not value or not (value.isascii() and value.isdecimal()):
         return None
     try:
-        return timedelta(seconds=int(value))
-    except OverflowError:
+        seconds = int(value)
+    except ValueError:
+        # Over 4300 digits (`sys.get_int_max_str_digits`).
         return None
+    return timedelta(seconds=min(seconds, _MAX_RETRY_AFTER_SECONDS))
 
 
 def _classify(response: httpx.Response) -> VcsUnavailable | VcsAccessDenied:

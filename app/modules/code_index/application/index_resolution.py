@@ -105,33 +105,40 @@ def _edges(edges: Iterable[IndexedEdge]) -> tuple[IndexedEdge, ...]:
     )
 
 
-def _uses(facts: AstFacts, alias: str) -> bool:
-    """`alias` is referenced by a declaration that does not rebind it.
+@dataclass(frozen=True)
+class _Reads:
+    """What the declarations of one file read, each outside a declaration that rebinds
+    it: the plain names, and the names read as `owner.name`, by owner.
 
-    Both name sets are the extractor's first 400 sorted names of the symbol
-    (`MAX_REFERENCES_PER_SYMBOL`), not all of them.
+    Read once per file, so a file costs one pass over its facts, not one per binding. The
+    name sets are the extractor's first 400 sorted names of each symbol
+    (`MAX_REFERENCES_PER_SYMBOL`), local bindings included, not all of them.
     """
-    return any(
-        alias in symbol.references and alias not in symbol.local_bindings
-        for symbol in facts.symbols
-    )
+
+    names: frozenset[str]
+    members: Mapping[str, frozenset[str]]
 
 
-def _members(facts: AstFacts, alias: str) -> list[str]:
-    """The names read as `alias.name` by declarations that do not rebind `alias`.
+def _reads(facts: AstFacts) -> _Reads:
+    names: set[str] = set()
+    members: defaultdict[str, set[str]] = defaultdict(set)
+    for symbol in facts.symbols:
+        bound = frozenset(symbol.local_bindings)
+        names.update(name for name in symbol.references if name not in bound)
+        for owner, name in symbol.member_references:
+            if owner not in bound:
+                members[owner].add(name)
+    return _Reads(frozenset(names), {owner: frozenset(read) for owner, read in members.items()})
 
-    Up to the extractor's first 400 sorted member references and local bindings of each
-    symbol (`MAX_REFERENCES_PER_SYMBOL`).
-    """
-    return sorted(
-        {
-            name
-            for symbol in facts.symbols
-            if alias not in symbol.local_bindings
-            for owner, name in symbol.member_references
-            if owner == alias
-        }
-    )
+
+def _uses(reads: _Reads, alias: str) -> bool:
+    """`alias` is referenced by a declaration that does not rebind it."""
+    return alias in reads.names
+
+
+def _members(reads: _Reads, alias: str) -> list[str]:
+    """The names read as `alias.name` by declarations that do not rebind `alias`."""
+    return sorted(reads.members.get(alias, ()))
 
 
 class IndexImportResolver:
@@ -160,10 +167,18 @@ class IndexImportResolver:
         self._go_layout: GoLayout | None = None
 
     async def resolve_file(self, path: str, facts: AstFacts) -> tuple[IndexedImport, ...]:
-        return tuple([await self.resolve_import(path, facts, item) for item in facts.imports])
+        reads = _reads(facts)
+        return tuple(
+            [await self.resolve_import(path, facts, item, reads) for item in facts.imports]
+        )
 
-    async def resolve_import(self, path: str, facts: AstFacts, item: AstImport) -> IndexedImport:
-        """The record and edges of one import specifier of the file at `path`."""
+    async def resolve_import(
+        self, path: str, facts: AstFacts, item: AstImport, reads: _Reads | None = None
+    ) -> IndexedImport:
+        """The record and edges of one import specifier of the file at `path`; `reads`
+        are `facts` read once, for a caller that resolves every import of the file."""
+        if reads is None:
+            reads = _reads(facts)
 
         def unresolved(
             resolution: ImportResolution, reason: str | None, target: str | None = None
@@ -183,7 +198,7 @@ class IndexImportResolver:
                 alias = binding.alias or package.name
                 if binding.kind is not ImportKind.MODULE or alias is None:
                     continue
-                for name in _members(facts, alias):
+                for name in _members(reads, alias):
                     # A name declared by no member or by several gets no edge.
                     declaring = package.declarations.get(name, ())
                     if len(declaring) == 1:
@@ -202,7 +217,7 @@ class IndexImportResolver:
             return unresolved(ImportResolution.EXCLUDED, excluded)
         edges = [IndexedEdge(path, EdgeKind.IMPORTS, target_path, "")]
         for binding in item.names:
-            edges += await self._binding_edges(path, facts, item, binding, target_path)
+            edges += await self._binding_edges(path, facts, reads, item, binding, target_path)
         return IndexedImport(
             ImportRecord(path, item.module, ImportResolution.RESOLVED, target_path),
             None,
@@ -213,6 +228,7 @@ class IndexImportResolver:
         self,
         path: str,
         facts: AstFacts,
+        reads: _Reads,
         item: AstImport,
         binding: AstImportName,
         target_path: str,
@@ -226,8 +242,8 @@ class IndexImportResolver:
             if binding.name is None:
                 return []
             if python and binding.kind is ImportKind.NAMED and target_path.endswith("__init__.py"):
-                return await self._package_binding(path, facts, target_path, binding.name, alias)
-            if not _uses(facts, alias):
+                return await self._package_binding(path, reads, target_path, binding.name, alias)
+            if not _uses(reads, alias):
                 return []
             return [IndexedEdge(path, EdgeKind.USES_IMPORTED, target_path, binding.name)]
         dotted = python and "." in item.module.strip(".") and alias == item.module.split(".")[0]
@@ -236,23 +252,23 @@ class IndexImportResolver:
             return []
         return [
             IndexedEdge(path, EdgeKind.USES_IMPORTED, target_path, name)
-            for name in _members(facts, alias)
+            for name in _members(reads, alias)
         ]
 
     async def _package_binding(
-        self, path: str, facts: AstFacts, package_init: str, name: str, alias: str
+        self, path: str, reads: _Reads, package_init: str, name: str, alias: str
     ) -> list[IndexedEdge]:
         """`from package import name`: a symbol of `__init__.py`, else the submodule."""
         submodule = python_submodule_files(package_init, name, self._tree)
         symbol = [IndexedEdge(path, EdgeKind.USES_IMPORTED, package_init, name)]
         if len(submodule) != 1:
-            return symbol if _uses(facts, alias) else []
+            return symbol if _uses(reads, alias) else []
         init = await self._facts.facts_for(package_init)
         if isinstance(init, FileUnavailable):
             # A symbol cannot be told from the submodule: neither is guessed.
             return []
         if exported_symbols(init, name):
-            return symbol if _uses(facts, alias) else []
+            return symbol if _uses(reads, alias) else []
         module = submodule[0]
         if self._path_exclusion(module) is not None:
             return []
@@ -260,7 +276,7 @@ class IndexImportResolver:
             IndexedEdge(path, EdgeKind.IMPORTS, module, ""),
             *(
                 IndexedEdge(path, EdgeKind.USES_IMPORTED, module, member)
-                for member in _members(facts, alias)
+                for member in _members(reads, alias)
             ),
         ]
 
