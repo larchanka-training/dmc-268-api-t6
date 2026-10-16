@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import runpy
 import shutil
 import subprocess
@@ -115,8 +116,11 @@ def test_key_evidence_checks_exact_roles_order_names_and_values() -> None:
     assert boundary("validate_diagnostics")(safe, expected) == expected
     for hostile in (
         safe.replace('"AUTH_KEY", "PATH"', '"PATH", "AUTH_KEY"'),
+        safe.replace('"AUTH_KEY", "PATH"', '"PATH"'),
+        safe.replace('"APP_KEY"', '"APP_KEY", "UNEXPECTED_KEY"'),
         safe.replace('"BOT_KEY"', '"APP_KEY"'),
         safe.replace('"APP_KEY"', '"bad\\nSECRET-CANARY"'),
+        safe.replace('worker environment keys: ["APP_KEY"]\n', ""),
         safe + 'api environment keys: ["AUTH_KEY", "PATH"]\n',
     ):
         with pytest.raises(Exception, match="environment key evidence was unexpected"):
@@ -330,7 +334,7 @@ def prepared_verifier(
                 output = image_a if args[-1] == "prepared:a" else image_b
             elif args[1] == "run":
                 if "import os,json" in args[-1]:
-                    output = "[]"
+                    output = '["PATH", "PYTHON_VERSION"]'
                 elif image_a in args:
                     output = json.dumps(
                         {"heads": ["20300101_0099"], "revisions": ["20300101_0099"]}
@@ -345,6 +349,35 @@ def prepared_verifier(
     yield prepare
     for verifier in verifiers:
         shutil.rmtree(verifier.root)
+
+
+@pytest.mark.parametrize("role", ["api", "worker", "webhook-worker"])
+def test_prepare_expected_keys_match_real_compose_runtime_environment(
+    prepared_verifier: Callable[[object, bool], Any], role: str
+) -> None:
+    verifier = prepared_verifier(
+        {
+            "heads": ["20261010_0110"],
+            "revisions": ["20261010_0110", "20300101_0099"],
+            "parents": {"20261010_0110": "20300101_0099"},
+        },
+        False,
+    )
+    verifier.prepare()
+    compose = (VERIFIER.parents[1] / "deploy/compose/staging.yml").read_text()
+    service = re.search(rf"^  {role}:\n(.*?)(?=^  [a-z][a-z0-9-]*:|\Z)", compose, re.M | re.S)
+    assert service is not None
+    environment = re.search(r"^    environment:\n((?:      .*\n)*)", service[1], re.M)
+    env_files = re.search(r"^    env_file:\n((?:      .*\n)*)", service[1], re.M)
+    assert environment is not None and env_files is not None
+    # Compose is the independent source: compare names only, never fixture secret values.
+    runtime_keys = {"PATH", "PYTHON_VERSION"}
+    runtime_keys.update(re.findall(r"^      ([A-Za-z_][A-Za-z0-9_]*):", environment[1], re.M))
+    for name in re.findall(r"^      - (\S+)$", env_files[1], re.M):
+        runtime_keys.update(
+            re.findall(r"^([A-Z][A-Z0-9_]*)='[^']*'\n", (verifier.app / name).read_text(), re.M)
+        )
+    assert verifier.expected_keys[role] == sorted(runtime_keys)
 
 
 @pytest.mark.parametrize("user_plugin", [False, True])

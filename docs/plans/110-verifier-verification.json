@@ -1,0 +1,183 @@
+{
+  "verified_on": "2026-10-16",
+  "application_source_sha": "7546e539e1c1f565f65b9a5ca4cdc5dd1fbfb3fa",
+  "source_description": "Fresh A built from checked-in Dockerfile and uv.lock; follow-up only changes verifier/tests/docs, which are not copied into A.",
+  "source_sha256": {
+    "Dockerfile": "72a357187bc445b48504cd5af29f65031a067209fa1b72579923291c97e1e7fe",
+    "uv.lock": "828addd73258e152e6f1a49aa971e065c156b58913392b31651a77e5ea238752",
+    "pyproject.toml": "883363818bbddee8e4832b4ce3a90f9d737adf56c632c2d7e1fa120c178c11f4",
+    "scripts/verify_rollback.py": "e8fb576b6fa79877b7c134fb41e6244ae0ae2a20d6ce0d09763758e245503b6f",
+    "tests/test_rollback_verifier.py": "0c2caf0c39d93298da5d741796560bc988f9f0819e94fcf747c540043aad50c1",
+    "deploy/compose/staging.yml": "6bab0f039a6420cc1e90b3fd33e7a8998cfd7e907b8dec62e7be9b444fb9a5b1",
+    "tests/fixtures/rollback/compose.yml": "eaf6cc028e9c6a40edf850ea15a38cdb1592ead856b67179cd03de6b2bb2550f",
+    "deploy/scripts/deploy.sh": "d853a22fb9ee218d1a1e0673109b9f0c5a9e95b54cc55ebd66d263bab8b0e377",
+    "deploy/scripts/rollback.sh": "5d870b8bed4eeab59915558e61ec883d55e70579c15ba3092fe776fa476dc63d",
+    "deploy/scripts/check-rollback-revision.py": "d39e94f98e4d53c66738dc8683e3a33f502d46097461922a2b4787ebc01f0493",
+    "deploy/scripts/env-file.sh": "26bc2116d1774d0a1dc45cffb82a327309e08024df514ae0b988e5389b8f477f"
+  },
+  "stock_report_file": "110-verifier-live.json",
+  "stock_report_sha256": "d79ffbbb05dd822f231377c28b4673c8ef34839bd5eb10e4eaa6cb56295b28a3",
+  "runtime": {
+    "docker": "24.0.2",
+    "server_architecture": "linux/arm64",
+    "compose": "5.6.0",
+    "compose_binary_sha256": "bd714a42b46e51757fc1121085b3096b9064e3f80d3ca5a991e33f44df4f43c9",
+    "user_docker_config_modified": false
+  },
+  "gates": [
+    {
+      "command": "uv run ruff check .",
+      "exit_code": 0,
+      "result": "All checks passed!"
+    },
+    {
+      "command": "uv run ruff format --check .",
+      "exit_code": 0,
+      "files": 457
+    },
+    {
+      "command": "uv run mypy .",
+      "exit_code": 0,
+      "source_files": 454
+    },
+    {
+      "command": "uv run pytest --junitxml=<private-output>/pytest.xml",
+      "outcome": "passed",
+      "exit_code": 0,
+      "tests": 3790,
+      "passed": 3790,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "warnings": 2,
+      "duration_seconds": 840.4,
+      "junit_duration_seconds": 840.355,
+      "junit_xml_sha256": "86f62294fe50f96811aae6ab49543b283997038198afa4109b889b60163e4cd6"
+    }
+  ],
+  "gate_infrastructure": {
+    "project": "rollback110-gates-ec19d9950bfd4204",
+    "postgres_image": "postgres:17-alpine",
+    "postgres_image_id": "sha256:ff80089083d7365046af7f03d949a2defa14e0b09e14bd5b8f08a242291be8b2",
+    "rabbitmq_image": "rabbitmq:4-management-alpine",
+    "rabbitmq_image_id": "sha256:04a158c5d95e1dd7575799d2e5153f8a9ab82daf3e52a4dc2f2e86c11f8e9ee8",
+    "host_port_binding": "loopback-only dynamic",
+    "shared_database_or_broker": false,
+    "anonymous_volumes": [
+      "1ae936f15dbaed8dbca4d302eb07efac65cad07e8c13eb9c77eb222a6a0c89db",
+      "bec85735b433d2742a234a64a4854966e1b866f171c1347cf39ce92300e4d562"
+    ],
+    "containers": [
+      "rollback110-gates-ec19d9950bfd4204-postgres-1",
+      "rollback110-gates-ec19d9950bfd4204-rabbitmq-1"
+    ],
+    "network": "rollback110-gates-ec19d9950bfd4204_default",
+    "postgres_version": "17.11",
+    "rabbitmq_version": "4.3.6"
+  },
+  "regression": {
+    "red": {
+      "failed": 1,
+      "passed": 2,
+      "only_failed_role": "worker",
+      "missing_key": "REDIS_URL"
+    },
+    "green": {
+      "passed": 3
+    },
+    "focused_suite": {
+      "passed": 232,
+      "failed": 0,
+      "errors": 0,
+      "skipped": 0,
+      "duration_seconds": 170.38
+    }
+  },
+  "live_image_A": "sha256:f6d47fe1bf650893bf66bc81b923812b110a987629c4f0a204c1d9a914ca3fe0",
+  "live_image_B": "sha256:50ed9c67e24a3aed60e5ab94c9a07ca01a00d3cf9ef8bc673eede8ae63a19f19",
+  "live_store_image_ids": {
+    "postgres": "sha256:25a89970a83255ae96484d709005bb35aa71f7455f941bc1634514f31c5d5c62",
+    "rabbitmq": "sha256:c3b1d10b087d5e3113e097c5c237ae00b05c92480ab2d6a1df07aafe787bf2e6",
+    "redis": "sha256:675f7644831d85995868250485bf7a71970257f74da31c62969a868d3f3eff2e"
+  },
+  "implementation_bytes_changed_during_verification": false,
+  "verifier_invocation": "uv run python scripts/verify_rollback.py --project rollback110-bd2e6fa84ce149d0 --image-a dmc268-rollback110-20261016:a --expect-image-a sha256:f6d47fe1bf650893bf66bc81b923812b110a987629c4f0a204c1d9a914ca3fe0 --report <new-private-output>/live-verifier.json",
+  "monkeypatch_or_expectation_override": false,
+  "prerequisite_attempt": {
+    "project": "rollback110-ec19d9950bfd4204",
+    "stage": "Compose version preflight before cases/image setup",
+    "failure": "real Compose version: command failed (exit 125)",
+    "reason": "Private-config plugin symlink resolved outside selected config; existing stock plugin exposure omitted it.",
+    "repair": "Copied the same official Compose binary physically into task-private config; no implementation edits.",
+    "cases": [],
+    "cleanup": "passed"
+  },
+  "external_cleanup": {
+    "live_project": "passed",
+    "fresh_A_tag_and_image": "removed",
+    "gate_project": "passed",
+    "shared_build_cache_or_preexisting_images_pruned": false,
+    "preflight_private_temporary_root": "removed",
+    "independent_resource_audit": {
+      "projects": {
+        "rollback110-gates-ec19d9950bfd4204": {
+          "containers": 0,
+          "networks": 0,
+          "volumes": 0
+        },
+        "rollback110-bd2e6fa84ce149d0": {
+          "containers": 0,
+          "networks": 0,
+          "volumes": 0
+        },
+        "rollback110-bd2e6fa84ce149d0-offline": {
+          "containers": 0,
+          "networks": 0,
+          "volumes": 0
+        },
+        "rollback110-ec19d9950bfd4204": {
+          "containers": 0,
+          "networks": 0,
+          "volumes": 0
+        },
+        "rollback110-ec19d9950bfd4204-offline": {
+          "containers": 0,
+          "networks": 0,
+          "volumes": 0
+        }
+      },
+      "exact_volumes_absent": {
+        "1ae936f15dbaed8dbca4d302eb07efac65cad07e8c13eb9c77eb222a6a0c89db": true,
+        "bec85735b433d2742a234a64a4854966e1b866f171c1347cf39ce92300e4d562": true
+      },
+      "exact_networks_absent": {
+        "rollback110-gates-ec19d9950bfd4204_default": true,
+        "rollback110-bd2e6fa84ce149d0_default": true,
+        "rollback110-bd2e6fa84ce149d0-offline_default": true,
+        "rollback110-ec19d9950bfd4204_default": true,
+        "rollback110-ec19d9950bfd4204-offline_default": true
+      },
+      "image_references_absent": {
+        "dmc268-rollback110-20261016:a": true,
+        "dmc268-rollback110:bd2e6fa84ce149d0-b": true,
+        "sha256:f6d47fe1bf650893bf66bc81b923812b110a987629c4f0a204c1d9a914ca3fe0": true,
+        "sha256:50ed9c67e24a3aed60e5ab94c9a07ca01a00d3cf9ef8bc673eede8ae63a19f19": true
+      }
+    },
+    "gate_credential_env_file": "removed",
+    "private_copied_Docker_config": "removed"
+  },
+  "proof_limits": [
+    "Local A/B immutable IDs use the existing stock pull substitution seam; no live registry delivery, mutable tag/digest resolution or empty-cache store download proof.",
+    "B is a synthetic fixture child. Compatible B-at-M deliberately skips B bootstrap via application-only up --no-deps.",
+    "Migration-graph admission does not prove application/schema/data/secret compatibility and does not perform an automatic downgrade.",
+    "No live GitHub or LLM provider calls, production secrets, edge provisioning/proxy changes or production deployment.",
+    "Docker shared build caches and preexisting images are preserved."
+  ],
+  "gate_stdout_sha256": {
+    "ruff_check": "82b3e6a6c090a57601d22943bd23fca9218d1031dbe5a7b754092f9a156b4f18",
+    "ruff_format": "8c719dbf8d21e4a81354073a755b808299dc585789291c93f432d450a72657b0",
+    "mypy": "e5c73464922fa3dd0b9b4b0cc6c80959954909a51c4f8fa9ed0df74dd908e817",
+    "pytest": "9e80a2348e7827c59416e6b4f9e33e1b5c5652325e10624a01093f476a630763"
+  }
+}
