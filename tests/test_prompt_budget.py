@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+from dataclasses import replace
 from pathlib import Path
 from time import perf_counter
 
@@ -48,13 +49,30 @@ def changed_file(path: str, count: int, *, width: int = 40) -> ChangedFile:
     )
 
 
-def context(*files: ChangedFile, rules: tuple[ReviewRule, ...] = ()) -> ReviewContext:
+def context(
+    *files: ChangedFile,
+    rules: tuple[ReviewRule, ...] = (),
+    commit_messages: tuple[str, ...] = (),
+) -> ReviewContext:
     return ReviewContext(
         system="SYSTEM",
         rules=rules,
         agents_md=None,
         conventions=RepoConventions((), ()),
-        pr_meta=PullRequestMeta("T", None, "a", "f", "main", (), len(files), 1, 0, False, False),
+        pr_meta=PullRequestMeta(
+            "T",
+            None,
+            "a",
+            "f",
+            "main",
+            (),
+            len(files),
+            1,
+            0,
+            False,
+            False,
+            commit_messages=commit_messages,
+        ),
         changed_files=files,
         omitted_files=("assets/logo.png",),
     )
@@ -170,6 +188,56 @@ def test_one_token_over_the_budget_changes_the_context() -> None:
     fitted = fit_review_context(original, max_prompt_tokens=exact - 1, counter=COUNTER)
     assert fitted != original
     assert prompt_tokens(fitted, COUNTER) <= exact - 1
+
+
+def test_commit_messages_are_budgeted_at_their_escaped_length_and_only_files_are_trimmed() -> None:
+    # 20 messages at the 500-character cap (kept without the "…" cut), built from
+    # characters XML escaping inflates: 10 000 raw characters render as 49 960.
+    messages = ("<" + "&" * 498 + ">",) * 20
+    original = context(
+        changed_file("app/a.py", 30),
+        changed_file("tests/test_a.py", 30),
+        commit_messages=messages,
+    )
+    unescaped = replace(
+        original, pr_meta=replace(original.pr_meta, commit_messages=("x" * 500,) * 20)
+    )
+    all_omitted = fit_review_context(original, max_prompt_tokens=0, counter=COUNTER)
+    # A count of raw commit lengths sees 15 535 and would keep every file; the rendered
+    # prompt is 55 495 and its files-omitted floor 50 958, so the budget must trim the diff.
+    budget = 54_000
+    assert [len(message) for message in messages] == [500] * 20
+    assert prompt_tokens(unescaped, COUNTER) == 15_535
+    assert prompt_tokens(all_omitted, COUNTER) == 50_958
+    assert prompt_tokens(original, COUNTER) == 55_495
+
+    fitted = fit_review_context(original, max_prompt_tokens=budget, counter=COUNTER)
+    user = PromptBuilder().build_prompt(fitted).user
+
+    assert prompt_tokens(fitted, COUNTER) <= budget
+    commit = "<commit>&lt;" + "&amp;" * 498 + "&gt;</commit>"
+    assert "<commit_messages>\n" + "\n".join([commit] * 20) + "\n</commit_messages>" in user
+    assert "…" not in user
+    # pr_meta survives whole; only the diff is cut or omitted
+    assert (
+        replace(fitted, changed_files=original.changed_files, omitted_files=original.omitted_files)
+        == original
+    )
+    assert [(file.path, len(file.lines), file.total_lines) for file in fitted.changed_files] == [
+        ("app/a.py", 30, None),
+        ("tests/test_a.py", 8, 30),
+    ]
+    assert fitted.omitted_files == ("assets/logo.png",)
+
+    # Worst case (SD §15): 20 × 500 "&" escape to 50 000 characters of commit text in a
+    # 50 396-character <commit_messages> block.
+    worst = PromptBuilder().build_prompt(context(commit_messages=("&" * 500,) * 20)).user
+    start = worst.index("<commit_messages>")
+    block = worst[start : worst.index("</commit_messages>", start) + len("</commit_messages>")]
+    worst_commit = "<commit>" + "&amp;" * 500 + "</commit>"
+    assert block == "<commit_messages>\n" + "\n".join([worst_commit] * 20) + "\n</commit_messages>"
+    assert sum(len(text) for text in re.findall(r"<commit>(.*?)</commit>", block)) == 50_000
+    assert len(block) == 50_396
 
 
 def test_additive_budget_matches_full_render_with_multiple_omitted_files() -> None:
