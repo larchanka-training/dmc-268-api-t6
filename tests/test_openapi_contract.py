@@ -112,6 +112,7 @@ EXPIRED_PATH = "expired.py"
 RUN_URL = f"/api/runs/{RUN_ID}"
 REPOSITORY_ID = UUID("22222222-2222-4222-8222-222222222222")
 CONFLICT_RUN_ID = UUID("88888888-8888-4888-8888-888888888888")
+NOT_CONFIGURED_RUN_ID = UUID("77777777-7777-4777-8777-777777777777")
 # PATCH /api/repos/{id} bodies the API rejects with 422 (#149, #145); the PostgreSQL API test
 # reuses them.
 INVALID_REVIEW_SETTINGS: dict[str, dict[str, object]] = {
@@ -243,6 +244,8 @@ class OpenApiContractRepository(ContractRepository):
     async def create_rerun(self, run_id: UUID, now: datetime) -> RerunResult:
         if run_id == CONFLICT_RUN_ID:
             return RerunResult(RerunOutcome.CONFLICT)
+        if run_id == NOT_CONFIGURED_RUN_ID:
+            return RerunResult(RerunOutcome.NOT_CONFIGURED)
         if run_id != RUN_ID:
             return RerunResult(RerunOutcome.NOT_FOUND)
         return RerunResult(
@@ -537,6 +540,29 @@ def test_app_responses_validate_against_the_declared_schema(
 
     assert response.status_code == int(status)
     _validator_for(method, spec_path, status).validate(response.json())
+
+
+def test_rerun_not_configured_response_validates_against_declared_schema(
+    client: TestClient,
+) -> None:
+    response = client.post(f"/api/runs/{NOT_CONFIGURED_RUN_ID}/rerun")
+
+    assert response.status_code == 422
+    assert response.json() == {"detail": "the repository has no active rule or prompt version"}
+    _validator_for("post", "/api/runs/{run_id}/rerun", "422").validate(response.json())
+
+
+def test_rerun_invalid_uuid_response_validates_against_declared_schema(client: TestClient) -> None:
+    response = client.post("/api/runs/not-a-uuid/rerun")
+
+    assert response.status_code == 422
+    detail = response.json()["detail"]
+    assert isinstance(detail, list)
+    assert len(detail) == 1
+    assert detail[0]["type"] == "uuid_parsing"
+    assert detail[0]["loc"] == ["path", "run_id"]
+    assert detail[0]["input"] == "not-a-uuid"
+    _validator_for("post", "/api/runs/{run_id}/rerun", "422").validate(response.json())
 
 
 def test_stream_events_validate_against_the_declared_event_schema() -> None:

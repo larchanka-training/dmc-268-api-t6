@@ -160,7 +160,13 @@ paths:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
         "422":
-          $ref: "#/components/responses/ValidationFailed"
+          description: Invalid run UUID or no active rule or prompt version for the repository.
+          content:
+            application/json:
+              schema:
+                anyOf:
+                  - $ref: "#/components/schemas/HTTPValidationError"
+                  - $ref: "#/components/schemas/ErrorResponse"
         "503":
           description: Authentication is not configured.
   /api/runs/{run_id}/cancel:
