@@ -157,8 +157,8 @@ class IndexAdmission:
 @dataclass(frozen=True)
 class LeaseClaim:
     """A granted lease, the target commit snapshot taken with it, and the Workspace's
-    estimated bytes at the claim: every repository's stored and pending bytes, this new
-    attempt's pending bytes being zero."""
+    estimated bytes at the claim: every repository's stored bytes and the pending bytes
+    of its live lease, this new attempt's pending bytes being zero."""
 
     fence: IndexFence
     target_commit_sha: str | None
@@ -224,6 +224,11 @@ class CodeIndexStore(Protocol):
 
         A QUOTA refusal writes `failed` as `mark_failed` does, so the caller commits a
         refusal too. A grant resets the pending bytes and turns `empty` into `building`.
+        The pending bytes of another repository's expired lease do not count.
+
+        It must be the first row-locking call of its own transaction: its admission
+        advisory lock orders before every state row lock. Each store call runs in a
+        short transaction of its own.
         """
         ...
 
@@ -237,7 +242,8 @@ class CodeIndexStore(Protocol):
         """T4: replace this attempt's rows of `file.path`; raises `IndexLeaseLost`.
 
         The pending bytes gain the new rows and lose the replaced ones, so a rewrite of
-        a path is counted once.
+        a path is counted once. It holds the state row for that update, so the writes of
+        one lease run one at a time; a claim or a purge waits for the batch.
         """
         ...
 
