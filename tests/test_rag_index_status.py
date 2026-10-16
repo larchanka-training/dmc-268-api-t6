@@ -95,6 +95,19 @@ def test_index_status_carries_no_code_text() -> None:
         ),
         pytest.param(
             _ready(
+                status=IndexStatus.EMPTY,
+                indexed_commit_sha=None,
+                target_commit_sha=SHA_B,
+                published_at=None,
+                file_count=0,
+                symbol_count=0,
+                last_error_code="github_rate_limited",
+            ),
+            RagIndex(RagIndexStatus.EMPTY, None, None, 0, 0, "github_rate_limited"),
+            id="empty-after-a-terminal-failure-keeps-the-last-error",
+        ),
+        pytest.param(
+            _ready(
                 status=IndexStatus.BUILDING,
                 indexed_commit_sha=None,
                 target_commit_sha=SHA_B,
@@ -120,6 +133,11 @@ def test_index_status_carries_no_code_text() -> None:
             _ready(target_commit_sha=SHA_B),
             RagIndex(RagIndexStatus.STALE, SHA_A, AT, 12, 340, None),
             id="ready-behind-its-target-is-stale",
+        ),
+        pytest.param(
+            _ready(target_commit_sha=SHA_B, last_error_code="github_rate_limited"),
+            RagIndex(RagIndexStatus.STALE, SHA_A, AT, 12, 340, "github_rate_limited"),
+            id="stale-after-a-failed-retry-keeps-its-publication",
         ),
         pytest.param(
             _ready(last_error_code="github_rate_limited"),

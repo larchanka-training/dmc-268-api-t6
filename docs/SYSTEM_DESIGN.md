@@ -1414,9 +1414,9 @@ API с ними выкатывается раньше, чем мёржится �
 `indexedCommitSha`, `indexedAt` (string или null), `fileCount`, `symbolCount`
 (integer ≥ 0) и `lastErrorCode` (string или null); правила вывода — §11. В
 `RepositoryUpdate` `ragEnabled` необязателен; `null` в нём и `ragIndex` в теле PATCH
-дают 422. Zod-схемы UI — ui#109 (коммит `9bfb931`, снимок
-`tests/fixtures/ui_zod_contracts.json`); поля ответа там обязательны, поэтому API
-с ними выкатывается раньше мёржа PR UI.
+дают 422. Zod-схемы UI — ui#109 (снимок `tests/fixtures/ui_zod_contracts.json`;
+коммит ui, с которого он снят, — в `provenance.commit` и `UI_CONTRACT_COMMIT`); поля
+ответа там обязательны, поэтому API с ними выкатывается раньше мёржа PR UI.
 
 **Контракт авторизации** (D4 — решение техлида по #20; хранение access в памяти, подпись в `auth-api` с проверкой публичным ключом и граница Workspace — дефолт по #20):
 

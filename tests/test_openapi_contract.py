@@ -954,7 +954,14 @@ def test_enums_match_the_ui_contract_and_the_review_output_model() -> None:
     assert components["Category"]["enum"] == list(get_args(Category.__value__))
     assert components["Severity"]["enum"] == zod["reviewComment"]["properties"]["severity"]["enum"]
     assert components["Category"]["enum"] == zod["reviewComment"]["properties"]["category"]["enum"]
-    assert components["RagIndexStatus"]["enum"] == [status.value for status in RagIndexStatus]
+    assert components["RagIndexStatus"]["enum"] == [
+        "disabled",
+        "empty",
+        "building",
+        "ready",
+        "stale",
+        "failed",
+    ]
 
 
 def test_runs_repo_filter_bounds_match_the_repository_name_constant() -> None:
