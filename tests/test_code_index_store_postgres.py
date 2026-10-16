@@ -561,7 +561,7 @@ def test_downgrade_drops_index_tables_and_types_and_upgrade_restores_them(
         "code_index_edge_kind",
         "code_index_import_resolution",
     }
-    assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "20261015_0032"
+    assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "20261016_0033"
 
 
 # Store behaviour: fencing, publication, purge, garbage collection and isolation.

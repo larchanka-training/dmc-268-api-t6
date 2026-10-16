@@ -94,15 +94,15 @@ update both heads pins.
 
 **Acceptance criteria:**
 
-- [ ] `rag_enabled BOOLEAN NOT NULL server_default false`; downgrade drops it;
+- [x] `rag_enabled BOOLEAN NOT NULL server_default false`; downgrade drops it;
   `tests/test_initial_migration.py` stays green (metadata matches the migration).
-- [ ] AC1: a repository inserted at 0032 reads `rag_enabled = false` after the upgrade to
+- [x] AC1: a repository inserted at 0032 reads `rag_enabled = false` after the upgrade to
   0033.
-- [ ] AC1/AC7: a new repository onboarded through `SyncInstallationRepositories` has
+- [x] AC1/AC7: a new repository onboarded through `SyncInstallationRepositories` has
   `rag_enabled = false`; a repeated onboarding of a repository with `rag_enabled = true`
   keeps true.
-- [ ] Reinstall keeps `rag_enabled` (+1 assert in `tests/test_app_reinstall_postgres.py`).
-- [ ] The heads pins name `20261016_0033` in
+- [x] Reinstall keeps `rag_enabled` (+1 assert in `tests/test_app_reinstall_postgres.py`).
+- [x] The heads pins name `20261016_0033` in
   `tests/test_app_reinstall_schema_postgres.py` and `tests/test_code_index_store_postgres.py`.
 
 **Verification:** Run the common verification block with zero skips; `uv run alembic

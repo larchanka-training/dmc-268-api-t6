@@ -87,6 +87,8 @@ class Repository(Base):
     installation_available: Mapped[bool] = mapped_column(
         BOOLEAN, nullable=False, server_default=text("true")
     )
+    # The RAG toggle (#145): off by default, and onboarding never turns it on.
+    rag_enabled: Mapped[bool] = mapped_column(BOOLEAN, nullable=False, server_default=text("false"))
     default_engine: Mapped[Engine] = mapped_column(
         pg_enum(Engine, "engine"), nullable=False, server_default=Engine.FAST.value
     )
