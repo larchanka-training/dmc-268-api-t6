@@ -479,7 +479,10 @@ class LiveVerifier:
                 }
             ),
             "worker": sorted(
-                set(base_keys) | common | app_keys | {"WORKER_HEARTBEAT_FILE", "LLM_API_KEYS"}
+                set(base_keys)
+                | common
+                | app_keys
+                | {"WORKER_HEARTBEAT_FILE", "LLM_API_KEYS", "REDIS_URL"}
             ),
             "webhook-worker": sorted(
                 set(base_keys)
