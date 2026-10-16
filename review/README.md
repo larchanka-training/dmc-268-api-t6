@@ -24,8 +24,11 @@ immutable — a file with a version in its name is never edited — and served f
 | `scripts/validate_findings.py`          | validator of model outputs: schema + semantic rules |
 | `examples/`                             | synthetic diff and sample outputs (proof run)       |
 
-The active prompts are `review.system.v2` and `review.conventions.v2` (the defaults in
-`app/bootstrap/llm_gateway.py`). The v1 files are history: a published version is never edited or removed.
+The current prompt files are `review.system.v2` and `review.conventions.v2`.
+`seed_prompt_versions` in `app/bootstrap/seed_prompts.py` activates the newest known
+version of each key in `prompt_versions` by setting `is_active`. The manual gateway
+check in `app/bootstrap/llm_gateway.py` defaults to the same v2 files. The v1 prompt
+files remain immutable history: a published version is never edited or removed.
 
 ## Seeding contract
 

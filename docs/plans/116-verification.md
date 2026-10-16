@@ -88,3 +88,55 @@ The separate independent Standards and Spec reviews each reported zero findings
 GitHub approval and final tech-lead AC acceptance remain pending; issue #116
 must remain open and PR #124 unmerged until the responsible humans complete
 their steps. Issue acceptance checkboxes and board statuses are unchanged.
+
+## Review round 2: correction and local documentation proof
+
+External review on published head `b42195dae68bb89908d33c0ab820204b2dc73322`
+found that the third original short line, `after removing and re-adding`, remained
+at line 670. The first independent Spec review missed it. Our previous statement
+that AC1's WEBHOOK_WORKER formatting was complete was an overclaim: token equality
+proved content preservation, but did not prove completion of the requested layout.
+The original evidence above is historical and does not establish this new fix.
+
+P2 now reflows that line through the paragraph end at width 92, keeping inline-code
+spans atomic. All three original standalone short lines from `f0f3c7e` were checked:
+`tech lead approved`, `risks of the budget"). A revived`, and
+`after removing and re-adding` are all integrated into longer lines now. The forced
+71-character line before `installation_repositories.added` remains unchanged.
+The complete affected paragraph (current lines 650–679) was inspected line by line.
+The unchanged surrounding line 669 has 93 characters; the rewritten tail is at most
+92. Tail lines 672 and 676 end early because the next complete inline-code span
+cannot fit; line 679 is the paragraph's final line.
+
+Local ad hoc checks passed:
+
+- Every whitespace-delimited token in the entire WEBHOOK_WORKER file matches
+  `origin/main` (`7546e539e1c1f565f65b9a5ca4cdc5dd1fbfb3fa`).
+- Every inline-code span's content matches pre-edit `b42195d`, normalizing embedded
+  whitespace. Every span in the complete reviewed paragraph now stays on one line,
+  including `GET /repos` and the final-attempt WARNING.
+- The rewritten tail matches greedy 92-column wrapping with code spans treated as
+  atomic tokens. No Markdown formatting tests were added.
+- `git diff --check` and current-main ancestry pass. Python, tests, review scripts,
+  published prompts, baseline, `pyproject.toml` and `uv.lock` are byte-identical to
+  both `b42195d` and the originally tested `a7eedf7`.
+
+P3-1 now explains the actual version choice: `seed_prompt_versions` activates the
+newest known version per key in `prompt_versions` by setting `is_active`. The manual
+gateway CLI defaults use the same v2 files.
+Historical v1 prompt files remain immutable. This wording was checked against
+`seed_prompts.py:95–142` and CLI defaults in
+`llm_gateway.py:85–86,334–335`; the paragraph is wrapped to its surrounding width.
+Coordination with overlapping PR #133 preceded edits:
+[comment](https://github.com/larchanka-training/dmc-268-api-t6/pull/133#issuecomment-6225203953).
+
+Local line-by-line output: `/tmp/issue116-round2-doc-proof.txt`. Fresh separate
+independent reviews completed with Standards 0 hard violations/0 smells and Spec 0
+findings; see `116-review.md`. No fresh local pytest/gate run or new-head CI success
+is claimed at this publication checkpoint. Current-head CI with all four gates,
+full pytest and the explicit integration zero-skip guard is required after push.
+Its exact SHA, run URL and actual counts are recorded in the existing
+[PR AC/DoD report](https://github.com/larchanka-training/dmc-268-api-t6/pull/124#issuecomment-6217853912)
+and [issue report](https://github.com/larchanka-training/dmc-268-api-t6/issues/116#issuecomment-6217854511)
+once CI completes, without another metadata-only push. The reviewer's thread
+resolution, approving review and final tech-lead acceptance remain pending.
