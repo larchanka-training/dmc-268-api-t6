@@ -10,7 +10,7 @@ from __future__ import annotations
 import posixpath
 import re
 from collections import defaultdict
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Protocol
@@ -335,8 +335,9 @@ def go_package_target(
 ) -> ModuleTarget:
     """Where the Go import `module` resolves in `tree`.
 
-    `layout` is `go_layout(tree)`, for a caller that resolves many imports of one tree;
-    without it, a call that reaches the package lookup walks the tree once.
+    `layout` is `go_layout(tree)`, for a caller that resolves many imports of one tree
+    (the indexer). Without it, as in the review, a call that reaches the package lookup
+    walks the tree twice, once for a nested `go.mod` and once for the members.
     """
     if "." not in module.split("/")[0]:
         return ModuleTarget(ImportResolution.EXTERNAL, "standard_library")
@@ -348,16 +349,33 @@ def go_package_target(
         return ModuleTarget(ImportResolution.EXTERNAL, "other_module")
     directory = module[len(go_module) :].strip("/")
     prefix = f"{directory}/" if directory else ""
+    members: Sequence[str]
     if layout is None:
-        layout = go_layout(tree)
-    # A `go.mod` in the package directory or in one above it, below the root.
-    if any(
-        prefix[: index + 1] in layout.module_prefixes
-        for index, character in enumerate(prefix)
-        if character == "/"
-    ):
-        return ModuleTarget(ImportResolution.UNSUPPORTED, "nested_module")
-    members = layout.members.get(prefix, ())
+        nested = [
+            path
+            for path in tree.blob_shas
+            if path.endswith("/go.mod") and prefix.startswith(path.removesuffix("go.mod"))
+        ]
+        if nested:
+            return ModuleTarget(ImportResolution.UNSUPPORTED, "nested_module")
+        members = sorted(
+            path
+            for path in tree.blob_shas
+            if path.startswith(prefix)
+            and "/" not in path[len(prefix) :]
+            and path.endswith(".go")
+            and not path.endswith("_test.go")
+            and not posixpath.basename(path).startswith(("_", "."))
+        )
+    else:
+        # A `go.mod` in the package directory or in one above it, below the root.
+        if any(
+            prefix[: index + 1] in layout.module_prefixes
+            for index, character in enumerate(prefix)
+            if character == "/"
+        ):
+            return ModuleTarget(ImportResolution.UNSUPPORTED, "nested_module")
+        members = layout.members.get(prefix, ())
     if not members:
         return ModuleTarget(ImportResolution.MISSING, "no_package_files")
     if any(_go_platform_file(path) for path in members):

@@ -13,7 +13,7 @@ import io
 import os
 import tarfile
 import time
-from collections.abc import Iterable, Set
+from collections.abc import Iterable, Mapping, Set
 
 import pytest
 
@@ -109,12 +109,19 @@ def _padded(data: bytes) -> bytes:
 
 
 def _raw_pax(key: str, value: str) -> bytes:
-    """A pax header with one record, `"<length> <key>=<value>\\n"`."""
-    record = f" {key}={value}\n".encode()
-    length = len(record) + 1
-    while len(str(length)) + len(record) != length:
-        length += 1
-    body = str(length).encode() + record
+    """A pax header with one record."""
+    return _raw_pax_records({key: value})
+
+
+def _raw_pax_records(records: Mapping[str, str]) -> bytes:
+    """A pax header with `"<length> <key>=<value>\\n"` records."""
+    body = b""
+    for key, value in records.items():
+        record = f" {key}={value}\n".encode()
+        length = len(record) + 1
+        while len(str(length)) + len(record) != length:
+            length += 1
+        body += str(length).encode() + record
     return _raw_header("PaxHeader", tarfile.XHDTYPE, len(body)) + _padded(body)
 
 
@@ -282,6 +289,16 @@ def test_the_unpacked_bytes_limit_counts_declared_sizes_before_reading_them() ->
     assert caught.value.code == "limit_exceeded:unpacked_bytes"
 
 
+def test_the_bytes_read_of_many_small_files_fit_a_limit_equal_to_their_declared_sizes() -> None:
+    # Each header adds its block and up to 511 bytes of padding that no size declares.
+    archive = _archive(*(_file(f"m{index}.py", b"x") for index in range(300)))
+    limit = _GLOBAL_HEADER_BYTES + 300
+    reader = _reader(unpacked_bytes=limit)
+
+    assert _scan(archive, reader).counters.unpacked_bytes == limit
+    assert _contents(archive, {"m299.py"}, reader=reader) == [(("m299.py", b"x"),)]
+
+
 _DATA = b"x" * 100_000
 # A base-256 size field that `tarfile` decodes as -(2**40).
 _NEGATIVE_SIZE = b"\xff" + (2**88 - 2**40).to_bytes(11, "big")
@@ -440,12 +457,53 @@ def test_a_truncated_archive_is_a_transient_vcs_failure() -> None:
         _contents(truncated, {"m1.py"})
 
 
+# A map of a trillion fields, two bytes a field: `tarfile` would read it all into a list.
+_FORGED_SPARSE_MAP = b"1000000000000\n" + b"1\n" * 150_000
+
+
+@pytest.mark.parametrize(
+    ("records", "data"),
+    [
+        pytest.param(
+            {"GNU.sparse.size": "10", "GNU.sparse.offset": "0", "GNU.sparse.numbytes": "1"},
+            b"x",
+            id="pax-sparse-0.0",
+        ),
+        pytest.param({"GNU.sparse.map": "0,1", "GNU.sparse.size": "10"}, b"x", id="pax-sparse-0.1"),
+        pytest.param(
+            {
+                "GNU.sparse.major": "1",
+                "GNU.sparse.minor": "0",
+                "GNU.sparse.name": f"{_ROOT}/s.py",
+                "GNU.sparse.realsize": "10",
+            },
+            _FORGED_SPARSE_MAP,
+            id="pax-sparse-1.0-forged-map",
+        ),
+    ],
+)
+def test_a_gnu_sparse_pax_member_is_unsafe_before_its_map_is_read(
+    records: Mapping[str, str], data: bytes
+) -> None:
+    archive = _raw_archive(
+        _raw_pax_records(records), _raw_header(f"{_ROOT}/s.py", size=len(data)), _padded(data)
+    )
+    started = time.monotonic()
+
+    with pytest.raises(ArchiveUnsafe):
+        _scan(archive)
+    with pytest.raises(ArchiveUnsafe):
+        _contents(archive, {"s.py"})
+    assert time.monotonic() - started < 1.0
+
+
 @pytest.mark.parametrize(
     "archive",
     [
-        # `ValueError` from `int()` of the pax record.
+        # `ValueError` from `int()` of the pax record (no sparse format reads `realsize`
+        # alone).
         pytest.param(
-            _raw_archive(_raw_pax("GNU.sparse.size", "abc"), _raw_header(f"{_ROOT}/a.py")),
+            _raw_archive(_raw_pax("GNU.sparse.realsize", "abc"), _raw_header(f"{_ROOT}/a.py")),
             id="pax-number-that-is-not-a-number",
         ),
         # `IndexError`: the map continues past the end of the stream.

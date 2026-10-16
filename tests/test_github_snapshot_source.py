@@ -268,8 +268,9 @@ def test_transient_answers_are_unavailable(
 @pytest.mark.parametrize("status", [429, 503])
 @pytest.mark.parametrize(
     "retry_after",
-    ["\u00b2", "-5", "9" * 30, "soon", "Wed, 21 Oct 2026 07:28:00 GMT"],
-    ids=["superscript-two", "negative", "overflow", "word", "http-date"],
+    ["\u00b2", "-5", "1" * 4301, "soon", "Wed, 21 Oct 2026 07:28:00 GMT"],
+    # `int()` refuses a string of more than 4300 digits with `ValueError`.
+    ids=["superscript-two", "negative", "over-4300-digits", "word", "http-date"],
 )
 def test_an_unreadable_retry_after_is_no_delay(status: int, retry_after: str) -> None:
     github = GitHub(
@@ -285,6 +286,22 @@ def test_an_unreadable_retry_after_is_no_delay(status: int, retry_after: str) ->
     assert isinstance(error, VcsUnavailable)
     assert error.rate_limited is (status == 429)
     assert error.retry_after is None
+
+
+@pytest.mark.parametrize(
+    ("retry_after", "seconds"),
+    [("86400", 86_400), ("86401", 86_400), ("10000000000000", 86_400), ("9" * 30, 86_400)],
+    ids=["one-day", "one-day-and-a-second", "ten-to-the-13", "30-digits"],
+)
+def test_a_retry_after_over_a_day_waits_one_day(retry_after: str, seconds: int) -> None:
+    github = GitHub(
+        {"api.github.com/repos/octo/repo": _answer(503, headers={"Retry-After": retry_after})}
+    )
+
+    error, _ = _run(github, lambda source: source.head())
+
+    assert isinstance(error, VcsUnavailable)
+    assert error.retry_after == timedelta(seconds=seconds)
 
 
 @pytest.mark.parametrize("status", [403, 404])
@@ -310,7 +327,10 @@ def test_a_timeout_is_unavailable() -> None:
     assert requests == 1
 
 
-@pytest.mark.parametrize(("status", "error_type"), [(404, VcsAccessDenied), (502, VcsUnavailable)])
+@pytest.mark.parametrize(
+    ("status", "error_type"),
+    [(404, VcsAccessDenied), (502, VcsUnavailable), (401, VcsUnavailable)],
+)
 def test_a_failed_token_exchange_is_mapped_and_not_counted(
     status: int, error_type: type[Exception]
 ) -> None:
