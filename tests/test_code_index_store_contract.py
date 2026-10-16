@@ -22,6 +22,8 @@ _PORT_METHODS = [
     "discard_abandoned",
     "replace_file",
     "publish",
+    "mark_failed",
+    "release",
     "revoke_expired_lease",
     "collect_garbage",
     "get_file",
@@ -29,6 +31,9 @@ _PORT_METHODS = [
     "outgoing_edges",
     "incoming_edges",
     "importers_of",
+    "iter_files",
+    "iter_imports",
+    "visible_counts",
 ]
 
 

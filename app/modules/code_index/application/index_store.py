@@ -10,6 +10,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
+from enum import StrEnum
 from typing import Protocol
 from uuid import UUID
 
@@ -87,12 +88,15 @@ class EdgeTarget:
 
 @dataclass(frozen=True)
 class IndexProfile:
-    """Versions a publication was built with; a change of any of them forces full."""
+    """What a publication was built with; a change of any of it forces full."""
 
     extractor_version: str
     resolver_version: str
     parser_profile_version: str
     limits_profile_version: str
+    default_branch: str
+    # `IgnorePolicy.digest` of `.review/rules.md` at the published commit.
+    exclusions_digest: str
 
 
 @dataclass(frozen=True)
@@ -122,16 +126,77 @@ class IndexState:
     file_count: int
     symbol_count: int
     edge_count: int
+    # Estimated bytes (`domain/storage.py`) of the published rows and of the leased
+    # attempt's rows.
+    stored_bytes: int
+    pending_bytes: int
     profile: IndexProfile | None
     stats: IndexBuildStats
     updated_at: datetime
+
+
+class ClaimRefusal(StrEnum):
+    """Why `claim_lease` granted no lease, in the order the claim checks it."""
+
+    STALE = "stale"  # no row, purged, another generation, or `failed`
+    LEASED = "leased"  # this repository has a live lease
+    QUOTA = "quota"  # a storage quota is exceeded; the claim wrote `failed`
+    BUSY = "busy"  # the concurrency limit is reached; the job waits in the queue
+
+
+@dataclass(frozen=True)
+class IndexAdmission:
+    """The ADR §7 limits a claim admits a job under."""
+
+    max_leases: int
+    max_installation_leases: int
+    repository_storage_bytes: int
+    workspace_storage_bytes: int
+
+
+@dataclass(frozen=True)
+class LeaseClaim:
+    """A granted lease, the target commit snapshot taken with it, and the Workspace's
+    estimated bytes at the claim: every repository's stored and pending bytes, this new
+    attempt's pending bytes being zero."""
+
+    fence: IndexFence
+    target_commit_sha: str | None
+    workspace_bytes: int
+
+
+@dataclass(frozen=True)
+class ClaimRefused:
+    """A refused claim; `error_code` is the `failed` code a QUOTA refusal wrote."""
+
+    reason: ClaimRefusal
+    error_code: str | None = None
+
+
+@dataclass(frozen=True)
+class IndexStorage:
+    """A repository's estimated bytes after a write: published, and of this attempt."""
+
+    stored_bytes: int
+    pending_bytes: int
+
+
+@dataclass(frozen=True)
+class IndexCounts:
+    """Visible rows of some paths, to take out of the state counters (incremental)."""
+
+    file_count: int
+    symbol_count: int
+    edge_count: int
 
 
 class CodeIndexStore(Protocol):
     """Index rows of one repository per call; flushes, never commits.
 
     Every method takes `repository_id` first and reads or writes only that repository's
-    rows. Reads see only the published rows of the current generation of a `ready` index.
+    rows; admission in `claim_lease` also reads sums over other repositories' state rows,
+    never their graph rows. Reads see only the published rows of the current generation
+    of a `ready` index.
     Each read statement is consistent on its own, but a read of several statements
     (`get_file`, `outgoing_edges`, or a sequence of reads) sees one snapshot only inside
     the caller's REPEATABLE READ read-only transaction (ADR §6.2): the #144 retriever
@@ -153,17 +218,27 @@ class CodeIndexStore(Protocol):
         ...
 
     async def claim_lease(
-        self, repository_id: UUID, generation: int, lease_seconds: int
-    ) -> IndexFence | None:
-        """T2: `None` when the generation differs, a live lease exists or the row is purged."""
+        self, repository_id: UUID, generation: int, lease_seconds: int, admission: IndexAdmission
+    ) -> LeaseClaim | ClaimRefused:
+        """T2 with admission (ADR §7), checked in the order of `ClaimRefusal`.
+
+        A QUOTA refusal writes `failed` as `mark_failed` does, so the caller commits a
+        refusal too. A grant resets the pending bytes and turns `empty` into `building`.
+        """
         ...
 
     async def discard_abandoned(self, repository_id: UUID, fence: IndexFence, limit: int) -> int:
         """T3: delete up to `limit` rows of abandoned attempts; returns the deleted count."""
         ...
 
-    async def replace_file(self, repository_id: UUID, fence: IndexFence, file: IndexedFile) -> None:
-        """T4: replace this attempt's rows of `file.path`; raises `IndexLeaseLost`."""
+    async def replace_file(
+        self, repository_id: UUID, fence: IndexFence, file: IndexedFile
+    ) -> IndexStorage:
+        """T4: replace this attempt's rows of `file.path`; raises `IndexLeaseLost`.
+
+        The pending bytes gain the new rows and lose the replaced ones, so a rewrite of
+        a path is counted once.
+        """
         ...
 
     async def publish(
@@ -180,7 +255,32 @@ class CodeIndexStore(Protocol):
     ) -> bool:
         """T5: publication compare-and-set; raises `IndexLeaseLost`, `False` on another miss.
 
-        Both a publication and a miss spend the lease.
+        Both a publication and a miss spend the lease. A publication moves the estimate
+        of its visible rows into the stored bytes and clears `last_error_code`.
+        """
+        ...
+
+    async def mark_failed(
+        self,
+        repository_id: UUID,
+        fence: IndexFence,
+        error_code: str,
+        *,
+        stats: IndexBuildStats | None = None,
+    ) -> None:
+        """ADR §7: fail the index with a code of `FAILED_ERROR_CODES`, else `ValueError`.
+
+        Spends the lease; the publication is no longer used, so garbage collection
+        removes every row. `None` keeps the recorded stats. Raises `IndexLeaseLost`.
+        """
+        ...
+
+    async def release(
+        self, repository_id: UUID, fence: IndexFence, *, last_error_code: str | None = None
+    ) -> IndexStatus:
+        """Spend the lease without publishing: `ready` with a publication, else `empty`.
+
+        `None` keeps the previous `last_error_code`. Raises `IndexLeaseLost`.
         """
         ...
 
@@ -205,6 +305,23 @@ class CodeIndexStore(Protocol):
     ) -> list[IndexedEdge]: ...
 
     async def importers_of(self, repository_id: UUID, target_path: str) -> list[ImportRecord]: ...
+
+    async def iter_files(
+        self, repository_id: UUID, after: str | None, limit: int
+    ) -> list[tuple[str, str]]:
+        """Up to `limit` visible `(path, blob_sha)` pairs after the path `after`, by path."""
+        ...
+
+    async def iter_imports(
+        self, repository_id: UUID, after: ImportRecord | None, limit: int
+    ) -> list[ImportRecord]:
+        """Up to `limit` visible import records after `after`, by path, specifier and
+        resolution."""
+        ...
+
+    async def visible_counts(self, repository_id: UUID, paths: Sequence[str]) -> IndexCounts:
+        """The visible files, symbols and edges of `paths`, read in one statement."""
+        ...
 
 
 class CodeIndexUnitOfWork(UnitOfWork, Protocol):
