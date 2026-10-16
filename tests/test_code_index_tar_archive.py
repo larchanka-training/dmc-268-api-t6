@@ -271,16 +271,20 @@ def test_a_passed_deadline_stops_both_passes() -> None:
 
 
 def test_the_deadline_stops_a_pass_over_a_large_archive_in_time() -> None:
-    # 512 MiB unpacked; reading it takes far longer than the deadline.
+    # 512 MiB unpacked: the whole pass takes many times the deadline.
     zeros = b"\0" * (8 * _MIB)
     archive = _archive(*(_file(f"blob{index}.bin", zeros) for index in range(64)))
+    started = time.monotonic()
+    _scan(archive)
+    whole = time.monotonic() - started
     started = time.monotonic()
 
     with pytest.raises(IndexLimitExceeded) as caught:
         _scan(archive, deadline=started + 0.05)
 
     assert caught.value.code == "limit_exceeded:deadline"
-    assert time.monotonic() - started < 0.5
+    # Checked at every header and read, not once at the end of the pass.
+    assert time.monotonic() - started < whole / 4
 
 
 @pytest.mark.parametrize(
