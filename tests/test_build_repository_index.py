@@ -178,6 +178,8 @@ class Store:
     bytes_per_file: int = 0
     published: bool = True
     after_publish: IndexState | None = None
+    # The state once the job released its lease or failed the index.
+    after_release: IndexState | None = None
     lose_lease_at: str | None = None
     written: list[tuple[int, IndexedFile]] = field(default_factory=list)
     publications: list[dict[str, Any]] = field(default_factory=list)
@@ -185,17 +187,29 @@ class Store:
     releases: list[str | None] = field(default_factory=list)
     pending: int = 0
     admission: IndexAdmission | None = None
+    # A store call that waits for `proceed` once `held` is set; `finished` follows it.
+    hold: str | None = None
+    held: asyncio.Event = field(default_factory=asyncio.Event)
+    proceed: asyncio.Event = field(default_factory=asyncio.Event)
+    finished: asyncio.Event = field(default_factory=asyncio.Event)
 
     def _call(self, name: str) -> None:
         self.tracker.store(name)
         if self.lose_lease_at == name:
             raise IndexLeaseLost("lost")
 
+    async def _wait_if_held(self, name: str) -> None:
+        if self.hold == name:
+            self.held.set()
+            await self.proceed.wait()
+
     async def get_state(self, repository_id: UUID) -> IndexState | None:
         assert repository_id == _REPO
         self._call("get_state")
         if self.publications and self.after_publish is not None:
             return self.after_publish
+        if (self.releases or self.failures) and self.after_release is not None:
+            return self.after_release
         return self.state
 
     async def claim_lease(
@@ -234,13 +248,17 @@ class Store:
         stats: IndexBuildStats | None = None,
     ) -> None:
         self._call("mark_failed")
+        await self._wait_if_held("mark_failed")
         self.failures.append((error_code, stats))
+        self.finished.set()
 
     async def release(
         self, repository_id: UUID, fence: IndexFence, *, last_error_code: str | None = None
     ) -> IndexStatus:
         self._call("release")
+        await self._wait_if_held("release")
         self.releases.append(last_error_code)
+        self.finished.set()
         return IndexStatus.READY
 
     async def iter_files(
@@ -392,12 +410,16 @@ class Parser:
     failures: dict[str, AstFailureReason] = field(default_factory=dict)
     error: BaseException | None = None
     parsed: list[str] = field(default_factory=list)
+    # Seconds the first file takes.
+    first_delay: float = 0.0
 
     async def parse_many(
         self, requests: tuple[ParseRequest, ...]
     ) -> dict[str, AstFacts | AstFailureReason]:
         if self.error is not None:
             raise self.error
+        if self.first_delay and not self.parsed:
+            await asyncio.sleep(self.first_delay)
         results: dict[str, AstFacts | AstFailureReason] = {}
         for request in requests:
             self.parsed.append(request.key)
@@ -446,15 +468,19 @@ class World:
     wakeups: Wakeups
     repositories: Repositories = field(default_factory=Repositories)
     sources: list[IndexedRepository] = field(default_factory=list)
+    # What the source factory raises after the claim, if anything.
+    source_error: BaseException | None = None
 
-    def run(
+    def use_case(
         self, limits: IndexLimits = _LIMITS, settings: IndexBuildSettings = _SETTINGS
-    ) -> BuildOutcome:
+    ) -> BuildRepositoryIndex:
         def source(repository: IndexedRepository) -> Source:
             self.sources.append(repository)
+            if self.source_error is not None:
+                raise self.source_error
             return self.source
 
-        use_case = BuildRepositoryIndex(
+        return BuildRepositoryIndex(
             uow=lambda: Uow(self.tracker, self.store),
             repositories=self.repositories,
             sources=source,
@@ -465,7 +491,11 @@ class World:
             limits=limits,
             settings=settings,
         )
-        return asyncio.run(use_case.execute(_REPO, _GENERATION))
+
+    def run(
+        self, limits: IndexLimits = _LIMITS, settings: IndexBuildSettings = _SETTINGS
+    ) -> BuildOutcome:
+        return asyncio.run(self.use_case(limits, settings).execute(_REPO, _GENERATION))
 
     def written(self) -> list[str]:
         return [file.path for _, file in self.store.written]
@@ -580,6 +610,17 @@ def test_a_refused_claim_ends_the_job_after_committing_the_claim(
     assert world.tracker.log == ["claim_lease", "commit"]
     assert world.store.admission == _ADMISSION
     assert world.sources == []
+
+
+def test_a_failing_source_factory_after_the_claim_releases_the_lease() -> None:
+    world = _world()
+    world.source_error = RuntimeError("no source for this repository")
+
+    with pytest.raises(RuntimeError, match="no source"):
+        world.run()
+
+    assert world.store.releases == [None]
+    assert world.tracker.log == ["claim_lease", "commit", "release", "commit"]
 
 
 def test_a_full_build_writes_every_admitted_file_in_batches_and_publishes_from_the_base() -> None:
@@ -856,6 +897,27 @@ def test_head_equal_to_the_indexed_commit_with_another_profile_builds_full() -> 
     assert (outcome.mode, outcome.full_reason) == (BuildMode.FULL, FullBuildReason.BRANCH_CHANGED)
 
 
+@pytest.mark.parametrize(
+    "version",
+    ["extractor_version", "resolver_version", "parser_profile_version", "limits_profile_version"],
+)
+def test_head_equal_to_the_indexed_commit_built_with_other_versions_builds_full(
+    version: str,
+) -> None:
+    profile = replace(_PROFILE, **{version: "other"})
+    world = _world(state=_state(indexed_commit_sha=_HEAD, profile=profile))
+
+    outcome = world.run()
+
+    assert (outcome.status, outcome.mode, outcome.full_reason) == (
+        BuildStatus.PUBLISHED,
+        BuildMode.FULL,
+        FullBuildReason.PROFILE_CHANGED,
+    )
+    assert world.network() == ["head", "archive"]
+    assert world.store.publications[0]["base_commit_sha"] == _HEAD
+
+
 def test_an_empty_repository_releases_as_empty_without_an_error() -> None:
     world = _world(state=_state())
     world.source.head_value = None
@@ -924,6 +986,85 @@ def test_a_target_that_moved_during_the_build_wakes_the_repository(
     assert outcome.status is BuildStatus.PUBLISHED
     assert world.wakeups.woken == woken
     assert world.tracker.log[-2:] == (["get_state", "wake"] if woken else ["commit", "get_state"])
+
+
+def _unsafe_archive(world: World) -> None:
+    world.archives.error = ArchiveUnsafe("unsafe")
+
+
+def _unavailable_head(world: World) -> None:
+    world.source.errors["head"] = VcsUnavailable("down")
+
+
+def _crashing_parser(world: World) -> None:
+    world.parser.error = RuntimeError("parser crashed")
+
+
+def _unchanged(world: World) -> None:
+    world.store.state = _state(indexed_commit_sha=_HEAD)
+
+
+def _empty(world: World) -> None:
+    world.source.head_value = None
+
+
+def _access_denied(world: World) -> None:
+    world.source.errors["head"] = VcsAccessDenied("gone")
+
+
+@pytest.mark.parametrize(
+    ("arrange", "status"),
+    [
+        (_unchanged, BuildStatus.UNCHANGED),
+        (_empty, BuildStatus.EMPTY),
+        (_access_denied, BuildStatus.RELEASED),
+    ],
+    ids=["unchanged", "empty", "released"],
+)
+@pytest.mark.parametrize(
+    ("target", "woken"),
+    [("d" * 40, [(_REPO, _GENERATION)]), (None, [])],
+    ids=["moved", "not-moved"],
+)
+def test_a_target_that_moved_before_a_release_wakes_the_repository(
+    arrange: Any, status: BuildStatus, target: str | None, woken: list[tuple[UUID, int]]
+) -> None:
+    # A wake-up refused as LEASED during the job left its target on the state row.
+    world = _world(state=_state(), after_release=_state(target_commit_sha=target))
+    arrange(world)
+
+    outcome = world.run()
+
+    assert outcome.status is status
+    assert world.wakeups.woken == woken
+    expected = ["release", "commit", "get_state", *(["wake"] if woken else [])]
+    assert world.tracker.log[-len(expected) :] == expected
+
+
+def _lost_lease(world: World) -> None:
+    world.store.lose_lease_at = "replace_file"
+
+
+@pytest.mark.parametrize(
+    ("arrange", "status", "tail"),
+    [
+        (_unavailable_head, BuildStatus.TRANSIENT, ["release", "commit"]),
+        (_unsafe_archive, BuildStatus.FAILED, ["mark_failed", "commit"]),
+        (_lost_lease, BuildStatus.LEASE_LOST, ["replace_file"]),
+    ],
+    ids=["transient", "failed", "lease-lost"],
+)
+def test_a_moved_target_is_not_rechecked_after_a_transient_failed_or_lost_lease(
+    arrange: Any, status: BuildStatus, tail: list[str]
+) -> None:
+    world = _world(state=_state(), after_release=_state(target_commit_sha="d" * 40))
+    arrange(world)
+
+    outcome = world.run()
+
+    assert outcome.status is status
+    assert world.wakeups.woken == []
+    assert world.tracker.log[-len(tail) :] == tail
 
 
 @pytest.mark.parametrize("step", ["replace_file", "publish", "discard_abandoned", "release"])
@@ -1018,16 +1159,33 @@ def test_a_build_limit_fails_the_index_before_writing_over_it(
     assert world.store.publications == []
 
 
-def test_the_incremental_limits_count_the_rows_the_build_keeps() -> None:
-    # 4 stored files with 6 symbols; closing app/models, util and cli leaves 1 file and 1
-    # symbol, and the build writes 2 files with 2 symbols: 3 files and 3 symbols in all.
+@pytest.mark.parametrize(("limit", "total"), [("parsed_files", 3), ("symbols", 3), ("edges", 2)])
+def test_the_incremental_limits_count_the_rows_the_build_keeps(limit: str, total: int) -> None:
+    # 4 stored files with 6 symbols and 5 edges; closing app/models, util and cli leaves 1
+    # file, 1 symbol and 2 edges, and the build writes 2 files with 2 symbols and no edge:
+    # 3 files, 3 symbols and 2 edges in all.
     counts = {"app/models.py": (2, 0), "app/util.py": (2, 1), "app/cli.py": (1, 2)}
     world = _incremental_world(counts=counts)
-    assert world.run(replace(_LIMITS, symbols=3, parsed_files=3)).status is BuildStatus.PUBLISHED
+    assert world.run(replace(_LIMITS, **{limit: total})).status is BuildStatus.PUBLISHED
 
     world = _incremental_world(counts=counts)
-    outcome = world.run(replace(_LIMITS, symbols=2))
-    assert (outcome.status, outcome.error_code) == (BuildStatus.FAILED, "limit_exceeded:symbols")
+    outcome = world.run(replace(_LIMITS, **{limit: total - 1}))
+    assert (outcome.status, outcome.error_code) == (BuildStatus.FAILED, f"limit_exceeded:{limit}")
+
+
+def test_the_repository_quota_counts_the_published_bytes_too() -> None:
+    # 100 published bytes and 100 per written file: the second write is over 250.
+    world = _world(state=_state(stored_bytes=100), bytes_per_file=100)
+    admission = replace(_ADMISSION, repository_storage_bytes=250)
+
+    outcome = world.run(settings=replace(_SETTINGS, admission=admission, batch_files=1))
+
+    assert (outcome.status, outcome.error_code) == (
+        BuildStatus.FAILED,
+        "limit_exceeded:repository_storage",
+    )
+    assert len(world.store.written) == 2
+    assert world.store.publications == []
 
 
 def test_a_passed_deadline_fails_the_index() -> None:
@@ -1037,6 +1195,17 @@ def test_a_passed_deadline_fails_the_index() -> None:
 
     assert (outcome.status, outcome.error_code) == (BuildStatus.FAILED, "limit_exceeded:deadline")
     assert world.network() == []
+
+
+def test_the_deadline_stops_the_parse_pass_between_files() -> None:
+    world = _world()
+    world.parser.first_delay = 1.0
+
+    outcome = world.run(replace(_LIMITS, deadline_seconds=1))
+
+    assert (outcome.status, outcome.error_code) == (BuildStatus.FAILED, "limit_exceeded:deadline")
+    assert world.parser.parsed == ["app/models.py"]
+    assert world.store.publications == []
 
 
 def test_the_deadline_interrupts_a_hanging_vcs_call() -> None:
@@ -1136,6 +1305,37 @@ def test_an_unexpected_error_releases_the_lease_and_propagates() -> None:
 
     assert world.store.releases == [None]
     assert world.store.failures == []
+
+
+@pytest.mark.parametrize(
+    ("arrange", "held", "failures", "releases"),
+    [
+        pytest.param(_unsafe_archive, "mark_failed", ["archive_unsafe"], [], id="mark-failed"),
+        pytest.param(_unavailable_head, "release", [], ["vcs_unavailable"], id="release"),
+        pytest.param(_crashing_parser, "release", [], [None], id="release-after-an-error"),
+    ],
+)
+def test_a_cancellation_during_the_closing_write_does_not_cut_it(
+    arrange: Any, held: str, failures: list[str], releases: list[str | None]
+) -> None:
+    world = _world(hold=held)
+    arrange(world)
+
+    async def scenario() -> None:
+        job = asyncio.create_task(world.use_case().execute(_REPO, _GENERATION))
+        await asyncio.wait_for(world.store.held.wait(), 5)
+        job.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await job
+        # The shielded write goes on after the job is cancelled.
+        world.store.proceed.set()
+        await asyncio.wait_for(world.store.finished.wait(), 5)
+
+    asyncio.run(scenario())
+
+    assert [code for code, _ in world.store.failures] == failures
+    assert world.store.releases == releases
+    assert world.tracker.log[-2:] == [held, "commit"]
 
 
 def test_no_transaction_is_open_during_a_vcs_call_or_a_wake_up() -> None:
