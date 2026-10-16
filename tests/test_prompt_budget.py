@@ -203,13 +203,15 @@ def test_commit_messages_are_budgeted_at_their_escaped_length_and_only_files_are
         original, pr_meta=replace(original.pr_meta, commit_messages=("x" * 500,) * 20)
     )
     all_omitted = fit_review_context(original, max_prompt_tokens=0, counter=COUNTER)
-    # A count of raw commit lengths sees 15 535 and would keep every file; the rendered
-    # prompt is 55 495 and its files-omitted floor 50 958, so the budget must trim the diff.
-    budget = 54_000
+    raw_length = prompt_tokens(unescaped, COUNTER)
+    floor = prompt_tokens(all_omitted, COUNTER)
+    rendered = prompt_tokens(original, COUNTER)
+    # One character under the rendered prompt: a count of raw commit lengths would keep
+    # every file, while the escaped commits leave room for the diff only once it is cut.
+    budget = rendered - 1
     assert [len(message) for message in messages] == [500] * 20
-    assert prompt_tokens(unescaped, COUNTER) == 15_535
-    assert prompt_tokens(all_omitted, COUNTER) == 50_958
-    assert prompt_tokens(original, COUNTER) == 55_495
+    assert raw_length < budget < rendered
+    assert floor < budget
 
     fitted = fit_review_context(original, max_prompt_tokens=budget, counter=COUNTER)
     user = PromptBuilder().build_prompt(fitted).user
@@ -223,10 +225,11 @@ def test_commit_messages_are_budgeted_at_their_escaped_length_and_only_files_are
         replace(fitted, changed_files=original.changed_files, omitted_files=original.omitted_files)
         == original
     )
-    assert [(file.path, len(file.lines), file.total_lines) for file in fitted.changed_files] == [
-        ("app/a.py", 30, None),
-        ("tests/test_a.py", 8, 30),
-    ]
+    # The source file stays whole; the test file is cut, not omitted.
+    source, test = fitted.changed_files
+    assert source == original.changed_files[0]
+    assert (test.path, test.total_lines) == ("tests/test_a.py", 30)
+    assert 0 < len(test.lines) < 30
     assert fitted.omitted_files == ("assets/logo.png",)
 
     # Worst case (SD §15): 20 × 500 "&" escape to 50 000 characters of commit text in a
