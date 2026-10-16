@@ -509,10 +509,12 @@ Tests first:
 - [ ] AC3: the skip counters equal literals.
 - [ ] AC9: no `code_index/application/*` module imports `integrations` or the GitHub
   adapters.
-- [ ] AC10 (Workspace quota at write): after each `replace_file` the build checks the
-  Workspace quota on the returned live `workspace_bytes` before the batch commit, so a
-  batch over it rolls back and the job ends with `limit_exceeded:workspace_storage`. PG
-  test: two live builds of one Workspace; the batch that crosses the quota is rolled back.
+- [ ] AC10 (storage quotas at write): after each `replace_file` the build checks both
+  quotas on the returned `IndexStorage` before the batch commit: the repository quota on
+  `stored_bytes + pending_bytes` and the Workspace quota on the live `workspace_bytes`. A
+  batch over either quota rolls back, and the job ends with
+  `limit_exceeded:repository_storage` or `limit_exceeded:workspace_storage`. Fake-store
+  tests cover both codes and show the batch is not committed.
 
 **Verification:** Run the common verification block.
 
@@ -541,6 +543,8 @@ here is fixed in the code of the owning task, in this commit.
 - [ ] AC7: a redelivery does not duplicate rows and does not move the sha backwards.
 - [ ] AC12: purge between batches stops the job without writes.
 - [ ] AC4/AC10: one test per exclusion class and per limit.
+- [ ] AC10 (Workspace quota at write): two live builds of one Workspace; the batch that
+  crosses the quota is rolled back, and the committed Workspace total never exceeds it.
 
 **Verification:** Run the common verification block with zero skips.
 
