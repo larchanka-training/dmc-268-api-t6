@@ -43,6 +43,7 @@ from app.modules.code_index.application.index_resolution import INDEX_RESOLVER_V
 from app.modules.code_index.application.index_store import (
     ImportRecord,
     IndexAdmission,
+    IndexBuildStats,
     IndexedEdge,
     IndexedSymbol,
     IndexState,
@@ -806,6 +807,31 @@ def test_a_redelivery_at_the_indexed_head_is_an_unchanged_no_op(database: _Datab
     _run(database, scenario)
 
 
+@pytest.mark.integration
+def test_a_job_released_without_a_publication_records_its_metrics(database: _Database) -> None:
+    async def scenario(indexer: Indexer) -> None:
+        await indexer.start({"lib.py": b"def target():\n    return 1\n", "user.py": _USER})
+        published = await indexer.state(database.a)
+        # The full build: the repository, its branch commit, the tarball and its redirect.
+        assert published.stats.github_request_count == 4
+        assert published.stats.downloaded_bytes > 0
+
+        outcome = await indexer.build(database.a)
+
+        assert outcome.status is BuildStatus.UNCHANGED
+        state = await indexer.state(database.a)
+        # The release wrote this job's metrics; the publication's counters stay.
+        assert state.stats == IndexBuildStats(0, state.stats.build_duration_ms, 2)
+        assert (state.status, state.file_count, state.symbol_count, state.stored_bytes) == (
+            IndexStatus.READY,
+            published.file_count,
+            published.symbol_count,
+            published.stored_bytes,
+        )
+
+    _run(database, scenario)
+
+
 _PACKAGE: Tree = {
     "pkg/__init__.py": b"def one():\n    return 1\n",
     "pkg/a.py": b"from pkg import one\n\n\ndef a1():\n    return one()\n",
@@ -936,11 +962,11 @@ def test_a_job_that_resumes_after_its_lease_was_taken_over_writes_nothing(
 
 
 @dataclass
-class _PurgeOnParse:
-    """The parser, purging the repository just before its `call`-th file."""
+class _ActOnParse:
+    """The parser, running `act` just before its `call`-th file; 0 never runs it."""
 
     inner: SourceParser
-    purge: Callable[[], Awaitable[None]]
+    act: Callable[[], Awaitable[None]]
     call: int
     calls: int = 0
 
@@ -949,7 +975,7 @@ class _PurgeOnParse:
     ) -> dict[str, AstFacts | AstFailureReason]:
         self.calls += 1
         if self.calls == self.call:
-            await self.purge()
+            await self.act()
         return await self.inner.parse_many(requests)
 
     async def aclose(self) -> None:
@@ -981,7 +1007,7 @@ def test_a_purge_between_batches_stops_the_job_without_writes(database: _Databas
         database,
         scenario,
         settings=replace(_SETTINGS, batch_files=1),
-        parser=lambda real: _PurgeOnParse(real, purge, call=2),
+        parser=lambda real: _ActOnParse(real, purge, call=2),
     )
 
 
@@ -1068,3 +1094,79 @@ def test_each_limit_fails_the_index_with_its_code(
         assert state.published_publication == 0
 
     _run(database, scenario, limits=limits, settings=replace(_SETTINGS, admission=admission))
+
+
+_MODULES: Tree = {f"m{index}.py": f"x{index} = 1\n".encode() for index in range(3)}
+
+
+@pytest.mark.integration
+def test_two_live_builds_of_one_workspace_never_commit_over_its_quota(
+    database: _Database,
+) -> None:
+    holder: list[Indexer] = []
+    parsers: list[_ActOnParse] = []
+    builds: list[BuildOutcome] = []
+
+    async def build_a() -> None:
+        builds.append(await holder[0].build(database.a))
+
+    def acting(real: SourceParser) -> SourceParser:
+        parsers.append(_ActOnParse(real, build_a, call=0))
+        return parsers[0]
+
+    async def scenario(indexer: Indexer) -> None:
+        holder.append(indexer)
+        # B's installation moves into A's Workspace: two installations, one Workspace.
+        async with indexer.database.factory() as session:
+            await session.execute(
+                text(
+                    "UPDATE provider_installations SET workspace_id = ("
+                    " SELECT workspace_id FROM provider_installations WHERE id ="
+                    " (SELECT provider_installation_id FROM repositories WHERE id = :a))"
+                    " WHERE id = (SELECT provider_installation_id FROM repositories WHERE id = :b)"
+                ),
+                {"a": database.a, "b": database.b},
+            )
+            await session.commit()
+        await indexer.enable(database.a)
+        await indexer.enable(database.b)
+        indexer.branch.push(_MODULES)
+        # The bytes of one publication of the tree; then A starts over.
+        assert (await indexer.build(database.a)).status is BuildStatus.PUBLISHED
+        stored = (await indexer.state(database.a)).stored_bytes
+        await indexer.purge(database.a)
+        await indexer.enable(database.a)
+        per_file = stored // len(_MODULES)
+        assert per_file * len(_MODULES) == stored
+        # Each repository fits its own quota; the Workspace holds A and two files of B.
+        admission = replace(
+            _ADMISSION,
+            repository_storage_bytes=stored,
+            workspace_storage_bytes=stored + 2 * per_file,
+        )
+        indexer.settings = replace(_SETTINGS, admission=admission, batch_files=1)
+        # B claims its lease in an empty Workspace; at its first parse, before its first
+        # write, A builds and publishes.
+        parsers[0].calls, parsers[0].call = 0, 1
+
+        outcome = await indexer.build(database.b)
+
+        (published,) = builds
+        assert published.status is BuildStatus.PUBLISHED
+        assert (outcome.status, outcome.error_code) == (
+            BuildStatus.FAILED,
+            "limit_exceeded:workspace_storage",
+        )
+        state_a, state_b = await indexer.state(database.a), await indexer.state(database.b)
+        assert state_a.stored_bytes == stored <= admission.repository_storage_bytes
+        assert (state_b.status, state_b.stored_bytes, state_b.pending_bytes) == (
+            IndexStatus.FAILED,
+            0,
+            0,
+        )
+        # B's first two batches committed, the Workspace at its quota and B within its
+        # own; the third batch, over the Workspace quota, rolled back.
+        assert await _raw_rows(database, database.b) == (2, 2, 0, 0)
+        assert 2 * per_file <= admission.repository_storage_bytes
+
+    _run(database, scenario, parser=acting)
