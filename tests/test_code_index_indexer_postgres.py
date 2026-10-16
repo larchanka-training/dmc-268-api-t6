@@ -750,6 +750,27 @@ def test_a_file_that_became_too_large_binary_or_a_symlink_loses_its_rows(
     _run(database, scenario)
 
 
+@pytest.mark.integration
+def test_a_nul_character_after_the_binary_check_drops_only_its_rows(database: _Database) -> None:
+    # The binary check reads the first 8 KiB; PostgreSQL text cannot hold U+0000.
+    source = (
+        "// " + "x" * 9_000 + "\n"
+        'import { a } from "./a\0b";\n'
+        'export class A {\n  "m\0n"() {\n    return a();\n  }\n}\n'
+        "export function run() {\n  return a();\n}\n"
+    ).encode()
+
+    async def scenario(indexer: Indexer) -> None:
+        snapshot = await indexer.start({"src/run.ts": source})
+
+        assert {path for path, _ in snapshot.files} == {"src/run.ts"}
+        assert {symbol.key.qualified_name for symbol in snapshot.symbols} == {"A", "run"}
+        assert snapshot.imports == frozenset()
+        assert snapshot.edges == frozenset()
+
+    _run(database, scenario)
+
+
 # --- AC7, AC12 ---------------------------------------------------------------------------
 
 

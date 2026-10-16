@@ -28,7 +28,11 @@ DEFAULT_EXPORT_NAME = "default"
 
 
 def _key_fits(*values: str) -> bool:
-    return sum(len(value.encode()) for value in values) <= MAX_INDEX_KEY_BYTES
+    # PostgreSQL text cannot hold U+0000, which a source can carry past the binary check
+    # (its first 8 KiB) in a string literal.
+    return all("\0" not in value for value in values) and (
+        sum(len(value.encode()) for value in values) <= MAX_INDEX_KEY_BYTES
+    )
 
 
 def symbol_rows(path: str, facts: AstFacts) -> tuple[IndexedSymbol, ...]:
