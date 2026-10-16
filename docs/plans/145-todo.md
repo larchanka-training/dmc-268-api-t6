@@ -154,13 +154,13 @@ Tests only, as in plan step 8, plus the test moved from C3 (D-E).
 
 **Acceptance criteria:**
 
-- [ ] AC5: for a block in the system message, in the user message and in an extra
+- [x] AC5: for a block in the system message, in the user message and in an extra
   message, 300 + 600 + 1200 characters give `input_tokens_estimate` = 700.
-- [ ] AC5: an answer without usage → exactly one ledger event with `tokens_in == 700` on
+- [x] AC5: an answer without usage → exactly one ledger event with `tokens_in == 700` on
   this run_id and workspace_id.
-- [ ] AC5: spending up to the run limit minus the next call's cost passes; 0.000001 more
+- [x] AC5: spending up to the run limit minus the next call's cost passes; 0.000001 more
   → `BUDGET_EXCEEDED` with no request.
-- [ ] AC6 (moved from C3): `usage_events.run_id` is NOT NULL with an FK to `runs`.
+- [x] AC6 (moved from C3): `usage_events.run_id` is NOT NULL with an FK to `runs`.
 
 **Verification:** Run the common verification block. The tests pin existing behaviour, so
 there is no failing run before them.
