@@ -169,6 +169,7 @@ def test_source_roles_are_the_list_of_the_specification() -> None:
         "diff",
         "source_excerpt",
         "ast_excerpt",
+        "retrieved_excerpt",
         "candidate",
         "previous_output",
     }

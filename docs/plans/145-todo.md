@@ -129,10 +129,10 @@ step 7.
 
 **Acceptance criteria:**
 
-- [ ] `tests/test_context_provenance.py` pins the role list with `retrieved_excerpt`.
-- [ ] `tests/test_review_context_stage.py` asserts literal `tokens_by_role` for a payload
+- [x] `tests/test_context_provenance.py` pins the role list with `retrieved_excerpt`.
+- [x] `tests/test_review_context_stage.py` asserts literal `tokens_by_role` for a payload
   with a `retrieved_excerpt` block.
-- [ ] The tests fail before the code exists and pass after.
+- [x] The tests fail before the code exists and pass after.
 
 **Verification:** Run the common verification block.
 
