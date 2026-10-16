@@ -28,22 +28,30 @@ Expand the review LLM pipeline to accept user-defined Markdown policy documents 
 ## Tasks & Phases
 
 ### Phase 1: Domain Contracts & Policy Snapshot Envelope (Foundation)
-- [ ] **Task 1**: Domain models for Policy Snapshot, Prompt Bindings, and Execution Profile (`policy_snapshot.py`).
-- [ ] **Task 2**: Envelope rendering, XML escaping, prompt injection defenses, and call manifest generation in `PromptBuilder`.
-- [ ] **Task 3**: Token counter / budget pre-send guards (policy budget ≤ 12,000 tokens, total input budget).
+- [x] **Task 1**: Domain models for Policy Snapshot, Prompt Bindings, and Execution Profile (`policy_snapshot.py`).
+- [x] **Task 2**: Envelope rendering, XML escaping, prompt injection defenses, and call manifest generation in `PromptBuilder`.
+- [x] **Task 3**: Token counter / budget pre-send guards (policy budget ≤ 12,000 tokens, total input budget).
 
 ### Phase 2: Attribution v2 & Schema Contracts
-- [ ] **Task 4**: `ReviewOutput v2` schema, `EvidenceRef`, and attribution validator (validating `rule_name`, `evidence_refs` against call manifest).
-- [ ] **Task 5**: JSON Schema definitions (`review-output.schema.v2.json`, `verifier-output.schema.v1.json`).
+- [x] **Task 4**: `ReviewOutput v2` schema, `EvidenceRef`, and attribution validator (validating `rule_name`, `evidence_refs` against call manifest).
+- [x] **Task 5**: JSON Schema definitions (`review-output.schema.v2.json`, `verifier-output.schema.v1.json`).
 
 ### Phase 3: Reflection Pass (Verifier Engine)
-- [ ] **Task 6**: Verifier data models (`VerificationDecision`, `VerificationOutput`), verifier system prompt (`review.verifier.v1.md`), and verifier prompt builder.
-- [ ] **Task 7**: Reflection Pass executor (`ReflectionPass`), handling model invocation, schema validation, decision resolution, and error classification.
+- [x] **Task 6**: Verifier data models (`VerificationDecision`, `VerificationOutput`), verifier system prompt (`review.verifier.v1.md`), and verifier prompt builder.
+- [x] **Task 7**: Reflection Pass executor (`ReflectionPass`), handling model invocation, schema validation, decision resolution, and error classification.
 
 ### Phase 4: Pipeline Integration & Verification
-- [ ] **Task 8**: Wire Reflection Pass into `ExecuteReviewRun`, filtering candidates so only `supported` findings proceed to publication.
-- [ ] **Task 9**: Comprehensive test suite (snapshot intake, prompt injection defenses, fixed positive/negative review examples, pipeline isolation).
-- [ ] **Task 10**: Linting, formatting, type checking, and documentation updates.
+- [x] **Task 8**: Wire Reflection Pass into `ExecuteReviewRun`, filtering candidates so only `supported` findings proceed to publication.
+- [x] **Task 9**: Comprehensive test suite (snapshot intake, prompt injection defenses, fixed positive/negative review examples, pipeline isolation).
+- [x] **Task 10**: Linting, formatting, type checking, and documentation updates.
+
+### Phase 5: Review Round 1 Fixes (Alexander Khomutov / axyi #5547099992)
+- [x] **P1 Security**: Narrow service-defaults ID regex to `^[a-zA-Z0-9_\-]+$` and add XML attribute escaping (`&quot;`, `&apos;`).
+- [x] **P2 Attribution**: Full validation of `evidence_refs` and `requirement_refs`; manifest `shown_ranges` and explicit `block_id` on `<file>`.
+- [x] **P2 Guards & Fail-Closed**: `is_ready_for_llm`, budget checks, `reflection_pass` presence; error codes catalog.
+- [x] **P2 Cleansing & Logging**: Summary cleansing on rejected candidates; sanitized ID/status logging.
+- [x] **P2 Documentation**: Updated `review/README.md`, `docs/TEST_PLAN.md`, plans.
+
 
 ## Risks and Mitigations
 | Risk | Impact | Mitigation |

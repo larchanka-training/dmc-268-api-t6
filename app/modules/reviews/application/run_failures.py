@@ -50,6 +50,7 @@ RETRYABLE_ERROR_CODES = (
             "llm_unavailable",
             "diff_fetch_failed",
             "commit_messages_fetch_failed",
+            "verification_unavailable",
             "internal_error",
         }
     )
@@ -62,6 +63,8 @@ KNOWN_ERROR_CODES = (
         "llm_invalid_output",
         "llm_context_overflow",
         "llm_payment_required",
+        "verification_invalid_output",
+        "verification_context_overflow",
         "budget_exceeded",
         "deadline_exceeded",
         "github_forbidden",

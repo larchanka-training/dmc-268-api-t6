@@ -260,12 +260,8 @@ def test_policy_document_properties_and_helpers() -> None:
 def test_policy_snapshot_composition_and_readiness() -> None:
     rules_doc = make_policy_document_present(".review/rules.md", "# Rules\nRule 1\n")
     agents_doc = make_policy_document_missing("AGENTS.md")
-    bindings = PromptBindings(
-        review_system_checksum="cs1",
-        conventions_checksum="cs2",
-        verifier_checksum="cs3",
-    )
-    profile = ExecutionProfile.fast("model1", "model2")
+    bindings = _bindings()
+    profile = _profile()
 
     snapshot = PolicySnapshot(
         schema_version=1,
@@ -293,6 +289,11 @@ def test_policy_snapshot_composition_and_readiness() -> None:
     assert snapshot.is_ready_for_llm is True
     assert snapshot.has_custom_rules is True
     assert snapshot.has_agents_doc is False
+
+    unready_bindings = replace(snapshot, prompt_bindings=_bindings(verifier_id=None))
+    assert unready_bindings.is_ready_for_llm is False
+    unready_profile = replace(snapshot, execution_profile=_profile(review_model=""))
+    assert unready_profile.is_ready_for_llm is False
 
 
 def test_call_manifest_tracks_shown_ranges() -> None:

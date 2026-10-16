@@ -50,6 +50,13 @@ class LengthAwareTokenCounter(TokenCounter, Protocol):
     def count_length(self, characters: int) -> int: ...
 
 
+class EstimatedTokenCounter:
+    """Four characters per token, rounded up: an estimate until the model counter is wired."""
+
+    def count(self, text: str) -> int:
+        return (len(text) + 3) // 4
+
+
 class PolicyBudgetExceededError(ValueError):
     """Rendered policy documents exceed the maximum token budget (RULES_FORMAT_SPEC §3.3)."""
 

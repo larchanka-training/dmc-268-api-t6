@@ -56,3 +56,27 @@
 - [x] **Task 10: Final polish, lint, format & typing**
   - Run `uv run ruff check .`, `uv run ruff format --check .`, `uv run mypy .`, and `uv run pytest`.
   - Ensure zero regressions across entire test suite.
+
+## Phase 5: Review Round 1 Fixes (Alexander Khomutov / axyi #5547099992)
+- [x] **Task 11: P1 security escaping & regex narrowing**
+  - Narrow `_SERVICE_DEFAULTS_ID_RE` to `^[a-zA-Z0-9_\-]+$`.
+  - Add entity escaping for quotes (`&quot;`, `&apos;`) in XML attributes via `_attribute`.
+- [x] **Task 12: P2 evidence & requirement validation**
+  - Validate `evidence_refs` (roles `diff`, `source_excerpt`, `ast_excerpt`) and `requirement_refs` (roles `policy_document`, `service_defaults`, strict `check_id`).
+  - Enforce matching `requirement_refs` for rule-attributed findings.
+- [x] **Task 13: P2 manifest fidelity & block_id**
+  - Implement `shown_ranges: tuple[tuple[int, int], ...]` in `ManifestBlock`.
+  - Explicit `block_id` on `<file>` tags in v2 snapshot and verifier prompts.
+  - Retain `service-defaults` in snapshot and manifest.
+- [x] **Task 14: P2 fail-closed guards & error catalog**
+  - Check `is_ready_for_llm`, budget checks (`verify_pre_send_guard`), missing `reflection_pass` when snapshot present.
+  - Register `verification_unavailable` (retryable), `verification_invalid_output` and `verification_context_overflow` (terminal).
+- [x] **Task 15: P2 summary cleansing & sanitized logging**
+  - Cleansing when all candidates rejected (neutral summary, zero hallucinated defects).
+  - Sanitized logging (only IDs and statuses).
+- [x] **Task 16: P2 prompt trust statements & post-processor**
+  - Added trust paragraphs in `review.system.v2.md` and `review.verifier.v1.md`.
+  - Preserve `ALLOWED_V2_RULE_NAMES` and `service-defaults:*` in `_repair_attribution`.
+- [x] **Task 17: P2 documentation & test suites**
+  - Updated `review/README.md`, `docs/TEST_PLAN.md`, `tests/test_reflection_evaluation.py`, `tests/test_execute_review.py`.
+
