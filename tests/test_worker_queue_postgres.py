@@ -1160,8 +1160,10 @@ _FILE_TEXT = b"line10\nline11\nline12\n"
 class FakeGitHubApi:
     """GitHub REST as the worker uses it, on a MockTransport (no network)."""
 
-    def __init__(self, *, agents_md: bytes | None = None) -> None:
+    def __init__(self, *, agents_md: bytes | None = None, commits: tuple[str, ...] = ()) -> None:
         self.agents_md = agents_md
+        # Keep it under 10: the handler ignores ``page``, so a full page would repeat as page 2.
+        self.commits = commits
         self.reviews: list[dict[str, Any]] = []
         self.requests: list[str] = []
 
@@ -1198,7 +1200,7 @@ class FakeGitHubApi:
                 },
             )
         if path == f"{repo}/pulls/7/commits":
-            return httpx.Response(200, json=[])
+            return httpx.Response(200, json=[{"commit": {"message": m}} for m in self.commits])
         if path == f"{repo}/pulls/7/files":
             return httpx.Response(
                 200,
@@ -1247,12 +1249,14 @@ class FakeLlm:
 
     def __init__(self) -> None:
         self.tasks: list[str] = []
+        self.bodies: list[dict[str, Any]] = []
 
     def __call__(self, request: httpx.Request) -> httpx.Response:
         assert request.url.path == "/v1/chat/completions"
         body = json.loads(request.content)
         task = body["response_format"]["json_schema"]["name"]
         self.tasks.append(task)
+        self.bodies.append(body)
         answer: dict[str, object] = (
             {
                 "files": [{"path": "app/example.py", "relevance": "Changed module."}],
@@ -1368,6 +1372,35 @@ def test_main_composition_reviews_through_the_llm_gateway(
     assert names.count("llm.call") >= 2
     assert usage_rows >= 2
     assert github.reviews and github.reviews[0]["commit_id"] == HEAD
+
+
+@pytest.mark.integration
+def test_main_composition_sends_escaped_commit_messages_to_the_review_llm_call(
+    env: Env,
+) -> None:
+    commits = ("fix: <escape> & keep", "feat: a > b && c < d")
+    github, llm = FakeGitHubApi(commits=commits), FakeLlm()
+    settings = _main_settings(env, LLM_ENV)
+    _, state, _ = asyncio.run(_run_main_worker(env, settings, github, llm, "succeeded", "failed"))
+
+    assert state == ("succeeded", 1, None)
+    assert "GET /repos/octo/repo/pulls/7/commits" in github.requests
+    reviews = [
+        body
+        for body in llm.bodies
+        if body["response_format"]["json_schema"]["name"] == "ReviewOutput"
+    ]
+    assert len(reviews) == 1
+    users = [m["content"] for m in reviews[0]["messages"] if m["role"] == "user"]
+    assert len(users) == 1
+    assert (
+        "<commit_messages>\n"
+        "<commit>fix: &lt;escape&gt; &amp; keep</commit>\n"
+        "<commit>feat: a &gt; b &amp;&amp; c &lt; d</commit>\n"
+        "</commit_messages>"
+    ) in users[0]
+    for message in commits:
+        assert message not in users[0]
 
 
 @pytest.mark.integration
