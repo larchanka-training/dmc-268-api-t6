@@ -9,6 +9,16 @@ from typing import Any, Literal
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.common.infrastructure.github_link_header import has_next_relation
+from app.modules.reviews.application.commit_prefix_limits import (
+    COMMIT_PAGE_COUNT,
+    COMMIT_PAGE_SIZE,
+    MAX_COMMIT_MESSAGE_CHARS,
+    MAX_COMMIT_MESSAGES,
+    MAX_COMMIT_PAGES,
+    MAX_COMMIT_RESPONSE_BYTES,
+    CommitEncoding,
+    commit_prefix_incomplete,
+)
 from app.modules.reviews.application.prompt_builder import shorten_commit_message
 from app.modules.reviews.application.vcs_diff import CommitMessagePrefix
 
@@ -25,12 +35,12 @@ class _StrictModel(BaseModel):
 
 
 class _Retrieval(_StrictModel):
-    per_page: int = Field(ge=10, le=10)
-    max_pages: int = Field(ge=2, le=2)
-    max_messages: int = Field(ge=20, le=20)
-    max_message_chars: int = Field(ge=500, le=500)
-    max_response_bytes: int = Field(ge=1048576, le=1048576)
-    accept_encoding: Literal["identity"]
+    per_page: int = Field(ge=COMMIT_PAGE_SIZE, le=COMMIT_PAGE_SIZE)
+    max_pages: int = Field(ge=MAX_COMMIT_PAGES, le=MAX_COMMIT_PAGES)
+    max_messages: int = Field(ge=MAX_COMMIT_MESSAGES, le=MAX_COMMIT_MESSAGES)
+    max_message_chars: int = Field(ge=MAX_COMMIT_MESSAGE_CHARS, le=MAX_COMMIT_MESSAGE_CHARS)
+    max_response_bytes: int = Field(ge=MAX_COMMIT_RESPONSE_BYTES, le=MAX_COMMIT_RESPONSE_BYTES)
+    accept_encoding: CommitEncoding
 
 
 class _Entry(_StrictModel):
@@ -54,14 +64,14 @@ class _HeadEvidence(_StrictModel):
 
 
 class _Page(_StrictModel):
-    page: int = Field(ge=1, le=2)
+    page: int = Field(ge=1, le=COMMIT_PAGE_COUNT)
     verified_via: str
     response_date: AwareDatetime
-    response_bytes: int = Field(ge=0, le=1048576)
-    content_encoding: Literal["identity"] | None
+    response_bytes: int = Field(ge=0, le=MAX_COMMIT_RESPONSE_BYTES)
+    content_encoding: CommitEncoding | None
     link_header: str | None
     next_relation: bool
-    entries: list[_Entry] = Field(max_length=10)
+    entries: list[_Entry] = Field(max_length=COMMIT_PAGE_SIZE)
 
     @model_validator(mode="after")
     def coherent_link(self) -> _Page:
@@ -76,7 +86,7 @@ class _Record(_StrictModel):
     source_url: str = Field(pattern=_PR_URL)
     revision: str = Field(pattern=_SHA)
     head_evidence: _HeadEvidence
-    pages: list[_Page] = Field(min_length=1, max_length=2)
+    pages: list[_Page] = Field(min_length=1, max_length=COMMIT_PAGE_COUNT)
     incomplete: bool
 
     @model_validator(mode="after")
@@ -90,18 +100,25 @@ class _Record(_StrictModel):
             or head.after_sha != self.revision
         ):
             raise ValueError("inconsistent head evidence")
-        if len(self.pages) == 1 and len(self.pages[0].entries) == 10:
+        if len(self.pages) < COMMIT_PAGE_COUNT and len(self.pages[-1].entries) == COMMIT_PAGE_SIZE:
             raise ValueError("full first page needs the second numeric page")
         for index, page in enumerate(self.pages, start=1):
-            if page.page != index or page.verified_via != f"{api}/commits?per_page=10&page={index}":
+            if page.page != index or page.verified_via != (
+                f"{api}/commits?per_page={COMMIT_PAGE_SIZE}&page={index}"
+            ):
                 raise ValueError("inconsistent numeric page evidence")
-            if index < len(self.pages) and len(page.entries) != 10:
+            if index < len(self.pages) and len(page.entries) != COMMIT_PAGE_SIZE:
                 raise ValueError("page after a short prefix page")
         entries = [entry for page in self.pages for entry in page.entries]
         if len({entry.sha for entry in entries}) != len(entries):
             raise ValueError("repeated commit SHA")
         last = self.pages[-1]
-        incomplete = last.next_relation or (last.page == 2 and len(last.entries) == 10)
+        incomplete = commit_prefix_incomplete(
+            has_next=last.next_relation,
+            page=last.page,
+            batch_length=len(last.entries),
+            remaining=MAX_COMMIT_MESSAGES - (len(entries) - len(last.entries)),
+        )
         if self.incomplete != incomplete or head.total_commits < len(entries):
             raise ValueError("inconsistent prefix tail evidence")
         if not incomplete and (

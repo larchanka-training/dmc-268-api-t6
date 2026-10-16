@@ -24,8 +24,15 @@ from app.common.infrastructure.github_repository_path import (
     repository_path_from_full_name,
 )
 from app.modules.reviews.application.check_runs import RunProviderCheckpoint
-from app.modules.reviews.application.prompt_builder import (
+from app.modules.reviews.application.commit_prefix_limits import (
+    COMMIT_ACCEPT_ENCODING,
+    COMMIT_PAGE_COUNT,
+    COMMIT_PAGE_SIZE,
     MAX_COMMIT_MESSAGES,
+    MAX_COMMIT_RESPONSE_BYTES,
+    commit_prefix_incomplete,
+)
+from app.modules.reviews.application.prompt_builder import (
     PullRequestMeta,
     shorten_commit_message,
 )
@@ -46,9 +53,6 @@ _MAX_FILES = 3000
 _PAGE_SIZE = 100
 _REQUEST_TIMEOUT = 10.0
 _MAX_BLOB_RESPONSE_BYTES = 1_500_000  # 1 MiB of base64 content plus JSON envelope.
-_COMMIT_PAGE_SIZE = 10
-_MAX_COMMIT_PAGES = 2
-_MAX_COMMIT_RESPONSE_BYTES = 1_048_576
 _API_VERSION = "2022-11-28"
 
 
@@ -208,12 +212,8 @@ class HttpGitHubVcsProvider:
         prefix = _repository_prefix(locator)
         messages: list[str] = []
         incomplete = False
-        page_count = min(
-            _MAX_COMMIT_PAGES,
-            (MAX_COMMIT_MESSAGES + _COMMIT_PAGE_SIZE - 1) // _COMMIT_PAGE_SIZE,
-        )
         try:
-            for page in range(1, page_count + 1):
+            for page in range(1, COMMIT_PAGE_COUNT + 1):
                 await checkpoint()
                 token = await self._tokens.get_installation_access_token(
                     locator.installation_external_id
@@ -221,12 +221,13 @@ class HttpGitHubVcsProvider:
                 await checkpoint()
                 body, has_next = await self._get_capped_body(
                     f"{prefix}/pulls/{locator.number}/commits",
-                    headers=_headers(token) | {"Accept-Encoding": "identity"},
-                    params={"per_page": _COMMIT_PAGE_SIZE, "page": page},
-                    max_bytes=_MAX_COMMIT_RESPONSE_BYTES,
+                    headers=_headers(token) | {"Accept-Encoding": COMMIT_ACCEPT_ENCODING},
+                    params={"per_page": COMMIT_PAGE_SIZE, "page": page},
+                    max_bytes=MAX_COMMIT_RESPONSE_BYTES,
                     too_large=lambda: RunFailure(
                         "commit_messages_fetch_failed",
-                        "GitHub commit response exceeds the 1 MiB retrieval budget",
+                        "GitHub commit response exceeds the "
+                        f"{MAX_COMMIT_RESPONSE_BYTES / 2**20:g} MiB retrieval budget",
                     ),
                     unsupported_encoding=lambda: RunFailure(
                         "commit_messages_fetch_failed",
@@ -239,7 +240,7 @@ class HttpGitHubVcsProvider:
                     raise RunFailure(
                         "commit_messages_fetch_failed", "GitHub commit response is malformed"
                     ) from None
-                if len(batch) > _COMMIT_PAGE_SIZE:
+                if len(batch) > COMMIT_PAGE_SIZE:
                     raise RunFailure(
                         "commit_messages_fetch_failed", "GitHub commit response is malformed"
                     )
@@ -247,12 +248,10 @@ class HttpGitHubVcsProvider:
                 messages.extend(
                     shorten_commit_message(item.commit.message) for item in batch[:remaining]
                 )
-                incomplete = (
-                    has_next
-                    or len(batch) > remaining
-                    or (page == page_count and len(batch) == _COMMIT_PAGE_SIZE)
+                incomplete = commit_prefix_incomplete(
+                    has_next=has_next, page=page, batch_length=len(batch), remaining=remaining
                 )
-                if len(batch) < _COMMIT_PAGE_SIZE:
+                if len(batch) < COMMIT_PAGE_SIZE:
                     break
         except httpx.HTTPError as exc:
             raise classify_vcs_error(exc, fetch_error_code="commit_messages_fetch_failed") from None
