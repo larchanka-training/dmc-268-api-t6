@@ -7,8 +7,9 @@ start and indexes that commit, in full or incrementally from `indexed_commit_sha
   one (AC7); a lost lease stops the job without a write and without a retry (AC12).
 - Only a limit or an unsafe archive fails the index. Any other terminal failure releases
   the lease with `last_error_code` and keeps the last publication (ADR §6.1, §7).
-- The archive passes, the exclusion scan and the importer scan run in threads that check
-  the monotonic job deadline themselves; a network call is cut at the deadline too.
+- The archive passes and the exclusion scan run in threads that check the monotonic job
+  deadline themselves, and the parse loop checks it before each file; the importer scan
+  runs in a thread without a check of its own. A network call is cut at the deadline too.
 - Go package members and package `__init__.py` files are read in a pass of their own
   before the parse pass, because an importer can come before its target in the archive;
   memory holds their fact summaries, never content.
@@ -47,6 +48,7 @@ from app.modules.code_index.application.index_store import (
     IndexBuildStats,
     IndexCounts,
     IndexedFile,
+    IndexFence,
     IndexLeaseLost,
     IndexProfile,
     IndexState,
@@ -423,19 +425,65 @@ class BuildRepositoryIndex:
     async def _claimed(
         self, repository: IndexedRepository, generation: int, started: float
     ) -> BuildOutcome:
-        async with self._uow() as uow:
-            claim = await uow.index.claim_lease(
-                repository.repository_id,
-                generation,
-                self._settings.lease_seconds,
-                self._settings.admission,
+        leased: LeaseClaim | None = None
+        try:
+            async with self._uow() as uow:
+                claim = await uow.index.claim_lease(
+                    repository.repository_id,
+                    generation,
+                    self._settings.lease_seconds,
+                    self._settings.admission,
+                )
+                # A QUOTA refusal wrote `failed`, so a refusal is committed too.
+                await uow.commit()
+                leased = claim if isinstance(claim, LeaseClaim) else None
+            if isinstance(claim, ClaimRefused):
+                return BuildOutcome(_REFUSALS[claim.reason], error_code=claim.error_code)
+            job = _Job(
+                uow=self._uow,
+                archives=self._archives,
+                parser=self._parser,
+                wakeups=self._wakeups,
+                versions=self._versions,
+                limits=self._limits,
+                settings=self._settings,
+                repository_id=repository.repository_id,
+                claim=claim,
+                source=self._sources(repository),
+                started=started,
             )
-            # A QUOTA refusal wrote `failed`, so a refusal is committed too.
-            await uow.commit()
-        if isinstance(claim, ClaimRefused):
-            return BuildOutcome(_REFUSALS[claim.reason], error_code=claim.error_code)
-        job = _Job(self, repository.repository_id, claim, self._sources(repository), started)
+        except BaseException:
+            # The lease is held from its commit on: the end of the claim transaction and
+            # the source factory must not leave it to expire.
+            if leased is not None:
+                await _abandon(self._uow, repository.repository_id, leased.fence)
+            raise
         return await job.run()
+
+
+async def _release_lease(
+    uow: Callable[[], CodeIndexUnitOfWork],
+    repository_id: UUID,
+    fence: IndexFence,
+    last_error_code: str | None,
+) -> None:
+    async with uow() as unit:
+        await unit.index.release(repository_id, fence, last_error_code=last_error_code)
+        await unit.commit()
+
+
+async def _abandon(
+    uow: Callable[[], CodeIndexUnitOfWork], repository_id: UUID, fence: IndexFence
+) -> None:
+    """Best effort after an unexpected error: release the lease, keep the error."""
+    try:
+        await asyncio.shield(_release_lease(uow, repository_id, fence, None))
+    except Exception:
+        _LOGGER.warning(
+            "code_index lease release after an error failed repository_id=%s",
+            repository_id,
+            exc_info=True,
+        )
 
 
 def _elapsed_ms(started: float) -> int:
@@ -472,15 +520,26 @@ class _Job:
 
     def __init__(
         self,
-        owner: BuildRepositoryIndex,
+        *,
+        uow: Callable[[], CodeIndexUnitOfWork],
+        archives: ArchiveReader,
+        parser: SourceParser,
+        wakeups: IndexWakeups,
+        versions: IndexVersions,
+        limits: IndexLimits,
+        settings: IndexBuildSettings,
         repository_id: UUID,
         claim: LeaseClaim,
         source: RepositorySnapshotSource,
         started: float,
     ) -> None:
-        self._owner = owner
-        self._limits = owner._limits
-        self._settings = owner._settings
+        self._uow = uow
+        self._archives = archives
+        self._parser = parser
+        self._wakeups = wakeups
+        self._versions = versions
+        self._limits = limits
+        self._settings = settings
         self._id = repository_id
         self._claim = claim
         self._fence = claim.fence
@@ -546,7 +605,7 @@ class _Job:
         """ADR §7: `failed` in a fresh transaction that a cancellation does not cut."""
 
         async def mark_failed() -> None:
-            async with self._owner._uow() as uow:
+            async with self._uow() as uow:
                 await uow.index.mark_failed(self._id, self._fence, error_code, stats=self._stats())
                 await uow.commit()
 
@@ -561,28 +620,28 @@ class _Job:
     ) -> BuildOutcome:
         try:
             await asyncio.shield(self._release_lease(error_code))
+            # A TRANSIENT message is retried and comes back to the target anyway.
+            if status is BuildStatus.RELEASED:
+                await self._wake_if_the_target_moved()
         except IndexLeaseLost:
             return self._outcome(BuildStatus.LEASE_LOST)
         return self._outcome(status, error_code, retry_after)
 
     async def _abandon(self) -> None:
-        """Best effort after an unexpected error: release the lease, keep the error."""
-        try:
-            await asyncio.shield(self._release_lease(None))
-        except Exception:
-            _LOGGER.warning(
-                "code_index lease release after an error failed repository_id=%s",
-                self._id,
-                exc_info=True,
-            )
+        await _abandon(self._uow, self._id, self._fence)
 
     async def _release_lease(self, last_error_code: str | None) -> None:
-        async with self._owner._uow() as uow:
-            await uow.index.release(self._id, self._fence, last_error_code=last_error_code)
-            await uow.commit()
+        await _release_lease(self._uow, self._id, self._fence, last_error_code)
 
     async def _wake(self) -> None:
-        await self._owner._wakeups.wake(self._id, self._fence.generation)
+        await self._wakeups.wake(self._id, self._fence.generation)
+
+    async def _wake_if_the_target_moved(self) -> None:
+        """ADR §6.2: a wake-up refused as LEASED while this job held the lease left its
+        target on the state row; a target other than the claim snapshot wakes the job."""
+        after = await self._state()
+        if after.target_commit_sha != self._claim.target_commit_sha:
+            await self._wake()
 
     # --- the build ----------------------------------------------------------------
 
@@ -595,6 +654,7 @@ class _Job:
         if head is None:
             # AC8: an empty repository or one without a default branch is no error.
             await self._release_lease(None)
+            await self._wake_if_the_target_moved()
             return self._outcome(BuildStatus.EMPTY)
         self._commit_sha = head.commit_sha
         state = await self._state()
@@ -602,19 +662,18 @@ class _Job:
         if (
             state.indexed_commit_sha == head.commit_sha
             and profile is not None
-            and self._owner._versions.built(profile)
+            and self._versions.built(profile)
             and profile.default_branch == head.branch
         ):
             await self._release_lease(None)
+            await self._wake_if_the_target_moved()
             return self._outcome(BuildStatus.UNCHANGED)
         comparison = await self._comparison(state, head)
         archive = await self._network(
             lambda: self._source.archive(head.commit_sha, max_bytes=self._limits.download_bytes)
         )
         self._downloaded = len(archive.content)
-        scan = await self._owner._archives.scan(
-            archive, documents=_DOCUMENTS, deadline=self._deadline
-        )
+        scan = await self._archives.scan(archive, documents=_DOCUMENTS, deadline=self._deadline)
         policy = _ignore_policy(scan)
         exclusions = IndexExclusions(IgnoreMatcher(policy), self._limits)
         self._exclusions = exclusions
@@ -636,7 +695,7 @@ class _Job:
         written = await self._index(archive, scan, exclusions, go_module, plan)
         deleted = tuple(sorted(plan.closes - written))
         self._written, self._deleted = len(written), len(deleted)
-        async with self._owner._uow() as uow:
+        async with self._uow() as uow:
             published = await uow.index.publish(
                 self._id,
                 self._fence,
@@ -644,7 +703,7 @@ class _Job:
                 commit_sha=head.commit_sha,
                 full=plan.full,
                 deleted_paths=deleted,
-                profile=self._owner._versions.profile(head.branch, policy.digest),
+                profile=self._versions.profile(head.branch, policy.digest),
                 stats=self._stats(),
             )
             await uow.commit()
@@ -652,9 +711,7 @@ class _Job:
             # A compare-and-set miss spent the lease; a new wake-up retries (ADR §6.2).
             await self._wake()
             return self._outcome(BuildStatus.REWAKE)
-        after = await self._state()
-        if after.target_commit_sha != self._claim.target_commit_sha:
-            await self._wake()
+        await self._wake_if_the_target_moved()
         return self._outcome(BuildStatus.PUBLISHED)
 
     async def _network[T](self, call: Callable[[], Awaitable[T]]) -> T:
@@ -674,7 +731,7 @@ class _Job:
         """T3 in portions; `False` when it outlasts the soft cutoff (ADR §6.2)."""
         rows = self._settings.discard_batch_rows
         while True:
-            async with self._owner._uow() as uow:
+            async with self._uow() as uow:
                 deleted = await uow.index.discard_abandoned(self._id, self._fence, rows)
                 await uow.commit()
             if deleted < rows:
@@ -683,7 +740,7 @@ class _Job:
                 return False
 
     async def _state(self) -> IndexState:
-        async with self._owner._uow() as uow:
+        async with self._uow() as uow:
             state = await uow.index.get_state(self._id)
         if state is None:
             raise IndexLeaseLost("the index state row is gone")
@@ -701,7 +758,7 @@ class _Job:
         comparison = None
         if indexed is None or profile is None:
             reason = FullBuildReason.NO_INDEX
-        elif not self._owner._versions.built(profile):
+        elif not self._versions.built(profile):
             reason = FullBuildReason.PROFILE_CHANGED
         elif profile.default_branch != head.branch:
             reason = FullBuildReason.BRANCH_CHANGED
@@ -762,7 +819,7 @@ class _Job:
             return None
         targets = changed | affected
         closes = frozenset(targets & stored.keys())
-        async with self._owner._uow() as uow:
+        async with self._uow() as uow:
             closing = await uow.index.visible_counts(self._id, sorted(closes))
         kept = IndexCounts(
             state.file_count - closing.file_count,
@@ -776,7 +833,7 @@ class _Job:
         files: dict[str, str] = {}
         after: str | None = None
         while True:
-            async with self._owner._uow() as uow:
+            async with self._uow() as uow:
                 page = await uow.index.iter_files(self._id, after, rows)
             files.update(page)
             if len(page) < rows:
@@ -790,7 +847,7 @@ class _Job:
         records: list[ImportRecord] = []
         after: ImportRecord | None = None
         while True:
-            async with self._owner._uow() as uow:
+            async with self._uow() as uow:
                 page = await uow.index.iter_imports(self._id, after, rows)
             records.extend(page)
             if len(page) < rows:
@@ -803,7 +860,7 @@ class _Job:
         language = language_for_path(path)
         assert language is not None, "an admitted path has a parser language"
         request = ParseRequest(path, language, content)
-        return (await self._owner._parser.parse_many((request,)))[path]
+        return (await self._parser.parse_many((request,)))[path]
 
     async def _target_facts(
         self, archive: SourceArchive, scan: ArchiveScan, targets: Sequence[str]
@@ -819,7 +876,7 @@ class _Job:
                 readable.add(path)
         if not readable:
             return facts
-        batches = self._owner._archives.contents(
+        batches = self._archives.contents(
             archive, readable, deadline=self._deadline, batch_files=self._settings.batch_files
         )
         async for batch in batches:
@@ -862,7 +919,7 @@ class _Job:
         written: set[str] = set()
         if not admitted:
             return written
-        batches = self._owner._archives.contents(
+        batches = self._archives.contents(
             archive,
             frozenset(admitted),
             deadline=self._deadline,
@@ -904,7 +961,7 @@ class _Job:
 
     async def _write(self, files: Sequence[IndexedFile]) -> None:
         """Step 11: one batch in one transaction; a quota stops it before the commit."""
-        async with self._owner._uow() as uow:
+        async with self._uow() as uow:
             for file in files:
                 self._check_storage(await uow.index.replace_file(self._id, self._fence, file))
             await uow.commit()
