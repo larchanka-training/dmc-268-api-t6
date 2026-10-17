@@ -211,24 +211,35 @@ rollback мог пересоздать контейнеры этим образ�
 при обработке или stale reconciliation без provider calls для этих Run.
 Старый worker не имеет origin guard; завершённая история не переписывается.
 
-Откат образа сам по себе не выполняет downgrade схемы. Ручной downgrade **до
-`20261012_0030`** уже выполняет downgrade ревизий `20261010_0030` и `20261010_0029`:
-удаляет сохранённый origin Run, `account_external_id`, `deleted_at` и
-`installation_available`. Доступность сворачивается в
-`enabled = enabled AND installation_available`: `enabled=true` при
-`installation_available=false` становится `enabled=false`. Повторный upgrade
-сохраняет это false и не восстанавливает исходное пользовательское предпочтение
-или удалённую числовую идентичность. Backfill может снова заполнить `deleted_at`
-по сохранившейся квитанции полного отзыва и Run origin по текущему FK Repository,
-но это не гарантирует прежние исторические значения удалённых колонок. Будущая
-переустановка без account evidence получает чистую цель.
+Откат образа сам по себе не выполняет downgrade схемы. Ручной downgrade до целевой
+ревизии откатывает **все ревизии выше целевой** в цепочке Alembic, а не только
+миграции последней задачи. Цепочка идёт не по датам в id ревизий (`20261010_0029`
+стоит после `20261012_0030`), поэтому состав отката определять по `alembic history`,
+а не по именам файлов. Таблица ниже перечисляет ревизии выше `20261007_0028` в порядке
+`alembic history` (сверху head): при цели `X` откатываются все строки выше строки `X`.
+Это единственное место, где перечислены потери downgrade; новая миграция добавляет свою
+строку в эту таблицу в том же PR.
+
+Потери при downgrade:
+
+| Ревизия | Что удаляет downgrade | Что даёт повторный upgrade |
+|---|---|---|
+| `20261016_0033` (#145) | колонку `repositories.rag_enabled` | колонка со значением `false`; включённый RAG (opt-in) не восстанавливается |
+| `20261015_0032` (#141) | таблицы `code_index_imports`, `code_index_edges`, `code_index_symbols`, `code_index_files`, `code_index_states` и ENUM `code_index_status`, `code_index_purge_reason`, `code_index_symbol_kind`, `code_index_edge_kind`, `code_index_import_resolution` | пустые таблицы; индекс графа строится заново с нуля |
+| `20261014_0031` (#149) | колонки `repositories.severity_threshold` и `repositories.branch_filter`, ENUM `severity_threshold` | `branch_filter = '{}'` (все ветки), `severity_threshold = 'all'`; пользовательские настройки не восстанавливаются |
+| `20261010_0030` (#132) | FK `runs_origin_provider_installation_id_fkey` и колонку `runs.origin_provider_installation_id` (сохранённый origin Run) | backfill заполняет origin Run по текущему FK Repository, а не по историческому: прежние значения удалённой колонки не гарантируются |
+| `20261010_0029` (#132) | `repositories.installation_available`, индекс `ix_provider_installations_provider_account`, CHECK `ck_provider_installations_account_positive`, колонки `provider_installations.deleted_at` и `account_external_id`; доступность сворачивается в `enabled = enabled AND installation_available`: `enabled=true` при `installation_available=false` становится `enabled=false` | свёрнутое `enabled=false` сохраняется; исходное пользовательское предпочтение и удалённая числовая идентичность не восстанавливаются; backfill может снова заполнить `deleted_at` по сохранившейся квитанции полного отзыва, но прежние значения удалённых колонок не гарантируются; будущая переустановка без account evidence получает чистую цель |
+| `20261012_0030` (#136) | conventions с `policy_key IS NOT NULL` (строки удаляются), колонку `repo_conventions.policy_key`; уникальный ключ возвращается к прежнему | колонка `policy_key` и расширенный уникальный ключ создаются заново; удалённые conventions не восстанавливаются |
+| `20261011_0029` (#136) | таблицы `run_policy_snapshots` и `run_policy_documents` (policy documents/snapshots) | пустые таблицы; policy documents/snapshots не восстанавливаются |
+
+Так, ручной downgrade до `20261012_0030` откатывает пять верхних строк, от
+`20261016_0033` до `20261010_0029`, а не только `20261010_0030` и `20261010_0029`.
 
 Более глубокий downgrade **до `20261007_0028`** дополнительно откатывает
-policy/context #136: удаляет policy documents/snapshots, очищает conventions с
-`policy_key IS NOT NULL` и удаляет этот ключ. Эти потери отделены от уже выполненных
-при возврате до `20261012_0030`. Восстановление удалённых данных требует проверенного
-backup, согласованного плана и образа под восстановленную схему (§5); повторный
-upgrade не заменяет восстановление БД.
+policy/context #136: ревизии `20261012_0030` и `20261011_0029`, их потери перечислены в
+двух нижних строках той же таблицы и добавляются к потерям пяти верхних строк.
+Восстановление удалённых данных требует проверенного backup, согласованного плана и
+образа под восстановленную схему (§5); повторный upgrade не заменяет восстановление БД.
 
 `api` стартует после успешного `bootstrap` и здорового `postgres`. От RabbitMQ и Redis он не зависит: к брокеру API подключается при первой публикации (`LazyAmqpPublisher`), поэтому сбой брокера или кэша не мешает пересозданному `api` стартовать. `up --wait` всё равно ждёт healthcheck каждого сервиса, и падение любого запускает авто-rollback. Секреты приложения приходят в каждый контейнер только через env-файлы его роли: `api.env` → `api`, `app.env` (ключ App) → оба воркера, `worker.env` (LLM и `PORTAL_URL`) → `worker`, `webhook-worker.env` (логин бота) → `webhook-worker` — [SECRETS.md](SECRETS.md) §1, §3.
 
