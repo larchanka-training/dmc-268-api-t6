@@ -38,6 +38,7 @@ _REVIEW_CODE = (
     "review/scripts/commit_context.py",
 )
 _CONVENTIONS_RENDERER = "app/modules/reviews/application/conventions_prompt.py"
+_RULE_SCHEMA_NAME = "schema.json"
 
 
 class DigestInputError(ValueError):
@@ -90,7 +91,12 @@ def digest_files(root: Path, paths: Iterable[str]) -> str:
 
 
 def rule_json_paths(root: Path) -> list[str]:
-    """Include every literal review/rules/*.json file, including schema.json."""
+    """Include every literal review/rules/*.json rule set, except schema.json.
+
+    The eval never reads the rule-set schema (only production onboarding and tests do), so an
+    edit to it changes neither the eval prompt nor the answer parsing and must not move the
+    static digest (#177).
+    """
     rules_dir = root / "review/rules"
     if rules_dir.is_symlink():
         raise DigestInputError(f"symlink rule directory: {rules_dir}")
@@ -98,7 +104,11 @@ def rule_json_paths(root: Path) -> list[str]:
         raise DigestInputMissing(f"missing rule directory: {rules_dir}")
     if not rules_dir.is_dir():
         raise DigestInputError(f"rule path is not a directory: {rules_dir}")
-    return sorted(path.relative_to(root).as_posix() for path in rules_dir.glob("*.json"))
+    return sorted(
+        path.relative_to(root).as_posix()
+        for path in rules_dir.glob("*.json")
+        if path.name != _RULE_SCHEMA_NAME
+    )
 
 
 def canonical_identity_paths(root: Path) -> list[str]:

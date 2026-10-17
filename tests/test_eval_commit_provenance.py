@@ -90,6 +90,28 @@ def test_each_commit_shaping_input_causes_replay_drift_without_rewriting_capture
     assert (REPO_ROOT / "test-prs-dataset/responses/manifest.json").read_bytes() == old_manifest
 
 
+def test_rule_schema_edit_does_not_cause_replay_drift(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # AC 5 of #177: the eval never reads the rule-set schema, so editing it must not
+    # invalidate the recorded baseline.
+    repo = capture_repo(tmp_path, monkeypatch)
+    schema = repo / "review/rules/schema.json"
+    # Copy independently of the pin list, so a pinned schema is observable.
+    schema.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(REPO_ROOT / "review/rules/schema.json", schema)
+    root = fixture_root(tmp_path, ("CLEAN-03", "SEC-01"))
+    manifest = record_with_repo(root, repo, FakeTransport([answer("primary-model", VALID)] * 2))
+    assert replay(root, prompt_root=repo)["warnings"] == []
+
+    payload = json.loads(schema.read_text(encoding="utf-8"))
+    payload["description"] += " Edited wording only."
+    schema.write_text(json.dumps(payload), encoding="utf-8")
+
+    assert replay(root, prompt_root=repo)["warnings"] == []
+    assert "review/rules/schema.json" not in manifest["static_inputs"]
+
+
 def test_inputs_that_do_not_shape_the_eval_are_not_static_inputs() -> None:
     # Does not shape the eval: not imported, or imported without shaping what it sends or
     # parses; edits to these must not change the static digest (#177).
@@ -100,6 +122,8 @@ def test_inputs_that_do_not_shape_the_eval_are_not_static_inputs() -> None:
     assert "app/modules/reviews/infrastructure/vcs_failures.py" not in paths
     # Imported by eval only through llm_gateway; shapes nothing it sends or parses.
     assert "app/modules/reviews/application/vcs_diff.py" not in paths
+    # The eval reads rule sets only; the rule-set schema is used by onboarding and tests.
+    assert "review/rules/schema.json" not in paths
 
 
 def sidecar_with_encodings(*, accept_encoding: str, content_encoding: str | None) -> str:

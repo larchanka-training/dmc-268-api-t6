@@ -144,7 +144,7 @@ single-revision snapshot capture remains historical evidence at
 with its original bytes/digests and measured metrics. No answers or manifest
 digests have been patched or mixed across captures.
 
-The manifest also stores sorted `static_inputs`, `static_digest`, and `corpus_digest`. Each digest is `sha256-v1:<64 lowercase hex>` over a SHA-256 stream beginning with the bytes `review-eval-inputs-v1` followed by a NUL byte. For every unique relative POSIX path in sorted order, the stream then contains its UTF-8 path length as an unsigned 8-byte big-endian integer, the path bytes, its file-content length in the same format, and the exact file bytes. Static inputs are the selected review system prompt, all literal `review/rules/*.json` files (including the rule schema), selected custom rule files, and these checked-in paths. Each remains in the byte-level digest because a change can affect the provider request, whether a response is accepted or retried, or which raw answer the recorder captures:
+The manifest also stores sorted `static_inputs`, `static_digest`, and `corpus_digest`. Each digest is `sha256-v1:<64 lowercase hex>` over a SHA-256 stream beginning with the bytes `review-eval-inputs-v1` followed by a NUL byte. For every unique relative POSIX path in sorted order, the stream then contains its UTF-8 path length as an unsigned 8-byte big-endian integer, the path bytes, its file-content length in the same format, and the exact file bytes. Static inputs are the selected review system prompt, all literal `review/rules/*.json` rule sets (not `schema.json`, the rule-set schema the eval never reads), selected custom rule files, and these checked-in paths. Each remains in the byte-level digest because a change can affect the provider request, whether a response is accepted or retried, or which raw answer the recorder captures:
 
 | Static input path | Why it is included |
 | --- | --- |
@@ -189,7 +189,13 @@ now does that. Also dropped: `vcs_diff.py`. Since `CommitMessagePrefix` moved to
 shapes what the eval sends, captures or parses; the eval only imports it, through
 `llm_gateway.py:79` → `run_lifecycle_store.py:19` → `handle_review_run.py:29` →
 `get_run_diff.py:15`, and "imported" is not the pin criterion (`execute_review.py` and
-`run_trace.py` are rejected on the same basis). Added: `commit_prefix_limits.py` and
+`run_trace.py` are rejected on the same basis). Also dropped: `review/rules/schema.json`. The
+eval loads rule sets only through `eval_live._rules()` (`json.loads` plus
+`review_rule_from_stored` per item) and never validates them against the schema, which only
+production onboarding and the tests read; editing its wording changes neither the prompt nor
+the parsing. It has no top-level `rules` array, so replay does not re-add it as a custom
+rule. The rule sets `default-backend.v1.json` and `default-frontend.v1.json` stay pinned, and
+so does any new `review/rules/*.json` rule set. Added: `commit_prefix_limits.py` and
 `memory.py` (the in-memory trace that `review_case` returns as the case's calls). Rejected candidates:
 `conventions.py` (`ConventionsDraft`/`ConventionsRequest` serve only the conventions task,
 which `eval_live.py` never runs; the review default `RepoConventions` lives in
