@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
+import time
 from collections.abc import AsyncIterator, Mapping, Sequence, Set
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
@@ -42,6 +43,7 @@ from app.modules.code_index.application.index_store import (
     IndexBuildStats,
     IndexCounts,
     IndexedFile,
+    IndexedSymbol,
     IndexFence,
     IndexLeaseLost,
     IndexState,
@@ -49,6 +51,7 @@ from app.modules.code_index.application.index_store import (
     LeaseClaim,
 )
 from app.modules.code_index.application.ports import IndexedRepository
+from app.modules.code_index.application.symbol_rows import file_rows, symbol_rows
 from app.modules.code_index.application.vcs import (
     Ancestry,
     ArchiveCounters,
@@ -196,6 +199,8 @@ class Store:
     held: asyncio.Event = field(default_factory=asyncio.Event)
     proceed: asyncio.Event = field(default_factory=asyncio.Event)
     finished: asyncio.Event = field(default_factory=asyncio.Event)
+    # Seconds each `replace_file` takes.
+    write_delay: float = 0.0
 
     def _call(self, name: str) -> None:
         self.tracker.store(name)
@@ -233,6 +238,8 @@ class Store:
     ) -> IndexStorage:
         assert fence == _FENCE
         self._call("replace_file")
+        if self.write_delay:
+            await asyncio.sleep(self.write_delay)
         self.written.append((self.tracker.transactions, file))
         self.pending += self.bytes_per_file
         stored = self.state.stored_bytes if self.state is not None else 0
@@ -1210,6 +1217,149 @@ def test_the_incremental_limits_count_the_rows_the_build_keeps(limit: str, total
     assert (outcome.status, outcome.error_code) == (BuildStatus.FAILED, f"limit_exceeded:{limit}")
 
 
+# Two exported top-level functions per file: each summary holds 2 symbols.
+_GO_A = b"package m\n\nfunc A() {}\n\nfunc B() {}\n"
+_GO_B = b"package m\n\nfunc C() {}\n\nfunc D() {}\n"
+_GO_OLD: Tree = {"a.go": _GO_A, "b.go": _GO_B, "c.go": b"package m\n\nfunc E() {}\n"}
+_GO_HEAD: Tree = {**_GO_OLD, "c.go": b"package m\n\nfunc F() {}\n"}
+
+
+def test_the_target_pass_stops_before_a_parse_over_the_parsed_files_limit() -> None:
+    # Every Go file is a target: `b.go` is the second path this job would parse.
+    world = _world({"a.go": _GO_A, "b.go": _GO_B})
+
+    outcome = world.run(replace(_LIMITS, parsed_files=1))
+
+    assert (outcome.status, outcome.error_code) == (
+        BuildStatus.FAILED,
+        "limit_exceeded:parsed_files",
+    )
+    assert world.parser.parsed == ["a.go"]
+    assert outcome.parsed_files == 1
+    assert world.store.written == []
+    assert world.store.publications == []
+
+
+@pytest.mark.parametrize(
+    ("limit", "status", "code", "parsed", "written"),
+    [
+        pytest.param(
+            3,
+            BuildStatus.FAILED,
+            "limit_exceeded:symbols",
+            ["a.go", "b.go"],
+            [],
+            id="over-the-limit",
+        ),
+        pytest.param(
+            4,
+            BuildStatus.PUBLISHED,
+            None,
+            ["a.go", "b.go", "a.go", "b.go"],
+            ["a.go", "b.go"],
+            id="at-the-limit",
+        ),
+    ],
+)
+def test_the_symbols_the_target_summaries_hold_count_toward_the_symbols_limit(
+    limit: int, status: BuildStatus, code: str | None, parsed: list[str], written: list[str]
+) -> None:
+    # The two summaries hold 4 symbols: over 3, the target pass stops the build before
+    # the main pass parses a file again.
+    world = _world({"a.go": _GO_A, "b.go": _GO_B})
+
+    outcome = world.run(replace(_LIMITS, symbols=limit))
+
+    assert (outcome.status, outcome.error_code) == (status, code)
+    assert world.parser.parsed == parsed
+    assert world.written() == written
+
+
+def test_held_symbols_accumulate_across_target_batches() -> None:
+    # One file per archive batch: the total runs over the batches, not within one.
+    world = _world({"a.go": _GO_A, "b.go": _GO_B})
+
+    outcome = world.run(replace(_LIMITS, symbols=3), replace(_SETTINGS, batch_files=1))
+
+    assert (outcome.status, outcome.error_code) == (BuildStatus.FAILED, "limit_exceeded:symbols")
+    assert world.parser.parsed == ["a.go", "b.go"]
+    assert world.written() == []
+
+
+def _go_world(mode: BuildMode) -> World:
+    if mode is BuildMode.FULL:
+        return _world(_GO_HEAD)
+    # The index holds the 3 files of the base; HEAD changes `c.go` only.
+    return _world(
+        _GO_HEAD,
+        state=_state(file_count=3),
+        comparison=_comparison(_changed("c.go")),
+        files=_indexed(_GO_OLD),
+    )
+
+
+@pytest.mark.parametrize(
+    ("mode", "limit", "status", "code", "parsed", "parsed_files"),
+    [
+        pytest.param(
+            BuildMode.FULL,
+            3,
+            BuildStatus.PUBLISHED,
+            None,
+            ["a.go", "b.go", "c.go", "a.go", "b.go", "c.go"],
+            3,
+            id="full-at-the-limit",
+        ),
+        pytest.param(
+            BuildMode.INCREMENTAL,
+            3,
+            BuildStatus.PUBLISHED,
+            None,
+            ["a.go", "b.go", "c.go", "c.go"],
+            3,
+            id="incremental-at-the-limit",
+        ),
+        pytest.param(
+            BuildMode.FULL,
+            2,
+            BuildStatus.FAILED,
+            "limit_exceeded:parsed_files",
+            ["a.go", "b.go"],
+            2,
+            id="full-over-the-limit",
+        ),
+        pytest.param(
+            BuildMode.INCREMENTAL,
+            2,
+            BuildStatus.FAILED,
+            "limit_exceeded:parsed_files",
+            ["a.go", "b.go"],
+            2,
+            id="incremental-over-the-limit",
+        ),
+    ],
+)
+def test_the_parsed_files_limit_counts_each_path_once_in_both_modes(
+    mode: BuildMode,
+    limit: int,
+    status: BuildStatus,
+    code: str | None,
+    parsed: list[str],
+    parsed_files: int,
+) -> None:
+    # The target pass parses the 3 Go files; the main pass parses them again (full) or
+    # the changed one (incremental) without counting a path twice. The incremental graph
+    # is the 2 kept files and `c.go`: the targets that are kept files are not counted
+    # into it again.
+    world = _go_world(mode)
+
+    outcome = world.run(replace(_LIMITS, parsed_files=limit))
+
+    assert (outcome.status, outcome.error_code, outcome.mode) == (status, code, mode)
+    assert world.parser.parsed == parsed
+    assert outcome.parsed_files == parsed_files
+
+
 def test_the_repository_quota_counts_the_published_bytes_too() -> None:
     # 100 published bytes and 100 per written file: the second write is over 250.
     world = _world(state=_state(stored_bytes=100), bytes_per_file=100)
@@ -1269,6 +1419,73 @@ def test_the_deadline_stops_the_parse_pass_between_files() -> None:
     assert world.store.publications == []
 
 
+def test_a_last_parse_that_ends_past_the_deadline_neither_writes_nor_publishes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The only file is the last one; its parse is not cut, it is checked once it ends.
+    rows: list[str] = []
+
+    def recorded_rows(path: str, facts: AstFacts) -> tuple[IndexedSymbol, ...]:
+        rows.append(path)
+        return symbol_rows(path, facts)
+
+    monkeypatch.setattr(build_index, "symbol_rows", recorded_rows)
+    world = _world({"app/models.py": _MODELS})
+    world.parser.first_delay = 1.2
+
+    outcome = world.run(replace(_LIMITS, deadline_seconds=1))
+
+    assert (outcome.status, outcome.error_code) == (BuildStatus.FAILED, "limit_exceeded:deadline")
+    assert world.parser.parsed == ["app/models.py"]
+    # No row is built from a result that came back past the deadline.
+    assert rows == []
+    assert world.store.written == []
+    assert world.store.publications == []
+    assert [code for code, _ in world.store.failures] == ["limit_exceeded:deadline"]
+
+
+def test_a_deadline_that_passes_after_the_last_parse_stops_the_write(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The rows of the last file take the job past its deadline after its parse ended.
+    def slow_rows(*args: Any) -> IndexedFile:
+        time.sleep(1.2)
+        return file_rows(*args)
+
+    monkeypatch.setattr(build_index, "file_rows", slow_rows)
+    world = _world({"app/models.py": _MODELS})
+
+    outcome = world.run(replace(_LIMITS, deadline_seconds=1))
+
+    assert (outcome.status, outcome.error_code) == (BuildStatus.FAILED, "limit_exceeded:deadline")
+    assert world.parser.parsed == ["app/models.py"]
+    assert world.store.written == []
+    assert world.store.publications == []
+
+
+def test_a_deadline_that_passes_during_the_last_write_stops_the_publication() -> None:
+    world = _world({"app/models.py": _MODELS}, write_delay=1.2)
+
+    outcome = world.run(replace(_LIMITS, deadline_seconds=1))
+
+    assert (outcome.status, outcome.error_code) == (BuildStatus.FAILED, "limit_exceeded:deadline")
+    assert world.written() == ["app/models.py"]
+    assert world.store.publications == []
+    assert [code for code, _ in world.store.failures] == ["limit_exceeded:deadline"]
+
+
+def test_a_deadline_that_passes_during_a_write_stops_the_next_file_before_its_parse() -> None:
+    # One file per batch: the first write outlasts the deadline, between two parses.
+    world = _world({"a.py": b"A = 1\n", "b.py": b"B = 1\n"}, write_delay=1.2)
+
+    outcome = world.run(replace(_LIMITS, deadline_seconds=1), replace(_SETTINGS, batch_files=1))
+
+    assert (outcome.status, outcome.error_code) == (BuildStatus.FAILED, "limit_exceeded:deadline")
+    assert world.parser.parsed == ["a.py"]
+    assert world.written() == ["a.py"]
+    assert world.store.publications == []
+
+
 def test_the_deadline_interrupts_a_hanging_vcs_call() -> None:
     world = _world()
     world.source.hang = "archive"
@@ -1320,6 +1537,13 @@ def test_a_vcs_failure_releases_the_lease_with_its_code(
         (b"x" * 65_537, "policy_document_too_large"),
         (b"x" * (_MIB + 1), "policy_document_too_large"),
         (b"\xff\xfe", "policy_document_decode_error"),
+    ],
+    ids=[
+        "unclosed-ignore-block",
+        "symlink",
+        "over-the-document-limit",
+        "over-the-read-limit",
+        "undecodable",
     ],
 )
 def test_a_policy_error_releases_the_lease_with_the_policy_code(
