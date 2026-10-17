@@ -79,6 +79,8 @@ class CheckRunView:
     conclusion: str | None
     title: str
     summary: str
+    # GitHub "View more details" target: the Run page; None leaves the App homepage.
+    details_url: str | None = None
 
 
 @dataclass(frozen=True)
@@ -120,6 +122,7 @@ def check_run_view(report: CheckRunReport) -> CheckRunView:
             None,
             "AI-ревью выполняется",
             f"попытка {max(report.attempt, 1)} из {MAX_ATTEMPTS}",
+            details_url=report.run_url,
         )
     if report.state == "succeeded":
         if report.summary_only:
@@ -128,6 +131,7 @@ def check_run_view(report: CheckRunReport) -> CheckRunView:
                 "neutral",
                 "AI-ревью: только сводка",
                 f"PR слишком большой: только сводка{link}",
+                details_url=report.run_url,
             )
         counts = severity_count_phrase(report.severity_counts)
         below = (
@@ -141,6 +145,7 @@ def check_run_view(report: CheckRunReport) -> CheckRunView:
             f"AI-ревью: {report.verdict or 'clean'}",
             f"{counts}\ninline: {report.inline_count}, в теле ревью: {report.body_count}"
             f"{below}{link}",
+            details_url=report.run_url,
         )
     reason = _ERROR_TEXTS.get(report.error_code or "", report.error_code or "")
     if report.error_detail:
@@ -151,7 +156,25 @@ def check_run_view(report: CheckRunReport) -> CheckRunView:
             if report.error_code == "llm_payment_required"
             else f"`{report.error_code}`: {reason}{link}"
         )
-        return CheckRunView("completed", "neutral", "AI-ревью не выполнено", summary)
+        return CheckRunView(
+            "completed",
+            "neutral",
+            "AI-ревью не выполнено",
+            summary,
+            details_url=report.run_url,
+        )
     if report.state == "cancelled":
-        return CheckRunView("completed", "cancelled", "AI-ревью отменено", reason)
-    return CheckRunView("completed", "skipped", "AI-ревью пропущено", reason)
+        return CheckRunView(
+            "completed",
+            "cancelled",
+            "AI-ревью отменено",
+            reason,
+            details_url=report.run_url,
+        )
+    return CheckRunView(
+        "completed",
+        "skipped",
+        "AI-ревью пропущено",
+        reason,
+        details_url=report.run_url,
+    )
