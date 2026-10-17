@@ -939,8 +939,8 @@ jobs:
         uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2 # v1.2.5
         env:
           API_DIR: ${{ needs.deploy-staging.outputs.app_dir }}
-          # Grafana behind the edge proxy on the API host (deploy/edge/Caddyfile); unused in ports mode.
-          GRAFANA_ROOT_URL: ${{ needs.deploy-staging.outputs.base_url }}/grafana/
+          # Grafana behind the edge proxy on its own host (deploy/edge/Caddyfile); unused in ports mode.
+          GRAFANA_ROOT_URL: https://grafana.${{ vars.APP_DOMAIN }}/
           # Alerts of the team channel (docs/SECRETS.md): Environment secret and variable. Both empty:
           # the stack runs and alerts are visible in Alertmanager, but nothing is delivered.
           ALERT_TELEGRAM_BOT_TOKEN: ${{ secrets.ALERT_TELEGRAM_BOT_TOKEN }}

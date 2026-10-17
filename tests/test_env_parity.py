@@ -21,11 +21,12 @@ CADDYFILE = REPO_ROOT / "deploy" / "edge" / "Caddyfile"
 
 # Hosts whose service is not deployed yet: prod and the standalone webhook service.
 HOSTS_WITHOUT_UPSTREAM = ("api", "webhook", "staging-webhook", "ui")
-DEPLOYED_HOSTS = ("staging-api", "staging-ui")
+DEPLOYED_HOSTS = ("staging-api", "staging-ui", "grafana")
 # Upstreams of every host in route order, as in the route table of docs/CICD.md §8.2.
 UPSTREAMS = {
-    # Grafana of the monitoring stack under /grafana/ (docs/MONITORING.md), then the API.
-    "staging-api": ["grafana-staging:3000", "api-staging:8000"],
+    "staging-api": ["api-staging:8000"],
+    # Grafana of the monitoring stack (docs/MONITORING.md), deployed by this repository.
+    "grafana": ["grafana-staging:3000"],
     "api": ["api-prod:8000"],
     "staging-webhook": ["webhook-staging:8000"],
     "webhook": ["webhook-prod:8000"],
