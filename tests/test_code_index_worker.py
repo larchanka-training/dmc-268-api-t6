@@ -8,25 +8,43 @@ revoked one.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Any, cast
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import httpx
 import pytest
-from aio_pika.abc import AbstractRobustConnection
+from aio_pika.abc import (
+    AbstractExchange,
+    AbstractIncomingMessage,
+    AbstractQueue,
+    AbstractRobustConnection,
+)
 from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.hazmat.primitives.serialization import Encoding, NoEncryption, PrivateFormat
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 import app.bootstrap.code_index_worker as code_index_worker
 from app.bootstrap.code_index_worker import CodeIndexSettings, index_versions, snapshot_sources
-from app.modules.code_index.application.build_index import IndexBuildSettings
+from app.modules.code_index.application.build_index import (
+    BuildOutcome,
+    BuildRepositoryIndex,
+    BuildStatus,
+    IndexBuildSettings,
+)
 from app.modules.code_index.application.index_store import IndexAdmission
 from app.modules.code_index.application.ports import IndexedRepository
+from app.modules.code_index.application.vcs import RepositorySnapshotSource
 from app.modules.code_index.domain.limits import IndexLimits
+from app.modules.code_index.infrastructure.amqp import (
+    IndexQueuePublisher,
+    IndexRepoMessage,
+    handle_index_delivery,
+)
 from app.modules.reviews.application.run_failures import RetryDelays
 
 _MIB = 1_048_576
@@ -389,3 +407,271 @@ def test_the_consumer_waits_for_the_lease_of_its_settings_in_its_own_10m_queue(
             return consumer.publisher.lease_waits
 
     assert asyncio.run(scenario()) == waits
+
+
+@pytest.mark.parametrize(
+    ("settings", "ttl"),
+    [
+        (CodeIndexSettings(lease_seconds=1560), 1560),
+        # Never shorter than the 300 s of the review queues.
+        (CodeIndexSettings(deadline_seconds=10, lease_seconds=70, soft_cutoff_seconds=5), 300),
+    ],
+    ids=["lease-1560", "lease-70"],
+)
+def test_the_local_count_of_the_consumer_lives_for_its_lease(
+    composed: tuple[list[Parser], list[Any]], settings: CodeIndexSettings, ttl: float
+) -> None:
+    async def scenario() -> float:
+        async with code_index_worker.index_consumer(
+            Worker(code_index=settings),
+            cast(AbstractRobustConnection, FakeConnection()),
+            _SESSIONS,
+            RetryDelays(),
+        ) as consumer:
+            assert consumer is not None
+            return consumer.publisher.local_ttl_seconds
+
+    assert asyncio.run(scenario()) == ttl
+
+
+def test_the_github_client_of_the_consumer_is_closed_when_it_exits(
+    composed: tuple[list[Parser], list[Any]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clients: list[httpx.AsyncClient] = []
+
+    def sources(
+        client: httpx.AsyncClient, **kwargs: Any
+    ) -> Callable[[IndexedRepository], RepositorySnapshotSource]:
+        clients.append(client)
+        return snapshot_sources(client, **kwargs)
+
+    monkeypatch.setattr(code_index_worker, "snapshot_sources", sources)
+
+    async def scenario() -> None:
+        async with code_index_worker.index_consumer(
+            Worker(), cast(AbstractRobustConnection, FakeConnection()), _SESSIONS, RetryDelays()
+        ) as consumer:
+            assert consumer is not None
+            [client] = clients
+            assert not client.is_closed
+
+    asyncio.run(scenario())
+
+    assert clients[0].is_closed
+
+
+def _codeload_line() -> logging.LogRecord:
+    url = httpx.URL("https://codeload.github.com/octo/repo/legacy.tar.gz/abc?token=secret")
+    return logging.LogRecord(
+        "httpx",
+        logging.INFO,
+        __file__,
+        0,
+        'HTTP Request: %s %s "%s %d %s"',
+        ("GET", url, "HTTP/1.1", 200, "OK"),
+        None,
+    )
+
+
+def test_a_snapshot_source_redacts_the_codeload_log_line_before_any_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    logger = logging.getLogger("httpx")
+    monkeypatch.setattr(logger, "filters", [])
+    before = _codeload_line()
+    assert logger.filter(before) and "token=secret" in before.getMessage()
+    requests: list[httpx.Request] = []
+
+    def github(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(500)
+
+    async def build() -> None:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(github)) as client:
+            snapshot_sources(client, app_id="1", private_key=_PEM)(_REPOSITORY)
+
+    asyncio.run(build())
+
+    assert requests == []
+    after = _codeload_line()
+    assert logger.filter(after)
+    assert after.getMessage() == (
+        "HTTP Request: GET https://codeload.github.com/octo/repo/legacy.tar.gz/abc?redacted "
+        '"HTTP/1.1 200 OK"'
+    )
+
+
+# --- the consumer loop --------------------------------------------------------------
+
+
+@dataclass
+class Wakeup:
+    """A delivery as aio-pika settles it: `processed` only after a settle that went out."""
+
+    repository_id: UUID = field(default_factory=uuid4)
+    channel_closed: bool = False
+    acked: bool = False
+    nacks: list[bool] = field(default_factory=list)
+    processed: bool = False
+    headers: dict[str, Any] = field(default_factory=dict)
+    redelivered: bool = False
+    routing_key: str = "index.repo"
+
+    def __post_init__(self) -> None:
+        message = IndexRepoMessage.wake(self.repository_id, 1, datetime.now(UTC))
+        self.body = json.dumps(message.wire()).encode()
+        self.message_id = str(message.message_id)
+
+    async def ack(self) -> None:
+        if self.channel_closed:
+            raise ConnectionError("the channel was replaced by a reconnect")
+        self.acked = self.processed = True
+
+    async def nack(self, requeue: bool = True) -> None:
+        self.nacks.append(requeue)
+        if self.channel_closed:
+            raise ConnectionError("the channel was replaced by a reconnect")
+        self.processed = True
+
+
+@dataclass
+class Deliveries:
+    messages: list[Wakeup]
+    closed: bool = False
+
+    def iterator(self) -> Deliveries:
+        return self
+
+    async def __aenter__(self) -> Deliveries:
+        return self
+
+    async def __aexit__(self, *exc: object) -> None:
+        self.closed = True
+
+    async def __aiter__(self) -> AsyncIterator[Wakeup]:
+        for message in self.messages:
+            yield message
+
+
+@dataclass
+class Jobs:
+    seen: list[UUID] = field(default_factory=list)
+    started: asyncio.Event | None = None
+
+    async def execute(self, repository_id: UUID, generation: int) -> BuildOutcome:
+        self.seen.append(repository_id)
+        if self.started is not None and len(self.seen) == 1:
+            self.started.set()
+            await asyncio.Event().wait()
+        return BuildOutcome(BuildStatus.PUBLISHED)
+
+
+def _consumer(deliveries: Deliveries, jobs: Jobs) -> code_index_worker.IndexConsumer:
+    exchange = cast(AbstractExchange, object())
+    return code_index_worker.IndexConsumer(
+        cast(AbstractQueue, deliveries),
+        cast(BuildRepositoryIndex, jobs),
+        IndexQueuePublisher(
+            exchange, exchange, RetryDelays(), lease_waits=2, local_ttl_seconds=1200
+        ),
+    )
+
+
+def _fail_on(failing: Wakeup, monkeypatch: pytest.MonkeyPatch, *, after_settle: bool) -> None:
+    """A bug of the delivery handler on `failing`: before any settle, or after its ack."""
+
+    async def handle(
+        message: AbstractIncomingMessage,
+        handler: Callable[[UUID, int], Awaitable[BuildOutcome]],
+        publisher: IndexQueuePublisher,
+    ) -> None:
+        if message is not cast(AbstractIncomingMessage, failing):
+            await handle_index_delivery(message, handler, publisher)
+            return
+        if after_settle:
+            await handle_index_delivery(message, handler, publisher)
+        raise RuntimeError("a bug of the delivery handler")
+
+    monkeypatch.setattr(code_index_worker, "handle_index_delivery", handle)
+
+
+def _guard_lines(caplog: pytest.LogCaptureFixture) -> list[str]:
+    return [r.getMessage() for r in caplog.records if r.name == code_index_worker.__name__]
+
+
+def test_a_failed_settle_is_logged_and_the_consumer_takes_the_next_delivery(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # A reconnect during a long job replaced the channel: the ack raises, the guard's nack
+    # raises too, and the review consumers in the same TaskGroup must not be cancelled.
+    first, second = Wakeup(channel_closed=True), Wakeup()
+    deliveries, jobs = Deliveries([first, second]), Jobs()
+
+    with caplog.at_level(logging.ERROR):
+        asyncio.run(_consumer(deliveries, jobs).consume())
+
+    assert jobs.seen == [first.repository_id, second.repository_id]
+    assert second.acked and second.nacks == []
+    assert not first.acked and first.nacks == [False] and not first.processed
+    assert deliveries.closed
+    lines = _guard_lines(caplog)
+    assert len(lines) == 2 and all(first.message_id in line for line in lines)
+    # SD §13: the message id only, no customer data.
+    assert str(first.repository_id) not in caplog.text
+
+
+def test_an_error_before_any_settle_dead_letters_the_delivery_and_the_next_is_handled(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # Not a channel failure: left unsettled on an open channel, the delivery would stall
+    # the consumer (`prefetch_count=1`), and a requeue could spin.
+    first, second = Wakeup(), Wakeup()
+    _fail_on(first, monkeypatch, after_settle=False)
+    deliveries, jobs = Deliveries([first, second]), Jobs()
+
+    with caplog.at_level(logging.ERROR):
+        asyncio.run(_consumer(deliveries, jobs).consume())
+
+    assert first.nacks == [False] and not first.acked
+    assert second.acked and second.nacks == []
+    assert jobs.seen == [second.repository_id]
+    [line] = _guard_lines(caplog)
+    assert first.message_id in line
+
+
+def test_an_error_after_the_ack_settles_nothing_more(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    first, second = Wakeup(), Wakeup()
+    _fail_on(first, monkeypatch, after_settle=True)
+    deliveries, jobs = Deliveries([first, second]), Jobs()
+
+    with caplog.at_level(logging.ERROR):
+        asyncio.run(_consumer(deliveries, jobs).consume())
+
+    assert first.acked and first.nacks == []
+    assert second.acked and second.nacks == []
+    assert jobs.seen == [first.repository_id, second.repository_id]
+    [line] = _guard_lines(caplog)
+    assert first.message_id in line
+
+
+def test_cancelling_the_consumer_stops_it_during_a_job() -> None:
+    first, second = Wakeup(), Wakeup()
+    deliveries = Deliveries([first, second])
+
+    async def scenario() -> Jobs:
+        jobs = Jobs(started=asyncio.Event())
+        assert jobs.started is not None
+        task = asyncio.create_task(_consumer(deliveries, jobs).consume())
+        await jobs.started.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        return jobs
+
+    jobs = asyncio.run(scenario())
+
+    assert jobs.seen == [first.repository_id]
+    assert not first.acked and not second.acked
+    assert deliveries.closed

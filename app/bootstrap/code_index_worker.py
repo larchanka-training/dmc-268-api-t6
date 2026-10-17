@@ -23,7 +23,7 @@ from functools import partial
 from typing import Protocol
 
 import httpx
-from aio_pika.abc import AbstractQueue, AbstractRobustConnection
+from aio_pika.abc import AbstractIncomingMessage, AbstractQueue, AbstractRobustConnection
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.modules.code_index.application.build_index import (
@@ -60,7 +60,7 @@ from app.modules.integrations.webhooks.infrastructure.github_installation_tree_p
 )
 from app.modules.reviews.application.ast_symbols import AstLanguage
 from app.modules.reviews.application.run_failures import RetryDelays
-from app.modules.reviews.infrastructure.amqp import consume
+from app.modules.reviews.infrastructure import amqp as review_amqp
 from app.modules.reviews.infrastructure.subprocess_source_parser import SubprocessSourceParser
 from app.modules.reviews.infrastructure.tree_sitter_facts import QUERY_VERSION, profile_version
 
@@ -238,10 +238,39 @@ class IndexConsumer:
     publisher: IndexQueuePublisher
 
     async def consume(self) -> None:
-        """One job at a time: the queue's channel has `prefetch_count=1`."""
-        await consume(
-            self.queue,
-            partial(handle_index_delivery, handler=self.build.execute, publisher=self.publisher),
+        """One job at a time: the queue's channel has `prefetch_count=1`.
+
+        An exception out of one delivery (a settle on a channel replaced by a reconnect
+        during a long job, or a bug of the handler) is logged and the loop goes on, so the
+        review consumers of the same `TaskGroup` are not cancelled for it. A delivery it
+        left unsettled goes to `code_index.dlq` (`_dead_letter`).
+        """
+        handle = partial(
+            handle_index_delivery, handler=self.build.execute, publisher=self.publisher
+        )
+        async with self.queue.iterator() as messages:
+            async for message in messages:
+                # CONTRACT: `Exception` only, so a cancellation still stops the loop.
+                try:
+                    await handle(message)
+                except Exception:
+                    # SD §13: the message id only, no customer data.
+                    _LOGGER.exception("Failed to handle index.repo message %s", message.message_id)
+                    if not message.processed:
+                        await _dead_letter(message)
+
+
+async def _dead_letter(message: AbstractIncomingMessage) -> None:
+    """Best effort: on an open channel an unsettled delivery would stall the consumer
+    (`prefetch_count=1`) and a requeue could spin, so it goes to `code_index.dlq` for
+    inspection. On a closed channel this nack fails too, and the broker redelivers the
+    delivery; the job is idempotent."""
+    try:
+        await message.nack(requeue=False)
+    except Exception:
+        _LOGGER.exception(
+            "Failed to nack index.repo message %s; it is redelivered once its channel closes",
+            message.message_id,
         )
 
 
@@ -291,7 +320,13 @@ async def index_consumer(
                 await consuming.get_queue(QUEUE, ensure=False),
                 build,
                 await IndexQueuePublisher.open(
-                    channel, delays, lease_waits=lease_waits(code_index.lease_seconds, delays.long)
+                    channel,
+                    delays,
+                    lease_waits=lease_waits(code_index.lease_seconds, delays.long),
+                    # A job ends before its lease; never below the review queues' TTL.
+                    local_ttl_seconds=max(
+                        code_index.lease_seconds, review_amqp.LOCAL_RETRY_TTL_SECONDS
+                    ),
                 ),
             )
         finally:

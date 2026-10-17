@@ -621,8 +621,11 @@ generation 0, attempt 0 and 4, bad uuid, foreign `schema` constant.
 
 **Description:** Move the body of `republish_after_error` into a module-level
 `republish_with_attempt(exchange, message, attempts)` and make the method delegate to it.
-Give `_requeue_after_error` a `dead_letter_queue` parameter and a public alias. `consume`,
-`validate_message`, `consumer_queue` and `RetryDelays` stay as they are.
+Give `_requeue_after_error` a `dead_letter_queue` parameter and a public alias. Give the
+local fallback store a TTL per entry (`local_ttl_seconds` on `_requeue_after_error` and
+`count_unexpected_attempt`, `None` → `LOCAL_RETRY_TTL_SECONDS` at call time), a read that
+skips an expired entry, and `current_unexpected_attempts`. `consume`, `validate_message`,
+`consumer_queue` and `RetryDelays` stay as they are.
 
 **Acceptance criteria:**
 
@@ -659,9 +662,9 @@ Tests first: unit tests with `FakeExchange`, one per outcome row.
 - [ ] AC10/AC12: FAILED and LEASE_LOST are acked with no retry and no DLQ; RELEASED is
   acked too.
 - [ ] BUSY republishes to `retry.30s` with the same attempt; LEASED with `redelivered`
-  (or already waiting) republishes to `10m` with `x-lease-wait ≤ ⌈lease / 600 s⌉` (2 at
-  the default lease); REWAKE is only acked (the use case already woke the repository
-  with attempt 1).
+  (or already waiting, or an `x-attempt` copy) republishes to `10m` with
+  `x-lease-wait ≤ ⌈lease / 600 s⌉` (2 at the default lease); REWAKE is only acked (the
+  use case already woke the repository with attempt 1).
 
 **Verification:** Run the common verification block.
 
