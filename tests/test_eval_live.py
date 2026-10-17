@@ -1586,6 +1586,9 @@ def test_empty_string_snapshot_is_a_valid_real_commit_message(
         "too_many_entries",
         "missing_tail",
         "inconsistent_link",
+        "next_link_without_tail",
+        "full_last_page_without_tail",
+        "tail_after_short_last_page",
         "wrong_retrieval_budget",
         "wrong_response_encoding",
         "out_of_interval_date",
@@ -1635,6 +1638,20 @@ def test_frozen_prefix_evidence_and_inactive_bindings_fail_before_capture(
     elif defect == "missing_tail":
         inactive["incomplete"] = False
     elif defect == "inconsistent_link":
+        inactive["pages"][-1]["next_relation"] = False
+    elif defect == "next_link_without_tail":
+        single = next(item for item in payload["records"] if item["case_id"] == "SEC-04")
+        single["pages"][0]["link_header"] = '<https://api.github.com/page2>; rel="next"'
+        single["pages"][0]["next_relation"] = True
+    elif defect == "full_last_page_without_tail":
+        inactive["pages"][-1]["link_header"] = None
+        inactive["pages"][-1]["next_relation"] = False
+        inactive["pages"][-1]["entries"][-1]["sha"] = inactive["revision"]
+        inactive["head_evidence"]["total_commits"] = 20
+        inactive["incomplete"] = False
+    elif defect == "tail_after_short_last_page":
+        inactive["pages"][-1]["entries"].pop()
+        inactive["pages"][-1]["link_header"] = None
         inactive["pages"][-1]["next_relation"] = False
     elif defect == "wrong_retrieval_budget":
         payload["retrieval"]["max_message_chars"] = 501
