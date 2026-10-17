@@ -1,5 +1,8 @@
 # Alert rules of the monitoring stack (docs/MONITORING.md §Alerts). Alertmanager sends them to the
 # team Telegram channel. Annotations carry counts and names only: no review content, no secrets.
+# kind: event marks an alert about something that happened (a failed run, a new dead letter), not a
+# state: Alertmanager sends it once, without RESOLVED when it leaves its window
+# (alertmanager-config.sh).
 # Unit tests: tests/monitoring/alerts.test.yml (promtool test rules, CI job monitoring-validate).
 groups:
   - name: availability
@@ -31,6 +34,8 @@ groups:
           summary: "Redis cache is unreachable"
           description: "The review context runs without its cache (SD §10) until Redis is back."
 
+      # staging-webhook is not here: it is a reserved 503 stub without a service (docs/CICD.md §8.2),
+      # GitHub delivers webhooks to staging-api. Add it when the webhook service exists.
       - alert: ApiHigh5xxRate
         expr: |
           (
@@ -49,22 +54,27 @@ groups:
 
   - name: review-pipeline
     rules:
+      # No `for`: the failure has already happened, waiting adds nothing.
       - alert: ReviewRunsFailed
         expr: sum(dmc_runs_finished_15m_runs{state="failed"}) > 0
         labels:
           severity: warning
+          kind: event
         annotations:
           summary: "{{ $value }} review run(s) failed in the last 15 minutes"
           description: "Open the runs with state failed in the portal or the Grafana dashboard for error_code."
 
+      # New dead letters, not the queue size: reviews.dlq keeps a message 7 days and nothing drains
+      # it, so a size alert would repeat for a week and stay silent on the next failure. The size
+      # stays on the dashboard (panel "Review queues: ready messages").
       - alert: ReviewDeadLetters
-        expr: sum(rabbitmq_detailed_queue_messages{queue="reviews.dlq"}) > 0
-        for: 5m
+        expr: sum(delta(rabbitmq_detailed_queue_messages{queue="reviews.dlq"}[15m])) > 0
         labels:
           severity: critical
+          kind: event
         annotations:
-          summary: "{{ $value }} message(s) in the dead-letter queue reviews.dlq"
-          description: "Review messages exhausted their retries (docs/PIPELINE_SPEC.md §4.4)."
+          summary: "{{ $value | printf \"%.0f\" }} new message(s) in reviews.dlq in the last 15 minutes"
+          description: "Retries exhausted, an unknown schema or an unexpected error (docs/PIPELINE_SPEC.md §4.4); the operator reads the DLQ."
 
       - alert: ReviewQueueBacklog
         expr: sum by (queue) (rabbitmq_detailed_queue_messages_ready{queue=~"review\\.run\\..+|review\\.publish"}) > 20

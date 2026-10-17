@@ -7,10 +7,13 @@
 
 TELEGRAM_TOKEN_FILE_IN_CONTAINER="/etc/alertmanager/secrets/telegram_bot_token"
 
-# The routing shared by both variants: one message per alert name and environment, a reminder
-# every 4 hours while it fires, and a message when it resolves.
+# The routing shared by both variants. A state alert: one message per alert name and environment,
+# a reminder every 4 hours while it fires, a message when it resolves. An event alert (label
+# kind="event", rules/alerts.yml): sent once and never as RESOLVED, because it resolves only by
+# leaving its time window; events of 90 seconds share one message, so the failed run and the dead
+# letter of one exhausted Run (docs/PIPELINE_SPEC.md §4.4) arrive together.
 render_alertmanager_route() {
-  local receiver="$1"
+  local receiver="$1" events_receiver="$2"
   cat <<YAML
 route:
   receiver: ${receiver}
@@ -18,6 +21,11 @@ route:
   group_wait: 30s
   group_interval: 5m
   repeat_interval: 4h
+  routes:
+    - matchers: [kind="event"]
+      receiver: ${events_receiver}
+      group_by: [environment]
+      group_wait: 90s
 YAML
 }
 
@@ -36,20 +44,22 @@ render_alertmanager_config() {
     echo "  - /etc/alertmanager/templates/*.tmpl"
     echo
     if [[ -n "${chat_id}" ]]; then
-      render_alertmanager_route telegram
-      cat <<YAML
-
-receivers:
-  - name: telegram
+      render_alertmanager_route telegram telegram-events
+      local resolved
+      for resolved in true false; do
+        if [[ "${resolved}" == true ]]; then echo; echo "receivers:"; fi
+        cat <<YAML
+  - name: $([[ "${resolved}" == true ]] && echo telegram || echo telegram-events)
     telegram_configs:
       - bot_token_file: ${TELEGRAM_TOKEN_FILE_IN_CONTAINER}
         chat_id: ${chat_id}
         parse_mode: HTML
-        send_resolved: true
+        send_resolved: ${resolved}
         message: '{{ template "dmc.telegram.message" . }}'
 YAML
+      done
     else
-      render_alertmanager_route none
+      render_alertmanager_route none none
       cat <<YAML
 
 receivers:

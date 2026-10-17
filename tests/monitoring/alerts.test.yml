@@ -7,11 +7,12 @@ rule_files:
 evaluation_interval: 30s
 
 tests:
-  # The DoD alert path: dead letters, a queue without its worker, a backlog.
+  # The DoD alert path: new dead letters, a queue without its worker, a backlog. The DLQ keeps
+  # its 2 messages for days; the alert fires on the growth and is gone 15 minutes later.
   - interval: 30s
     input_series:
       - series: 'rabbitmq_detailed_queue_messages{queue="reviews.dlq", vhost="/"}'
-        values: "0 0 2x20"
+        values: "0 0 2x40"
       - series: 'rabbitmq_detailed_queue_consumers{queue="review.run.fast", vhost="/"}'
         values: "1 1 0x20"
       - series: 'rabbitmq_detailed_queue_messages_ready{queue="review.run.fast", vhost="/"}'
@@ -19,17 +20,21 @@ tests:
       - series: 'rabbitmq_detailed_queue_messages_ready{queue="retry.30s.fast", vhost="/"}'
         values: "500x30"
     alert_rule_test:
-      - eval_time: 3m
+      - eval_time: 30s
         alertname: ReviewDeadLetters
         exp_alerts: []
-      - eval_time: 7m
+      - eval_time: 2m
         alertname: ReviewDeadLetters
         exp_alerts:
           - exp_labels:
               severity: critical
+              kind: event
             exp_annotations:
-              summary: "2 message(s) in the dead-letter queue reviews.dlq"
-              description: "Review messages exhausted their retries (docs/PIPELINE_SPEC.md §4.4)."
+              summary: "2 new message(s) in reviews.dlq in the last 15 minutes"
+              description: "Retries exhausted, an unknown schema or an unexpected error (docs/PIPELINE_SPEC.md §4.4); the operator reads the DLQ."
+      - eval_time: 17m
+        alertname: ReviewDeadLetters
+        exp_alerts: []
       - eval_time: 7m
         alertname: ReviewQueueWithoutConsumer
         exp_alerts:
@@ -68,6 +73,7 @@ tests:
         exp_alerts:
           - exp_labels:
               severity: warning
+              kind: event
             exp_annotations:
               summary: "1 review run(s) failed in the last 15 minutes"
               description: "Open the runs with state failed in the portal or the Grafana dashboard for error_code."

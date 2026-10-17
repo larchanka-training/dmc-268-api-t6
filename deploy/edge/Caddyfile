@@ -50,7 +50,15 @@ staging-api.{$APP_DOMAIN} {
 # no authentication and stays on the docker networks, VictoriaMetrics is not used.
 grafana.{$APP_DOMAIN} {
 	import hsts
-	reverse_proxy grafana-staging:3000
+	# Grafana serves /metrics without login (Prometheus scrapes it inside the docker network): its
+	# version, plugins and login counters stay off the internet.
+	@metrics path /metrics /metrics/*
+	handle @metrics {
+		respond 404
+	}
+	handle {
+		reverse_proxy grafana-staging:3000
+	}
 }
 
 api.{$APP_DOMAIN} {
