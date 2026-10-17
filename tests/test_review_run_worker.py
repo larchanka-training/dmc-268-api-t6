@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from types import TracebackType
@@ -676,6 +676,48 @@ def test_check_run_view_follows_the_pipeline_spec_table(
 
 
 @pytest.mark.parametrize(
+    ("run_url", "details_url"),
+    [("https://app.test/runs/1", "https://app.test/runs/1"), (None, None)],
+    ids=["run-link", "no-portal-url"],
+)
+@pytest.mark.parametrize(
+    "report",
+    [
+        CheckRunReport(CheckRunTarget(1, "o/r", HEAD, RUN), "running", 2),
+        CheckRunReport(
+            CheckRunTarget(1, "o/r", HEAD, RUN),
+            "succeeded",
+            1,
+            verdict="blocking",
+            severity_counts={"critical": 1},
+            inline_count=1,
+        ),
+        CheckRunReport(CheckRunTarget(1, "o/r", HEAD, RUN), "succeeded", 1, verdict=None),
+        CheckRunReport(CheckRunTarget(1, "o/r", HEAD, RUN), "succeeded", 1, summary_only=True),
+        CheckRunReport(CheckRunTarget(1, "o/r", HEAD, RUN), "failed", 3, "llm_timeout"),
+        CheckRunReport(CheckRunTarget(1, "o/r", HEAD, RUN), "failed", 1, "llm_payment_required"),
+        CheckRunReport(CheckRunTarget(1, "o/r", HEAD, RUN), "cancelled", 1, "superseded"),
+        CheckRunReport(CheckRunTarget(1, "o/r", HEAD, RUN), "skipped", 0, "budget_paused"),
+    ],
+    ids=[
+        "in-progress",
+        "succeeded",
+        "partial",
+        "summary-only",
+        "failed",
+        "payment-required",
+        "cancelled",
+        "skipped",
+    ],
+)
+def test_check_run_view_sends_the_run_link_as_details_url_in_every_state(
+    report: CheckRunReport, run_url: str | None, details_url: str | None
+) -> None:
+    view = check_run_view(replace(report, run_url=run_url))
+    assert view.details_url == details_url
+
+
+@pytest.mark.parametrize(
     ("below_threshold", "expected"),
     [
         (
@@ -855,6 +897,24 @@ def test_check_run_cancellation_logs_run_and_reason_at_info(
             "Check-run update cancelled for run "
             "11111111-1111-1111-1111-111111111111: installation_unavailable",
         )
+    ]
+
+
+def test_check_run_update_passes_the_run_url_to_the_view_as_details_url() -> None:
+    store = FakeStore(FakeRun())
+    check_runs = CheckRuns()
+
+    asyncio.run(
+        update_check_run(
+            lambda: FakeUow(store),
+            check_runs,
+            RUN,
+            lambda run_id: f"https://review.example/runs/{run_id}",
+        )
+    )
+
+    assert [view.details_url for view in check_runs.views] == [
+        "https://review.example/runs/11111111-1111-1111-1111-111111111111"
     ]
 
 
