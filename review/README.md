@@ -115,7 +115,7 @@ preflight checks finish before any model call or staging. Custom synthetic
 subsets remain supported; new real cases require curated canonical identity and
 prefix evidence. Live evaluation and replay never query GitHub.
 
-The sidecar, production retrieval/Link shaping, recorder/schema, existing inputs,
+The sidecar, the shared commit-prefix module, Link shaping, recorder/schema, existing inputs,
 and every canonical `case.json` identity consulted by binding are conservatively
 fingerprinted. [Run 38701845865, attempt 1](https://github.com/larchanka-training/dmc-268-api-t6/actions/runs/38701845865)
 captured all 24 first raw answers on 2026-10-15 at frozen source `a1cc6229c6a6fdba65ecb640c60ca823e262a6aa`

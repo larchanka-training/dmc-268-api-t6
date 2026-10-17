@@ -12,6 +12,7 @@ from typing import Any
 
 import pytest
 
+import review.scripts.eval_live as eval_live_module
 import review.scripts.eval_replay as eval_replay_module
 from review.scripts import eval_provenance
 from review.scripts.eval_provenance import (
@@ -949,6 +950,29 @@ def test_replay_keeps_recorded_custom_rule_without_path_set_warning(
     assert custom not in rule_json_paths(repo)
     assert custom in json.loads((root / "responses/manifest.json").read_text())["static_inputs"]
     assert replay(root, prompt_root=repo)["warnings"] == []
+
+
+def test_recorded_rule_set_detection_accepts_every_file_the_recorder_loads(
+    tmp_path: Path,
+) -> None:
+    # One direction only: _is_rule_set checks the top-level shape, not the rule items.
+    for relative in (
+        "review/rules/default-backend.v1.json",
+        "review/rules/default-frontend.v1.json",
+    ):
+        assert eval_live_module._rules(REPO_ROOT / relative)
+        assert eval_replay_module._is_rule_set(REPO_ROOT / relative)
+    for relative in (
+        SIDECAR,
+        "test-prs-dataset/cases/RES-03/case.json",
+        "review/rules/schema.json",
+    ):
+        with pytest.raises(eval_live_module.RecorderError, match="no rules array"):
+            eval_live_module._rules(REPO_ROOT / relative)
+        assert not eval_replay_module._is_rule_set(REPO_ROOT / relative)
+    nested = tmp_path / "nested.json"
+    nested.write_text("[" * 100_000 + "]" * 100_000, encoding="utf-8")
+    assert not eval_replay_module._is_rule_set(nested)
 
 
 def test_replay_rejects_unreferenced_response_file(tmp_path: Path) -> None:

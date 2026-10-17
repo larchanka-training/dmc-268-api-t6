@@ -44,6 +44,9 @@ from app.bootstrap.llm_gateway import (  # noqa: E402
     ReviewCaseFailed,
     review_case,
 )
+from app.modules.reviews.application.commit_prefix_limits import (  # noqa: E402
+    CommitMessagePrefix,
+)
 from app.modules.reviews.application.llm import EngineName, LlmCallRecord  # noqa: E402
 from app.modules.reviews.application.prompt_builder import (  # noqa: E402
     PullRequestMeta,
@@ -51,7 +54,6 @@ from app.modules.reviews.application.prompt_builder import (  # noqa: E402
     parse_unified_diff,
     review_rule_from_stored,
 )
-from app.modules.reviews.application.vcs_diff import CommitMessagePrefix  # noqa: E402
 from app.modules.reviews.infrastructure.llm.settings import (  # noqa: E402
     LlmConfigError,
     LlmSettings,

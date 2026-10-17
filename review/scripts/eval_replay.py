@@ -302,7 +302,7 @@ def _is_rule_set(path: Path) -> bool:
     # --frontend-rules; the path already passed digest_files (in the root, no links, a file).
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError):
+    except (OSError, UnicodeError, json.JSONDecodeError, RecursionError):
         return False
     return isinstance(value, dict) and isinstance(value.get("rules"), list)
 
@@ -330,18 +330,11 @@ def _digest_warnings(
                 if path.startswith("review/prompts/") and path != manifest["prompt_path"]
             ]
             conventions_prompt = convention_paths[0] if len(convention_paths) == 1 else None
-            pinned_inputs = static_input_paths(
-                manifest["prompt_path"],
-                rules,
-                conventions_prompt=conventions_prompt,
-                repo_root=prompt_root,
-            )
             # Only a recorded --backend-rules/--frontend-rules file comes back; any other
-            # recorded path the current pins no longer produce is a path-set change.
+            # recorded path the current pins no longer produce is a path-set change. A rule
+            # file the pins already produce is deduplicated by static_input_paths.
             selected_custom_rules = [
-                path
-                for path in recorded_inputs
-                if path not in pinned_inputs and _is_rule_set(prompt_root / path)
+                path for path in recorded_inputs if _is_rule_set(prompt_root / path)
             ]
             current_inputs = static_input_paths(
                 manifest["prompt_path"],

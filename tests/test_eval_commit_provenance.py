@@ -25,7 +25,6 @@ SIDECAR = "review/eval/pr-commit-messages.json"
 SHAPING_INPUTS = (
     LIMITS,
     SIDECAR,
-    "app/modules/reviews/application/vcs_diff.py",
     "review/scripts/commit_context.py",
     "app/common/infrastructure/github_link_header.py",
     "test-prs-dataset/cases/SYN-04/case.json",

@@ -11,10 +11,8 @@ from xml.sax.saxutils import escape
 
 from app.common.application.languages import LANGUAGE_BY_SUFFIX
 from app.modules.reviews.application.commit_prefix_limits import (
-    MAX_COMMIT_MESSAGE_CHARS as MAX_COMMIT_MESSAGE_CHARS,
-)
-from app.modules.reviews.application.commit_prefix_limits import (
-    MAX_COMMIT_MESSAGES as MAX_COMMIT_MESSAGES,
+    MAX_COMMIT_MESSAGE_CHARS,
+    MAX_COMMIT_MESSAGES,
 )
 
 type LineType = Literal["added", "removed", "context"]
