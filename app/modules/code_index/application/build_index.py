@@ -8,11 +8,14 @@ start and indexes that commit, in full or incrementally from `indexed_commit_sha
 - Only a limit or an unsafe archive fails the index. Any other terminal failure releases
   the lease with `last_error_code` and keeps the last publication (ADR §6.1, §7).
 - The archive passes and the exclusion scan run in threads that check the monotonic job
-  deadline themselves, and the parse loop checks it before each file; the importer scan
-  runs in a thread without a check of its own. A network call is cut at the deadline too.
+  deadline themselves; a parse checks it before its parser call and after its result,
+  and the job checks it again before each write and before the publication. The importer
+  scan runs in a thread without a check of its own. A network call is cut at the
+  deadline too; a parser call is not, so one file's parser wait bounds the overshoot.
 - Go package members and package `__init__.py` files are read in a pass of their own
   before the parse pass, because an importer can come before its target in the archive;
-  memory holds their fact summaries, never content.
+  memory holds their fact summaries, never content. `parsed_files` bounds the paths both
+  passes parse, each once, and `symbols` the symbols the summaries hold.
 """
 
 from __future__ import annotations
@@ -558,7 +561,8 @@ class _Job:
         self._commit_sha: str | None = None
         self._exclusions: IndexExclusions | None = None
         self._downloaded = 0
-        self._parsed = 0
+        # Every path this job parsed, in either pass: `parsed_files` bounds the work.
+        self._parsed: set[str] = set()
         self._written = 0
         self._deleted = 0
 
@@ -596,7 +600,7 @@ class _Job:
             full_reason=self._full_reason,
             commit_sha=self._commit_sha,
             exclusions=MappingProxyType(dict(exclusions.counts)) if exclusions else _NO_EXCLUSIONS,
-            parsed_files=self._parsed,
+            parsed_files=len(self._parsed),
             written_files=self._written,
             deleted_files=self._deleted,
             github_request_count=self._source.request_count,
@@ -702,6 +706,7 @@ class _Job:
         written = await self._index(archive, scan, exclusions, go_module, plan)
         deleted = tuple(sorted(plan.closes - written))
         self._written, self._deleted = len(written), len(deleted)
+        _check_deadline(self._deadline)
         async with self._uow() as uow:
             published = await uow.index.publish(
                 self._id,
@@ -862,19 +867,33 @@ class _Job:
             after = page[-1]
 
     async def _parse(self, path: str, content: bytes) -> AstFacts | AstFailureReason:
-        # Between files: the parser bounds one file, the job deadline bounds them all.
+        """One parser call of either pass. A path counts toward `parsed_files` once,
+        before its first call; the job deadline is checked before the call and after it.
+
+        The call itself is not cancelled at the deadline: the parser is shared across
+        jobs, and a request cut while its answer is pending would hand that answer to the
+        next file. The parser bounds one file, so one file's wait bounds the overshoot.
+        """
         _check_deadline(self._deadline)
+        if path not in self._parsed:
+            if len(self._parsed) + 1 > self._limits.parsed_files:
+                raise IndexLimitExceeded("parsed_files")
+            self._parsed.add(path)
         language = language_for_path(path)
         assert language is not None, "an admitted path has a parser language"
         request = ParseRequest(path, language, content)
-        return (await self._parser.parse_many((request,)))[path]
+        result = (await self._parser.parse_many((request,)))[path]
+        _check_deadline(self._deadline)
+        return result
 
     async def _target_facts(
         self, archive: SourceArchive, scan: ArchiveScan, targets: Sequence[str]
     ) -> dict[str, AstFacts | FileUnavailable]:
         """Step 9: the summaries of every Go file and package `__init__.py` an import may
-        resolve to, read as the review reads them."""
+        resolve to, read as the review reads them. The symbols they hold count toward
+        `symbols` apart from the rows the main pass stores."""
         facts: dict[str, AstFacts | FileUnavailable] = {}
+        held = 0
         readable = set()
         for path in targets:
             if scan.entries[path].size > self._limits.parse_bytes:
@@ -894,8 +913,12 @@ class _Job:
                 result = await self._parse(path, content)
                 if isinstance(result, AstFailureReason):
                     facts[path] = FileUnavailable(result.value)
-                else:
-                    facts[path] = _summary(result)
+                    continue
+                summary = _summary(result)
+                held += len(summary.symbols)
+                if held > self._limits.symbols:
+                    raise IndexLimitExceeded("symbols")
+                facts[path] = summary
         return facts
 
     async def _index(
@@ -923,6 +946,9 @@ class _Job:
         )
         limits = self._limits
         symbols, edges = plan.kept.symbol_count, plan.kept.edge_count
+        # The graph bound counts the files this pass parses on top of the kept ones, not
+        # the target-pass parses: most targets of an incremental build are kept files.
+        parsed = 0
         written: set[str] = set()
         if not admitted:
             return written
@@ -937,9 +963,9 @@ class _Job:
             for path, content in batch:
                 if exclusions.admit_content(content) is not None:
                     continue
-                if plan.kept.file_count + self._parsed + 1 > limits.parsed_files:
+                if plan.kept.file_count + parsed + 1 > limits.parsed_files:
                     raise IndexLimitExceeded("parsed_files")
-                self._parsed += 1
+                parsed += 1
                 result = await self._parse(path, content)
                 if exclusions.admit_parse(result) is not None:
                     continue
@@ -968,6 +994,7 @@ class _Job:
 
     async def _write(self, files: Sequence[IndexedFile]) -> None:
         """Step 11: one batch in one transaction; a quota stops it before the commit."""
+        _check_deadline(self._deadline)
         async with self._uow() as uow:
             for file in files:
                 self._check_storage(await uow.index.replace_file(self._id, self._fence, file))
