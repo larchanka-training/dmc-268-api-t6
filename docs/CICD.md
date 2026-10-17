@@ -119,7 +119,8 @@ GitHub App/LLM: открытый PR, новый head с зелёным CI и а�
 не подтверждает доставку новой настройки; PR CI не выкатывает staging.
 
 С рабочей машины получите check-runs нового head, выберите `id`, чей
-`external_id` совпадает с UUID нового Run, и проверьте его summary:
+`external_id` совпадает с UUID нового Run, и проверьте его summary и
+`details_url`:
 
 ```bash
 head_sha='<полный SHA нового sandbox head>'
@@ -131,15 +132,19 @@ gh api "repos/axyi/dmc268-t6-sandbox/check-runs/${check_run_id}" > /tmp/check-ru
 jq -e --arg run_id "${run_id}" --arg head_sha "${head_sha}" \
   --arg url "https://staging-ui.dmc268-t6.axyi.ru/runs/${run_id}" \
   '.name == "AI Review" and .status == "completed" and .head_sha == $head_sha
-   and .external_id == $run_id and (.output.summary | contains($url))' /tmp/check-run-111.json
-jq -r '.html_url, .external_id, .head_sha, .output.summary' /tmp/check-run-111.json
+   and .external_id == $run_id and (.output.summary | contains($url))
+   and .details_url == $url' /tmp/check-run-111.json
+jq -r '.html_url, .external_id, .head_sha, .details_url, .output.summary' /tmp/check-run-111.json
 ```
 
 Откройте URL `/runs/{run_id}` из summary в авторизованном портале и подтвердите
-тот же Run UUID. К PR/приёмке приложите свежий `html_url` check-run, UUID,
-SHA/digest staging и результат открытия страницы. Корневой `details_url` App
-не заменяет эту проверку. Пока нет штатного deployment или нужного доступа,
-live AC остаётся **pending**; зелёные локальные тесты его не подтверждают.
+тот же Run UUID. Кнопка «View more details» (`details_url`) check-run должна
+открывать тот же Run. Корень портала в `details_url` при ссылке в summary
+значит, что выкачен образ без #172; без ссылки и в summary — что `PORTAL_URL`
+не дошёл до worker. К PR/приёмке приложите свежий `html_url`
+check-run, UUID, SHA/digest staging и результат открытия страницы. Пока нет
+штатного deployment или нужного доступа, live AC остаётся **pending**; зелёные
+локальные тесты его не подтверждают.
 
 ---
 
