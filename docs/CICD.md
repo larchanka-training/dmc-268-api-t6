@@ -70,7 +70,7 @@ flowchart TD
 3. Дождаться зелёных проверок и job **Push Docker image** (immutable `:sha` + digest в логах).
 4. Job **Deploy staging** выбирает цель (§8), копирует `deploy/` в `APP_DIR` (`/opt/dmc-268-api` на Terraform-хосте, `/opt/dmc-268-api-staging` на курсовом VPS), готовит хост и выкатывает образ по digest; bootstrap снимается только после `docker pull` и перед `compose up`.
 5. Runner проверяет `GET /healthcheck` снаружи, 12 × 5 с: Terraform-хост — `STAGING_HEALTH_URL` или `http://$STAGING_HOST/healthcheck`; курсовой VPS — `https://staging-api.<APP_DOMAIN>/healthcheck` через edge-прокси.
-6. Успех: job **Promote staging tag** продвигает проверенный digest в `:staging`, прежний `:staging` сохраняется как `:staging-previous`. Неуспех deploy или health: авто-rollback (первый выкат без previous → bootstrap), отдельное сообщение при ошибке rollback, job красный.
+6. Успех: job **Promote staging tag** продвигает проверенный digest в `:staging`, прежний `:staging` сохраняется как `:staging-previous`. Неуспех deploy или health: авто-rollback (первый выкат без previous → bootstrap), но deploy, остановленный до переключения релиза, оставляет релиз как есть (§5, «Действия при отказе»); отдельное сообщение при ошибке rollback, job красный.
 
 Повторный ручной запуск того же workflow: **Actions → CI/CD → Run workflow** (ветка `main`).
 
@@ -410,9 +410,17 @@ APP_DIR=/opt/dmc-268-api-staging /opt/dmc-268-api-staging/rollback.sh
 Opt-in verifier использует отдельные PostgreSQL/RabbitMQ volumes, уникальный Compose project,
 внутреннюю сеть без исходящего доступа и без публикации портов. Он запускает реальные
 `deploy.sh`/`rollback.sh` с синтетическими App credentials и PEM, не отправляет вебхуки и не
-вызывает GitHub/LLM. Соберите A из проверяемого checkout и зафиксируйте его immutable ID:
+вызывает GitHub/LLM.
+
+Compose `up` из `deploy.sh` verifier запускает с `--pull never` (см. ниже), поэтому закреплённые
+по digest образы postgres, rabbitmq и redis из `deploy/compose/staging.yml` должны уже лежать в
+локальном кеше Docker, иначе первый deploy A упадёт. `docker compose pull` здесь не подходит:
+без `IMAGE`, паролей хранилищ и env-файлов ролей файл не рендерится, поэтому refs берутся из
+файла напрямую. Затем соберите A из проверяемого checkout и зафиксируйте его immutable ID:
 
 ```bash
+grep -oE '(postgres|rabbitmq|redis):[^ ]+@sha256:[0-9a-f]{64}' deploy/compose/staging.yml \
+  | xargs -n1 docker pull
 docker build -t dmc268-rollback110-prepared:a .
 rollback_a_id="$(docker image inspect --format '{{.Id}}' dmc268-rollback110-prepared:a)"
 uv run python scripts/verify_rollback.py \
@@ -428,6 +436,8 @@ uv run python scripts/verify_rollback.py \
 ревизией и sentinel. Отдельная пустая сеть проверяет недоступную БД без остановки основного
 PostgreSQL. Проверяются literal HTTP 200 `{"status":"ok"}`, heartbeat обоих воркеров и отсутствие
 значений/строк PEM в выводе. Cleanup удаляет только ресурсы этого запуска и B; A сохраняется.
+Auto rollback verifier вызывает без `DEPLOY_RUN`, то есть проверяет legacy-путь без маркера
+`.deploy-switch` («Действия при отказе»).
 
 Для локальных A/B wrapper заменяет только их pull после проверки ID и добавляет `--pull never`
 к реальному Compose up, если флаг ещё не задан; rollback сохраняет production `--pull missing`.
@@ -439,6 +449,8 @@ PostgreSQL. Проверяются literal HTTP 200 `{"status":"ok"}`, heartbeat
 приватном config, без копирования credentials. Реальные шесть acceptance cases, полные ID,
 ревизии, снимки контейнеров, хеши файлов и cleanup от 2026-10-12:
 [отчёт и ограничения](plans/110-verification.md), [redacted JSON](plans/110-verification.json).
+Повторная проверка 2026-10-16 (PR #160: verifier ждёт `REDIS_URL` у worker):
+[отчёт](plans/110-verifier-verification.md), [метаданные проверки](plans/110-verifier-verification.json).
 
 ---
 
