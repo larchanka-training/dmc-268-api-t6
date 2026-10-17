@@ -66,6 +66,8 @@ class GitHubCheckRunGateway:
         }
         if view.conclusion is not None:
             payload["conclusion"] = view.conclusion
+        if view.details_url is not None:
+            payload["details_url"] = view.details_url
         existing = await self._find(commit_check_runs, headers, target, checkpoint)
         await checkpoint()
         if existing is None:
