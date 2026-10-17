@@ -31,6 +31,8 @@ from tests.test_run_origin_guard_postgres import prepare
 
 COMPETITORS = ["revoke", "rebind"]
 FINDING = UUID(int=16401)
+# state, error_code, error_message, lease_until, finished_at set
+CANCELLED = ("cancelled", "installation_unavailable", None, None, True)
 
 
 @pytest.fixture
@@ -64,7 +66,13 @@ def without_run(state: dict[str, object]) -> dict[str, object]:
 def outcome(state: dict[str, object]) -> tuple[object, ...]:
     run = state["run"]
     assert isinstance(run, dict)
-    return run["state"], run["error_code"], run["error_message"]
+    return (
+        run["state"],
+        run["error_code"],
+        run["error_message"],
+        run["lease_until"],
+        run["finished_at"] is not None,
+    )
 
 
 async def race[T](
@@ -76,6 +84,10 @@ async def race[T](
 
     Returns the finished task and the state the operation must not alter, read
     after the competitor's writes and before its commit.
+
+    The rebind competitor models rebind's lock order and its origin change only; it does
+    not cancel the Run with installation_replaced or soft-delete the source installation.
+    So it proves lock order plus the origin guard, not production rebind outcomes.
     """
     task: asyncio.Task[T] | None = None
     try:
@@ -89,7 +101,8 @@ async def race[T](
                 # Installation FOR NO KEY UPDATE only (installation_repository_unit_of_work:214).
                 await competing.repositories._record_revocation(INSTALL_A, 0)
             else:
-                # Source installations FOR NO KEY UPDATE (github_repository_rebinding:30-40).
+                # Lock order of rebind, not its outcomes: source installations
+                # FOR NO KEY UPDATE (github_repository_rebinding:30-40).
                 await session.execute(
                     text("SELECT id FROM provider_installations WHERE id=:id FOR NO KEY UPDATE"),
                     {"id": INSTALL_A},
@@ -100,20 +113,27 @@ async def race[T](
             # A real PostgreSQL lock edge, not an event on the helper's first query:
             # the operation must already wait before the competitor touches Repository.
             await wait_for_blocked_backend(observer, blocker_pid, task)
-            if competitor == "revoke":
-                # Its repositories UPDATE is revoke's Repository row lock (L190-208).
-                await competing.repositories.disable_installation(INSTALL_A)
-            else:
-                # Repository FOR UPDATE, then the FK move (github_repository_rebinding:86-157).
-                await session.execute(
-                    text("SELECT id FROM repositories WHERE id=:id FOR UPDATE"), {"id": REPO_A}
-                )
-                await session.execute(
-                    text("UPDATE repositories SET provider_installation_id=:to WHERE id=:id"),
-                    {"to": INSTALL_B, "id": REPO_A},
-                )
-            before = await history_in(session) | {"context_payload": await context_row(factory)}
-            await competing.commit()
+            async with asyncio.timeout(10):
+                if competitor == "revoke":
+                    # Its repositories UPDATE is revoke's Repository row lock (L190-208).
+                    await competing.repositories.disable_installation(INSTALL_A)
+                else:
+                    # Repository FOR UPDATE, Run lock, then the FK move, as in
+                    # github_repository_rebinding:86-157. The Run is only locked, not cancelled
+                    # with installation_replaced, and the source gets no deleted_at: the origin
+                    # guard alone must cancel.
+                    await session.execute(
+                        text("SELECT id FROM repositories WHERE id=:id FOR UPDATE"), {"id": REPO_A}
+                    )
+                    await session.execute(
+                        text("SELECT id FROM runs WHERE id=:id FOR UPDATE"), {"id": RUN_ATTEMPTED}
+                    )
+                    await session.execute(
+                        text("UPDATE repositories SET provider_installation_id=:to WHERE id=:id"),
+                        {"to": INSTALL_B, "id": REPO_A},
+                    )
+                before = await history_in(session) | {"context_payload": await context_row(factory)}
+                await competing.commit()
     finally:
         # The competitor has committed or rolled back: the operation can always finish.
         if task is not None:
@@ -147,11 +167,10 @@ def test_finish_waits_for_revoke_or_rebind_then_cancels_the_owned_attempt(
         try:
             await prepare(factory, "active", "running")
             await own(factory)
-            task, before = await race(factory, competitor, finish)
+            task, _ = await race(factory, competitor, finish)
             assert task.result() is True
             after = await snapshot(factory)
-            assert outcome(after) == ("cancelled", "installation_unavailable", None)
-            assert without_run(after) == without_run(before)
+            assert outcome(after) == CANCELLED
         finally:
             await engine.dispose()
 
@@ -180,11 +199,10 @@ def test_requeue_waits_for_revoke_or_rebind_then_cancels_instead_of_queueing(
         try:
             await prepare(factory, "active", "running")
             await own(factory)
-            task, before = await race(factory, competitor, requeue)
+            task, _ = await race(factory, competitor, requeue)
             assert task.result() is False
             after = await snapshot(factory)
-            assert outcome(after) == ("cancelled", "installation_unavailable", None)
-            assert without_run(after) == without_run(before)
+            assert outcome(after) == CANCELLED
         finally:
             await engine.dispose()
 
@@ -229,7 +247,7 @@ def test_complete_publication_waits_for_revoke_or_rebind_then_cancels_without_pa
             task, before = await race(factory, competitor, complete)
             assert task.result() == "cancelled"
             after = await snapshot(factory)
-            assert outcome(after) == ("cancelled", "installation_unavailable", None)
+            assert outcome(after) == CANCELLED
             assert without_run(after) == without_run(before)
             assert after["comments"] == []
         finally:
