@@ -1,0 +1,142 @@
+# Alert rules of the monitoring stack (docs/MONITORING.md §Alerts). Alertmanager sends them to the
+# team Telegram channel. Annotations carry counts and names only: no review content, no secrets.
+# Unit tests: tests/monitoring/alerts.test.yml (promtool test rules, CI job monitoring-validate).
+groups:
+  - name: availability
+    rules:
+      - alert: TargetDown
+        expr: up == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Scrape target {{ $labels.job }} ({{ $labels.instance }}) is down"
+          description: "Prometheus has not reached {{ $labels.job }} for 5 minutes."
+
+      - alert: PostgresDown
+        expr: pg_up == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "PostgreSQL is unreachable"
+          description: "postgres-exporter cannot connect to PostgreSQL for 2 minutes."
+
+      - alert: RedisDown
+        expr: redis_up == 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Redis cache is unreachable"
+          description: "The review context runs without its cache (SD §10) until Redis is back."
+
+      - alert: ApiHigh5xxRate
+        expr: |
+          (
+            sum by (host) (rate(caddy_http_request_duration_seconds_count{host=~"staging-(api|ui)\\..+", code=~"5.."}[5m]))
+            /
+            sum by (host) (rate(caddy_http_request_duration_seconds_count{host=~"staging-(api|ui)\\..+"}[5m]))
+          ) > 0.05
+          and
+          sum by (host) (rate(caddy_http_request_duration_seconds_count{host=~"staging-(api|ui)\\..+"}[5m])) > 0.05
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $labels.host }}: {{ $value | humanizePercentage }} of requests end in 5xx"
+          description: "More than 5% of requests to {{ $labels.host }} returned 5xx for 5 minutes."
+
+  - name: review-pipeline
+    rules:
+      - alert: ReviewRunsFailed
+        expr: sum(dmc_runs_finished_15m_runs{state="failed"}) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $value }} review run(s) failed in the last 15 minutes"
+          description: "Open the runs with state failed in the portal or the Grafana dashboard for error_code."
+
+      - alert: ReviewDeadLetters
+        expr: sum(rabbitmq_detailed_queue_messages{queue="reviews.dlq"}) > 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $value }} message(s) in the dead-letter queue reviews.dlq"
+          description: "Review messages exhausted their retries (docs/PIPELINE_SPEC.md §4.4)."
+
+      - alert: ReviewQueueBacklog
+        expr: sum by (queue) (rabbitmq_detailed_queue_messages_ready{queue=~"review\\.run\\..+|review\\.publish"}) > 20
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $value }} message(s) wait in {{ $labels.queue }}"
+          description: "The queue has held more than 20 ready messages for 10 minutes; workers do not keep up."
+
+      - alert: ReviewQueueWithoutConsumer
+        expr: sum by (queue) (rabbitmq_detailed_queue_consumers{queue=~"review\\.run\\.fast|review\\.publish"}) == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "No worker consumes {{ $labels.queue }}"
+          description: "The review worker is down or detached from the broker for 5 minutes."
+
+      - alert: ReviewRunsStuckInQueue
+        expr: max(dmc_runs_active_stale_queued) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $value }} run(s) queued for more than 10 minutes"
+          description: "Runs stay queued past available_at (T18 of docs/PIPELINE_SPEC.md §3)."
+
+      - alert: LlmLatencyHigh
+        expr: max(dmc_llm_calls_15m_p95_seconds) > 60 and max(dmc_llm_calls_15m_calls) >= 3
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "LLM calls are slow: p95 {{ $value | humanizeDuration }} over 15 minutes"
+          description: "The fast-engine call timeout is 90 s (docs/PIPELINE_SPEC.md §3)."
+
+  - name: host
+    rules:
+      - alert: HostMemoryLow
+        expr: node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes < 0.10
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Host memory available: {{ $value | humanizePercentage }}"
+          description: "Less than 10% of the VPS memory has been available for 10 minutes."
+
+      - alert: HostDiskFull
+        expr: |
+          node_filesystem_avail_bytes{mountpoint="/", fstype!~"tmpfs|overlay"}
+            / node_filesystem_size_bytes{mountpoint="/", fstype!~"tmpfs|overlay"} < 0.15
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Root filesystem free: {{ $value | humanizePercentage }}"
+          description: "Less than 15% of the root filesystem is free."
+
+      - alert: HostCpuHigh
+        expr: 1 - avg(rate(node_cpu_seconds_total{mode="idle"}[5m])) > 0.90
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Host CPU busy: {{ $value | humanizePercentage }}"
+          description: "The VPS has been more than 90% busy for 15 minutes."
+
+      - alert: ContainerOomKilled
+        expr: increase(container_oom_events_total{container_label_com_docker_compose_service!=""}[10m]) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "Container {{ $labels.name }} was OOM-killed"
+          description: "The kernel killed a process of {{ $labels.name }} for lack of memory in the last 10 minutes."

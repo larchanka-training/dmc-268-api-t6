@@ -1,0 +1,6 @@
+# Dedicated host (Terraform): no edge proxy. Grafana listens on the host loopback only; reach it
+# through an SSH tunnel (docs/MONITORING.md), never on a public port.
+services:
+  grafana:
+    ports:
+      - "127.0.0.1:3000:3000"

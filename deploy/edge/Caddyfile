@@ -5,6 +5,17 @@
 		include http.log.error
 		level DEBUG
 	}
+	# Request metrics for the monitoring stack (deploy/monitoring): RPS, status codes and latency
+	# per site address. per_host adds the host label, so staging and prod stay apart.
+	metrics {
+		per_host
+	}
+}
+
+# Prometheus endpoint for the monitoring stack, plain HTTP on the edge network only: no host port
+# publishes 9180 (deploy/edge/compose.yml), and the Caddy admin API stays on localhost.
+http://:9180 {
+	metrics /metrics
 }
 
 # Edge routes on the shared course VPS, one hostname per service and environment under
@@ -31,7 +42,14 @@
 
 staging-api.{$APP_DOMAIN} {
 	import hsts
-	reverse_proxy api-staging:8000
+	# Grafana of the monitoring stack (deploy/monitoring), served from the /grafana sub-path until
+	# it has a hostname of its own. Grafana runs its own login; the rest of the host is the API.
+	handle /grafana/* {
+		reverse_proxy grafana-staging:3000
+	}
+	handle {
+		reverse_proxy api-staging:8000
+	}
 }
 
 api.{$APP_DOMAIN} {

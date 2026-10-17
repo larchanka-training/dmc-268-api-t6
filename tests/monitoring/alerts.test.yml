@@ -1,0 +1,151 @@
+# Unit tests of deploy/monitoring/prometheus/rules/alerts.yml, run by CI (job monitoring-validate):
+#   docker run --rm --entrypoint promtool -v "$PWD:/w:ro" -w /w <prometheus image> \
+#     test rules tests/monitoring/alerts.test.yml
+rule_files:
+  - ../../deploy/monitoring/prometheus/rules/alerts.yml
+
+evaluation_interval: 30s
+
+tests:
+  # The DoD alert path: dead letters, a queue without its worker, a backlog.
+  - interval: 30s
+    input_series:
+      - series: 'rabbitmq_detailed_queue_messages{queue="reviews.dlq", vhost="/"}'
+        values: "0 0 2x20"
+      - series: 'rabbitmq_detailed_queue_consumers{queue="review.run.fast", vhost="/"}'
+        values: "1 1 0x20"
+      - series: 'rabbitmq_detailed_queue_messages_ready{queue="review.run.fast", vhost="/"}'
+        values: "25x30"
+      - series: 'rabbitmq_detailed_queue_messages_ready{queue="retry.30s.fast", vhost="/"}'
+        values: "500x30"
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: ReviewDeadLetters
+        exp_alerts: []
+      - eval_time: 7m
+        alertname: ReviewDeadLetters
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+            exp_annotations:
+              summary: "2 message(s) in the dead-letter queue reviews.dlq"
+              description: "Review messages exhausted their retries (docs/PIPELINE_SPEC.md §4.4)."
+      - eval_time: 7m
+        alertname: ReviewQueueWithoutConsumer
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              queue: review.run.fast
+            exp_annotations:
+              summary: "No worker consumes review.run.fast"
+              description: "The review worker is down or detached from the broker for 5 minutes."
+      # Retry queues hold messages on purpose: only review.run.* and review.publish count.
+      - eval_time: 11m
+        alertname: ReviewQueueBacklog
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              queue: review.run.fast
+            exp_annotations:
+              summary: "25 message(s) wait in review.run.fast"
+              description: "The queue has held more than 20 ready messages for 10 minutes; workers do not keep up."
+
+  # Failed and stuck runs from the PostgreSQL review metrics.
+  - interval: 1m
+    input_series:
+      - series: 'dmc_runs_finished_15m_runs{state="succeeded"}'
+        values: "4x10"
+      - series: 'dmc_runs_finished_15m_runs{state="failed"}'
+        values: "_ _ 1x8"
+      - series: 'dmc_runs_active_stale_queued'
+        values: "0 0 2x10"
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: ReviewRunsFailed
+        exp_alerts: []
+      - eval_time: 2m
+        alertname: ReviewRunsFailed
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: "1 review run(s) failed in the last 15 minutes"
+              description: "Open the runs with state failed in the portal or the Grafana dashboard for error_code."
+      - eval_time: 8m
+        alertname: ReviewRunsStuckInQueue
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: "2 run(s) queued for more than 10 minutes"
+              description: "Runs stay queued past available_at (T18 of docs/PIPELINE_SPEC.md §3)."
+
+  # LLM latency needs both a slow p95 and enough calls: one slow call does not page.
+  - interval: 1m
+    input_series:
+      - series: 'dmc_llm_calls_15m_p95_seconds'
+        values: "80x30"
+      - series: 'dmc_llm_calls_15m_calls'
+        values: "1x10 5x20"
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: LlmLatencyHigh
+        exp_alerts: []
+      - eval_time: 21m
+        alertname: LlmLatencyHigh
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: "LLM calls are slow: p95 1m 20s over 15 minutes"
+              description: "The fast-engine call timeout is 90 s (docs/PIPELINE_SPEC.md §3)."
+
+  # 5xx share per host, with a minimum of traffic; the metrics endpoint of Caddy (host _other) and
+  # other hosts do not count.
+  - interval: 1m
+    input_series:
+      - series: 'caddy_http_request_duration_seconds_count{host="staging-api.example.test", code="200"}'
+        values: "0+60x20"
+      - series: 'caddy_http_request_duration_seconds_count{host="staging-api.example.test", code="502"}'
+        values: "0+12x20"
+      - series: 'caddy_http_request_duration_seconds_count{host="api.example.test", code="503"}'
+        values: "0+60x20"
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: ApiHigh5xxRate
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              host: staging-api.example.test
+            exp_annotations:
+              summary: "staging-api.example.test: 16.67% of requests end in 5xx"
+              description: "More than 5% of requests to staging-api.example.test returned 5xx for 5 minutes."
+
+  - interval: 1m
+    input_series:
+      - series: 'up{job="rabbitmq", instance="rabbitmq:15692"}'
+        values: "1 1 0x10"
+      - series: 'node_memory_MemAvailable_bytes{instance="node-exporter:9100"}'
+        values: "50x20"
+      - series: 'node_memory_MemTotal_bytes{instance="node-exporter:9100"}'
+        values: "1000x20"
+    alert_rule_test:
+      - eval_time: 8m
+        alertname: TargetDown
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              job: rabbitmq
+              instance: rabbitmq:15692
+            exp_annotations:
+              summary: "Scrape target rabbitmq (rabbitmq:15692) is down"
+              description: "Prometheus has not reached rabbitmq for 5 minutes."
+      - eval_time: 11m
+        alertname: HostMemoryLow
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              instance: node-exporter:9100
+            exp_annotations:
+              summary: "Host memory available: 5%"
+              description: "Less than 10% of the VPS memory has been available for 10 minutes."
