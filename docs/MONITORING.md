@@ -113,7 +113,7 @@ flowchart LR
 | `HostMemoryLow` / `HostDiskFull` / `HostCpuHigh` | < 10 % памяти 10 мин / < 15 % диска 10 мин / > 90 % CPU 15 мин | critical / critical / warning |
 | `ContainerOomKilled` | OOM-kill в контейнере compose за 10 мин | warning |
 | `PostgresBackupStale` | последнему проверенному дампу больше 26 ч | critical |
-| `PostgresBackupMissing` | нет метрик бэкапа 2 ч (сервис не работает или не может писать) | critical |
+| `PostgresBackupMissing` | heartbeat `pg-backup` старше 2 ч или его нет (сервис остановлен, удалён или не может писать). Файл метрик переживает контейнер, поэтому смотрим на возраст heartbeat, а не на отсутствие метрик | critical |
 | `PostgresBackupFailed` | последняя попытка бэкапа упала | warning |
 | `PostgresBackupOffsiteStale` | копия в бакет не обновлялась 3 ч (только при включённой выгрузке) | critical |
 | `PostgresBackupOffsiteFailing` | все проходы выгрузки за час упали | warning |
@@ -167,10 +167,12 @@ Grafana — на своём хосте `grafana.<APP_DOMAIN>` (A-запись н
 
 Сервис `pg-backup` (`deploy/monitoring/backup/pg-backup.sh`) раз в 5 минут проверяет возраст последнего дампа и, если он старше суток, делает новый:
 
-1. `pg_dump --format=custom` от роли `backup_agent` во временный `*.partial`. Дамп сохраняет владельцев и права для настоящего восстановления.
-2. Проверка восстановления: `pg_restore --no-owner --no-privileges` во временную БД `dmc_restore_check` на том же сервере. Ревизия `alembic_version` должна совпасть с исходной, потом БД удаляется.
-3. Только после проверки — переименование в `<db>-<UTC>.dump` (0600) и удаление дампов старше 7 дней.
-4. Метрики `dmc_pg_backup_*` → `textfile/pg_backup.prom` → node-exporter → алерты §5 и строка `PostgreSQL backups` дашборда.
+1. Проверка места: свободно на диске каталога бэкапов не меньше 2 × `pg_database_size` (дамп и временная БД; на VPS каталог и тома Docker на одном корневом разделе). Иначе попытка падает до записи чего-либо.
+2. Снимок: транзакция `REPEATABLE READ` на исходной БД делает `pg_export_snapshot()` и в нём же снимает отпечаток — ревизию `alembic_version` и число строк каждой таблицы схемы `public`.
+3. `pg_dump --format=custom --snapshot=<снимок>` от роли `backup_agent` во временный `*.partial`: дамп ровно того состояния, по которому снят отпечаток. Дамп сохраняет владельцев и права для настоящего восстановления.
+4. Проверка восстановления: `pg_restore --no-owner --no-privileges` во временную БД `dmc_restore_check`, отпечаток восстановленной БД должен совпасть построчно. Запись или миграция во время дампа ложной ошибки не дают (обе стороны из одного снимка), а потерянная строка или таблица ловится. Проверено под постоянной записью: три бэкапа подряд, до 104 255 строк, все совпали.
+5. Только после проверки — переименование в `<db>-<UTC>.dump` (0600) и удаление дампов старше 7 дней.
+6. Метрики `dmc_pg_backup_*` → `textfile/pg_backup.prom`, heartbeat каждые 5 мин → `textfile/pg_backup_heartbeat.prom` → node-exporter → алерты §5 и строка `PostgreSQL backups` дашборда.
 
 Упавшая попытка повторяется через час. Дамп, не прошедший проверку, не сохраняется.
 
