@@ -557,6 +557,7 @@ def test_digest_is_order_stable_and_rejects_unsafe_or_missing_paths(tmp_path: Pa
         "app/modules/reviews/application/prompt_builder.py",
         "app/modules/reviews/application/prompt_budget.py",
         "app/modules/reviews/infrastructure/llm/gateway.py",
+        "app/modules/reviews/infrastructure/llm/memory.py",
         "review/scripts/eval_live.py",
         "app/modules/reviews/infrastructure/llm/settings.py",
         "app/modules/reviews/infrastructure/llm/transport.py",
