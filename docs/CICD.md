@@ -373,9 +373,11 @@ Compose-файлами и env-file. Для этого восстановлени
 | Health check | Откатывает | `.deploy-state.previous` |
 | Первый выкат (нет `.deploy-state`): отказ после переключения или health check | Откатывает | bootstrap nginx |
 
-Job остаётся красным, `:staging` не продвигается: шаг «Fail the pipeline after rollback» печатает
-`staging deploy failed; rollback was triggered`, даже если откат ничего не менял, — тогда в логе
-шага rollback видно `release unchanged`. Ручной rollback (`ROLLBACK_MODE=manual`, значение по
+Job остаётся красным, `:staging` не продвигается. Шаг rollback сохраняет свой вывод
+(`capture_stdout`): если Deploy упал, откат завершился успешно и в выводе есть
+`release unchanged: deploy run`, шаг «Fail the pipeline after rollback» печатает
+`staging deploy failed before the release switch; the running release was left unchanged`, иначе —
+`staging deploy failed; rollback was triggered`. Ручной rollback (`ROLLBACK_MODE=manual`, значение по
 умолчанию) маркер не проверяет; автоматический без `DEPLOY_RUN` (вызов `rollback.sh` на хосте,
 `scripts/verify_rollback.py`) тоже работает как раньше: цель — `.deploy-state.previous` или
 bootstrap nginx, где бы ни остановился выкат.

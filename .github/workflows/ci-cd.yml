@@ -843,6 +843,7 @@ jobs:
           password: ${{ steps.target.outputs.mode == 'course' && secrets.VPS_DMC268_P || '' }}
           fingerprint: ${{ vars.STAGING_SSH_FINGERPRINT }}
           debug: false
+          capture_stdout: true
           envs: GHCR_TOKEN,GHCR_USER,APP_DIR,DEPLOY_MODE,EDGE_ALIAS,DEPLOY_RUN
           script: |
             set -euo pipefail
@@ -861,8 +862,13 @@ jobs:
 
       - name: Fail the pipeline after rollback
         if: always() && (steps.deploy.outcome == 'failure' || steps.health.outcome == 'failure')
+        env:
+          # rollback.sh prints this when deploy.sh of this run stopped before the release switch.
+          RELEASE_UNCHANGED: "${{ contains(steps.rollback.outputs.stdout, 'release unchanged: deploy run') }}"
         run: |
-          if [[ "${{ steps.deploy.outcome }}" == "failure" ]]; then
+          if [[ "${{ steps.deploy.outcome }}" == "failure" && "${{ steps.rollback.outcome }}" == "success" && "${RELEASE_UNCHANGED}" == "true" ]]; then
+            echo "staging deploy failed before the release switch; the running release was left unchanged"
+          elif [[ "${{ steps.deploy.outcome }}" == "failure" ]]; then
             echo "staging deploy failed; rollback was triggered"
           else
             echo "staging health check failed; rollback was triggered"
