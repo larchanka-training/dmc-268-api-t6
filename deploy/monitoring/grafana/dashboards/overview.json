@@ -1594,7 +1594,7 @@
       },
       "gridPos": {
         "h": 5,
-        "w": 6,
+        "w": 4,
         "x": 0,
         "y": 82
       }
@@ -1658,15 +1658,15 @@
       },
       "gridPos": {
         "h": 5,
-        "w": 6,
-        "x": 6,
+        "w": 4,
+        "x": 4,
         "y": 82
       }
     },
     {
       "type": "stat",
       "title": "Dumps kept",
-      "description": "Dumps in the backup directory (retention 7 days).",
+      "description": "Dumps in the backup directory on the host (retention 7 days).",
       "id": 33,
       "datasource": {
         "type": "prometheus",
@@ -1718,7 +1718,75 @@
       },
       "gridPos": {
         "h": 5,
-        "w": 6,
+        "w": 4,
+        "x": 8,
+        "y": 82
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Last off-host copy",
+      "description": "Time since the last successful encrypted copy to the bucket (every 15 min, kept 30 days); empty when BACKUP_S3_* are not set. PostgresBackupOffsiteStale fires after 3 h.",
+      "id": 34,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "refId": "A",
+          "expr": "time() - max(dmc_pg_backup_offsite_last_success_timestamp_seconds)",
+          "legendFormat": "age",
+          "range": false,
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 3600
+              },
+              {
+                "color": "red",
+                "value": 10800
+              }
+            ]
+          },
+          "color": {
+            "mode": "thresholds"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "value",
+        "justifyMode": "auto"
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 4,
         "x": 12,
         "y": 82
       }
@@ -1727,7 +1795,7 @@
       "type": "timeseries",
       "title": "Dump size",
       "description": "Size of the newest verified dump (pg_dump custom format, compressed).",
-      "id": 34,
+      "id": 35,
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -1776,8 +1844,8 @@
       },
       "gridPos": {
         "h": 5,
-        "w": 6,
-        "x": 18,
+        "w": 8,
+        "x": 16,
         "y": 82
       }
     }

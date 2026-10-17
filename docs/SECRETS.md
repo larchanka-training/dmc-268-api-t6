@@ -170,6 +170,11 @@ worker стартует, но summary завершившегося успешн�
 | `GRAFANA_DB_PASSWORD` | генерируется на хосте | `.env` стека; роль PostgreSQL `grafana_reader` | источник данных PostgreSQL в Grafana: только чтение и только колонки метаданных (§3 MONITORING.md) |
 | `PG_EXPORTER_PASSWORD` | генерируется на хосте | `.env` стека; роль PostgreSQL `metrics_exporter` | `postgres-exporter`: `pg_monitor` и те же колонки |
 | `PG_BACKUP_PASSWORD` | генерируется на хосте | `.env` стека; роль PostgreSQL `backup_agent` | `pg-backup`: `pg_read_all_data` для `pg_dump`, `CREATEDB` для БД проверки восстановления |
+| `BACKUP_S3_ENDPOINT` | variable, Environment `staging` | `.env` стека, контейнер `backup-offsite` | endpoint S3 API бакета бэкапов: `https://<ACCOUNT_ID>.r2.cloudflarestorage.com` (Cloudflare R2, решение техлида 17.10.2026) |
+| `BACKUP_S3_BUCKET` | variable, Environment `staging` | там же | имя бакета |
+| `BACKUP_S3_ACCESS_KEY_ID` | secret, Environment `staging` | там же | Access Key ID R2-токена (Object Read & Write на один бакет) |
+| `BACKUP_S3_SECRET_ACCESS_KEY` | secret, Environment `staging` | там же | Secret Access Key того же токена |
+| `BACKUP_ENCRYPTION_PASSPHRASE` | secret, Environment `staging` | на хосте только obscured-форма rclone и SHA-256 | ключ шифрования дампов (rclone crypt) до выгрузки. Копия — у техлида вне GitHub, без неё бэкапы не расшифровать. Пять имён `BACKUP_*` задаются вместе или не задаются вовсе ([MONITORING.md](MONITORING.md) §9) |
 | `REDIS_PASSWORD` | копия из `<APP_DIR>/.env` | `.env` стека, контейнер `redis-exporter` | метрики Redis. Сменился пароль Redis — следующий выкат мониторинга (сразу после выката приложения) берёт новый |
 
 Пароли ролей PostgreSQL передаются в `psql` через stdin, не через argv; вывод этого вызова подавлен, потому что `psql` повторил бы упавший оператор вместе с паролем.

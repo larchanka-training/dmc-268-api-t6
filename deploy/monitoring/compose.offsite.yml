@@ -1,0 +1,41 @@
+# Off-host copy of the PostgreSQL dumps (backup/offsite.sh, docs/MONITORING.md §9): encrypted on
+# the host with rclone crypt, then uploaded to the S3-compatible bucket of BACKUP_S3_* (Cloudflare
+# R2 on staging, decision of the tech lead on 2026-10-17, #186). deploy.sh adds this file only when
+# every BACKUP_S3_* value and the passphrase are set; otherwise the service is not created.
+services:
+  backup-offsite:
+    image: rclone/rclone:1.75.2@sha256:2687085f718d3c628f7fdfb77c52a1d344332aed543110bb88088f2c70d43eb5
+    entrypoint: ["sh", "/opt/pg-backup/offsite.sh"]
+    command: ["loop"]
+    # The owner of the dump dir and the textfile dir (pg-backup); read-only on the dumps.
+    user: "70:70"
+    environment:
+      # No config file: both remotes come from the environment.
+      RCLONE_CONFIG: /dev/null
+      RCLONE_CONFIG_STORE_TYPE: s3
+      RCLONE_CONFIG_STORE_PROVIDER: ${BACKUP_S3_PROVIDER:-Cloudflare}
+      RCLONE_CONFIG_STORE_ENDPOINT: ${BACKUP_S3_ENDPOINT:?BACKUP_S3_ENDPOINT is required}
+      RCLONE_CONFIG_STORE_ACCESS_KEY_ID: ${BACKUP_S3_ACCESS_KEY_ID:?BACKUP_S3_ACCESS_KEY_ID is required}
+      RCLONE_CONFIG_STORE_SECRET_ACCESS_KEY: ${BACKUP_S3_SECRET_ACCESS_KEY:?BACKUP_S3_SECRET_ACCESS_KEY is required}
+      # A token scoped to one bucket may neither list nor create buckets.
+      RCLONE_CONFIG_STORE_NO_CHECK_BUCKET: "true"
+      RCLONE_CONFIG_SECURE_TYPE: crypt
+      RCLONE_CONFIG_SECURE_REMOTE: store:${BACKUP_S3_BUCKET:?BACKUP_S3_BUCKET is required}/postgres
+      # BACKUP_ENCRYPTION_PASSPHRASE in rclone's obscured form (deploy.sh). The content is readable
+      # only with the passphrase; file names stay plain so a restore can pick a dump by date.
+      RCLONE_CONFIG_SECURE_PASSWORD: ${BACKUP_ENCRYPTION_PASSWORD_OBSCURED:?BACKUP_ENCRYPTION_PASSWORD_OBSCURED is required}
+      RCLONE_CONFIG_SECURE_FILENAME_ENCRYPTION: "off"
+      BACKUP_OFFSITE_RETENTION_DAYS: ${BACKUP_OFFSITE_RETENTION_DAYS:-30}
+    labels:
+      dmc.config-digest: ${PG_BACKUP_CONFIG_DIGEST:-none}
+    volumes:
+      - ./backup:/opt/pg-backup:ro
+      - ${BACKUP_DIR:?BACKUP_DIR is required}:/backups:ro
+      - ${TEXTFILE_DIR:-./textfile}:/textfile
+    restart: unless-stopped
+    mem_limit: 128m
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

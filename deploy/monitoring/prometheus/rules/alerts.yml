@@ -179,3 +179,23 @@ groups:
         annotations:
           summary: "The last PostgreSQL backup attempt failed"
           description: "See docker compose -p dmc-268-monitoring logs pg-backup; the next attempt runs within an hour."
+
+      # Off-host copy (backup-offsite, only when BACKUP_S3_* are set): without it the dumps would
+      # not survive the loss of the VPS.
+      - alert: PostgresBackupOffsiteStale
+        expr: time() - dmc_pg_backup_offsite_last_success_timestamp_seconds > 3 * 3600
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Off-host backup copy last succeeded {{ $value | humanizeDuration }} ago"
+          description: "backup-offsite has not reached the bucket for 3 hours; see docker compose -p dmc-268-monitoring logs backup-offsite."
+
+      - alert: PostgresBackupOffsiteFailing
+        expr: dmc_pg_backup_offsite_last_run_success == 0
+        for: 1h
+        labels:
+          severity: warning
+        annotations:
+          summary: "Off-host backup copy fails"
+          description: "Every backup-offsite pass of the last hour failed (bucket, keys or network)."
