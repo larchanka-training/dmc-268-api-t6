@@ -14,6 +14,7 @@ from starlette.routing import BaseRoute
 
 import app.main  # registers every DTO of the composed app; its routes feed the response walk
 from app.modules.auth.api.router import AuthSessionDto
+from app.modules.repositories.api.dtos import RagIndexDto
 from app.modules.reviews.api.dtos import (
     ApiDto,
     PullRequestDto,
@@ -148,21 +149,27 @@ def _models(annotation: Any) -> list[type[BaseModel]]:
     if isinstance(annotation, type) and issubclass(annotation, BaseModel):
         return [annotation]
     # Annotated metadata and dict keys are never models, so walking every argument is enough.
+    # None (a streamed or empty response, or a responses entry without "model") and object (a
+    # raw stored payload) have no arguments: they yield no model to walk.
     return [model for argument in get_args(annotation) for model in _models(argument)]
 
 
 def _response_models(routes: Sequence[BaseRoute]) -> list[type[BaseModel]]:
     """Every model an ``/api/`` route returns, with the models nested in its fields."""
     # app.routes holds each included router as a wrapper, not an APIRoute: unwrap it first.
+    # A Mount is not descended into: the app mounts nothing, so no /api/ route hides in one.
     pending = [
         model
         for route in iter_route_contexts(routes)
         if route.path_format is not None
         and route.path_format.startswith("/api/")
         and isinstance(route.original_route, APIRoute)
-        # No model to walk: a streamed or empty response (None) or a raw stored payload (object).
-        and route.response_model not in (None, object)
-        for model in _models(route.response_model)
+        # The declared response model, then the model of each status in responses={...}.
+        for annotation in (
+            route.response_model,
+            *(response.get("model") for response in route.responses.values()),
+        )
+        for model in _models(annotation)
     ]
     found: list[type[BaseModel]] = []
     seen: set[type[BaseModel]] = set()
@@ -171,6 +178,8 @@ def _response_models(routes: Sequence[BaseRoute]) -> list[type[BaseModel]]:
         if model in seen:
             continue
         seen.add(model)
+        # An unresolved forward reference leaves a field annotation that _models cannot walk.
+        assert model.__pydantic_complete__, model
         found.append(model)
         pending += [
             nested for field in model.model_fields.values() for nested in _models(field.annotation)
@@ -192,6 +201,7 @@ def test_no_api_response_model_returns_a_timestamp_outside_utc() -> None:
     models = _response_models(app.main.app.routes)
 
     assert AuthSessionDto in models
+    assert RagIndexDto in models  # no route returns it: reached only via RepositoryDto.rag_index
     assert _bare_timestamps(models) == []
 
 
@@ -211,13 +221,21 @@ class UtcProbe(BaseModel):
     items: list[UtcStamp]
 
 
+class BareTree(BaseModel):
+    at: datetime
+    children: list[BareTree]
+
+
 async def _probe() -> None:
     return None
 
 
-def _probe_routes(response_model: type[BaseModel]) -> list[BaseRoute]:
+def _probe_routes(
+    response_model: type[BaseModel],
+    responses: dict[int | str, dict[str, Any]] | None = None,
+) -> list[BaseRoute]:
     probe = FastAPI()
-    probe.add_api_route("/api/probe", _probe, response_model=response_model)
+    probe.add_api_route("/api/probe", _probe, response_model=response_model, responses=responses)
     return probe.routes
 
 
@@ -227,3 +245,14 @@ def test_response_walk_reports_a_bare_datetime_in_a_nested_model() -> None:
 
 def test_response_walk_accepts_a_utc_datetime_in_a_nested_model() -> None:
     assert _bare_timestamps(_response_models(_probe_routes(UtcProbe))) == []
+
+
+def test_response_walk_ends_on_a_self_referencing_model() -> None:
+    # Returning at all proves the walk ends; one entry proves BareTree was walked once.
+    assert _bare_timestamps(_response_models(_probe_routes(BareTree))) == ["BareTree.at"]
+
+
+def test_response_walk_reports_a_bare_datetime_in_a_responses_model() -> None:
+    routes = _probe_routes(UtcProbe, responses={404: {"model": BareStamp}})
+
+    assert _bare_timestamps(_response_models(routes)) == ["BareStamp.at"]
