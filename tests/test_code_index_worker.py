@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass, field
+from datetime import timedelta
 from typing import Any, cast
 from uuid import uuid4
 
@@ -164,18 +165,9 @@ def test_the_bounds_admit_their_edges() -> None:
 
     assert (settings.limits.deadline_seconds, settings.build.lease_seconds) == (1500, 1560)
     assert settings.build.soft_cutoff_seconds == 1499
-    assert (
-        CodeIndexSettings.from_environment({"CODE_INDEX_LEASE_SECONDS": "86400"}).lease_waits == 144
+    assert CodeIndexSettings.from_environment({"CODE_INDEX_LEASE_SECONDS": "86400"}).build == (
+        IndexBuildSettings(admission=CodeIndexSettings().build.admission, lease_seconds=86_400)
     )
-
-
-@pytest.mark.parametrize(
-    ("lease_seconds", "waits"), [(960, 2), (1200, 2), (1201, 3), (1560, 3), (86_400, 144)]
-)
-def test_a_leased_redelivery_waits_in_the_10m_queue_until_the_lease_has_expired(
-    lease_seconds: int, waits: int
-) -> None:
-    assert CodeIndexSettings(lease_seconds=lease_seconds).lease_waits == waits
 
 
 # --- versions ---------------------------------------------------------------------
@@ -371,19 +363,29 @@ def test_without_the_github_app_the_topology_is_declared_and_nothing_consumes(
     assert "the index.repo consumer is disabled" in caplog.text
 
 
-def test_the_consumer_waits_for_the_lease_of_its_settings(
+@pytest.mark.parametrize(
+    ("settings", "delays", "waits"),
+    [
+        (CodeIndexSettings(deadline_seconds=1500, lease_seconds=1560), RetryDelays(), 3),
+        # The waits are turns of the consumer's own 10m queue, whatever its TTL.
+        (CodeIndexSettings(), RetryDelays(long=timedelta(minutes=5)), 4),
+    ],
+    ids=["lease-1560", "long-delay-5-min"],
+)
+def test_the_consumer_waits_for_the_lease_of_its_settings_in_its_own_10m_queue(
     composed: tuple[list[Parser], list[Any]],
+    settings: CodeIndexSettings,
+    delays: RetryDelays,
+    waits: int,
 ) -> None:
-    settings = CodeIndexSettings(deadline_seconds=1500, lease_seconds=1560)
-
     async def scenario() -> int:
         async with code_index_worker.index_consumer(
             Worker(code_index=settings),
             cast(AbstractRobustConnection, FakeConnection()),
             _SESSIONS,
-            RetryDelays(),
+            delays,
         ) as consumer:
             assert consumer is not None
             return consumer.publisher.lease_waits
 
-    assert asyncio.run(scenario()) == 3
+    assert asyncio.run(scenario()) == waits

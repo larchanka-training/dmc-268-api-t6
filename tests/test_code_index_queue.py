@@ -497,6 +497,23 @@ def test_leased_on_a_redelivery_waits_twice_in_the_10m_queue_then_is_acked() -> 
     assert last.acked and queue.retry.published == []
 
 
+@pytest.mark.parametrize(
+    ("lease_seconds", "long", "waits"),
+    [
+        (960, timedelta(minutes=10), 2),
+        (1200, timedelta(minutes=10), 2),
+        (1201, timedelta(minutes=10), 3),
+        (1560, timedelta(minutes=10), 3),
+        (86_400, timedelta(minutes=10), 144),
+        (1200, timedelta(minutes=5), 4),
+    ],
+)
+def test_a_leased_redelivery_waits_in_the_10m_queue_until_the_lease_has_expired(
+    lease_seconds: int, long: timedelta, waits: int
+) -> None:
+    assert index_amqp.lease_waits(lease_seconds, long) == waits
+
+
 def test_the_lease_waits_follow_the_lease_of_the_settings() -> None:
     # A lease of 1560 s needs three waits of 10 minutes.
     message = body()
