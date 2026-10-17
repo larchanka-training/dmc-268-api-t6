@@ -156,7 +156,6 @@ The manifest also stores sorted `static_inputs`, `static_digest`, and `corpus_di
 | `app/modules/reviews/application/prompt_builder.py` | Renders the system/user message envelope, including commit lines. |
 | `app/modules/reviews/application/review_output.py` | Parses and validates review output; a failure triggers repair. |
 | `app/modules/reviews/application/run_failures.py` | Deliberately wide. Only `FAST_ATTEMPT_DEADLINE` (`run_failures.py:17`) shapes the eval, through `CASE_DEADLINE["fast"]` (`llm_gateway.py:147`): the gateway refuses a call with less than one call timeout left (`gateway.py:334-341`) and skips a same-model retry that would leave less (`gateway.py:278-281`). `llm.py:17` also imports `RETRYABLE_ERROR_CODES` for `LlmCallFailed.run_retryable`, which the eval never calls. The rest is worker retry, lease and failure-code policy: its edits do not shape the eval but still cause static drift. |
-| `app/modules/reviews/application/vcs_diff.py` | Shapes nothing the eval sends, captures or parses since `CommitMessagePrefix` moved to `commit_prefix_limits.py` (re-exported here for production). Still pinned because the eval still imports it (`llm_gateway.py:79` → `run_lifecycle_store.py:19` → `handle_review_run.py:29` → `get_run_diff.py:15`); its edits cause static drift. |
 | `app/common/infrastructure/github_link_header.py` | `has_next_relation` decides a sidecar page's tail, hence the omission marker. |
 | `app/modules/reviews/infrastructure/llm/answers.py` | Builds the provider schema, validates answers and prepares repair feedback. |
 | `app/modules/reviews/infrastructure/llm/gateway.py` | Controls calls, retries, repair, fallback, and budgets. |
@@ -177,17 +176,21 @@ A supplied conventions prompt and its renderer are included only for that task. 
 provider request, the captured answer or its parsing — the criterion above. Executing a file
 is not enough: `validate_dataset.py`, `eval_score.py` and `ecb_fx.py` run during an eval or
 its replay and stay unpinned by design. `llm_gateway.py` and `run_failures.py` are
-deliberately wide pins and `vcs_diff.py` is kept only as an eval import (reasons in the
-table). Replay re-adds any recorded path that still holds a top-level `rules` array as a
-selected custom rule, so dropping a default pin that is itself rule-shaped would go
-unwarned. Dropped:
+deliberately wide pins (reasons in the table). Replay re-adds any recorded path that still
+holds a top-level `rules` array as a selected custom rule, so dropping a default pin that is
+itself rule-shaped would go unwarned. Dropped:
 `github_vcs.py`, `github_run_source.py` and `vcs_failures.py` — production commit
 retrieval, run metadata and fetch-failure classification. `eval_live.py` never imports
 them: it reads the frozen sidecar, copies the prefix into `PullRequestMeta` itself and
 never fetches. They were pinned only to keep retrieval in step with the evidence; the
 shared `commit_prefix_limits.py`, imported by both `github_vcs.py` and `commit_context.py`,
-now does that. Added: `commit_prefix_limits.py` and `memory.py` (the in-memory trace that
-`review_case` returns as the case's calls). Rejected candidates:
+now does that. Also dropped: `vcs_diff.py`. Since `CommitMessagePrefix` moved to
+`commit_prefix_limits.py` (re-exported from `vcs_diff.py` for production), nothing in it
+shapes what the eval sends, captures or parses; the eval only imports it, through
+`llm_gateway.py:79` → `run_lifecycle_store.py:19` → `handle_review_run.py:29` →
+`get_run_diff.py:15`, and "imported" is not the pin criterion (`execute_review.py` and
+`run_trace.py` are rejected on the same basis). Added: `commit_prefix_limits.py` and
+`memory.py` (the in-memory trace that `review_case` returns as the case's calls). Rejected candidates:
 `conventions.py` (`ConventionsDraft`/`ConventionsRequest` serve only the conventions task,
 which `eval_live.py` never runs; the review default `RepoConventions` lives in
 `prompt_builder.py`); `execute_review.py` (only the `PullRequestMetaSource` type of the
