@@ -109,7 +109,7 @@ services:
     pid: host
     volumes:
       - /:/host:ro
-      # Metrics files of host jobs such as the PostgreSQL backup (deploy/scripts/pg-backup.sh).
+      # Metrics files of host jobs such as the PostgreSQL backup (backup/pg-backup.sh).
       - ${TEXTFILE_DIR:-./textfile}:/textfile:ro
     restart: unless-stopped
     mem_limit: 64m
@@ -168,6 +168,37 @@ services:
       api: {}
     restart: unless-stopped
     mem_limit: 32m
+    logging: *logging
+
+  # Scheduled PostgreSQL backup (backup/pg-backup.sh, docs/MONITORING.md §9). It lives here, not in
+  # the application project, for the same reason as the monitoring: it reads that stack and must
+  # never fail or roll back its deploy. The image is the postgres of deploy/compose/staging.yml by
+  # the same digest, so pg_dump matches the server version.
+  pg-backup:
+    image: postgres:17.11-alpine@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24
+    entrypoint: ["sh", "/opt/pg-backup/pg-backup.sh"]
+    command: ["loop"]
+    # The postgres user of the image; deploy.sh gives it the backup and textfile dirs.
+    user: "70:70"
+    environment:
+      PGHOST: postgres
+      PGPORT: "5432"
+      PGUSER: backup_agent
+      PGPASSWORD: ${PG_BACKUP_PASSWORD:?PG_BACKUP_PASSWORD is required}
+      PGDATABASE: ${POSTGRES_DB:-app}
+      BACKUP_INTERVAL_SECONDS: ${BACKUP_INTERVAL_SECONDS:-86400}
+      BACKUP_RETENTION_DAYS: ${BACKUP_RETENTION_DAYS:-7}
+    labels:
+      dmc.config-digest: ${PG_BACKUP_CONFIG_DIGEST:-none}
+    volumes:
+      - ./backup:/opt/pg-backup:ro
+      # A host directory outside the stack dirs: dumps survive a removed project or volume.
+      - ${BACKUP_DIR:?BACKUP_DIR is required}:/backups
+      - ${TEXTFILE_DIR:-./textfile}:/textfile
+    networks:
+      api: {}
+    restart: unless-stopped
+    mem_limit: 128m
     logging: *logging
 
 volumes:

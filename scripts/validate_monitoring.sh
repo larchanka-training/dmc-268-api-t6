@@ -53,7 +53,7 @@ docker run --rm --entrypoint amtool -v "${PWD}/${MONITORING}/alertmanager/templa
 echo "== docker compose config (edge and ports)"
 for mode in edge ports; do
   API_NETWORK=ci_default GRAFANA_ADMIN_PASSWORD=ci GRAFANA_DB_PASSWORD=ci PG_EXPORTER_PASSWORD=ci \
-    GRAFANA_ALIAS=grafana-staging \
+    PG_BACKUP_PASSWORD=ci BACKUP_DIR=/var/backups/ci GRAFANA_ALIAS=grafana-staging \
     docker compose -p dmc-268-monitoring -f "${MONITORING}/compose.yml" \
     -f "${MONITORING}/compose.${mode}.yml" config -q
 done

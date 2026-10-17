@@ -59,9 +59,20 @@ def _job(name: str) -> str:
 def test_monitoring_images_are_pinned_by_digest() -> None:
     images = re.findall(r"^    image: (\S+)$", _read(MONITORING / "compose.yml"), re.M)
 
-    assert len(images) == 7
+    assert len(images) == 8
     for image in images:
-        assert re.fullmatch(r"[a-z0-9./_-]+:v?[\d.]+@sha256:[0-9a-f]{64}", image), image
+        assert re.fullmatch(r"[a-z0-9./_-]+:v?[\d.]+(-alpine)?@sha256:[0-9a-f]{64}", image), image
+
+
+def test_backup_uses_the_postgres_image_of_staging() -> None:
+    # pg_dump must match the server version: the same image, by the same digest.
+    staging = re.search(
+        r"^    image: (postgres:\S+)$", _read(REPO_ROOT / "deploy/compose/staging.yml"), re.M
+    )
+    backup = _service_blocks(_read(MONITORING / "compose.yml"))["pg-backup"]
+
+    assert staging is not None
+    assert f"    image: {staging.group(1)}\n" in backup
 
 
 def test_every_monitoring_service_has_a_memory_limit() -> None:
@@ -84,7 +95,9 @@ def test_monitoring_reads_the_application_network_without_joining_its_project() 
     assert "    name: ${API_NETWORK:?API_NETWORK is required}\n    external: true" in compose
     # Only what talks to postgres, rabbitmq or redis joins the application network.
     on_api = {name for name, block in blocks.items() if "      api: {}" in block}
-    assert on_api == {"prometheus", "grafana", "postgres-exporter", "redis-exporter"}
+    assert on_api == {"prometheus", "grafana", "postgres-exporter", "redis-exporter", "pg-backup"}
+    # The backup job needs PostgreSQL only.
+    assert "default: {}" not in blocks["pg-backup"]
     # Host collectors never reach the stores or the edge.
     for name in ("node-exporter", "cadvisor"):
         assert "networks:" not in blocks[name]
@@ -104,6 +117,7 @@ def test_config_changes_recreate_the_service_that_reads_them() -> None:
         "alertmanager": "ALERTMANAGER_CONFIG_DIGEST",
         "grafana": "GRAFANA_CONFIG_DIGEST",
         "postgres-exporter": "POSTGRES_EXPORTER_CONFIG_DIGEST",
+        "pg-backup": "PG_BACKUP_CONFIG_DIGEST",
     }
     deploy = _read(MONITORING / "deploy.sh")
 
@@ -272,6 +286,7 @@ class Host:
             "STUB_GRAFANA_STDIN": str(self.stubs / "grafana.log"),
             "STUB_CHOWN_LOG": str(self.stubs / "chown.log"),
             "STUB_POSTGRES_ID": "pgcontainer",
+            "BACKUP_DIR": str(self.root / "backups"),
             **overrides,
         }
         for name in unset:
@@ -323,8 +338,14 @@ def test_first_deploy_generates_stack_passwords_once(host: Host) -> None:
         "GRAFANA_ADMIN_PASSWORD",
         "GRAFANA_DB_PASSWORD",
         "PG_EXPORTER_PASSWORD",
+        "PG_BACKUP_PASSWORD",
     }
-    for key in ("GRAFANA_ADMIN_PASSWORD", "GRAFANA_DB_PASSWORD", "PG_EXPORTER_PASSWORD"):
+    for key in (
+        "GRAFANA_ADMIN_PASSWORD",
+        "GRAFANA_DB_PASSWORD",
+        "PG_EXPORTER_PASSWORD",
+        "PG_BACKUP_PASSWORD",
+    ):
         assert re.fullmatch(r"[0-9a-f]{48}", passwords[key]), key
         assert host.env()[key] == passwords[key], key
     # The Redis password of the application, escaped for compose like its own .env.
@@ -341,6 +362,7 @@ def test_passwords_reach_postgres_and_grafana_through_stdin_only(host: Host) -> 
         env["GRAFANA_ADMIN_PASSWORD"],
         env["GRAFANA_DB_PASSWORD"],
         env["PG_EXPORTER_PASSWORD"],
+        env["PG_BACKUP_PASSWORD"],
         TOKEN,
     )
 
@@ -349,6 +371,9 @@ def test_passwords_reach_postgres_and_grafana_through_stdin_only(host: Host) -> 
         "psql.log"
     )
     assert f"ALTER ROLE metrics_exporter PASSWORD '{env['PG_EXPORTER_PASSWORD']}';" in host.log(
+        "psql.log"
+    )
+    assert f"ALTER ROLE backup_agent PASSWORD '{env['PG_BACKUP_PASSWORD']}';" in host.log(
         "psql.log"
     )
     assert host.log("grafana.log") == env["GRAFANA_ADMIN_PASSWORD"]
@@ -503,3 +528,165 @@ def test_without_telegram_both_routes_deliver_nothing(tmp_path: Path) -> None:
     assert "  receiver: none\n" in config
     assert "      receiver: none\n" in config
     assert "telegram_configs" not in config
+
+
+def test_backup_role_reads_everything_but_cannot_administer(host: Host) -> None:
+    result = host.deploy()
+    sql = host.log("psql.log")
+
+    assert result.returncode == 0, result.stderr
+    assert "GRANT pg_read_all_data TO backup_agent;" in sql
+    assert (
+        "ALTER ROLE backup_agent WITH LOGIN NOSUPERUSER CREATEDB NOCREATEROLE NOREPLICATION" in sql
+    )
+    assert "pg_write_all_data" not in sql
+    # The column grants of the metadata roles are rebuilt without touching the backup role.
+    assert "FROM grafana_reader, metrics_exporter;" in sql
+    assert "backup_agent;" not in sql.split("REVOKE", 1)[1].split("\n", 1)[0]
+
+
+def test_backup_dirs_belong_to_the_backup_user(host: Host) -> None:
+    result = host.deploy()
+    backup_dir = host.root / "backups"
+    textfile = host.monitoring_dir / "textfile"
+
+    assert result.returncode == 0, result.stderr
+    assert stat.S_IMODE(backup_dir.stat().st_mode) == 0o700
+    assert stat.S_IMODE(textfile.stat().st_mode) == 0o755
+    assert f"70:70 {backup_dir}" in host.log("chown.log")
+    assert f"70:70 {textfile}" in host.log("chown.log")
+    assert host.env()["BACKUP_DIR"] == str(backup_dir)
+
+
+# --- pg-backup.sh with fake PostgreSQL tools -----------------------------------------------
+
+FAKE_PG_TOOLS = {
+    # Writes the dump unless told to fail; logs every call.
+    "pg_dump": """\
+#!/bin/sh
+echo "pg_dump $*" >> "${STUB_PG_LOG}"
+[ -n "${STUB_DUMP_FAILS:-}" ] && { echo "pg_dump: connection refused" >&2; exit 1; }
+for arg; do case "$arg" in --file=*) echo dump > "${arg#--file=}" ;; esac; done
+""",
+    "pg_restore": """\
+#!/bin/sh
+echo "pg_restore $*" >> "${STUB_PG_LOG}"
+""",
+    # The source revision without -d, the restored one with -d <check db>.
+    "psql": """\
+#!/bin/sh
+echo "psql $*" >> "${STUB_PG_LOG}"
+case "$*" in
+  *information_schema*) echo 36 ;;
+  *"-d "*) echo "${STUB_RESTORED_REVISION}" ;;
+  *) echo "20261015_0032" ;;
+esac
+""",
+    "createdb": """\
+#!/bin/sh
+echo "createdb $*" >> "${STUB_PG_LOG}"
+""",
+    "dropdb": """\
+#!/bin/sh
+echo "dropdb $*" >> "${STUB_PG_LOG}"
+""",
+    # GNU/busybox `stat -c %Y FILE` on any platform.
+    "stat": """\
+#!/bin/sh
+python3 -c 'import os, sys; print(int(os.path.getmtime(sys.argv[1])))' "$3"
+""",
+}
+
+
+@dataclass
+class BackupRun:
+    result: subprocess.CompletedProcess[str]
+    backups: Path
+    metrics: dict[str, str]
+    calls: list[str]
+
+
+def _run_backup(tmp_path: Path, **env: str) -> BackupRun:
+    tools = tmp_path / "pgbin"
+    tools.mkdir(exist_ok=True)
+    for name, source in FAKE_PG_TOOLS.items():
+        (tools / name).write_text(source, encoding="utf-8")
+        (tools / name).chmod(0o755)
+    backups = tmp_path / "backups"
+    backups.mkdir(exist_ok=True)
+    textfile = tmp_path / "pg_backup.prom"
+    log = tmp_path / "pg.log"
+    result = subprocess.run(
+        ["sh", str(MONITORING / "backup" / "pg-backup.sh"), "once"],
+        env={
+            "PATH": f"{tools}:{os.environ['PATH']}",
+            "PGDATABASE": "app",
+            "BACKUP_DIR": str(backups),
+            "TEXTFILE": str(textfile),
+            "STUB_PG_LOG": str(log),
+            "STUB_RESTORED_REVISION": "20261015_0032",
+            **env,
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    metrics = {}
+    if textfile.exists():
+        for line in _read(textfile).splitlines():
+            if not line.startswith("#"):
+                name, _, value = line.partition(" ")
+                metrics[name] = value
+    calls = _read(log).splitlines() if log.exists() else []
+    return BackupRun(result, backups, metrics, calls)
+
+
+def test_backup_keeps_a_dump_only_after_the_restore_check(tmp_path: Path) -> None:
+    run = _run_backup(tmp_path)
+    dumps = sorted(path.name for path in run.backups.iterdir())
+
+    assert run.result.returncode == 0, run.result.stderr
+    assert len(dumps) == 1 and re.fullmatch(r"app-\d{8}T\d{6}Z\.dump", dumps[0])
+    assert stat.S_IMODE((run.backups / dumps[0]).stat().st_mode) == 0o600
+    # The dump keeps owners and grants; the check restores without them and drops its database.
+    assert [call.split()[0] for call in run.calls] == [
+        "pg_dump",
+        "dropdb",
+        "createdb",
+        "pg_restore",
+        "psql",
+        "psql",
+        "psql",
+        "dropdb",
+    ]
+    assert "--no-owner" not in run.calls[0]
+    assert (
+        "pg_restore --no-owner --no-privileges --exit-on-error --dbname=dmc_restore_check"
+        in (run.calls[3])
+    )
+    assert run.calls[-1] == "dropdb dmc_restore_check"
+    assert run.metrics["dmc_pg_backup_last_run_success"] == "1"
+    assert run.metrics["dmc_pg_backup_files"].strip() == "1"
+    assert "dmc_pg_backup_last_success_timestamp_seconds" in run.metrics
+
+
+def test_failed_dump_never_reaches_the_restore_check(tmp_path: Path) -> None:
+    run = _run_backup(tmp_path, STUB_DUMP_FAILS="1")
+
+    assert run.result.returncode == 1
+    assert not [call for call in run.calls if call.startswith(("pg_restore", "createdb"))]
+    assert list(run.backups.iterdir()) == []
+    assert run.metrics["dmc_pg_backup_last_run_success"] == "0"
+    # Without any verified dump there is no success timestamp: PostgresBackupStale cannot fire
+    # on a fake age, PostgresBackupFailed does.
+    assert "dmc_pg_backup_last_success_timestamp_seconds" not in run.metrics
+
+
+def test_dump_with_another_revision_is_discarded(tmp_path: Path) -> None:
+    run = _run_backup(tmp_path, STUB_RESTORED_REVISION="20261001_0020")
+
+    assert run.result.returncode == 1
+    assert list(run.backups.iterdir()) == []
+    assert "restore check failed" in run.result.stdout
+    assert run.calls[-1] == "dropdb --if-exists dmc_restore_check"
+    assert run.metrics["dmc_pg_backup_last_run_success"] == "0"
