@@ -988,11 +988,15 @@ def _string_constant(node: ast.expr | None) -> str | None:
 
 
 def _written_tools(source: str) -> set[str]:
-    """Collect the tool names of the shapes that write run_actions rows, nothing else.
+    """Collect the string-constant tool names from the shapes that write run_actions rows.
 
-    The shapes: the third positional argument of ``traced_step(...)``, a ``tool=`` keyword of any
-    call and a module-level ``NAME_TOOL = "..."``. A blanket ``"x.y"`` match would also pick up
-    prompt names such as ``review.system``, which are not tools.
+    The scanned shapes: a module-level ``NAME_TOOL = "..."`` assignment, the third positional
+    argument of a ``traced_step(...)`` call, the second positional argument of a ``record(...)``
+    call (the ``RunTrace.record(run_id, tool, ...)`` sink) and a ``tool=`` keyword of any call.
+    Only string constants count; a name or an attribute in these positions is skipped. A
+    ``tool=`` keyword is counted on any call, so a ``tool="x.y"`` that does not write run_actions
+    surfaces as unexpected and must be renamed or excluded. A blanket ``"x.y"`` match would also
+    pick up prompt names such as ``review.system``, which are not tools.
     """
     tree = ast.parse(source)
     found: list[str | None] = []
@@ -1015,15 +1019,17 @@ def _written_tools(source: str) -> set[str]:
         callee = func.attr if isinstance(func, ast.Attribute) else callee
         if callee == "traced_step" and len(node.args) >= 3:
             found.append(_string_constant(node.args[2]))
+        if callee == "record" and len(node.args) >= 2:
+            found.append(_string_constant(node.args[1]))
         found += [
             _string_constant(keyword.value) for keyword in node.keywords if keyword.arg == "tool"
         ]
     return {tool for tool in found if tool is not None}
 
 
-def _catalog_drift(found: set[str]) -> str:
+def _catalog_drift(side: str, found: set[str]) -> str:
     missing, unexpected = sorted(RUN_ACTION_TOOLS - found), sorted(found - RUN_ACTION_TOOLS)
-    return f"missing {missing}, unexpected {unexpected}"
+    return f"{side} vs catalog: missing {missing}, unexpected {unexpected}"
 
 
 def test_run_action_tool_catalog_matches_the_tools_the_code_writes() -> None:
@@ -1031,7 +1037,7 @@ def test_run_action_tool_catalog_matches_the_tools_the_code_writes() -> None:
     for path in sorted(APP_PATH.rglob("*.py")):
         written |= _written_tools(path.read_text(encoding="utf-8"))
 
-    assert written == RUN_ACTION_TOOLS, _catalog_drift(written)
+    assert written == RUN_ACTION_TOOLS, _catalog_drift("code", written)
 
 
 @pytest.mark.parametrize(
@@ -1044,7 +1050,7 @@ def test_run_action_tool_descriptions_list_the_catalog(location: tuple[str, ...]
 
     listed = set(BACKTICKED_TOOL.findall(schema["description"]))
 
-    assert listed == RUN_ACTION_TOOLS, _catalog_drift(listed)
+    assert listed == RUN_ACTION_TOOLS, _catalog_drift(f"{'.'.join(location)} description", listed)
 
 
 def test_runs_repo_filter_bounds_match_the_repository_name_constant() -> None:
