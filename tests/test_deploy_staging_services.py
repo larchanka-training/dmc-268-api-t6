@@ -655,6 +655,20 @@ def test_manual_rollback_failure_keeps_followup_and_promotion_success_gated() ->
     assert "  cancel-in-progress: false" in workflow
 
 
+def _release_unchanged_literal() -> str:
+    """The text the Fail step looks for in the captured stdout of the auto rollback."""
+    step = _workflow_step("Fail the pipeline after rollback")
+    match = re.search(
+        r"^          RELEASE_UNCHANGED: "
+        r"\"\$\{\{ contains\(steps\.rollback\.outputs\.stdout, '([^']+)'\) \}\}\"$",
+        step,
+        re.MULTILINE,
+    )
+    assert match is not None, "the Fail step has no RELEASE_UNCHANGED expression"
+    return match.group(1)
+
+
+@pytest.mark.parametrize("unchanged", [False, True], ids=["rolled-back", "release-unchanged"])
 @pytest.mark.parametrize(
     ("deploy", "health", "rollback"),
     [
@@ -664,7 +678,7 @@ def test_manual_rollback_failure_keeps_followup_and_promotion_success_gated() ->
     ],
 )
 def test_failed_forward_deploy_never_promotes_and_reports_failed_auto_rollback(
-    deploy: str, health: str, rollback: str, tmp_path: Path
+    deploy: str, health: str, rollback: str, unchanged: bool, tmp_path: Path
 ) -> None:
     values = {"deploy": deploy, "health": health, "rollback": rollback}
 
@@ -692,6 +706,14 @@ def test_failed_forward_deploy_never_promotes_and_reports_failed_auto_rollback(
     )
     assert promote.returncode == 0
     assert output.read_text() == "promote=false\n"
+    # Stdout captured by the Rollback step: rollback.sh's answer when deploy.sh of this run
+    # stopped before the release switch, or the line of a real rollback.
+    stdout = STOPPED_BEFORE_SWITCH.format("101-1") if unchanged else f"rolled back to {IMAGE_A}\n"
+    # GitHub renders the env expression to "true" / "false" (contains() ignores case), so the
+    # raw stdout never enters the script.
+    release_unchanged = str(_release_unchanged_literal().lower() in stdout.lower()).lower()
+    fail_script = _run_script(_workflow_step("Fail the pipeline after rollback"))
+    assert "outputs.stdout" not in fail_script
     failed = subprocess.run(
         [
             "bash",
@@ -700,23 +722,47 @@ def test_failed_forward_deploy_never_promotes_and_reports_failed_auto_rollback(
             "-eo",
             "pipefail",
             "-c",
-            render(_run_script(_workflow_step("Fail the pipeline after rollback"))),
+            render(fail_script),
         ],
-        env=environment,
+        env={**environment, "RELEASE_UNCHANGED": release_unchanged},
         capture_output=True,
         text=True,
         check=False,
     )
     assert failed.returncode == 1
     assert ("rollback failed" in failed.stderr) is (rollback == "failure")
+    if deploy == "failure" and rollback == "success" and unchanged:
+        message = (
+            "staging deploy failed before the release switch; "
+            "the running release was left unchanged"
+        )
+    elif deploy == "failure":
+        message = "staging deploy failed; rollback was triggered"
+    else:
+        message = "staging health check failed; rollback was triggered"
+    assert failed.stdout == message + "\n"
     auto = _workflow_step("Rollback on failed deploy or health check")
     assert "ROLLBACK_MODE=auto" in auto
+    assert "\n          capture_stdout: true\n" in auto
     assert (
         "if: always() && (steps.deploy.outcome == 'failure' || steps.health.outcome == 'failure')"
         in auto
     )
     promotion = WORKFLOW.read_text().split("  promote-staging:", 1)[1]
     assert "needs.deploy-staging.outputs.promote == 'true'" in promotion
+
+
+def test_fail_step_looks_for_the_release_unchanged_line_of_rollback_sh() -> None:
+    # The Fail step tells an unchanged release apart by this text; rollback.sh must print it.
+    literal = _release_unchanged_literal()
+    echoes = [
+        line
+        for line in _read("deploy", "scripts", "rollback.sh").splitlines()
+        if line.lstrip().startswith("echo ") and literal in line
+    ]
+    assert len(echoes) == 1, echoes
+    assert "skipping auto rollback" in echoes[0]
+    assert literal in STOPPED_BEFORE_SWITCH
 
 
 def test_deploy_and_auto_rollback_steps_share_the_deploy_run() -> None:
