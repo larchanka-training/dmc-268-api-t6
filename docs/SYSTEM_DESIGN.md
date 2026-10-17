@@ -650,7 +650,7 @@ RunGuard останавливаются, rerun отвечает 409.
 поля публичной и очередной схемы не добавляются.
 
 Проверки в закрытой UOW предшествуют получению installation-токена и каждому
-следующему GitHub HTTP-запросу: details/tree/labels, PR/timeline/CI страницы,
+следующему GitHub HTTP-запросу: details/tree/labels, PR/CI страницы,
 VCS/stream, policy/AST context tree и blob, check-run и публикация с повторными
 запросами. LLM проверяет origin перед каждым фактическим POST, включая смену ключа, retry/fallback/JSON repair и
 ожидание FX/ledger; после финальной проверки должно оставаться время полного call
