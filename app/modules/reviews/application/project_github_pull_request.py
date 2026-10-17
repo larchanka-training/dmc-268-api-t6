@@ -72,7 +72,6 @@ class PullRequestEvent:
     state: PullRequestState
     provider_updated_at: datetime
     repository_full_name: str | None = None
-    requested_reviewer_login: str | None = None
     sender_type: str | None = None
     sender_login: str | None = None
     current_label_names: frozenset[str] | None = None
