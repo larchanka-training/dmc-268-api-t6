@@ -110,14 +110,14 @@ durable retry slice is complete; record that expected failure explicitly.
 ## PostgreSQL runtime and test seams
 
 The coordinator used the existing PostgreSQL 17 test database stack
-(`postgres:17-alpine`), never destructively. Do not stop that stack, remove
+(`postgres:17-alpine`) without destructive changes. Do not stop that stack, remove
 its volume, reuse its existing database destructively, or print its secret values.
 Create a fresh task-specific disposable database there after privately checking the
 local test connection settings, or start an isolated postgres:17-alpine container
 if connection settings are unavailable. The DB user needs `CREATE SCHEMA`.
 Remove only the task-created database/container after tests.
 
-Use `TEST_DATABASE_URL=<disposable-db-url>`.
+Use `TEST_DATABASE_URL=postgresql+psycopg://<test-user>:<test-password>@<host>:<port>/<disposable-db>`.
 The existing fixture in `tests/test_webhook_run_trigger_postgres.py` creates a
 random schema, upgrades real Alembic migrations, and drops that schema in teardown.
 Production `ReviewsApiResources` builds the actual receiver, dispatcher, CI
