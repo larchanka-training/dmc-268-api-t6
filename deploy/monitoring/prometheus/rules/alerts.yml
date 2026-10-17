@@ -150,3 +150,32 @@ groups:
         annotations:
           summary: "Container {{ $labels.name }} was OOM-killed"
           description: "The kernel killed a process of {{ $labels.name }} for lack of memory in the last 10 minutes."
+
+  # PostgreSQL backups of the pg-backup service (textfile metrics through node-exporter).
+  - name: backups
+    rules:
+      - alert: PostgresBackupStale
+        expr: time() - dmc_pg_backup_last_success_timestamp_seconds > 26 * 3600
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Last verified PostgreSQL backup is {{ $value | humanizeDuration }} old"
+          description: "No dump has passed the restore check for more than 26 hours (daily schedule)."
+
+      - alert: PostgresBackupMissing
+        expr: absent(dmc_pg_backup_last_run_timestamp_seconds)
+        for: 2h
+        labels:
+          severity: critical
+        annotations:
+          summary: "No PostgreSQL backup status for 2 hours"
+          description: "The pg-backup service has not written its metrics: it is down or cannot write the textfile dir."
+
+      - alert: PostgresBackupFailed
+        expr: dmc_pg_backup_last_run_success == 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "The last PostgreSQL backup attempt failed"
+          description: "See docker compose -p dmc-268-monitoring logs pg-backup; the next attempt runs within an hour."
