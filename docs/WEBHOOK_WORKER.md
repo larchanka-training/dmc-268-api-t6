@@ -352,11 +352,11 @@ GitHub webhook delivery <delivery_id> event=<event> status=<status> detail=<deta
 ```
 
 `status` is the dispatch status: `projected_pr`, `processed_ci`, `onboarded`, the final
-`ignored_irrelevant_event` and `ignored_invalid_event`, or a deferral, retried as described in
-"Deferred deliveries" below (`ignored_unknown_installation`, `ignored_unknown_repository`,
-`deferred_known_event`, `deferred_repository_details`), or `deferred_run_trigger`, which is
-retried every 30 seconds without a poll-count limit until one hour after the receipt was
-received, see "Superseded heads" below; a deferral carries `retry_at`.
+`ignored_irrelevant_event` and `ignored_invalid_event`, or a deferral
+(`ignored_unknown_installation`, `ignored_unknown_repository`, `deferred_known_event`,
+`deferred_repository_details`, retried as described in "Deferred deliveries" below;
+`deferred_run_trigger`, retried every 30 seconds without a poll-count limit until one hour after
+the receipt was received, see "Superseded heads" below); a deferral carries `retry_at`.
 `detail` is `-` or the reason. For a `pull_request` event it starts with `action=<action>`, so
 `labeled` and `synchronize` can be told apart (an ignored action, such as `ready_for_review`,
 shows only that). For a Run trigger (label, `synchronize`, `reopened`, CI events) the rest is
@@ -557,8 +557,8 @@ status is `deferred_run_trigger`, for example
 `event=check_suite status=deferred_run_trigger detail=pr=<id> head=bbbbbbb: deferred (active_run) retry_at=<time>`.
 PR/label deliveries retain the `action=<action>` prefix. If one CI delivery targets several
 PRs, any temporarily blocked target keeps the whole receipt retryable; already-enqueued or
-reviewed targets are safe to replay. The no-CI sweep follows the same rule: `deferred` does
-not exclude its candidate, and every other result except `enqueued` does, see "No-CI sweep"
+reviewed targets are safe to replay. The no-CI sweep treats `deferred` alike: it does not
+exclude its candidate, and every other result except `enqueued` does, see "No-CI sweep"
 above.
 
 After dispatch, a short receipt transaction verifies the claim token, clears its lease and
@@ -596,8 +596,9 @@ after A becomes terminal. Nor can it under `always` or `never`: the sweep select
 repositories with `wait_for_ci = auto`. In these cases, a new push or label event gives another
 launch opportunity, subject to current eligibility, and so does a rerun from the UI
 (SYSTEM_DESIGN §6.7): it creates a Run on the PR's current head without a CI check, but answers
-409 while the PR has an active Run, A with cancellation requested included, so it works only
-once A is terminal. A's original check-run still promises review for the new commit
+409 while the PR has an active Run, A with cancellation requested included (its other refusals:
+SYSTEM_DESIGN §6.7), so it works only once A is terminal. A's original check-run still promises
+review for the new commit
 (`В PR новый коммит — ревью будет для него.`) and carries no portal link.
 Expiry has no UI or check-run alert; the WARNING is its only failure signal.
 
@@ -623,12 +624,13 @@ block on red/pending CI, while `never` deliberately ignores CI. The CI fetch sta
 DB transactions; the enqueue transaction locks and rechecks its candidate afterward. PR
 lifecycle/label evidence still comes from the existing projections, without a new remote
 PR polling mechanism for CI events. When eligibility no longer holds or the target is gone,
-the CI receipt becomes final without creating a Run. A rebind during the wait is such a case:
-once the receipt's installation is deleted and the repository is stored under another one,
-the retry finds no target under the receipt's installation (`processed_ci`,
+the CI receipt becomes final without creating a Run. A rebind during the wait is such a case
+for a CI receipt: once the receipt's installation is deleted or the repository is stored under
+another one, the retry finds no target under the receipt's installation (`processed_ci`,
 `no open pull request at this head`), and the receipt is finalized as projected, with no Run,
-no GitHub request and no token for the new installation. Generic repository refusal on PR/label
-projection keeps its existing deferral policy below.
+no GitHub request and no token for the new installation. A PR/label receipt defers instead
+(`other_installation_repository`, see the projection results above). Generic repository refusal
+on PR/label projection keeps its existing deferral policy below.
 
 After B is inserted, failed broker confirmation is `publication_pending`, and the review
 worker's existing Run outbox recovers that Run. Receipt redelivery, distinct equivalent CI
