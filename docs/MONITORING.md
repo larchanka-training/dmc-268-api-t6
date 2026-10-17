@@ -1,6 +1,6 @@
 # Мониторинг и алерты — API (команда 6)
 
-Стек мониторинга staging: метрики хоста, контейнеров, очередей, хранилищ и пайплайна ревью, дашборд Grafana и алерты в командный Telegram-канал. Это self-hosted стек, который SD §13 («Наблюдаемость») выносит в отдельную задачу. Сквозной трейсинг (OpenTelemetry/Sentry) и JSON-логи с `run_id` — следующий шаг (§8).
+Стек мониторинга staging: метрики хоста, контейнеров, очередей, хранилищ и пайплайна ревью, дашборд Grafana, алерты в командный Telegram-канал и ежедневный бэкап PostgreSQL с проверкой восстановления (§9). Это self-hosted стек, который SD §13 («Наблюдаемость») выносит в отдельную задачу. Сквозной трейсинг (OpenTelemetry/Sentry) и JSON-логи с `run_id` — следующий шаг (§8).
 
 ## 1. Состав
 
@@ -14,6 +14,7 @@ flowchart LR
     cadv[cAdvisor]
     pgx[postgres-exporter]
     rx[redis-exporter]
+    bk[pg-backup]
   end
   subgraph app["compose project dmc-268-api-staging"]
     pg[(postgres)]
@@ -23,6 +24,8 @@ flowchart LR
   caddy["edge Caddy :9180\n(dmc268-edge)"]
   prom -->|scrape| node & cadv & pgx & rx & mq & caddy
   pgx -->|metrics_exporter| pg
+  bk -->|"pg_dump, backup_agent"| pg
+  bk -->|textfile| node
   rx --> redis
   graf -->|PromQL| prom
   graf -->|"SQL, grafana_reader"| pg
@@ -40,6 +43,7 @@ flowchart LR
 | `cadvisor` | `gcr.io/cadvisor/cadvisor:v0.55.1` | 256m | CPU и память каждого контейнера (`api`, `worker`, `webhook-worker`, хранилища) |
 | `postgres-exporter` | `quay.io/prometheuscommunity/postgres-exporter:v0.20.1` | 64m | `pg_up`, соединения, размер БД и метрики ревью (`queries.yml`, §4) |
 | `redis-exporter` | `oliver006/redis_exporter:v1.94.0` | 32m | память, hit ratio, `redis_up` |
+| `pg-backup` | `postgres:17.11-alpine` — тот же digest, что у `postgres` staging | 128m | ежедневный `pg_dump` с проверкой восстановления (§9) |
 
 Длину очередей отдаёт сам RabbitMQ: плагин `rabbitmq_prometheus` включён в образе `rabbitmq:4.3.6-management-alpine`, порт 15692 внутри сети проекта. RPS и коды ответов отдаёт edge-прокси Caddy (`metrics { per_host }`, порт 9180 только в сети `dmc268-edge`, [CICD.md §8.2](CICD.md#82-edge-прокси)). Очередь ревью — RabbitMQ, не Redis: Redis только кэш (SD §10).
 
@@ -66,6 +70,7 @@ flowchart LR
 |---|---|---|
 | `grafana_reader` | источник PostgreSQL в Grafana | `default_transaction_read_only`, `statement_timeout 30s`, `CONNECTION LIMIT 5`; `SELECT` только на колонки ниже |
 | `metrics_exporter` | `postgres-exporter` | `pg_monitor`, `default_transaction_read_only`, `statement_timeout 15s`, `CONNECTION LIMIT 3`; те же колонки `runs` и `run_actions` |
+| `backup_agent` | `pg-backup` | `pg_read_all_data` для `pg_dump` и `CREATEDB` для временной БД проверки; без суперпользователя и без записи в данные приложения |
 
 | Таблица | Открытые колонки |
 |---|---|
@@ -106,6 +111,9 @@ flowchart LR
 | `LlmLatencyHigh` | p95 LLM > 60 с при ≥ 3 вызовах, 10 мин (таймаут fast — 90 с) | warning |
 | `HostMemoryLow` / `HostDiskFull` / `HostCpuHigh` | < 10 % памяти 10 мин / < 15 % диска 10 мин / > 90 % CPU 15 мин | critical / critical / warning |
 | `ContainerOomKilled` | OOM-kill в контейнере compose за 10 мин | warning |
+| `PostgresBackupStale` | последнему проверенному дампу больше 26 ч | critical |
+| `PostgresBackupMissing` | нет метрик бэкапа 2 ч (сервис не работает или не может писать) | critical |
+| `PostgresBackupFailed` | последняя попытка бэкапа упала | warning |
 
 **Подключение Telegram** (один раз):
 
@@ -129,7 +137,7 @@ Job `Deploy monitoring` в `ci-cd.yml` запускается после усп�
    - `docker compose -p dmc-268-monitoring up -d --wait`. Метка с хешем каталога конфигурации пересоздаёт сервис ровно тогда, когда его конфигурация изменилась;
    - синхронизирует пароль `admin` Grafana с `.env`.
 
-Файлы на хосте: `.env` (0600), `alertmanager/alertmanager.yml`, `alertmanager/secrets/telegram_bot_token` (0400), `prometheus/targets/caddy.json`, `textfile/` (каталог textfile-метрик node-exporter). Тома: `prometheus-data`, `alertmanager-data`, `grafana-data`.
+Файлы на хосте: `.env` (0600), `alertmanager/alertmanager.yml`, `alertmanager/secrets/telegram_bot_token` (0400), `prometheus/targets/caddy.json`, `textfile/` (textfile-метрики node-exporter, пишет `pg-backup`), дампы — `/var/backups/dmc-268/<project>/` (0700, §9). Тома: `prometheus-data`, `alertmanager-data`, `grafana-data`.
 
 Откат приложения стек не трогает. Откатить сам мониторинг — перезапустить job `Deploy monitoring` на нужном коммите или выполнить `deploy.sh` из его checkout.
 
@@ -147,13 +155,57 @@ Grafana — на своём хосте `grafana.<APP_DOMAIN>` (A-запись н
 | Что | Статус |
 |---|---|
 | Сквозной трейсинг (OpenTelemetry/Sentry), JSON-логи с `run_id` | отдельный PR после стабилизации пайплайна (договорённость команды). Нужен выбор бэкенда: Sentry SaaS (аккаунт и DSN), GlitchTip или Grafana Tempo; self-hosted Sentry на общий VPS не помещается |
-| Бэкапы PostgreSQL | отдельный PR (`deploy/scripts/pg-backup.sh`), метрики — через `textfile/` node-exporter |
+| Копия бэкапов вне VPS | дампы лежат на том же диске, что и БД: при потере VPS пропадут вместе с ней. Нужно хранилище вне хоста (S3-совместимое или второй хост) и решение о шифровании (§9) |
 | Redis | бэкапить нечего: на staging он без тома и без персистентности (`save ""`, `appendonly no`), это кэш (SD §10) |
 | Метрики приложения (`/metrics` FastAPI, `X-RateLimit-Remaining` GitHub) | нужен код и зависимость; пока RPS и коды — с edge-прокси, пайплайн — из `run_actions` |
 | prod | prod-выката нет; `environment` в метках — `staging` |
 | cAdvisor | читает состояние Docker через `/var/run` (сокеты Docker и containerd), что равносильно root на хосте; сетей, кроме сети проекта, и портов у него нет |
 
-## 9. Проверка
+## 9. Бэкапы PostgreSQL
+
+Сервис `pg-backup` (`deploy/monitoring/backup/pg-backup.sh`) раз в 5 минут проверяет возраст последнего дампа и, если он старше суток, делает новый:
+
+1. `pg_dump --format=custom` от роли `backup_agent` во временный `*.partial`. Дамп сохраняет владельцев и права для настоящего восстановления.
+2. Проверка восстановления: `pg_restore --no-owner --no-privileges` во временную БД `dmc_restore_check` на том же сервере. Ревизия `alembic_version` должна совпасть с исходной, потом БД удаляется.
+3. Только после проверки — переименование в `<db>-<UTC>.dump` (0600) и удаление дампов старше 7 дней.
+4. Метрики `dmc_pg_backup_*` → `textfile/pg_backup.prom` → node-exporter → алерты §5 и строка `PostgreSQL backups` дашборда.
+
+Упавшая попытка повторяется через час. Дамп, не прошедший проверку, не сохраняется.
+
+| Параметр | Значение | Где менять |
+|---|---|---|
+| Период | 24 ч (`BACKUP_INTERVAL_SECONDS`) | `deploy/monitoring/compose.yml` |
+| Хранение | 7 дней (`BACKUP_RETENTION_DAYS`) | там же |
+| Каталог | `/var/backups/dmc-268/<project>/` на хосте, вне каталогов стеков | `BACKUP_DIR` для `deploy.sh` |
+| Размер | ~110 КБ на staging (10.2026) | дашборд, `dmc_pg_backup_last_size_bytes` |
+
+Бэкап вне расписания: `docker compose -p dmc-268-monitoring exec pg-backup sh /opt/pg-backup/pg-backup.sh once`.
+
+**Восстановление** (проверено на дампе staging-схемы: та же ревизия, таблицы и данные, владелец `app`). Перед заменой рабочей БД — правила [CICD.md §5](CICD.md#5-rollback) «Действия при отказе»: окно обслуживания, остановка пишущих процессов, бэкап текущей БД.
+
+```bash
+cd /opt/dmc-268-api-staging
+pg=$(docker compose -p dmc-268-api-staging ps -q postgres)
+dump=/var/backups/dmc-268/dmc-268-api-staging/<выбранный>.dump
+
+# 1. Проверить дамп в отдельной БД
+docker exec "$pg" createdb -U app -O app restore_drill
+docker exec -i "$pg" pg_restore -U app -d restore_drill --no-owner --role=app \
+  --exit-on-error --single-transaction < "$dump"
+docker exec "$pg" psql -U app -d restore_drill -Atc 'SELECT version_num FROM alembic_version'
+
+# 2. Заменить рабочую БД (writers остановлены)
+docker compose -p dmc-268-api-staging stop api worker webhook-worker
+docker exec "$pg" psql -U app -d postgres -c 'DROP DATABASE app WITH (FORCE)'
+docker exec "$pg" psql -U app -d postgres -c 'ALTER DATABASE restore_drill RENAME TO app'
+docker compose -p dmc-268-api-staging start api worker webhook-worker
+```
+
+Образ приложения должен соответствовать восстановленной ревизии (CICD.md §5, «Допуск по ревизии БД»). Роли мониторинга и их права после переименования БД пересоздаст следующий `Deploy monitoring`.
+
+Redis не бэкапится: на staging он без тома и без персистентности, это кэш (SD §10). Очереди RabbitMQ лежат в томе `rabbitmq-data`, а топологию при старте объявляет воркер; состояние прогонов восстанавливается из PostgreSQL реконсилером.
+
+## 10. Проверка
 
 ```bash
 scripts/validate_monitoring.sh   # promtool, amtool, compose config, JSON дашбордов (как в CI)
