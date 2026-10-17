@@ -26,6 +26,7 @@ flowchart LR
   pgx -->|metrics_exporter| pg
   bk -->|"pg_dump, backup_agent"| pg
   bk -->|textfile| node
+  off[backup-offsite] -->|"rclone crypt, S3 API"| r2[("Cloudflare R2")]
   rx --> redis
   graf -->|PromQL| prom
   graf -->|"SQL, grafana_reader"| pg
@@ -114,6 +115,8 @@ flowchart LR
 | `PostgresBackupStale` | последнему проверенному дампу больше 26 ч | critical |
 | `PostgresBackupMissing` | нет метрик бэкапа 2 ч (сервис не работает или не может писать) | critical |
 | `PostgresBackupFailed` | последняя попытка бэкапа упала | warning |
+| `PostgresBackupOffsiteStale` | копия в бакет не обновлялась 3 ч (только при включённой выгрузке) | critical |
+| `PostgresBackupOffsiteFailing` | все проходы выгрузки за час упали | warning |
 
 **Подключение Telegram** (один раз):
 
@@ -137,7 +140,7 @@ Job `Deploy monitoring` в `ci-cd.yml` запускается после усп�
    - `docker compose -p dmc-268-monitoring up -d --wait`. Метка с хешем каталога конфигурации пересоздаёт сервис ровно тогда, когда его конфигурация изменилась;
    - синхронизирует пароль `admin` Grafana с `.env`.
 
-Файлы на хосте: `.env` (0600), `alertmanager/alertmanager.yml`, `alertmanager/secrets/telegram_bot_token` (0400), `prometheus/targets/caddy.json`, `textfile/` (textfile-метрики node-exporter, пишет `pg-backup`), дампы — `/var/backups/dmc-268/<project>/` (0700, §9). Тома: `prometheus-data`, `alertmanager-data`, `grafana-data`.
+Файлы на хосте: `.env` (0600), `alertmanager/alertmanager.yml`, `alertmanager/secrets/telegram_bot_token` (0400), `prometheus/targets/caddy.json`, `textfile/` (textfile-метрики node-exporter, пишут `pg-backup` и `backup-offsite`), дампы — `/var/backups/dmc-268/<project>/` (0700, §9). Тома: `prometheus-data`, `alertmanager-data`, `grafana-data`.
 
 Откат приложения стек не трогает. Откатить сам мониторинг — перезапустить job `Deploy monitoring` на нужном коммите или выполнить `deploy.sh` из его checkout.
 
@@ -155,7 +158,6 @@ Grafana — на своём хосте `grafana.<APP_DOMAIN>` (A-запись н
 | Что | Статус |
 |---|---|
 | Сквозной трейсинг (OpenTelemetry/Sentry), JSON-логи с `run_id` | отдельный PR после стабилизации пайплайна (договорённость команды). Нужен выбор бэкенда: Sentry SaaS (аккаунт и DSN), GlitchTip или Grafana Tempo; self-hosted Sentry на общий VPS не помещается |
-| Копия бэкапов вне VPS | дампы лежат на том же диске, что и БД: при потере VPS пропадут вместе с ней. Нужно хранилище вне хоста (S3-совместимое или второй хост) и решение о шифровании (§9) |
 | Redis | бэкапить нечего: на staging он без тома и без персистентности (`save ""`, `appendonly no`), это кэш (SD §10) |
 | Метрики приложения (`/metrics` FastAPI, `X-RateLimit-Remaining` GitHub) | нужен код и зависимость; пока RPS и коды — с edge-прокси, пайплайн — из `run_actions` |
 | prod | prod-выката нет; `environment` в метках — `staging` |
@@ -202,6 +204,49 @@ docker compose -p dmc-268-api-staging start api worker webhook-worker
 ```
 
 Образ приложения должен соответствовать восстановленной ревизии (CICD.md §5, «Допуск по ревизии БД»). Роли мониторинга и их права после переименования БД пересоздаст следующий `Deploy monitoring`.
+
+### Копия вне VPS
+
+Решение техлида от 17.10.2026 (#186): дампы дополнительно уходят в S3-совместимый бакет Cloudflare R2. Это исключение из D1 («объектного хранилища в MVP нет») только для бэкапов; приложение S3 по-прежнему не использует.
+
+Сервис `backup-offsite` (`deploy/monitoring/backup/offsite.sh`, `compose.offsite.yml`, образ `rclone/rclone:1.75.2` по digest) каждые 15 минут:
+
+1. `rclone copy` готовых `*.dump` в crypt-remote `secure:` поверх `store:<bucket>/postgres`. Шифрование (rclone crypt: XSalsa20-Poly1305, ключ из `BACKUP_ENCRYPTION_PASSPHRASE`) выполняется на VPS: в бакете только шифротекст `<dump>.bin`, без ключа его не прочитать. `--immutable` запрещает перезапись уже загруженного дампа.
+2. `rclone delete --min-age 30d` — в бакете дампы хранятся 30 дней (на VPS — 7).
+3. Метрики `dmc_pg_backup_offsite_*` → алерты выше и панель `Last off-host copy`.
+
+Сбой копирования не доходит до удаления. Сервис создаётся, только когда заданы все пять имён ниже; заданы не все — выкат мониторинга падает до изменений на хосте; все пустые — сервис удаляется, дампы остаются только на VPS.
+
+| Имя | Environment `staging` | Значение |
+|---|---|---|
+| `BACKUP_S3_ENDPOINT` | variable | `https://<ACCOUNT_ID>.r2.cloudflarestorage.com` (только `https`) |
+| `BACKUP_S3_BUCKET` | variable | имя бакета |
+| `BACKUP_S3_ACCESS_KEY_ID` | secret | Access Key ID R2-токена с правами Object Read & Write на этот бакет |
+| `BACKUP_S3_SECRET_ACCESS_KEY` | secret | Secret Access Key того же токена |
+| `BACKUP_ENCRYPTION_PASSPHRASE` | secret | одна строка ≥ 32 символов, например `openssl rand -base64 48`. Копия хранится у техлида вне GitHub: без неё бэкапы не расшифровать. Смена ключа затрагивает только новые копии; старые читаются прежним ключом |
+
+На хосте ключ хранится только в обфусцированном виде rclone и как SHA-256 (`.env` стека, 0600); в `rclone obscure` он передаётся через stdin.
+
+**Восстановление после потери VPS** (проверено с S3-совместимым сервером: скачанный и расшифрованный дамп восстановился с той же ревизией и таблицами; с неверным ключом rclone отказывает `bad password`). Нужны Docker, ключи бакета и ключ шифрования:
+
+```bash
+read -rs PASS; export OBSCURED="$(printf '%s' "$PASS" | docker run --rm -i --entrypoint rclone rclone/rclone:1.75.2 obscure -)"
+rc() {
+  docker run --rm -v "$PWD:/restore" -e RCLONE_CONFIG=/dev/null \
+    -e RCLONE_CONFIG_STORE_TYPE=s3 -e RCLONE_CONFIG_STORE_PROVIDER=Cloudflare \
+    -e RCLONE_CONFIG_STORE_ENDPOINT="$BACKUP_S3_ENDPOINT" \
+    -e RCLONE_CONFIG_STORE_ACCESS_KEY_ID="$BACKUP_S3_ACCESS_KEY_ID" \
+    -e RCLONE_CONFIG_STORE_SECRET_ACCESS_KEY="$BACKUP_S3_SECRET_ACCESS_KEY" \
+    -e RCLONE_CONFIG_STORE_NO_CHECK_BUCKET=true \
+    -e RCLONE_CONFIG_SECURE_TYPE=crypt -e RCLONE_CONFIG_SECURE_REMOTE="store:$BACKUP_S3_BUCKET/postgres" \
+    -e RCLONE_CONFIG_SECURE_PASSWORD="$OBSCURED" -e RCLONE_CONFIG_SECURE_FILENAME_ENCRYPTION=off \
+    rclone/rclone:1.75.2 "$@"
+}
+rc lsl secure:                                # дампы по датам
+rc copy secure:<db>-<UTC>.dump /restore       # расшифрованный дамп в текущий каталог
+```
+
+Дальше — те же шаги `pg_restore`, что выше, на новом хосте после выката приложения.
 
 Redis не бэкапится: на staging он без тома и без персистентности, это кэш (SD §10). Очереди RabbitMQ лежат в томе `rabbitmq-data`, а топологию при старте объявляет воркер; состояние прогонов восстанавливается из PostgreSQL реконсилером.
 

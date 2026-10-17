@@ -199,3 +199,39 @@ tests:
             exp_annotations:
               summary: "No PostgreSQL backup status for 2 hours"
               description: "The pg-backup service has not written its metrics: it is down or cannot write the textfile dir."
+
+  # Off-host copy: a pass every 15 min is fine; 3 h without one is stale; failing passes warn
+  # after an hour, also when no pass ever succeeded (no success timestamp at all).
+  - interval: 1m
+    input_series:
+      - series: 'dmc_pg_backup_offsite_last_success_timestamp_seconds{job="node", instance="node-exporter:9100"}'
+        values: "0x300"
+      - series: 'dmc_pg_backup_offsite_last_run_success{job="node", instance="node-exporter:9100"}'
+        values: "0x90"
+    alert_rule_test:
+      - eval_time: 2h
+        alertname: PostgresBackupOffsiteStale
+        exp_alerts: []
+      - eval_time: 3h15m
+        alertname: PostgresBackupOffsiteStale
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              job: node
+              instance: node-exporter:9100
+            exp_annotations:
+              summary: "Off-host backup copy last succeeded 3h 15m 0s ago"
+              description: "backup-offsite has not reached the bucket for 3 hours; see docker compose -p dmc-268-monitoring logs backup-offsite."
+      - eval_time: 50m
+        alertname: PostgresBackupOffsiteFailing
+        exp_alerts: []
+      - eval_time: 61m
+        alertname: PostgresBackupOffsiteFailing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: node
+              instance: node-exporter:9100
+            exp_annotations:
+              summary: "Off-host backup copy fails"
+              description: "Every backup-offsite pass of the last hour failed (bucket, keys or network)."
