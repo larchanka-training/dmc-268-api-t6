@@ -502,7 +502,7 @@ The worker declares it at startup on its own confirm channel, not through the re
 - `message_id = uuid5(NS, f"{repository_id}:{generation}:{requested_at}")`: unique per
   wake-up and deterministic from the fields (SD §7.2). A per-generation id does not work:
   every wake-up of a generation would share one key in the local unexpected-error counter
-  (`amqp.py:243-273`, TTL 300 s for an unconfirmed handoff), and a healthy repository
+  (`amqp.py:243-273`; for `index.repo` its TTL is the lease), and a healthy repository
   could land in the DLQ.
 - Files: `contracts/schemas/index.repo.v1.schema.json` and
   `contracts/examples/index.repo.v1.json`.
@@ -516,7 +516,7 @@ A republish always waits for the confirm, and only then acks the original.
 | decode or schema error, foreign `message_id` | `nack(requeue=False)` → DLQ |
 | PUBLISHED, UNCHANGED, EMPTY, STALE, FAILED, LEASE_LOST | ack |
 | RELEASED (access or policy error, `last_error_code` written) | ack |
-| LEASED | ack; if `redelivered` or already waiting, republish to `10m` with `x-lease-wait ≤ ⌈lease / 600 s⌉` (2 at the default 1200 s; holder SIGKILLed) |
+| LEASED | ack; if `redelivered`, already waiting or an `x-attempt` copy, republish to `10m` with `x-lease-wait ≤ ⌈lease / 600 s⌉` (2 at the default 1200 s; holder SIGKILLed) |
 | BUSY | republish to `retry.30s` with the same attempt, ack (no nack-requeue spin) |
 | REWAKE | ack only: the use case already woke the repository with attempt 1 |
 | TRANSIENT | attempt 1 → 30s, 2 → 2m; rate limit ≥ 2m; `Retry-After` > 2 min → 10m; on attempt 3, ack (`last_error_code` is already written) |
@@ -528,7 +528,15 @@ A republish always waits for the confirm, and only then acks the original.
 - The body of `republish_after_error` moves into a module-level
   `republish_with_attempt(exchange, message, attempts)`; the method delegates to it.
 - `_requeue_after_error` gets a `dead_letter_queue` parameter and a public alias.
-- `consume`, `validate_message`, `consumer_queue` and `RetryDelays` are used as they are.
+- The local fallback store gains a TTL per entry (`local_ttl_seconds` on
+  `_requeue_after_error` and `count_unexpected_attempt`; `None` reads
+  `LOCAL_RETRY_TTL_SECONDS` at call time), a read that skips an expired entry, and
+  `current_unexpected_attempts` (the count so far, without +1) for deferred copies. Review
+  entries keep 300 s.
+- `validate_message`, `consumer_queue` and `RetryDelays` are used as they are; the index
+  consumer runs its own loop, so that an exception out of one delivery is logged, a
+  delivery it left unsettled goes to the DLQ (`nack(requeue=False)`, best effort), and the
+  review consumers are not cancelled.
 - New file: `code_index/infrastructure/amqp.py` (topology, `AmqpIndexWakeups`, the
   delivery handler). It implements the `IndexWakeups` port that PR 2 defines in
   `code_index/application/ports.py`; #143 reuses the same port.

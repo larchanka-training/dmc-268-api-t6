@@ -953,6 +953,48 @@ def test_retry_fallback_entries_expire_after_five_minutes(
         assert delivery.nacked == [True]
 
 
+def test_the_retry_fallback_ttl_is_read_when_an_entry_is_stored(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(amqp, "REQUEUE_ERROR_DELAY_SECONDS", 0.0)
+    monkeypatch.setattr(amqp, "LOCAL_RETRY_TTL_SECONDS", 10.0)
+    now = 1000.0
+    monkeypatch.setattr(amqp, "monotonic", lambda: now, raising=False)
+    amqp._unexpected_delivery_attempts.clear()
+    publisher, _ = fake_publisher(OfflineExchange())
+    asyncio.run(_fail_retry_delivery(Delivery(VALID, message_id="short"), publisher))
+    now = 1010.0
+    for _ in range(2):
+        delivery = Delivery(VALID, message_id="short")
+        asyncio.run(_fail_retry_delivery(delivery, publisher))
+        assert delivery.nacked == [True]
+
+
+def test_a_review_entry_behind_a_longer_index_entry_still_expires_after_five_minutes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(amqp, "REQUEUE_ERROR_DELAY_SECONDS", 0.0)
+    now = 1000.0
+    monkeypatch.setattr(amqp, "monotonic", lambda: now, raising=False)
+    amqp._unexpected_delivery_attempts.clear()
+    publisher, _ = fake_publisher(OfflineExchange())
+    # #142: an index.repo entry lives for a lease, and it is stored first.
+    wake = cast(
+        AbstractIncomingMessage, Delivery(b"{}", message_id="wake", routing_key="index.repo")
+    )
+    assert amqp.count_unexpected_attempt(wake, local_ttl_seconds=1200.0) == 1
+    now = 1001.0
+    asyncio.run(_fail_retry_delivery(Delivery(VALID, message_id="review"), publisher))
+    now = 1301.0
+    # Five minutes on, the review count has expired behind the live index entry: two new
+    # failures are not the terminal third attempt.
+    for _ in range(2):
+        delivery = Delivery(VALID, message_id="review")
+        asyncio.run(_fail_retry_delivery(delivery, publisher))
+        assert delivery.nacked == [True]
+    assert amqp.current_unexpected_attempts(wake) == 1
+
+
 @pytest.mark.parametrize("publish", [False, True])
 @pytest.mark.parametrize("ack_fails", [False, True])
 @pytest.mark.parametrize("message_id", ["retry-fallback", None])

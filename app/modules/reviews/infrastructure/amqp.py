@@ -252,7 +252,10 @@ MAX_UNEXPECTED_RETRIES: int = 3
 REQUEUE_ERROR_DELAY_SECONDS: float = 1.0
 MAX_LOCAL_RETRY_ENTRIES: int = 1024
 LOCAL_RETRY_TTL_SECONDS: float = 300.0
-# Only an unconfirmed handoff needs local fallback state. Insertion order is expiry order.
+# Only an unconfirmed handoff needs local fallback state. An `index.repo` entry lives for a
+# lease (#142), so insertion order is not expiry order.
+# CONTRACT: a read counts an entry only before its expiry; the prune is best-effort (it
+# stops at the first live entry), and MAX_LOCAL_RETRY_ENTRIES bounds what it leaves.
 _unexpected_delivery_attempts: dict[str, tuple[int, float]] = {}
 
 
@@ -274,22 +277,32 @@ def _prune_delivery_attempts() -> None:
         _unexpected_delivery_attempts.pop(oldest)
 
 
-def _remember_delivery_attempts(key: str, attempts: int) -> None:
+def _remember_delivery_attempts(
+    key: str, attempts: int, local_ttl_seconds: float | None = None
+) -> None:
+    """`None` reads `LOCAL_RETRY_TTL_SECONDS` now, not when the module was imported."""
+    ttl = LOCAL_RETRY_TTL_SECONDS if local_ttl_seconds is None else local_ttl_seconds
     _prune_delivery_attempts()
     _unexpected_delivery_attempts.pop(key, None)
     while len(_unexpected_delivery_attempts) >= MAX_LOCAL_RETRY_ENTRIES:
         _unexpected_delivery_attempts.pop(next(iter(_unexpected_delivery_attempts)))
-    _unexpected_delivery_attempts[key] = (attempts, monotonic() + LOCAL_RETRY_TTL_SECONDS)
+    _unexpected_delivery_attempts[key] = (attempts, monotonic() + ttl)
 
 
 def _clear_delivery_attempts(key: str) -> None:
     _unexpected_delivery_attempts.pop(key, None)
 
 
+def _local_delivery_attempts(key: str) -> int:
+    """The local count of a delivery; an expired entry counts as none."""
+    attempts, expires = _unexpected_delivery_attempts.get(key, (0, 0.0))
+    return attempts if expires > monotonic() else 0
+
+
 def _get_delivery_attempts(message: AbstractIncomingMessage) -> int:
     _prune_delivery_attempts()
     key = _delivery_key(message)
-    local_attempts = _unexpected_delivery_attempts.get(key, (0, 0.0))[0]
+    local_attempts = _local_delivery_attempts(key)
     broker_attempts = 0
     headers = getattr(message, "headers", None)
     if isinstance(headers, dict) and "x-attempt" in headers:
@@ -319,10 +332,11 @@ async def _requeue_after_error(
     max_retries: int = MAX_UNEXPECTED_RETRIES,
     *,
     dead_letter_queue: str = DEAD_LETTER_QUEUE,
+    local_ttl_seconds: float | None = None,
 ) -> None:
     key = _delivery_key(message)
     attempts = _get_delivery_attempts(message)
-    _remember_delivery_attempts(key, attempts)
+    _remember_delivery_attempts(key, attempts, local_ttl_seconds)
 
     if attempts >= max_retries:
         _LOGGER.error(
@@ -359,12 +373,38 @@ def forget_unexpected_attempts(message: AbstractIncomingMessage) -> None:
     _clear_delivery_attempts(_delivery_key(message))
 
 
-def count_unexpected_attempt(message: AbstractIncomingMessage) -> int:
+def count_unexpected_attempt(
+    message: AbstractIncomingMessage, *, local_ttl_seconds: float | None = None
+) -> int:
     """Count one more failed pass of a delivery in the local fallback state; the number
     of this pass, as `requeue_after_error` counts it."""
     attempts = _get_delivery_attempts(message)
-    _remember_delivery_attempts(_delivery_key(message), attempts)
+    _remember_delivery_attempts(_delivery_key(message), attempts, local_ttl_seconds)
     return attempts
+
+
+def current_unexpected_attempts(message: AbstractIncomingMessage) -> int:
+    """The failed passes counted for a delivery so far, this one not included:
+    max(a valid `x-attempt`, the live local count); 0 when there is none.
+
+    The index queue reads it on every deferral (#142), so an infinite double is an
+    invalid header here, not an `OverflowError` out of the handler.
+    """
+    _prune_delivery_attempts()
+    local_attempts = _local_delivery_attempts(_delivery_key(message))
+    broker_attempts = 0
+    headers = getattr(message, "headers", None)
+    if isinstance(headers, dict) and "x-attempt" in headers:
+        try:
+            broker_attempts = int(headers["x-attempt"])
+        except (ValueError, TypeError, OverflowError):
+            _LOGGER.warning(
+                "Invalid retry header %s=%r on message %s",
+                "x-attempt",
+                headers["x-attempt"],
+                message.message_id,
+            )
+    return max(broker_attempts, local_attempts)
 
 
 async def handle_run_delivery(
