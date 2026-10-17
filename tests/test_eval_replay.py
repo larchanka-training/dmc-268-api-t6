@@ -883,6 +883,73 @@ def test_replay_warns_when_manifest_omits_current_static_input(tmp_path: Path) -
     ]
 
 
+SIDECAR = "review/eval/pr-commit-messages.json"
+
+
+def _pin_recorded_static_input(root: Path, repo: Path, relative: str, content: bytes) -> None:
+    """Write a repository file and record it in the manifest's static inputs and digest."""
+    target = repo / relative
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(content)
+    manifest_path = root / "responses/manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["static_inputs"] = sorted({*manifest["static_inputs"], relative})
+    manifest["static_digest"] = digest_files(repo, manifest["static_inputs"])
+    manifest_path.write_text(json.dumps(manifest))
+
+
+def _custom_rule_set() -> bytes:
+    rules = json.loads((REPO_ROOT / "review/rules/default-backend.v1.json").read_text("utf-8"))
+    rules["rules"][0]["name"] = "Custom Source Review"
+    return json.dumps(rules).encode("utf-8")
+
+
+@pytest.mark.parametrize("dropped", [SIDECAR, "test-prs-dataset/cases/RES-03/case.json"])
+def test_replay_warns_when_recorded_json_pin_is_no_longer_produced(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, dropped: str
+) -> None:
+    root = fixture_root(tmp_path)
+    repo = tmp_path / "repo"
+    _record_with_digests(root, repo)
+    _pin_recorded_static_input(root, repo, SIDECAR, (REPO_ROOT / SIDECAR).read_bytes())
+    _pin_recorded_static_input(root, repo, "config/custom-backend.json", _custom_rule_set())
+    manifest = json.loads((root / "responses/manifest.json").read_text())
+    assert dropped in manifest["static_inputs"]
+    assert "config/custom-backend.json" in manifest["static_inputs"]
+    assert replay(root, prompt_root=repo)["warnings"] == []
+
+    review_code = eval_provenance._REVIEW_CODE
+    identity_paths = eval_provenance.canonical_identity_paths
+    monkeypatch.setattr(
+        eval_provenance, "_REVIEW_CODE", tuple(path for path in review_code if path != dropped)
+    )
+    monkeypatch.setattr(
+        eval_provenance,
+        "canonical_identity_paths",
+        lambda repo_root: [path for path in identity_paths(repo_root) if path != dropped],
+    )
+
+    assert (repo / dropped).is_file()
+    assert replay(root, prompt_root=repo)["warnings"] == [
+        "Static input path set changed; refresh the complete baseline"
+    ]
+
+
+# eval_live --backend-rules/--frontend-rules accept any repository file holding a rules array.
+@pytest.mark.parametrize("custom", ["config/custom-backend.json", "config/custom-backend.rules"])
+def test_replay_keeps_recorded_custom_rule_without_path_set_warning(
+    tmp_path: Path, custom: str
+) -> None:
+    root = fixture_root(tmp_path)
+    repo = tmp_path / "repo"
+    _record_with_digests(root, repo)
+    _pin_recorded_static_input(root, repo, custom, _custom_rule_set())
+
+    assert custom not in rule_json_paths(repo)
+    assert custom in json.loads((root / "responses/manifest.json").read_text())["static_inputs"]
+    assert replay(root, prompt_root=repo)["warnings"] == []
+
+
 def test_replay_rejects_unreferenced_response_file(tmp_path: Path) -> None:
     root = fixture_root(tmp_path)
     record(root, {"SEC-01": review_output()})
