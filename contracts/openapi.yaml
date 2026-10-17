@@ -982,7 +982,12 @@ components:
         startedAt:
           type: [string, "null"]
           format: date-time
-          description: First claim by a worker; null while the Run has not been claimed.
+          description: >-
+            First claim by a worker; null while the Run has not been claimed. A Run that ended at
+            `attempt = 0`, i.e. was never claimed (PIPELINE_SPEC T5 `skipped` or T6 `cancelled`
+            from `queued`), keeps null forever, and `startedAt − createdAt` is undefined for it.
+            A Run skipped (T5) or cancelled (T6) after returning to `queued` (T9 retry, T12 lease
+            expiry) keeps the time of its first claim.
         finishedAt:
           type: [string, "null"]
           format: date-time
@@ -1055,7 +1060,12 @@ components:
         startedAt:
           type: [string, "null"]
           format: date-time
-          description: First claim by a worker; null while the Run has not been claimed.
+          description: >-
+            First claim by a worker; null while the Run has not been claimed. A Run that ended at
+            `attempt = 0`, i.e. was never claimed (PIPELINE_SPEC T5 `skipped` or T6 `cancelled`
+            from `queued`), keeps null forever, and `startedAt − createdAt` is undefined for it.
+            A Run skipped (T5) or cancelled (T6) after returning to `queued` (T9 retry, T12 lease
+            expiry) keeps the time of its first claim.
         finishedAt:
           type: [string, "null"]
           format: date-time

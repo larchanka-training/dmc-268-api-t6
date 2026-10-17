@@ -2,13 +2,19 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from datetime import datetime, timedelta, timezone
 from typing import Annotated, Any, get_args, get_origin
 from uuid import UUID
 
-from pydantic import AfterValidator
+from fastapi import FastAPI
+from fastapi.routing import APIRoute, iter_route_contexts
+from pydantic import AfterValidator, BaseModel
+from starlette.routing import BaseRoute
 
-import app.main  # noqa: F401  (registers every DTO of the composed app)
+import app.main  # registers every DTO of the composed app; its routes feed the response walk
+from app.modules.auth.api.router import AuthSessionDto
+from app.modules.repositories.api.dtos import RagIndexDto
 from app.modules.reviews.api.dtos import (
     ApiDto,
     PullRequestDto,
@@ -16,6 +22,7 @@ from app.modules.reviews.api.dtos import (
     ReviewCommentDto,
     RunActionDto,
     RunSessionDto,
+    UtcDatetime,
     _to_utc,
 )
 
@@ -135,3 +142,117 @@ def test_no_api_dto_declares_a_timestamp_outside_utc() -> None:
 
     assert _api_dtos()
     assert bare == []
+
+
+def _models(annotation: Any) -> list[type[BaseModel]]:
+    """The models an annotation holds, unpacking list, unions, Annotated and dict values."""
+    if isinstance(annotation, type) and issubclass(annotation, BaseModel):
+        return [annotation]
+    # Annotated metadata and dict keys are never models, so walking every argument is enough.
+    # None (a streamed or empty response, or a responses entry without "model") and object (a
+    # raw stored payload) have no arguments: they yield no model to walk.
+    return [model for argument in get_args(annotation) for model in _models(argument)]
+
+
+def _response_models(routes: Sequence[BaseRoute]) -> list[type[BaseModel]]:
+    """Every model an ``/api/`` route returns, with the models nested in its fields."""
+    # app.routes holds each included router as a wrapper, not an APIRoute: unwrap it first.
+    # A Mount is not descended into: the app mounts nothing, so no /api/ route hides in one.
+    pending = [
+        model
+        for route in iter_route_contexts(routes)
+        if route.path_format is not None
+        and route.path_format.startswith("/api/")
+        and isinstance(route.original_route, APIRoute)
+        # The declared response model, then the model of each status in responses={...}.
+        for annotation in (
+            route.response_model,
+            *(response.get("model") for response in route.responses.values()),
+        )
+        for model in _models(annotation)
+    ]
+    found: list[type[BaseModel]] = []
+    seen: set[type[BaseModel]] = set()
+    while pending:
+        model = pending.pop(0)
+        if model in seen:
+            continue
+        seen.add(model)
+        # An unresolved forward reference leaves a field annotation that _models cannot walk.
+        assert model.__pydantic_complete__, model
+        found.append(model)
+        pending += [
+            nested for field in model.model_fields.values() for nested in _models(field.annotation)
+        ]
+    return found
+
+
+def _bare_timestamps(models: list[type[BaseModel]]) -> list[str]:
+    return [
+        f"{model.__name__}.{name}"
+        for model in models
+        for name, field in model.model_fields.items()
+        if _has_bare_datetime(field.annotation, tuple(field.metadata))
+    ]
+
+
+def test_no_api_response_model_returns_a_timestamp_outside_utc() -> None:
+    # Wider than the ApiDto walk: nested models and plain BaseModel responses (auth) count too.
+    models = _response_models(app.main.app.routes)
+
+    assert AuthSessionDto in models
+    assert RagIndexDto in models  # no route returns it: reached only via RepositoryDto.rag_index
+    assert _bare_timestamps(models) == []
+
+
+class BareStamp(BaseModel):
+    at: datetime
+
+
+class BareProbe(BaseModel):
+    items: list[BareStamp]
+
+
+class UtcStamp(BaseModel):
+    at: UtcDatetime
+
+
+class UtcProbe(BaseModel):
+    items: list[UtcStamp]
+
+
+class BareTree(BaseModel):
+    at: datetime
+    children: list[BareTree]
+
+
+async def _probe() -> None:
+    return None
+
+
+def _probe_routes(
+    response_model: type[BaseModel],
+    responses: dict[int | str, dict[str, Any]] | None = None,
+) -> list[BaseRoute]:
+    probe = FastAPI()
+    probe.add_api_route("/api/probe", _probe, response_model=response_model, responses=responses)
+    return probe.routes
+
+
+def test_response_walk_reports_a_bare_datetime_in_a_nested_model() -> None:
+    assert _bare_timestamps(_response_models(_probe_routes(BareProbe))) == ["BareStamp.at"]
+
+
+def test_response_walk_accepts_a_utc_datetime_in_a_nested_model() -> None:
+    assert _bare_timestamps(_response_models(_probe_routes(UtcProbe))) == []
+
+
+def test_response_walk_ends_on_a_self_referencing_model() -> None:
+    # Returning at all proves the walk ends; one entry proves BareTree was walked once.
+    assert _bare_timestamps(_response_models(_probe_routes(BareTree))) == ["BareTree.at"]
+
+
+def test_response_walk_reports_a_bare_datetime_in_a_responses_model() -> None:
+    routes = _probe_routes(UtcProbe, responses={404: {"model": BareStamp}})
+
+    assert _bare_timestamps(_response_models(routes)) == ["BareStamp.at"]
