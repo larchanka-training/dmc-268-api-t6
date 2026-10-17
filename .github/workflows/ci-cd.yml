@@ -798,6 +798,7 @@ jobs:
           POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
           POSTGRES_DB: ${{ vars.POSTGRES_DB }}
           APP_SECRETS_B64: ${{ steps.app_secrets.outputs.bundle }}
+          DEPLOY_RUN: ${{ github.run_id }}-${{ github.run_attempt }}
         with:
           host: ${{ steps.target.outputs.host }}
           port: ${{ steps.target.outputs.port }}
@@ -806,7 +807,7 @@ jobs:
           password: ${{ steps.target.outputs.mode == 'course' && secrets.VPS_DMC268_P || '' }}
           fingerprint: ${{ vars.STAGING_SSH_FINGERPRINT }}
           debug: false
-          envs: GHCR_TOKEN,GHCR_USER,IMAGE,APP_DIR,DEPLOY_MODE,EDGE_ALIAS,POSTGRES_USER,POSTGRES_PASSWORD,POSTGRES_DB,APP_SECRETS_B64
+          envs: GHCR_TOKEN,GHCR_USER,IMAGE,APP_DIR,DEPLOY_MODE,EDGE_ALIAS,POSTGRES_USER,POSTGRES_PASSWORD,POSTGRES_DB,APP_SECRETS_B64,DEPLOY_RUN
           script: |
             set -euo pipefail
             set +o xtrace
@@ -833,6 +834,7 @@ jobs:
           APP_DIR: ${{ steps.target.outputs.app_dir }}
           DEPLOY_MODE: ${{ steps.target.outputs.deploy_mode }}
           EDGE_ALIAS: ${{ steps.target.outputs.edge_alias }}
+          DEPLOY_RUN: ${{ github.run_id }}-${{ github.run_attempt }}
         with:
           host: ${{ steps.target.outputs.host }}
           port: ${{ steps.target.outputs.port }}
@@ -841,7 +843,7 @@ jobs:
           password: ${{ steps.target.outputs.mode == 'course' && secrets.VPS_DMC268_P || '' }}
           fingerprint: ${{ vars.STAGING_SSH_FINGERPRINT }}
           debug: false
-          envs: GHCR_TOKEN,GHCR_USER,APP_DIR,DEPLOY_MODE,EDGE_ALIAS
+          envs: GHCR_TOKEN,GHCR_USER,APP_DIR,DEPLOY_MODE,EDGE_ALIAS,DEPLOY_RUN
           script: |
             set -euo pipefail
             set +o xtrace
