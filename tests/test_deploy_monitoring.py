@@ -231,10 +231,11 @@ def test_monitoring_upload_and_secrets_reach_only_the_monitoring_dir() -> None:
 
 FAKE_DOCKER = """\
 #!/usr/bin/env bash
-# Fake docker CLI: logs every call; psql and grafana stdin go to their own logs.
+# Fake docker CLI: logs every call; psql, grafana and rclone obscure stdin go to their own logs.
 printf '%s\\n' "$*" >> "${STUB_LOG}"
 case "$1" in
   network) exit 0 ;;
+  run) cat >> "${STUB_OBSCURE_STDIN}"; echo "obscured_${RANDOM}${RANDOM}" ;;
   ps) echo "${STUB_POSTGRES_ID}" ;;
   exec) cat >> "${STUB_PSQL_STDIN}"; printf '\\n--\\n' >> "${STUB_PSQL_STDIN}" ;;
   compose)
@@ -272,7 +273,11 @@ class Host:
         return path.read_text(encoding="utf-8") if path.exists() else ""
 
     def deploy(
-        self, *, unset: tuple[str, ...] = (), **overrides: str
+        self,
+        *,
+        unset: tuple[str, ...] = (),
+        extra: dict[str, str] | None = None,
+        **overrides: str,
     ) -> subprocess.CompletedProcess[str]:
         env = {
             "PATH": f"{self.stubs}:{os.environ['PATH']}",
@@ -286,7 +291,9 @@ class Host:
             "STUB_GRAFANA_STDIN": str(self.stubs / "grafana.log"),
             "STUB_CHOWN_LOG": str(self.stubs / "chown.log"),
             "STUB_POSTGRES_ID": "pgcontainer",
+            "STUB_OBSCURE_STDIN": str(self.stubs / "obscure.log"),
             "BACKUP_DIR": str(self.root / "backups"),
+            **(extra or {}),
             **overrides,
         }
         for name in unset:
@@ -690,3 +697,165 @@ def test_dump_with_another_revision_is_discarded(tmp_path: Path) -> None:
     assert "restore check failed" in run.result.stdout
     assert run.calls[-1] == "dropdb --if-exists dmc_restore_check"
     assert run.metrics["dmc_pg_backup_last_run_success"] == "0"
+
+
+# --- off-host copy of the dumps ------------------------------------------------------------
+
+PASSPHRASE = "test-passphrase-with-enough-entropy-0123456789"
+OFFSITE = {
+    "BACKUP_S3_ENDPOINT": "https://0123456789abcdef.r2.cloudflarestorage.com",
+    "BACKUP_S3_BUCKET": "dmc268-t6-backups",
+    "BACKUP_S3_ACCESS_KEY_ID": "FAKE_TEST_KEY_ID_DO_NOT_USE",
+    "BACKUP_S3_SECRET_ACCESS_KEY": "FAKE_TEST_CREDENTIAL_DO_NOT_USE",
+    "BACKUP_ENCRYPTION_PASSPHRASE": PASSPHRASE,
+}
+NO_OFFSITE = dict.fromkeys(OFFSITE, "")
+
+
+def test_offsite_names_reach_only_the_monitoring_deploy() -> None:
+    job = _job("deploy-monitoring")
+
+    for name in ("BACKUP_S3_ENDPOINT", "BACKUP_S3_BUCKET"):
+        assert f"{name}: ${{{{ vars.{name} }}}}" in job
+    for name in (
+        "BACKUP_S3_ACCESS_KEY_ID",
+        "BACKUP_S3_SECRET_ACCESS_KEY",
+        "BACKUP_ENCRYPTION_PASSPHRASE",
+    ):
+        assert f"{name}: ${{{{ secrets.{name} }}}}" in job
+        assert name not in _job("deploy-staging")
+    envs = re.search(r"^          envs: (\S+)$", job, re.M)
+    assert envs is not None
+    assert set(OFFSITE) <= set(envs.group(1).split(","))
+
+
+def test_offsite_copy_is_encrypted_and_the_passphrase_never_stored(host: Host) -> None:
+    result = host.deploy(extra=OFFSITE)
+    env = host.env()
+
+    assert result.returncode == 0, result.stderr
+    assert "-f " + str(host.monitoring_dir / "compose.offsite.yml") in host.log("docker.log")
+    # The passphrase reaches rclone obscure through stdin only, then only its obscured form and
+    # its digest stay on the host.
+    assert host.log("obscure.log") == PASSPHRASE
+    assert env["BACKUP_ENCRYPTION_PASSWORD_OBSCURED"].startswith("obscured_")
+    assert len(env["BACKUP_ENCRYPTION_PASSPHRASE_SHA256"]) == 64
+    assert PASSPHRASE not in _read(host.env_file)
+    for secret in (PASSPHRASE, OFFSITE["BACKUP_S3_SECRET_ACCESS_KEY"]):
+        assert secret not in host.log("docker.log")
+        assert secret not in result.stdout + result.stderr
+    assert env["BACKUP_S3_PROVIDER"] == "Cloudflare"
+    assert "backups: encrypted off-host copy to bucket dmc268-t6-backups" in result.stdout
+
+
+def test_same_passphrase_keeps_its_obscured_form(host: Host) -> None:
+    assert host.deploy(extra=OFFSITE).returncode == 0
+    first = host.env()["BACKUP_ENCRYPTION_PASSWORD_OBSCURED"]
+    assert host.deploy(extra=OFFSITE).returncode == 0
+    second = host.env()["BACKUP_ENCRYPTION_PASSWORD_OBSCURED"]
+    rotated = host.deploy(
+        extra={**OFFSITE, "BACKUP_ENCRYPTION_PASSPHRASE": PASSPHRASE + "-rotated"}
+    )
+
+    # A new obscured value would recreate the service on every deploy.
+    assert second == first
+    assert rotated.returncode == 0
+    assert host.env()["BACKUP_ENCRYPTION_PASSWORD_OBSCURED"] != first
+
+
+def test_manual_run_keeps_and_empty_values_disable_the_offsite_copy(host: Host) -> None:
+    assert host.deploy(extra=OFFSITE).returncode == 0
+    kept = host.deploy(unset=tuple(OFFSITE))
+    kept_env = host.env()
+    disabled = host.deploy(extra=NO_OFFSITE)
+
+    assert kept.returncode == 0, kept.stderr
+    assert kept_env["BACKUP_S3_BUCKET"] == "dmc268-t6-backups"
+    assert kept.stdout.count("compose.offsite.yml") == 0  # nothing printed, the file is passed
+    assert disabled.returncode == 0, disabled.stderr
+    assert not any(key.startswith("BACKUP_S3") for key in host.env())
+    assert "dumps stay on this host only" in disabled.stderr
+    last_up = [line for line in host.log("docker.log").splitlines() if " up " in line][-1]
+    assert "compose.offsite.yml" not in last_up
+
+
+@pytest.mark.parametrize(
+    ("override", "message"),
+    [
+        ({"BACKUP_S3_BUCKET": ""}, "set all of BACKUP_S3_ENDPOINT"),
+        ({"BACKUP_S3_ENDPOINT": "http://r2.example.test"}, "BACKUP_S3_ENDPOINT must be https://"),
+        ({"BACKUP_S3_BUCKET": "Bad_Bucket"}, "BACKUP_S3_BUCKET is not a valid bucket name"),
+        (
+            {"BACKUP_S3_ACCESS_KEY_ID": "key with spaces"},
+            "BACKUP_S3_ACCESS_KEY_ID has an unexpected",
+        ),
+        ({"BACKUP_ENCRYPTION_PASSPHRASE": "short"}, "at least 32 characters"),
+    ],
+)
+def test_invalid_offsite_settings_fail_before_the_host_changes(
+    host: Host, override: dict[str, str], message: str
+) -> None:
+    result = host.deploy(extra={**OFFSITE, **override})
+
+    assert result.returncode == 1
+    assert message in result.stderr
+    assert not host.env_file.exists()
+    assert host.log("psql.log") == ""
+    assert PASSPHRASE not in result.stdout + result.stderr
+
+
+FAKE_RCLONE = """\
+#!/bin/sh
+echo "rclone $*" >> "${STUB_RCLONE_LOG}"
+if [ "$1" = copy ] && [ -n "${STUB_COPY_FAILS:-}" ]; then
+  echo "Failed to copy: 403 Forbidden" >&2
+  exit 1
+fi
+"""
+
+
+def _run_offsite(
+    tmp_path: Path, **env: str
+) -> tuple[subprocess.CompletedProcess[str], list[str], str]:
+    tools = tmp_path / "rclonebin"
+    tools.mkdir(exist_ok=True)
+    (tools / "rclone").write_text(FAKE_RCLONE, encoding="utf-8")
+    (tools / "rclone").chmod(0o755)
+    textfile = tmp_path / "pg_backup_offsite.prom"
+    log = tmp_path / "rclone.log"
+    result = subprocess.run(
+        ["sh", str(MONITORING / "backup" / "offsite.sh"), "once"],
+        env={
+            "PATH": f"{tools}:{os.environ['PATH']}",
+            "BACKUP_DIR": str(tmp_path),
+            "TEXTFILE": str(textfile),
+            "STUB_RCLONE_LOG": str(log),
+            **env,
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    calls = _read(log).splitlines() if log.exists() else []
+    return result, calls, _read(textfile) if textfile.exists() else ""
+
+
+def test_offsite_copies_finished_dumps_then_prunes_old_copies(tmp_path: Path) -> None:
+    result, calls, metrics = _run_offsite(tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    assert calls == [
+        f"rclone copy {tmp_path} secure: --include *.dump --immutable --no-traverse",
+        "rclone delete secure: --include *.dump --min-age 30d",
+    ]
+    assert "dmc_pg_backup_offsite_last_run_success 1" in metrics
+    assert "dmc_pg_backup_offsite_last_success_timestamp_seconds " in metrics
+
+
+def test_failed_offsite_copy_never_deletes_remote_dumps(tmp_path: Path) -> None:
+    result, calls, metrics = _run_offsite(tmp_path, STUB_COPY_FAILS="1")
+
+    assert result.returncode == 1
+    assert [call.split()[1] for call in calls] == ["copy"]
+    assert "dmc_pg_backup_offsite_last_run_success 0" in metrics
+    assert "last_success_timestamp" not in metrics
