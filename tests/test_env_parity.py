@@ -24,7 +24,8 @@ HOSTS_WITHOUT_UPSTREAM = ("api", "webhook", "staging-webhook", "ui")
 DEPLOYED_HOSTS = ("staging-api", "staging-ui")
 # Upstreams of every host in route order, as in the route table of docs/CICD.md §8.2.
 UPSTREAMS = {
-    "staging-api": ["api-staging:8000"],
+    # Grafana of the monitoring stack under /grafana/ (docs/MONITORING.md), then the API.
+    "staging-api": ["grafana-staging:3000", "api-staging:8000"],
     "api": ["api-prod:8000"],
     "staging-webhook": ["webhook-staging:8000"],
     "webhook": ["webhook-prod:8000"],
@@ -183,9 +184,11 @@ def test_stub_answers_503_only_when_the_upstream_is_unreachable() -> None:
 
 def test_proxy_errors_stay_in_the_log_next_to_handle_errors() -> None:
     # Once any site has handle_errors, Caddy logs proxy errors at debug level for every site of
-    # the server: without this log the cause of a staging 502 is gone from the edge log.
+    # the server: without this log the cause of a staging 502 is gone from the edge log. The
+    # request metrics of the monitoring stack (docs/MONITORING.md) follow it.
     assert re.match(
-        r"\{\n(?:\t#.*\n)*\tlog \w+ \{\n\t\tinclude http\.log\.error\n\t\tlevel DEBUG\n\t\}\n\}\n",
+        r"\{\n(?:\t#.*\n)*\tlog \w+ \{\n\t\tinclude http\.log\.error\n\t\tlevel DEBUG\n\t\}\n"
+        r"(?:\t#.*\n)*\tmetrics \{\n\t\tper_host\n\t\}\n\}\n",
         CADDYFILE.read_text(encoding="utf-8"),
     ), "the global options block with the proxy error log must come first"
 
