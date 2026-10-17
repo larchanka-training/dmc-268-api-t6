@@ -1039,7 +1039,8 @@ def _written_tools(source: str) -> set[str]:
         ('Route(tool="c.d")', {"c.d"}),
         ('LLM_CALL_TOOL = "e.f"', {"e.f"}),
         ('X_TOOL: Final = "g.h"', {"g.h"}),
-        ("def record(self, run_id, tool): ...", set()),
+        ('ledger.record(context, "x.y")', {"x.y"}),
+        ('def record(self, run_id, tool="x.y"): ...', set()),
         ('prompts.load("review.system")', set()),
     ],
     ids=[
@@ -1050,6 +1051,7 @@ def _written_tools(source: str) -> set[str]:
         "tool-keyword",
         "module-constant",
         "module-annotated-constant",
+        "record-any-receiver",
         "record-definition",
         "plain-string-literal",
     ],
