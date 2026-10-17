@@ -148,21 +148,20 @@ The manifest also stores sorted `static_inputs`, `static_digest`, and `corpus_di
 
 | Static input path | Why it is included |
 | --- | --- |
-| `app/bootstrap/llm_gateway.py` | Composes requests and sets attempt deadlines. |
-| `app/common/application/languages.py` | Selects the case language and default rule set. |
-| `app/modules/reviews/application/llm.py` | Defines call kinds and retryability used by the gateway. |
+| `app/bootstrap/llm_gateway.py` | `review_case` builds the review context, sets the case deadline and parses the accepted output. |
+| `app/common/application/languages.py` | `LANGUAGE_BY_SUFFIX` sets each file's `language` attribute in the rendered user message. |
+| `app/modules/reviews/application/commit_prefix_limits.py` | Caps rendered commit lines (20 messages, 500 characters) and fixes the retrieval budget the sidecar must match. |
+| `app/modules/reviews/application/llm.py` | `LlmCallRecord.response` holds the envelope the recorder reads; `LlmErrorCode` values are the recorded `gateway_status` replay's publishability check reads. |
 | `app/modules/reviews/application/prompt_budget.py` | Chooses whole, truncated, and omitted diff files. |
-| `app/modules/reviews/application/prompt_builder.py` | Renders the system/user message envelope. |
-| `app/modules/reviews/application/review_output.py` | Parses and validates review output. |
-| `app/modules/reviews/application/run_failures.py` | Supplies the gateway's attempt deadline and retryable codes. |
-| `app/modules/reviews/application/vcs_diff.py` | Defines provider-neutral commit-prefix/metadata ports. |
-| `app/common/infrastructure/github_link_header.py` | Shares next-relation parsing between production and evidence validation. |
-| `app/modules/reviews/infrastructure/github_run_source.py` | Carries bounded commit prefixes into run metadata. |
-| `app/modules/reviews/infrastructure/github_vcs.py` | Retrieves typed production commit pages and caps streaming. |
-| `app/modules/reviews/infrastructure/vcs_failures.py` | Classifies commit retrieval failures and retry delays. |
-| `app/modules/reviews/infrastructure/llm/answers.py` | Validates answers and prepares repair feedback. |
+| `app/modules/reviews/application/prompt_builder.py` | Renders the system/user message envelope, including commit lines. |
+| `app/modules/reviews/application/review_output.py` | Parses and validates review output; a failure triggers repair. |
+| `app/modules/reviews/application/run_failures.py` | `FAST_ATTEMPT_DEADLINE` is the case deadline the gateway checks before each call and same-model retry. |
+| `app/modules/reviews/application/vcs_diff.py` | `CommitMessagePrefix` carries the bound prefix and tail flag into the request metadata. |
+| `app/common/infrastructure/github_link_header.py` | `has_next_relation` decides a sidecar page's tail, hence the omission marker. |
+| `app/modules/reviews/infrastructure/llm/answers.py` | Builds the provider schema, validates answers and prepares repair feedback. |
 | `app/modules/reviews/infrastructure/llm/gateway.py` | Controls calls, retries, repair, fallback, and budgets. |
-| `app/modules/reviews/infrastructure/llm/models.py` | Adapts gateway calls to review and conventions model ports. |
+| `app/modules/reviews/infrastructure/llm/memory.py` | Holds the in-memory call trace whose first record becomes the captured raw answer. |
+| `app/modules/reviews/infrastructure/llm/models.py` | `review_with_gateway` fits, renders and sends the review task with its schema. |
 | `app/modules/reviews/infrastructure/llm/settings.py` | Resolves model profiles, endpoints, and call policy. |
 | `app/modules/reviews/infrastructure/llm/transport.py` | Encodes provider requests and extracts response text. |
 | `review/eval/pr-commit-messages.json` | Supplies verified bounded PR prefixes and tail evidence. |
@@ -172,7 +171,29 @@ The manifest also stores sorted `static_inputs`, `static_digest`, and `corpus_di
 | `test-prs-dataset/cases/*/case.json` (each canonical file) | Supplies the complete cohort identity used by sidecar binding, including subset captures. |
 | `app/modules/reviews/application/conventions_prompt.py` | Renders conventions input when a conventions prompt is supplied. |
 
-A supplied conventions prompt and its renderer are included only for that task. Byte hashing also warns on a docstring-only edit to any listed file; this conservative warning avoids missing a changed deadline or call policy. `run_failures.py` remains included because `FAST_ATTEMPT_DEADLINE` and `RETRYABLE_ERROR_CODES` are imported into the gateway path. Corpus inputs are every active `case.json`, patch, and recursive pre-image file. Every case ID maps exactly to `responses/<case-id>.json`; replay rejects unmapped extra files. Replay warns if either digest differs or a static file is missing; it never rewrites raw answers. Refresh the **entire** response set and manifest after any input edit, even if only one rule or case changes. Traversal and symlink inputs are rejected.
+A supplied conventions prompt and its renderer are included only for that task. Byte hashing also warns on a docstring-only edit to any listed file; this conservative warning avoids missing a changed deadline or call policy. Corpus inputs are every active `case.json`, patch, and recursive pre-image file. Every case ID maps exactly to `responses/<case-id>.json`; replay rejects unmapped extra files. Replay warns if either digest differs or a static file is missing; it never rewrites raw answers. Refresh the **entire** response set and manifest after any input edit, even if only one rule or case changes. Traversal and symlink inputs are rejected.
+
+**Decision (#177).** Static pins are exactly the checked-in inputs the eval run executes
+on its request and answer path, judged by the criterion above. Dropped:
+`github_vcs.py`, `github_run_source.py` and `vcs_failures.py` — production commit
+retrieval, run metadata and fetch-failure classification. `eval_live.py` never imports
+them: it reads the frozen sidecar, copies the prefix into `PullRequestMeta` itself and
+never fetches. They were pinned only to keep retrieval in step with the evidence; the
+shared `commit_prefix_limits.py`, imported by both `github_vcs.py` and `commit_context.py`,
+now does that. Added: `commit_prefix_limits.py` and `memory.py` (the in-memory trace that
+`review_case` returns as the case's calls). Rejected candidates:
+`conventions.py` (`ConventionsDraft`/`ConventionsRequest` serve only the conventions task,
+which `eval_live.py` never runs; the review default `RepoConventions` lives in
+`prompt_builder.py`); `execute_review.py` (only the `PullRequestMetaSource` type of the
+worker's `GatewayReviewModel`); `run_trace.py` (only the production `build_gateway`);
+`unified_diff.py` (only production patch parsing in `vcs_diff.parse_file_patch`; the eval
+uses `prompt_builder.parse_unified_diff`); `check_runs.py` (`RunProviderCheckpoint` is a
+type alias); `ecb_fx.py` (the quote prices calls for the budget check and usage cost; a
+missing quote or exceeded budget fails the case before a call, which replay reports as not
+publishable, and never changes request bytes, answer validation or the captured answer;
+the rate is live ECB data no pin can freeze). The recorded 2026-10-15 manifest keeps the
+earlier list until the #178 re-shoot; until then replay prints
+`Static input path set changed; refresh the complete baseline` for this change.
 
 ## Recorded Mistral baseline — 2026-10-15
 
@@ -629,9 +650,11 @@ on the two selected EUrouter models.
 
 ### Baseline drift
 
-The static digest includes gateway/settings, production commit retrieval and frozen
-commit-context inputs. The complete 2026-10-15 post-rebase replacement replays with no static
-or corpus drift after merged #149 changed the pinned parser/schema. The 2026-10-14
+The static digest includes gateway/settings, the shared commit-prefix limits module and
+frozen commit-context inputs; production commit retrieval is not pinned (#177). The complete
+2026-10-15 post-rebase replacement replayed with no static or corpus drift after merged #149
+changed the pinned parser/schema; after #177 changed the pin list, replay prints
+`Static input path set changed; refresh the complete baseline` until the #178 re-shoot. The 2026-10-14
 PR-prefix, 2026-10-13 snapshot and 2026-10-07 captures remain historical.
 Later changes to fingerprinted inputs require another complete separately authorized
 capture. Preserve each original capture's provenance rather than editing a digest

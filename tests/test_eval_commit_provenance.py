@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+from review.scripts.eval_provenance import rule_json_paths, static_input_paths
 from review.scripts.eval_replay import replay
 from tests.test_eval_live import (
     REPO_ROOT,
@@ -19,14 +20,12 @@ from tests.test_eval_live import (
     record_with_repo,
 )
 
-SOURCE = "app/modules/reviews/infrastructure/github_run_source.py"
+LIMITS = "app/modules/reviews/application/commit_prefix_limits.py"
 SIDECAR = "review/eval/pr-commit-messages.json"
 SHAPING_INPUTS = (
-    SOURCE,
+    LIMITS,
     SIDECAR,
-    "app/modules/reviews/infrastructure/github_vcs.py",
     "app/modules/reviews/application/vcs_diff.py",
-    "app/modules/reviews/infrastructure/vcs_failures.py",
     "review/scripts/commit_context.py",
     "app/common/infrastructure/github_link_header.py",
     "test-prs-dataset/cases/SYN-04/case.json",
@@ -76,11 +75,20 @@ def test_each_commit_shaping_input_causes_replay_drift_without_rewriting_capture
 
     assert report["warnings"] == ["Static input digest mismatch; refresh the complete baseline"]
     assert changed in manifest["static_inputs"]
-    assert SOURCE in manifest["static_inputs"]
+    assert LIMITS in manifest["static_inputs"]
     assert SIDECAR in manifest["static_inputs"]
     assert "review/scripts/eval_live.py" in manifest["static_inputs"]
     assert {path.name: path.read_bytes() for path in (root / "responses").iterdir()} == before
     assert (REPO_ROOT / "test-prs-dataset/responses/manifest.json").read_bytes() == old_manifest
+
+
+def test_production_commit_retrieval_is_not_a_static_input() -> None:
+    # Eval never imports these; their edits must not change the static digest (#177).
+    paths = static_input_paths("review/prompts/review.system.v2.md", rule_json_paths(REPO_ROOT))
+
+    assert "app/modules/reviews/infrastructure/github_vcs.py" not in paths
+    assert "app/modules/reviews/infrastructure/github_run_source.py" not in paths
+    assert "app/modules/reviews/infrastructure/vcs_failures.py" not in paths
 
 
 def test_populated_context_capture_and_two_json_replay_reports_are_deterministic(
