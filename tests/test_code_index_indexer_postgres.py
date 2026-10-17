@@ -1032,6 +1032,19 @@ _OK = b"def ok():\n    return 1\n"
         ("blob.py", b"\x00\x01\x02", ExclusionClass.BINARY),
         ("broken.py", b"\xff\xfe = 1\n", ExclusionClass.PARSE_FAILED),
     ],
+    ids=[
+        "unsupported-path",
+        "secret",
+        "vendored",
+        "generated",
+        "unsupported-language",
+        "ignored",
+        "symlink",
+        "over-the-read-limit",
+        "over-the-parse-limit",
+        "binary",
+        "parse-failed",
+    ],
 )
 def test_each_exclusion_class_keeps_its_file_out_of_the_index(
     database: _Database, path: str, content: bytes | Link, excluded: ExclusionClass
