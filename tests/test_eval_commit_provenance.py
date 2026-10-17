@@ -88,6 +88,8 @@ def test_production_commit_retrieval_is_not_a_static_input() -> None:
     assert "app/modules/reviews/infrastructure/github_vcs.py" not in paths
     assert "app/modules/reviews/infrastructure/github_run_source.py" not in paths
     assert "app/modules/reviews/infrastructure/vcs_failures.py" not in paths
+    # Imported by eval only through llm_gateway; shapes nothing it sends or parses.
+    assert "app/modules/reviews/application/vcs_diff.py" not in paths
 
 
 def test_populated_context_capture_and_two_json_replay_reports_are_deterministic(

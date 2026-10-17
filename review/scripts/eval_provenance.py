@@ -26,7 +26,6 @@ _REVIEW_CODE = (
     "app/modules/reviews/application/prompt_builder.py",
     "app/modules/reviews/application/review_output.py",
     "app/modules/reviews/application/run_failures.py",
-    "app/modules/reviews/application/vcs_diff.py",
     "app/modules/reviews/infrastructure/llm/answers.py",
     "app/modules/reviews/infrastructure/llm/gateway.py",
     "app/modules/reviews/infrastructure/llm/memory.py",
