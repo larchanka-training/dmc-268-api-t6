@@ -739,6 +739,7 @@ def test_provider_commit_timeout_has_safe_source_specific_error(classified: bool
         ((10, 3), ('<https://evil.test/page2>; rel="next"', None), False, ["1", "2"]),
         ((10, 3), (None, '<https://evil.test/page3>; rel="next"'), True, ["1", "2"]),
         ((10, 0), (None, '<https://evil.test/page3>; rel="next"'), True, ["1", "2"]),
+        ((10, 9), (None, None), False, ["1", "2"]),
         ((10, 10), (None, None), True, ["1", "2"]),
         ((10, 10), (None, '<https://evil.test/page2>; rel="last"'), True, ["1", "2"]),
     ],
