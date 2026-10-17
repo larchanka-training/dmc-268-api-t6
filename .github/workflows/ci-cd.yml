@@ -74,6 +74,18 @@ jobs:
           docker run --rm -e APP_DOMAIN=example.test -v "$PWD/deploy/edge:/etc/caddy:ro" "${image}" \
             caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
 
+  monitoring-validate:
+    name: Monitoring config validate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Prometheus config and alert rules (with their unit tests), both Alertmanager variants, the
+      # Telegram template, the compose files and the dashboards, with the images the host runs.
+      - name: Validate monitoring stack
+        run: scripts/validate_monitoring.sh
+
   terraform-lint-security:
     name: Terraform lint / security
     runs-on: ubuntu-latest
@@ -508,6 +520,7 @@ jobs:
       - secret-scan
       - terraform-fmt-validate
       - edge-validate
+      - monitoring-validate
       - terraform-lint-security
       - python-lint-type-test
       - openapi-lint
@@ -569,6 +582,13 @@ jobs:
       promote: ${{ steps.result.outputs.promote }}
       image_ref: ${{ needs.push-image.outputs.image_ref }}
       staging: ${{ needs.push-image.outputs.staging }}
+      # Non-secret target values for deploy-monitoring (organization variable and step outputs).
+      mode: ${{ steps.target.outputs.mode }}
+      host: ${{ steps.target.outputs.host }}
+      port: ${{ steps.target.outputs.port }}
+      app_dir: ${{ steps.target.outputs.app_dir }}
+      deploy_mode: ${{ steps.target.outputs.deploy_mode }}
+      base_url: ${{ steps.target.outputs.base_url }}
     steps:
       - name: Resolve staging target
         id: target
@@ -870,6 +890,65 @@ jobs:
             exit 1
           fi
           exit 1
+
+  # Monitoring stack (docs/MONITORING.md): its own compose project next to the application. It runs
+  # after a successful application deploy and never triggers a rollback or blocks the promotion;
+  # a red run here only means the monitoring is stale until the next push or a re-run.
+  deploy-monitoring:
+    name: Deploy monitoring
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && needs.deploy-staging.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    needs: deploy-staging
+    concurrency:
+      group: staging-deploy
+      cancel-in-progress: false
+    environment:
+      name: staging
+    env:
+      MONITORING_DIR: /opt/dmc-268-monitoring
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Upload monitoring files
+        uses: appleboy/scp-action@ff85246acaad7bdce478db94a363cd2bf7c90345 # v1.0.0
+        with:
+          host: ${{ needs.deploy-staging.outputs.host }}
+          port: ${{ needs.deploy-staging.outputs.port }}
+          username: ${{ needs.deploy-staging.outputs.mode == 'course' && secrets.VPS_DMC268_U || vars.STAGING_SSH_USER }}
+          key: ${{ needs.deploy-staging.outputs.mode == 'terraform' && secrets.STAGING_SSH_KEY || '' }}
+          password: ${{ needs.deploy-staging.outputs.mode == 'course' && secrets.VPS_DMC268_P || '' }}
+          fingerprint: ${{ vars.STAGING_SSH_FINGERPRINT }}
+          source: "deploy/monitoring,deploy/scripts/env-file.sh"
+          target: ${{ env.MONITORING_DIR }}
+          strip_components: 2
+
+      - name: Deploy monitoring stack
+        uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2 # v1.2.5
+        env:
+          API_DIR: ${{ needs.deploy-staging.outputs.app_dir }}
+          # Grafana behind the edge proxy on the API host (deploy/edge/Caddyfile); unused in ports mode.
+          GRAFANA_ROOT_URL: ${{ needs.deploy-staging.outputs.base_url }}/grafana/
+          # Alerts of the team channel (docs/SECRETS.md): Environment secret and variable. Both empty:
+          # the stack runs and alerts are visible in Alertmanager, but nothing is delivered.
+          ALERT_TELEGRAM_BOT_TOKEN: ${{ secrets.ALERT_TELEGRAM_BOT_TOKEN }}
+          ALERT_TELEGRAM_CHAT_ID: ${{ vars.ALERT_TELEGRAM_CHAT_ID }}
+        with:
+          host: ${{ needs.deploy-staging.outputs.host }}
+          port: ${{ needs.deploy-staging.outputs.port }}
+          username: ${{ needs.deploy-staging.outputs.mode == 'course' && secrets.VPS_DMC268_U || vars.STAGING_SSH_USER }}
+          key: ${{ needs.deploy-staging.outputs.mode == 'terraform' && secrets.STAGING_SSH_KEY || '' }}
+          password: ${{ needs.deploy-staging.outputs.mode == 'course' && secrets.VPS_DMC268_P || '' }}
+          fingerprint: ${{ vars.STAGING_SSH_FINGERPRINT }}
+          debug: false
+          envs: MONITORING_DIR,API_DIR,GRAFANA_ROOT_URL,ALERT_TELEGRAM_BOT_TOKEN,ALERT_TELEGRAM_CHAT_ID
+          script: |
+            set -euo pipefail
+            set +o xtrace
+            chmod +x "${MONITORING_DIR}/deploy.sh"
+            "${MONITORING_DIR}/deploy.sh"
 
   promote-staging:
     name: Promote staging tag
