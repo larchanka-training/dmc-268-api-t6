@@ -1,7 +1,7 @@
 """Extend the index state row for the indexer: branch, exclusions, storage bytes (#142).
 
-Revision ID: 20261016_0033
-Revises: 20261015_0032
+Revision ID: 20261017_0034
+Revises: 20261016_0033
 """
 
 from __future__ import annotations
@@ -10,8 +10,8 @@ import sqlalchemy as sa
 
 from alembic import op
 
-revision = "20261016_0033"
-down_revision = "20261015_0032"
+revision = "20261017_0034"
+down_revision = "20261016_0033"
 branch_labels = None
 depends_on = None
 
