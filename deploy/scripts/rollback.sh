@@ -10,6 +10,7 @@ APP_DIR="${APP_DIR:-/opt/dmc-268-api}"
 COMPOSE_FILE="${APP_DIR}/compose.yml"
 STATE_FILE="${APP_DIR}/.deploy-state"
 PREVIOUS_FILE="${STATE_FILE}.previous"
+SWITCH_FILE="${APP_DIR}/.deploy-switch"
 ENV_FILE="${APP_DIR}/.env"
 REQUESTED_IMAGE="${1:-}"
 COMPOSE_PROJECT="${COMPOSE_PROJECT:-$(basename "${APP_DIR}")}"
@@ -23,6 +24,15 @@ ROLLBACK_MODE="${ROLLBACK_MODE:-manual}"
 if [[ "${ROLLBACK_MODE}" != "auto" && "${ROLLBACK_MODE}" != "manual" ]]; then
   echo "ROLLBACK_MODE must be auto or manual, got: ${ROLLBACK_MODE}" >&2
   exit 1
+fi
+
+# CI auto rollback (DEPLOY_RUN set): a deploy of this run that stopped before the release switch
+# left the running release, .env and .deploy-state as they were, so there is nothing to undo.
+if [[ "${ROLLBACK_MODE}" == "auto" && -n "${DEPLOY_RUN:-}" ]]; then
+  if [[ ! -f "${SWITCH_FILE}" || "$(awk -F= '/^run=/{print $2}' "${SWITCH_FILE}")" != "${DEPLOY_RUN}" ]]; then
+    echo "release unchanged: deploy run ${DEPLOY_RUN} stopped before the release switch; skipping auto rollback"
+    exit 0
+  fi
 fi
 
 # Per-run registry credentials (see deploy.sh). Started by deploy.sh, the rollback inherits its

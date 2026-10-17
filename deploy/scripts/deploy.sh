@@ -10,6 +10,7 @@ APP_DIR="${APP_DIR:-/opt/dmc-268-api}"
 IMAGE="${1:-${IMAGE:-}}"
 COMPOSE_FILE="${APP_DIR}/compose.yml"
 STATE_FILE="${APP_DIR}/.deploy-state"
+SWITCH_FILE="${APP_DIR}/.deploy-switch"
 ENV_FILE="${APP_DIR}/.env"
 ROLLBACK_SCRIPT="${APP_DIR}/rollback.sh"
 # One compose project per app dir: /opt/dmc-268-api (Terraform host), /opt/dmc-268-api-staging (course VPS).
@@ -134,6 +135,15 @@ fi
 if [[ -n "${GHCR_TOKEN:-}" ]]; then
   echo "${GHCR_TOKEN}" | docker login ghcr.io -u "${GHCR_USER:-github}" --password-stdin >/dev/null
   unset GHCR_TOKEN
+fi
+
+# Release switch: from here on the host moves to IMAGE. The CI run id (DEPLOY_RUN) lets the CI
+# auto rollback of this run tell a deploy that got this far from one that stopped earlier.
+if [[ -n "${DEPLOY_RUN:-}" ]]; then
+  {
+    echo "run=${DEPLOY_RUN}"
+    echo "image=${IMAGE}"
+  } > "${SWITCH_FILE}"
 fi
 
 write_compose_env_file \
