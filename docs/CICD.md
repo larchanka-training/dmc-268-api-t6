@@ -376,8 +376,10 @@ Compose-файлами и env-file. Для этого восстановлени
 Job остаётся красным, `:staging` не продвигается. Шаг rollback сохраняет свой вывод
 (`capture_stdout`): если Deploy упал, откат завершился успешно и в выводе есть
 `release unchanged: deploy run`, шаг «Fail the pipeline after rollback» печатает
-`staging deploy failed before the release switch; the running release was left unchanged`, иначе —
-`staging deploy failed; rollback was triggered`. Ручной rollback (`ROLLBACK_MODE=manual`, значение по
+`staging deploy failed before the release switch; the running release was left unchanged`; при
+других отказах Deploy — `staging deploy failed; rollback was triggered`, при отказе Health check —
+`staging health check failed; rollback was triggered`. Если упал сам откат, шаг ещё пишет
+`rollback failed` в stderr. Ручной rollback (`ROLLBACK_MODE=manual`, значение по
 умолчанию) маркер не проверяет; автоматический без `DEPLOY_RUN` (вызов `rollback.sh` на хосте,
 `scripts/verify_rollback.py`) тоже работает как раньше: цель — `.deploy-state.previous` или
 bootstrap nginx, где бы ни остановился выкат.
