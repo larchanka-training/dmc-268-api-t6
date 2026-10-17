@@ -157,14 +157,15 @@ _PRIMARY_KEYS = {
     ],
 }
 
-_CHECKS_0032 = {
+# 0032 (#141) creates these; 0033 (#145) does not touch `code_index_states`.
+_CHECKS_0033 = {
     "ck_code_index_states_failed_error",
     "ck_code_index_states_lease_pair",
     "ck_code_index_states_purge_reason",
 }
 _CHECKS = {
     "code_index_states": {
-        *_CHECKS_0032,
+        *_CHECKS_0033,
         "ck_code_index_states_profile_complete",
         "ck_code_index_states_bytes",
         "ck_code_index_states_pending_leased",
@@ -660,7 +661,7 @@ def test_downgrade_drops_index_tables_and_types_and_upgrade_restores_them(
         "code_index_edge_kind",
         "code_index_import_resolution",
     }
-    assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "20261016_0033"
+    assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "20261017_0034"
 
 
 # ADR 0001 §7: only a limit or an unsafe archive fails an index.
@@ -727,7 +728,7 @@ def _state_schema(connection: Connection) -> tuple[set[str], set[str], dict[str,
 
 
 @pytest.mark.integration
-def test_downgrade_to_0032_drops_the_indexer_columns_and_upgrade_resets_profiles(
+def test_downgrade_to_0033_drops_the_indexer_columns_and_upgrade_resets_profiles(
     code_index_database: Connection,
 ) -> None:
     connection = code_index_database
@@ -740,9 +741,20 @@ def test_downgrade_to_0032_drops_the_indexer_columns_and_upgrade_resets_profiles
         {"ix_code_index_states_live_lease": "(lease_token IS NOT NULL)"},
     )
     connection.rollback()
-    command.downgrade(config, "20261015_0032")
-    assert _state_schema(connection) == (head_columns - new_columns, _CHECKS_0032, {})
-    assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "20261015_0032"
+    command.downgrade(config, "20261016_0033")
+    assert _state_schema(connection) == (head_columns - new_columns, _CHECKS_0033, {})
+    assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "20261016_0033"
+    # The downgrade stops at #145's revision and keeps its RAG toggle column.
+    assert (
+        connection.scalar(
+            text(
+                "SELECT count(*) FROM information_schema.columns "
+                "WHERE table_schema = current_schema() AND table_name = 'repositories' "
+                "AND column_name = 'rag_enabled'"
+            )
+        )
+        == 1
+    )
     repository_id = _repository(connection)
     connection.execute(
         text(
@@ -756,7 +768,7 @@ def test_downgrade_to_0032_drops_the_indexer_columns_and_upgrade_resets_profiles
     connection.commit()
 
     command.upgrade(config, "head")
-    # The reset forces a full build: no publication on 0032 recorded a branch or digest.
+    # The reset forces a full build: no publication on 0033 recorded a branch or digest.
     assert connection.execute(
         text(
             "SELECT status::text, indexed_commit_sha, extractor_version, resolver_version, "
@@ -769,7 +781,7 @@ def test_downgrade_to_0032_drops_the_indexer_columns_and_upgrade_resets_profiles
         _CHECKS["code_index_states"],
         {"ix_code_index_states_live_lease": "(lease_token IS NOT NULL)"},
     )
-    assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "20261016_0033"
+    assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "20261017_0034"
 
 
 # Store behaviour: fencing, publication, purge, garbage collection and isolation.

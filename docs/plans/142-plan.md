@@ -105,10 +105,11 @@ and the external items in the todo.
 
 ## PR 1: `feat(code_index): extend the index store for the indexer`
 
-Branch `feat/142-rag-indexer-store` from `origin/main`. Migration `20261016_0033`,
-`down_revision="20261015_0032"`.
+Branch `feat/142-rag-indexer-store` from `origin/main`. Migration `20261017_0034`,
+`down_revision="20261016_0033"`. Revision 0033 went to #145 (RAG toggle), which merged
+first, so this PR re-chained its migration after it.
 
-### Migration 0033 (`code_index_states`)
+### Migration 0034 (`code_index_states`)
 
 - Columns:
   - `indexed_default_branch varchar(255) NULL` and `exclusions_digest varchar(64) NULL`
@@ -208,9 +209,9 @@ Python half `domain/storage.py`; the PR 1 parity test needs it (see the todo, Ta
 Files: `tests/test_code_index_store_postgres.py`, the port contract test, the migration
 test.
 
-- **Edits to existing tests:** `_COLUMNS`, head 0033 in the downgrade test, the `_claim`
+- **Edits to existing tests:** `_COLUMNS`, head 0034 in the downgrade test, the `_claim`
   helpers for the new return type, the new methods in `_PORT_METHODS`.
-- **Migration:** round trip 0033 → 0032 → head; rejection by each CHECK.
+- **Migration:** round trip 0034 → 0033 → head; rejection by each CHECK.
 - **Claim:**
   - BUSY: a third repository while 2 leases are live; a second repository of the same
     installation;
@@ -683,7 +684,7 @@ uv run pytest
 TEST_DATABASE_URL=postgresql+psycopg://app:app@127.0.0.1:5432/dmc_142 \
   uv run pytest -m integration -rs tests/test_code_index_*_postgres.py \
   tests/test_initial_migration.py tests/test_alembic_heads.py   # 0 skips
-uv run alembic heads   # exactly one head: 20261016_0033
+uv run alembic heads   # exactly one head: 20261017_0034
 ```
 
 - PR 3 adds `TEST_RABBITMQ_URL=amqp://…/dmc_142` and

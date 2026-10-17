@@ -12,7 +12,7 @@ Each task is one planned commit, with two exceptions:
 
 - the review and publication tasks (6, 15, 24);
 - Tasks 2–4 land as one commit. They stay separate here as a test-first work order, not
-  as commit boundaries. Migration 0033's `profile_complete` CHECK rejects the existing
+  as commit boundaries. Migration 0034's `profile_complete` CHECK rejects the existing
   adapter's `publish`, which writes only 4 of the 6 profile columns. The contract test
   requires the adapter to have exactly the port's methods
   (`tests/test_code_index_store_contract.py:48-49`). So neither the migration nor the
@@ -76,9 +76,10 @@ commit of PR 1: `docs(plans): plan the rag indexer (#142)`.
 **Dependencies:** None. **Files touched:** `docs/plans/142-plan.md`,
 `docs/plans/142-todo.md`. **Estimated scope:** Small.
 
-### Task 2: Migration `20261016_0033`, ORM columns and migration tests (commit with Task 4)
+### Task 2: Migration `20261017_0034`, ORM columns and migration tests (commit with Task 4)
 
-**Description:** Extend `code_index_states` as in the plan's "Migration 0033" section:
+**Description:** Extend `code_index_states` as in the plan's "Migration 0034" section
+(revision 0033 went to #145, which merged first; this migration follows it):
 
 - the columns `indexed_default_branch`, `exclusions_digest`, `stored_bytes`,
   `pending_bytes`;
@@ -91,19 +92,19 @@ so that `tests/test_initial_migration.py` still sees no metadata↔migration dri
 
 Tests first:
 
-- edit the existing tests named by the plan: `_COLUMNS`, and head 0033 in the downgrade
+- edit the existing tests named by the plan: `_COLUMNS`, and head 0034 in the downgrade
   test;
 - also edit `tests/test_app_reinstall_schema_postgres.py:67-70` (hard-coded head
   `20261015_0032`) and `tests/test_code_index_store_postgres.py:495-502` (inserts
   `failed` + `parse_failed`, which the new `failed_code` CHECK rejects — use a
   `limit_exceeded:*` code);
-- round trip 0033 → 0032 → head;
+- round trip 0034 → 0033 → head;
 - one rejection test per new CHECK.
 
 **Acceptance criteria:**
 
-- [ ] `uv run alembic heads` shows exactly one head, `20261016_0033`
-  (`down_revision="20261015_0032"`). Upgrade → downgrade → upgrade passes on a clean
+- [ ] `uv run alembic heads` shows exactly one head, `20261017_0034`
+  (`down_revision="20261016_0033"`). Upgrade → downgrade → upgrade passes on a clean
   database.
 - [ ] The PG test asserts the exact `code_index_states` column set and rejects a row for
   each of the four CHECKs.
@@ -119,7 +120,7 @@ Tests first:
 
 **Files likely touched:**
 
-- `alembic/versions/20261016_0033_<slug>.py`;
+- `alembic/versions/20261017_0034_<slug>.py`;
 - `app/modules/code_index/infrastructure/models.py`;
 - `tests/test_code_index_store_postgres.py`.
 
@@ -250,7 +251,7 @@ The adapter constructor stays `(session)`; the store flushes and never commits.
 ### Checkpoint: PR 1 store
 
 - [ ] Gates are green; the focused PG run has zero skips; there is one Alembic head
-  `20261016_0033`.
+  `20261017_0034`.
 - [ ] Every PR 1 test named in the plan passes and asserts literal values.
 
 ### Task 5: Coordination comments, then PR 1 documentation
@@ -270,7 +271,7 @@ comment in each open PR that touches `docs/SYSTEM_DESIGN.md`. Planned: #124, #14
   - #124: https://github.com/larchanka-training/dmc-268-api-t6/pull/124#issuecomment-6214950766
   - #155: https://github.com/larchanka-training/dmc-268-api-t6/pull/155#issuecomment-6214951136
   - #148: https://github.com/larchanka-training/dmc-268-api-t6/pull/148#issuecomment-6214951477
-- [ ] Each documented column matches migration 0033.
+- [ ] Each documented column matches migration 0034.
 
 **Verification:** Run the common verification block.
 
