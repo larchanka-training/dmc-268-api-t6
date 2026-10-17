@@ -2,12 +2,14 @@
 # shellcheck source-path=SCRIPTDIR
 # Deploy the monitoring stack on the host (docs/MONITORING.md). Run as root after the application
 # deploy: it reads the application's .env and joins its network, and changes neither, except the
-# two read-only PostgreSQL roles it keeps in sync (grafana_reader, metrics_exporter).
+# PostgreSQL roles it keeps in sync: grafana_reader and metrics_exporter (read-only, metadata
+# columns) and backup_agent (pg_read_all_data for pg_dump of the pg-backup service).
 #
 # Inputs (environment):
 #   API_DIR                    application dir with .env and env-file.sh (/opt/dmc-268-api-staging)
 #   MONITORING_DIR             this stack's dir, default: the directory of this script
 #   GRAFANA_ROOT_URL           public Grafana URL in edge mode (https://grafana.<APP_DOMAIN>/)
+#   BACKUP_DIR                 host dir of the PostgreSQL dumps, default /var/backups/dmc-268/<project>
 #   ALERT_TELEGRAM_BOT_TOKEN   } both set: alerts go to that Telegram chat; both empty: alerts are
 #   ALERT_TELEGRAM_CHAT_ID     } not delivered; unset: keep the previous alert config (manual run)
 set -euo pipefail
@@ -23,8 +25,9 @@ ENV_FILE="${MONITORING_DIR}/.env"
 GRAFANA_ALIAS="${GRAFANA_ALIAS:-grafana-staging}"
 # Container name of the edge proxy (project dmc-268-edge): unambiguous on the shared network.
 CADDY_METRICS_TARGET="${CADDY_METRICS_TARGET:-dmc-268-edge-caddy-1:9180}"
-# Alertmanager and Prometheus run as nobody.
+# Alertmanager and Prometheus run as nobody; pg-backup as postgres of the alpine image.
 NOBODY_UID=65534
+POSTGRES_IMAGE_UID=70
 
 # On the host env-file.sh is uploaded next to this script; in the repository it is a sibling dir.
 if [[ -f "${SCRIPT_DIR}/env-file.sh" ]]; then
@@ -145,6 +148,9 @@ unset ALERT_TELEGRAM_BOT_TOKEN
 GRAFANA_ADMIN_PASSWORD="$(stack_password GRAFANA_ADMIN_PASSWORD)"
 GRAFANA_DB_PASSWORD="$(stack_password GRAFANA_DB_PASSWORD)"
 PG_EXPORTER_PASSWORD="$(stack_password PG_EXPORTER_PASSWORD)"
+PG_BACKUP_PASSWORD="$(stack_password PG_BACKUP_PASSWORD)"
+# Dumps of the application database, outside every stack dir (docs/MONITORING.md §9).
+BACKUP_DIR="${BACKUP_DIR:-/var/backups/dmc-268/${API_PROJECT}}"
 
 # Read-only roles. Grants are rebuilt on every deploy: REVOKE on a table also drops its column
 # privileges, so the list below is exactly what the roles can read. No column holds review
@@ -164,6 +170,9 @@ BEGIN
   IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'metrics_exporter') THEN
     CREATE ROLE metrics_exporter LOGIN;
   END IF;
+  IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'backup_agent') THEN
+    CREATE ROLE backup_agent LOGIN;
+  END IF;
 END
 \$\$;
 ALTER ROLE grafana_reader WITH LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION CONNECTION LIMIT 5;
@@ -181,12 +190,18 @@ GRANT SELECT (id, state, trigger, engine, attempt, error_code, available_at, cre
 GRANT SELECT (run_id, tool, started_at, duration_ms) ON run_actions TO grafana_reader, metrics_exporter;
 GRANT SELECT (provider, model, operation, tokens_in, tokens_out, cache_read_tokens, cost_usd, created_at)
   ON usage_events TO grafana_reader;
+-- pg-backup: reads everything for pg_dump; CREATEDB only for the scratch database of the restore
+-- check, which it creates, owns and drops. No superuser, no write access to the application data.
+ALTER ROLE backup_agent WITH LOGIN NOSUPERUSER CREATEDB NOCREATEROLE NOREPLICATION CONNECTION LIMIT 3;
+GRANT pg_read_all_data TO backup_agent;
+GRANT CONNECT ON DATABASE "${POSTGRES_DB}" TO backup_agent;
 SQL
 # Passwords through stdin, never argv; output and errors are dropped because psql would echo the
 # failing statement, password included.
 if ! run_psql >/dev/null 2>&1 <<SQL
 ALTER ROLE grafana_reader PASSWORD '${GRAFANA_DB_PASSWORD}';
 ALTER ROLE metrics_exporter PASSWORD '${PG_EXPORTER_PASSWORD}';
+ALTER ROLE backup_agent PASSWORD '${PG_BACKUP_PASSWORD}';
 SQL
 then
   echo "failed to set the passwords of the monitoring roles in PostgreSQL" >&2
@@ -196,7 +211,12 @@ fi
 umask 077
 mkdir -p "${MONITORING_DIR}/alertmanager/secrets" "${MONITORING_DIR}/prometheus/targets" \
   "${MONITORING_DIR}/textfile"
+# pg-backup writes its metrics here; node-exporter (nobody) reads them.
+chown "${POSTGRES_IMAGE_UID}:${POSTGRES_IMAGE_UID}" "${MONITORING_DIR}/textfile"
 chmod 755 "${MONITORING_DIR}/textfile"
+mkdir -p "${BACKUP_DIR}"
+chown "${POSTGRES_IMAGE_UID}:${POSTGRES_IMAGE_UID}" "${BACKUP_DIR}"
+chmod 700 "${BACKUP_DIR}"
 
 TOKEN_FILE="${MONITORING_DIR}/alertmanager/secrets/telegram_bot_token"
 AM_CONFIG="${MONITORING_DIR}/alertmanager/alertmanager.yml"
@@ -237,9 +257,9 @@ chmod 644 "${CADDY_TARGETS}.tmp"
 mv -f "${CADDY_TARGETS}.tmp" "${CADDY_TARGETS}"
 # Read by nobody (Prometheus) and grafana (uid 472) through read-only mounts.
 find "${MONITORING_DIR}/prometheus" "${MONITORING_DIR}/grafana" "${MONITORING_DIR}/postgres-exporter" \
-  "${MONITORING_DIR}/alertmanager/templates" -type d -exec chmod 755 {} +
+  "${MONITORING_DIR}/alertmanager/templates" "${MONITORING_DIR}/backup" -type d -exec chmod 755 {} +
 find "${MONITORING_DIR}/prometheus" "${MONITORING_DIR}/grafana" "${MONITORING_DIR}/postgres-exporter" \
-  "${MONITORING_DIR}/alertmanager/templates" -type f -exec chmod 644 {} +
+  "${MONITORING_DIR}/alertmanager/templates" "${MONITORING_DIR}/backup" -type f -exec chmod 644 {} +
 
 {
   printf 'API_NETWORK=%s\n' "$(escape_compose_value "${API_NETWORK}")"
@@ -248,6 +268,8 @@ find "${MONITORING_DIR}/prometheus" "${MONITORING_DIR}/grafana" "${MONITORING_DI
   printf 'GRAFANA_ADMIN_PASSWORD=%s\n' "${GRAFANA_ADMIN_PASSWORD}"
   printf 'GRAFANA_DB_PASSWORD=%s\n' "${GRAFANA_DB_PASSWORD}"
   printf 'PG_EXPORTER_PASSWORD=%s\n' "${PG_EXPORTER_PASSWORD}"
+  printf 'PG_BACKUP_PASSWORD=%s\n' "${PG_BACKUP_PASSWORD}"
+  printf 'BACKUP_DIR=%s\n' "$(escape_compose_value "${BACKUP_DIR}")"
   printf 'GRAFANA_ROOT_URL=%s\n' "$(escape_compose_value "${GRAFANA_ROOT_URL}")"
   printf 'GRAFANA_COOKIE_SECURE=%s\n' "${GRAFANA_COOKIE_SECURE}"
   printf 'GRAFANA_ALIAS=%s\n' "$(escape_compose_value "${GRAFANA_ALIAS}")"
@@ -256,6 +278,7 @@ find "${MONITORING_DIR}/prometheus" "${MONITORING_DIR}/grafana" "${MONITORING_DI
   printf 'ALERTMANAGER_CONFIG_DIGEST=%s\n' "$(config_digest alertmanager)"
   printf 'GRAFANA_CONFIG_DIGEST=%s\n' "$(config_digest grafana/provisioning)"
   printf 'POSTGRES_EXPORTER_CONFIG_DIGEST=%s\n' "$(config_digest postgres-exporter)"
+  printf 'PG_BACKUP_CONFIG_DIGEST=%s\n' "$(config_digest backup)"
 } > "${ENV_FILE}.tmp"
 chmod 600 "${ENV_FILE}.tmp"
 mv -f "${ENV_FILE}.tmp" "${ENV_FILE}"
