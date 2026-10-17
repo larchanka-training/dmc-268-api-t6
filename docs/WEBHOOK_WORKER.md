@@ -596,10 +596,10 @@ after A becomes terminal. Nor can it under `always` or `never`: the sweep select
 repositories with `wait_for_ci = auto`. In these cases, a new push or label event gives another
 launch opportunity, subject to current eligibility, and so does a rerun from the UI
 (SYSTEM_DESIGN §6.7): it creates a Run on the PR's current head without a CI check, but answers
-409 while the PR has an active Run, A with cancellation requested included (its other refusals:
-SYSTEM_DESIGN §6.7), so it works only once A is terminal. A's original check-run still promises
-review for the new commit
-(`В PR новый коммит — ревью будет для него.`) and carries no portal link.
+409 while the PR has an active Run, A with cancellation requested included (other refusals:
+PIPELINE_SPEC T3), so it works only once A is terminal. A's original check-run still promises
+review for the new commit (`В PR новый коммит — ревью будет для него.`) and carries no portal
+link.
 Expiry has no UI or check-run alert; the WARNING is its only failure signal.
 
 The 30-second retry interval allows approximately 120 wait polls per hour. Each CI receipt
