@@ -294,7 +294,7 @@ def test_each_retry_queue_returns_the_message_to_index_repo(broker: str) -> None
         try:
             channel = await connection.channel(publisher_confirms=True, on_return_raises=True)
             await declare_topology(channel, SHORT_DELAYS)
-            publisher = await IndexQueuePublisher.open(channel, SHORT_DELAYS)
+            publisher = await IndexQueuePublisher.open(channel, SHORT_DELAYS, lease_waits=2)
             queue = await (await connection.channel()).get_queue("index.repo", ensure=False)
             returned = []
             for key in ("30s", "2m", "10m"):
@@ -340,7 +340,7 @@ def test_an_invalid_message_or_a_foreign_id_goes_to_the_dlq(broker: str) -> None
         try:
             channel = await connection.channel(publisher_confirms=True, on_return_raises=True)
             await declare_topology(channel, RetryDelays())
-            publisher = await IndexQueuePublisher.open(channel, RetryDelays())
+            publisher = await IndexQueuePublisher.open(channel, RetryDelays(), lease_waits=2)
             exchange = await channel.get_exchange("code_index", ensure=False)
             consuming = await connection.channel()
             queue = await consuming.get_queue("index.repo", ensure=False)
@@ -358,6 +358,48 @@ def test_an_invalid_message_or_a_foreign_id_goes_to_the_dlq(broker: str) -> None
 
     assert asyncio.run(scenario()) == bodies
     assert calls == []
+
+
+@pytest.mark.integration
+def test_a_copy_into_a_deleted_retry_queue_runs_the_job_three_times_then_dead_letters(
+    broker: str,
+) -> None:
+    # Retry TTLs change by deleting and redeclaring the queues: a worker that still runs
+    # in between publishes its copy into nothing, and the broker returns it.
+    calls: list[UUID] = []
+
+    async def handler(repository_id: UUID, generation: int) -> BuildOutcome:
+        calls.append(repository_id)
+        return BuildOutcome(BuildStatus.BUSY)
+
+    async def scenario() -> tuple[bool, bool]:
+        connection = await aio_pika.connect(broker)
+        try:
+            channel = await connection.channel(publisher_confirms=True, on_return_raises=True)
+            await declare_topology(channel, RetryDelays())
+            publisher = await IndexQueuePublisher.open(channel, RetryDelays(), lease_waits=2)
+            consuming = await connection.channel()
+            await consuming.queue_delete("index.repo.retry.30s")
+            queue = await consuming.get_queue("index.repo", ensure=False)
+            dlq = await consuming.get_queue("code_index.dlq", ensure=False)
+            message = IndexRepoMessage.wake(uuid4(), 1, datetime.now(UTC))
+            await (await channel.get_exchange("code_index", ensure=False)).publish(
+                aio_pika.Message(
+                    json.dumps(message.wire()).encode(), message_id=str(message.message_id)
+                ),
+                "index.repo",
+            )
+            for _ in range(3):
+                await handle_index_delivery(await _next(queue), handler, publisher)
+            letter = await _next(dlq)
+            await letter.ack()
+            left = await queue.get(no_ack=True, fail=False)
+            return json.loads(letter.body) == message.wire(), left is None
+        finally:
+            await connection.close()
+
+    assert asyncio.run(scenario()) == (True, True)
+    assert len(calls) == 3
 
 
 # --- a job through the queue ------------------------------------------------------

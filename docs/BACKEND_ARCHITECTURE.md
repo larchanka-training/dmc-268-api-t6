@@ -353,7 +353,9 @@ docker compose up -d worker        # сервис worker в docker-compose.yml
 (по умолчанию `hostname:pid`) пишется в `runs.worker_id`, `PORTAL_URL` даёт ссылку на
 прогон в check-run. `CODE_INDEX_*` (#142) настраивают индексатор графа: все необязательны,
 значения по умолчанию — в коде (`.env.example`), недопустимое значение не даёт процессу
-стартовать.
+стартовать. Их видит worker, запущенный через `uv run --env-file .env`; у `worker` в
+`docker-compose.yml` и `deploy/compose/staging.yml` фиксированный список `environment:`,
+и значение туда нужно добавить.
 
 При старте worker объявляет топологию SD §7.1 целиком — ревью
 ([amqp.py](../app/modules/reviews/infrastructure/amqp.py)) и, на своём confirm-канале,
