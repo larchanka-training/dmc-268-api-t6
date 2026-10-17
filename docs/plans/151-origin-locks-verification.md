@@ -148,6 +148,18 @@ This behavior-preserving refactor retains their selects/guards and existing
 public behavior regressions; extending the concurrency matrix is a separate
 focused task, beyond #151 P3-5's acceptance criteria.
 
+Closed 2026-10-17 by [#164](https://github.com/larchanka-training/dmc-268-api-t6/issues/164)
+part 1: the deferred concurrency cases for `finish`, `requeue`,
+`complete_publication` and `save_context_payload` now exist in
+`tests/test_run_lifecycle_origin_concurrency_postgres.py`, one test per operation,
+each parametrized over `revoke` and `rebind` (8 cases):
+`test_finish_waits_for_revoke_or_rebind_then_cancels_the_owned_attempt`,
+`test_requeue_waits_for_revoke_or_rebind_then_cancels_instead_of_queueing`,
+`test_complete_publication_waits_for_revoke_or_rebind_then_cancels_without_payload_writes`,
+`test_save_context_payload_waits_for_revoke_or_rebind_then_refuses_the_write`.
+Evidence: temporary helper mutations M1 (no installation lock) and M2 (Repository
+locked before installation) turn all 8 cases red, and the restored helper is green.
+
 Follow-up required gates on this working tree: `uv run ruff check .` passed;
 `uv run ruff format --check .` reports 434 files formatted; `uv run mypy .`
 reports no issues in 431 source files. Full `uv run pytest` with dedicated
