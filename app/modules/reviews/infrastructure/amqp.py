@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from functools import cache
 from pathlib import Path
 from time import monotonic
-from typing import Any
+from typing import Any, Protocol
 from uuid import UUID
 
 import aio_pika
@@ -181,45 +181,58 @@ class AmqpQueuePublisher:
         attempts: int,
     ) -> bool:
         """Report a completed handoff only after both publisher confirm and original ACK."""
-        routing_key = getattr(message, "routing_key", "") or ""
-        headers = dict(getattr(message, "headers", None) or {})
-        headers["x-attempt"] = attempts
-        try:
-            await self._reviews.publish(
-                aio_pika.Message(
-                    body=message.body,
-                    headers=headers,
-                    priority=getattr(message, "priority", 0) or 0,
-                    message_id=getattr(message, "message_id", None),
-                    correlation_id=getattr(message, "correlation_id", None),
-                    content_type=getattr(message, "content_type", None),
-                    delivery_mode=aio_pika.DeliveryMode.PERSISTENT,
-                ),
-                routing_key=routing_key,
-            )
-        except Exception:
-            _LOGGER.exception(
-                "Failed to republish message %s with attempt header; falling back to nack",
-                message.message_id,
-            )
-            try:
-                await message.nack(requeue=True)
-            except Exception:
-                _LOGGER.exception(
-                    "Failed to nack message %s after republish error",
-                    message.message_id,
-                )
-            return False
+        return await republish_with_attempt(self._reviews, message, attempts)
 
+
+async def republish_with_attempt(
+    exchange: AbstractExchange,
+    message: AbstractIncomingMessage,
+    attempts: int,
+) -> bool:
+    """Republish a copy with ``x-attempt`` under the delivery's own routing key, then ACK it.
+
+    True only after both the publisher confirm and the original ACK; a failed publish
+    falls back to ``nack(requeue=True)``.
+    """
+    routing_key = getattr(message, "routing_key", "") or ""
+    headers = dict(getattr(message, "headers", None) or {})
+    headers["x-attempt"] = attempts
+    try:
+        await exchange.publish(
+            aio_pika.Message(
+                body=message.body,
+                headers=headers,
+                priority=getattr(message, "priority", 0) or 0,
+                message_id=getattr(message, "message_id", None),
+                correlation_id=getattr(message, "correlation_id", None),
+                content_type=getattr(message, "content_type", None),
+                delivery_mode=aio_pika.DeliveryMode.PERSISTENT,
+            ),
+            routing_key=routing_key,
+        )
+    except Exception:
+        _LOGGER.exception(
+            "Failed to republish message %s with attempt header; falling back to nack",
+            message.message_id,
+        )
         try:
-            await message.ack()
+            await message.nack(requeue=True)
         except Exception:
             _LOGGER.exception(
-                "Failed to ack message %s after republish",
+                "Failed to nack message %s after republish error",
                 message.message_id,
             )
-            return False
-        return True
+        return False
+
+    try:
+        await message.ack()
+    except Exception:
+        _LOGGER.exception(
+            "Failed to ack message %s after republish",
+            message.message_id,
+        )
+        return False
+    return True
 
 
 def _decode[T: BaseModel](name: str, model: type[T], message: AbstractIncomingMessage) -> T | None:
@@ -239,7 +252,10 @@ MAX_UNEXPECTED_RETRIES: int = 3
 REQUEUE_ERROR_DELAY_SECONDS: float = 1.0
 MAX_LOCAL_RETRY_ENTRIES: int = 1024
 LOCAL_RETRY_TTL_SECONDS: float = 300.0
-# Only an unconfirmed handoff needs local fallback state. Insertion order is expiry order.
+# Only an unconfirmed handoff needs local fallback state. An `index.repo` entry lives for a
+# lease (#142), so insertion order is not expiry order.
+# CONTRACT: a read counts an entry only before its expiry; the prune is best-effort (it
+# stops at the first live entry), and MAX_LOCAL_RETRY_ENTRIES bounds what it leaves.
 _unexpected_delivery_attempts: dict[str, tuple[int, float]] = {}
 
 
@@ -261,22 +277,32 @@ def _prune_delivery_attempts() -> None:
         _unexpected_delivery_attempts.pop(oldest)
 
 
-def _remember_delivery_attempts(key: str, attempts: int) -> None:
+def _remember_delivery_attempts(
+    key: str, attempts: int, local_ttl_seconds: float | None = None
+) -> None:
+    """`None` reads `LOCAL_RETRY_TTL_SECONDS` now, not when the module was imported."""
+    ttl = LOCAL_RETRY_TTL_SECONDS if local_ttl_seconds is None else local_ttl_seconds
     _prune_delivery_attempts()
     _unexpected_delivery_attempts.pop(key, None)
     while len(_unexpected_delivery_attempts) >= MAX_LOCAL_RETRY_ENTRIES:
         _unexpected_delivery_attempts.pop(next(iter(_unexpected_delivery_attempts)))
-    _unexpected_delivery_attempts[key] = (attempts, monotonic() + LOCAL_RETRY_TTL_SECONDS)
+    _unexpected_delivery_attempts[key] = (attempts, monotonic() + ttl)
 
 
 def _clear_delivery_attempts(key: str) -> None:
     _unexpected_delivery_attempts.pop(key, None)
 
 
+def _local_delivery_attempts(key: str) -> int:
+    """The local count of a delivery; an expired entry counts as none."""
+    attempts, expires = _unexpected_delivery_attempts.get(key, (0, 0.0))
+    return attempts if expires > monotonic() else 0
+
+
 def _get_delivery_attempts(message: AbstractIncomingMessage) -> int:
     _prune_delivery_attempts()
     key = _delivery_key(message)
-    local_attempts = _unexpected_delivery_attempts.get(key, (0, 0.0))[0]
+    local_attempts = _local_delivery_attempts(key)
     broker_attempts = 0
     headers = getattr(message, "headers", None)
     if isinstance(headers, dict) and "x-attempt" in headers:
@@ -292,21 +318,32 @@ def _get_delivery_attempts(message: AbstractIncomingMessage) -> int:
     return max(broker_attempts, local_attempts) + 1
 
 
+class ErrorRepublisher(Protocol):
+    """The ``x-attempt`` handoff of one queue, as ``republish_with_attempt`` does it."""
+
+    async def republish_after_error(
+        self, message: AbstractIncomingMessage, attempts: int
+    ) -> bool: ...
+
+
 async def _requeue_after_error(
     message: AbstractIncomingMessage,
-    publisher: AmqpQueuePublisher,
+    publisher: ErrorRepublisher,
     max_retries: int = MAX_UNEXPECTED_RETRIES,
+    *,
+    dead_letter_queue: str = DEAD_LETTER_QUEUE,
+    local_ttl_seconds: float | None = None,
 ) -> None:
     key = _delivery_key(message)
     attempts = _get_delivery_attempts(message)
-    _remember_delivery_attempts(key, attempts)
+    _remember_delivery_attempts(key, attempts, local_ttl_seconds)
 
     if attempts >= max_retries:
         _LOGGER.error(
             "Message %s exceeded maximum unexpected retry attempts (%d); routing to DLQ %s",
             message.message_id,
             max_retries,
-            DEAD_LETTER_QUEUE,
+            dead_letter_queue,
             exc_info=True,
         )
         _clear_delivery_attempts(key)
@@ -325,6 +362,49 @@ async def _requeue_after_error(
 
     if await publisher.republish_after_error(message, attempts):
         _clear_delivery_attempts(key)
+
+
+# Public for the index queue (#142); both queues share the local fallback state per delivery.
+requeue_after_error = _requeue_after_error
+
+
+def forget_unexpected_attempts(message: AbstractIncomingMessage) -> None:
+    """Drop the local fallback count of a delivery that ended without an exception."""
+    _clear_delivery_attempts(_delivery_key(message))
+
+
+def count_unexpected_attempt(
+    message: AbstractIncomingMessage, *, local_ttl_seconds: float | None = None
+) -> int:
+    """Count one more failed pass of a delivery in the local fallback state; the number
+    of this pass, as `requeue_after_error` counts it."""
+    attempts = _get_delivery_attempts(message)
+    _remember_delivery_attempts(_delivery_key(message), attempts, local_ttl_seconds)
+    return attempts
+
+
+def current_unexpected_attempts(message: AbstractIncomingMessage) -> int:
+    """The failed passes counted for a delivery so far, this one not included:
+    max(a valid `x-attempt`, the live local count); 0 when there is none.
+
+    The index queue reads it on every deferral (#142), so an infinite double is an
+    invalid header here, not an `OverflowError` out of the handler.
+    """
+    _prune_delivery_attempts()
+    local_attempts = _local_delivery_attempts(_delivery_key(message))
+    broker_attempts = 0
+    headers = getattr(message, "headers", None)
+    if isinstance(headers, dict) and "x-attempt" in headers:
+        try:
+            broker_attempts = int(headers["x-attempt"])
+        except (ValueError, TypeError, OverflowError):
+            _LOGGER.warning(
+                "Invalid retry header %s=%r on message %s",
+                "x-attempt",
+                headers["x-attempt"],
+                message.message_id,
+            )
+    return max(broker_attempts, local_attempts)
 
 
 async def handle_run_delivery(

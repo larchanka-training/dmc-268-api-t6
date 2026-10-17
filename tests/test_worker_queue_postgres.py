@@ -44,6 +44,7 @@ from sqlalchemy.ext.asyncio import (
 from sqlalchemy.pool import NullPool
 from sqlalchemy.schema import CreateSchema, DropSchema
 
+import app.modules.code_index.infrastructure.amqp as index_amqp
 from alembic import command
 from app.bootstrap.reviews_api import get_run_repository
 from app.common.infrastructure.db.leader import run_as_leader
@@ -133,13 +134,22 @@ async def _reset_topology(url: str) -> None:
     connection = await aio_pika.connect(url)
     try:
         channel = await connection.channel()
-        names = [DEAD_LETTER_QUEUE, PUBLISH_QUEUE]
+        names = [DEAD_LETTER_QUEUE, PUBLISH_QUEUE, index_amqp.DEAD_LETTER_QUEUE, index_amqp.QUEUE]
         for engine in ENGINES:
             names.append(run_queue(engine))
             names.extend(retry_queue(key, engine) for key in RETRY_KEYS)
+        # The worker declares the index.repo topology too (#142).
+        names.extend(index_amqp.retry_queue(key) for key in RETRY_KEYS)
         for name in names:
             await channel.queue_delete(name)
-        for exchange in (EXCHANGE, RETRY_EXCHANGE, DEAD_LETTER_EXCHANGE):
+        for exchange in (
+            EXCHANGE,
+            RETRY_EXCHANGE,
+            DEAD_LETTER_EXCHANGE,
+            index_amqp.EXCHANGE,
+            index_amqp.RETRY_EXCHANGE,
+            index_amqp.DEAD_LETTER_EXCHANGE,
+        ):
             await channel.exchange_delete(exchange)
     finally:
         await connection.close()
@@ -920,7 +930,13 @@ def test_worker_without_github_app_starts_and_stays_healthy(
 
     with caplog.at_level(logging.WARNING):
         assert asyncio.run(scenario()) is True
-    assert "GITHUB_APP_ID or GITHUB_APP_PRIVATE_KEY is not set" in caplog.text
+    assert (
+        "GITHUB_APP_ID or GITHUB_APP_PRIVATE_KEY is not set: the no-CI sweep and "
+        "GitHub publication (reviews and check-runs) are disabled"
+    ) in caplog.text
+    assert (
+        "GITHUB_APP_ID or GITHUB_APP_PRIVATE_KEY is not set: the index.repo consumer is disabled"
+    ) in caplog.text
     assert "leader tick failed" not in caplog.text
 
 

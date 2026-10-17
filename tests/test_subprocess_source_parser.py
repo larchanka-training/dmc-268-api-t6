@@ -120,3 +120,23 @@ def test_cpu_budget_of_the_attempt_stops_further_parsing(
         "b.py": AstFailureReason.AST_FAILED,
         "c.py": AstFailureReason.AST_TIMEOUT,
     }
+
+
+def test_no_attempt_budget_leaves_only_the_per_file_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(subprocess_source_parser, "_WORKER_MODULE", "tests.ast_workers.greedy")
+
+    async def run() -> dict[str, AstFacts | AstFailureReason]:
+        parser = SubprocessSourceParser(attempt_cpu_seconds=None)
+        try:
+            return await parser.parse_many((_python("a.py"), _python("b.py"), _python("c.py")))
+        finally:
+            await parser.aclose()
+
+    # Nine CPU seconds in total: without the attempt budget every file is still parsed.
+    assert asyncio.run(run()) == {
+        "a.py": AstFailureReason.AST_FAILED,
+        "b.py": AstFailureReason.AST_FAILED,
+        "c.py": AstFailureReason.AST_FAILED,
+    }

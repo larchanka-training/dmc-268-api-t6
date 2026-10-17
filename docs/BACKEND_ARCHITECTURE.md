@@ -143,7 +143,13 @@ Application зависит от узких интерфейсов, сгрупп�
 одна строка на репозиторий, файлы, символы, рёбра, записи импортов;
 `repository_id NOT NULL` и `generation` на каждой строке, методов repositories без
 `repository_id` нет) и индексатором
-владеет новый модуль `code_index`; DDL и миграция (ревизия `20261015_0032`) — #141. Процесс индексатора —
+владеет новый модуль `code_index`; DDL и миграция (ревизия `20261015_0032`) — #141,
+колонки индексатора в `code_index_states` (ревизия `20261017_0034`: ветка и digest
+исключений публикации, оценки `stored_bytes` и `pending_bytes` для квот хранения) — #142.
+Захват lease, пакетная запись и публикация берут транзакционный advisory lock первым;
+захват и пакет читают под ним суммы по строкам состояния других репозиториев (живые
+lease, байты Workspace), но не их строки графа.
+Процесс индексатора —
 отдельный потребитель очереди `index.repo` (exchange `code_index`) со своим каналом
 и prefetch в процессе `worker`, не в `webhook-worker` и не в потребителе
 `review.run`; вынос в отдельный сервис того же образа контракт не меняет. Сверку с
@@ -342,17 +348,25 @@ docker compose up -d worker        # сервис worker в docker-compose.yml
 все три попытки (`llm_unavailable` ретраится) и завершается `failed` с сообщением о
 ненастроенном шлюзе; `GITHUB_APP_ID` и
 `GITHUB_APP_PRIVATE_KEY` необязательны: без них процесс стартует, пишет предупреждение,
-а sweep «2 мин без CI» и публикация в GitHub (ревью и check-run) выключены. `WORKER_ID`
+а sweep «2 мин без CI», публикация в GitHub (ревью и check-run) и consumer `index.repo`
+выключены. `WORKER_ID`
 (по умолчанию `hostname:pid`) пишется в `runs.worker_id`, `PORTAL_URL` даёт ссылку на
-прогон в check-run.
+прогон в check-run. `CODE_INDEX_*` (#142) настраивают индексатор графа: все необязательны,
+значения по умолчанию — в коде (`.env.example`), недопустимое значение не даёт процессу
+стартовать. Их видит worker, запущенный через `uv run --env-file .env`; у `worker` в
+`docker-compose.yml` и `deploy/compose/staging.yml` фиксированный список `environment:`,
+и значение туда нужно добавить.
 
-При старте worker объявляет топологию SD §7.1 целиком
-([amqp.py](../app/modules/reviews/infrastructure/amqp.py)) и запускает три задачи:
+При старте worker объявляет топологию SD §7.1 целиком — ревью
+([amqp.py](../app/modules/reviews/infrastructure/amqp.py)) и, на своём confirm-канале,
+`code_index` ([amqp.py](../app/modules/code_index/infrastructure/amqp.py),
+[code_index_worker.py](../app/bootstrap/code_index_worker.py)) — и запускает четыре задачи:
 
 | Задача | Что делает | Use case |
 |---|---|---|
 | consumer `review.run.fast` (prefetch 1) | RunGuard, claim по lease, попытка под watchdog, retry и DLQ | [HandleReviewRun](../app/modules/reviews/application/handle_review_run.py) |
 | consumer `review.publish` (prefetch 1) | T14-T16: ревью в GitHub, check-run | [PublishRunReview](../app/modules/reviews/application/publish_run_review.py) |
+| consumer `index.repo` (prefetch 1, #142) | задание графа RAG: claim lease, HEAD default branch, архив, публикация; retry и DLQ по исходу (SD §7.4). Свой `SubprocessSourceParser` и HTTP-клиент GitHub; без GitHub App не запускается | [BuildRepositoryIndex](../app/modules/code_index/application/build_index.py) |
 | лидер-цикл (`pg_advisory_lock`, 30 с) | sweep «2 мин без CI» и повторная отправка outbox (`message_published_at IS NULL`, сигналы отмены T6) | `SweepNoCi`, `TryEnqueueWebhookRun.replay_pending_publications` |
 
 Consumer `review.run.deep` не запускается, очередь только объявляется. Реконсилер

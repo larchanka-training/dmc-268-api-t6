@@ -56,6 +56,12 @@ services:
   worker:
     image: ${IMAGE:?IMAGE is required}
     command: ["python", "-m", "app.worker"]
+    # Also the index.repo consumer (#142). CODE_INDEX_* keep their code defaults here:
+    # worker.env is rebuilt from the allowlist in deploy/scripts/env-file.sh, so a value
+    # changes only under environment: below (or by adding it to that allowlist).
+    # No mem_limit. An estimate, not a bound: a job holds its archive (<= 100 MiB) and a
+    # batch of parsed files (<= 12.5 MiB); the parser subprocess may map 128 MiB over its
+    # start size (RLIMIT_AS). Measured locally: an idle worker ~110 MiB.
     # app.env: GitHub App credentials; worker.env: LLM gateway and portal links (docs/SECRETS.md).
     env_file:
       - app.env

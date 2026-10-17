@@ -953,6 +953,48 @@ def test_retry_fallback_entries_expire_after_five_minutes(
         assert delivery.nacked == [True]
 
 
+def test_the_retry_fallback_ttl_is_read_when_an_entry_is_stored(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(amqp, "REQUEUE_ERROR_DELAY_SECONDS", 0.0)
+    monkeypatch.setattr(amqp, "LOCAL_RETRY_TTL_SECONDS", 10.0)
+    now = 1000.0
+    monkeypatch.setattr(amqp, "monotonic", lambda: now, raising=False)
+    amqp._unexpected_delivery_attempts.clear()
+    publisher, _ = fake_publisher(OfflineExchange())
+    asyncio.run(_fail_retry_delivery(Delivery(VALID, message_id="short"), publisher))
+    now = 1010.0
+    for _ in range(2):
+        delivery = Delivery(VALID, message_id="short")
+        asyncio.run(_fail_retry_delivery(delivery, publisher))
+        assert delivery.nacked == [True]
+
+
+def test_a_review_entry_behind_a_longer_index_entry_still_expires_after_five_minutes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(amqp, "REQUEUE_ERROR_DELAY_SECONDS", 0.0)
+    now = 1000.0
+    monkeypatch.setattr(amqp, "monotonic", lambda: now, raising=False)
+    amqp._unexpected_delivery_attempts.clear()
+    publisher, _ = fake_publisher(OfflineExchange())
+    # #142: an index.repo entry lives for a lease, and it is stored first.
+    wake = cast(
+        AbstractIncomingMessage, Delivery(b"{}", message_id="wake", routing_key="index.repo")
+    )
+    assert amqp.count_unexpected_attempt(wake, local_ttl_seconds=1200.0) == 1
+    now = 1001.0
+    asyncio.run(_fail_retry_delivery(Delivery(VALID, message_id="review"), publisher))
+    now = 1301.0
+    # Five minutes on, the review count has expired behind the live index entry: two new
+    # failures are not the terminal third attempt.
+    for _ in range(2):
+        delivery = Delivery(VALID, message_id="review")
+        asyncio.run(_fail_retry_delivery(delivery, publisher))
+        assert delivery.nacked == [True]
+    assert amqp.current_unexpected_attempts(wake) == 1
+
+
 @pytest.mark.parametrize("publish", [False, True])
 @pytest.mark.parametrize("ack_fails", [False, True])
 @pytest.mark.parametrize("message_id", ["retry-fallback", None])
@@ -984,3 +1026,91 @@ def test_retry_fallback_reaches_dlq_even_without_message_id(
     if ack_fails:
         assert [message.headers["x-attempt"] for message, _ in exchange.published] == [1, 2]
     assert len(amqp._unexpected_delivery_attempts) == 0
+
+
+# ---------- #142: the unexpected-error republish reused by the index queue ----------
+
+
+def test_republish_with_attempt_copies_the_delivery_onto_the_given_exchange() -> None:
+    exchange = FakeExchange()
+    delivery = Delivery(
+        b'{"schema":"index.repo/v1"}',
+        message_id="wake-1",
+        headers={"x-lease-wait": 1},
+        exchange="code_index",
+        routing_key="index.repo",
+    )
+
+    done = asyncio.run(
+        amqp.republish_with_attempt(
+            cast(AbstractExchange, exchange), cast(AbstractIncomingMessage, delivery), 2
+        )
+    )
+
+    assert done is True
+    assert delivery.acked is True and delivery.nacked == []
+    [(message, routing_key)] = exchange.published
+    assert routing_key == "index.repo"
+    assert message.body == b'{"schema":"index.repo/v1"}'
+    assert message.headers == {"x-lease-wait": 1, "x-attempt": 2}
+    assert message.message_id == "wake-1"
+    assert message.delivery_mode == aio_pika.DeliveryMode.PERSISTENT
+
+
+def test_republish_with_attempt_falls_back_to_nack_requeue_when_the_publish_fails() -> None:
+    delivery = Delivery(b"{}", message_id="wake-2", routing_key="index.repo")
+
+    done = asyncio.run(
+        amqp.republish_with_attempt(
+            cast(AbstractExchange, OfflineExchange()), cast(AbstractIncomingMessage, delivery), 1
+        )
+    )
+
+    assert done is False
+    assert delivery.acked is False and delivery.nacked == [True]
+
+
+def test_republish_after_error_publishes_onto_the_reviews_exchange() -> None:
+    reviews, retry = FakeExchange(), FakeExchange()
+    publisher = amqp.AmqpQueuePublisher(
+        cast(AbstractExchange, reviews), cast(AbstractExchange, retry)
+    )
+    delivery = Delivery(VALID, message_id="m-delegate")
+
+    done = asyncio.run(publisher.republish_after_error(cast(AbstractIncomingMessage, delivery), 1))
+
+    assert done is True and delivery.acked is True
+    assert [routing_key for _, routing_key in reviews.published] == ["review.run.fast"]
+    assert retry.published == []
+
+
+@pytest.mark.parametrize(
+    ("dead_letter_queue", "named"),
+    [(None, "reviews.dlq"), ("code_index.dlq", "code_index.dlq")],
+)
+def test_requeue_after_error_names_the_dead_letter_queue_on_the_third_attempt(
+    caplog: pytest.LogCaptureFixture, dead_letter_queue: str | None, named: str
+) -> None:
+    amqp._unexpected_delivery_attempts.clear()
+    publisher, exchange = fake_publisher()
+    delivery = Delivery(
+        b"{}", message_id="wake-3", headers={"x-attempt": 2}, routing_key="index.repo"
+    )
+    incoming = cast(AbstractIncomingMessage, delivery)
+
+    with caplog.at_level(logging.ERROR):
+        if dead_letter_queue is None:
+            asyncio.run(amqp.requeue_after_error(incoming, publisher))
+        else:
+            asyncio.run(
+                amqp.requeue_after_error(incoming, publisher, dead_letter_queue=dead_letter_queue)
+            )
+
+    assert delivery.nacked == [False] and not delivery.acked
+    assert exchange.published == []
+    assert f"exceeded maximum unexpected retry attempts (3); routing to DLQ {named}" in caplog.text
+    assert len(amqp._unexpected_delivery_attempts) == 0
+
+
+def test_requeue_after_error_is_the_review_queue_implementation() -> None:
+    assert amqp.requeue_after_error is amqp._requeue_after_error

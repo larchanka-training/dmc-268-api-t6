@@ -101,10 +101,10 @@ flowchart TB
     auth["<b>Auth API</b><br/><i>[Container: FastAPI]</i><br/>вход через GitHub App,<br/>JWT и refresh, Workspace (Р-7)"]
     hook["<b>Webhook API</b><br/><i>[Container: FastAPI]</i><br/>GitHub HMAC, квитанция в webhook_events<br/>(идемпотентность по delivery_id), ack < 500 мс"]
     ww["<b>webhook-worker</b><br/><i>[Container: Python]</i><br/>разбор квитанций раз в 30 с: проекция PR<br/>и лейбла ai-review, подключение репозиториев,<br/>схлопывание Р-2, триггер Р-10 (#52)"]
-    worker["<b>AI Worker</b><br/><i>[Container: Python + aio-pika]</i><br/>сборщик контекста (4 уровня) → LLM Gateway<br/>→ постобработка → трейс"]
+    worker["<b>AI Worker</b><br/><i>[Container: Python + aio-pika]</i><br/>сборщик контекста (4 уровня) → LLM Gateway<br/>→ постобработка → трейс;<br/>индексатор графа RAG (#142)"]
     pub["<b>GitHub Publisher</b><br/><i>[Container: Python + aio-pika]</i><br/>валидация координат, одно ревью и check-run"]
     sandbox["<b>Sandbox Runner</b><br/><i>[Container: Docker, --network=none]</i><br/>SandboxEngine · фаза 3"]
-    mq[("<b>RabbitMQ</b><br/><i>[AMQP 0-9-1]</i><br/>reviews (direct), retry и DLX")]
+    mq[("<b>RabbitMQ</b><br/><i>[AMQP 0-9-1]</i><br/>reviews и code_index (direct),<br/>retry и DLX")]
     pg[("<b>PostgreSQL 17</b><br/><i>[SQLAlchemy 2 + Alembic]</i><br/>источник истины")]
     redis[("<b>Redis</b><br/>токены, блобы, AST, дерево репо")]
   end
@@ -126,10 +126,11 @@ flowchart TB
   auth -->|"пользователи,<br/>refresh-токены"| pg
 
   mq -->|"review.run.fast / .deep<br/>prefetch=1"| worker
-  worker -->|"diff, blobs, tree · REST"| gh
+  mq -->|"index.repo<br/>prefetch=1 (#142)"| worker
+  worker -->|"diff, blobs, tree, tarball · REST"| gh
   worker -->|"промпт → находки"| llm
   worker -->|"блобы, AST"| redis
-  worker -->|"context_payloads, findings,<br/>run_actions, usage_events"| pg
+  worker -->|"context_payloads, findings,<br/>run_actions, usage_events,<br/>code_index_*"| pg
   worker -.->|"docker API · фаза 3"| sandbox
   worker -->|"review.publish"| mq
 
@@ -168,8 +169,9 @@ Workspace-пакет `database-migrator` запускается Compose-серв
 Диаграмма и раскладка выше — целевые. До разделения на сервисы (#16; скорее всего после
 этого спринта, отдельным рефакторингом) `portal-api`, `auth-api` и `webhook-api` —
 логические роли: их маршруты живут в одном FastAPI-приложении `app/main.py`, а `worker`
-(в MVP — вместе с consumer `review.publish`, §7.1) запускается отдельным процессом из
-того же образа. Отдельным процессом из того же образа запускается и `webhook-worker`
+(в MVP — вместе с consumer `review.publish`, §7.1, и индексатором графа, consumer
+`index.repo`, §7.4) запускается отдельным процессом из того же образа. Отдельным процессом
+из того же образа запускается и `webhook-worker`
 (`python -m app.webhook_worker`, Compose profile `webhooks`): он разбирает квитанции,
 которые маршрут `webhook-api` записал в `webhook_events`, создаёт Run и публикует их в очередь
 ревью, поэтому требует PostgreSQL, RabbitMQ (`RABBITMQ_URL`) и GitHub App (ID, приватный ключ,
@@ -761,8 +763,11 @@ sequenceDiagram
 | `reviews` | direct | `review.publish` | `review.publish` | GitHub Publisher (в MVP — consumer в процессе worker) | durable, DLX |
 | `reviews.retry` | direct | `retry.{30s,2m,10m}.{fast,deep}` | с тем же именем | — | `x-message-ttl`, `x-dead-letter-exchange=reviews`, `x-dead-letter-routing-key=review.run.{engine}` (отложенный повтор без плагина; PIPELINE_SPEC §4.3) |
 | `reviews.dlx` | fanout | — | `reviews.dlq` | оператор | хранение 7 дней |
+| `code_index` | direct | `index.repo` | `index.repo` | индексатор графа RAG — consumer в процессе worker (#142, §7.4) | durable, без приоритетов, DLX → `code_index.dlx` |
+| `code_index.retry` | direct | `index.repo.retry.{30s,2m,10m}` | с тем же именем | — | `x-message-ttl` из тех же задержек, `x-dead-letter-exchange=code_index`, `x-dead-letter-routing-key=index.repo` (PIPELINE_SPEC §4.3) |
+| `code_index.dlx` | fanout | — | `code_index.dlq` | оператор | хранение 7 дней |
 
-Параметры: сообщения `delivery_mode=2`, publisher confirms включены, `prefetch_count=1` на run-очередях (задачи длинные и неравные), ack **только после** фиксации состояния в PostgreSQL, `consumer_timeout=45min` (попытка в `running` — не дольше 28 мин с учётом lease и реконсилера, PIPELINE_SPEC §3). Retry, lease и таймауты — PIPELINE_SPEC §3–§4.
+Параметры: сообщения `delivery_mode=2`, publisher confirms включены, `prefetch_count=1` на run-очередях (задачи длинные и неравные), ack **только после** фиксации состояния в PostgreSQL, `consumer_timeout=45min` (попытка в `running` — не дольше 28 мин с учётом lease и реконсилера, PIPELINE_SPEC §3). Retry, lease и таймауты — PIPELINE_SPEC §3–§4. У `index.repo` (#142) тоже `prefetch_count=1`: ack — после задания индекса, дедлайн которого (не больше 1500 с) ниже `consumer_timeout`; исходы, задержки и кто объявляет топологию `code_index` — §7.4, PIPELINE_SPEC §4.6.
 
 Пока отдельного сервиса `publisher` нет, очередь `review.publish` потребляет отдельный
 consumer в worker. Текущий wire envelope — `review.publish/v1`; новый профиль
@@ -779,6 +784,7 @@ legacy/диагностическим полем и не определяет и
 |---|---|---|---|
 | `review.run/v1` | [`contracts/schemas/review.run.v1.schema.json`](../contracts/schemas/review.run.v1.schema.json) · [`contracts/examples/review.run.v1.json`](../contracts/examples/review.run.v1.json) | webhook-worker (#52), Portal API (rerun, реконсилер), worker (sweep) → AI Worker | `schema`, `message_id` (= `run_id`, ключ идемпотентности), `run_id`, `workspace_id`, `installation_id`, `repo {id, provider, external_id, full_name}`, `pr {number, head_sha, base_sha, base_ref}`, `engine`, `rule_version_id`, `prompt_version_id`, `trigger`, `attempt`, `requested_at` |
 | `review.publish/v1` | [`contracts/schemas/review.publish.v1.schema.json`](../contracts/schemas/review.publish.v1.schema.json) · [`contracts/examples/review.publish.v1.json`](../contracts/examples/review.publish.v1.json) | AI Worker, реконсилер → GitHub Publisher (в MVP — consumer в worker) | Текущий envelope: `schema`, `message_id`, `run_id`, `head_sha`, `findings_hash`, `review_event`; в новом профиле authoritative payload/identity загружаются по run_id, не восстанавливаются из текущей конфигурации |
+| `index.repo/v1` | [`contracts/schemas/index.repo.v1.schema.json`](../contracts/schemas/index.repo.v1.schema.json) · [`contracts/examples/index.repo.v1.json`](../contracts/examples/index.repo.v1.json) | worker (повторное пробуждение задания), триггеры #143 → индексатор графа в worker (#142) | `schema`, `message_id` (UUIDv5 от `repository_id:generation:requested_at`, свой у каждого пробуждения, §7.4), `repository_id`, `generation` (≥ 1), `attempt` (1–3), `requested_at`; коммита в сообщении нет — задание само читает HEAD default branch |
 
 ID — UUID без префиксов, как в БД; `findings_hash` — 64 hex; приоритет (rerun — 9) — свойство AMQP, а не поле. Отличия от прежних примеров этого раздела — PIPELINE_SPEC §12.
 
@@ -806,6 +812,58 @@ head-входы общего conventions cache и публикация raw summa
 - `deep` (SandboxEngine) относится к фазе 3: `PATCH /api/repos/{id}` принимает только `fast`, реконсилер не публикует в `review.run.deep`, очередь только объявляется (#52).
 - Installation-токены кэшируются в памяти процесса: в боевом runtime `InMemoryInstallationAccessTokenCache` создаётся в [`app/webhook_worker.py` → `run_forever`](../app/webhook_worker.py) и [`app/worker.py` → `github_adapters`](../app/worker.py). Боевой `worker.run_worker` вызывает `github_adapters` и использует `compose_worker_process` / `WorkerProcess`; фабрика создаёт один общий кэш для GitHub-адаптеров только при настроенном GitHub App и доступном HTTP-клиенте, иначе возвращает `None` с предупреждением. Третье место создания — [`app/worker.py` → `review_worker`](../app/worker.py), устаревший прототип из §16, вызываемый тестами: в нём кэш создаётся при отсутствии внедрённого `vcs_provider` и настроенном GitHub App. Кэши process-local: каждый процесс получает installation-токен и держит его до `expires_at` из ответа GitHub минус 60 с ([`InMemoryInstallationAccessTokenCache.get`, `_INSTALLATION_TOKEN_SAFETY_SKEW_SECONDS`](../app/modules/integrations/webhooks/infrastructure/github_installation_tree_provider.py)). Цель — Redis `token:{installation_id}` (§8.3, §10); перенос в Redis — бэклог, #62.
 - **Лимит повторов AMQP и маршрутизация в DLQ при неожиданных ошибках (#54).** Очереди `review.run.*` объявлены как классические очереди RabbitMQ из-за несовместимости `x-max-priority` с кворум-очередями брокера. Classic-очереди RabbitMQ не выставляют заголовок `x-delivery-count`. Доменные повторы отслеживаются через `runs.attempt` в PostgreSQL и проявляются в AMQP через `x-death` после возвращения из exchange `reviews.retry` и очередей задержки `retry.{30s,2m,10m}.{fast,deep}` (§6.8, §7.2). Для защиты от необработанных исключений потребителя вводится второй, отдельный счётчик повторов через заголовок `x-attempt`: он считает любые исключения, вылетевшие из обработчика, в обеих очередях (`review.run.*` и `review.publish`); гибель процесса не считается. При возникновении исключения обработчик воркера выполняет confirmed-перепубликацию копии сообщения с инкрементированным заголовком `x-attempt: attempts` через exchange `reviews` с последующим подтверждением `ack()` исходной доставки. Если перепубликация завершается ошибкой (сбой соединения или брокера), воркер перехватывает исключение и выполняет fallback на `nack(requeue=True)`. Заголовок `x-death` отложенных очередей не расходует бюджет неожиданных сбоев. Некорректные или повреждённые заголовки попыток логируются с уровнем `WARNING` и fallback на 1. При достижении порога `MAX_UNEXPECTED_RETRIES = 3` сообщение маршрутизируется в `reviews.dlq` через `nack(requeue=False)`, в лог пишется `ERROR` с полным `exc_info=True`, а локальный кэш попыток процесса очищается. Локальное fallback-состояние ограничено 1024 записями (`MAX_LOCAL_RETRY_ENTRIES`) с TTL 300 с от последнего сохранения (`LOCAL_RETRY_TTL_SECONDS`); истёкшие записи удаляются лениво при следующем обращении retry к состоянию, при заполнении вытесняются старейшие. Успешная confirmed-перепубликация и ack оригинала очищают локальную запись; ошибка publish или ack сохраняет ограниченный fallback. Между процессами счётчик переносит заголовок `x-attempt`. Без `message_id` локальный ключ — стабильный SHA-256 routing key и тела сообщения. Остаточные риски: 1) внезапная гибель процесса (SIGKILL, OOM-killer) не считается счётчиком, так как обработчик не успевает выполнить перепубликацию до падения процесса; 2) если копия опубликована, а `ack` оригинала упал, в очереди окажутся и оригинал, и копия; это безопасно благодаря идемпотентности обработчиков (Р-5, §7.2).
+
+### 7.4 Очередь index.repo (#142)
+
+Индексатор графа RAG (Р-13, [ADR 0001 §6](adr/0001-graph-rag-v1.md)) — отдельный consumer
+`index.repo` в процессе `worker`, рядом с consumers ревью. У него свои каналы, свой
+`SubprocessSourceParser` и свой HTTP-клиент GitHub, поэтому ревью не ждут задания индекса
+([code_index_worker.py](../app/bootstrap/code_index_worker.py)). Топологию `code_index`
+(§7.1) worker объявляет при старте на своём confirm-канале, отдельно от топологии ревью
+([code_index/infrastructure/amqp.py](../app/modules/code_index/infrastructure/amqp.py));
+без `GITHUB_APP_ID` и `GITHUB_APP_PRIVATE_KEY` он только объявляет её и очередь не
+потребляет. Публикаторы #143 берут те же имена и порт `IndexWakeups` (`AmqpIndexWakeups`);
+до #143 публикаторов нет, и consumer простаивает.
+
+`index.repo/v1` только будит задание репозитория: цель — HEAD default branch, которую
+задание читает при старте, поэтому задания одного репозитория сливаются. `message_id` —
+UUIDv5 от `repository_id:generation:requested_at` (текст `requested_at` из сообщения) в
+пространстве имён `MESSAGE_ID_NAMESPACE`: свой у каждого пробуждения. Копия при повторе
+сохраняет `message_id` и `requested_at`, меняется только `attempt`.
+
+Исход задания определяет действие с доставкой. Копия публикуется с publisher confirm, и
+только потом подтверждается оригинал. Неподтверждённая копия (например, удалена
+retry-очередь) оставляет оригинал брокеру (`nack(requeue=True)`) после паузы
+неожиданной ошибки. Неподтверждённые копии и исключения обработчика считает один счётчик,
+max(`x-attempt`, локальный) + 1, и в `code_index.dlq` уходит третий неудачный проход, не
+обязательно третья неподтверждённая копия: после двух исключений — уже первая. Каждый
+проход заново запускает задание. Исключение из обработки одной доставки (сбой ack, nack
+или публикации, например канал заменён переподключением за время задания, или ошибка
+самого обработчика) consumer индекса логирует с одним `message_id` и берёт следующую
+доставку, не останавливая consumer-ы ревью. Оставшуюся неподтверждённой доставку он
+отправляет `nack(requeue=False)` в `code_index.dlq`: иначе на открытом канале consumer с
+`prefetch_count=1` встал бы, а requeue мог бы крутиться. На закрытом канале этот nack
+тоже падает, сбой логируется, и брокер вернёт доставку; задание идемпотентно.
+
+| Исход | Действие |
+|---|---|
+| тело не JSON или не проходит схему, чужой `schema`, `message_id` не выводится из полей | `nack(requeue=False)` → `code_index.dlq`, задание не запускается |
+| PUBLISHED, UNCHANGED, EMPTY, STALE, FAILED (лимит, небезопасный архив, квота хранения), RELEASED (отказ доступа или политики, код в `last_error_code`), LEASE_LOST | ack, без retry и DLQ |
+| REWAKE (soft cutoff очистки, промах CAS публикации) | ack: задание само уже разбудило репозиторий новым сообщением с attempt 1 |
+| BUSY (лимит параллельности при claim) | копия в `index.repo.retry.30s` с тем же `attempt`, ack; не nack-requeue, который крутился бы, пока лимит занят |
+| LEASED | ack. Если доставка повторная (`redelivered`: держатель lease погиб вместе с ней), уже ждёт lease (заголовок `x-lease-wait`) или несёт `x-attempt` ≥ 1 (любая копия со счётчиком: после исключения или отложенная BUSY/TRANSIENT-копия такой доставки; задание могло не освободить lease), — копия в `index.repo.retry.10m` с `x-lease-wait` + 1, пока ожидания не перекроют lease: ⌈`CODE_INDEX_LEASE_SECONDS` / TTL очереди 10m (600 с)⌉ раз (2 при 1200 с, 3 при 1560 с). Бюджет ожиданий — на всё сообщение: BUSY- и TRANSIENT-копии переносят потраченный `x-lease-wait` без + 1; бесконечное значение заголовка считается последним ожиданием |
+| TRANSIENT (`vcs_unavailable`, `vcs_rate_limited`) | копия с `attempt` + 1: после попытки 1 — 30 с, после 2 — 2 мин; лимит или `Retry-After` — не меньше 2 мин, `Retry-After` больше 2 мин — 10 мин. На попытке 3 — ack: `last_error_code` уже записан, последняя публикация остаётся |
+| исключение обработчика | перепубликация с `x-attempt` в `code_index` с тем же routing key, как у ревью (§7.3); третье → `code_index.dlq`. Отложенные копии (BUSY, TRANSIENT, LEASED) несут текущий счётчик в `x-attempt` без + 1: откладывание — не ошибка. Записи индекса в общем локальном счётчике живут `CODE_INDEX_LEASE_SECONDS`, но не меньше 300 с (задание кончается раньше своего lease), записи ревью — 300 с, и истёкшая запись при чтении не считается. Счётчик накапливается за всю жизнь сообщения, раз откладывания его сохраняют: три исключения в любом месте цепочки откладываний отправляют сообщение в `code_index.dlq` |
+
+Цель, сдвинутую за время задания (`target_commit_sha` отличается от снимка claim), задание
+тоже будит само после PUBLISHED, UNCHANGED, EMPTY и RELEASED; consumer второй раз не будит.
+
+Параллельность ограничивает claim в PostgreSQL: `CODE_INDEX_MAX_CONCURRENT` (2) на весь
+деплой и `CODE_INDEX_MAX_CONCURRENT_PER_INSTALLATION` (1) на установку; процесс берёт одну
+доставку за раз. Installation-токен каждое задание получает своим провайдером с кэшем на
+это задание: попытка после 401 берёт новый токен, а общий кэш процесса (и Redis, #62)
+индексатор не использует. Переменные `CODE_INDEX_*` и значения по умолчанию —
+`.env.example`, задержки и лимиты — PIPELINE_SPEC §4.6.
 
 ---
 
@@ -1312,7 +1370,7 @@ CONTEXT_AND_VERIFICATION_SPEC §5–8, §10.
 | **#107:** `review_candidates`, `verification_results` | исходный v2 finding, candidate_id/digest, решения фильтров; решение verifier по каждому переданному ID и resolved refs |
 | **#107:** `final_review_results` | run_id UNIQUE, версия, supported findings, counts, coverage, verdict, backend summary и digest; immutable после publishing |
 | **#107:** `publication_plans/items` | точные payloads, keys/ordinals, отдельные body-only variants, receipts и состояние доставки; явный finding → remote comment mapping |
-| **#141:** `code_index_states` | одна строка на репозиторий: `repository_id` (PK, FK `repositories` `ON DELETE CASCADE`); `generation` и номера публикаций `reserved_publication`, `published_publication`, `floor_publication` (BIGINT, по умолчанию 0); `status` (PG enum `code_index_status`: `empty\|building\|ready\|failed`, по умолчанию `empty`), `purge_reason` (`ttl\|removed\|disabled`, только при `empty`), `error_code` (задан ровно при `failed`), `last_error_code`; `indexed_commit_sha`, `target_commit_sha`, `published_at`, `last_used_at`; lease — `lease_token` и `lease_expires_at` (оба заданы или оба NULL); счётчики `file_count`, `symbol_count`, `edge_count` (считает публикация); версии `extractor_version`, `resolver_version`, `parser_profile_version`, `limits_profile_version`; `downloaded_bytes`, `build_duration_ms`, `github_request_count`; `created_at`, `updated_at` |
+| **#141:** `code_index_states` | одна строка на репозиторий: `repository_id` (PK, FK `repositories` `ON DELETE CASCADE`); `generation` и номера публикаций `reserved_publication`, `published_publication`, `floor_publication` (BIGINT, по умолчанию 0); `status` (PG enum `code_index_status`: `empty\|building\|ready\|failed`, по умолчанию `empty`), `purge_reason` (`ttl\|removed\|disabled`, только при `empty`), `error_code` (задан ровно при `failed`), `last_error_code`; `indexed_commit_sha`, `target_commit_sha`, `published_at`, `last_used_at`; lease — `lease_token` и `lease_expires_at` (оба заданы или оба NULL); счётчики `file_count`, `symbol_count`, `edge_count` (считает публикация); версии `extractor_version`, `resolver_version`, `parser_profile_version`, `limits_profile_version`; `downloaded_bytes`, `build_duration_ms`, `github_request_count`; `created_at`, `updated_at`. **#142** (миграция `20261017_0034`): профиль публикации дополняют `indexed_default_branch` и `exclusions_digest` (`IgnorePolicy.digest` файла `.review/rules.md`); CHECK `profile_complete` — заданы все шесть колонок профиля или ни одна, миграция обнуляет версии существующих строк, и их следующая сборка — full. Квоты хранения ADR §7 считают оценки `stored_bytes` (видимые строки публикации) и `pending_bytes` (строки попытки под lease; CHECK `pending_leased` — без lease 0), BIGINT ≥ 0 (CHECK `bytes`), по умолчанию 0: строка графа — 160 байт плюс UTF-8 байты её текстовых колонок с весом 1 + число индексов с колонкой, включая PK; это оценка, а не размер на диске. CHECK `failed_code`: `failed` — только с `archive_unsafe` или `limit_exceeded:*`. Частичный индекс `ix_code_index_states_live_lease` (`repository_id`, `lease_token IS NOT NULL`) — для подсчёта живых lease при захвате |
 | **#141:** `code_index_files`, `code_index_symbols`, `code_index_edges`, `code_index_imports` | строки графа без суррогатных id: натуральный PK — `(repository_id, generation, valid_from, path)` плюс ключ строки, nullable `valid_to` закрывает строку более поздней публикацией. Файл — `blob_sha`. Символ — ключ `qualified_name`, `kind` (`code_index_symbol_kind` из `SymbolKind`), `disambiguator` (порядковый номер среди дублей; у единственного объявления — 0: в ADR §3 он «пуст», но колонка NOT NULL и входит в PK), `start_line ≥ 1`, `end_line ≥ start_line`; `defines` (ADR §3) — сама строка символа, не ребро. Ребро — ключ `kind` (`imports\|uses_imported`), `target_path`, `target_name` (`''` ровно у `imports`), индекс `ix_code_index_edges_target`. Запись импорта — ключ `specifier`, `resolution` (`code_index_import_resolution` из `ImportResolution`, в том числе неразрешённые исходы), nullable `target_path`, индекс `ix_code_index_imports_target`. Текста кода, сигнатур и embeddings нет |
 | **После MVP:** `FeedbackSignal` | `finding_id`, `kind: resolved\|line_changed\|reaction`, `value`, `at` |
 
@@ -1496,7 +1554,7 @@ flowchart TB
   worker -->|HTTPS| llm[LLM Provider]
 ```
 
-Внешние порты — только у edge-прокси Caddy: 443 (80 — редирект на HTTPS). HTTP-сервисы и Web UI подключаются к docker-сети `dmc268-edge` по alias, без host-портов; Web UI — nginx-контейнер из репозитория UI (alias `ui-staging`, порт 8080). Маршруты edge-прокси текущего staging и альтернативная цель выката (Hetzner VM из Terraform роли 3, без edge-прокси) — [CICD.md](CICD.md) §8. Диаграмма — целевая раскладка Р-12, объектного хранилища в ней нет (§10). До разделения на сервисы (#16; скорее всего после этого спринта, отдельным рефакторингом) маршруты `portal-api`, `auth-api` и `webhook-api` живут в одном приложении `api`, а `worker` — отдельный процесс из того же образа (§4); сегодня на staging (`deploy/compose/staging.yml`) работают `api`, `worker` (очереди ревью, LLM), `webhook-worker` (разбор квитанций вебхуков; роль `webhook-api` на стороне обработки), разовый `bootstrap` (роль `migrator`), `postgres` 17, `rabbitmq` 4 и `redis` 8 — все, кроме `api`, только во внутренней сети, без `ports:`. Роль `publisher` выполняет `worker` (очередь `review.publish`). Воркеры без HTTP-порта сообщают о здоровье heartbeat-файлом, и `up --wait` выката ждёт их так же, как `api` ([CICD.md](CICD.md) §3). Edge-прокси знает только upstream `api-staging`: туда идут хост API и `/api/*` хоста UI, включая `/api/auth/*`. Маршрут на `auth-api` и переименование `api` → `portal-api` добавляются в CICD.md §8 вместе с разделением. Сандбокс (фаза 3) — отдельная VM с Docker-сокетом, недоступным из `portal-api`, `auth-api` и `webhook-api`.
+Внешние порты — только у edge-прокси Caddy: 443 (80 — редирект на HTTPS). HTTP-сервисы и Web UI подключаются к docker-сети `dmc268-edge` по alias, без host-портов; Web UI — nginx-контейнер из репозитория UI (alias `ui-staging`, порт 8080). Маршруты edge-прокси текущего staging и альтернативная цель выката (Hetzner VM из Terraform роли 3, без edge-прокси) — [CICD.md](CICD.md) §8. Диаграмма — целевая раскладка Р-12, объектного хранилища в ней нет (§10). До разделения на сервисы (#16; скорее всего после этого спринта, отдельным рефакторингом) маршруты `portal-api`, `auth-api` и `webhook-api` живут в одном приложении `api`, а `worker` — отдельный процесс из того же образа (§4); сегодня на staging (`deploy/compose/staging.yml`) работают `api`, `worker` (очереди ревью, LLM), `webhook-worker` (разбор квитанций вебхуков; роль `webhook-api` на стороне обработки), разовый `bootstrap` (роль `migrator`), `postgres` 17, `rabbitmq` 4 и `redis` 8 — все, кроме `api`, только во внутренней сети, без `ports:`. Роль `publisher` выполняет `worker` (очередь `review.publish`). Он же потребляет `index.repo` (индексатор графа, §7.4); лимита памяти у него нет. Задание индекса держит в памяти архив (до 100 МиБ, `CODE_INDEX_MAX_DOWNLOAD_BYTES`), пачку разбираемых файлов (до 50 × 256 КиБ, около 12,5 МиБ) и карту записей архива, а подпроцессу парсера RLIMIT_AS разрешает 128 МиБ сверх его размера на старте. Это оценка, не граница. Измерено: тест большого архива (64 МиБ) — пик 179,5 МиБ RSS при 53 МиБ у pytest на крошечном архиве (разница — две копии входа самого теста), проходы по архиву — около 1,5 МиБ сверх буфера, простаивающий worker — около 110 МиБ на локальном стенде; пик фаз разбора и записи не измерялся. Воркеры без HTTP-порта сообщают о здоровье heartbeat-файлом, и `up --wait` выката ждёт их так же, как `api` ([CICD.md](CICD.md) §3). Edge-прокси знает только upstream `api-staging`: туда идут хост API и `/api/*` хоста UI, включая `/api/auth/*`. Маршрут на `auth-api` и переименование `api` → `portal-api` добавляются в CICD.md §8 вместе с разделением. Сандбокс (фаза 3) — отдельная VM с Docker-сокетом, недоступным из `portal-api`, `auth-api` и `webhook-api`.
 
 **Один origin** (решение техлида по #20, 28.09): браузер обращается к `/api/*` на хосте UI — edge-прокси или nginx UI проксирует эти пути в API (для SSE без буферизации), поэтому CORS не нужен, а refresh-cookie `Path=/api/auth` (§12) работает в пределах одного origin. Хост API остаётся для healthcheck и вебхуков GitHub. Настроено в #35 маршрутом `handle /api/*` edge-прокси (`deploy/edge/Caddyfile`); Caddy отдаёт `text/event-stream` без буферизации.
 

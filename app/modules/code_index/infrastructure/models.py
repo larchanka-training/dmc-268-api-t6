@@ -48,6 +48,31 @@ class CodeIndexState(Base):
         CheckConstraint(
             "purge_reason IS NULL OR status = 'empty'", name="ck_code_index_states_purge_reason"
         ),
+        # A publication records all six versions of its profile; any other row records none.
+        CheckConstraint(
+            "num_nulls(extractor_version, resolver_version, parser_profile_version, "
+            "limits_profile_version, indexed_default_branch, exclusions_digest) IN (0, 6)",
+            name="ck_code_index_states_profile_complete",
+        ),
+        CheckConstraint(
+            "stored_bytes >= 0 AND pending_bytes >= 0", name="ck_code_index_states_bytes"
+        ),
+        CheckConstraint(
+            "pending_bytes = 0 OR lease_token IS NOT NULL",
+            name="ck_code_index_states_pending_leased",
+        ),
+        # ADR §7: only a limit or an unsafe archive fails an index.
+        CheckConstraint(
+            "status <> 'failed' OR error_code = 'archive_unsafe' "
+            "OR error_code LIKE 'limit_exceeded:%'",
+            name="ck_code_index_states_failed_code",
+        ),
+        # Admission counts the live leases of all repositories (ADR §7).
+        Index(
+            "ix_code_index_states_live_lease",
+            "repository_id",
+            postgresql_where=text("lease_token IS NOT NULL"),
+        ),
     )
 
     repository_id: Mapped[UUID] = mapped_column(
@@ -95,6 +120,13 @@ class CodeIndexState(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
     )
+    indexed_default_branch: Mapped[str | None] = mapped_column(String(255))
+    # `IgnorePolicy.digest` of the `.review/rules.md` the publication was built with.
+    exclusions_digest: Mapped[str | None] = mapped_column(String(64))
+    # Estimated bytes (`domain/storage.py`) of the published rows and of the leased
+    # attempt's rows: the storage quotas of ADR §7.
+    stored_bytes: Mapped[int] = mapped_column(BIGINT, nullable=False, server_default=text("0"))
+    pending_bytes: Mapped[int] = mapped_column(BIGINT, nullable=False, server_default=text("0"))
 
 
 class CodeIndexFile(Base):

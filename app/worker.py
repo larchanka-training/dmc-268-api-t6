@@ -30,6 +30,7 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 
+from app.bootstrap.code_index_worker import CodeIndexSettings, index_consumer
 from app.bootstrap.llm_gateway import build_gateway
 from app.common.infrastructure.db.leader import WORKER_LEADER_LOCK, run_as_leader
 from app.common.infrastructure.heartbeat import beat, heartbeat_file, reset
@@ -412,6 +413,7 @@ class WorkerSettings:
     gitlab_token: str | None = None
     gitlab_base_url: str = "https://gitlab.com"
     redis_url: str | None = None
+    code_index: CodeIndexSettings = CodeIndexSettings()
 
     @property
     def github_app_configured(self) -> bool:
@@ -444,6 +446,7 @@ class WorkerSettings:
             gitlab_base_url=env.get("GITLAB_BASE_URL") or "https://gitlab.com",
             # Optional: the cache of AST facts and file trees of the context stage.
             redis_url=env.get("REDIS_URL") or None,
+            code_index=CodeIndexSettings.from_environment(env),
         )
 
 
@@ -812,7 +815,8 @@ async def run_worker(
     """
     if settings.heartbeat_file is not None:
         reset(settings.heartbeat_file)
-    engine = create_async_engine(settings.database_url, pool_pre_ping=True)
+    # SD §13: a SQL error in a log carries no bound parameters (paths, symbol names).
+    engine = create_async_engine(settings.database_url, pool_pre_ping=True, hide_parameters=True)
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
     async with AsyncExitStack() as stack:
         stack.push_async_callback(engine.dispose)
@@ -865,6 +869,16 @@ async def run_worker(
             )
             run_queue = await channels.consumer_queue(run_queue_name("fast"))
             publish_queue = await channels.consumer_queue(PUBLISH_QUEUE)
+            # The index.repo consumer (#142): its own channels, parser and GitHub client.
+            index = await stack.enter_async_context(
+                index_consumer(
+                    settings,
+                    channels.connection,
+                    session_factory,
+                    delays or RetryDelays(),
+                    github_transport,
+                )
+            )
             _LOGGER.info("Review worker %s is consuming", settings.worker_id)
             async with asyncio.TaskGroup() as tasks:
                 tasks.create_task(
@@ -896,7 +910,9 @@ async def run_worker(
                         name="worker",
                     )
                 )
-                # Beats only once both consumers are attached; any failed task ends the group.
+                if index is not None:
+                    tasks.create_task(index.consume())
+                # Beats only once the consumers are attached; any failed task ends the group.
                 if settings.heartbeat_file is not None:
                     tasks.create_task(beat(settings.heartbeat_file))
 

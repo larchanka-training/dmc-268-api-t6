@@ -1,8 +1,10 @@
-"""PostgreSQL adapter of the graph index store, fenced per ADR 0001 §6.2 (#141).
+"""PostgreSQL adapter of the graph index store, fenced per ADR 0001 §6.2 (#141, #142).
 
-Every statement filters by `repository_id`. The store runs on the caller's session and
-never commits. Lease expiry is compared with `clock_timestamp()` read after the state
-row is locked, never with the transaction start time.
+Every statement filters by `repository_id`, except the admission sums of `claim_lease`
+and the Workspace sum of `replace_file` over other repositories' state rows. The store
+runs on the caller's session and never commits. Lease expiry is compared with
+`clock_timestamp()` read after the state row is locked, never with the transaction start
+time.
 """
 
 from __future__ import annotations
@@ -17,14 +19,16 @@ from sqlalchemy import (
     ColumnElement,
     CursorResult,
     Enum,
-    ScalarSelect,
     String,
     and_,
+    case,
     delete,
     func,
     insert,
+    literal,
     or_,
     select,
+    text,
     true,
 )
 from sqlalchemy import tuple_ as sa_tuple
@@ -33,11 +37,16 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import InstrumentedAttribute
 
+from app.common.infrastructure.db.leader import CODE_INDEX_ADMISSION_LOCK
 from app.common.infrastructure.db.unit_of_work import SqlAlchemyUnitOfWork
 from app.modules.code_index.application.index_store import (
+    ClaimRefusal,
+    ClaimRefused,
     EdgeTarget,
     ImportRecord,
+    IndexAdmission,
     IndexBuildStats,
+    IndexCounts,
     IndexedEdge,
     IndexedFile,
     IndexedSymbol,
@@ -45,9 +54,17 @@ from app.modules.code_index.application.index_store import (
     IndexLeaseLost,
     IndexProfile,
     IndexState,
+    IndexStorage,
+    LeaseClaim,
+)
+from app.modules.code_index.domain.codes import (
+    FAILED_ERROR_CODES,
+    REPOSITORY_STORAGE_EXCEEDED,
+    WORKSPACE_STORAGE_EXCEEDED,
 )
 from app.modules.code_index.domain.enums import EdgeKind, IndexStatus, PurgeReason
 from app.modules.code_index.domain.keys import MAX_INDEX_KEY_BYTES, SymbolKey
+from app.modules.code_index.domain.storage import COLUMN_WEIGHTS, ROW_OVERHEAD_BYTES, row_bytes
 from app.modules.code_index.infrastructure.models import (
     CodeIndexEdge,
     CodeIndexFile,
@@ -55,6 +72,7 @@ from app.modules.code_index.infrastructure.models import (
     CodeIndexState,
     CodeIndexSymbol,
 )
+from app.modules.repositories.infrastructure.models import ProviderInstallation, Repository
 from app.modules.reviews.application.ast_resolution import ImportResolution
 
 type _GraphModel = (
@@ -80,6 +98,49 @@ _TEXT_LIMITS = {
     and not isinstance(column.type, Enum)
     and column.type.length is not None
 }
+
+
+def _row_bytes(model: _GraphModel) -> ColumnElement[int]:
+    """The SQL half of `row_bytes`: the same estimate over the stored row."""
+    columns = model.__table__.columns
+    estimate: ColumnElement[int] = literal(ROW_OVERHEAD_BYTES)
+    for column, weight in COLUMN_WEIGHTS[model.__tablename__].items():
+        estimate = estimate + func.coalesce(func.octet_length(columns[column]), 0) * weight
+    return estimate
+
+
+def _failure(error_code: str) -> dict[str, Any]:
+    """ADR §7: a `failed` index uses no publication, so GC removes every row it has."""
+    return {
+        "status": IndexStatus.FAILED,
+        "error_code": error_code,
+        "lease_token": None,
+        "lease_expires_at": None,
+        "pending_bytes": 0,
+        "published_publication": 0,
+        "floor_publication": 0,
+        "published_at": None,
+        "indexed_commit_sha": None,
+        "extractor_version": None,
+        "resolver_version": None,
+        "parser_profile_version": None,
+        "limits_profile_version": None,
+        "indexed_default_branch": None,
+        "exclusions_digest": None,
+        "file_count": 0,
+        "symbol_count": 0,
+        "edge_count": 0,
+        "stored_bytes": 0,
+    }
+
+
+def _stats(stats: IndexBuildStats) -> dict[str, int]:
+    """The job metrics a failure, a release or a publication miss records."""
+    return {
+        "downloaded_bytes": stats.downloaded_bytes,
+        "build_duration_ms": stats.build_duration_ms,
+        "github_request_count": stats.github_request_count,
+    }
 
 
 def _visible(
@@ -176,6 +237,8 @@ def _to_state(row: CodeIndexState) -> IndexState:
             resolver_version=cast(str, row.resolver_version),
             parser_profile_version=cast(str, row.parser_profile_version),
             limits_profile_version=cast(str, row.limits_profile_version),
+            default_branch=cast(str, row.indexed_default_branch),
+            exclusions_digest=cast(str, row.exclusions_digest),
         )
     return IndexState(
         generation=row.generation,
@@ -194,6 +257,8 @@ def _to_state(row: CodeIndexState) -> IndexState:
         file_count=row.file_count,
         symbol_count=row.symbol_count,
         edge_count=row.edge_count,
+        stored_bytes=row.stored_bytes,
+        pending_bytes=row.pending_bytes,
         profile=profile,
         stats=IndexBuildStats(
             downloaded_bytes=row.downloaded_bytes,
@@ -239,14 +304,28 @@ class SqlAlchemyCodeIndexStore:
         self._session = session
 
     async def _state(
-        self, repository_id: UUID, *, lock: bool = False, share: bool = False
+        self,
+        repository_id: UUID,
+        *,
+        lock: bool = False,
+        share: bool = False,
+        key_share: bool = False,
     ) -> CodeIndexState | None:
         statement = select(CodeIndexState).where(CodeIndexState.repository_id == repository_id)
         if lock:
-            statement = statement.with_for_update(read=share)
+            statement = statement.with_for_update(read=share, key_share=key_share)
         return cast(
             CodeIndexState | None,
             await self._session.scalar(statement.execution_options(populate_existing=True)),
+        )
+
+    async def _admission_lock(self) -> None:
+        # Claims, batch writes and publications take it first, before any state row lock,
+        # so they run one at a time without a lock-order cycle: a claim counts live
+        # leases, and a batch reads the Workspace bytes, with every earlier batch and
+        # publication committed (ADR §6.2).
+        await self._session.execute(
+            text("SELECT pg_advisory_xact_lock(:key)"), {"key": CODE_INDEX_ADMISSION_LOCK}
         )
 
     async def _clock(self) -> datetime:
@@ -255,9 +334,9 @@ class SqlAlchemyCodeIndexStore:
         return cast(datetime, await self._session.scalar(select(func.clock_timestamp())))
 
     async def _fenced(
-        self, repository_id: UUID, fence: IndexFence, *, share: bool
+        self, repository_id: UUID, fence: IndexFence, *, share: bool, key_share: bool = False
     ) -> CodeIndexState:
-        state = await self._state(repository_id, lock=True, share=share)
+        state = await self._state(repository_id, lock=True, share=share, key_share=key_share)
         if state is None or not _holds(state, fence, await self._clock()):
             raise IndexLeaseLost("the index lease of this attempt is lost")
         return state
@@ -356,37 +435,119 @@ class SqlAlchemyCodeIndexStore:
             resolver_version=None,
             parser_profile_version=None,
             limits_profile_version=None,
+            indexed_default_branch=None,
+            exclusions_digest=None,
             file_count=0,
             symbol_count=0,
             edge_count=0,
+            stored_bytes=0,
+            pending_bytes=0,
             downloaded_bytes=0,
             build_duration_ms=0,
             github_request_count=0,
         )
 
     async def claim_lease(
-        self, repository_id: UUID, generation: int, lease_seconds: int
-    ) -> IndexFence | None:
+        self, repository_id: UUID, generation: int, lease_seconds: int, admission: IndexAdmission
+    ) -> LeaseClaim | ClaimRefused:
+        await self._admission_lock()
         state = await self._state(repository_id, lock=True)
-        if state is None or state.purge_reason is not None or state.generation != generation:
-            return None
+        if (
+            state is None
+            or state.purge_reason is not None
+            or state.generation != generation
+            or state.status == IndexStatus.FAILED
+        ):
+            return ClaimRefused(ClaimRefusal.STALE)
         now = await self._clock()
         if state.lease_expires_at is not None and state.lease_expires_at > now:
-            return None
+            return ClaimRefused(ClaimRefusal.LEASED)
+        # The claim drops the pending bytes of an expired attempt, so only its own
+        # stored bytes count for this repository.
+        workspace_bytes = state.stored_bytes + await self._workspace_bytes(repository_id, now)
+        quota = None
+        if state.stored_bytes > admission.repository_storage_bytes:
+            quota = REPOSITORY_STORAGE_EXCEEDED
+        elif workspace_bytes > admission.workspace_storage_bytes:
+            quota = WORKSPACE_STORAGE_EXCEEDED
+        if quota is not None:
+            await self._update_state(repository_id, **_failure(quota))
+            return ClaimRefused(ClaimRefusal.QUOTA, quota)
+        leases, installation_leases = await self._live_leases(repository_id, now)
+        if (
+            leases >= admission.max_leases
+            or installation_leases >= admission.max_installation_leases
+        ):
+            return ClaimRefused(ClaimRefusal.BUSY)
         # Taking over an expired lease revokes it: its batches compare the token.
         fence = IndexFence(uuid4(), generation, state.reserved_publication + 1)
-        status = state.status
-        if status in (IndexStatus.EMPTY, IndexStatus.FAILED):
-            status = IndexStatus.BUILDING
         await self._update_state(
             repository_id,
             reserved_publication=fence.publication,
             lease_token=fence.token,
             lease_expires_at=now + timedelta(seconds=lease_seconds),
-            status=status,
-            error_code=None,
+            pending_bytes=0,
+            status=IndexStatus.BUILDING if state.status == IndexStatus.EMPTY else state.status,
         )
-        return fence
+        return LeaseClaim(fence, state.target_commit_sha)
+
+    async def _workspace_bytes(self, repository_id: UUID, now: datetime) -> int:
+        """Stored bytes of the other repositories of this one's Workspace, and their
+        pending bytes under a lease still live at `now`.
+
+        An expired attempt keeps its pending bytes until its repository is claimed again
+        or its lease is revoked; they would fail a healthy repository for its Workspace.
+        """
+        workspace = (
+            select(ProviderInstallation.workspace_id)
+            .join(Repository, Repository.provider_installation_id == ProviderInstallation.id)
+            .where(Repository.id == repository_id)
+            .scalar_subquery()
+        )
+        live_pending = case(
+            (
+                and_(
+                    CodeIndexState.lease_token.is_not(None),
+                    CodeIndexState.lease_expires_at > now,
+                ),
+                CodeIndexState.pending_bytes,
+            ),
+            else_=0,
+        )
+        total = await self._session.scalar(
+            select(func.coalesce(func.sum(CodeIndexState.stored_bytes + live_pending), 0))
+            .join(Repository, Repository.id == CodeIndexState.repository_id)
+            .join(
+                ProviderInstallation, ProviderInstallation.id == Repository.provider_installation_id
+            )
+            .where(
+                ProviderInstallation.workspace_id == workspace,
+                CodeIndexState.repository_id != repository_id,
+            )
+        )
+        return int(total or 0)
+
+    async def _live_leases(self, repository_id: UUID, now: datetime) -> tuple[int, int]:
+        """Live leases in all, and in this repository's installation, at `now`."""
+        installation = (
+            select(Repository.provider_installation_id)
+            .where(Repository.id == repository_id)
+            .scalar_subquery()
+        )
+        row = (
+            await self._session.execute(
+                select(
+                    func.count(),
+                    func.count().filter(Repository.provider_installation_id == installation),
+                )
+                .select_from(CodeIndexState)
+                .join(Repository, Repository.id == CodeIndexState.repository_id)
+                .where(
+                    CodeIndexState.lease_token.is_not(None), CodeIndexState.lease_expires_at > now
+                )
+            )
+        ).one()
+        return int(row[0]), int(row[1])
 
     async def discard_abandoned(self, repository_id: UUID, fence: IndexFence, limit: int) -> int:
         state = await self._fenced(repository_id, fence, share=True)
@@ -401,11 +562,23 @@ class SqlAlchemyCodeIndexStore:
             limit,
         )
 
-    async def replace_file(self, repository_id: UUID, fence: IndexFence, file: IndexedFile) -> None:
+    async def replace_file(
+        self, repository_id: UUID, fence: IndexFence, file: IndexedFile
+    ) -> IndexStorage:
         _validate(file)
-        await self._fenced(repository_id, fence, share=True)
+        # The Workspace bytes this batch returns must include every other batch's pending
+        # bytes and every publication's stored bytes, so batches serialize with each
+        # other, with claims and with publications on this lock.
+        await self._admission_lock()
+        # FOR NO KEY UPDATE, not ADR §6.2's FOR SHARE: the batch updates the state row's
+        # pending bytes, so it takes the lock it ends up holding. A purge or a
+        # publication (FOR UPDATE) still waits for the batch.
+        await self._fenced(repository_id, fence, share=False, key_share=True)
+        removed = 0
         for model in _GRAPH_MODELS:
-            await self._session.execute(
+            # The rows of an earlier write of this path in this attempt leave the pending
+            # bytes, so a rewrite is counted once.
+            deleted = await self._session.scalars(
                 delete(model)
                 .where(
                     model.repository_id == repository_id,
@@ -413,20 +586,27 @@ class SqlAlchemyCodeIndexStore:
                     model.valid_from == fence.publication,
                     model.path == file.path,
                 )
+                .returning(_row_bytes(model))
                 .execution_options(synchronize_session=False)
             )
-        row = {
+            removed += sum(deleted)
+        row: dict[str, Any] = {
             "repository_id": repository_id,
             "generation": fence.generation,
             "valid_from": fence.publication,
             "path": file.path,
         }
-        await self._session.execute(insert(CodeIndexFile).values(**row, blob_sha=file.blob_sha))
-        # executemany, batched by insertmanyvalues: one multi-row VALUES statement would
-        # pass PostgreSQL's 65,535 bind parameters at ~7,000 rows.
-        if file.symbols:
-            await self._session.execute(
-                insert(CodeIndexSymbol),
+        # Duplicate edges and imports of one file collapse onto their natural key.
+        edges = dict.fromkeys(
+            (edge.kind, edge.target_path, edge.target_name) for edge in file.edges
+        )
+        imports: dict[tuple[str, ImportResolution], str | None] = {}
+        for record in file.imports:
+            imports.setdefault((record.specifier, record.resolution), record.target_path)
+        rows: tuple[tuple[_GraphModel, list[dict[str, Any]]], ...] = (
+            (CodeIndexFile, [{**row, "blob_sha": file.blob_sha}]),
+            (
+                CodeIndexSymbol,
                 [
                     {
                         **row,
@@ -438,25 +618,16 @@ class SqlAlchemyCodeIndexStore:
                     }
                     for symbol in file.symbols
                 ],
-            )
-        # Duplicate edges and imports of one file collapse onto their natural key.
-        edges = dict.fromkeys(
-            (edge.kind, edge.target_path, edge.target_name) for edge in file.edges
-        )
-        if edges:
-            await self._session.execute(
-                insert(CodeIndexEdge),
+            ),
+            (
+                CodeIndexEdge,
                 [
                     {**row, "kind": kind, "target_path": target_path, "target_name": name}
                     for kind, target_path, name in edges
                 ],
-            )
-        imports: dict[tuple[str, ImportResolution], str | None] = {}
-        for record in file.imports:
-            imports.setdefault((record.specifier, record.resolution), record.target_path)
-        if imports:
-            await self._session.execute(
-                insert(CodeIndexImport),
+            ),
+            (
+                CodeIndexImport,
                 [
                     {
                         **row,
@@ -466,7 +637,30 @@ class SqlAlchemyCodeIndexStore:
                     }
                     for (specifier, resolution), target_path in imports.items()
                 ],
+            ),
+        )
+        added = 0
+        for model, values in rows:
+            if values:
+                # executemany, batched by insertmanyvalues: one multi-row VALUES statement
+                # would pass PostgreSQL's 65,535 bind parameters at ~7,000 rows.
+                await self._session.execute(insert(model), values)
+                added += sum(row_bytes(model.__tablename__, value) for value in values)
+        storage = (
+            await self._session.execute(
+                sa_update(CodeIndexState)
+                .where(CodeIndexState.repository_id == repository_id)
+                .values(pending_bytes=CodeIndexState.pending_bytes + (added - removed))
+                .returning(CodeIndexState.stored_bytes, CodeIndexState.pending_bytes)
+                .execution_options(synchronize_session=False)
             )
+        ).one()
+        others = await self._workspace_bytes(repository_id, await self._clock())
+        return IndexStorage(
+            stored_bytes=storage[0],
+            pending_bytes=storage[1],
+            workspace_bytes=storage[0] + storage[1] + others,
+        )
 
     async def publish(
         self,
@@ -481,6 +675,9 @@ class SqlAlchemyCodeIndexStore:
         stats: IndexBuildStats,
     ) -> bool:
         """`deleted_paths` closes paths of an incremental build; a full one ignores them."""
+        # The lease may expire while this transaction is open; a batch of another build
+        # waits for it, so it counts these bytes as stored once they are committed.
+        await self._admission_lock()
         state = await self._fenced(repository_id, fence, share=False)
         mine, published = fence.publication, state.published_publication
         floor = state.floor_publication
@@ -491,8 +688,15 @@ class SqlAlchemyCodeIndexStore:
             or published >= mine
             or (not full and await self._has_abandoned(repository_id, fence, published))
         ):
-            # A miss spends the lease like a publication, so the next wake-up claims at once.
-            await self._update_state(repository_id, lease_token=None, lease_expires_at=None)
+            # A miss spends the lease like a publication, so the next wake-up claims at once,
+            # and records the job's metrics as a release does.
+            await self._update_state(
+                repository_id,
+                lease_token=None,
+                lease_expires_at=None,
+                pending_bytes=0,
+                **_stats(stats),
+            )
             return False
         if not full:
             written = select(CodeIndexFile.path).where(
@@ -513,17 +717,20 @@ class SqlAlchemyCodeIndexStore:
                 )
         else:
             floor = mine
-
-        def count(model: _GraphModel) -> ScalarSelect[int]:
-            return (
-                select(func.count())
-                .select_from(model)
-                .where(
-                    model.repository_id == repository_id,
-                    _visible(model, fence.generation, floor, mine),
+        # One aggregate per table: its visible rows and their estimated bytes.
+        totals: dict[_GraphModel, tuple[int, int]] = {}
+        for model in _GRAPH_MODELS:
+            count, size = (
+                await self._session.execute(
+                    select(func.count(), func.coalesce(func.sum(_row_bytes(model)), 0))
+                    .select_from(model)
+                    .where(
+                        model.repository_id == repository_id,
+                        _visible(model, fence.generation, floor, mine),
+                    )
                 )
-                .scalar_subquery()
-            )
+            ).one()
+            totals[model] = int(count), int(size)
 
         # The attempt is spent: its fence can no longer write rows that would be visible.
         await self._update_state(
@@ -532,22 +739,68 @@ class SqlAlchemyCodeIndexStore:
             floor_publication=floor,
             status=IndexStatus.READY,
             error_code=None,
+            last_error_code=None,
             indexed_commit_sha=commit_sha,
             published_at=func.now(),
             lease_token=None,
             lease_expires_at=None,
-            file_count=count(CodeIndexFile),
-            symbol_count=count(CodeIndexSymbol),
-            edge_count=count(CodeIndexEdge),
+            file_count=totals[CodeIndexFile][0],
+            symbol_count=totals[CodeIndexSymbol][0],
+            edge_count=totals[CodeIndexEdge][0],
+            stored_bytes=sum(size for _, size in totals.values()),
+            pending_bytes=0,
             extractor_version=profile.extractor_version,
             resolver_version=profile.resolver_version,
             parser_profile_version=profile.parser_profile_version,
             limits_profile_version=profile.limits_profile_version,
+            indexed_default_branch=profile.default_branch,
+            exclusions_digest=profile.exclusions_digest,
             downloaded_bytes=stats.downloaded_bytes,
             build_duration_ms=stats.build_duration_ms,
             github_request_count=stats.github_request_count,
         )
         return True
+
+    async def mark_failed(
+        self,
+        repository_id: UUID,
+        fence: IndexFence,
+        error_code: str,
+        *,
+        stats: IndexBuildStats | None = None,
+    ) -> None:
+        if error_code not in FAILED_ERROR_CODES:
+            raise ValueError(f"{error_code!r} is not an error code of a failed index")
+        await self._fenced(repository_id, fence, share=False)
+        values = _failure(error_code)
+        if stats is not None:
+            values |= _stats(stats)
+        await self._update_state(repository_id, **values)
+
+    async def release(
+        self,
+        repository_id: UUID,
+        fence: IndexFence,
+        *,
+        last_error_code: str | None = None,
+        stats: IndexBuildStats | None = None,
+    ) -> IndexStatus:
+        state = await self._fenced(repository_id, fence, share=False)
+        # The last publication stays readable; GC removes this attempt's rows. Its
+        # counters and stored bytes stay; only the job metrics are this attempt's.
+        status = IndexStatus.READY if state.published_publication > 0 else IndexStatus.EMPTY
+        values: dict[str, Any] = {
+            "status": status,
+            "lease_token": None,
+            "lease_expires_at": None,
+            "pending_bytes": 0,
+        }
+        if last_error_code is not None:
+            values["last_error_code"] = last_error_code
+        if stats is not None:
+            values |= _stats(stats)
+        await self._update_state(repository_id, **values)
+        return status
 
     async def _has_abandoned(self, repository_id: UUID, fence: IndexFence, published: int) -> bool:
         abandoned = select(
@@ -573,7 +826,9 @@ class SqlAlchemyCodeIndexStore:
             return False
         if state.lease_expires_at > await self._clock():
             return False
-        await self._update_state(repository_id, lease_token=None, lease_expires_at=None)
+        await self._update_state(
+            repository_id, lease_token=None, lease_expires_at=None, pending_bytes=0
+        )
         return True
 
     async def collect_garbage(self, repository_id: UUID, limit: int) -> int:
@@ -729,6 +984,56 @@ class SqlAlchemyCodeIndexStore:
             repository_id, CodeIndexImport.target_path == target_path
         )
         return [_to_import(row) for row in rows]
+
+    async def iter_files(
+        self, repository_id: UUID, after: str | None, limit: int
+    ) -> list[tuple[str, str]]:
+        rows = await self._session.execute(
+            select(CodeIndexFile.path, CodeIndexFile.blob_sha)
+            .join(CodeIndexState, CodeIndexState.repository_id == CodeIndexFile.repository_id)
+            .where(
+                *_readable(CodeIndexFile, repository_id),
+                true() if after is None else CodeIndexFile.path > after,
+            )
+            .order_by(CodeIndexFile.path)
+            .limit(limit)
+        )
+        return [(path, blob_sha) for path, blob_sha in rows]
+
+    async def iter_imports(
+        self, repository_id: UUID, after: ImportRecord | None, limit: int
+    ) -> list[ImportRecord]:
+        # The primary key's tail; each bound value takes its column's type.
+        key = sa_tuple(CodeIndexImport.path, CodeIndexImport.specifier, CodeIndexImport.resolution)
+        rows = await self._session.scalars(
+            select(CodeIndexImport)
+            .join(CodeIndexState, CodeIndexState.repository_id == CodeIndexImport.repository_id)
+            .where(
+                *_readable(CodeIndexImport, repository_id),
+                true() if after is None else key > (after.path, after.specifier, after.resolution),
+            )
+            .order_by(*key.clauses)
+            .limit(limit)
+            .execution_options(populate_existing=True)
+        )
+        return [_to_import(row) for row in rows]
+
+    async def visible_counts(self, repository_id: UUID, paths: Sequence[str]) -> IndexCounts:
+        def count(model: _GraphModel) -> ColumnElement[int]:
+            return (
+                select(func.count())
+                .select_from(model)
+                .join(CodeIndexState, CodeIndexState.repository_id == model.repository_id)
+                .where(*_readable(model, repository_id), model.path.in_(list(paths)))
+                .scalar_subquery()
+            )
+
+        row = (
+            await self._session.execute(
+                select(count(CodeIndexFile), count(CodeIndexSymbol), count(CodeIndexEdge))
+            )
+        ).one()
+        return IndexCounts(file_count=row[0], symbol_count=row[1], edge_count=row[2])
 
 
 class SqlAlchemyCodeIndexUnitOfWork(SqlAlchemyUnitOfWork):
