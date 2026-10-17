@@ -10,17 +10,17 @@ from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, field_validato
 
 from app.common.infrastructure.github_link_header import has_next_relation
 from app.modules.reviews.application.commit_prefix_limits import (
+    COMMIT_ACCEPT_ENCODING,
     COMMIT_PAGE_COUNT,
     COMMIT_PAGE_SIZE,
     MAX_COMMIT_MESSAGE_CHARS,
     MAX_COMMIT_MESSAGES,
     MAX_COMMIT_PAGES,
     MAX_COMMIT_RESPONSE_BYTES,
-    CommitEncoding,
+    CommitMessagePrefix,
     commit_prefix_incomplete,
 )
 from app.modules.reviews.application.prompt_builder import shorten_commit_message
-from app.modules.reviews.application.vcs_diff import CommitMessagePrefix
 
 _SHA = r"^[0-9a-fA-F]{40}(?:[0-9a-fA-F]{24})?$"
 _PR_URL = r"^https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/pull/[1-9][0-9]*$"
@@ -40,7 +40,15 @@ class _Retrieval(_StrictModel):
     max_messages: int = Field(ge=MAX_COMMIT_MESSAGES, le=MAX_COMMIT_MESSAGES)
     max_message_chars: int = Field(ge=MAX_COMMIT_MESSAGE_CHARS, le=MAX_COMMIT_MESSAGE_CHARS)
     max_response_bytes: int = Field(ge=MAX_COMMIT_RESPONSE_BYTES, le=MAX_COMMIT_RESPONSE_BYTES)
-    accept_encoding: CommitEncoding
+    accept_encoding: str
+
+    @field_validator("accept_encoding")
+    @classmethod
+    def production_encoding(cls, value: str) -> str:
+        # Compare the value, not a Literal type: a changed constant must reject old evidence.
+        if value != COMMIT_ACCEPT_ENCODING:
+            raise ValueError("unexpected accept encoding")
+        return value
 
 
 class _Entry(_StrictModel):
@@ -68,10 +76,17 @@ class _Page(_StrictModel):
     verified_via: str
     response_date: AwareDatetime
     response_bytes: int = Field(ge=0, le=MAX_COMMIT_RESPONSE_BYTES)
-    content_encoding: CommitEncoding | None
+    content_encoding: str | None
     link_header: str | None
     next_relation: bool
     entries: list[_Entry] = Field(max_length=COMMIT_PAGE_SIZE)
+
+    @field_validator("content_encoding")
+    @classmethod
+    def production_encoding(cls, value: str | None) -> str | None:
+        if value is not None and value != COMMIT_ACCEPT_ENCODING:
+            raise ValueError("unexpected content encoding")
+        return value
 
     @model_validator(mode="after")
     def coherent_link(self) -> _Page:

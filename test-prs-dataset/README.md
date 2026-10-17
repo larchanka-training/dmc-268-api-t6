@@ -148,15 +148,15 @@ The manifest also stores sorted `static_inputs`, `static_digest`, and `corpus_di
 
 | Static input path | Why it is included |
 | --- | --- |
-| `app/bootstrap/llm_gateway.py` | `review_case` builds the review context, sets the case deadline and parses the accepted output. |
+| `app/bootstrap/llm_gateway.py` | Deliberately wide. The eval uses `ReviewCase` (`llm_gateway.py:131-141`: the case input `eval_live.py` builds; its `conventions` and `engine` defaults reach the request), `review_case` (`:230-267`: review context, `parse_review_output` of the accepted output), `_run_database_free_case` (`:185-227`: case deadline from `CASE_DEADLINE` `:146-149`, in-memory call trace), `ReviewCaseFailed` (`:152-162`: error code and trace the recorder captures for a failed case) and `DEFAULT_SYSTEM_PROMPT` (`:85`). The production `build_gateway` (`:90-124`), `conventions_case` and the CLI share the file: their edits do not shape the eval but still cause static drift. |
 | `app/common/application/languages.py` | `LANGUAGE_BY_SUFFIX` sets each file's `language` attribute in the rendered user message. |
-| `app/modules/reviews/application/commit_prefix_limits.py` | Caps rendered commit lines (20 messages, 500 characters) and fixes the retrieval budget the sidecar must match. |
+| `app/modules/reviews/application/commit_prefix_limits.py` | Caps rendered commit lines (20 messages, 500 characters), fixes the retrieval budget, encoding and tail rule the sidecar must match, and holds `CommitMessagePrefix`, the bound prefix and tail flag copied into the request metadata. |
 | `app/modules/reviews/application/llm.py` | `LlmCallRecord.response` holds the envelope the recorder reads; `LlmErrorCode` values are the recorded `gateway_status` replay's publishability check reads. |
 | `app/modules/reviews/application/prompt_budget.py` | Chooses whole, truncated, and omitted diff files. |
 | `app/modules/reviews/application/prompt_builder.py` | Renders the system/user message envelope, including commit lines. |
 | `app/modules/reviews/application/review_output.py` | Parses and validates review output; a failure triggers repair. |
-| `app/modules/reviews/application/run_failures.py` | `FAST_ATTEMPT_DEADLINE` is the case deadline the gateway checks before each call and same-model retry. |
-| `app/modules/reviews/application/vcs_diff.py` | `CommitMessagePrefix` carries the bound prefix and tail flag into the request metadata. |
+| `app/modules/reviews/application/run_failures.py` | Deliberately wide. Only `FAST_ATTEMPT_DEADLINE` (`run_failures.py:17`) shapes the eval, through `CASE_DEADLINE["fast"]` (`llm_gateway.py:147`): the gateway refuses a call with less than one call timeout left (`gateway.py:334-341`) and skips a same-model retry that would leave less (`gateway.py:278-281`). `llm.py:17` also imports `RETRYABLE_ERROR_CODES` for `LlmCallFailed.run_retryable`, which the eval never calls. The rest is worker retry, lease and failure-code policy: its edits do not shape the eval but still cause static drift. |
+| `app/modules/reviews/application/vcs_diff.py` | Shapes nothing the eval sends, captures or parses since `CommitMessagePrefix` moved to `commit_prefix_limits.py` (re-exported here for production). Still pinned because the eval still imports it (`llm_gateway.py:79` → `run_lifecycle_store.py:19` → `handle_review_run.py:29` → `get_run_diff.py:15`); its edits cause static drift. |
 | `app/common/infrastructure/github_link_header.py` | `has_next_relation` decides a sidecar page's tail, hence the omission marker. |
 | `app/modules/reviews/infrastructure/llm/answers.py` | Builds the provider schema, validates answers and prepares repair feedback. |
 | `app/modules/reviews/infrastructure/llm/gateway.py` | Controls calls, retries, repair, fallback, and budgets. |
@@ -173,8 +173,14 @@ The manifest also stores sorted `static_inputs`, `static_digest`, and `corpus_di
 
 A supplied conventions prompt and its renderer are included only for that task. Byte hashing also warns on a docstring-only edit to any listed file; this conservative warning avoids missing a changed deadline or call policy. Corpus inputs are every active `case.json`, patch, and recursive pre-image file. Every case ID maps exactly to `responses/<case-id>.json`; replay rejects unmapped extra files. Replay warns if either digest differs or a static file is missing; it never rewrites raw answers. Refresh the **entire** response set and manifest after any input edit, even if only one rule or case changes. Traversal and symlink inputs are rejected.
 
-**Decision (#177).** Static pins are exactly the checked-in inputs the eval run executes
-on its request and answer path, judged by the criterion above. Dropped:
+**Decision (#177).** A static pin is a checked-in input that shapes the eval prompt, the
+provider request, the captured answer or its parsing — the criterion above. Executing a file
+is not enough: `validate_dataset.py`, `eval_score.py` and `ecb_fx.py` run during an eval or
+its replay and stay unpinned by design. `llm_gateway.py` and `run_failures.py` are
+deliberately wide pins and `vcs_diff.py` is kept only as an eval import (reasons in the
+table). Replay re-adds any recorded path that still holds a top-level `rules` array as a
+selected custom rule, so dropping a default pin that is itself rule-shaped would go
+unwarned. Dropped:
 `github_vcs.py`, `github_run_source.py` and `vcs_failures.py` — production commit
 retrieval, run metadata and fetch-failure classification. `eval_live.py` never imports
 them: it reads the frozen sidecar, copies the prefix into `PullRequestMeta` itself and

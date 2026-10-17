@@ -1,12 +1,14 @@
-"""Limits of the bounded PR commit-message prefix and its tail rule (#177).
+"""The bounded PR commit-message prefix: its limits, tail rule and value type (#177).
 
 Production retrieval (``github_vcs``) and the eval validator of frozen prefix evidence
 (``review/scripts/commit_context.py``) must share one definition, so a changed limit cannot
-make the eval accept a prefix that production would never read.
+make the eval accept a prefix that production would never read. ``CommitMessagePrefix`` is
+the value both sides produce; ``vcs_diff`` re-exports it for the production ports.
 """
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Literal
 
 type CommitEncoding = Literal["identity"]
@@ -23,6 +25,14 @@ COMMIT_ACCEPT_ENCODING: CommitEncoding = "identity"
 COMMIT_PAGE_COUNT = min(
     MAX_COMMIT_PAGES, (MAX_COMMIT_MESSAGES + COMMIT_PAGE_SIZE - 1) // COMMIT_PAGE_SIZE
 )
+
+
+@dataclass(frozen=True)
+class CommitMessagePrefix:
+    """Retained API-order messages; incomplete means an additional tail may exist."""
+
+    messages: tuple[str, ...]
+    incomplete: bool = False
 
 
 def commit_prefix_incomplete(

@@ -229,6 +229,7 @@ class HttpGitHubVcsProvider:
                         "GitHub commit response exceeds the "
                         f"{MAX_COMMIT_RESPONSE_BYTES / 2**20:g} MiB retrieval budget",
                     ),
+                    accepted_encoding=COMMIT_ACCEPT_ENCODING,
                     unsupported_encoding=lambda: RunFailure(
                         "commit_messages_fetch_failed",
                         "GitHub commit response uses unsupported content encoding",
@@ -374,10 +375,14 @@ class HttpGitHubVcsProvider:
         max_bytes: int,
         too_large: Callable[[], Exception],
         params: dict[str, int] | None = None,
+        accepted_encoding: str = "",
         unsupported_encoding: Callable[[], Exception] | None = None,
         chunk_size: int | None = None,
     ) -> tuple[bytearray, bool]:
-        """Bound a streamed JSON body while retaining each endpoint's failure contract."""
+        """Bound a streamed JSON body while retaining each endpoint's failure contract.
+
+        With ``unsupported_encoding`` set, only an unencoded body or ``accepted_encoding`` is read.
+        """
         async with self._client.stream(
             "GET", path, headers=headers, params=params, timeout=_REQUEST_TIMEOUT
         ) as response:
@@ -386,7 +391,7 @@ class HttpGitHubVcsProvider:
             # the commit cap even when the compressed transport chunk fits the budget.
             if unsupported_encoding is not None and response.headers.get(
                 "Content-Encoding", ""
-            ).strip().casefold() not in {"", "identity"}:
+            ).strip().casefold() not in {"", accepted_encoding}:
                 raise unsupported_encoding()
             content_length = response.headers.get("Content-Length")
             if (

@@ -9,6 +9,9 @@ from typing import Protocol
 from uuid import UUID
 
 from app.modules.reviews.application.check_runs import RunProviderCheckpoint
+from app.modules.reviews.application.commit_prefix_limits import (
+    CommitMessagePrefix as CommitMessagePrefix,
+)
 from app.modules.reviews.application.prompt_builder import (
     ChangedFile,
     DiffLine,
@@ -107,14 +110,6 @@ class VcsProvider(Protocol):
     async def get_blob(
         self, locator: PullRequestLocator, sha: str, *, checkpoint: RunProviderCheckpoint
     ) -> bytes: ...
-
-
-@dataclass(frozen=True)
-class CommitMessagePrefix:
-    """Retained API-order messages; incomplete means an additional tail may exist."""
-
-    messages: tuple[str, ...]
-    incomplete: bool = False
 
 
 class CommitMessagesProvider(Protocol):
