@@ -137,13 +137,13 @@ API baseline gates локально и в обязательном CI: `uv run r
 
 Это историческое измерение; исходные raw bytes/digests доступны на
 [`76df6d4`](https://github.com/larchanka-training/dmc-268-api-t6/tree/76df6d4d0f431ce4c02e6708410c000c66f6135a/test-prs-dataset/responses).
-Baseline §3.2.2 заменяет весь response set одной новой съёмкой без drift. Новый
+Baseline §3.2.2 заменил весь response set одной новой съёмкой без drift. Новый
 sidecar содержит проверенные API-order prefixes при совпадающих PR head/revision:
 CLEAN-03/LOG-03/SEC-04 по 1 сообщению, RES-03/SYN-04 по 20 и uncertainty marker.
 Strict schema и canonical/active binding проверяются до calls/staging; все
 canonical case.json identity inputs и shaping modules входят в static provenance.
 Результаты ниже относятся только к capture 2026-10-13 и не измеряют новые
-prefixes; новая полная съёмка описана в §3.2.2.
+prefixes; новая полная съёмка описана в §3.2.2; текущий baseline — §3.2.3.
 
 [Actions run 38468081001, attempt 1](https://github.com/larchanka-training/dmc-268-api-t6/actions/runs/38468081001)
 снял все 24 первых ответа на source SHA `80ede3cd274d745616b8a24082ff7d1d00f5b736`;
@@ -354,6 +354,10 @@ Adversarial eval использует пары одинакового дефек
 | Превышение лимита индексации, небезопасные entries архива | `failed` с `limit_exceeded:<лимит>`; entry с `..`, абсолютным путём, hardlink, устройством или FIFO — `failed` с `archive_unsafe`; symlink не индексируется; без retry, публикация не используется, ревью без RAG |
 | Прочий терминальный отказ задачи после retry | Последняя публикация читается (`stale`), на строке состояния `last_error_code` |
 | Инъекция внутри извлечённого кода | Блок передаётся типизированной недоверенной секцией `retrieved_excerpt` и не меняет роли, schema или адресата; влияние на ответ модели измеряется в корпусе ниже и по §3.4 |
+| Тумблер RAG: репозиторий до ревизии `20261016_0033`, новый репозиторий, повторный онбординг включённого, переустановка App | `rag_enabled = false` после миграции и у нового; повторный онбординг и переустановка сохраняют `true` |
+| `GET`/`PATCH /api/repos/{id}` с `ragEnabled`; чужой репозиторий; недоступная установка; `{"ragEnabled": null}` и `ragIndex` в теле | По умолчанию `ragEnabled: false` и `ragIndex.status = disabled` в detail и в списке; PATCH пишет предпочтение, включение без строки состояния даёт `empty`; чужой — 404, строка не меняется; недоступная установка — `false` и `disabled`, сохранённое предпочтение остаётся; недопустимые тела — 422 без записи |
+| Статус индекса по строке `code_index_states`: нет строки, `building`, `ready` без target, `ready` с target ≠ indexed, `failed` (`limit_exceeded:symbols`), `ready` с `last_error_code`, тумблер выключен при `ready` | `empty`, `building`, `ready`, `stale`, `failed` с кодом `error_code`, `ready` с этим кодом, `disabled`; commit, время и счётчики — только у `ready`/`stale`, иначе null и 0 |
+| Блок prompt в system, user или дополнительном сообщении; ответ без `usage`; расход до лимита run | Оценка входа учитывает блок в любой позиции; ровно одно событие `usage_events` этого run с `tokens_in` по оценке; вызов на границе лимита проходит, сверх неё — `budget_exceeded` без запроса; `context.build` пишет `tokens_by_role` |
 
 Корпус для замера — не меньше 24 кейсов, каждый со снимком репозитория на ревизии
 кейса (§4): 10 дефектов, видимых только через обратное ребро (3 из них — удалённые

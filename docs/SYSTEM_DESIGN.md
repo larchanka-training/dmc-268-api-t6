@@ -613,6 +613,18 @@ PATCH `enabled` сохраняет только предпочтение, `GET` 
 (Р-10). При `enabled=false` всё как раньше: проекция PR, precheck, replay, sweep и
 RunGuard останавливаются, rerun отвечает 409.
 
+**Тумблер RAG [техлид, 16.10.2026, #145].** `Repository.rag_enabled` хранит
+предпочтение пользователя для графа RAG v1 ([ADR 0001](adr/0001-graph-rag-v1.md));
+по умолчанию false — и у репозиториев, существовавших до ревизии `20261016_0033`, и у
+новых. Онбординг (`installation.created`, `installation_repositories.added`, sync
+установки) эту колонку не пишет: RAG он не включает и включённый не сбрасывает;
+переустановка (#132) переносит строку вместе с предпочтением. Как и у `enabled`,
+`GET` отдаёт эффективное `ragEnabled = rag_enabled AND installation_available`, PATCH
+меняет только предпочтение. Статус индекса `ragIndex` (§11, §12) выводится из
+эффективного значения и строки `code_index_states` и не хранится. Реакция на смену
+тумблера — очистка с `disabled`, включение и постановка сборки — #143; до неё
+включение не создаёт строку состояния, и статус остаётся `empty`.
+
 Старые квитанции и tombstones остаются у исходной установки: старое removal не
 отзывает новый доступ, а положительные события удалённой установки не оживляют её.
 `deleted_at` навсегда запрещает оживление той же физической установки, в том числе
@@ -1283,7 +1295,7 @@ CONTEXT_AND_VERIFICATION_SPEC §5–8, §10.
 |---|---|
 | `Workspace` | арендатор (Р-7); дневной бюджет |
 | `ProviderInstallation` | `provider`, неизменяемый `external_id`, nullable positive BIGINT `account_external_id`, постоянный `deleted_at`, `metadata` (JSON); токены App в БД не сохраняются (installation-токен — только кэш Redis, §8.3; сейчас — в памяти процесса, отступление §7.3); шифрование в MVP не заявлено — OQ-7 |
-| `Repository` | `enabled` (предпочтение), `installation_available` (доступность App), их AND в API и review eligibility; `default_engine`, `wait_for_ci: auto\|always\|never`, `review_event`, `max_comments`; `branch_filter` (массив строк, NOT NULL, по умолчанию `{}` — все ветки, §6.1), `severity_threshold` (PG enum `severity_threshold`: `all\|warning\|critical`, NOT NULL, по умолчанию `all`, PIPELINE_SPEC §9, §11) |
+| `Repository` | `enabled` (предпочтение), `installation_available` (доступность App), их AND в API и review eligibility; `default_engine`, `wait_for_ci: auto\|always\|never`, `review_event`, `max_comments`; `branch_filter` (массив строк, NOT NULL, по умолчанию `{}` — все ветки, §6.1), `severity_threshold` (PG enum `severity_threshold`: `all\|warning\|critical`, NOT NULL, по умолчанию `all`, PIPELINE_SPEC §9, §11); `rag_enabled` (предпочтение RAG, BOOLEAN NOT NULL, по умолчанию false, #145; в API — AND с `installation_available`, §6.9) |
 | `CodeChange` (PR) | `number`, `head_sha`, `base_sha`, `ai_review_labeled` (стоит лейбл `ai-review`, Р-10), `ci_status` (jsonb по sha), `state` |
 | `Run` | `origin_provider_installation_id` (неизменяемая исходная физическая установка; NULL закрывает provider-доступ), `head_sha`, `base_sha`, `state` (§6.4), `engine`, `rule_version_id`, `prompt_version_id`, `attempt`, `available_at`, `lease_until`, `cancel_requested`, `worker_id`, `trigger`, `error_code`, `error_message`; дополнительно закреплённые policy/diff/profile/result bindings. `summaryOnly` — явный итог режима, не вывод из `patch=null` |
 | Контекст | §9; manifest каждого фактического call, source roles/revisions/ranges/hashes и PG evidence excerpts (§10); summary не заменяет доказательства |
@@ -1292,7 +1304,7 @@ CONTEXT_AND_VERIFICATION_SPEC §5–8, §10.
 | `CreditLedger` | потребитель `usage_events`, не источник |
 | **Добавить:** `WebhookEvent` | `delivery_id UNIQUE`, `event`, `action`, `payload` (JSONB в PostgreSQL), `payload_s3_ref` (TEXT nullable, CHECK `payload IS NOT NULL OR payload_s3_ref IS NOT NULL` для будущего S3-оффлоада), `received_at` |
 | **Добавить:** `RuleVersion`, `PromptVersion` | неизменяемые (Р-6) |
-| **Добавить:** `UsageEvent` | `run_id`, `model`, `tokens_in/out`, `cache_read_tokens`, `cost_usd` — только вставка (Р-8) |
+| **Добавить:** `UsageEvent` | `run_id` (NOT NULL, FK `runs`: подставного run нет, #145), `model`, `tokens_in/out`, `cache_read_tokens`, `cost_usd` — только вставка (Р-8) |
 | **Добавить:** `RunAction` | `run_id`, `index`, `tool` (каталог — PIPELINE_SPEC §2), `request jsonb`, `response jsonb?` (≤ 64 КБ) или `response_ref` (> 64 КБ — id строки отдельной таблицы PG, PIPELINE_SPEC §2), `started_at`, `duration_ms` — Zod `RunAction` фронта |
 | Снимок диффа (Р-15) | ключ `(run_id, filename)`; исходный доступный `patch`, отдельно `review_patch`, patch_state и rename/copy provenance; `run_diff_maps` хранит immutable revisions/provider refs/hunks/digest |
 | **#107:** `run_policy_snapshots` | один immutable snapshot на run: документы/absence, checksums, ignore и версии профилей; retry его не заменяет |
@@ -1337,6 +1349,20 @@ storage/API/UI, без смешивания версий внутри run.
 Leader-задачи TTL и сборки мусора с удалением не позже чем через 1 ч — #143. Каскад FK
 при удалении репозитория — только страховка.
 
+Статус индекса, который видят API и ревью (#145), не хранится: его выводит
+`rag_index(...)` модуля `code_index` из эффективного тумблера (§6.9) и строки
+состояния. Выключенный тумблер — `disabled`; нет строки — `empty`; `ready` с заданным
+`target_commit_sha`, отличным от `indexed_commit_sha`, — `stale`; остальные статусы
+строки — как есть. Код ошибки ответа — `error_code` при `failed`, иначе
+`last_error_code`. Commit, время публикации и счётчики файлов и символов видимой
+публикации показываются только для `ready` и `stale`, иначе null и 0; текста кода нет.
+`disabled` выходит за список статусов ADR (отступление от буквы AC3 #145); пустой
+репозиторий — `ready` с `fileCount = 0`. `ready`/`stale` пригодны для ревью, у
+`empty`/`building`/`failed` есть причина неготовности для `rag: not_ready` (#144).
+`target_commit_sha` до #143 никто не пишет, поэтому `stale` на `main` не возникает.
+Итог задачи индексации пишется без новых колонок — статусом, `error_code` и
+`last_error_code` (`mark_failed`/`release`, сброс `last_error_code` публикацией — #142).
+
 ---
 
 ## 12. Контракт API ↔ UI
@@ -1356,14 +1382,14 @@ null, не 0. У legacy coverage=null. `blocking` = supported critical/high,
 API, VCS и check-run показывают один backend summary из supported findings и scope;
 raw модельная похвала/неподтверждённые дефекты в публичную сводку не переносятся.
 
-Провод — **camelCase** (Ф-10): `defaultEngine`, `waitForCi`, `maxComments`, `reviewEvent`, `branchFilter`, `severityThreshold`, `installationAvailable`; snake_case — только в БД (и во внутренних сообщениях очереди, §7.2). Префикс `/api` без версии.
+Провод — **camelCase** (Ф-10): `defaultEngine`, `waitForCi`, `maxComments`, `reviewEvent`, `branchFilter`, `severityThreshold`, `installationAvailable`, `ragEnabled`, `ragIndex`; snake_case — только в БД (и во внутренних сообщениях очереди, §7.2). Префикс `/api` без версии.
 
 | Группа | Операции | Сервис | Главное |
 |---|---|---|---|
 | Прогоны | `GET /api/runs`, `GET /api/runs/{id}`, `…/diff`, `…/files`, `…/comments`, `…/actions`, `…/actions/{index}/response` | `portal-api` | `RunListPage {items,nextCursor}`, семь состояний Р-14; detail = RunSession + verdict/summary/severityCounts/findings/budget и планируемые поля coverage/version выше. `/diff` сохраняет исходный доступный UI patch при ignored/summary-only; `patch=null` означает отсутствие исходного patch, не отсутствие AI-проверки. `/files` старше TTL → `404`/`410`; большие action bodies — через response endpoint |
 | Действия с прогоном | `POST /api/runs/{id}/rerun`, `POST /api/runs/{id}/cancel` | `portal-api` | rerun — новый Run `queued`, `202`; PR закрыт, есть активный Run либо Repository paused/unavailable → `409` (§6.7); cancel идемпотентен |
 | Поток | `GET /api/stream` | `portal-api` | SSE `run.updated {runId, status}` (кадр с `id:`, повтор по `Last-Event-ID`) и `run.step {runId, tool, index, ok, startedAt, durationMs}` (без `id:`, не переигрывается); один поток на вкладку, `fetch` с Bearer; между процессами — PG `LISTEN/NOTIFY` каналов `run_updated` и `run_step` (D12 — дефолт по #20, §6.6, PIPELINE_SPEC §1) |
-| Репозитории | `GET /api/repos`, `GET/PATCH /api/repos/{id}`, `GET /api/repos/{id}/pulls` | `portal-api` | подключение — установкой App (§6.9): `POST /api/repos` и PATCH коллекции нет (D10); `GET /api/repos` → `Repository[]`; PATCH — `enabled`, `defaultEngine`, `waitForCi` (`auto\|always\|never`), `maxComments` (1..10), `reviewEvent` (`COMMENT\|REQUEST_CHANGES`), `branchFilter` (до 20 шаблонов по 1–255 символов, `[]` очищает), `severityThreshold` (`all\|warning\|critical`); `Repository` дополнительно отдаёт только для чтения `installationAvailable` (§6.9), в теле PATCH оно → `422`; pulls → `{items: PullRequestSummary[], nextCursor}` с `latestRun {id, status, verdict}` (D11 — дефолт по #20) |
+| Репозитории | `GET /api/repos`, `GET/PATCH /api/repos/{id}`, `GET /api/repos/{id}/pulls` | `portal-api` | подключение — установкой App (§6.9): `POST /api/repos` и PATCH коллекции нет (D10); `GET /api/repos` → `Repository[]`; PATCH — `enabled`, `defaultEngine`, `waitForCi` (`auto\|always\|never`), `maxComments` (1..10), `reviewEvent` (`COMMENT\|REQUEST_CHANGES`), `branchFilter` (до 20 шаблонов по 1–255 символов, `[]` очищает), `severityThreshold` (`all\|warning\|critical`), `ragEnabled`; `Repository` дополнительно отдаёт только для чтения `installationAvailable` (§6.9) и `ragIndex` (§11), в теле PATCH они → `422`; pulls → `{items: PullRequestSummary[], nextCursor}` с `latestRun {id, status, verdict}` (D11 — дефолт по #20) |
 | Правила, метрики | `GET/POST /api/repos/{id}/rules`, `POST /api/rules/{id}/preview`, `GET /api/metrics/summary` | `portal-api` | после MVP (`x-note` в спеке) |
 | Вход и сессия | `POST /api/auth/github/callback`, `POST /api/auth/refresh`, `GET /api/auth/me`, `POST /api/auth/logout` | `auth-api` | ниже; поток — §6.5 |
 
@@ -1380,6 +1406,17 @@ PATCH даёт 422. Шаблон `branchFilter` (синтаксис — §6.1) �
 либо заканчивается на `/`, `.` или `.lock`; равен `@`. Список — не больше 20
 шаблонов, без повторов. Zod-схема UI делает три поля ответа обязательными, поэтому
 API с ними выкатывается раньше, чем мёржится соответствующий PR UI.
+
+**Тумблер и статус RAG [техлид, 16.10.2026, #145].** В `Repository` обязательны
+`ragEnabled` (boolean, эффективное значение, §6.9) и `ragIndex` (схема `RagIndex`,
+только чтение, закрыта): `status` (схема `RagIndexStatus`:
+`disabled | empty | building | ready | stale | failed`, порядок контракта),
+`indexedCommitSha`, `indexedAt` (string или null), `fileCount`, `symbolCount`
+(integer ≥ 0) и `lastErrorCode` (string или null); правила вывода — §11. В
+`RepositoryUpdate` `ragEnabled` необязателен; `null` в нём и `ragIndex` в теле PATCH
+дают 422. Zod-схемы UI — ui#109 (снимок `tests/fixtures/ui_zod_contracts.json`;
+коммит ui, с которого он снят, — в `provenance.commit` и `UI_CONTRACT_COMMIT`); поля
+ответа там обязательны, поэтому API с ними выкатывается раньше мёржа PR UI.
 
 **Контракт авторизации** (D4 — решение техлида по #20; хранение access в памяти, подпись в `auth-api` с проверкой публичным ключом и граница Workspace — дефолт по #20):
 
@@ -1410,7 +1447,7 @@ API с ними выкатывается раньше, чем мёржится �
 | Пропускная способность v1 | 100 PR/день, 5 параллельных прогонов; масштаб — реплики `worker` | |
 | Надёжность | ни одна задача не теряется: persistent-сообщения + состояние в PG + реконсилер 5 мин; приёмник вебхуков — отдельный процесс (GitHub не ретраит) | |
 | Схлопывание | Перед каждым POST проверяются актуальные head/diff и отмена; при расхождении cancelled/superseded. После POST повторно проверяется актуальность, remote IDs сохраняются даже при cancelled. Окно GET–POST остаётся; нового head такое ревью не подтверждает | §8.4, TEST_PLAN §5 |
-| Стоимость | fast $0.50, deep $3 на все попытки; до вызова учитываются usage + его оценка + резерв обязательных downstream стадий. Общие 4 вызова/попытку, 12/run, ≤3 попыток. Без завершённого verifier/final result публикация запрещена в обоих движках; verifier budget/deadline exhaustion → failed. Дневной бюджет Workspace → fast, затем skipped | Р-8, §5, PIPELINE_SPEC §4.5 |
+| Стоимость | fast $0.50, deep $3 на все попытки; до вызова учитываются usage + его оценка + резерв обязательных downstream стадий. Общие 4 вызова/попытку, 12/run, ≤3 попыток. Без завершённого verifier/final result публикация запрещена в обоих движках; verifier budget/deadline exhaustion → failed. Дневной бюджет Workspace → fast, затем skipped. Блоки RAG — обычный контекст prompt: входят в оценку входа до вызова, их токены и стоимость пишутся в `usage_events` своего run, дневной бюджет и лимит run считают их как прежде; доля RAG — `tokens_by_role` в `context.build` (роль `retrieved_excerpt`, #145) | Р-8, §5, PIPELINE_SPEC §4.5, [ADR 0001 §11](adr/0001-graph-rag-v1.md#11-учёт-расхода) |
 | Качество | Ориентиры Precision ≥85 %, Critical Recall ≥75 %, Hallucination <3 %. Raw review и final pipeline измеряются раздельно по независимой ручной разметке; verifier rejection/unsupported acceptance, insufficient/partial/failure и стоимость требуют собственного baseline | TEST_PLAN §3, §5 |
 | Безопасность | HMAC на вебхуках; секреты только через env из CI (роль 3); токены GitHub и LLM не попадают в сандбокс; сандбокс `--network=none`, non-root, read-only rootfs; PG/RabbitMQ/Redis — только внутренняя сеть | [TEST_PLAN 2.2](TEST_PLAN.md#22-webhook-и-триггер-р-9-р-10), [2.4](TEST_PLAN.md#24-sandboxengine-р-4-фаза-3), [2.6](TEST_PLAN.md#26-инфраструктура-и-безопасность) |
 | Данные клиента | блобы ≤ 7 дней в кэше; диффы, контексты и тела ответов инструментов — до удаления Workspace, payload вебхуков — 30 дней после завершения квитанции; индекс RAG — производные метаданные кода без текста и сигнатур (ключ `repository_id`), 30 дней без использования в ревью; после `installation_repositories.removed`, `installation.deleted` и выключения тумблера сразу нечитаем, физически удаляется не позже чем через 1 ч; архив дерева при индексации разбирается в памяти и не хранится сверх задачи; ни один прогон не логирует содержимое файлов в stdout | §10, [ADR 0001 §4](adr/0001-graph-rag-v1.md#4-хранение-очистка-и-изоляция) |
@@ -1488,7 +1525,7 @@ verifier #107. В новом профиле четыре слота делятс
 
 **Production `commit_messages` ([#82](https://github.com/larchanka-training/dmc-268-api-t6/issues/82)).** `GitHubRunSource.get_pull_request_meta` делегирует чтение `HttpGitHubVcsProvider` через узкий порт commit metadata. Провайдер читает `GET /repos/{owner}/{repo}/pulls/{n}/commits` с валидированным именем репозитория: не более двух числовых страниц (`per_page=10`, `page=1`, затем `page=2`), первые 20 сообщений в порядке API. Короткая или пустая страница завершает чтение. URL из `Link` не используются для запросов. Признак `next` последней страницы или полная вторая страница задаёт `commit_messages_incomplete`; `PromptBuilder` добавляет `[Additional commits may be omitted]`, не придумывая число пропущенных коммитов. Короткая полная по данным API вторая страница снимает ранний `next`; пустая последняя страница с `next` сохраняет маркер без сообщений.
 
-Общая application-функция ограничивает сообщение 500 Unicode-символами, включая многоточие; сохраняется не более 10 000 символов текста. Commit pages и blobs используют общий capped reader. Каждая commit page ограничена 1 MiB до строгого Pydantic-разбора. `Accept-Encoding: identity` и отказ от другого encoding до чтения предотвращают распаковку сверх байтового потолка. Пустая строка сообщения допустима. Невалидный JSON, более 10 записей, неверная структура, размер, encoding и HTTP-сбои дают retryable `commit_messages_fetch_failed`; 404 и nonlimited 403 сохраняют `github_forbidden`, числовой `Retry-After` — задержку. Безопасный check-run сообщает «Не удалось получить сообщения коммитов PR из GitHub.»
+Общая application-функция ограничивает сообщение 500 Unicode-символами, включая многоточие; сохраняется не более 10 000 символов текста (20 × 500) до XML-экранирования. После экранирования блок `<commit_messages>` в отрендеренном user message (`base_user`) занимает до 50 396 символов, из них 50 000 — экранированный текст; подгонка промпта считает именно отрендеренную длину. Эта граница не включает маркеры `[N more commits omitted]` и `[Additional commits may be omitted]`: каждый добавляет ещё одну строку `<commit>…</commit>`. Commit pages и blobs используют общий capped reader. Каждая commit page ограничена 1 MiB до строгого Pydantic-разбора. `Accept-Encoding: identity` и отказ от другого encoding до чтения предотвращают распаковку сверх байтового потолка. Пустая строка сообщения допустима. Невалидный JSON, более 10 записей, неверная структура, размер, encoding и HTTP-сбои дают retryable `commit_messages_fetch_failed`; 404 и nonlimited 403 сохраняют `github_forbidden`, числовой `Retry-After` — задержку. Безопасный check-run сообщает «Не удалось получить сообщения коммитов PR из GitHub.»
 
 Перед получением токена и каждым запросом checkpoint проверяет исходную установку Run; её отзыв между страницами прекращает дальнейшую работу с токенами и HTTP. Чтения Run завершают короткую транзакцию до GitHub-вызова. Рендерер сохраняет XML-экранирование, Unicode-предел 20 × 500 и прежний `[N more commits omitted]` для известных дополнительных сообщений в длинном in-memory кортеже; complete empty list не добавляет блок.
 

@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
+from typing import Any
 from uuid import UUID
 
-from sqlalchemy import ColumnElement, select, true, update
+from sqlalchemy import ColumnElement, Row, select, true, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.common.infrastructure.db.enums import Engine, ReviewEvent, SeverityThreshold, WaitForCi
 from app.common.infrastructure.db.unit_of_work import SqlAlchemyUnitOfWork
 from app.modules.auth.application.scope import AuthScope
+from app.modules.code_index.domain.rag_index import rag_index
+from app.modules.code_index.infrastructure.models import CodeIndexState
 from app.modules.repositories.application.repository_settings import (
     RepositorySettings,
     RepositorySettingsChange,
@@ -17,8 +20,25 @@ from app.modules.repositories.application.repository_settings import (
 from app.modules.repositories.infrastructure.models import Repository
 from app.modules.workspaces.infrastructure.repository_access import repository_access_predicate
 
+# The repository row and the state columns the RAG index status is derived from (#145); the
+# outer join gives None for each of them when the repository has no state row yet.
+# `_to_settings` reads them by name, so the column order here carries no meaning.
+_SETTINGS = select(
+    Repository,
+    CodeIndexState.status,
+    CodeIndexState.indexed_commit_sha,
+    CodeIndexState.target_commit_sha,
+    CodeIndexState.published_at,
+    CodeIndexState.file_count,
+    CodeIndexState.symbol_count,
+    CodeIndexState.error_code,
+    CodeIndexState.last_error_code,
+).outerjoin(CodeIndexState, CodeIndexState.repository_id == Repository.id)
 
-def _to_settings(repository: Repository) -> RepositorySettings:
+
+def _to_settings(row: Row[Any]) -> RepositorySettings:
+    repository: Repository = row.Repository
+    rag_enabled = repository.rag_enabled and repository.installation_available
     return RepositorySettings(
         id=repository.id,
         full_name=repository.full_name,
@@ -33,6 +53,18 @@ def _to_settings(repository: Repository) -> RepositorySettings:
         branch_filter=tuple(repository.branch_filter),
         severity_threshold=repository.severity_threshold.value,
         installation_available=repository.installation_available,
+        rag_enabled=rag_enabled,
+        rag_index=rag_index(
+            rag_enabled=rag_enabled,
+            status=row.status,
+            indexed_commit_sha=row.indexed_commit_sha,
+            target_commit_sha=row.target_commit_sha,
+            published_at=row.published_at,
+            file_count=row.file_count,
+            symbol_count=row.symbol_count,
+            error_code=row.error_code,
+            last_error_code=row.last_error_code,
+        ),
     )
 
 
@@ -55,15 +87,17 @@ class SqlAlchemyRepositorySettingsStore:
         return true() if self._scope is None else repository_access_predicate(self._scope)
 
     async def list_repositories(self) -> list[RepositorySettings]:
-        rows = await self._session.scalars(
-            select(Repository).where(self._visible()).order_by(Repository.full_name, Repository.id)
+        rows = await self._session.execute(
+            _SETTINGS.where(self._visible()).order_by(Repository.full_name, Repository.id)
         )
         return [_to_settings(row) for row in rows]
 
     async def get_repository(self, repository_id: UUID) -> RepositorySettings | None:
-        row = await self._session.scalar(
-            select(Repository).where(Repository.id == repository_id, self._visible())
-        )
+        row = (
+            await self._session.execute(
+                _SETTINGS.where(Repository.id == repository_id, self._visible())
+            )
+        ).one_or_none()
         return None if row is None else _to_settings(row)
 
     async def update_repository(
@@ -84,13 +118,16 @@ class SqlAlchemyRepositorySettingsStore:
             values["branch_filter"] = list(change.branch_filter)
         if change.severity_threshold is not None:
             values["severity_threshold"] = SeverityThreshold(change.severity_threshold)
-        row = await self._session.scalar(
+        if change.rag_enabled is not None:
+            # The stored preference; the read below masks it by the installation, like enabled.
+            values["rag_enabled"] = change.rag_enabled
+        updated = await self._session.scalar(
             update(Repository)
             .where(Repository.id == repository_id, self._visible())
             .values(**values)
-            .returning(Repository)
+            .returning(Repository.id)
         )
-        return None if row is None else _to_settings(row)
+        return None if updated is None else await self.get_repository(updated)
 
 
 class SqlAlchemyRepositorySettingsUnitOfWork(SqlAlchemyUnitOfWork):

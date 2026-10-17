@@ -64,8 +64,9 @@ def _installation(connection: Connection, external_id: int) -> str:
 
 def test_reinstall_schema_has_one_upgrade_head_after_deployed_policy_schema() -> None:
     graph = ScriptDirectory.from_config(Config("alembic.ini"))
-    assert graph.get_heads() == ["20261015_0032"]
+    assert graph.get_heads() == ["20261016_0033"]
     assert [revision.revision for revision in graph.iterate_revisions("head", "20261012_0030")] == [
+        "20261016_0033",
         "20261015_0032",
         "20261014_0031",
         "20261010_0030",

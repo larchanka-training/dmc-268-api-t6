@@ -208,7 +208,7 @@ def test_invalid_review_settings_are_rejected_without_a_write(env: Env) -> None:
         stored_row = tuple(
             scalar(
                 factory,
-                "SELECT branch_filter, severity_threshold, installation_available "
+                "SELECT branch_filter, severity_threshold, installation_available, rag_enabled "
                 "FROM repositories WHERE id=:id",
                 id=REPO_A,
             )
@@ -223,7 +223,7 @@ def test_invalid_review_settings_are_rejected_without_a_write(env: Env) -> None:
         "body",
         "branchFilter",
     ]
-    assert stored_row == (["main"], "warning", True)
+    assert stored_row == (["main"], "warning", True, False)
 
 
 @pytest.mark.integration

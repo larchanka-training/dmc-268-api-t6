@@ -8,7 +8,19 @@ from uuid import UUID
 from pydantic import ConfigDict, Field, field_validator, model_validator
 
 from app.common.application.branch_patterns import validate_branch_patterns
-from app.modules.reviews.api.dtos import ApiDto
+from app.modules.code_index.domain.enums import RagIndexStatus
+from app.modules.reviews.api.dtos import ApiDto, UtcDatetime
+
+
+class RagIndexDto(ApiDto):
+    """Read-only; the publication fields are set only for ready and stale (#145)."""
+
+    status: RagIndexStatus
+    indexed_commit_sha: str | None
+    indexed_at: UtcDatetime | None
+    file_count: int
+    symbol_count: int
+    last_error_code: str | None
 
 
 class RepositoryDto(ApiDto):
@@ -26,6 +38,9 @@ class RepositoryDto(ApiDto):
     severity_threshold: Literal["all", "warning", "critical"]
     # Read-only: ``enabled`` is the stored preference AND this availability (SD §6.9).
     installation_available: bool
+    # Like ``enabled``: the stored preference AND ``installation_available`` (#145).
+    rag_enabled: bool
+    rag_index: RagIndexDto
 
 
 class RepositoryUpdateDto(ApiDto):
@@ -40,6 +55,7 @@ class RepositoryUpdateDto(ApiDto):
     review_event: Literal["COMMENT", "REQUEST_CHANGES"] | None = None
     branch_filter: list[str] | None = None
     severity_threshold: Literal["all", "warning", "critical"] | None = None
+    rag_enabled: bool | None = None
 
     @field_validator("branch_filter")
     @classmethod

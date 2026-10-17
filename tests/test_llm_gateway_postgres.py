@@ -70,6 +70,25 @@ def _rows(factory: async_sessionmaker[Any], sql: str, **values: Any) -> list[Any
 
 
 @pytest.mark.integration
+def test_usage_events_cannot_carry_a_substitute_run(env: Env) -> None:
+    """Spend outside a run (index builds) has no row to land in (#145, AC6)."""
+    engine = env.engine()
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        rows = _rows(
+            factory,
+            "SELECT a.attnotnull, c.confrelid::regclass::text FROM pg_attribute a "
+            "JOIN pg_constraint c ON c.conrelid = a.attrelid AND c.contype = 'f' "
+            "AND c.conkey = ARRAY[a.attnum] "
+            "WHERE a.attrelid = 'usage_events'::regclass AND a.attname = 'run_id'",
+        )
+    finally:
+        asyncio.run(engine.dispose())
+
+    assert [tuple(row) for row in rows] == [(True, "runs")]
+
+
+@pytest.mark.integration
 def test_run_cost_sums_every_attempt_of_one_run_only(env: Env) -> None:
     engine = env.engine()
     factory = async_sessionmaker(engine, expire_on_commit=False)

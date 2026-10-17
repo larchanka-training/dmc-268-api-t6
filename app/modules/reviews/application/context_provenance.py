@@ -27,6 +27,7 @@ class SourceRole(StrEnum):
     DIFF = "diff"
     SOURCE_EXCERPT = "source_excerpt"
     AST_EXCERPT = "ast_excerpt"
+    RETRIEVED_EXCERPT = "retrieved_excerpt"
     CANDIDATE = "candidate"
     PREVIOUS_OUTPUT = "previous_output"
 

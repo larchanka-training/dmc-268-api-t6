@@ -18,6 +18,8 @@ from app.modules.reviews.application.ast_symbols import (
     ParseRequest,
 )
 from app.modules.reviews.application.check_runs import RunProviderCheckpoint
+from app.modules.reviews.application.context_provenance import LineRange, SourceRef, SourceRole
+from app.modules.reviews.application.diff_map import DiffMap, DiffSide, VcsProviderName
 from app.modules.reviews.application.execute_review import ExecuteReviewRun
 from app.modules.reviews.application.get_run_diff import DiffSnapshot
 from app.modules.reviews.application.policy_documents import PolicyEntryKind, PolicyTreeEntry
@@ -25,10 +27,18 @@ from app.modules.reviews.application.policy_errors import PolicyError, PolicyErr
 from app.modules.reviews.application.prepare_policy_snapshot import PreparePolicySnapshot
 from app.modules.reviews.application.process_run import RunVcsInput
 from app.modules.reviews.application.prompt_builder import PullRequestMeta
-from app.modules.reviews.application.review_context import BuildReviewContext, ContextStatus
+from app.modules.reviews.application.review_context import (
+    BuildReviewContext,
+    ContextBlock,
+    ContextLevel,
+    ContextStatus,
+    Representation,
+    ReviewContextPayload,
+)
 from app.modules.reviews.application.review_context_stage import (
     EstimatedTokenCounter,
     ReviewContextStage,
+    context_summary,
 )
 from app.modules.reviews.application.run_failures import RunCancelled, RunFailure, RunSkipped
 from app.modules.reviews.application.vcs_diff import (
@@ -252,6 +262,63 @@ def test_stage_records_the_policy_and_the_context_without_any_document_or_code_t
     recorded = repr(trace.steps)
     assert "extra = 1" not in recorded
     assert "generated" not in recorded
+
+
+def _block(block_id: str, level: ContextLevel, role: SourceRole, tokens: int) -> ContextBlock:
+    source = SourceRef(
+        role, UUID(int=5), _HEAD, "src/app.py", None, (), DiffSide.RIGHT, (LineRange(1, 3),), "t"
+    )
+    return ContextBlock(
+        block_id, level, None, source, Representation.EXACT_LINES, "x", tokens, False
+    )
+
+
+def test_context_trace_counts_tokens_by_source_role_so_retrieved_excerpts_show() -> None:
+    diff_map = DiffMap(
+        schema_version=1,
+        parser_version="unified-hunks/v1",
+        provider=VcsProviderName.GITHUB,
+        repository_id=UUID(int=5),
+        code_change_number=7,
+        policy_base_sha=_BASE,
+        head_sha=_HEAD,
+        diff_old_sha=None,
+        file_list_complete=True,
+        incomplete_reasons=(),
+        files=(),
+        digest="d" * 64,
+    )
+    payload = ReviewContextPayload(
+        status=ContextStatus.REVIEW,
+        reason=None,
+        policy_snapshot_id=UUID(int=9),
+        policy_digest="p" * 64,
+        diff_digest="d" * 64,
+        blocks=(
+            _block("b1", ContextLevel.L1, SourceRole.DIFF, 40),
+            _block("b2", ContextLevel.L3, SourceRole.SOURCE_EXCERPT, 25),
+            _block("b3", ContextLevel.L3, SourceRole.RETRIEVED_EXCERPT, 60),
+            _block("b4", ContextLevel.L3, SourceRole.RETRIEVED_EXCERPT, 30),
+        ),
+        omissions=(),
+        imports=(),
+        levels_present=(ContextLevel.L1, ContextLevel.L3),
+        reviewable_lines=1,
+        ignored_files=0,
+        tokens_used=155,
+    )
+
+    summary = context_summary(diff_map, payload)
+
+    # The level view merges retrieved excerpts into L3; the role view keeps them apart.
+    assert summary["tokens_by_level"] == {"L1": 40, "L3": 115}
+    assert summary["tokens_by_role"] == {"diff": 40, "source_excerpt": 25, "retrieved_excerpt": 90}
+    assert [block["role"] for block in summary["blocks"]] == [
+        "diff",
+        "source_excerpt",
+        "retrieved_excerpt",
+        "retrieved_excerpt",
+    ]
 
 
 def test_retry_reuses_the_stored_policy_snapshot() -> None:
