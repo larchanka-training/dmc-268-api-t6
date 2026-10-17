@@ -89,15 +89,17 @@ flowchart LR
 
 ## 5. Алерты
 
-Правила — `deploy/monitoring/prometheus/rules/alerts.yml`, unit-тесты — `tests/monitoring/alerts.test.yml`. Сообщение: статус, имя, окружение, severity и по строке на алерт; только числа и имена — без содержимого ревью и секретов.
+Правила — `deploy/monitoring/prometheus/rules/alerts.yml`, unit-тесты — `tests/monitoring/alerts.test.yml`. Сообщение: статус, окружение, severity и по строке на алерт с его именем; только числа и имена — без содержимого ревью и секретов.
+
+Два вида алертов. **Состояние** (диск, очередь без консьюмера, цель недоступна): напоминание раз в 4 ч, пока условие держится, и сообщение RESOLVED. **Событие** (метка `kind: event`: упавший прогон, новое сообщение в DLQ): уходит один раз и без RESOLVED — оно «закрывается» лишь потому, что выходит из 15-минутного окна. События за 90 с собираются в одно сообщение: прогон, исчерпавший попытки, — это и `failed`, и сообщение в `reviews.dlq` (PIPELINE_SPEC §4.4), и оба приходят вместе.
 
 | Алерт | Условие | Severity |
 |---|---|---|
 | `TargetDown` | цель не отвечает 5 мин | critical |
 | `PostgresDown` / `RedisDown` | `pg_up == 0` 2 мин / `redis_up == 0` 5 мин | critical / warning |
-| `ApiHigh5xxRate` | > 5 % ответов 5xx на `staging-api`/`staging-ui` 5 мин (при > 0.05 rps) | critical |
-| `ReviewRunsFailed` | хотя бы один прогон `failed` за 15 мин | warning |
-| `ReviewDeadLetters` | сообщения в `reviews.dlq` 5 мин | critical |
+| `ApiHigh5xxRate` | > 5 % ответов 5xx на `staging-api`/`staging-ui` 5 мин (при > 0.05 rps). `staging-webhook` не входит: это заглушка 503 без сервиса, вебхуки GitHub принимает `staging-api` (CICD.md §8.2) | critical |
+| `ReviewRunsFailed` | хотя бы один прогон `failed` за 15 мин; событие | warning |
+| `ReviewDeadLetters` | новые сообщения в `reviews.dlq` за 15 мин; событие. Размер DLQ (хранение 7 дней) — на панели `Review queues: ready messages` | critical |
 | `ReviewQueueBacklog` | > 20 готовых сообщений в `review.run.*`/`review.publish` 10 мин | warning |
 | `ReviewQueueWithoutConsumer` | у `review.run.fast` или `review.publish` нет консьюмера 5 мин | critical |
 | `ReviewRunsStuckInQueue` | есть `stale_queued` 5 мин | warning |
@@ -138,7 +140,7 @@ Job `Deploy monitoring` в `ci-cd.yml` запускается после усп�
 | Курсовой VPS | `https://grafana.<APP_DOMAIN>/` (staging: `https://grafana.dmc268-t6.axyi.ru/`), пользователь `admin`, пароль — `GRAFANA_ADMIN_PASSWORD` из `/opt/dmc-268-monitoring/.env` | без внешнего доступа: `docker compose -p dmc-268-monitoring exec prometheus wget -qO- localhost:9090/api/v1/alerts` |
 | Terraform-хост | SSH-туннель: `ssh -L 3000:127.0.0.1:3000 …`, затем `http://localhost:3000/` | то же |
 
-Grafana — на своём хосте `grafana.<APP_DOMAIN>` (A-запись на VPS). Регистрация и анонимный доступ выключены, cookie `Secure`, дашборды и источники данных доступны в UI только для чтения: изменения идут через PR в `deploy/monitoring/grafana`. Имена `prometheus.<APP_DOMAIN>` и `victoria-metrics.<APP_DOMAIN>` тоже указывают на VPS, но сайта в Caddyfile не получают: у Prometheus нет аутентификации, запросы к нему — через Explore в Grafana; VictoriaMetrics в стеке нет.
+Grafana — на своём хосте `grafana.<APP_DOMAIN>` (A-запись на VPS). Регистрация и анонимный доступ выключены, cookie `Secure`, `/metrics` Grafana (он без логина) edge отвечает 404 — Prometheus читает его внутри docker-сети, дашборды и источники данных доступны в UI только для чтения: изменения идут через PR в `deploy/monitoring/grafana`. Имена `prometheus.<APP_DOMAIN>` и `victoria-metrics.<APP_DOMAIN>` тоже указывают на VPS, но сайта в Caddyfile не получают: у Prometheus нет аутентификации, запросы к нему — через Explore в Grafana; VictoriaMetrics в стеке нет.
 
 ## 8. Ограничения и следующие шаги
 
