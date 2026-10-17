@@ -92,7 +92,8 @@ async def seed_archive(factory: async_sessionmaker[AsyncSession]) -> None:
             text(
                 "UPDATE repositories SET enabled=false, installation_available=false, "
                 "default_engine='fast', wait_for_ci='always', max_comments=7, "
-                "review_event='request_changes', "
+                "review_event='request_changes', branch_filter='{main,release/*}', "
+                "severity_threshold='critical', rag_enabled=true, "
                 "prompt_version_id=:prompt WHERE id=:repo"
             ),
             {"repo": REPO_A, "prompt": PROMPT},
@@ -157,13 +158,17 @@ def test_same_account_fresh_oauth_preserves_repository_children_workspace_and_pa
         assert asyncio.run(apply(factory, FreshGitHub())) == (WS_A,)
         assert client.get(f"/api/repos/{REPO_A}").status_code == 200
         assert client.get(f"/api/repos/{REPO_A}").json()["enabled"] is False
+        repository = client.get(f"/api/repos/{REPO_A}").json()
+        assert repository["branchFilter"] == ["main", "release/*"]
+        assert repository["severityThreshold"] == "critical" and repository["ragEnabled"] is True
         assert client.get(f"/api/runs/{RUN_DONE}").status_code == 200
         assert tuple(
             scalar(
                 factory,
                 "SELECT i.external_id, i.account_external_id, i.workspace_id, r.enabled, "
                 "r.installation_available, r.default_engine, r.wait_for_ci, r.max_comments, "
-                "r.review_event, r.prompt_version_id, w.daily_budget_usd FROM repositories r "
+                "r.review_event, r.prompt_version_id, r.branch_filter, r.severity_threshold, "
+                "r.rag_enabled, w.daily_budget_usd FROM repositories r "
                 "JOIN provider_installations i ON i.id=r.provider_installation_id "
                 "JOIN workspaces w ON w.id=i.workspace_id WHERE r.id=:repo",
                 repo=REPO_A,
@@ -179,6 +184,9 @@ def test_same_account_fresh_oauth_preserves_repository_children_workspace_and_pa
             7,
             "request_changes",
             PROMPT,
+            ["main", "release/*"],
+            "critical",
+            True,
             Decimal("12.34"),
         )
         assert tuple(
@@ -443,6 +451,64 @@ def test_oauth_moves_only_confirmed_repository_and_preserves_deep_setting(
 
 
 @pytest.mark.integration
+def test_rebind_keeps_other_account_deleted_installation_out_of_same_workspace_sources(
+    reinstall_env: Env,
+) -> None:
+    async def exercise() -> None:
+        engine = reinstall_env.engine()
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        other_installation = UUID(int=11315)
+        other_repo = UUID(int=11316)
+        try:
+            await seed_archive(factory)
+            async with factory.begin() as session:
+                # Same Workspace, other account: archived_workspace never locks it, so only
+                # the account predicate of the rebind() source query keeps 105 in place.
+                await session.execute(
+                    text(
+                        "INSERT INTO "
+                        "provider_installations(id,workspace_id,provider,external_id,account_external_id,deleted_at,metadata)"
+                        " VALUES (:id,:ws,'github',19,701,clock_timestamp(),'{}')"
+                    ),
+                    {"id": other_installation, "ws": WS_A},
+                )
+                await session.execute(
+                    text(
+                        "INSERT INTO "
+                        "repositories(id,provider_installation_id,external_id,full_name,default_branch,web_url,installation_available)"
+                        " VALUES "
+                        "(:id,:installation,105,'other/b','main','https://github.test/other/b',false)"
+                    ),
+                    {"id": other_repo, "installation": other_installation},
+                )
+            assert await apply(
+                factory,
+                FreshGitHub(installation=GitHubInstallation(29, "renamed-owner", (101, 105), 700)),
+            ) == (WS_A,)
+            async with factory() as session:
+                target = await session.scalar(
+                    text("SELECT id FROM provider_installations WHERE external_id=29")
+                )
+                assert isinstance(target, UUID)
+                rows = (
+                    await session.execute(
+                        text(
+                            "SELECT id, provider_installation_id, installation_available FROM "
+                            "repositories WHERE external_id IN (101, 105) ORDER BY external_id"
+                        )
+                    )
+                ).all()
+                assert [tuple(row) for row in rows] == [
+                    (REPO_A, target, True),
+                    (other_repo, other_installation, False),
+                ]
+        finally:
+            await engine.dispose()
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.integration
 @pytest.mark.parametrize("same_user", [True, False])
 def test_concurrent_fresh_callbacks_share_one_target_and_preserved_repository(
     reinstall_env: Env,
@@ -643,8 +709,35 @@ def test_existing_target_repository_is_not_replaced_or_merged_with_archive(
                     ),
                     {"id": target_repo, "installation": UUID(int=11310)},
                 )
+            snapshot = text(
+                "SELECT id, to_jsonb(r) FROM repositories r WHERE id IN (:archive, :target)"
+            )
+            ids = {"archive": REPO_A, "target": target_repo}
+            async with factory() as session:
+                before = {row[0]: row[1] for row in await session.execute(snapshot, ids)}
             assert await apply(factory, FreshGitHub()) == (target_workspace,)
             async with factory() as session:
+                # Whole rows, every column: neither side is replaced, merged or reset.
+                after = {row[0]: row[1] for row in await session.execute(snapshot, ids)}
+                assert after == before
+                assert {
+                    key: after[REPO_A][key]
+                    for key in (
+                        "provider_installation_id",
+                        "enabled",
+                        "installation_available",
+                        "branch_filter",
+                        "severity_threshold",
+                        "rag_enabled",
+                    )
+                } == {
+                    "provider_installation_id": str(INSTALL_A),
+                    "enabled": False,
+                    "installation_available": False,
+                    "branch_filter": ["main", "release/*"],
+                    "severity_threshold": "critical",
+                    "rag_enabled": True,
+                }
                 assert (
                     await session.scalar(
                         text("SELECT provider_installation_id FROM repositories WHERE id=:id"),
@@ -1066,7 +1159,8 @@ def test_positive_sync_waits_for_fresh_user_confirmation_before_preserving_archi
                         text(
                             "SELECT provider_installation_id, enabled, installation_available, "
                             "default_engine, "
-                            "wait_for_ci, max_comments, review_event, prompt_version_id FROM "
+                            "wait_for_ci, max_comments, review_event, prompt_version_id, "
+                            "branch_filter, severity_threshold, rag_enabled FROM "
                             "repositories WHERE id=:repo"
                         ),
                         {"repo": REPO_A},
@@ -1081,6 +1175,9 @@ def test_positive_sync_waits_for_fresh_user_confirmation_before_preserving_archi
                     7,
                     "request_changes",
                     PROMPT,
+                    ["main", "release/*"],
+                    "critical",
+                    True,
                 )
                 assert (
                     await session.scalar(

@@ -26,8 +26,11 @@ from fastapi.testclient import TestClient
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.bootstrap.auth_api import get_refresh_local_session
 from app.bootstrap.reviews_api import GitHubAuthHttpClients, ReviewsApiResources
 from app.main import app, get_github_webhook_secret
+from app.modules.auth.application.refresh_session import RefreshLocalSession
+from app.modules.auth.infrastructure.jwt_tokens import Rs256AccessTokenIssuer
 from app.modules.integrations.webhooks.application.receive_github_delivery import (
     ReceiveGitHubDelivery,
 )
@@ -69,7 +72,9 @@ async def seed_custom(factory: async_sessionmaker[AsyncSession]) -> None:
         for sql, values in (
             (
                 "UPDATE repositories SET enabled=false, max_comments=7, wait_for_ci='always', "
-                "review_event='request_changes', prompt_version_id=(SELECT id FROM prompt_versions "
+                "review_event='request_changes', branch_filter='{main,release/*}', "
+                "severity_threshold='critical', rag_enabled=true, "
+                "prompt_version_id=(SELECT id FROM prompt_versions "
                 "WHERE key='review.system') WHERE id=:id",
                 {"id": REPO_A},
             ),
@@ -172,12 +177,11 @@ def test_signed_reinstall_requires_each_users_fresh_oauth_and_preserves_only_sam
     reinstall_env: Env, monkeypatch: pytest.MonkeyPatch, account_id: int
 ) -> None:
     key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    private_key = key.private_bytes(Encoding.PEM, PrivateFormat.PKCS8, NoEncryption()).decode()
     for name, value in {
         "GITHUB_CLIENT_ID": "test-client",
         "GITHUB_CLIENT_SECRET": "test-secret",
-        "AUTH_JWT_PRIVATE_KEY": key.private_bytes(
-            Encoding.PEM, PrivateFormat.PKCS8, NoEncryption()
-        ).decode(),
+        "AUTH_JWT_PRIVATE_KEY": private_key,
         "AUTH_JWT_PUBLIC_KEY": key.public_key()
         .public_bytes(Encoding.PEM, PublicFormat.SubjectPublicKeyInfo)
         .decode(),
@@ -252,6 +256,13 @@ def test_signed_reinstall_requires_each_users_fresh_oauth_and_preserves_only_sam
         now=lambda: clock[0],
     )
     app.dependency_overrides[get_github_webhook_secret] = lambda: _SECRET
+    # Bob's second refresh replays the cookie already rotated after `deleted`, so it passes
+    # only through the grace branch: an injected hour, not the real-clock 15 s default.
+    app.dependency_overrides[get_refresh_local_session] = lambda: RefreshLocalSession(
+        uow_factory=resources.auth_session_uow,
+        issuer=Rs256AccessTokenIssuer(private_key, issuer="test-issuer", audience="test-audience"),
+        grace_period=timedelta(hours=1),
+    )
 
     try:
         with TestClient(app, base_url="https://testserver") as client:
@@ -350,17 +361,33 @@ def test_signed_reinstall_requires_each_users_fresh_oauth_and_preserves_only_sam
                     assert target["id"] == str(REPO_A) and target["enabled"] is False
                     assert client.get(f"/api/repos/{REPO_A}", headers=alice).status_code == 200
                     assert client.get(f"/api/runs/{RUN_DONE}", headers=alice).status_code == 200
+                    repository = client.get(f"/api/repos/{target['id']}", headers=fresh_alice)
+                    assert repository.json()["branchFilter"] == ["main", "release/*"]
+                    assert repository.json()["severityThreshold"] == "critical"
+                    assert repository.json()["ragEnabled"] is True
                     assert asyncio.run(
                         read(
                             factory,
                             "SELECT "
                             "i.external_id,i.workspace_id,r.enabled,r.max_comments,r.wait_for_ci::text,"
-                            "r.review_event::text,w.daily_budget_usd FROM repositories r "
+                            "r.review_event::text,r.branch_filter,r.severity_threshold::text,"
+                            "r.rag_enabled,w.daily_budget_usd FROM repositories r "
                             "JOIN provider_installations i ON i.id=r.provider_installation_id "
                             "JOIN workspaces w ON w.id=i.workspace_id WHERE r.id=:id",
                             id=REPO_A,
                         )
-                    )[0] == (29, WS_A, False, 7, "always", "request_changes", Decimal("12.34"))
+                    )[0] == (
+                        29,
+                        WS_A,
+                        False,
+                        7,
+                        "always",
+                        "request_changes",
+                        ["main", "release/*"],
+                        "critical",
+                        True,
+                        Decimal("12.34"),
+                    )
                     assert asyncio.run(
                         read(
                             factory,
@@ -410,6 +437,16 @@ def test_signed_reinstall_requires_each_users_fresh_oauth_and_preserves_only_sam
                     ) == [(29, True)]
                 else:
                     assert target["id"] != str(REPO_A) and target["enabled"] is True
+                    ((workspace, budget),) = asyncio.run(
+                        read(
+                            factory,
+                            "SELECT i.workspace_id,w.daily_budget_usd FROM "
+                            "provider_installations i JOIN workspaces w ON w.id=i.workspace_id "
+                            "WHERE i.external_id=29",
+                        )
+                    )
+                    # A fresh Workspace, not the archived one with its budget.
+                    assert workspace != WS_A and budget == 0
                     assert (
                         client.get(f"/api/repos/{REPO_A}", headers=fresh_alice).status_code == 404
                     )
