@@ -11,6 +11,7 @@ import asyncio
 import json
 import logging
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -77,6 +78,7 @@ class Queue:
     events: list[tuple[str, ...]] = field(default_factory=list)
     calls: list[tuple[UUID, int]] = field(default_factory=list)
     lease_waits: int = 2
+    lease_seconds: int = 1200
 
     def __post_init__(self) -> None:
         self.main = FakeExchange("code_index", self.events)
@@ -86,13 +88,19 @@ class Queue:
             cast(AbstractExchange, self.retry),
             RetryDelays(),
             lease_waits=self.lease_waits,
+            local_ttl_seconds=self.lease_seconds,
         )
 
     def deliver(
-        self, delivery: Delivery, outcome: BuildOutcome | BaseException
+        self,
+        delivery: Delivery,
+        outcome: BuildOutcome | BaseException,
+        during: Callable[[], None] | None = None,
     ) -> tuple[Delivery, list[tuple[UUID, int]]]:
         async def handler(repository_id: UUID, generation: int) -> BuildOutcome:
             self.calls.append((repository_id, generation))
+            if during is not None:
+                during()
             if isinstance(outcome, BaseException):
                 raise outcome
             return outcome
@@ -669,3 +677,237 @@ def test_an_unexpected_error_republishes_with_x_attempt_and_the_third_goes_to_th
     assert third.nacked == [False] and not third.acked
     assert len(queue.main.published) == 2
     assert "routing to DLQ code_index.dlq" in caplog.text
+
+
+# --- deferred copies keep the unexpected count -------------------------------------
+
+_DEFERRALS = {
+    "busy": (BuildOutcome(BuildStatus.BUSY), {}),
+    "transient": (BuildOutcome(BuildStatus.TRANSIENT, error_code="vcs_unavailable"), {}),
+    "leased": (BuildOutcome(BuildStatus.LEASED), {"x-lease-wait": 1}),
+}
+
+
+def _headers(exchange: FakeExchange) -> dict[str, Any]:
+    return dict(exchange.published[-1][0].headers)
+
+
+@pytest.mark.parametrize("deferral", list(_DEFERRALS))
+def test_a_deferred_copy_keeps_the_unexpected_count_so_the_third_error_goes_to_the_dlq(
+    deferral: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    outcome, lease_wait = _DEFERRALS[deferral]
+    message = body()
+    queue = Queue()
+    queue.deliver(delivery(queue, message), RuntimeError("database is down"))
+    queue.deliver(
+        delivery(queue, message, headers=_headers(queue.main)), RuntimeError("database is down")
+    )
+
+    deferred, _ = queue.deliver(delivery(queue, message, headers=_headers(queue.main)), outcome)
+
+    [(copy, _)] = queue.retry.published
+    # A deferral is not an error: the copy keeps the count as it is.
+    assert copy.headers == {"x-attempt": 2, **lease_wait}
+    assert deferred.acked and deferred.nacked == []
+    with caplog.at_level(logging.ERROR):
+        third, _ = queue.deliver(
+            delivery(queue, wire(copy), headers=dict(copy.headers)),
+            RuntimeError("database is down"),
+        )
+    assert third.nacked == [False] and not third.acked
+    assert len(queue.main.published) == 2
+    assert "routing to DLQ code_index.dlq" in caplog.text
+
+
+def test_a_deferred_copy_carries_the_local_count_of_an_unconfirmed_republish() -> None:
+    message = body()
+    queue = Queue()
+    queue.main.fail = True
+    first, _ = queue.deliver(delivery(queue, message), RuntimeError("database is down"))
+    assert first.nacked == [True]
+
+    queue.deliver(delivery(queue, message, redelivered=True), BuildOutcome(BuildStatus.BUSY))
+
+    [(copy, _)] = queue.retry.published
+    assert copy.headers == {"x-attempt": 1}
+    # The header carries the count from here on.
+    assert message["message_id"] not in review_amqp._unexpected_delivery_attempts
+
+
+@pytest.mark.parametrize("deferral", list(_DEFERRALS))
+def test_a_deferred_copy_of_a_delivery_without_errors_has_no_attempt_header(
+    deferral: str,
+) -> None:
+    outcome, lease_wait = _DEFERRALS[deferral]
+    queue = Queue()
+
+    queue.deliver(delivery(queue, body(), redelivered=True), outcome)
+
+    [(copy, _)] = queue.retry.published
+    assert copy.headers == lease_wait
+
+
+@pytest.mark.parametrize("value", [0, -1, "two", float("inf")], ids=["0", "-1", "two", "inf"])
+def test_an_attempt_header_without_a_count_adds_none_and_is_no_repeat(value: object) -> None:
+    queue = Queue()
+    busy, _ = queue.deliver(
+        delivery(queue, body(), headers={"x-attempt": value}), BuildOutcome(BuildStatus.BUSY)
+    )
+    [(copy, _)] = queue.retry.published
+    assert busy.acked and copy.headers == {}
+
+    queue = Queue()
+    leased, _ = queue.deliver(
+        delivery(queue, body(), headers={"x-attempt": value}), BuildOutcome(BuildStatus.LEASED)
+    )
+    assert leased.acked and queue.retry.published == []
+
+
+# --- LEASED after an unexpected error -----------------------------------------------
+
+
+def test_leased_on_the_copy_of_an_unexpected_error_waits_for_the_stale_lease() -> None:
+    # The job raised and could not release its lease (a database blip): its x-attempt
+    # copy is not a redelivery, has no x-lease-wait, and meets that very lease.
+    message = body()
+    queue = Queue()
+    queue.deliver(delivery(queue, message), RuntimeError("database is down"))
+
+    received, _ = queue.deliver(
+        delivery(queue, message, headers=_headers(queue.main)), BuildOutcome(BuildStatus.LEASED)
+    )
+
+    [(copy, routing_key)] = queue.retry.published
+    assert routing_key == "index.repo.retry.10m"
+    assert wire(copy) == message
+    assert copy.headers == {"x-attempt": 1, "x-lease-wait": 1}
+    assert received.acked and received.nacked == []
+
+
+@pytest.mark.parametrize("deferral", ["busy", "transient"])
+def test_a_deferred_copy_with_an_attempt_header_waits_when_it_meets_leased(
+    deferral: str,
+) -> None:
+    outcome, _ = _DEFERRALS[deferral]
+    message = body()
+    queue = Queue()
+    queue.deliver(delivery(queue, message), RuntimeError("database is down"))
+    queue.deliver(delivery(queue, message, headers=_headers(queue.main)), outcome)
+    [(deferred, _)] = queue.retry.published
+
+    queue.deliver(
+        delivery(queue, wire(deferred), headers=dict(deferred.headers)),
+        BuildOutcome(BuildStatus.LEASED),
+    )
+
+    copy, routing_key = queue.retry.published[-1]
+    assert routing_key == "index.repo.retry.10m"
+    assert copy.headers == {"x-attempt": 1, "x-lease-wait": 1}
+
+
+@pytest.mark.parametrize("deferral", ["busy", "transient"])
+def test_a_busy_or_transient_hop_keeps_the_spent_lease_waits_so_the_budget_runs_out(
+    deferral: str,
+) -> None:
+    # After an exception every copy carries x-attempt and so waits when it meets LEASED;
+    # the waits are spent once per message, not again after each BUSY or TRANSIENT hop.
+    outcome, _ = _DEFERRALS[deferral]
+    message = body()
+    queue = Queue()
+    queue.deliver(delivery(queue, message), RuntimeError("database is down"))
+    copy = queue.main.published[-1][0]
+    hops = [BuildOutcome(BuildStatus.LEASED), outcome, BuildOutcome(BuildStatus.LEASED), outcome]
+
+    seen = []
+    for hop in hops:
+        received, _ = queue.deliver(delivery(queue, wire(copy), headers=dict(copy.headers)), hop)
+        assert received.acked
+        copy, routing_key = queue.retry.published[-1]
+        seen.append((routing_key.rsplit(".", 1)[-1], dict(copy.headers)))
+    last, _ = queue.deliver(
+        delivery(queue, wire(copy), headers=dict(copy.headers)), BuildOutcome(BuildStatus.LEASED)
+    )
+
+    assert [headers for _, headers in seen] == [
+        {"x-attempt": 1, "x-lease-wait": 1},
+        {"x-attempt": 1, "x-lease-wait": 1},
+        {"x-attempt": 1, "x-lease-wait": 2},
+        {"x-attempt": 1, "x-lease-wait": 2},
+    ]
+    assert [key for key, _ in seen][::2] == ["10m", "10m"]
+    assert last.acked and len(queue.retry.published) == 4
+
+
+def test_an_attempt_header_does_not_extend_the_lease_waits() -> None:
+    queue = Queue()
+
+    received, _ = queue.deliver(
+        delivery(queue, body(), headers={"x-attempt": 1, "x-lease-wait": 2}),
+        BuildOutcome(BuildStatus.LEASED),
+    )
+
+    assert received.acked and queue.retry.published == []
+
+
+# --- the local count outlives a long job --------------------------------------------
+
+
+@dataclass
+class Clock:
+    now: float = 1000.0
+
+
+@pytest.fixture
+def clock(monkeypatch: pytest.MonkeyPatch) -> Clock:
+    # The module's clock, not `time.monotonic`, which asyncio reads too.
+    clock = Clock()
+    monkeypatch.setattr(review_amqp, "monotonic", lambda: clock.now)
+    review_amqp._unexpected_delivery_attempts.clear()
+    return clock
+
+
+@pytest.mark.parametrize(
+    ("lease_seconds", "job_seconds", "settled"),
+    [
+        (1200, 301, [[True], [True], [False]]),
+        # The count lives for the lease of the settings, not for a fixed time.
+        (1560, 1559, [[True], [True], [False]]),
+        (1560, 1560, [[True], [True], [True]]),
+    ],
+    ids=["job-301s", "job-just-under-the-lease", "job-of-a-whole-lease"],
+)
+@pytest.mark.parametrize("path", ["copy-publish", "attempt-republish"])
+def test_the_local_count_of_an_unconfirmed_handoff_lives_for_a_lease(
+    clock: Clock,
+    path: str,
+    lease_seconds: int,
+    job_seconds: int,
+    settled: list[list[bool]],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # The broker refuses the copy each time, so only the local entry carries the count:
+    # `nack(requeue=True)` returns the original with its old headers.
+    message = body()
+    queue = Queue(lease_seconds=lease_seconds)
+    outcome: BuildOutcome | BaseException
+    if path == "copy-publish":
+        queue.retry.fail = True
+        outcome = BuildOutcome(BuildStatus.BUSY)
+    else:
+        queue.main.fail = True
+        outcome = RuntimeError("database is down")
+
+    def job() -> None:
+        clock.now += job_seconds
+
+    passes = []
+    with caplog.at_level(logging.CRITICAL):
+        for index in range(3):
+            received, _ = queue.deliver(
+                delivery(queue, message, redelivered=index > 0), outcome, during=job
+            )
+            assert not received.acked
+            passes.append(received.nacked)
+
+    assert passes == settled

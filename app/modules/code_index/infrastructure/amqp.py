@@ -10,8 +10,10 @@ picks the queue action:
 - PUBLISHED, UNCHANGED, EMPTY, STALE, FAILED, RELEASED, LEASE_LOST → ack;
 - REWAKE → ack: the job already woke the repository with attempt 1;
 - BUSY → the 30s queue with the same attempt;
-- LEASED → ack; a redelivery, or a message already waiting for a lease, waits in the
-  10m queue until the lease of a holder that died with it has expired (`lease_waits`);
+- LEASED → ack; a redelivery, a message already waiting for a lease, or any copy with an
+  unexpected count (`x-attempt`) waits in the 10m queue until the lease of a holder that
+  died with it, or raised before releasing it, has expired (`lease_waits`). A BUSY or
+  TRANSIENT copy keeps the waits spent (`x-lease-wait`), so the budget is per message;
 - TRANSIENT → the next attempt as `retry_delay_key` chooses; on attempt 3, ack (the
   job already wrote `last_error_code`);
 - an unexpected exception → the `x-attempt` republish of the review queues, the third
@@ -21,7 +23,10 @@ A copy is always confirmed before the original is acked. A copy that is not conf
 leaves the original to the broker (`nack(requeue=True)`) after the pause of the
 unexpected-error path. One count, `max(x-attempt, local) + 1`, covers such passes and
 the unexpected errors, and the third counted pass goes to `code_index.dlq`, since each
-pass runs the job again.
+pass runs the job again. A deferred copy (BUSY, TRANSIENT, LEASED) carries the count as
+it is in `x-attempt`, since a deferral is not an error; the local count lives for a
+lease, at least the 300 s of the review queues (`local_ttl_seconds`), since a job ends
+before its lease.
 """
 
 from __future__ import annotations
@@ -46,6 +51,7 @@ from app.modules.reviews.infrastructure import amqp as review_amqp
 from app.modules.reviews.infrastructure.amqp import (
     RETRY_KEYS,
     count_unexpected_attempt,
+    current_unexpected_attempts,
     forget_unexpected_attempts,
     republish_with_attempt,
     requeue_after_error,
@@ -64,6 +70,7 @@ SCHEMA = "index.repo.v1"
 MESSAGE_ID_NAMESPACE = UUID("e03f49a6-717b-4702-886d-5b6805fe7d1a")
 MAX_ATTEMPTS = 3
 LEASE_WAIT_HEADER = "x-lease-wait"
+ATTEMPT_HEADER = "x-attempt"
 _DLQ_RETENTION_MS = 7 * 24 * 60 * 60 * 1000
 
 
@@ -191,22 +198,33 @@ class IndexQueuePublisher:
         delays: RetryDelays,
         *,
         lease_waits: int,
+        local_ttl_seconds: float,
     ) -> None:
         self._index = index
         self._retry = retry
         self.delays = delays
         # The budget of waits of a LEASED redelivery in the 10m queue (`lease_waits()`).
         self.lease_waits = lease_waits
+        # How long the local count of an unconfirmed handoff lives: the lease
+        # (`CODE_INDEX_LEASE_SECONDS`, at least the reviews' 300 s), so that it outlives
+        # the next job.
+        self.local_ttl_seconds = local_ttl_seconds
 
     @classmethod
     async def open(
-        cls, channel: AbstractChannel, delays: RetryDelays, *, lease_waits: int
+        cls,
+        channel: AbstractChannel,
+        delays: RetryDelays,
+        *,
+        lease_waits: int,
+        local_ttl_seconds: float,
     ) -> IndexQueuePublisher:
         return cls(
             await channel.get_exchange(EXCHANGE, ensure=False),
             await channel.get_exchange(RETRY_EXCHANGE, ensure=False),
             delays,
             lease_waits=lease_waits,
+            local_ttl_seconds=local_ttl_seconds,
         )
 
     async def publish_retry(
@@ -267,24 +285,44 @@ def _waits_spent(message: AbstractIncomingMessage, budget: int) -> int:
         return budget if isinstance(error, OverflowError) else 0
 
 
+def _counted(message: AbstractIncomingMessage) -> dict[str, Any]:
+    """The `x-attempt` of a deferred copy: the delivery's unexpected count as it is, since
+    a deferral is not an error; no header while the count is 0."""
+    attempts = current_unexpected_attempts(message)
+    return {ATTEMPT_HEADER: attempts} if attempts > 0 else {}
+
+
+def _carried(message: AbstractIncomingMessage, publisher: IndexQueuePublisher) -> dict[str, Any]:
+    """The headers of a BUSY or TRANSIENT copy: the count and the waits spent so far, both
+    unchanged, so that a LEASED wait budget is spent once per message, not per hop."""
+    spent = _waits_spent(message, publisher.lease_waits)
+    return {**_counted(message), **({LEASE_WAIT_HEADER: spent} if spent > 0 else {})}
+
+
 def _next_delivery(
     decoded: IndexRepoMessage,
     outcome: BuildOutcome,
     message: AbstractIncomingMessage,
     publisher: IndexQueuePublisher,
-) -> tuple[IndexRepoMessage, str, dict[str, Any] | None] | None:
-    """The copy to put on a retry queue, or `None` when the delivery is only acked."""
+) -> tuple[IndexRepoMessage, str, dict[str, Any]] | None:
+    """The copy to put on a retry queue with its headers, or `None` when the delivery is
+    only acked."""
     if outcome.status is BuildStatus.BUSY:
         # Not a nack-requeue: it would spin while the admission is full.
-        return decoded, "30s", None
+        return decoded, "30s", _carried(message, publisher)
     if outcome.status is BuildStatus.TRANSIENT and decoded.attempt < MAX_ATTEMPTS:
         retry = decoded.model_copy(update={"attempt": decoded.attempt + 1})
-        return retry, retry_delay_key(decoded.attempt, outcome, publisher.delays), None
+        key = retry_delay_key(decoded.attempt, outcome, publisher.delays)
+        return retry, key, _carried(message, publisher)
     if outcome.status is BuildStatus.LEASED:
         budget = publisher.lease_waits
         spent = _waits_spent(message, budget)
-        if (getattr(message, "redelivered", False) or spent > 0) and spent < budget:
-            return decoded, "10m", {LEASE_WAIT_HEADER: spent + 1}
+        counted = _counted(message)
+        # A copy of an unexpected error is a repeat too: the job may have raised before
+        # it released its lease, and the copy is neither redelivered nor waiting.
+        repeat = getattr(message, "redelivered", False) or spent > 0 or bool(counted)
+        if repeat and spent < budget:
+            return decoded, "10m", {**counted, LEASE_WAIT_HEADER: spent + 1}
     return None
 
 
@@ -295,10 +333,12 @@ async def _nack(message: AbstractIncomingMessage, *, requeue: bool) -> None:
         _LOGGER.exception("Failed to nack message %s after a publish error", message.message_id)
 
 
-async def _requeue_unpublished(message: AbstractIncomingMessage, target: str) -> None:
+async def _requeue_unpublished(
+    message: AbstractIncomingMessage, target: str, local_ttl_seconds: float
+) -> None:
     """A copy that was not confirmed: redeliver the original after a pause, and send the
     third pass to the DLQ, counted as `requeue_after_error` counts."""
-    attempts = count_unexpected_attempt(message)
+    attempts = count_unexpected_attempt(message, local_ttl_seconds=local_ttl_seconds)
     if attempts >= review_amqp.MAX_UNEXPECTED_RETRIES:
         _LOGGER.error(
             "Message %s failed to reach %s %d times; routing to DLQ %s",
@@ -338,7 +378,12 @@ async def handle_index_delivery(
     try:
         outcome = await handler(decoded.repository_id, decoded.generation)
     except Exception:
-        await requeue_after_error(message, publisher, dead_letter_queue=DEAD_LETTER_QUEUE)
+        await requeue_after_error(
+            message,
+            publisher,
+            dead_letter_queue=DEAD_LETTER_QUEUE,
+            local_ttl_seconds=publisher.local_ttl_seconds,
+        )
         return
     retry = _next_delivery(decoded, outcome, message, publisher)
     if retry is None:
@@ -350,7 +395,7 @@ async def handle_index_delivery(
         await publisher.publish_retry(copy, delay_key, headers)
     except Exception:
         # Not forgotten before: the failed passes count towards the DLQ.
-        await _requeue_unpublished(message, retry_queue(delay_key))
+        await _requeue_unpublished(message, retry_queue(delay_key), publisher.local_ttl_seconds)
         return
     forget_unexpected_attempts(message)
     _LOGGER.info(

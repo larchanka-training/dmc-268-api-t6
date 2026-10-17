@@ -294,7 +294,9 @@ def test_each_retry_queue_returns_the_message_to_index_repo(broker: str) -> None
         try:
             channel = await connection.channel(publisher_confirms=True, on_return_raises=True)
             await declare_topology(channel, SHORT_DELAYS)
-            publisher = await IndexQueuePublisher.open(channel, SHORT_DELAYS, lease_waits=2)
+            publisher = await IndexQueuePublisher.open(
+                channel, SHORT_DELAYS, lease_waits=2, local_ttl_seconds=1200
+            )
             queue = await (await connection.channel()).get_queue("index.repo", ensure=False)
             returned = []
             for key in ("30s", "2m", "10m"):
@@ -340,7 +342,9 @@ def test_an_invalid_message_or_a_foreign_id_goes_to_the_dlq(broker: str) -> None
         try:
             channel = await connection.channel(publisher_confirms=True, on_return_raises=True)
             await declare_topology(channel, RetryDelays())
-            publisher = await IndexQueuePublisher.open(channel, RetryDelays(), lease_waits=2)
+            publisher = await IndexQueuePublisher.open(
+                channel, RetryDelays(), lease_waits=2, local_ttl_seconds=1200
+            )
             exchange = await channel.get_exchange("code_index", ensure=False)
             consuming = await connection.channel()
             queue = await consuming.get_queue("index.repo", ensure=False)
@@ -377,7 +381,9 @@ def test_a_copy_into_a_deleted_retry_queue_runs_the_job_three_times_then_dead_le
         try:
             channel = await connection.channel(publisher_confirms=True, on_return_raises=True)
             await declare_topology(channel, RetryDelays())
-            publisher = await IndexQueuePublisher.open(channel, RetryDelays(), lease_waits=2)
+            publisher = await IndexQueuePublisher.open(
+                channel, RetryDelays(), lease_waits=2, local_ttl_seconds=1200
+            )
             consuming = await connection.channel()
             await consuming.queue_delete("index.repo.retry.30s")
             queue = await consuming.get_queue("index.repo", ensure=False)
