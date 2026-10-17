@@ -513,3 +513,133 @@ def _moved_finding() -> PublishedFinding:
         confidence=0.9,
         rule_name=None,
     )
+
+
+def test_findings_post_processor_legacy_nulls_out_v2_rules() -> None:
+    from app.modules.reviews.application.review_output import (
+        ReviewFinding,
+        ReviewOutput,
+        ReviewSummary,
+    )
+
+    processor = FindingsPostProcessor.from_default_patterns()
+    findings = [
+        ReviewFinding(
+            path="app/main.py",
+            line=10,
+            start_line=None,
+            severity="high",
+            category="security",
+            title="Finding 1",
+            body="Body 1",
+            suggestion=None,
+            confidence=0.9,
+            rule_name=".review/rules.md",
+        ),
+        ReviewFinding(
+            path="app/main.py",
+            line=11,
+            start_line=None,
+            severity="high",
+            category="security",
+            title="Finding 2",
+            body="Body 2",
+            suggestion=None,
+            confidence=0.9,
+            rule_name="service-defaults:foo",
+        ),
+    ]
+    output = ReviewOutput(
+        findings=findings,
+        summary=ReviewSummary(problem="Problem.", done_well="Done well.", effort="small"),
+    )
+    # Legacy run: allowed_v2_rules is None
+    result = processor.process(
+        output,
+        hunk_lines={"app/main.py": frozenset({10, 11})},
+        rule_names=frozenset(),
+        allowed_v2_rules=None,
+    )
+    # Both v2 rule names must be nulled out in legacy mode!
+    assert len(result.inline) == 2
+    assert result.inline[0].finding.rule_name is None
+    assert result.inline[1].finding.rule_name is None
+
+
+def test_findings_post_processor_v2_allows_valid_and_rejects_malformed_rules() -> None:
+    from app.modules.reviews.application.review_output import (
+        ReviewFinding,
+        ReviewOutput,
+        ReviewSummary,
+    )
+
+    processor = FindingsPostProcessor.from_default_patterns()
+    findings = [
+        ReviewFinding(
+            path="app/main.py",
+            line=10,
+            start_line=None,
+            severity="high",
+            category="security",
+            title="Finding 1",
+            body="Body 1",
+            suggestion=None,
+            confidence=0.9,
+            rule_name=".review/rules.md",
+        ),
+        ReviewFinding(
+            path="app/main.py",
+            line=11,
+            start_line=None,
+            severity="high",
+            category="security",
+            title="Finding 2",
+            body="Body 2",
+            suggestion=None,
+            confidence=0.9,
+            rule_name="service-defaults:valid-rule_1",
+        ),
+        ReviewFinding(
+            path="app/main.py",
+            line=12,
+            start_line=None,
+            severity="high",
+            category="security",
+            title="Finding 3",
+            body="Body 3",
+            suggestion=None,
+            confidence=0.9,
+            rule_name="service-defaults:[x](http://evil.com)",
+        ),
+        ReviewFinding(
+            path="app/main.py",
+            line=13,
+            start_line=None,
+            severity="high",
+            category="security",
+            title="Finding 4",
+            body="Body 4",
+            suggestion=None,
+            confidence=0.9,
+            rule_name="service-defaults:",
+        ),
+    ]
+    output = ReviewOutput(
+        findings=findings,
+        summary=ReviewSummary(problem="Problem.", done_well="Done well.", effort="small"),
+    )
+    # V2 run: allowed_v2_rules provided
+    result = processor.process(
+        output,
+        hunk_lines={"app/main.py": frozenset({10, 11, 12, 13})},
+        rule_names=frozenset(),
+        allowed_v2_rules=frozenset({".review/rules.md", "AGENTS.md"}),
+    )
+    assert len(result.inline) == 4
+    # .review/rules.md is allowed
+    assert result.inline[0].finding.rule_name == ".review/rules.md"
+    # valid service-defaults ID is allowed
+    assert result.inline[1].finding.rule_name == "service-defaults:valid-rule_1"
+    # malformed service-defaults are nulled out
+    assert result.inline[2].finding.rule_name is None
+    assert result.inline[3].finding.rule_name is None

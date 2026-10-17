@@ -22,6 +22,7 @@ from app.modules.reviews.application.prompt_builder import (
     PullRequestMeta,
     RepoConventions,
     ReviewContext,
+    file_block_id,
 )
 from app.modules.reviews.application.reflection_pass import (
     CandidateFindingItem,
@@ -68,11 +69,15 @@ def make_snapshot() -> PolicySnapshot:
 def make_candidate(
     candidate_id: str,
     *,
+    path: str = "app/query.py",
     rule_name: str | None = ".review/rules.md",
     title: str = "SQL injection",
+    evidence_refs: list[EvidenceRef] | None = None,
 ) -> CandidateFindingItem:
+    if evidence_refs is None:
+        evidence_refs = [EvidenceRef(block_id=file_block_id(path), start_line=10, end_line=15)]
     finding = ReviewFindingV2(
-        path="app/query.py",
+        path=path,
         line=15,
         start_line=10,
         severity="high",
@@ -82,7 +87,7 @@ def make_candidate(
         suggestion=None,
         confidence=0.9,
         rule_name=rule_name,
-        evidence_refs=[EvidenceRef(block_id="file-app-query-py", start_line=10, end_line=15)],
+        evidence_refs=evidence_refs,
     )
     return CandidateFindingItem(candidate_id=candidate_id, finding=finding)
 
@@ -157,7 +162,7 @@ def test_verifier_prompt_builder_renders_candidates_and_policy() -> None:
     assert manifest.call_id == call_id
     assert manifest.stage == "verifier"
     assert manifest.get_block("policy-rules") is not None
-    assert manifest.get_block("file-app-query-py") is not None
+    assert manifest.get_block(file_block_id("app/query.py")) is not None
 
 
 @pytest.mark.anyio
@@ -186,6 +191,7 @@ async def test_reflection_pass_verifies_and_filters_candidates() -> None:
     cand1 = make_candidate("c-1", title="True Defect")
     cand2 = make_candidate("c-2", title="Hallucinated Defect")
     cand3 = make_candidate("c-3", title="Unclear Assertion", rule_name=None)
+    query_block_id = file_block_id("app/query.py")
 
     fake_response = {
         "decisions": [
@@ -193,9 +199,7 @@ async def test_reflection_pass_verifies_and_filters_candidates() -> None:
                 "candidate_id": "c-1",
                 "status": "supported",
                 "reason": "Direct SQL injection visible on line 10.",
-                "evidence_refs": [
-                    {"block_id": "file-app-query-py", "start_line": 10, "end_line": 10}
-                ],
+                "evidence_refs": [{"block_id": query_block_id, "start_line": 10, "end_line": 10}],
                 "requirement_refs": [
                     {
                         "block_id": "policy-rules",
@@ -209,9 +213,7 @@ async def test_reflection_pass_verifies_and_filters_candidates() -> None:
                 "candidate_id": "c-2",
                 "status": "contradicted",
                 "reason": "Parameterization is handled in helper function.",
-                "evidence_refs": [
-                    {"block_id": "file-app-query-py", "start_line": 10, "end_line": 10}
-                ],
+                "evidence_refs": [{"block_id": query_block_id, "start_line": 10, "end_line": 10}],
                 "requirement_refs": [
                     {
                         "block_id": "policy-rules",
@@ -268,6 +270,7 @@ async def test_reflection_pass_verifies_and_filters_candidates() -> None:
 async def test_reflection_pass_raises_on_missing_candidate_decision() -> None:
     cand1 = make_candidate("c-1")
     cand2 = make_candidate("c-2")
+    query_block_id = file_block_id("app/query.py")
 
     # Missing decision for c-2
     fake_response = {
@@ -276,9 +279,7 @@ async def test_reflection_pass_raises_on_missing_candidate_decision() -> None:
                 "candidate_id": "c-1",
                 "status": "supported",
                 "reason": "OK",
-                "evidence_refs": [
-                    {"block_id": "file-app-query-py", "start_line": 10, "end_line": 10}
-                ],
+                "evidence_refs": [{"block_id": query_block_id, "start_line": 10, "end_line": 10}],
                 "requirement_refs": [],
             }
         ]
@@ -300,3 +301,156 @@ async def test_reflection_pass_raises_on_missing_candidate_decision() -> None:
 
     with pytest.raises(VerificationInvalidOutputError):
         await verifier.verify(candidates=(cand1, cand2), context=context)
+
+
+@pytest.mark.anyio
+async def test_reflection_pass_rejects_duplicate_candidate_decisions() -> None:
+    cand1 = make_candidate("c-1")
+    cand2 = make_candidate("c-2")
+    query_block_id = file_block_id("app/query.py")
+
+    # Duplicate decision for c-1 instead of 1:1 match
+    fake_response = {
+        "decisions": [
+            {
+                "candidate_id": "c-1",
+                "status": "supported",
+                "reason": "OK 1",
+                "evidence_refs": [{"block_id": query_block_id, "start_line": 10, "end_line": 10}],
+                "requirement_refs": [],
+            },
+            {
+                "candidate_id": "c-1",
+                "status": "supported",
+                "reason": "OK 2",
+                "evidence_refs": [{"block_id": query_block_id, "start_line": 10, "end_line": 10}],
+                "requirement_refs": [],
+            },
+        ]
+    }
+    fake_model = FakeVerifierModel(fake_response)
+    verifier = ReflectionPass(fake_model)
+
+    snapshot = make_snapshot()
+    context = ReviewContext(
+        system="SYSTEM",
+        rules=(),
+        agents_md=None,
+        conventions=RepoConventions((), ()),
+        pr_meta=PullRequestMeta("T", None, "u", "b", "main", (), 1, 1, 0, False, False),
+        changed_files=(ChangedFile("app/query.py", "modified", (DiffLine(10, "added", "x = 1"),)),),
+        omitted_files=(),
+        policy_snapshot=snapshot,
+    )
+
+    with pytest.raises(VerificationInvalidOutputError, match="Verifier returned decisions"):
+        await verifier.verify(candidates=(cand1, cand2), context=context)
+
+
+@pytest.mark.anyio
+async def test_reflection_pass_rejects_evidence_with_mismatched_path() -> None:
+    cand1 = make_candidate("c-1", path="app/query.py")
+    other_block_id = file_block_id("app/other.py")
+
+    fake_response = {
+        "decisions": [
+            {
+                "candidate_id": "c-1",
+                "status": "supported",
+                "reason": "Found defect in different file",
+                "evidence_refs": [{"block_id": other_block_id, "start_line": 5, "end_line": 5}],
+                "requirement_refs": [],
+            }
+        ]
+    }
+    fake_model = FakeVerifierModel(fake_response)
+    verifier = ReflectionPass(fake_model)
+
+    snapshot = make_snapshot()
+    context = ReviewContext(
+        system="SYSTEM",
+        rules=(),
+        agents_md=None,
+        conventions=RepoConventions((), ()),
+        pr_meta=PullRequestMeta("T", None, "u", "b", "main", (), 2, 2, 0, False, False),
+        changed_files=(
+            ChangedFile("app/query.py", "modified", (DiffLine(10, "added", "x = 1"),)),
+            ChangedFile("app/other.py", "modified", (DiffLine(5, "added", "y = 2"),)),
+        ),
+        omitted_files=(),
+        policy_snapshot=snapshot,
+    )
+
+    with pytest.raises(VerificationInvalidOutputError, match="does not match candidate path"):
+        await verifier.verify(candidates=(cand1,), context=context)
+
+
+@pytest.mark.anyio
+async def test_reflection_pass_validates_service_defaults_check_id() -> None:
+    from app.modules.reviews.application.prompt_builder import ReviewRule
+
+    cand1 = make_candidate("c-1", path="app/query.py", rule_name="service-defaults:rule-1")
+    query_block_id = file_block_id("app/query.py")
+
+    fake_response = {
+        "decisions": [
+            {
+                "candidate_id": "c-1",
+                "status": "supported",
+                "reason": "Valid defect",
+                "evidence_refs": [{"block_id": query_block_id, "start_line": 10, "end_line": 10}],
+                "requirement_refs": [
+                    {
+                        "block_id": "service-defaults",
+                        "start_line": 1,
+                        "end_line": 1,
+                        "check_id": "invalid-check-id",
+                    }
+                ],
+            }
+        ]
+    }
+    fake_model = FakeVerifierModel(fake_response)
+    verifier = ReflectionPass(fake_model)
+
+    snapshot = make_snapshot()
+    context = ReviewContext(
+        system="SYSTEM",
+        rules=(ReviewRule(name="Rule 1", include=(), exclude=(), checks=("Check 1",)),),
+        agents_md=None,
+        conventions=RepoConventions((), ()),
+        pr_meta=PullRequestMeta("T", None, "u", "b", "main", (), 1, 1, 0, False, False),
+        changed_files=(ChangedFile("app/query.py", "modified", (DiffLine(10, "added", "x = 1"),)),),
+        omitted_files=(),
+        policy_snapshot=snapshot,
+    )
+
+    with pytest.raises(VerificationInvalidOutputError, match="check_id 'invalid-check-id'"):
+        await verifier.verify(candidates=(cand1,), context=context)
+
+
+@pytest.mark.anyio
+async def test_reflection_pass_reraises_run_failures_with_error_code() -> None:
+    from app.modules.reviews.application.run_failures import RunFailure
+
+    class FailingModel:
+        async def verify(self, *, system_prompt: str, user_prompt: str) -> Mapping[str, Any] | str:
+            raise RunFailure("verification_deadline_exceeded", "Time limit reached")
+
+    verifier = ReflectionPass(FailingModel())
+    snapshot = make_snapshot()
+    context = ReviewContext(
+        system="SYSTEM",
+        rules=(),
+        agents_md=None,
+        conventions=RepoConventions((), ()),
+        pr_meta=PullRequestMeta("T", None, "u", "b", "main", (), 1, 1, 0, False, False),
+        changed_files=(ChangedFile("app/query.py", "modified", (DiffLine(10, "added", "x = 1"),)),),
+        omitted_files=(),
+        policy_snapshot=snapshot,
+    )
+    cand = make_candidate("c-1")
+
+    with pytest.raises(RunFailure) as exc_info:
+        await verifier.verify(candidates=(cand,), context=context)
+    assert exc_info.value.error_code == "verification_deadline_exceeded"

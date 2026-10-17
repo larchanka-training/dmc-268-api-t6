@@ -16,6 +16,8 @@ from hashlib import sha256
 from typing import Literal
 from uuid import UUID
 
+from app.modules.reviews.application.context_provenance import SourceRole as SourceRole
+
 POLICY_SNAPSHOT_SCHEMA_VERSION = 1
 RULES_DOCUMENT_PATH = ".review/rules.md"
 AGENTS_DOCUMENT_PATH = "AGENTS.md"
@@ -23,17 +25,6 @@ AGENTS_DOCUMENT_PATH = "AGENTS.md"
 _EMPTY_SHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 
 type StageName = Literal["conventions", "review", "verifier", "repair", "fallback"]
-type SourceRole = Literal[
-    "policy_document",
-    "service_defaults",
-    "conventions",
-    "pr_metadata",
-    "diff",
-    "source_excerpt",
-    "ast_excerpt",
-    "candidate",
-    "previous_output",
-]
 
 
 class DocumentPresence(StrEnum):
@@ -231,7 +222,8 @@ class ExecutionProfile:
 
 
 PINNED_PROMPT_CHECKSUMS: dict[str, str] = {
-    "review.system:v2": "17e1818842ee744aae9cd32c3554bc33b2b6ac1f7182f5330c3a057010783bd4",
+    "review.system:v2": "9177e358c23d1a7cd8987cbf667cf8b705c2afb27eaf8b2237480e4531431d75",
+    "review.system:v3": "2b92bee0de6dae9959d816e3c2aa28e599f58c7d4ad41004f6fcd47891dbf21c",
     "review.conventions:v2": "225a8f7d56835cf1307ddb25feac602c3d10e03c34ee51afc90a1f99af101454",
     "review.verifier:v1": "7f1d1a93ce64c587709785faec1f679153722d6d83df0de77ec631d1cb95ef3d",
 }
@@ -246,7 +238,7 @@ def make_complete_prompt_bindings(
     review_system_id: UUID = _DEFAULT_REVIEW_SYSTEM_ID,
     conventions_id: UUID = _DEFAULT_CONVENTIONS_ID,
     verifier_id: UUID = _DEFAULT_VERIFIER_ID,
-    review_system_checksum: str = PINNED_PROMPT_CHECKSUMS["review.system:v2"],
+    review_system_checksum: str = PINNED_PROMPT_CHECKSUMS["review.system:v3"],
     conventions_checksum: str = PINNED_PROMPT_CHECKSUMS["review.conventions:v2"],
     verifier_checksum: str = PINNED_PROMPT_CHECKSUMS["review.verifier:v1"],
 ) -> PromptBindings:

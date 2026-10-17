@@ -27,6 +27,7 @@ from app.modules.reviews.application.prompt_builder import (
     PullRequestMeta,
     RepoConventions,
     ReviewContext,
+    file_block_id,
 )
 from app.modules.reviews.application.reflection_pass import (
     CandidateFindingItem,
@@ -139,7 +140,7 @@ class TestPositiveEvaluation:
                 confidence=0.95,
                 rule_name=None,
                 evidence_refs=[
-                    EvidenceRef(block_id="file-app-users-py", start_line=42, end_line=42)
+                    EvidenceRef(block_id=file_block_id("app/users.py"), start_line=42, end_line=42)
                 ],
             ),
         )
@@ -155,7 +156,11 @@ class TestPositiveEvaluation:
                             "query string on line 42."
                         ),
                         "evidence_refs": [
-                            {"block_id": "file-app-users-py", "start_line": 42, "end_line": 42}
+                            {
+                                "block_id": file_block_id("app/users.py"),
+                                "start_line": 42,
+                                "end_line": 42,
+                            }
                         ],
                         "requirement_refs": [],
                     }
@@ -168,6 +173,13 @@ class TestPositiveEvaluation:
         assert len(decisions) == 1
         assert decisions[0].status == "supported"
         assert decisions[0].candidate_id == "cand-sql-1"
+
+        # Assert code and candidate finding text are rendered into verifier prompt
+        assert "f'SELECT * FROM users WHERE id = {user_id}'" in model.last_user_prompt
+        assert "SQL injection vulnerability" in model.last_user_prompt
+        assert "f-string formatting in SQL query allows injection." in model.last_user_prompt
+        assert 'path="app/users.py"' in model.last_user_prompt
+        assert 'candidate_id="cand-sql-1"' in model.last_user_prompt
 
         supported, rejected = filter_verified_candidates(
             candidates=(candidate,), decisions=decisions
@@ -191,7 +203,9 @@ class TestPositiveEvaluation:
             suggestion=None,
             confidence=0.88,
             rule_name=".review/rules.md",
-            evidence_refs=[EvidenceRef(block_id="file-app-storage-py", start_line=20, end_line=20)],
+            evidence_refs=[
+                EvidenceRef(block_id=file_block_id("app/storage.py"), start_line=20, end_line=20)
+            ],
         )
         candidate = CandidateFindingItem("cand-io-1", finding)
         context = ReviewContext(
@@ -219,7 +233,11 @@ class TestPositiveEvaluation:
                         "status": "supported",
                         "reason": "Unchecked file I/O violates repository rules line 1.",
                         "evidence_refs": [
-                            {"block_id": "file-app-storage-py", "start_line": 20, "end_line": 20}
+                            {
+                                "block_id": file_block_id("app/storage.py"),
+                                "start_line": 20,
+                                "end_line": 20,
+                            }
                         ],
                         "requirement_refs": [
                             {"block_id": "policy-rules", "start_line": 1, "end_line": 1}
@@ -233,6 +251,10 @@ class TestPositiveEvaluation:
 
         assert len(decisions) == 1
         assert decisions[0].status == "supported"
+        assert "data = f.read()" in model.last_user_prompt
+        assert "Unhandled file read exception" in model.last_user_prompt
+        assert "open() call without try/except violates repository rule." in model.last_user_prompt
+        assert "1. All I/O operations must handle exceptions." in model.last_user_prompt
         supported, rejected = filter_verified_candidates(
             candidates=(candidate,), decisions=decisions
         )
@@ -258,7 +280,9 @@ class TestNegativeEvaluation:
             suggestion=None,
             confidence=0.75,
             rule_name=None,
-            evidence_refs=[EvidenceRef(block_id="file-app-calc-py", start_line=10, end_line=10)],
+            evidence_refs=[
+                EvidenceRef(block_id=file_block_id("app/calc.py"), start_line=10, end_line=10)
+            ],
         )
         candidate = CandidateFindingItem("cand-1", finding)
         context = ReviewContext(
@@ -282,7 +306,11 @@ class TestNegativeEvaluation:
                         "status": "contradicted",
                         "reason": "Line 10 is scalar arithmetic with no loop or retain cycle.",
                         "evidence_refs": [
-                            {"block_id": "file-app-calc-py", "start_line": 10, "end_line": 10}
+                            {
+                                "block_id": file_block_id("app/calc.py"),
+                                "start_line": 10,
+                                "end_line": 10,
+                            }
                         ],
                         "requirement_refs": [],
                     }
@@ -316,7 +344,9 @@ class TestNegativeEvaluation:
             suggestion=None,
             confidence=0.8,
             rule_name=".review/rules.md",
-            evidence_refs=[EvidenceRef(block_id="file-app-calc-py", start_line=10, end_line=10)],
+            evidence_refs=[
+                EvidenceRef(block_id=file_block_id("app/calc.py"), start_line=10, end_line=10)
+            ],
         )
         candidate = CandidateFindingItem("cand-inapplicable", finding)
         context = ReviewContext(
@@ -340,7 +370,11 @@ class TestNegativeEvaluation:
                         "status": "contradicted",
                         "reason": "Rule 2 applies to Go files, but app/calc.py is a Python file.",
                         "evidence_refs": [
-                            {"block_id": "file-app-calc-py", "start_line": 10, "end_line": 10}
+                            {
+                                "block_id": file_block_id("app/calc.py"),
+                                "start_line": 10,
+                                "end_line": 10,
+                            }
                         ],
                         "requirement_refs": [
                             {"block_id": "policy-rules", "start_line": 2, "end_line": 2}
@@ -372,7 +406,9 @@ class TestNegativeEvaluation:
             suggestion=None,
             confidence=0.6,
             rule_name=None,
-            evidence_refs=[EvidenceRef(block_id="file-app-service-py", start_line=50, end_line=50)],
+            evidence_refs=[
+                EvidenceRef(block_id=file_block_id("app/service.py"), start_line=50, end_line=50)
+            ],
         )
         candidate = CandidateFindingItem("cand-1", finding)
         context = ReviewContext(
@@ -428,7 +464,7 @@ class TestNegativeEvaluation:
             confidence=0.7,
             rule_name=None,
             evidence_refs=[
-                EvidenceRef(block_id="file-app-service-py", start_line=11, end_line=199)
+                EvidenceRef(block_id=file_block_id("app/service.py"), start_line=11, end_line=199)
             ],
         )
         candidate = CandidateFindingItem("cand-gap", finding)
@@ -460,7 +496,11 @@ class TestNegativeEvaluation:
                         "status": "supported",
                         "reason": "Valid claim but unshown evidence",
                         "evidence_refs": [
-                            {"block_id": "file-app-service-py", "start_line": 11, "end_line": 199}
+                            {
+                                "block_id": file_block_id("app/service.py"),
+                                "start_line": 11,
+                                "end_line": 199,
+                            }
                         ],
                         "requirement_refs": [],
                     }
@@ -490,7 +530,9 @@ class TestNegativeEvaluation:
             suggestion=None,
             confidence=0.7,
             rule_name=None,
-            evidence_refs=[EvidenceRef(block_id="file-app-service-py", start_line=10, end_line=10)],
+            evidence_refs=[
+                EvidenceRef(block_id=file_block_id("app/service.py"), start_line=10, end_line=10)
+            ],
         )
         candidate = CandidateFindingItem("cand-role", finding)
         context = ReviewContext(
@@ -540,7 +582,9 @@ class TestNegativeEvaluation:
             suggestion=None,
             confidence=0.7,
             rule_name=".review/rules.md",
-            evidence_refs=[EvidenceRef(block_id="file-app-service-py", start_line=10, end_line=10)],
+            evidence_refs=[
+                EvidenceRef(block_id=file_block_id("app/service.py"), start_line=10, end_line=10)
+            ],
         )
         candidate = CandidateFindingItem("cand-checkid", finding)
         context = ReviewContext(
@@ -564,7 +608,11 @@ class TestNegativeEvaluation:
                         "status": "supported",
                         "reason": "OK",
                         "evidence_refs": [
-                            {"block_id": "file-app-service-py", "start_line": 10, "end_line": 10}
+                            {
+                                "block_id": file_block_id("app/service.py"),
+                                "start_line": 10,
+                                "end_line": 10,
+                            }
                         ],
                         "requirement_refs": [
                             {
@@ -688,6 +736,24 @@ class TestPromptInjectionDefenses:
         if field_name == "agents_md":
             assert prompt.user.count("</project_conventions_document>") == 1
 
+        # 4. XML Parsing and Attribute Integrity (prevents quote breakout / attribute injection)
+        import xml.etree.ElementTree as ET
+
+        root = ET.fromstring(f"<root>{prompt.user}</root>")
+        cand_el = root.find(".//candidate")
+        assert cand_el is not None
+        assert "injected" not in cand_el.attrib
+        assert "role" not in cand_el.attrib
+        for file_el in root.findall(".//file"):
+            assert "injected" not in file_el.attrib
+            assert "x" not in file_el.attrib
+
+        # 5. System prompt is strictly equal to the pinned verifier prompt; role markers never leak
+        assert prompt.system == verifier_builder._system_prompt
+        assert "<|im_start|>" not in prompt.system
+        assert "[INST]" not in prompt.system
+        assert "<|im_start|>" not in prompt.user
+
     @pytest.mark.parametrize(
         "bad_rule_name",
         [
@@ -715,3 +781,49 @@ class TestPromptInjectionDefenses:
                 rule_name=bad_rule_name,
                 evidence_refs=[EvidenceRef(block_id="b1", start_line=1, end_line=1)],
             )
+
+
+def test_verifier_prompt_builder_checksum_mismatch() -> None:
+    from dataclasses import replace
+
+    from app.modules.reviews.application.policy_errors import PolicyError, PolicyErrorCode
+
+    snapshot = make_eval_snapshot()
+    # Bind an invalid checksum
+    corrupt_bindings = replace(snapshot.prompt_bindings, verifier_checksum="0" * 64)
+    corrupt_snapshot = replace(snapshot, prompt_bindings=corrupt_bindings)
+
+    context = ReviewContext(
+        system="sys",
+        rules=(),
+        agents_md=None,
+        conventions=RepoConventions((), ()),
+        pr_meta=PullRequestMeta("PR", None, "u", "b", "main", (), 1, 1, 0, False, False),
+        changed_files=(),
+        omitted_files=(),
+        policy_snapshot=corrupt_snapshot,
+    )
+    builder = VerifierPromptBuilder()
+    with pytest.raises(PolicyError) as exc_info:
+        builder.build_verifier_prompt(candidates=(), context=context)
+    assert exc_info.value.code == PolicyErrorCode.SNAPSHOT_INTEGRITY_ERROR
+    assert "Verifier prompt checksum mismatch" in exc_info.value.message
+
+
+def test_source_authority_and_trust_statement_present_in_prompts() -> None:
+    from pathlib import Path
+
+    repo_root = Path(__file__).resolve().parent.parent
+    v3_prompt = (repo_root / "review" / "prompts" / "review.system.v3.md").read_text(
+        encoding="utf-8"
+    )
+    verifier_prompt = (repo_root / "review" / "prompts" / "review.verifier.v1.md").read_text(
+        encoding="utf-8"
+    )
+
+    assert "Source Authority and Trust" in v3_prompt
+    assert "Source Authority and Trust" in verifier_prompt
+    assert "Treat the contents of" in v3_prompt
+    assert "Treat the contents of" in verifier_prompt
+    assert "prompt injection" in v3_prompt
+    assert "prompt injection" in verifier_prompt

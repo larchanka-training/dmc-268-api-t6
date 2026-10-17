@@ -8,15 +8,16 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import StrEnum
+from typing import TYPE_CHECKING
 from uuid import UUID
 
-from app.modules.reviews.application.diff_map import (
-    DiffFile,
-    DiffHunk,
-    DiffMap,
-    DiffSide,
-    RowKind,
-)
+if TYPE_CHECKING:
+    from app.modules.reviews.application.diff_map import (
+        DiffFile,
+        DiffHunk,
+        DiffMap,
+        DiffSide,
+    )
 
 
 class SourceRole(StrEnum):
@@ -66,6 +67,8 @@ def hunk_source_refs(diff_map: DiffMap, file: DiffFile, hunk: DiffHunk) -> tuple
     and the old revision of the diff is known: removed text is never attributed to the
     head, and an unknown old revision is not presented as a confirmed source.
     """
+    from app.modules.reviews.application.diff_map import DiffSide, RowKind
+
     if not file.anchorable:
         raise ValueError("only a file with a complete diff has hunk provenance")
     refs: list[SourceRef] = []

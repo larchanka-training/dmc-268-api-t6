@@ -62,6 +62,11 @@ _ERROR_TEXTS = {
     "policy_snapshot_integrity_error": "Снимок правил прогона повреждён или противоречив.",
     "policy_context_violation": "В контекст модели попал запрещённый источник.",
     "budget_paused": "Дневной бюджет исчерпан, ревью на паузе.",
+    "verification_context_overflow": "Обязательные данные проверки не помещаются в контекст.",
+    "verification_invalid_output": "Проверяющий вернул ответ не по контракту.",
+    "verification_unavailable": "Проверяющий временно недоступен.",
+    "verification_budget_exceeded": "Бюджета недостаточно для обязательной проверки.",
+    "verification_deadline_exceeded": "Недостаточно времени для обязательной проверки.",
 }
 
 

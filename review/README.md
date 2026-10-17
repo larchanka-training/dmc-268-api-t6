@@ -92,24 +92,6 @@ run of a repository, the diff is the varying tail (`docs/SYSTEM_DESIGN.md` §10)
   with no shown content, including unselected or unavailable files. A truncated `<file>`
   ends with `[N more lines omitted]`. Counts describe source input; markers are never paths.
 
-### Policy snapshot v2 envelope and reflection pass
-
-Under Policy Snapshot v2 (`policy_snapshot` present), prompts and candidate findings use an immutable manifest and content-addressed blocks:
-- `<repository_rules block_id="...">`: rules from `.review/rules.md` (or empty block when missing).
-- `<project_conventions_document block_id="...">`: conventions from `AGENTS.md` (or empty block when missing).
-- `<service_defaults block_id="...">`: builtin platform review defaults (`defaults_checksum`).
-- `<conventions_excerpt block_id="...">`: cached repository conventions.
-- `<pull_request_metadata block_id="...">`: PR title, commit history, base/head revisions.
-- `<changed_files>`: each `<file path="..." block_id="..." status="..." language="...">` carries a stable `block_id`. Contiguous ranges shown to the model are recorded in `CallManifest.shown_ranges`.
-
-**Reflection Pass (`prompts/review.verifier.v1.md`)**:
-- Two-pass verification architecture to eliminate hallucinated findings.
-- **Pass 1 (Reviewer)** generates candidate findings conforming to `schemas/review-output.schema.v2.json` with required `evidence_refs` (pointing to visible `block_id` line ranges).
-- **Pass 2 (Verifier)** checks each candidate against visible code and requirements using `prompts/review.verifier.v1.md`.
-  - Verifier prompt envelope: `<candidate_findings>`, `<code_context>`, and `<policy_documents>`.
-  - Verifier output: validated against `schemas/verifier-output.schema.v1.json` (`decisions`: `candidate_id`, `status` in `supported` / `contradicted` / `unverifiable`, `reason`, `evidence_refs`, `requirement_refs`).
-  - Strict filtering: only candidates with `status="supported"` survive; unverified candidates are dropped, and the review summary is cleansed of hallucinated defects.
-
 
 Production commit context comes from `GitHubRunSource.get_pull_request_meta`, which
 delegates retrieval to `HttpGitHubVcsProvider` through the commit-metadata port.
@@ -187,6 +169,24 @@ A file block cut to fit the token budget ends with the trailer
 `[Showing lines 1-80 of 376 total. Use offset=81 to continue reading.]`. The numbers count the
 `<line>` elements of the block (removed lines included), not file line numbers. The model has
 no tool to continue; the trailer is the contract for a future tool-enabled engine's file reader.
+
+## Policy snapshot v2 envelope and reflection pass
+
+Under Policy Snapshot v2 (`policy_snapshot` present), prompts and candidate findings use an immutable manifest and content-addressed blocks:
+- `<repository_rules block_id="...">`: rules from `.review/rules.md` (or empty block when missing).
+- `<project_conventions_document block_id="...">`: conventions from `AGENTS.md` (or empty block when missing).
+- `<service_defaults block_id="...">`: builtin platform review defaults (`defaults_checksum`).
+- `<repo_conventions>`: cached repository conventions.
+- `<pr_meta>`: PR metadata (title, description, author, branch, base ref, commit messages).
+- `<changed_files>`: each `<file path="..." block_id="..." status="..." language="...">` carries a stable `block_id`. Contiguous ranges shown to the model are recorded in `CallManifest.shown_ranges`.
+
+**Reflection Pass (`prompts/review.verifier.v1.md`)**:
+- Two-pass verification architecture to eliminate hallucinated findings.
+- **Pass 1 (Reviewer)** generates candidate findings conforming to `schemas/review-output.schema.v2.json` with required `evidence_refs` (pointing to visible `block_id` line ranges).
+- **Pass 2 (Verifier)** checks each candidate against visible code and requirements using `prompts/review.verifier.v1.md`.
+  - Verifier prompt envelope: `<candidate_findings>` (with `<candidate id="..." file="..." rule="..." start_line="..." category="...">`) and `<evidence_context>` (carrying `<file path="..." block_id="...">` and `<policy_document name="..." block_id="...">`).
+  - Verifier output: validated against `schemas/verifier-output.schema.v1.json` (`decisions`: `candidate_id`, `status` in `supported` / `contradicted` / `insufficient_context`, `reason`, `evidence_refs`, `requirement_refs`).
+  - Strict filtering: only candidates with `status="supported"` survive; unverified candidates are dropped, and the review summary is cleansed of hallucinated defects.
 
 ## Rule sets
 

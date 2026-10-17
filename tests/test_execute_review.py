@@ -37,10 +37,12 @@ from app.modules.reviews.application.prompt_builder import (
     RepoConventions,
     ReviewContext,
     ReviewRule,
+    file_block_id,
 )
 from app.modules.reviews.application.reflection_pass import ReflectionPass
 
 RUN_ID = UUID("00000000-0000-0000-0000-000000000200")
+MAIN_BLOCK_ID = file_block_id("app/main.py")
 
 
 def conventions() -> GeneratedConventions:
@@ -199,7 +201,7 @@ def test_execute_review_run_with_reflection_pass_filters_unsupported_findings() 
                         "confidence": 0.9,
                         "rule_name": None,
                         "evidence_refs": [
-                            {"block_id": "file-app-main-py", "start_line": 10, "end_line": 10}
+                            {"block_id": MAIN_BLOCK_ID, "start_line": 10, "end_line": 10}
                         ],
                     },
                     {
@@ -214,7 +216,7 @@ def test_execute_review_run_with_reflection_pass_filters_unsupported_findings() 
                         "confidence": 0.7,
                         "rule_name": None,
                         "evidence_refs": [
-                            {"block_id": "file-app-main-py", "start_line": 10, "end_line": 10}
+                            {"block_id": MAIN_BLOCK_ID, "start_line": 10, "end_line": 10}
                         ],
                     },
                 ],
@@ -243,7 +245,7 @@ def test_execute_review_run_with_reflection_pass_filters_unsupported_findings() 
                     "status": "supported",
                     "reason": "Direct unparameterized SQL query execution.",
                     "evidence_refs": [
-                        {"block_id": "file-app-main-py", "start_line": 10, "end_line": 10}
+                        {"block_id": MAIN_BLOCK_ID, "start_line": 10, "end_line": 10}
                     ],
                     "requirement_refs": [],
                 },
@@ -252,7 +254,7 @@ def test_execute_review_run_with_reflection_pass_filters_unsupported_findings() 
                     "status": "contradicted",
                     "reason": "Variable does not exist and no leak occurs in visible context.",
                     "evidence_refs": [
-                        {"block_id": "file-app-main-py", "start_line": 10, "end_line": 10}
+                        {"block_id": MAIN_BLOCK_ID, "start_line": 10, "end_line": 10}
                     ],
                     "requirement_refs": [],
                 },
@@ -410,7 +412,7 @@ def test_execute_review_run_excluded_file_does_not_reach_verifier() -> None:
                         "status": "supported",
                         "reason": "OK",
                         "evidence_refs": [
-                            {"block_id": "file-app-main-py", "start_line": 10, "end_line": 10}
+                            {"block_id": MAIN_BLOCK_ID, "start_line": 10, "end_line": 10}
                         ],
                         "requirement_refs": [],
                     }
@@ -471,7 +473,7 @@ def test_execute_review_run_excluded_file_does_not_reach_verifier() -> None:
                         "confidence": 0.9,
                         "rule_name": None,
                         "evidence_refs": [
-                            {"block_id": "file-app-main-py", "start_line": 10, "end_line": 10}
+                            {"block_id": MAIN_BLOCK_ID, "start_line": 10, "end_line": 10}
                         ],
                     }
                 ],
@@ -521,21 +523,31 @@ def test_execute_review_fail_closed_when_snapshot_present_without_reflection_pas
             )
 
     class Model:
+        def __init__(self) -> None:
+            self.draft_calls = 0
+
         async def get_pull_request_meta(self, run_id: UUID) -> PullRequestMeta:
             return PullRequestMeta("Title", None, "u", "b", "m", (), 1, 1, 0, False, False)
 
         async def draft_review(self, *, context: ReviewContext) -> dict[str, Any]:
+            self.draft_calls += 1
             return {"findings": [], "summary": {"problem": "p", "done_well": "d", "effort": "none"}}
 
     class Publisher:
+        def __init__(self) -> None:
+            self.publish_calls = 0
+
         async def execute(self, run_id: UUID, raw_output: Any) -> bool:
+            self.publish_calls += 1
             return True
 
+    model = Model()
+    publisher = Publisher()
     pipeline = ExecuteReviewRun(
         Processor(),
         Repository(),
-        Model(),
-        Publisher(),
+        model,
+        publisher,
         reflection_pass=None,  # Missing reflection_pass with snapshot present
     )
 
@@ -543,6 +555,8 @@ def test_execute_review_fail_closed_when_snapshot_present_without_reflection_pas
         asyncio.run(pipeline.execute(RUN_ID))
     assert exc_info.value.code == PolicyErrorCode.SNAPSHOT_INTEGRITY_ERROR
     assert "Reflection pass is required" in exc_info.value.message
+    assert model.draft_calls == 0
+    assert publisher.publish_calls == 0
 
 
 def test_execute_review_fail_closed_when_snapshot_not_ready() -> None:
@@ -567,22 +581,32 @@ def test_execute_review_fail_closed_when_snapshot_not_ready() -> None:
             )
 
     class Model:
+        def __init__(self) -> None:
+            self.draft_calls = 0
+
         async def get_pull_request_meta(self, run_id: UUID) -> PullRequestMeta:
             return PullRequestMeta("Title", None, "u", "b", "m", (), 1, 1, 0, False, False)
 
         async def draft_review(self, *, context: ReviewContext) -> dict[str, Any]:
+            self.draft_calls += 1
             return {"findings": [], "summary": {"problem": "p", "done_well": "d", "effort": "none"}}
 
     class Publisher:
+        def __init__(self) -> None:
+            self.publish_calls = 0
+
         async def execute(self, run_id: UUID, raw_output: Any) -> bool:
+            self.publish_calls += 1
             return True
 
+    model = Model()
+    publisher = Publisher()
     fake_verifier_model = FakeVerifierModel({"decisions": []})
     pipeline = ExecuteReviewRun(
         Processor(),
         Repository(),
-        Model(),
-        Publisher(),
+        model,
+        publisher,
         reflection_pass=ReflectionPass(fake_verifier_model),
     )
 
@@ -590,10 +614,11 @@ def test_execute_review_fail_closed_when_snapshot_not_ready() -> None:
         asyncio.run(pipeline.execute(RUN_ID))
     assert exc_info.value.code == PolicyErrorCode.SNAPSHOT_INTEGRITY_ERROR
     assert "Policy snapshot is not ready" in exc_info.value.message
+    assert model.draft_calls == 0
+    assert publisher.publish_calls == 0
 
 
 def test_execute_review_fail_closed_when_budget_exceeded() -> None:
-
     class Processor:
         async def prepare(self, run_id: UUID) -> GeneratedConventions:
             return conventions()
@@ -617,28 +642,40 @@ def test_execute_review_fail_closed_when_budget_exceeded() -> None:
             )
 
     class Model:
+        def __init__(self) -> None:
+            self.draft_calls = 0
+
         async def get_pull_request_meta(self, run_id: UUID) -> PullRequestMeta:
             return PullRequestMeta("Title", None, "u", "b", "m", (), 1, 1, 0, False, False)
 
         async def draft_review(self, *, context: ReviewContext) -> dict[str, Any]:
+            self.draft_calls += 1
             return {"findings": [], "summary": {"problem": "p", "done_well": "d", "effort": "none"}}
 
     class Publisher:
+        def __init__(self) -> None:
+            self.publish_calls = 0
+
         async def execute(self, run_id: UUID, raw_output: Any) -> bool:
+            self.publish_calls += 1
             return True
 
+    model = Model()
+    publisher = Publisher()
     fake_verifier_model = FakeVerifierModel({"decisions": []})
     pipeline = ExecuteReviewRun(
         Processor(),
         Repository(),
-        Model(),
-        Publisher(),
+        model,
+        publisher,
         reflection_pass=ReflectionPass(fake_verifier_model),
     )
 
     with pytest.raises(PolicyError) as exc_info:
         asyncio.run(pipeline.execute(RUN_ID))
     assert exc_info.value.code == PolicyErrorCode.PROMPT_BUDGET_EXCEEDED
+    assert model.draft_calls == 0
+    assert publisher.publish_calls == 0
 
 
 def test_execute_review_fail_closed_when_context_overflow() -> None:
@@ -667,28 +704,40 @@ def test_execute_review_fail_closed_when_context_overflow() -> None:
             )
 
     class Model:
+        def __init__(self) -> None:
+            self.draft_calls = 0
+
         async def get_pull_request_meta(self, run_id: UUID) -> PullRequestMeta:
             return PullRequestMeta("Title", None, "u", "b", "m", (), 1, 1, 0, False, False)
 
         async def draft_review(self, *, context: ReviewContext) -> dict[str, Any]:
+            self.draft_calls += 1
             return {"findings": [], "summary": {"problem": "p", "done_well": "d", "effort": "none"}}
 
     class Publisher:
+        def __init__(self) -> None:
+            self.publish_calls = 0
+
         async def execute(self, run_id: UUID, raw_output: Any) -> bool:
+            self.publish_calls += 1
             return True
 
+    model = Model()
+    publisher = Publisher()
     fake_verifier_model = FakeVerifierModel({"decisions": []})
     pipeline = ExecuteReviewRun(
         Processor(),
         Repository(),
-        Model(),
-        Publisher(),
+        model,
+        publisher,
         reflection_pass=ReflectionPass(fake_verifier_model),
     )
 
     with pytest.raises(RunFailure) as exc_info:
         asyncio.run(pipeline.execute(RUN_ID))
     assert exc_info.value.error_code == "llm_context_overflow"
+    assert model.draft_calls == 0
+    assert publisher.publish_calls == 0
 
 
 def test_execute_review_summary_cleansed_when_all_candidates_rejected() -> None:
@@ -731,7 +780,7 @@ def test_execute_review_summary_cleansed_when_all_candidates_rejected() -> None:
                         "confidence": 0.8,
                         "rule_name": None,
                         "evidence_refs": [
-                            {"block_id": "file-app-main-py", "start_line": 10, "end_line": 10}
+                            {"block_id": MAIN_BLOCK_ID, "start_line": 10, "end_line": 10}
                         ],
                     }
                 ],
@@ -758,7 +807,7 @@ def test_execute_review_summary_cleansed_when_all_candidates_rejected() -> None:
                     "status": "contradicted",
                     "reason": "Variable is an integer constant, cannot inject SQL.",
                     "evidence_refs": [
-                        {"block_id": "file-app-main-py", "start_line": 10, "end_line": 10}
+                        {"block_id": MAIN_BLOCK_ID, "start_line": 10, "end_line": 10}
                     ],
                     "requirement_refs": [],
                 }
@@ -824,7 +873,7 @@ def test_execute_review_json_rules_compatibility_with_reflection_pass() -> None:
                         "confidence": 0.95,
                         "rule_name": None,
                         "evidence_refs": [
-                            {"block_id": "file-app-main-py", "start_line": 5, "end_line": 5}
+                            {"block_id": MAIN_BLOCK_ID, "start_line": 5, "end_line": 5}
                         ],
                     }
                 ],
@@ -850,9 +899,7 @@ def test_execute_review_json_rules_compatibility_with_reflection_pass() -> None:
                     "candidate_id": "cand-1",
                     "status": "supported",
                     "reason": "Direct print call matches rule.",
-                    "evidence_refs": [
-                        {"block_id": "file-app-main-py", "start_line": 5, "end_line": 5}
-                    ],
+                    "evidence_refs": [{"block_id": MAIN_BLOCK_ID, "start_line": 5, "end_line": 5}],
                     "requirement_refs": [],
                 }
             ]
@@ -870,3 +917,275 @@ def test_execute_review_json_rules_compatibility_with_reflection_pass() -> None:
     assert success is True
     assert len(published_output["findings"]) == 1
     assert published_output["findings"][0]["title"] == "Disallowed print"
+
+
+def test_execute_review_verifier_failure_prevents_publication() -> None:
+    from app.modules.reviews.application.reflection_pass import VerificationUnavailableError
+
+    class FailingVerifierModel:
+        async def verify(self, *, system_prompt: str, user_prompt: str) -> Mapping[str, Any]:
+            raise VerificationUnavailableError("Verifier downstream failure")
+
+    class Processor:
+        async def prepare(self, run_id: UUID) -> GeneratedConventions:
+            return conventions()
+
+    class Repository:
+        async def get_review_prompt_input(
+            self, run_id: UUID, saved: GeneratedConventions
+        ) -> ReviewPromptInput:
+            return ReviewPromptInput(
+                system="Review carefully.",
+                rules=(),
+                agents_md=None,
+                conventions=RepoConventions((), ()),
+                changed_files=(
+                    ChangedFile("app/main.py", "modified", (DiffLine(10, "added", "x = 1"),)),
+                ),
+                omitted_files=(),
+                policy_snapshot=_make_test_snapshot(),
+            )
+
+    class Model:
+        async def get_pull_request_meta(self, run_id: UUID) -> PullRequestMeta:
+            return PullRequestMeta("Title", None, "u", "b", "m", (), 1, 1, 0, False, False)
+
+        async def draft_review(self, *, context: ReviewContext) -> dict[str, Any]:
+            return {
+                "findings": [
+                    {
+                        "path": "app/main.py",
+                        "line": 10,
+                        "start_line": None,
+                        "severity": "high",
+                        "category": "security",
+                        "title": "Finding 1",
+                        "body": "Body",
+                        "suggestion": None,
+                        "confidence": 0.9,
+                        "rule_name": None,
+                        "evidence_refs": [
+                            {"block_id": MAIN_BLOCK_ID, "start_line": 10, "end_line": 10}
+                        ],
+                    }
+                ],
+                "summary": {"problem": "Issue found.", "done_well": "Clean.", "effort": "small"},
+            }
+
+    publish_called = False
+
+    class Publisher:
+        async def execute(self, run_id: UUID, raw_output: Any) -> bool:
+            nonlocal publish_called
+            publish_called = True
+            return True
+
+    pipeline = ExecuteReviewRun(
+        Processor(),
+        Repository(),
+        Model(),
+        Publisher(),
+        reflection_pass=ReflectionPass(FailingVerifierModel()),
+    )
+
+    with pytest.raises(VerificationUnavailableError):
+        asyncio.run(pipeline.execute(RUN_ID))
+
+    assert publish_called is False
+
+
+def test_execute_review_candidate_count_limit() -> None:
+    from app.modules.reviews.application.review_output import InvalidReviewOutput
+
+    class Processor:
+        async def prepare(self, run_id: UUID) -> GeneratedConventions:
+            return conventions()
+
+    class Repository:
+        async def get_review_prompt_input(
+            self, run_id: UUID, saved: GeneratedConventions
+        ) -> ReviewPromptInput:
+            return ReviewPromptInput(
+                system="Review carefully.",
+                rules=(),
+                agents_md=None,
+                conventions=RepoConventions((), ()),
+                changed_files=(
+                    ChangedFile("app/main.py", "modified", (DiffLine(10, "added", "x = 1"),)),
+                ),
+                omitted_files=(),
+                policy_snapshot=_make_test_snapshot(),
+            )
+
+    class Model:
+        async def get_pull_request_meta(self, run_id: UUID) -> PullRequestMeta:
+            return PullRequestMeta("Title", None, "u", "b", "m", (), 1, 1, 0, False, False)
+
+        async def draft_review(self, *, context: ReviewContext) -> dict[str, Any]:
+            # 11 candidates (exceeds limit of 10)
+            return {
+                "findings": [
+                    {
+                        "path": "app/main.py",
+                        "line": 10,
+                        "start_line": None,
+                        "severity": "low",
+                        "category": "style",
+                        "title": f"Finding {i}",
+                        "body": "Body",
+                        "suggestion": None,
+                        "confidence": 0.8,
+                        "rule_name": None,
+                        "evidence_refs": [
+                            {"block_id": MAIN_BLOCK_ID, "start_line": 10, "end_line": 10}
+                        ],
+                    }
+                    for i in range(11)
+                ],
+                "summary": {"problem": "Issues.", "done_well": "Clean.", "effort": "medium"},
+            }
+
+    publish_called = False
+
+    class Publisher:
+        async def execute(self, run_id: UUID, raw_output: Any) -> bool:
+            nonlocal publish_called
+            publish_called = True
+            return True
+
+    pipeline = ExecuteReviewRun(
+        Processor(),
+        Repository(),
+        Model(),
+        Publisher(),
+        reflection_pass=ReflectionPass(FakeVerifierModel({"decisions": []})),
+    )
+
+    with pytest.raises(InvalidReviewOutput, match="maximum of 10"):
+        asyncio.run(pipeline.execute(RUN_ID))
+
+    assert publish_called is False
+
+
+def test_execute_review_summary_cleansed_when_partially_rejected() -> None:
+    class Processor:
+        async def prepare(self, run_id: UUID) -> GeneratedConventions:
+            return conventions()
+
+    class Repository:
+        async def get_review_prompt_input(
+            self, run_id: UUID, saved: GeneratedConventions
+        ) -> ReviewPromptInput:
+            return ReviewPromptInput(
+                system="Review carefully.",
+                rules=(),
+                agents_md=None,
+                conventions=RepoConventions((), ()),
+                changed_files=(
+                    ChangedFile("app/main.py", "modified", (DiffLine(10, "added", "x = 1"),)),
+                ),
+                omitted_files=(),
+                policy_snapshot=_make_test_snapshot(),
+            )
+
+    class Model:
+        async def get_pull_request_meta(self, run_id: UUID) -> PullRequestMeta:
+            return PullRequestMeta("Title", None, "u", "b", "m", (), 1, 1, 0, False, False)
+
+        async def draft_review(self, *, context: ReviewContext) -> dict[str, Any]:
+            return {
+                "findings": [
+                    {
+                        "path": "app/main.py",
+                        "line": 10,
+                        "start_line": None,
+                        "severity": "critical",
+                        "category": "security",
+                        "title": "Critical flaw",
+                        "body": "Body 1",
+                        "suggestion": None,
+                        "confidence": 0.9,
+                        "rule_name": None,
+                        "evidence_refs": [
+                            {"block_id": MAIN_BLOCK_ID, "start_line": 10, "end_line": 10}
+                        ],
+                    },
+                    {
+                        "path": "app/main.py",
+                        "line": 10,
+                        "start_line": None,
+                        "severity": "medium",
+                        "category": "correctness",
+                        "title": "Medium flaw",
+                        "body": "Body 2",
+                        "suggestion": None,
+                        "confidence": 0.8,
+                        "rule_name": None,
+                        "evidence_refs": [
+                            {"block_id": MAIN_BLOCK_ID, "start_line": 10, "end_line": 10}
+                        ],
+                    },
+                ],
+                "summary": {
+                    "problem": "Severe critical vulnerability found.",
+                    "done_well": "Well documented code.",
+                    "effort": "large",
+                },
+            }
+
+    published_output: dict[str, Any] = {}
+
+    class Publisher:
+        async def execute(self, run_id: UUID, raw_output: Any) -> bool:
+            nonlocal published_output
+            published_output = dict(raw_output)
+            return True
+
+    fake_verifier_model = FakeVerifierModel(
+        {
+            "decisions": [
+                {
+                    "candidate_id": "c-1",
+                    "status": "contradicted",
+                    "reason": "Not a critical flaw.",
+                    "evidence_refs": [
+                        {"block_id": MAIN_BLOCK_ID, "start_line": 10, "end_line": 10}
+                    ],
+                    "requirement_refs": [],
+                },
+                {
+                    "candidate_id": "c-2",
+                    "status": "supported",
+                    "reason": "Confirmed correctness flaw.",
+                    "evidence_refs": [
+                        {"block_id": MAIN_BLOCK_ID, "start_line": 10, "end_line": 10}
+                    ],
+                    "requirement_refs": [],
+                },
+            ]
+        }
+    )
+
+    pipeline = ExecuteReviewRun(
+        Processor(),
+        Repository(),
+        Model(),
+        Publisher(),
+        reflection_pass=ReflectionPass(fake_verifier_model),
+    )
+
+    success = asyncio.run(pipeline.execute(RUN_ID))
+    assert success is True
+    assert len(published_output["findings"]) == 1
+    assert published_output["findings"][0]["title"] == "Medium flaw"
+
+    summary = published_output["summary"]
+    # Severe vulnerability text was cleansed
+    assert "Severe critical vulnerability" not in summary["problem"]
+    assert "Identified 1 verified issue (correctness)" in summary["problem"]
+    # Exactly one sentence (no internal period)
+    assert summary["problem"].count(".") == 1
+    # Effort is small/medium based on remaining finding
+    assert summary["effort"] == "small"
+    # Done well was preserved
+    assert summary["done_well"] == "Well documented code."
