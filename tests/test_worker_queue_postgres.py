@@ -930,7 +930,13 @@ def test_worker_without_github_app_starts_and_stays_healthy(
 
     with caplog.at_level(logging.WARNING):
         assert asyncio.run(scenario()) is True
-    assert "GITHUB_APP_ID or GITHUB_APP_PRIVATE_KEY is not set" in caplog.text
+    assert (
+        "GITHUB_APP_ID or GITHUB_APP_PRIVATE_KEY is not set: the no-CI sweep and "
+        "GitHub publication (reviews and check-runs) are disabled"
+    ) in caplog.text
+    assert (
+        "GITHUB_APP_ID or GITHUB_APP_PRIVATE_KEY is not set: the index.repo consumer is disabled"
+    ) in caplog.text
     assert "leader tick failed" not in caplog.text
 
 

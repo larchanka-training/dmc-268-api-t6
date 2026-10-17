@@ -515,11 +515,13 @@ A republish always waits for the confirm, and only then acks the original.
 | --- | --- |
 | decode or schema error, foreign `message_id` | `nack(requeue=False)` → DLQ |
 | PUBLISHED, UNCHANGED, EMPTY, STALE, FAILED, LEASE_LOST | ack |
-| LEASED | ack; if `redelivered`, republish to `10m` with `x-lease-wait ≤ 2` (holder SIGKILLed) |
+| RELEASED (access or policy error, `last_error_code` written) | ack |
+| LEASED | ack; if `redelivered` or already waiting, republish to `10m` with `x-lease-wait ≤ ⌈lease / 600 s⌉` (2 at the default 1200 s; holder SIGKILLed) |
 | BUSY | republish to `retry.30s` with the same attempt, ack (no nack-requeue spin) |
-| REWAKE | `wake()` to `index.repo` with attempt 1, ack |
+| REWAKE | ack only: the use case already woke the repository with attempt 1 |
 | TRANSIENT | attempt 1 → 30s, 2 → 2m; rate limit ≥ 2m; `Retry-After` > 2 min → 10m; on attempt 3, ack (`last_error_code` is already written) |
 | unexpected exception | `x-attempt` republish; on the 3rd → DLQ |
+| a copy the broker does not confirm | `nack(requeue=True)` after the unexpected-error pause, counted with the same local counter; on the 3rd → DLQ |
 
 ### Reuse of `reviews/infrastructure/amqp.py`
 

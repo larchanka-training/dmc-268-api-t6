@@ -359,6 +359,14 @@ def forget_unexpected_attempts(message: AbstractIncomingMessage) -> None:
     _clear_delivery_attempts(_delivery_key(message))
 
 
+def count_unexpected_attempt(message: AbstractIncomingMessage) -> int:
+    """Count one more failed pass of a delivery in the local fallback state; the number
+    of this pass, as `requeue_after_error` counts it."""
+    attempts = _get_delivery_attempts(message)
+    _remember_delivery_attempts(_delivery_key(message), attempts)
+    return attempts
+
+
 async def handle_run_delivery(
     message: AbstractIncomingMessage,
     handler: Callable[[UUID], Awaitable[DeliveryOutcome]],

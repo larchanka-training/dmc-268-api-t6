@@ -656,9 +656,12 @@ Tests first: unit tests with `FakeExchange`, one per outcome row.
 - [ ] AC1: confirm before ack; `x-attempt` → DLQ on the 3rd unexpected exception; the
   retry key is chosen as in the table (TRANSIENT 30s/2m, rate limit ≥ 2m,
   `Retry-After` > 2 min → 10m, ack on attempt 3).
-- [ ] AC10/AC12: FAILED and LEASE_LOST are acked with no retry and no DLQ.
+- [ ] AC10/AC12: FAILED and LEASE_LOST are acked with no retry and no DLQ; RELEASED is
+  acked too.
 - [ ] BUSY republishes to `retry.30s` with the same attempt; LEASED with `redelivered`
-  republishes to `10m` with `x-lease-wait ≤ 2`; REWAKE wakes with attempt 1.
+  (or already waiting) republishes to `10m` with `x-lease-wait ≤ ⌈lease / 600 s⌉` (2 at
+  the default lease); REWAKE is only acked (the use case already woke the repository
+  with attempt 1).
 
 **Verification:** Run the common verification block.
 
