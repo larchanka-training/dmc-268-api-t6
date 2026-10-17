@@ -172,6 +172,7 @@ summary-only) и `failed`, но не `cancelled` и `skipped`, и в `details_ur
 | `GRAFANA_ADMIN_PASSWORD` | генерируется на хосте | `.env` стека (0600), контейнер `grafana` | вход `admin` в Grafana. Генерируется один раз; каждый выкат синхронизирует его через `grafana cli … --password-from-stdin`. Прочитать: `ssh` на VPS, `grep GRAFANA_ADMIN_PASSWORD /opt/dmc-268-monitoring/.env` |
 | `GRAFANA_DB_PASSWORD` | генерируется на хосте | `.env` стека; роль PostgreSQL `grafana_reader` | источник данных PostgreSQL в Grafana: только чтение и только колонки метаданных (§3 MONITORING.md) |
 | `PG_EXPORTER_PASSWORD` | генерируется на хосте | `.env` стека; роль PostgreSQL `metrics_exporter` | `postgres-exporter`: `pg_monitor` и те же колонки |
+| `PG_BACKUP_PASSWORD` | генерируется на хосте | `.env` стека; роль PostgreSQL `backup_agent` | `pg-backup`: `pg_read_all_data` для `pg_dump`, `CREATEDB` для БД проверки восстановления |
 | `REDIS_PASSWORD` | копия из `<APP_DIR>/.env` | `.env` стека, контейнер `redis-exporter` | метрики Redis. Сменился пароль Redis — следующий выкат мониторинга (сразу после выката приложения) берёт новый |
 
 Пароли ролей PostgreSQL передаются в `psql` через stdin, не через argv; вывод этого вызова подавлен, потому что `psql` повторил бы упавший оператор вместе с паролем.
