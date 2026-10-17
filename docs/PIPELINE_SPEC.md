@@ -230,7 +230,7 @@ RabbitMQ пересылает dead-letter с исходным routing key, ес�
 - `runs.attempt` и AMQP `x-attempt` — независимые бюджеты: первый увеличивается при доменном claim, второй — при исключении, вышедшем из обработчика. `x-death` — диагностика, в бюджет неожиданных сбоев не входит. Копия после неожиданной ошибки публикуется в `reviews` с исходным routing key доставки (`review.run.{fast,deep}` или `review.publish`).
 - Сбои классов без retry подтверждаются ack без DLQ: причина уже записана в PG (`error_code`, `run_actions`).
 - DLQ читает оператор. Реконсилер её не разбирает. При исчерпании доменных попыток Run уже `failed` и повторяется через rerun; при невалидном сообщении или неожиданных ошибках оператор сначала сверяет PG и логи: Run может отсутствовать или остаться в прежнем состоянии.
-- В `code_index.dlq` (через `code_index.dlx`, хранение 7 дней) попадают сообщение `index.repo`, не прошедшее `contracts/schemas/index.repo.v1.schema.json`, с чужим `schema` или с `message_id`, не выведенным из полей, и сообщение после третьей неожиданной ошибки обработчика (`x-attempt`, копия — в `code_index` с ключом `index.repo`). Исходы FAILED, RELEASED, LEASE_LOST и TRANSIENT на третьей попытке подтверждаются ack без DLQ: причина уже в `code_index_states` (`error_code`, `last_error_code`), SD §7.4.
+- В `code_index.dlq` (через `code_index.dlx`, хранение 7 дней) попадают сообщение `index.repo`, не прошедшее `contracts/schemas/index.repo.v1.schema.json`, с чужим `schema` или с `message_id`, не выведенным из полей, сообщение после третьей неожиданной ошибки обработчика (`x-attempt`, копия — в `code_index` с ключом `index.repo`) и сообщение, копию которого в retry-очередь брокер трижды не подтвердил (тот же локальный счётчик, пауза перед каждым повтором). Исходы FAILED, RELEASED и TRANSIENT на третьей попытке подтверждаются ack без DLQ: причина уже в `code_index_states` (`error_code`, `last_error_code`), SD §7.4. LEASE_LOST тоже подтверждается ack, но ничего не пишет: строкой владеет новый держатель lease.
 
 ### 4.5 Лимиты вызовов и стоимости
 
@@ -255,7 +255,7 @@ RabbitMQ пересылает dead-letter с исходным routing key, ес�
 | `vcs_rate_limited` или `Retry-After` | не меньше 2 мин; `Retry-After` > 2 мин → 10 мин, consumer не ждёт в процессе | `index.repo.retry.2m` / `index.repo.retry.10m` |
 | TRANSIENT на попытке 3 | — | ack: `last_error_code` записан, последняя публикация остаётся |
 | BUSY: лимит параллельности | 30 с, тот же `attempt` | `index.repo.retry.30s` |
-| LEASED повторной доставки | 10 мин, не больше двух раз (`x-lease-wait`) | `index.repo.retry.10m` |
+| LEASED повторной доставки | 10 мин, ⌈`CODE_INDEX_LEASE_SECONDS` / 600⌉ раз (`x-lease-wait`): 2 при 1200 с | `index.repo.retry.10m` |
 
 - Лимит параллельности — `CODE_INDEX_MAX_CONCURRENT` = 2 lease на весь деплой и
   `CODE_INDEX_MAX_CONCURRENT_PER_INSTALLATION` = 1 на установку. Его проверяет claim под
@@ -263,7 +263,7 @@ RabbitMQ пересылает dead-letter с исходным routing key, ес�
   раз (`prefetch_count=1`).
 - Дедлайн задания `CODE_INDEX_DEADLINE_SECONDS` = 900 с, не больше 1500 с: ack приходит
   раньше `consumer_timeout` брокера. Lease `CODE_INDEX_LEASE_SECONDS` = 1200 с, не меньше
-  дедлайна + 60 с. Soft cutoff очистки `CODE_INDEX_SOFT_CUTOFF_SECONDS` = 300 с, меньше
+  дедлайна + 60 с и не больше 86 400 с. Soft cutoff очистки `CODE_INDEX_SOFT_CUTOFF_SECONDS` = 300 с, меньше
   дедлайна. Недопустимое значение любой `CODE_INDEX_*` не даёт worker стартовать.
 
 ---

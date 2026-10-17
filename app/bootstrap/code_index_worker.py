@@ -44,6 +44,7 @@ from app.modules.code_index.infrastructure.amqp import (
     IndexQueuePublisher,
     declare_topology,
     handle_index_delivery,
+    lease_waits,
 )
 from app.modules.code_index.infrastructure.github_snapshot_source import (
     GitHubRepositorySnapshotSource,
@@ -69,6 +70,8 @@ _LOGGER = logging.getLogger(__name__)
 MAX_DEADLINE_SECONDS = 1_500
 # The lease outlives the job deadline by at least this much.
 LEASE_MARGIN_SECONDS = 60
+# At most a day: a LEASED redelivery waits in the 10m queue until the lease has expired.
+MAX_LEASE_SECONDS = 86_400
 # Far above any limit; it keeps `int()` off a pathological value.
 _MAX_DIGITS = 18
 
@@ -108,6 +111,8 @@ class CodeIndexSettings:
                 f"{_variable('lease_seconds')} must be at least "
                 f"{_variable('deadline_seconds')} + {LEASE_MARGIN_SECONDS}"
             )
+        if self.lease_seconds > MAX_LEASE_SECONDS:
+            raise ValueError(f"{_variable('lease_seconds')} must be at most {MAX_LEASE_SECONDS}")
         if self.soft_cutoff_seconds >= self.deadline_seconds:
             raise ValueError(
                 f"{_variable('soft_cutoff_seconds')} must be below {_variable('deadline_seconds')}"
@@ -136,6 +141,11 @@ class CodeIndexSettings:
             deadline_seconds=self.deadline_seconds,
             incremental_files=self.max_incremental_files,
         )
+
+    @property
+    def lease_waits(self) -> int:
+        """The waits of a LEASED redelivery in the 10m queue that outlast the lease."""
+        return lease_waits(self.lease_seconds)
 
     @property
     def build(self) -> IndexBuildSettings:
@@ -285,7 +295,7 @@ async def index_consumer(
             yield IndexConsumer(
                 await consuming.get_queue(QUEUE, ensure=False),
                 build,
-                await IndexQueuePublisher.open(channel, delays),
+                await IndexQueuePublisher.open(channel, delays, lease_waits=code_index.lease_waits),
             )
         finally:
             await parser.aclose()

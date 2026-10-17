@@ -11,20 +11,24 @@ picks the queue action:
 - REWAKE → ack: the job already woke the repository with attempt 1;
 - BUSY → the 30s queue with the same attempt;
 - LEASED → ack; a redelivery, or a message already waiting for a lease, waits in the
-  10m queue at most `MAX_LEASE_WAITS` times (the holder died with the lease);
+  10m queue until the lease of a holder that died with it has expired (`lease_waits`);
 - TRANSIENT → the next attempt as `retry_delay_key` chooses; on attempt 3, ack (the
   job already wrote `last_error_code`);
 - an unexpected exception → the `x-attempt` republish of the review queues, the third
   goes to `code_index.dlq`.
 
-A copy is always confirmed before the original is acked; a copy that is not confirmed
-leaves the original to the broker (`nack(requeue=True)`).
+A copy is always confirmed before the original is acked. A copy that is not confirmed
+leaves the original to the broker (`nack(requeue=True)`) after the pause of the
+unexpected-error path; its passes share that local count, and the third goes to
+`code_index.dlq`, since each pass runs the job again.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+import math
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from typing import Any, Literal
@@ -37,8 +41,10 @@ from pydantic import BaseModel, ConfigDict, Field
 from app.modules.code_index.application.build_index import BuildOutcome, BuildStatus
 from app.modules.code_index.application.vcs import VCS_RATE_LIMITED
 from app.modules.reviews.application.run_failures import RetryDelays
+from app.modules.reviews.infrastructure import amqp as review_amqp
 from app.modules.reviews.infrastructure.amqp import (
     RETRY_KEYS,
+    count_unexpected_attempt,
     forget_unexpected_attempts,
     republish_with_attempt,
     requeue_after_error,
@@ -57,13 +63,16 @@ SCHEMA = "index.repo.v1"
 MESSAGE_ID_NAMESPACE = UUID("e03f49a6-717b-4702-886d-5b6805fe7d1a")
 MAX_ATTEMPTS = 3
 LEASE_WAIT_HEADER = "x-lease-wait"
-# Two waits in the 10m queue outlast the default lease of 1200 s.
-MAX_LEASE_WAITS = 2
 _DLQ_RETENTION_MS = 7 * 24 * 60 * 60 * 1000
 
 
 def retry_queue(delay_key: str) -> str:
     return f"{QUEUE}.retry.{delay_key}"
+
+
+def lease_waits(lease_seconds: int) -> int:
+    """How many waits in the 10m queue outlast a lease: two for the default 1200 s."""
+    return math.ceil(lease_seconds / RetryDelays().long.total_seconds())
 
 
 def message_id(repository_id: UUID, generation: int, requested_at: str) -> UUID:
@@ -174,18 +183,28 @@ class IndexQueuePublisher:
     """The retries and the unexpected-error republish of `index.repo`, each confirmed."""
 
     def __init__(
-        self, index: AbstractExchange, retry: AbstractExchange, delays: RetryDelays
+        self,
+        index: AbstractExchange,
+        retry: AbstractExchange,
+        delays: RetryDelays,
+        *,
+        lease_waits: int,
     ) -> None:
         self._index = index
         self._retry = retry
         self.delays = delays
+        # The waits of a LEASED redelivery in the 10m queue (`lease_waits()` of the lease).
+        self.lease_waits = lease_waits
 
     @classmethod
-    async def open(cls, channel: AbstractChannel, delays: RetryDelays) -> IndexQueuePublisher:
+    async def open(
+        cls, channel: AbstractChannel, delays: RetryDelays, *, lease_waits: int
+    ) -> IndexQueuePublisher:
         return cls(
             await channel.get_exchange(EXCHANGE, ensure=False),
             await channel.get_exchange(RETRY_EXCHANGE, ensure=False),
             delays,
+            lease_waits=lease_waits,
         )
 
     async def publish_retry(
@@ -230,25 +249,26 @@ def _decode(message: AbstractIncomingMessage) -> IndexRepoMessage | None:
     return decoded
 
 
-def _lease_waits(message: AbstractIncomingMessage) -> int:
+def _lease_waits(message: AbstractIncomingMessage, maximum: int) -> int:
     headers = getattr(message, "headers", None) or {}
     try:
         return int(headers.get(LEASE_WAIT_HEADER, 0))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError) as error:
         _LOGGER.warning(
             "Invalid header %s=%r on message %s",
             LEASE_WAIT_HEADER,
             headers.get(LEASE_WAIT_HEADER),
             message.message_id,
         )
-        return 0
+        # An infinite double: the waits are over.
+        return maximum if isinstance(error, OverflowError) else 0
 
 
 def _next_delivery(
     decoded: IndexRepoMessage,
     outcome: BuildOutcome,
     message: AbstractIncomingMessage,
-    delays: RetryDelays,
+    publisher: IndexQueuePublisher,
 ) -> tuple[IndexRepoMessage, str, dict[str, Any] | None] | None:
     """The copy to put on a retry queue, or `None` when the delivery is only acked."""
     if outcome.status is BuildStatus.BUSY:
@@ -256,12 +276,49 @@ def _next_delivery(
         return decoded, "30s", None
     if outcome.status is BuildStatus.TRANSIENT and decoded.attempt < MAX_ATTEMPTS:
         retry = decoded.model_copy(update={"attempt": decoded.attempt + 1})
-        return retry, retry_delay_key(decoded.attempt, outcome, delays), None
+        return retry, retry_delay_key(decoded.attempt, outcome, publisher.delays), None
     if outcome.status is BuildStatus.LEASED:
-        waits = _lease_waits(message)
-        if (getattr(message, "redelivered", False) or waits > 0) and waits < MAX_LEASE_WAITS:
+        maximum = publisher.lease_waits
+        waits = _lease_waits(message, maximum)
+        if (getattr(message, "redelivered", False) or waits > 0) and waits < maximum:
             return decoded, "10m", {LEASE_WAIT_HEADER: waits + 1}
     return None
+
+
+async def _nack(message: AbstractIncomingMessage, *, requeue: bool) -> None:
+    try:
+        await message.nack(requeue=requeue)
+    except Exception:
+        _LOGGER.exception("Failed to nack message %s after a publish error", message.message_id)
+
+
+async def _requeue_unpublished(message: AbstractIncomingMessage, target: str) -> None:
+    """A copy that was not confirmed: redeliver the original after a pause, and send the
+    third pass to the DLQ, counted as `requeue_after_error` counts."""
+    attempts = count_unexpected_attempt(message)
+    if attempts >= review_amqp.MAX_UNEXPECTED_RETRIES:
+        _LOGGER.error(
+            "Message %s failed to reach %s %d times; routing to DLQ %s",
+            message.message_id,
+            target,
+            attempts,
+            DEAD_LETTER_QUEUE,
+            exc_info=True,
+        )
+        forget_unexpected_attempts(message)
+        await _nack(message, requeue=False)
+        return
+    _LOGGER.exception(
+        "Failed to publish message %s to %s (attempt %d/%d); it is redelivered",
+        message.message_id,
+        target,
+        attempts,
+        review_amqp.MAX_UNEXPECTED_RETRIES,
+    )
+    # Each pass runs the job again: the pause of the unexpected-error path throttles it.
+    if review_amqp.REQUEUE_ERROR_DELAY_SECONDS > 0:
+        await asyncio.sleep(review_amqp.REQUEUE_ERROR_DELAY_SECONDS)
+    await _nack(message, requeue=True)
 
 
 async def handle_index_delivery(
@@ -280,25 +337,19 @@ async def handle_index_delivery(
     except Exception:
         await requeue_after_error(message, publisher, dead_letter_queue=DEAD_LETTER_QUEUE)
         return
-    forget_unexpected_attempts(message)
-    retry = _next_delivery(decoded, outcome, message, publisher.delays)
+    retry = _next_delivery(decoded, outcome, message, publisher)
     if retry is None:
+        forget_unexpected_attempts(message)
         await message.ack()
         return
     copy, delay_key, headers = retry
     try:
         await publisher.publish_retry(copy, delay_key, headers)
     except Exception:
-        _LOGGER.exception(
-            "Failed to publish message %s to %s; it is redelivered",
-            message.message_id,
-            retry_queue(delay_key),
-        )
-        try:
-            await message.nack(requeue=True)
-        except Exception:
-            _LOGGER.exception("Failed to nack message %s after a publish error", message.message_id)
+        # Not forgotten before: the failed passes count towards the DLQ.
+        await _requeue_unpublished(message, retry_queue(delay_key))
         return
+    forget_unexpected_attempts(message)
     _LOGGER.info(
         "code_index delivery message_id=%s status=%s retry=%s attempt=%d",
         decoded.message_id,

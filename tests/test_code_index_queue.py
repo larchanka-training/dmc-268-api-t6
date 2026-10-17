@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -21,6 +22,7 @@ import pytest
 from aio_pika.abc import AbstractChannel, AbstractExchange, AbstractIncomingMessage
 
 import app.modules.code_index.infrastructure.amqp as index_amqp
+import app.modules.reviews.infrastructure.amqp as review_amqp
 from app.modules.code_index.application.build_index import BuildOutcome, BuildStatus
 from app.modules.reviews.application.run_failures import RetryDelays
 
@@ -74,12 +76,16 @@ class Delivery:
 class Queue:
     events: list[tuple[str, ...]] = field(default_factory=list)
     calls: list[tuple[UUID, int]] = field(default_factory=list)
+    lease_waits: int = 2
 
     def __post_init__(self) -> None:
         self.main = FakeExchange("code_index", self.events)
         self.retry = FakeExchange("code_index.retry", self.events)
         self.publisher = index_amqp.IndexQueuePublisher(
-            cast(AbstractExchange, self.main), cast(AbstractExchange, self.retry), RetryDelays()
+            cast(AbstractExchange, self.main),
+            cast(AbstractExchange, self.retry),
+            RetryDelays(),
+            lease_waits=self.lease_waits,
         )
 
     def deliver(
@@ -394,6 +400,16 @@ def test_busy_goes_to_the_30s_queue_with_the_same_attempt_confirmed_before_the_a
             ),
             "10m",
         ),
+        # Any Retry-After waits at least 2 minutes, a rate limit or not.
+        (
+            1,
+            BuildOutcome(
+                BuildStatus.TRANSIENT,
+                error_code="vcs_unavailable",
+                retry_after=timedelta(seconds=5),
+            ),
+            "2m",
+        ),
         # Never a sleep: a delay of one day takes the 10m queue too.
         (
             2,
@@ -405,7 +421,15 @@ def test_busy_goes_to_the_30s_queue_with_the_same_attempt_confirmed_before_the_a
             "10m",
         ),
     ],
-    ids=["first", "second", "rate-limit", "retry-after-2m", "retry-after-121s", "one-day"],
+    ids=[
+        "first",
+        "second",
+        "rate-limit",
+        "retry-after-2m",
+        "retry-after-121s",
+        "retry-after-5s-not-limited",
+        "one-day",
+    ],
 )
 def test_a_transient_outcome_is_retried_with_the_next_attempt(
     attempt: int, outcome: BuildOutcome, key: str
@@ -473,6 +497,37 @@ def test_leased_on_a_redelivery_waits_twice_in_the_10m_queue_then_is_acked() -> 
     assert last.acked and queue.retry.published == []
 
 
+def test_the_lease_waits_follow_the_lease_of_the_settings() -> None:
+    # A lease of 1560 s needs three waits of 10 minutes.
+    message = body()
+    queue = Queue(lease_waits=3)
+    queue.deliver(
+        delivery(queue, message, headers={"x-lease-wait": 2}), BuildOutcome(BuildStatus.LEASED)
+    )
+    [(copy, routing_key)] = queue.retry.published
+    assert routing_key == "index.repo.retry.10m"
+    assert copy.headers == {"x-lease-wait": 3}
+
+    queue = Queue(lease_waits=3)
+    last, _ = queue.deliver(
+        delivery(queue, message, headers={"x-lease-wait": 3}), BuildOutcome(BuildStatus.LEASED)
+    )
+    assert last.acked and queue.retry.published == []
+
+
+@pytest.mark.parametrize("value", [float("inf"), float("-inf")], ids=["inf", "-inf"])
+def test_an_infinite_lease_wait_header_counts_as_the_last_wait(value: float) -> None:
+    queue = Queue()
+
+    received, _ = queue.deliver(
+        delivery(queue, body(), redelivered=True, headers={"x-lease-wait": value}),
+        BuildOutcome(BuildStatus.LEASED),
+    )
+
+    assert received.acked and received.nacked == []
+    assert queue.retry.published == []
+
+
 def test_a_failed_retry_publish_leaves_the_delivery_to_the_broker() -> None:
     queue = Queue()
     queue.retry.fail = True
@@ -481,6 +536,91 @@ def test_a_failed_retry_publish_leaves_the_delivery_to_the_broker() -> None:
 
     assert not received.acked
     assert received.nacked == [True]
+
+
+@pytest.mark.parametrize(
+    ("outcome", "change"),
+    [
+        (BuildOutcome(BuildStatus.BUSY), {}),
+        (BuildOutcome(BuildStatus.TRANSIENT, error_code="vcs_unavailable"), {}),
+        (BuildOutcome(BuildStatus.LEASED), {"redelivered": True}),
+    ],
+    ids=["busy", "transient", "leased"],
+)
+def test_a_copy_that_fails_three_times_goes_to_the_dlq(
+    outcome: BuildOutcome, change: dict[str, Any], caplog: pytest.LogCaptureFixture
+) -> None:
+    # A deleted retry queue or exchange: each pass runs the job again, so it is bounded.
+    message = body()
+    queue = Queue()
+    queue.retry.fail = True
+
+    settled = []
+    with caplog.at_level(logging.ERROR):
+        for _ in range(3):
+            received, _ = queue.deliver(delivery(queue, message, **change), outcome)
+            assert not received.acked
+            settled.append(received.nacked)
+
+    assert settled == [[True], [True], [False]]
+    assert "routing to DLQ code_index.dlq" in caplog.text
+    assert message["message_id"] not in review_amqp._unexpected_delivery_attempts
+
+
+def test_a_failed_copy_publish_pauses_before_the_redelivery(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("app.modules.reviews.infrastructure.amqp.REQUEUE_ERROR_DELAY_SECONDS", 0.2)
+    queue = Queue()
+    queue.retry.fail = True
+
+    started = time.monotonic()
+    received, _ = queue.deliver(delivery(queue, body()), BuildOutcome(BuildStatus.BUSY))
+
+    assert time.monotonic() - started >= 0.2
+    assert received.nacked == [True]
+
+
+def _fail_once(message: dict[str, Any]) -> None:
+    queue = Queue()
+    queue.retry.fail = True
+    received, _ = queue.deliver(delivery(queue, message), BuildOutcome(BuildStatus.BUSY))
+    assert received.nacked == [True]
+    assert message["message_id"] in review_amqp._unexpected_delivery_attempts
+
+
+def test_a_confirmed_copy_forgets_the_failed_passes() -> None:
+    message = body()
+    _fail_once(message)
+    queue = Queue()
+
+    received, _ = queue.deliver(delivery(queue, message), BuildOutcome(BuildStatus.BUSY))
+
+    assert received.acked
+    assert message["message_id"] not in review_amqp._unexpected_delivery_attempts
+
+
+def test_an_acked_outcome_forgets_the_failed_passes() -> None:
+    message = body()
+    _fail_once(message)
+    queue = Queue()
+
+    received, _ = queue.deliver(delivery(queue, message), BuildOutcome(BuildStatus.PUBLISHED))
+
+    assert received.acked
+    assert message["message_id"] not in review_amqp._unexpected_delivery_attempts
+
+
+def test_a_rejected_body_forgets_the_failed_passes() -> None:
+    message = body()
+    _fail_once(message)
+    queue = Queue()
+    poison = Delivery(b"not json", queue.events, message_id=message["message_id"])
+
+    queue.deliver(poison, BuildOutcome(BuildStatus.PUBLISHED))
+
+    assert poison.nacked == [False]
+    assert message["message_id"] not in review_amqp._unexpected_delivery_attempts
 
 
 # --- unexpected errors --------------------------------------------------------------

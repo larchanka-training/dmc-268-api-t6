@@ -328,7 +328,11 @@ def test_run_worker_consumes_index_repo_beside_the_review_queues(
         transport: object = None,
     ) -> AsyncIterator[IndexConsumer]:
         composed.update(
-            settings=settings, connection=connection, delays=delays, transport=transport
+            settings=settings,
+            connection=connection,
+            session_factory=session_factory,
+            delays=delays,
+            transport=transport,
         )
         yield IndexConsumer()
 
@@ -351,6 +355,10 @@ def test_run_worker_consumes_index_repo_beside_the_review_queues(
 
     assert stopped.group_contains(_IndexStopped)
     assert consumed == ["review.run.fast", "review.publish", "index.repo"]
+    # SD §13: a SQL error of a job logs no bound parameters (paths, symbol names).
+    session_factory = composed.pop("session_factory")
+    assert isinstance(session_factory, async_sessionmaker)
+    assert session_factory.kw["bind"].sync_engine.hide_parameters is True
     assert composed == {
         "settings": settings,
         "connection": channels.connection,

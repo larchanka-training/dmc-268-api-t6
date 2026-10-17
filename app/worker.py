@@ -815,7 +815,8 @@ async def run_worker(
     """
     if settings.heartbeat_file is not None:
         reset(settings.heartbeat_file)
-    engine = create_async_engine(settings.database_url, pool_pre_ping=True)
+    # SD §13: a SQL error in a log carries no bound parameters (paths, symbol names).
+    engine = create_async_engine(settings.database_url, pool_pre_ping=True, hide_parameters=True)
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
     async with AsyncExitStack() as stack:
         stack.push_async_callback(engine.dispose)

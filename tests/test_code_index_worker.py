@@ -130,6 +130,10 @@ def test_an_empty_variable_keeps_the_default() -> None:
         # The lease outlives the deadline by at least a minute.
         ({"CODE_INDEX_LEASE_SECONDS": "959"}, "CODE_INDEX_LEASE_SECONDS"),
         ({"CODE_INDEX_SOFT_CUTOFF_SECONDS": "900"}, "CODE_INDEX_SOFT_CUTOFF_SECONDS"),
+        # At most a day: the LEASED waits follow the lease, and a lease far in the future
+        # would overflow the lease timestamp.
+        ({"CODE_INDEX_LEASE_SECONDS": "86401"}, "CODE_INDEX_LEASE_SECONDS"),
+        ({"CODE_INDEX_LEASE_SECONDS": "1000000000000"}, "CODE_INDEX_LEASE_SECONDS"),
     ],
     ids=[
         "not-a-number",
@@ -140,6 +144,8 @@ def test_an_empty_variable_keeps_the_default() -> None:
         "deadline-over-1500",
         "lease-under-deadline-plus-60",
         "soft-cutoff-not-under-deadline",
+        "lease-over-a-day",
+        "lease-far-in-the-future",
     ],
 )
 def test_an_invalid_value_fails_the_start(env: dict[str, str], variable: str) -> None:
@@ -158,6 +164,18 @@ def test_the_bounds_admit_their_edges() -> None:
 
     assert (settings.limits.deadline_seconds, settings.build.lease_seconds) == (1500, 1560)
     assert settings.build.soft_cutoff_seconds == 1499
+    assert (
+        CodeIndexSettings.from_environment({"CODE_INDEX_LEASE_SECONDS": "86400"}).lease_waits == 144
+    )
+
+
+@pytest.mark.parametrize(
+    ("lease_seconds", "waits"), [(960, 2), (1200, 2), (1201, 3), (1560, 3), (86_400, 144)]
+)
+def test_a_leased_redelivery_waits_in_the_10m_queue_until_the_lease_has_expired(
+    lease_seconds: int, waits: int
+) -> None:
+    assert CodeIndexSettings(lease_seconds=lease_seconds).lease_waits == waits
 
 
 # --- versions ---------------------------------------------------------------------
@@ -316,6 +334,7 @@ def test_the_consumer_owns_its_parser_and_its_channels(
             Worker(), cast(AbstractRobustConnection, connection), _SESSIONS, delays
         ) as consumer:
             assert consumer is not None
+            assert consumer.publisher.lease_waits == 2
             # AC3/AC8: not the review's parser, and without the review's CPU budget.
             assert [parser.kwargs for parser in parsers] == [{"attempt_cpu_seconds": None}]
             assert not parsers[0].closed
@@ -350,3 +369,21 @@ def test_without_the_github_app_the_topology_is_declared_and_nothing_consumes(
     assert len(declared) == 1 and len(connection.channels) == 1
     assert parsers == []
     assert "the index.repo consumer is disabled" in caplog.text
+
+
+def test_the_consumer_waits_for_the_lease_of_its_settings(
+    composed: tuple[list[Parser], list[Any]],
+) -> None:
+    settings = CodeIndexSettings(deadline_seconds=1500, lease_seconds=1560)
+
+    async def scenario() -> int:
+        async with code_index_worker.index_consumer(
+            Worker(code_index=settings),
+            cast(AbstractRobustConnection, FakeConnection()),
+            _SESSIONS,
+            RetryDelays(),
+        ) as consumer:
+            assert consumer is not None
+            return consumer.publisher.lease_waits
+
+    assert asyncio.run(scenario()) == 3
