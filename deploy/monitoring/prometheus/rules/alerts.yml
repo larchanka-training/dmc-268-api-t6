@@ -163,14 +163,19 @@ groups:
           summary: "Last verified PostgreSQL backup is {{ $value | humanizeDuration }} old"
           description: "No dump has passed the restore check for more than 26 hours (daily schedule)."
 
+      # The heartbeat is rewritten every loop pass (5 min). The textfile outlives a stopped or
+      # removed container, so the age of the heartbeat, not its absence, shows that nothing runs.
       - alert: PostgresBackupMissing
-        expr: absent(dmc_pg_backup_last_run_timestamp_seconds)
-        for: 2h
+        expr: |
+          time() - dmc_pg_backup_heartbeat_timestamp_seconds > 2 * 3600
+          or
+          absent(dmc_pg_backup_heartbeat_timestamp_seconds)
+        for: 10m
         labels:
           severity: critical
         annotations:
-          summary: "No PostgreSQL backup status for 2 hours"
-          description: "The pg-backup service has not written its metrics: it is down or cannot write the textfile dir."
+          summary: "The PostgreSQL backup service has not run for 2 hours"
+          description: "pg-backup is stopped, removed or cannot write the textfile dir; see docker compose -p dmc-268-monitoring ps pg-backup."
 
       - alert: PostgresBackupFailed
         expr: dmc_pg_backup_last_run_success == 0
