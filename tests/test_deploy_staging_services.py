@@ -675,6 +675,7 @@ def _release_unchanged_literal() -> str:
         ("failure", "skipped", "failure"),
         ("success", "failure", "failure"),
         ("failure", "skipped", "success"),
+        ("success", "failure", "success"),
     ],
 )
 def test_failed_forward_deploy_never_promotes_and_reports_failed_auto_rollback(
