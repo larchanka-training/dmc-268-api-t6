@@ -50,12 +50,14 @@ docker run --rm --entrypoint amtool -v "${PWD}/${MONITORING}/alertmanager/templa
   "${alertmanager_image}" template render --template.glob='/t/*.tmpl' \
   --template.text='{{ template "dmc.telegram.message" . }}' >/dev/null
 
-echo "== docker compose config (edge and ports)"
+echo "== docker compose config (edge and ports, with the off-host copy)"
 for mode in edge ports; do
   API_NETWORK=ci_default GRAFANA_ADMIN_PASSWORD=ci GRAFANA_DB_PASSWORD=ci PG_EXPORTER_PASSWORD=ci \
-    GRAFANA_ALIAS=grafana-staging \
+    PG_BACKUP_PASSWORD=ci BACKUP_DIR=/var/backups/ci GRAFANA_ALIAS=grafana-staging \
+    BACKUP_S3_ENDPOINT=https://ci.example.test BACKUP_S3_BUCKET=ci BACKUP_S3_ACCESS_KEY_ID=ci \
+    BACKUP_S3_SECRET_ACCESS_KEY=ci BACKUP_ENCRYPTION_PASSWORD_OBSCURED=ci \
     docker compose -p dmc-268-monitoring -f "${MONITORING}/compose.yml" \
-    -f "${MONITORING}/compose.${mode}.yml" config -q
+    -f "${MONITORING}/compose.${mode}.yml" -f "${MONITORING}/compose.offsite.yml" config -q
 done
 
 echo "== dashboards are JSON"

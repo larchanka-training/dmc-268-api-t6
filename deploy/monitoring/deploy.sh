@@ -2,14 +2,20 @@
 # shellcheck source-path=SCRIPTDIR
 # Deploy the monitoring stack on the host (docs/MONITORING.md). Run as root after the application
 # deploy: it reads the application's .env and joins its network, and changes neither, except the
-# two read-only PostgreSQL roles it keeps in sync (grafana_reader, metrics_exporter).
+# PostgreSQL roles it keeps in sync: grafana_reader and metrics_exporter (read-only, metadata
+# columns) and backup_agent (pg_read_all_data for pg_dump of the pg-backup service).
 #
 # Inputs (environment):
 #   API_DIR                    application dir with .env and env-file.sh (/opt/dmc-268-api-staging)
 #   MONITORING_DIR             this stack's dir, default: the directory of this script
 #   GRAFANA_ROOT_URL           public Grafana URL in edge mode (https://grafana.<APP_DOMAIN>/)
+#   BACKUP_DIR                 host dir of the PostgreSQL dumps, default /var/backups/dmc-268/<project>
 #   ALERT_TELEGRAM_BOT_TOKEN   } both set: alerts go to that Telegram chat; both empty: alerts are
 #   ALERT_TELEGRAM_CHAT_ID     } not delivered; unset: keep the previous alert config (manual run)
+#   BACKUP_S3_ENDPOINT, BACKUP_S3_BUCKET, BACKUP_S3_ACCESS_KEY_ID, BACKUP_S3_SECRET_ACCESS_KEY,
+#   BACKUP_ENCRYPTION_PASSPHRASE
+#                              all set: encrypted off-host copy of the dumps (compose.offsite.yml);
+#                              all empty: dumps stay on this host; unset: keep the previous setting
 set -euo pipefail
 set +o xtrace
 
@@ -23,8 +29,9 @@ ENV_FILE="${MONITORING_DIR}/.env"
 GRAFANA_ALIAS="${GRAFANA_ALIAS:-grafana-staging}"
 # Container name of the edge proxy (project dmc-268-edge): unambiguous on the shared network.
 CADDY_METRICS_TARGET="${CADDY_METRICS_TARGET:-dmc-268-edge-caddy-1:9180}"
-# Alertmanager and Prometheus run as nobody.
+# Alertmanager and Prometheus run as nobody; pg-backup as postgres of the alpine image.
 NOBODY_UID=65534
+POSTGRES_IMAGE_UID=70
 
 # On the host env-file.sh is uploaded next to this script; in the repository it is a sibling dir.
 if [[ -f "${SCRIPT_DIR}/env-file.sh" ]]; then
@@ -142,9 +149,91 @@ if [[ -n "${ALERT_TELEGRAM_BOT_TOKEN+set}" || -n "${ALERT_TELEGRAM_CHAT_ID+set}"
 fi
 unset ALERT_TELEGRAM_BOT_TOKEN
 
+# Off-host backup copy (docs/MONITORING.md §9), validated before anything on the host changes.
+OFFSITE_KEYS=(BACKUP_S3_ENDPOINT BACKUP_S3_BUCKET BACKUP_S3_ACCESS_KEY_ID BACKUP_S3_SECRET_ACCESS_KEY
+  BACKUP_ENCRYPTION_PASSPHRASE)
+OFFSITE_CONFIGURED=keep
+offsite_given=0
+offsite_set=0
+for name in "${OFFSITE_KEYS[@]}"; do
+  if [[ -n "${!name+set}" ]]; then offsite_given=1; fi
+  if [[ -n "${!name:-}" ]]; then offsite_set=$((offsite_set + 1)); fi
+done
+if ((offsite_given)); then
+  if ((offsite_set == 0)); then
+    OFFSITE_CONFIGURED=none
+  elif ((offsite_set == ${#OFFSITE_KEYS[@]})); then
+    # Plain HTTP only for a local S3 stand-in: the keys would cross the network in clear.
+    if [[ ! "${BACKUP_S3_ENDPOINT}" =~ ^https://[A-Za-z0-9.-]+(:[0-9]+)?/?$ ]] \
+      && ! [[ "${BACKUP_S3_ALLOW_HTTP:-}" == 1 && "${BACKUP_S3_ENDPOINT}" =~ ^http://[A-Za-z0-9.-]+(:[0-9]+)?/?$ ]]; then
+      echo "BACKUP_S3_ENDPOINT must be https://<host>, got: ${BACKUP_S3_ENDPOINT}" >&2
+      exit 1
+    fi
+    if [[ ! "${BACKUP_S3_BUCKET}" =~ ^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$ ]]; then
+      echo "BACKUP_S3_BUCKET is not a valid bucket name: ${BACKUP_S3_BUCKET}" >&2
+      exit 1
+    fi
+    for name in BACKUP_S3_ACCESS_KEY_ID BACKUP_S3_SECRET_ACCESS_KEY; do
+      if [[ ! "${!name}" =~ ^[A-Za-z0-9/+=_-]{8,128}$ ]]; then
+        echo "${name} has an unexpected format" >&2
+        exit 1
+      fi
+    done
+    if ((${#BACKUP_ENCRYPTION_PASSPHRASE} < 32)) || [[ "${BACKUP_ENCRYPTION_PASSPHRASE}" == *$'\n'* ]]; then
+      echo "BACKUP_ENCRYPTION_PASSPHRASE must be one line of at least 32 characters" >&2
+      exit 1
+    fi
+    OFFSITE_CONFIGURED=s3
+  else
+    echo "set all of ${OFFSITE_KEYS[*]}, or none" >&2
+    exit 1
+  fi
+fi
+
 GRAFANA_ADMIN_PASSWORD="$(stack_password GRAFANA_ADMIN_PASSWORD)"
 GRAFANA_DB_PASSWORD="$(stack_password GRAFANA_DB_PASSWORD)"
 PG_EXPORTER_PASSWORD="$(stack_password PG_EXPORTER_PASSWORD)"
+PG_BACKUP_PASSWORD="$(stack_password PG_BACKUP_PASSWORD)"
+# Dumps of the application database, outside every stack dir (docs/MONITORING.md §9).
+BACKUP_DIR="${BACKUP_DIR:-/var/backups/dmc-268/${API_PROJECT}}"
+
+# The crypt remote of rclone takes the passphrase in its obscured form. Obscuring is randomised, so
+# the previous value is reused while the passphrase is the same: a new value would recreate the
+# service on every deploy. The passphrase reaches rclone through stdin, never argv.
+OFFSITE_SETTINGS=(BACKUP_S3_PROVIDER BACKUP_S3_ENDPOINT BACKUP_S3_BUCKET BACKUP_S3_ACCESS_KEY_ID
+  BACKUP_S3_SECRET_ACCESS_KEY BACKUP_ENCRYPTION_PASSWORD_OBSCURED BACKUP_ENCRYPTION_PASSPHRASE_SHA256)
+previous_setting() {
+  if [[ -f "${ENV_FILE}" ]]; then read_compose_env_var "$1" "${ENV_FILE}" || true; fi
+}
+case "${OFFSITE_CONFIGURED}" in
+  s3)
+    BACKUP_S3_PROVIDER="${BACKUP_S3_PROVIDER:-Cloudflare}"
+    BACKUP_ENCRYPTION_PASSPHRASE_SHA256="$(printf '%s' "${BACKUP_ENCRYPTION_PASSPHRASE}" | sha256sum | cut -d' ' -f1)"
+    BACKUP_ENCRYPTION_PASSWORD_OBSCURED=""
+    if [[ "$(previous_setting BACKUP_ENCRYPTION_PASSPHRASE_SHA256)" == "${BACKUP_ENCRYPTION_PASSPHRASE_SHA256}" ]]; then
+      BACKUP_ENCRYPTION_PASSWORD_OBSCURED="$(previous_setting BACKUP_ENCRYPTION_PASSWORD_OBSCURED)"
+    fi
+    if [[ -z "${BACKUP_ENCRYPTION_PASSWORD_OBSCURED}" ]]; then
+      rclone_image="$(sed -n 's/^    image: \(rclone\/rclone:.*\)$/\1/p' "${MONITORING_DIR}/compose.offsite.yml")"
+      BACKUP_ENCRYPTION_PASSWORD_OBSCURED="$(printf '%s' "${BACKUP_ENCRYPTION_PASSPHRASE}" \
+        | docker run --rm -i --entrypoint rclone "${rclone_image}" obscure -)"
+    fi
+    if [[ ! "${BACKUP_ENCRYPTION_PASSWORD_OBSCURED}" =~ ^[A-Za-z0-9_-]+$ ]]; then
+      echo "failed to prepare the backup encryption key" >&2
+      exit 1
+    fi
+    echo "backups: encrypted off-host copy to bucket ${BACKUP_S3_BUCKET}"
+    ;;
+  none)
+    for name in "${OFFSITE_SETTINGS[@]}"; do unset "${name}"; done
+    echo "backups: BACKUP_S3_* are not set; dumps stay on this host only" >&2
+    ;;
+  keep)
+    for name in "${OFFSITE_SETTINGS[@]}"; do printf -v "${name}" '%s' "$(previous_setting "${name}")"; done
+    if [[ -n "${BACKUP_ENCRYPTION_PASSWORD_OBSCURED}" ]]; then OFFSITE_CONFIGURED=s3; fi
+    ;;
+esac
+unset BACKUP_ENCRYPTION_PASSPHRASE
 
 # Read-only roles. Grants are rebuilt on every deploy: REVOKE on a table also drops its column
 # privileges, so the list below is exactly what the roles can read. No column holds review
@@ -164,6 +253,9 @@ BEGIN
   IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'metrics_exporter') THEN
     CREATE ROLE metrics_exporter LOGIN;
   END IF;
+  IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'backup_agent') THEN
+    CREATE ROLE backup_agent LOGIN;
+  END IF;
 END
 \$\$;
 ALTER ROLE grafana_reader WITH LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION CONNECTION LIMIT 5;
@@ -181,12 +273,18 @@ GRANT SELECT (id, state, trigger, engine, attempt, error_code, available_at, cre
 GRANT SELECT (run_id, tool, started_at, duration_ms) ON run_actions TO grafana_reader, metrics_exporter;
 GRANT SELECT (provider, model, operation, tokens_in, tokens_out, cache_read_tokens, cost_usd, created_at)
   ON usage_events TO grafana_reader;
+-- pg-backup: reads everything for pg_dump; CREATEDB only for the scratch database of the restore
+-- check, which it creates, owns and drops. No superuser, no write access to the application data.
+ALTER ROLE backup_agent WITH LOGIN NOSUPERUSER CREATEDB NOCREATEROLE NOREPLICATION CONNECTION LIMIT 3;
+GRANT pg_read_all_data TO backup_agent;
+GRANT CONNECT ON DATABASE "${POSTGRES_DB}" TO backup_agent;
 SQL
 # Passwords through stdin, never argv; output and errors are dropped because psql would echo the
 # failing statement, password included.
 if ! run_psql >/dev/null 2>&1 <<SQL
 ALTER ROLE grafana_reader PASSWORD '${GRAFANA_DB_PASSWORD}';
 ALTER ROLE metrics_exporter PASSWORD '${PG_EXPORTER_PASSWORD}';
+ALTER ROLE backup_agent PASSWORD '${PG_BACKUP_PASSWORD}';
 SQL
 then
   echo "failed to set the passwords of the monitoring roles in PostgreSQL" >&2
@@ -196,7 +294,12 @@ fi
 umask 077
 mkdir -p "${MONITORING_DIR}/alertmanager/secrets" "${MONITORING_DIR}/prometheus/targets" \
   "${MONITORING_DIR}/textfile"
+# pg-backup writes its metrics here; node-exporter (nobody) reads them.
+chown "${POSTGRES_IMAGE_UID}:${POSTGRES_IMAGE_UID}" "${MONITORING_DIR}/textfile"
 chmod 755 "${MONITORING_DIR}/textfile"
+mkdir -p "${BACKUP_DIR}"
+chown "${POSTGRES_IMAGE_UID}:${POSTGRES_IMAGE_UID}" "${BACKUP_DIR}"
+chmod 700 "${BACKUP_DIR}"
 
 TOKEN_FILE="${MONITORING_DIR}/alertmanager/secrets/telegram_bot_token"
 AM_CONFIG="${MONITORING_DIR}/alertmanager/alertmanager.yml"
@@ -237,9 +340,9 @@ chmod 644 "${CADDY_TARGETS}.tmp"
 mv -f "${CADDY_TARGETS}.tmp" "${CADDY_TARGETS}"
 # Read by nobody (Prometheus) and grafana (uid 472) through read-only mounts.
 find "${MONITORING_DIR}/prometheus" "${MONITORING_DIR}/grafana" "${MONITORING_DIR}/postgres-exporter" \
-  "${MONITORING_DIR}/alertmanager/templates" -type d -exec chmod 755 {} +
+  "${MONITORING_DIR}/alertmanager/templates" "${MONITORING_DIR}/backup" -type d -exec chmod 755 {} +
 find "${MONITORING_DIR}/prometheus" "${MONITORING_DIR}/grafana" "${MONITORING_DIR}/postgres-exporter" \
-  "${MONITORING_DIR}/alertmanager/templates" -type f -exec chmod 644 {} +
+  "${MONITORING_DIR}/alertmanager/templates" "${MONITORING_DIR}/backup" -type f -exec chmod 644 {} +
 
 {
   printf 'API_NETWORK=%s\n' "$(escape_compose_value "${API_NETWORK}")"
@@ -248,6 +351,13 @@ find "${MONITORING_DIR}/prometheus" "${MONITORING_DIR}/grafana" "${MONITORING_DI
   printf 'GRAFANA_ADMIN_PASSWORD=%s\n' "${GRAFANA_ADMIN_PASSWORD}"
   printf 'GRAFANA_DB_PASSWORD=%s\n' "${GRAFANA_DB_PASSWORD}"
   printf 'PG_EXPORTER_PASSWORD=%s\n' "${PG_EXPORTER_PASSWORD}"
+  printf 'PG_BACKUP_PASSWORD=%s\n' "${PG_BACKUP_PASSWORD}"
+  printf 'BACKUP_DIR=%s\n' "$(escape_compose_value "${BACKUP_DIR}")"
+  if [[ "${OFFSITE_CONFIGURED}" == s3 ]]; then
+    for name in "${OFFSITE_SETTINGS[@]}"; do
+      printf '%s=%s\n' "${name}" "$(escape_compose_value "${!name}")"
+    done
+  fi
   printf 'GRAFANA_ROOT_URL=%s\n' "$(escape_compose_value "${GRAFANA_ROOT_URL}")"
   printf 'GRAFANA_COOKIE_SECURE=%s\n' "${GRAFANA_COOKIE_SECURE}"
   printf 'GRAFANA_ALIAS=%s\n' "$(escape_compose_value "${GRAFANA_ALIAS}")"
@@ -256,12 +366,17 @@ find "${MONITORING_DIR}/prometheus" "${MONITORING_DIR}/grafana" "${MONITORING_DI
   printf 'ALERTMANAGER_CONFIG_DIGEST=%s\n' "$(config_digest alertmanager)"
   printf 'GRAFANA_CONFIG_DIGEST=%s\n' "$(config_digest grafana/provisioning)"
   printf 'POSTGRES_EXPORTER_CONFIG_DIGEST=%s\n' "$(config_digest postgres-exporter)"
+  printf 'PG_BACKUP_CONFIG_DIGEST=%s\n' "$(config_digest backup)"
 } > "${ENV_FILE}.tmp"
 chmod 600 "${ENV_FILE}.tmp"
 mv -f "${ENV_FILE}.tmp" "${ENV_FILE}"
 
 COMPOSE=(docker compose -p "${COMPOSE_PROJECT}" -f "${MONITORING_DIR}/compose.yml"
   -f "${MONITORING_DIR}/compose.${DEPLOY_MODE}.yml" --env-file "${ENV_FILE}")
+# Without the off-host settings the service is left out, and --remove-orphans removes a running one.
+if [[ "${OFFSITE_CONFIGURED}" == s3 ]]; then
+  COMPOSE+=(-f "${MONITORING_DIR}/compose.offsite.yml")
+fi
 "${COMPOSE[@]}" up -d --remove-orphans --wait --wait-timeout 180
 
 # GF_SECURITY_ADMIN_PASSWORD applies only when the Grafana volume is created: keep .env the

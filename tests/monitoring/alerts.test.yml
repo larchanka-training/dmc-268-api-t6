@@ -155,3 +155,105 @@ tests:
             exp_annotations:
               summary: "Host memory available: 5%"
               description: "Less than 10% of the VPS memory has been available for 10 minutes."
+
+  # Backups: a day-old dump is fine, 26 hours is stale; a failed attempt warns at once; no
+  # status at all for 2 hours means the service is gone.
+  - interval: 1m
+    input_series:
+      - series: 'dmc_pg_backup_last_success_timestamp_seconds{job="node", instance="node-exporter:9100"}'
+        values: "0x1700"
+      - series: 'dmc_pg_backup_last_run_success{job="node", instance="node-exporter:9100"}'
+        values: "1x10 0x5 1x10"
+    alert_rule_test:
+      - eval_time: 24h
+        alertname: PostgresBackupStale
+        exp_alerts: []
+      - eval_time: 27h
+        alertname: PostgresBackupStale
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              job: node
+              instance: node-exporter:9100
+            exp_annotations:
+              summary: "Last verified PostgreSQL backup is 1d 3h 0m 0s old"
+              description: "No dump has passed the restore check for more than 26 hours (daily schedule)."
+      - eval_time: 12m
+        alertname: PostgresBackupFailed
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: node
+              instance: node-exporter:9100
+            exp_annotations:
+              summary: "The last PostgreSQL backup attempt failed"
+              description: "See docker compose -p dmc-268-monitoring logs pg-backup; the next attempt runs within an hour."
+      - eval_time: 20m
+        alertname: PostgresBackupFailed
+        exp_alerts: []
+      # No heartbeat series in this group at all: a service that never ran.
+      - eval_time: 15m
+        alertname: PostgresBackupMissing
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+            exp_annotations:
+              summary: "The PostgreSQL backup service has not run for 2 hours"
+              description: "pg-backup is stopped, removed or cannot write the textfile dir; see docker compose -p dmc-268-monitoring ps pg-backup."
+
+  # A heartbeat that stops at 30 min (container gone, its textfile left behind): no alert while it
+  # is younger than 2 h, an alert 10 minutes after.
+  - interval: 1m
+    input_series:
+      - series: 'dmc_pg_backup_heartbeat_timestamp_seconds{job="node", instance="node-exporter:9100"}'
+        values: "0+60x30 1800x200"
+    alert_rule_test:
+      - eval_time: 2h
+        alertname: PostgresBackupMissing
+        exp_alerts: []
+      - eval_time: 2h45m
+        alertname: PostgresBackupMissing
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              job: node
+              instance: node-exporter:9100
+            exp_annotations:
+              summary: "The PostgreSQL backup service has not run for 2 hours"
+              description: "pg-backup is stopped, removed or cannot write the textfile dir; see docker compose -p dmc-268-monitoring ps pg-backup."
+
+  # Off-host copy: a pass every 15 min is fine; 3 h without one is stale; failing passes warn
+  # after an hour, also when no pass ever succeeded (no success timestamp at all).
+  - interval: 1m
+    input_series:
+      - series: 'dmc_pg_backup_offsite_last_success_timestamp_seconds{job="node", instance="node-exporter:9100"}'
+        values: "0x300"
+      - series: 'dmc_pg_backup_offsite_last_run_success{job="node", instance="node-exporter:9100"}'
+        values: "0x90"
+    alert_rule_test:
+      - eval_time: 2h
+        alertname: PostgresBackupOffsiteStale
+        exp_alerts: []
+      - eval_time: 3h15m
+        alertname: PostgresBackupOffsiteStale
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              job: node
+              instance: node-exporter:9100
+            exp_annotations:
+              summary: "Off-host backup copy last succeeded 3h 15m 0s ago"
+              description: "backup-offsite has not reached the bucket for 3 hours; see docker compose -p dmc-268-monitoring logs backup-offsite."
+      - eval_time: 50m
+        alertname: PostgresBackupOffsiteFailing
+        exp_alerts: []
+      - eval_time: 61m
+        alertname: PostgresBackupOffsiteFailing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: node
+              instance: node-exporter:9100
+            exp_annotations:
+              summary: "Off-host backup copy fails"
+              description: "Every backup-offsite pass of the last hour failed (bucket, keys or network)."
