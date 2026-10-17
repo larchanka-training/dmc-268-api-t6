@@ -74,6 +74,7 @@ modules hold only `infrastructure/` code and `app/entrypoints/` does not exist y
 - `docs/BACKEND_ARCHITECTURE.md` — Clean Architecture layout in full.
 - `docs/SYSTEM_DESIGN.md` — product architecture (this repo, `main`).
 - [docs/TEST_PLAN.md](docs/TEST_PLAN.md) — canonical API/UI test strategy and benchmark methodology.
+- `docs/MONITORING.md` — monitoring stack (Prometheus, Grafana, Alertmanager), alerts and their roles.
 - `review/` — the AI reviewer product's own prompts and rule sets, not covered here.
 - `CLAUDE.md` only imports this file — edit `AGENTS.md`.
 

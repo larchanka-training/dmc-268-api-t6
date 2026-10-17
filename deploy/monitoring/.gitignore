@@ -1,0 +1,6 @@
+# Written on the host by deploy.sh (also when it runs from a checkout).
+.env
+.env.tmp
+alertmanager/alertmanager.yml
+alertmanager/secrets/
+textfile/

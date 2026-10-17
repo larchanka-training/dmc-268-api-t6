@@ -1,0 +1,182 @@
+# Monitoring stack of the API (docs/MONITORING.md): Prometheus, Alertmanager, Grafana and exporters.
+# Its own compose project next to the application stack, deployed by deploy/monitoring/deploy.sh:
+#   docker compose -p dmc-268-monitoring -f compose.yml [-f compose.edge.yml | -f compose.ports.yml]
+# It reads the stores of the application over that stack's network (API_NETWORK) and never joins
+# its lifecycle: a monitoring failure cannot fail or roll back an application deploy.
+# Images are pinned by digest like the stores of deploy/compose/staging.yml; the tag only names the
+# version, update tag and digest together.
+# Memory limits keep the stack under ~1.3 GB on the shared course VPS.
+services:
+  prometheus:
+    image: prom/prometheus:v3.15.0@sha256:efd719c99d83b060d9daefdcf00360461adf279f45ef5391f8d111892118753e
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=15d
+      - --storage.tsdb.retention.size=2GB
+    # The digest of the config dir (deploy.sh): compose recreates the container when it changes.
+    labels:
+      dmc.config-digest: ${PROMETHEUS_CONFIG_DIGEST:-none}
+    volumes:
+      # Directories, not files: a re-uploaded file gets a new inode that a file bind mount would
+      # not follow.
+      - ./prometheus:/etc/prometheus:ro
+      - prometheus-data:/prometheus
+    networks:
+      default: {}
+      api: {}
+    restart: unless-stopped
+    mem_limit: 512m
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:9090/-/ready"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    logging: &logging
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  alertmanager:
+    image: prom/alertmanager:v0.34.1@sha256:e9733bafb1bdef9b00e25a21f8f99dc26a22224bf16641ad754d1649f4c3357a
+    command:
+      - --config.file=/etc/alertmanager/alertmanager.yml
+      - --storage.path=/alertmanager
+    labels:
+      dmc.config-digest: ${ALERTMANAGER_CONFIG_DIGEST:-none}
+    # alertmanager.yml and the Telegram token file are written on the host by deploy.sh.
+    volumes:
+      - ./alertmanager:/etc/alertmanager:ro
+      - alertmanager-data:/alertmanager
+    restart: unless-stopped
+    mem_limit: 64m
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:9093/-/ready"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    logging: *logging
+
+  grafana:
+    image: grafana/grafana-oss:13.0.2@sha256:5dad0df181cb644a14e13617b913b261a54f7d4fd4510721dba420929f35bea2
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?GRAFANA_ADMIN_PASSWORD is required}
+      GF_SECURITY_COOKIE_SECURE: ${GRAFANA_COOKIE_SECURE:-false}
+      GF_SECURITY_DISABLE_GRAVATAR: "true"
+      GF_SERVER_ROOT_URL: ${GRAFANA_ROOT_URL:-http://localhost:3000/}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_ANALYTICS_CHECK_FOR_PLUGIN_UPDATES: "false"
+      GF_NEWS_NEWS_FEED_ENABLED: "false"
+      # Read by grafana/provisioning/datasources: the read-only PostgreSQL role of deploy.sh.
+      POSTGRES_DB: ${POSTGRES_DB:-app}
+      GRAFANA_DB_PASSWORD: ${GRAFANA_DB_PASSWORD:?GRAFANA_DB_PASSWORD is required}
+    labels:
+      dmc.config-digest: ${GRAFANA_CONFIG_DIGEST:-none}
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    networks:
+      default: {}
+      api: {}
+    depends_on:
+      prometheus:
+        condition: service_healthy
+    restart: unless-stopped
+    mem_limit: 256m
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:3000/api/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    logging: *logging
+
+  # Host CPU, memory, disk and load. Reads the host through read-only mounts; no host network.
+  node-exporter:
+    image: prom/node-exporter:v1.12.1@sha256:1b4e4438faca4dd7e001dd445d161a4a2091b0fededa84093b3a8dfeae1f1be0
+    command:
+      - --path.rootfs=/host
+      - --collector.filesystem.mount-points-exclude=^/(dev|proc|sys|run|var/lib/docker/.+)($$|/)
+      - --collector.textfile.directory=/textfile
+    pid: host
+    volumes:
+      - /:/host:ro
+      # Metrics files of host jobs such as the PostgreSQL backup (deploy/scripts/pg-backup.sh).
+      - ${TEXTFILE_DIR:-./textfile}:/textfile:ro
+    restart: unless-stopped
+    mem_limit: 64m
+    logging: *logging
+
+  # CPU and memory per container (api, worker, webhook-worker, stores). It reads the Docker state
+  # through the socket: it joins no network but the project one and publishes no port.
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:v0.55.1@sha256:3de2bd5203120b866d74a9b283b2ffb8ec382fbf9dc321814700c6ea6f44ec57
+    command:
+      - --docker_only=true
+      - --housekeeping_interval=30s
+      - --store_container_labels=false
+      - --whitelisted_container_labels=com.docker.compose.project,com.docker.compose.service
+      - --enable_metrics=cpu,memory,network,diskIO,oom_event
+    devices:
+      - /dev/kmsg
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+    restart: unless-stopped
+    mem_limit: 256m
+    logging: *logging
+
+  # pg_up, connections, database size and the review metrics of postgres-exporter/queries.yml,
+  # as the role metrics_exporter of deploy.sh (pg_monitor and column-level SELECT, no review content).
+  postgres-exporter:
+    image: quay.io/prometheuscommunity/postgres-exporter:v0.20.1@sha256:ac5ec343104fae0e2d84a27bb8d69b38430a11910c5382cad85d478d2bab713e
+    command:
+      - --extend.query-path=/etc/postgres-exporter/queries.yml
+      - --no-collector.stat_bgwriter
+    environment:
+      DATA_SOURCE_URI: postgres:5432/${POSTGRES_DB:-app}?sslmode=disable
+      DATA_SOURCE_USER: metrics_exporter
+      DATA_SOURCE_PASS: ${PG_EXPORTER_PASSWORD:?PG_EXPORTER_PASSWORD is required}
+    labels:
+      dmc.config-digest: ${POSTGRES_EXPORTER_CONFIG_DIGEST:-none}
+    volumes:
+      - ./postgres-exporter:/etc/postgres-exporter:ro
+    networks:
+      default: {}
+      api: {}
+    restart: unless-stopped
+    mem_limit: 64m
+    logging: *logging
+
+  redis-exporter:
+    image: oliver006/redis_exporter:v1.94.0@sha256:0842ef7110e62b40bbde2d5c11f38c6fbd99f7100c75e3866637c1b335a1eff7
+    environment:
+      REDIS_ADDR: redis://redis:6379
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-}
+    networks:
+      default: {}
+      api: {}
+    restart: unless-stopped
+    mem_limit: 32m
+    logging: *logging
+
+volumes:
+  prometheus-data:
+  alertmanager-data:
+  grafana-data:
+
+networks:
+  # The default network of the application project (<project>_default): postgres, rabbitmq, redis.
+  api:
+    name: ${API_NETWORK:?API_NETWORK is required}
+    external: true

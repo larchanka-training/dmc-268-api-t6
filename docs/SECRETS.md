@@ -158,6 +158,21 @@ worker стартует, но summary завершившегося успешн�
 | `GITLAB_TOKEN` | **да** | `worker` | токен в заголовке `PRIVATE-TOKEN`. Один токен на все проекты. Пустое значение: прогон GitLab остаётся в `publishing`, HTTP к GitLab нет |
 | `GITLAB_BASE_URL` | нет | `worker` | базовый URL API GitLab; по умолчанию `https://gitlab.com` |
 
+### Мониторинг (`deploy/monitoring`, [MONITORING.md](MONITORING.md))
+
+Стек мониторинга — отдельный compose project `dmc-268-monitoring` в `/opt/dmc-268-monitoring`; выкатывает его job `Deploy monitoring` (`deploy/monitoring/deploy.sh`).
+
+| Имя | Тип и уровень | Куда уходит | Назначение |
+|---|---|---|---|
+| `ALERT_TELEGRAM_BOT_TOKEN` | secret, Environment `staging` | файл `alertmanager/secrets/telegram_bot_token` (0400, владелец `nobody`), Alertmanager читает его через `bot_token_file` | токен бота командного канала. В конфиг, `.env` и логи не попадает |
+| `ALERT_TELEGRAM_CHAT_ID` | variable, Environment `staging` | `chat_id` в `alertmanager/alertmanager.yml` | числовой id чата (у группы — отрицательный). Задаются оба имени или ни одного: без них алерты видны в Alertmanager, но не доставляются |
+| `GRAFANA_ADMIN_PASSWORD` | генерируется на хосте | `.env` стека (0600), контейнер `grafana` | вход `admin` в Grafana. Генерируется один раз; каждый выкат синхронизирует его через `grafana cli … --password-from-stdin`. Прочитать: `ssh` на VPS, `grep GRAFANA_ADMIN_PASSWORD /opt/dmc-268-monitoring/.env` |
+| `GRAFANA_DB_PASSWORD` | генерируется на хосте | `.env` стека; роль PostgreSQL `grafana_reader` | источник данных PostgreSQL в Grafana: только чтение и только колонки метаданных (§3 MONITORING.md) |
+| `PG_EXPORTER_PASSWORD` | генерируется на хосте | `.env` стека; роль PostgreSQL `metrics_exporter` | `postgres-exporter`: `pg_monitor` и те же колонки |
+| `REDIS_PASSWORD` | копия из `<APP_DIR>/.env` | `.env` стека, контейнер `redis-exporter` | метрики Redis. Сменился пароль Redis — следующий выкат мониторинга (сразу после выката приложения) берёт новый |
+
+Пароли ролей PostgreSQL передаются в `psql` через stdin, не через argv; вывод этого вызова подавлен, потому что `psql` повторил бы упавший оператор вместе с паролем.
+
 ### Только локально у оператора
 
 CI **не** делает `terraform apply`. Эти значения в GitHub Actions не заводят.

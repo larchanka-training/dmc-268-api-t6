@@ -1,0 +1,62 @@
+# Review metrics of postgres-exporter (--extend.query-path), for the alert rules of
+# prometheus/rules/alerts.yml. The role metrics_exporter reads only the columns granted by
+# deploy/monitoring/deploy.sh: states, timestamps, tool names and durations, never review content.
+# Every query is bounded by a recent time window or an indexed state; one scrape per minute.
+
+# Runs that reached a final state in the last 15 minutes, by state (docs/PIPELINE_SPEC.md §1).
+dmc_runs_finished_15m:
+  query: |
+    SELECT state::text AS state, count(*)::float8 AS runs
+    FROM runs
+    WHERE finished_at > now() - interval '15 minutes'
+    GROUP BY state
+  metrics:
+    - state:
+        usage: LABEL
+        description: Final state of the run
+    - runs:
+        usage: GAUGE
+        description: Runs that finished in the last 15 minutes
+
+# Runs not finished yet. stale_queued: queued past available_at for 10 minutes, the condition of
+# the reconciler's T18 (docs/PIPELINE_SPEC.md §3).
+dmc_runs_active:
+  query: |
+    SELECT
+      count(*) FILTER (WHERE state = 'queued')::float8 AS queued,
+      count(*) FILTER (WHERE state IN ('running', 'publishing'))::float8 AS in_progress,
+      count(*) FILTER (
+        WHERE state = 'queued' AND available_at < now() - interval '10 minutes'
+      )::float8 AS stale_queued
+    FROM runs
+    WHERE state IN ('queued', 'running', 'publishing')
+  metrics:
+    - queued:
+        usage: GAUGE
+        description: Runs in state queued
+    - in_progress:
+        usage: GAUGE
+        description: Runs in state running or publishing
+    - stale_queued:
+        usage: GAUGE
+        description: Queued runs past available_at by more than 10 minutes
+
+# Provider calls of the LLM gateway (run_actions.tool = 'llm.call', one per generation call).
+dmc_llm_calls_15m:
+  query: |
+    SELECT
+      count(*)::float8 AS calls,
+      coalesce(percentile_cont(0.5) WITHIN GROUP (ORDER BY duration_ms), 0) / 1000.0 AS p50_seconds,
+      coalesce(percentile_cont(0.95) WITHIN GROUP (ORDER BY duration_ms), 0) / 1000.0 AS p95_seconds
+    FROM run_actions
+    WHERE tool = 'llm.call' AND started_at > now() - interval '15 minutes'
+  metrics:
+    - calls:
+        usage: GAUGE
+        description: LLM calls started in the last 15 minutes
+    - p50_seconds:
+        usage: GAUGE
+        description: Median LLM call duration over the last 15 minutes
+    - p95_seconds:
+        usage: GAUGE
+        description: 95th percentile LLM call duration over the last 15 minutes

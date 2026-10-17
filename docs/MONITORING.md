@@ -1,0 +1,167 @@
+# Мониторинг и алерты — API (команда 6)
+
+Стек мониторинга staging: метрики хоста, контейнеров, очередей, хранилищ и пайплайна ревью, дашборд Grafana и алерты в командный Telegram-канал. Это self-hosted стек, который SD §13 («Наблюдаемость») выносит в отдельную задачу. Сквозной трейсинг (OpenTelemetry/Sentry) и JSON-логи с `run_id` — следующий шаг (§8).
+
+## 1. Состав
+
+```mermaid
+flowchart LR
+  subgraph mon["compose project dmc-268-monitoring · /opt/dmc-268-monitoring"]
+    prom[Prometheus]
+    am[Alertmanager]
+    graf[Grafana]
+    node[node-exporter]
+    cadv[cAdvisor]
+    pgx[postgres-exporter]
+    rx[redis-exporter]
+  end
+  subgraph app["compose project dmc-268-api-staging"]
+    pg[(postgres)]
+    mq[(rabbitmq :15692)]
+    redis[(redis)]
+  end
+  caddy["edge Caddy :9180\n(dmc268-edge)"]
+  prom -->|scrape| node & cadv & pgx & rx & mq & caddy
+  pgx -->|metrics_exporter| pg
+  rx --> redis
+  graf -->|PromQL| prom
+  graf -->|"SQL, grafana_reader"| pg
+  prom -->|alerts| am
+  am -->|Bot API| tg["Telegram-канал команды"]
+  caddy -->|"grafana.<APP_DOMAIN>"| graf
+```
+
+| Сервис | Образ (по digest) | Лимит памяти | Что даёт |
+|---|---|---|---|
+| `prometheus` | `prom/prometheus:v3.15.0` | 512m | сбор каждые 30 с, хранение 15 дней / 2 GB, правила алертов |
+| `alertmanager` | `prom/alertmanager:v0.34.1` | 64m | группировка, повтор раз в 4 ч, сообщение о resolve, доставка в Telegram |
+| `grafana` | `grafana/grafana-oss:13.0.2` | 256m | дашборд `AI Code Reviewer — staging overview`, источники Prometheus и PostgreSQL |
+| `node-exporter` | `prom/node-exporter:v1.12.1` | 64m | CPU, память, диск, load хоста; textfile-метрики хостовых задач |
+| `cadvisor` | `gcr.io/cadvisor/cadvisor:v0.55.1` | 256m | CPU и память каждого контейнера (`api`, `worker`, `webhook-worker`, хранилища) |
+| `postgres-exporter` | `quay.io/prometheuscommunity/postgres-exporter:v0.20.1` | 64m | `pg_up`, соединения, размер БД и метрики ревью (`queries.yml`, §4) |
+| `redis-exporter` | `oliver006/redis_exporter:v1.94.0` | 32m | память, hit ratio, `redis_up` |
+
+Длину очередей отдаёт сам RabbitMQ: плагин `rabbitmq_prometheus` включён в образе `rabbitmq:4.3.6-management-alpine`, порт 15692 внутри сети проекта. RPS и коды ответов отдаёт edge-прокси Caddy (`metrics { per_host }`, порт 9180 только в сети `dmc268-edge`, [CICD.md §8.2](CICD.md#82-edge-прокси)). Очередь ревью — RabbitMQ, не Redis: Redis только кэш (SD §10).
+
+Стек — отдельный compose project. Он подключается к сети приложения `<project>_default` как к внешней и к `dmc268-edge`, но в жизненный цикл приложения не входит: его сбой не валит выкат и не запускает откат. Host-портов нет (на курсовом VPS их публикует только edge-прокси); в режиме ports (Terraform-хост) Grafana слушает только `127.0.0.1:3000`.
+
+## 2. Definition of Done → где смотреть
+
+| Требование | Панель дашборда | Источник |
+|---|---|---|
+| Latency LLM-запросов | `LLM call p95`, `LLM call latency` (p50/p95/max, 5 мин) | `run_actions` с `tool = 'llm.call'`: одна запись на фактический вызов провайдера, `duration_ms` (PIPELINE_SPEC §2) |
+| Размер очередей | `Messages waiting in review queues`, `Review queues: ready messages`, `… in work and consumers` | `rabbitmq_detailed_queue_messages_ready/unacked/consumers{queue}` |
+| RPS | `Requests per second`, `Requests per second by host` | `caddy_http_request_duration_seconds_count{host}` |
+| Алерты об ошибках в командный канал | §5 | Prometheus → Alertmanager → Telegram |
+| Время каждого шага пайплайна | `Phase duration p95`, `Phases over the range` | `run_actions.tool` + `duration_ms`: `vcs.fetch_diff`, `context.build`, `llm.call`, `review.postprocess`, `github.publish_review`, … |
+| CPU / RAM серверов и воркеров | `Host CPU`, `Host memory`, `Container CPU`, `Container memory` | node-exporter, cAdvisor (метка `container_label_com_docker_compose_service`) |
+
+Ещё на дашборде: прогоны по итоговому состоянию, failed по `error_code`, стоимость и токены LLM в час (`usage_events`), доля 5xx и p95 ответа по хосту, соединения PostgreSQL, память и hit ratio Redis.
+
+## 3. Доступ к данным приложения
+
+Задержки шагов уже лежат в трейсе прогона (`run_actions`), поэтому дашборд и алерты читают PostgreSQL напрямую, без изменений в коде. Доступ — две роли, которые `deploy.sh` создаёт и пересобирает при каждом выкате:
+
+| Роль | Кто | Права |
+|---|---|---|
+| `grafana_reader` | источник PostgreSQL в Grafana | `default_transaction_read_only`, `statement_timeout 30s`, `CONNECTION LIMIT 5`; `SELECT` только на колонки ниже |
+| `metrics_exporter` | `postgres-exporter` | `pg_monitor`, `default_transaction_read_only`, `statement_timeout 15s`, `CONNECTION LIMIT 3`; те же колонки `runs` и `run_actions` |
+
+| Таблица | Открытые колонки |
+|---|---|
+| `runs` | `id`, `state`, `trigger`, `engine`, `attempt`, `error_code`, `available_at`, `created_at`, `started_at`, `finished_at` |
+| `run_actions` | `run_id`, `tool`, `started_at`, `duration_ms` |
+| `usage_events` (только `grafana_reader`) | `provider`, `model`, `operation`, `tokens_in`, `tokens_out`, `cache_read_tokens`, `cost_usd`, `created_at` |
+
+Тела запросов и ответов (`run_actions.request/response`), `review_body`, `error_message`, диффы, находки и комментарии закрыты: каждый выкат делает `REVOKE ALL ON ALL TABLES` и выдаёт заново ровно этот список. Так соблюдается требование SD §13 о данных клиента: стек не видит кода и текстов ревью.
+
+Нагрузка: запросы ограничены окном времени, exporter опрашивается раз в минуту. У `run_actions` нет индекса по `started_at`; при 100 PR/день это тысячи строк в сутки, seq scan дешёвый. Если таблица вырастет до миллионов строк, нужен индекс `(tool, started_at)` отдельной миграцией.
+
+## 4. Метрики ревью из PostgreSQL
+
+`deploy/monitoring/postgres-exporter/queries.yml`:
+
+| Метрика | Значение |
+|---|---|
+| `dmc_runs_finished_15m_runs{state}` | прогоны, завершившиеся за 15 мин, по состоянию |
+| `dmc_runs_active_queued`, `…_in_progress`, `…_stale_queued` | незавершённые прогоны; `stale_queued` — `queued` дольше 10 мин после `available_at` (T18) |
+| `dmc_llm_calls_15m_calls`, `…_p50_seconds`, `…_p95_seconds` | вызовы LLM за 15 мин и их длительность |
+
+## 5. Алерты
+
+Правила — `deploy/monitoring/prometheus/rules/alerts.yml`, unit-тесты — `tests/monitoring/alerts.test.yml`. Сообщение: статус, окружение, severity и по строке на алерт с его именем; только числа и имена — без содержимого ревью и секретов.
+
+Два вида алертов. **Состояние** (диск, очередь без консьюмера, цель недоступна): напоминание раз в 4 ч, пока условие держится, и сообщение RESOLVED. **Событие** (метка `kind: event`: упавший прогон, новое сообщение в DLQ): уходит один раз и без RESOLVED — оно «закрывается» лишь потому, что выходит из 15-минутного окна. События за 90 с собираются в одно сообщение: прогон, исчерпавший попытки, — это и `failed`, и сообщение в `reviews.dlq` (PIPELINE_SPEC §4.4), и оба приходят вместе.
+
+| Алерт | Условие | Severity |
+|---|---|---|
+| `TargetDown` | цель не отвечает 5 мин | critical |
+| `PostgresDown` / `RedisDown` | `pg_up == 0` 2 мин / `redis_up == 0` 5 мин | critical / warning |
+| `ApiHigh5xxRate` | > 5 % ответов 5xx на `staging-api`/`staging-ui` 5 мин (при > 0.05 rps). `staging-webhook` не входит: это заглушка 503 без сервиса, вебхуки GitHub принимает `staging-api` (CICD.md §8.2) | critical |
+| `ReviewRunsFailed` | хотя бы один прогон `failed` за 15 мин; событие | warning |
+| `ReviewDeadLetters` | новые сообщения в `reviews.dlq` за 15 мин; событие. Размер DLQ (хранение 7 дней) — на панели `Review queues: ready messages` | critical |
+| `ReviewQueueBacklog` | > 20 готовых сообщений в `review.run.*`/`review.publish` 10 мин | warning |
+| `ReviewQueueWithoutConsumer` | у `review.run.fast` или `review.publish` нет консьюмера 5 мин | critical |
+| `ReviewRunsStuckInQueue` | есть `stale_queued` 5 мин | warning |
+| `LlmLatencyHigh` | p95 LLM > 60 с при ≥ 3 вызовах, 10 мин (таймаут fast — 90 с) | warning |
+| `HostMemoryLow` / `HostDiskFull` / `HostCpuHigh` | < 10 % памяти 10 мин / < 15 % диска 10 мин / > 90 % CPU 15 мин | critical / critical / warning |
+| `ContainerOomKilled` | OOM-kill в контейнере compose за 10 мин | warning |
+
+**Подключение Telegram** (один раз):
+
+1. Создать бота у `@BotFather`, добавить его в командный чат.
+2. Узнать `chat_id`: написать в чат и открыть `https://api.telegram.org/bot<token>/getUpdates` (у группы id отрицательный, `-100…`).
+3. В Environment `staging`: secret `ALERT_TELEGRAM_BOT_TOKEN`, variable `ALERT_TELEGRAM_CHAT_ID` ([SECRETS.md](SECRETS.md)).
+4. Перезапустить `Deploy monitoring` (Re-run job) или дождаться пуша в `main`.
+
+Без этих имён стек работает, алерты видны в Alertmanager, но никуда не уходят — `deploy.sh` пишет об этом в лог job. Задано только одно из двух — выкат падает до изменений на хосте.
+
+## 6. Выкат
+
+Job `Deploy monitoring` в `ci-cd.yml` запускается после успешного `Deploy staging`, под тем же lock `staging-deploy`:
+
+1. `scp` содержимого `deploy/monitoring` и `deploy/scripts/env-file.sh` в `/opt/dmc-268-monitoring`.
+2. `deploy.sh`:
+   - читает `<APP_DIR>/.env` приложения (пользователь и БД PostgreSQL, пароль Redis, режим edge/ports); проверяет сеть `<project>_default` и контейнер `postgres`;
+   - проверяет настройки Telegram, потом генерирует один раз пароли стека (`.env` 0600);
+   - создаёт и пересобирает роли PostgreSQL (§3);
+   - пишет конфиг Alertmanager и файл токена, цель Caddy для Prometheus (только в режиме edge);
+   - `docker compose -p dmc-268-monitoring up -d --wait`. Метка с хешем каталога конфигурации пересоздаёт сервис ровно тогда, когда его конфигурация изменилась;
+   - синхронизирует пароль `admin` Grafana с `.env`.
+
+Файлы на хосте: `.env` (0600), `alertmanager/alertmanager.yml`, `alertmanager/secrets/telegram_bot_token` (0400), `prometheus/targets/caddy.json`, `textfile/` (каталог textfile-метрик node-exporter). Тома: `prometheus-data`, `alertmanager-data`, `grafana-data`.
+
+Откат приложения стек не трогает. Откатить сам мониторинг — перезапустить job `Deploy monitoring` на нужном коммите или выполнить `deploy.sh` из его checkout.
+
+## 7. Доступ
+
+| Цель | Grafana | Prometheus / Alertmanager |
+|---|---|---|
+| Курсовой VPS | `https://grafana.<APP_DOMAIN>/` (staging: `https://grafana.dmc268-t6.axyi.ru/`), пользователь `admin`, пароль — `GRAFANA_ADMIN_PASSWORD` из `/opt/dmc-268-monitoring/.env` | без внешнего доступа: `docker compose -p dmc-268-monitoring exec prometheus wget -qO- localhost:9090/api/v1/alerts` |
+| Terraform-хост | SSH-туннель: `ssh -L 3000:127.0.0.1:3000 …`, затем `http://localhost:3000/` | то же |
+
+Grafana — на своём хосте `grafana.<APP_DOMAIN>` (A-запись на VPS). Регистрация и анонимный доступ выключены, cookie `Secure`, `/metrics` Grafana (он без логина) edge отвечает 404 — Prometheus читает его внутри docker-сети, дашборды и источники данных доступны в UI только для чтения: изменения идут через PR в `deploy/monitoring/grafana`. Имена `prometheus.<APP_DOMAIN>` и `victoria-metrics.<APP_DOMAIN>` тоже указывают на VPS, но сайта в Caddyfile не получают: у Prometheus нет аутентификации, запросы к нему — через Explore в Grafana; VictoriaMetrics в стеке нет.
+
+## 8. Ограничения и следующие шаги
+
+| Что | Статус |
+|---|---|
+| Сквозной трейсинг (OpenTelemetry/Sentry), JSON-логи с `run_id` | отдельный PR после стабилизации пайплайна (договорённость команды). Нужен выбор бэкенда: Sentry SaaS (аккаунт и DSN), GlitchTip или Grafana Tempo; self-hosted Sentry на общий VPS не помещается |
+| Бэкапы PostgreSQL | отдельный PR (`deploy/scripts/pg-backup.sh`), метрики — через `textfile/` node-exporter |
+| Redis | бэкапить нечего: на staging он без тома и без персистентности (`save ""`, `appendonly no`), это кэш (SD §10) |
+| Метрики приложения (`/metrics` FastAPI, `X-RateLimit-Remaining` GitHub) | нужен код и зависимость; пока RPS и коды — с edge-прокси, пайплайн — из `run_actions` |
+| prod | prod-выката нет; `environment` в метках — `staging` |
+| cAdvisor | читает состояние Docker через `/var/run` (сокеты Docker и containerd), что равносильно root на хосте; сетей, кроме сети проекта, и портов у него нет |
+
+## 9. Проверка
+
+```bash
+scripts/validate_monitoring.sh   # promtool, amtool, compose config, JSON дашбордов (как в CI)
+uv run pytest tests/test_deploy_monitoring.py
+```
+
+Локально против `docker compose` из корня репозитория: каталог с `.env` приложения, где `DEPLOY_MODE=ports`, и `API_DIR`, указывающий на него. Имя каталога должно совпадать с compose project приложения (сеть `<project>_default`). В Docker Desktop cAdvisor не видит сокеты через `/var/run`: для локального запуска добавьте override с `/var/run/docker.sock` и `/run/containerd/containerd.sock`.
+
+```bash
+API_DIR=/path/to/<project> deploy/monitoring/deploy.sh
+```

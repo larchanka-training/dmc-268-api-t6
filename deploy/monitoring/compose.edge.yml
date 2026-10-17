@@ -1,0 +1,22 @@
+# Shared course VPS: Grafana joins the edge proxy network as GRAFANA_ALIAS (grafana-staging), served
+# by Caddy at https://grafana.<APP_DOMAIN>/; Prometheus joins it to scrape the request
+# metrics of Caddy (deploy/edge/Caddyfile, port 9180). No host port.
+services:
+  grafana:
+    networks:
+      default: {}
+      api: {}
+      edge:
+        aliases:
+          - ${GRAFANA_ALIAS:?GRAFANA_ALIAS is required}
+
+  prometheus:
+    networks:
+      default: {}
+      api: {}
+      edge: {}
+
+networks:
+  edge:
+    name: dmc268-edge
+    external: true

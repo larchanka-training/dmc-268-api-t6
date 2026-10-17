@@ -1,0 +1,35 @@
+# Data sources of the monitoring Grafana, provisioned on every start. Fixed uids: the dashboards in
+# grafana/dashboards refer to them. Grafana expands $VARS from its container environment.
+apiVersion: 1
+
+prune: true
+
+datasources:
+  - name: Prometheus
+    uid: prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: false
+    jsonData:
+      timeInterval: 30s
+
+  # Pipeline timings straight from the trace (run_actions, docs/PIPELINE_SPEC.md §2) as the
+  # read-only role grafana_reader of deploy/monitoring/deploy.sh: column-level SELECT on run
+  # states, tool names, durations and usage costs, never request/response bodies or diffs.
+  - name: PostgreSQL
+    uid: postgres
+    type: grafana-postgresql-datasource
+    access: proxy
+    url: postgres:5432
+    user: grafana_reader
+    editable: false
+    jsonData:
+      database: $POSTGRES_DB
+      sslmode: disable
+      postgresVersion: 1700
+      maxOpenConns: 2
+      maxIdleConns: 1
+    secureJsonData:
+      password: $GRAFANA_DB_PASSWORD

@@ -5,6 +5,17 @@
 		include http.log.error
 		level DEBUG
 	}
+	# Request metrics for the monitoring stack (deploy/monitoring): RPS, status codes and latency
+	# per site address. per_host adds the host label, so staging and prod stay apart.
+	metrics {
+		per_host
+	}
+}
+
+# Prometheus endpoint for the monitoring stack, plain HTTP on the edge network only: no host port
+# publishes 9180 (deploy/edge/compose.yml), and the Caddy admin API stays on localhost.
+http://:9180 {
+	metrics /metrics
 }
 
 # Edge routes on the shared course VPS, one hostname per service and environment under
@@ -32,6 +43,22 @@
 staging-api.{$APP_DOMAIN} {
 	import hsts
 	reverse_proxy api-staging:8000
+}
+
+# Grafana of the monitoring stack (deploy/monitoring, docs/MONITORING.md) with its own login.
+# The names prometheus.* and victoria-metrics.* also point here but get no site: Prometheus has
+# no authentication and stays on the docker networks, VictoriaMetrics is not used.
+grafana.{$APP_DOMAIN} {
+	import hsts
+	# Grafana serves /metrics without login (Prometheus scrapes it inside the docker network): its
+	# version, plugins and login counters stay off the internet.
+	@metrics path /metrics /metrics/*
+	handle @metrics {
+		respond 404
+	}
+	handle {
+		reverse_proxy grafana-staging:3000
+	}
 }
 
 api.{$APP_DOMAIN} {
