@@ -143,11 +143,6 @@ class CodeIndexSettings:
         )
 
     @property
-    def lease_waits(self) -> int:
-        """The waits of a LEASED redelivery in the 10m queue that outlast the lease."""
-        return lease_waits(self.lease_seconds)
-
-    @property
     def build(self) -> IndexBuildSettings:
         return IndexBuildSettings(
             admission=IndexAdmission(
@@ -295,7 +290,9 @@ async def index_consumer(
             yield IndexConsumer(
                 await consuming.get_queue(QUEUE, ensure=False),
                 build,
-                await IndexQueuePublisher.open(channel, delays, lease_waits=code_index.lease_waits),
+                await IndexQueuePublisher.open(
+                    channel, delays, lease_waits=lease_waits(code_index.lease_seconds, delays.long)
+                ),
             )
         finally:
             await parser.aclose()

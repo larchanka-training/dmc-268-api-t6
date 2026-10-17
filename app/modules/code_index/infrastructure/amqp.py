@@ -19,8 +19,9 @@ picks the queue action:
 
 A copy is always confirmed before the original is acked. A copy that is not confirmed
 leaves the original to the broker (`nack(requeue=True)`) after the pause of the
-unexpected-error path; its passes share that local count, and the third goes to
-`code_index.dlq`, since each pass runs the job again.
+unexpected-error path. One count, `max(x-attempt, local) + 1`, covers such passes and
+the unexpected errors, and the third counted pass goes to `code_index.dlq`, since each
+pass runs the job again.
 """
 
 from __future__ import annotations
@@ -30,7 +31,7 @@ import json
 import logging
 import math
 from collections.abc import Awaitable, Callable
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
 from uuid import UUID, uuid5
 
@@ -70,9 +71,10 @@ def retry_queue(delay_key: str) -> str:
     return f"{QUEUE}.retry.{delay_key}"
 
 
-def lease_waits(lease_seconds: int) -> int:
-    """How many waits in the 10m queue outlast a lease: two for the default 1200 s."""
-    return math.ceil(lease_seconds / RetryDelays().long.total_seconds())
+def lease_waits(lease_seconds: int, long: timedelta) -> int:
+    """How many turns of the 10m queue, whose TTL is `long`, outlast a lease: two for the
+    default 1200 s and 10 minutes."""
+    return math.ceil(lease_seconds / long.total_seconds())
 
 
 def message_id(repository_id: UUID, generation: int, requested_at: str) -> UUID:
@@ -193,7 +195,7 @@ class IndexQueuePublisher:
         self._index = index
         self._retry = retry
         self.delays = delays
-        # The waits of a LEASED redelivery in the 10m queue (`lease_waits()` of the lease).
+        # The budget of waits of a LEASED redelivery in the 10m queue (`lease_waits()`).
         self.lease_waits = lease_waits
 
     @classmethod
@@ -249,7 +251,8 @@ def _decode(message: AbstractIncomingMessage) -> IndexRepoMessage | None:
     return decoded
 
 
-def _lease_waits(message: AbstractIncomingMessage, maximum: int) -> int:
+def _waits_spent(message: AbstractIncomingMessage, budget: int) -> int:
+    """The waits for a lease this delivery has already spent (`x-lease-wait`)."""
     headers = getattr(message, "headers", None) or {}
     try:
         return int(headers.get(LEASE_WAIT_HEADER, 0))
@@ -261,7 +264,7 @@ def _lease_waits(message: AbstractIncomingMessage, maximum: int) -> int:
             message.message_id,
         )
         # An infinite double: the waits are over.
-        return maximum if isinstance(error, OverflowError) else 0
+        return budget if isinstance(error, OverflowError) else 0
 
 
 def _next_delivery(
@@ -278,10 +281,10 @@ def _next_delivery(
         retry = decoded.model_copy(update={"attempt": decoded.attempt + 1})
         return retry, retry_delay_key(decoded.attempt, outcome, publisher.delays), None
     if outcome.status is BuildStatus.LEASED:
-        maximum = publisher.lease_waits
-        waits = _lease_waits(message, maximum)
-        if (getattr(message, "redelivered", False) or waits > 0) and waits < maximum:
-            return decoded, "10m", {LEASE_WAIT_HEADER: waits + 1}
+        budget = publisher.lease_waits
+        spent = _waits_spent(message, budget)
+        if (getattr(message, "redelivered", False) or spent > 0) and spent < budget:
+            return decoded, "10m", {LEASE_WAIT_HEADER: spent + 1}
     return None
 
 
