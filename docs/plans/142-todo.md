@@ -685,7 +685,7 @@ Tests first: validation of `CodeIndexSettings` and the limits digest.
 **Acceptance criteria:**
 
 - [ ] Every default equals the plan's table; the bounds (deadline ≤1500, lease ≥ deadline
-  + 60, soft cutoff < deadline) fail startup when violated.
+  + 60, lease ≤ 86400, soft cutoff < deadline) fail startup when violated.
 - [ ] AC3/AC8: the indexer has its own `SubprocessSourceParser` instance (the same
   extractor), so reviews never queue behind index jobs.
 
@@ -795,9 +795,8 @@ their files and comments in each open PR that touches the edited docs (planned f
   - #133 (TEST_PLAN:44): https://github.com/larchanka-training/dmc-268-api-t6/pull/133#issuecomment-6225259343
   - #124 (SD): https://github.com/larchanka-training/dmc-268-api-t6/pull/124#issuecomment-6225259591
   - #155 (SD): https://github.com/larchanka-training/dmc-268-api-t6/pull/155#issuecomment-6225259869
-  - opened after these comments and touching the edited docs, not commented yet: #180
-    (PIPELINE_SPEC, SD, TEST_PLAN) and #181 (PIPELINE_SPEC); none of their sections is
-    edited here.
+  - #180 (PIPELINE_SPEC, SD, TEST_PLAN; opened after the comments above): https://github.com/larchanka-training/dmc-268-api-t6/pull/180#issuecomment-6226804931
+  - #181 (PIPELINE_SPEC; opened after the comments above): https://github.com/larchanka-training/dmc-268-api-t6/pull/181#issuecomment-6226805195
 - [ ] Each documented queue argument, delay, limit and outcome matches the code of Tasks
   16–22.
 

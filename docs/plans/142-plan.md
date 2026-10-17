@@ -555,7 +555,7 @@ The defaults live in code; an invalid value fails startup.
 | --- | --- |
 | `CODE_INDEX_MAX_CONCURRENT` / `_PER_INSTALLATION` | 2 / 1 |
 | `CODE_INDEX_DEADLINE_SECONDS` | 900 (≤1500, below `consumer_timeout`) |
-| `CODE_INDEX_LEASE_SECONDS` | 1200 (≥ deadline + 60) |
+| `CODE_INDEX_LEASE_SECONDS` | 1200 (≥ deadline + 60, ≤ 86400) |
 | `CODE_INDEX_SOFT_CUTOFF_SECONDS` | 300 (< deadline) |
 | `CODE_INDEX_DISCARD_BATCH_ROWS` | 10000 |
 | `CODE_INDEX_MAX_DOWNLOAD_BYTES` | 104857600 |
