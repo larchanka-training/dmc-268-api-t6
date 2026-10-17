@@ -493,6 +493,51 @@ def test_check_run_gateway_creates_once_then_updates_the_same_check_run() -> Non
     assert requests[3][2]["conclusion"] == "neutral"
 
 
+def _check_run_bodies(details_url: str | None) -> dict[str, Any]:
+    """Create then update one check-run; return the POST and PATCH bodies by method."""
+    bodies: dict[str, Any] = {}
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET":
+            runs = [{"id": 31, "external_id": str(RUN)}] if "POST" in bodies else []
+            return httpx.Response(200, json={"total_count": len(runs), "check_runs": runs})
+        bodies[request.method] = _json(request)
+        return httpx.Response(201 if request.method == "POST" else 200, json={"id": 31})
+
+    gateway = GitHubCheckRunGateway(
+        client=httpx.AsyncClient(
+            base_url="https://api.github.test", transport=httpx.MockTransport(respond)
+        ),
+        token_provider=_Tokens(),
+    )
+    target = CheckRunTarget(17, "octo/repo", HEAD, RUN)
+    for view in (
+        CheckRunView("in_progress", None, "t", "попытка 1 из 3", details_url=details_url),
+        CheckRunView("completed", "neutral", "t", "done", details_url=details_url),
+    ):
+        asyncio.run(gateway.upsert(target, view, checkpoint=provider_checkpoint))
+    assert set(bodies) == {"POST", "PATCH"}
+    return bodies
+
+
+def test_check_run_gateway_sends_the_run_link_as_details_url_on_create_and_update() -> None:
+    bodies = _check_run_bodies(f"https://review.example/runs/{RUN}")
+
+    assert bodies["POST"]["details_url"] == (
+        "https://review.example/runs/11111111-1111-1111-1111-111111111111"
+    )
+    assert bodies["PATCH"]["details_url"] == (
+        "https://review.example/runs/11111111-1111-1111-1111-111111111111"
+    )
+
+
+def test_check_run_gateway_omits_details_url_without_a_run_link() -> None:
+    bodies = _check_run_bodies(None)
+
+    assert "details_url" not in bodies["POST"]
+    assert "details_url" not in bodies["PATCH"]
+
+
 class _Tokens:
     async def get_installation_access_token(self, installation_external_id: int) -> str:
         assert installation_external_id == 17
