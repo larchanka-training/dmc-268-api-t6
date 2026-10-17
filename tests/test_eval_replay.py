@@ -458,7 +458,7 @@ def _record_with_digests(root: Path, repo: Path) -> tuple[Path, Path]:
     rule.write_text('{"rules": []}\n')
     static_paths = static_input_paths(
         "review/prompts/review.system.v1.md",
-        ["review/rules/default-backend.v1.json", "review/rules/schema.json"],
+        ["review/rules/default-backend.v1.json"],
     )
     for relative in static_paths:
         path = repo / relative
@@ -814,10 +814,9 @@ def test_corpus_digest_rejects_symlinked_preimage_directory(tmp_path: Path) -> N
     [
         "app/common/application/languages.py",
         "review/schemas/review-output.schema.json",
-        "review/rules/schema.json",
     ],
 )
-def test_replay_warns_on_request_shape_or_rule_schema_edit(tmp_path: Path, changed: str) -> None:
+def test_replay_warns_on_request_shape_or_output_schema_edit(tmp_path: Path, changed: str) -> None:
     root = fixture_root(tmp_path)
     repo = tmp_path / "repo"
     _record_with_digests(root, repo)
