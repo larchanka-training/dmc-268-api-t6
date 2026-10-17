@@ -88,6 +88,7 @@ async def seed_archive(factory: async_sessionmaker[AsyncSession]) -> None:
             ),
             {"id": INSTALL_A},
         )
+        # Three non-default #149/#145 settings below: inherited by other files using seed_archive.
         await session.execute(
             text(
                 "UPDATE repositories SET enabled=false, installation_available=false, "
@@ -709,16 +710,17 @@ def test_existing_target_repository_is_not_replaced_or_merged_with_archive(
                     ),
                     {"id": target_repo, "installation": UUID(int=11310)},
                 )
-            snapshot = text(
+            select_rows = text(
                 "SELECT id, to_jsonb(r) FROM repositories r WHERE id IN (:archive, :target)"
             )
             ids = {"archive": REPO_A, "target": target_repo}
             async with factory() as session:
-                before = {row[0]: row[1] for row in await session.execute(snapshot, ids)}
+                before = {row[0]: row[1] for row in await session.execute(select_rows, ids)}
+            # [True] returns early at rebinding L77-78; only [False] reaches the loop guard.
             assert await apply(factory, FreshGitHub()) == (target_workspace,)
             async with factory() as session:
                 # Whole rows, every column: neither side is replaced, merged or reset.
-                after = {row[0]: row[1] for row in await session.execute(snapshot, ids)}
+                after = {row[0]: row[1] for row in await session.execute(select_rows, ids)}
                 assert after == before
                 assert {
                     key: after[REPO_A][key]
