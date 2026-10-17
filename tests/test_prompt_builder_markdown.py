@@ -20,6 +20,7 @@ from app.modules.reviews.application.prompt_builder import (
     PullRequestMeta,
     RepoConventions,
     ReviewContext,
+    file_block_id,
 )
 
 
@@ -214,9 +215,65 @@ def test_prompt_builder_builds_call_manifest() -> None:
     assert rules_block.end_line == 2
     assert rules_block.shown_line_count == 2
 
-    diff_block = manifest.get_block("file-app-util-py")
+    diff_block = manifest.get_block(file_block_id("app/util.py"))
     assert diff_block is not None
     assert diff_block.source_role == "diff"
     assert diff_block.path == "app/util.py"
     assert diff_block.start_line == 1
     assert diff_block.end_line == 2
+
+
+def test_file_block_id_collision_prevention() -> None:
+    id_1 = file_block_id("app/a_b.py")
+    id_2 = file_block_id("app/a/b.py")
+    id_3 = file_block_id("a.b.py")
+    id_4 = file_block_id("a-b.py")
+
+    assert id_1 != id_2
+    assert id_3 != id_4
+    assert id_1.startswith("file-app-a-b-py-")
+    assert id_2.startswith("file-app-a-b-py-")
+
+    snapshot = make_test_snapshot()
+    context = ReviewContext(
+        system="SYSTEM",
+        rules=(),
+        agents_md=None,
+        conventions=RepoConventions(key_patterns=(), recommendations=()),
+        pr_meta=PullRequestMeta(
+            title="PR",
+            description=None,
+            author="author",
+            source_branch="b",
+            target_branch="main",
+            labels=(),
+            files_changed=2,
+            lines_added=2,
+            lines_removed=0,
+            is_draft=False,
+            is_fork=False,
+        ),
+        changed_files=(
+            ChangedFile(
+                path="app/a_b.py",
+                status="added",
+                lines=(DiffLine(number=1, type="added", content="x = 1"),),
+            ),
+            ChangedFile(
+                path="app/a/b.py",
+                status="added",
+                lines=(DiffLine(number=1, type="added", content="y = 2"),),
+            ),
+        ),
+        omitted_files=(),
+        policy_snapshot=snapshot,
+    )
+    builder = PromptBuilder()
+    manifest = builder.build_manifest(context, call_id=uuid.uuid4(), stage="review")
+
+    block_1 = manifest.get_block(id_1)
+    block_2 = manifest.get_block(id_2)
+
+    assert block_1 is not None and block_1.path == "app/a_b.py"
+    assert block_2 is not None and block_2.path == "app/a/b.py"
+    assert block_1.block_id != block_2.block_id

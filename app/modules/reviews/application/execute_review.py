@@ -10,6 +10,8 @@ from dataclasses import dataclass
 from typing import Protocol
 from uuid import UUID
 
+from pydantic import ValidationError
+
 from app.modules.reviews.application.conventions import GeneratedConventions
 from app.modules.reviews.application.policy_errors import PolicyError, PolicyErrorCode
 from app.modules.reviews.application.policy_snapshot import PolicySnapshot
@@ -217,29 +219,39 @@ class ExecuteReviewRun:
             # Zero candidates: Reflection verifier is skipped (0 calls)
             return model_output
 
+        if len(raw_findings) > 10:
+            raise InvalidReviewOutput("Draft review exceeded maximum of 10 findings")
+
         reviewer_manifest = PromptBuilder().build_manifest(
             context, call_id=uuid.uuid4(), stage="review"
         )
         candidates: list[CandidateFindingItem] = []
         for idx, item in enumerate(raw_findings):
             cand_id = str(uuid.uuid4())
-            if isinstance(item, ReviewFindingV2):
-                finding = item
-            elif isinstance(item, dict):
-                if context.policy_snapshot is not None and "evidence_refs" not in item:
+            try:
+                if isinstance(item, ReviewFindingV2):
+                    finding = item
+                elif isinstance(item, dict):
+                    if context.policy_snapshot is not None and "evidence_refs" not in item:
+                        raise InvalidReviewOutput(
+                            f"Candidate finding at index {idx} missing required evidence_refs"
+                        )
+                    finding = ReviewFindingV2.model_validate(item)
+                elif hasattr(item, "model_dump"):
+                    d = item.model_dump()
+                    if context.policy_snapshot is not None and "evidence_refs" not in d:
+                        raise InvalidReviewOutput(
+                            f"Candidate finding at index {idx} missing required evidence_refs"
+                        )
+                    finding = ReviewFindingV2.model_validate(d)
+                else:
                     raise InvalidReviewOutput(
-                        f"Candidate finding at index {idx} missing required evidence_refs"
+                        f"Unsupported finding type in draft review: {type(item)}"
                     )
-                finding = ReviewFindingV2.model_validate(item)
-            elif hasattr(item, "model_dump"):
-                d = item.model_dump()
-                if context.policy_snapshot is not None and "evidence_refs" not in d:
-                    raise InvalidReviewOutput(
-                        f"Candidate finding at index {idx} missing required evidence_refs"
-                    )
-                finding = ReviewFindingV2.model_validate(d)
-            else:
-                raise InvalidReviewOutput(f"Unsupported finding type in draft review: {type(item)}")
+            except (ValidationError, ValueError) as err:
+                raise InvalidReviewOutput(
+                    f"Malformed candidate finding at index {idx}: {err}"
+                ) from err
 
             valid_attr, attr_err = validate_v2_attribution(finding, reviewer_manifest)
             if not valid_attr:
@@ -263,23 +275,41 @@ class ExecuteReviewRun:
 
         data["findings"] = [cand.finding.model_dump() for cand in supported]
 
-        # Cleansing: never leak unverified defects through the summary
-        if not supported:
+        # Cleansing: never leak unverified defects or praise through summary (CONTEXT §8.2)
+        if len(supported) < len(candidates):
             orig_done_well = "The proposed changes look clean and well-structured."
             if isinstance(data.get("summary"), dict):
                 dw = data["summary"].get("done_well")
                 if isinstance(dw, str) and dw:
                     orig_done_well = dw
-            data["summary"] = {
-                "problem": "No verified issues were found in the provided changes.",
-                "done_well": orig_done_well,
-                "effort": "none",
-            }
-        elif len(supported) < len(candidates) and isinstance(data.get("summary"), dict):
-            first_title = supported[0].finding.title
-            issue_word = "issue" if len(supported) == 1 else "issues"
-            data["summary"]["problem"] = (
-                f"Identified {len(supported)} verified {issue_word}: {first_title}."
-            )
+
+            severities = {cand.finding.severity for cand in supported}
+            if "critical" in severities:
+                effort = "large"
+            elif "high" in severities:
+                effort = "medium"
+            elif "medium" in severities or "low" in severities:
+                effort = "small"
+            else:
+                effort = "none"
+
+            if not supported:
+                data["summary"] = {
+                    "problem": "No verified issues were found in the provided changes.",
+                    "done_well": orig_done_well,
+                    "effort": "none",
+                }
+            else:
+                categories = sorted({cand.finding.category for cand in supported})
+                cat_desc = ", ".join(categories)
+                issue_word = "issue" if len(supported) == 1 else "issues"
+                data["summary"] = {
+                    "problem": (
+                        f"Identified {len(supported)} verified {issue_word} ({cat_desc}) "
+                        "in the reviewed changes."
+                    ),
+                    "done_well": orig_done_well,
+                    "effort": effort,
+                }
 
         return data

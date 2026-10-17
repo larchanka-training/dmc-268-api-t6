@@ -132,7 +132,7 @@ class RequirementRef(BaseModel):
 
 
 ALLOWED_V2_RULE_NAMES = frozenset({".review/rules.md", "AGENTS.md"})
-_SERVICE_DEFAULTS_ID_RE = re.compile(r"^[a-zA-Z0-9_\-]+$")
+_SERVICE_DEFAULTS_ID_RE = re.compile(r"\A[a-zA-Z0-9_\-]+\Z")
 
 
 class ReviewFindingV2(BaseModel):
@@ -166,7 +166,7 @@ class ReviewFindingV2(BaseModel):
                 pass
             elif self.rule_name.startswith("service-defaults:"):
                 rule_id = self.rule_name.removeprefix("service-defaults:")
-                if not rule_id or not _SERVICE_DEFAULTS_ID_RE.match(rule_id):
+                if not rule_id or not _SERVICE_DEFAULTS_ID_RE.fullmatch(rule_id):
                     raise ValueError(
                         "rule_name format for service-defaults must be 'service-defaults:<ID>' "
                         "where <ID> contains only letters, digits, underscores, or hyphens"
@@ -221,6 +221,13 @@ def validate_v2_attribution(
             return (
                 False,
                 "rule_name is 'AGENTS.md' but no project_conventions_document in manifest",
+            )
+    elif finding.rule_name and finding.rule_name.startswith("service-defaults:"):
+        has_defaults = any(b.source_role == "service_defaults" for b in manifest.blocks)
+        if not has_defaults:
+            return (
+                False,
+                f"rule_name is '{finding.rule_name}' but no service_defaults in manifest",
             )
 
     return True, None

@@ -18,6 +18,7 @@ from xml.sax.saxutils import escape
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
+from app.modules.reviews.application.context_provenance import SourceRole
 from app.modules.reviews.application.policy_errors import PolicyError, PolicyErrorCode
 from app.modules.reviews.application.policy_snapshot import (
     CallManifest,
@@ -149,14 +150,13 @@ class VerifierPromptBuilder:
         # Check prompt checksum if snapshot binds verifier prompt
         if context.policy_snapshot is not None:
             expected_checksum = context.policy_snapshot.prompt_bindings.verifier_checksum
-            if expected_checksum:
-                actual_checksum = sha256(self._raw_prompt.encode("utf-8")).hexdigest()
-                if actual_checksum != expected_checksum:
-                    raise PolicyError(
-                        PolicyErrorCode.SNAPSHOT_INTEGRITY_ERROR,
-                        f"Verifier prompt checksum mismatch: expected {expected_checksum}, "
-                        f"got {actual_checksum}",
-                    )
+            actual_checksum = sha256(self._raw_prompt.encode("utf-8")).hexdigest()
+            if not expected_checksum or actual_checksum != expected_checksum:
+                raise PolicyError(
+                    PolicyErrorCode.SNAPSHOT_INTEGRITY_ERROR,
+                    f"Verifier prompt checksum mismatch: expected {expected_checksum!r}, "
+                    f"got {actual_checksum!r}",
+                )
 
         builder = PromptBuilder()
         prompt_builder_manifest = builder.build_manifest(context, call_id=call_id, stage="verifier")
@@ -190,10 +190,14 @@ class VerifierPromptBuilder:
                 if f.rule_name is not None
                 else ""
             )
+            start_attr = f'start_line="{f.start_line}" ' if f.start_line is not None else ""
+            category_attr = f'category="{_attribute(f.category)}" '
             cand_xml_list.append(
                 f'<candidate candidate_id="{_attribute(cand.candidate_id)}" '
                 f'path="{_attribute(f.path)}" '
+                f"{start_attr}"
                 f'line="{f.line}" '
+                f"{category_attr}"
                 f'severity="{_attribute(f.severity)}">\n'
                 f"<title>{_text(f.title)}</title>\n"
                 f"<body>{_text(f.body)}</body>\n"
@@ -205,7 +209,7 @@ class VerifierPromptBuilder:
             candidate_blocks.append(
                 ManifestBlock(
                     block_id=cand.candidate_id,
-                    source_role="candidate",
+                    source_role=SourceRole.CANDIDATE,
                     source_kind="candidate_finding",
                     path=f.path,
                     start_line=start_l,
@@ -277,20 +281,31 @@ class ReflectionPass:
             )
         except TimeoutError as exc:
             raise VerificationUnavailableError("Verifier model timed out") from exc
+        except (
+            VerificationInvalidOutputError,
+            VerificationUnavailableError,
+            PolicyError,
+            RunFailure,
+        ):
+            raise
         except Exception as exc:
-            raise VerificationUnavailableError(f"Verifier model call failed: {exc}") from exc
+            if hasattr(exc, "error_code"):
+                raise
+            raise VerificationUnavailableError("Verifier model call failed") from exc
 
         try:
             if isinstance(raw_output, (str, bytes)):
                 parsed = VerificationOutput.model_validate_json(raw_output)
-            elif isinstance(raw_output, dict):
+            elif isinstance(raw_output, Mapping):
                 parsed = VerificationOutput.model_validate(raw_output)
             else:
                 raise VerificationInvalidOutputError(
                     f"Unexpected verifier output type: {type(raw_output)}"
                 )
         except (ValidationError, ValueError, json.JSONDecodeError) as exc:
-            raise VerificationInvalidOutputError(f"Malformed verifier response: {exc}") from exc
+            raise VerificationInvalidOutputError(
+                "Malformed verifier response schema or JSON"
+            ) from exc
 
         # Ensure exact 1:1 match of decisions to candidate IDs
         cand_by_id = {c.candidate_id: c for c in candidates}
@@ -298,7 +313,8 @@ class ReflectionPass:
 
         if len(parsed.decisions) != len(candidates) or decision_ids != set(cand_by_id.keys()):
             raise VerificationInvalidOutputError(
-                f"Verifier returned decisions for {decision_ids}, expected {set(cand_by_id.keys())}"
+                f"Verifier returned decisions for {len(decision_ids)} candidates, "
+                f"expected {len(cand_by_id)}"
             )
 
         # Build allowed check IDs for service defaults
@@ -326,6 +342,11 @@ class ReflectionPass:
                     raise VerificationInvalidOutputError(
                         f"Decision {decision.candidate_id} evidence_ref {ref.block_id} "
                         f"has non-code role '{block.source_role}'"
+                    )
+                if block.source_role == "diff" and block.path != cand.finding.path:
+                    raise VerificationInvalidOutputError(
+                        f"Decision {decision.candidate_id} evidence_ref {ref.block_id} "
+                        f"path '{block.path}' does not match candidate path '{cand.finding.path}'"
                     )
                 if not manifest.is_range_shown(ref.block_id, ref.start_line, ref.end_line):
                     raise VerificationInvalidOutputError(
@@ -365,14 +386,15 @@ class ReflectionPass:
                         and cand.finding.rule_name.startswith("service-defaults:")
                         else ""
                     )
-                    if (
-                        valid_check_ids
-                        and req_ref.check_id not in valid_check_ids
-                        and req_ref.check_id != rule_id
-                    ):
+                    if valid_check_ids and req_ref.check_id not in valid_check_ids:
                         raise VerificationInvalidOutputError(
                             f"Decision {decision.candidate_id} check_id '{req_ref.check_id}' "
                             "does not match service defaults rules"
+                        )
+                    if rule_id and req_ref.check_id != rule_id:
+                        raise VerificationInvalidOutputError(
+                            f"Decision {decision.candidate_id} check_id '{req_ref.check_id}' "
+                            f"does not match rule_id '{rule_id}'"
                         )
 
             # 3. For supported/contradicted with rule_name, require a matching requirement_ref

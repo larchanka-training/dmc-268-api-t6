@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import re
 import uuid
 from collections.abc import Mapping
@@ -15,6 +16,7 @@ from app.modules.reviews.application.commit_prefix_limits import (
     MAX_COMMIT_MESSAGE_CHARS,
     MAX_COMMIT_MESSAGES,
 )
+from app.modules.reviews.application.context_provenance import SourceRole
 from app.modules.reviews.application.policy_snapshot import (
     CallManifest,
     ManifestBlock,
@@ -276,7 +278,7 @@ class PromptBuilder:
                     blocks.append(
                         ManifestBlock(
                             block_id="policy-rules",
-                            source_role="policy_document",
+                            source_role=SourceRole.POLICY_DOCUMENT,
                             source_kind="repository_rules",
                             path=rules_doc.path,
                             revision=context.policy_snapshot.policy_base_sha,
@@ -291,7 +293,7 @@ class PromptBuilder:
                     blocks.append(
                         ManifestBlock(
                             block_id="policy-rules",
-                            source_role="policy_document",
+                            source_role=SourceRole.POLICY_DOCUMENT,
                             source_kind="repository_rules",
                             path=rules_doc.path,
                             revision=context.policy_snapshot.policy_base_sha,
@@ -309,7 +311,7 @@ class PromptBuilder:
                     blocks.append(
                         ManifestBlock(
                             block_id="policy-agents",
-                            source_role="policy_document",
+                            source_role=SourceRole.POLICY_DOCUMENT,
                             source_kind="project_conventions_document",
                             path=agents_doc.path,
                             revision=context.policy_snapshot.policy_base_sha,
@@ -324,7 +326,7 @@ class PromptBuilder:
                     blocks.append(
                         ManifestBlock(
                             block_id="policy-agents",
-                            source_role="policy_document",
+                            source_role=SourceRole.POLICY_DOCUMENT,
                             source_kind="project_conventions_document",
                             path=agents_doc.path,
                             revision=context.policy_snapshot.policy_base_sha,
@@ -340,7 +342,7 @@ class PromptBuilder:
                 blocks.append(
                     ManifestBlock(
                         block_id="service-defaults",
-                        source_role="service_defaults",
+                        source_role=SourceRole.SERVICE_DEFAULTS,
                         source_kind="service_defaults",
                         start_line=1,
                         end_line=defaults_lines,
@@ -350,20 +352,20 @@ class PromptBuilder:
                 )
 
         for file in context.changed_files:
-            slug = re.sub(r"[^a-zA-Z0-9]+", "-", file.path).strip("-")
-            block_id = f"file-{slug}"
+            block_id = file_block_id(file.path)
             shown_ranges = _calculate_shown_ranges(file.lines)
             start_line = min((r[0] for r in shown_ranges), default=None)
             end_line = max((r[1] for r in shown_ranges), default=None)
+            shown_count = sum(r[1] - r[0] + 1 for r in shown_ranges)
             blocks.append(
                 ManifestBlock(
                     block_id=block_id,
-                    source_role="diff",
+                    source_role=SourceRole.DIFF,
                     source_kind="diff",
                     path=file.path,
                     start_line=start_line,
                     end_line=end_line,
-                    shown_line_count=len(file.lines),
+                    shown_line_count=shown_count,
                     shown_ranges=shown_ranges,
                 )
             )
@@ -458,18 +460,22 @@ def _split_policy_lines(text: str) -> list[str]:
     return text.split("\n")
 
 
+def file_block_id(path: str) -> str:
+    """Deterministic, collision-free block_id for changed files in manifest and prompt."""
+    slug = re.sub(r"[^a-zA-Z0-9]+", "-", path).strip("-")
+    digest = hashlib.sha256(path.encode("utf-8")).hexdigest()[:8]
+    return f"file-{slug}-{digest}"
+
+
 def _calculate_shown_ranges(lines: tuple[DiffLine, ...]) -> tuple[tuple[int, int], ...]:
-    """Calculate contiguous shown line ranges for the visible file diff."""
-    if not lines:
-        return ()
+    """Calculate contiguous shown line ranges for the visible file diff (RIGHT-side only)."""
     right_numbers = sorted({line.number for line in lines if line.type != "removed"})
-    target_numbers = right_numbers if right_numbers else sorted({line.number for line in lines})
-    if not target_numbers:
+    if not right_numbers:
         return ()
     ranges: list[tuple[int, int]] = []
-    start = target_numbers[0]
-    prev = target_numbers[0]
-    for num in target_numbers[1:]:
+    start = right_numbers[0]
+    prev = right_numbers[0]
+    for num in right_numbers[1:]:
         if num == prev + 1:
             prev = num
         else:
@@ -491,8 +497,7 @@ def render_changed_file(file: ChangedFile, *, include_block_id: bool = False) ->
     if file.total_lines is not None and file.total_lines > len(file.lines):
         body.append(truncation_trailer(len(file.lines), file.total_lines))
     if include_block_id:
-        slug = re.sub(r"[^a-zA-Z0-9]+", "-", file.path).strip("-")
-        block_id = f"file-{slug}"
+        block_id = file_block_id(file.path)
         attributes = (
             f'block_id="{_attribute(block_id)}" path="{_attribute(file.path)}" '
             f'status="{file.status}"'

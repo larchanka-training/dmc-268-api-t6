@@ -7,6 +7,7 @@ from uuid import UUID
 
 import pytest
 
+from app.modules.reviews.application.context_provenance import SourceRole
 from app.modules.reviews.application.policy_snapshot import (
     AGENTS_DOCUMENT_PATH,
     POLICY_SNAPSHOT_SCHEMA_VERSION,
@@ -301,7 +302,7 @@ def test_call_manifest_tracks_shown_ranges() -> None:
     run_id = UUID("00000000-0000-0000-0000-000000000020")
     block1 = ManifestBlock(
         block_id="code-1",
-        source_role="diff",
+        source_role=SourceRole.DIFF,
         source_kind="diff",
         path="app/service.py",
         start_line=10,
@@ -310,7 +311,7 @@ def test_call_manifest_tracks_shown_ranges() -> None:
     )
     block2 = ManifestBlock(
         block_id="policy-rules",
-        source_role="policy_document",
+        source_role=SourceRole.POLICY_DOCUMENT,
         source_kind="repository_rules",
         path=".review/rules.md",
         start_line=1,

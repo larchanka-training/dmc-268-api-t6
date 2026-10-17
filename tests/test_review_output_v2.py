@@ -8,6 +8,7 @@ import uuid
 import pytest
 from pydantic import ValidationError
 
+from app.modules.reviews.application.context_provenance import SourceRole
 from app.modules.reviews.application.policy_snapshot import (
     CallManifest,
     ManifestBlock,
@@ -131,7 +132,7 @@ def test_validate_v2_attribution_checks_manifest_evidence_and_policy() -> None:
         blocks=(
             ManifestBlock(
                 block_id="diff-app-main",
-                source_role="diff",
+                source_role=SourceRole.DIFF,
                 source_kind="diff",
                 path="app/main.py",
                 start_line=1,
@@ -140,7 +141,7 @@ def test_validate_v2_attribution_checks_manifest_evidence_and_policy() -> None:
             ),
             ManifestBlock(
                 block_id="policy-rules",
-                source_role="policy_document",
+                source_role=SourceRole.POLICY_DOCUMENT,
                 source_kind="repository_rules",
                 path=".review/rules.md",
                 start_line=1,
@@ -261,7 +262,7 @@ def test_validate_v2_attribution_additional_branches() -> None:
         blocks=(
             ManifestBlock(
                 block_id="invalid-role-block",
-                source_role="candidate",
+                source_role=SourceRole.CANDIDATE,
                 source_kind="candidate_finding",
                 start_line=1,
                 end_line=10,
@@ -269,7 +270,7 @@ def test_validate_v2_attribution_additional_branches() -> None:
             ),
             ManifestBlock(
                 block_id="diff-file",
-                source_role="diff",
+                source_role=SourceRole.DIFF,
                 source_kind="file_diff",
                 start_line=1,
                 end_line=30,
@@ -277,7 +278,7 @@ def test_validate_v2_attribution_additional_branches() -> None:
             ),
             ManifestBlock(
                 block_id="agents-doc",
-                source_role="policy_document",
+                source_role=SourceRole.POLICY_DOCUMENT,
                 source_kind="project_conventions_document",
                 path="AGENTS.md",
                 start_line=1,

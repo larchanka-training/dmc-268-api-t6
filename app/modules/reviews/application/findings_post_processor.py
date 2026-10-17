@@ -9,7 +9,7 @@ from importlib.resources import files
 from typing import Literal
 
 from app.modules.reviews.application.review_output import (
-    ALLOWED_V2_RULE_NAMES,
+    _SERVICE_DEFAULTS_ID_RE,
     ReviewFinding,
     ReviewOutput,
     finding_order_key,
@@ -100,6 +100,7 @@ class FindingsPostProcessor:
         rule_names: frozenset[str],
         repository_max_inline: int | None = None,
         severity_threshold: SeverityThresholdValue = "all",
+        allowed_v2_rules: frozenset[str] | None = None,
     ) -> ProcessedReviewOutput:
         """Classify every finding once in the documented stage order.
 
@@ -152,8 +153,14 @@ class FindingsPostProcessor:
         ]
         body_only = [item for item in prepared if item.bucket == "body_only"] + overflow
 
-        inline = [self._repair_attribution(item, rule_names) for item in inline]
-        body_only = [self._repair_attribution(item, rule_names) for item in body_only]
+        inline = [
+            self._repair_attribution(item, rule_names, allowed_v2_rules=allowed_v2_rules)
+            for item in inline
+        ]
+        body_only = [
+            self._repair_attribution(item, rule_names, allowed_v2_rules=allowed_v2_rules)
+            for item in body_only
+        ]
         moved_to_body = [item for item in inline if item.bucket == "body_only"]
         inline = [item for item in inline if item.bucket == "inline"]
         body_only.extend(moved_to_body)
@@ -233,12 +240,19 @@ class FindingsPostProcessor:
         return kept, dropped
 
     @staticmethod
-    def _repair_attribution(item: ProcessedFinding, rule_names: frozenset[str]) -> ProcessedFinding:
+    def _repair_attribution(
+        item: ProcessedFinding,
+        rule_names: frozenset[str],
+        allowed_v2_rules: frozenset[str] | None = None,
+    ) -> ProcessedFinding:
         finding = item.finding
-        if finding.rule_name in ALLOWED_V2_RULE_NAMES or (
-            finding.rule_name is not None and finding.rule_name.startswith("service-defaults:")
-        ):
-            return item
+        if allowed_v2_rules is not None and finding.rule_name is not None:
+            if finding.rule_name in allowed_v2_rules:
+                return item
+            if finding.rule_name.startswith("service-defaults:"):
+                rule_id = finding.rule_name.removeprefix("service-defaults:")
+                if _SERVICE_DEFAULTS_ID_RE.fullmatch(rule_id):
+                    return item
         match = _ATTRIBUTION_RE.match(finding.body)
         quoted_name = match.group("name") if match is not None else None
         valid = (
