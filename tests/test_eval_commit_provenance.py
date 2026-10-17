@@ -5,9 +5,18 @@ from __future__ import annotations
 import json
 import shutil
 from pathlib import Path
+from typing import Any
 
 import pytest
+from pydantic import ValidationError
 
+import review.scripts.commit_context as commit_context_module
+from review.scripts.commit_context import (
+    CommitContextError,
+    CommitContextSidecar,
+    parse_commit_context,
+)
+from review.scripts.eval_live import RecorderError
 from review.scripts.eval_provenance import rule_json_paths, static_input_paths
 from review.scripts.eval_replay import replay
 from tests.test_eval_live import (
@@ -81,8 +90,9 @@ def test_each_commit_shaping_input_causes_replay_drift_without_rewriting_capture
     assert (REPO_ROOT / "test-prs-dataset/responses/manifest.json").read_bytes() == old_manifest
 
 
-def test_production_commit_retrieval_is_not_a_static_input() -> None:
-    # Eval never imports these; their edits must not change the static digest (#177).
+def test_inputs_that_do_not_shape_the_eval_are_not_static_inputs() -> None:
+    # Does not shape the eval: not imported, or imported without shaping what it sends or
+    # parses; edits to these must not change the static digest (#177).
     paths = static_input_paths("review/prompts/review.system.v2.md", rule_json_paths(REPO_ROOT))
 
     assert "app/modules/reviews/infrastructure/github_vcs.py" not in paths
@@ -90,6 +100,60 @@ def test_production_commit_retrieval_is_not_a_static_input() -> None:
     assert "app/modules/reviews/infrastructure/vcs_failures.py" not in paths
     # Imported by eval only through llm_gateway; shapes nothing it sends or parses.
     assert "app/modules/reviews/application/vcs_diff.py" not in paths
+
+
+def sidecar_with_encodings(*, accept_encoding: str, content_encoding: str | None) -> str:
+    payload: dict[str, Any] = json.loads((REPO_ROOT / SIDECAR).read_text(encoding="utf-8"))
+    payload["retrieval"]["accept_encoding"] = accept_encoding
+    payload["records"][0]["pages"][0]["content_encoding"] = content_encoding
+    return json.dumps(payload)
+
+
+def test_real_sidecar_is_rejected_once_the_production_encoding_changes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Every real page has content_encoding null, so only the retrieval check can reject it.
+    monkeypatch.setattr(commit_context_module, "COMMIT_ACCEPT_ENCODING", "gzip")
+
+    with pytest.raises(ValidationError, match="unexpected accept encoding"):
+        CommitContextSidecar.model_validate_json((REPO_ROOT / SIDECAR).read_bytes())
+    with pytest.raises(CommitContextError, match="malformed commit context sidecar"):
+        parse_commit_context(REPO_ROOT / SIDECAR)
+
+    repo = commit_context_repo(
+        tmp_path, monkeypatch, json.loads((REPO_ROOT / SIDECAR).read_text(encoding="utf-8"))
+    )
+    root = fixture_root(tmp_path, ("CLEAN-03",))
+    transport = FakeTransport([answer("primary-model", VALID)])
+    with pytest.raises(RecorderError, match="commit context"):
+        record_with_repo(root, repo, transport)
+    assert transport.requests == []
+
+
+@pytest.mark.parametrize(
+    ("constant", "content_encoding", "rejection"),
+    [
+        ("identity", "identity", None),
+        ("gzip", "gzip", None),
+        ("gzip", "identity", "unexpected content encoding"),
+    ],
+)
+def test_page_content_encoding_is_compared_with_the_constant_value(
+    monkeypatch: pytest.MonkeyPatch,
+    constant: str,
+    content_encoding: str,
+    rejection: str | None,
+) -> None:
+    # The retrieval value follows the constant, so only the page check decides each case.
+    monkeypatch.setattr(commit_context_module, "COMMIT_ACCEPT_ENCODING", constant)
+    document = sidecar_with_encodings(accept_encoding=constant, content_encoding=content_encoding)
+
+    if rejection is None:
+        sidecar = CommitContextSidecar.model_validate_json(document)
+        assert sidecar.records[0].pages[0].content_encoding == content_encoding
+    else:
+        with pytest.raises(ValidationError, match=rejection):
+            CommitContextSidecar.model_validate_json(document)
 
 
 def test_populated_context_capture_and_two_json_replay_reports_are_deterministic(
