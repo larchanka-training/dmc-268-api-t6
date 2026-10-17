@@ -23,12 +23,12 @@ HTTP webhook receipt ingress, while retaining actual PG/application composition.
 against the disposable database. Save the expected RED and passing control evidence;
 zero skips. Check formatting/types of test changes. No production code in this task.
 
-**Evidence:** PostgreSQL 17 disposable database `dmc268_issue109_tests`; signed
+**Evidence:** PostgreSQL 17 disposable database; signed
 HTTP ingress through the real app and production receiver composition. Command
 `TEST_DATABASE_URL=<disposable-db-url> uv run pytest tests/test_webhook_run_trigger_postgres.py -v -rs`
 produced **1 expected failure, 13 passed, zero skips**. Race fails at the literal
 B Run assertion after cancellation/replay; terminal control logs `processed_ci`
-and `enqueued`. RED log: `/private/tmp/issue109-task1-red.log`. No production code
+and `enqueued`. No production code
 changed during Task 1. The Run model names its supersession field `error_code`;
 the fixture finalization uses `error_code='superseded'` (no `cancel_reason` column).
 
@@ -94,7 +94,7 @@ worker-finalization, or PR #108 owned document changes.
 - [x] No change to Run indexes or cancellation finalization semantics.
 
 Checkpoint A deliberately retains the original race RED until Task 3:
-`/private/tmp/issue109-checkpoint-a-pg.log` records **1 expected failure, 13 passed,
+the PostgreSQL run records **1 expected failure, 13 passed,
 zero skips**, now logging `deferred_run_trigger` with `deferred (active_run)`.
 Full pytest gates are due at final completion; the four-file focused suite and
 static checks above are the checkpoint evidence.
@@ -121,7 +121,7 @@ persisted rows; use fake clock/due retry state instead of long wall-clock sleeps
 **Evidence:** Receiver RED showed the deferred receipt incorrectly marked projected;
 PG store RED showed missing release. After minimal implementation, command
 `TEST_DATABASE_URL=<disposable-db-url> uv run pytest tests/test_github_webhook_delivery.py tests/test_webhook_run_trigger_postgres.py tests/test_webhook_full_path.py -q -rs`
-passed **172 tests, zero skips** (`/private/tmp/issue109-task3-green.log`). Public
+passed **172 tests, zero skips**. Public
 receipt operation PG checks prove rollback without commit, lost-token rejection,
 lease-expiry replacement, persisted 30-second due retry, zero generic attempts,
 four retries, no terminal markers and exclusion from purge. The original signed
@@ -161,7 +161,7 @@ the required invariant rather than creating implementation-mirroring duplicates.
 
 **Evidence:**
 `TEST_DATABASE_URL=<disposable-db-url> uv run pytest tests/test_webhook_run_trigger_postgres.py -k survives_restart -v -rs`
-passed **2 PG scenarios, zero skips** (`/private/tmp/issue109-task4-pg.log`). Both
+passed **2 PG scenarios, zero skips**. Both
 confirmed-publication and broker-failure/outbox-recovery paths rebuild engine,
 HTTP client, resources, and composed receiver, retain due retry across restart,
 wait four polls, deduplicate same-ID intake, persist distinct duplicate CI receipts,
@@ -209,7 +209,7 @@ assert literal heads/counts, not outcomes calculated from implementation constan
 
 **Evidence:**
 `TEST_DATABASE_URL=<disposable-db-url> uv run pytest tests/test_webhook_run_trigger_postgres.py -k 'waiting_ci_receipt or newer_head' -v -rs`
-passed **18 PG cases, zero skips** (`/private/tmp/issue109-task5-pg.log`). Literal
+passed **18 PG cases, zero skips**. Literal
 head/count/state assertions cover `always`, `auto`, and `never`, removed label and
 closed PR through real webhook projection, persisted repository disabling, fresh
 red/pending CI, and C push while B waits. Only C's own CI success enables it in
@@ -221,7 +221,7 @@ eligibility changes were needed. Existing
 and enabled change during CI I/O; `test_a_candidate_that_moved_since_the_decision_is_stale_with_state_changed`
 proves the enqueue lock recheck. Final focused rerun includes these suites and strengthened PR/label replay cases:
 `TEST_DATABASE_URL=<disposable-db-url> uv run pytest tests/test_webhook_run_trigger_postgres.py tests/test_github_run_trigger.py tests/test_github_webhook_delivery.py tests/test_ci_eligibility.py -v -rs`
-passed **304 tests, zero skips** (`/private/tmp/issue109-final-focused.log`), including
+passed **304 tests, zero skips**, including
 all **34** production-composition PG webhook cases.
 
 **Dependencies:** Tasks 3–4.
@@ -271,7 +271,7 @@ Task 6 static gates passed with their exact commands: `uv run ruff check .`,
 files**). Full `uv run pytest` with `TEST_DATABASE_URL=<disposable-db-url>` and
 `TEST_RABBITMQ_URL=<isolated-task-vhost-url>` passed **2426 tests, zero skips** in
 **226.85 seconds**, with two existing Starlette/httpx/anyio deprecation warnings.
-Log: `/private/tmp/issue109-full-gates.log`. No new dependency or migration was
+No new dependency or migration was
 introduced. Both final independent Standards and Spec reviews returned **zero
 findings**; the coordinator rechecked main (`92250a1`) and PR ownership (#108 still
 has no overlap). No code changed after the focused run/review freeze; plan/checklist
@@ -284,10 +284,9 @@ evidence was finalized after verification. `git diff --check` is clean.
 - [x] AC3: current head/PR/label/enabled/CI invalidation proven.
 - [x] Gates and independent Standards/Spec review green; ready for publisher.
 - [x] Disposable resources cleaned up without touching pre-existing stack data.
-      Coordinator dropped only database `dmc268_issue109_tests` in existing
-      `dmc268-webhook-local-postgres-1` (`DROP DATABASE`, exit 0), and removed only
-      task-created `dmc268-issue109-rabbitmq`/vhost `issue109` and its anonymous volume
-      (`docker rm -fv`, exit 0). The pre-existing PostgreSQL stack remains untouched.
+      Coordinator dropped only the disposable database (exit 0) and removed only the
+      task-created RabbitMQ container and its anonymous volume (exit 0). The
+      pre-existing PostgreSQL stack remains untouched.
 
 ## Publication follow-through (coordinator / publisher / tech lead)
 

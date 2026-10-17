@@ -109,16 +109,15 @@ durable retry slice is complete; record that expected failure explicitly.
 
 ## PostgreSQL runtime and test seams
 
-The coordinator verified a running `postgres:17-alpine` container named
-`dmc268-webhook-local-postgres-1`, exposed on localhost port 5433. Docker works
-with the environment's required sandbox escalation. Do not stop that stack, remove
+The coordinator used the existing PostgreSQL 17 test database stack
+(`postgres:17-alpine`), never destructively. Do not stop that stack, remove
 its volume, reuse its existing database destructively, or print its secret values.
 Create a fresh task-specific disposable database there after privately checking the
 local test connection settings, or start an isolated postgres:17-alpine container
 if connection settings are unavailable. The DB user needs `CREATE SCHEMA`.
 Remove only the task-created database/container after tests.
 
-Use `TEST_DATABASE_URL=postgresql+psycopg://<test-user>:<test-password>@127.0.0.1:5433/<disposable-db>`.
+Use `TEST_DATABASE_URL=<disposable-db-url>`.
 The existing fixture in `tests/test_webhook_run_trigger_postgres.py` creates a
 random schema, upgrades real Alembic migrations, and drops that schema in teardown.
 Production `ReviewsApiResources` builds the actual receiver, dispatcher, CI
@@ -200,8 +199,8 @@ migration, Run index, cancellation finalization, or PR #108 owned file changed.
 
 The publisher fetched and rebased on current `main` (`92250a1`); the base and
 implementation were unchanged, and PR #108 still has no overlapping files.
-The coordinator dropped only `dmc268_issue109_tests` and removed only the task
-RabbitMQ container `dmc268-issue109-rabbitmq` and its anonymous volume, both
-successfully. The pre-existing PostgreSQL stack remains untouched. Publication
+The coordinator dropped only the disposable database and removed only the task
+RabbitMQ container and its anonymous volume, both successfully. The pre-existing
+PostgreSQL stack remains untouched. Publication
 is prepared as a draft PR; GitHub current-head approval/merge and tech-lead
 issue/tracker/board acceptance remain pending with their respective owners.
