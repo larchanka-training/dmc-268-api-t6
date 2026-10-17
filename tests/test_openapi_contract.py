@@ -994,9 +994,11 @@ def _written_tools(source: str) -> set[str]:
     argument of a ``traced_step(...)`` call, the second positional argument of a ``record(...)``
     call (the ``RunTrace.record(run_id, tool, ...)`` sink) and a ``tool=`` keyword of any call.
     Only string constants count; a name or an attribute in these positions is skipped. A
-    ``tool=`` keyword is counted on any call, so a ``tool="x.y"`` that does not write run_actions
-    surfaces as unexpected and must be renamed or excluded. A blanket ``"x.y"`` match would also
-    pick up prompt names such as ``review.system``, which are not tools.
+    ``tool=`` keyword and a literal second argument of ``record(...)`` are counted on any call,
+    whatever the receiver, so a ``tool="x.y"`` or a ``ledger.record(context, "x.y")`` that does not
+    write run_actions surfaces as unexpected and must be renamed or the scan taught to skip it. A
+    blanket ``"x.y"`` match would also pick up prompt names such as ``review.system``, which are
+    not tools.
     """
     tree = ast.parse(source)
     found: list[str | None] = []
@@ -1025,6 +1027,37 @@ def _written_tools(source: str) -> set[str]:
             _string_constant(keyword.value) for keyword in node.keywords if keyword.arg == "tool"
         ]
     return {tool for tool in found if tool is not None}
+
+
+@pytest.mark.parametrize(
+    ("source", "expected"),
+    [
+        ('traced_step(trace, run_id, "a.b", {})', {"a.b"}),
+        ('trace.record(run_id, "x.y", {}, None, now, 0)', {"x.y"}),
+        ("ledger.record(context, usage)", set()),
+        ("self._trace.record(pointer.run_id, route.tool, {})", set()),
+        ('Route(tool="c.d")', {"c.d"}),
+        ('LLM_CALL_TOOL = "e.f"', {"e.f"}),
+        ('X_TOOL: Final = "g.h"', {"g.h"}),
+        ("def record(self, run_id, tool): ...", set()),
+        ('prompts.load("review.system")', set()),
+    ],
+    ids=[
+        "traced_step-third-argument",
+        "record-second-argument",
+        "record-without-tool-argument",
+        "record-attribute-argument",
+        "tool-keyword",
+        "module-constant",
+        "module-annotated-constant",
+        "record-definition",
+        "plain-string-literal",
+    ],
+)
+def test_written_tools_scan_picks_up_only_the_run_action_shapes(
+    source: str, expected: set[str]
+) -> None:
+    assert _written_tools(source) == expected
 
 
 def _catalog_drift(side: str, found: set[str]) -> str:
