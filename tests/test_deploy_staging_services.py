@@ -36,7 +36,9 @@ A_ID = "sha256:" + "1" * 64
 B_ID = "sha256:" + "2" * 64
 EXPLICIT_ID = "sha256:" + "3" * 64
 # rollback.sh's answer to a CI auto rollback whose deploy run never reached the release switch.
-STOPPED_BEFORE_SWITCH = "release unchanged: deploy run {} stopped before the release switch"
+STOPPED_BEFORE_SWITCH = (
+    "release unchanged: deploy run {} stopped before the release switch; skipping auto rollback\n"
+)
 
 # GitHub rejects secret names starting with GITHUB_, so the App secrets are GH_* in the
 # Environment (comment of the tech lead in #35); the container keeps the names of .env.example.
@@ -1651,9 +1653,14 @@ def test_failed_deploy_then_refused_auto_rollback_preserves_rollback_entry(host:
     assert list(host.tmp.iterdir()) == []
 
 
-# CI runs deploy A, B and C as runs 101-1, 102-1 and 103-1 (DEPLOY_RUN). The DB probe stays
-# compatible throughout: guard #126 never decides these cases.
-@pytest.mark.parametrize("marked", [True, False], ids=["marked-host", "legacy-host"])
+# CI runs deploy A, B and C as runs 101-1, 102-1 and 103-1 (DEPLOY_RUN); in the re-run case C is
+# attempt 2 of B's run 102, whose attempt 1 crossed the switch. The DB probe stays compatible
+# throughout: guard #126 never decides these cases.
+@pytest.mark.parametrize(
+    ("marked", "attempt"),
+    [(True, "103-1"), (True, "102-2"), (False, "103-1")],
+    ids=["marked-host", "re-run-attempt", "legacy-host"],
+)
 @pytest.mark.parametrize(
     ("deploy_mode", "bundle", "stubs", "reason", "previous_copied"),
     [
@@ -1672,6 +1679,7 @@ def test_failed_deploy_then_refused_auto_rollback_preserves_rollback_entry(host:
 def test_ci_auto_rollback_keeps_the_release_when_deploy_stops_before_the_switch(
     host: Host,
     marked: bool,
+    attempt: str,
     deploy_mode: str,
     bundle: str | None,
     stubs: dict[str, str],
@@ -1686,15 +1694,15 @@ def test_ci_auto_rollback_keeps_the_release_when_deploy_stops_before_the_switch(
     calls_before = len(host.calls())
 
     deploy = host.deploy(
-        IMAGE_C, bundle=bundle, env={"DEPLOY_MODE": deploy_mode, "DEPLOY_RUN": "103-1", **stubs}
+        IMAGE_C, bundle=bundle, env={"DEPLOY_MODE": deploy_mode, "DEPLOY_RUN": attempt, **stubs}
     )
     assert deploy.returncode != 0
     assert reason in deploy.stderr
     rollback_calls = len(host.calls())
-    result = _ci_auto_rollback(host, "103-1", deploy_mode=deploy_mode)
+    result = _ci_auto_rollback(host, attempt, deploy_mode=deploy_mode)
 
     assert result.returncode == 0, result.stderr
-    assert result.stdout == STOPPED_BEFORE_SWITCH.format("103-1") + "; skipping auto rollback\n"
+    assert result.stdout == STOPPED_BEFORE_SWITCH.format(attempt)
     assert host.calls()[rollback_calls:] == []
     calls = host.calls()[calls_before:]
     assert not any(set(c.split()) & {"pull", "run", "up", "down", "rm"} for c in calls)
@@ -1721,7 +1729,7 @@ def test_ci_auto_rollback_keeps_the_only_release_when_deploy_stops_before_the_sw
     result = _ci_auto_rollback(host, "102-1")
 
     assert result.returncode == 0, result.stderr
-    assert result.stdout.startswith(STOPPED_BEFORE_SWITCH.format("102-1"))
+    assert result.stdout == STOPPED_BEFORE_SWITCH.format("102-1")
     # No compose down and no bootstrap container: the running release A stays.
     calls = host.calls()[calls_before:]
     assert not any(set(c.split()) & {"pull", "run", "up", "down", "rm"} for c in calls)
@@ -1804,6 +1812,27 @@ def test_ci_auto_rollback_after_a_failed_health_check_keeps_the_revision_guard(
     assert "rolled back" not in result.stdout
     assert host.files() == before
     assert not any(" up " in call for call in host.calls()[calls_before:])
+
+
+# The gate is for CI auto rollbacks only: a DEPLOY_RUN in an operator's shell (or a future
+# rollback.yml) with no matching switch marker must not turn a manual rollback into a no-op.
+@pytest.mark.parametrize("mode", [{"ROLLBACK_MODE": "manual"}, {}], ids=["explicit", "default"])
+def test_manual_rollback_ignores_the_deploy_run_and_restores_the_previous_release(
+    host: Host, mode: dict[str, str]
+) -> None:
+    assert host.deploy(IMAGE_A, bundle="", env={"DEPLOY_RUN": "101-1"}).returncode == 0
+    assert host.deploy(IMAGE_B, env={"DEPLOY_RUN": "102-1"}).returncode == 0
+    state_b = (host.app_dir / ".deploy-state").read_bytes()
+
+    result = host.run("rollback.sh", env={**mode, "DEPLOY_RUN": "999-1"})
+
+    assert result.returncode == 0, result.stderr
+    assert f"rolled back to {IMAGE_A}" in result.stdout
+    assert STOPPED_BEFORE_SWITCH.format("999-1") not in result.stdout
+    assert _read_dotenv(host.env_file)["IMAGE"] == IMAGE_A
+    state = _read_dotenv(host.app_dir / ".deploy-state")
+    assert state["current_image"] == IMAGE_A and state["rolled_back"] == "true"
+    assert (host.app_dir / ".deploy-state.previous").read_bytes() == state_b
 
 
 @pytest.mark.parametrize("mode", ["manual", "auto"])
