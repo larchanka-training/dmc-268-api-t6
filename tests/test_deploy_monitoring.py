@@ -127,16 +127,19 @@ def test_edge_exposes_request_metrics_on_an_internal_port_only() -> None:
     assert not re.search(r"^\s*admin\s", caddyfile, re.M)
 
 
-def test_api_host_sends_the_grafana_sub_path_to_grafana_and_the_rest_to_the_api() -> None:
+def test_grafana_has_its_own_host_and_prometheus_none() -> None:
     caddyfile = _read(CADDYFILE)
-    site = caddyfile[caddyfile.index("staging-api.{$APP_DOMAIN} {") :]
+    site = caddyfile[caddyfile.index("grafana.{$APP_DOMAIN} {") :]
     site = site[: site.index("\n}\n")]
-    grafana = re.search(r"handle /grafana/\* \{\n(.*?)\n\t\}", site, re.DOTALL)
-    fallback = re.search(r"\thandle \{\n(.*?)\n\t\}", site, re.DOTALL)
+    api_site = caddyfile[caddyfile.index("staging-api.{$APP_DOMAIN} {") :]
+    api_site = api_site[: api_site.index("\n}\n")]
 
-    assert grafana is not None and fallback is not None
-    assert grafana.group(1).strip() == "reverse_proxy grafana-staging:3000"
-    assert fallback.group(1).strip() == "reverse_proxy api-staging:8000"
+    assert re.findall(r"reverse_proxy (\S+)", site) == ["grafana-staging:3000"]
+    assert "import hsts" in site
+    # The API host is the API only; Prometheus has no authentication and gets no public site.
+    assert re.findall(r"reverse_proxy (\S+)", api_site) == ["api-staging:8000"]
+    assert not re.search(r"^(prometheus|victoria-metrics)\.", caddyfile, re.M)
+    assert "GRAFANA_ROOT_URL: https://grafana.${{ vars.APP_DOMAIN }}/" in _job("deploy-monitoring")
 
 
 # --- review metrics and roles --------------------------------------------------------------
@@ -254,7 +257,7 @@ class Host:
             "PATH": f"{self.stubs}:{os.environ['PATH']}",
             "HOME": str(self.root),
             "API_DIR": str(self.api_dir),
-            "GRAFANA_ROOT_URL": "https://staging-api.example.test/grafana/",
+            "GRAFANA_ROOT_URL": "https://grafana.example.test/",
             "ALERT_TELEGRAM_BOT_TOKEN": TOKEN,
             "ALERT_TELEGRAM_CHAT_ID": CHAT_ID,
             "STUB_LOG": str(self.stubs / "docker.log"),
@@ -415,24 +418,24 @@ def test_invalid_telegram_settings_fail_before_the_host_changes(
 def test_edge_mode_scrapes_caddy_and_needs_a_https_grafana_url(host: Host) -> None:
     result = host.deploy()
     targets = _read(host.monitoring_dir / "prometheus" / "targets" / "caddy.json")
-    refused = host.deploy(GRAFANA_ROOT_URL="http://staging-api.example.test/grafana/")
+    refused = host.deploy(GRAFANA_ROOT_URL="https://staging-api.example.test/grafana/")
 
     assert result.returncode == 0, result.stderr
     assert targets == '[{"targets": ["dmc-268-edge-caddy-1:9180"]}]\n'
     assert host.env()["GRAFANA_COOKIE_SECURE"] == "true"
     assert "-f " + str(host.monitoring_dir / "compose.edge.yml") in host.log("docker.log")
     assert refused.returncode == 1
-    assert "GRAFANA_ROOT_URL must be https://<host>/grafana/" in refused.stderr
+    assert "GRAFANA_ROOT_URL must be https://<host>/ in edge mode" in refused.stderr
 
 
 def test_ports_mode_keeps_grafana_on_loopback_and_scrapes_no_proxy(host: Host) -> None:
     env_file = host.api_dir / ".env"
     env_file.write_text(_read(env_file).replace("DEPLOY_MODE=edge", "DEPLOY_MODE=ports"))
-    result = host.deploy(GRAFANA_ROOT_URL="http://203.0.113.10/grafana/")
+    result = host.deploy(GRAFANA_ROOT_URL="https://grafana.example.test/")
 
     assert result.returncode == 0, result.stderr
     assert _read(host.monitoring_dir / "prometheus" / "targets" / "caddy.json") == "[]\n"
-    assert host.env()["GRAFANA_ROOT_URL"] == "http://localhost:3000/grafana/"
+    assert host.env()["GRAFANA_ROOT_URL"] == "http://localhost:3000/"
     assert host.env()["GRAFANA_COOKIE_SECURE"] == "false"
     assert "-f " + str(host.monitoring_dir / "compose.ports.yml") in host.log("docker.log")
 

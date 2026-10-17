@@ -28,7 +28,7 @@ flowchart LR
   graf -->|"SQL, grafana_reader"| pg
   prom -->|alerts| am
   am -->|Bot API| tg["Telegram-канал команды"]
-  caddy -->|"/grafana/*"| graf
+  caddy -->|"grafana.<APP_DOMAIN>"| graf
 ```
 
 | Сервис | Образ (по digest) | Лимит памяти | Что даёт |
@@ -135,17 +135,16 @@ Job `Deploy monitoring` в `ci-cd.yml` запускается после усп�
 
 | Цель | Grafana | Prometheus / Alertmanager |
 |---|---|---|
-| Курсовой VPS | `https://staging-api.<APP_DOMAIN>/grafana/`, пользователь `admin`, пароль — `GRAFANA_ADMIN_PASSWORD` из `/opt/dmc-268-monitoring/.env` | без внешнего доступа: `docker compose -p dmc-268-monitoring exec prometheus wget -qO- localhost:9090/api/v1/alerts` |
-| Terraform-хост | SSH-туннель: `ssh -L 3000:127.0.0.1:3000 …`, затем `http://localhost:3000/grafana/` | то же |
+| Курсовой VPS | `https://grafana.<APP_DOMAIN>/` (staging: `https://grafana.dmc268-t6.axyi.ru/`), пользователь `admin`, пароль — `GRAFANA_ADMIN_PASSWORD` из `/opt/dmc-268-monitoring/.env` | без внешнего доступа: `docker compose -p dmc-268-monitoring exec prometheus wget -qO- localhost:9090/api/v1/alerts` |
+| Terraform-хост | SSH-туннель: `ssh -L 3000:127.0.0.1:3000 …`, затем `http://localhost:3000/` | то же |
 
-Grafana — под путём `/grafana/` хоста API, пока у неё нет своего имени: для `grafana.<APP_DOMAIN>` нужна A-запись (§8). Регистрация и анонимный доступ выключены, cookie `Secure`, дашборды и источники данных доступны в UI только для чтения: изменения идут через PR в `deploy/monitoring/grafana`.
+Grafana — на своём хосте `grafana.<APP_DOMAIN>` (A-запись на VPS). Регистрация и анонимный доступ выключены, cookie `Secure`, дашборды и источники данных доступны в UI только для чтения: изменения идут через PR в `deploy/monitoring/grafana`. Имена `prometheus.<APP_DOMAIN>` и `victoria-metrics.<APP_DOMAIN>` тоже указывают на VPS, но сайта в Caddyfile не получают: у Prometheus нет аутентификации, запросы к нему — через Explore в Grafana; VictoriaMetrics в стеке нет.
 
 ## 8. Ограничения и следующие шаги
 
 | Что | Статус |
 |---|---|
 | Сквозной трейсинг (OpenTelemetry/Sentry), JSON-логи с `run_id` | отдельный PR после стабилизации пайплайна (договорённость команды). Нужен выбор бэкенда: Sentry SaaS (аккаунт и DSN), GlitchTip или Grafana Tempo; self-hosted Sentry на общий VPS не помещается |
-| Отдельное имя `grafana.<APP_DOMAIN>` | нужна A-запись в зоне `APP_DOMAIN`, затем сайт в Caddyfile |
 | Бэкапы PostgreSQL | отдельный PR (`deploy/scripts/pg-backup.sh`), метрики — через `textfile/` node-exporter |
 | Redis | бэкапить нечего: на staging он без тома и без персистентности (`save ""`, `appendonly no`), это кэш (SD §10) |
 | Метрики приложения (`/metrics` FastAPI, `X-RateLimit-Remaining` GitHub) | нужен код и зависимость; пока RPS и коды — с edge-прокси, пайплайн — из `run_actions` |

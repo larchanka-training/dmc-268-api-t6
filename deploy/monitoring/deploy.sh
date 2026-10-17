@@ -7,7 +7,7 @@
 # Inputs (environment):
 #   API_DIR                    application dir with .env and env-file.sh (/opt/dmc-268-api-staging)
 #   MONITORING_DIR             this stack's dir, default: the directory of this script
-#   GRAFANA_ROOT_URL           public Grafana URL in edge mode (https://<api host>/grafana/)
+#   GRAFANA_ROOT_URL           public Grafana URL in edge mode (https://grafana.<APP_DOMAIN>/)
 #   ALERT_TELEGRAM_BOT_TOKEN   } both set: alerts go to that Telegram chat; both empty: alerts are
 #   ALERT_TELEGRAM_CHAT_ID     } not delivered; unset: keep the previous alert config (manual run)
 set -euo pipefail
@@ -94,14 +94,14 @@ if [[ "${DEPLOY_MODE}" != "ports" && "${DEPLOY_MODE}" != "edge" ]]; then
 fi
 
 if [[ "${DEPLOY_MODE}" == "edge" ]]; then
-  if [[ ! "${GRAFANA_ROOT_URL:-}" =~ ^https://[A-Za-z0-9.-]+/grafana/$ ]]; then
-    echo "GRAFANA_ROOT_URL must be https://<host>/grafana/ in edge mode, got: ${GRAFANA_ROOT_URL:-}" >&2
+  if [[ ! "${GRAFANA_ROOT_URL:-}" =~ ^https://[A-Za-z0-9.-]+/$ ]]; then
+    echo "GRAFANA_ROOT_URL must be https://<host>/ in edge mode, got: ${GRAFANA_ROOT_URL:-}" >&2
     exit 1
   fi
   GRAFANA_COOKIE_SECURE=true
 else
   # Loopback only (compose.ports.yml), reached through an SSH tunnel.
-  GRAFANA_ROOT_URL="http://localhost:3000/grafana/"
+  GRAFANA_ROOT_URL="http://localhost:3000/"
   GRAFANA_COOKIE_SECURE=false
 fi
 

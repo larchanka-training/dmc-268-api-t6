@@ -42,14 +42,15 @@ http://:9180 {
 
 staging-api.{$APP_DOMAIN} {
 	import hsts
-	# Grafana of the monitoring stack (deploy/monitoring), served from the /grafana sub-path until
-	# it has a hostname of its own. Grafana runs its own login; the rest of the host is the API.
-	handle /grafana/* {
-		reverse_proxy grafana-staging:3000
-	}
-	handle {
-		reverse_proxy api-staging:8000
-	}
+	reverse_proxy api-staging:8000
+}
+
+# Grafana of the monitoring stack (deploy/monitoring, docs/MONITORING.md) with its own login.
+# The names prometheus.* and victoria-metrics.* also point here but get no site: Prometheus has
+# no authentication and stays on the docker networks, VictoriaMetrics is not used.
+grafana.{$APP_DOMAIN} {
+	import hsts
+	reverse_proxy grafana-staging:3000
 }
 
 api.{$APP_DOMAIN} {
