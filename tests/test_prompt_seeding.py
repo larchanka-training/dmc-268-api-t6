@@ -57,6 +57,7 @@ def test_load_prompt_assets_preserves_full_file_and_checksum() -> None:
         ("review.conventions", 2),
         ("review.system", 1),
         ("review.system", 2),
+        ("review.verifier", 1),
     ]
     for asset in assets:
         expected_content = (prompts_dir / f"{asset.key}.v{asset.version}.md").read_text(
@@ -115,7 +116,7 @@ def test_first_seed_makes_the_newest_version_of_each_prompt_active(
                     .order_by(PromptVersion.key)
                 )
                 active_versions = [(key, version) for key, version in rows.tuples().all()]
-                assert inserted == 4
+                assert inserted == 5
                 return active_versions
         finally:
             await engine.dispose()
@@ -123,6 +124,7 @@ def test_first_seed_makes_the_newest_version_of_each_prompt_active(
     assert asyncio.run(seed_and_read_active_versions()) == [
         ("review.conventions", 2),
         ("review.system", 2),
+        ("review.verifier", 1),
     ]
 
 
