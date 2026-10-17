@@ -204,9 +204,11 @@ GET /healthcheck
 `webhook-worker` зависят от `service_completed_successfully`, поэтому не стартуют.
 До [PR #126](https://github.com/larchanka-training/dmc-268-api-t6/pull/126)
 rollback мог пересоздать контейнеры этим образом и оставить staging без сервисов.
-Теперь ручной и автоматический rollback проверяют граф целевого образа и ревизию
-БД до изменения конфигурации и application-контейнеров (§5); образ без `20261010_0030`
-отклоняется. Guard не восстанавливает сервисы, уже затронутые неуспешным deploy.
+Теперь `rollback.sh` в ручном и автоматическом откате проверяет граф целевого образа и
+ревизию БД до того, как сам меняет конфигурацию и application-контейнеры (§5); образ без
+`20261010_0030` отклоняется. Гарантия начинается при входе в `rollback.sh`: ручной edge
+workflow до него уже меняет Compose-файлы и edge-прокси. Guard не восстанавливает
+сервисы, уже затронутые неуспешным deploy.
 Для восстановления после `20261010_0030` нужен исправленный forward release, знающий эту
 ревизию. Не обходить admission и не выполнять downgrade ради запуска старого образа.
 
@@ -275,7 +277,7 @@ policy/context #136: ревизии `20261012_0030` и `20261011_0029`, их п�
 
 ## 5. Rollback
 
-1. **Автоматический.** Deploy или health check не прошли → `rollback.sh` с `ROLLBACK_MODE=auto` поднимает образ из `.deploy-state.previous` и не записывает упавший образ в previous: повторный откат не вернёт сломанный релиз. На первом выкате без previous release восстанавливается bootstrap nginx. При падении `compose up` rollback вызывается и из `deploy.sh`. Данные PostgreSQL не сбрасываются. Тег `:staging` в GHCR не меняется до успешного health check.
+1. **Автоматический.** Deploy или health check не прошли → шаг rollback вызывает `rollback.sh` с `ROLLBACK_MODE=auto` и `DEPLOY_RUN` этого run. Откат выполняется, только если `deploy.sh` этого run дошёл до переключения релиза: тогда скрипт поднимает образ из `.deploy-state.previous` и не записывает упавший образ в previous — повторный откат не вернёт сломанный релиз; на первом выкате без previous release восстанавливается bootstrap nginx. При падении `compose up` rollback вызывается и из `deploy.sh`. Какие отказы запускают откат и какой релиз становится целью — таблица в начале подраздела «Действия при отказе». Данные PostgreSQL не сбрасываются. Тег `:staging` в GHCR не меняется до успешного health check.
 2. **Ручной.** Actions → **Rollback staging** → Run workflow, ветка `main` (с другой ветки jobs пропускаются; Environment `staging` тоже ограничен веткой `main`, см. [SECRETS.md](SECRETS.md)).
    - `reason` — обязателен.
    - Пустой `image` — предыдущий релиз из `.deploy-state.previous`; релиз, с которого откатились, становится новым previous (как `:staging` → `:staging-previous`).
@@ -355,6 +357,30 @@ Compose-файлами и env-file. Для этого восстановлени
 Этот путь останавливает проект и удаляет release metadata по прежним правилам.
 
 ### Действия при отказе
+
+Автоматический откат зависит от того, где остановился выкат. `deploy.sh` пишет в `APP_DIR`
+маркер `.deploy-switch` (`run=<DEPLOY_RUN>`, `image=<образ>`) прямо перед перезаписью `.env`
+под новый образ — это переключение релиза. Шаги Deploy и rollback получают один `DEPLOY_RUN`
+(`<run_id>-<run_attempt>`); нет маркера или его `run=` другой (старый run, другая попытка) —
+значит, этот run хост не переключал. Маркер не удаляется.
+
+| Где остановился выкат | Шаг rollback в CI | Цель и состояние хоста |
+|---|---|---|
+| Шаг workflow до Deploy: «Upload deploy files», «Upload edge proxy files», «Prepare host», «Wait for the edge certificate», «Bundle application secrets» | Не запускается: его `if:` смотрит только на Deploy и Health check | Отката нет, работает прежний релиз. Уже выложенные Compose-файлы и скрипты, изменения `provision.sh` и edge-прокси (`caddy reload`) не возвращаются |
+| `deploy.sh` до переключения: аргументы, `DEPLOY_MODE`/`EDGE_ALIAS`, пароли хранилищ, bundle секретов, `docker login` | Печатает `release unchanged: ...` и завершается с кодом 0 до чтения `.env`, проверки `DEPLOY_MODE` и вызовов docker | Отката нет: контейнеры, `.env` и `.deploy-state` остаются на работающем релизе. После отказа `docker login` env-файлы ролей уже записаны из bundle, а `.deploy-state.previous` указывает на работающий релиз |
+| `deploy.sh` после переключения: запись `.env`, `docker pull`, снятие bootstrap nginx | Откатывает | `.deploy-state.previous` — релиз, работавший до этого выката; `.env` переписывается под него |
+| `deploy.sh`, `compose up` | `deploy.sh` откатывает сам, шаг CI повторяет откат идемпотентно | `.deploy-state.previous` |
+| Health check | Откатывает | `.deploy-state.previous` |
+| Первый выкат (нет `.deploy-state`): отказ после переключения или health check | Откатывает | bootstrap nginx |
+
+Job остаётся красным, `:staging` не продвигается: шаг «Fail the pipeline after rollback» печатает
+`staging deploy failed; rollback was triggered`, даже если откат ничего не менял, — тогда в логе
+шага rollback видно `release unchanged`. Ручной rollback (`ROLLBACK_MODE=manual`, значение по
+умолчанию) маркер не проверяет; автоматический без `DEPLOY_RUN` (вызов `rollback.sh` на хосте,
+`scripts/verify_rollback.py`) тоже работает как раньше: цель — `.deploy-state.previous` или
+bootstrap nginx, где бы ни остановился выкат.
+
+При отказе admission:
 
 1. Сохранить контролируемую причину и остановить новые выкаты/ручные миграции на время разбора.
    Проверить фактические image refs, здоровье сервисов и текущую ревизию без вывода env/config.
