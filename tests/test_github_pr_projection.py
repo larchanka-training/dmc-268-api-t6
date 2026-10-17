@@ -78,7 +78,6 @@ def _event(action: str = "opened", **overrides: object) -> PullRequestEvent:
         "state": PullRequestState.OPEN,
         "provider_updated_at": _UPDATED,
         "repository_full_name": "octo/repo",
-        "requested_reviewer_login": None,
         "sender_type": None,
     }
     values.update(overrides)
@@ -199,11 +198,7 @@ def test_reviewer_deliveries_are_ignored_before_any_projection_work(action: str)
         projection_lock=ForbiddenLock(),
         cancellation_signals=ForbiddenSignals(),
     )
-    result = asyncio.run(
-        projector.execute(
-            _event(action, requested_reviewer_login="Reviewer[bot]", sender_type="User")
-        )
-    )
+    result = asyncio.run(projector.execute(_event(action, sender_type="User")))
     assert result == PullRequestProjectionStatus.IGNORED_UNRELATED
 
 
@@ -1047,14 +1042,12 @@ def _webhook_payload() -> dict[str, object]:
     }
 
 
-def test_webhook_payload_parses_pr_metadata_and_bot_request() -> None:
+def test_webhook_payload_parses_pr_metadata_and_sender() -> None:
     payload = _webhook_payload()
 
     event = parse_pull_request_event(payload)
 
-    assert event == _event(
-        "review_requested", requested_reviewer_login="reviewer[bot]", sender_type="User"
-    )
+    assert event == _event("review_requested", sender_type="User")
 
 
 def test_edited_receipt_updates_metadata_without_changing_intent_clock_or_enqueue() -> None:

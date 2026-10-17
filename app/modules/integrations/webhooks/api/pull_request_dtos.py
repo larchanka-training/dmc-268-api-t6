@@ -107,7 +107,6 @@ class _GitHubPullRequestPayloadDto(BaseModel):
     installation: _GitHubIdDto
     repository: _GitHubRepositoryDto
     pull_request: _GitHubPullRequestDto
-    requested_reviewer: _GitHubUserDto | None = None
     label: _GitHubLabelDto | None = None
     sender: _GitHubSenderDto | None = None
 
@@ -156,9 +155,6 @@ def _event_from_payload(parsed: _GitHubPullRequestPayloadDto) -> PullRequestEven
         state=state,
         provider_updated_at=item.updated_at,
         repository_full_name=parsed.repository.full_name,
-        requested_reviewer_login=(
-            parsed.requested_reviewer.login if parsed.requested_reviewer is not None else None
-        ),
         sender_type=parsed.sender.type if parsed.sender is not None else None,
         sender_login=parsed.sender.login if parsed.sender is not None else None,
     )
