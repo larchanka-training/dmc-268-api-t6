@@ -567,6 +567,8 @@ def test_backup_dirs_belong_to_the_backup_user(host: Host) -> None:
 
 # --- pg-backup.sh with fake PostgreSQL tools -----------------------------------------------
 
+SOURCE_FINGERPRINT = "alembic_version=20261015_0032\nrun_actions=10\nruns=3"
+
 FAKE_PG_TOOLS = {
     # Writes the dump unless told to fail; logs every call.
     "pg_dump": """\
@@ -579,15 +581,24 @@ for arg; do case "$arg" in --file=*) echo dump > "${arg#--file=}" ;; esac; done
 #!/bin/sh
 echo "pg_restore $*" >> "${STUB_PG_LOG}"
 """,
-    # The source revision without -d, the restored one with -d <check db>.
-    "psql": """\
+    # -c: the database size, or the fingerprint of the restored database (-d). Without -c: the
+    # snapshot session fed through the fifo — it answers the snapshot id, the fingerprint of the
+    # source and \echo lines, and logs every statement it reads until the fifo closes.
+    "psql": r"""\
 #!/bin/sh
-echo "psql $*" >> "${STUB_PG_LOG}"
+printf 'psql %s\n' "$(printf '%s' "$*" | tr '\n' ' ')" >> "${STUB_PG_LOG}"
 case "$*" in
-  *information_schema*) echo 36 ;;
-  *"-d "*) echo "${STUB_RESTORED_REVISION}" ;;
-  *) echo "20261015_0032" ;;
+  *pg_database_size*) echo "${STUB_DB_BYTES:-1024}"; exit 0 ;;
+  *"-d "*) printf '%s\n' "${STUB_RESTORED_FINGERPRINT}"; exit 0 ;;
 esac
+while IFS= read -r line; do
+  echo "session: ${line}" >> "${STUB_PG_LOG}"
+  case "${line}" in
+    *pg_export_snapshot*) echo "00000003-0000001B-1" ;;
+    *"ORDER BY ord, line;"*) printf '%s\n' "${STUB_SOURCE_FINGERPRINT}" ;;
+    '\echo '*) echo "${line#\\echo }" ;;
+  esac
+done
 """,
     "createdb": """\
 #!/bin/sh
@@ -630,13 +641,16 @@ def _run_backup(tmp_path: Path, **env: str) -> BackupRun:
             "PGDATABASE": "app",
             "BACKUP_DIR": str(backups),
             "TEXTFILE": str(textfile),
+            "BACKUP_SNAPSHOT_WAIT_SECONDS": "10",
             "STUB_PG_LOG": str(log),
-            "STUB_RESTORED_REVISION": "20261015_0032",
+            "STUB_SOURCE_FINGERPRINT": SOURCE_FINGERPRINT,
+            "STUB_RESTORED_FINGERPRINT": SOURCE_FINGERPRINT,
             **env,
         },
         capture_output=True,
         text=True,
         check=False,
+        timeout=60,
     )
     metrics = {}
     if textfile.exists():
@@ -648,30 +662,37 @@ def _run_backup(tmp_path: Path, **env: str) -> BackupRun:
     return BackupRun(result, backups, metrics, calls)
 
 
+def _commands(run: BackupRun) -> list[str]:
+    return [call.split()[0] for call in run.calls if not call.startswith("session:")]
+
+
 def test_backup_keeps_a_dump_only_after_the_restore_check(tmp_path: Path) -> None:
     run = _run_backup(tmp_path)
     dumps = sorted(path.name for path in run.backups.iterdir())
+    pg_dump = next(call for call in run.calls if call.startswith("pg_dump"))
 
     assert run.result.returncode == 0, run.result.stderr
     assert len(dumps) == 1 and re.fullmatch(r"app-\d{8}T\d{6}Z\.dump", dumps[0])
     assert stat.S_IMODE((run.backups / dumps[0]).stat().st_mode) == 0o600
-    # The dump keeps owners and grants; the check restores without them and drops its database.
-    assert [call.split()[0] for call in run.calls] == [
+    # Disk check, snapshot session, the dump of exactly that snapshot, then the scratch restore.
+    assert _commands(run) == [
+        "psql",
+        "psql",
         "pg_dump",
         "dropdb",
         "createdb",
         "pg_restore",
         "psql",
-        "psql",
-        "psql",
         "dropdb",
     ]
-    assert "--no-owner" not in run.calls[0]
-    assert (
-        "pg_restore --no-owner --no-privileges --exit-on-error --dbname=dmc_restore_check"
-        in (run.calls[3])
-    )
+    assert "--snapshot=00000003-0000001B-1" in pg_dump
+    assert "--no-owner" not in pg_dump  # the dump keeps owners and grants for a real restore
+    assert "session: BEGIN ISOLATION LEVEL REPEATABLE READ, READ ONLY;" in run.calls
     assert run.calls[-1] == "dropdb dmc_restore_check"
+    # The transaction ends only after the dump.
+    assert run.calls.index("session: COMMIT;") > run.calls.index(pg_dump)
+    assert "revision" not in run.result.stdout
+    assert "alembic_version=20261015_0032, 2 tables, 13 rows match" in run.result.stdout
     assert run.metrics["dmc_pg_backup_last_run_success"] == "1"
     assert run.metrics["dmc_pg_backup_files"].strip() == "1"
     assert "dmc_pg_backup_last_success_timestamp_seconds" in run.metrics
@@ -689,14 +710,33 @@ def test_failed_dump_never_reaches_the_restore_check(tmp_path: Path) -> None:
     assert "dmc_pg_backup_last_success_timestamp_seconds" not in run.metrics
 
 
-def test_dump_with_another_revision_is_discarded(tmp_path: Path) -> None:
-    run = _run_backup(tmp_path, STUB_RESTORED_REVISION="20261001_0020")
+@pytest.mark.parametrize(
+    "restored",
+    [
+        "alembic_version=20261001_0020\nrun_actions=10\nruns=3",  # another revision
+        "alembic_version=20261015_0032\nrun_actions=9\nruns=3",  # a lost row
+        "alembic_version=20261015_0032\nruns=3",  # a lost table
+    ],
+)
+def test_dump_that_does_not_reproduce_its_snapshot_is_discarded(
+    tmp_path: Path, restored: str
+) -> None:
+    run = _run_backup(tmp_path, STUB_RESTORED_FINGERPRINT=restored)
 
     assert run.result.returncode == 1
     assert list(run.backups.iterdir()) == []
-    assert "restore check failed" in run.result.stdout
+    assert "restore check failed: the restored database differs" in run.result.stdout
     assert run.calls[-1] == "dropdb --if-exists dmc_restore_check"
     assert run.metrics["dmc_pg_backup_last_run_success"] == "0"
+
+
+def test_backup_refuses_without_disk_for_the_dump_and_the_restore(tmp_path: Path) -> None:
+    run = _run_backup(tmp_path, STUB_DB_BYTES=str(10**18))
+
+    assert run.result.returncode == 1
+    assert "not enough free disk" in run.result.stdout
+    assert _commands(run) == ["psql", "dropdb"]
+    assert list(run.backups.iterdir()) == []
 
 
 # --- off-host copy of the dumps ------------------------------------------------------------
