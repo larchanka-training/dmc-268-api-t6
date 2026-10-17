@@ -901,8 +901,10 @@ jobs:
     permissions:
       contents: read
     needs: deploy-staging
+    # Its own group: in staging-deploy it would wait next to promote-staging, and the next merge's
+    # pending deploy would cancel whichever of the two was still pending. It only reads the app stack.
     concurrency:
-      group: staging-deploy
+      group: staging-monitoring
       cancel-in-progress: false
     environment:
       name: staging

@@ -136,6 +136,11 @@ def test_grafana_has_its_own_host_and_prometheus_none() -> None:
 
     assert re.findall(r"reverse_proxy (\S+)", site) == ["grafana-staging:3000"]
     assert "import hsts" in site
+    # /metrics of Grafana needs no login: answered 404 at the edge before the proxy route.
+    blocked = site.index(
+        "@metrics path /metrics /metrics/*\n\thandle @metrics {\n\t\trespond 404\n\t}"
+    )
+    assert blocked < site.index("reverse_proxy grafana-staging:3000")
     # The API host is the API only; Prometheus has no authentication and gets no public site.
     assert re.findall(r"reverse_proxy (\S+)", api_site) == ["api-staging:8000"]
     assert not re.search(r"^(prometheus|victoria-metrics)\.", caddyfile, re.M)
@@ -193,7 +198,9 @@ def test_monitoring_deploys_after_the_application_and_never_gates_it() -> None:
     assert "rollback" not in job.lower()
     # Promotion depends on the application deploy only.
     assert "deploy-monitoring" not in _job("promote-staging")
-    assert "group: staging-deploy" in job
+    # Its own lock: in staging-deploy a pending monitoring job and promote-staging could cancel
+    # each other when the next merge queues its deploy.
+    assert re.findall(r"^      group: (\S+)$", job, re.M) == ["staging-monitoring"]
 
 
 def test_monitoring_upload_and_secrets_reach_only_the_monitoring_dir() -> None:
@@ -454,3 +461,45 @@ def test_failed_stack_start_fails_the_deploy(host: Host) -> None:
 
     assert result.returncode != 0
     assert host.log("grafana.log") == ""
+
+
+def _render_alertmanager(tmp_path: Path, chat_id: str) -> str:
+    config = tmp_path / "alertmanager.yml"
+    subprocess.run(
+        [
+            "bash",
+            "-c",
+            'source "$1"; render_alertmanager_config "$2" "$3"',
+            "render",
+            str(MONITORING / "alertmanager-config.sh"),
+            str(config),
+            chat_id,
+        ],
+        check=True,
+    )
+    return _read(config)
+
+
+def test_event_alerts_are_sent_once_and_never_as_resolved(tmp_path: Path) -> None:
+    config = _render_alertmanager(tmp_path, CHAT_ID)
+    rules = _read(MONITORING / "prometheus" / "rules" / "alerts.yml")
+    events = re.findall(r"- alert: (\w+)\n(?:        .*\n)*?          kind: event\n", rules)
+
+    assert events == ["ReviewRunsFailed", "ReviewDeadLetters"]
+    assert (
+        '  routes:\n    - matchers: [kind="event"]\n      receiver: telegram-events\n'
+        "      group_by: [environment]\n      group_wait: 90s\n"
+    ) in config
+    receivers = config[config.index("receivers:") :]
+    assert re.findall(r"- name: (\S+)\n(?:.*\n)*?        send_resolved: (\w+)", receivers) == [
+        ("telegram", "true"),
+        ("telegram-events", "false"),
+    ]
+
+
+def test_without_telegram_both_routes_deliver_nothing(tmp_path: Path) -> None:
+    config = _render_alertmanager(tmp_path, "")
+
+    assert "  receiver: none\n" in config
+    assert "      receiver: none\n" in config
+    assert "telegram_configs" not in config

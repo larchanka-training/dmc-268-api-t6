@@ -1,9 +1,10 @@
-{{/* Telegram message of the team channel (parse_mode HTML): status, alert name, environment and
-     one line per alert. Every value is HTML-escaped; annotations carry no review content. */}}
+{{/* Telegram message of the team channel (parse_mode HTML): status, environment and one line per
+     alert with its name, since an event group can hold several alert names. Every value is
+     HTML-escaped; annotations carry no review content. */}}
 {{ define "dmc.telegram.message" -}}
-{{ if eq .Status "firing" }}🔥 FIRING{{ else }}✅ RESOLVED{{ end }} · <b>{{ .CommonLabels.alertname | html }}</b> · {{ .CommonLabels.environment | html }}{{ if .CommonLabels.severity }} · {{ .CommonLabels.severity | html }}{{ end }}
+{{ if eq .Status "firing" }}🔥 FIRING{{ else }}✅ RESOLVED{{ end }} · {{ .CommonLabels.environment | html }}{{ if .CommonLabels.severity }} · {{ .CommonLabels.severity | html }}{{ end }}
 {{ range .Alerts -}}
-• {{ .Annotations.summary | html }}
+• <b>{{ .Labels.alertname | html }}</b>: {{ .Annotations.summary | html }}
 {{ if .Annotations.description }}  {{ .Annotations.description | html }}
 {{ end }}{{ end -}}
 {{- end }}
