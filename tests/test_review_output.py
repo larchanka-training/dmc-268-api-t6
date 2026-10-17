@@ -20,6 +20,7 @@ from app.modules.reviews.application.review_output import (
     PublishReviewOutput,
     ReviewOutput,
     ReviewPublication,
+    comment_body,
     parse_review_output,
 )
 
@@ -284,3 +285,11 @@ def test_review_output_rejects_title_with_trailing_newline() -> None:
 
     with pytest.raises(ValidationError, match="title must be one line"):
         ReviewOutput.model_validate(data)
+
+
+def test_comment_body_formatting() -> None:
+    assert comment_body("Title", "Body", None) == "**Title**\n\nBody"
+    assert (
+        comment_body("Title", "Body", "suggestion_code")
+        == "**Title**\n\nBody\n\n```suggestion\nsuggestion_code\n```"
+    )
