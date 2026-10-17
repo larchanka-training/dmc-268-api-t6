@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 import hashlib
 import hmac
 import json
@@ -26,11 +27,9 @@ from fastapi.testclient import TestClient
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.bootstrap.auth_api import get_refresh_local_session
 from app.bootstrap.reviews_api import GitHubAuthHttpClients, ReviewsApiResources
 from app.main import app, get_github_webhook_secret
 from app.modules.auth.application.refresh_session import RefreshLocalSession
-from app.modules.auth.infrastructure.jwt_tokens import Rs256AccessTokenIssuer
 from app.modules.integrations.webhooks.application.receive_github_delivery import (
     ReceiveGitHubDelivery,
 )
@@ -177,11 +176,12 @@ def test_signed_reinstall_requires_each_users_fresh_oauth_and_preserves_only_sam
     reinstall_env: Env, monkeypatch: pytest.MonkeyPatch, account_id: int
 ) -> None:
     key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
-    private_key = key.private_bytes(Encoding.PEM, PrivateFormat.PKCS8, NoEncryption()).decode()
     for name, value in {
         "GITHUB_CLIENT_ID": "test-client",
         "GITHUB_CLIENT_SECRET": "test-secret",
-        "AUTH_JWT_PRIVATE_KEY": private_key,
+        "AUTH_JWT_PRIVATE_KEY": key.private_bytes(
+            Encoding.PEM, PrivateFormat.PKCS8, NoEncryption()
+        ).decode(),
         "AUTH_JWT_PUBLIC_KEY": key.public_key()
         .public_bytes(Encoding.PEM, PublicFormat.SubjectPublicKeyInfo)
         .decode(),
@@ -258,10 +258,9 @@ def test_signed_reinstall_requires_each_users_fresh_oauth_and_preserves_only_sam
     app.dependency_overrides[get_github_webhook_secret] = lambda: _SECRET
     # Bob's second refresh replays the cookie already rotated after `deleted`, so it passes
     # only through the grace branch: an injected hour, not the real-clock 15 s default.
-    app.dependency_overrides[get_refresh_local_session] = lambda: RefreshLocalSession(
-        uow_factory=resources.auth_session_uow,
-        issuer=Rs256AccessTokenIssuer(private_key, issuer="test-issuer", audience="test-audience"),
-        grace_period=timedelta(hours=1),
+    monkeypatch.setattr(
+        "app.bootstrap.auth_api.RefreshLocalSession",
+        functools.partial(RefreshLocalSession, grace_period=timedelta(hours=1)),
     )
 
     try:
@@ -362,6 +361,7 @@ def test_signed_reinstall_requires_each_users_fresh_oauth_and_preserves_only_sam
                     assert client.get(f"/api/repos/{REPO_A}", headers=alice).status_code == 200
                     assert client.get(f"/api/runs/{RUN_DONE}", headers=alice).status_code == 200
                     repository = client.get(f"/api/repos/{target['id']}", headers=fresh_alice)
+                    assert repository.status_code == 200
                     assert repository.json()["branchFilter"] == ["main", "release/*"]
                     assert repository.json()["severityThreshold"] == "critical"
                     assert repository.json()["ragEnabled"] is True
