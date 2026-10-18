@@ -1019,8 +1019,12 @@ def test_a_retry_after_a_crash_in_an_incremental_build_equals_a_fresh_full_build
         assert await _raw_rows(database, database.a) != rows
         state = await indexer.state(database.a)
         assert (state.indexed_commit_sha, state.lease_expires_at) == (indexed, None)
+        # The crash is on the row, not only in the log: a status reader sees it (#145).
+        assert (state.status, state.last_error_code) == (IndexStatus.READY, "internal_error")
         parser.call = 0
         await indexer.incremental_equals_full(await indexer.build(database.a), before)
+        # The next publication clears it.
+        assert (await indexer.state(database.a)).last_error_code is None
 
     _run(database, scenario, settings=replace(_SETTINGS, batch_files=1), parser=crashing)
 

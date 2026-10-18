@@ -653,7 +653,7 @@ def test_a_failing_source_factory_after_the_claim_releases_the_lease() -> None:
     with pytest.raises(RuntimeError, match="no source"):
         world.run()
 
-    assert world.store.releases == [None]
+    assert world.store.releases == ["internal_error"]
     assert world.tracker.log == ["claim_lease", "commit", "release", "commit"]
 
 
@@ -1588,7 +1588,7 @@ def test_an_unexpected_error_releases_the_lease_and_propagates() -> None:
     with pytest.raises(RuntimeError, match="parser crashed"):
         world.run()
 
-    assert world.store.releases == [None]
+    assert world.store.releases == ["internal_error"]
     assert world.store.failures == []
 
 
@@ -1649,7 +1649,9 @@ def test_every_release_records_the_job_metrics(
     [
         pytest.param(_unsafe_archive, "mark_failed", ["archive_unsafe"], [], id="mark-failed"),
         pytest.param(_unavailable_head, "release", [], ["vcs_unavailable"], id="release"),
-        pytest.param(_crashing_parser, "release", [], [None], id="release-after-an-error"),
+        pytest.param(
+            _crashing_parser, "release", [], ["internal_error"], id="release-after-an-error"
+        ),
     ],
 )
 def test_a_cancellation_during_the_closing_write_does_not_cut_it(
