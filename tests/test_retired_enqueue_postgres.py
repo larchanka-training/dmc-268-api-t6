@@ -289,13 +289,26 @@ def test_rerun_waits_for_source_before_taking_pr_lock_and_retains_normal_creatio
 
 @pytest.mark.integration
 @pytest.mark.parametrize(
-    "closed,active,missing_rules,retired,outcome,run_count",
+    "closed,active,missing_rules,retired,paused,outcome,run_count",
     [
-        (True, False, True, False, RerunOutcome.CONFLICT, 4),
-        (False, True, True, False, RerunOutcome.CONFLICT, 4),
-        (False, False, True, False, RerunOutcome.NOT_CONFIGURED, 4),
-        (False, False, False, False, RerunOutcome.CREATED, 5),
-        (False, False, False, True, RerunOutcome.CONFLICT, 4),
+        (True, False, True, False, False, RerunOutcome.CONFLICT, 4),
+        (False, True, True, False, False, RerunOutcome.CONFLICT, 4),
+        (False, False, True, False, False, RerunOutcome.NOT_CONFIGURED, 4),
+        (False, False, True, True, False, RerunOutcome.NOT_CONFIGURED, 4),
+        (False, False, True, False, True, RerunOutcome.NOT_CONFIGURED, 4),
+        (False, False, False, False, False, RerunOutcome.CREATED, 5),
+        (False, False, False, True, False, RerunOutcome.CONFLICT, 4),
+        (False, False, False, False, True, RerunOutcome.CONFLICT, 4),
+    ],
+    ids=[
+        "closed-before-missing-rules",
+        "active-before-missing-rules",
+        "missing-rules",
+        "missing-rules-before-retired",
+        "missing-rules-before-paused",
+        "configured-active-repository",
+        "configured-retired-installation",
+        "configured-paused-repository",
     ],
 )
 def test_rerun_source_lock_keeps_conflict_precedence_and_retired_refusal(
@@ -304,6 +317,7 @@ def test_rerun_source_lock_keeps_conflict_precedence_and_retired_refusal(
     active: bool,
     missing_rules: bool,
     retired: bool,
+    paused: bool,
     outcome: RerunOutcome,
     run_count: int,
 ) -> None:
@@ -313,6 +327,10 @@ def test_rerun_source_lock_keeps_conflict_precedence_and_retired_refusal(
         try:
             await prepare(factory, "never", retired)
             async with factory.begin() as session:
+                if paused:
+                    await session.execute(
+                        text("UPDATE repositories SET enabled=false WHERE id=:id"), {"id": REPO_A}
+                    )
                 if closed:
                     await session.execute(
                         text("UPDATE code_changes SET state='closed' WHERE id=:id"), {"id": PR_OPEN}
