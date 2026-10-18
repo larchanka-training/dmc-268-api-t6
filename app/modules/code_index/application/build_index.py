@@ -482,7 +482,8 @@ async def _release_lease(
 
 
 def _unexpected_error_code(error: BaseException) -> str | None:
-    """`internal_error` for an `Exception`; a cancellation is redelivered, not a failure."""
+    """`internal_error` for an `Exception`; a cancellation or another non-`Exception`
+    `BaseException` is not a failure."""
     return INTERNAL_ERROR if isinstance(error, Exception) else None
 
 
