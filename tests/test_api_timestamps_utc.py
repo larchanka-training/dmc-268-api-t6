@@ -4,12 +4,12 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from datetime import datetime, timedelta, timezone
-from typing import Annotated, Any, Generic, TypeAliasType, TypeVar, get_args, get_origin
+from typing import Annotated, Any, TypeAliasType, get_args, get_origin
 from uuid import UUID
 
 from fastapi import FastAPI
 from fastapi.routing import APIRoute, iter_route_contexts
-from pydantic import AfterValidator, BaseModel
+from pydantic import AfterValidator, AwareDatetime, BaseModel, FutureDatetime, PastDatetime
 from starlette.routing import BaseRoute
 
 import app.main  # registers every DTO of the composed app; its routes feed the response walk
@@ -122,13 +122,17 @@ def _parts(annotation: Any) -> tuple[Any, ...]:
     return get_args(annotation)
 
 
+# pydantic's datetime types are classes of their own at runtime, not datetime: each is named.
+_DATETIMES = (datetime, AwareDatetime, PastDatetime, FutureDatetime)
+
+
 def _has_bare_datetime(
     annotation: Any,
     metadata: tuple[Any, ...] = (),
     expanding: frozenset[TypeAliasType] = frozenset(),
 ) -> bool:
     """Whether the annotation holds a ``datetime`` that is not converted to UTC."""
-    if annotation is datetime:
+    if annotation in _DATETIMES:
         return not any(
             isinstance(item, AfterValidator) and item.func is _to_utc for item in metadata
         )
@@ -298,11 +302,14 @@ class GenericAliasStamp(BaseModel):
     at: WithBareAt[int]
 
 
-T = TypeVar("T")
+class PydanticStamps(BaseModel):
+    aware: AwareDatetime
+    past: PastDatetime
+    future: FutureDatetime
+    converted: Annotated[AwareDatetime, AfterValidator(_to_utc)]
 
 
-# The typing.Generic form the review reproduced the gap with, kept as written.
-class Envelope(BaseModel, Generic[T]):  # noqa: UP046
+class Envelope[T](BaseModel):
     at: T
 
 
@@ -362,6 +369,15 @@ def test_timestamp_check_unwraps_a_datetime_alias() -> None:
     assert _bare_timestamps([AliasStamps]) == ["AliasStamps.bare"]
 
 
+def test_timestamp_check_reports_the_pydantic_datetime_types() -> None:
+    # Each keeps the zone it was given; the UTC validator still converts AwareDatetime.
+    assert _bare_timestamps([PydanticStamps]) == [
+        "PydanticStamps.aware",
+        "PydanticStamps.past",
+        "PydanticStamps.future",
+    ]
+
+
 def test_response_walk_ends_on_a_recursive_model_alias() -> None:
     assert _bare_timestamps(_response_models(_probe_routes(BareForest))) == ["BareStamp.at"]
 
@@ -401,6 +417,13 @@ def test_route_check_reports_a_bare_datetime_outside_any_model() -> None:
 
 def test_route_check_accepts_a_utc_datetime_outside_any_model() -> None:
     assert _routes_declaring_a_bare_datetime(_probe_routes(list[UtcDatetime])) == []
+
+
+def test_route_check_lists_a_route_once_across_its_responses_models() -> None:
+    # The response model and the 404 model each hold a bare datetime: one path, listed once.
+    routes = _probe_routes(Response[datetime], responses={404: {"model": Id[datetime]}})
+
+    assert _routes_declaring_a_bare_datetime(routes) == ["/api/probe"]
 
 
 def test_response_walk_reports_a_datetime_argument_of_a_generic_alias_in_a_field() -> None:
