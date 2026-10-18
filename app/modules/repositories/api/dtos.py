@@ -77,6 +77,10 @@ class RepositoryUpdateDto(ApiDto):
         return self
 
 
+# The UI schema takes a 40 hex commit SHA only.
+CommitSha = Annotated[str, Field(pattern=r"^[0-9a-f]{40}$")]
+
+
 def _is_none(value: object) -> bool:
     return value is None
 
@@ -101,7 +105,7 @@ class PresentRulesStatusDto(ApiDto):
     status: Literal["present"]
     branch: str
     path: str
-    sha: str
+    sha: CommitSha
     checked_at: UtcDatetime
     text: str
     checksum: str
@@ -115,7 +119,7 @@ class MissingRulesStatusDto(ApiDto):
     status: Literal["missing"]
     branch: str
     path: str
-    sha: str
+    sha: CommitSha
     checked_at: UtcDatetime
     defaults_version: str
 
@@ -126,7 +130,7 @@ class InvalidRulesStatusDto(ApiDto):
     status: Literal["invalid"]
     branch: str
     path: str
-    sha: str
+    sha: CommitSha
     checked_at: UtcDatetime
     text: str | None
     diagnostics: list[RulesDiagnosticDto] = Field(min_length=1)
@@ -138,7 +142,7 @@ class UnavailableRulesStatusDto(ApiDto):
     status: Literal["unavailable"]
     branch: str
     path: str
-    sha: str | None
+    sha: CommitSha | None
     checked_at: UtcDatetime
     diagnostics: list[RulesDiagnosticDto] = Field(min_length=1)
 

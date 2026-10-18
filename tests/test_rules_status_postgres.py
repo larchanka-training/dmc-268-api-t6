@@ -10,17 +10,27 @@ import asyncio
 import os
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
+from hashlib import sha256
 from pathlib import Path
 from typing import Any
 from uuid import UUID
 
+import httpx
 import psycopg
 import pytest
-from sqlalchemy import text
+from alembic.config import Config
+from sqlalchemy import Connection, create_engine, text
 from sqlalchemy.engine import make_url
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import async_sessionmaker
+from sqlalchemy.schema import CreateSchema, DropSchema
 
+from alembic import command
+from app.bootstrap.reviews_api import ReviewsApiResources
 from app.modules.auth.application.scope import AuthScope
+from app.modules.integrations.webhooks.infrastructure.github_installation_tree_provider import (
+    StaticGitHubInstallationAccessTokenProvider,
+)
 from app.modules.repositories.application.installation_repositories import RepositorySnapshot
 from app.modules.repositories.application.onboard_repository import load_default_rule_sets
 from app.modules.repositories.application.rules_status import (
@@ -40,6 +50,8 @@ from app.modules.repositories.infrastructure.installation_repository_unit_of_wor
 )
 from app.modules.repositories.infrastructure.rules_status import (
     SqlAlchemyRulesRefreshUnitOfWork,
+    SqlAlchemyRulesStatusStore,
+    SqlAlchemyRulesStatusUnitOfWork,
     request_rules_refresh,
 )
 from tests.portal_postgres import INSTALL_A, REPO_A, REPO_B, WS_A, Env, api, portal_schema, scalar
@@ -121,11 +133,12 @@ def _execute(factory: async_sessionmaker[Any], sql: str, **values: Any) -> None:
 
 @pytest.mark.integration
 def test_first_get_is_pending_and_the_worker_read_is_then_returned(env: Env) -> None:
+    raw = b"# Rules\r\n```review-ignore\ndocs/**\n```\n"
     with api(env, _SCOPE) as (client, factory):
         first = client.get(f"/api/repos/{REPO_A}/rules-status")
         requested = _row(factory, REPO_A)
         again = client.get(f"/api/repos/{REPO_A}/rules-status")
-        reader = GitHubReader(FakeGitHub(rules=b"# Rules\n```review-ignore\ndocs/**\n```\n"))
+        reader = GitHubReader(FakeGitHub(rules=raw))
         refreshed = _refresh(factory, reader)
         stored = _row(factory, REPO_A)
         shown = client.get(f"/api/repos/{REPO_A}/rules-status")
@@ -151,9 +164,79 @@ def test_first_get_is_pending_and_the_worker_read_is_then_returned(env: Env) -> 
         "# Rules\n```review-ignore\ndocs/**\n```\n",
         ["docs/**"],
     )
-    assert body["checksum"] == stored.checksum
+    # SHA-256 of the raw bytes, before the CRLF is normalized.
+    assert body["checksum"] == stored.checksum == sha256(raw).hexdigest()
     # Fresh: the GET after the read requests nothing.
     assert _row(factory, REPO_A).refresh_requested_at is None
+
+
+@pytest.mark.integration
+def test_an_empty_file_is_stored_and_shown_as_present(env: Env) -> None:
+    with api(env, _SCOPE) as (client, factory):
+        client.get(f"/api/repos/{REPO_A}/rules-status")
+        _refresh(factory, GitHubReader(FakeGitHub(rules=b"")))
+        stored = _row(factory, REPO_A)
+        body = client.get(f"/api/repos/{REPO_A}/rules-status").json()
+
+    assert (stored.status, stored.text, stored.ignore_masks) == ("present", "", [])
+    assert body["status"] == "present"
+    assert (body["text"], body["ignoreMasks"], body["diagnostics"]) == ("", [], [])
+    assert body["checksum"] == sha256(b"").hexdigest()
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("read_before", [False, True], ids=["never-read", "read-before"])
+def test_a_repository_the_app_lost_is_access_denied_and_not_requested(
+    env: Env, read_before: bool
+) -> None:
+    with api(env, _SCOPE) as (client, factory):
+        if read_before:
+            client.get(f"/api/repos/{REPO_A}/rules-status")
+            _refresh(factory, FixedReader(RulesReading(RulesStatusKind.MISSING, "main", _HEAD)))
+        _execute(
+            factory,
+            "UPDATE repositories SET installation_available = false WHERE id = :id",
+            id=REPO_A,
+        )
+        repository = client.get(f"/api/repos/{REPO_A}").json()
+        response = client.get(f"/api/repos/{REPO_A}/rules-status")
+        markers = scalar(
+            factory,
+            "SELECT count(*) AS n FROM repository_rules_status "
+            "WHERE refresh_requested_at IS NOT NULL",
+        ).n
+
+    assert repository["installationAvailable"] is False
+    assert response.status_code == 200
+    body = response.json()
+    assert (body["status"], body["sha"]) == ("unavailable", None)
+    assert body["diagnostics"] == [
+        {
+            "code": "policy_access_denied",
+            "message": "Нет доступа к документам правил репозитория.",
+            "line": None,
+            "column": None,
+            "retryable": False,
+        }
+    ]
+    assert markers == 0
+
+
+@pytest.mark.integration
+def test_the_portal_store_fails_closed_without_a_scope(factory: async_sessionmaker[Any]) -> None:
+    async def scenario() -> None:
+        async with factory() as session:
+            with pytest.raises(ValueError, match="requires an AuthScope"):
+                SqlAlchemyRulesStatusStore(session, None)
+            unscoped = SqlAlchemyRulesStatusStore(session, None, allow_unscoped=True)
+            # A trusted caller sees the repository of every Workspace.
+            assert await unscoped.get(REPO_B) is not None
+        with pytest.raises(ValueError, match="requires an AuthScope"):
+            SqlAlchemyRulesStatusUnitOfWork(factory)
+        async with SqlAlchemyRulesStatusUnitOfWork(factory, allow_unscoped=True) as uow:
+            assert await uow.rules_status.get(REPO_B) is not None
+
+    asyncio.run(scenario())
 
 
 @pytest.mark.integration
@@ -243,12 +326,19 @@ def test_a_stale_or_retryable_result_is_requested_again_on_get(env: Env) -> None
         _refresh(factory, FixedReader(transient))
         _execute(
             factory,
+            "UPDATE repository_rules_status SET checked_at = now() - interval '29 seconds'",
+        )
+        within = client.get(f"/api/repos/{REPO_A}/rules-status").json()
+        after_within = _row(factory, REPO_A).refresh_requested_at
+        _execute(
+            factory,
             "UPDATE repository_rules_status SET checked_at = now() - interval '31 seconds'",
         )
         failed = client.get(f"/api/repos/{REPO_A}/rules-status").json()
         after_failed = _row(factory, REPO_A).refresh_requested_at
 
     assert fresh["status"] == "missing" and after_fresh is None
+    assert within["status"] == "unavailable" and after_within is None
     # The stored result is still returned; the new read is only requested.
     assert stale["status"] == "missing" and after_stale is not None
     assert failed["status"] == "unavailable" and failed["sha"] is None
@@ -257,21 +347,58 @@ def test_a_stale_or_retryable_result_is_requested_again_on_get(env: Env) -> None
 
 
 @pytest.mark.integration
+def test_a_rate_limit_waits_for_its_retry_after_before_a_new_read(env: Env) -> None:
+    limited = RulesReading(
+        RulesStatusKind.UNAVAILABLE,
+        "main",
+        None,
+        diagnostics=(
+            RulesDiagnostic(
+                "policy_rate_limited", "m", None, None, True, retry_after=timedelta(seconds=90)
+            ),
+        ),
+    )
+    with api(env, _SCOPE) as (client, factory):
+        client.get(f"/api/repos/{REPO_A}/rules-status")
+        _refresh(factory, FixedReader(limited))
+        _execute(
+            factory,
+            "UPDATE repository_rules_status SET checked_at = now() - interval '89 seconds'",
+        )
+        within = client.get(f"/api/repos/{REPO_A}/rules-status").json()
+        after_within = _row(factory, REPO_A).refresh_requested_at
+        _execute(
+            factory,
+            "UPDATE repository_rules_status SET checked_at = now() - interval '91 seconds'",
+        )
+        client.get(f"/api/repos/{REPO_A}/rules-status")
+        after_pause = _row(factory, REPO_A).refresh_requested_at
+
+    # Retry-After is kept in the row but never shown.
+    assert within["diagnostics"][0] == {
+        "code": "policy_rate_limited",
+        "message": "m",
+        "line": None,
+        "column": None,
+        "retryable": True,
+    }
+    assert after_within is None
+    assert after_pause is not None
+
+
+async def _request(factory: async_sessionmaker[Any]) -> None:
+    async with factory() as session:
+        await request_rules_refresh(session, REPO_A)
+        await session.commit()
+
+
+@pytest.mark.integration
 def test_a_request_made_during_a_read_survives_it(factory: async_sessionmaker[Any]) -> None:
     async def request_again() -> None:
-        async with factory() as session:
-            # The new request of a push that arrives while the worker reads.
-            await session.execute(
-                text("UPDATE repository_rules_status SET refresh_requested_at = clock_timestamp()")
-            )
-            await session.commit()
+        # The new request of a push that arrives while the worker reads.
+        await _request(factory)
 
-    async def request() -> None:
-        async with factory() as session:
-            await request_rules_refresh(session, REPO_A)
-            await session.commit()
-
-    asyncio.run(request())
+    asyncio.run(_request(factory))
     missing = RulesReading(RulesStatusKind.MISSING, "main", _HEAD)
     _refresh(factory, FixedReader(missing, during=request_again))
     survived = _row(factory, REPO_A)
@@ -285,26 +412,36 @@ def test_a_request_made_during_a_read_survives_it(factory: async_sessionmaker[An
     assert _row(factory, REPO_A).refresh_requested_at is None
 
 
+def _claim(factory: async_sessionmaker[Any], now: datetime) -> tuple[RulesRefreshTarget, ...]:
+    """A claim of a worker that then dies: nothing is saved."""
+
+    async def claim() -> tuple[RulesRefreshTarget, ...]:
+        async with SqlAlchemyRulesRefreshUnitOfWork(factory) as uow:
+            targets = await uow.rules.claim(now=now, until=now + timedelta(minutes=5), limit=20)
+            await uow.commit()
+        return targets
+
+    return asyncio.run(claim())
+
+
+def _save(factory: async_sessionmaker[Any], target: RulesRefreshTarget, reading: Any) -> bool:
+    async def save() -> bool:
+        async with SqlAlchemyRulesRefreshUnitOfWork(factory) as uow:
+            saved = await uow.rules.save(target, reading, checked_at=datetime.now(UTC))
+            await uow.commit()
+        return saved
+
+    return asyncio.run(save())
+
+
 @pytest.mark.integration
 def test_a_claimed_request_is_taken_again_only_after_its_lease(
     factory: async_sessionmaker[Any],
 ) -> None:
-    async def request() -> None:
-        async with factory() as session:
-            await request_rules_refresh(session, REPO_A)
-            await session.commit()
-
-    class Crash(Exception):
-        pass
-
-    asyncio.run(request())
+    asyncio.run(_request(factory))
     now = datetime.now(UTC)
 
-    class Crashing:
-        async def read(self, target: RulesRefreshTarget) -> RulesReading:
-            raise Crash
-
-    _refresh(factory, Crashing(), now=now)
+    _claim(factory, now)
     within = FixedReader(RulesReading(RulesStatusKind.MISSING, "main", _HEAD))
     _refresh(factory, within, now=now + timedelta(minutes=4))
     after = FixedReader(RulesReading(RulesStatusKind.MISSING, "main", _HEAD))
@@ -313,6 +450,46 @@ def test_a_claimed_request_is_taken_again_only_after_its_lease(
     assert within.targets == []
     assert [target.repository_id for target in after.targets] == [REPO_A]
     assert _row(factory, REPO_A).status == "missing"
+
+
+@pytest.mark.integration
+def test_a_read_whose_lease_ended_cannot_overwrite_the_newer_read(
+    factory: async_sessionmaker[Any],
+) -> None:
+    asyncio.run(_request(factory))
+    now = datetime.now(UTC)
+    (slow,) = _claim(factory, now)
+    # The lease of the slow read ends and another worker reads the newer head.
+    newer = RulesReading(RulesStatusKind.MISSING, "main", "b" * 40)
+    taken_over = FixedReader(newer)
+    _refresh(factory, taken_over, now=now + timedelta(minutes=6))
+
+    stale = _save(factory, slow, RulesReading(RulesStatusKind.MISSING, "main", _HEAD))
+
+    assert [target.repository_id for target in taken_over.targets] == [REPO_A]
+    assert stale is False
+    assert _row(factory, REPO_A).sha == "b" * 40
+
+
+@pytest.mark.integration
+def test_an_unexpected_read_failure_is_stored_as_a_transient_error(
+    env: Env,
+) -> None:
+    class Broken:
+        async def read(self, target: RulesRefreshTarget) -> RulesReading:
+            raise RuntimeError("bug")
+
+    with api(env, _SCOPE) as (client, factory):
+        client.get(f"/api/repos/{REPO_A}/rules-status")
+        _refresh(factory, Broken())
+        stored = _row(factory, REPO_A)
+        body = client.get(f"/api/repos/{REPO_A}/rules-status").json()
+
+    assert stored.refresh_claimed_until is None and stored.refresh_requested_at is None
+    assert (body["status"], body["sha"]) == ("unavailable", None)
+    assert [(item["code"], item["retryable"]) for item in body["diagnostics"]] == [
+        ("policy_fetch_transient", True)
+    ]
 
 
 @pytest.mark.integration
@@ -391,3 +568,202 @@ def test_a_request_wakes_the_worker_on_commit(env: Env, factory: async_sessionma
             return channels
 
     assert asyncio.run(scenario()) == ["webhook_work_available"]
+
+
+@pytest.mark.integration
+def test_the_worker_composition_reads_through_github_and_stores_the_result(env: Env) -> None:
+    raw = b"# Rules\n```review-ignore\ndocs/**\n```\n"
+    github = FakeGitHub(rules=raw)
+    engine = env.engine()
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+
+    async def scenario() -> int:
+        async with factory() as session:
+            await session.execute(
+                text("UPDATE repositories SET full_name = 'octo/repo' WHERE id = :id"),
+                {"id": REPO_A},
+            )
+            await request_rules_refresh(session, REPO_A)
+            await session.commit()
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(github.respond), base_url="https://api.github.test"
+        ) as client:
+            refresher = ReviewsApiResources(engine, factory).rules_status_refresher(
+                client=client, token_provider=StaticGitHubInstallationAccessTokenProvider("token")
+            )
+            return await refresher.execute()
+
+    try:
+        refreshed = asyncio.run(scenario())
+        stored = _row(factory, REPO_A)
+    finally:
+        asyncio.run(engine.dispose())
+
+    assert refreshed == 1
+    assert (stored.status, stored.sha, stored.ignore_masks) == ("present", _HEAD, ["docs/**"])
+    assert stored.checksum == sha256(raw).hexdigest()
+    assert github.paths[-1] == "/repos/octo/repo/git/blobs/" + "3" * 40
+
+
+@pytest.fixture
+def bare_schema() -> Iterator[Connection]:
+    """An empty schema for migrating by hand."""
+    database_url = os.environ.get("TEST_DATABASE_URL")
+    if database_url is None:
+        pytest.skip("set TEST_DATABASE_URL to run PostgreSQL integration tests")
+    schema = f"test_rules_status_{os.urandom(8).hex()}"
+    engine = create_engine(database_url)
+    try:
+        with engine.connect() as connection:
+            connection.execute(CreateSchema(schema))
+            connection.execute(text(f'SET search_path TO "{schema}"'))
+            connection.commit()
+            try:
+                yield connection
+            finally:
+                connection.rollback()
+                connection.execute(text("SET search_path TO public"))
+                connection.execute(DropSchema(schema, cascade=True))
+                connection.commit()
+    finally:
+        engine.dispose()
+
+
+def _config(connection: Connection) -> Config:
+    config = Config("alembic.ini")
+    config.attributes["connection"] = connection
+    return config
+
+
+_TABLE = (
+    "SELECT count(*) FROM information_schema.tables "
+    "WHERE table_schema = current_schema() AND table_name = 'repository_rules_status'"
+)
+_INDEX = (
+    "SELECT count(*) FROM pg_indexes WHERE schemaname = current_schema() "
+    "AND indexname = 'ix_repository_rules_status_refresh'"
+)
+_REPOSITORY = UUID("00000000-0000-4000-8000-0000000000c1")
+
+
+def _legacy_repository(connection: Connection) -> None:
+    workspace, installation = UUID(int=11), UUID(int=12)
+    connection.execute(
+        text("INSERT INTO workspaces (id, name, daily_budget_usd) VALUES (:id, 'legacy', 0)"),
+        {"id": workspace},
+    )
+    connection.execute(
+        text(
+            "INSERT INTO provider_installations (id, workspace_id, provider, external_id, "
+            "metadata) VALUES (:id, :workspace, 'github', 17, '{}'::jsonb)"
+        ),
+        {"id": installation, "workspace": workspace},
+    )
+    connection.execute(
+        text(
+            "INSERT INTO repositories (id, provider_installation_id, external_id, full_name, "
+            "default_branch, web_url) VALUES (:id, :installation, 101, 'octo/legacy', 'main', "
+            "'https://github.test/octo/legacy')"
+        ),
+        {"id": _REPOSITORY, "installation": installation},
+    )
+
+
+@pytest.mark.integration
+def test_migration_0035_creates_the_table_and_its_downgrade_drops_it(
+    bare_schema: Connection,
+) -> None:
+    connection = bare_schema
+    config = _config(connection)
+    command.upgrade(config, "20261017_0034")
+    _legacy_repository(connection)
+    connection.commit()
+
+    command.upgrade(config, "20261018_0035")
+
+    assert (connection.scalar(text(_TABLE)), connection.scalar(text(_INDEX))) == (1, 1)
+    # An existing repository has no row: its first GET answers pending and requests a read.
+    assert connection.scalar(text("SELECT count(*) FROM repository_rules_status")) == 0
+    connection.execute(
+        text(
+            "INSERT INTO repository_rules_status (repository_id, refresh_requested_at) "
+            "VALUES (:id, now())"
+        ),
+        {"id": _REPOSITORY},
+    )
+    connection.commit()
+    command.downgrade(config, "20261017_0034")
+    assert (connection.scalar(text(_TABLE)), connection.scalar(text(_INDEX))) == (0, 0)
+    assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "20261017_0034"
+    connection.commit()
+    command.upgrade(config, "head")
+    # The stored results and requests are lost; the table comes back empty.
+    assert connection.scalar(text("SELECT count(*) FROM repository_rules_status")) == 0
+
+
+_VALID = {
+    "status": "present",
+    "branch": "main",
+    "sha": "a" * 40,
+    "text": "",
+    "checksum": sha256(b"").hexdigest(),
+    "ignore_masks": "[]",
+    "diagnostics": "[]",
+    "defaults_version": None,
+    "checked_at": "2026-10-18 12:00:00+00",
+}
+_DIAGNOSTIC = '[{"code": "policy_fetch_transient", "message": "m", "retryable": true}]'
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize(
+    ("change", "constraint"),
+    [
+        ({"status": "pending"}, "ck_repository_rules_status_status"),
+        ({"checked_at": None}, "ck_repository_rules_status_read_complete"),
+        ({"sha": "a" * 39}, "ck_repository_rules_status_sha"),
+        ({"sha": "A" * 40}, "ck_repository_rules_status_sha"),
+        ({"checksum": "a" * 63 + "g"}, "ck_repository_rules_status_checksum"),
+        ({"ignore_masks": None}, "ck_repository_rules_status_present"),
+        ({"status": "missing"}, "ck_repository_rules_status_missing"),
+        ({"status": "invalid"}, "ck_repository_rules_status_diagnosed"),
+        ({"status": "unavailable", "sha": None}, "ck_repository_rules_status_diagnosed"),
+    ],
+    ids=[
+        "unknown-status",
+        "read-without-time",
+        "short-sha",
+        "upper-case-sha",
+        "bad-checksum",
+        "present-without-masks",
+        "missing-without-defaults",
+        "invalid-without-diagnostic",
+        "unavailable-without-diagnostic",
+    ],
+)
+def test_the_row_constraints_refuse_an_incomplete_read(
+    bare_schema: Connection, change: dict[str, Any], constraint: str
+) -> None:
+    connection = bare_schema
+    command.upgrade(_config(connection), "head")
+    _legacy_repository(connection)
+    insert = text(
+        "INSERT INTO repository_rules_status (repository_id, status, branch, sha, text, "
+        "checksum, ignore_masks, diagnostics, defaults_version, checked_at) VALUES (:id, "
+        ":status, :branch, :sha, :text, :checksum, CAST(:ignore_masks AS jsonb), "
+        "CAST(:diagnostics AS jsonb), :defaults_version, CAST(:checked_at AS timestamptz))"
+    )
+    with connection.begin_nested() as valid:
+        connection.execute(insert, {"id": _REPOSITORY, **_VALID})
+        valid.rollback()
+    with connection.begin_nested() as unavailable:
+        # A failed read without a revision is complete with its diagnostic.
+        connection.execute(
+            insert,
+            {"id": _REPOSITORY, **_VALID, "status": "unavailable", "sha": None}
+            | {"text": None, "checksum": None, "ignore_masks": None, "diagnostics": _DIAGNOSTIC},
+        )
+        unavailable.rollback()
+
+    with pytest.raises(IntegrityError, match=constraint):
+        connection.execute(insert, {"id": _REPOSITORY, **_VALID, **change})

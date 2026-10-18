@@ -945,9 +945,9 @@ async def update_repository(
     response_model=RulesStatusDto,
     summary="Get the rules status of a repository",
     description=(
-        "The last read of `.review/rules.md` on the default branch. A read older than "
-        "10 minutes, or one that failed with a retryable error, is requested again; "
-        "`pending` means no read has finished yet."
+        "The last read of `.review/rules.md` on the default branch. A GET that finds the "
+        "read older than 10 minutes, or failed with a retryable error, requests a new one "
+        "and a later GET shows it; `pending` means no read has finished yet."
     ),
     responses={
         401: {"description": "Unauthorized"},

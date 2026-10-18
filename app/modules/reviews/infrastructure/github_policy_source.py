@@ -68,7 +68,8 @@ class _Repository(_GitHubDto):
 
 
 _REPOSITORY = TypeAdapter(_Repository)
-_FULL_SHA = re.compile(r"[0-9a-fA-F]{40}|[0-9a-fA-F]{64}")
+# The portal shows a 40 hex commit SHA; GitHub has no SHA-256 repositories.
+_FULL_SHA = re.compile(r"[0-9a-fA-F]{40}")
 
 
 def _kind(item: _TreeItem) -> PolicyEntryKind:
