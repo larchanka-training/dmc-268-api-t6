@@ -222,7 +222,8 @@ class CodeIndexStore(Protocol):
     ) -> LeaseClaim | ClaimRefused:
         """T2 with admission (ADR §7), checked in the order of `ClaimRefusal`.
 
-        A QUOTA refusal writes `failed` as `mark_failed` does, so the caller commits a
+        A QUOTA refusal writes `failed` as `mark_failed` does and records zero job
+        metrics (the refused job made no GitHub request), so the caller commits a
         refusal too. A grant resets the pending bytes and turns `empty` into `building`.
         The pending bytes of another repository's expired lease do not count.
 
