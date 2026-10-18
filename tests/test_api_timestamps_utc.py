@@ -9,7 +9,14 @@ from uuid import UUID
 
 from fastapi import FastAPI
 from fastapi.routing import APIRoute, iter_route_contexts
-from pydantic import AfterValidator, AwareDatetime, BaseModel, FutureDatetime, PastDatetime
+from pydantic import (
+    AfterValidator,
+    AwareDatetime,
+    BaseModel,
+    FutureDatetime,
+    NaiveDatetime,
+    PastDatetime,
+)
 from starlette.routing import BaseRoute
 
 import app.main  # registers every DTO of the composed app; its routes feed the response walk
@@ -123,7 +130,7 @@ def _parts(annotation: Any) -> tuple[Any, ...]:
 
 
 # pydantic's datetime types are classes of their own at runtime, not datetime: each is named.
-_DATETIMES = (datetime, AwareDatetime, PastDatetime, FutureDatetime)
+_DATETIMES = (datetime, AwareDatetime, PastDatetime, FutureDatetime, NaiveDatetime)
 
 
 def _has_bare_datetime(
@@ -306,6 +313,7 @@ class PydanticStamps(BaseModel):
     aware: AwareDatetime
     past: PastDatetime
     future: FutureDatetime
+    naive: NaiveDatetime
     converted: Annotated[AwareDatetime, AfterValidator(_to_utc)]
 
 
@@ -370,11 +378,13 @@ def test_timestamp_check_unwraps_a_datetime_alias() -> None:
 
 
 def test_timestamp_check_reports_the_pydantic_datetime_types() -> None:
-    # Each keeps the zone it was given; the UTC validator still converts AwareDatetime.
+    # Each keeps the zone it was given, NaiveDatetime none at all; the UTC validator still
+    # converts AwareDatetime.
     assert _bare_timestamps([PydanticStamps]) == [
         "PydanticStamps.aware",
         "PydanticStamps.past",
         "PydanticStamps.future",
+        "PydanticStamps.naive",
     ]
 
 
