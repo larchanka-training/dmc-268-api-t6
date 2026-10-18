@@ -10,7 +10,7 @@ from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from types import TracebackType
-from typing import Self
+from typing import Any, Self
 from uuid import UUID, uuid4
 
 import psycopg
@@ -90,6 +90,35 @@ def migrated_database(database_url: str) -> Iterator[Database]:
         engine.dispose()
 
 
+@contextmanager
+def recorded_backends() -> Iterator[set[int]]:
+    """Record the backend of every psycopg connection this process opens.
+
+    LISTEN is database-wide, so a hint from a pid outside the set came from another process
+    sharing the database. SQLAlchemy looks the driver's ``connect`` up per connection, so
+    engine sessions are recorded too; wrapping the current attribute composes with test patches.
+    """
+    backends: set[int] = set()
+    connect = psycopg.AsyncConnection.connect
+
+    async def recording_connect(
+        conninfo: str = "", **kwargs: Any
+    ) -> psycopg.AsyncConnection[tuple[Any, ...]]:
+        connection = await connect(conninfo, **kwargs)
+        backends.add(connection.info.backend_pid)
+        return connection
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(psycopg.AsyncConnection, "connect", recording_connect)
+        yield backends
+
+
+@pytest.fixture
+def own_backends() -> Iterator[set[int]]:
+    with recorded_backends() as backends:
+        yield backends
+
+
 @asynccontextmanager
 async def listen(database: Database) -> AsyncIterator[asyncio.Queue[psycopg.Notify]]:
     conninfo = (
@@ -113,9 +142,30 @@ async def listen(database: Database) -> AsyncIterator[asyncio.Queue[psycopg.Noti
                 await task
 
 
-async def assert_no_signal(notifications: asyncio.Queue[psycopg.Notify]) -> None:
+async def expect_signal(
+    notifications: asyncio.Queue[psycopg.Notify], own: set[int], writer_pid: int
+) -> None:
+    """The first hint from this process must come from the writer's own transaction."""
+    # One deadline for the whole wait: steady foreign traffic cannot stretch it.
+    async with asyncio.timeout(5):
+        while True:
+            signal = await notifications.get()
+            if signal.pid in own:
+                break
+    assert (signal.channel, signal.payload, signal.pid) == (
+        "webhook_work_available",
+        "",
+        writer_pid,
+    )
+
+
+async def assert_no_signal(notifications: asyncio.Queue[psycopg.Notify], own: set[int]) -> None:
+    """No hint from any backend of this process; other processes' hints are skipped."""
     with pytest.raises(TimeoutError):
-        await asyncio.wait_for(notifications.get(), timeout=0.2)
+        async with asyncio.timeout(0.2):
+            while True:
+                signal = await notifications.get()
+                assert signal.pid not in own
 
 
 async def pending_ids(factory: async_sessionmaker[AsyncSession]) -> tuple[str, ...]:
@@ -123,7 +173,7 @@ async def pending_ids(factory: async_sessionmaker[AsyncSession]) -> tuple[str, .
         return await observer.receipts.pending_ids(datetime.now(UTC), limit=100)
 
 
-def test_new_receipt_signals_only_after_commit(database: Database) -> None:
+def test_new_receipt_signals_only_after_commit(database: Database, own_backends: set[int]) -> None:
     async def scenario() -> None:
         engine = database.engine()
         factory = async_sessionmaker(engine, expire_on_commit=False)
@@ -133,11 +183,11 @@ def test_new_receipt_signals_only_after_commit(database: Database) -> None:
             async with listen(database) as notifications:
                 async with SqlAlchemyGitHubWebhookReceiptUnitOfWork(factory) as uow:
                     assert await uow.receipts.save(delivery) is True
-                    await assert_no_signal(notifications)
+                    writer_pid = await uow.session.scalar(text("SELECT pg_backend_pid()"))
+                    await assert_no_signal(notifications, own_backends)
                     assert await pending_ids(factory) == ()
                     await uow.commit()
-                signal = await asyncio.wait_for(notifications.get(), timeout=5)
-                assert (signal.channel, signal.payload) == ("webhook_work_available", "")
+                await expect_signal(notifications, own_backends, writer_pid)
                 assert await pending_ids(factory) == (delivery_id,)
         finally:
             await engine.dispose()
@@ -145,7 +195,9 @@ def test_new_receipt_signals_only_after_commit(database: Database) -> None:
     asyncio.run(scenario())
 
 
-def test_rolled_back_receipt_never_signals_or_becomes_visible(database: Database) -> None:
+def test_rolled_back_receipt_never_signals_or_becomes_visible(
+    database: Database, own_backends: set[int]
+) -> None:
     async def scenario() -> None:
         engine = database.engine()
         factory = async_sessionmaker(engine, expire_on_commit=False)
@@ -154,10 +206,10 @@ def test_rolled_back_receipt_never_signals_or_becomes_visible(database: Database
             async with listen(database) as notifications:
                 async with SqlAlchemyGitHubWebhookReceiptUnitOfWork(factory) as uow:
                     assert await uow.receipts.save(delivery) is True
-                    await assert_no_signal(notifications)
+                    await assert_no_signal(notifications, own_backends)
                     assert await pending_ids(factory) == ()
                     await uow.rollback()
-                await assert_no_signal(notifications)
+                await assert_no_signal(notifications, own_backends)
                 assert await pending_ids(factory) == ()
         finally:
             await engine.dispose()
@@ -165,7 +217,9 @@ def test_rolled_back_receipt_never_signals_or_becomes_visible(database: Database
     asyncio.run(scenario())
 
 
-def test_duplicate_receipt_does_not_send_another_signal(database: Database) -> None:
+def test_duplicate_receipt_does_not_send_another_signal(
+    database: Database, own_backends: set[int]
+) -> None:
     async def scenario() -> None:
         engine = database.engine()
         factory = async_sessionmaker(engine, expire_on_commit=False)
@@ -175,13 +229,13 @@ def test_duplicate_receipt_does_not_send_another_signal(database: Database) -> N
             async with listen(database) as notifications:
                 async with SqlAlchemyGitHubWebhookReceiptUnitOfWork(factory) as uow:
                     assert await uow.receipts.save(delivery) is True
+                    writer_pid = await uow.session.scalar(text("SELECT pg_backend_pid()"))
                     await uow.commit()
-                signal = await asyncio.wait_for(notifications.get(), timeout=5)
-                assert (signal.channel, signal.payload) == ("webhook_work_available", "")
+                await expect_signal(notifications, own_backends, writer_pid)
                 async with SqlAlchemyGitHubWebhookReceiptUnitOfWork(factory) as uow:
                     assert await uow.receipts.save(delivery) is False
                     await uow.commit()
-                await assert_no_signal(notifications)
+                await assert_no_signal(notifications, own_backends)
                 assert await pending_ids(factory) == (delivery_id,)
         finally:
             await engine.dispose()
@@ -196,6 +250,7 @@ class ReconciliationControl:
     active: bool = False
     commits: int = 0
     rollback: bool = False
+    writer_pid: int | None = None
 
 
 class ControlledLinkUnitOfWork(SqlAlchemyGitHubInstallationLinkUnitOfWork):
@@ -226,6 +281,8 @@ class ControlledLinkUnitOfWork(SqlAlchemyGitHubInstallationLinkUnitOfWork):
     async def commit(self) -> None:
         self.control.commits += 1
         if self.control.commits == 2:
+            # The second commit is the apply transaction, the only one that may send the hint.
+            self.control.writer_pid = await self.session.scalar(text("SELECT pg_backend_pid()"))
             self.control.before_commit.set()
             await self.control.release_commit.wait()
             if self.control.rollback:
@@ -291,7 +348,7 @@ async def receipt_retry_state(
 
 
 def test_oauth_reconciliation_signals_only_when_revived_receipt_commits(
-    database: Database,
+    database: Database, own_backends: set[int]
 ) -> None:
     async def scenario() -> None:
         engine = database.engine()
@@ -308,13 +365,13 @@ def test_oauth_reconciliation_signals_only_when_revived_receipt_commits(
             async with listen(database) as notifications:
                 task = asyncio.create_task(use_case.execute("synthetic-token"))
                 await asyncio.wait_for(control.before_commit.wait(), timeout=5)
-                await assert_no_signal(notifications)
+                await assert_no_signal(notifications, own_backends)
                 assert await receipt_retry_state(factory, delivery_id) == (3, DEFERRED_AT, RETRY_AT)
                 control.release_commit.set()
                 workspaces = await asyncio.wait_for(task, timeout=5)
                 assert len(workspaces) == 1
-                signal = await asyncio.wait_for(notifications.get(), timeout=5)
-                assert (signal.channel, signal.payload) == ("webhook_work_available", "")
+                assert control.writer_pid is not None
+                await expect_signal(notifications, own_backends, control.writer_pid)
                 assert await receipt_retry_state(factory, delivery_id) == (0, None, None)
                 assert await pending_ids(factory) == (delivery_id,)
         finally:
@@ -328,7 +385,7 @@ def test_oauth_reconciliation_signals_only_when_revived_receipt_commits(
 
 
 def test_rolled_back_oauth_reconciliation_retains_deferral_and_sends_no_signal(
-    database: Database,
+    database: Database, own_backends: set[int]
 ) -> None:
     async def scenario() -> None:
         engine = database.engine()
@@ -345,12 +402,12 @@ def test_rolled_back_oauth_reconciliation_retains_deferral_and_sends_no_signal(
             async with listen(database) as notifications:
                 task = asyncio.create_task(use_case.execute("synthetic-token"))
                 await asyncio.wait_for(control.before_commit.wait(), timeout=5)
-                await assert_no_signal(notifications)
+                await assert_no_signal(notifications, own_backends)
                 assert await receipt_retry_state(factory, delivery_id) == (3, DEFERRED_AT, RETRY_AT)
                 control.release_commit.set()
                 with pytest.raises(RuntimeError, match="test reconciliation rollback"):
                     await asyncio.wait_for(task, timeout=5)
-                await assert_no_signal(notifications)
+                await assert_no_signal(notifications, own_backends)
                 assert await receipt_retry_state(factory, delivery_id) == (3, DEFERRED_AT, RETRY_AT)
                 assert await pending_ids(factory) == ()
                 async with factory() as observer:
@@ -371,7 +428,9 @@ def test_rolled_back_oauth_reconciliation_retains_deferral_and_sends_no_signal(
     asyncio.run(scenario())
 
 
-def test_oauth_reconciliation_with_no_matching_receipt_sends_no_signal(database: Database) -> None:
+def test_oauth_reconciliation_with_no_matching_receipt_sends_no_signal(
+    database: Database, own_backends: set[int]
+) -> None:
     async def scenario() -> None:
         engine = database.engine()
         factory = async_sessionmaker(engine, expire_on_commit=False)
@@ -384,7 +443,7 @@ def test_oauth_reconciliation_with_no_matching_receipt_sends_no_signal(database:
         try:
             async with listen(database) as notifications:
                 assert len(await use_case.execute("synthetic-token")) == 1
-                await assert_no_signal(notifications)
+                await assert_no_signal(notifications, own_backends)
                 assert await pending_ids(factory) == ()
                 async with factory() as observer:
                     assert (
