@@ -49,6 +49,7 @@ class FakeInstallationRepositoryStore:
     disable_error: Exception | None = None
     identity_changes_remaining: int = 0
     lock_attempts: int = 0
+    rules_refresh_requests: list[UUID] = field(default_factory=list)
 
     async def lock_active_installation(self, provider_installation_id: UUID) -> bool:
         self.lock_attempts += 1
@@ -72,6 +73,9 @@ class FakeInstallationRepositoryStore:
 
     async def record_removal_delivery(self, delivery_id: str) -> bool:
         return True
+
+    async def request_rules_refresh(self, repository_id: UUID) -> None:
+        self.rules_refresh_requests.append(repository_id)
 
     async def disable_installation(self, provider_installation_id: UUID) -> None:
         raise AssertionError("unexpected installation deletion")
@@ -171,6 +175,8 @@ def test_sync_creates_repository_and_its_one_active_default_in_one_commit() -> N
     assert len(store.repositories) == 1
     assert store.created_versions == 1
     assert uow.commits == 1
+    # The connected repository gets its .review/rules.md read in the same commit (#150).
+    assert store.rules_refresh_requests == [result[0].rule_version.repository_id]
 
 
 def test_sync_replay_updates_metadata_but_keeps_the_immutable_active_version() -> None:

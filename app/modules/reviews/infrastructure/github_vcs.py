@@ -146,6 +146,10 @@ _FILES = TypeAdapter(list[_File])
 _COMMITS = TypeAdapter(list[_PullRequestCommit])
 
 
+async def _no_checkpoint() -> None:
+    """The checkpoint of a read that belongs to no run."""
+
+
 def _repository_prefix(locator: PullRequestLocator) -> str:
     if locator.installation_external_id <= 0 or locator.number <= 0:
         raise ValueError("GitHub installation and pull request number must be positive")
@@ -339,11 +343,30 @@ class HttpGitHubVcsProvider:
     async def get_blob(
         self, locator: PullRequestLocator, sha: str, *, checkpoint: RunProviderCheckpoint
     ) -> bytes:
-        prefix = _repository_prefix(locator)
+        _repository_prefix(locator)
+        return await self.get_repository_blob(
+            locator.installation_external_id,
+            locator.repository_full_name,
+            sha,
+            checkpoint=checkpoint,
+        )
+
+    async def get_repository_blob(
+        self,
+        installation_external_id: int,
+        repository_full_name: str,
+        sha: str,
+        *,
+        checkpoint: RunProviderCheckpoint = _no_checkpoint,
+    ) -> bytes:
+        """A blob by id, outside any pull request: the rules status reads one (#150)."""
+        if installation_external_id <= 0:
+            raise ValueError("GitHub installation must be positive")
+        prefix = repository_path_from_full_name(repository_full_name)
         if re.fullmatch(_SHA, sha) is None:
             raise ValueError("GitHub blob SHA must be 40 or 64 hexadecimal characters")
         await checkpoint()
-        token = await self._tokens.get_installation_access_token(locator.installation_external_id)
+        token = await self._tokens.get_installation_access_token(installation_external_id)
         await checkpoint()
         body, _ = await self._get_capped_body(
             f"{prefix}/git/blobs/{sha}",

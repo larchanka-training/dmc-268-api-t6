@@ -70,6 +70,16 @@ _ERROR_TEXTS = {
 }
 
 
+def failure_reason(error_code: str | None, detail: str | None = None) -> str:
+    """The author-facing text of a catalog code and where it happened.
+
+    An unknown code is shown as is. Shared by the check-run and the rules status of a
+    repository (#150), so that both say the same thing about one policy error.
+    """
+    reason = _ERROR_TEXTS.get(error_code or "", error_code or "")
+    return f"{reason} Где: {detail}." if detail else reason
+
+
 @dataclass(frozen=True)
 class CheckRunTarget:
     installation_id: int
@@ -152,9 +162,7 @@ def check_run_view(report: CheckRunReport) -> CheckRunView:
             f"{below}{link}",
             details_url=report.run_url,
         )
-    reason = _ERROR_TEXTS.get(report.error_code or "", report.error_code or "")
-    if report.error_detail:
-        reason = f"{reason} Где: {report.error_detail}."
+    reason = failure_reason(report.error_code, report.error_detail)
     if report.state == "failed":
         summary = (
             f"{reason}{link}"
