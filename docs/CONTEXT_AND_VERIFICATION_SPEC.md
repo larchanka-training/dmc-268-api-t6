@@ -1,19 +1,22 @@
 # CONTEXT_AND_VERIFICATION_SPEC — контекст, верификация и VCS Write-Back
 
-Версия: **1.2, проект уточнения**. Дата: **2026-10-14**.
+Версия: **1.2, утверждена**. Дата: **2026-10-14**.
 Задача: [api#107](https://github.com/larchanka-training/dmc-268-api-t6/issues/107);
 версия 1.2 — [api#140](https://github.com/larchanka-training/dmc-268-api-t6/issues/140).
 
 Основание — предоставленный техлидом документ `107-rules-and-ignore-decision.md`
 от 2026-10-09, разделы 1–12. Формат документов, приоритет требований, ignore и снимок политики
 определены в [RULES_FORMAT_SPEC](RULES_FORMAT_SPEC.md). Эти документы составляют
-одну спецификацию изменения. Версия 1.0 согласована в рабочем обсуждении
-2026-10-09 и включена в [PR #108](https://github.com/larchanka-training/dmc-268-api-t6/pull/108).
-Версия 1.1 уточняет пропуск файлов с неподдерживаемыми путями и требует review.
-Версия 1.2 вносит RAG v1 — кандидатов графа символов — по
-[ADR 0001](adr/0001-graph-rag-v1.md) (§1, §2.1, §3.1–3.2, §3.4–3.5, §4.1, §5, §8.1, §12)
-и требует отдельного review.
-Реализация и прохождение проверок этим документом не заявляются.
+одну спецификацию изменения.
+
+**Статус: утверждено.** Спецификации для
+[#107](https://github.com/larchanka-training/dmc-268-api-t6/issues/107):
+v1.0 — [PR #108](https://github.com/larchanka-training/dmc-268-api-t6/pull/108),
+v1.1 (`unsupported_path`) — [PR #135](https://github.com/larchanka-training/dmc-268-api-t6/pull/135),
+v1.2 (RAG v1, #140) — [PR #157](https://github.com/larchanka-training/dmc-268-api-t6/pull/157).
+Утверждение спецификации не означает выполнения реализации, миграций или проверок.
+Версия 1.2 вносит RAG v1 по
+[ADR 0001](adr/0001-graph-rag-v1.md); согласование остаточных расхождений — #175.
 
 Слова **ДОЛЖЕН**, **НЕЛЬЗЯ** и **МОЖЕТ** задают требования к будущей реализации.
 Числа и контракты ниже — согласованные проектные значения, а не
@@ -33,7 +36,11 @@ default branch репозитория с включённым тумблером
 кандидатов; их текст и рёбра подтверждаются на ревизиях run по §3.5. Векторный
 поиск (v2) — только после гейта eval #146.
 
-1. Политика, документы, дефолты, профили моделей и версии промптов неизменяемы в run.
+1. Политика, документы, дефолты, профили моделей, версии промптов и порог severity
+   неизменяемы в run. `severity_threshold` читается из Repository при создании run,
+   сохраняется в привязках и policy snapshot (RULES_FORMAT_SPEC §7), retry его
+   переиспользует; изменение настройки действует на новые runs/rerun. Это целевой
+   профиль #107; legacy-оговорка о чтении во время обработки — PIPELINE_SPEC §9.
 2. Ignore применяется ко всем источникам всех LLM-вызовов, включая конвенции,
    AST, verifier, repair и fallback. Кэш не даёт разрешения на отправку источника.
 3. Карта diff доказывает допустимость якоря; manifest — видимость фрагмента;
@@ -75,15 +82,16 @@ claim run
   → получить согласованный снимок VCS и перечень изменений
   → изолировать unsupported_path, сохранить причины пропусков
   → применить built-in exclusions и review-ignore с rename/copy provenance
-  → если все изменения доказанно исключены: running → skipped, LLM calls = 0
+  → если все изменения доказанно исключены и нет технических пропусков: running → skipped, LLM calls = 0
   → сохранить DiffMap с причинами пропусков
-  → если кроме unsupported_path остались только доказанные исключения: backend result → publishing
+  → если остались только технические пропуски и доказанные исключения: backend none result → publishing
   → определить summary-only
   → получить общие конвенции только из base либо зафиксировать отсутствие источников
-  → собрать L0–L4 и окончательно распределить бюджет
+  → собрать L1 → сигнатуры L4 → context.rag → L2 → L3 в бюджете с резервом L0
   → pre-send policy guard → manifest → review LLM
   → формат → координаты → доказательства → детерминированные фильтры
   → если кандидаты остались: manifest → обязательный verifier
+  → применить закреплённый порог severity → сортировка → inline max_comments
   → сохранить FinalReviewResult и публикационный план
   → publishing → сверить head/diff → восстановить или выполнить VCS write-back
 ```
@@ -94,24 +102,31 @@ claim run
 дочитывает те же закреплённые SHA/версии; частичный снимок не разрешает LLM-вызов.
 Недоступный закреплённый объект не заменяется текущей веткой.
 
-Все изменения доказанно исключены, без неклассифицированных `unsupported_path`, —
+Все изменения доказанно исключены, без технических пропусков
+`unsupported_path`, `binary`, `too_large`, —
 отдельная причина `all_changes_ignored`, переход
 `running → skipped`, `verdict=null`, check-run `skipped`, сообщение «Все изменения
 исключены из AI-ревью». Пустой diff имеет отдельную причину `no_changes` с тем же
-отсутствием LLM-вызовов. Бинарные/generated файлы учитываются как исключения;
-неполученный patch разрешённого текстового файла — неполнота, а не ignore.
+отсутствием LLM-вызовов. Generated и совпадения масок — доказанные исключения.
+Бинарные и слишком большие файлы — технические пропуски `binary`/`too_large`,
+как и `unsupported_path`; неполученный patch разрешённого текстового файла —
+неполнота, а не ignore.
 
 Локальный `unsupported_path` не останавливает run: файл исключается из контекста
 по §9.1, остальные изменения анализируются с неполным покрытием. Если inventory
-полон и достоверен, есть хотя бы один `unsupported_path`, а все записи без этой
-причины доказанно исключены политикой/built-in exclusions, backend создаёт
-`FinalReviewResult` с `coverage.status=none`, причиной `unsupported_path`, пустыми
+полон и достоверен, есть хотя бы один технический пропуск (`unsupported_path`,
+`binary` или `too_large`), а все остальные записи доказанно исключены
+политикой/built-in generated, backend создаёт
+`FinalReviewResult` с `coverage.status=none`, фактическими причинами пропусков, пустыми
 findings и `verdict=null`, без conventions/review/verifier calls. Он сохраняется
 с публикационным планом и проходит обычный `publishing → succeeded`, check-run
 `neutral`. Это не `all_changes_ignored`/`no_changes` и не включает `summaryOnly`:
 прежние основания summary-only и неполного inventory по §2.3 сохраняются.
 Обычный разрешённый файл с отсутствующим patch или неизвестным счётчиком не
 считается исключением и не позволяет применить эту ветку `none`.
+PR только из бинарных/слишком больших файлов (включая смесь с ignored или
+`unsupported_path`) следует этой же ветке. Технические пропуски при наличии
+анализируемых изменений дают partial; таблица исходов — SYSTEM_DESIGN §9.
 
 ### 2.3. Summary-only и исходный diff
 
@@ -234,7 +249,7 @@ queries и resolver закрепляются в `ast_profile_version` и lockfil
 Другие языки сохраняют L1–L3; отсутствие parser не отменяет базовые проверки.
 Здесь зависимости не добавляются.
 
-Индексируются изменённые разрешённые файлы, затем непосредственно импортированные
+В пределах run разбираются AST изменённых разрешённых файлов, затем непосредственно импортированные
 ими определения. Дерево для RIGHT берётся на `head_sha`; для LEFT — на
 `diff_old_sha`. Импорт из LEFT не разрешается по head. AST — средство выбора
 контекста, а не type checker и не доказательство поведения во время выполнения.
@@ -430,6 +445,10 @@ tokenizer используется консервативная оценка gat
 должны вмещаться также в verifier и разрешённый fallback; иначе явная
 `policy_prompt_budget_exceeded` до первого вызова. PR body ограничен 4 000
 токенами с явным маркером усечения; конвенции — 4 000, дерево/списки — 2 000.
+Сообщения коммитов (#82) входят в L0 и общий input budget: первые 20 в API-order,
+каждое ≤500 Unicode-символов, всего ≤10 000 до XML escaping; после escaping
+учитывается фактический token-size с framing. Они остаются недоверенными
+метаданными намерения автора, не evidence и не общим входом conventions.
 Сокращённые метаданные не служат доказательством отсутствующего текста.
 
 Приоритет файла:
@@ -530,7 +549,7 @@ fallback имеет отдельный `call_id` и manifest, даже если 
 ```text
 ContextManifest {
   version: 1, manifest_id, run_id, attempt, call_id,
-  stage: conventions|review|verify, recovery_kind: none|retry|repair|fallback,
+  stage: conventions|review|verification, recovery_kind: none|retry|repair|fallback,
   parent_call_id?, policy_snapshot_id, diff_snapshot_id?,
   prompt_checksum, schema_version, model_profile_version,
   rendered_messages_sha256, input_tokens_estimate,
@@ -598,7 +617,8 @@ prompt хранить не требуется; ссылки на истекаю�
 Первое внедрение вводит **ReviewOutput v2**: сохраняет координаты
 `path/start_line/line` без `side`, внутренне `RIGHT`, и добавляет обязательное
 `evidence_refs` к finding. Остальные поля и предел **10 кандидатов** сохраняются;
-атрибуция меняется по RULES_FORMAT_SPEC. Старый обязательный текстовый custom-prefix
+атрибуция меняется по RULES_FORMAT_SPEC; полный состав и ограничения остальных
+полей — SYSTEM_DESIGN §5 (`ReviewFinding`). Старый обязательный текстовый custom-prefix
 не является контрактом v2. Версия схемы и prompt закрепляются вместе.
 
 ```json
@@ -626,14 +646,20 @@ API, хранения, hash/dedup и eval. Старые v1 findings не пол�
 
 ### 6.2. Проходы и причины отказа
 
-| Проход | Проверка | Исход |
-| --- | --- | --- |
-| 1. Формат | JSON/schema, типы, обязательные поля, enum, max 10, диапазоны | Весь ответ принят либо восстановление по §7; ошибка не равна пустому успешному review |
-| 2. Координаты | Canonical path, revision/side, существование строк, каждый элемент диапазона, DiffMap | `inline_eligible`, `general_only` либо отбрасывание |
-| 3. Доказательства | Все evidence refs разрешаются в manifest принятого reviewer-call; source разрешён | `evidence_not_shown`, `evidence_source_disallowed`, `revision_mismatch` отбрасывают кандидата |
-| 4. Политика/дубли | Ignore guard, сохранённые правила lint-filter, точная дедупликация, пороги публикации | Причина сохраняется, остальные кандидаты продолжают pipeline |
-| 5. Verifier | Отдельный обязательный смысловой проход всего оставшегося набора | Только `supported` переходит дальше |
-| 6. Публикация | Неизменяемый payload, допустимый адаптер, свежесть head/diff | Публикация или явный отказ, без угадывания координат |
+| Проход | Вход | Проверка | Выход и коды отказа |
+| --- | --- | --- | --- |
+| 1. Формат | Raw reviewer response, закреплённая schema v2/v3 | JSON, типы, обязательные поля, enum, max 10, диапазоны | Валидный ReviewOutput либо восстановление по §7; `llm_invalid_output` после исчерпания восстановления, не пустой успешный review |
+| 2. Координаты | Candidates, DiffMap, manifest принятого review-call | Canonical path, revision/side, существование и видимость каждой строки диапазона | `inline_eligible` / `general_only`; причины/drop: `unknown_path`, `wrong_side`, `left_anchor_unsupported`, `line_absent`, `cross_hunk_range`, `range_gap`, `anchor_not_visible`, `ignored_file`, `incomplete_diff`, `unsupported_provider_anchor` (§9.3) |
+| 3. Доказательства | Candidates с допустимыми координатами, evidence refs и manifest review-call | Все refs показаны, источники разрешены, ревизии совпадают | Допущенные candidates; `evidence_not_shown`, `evidence_source_disallowed`, `revision_mismatch` — drop кандидата |
+| 4. Политика/дубли | Допущенные candidates, IgnorePolicy, закреплённый lint-filter и dedup keys | Ignore guard, чистый lint, точная дедупликация; порог severity здесь не применяется | Сохранённый набор; drop `ignored_file`, `lint_filter`, `duplicate`; утечка источника в prompt — `policy_context_violation`, failed до вызова |
+| 5. Verifier | Замороженные candidates после прохода 4, policy/defaults, код и отдельный manifest | Обязательный смысловой batch по §7 | `supported` идёт дальше; `contradicted`, `insufficient_context` сохраняются без публикации; ошибки всего вызова — §8.4 |
+| 6. Порог и размещение | Только supported, закреплённый `severity_threshold`, `max_comments` | Порог после verifier/Reflection Pass, затем сортировка и inline cap | Drop `severity_threshold` с отдельным счётчиком; остальные — final findings с disposition inline/general; сверх cap — general, не drop |
+| 7. Публикация | FinalReviewResult и immutable publication plan, текущая идентичность VCS | Допустимый адаптер, свежесть head/diff | Публикация или явный отказ по §9–10: `superseded`, `pr_closed`, `publication_payload_too_large`, provider-specific ошибки, `publication_outcome_unknown`; без угадывания координат |
+
+Коды `lint_filter` и `duplicate` — целевые `drop_reason` профиля #107;
+`ignored_file` используется и для policy-drop. Миграция legacy-причин должна
+сохранить исторические значения. `llm_invalid_output` — код reviewer, а
+`verification_invalid_output` относится к verifier (§8.4).
 
 Ошибочная форма ссылки (не integer/нет поля) — ошибка схемы всего ответа;
 правильно сформированная ссылка на непоказанный блок — drop отдельного кандидата.
@@ -664,6 +690,16 @@ accepted_call_id и все решения фильтров. ID не вычисл
 из final findings или severity counts.
 
 ## 7. Обязательный LLM-проверяющий
+
+Отдельный verifier выбран для проверки смысла, применимости правила и suggestion:
+schema/DiffMap/manifest доказывают только форму, координаты и видимость. Рассмотрены
+публикация сразу после детерминированных фильтров (не проверяет смысл), self-check
+в том же reviewer response (нет отдельного прохода) и необязательный verifier
+только для части findings (одинаковые кандидаты получали бы разные гарантии).
+Цена решения — дополнительный LLM-вызов, задержка, cost/token reserve и риск
+потерять верный finding из-за ошибочного отказа. Резерв §7.3 и независимый oracle
+§11 ограничивают и измеряют эту цену; качество verifier не считается доказанным
+самим фактом вызова. Решение также записано в SYSTEM_DESIGN §1.
 
 ### 7.1. Профиль и вход
 
@@ -823,10 +859,17 @@ FinalReviewResult {
     omitted_changed_lines, reasons[], uncertain_candidates
   },
   verdict: blocking|attention|clean|null,
-  severity_counts, summary: {problem, done_well, effort},
+  severity_counts, severity_threshold, below_severity_threshold_count,
+  summary: {problem, done_well, effort},
   summary_text, result_digest, publication_plan_id, created_at
 }
 ```
+
+`severity_threshold` копируется из snapshot run. `below_severity_threshold_count`
+— число supported candidates с `drop_reason=severity_threshold` после прохода 6;
+целое ≥0, включая 0 при backend-only результате. Эти записи остаются в diagnostics,
+но не входят в final findings/severity_counts/verdict. Summary, review body и
+check-run берут число из того же `result_id`; строка выводится только при N > 0.
 
 `complete` означает полноту по разрешённым изменениям и выбранным возможностям
 сервиса, не доказательство отсутствия любых дефектов. Числа по исключённым файлам
@@ -836,7 +879,7 @@ FinalReviewResult {
 значение `null`, а не 0. UI явно обозначает «неизвестно».
 
 Partial устанавливается при summary-only, пропущенном разрешённом diff, усечении,
-`unsupported_path` при анализе других изменений, техническом drop по
+`unsupported_path`/`binary`/`too_large` при анализе других изменений, техническом drop по
 недостоверным координатам/evidence, `insufficient_context`,
 unsupported LEFT или недоступном расширении AST/импортов, необходимом для
 оценки конкретного кандидата.
@@ -847,10 +890,11 @@ unsupported LEFT или недоступном расширении AST/импо
 `rag_edge_unconfirmed` и `rag_limit` записываются в `coverage.reasons`, как `ast_*`,
 и тоже не делают её partial сами по себе; правило `insufficient_context` выше не
 меняется.
-Дедупликация, чистый lint-drop и доказанное contradicted сами по себе не делают
+Дедупликация, чистый lint-drop, severity threshold и доказанное contradicted сами по себе не делают
 полноту partial. Полнота зависит от всего pipeline, не только числа findings.
 
-`unsupported_path` сохраняется в `DiffFile.omission_reason` и `coverage.reasons`;
+Технические причины `unsupported_path`, `binary`, `too_large` сохраняются
+в `DiffFile.omission_reason` и `coverage.reasons`;
 такой файл не считается проверенным или доказанно исключённым политикой и не
 попадает в `excluded_files`. Неизвестные scope/line counts остаются `null`, а не
 уменьшаются до обработанного scope ради `complete`. Если анализируемых изменений
@@ -861,8 +905,8 @@ unsupported LEFT или недоступном расширении AST/импо
 
 | Условие окончательного набора | `verdict` |
 | --- | --- |
-| Есть supported critical/high | `blocking`, даже если coverage partial |
-| Иначе есть supported medium/low | `attention`, даже если coverage partial |
+| Есть supported critical/high после порога | `blocking`, даже если coverage partial |
+| Иначе есть supported medium/low после порога | `attention`, даже если coverage partial |
 | Только info или пусто, coverage complete | `clean` |
 | Только info или пусто, coverage partial/none | `null` |
 | skipped/failed/cancelled или ещё не succeeded | API `null` |
@@ -871,7 +915,7 @@ unsupported LEFT или недоступном расширении AST/импо
 UI отличить неполноту от незавершённого run. В списках и detail используется
 сохранённый итог; старый пересчёт `empty findings → clean` для v1 результата запрещён.
 
-Backend строит summary детерминированно только из supported findings, scope и
+Backend строит summary детерминированно только из supported findings после порога, scope и
 coverage. `problem` — число/категории подтверждённых замечаний либо нейтральное
 «Подтверждённых замечаний нет»; `done_well` — факт объёма выполненного анализа,
 без неподтверждённой похвалы коду; `effort` = large для critical, medium для high,
@@ -893,8 +937,11 @@ small для medium/low, none для info/пусто, при partial не тра
 - Partial с supported high: «Подтверждено 1 замечание высокой серьёзности.
   Проверка неполная: 1 разрешённый файл не вошёл в контекст».
 - Неподдерживаемые пути: «Проверка неполная: пропущен 1 файл с неподдерживаемым
-  путём; остальные изменения проанализированы». При `none`: «AI-ревью не выполнено:
+  путём; остальные изменения проанализированы». При `none`: «AI-ревью: нет доступных для анализа изменений;
   2 файла имеют неподдерживаемые пути; 1 файл исключён политикой».
+  Для бинарных/слишком больших файлов приводятся их отдельные счётчики и причины.
+  Заголовок none — «AI-ревью: нет доступных для анализа изменений» (PIPELINE_SPEC §7),
+  он отличается от failed «AI-ревью не выполнено».
 
 Оригинальное модельное summary хранится только как raw diagnostic output.
 Никакой fallback к нему в API, теле ревью или check-run не допускается. Все три
@@ -946,6 +993,8 @@ runs завершаются закреплённым legacy pipeline; новые
 | `verification_unavailable` | queued, затем failed после лимита попыток | Да, существующие 30 с/2 мин; rate limit учитывает Retry-After |
 | `verification_budget_exceeded`, `verification_deadline_exceeded` | failed без непроверенной публикации | Нет |
 | `all_changes_ignored`, `no_changes` | skipped, verdict null | Не применяется |
+| `unsupported_path`, `binary`, `too_large` | none либо partial по §2.2/§8.1, не failed и не ignored | Не применяется |
+| `rag_candidate_missing`, `rag_edge_unconfirmed`, `rag_limit`; `rag: not_ready` | Причины coverage/omission либо trace; сами по себе не partial и не error_code failed (§3.5, §8.1) | Без дополнительных вызовов; ревью продолжается без кандидата/RAG |
 | `ast_*`, `insufficient_context` | Coverage reason при недоступном необходимом основании, сами по себе не error_code failed | Без дополнительных вызовов сверх резерва |
 
 Ошибки конкретного provider call сохраняют исходный код/статус в trace; публичное
@@ -1108,7 +1157,10 @@ hunks, невозможная нулевая координата существ
 смысловую проверку для общего текста только при валидных разрешённых доказательствах.
 Дополнительные ограничения `general_only` заданы в §6.2. Причины сохраняются: `unknown_path`, `wrong_side`, `line_absent`, `cross_hunk_range`,
 `range_gap`, `anchor_not_visible`, `ignored_file`, `incomplete_diff`,
-`unsupported_provider_anchor`.
+`unsupported_provider_anchor`, `left_anchor_unsupported`.
+`left_anchor_unsupported` означает корректную LEFT-привязку, невыразимую в v2;
+`wrong_side` — несовпадение заявленной стороны с реальной стороной строки/ревизии.
+Неподдерживаемый LEFT не исправляется подстановкой RIGHT.
 
 `suggestion` — готовая замена ровно исходного RIGHT-диапазона, включая обе границы,
 а не unified diff. Пустая строка означает удаление диапазона и отличается от `null`.
@@ -1226,6 +1278,24 @@ Endpoint — `POST /projects/{id}/merge_requests/{iid}/discussions`.
 }
 ```
 
+Пример отдельной удалённой строки old11 (без suggestion и `line_range`):
+
+```json
+{
+  "body": "Удаление нарушает показанный контракт вызывающего кода.",
+  "position": {
+    "position_type": "text",
+    "base_sha": "1111111111111111111111111111111111111111",
+    "start_sha": "2222222222222222222222222222222222222222",
+    "head_sha": "3333333333333333333333333333333333333333",
+    "old_path": "a",
+    "new_path": "a",
+    "old_line": 11
+  }
+}
+```
+
+Этот пример — контракт LEFT/v3, не разрешение публиковать LEFT из v2.
 Одиночный context old12/new13 использует ту же position без `line_range`,
 с `old_line=12,new_line=13`; одиночное удаление old11 — только `old_line=11`.
 При rename оба пути остаются своими, SHA1 для line_code использует новый API-путь;
@@ -1476,8 +1546,8 @@ quality gates не объявляются достигнутыми без baseli
 | API RunDetail/RunSession/latestRun и UI | Добавить coverage, resultVersion/verificationMode; null verdict при partial без значимых supported findings |
 | Postprocess/lint-filter, prompt fixtures и review README | Версии evidence/атрибуции и фильтров; не восстанавливать raw summary |
 | VCS publisher | §9–10: DiffMap, run-specific identities, сохранённый payload, адресные ошибки и recovery |
-| SYSTEM_DESIGN Р-13, §9: RAG вне MVP; §1 этой спецификации: без RAG и индексации репозитория | Версия 1.2, [ADR 0001](adr/0001-graph-rag-v1.md): RAG v1 — граф символов с указателями; §2.1 `index_commit_sha`, §3.1 `retrieved_excerpt`, §3.5 правило ревизий и подтверждение рёбер, §4.1 слот бюджета, §5 manifest и guard |
-| SYSTEM_DESIGN §10/§13: код клиента только в кэше блобов до 7 дней | Индекс — производные метаданные без текста и сигнатур, 30 дней без использования в ревью; по событиям сразу нечитаем, физически удаляется не позже чем через 1 ч ([ADR 0001 §4](adr/0001-graph-rag-v1.md#4-хранение-очистка-и-изоляция)) |
+| SYSTEM_DESIGN Р-13, §9: RAG вне MVP; исторический §1 v1.0 этой спецификации (заменён v1.2): без RAG и индексации репозитория | Версия 1.2, [ADR 0001](adr/0001-graph-rag-v1.md): RAG v1 — граф символов с указателями; §2.1 `index_commit_sha`, §3.1 `retrieved_excerpt`, §3.5 правило ревизий и подтверждение рёбер, §4.1 слот бюджета, §5 manifest и guard |
+| SYSTEM_DESIGN §10/§13: код клиента только в кэше блобов до 7 дней | Индекс — производные метаданные без текста и сигнатур, 30 дней с `last_used_at` (его сдвигают чтение при ревью и постановка full, не чаще раза в час; incremental не продлевает TTL); по событиям сразу нечитаем, физически удаляется не позже чем через 1 ч ([ADR 0001 §4](adr/0001-graph-rag-v1.md#4-хранение-очистка-и-изоляция)) |
 | PIPELINE_SPEC §2, §6 | Действие `context.rag`; `rag_*` — причины coverage, RAG не задаёт `error_code` |
 | TEST_PLAN | §3.5: функциональные сценарии RAG, корпус со снимком репозитория, A/B-метрика вклада и гейт v2 до замера #146 |
 
@@ -1511,7 +1581,6 @@ quality gates не объявляются достигнутыми без baseli
 по §2.2; публикация требует завершённого проверенного результата.
 
 Согласование содержания обеих спецификаций, включая новые лимиты, профиль и
-контракты, зафиксировано в начале документа. Оно не означает выполнения
-реализации, проверок или утверждающего GitHub review. Формальный approving review
-на текущем head PR остаётся условием утверждения #107; закрытие задачи этим
-документом не заявляется.
+контракты, зафиксировано в PR #108/#135/#157 (v1.0/v1.1/v1.2).
+Это не означает выполнения реализации или проверок; последующие изменения
+проходят review собственного PR. Закрытие #107 этим документом не заявляется.
