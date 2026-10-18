@@ -193,6 +193,25 @@ Cancelling an attempted Run (new head, closed PR) publishes the check-run close 
 the same delivery. Missing database, broker or GitHub App configuration stops startup before
 any receipt is claimed.
 
+Rules status reads (api#150). The worker also reads `.review/rules.md` of the default branch
+for the rules status page (`GET /api/repos/{repo_id}/rules-status`; the API process holds no App
+key, `docs/SECRETS.md`). A read is requested by a marker on the repository's
+`repository_rules_status` row: onboarding writes it in the sync transaction, a `push` to the
+default branch writes it while its receipt is dispatched, and the API writes it on a GET that
+finds no result, one older than 10 minutes, or a retryable failure older than 30 seconds. Each
+writer sends `NOTIFY webhook_work_available` in the same transaction, so the hint wakes the same
+scan as a receipt. Every scan, the first one after startup included, then claims up to 20
+requests with a five-minute lease, reads each repository outside any transaction (the default
+branch from `GET /repos/{owner}/{repo}`, its full commit SHA, the tree and the blob by SHA,
+RULES_FORMAT_SPEC §3.1) and stores the result in a short transaction. A request written during
+the read survives it and is answered by the next scan; a read that raises keeps its claim, so the
+request is taken again when the lease ends. A full batch of 20 runs the next scan at once, like
+100 deliveries. One line per read is logged: `Rules status of repository <id>: <status>
+[<code>]`, never the text. A `push` to another branch or a tag is `ignored_irrelevant_event` with
+detail `not_default_branch`; a push to a repository that is not connected is
+`ignored_irrelevant_event` with detail `unknown_repository` and is not deferred, because
+connecting the repository requests a read anyway.
+
 Installation events. GitHub sends each repository of `installation.created`,
 `installation_repositories.added` and the removal events as `id`, `node_id`, `name`,
 `full_name` and `private` only. The parser requires `id` and `full_name` and ignores the
@@ -351,7 +370,8 @@ shows why a label produced no Run:
 GitHub webhook delivery <delivery_id> event=<event> status=<status> detail=<detail> [retry_at=<time|none>]
 ```
 
-`status` is the dispatch status: `projected_pr`, `processed_ci`, `onboarded`, the final
+`status` is the dispatch status: `projected_pr`, `processed_ci`, `onboarded`,
+`requested_rules_refresh` (a `push` to the default branch, see "Rules status reads"), the final
 `ignored_irrelevant_event` and `ignored_invalid_event`, or a deferral
 (`ignored_unknown_installation`, `ignored_unknown_repository`, `deferred_known_event`,
 `deferred_repository_details`, retried as described in "Deferred deliveries" below;
