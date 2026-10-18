@@ -9,9 +9,9 @@ Manifest format (at <root>/responses/manifest.json)::
     {
       "schema_version": 1,
       "model_id": "recorded-model-id",
-      "prompt_path": "review/prompts/review.system.v1.md",
+      "prompt_path": "review/prompts/review.system.v2.md",
       "prompt_sha": "<64-character SHA-256 hex digest>",
-      "prompt_version": "v1",
+      "prompt_version": "v2",
       "static_inputs": ["<sorted relative prompt/rule/rendering paths>"],
       "static_digest": "sha256-v1:<64-character SHA-256 hex digest>",
       "corpus_digest": "sha256-v1:<64-character SHA-256 hex digest>",
