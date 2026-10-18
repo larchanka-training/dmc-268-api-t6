@@ -149,14 +149,18 @@ def _api_dtos(base: type[ApiDto] = ApiDto) -> list[type[ApiDto]]:
     return found
 
 
-def test_no_api_dto_declares_a_timestamp_outside_utc() -> None:
-    # A new timestamp field must use UtcDatetime, or the ui Zod contract rejects its offset.
-    bare = [
-        f"{dto.__name__}.{name}"
-        for dto in _api_dtos()
-        for name, field in dto.model_fields.items()
+def _bare_timestamps(models: Sequence[type[BaseModel]]) -> list[str]:
+    return [
+        f"{model.__name__}.{name}"
+        for model in models
+        for name, field in model.model_fields.items()
         if _has_bare_datetime(field.annotation, tuple(field.metadata))
     ]
+
+
+def test_no_api_dto_declares_a_timestamp_outside_utc() -> None:
+    # A new timestamp field must use UtcDatetime, or the ui Zod contract rejects its offset.
+    bare = _bare_timestamps(_api_dtos())
 
     assert _api_dtos()
     assert bare == []
@@ -209,15 +213,6 @@ def _response_models(routes: Sequence[BaseRoute]) -> list[type[BaseModel]]:
             nested for field in model.model_fields.values() for nested in _models(field.annotation)
         ]
     return found
-
-
-def _bare_timestamps(models: list[type[BaseModel]]) -> list[str]:
-    return [
-        f"{model.__name__}.{name}"
-        for model in models
-        for name, field in model.model_fields.items()
-        if _has_bare_datetime(field.annotation, tuple(field.metadata))
-    ]
 
 
 def test_no_api_response_model_returns_a_timestamp_outside_utc() -> None:
