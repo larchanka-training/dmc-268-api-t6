@@ -481,6 +481,7 @@ EXTERNAL = ImportResolution.EXTERNAL
 # --- AC6: incremental = full ------------------------------------------------------------
 
 _USER = b"from lib import target\n\n\ndef use():\n    return target()\n"
+_GO_MOD = b"module example.com/m\n"
 
 
 @pytest.mark.integration
@@ -526,6 +527,134 @@ def test_ac6_a_declaration_deleted_and_a_file_renamed(database: _Database) -> No
             ("a", EXTERNAL),
             ("b", EXTERNAL),
         }
+
+    _run(database, scenario)
+
+
+# Reads a name the next commit declares, one it deletes and one of an untouched member.
+_RENAME_GO_TOOL = (
+    b'package tool\n\nimport "example.com/m/pkg"\n\n'
+    b"func Run() {\n\tpkg.Baz()\n\tpkg.Bar()\n\tpkg.Keep()\n}\n"
+)
+_RENAME_GO_KEEP = b"package pkg\n\nfunc Keep() {}\n"
+_RENAME_PY_OTHER = b"from lib import foo\n\n\ndef keep():\n    return foo()\n"
+
+
+def _go_package_edges(path: str) -> set[IndexedEdge]:
+    return {_imports(path, f"pkg/{member}.go") for member in ("a", "b", "c")}
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize(
+    ("before_tree", "after_tree", "declarations", "before_edges", "after_edges"),
+    [
+        (
+            {
+                "lib.py": b"def foo():\n    return 1\n\n\ndef bar():\n    return 2\n",
+                "user.py": b"from lib import bar, foo\n\n\ndef use():\n    return foo() + bar()\n",
+                "other.py": _RENAME_PY_OTHER,
+            },
+            {
+                # `foo` renamed to `baz`, `bar` deleted while `user.py` still calls it.
+                "lib.py": b"def baz():\n    return 1\n",
+                "user.py": b"from lib import bar, baz\n\n\ndef use():\n    return baz() + bar()\n",
+                "other.py": _RENAME_PY_OTHER,
+            },
+            {"lib.py": ({"foo", "bar"}, {"baz"})},
+            {
+                _imports("user.py", "lib.py"),
+                _uses("user.py", "lib.py", "bar"),
+                _uses("user.py", "lib.py", "foo"),
+                _imports("other.py", "lib.py"),
+                _uses("other.py", "lib.py", "foo"),
+            },
+            # (path, name) edges are joined at read time: a deleted name keeps its edge.
+            {
+                _imports("user.py", "lib.py"),
+                _uses("user.py", "lib.py", "bar"),
+                _uses("user.py", "lib.py", "baz"),
+                _imports("other.py", "lib.py"),
+                _uses("other.py", "lib.py", "foo"),
+            },
+        ),
+        (
+            {
+                "go.mod": _GO_MOD,
+                "pkg/a.go": b"package pkg\n\nfunc Foo() {}\n",
+                "pkg/b.go": b"package pkg\n\nfunc Bar() {}\n\nfunc Other() {}\n",
+                "pkg/c.go": _RENAME_GO_KEEP,
+                "cmd/main.go": (
+                    b'package main\n\nimport "example.com/m/pkg"\n\n'
+                    b"func main() {\n\tpkg.Foo()\n\tpkg.Bar()\n}\n"
+                ),
+                "tool/tool.go": _RENAME_GO_TOOL,
+            },
+            {
+                # `Foo` renamed to `Baz`, `Bar` deleted while `cmd/main.go` still calls it.
+                "go.mod": _GO_MOD,
+                "pkg/a.go": b"package pkg\n\nfunc Baz() {}\n",
+                "pkg/b.go": b"package pkg\n\nfunc Other() {}\n",
+                "pkg/c.go": _RENAME_GO_KEEP,
+                "cmd/main.go": (
+                    b'package main\n\nimport "example.com/m/pkg"\n\n'
+                    b"func main() {\n\tpkg.Baz()\n\tpkg.Bar()\n}\n"
+                ),
+                "tool/tool.go": _RENAME_GO_TOOL,
+            },
+            {
+                "pkg/a.go": ({"Foo"}, {"Baz"}),
+                "pkg/b.go": ({"Bar", "Other"}, {"Other"}),
+                "pkg/c.go": ({"Keep"}, {"Keep"}),
+            },
+            {
+                *_go_package_edges("cmd/main.go"),
+                _uses("cmd/main.go", "pkg/a.go", "Foo"),
+                _uses("cmd/main.go", "pkg/b.go", "Bar"),
+                *_go_package_edges("tool/tool.go"),
+                _uses("tool/tool.go", "pkg/b.go", "Bar"),
+                _uses("tool/tool.go", "pkg/c.go", "Keep"),
+            },
+            # A name no member declares gets no edge; `tool/tool.go` changes by rule G only.
+            {
+                *_go_package_edges("cmd/main.go"),
+                _uses("cmd/main.go", "pkg/a.go", "Baz"),
+                *_go_package_edges("tool/tool.go"),
+                _uses("tool/tool.go", "pkg/a.go", "Baz"),
+                _uses("tool/tool.go", "pkg/c.go", "Keep"),
+            },
+        ),
+    ],
+    ids=["python", "go"],
+)
+def test_ac6_a_declaration_renamed_and_another_deleted_in_a_surviving_file(
+    database: _Database,
+    before_tree: Tree,
+    after_tree: Tree,
+    declarations: Mapping[str, tuple[set[str], set[str]]],
+    before_edges: set[IndexedEdge],
+    after_edges: set[IndexedEdge],
+) -> None:
+    def declared(snapshot: Snapshot) -> dict[str, set[str]]:
+        names: dict[str, set[str]] = {path: set() for path in declarations}
+        for symbol in snapshot.symbols:
+            if symbol.key.path in names:
+                names[symbol.key.path].add(symbol.key.qualified_name)
+        return names
+
+    async def scenario(indexer: Indexer) -> None:
+        before = await indexer.start(before_tree)
+        assert before.edges == before_edges
+        assert declared(before) == {path: names for path, (names, _) in declarations.items()}
+        indexer.branch.push(after_tree)
+
+        after = await indexer.incremental_equals_full(await indexer.build(database.a), before)
+
+        # Every file survives; the importers' edges changed, their import records did not.
+        assert {path for path, _ in after.files} == {path for path, _ in before.files}
+        assert after.edges != before.edges
+        assert after.edges == after_edges
+        assert after.imports == before.imports
+        assert declared(after) == {path: names for path, (_, names) in declarations.items()}
 
     _run(database, scenario)
 
@@ -656,7 +785,6 @@ def test_a_python_runtime_module_wins_over_its_stub_and_two_roots_tie(database: 
     _run(database, scenario)
 
 
-_GO_MOD = b"module example.com/m\n"
 _MAIN = b'package main\n\nimport "example.com/m/pkg"\n\nfunc main() {\n\tpkg.Run()\n}\n'
 
 
@@ -1024,6 +1152,7 @@ _OK = b"def ok():\n    return 1\n"
         ("config/.env.py", _OK, ExclusionClass.SECRET),
         ("vendor/lib.py", _OK, ExclusionClass.VENDORED),
         ("dist/app.js", b"export const x = 1;\n", ExclusionClass.GENERATED),
+        ("web/package-lock.json", b"{}\n", ExclusionClass.GENERATED),
         ("notes.txt", b"notes\n", ExclusionClass.UNSUPPORTED_LANGUAGE),
         ("legacy/old.py", _OK, ExclusionClass.IGNORED),
         ("link.py", Link("ok.py"), ExclusionClass.SYMLINK),
@@ -1037,6 +1166,7 @@ _OK = b"def ok():\n    return 1\n"
         "secret",
         "vendored",
         "generated",
+        "lock-file",
         "unsupported-language",
         "ignored",
         "symlink",
