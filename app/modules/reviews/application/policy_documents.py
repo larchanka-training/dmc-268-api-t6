@@ -82,6 +82,10 @@ class LoadPolicyDocuments:
             agents=await self._load(root, AGENTS_DOCUMENT_PATH),
         )
 
+    async def load_document(self, path: str) -> LoadedPolicyDocument:
+        """Read one document only, with the same rules as ``execute``."""
+        return await self._load(await self._source.list_entries(None), path)
+
     async def _load(self, root: Mapping[str, PolicyTreeEntry], path: str) -> LoadedPolicyDocument:
         *directories, name = path.split("/")
         entries = root

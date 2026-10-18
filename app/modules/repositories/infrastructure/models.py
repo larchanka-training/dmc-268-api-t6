@@ -207,3 +207,71 @@ class RepoConventionDraft(Base):
     )
     files: Mapped[list[dict[str, str]]] = mapped_column(JSONB, nullable=False)
     created_at: Mapped[datetime] = timestamp_column()
+
+
+class RepositoryRulesStatus(Base):
+    """The last read of ``.review/rules.md`` on the default branch (#150), one row per repository.
+
+    ``webhook-worker`` writes it; the API only reads it and requests a new read. A row
+    without ``status`` is a request that has not been answered yet. ``missing`` is a
+    stored result too: the absence was proved by a complete read of the revision.
+    """
+
+    __tablename__ = "repository_rules_status"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('present', 'missing', 'invalid', 'unavailable')",
+            name="ck_repository_rules_status_status",
+        ),
+        # A read records its branch and time; a request that is not answered yet has neither.
+        CheckConstraint(
+            "num_nulls(status, branch, checked_at) IN (0, 3)",
+            name="ck_repository_rules_status_read_complete",
+        ),
+        CheckConstraint(
+            "sha IS NULL OR sha ~ '^([0-9a-f]{40}|[0-9a-f]{64})$'",
+            name="ck_repository_rules_status_sha",
+        ),
+        CheckConstraint(
+            "checksum IS NULL OR checksum ~ '^[0-9a-f]{64}$'",
+            name="ck_repository_rules_status_checksum",
+        ),
+        CheckConstraint(
+            "status <> 'present' OR num_nulls(sha, text, checksum, ignore_masks) = 0",
+            name="ck_repository_rules_status_present",
+        ),
+        CheckConstraint(
+            "status <> 'missing' OR num_nulls(sha, defaults_version) = 0",
+            name="ck_repository_rules_status_missing",
+        ),
+        CheckConstraint(
+            "status NOT IN ('invalid', 'unavailable') OR jsonb_array_length(diagnostics) > 0",
+            name="ck_repository_rules_status_diagnosed",
+        ),
+        Index(
+            "ix_repository_rules_status_refresh",
+            "refresh_requested_at",
+            postgresql_where=text("refresh_requested_at IS NOT NULL"),
+        ),
+    )
+
+    repository_id: Mapped[UUID] = mapped_column(
+        ForeignKey("repositories.id", ondelete="CASCADE"), primary_key=True
+    )
+    status: Mapped[str | None] = mapped_column(String(16))
+    branch: Mapped[str | None] = mapped_column(String(255))
+    sha: Mapped[str | None] = mapped_column(String(64))
+    # ``text`` would shadow ``sqlalchemy.text`` in the class body.
+    content: Mapped[str | None] = mapped_column("text", TEXT)
+    # SHA-256 of the raw bytes (RULES_FORMAT_SPEC §3.2); the Git blob id is not a checksum.
+    checksum: Mapped[str | None] = mapped_column(CHAR(64))
+    ignore_masks: Mapped[list[str] | None] = mapped_column(JSONB)
+    diagnostics: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSONB, nullable=False, server_default=text("'[]'")
+    )
+    defaults_version: Mapped[str | None] = mapped_column(String(64))
+    checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # The durable re-read request: set by the API, a push or onboarding, cleared by the read
+    # that answers it. The claim keeps two workers from reading the same repository at once.
+    refresh_requested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    refresh_claimed_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

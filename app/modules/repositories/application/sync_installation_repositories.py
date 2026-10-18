@@ -56,6 +56,10 @@ class InstallationRepositoryStore(RepositoryRuleVersionStore, Protocol):
         """Record once in this transaction; false means its effect already committed."""
         ...
 
+    async def request_rules_refresh(self, repository_id: UUID) -> None:
+        """Ask ``webhook-worker`` to read ``.review/rules.md`` of the repository (#150)."""
+        ...
+
 
 class InstallationRepositoriesUnitOfWork(UnitOfWork, Protocol):
     """The sync use case owns the one repository-plus-rules transaction."""
@@ -137,6 +141,8 @@ class SyncInstallationRepositories:
                 )
                 if repository_id is not None:
                     results.append(await onboarding.execute(repository_id, repository.languages))
+                    # In the same commit, so a connected repository always gets its read.
+                    await uow.repositories.request_rules_refresh(repository_id)
             await uow.commit()
         return tuple(results)
 

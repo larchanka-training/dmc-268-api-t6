@@ -20,6 +20,7 @@ from app.modules.repositories.infrastructure.models import ProviderInstallation,
 from app.modules.repositories.infrastructure.rule_version_repository import (
     SqlAlchemyRepositoryRuleVersionStore,
 )
+from app.modules.repositories.infrastructure.rules_status import request_rules_refresh
 from app.modules.workspaces.application.link_github_installations import GitHubInstallation
 from app.modules.workspaces.infrastructure.github_installation_locks import lock_github_account
 from app.modules.workspaces.infrastructure.github_repository_rebinding import (
@@ -231,6 +232,9 @@ class SqlAlchemyInstallationRepositoryStore:
                 set_={"revoked_at": func.clock_timestamp()},
             )
         )
+
+    async def request_rules_refresh(self, repository_id: UUID) -> None:
+        await request_rules_refresh(self._session, repository_id)
 
     async def get_active_rule_version(self, repository_id: UUID) -> PersistedRuleVersion | None:
         return await self._rule_versions.get_active_rule_version(repository_id)
