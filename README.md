@@ -141,8 +141,11 @@ into a queued Run locally, follow the recipe in
 
 ### webhook-worker
 
-webhook-worker replays stored deliveries every 30 s and projects installation and pull request
-events. Label, push and CI deliveries create Runs and publish them to the review queue, so it
+webhook-worker projects installation and pull request events from stored deliveries. It wakes on
+`NOTIFY webhook_work_available` once a new delivery or an OAuth reactivation of deferred ones
+commits, with a 30 s fallback scan
+([details](docs/WEBHOOK_WORKER.md#how-the-worker-handles-deliveries)). Label, push and CI
+deliveries create Runs and publish them to the review queue, so it
 needs RabbitMQ: without `RABBITMQ_URL` it does not start (the compose file passes it), and
 without an active `review.system` prompt (`python -m app.bootstrap.seed_prompts`) no Run is
 created. It runs in the `webhooks` profile and needs `GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY`

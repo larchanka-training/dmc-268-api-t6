@@ -389,6 +389,11 @@ Consumer `review.run.deep` не запускается, очередь толь�
 `run_updated` (`LISTEN` на отдельном autocommit-соединении,
 [run_update_listener.py](../app/bootstrap/run_update_listener.py)) и передаёт события в
 хаб, который хранит для медленного подписчика последний статус каждого Run.
+Процесс `webhook-worker` слушает канал `webhook_work_available` (`LISTEN` на отдельном
+autocommit-соединении, [webhook_work_listener.py](../app/bootstrap/webhook_work_listener.py)):
+уведомление отправляют сохранение новой квитанции и повторная активация отложенных квитанций
+при OAuth, а обход раз в 30 с остаётся резервным
+([WEBHOOK_WORKER.md](WEBHOOK_WORKER.md#how-the-worker-handles-deliveries)).
 
 Хаб ничего не хранит после отключения клиента, поэтому события `/api/stream` несут `id:`, а
 переподключение с `Last-Event-ID` повторяет пропущенное (ui#74, AC 2.16). `id` — это
