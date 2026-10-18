@@ -6,7 +6,7 @@ import asyncio
 import json
 from dataclasses import dataclass, field
 from types import TracebackType
-from typing import cast
+from typing import Any, cast
 from uuid import UUID
 
 import pytest
@@ -324,3 +324,86 @@ def test_publish_snapshot_run_preserves_v2_rule_attribution() -> None:
     assert asyncio.run(PublishReviewOutput(factory, provider).execute(RUN_ID, value)) is True
     assert len(published_processed) == 1
     assert published_processed[0].inline[0].finding.rule_name == ".review/rules.md"
+
+
+def test_store_review_output_preserves_allowed_v2_rules() -> None:
+    from app.modules.reviews.application.store_review_output import (
+        PublishingGuard,
+        StoreReviewOutput,
+    )
+
+    stored_processed: list[ProcessedReviewOutput] = []
+
+    class FakeReviewRepo:
+        async def get_post_processing_input(self, run_id: UUID) -> FindingPostProcessingInput:
+            return FindingPostProcessingInput(
+                hunk_lines={"app/example.py": frozenset({10, 12})},
+                rule_names=frozenset(),
+                allowed_v2_rules=frozenset({".review/rules.md"}),
+            )
+
+        async def lock_for_publishing(self, run_id: UUID) -> PublishingGuard:
+            return PublishingGuard(
+                state="running",
+                worker_id="test-worker",
+                cancel_requested=False,
+                head_sha="head_sha_123",
+                head_current=True,
+                repository_review_event="APPROVE",
+            )
+
+        async def store_review_output(
+            self,
+            run_id: UUID,
+            answer: dict[str, Any],
+            parsed: ReviewOutput,
+            processed: ProcessedReviewOutput,
+        ) -> ReviewPublication:
+            stored_processed.append(processed)
+            return ReviewPublication(
+                head_sha="head_sha_123",
+                findings=(),
+                review_body="body",
+            )
+
+        async def enter_publishing(self, run_id: UUID, **kwargs: Any) -> None:
+            pass
+
+    class FakeUoW:
+        def __init__(self) -> None:
+            self.reviews = FakeReviewRepo()
+
+        async def __aenter__(self) -> FakeUoW:
+            return self
+
+        async def __aexit__(
+            self,
+            exc_type: type[BaseException] | None,
+            exc: BaseException | None,
+            tb: TracebackType | None,
+        ) -> None:
+            pass
+
+        async def commit(self) -> None:
+            pass
+
+        async def rollback(self) -> None:
+            pass
+
+    class FakeQueue:
+        def __init__(self) -> None:
+            self.published: list[Any] = []
+
+        async def publish_review(self, pointer: Any) -> None:
+            self.published.append(pointer)
+
+    queue = FakeQueue()
+    store = StoreReviewOutput(cast(Any, lambda: FakeUoW()), queue, worker_id="test-worker")
+    value = valid_output()
+    cast(list[dict[str, object]], value["findings"])[0]["rule_name"] = ".review/rules.md"
+
+    success = asyncio.run(store.execute(RUN_ID, value))
+    assert success is True
+    assert len(stored_processed) == 1
+    assert stored_processed[0].inline[0].finding.rule_name == ".review/rules.md"
+    assert len(queue.published) == 1

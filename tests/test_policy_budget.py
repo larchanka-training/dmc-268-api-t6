@@ -76,8 +76,9 @@ def test_policy_tokens_counts_rendered_documents() -> None:
         agents_text="# Architecture\nUse UoW.\n",
     )
     tokens = policy_tokens(snapshot, counter)
-    # Tokens must be greater than raw text because of tags (<repository_rules>, <line>)
-    assert tokens > len("# Security\n1. Validate input.\n") + len("# Architecture\nUse UoW.\n")
+    # Exact rendered character length of policy XML blocks
+    # (<repository_rules> and <project_conventions_document>)
+    assert tokens == 320
 
 
 def test_verify_policy_budget_passes_within_limit() -> None:

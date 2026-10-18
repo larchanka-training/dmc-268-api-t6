@@ -995,3 +995,47 @@ def test_commit_fetch_gateway_code_is_recognized_by_failure_classifier() -> None
     failure = classify_failure(CommitGatewayFailure("GitHub answered 502"))
     assert failure.error_code == "commit_messages_fetch_failed"
     assert failure.message == "GitHub answered 502"
+
+
+def test_verification_error_codes_classification_and_check_runs() -> None:
+    from app.modules.reviews.application.check_runs import check_run_view
+    from app.modules.reviews.application.reflection_pass import (
+        VerificationInvalidOutputError,
+        VerificationUnavailableError,
+    )
+    from app.modules.reviews.application.run_failures import classify_failure
+
+    # Class error_code attributes
+    assert VerificationInvalidOutputError.error_code == "verification_invalid_output"
+    assert VerificationUnavailableError.error_code == "verification_unavailable"
+
+    # classify_failure retryability
+    unavailable = classify_failure(RunFailure("verification_unavailable", "Timeout"))
+    assert unavailable.error_code == "verification_unavailable"
+    assert unavailable.error_code in RETRYABLE_ERROR_CODES
+
+    terminal_codes = [
+        "verification_invalid_output",
+        "verification_context_overflow",
+        "verification_budget_exceeded",
+        "verification_deadline_exceeded",
+    ]
+    for code in terminal_codes:
+        fail = classify_failure(RunFailure(code, "Details"))
+        assert fail.error_code == code
+        assert fail.error_code not in RETRYABLE_ERROR_CODES
+
+    # Check run summary translations
+    target = CheckRunTarget(1, "octo/repo", HEAD, RUN)
+    expected_texts = {
+        "verification_context_overflow": "Обязательные данные проверки не помещаются в контекст.",
+        "verification_invalid_output": "Проверяющий вернул ответ не по контракту.",
+        "verification_unavailable": "Проверяющий временно недоступен.",
+        "verification_budget_exceeded": "Бюджета недостаточно для обязательной проверки.",
+        "verification_deadline_exceeded": "Недостаточно времени для обязательной проверки.",
+    }
+    for code, expected_summary in expected_texts.items():
+        report = CheckRunReport(target, "failed", 1, code)
+        view = check_run_view(report)
+        assert expected_summary in view.summary
+        assert f"`{code}`" in view.summary

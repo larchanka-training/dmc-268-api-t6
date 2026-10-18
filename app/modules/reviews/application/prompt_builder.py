@@ -272,7 +272,7 @@ class PromptBuilder:
         stage: StageName = "review",
     ) -> CallManifest:
         """Construct the exact CallManifest presented in this prompt."""
-        run_id = context.policy_snapshot.run_id if context.policy_snapshot else uuid.uuid4()
+        run_id = context.policy_snapshot.run_id if context.policy_snapshot is not None else None
         blocks: list[ManifestBlock] = []
 
         if context.policy_snapshot is not None:

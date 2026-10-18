@@ -182,10 +182,10 @@ Under Policy Snapshot v2 (`policy_snapshot` present), prompts and candidate find
 
 **Reflection Pass (`prompts/review.verifier.v1.md`)**:
 - Two-pass verification architecture to eliminate hallucinated findings.
-- **Pass 1 (Reviewer)** generates candidate findings conforming to `schemas/review-output.schema.v2.json` with required `evidence_refs` (pointing to visible `block_id` line ranges).
+- **Pass 1 (Reviewer)** generates candidate findings with required `evidence_refs` (pointing to visible `block_id` line ranges).
 - **Pass 2 (Verifier)** checks each candidate against visible code and requirements using `prompts/review.verifier.v1.md`.
   - Verifier prompt envelope: contains `<repository_rules>`, `<project_conventions_document>`, `<service_defaults>`, `<code_context>` (with `<changed_files>`), and `<candidate_findings count="...">` (carrying `<candidate candidate_id="..." path="..." start_line="..." line="..." category="..." severity="...">`, `<title>`, `<body>`, optional `<suggestion>`, and optional `<rule_attribution name="..." />`).
-  - Verifier output: validated at runtime via Pydantic (`VerificationOutput`, `ReviewFindingV2`) and schema `schemas/verifier-output.schema.v1.json` (`decisions`: `candidate_id`, `status` in `supported` / `contradicted` / `insufficient_context`, `reason`, `evidence_refs`, `requirement_refs`). Legacy runs without policy snapshot continue to validate v1 output.
+  - Verifier output: validated at runtime via Pydantic (`VerificationOutput`, `ReviewFindingV2`) conforming to contract `schemas/verifier-output.schema.v1.json` (`decisions`: `candidate_id`, `status` in `supported` / `contradicted` / `insufficient_context`, `reason`, `evidence_refs`, `requirement_refs`). Legacy runs without policy snapshot continue to process v1 output.
   - Strict filtering: only candidates with `status="supported"` survive; unverified candidates are dropped, and the review summary is cleansed of hallucinated defects.
 
 ## Rule sets

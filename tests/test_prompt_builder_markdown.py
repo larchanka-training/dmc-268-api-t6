@@ -559,3 +559,46 @@ def test_first_pass_prompt_injection_defense() -> None:
     # Parses cleanly as XML
     root = ET.fromstring(f"<root>{prompt.user}</root>")
     assert root.find(".//file") is not None
+
+
+def test_split_policy_lines_strictly_splits_on_newline() -> None:
+    # \v (vertical tab) and other whitespace characters are treated as linebreaks by splitlines()
+    # but MUST NOT split policy lines in _split_policy_lines
+    text = "line1\vline2\nline3\n"
+    assert _split_policy_lines(text) == ["line1\vline2", "line3"]
+    # Verify divergence from Python's splitlines()
+    assert text.splitlines() == ["line1", "line2", "line3"]
+
+    # Trailing empty lines without newline removal
+    text2 = "a\n\nb\n"
+    assert _split_policy_lines(text2) == ["a", "", "b"]
+
+
+def test_manifest_shown_line_count_excludes_removed_diff_lines() -> None:
+    # 5 total diff lines: 2 removed, 3 added (right-side line numbers 10, 11, 12)
+    diff_lines = (
+        DiffLine(number=1, type="removed", content="old line 1"),
+        DiffLine(number=2, type="removed", content="old line 2"),
+        DiffLine(number=10, type="added", content="new line 1"),
+        DiffLine(number=11, type="added", content="new line 2"),
+        DiffLine(number=12, type="added", content="new line 3"),
+    )
+    changed_file = ChangedFile("app/service.py", "modified", diff_lines)
+    snapshot = make_test_snapshot()
+    context = ReviewContext(
+        system="SYSTEM",
+        rules=(),
+        agents_md=None,
+        conventions=RepoConventions(key_patterns=(), recommendations=()),
+        pr_meta=PullRequestMeta("T", None, "u", "b", "m", (), 1, 3, 2, False, False),
+        changed_files=(changed_file,),
+        omitted_files=(),
+        policy_snapshot=snapshot,
+    )
+    manifest = PromptBuilder().build_manifest(context, call_id=uuid.uuid4())
+    file_block = manifest.get_block(file_block_id("app/service.py"))
+    assert file_block is not None
+    # Must be 3 (sum of shown_ranges 12 - 10 + 1), NOT 5 (len(file.lines))
+    assert file_block.shown_line_count == 3
+    assert len(changed_file.lines) == 5
+    assert file_block.shown_ranges == ((10, 12),)

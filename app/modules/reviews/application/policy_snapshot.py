@@ -363,9 +363,9 @@ class CallManifest:
     """
 
     call_id: UUID
-    run_id: UUID
-    stage: StageName
-    blocks: tuple[ManifestBlock, ...]
+    run_id: UUID | None = None
+    stage: StageName = "review"
+    blocks: tuple[ManifestBlock, ...] = ()
 
     def get_block(self, block_id: str) -> ManifestBlock | None:
         for block in self.blocks:
