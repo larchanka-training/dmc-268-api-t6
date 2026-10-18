@@ -470,10 +470,13 @@ normalized sets of symbol keys, edges and import records are compared.
   import resolution changed; target file deleted; missed direct push; two merges before
   the queue drains;
 - additionally: Python tie-break, Go move, `EXTERNAL` → `RESOLVED` when a file is added;
+- a declaration renamed and another deleted inside a surviving file, Python and Go; the
+  Go case keeps an untouched importer and an untouched member, so its edges change
+  through rule G only;
 - a file that became >256 KiB, binary or a symlink loses its rows;
 - a redelivery does not duplicate rows and does not move the sha backwards;
 - purge between batches;
-- one test per exclusion class and per limit;
+- one test per exclusion class (a lock file among the generated ones) and per limit;
 - two live builds of one Workspace: A publishes, B fails with
   `limit_exceeded:workspace_storage`, and the committed rows stay within both quotas;
 - a job released without a publication records its metrics.

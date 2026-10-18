@@ -544,11 +544,15 @@ here is fixed in the code of the owning task, in this commit.
   rename; import resolution changed; target file deleted; missed direct push; two merges
   before the queue drains).
 - [ ] Also: Python tie-break, Go move, `EXTERNAL` → `RESOLVED` when a file is added.
+- [ ] AC6: a declaration renamed and another deleted inside a surviving file, Python and
+  Go; the Go case keeps an untouched importer and an untouched member, so its edges
+  change through rule G only.
 - [ ] AC4/AC5: a file that became >256 KiB, binary or a symlink loses its rows; deleted and
   renamed files lose their rows.
 - [ ] AC7: a redelivery does not duplicate rows and does not move the sha backwards.
 - [ ] AC12: purge between batches stops the job without writes.
-- [ ] AC4/AC10: one test per exclusion class and per limit.
+- [ ] AC4/AC10: one test per exclusion class (a lock file among the generated ones) and
+  per limit.
 - [ ] AC10 (Workspace quota at write): two live builds of one Workspace; the batch that
   crosses the quota is rolled back, and the committed Workspace total never exceeds it.
 
