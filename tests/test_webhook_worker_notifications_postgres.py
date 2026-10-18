@@ -6,10 +6,11 @@ import asyncio
 import contextlib
 import os
 from collections.abc import AsyncIterator, Iterator
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Any, Literal, cast
+from types import TracebackType
+from typing import Any, Literal, LiteralString, Self, cast
 from uuid import uuid4
 
 import psycopg
@@ -44,6 +45,7 @@ from tests.test_webhook_work_notifications_postgres import (
     ReconciliationControl,
     migrated_database,
     receipt_retry_state,
+    recorded_backends,
     seed_deferred_receipt,
 )
 
@@ -57,6 +59,64 @@ def database() -> Iterator[Database]:
         pytest.skip("set TEST_DATABASE_URL to run PostgreSQL integration tests")
     with migrated_database(database_url) as isolated_database:
         yield isolated_database
+
+
+class OwnHintsConnection:
+    """The real listener connection, minus hints sent by other processes' backends.
+
+    A proxy, not a subclass: ``connect`` is patched on ``AsyncConnection``, so the wrapped
+    chain always builds the base class.
+    """
+
+    def __init__(self, connection: psycopg.AsyncConnection[Any], own: set[int]) -> None:
+        self.connection = connection
+        self.own = own
+
+    async def __aenter__(self) -> Self:
+        await self.connection.__aenter__()
+        return self
+
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
+        await self.connection.__aexit__(exc_type, exc, traceback)
+
+    async def execute(self, query: LiteralString) -> None:
+        await self.connection.execute(query)
+
+    async def notifies(self) -> AsyncIterator[psycopg.Notify]:
+        async for notification in self.connection.notifies():
+            if notification.pid in self.own:
+                yield notification
+
+
+@contextmanager
+def own_listener_hints(own: set[int]) -> Iterator[None]:
+    """Let the production listener see only hints from this process (LISTEN is database-wide)."""
+    connect = psycopg.AsyncConnection.connect
+
+    async def filtering_connect(
+        conninfo: str = "", **kwargs: Any
+    ) -> psycopg.AsyncConnection[tuple[Any, ...]] | OwnHintsConnection:
+        connection = await connect(conninfo, **kwargs)
+        # SQLAlchemy also uses this driver; filter only the dedicated listener.
+        if "application_name=test_webhook_listener_" in conninfo:
+            return OwnHintsConnection(connection, own)
+        return connection
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(psycopg.AsyncConnection, "connect", filtering_connect)
+        yield
+
+
+@pytest.fixture(autouse=True)
+def only_own_hints() -> Iterator[None]:
+    # Autouse runs before ``monkeypatch``, so a test's own connect patch wraps this one.
+    with recorded_backends() as own, own_listener_hints(own):
+        yield
 
 
 class Wake(asyncio.Event):
