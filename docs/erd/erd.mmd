@@ -12,6 +12,7 @@ erDiagram
     REPOSITORIES ||--o{ CODE_CHANGES : contains
     REPOSITORIES ||--o{ REPO_CONVENTIONS : caches
     REPOSITORIES ||--o| CODE_INDEX_STATES : indexes
+    REPOSITORIES ||--o| REPOSITORY_RULES_STATUS : reads
     REPOSITORIES ||--o{ CODE_INDEX_FILES : holds
     REPOSITORIES ||--o{ CODE_INDEX_SYMBOLS : declares
     REPOSITORIES ||--o{ CODE_INDEX_EDGES : links
@@ -181,6 +182,20 @@ erDiagram
       int file_count
       int symbol_count
       int edge_count
+    }
+    REPOSITORY_RULES_STATUS {
+      uuid repository_id PK, FK
+      varchar status
+      varchar branch
+      varchar sha
+      text text
+      char checksum
+      jsonb ignore_masks
+      jsonb diagnostics
+      varchar defaults_version
+      timestamptz checked_at
+      timestamptz refresh_requested_at
+      timestamptz refresh_claimed_until
     }
     CODE_INDEX_FILES {
       uuid repository_id PK, FK

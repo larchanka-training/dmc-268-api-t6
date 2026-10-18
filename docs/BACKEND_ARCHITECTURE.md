@@ -428,7 +428,7 @@ SQLModel не используется: ORM отделена от transport DTO 
 | Модуль / код схемы | Модели |
 | --- | --- |
 | [workspaces](../app/modules/workspaces/infrastructure/models.py) | Workspace |
-| [repositories](../app/modules/repositories/infrastructure/models.py) | ProviderInstallation, Repository, RuleVersion, RepoConventions |
+| [repositories](../app/modules/repositories/infrastructure/models.py) | ProviderInstallation, Repository, RuleVersion, RepoConventions, RepositoryRulesStatus (статус `.review/rules.md`, #150) |
 | [reviews](../app/modules/reviews/infrastructure/models.py) | PromptVersion, CodeChange, Run, ContextPayload, Finding, Comment, RunAction |
 | [webhooks](../app/modules/integrations/webhooks/infrastructure/models.py) | WebhookEvent |
 | [billing](../app/modules/billing/infrastructure/models.py) | Payment, CreditLedger |
