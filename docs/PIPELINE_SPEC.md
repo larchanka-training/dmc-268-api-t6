@@ -39,7 +39,7 @@ stateDiagram-v2
 |---|---|---|---|---|---|
 | T1 | `[*]` → `queued` | `pull_request.labeled` (`ai-review`) и `reopened`, `check_suite` / `workflow_run.completed`, `pull_request.synchronize` → `try_enqueue` | webhook-worker (#52) | условие Р-10 (§8) ∧ нет активного Run по PR (Р-2) ∧ нет Run с `trigger = webhook` для `(PR, head_sha)`; фильтр веток здесь не проверяется — его применяет RunGuard при claim (T5) | INSERT `runs` (`attempt = 0`, `available_at = now`), после commit — `review.run/v1` в `review.run.{engine}` · check-run не создаётся |
 | T2 | `[*]` → `queued` | sweep «2 мин без CI» → тот же `try_enqueue` | worker, leader-цикл (#34) | `wait_for_ci = auto` ∧ ни чужих check suites (кроме `queued` без check run), ни статусов коммита ≥ 2 мин (§8.3) ∧ guard T1 | как T1 |
-| T3 | `[*]` → `queued` | `POST /api/runs/{id}/rerun` | portal-api (#34) | PR открыт [дефолт] ∧ нет активного Run по PR ∧ Repository не приостановлен ∧ App доступна, иначе `409`; лейбл `ai-review`, готовность CI и фильтр веток не проверяются (фильтр применяет RunGuard при claim, T5) | новый Run на текущий `head_sha`, `trigger = rerun`, AMQP priority 9 · check-run не создаётся |
+| T3 | `[*]` → `queued` | `POST /api/runs/{id}/rerun` | portal-api (#34) | PR открыт [дефолт] ∧ нет активного Run по PR ∧ есть кандидат запуска ∧ Repository не приостановлен ∧ App доступна; отказы `409`/`422` — [§6.1](#61-http-отказы-rerun); лейбл `ai-review`, готовность CI и фильтр веток не проверяются (фильтр применяет RunGuard при claim, T5) | новый Run на текущий `head_sha`, `trigger = rerun`, AMQP priority 9 · check-run не создаётся |
 | T4 | `queued` → `running` | доставка `review.run/v1` | worker | RunGuard: `state = queued` ∧ `available_at ≤ now` ∧ ¬`cancel_requested` ∧ `head_sha` актуален ∧ PR открыт | одним UPDATE: `attempt += 1`, `lease_until = now + 5 мин`, `worker_id`; `started_at` при первой попытке · check-run `in_progress` (создаётся при `attempt = 1`) |
 | T5 | `queued` → `skipped` | RunGuard при claim | worker | `repo_disabled` / `rule_not_matched` / `budget_paused` (§6); `rule_not_matched` — целевая ветка `run.base_ref or pr.target_branch` не подходит ни под один шаблон непустого `repositories.branch_filter` (SD §6.1); проверяется при каждом claim, у rerun тоже [техлид, #149] | `error_code` = причина, ack · check-run сразу `completed/skipped`, при `repo_disabled` не создаётся |
 | T6 | `queued` → `cancelled` | `synchronize` (новый `head_sha`), `pull_request.closed`, `POST /api/runs/{id}/cancel`, rebind/снятие origin; то же, найденное RunGuard при claim или реконсилером | webhook-worker, portal-api, worker | — | `error_code` = `superseded` / `pr_closed` / `cancelled_by_user` / `installation_replaced` / `installation_unavailable`; снятый origin не публикует retry/check-run; исходное сообщение остаётся в брокере; при действующем origin и `attempt ≥ 1` webhook-worker (#52) и portal-api после commit публикуют сигнал закрытия — `review.run/v1` в `review.run.{engine}` с AMQP priority 9 [дефолт] · check-run (если `attempt ≥ 1`) закрывает RunGuard при доставке сигнала; T6 с действующим origin, найденный RunGuard при claim, закрывает его в той же доставке, без сигнала; при `attempt = 0` нет ни check-run, ни сигнала |
@@ -329,7 +329,7 @@ Legacy marker `<!-- ai-review findings_hash=… -->` не используетс
 
 ## 6. Каталог `error_code`
 
-`runs.error_code` (`String(100)`, Zod `errorCode: string | null`): для `failed` — причина сбоя, для `cancelled` и `skipped` — причина завершения, в остальных состояниях — `null`. Новые коды миграции не требуют. Технические детали пишутся в `error_message` и `run_actions`, в check-run они не попадают. Для `llm_payment_required` публичный check-run показывает только нейтральный текст: код остаётся в `runs.error_code` и UI, но не выводится в summary check-run. Для `failed` к тексту добавляется ссылка на прогон в UI. Тексты причин снятого origin предназначены для UI: check-run через снятую установку не отправляется. Rerun при паузе Repository или недоступной App возвращает HTTP 409 с соответствующим `detail`. Текущий UI любой 409 показывает как «У этого PR уже есть активный прогон или PR закрыт»; корректная обработка паузы/недоступной App остаётся отдельной frontend-доработкой.
+`runs.error_code` (`String(100)`, Zod `errorCode: string | null`): для `failed` — причина сбоя, для `cancelled` и `skipped` — причина завершения, в остальных состояниях — `null`. Новые коды миграции не требуют. Технические детали пишутся в `error_message` и `run_actions`, в check-run они не попадают. Для `llm_payment_required` публичный check-run показывает только нейтральный текст: код остаётся в `runs.error_code` и UI, но не выводится в summary check-run. Для `failed` к тексту добавляется ссылка на прогон в UI. Тексты причин снятого origin предназначены для UI: check-run через снятую установку не отправляется. HTTP-отказы rerun описаны в [§6.1](#61-http-отказы-rerun).
 
 | `error_code` | Состояние | Класс | Retry | Текст автору PR (summary check-run) |
 |---|---|---|---|---|
@@ -381,6 +381,44 @@ Legacy marker `<!-- ai-review findings_hash=… -->` не используетс
 | `policy_fetch_transient`, `policy_rate_limited` | T9 с общими лимитами/дедлайном, затем failed после 3 попыток; Retry-After учитывается |
 
 Достоверно отсутствующий документ — `presence=missing`, не ошибка; ошибка доступа/чтения — не missing. `unsupported_path`, `ast_*`, `rag_*`, `insufficient_context` и технические drops отражают coverage reasons, сами по себе не переводят Run в failed; их влияние на полноту — CONTEXT_AND_VERIFICATION_SPEC §8.1/§8.4. Состояние индекса RAG v1 и отбор кандидатов не задают `runs.error_code`: выключенный тумблер, `rag: not_ready`, отказ или превышение лимитов индекса дают ревью без RAG. Статусы индекса и их коды (`limit_exceeded:*`, `archive_unsafe`, `last_error_code`) — состояние индекса на его строке, а не `error_code` Run ([ADR 0001 §7](adr/0001-graph-rag-v1.md#7-лимиты-индексации)). Исключение — общий pre-send guard: блок с ревизией индекса вместо ревизии PR даёт `failed/policy_context_violation`, как для любого источника. `policy_path_invalid` больше не используется для локального нарушения контракта пути. Если источник нельзя надёжно изолировать или нарушена целостность снимка, сохраняется `failed/snapshot_integrity_error`; попытка отправить запрещённый источник — `policy_context_violation`. Непроверенные кандидаты не становятся публичным результатом.
+
+---
+
+### 6.1 HTTP-отказы rerun
+
+`POST /api/runs/{id}/rerun` возвращает 409 по четырём причинам: у PR есть активный
+Run (`queued`, `running` или `publishing`), PR закрыт, ревью репозитория на паузе
+или GitHub App недоступна. Во всех случаях тело одинаковое:
+
+```json
+{"detail": "the pull request has an active run or is closed, or repository reviews are paused or unavailable"}
+```
+
+`detail` — общая строка; машиночитаемого кода причины нет. Это HTTP-отказ до
+создания нового Run, а не `runs.error_code`.
+
+После проверки авторизации и видимости исходного Run порядок решений в
+`SqlAlchemyRerunStore.create_rerun` такой:
+
+1. Закрытый PR или активный Run → 409.
+2. Нет кандидата запуска (в частности, активной версии правил или промпта) → 422.
+   Отсутствующая связанная GitHub installation тоже не даёт кандидата; это
+   отличается от недоступности существующей установки на следующем шаге.
+3. При наличии кандидата пауза репозитория или недоступность App → 409.
+4. Иначе создаётся новый Run.
+
+Поэтому приостановленный репозиторий без активной конфигурации получает 422,
+если PR открыт и активного Run нет. Проверка доступности учитывает предпочтение
+`enabled`, `installation_available` и `deleted_at` установки; сетевого вызова
+GitHub для этого нет.
+
+422 имеет два тела в [OpenAPI](../contracts/openapi.yaml): невалидный UUID в пути
+даёт `HTTPValidationError` с массивом `detail`, а отсутствие кандидата —
+`ErrorResponse` со строкой:
+
+```json
+{"detail": "the repository has no active rule or prompt version"}
+```
 
 ---
 
@@ -581,9 +619,9 @@ UI рисует диапазон `[newLine ?? oldLine, endLine ?? newLine ?? old
 | Политика/контекст/проверка/доставка #107 | Целевые §2, §4.5, §5, §9–§11; канон деталей — RULES_FORMAT_SPEC и CONTEXT_AND_VERIFICATION_SPEC. Новые профили включаются после миграций, schema/API/UI и требуемых проверок; legacy runs не получают synthetic verified status | Согласовано пользователем 09.10.2026; реализация отдельно |
 | Контракт авторизации | GitHub App user authorization без OAuth scopes; `state` генерирует и хранит SPA. `POST /api/auth/github/callback {code}` → access JWT (15 мин, Bearer) и refresh в httpOnly-cookie (30 дней, ротация, `Path=/api/auth`). Дальше — `POST /api/auth/refresh`, `GET /api/auth/me`, `POST /api/auth/logout`; SSE — fetch-стрим с Bearer. Полный контракт — SD §12 и `contracts/openapi.yaml`, реализация — #11 | D4 [техлид]; access-токен в памяти, подпись в auth-api и проверка публичным ключом в portal-api, граница Workspace по Р-7 — [дефолт] |
 | Стадии, вердикт, якорь, retry | §2, §11, §10, §4 | D5, D3 [техлид]; имена `run_actions.tool` в стиле main — [дефолт]; D6 [техлид, формулы — дефолт]; D13 [дефолт] |
-| Rerun (T3) | `POST /api/runs/{id}/rerun` создаёт новый Run на текущий `head_sha`; флаг и CI не проверяются. `409`, если у PR есть активный Run или PR закрыт (§1) | `409` при активном Run и при закрытом PR — [дефолт] |
+| Rerun (T3) | `POST /api/runs/{id}/rerun` создаёт новый Run на текущий `head_sha`; флаг и CI не проверяются. Причины `409`: активный Run, закрытый PR, пауза ревью репозитория, недоступная App; общий `detail` без кода причины и порядок `409`/`422` — [§6.1](#61-http-отказы-rerun) | `409` при активном Run и при закрытом PR — исходный [дефолт]; пауза/недоступность добавлены в [#132](https://github.com/larchanka-training/dmc-268-api-t6/pull/132), контракт настроек уточнён в [#149](https://github.com/larchanka-training/dmc-268-api-t6/issues/149) |
 | Происхождение Run в API | `RunSession` отдаёт `trigger` и `createdAt` (§1.1); `delivery_id` не добавляется, решение отложено до отдельной задачи | #112, #106 часть 7 |
-| Автоматическое ревью репозитория | Переключатель — существующее `enabled`, новой колонки нет. PATCH `enabled` хранит только предпочтение, `GET` отдаёт `enabled AND installation_available`; новое обязательное поле только для чтения `installationAvailable` отличает паузу от недоступной установки. Лейбл `ai-review` нужен на каждом PR; при `enabled=false` поведение прежнее: проекция PR, precheck, replay, sweep и RunGuard останавливаются, rerun → `409` (SD §6.9) | [техлид, 14.10.2026, #149] |
+| Автоматическое ревью репозитория | Переключатель — существующее `enabled`, новой колонки нет. PATCH `enabled` хранит только предпочтение, `GET` отдаёт `enabled AND installation_available`; новое обязательное поле только для чтения `installationAvailable` отличает паузу от недоступной установки. Лейбл `ai-review` нужен на каждом PR; при `enabled=false` поведение прежнее: проекция PR, precheck, replay, sweep и RunGuard останавливаются; HTTP-отказы rerun — [§6.1](#61-http-отказы-rerun) (SD §6.9) | [техлид, 14.10.2026, #149] |
 | Фильтр веток репозитория | `branchFilter: string[]` сверяется с целевой веткой `run.base_ref or pr.target_branch`: `*` — любые символы, кроме `/`, `**` — любые символы, включая `/`, остальные буквальны; пустой список — все ветки; до 20 шаблонов без повторов, правила `422` — SD §12. Проверяет RunGuard при каждом claim, включая rerun: несовпадение → `skipped/rule_not_matched`, check-run `completed/skipped` с причиной (T5, §6). **Известный пробел, в #149 не исправляется:** смена целевой ветки PR (`pull_request.edited`) отбор заново не запускает, `Run.base_ref` хранит прежнюю ветку | [техлид, 14.10.2026, #149] |
 | Порог severity репозитория | `severityThreshold: all \| warning \| critical` — нижняя публикуемая группа (§11). Находки ниже порога сохраняются с `drop_reason = severity_threshold` и не публикуются; counts, verdict, check-run и UI считаются после порога, число отсечённых — отдельной строкой только при N > 0 (§7, §9). Применяется после lint и дедупликации, до маршрутизации, сортировки и предела inline; значение читается из Repository в момент обработки (§9) | [техлид, 14.10.2026, #149] |
 
