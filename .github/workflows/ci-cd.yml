@@ -466,7 +466,9 @@ jobs:
             "${LOCAL_IMAGE}" python -m app.webhook_worker
 
       - name: Wait for the labeled outcome in the worker log
-        # The worker sweeps at start, then every 30 s, and logs to stderr. Its state is read before
+        # The labeled deliveries are posted before the worker starts, so its startup scan finds
+        # them; later receipts wake it via NOTIFY, with a 30 s fallback scan.
+        # It logs to stderr. Its state is read before
         # its log, so a worker that exited (e.g. on its configuration) has its full log searched.
         run: |
           expected='event=pull_request status=ignored_unknown_repository detail=action=labeled unknown_repository'
