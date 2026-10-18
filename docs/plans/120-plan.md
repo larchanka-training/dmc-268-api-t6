@@ -7,7 +7,7 @@ Expand the review LLM pipeline to accept user-defined Markdown policy documents 
 1. **Contract Boundary with Engineer 3**:
    - Engineer 3 owns VCS reading, parsing raw bytes, `.review/ignore`, AST context, and the `run_policy_snapshots` database table and all its migrations.
    - Engineer 4 (#120) does NOT write database migrations for `run_policy_snapshots` and does NOT modify durable snapshots after creation.
-   - Engineer 4 provides the pure Python domain contracts for `PolicySnapshot`, `PolicyDocument`, `PromptBindings`, and `ExecutionProfile`, and implements the rendering, pre-send guards, call manifests, attribution validation, and Reflection Pass.
+   - The domain contracts for `PolicySnapshot`, `PolicyDocument`, `PromptBindings`, and `ExecutionProfile` were established by Engineer 3 in #134. Engineer 4 (#120) consumes them, defines `CallManifest` and `ManifestBlock`, and implements the rendering, pre-send guards, attribution validation, and Reflection Pass.
 2. **Untrusted Markdown Envelope & Injection Defense**:
    - The system prompt belongs strictly to service instructions and few-shots. No untrusted Markdown, PR metadata, code, or findings are placed in system/developer messages.
    - User message partitions data into typed, bounded blocks (`source_role` and `source_kind`) with backend-generated `block_id`.
@@ -28,7 +28,7 @@ Expand the review LLM pipeline to accept user-defined Markdown policy documents 
 ## Tasks & Phases
 
 ### Phase 1: Domain Contracts & Policy Snapshot Envelope (Foundation)
-- [x] **Task 1**: Domain models for Policy Snapshot, Prompt Bindings, and Execution Profile (`policy_snapshot.py`).
+- [x] **Task 1**: Domain models for Policy Snapshot, Prompt Bindings, and Execution Profile (consumed from #134), `CallManifest` and `ManifestBlock` (`policy_snapshot.py`).
 - [x] **Task 2**: Envelope rendering, XML escaping, prompt injection defenses, and call manifest generation in `PromptBuilder`.
 - [x] **Task 3**: Token counter / budget pre-send guards (policy budget ≤ 12,000 tokens, total input budget).
 
@@ -51,6 +51,14 @@ Expand the review LLM pipeline to accept user-defined Markdown policy documents 
 - [x] **P2 Guards & Fail-Closed**: `is_ready_for_llm`, budget checks, `reflection_pass` presence; error codes catalog.
 - [x] **P2 Cleansing & Logging**: Summary cleansing on rejected candidates; sanitized ID/status logging.
 - [x] **P2 Documentation**: Updated `review/README.md`, `docs/TEST_PLAN.md`, plans.
+
+### Phase 6: Review Round 3 Fixes (Alexander Khomutov / axyi #5562633453)
+- [x] **P1 System Prompt Preservation (Option a)**: Removed `review.system.v3.md` and golden fixtures to defer prompt rollout until #130; strictly preserved and pinned byte-level SHA-256 for `review.system.v2.md`.
+- [x] **P2 Rebase & Limits Relocation**: Rebased on `origin/main` (`f8fe9c0`) and imported `MAX_COMMIT_MESSAGES`/`MAX_COMMIT_MESSAGE_CHARS` from `commit_prefix_limits.py`.
+- [x] **P2 Error Handling & Schema Strictness**: Enforced exact 1:1 decision counts with candidate IDs, sanitized error messages (truncating IDs to 64 chars and hiding raw input payloads in ValidationError), cataloged `verification_budget_exceeded` and `verification_deadline_exceeded`, and mapped timeout/unavailable/invalid errors.
+- [x] **P2 Attribution & Post-Processing**: Passed `allowed_v2_rules` through `FindingsPostProcessor` and `RunRepository` so v2 findings (`.review/rules.md`, `AGENTS.md`) retain attribution in database and during publication.
+- [x] **P2 Manifest & Rendering Fidelity**: Numbered service-defaults lines in prompt matching manifest `shown_ranges`; neutral summary `done_well` text on cleansed summaries; legacy runs bypass reflection when `context.policy_snapshot is None`.
+- [x] **P2 Test Coverage & Docs**: 100% statement and branch coverage on review output v2 and reflection evaluation; aligned `review/README.md`, `docs/TEST_PLAN.md`, and plans.
 
 
 ## Risks and Mitigations

@@ -2,7 +2,7 @@
 
 ## Phase 1: Foundation (Domain Contracts & Policy Envelope)
 - [x] **Task 1: Domain models for Policy Snapshot & Bindings**
-  - Create `app/modules/reviews/application/policy_snapshot.py` with `PolicyDocument`, `PolicySnapshot`, `PromptBindings`, `ExecutionProfile`, and `CallManifest`.
+  - Domain models defined by Engineer 3 in #134; consumed in `app/modules/reviews/application/policy_snapshot.py` alongside `CallManifest` and `ManifestBlock`.
   - Add unit tests verifying snapshot immutability, document presence, and digest checks.
 - [x] **Task 2: PromptBuilder envelope & prompt injection defenses**
   - Update `PromptBuilder` to accept `PolicySnapshot` with Markdown documents.
@@ -79,4 +79,26 @@
   - Preserve `ALLOWED_V2_RULE_NAMES` and `service-defaults:*` in `_repair_attribution`.
 - [x] **Task 17: P2 documentation & test suites**
   - Updated `review/README.md`, `docs/TEST_PLAN.md`, `tests/test_reflection_evaluation.py`, `tests/test_execute_review.py`.
+
+## Phase 6: Review Round 3 Fixes (Alexander Khomutov / axyi #5562633453)
+- [x] **Task 18: P1 review.system.v3.md deferral (Option a)**
+  - Deleted `review/prompts/review.system.v3.md` and `tests/fixtures/prompt_builder/sample.system.v3.txt`.
+  - Reverted pinned system prompt in `policy_snapshot.py` and `tests/test_prompt_seeding.py` to `review.system.v2.md`.
+  - Added `test_pinned_checksums_match_files_and_golden_fixtures` asserting byte-level SHA-256 for active prompts.
+- [x] **Task 19: P2 Rebase & Limits Relocation**
+  - Rebased on `origin/main` (`f8fe9c0`) and resolved `MAX_COMMIT_MESSAGES`/`MAX_COMMIT_MESSAGE_CHARS` import from `commit_prefix_limits.py`.
+- [x] **Task 20: P2 Error Handling & Schema Strictness**
+  - Enforced 1:1 decision count match with candidates in `reflection_pass.py`.
+  - Sanitized error messages and logged payloads; masked raw input values in Pydantic `ValidationError`.
+  - Cataloged `verification_budget_exceeded` and `verification_deadline_exceeded` in `run_failures.py`.
+  - Translated `TimeoutError`/`llm_timeout` to `VerificationUnavailableError` and generic errors to `VerificationUnavailableError`.
+- [x] **Task 21: P2 Attribution & Post-Processing**
+  - Threaded `allowed_v2_rules` through `FindingPostProcessingInput`, `FindingsPostProcessor.process()`, and `RunRepository.get_post_processing_input()`.
+  - Added regression test `test_findings_post_processor_v2_preserves_attribution_for_body_only_findings`.
+- [x] **Task 22: P2 Manifest & Rendering Fidelity**
+  - Rendered service defaults lines in XML numbered to match manifest `shown_ranges` `1..sum(checks)`.
+  - Provided neutral `done_well` text for cleansed summaries.
+  - Allowed legacy runs without snapshot to bypass reflection pass.
+- [x] **Task 23: P2 Documentation Alignment**
+  - Aligned `review/README.md`, `docs/TEST_PLAN.md`, `120-plan.md`, and `120-todo.md`.
 

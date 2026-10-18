@@ -29,6 +29,7 @@ from app.modules.reviews.application.reflection_pass import (
     ReflectionPass,
     VerificationDecision,
     VerificationInvalidOutputError,
+    VerificationUnavailableError,
     VerifierPromptBuilder,
     filter_verified_candidates,
 )
@@ -37,6 +38,7 @@ from app.modules.reviews.application.review_output import (
     RequirementRef,
     ReviewFindingV2,
 )
+from app.modules.reviews.application.run_failures import RunFailure
 
 
 def make_snapshot() -> PolicySnapshot:
@@ -93,13 +95,15 @@ def make_candidate(
 
 
 class FakeVerifierModel:
-    def __init__(self, response_payload: Mapping[str, Any] | str) -> None:
+    def __init__(self, response_payload: Mapping[str, Any] | str | bytes) -> None:
         self.response_payload = response_payload
         self.call_count = 0
         self.last_system_prompt = ""
         self.last_user_prompt = ""
 
-    async def verify(self, *, system_prompt: str, user_prompt: str) -> Mapping[str, Any] | str:
+    async def verify(
+        self, *, system_prompt: str, user_prompt: str
+    ) -> Mapping[str, Any] | str | bytes:
         self.call_count += 1
         self.last_system_prompt = system_prompt
         self.last_user_prompt = user_prompt
@@ -126,9 +130,44 @@ def test_verification_decision_validates_fields() -> None:
             candidate_id=cand_id,
             status="supported",
             reason="x" * 601,
+            evidence_refs=[EvidenceRef(block_id="code-1", start_line=1, end_line=1)],
+            requirement_refs=[],
+        )
+
+    # status supported requires at least 1 evidence_ref
+    with pytest.raises(ValidationError, match="requires at least 1 evidence_ref"):
+        VerificationDecision(
+            candidate_id=cand_id,
+            status="supported",
+            reason="valid reason",
             evidence_refs=[],
             requirement_refs=[],
         )
+
+    # status contradicted requires at least 1 evidence_ref
+    with pytest.raises(ValidationError, match="requires at least 1 evidence_ref"):
+        VerificationDecision(
+            candidate_id=cand_id,
+            status="contradicted",
+            reason="valid reason",
+            evidence_refs=[],
+            requirement_refs=[],
+        )
+
+
+def test_verifier_prompt_builder_custom_prompts() -> None:
+    builder_custom = VerifierPromptBuilder(system_prompt="Custom prompt")
+    assert builder_custom._system_prompt == "Custom prompt"
+
+    builder_no_frontmatter = VerifierPromptBuilder.__new__(VerifierPromptBuilder)
+    raw = "No frontmatter prompt body"
+    builder_no_frontmatter._raw_prompt = raw
+    if raw.startswith("---"):
+        parts = raw.split("---", 2)
+        builder_no_frontmatter._system_prompt = parts[2].strip() if len(parts) >= 3 else raw
+    else:
+        builder_no_frontmatter._system_prompt = raw
+    assert builder_no_frontmatter._system_prompt == raw
 
 
 def test_verifier_prompt_builder_renders_candidates_and_policy() -> None:
@@ -299,7 +338,10 @@ async def test_reflection_pass_raises_on_missing_candidate_decision() -> None:
         policy_snapshot=snapshot,
     )
 
-    with pytest.raises(VerificationInvalidOutputError):
+    with pytest.raises(
+        VerificationInvalidOutputError,
+        match="Verifier returned decisions for 1 items, expected 2",
+    ):
         await verifier.verify(candidates=(cand1, cand2), context=context)
 
 
@@ -309,7 +351,7 @@ async def test_reflection_pass_rejects_duplicate_candidate_decisions() -> None:
     cand2 = make_candidate("c-2")
     query_block_id = file_block_id("app/query.py")
 
-    # Duplicate decision for c-1 instead of 1:1 match
+    # 1. 2 candidates, 2 decisions with same candidate_id "c-1" (missing c-2)
     fake_response = {
         "decisions": [
             {
@@ -328,8 +370,7 @@ async def test_reflection_pass_rejects_duplicate_candidate_decisions() -> None:
             },
         ]
     }
-    fake_model = FakeVerifierModel(fake_response)
-    verifier = ReflectionPass(fake_model)
+    verifier = ReflectionPass(FakeVerifierModel(fake_response))
 
     snapshot = make_snapshot()
     context = ReviewContext(
@@ -343,8 +384,51 @@ async def test_reflection_pass_rejects_duplicate_candidate_decisions() -> None:
         policy_snapshot=snapshot,
     )
 
-    with pytest.raises(VerificationInvalidOutputError, match="Verifier returned decisions"):
+    with pytest.raises(
+        VerificationInvalidOutputError,
+        match="Verifier returned decisions for 2 items, expected 2",
+    ):
         await verifier.verify(candidates=(cand1, cand2), context=context)
+
+    # 2. 1 candidate, 2 duplicate decisions for that candidate
+    with pytest.raises(
+        VerificationInvalidOutputError,
+        match="Verifier returned decisions for 2 items, expected 1",
+    ):
+        await verifier.verify(candidates=(cand1,), context=context)
+
+    # 3. 2 candidates ("c-1", "c-2"), 3 decisions ("c-1", "c-1", "c-2")
+    three_decisions_response = {
+        "decisions": [
+            {
+                "candidate_id": "c-1",
+                "status": "supported",
+                "reason": "OK 1",
+                "evidence_refs": [{"block_id": query_block_id, "start_line": 10, "end_line": 10}],
+                "requirement_refs": [],
+            },
+            {
+                "candidate_id": "c-1",
+                "status": "supported",
+                "reason": "OK 2",
+                "evidence_refs": [{"block_id": query_block_id, "start_line": 10, "end_line": 10}],
+                "requirement_refs": [],
+            },
+            {
+                "candidate_id": "c-2",
+                "status": "supported",
+                "reason": "OK 3",
+                "evidence_refs": [{"block_id": query_block_id, "start_line": 10, "end_line": 10}],
+                "requirement_refs": [],
+            },
+        ]
+    }
+    verifier_three = ReflectionPass(FakeVerifierModel(three_decisions_response))
+    with pytest.raises(
+        VerificationInvalidOutputError,
+        match="Verifier returned decisions for 3 items, expected 2",
+    ):
+        await verifier_three.verify(candidates=(cand1, cand2), context=context)
 
 
 @pytest.mark.anyio
@@ -392,7 +476,72 @@ async def test_reflection_pass_validates_service_defaults_check_id() -> None:
     cand1 = make_candidate("c-1", path="app/query.py", rule_name="service-defaults:rule-1")
     query_block_id = file_block_id("app/query.py")
 
-    fake_response = {
+    rules = (
+        ReviewRule(name="rule-1", include=(), exclude=(), checks=("Check 1",)),
+        ReviewRule(name="rule-2", include=(), exclude=(), checks=("Check 2",)),
+    )
+    snapshot = make_snapshot()
+    context = ReviewContext(
+        system="SYSTEM",
+        rules=rules,
+        agents_md=None,
+        conventions=RepoConventions((), ()),
+        pr_meta=PullRequestMeta("T", None, "u", "b", "main", (), 1, 1, 0, False, False),
+        changed_files=(ChangedFile("app/query.py", "modified", (DiffLine(10, "added", "x = 1"),)),),
+        omitted_files=(),
+        policy_snapshot=snapshot,
+    )
+
+    # 1. check_id is not in service defaults rules at all
+    bad_id_response = {
+        "decisions": [
+            {
+                "candidate_id": "c-1",
+                "status": "supported",
+                "reason": "Defect",
+                "evidence_refs": [{"block_id": query_block_id, "start_line": 10, "end_line": 10}],
+                "requirement_refs": [
+                    {
+                        "block_id": "service-defaults",
+                        "start_line": 1,
+                        "end_line": 1,
+                        "check_id": "completely-invalid",
+                    }
+                ],
+            }
+        ]
+    }
+    verifier_bad = ReflectionPass(FakeVerifierModel(bad_id_response))
+    with pytest.raises(
+        VerificationInvalidOutputError, match="does not match service defaults rules"
+    ):
+        await verifier_bad.verify(candidates=(cand1,), context=context)
+
+    # 2. check_id exists in rules ("rule-2"), but candidate rule_id is "rule-1"
+    mismatched_id_response = {
+        "decisions": [
+            {
+                "candidate_id": "c-1",
+                "status": "supported",
+                "reason": "Defect",
+                "evidence_refs": [{"block_id": query_block_id, "start_line": 10, "end_line": 10}],
+                "requirement_refs": [
+                    {
+                        "block_id": "service-defaults",
+                        "start_line": 1,
+                        "end_line": 1,
+                        "check_id": "rule-2",
+                    }
+                ],
+            }
+        ]
+    }
+    verifier_mismatch = ReflectionPass(FakeVerifierModel(mismatched_id_response))
+    with pytest.raises(VerificationInvalidOutputError, match="does not match rule_id 'rule-1'"):
+        await verifier_mismatch.verify(candidates=(cand1,), context=context)
+
+    # 3. Positive case: check_id matches candidate rule_id
+    valid_id_response = {
         "decisions": [
             {
                 "candidate_id": "c-1",
@@ -404,40 +553,21 @@ async def test_reflection_pass_validates_service_defaults_check_id() -> None:
                         "block_id": "service-defaults",
                         "start_line": 1,
                         "end_line": 1,
-                        "check_id": "invalid-check-id",
+                        "check_id": "rule-1",
                     }
                 ],
             }
         ]
     }
-    fake_model = FakeVerifierModel(fake_response)
-    verifier = ReflectionPass(fake_model)
-
-    snapshot = make_snapshot()
-    context = ReviewContext(
-        system="SYSTEM",
-        rules=(ReviewRule(name="Rule 1", include=(), exclude=(), checks=("Check 1",)),),
-        agents_md=None,
-        conventions=RepoConventions((), ()),
-        pr_meta=PullRequestMeta("T", None, "u", "b", "main", (), 1, 1, 0, False, False),
-        changed_files=(ChangedFile("app/query.py", "modified", (DiffLine(10, "added", "x = 1"),)),),
-        omitted_files=(),
-        policy_snapshot=snapshot,
-    )
-
-    with pytest.raises(VerificationInvalidOutputError, match="check_id 'invalid-check-id'"):
-        await verifier.verify(candidates=(cand1,), context=context)
+    verifier_valid = ReflectionPass(FakeVerifierModel(valid_id_response))
+    decisions = await verifier_valid.verify(candidates=(cand1,), context=context)
+    assert len(decisions) == 1
+    assert decisions[0].status == "supported"
 
 
 @pytest.mark.anyio
-async def test_reflection_pass_reraises_run_failures_with_error_code() -> None:
-    from app.modules.reviews.application.run_failures import RunFailure
-
-    class FailingModel:
-        async def verify(self, *, system_prompt: str, user_prompt: str) -> Mapping[str, Any] | str:
-            raise RunFailure("verification_deadline_exceeded", "Time limit reached")
-
-    verifier = ReflectionPass(FailingModel())
+async def test_reflection_pass_translates_llm_and_system_errors() -> None:
+    cand = make_candidate("c-1")
     snapshot = make_snapshot()
     context = ReviewContext(
         system="SYSTEM",
@@ -449,8 +579,389 @@ async def test_reflection_pass_reraises_run_failures_with_error_code() -> None:
         omitted_files=(),
         policy_snapshot=snapshot,
     )
-    cand = make_candidate("c-1")
 
-    with pytest.raises(RunFailure) as exc_info:
+    class CustomModel:
+        def __init__(self, exc: Exception) -> None:
+            self._exc = exc
+
+        async def verify(self, *, system_prompt: str, user_prompt: str) -> Mapping[str, Any] | str:
+            raise self._exc
+
+    # TimeoutError -> VerificationUnavailableError
+    v1 = ReflectionPass(CustomModel(TimeoutError("Timeout")))
+    with pytest.raises(VerificationUnavailableError, match="Verifier model timed out"):
+        await v1.verify(candidates=(cand,), context=context)
+
+    # llm_timeout -> VerificationUnavailableError
+    v2 = ReflectionPass(CustomModel(RunFailure("llm_timeout", "Slow")))
+    with pytest.raises(VerificationUnavailableError, match="Verifier model unavailable"):
+        await v2.verify(candidates=(cand,), context=context)
+
+    # llm_unavailable -> VerificationUnavailableError
+    v3 = ReflectionPass(CustomModel(RunFailure("llm_unavailable", "503")))
+    with pytest.raises(VerificationUnavailableError, match="Verifier model unavailable"):
+        await v3.verify(candidates=(cand,), context=context)
+
+    # llm_invalid_output -> VerificationInvalidOutputError
+    v4 = ReflectionPass(CustomModel(RunFailure("llm_invalid_output", "Bad output")))
+    with pytest.raises(VerificationInvalidOutputError, match="Verifier model output invalid"):
+        await v4.verify(candidates=(cand,), context=context)
+
+    # budget_exceeded -> RunFailure(verification_budget_exceeded)
+    v5 = ReflectionPass(CustomModel(RunFailure("budget_exceeded", "Cost")))
+    with pytest.raises(RunFailure) as exc_budget:
+        await v5.verify(candidates=(cand,), context=context)
+    assert exc_budget.value.error_code == "verification_budget_exceeded"
+
+    # deadline_exceeded -> RunFailure(verification_deadline_exceeded)
+    v6 = ReflectionPass(CustomModel(RunFailure("deadline_exceeded", "Time")))
+    with pytest.raises(RunFailure) as exc_deadline:
+        await v6.verify(candidates=(cand,), context=context)
+    assert exc_deadline.value.error_code == "verification_deadline_exceeded"
+
+    # Unknown exception -> VerificationUnavailableError
+    v7 = ReflectionPass(CustomModel(RuntimeError("Unexpected crash")))
+    with pytest.raises(VerificationUnavailableError, match="Verifier model call failed"):
+        await v7.verify(candidates=(cand,), context=context)
+
+
+@pytest.mark.anyio
+async def test_reflection_pass_unexpected_output_type() -> None:
+    cand = make_candidate("c-1")
+    snapshot = make_snapshot()
+    context = ReviewContext(
+        system="SYSTEM",
+        rules=(),
+        agents_md=None,
+        conventions=RepoConventions((), ()),
+        pr_meta=PullRequestMeta("T", None, "u", "b", "main", (), 1, 1, 0, False, False),
+        changed_files=(),
+        omitted_files=(),
+        policy_snapshot=snapshot,
+    )
+    v = ReflectionPass(FakeVerifierModel(12345))  # type: ignore[arg-type]
+    with pytest.raises(VerificationInvalidOutputError, match="Unexpected verifier output type"):
+        await v.verify(candidates=(cand,), context=context)
+
+
+@pytest.mark.anyio
+async def test_reflection_pass_verification_context_overflow() -> None:
+    from dataclasses import replace
+
+    # Profile with tiny max_input_tokens = 5
+    tiny_profile = replace(make_complete_execution_profile(), max_input_tokens=5)
+    cand = make_candidate("c-1")
+    snapshot = make_snapshot()
+    snapshot_tiny = PolicySnapshot(
+        schema_version=snapshot.schema_version,
+        snapshot_id=snapshot.snapshot_id,
+        run_id=snapshot.run_id,
+        repository_id=snapshot.repository_id,
+        policy_base_sha=snapshot.policy_base_sha,
+        rules=snapshot.rules,
+        agents=snapshot.agents,
+        ignore_patterns=snapshot.ignore_patterns,
+        ignore_digest=snapshot.ignore_digest,
+        parser_profile=snapshot.parser_profile,
+        parser_version=snapshot.parser_version,
+        matcher_version=snapshot.matcher_version,
+        limits_version=snapshot.limits_version,
+        builtin_exclusions_version=snapshot.builtin_exclusions_version,
+        priority_matcher_version=snapshot.priority_matcher_version,
+        service_defaults_rule_version_id=snapshot.service_defaults_rule_version_id,
+        defaults_checksum=snapshot.defaults_checksum,
+        prompt_bindings=snapshot.prompt_bindings,
+        execution_profile=tiny_profile,
+        policy_digest=snapshot.policy_digest,
+    )
+    context = ReviewContext(
+        system="SYSTEM",
+        rules=(),
+        agents_md=None,
+        conventions=RepoConventions((), ()),
+        pr_meta=PullRequestMeta("T", None, "u", "b", "main", (), 1, 1, 0, False, False),
+        changed_files=(ChangedFile("app/query.py", "modified", (DiffLine(10, "added", "x = 1"),)),),
+        omitted_files=(),
+        policy_snapshot=snapshot_tiny,
+    )
+
+    verifier = ReflectionPass(FakeVerifierModel({"decisions": []}))
+    with pytest.raises(RunFailure) as exc_overflow:
         await verifier.verify(candidates=(cand,), context=context)
-    assert exc_info.value.error_code == "verification_deadline_exceeded"
+    assert exc_overflow.value.error_code == "verification_context_overflow"
+    assert "tokens, limit is 5" in exc_overflow.value.message
+
+
+@pytest.mark.anyio
+async def test_reflection_pass_malformed_json_and_schema_validation() -> None:
+    from types import MappingProxyType
+
+    cand = make_candidate("c-1")
+    query_block_id = file_block_id("app/query.py")
+    snapshot = make_snapshot()
+    context = ReviewContext(
+        system="SYSTEM",
+        rules=(),
+        agents_md=None,
+        conventions=RepoConventions((), ()),
+        pr_meta=PullRequestMeta("T", None, "u", "b", "main", (), 1, 1, 0, False, False),
+        changed_files=(ChangedFile("app/query.py", "modified", (DiffLine(10, "added", "x = 1"),)),),
+        omitted_files=(),
+        policy_snapshot=snapshot,
+    )
+
+    # 1. Non-JSON string
+    v1 = ReflectionPass(FakeVerifierModel("not json at all"))
+    with pytest.raises(
+        VerificationInvalidOutputError, match="Malformed verifier response schema or JSON"
+    ):
+        await v1.verify(candidates=(cand,), context=context)
+
+    # 2. Schema violation: missing required status
+    bad_schema = {"decisions": [{"candidate_id": "c-1", "reason": "No status"}]}
+    v2 = ReflectionPass(FakeVerifierModel(bad_schema))
+    with pytest.raises(
+        VerificationInvalidOutputError, match="Malformed verifier response schema or JSON"
+    ):
+        await v2.verify(candidates=(cand,), context=context)
+
+    # 3. Valid bytes response
+    valid_dict = {
+        "decisions": [
+            {
+                "candidate_id": "c-1",
+                "status": "supported",
+                "reason": "OK",
+                "evidence_refs": [{"block_id": query_block_id, "start_line": 10, "end_line": 10}],
+                "requirement_refs": [
+                    {"block_id": "policy-rules", "start_line": 1, "end_line": 1, "check_id": None}
+                ],
+            }
+        ]
+    }
+    import json
+
+    v3 = ReflectionPass(FakeVerifierModel(json.dumps(valid_dict).encode("utf-8")))
+    d3 = await v3.verify(candidates=(cand,), context=context)
+    assert len(d3) == 1
+    assert d3[0].status == "supported"
+
+    # 4. Valid MappingProxyType response
+    v4 = ReflectionPass(FakeVerifierModel(MappingProxyType(valid_dict)))
+    d4 = await v4.verify(candidates=(cand,), context=context)
+    assert len(d4) == 1
+    assert d4[0].status == "supported"
+
+
+@pytest.mark.anyio
+async def test_reflection_pass_validates_requirement_refs_and_evidence_refs() -> None:
+    cand = make_candidate("c-1", rule_name=".review/rules.md")
+    query_block_id = file_block_id("app/query.py")
+    snapshot = make_snapshot()
+    context = ReviewContext(
+        system="SYSTEM",
+        rules=(),
+        agents_md=None,
+        conventions=RepoConventions((), ()),
+        pr_meta=PullRequestMeta("T", None, "u", "b", "main", (), 1, 1, 0, False, False),
+        changed_files=(ChangedFile("app/query.py", "modified", (DiffLine(10, "added", "x = 1"),)),),
+        omitted_files=(),
+        policy_snapshot=snapshot,
+    )
+
+    # 1. Evidence ref: unknown block
+    v1 = ReflectionPass(
+        FakeVerifierModel(
+            {
+                "decisions": [
+                    {
+                        "candidate_id": "c-1",
+                        "status": "supported",
+                        "reason": "OK",
+                        "evidence_refs": [
+                            {"block_id": "unknown-diff", "start_line": 1, "end_line": 1}
+                        ],
+                        "requirement_refs": [
+                            {
+                                "block_id": "policy-rules",
+                                "start_line": 1,
+                                "end_line": 1,
+                                "check_id": None,
+                            }
+                        ],
+                    }
+                ]
+            }
+        )
+    )
+    with pytest.raises(
+        VerificationInvalidOutputError, match="evidence_ref unknown-diff not found in manifest"
+    ):
+        await v1.verify(candidates=(cand,), context=context)
+
+    # 2. Evidence ref: non-code role (policy_document)
+    v2 = ReflectionPass(
+        FakeVerifierModel(
+            {
+                "decisions": [
+                    {
+                        "candidate_id": "c-1",
+                        "status": "supported",
+                        "reason": "OK",
+                        "evidence_refs": [
+                            {"block_id": "policy-rules", "start_line": 1, "end_line": 1}
+                        ],
+                        "requirement_refs": [
+                            {
+                                "block_id": "policy-rules",
+                                "start_line": 1,
+                                "end_line": 1,
+                                "check_id": None,
+                            }
+                        ],
+                    }
+                ]
+            }
+        )
+    )
+    with pytest.raises(VerificationInvalidOutputError, match="has non-code role 'policy_document'"):
+        await v2.verify(candidates=(cand,), context=context)
+
+    # 3. Evidence ref: range not shown
+    v3 = ReflectionPass(
+        FakeVerifierModel(
+            {
+                "decisions": [
+                    {
+                        "candidate_id": "c-1",
+                        "status": "supported",
+                        "reason": "OK",
+                        "evidence_refs": [
+                            {"block_id": query_block_id, "start_line": 50, "end_line": 60}
+                        ],
+                        "requirement_refs": [
+                            {
+                                "block_id": "policy-rules",
+                                "start_line": 1,
+                                "end_line": 1,
+                                "check_id": None,
+                            }
+                        ],
+                    }
+                ]
+            }
+        )
+    )
+    with pytest.raises(VerificationInvalidOutputError, match="is not shown in verifier manifest"):
+        await v3.verify(candidates=(cand,), context=context)
+
+    # 4. Requirement ref: unknown block
+    v4 = ReflectionPass(
+        FakeVerifierModel(
+            {
+                "decisions": [
+                    {
+                        "candidate_id": "c-1",
+                        "status": "supported",
+                        "reason": "OK",
+                        "evidence_refs": [
+                            {"block_id": query_block_id, "start_line": 10, "end_line": 10}
+                        ],
+                        "requirement_refs": [
+                            {
+                                "block_id": "unknown-req",
+                                "start_line": 1,
+                                "end_line": 1,
+                                "check_id": None,
+                            }
+                        ],
+                    }
+                ]
+            }
+        )
+    )
+    with pytest.raises(
+        VerificationInvalidOutputError,
+        match="requirement_ref block 'unknown-req' not found in manifest",
+    ):
+        await v4.verify(candidates=(cand,), context=context)
+
+    # 5. Requirement ref: invalid role (diff block)
+    v5 = ReflectionPass(
+        FakeVerifierModel(
+            {
+                "decisions": [
+                    {
+                        "candidate_id": "c-1",
+                        "status": "supported",
+                        "reason": "OK",
+                        "evidence_refs": [
+                            {"block_id": query_block_id, "start_line": 10, "end_line": 10}
+                        ],
+                        "requirement_refs": [
+                            {
+                                "block_id": query_block_id,
+                                "start_line": 10,
+                                "end_line": 10,
+                                "check_id": None,
+                            }
+                        ],
+                    }
+                ]
+            }
+        )
+    )
+    with pytest.raises(VerificationInvalidOutputError, match="has invalid role 'diff'"):
+        await v5.verify(candidates=(cand,), context=context)
+
+    # 6. Requirement ref: range not shown
+    v6 = ReflectionPass(
+        FakeVerifierModel(
+            {
+                "decisions": [
+                    {
+                        "candidate_id": "c-1",
+                        "status": "supported",
+                        "reason": "OK",
+                        "evidence_refs": [
+                            {"block_id": query_block_id, "start_line": 10, "end_line": 10}
+                        ],
+                        "requirement_refs": [
+                            {
+                                "block_id": "policy-rules",
+                                "start_line": 50,
+                                "end_line": 60,
+                                "check_id": None,
+                            }
+                        ],
+                    }
+                ]
+            }
+        )
+    )
+    with pytest.raises(VerificationInvalidOutputError, match="not shown in 'policy-rules'"):
+        await v6.verify(candidates=(cand,), context=context)
+
+    # 7. Candidate has rule_name=".review/rules.md" but requirement_refs is empty
+    v7 = ReflectionPass(
+        FakeVerifierModel(
+            {
+                "decisions": [
+                    {
+                        "candidate_id": "c-1",
+                        "status": "supported",
+                        "reason": "OK",
+                        "evidence_refs": [
+                            {"block_id": query_block_id, "start_line": 10, "end_line": 10}
+                        ],
+                        "requirement_refs": [],
+                    }
+                ]
+            }
+        )
+    )
+    with pytest.raises(
+        VerificationInvalidOutputError,
+        match="requires at least one matching requirement_ref for this rule",
+    ):
+        await v7.verify(candidates=(cand,), context=context)

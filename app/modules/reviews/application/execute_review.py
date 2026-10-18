@@ -174,7 +174,7 @@ class ExecuteReviewRun:
                 raise RunFailure("llm_context_overflow", str(exc)) from exc
 
         model_output = await self._model.draft_review(context=context)
-        if self._reflection_pass is not None:
+        if self._reflection_pass is not None and context.policy_snapshot is not None:
             model_output = await self._run_reflection_pass(model_output, context)
         return await self._publisher.execute(run_id, model_output)
 
@@ -183,7 +183,7 @@ class ExecuteReviewRun:
         model_output: Mapping[str, object] | str | bytes,
         context: ReviewContext,
     ) -> Mapping[str, object] | str | bytes:
-        if self._reflection_pass is None:
+        if self._reflection_pass is None or context.policy_snapshot is None:
             return model_output
 
         if isinstance(model_output, (str, bytes)):
@@ -248,9 +248,16 @@ class ExecuteReviewRun:
                     raise InvalidReviewOutput(
                         f"Unsupported finding type in draft review: {type(item)}"
                     )
-            except (ValidationError, ValueError) as err:
+            except ValidationError as err:
+                sanitized_errors = "; ".join(
+                    f"{'.'.join(str(loc) for loc in e['loc'])}: {e['msg']}" for e in err.errors()
+                )
                 raise InvalidReviewOutput(
-                    f"Malformed candidate finding at index {idx}: {err}"
+                    f"Malformed candidate finding at index {idx}: {sanitized_errors}"
+                ) from err
+            except ValueError as err:
+                raise InvalidReviewOutput(
+                    f"Malformed candidate finding at index {idx}: {str(err)[:200]}"
                 ) from err
 
             valid_attr, attr_err = validate_v2_attribution(finding, reviewer_manifest)
@@ -277,12 +284,6 @@ class ExecuteReviewRun:
 
         # Cleansing: never leak unverified defects or praise through summary (CONTEXT §8.2)
         if len(supported) < len(candidates):
-            orig_done_well = "The proposed changes look clean and well-structured."
-            if isinstance(data.get("summary"), dict):
-                dw = data["summary"].get("done_well")
-                if isinstance(dw, str) and dw:
-                    orig_done_well = dw
-
             severities = {cand.finding.severity for cand in supported}
             if "critical" in severities:
                 effort = "large"
@@ -293,10 +294,14 @@ class ExecuteReviewRun:
             else:
                 effort = "none"
 
+            done_well = (
+                "Code analysis and policy verification were completed across all evaluated changes."
+            )
+
             if not supported:
                 data["summary"] = {
                     "problem": "No verified issues were found in the provided changes.",
-                    "done_well": orig_done_well,
+                    "done_well": done_well,
                     "effort": "none",
                 }
             else:
@@ -308,7 +313,7 @@ class ExecuteReviewRun:
                         f"Identified {len(supported)} verified {issue_word} ({cat_desc}) "
                         "in the reviewed changes."
                     ),
-                    "done_well": orig_done_well,
+                    "done_well": done_well,
                     "effort": effort,
                 }
 

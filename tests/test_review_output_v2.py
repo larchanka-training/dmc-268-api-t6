@@ -314,6 +314,63 @@ def test_validate_v2_attribution_additional_branches() -> None:
     assert valid is True
     assert reason is None
 
+    # Rule name is AGENTS.md but manifest has NO AGENTS.md
+    manifest_no_agents = CallManifest(
+        call_id=uuid.uuid4(),
+        run_id=uuid.uuid4(),
+        stage="review",
+        blocks=(
+            ManifestBlock(
+                block_id="diff-file",
+                source_role=SourceRole.DIFF,
+                source_kind="file_diff",
+                start_line=1,
+                end_line=30,
+                shown_line_count=30,
+            ),
+        ),
+    )
+    valid, reason = validate_v2_attribution(f_agents, manifest_no_agents)
+    assert valid is False
+    assert "no project_conventions_document in manifest" in str(reason)
+
+    # Rule name is service-defaults:id but no service_defaults in manifest
+    f_defaults = make_valid_finding_v2(
+        rule_name="service-defaults:fastapi",
+        evidence_refs=[EvidenceRef(block_id="diff-file", start_line=5, end_line=10)],
+    )
+    valid, reason = validate_v2_attribution(f_defaults, manifest)
+    assert valid is False
+    assert "no service_defaults in manifest" in str(reason)
+
+    # Rule name is service-defaults:id and manifest HAS service_defaults
+    manifest_with_defaults = CallManifest(
+        call_id=uuid.uuid4(),
+        run_id=uuid.uuid4(),
+        stage="review",
+        blocks=(
+            ManifestBlock(
+                block_id="diff-file",
+                source_role=SourceRole.DIFF,
+                source_kind="file_diff",
+                start_line=1,
+                end_line=30,
+                shown_line_count=30,
+            ),
+            ManifestBlock(
+                block_id="service-defaults",
+                source_role=SourceRole.SERVICE_DEFAULTS,
+                source_kind="service_defaults",
+                start_line=1,
+                end_line=5,
+                shown_line_count=5,
+            ),
+        ),
+    )
+    valid, reason = validate_v2_attribution(f_defaults, manifest_with_defaults)
+    assert valid is True
+    assert reason is None
+
     # Rule name is None (built-in standard criteria)
     f_none_rule = make_valid_finding_v2(
         rule_name=None,

@@ -244,6 +244,7 @@ class PromptBuilder:
     @staticmethod
     def _render_service_defaults(rules: tuple[ReviewRule, ...]) -> str:
         blocks = []
+        line_offset = 1
         for rule in rules:
             attributes = " ".join(
                 (
@@ -252,10 +253,14 @@ class PromptBuilder:
                     f'exclude="{_attribute(" ".join(rule.exclude))}"',
                 )
             )
-            checks = "\n".join(
-                f"{index}. {_text(check)}" for index, check in enumerate(rule.checks, start=1)
-            )
-            blocks.append(f"<rule {attributes}>\n{checks}\n</rule>")
+            checks = []
+            for index, check in enumerate(rule.checks, start=1):
+                checks.append(
+                    f'<check id="{index}"><line n="{line_offset}">{_text(check)}</line></check>'
+                )
+                line_offset += 1
+            checks_content = "\n".join(checks)
+            blocks.append(f"<rule {attributes}>\n{checks_content}\n</rule>")
         content = "\n".join(blocks)
         return f'<service_defaults block_id="service-defaults">\n{content}\n</service_defaults>'
 

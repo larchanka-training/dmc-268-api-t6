@@ -12,7 +12,7 @@ immutable — a file with a version in its name is never edited — and served f
 | Path                                    | What it is                                          |
 | --------------------------------------- | --------------------------------------------------- |
 | `prompts/review.system.v1.md`           | review prompt: order, filters, attribution, output  |
-| `prompts/review.system.v2.md`           | v1 + input metadata, few-shot examples, trust      |
+| `prompts/review.system.v2.md`           | v1 + input metadata, few-shot examples              |
 | `prompts/review.verifier.v1.md`         | reflection verifier prompt: validates candidates    |
 | `prompts/review.conventions.v1.md`      | pre-review prompt: repository patterns, review plan |
 | `prompts/review.conventions.v2.md`      | v1 + explicit counts for omitted input context    |
@@ -173,19 +173,19 @@ no tool to continue; the trailer is the contract for a future tool-enabled engin
 ## Policy snapshot v2 envelope and reflection pass
 
 Under Policy Snapshot v2 (`policy_snapshot` present), prompts and candidate findings use an immutable manifest and content-addressed blocks:
-- `<repository_rules block_id="...">`: rules from `.review/rules.md` (or empty block when missing).
-- `<project_conventions_document block_id="...">`: conventions from `AGENTS.md` (or empty block when missing).
+- `<repository_rules block_id="...">`: rules from `.review/rules.md` (or `<repository_rules status="absent" />` when missing).
+- `<project_conventions_document block_id="...">`: conventions from `AGENTS.md` (or `<project_conventions_document status="absent" />` when missing).
 - `<service_defaults block_id="...">`: builtin platform review defaults (`defaults_checksum`).
 - `<repo_conventions>`: cached repository conventions.
 - `<pr_meta>`: PR metadata (title, description, author, branch, base ref, commit messages).
-- `<changed_files>`: each `<file path="..." block_id="..." status="..." language="...">` carries a stable `block_id`. Contiguous ranges shown to the model are recorded in `CallManifest.shown_ranges`.
+- `<changed_files>`: each `<file path="..." block_id="..." status="..." language="...">` carries a stable `block_id`. Contiguous ranges shown to the model are recorded in `ManifestBlock.shown_ranges`.
 
 **Reflection Pass (`prompts/review.verifier.v1.md`)**:
 - Two-pass verification architecture to eliminate hallucinated findings.
 - **Pass 1 (Reviewer)** generates candidate findings conforming to `schemas/review-output.schema.v2.json` with required `evidence_refs` (pointing to visible `block_id` line ranges).
 - **Pass 2 (Verifier)** checks each candidate against visible code and requirements using `prompts/review.verifier.v1.md`.
-  - Verifier prompt envelope: `<candidate_findings>` (with `<candidate id="..." file="..." rule="..." start_line="..." category="...">`) and `<evidence_context>` (carrying `<file path="..." block_id="...">` and `<policy_document name="..." block_id="...">`).
-  - Verifier output: validated against `schemas/verifier-output.schema.v1.json` (`decisions`: `candidate_id`, `status` in `supported` / `contradicted` / `insufficient_context`, `reason`, `evidence_refs`, `requirement_refs`).
+  - Verifier prompt envelope: contains `<repository_rules>`, `<project_conventions_document>`, `<service_defaults>`, `<code_context>` (with `<changed_files>`), and `<candidate_findings count="...">` (carrying `<candidate candidate_id="..." path="..." start_line="..." line="..." category="..." severity="...">`, `<title>`, `<body>`, optional `<suggestion>`, and optional `<rule_attribution name="..." />`).
+  - Verifier output: validated at runtime via Pydantic (`VerificationOutput`, `ReviewFindingV2`) and schema `schemas/verifier-output.schema.v1.json` (`decisions`: `candidate_id`, `status` in `supported` / `contradicted` / `insufficient_context`, `reason`, `evidence_refs`, `requirement_refs`). Legacy runs without policy snapshot continue to validate v1 output.
   - Strict filtering: only candidates with `status="supported"` survive; unverified candidates are dropped, and the review summary is cleansed of hallucinated defects.
 
 ## Rule sets
@@ -217,7 +217,7 @@ one-line title without a trailing period, the `rule_name` ↔ attribution-prefix
 
 For Policy Snapshot v2, [`schemas/review-output.schema.v2.json`](schemas/review-output.schema.v2.json) defines
 `ReviewOutputV2` with required `evidence_refs` (array of `EvidenceRef{block_id, start_line, end_line}`)
-and closed `rule_name` attribution (`.review/rules.md`, `AGENTS.md`, `service-defaults:<ID>`, or null).
+and closed `rule_name` attribution (`.review/rules.md`, `AGENTS.md`, `service-defaults:<ID>`, or null; string type with domain validation in runtime Pydantic models).
 [`schemas/verifier-output.schema.v1.json`](schemas/verifier-output.schema.v1.json) defines the reflection pass contract
 (`decisions[]` with `candidate_id`, `status`, `reason`, `evidence_refs`, and `requirement_refs`).
 

@@ -643,3 +643,65 @@ def test_findings_post_processor_v2_allows_valid_and_rejects_malformed_rules() -
     # malformed service-defaults are nulled out
     assert result.inline[2].finding.rule_name is None
     assert result.inline[3].finding.rule_name is None
+
+
+def test_findings_post_processor_v2_preserves_attribution_for_body_only_findings() -> None:
+    from app.modules.reviews.application.review_output import (
+        ReviewFinding,
+        ReviewOutput,
+        ReviewSummary,
+    )
+
+    processor = FindingsPostProcessor.from_default_patterns()
+    findings = [
+        ReviewFinding(
+            path="app/main.py",
+            line=999,  # line not in hunk lines, so it is routed to body_only
+            start_line=None,
+            severity="high",
+            category="security",
+            title="Finding 1",
+            body="Body 1",
+            suggestion=None,
+            confidence=0.9,
+            rule_name=".review/rules.md",
+        ),
+        ReviewFinding(
+            path="app/main.py",
+            line=10,  # low confidence (< 0.8), so it is routed to body_only
+            start_line=None,
+            severity="high",
+            category="security",
+            title="Finding 2",
+            body="Body 2",
+            suggestion=None,
+            confidence=0.5,
+            rule_name="service-defaults:auth-check",
+        ),
+    ]
+    output = ReviewOutput(
+        findings=findings,
+        summary=ReviewSummary(problem="Problem.", done_well="Done well.", effort="small"),
+    )
+
+    # 1. Snapshot run with allowed_v2_rules: attribution must be preserved in body_only!
+    result = processor.process(
+        output,
+        hunk_lines={"app/main.py": frozenset({10})},
+        rule_names=frozenset(),
+        allowed_v2_rules=frozenset({".review/rules.md"}),
+    )
+    assert len(result.body_only) == 2
+    assert result.body_only[0].finding.rule_name == ".review/rules.md"
+    assert result.body_only[1].finding.rule_name == "service-defaults:auth-check"
+
+    # 2. Legacy run without allowed_v2_rules: attribution must be cleared in body_only!
+    legacy_result = processor.process(
+        output,
+        hunk_lines={"app/main.py": frozenset({10})},
+        rule_names=frozenset(),
+        allowed_v2_rules=None,
+    )
+    assert len(legacy_result.body_only) == 2
+    assert legacy_result.body_only[0].finding.rule_name is None
+    assert legacy_result.body_only[1].finding.rule_name is None
