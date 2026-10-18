@@ -65,6 +65,8 @@ KNOWN_ERROR_CODES = (
         "llm_payment_required",
         "verification_invalid_output",
         "verification_context_overflow",
+        "verification_budget_exceeded",
+        "verification_deadline_exceeded",
         "budget_exceeded",
         "deadline_exceeded",
         "github_forbidden",

@@ -311,6 +311,7 @@ class FindingPostProcessingInput:
     rule_names: frozenset[str]
     repository_max_inline: int | None = None
     severity_threshold: SeverityThresholdValue = "all"
+    allowed_v2_rules: frozenset[str] | None = None
 
 
 class ReviewOutputRepository(Protocol):
@@ -400,6 +401,7 @@ class PublishReviewOutput:
             rule_names=context.rule_names,
             repository_max_inline=context.repository_max_inline,
             severity_threshold=context.severity_threshold,
+            allowed_v2_rules=context.allowed_v2_rules,
         )
         async with self._uow_factory() as uow:
             publication = await uow.reviews.store_review_output(run_id, answer, parsed, processed)

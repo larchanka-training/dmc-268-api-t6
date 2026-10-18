@@ -293,3 +293,34 @@ def test_comment_body_formatting() -> None:
         comment_body("Title", "Body", "suggestion_code")
         == "**Title**\n\nBody\n\n```suggestion\nsuggestion_code\n```"
     )
+
+
+def test_publish_snapshot_run_preserves_v2_rule_attribution() -> None:
+    context = FindingPostProcessingInput(
+        hunk_lines={"app/example.py": frozenset({10, 12})},
+        rule_names=frozenset(),
+        allowed_v2_rules=frozenset({".review/rules.md"}),
+    )
+    published_processed: list[ProcessedReviewOutput] = []
+
+    @dataclass
+    class CustomRecordingRepository(RecordingRepository):
+        async def store_review_output(
+            self,
+            run_id: UUID,
+            model_output: dict[str, object],
+            parsed: ReviewOutput,
+            processed: ProcessedReviewOutput,
+        ) -> ReviewPublication | None:
+            published_processed.append(processed)
+            return await super().store_review_output(run_id, model_output, parsed, processed)
+
+    repository = CustomRecordingRepository(context, _publication())
+    factory = RecordingFactory(repository)
+    provider = RecordingProvider(units=factory.units)
+    value = valid_output()
+    cast(list[dict[str, object]], value["findings"])[0]["rule_name"] = ".review/rules.md"
+
+    assert asyncio.run(PublishReviewOutput(factory, provider).execute(RUN_ID, value)) is True
+    assert len(published_processed) == 1
+    assert published_processed[0].inline[0].finding.rule_name == ".review/rules.md"

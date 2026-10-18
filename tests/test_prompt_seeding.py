@@ -17,6 +17,7 @@ from sqlalchemy.schema import CreateSchema, DropSchema
 
 from alembic import command
 from app.bootstrap.seed_prompts import PromptAsset, load_prompt_assets, seed_prompt_versions
+from app.modules.reviews.application.policy_snapshot import PINNED_PROMPT_CHECKSUMS
 from app.modules.reviews.infrastructure.models import PromptVersion
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -57,7 +58,6 @@ def test_load_prompt_assets_preserves_full_file_and_checksum() -> None:
         ("review.conventions", 2),
         ("review.system", 1),
         ("review.system", 2),
-        ("review.system", 3),
         ("review.verifier", 1),
     ]
     for asset in assets:
@@ -66,6 +66,26 @@ def test_load_prompt_assets_preserves_full_file_and_checksum() -> None:
         )
         assert asset.content == expected_content
         assert asset.checksum == sha256(expected_content.encode("utf-8")).hexdigest()
+
+
+def test_pinned_checksums_match_files_and_golden_fixtures() -> None:
+    prompts_dir = REPO_ROOT / "review" / "prompts"
+
+    for key_ver, pinned_hash in PINNED_PROMPT_CHECKSUMS.items():
+        key, ver = key_ver.split(":")
+        file_path = prompts_dir / f"{key}.{ver}.md"
+        assert file_path.exists(), f"Prompt file {file_path} must exist"
+        actual_hash = sha256(file_path.read_bytes()).hexdigest()
+        assert actual_hash == pinned_hash, (
+            f"Checksum for {key_ver} must match {pinned_hash}, got {actual_hash}"
+        )
+
+    # Verify golden fixture matches system prompt v2
+    system_v2_raw = (prompts_dir / "review.system.v2.md").read_text(encoding="utf-8")
+    sample_fixture = (
+        REPO_ROOT / "tests" / "fixtures" / "prompt_builder" / "sample.system.txt"
+    ).read_text(encoding="utf-8")
+    assert sample_fixture == system_v2_raw
 
 
 def test_load_prompt_assets_preserves_crlf_bytes_and_checksum(tmp_path: Path) -> None:

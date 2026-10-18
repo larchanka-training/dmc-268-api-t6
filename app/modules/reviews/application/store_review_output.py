@@ -121,6 +121,7 @@ class StoreReviewOutput:
             rule_names=context.rule_names,
             repository_max_inline=context.repository_max_inline,
             severity_threshold=context.severity_threshold,
+            allowed_v2_rules=context.allowed_v2_rules,
         )
         findings = hashed_findings(processed)
         severities = [item.severity for item in findings]

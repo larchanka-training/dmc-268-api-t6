@@ -285,23 +285,43 @@ class ReflectionPass:
             VerificationInvalidOutputError,
             VerificationUnavailableError,
             PolicyError,
-            RunFailure,
         ):
             raise
         except Exception as exc:
-            if hasattr(exc, "error_code"):
+            error_code = getattr(exc, "error_code", None)
+            if error_code in {
+                "verification_unavailable",
+                "verification_invalid_output",
+                "verification_context_overflow",
+                "verification_budget_exceeded",
+                "verification_deadline_exceeded",
+            }:
                 raise
+            if isinstance(exc, TimeoutError) or error_code in {"llm_timeout", "llm_unavailable"}:
+                raise VerificationUnavailableError("Verifier model unavailable") from exc
+            if error_code == "llm_invalid_output":
+                raise VerificationInvalidOutputError("Verifier model output invalid") from exc
+            if error_code == "budget_exceeded":
+                raise RunFailure(
+                    "verification_budget_exceeded", "Verifier budget exceeded"
+                ) from exc
+            if error_code == "deadline_exceeded":
+                raise RunFailure(
+                    "verification_deadline_exceeded", "Verifier deadline exceeded"
+                ) from exc
             raise VerificationUnavailableError("Verifier model call failed") from exc
 
         try:
             if isinstance(raw_output, (str, bytes)):
                 parsed = VerificationOutput.model_validate_json(raw_output)
             elif isinstance(raw_output, Mapping):
-                parsed = VerificationOutput.model_validate(raw_output)
+                parsed = VerificationOutput.model_validate(dict(raw_output))
             else:
                 raise VerificationInvalidOutputError(
                     f"Unexpected verifier output type: {type(raw_output)}"
                 )
+        except VerificationInvalidOutputError:
+            raise
         except (ValidationError, ValueError, json.JSONDecodeError) as exc:
             raise VerificationInvalidOutputError(
                 "Malformed verifier response schema or JSON"
@@ -313,8 +333,8 @@ class ReflectionPass:
 
         if len(parsed.decisions) != len(candidates) or decision_ids != set(cand_by_id.keys()):
             raise VerificationInvalidOutputError(
-                f"Verifier returned decisions for {len(decision_ids)} candidates, "
-                f"expected {len(cand_by_id)}"
+                f"Verifier returned decisions for {len(parsed.decisions)} items, "
+                f"expected {len(candidates)}"
             )
 
         # Build allowed check IDs for service defaults
@@ -329,55 +349,60 @@ class ReflectionPass:
         # Validate evidence and requirement references against manifest
         for decision in parsed.decisions:
             cand = cand_by_id[decision.candidate_id]
+            cand_id_clean = decision.candidate_id[:64]
 
             # 1. Validate evidence_refs
             for ref in decision.evidence_refs:
+                block_id_clean = ref.block_id[:64]
                 block = manifest.get_block(ref.block_id)
                 if block is None:
                     raise VerificationInvalidOutputError(
-                        f"Decision {decision.candidate_id} evidence_ref {ref.block_id} "
+                        f"Decision {cand_id_clean} evidence_ref {block_id_clean} "
                         "not found in manifest"
                     )
                 if block.source_role not in {"diff", "source_excerpt", "ast_excerpt"}:
                     raise VerificationInvalidOutputError(
-                        f"Decision {decision.candidate_id} evidence_ref {ref.block_id} "
+                        f"Decision {cand_id_clean} evidence_ref {block_id_clean} "
                         f"has non-code role '{block.source_role}'"
                     )
                 if block.source_role == "diff" and block.path != cand.finding.path:
                     raise VerificationInvalidOutputError(
-                        f"Decision {decision.candidate_id} evidence_ref {ref.block_id} "
+                        f"Decision {cand_id_clean} evidence_ref {block_id_clean} "
                         f"path '{block.path}' does not match candidate path '{cand.finding.path}'"
                     )
                 if not manifest.is_range_shown(ref.block_id, ref.start_line, ref.end_line):
                     raise VerificationInvalidOutputError(
-                        f"Decision {decision.candidate_id} evidence_ref {ref.block_id}:"
+                        f"Decision {cand_id_clean} evidence_ref {block_id_clean}:"
                         f"{ref.start_line}-{ref.end_line} is not shown in verifier manifest"
                     )
 
             # 2. Validate requirement_refs
             for req_ref in decision.requirement_refs:
+                req_block_id_clean = req_ref.block_id[:64]
                 block = manifest.get_block(req_ref.block_id)
                 if block is None:
                     raise VerificationInvalidOutputError(
-                        f"Decision {decision.candidate_id} requirement_ref block "
-                        f"'{req_ref.block_id}' not found in manifest"
+                        f"Decision {cand_id_clean} requirement_ref block "
+                        f"'{req_block_id_clean}' not found in manifest"
                     )
                 if block.source_role not in {"policy_document", "service_defaults"}:
                     raise VerificationInvalidOutputError(
-                        f"Decision {decision.candidate_id} requirement_ref block "
-                        f"'{req_ref.block_id}' has invalid role '{block.source_role}'"
+                        f"Decision {cand_id_clean} requirement_ref block "
+                        f"'{req_block_id_clean}' has invalid role '{block.source_role}'"
                     )
                 if not manifest.is_range_shown(
                     req_ref.block_id, req_ref.start_line, req_ref.end_line
                 ):
                     raise VerificationInvalidOutputError(
-                        f"Decision {decision.candidate_id} requirement_ref range "
-                        f"{req_ref.start_line}-{req_ref.end_line} not shown in '{req_ref.block_id}'"
+                        f"Decision {cand_id_clean} requirement_ref range "
+                        f"{req_ref.start_line}-{req_ref.end_line} "
+                        f"not shown in '{req_block_id_clean}'"
                     )
                 if req_ref.check_id is not None:
+                    req_check_id_clean = req_ref.check_id[:64]
                     if block.source_role != "service_defaults":
                         raise VerificationInvalidOutputError(
-                            f"Decision {decision.candidate_id} check_id is only allowed "
+                            f"Decision {cand_id_clean} check_id is only allowed "
                             f"for service_defaults, got '{block.source_role}'"
                         )
                     rule_id = (
@@ -388,12 +413,12 @@ class ReflectionPass:
                     )
                     if valid_check_ids and req_ref.check_id not in valid_check_ids:
                         raise VerificationInvalidOutputError(
-                            f"Decision {decision.candidate_id} check_id '{req_ref.check_id}' "
+                            f"Decision {cand_id_clean} check_id '{req_check_id_clean}' "
                             "does not match service defaults rules"
                         )
                     if rule_id and req_ref.check_id != rule_id:
                         raise VerificationInvalidOutputError(
-                            f"Decision {decision.candidate_id} check_id '{req_ref.check_id}' "
+                            f"Decision {cand_id_clean} check_id '{req_check_id_clean}' "
                             f"does not match rule_id '{rule_id}'"
                         )
 
@@ -406,9 +431,7 @@ class ReflectionPass:
                 matched = False
                 for req_ref in decision.requirement_refs:
                     block = manifest.get_block(req_ref.block_id)
-                    if block is None:
-                        continue
-                    if (
+                    if block is not None and (
                         rname == ".review/rules.md"
                         and block.source_kind == "repository_rules"
                         or rname == "AGENTS.md"

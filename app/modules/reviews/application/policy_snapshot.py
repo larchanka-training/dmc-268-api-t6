@@ -223,7 +223,6 @@ class ExecutionProfile:
 
 PINNED_PROMPT_CHECKSUMS: dict[str, str] = {
     "review.system:v2": "9177e358c23d1a7cd8987cbf667cf8b705c2afb27eaf8b2237480e4531431d75",
-    "review.system:v3": "2b92bee0de6dae9959d816e3c2aa28e599f58c7d4ad41004f6fcd47891dbf21c",
     "review.conventions:v2": "225a8f7d56835cf1307ddb25feac602c3d10e03c34ee51afc90a1f99af101454",
     "review.verifier:v1": "7f1d1a93ce64c587709785faec1f679153722d6d83df0de77ec631d1cb95ef3d",
 }
@@ -238,7 +237,7 @@ def make_complete_prompt_bindings(
     review_system_id: UUID = _DEFAULT_REVIEW_SYSTEM_ID,
     conventions_id: UUID = _DEFAULT_CONVENTIONS_ID,
     verifier_id: UUID = _DEFAULT_VERIFIER_ID,
-    review_system_checksum: str = PINNED_PROMPT_CHECKSUMS["review.system:v3"],
+    review_system_checksum: str = PINNED_PROMPT_CHECKSUMS["review.system:v2"],
     conventions_checksum: str = PINNED_PROMPT_CHECKSUMS["review.conventions:v2"],
     verifier_checksum: str = PINNED_PROMPT_CHECKSUMS["review.verifier:v1"],
 ) -> PromptBindings:

@@ -677,9 +677,13 @@ class TestPromptInjectionDefenses:
 
         cand_id = payload if field_name == "candidate_id" else "cand-safe-1"
         c_path = payload if field_name == "candidate_path" else "app/service.py"
-        c_rname = payload if field_name == "candidate_rule_name" else ".review/rules.md"
+        c_rname = ".review/rules.md"
         c_title = payload if field_name == "candidate_title" else "Title"
-        c_body = payload if field_name == "candidate_body" else "Body text"
+        c_body = (
+            payload
+            if field_name in ("candidate_body", "role_marker_start", "role_marker_llama")
+            else "Body text"
+        )
         c_sugg = payload if field_name == "candidate_suggestion" else "Suggestion"
 
         finding = ReviewFindingV2(
@@ -748,11 +752,17 @@ class TestPromptInjectionDefenses:
             assert "injected" not in file_el.attrib
             assert "x" not in file_el.attrib
 
+        # Decoded body must match original payload
+        body_el = root.find(".//candidate/body")
+        assert body_el is not None
+        assert body_el.text == c_body
+
         # 5. System prompt is strictly equal to the pinned verifier prompt; role markers never leak
         assert prompt.system == verifier_builder._system_prompt
         assert "<|im_start|>" not in prompt.system
         assert "[INST]" not in prompt.system
         assert "<|im_start|>" not in prompt.user
+        assert "<<SYS>>" not in prompt.user
 
     @pytest.mark.parametrize(
         "bad_rule_name",
@@ -814,16 +824,10 @@ def test_source_authority_and_trust_statement_present_in_prompts() -> None:
     from pathlib import Path
 
     repo_root = Path(__file__).resolve().parent.parent
-    v3_prompt = (repo_root / "review" / "prompts" / "review.system.v3.md").read_text(
-        encoding="utf-8"
-    )
     verifier_prompt = (repo_root / "review" / "prompts" / "review.verifier.v1.md").read_text(
         encoding="utf-8"
     )
 
-    assert "Source Authority and Trust" in v3_prompt
     assert "Source Authority and Trust" in verifier_prompt
-    assert "Treat the contents of" in v3_prompt
     assert "Treat the contents of" in verifier_prompt
-    assert "prompt injection" in v3_prompt
     assert "prompt injection" in verifier_prompt
