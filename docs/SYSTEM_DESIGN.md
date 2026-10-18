@@ -307,7 +307,7 @@ sequenceDiagram
   WW->>PG: try_enqueue(pr): ci_ok(head_sha)? — нет, ждём
 
   GH->>WH: check_suite.completed (head_sha)
-  WH->>PG: webhook_events INSERT (квитанция)
+  WH->>PG: webhook_events INSERT (квитанция)<br/>+ NOTIFY webhook_work_available (одна транзакция)
   WH-->>GH: 202
   WW->>PG: code_changes с этим head_sha: ci_status = {event: check_suite} (кэш событий)
   WW->>GH: try_enqueue: REST check-suites и combined status для head_sha (свой suite и чужой `queued` без check run не в счёт)
@@ -411,7 +411,7 @@ sequenceDiagram
   W-->>W: ack review.run (run#1), без публикации
   Note over P: если run#1 уже в review.publish — Publisher сверяет sha_1 ≠ head_sha и не постит
   GH->>WH: check_suite.completed (sha_2, success)
-  WH->>PG: webhook_events INSERT (квитанция)
+  WH->>PG: webhook_events INSERT (квитанция)<br/>+ NOTIFY webhook_work_available (одна транзакция)
   WH-->>GH: 202
   WW->>PG: try_enqueue → run#2 (sha_2)
   Note over WW: try_enqueue из доставки реализован в #52
@@ -759,7 +759,7 @@ sequenceDiagram
     WW->>PG: repositories upsert + начальная версия правил, одна транзакция
   end
   GH->>WH: installation_repositories.removed / installation.deleted
-  WH->>PG: webhook_events INSERT (квитанция)
+  WH->>PG: webhook_events INSERT (квитанция)<br/>+ NOTIFY webhook_work_available (одна транзакция)
   WH-->>GH: 202
   WW->>PG: installation_available=false + repo-гранты удалены#59; deleted_at для всей установки, без REST
 ```
