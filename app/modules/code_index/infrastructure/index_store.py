@@ -471,7 +471,14 @@ class SqlAlchemyCodeIndexStore:
         elif workspace_bytes > admission.workspace_storage_bytes:
             quota = WORKSPACE_STORAGE_EXCEEDED
         if quota is not None:
-            await self._update_state(repository_id, **_failure(quota))
+            # This job made no GitHub request: it records zero metrics, not the last job's.
+            await self._update_state(
+                repository_id,
+                **_failure(quota),
+                **_stats(
+                    IndexBuildStats(downloaded_bytes=0, build_duration_ms=0, github_request_count=0)
+                ),
+            )
             return ClaimRefused(ClaimRefusal.QUOTA, quota)
         leases, installation_leases = await self._live_leases(repository_id, now)
         if (

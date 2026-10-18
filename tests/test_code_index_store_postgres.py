@@ -2789,7 +2789,9 @@ def test_repository_quota_refuses_the_claim_and_fails_the_index(index: _Index) -
             "stored_bytes": 0,
             "pending_bytes": 0,
             "profile": None,
-            "stats": _STATS_FIELDS,
+            # The refused job made no GitHub request: it records zero metrics, not the
+            # previous job's.
+            "stats": _NO_STATS,
         }
         assert await _reads(index, index.a) == (None, [], [], [], [])
         assert await _collect(index, index.a, 100) == [8, 0]
@@ -2847,6 +2849,8 @@ def test_workspace_quota_counts_other_builds_and_spares_another_workspace(
             failed.published_publication,
             failed.stored_bytes,
         ) == ("failed", "limit_exceeded:workspace_storage", 0, 0)
+        # A's earlier build recorded `_STATS`; the refused job made no GitHub request.
+        assert dataclasses.asdict(failed.stats) == _NO_STATS
 
         # The build that filled the Workspace keeps running.
         running = await _state(index, s)
