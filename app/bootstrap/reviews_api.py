@@ -60,8 +60,19 @@ from app.modules.integrations.webhooks.infrastructure.github_webhook_receipts im
 from app.modules.repositories.application.repository_settings import (
     RepositorySettingsUowFactory,
 )
+from app.modules.repositories.application.rules_status import (
+    GetRulesStatus,
+    ReadRulesDocument,
+    RefreshRulesStatuses,
+    RequestRulesRefreshOnPush,
+    RulesRefreshTarget,
+)
 from app.modules.repositories.infrastructure.repository_settings import (
     SqlAlchemyRepositorySettingsUnitOfWork,
+)
+from app.modules.repositories.infrastructure.rules_status import (
+    SqlAlchemyRulesRefreshUnitOfWork,
+    SqlAlchemyRulesStatusUnitOfWork,
 )
 from app.modules.reviews.application.cancel_run import (
     CancellationSignals,
@@ -96,10 +107,15 @@ from app.modules.reviews.infrastructure.ci_eligibility_candidates import (
     SqlAlchemyEligibilityCandidateStore,
 )
 from app.modules.reviews.infrastructure.github_ci import HttpGitHubCurrentHeadCiProvider
+from app.modules.reviews.infrastructure.github_policy_source import (
+    GitHubDefaultBranchHeadSource,
+    GitHubRepositoryPolicySource,
+)
 from app.modules.reviews.infrastructure.github_pull_request_projection import (
     SqlAlchemyPullRequestProjectionLock,
     SqlAlchemyPullRequestProjectionUnitOfWork,
 )
+from app.modules.reviews.infrastructure.github_vcs import HttpGitHubVcsProvider
 from app.modules.reviews.infrastructure.pull_request_queries import SqlAlchemyPullRequestQueries
 from app.modules.reviews.infrastructure.rerun_store import SqlAlchemyRerunUnitOfWork
 from app.modules.reviews.infrastructure.run_repository import (
@@ -200,6 +216,37 @@ class ReviewsApiResources:
             ),
             action_of=action_of,
             classify_failure=classify_failure,
+        )
+
+    def rules_status_refresher(
+        self,
+        *,
+        client: httpx.AsyncClient,
+        token_provider: GitHubInstallationAccessTokenProvider,
+    ) -> RefreshRulesStatuses:
+        """Compose the ``webhook-worker`` reads of ``.review/rules.md`` (#150)."""
+        vcs = HttpGitHubVcsProvider(client=client, token_provider=token_provider)
+
+        def source(target: RulesRefreshTarget, sha: str) -> GitHubRepositoryPolicySource:
+            return GitHubRepositoryPolicySource(
+                client=client,
+                token_provider=token_provider,
+                installation_external_id=target.installation_external_id,
+                repository_full_name=target.repository_full_name,
+                policy_base_sha=sha,
+                read_blob=partial(
+                    vcs.get_repository_blob,
+                    target.installation_external_id,
+                    target.repository_full_name,
+                ),
+            )
+
+        return RefreshRulesStatuses(
+            uow_factory=partial(SqlAlchemyRulesRefreshUnitOfWork, self._session_factory),
+            reader=ReadRulesDocument(
+                heads=GitHubDefaultBranchHeadSource(client=client, token_provider=token_provider),
+                sources=source,
+            ),
         )
 
     def installation_onboarding(
@@ -303,6 +350,9 @@ class ReviewsApiResources:
             pull_request_projector=projector,
             label_intent_projector=projector,
             run_trigger=run_trigger,
+            rules_refresh=RequestRulesRefreshOnPush(
+                partial(SqlAlchemyRulesRefreshUnitOfWork, self._session_factory)
+            ),
         )
         return GitHubWebhookDispatchAdapter(dispatcher)
 
@@ -339,6 +389,15 @@ def get_repository_settings(
 ) -> RepositorySettingsUowFactory:
     return partial(
         SqlAlchemyRepositorySettingsUnitOfWork, _resources(request).session_factory, scope
+    )
+
+
+def get_rules_status(
+    request: Request,
+    scope: Annotated[AuthScope, Depends(get_auth_scope)],
+) -> GetRulesStatus:
+    return GetRulesStatus(
+        partial(SqlAlchemyRulesStatusUnitOfWork, _resources(request).session_factory, scope)
     )
 
 

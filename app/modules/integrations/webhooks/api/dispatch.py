@@ -23,10 +23,12 @@ from app.modules.integrations.webhooks.api.pull_request_dtos import (
     parse_pull_request_event,
     parse_pull_request_label_event,
 )
+from app.modules.integrations.webhooks.api.push_event_dtos import parse_push_event
 from app.modules.integrations.webhooks.application.github_installation_dispatch import (
     GitHubDispatchEvent,
     InstallationDeliveryDispatchResult,
     InstallationDeliveryDispatchStatus,
+    PushEvent,
     UnsupportedGitHubEvent,
     _with_action,
 )
@@ -93,6 +95,7 @@ class GitHubWebhookDispatchAdapter:
             | PullRequestLabelEvent
             | CiTriggerEvent
             | InstallationRepositoriesEvent
+            | PushEvent
             | UnsupportedGitHubEvent
         )
         if event_name == "pull_request":
@@ -113,6 +116,14 @@ class GitHubWebhookDispatchAdapter:
         elif event_name == "status" or (event_name in _CI_EVENTS and action == "completed"):
             try:
                 value = parse_ci_event(event_name, payload)
+            except (ValueError, ValidationError) as error:
+                return InstallationDeliveryDispatchResult(
+                    InstallationDeliveryDispatchStatus.IGNORED_INVALID_EVENT,
+                    _invalid_payload(error),
+                )
+        elif event_name == "push":
+            try:
+                value = parse_push_event(payload)
             except (ValueError, ValidationError) as error:
                 return InstallationDeliveryDispatchResult(
                     InstallationDeliveryDispatchStatus.IGNORED_INVALID_EVENT,

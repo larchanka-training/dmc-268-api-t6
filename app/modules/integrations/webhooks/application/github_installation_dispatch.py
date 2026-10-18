@@ -51,6 +51,7 @@ class InstallationDeliveryDispatchStatus(StrEnum):
     PROCESSED_CI = "processed_ci"
     DEFERRED_REPOSITORY_DETAILS = "deferred_repository_details"
     DEFERRED_RUN_TRIGGER = "deferred_run_trigger"
+    REQUESTED_RULES_REFRESH = "requested_rules_refresh"
 
 
 @dataclass(frozen=True)
@@ -72,6 +73,20 @@ class UnsupportedGitHubEvent:
 
 
 @dataclass(frozen=True)
+class PushEvent:
+    """A push; only one to the default branch can change the rules status (#150)."""
+
+    installation_external_id: int
+    repository_external_id: int
+    ref: str
+    default_branch: str
+
+    @property
+    def to_default_branch(self) -> bool:
+        return self.ref == f"refs/heads/{self.default_branch}"
+
+
+@dataclass(frozen=True)
 class GitHubDispatchEvent:
     """Validated application input from a claimed raw webhook receipt."""
 
@@ -81,6 +96,7 @@ class GitHubDispatchEvent:
         | PullRequestLabelEvent
         | CiTriggerEvent
         | InstallationRepositoriesEvent
+        | PushEvent
         | UnsupportedGitHubEvent
     )
 
@@ -120,6 +136,12 @@ class WebhookRunTriggerHandler(Protocol):
     async def on_ci(self, event: CiTriggerEvent) -> RunTriggerOutcome: ...
 
 
+class RulesRefreshOnPushHandler(Protocol):
+    """Request a new read of ``.review/rules.md``; False when the repository is not connected."""
+
+    async def execute(self, installation_external_id: int, repository_external_id: int) -> bool: ...
+
+
 class GitHubInstallationDeliveryDispatcher:
     """Safely route supported GitHub installation events to onboarding.
 
@@ -136,12 +158,14 @@ class GitHubInstallationDeliveryDispatcher:
         pull_request_projector: PullRequestProjectionHandler | None = None,
         label_intent_projector: PullRequestLabelIntentHandler | None = None,
         run_trigger: WebhookRunTriggerHandler | None = None,
+        rules_refresh: RulesRefreshOnPushHandler | None = None,
     ) -> None:
         self._resolver = resolver
         self._onboarding = onboarding
         self._pull_request_projector = pull_request_projector
         self._label_intent_projector = label_intent_projector
         self._run_trigger = run_trigger
+        self._rules_refresh = rules_refresh
 
     async def execute(self, delivery: GitHubDispatchEvent) -> InstallationDeliveryDispatchResult:
         event = delivery.value
@@ -200,6 +224,8 @@ class GitHubInstallationDeliveryDispatcher:
                 outcome = await self._run_trigger.on_pr(event)
                 return self._trigger_result(outcome, result.status, event.action)
             return result
+        if isinstance(event, PushEvent):
+            return await self._push_result(event)
         if isinstance(event, CiTriggerEvent):
             if self._run_trigger is not None:
                 outcome = await self._run_trigger.on_ci(event)
@@ -237,6 +263,30 @@ class GitHubInstallationDeliveryDispatcher:
             )
         return InstallationDeliveryDispatchResult(
             status=InstallationDeliveryDispatchStatus.ONBOARDED
+        )
+
+    async def _push_result(self, event: PushEvent) -> InstallationDeliveryDispatchResult:
+        # The rules file changes only by a commit to the default branch; other refs and
+        # tags cannot change what the settings page shows.
+        if not event.to_default_branch:
+            return InstallationDeliveryDispatchResult(
+                status=InstallationDeliveryDispatchStatus.IGNORED_IRRELEVANT_EVENT,
+                detail="not_default_branch",
+            )
+        if self._rules_refresh is None:
+            return InstallationDeliveryDispatchResult(
+                status=InstallationDeliveryDispatchStatus.DEFERRED_KNOWN_EVENT
+            )
+        if not await self._rules_refresh.execute(
+            event.installation_external_id, event.repository_external_id
+        ):
+            # Not deferred: connecting the repository reads the file anyway.
+            return InstallationDeliveryDispatchResult(
+                status=InstallationDeliveryDispatchStatus.IGNORED_IRRELEVANT_EVENT,
+                detail="unknown_repository",
+            )
+        return InstallationDeliveryDispatchResult(
+            status=InstallationDeliveryDispatchStatus.REQUESTED_RULES_REFRESH
         )
 
     @staticmethod

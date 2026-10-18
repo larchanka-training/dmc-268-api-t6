@@ -17,6 +17,7 @@ from app.modules.integrations.webhooks.application.github_installation_dispatch 
     GitHubInstallationDeliveryDispatcher,
     InstallationDeliveryDispatchResult,
     InstallationDeliveryDispatchStatus,
+    PushEvent,
     UnsupportedGitHubEvent,
 )
 from app.modules.integrations.webhooks.application.installation_access_token import (
@@ -656,14 +657,14 @@ def test_malformed_or_unsupported_delivery_is_ignored_before_lookup() -> None:
     unsupported = asyncio.run(
         dispatcher.execute(
             VerifiedGitHubDelivery(
-                delivery_id="delivery-3", event_name="push", payload={}
+                delivery_id="delivery-3", event_name="deployment", payload={}
             ).to_receipt()
         )
     )
 
     assert malformed.status is InstallationDeliveryDispatchStatus.IGNORED_INVALID_EVENT
     assert unsupported.status is InstallationDeliveryDispatchStatus.IGNORED_IRRELEVANT_EVENT
-    assert unsupported.detail is None  # a push has no action to report
+    assert unsupported.detail is None  # a deployment has no action to report
     assert resolver.calls == []
     assert onboarding.calls == []
 
@@ -744,8 +745,8 @@ def test_non_actionable_pr_action_is_ignored() -> None:
         ("installation", "suspend", "action=suspend"),
         ("installation", "suspend\nFAKE LINE", None),
         ("installation_repositories", "x" * 41, None),
-        ("push", "created", "action=created"),
-        ("push", "created\nFAKE LINE", None),
+        ("deployment", "created", "action=created"),
+        ("deployment", "created\nFAKE LINE", None),
     ],
 )
 def test_an_ignored_events_action_reaches_the_detail_only_as_a_plain_token(
@@ -1132,13 +1133,15 @@ def test_unsupported_receipt_reaches_application_as_event_metadata() -> None:
     adapter = GitHubWebhookDispatchAdapter(dispatcher)
     result = asyncio.run(
         adapter.execute(
-            VerifiedGitHubDelivery("delivery-push", "push", {"action": "created"}).to_receipt()
+            VerifiedGitHubDelivery(
+                "delivery-deployment", "deployment", {"action": "created"}
+            ).to_receipt()
         )
     )
 
     assert result.status is InstallationDeliveryDispatchStatus.IGNORED_IRRELEVANT_EVENT
     assert dispatcher.events == [
-        GitHubDispatchEvent("delivery-push", UnsupportedGitHubEvent("push", "created"))
+        GitHubDispatchEvent("delivery-deployment", UnsupportedGitHubEvent("deployment", "created"))
     ]
 
 
@@ -1238,3 +1241,124 @@ def test_structured_run_trigger_retry_becomes_retryable_dispatch_status(
     result = asyncio.run(adapter.execute(delivery.to_receipt()))
     assert result.status == "deferred_run_trigger"
     assert result.detail == detail
+
+
+@dataclass
+class FakeRulesRefresh:
+    """Connected repositories by (installation, repository) external id."""
+
+    connected: set[tuple[int, int]] = field(default_factory=lambda: {(17, 101)})
+    calls: list[tuple[int, int]] = field(default_factory=list)
+
+    async def execute(self, installation_external_id: int, repository_external_id: int) -> bool:
+        self.calls.append((installation_external_id, repository_external_id))
+        return (installation_external_id, repository_external_id) in self.connected
+
+
+def _push_delivery(ref: str, *, repository_id: int = 101) -> VerifiedGitHubDelivery:
+    return VerifiedGitHubDelivery(
+        "delivery-push",
+        "push",
+        {
+            "ref": ref,
+            "before": "b" * 40,
+            "after": "a" * 40,
+            "installation": {"id": 17},
+            "repository": {"id": repository_id, "full_name": "octo/repo", "default_branch": "main"},
+        },
+    )
+
+
+def _push_dispatcher(
+    rules_refresh: FakeRulesRefresh | None,
+) -> tuple[GitHubWebhookDispatchAdapter, FakeInstallationResolver]:
+    resolver = FakeInstallationResolver()
+    return (
+        GitHubWebhookDispatchAdapter(
+            GitHubInstallationDeliveryDispatcher(
+                resolver=resolver, onboarding=FakeOnboarding(), rules_refresh=rules_refresh
+            )
+        ),
+        resolver,
+    )
+
+
+def test_push_to_the_default_branch_requests_a_rules_status_read() -> None:
+    refresh = FakeRulesRefresh()
+    dispatcher, resolver = _push_dispatcher(refresh)
+
+    result = asyncio.run(dispatcher.execute(_push_delivery("refs/heads/main").to_receipt()))
+
+    assert result == InstallationDeliveryDispatchResult(
+        InstallationDeliveryDispatchStatus.REQUESTED_RULES_REFRESH
+    )
+    assert refresh.calls == [(17, 101)]
+    assert resolver.calls == []
+
+
+@pytest.mark.parametrize(
+    "ref", ["refs/heads/feature", "refs/heads/main-2", "refs/tags/main", "refs/heads/release/main"]
+)
+def test_push_to_another_ref_is_ignored_without_a_request(ref: str) -> None:
+    refresh = FakeRulesRefresh()
+    dispatcher, _ = _push_dispatcher(refresh)
+
+    result = asyncio.run(dispatcher.execute(_push_delivery(ref).to_receipt()))
+
+    assert result == InstallationDeliveryDispatchResult(
+        InstallationDeliveryDispatchStatus.IGNORED_IRRELEVANT_EVENT, "not_default_branch"
+    )
+    assert refresh.calls == []
+
+
+def test_push_to_a_repository_that_is_not_connected_is_ignored_not_deferred() -> None:
+    refresh = FakeRulesRefresh(connected=set())
+    dispatcher, _ = _push_dispatcher(refresh)
+
+    result = asyncio.run(
+        dispatcher.execute(_push_delivery("refs/heads/main", repository_id=999).to_receipt())
+    )
+
+    assert result == InstallationDeliveryDispatchResult(
+        InstallationDeliveryDispatchStatus.IGNORED_IRRELEVANT_EVENT, "unknown_repository"
+    )
+    assert refresh.calls == [(17, 999)]
+
+
+def test_push_waits_until_the_rules_refresh_is_configured() -> None:
+    dispatcher, _ = _push_dispatcher(None)
+
+    result = asyncio.run(dispatcher.execute(_push_delivery("refs/heads/main").to_receipt()))
+
+    assert result.status is InstallationDeliveryDispatchStatus.DEFERRED_KNOWN_EVENT
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"ref": None},
+        {"installation": {"id": 0}},
+        {"repository": {"id": 101, "full_name": "octo/repo"}},
+        {"repository": {"id": 101, "default_branch": ""}},
+    ],
+    ids=["no-ref", "bad-installation", "no-default-branch", "empty-default-branch"],
+)
+def test_malformed_push_is_ignored_as_invalid(change: dict[str, object]) -> None:
+    refresh = FakeRulesRefresh()
+    dispatcher, _ = _push_dispatcher(refresh)
+    delivery = _push_delivery("refs/heads/main")
+    payload = {**delivery.payload, **change}
+
+    result = asyncio.run(
+        dispatcher.execute(VerifiedGitHubDelivery("bad-push", "push", payload).to_receipt())
+    )
+
+    assert result.status is InstallationDeliveryDispatchStatus.IGNORED_INVALID_EVENT
+    assert result.detail is not None and result.detail.startswith("invalid_payload")
+    assert refresh.calls == []
+
+
+def test_push_event_names_its_default_branch() -> None:
+    event = PushEvent(17, 101, "refs/heads/release/1.x", "release/1.x")
+
+    assert event.to_default_branch

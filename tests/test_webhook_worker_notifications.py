@@ -21,6 +21,10 @@ from app.modules.integrations.webhooks.application.receive_github_delivery impor
 from app.modules.integrations.webhooks.application.revive_deferred_installation_deliveries import (
     ReviveDeferredInstallationDeliveries,
 )
+from app.modules.repositories.application.rules_status import (
+    RULES_REFRESH_BATCH,
+    RefreshRulesStatuses,
+)
 from app.webhook_worker import sweep_forever
 
 
@@ -321,3 +325,92 @@ def test_worker_starts_scan_and_heartbeat_before_listener_ready_and_awaits_clean
                 await cancel(task)
 
     asyncio.run(scenario())
+
+
+class RulesRefresher:
+    """Counts the passes of the rules status sweep (#150); the first may fill a batch."""
+
+    def __init__(self, *, first_batch: int = 0, fail: bool = False) -> None:
+        self.first_batch = first_batch
+        self.fail = fail
+        self.passes: asyncio.Queue[int] = asyncio.Queue()
+        self.count = 0
+
+    async def execute(self) -> int:
+        self.count += 1
+        self.passes.put_nowait(self.count)
+        if self.fail:
+            raise RuntimeError("rules status store down")
+        return self.first_batch if self.count == 1 else 0
+
+
+def test_rules_status_requests_are_answered_on_startup_and_on_each_hint() -> None:
+    async def scenario() -> None:
+        receiver, reviver, wake = Receiver(), Reviver(), Wake()
+        rules = RulesRefresher()
+        task = asyncio.create_task(
+            sweep_forever(
+                cast(ReceiveGitHubDelivery, receiver),
+                cast(ReviveDeferredInstallationDeliveries, reviver),
+                wake,
+                rules=cast(RefreshRulesStatuses, rules),
+            )
+        )
+        try:
+            # A request written while the worker was down is answered by the first pass.
+            assert await asyncio.wait_for(rules.passes.get(), timeout=1) == 1
+            await asyncio.wait_for(wake.waiting.get(), timeout=1)
+            wake.set()
+            assert await asyncio.wait_for(rules.passes.get(), timeout=1) == 2
+        finally:
+            await cancel(task)
+
+    asyncio.run(scenario())
+
+
+def test_a_full_rules_status_batch_runs_the_next_pass_without_waiting() -> None:
+    async def scenario() -> None:
+        receiver, reviver, wake = Receiver(), Reviver(), Wake()
+        rules = RulesRefresher(first_batch=RULES_REFRESH_BATCH)
+        task = asyncio.create_task(
+            sweep_forever(
+                cast(ReceiveGitHubDelivery, receiver),
+                cast(ReviveDeferredInstallationDeliveries, reviver),
+                wake,
+                rules=cast(RefreshRulesStatuses, rules),
+            )
+        )
+        try:
+            # The first wait for a hint comes only after the pass that found the batch short.
+            await asyncio.wait_for(wake.waiting.get(), timeout=1)
+            assert rules.count == 2
+        finally:
+            await cancel(task)
+
+    asyncio.run(scenario())
+
+
+def test_a_failed_rules_status_pass_does_not_stop_the_webhook_sweep(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    async def scenario() -> None:
+        receiver, reviver, wake = Receiver(), Reviver(), Wake()
+        rules = RulesRefresher(fail=True)
+        task = asyncio.create_task(
+            sweep_forever(
+                cast(ReceiveGitHubDelivery, receiver),
+                cast(ReviveDeferredInstallationDeliveries, reviver),
+                wake,
+                rules=cast(RefreshRulesStatuses, rules),
+            )
+        )
+        try:
+            await asyncio.wait_for(wake.waiting.get(), timeout=1)
+            wake.set()
+            assert await asyncio.wait_for(receiver.scans.get(), timeout=1) == 1
+            assert await asyncio.wait_for(receiver.scans.get(), timeout=1) == 2
+        finally:
+            await cancel(task)
+
+    asyncio.run(scenario())
+    assert "Rules status refresh sweep failed" in caplog.text

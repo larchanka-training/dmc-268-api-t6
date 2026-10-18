@@ -36,6 +36,10 @@ from app.modules.integrations.webhooks.infrastructure.redis_installation_token_c
     RedisLike,
     installation_token_cache,
 )
+from app.modules.repositories.application.rules_status import (
+    RULES_REFRESH_BATCH,
+    RefreshRulesStatuses,
+)
 from app.modules.reviews.application.try_enqueue_webhook_run import RunMessagePublisher
 from app.modules.reviews.infrastructure.amqp import LazyAmqpPublisher
 
@@ -124,6 +128,15 @@ async def revive_once(reviver: ReviveDeferredInstallationDeliveries) -> int:
         return 0
 
 
+async def refresh_rules_once(refresher: RefreshRulesStatuses) -> int:
+    """Answer pending rules status requests (#150); a failure waits for the next pass."""
+    try:
+        return await refresher.execute()
+    except Exception:
+        _LOGGER.exception("Rules status refresh sweep failed")
+        return 0
+
+
 async def hourly_maintenance(
     receiver: ReceiveGitHubDelivery, reviver: ReviveDeferredInstallationDeliveries
 ) -> None:
@@ -137,16 +150,20 @@ async def sweep_forever(
     wake: asyncio.Event,
     *,
     poll_interval: float = 30.0,
+    rules: RefreshRulesStatuses | None = None,
 ) -> NoReturn:
     next_maintenance = 0.0
     while True:
         # Clear before scanning so hints arriving during processing survive the wait.
         wake.clear()
         projected = await sweep_once(receiver)
+        # The same hint and the same pass serve the rules status requests: one written
+        # while the worker was down is answered on the first pass after a restart.
+        refreshed = await refresh_rules_once(rules) if rules is not None else 0
         if time.monotonic() >= next_maintenance:
             await hourly_maintenance(receiver, reviver)
             next_maintenance = time.monotonic() + _MAINTENANCE_INTERVAL_SECONDS
-        if projected == 100:
+        if projected == 100 or refreshed == RULES_REFRESH_BATCH:
             await asyncio.sleep(0)
         else:
             with suppress(TimeoutError):
@@ -180,9 +197,10 @@ async def run_forever() -> None:
             reviver = ReviveDeferredInstallationDeliveries(
                 uow_factory=resources.github_webhook_receipts, now=lambda: datetime.now(UTC)
             )
+            rules = resources.rules_status_refresher(client=client, token_provider=tokens)
             wake = asyncio.Event()
             async with asyncio.TaskGroup() as tasks:
-                tasks.create_task(sweep_forever(receiver, reviver, wake))
+                tasks.create_task(sweep_forever(receiver, reviver, wake, rules=rules))
                 tasks.create_task(listen_forever(config.database_url, wake))
                 if config.heartbeat_file is not None:
                     tasks.create_task(beat(config.heartbeat_file))
