@@ -1592,6 +1592,19 @@ def test_an_unexpected_error_releases_the_lease_and_propagates() -> None:
     assert world.store.failures == []
 
 
+def test_a_base_exception_that_is_not_an_exception_releases_the_lease_without_a_code() -> None:
+    # Like a cancellation, it is not a failure of the index (#145): the lease is released
+    # with no `last_error_code`, and the exception still propagates.
+    world = _world()
+    world.parser.error = KeyboardInterrupt()
+
+    with pytest.raises(KeyboardInterrupt):
+        world.run()
+
+    assert world.store.releases == [None]
+    assert world.store.failures == []
+
+
 def _unfinished_discard(world: World) -> None:
     world.store.discards = [2]
 

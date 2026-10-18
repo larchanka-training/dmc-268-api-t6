@@ -1,8 +1,8 @@
-"""Error codes of a `failed` index (ADR 0001 §7, #142).
+"""Error codes of a `failed` index and the soft code of an unexpected failure (ADR 0001 §7, #142).
 
 Only exceeding a limit or an unsafe archive entry fails an index; any other terminal
 failure releases the lease with `last_error_code` and keeps the last publication
-(ADR §6.1). It also names the soft code of an unexpected failure, which is a
+(ADR §6.1). This module also names the soft code of an unexpected failure, which is a
 `last_error_code` value only and never fails an index.
 """
 
