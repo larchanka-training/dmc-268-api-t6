@@ -2,10 +2,10 @@
 
 | | |
 |---|---|
-| Статус | Базовый дизайн утверждён командой — PR #36 (#20); целевые дополнения #107 согласованы пользователем 2026-10-09, GitHub review этих дополнений ещё требуется |
+| Статус | Базовый дизайн утверждён командой — PR #36 (#20); спецификации #107 утверждены: v1.0 — PR #108, v1.1 — PR #135, v1.2 — PR #157 |
 | Владелец | техлид (роль 1) |
 | Связанные документы | `BACKEND_ARCHITECTURE.md` (роль 6, ERD), [`PIPELINE_SPEC.md`](PIPELINE_SPEC.md) (жизненный цикл Run, retry, сбои), [`contracts/openapi.yaml`](../contracts/openapi.yaml) (HTTP API), [`FRONTEND_ARCHITECTURE.md`](https://github.com/larchanka-training/dmc-268-ui-t6/blob/main/docs/FRONTEND_ARCHITECTURE.md) (роль 5, Zod-контракты), [`TEST_PLAN.md`](TEST_PLAN.md) (роль 2, quality gates), инфраструктура (роль 3) |
-| Нумерация решений | `Р-1…Р-15`; `Р-1…Р-9` — общие с [`TEST_PLAN.md`](TEST_PLAN.md), не менять |
+| Нумерация решений | `Р-1…Р-16`; `Р-1…Р-9` — общие с [`TEST_PLAN.md`](TEST_PLAN.md), не менять |
 
 **Продукт.** GitHub App, который ревьюит pull request с лейблом `ai-review`. После зелёного CI бот публикует одно ревью с inline-комментариями прямо в PR. Web UI показывает прогоны, трейс действий агента, метрики и расход.
 
@@ -40,6 +40,7 @@ runtime-профиль требуют отдельной реализации; �
 | Р-13 | **RAG v1 — граф символов репозитория с указателями** ([ADR 0001](adr/0001-graph-rag-v1.md)). Worker получает контекст через порт `ContextProvider`: детерминированный сборщик L0–L4 и `RagContextProvider`, возвращающий тот же `ContextPayload`. Индекс RAG v1 хранит по репозиторию определения, ссылки и импорты символов и рёбра между ними с указателями — путь, диапазон строк, `blob_sha`, `indexed_commit_sha`; без embeddings и без текста кода. Индексируются только репозитории с включённым тумблером RAG (по умолчанию выключен). v2 (векторный поиск, embeddings) — только после гейта eval #146 | Граф даёт то, чего нет у L4: обратные рёбра — кто импортирует или использует изменённый символ. Нет затрат и рисков embeddings/vector DB, код клиента сверх 7-дневного кэша не хранится; LLM, post-processing и публикация не меняются. Решение #19 «RAG не в MVP» пересмотрено эпиком #139 |
 | Р-14 | Успешный прогон — статус **`succeeded`** везде: домен (`RunState.SUCCEEDED`), PG enum `run_state`, API, Zod фронтенда. Полный набор: `queued\|running\|publishing\|succeeded\|failed\|cancelled\|skipped` (§6.4); `completed` — только события и статусы GitHub (`check_suite`, `check_run`, `workflow_run`) | Одно имя от БД до UI без маппинга; код и миграция уже используют `succeeded` и `publishing` |
 | Р-15 | Снимок диффа run хранится в **PostgreSQL** с ключом `(run_id, filename)` и отдельной неизменяемой `DiffMap`. Исходный доступный `patch` сохраняется для UI; `review_patch=null` для ignored и summary-only. Порог >3 000 добавленных/удалённых строк считается **после ignore** (§9); удаление каскадом с Workspace | UI сохраняет исходный diff; ограничения входа модели не стирают снимок и не смешивают разные runs одного head |
+| Р-16 | Непустой набор кандидатов профиля #107 проходит отдельный обязательный verifier до порога severity и публикации (CVS §7) | Детерминированные фильтры не оценивают смысл; self-check reviewer и выборочная проверка не дают отдельной проверки всего набора. Цена — вызов, задержка, бюджет и false negatives; независимая оценка — CVS §11 |
 
 ---
 
@@ -48,7 +49,7 @@ runtime-профиль требуют отдельной реализации; �
 | Слой | Отвечает | Не отвечает |
 |---|---|---|
 | **Frontend** (`dmc-268-ui-t6`) | Экраны: обзор + лента прогонов, карточка прогона с диффом и инлайн-комментариями, инспектор трейса (`RunSession → RunAction`), репозитории и правила, метрики. Клиентское состояние (Zustand), серверный кэш (TanStack Query) | Не считает метрики, не парсит дифф вручную (сырой unified-diff `RawFileDiff` разбирает библиотека — `react-diff-view` / `gitdiff-parser` — за адаптером), не знает про провайдеров |
-| **Backend** (`dmc-268-api-t6`) | Приём вебхуков, триггер, очередь, состояние прогонов, сборка контекста, индекс графа символов репозиториев с включённым RAG (Р-13), вызов LLM, постобработка находок, публикация, метрики, авторизация, кэш | Не хранит код клиентов сверх сроков §10 (кэш блобов — 7 дней, снимки диффов и контексты — до удаления Workspace; индекс RAG — только производные метаданные кода без текста, до 30 дней без использования); не принимает решений о качестве кода — это LLM |
+| **Backend** (`dmc-268-api-t6`) | Приём вебхуков, триггер, очередь, состояние прогонов, сборка контекста, индекс графа символов репозиториев с включённым RAG (Р-13), вызов LLM, постобработка находок, публикация, метрики, авторизация, кэш | Не хранит код клиентов сверх сроков §10 (кэш блобов — 7 дней, снимки диффов и контексты — до удаления Workspace; индекс RAG — только производные метаданные кода без текста, до 30 дней с `last_used_at` (чтение при ревью и постановка full)); не принимает решений о качестве кода — это LLM |
 | **LLM-сервисы** | Общие конвенции по base; review → кандидаты; отдельный обязательный verifier → решения по каждому оставшемуся кандидату | Не ходят в GitHub, не имеют токенов; backend применяет технические фильтры и публикует только `supported` |
 
 ---
@@ -443,7 +444,7 @@ stateDiagram-v2
 
 Реконсилер (в `portal-api`, раз в 5 мин, лидер через `pg_advisory_lock`): `running` с истёкшим `lease_until` → `queued` + повторная публикация сообщения (при `attempt ≥ 3` — `failed`, `lease_expired`); `queued` старше 10 мин без сообщения → повторная публикация.
 
-Источник по переходам (триггеры, guard'ы и побочные эффекты T1–T18), lease (5 мин, heartbeat 60 с), таймаутам и retry — [PIPELINE_SPEC](PIPELINE_SPEC.md) §1, §3, §4; при расхождении по жизненному циклу прав он.
+Источник по переходам (триггеры, guard'ы и побочные эффекты T1–T19), lease (5 мин, heartbeat 60 с), таймаутам и retry — [PIPELINE_SPEC](PIPELINE_SPEC.md) §1, §3, §4; при расхождении по жизненному циклу прав он.
 
 ### 6.5 Вход и сессия (D4)
 
@@ -941,7 +942,7 @@ class VcsProvider(Protocol):
 | Файлы | Точный путь разрешается в дереве закреплённой ревизии, затем `GET /git/blobs/{sha}`; policy — base, RIGHT — head, LEFT — подтверждённый diff_old. Кэш 7 дней; текущая ветка не заменяет недоступный снимок |
 | Дерево | `GET /git/trees/{revision_sha}?recursive=1`; усечённый ответ не доказывает отсутствие пути. Требуется полный целевой обход; policy guard повторяется на каждом использовании |
 | Публикация (Р-5) | Один `POST /pulls/{n}/reviews` с сохранённым payload: `commit_id=head_sha`, `event`, `body`, `comments[{path,line,side:"RIGHT",start_line?,start_side?,body}]`. Диапазон должен целиком входить в один hunk одной стороны. В body — только supported general-only и находки сверх inline cap, без применяемой suggestion |
-| Check-run | `in_progress` при claim; `neutral` для succeeded/failed, `skipped` для исключённого scope, `cancelled` для отмены. `blocking`/`attention` определяются supported severity; `clean` допустим только при complete coverage. Partial без значимых findings и summary-only имеют `verdict=null` и явное сообщение о неполноте; API, review и check-run читают один сохранённый final result |
+| Check-run | `in_progress` при claim; `neutral` для succeeded/failed, `skipped` для исключённого scope, `cancelled` для отмены. `blocking`/`attention` определяются supported severity; `clean` допустим только при complete coverage. Partial/none без значимых findings и summary-only имеют `verdict=null` и явное сообщение о неполноте; API, review и check-run читают один сохранённый final result |
 | Обратная связь | **после MVP** (`FeedbackSignal`): `pull_request_review_thread.resolved` — вебхук; реакции — poll `GET /pulls/comments/{id}/reactions` раз в час по комментариям бота за 7 дней |
 
 ### 8.4 Координаты, GitLab и надёжная публикация (#107)
@@ -1061,8 +1062,12 @@ GitLab хранит receipt каждой discussion отдельно и не п�
 
 Worker зависит от `ContextProvider`, возвращающего контекст по закреплённым
 policy/diff snapshots. В целевом детерминированном профиле используются L0–L4,
-`IgnorePolicy`, `DiffMap`, `BudgetAllocator` и manifest. Built-in exclusions и
-`review-ignore` применяются до сборки, подсчёта порога и любых conventions-вызовов.
+`IgnorePolicy`, `DiffMap`, `BudgetAllocator` и manifest. Сначала валидируются
+пути и изолируется `unsupported_path` (для rename/copy — всё изменение и aliases),
+затем built-in exclusions и `review-ignore` применяются к допустимым путям до
+сборки, подсчёта порога и любых conventions-вызовов. Невозможность изоляции —
+`snapshot_integrity_error`, утечка источника в prompt — `policy_context_violation`.
+Имя и содержимое изолированного источника не передаются ни одному LLM-вызову.
 Недоступный patch разрешённого текстового файла отражает неполноту, не ignore.
 
 **RAG v1 — граф символов** (Р-13, [ADR 0001](adr/0001-graph-rag-v1.md#2-решение--граф-символов-с-указателями)): embedding-модели, vector DB и текста кода в индексе нет. Для репозиториев с включённым тумблером RAG фоновый индексатор (потребитель очереди `index.repo`) строит по разрешённому дереву HEAD default branch граф определений, импортов и рёбер `imports`/`defines`/`uses_imported` с указателями — путь, диапазон строк, `blob_sha`, `indexed_commit_sha`. `RagContextProvider` добавляет кандидатов **после Diff/AST-анализа (L4) и до L2/L3 в `BudgetAllocator`**: файлы с подтверждённым обратным ребром к изменённому символу или модулю и битые ссылки на удалённый экспорт, на один обратный шаг сверх L4. Индекс только выбирает кандидатов: текст читается на ревизии PR (`head_sha` для RIGHT, `diff_old_sha` для LEFT), каждое ребро заново разрешается резолвером AST v1 на этой ревизии, неподтверждённый или отсутствующий кандидат уходит в omissions ([ADR 0001 §8](adr/0001-graph-rag-v1.md#8-использование-при-ревью)). Кандидаты проходят те же ignore, allowlist путей, лимиты размера и токенов, записываются в trace с причиной выбора и в итоге дают тот же `ContextPayload`. Поэтому LLM Gateway, постобработка, хранение результатов и Publisher от способа retrieval не зависят. Тумблер выключен или индекс не готов — ревью идёт без RAG. Векторный поиск (v2) — только после гейта eval #146.
@@ -1084,7 +1089,9 @@ verifier, инструменты или адресата публикации. D
 отсутствием секции или несовпадением structured priority rule. Backend передаёт
 отдельные типизированные/экранированные блоки, проверяет provenance до каждого
 вызова и не исполняет команды/ссылки документов; keyword-фильтр не заменяет эту
-границу. Семантическую применимость правил независимо оценивают review и verifier.
+границу. Авторы base rules могут явно ослабить дефолты, включая SEC1/COR1;
+наблюдаемые конвенции уровня 4 не отменяют SEC1/COR1 (RFS §2).
+Семантическую применимость правил независимо оценивают review и verifier.
 
 Ignore исключает файл из всех L1–L4, trees/lists, retrieval и conventions-входов;
 старый и новый путь rename/copy проверяются вместе, deny-set не даёт вернуть файл
@@ -1115,8 +1122,24 @@ Policy documents хранятся отдельно от производных �
 
 **Порог — >3 000 добавленных и удалённых строк после ignore**; ровно 3 000 допускает
 обычную сборку. 4 000 исключённых + 50 разрешённых строк дают анализ 50 строк.
-Все изменения ignored → `running → skipped/all_changes_ignored`, пустой diff →
-`no_changes`; в обоих случаях LLM calls=0, verdict=null, check-run skipped.
+Все изменения доказанно ignored (маски/built-in generated), без технических
+пропусков → `running → skipped/all_changes_ignored`; достоверно пустой diff →
+`no_changes`. В обоих случаях LLM calls=0, verdict=null, check-run skipped.
+
+Технические пропуски — `unsupported_path`, `binary`, `too_large`; они не ignored
+и не входят в excluded_files. При полном достоверном inventory:
+
+| Изменения PR после классификации | Исход |
+| --- | --- |
+| Один/все файлы unsupported_path, binary или too_large; либо их смесь, остальные ignored | Backend FinalReviewResult: coverage=none, verdict=null, пустые findings, 0 LLM; publishing → succeeded, check-run neutral |
+| Технический пропуск + анализируемые изменения (в том числе с ignored) | Остальные изменения проходят ревью; coverage=partial, verdict по подтверждённым findings после severity threshold |
+| Только доказанные ignored, технических пропусков нет | skipped/all_changes_ignored, 0 LLM |
+
+Для none сохраняются фактические причины и отдельные счётчики пропусков; заголовок
+«AI-ревью: нет доступных для анализа изменений» отличается от failed (§8.3, PS §7).
+Обычный разрешённый файл без patch не даёт права выбрать none. Неполный inventory
+сохраняет summary-only; неизвестные счётчики — null, не 0 (CVS §2.2–2.3).
+
 Неизвестные/неполные счётчики VCS дают `summary_only/diff_inventory_incomplete`.
 Summary-only строит backend по разрешённой статистике **без LLM**, L1–L4 и inline:
 `succeeded`, coverage partial, verdict=null, check-run neutral. Исходный доступный
@@ -1306,7 +1329,10 @@ class ContextPayload(BaseModel):          # сущность роли 6
 Лимит всего входа с system/schema/framing: fast ≤60 000, deep ≤150 000 и не больше
 окна конкретной модели минус output reserve. Полные policy/defaults/system и
 обязательные verifier-кандидаты резервируются первыми; policy overflow — ошибка,
-не усечение. PR body ≤4 000 токенов, конвенции ≤4 000, trees/lists ≤2 000; сокращения
+не усечение. PR body ≤4 000 токенов, конвенции ≤4 000, trees/lists ≤2 000.
+Commit messages (#82) — первые 20 в API-order по ≤500 Unicode-символов,
+всего ≤10 000 до XML escaping; их фактический rendered token-size входит в
+общий бюджет L0 (CVS §4.1), это не evidence и не вход общих conventions. Сокращения
 маркируются. Непоказанная строка не становится evidence через одну лишь DiffMap.
 Обычный stdout содержит только IDs/digests/счётчики, не клиентский код.
 
@@ -1351,7 +1377,7 @@ diff/findings hash; ничего в сандбоксе. Снимки полит�
 пути, квалифицированные имена, виды символов, диапазоны строк, `blob_sha` и commit
 sha, рёбра; тела, литералы, комментарии и docstrings не хранятся. Индекс хранит
 **только указатели, без сигнатур**: сигнатура — фрагмент кода клиента, а индекс
-живёт до 30 дней без использования, тогда как код клиента допустим лишь в кэше
+живёт до 30 дней с `last_used_at` (чтение при ревью и постановка full), тогда как код клиента допустим лишь в кэше
 блобов до 7 дней; кроме того, сигнатура кандидата всё равно заново извлекается из
 blob ревизии PR, и сохранённая копия с default branch в prompt не попала бы.
 Правило 7 дней не меняется: текст для RAG читается из того же кэша блобов.
@@ -1469,7 +1495,8 @@ resultVersion и verificationMode из сохранённого final result. Э
 `complete|partial|none` с причинами и известными счётчиками; неизвестное число —
 null, не 0. У legacy coverage=null. `blocking` = supported critical/high,
 `attention` = supported medium/low; только info/пусто дают `clean` лишь при complete,
-иначе verdict=null. До succeeded и при failed/skipped/cancelled verdict также null.
+иначе verdict=null. Coverage=none возникает при полном inventory только из
+технических пропусков и доказанных исключений (§9, CVS §2.2). До succeeded и при failed/skipped/cancelled verdict также null.
 API, VCS и check-run показывают один backend summary из supported findings и scope;
 raw модельная похвала/неподтверждённые дефекты в публичную сводку не переносятся.
 
@@ -1541,7 +1568,7 @@ API с ними выкатывается раньше, чем мёржится �
 | Стоимость | fast $0.50, deep $3 на все попытки; до вызова учитываются usage + его оценка + резерв обязательных downstream стадий. Общие 4 вызова/попытку, 12/run, ≤3 попыток. Без завершённого verifier/final result публикация запрещена в обоих движках; verifier budget/deadline exhaustion → failed. Дневной бюджет Workspace → fast, затем skipped. Блоки RAG — обычный контекст prompt: входят в оценку входа до вызова, их токены и стоимость пишутся в `usage_events` своего run, дневной бюджет и лимит run считают их как прежде; доля RAG — `tokens_by_role` в `context.build` (роль `retrieved_excerpt`, #145) | Р-8, §5, PIPELINE_SPEC §4.5, [ADR 0001 §11](adr/0001-graph-rag-v1.md#11-учёт-расхода) |
 | Качество | Ориентиры Precision ≥85 %, Critical Recall ≥75 %, Hallucination <3 %. Raw review и final pipeline измеряются раздельно по независимой ручной разметке; verifier rejection/unsupported acceptance, insufficient/partial/failure и стоимость требуют собственного baseline | TEST_PLAN §3, §5 |
 | Безопасность | HMAC на вебхуках; секреты только через env из CI (роль 3); токены GitHub и LLM не попадают в сандбокс; сандбокс `--network=none`, non-root, read-only rootfs; PG/RabbitMQ/Redis — только внутренняя сеть | [TEST_PLAN 2.2](TEST_PLAN.md#22-webhook-и-триггер-р-9-р-10), [2.4](TEST_PLAN.md#24-sandboxengine-р-4-фаза-3), [2.6](TEST_PLAN.md#26-инфраструктура-и-безопасность) |
-| Данные клиента | блобы ≤ 7 дней в кэше; диффы, контексты и тела ответов инструментов — до удаления Workspace, payload вебхуков — 30 дней после завершения квитанции; индекс RAG — производные метаданные кода без текста и сигнатур (ключ `repository_id`), 30 дней без использования в ревью; после `installation_repositories.removed`, `installation.deleted` и выключения тумблера сразу нечитаем, физически удаляется не позже чем через 1 ч; архив дерева при индексации разбирается в памяти и не хранится сверх задачи; ни один прогон не логирует содержимое файлов в stdout | §10, [ADR 0001 §4](adr/0001-graph-rag-v1.md#4-хранение-очистка-и-изоляция) |
+| Данные клиента | блобы ≤ 7 дней в кэше; диффы, контексты и тела ответов инструментов — до удаления Workspace, payload вебхуков — 30 дней после завершения квитанции; индекс RAG — производные метаданные кода без текста и сигнатур (ключ `repository_id`), 30 дней с `last_used_at` (чтение при ревью и постановка full продлевают TTL, incremental — нет; запись не чаще раза в час); после `installation_repositories.removed`, `installation.deleted` и выключения тумблера сразу нечитаем, физически удаляется не позже чем через 1 ч; архив дерева при индексации разбирается в памяти и не хранится сверх задачи; ни один прогон не логирует содержимое файлов в stdout | §10, [ADR 0001 §4](adr/0001-graph-rag-v1.md#4-хранение-очистка-и-изоляция) |
 | Наблюдаемость | структурированные логи (JSON) с `run_id` во всех контейнерах; метрики: глубина очередей, длительность по этапам, `X-RateLimit-Remaining`, стоимость; self-hosted стек — отдельная задача | |
 
 **Риск схлопывания.** Реализованная в #52 проверка head перед POST сохраняется;
