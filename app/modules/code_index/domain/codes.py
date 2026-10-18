@@ -2,10 +2,15 @@
 
 Only exceeding a limit or an unsafe archive entry fails an index; any other terminal
 failure releases the lease with `last_error_code` and keeps the last publication
-(ADR §6.1).
+(ADR §6.1). It also names the soft code of an unexpected failure, which is a
+`last_error_code` value only and never fails an index.
 """
 
 from __future__ import annotations
+
+# The `last_error_code` of a job that ends by an unexpected `Exception` (#145); it is
+# not a `failed` code and never goes to `error_code`.
+INTERNAL_ERROR = "internal_error"
 
 REPOSITORY_STORAGE_EXCEEDED = "limit_exceeded:repository_storage"
 WORKSPACE_STORAGE_EXCEEDED = "limit_exceeded:workspace_storage"

@@ -79,6 +79,7 @@ from app.modules.code_index.application.vcs import (
     VcsAccessDenied,
     VcsUnavailable,
 )
+from app.modules.code_index.domain.codes import INTERNAL_ERROR
 from app.modules.code_index.domain.limits import IndexLimits
 from app.modules.reviews.application.ast_resolution import (
     BINARY_SOURCE,
@@ -455,13 +456,14 @@ class BuildRepositoryIndex:
                 source=self._sources(repository),
                 started=started,
             )
-        except BaseException:
+        except BaseException as error:
             # The lease is held from its commit on: the end of the claim transaction and
             # the source factory must not leave it to expire. No source has made a
             # request yet, and nothing was downloaded.
             if leased is not None:
                 stats = IndexBuildStats(0, _elapsed_ms(started), 0)
-                await _abandon(self._uow, repository.repository_id, leased.fence, stats)
+                code = _unexpected_error_code(error)
+                await _abandon(self._uow, repository.repository_id, leased.fence, code, stats)
             raise
         return await job.run()
 
@@ -479,15 +481,21 @@ async def _release_lease(
         await unit.commit()
 
 
+def _unexpected_error_code(error: BaseException) -> str | None:
+    """`internal_error` for an `Exception`; a cancellation is redelivered, not a failure."""
+    return INTERNAL_ERROR if isinstance(error, Exception) else None
+
+
 async def _abandon(
     uow: Callable[[], CodeIndexUnitOfWork],
     repository_id: UUID,
     fence: IndexFence,
+    last_error_code: str | None,
     stats: IndexBuildStats,
 ) -> None:
-    """Best effort after an unexpected error: release the lease, keep the error."""
+    """Best effort after an unexpected error: release the lease with its `last_error_code`."""
     try:
-        await asyncio.shield(_release_lease(uow, repository_id, fence, None, stats))
+        await asyncio.shield(_release_lease(uow, repository_id, fence, last_error_code, stats))
     except Exception:
         _LOGGER.warning(
             "code_index lease release after an error failed repository_id=%s",
@@ -579,8 +587,8 @@ class _Job:
             return await self._release(BuildStatus.RELEASED, error.code)
         except PolicyError as error:
             return await self._release(BuildStatus.RELEASED, error.error_code)
-        except BaseException:
-            await self._abandon()
+        except BaseException as error:
+            await self._abandon(_unexpected_error_code(error))
             raise
 
     # --- outcomes -----------------------------------------------------------------
@@ -638,8 +646,8 @@ class _Job:
             return self._outcome(BuildStatus.LEASE_LOST)
         return self._outcome(status, error_code, retry_after)
 
-    async def _abandon(self) -> None:
-        await _abandon(self._uow, self._id, self._fence, self._stats())
+    async def _abandon(self, last_error_code: str | None) -> None:
+        await _abandon(self._uow, self._id, self._fence, last_error_code, self._stats())
 
     async def _release_lease(self, last_error_code: str | None) -> None:
         await _release_lease(self._uow, self._id, self._fence, last_error_code, self._stats())
