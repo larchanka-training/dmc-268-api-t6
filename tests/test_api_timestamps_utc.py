@@ -262,6 +262,7 @@ class AliasProbe(BaseModel):
 class AliasStamps(BaseModel):
     bare: BareAt
     utc: UtcAt
+    converted: Annotated[BareAt, AfterValidator(_to_utc)]
 
 
 class RecursiveAliasStamp(BaseModel):
@@ -313,7 +314,8 @@ def test_response_walk_unwraps_a_model_alias_nested_in_a_field() -> None:
 
 
 def test_timestamp_check_unwraps_a_datetime_alias() -> None:
-    # The UtcDatetime alias still carries its AfterValidator once unwrapped.
+    # The UtcDatetime alias still carries its AfterValidator once unwrapped, and a validator
+    # put on an alias reaches the datetime in its body.
     assert _bare_timestamps([AliasStamps]) == ["AliasStamps.bare"]
 
 
