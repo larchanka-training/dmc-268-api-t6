@@ -31,6 +31,7 @@ from app.bootstrap.reviews_api import (
     get_pull_requests,
     get_repository_settings,
     get_rerun_uow_factory,
+    get_rules_status,
     get_run_publisher,
 )
 from app.common.application.github_repository_name import REPOSITORY_FULL_NAME_MAX_LENGTH
@@ -40,6 +41,13 @@ from app.modules.code_index.domain.rag_index import RagIndex
 from app.modules.repositories.application.repository_settings import (
     RepositorySettings,
     RepositorySettingsChange,
+)
+from app.modules.repositories.application.rules_status import (
+    GetRulesStatus,
+    RulesDiagnostic,
+    RulesStatus,
+    RulesStatusKind,
+    StoredRulesStatus,
 )
 from app.modules.reviews.application.cancel_run import CancelRequestResult, CancelRun
 from app.modules.reviews.application.get_run_actions import RunActionResponse
@@ -353,6 +361,90 @@ class ContractRepositories:
         return self.item
 
 
+CHECKED_AT = datetime(2026, 10, 18, 9, 0, tzinfo=UTC)
+_TOO_LARGE = RulesDiagnostic(
+    "policy_document_too_large", "Документ правил превышает 64 КиБ.", None, None, False, 65536
+)
+_TRANSIENT = RulesDiagnostic(
+    "policy_fetch_transient", "Не удалось прочитать документы правил из GitHub.", None, None, True
+)
+# One stored result of every variant; None is a repository that was never read.
+RULES_STATUSES: dict[str, RulesStatus | None] = {
+    "present": RulesStatus(
+        RulesStatusKind.PRESENT,
+        "main",
+        "a" * 40,
+        CHECKED_AT,
+        text="# Rules\n",
+        checksum="b" * 64,
+        ignore_masks=("docs/**",),
+    ),
+    "present-empty": RulesStatus(
+        RulesStatusKind.PRESENT,
+        "main",
+        "a" * 40,
+        CHECKED_AT,
+        text="",
+        checksum="c" * 64,
+        ignore_masks=(),
+    ),
+    "missing": RulesStatus(
+        RulesStatusKind.MISSING, "main", "a" * 40, CHECKED_AT, defaults_version="v1"
+    ),
+    "invalid": RulesStatus(
+        RulesStatusKind.INVALID,
+        "main",
+        "a" * 40,
+        CHECKED_AT,
+        diagnostics=(
+            RulesDiagnostic(
+                "policy_ignore_pattern_invalid", "Маска.", 5, 6, False, pattern_index=0
+            ),
+        ),
+        text="```review-ignore\nsrc/a?.py\n```\n",
+    ),
+    "invalid-too-large": RulesStatus(
+        RulesStatusKind.INVALID, "main", "a" * 40, CHECKED_AT, diagnostics=(_TOO_LARGE,)
+    ),
+    "unavailable": RulesStatus(
+        RulesStatusKind.UNAVAILABLE, "main", None, CHECKED_AT, diagnostics=(_TRANSIENT,)
+    ),
+    "pending": None,
+}
+
+
+class ContractRulesStatus:
+    """Rules status store and its unit of work; requests are counted, not stored."""
+
+    def __init__(self, status: RulesStatus | None = RULES_STATUSES["present"]) -> None:
+        self.status = status
+        self.requests = 0
+
+    @property
+    def rules_status(self) -> ContractRulesStatus:
+        return self
+
+    async def __aenter__(self) -> Self:
+        return self
+
+    async def __aexit__(self, *args: object) -> None:
+        return None
+
+    async def commit(self) -> None:
+        return None
+
+    async def rollback(self) -> None:
+        return None
+
+    async def get(self, repository_id: UUID) -> StoredRulesStatus | None:
+        if repository_id != REPOSITORY_ID:
+            return None
+        return StoredRulesStatus("main", self.status, refresh_requested=False)
+
+    async def request_refresh(self, repository_id: UUID) -> None:
+        self.requests += 1
+
+
 class ContractPulls:
     async def list_pulls(
         self, repository_id: UUID, *, state: str, cursor: RunCursor | None, limit: int
@@ -408,7 +500,11 @@ def client() -> Iterator[TestClient]:
     blob_cache = ContractBlobCache()
     repositories = ContractRepositories()
     pulls = ContractPulls()
+    rules_status = ContractRulesStatus()
     app.dependency_overrides[get_run_repository] = lambda: repository
+    app.dependency_overrides[get_rules_status] = lambda: GetRulesStatus(
+        lambda: rules_status, now=lambda: CHECKED_AT
+    )
     app.dependency_overrides[get_file_blob_cache] = lambda: blob_cache
     app.dependency_overrides[get_repository_settings] = lambda: lambda: repositories
     app.dependency_overrides[get_rerun_uow_factory] = lambda: lambda: repository
@@ -530,6 +626,20 @@ def test_every_operation_declares_its_service_and_plan() -> None:
             "200",
             id="pulls",
         ),
+        pytest.param(
+            "get",
+            "/api/repos/{repo_id}/rules-status",
+            f"/api/repos/{REPOSITORY_ID}/rules-status",
+            "200",
+            id="rules-status",
+        ),
+        pytest.param(
+            "get",
+            "/api/repos/{repo_id}/rules-status",
+            f"/api/repos/{UNKNOWN_RUN_ID}/rules-status",
+            "404",
+            id="rules-status-not-found",
+        ),
         pytest.param("get", "/api/runs", "/api/runs?cursor=not-a-cursor", "422", id="bad-cursor"),
     ],
 )
@@ -563,6 +673,87 @@ def test_rerun_invalid_uuid_response_validates_against_declared_schema(client: T
     assert detail[0]["loc"] == ["path", "run_id"]
     assert detail[0]["input"] == "not-a-uuid"
     _validator_for("post", "/api/runs/{run_id}/rerun", "422").validate(response.json())
+
+
+@pytest.mark.parametrize("name", RULES_STATUSES)
+def test_every_rules_status_variant_validates_against_the_declared_schema(name: str) -> None:
+    store = ContractRulesStatus(RULES_STATUSES[name])
+    app.dependency_overrides[get_rules_status] = lambda: GetRulesStatus(
+        lambda: store, now=lambda: CHECKED_AT
+    )
+    try:
+        response = authenticated_test_client(app).get(f"/api/repos/{REPOSITORY_ID}/rules-status")
+    finally:
+        app.dependency_overrides.clear()
+    body = response.json()
+
+    assert response.status_code == 200
+    assert body["status"] == name.split("-")[0]
+    assert body["path"] == ".review/rules.md"
+    _validator_for("get", "/api/repos/{repo_id}/rules-status", "200").validate(body)
+
+
+@pytest.mark.parametrize(
+    ("variant", "change"),
+    [
+        ("present", {"status": "missing"}),
+        ("missing", {"defaultsVersion": None}),
+        ("invalid", {"diagnostics": []}),
+        ("unavailable", {"diagnostics": [{**_TRANSIENT.__dict__}]}),
+        ("unavailable", {"sha": "A" * 40}),
+        ("pending", {"checkedAt": "2026-10-18T09:00:00Z"}),
+    ],
+)
+def test_rules_status_validation_rejects_drift(variant: str, change: dict[str, Any]) -> None:
+    store = ContractRulesStatus(RULES_STATUSES[variant])
+    app.dependency_overrides[get_rules_status] = lambda: GetRulesStatus(
+        lambda: store, now=lambda: CHECKED_AT
+    )
+    try:
+        body = authenticated_test_client(app).get(f"/api/repos/{REPOSITORY_ID}/rules-status")
+    finally:
+        app.dependency_overrides.clear()
+
+    with pytest.raises(ValidationError):
+        _validator_for("get", "/api/repos/{repo_id}/rules-status", "200").validate(
+            {**body.json(), **change}
+        )
+
+
+def test_diagnostic_omits_the_limits_it_does_not_know() -> None:
+    store = ContractRulesStatus(RULES_STATUSES["invalid"])
+    app.dependency_overrides[get_rules_status] = lambda: GetRulesStatus(
+        lambda: store, now=lambda: CHECKED_AT
+    )
+    try:
+        body = authenticated_test_client(app).get(f"/api/repos/{REPOSITORY_ID}/rules-status")
+    finally:
+        app.dependency_overrides.clear()
+
+    assert body.json()["diagnostics"] == [
+        {
+            "code": "policy_ignore_pattern_invalid",
+            "message": "Маска.",
+            "line": 5,
+            "column": 6,
+            "retryable": False,
+            "patternIndex": 0,
+        }
+    ]
+
+
+def test_rules_operations_are_replaced_and_the_status_is_not_shared_with_zod() -> None:
+    operations = _operations(_spec()["paths"])
+    for key in (
+        ("get", "/api/repos/{}/rules"),
+        ("post", "/api/repos/{}/rules"),
+        ("post", "/api/rules/{}/preview"),
+    ):
+        assert operations[key]["x-status"] == "planned"
+        assert "Replaced" in operations[key]["x-note"]
+        assert "§10" in operations[key]["x-note"]
+    assert "x-status" not in operations[("get", "/api/repos/{}/rules-status")]
+    assert "RulesStatus" not in UI_ZOD_COMPONENTS.values()
 
 
 def test_stream_events_validate_against_the_declared_event_schema() -> None:

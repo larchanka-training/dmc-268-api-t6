@@ -48,7 +48,9 @@ tags:
   - name: repositories
     description: Repositories connected through the GitHub App installation.
   - name: rules
-    description: Custom review rule sets (post-MVP).
+    description: >-
+      The `.review/rules.md` status of a repository; the planned DB rule set operations are
+      replaced (RULES_FORMAT_SPEC §10).
   - name: metrics
     description: Usage metrics (post-MVP).
   - name: auth
@@ -535,6 +537,47 @@ paths:
           $ref: "#/components/responses/ValidationFailed"
         "503":
           description: Authentication is not configured.
+  /api/repos/{repo_id}/rules-status:
+    parameters:
+      - $ref: "#/components/parameters/RepoId"
+    get:
+      operationId: getRulesStatus
+      tags: [rules]
+      summary: Status of .review/rules.md on the default branch of a repository
+      description: |
+        Replaces the planned rule set operations below (RULES_FORMAT_SPEC §10): the Git file is
+        the only source of custom rules, and this operation shows its last read. Visibility is the
+        same as `getRepository`: a repository of another Workspace is 404.
+
+        The API reads no VCS itself: `webhook-worker` reads the file of the default branch head
+        (branch, then the full commit SHA, then the tree and the blob by SHA) and stores one
+        result per repository. A read happens when the repository is connected, after each
+        `push` to the default branch, and when this GET finds the stored result older than
+        10 minutes or failed with a retryable error (then at most once per 30 seconds); the GET
+        still returns the stored result and a later GET shows the new one. So a change of the file
+        shows here a few seconds after the push, and at the latest 10 minutes after it if the
+        `push` event was lost. `pending` means no read has finished yet.
+
+        The variant is told by `status`, never by a message: `present` (an empty file too),
+        `missing` (the file is reliably absent and the service defaults apply), `invalid` (a
+        format or limit error), `unavailable` (an access or temporary error: the read proved
+        nothing, an ambiguous GitHub 404 and a truncated tree included) and `pending`.
+      x-service: portal-api
+      responses:
+        "200":
+          description: The stored rules status of the repository.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RulesStatus"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          $ref: "#/components/responses/ValidationFailed"
+        "503":
+          description: Authentication is not configured.
   /api/repos/{repo_id}/rules:
     parameters:
       - $ref: "#/components/parameters/RepoId"
@@ -544,7 +587,10 @@ paths:
       summary: List custom rule set versions of a repository
       x-service: portal-api
       x-status: planned
-      x-note: Post-MVP; the shape is indicative until the rules UI is scheduled.
+      x-note: >-
+        Replaced by `getRulesStatus` (RULES_FORMAT_SPEC §10): rules live in `.review/rules.md`, not
+        in DB rule versions. Kept only as the indicative shape of legacy rule versions; not to be
+        implemented with this body.
       responses:
         "200":
           description: Rule set versions, newest first.
@@ -568,7 +614,10 @@ paths:
       summary: Create a new active rule set version
       x-service: portal-api
       x-status: planned
-      x-note: Post-MVP; the shape is indicative until the rules UI is scheduled.
+      x-note: >-
+        Replaced (RULES_FORMAT_SPEC §10): a DB rule version is never activated; an edit of
+        `.review/rules.md` would be a separate Git change operation. Not to be implemented with
+        this body.
       requestBody:
         required: true
         content:
@@ -605,7 +654,10 @@ paths:
       summary: Show which pull requests of the last 7 days a rule set version matches
       x-service: portal-api
       x-status: planned
-      x-note: Post-MVP; the shape is indicative until the rules UI is scheduled.
+      x-note: >-
+        Replaced (RULES_FORMAT_SPEC §10): the target is a pure preview of posted UTF-8 Markdown
+        (parse and ignore diagnostics, policy digest, token estimate), a separate task if needed.
+        Not to be implemented with this body.
       responses:
         "200":
           description: Matching pull requests.
@@ -1683,6 +1735,205 @@ components:
           description: Access token lifetime in seconds (900).
         user:
           $ref: "#/components/schemas/User"
+      additionalProperties: false
+    RulesDiagnostic:
+      type: object
+      description: >-
+        One diagnostic of RULES_FORMAT_SPEC §9. `message` is the author-facing text with where
+        the problem is; `line` and `column` are 1-based (the column in Unicode scalars) and null
+        when the problem has no position. `limit`, `actual` and `patternIndex` are omitted when
+        the error has none.
+      required: [code, message, line, column, retryable]
+      properties:
+        code:
+          type: string
+          minLength: 1
+          description: A `policy_*` code of the §9 catalog.
+        message:
+          type: string
+        line:
+          type: [integer, "null"]
+          minimum: 1
+        column:
+          type: [integer, "null"]
+          minimum: 1
+        retryable:
+          type: boolean
+          description: True for a temporary error that a new read can heal.
+        limit:
+          type: integer
+          minimum: 0
+        actual:
+          type: integer
+          minimum: 0
+        patternIndex:
+          type: integer
+          minimum: 0
+          description: Index of the offending mask among the masks of the block.
+      additionalProperties: false
+    RulesStatus:
+      description: The last read of `.review/rules.md`, told apart by `status`.
+      oneOf:
+        - $ref: "#/components/schemas/PresentRulesStatus"
+        - $ref: "#/components/schemas/MissingRulesStatus"
+        - $ref: "#/components/schemas/InvalidRulesStatus"
+        - $ref: "#/components/schemas/UnavailableRulesStatus"
+        - $ref: "#/components/schemas/PendingRulesStatus"
+      discriminator:
+        propertyName: status
+        mapping:
+          present: "#/components/schemas/PresentRulesStatus"
+          missing: "#/components/schemas/MissingRulesStatus"
+          invalid: "#/components/schemas/InvalidRulesStatus"
+          unavailable: "#/components/schemas/UnavailableRulesStatus"
+          pending: "#/components/schemas/PendingRulesStatus"
+    PresentRulesStatus:
+      type: object
+      description: The file is there and was read; an empty file is present too.
+      required: [status, branch, path, sha, checkedAt, text, checksum, ignoreMasks, diagnostics]
+      properties:
+        status:
+          type: string
+          const: present
+        branch:
+          type: string
+          minLength: 1
+          description: The default branch that was read.
+        path:
+          type: string
+          const: .review/rules.md
+        sha:
+          type: string
+          pattern: "^[0-9a-f]{40}([0-9a-f]{24})?$"
+          description: The commit that was read (`policy_base_sha` of a run on it).
+        checkedAt:
+          type: string
+          format: date-time
+        text:
+          type: string
+          maxLength: 65536
+          description: The normalized text (RULES_FORMAT_SPEC §3.2), shown as plain text.
+        checksum:
+          type: string
+          pattern: "^[0-9a-f]{64}$"
+          description: SHA-256 of the raw bytes; for an empty file the digest of no bytes.
+        ignoreMasks:
+          type: array
+          description: The unique valid masks of the `review-ignore` block in code point order.
+          items:
+            type: string
+        diagnostics:
+          type: array
+          description: Warnings of the read; none are defined yet, so the list is empty today.
+          items:
+            $ref: "#/components/schemas/RulesDiagnostic"
+      additionalProperties: false
+    MissingRulesStatus:
+      type: object
+      description: The file is reliably absent, proved by a complete read; the service defaults apply.
+      required: [status, branch, path, sha, checkedAt, defaultsVersion]
+      properties:
+        status:
+          type: string
+          const: missing
+        branch:
+          type: string
+          minLength: 1
+        path:
+          type: string
+          const: .review/rules.md
+        sha:
+          type: string
+          pattern: "^[0-9a-f]{40}([0-9a-f]{24})?$"
+        checkedAt:
+          type: string
+          format: date-time
+        defaultsVersion:
+          type: string
+          minLength: 1
+          description: The active default rule version of the repository, such as `v1`.
+      additionalProperties: false
+    InvalidRulesStatus:
+      type: object
+      description: The file is there and was refused with a format or limit error.
+      required: [status, branch, path, sha, checkedAt, text, diagnostics]
+      properties:
+        status:
+          type: string
+          const: invalid
+        branch:
+          type: string
+          minLength: 1
+        path:
+          type: string
+          const: .review/rules.md
+        sha:
+          type: string
+          pattern: "^[0-9a-f]{40}([0-9a-f]{24})?$"
+        checkedAt:
+          type: string
+          format: date-time
+        text:
+          type: [string, "null"]
+          maxLength: 65536
+          description: >-
+            Null when the file could not become text: too large, not UTF-8, a control
+            character, or not a regular blob.
+        diagnostics:
+          type: array
+          minItems: 1
+          items:
+            $ref: "#/components/schemas/RulesDiagnostic"
+      additionalProperties: false
+    UnavailableRulesStatus:
+      type: object
+      description: >-
+        The read proved nothing about the file: an access, revision or temporary error. Never
+        shown as `missing`. `retryable` of the diagnostics tells whether a new read can help.
+      required: [status, branch, path, sha, checkedAt, diagnostics]
+      properties:
+        status:
+          type: string
+          const: unavailable
+        branch:
+          type: string
+          minLength: 1
+          description: The default branch, as stored when GitHub did not name it.
+        path:
+          type: string
+          const: .review/rules.md
+        sha:
+          type: [string, "null"]
+          pattern: "^[0-9a-f]{40}([0-9a-f]{24})?$"
+          description: Null when the branch could not be resolved to a commit.
+        checkedAt:
+          type: string
+          format: date-time
+        diagnostics:
+          type: array
+          minItems: 1
+          items:
+            $ref: "#/components/schemas/RulesDiagnostic"
+      additionalProperties: false
+    PendingRulesStatus:
+      type: object
+      description: No read has finished yet; it is requested and a later GET returns its result.
+      required: [status, branch, path, sha, checkedAt]
+      properties:
+        status:
+          type: string
+          const: pending
+        branch:
+          type: string
+          minLength: 1
+          description: The stored default branch.
+        path:
+          type: string
+          const: .review/rules.md
+        sha:
+          type: "null"
+        checkedAt:
+          type: "null"
       additionalProperties: false
     RuleVersion:
       type: object

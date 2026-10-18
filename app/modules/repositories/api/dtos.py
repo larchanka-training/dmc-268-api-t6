@@ -1,8 +1,11 @@
-"""HTTP contract of repository settings (contracts/openapi.yaml: Repository, RepositoryUpdate)."""
+"""HTTP contract of repositories (contracts/openapi.yaml).
+
+Schemas: Repository, RepositoryUpdate and the RulesStatus variants.
+"""
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Annotated, Literal
 from uuid import UUID
 
 from pydantic import ConfigDict, Field, field_validator, model_validator
@@ -72,3 +75,90 @@ class RepositoryUpdateDto(ApiDto):
             if getattr(self, name) is None:
                 raise ValueError(f"{name} must not be null")
         return self
+
+
+def _is_none(value: object) -> bool:
+    return value is None
+
+
+class RulesDiagnosticDto(ApiDto):
+    """RULES_FORMAT_SPEC §9 in camelCase; ``limit``, ``actual`` and ``patternIndex`` are
+    omitted, not null, when the error has none."""
+
+    code: str
+    message: str
+    line: int | None
+    column: int | None
+    retryable: bool
+    limit: int | None = Field(default=None, exclude_if=_is_none)
+    actual: int | None = Field(default=None, exclude_if=_is_none)
+    pattern_index: int | None = Field(default=None, exclude_if=_is_none)
+
+
+class PresentRulesStatusDto(ApiDto):
+    """The file is there and was read; an empty file is present too."""
+
+    status: Literal["present"]
+    branch: str
+    path: str
+    sha: str
+    checked_at: UtcDatetime
+    text: str
+    checksum: str
+    ignore_masks: list[str]
+    diagnostics: list[RulesDiagnosticDto]
+
+
+class MissingRulesStatusDto(ApiDto):
+    """The file is reliably absent; the service defaults of ``defaultsVersion`` apply."""
+
+    status: Literal["missing"]
+    branch: str
+    path: str
+    sha: str
+    checked_at: UtcDatetime
+    defaults_version: str
+
+
+class InvalidRulesStatusDto(ApiDto):
+    """The file is there and was refused; ``text`` is null when it could not be decoded."""
+
+    status: Literal["invalid"]
+    branch: str
+    path: str
+    sha: str
+    checked_at: UtcDatetime
+    text: str | None
+    diagnostics: list[RulesDiagnosticDto] = Field(min_length=1)
+
+
+class UnavailableRulesStatusDto(ApiDto):
+    """The read proved nothing about the file; ``sha`` is null without a resolved revision."""
+
+    status: Literal["unavailable"]
+    branch: str
+    path: str
+    sha: str | None
+    checked_at: UtcDatetime
+    diagnostics: list[RulesDiagnosticDto] = Field(min_length=1)
+
+
+class PendingRulesStatusDto(ApiDto):
+    """Not read yet: the read is requested and a later GET returns its result."""
+
+    status: Literal["pending"]
+    branch: str
+    path: str
+    sha: None
+    checked_at: None
+
+
+# The variant is told by ``status``, never by a message text.
+RulesStatusDto = Annotated[
+    PresentRulesStatusDto
+    | MissingRulesStatusDto
+    | InvalidRulesStatusDto
+    | UnavailableRulesStatusDto
+    | PendingRulesStatusDto,
+    Field(discriminator="status"),
+]

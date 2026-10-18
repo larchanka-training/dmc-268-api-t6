@@ -9,7 +9,7 @@ import time
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
-from typing import Annotated, Any, Literal, NoReturn
+from typing import Annotated, Any, Literal, NoReturn, cast
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Path, Query, Request
@@ -20,7 +20,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.openapi.utils import get_openapi
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from fastapi.routing import APIRoute, iter_route_contexts
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 
 from app.bootstrap.portal_auth import get_auth_scope
 from app.bootstrap.reviews_api import (
@@ -30,6 +30,7 @@ from app.bootstrap.reviews_api import (
     get_pull_requests,
     get_repository_settings,
     get_rerun_uow_factory,
+    get_rules_status,
     get_run_publisher,
     get_run_repository,
     reviews_api_lifespan,
@@ -49,7 +50,17 @@ from app.modules.integrations.webhooks.application.receive_github_delivery impor
     GitHubWebhookReceiptUnitOfWork,
     ReceiveGitHubDelivery,
 )
-from app.modules.repositories.api.dtos import RepositoryDto, RepositoryUpdateDto
+from app.modules.repositories.api.dtos import (
+    InvalidRulesStatusDto,
+    MissingRulesStatusDto,
+    PendingRulesStatusDto,
+    PresentRulesStatusDto,
+    RepositoryDto,
+    RepositoryUpdateDto,
+    RulesDiagnosticDto,
+    RulesStatusDto,
+    UnavailableRulesStatusDto,
+)
 from app.modules.repositories.application.repository_settings import (
     GetRepository,
     ListRepositories,
@@ -57,6 +68,11 @@ from app.modules.repositories.application.repository_settings import (
     RepositorySettingsChange,
     RepositorySettingsUowFactory,
     UpdateRepository,
+)
+from app.modules.repositories.application.rules_status import (
+    GetRulesStatus,
+    RulesStatus,
+    RulesStatusKind,
 )
 from app.modules.reviews.api.dtos import (
     DiffFileDto,
@@ -462,6 +478,36 @@ def to_run_detail_dto(detail: RunDetail) -> RunDetailDto:
 
 def to_repository_dto(item: RepositorySettings) -> RepositoryDto:
     return RepositoryDto.model_validate(item, from_attributes=True)
+
+
+_RULES_STATUS_DTOS: dict[RulesStatusKind, type[BaseModel]] = {
+    RulesStatusKind.PENDING: PendingRulesStatusDto,
+    RulesStatusKind.PRESENT: PresentRulesStatusDto,
+    RulesStatusKind.MISSING: MissingRulesStatusDto,
+    RulesStatusKind.INVALID: InvalidRulesStatusDto,
+    RulesStatusKind.UNAVAILABLE: UnavailableRulesStatusDto,
+}
+
+
+def to_rules_status_dto(item: RulesStatus) -> RulesStatusDto:
+    """The variant of ``item.status``; a stored row that misses a field of it fails loudly."""
+    values: dict[str, Any] = {
+        "status": item.status.value,
+        "branch": item.branch,
+        "path": item.path,
+        "sha": item.sha,
+        "checked_at": item.checked_at,
+        "text": item.text,
+        "checksum": item.checksum,
+        "ignore_masks": None if item.ignore_masks is None else list(item.ignore_masks),
+        "diagnostics": [
+            RulesDiagnosticDto.model_validate(diagnostic, from_attributes=True)
+            for diagnostic in item.diagnostics
+        ],
+        "defaults_version": item.defaults_version,
+    }
+    dto = _RULES_STATUS_DTOS[item.status]
+    return cast(RulesStatusDto, dto.model_validate({k: values[k] for k in dto.model_fields}))
 
 
 def to_pull_request_summary_dto(item: PullRequestSummary) -> PullRequestSummaryDto:
@@ -892,6 +938,30 @@ async def update_repository(
     if item is None:
         raise HTTPException(status_code=404, detail="repository not found")
     return to_repository_dto(item)
+
+
+@api_router.get(
+    "/repos/{repo_id}/rules-status",
+    response_model=RulesStatusDto,
+    summary="Get the rules status of a repository",
+    description=(
+        "The last read of `.review/rules.md` on the default branch. A read older than "
+        "10 minutes, or one that failed with a retryable error, is requested again; "
+        "`pending` means no read has finished yet."
+    ),
+    responses={
+        401: {"description": "Unauthorized"},
+        404: {"description": "Repository not found"},
+    },
+)
+async def get_repository_rules_status(
+    repo_id: UUID,
+    use_case: Annotated[GetRulesStatus, Depends(get_rules_status)],
+) -> RulesStatusDto:
+    item = await use_case.execute(repo_id)
+    if item is None:
+        raise HTTPException(status_code=404, detail="repository not found")
+    return to_rules_status_dto(item)
 
 
 @api_router.get(
