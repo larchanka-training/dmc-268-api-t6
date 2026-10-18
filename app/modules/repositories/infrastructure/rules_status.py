@@ -9,7 +9,8 @@ sweep of ``webhook-worker``.
 
 from __future__ import annotations
 
-from datetime import datetime
+import logging
+from datetime import datetime, timedelta
 from typing import Any
 from uuid import UUID
 
@@ -38,6 +39,8 @@ from app.modules.repositories.infrastructure.models import (
 )
 from app.modules.workspaces.infrastructure.repository_access import repository_access_predicate
 
+_LOGGER = logging.getLogger(__name__)
+
 # Shown for a missing document when the repository has no active rule version, which
 # onboarding always creates; the row constraint needs a value.
 _UNKNOWN_DEFAULTS_VERSION = "unknown"
@@ -46,7 +49,10 @@ _UNKNOWN_DEFAULTS_VERSION = "unknown"
 async def request_rules_refresh(session: AsyncSession, repository_id: UUID) -> None:
     """Mark the repository for a new read and wake ``webhook-worker`` on commit.
 
-    An older pending request is kept: the read that answers it is still to come.
+    An older pending request is kept while no worker holds it: the read that answers it is
+    still to come. A claimed request gets a new time instead, so ``save``, which clears
+    only the claimed time, leaves it for the next read: the running read may have resolved
+    the branch head before the change that caused this request.
     """
     await session.execute(
         insert(RepositoryRulesStatus)
@@ -54,8 +60,14 @@ async def request_rules_refresh(session: AsyncSession, repository_id: UUID) -> N
         .on_conflict_do_update(
             index_elements=[RepositoryRulesStatus.repository_id],
             set_={
-                "refresh_requested_at": func.coalesce(
-                    RepositoryRulesStatus.refresh_requested_at, func.clock_timestamp()
+                "refresh_requested_at": case(
+                    (
+                        RepositoryRulesStatus.refresh_claimed_until.is_not(None),
+                        func.clock_timestamp(),
+                    ),
+                    else_=func.coalesce(
+                        RepositoryRulesStatus.refresh_requested_at, func.clock_timestamp()
+                    ),
                 )
             },
         )
@@ -73,6 +85,11 @@ def _diagnostic(item: dict[str, Any]) -> RulesDiagnostic:
         limit=item.get("limit"),
         actual=item.get("actual"),
         pattern_index=item.get("pattern_index"),
+        retry_after=(
+            None
+            if item.get("retry_after_seconds") is None
+            else timedelta(seconds=item["retry_after_seconds"])
+        ),
     )
 
 
@@ -86,6 +103,9 @@ def _diagnostic_json(item: RulesDiagnostic) -> dict[str, Any]:
         "limit": item.limit,
         "actual": item.actual,
         "pattern_index": item.pattern_index,
+        "retry_after_seconds": (
+            None if item.retry_after is None else int(item.retry_after.total_seconds())
+        ),
     }
 
 
@@ -106,7 +126,13 @@ def _to_status(row: RepositoryRulesStatus) -> RulesStatus | None:
 
 
 class SqlAlchemyRulesStatusStore:
-    def __init__(self, session: AsyncSession, scope: AuthScope | None) -> None:
+    def __init__(
+        self, session: AsyncSession, scope: AuthScope | None, *, allow_unscoped: bool = False
+    ) -> None:
+        if scope is None and not allow_unscoped:
+            raise ValueError(
+                "SqlAlchemyRulesStatusStore requires an AuthScope unless allow_unscoped=True"
+            )
         self._session = session
         self._scope = scope
 
@@ -116,7 +142,11 @@ class SqlAlchemyRulesStatusStore:
     async def get(self, repository_id: UUID) -> StoredRulesStatus | None:
         row = (
             await self._session.execute(
-                select(Repository.default_branch, RepositoryRulesStatus)
+                select(
+                    Repository.default_branch,
+                    Repository.installation_available,
+                    RepositoryRulesStatus,
+                )
                 .outerjoin(
                     RepositoryRulesStatus, RepositoryRulesStatus.repository_id == Repository.id
                 )
@@ -130,6 +160,7 @@ class SqlAlchemyRulesStatusStore:
             default_branch=row.default_branch,
             status=None if stored is None else _to_status(stored),
             refresh_requested=stored is not None and stored.refresh_requested_at is not None,
+            installation_available=row.installation_available,
         )
 
     async def request_refresh(self, repository_id: UUID) -> None:
@@ -150,10 +181,13 @@ class SqlAlchemyRulesStatusUnitOfWork(SqlAlchemyUnitOfWork):
             )
         super().__init__(session_factory)
         self._scope = scope
+        self._allow_unscoped = allow_unscoped
 
     @property
     def rules_status(self) -> SqlAlchemyRulesStatusStore:
-        return SqlAlchemyRulesStatusStore(self.session, self._scope)
+        return SqlAlchemyRulesStatusStore(
+            self.session, self._scope, allow_unscoped=self._allow_unscoped
+        )
 
 
 class SqlAlchemyRulesRefreshStore:
@@ -208,13 +242,14 @@ class SqlAlchemyRulesRefreshStore:
                 repository_full_name=row.full_name,
                 default_branch=row.default_branch,
                 requested_at=row.refresh_requested_at,
+                claimed_until=until,
             )
             for row in rows
         )
 
     async def save(
         self, target: RulesRefreshTarget, reading: RulesReading, *, checked_at: datetime
-    ) -> None:
+    ) -> bool:
         defaults_version: str | None = None
         if reading.status is RulesStatusKind.MISSING:
             version = await self._session.scalar(
@@ -222,10 +257,20 @@ class SqlAlchemyRulesRefreshStore:
                     RuleVersion.repository_id == target.repository_id, RuleVersion.is_active
                 )
             )
+            if version is None:
+                # Onboarding always creates one; shown as "unknown" rather than failing.
+                _LOGGER.warning(
+                    "Repository %s has no active rule version; defaultsVersion is unknown",
+                    target.repository_id,
+                )
             defaults_version = _UNKNOWN_DEFAULTS_VERSION if version is None else f"v{version}"
-        await self._session.execute(
+        saved = await self._session.scalar(
             update(RepositoryRulesStatus)
-            .where(RepositoryRulesStatus.repository_id == target.repository_id)
+            .where(
+                RepositoryRulesStatus.repository_id == target.repository_id,
+                # Still our claim: after the lease another worker may hold a newer read.
+                RepositoryRulesStatus.refresh_claimed_until == target.claimed_until,
+            )
             .values(
                 status=reading.status.value,
                 branch=reading.branch,
@@ -245,7 +290,9 @@ class SqlAlchemyRulesRefreshStore:
                 ),
                 refresh_claimed_until=None,
             )
+            .returning(RepositoryRulesStatus.repository_id)
         )
+        return saved is not None
 
     async def request_for_provider_repository(
         self, installation_external_id: int, repository_external_id: int

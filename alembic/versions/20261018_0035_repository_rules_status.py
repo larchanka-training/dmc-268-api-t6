@@ -23,7 +23,7 @@ def upgrade() -> None:
         sa.Column("repository_id", sa.Uuid(), nullable=False),
         sa.Column("status", sa.String(16), nullable=True),
         sa.Column("branch", sa.String(255), nullable=True),
-        sa.Column("sha", sa.String(64), nullable=True),
+        sa.Column("sha", sa.String(40), nullable=True),
         sa.Column("text", sa.TEXT(), nullable=True),
         sa.Column("checksum", sa.CHAR(64), nullable=True),
         sa.Column("ignore_masks", postgresql.JSONB(), nullable=True),
@@ -45,7 +45,7 @@ def upgrade() -> None:
             name="ck_repository_rules_status_read_complete",
         ),
         sa.CheckConstraint(
-            "sha IS NULL OR sha ~ '^([0-9a-f]{40}|[0-9a-f]{64})$'",
+            "sha IS NULL OR sha ~ '^[0-9a-f]{40}$'",
             name="ck_repository_rules_status_sha",
         ),
         sa.CheckConstraint(

@@ -553,10 +553,14 @@ paths:
         (branch, then the full commit SHA, then the tree and the blob by SHA) and stores one
         result per repository. A read happens when the repository is connected, after each
         `push` to the default branch, and when this GET finds the stored result older than
-        10 minutes or failed with a retryable error (then at most once per 30 seconds); the GET
-        still returns the stored result and a later GET shows the new one. So a change of the file
-        shows here a few seconds after the push, and at the latest 10 minutes after it if the
-        `push` event was lost. `pending` means no read has finished yet.
+        10 minutes or failed with a retryable error (then at most once per 30 seconds, or after
+        GitHub's `Retry-After` when it is longer); the GET still returns the stored result and a
+        later GET shows the new one. So a change of the file usually shows here a few seconds
+        after the push. Without the `push` event the 10 minutes count from the last read, not
+        from the push: a GET after them requests a read, and a later GET shows its result.
+        `pending` means no read has finished yet. A repository the App can no longer read
+        (`installationAvailable: false` in `getRepository`) is `unavailable` with
+        `policy_access_denied` (`retryable: false`) and requests no read.
 
         The variant is told by `status`, never by a message: `present` (an empty file too),
         `missing` (the file is reliably absent and the service defaults apply), `invalid` (a
@@ -1804,7 +1808,7 @@ components:
           const: .review/rules.md
         sha:
           type: string
-          pattern: "^[0-9a-f]{40}([0-9a-f]{24})?$"
+          pattern: "^[0-9a-f]{40}$"
           description: The commit that was read (`policy_base_sha` of a run on it).
         checkedAt:
           type: string
@@ -1844,14 +1848,17 @@ components:
           const: .review/rules.md
         sha:
           type: string
-          pattern: "^[0-9a-f]{40}([0-9a-f]{24})?$"
+          pattern: "^[0-9a-f]{40}$"
         checkedAt:
           type: string
           format: date-time
         defaultsVersion:
           type: string
           minLength: 1
-          description: The active default rule version of the repository, such as `v1`.
+          description: >-
+            The active default rule version of the repository, such as `v1`; `unknown` when the
+            repository has no active rule version (onboarding always creates one, so this is
+            logged as a warning).
       additionalProperties: false
     InvalidRulesStatus:
       type: object
@@ -1869,7 +1876,7 @@ components:
           const: .review/rules.md
         sha:
           type: string
-          pattern: "^[0-9a-f]{40}([0-9a-f]{24})?$"
+          pattern: "^[0-9a-f]{40}$"
         checkedAt:
           type: string
           format: date-time
@@ -1904,11 +1911,14 @@ components:
           const: .review/rules.md
         sha:
           type: [string, "null"]
-          pattern: "^[0-9a-f]{40}([0-9a-f]{24})?$"
+          pattern: "^[0-9a-f]{40}$"
           description: Null when the branch could not be resolved to a commit.
         checkedAt:
           type: string
           format: date-time
+          description: >-
+            The time of the read; for a repository the App can no longer read, the time of this
+            answer.
         diagnostics:
           type: array
           minItems: 1

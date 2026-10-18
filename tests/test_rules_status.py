@@ -23,8 +23,6 @@ from app.modules.integrations.webhooks.infrastructure.github_installation_tree_p
     StaticGitHubInstallationAccessTokenProvider,
 )
 from app.modules.repositories.application.rules_status import (
-    RULES_STATUS_RETRY_AFTER,
-    RULES_STATUS_STALE_AFTER,
     GetRulesStatus,
     ReadRulesDocument,
     RefreshRulesStatuses,
@@ -49,7 +47,8 @@ _ROOT = "1" * 40
 _REVIEW = "2" * 40
 _RULES = "3" * 40
 _NOW = datetime(2026, 10, 18, 12, 0, tzinfo=UTC)
-_TARGET = RulesRefreshTarget(_REPOSITORY, 17, "octo/repo", "main", _NOW)
+_LEASE_END = _NOW + timedelta(minutes=5)
+_TARGET = RulesRefreshTarget(_REPOSITORY, 17, "octo/repo", "main", _NOW, _LEASE_END)
 
 
 def _entry(path: str, sha: str, *, kind: str = "blob", size: int = 5) -> dict[str, Any]:
@@ -238,6 +237,8 @@ def test_symlink_is_invalid() -> None:
         ({f"/git/blobs/{_RULES}": 404}, {}, "policy_revision_unavailable", _HEAD, False),
         ({"/repos/octo/repo": 404}, {}, "policy_revision_unavailable", None, False),
         ({"/commits/main": 422}, {}, "policy_revision_unavailable", None, False),
+        # An empty repository: GitHub answers 409 "Git Repository is empty".
+        ({"/commits/main": 409}, {}, "policy_revision_unavailable", None, False),
         ({"/repos/octo/repo": 403}, {}, "policy_access_denied", None, False),
         ({f"/git/trees/{_HEAD}": 401}, {}, "policy_access_denied", _HEAD, False),
         (
@@ -256,6 +257,7 @@ def test_symlink_is_invalid() -> None:
         "404-blob",
         "404-repository",
         "unknown-ref",
+        "empty-repository-409",
         "access-denied",
         "unauthorized",
         "rate-limited",
@@ -311,6 +313,12 @@ def _status(
 
 _TRANSIENT = RulesDiagnostic("policy_fetch_transient", "m", None, None, True)
 _DENIED = RulesDiagnostic("policy_access_denied", "m", None, None, False)
+_LIMITED = RulesDiagnostic(
+    "policy_rate_limited", "m", None, None, True, retry_after=timedelta(seconds=60)
+)
+_SHORT_LIMIT = RulesDiagnostic(
+    "policy_rate_limited", "m", None, None, True, retry_after=timedelta(seconds=5)
+)
 
 
 @pytest.mark.parametrize(
@@ -326,7 +334,7 @@ _DENIED = RulesDiagnostic("policy_access_denied", "m", None, None, False)
         ),
         (
             StoredRulesStatus(
-                "main", _status(RulesStatusKind.PRESENT, _NOW - RULES_STATUS_STALE_AFTER), False
+                "main", _status(RulesStatusKind.PRESENT, _NOW - timedelta(minutes=10)), False
             ),
             True,
         ),
@@ -339,10 +347,42 @@ _DENIED = RulesDiagnostic("policy_access_denied", "m", None, None, False)
         (
             StoredRulesStatus(
                 "main",
-                _status(RulesStatusKind.UNAVAILABLE, _NOW - RULES_STATUS_RETRY_AFTER, _TRANSIENT),
+                _status(RulesStatusKind.UNAVAILABLE, _NOW - timedelta(seconds=30), _TRANSIENT),
                 False,
             ),
             True,
+        ),
+        (
+            StoredRulesStatus(
+                "main",
+                _status(RulesStatusKind.UNAVAILABLE, _NOW - timedelta(seconds=29), _TRANSIENT),
+                False,
+            ),
+            False,
+        ),
+        (
+            StoredRulesStatus(
+                "main",
+                _status(RulesStatusKind.UNAVAILABLE, _NOW - timedelta(seconds=59), _LIMITED),
+                False,
+            ),
+            False,
+        ),
+        (
+            StoredRulesStatus(
+                "main",
+                _status(RulesStatusKind.UNAVAILABLE, _NOW - timedelta(seconds=60), _LIMITED),
+                False,
+            ),
+            True,
+        ),
+        (
+            StoredRulesStatus(
+                "main",
+                _status(RulesStatusKind.UNAVAILABLE, _NOW - timedelta(seconds=29), _SHORT_LIMIT),
+                False,
+            ),
+            False,
         ),
         (
             StoredRulesStatus(
@@ -367,7 +407,11 @@ _DENIED = RulesDiagnostic("policy_access_denied", "m", None, None, False)
         "fresh",
         "stale-after-10-minutes",
         "stale-but-requested",
-        "retryable-after-pause",
+        "retryable-after-30-seconds",
+        "retryable-at-29-seconds",
+        "retry-after-60-not-yet",
+        "retry-after-60-reached",
+        "retry-after-below-30-keeps-30",
         "retryable-within-pause",
         "permanent-error-fresh",
     ],
@@ -434,6 +478,39 @@ def test_a_fresh_result_is_returned_without_a_request() -> None:
     assert (store.requests, store.commits) == (0, 0)
 
 
+@pytest.mark.parametrize(
+    "old",
+    [None, _status(RulesStatusKind.PRESENT, _NOW - timedelta(hours=1))],
+    ids=["never-read", "read-before"],
+)
+def test_a_repository_the_app_lost_is_access_denied_without_a_request(
+    old: RulesStatus | None,
+) -> None:
+    store = FakeStatusStore(
+        StoredRulesStatus("main", old, refresh_requested=False, installation_available=False)
+    )
+
+    status = _get(store)
+
+    assert status == RulesStatus(
+        RulesStatusKind.UNAVAILABLE,
+        "main",
+        None,
+        _NOW,
+        diagnostics=(
+            RulesDiagnostic(
+                "policy_access_denied",
+                "Нет доступа к документам правил репозитория.",
+                None,
+                None,
+                False,
+            ),
+        ),
+    )
+    assert status is not None and status.retryable is False
+    assert (store.requests, store.commits) == (0, 0)
+
+
 def test_an_invisible_repository_is_none_without_a_request() -> None:
     store = FakeStatusStore(None)
 
@@ -446,6 +523,7 @@ class FakeRefreshStore:
     targets: tuple[RulesRefreshTarget, ...]
     saved: list[tuple[UUID, RulesReading]] = field(default_factory=list)
     claims: list[tuple[datetime, datetime, int]] = field(default_factory=list)
+    lost: frozenset[UUID] = frozenset()
 
     @property
     def rules(self) -> Self:
@@ -472,8 +550,11 @@ class FakeRefreshStore:
 
     async def save(
         self, target: RulesRefreshTarget, reading: RulesReading, *, checked_at: datetime
-    ) -> None:
+    ) -> bool:
+        if target.repository_id in self.lost:
+            return False
         self.saved.append((target.repository_id, reading))
+        return True
 
     async def request_for_provider_repository(
         self, installation_external_id: int, repository_external_id: int
@@ -486,8 +567,8 @@ class FakeReader:
     read: Callable[[RulesRefreshTarget], Any]
 
 
-def test_refresh_saves_each_claimed_read_and_keeps_going_after_a_failure() -> None:
-    broken = RulesRefreshTarget(UUID(int=1), 17, "octo/broken", "main", _NOW)
+def test_refresh_saves_each_claimed_read_and_an_unexpected_failure_as_transient() -> None:
+    broken = RulesRefreshTarget(UUID(int=1), 17, "octo/broken", "main", _NOW, _LEASE_END)
     store = FakeRefreshStore((broken, _TARGET))
     missing = RulesReading(RulesStatusKind.MISSING, "main", _HEAD)
 
@@ -503,6 +584,51 @@ def test_refresh_saves_each_claimed_read_and_keeps_going_after_a_failure() -> No
     )
 
     assert refreshed == 2
-    # The failed read keeps its claim: the request is taken again once the lease ends.
-    assert store.saved == [(_REPOSITORY, missing)]
+    # The failed read is stored as a temporary failure, so a GET asks again after 30 s.
+    transient = RulesReading(
+        RulesStatusKind.UNAVAILABLE,
+        "main",
+        None,
+        diagnostics=(
+            RulesDiagnostic(
+                "policy_fetch_transient",
+                "Не удалось прочитать документы правил из GitHub.",
+                None,
+                None,
+                True,
+            ),
+        ),
+    )
+    assert store.saved == [(UUID(int=1), transient), (_REPOSITORY, missing)]
     assert store.claims == [(_NOW, _NOW + timedelta(minutes=5), 20)]
+
+
+def test_a_read_whose_claim_was_taken_over_is_dropped(caplog: pytest.LogCaptureFixture) -> None:
+    store = FakeRefreshStore((_TARGET,), lost=frozenset({_REPOSITORY}))
+    missing = RulesReading(RulesStatusKind.MISSING, "main", _HEAD)
+
+    async def read(target: RulesRefreshTarget) -> RulesReading:
+        return missing
+
+    with caplog.at_level("WARNING"):
+        refreshed = asyncio.run(
+            RefreshRulesStatuses(
+                uow_factory=lambda: store, reader=FakeReader(read), now=lambda: _NOW
+            ).execute()
+        )
+
+    assert refreshed == 1
+    assert store.saved == []
+    assert "claim was taken over" in caplog.text
+
+
+def test_a_rate_limit_keeps_its_retry_after_for_the_next_get() -> None:
+    reading = _read(
+        FakeGitHub(rules=b"x", failures={f"/git/trees/{_HEAD}": 429}, headers={"Retry-After": "90"})
+    )
+
+    (diagnostic,) = reading.diagnostics
+    assert (diagnostic.code, diagnostic.retry_after) == (
+        "policy_rate_limited",
+        timedelta(seconds=90),
+    )

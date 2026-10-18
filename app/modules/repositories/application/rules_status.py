@@ -41,8 +41,9 @@ _LOGGER = logging.getLogger(__name__)
 
 # A stored result older than this is read again on the next GET.
 RULES_STATUS_STALE_AFTER = timedelta(minutes=10)
-# A retryable failure is read again on a GET only after this pause, so that a page
-# polled during a GitHub outage does not turn into one read per request.
+# A retryable failure is read again on a GET only after this pause, or after the
+# ``Retry-After`` of GitHub when it is longer, so that a page polled during a GitHub
+# outage does not turn into one read per request.
 RULES_STATUS_RETRY_AFTER = timedelta(seconds=30)
 # How long a worker may hold a request before another one takes it over.
 RULES_REFRESH_LEASE = timedelta(minutes=5)
@@ -94,6 +95,8 @@ class RulesDiagnostic:
     limit: int | None = None
     actual: int | None = None
     pattern_index: int | None = None
+    # The ``Retry-After`` of a rate limit; stored for the next GET, never shown.
+    retry_after: timedelta | None = None
 
     @classmethod
     def from_error(cls, error: PolicyError) -> RulesDiagnostic:
@@ -112,6 +115,7 @@ class RulesDiagnostic:
             limit=error.limit,
             actual=error.actual,
             pattern_index=error.pattern_index,
+            retry_after=error.retry_after,
         )
 
 
@@ -147,14 +151,25 @@ class RulesStatus:
     def retryable(self) -> bool:
         return any(item.retryable for item in self.diagnostics)
 
+    @property
+    def retry_pause(self) -> timedelta:
+        """How long a retryable failure waits for a new read: 30 s or GitHub's ``Retry-After``."""
+        delays = [item.retry_after for item in self.diagnostics if item.retry_after is not None]
+        return max([RULES_STATUS_RETRY_AFTER, *delays])
+
 
 @dataclass(frozen=True)
 class StoredRulesStatus:
-    """A visible repository with its stored result; ``status`` is None before the first read."""
+    """A visible repository with its stored result; ``status`` is None before the first read.
+
+    ``installation_available`` is that of ``GET /api/repos/{repo_id}``: false once the App
+    has lost the repository, which the worker then no longer reads.
+    """
 
     default_branch: str
     status: RulesStatus | None
     refresh_requested: bool
+    installation_available: bool = True
 
 
 def needs_refresh(stored: StoredRulesStatus, now: datetime) -> bool:
@@ -166,7 +181,7 @@ def needs_refresh(stored: StoredRulesStatus, now: datetime) -> bool:
         return True
     if status.checked_at <= now - RULES_STATUS_STALE_AFTER:
         return True
-    return status.retryable and status.checked_at <= now - RULES_STATUS_RETRY_AFTER
+    return status.retryable and status.checked_at <= now - status.retry_pause
 
 
 class RulesStatusStore(Protocol):
@@ -184,8 +199,27 @@ class RulesStatusUnitOfWork(UnitOfWork, Protocol):
     def rules_status(self) -> RulesStatusStore: ...
 
 
+def _no_installation_access(branch: str, now: datetime) -> RulesStatus:
+    # The App cannot read the repository any more, so no read is requested: it would never
+    # be answered and the page would stay ``pending``.
+    error = PolicyError(
+        PolicyErrorCode.ACCESS_DENIED, "The GitHub App has no access to the repository"
+    )
+    return RulesStatus(
+        status=RulesStatusKind.UNAVAILABLE,
+        branch=branch,
+        sha=None,
+        checked_at=now,
+        diagnostics=(RulesDiagnostic.from_error(error),),
+    )
+
+
 class GetRulesStatus:
-    """Return the stored status and, when it is due, request a new read in the same commit."""
+    """Return the stored status and, when it is due, request a new read in the same commit.
+
+    A repository the App has lost (``installation_available`` false) is ``unavailable``
+    with ``policy_access_denied`` and requests nothing.
+    """
 
     def __init__(
         self,
@@ -201,6 +235,8 @@ class GetRulesStatus:
             stored = await uow.rules_status.get(repository_id)
             if stored is None:
                 return None
+            if not stored.installation_available:
+                return _no_installation_access(stored.default_branch, self._now())
             if needs_refresh(stored, self._now()):
                 await uow.rules_status.request_refresh(repository_id)
                 await uow.commit()
@@ -224,6 +260,9 @@ class RulesRefreshTarget:
     # The stored default branch: shown when GitHub does not name the current one.
     default_branch: str
     requested_at: datetime
+    # The lease end written by this claim; ``save`` checks it, so a read whose claim was
+    # taken over after the lease cannot overwrite the newer read.
+    claimed_until: datetime
 
 
 @dataclass(frozen=True)
@@ -241,8 +280,8 @@ class RulesRefreshStore(Protocol):
 
     async def save(
         self, target: RulesRefreshTarget, reading: RulesReading, *, checked_at: datetime
-    ) -> None:
-        """Store the result and release the claim.
+    ) -> bool:
+        """Store the result and release the claim; False when the claim is no longer ours.
 
         The request is cleared only if it is still the one that was claimed, so a request
         made during the read survives and is answered by the next read.
@@ -328,6 +367,11 @@ def _unavailable(branch: str, sha: str | None, error: PolicyError) -> RulesReadi
     )
 
 
+def _unexpected_failure(target: RulesRefreshTarget) -> RulesReading:
+    error = PolicyError(PolicyErrorCode.FETCH_TRANSIENT, "The rules read failed unexpectedly")
+    return _unavailable(target.default_branch, None, error)
+
+
 class RulesDocumentReader(Protocol):
     async def read(self, target: RulesRefreshTarget) -> RulesReading: ...
 
@@ -358,13 +402,27 @@ class RefreshRulesStatuses:
         for target in targets:
             try:
                 reading = await self._reader.read(target)
+            except Exception:
+                # A bug or an unexpected answer: shown as a temporary failure, so the page
+                # does not keep an old result without an error and a GET asks again.
+                _LOGGER.exception(
+                    "Rules status read failed for repository %s", target.repository_id
+                )
+                reading = _unexpected_failure(target)
+            try:
                 async with self._uow_factory() as uow:
-                    await uow.rules.save(target, reading, checked_at=self._now())
+                    saved = await uow.rules.save(target, reading, checked_at=self._now())
                     await uow.commit()
             except Exception:
                 # The claim ends with its lease and the next sweep tries again.
                 _LOGGER.exception(
-                    "Rules status read failed for repository %s", target.repository_id
+                    "Rules status save failed for repository %s", target.repository_id
+                )
+                continue
+            if not saved:
+                _LOGGER.warning(
+                    "Rules status read of repository %s dropped: its claim was taken over",
+                    target.repository_id,
                 )
                 continue
             # Status and code only: the document text never reaches the log.

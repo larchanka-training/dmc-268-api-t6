@@ -229,7 +229,7 @@ class RepositoryRulesStatus(Base):
             name="ck_repository_rules_status_read_complete",
         ),
         CheckConstraint(
-            "sha IS NULL OR sha ~ '^([0-9a-f]{40}|[0-9a-f]{64})$'",
+            "sha IS NULL OR sha ~ '^[0-9a-f]{40}$'",
             name="ck_repository_rules_status_sha",
         ),
         CheckConstraint(
@@ -260,7 +260,7 @@ class RepositoryRulesStatus(Base):
     )
     status: Mapped[str | None] = mapped_column(String(16))
     branch: Mapped[str | None] = mapped_column(String(255))
-    sha: Mapped[str | None] = mapped_column(String(64))
+    sha: Mapped[str | None] = mapped_column(String(40))
     # ``text`` would shadow ``sqlalchemy.text`` in the class body.
     content: Mapped[str | None] = mapped_column("text", TEXT)
     # SHA-256 of the raw bytes (RULES_FORMAT_SPEC §3.2); the Git blob id is not a checksum.
