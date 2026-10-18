@@ -100,7 +100,7 @@ flowchart TB
     portal["<b>Portal API</b><br/><i>[Container: FastAPI BFF]</i><br/>REST + SSE, подписка, биллинг,<br/>настройки и ручной перезапуск"]
     auth["<b>Auth API</b><br/><i>[Container: FastAPI]</i><br/>вход через GitHub App,<br/>JWT и refresh, Workspace (Р-7)"]
     hook["<b>Webhook API</b><br/><i>[Container: FastAPI]</i><br/>GitHub HMAC, квитанция в webhook_events<br/>(идемпотентность по delivery_id), ack < 500 мс"]
-    ww["<b>webhook-worker</b><br/><i>[Container: Python]</i><br/>разбор квитанций по NOTIFY после commit (резервно раз в 30 с): проекция PR<br/>и лейбла ai-review, подключение репозиториев,<br/>схлопывание Р-2, триггер Р-10 (#52)"]
+    ww["<b>webhook-worker</b><br/><i>[Container: Python]</i><br/>разбор квитанций по NOTIFY после commit<br/>(резервно раз в 30 с): проекция PR и лейбла ai-review,<br/>подключение репозиториев, схлопывание Р-2, триггер Р-10 (#52)"]
     worker["<b>AI Worker</b><br/><i>[Container: Python + aio-pika]</i><br/>сборщик контекста (4 уровня) → LLM Gateway<br/>→ постобработка → трейс;<br/>индексатор графа RAG (#142)"]
     pub["<b>GitHub Publisher</b><br/><i>[Container: Python + aio-pika]</i><br/>валидация координат, одно ревью и check-run"]
     sandbox["<b>Sandbox Runner</b><br/><i>[Container: Docker, --network=none]</i><br/>SandboxEngine · фаза 3"]
@@ -176,9 +176,10 @@ Workspace-пакет `database-migrator` запускается Compose-серв
 которые маршрут `webhook-api` записал в `webhook_events`, создаёт Run и публикует их в очередь
 ревью, поэтому требует PostgreSQL, RabbitMQ (`RABBITMQ_URL`) и GitHub App (ID, приватный ключ,
 логин бота) — [WEBHOOK_WORKER.md](WEBHOOK_WORKER.md).
-Он просыпается по `NOTIFY webhook_work_available`, который после commit отправляют сохранение
-новой квитанции и повторная активация отложенных квитанций при OAuth; обход раз в 30 с остаётся
-резервным ([WEBHOOK_WORKER.md](WEBHOOK_WORKER.md#how-the-worker-handles-deliveries)).
+Он просыпается по `NOTIFY webhook_work_available`: сохранение новой квитанции и повторная
+активация отложенных квитанций при OAuth отправляют его в своей транзакции, PostgreSQL доставляет
+его после commit; обход раз в 30 с остаётся резервным
+([WEBHOOK_WORKER.md](WEBHOOK_WORKER.md#how-the-worker-handles-deliveries)).
 
 ---
 
@@ -297,7 +298,7 @@ sequenceDiagram
 
   GH->>WH: pull_request.labeled (label = ai-review)
   WH->>WH: HMAC ok? (иначе 401) заголовки и JSON? (иначе 400)
-  WH->>PG: webhook_events INSERT … ON CONFLICT (delivery_id) DO NOTHING + NOTIFY webhook_work_available только для новой квитанции (одна транзакция)
+  WH->>PG: webhook_events INSERT … ON CONFLICT (delivery_id) DO NOTHING<br/>+ NOTIFY webhook_work_available только для новой квитанции (одна транзакция)
   WH-->>GH: 202 pending / duplicate (< 500 мс)
   PG-->>WW: уведомление после commit
   WW->>PG: claim квитанции (по уведомлению, резервно раз в 30 с)
@@ -349,7 +350,7 @@ sequenceDiagram
   W->>GH: policy documents по закреплённому base_sha
   W->>GH: GET /pulls/{n} + files (patch на файл)
   W->>PG: policy snapshot + run diff snapshot + DiffMap
-  Note over W: ignore до подсчёта; все ignored → skipped; больше 3000 allowed строк → backend summary, без LLM (§9)
+  Note over W: ignore до подсчёта#59; все ignored → skipped#59; больше 3000 allowed строк → backend summary, без LLM (§9)
   W->>GH: base-tree для конвенций, head/diff_old trees для кода
   opt conventions cache miss и есть base-исходники
     W->>PG: manifest разрешённого base-input
@@ -380,7 +381,7 @@ sequenceDiagram
   P->>GH: свежие head/diff + recovery своих операций
   P->>GH: POST /pulls/{n}/reviews (одно ревью) + check-run completed
   P->>GH: проверить актуальность после POST
-  P->>PG: remote receipts; succeeded либо cancelled при гонке
+  P->>PG: remote receipts#59; succeeded либо cancelled при гонке
   P->>MQ: ack review.publish
 ```
 
@@ -398,7 +399,7 @@ sequenceDiagram
 
   Note over W: выполняет run#1 (sha_1)
   GH->>WH: pull_request.synchronize (head = sha_2)
-  WH->>PG: webhook_events INSERT (квитанция) + NOTIFY webhook_work_available только для новой квитанции (одна транзакция)
+  WH->>PG: webhook_events INSERT (квитанция)<br/>+ NOTIFY webhook_work_available (одна транзакция)
   WH-->>GH: 202
   PG-->>WW: уведомление после commit
   WW->>PG: claim квитанции (по уведомлению, резервно раз в 30 с)
@@ -729,7 +730,7 @@ sequenceDiagram
   B->>GH: «Подключить» → страница установки App
   GH->>GH: пользователь выбирает аккаунт и репозитории
   GH->>WH: installation.created / installation_repositories.added
-  WH->>PG: webhook_events INSERT … ON CONFLICT (delivery_id) DO NOTHING + NOTIFY webhook_work_available только для новой квитанции (одна транзакция)
+  WH->>PG: webhook_events INSERT … ON CONFLICT (delivery_id) DO NOTHING<br/>+ NOTIFY webhook_work_available только для новой квитанции (одна транзакция)
   WH-->>GH: 202 pending / duplicate
   PG-->>WW: уведомление после commit
   WW->>PG: claim квитанции (по уведомлению, резервно раз в 30 с), установка связана с Workspace?
@@ -747,7 +748,7 @@ sequenceDiagram
   WW->>PG: installation_available=false + repo-гранты удалены#59; deleted_at для всей установки, без REST
 ```
 
-Репозиторий подключается установкой App: `POST /api/repos` нет (D10), кнопка «Подключить» ведёт на установку App. После изменения выбранных в GitHub репозиториев пользователь нажимает «Обновить доступ»: повторный OAuth-вход без logout возвращает на `/repositories`. `ExchangeGitHubCode` вызывает `LinkGitHubInstallations`: по пользовательскому токену читает установки и их репозитории, связывает новые установки с Workspace, сохраняет актуальные пользовательские гранты и пробуждает отложенные квитанции: после commit уходит `NOTIFY webhook_work_available` ([WEBHOOK_WORKER.md](WEBHOOK_WORKER.md#how-the-worker-handles-deliveries)). Это добавляет новую установку и новый репозиторий прежней установки, сохраняя по-прежнему разрешённые гранты. Refresh читает локальную идентичность; запросов к GitHub и обновления списка разрешённых репозиториев он не делает. Поэтому добавленный доступ появляется после повторного OAuth и проекции репозитория вебхуком, а не от одного refresh.
+Репозиторий подключается установкой App: `POST /api/repos` нет (D10), кнопка «Подключить» ведёт на установку App. После изменения выбранных в GitHub репозиториев пользователь нажимает «Обновить доступ»: повторный OAuth-вход без logout возвращает на `/repositories`. `ExchangeGitHubCode` вызывает `LinkGitHubInstallations`: по пользовательскому токену читает установки и их репозитории, связывает новые установки с Workspace, сохраняет актуальные пользовательские гранты и пробуждает отложенные квитанции: `NOTIFY webhook_work_available` уходит в той же транзакции и доставляется после commit ([WEBHOOK_WORKER.md](WEBHOOK_WORKER.md#how-the-worker-handles-deliveries)). Это добавляет новую установку и новый репозиторий прежней установки, сохраняя по-прежнему разрешённые гранты. Refresh читает локальную идентичность; запросов к GitHub и обновления списка разрешённых репозиториев он не делает. Поэтому добавленный доступ появляется после повторного OAuth и проекции репозитория вебхуком, а не от одного refresh.
 
 Отзыв доступа пользователя на стороне GitHub (без удаления репозитория из установки App) обнаруживается при следующем успешном OAuth-входе, в том числе через «Обновить доступ». До этой сверки прежние локальные гранты сохраняются: refresh читает локальную идентичность и не проверяет права в GitHub. Без повторного OAuth сессия ограничена абсолютным сроком refresh-семьи — 30 дней от входа; последний выпущенный access JWT может действовать ещё до 15 минут после этого срока ([§12](#12-контракт-api--ui)). Это принятая задержка отзыва пользовательского доступа [техлид, 07.10.2026, #101]; отзыв через события установки App описан ниже.
 
