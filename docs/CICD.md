@@ -224,6 +224,7 @@ rollback мог пересоздать контейнеры этим образ�
 
 | Ревизия | Что удаляет downgrade | Что даёт повторный upgrade |
 |---|---|---|
+| `20261017_0034` (#142) | колонки `code_index_states.indexed_default_branch`, `exclusions_digest`, `stored_bytes`, `pending_bytes`, четыре CHECK `ck_code_index_states_profile_complete`, `ck_code_index_states_bytes`, `ck_code_index_states_pending_leased`, `ck_code_index_states_failed_code` и индекс `ix_code_index_states_live_lease` | `indexed_default_branch` и `exclusions_digest` = NULL, `stored_bytes` и `pending_bytes` = 0; upgrade обнуляет версии профиля, поэтому следующая сборка каждого индекса полная; пока строки графа сохранились, `stored_bytes` остаётся 0 до следующей публикации, и квоты хранения недосчитывают индекс до пересборки |
 | `20261016_0033` (#145) | колонку `repositories.rag_enabled` | колонка со значением `false`; включённый RAG (opt-in) не восстанавливается |
 | `20261015_0032` (#141) | таблицы `code_index_imports`, `code_index_edges`, `code_index_symbols`, `code_index_files`, `code_index_states` и ENUM `code_index_status`, `code_index_purge_reason`, `code_index_symbol_kind`, `code_index_edge_kind`, `code_index_import_resolution` | пустые таблицы; индекс графа строится заново с нуля |
 | `20261014_0031` (#149) | колонки `repositories.severity_threshold` и `repositories.branch_filter`, ENUM `severity_threshold` | `branch_filter = '{}'` (все ветки), `severity_threshold = 'all'`; пользовательские настройки не восстанавливаются |
@@ -238,7 +239,8 @@ installation_available`: `enabled=true` при `installation_available=false` с
 
 Например, ручной downgrade до `20261012_0030` откатывает все строки таблицы выше строки
 `20261012_0030`, а не только `20261010_0030` и `20261010_0029`: сейчас это ещё
-`20261014_0031`, `20261015_0032` и `20261016_0033`; полный актуальный состав — таблица.
+`20261014_0031`, `20261015_0032`, `20261016_0033` и `20261017_0034`; полный актуальный
+состав — таблица.
 
 Более глубокий downgrade **до `20261007_0028`** дополнительно откатывает
 policy/context #136: ревизии `20261012_0030` и `20261011_0029`, их потери перечислены в

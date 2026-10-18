@@ -692,9 +692,10 @@ downgrade до целевой ревизии откатывает **все ре�
 Alembic; состав отката определяет `alembic history`, а не даты в id ревизий. Поэтому
 downgrade **до `20261012_0030`** откатывает не только `20261010_0030` и
 `20261010_0029` (#132), но и все более поздние ревизии; сейчас это `20261014_0031`,
-`20261015_0032` и `20261016_0033`: теряются `branch_filter` и `severity_threshold`,
-таблицы индекса графа `code_index_*` с их ENUM и флаг `rag_enabled`. Недоступный
-репозиторий после отката не оживает (доступность сворачивается в `enabled AND
+`20261015_0032`, `20261016_0033` и `20261017_0034`: теряются `branch_filter` и
+`severity_threshold`, таблицы индекса графа `code_index_*` с их ENUM, флаг `rag_enabled`
+и состояние индексатора в `code_index_states` (ветка, digest исключений, учёт байтов).
+Недоступный репозиторий после отката не оживает (доступность сворачивается в `enabled AND
 installation_available`: `enabled=true` при `installation_available=false` становится
 `enabled=false`), а повторный upgrade возвращает схему со значениями по умолчанию
 (`branch_filter = '{}'`, `severity_threshold = 'all'`, `rag_enabled = false`, пустой
