@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from datetime import datetime, timedelta, timezone
-from typing import Annotated, Any, TypeAliasType, get_args, get_origin
+from typing import Annotated, Any, Generic, TypeAliasType, TypeVar, get_args, get_origin
 from uuid import UUID
 
 from fastapi import FastAPI
@@ -182,12 +182,12 @@ def _models(
     return [model for argument in _parts(annotation) for model in _models(argument, expanding)]
 
 
-def _response_models(routes: Sequence[BaseRoute]) -> list[type[BaseModel]]:
-    """Every model an ``/api/`` route returns, with the models nested in its fields."""
+def _route_annotations(routes: Sequence[BaseRoute]) -> list[tuple[str, Any]]:
+    """Each annotation an ``/api/`` route declares, with the route path."""
     # app.routes holds each included router as a wrapper, not an APIRoute: unwrap it first.
     # A Mount is not descended into: the app mounts nothing, so no /api/ route hides in one.
-    pending = [
-        model
+    return [
+        (route.path_format, annotation)
         for route in iter_route_contexts(routes)
         if route.path_format is not None
         and route.path_format.startswith("/api/")
@@ -197,7 +197,13 @@ def _response_models(routes: Sequence[BaseRoute]) -> list[type[BaseModel]]:
             route.response_model,
             *(response.get("model") for response in route.responses.values()),
         )
-        for model in _models(annotation)
+    ]
+
+
+def _response_models(routes: Sequence[BaseRoute]) -> list[type[BaseModel]]:
+    """Every model an ``/api/`` route returns, with the models nested in its fields."""
+    pending = [
+        model for _, annotation in _route_annotations(routes) for model in _models(annotation)
     ]
     found: list[type[BaseModel]] = []
     seen: set[type[BaseModel]] = set()
@@ -222,6 +228,25 @@ def test_no_api_response_model_returns_a_timestamp_outside_utc() -> None:
     assert AuthSessionDto in models
     assert RagIndexDto in models  # no route returns it: reached only via RepositoryDto.rag_index
     assert _bare_timestamps(models) == []
+
+
+def _routes_declaring_a_bare_datetime(routes: Sequence[BaseRoute]) -> list[str]:
+    """The ``/api/`` routes whose own annotation holds a bare datetime, each path listed once."""
+    # Response[datetime] over Envelope[T] reaches the model walk as Envelope[X] (field at: X) and
+    # the argument datetime, which is no model: only the route's own annotation names it.
+    return list(
+        dict.fromkeys(
+            path
+            for path, annotation in _route_annotations(routes)
+            if _has_bare_datetime(annotation)
+        )
+    )
+
+
+def test_no_api_route_declares_a_timestamp_outside_utc() -> None:
+    # A type parameter only takes an argument written in some annotation: a route's, checked
+    # here, or a model field's, checked by the model walk. No parameter substitution is needed.
+    assert _routes_declaring_a_bare_datetime(app.main.app.routes) == []
 
 
 class BareStamp(BaseModel):
@@ -271,6 +296,24 @@ class RecursiveAliasStamp(BaseModel):
 
 class GenericAliasStamp(BaseModel):
     at: WithBareAt[int]
+
+
+T = TypeVar("T")
+
+
+# The typing.Generic form the review reproduced the gap with, kept as written.
+class Envelope(BaseModel, Generic[T]):  # noqa: UP046
+    at: T
+
+
+type Response[X] = Envelope[X]
+type Id[X] = X
+type L[X] = list[X]
+type Opt[Y] = L[Y | None]
+
+
+class Holder(BaseModel):
+    env: Response[datetime]
 
 
 async def _probe() -> None:
@@ -337,3 +380,35 @@ def test_response_walk_reports_a_model_in_the_body_of_a_generic_alias() -> None:
 
 def test_timestamp_check_reports_a_datetime_in_the_body_of_a_generic_alias() -> None:
     assert _bare_timestamps([GenericAliasStamp]) == ["GenericAliasStamp.at"]
+
+
+def test_route_check_reports_a_datetime_argument_of_a_generic_model_alias() -> None:
+    # The model walk sees Envelope[X], whose field is a TypeVar: only the route check sees datetime.
+    routes = _probe_routes(Response[datetime])
+
+    assert _routes_declaring_a_bare_datetime(routes) == ["/api/probe"]
+
+
+def test_route_check_accepts_a_utc_datetime_argument_of_a_generic_model_alias() -> None:
+    routes = _probe_routes(Response[UtcDatetime])
+
+    assert _routes_declaring_a_bare_datetime(routes) == []
+
+
+def test_route_check_reports_a_bare_datetime_outside_any_model() -> None:
+    assert _routes_declaring_a_bare_datetime(_probe_routes(Id[datetime])) == ["/api/probe"]
+
+
+def test_route_check_accepts_a_utc_datetime_outside_any_model() -> None:
+    assert _routes_declaring_a_bare_datetime(_probe_routes(list[UtcDatetime])) == []
+
+
+def test_response_walk_reports_a_datetime_argument_of_a_generic_alias_in_a_field() -> None:
+    assert _bare_timestamps(_response_models(_probe_routes(Holder))) == ["Holder.env"]
+
+
+def test_response_walk_reports_a_model_argument_passed_through_two_aliases() -> None:
+    # Opt's body L[Y | None] names no model: BareStamp is reached through the argument alone.
+    routes = _probe_routes(Opt[BareStamp])
+
+    assert _bare_timestamps(_response_models(routes)) == ["BareStamp.at"]
