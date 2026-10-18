@@ -30,7 +30,7 @@ runtime-профиль требуют отдельной реализации; �
 | Р-3 | Два движка за одним контрактом `ReviewOutput` (§5): **DiffEngine** (без диска, ≤ 40 с) и **SandboxEngine** (контейнер, ≤ 10 мин). v1 = DiffEngine | Движок будет меняться; всё ниже контракта об этом не знает |
 | Р-4 | Сандбокс: `--network=none`, без токенов внутри, клон монтирует контроллер снаружи | Промпт-инъекция в диффе — штатная ситуация |
 | Р-5 | GitHub: **один** review batch на run. Идентичность включает run/head/diff/final result и digest точного payload; после неоднозначной отправки — recovery без слепого POST. В тело допускаются только подтверждённые находки с существующим показанным якорем (§8.4) | Повтор доставки не создаёт новое ревью и не присваивает результат другого run; `findings_hash` недостаточен |
-| Р-6 | Неизменяемые `rule_version_id`, `prompt_version_id` и policy snapshot на run: оба base-документа, ignore, defaults, профили моделей/парсеров и checksums. Retry использует тот же снимок. Ревизия индекса RAG в снимок не входит: она только выбирает кандидатов, текст читается на ревизиях PR, показанное фиксирует manifest; новый блок контекста закрепляется новой версией промпта ([ADR 0001 §8.1](adr/0001-graph-rag-v1.md#81-правило-ревизий)) | Воспроизводимость правил, проверки и атрибуции |
+| Р-6 | Неизменяемые `rule_version_id`, `prompt_version_id` и policy snapshot на run: оба base-документа, ignore, defaults, профили моделей/парсеров и checksums; целевые настройки публикации severity_threshold/max_comments закреплены отдельно от policy_digest (RFS §7). Retry использует тот же снимок. Ревизия индекса RAG в снимок не входит: она только выбирает кандидатов, текст читается на ревизиях PR, показанное фиксирует manifest; новый блок контекста закрепляется новой версией промпта ([ADR 0001 §8.1](adr/0001-graph-rag-v1.md#81-правило-ревизий)) | Воспроизводимость правил, проверки и атрибуции |
 | Р-7 | Арендатор = **Workspace** (роль 6), к которому привязана `ProviderInstallation`; права на репозитории — из провайдера, не из своей таблицы ролей | Своя модель ролей разъедется с GitHub |
 | Р-8 | `usage_events` (токены, деньги, модель) — с первого вызова LLM, только вставка | Восстановить задним числом нельзя; основа для `CreditLedger` |
 | Р-9 | Бот односторонний: публикует, на комментарии не отвечает; **обязательно** игнорирует собственные события | Скорость запуска; защита от цикла «бот → CI → бот» |
@@ -351,7 +351,7 @@ sequenceDiagram
   W->>GH: policy documents по закреплённому base_sha
   W->>GH: GET /pulls/{n} + files (patch на файл)
   W->>PG: policy snapshot + run diff snapshot + DiffMap
-  Note over W: ignore до подсчёта#59; все ignored → skipped#59; больше 3000 allowed строк → backend summary, без LLM (§9)
+  Note over W: ignore до подсчёта#59; все доказанно исключены без технических пропусков → skipped#59; больше 3000 allowed строк → backend summary, без LLM (§9)
   W->>GH: base-tree для конвенций, head/diff_old trees для кода
   opt conventions cache miss и есть base-исходники
     W->>PG: manifest разрешённого base-input
@@ -1062,8 +1062,9 @@ GitLab хранит receipt каждой discussion отдельно и не п�
 Worker зависит от `ContextProvider`, возвращающего контекст по закреплённым
 policy/diff snapshots. В целевом детерминированном профиле используются L0–L4,
 `IgnorePolicy`, `DiffMap`, `BudgetAllocator` и manifest. Сначала валидируются
-пути и изолируется `unsupported_path` (для rename/copy — всё изменение и aliases),
-затем built-in exclusions и `review-ignore` применяются к допустимым путям до
+пути и изолируются `unsupported_path`/`identity_unresolved` (для rename/copy —
+всё изменение и aliases), затем маски/generated → доказанное binary → остальные
+технические пропуски по каноническому порядку CVS §2.2/§9.2, до
 сборки, подсчёта порога и любых conventions-вызовов. Невозможность изоляции —
 `snapshot_integrity_error`, утечка источника в prompt — `policy_context_violation`.
 Имя и содержимое изолированного источника не передаются ни одному LLM-вызову.
@@ -1088,7 +1089,7 @@ verifier, инструменты или адресата публикации. D
 отсутствием секции или несовпадением structured priority rule. Backend передаёт
 отдельные типизированные/экранированные блоки, проверяет provenance до каждого
 вызова и не исполняет команды/ссылки документов; keyword-фильтр не заменяет эту
-границу. Авторы base rules могут явно ослабить дефолты, включая SEC1/COR1;
+границу. Авторы base rules и корневого AGENTS могут явно ослабить дефолты, включая SEC1/COR1;
 наблюдаемые конвенции уровня 4 не отменяют SEC1/COR1 (RFS §2).
 Семантическую применимость правил независимо оценивают review и verifier.
 
@@ -1121,23 +1122,23 @@ Policy documents хранятся отдельно от производных �
 
 **Порог — >3 000 добавленных и удалённых строк после ignore**; ровно 3 000 допускает
 обычную сборку. 4 000 исключённых + 50 разрешённых строк дают анализ 50 строк.
-Все изменения доказанно ignored (маски/built-in generated), без технических
+Все изменения доказанно исключены (маски/built-in generated/binary), без технических
 пропусков → `running → skipped/all_changes_ignored`; достоверно пустой diff →
 `no_changes`. В обоих случаях LLM calls=0, verdict=null, check-run skipped.
 
-Технические пропуски — `unsupported_path`, `binary`, `too_large`; они не ignored
-и не входят в excluded_files. При полном достоверном inventory:
-
-| Изменения PR после классификации | Исход |
-| --- | --- |
-| Один/все файлы unsupported_path, binary или too_large; либо их смесь, остальные ignored | Backend FinalReviewResult: coverage=none, verdict=null, пустые findings, 0 LLM; publishing → succeeded, check-run neutral |
-| Технический пропуск + анализируемые изменения (в том числе с ignored) | Остальные изменения проходят ревью; coverage=partial, verdict по подтверждённым findings после severity threshold |
-| Только доказанные ignored, технических пропусков нет | skipped/all_changes_ignored, 0 LLM |
-
-Для none сохраняются фактические причины и отдельные счётчики пропусков; заголовок
-«AI-ревью: нет доступных для анализа изменений» отличается от failed (§8.3, PS §7).
-Обычный разрешённый файл без patch не даёт права выбрать none. Неполный inventory
-сохраняет summary-only; неизвестные счётчики — null, не 0 (CVS §2.2–2.3).
+Каноническая таблица исходов —
+[CVS §2.2](CONTEXT_AND_VERIFICATION_SPEC.md#22-порядок-операций), классификация — CVS §9.2.
+Binary — доказанное встроенное исключение: binary-only → skipped, binary + код
+может дать complete/clean. Технические пропуски T из CVS §2.2 не являются ignored
+и не входят в excluded_files. При полном inventory и **хотя бы одном T**, если
+остальные изменения только E/T, backend формирует none, verdict=null, 0 LLM,
+publishing → succeeded/neutral. С анализируемым текстом T даёт partial либо
+summary-only по оставшемуся scope; T не увеличивают пороговый счётчик 3 000 строк.
+Исходные counters остаются в диагностике (неизвестные null). Маски/generated
+побеждают binary/too_large, но не недостоверную идентичность. Submodule и
+metadata-only/mode-only без поддерживаемого анализа — unsupported_change, T.
+Заголовок none — «AI-ревью: нет доступных для анализа изменений», не failed.
+Обычный missing patch не позволяет выбрать none; различие с source_too_large — CVS §9.2.
 
 Неизвестные/неполные счётчики VCS дают `summary_only/diff_inventory_incomplete`.
 Summary-only строит backend по разрешённой статистике **без LLM**, L1–L4 и inline:
@@ -1226,8 +1227,8 @@ AST v1: tree-sitter для Python (`.py/.pyi`), TypeScript/TSX (`.ts/.tsx`),
 JavaScript/JSX (`.js/.jsx/.mjs/.cjs`) и Go (`.go`). Для TypeScript/TSX применяются
 отдельные grammars; JavaScript grammar включает JSX. Остальные языки сохраняют
 L1–L3. Версии runtime/grammar/query/resolver
-закрепляются в `ast_profile_version` и lockfile при реализации. Индексируются
-разрешённые изменённые файлы и одна степень непосредственно используемых импортов.
+закрепляются в `ast_profile_version` и lockfile при реализации. В пределах run разбираются AST
+разрешённых изменённых файлов и одной степени непосредственно используемых импортов.
 RIGHT разрешается по head-tree, LEFT — по diff_old-tree; политика всегда из base.
 Вставка между символами — module-level change, не произвольно соседняя функция.
 
@@ -1418,10 +1419,10 @@ CONTEXT_AND_VERIFICATION_SPEC §5–8, §10.
 | **Добавить:** `UsageEvent` | `run_id` (NOT NULL, FK `runs`: подставного run нет, #145), `model`, `tokens_in/out`, `cache_read_tokens`, `cost_usd` — только вставка (Р-8) |
 | **Добавить:** `RunAction` | `run_id`, `index`, `tool` (каталог — PIPELINE_SPEC §2), `request jsonb`, `response jsonb?` (≤ 64 КБ) или `response_ref` (> 64 КБ — id строки отдельной таблицы PG, PIPELINE_SPEC §2), `started_at`, `duration_ms` — Zod `RunAction` фронта |
 | Снимок диффа (Р-15) | ключ `(run_id, filename)`; исходный доступный `patch`, отдельно `review_patch`, patch_state и rename/copy provenance; `run_diff_maps` хранит immutable revisions/provider refs/hunks/digest |
-| **#107:** `run_policy_snapshots` | один immutable snapshot на run: документы/absence, checksums, ignore и версии профилей; retry его не заменяет |
+| **#107:** `run_policy_snapshots` | один immutable snapshot на run: документы/absence, checksums, ignore и версии профилей; целевые severity_threshold/max_comments закрепляются при создании run и не входят в policy_digest; retry их не заменяет |
 | **#107:** `context_manifests`, `context_evidence_blobs` | manifest по call_id и workspace-scoped dedup точных excerpts; источник refs accepted call |
 | **#107:** `review_candidates`, `verification_results` | исходный v2 finding, candidate_id/digest, решения фильтров; решение verifier по каждому переданному ID и resolved refs |
-| **#107:** `final_review_results` | run_id UNIQUE, версия, supported findings, counts, coverage, verdict, backend summary и digest; immutable после publishing |
+| **#107:** `final_review_results` | run_id UNIQUE, версия, supported findings после порога, counts, coverage, verdict, backend summary, severity_threshold/max_comments, below_severity_threshold_count и result_digest с этими настройками; immutable после publishing |
 | **#107:** `publication_plans/items` | точные payloads, keys/ordinals, отдельные body-only variants, receipts и состояние доставки; явный finding → remote comment mapping |
 | **#141:** `code_index_states` | одна строка на репозиторий: `repository_id` (PK, FK `repositories` `ON DELETE CASCADE`); `generation` и номера публикаций `reserved_publication`, `published_publication`, `floor_publication` (BIGINT, по умолчанию 0); `status` (PG enum `code_index_status`: `empty\|building\|ready\|failed`, по умолчанию `empty`), `purge_reason` (`ttl\|removed\|disabled`, только при `empty`), `error_code` (задан ровно при `failed`), `last_error_code`; `indexed_commit_sha`, `target_commit_sha`, `published_at`, `last_used_at`; lease — `lease_token` и `lease_expires_at` (оба заданы или оба NULL); счётчики `file_count`, `symbol_count`, `edge_count` (считает публикация); версии `extractor_version`, `resolver_version`, `parser_profile_version`, `limits_profile_version`; `downloaded_bytes`, `build_duration_ms`, `github_request_count`; `created_at`, `updated_at`. **#142** (миграция `20261017_0034`): профиль публикации дополняют `indexed_default_branch` и `exclusions_digest` (`IgnorePolicy.digest` файла `.review/rules.md`); CHECK `profile_complete` — заданы все шесть колонок профиля или ни одна, миграция обнуляет версии существующих строк, и их следующая сборка — full. Квоты хранения ADR §7 считают оценки `stored_bytes` (видимые строки публикации) и `pending_bytes` (строки попытки под lease; CHECK `pending_leased` — без lease 0), BIGINT ≥ 0 (CHECK `bytes`), по умолчанию 0: строка графа — 160 байт плюс UTF-8 байты её текстовых колонок с весом 1 + число индексов с колонкой, включая PK; это оценка, а не размер на диске. CHECK `failed_code`: `failed` — только с `archive_unsafe` или `limit_exceeded:*`. Частичный индекс `ix_code_index_states_live_lease` (`repository_id`, `lease_token IS NOT NULL`) — для подсчёта живых lease при захвате |
 | **#141:** `code_index_files`, `code_index_symbols`, `code_index_edges`, `code_index_imports` | строки графа без суррогатных id: натуральный PK — `(repository_id, generation, valid_from, path)` плюс ключ строки, nullable `valid_to` закрывает строку более поздней публикацией. Файл — `blob_sha`. Символ — ключ `qualified_name`, `kind` (`code_index_symbol_kind` из `SymbolKind`), `disambiguator` (порядковый номер среди дублей; у единственного объявления — 0: в ADR §3 он «пуст», но колонка NOT NULL и входит в PK), `start_line ≥ 1`, `end_line ≥ start_line`; `defines` (ADR §3) — сама строка символа, не ребро. Ребро — ключ `kind` (`imports\|uses_imported`), `target_path`, `target_name` (`''` ровно у `imports`), индекс `ix_code_index_edges_target`. Запись импорта — ключ `specifier`, `resolution` (`code_index_import_resolution` из `ImportResolution`, в том числе неразрешённые исходы), nullable `target_path`, индекс `ix_code_index_imports_target`. Текста кода, сигнатур и embeddings нет |
@@ -1494,8 +1495,8 @@ resultVersion и verificationMode из сохранённого final result. Э
 `complete|partial|none` с причинами и известными счётчиками; неизвестное число —
 null, не 0. У legacy coverage=null. `blocking` = supported critical/high,
 `attention` = supported medium/low; только info/пусто дают `clean` лишь при complete,
-иначе verdict=null. Coverage=none возникает при полном inventory только из
-технических пропусков и доказанных исключений (§9, CVS §2.2). До succeeded и при failed/skipped/cancelled verdict также null.
+иначе verdict=null. Coverage=none возникает при полном inventory, хотя бы одном
+техническом пропуске и остальных записях только T/E (§9, CVS §2.2). До succeeded и при failed/skipped/cancelled verdict также null.
 API, VCS и check-run показывают один backend summary из supported findings и scope;
 raw модельная похвала/неподтверждённые дефекты в публичную сводку не переносятся.
 
