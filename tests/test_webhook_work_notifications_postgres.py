@@ -92,14 +92,15 @@ def migrated_database(database_url: str) -> Iterator[Database]:
 
 @contextmanager
 def recorded_backends() -> Iterator[set[int]]:
-    """Record the backend of every psycopg connection this process opens.
+    """Record the backend of every async and sync psycopg connection this process opens.
 
-    LISTEN is database-wide, so a hint from a pid outside the set came from another process
+    LISTEN is database-wide, so a hint from a pid outside the set came from another OS process
     sharing the database. SQLAlchemy looks the driver's ``connect`` up per connection, so
     engine sessions are recorded too; wrapping the current attribute composes with test patches.
     """
     backends: set[int] = set()
     connect = psycopg.AsyncConnection.connect
+    sync_connect = psycopg.Connection.connect
 
     async def recording_connect(
         conninfo: str = "", **kwargs: Any
@@ -108,8 +109,18 @@ def recorded_backends() -> Iterator[set[int]]:
         backends.add(connection.info.backend_pid)
         return connection
 
+    def recording_sync_connect(
+        conninfo: str = "", **kwargs: Any
+    ) -> psycopg.Connection[tuple[Any, ...]]:
+        connection = sync_connect(conninfo, **kwargs)
+        backends.add(connection.info.backend_pid)
+        return connection
+
     with pytest.MonkeyPatch.context() as patch:
         patch.setattr(psycopg.AsyncConnection, "connect", recording_connect)
+        patch.setattr(psycopg.Connection, "connect", recording_sync_connect)
+        # ``psycopg.connect`` is bound to the class method at import; route it here as well.
+        patch.setattr(psycopg, "connect", recording_sync_connect)
         yield backends
 
 
