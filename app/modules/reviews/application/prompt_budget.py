@@ -60,6 +60,17 @@ class EstimatedTokenCounter:
 class PolicyBudgetExceededError(ValueError):
     """Rendered policy documents exceed the maximum token budget (RULES_FORMAT_SPEC §3.3)."""
 
+    def __init__(
+        self,
+        message: str,
+        *,
+        limit: int | None = None,
+        actual: int | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.limit = limit
+        self.actual = actual
+
 
 class PreSendGuardError(ValueError):
     """Rendered prompt exceeds the maximum input token budget or context window."""
@@ -86,7 +97,9 @@ def verify_policy_budget(
     if count > max_policy_tokens:
         raise PolicyBudgetExceededError(
             f"policy_prompt_budget_exceeded: rendered policy is {count} tokens, "
-            f"limit is {max_policy_tokens}"
+            f"limit is {max_policy_tokens}",
+            limit=max_policy_tokens,
+            actual=count,
         )
 
 

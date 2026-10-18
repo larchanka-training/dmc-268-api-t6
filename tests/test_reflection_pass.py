@@ -22,6 +22,7 @@ from app.modules.reviews.application.prompt_builder import (
     PullRequestMeta,
     RepoConventions,
     ReviewContext,
+    ReviewRule,
     file_block_id,
 )
 from app.modules.reviews.application.reflection_pass import (
@@ -39,6 +40,14 @@ from app.modules.reviews.application.review_output import (
     ReviewFindingV2,
 )
 from app.modules.reviews.application.run_failures import RunFailure
+
+
+class CustomModel:
+    def __init__(self, exc: Exception) -> None:
+        self._exc = exc
+
+    async def verify(self, *, system_prompt: str, user_prompt: str) -> Mapping[str, Any] | str:
+        raise self._exc
 
 
 def make_snapshot() -> PolicySnapshot:
@@ -158,16 +167,12 @@ def test_verification_decision_validates_fields() -> None:
 def test_verifier_prompt_builder_custom_prompts() -> None:
     builder_custom = VerifierPromptBuilder(system_prompt="Custom prompt")
     assert builder_custom._system_prompt == "Custom prompt"
+    assert builder_custom._raw_prompt == "Custom prompt"
 
-    builder_no_frontmatter = VerifierPromptBuilder.__new__(VerifierPromptBuilder)
-    raw = "No frontmatter prompt body"
-    builder_no_frontmatter._raw_prompt = raw
-    if raw.startswith("---"):
-        parts = raw.split("---", 2)
-        builder_no_frontmatter._system_prompt = parts[2].strip() if len(parts) >= 3 else raw
-    else:
-        builder_no_frontmatter._system_prompt = raw
-    assert builder_no_frontmatter._system_prompt == raw
+    builder_default = VerifierPromptBuilder()
+    assert builder_default._raw_prompt.startswith("---")
+    assert not builder_default._system_prompt.startswith("---")
+    assert "Reflection Pass" in builder_default._system_prompt
 
 
 def test_verifier_prompt_builder_renders_candidates_and_policy() -> None:
@@ -580,13 +585,6 @@ async def test_reflection_pass_translates_llm_and_system_errors() -> None:
         policy_snapshot=snapshot,
     )
 
-    class CustomModel:
-        def __init__(self, exc: Exception) -> None:
-            self._exc = exc
-
-        async def verify(self, *, system_prompt: str, user_prompt: str) -> Mapping[str, Any] | str:
-            raise self._exc
-
     # TimeoutError -> VerificationUnavailableError
     v1 = ReflectionPass(CustomModel(TimeoutError("Timeout")))
     with pytest.raises(VerificationUnavailableError, match="Verifier model timed out"):
@@ -965,3 +963,219 @@ async def test_reflection_pass_validates_requirement_refs_and_evidence_refs() ->
         match="requires at least one matching requirement_ref for this rule",
     ):
         await v7.verify(candidates=(cand,), context=context)
+
+
+def test_verifier_prompt_envelope_contains_block_id_and_defaults_and_candidate_attrs() -> None:
+    cand = CandidateFindingItem(
+        candidate_id="cand-123",
+        finding=ReviewFindingV2(
+            path="app/query.py",
+            line=10,
+            start_line=5,
+            severity="critical",
+            category="security",
+            title="SQL Injection",
+            body="Raw formatting used",
+            suggestion="Use params",
+            confidence=0.95,
+            rule_name=".review/rules.md",
+            evidence_refs=[
+                EvidenceRef(block_id="file-app-query-py-12345678", start_line=5, end_line=10)
+            ],
+        ),
+    )
+    snapshot = make_snapshot()
+    rule = ReviewRule("sec-rule", ("*.py",), (), ("Never format SQL",))
+    context = ReviewContext(
+        system="SYSTEM",
+        rules=(rule,),
+        agents_md=None,
+        conventions=RepoConventions((), ()),
+        pr_meta=PullRequestMeta("T", None, "u", "b", "main", (), 1, 1, 0, False, False),
+        changed_files=(ChangedFile("app/query.py", "modified", (DiffLine(10, "added", "x = 1"),)),),
+        omitted_files=(),
+        policy_snapshot=snapshot,
+    )
+    builder = VerifierPromptBuilder()
+    prompt, manifest = builder.build_verifier_prompt(candidates=(cand,), context=context)
+
+    # 1. <file> carries explicit block_id
+    query_block_id = file_block_id("app/query.py")
+    assert f'<file block_id="{query_block_id}" path="app/query.py"' in prompt.user
+
+    # 2. <service_defaults> block is rendered
+    assert '<service_defaults block_id="service-defaults">' in prompt.user
+    assert "Never format SQL" in prompt.user
+
+    # 3. Candidate attributes rendered correctly in XML
+    assert (
+        '<candidate candidate_id="cand-123" path="app/query.py" start_line="5" line="10" '
+        'category="security" severity="critical">'
+    ) in prompt.user
+    assert "<title>SQL Injection</title>" in prompt.user
+    assert "<body>Raw formatting used</body>" in prompt.user
+    assert "<suggestion>Use params</suggestion>" in prompt.user
+    assert '<rule_attribution name=".review/rules.md" />' in prompt.user
+
+
+@pytest.mark.anyio
+async def test_reflection_pass_guard_rejects_prompt_exceeding_token_limit() -> None:
+    cand = make_candidate("c-1")
+    # execution_profile with very low max_input_tokens
+    import dataclasses
+
+    profile = dataclasses.replace(make_complete_execution_profile(), max_input_tokens=10)
+    snapshot = dataclasses.replace(make_snapshot(), execution_profile=profile)
+    context = ReviewContext(
+        system="SYSTEM",
+        rules=(),
+        agents_md=None,
+        conventions=RepoConventions((), ()),
+        pr_meta=PullRequestMeta("T", None, "u", "b", "main", (), 1, 1, 0, False, False),
+        changed_files=(ChangedFile("app/query.py", "modified", (DiffLine(10, "added", "x = 1"),)),),
+        omitted_files=(),
+        policy_snapshot=snapshot,
+    )
+    reflection = ReflectionPass(FakeVerifierModel({"decisions": []}))
+    with pytest.raises(RunFailure) as exc_info:
+        await reflection.verify(candidates=(cand,), context=context)
+    assert exc_info.value.error_code == "verification_context_overflow"
+    assert "limit is 10" in exc_info.value.message
+
+
+@pytest.mark.anyio
+async def test_reflection_pass_maps_foreign_exception_error_codes() -> None:
+    cand = make_candidate("c-1")
+    snapshot = make_snapshot()
+    context = ReviewContext(
+        system="SYSTEM",
+        rules=(),
+        agents_md=None,
+        conventions=RepoConventions((), ()),
+        pr_meta=PullRequestMeta("T", None, "u", "b", "main", (), 1, 1, 0, False, False),
+        changed_files=(ChangedFile("app/query.py", "modified", (DiffLine(10, "added", "x = 1"),)),),
+        omitted_files=(),
+        policy_snapshot=snapshot,
+    )
+
+    class ForeignError(Exception):
+        def __init__(self, code: str) -> None:
+            super().__init__(code)
+            self.error_code = code
+
+    # Foreign exception with verification_invalid_output maps to VerificationInvalidOutputError
+    v1 = ReflectionPass(CustomModel(ForeignError("verification_invalid_output")))
+    with pytest.raises(VerificationInvalidOutputError):
+        await v1.verify(candidates=(cand,), context=context)
+
+    # Foreign exception with verification_unavailable maps to VerificationUnavailableError
+    v2 = ReflectionPass(CustomModel(ForeignError("verification_unavailable")))
+    with pytest.raises(VerificationUnavailableError):
+        await v2.verify(candidates=(cand,), context=context)
+
+
+@pytest.mark.anyio
+async def test_reflection_pass_requirement_ref_validation_details() -> None:
+    query_block_id = file_block_id("app/query.py")
+    rule = ReviewRule("service-rule", ("*.py",), (), ("Check sql",))
+    snapshot = make_snapshot()
+    context = ReviewContext(
+        system="SYSTEM",
+        rules=(rule,),
+        agents_md=None,
+        conventions=RepoConventions((), ()),
+        pr_meta=PullRequestMeta("T", None, "u", "b", "main", (), 1, 1, 0, False, False),
+        changed_files=(ChangedFile("app/query.py", "modified", (DiffLine(10, "added", "x = 1"),)),),
+        omitted_files=(),
+        policy_snapshot=snapshot,
+    )
+
+    # 1. service_defaults requirement_ref without check_id is rejected
+    cand1 = CandidateFindingItem(
+        candidate_id="c-1",
+        finding=ReviewFindingV2(
+            path="app/query.py",
+            line=10,
+            start_line=None,
+            severity="critical",
+            category="security",
+            title="T",
+            body="B",
+            suggestion=None,
+            confidence=0.9,
+            rule_name="service-defaults:service-rule",
+            evidence_refs=[EvidenceRef(block_id=query_block_id, start_line=10, end_line=10)],
+        ),
+    )
+    v1 = ReflectionPass(
+        FakeVerifierModel(
+            {
+                "decisions": [
+                    {
+                        "candidate_id": "c-1",
+                        "status": "supported",
+                        "reason": "OK",
+                        "evidence_refs": [
+                            {"block_id": query_block_id, "start_line": 10, "end_line": 10}
+                        ],
+                        "requirement_refs": [
+                            {
+                                "block_id": "service-defaults",
+                                "start_line": 1,
+                                "end_line": 1,
+                                "check_id": None,
+                            }
+                        ],
+                    }
+                ]
+            }
+        )
+    )
+    with pytest.raises(
+        VerificationInvalidOutputError, match="check_id is required for service_defaults"
+    ):
+        await v1.verify(candidates=(cand1,), context=context)
+
+    # 2. requirement_ref block does not match finding rule_name
+    cand2 = CandidateFindingItem(
+        candidate_id="c-2",
+        finding=ReviewFindingV2(
+            path="app/query.py",
+            line=10,
+            start_line=None,
+            severity="critical",
+            category="security",
+            title="T",
+            body="B",
+            suggestion=None,
+            confidence=0.9,
+            rule_name=".review/rules.md",
+            evidence_refs=[EvidenceRef(block_id=query_block_id, start_line=10, end_line=10)],
+        ),
+    )
+    v2 = ReflectionPass(
+        FakeVerifierModel(
+            {
+                "decisions": [
+                    {
+                        "candidate_id": "c-2",
+                        "status": "supported",
+                        "reason": "OK",
+                        "evidence_refs": [
+                            {"block_id": query_block_id, "start_line": 10, "end_line": 10}
+                        ],
+                        "requirement_refs": [
+                            {
+                                "block_id": "service-defaults",
+                                "start_line": 1,
+                                "end_line": 1,
+                                "check_id": "service-rule",
+                            }
+                        ],
+                    }
+                ]
+            }
+        )
+    )
+    with pytest.raises(VerificationInvalidOutputError, match="does not match finding rule_name"):
+        await v2.verify(candidates=(cand2,), context=context)

@@ -169,9 +169,16 @@ class ExecuteReviewRun:
                 raise PolicyError(
                     PolicyErrorCode.PROMPT_BUDGET_EXCEEDED,
                     str(exc),
+                    limit=exc.limit,
+                    actual=exc.actual,
                 ) from exc
             except PreSendGuardError as exc:
                 raise RunFailure("llm_context_overflow", str(exc)) from exc
+        elif self._reflection_pass is not None:
+            _LOGGER.warning(
+                "execute_review_legacy_run_without_snapshot: reflection pass provided but "
+                "bypassed because policy snapshot is absent"
+            )
 
         model_output = await self._model.draft_review(context=context)
         if self._reflection_pass is not None and context.policy_snapshot is not None:
@@ -190,30 +197,18 @@ class ExecuteReviewRun:
             try:
                 data = json.loads(model_output)
             except json.JSONDecodeError as exc:
-                if context.policy_snapshot is not None:
-                    raise InvalidReviewOutput(f"Malformed review model JSON output: {exc}") from exc
-                return model_output
+                raise InvalidReviewOutput(f"Malformed review model JSON output: {exc}") from exc
         elif isinstance(model_output, Mapping):
             data = dict(model_output)
         else:
-            if context.policy_snapshot is not None:
-                raise InvalidReviewOutput(
-                    f"Unexpected review model output type: {type(model_output)}"
-                )
-            return model_output
+            raise InvalidReviewOutput(f"Unexpected review model output type: {type(model_output)}")
 
         if not isinstance(data, dict):
-            if context.policy_snapshot is not None:
-                raise InvalidReviewOutput(
-                    f"Expected dict for review model output, got {type(data)}"
-                )
-            return model_output
+            raise InvalidReviewOutput(f"Expected dict for review model output, got {type(data)}")
 
         raw_findings = data.get("findings")
         if raw_findings is None or not isinstance(raw_findings, list):
-            if context.policy_snapshot is not None and "findings" not in data:
-                raise InvalidReviewOutput("Review model output missing 'findings' list")
-            return model_output
+            raise InvalidReviewOutput("Review model output missing 'findings' list")
 
         if not raw_findings:
             # Zero candidates: Reflection verifier is skipped (0 calls)
@@ -232,14 +227,14 @@ class ExecuteReviewRun:
                 if isinstance(item, ReviewFindingV2):
                     finding = item
                 elif isinstance(item, dict):
-                    if context.policy_snapshot is not None and "evidence_refs" not in item:
+                    if "evidence_refs" not in item:
                         raise InvalidReviewOutput(
                             f"Candidate finding at index {idx} missing required evidence_refs"
                         )
                     finding = ReviewFindingV2.model_validate(item)
                 elif hasattr(item, "model_dump"):
                     d = item.model_dump()
-                    if context.policy_snapshot is not None and "evidence_refs" not in d:
+                    if "evidence_refs" not in d:
                         raise InvalidReviewOutput(
                             f"Candidate finding at index {idx} missing required evidence_refs"
                         )
@@ -248,6 +243,8 @@ class ExecuteReviewRun:
                     raise InvalidReviewOutput(
                         f"Unsupported finding type in draft review: {type(item)}"
                     )
+            except InvalidReviewOutput:
+                raise
             except ValidationError as err:
                 sanitized_errors = "; ".join(
                     f"{'.'.join(str(loc) for loc in e['loc'])}: {e['msg']}" for e in err.errors()

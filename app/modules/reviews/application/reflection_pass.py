@@ -289,25 +289,21 @@ class ReflectionPass:
             raise
         except Exception as exc:
             error_code = getattr(exc, "error_code", None)
-            if error_code in {
-                "verification_unavailable",
-                "verification_invalid_output",
-                "verification_context_overflow",
-                "verification_budget_exceeded",
-                "verification_deadline_exceeded",
-            }:
-                raise
-            if isinstance(exc, TimeoutError) or error_code in {"llm_timeout", "llm_unavailable"}:
-                raise VerificationUnavailableError("Verifier model unavailable") from exc
-            if error_code == "llm_invalid_output":
+            if error_code in {"llm_invalid_output", "verification_invalid_output"}:
                 raise VerificationInvalidOutputError("Verifier model output invalid") from exc
-            if error_code == "budget_exceeded":
+            if error_code in {"llm_timeout", "llm_unavailable", "verification_unavailable"}:
+                raise VerificationUnavailableError("Verifier model unavailable") from exc
+            if error_code in {"budget_exceeded", "verification_budget_exceeded"}:
                 raise RunFailure(
                     "verification_budget_exceeded", "Verifier budget exceeded"
                 ) from exc
-            if error_code == "deadline_exceeded":
+            if error_code in {"deadline_exceeded", "verification_deadline_exceeded"}:
                 raise RunFailure(
                     "verification_deadline_exceeded", "Verifier deadline exceeded"
+                ) from exc
+            if error_code == "verification_context_overflow":
+                raise RunFailure(
+                    "verification_context_overflow", "Verifier prompt context overflow"
                 ) from exc
             raise VerificationUnavailableError("Verifier model call failed") from exc
 
@@ -398,13 +394,12 @@ class ReflectionPass:
                         f"{req_ref.start_line}-{req_ref.end_line} "
                         f"not shown in '{req_block_id_clean}'"
                     )
-                if req_ref.check_id is not None:
-                    req_check_id_clean = req_ref.check_id[:64]
-                    if block.source_role != "service_defaults":
+                if block.source_role == "service_defaults":
+                    if req_ref.check_id is None:
                         raise VerificationInvalidOutputError(
-                            f"Decision {cand_id_clean} check_id is only allowed "
-                            f"for service_defaults, got '{block.source_role}'"
+                            f"Decision {cand_id_clean} check_id is required for service_defaults"
                         )
+                    req_check_id_clean = req_ref.check_id[:64]
                     rule_id = (
                         cand.finding.rule_name.removeprefix("service-defaults:")
                         if cand.finding.rule_name
@@ -420,6 +415,34 @@ class ReflectionPass:
                         raise VerificationInvalidOutputError(
                             f"Decision {cand_id_clean} check_id '{req_check_id_clean}' "
                             f"does not match rule_id '{rule_id}'"
+                        )
+                else:
+                    if req_ref.check_id is not None:
+                        raise VerificationInvalidOutputError(
+                            f"Decision {cand_id_clean} check_id is only allowed "
+                            f"for service_defaults, got '{block.source_role}'"
+                        )
+
+                # Ensure requirement ref block matches candidate finding rule_name
+                if cand.finding.rule_name is not None:
+                    rname = cand.finding.rule_name
+                    if rname == ".review/rules.md" and block.source_kind != "repository_rules":
+                        raise VerificationInvalidOutputError(
+                            f"Decision {cand_id_clean} requirement_ref block "
+                            f"'{req_block_id_clean}' does not match finding rule_name '{rname}'"
+                        )
+                    if rname == "AGENTS.md" and block.source_kind != "project_conventions_document":
+                        raise VerificationInvalidOutputError(
+                            f"Decision {cand_id_clean} requirement_ref block "
+                            f"'{req_block_id_clean}' does not match finding rule_name '{rname}'"
+                        )
+                    if (
+                        rname.startswith("service-defaults:")
+                        and block.source_role != "service_defaults"
+                    ):
+                        raise VerificationInvalidOutputError(
+                            f"Decision {cand_id_clean} requirement_ref block "
+                            f"'{req_block_id_clean}' does not match finding rule_name '{rname}'"
                         )
 
             # 3. For supported/contradicted with rule_name, require a matching requirement_ref

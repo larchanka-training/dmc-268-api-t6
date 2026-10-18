@@ -681,6 +681,9 @@ def test_execute_review_fail_closed_when_budget_exceeded() -> None:
     with pytest.raises(PolicyError) as exc_info:
         asyncio.run(pipeline.execute(RUN_ID))
     assert exc_info.value.code == PolicyErrorCode.PROMPT_BUDGET_EXCEEDED
+    assert exc_info.value.limit == 1
+    assert exc_info.value.actual is not None and exc_info.value.actual > 1
+    assert "допустимо 1" in str(exc_info.value)
     assert model.draft_calls == 0
     assert publisher.publish_calls == 0
 
@@ -1422,4 +1425,346 @@ def test_execute_review_summary_cleansing_effort_categories_and_plural(
     assert (
         summary["done_well"]
         == "Code analysis and policy verification were completed across all evaluated changes."
+    )
+
+
+def test_execute_review_missing_evidence_refs_not_double_wrapped() -> None:
+    class Processor:
+        async def prepare(self, run_id: UUID) -> GeneratedConventions:
+            return conventions()
+
+    class Repository:
+        async def get_review_prompt_input(
+            self, run_id: UUID, saved: GeneratedConventions
+        ) -> ReviewPromptInput:
+            return ReviewPromptInput(
+                system="Review carefully.",
+                rules=(),
+                agents_md=None,
+                conventions=RepoConventions((), ()),
+                changed_files=(
+                    ChangedFile("app/main.py", "modified", (DiffLine(10, "added", "x = 1"),)),
+                ),
+                omitted_files=(),
+                policy_snapshot=_make_test_snapshot(),
+            )
+
+    class Model:
+        async def get_pull_request_meta(self, run_id: UUID) -> PullRequestMeta:
+            return PullRequestMeta("Title", None, "u", "b", "m", (), 1, 1, 0, False, False)
+
+        async def draft_review(self, *, context: ReviewContext) -> dict[str, Any]:
+            return {
+                "findings": [
+                    {
+                        "path": "app/main.py",
+                        "line": 10,
+                        "severity": "critical",
+                        "category": "security",
+                        "title": "SQL Injection",
+                        "body": "Raw query used",
+                        "confidence": 0.9,
+                        # missing evidence_refs
+                    }
+                ],
+                "summary": {"problem": "p", "done_well": "d", "effort": "none"},
+            }
+
+    class Publisher:
+        async def execute(self, run_id: UUID, raw_output: Any) -> bool:
+            return True
+
+    pipeline = ExecuteReviewRun(
+        Processor(),
+        Repository(),
+        Model(),
+        Publisher(),
+        reflection_pass=ReflectionPass(FakeVerifierModel({"decisions": []})),
+    )
+
+    with pytest.raises(InvalidReviewOutput) as exc_info:
+        asyncio.run(pipeline.execute(RUN_ID))
+    # Must NOT have nested "Malformed candidate finding at index 0: Candidate finding at index 0..."
+    assert str(exc_info.value) == "Candidate finding at index 0 missing required evidence_refs"
+
+
+def test_execute_review_supports_model_dump_candidate_item() -> None:
+    class DumpableFinding:
+        def model_dump(self) -> dict[str, Any]:
+            return {
+                "path": "app/main.py",
+                "line": 10,
+                "start_line": None,
+                "severity": "critical",
+                "category": "security",
+                "title": "SQL Injection",
+                "body": "Raw query used",
+                "suggestion": None,
+                "confidence": 0.9,
+                "rule_name": None,
+                "evidence_refs": [{"block_id": MAIN_BLOCK_ID, "start_line": 10, "end_line": 10}],
+            }
+
+    class Processor:
+        async def prepare(self, run_id: UUID) -> GeneratedConventions:
+            return conventions()
+
+    class Repository:
+        async def get_review_prompt_input(
+            self, run_id: UUID, saved: GeneratedConventions
+        ) -> ReviewPromptInput:
+            return ReviewPromptInput(
+                system="Review carefully.",
+                rules=(),
+                agents_md=None,
+                conventions=RepoConventions((), ()),
+                changed_files=(
+                    ChangedFile("app/main.py", "modified", (DiffLine(10, "added", "x = 1"),)),
+                ),
+                omitted_files=(),
+                policy_snapshot=_make_test_snapshot(),
+            )
+
+    class Model:
+        async def get_pull_request_meta(self, run_id: UUID) -> PullRequestMeta:
+            return PullRequestMeta("Title", None, "u", "b", "m", (), 1, 1, 0, False, False)
+
+        async def draft_review(self, *, context: ReviewContext) -> dict[str, Any]:
+            return {
+                "findings": [DumpableFinding()],
+                "summary": {"problem": "p", "done_well": "d", "effort": "none"},
+            }
+
+    class DynamicVerifierModel:
+        async def verify(self, *, system_prompt: str, user_prompt: str) -> dict[str, Any]:
+            import re
+
+            m = re.search(r'candidate_id="([^"]+)"', user_prompt)
+            assert m is not None
+            cand_id = m.group(1)
+            return {
+                "decisions": [
+                    {
+                        "candidate_id": cand_id,
+                        "status": "supported",
+                        "reason": "OK",
+                        "evidence_refs": [
+                            {"block_id": MAIN_BLOCK_ID, "start_line": 10, "end_line": 10}
+                        ],
+                        "requirement_refs": [],
+                    }
+                ]
+            }
+
+    class Publisher:
+        def __init__(self) -> None:
+            self.output: Any = None
+
+        async def execute(self, run_id: UUID, raw_output: Any) -> bool:
+            self.output = raw_output
+            return True
+
+    publisher = Publisher()
+    pipeline = ExecuteReviewRun(
+        Processor(),
+        Repository(),
+        Model(),
+        publisher,
+        reflection_pass=ReflectionPass(DynamicVerifierModel()),
+    )
+    assert asyncio.run(pipeline.execute(RUN_ID)) is True
+    assert len(publisher.output["findings"]) == 1
+
+
+def test_execute_review_malformed_json_and_non_dict_draft_output() -> None:
+    class Processor:
+        async def prepare(self, run_id: UUID) -> GeneratedConventions:
+            return conventions()
+
+    class Repository:
+        async def get_review_prompt_input(
+            self, run_id: UUID, saved: GeneratedConventions
+        ) -> ReviewPromptInput:
+            return ReviewPromptInput(
+                system="Review carefully.",
+                rules=(),
+                agents_md=None,
+                conventions=RepoConventions((), ()),
+                changed_files=(
+                    ChangedFile("app/main.py", "modified", (DiffLine(10, "added", "x = 1"),)),
+                ),
+                omitted_files=(),
+                policy_snapshot=_make_test_snapshot(),
+            )
+
+    class Publisher:
+        async def execute(self, run_id: UUID, raw_output: Any) -> bool:
+            return True
+
+    # 1. Malformed JSON string
+    class MalformedJsonModel:
+        async def get_pull_request_meta(self, run_id: UUID) -> PullRequestMeta:
+            return PullRequestMeta("Title", None, "u", "b", "m", (), 1, 1, 0, False, False)
+
+        async def draft_review(self, *, context: ReviewContext) -> str:
+            return "not a valid json {"
+
+    p1 = ExecuteReviewRun(
+        Processor(),
+        Repository(),
+        MalformedJsonModel(),
+        Publisher(),
+        reflection_pass=ReflectionPass(FakeVerifierModel({"decisions": []})),
+    )
+    with pytest.raises(InvalidReviewOutput, match="Malformed review model JSON output"):
+        asyncio.run(p1.execute(RUN_ID))
+
+    # 2. JSON parses to non-dict (e.g. list)
+    class NonDictJsonModel:
+        async def get_pull_request_meta(self, run_id: UUID) -> PullRequestMeta:
+            return PullRequestMeta("Title", None, "u", "b", "m", (), 1, 1, 0, False, False)
+
+        async def draft_review(self, *, context: ReviewContext) -> str:
+            return "[]"
+
+    p2 = ExecuteReviewRun(
+        Processor(),
+        Repository(),
+        NonDictJsonModel(),
+        Publisher(),
+        reflection_pass=ReflectionPass(FakeVerifierModel({"decisions": []})),
+    )
+    with pytest.raises(InvalidReviewOutput, match="Expected dict for review model output"):
+        asyncio.run(p2.execute(RUN_ID))
+
+    # 3. Dict missing findings
+    class MissingFindingsModel:
+        async def get_pull_request_meta(self, run_id: UUID) -> PullRequestMeta:
+            return PullRequestMeta("Title", None, "u", "b", "m", (), 1, 1, 0, False, False)
+
+        async def draft_review(self, *, context: ReviewContext) -> dict[str, Any]:
+            return {"summary": {}}
+
+    p3 = ExecuteReviewRun(
+        Processor(),
+        Repository(),
+        MissingFindingsModel(),
+        Publisher(),
+        reflection_pass=ReflectionPass(FakeVerifierModel({"decisions": []})),
+    )
+    with pytest.raises(InvalidReviewOutput, match="Review model output missing 'findings' list"):
+        asyncio.run(p3.execute(RUN_ID))
+
+
+def test_execute_review_rejects_finding_with_invalid_attribution() -> None:
+    class Processor:
+        async def prepare(self, run_id: UUID) -> GeneratedConventions:
+            return conventions()
+
+    class Repository:
+        async def get_review_prompt_input(
+            self, run_id: UUID, saved: GeneratedConventions
+        ) -> ReviewPromptInput:
+            return ReviewPromptInput(
+                system="Review carefully.",
+                rules=(),
+                agents_md=None,
+                conventions=RepoConventions((), ()),
+                changed_files=(
+                    ChangedFile("app/main.py", "modified", (DiffLine(10, "added", "x = 1"),)),
+                ),
+                omitted_files=(),
+                policy_snapshot=_make_test_snapshot(),
+            )
+
+    class InvalidAttrModel:
+        async def get_pull_request_meta(self, run_id: UUID) -> PullRequestMeta:
+            return PullRequestMeta("Title", None, "u", "b", "m", (), 1, 1, 0, False, False)
+
+        async def draft_review(self, *, context: ReviewContext) -> dict[str, Any]:
+            return {
+                "findings": [
+                    {
+                        "path": "app/main.py",
+                        "line": 10,
+                        "start_line": None,
+                        "severity": "critical",
+                        "category": "security",
+                        "title": "T",
+                        "body": "B",
+                        "suggestion": None,
+                        "confidence": 0.9,
+                        "rule_name": None,
+                        "evidence_refs": [
+                            {"block_id": "non-existent-block", "start_line": 10, "end_line": 10}
+                        ],
+                    }
+                ],
+                "summary": {"problem": "p", "done_well": "d", "effort": "none"},
+            }
+
+    class Publisher:
+        async def execute(self, run_id: UUID, raw_output: Any) -> bool:
+            return True
+
+    pipeline = ExecuteReviewRun(
+        Processor(),
+        Repository(),
+        InvalidAttrModel(),
+        Publisher(),
+        reflection_pass=ReflectionPass(FakeVerifierModel({"decisions": []})),
+    )
+    with pytest.raises(InvalidReviewOutput, match="Invalid attribution in candidate finding"):
+        asyncio.run(pipeline.execute(RUN_ID))
+
+
+def test_execute_review_legacy_run_with_reflection_pass_logs_warning(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    import logging
+
+    class Processor:
+        async def prepare(self, run_id: UUID) -> GeneratedConventions:
+            return conventions()
+
+    class Repository:
+        async def get_review_prompt_input(
+            self, run_id: UUID, saved: GeneratedConventions
+        ) -> ReviewPromptInput:
+            return ReviewPromptInput(
+                system="Review carefully.",
+                rules=(),
+                agents_md=None,
+                conventions=RepoConventions((), ()),
+                changed_files=(
+                    ChangedFile("app/main.py", "modified", (DiffLine(10, "added", "x = 1"),)),
+                ),
+                omitted_files=(),
+                policy_snapshot=None,  # Legacy run
+            )
+
+    class Model:
+        async def get_pull_request_meta(self, run_id: UUID) -> PullRequestMeta:
+            return PullRequestMeta("Title", None, "u", "b", "m", (), 1, 1, 0, False, False)
+
+        async def draft_review(self, *, context: ReviewContext) -> dict[str, Any]:
+            return {"findings": [], "summary": {"problem": "p", "done_well": "d", "effort": "none"}}
+
+    class Publisher:
+        async def execute(self, run_id: UUID, raw_output: Any) -> bool:
+            return True
+
+    pipeline = ExecuteReviewRun(
+        Processor(),
+        Repository(),
+        Model(),
+        Publisher(),
+        reflection_pass=ReflectionPass(FakeVerifierModel({"decisions": []})),
+    )
+
+    with caplog.at_level(logging.WARNING):
+        success = asyncio.run(pipeline.execute(RUN_ID))
+    assert success is True
+    assert any(
+        "execute_review_legacy_run_without_snapshot" in record.message for record in caplog.records
     )

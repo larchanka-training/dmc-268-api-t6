@@ -19,7 +19,7 @@
 
 ## Phase 2: Attribution v2 & Schema Contracts
 - [x] **Task 4: ReviewOutput v2 & Attribution Validation**
-  - Update `ReviewFinding` with `evidence_refs: list[EvidenceRef]`.
+  - Add `ReviewFindingV2` with `evidence_refs: list[EvidenceRef]` (keeping `ReviewFinding` v1 unchanged for backwards compatibility).
   - Validate `rule_name` values against allowed enum (`.review/rules.md`, `AGENTS.md`, `service-defaults:<ID>`, `null`).
   - Implement attribution resolver: check that `evidence_refs` point to shown lines in call manifest.
   - Add unit tests for v2 finding parsing, valid/invalid evidence_refs, and attribution checks.
@@ -75,13 +75,13 @@
   - Cleansing when all candidates rejected (neutral summary, zero hallucinated defects).
   - Sanitized logging (only IDs and statuses).
 - [x] **Task 16: P2 prompt trust statements & post-processor**
-  - Added trust paragraphs in `review.system.v2.md` and `review.verifier.v1.md`.
+  - Added trust statement in `review.verifier.v1.md`.
   - Preserve `ALLOWED_V2_RULE_NAMES` and `service-defaults:*` in `_repair_attribution`.
 - [x] **Task 17: P2 documentation & test suites**
   - Updated `review/README.md`, `docs/TEST_PLAN.md`, `tests/test_reflection_evaluation.py`, `tests/test_execute_review.py`.
 
 ## Phase 6: Review Round 3 Fixes (Alexander Khomutov / axyi #5562633453)
-- [x] **Task 18: P1 review.system.v3.md deferral (Option a)**
+- [x] **Task 18: P1 reviewer prompt deferral (Option a)**
   - Deleted `review/prompts/review.system.v3.md` and `tests/fixtures/prompt_builder/sample.system.v3.txt`.
   - Reverted pinned system prompt in `policy_snapshot.py` and `tests/test_prompt_seeding.py` to `review.system.v2.md`.
   - Added `test_pinned_checksums_match_files_and_golden_fixtures` asserting byte-level SHA-256 for active prompts.
@@ -101,4 +101,18 @@
   - Allowed legacy runs without snapshot to bypass reflection pass.
 - [x] **Task 23: P2 Documentation Alignment**
   - Aligned `review/README.md`, `docs/TEST_PLAN.md`, `120-plan.md`, and `120-todo.md`.
+
+## Phase 7: Review Round 4 Fixes (Alexander Khomutov / axyi #5563263769)
+- [x] **Task 24: P2 Seeding Test Assertion**
+  - Updated `test_prompt_seeding.py` to expect 5 inserted prompt versions and version 2 for active `review.system`.
+- [x] **Task 25: P2 Clean Error Wrapping & Finding Parsing**
+  - Prevented double-wrapping of `InvalidReviewOutput` in `execute_review.py`.
+  - Cleaned up redundant snapshot checks in `_run_reflection_pass` and added warning log for legacy runs with reflection pass.
+  - Added `limit` and `actual` attributes to `PolicyBudgetExceededError` and passed to `PolicyError`.
+- [x] **Task 26: P2 Error Mapping & Requirement Refs Validation**
+  - Cleaned unreachable `TimeoutError` check in `reflection_pass.py` and mapped foreign exceptions with `verification_invalid_output` and `verification_unavailable` to canonical classes.
+  - Enforced required `check_id` on `service_defaults` and strict matching of requirement ref blocks to candidate finding `rule_name`.
+- [x] **Task 27: P2 Complete Test Coverage for Mutation Gates**
+  - Added unit tests for candidate XML attributes, verifier prompt `block_id` and service defaults, verifier token guard, `_split_policy_lines`, `shown_line_count` excluding removed lines, `StoreReviewOutput`, and `verification_*` error catalog in worker.
+
 

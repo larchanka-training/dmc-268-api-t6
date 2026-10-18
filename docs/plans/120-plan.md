@@ -60,6 +60,16 @@ Expand the review LLM pipeline to accept user-defined Markdown policy documents 
 - [x] **P2 Manifest & Rendering Fidelity**: Numbered service-defaults lines in prompt matching manifest `shown_ranges`; neutral summary `done_well` text on cleansed summaries; legacy runs bypass reflection when `context.policy_snapshot is None`.
 - [x] **P2 Test Coverage & Docs**: 100% statement and branch coverage on review output v2 and reflection evaluation; aligned `review/README.md`, `docs/TEST_PLAN.md`, and plans.
 
+### Phase 7: Review Round 4 Fixes (Alexander Khomutov / axyi #5563263769)
+- [x] **P2 Seeding Test Assertion**: Updated `test_prompt_seeding.py` to expect 5 inserted prompt versions and version 2 for active `review.system` after deleting reviewer prompt v3.
+- [x] **P2 Finding Deserialization & Clean Error Wrapping**: Prevented double-wrapping of `InvalidReviewOutput` inside `execute_review.py` candidate deserialization loop.
+- [x] **P2 Budget Error Details**: Populated `limit` and `actual` in `PolicyBudgetExceededError` and passed them to `PolicyError(PolicyErrorCode.PROMPT_BUDGET_EXCEEDED)`.
+- [x] **P2 Clean Reflection Gate & Warning Log**: Cleaned up duplicate snapshot checks inside `_run_reflection_pass` and added warning log when legacy run is invoked with reflection pass.
+- [x] **P2 Error Mapping & Canonical Exceptions**: Cleaned unreachable `TimeoutError` check in `reflection_pass.py` and mapped foreign exceptions with `verification_invalid_output` and `verification_unavailable` to canonical classes.
+- [x] **P2 Requirement Refs & Service Defaults Validation**: Enforced required `check_id` on `service_defaults` requirement refs and strict matching of requirement ref blocks to finding `rule_name`.
+- [x] **P2 Complete Test Coverage for Mutation Gates**: Added unit tests covering candidate XML attributes, verifier prompt `block_id` and service defaults, verifier token guard, `_split_policy_lines` strictly splitting on newline, `shown_line_count` excluding removed diff lines, `StoreReviewOutput` passing `allowed_v2_rules`, and `verification_*` error catalog in worker.
+
+
 
 ## Risks and Mitigations
 | Risk | Impact | Mitigation |
