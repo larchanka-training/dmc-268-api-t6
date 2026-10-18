@@ -204,13 +204,32 @@ scan as a receipt. Every scan, the first one after startup included, then claims
 requests with a five-minute lease, reads each repository outside any transaction (the default
 branch from `GET /repos/{owner}/{repo}`, its full commit SHA, the tree and the blob by SHA,
 RULES_FORMAT_SPEC §3.1) and stores the result in a short transaction. A request written during
-the read survives it and is answered by the next scan; a read that raises keeps its claim, so the
-request is taken again when the lease ends. A full batch of 20 runs the next scan at once, like
+the read gets a new time on the claimed row, and the save clears only the claimed time, so the
+request survives and is answered by the next scan. The save also checks that the claim is still
+its own (the lease end it wrote): a read whose lease ended and whose row another worker claimed
+is dropped with a warning instead of overwriting the newer result. A read that raises is stored
+as `unavailable` with `policy_fetch_transient`, so a GET asks again after 30 seconds; a rate
+limit waits for GitHub's `Retry-After` when it is longer than 30 seconds. A repository whose
+`installation_available` is false is never claimed; its GET answers `unavailable` with
+`policy_access_denied` and requests nothing. A full batch of 20 runs the next scan at once, like
 100 deliveries. One line per read is logged: `Rules status of repository <id>: <status>
 [<code>]`, never the text. A `push` to another branch or a tag is `ignored_irrelevant_event` with
 detail `not_default_branch`; a push to a repository that is not connected is
 `ignored_irrelevant_event` with detail `unknown_repository` and is not deferred, because
 connecting the repository requests a read anyway.
+
+The Push subscription of the GitHub App is a required manual step of the App settings (staging,
+dev and sandbox Apps alike; Permissions & events, Subscribe to events, Push). Without it no
+`push` arrives, nothing fails, and a change of the file shows only through the 10-minute
+staleness of a GET (`docs/SYSTEM_DESIGN.md` §8.2).
+
+Expected push receipt volume. GitHub sends `push` for every branch and tag of every connected
+repository, and each delivery is stored as a receipt and kept 30 days like any other (see
+Retention), although most of them end as `not_default_branch`. The volume is one receipt per
+push: roughly the number of commits pushed by the team per day (CI bots and force pushes
+included), usually more than the `pull_request` receipts. On staging, with a few course
+repositories, that is tens to a few hundred receipts a day. If it grows enough to matter for
+the receipt table, dropping non-default-branch pushes before storing them is a separate change.
 
 Installation events. GitHub sends each repository of `installation.created`,
 `installation_repositories.added` and the removal events as `id`, `node_id`, `name`,
