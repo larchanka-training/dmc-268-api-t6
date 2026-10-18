@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from datetime import datetime, timedelta, timezone
-from typing import Annotated, Any, get_args, get_origin
+from typing import Annotated, Any, TypeAliasType, get_args, get_origin
 from uuid import UUID
 
 from fastapi import FastAPI
@@ -112,16 +112,34 @@ def test_pull_request_summary_timestamp_is_serialized_in_utc() -> None:
     assert _json(dto)["updatedAt"] == IN_UTC
 
 
-def _has_bare_datetime(annotation: Any, metadata: tuple[Any, ...] = ()) -> bool:
+def _parts(annotation: Any) -> tuple[Any, ...]:
+    """The arguments of an annotation, led by the alias it subscripts (``type Page[T] = ...``)."""
+    # The body may hold a model or a datetime that no argument names: the alias leads,
+    # unsubscripted, so the walk unwraps it like a plain alias.
+    origin = get_origin(annotation)
+    if isinstance(origin, TypeAliasType):
+        return (origin, *get_args(annotation))
+    return get_args(annotation)
+
+
+def _has_bare_datetime(
+    annotation: Any,
+    metadata: tuple[Any, ...] = (),
+    expanding: frozenset[TypeAliasType] = frozenset(),
+) -> bool:
     """Whether the annotation holds a ``datetime`` that is not converted to UTC."""
     if annotation is datetime:
         return not any(
             isinstance(item, AfterValidator) and item.func is _to_utc for item in metadata
         )
+    if isinstance(annotation, TypeAliasType):
+        if annotation in expanding:  # a recursive alias (type T = X | list[T]) meets itself
+            return False
+        return _has_bare_datetime(annotation.__value__, metadata, expanding | {annotation})
     if get_origin(annotation) is Annotated:
         base, *inner = get_args(annotation)
-        return _has_bare_datetime(base, tuple(inner))
-    return any(_has_bare_datetime(argument) for argument in get_args(annotation))
+        return _has_bare_datetime(base, tuple(inner), expanding)
+    return any(_has_bare_datetime(argument, (), expanding) for argument in _parts(annotation))
 
 
 def _api_dtos(base: type[ApiDto] = ApiDto) -> list[type[ApiDto]]:
@@ -144,14 +162,20 @@ def test_no_api_dto_declares_a_timestamp_outside_utc() -> None:
     assert bare == []
 
 
-def _models(annotation: Any) -> list[type[BaseModel]]:
-    """The models an annotation holds, unpacking list, unions, Annotated and dict values."""
+def _models(
+    annotation: Any, expanding: frozenset[TypeAliasType] = frozenset()
+) -> list[type[BaseModel]]:
+    """The models an annotation holds, unpacking list, unions, Annotated, dict values, aliases."""
     if isinstance(annotation, type) and issubclass(annotation, BaseModel):
         return [annotation]
+    if isinstance(annotation, TypeAliasType):
+        if annotation in expanding:  # a recursive alias (type T = X | list[T]) meets itself
+            return []
+        return _models(annotation.__value__, expanding | {annotation})
     # Annotated metadata and dict keys are never models, so walking every argument is enough.
     # None (a streamed or empty response, or a responses entry without "model") and object (a
     # raw stored payload) have no arguments: they yield no model to walk.
-    return [model for argument in get_args(annotation) for model in _models(argument)]
+    return [model for argument in _parts(annotation) for model in _models(argument, expanding)]
 
 
 def _response_models(routes: Sequence[BaseRoute]) -> list[type[BaseModel]]:
@@ -226,12 +250,39 @@ class BareTree(BaseModel):
     children: list[BareTree]
 
 
+# FastAPI and pydantic keep a PEP 695 alias itself as the response model or field annotation.
+type BareAlias = BareStamp
+type BareAt = datetime
+type UtcAt = UtcDatetime
+type BareForest = BareStamp | list[BareForest]
+type BareTimes = list[BareTimes] | datetime  # recursion first: any() stops at the datetime
+type WithBareStamp[T] = list[T] | BareStamp
+type WithBareAt[T] = tuple[T, datetime]
+
+
+class AliasProbe(BaseModel):
+    items: list[BareAlias]
+
+
+class AliasStamps(BaseModel):
+    bare: BareAt
+    utc: UtcAt
+
+
+class RecursiveAliasStamp(BaseModel):
+    at: BareTimes
+
+
+class GenericAliasStamp(BaseModel):
+    at: WithBareAt[int]
+
+
 async def _probe() -> None:
     return None
 
 
 def _probe_routes(
-    response_model: type[BaseModel],
+    response_model: Any,
     responses: dict[int | str, dict[str, Any]] | None = None,
 ) -> list[BaseRoute]:
     probe = FastAPI()
@@ -256,3 +307,36 @@ def test_response_walk_reports_a_bare_datetime_in_a_responses_model() -> None:
     routes = _probe_routes(UtcProbe, responses={404: {"model": BareStamp}})
 
     assert _bare_timestamps(_response_models(routes)) == ["BareStamp.at"]
+
+
+def test_response_walk_unwraps_a_model_alias_returned_by_a_route() -> None:
+    assert _bare_timestamps(_response_models(_probe_routes(BareAlias))) == ["BareStamp.at"]
+
+
+def test_response_walk_unwraps_a_model_alias_nested_in_a_field() -> None:
+    assert _bare_timestamps(_response_models(_probe_routes(AliasProbe))) == ["BareStamp.at"]
+
+
+def test_timestamp_check_unwraps_a_datetime_alias() -> None:
+    # The UtcDatetime alias still carries its AfterValidator once unwrapped.
+    assert _bare_timestamps([AliasStamps]) == ["AliasStamps.bare"]
+
+
+def test_response_walk_ends_on_a_recursive_model_alias() -> None:
+    assert _bare_timestamps(_response_models(_probe_routes(BareForest))) == ["BareStamp.at"]
+
+
+def test_timestamp_check_ends_on_a_recursive_datetime_alias() -> None:
+    # The model is checked directly: the response walk would expand BareTimes in _models first.
+    assert _bare_timestamps([RecursiveAliasStamp]) == ["RecursiveAliasStamp.at"]
+
+
+def test_response_walk_reports_a_model_in_the_body_of_a_generic_alias() -> None:
+    # UtcStamp is the only argument: BareStamp is reached through the alias body alone.
+    routes = _probe_routes(WithBareStamp[UtcStamp])
+
+    assert _bare_timestamps(_response_models(routes)) == ["BareStamp.at"]
+
+
+def test_timestamp_check_reports_a_datetime_in_the_body_of_a_generic_alias() -> None:
+    assert _bare_timestamps([GenericAliasStamp]) == ["GenericAliasStamp.at"]
