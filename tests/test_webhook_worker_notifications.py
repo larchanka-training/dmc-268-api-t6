@@ -414,3 +414,27 @@ def test_a_failed_rules_status_pass_does_not_stop_the_webhook_sweep(
 
     asyncio.run(scenario())
     assert "Rules status refresh sweep failed" in caplog.text
+
+
+def test_rules_status_requests_are_answered_on_the_poll_timeout_without_a_hint() -> None:
+    async def scenario() -> None:
+        receiver, reviver, wake = Receiver(), Reviver(), Wake()
+        rules = RulesRefresher()
+        task = asyncio.create_task(
+            sweep_forever(
+                cast(ReceiveGitHubDelivery, receiver),
+                cast(ReviveDeferredInstallationDeliveries, reviver),
+                wake,
+                poll_interval=0.01,
+                rules=cast(RefreshRulesStatuses, rules),
+            )
+        )
+        try:
+            # A lost NOTIFY only delays the request until the next poll.
+            assert await asyncio.wait_for(rules.passes.get(), timeout=1) == 1
+            assert await asyncio.wait_for(rules.passes.get(), timeout=1) == 2
+            assert not wake.is_set()
+        finally:
+            await cancel(task)
+
+    asyncio.run(scenario())
