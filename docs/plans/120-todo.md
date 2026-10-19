@@ -115,4 +115,28 @@
 - [x] **Task 27: P2 Complete Test Coverage for Mutation Gates**
   - Added unit tests for candidate XML attributes, verifier prompt `block_id` and service defaults, verifier token guard, `_split_policy_lines`, `shown_line_count` excluding removed lines, `StoreReviewOutput`, and `verification_*` error catalog in worker.
 
+## Phase 8: Review Round 5 Fixes (Alexander Khomutov / axyi #5567300448)
+- [x] **Task 28: Multi-source requirement_refs validation**
+  - Allowed multiple `requirement_refs` in verifier decisions referencing distinct policy blocks (e.g. both `service-defaults` and `policy-rules`).
+  - Added unit tests for multi-source requirement refs and strict validation of each ref against its block.
+- [x] **Task 29: Error catalog & worker mapping**
+  - Mapped `verification_unavailable` and other retryable failures in `_TRANSIENT_FAILURE_REASONS`.
+- [x] **Task 30: Rebase onto main**
+  - Rebased branch cleanly on `origin/main` (`9de20a5`).
+
+## Phase 9: Review Round 6 Fixes (Alexander Khomutov / axyi #5572159225)
+- [x] **Task 31: Block ID & Path length limits**
+  - Capped slug in `file_block_id` to max 64 characters (`re.sub(...).strip("-")[:64].rstrip("-")`), guaranteeing `file-{slug}-{digest[:8]}` is at most 78 chars and comfortably below 128.
+  - Aligned `ReviewFindingV2.path` `max_length` with `MAX_PATH_BYTES` (1024, was 512).
+  - Added unit test with 200+ character path traversing prompt builder, call manifest, and `EvidenceRef`.
+- [x] **Task 32: Schema synchronization & required rule_name**
+  - Removed `= None` default from `ReviewFindingV2.rule_name`, keeping it strictly required per JSON schema contract.
+  - Added `maxLength` properties to `review-output.schema.v2.json` and `verifier-output.schema.v1.json` (`path`: 1024, `block_id`/`check_id`/`rule_name`: 128, `candidate_id`: 64).
+  - Updated schema test in `test_schemas_v2.py` to assert against `f.is_required()`.
+- [x] **Task 33: Case-insensitive slug matching & secondary source validation**
+  - Added lowercase slug key to `service_defaults_check_lines` in `reflection_pass.py` for real rule names with spaces ("Naming Consistency" -> "naming-consistency").
+  - Added tests for real rule name slug matching and secondary source check_id and line range validation branches.
+- [x] **Task 34: Scope boundary alignment with #130**
+  - Confirmed deferral of verifier gateway adapter, live worker wiring, and context-fitting manifest to #130 per tech lead directive.
+
 

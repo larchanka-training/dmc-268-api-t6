@@ -69,6 +69,17 @@ Expand the review LLM pipeline to accept user-defined Markdown policy documents 
 - [x] **P2 Requirement Refs & Service Defaults Validation**: Enforced required `check_id` on `service_defaults` requirement refs and strict matching of requirement ref blocks to finding `rule_name`.
 - [x] **P2 Complete Test Coverage for Mutation Gates**: Added unit tests covering candidate XML attributes, verifier prompt `block_id` and service defaults, verifier token guard, `_split_policy_lines` strictly splitting on newline, `shown_line_count` excluding removed diff lines, `StoreReviewOutput` passing `allowed_v2_rules`, and `verification_*` error catalog in worker.
 
+### Phase 8: Review Round 5 Fixes (Alexander Khomutov / axyi #5567300448)
+- [x] **P2 Multi-source requirement_refs**: Relaxed single-source restriction to allow verifier decisions referencing multiple distinct policy blocks (`service-defaults` and `policy-rules`).
+- [x] **P2 Error catalog**: Added `verification_unavailable` and transient failure reasons to worker retry catalog.
+- [x] **P2 Rebase**: Rebased on `origin/main` (`9de20a5`).
+
+### Phase 9: Review Round 6 Fixes (Alexander Khomutov / axyi #5572159225)
+- [x] **P2 Block ID & Path Bounds**: Truncated slug in `file_block_id` to max 64 characters so `file-{slug}-{digest[:8]}` (max 78 chars) never exceeds `max_length=128`. Aligned `ReviewFindingV2.path` `max_length` with `MAX_PATH_BYTES` (1024). Added test for 200+ char path through manifest and `EvidenceRef`.
+- [x] **P2 Schema Synchronization**: Removed `= None` default from `ReviewFindingV2.rule_name` to keep it strictly required matching JSON schema. Synchronized `maxLength` in `review-output.schema.v2.json` and `verifier-output.schema.v1.json`.
+- [x] **P2 Service Defaults Slug Matching**: Added case-insensitive slug key to `service_defaults_check_lines` in `reflection_pass.py` for real rule names with spaces ("Naming Consistency"). Added branch coverage for secondary source validation.
+- [x] **P2 Scope Boundary Confirmation**: Formalized boundary with tech lead: live LLM gateway wiring, verifier gateway adapter, and context-fitting manifest deferred to #130.
+
 
 
 ## Risks and Mitigations
