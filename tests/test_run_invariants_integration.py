@@ -202,6 +202,7 @@ def add_run(
     code_change: UUID | None = None,
     rule_version: UUID | None = None,
     prompt_version: UUID | None = None,
+    trigger: str = "webhook",
 ) -> UUID:
     run_id = uuid4()
     values: dict[str, object] = {
@@ -209,7 +210,7 @@ def add_run(
         "code_change_id": code_change or parents.code_change,
         "base_sha": "b" * 40,
         "head_sha": head_sha,
-        "trigger": "webhook",
+        "trigger": trigger,
         "idempotency_key": key,
         "engine": Engine.FAST,
         "rule_version_id": rule_version or parents.rule_version,
@@ -358,4 +359,26 @@ def test_foreign_key_chain_rejects_orphans(
         connection,
         lambda: add_run(connection, parents, key="b" * 64, prompt_version=uuid4()),
         "23503",
+    )
+
+
+@pytest.mark.parametrize("trigger", ["webhook", "manual", "rerun", "dry_run"])
+def test_run_trigger_accepts_each_value_of_the_spec(
+    seeded_connection: tuple[Connection, ParentIds], trigger: str
+) -> None:
+    connection, parents = seeded_connection
+    run_id = add_run(connection, parents, key="1" * 64, trigger=trigger)
+    stored = connection.scalar(select(RUN_TABLE.c.trigger).where(RUN_TABLE.c.id == run_id))
+    assert stored == trigger
+
+
+def test_run_trigger_outside_the_spec_is_rejected(
+    seeded_connection: tuple[Connection, ParentIds],
+) -> None:
+    connection, parents = seeded_connection
+    assert_rejected(
+        connection,
+        lambda: add_run(connection, parents, key="1" * 64, trigger="push"),
+        "23514",
+        "ck_runs_trigger",
     )

@@ -661,7 +661,7 @@ def test_downgrade_drops_index_tables_and_types_and_upgrade_restores_them(
         "code_index_edge_kind",
         "code_index_import_resolution",
     }
-    assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "20261018_0035"
+    assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "20261019_0036"
 
 
 # ADR 0001 §7: only a limit or an unsafe archive fails an index.
@@ -781,7 +781,7 @@ def test_downgrade_to_0033_drops_the_indexer_columns_and_upgrade_resets_profiles
         _CHECKS["code_index_states"],
         {"ix_code_index_states_live_lease": "(lease_token IS NOT NULL)"},
     )
-    assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "20261018_0035"
+    assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "20261019_0036"
 
 
 # Store behaviour: fencing, publication, purge, garbage collection and isolation.
