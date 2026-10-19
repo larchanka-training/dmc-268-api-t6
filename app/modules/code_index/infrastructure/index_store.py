@@ -91,7 +91,7 @@ _GRAPH_MODELS: tuple[_GraphModel, ...] = (
     CodeIndexFile,
 )
 # Displaced rows stay for in-flight readers this long after a publication (ADR §6.2).
-_DISPLACED_GRACE = timedelta(minutes=10)
+DISPLACED_GRACE = timedelta(minutes=10)
 # Character limits of the graph tables' varchar columns, read from the models.
 _TEXT_LIMITS = {
     (model.__tablename__, column.name): column.type.length
@@ -900,7 +900,7 @@ class SqlAlchemyCodeIndexStore:
         )
         displaced_due = literal(
             state.published_at is not None
-            and state.published_at <= await self._clock() - _DISPLACED_GRACE,
+            and state.published_at <= await self._clock() - DISPLACED_GRACE,
             Boolean(),
         )
         return await self._delete(
