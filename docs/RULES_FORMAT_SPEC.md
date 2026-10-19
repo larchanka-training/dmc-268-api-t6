@@ -634,7 +634,7 @@ snapshot описывается `schema_version = 1`.
 | `service_defaults_rule_version_id`, `defaults_checksum` | Первый равен `Run.rule_version_id`, checksum проверяется при чтении |
 | `prompt_bindings` | Immutable ID/checksum для `review.system`, `review.conventions`, `review.verifier`; review ID совпадает с `Run.prompt_version_id` |
 | `severity_threshold` | `all`, `warning` или `critical` из Repository; закреплён при создании run, неизменяемый вход публикации — целевое поле #107/#175, не live-read правило #149 |
-| `max_comments` | Inline cap 1–10 из Repository, закреплённый вместе с порогом; целевое поле #175 |
+| `max_comments` | Inline cap 1–10 из Repository, закреплённый вместе с порогом; целевое поле #107/#175 |
 | `execution_profile` | Закреплённые primary/fallback model IDs, provider routes, tokenizer/counter versions, temperature, response-schema, recovery/budget profile из связанной спецификации |
 | `policy_digest` | Checksum документов, допусков, дефолтов, prompt bindings, interpreter/execution versions |
 | `created_at` | Время фиксации; не влияет на policy_digest |
@@ -971,10 +971,14 @@ unsupported_change не являются исключениями. При пол
 известных relevant counters ≤3 000 — backend partial, summaryOnly=false, findings=[],
 verdict=null, 0 LLM, publishing → succeeded/neutral. Сохраняются pins,
 below_severity_threshold_count=0 и reviewed_changed_lines=0; неизвестная исходная
-статистика остаётся null. Оба триггера CVS §2.3 проверяются раньше этой ветки:
+статистика остаётся null. Анализируемый текст — разрешённые hunks вне E/T, включая сохранившиеся
+hunks truncated в L1: обычное review/partial, blocking возможен; без hunks —
+no-text ветка. Relevant counters — additions/deletions вне E/T, включая
+incomplete; raw counters E/T — диагностика (пустой counted scope=0).
+Оба триггера CVS §2.3 проверяются раньше этой ветки:
 unknown inventory/counters либо >3 000 counted allowed дают summary-only/partial,
 summaryOnly=true (включая known missing-patch-only 4 000 строк). Все backend-ветки
-обходят conventions/reviewer/verifier; skipped — ещё и публикацию.
+обходят conventions/context/reviewer/verifier; skipped — ещё и публикацию.
 Доказанный binary-only — skipped; доказанный binary + код может дать complete/clean. Причины всех
 пропусков и исключений сохраняются отдельно по CVS §9.2.
 

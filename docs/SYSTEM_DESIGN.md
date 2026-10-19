@@ -1152,15 +1152,20 @@ summary-only по оставшемуся scope; T не увеличивают п
 доказанный чистый rename/mode-only без поддерживаемого анализа — unsupported_change, T.
 При полном inventory, известных relevant counters ≤3 000 и только incomplete
 с возможными E/T, без анализируемого текста — backend partial, summaryOnly=false,
-findings=[], verdict=null; 0 LLM, затем succeeded/neutral. Оба триггера CVS §2.3
+findings=[], verdict=null; 0 LLM, затем succeeded/neutral. Анализируемый текст — разрешённые hunks вне E/T, включая сохранившиеся
+hunks truncated в L1: обычное review/partial, blocking возможен; без hunks —
+no-text ветка. Relevant counters — additions/deletions вне E/T, включая
+incomplete; raw counters E/T — диагностика (пустой counted scope=0).
+Оба триггера CVS §2.3
 проверяются раньше: unknown inventory/counters или >3 000 counted allowed строк
 (включая известные 4 000 missing-patch-only) дают summary-only. Все backend-ветки
-обходят conventions/reviewer/verifier и сохраняют pins и below-threshold count=0.
+обходят conventions/context/reviewer/verifier и сохраняют pins и below-threshold count=0.
 Классификация run сохраняется и для skipped до раннего выхода.
 Заголовок none — «AI-ревью: нет доступных для анализа изменений», не failed.
 Обычный missing patch не позволяет выбрать none; различие с source_too_large — CVS §9.2.
 
-Неизвестные/неполные счётчики VCS дают `summary_only/diff_inventory_incomplete`.
+Неизвестные relevant counters вне E/T (включая incomplete) либо неполный
+inventory дают `summary_only/diff_inventory_incomplete`.
 Summary-only строит backend по разрешённой статистике **без LLM**, L1–L4 и inline:
 `succeeded`, coverage partial, verdict=null, check-run neutral. Исходный доступный
 `patch` сохраняется для UI, очищается только `review_patch`; роль code не может
@@ -1209,7 +1214,8 @@ class RunDiffClassification(BaseModel):
     file_omissions: dict[str, FileOmission]  # file_id → reason + class
 ```
 
-`file_omissions[file_id].reason` и `.class` определяют coverage и ранний исход;
+`file_omissions[file_id].reason` и Python-атрибут .classification определяют
+coverage и ранний исход; `class` — только wire alias поля `classification`;
 raw flags/patch_state остаются диагностикой. Ignore и эта классификация не входят
 в VCS DiffMap/digest. Raw metadata_only при changes=0 не доказывает pure rename:
 пустое добавление без patch — missing_patch/incomplete; только доказанный чистый
@@ -1461,7 +1467,7 @@ CONTEXT_AND_VERIFICATION_SPEC §5–8, §10.
 | **Добавить:** `RuleVersion`, `PromptVersion` | неизменяемые (Р-6) |
 | **Добавить:** `UsageEvent` | `run_id` (NOT NULL, FK `runs`: подставного run нет, #145), `model`, `tokens_in/out`, `cache_read_tokens`, `cost_usd` — только вставка (Р-8) |
 | **Добавить:** `RunAction` | `run_id`, `index`, `tool` (каталог — PIPELINE_SPEC §2), `request jsonb`, `response jsonb?` (≤ 64 КБ) или `response_ref` (> 64 КБ — id строки отдельной таблицы PG, PIPELINE_SPEC §2), `started_at`, `duration_ms` — Zod `RunAction` фронта |
-| Снимок диффа (Р-15) | ключ `(run_id, filename)`; исходный доступный `patch`, отдельно `review_patch`, patch_state и rename/copy provenance; `run_diff_maps` хранит immutable revisions/provider refs/hunks/digest |
+| Снимок диффа (Р-15) | ключ `(run_id, filename)`; исходный доступный `patch`, отдельно `review_patch`, patch_state и rename/copy provenance; `run_diff_maps` хранит immutable VCS-only revisions/provider refs/hunks/digest; отдельно run-owned immutable RunDiffClassification/file_omissions до любого выхода, включая skipped (CVS §9.2): reason + Python classification, wire alias class; классификация не входит в VCS digest |
 | **#107:** `run_policy_snapshots` | один immutable snapshot на run: документы/absence, checksums, ignore и версии профилей; целевые severity_threshold/max_comments закрепляются при создании run и не входят в policy_digest; retry их не заменяет |
 | **#107:** `context_manifests`, `context_evidence_blobs` | manifest по call_id и workspace-scoped dedup точных excerpts; источник refs accepted call |
 | **#107:** `review_candidates`, `verification_results` | исходный v2 finding, candidate_id/digest, решения фильтров; решение verifier по каждому переданному ID и resolved refs |
