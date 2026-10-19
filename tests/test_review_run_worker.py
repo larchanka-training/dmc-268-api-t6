@@ -1009,10 +1009,20 @@ def test_verification_error_codes_classification_and_check_runs() -> None:
     assert VerificationInvalidOutputError.error_code == "verification_invalid_output"
     assert VerificationUnavailableError.error_code == "verification_unavailable"
 
-    # classify_failure retryability
-    unavailable = classify_failure(RunFailure("verification_unavailable", "Timeout"))
-    assert unavailable.error_code == "verification_unavailable"
-    assert unavailable.error_code in RETRYABLE_ERROR_CODES
+    # classify_failure through KNOWN_ERROR_CODES catalog using real exception instances
+    class CustomVerificationError(Exception):
+        def __init__(self, error_code: str, message: str) -> None:
+            super().__init__(message)
+            self.error_code = error_code
+
+    # Real canonical exception instances
+    inv_out_fail = classify_failure(VerificationInvalidOutputError("Invalid verifier JSON"))
+    assert inv_out_fail.error_code == "verification_invalid_output"
+    assert inv_out_fail.error_code not in RETRYABLE_ERROR_CODES
+
+    unavail_real = classify_failure(VerificationUnavailableError("Timeout"))
+    assert unavail_real.error_code == "verification_unavailable"
+    assert unavail_real.error_code in RETRYABLE_ERROR_CODES
 
     terminal_codes = [
         "verification_invalid_output",
@@ -1021,9 +1031,13 @@ def test_verification_error_codes_classification_and_check_runs() -> None:
         "verification_deadline_exceeded",
     ]
     for code in terminal_codes:
-        fail = classify_failure(RunFailure(code, "Details"))
+        fail = classify_failure(CustomVerificationError(code, "Details"))
         assert fail.error_code == code
         assert fail.error_code not in RETRYABLE_ERROR_CODES
+
+    unavail_fail = classify_failure(CustomVerificationError("verification_unavailable", "Timeout"))
+    assert unavail_fail.error_code == "verification_unavailable"
+    assert unavail_fail.error_code in RETRYABLE_ERROR_CODES
 
     # Check run summary translations
     target = CheckRunTarget(1, "octo/repo", HEAD, RUN)

@@ -62,7 +62,6 @@ from app.modules.reviews.infrastructure.models import (
     Run,
     RunAction,
     RunActionResponseBody,
-    RunPolicySnapshot,
 )
 from app.modules.reviews.infrastructure.run_action_records import insert_run_action
 from app.modules.reviews.infrastructure.run_notifications import notify_run_state
@@ -668,14 +667,9 @@ class SqlAlchemyReviewOutputRepository:
         ).all()
         hunk_lines = {filename: _new_hunk_lines(filename, patch) for filename, patch in snapshots}
         rule_names = frozenset(rule["name"] for rule in rules if isinstance(rule.get("name"), str))
-        snapshot_row = (
-            await self._session.execute(
-                select(RunPolicySnapshot.snapshot_id).where(RunPolicySnapshot.run_id == run_id)
-            )
-        ).scalar_one_or_none()
+        # Until #130 connects live worker runs to the verifier, allowed_v2 remains None
+        # so legacy runs do not retain unverified v2 rule names even if a snapshot row exists.
         allowed_v2: frozenset[str] | None = None
-        if snapshot_row is not None:
-            allowed_v2 = frozenset({".review/rules.md", "AGENTS.md"})
 
         return FindingPostProcessingInput(
             hunk_lines=hunk_lines,

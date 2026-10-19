@@ -58,7 +58,7 @@ class VerificationDecision(BaseModel):
 
     model_config = _STRICT
 
-    candidate_id: Annotated[str, Field(min_length=1)]
+    candidate_id: Annotated[str, Field(min_length=1, max_length=64)]
     status: VerificationStatus
     reason: Annotated[str, Field(min_length=1, max_length=600)]
     evidence_refs: Annotated[list[EvidenceRef], Field(max_length=8)]
@@ -333,14 +333,20 @@ class ReflectionPass:
                 f"expected {len(candidates)}"
             )
 
-        # Build allowed check IDs for service defaults
-        valid_check_ids: set[str] = set()
+        # Build check lines mapping for service defaults: (rule_id/slug, check_id) -> line_number
+        service_defaults_check_lines: dict[tuple[str, str], int] = {}
+        all_check_lines: dict[str, set[int]] = {}
+        line_offset = 1
         if context.rules:
             for r in context.rules:
-                valid_check_ids.add(r.name)
-                valid_check_ids.add(re.sub(r"[^a-zA-Z0-9_\-]+", "-", r.name).strip("-"))
+                r_slug = re.sub(r"[^a-zA-Z0-9_\-]+", "-", r.name).strip("-")
                 for idx in range(1, len(r.checks) + 1):
-                    valid_check_ids.add(str(idx))
+                    c_id = str(idx)
+                    service_defaults_check_lines[(r.name, c_id)] = line_offset
+                    if r_slug:
+                        service_defaults_check_lines[(r_slug, c_id)] = line_offset
+                    all_check_lines.setdefault(c_id, set()).add(line_offset)
+                    line_offset += 1
 
         # Validate evidence and requirement references against manifest
         for decision in parsed.decisions:
@@ -400,22 +406,40 @@ class ReflectionPass:
                             f"Decision {cand_id_clean} check_id is required for service_defaults"
                         )
                     req_check_id_clean = req_ref.check_id[:64]
-                    rule_id = (
-                        cand.finding.rule_name.removeprefix("service-defaults:")
-                        if cand.finding.rule_name
-                        and cand.finding.rule_name.startswith("service-defaults:")
-                        else ""
-                    )
-                    if valid_check_ids and req_ref.check_id not in valid_check_ids:
-                        raise VerificationInvalidOutputError(
-                            f"Decision {cand_id_clean} check_id '{req_check_id_clean}' "
-                            "does not match service defaults rules"
+                    if cand.finding.rule_name and cand.finding.rule_name.startswith(
+                        "service-defaults:"
+                    ):
+                        rule_id = cand.finding.rule_name.removeprefix("service-defaults:")
+                        expected_line = service_defaults_check_lines.get(
+                            (rule_id, req_ref.check_id)
                         )
-                    if rule_id and req_ref.check_id != rule_id:
-                        raise VerificationInvalidOutputError(
-                            f"Decision {cand_id_clean} check_id '{req_check_id_clean}' "
-                            f"does not match rule_id '{rule_id}'"
-                        )
+                        if expected_line is None:
+                            raise VerificationInvalidOutputError(
+                                f"Decision {cand_id_clean} check_id '{req_check_id_clean}' "
+                                f"does not match service defaults rule '{rule_id}'"
+                            )
+                        if not (req_ref.start_line <= expected_line <= req_ref.end_line):
+                            raise VerificationInvalidOutputError(
+                                f"Decision {cand_id_clean} requirement_ref range "
+                                f"{req_ref.start_line}-{req_ref.end_line} does not cover check "
+                                f"'{req_check_id_clean}' line {expected_line}"
+                            )
+                    else:
+                        matching_lines = all_check_lines.get(req_ref.check_id)
+                        if not matching_lines:
+                            raise VerificationInvalidOutputError(
+                                f"Decision {cand_id_clean} check_id '{req_check_id_clean}' "
+                                "does not match any service defaults rule"
+                            )
+                        if not any(
+                            req_ref.start_line <= line <= req_ref.end_line
+                            for line in matching_lines
+                        ):
+                            raise VerificationInvalidOutputError(
+                                f"Decision {cand_id_clean} requirement_ref range "
+                                f"{req_ref.start_line}-{req_ref.end_line} does not cover check "
+                                f"'{req_check_id_clean}'"
+                            )
                 else:
                     if req_ref.check_id is not None:
                         raise VerificationInvalidOutputError(
@@ -423,29 +447,8 @@ class ReflectionPass:
                             f"for service_defaults, got '{block.source_role}'"
                         )
 
-                # Ensure requirement ref block matches candidate finding rule_name
-                if cand.finding.rule_name is not None:
-                    rname = cand.finding.rule_name
-                    if rname == ".review/rules.md" and block.source_kind != "repository_rules":
-                        raise VerificationInvalidOutputError(
-                            f"Decision {cand_id_clean} requirement_ref block "
-                            f"'{req_block_id_clean}' does not match finding rule_name '{rname}'"
-                        )
-                    if rname == "AGENTS.md" and block.source_kind != "project_conventions_document":
-                        raise VerificationInvalidOutputError(
-                            f"Decision {cand_id_clean} requirement_ref block "
-                            f"'{req_block_id_clean}' does not match finding rule_name '{rname}'"
-                        )
-                    if (
-                        rname.startswith("service-defaults:")
-                        and block.source_role != "service_defaults"
-                    ):
-                        raise VerificationInvalidOutputError(
-                            f"Decision {cand_id_clean} requirement_ref block "
-                            f"'{req_block_id_clean}' does not match finding rule_name '{rname}'"
-                        )
-
-            # 3. For supported/contradicted with rule_name, require a matching requirement_ref
+            # 3. For supported/contradicted with rule_name, require at least one matching
+            # requirement_ref (RULES_FORMAT_SPEC §8.2)
             if cand.finding.rule_name is not None and decision.status in {
                 "supported",
                 "contradicted",

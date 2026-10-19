@@ -590,3 +590,96 @@ def test_sqlalchemy_run_repository_writes_fail_fast_without_a_unit_of_work_sessi
         asyncio.run(repository.request_cancel(UUID(int=1)))
     with pytest.raises(RuntimeError, match="store_diff_snapshots"):
         asyncio.run(repository.store_diff_snapshots(UUID(int=1), UUID(int=2), "a" * 40, []))
+
+
+def test_get_post_processing_input_returns_none_allowed_v2_rules_for_legacy_run() -> None:
+    from app.common.infrastructure.db.enums import SeverityThreshold
+    from app.modules.reviews.application.findings_post_processor import FindingsPostProcessor
+    from app.modules.reviews.application.review_output import (
+        ReviewFinding,
+        ReviewOutput,
+        ReviewSummary,
+    )
+
+    run_id = UUID(int=1)
+    rules = [{"name": "Standard Rule"}]
+    first_row = (UUID(int=10), "head_sha_123", rules, 10, SeverityThreshold.ALL)
+    diff_rows = [("app/main.py", "@@ -1,3 +1,3 @@\n context\n+added\n context")]
+
+    class MultiQueryFakeSession:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def execute(self, statement: Any) -> FakeResult:
+            self.calls += 1
+            if self.calls == 1:
+                return FakeResult([first_row])
+            return FakeResult(diff_rows)
+
+    from app.modules.reviews.infrastructure.run_repository import (
+        SqlAlchemyReviewOutputRepository,
+    )
+
+    session = MultiQueryFakeSession()
+    repository = SqlAlchemyReviewOutputRepository(session=cast(AsyncSession, session))
+
+    post_input = asyncio.run(repository.get_post_processing_input(run_id))
+    assert post_input is not None
+    assert post_input.allowed_v2_rules is None
+
+    # Verify that in legacy runs without verifier, unverified v2 names are nulled out
+    findings = [
+        ReviewFinding(
+            path="app/main.py",
+            line=2,
+            start_line=None,
+            title="Finding 1",
+            body="Review finding text",
+            suggestion=None,
+            severity="medium",
+            category="correctness",
+            confidence=0.9,
+            rule_name=".review/rules.md",
+        ),
+        ReviewFinding(
+            path="app/main.py",
+            line=2,
+            start_line=None,
+            title="Finding 2",
+            body="Review finding text 2",
+            suggestion=None,
+            severity="medium",
+            category="correctness",
+            confidence=0.9,
+            rule_name="AGENTS.md",
+        ),
+        ReviewFinding(
+            path="app/main.py",
+            line=2,
+            start_line=None,
+            title="Finding 3",
+            body="Review finding text 3",
+            suggestion=None,
+            severity="medium",
+            category="correctness",
+            confidence=0.9,
+            rule_name="service-defaults:fastapi",
+        ),
+    ]
+    raw_output = ReviewOutput(
+        findings=findings,
+        summary=ReviewSummary(
+            problem="No issues detected.", done_well="Good code structure.", effort="small"
+        ),
+    )
+    processed = FindingsPostProcessor.from_default_patterns().process(
+        raw_output,
+        hunk_lines=post_input.hunk_lines,
+        rule_names=post_input.rule_names,
+        repository_max_inline=post_input.repository_max_inline,
+        severity_threshold=post_input.severity_threshold,
+        allowed_v2_rules=post_input.allowed_v2_rules,
+    )
+    assert len(processed.inline) == 3
+    for item in processed.inline:
+        assert item.finding.rule_name is None

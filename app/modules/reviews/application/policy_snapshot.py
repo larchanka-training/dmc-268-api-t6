@@ -224,7 +224,7 @@ class ExecutionProfile:
 PINNED_PROMPT_CHECKSUMS: dict[str, str] = {
     "review.system:v2": "9177e358c23d1a7cd8987cbf667cf8b705c2afb27eaf8b2237480e4531431d75",
     "review.conventions:v2": "225a8f7d56835cf1307ddb25feac602c3d10e03c34ee51afc90a1f99af101454",
-    "review.verifier:v1": "7f1d1a93ce64c587709785faec1f679153722d6d83df0de77ec631d1cb95ef3d",
+    "review.verifier:v1": "e00128b211ca64c9a2dd2bb902ade9abf4a29f30c7ec9066501dc7694ddc5940",
 }
 
 _DEFAULT_REVIEW_SYSTEM_ID = UUID("00000000-0000-0000-0000-000000000001")
@@ -363,9 +363,9 @@ class CallManifest:
     """
 
     call_id: UUID
+    stage: StageName
+    blocks: tuple[ManifestBlock, ...]
     run_id: UUID | None = None
-    stage: StageName = "review"
-    blocks: tuple[ManifestBlock, ...] = ()
 
     def get_block(self, block_id: str) -> ManifestBlock | None:
         for block in self.blocks:

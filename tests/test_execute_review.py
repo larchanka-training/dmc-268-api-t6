@@ -44,7 +44,11 @@ from app.modules.reviews.application.reflection_pass import (
     VerificationInvalidOutputError,
     VerificationUnavailableError,
 )
-from app.modules.reviews.application.review_output import InvalidReviewOutput
+from app.modules.reviews.application.review_output import (
+    EvidenceRef,
+    InvalidReviewOutput,
+    RequirementRef,
+)
 from app.modules.reviews.application.run_failures import RunFailure
 
 RUN_ID = UUID("00000000-0000-0000-0000-000000000200")
@@ -1765,6 +1769,274 @@ def test_execute_review_legacy_run_with_reflection_pass_logs_warning(
     with caplog.at_level(logging.WARNING):
         success = asyncio.run(pipeline.execute(RUN_ID))
     assert success is True
-    assert any(
-        "execute_review_legacy_run_without_snapshot" in record.message for record in caplog.records
+    warning_records = [
+        r for r in caplog.records if "execute_review_legacy_run_without_snapshot" in r.message
+    ]
+    assert len(warning_records) == 1
+    assert str(RUN_ID) in warning_records[0].message
+
+    # Without reflection pass, no warning is logged
+    caplog.clear()
+    pipeline_no_reflection = ExecuteReviewRun(
+        Processor(),
+        Repository(),
+        Model(),
+        Publisher(),
+        reflection_pass=None,
     )
+    with caplog.at_level(logging.WARNING):
+        success2 = asyncio.run(pipeline_no_reflection.execute(RUN_ID))
+    assert success2 is True
+    assert not any(
+        "execute_review_legacy_run_without_snapshot" in r.message for r in caplog.records
+    )
+
+
+def test_execute_review_reflection_pass_logs_run_id_call_id_and_counters(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    import logging
+
+    class Processor:
+        async def prepare(self, run_id: UUID) -> GeneratedConventions:
+            return conventions()
+
+    class Repository:
+        async def get_review_prompt_input(
+            self, run_id: UUID, saved: GeneratedConventions
+        ) -> ReviewPromptInput:
+            return ReviewPromptInput(
+                system="Review carefully.",
+                rules=(),
+                agents_md=None,
+                conventions=RepoConventions((), ()),
+                changed_files=(
+                    ChangedFile("app/main.py", "modified", (DiffLine(10, "added", "x = 1"),)),
+                ),
+                omitted_files=(),
+                policy_snapshot=_make_test_snapshot(),
+            )
+
+    class Model:
+        async def get_pull_request_meta(self, run_id: UUID) -> PullRequestMeta:
+            return PullRequestMeta("Title", None, "u", "b", "m", (), 1, 1, 0, False, False)
+
+        async def draft_review(self, *, context: ReviewContext) -> dict[str, Any]:
+            return {
+                "findings": [
+                    {
+                        "path": "app/main.py",
+                        "line": 10,
+                        "start_line": None,
+                        "severity": "critical",
+                        "category": "security",
+                        "title": "SQL Injection",
+                        "body": "Fix it.",
+                        "suggestion": None,
+                        "confidence": 0.9,
+                        "rule_name": None,
+                        "evidence_refs": [
+                            {"block_id": MAIN_BLOCK_ID, "start_line": 10, "end_line": 10}
+                        ],
+                    }
+                ],
+                "summary": {"problem": "Issue.", "done_well": "Fine.", "effort": "none"},
+            }
+
+    class Publisher:
+        async def execute(self, run_id: UUID, raw_output: Any) -> bool:
+            return True
+
+    class FakePassVerifier:
+        async def verify(self, *, candidates: Any, context: Any) -> Any:
+            from app.modules.reviews.application.reflection_pass import VerificationDecision
+
+            return (
+                VerificationDecision(
+                    candidate_id=candidates[0].candidate_id,
+                    status="supported",
+                    reason="Confirmed defect.",
+                    evidence_refs=[EvidenceRef(block_id=MAIN_BLOCK_ID, start_line=10, end_line=10)],
+                    requirement_refs=[],
+                ),
+            )
+
+    pipeline = ExecuteReviewRun(
+        Processor(),
+        Repository(),
+        Model(),
+        Publisher(),
+        reflection_pass=FakePassVerifier(),  # type: ignore[arg-type]
+    )
+
+    with caplog.at_level(logging.INFO):
+        success = asyncio.run(pipeline.execute(RUN_ID))
+    assert success is True
+
+    reflection_logs = [
+        r for r in caplog.records if "Reflection pass completed for run" in r.message
+    ]
+    assert len(reflection_logs) == 1
+    log_msg = reflection_logs[0].message
+    assert str(RUN_ID) in log_msg
+    assert "total=1, supported=1, rejected=0" in log_msg
+
+
+def test_execute_review_validates_candidate_rule_name_against_manifest() -> None:
+    class Processor:
+        async def prepare(self, run_id: UUID) -> GeneratedConventions:
+            return conventions()
+
+    class RepositoryAgentsMissing:
+        async def get_review_prompt_input(
+            self, run_id: UUID, saved: GeneratedConventions
+        ) -> ReviewPromptInput:
+            return ReviewPromptInput(
+                system="Review carefully.",
+                rules=(),
+                agents_md=None,
+                conventions=RepoConventions((), ()),
+                changed_files=(
+                    ChangedFile("app/main.py", "modified", (DiffLine(10, "added", "x = 1"),)),
+                ),
+                omitted_files=(),
+                policy_snapshot=_make_test_snapshot(),  # AGENTS.md is missing
+            )
+
+    class ModelWithRuleName:
+        def __init__(self, rule_name: str) -> None:
+            self.rule_name = rule_name
+
+        async def get_pull_request_meta(self, run_id: UUID) -> PullRequestMeta:
+            return PullRequestMeta("Title", None, "u", "b", "m", (), 1, 1, 0, False, False)
+
+        async def draft_review(self, *, context: ReviewContext) -> dict[str, Any]:
+            return {
+                "findings": [
+                    {
+                        "path": "app/main.py",
+                        "line": 10,
+                        "start_line": None,
+                        "severity": "medium",
+                        "category": "correctness",
+                        "title": "Rule check",
+                        "body": "Body.",
+                        "suggestion": None,
+                        "confidence": 0.9,
+                        "rule_name": self.rule_name,
+                        "evidence_refs": [
+                            {"block_id": MAIN_BLOCK_ID, "start_line": 10, "end_line": 10}
+                        ],
+                    }
+                ],
+                "summary": {"problem": "p.", "done_well": "d.", "effort": "none"},
+            }
+
+    class Publisher:
+        async def execute(self, run_id: UUID, raw_output: Any) -> bool:
+            return True
+
+    # 1. Candidate attributes AGENTS.md, but AGENTS.md is absent in snapshot
+    pipeline1 = ExecuteReviewRun(
+        Processor(),
+        RepositoryAgentsMissing(),
+        ModelWithRuleName("AGENTS.md"),
+        Publisher(),
+        reflection_pass=ReflectionPass(FakeVerifierModel({"decisions": []})),
+    )
+    with pytest.raises(InvalidReviewOutput, match="no project_conventions_document in manifest"):
+        asyncio.run(pipeline1.execute(RUN_ID))
+
+    # 2. Candidate attributes .review/rules.md, but rules.md is absent in snapshot
+    from dataclasses import replace
+
+    snapshot_no_rules = replace(
+        _make_test_snapshot(),
+        rules=make_policy_document_missing(".review/rules.md"),
+    )
+
+    class RepositoryRulesMissing:
+        async def get_review_prompt_input(
+            self, run_id: UUID, saved: GeneratedConventions
+        ) -> ReviewPromptInput:
+            return ReviewPromptInput(
+                system="Review carefully.",
+                rules=(),
+                agents_md=None,
+                conventions=RepoConventions((), ()),
+                changed_files=(
+                    ChangedFile("app/main.py", "modified", (DiffLine(10, "added", "x = 1"),)),
+                ),
+                omitted_files=(),
+                policy_snapshot=snapshot_no_rules,
+            )
+
+    pipeline2 = ExecuteReviewRun(
+        Processor(),
+        RepositoryRulesMissing(),
+        ModelWithRuleName(".review/rules.md"),
+        Publisher(),
+        reflection_pass=ReflectionPass(FakeVerifierModel({"decisions": []})),
+    )
+    with pytest.raises(InvalidReviewOutput, match="no repository_rules in manifest"):
+        asyncio.run(pipeline2.execute(RUN_ID))
+
+    # 3. Candidate attributes service-defaults:fastapi, but context.rules is empty
+    pipeline3 = ExecuteReviewRun(
+        Processor(),
+        RepositoryAgentsMissing(),
+        ModelWithRuleName("service-defaults:fastapi"),
+        Publisher(),
+        reflection_pass=ReflectionPass(FakeVerifierModel({"decisions": []})),
+    )
+    with pytest.raises(InvalidReviewOutput, match="no service_defaults in manifest"):
+        asyncio.run(pipeline3.execute(RUN_ID))
+
+    # 4. Positive case: rules.md is present in snapshot, candidate with .review/rules.md
+    # passes attribution validation
+    class RepositoryRulesPresent:
+        async def get_review_prompt_input(
+            self, run_id: UUID, saved: GeneratedConventions
+        ) -> ReviewPromptInput:
+            return ReviewPromptInput(
+                system="Review carefully.",
+                rules=(),
+                agents_md=None,
+                conventions=RepoConventions((), ()),
+                changed_files=(
+                    ChangedFile("app/main.py", "modified", (DiffLine(10, "added", "x = 1"),)),
+                ),
+                omitted_files=(),
+                policy_snapshot=_make_test_snapshot(),  # rules is present
+            )
+
+    class FakePassWithRulesVerifier:
+        async def verify(self, *, candidates: Any, context: Any) -> Any:
+            from app.modules.reviews.application.reflection_pass import VerificationDecision
+
+            return (
+                VerificationDecision(
+                    candidate_id=candidates[0].candidate_id,
+                    status="supported",
+                    reason="Rules violation confirmed.",
+                    evidence_refs=[EvidenceRef(block_id=MAIN_BLOCK_ID, start_line=10, end_line=10)],
+                    requirement_refs=[
+                        RequirementRef(
+                            block_id="policy-rules",
+                            start_line=1,
+                            end_line=2,
+                            check_id=None,
+                        )
+                    ],
+                ),
+            )
+
+    pipeline4 = ExecuteReviewRun(
+        Processor(),
+        RepositoryRulesPresent(),
+        ModelWithRuleName(".review/rules.md"),
+        Publisher(),
+        reflection_pass=FakePassWithRulesVerifier(),  # type: ignore[arg-type]
+    )
+    success = asyncio.run(pipeline4.execute(RUN_ID))
+    assert success is True
