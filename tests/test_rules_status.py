@@ -316,6 +316,9 @@ _DENIED = RulesDiagnostic("policy_access_denied", "m", None, None, False)
 _LIMITED = RulesDiagnostic(
     "policy_rate_limited", "m", None, None, True, retry_after=timedelta(seconds=60)
 )
+_LONG_LIMIT = RulesDiagnostic(
+    "policy_rate_limited", "m", None, None, True, retry_after=timedelta(hours=1)
+)
 _SHORT_LIMIT = RulesDiagnostic(
     "policy_rate_limited", "m", None, None, True, retry_after=timedelta(seconds=5)
 )
@@ -324,23 +327,38 @@ _SHORT_LIMIT = RulesDiagnostic(
 @pytest.mark.parametrize(
     ("stored", "due"),
     [
-        (StoredRulesStatus("main", None, refresh_requested=False), True),
-        (StoredRulesStatus("main", None, refresh_requested=True), False),
+        (
+            StoredRulesStatus("main", None, refresh_requested=False, installation_available=True),
+            True,
+        ),
+        (
+            StoredRulesStatus("main", None, refresh_requested=True, installation_available=True),
+            False,
+        ),
         (
             StoredRulesStatus(
-                "main", _status(RulesStatusKind.PRESENT, _NOW - timedelta(minutes=9)), False
+                "main",
+                _status(RulesStatusKind.PRESENT, _NOW - timedelta(minutes=9)),
+                False,
+                installation_available=True,
             ),
             False,
         ),
         (
             StoredRulesStatus(
-                "main", _status(RulesStatusKind.PRESENT, _NOW - timedelta(minutes=10)), False
+                "main",
+                _status(RulesStatusKind.PRESENT, _NOW - timedelta(minutes=10)),
+                False,
+                installation_available=True,
             ),
             True,
         ),
         (
             StoredRulesStatus(
-                "main", _status(RulesStatusKind.MISSING, _NOW - timedelta(hours=1)), True
+                "main",
+                _status(RulesStatusKind.MISSING, _NOW - timedelta(hours=1)),
+                True,
+                installation_available=True,
             ),
             False,
         ),
@@ -349,6 +367,7 @@ _SHORT_LIMIT = RulesDiagnostic(
                 "main",
                 _status(RulesStatusKind.UNAVAILABLE, _NOW - timedelta(seconds=30), _TRANSIENT),
                 False,
+                installation_available=True,
             ),
             True,
         ),
@@ -357,6 +376,7 @@ _SHORT_LIMIT = RulesDiagnostic(
                 "main",
                 _status(RulesStatusKind.UNAVAILABLE, _NOW - timedelta(seconds=29), _TRANSIENT),
                 False,
+                installation_available=True,
             ),
             False,
         ),
@@ -365,6 +385,7 @@ _SHORT_LIMIT = RulesDiagnostic(
                 "main",
                 _status(RulesStatusKind.UNAVAILABLE, _NOW - timedelta(seconds=59), _LIMITED),
                 False,
+                installation_available=True,
             ),
             False,
         ),
@@ -373,6 +394,7 @@ _SHORT_LIMIT = RulesDiagnostic(
                 "main",
                 _status(RulesStatusKind.UNAVAILABLE, _NOW - timedelta(seconds=60), _LIMITED),
                 False,
+                installation_available=True,
             ),
             True,
         ),
@@ -381,14 +403,25 @@ _SHORT_LIMIT = RulesDiagnostic(
                 "main",
                 _status(RulesStatusKind.UNAVAILABLE, _NOW - timedelta(seconds=29), _SHORT_LIMIT),
                 False,
+                installation_available=True,
             ),
             False,
         ),
         (
             StoredRulesStatus(
                 "main",
+                _status(RulesStatusKind.UNAVAILABLE, _NOW - timedelta(minutes=10), _LONG_LIMIT),
+                False,
+                installation_available=True,
+            ),
+            True,
+        ),
+        (
+            StoredRulesStatus(
+                "main",
                 _status(RulesStatusKind.UNAVAILABLE, _NOW - timedelta(seconds=5), _TRANSIENT),
                 False,
+                installation_available=True,
             ),
             False,
         ),
@@ -397,6 +430,7 @@ _SHORT_LIMIT = RulesDiagnostic(
                 "main",
                 _status(RulesStatusKind.UNAVAILABLE, _NOW - timedelta(minutes=1), _DENIED),
                 False,
+                installation_available=True,
             ),
             False,
         ),
@@ -412,6 +446,7 @@ _SHORT_LIMIT = RulesDiagnostic(
         "retry-after-60-not-yet",
         "retry-after-60-reached",
         "retry-after-below-30-keeps-30",
+        "retry-after-over-10-minutes-ends-at-10-minutes",
         "retryable-within-pause",
         "permanent-error-fresh",
     ],
@@ -454,7 +489,9 @@ def _get(store: FakeStatusStore) -> RulesStatus | None:
 
 
 def test_a_repository_never_read_is_pending_and_requests_its_read() -> None:
-    store = FakeStatusStore(StoredRulesStatus("develop", None, refresh_requested=False))
+    store = FakeStatusStore(
+        StoredRulesStatus("develop", None, refresh_requested=False, installation_available=True)
+    )
 
     status = _get(store)
 
@@ -464,7 +501,9 @@ def test_a_repository_never_read_is_pending_and_requests_its_read() -> None:
 
 def test_a_stale_result_is_returned_and_requested_again() -> None:
     old = _status(RulesStatusKind.PRESENT, _NOW - timedelta(minutes=11))
-    store = FakeStatusStore(StoredRulesStatus("main", old, refresh_requested=False))
+    store = FakeStatusStore(
+        StoredRulesStatus("main", old, refresh_requested=False, installation_available=True)
+    )
 
     assert _get(store) == old
     assert store.requests == 1
@@ -472,7 +511,9 @@ def test_a_stale_result_is_returned_and_requested_again() -> None:
 
 def test_a_fresh_result_is_returned_without_a_request() -> None:
     fresh = _status(RulesStatusKind.MISSING, _NOW - timedelta(minutes=1))
-    store = FakeStatusStore(StoredRulesStatus("main", fresh, refresh_requested=False))
+    store = FakeStatusStore(
+        StoredRulesStatus("main", fresh, refresh_requested=False, installation_available=True)
+    )
 
     assert _get(store) == fresh
     assert (store.requests, store.commits) == (0, 0)
@@ -632,3 +673,25 @@ def test_a_rate_limit_keeps_its_retry_after_for_the_next_get() -> None:
         "policy_rate_limited",
         timedelta(seconds=90),
     )
+
+
+@pytest.mark.parametrize(
+    ("header", "stored"),
+    [("86400", timedelta(days=1)), ("999999", timedelta(days=1))],
+    ids=["one-day", "capped-at-one-day"],
+)
+def test_the_stored_retry_after_is_at_most_one_day(header: str, stored: timedelta) -> None:
+    reading = _read(
+        FakeGitHub(
+            rules=b"x", failures={f"/git/trees/{_HEAD}": 429}, headers={"Retry-After": header}
+        )
+    )
+
+    assert reading.diagnostics[0].retry_after == stored
+
+
+def test_a_store_must_say_whether_the_installation_is_available() -> None:
+    # No fail-open default: a store that forgets the flag fails instead of showing a lost
+    # repository as readable.
+    with pytest.raises(TypeError, match="installation_available"):
+        StoredRulesStatus("main", None, refresh_requested=False)  # type: ignore[call-arg]

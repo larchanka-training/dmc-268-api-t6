@@ -554,10 +554,11 @@ paths:
         result per repository. A read happens when the repository is connected, after each
         `push` to the default branch, and when this GET finds the stored result older than
         10 minutes or failed with a retryable error (then at most once per 30 seconds, or after
-        GitHub's `Retry-After` when it is longer); the GET still returns the stored result and a
-        later GET shows the new one. So a change of the file usually shows here a few seconds
-        after the push. Without the `push` event the 10 minutes count from the last read, not
-        from the push: a GET after them requests a read, and a later GET shows its result.
+        GitHub's `Retry-After` when it is longer, but never later than those 10 minutes); the GET
+        still returns the stored result and a later GET shows the new one. So a change of the
+        file usually shows here a few seconds after the push. Without the `push` event the
+        10 minutes count from the last read, not from the push: a GET after them requests a
+        read, and a later GET shows its result.
         `pending` means no read has finished yet. A repository the App can no longer read
         (`installationAvailable: false` in `getRepository`) is `unavailable` with
         `policy_access_denied` (`retryable: false`) and requests no read.

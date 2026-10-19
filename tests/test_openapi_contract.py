@@ -439,7 +439,9 @@ class ContractRulesStatus:
     async def get(self, repository_id: UUID) -> StoredRulesStatus | None:
         if repository_id != REPOSITORY_ID:
             return None
-        return StoredRulesStatus("main", self.status, refresh_requested=False)
+        return StoredRulesStatus(
+            "main", self.status, refresh_requested=False, installation_available=True
+        )
 
     async def request_refresh(self, repository_id: UUID) -> None:
         self.requests += 1
