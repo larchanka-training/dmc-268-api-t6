@@ -1013,8 +1013,7 @@ default branch и не смешивает редактор правил с VCS w
 
 ### 10.1. Статус правил репозитория (#150)
 
-Механизм предложен исполнителем в #150 [предложено, 18.10.2026, #150]; подтверждение
-техлида записывается в задаче. Просмотр rules из таблицы выше реализован как `GET /api/repos/{repo_id}/rules-status` (`getRulesStatus` в
+Механизм согласован техлидом в #150 [техлид, 18.10.2026, #150]. Просмотр rules из таблицы выше реализован как `GET /api/repos/{repo_id}/rules-status` (`getRulesStatus` в
 `contracts/openapi.yaml`). Planned-операции `listRuleVersions`, `createRuleVersion` и
 `previewRuleVersion` с прежним телом не реализуются: в контракте у них остаётся
 `x-status: planned`, а `x-note` называет их заменёнными по этому разделу.
