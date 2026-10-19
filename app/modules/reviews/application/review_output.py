@@ -122,7 +122,7 @@ class RequirementRef(BaseModel):
     block_id: Annotated[str, Field(min_length=1, max_length=128)]
     start_line: Annotated[int, Field(ge=1)]
     end_line: Annotated[int, Field(ge=1)]
-    check_id: Annotated[str | None, Field(min_length=1, max_length=128)] = None
+    check_id: Annotated[str | None, Field(min_length=1, max_length=128)]
 
     @model_validator(mode="after")
     def validate_range(self) -> RequirementRef:

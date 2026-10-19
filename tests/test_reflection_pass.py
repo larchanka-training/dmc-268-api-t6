@@ -1515,7 +1515,7 @@ async def test_reflection_pass_secondary_source_defaults_validation_branches() -
     ):
         await v_unknown.verify(candidates=(cand_rules,), context=context)
 
-    # 2. Secondary ref range does not cover check line
+    # 2. Secondary ref range does not cover check line (lower bound: range is 2-2)
     range_mismatch_response = {
         "decisions": [
             {
@@ -1538,3 +1538,108 @@ async def test_reflection_pass_secondary_source_defaults_validation_branches() -
     v_range = ReflectionPass(FakeVerifierModel(range_mismatch_response))
     with pytest.raises(VerificationInvalidOutputError, match="does not cover check '1'"):
         await v_range.verify(candidates=(cand_rules,), context=context)
+
+    # 3. Secondary ref range upper bound mismatch: check 2 is at line 2, but range is 1-1
+    range_upper_mismatch = {
+        "decisions": [
+            {
+                "candidate_id": "c-multi",
+                "status": "supported",
+                "reason": "OK",
+                "evidence_refs": [{"block_id": query_block_id, "start_line": 10, "end_line": 10}],
+                "requirement_refs": [
+                    {"block_id": "policy-rules", "start_line": 1, "end_line": 2, "check_id": None},
+                    {
+                        "block_id": "service-defaults",
+                        "start_line": 1,
+                        "end_line": 1,
+                        "check_id": "2",
+                    },
+                ],
+            }
+        ]
+    }
+    v_upper = ReflectionPass(FakeVerifierModel(range_upper_mismatch))
+    with pytest.raises(VerificationInvalidOutputError, match="does not cover check '2'"):
+        await v_upper.verify(candidates=(cand_rules,), context=context)
+
+    # 4. Secondary ref positive case: check 1 is covered by range 1-2
+    positive_multi_response = {
+        "decisions": [
+            {
+                "candidate_id": "c-multi",
+                "status": "supported",
+                "reason": "OK",
+                "evidence_refs": [{"block_id": query_block_id, "start_line": 10, "end_line": 10}],
+                "requirement_refs": [
+                    {"block_id": "policy-rules", "start_line": 1, "end_line": 2, "check_id": None},
+                    {
+                        "block_id": "service-defaults",
+                        "start_line": 1,
+                        "end_line": 2,
+                        "check_id": "1",
+                    },
+                ],
+            }
+        ]
+    }
+    v_pos = ReflectionPass(FakeVerifierModel(positive_multi_response))
+    decisions_pos = await v_pos.verify(candidates=(cand_rules,), context=context)
+    assert len(decisions_pos) == 1
+    assert decisions_pos[0].status == "supported"
+
+
+@pytest.mark.anyio
+async def test_reflection_pass_service_defaults_exact_case_slug_matching() -> None:
+    query_block_id = file_block_id("app/query.py")
+    rule = ReviewRule("Naming-Consistency", ("*.py",), (), ("Check snake_case",))
+    snapshot = make_snapshot()
+    context = ReviewContext(
+        system="SYSTEM",
+        rules=(rule,),
+        agents_md=None,
+        conventions=RepoConventions((), ()),
+        pr_meta=PullRequestMeta("T", None, "u", "b", "main", (), 1, 1, 0, False, False),
+        changed_files=(ChangedFile("app/query.py", "modified", (DiffLine(10, "added", "x = 1"),)),),
+        omitted_files=(),
+        policy_snapshot=snapshot,
+    )
+
+    cand_slug = CandidateFindingItem(
+        candidate_id="c-slug-exact",
+        finding=ReviewFindingV2(
+            path="app/query.py",
+            line=10,
+            start_line=None,
+            severity="medium",
+            category="readability",
+            title="Naming violation",
+            body="Variable must be snake_case",
+            suggestion=None,
+            confidence=0.9,
+            rule_name="service-defaults:Naming-Consistency",
+            evidence_refs=[EvidenceRef(block_id=query_block_id, start_line=10, end_line=10)],
+        ),
+    )
+    response = {
+        "decisions": [
+            {
+                "candidate_id": "c-slug-exact",
+                "status": "supported",
+                "reason": "Variable name violates Naming Consistency rule.",
+                "evidence_refs": [{"block_id": query_block_id, "start_line": 10, "end_line": 10}],
+                "requirement_refs": [
+                    {
+                        "block_id": "service-defaults",
+                        "start_line": 1,
+                        "end_line": 1,
+                        "check_id": "1",
+                    }
+                ],
+            }
+        ]
+    }
+    verifier = ReflectionPass(FakeVerifierModel(response))
+    decisions = await verifier.verify(candidates=(cand_slug,), context=context)
+    assert len(decisions) == 1
+    assert decisions[0].status == "supported"

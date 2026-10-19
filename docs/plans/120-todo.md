@@ -80,7 +80,11 @@
 - [x] **Task 17: P2 documentation & test suites**
   - Updated `review/README.md`, `docs/TEST_PLAN.md`, `tests/test_reflection_evaluation.py`, `tests/test_execute_review.py`.
 
-## Phase 6: Review Round 3 Fixes (Alexander Khomutov / axyi #5562633453)
+## Phase 6: Review Round 2 Fixes (Alexander Khomutov / axyi, commit c61511e)
+- [x] **Task 17b: Mutation & Coverage Gates**
+  - Covered `comment_body` helper, XML escaping edge cases, and achieved 100% test coverage across review output and prompt builder.
+
+## Phase 7: Review Round 3 Fixes (Alexander Khomutov / axyi #5562633453)
 - [x] **Task 18: P1 reviewer prompt deferral (Option a)**
   - Deleted `review/prompts/review.system.v3.md` and `tests/fixtures/prompt_builder/sample.system.v3.txt`.
   - Reverted pinned system prompt in `policy_snapshot.py` and `tests/test_prompt_seeding.py` to `review.system.v2.md`.
@@ -102,9 +106,9 @@
 - [x] **Task 23: P2 Documentation Alignment**
   - Aligned `review/README.md`, `docs/TEST_PLAN.md`, `120-plan.md`, and `120-todo.md`.
 
-## Phase 7: Review Round 4 Fixes (Alexander Khomutov / axyi #5563263769)
+## Phase 8: Review Round 4 Fixes (Alexander Khomutov / axyi #5563263769)
 - [x] **Task 24: P2 Seeding Test Assertion**
-  - Updated `test_prompt_seeding.py` to expect 5 inserted prompt versions and version 2 for active `review.system`.
+  - Updated `test_prompt_seeding.py` to expect 5 inserted prompt versions and version 2 for active `review.system` after deleting reviewer prompt v3.
 - [x] **Task 25: P2 Clean Error Wrapping & Finding Parsing**
   - Prevented double-wrapping of `InvalidReviewOutput` in `execute_review.py`.
   - Cleaned up redundant snapshot checks in `_run_reflection_pass` and added warning log for legacy runs with reflection pass.
@@ -115,7 +119,7 @@
 - [x] **Task 27: P2 Complete Test Coverage for Mutation Gates**
   - Added unit tests for candidate XML attributes, verifier prompt `block_id` and service defaults, verifier token guard, `_split_policy_lines`, `shown_line_count` excluding removed lines, `StoreReviewOutput`, and `verification_*` error catalog in worker.
 
-## Phase 8: Review Round 5 Fixes (Alexander Khomutov / axyi #5567300448)
+## Phase 9: Review Round 5 Fixes (Alexander Khomutov / axyi #5567300448)
 - [x] **Task 28: Multi-source requirement_refs validation**
   - Allowed multiple `requirement_refs` in verifier decisions referencing distinct policy blocks (e.g. both `service-defaults` and `policy-rules`).
   - Added unit tests for multi-source requirement refs and strict validation of each ref against its block.
@@ -124,7 +128,7 @@
 - [x] **Task 30: Rebase onto main**
   - Rebased branch cleanly on `origin/main` (`9de20a5`).
 
-## Phase 9: Review Round 6 Fixes (Alexander Khomutov / axyi #5572159225)
+## Phase 10: Review Round 6 Fixes (Alexander Khomutov / axyi #5572159225)
 - [x] **Task 31: Block ID & Path length limits**
   - Capped slug in `file_block_id` to max 64 characters (`re.sub(...).strip("-")[:64].rstrip("-")`), guaranteeing `file-{slug}-{digest[:8]}` is at most 78 chars and comfortably below 128.
   - Aligned `ReviewFindingV2.path` `max_length` with `MAX_PATH_BYTES` (1024, was 512).
@@ -139,4 +143,13 @@
 - [x] **Task 34: Scope boundary alignment with #130**
   - Confirmed deferral of verifier gateway adapter, live worker wiring, and context-fitting manifest to #130 per tech lead directive.
 
-
+## Phase 11: Review Round 7 Fixes (Alexander Khomutov / axyi #5574663268)
+- [x] **Task 35: Required check_id in RequirementRef**
+  - Removed `= None` default from `RequirementRef.check_id`, enforcing required nullable string per CONTEXT_AND_VERIFICATION_SPEC §7.2 and schema.
+  - Updated tests in `test_reflection_evaluation.py` and `test_review_output_v2.py` to supply `check_id: None`.
+- [x] **Task 36: Verifier schema property and required validation**
+  - Added `test_verifier_schema_properties_match_pydantic_models` in `test_schemas_v2.py` asserting schema `required` matches `is_required()` on `VerificationOutput`, `VerificationDecision`, `RequirementRef`, and `EvidenceRef`.
+  - Added `minLength: 1` to `check_id` in `verifier-output.schema.v1.json` and tested rejection of empty string and acceptance of null.
+- [x] **Task 37: Mutation & Boundary Tests**
+  - Added boundary tests for `path` 1024, `block_id` 128, and `check_id` 128 in `test_review_output_v2.py`.
+  - Added unit test for exact-case slug matching and secondary source upper-bound validation in `test_reflection_pass.py`.
