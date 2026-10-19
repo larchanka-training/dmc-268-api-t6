@@ -127,7 +127,8 @@ reviews only with `LLM_*` set: without `LLM_MODEL` the Run takes all three attem
 ## How the worker handles deliveries
 
 The worker scans the durable PostgreSQL queue immediately on startup. Saving a new
-receipt and OAuth installation reconciliation (`wake_receipts`) send an empty
+receipt, OAuth installation reconciliation (`wake_receipts`) and a rules status request
+(`request_rules_refresh`, see "Rules status reads" below) send an empty
 `NOTIFY webhook_work_available` in the same transaction as their queue change.
 PostgreSQL delivers the hint after commit and discards it on rollback; duplicate
 receipt insertion and OAuth updates matching no receipts send no hint.

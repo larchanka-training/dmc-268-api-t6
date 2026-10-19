@@ -177,8 +177,9 @@ Workspace-пакет `database-migrator` запускается Compose-серв
 которые маршрут `webhook-api` записал в `webhook_events`, создаёт Run и публикует их в очередь
 ревью, поэтому требует PostgreSQL, RabbitMQ (`RABBITMQ_URL`) и GitHub App (ID, приватный ключ,
 логин бота) — [WEBHOOK_WORKER.md](WEBHOOK_WORKER.md).
-Он просыпается по `NOTIFY webhook_work_available`: сохранение новой квитанции и повторная
-активация отложенных квитанций при OAuth отправляют его в своей транзакции, PostgreSQL доставляет
+Он просыпается по `NOTIFY webhook_work_available`: сохранение новой квитанции, повторная
+активация отложенных квитанций при OAuth и запрос статуса правил (#150) отправляют его в своей
+транзакции, PostgreSQL доставляет
 его после commit; обход раз в 30 с остаётся резервным
 ([WEBHOOK_WORKER.md](WEBHOOK_WORKER.md#how-the-worker-handles-deliveries)).
 
