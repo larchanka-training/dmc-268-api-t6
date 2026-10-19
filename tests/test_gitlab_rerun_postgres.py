@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -24,7 +24,7 @@ from app.modules.reviews.infrastructure.models import CodeChange, Run
 from app.modules.reviews.infrastructure.rerun_store import SqlAlchemyRerunUnitOfWork
 from app.modules.reviews.infrastructure.run_repository import SqlAlchemyRunRepository
 from tests import test_gitlab_projection_postgres as projection_fixtures
-from tests.test_gitlab_projection_postgres import NOW, Rig, rig, seed_run
+from tests.test_gitlab_projection_postgres import NOW, Rig, rig, run_json, seed_run
 
 rerun_database = projection_fixtures.authority_database
 pytestmark = pytest.mark.integration
@@ -639,3 +639,162 @@ def test_rerun_commit_before_management_retirement_serializes_without_deadlock(
                 await asyncio.gather(*tasks, return_exceptions=True)
 
     asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    "lineage",
+    [
+        "same",
+        "different_account",
+        "missing_original_account",
+        "missing_current_account",
+        "different_workspace",
+        "different_repository",
+        "reparent_after_read",
+        "original_provider",
+        "original_not_retired",
+    ],
+)
+def test_reinstalled_github_rerun_requires_same_account_workspace_and_original_repository(
+    rerun_database: tuple[str, str, UUID], lineage: str
+) -> None:
+    async def scenario() -> None:
+        async with rig(rerun_database) as fixture, rig(rerun_database) as independent:
+            template = await fixture.seed()
+            original, repository = await seed_github(
+                fixture, template.repository_id, fixture.workspace, 71
+            )
+            change = await seed_change(fixture, repository)
+            old = await seed_run(
+                fixture,
+                replace(template, repository_id=repository),
+                change,
+                state="succeeded",
+                origin=original,
+            )
+            current = uuid4()
+            # Synthetic OAuth rebind state. The existing HTTP regressions exercise
+            # the supported transition; these public controls isolate its lineage.
+            async with fixture.sessions.begin() as session:
+                await session.execute(
+                    text(
+                        "UPDATE provider_installations SET "
+                        "account_external_id=700,deleted_at=clock_timestamp() WHERE id=:id"
+                    ),
+                    {"id": original},
+                )
+                await session.execute(
+                    text(
+                        "INSERT INTO provider_installations "
+                        "(id,workspace_id,provider,external_id,account_external_id,metadata) "
+                        "VALUES (:id,:ws,'github',72,700,'{}')"
+                    ),
+                    {"id": current, "ws": fixture.workspace},
+                )
+                await session.execute(
+                    text("UPDATE repositories SET provider_installation_id=:origin WHERE id=:id"),
+                    {"origin": current, "id": repository},
+                )
+                if lineage == "different_account":
+                    await session.execute(
+                        text(
+                            "UPDATE provider_installations SET account_external_id=701 WHERE id=:id"
+                        ),
+                        {"id": current},
+                    )
+                elif lineage in {"missing_original_account", "missing_current_account"}:
+                    await session.execute(
+                        text(
+                            "UPDATE provider_installations SET "
+                            "account_external_id=NULL WHERE id=:id"
+                        ),
+                        {"id": original if lineage == "missing_original_account" else current},
+                    )
+                elif lineage == "different_workspace":
+                    workspace = uuid4()
+                    await session.execute(
+                        text(
+                            "INSERT INTO workspaces(id,name,daily_budget_usd) "
+                            "VALUES (:id,'other workspace',7)"
+                        ),
+                        {"id": workspace},
+                    )
+                    await session.execute(
+                        text("UPDATE provider_installations SET workspace_id=:ws WHERE id=:id"),
+                        {"ws": workspace, "id": current},
+                    )
+                elif lineage == "original_provider":
+                    await session.execute(
+                        text("UPDATE provider_installations SET provider='gitlab' WHERE id=:id"),
+                        {"id": original},
+                    )
+                elif lineage == "original_not_retired":
+                    await session.execute(
+                        text("UPDATE provider_installations SET deleted_at=NULL WHERE id=:id"),
+                        {"id": original},
+                    )
+            alternative = None
+            if lineage in {"different_repository", "reparent_after_read"}:
+                replacement, alternative = await seed_github(
+                    fixture, repository, fixture.workspace, 73
+                )
+                async with fixture.sessions.begin() as session:
+                    await session.execute(
+                        text(
+                            "UPDATE provider_installations SET account_external_id=700 WHERE id=:id"
+                        ),
+                        {"id": replacement},
+                    )
+                    if lineage == "different_repository":
+                        await session.execute(
+                            text("UPDATE code_changes SET repository_id=:repo WHERE id=:id"),
+                            {"repo": alternative, "id": change},
+                        )
+            before = await run_json(fixture, old)
+            publisher = Publisher()
+            if lineage == "reparent_after_read":
+                barrier = OriginalReadBarrier()
+                task = asyncio.create_task(rerun(barrier.sessions(fixture), publisher).execute(old))
+                try:
+                    await asyncio.wait_for(barrier.reached.wait(), 3)
+                    async with independent.sessions.begin() as session:
+                        await session.execute(
+                            text("UPDATE code_changes SET repository_id=:repo WHERE id=:id"),
+                            {"repo": alternative, "id": change},
+                        )
+                    barrier.release.set()
+                    with pytest.raises(RerunNotConfigured):
+                        await asyncio.wait_for(task, 5)
+                    assert barrier.reads == 1
+                finally:
+                    barrier.release.set()
+                    if not task.done():
+                        task.cancel()
+                    await asyncio.gather(task, return_exceptions=True)
+            elif lineage == "same":
+                created = await rerun(fixture.sessions, publisher).execute(old)
+                assert created is not None and created.id != old
+                assert (created.status, created.head_sha, created.trigger) == (
+                    "queued",
+                    "d" * 40,
+                    "rerun",
+                )
+                assert len(publisher.messages) == 1
+                async with fixture.sessions() as session:
+                    assert (
+                        await session.scalar(
+                            text("SELECT origin_provider_installation_id FROM runs WHERE id=:id"),
+                            {"id": created.id},
+                        )
+                        == current
+                    )
+            else:
+                with pytest.raises(RerunNotConfigured):
+                    await rerun(fixture.sessions, publisher).execute(old)
+            assert await run_json(fixture, old) == before
+            if lineage != "same":
+                assert publisher.messages == []
+                async with fixture.sessions() as session:
+                    assert await session.scalar(text("SELECT count(*) FROM runs")) == 1
+
+    asyncio.run(asyncio.wait_for(scenario(), 15))
