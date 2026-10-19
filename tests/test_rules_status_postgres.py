@@ -21,7 +21,7 @@ import pytest
 from alembic.config import Config
 from sqlalchemy import Connection, create_engine, text
 from sqlalchemy.engine import make_url
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import DataError, IntegrityError
 from sqlalchemy.ext.asyncio import async_sessionmaker
 from sqlalchemy.schema import CreateSchema, DropSchema
 
@@ -264,6 +264,27 @@ def test_missing_is_stored_with_the_defaults_version_and_shown(env: Env) -> None
 
 
 @pytest.mark.integration
+def test_missing_without_an_active_rule_version_is_unknown_and_logged(
+    env: Env, caplog: pytest.LogCaptureFixture
+) -> None:
+    with api(env, _SCOPE) as (client, factory):
+        _execute(
+            factory,
+            "UPDATE rule_versions SET is_active = false WHERE repository_id = :id",
+            id=REPO_A,
+        )
+        client.get(f"/api/repos/{REPO_A}/rules-status")
+        with caplog.at_level("WARNING"):
+            _refresh(factory, FixedReader(RulesReading(RulesStatusKind.MISSING, "main", _HEAD)))
+        body = client.get(f"/api/repos/{REPO_A}/rules-status").json()
+
+    assert (body["status"], body["defaultsVersion"]) == ("missing", "unknown")
+    assert f"Repository {REPO_A} has no active rule version; defaultsVersion is unknown" in (
+        caplog.text
+    )
+
+
+@pytest.mark.integration
 @pytest.mark.parametrize(
     ("github", "status", "code"),
     [
@@ -469,6 +490,44 @@ def test_a_read_whose_lease_ended_cannot_overwrite_the_newer_read(
     assert [target.repository_id for target in taken_over.targets] == [REPO_A]
     assert stale is False
     assert _row(factory, REPO_A).sha == "b" * 40
+
+
+@pytest.mark.integration
+def test_a_read_whose_lease_ended_cannot_save_while_the_new_claim_reads(
+    factory: async_sessionmaker[Any],
+) -> None:
+    asyncio.run(_request(factory))
+    now = datetime.now(UTC)
+    (slow,) = _claim(factory, now)
+    seen: list[tuple[bool, Any]] = []
+
+    async def slow_read_ends() -> None:
+        # The slow read A finishes while the read B of the new claim is still running.
+        async with SqlAlchemyRulesRefreshUnitOfWork(factory) as uow:
+            saved = await uow.rules.save(
+                slow,
+                RulesReading(RulesStatusKind.MISSING, "main", _HEAD),
+                checked_at=datetime.now(UTC),
+            )
+            await uow.commit()
+        async with factory() as session:
+            claimed_until = await session.scalar(
+                text(
+                    "SELECT refresh_claimed_until FROM repository_rules_status "
+                    "WHERE repository_id = :id"
+                ),
+                {"id": REPO_A},
+            )
+        seen.append((saved, claimed_until))
+
+    newer = RulesReading(RulesStatusKind.MISSING, "main", "b" * 40)
+    taken_over = FixedReader(newer, during=slow_read_ends)
+    _refresh(factory, taken_over, now=now + timedelta(minutes=6))
+
+    (target,) = taken_over.targets
+    assert seen == [(False, target.claimed_until)]
+    row = _row(factory, REPO_A)
+    assert (row.sha, row.refresh_claimed_until) == ("b" * 40, None)
 
 
 @pytest.mark.integration
@@ -723,6 +782,7 @@ _DIAGNOSTIC = '[{"code": "policy_fetch_transient", "message": "m", "retryable": 
         ({"checked_at": None}, "ck_repository_rules_status_read_complete"),
         ({"sha": "a" * 39}, "ck_repository_rules_status_sha"),
         ({"sha": "A" * 40}, "ck_repository_rules_status_sha"),
+        ({"sha": "a" * 64}, "value too long"),
         ({"checksum": "a" * 63 + "g"}, "ck_repository_rules_status_checksum"),
         ({"ignore_masks": None}, "ck_repository_rules_status_present"),
         ({"status": "missing"}, "ck_repository_rules_status_missing"),
@@ -734,6 +794,7 @@ _DIAGNOSTIC = '[{"code": "policy_fetch_transient", "message": "m", "retryable": 
         "read-without-time",
         "short-sha",
         "upper-case-sha",
+        "sha-256",
         "bad-checksum",
         "present-without-masks",
         "missing-without-defaults",
@@ -765,5 +826,6 @@ def test_the_row_constraints_refuse_an_incomplete_read(
         )
         unavailable.rollback()
 
-    with pytest.raises(IntegrityError, match=constraint):
+    # A 64 hex SHA is refused by the column length before the CHECK runs.
+    with pytest.raises((IntegrityError, DataError), match=constraint):
         connection.execute(insert, {"id": _REPOSITORY, **_VALID, **change})

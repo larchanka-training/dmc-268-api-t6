@@ -286,14 +286,15 @@ def test_truncated_tree_is_unavailable_not_missing() -> None:
     assert reading.diagnostics[0].code == "policy_revision_unavailable"
 
 
-def test_unreadable_commit_sha_is_a_transient_failure() -> None:
-    class ShortSha(FakeGitHub):
+@pytest.mark.parametrize("answer", ["abc", "a" * 64], ids=["short", "sha-256"])
+def test_unreadable_commit_sha_is_a_transient_failure(answer: str) -> None:
+    class OddSha(FakeGitHub):
         def respond(self, request: httpx.Request) -> httpx.Response:
             if request.url.path.endswith("/commits/main"):
-                return httpx.Response(200, text="abc")
+                return httpx.Response(200, text=answer)
             return super().respond(request)
 
-    reading = _read(ShortSha(rules=b"rules"))
+    reading = _read(OddSha(rules=b"rules"))
 
     assert (reading.status, reading.sha) == (RulesStatusKind.UNAVAILABLE, None)
     assert reading.diagnostics[0] == RulesDiagnostic(
