@@ -103,7 +103,7 @@ class EvidenceRef(BaseModel):
 
     model_config = _STRICT
 
-    block_id: Annotated[str, Field(min_length=1)]
+    block_id: Annotated[str, Field(min_length=1, max_length=128)]
     start_line: Annotated[int, Field(ge=1)]
     end_line: Annotated[int, Field(ge=1)]
 
@@ -119,10 +119,10 @@ class RequirementRef(BaseModel):
 
     model_config = _STRICT
 
-    block_id: Annotated[str, Field(min_length=1)]
+    block_id: Annotated[str, Field(min_length=1, max_length=128)]
     start_line: Annotated[int, Field(ge=1)]
     end_line: Annotated[int, Field(ge=1)]
-    check_id: Annotated[str | None, Field(min_length=1)] = None
+    check_id: Annotated[str | None, Field(min_length=1, max_length=128)] = None
 
     @model_validator(mode="after")
     def validate_range(self) -> RequirementRef:
@@ -140,7 +140,7 @@ class ReviewFindingV2(BaseModel):
 
     model_config = _STRICT
 
-    path: Annotated[str, Field(min_length=1)]
+    path: Annotated[str, Field(min_length=1, max_length=512)]
     line: Annotated[int, Field(ge=1)]
     start_line: Annotated[int | None, Field(ge=1)]
     severity: Severity
@@ -149,7 +149,7 @@ class ReviewFindingV2(BaseModel):
     body: Annotated[str, Field(min_length=1, max_length=1200)]
     suggestion: str | None
     confidence: Annotated[float, Field(ge=0, le=1)]
-    rule_name: str | None
+    rule_name: Annotated[str | None, Field(max_length=128)] = None
     evidence_refs: Annotated[list[EvidenceRef], Field(min_length=1, max_length=8)]
 
     @model_validator(mode="after")

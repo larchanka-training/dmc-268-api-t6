@@ -475,6 +475,12 @@ def test_service_defaults_rendered_in_review_prompt_with_check_id_and_lines() ->
             exclude=(),
             checks=("Check 1: no print statements", "Check 2: return pydantic models"),
         ),
+        ReviewRule(
+            name="Security rules",
+            include=(),
+            exclude=(),
+            checks=("Check 1: validate tokens",),
+        ),
     )
     context = ReviewContext(
         system="SYSTEM",
@@ -494,14 +500,17 @@ def test_service_defaults_rendered_in_review_prompt_with_check_id_and_lines() ->
     assert '<rule name="FastAPI rules" include="app/**" exclude="">' in prompt.user
     assert '<check id="1"><line n="1">Check 1: no print statements</line></check>' in prompt.user
     assert '<check id="2"><line n="2">Check 2: return pydantic models</line></check>' in prompt.user
+    assert '<rule name="Security rules" include="" exclude="">' in prompt.user
+    # check id resets to 1, while line n continues from 3
+    assert '<check id="1"><line n="3">Check 1: validate tokens</line></check>' in prompt.user
 
     defaults_block = manifest.get_block("service-defaults")
     assert defaults_block is not None
     assert defaults_block.source_role == "service_defaults"
     assert defaults_block.start_line == 1
-    assert defaults_block.end_line == 2
-    assert defaults_block.shown_line_count == 2
-    assert defaults_block.shown_ranges == ((1, 2),)
+    assert defaults_block.end_line == 3
+    assert defaults_block.shown_line_count == 3
+    assert defaults_block.shown_ranges == ((1, 3),)
 
 
 def test_first_pass_prompt_injection_defense() -> None:
@@ -562,16 +571,51 @@ def test_first_pass_prompt_injection_defense() -> None:
 
 
 def test_split_policy_lines_strictly_splits_on_newline() -> None:
-    # \v (vertical tab) and other whitespace characters are treated as linebreaks by splitlines()
+    # Unicode line breaks (NEL U+0085, Line Separator U+2028, Paragraph Separator U+2029)
+    # and \v (vertical tab) are treated as linebreaks by splitlines()
     # but MUST NOT split policy lines in _split_policy_lines
     text = "line1\vline2\nline3\n"
     assert _split_policy_lines(text) == ["line1\vline2", "line3"]
     # Verify divergence from Python's splitlines()
     assert text.splitlines() == ["line1", "line2", "line3"]
 
+    # Test Unicode separators: U+0085 (NEL), U+2028 (LS), U+2029 (PS)
+    unicode_text = "line1\u0085line2\u2028line3\u2029line4\nline5\n"
+    # _split_policy_lines splits ONLY on \n
+    assert _split_policy_lines(unicode_text) == [
+        "line1\u0085line2\u2028line3\u2029line4",
+        "line5",
+    ]
+    # splitlines() splits into 5 separate lines
+    assert len(unicode_text.splitlines()) == 5
+
     # Trailing empty lines without newline removal
     text2 = "a\n\nb\n"
     assert _split_policy_lines(text2) == ["a", "", "b"]
+
+
+def test_make_policy_document_present_line_count() -> None:
+    from app.modules.reviews.application.policy_snapshot import make_policy_document_present
+
+    # Normal text ending in newline
+    doc1 = make_policy_document_present(".review/rules.md", "line 1\nline 2\n")
+    assert doc1.line_count == 2
+
+    # Text without trailing newline
+    doc2 = make_policy_document_present(".review/rules.md", "line 1\nline 2")
+    assert doc2.line_count == 2
+
+    # Empty text
+    doc_empty = make_policy_document_present(".review/rules.md", "")
+    assert doc_empty.line_count == 0
+
+    # Text containing Unicode separators U+0085, U+2028, U+2029:
+    # Must count \n lines (2 lines), NOT splitlines() (5 lines)
+    unicode_text = "line1\u0085line2\u2028line3\u2029line4\nline5\n"
+    doc_unicode = make_policy_document_present(".review/rules.md", unicode_text)
+    assert doc_unicode.line_count == 2
+    assert doc_unicode.line_count == len(_split_policy_lines(unicode_text))
+    assert doc_unicode.line_count != len(unicode_text.splitlines())
 
 
 def test_manifest_shown_line_count_excludes_removed_diff_lines() -> None:

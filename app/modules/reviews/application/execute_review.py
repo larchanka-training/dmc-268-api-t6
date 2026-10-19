@@ -177,21 +177,24 @@ class ExecuteReviewRun:
         elif self._reflection_pass is not None:
             _LOGGER.warning(
                 "execute_review_legacy_run_without_snapshot: reflection pass provided but "
-                "bypassed because policy snapshot is absent"
+                "bypassed because policy snapshot is absent for run %s",
+                run_id,
             )
 
         model_output = await self._model.draft_review(context=context)
         if self._reflection_pass is not None and context.policy_snapshot is not None:
-            model_output = await self._run_reflection_pass(model_output, context)
+            model_output = await self._run_reflection_pass(model_output, context, run_id=run_id)
         return await self._publisher.execute(run_id, model_output)
 
     async def _run_reflection_pass(
         self,
         model_output: Mapping[str, object] | str | bytes,
         context: ReviewContext,
+        *,
+        run_id: UUID,
     ) -> Mapping[str, object] | str | bytes:
-        if self._reflection_pass is None or context.policy_snapshot is None:
-            return model_output
+        assert self._reflection_pass is not None
+        assert context.policy_snapshot is not None
 
         if isinstance(model_output, (str, bytes)):
             try:
@@ -270,7 +273,10 @@ class ExecuteReviewRun:
             candidates=tuple(candidates), decisions=decisions
         )
         _LOGGER.info(
-            "Reflection pass completed for run: total=%d, supported=%d, rejected=%d. Decisions: %s",
+            "Reflection pass completed for run %s (call %s): "
+            "total=%d, supported=%d, rejected=%d. Decisions: %s",
+            run_id,
+            reviewer_manifest.call_id,
             len(candidates),
             len(supported),
             len(rejected),

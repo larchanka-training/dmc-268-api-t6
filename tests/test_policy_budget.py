@@ -76,9 +76,21 @@ def test_policy_tokens_counts_rendered_documents() -> None:
         agents_text="# Architecture\nUse UoW.\n",
     )
     tokens = policy_tokens(snapshot, counter)
-    # Exact rendered character length of policy XML blocks
-    # (<repository_rules> and <project_conventions_document>)
-    assert tokens == 320
+    # Exact rendered character length of policy XML blocks per specification
+    expected_rules = (
+        '<repository_rules block_id="policy-rules" path=".review/rules.md">\n'
+        '<line n="1"># Security</line>\n'
+        '<line n="2">1. Validate input.</line>\n'
+        "</repository_rules>"
+    )
+    expected_agents = (
+        '<project_conventions_document block_id="policy-agents" path="AGENTS.md">\n'
+        '<line n="1"># Architecture</line>\n'
+        '<line n="2">Use UoW.</line>\n'
+        "</project_conventions_document>"
+    )
+    expected_tokens = counter.count(expected_rules) + counter.count(expected_agents)
+    assert tokens == expected_tokens
 
 
 def test_verify_policy_budget_passes_within_limit() -> None:

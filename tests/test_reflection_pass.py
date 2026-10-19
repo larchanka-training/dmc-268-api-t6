@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Mapping
+from dataclasses import replace
 from typing import Any
 
 import pytest
@@ -518,11 +519,12 @@ async def test_reflection_pass_validates_service_defaults_check_id() -> None:
     }
     verifier_bad = ReflectionPass(FakeVerifierModel(bad_id_response))
     with pytest.raises(
-        VerificationInvalidOutputError, match="does not match service defaults rules"
+        VerificationInvalidOutputError, match="does not match service defaults rule 'rule-1'"
     ):
         await verifier_bad.verify(candidates=(cand1,), context=context)
 
-    # 2. check_id exists in rules ("rule-2"), but candidate rule_id is "rule-1"
+    # 2. check_id exists in rules ("2" in rule-2), but candidate rule_id is "rule-1"
+    # which has only check "1"
     mismatched_id_response = {
         "decisions": [
             {
@@ -535,17 +537,44 @@ async def test_reflection_pass_validates_service_defaults_check_id() -> None:
                         "block_id": "service-defaults",
                         "start_line": 1,
                         "end_line": 1,
-                        "check_id": "rule-2",
+                        "check_id": "2",
                     }
                 ],
             }
         ]
     }
     verifier_mismatch = ReflectionPass(FakeVerifierModel(mismatched_id_response))
-    with pytest.raises(VerificationInvalidOutputError, match="does not match rule_id 'rule-1'"):
+    with pytest.raises(
+        VerificationInvalidOutputError, match="does not match service defaults rule 'rule-1'"
+    ):
         await verifier_mismatch.verify(candidates=(cand1,), context=context)
 
-    # 3. Positive case: check_id matches candidate rule_id
+    # 3. Line offset mismatch: candidate is rule-2, check is "1" (line 2),
+    # but range 1-1 covers line 1 (rule-1)
+    cand2 = make_candidate("c-2", path="app/query.py", rule_name="service-defaults:rule-2")
+    mismatched_line_response = {
+        "decisions": [
+            {
+                "candidate_id": "c-2",
+                "status": "supported",
+                "reason": "Defect",
+                "evidence_refs": [{"block_id": query_block_id, "start_line": 10, "end_line": 10}],
+                "requirement_refs": [
+                    {
+                        "block_id": "service-defaults",
+                        "start_line": 1,
+                        "end_line": 1,
+                        "check_id": "1",
+                    }
+                ],
+            }
+        ]
+    }
+    verifier_line_mismatch = ReflectionPass(FakeVerifierModel(mismatched_line_response))
+    with pytest.raises(VerificationInvalidOutputError, match="does not cover check '1' line 2"):
+        await verifier_line_mismatch.verify(candidates=(cand2,), context=context)
+
+    # 4. Positive case: check_id matches candidate rule_id and covers line offset
     valid_id_response = {
         "decisions": [
             {
@@ -558,7 +587,7 @@ async def test_reflection_pass_validates_service_defaults_check_id() -> None:
                         "block_id": "service-defaults",
                         "start_line": 1,
                         "end_line": 1,
-                        "check_id": "rule-1",
+                        "check_id": "1",
                     }
                 ],
             }
@@ -1136,8 +1165,8 @@ async def test_reflection_pass_requirement_ref_validation_details() -> None:
     ):
         await v1.verify(candidates=(cand1,), context=context)
 
-    # 2. requirement_ref block does not match finding rule_name
-    cand2 = CandidateFindingItem(
+    # 2. Candidate with rule_name=".review/rules.md" without matching policy-rules ref is rejected
+    cand_rules = CandidateFindingItem(
         candidate_id="c-2",
         finding=ReviewFindingV2(
             path="app/query.py",
@@ -1153,7 +1182,7 @@ async def test_reflection_pass_requirement_ref_validation_details() -> None:
             evidence_refs=[EvidenceRef(block_id=query_block_id, start_line=10, end_line=10)],
         ),
     )
-    v2 = ReflectionPass(
+    v2_missing_rules = ReflectionPass(
         FakeVerifierModel(
             {
                 "decisions": [
@@ -1169,7 +1198,7 @@ async def test_reflection_pass_requirement_ref_validation_details() -> None:
                                 "block_id": "service-defaults",
                                 "start_line": 1,
                                 "end_line": 1,
-                                "check_id": "service-rule",
+                                "check_id": "1",
                             }
                         ],
                     }
@@ -1177,5 +1206,172 @@ async def test_reflection_pass_requirement_ref_validation_details() -> None:
             }
         )
     )
-    with pytest.raises(VerificationInvalidOutputError, match="does not match finding rule_name"):
-        await v2.verify(candidates=(cand2,), context=context)
+    with pytest.raises(
+        VerificationInvalidOutputError,
+        match="requires at least one matching requirement_ref for this rule",
+    ):
+        await v2_missing_rules.verify(candidates=(cand_rules,), context=context)
+
+    # 3. Candidate with rule_name="AGENTS.md" without matching policy-agents ref is rejected
+    snapshot_agents = replace(
+        snapshot,
+        agents=make_policy_document_present("AGENTS.md", "# Conventions\n1. Be explicit\n"),
+    )
+    context_agents = replace(context, policy_snapshot=snapshot_agents)
+    cand_agents = CandidateFindingItem(
+        candidate_id="c-3",
+        finding=ReviewFindingV2(
+            path="app/query.py",
+            line=10,
+            start_line=None,
+            severity="critical",
+            category="security",
+            title="T",
+            body="B",
+            suggestion=None,
+            confidence=0.9,
+            rule_name="AGENTS.md",
+            evidence_refs=[EvidenceRef(block_id=query_block_id, start_line=10, end_line=10)],
+        ),
+    )
+    v3_missing_agents = ReflectionPass(
+        FakeVerifierModel(
+            {
+                "decisions": [
+                    {
+                        "candidate_id": "c-3",
+                        "status": "supported",
+                        "reason": "OK",
+                        "evidence_refs": [
+                            {"block_id": query_block_id, "start_line": 10, "end_line": 10}
+                        ],
+                        "requirement_refs": [
+                            {
+                                "block_id": "policy-rules",
+                                "start_line": 1,
+                                "end_line": 2,
+                                "check_id": None,
+                            }
+                        ],
+                    }
+                ]
+            }
+        )
+    )
+    with pytest.raises(
+        VerificationInvalidOutputError,
+        match="requires at least one matching requirement_ref for this rule",
+    ):
+        await v3_missing_agents.verify(candidates=(cand_agents,), context=context_agents)
+
+    # 4. Candidate with rule_name="service-defaults:service-rule"
+    # without service-defaults ref is rejected
+    cand_defaults = CandidateFindingItem(
+        candidate_id="c-4",
+        finding=ReviewFindingV2(
+            path="app/query.py",
+            line=10,
+            start_line=None,
+            severity="critical",
+            category="security",
+            title="T",
+            body="B",
+            suggestion=None,
+            confidence=0.9,
+            rule_name="service-defaults:service-rule",
+            evidence_refs=[EvidenceRef(block_id=query_block_id, start_line=10, end_line=10)],
+        ),
+    )
+    v4_missing_defaults = ReflectionPass(
+        FakeVerifierModel(
+            {
+                "decisions": [
+                    {
+                        "candidate_id": "c-4",
+                        "status": "supported",
+                        "reason": "OK",
+                        "evidence_refs": [
+                            {"block_id": query_block_id, "start_line": 10, "end_line": 10}
+                        ],
+                        "requirement_refs": [
+                            {
+                                "block_id": "policy-rules",
+                                "start_line": 1,
+                                "end_line": 2,
+                                "check_id": None,
+                            }
+                        ],
+                    }
+                ]
+            }
+        )
+    )
+    with pytest.raises(
+        VerificationInvalidOutputError,
+        match="requires at least one matching requirement_ref for this rule",
+    ):
+        await v4_missing_defaults.verify(candidates=(cand_defaults,), context=context)
+
+    # 5. Multiple requirement_ref sources accepted per RULES_FORMAT_SPEC §8.2
+    v5_multi_source = ReflectionPass(
+        FakeVerifierModel(
+            {
+                "decisions": [
+                    {
+                        "candidate_id": "c-2",
+                        "status": "supported",
+                        "reason": "OK",
+                        "evidence_refs": [
+                            {"block_id": query_block_id, "start_line": 10, "end_line": 10}
+                        ],
+                        "requirement_refs": [
+                            {
+                                "block_id": "policy-rules",
+                                "start_line": 1,
+                                "end_line": 2,
+                                "check_id": None,
+                            },
+                            {
+                                "block_id": "service-defaults",
+                                "start_line": 1,
+                                "end_line": 1,
+                                "check_id": "1",
+                            },
+                        ],
+                    }
+                ]
+            }
+        )
+    )
+    decisions_multi = await v5_multi_source.verify(candidates=(cand_rules,), context=context)
+    assert len(decisions_multi) == 1
+    assert decisions_multi[0].status == "supported"
+
+    # 6. Positive case for AGENTS.md
+    v6_agents = ReflectionPass(
+        FakeVerifierModel(
+            {
+                "decisions": [
+                    {
+                        "candidate_id": "c-3",
+                        "status": "supported",
+                        "reason": "OK",
+                        "evidence_refs": [
+                            {"block_id": query_block_id, "start_line": 10, "end_line": 10}
+                        ],
+                        "requirement_refs": [
+                            {
+                                "block_id": "policy-agents",
+                                "start_line": 1,
+                                "end_line": 2,
+                                "check_id": None,
+                            }
+                        ],
+                    }
+                ]
+            }
+        )
+    )
+    decisions_agents = await v6_agents.verify(candidates=(cand_agents,), context=context_agents)
+    assert len(decisions_agents) == 1
+    assert decisions_agents[0].status == "supported"

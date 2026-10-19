@@ -37,7 +37,7 @@ Respond with a single JSON object matching the VerificationOutput schema:
         {"block_id": "<code block id>", "start_line": 10, "end_line": 15}
       ],
       "requirement_refs": [
-        {"block_id": "<policy block id>", "start_line": 5, "end_line": 8, "check_id": null}
+        {"block_id": "<policy block id>", "start_line": 5, "end_line": 8, "check_id": "<check id or null>"}
       ]
     }
   ]
@@ -48,4 +48,4 @@ Rules:
 - Provide exactly one decision per candidate finding. Do not omit any candidate; do not introduce new candidates.
 - `reason` must be concise (at most 600 characters) without chain-of-thought exposition.
 - `evidence_refs` must refer to the exact code blocks and line numbers in `<code_context>`.
-- `requirement_refs` must refer to the exact policy blocks and line numbers in `<repository_rules>` or `<project_conventions_document>` when a rule was attributed.
+- `requirement_refs` must refer to the exact policy blocks and line numbers in `<repository_rules>`, `<project_conventions_document>`, or `<service_defaults>` when a rule was attributed. For `<service_defaults>`, `check_id` must match the id attribute of the `<check>` tag (e.g. `"1"`, `"2"`); for other policy documents, `check_id` must be null.
