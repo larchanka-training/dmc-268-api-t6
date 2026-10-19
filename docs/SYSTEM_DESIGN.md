@@ -35,7 +35,7 @@ runtime-профиль требуют отдельной реализации; �
 | Р-8 | `usage_events` (токены, деньги, модель) — с первого вызова LLM, только вставка | Восстановить задним числом нельзя; основа для `CreditLedger` |
 | Р-9 | Бот односторонний: публикует, на комментарии не отвечает; **обязательно** игнорирует собственные события | Скорость запуска; защита от цикла «бот → CI → бот» |
 | Р-10 | Триггер — **конъюнкция двух событий в любом порядке**: на PR стоит лейбл `ai-review` ∧ CI успешен для текущего `head_sha`. Бота нельзя запросить ревьюером: GitHub отвечает 201 с пустым `requested_reviewers`, событие `review_requested` не приходит ([#37](https://github.com/larchanka-training/dmc-268-api-t6/issues/37#issuecomment-5874776355)). **После пуша — авто-повтор**, пока PR открыт и стоит лейбл (наш флаг `ai_review_labeled`): бот лейбл не снимает; флаг сверяется с текущими лейблами PR, поэтому его снимает `unlabeled` не от нашего бота, а закрытие PR флаг не трогает — новые Run для закрытого PR не создаются (решения техлида по #20, OQ-1, по #37 и #56). Условие «CI успешен» и sweep «2 мин без CI» — §6.1, [PIPELINE_SPEC](PIPELINE_SPEC.md) §8 | Решение мита; события независимы, порядок не гарантирован. Лейбл ставит только участник с правом triage и выше: внешний автор PR не запустит ревью и не потратит бюджет LLM |
-| Р-11 | Провайдер VCS — за портом `VcsProvider`. Публикация обсуждений реализована для GitHub и GitLab; Bitbucket не реализован. Приём GitLab (вебхуки, diff, блобы) не реализован | Запись в GitLab — discussions, маркеры `findings_hash` и inline `position` по §9.5 (#171); ключи §10 / отдельные receipts операций — не реализованы |
+| Р-11 | Провайдер VCS — за портом `VcsProvider`. GitHub и установленный GitLab поддерживают приём, fast-анализ и публикацию; GitLab intake по умолчанию выключен, live-приёмка остаётся отдельным гейтом (§8.1). Bitbucket не реализован | Запись в GitLab — discussions, маркеры `findings_hash` и inline `position` по §9.5 (#171); ключи §10 / отдельные receipts операций — не реализованы |
 | Р-12 | Один monorepo и пять независимо собираемых сервисов (`portal-api`, `auth-api`, `webhook-api`, `worker`, `publisher`) с собственными зависимостями; у роли `webhook-api` второй процесс — `webhook-worker` (тот же образ, `python -m app.webhook_worker`, §4) | Изоляция релизов и зависимостей без потери единого lock-файла и локального окружения |
 | Р-13 | **RAG v1 — граф символов репозитория с указателями** ([ADR 0001](adr/0001-graph-rag-v1.md)). Worker получает контекст через порт `ContextProvider`: детерминированный сборщик L0–L4 и `RagContextProvider`, возвращающий тот же `ContextPayload`; в коде провайдер реализован слотом RAG сборки `BuildReviewContext`, кандидатов которого выбирает `ReverseEdgeSelector`. Индекс RAG v1 хранит по репозиторию определения, ссылки и импорты символов и рёбра между ними с указателями — путь, диапазон строк, `blob_sha`, `indexed_commit_sha`; без embeddings и без текста кода. Индексируются только репозитории с включённым тумблером RAG (по умолчанию выключен). v2 (векторный поиск, embeddings) — только после гейта eval #146 | Граф даёт то, чего нет у L4: обратные рёбра — кто импортирует или использует изменённый символ. Нет затрат и рисков embeddings/vector DB, код клиента сверх 7-дневного кэша не хранится; LLM, post-processing и публикация не меняются. Решение #19 «RAG не в MVP» пересмотрено эпиком #139 |
 | Р-14 | Успешный прогон — статус **`succeeded`** везде: домен (`RunState.SUCCEEDED`), PG enum `run_state`, API, Zod фронтенда. Полный набор: `queued\|running\|publishing\|succeeded\|failed\|cancelled\|skipped` (§6.4); `completed` — только события и статусы GitHub (`check_suite`, `check_run`, `workflow_run`) | Одно имя от БД до UI без маппинга; код и миграция уже используют `succeeded` и `publishing` |
@@ -175,8 +175,10 @@ Workspace-пакет `database-migrator` запускается Compose-серв
 из того же образа запускается и `webhook-worker`
 (`python -m app.webhook_worker`, Compose profile `webhooks`): он разбирает квитанции,
 которые маршрут `webhook-api` записал в `webhook_events`, создаёт Run и публикует их в очередь
-ревью, поэтому требует PostgreSQL, RabbitMQ (`RABBITMQ_URL`) и GitHub App (ID, приватный ключ,
-логин бота) — [WEBHOOK_WORKER.md](WEBHOOK_WORKER.md).
+ревью, поэтому требует PostgreSQL и RabbitMQ (`RABBITMQ_URL`). Для GitHub replay
+дополнительно нужны GitHub App ID, приватный ключ и логин бота; GitLab-only replay
+использует полный GitLab runtime config без GitHub App —
+[WEBHOOK_WORKER.md](WEBHOOK_WORKER.md).
 Он просыпается по `NOTIFY webhook_work_available`: сохранение новой квитанции, повторная
 активация отложенных квитанций при OAuth и запрос статуса правил (#150) отправляют его в своей
 транзакции, PostgreSQL доставляет
@@ -1036,7 +1038,46 @@ class VcsProvider(Protocol):
     async def list_feedback(self, repo: RepoRef, number: int) -> list[FeedbackSignal]: ...   # после MVP
 ```
 
-Реализованы публикация GitHub (вебхуки, diff, блобы, check-run, `post_review`) и публикация обсуждений GitLab (`GitLabMergeRequestDiscussionGateway`, §8.4). Приём GitLab — вебхуки, diff, блобы — не реализован: отдельного `GitLabProvider` для этих методов нет. `BitbucketProvider` не реализован.
+GitHub поддерживает вебхуки, diff, блобы, check-run и `post_review`. Установленный
+GitLab поддерживает durable MR receipts, проекцию, очередь, fast-анализ и discussions
+через отдельные адаптеры (§8.4); GitHub check-run для GitLab не вызывается.
+`BitbucketProvider` не реализован. Минимальная совместимая версия GitLab — 17.4.
+
+GitLab HTTP admission включается отдельно через `GITLAB_WEBHOOK_INTAKE_ENABLED`
+(по умолчанию false), а каждый connection — через проверяемый `gitlab_admin activate`
+с обязательной ожидаемой generation (SECRETS). Internet-facing API использует только
+БД и digest webhook secret; keyring и PAT для admission не нужны. Replay и review
+workers используют полный защищённый runtime config и исходный stored credential.
+
+`POST /webhooks/gitlab/{installationId}` проверяет `X-Gitlab-Token` по digest именно
+этой физической установки, ограничивает поток 10 МиБ и принимает строгий UTF-8 JSON.
+`webhook-id` (либо `Idempotency-Key`) обязателен; конфликт заголовков/повторного payload
+отклоняется. `X-Gitlab-Event-UUID` и `X-Gitlab-Webhook-UUID` не заменяют delivery key.
+Receipt namespace включает provider и immutable installation UUID. Ответ 202 означает
+commit receipt, включая точный повтор; 400 — невалидный запрос, 401 — неверная
+авторизация, 413 — размер, 503 — выключенный/недоступный admission. GitLab HTTP в
+receiver отсутствует. Вебхук не создаёт installation или binding.
+
+MR open/update/reopen читают текущее состояние, сериализуют проекцию и допускают
+запуск только bound enabled/available репозитория с `wait_for_ci=never`, активными
+rules/prompt и неизменным head. Close/merge отменяет активную работу. GitLab CI,
+no-CI sweep, deep/Sandbox, Graph/RAG и Bitbucket не поддерживаются; GitHub CI,
+sweep, index и cache сохраняют прежнее поведение.
+
+Diff закреплён за сохранённой версией MR с точными head/start/base и target/source
+project IDs. Fork получает policy/conventions из TARGET/START, контекст из SOURCE/HEAD,
+старую сторону из merge-base. Полнота file inventory/counts и bounded pagination
+проверяется; overflow, усечение, недоступный fork и несовместимые refs не превращаются
+в полный diff. Tree/blob reads используют immutable SHA/OID и проверяют маршрут;
+кэш не заменяет checkpoint или authority. Policy, ignore, context и shared LLM/accounting
+проходят обычный pipeline. Доли языков нормируются по байтам распознанных языков;
+неизвестные расширения не входят в знаменатель, нулевой размер не создаёт долю.
+
+До реального выборочного включения нужен фактический merge/rebase dependency #171 и
+проверка на rebased source; произвольный supplied SHA или boolean не доказывает merge.
+#171 остаётся OPEN; synthetic/component proof не является live MR/run/discussion/
+redelivery acceptance. Intake остаётся default-off; production rollout не следует из
+наличия кода или локальных фикстур.
 
 ### 8.2 GitHub: события и права
 
@@ -1091,20 +1132,23 @@ HTTP-запросом повторяется checkpoint claimed Run; кэшир�
 не заменяет разрешение. GitHub/LLM calls выполняются вне DB-транзакций. Существующие
 terminal payload и append-only audit сохраняются по правилам §6.9.
 
-Публикация обсуждений реализована для GitHub и для GitLab (#97). Bitbucket не
-реализован. Приём GitLab — вебхуки, diff и блобы — не реализован: прогон
-`provider=gitlab` этот код из вебхука не создаёт.
+Публикация обсуждений реализована для GitHub и GitLab (#97); installed GitLab
+intake и fast pipeline описаны в §8.1. Payload/placement/marker/outcome изменения
+#171 остаются отдельной dependency; их не следует считать реализованными этим intake.
 
-При реализации приёма GitLab каждый писатель Run обязан при создании выставлять
-`origin_provider_installation_id` исходной физической установки: поле nullable
-без default, а NULL закрывает provider-доступ и отменяет прогон с
-`installation_unavailable`. Тогда же нужно уточнить пользовательскую формулировку
-этого кода для не-GitHub провайдера: сейчас она говорит про GitHub App.
+Каждый installed Run сохраняет исходный `origin_provider_installation_id`. NULL,
+revoked/replaced origin или несовпадение текущей физической установки закрывает
+provider-доступ. Публикация сравнивает исходные workspace/installation/repository/
+code-change/head и immutable payload до изменения Run/findings/уведомления; pointer
+устаревшего head/hash не терминализирует более новый результат. Текущие close/head/
+user-cancel проверки выполняются после identity fence.
 
-GitLab пишет discussions через `GitLabMergeRequestDiscussionGateway`: заголовок
-`PRIVATE-TOKEN` из `GITLAB_TOKEN`, базовый URL `GITLAB_BASE_URL` (по умолчанию
-`https://gitlab.com`). Без `GITLAB_TOKEN` прогон остаётся в `publishing`, HTTP
-к GitLab нет. Версия diff — строка `GET /api/v4/projects/{id}/merge_requests/{iid}/versions`,
+GitLab пишет discussions через `GitLabMergeRequestDiscussionGateway`: `PRIVATE-TOKEN`
+получается из encrypted credential исходного connection, а HTTPS origin — из его
+сохранённого канонического instance origin. Process PAT/base URL fallback отсутствует.
+Одна publication attempt закрепляет credential generation, HTTP client и bounded
+ledger на retries 2/8/30 с и marker replay; перед каждым запросом повторяется исходный
+checkpoint. Поворот credential/revoke останавливает прежнюю работу. Версия diff — строка `GET /api/v4/projects/{id}/merge_requests/{iid}/versions`,
 у которой `head_commit_sha` равен голове прогона. У строки versions имена
 `base_commit_sha`, `start_commit_sha` и `head_commit_sha`; в payload позиции те же
 значения уходят как `base_sha`, `start_sha` и `head_sha`, и `head_sha` не копируется
@@ -2051,7 +2095,7 @@ Configured цены/лимиты совпадают с предыдущими; a
 ## 17. Проверка DoD
 
 - [x] Компоненты, потоки данных, границы backend / frontend / LLM — §2, §3–§5
-- [x] Правила взаимодействия с VCS (публикация GitHub и GitLab; приём GitLab и Bitbucket нет) — §8
+- [x] Правила взаимодействия с VCS (GitHub и installed GitLab fast; GitLab live activation gated, Bitbucket нет) — §8
 - [x] Форматы очереди задач (RabbitMQ) — §7
 - [x] Стратегия кэширования контекстов — §10
 - [x] Сборщик контекста: структуры данных на 4 уровнях — §9

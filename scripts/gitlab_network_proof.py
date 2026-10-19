@@ -66,6 +66,7 @@ from app.modules.reviews.application.run_failures import (
     LEASE,
     RequiredSourceUnavailable,
     RunCancelled,
+    RunFailure,
 )
 from app.modules.reviews.application.vcs_diff import FetchVcsReviewInput
 from app.modules.reviews.infrastructure.amqp import LazyAmqpPublisher
@@ -430,6 +431,8 @@ class Proof:
                             "connection",
                             "transfer-encoding",
                             "x-proof-gate",
+                            "date",
+                            "server",
                         }:
                             self.send_header(key, value)
                     self.send_header("Content-Length", str(len(data)))
@@ -672,7 +675,7 @@ class Proof:
             async with self.attempt_http(run, replace(claimed, workspace_id=uuid4())) as http:
                 await http.get_canonical_merge_request()
         self.check("wrong workspace refuses before wire", len(self.state["wire"]) == before)
-        with self.expect(RequiredSourceUnavailable, "unknown CA handshake"):
+        with self.expect(RunFailure, "unknown CA handshake", error_code="diff_fetch_failed"):
             async with self.attempt_http(run, claimed, untrusted=True) as http:
                 await FetchVcsReviewInput(
                     HttpGitLabVcsProvider(http=http), checkpoint=http.checkpoint
@@ -680,7 +683,9 @@ class Proof:
         self.check("unknown CA emits no provider HTTP request", len(self.state["wire"]) == before)
         for mode in ("wrong-target", "bad-source"):
             self.control("A", mode=mode)
-            with self.expect(RequiredSourceUnavailable, "invalid canonical " + mode):
+            with self.expect(
+                RunFailure, "invalid canonical " + mode, error_code="diff_fetch_failed"
+            ):
                 async with self.attempt_http(run, claimed) as http:
                     await FetchVcsReviewInput(
                         HttpGitLabVcsProvider(http=http), checkpoint=http.checkpoint
@@ -688,11 +693,11 @@ class Proof:
         self.control("A", mode="complete")
 
     @contextlib.contextmanager
-    def expect(self, kind: type[BaseException], name: str) -> Any:
+    def expect(self, kind: type[BaseException], name: str, *, error_code: str | None = None) -> Any:
         try:
             yield
-        except kind:
-            self.check(name, True)
+        except kind as error:
+            self.check(name, error_code is None or getattr(error, "error_code", None) == error_code)
         else:
             self.check(name, False)
 
