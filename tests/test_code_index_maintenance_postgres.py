@@ -3,7 +3,8 @@
 `with_garbage` lists the repositories garbage collection has work in (an expired lease,
 rows of an old generation or of a dead attempt, displaced rows past their grace) and
 spares a live lease; once it lists a repository no more, every row left is visible.
-`unused` lists the live indexes past the TTL. Both page by `repository_id`.
+`unused` lists the live indexes past the TTL. Both page by `repository_id`. One run of
+the GC leader task revokes a crashed attempt's lease and deletes its rows.
 
 Opt-in: TEST_DATABASE_URL must target a test database whose user can create schemas.
 Each test migrates its own schema to head and drops it afterwards.
@@ -15,6 +16,7 @@ import asyncio
 import os
 from collections.abc import Iterator
 from dataclasses import dataclass
+from functools import partial
 from uuid import UUID, uuid4
 
 import pytest
@@ -25,6 +27,7 @@ from sqlalchemy.schema import CreateSchema, DropSchema
 
 from alembic import command
 from app.modules.code_index.application.index_store import IndexedFile
+from app.modules.code_index.application.leader_tasks import CollectIndexGarbage
 from app.modules.code_index.domain.enums import PurgeReason
 from app.modules.code_index.infrastructure.maintenance import (
     SqlAlchemyCodeIndexMaintenanceUnitOfWork,
@@ -236,5 +239,31 @@ def test_unused_lists_live_indexes_past_the_ttl_by_repository_id(fleet: _Fleet) 
 
         await _purge(index, old_ready, PurgeReason.TTL)
         assert await _unused(index) == [old_empty]
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.integration
+def test_one_gc_run_revokes_an_expired_lease_and_deletes_the_rows_of_its_attempt(
+    fleet: _Fleet,
+) -> None:
+    async def scenario() -> None:
+        index, first = fleet.index, fleet.ids[0]
+        await _enable(index, first)
+        fence = await _claim(index, first)
+        await _write(index, first, fence, _module("aa01", 1), _importer("ab01", 1))
+        # The job crashed: its lease expires with two unpublished files.
+        await _expire_lease(index, first)
+        assert await _raw_and_visible(index, first) == ((2, 2, 2, 2), (0, 0, 0, 0))
+
+        remains = await CollectIndexGarbage(
+            uow=partial(SqlAlchemyCodeIndexMaintenanceUnitOfWork, index.factory), batch_rows=100
+        ).run(10.0)
+
+        assert remains is False
+        assert await _raw_and_visible(index, first) == ((0, 0, 0, 0), (0, 0, 0, 0))
+        state = await _state(index, first)
+        assert state is not None and state.lease_expires_at is None
+        assert await _with_garbage(index) == []
 
     asyncio.run(scenario())
