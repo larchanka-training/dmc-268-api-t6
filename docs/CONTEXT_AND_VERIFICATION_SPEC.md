@@ -44,7 +44,7 @@ default branch репозитория с включённым тумблером
 
 1. Политика, документы, дефолты, профили моделей, версии промптов, порог severity и inline cap
    `max_comments` неизменяемы в run. `severity_threshold` и `max_comments` читаются из Repository при создании run,
-   сохраняется в привязках и policy snapshot (RULES_FORMAT_SPEC §7), retry их
+   сохраняются в привязках и policy snapshot (RULES_FORMAT_SPEC §7), retry их
    переиспользует; изменение настройки действует на новые runs/rerun. Это целевой
    профиль #107; legacy-оговорка о чтении во время обработки — PIPELINE_SPEC §9.
 2. Ignore применяется ко всем источникам всех LLM-вызовов, включая конвенции,
@@ -87,11 +87,13 @@ claim run
   → использовать версии, закреплённые при enqueue, загрузить документы policy_base_sha
   → получить согласованный снимок VCS и перечень изменений
   → изолировать unsupported_path/identity_unresolved
-  → review-ignore/generated → доказанное binary → остальные технические пропуски (§9.2)
-  → если все изменения доказанно исключены и нет технических пропусков: running → skipped, LLM calls = 0
-  → сохранить DiffMap и отдельно окончательную классификацию файлов run (§9.2)
-  → если остались только технические пропуски и доказанные исключения: backend none result → publishing
-  → определить summary-only
+  → review-ignore/generated → доказанное binary → остальные пропуски (§9.2)
+  → сохранить VCS-only DiffMap и отдельно immutable классификацию файлов run (§9.2), включая будущий skipped
+  → проверить оба триггера §2.3: неполный inventory/неизвестные relevant counters ИЛИ >3 000 counted allowed строк → backend summary-only/partial → сохранить результат/план → publishing
+  → полный достоверный пустой inventory: skipped/no_changes; только E без T/incomplete: skipped/all_changes_ignored; LLM calls = 0
+  → полный достоверный inventory, хотя бы один T, остальные только E/T, incomplete нет: backend none → сохранить результат/план → publishing
+  → нет анализируемого текста, есть incomplete (E/T могут быть), inventory/counters полны, counted allowed ≤3 000: backend partial, summaryOnly=false → сохранить результат/план → publishing
+  → иначе анализ доступного текста; T/incomplete означают partial
   → получить общие конвенции только из base либо зафиксировать отсутствие источников
   → собрать L1 → сигнатуры L4 → context.rag → L2 → L3 в бюджете с резервом L0
   → pre-send policy guard → manifest → review LLM
@@ -110,38 +112,54 @@ claim run
 
 **Каноническая классификация и исходы.** Приоритет по каждой записи inventory:
 валидация пути/идентичности (включая обе стороны rename/copy) → маски и built-in
-generated → доказанное binary → остальные технические пропуски (§9.2).
+generated → доказанное binary → остальные пропуски (§9.2).
 Маска/generated побеждает binary/too_large только при достоверной идентичности;
 совпадение безопасного alias не отменяет unsupported_path/identity_unresolved.
 Отсутствие patch само по себе не доказывает ни binary, ни too_large.
 
 Доказанные исключения E — маски, generated и binary. Технические пропуски T —
 `unsupported_path`, `identity_unresolved`, `too_large`, `unsupported_change`
-(submodule/gitlink и metadata-only без поддерживаемого текстового анализа).
+(submodule/gitlink и доказанный чистый rename/mode-only без поддерживаемого анализа).
 Missing/truncated/malformed patch обычного файла — неполнота, не E и не T,
 для неё нет доказательства, позволяющего выбрать none. Критерии и хранение — §9.2.
 
+Успешные маршруты выбираются сверху вниз; ошибки policy/целостности по-прежнему
+дают failed. Сначала проверяются **оба** триггера §2.3. Counted allowed включает
+известные изменения incomplete-файлов без patch; E/T исключаются из этого счётчика.
+
 | Состав согласованного inventory | Исход целевого профиля #107 |
 | --- | --- |
-| Достоверно пуст | skipped/no_changes, verdict=null, 0 LLM |
-| Только E, T нет, inventory полный | skipped/all_changes_ignored, verdict=null, 0 LLM; check-run skipped |
-| Хотя бы один T, остальные только E/T, inventory полный и достоверный | Backend FinalReviewResult: coverage=none, findings=[], verdict=null, 0 LLM; publishing → succeeded, check-run neutral; summaryOnly=false |
-| T + анализируемый текст (дополнительно могут быть E) | Анализ текста с partial; если его scope превышает порог §2.3 — backend summary-only/partial |
-| Анализируемый текст, T нет, inventory и счётчики достоверны (E могут быть) | Обычное ревью, возможен complete/clean; при >3 000 анализируемых строк — summary-only/partial по §2.3 |
-| Binary + анализируемый текст, T нет | Binary учитывается в excluded_files; само по себе не снижает coverage: возможен complete/clean |
-| Неполный inventory или неизвестны счётчики анализируемых изменений | Backend summary-only/partial по §2.3; none/skipped не выводятся из неполного списка |
-| Обычный разрешённый файл с missing/truncated/malformed patch, inventory/счётчики известны | Неполнота/partial; анализ других файлов либо summary-only по §2.3, но не none/all_changes_ignored |
+| Inventory неполный/недостоверный либо неизвестны relevant counters допущенных изменений | Backend summary-only/partial, summaryOnly=true, 0 LLM, причина diff_inventory_incomplete; none/skipped не выводятся из неизвестности |
+| Полный inventory, известные counted allowed >3 000 (в том числе missing-patch-only 4 000 строк) | Backend summary-only/partial, summaryOnly=true, 0 LLM, причина diff_too_large, даже если нет анализируемого текста |
+| Достоверно пуст, предыдущие триггеры не сработали | skipped/no_changes, verdict=null, 0 LLM |
+| Только E, T/incomplete нет, inventory полный | skipped/all_changes_ignored, verdict=null, 0 LLM; check-run skipped |
+| Хотя бы один T, остальные только E/T, inventory полный и достоверный, incomplete нет | Backend FinalReviewResult: coverage=none, findings=[], verdict=null, 0 LLM; publishing → succeeded, check-run neutral; summaryOnly=false |
+| Нет анализируемого текста, есть incomplete (возможно E/T); inventory полный, relevant counters известны, counted allowed ≤3 000 | Backend FinalReviewResult: coverage=partial, findings=[], verdict=null, summaryOnly=false, 0 LLM; publishing → succeeded/neutral; это не none и не skipped |
+| Есть анализируемый текст и T/incomplete (E могут быть), counted allowed ≤3 000 | Ревью доступного текста с partial |
+| Есть анализируемый текст, T/incomplete нет, inventory/counters полны, counted allowed ≤3 000 (E могут быть) | Обычное ревью, возможен complete/clean; доказанный binary в excluded_files сам по себе не снижает coverage |
 
-Binary-only и binary+ignored — вторая строка; too_large-only, unsupported-only,
-неразрешённый rename+ignored и submodule/mode-only — третья. E и T не считаются
-проверенными; причины E включаются в excluded_files, причины T — отдельно в
-coverage.reasons. Общие ошибки policy, неизолируемый источник и повреждение
-снимка по-прежнему дают failed. Условия проверяются до summary-only и LLM calls.
+Доказанный binary-only/binary+ignored — строка «Только E»; too_large-only,
+unsupported-only, неразрешённый rename+ignored и доказанный submodule/mode-only —
+ветка none при выполнении всех её условий. E и T не считаются проверенными;
+причины E включаются в excluded_files, T — отдельно в coverage.reasons.
+Классификация сохраняется **до любого выхода**, включая skipped, отдельно от
+VCS-only DiffMap/digest. Все backend-ветки обходят conventions, context, reviewer
+и verifier, сохраняют закреплённые severity_threshold/max_comments и
+below_severity_threshold_count=0; summary сообщает фактическое отсутствие анализа.
+Для no-text partial известный reviewed_changed_lines=0, неизвестные исходные
+статистики — null. Backend-результаты идут в общий путь сохранения результата/плана
+и публикации; skipped завершается без публикации.
 
-Выбор binary как E сохраняет текстовый scope и поведение main: сервис не
-анализирует бинарное содержимое, поэтому картинка рядом с кодом не делает
-результат неполным. Отсутствие бинарного дефекта не утверждается.
-В отличие от binary, у too_large остался непроверенный текст.
+Выбор доказанного binary как E сохраняет текстовый scope: сервис не анализирует
+бинарное содержимое. Только при подтверждённом E картинка рядом с кодом сама по
+себе не делает результат неполным; bounded evidence, удаление без blob и лимит
+чтения оговорены в §9.2. Отсутствие бинарного дефекта не утверждается.
+Too_large означает неподдержанный размер; для текста остаётся непроверенный scope.
+Пустой добавленный файл без patch (incomplete) и доказанный чистый rename/mode-only
+(T) рядом с проверенным кодом также препятствуют clean, даже без известного
+непроверенного текста: это консервативное ограничение доступных доказательств и
+поддерживаемого анализа, а не следствие одного лишь размера. Его расширение
+требует отдельной продуктовой задачи.
 
 ### 2.3. Summary-only и исходный diff
 
@@ -669,16 +687,20 @@ API, хранения, hash/dedup и eval. Старые v1 findings не пол�
 | Проход | Вход | Проверка | Выход и коды отказа |
 | --- | --- | --- | --- |
 | 1. Формат | Raw reviewer response, закреплённая schema v2/v3 | JSON, типы, обязательные поля, enum, max 10, диапазоны | Валидный ReviewOutput либо восстановление по §7; `llm_invalid_output` после исчерпания восстановления, не пустой успешный review |
-| 2. Координаты | Candidates, DiffMap, manifest принятого review-call | Canonical path, revision/side, существование и видимость каждой строки диапазона | `inline_eligible` / `general_only`; причины/drop: `unknown_path`, `wrong_side`, `left_anchor_unsupported`, `line_absent`, `cross_hunk_range`, `range_gap`, `anchor_not_visible`, `incomplete_diff`, `unsupported_provider_anchor` (§9.3) |
-| 3. Доказательства | Candidates с допустимыми координатами, evidence refs и manifest review-call | Все refs показаны, источники разрешены, ревизии совпадают | Допущенные candidates; `evidence_not_shown`, `evidence_source_disallowed`, `revision_mismatch` — drop кандидата |
-| 4. Политика/дубли | Допущенные candidates, IgnorePolicy, закреплённый lint-filter и dedup keys | Ignore guard, чистый lint, точная дедупликация; порог severity здесь не применяется | Сохранённый набор; drop `ignored_file`, `lint_pattern`, `duplicate`; pre-send guard не является проходом по ответу |
+| 2. Координаты | Candidates, доверенный inventory/DiffMap, IgnorePolicy, manifest принятого review-call | Сначала достоверная идентичность (обе стороны rename/copy), затем ignore до проверки существования/стороны/видимости каждой строки; структурный deleted-file и предварительный LEFT-отказ (§9.3) | `inline_eligible` / `general_only` либо drop: `unknown_path`, `ignored_file`, `wrong_side`, `left_anchor_unsupported`, `line_absent`, `cross_hunk_range`, `range_gap`, `anchor_not_visible`, `incomplete_diff`, `unsupported_provider_anchor`; evidence-dependent LEFT-отказ только предварительный до прохода 3 |
+| 3. Доказательства | Candidates с допустимыми координатами и отдельно кандидаты с предварительным evidence-dependent LEFT-отказом; refs и manifest review-call | Все refs показаны, provenance/источники разрешены, ревизии совпадают; лишь затем финализировать LEFT-причину (§9.3) | Допущенные candidates; `evidence_not_shown`, `evidence_source_disallowed`, `revision_mismatch` — drop; предварительный LEFT не даёт eligibility, после валидных refs финализируется `left_anchor_unsupported` либо map-derived `wrong_side`/другая координатная причина |
+| 4. Политика/дубли | Допущенные candidates, IgnorePolicy, закреплённый lint-filter и dedup keys | Defense guard разрешённых источников для evidence/general, чистый lint, точная дедупликация; порог severity здесь не применяется | Сохранённый набор; drop `lint_pattern`, `duplicate`; не переименовывает evidence-причины прохода 3 и не заменяет anchor-ignore прохода 2; pre-send guard не является проходом по ответу |
 | 5. Verifier | Замороженные candidates после прохода 4, policy/defaults, код и отдельный manifest | Обязательный смысловой batch по §7 | `supported` идёт дальше; `contradicted`, `insufficient_context` сохраняются без публикации; ошибки всего вызова — §8.4 |
 | 6. Порог и размещение | Только supported, закреплённый `severity_threshold`, `max_comments` | Порог после verifier (§7), затем сортировка и закреплённый inline cap | Drop `severity_threshold` с отдельным счётчиком; остальные — final findings с disposition inline/general; сверх cap — general, не drop |
 | 7. Публикация | FinalReviewResult и immutable publication plan, текущая идентичность VCS | Допустимый адаптер, свежесть head/diff | Публикация или явный отказ по §9–10: `superseded`, `pr_closed`, `publication_payload_too_large`, provider-specific ошибки, `publication_outcome_unknown`; без угадывания координат |
 
 `lint_pattern` и `duplicate` сохраняют действующие имена legacy-кодов;
-переименование/миграция причин не вводится. `ignored_file` выдаёт только проход 4:
-координатный проход 2 проверяет существование/сторону/видимость, не ignore.
+переименование/миграция причин не вводится. `ignored_file` для якоря выдаёт проход 2
+по доказанной inventory/DiffMap идентичности **до видимости**: текст исключённого
+файла закономерно отсутствует в manifest, это не anchor_not_visible. Выдуманный
+путь, даже совпавший с маской, не доказывает исключение: unknown_path либо
+соответствующая ошибка идентичности/неполноты сохраняется. Проход 4 оставляет
+защитный guard для evidence/general, не разрешая запрещённый источник.
 Проверка источников evidence в проходе 3 даёт `evidence_source_disallowed`,
 а не второе `ignored_file`. Pre-send guard выполняется до каждого вызова (§5)
 и останавливает отправку с `policy_context_violation`; это не drop по ответу модели.
@@ -902,7 +924,8 @@ check-run берут число из того же `result_id`; строка в�
 не включаются в reviewed. Каждая изменённая строка считается один раз по
 `file_id/side/line`; L1 контекстные строки и повторный показ не увеличивают число.
 Для `summary_only`, неполного списка VCS или недоступного счётчика число имеет
-значение `null`, а не 0. UI явно обозначает «неизвестно».
+значение `null`, а не 0. Для no-text partial из §2.2 reviewed_changed_lines
+достоверно равно 0; недоступные исходные статистики остаются null. UI явно обозначает «неизвестно».
 
 Partial устанавливается при summary-only, пропущенном разрешённом diff, усечении,
 T (§2.2) при анализе других изменений, техническом drop по
@@ -916,6 +939,10 @@ unsupported LEFT или недоступном расширении AST/импо
 `rag_edge_unconfirmed` и `rag_limit` записываются в `coverage.reasons`, как `ast_*`,
 и тоже не делают её partial сами по себе; правило `insufficient_context` выше не
 меняется.
+Доказанный drop `ignored_file` сам по себе не снижает coverage: исключённый
+якорь не становится anchor_not_visible из-за отсутствия текста в manifest. Любая
+независимая неполнота файла/кандидата по-прежнему даёт partial; разрешённый якорь
+с запрещённым evidence даёт evidence_source_disallowed, а не ignored_file.
 Дедупликация, чистый lint-drop, severity threshold и доказанное contradicted сами по себе не делают
 полноту partial. Полнота зависит от всего pipeline, не только числа findings.
 
@@ -1173,10 +1200,22 @@ hunks, невозможная нулевая координата существ
 | --- | --- |
 | `unsupported_path`, `identity_unresolved` | Недопустимый путь или недоказанная идентичность rename/copy; technical, до масок |
 | `ignored_file`, `generated` | Доказанное совпадение маски/built-in generated на достоверных путях; excluded, прежде binary/too_large |
-| `binary` | Явный факт binary от адаптера или NUL в прочитанном patch/blob; excluded. Один лишь отсутствующий patch и расширение файла не доказательство |
-| `unsupported_change` | Достоверный gitlink/submodule либо metadata-only (чистый rename/mode-only без текстовых изменений) без поддерживаемого анализа; technical, если ранее не доказано исключение |
-| `too_large` | Доказан хотя бы один предел профиля diff-limits/v1: >20 000 additions+deletions, >20 000 строк patch, >1 048 576 UTF-8 байт patch/blob; либо явный provider too_large / остановка чтения на лимите; technical |
+| `binary` | Достоверный явный факт адаптера, NUL в доступном patch либо bounded blob evidence: NUL в первых 8 KiB или magic-префикс PNG/JPEG/GIF/PDF/ZIP/ELF (`is_binary_content`); excluded. Отсутствие patch и расширение файла не доказательство |
+| `unsupported_change` | Достоверный gitlink/submodule либо доказанный чистый rename/mode-only без текстовых изменений и без поддерживаемого анализа; technical, если ранее не доказано исключение. Один raw `patch_state=metadata_only` не доказывает этот класс |
+| `too_large` | >20 000 additions+deletions, >20 000 LF-строк patch (включая context/заголовки), >1 048 576 UTF-8 байт patch или >1 048 576 сырых байт blob / достоверного blob size; либо явный provider too_large / остановка чтения на лимите; technical |
 | `missing_patch` / `truncated_patch` / `malformed_patch` | Нет полного достоверного patch обычного файла и нет доказательства предыдущих причин; incomplete, не разрешает none |
+
+Пустой добавленный `__init__.py`/`.gitkeep` без patch остаётся `missing_patch`,
+class=incomplete, если ранее не доказано исключение. DiffMap на main ставит raw
+`patch_state=metadata_only` при changes=0, но это только диагностика, не
+доказательство чистого rename/mode-only и не effective T. Реконструкция текста
+из blob или специальное исключение пустых файлов здесь не вводятся.
+
+Blob сверх лимита чтения/известного size становится `too_large` до blob-based
+binary-проверки, если binary не доказан независимо уже доступными данными.
+GitHub для removed не даёт нового blob (`github_vcs.py`); удалённая картинка без
+независимого binary evidence — `missing_patch`, incomplete. Base-blob fetch и
+классификация по расширению не предусмотрены.
 
 Ровно 20 000 строк или 1 048 576 байт по соответствующему пределу допускаются;
 число строк patch включает его заголовки и context по LF. Флаг провайдера с его
@@ -1203,7 +1242,10 @@ hunks, невозможная нулевая координата существ
 `start_line=null` означает одну строку; иначе `1 ≤ start_line < line`.
 Принимается один файл, одна сторона и один полный hunk. Для каждого номера
 включительного диапазона требуется реальная строка этой стороны; проверка
-только концов недостаточна. Все строки якоря должны быть разрешены политикой
+только концов недостаточна. Сначала разрешается достоверная inventory/DiffMap
+идентичность; ignore на ней проверяется до видимости и даёт ignored_file (§6.2).
+Неизвестный путь не становится доказанным excluded по совпадению с маской.
+Для дальнейшего допуска все строки якоря должны быть разрешены политикой
 и присутствовать в manifest принятого ответа; ссылки доказательств отдельно
 проверяются по manifest своего модельного вызова. Представление контекстной
 строки в patch может содержать оба номера, но источник старого полного файла
@@ -1218,15 +1260,23 @@ hunks, невозможная нулевая координата существ
 `unsupported_provider_anchor`, `left_anchor_unsupported`.
 В v2 модель не заявляет сторону, поэтому коды определяются наблюдаемыми данными:
 
-- `left_anchor_unsupported`: finding указывает удалённый файл; либо для его
-  диапазона нет реального RIGHT-якоря, а показанные evidence однозначно привязывают
-  замечание к удалённым строкам этого файла. Удаление нельзя подменить новой строкой.
+- `left_anchor_unsupported`: достоверная структурная идентичность удалённого файла
+  позволяет выбрать причину в проходе 2. Иначе, если реального RIGHT-якоря нет,
+  проход 2 сохраняет только предварительный координатный отказ. В проходе 3
+  refs должны пройти manifest, provenance, source-policy и revision validation;
+  лишь после этого подтверждённые evidence удалённых строк того же файла могут
+  финализировать left_anchor_unsupported. Непроверенные refs не доказывают удаление.
 - `wrong_side`: при отсутствии предыдущего условия запрошенная координата
   существует в DiffMap только на LEFT; в v3 также заявленный side не совпадает
   с реальной стороной строки. Если строки нет ни на одной стороне — line_absent;
   если нет пути — unknown_path.
 
-При совпадении условий побеждает `left_anchor_unsupported`. Оба кода дают partial
+При невалидных/непоказанных refs окончательный отказ — существующая evidence-причина
+прохода 3, а не доказательство LEFT. Если refs валидны, но не подтверждают удаление
+без RIGHT-якоря, остаётся map-derived wrong_side либо другая применимая координатная
+причина. Отложенный отказ не даёт inline/general eligibility и не допускает
+кандидата к verifier; это не ремонт координат. При совпадении условий с валидным
+подтверждением удаления побеждает `left_anchor_unsupported`. Оба кода дают partial
 как технический drop по координатам (§8.1). Это целевой профиль: main пока
 возвращает wrong_side для удалённого файла (diff_anchor.resolve_anchor);
 он не считается доказательством корректного применения v2-правила #107.
@@ -1386,7 +1436,9 @@ GitLab suggestion сериализуется отдельно от line_range: �
 
 Во всех формулах используется canonical JSON `policy-json/v1` из RULES_FORMAT_SPEC.
 `final_result_digest` покрывает версию результата, run/snapshot bindings, принятые
-call IDs, окончательные findings, coverage, verdict и summary. Сам digest,
+call IDs, окончательные findings, coverage, verdict, severity_counts,
+severity_threshold, max_comments, below_severity_threshold_count и summary
+(включая summary_text). Сам digest,
 служебное время, `publication_plan_id` и delivery receipts в его вход не входят:
 циклическое хеширование исключено. `disposition` результата задаёт исходное
 планируемое размещение. При допустимом координатном fallback фактическое размещение
@@ -1555,14 +1607,22 @@ review. Подтверждённый legacy-object связывается с run
 | Все файлы доказанно E, без T (§2.2), полный inventory | skipped, ноль conventions/review/verifier calls |
 | Один путь unsupported, остальные изменения доступны | Файл отсутствует во всех LLM-источниках и inline; остальные проверяются, coverage partial; при пустых findings или только info verdict null |
 | Полный inventory: хотя бы один T, остальные только E/T (§2.2) | Каноническая ветка none: 0 LLM, пустые findings, verdict null; publishing → succeeded/neutral, без summaryOnly |
-| Binary-only; binary + код | Binary — E: skipped в первом случае; во втором возможны complete/clean |
+| Доказанный binary-only; доказанный binary + код | E только по bounded evidence §9.2: skipped в первом случае; во втором возможны complete/clean |
 | Too_large-only; too_large >20 000 строк + 50 строк кода; маска assets/** + слишком большой assets/a.txt | Соответственно none; обычное ревью 50 строк с partial; skipped/ignored, так как маска побеждает too_large |
-| Identity_unresolved, submodule либо mode-only, отдельно и с ignored | T с каноническими исходами none/partial; отсутствие строк не превращается в clean |
-| Unsupported-файл и неполный inventory либо обычный разрешённый файл без patch | Новая ветка none неприменима; действуют прежние правила неполноты/summary-only |
+| Identity_unresolved, submodule либо доказанный pure rename/mode-only, отдельно и с ignored, incomplete нет | T с каноническими исходами none/partial; отсутствие строк не превращается в clean |
+| Неполный inventory либо неизвестные relevant counters; отдельно missing-patch-only 4 000 known строк | Сначала summary-only/partial, summaryOnly=true, 0 LLM; none/skipped и no-text partial неприменимы |
+| Только incomplete (missing/truncated/malformed patch), а также I+E, I+T и I+E+T; полный inventory, known counters 0/3 000, текста нет | Backend partial, summaryOnly=false, findings=[], verdict=null, 0 LLM включая conventions/verifier; pins и below_severity_threshold_count=0 сохранены, reviewed_changed_lines=0, неизвестная статистика null; publishing → succeeded/neutral |
+| Пустое added __init__.py/.gitkeep без patch; удалённая картинка без blob/независимого binary evidence | missing_patch/incomplete, не E и не effective metadata-only T; при no-text known ≤3 000 — предыдущая ветка |
+| Добавленный/изменённый небольшой PNG с magic; oversized blob без независимого binary evidence | Первый доказанно binary/E; второй too_large/T до blob-based проверки, отдельно none, рядом с кодом partial |
+| Чистый rename/mode-only, доказанный тип изменения, и проверенный код; отдельно пустое added без patch и код | Соответственно T либо incomplete; оба сохраняют partial/null при пустых findings даже без известного непроверенного текста |
 | Rename/copy с одним unsupported-путём; новый файл запрошен через import | Весь DiffFile и новый файловый/AST-контекст запрещены; валидная половина не обходит ignore |
 | Неподдерживаемое имя содержит управляющие символы или некорректный UTF-8 | Только безопасная диагностика; без исправленного канонического имени, утечки через metadata/omissions/summary или URL-якоря |
 | `generated/a.py` переименован в `src/a.py`, импортирован другим файлом | Diff, L2/L3/L4 нового пути не отправляются; UI может хранить исходный patch |
 | Base продвинулся после fork PR | Политика из policy_base_sha; старый код из diff_old_sha |
+| Достоверный ignored якорь отсутствует в manifest; отдельно неизвестный путь совпал с ignore-маской | В проходе 2 ignored_file до видимости, сам по себе без partial; неизвестный путь — unknown_path/ошибка идентичности, маска не доказывает E |
+| Разрешённый якорь с ignored evidence; отдельно разрешённый якорь не показан | evidence_source_disallowed в проходе 3; anchor_not_visible в проходе 2; оба технических drop дают partial, guard не допускает запрещённый source |
+| Deleted-file identity; отдельно LEFT-only координата без подтверждённого deletion evidence | Структурный left_anchor_unsupported в проходе 2; во втором случае после валидных refs остаётся wrong_side; оба partial, без verifier/general |
+| LEFT-only координата и валидное показанное deletion evidence без RIGHT; отдельно refs непоказаны/запрещены/не той ревизии | После прохода 3 left_anchor_unsupported побеждает wrong_side; невалидные refs дают соответствующую evidence-причину, не доказательство LEFT; partial, без допуска к verifier |
 | В полном diff строка есть, в окончательном prompt её нет | Finding не допускается по одной DiffMap; evidence drop и partial |
 | Диапазон через пропущенную строку/другой hunk | Нет inline; general только при всех реально показанных строках и supported |
 | Импорт неоднозначен, исключён или parser упал | Нет угадывания определения; fallback L1–L3, причина неполноты |
