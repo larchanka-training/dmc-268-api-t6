@@ -43,8 +43,11 @@ _LOGGER = logging.getLogger(__name__)
 RULES_STATUS_STALE_AFTER = timedelta(minutes=10)
 # A retryable failure is read again on a GET only after this pause, or after the
 # ``Retry-After`` of GitHub when it is longer, so that a page polled during a GitHub
-# outage does not turn into one read per request.
+# outage does not turn into one read per request. The age above still applies first, so
+# a result older than 10 minutes is read again whatever ``Retry-After`` asked.
 RULES_STATUS_RETRY_AFTER = timedelta(seconds=30)
+# The longest ``Retry-After`` that is stored, as for the code index snapshot source.
+RULES_STATUS_MAX_RETRY_AFTER = timedelta(days=1)
 # How long a worker may hold a request before another one takes it over.
 RULES_REFRESH_LEASE = timedelta(minutes=5)
 RULES_REFRESH_BATCH = 20
@@ -115,7 +118,11 @@ class RulesDiagnostic:
             limit=error.limit,
             actual=error.actual,
             pattern_index=error.pattern_index,
-            retry_after=error.retry_after,
+            retry_after=(
+                None
+                if error.retry_after is None
+                else min(error.retry_after, RULES_STATUS_MAX_RETRY_AFTER)
+            ),
         )
 
 
@@ -163,13 +170,14 @@ class StoredRulesStatus:
     """A visible repository with its stored result; ``status`` is None before the first read.
 
     ``installation_available`` is that of ``GET /api/repos/{repo_id}``: false once the App
-    has lost the repository, which the worker then no longer reads.
+    has lost the repository, which the worker then no longer reads. It has no default, so a
+    store cannot report a lost repository as readable by leaving it out.
     """
 
     default_branch: str
     status: RulesStatus | None
     refresh_requested: bool
-    installation_available: bool = True
+    installation_available: bool
 
 
 def needs_refresh(stored: StoredRulesStatus, now: datetime) -> bool:
