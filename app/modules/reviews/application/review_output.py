@@ -140,7 +140,7 @@ class ReviewFindingV2(BaseModel):
 
     model_config = _STRICT
 
-    path: Annotated[str, Field(min_length=1, max_length=512)]
+    path: Annotated[str, Field(min_length=1, max_length=1024)]
     line: Annotated[int, Field(ge=1)]
     start_line: Annotated[int | None, Field(ge=1)]
     severity: Severity
@@ -149,7 +149,7 @@ class ReviewFindingV2(BaseModel):
     body: Annotated[str, Field(min_length=1, max_length=1200)]
     suggestion: str | None
     confidence: Annotated[float, Field(ge=0, le=1)]
-    rule_name: Annotated[str | None, Field(max_length=128)] = None
+    rule_name: Annotated[str | None, Field(max_length=128)]
     evidence_refs: Annotated[list[EvidenceRef], Field(min_length=1, max_length=8)]
 
     @model_validator(mode="after")

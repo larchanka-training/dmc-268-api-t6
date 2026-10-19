@@ -24,7 +24,8 @@
       "properties": {
         "block_id": {
           "type": "string",
-          "minLength": 1
+          "minLength": 1,
+          "maxLength": 128
         },
         "start_line": {
           "type": "integer",
@@ -44,7 +45,8 @@
       "properties": {
         "block_id": {
           "type": "string",
-          "minLength": 1
+          "minLength": 1,
+          "maxLength": 128
         },
         "start_line": {
           "type": "integer",
@@ -55,7 +57,8 @@
           "minimum": 1
         },
         "check_id": {
-          "type": ["string", "null"]
+          "type": ["string", "null"],
+          "maxLength": 128
         }
       }
     },
@@ -74,7 +77,8 @@
         "candidate_id": {
           "type": "string",
           "description": "The UUID of the input candidate.",
-          "minLength": 1
+          "minLength": 1,
+          "maxLength": 64
         },
         "status": {
           "type": "string",

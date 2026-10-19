@@ -467,7 +467,7 @@ def _split_policy_lines(text: str) -> list[str]:
 
 def file_block_id(path: str) -> str:
     """Deterministic, collision-free block_id for changed files in manifest and prompt."""
-    slug = re.sub(r"[^a-zA-Z0-9]+", "-", path).strip("-")
+    slug = re.sub(r"[^a-zA-Z0-9]+", "-", path).strip("-")[:64].rstrip("-")
     digest = hashlib.sha256(path.encode("utf-8")).hexdigest()[:8]
     return f"file-{slug}-{digest}"
 

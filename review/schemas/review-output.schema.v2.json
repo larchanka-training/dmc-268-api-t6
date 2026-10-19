@@ -25,7 +25,8 @@
         "block_id": {
           "type": "string",
           "description": "The manifest block ID.",
-          "minLength": 1
+          "minLength": 1,
+          "maxLength": 128
         },
         "start_line": {
           "type": "integer",
@@ -60,7 +61,8 @@
         "path": {
           "type": "string",
           "description": "File path relative to the repository root, as it appears in the diff.",
-          "minLength": 1
+          "minLength": 1,
+          "maxLength": 1024
         },
         "line": {
           "type": "integer",
@@ -104,7 +106,8 @@
         },
         "rule_name": {
           "type": ["string", "null"],
-          "description": "Attribution target: '.review/rules.md', 'AGENTS.md', 'service-defaults:<ID>', or null."
+          "description": "Attribution target: '.review/rules.md', 'AGENTS.md', 'service-defaults:<ID>', or null.",
+          "maxLength": 128
         },
         "evidence_refs": {
           "type": "array",

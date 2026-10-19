@@ -574,6 +574,29 @@ async def test_reflection_pass_validates_service_defaults_check_id() -> None:
     with pytest.raises(VerificationInvalidOutputError, match="does not cover check '1' line 2"):
         await verifier_line_mismatch.verify(candidates=(cand2,), context=context)
 
+    # 3b. Lower bound range mismatch: check is at line 1, but range is 2-2
+    mismatched_lower_bound_response = {
+        "decisions": [
+            {
+                "candidate_id": "c-1",
+                "status": "supported",
+                "reason": "Defect",
+                "evidence_refs": [{"block_id": query_block_id, "start_line": 10, "end_line": 10}],
+                "requirement_refs": [
+                    {
+                        "block_id": "service-defaults",
+                        "start_line": 2,
+                        "end_line": 2,
+                        "check_id": "1",
+                    }
+                ],
+            }
+        ]
+    }
+    verifier_lower_mismatch = ReflectionPass(FakeVerifierModel(mismatched_lower_bound_response))
+    with pytest.raises(VerificationInvalidOutputError, match="does not cover check '1' line 1"):
+        await verifier_lower_mismatch.verify(candidates=(cand1,), context=context)
+
     # 4. Positive case: check_id matches candidate rule_id and covers line offset
     valid_id_response = {
         "decisions": [
@@ -1375,3 +1398,143 @@ async def test_reflection_pass_requirement_ref_validation_details() -> None:
     decisions_agents = await v6_agents.verify(candidates=(cand_agents,), context=context_agents)
     assert len(decisions_agents) == 1
     assert decisions_agents[0].status == "supported"
+
+
+@pytest.mark.anyio
+async def test_reflection_pass_service_defaults_slug_matching_for_real_rule_names() -> None:
+    query_block_id = file_block_id("app/query.py")
+    rule = ReviewRule("Naming Consistency", ("*.py",), (), ("Check snake_case",))
+    snapshot = make_snapshot()
+    context = ReviewContext(
+        system="SYSTEM",
+        rules=(rule,),
+        agents_md=None,
+        conventions=RepoConventions((), ()),
+        pr_meta=PullRequestMeta("T", None, "u", "b", "main", (), 1, 1, 0, False, False),
+        changed_files=(ChangedFile("app/query.py", "modified", (DiffLine(10, "added", "x = 1"),)),),
+        omitted_files=(),
+        policy_snapshot=snapshot,
+    )
+
+    # Candidate uses slug "naming-consistency" for rule named "Naming Consistency"
+    cand_slug = CandidateFindingItem(
+        candidate_id="c-slug",
+        finding=ReviewFindingV2(
+            path="app/query.py",
+            line=10,
+            start_line=None,
+            severity="medium",
+            category="readability",
+            title="Naming violation",
+            body="Variable must be snake_case",
+            suggestion=None,
+            confidence=0.9,
+            rule_name="service-defaults:naming-consistency",
+            evidence_refs=[EvidenceRef(block_id=query_block_id, start_line=10, end_line=10)],
+        ),
+    )
+    response = {
+        "decisions": [
+            {
+                "candidate_id": "c-slug",
+                "status": "supported",
+                "reason": "Variable name violates Naming Consistency rule.",
+                "evidence_refs": [{"block_id": query_block_id, "start_line": 10, "end_line": 10}],
+                "requirement_refs": [
+                    {
+                        "block_id": "service-defaults",
+                        "start_line": 1,
+                        "end_line": 1,
+                        "check_id": "1",
+                    }
+                ],
+            }
+        ]
+    }
+    verifier = ReflectionPass(FakeVerifierModel(response))
+    decisions = await verifier.verify(candidates=(cand_slug,), context=context)
+    assert len(decisions) == 1
+    assert decisions[0].status == "supported"
+
+
+@pytest.mark.anyio
+async def test_reflection_pass_secondary_source_defaults_validation_branches() -> None:
+    query_block_id = file_block_id("app/query.py")
+    rule = ReviewRule("rule-1", ("*.py",), (), ("Check something", "Check another"))
+    snapshot = make_snapshot()
+    context = ReviewContext(
+        system="SYSTEM",
+        rules=(rule,),
+        agents_md=None,
+        conventions=RepoConventions((), ()),
+        pr_meta=PullRequestMeta("T", None, "u", "b", "main", (), 1, 1, 0, False, False),
+        changed_files=(ChangedFile("app/query.py", "modified", (DiffLine(10, "added", "x = 1"),)),),
+        omitted_files=(),
+        policy_snapshot=snapshot,
+    )
+    cand_rules = CandidateFindingItem(
+        candidate_id="c-multi",
+        finding=ReviewFindingV2(
+            path="app/query.py",
+            line=10,
+            start_line=None,
+            severity="high",
+            category="security",
+            title="Security issue",
+            body="Security issue body",
+            suggestion=None,
+            confidence=0.9,
+            rule_name=".review/rules.md",
+            evidence_refs=[EvidenceRef(block_id=query_block_id, start_line=10, end_line=10)],
+        ),
+    )
+
+    # 1. Secondary ref check_id does not match any service defaults rule
+    unknown_check_response = {
+        "decisions": [
+            {
+                "candidate_id": "c-multi",
+                "status": "supported",
+                "reason": "OK",
+                "evidence_refs": [{"block_id": query_block_id, "start_line": 10, "end_line": 10}],
+                "requirement_refs": [
+                    {"block_id": "policy-rules", "start_line": 1, "end_line": 2, "check_id": None},
+                    {
+                        "block_id": "service-defaults",
+                        "start_line": 1,
+                        "end_line": 1,
+                        "check_id": "99",
+                    },
+                ],
+            }
+        ]
+    }
+    v_unknown = ReflectionPass(FakeVerifierModel(unknown_check_response))
+    with pytest.raises(
+        VerificationInvalidOutputError, match="does not match any service defaults rule"
+    ):
+        await v_unknown.verify(candidates=(cand_rules,), context=context)
+
+    # 2. Secondary ref range does not cover check line
+    range_mismatch_response = {
+        "decisions": [
+            {
+                "candidate_id": "c-multi",
+                "status": "supported",
+                "reason": "OK",
+                "evidence_refs": [{"block_id": query_block_id, "start_line": 10, "end_line": 10}],
+                "requirement_refs": [
+                    {"block_id": "policy-rules", "start_line": 1, "end_line": 2, "check_id": None},
+                    {
+                        "block_id": "service-defaults",
+                        "start_line": 2,
+                        "end_line": 2,
+                        "check_id": "1",
+                    },
+                ],
+            }
+        ]
+    }
+    v_range = ReflectionPass(FakeVerifierModel(range_mismatch_response))
+    with pytest.raises(VerificationInvalidOutputError, match="does not cover check '1'"):
+        await v_range.verify(candidates=(cand_rules,), context=context)

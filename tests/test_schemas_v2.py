@@ -34,11 +34,14 @@ def test_v2_schema_properties_match_pydantic_models() -> None:
     finding_def = schema["$defs"]["ReviewFindingV2"]
     evidence_def = schema["$defs"]["EvidenceRef"]
 
+    finding_required = {name for name, f in ReviewFindingV2.model_fields.items() if f.is_required()}
+    evidence_required = {name for name, f in EvidenceRef.model_fields.items() if f.is_required()}
+
     assert set(finding_def["properties"]) == set(ReviewFindingV2.model_fields)
-    assert set(finding_def["required"]) == set(ReviewFindingV2.model_fields)
+    assert set(finding_def["required"]) == finding_required
 
     assert set(evidence_def["properties"]) == set(EvidenceRef.model_fields)
-    assert set(evidence_def["required"]) == set(EvidenceRef.model_fields)
+    assert set(evidence_def["required"]) == evidence_required
 
 
 def test_v2_schema_accepts_valid_payload() -> None:

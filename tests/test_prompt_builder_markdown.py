@@ -646,3 +646,58 @@ def test_manifest_shown_line_count_excludes_removed_diff_lines() -> None:
     assert file_block.shown_line_count == 3
     assert len(changed_file.lines) == 5
     assert file_block.shown_ranges == ((10, 12),)
+
+
+def test_file_block_id_with_200_character_path_in_manifest_and_evidence_ref() -> None:
+    from app.modules.reviews.application.review_output import EvidenceRef, ReviewFindingV2
+
+    long_path = (
+        "src/main/java/"
+        + ("subpkg/" * 25)
+        + "VeryLongClassNameThatExceedsPathLengthLimitsTest.java"
+    )
+    assert len(long_path) >= 200
+
+    block_id = file_block_id(long_path)
+    # block_id must not exceed max_length=128
+    assert len(block_id) <= 128
+
+    diff_lines = (DiffLine(number=10, type="added", content="class Foo {}"),)
+    changed_file = ChangedFile(long_path, "added", diff_lines)
+    snapshot = make_test_snapshot()
+    context = ReviewContext(
+        system="SYSTEM",
+        rules=(),
+        agents_md=None,
+        conventions=RepoConventions(key_patterns=(), recommendations=()),
+        pr_meta=PullRequestMeta("T", None, "u", "b", "m", (), 1, 1, 0, False, False),
+        changed_files=(changed_file,),
+        omitted_files=(),
+        policy_snapshot=snapshot,
+    )
+    prompt = PromptBuilder().build_prompt(context)
+    assert f'block_id="{block_id}"' in prompt.user
+
+    manifest = PromptBuilder().build_manifest(context, call_id=uuid.uuid4())
+    block = manifest.get_block(block_id)
+    assert block is not None
+    assert block.path == long_path
+
+    # Validates cleanly into EvidenceRef and ReviewFindingV2
+    ref = EvidenceRef(block_id=block_id, start_line=10, end_line=10)
+    assert ref.block_id == block_id
+
+    finding = ReviewFindingV2(
+        path=long_path,
+        line=10,
+        start_line=None,
+        severity="info",
+        category="readability",
+        title="Check class structure",
+        body="Class structure explanation.",
+        suggestion=None,
+        confidence=0.9,
+        rule_name=None,
+        evidence_refs=[ref],
+    )
+    assert finding.path == long_path
