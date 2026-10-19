@@ -18,4 +18,6 @@ regexes = [
   # Public conventions policy-key SHA-256 oracle from baseline 1ae74b1 (#212).
   # This exact digest is fixture data, not a credential; keep every path scanned.
   '''^24ab4f16f70b7124f9af6fd8e6000572622dc1f868f1980616b2519fd03c9821$''',
+  # Exact synthetic operator-test canary; provider HTTP is mocked.
+  '''^SYNTHETIC_PAT_CANARY_169$''',
 ]
