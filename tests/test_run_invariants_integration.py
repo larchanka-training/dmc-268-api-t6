@@ -372,13 +372,14 @@ def test_run_trigger_accepts_each_value_of_the_spec(
     assert stored == trigger
 
 
+@pytest.mark.parametrize("trigger", ["push", "", "WEBHOOK", "dry-run"])
 def test_run_trigger_outside_the_spec_is_rejected(
-    seeded_connection: tuple[Connection, ParentIds],
+    seeded_connection: tuple[Connection, ParentIds], trigger: str
 ) -> None:
     connection, parents = seeded_connection
     assert_rejected(
         connection,
-        lambda: add_run(connection, parents, key="1" * 64, trigger="push"),
+        lambda: add_run(connection, parents, key="1" * 64, trigger=trigger),
         "23514",
         "ck_runs_trigger",
     )
