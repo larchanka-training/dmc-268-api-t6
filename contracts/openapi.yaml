@@ -5,13 +5,15 @@ info:
   description: |
     Browser-facing HTTP surface of the AI Code Reviewer: `portal-api` (runs, repositories,
     pull requests, live updates) and `auth-api` (GitHub App user authorization), as decided
-    in api#20 (D4, D9, D10, D11). The GitHub webhook receiver (`/webhooks/github`) and
-    `/healthcheck` are not part of the browser surface and are not described here.
+    in api#20 (D4, D9, D10, D11). The provider webhook receivers (`/webhooks/github` and
+    `/webhooks/gitlab/{installationId}`) and `/healthcheck` are not part of the browser
+    surface and are not described here. GitLab operator setup and activation use the
+    trusted local CLI (docs/SECRETS.md); no new browser GitLab grants are implied.
 
     **Origin and CORS.** The UI and the API share one origin: the UI host serves `/api/*` and
     its proxy (the edge proxy or the UI's nginx; the Vite dev server locally) forwards those
     paths to the API, so there is no CORS (#35). A separate API host remains only for
-    `/healthcheck` and GitHub webhooks. Until the service split (#16, later), the `auth-api`,
+    `/healthcheck` and provider webhooks. Until the service split (#16, later), the `auth-api`,
     `portal-api` and `webhook-api` routes live in the single FastAPI app `app/main.py`.
 
     **Wire format.** JSON bodies use camelCase keys. Timestamps are RFC 3339 in UTC with a `Z`
@@ -920,7 +922,10 @@ components:
       type: string
       description: >-
         What created the Run, stored once and never changed (docs/PIPELINE_SPEC.md §1.1):
-        `webhook` - a GitHub event or the no-CI sweep, `rerun` - `POST /api/runs/{id}/rerun`.
+        `webhook` - an eligible GitHub or GitLab event, or the GitHub-only no-CI sweep;
+        `rerun` - a rerun of an existing Run. Browser reruns use
+        `POST /api/runs/{id}/rerun` with the existing authorization and visibility rules;
+        trusted internal GitLab rerun support does not add browser GitLab access.
         `manual` and `dry_run` are reserved; nothing creates such runs yet.
       enum: [webhook, manual, rerun, dry_run]
     Engine:
