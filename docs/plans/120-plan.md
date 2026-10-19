@@ -52,7 +52,10 @@ Expand the review LLM pipeline to accept user-defined Markdown policy documents 
 - [x] **P2 Cleansing & Logging**: Summary cleansing on rejected candidates; sanitized ID/status logging.
 - [x] **P2 Documentation**: Updated `review/README.md`, `docs/TEST_PLAN.md`, plans.
 
-### Phase 6: Review Round 3 Fixes (Alexander Khomutov / axyi #5562633453)
+### Phase 6: Review Round 2 Fixes (Alexander Khomutov / axyi, commit c61511e)
+- [x] **P2 Mutation & Coverage Gates**: Covered `comment_body` helper, XML escaping edge cases, and achieved 100% test coverage across review output and prompt builder.
+
+### Phase 7: Review Round 3 Fixes (Alexander Khomutov / axyi #5562633453)
 - [x] **P1 System Prompt Preservation (Option a)**: Removed `review.system.v3.md` and golden fixtures to defer prompt rollout until #130; strictly preserved and pinned byte-level SHA-256 for `review.system.v2.md`.
 - [x] **P2 Rebase & Limits Relocation**: Rebased on `origin/main` (`f8fe9c0`) and imported `MAX_COMMIT_MESSAGES`/`MAX_COMMIT_MESSAGE_CHARS` from `commit_prefix_limits.py`.
 - [x] **P2 Error Handling & Schema Strictness**: Enforced exact 1:1 decision counts with candidate IDs, sanitized error messages (truncating IDs to 64 chars and hiding raw input payloads in ValidationError), cataloged `verification_budget_exceeded` and `verification_deadline_exceeded`, and mapped timeout/unavailable/invalid errors.
@@ -60,7 +63,7 @@ Expand the review LLM pipeline to accept user-defined Markdown policy documents 
 - [x] **P2 Manifest & Rendering Fidelity**: Numbered service-defaults lines in prompt matching manifest `shown_ranges`; neutral summary `done_well` text on cleansed summaries; legacy runs bypass reflection when `context.policy_snapshot is None`.
 - [x] **P2 Test Coverage & Docs**: 100% statement and branch coverage on review output v2 and reflection evaluation; aligned `review/README.md`, `docs/TEST_PLAN.md`, and plans.
 
-### Phase 7: Review Round 4 Fixes (Alexander Khomutov / axyi #5563263769)
+### Phase 8: Review Round 4 Fixes (Alexander Khomutov / axyi #5563263769)
 - [x] **P2 Seeding Test Assertion**: Updated `test_prompt_seeding.py` to expect 5 inserted prompt versions and version 2 for active `review.system` after deleting reviewer prompt v3.
 - [x] **P2 Finding Deserialization & Clean Error Wrapping**: Prevented double-wrapping of `InvalidReviewOutput` inside `execute_review.py` candidate deserialization loop.
 - [x] **P2 Budget Error Details**: Populated `limit` and `actual` in `PolicyBudgetExceededError` and passed them to `PolicyError(PolicyErrorCode.PROMPT_BUDGET_EXCEEDED)`.
@@ -69,16 +72,23 @@ Expand the review LLM pipeline to accept user-defined Markdown policy documents 
 - [x] **P2 Requirement Refs & Service Defaults Validation**: Enforced required `check_id` on `service_defaults` requirement refs and strict matching of requirement ref blocks to finding `rule_name`.
 - [x] **P2 Complete Test Coverage for Mutation Gates**: Added unit tests covering candidate XML attributes, verifier prompt `block_id` and service defaults, verifier token guard, `_split_policy_lines` strictly splitting on newline, `shown_line_count` excluding removed diff lines, `StoreReviewOutput` passing `allowed_v2_rules`, and `verification_*` error catalog in worker.
 
-### Phase 8: Review Round 5 Fixes (Alexander Khomutov / axyi #5567300448)
+### Phase 9: Review Round 5 Fixes (Alexander Khomutov / axyi #5567300448)
 - [x] **P2 Multi-source requirement_refs**: Relaxed single-source restriction to allow verifier decisions referencing multiple distinct policy blocks (`service-defaults` and `policy-rules`).
 - [x] **P2 Error catalog**: Added `verification_unavailable` and transient failure reasons to worker retry catalog.
 - [x] **P2 Rebase**: Rebased on `origin/main` (`9de20a5`).
 
-### Phase 9: Review Round 6 Fixes (Alexander Khomutov / axyi #5572159225)
+### Phase 10: Review Round 6 Fixes (Alexander Khomutov / axyi #5572159225)
 - [x] **P2 Block ID & Path Bounds**: Truncated slug in `file_block_id` to max 64 characters so `file-{slug}-{digest[:8]}` (max 78 chars) never exceeds `max_length=128`. Aligned `ReviewFindingV2.path` `max_length` with `MAX_PATH_BYTES` (1024). Added test for 200+ char path through manifest and `EvidenceRef`.
 - [x] **P2 Schema Synchronization**: Removed `= None` default from `ReviewFindingV2.rule_name` to keep it strictly required matching JSON schema. Synchronized `maxLength` in `review-output.schema.v2.json` and `verifier-output.schema.v1.json`.
 - [x] **P2 Service Defaults Slug Matching**: Added case-insensitive slug key to `service_defaults_check_lines` in `reflection_pass.py` for real rule names with spaces ("Naming Consistency"). Added branch coverage for secondary source validation.
 - [x] **P2 Scope Boundary Confirmation**: Formalized boundary with tech lead: live LLM gateway wiring, verifier gateway adapter, and context-fitting manifest deferred to #130.
+
+### Phase 11: Review Round 7 Fixes (Alexander Khomutov / axyi #5574663268)
+- [x] **P2 Required check_id in RequirementRef**: Removed `= None` default from `RequirementRef.check_id`, making it strictly required nullable string per CONTEXT_AND_VERIFICATION_SPEC §7.2 and `verifier-output.schema.v1.json`.
+- [x] **P2 Verifier Schema Model Match**: Added `test_verifier_schema_properties_match_pydantic_models` in `test_schemas_v2.py` asserting exact match of schema `required` fields against `is_required()` for all verifier models (`VerificationOutput`, `VerificationDecision`, `RequirementRef`, `EvidenceRef`).
+- [x] **P3 Schema minLength**: Added `minLength: 1` to `check_id` in `verifier-output.schema.v1.json` and verified empty string rejection and null acceptance.
+- [x] **P3 Service Defaults Key Ordering & Upper Bound**: Ensured exact-case slug key isn't overwritten by lowercase setdefault in `reflection_pass.py`; added unit tests for exact-case slug, secondary source upper bound, and boundary tests for `path` 1024, `block_id` 128, and `check_id` 128.
+
 
 
 

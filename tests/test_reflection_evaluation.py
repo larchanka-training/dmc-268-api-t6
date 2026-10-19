@@ -240,7 +240,12 @@ class TestPositiveEvaluation:
                             }
                         ],
                         "requirement_refs": [
-                            {"block_id": "policy-rules", "start_line": 1, "end_line": 1}
+                            {
+                                "block_id": "policy-rules",
+                                "start_line": 1,
+                                "end_line": 1,
+                                "check_id": None,
+                            }
                         ],
                     }
                 ]
@@ -377,7 +382,12 @@ class TestNegativeEvaluation:
                             }
                         ],
                         "requirement_refs": [
-                            {"block_id": "policy-rules", "start_line": 2, "end_line": 2}
+                            {
+                                "block_id": "policy-rules",
+                                "start_line": 2,
+                                "end_line": 2,
+                                "check_id": None,
+                            }
                         ],
                     }
                 ]

@@ -344,8 +344,8 @@ class ReflectionPass:
                     c_id = str(idx)
                     service_defaults_check_lines[(r.name, c_id)] = line_offset
                     if r_slug:
+                        service_defaults_check_lines.setdefault((r_slug.lower(), c_id), line_offset)
                         service_defaults_check_lines[(r_slug, c_id)] = line_offset
-                        service_defaults_check_lines[(r_slug.lower(), c_id)] = line_offset
                     all_check_lines.setdefault(c_id, set()).add(line_offset)
                     line_offset += 1
 

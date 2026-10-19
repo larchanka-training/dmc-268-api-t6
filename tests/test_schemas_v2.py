@@ -7,8 +7,13 @@ from pathlib import Path
 
 from jsonschema import Draft202012Validator
 
+from app.modules.reviews.application.reflection_pass import (
+    VerificationDecision,
+    VerificationOutput,
+)
 from app.modules.reviews.application.review_output import (
     EvidenceRef,
+    RequirementRef,
     ReviewFindingV2,
 )
 
@@ -40,6 +45,37 @@ def test_v2_schema_properties_match_pydantic_models() -> None:
     assert set(finding_def["properties"]) == set(ReviewFindingV2.model_fields)
     assert set(finding_def["required"]) == finding_required
 
+    assert set(evidence_def["properties"]) == set(EvidenceRef.model_fields)
+    assert set(evidence_def["required"]) == evidence_required
+
+
+def test_verifier_schema_properties_match_pydantic_models() -> None:
+    schema = json.loads(VERIFIER_SCHEMA_PATH.read_text(encoding="utf-8"))
+
+    # Root VerificationOutput
+    output_required = {
+        name for name, f in VerificationOutput.model_fields.items() if f.is_required()
+    }
+    assert set(schema["properties"]) == set(VerificationOutput.model_fields)
+    assert set(schema["required"]) == output_required
+
+    # VerificationDecision
+    decision_def = schema["$defs"]["VerificationDecision"]
+    decision_required = {
+        name for name, f in VerificationDecision.model_fields.items() if f.is_required()
+    }
+    assert set(decision_def["properties"]) == set(VerificationDecision.model_fields)
+    assert set(decision_def["required"]) == decision_required
+
+    # RequirementRef
+    req_def = schema["$defs"]["RequirementRef"]
+    req_required = {name for name, f in RequirementRef.model_fields.items() if f.is_required()}
+    assert set(req_def["properties"]) == set(RequirementRef.model_fields)
+    assert set(req_def["required"]) == req_required
+
+    # EvidenceRef
+    evidence_def = schema["$defs"]["EvidenceRef"]
+    evidence_required = {name for name, f in EvidenceRef.model_fields.items() if f.is_required()}
     assert set(evidence_def["properties"]) == set(EvidenceRef.model_fields)
     assert set(evidence_def["required"]) == evidence_required
 
@@ -96,3 +132,22 @@ def test_verifier_schema_accepts_valid_payload() -> None:
         ]
     }
     assert list(validator.iter_errors(payload)) == []
+
+    # check_id with string is valid
+    payload_str_check = json.loads(json.dumps(payload))
+    payload_str_check["decisions"][0]["requirement_refs"][0]["check_id"] = "check-1"
+    assert list(validator.iter_errors(payload_str_check)) == []
+
+    # check_id cannot be empty string (minLength: 1)
+    payload_empty_check = json.loads(json.dumps(payload))
+    payload_empty_check["decisions"][0]["requirement_refs"][0]["check_id"] = ""
+    errors_empty = list(validator.iter_errors(payload_empty_check))
+    assert len(errors_empty) >= 1
+    assert any(e.validator == "minLength" for e in errors_empty)
+
+    # check_id is required: omitting check_id is rejected
+    payload_missing_check = json.loads(json.dumps(payload))
+    del payload_missing_check["decisions"][0]["requirement_refs"][0]["check_id"]
+    errors_missing = list(validator.iter_errors(payload_missing_check))
+    assert len(errors_missing) >= 1
+    assert any("check_id" in e.message for e in errors_missing)

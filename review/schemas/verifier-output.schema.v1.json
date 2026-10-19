@@ -58,6 +58,7 @@
         },
         "check_id": {
           "type": ["string", "null"],
+          "minLength": 1,
           "maxLength": 128
         }
       }

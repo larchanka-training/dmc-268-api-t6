@@ -85,8 +85,44 @@ def test_requirement_ref_validates_range_and_check_id() -> None:
     )
     assert svc_ref.check_id == "B4.1"
 
+    # start_line > end_line raises ValidationError
+    with pytest.raises(ValidationError, match="start_line must be <= end_line"):
+        RequirementRef(block_id="b", start_line=10, end_line=5, check_id=None)
+
+    # check_id is required (nullable string)
     with pytest.raises(ValidationError):
-        RequirementRef(block_id="b", start_line=10, end_line=5)
+        RequirementRef.model_validate({"block_id": "b", "start_line": 1, "end_line": 5})
+
+    # check_id cannot be empty string
+    with pytest.raises(ValidationError):
+        RequirementRef(block_id="b", start_line=1, end_line=5, check_id="")
+
+
+def test_bounds_for_path_block_id_and_check_id() -> None:
+    # 1. path: exactly 1024 is valid, 1025 raises ValidationError
+    f_1024 = make_valid_finding_v2(path="p" * 1024)
+    assert len(f_1024.path) == 1024
+
+    with pytest.raises(ValidationError):
+        make_valid_finding_v2(path="p" * 1025)
+
+    # 2. EvidenceRef block_id: exactly 128 is valid, 129 raises ValidationError
+    ev_128 = EvidenceRef(block_id="b" * 128, start_line=1, end_line=1)
+    assert len(ev_128.block_id) == 128
+
+    with pytest.raises(ValidationError):
+        EvidenceRef(block_id="b" * 129, start_line=1, end_line=1)
+
+    # 3. RequirementRef block_id & check_id: 128 valid, 129 raises ValidationError
+    req_128 = RequirementRef(block_id="b" * 128, start_line=1, end_line=1, check_id="c" * 128)
+    assert len(req_128.block_id) == 128
+    assert req_128.check_id == "c" * 128
+
+    with pytest.raises(ValidationError):
+        RequirementRef(block_id="b" * 129, start_line=1, end_line=1, check_id="c")
+
+    with pytest.raises(ValidationError):
+        RequirementRef(block_id="b", start_line=1, end_line=1, check_id="c" * 129)
 
 
 def test_review_finding_v2_validates_rule_name_values() -> None:
