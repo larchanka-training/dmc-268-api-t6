@@ -481,6 +481,21 @@ class SqlAlchemyCodeIndexStore:
             github_request_count=0,
         )
 
+    async def purge_unused(self, repository_id: UUID, unused_for: timedelta) -> bool:
+        state = await self._state(repository_id, lock=True)
+        if (
+            state is None
+            or state.purge_reason is not None
+            or state.status == IndexStatus.FAILED
+            or state.last_used_at is None
+        ):
+            return False
+        # Read after the lock: a use committed while this purge waited keeps the index.
+        if state.last_used_at >= await self._clock() - unused_for:
+            return False
+        await self.purge(repository_id, PurgeReason.TTL)
+        return True
+
     async def claim_lease(
         self, repository_id: UUID, generation: int, lease_seconds: int, admission: IndexAdmission
     ) -> LeaseClaim | ClaimRefused:

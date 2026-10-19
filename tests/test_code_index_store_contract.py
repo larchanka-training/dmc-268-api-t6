@@ -18,6 +18,7 @@ _PORT_METHODS = [
     "get_state",
     "enable",
     "purge",
+    "purge_unused",
     "claim_lease",
     "discard_abandoned",
     "replace_file",
@@ -46,7 +47,8 @@ def _public_methods(cls: type) -> set[str]:
 
 
 def test_store_port_has_exactly_the_planned_methods() -> None:
-    # No leader enumeration or TTL seam: those belong to #143 and take no repository_id.
+    # The TTL seam `purge_unused` takes repository_id like every other method; the leader
+    # enumeration takes none and lives in the separate `CodeIndexMaintenance` port (#143).
     assert _public_methods(CodeIndexStore) == set(_PORT_METHODS)
 
 

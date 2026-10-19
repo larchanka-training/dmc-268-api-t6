@@ -11,7 +11,7 @@ import dataclasses
 import os
 from collections.abc import Awaitable, Callable, Iterator, Sequence
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from enum import StrEnum
 from typing import Any
 from uuid import UUID, uuid4
@@ -2281,6 +2281,157 @@ def test_a_later_purge_replaces_only_a_ttl_reason(index: _Index) -> None:
         )
         assert await purge(index.b, PurgeReason.REMOVED) == disabled
         assert await purge(index.b, PurgeReason.TTL) == disabled
+
+    asyncio.run(scenario())
+
+
+# The TTL purge (#143, ADR §4 lifetime row): any live index except `failed`.
+
+_TTL = timedelta(days=30)
+
+
+async def _purge_unused(index: _Index, repository_id: UUID) -> bool:
+    async with index.uow() as uow:
+        purged = await uow.index.purge_unused(repository_id, _TTL)
+        await uow.commit()
+    return purged
+
+
+async def _unused_for_31_days(index: _Index, repository_id: UUID) -> None:
+    await _execute(
+        index,
+        "UPDATE code_index_states SET last_used_at = clock_timestamp() - interval '31 days' "
+        "WHERE repository_id = :repository",
+        repository_id,
+    )
+
+
+@pytest.mark.integration
+def test_purge_unused_purges_an_old_live_index_with_the_ttl_reason(index: _Index) -> None:
+    async def scenario() -> None:
+        for repository_id in (index.a, index.b):
+            await _enable(index, repository_id)
+            await _build(index, repository_id, C1, _module("aa01", 1))
+        await _unused_for_31_days(index, index.a)
+        old = await _state(index, index.a)
+        untouched = await _state(index, index.b)
+
+        assert await _purge_unused(index, index.a) is True
+
+        purged = await _state(index, index.a)
+        assert purged is not None and old is not None
+        assert (
+            purged.generation,
+            purged.status,
+            purged.purge_reason,
+            purged.published_publication,
+            purged.file_count,
+        ) == (2, "empty", "ttl", 0, 0)
+        assert purged.last_used_at == old.last_used_at
+        assert await _reads(index, index.a) == (None, [], [], [], [])
+        assert await _state(index, index.b) == untouched
+        assert await _purge_unused(index, index.a) is False
+        assert await _state(index, index.a) == purged
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.integration
+def test_purge_unused_leaves_a_failed_a_purged_and_a_fresh_index_alone(index: _Index) -> None:
+    async def scenario() -> None:
+        await _enable(index, index.a)
+        await _build(index, index.a, C1, _module("aa01", 1))
+        fresh = await _state(index, index.a)
+        assert await _purge_unused(index, index.a) is False
+        assert await _state(index, index.a) == fresh
+        # A NULL last_used_at is not older than the TTL either.
+        await _execute(
+            index,
+            "UPDATE code_index_states SET last_used_at = NULL WHERE repository_id = :repository",
+            index.a,
+        )
+        never_used = await _state(index, index.a)
+        assert await _purge_unused(index, index.a) is False
+        assert await _state(index, index.a) == never_used
+
+        fence = await _claim(index, index.a, generation=1)
+        await _mark_failed(index, index.a, fence, "limit_exceeded:symbols")
+        await _unused_for_31_days(index, index.a)
+        failed = await _state(index, index.a)
+        assert failed is not None and failed.status == "failed"
+        assert await _purge_unused(index, index.a) is False
+        assert await _state(index, index.a) == failed
+
+        await _enable(index, index.b)
+        await _purge(index, index.b, PurgeReason.DISABLED)
+        await _unused_for_31_days(index, index.b)
+        disabled = await _state(index, index.b)
+        assert await _purge_unused(index, index.b) is False
+        assert await _state(index, index.b) == disabled
+
+        assert await _purge_unused(index, uuid4()) is False
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.integration
+def test_purge_unused_rechecks_last_used_at_after_the_row_lock(index: _Index) -> None:
+    async def scenario() -> None:
+        await _enable(index, index.a)
+        await _build(index, index.a, C1, _module("aa01", 1))
+        await _unused_for_31_days(index, index.a)
+        async with index.factory() as holder:
+            await holder.execute(
+                text(
+                    "SELECT 1 FROM code_index_states WHERE repository_id = :repository FOR UPDATE"
+                ),
+                {"repository": index.a},
+            )
+            holder_pid = await holder.scalar(text("SELECT pg_backend_pid()"))
+            purging = asyncio.create_task(_purge_unused(index, index.a))
+            await _wait_until_blocked(index, holder_pid, 1, purging)
+            # A use of the index refreshes last_used_at while the purge waits for the row.
+            await holder.execute(
+                text(
+                    "UPDATE code_index_states SET last_used_at = clock_timestamp() "
+                    "WHERE repository_id = :repository"
+                ),
+                {"repository": index.a},
+            )
+            await holder.commit()
+
+        assert await asyncio.wait_for(purging, 5) is False
+        state = await _state(index, index.a)
+        assert state is not None
+        assert (state.generation, state.status, state.purge_reason) == (1, "ready", None)
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.integration
+def test_two_parallel_ttl_purges_purge_the_index_once(
+    index: _Index, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def scenario() -> None:
+        await _enable(index, index.a)
+        await _build(index, index.a, C1, _module("aa01", 1))
+        await _unused_for_31_days(index, index.a)
+        async with index.uow() as first:
+            first_pid = await first.session.scalar(text("SELECT pg_backend_pid()"))
+            store = first.index
+            locked, release = _pause_after_lock(monkeypatch, store)
+            first_run = asyncio.create_task(store.purge_unused(index.a, _TTL))
+            await asyncio.wait_for(locked.wait(), 5)
+            second_run = asyncio.create_task(_purge_unused(index, index.a))
+            await _wait_until_blocked(index, first_pid, 1, second_run)
+            release.set()
+            assert await first_run is True
+            await first.commit()
+
+        assert await asyncio.wait_for(second_run, 5) is False
+        state = await _state(index, index.a)
+        assert state is not None
+        assert (state.generation, state.status, state.purge_reason) == (2, "empty", "ttl")
 
     asyncio.run(scenario())
 
