@@ -769,6 +769,15 @@ def test_offsite_names_reach_only_the_monitoring_deploy() -> None:
     assert set(OFFSITE) <= set(envs.group(1).split(","))
 
 
+def test_offsite_file_names_stay_plain_across_passphrase_changes() -> None:
+    compose = _read(MONITORING / "compose.offsite.yml")
+
+    # With encrypted names a new passphrase could not list the older copies, so the 30-day prune
+    # would never remove them (docs/MONITORING.md §9, "Смена ключа").
+    assert re.search(r'^\s+RCLONE_CONFIG_SECURE_FILENAME_ENCRYPTION: "off"$', compose, re.M)
+    assert "--min-age" in _read(MONITORING / "backup" / "offsite.sh")
+
+
 def test_offsite_copy_is_encrypted_and_the_passphrase_never_stored(host: Host) -> None:
     result = host.deploy(extra=OFFSITE)
     env = host.env()

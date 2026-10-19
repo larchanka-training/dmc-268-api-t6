@@ -177,7 +177,7 @@ summary-only) и `failed`, но не `cancelled` и `skipped`, и в `details_ur
 | `BACKUP_S3_BUCKET` | variable, Environment `staging` | там же | имя бакета |
 | `BACKUP_S3_ACCESS_KEY_ID` | secret, Environment `staging` | там же | Access Key ID R2-токена (Object Read & Write на один бакет) |
 | `BACKUP_S3_SECRET_ACCESS_KEY` | secret, Environment `staging` | там же | Secret Access Key того же токена |
-| `BACKUP_ENCRYPTION_PASSPHRASE` | secret, Environment `staging` | на хосте только obscured-форма rclone и SHA-256 | ключ шифрования дампов (rclone crypt) до выгрузки. Копия — у техлида вне GitHub, без неё бэкапы не расшифровать. Пять имён `BACKUP_*` задаются вместе или не задаются вовсе ([MONITORING.md](MONITORING.md) §9) |
+| `BACKUP_ENCRYPTION_PASSPHRASE` | secret, Environment `staging` | на хосте в `.env` стека в форме `rclone obscure` (обратима `rclone reveal`, `.env` равносилен ключу) и SHA-256 | ключ шифрования дампов (rclone crypt) до выгрузки. Копия — у техлида вне GitHub, без неё бэкапы не расшифровать. Пять имён `BACKUP_*` задаются вместе или не задаются вовсе ([MONITORING.md](MONITORING.md) §9) |
 | `REDIS_PASSWORD` | копия из `<APP_DIR>/.env` | `.env` стека, контейнер `redis-exporter` | метрики Redis. Сменился пароль Redis — следующий выкат мониторинга (сразу после выката приложения) берёт новый |
 
 Пароли ролей PostgreSQL передаются в `psql` через stdin, не через argv; вывод этого вызова подавлен, потому что `psql` повторил бы упавший оператор вместе с паролем.

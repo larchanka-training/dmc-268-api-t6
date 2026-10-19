@@ -21,8 +21,10 @@ services:
       RCLONE_CONFIG_STORE_NO_CHECK_BUCKET: "true"
       RCLONE_CONFIG_SECURE_TYPE: crypt
       RCLONE_CONFIG_SECURE_REMOTE: store:${BACKUP_S3_BUCKET:?BACKUP_S3_BUCKET is required}/postgres
-      # BACKUP_ENCRYPTION_PASSPHRASE in rclone's obscured form (deploy.sh). The content is readable
-      # only with the passphrase; file names stay plain so a restore can pick a dump by date.
+      # BACKUP_ENCRYPTION_PASSPHRASE in rclone's obscured form (deploy.sh). Obscuring is reversible
+      # (rclone reveal): the stack .env is as sensitive as the passphrase. The content is readable
+      # only with the passphrase. File names stay plain so a restore can pick a dump by date and,
+      # after a passphrase change, older copies are still listed and pruned by age.
       RCLONE_CONFIG_SECURE_PASSWORD: ${BACKUP_ENCRYPTION_PASSWORD_OBSCURED:?BACKUP_ENCRYPTION_PASSWORD_OBSCURED is required}
       RCLONE_CONFIG_SECURE_FILENAME_ENCRYPTION: "off"
       BACKUP_OFFSITE_RETENTION_DAYS: ${BACKUP_OFFSITE_RETENTION_DAYS:-30}
