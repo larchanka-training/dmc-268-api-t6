@@ -9,6 +9,7 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.modules.reviews.application.queue_messages import ReviewPublishPointer, message_trigger
+from app.modules.reviews.application.run_trigger import RunTrigger
 from app.modules.reviews.application.try_enqueue_webhook_run import PendingRunMessage
 from app.modules.reviews.application.verdict import publish_message_id
 
@@ -45,7 +46,7 @@ class ReviewRunMessage(_Message):
     engine: Literal["fast", "deep"]
     rule_version_id: UUID
     prompt_version_id: UUID
-    trigger: Literal["webhook", "manual", "rerun", "dry_run"]
+    trigger: RunTrigger
     attempt: int
     requested_at: datetime
 
@@ -71,7 +72,7 @@ class ReviewRunMessage(_Message):
             engine=message.engine,  # type: ignore[arg-type]
             rule_version_id=message.rule_version_id,
             prompt_version_id=message.prompt_version_id,
-            trigger=message_trigger(message),  # type: ignore[arg-type]
+            trigger=message_trigger(message),
             attempt=message.attempt,
             requested_at=message.requested_at.astimezone(UTC),
         )

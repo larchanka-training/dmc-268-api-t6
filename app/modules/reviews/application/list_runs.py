@@ -10,6 +10,8 @@ from datetime import datetime
 from typing import Protocol
 from uuid import UUID
 
+from app.modules.reviews.application.run_trigger import RunTrigger
+
 
 @dataclass(frozen=True)
 class RunCursor:
@@ -59,7 +61,7 @@ class RunListItem:
     url: str
     head_sha: str
     created_at: datetime
-    trigger: str
+    trigger: RunTrigger
     summary_only: bool = False
 
 
