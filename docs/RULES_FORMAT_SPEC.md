@@ -1013,10 +1013,12 @@ default branch и не смешивает редактор правил с VCS w
 
 ### 10.1. Статус правил репозитория (#150)
 
-Механизм согласован техлидом в #150 [техлид, 18.10.2026, #150]. Просмотр rules из таблицы выше реализован как `GET /api/repos/{repo_id}/rules-status` (`getRulesStatus` в
-`contracts/openapi.yaml`). Planned-операции `listRuleVersions`, `createRuleVersion` и
-`previewRuleVersion` с прежним телом не реализуются: в контракте у них остаётся
-`x-status: planned`, а `x-note` называет их заменёнными по этому разделу.
+Механизм согласован техлидом [техлид, 18.10.2026, #150].
+
+Просмотр rules из таблицы выше реализован как `GET /api/repos/{repo_id}/rules-status`
+(`getRulesStatus` в `contracts/openapi.yaml`). Planned-операции `listRuleVersions`,
+`createRuleVersion` и `previewRuleVersion` с прежним телом не реализуются: в контракте
+у них остаётся `x-status: planned`, а `x-note` называет их заменёнными по этому разделу.
 
 Read-only effective snapshot из строки «Просмотр rules» этот эндпоинт не отдаёт: он
 показывает только сам файл (текст, sha, checksum, маски, диагностику). Effective
@@ -1093,7 +1095,7 @@ snapshot (§5, итог дефолтов и файла для прогона) в
 `UI_ZOD_COMPONENTS` не входит.
 
 Вне объёма: редактирование файла из портала, `previewRuleVersion` и подробности
-ошибки политики в `RunSession`.
+ошибки политики в `RunSession` (#204).
 
 ## 11. Приёмочные сценарии для будущей реализации
 
