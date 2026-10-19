@@ -24,6 +24,7 @@ from app.modules.reviews.application.conventions import (
     RepositoryConventionsSource,
     RepositoryFile,
     RepositorySnapshot,
+    RepositoryTreeInput,
 )
 from app.modules.reviews.application.execute_review import ReviewModel, ReviewReply
 from app.modules.reviews.application.get_run_diff import DiffSnapshot
@@ -225,7 +226,7 @@ class CheckpointedProvider:
     async def fetch_agents_md(self, repository_id: UUID) -> RepositorySnapshot:
         return await self._inner.fetch_agents_md(repository_id)
 
-    async def fetch_tree(self, repository_id: UUID) -> tuple[RepositoryFile, ...]:
+    async def fetch_tree(self, repository_id: UUID) -> RepositoryTreeInput:
         return await self._inner.fetch_tree(repository_id)
 
     async def fetch_files(
@@ -572,7 +573,7 @@ async def update_check_run(
         return
     async with uow_factory() as uow:
         report = await uow.runs.check_run_report(run_id)
-    if report is None:
+    if report is None or report.provider != "github":
         return
     report = replace(report, run_url=run_url(run_id))
 

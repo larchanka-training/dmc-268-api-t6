@@ -22,8 +22,10 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 from fastapi.routing import APIRoute, iter_route_contexts
 from pydantic import BaseModel, ValidationError
 
+from app.bootstrap.gitlab import gitlab_webhook_lifespan
 from app.bootstrap.portal_auth import get_auth_scope
 from app.bootstrap.reviews_api import (
+    ReviewsApiResources,
     get_cancel_run,
     get_file_blob_cache,
     get_github_webhook_receipt_uow_factory,
@@ -44,6 +46,8 @@ from app.common.application.github_repository_name import REPOSITORY_FULL_NAME_M
 from app.common.infrastructure.db.enums import RunState
 from app.modules.auth.api.router import auth_router
 from app.modules.auth.application.scope import AuthScope
+from app.modules.integrations.gitlab.api.webhook import router as gitlab_webhook_router
+from app.modules.integrations.gitlab.infrastructure.settings import GitLabApiSettings
 from app.modules.integrations.webhooks.api.dtos import GitHubWebhookPayloadDto
 from app.modules.integrations.webhooks.api.receipt import VerifiedGitHubDelivery
 from app.modules.integrations.webhooks.application.receive_github_delivery import (
@@ -163,12 +167,19 @@ run_step_hub = InMemoryRunStepHub()
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """Process resources plus the NOTIFY bridges from worker processes into ``/api/stream``."""
-    async with (
-        reviews_api_lifespan(app),
-        run_update_listener(os.environ.get("DATABASE_URL"), run_update_hub),
-        run_step_listener(os.environ.get("DATABASE_URL"), run_step_hub),
-    ):
-        yield
+    gitlab_api = GitLabApiSettings.from_environment(os.environ)
+    async with reviews_api_lifespan(app):
+        resources = getattr(app.state, "reviews_api_resources", None)
+        async with (
+            gitlab_webhook_lifespan(
+                app,
+                resources.session_factory if isinstance(resources, ReviewsApiResources) else None,
+                intake_enabled=gitlab_api.intake_enabled,
+            ),
+            run_update_listener(os.environ.get("DATABASE_URL"), run_update_hub),
+            run_step_listener(os.environ.get("DATABASE_URL"), run_step_hub),
+        ):
+            yield
 
 
 KEEPALIVE_INTERVAL_SECONDS = 15.0
@@ -998,4 +1009,5 @@ async def list_repository_pulls(
 
 app.include_router(api_router)
 app.include_router(github_webhook_router)
+app.include_router(gitlab_webhook_router)
 app.include_router(auth_router)

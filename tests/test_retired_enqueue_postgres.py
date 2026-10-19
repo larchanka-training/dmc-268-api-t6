@@ -3,16 +3,19 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import time
 from collections.abc import Iterator
 from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 from uuid import UUID
 
 import httpx
+import psycopg
 import pytest
 from sqlalchemy import Connection, event, text
 from sqlalchemy.exc import DBAPIError
@@ -22,15 +25,25 @@ from app.modules.auth.application.scope import AuthScope
 from app.modules.integrations.webhooks.infrastructure.github_installation_tree_provider import (
     GitHubAppInstallationAccessTokenProvider,
 )
+from app.modules.repositories.application.onboard_repository import load_default_rule_sets
+from app.modules.repositories.application.sync_installation_repositories import (
+    SyncInstallationRepositories,
+)
+from app.modules.repositories.infrastructure.installation_repository_unit_of_work import (
+    SqlAlchemyInstallationRepositoriesUnitOfWork,
+)
 from app.modules.reviews.application.determine_ci_eligibility import (
     CiEligibility,
     CiProviderCheckpoint,
     CiSnapshot,
     DetermineCiEligibility,
+    WebhookRunIdentity,
 )
 from app.modules.reviews.application.rerun_run import RerunOutcome
 from app.modules.reviews.application.try_enqueue_webhook_run import (
+    PendingRunMessage,
     RunInsertCandidate,
+    RunPublicationKind,
     TryEnqueueWebhookRun,
 )
 from app.modules.reviews.infrastructure.ci_eligibility_candidates import (
@@ -42,7 +55,16 @@ from app.modules.reviews.infrastructure.webhook_runs import (
     SqlAlchemyWebhookRunStore,
     SqlAlchemyWebhookRunUnitOfWork,
 )
-from tests.portal_postgres import INSTALL_A, PR_OPEN, REPO_A, RUN_DONE, WS_A, Env, portal_schema
+from tests.portal_postgres import (
+    INSTALL_A,
+    PR_OPEN,
+    REPO_A,
+    RUN_DONE,
+    WS_A,
+    WS_B,
+    Env,
+    portal_schema,
+)
 from tests.test_effective_review_eligibility_postgres import Publisher
 from tests.test_retired_installation_postgres import DiscardTokenCache
 
@@ -506,6 +528,260 @@ def _exercise_ci_request_change(env: Env, phase: str, change: str) -> None:
                     )
                     == previous_ci
                 )
+        finally:
+            await engine.dispose()
+
+    asyncio.run(exercise())
+
+
+@dataclass
+class PausedEligibility:
+    """Pause at the public checker port after the real detached decision."""
+
+    real: DetermineCiEligibility
+    ready: asyncio.Event = field(default_factory=asyncio.Event)
+    release: asyncio.Event = field(default_factory=asyncio.Event)
+
+    async def execute(
+        self,
+        code_change_id: UUID,
+        expected_head_sha: str,
+        *,
+        expected_installation_external_id: int | None = None,
+    ) -> CiEligibility:
+        decision = await self.real.execute(
+            code_change_id,
+            expected_head_sha,
+            expected_installation_external_id=expected_installation_external_id,
+        )
+        assert decision.eligible is True
+        self.ready.set()
+        await asyncio.wait_for(self.release.wait(), timeout=5)
+        return decision
+
+
+@dataclass
+class CommittedPublisher:
+    factory: async_sessionmaker[AsyncSession]
+    messages: list[PendingRunMessage] = field(default_factory=list)
+
+    async def publish_confirmed(
+        self, message: PendingRunMessage, *, kind: RunPublicationKind = RunPublicationKind.QUEUED
+    ) -> None:
+        assert kind is RunPublicationKind.QUEUED
+        async with self.factory() as session:
+            row = (
+                await session.execute(
+                    text(
+                        "SELECT r.origin_provider_installation_id, pi.workspace_id, pi.provider, "
+                        "r.head_sha, r.message_published_at FROM runs r "
+                        "JOIN provider_installations pi ON pi.id=r.origin_provider_installation_id "
+                        "WHERE r.id=:id"
+                    ),
+                    {"id": message.run_id},
+                )
+            ).one()
+            assert tuple(row) == (INSTALL_A, WS_A, "github", _HEAD, None)
+            assert (
+                await session.scalar(
+                    text(
+                        "SELECT count(*) FROM pg_stat_activity WHERE datname=current_database() "
+                        "AND backend_type='client backend' "
+                        "AND pid<>pg_backend_pid() AND xact_start IS NOT NULL"
+                    )
+                )
+            ) == 0
+        assert message.provider == "github"
+        assert message.installation_id == 17
+        assert message.workspace_id == WS_A
+        assert message.repository_id == REPO_A
+        assert message.repository_external_id == 101
+        self.messages.append(message)
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("wait_mode", ["never", "always"])
+@pytest.mark.parametrize(
+    "change,expected_status,expected_reason",
+    [
+        ("unchanged", "enqueued", None),
+        ("gitlab_collision", "enqueued", None),
+        ("origin", "stale", "state_changed"),
+        ("origin_other_workspace", "stale", "state_changed"),
+        ("workspace", "stale", "state_changed"),
+        ("project", "stale", "state_changed"),
+        ("retirement_positive_flags", "stale", "state_changed"),
+        ("gitlab_binding", "unconfigured", "missing_installation"),
+    ],
+)
+def test_detached_github_identity_survives_only_equal_locked_authority(
+    enqueue_env: Env,
+    wait_mode: str,
+    change: str,
+    expected_status: str,
+    expected_reason: str | None,
+) -> None:
+    async def exercise() -> UUID | None:
+        engine = enqueue_env.engine()
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        publisher, ci = CommittedPublisher(factory), Ci(factory)
+        paused = PausedEligibility(
+            DetermineCiEligibility(
+                candidates=SqlAlchemyEligibilityCandidateStore(factory), ci=ci, own_app_id=42
+            )
+        )
+        pending = None
+        try:
+            await prepare(factory, wait_mode, False)
+            enqueue = TryEnqueueWebhookRun(
+                eligibility=paused,
+                uow_factory=lambda: SqlAlchemyWebhookRunUnitOfWork(factory),
+                publisher=publisher,
+            )
+            # Old callers need no expected_identity argument to gain read/lock pinning.
+            pending = asyncio.create_task(enqueue.execute(PR_OPEN, _HEAD))
+            await asyncio.wait_for(paused.ready.wait(), timeout=5)
+            if change == "retirement_positive_flags":
+                # Supported public retirement, followed by adversarial fixture flag revival.
+                sync = SyncInstallationRepositories(
+                    uow_factory=lambda: SqlAlchemyInstallationRepositoriesUnitOfWork(factory),
+                    rule_sets=load_default_rule_sets(Path("review/rules")),
+                )
+                await sync.disable(
+                    provider_installation_id=INSTALL_A,
+                    repositories=(),
+                    delivery_id="169-t9b-retirement",
+                    all_repositories=True,
+                )
+                async with factory.begin() as session:
+                    await session.execute(
+                        text(
+                            "UPDATE repositories SET enabled=true,installation_available=true "
+                            "WHERE id=:id"
+                        ),
+                        {"id": REPO_A},
+                    )
+            else:
+                # All following changes are explicit fixture-only persisted mutations,
+                # not supported management operations or production identity transfers.
+                async with factory.begin() as session:
+                    if change in {"origin", "origin_other_workspace"}:
+                        # Preserve the old numeric snapshot, respecting its uniqueness key.
+                        await session.execute(
+                            text("UPDATE provider_installations SET external_id=117 WHERE id=:id"),
+                            {"id": INSTALL_A},
+                        )
+                        await session.execute(
+                            text(
+                                "INSERT INTO provider_installations "
+                                "(id,workspace_id,provider,external_id,metadata) "
+                                "VALUES (:id,:ws,'github',17,'{}'::jsonb)"
+                            ),
+                            {
+                                "id": UUID(int=329),
+                                "ws": WS_B if change.endswith("workspace") else WS_A,
+                            },
+                        )
+                        await session.execute(
+                            text(
+                                "UPDATE repositories SET provider_installation_id=:source "
+                                "WHERE id=:id"
+                            ),
+                            {"id": REPO_A, "source": UUID(int=329)},
+                        )
+                    elif change == "workspace":
+                        await session.execute(
+                            text("UPDATE provider_installations SET workspace_id=:ws WHERE id=:id"),
+                            {"id": INSTALL_A, "ws": WS_B},
+                        )
+                    elif change == "project":
+                        await session.execute(
+                            text("UPDATE repositories SET external_id=201 WHERE id=:id"),
+                            {"id": REPO_A},
+                        )
+                    elif change in {"gitlab_collision", "gitlab_binding"}:
+                        await session.execute(
+                            text(
+                                "INSERT INTO provider_installations "
+                                "(id,workspace_id,provider,external_id,metadata) "
+                                "VALUES (:id,:ws,'gitlab',17,'{}'::jsonb)"
+                            ),
+                            {"id": UUID(int=330), "ws": WS_B},
+                        )
+                        if change == "gitlab_binding":
+                            await session.execute(
+                                text(
+                                    "UPDATE repositories SET provider_installation_id=:source "
+                                    "WHERE id=:id"
+                                ),
+                                {"id": REPO_A, "source": UUID(int=330)},
+                            )
+            paused.release.set()
+            result = await asyncio.wait_for(pending, timeout=5)
+            assert (result.status.value, result.reason) == (expected_status, expected_reason)
+            assert ci.calls == ([17] if wait_mode == "always" else [])
+            assert len(publisher.messages) == (1 if expected_status == "enqueued" else 0)
+            async with factory() as session:
+                assert await session.scalar(text("SELECT count(*) FROM runs")) == (
+                    5 if expected_status == "enqueued" else 4
+                )
+                if result.run_id is not None:
+                    assert (
+                        await session.scalar(
+                            text("SELECT message_published_at IS NOT NULL FROM runs WHERE id=:id"),
+                            {"id": result.run_id},
+                        )
+                        is True
+                    )
+            return result.run_id
+        finally:
+            if pending is not None and not pending.done():
+                pending.cancel()
+                with suppress(asyncio.CancelledError):
+                    await pending
+            await engine.dispose()
+
+    with psycopg.connect(
+        enqueue_env.database_url.replace("postgresql+psycopg://", "postgresql://"), autocommit=True
+    ) as listener:
+        listener.execute("LISTEN run_updated")
+        run_id = asyncio.run(exercise())
+        payloads = [json.loads(n.payload) for n in listener.notifies(timeout=0.1)]
+    assert payloads == (
+        [{"run_id": str(run_id), "workspace_id": str(WS_A), "status": "queued"}]
+        if run_id is not None
+        else []
+    )
+
+
+@pytest.mark.integration
+def test_github_detached_and_locked_snapshots_include_complete_equal_identity(
+    enqueue_env: Env,
+) -> None:
+    async def exercise() -> None:
+        engine = enqueue_env.engine()
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        try:
+            await prepare(factory, "always", False)
+            detached = await SqlAlchemyEligibilityCandidateStore(factory).get(PR_OPEN)
+            assert detached is not None
+            assert detached.identity == WebhookRunIdentity("github", INSTALL_A, WS_A, REPO_A, 101)
+            assert detached.ai_review_labeled is True
+            assert detached.ai_review_labeled_at == _NOW
+            assert detached.head_first_seen_at == _NOW
+            assert detached.wait_for_ci.value == "always"
+            assert detached.head_sha == _HEAD
+            assert detached.state.value == "open"
+            assert detached.repository_enabled is True
+            async with factory.begin() as session:
+                locked = await SqlAlchemyWebhookRunStore(session).lock_candidate(PR_OPEN)
+                assert isinstance(locked, RunInsertCandidate)
+                assert locked.ci == detached
+                assert locked.provider == "github"
+                assert locked.origin_provider_installation_id == INSTALL_A
+                assert locked.workspace_id == WS_A
+                assert locked.repository_id == REPO_A
+                assert locked.repository_external_id == 101
         finally:
             await engine.dispose()
 

@@ -120,8 +120,12 @@ def test_process_review_run_composes_repository_and_processor_from_a_shared_fact
             vcs_provider: Vcs,
             trace: object = None,
             uow_factory: object = None,
+            context_stage: object = None,
+            vcs_provider_selector: object = None,
         ) -> None:
             assert trace is None
+            assert context_stage is None
+            assert vcs_provider_selector is None
             assert isinstance(repository, Repository)
             assert isinstance(provider, Provider)
             assert cache is not None
@@ -350,6 +354,7 @@ def test_run_worker_consumes_index_repo_beside_the_review_queues(
 
     process = SimpleNamespace(
         handle_run=SimpleNamespace(execute=None, wait_for_quiescence=wait_for_quiescence),
+        handle_delivery=SimpleNamespace(execute=None),
         publish_review=SimpleNamespace(execute=None),
         leader_tick=None,
     )
@@ -416,8 +421,23 @@ def test_compose_worker_passes_portal_run_url_to_store_review_output(
     from datetime import UTC, datetime
 
     from app.modules.reviews.application.handle_review_run import ClaimedAttempt
+    from app.modules.reviews.application.process_run import RunVcsInput
 
     captured: dict[str, Any] = {}
+
+    class Runs:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            pass
+
+        async def get_run_vcs_input(self, received_run_id: UUID) -> RunVcsInput:
+            assert received_run_id == run_id
+            return RunVcsInput(
+                UUID(int=4),
+                UUID(int=5),
+                "a" * 40,
+                "b" * 40,
+                PullRequestLocator(1, "team/repo", 7, "github", UUID(int=6), 1),
+            )
 
     class RecordingStore:
         def __init__(self, *args: object, **kwargs: object) -> None:
@@ -426,6 +446,7 @@ def test_compose_worker_passes_portal_run_url_to_store_review_output(
     async def stop_after_store(*args: object, **kwargs: object) -> bool:
         return True
 
+    monkeypatch.setattr(worker, "SqlAlchemyRunRepository", Runs)
     monkeypatch.setattr(worker, "StoreReviewOutput", RecordingStore)
     monkeypatch.setattr(worker, "process_review_run", stop_after_store)
     settings = worker.WorkerSettings(
@@ -449,6 +470,7 @@ def test_compose_worker_passes_portal_run_url_to_store_review_output(
         session_factory=cast(async_sessionmaker[AsyncSession], object()),
         queue=cast(Any, object()),
         github=github,
+        provider_factory=lambda _claimed: cast(Any, object()),
     )
     run_id = UUID("11111111-2222-3333-4444-555555555555")
     claimed = ClaimedAttempt(
@@ -466,3 +488,49 @@ def test_compose_worker_passes_portal_run_url_to_store_review_output(
 
     run_url = cast(Any, captured["run_url"])
     assert run_url(run_id) == f"https://portal.test/runs/{run_id}"
+
+
+@pytest.mark.parametrize(("listing", "sizes"), [(False, True), (True, False)])
+def test_actual_worker_source_forwarders_preserve_completeness_and_filter_files(
+    listing: bool, sizes: bool
+) -> None:
+    from app.modules.reviews.application.conventions import (
+        PolicyFilteredConventionsSource,
+        RepositoryTreeResult,
+        normalize_repository_tree,
+    )
+    from app.modules.reviews.application.handle_review_run import CheckpointedProvider
+    from app.modules.reviews.infrastructure.provider_conventions import (
+        ProviderRepositoryConventionsSource,
+    )
+    from tests.test_repo_conventions import REPOSITORY_ID, FakeSource
+
+    class Source(FakeSource):
+        async def fetch_tree(self, repository_id: UUID) -> RepositoryTreeResult:
+            return RepositoryTreeResult(
+                (RepositoryFile("src/app.py", 3), RepositoryFile("web/app.ts", 1)),
+                listing,
+                sizes,
+                ("sizes_incomplete",),
+            )
+
+        async def get_pull_request_meta(self, run_id: UUID) -> PullRequestMeta | None:
+            return None
+
+    async def checkpoint() -> None:
+        raise AssertionError("tree forwarding does not add an LLM checkpoint")
+
+    source = worker.AttemptReviewProvider(
+        Source(), worker.UnconfiguredModel(), worker.UnconfiguredModel()
+    )
+    chain = PolicyFilteredConventionsSource(
+        ProviderRepositoryConventionsSource(CheckpointedProvider(source, checkpoint)),
+        lambda path: path.startswith("web/"),
+    )
+    result = normalize_repository_tree(asyncio.run(chain.fetch_tree(REPOSITORY_ID)))
+    assert result.files == (RepositoryFile("src/app.py", 3),)
+    assert (result.listing_complete, result.sizes_complete, result.incomplete_reasons) == (
+        listing,
+        sizes,
+        ("sizes_incomplete",),
+    )

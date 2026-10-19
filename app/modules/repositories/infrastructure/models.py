@@ -48,6 +48,8 @@ class ProviderInstallation(Base):
     __tablename__ = "provider_installations"
     __table_args__ = (
         UniqueConstraint("provider", "external_id"),
+        # A composite FK can prove the installation tenant and provider together.
+        UniqueConstraint("id", "workspace_id", "provider", name="uq_provider_installations_owner"),
         Index("ix_provider_installations_workspace_id", "workspace_id"),
         CheckConstraint(
             "account_external_id > 0", name="ck_provider_installations_account_positive"
@@ -72,6 +74,10 @@ class Repository(Base):
     __tablename__ = "repositories"
     __table_args__ = (
         UniqueConstraint("provider_installation_id", "external_id"),
+        # A composite FK can prove project identity within its installation.
+        UniqueConstraint(
+            "id", "provider_installation_id", "external_id", name="uq_repositories_owner"
+        ),
         CheckConstraint("max_comments > 0", name="ck_repositories_max_comments_positive"),
     )
 

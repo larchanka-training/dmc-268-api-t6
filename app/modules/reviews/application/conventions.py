@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from hashlib import sha256
 from pathlib import PurePosixPath
 from typing import Annotated, Protocol
@@ -33,6 +33,7 @@ from app.modules.reviews.application.prompt_builder import (
     xml_container,
     xml_text,
 )
+from app.modules.reviews.application.run_failures import RequiredSourceUnavailable
 
 _STRICT = ConfigDict(extra="forbid", strict=True)
 _MAX_CONTEXT_FILES = 10
@@ -64,6 +65,27 @@ class RepositoryFile:
     size: int
     content: str | None = None
     omitted_lines: int = 0
+
+
+@dataclass(frozen=True)
+class RepositoryTreeResult:
+    """Verified file sizes and explicit coverage of a repository discovery."""
+
+    files: tuple[RepositoryFile, ...]
+    listing_complete: bool
+    sizes_complete: bool
+    incomplete_reasons: tuple[str, ...] = ()
+
+
+type RepositoryTreeInput = tuple[RepositoryFile, ...] | RepositoryTreeResult
+
+
+def normalize_repository_tree(value: RepositoryTreeInput) -> RepositoryTreeResult:
+    return (
+        value
+        if isinstance(value, RepositoryTreeResult)
+        else RepositoryTreeResult(value, True, True)
+    )
 
 
 @dataclass(frozen=True)
@@ -315,7 +337,7 @@ class RepositoryConventionsSource(Protocol):
 
     async def fetch_agents_md(self, repository_id: UUID) -> RepositorySnapshot: ...
 
-    async def fetch_tree(self, repository_id: UUID) -> tuple[RepositoryFile, ...]: ...
+    async def fetch_tree(self, repository_id: UUID) -> RepositoryTreeInput: ...
 
     async def fetch_files(
         self, repository_id: UUID, paths: tuple[str, ...]
@@ -336,9 +358,11 @@ class PolicyFilteredConventionsSource:
     async def fetch_agents_md(self, repository_id: UUID) -> RepositorySnapshot:
         return await self._inner.fetch_agents_md(repository_id)
 
-    async def fetch_tree(self, repository_id: UUID) -> tuple[RepositoryFile, ...]:
-        tree = await self._inner.fetch_tree(repository_id)
-        return tuple(file for file in tree if not self._excluded(file.path))
+    async def fetch_tree(self, repository_id: UUID) -> RepositoryTreeInput:
+        tree = normalize_repository_tree(await self._inner.fetch_tree(repository_id))
+        return replace(
+            tree, files=tuple(file for file in tree.files if not self._excluded(file.path))
+        )
 
     async def fetch_files(
         self, repository_id: UUID, paths: tuple[str, ...]
@@ -439,7 +463,10 @@ class GenerateRepoConventions:
                 await uow.commit()
             return GeneratedConventions(cached, agents_md.content, cache_hit=True)
 
-        tree = await self._source.fetch_tree(repository_id)
+        discovery = normalize_repository_tree(await self._source.fetch_tree(repository_id))
+        if not discovery.listing_complete or not discovery.sizes_complete:
+            raise RequiredSourceUnavailable("diff_fetch_failed")
+        tree = discovery.files
         languages = classify_languages(tree)
         selected = select_context_files(tree)
         fetched_files = await self._source.fetch_files(repository_id, selected)

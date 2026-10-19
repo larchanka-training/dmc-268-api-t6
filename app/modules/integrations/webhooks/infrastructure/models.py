@@ -30,6 +30,14 @@ from app.common.infrastructure.db.columns import timestamp_column
 class WebhookEvent(Base):
     __tablename__ = "webhook_events"
     __table_args__ = (
+        CheckConstraint("provider IN ('github', 'gitlab')", name="ck_webhook_events_provider"),
+        CheckConstraint(
+            "(provider = 'github' AND gitlab_connection_id IS NULL) OR "
+            "(provider = 'gitlab' AND gitlab_connection_id IS NOT NULL AND "
+            "provider_installation_id IS NOT NULL AND "
+            "gitlab_connection_id = provider_installation_id)",
+            name="ck_webhook_events_gitlab_origin",
+        ),
         CheckConstraint(
             "payload IS NOT NULL OR payload_s3_ref IS NOT NULL",
             name="ck_webhook_events_payload_present",
@@ -56,6 +64,10 @@ class WebhookEvent(Base):
     id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
     provider_installation_id: Mapped[UUID | None] = mapped_column(
         ForeignKey("provider_installations.id"), nullable=True
+    )
+    provider: Mapped[str] = mapped_column(String(50), nullable=False, server_default="github")
+    gitlab_connection_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("gitlab_connections.provider_installation_id"), nullable=True
     )
     installation_external_id: Mapped[int | None] = mapped_column(BIGINT, nullable=True)
     delivery_id: Mapped[str] = mapped_column(String(255), nullable=False, unique=True)

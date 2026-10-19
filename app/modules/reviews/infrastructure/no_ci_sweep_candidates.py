@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.common.infrastructure.db.enums import CodeChangeState, RunState, WaitForCi
 from app.common.infrastructure.db.unit_of_work import SqlAlchemyUnitOfWork
-from app.modules.repositories.infrastructure.models import Repository
+from app.modules.repositories.infrastructure.models import ProviderInstallation, Repository
 from app.modules.reviews.application.sweep_no_ci import DueNoCiCandidate
 from app.modules.reviews.infrastructure.models import CodeChange, Run
 
@@ -43,7 +43,12 @@ class SqlAlchemyDueNoCiCandidates:
         rows = await session.execute(
             select(CodeChange.id, CodeChange.head_sha)
             .join(Repository, CodeChange.repository_id == Repository.id)
+            .join(
+                ProviderInstallation, Repository.provider_installation_id == ProviderInstallation.id
+            )
             .where(
+                ProviderInstallation.provider == "github",
+                ProviderInstallation.deleted_at.is_(None),
                 CodeChange.state == CodeChangeState.OPEN,
                 CodeChange.ai_review_labeled.is_(True),
                 CodeChange.ai_review_labeled_at.is_not(None),
@@ -69,6 +74,20 @@ class SqlAlchemyDueNoCiCandidates:
         await self._session.execute(
             update(CodeChange)
             .where(
+                exists(
+                    select(Repository.id)
+                    .join(
+                        ProviderInstallation,
+                        Repository.provider_installation_id == ProviderInstallation.id,
+                    )
+                    .where(
+                        Repository.id == CodeChange.repository_id,
+                        Repository.enabled.is_(True),
+                        Repository.installation_available.is_(True),
+                        ProviderInstallation.provider == "github",
+                        ProviderInstallation.deleted_at.is_(None),
+                    )
+                ),
                 CodeChange.id == candidate.code_change_id,
                 CodeChange.head_sha == candidate.head_sha,
                 CodeChange.ci_status == {},

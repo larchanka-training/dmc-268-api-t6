@@ -19,6 +19,7 @@ from sqlalchemy.sql import ClauseElement
 
 from alembic import command
 from app.common.infrastructure.db.enums import Engine, RunState
+from app.modules.reviews.application.queue_messages import message_trigger
 from app.modules.reviews.infrastructure.github_pull_request_projection import (
     SqlAlchemyPullRequestProjectionUnitOfWork,
     SqlAlchemyPullRequestRunCanceller,
@@ -82,11 +83,12 @@ def test_pending_cancellation_query_rebuilds_old_head_pointer_without_queued_fil
         rule_version_id=UUID(int=21),
         prompt_version_id=UUID(int=22),
         attempt=2,
+        trigger="rerun",
         cancellation_signal_requested_at=_NOW,
     )
     pr = SimpleNamespace(external_number=7, target_branch="main")
     repository = SimpleNamespace(id=UUID(int=23), external_id=101, full_name="octo/repo")
-    installation = SimpleNamespace(workspace_id=_WORKSPACE, external_id=17)
+    installation = SimpleNamespace(workspace_id=_WORKSPACE, external_id=17, provider="github")
 
     class QuerySession:
         statement: ClauseElement | None = None
@@ -109,6 +111,8 @@ def test_pending_cancellation_query_rebuilds_old_head_pointer_without_queued_fil
     assert messages[0].head_sha == "a" * 40
     assert messages[0].attempt == 3
     assert messages[0].requested_at == _NOW
+    assert messages[0].provider == "github"
+    assert message_trigger(messages[0]) == "rerun"
     assert session.statement is not None
     sql = str(session.statement)
     predicate = sql.split("WHERE", 1)[1]

@@ -17,6 +17,7 @@ from app.bootstrap.reviews_api import ReviewsApiResources
 from app.common.infrastructure.heartbeat import is_fresh
 from app.modules.integrations.webhooks.application.receive_github_delivery import (
     ReceiveGitHubDelivery,
+    ReplayBatchResult,
 )
 from app.modules.integrations.webhooks.infrastructure.github_installation_tree_provider import (
     GitHubInstallationAccessTokenProvider,
@@ -96,9 +97,9 @@ def test_worker_wires_receipt_projection_with_the_run_publisher_and_app_id() -> 
     class Receiver:
         calls: int = 0
 
-        async def replay_pending(self) -> int:
+        async def replay_batch(self, *, limit: int = 100) -> ReplayBatchResult:
             self.calls += 1
-            return 1
+            return ReplayBatchResult(1, 1, 0, limit)
 
     @dataclass
     class Resources:
@@ -126,7 +127,7 @@ def test_worker_wires_receipt_projection_with_the_run_publisher_and_app_id() -> 
 
 def test_worker_returns_zero_when_receipt_sweep_fails() -> None:
     class FailingReceiver:
-        async def replay_pending(self) -> int:
+        async def replay_batch(self, *, limit: int = 100) -> ReplayBatchResult:
             raise RuntimeError("GitHub unavailable")
 
     assert asyncio.run(sweep_once(cast(ReceiveGitHubDelivery, FailingReceiver()))) == 0
