@@ -213,7 +213,11 @@ limit waits for GitHub's `Retry-After` when it is longer than 30 seconds, but no
 the 10-minute age (the stored value is capped at one day). A repository whose
 `installation_available` is false is never claimed; its GET answers `unavailable` with
 `policy_access_denied` and requests nothing. A full batch of 20 runs the next scan at once, like
-100 deliveries. One line per read is logged: `Rules status of repository <id>: <status>
+100 deliveries. The reads run inside the scan, one after another, so while they last no receipt
+is claimed. Worst case: 20 reads × 5 GitHub requests (repository, commit SHA, root tree,
+`.review` tree, blob) × the 10-second request timeout, about 17 minutes for one batch. This is
+accepted for the MVP with one replica; a slow batch also outlives the five-minute lease, which
+is harmless there because no other worker takes the claims over. One line per read is logged: `Rules status of repository <id>: <status>
 [<code>]`, never the text. A `push` to another branch or a tag is `ignored_irrelevant_event` with
 detail `not_default_branch`; a push to a repository that is not connected is
 `ignored_irrelevant_event` with detail `unknown_repository` and is not deferred, because
