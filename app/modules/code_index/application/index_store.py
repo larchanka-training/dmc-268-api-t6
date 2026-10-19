@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from enum import StrEnum
 from typing import Protocol
 from uuid import UUID
@@ -214,6 +214,16 @@ class CodeIndexStore(Protocol):
 
         A repeated purge changes nothing, except that `removed` or `disabled` replaces a
         `ttl` reason.
+        """
+        ...
+
+    async def purge_unused(self, repository_id: UUID, unused_for: timedelta) -> bool:
+        """T1 for the TTL (ADR §4): `purge` with `ttl` if the index is still unused.
+
+        Re-checked under FOR UPDATE against `clock_timestamp()`: only a live index (no
+        purge reason, not `failed`) whose `last_used_at` is older than `unused_for`. A
+        `failed` index stays: a TTL purge would turn it into `empty` and reopen the
+        repeated full build that ADR §7 forbids. Returns whether it purged.
         """
         ...
 
