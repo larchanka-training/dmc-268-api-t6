@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Protocol
 from uuid import UUID
 
+from app.modules.reviews.application.run_trigger import RunTrigger
 from app.modules.reviews.application.try_enqueue_webhook_run import PendingRunMessage
 
 
@@ -16,10 +17,10 @@ class StoredRunMessage(PendingRunMessage):
     Webhook publications (#11) carry no trigger field and are always ``webhook``.
     """
 
-    trigger: str = "webhook"
+    trigger: RunTrigger = "webhook"
 
 
-def message_trigger(message: PendingRunMessage) -> str:
+def message_trigger(message: PendingRunMessage) -> RunTrigger:
     return message.trigger if isinstance(message, StoredRunMessage) else "webhook"
 
 

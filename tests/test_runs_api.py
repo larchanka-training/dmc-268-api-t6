@@ -8,6 +8,7 @@ import pytest
 from app.main import app, get_run_repository
 from app.modules.reviews.application.get_run import RunReview, RunReviewRepository
 from app.modules.reviews.application.list_runs import RunCursor, RunListItem
+from app.modules.reviews.application.run_trigger import RunTrigger
 from tests.portal_test_client import authenticated_test_client as TestClient
 
 
@@ -229,7 +230,9 @@ def test_run_detail_returns_pr_data_latest_model_and_action_count() -> None:
 
 
 @pytest.mark.parametrize("trigger", ["webhook", "rerun"])
-def test_runs_list_and_detail_return_the_stored_trigger_and_creation_time(trigger: str) -> None:
+def test_runs_list_and_detail_return_the_stored_trigger_and_creation_time(
+    trigger: RunTrigger,
+) -> None:
     # Queued and never claimed: createdAt is the only timestamp the Run has.
     item = replace(
         make_item(9, datetime(2026, 9, 24, 10, 30, 15, 250000, tzinfo=UTC)),

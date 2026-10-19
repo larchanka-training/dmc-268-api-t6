@@ -69,6 +69,7 @@ from app.modules.reviews.application.list_runs import RunCursor, RunListItem
 from app.modules.reviews.application.rerun_run import RerunOutcome, RerunResult
 from app.modules.reviews.application.review_output import Category, Severity
 from app.modules.reviews.application.run_events import RunUpdated
+from app.modules.reviews.application.run_trigger import RunTrigger
 from app.modules.reviews.application.try_enqueue_webhook_run import PendingRunMessage
 from tests.portal_test_client import authenticated_test_client
 from tests.test_branch_patterns import INVALID_BRANCH_PATTERNS
@@ -1214,6 +1215,7 @@ def test_enums_match_the_ui_contract_and_the_review_output_model() -> None:
     queue_schema = json.loads((SPEC_PATH.parent / "schemas/review.run.v1.schema.json").read_text())
     queue_run = queue_schema["$defs"]["ReviewRunV1"]
     assert components["RunTrigger"]["enum"] == queue_run["properties"]["trigger"]["enum"]
+    assert components["RunTrigger"]["enum"] == list(get_args(RunTrigger.__value__))
     assert components["Severity"]["enum"] == list(get_args(Severity.__value__))
     assert components["Category"]["enum"] == list(get_args(Category.__value__))
     assert components["Severity"]["enum"] == zod["reviewComment"]["properties"]["severity"]["enum"]
@@ -1226,6 +1228,15 @@ def test_enums_match_the_ui_contract_and_the_review_output_model() -> None:
         "stale",
         "failed",
     ]
+
+
+def test_runtime_run_dtos_declare_the_trigger_enum_of_the_spec() -> None:
+    runtime = app.openapi()["components"]["schemas"]
+    trigger_ref = {"$ref": "#/components/schemas/RunTrigger"}
+
+    assert runtime["RunSessionDto"]["properties"]["trigger"] == trigger_ref
+    assert runtime["RunDetailDto"]["properties"]["trigger"] == trigger_ref
+    assert runtime["RunTrigger"]["enum"] == _components()["RunTrigger"]["enum"]
 
 
 def _string_constant(node: ast.expr | None) -> str | None:

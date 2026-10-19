@@ -6,6 +6,8 @@ from uuid import UUID
 
 from pydantic import AfterValidator, BaseModel, ConfigDict
 
+from app.modules.reviews.application.run_trigger import RunTrigger
+
 
 def to_camel(value: str) -> str:
     head, *tail = value.split("_")
@@ -39,7 +41,7 @@ class RunSessionDto(ApiDto):
     engine: str
     attempt: int
     cancel_requested: bool
-    trigger: str
+    trigger: RunTrigger
     created_at: UtcDatetime
     started_at: UtcDatetime | None
     finished_at: UtcDatetime | None

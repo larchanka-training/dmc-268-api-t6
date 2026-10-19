@@ -42,6 +42,7 @@ from app.common.infrastructure.db.enums import (
     FindingSide,
     RunState,
 )
+from app.modules.reviews.application.run_trigger import RunTrigger
 
 
 class PromptVersion(Base):
@@ -236,7 +237,7 @@ class Run(Base):
     state: Mapped[RunState] = mapped_column(
         pg_enum(RunState, "run_state"), nullable=False, server_default=RunState.QUEUED.value
     )
-    trigger: Mapped[str] = mapped_column(String(50), nullable=False)
+    trigger: Mapped[RunTrigger] = mapped_column(String(50), nullable=False)
     idempotency_key: Mapped[str] = mapped_column(CHAR(64), nullable=False)
     engine: Mapped[Engine] = mapped_column(pg_enum(Engine, "engine"), nullable=False)
     rule_version_id: Mapped[UUID] = mapped_column(ForeignKey("rule_versions.id"), nullable=False)
