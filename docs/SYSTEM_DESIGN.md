@@ -350,29 +350,40 @@ sequenceDiagram
   W->>PG: run.state queued → running (lease, worker_id)
   W->>GH: policy documents по закреплённому base_sha
   W->>GH: GET /pulls/{n} + files (patch на файл)
-  W->>PG: policy snapshot + run diff snapshot + DiffMap
-  Note over W: ignore до подсчёта#59; все доказанно исключены без технических пропусков → skipped#59; больше 3000 allowed строк → backend summary, без LLM (§9)
-  W->>GH: base-tree для конвенций, head/diff_old trees для кода
-  opt conventions cache miss и есть base-исходники
-    W->>PG: manifest разрешённого base-input
-    W->>LLM: общие conventions без PR/head-входов
-    LLM-->>W: conventions с сохранённым provenance
+  W->>PG: policy snapshot + VCS-only DiffMap + отдельная run classification
+  alt inventory/counters неизвестны или counted allowed больше 3000 (CVS §2.3)
+    Note over W: backend summary-only/partial, summaryOnly=true, 0 LLM
+  else достоверно пустой inventory либо только E, без T/incomplete
+    W->>PG: skipped no_changes/all_changes_ignored, 0 LLM
+    W->>MQ: ack review.run, без публикации
+  else полный inventory, хотя бы один T, остальные E/T, incomplete нет
+    Note over W: backend none, summaryOnly=false, 0 LLM
+  else нет текста, есть incomplete (возможно E/T), known counted allowed не больше 3000
+    Note over W: backend partial, findings=[], verdict=null, summaryOnly=false, 0 LLM
+  else доступен анализируемый текст
+    W->>GH: base-tree для конвенций, head/diff_old trees для кода
+    opt conventions cache miss и есть base-исходники
+      W->>PG: manifest разрешённого base-input
+      W->>LLM: общие conventions без PR/head-входов
+      LLM-->>W: conventions с сохранённым provenance
+    end
+    loop файлы по приоритету, пока есть бюджет
+      W->>R: blob(repo, sha)? AST(sha)?
+      R-->>W: hit / miss
+      W->>GH: GET /git/blobs/{sha} (при miss)
+      W->>R: put blob, put AST
+    end
+    W->>PG: manifest + точные evidence excerpts каждого вызова
+    W->>LLM: review с изолированными policy/code блоками
+    LLM-->>W: ReviewOutput v2 (кандидаты + evidence_refs)
+    Note over W: schema → trusted identity/ignore → координаты/видимость → evidence + LEFT decision → guards/lint/dedup
+    opt непустой набор после фильтров
+      W->>PG: manifest verifier, кандидаты и evidence
+      W->>LLM: обязательный verifier
+      LLM-->>W: решение по каждому candidate_id
+    end
   end
-  loop файлы по приоритету, пока есть бюджет
-    W->>R: blob(repo, sha)? AST(sha)?
-    R-->>W: hit / miss
-    W->>GH: GET /git/blobs/{sha} (при miss)
-    W->>R: put blob, put AST
-  end
-  W->>PG: manifest + точные evidence excerpts каждого вызова
-  W->>LLM: review с изолированными policy/code блоками
-  LLM-->>W: ReviewOutput v2 (кандидаты + evidence_refs)
-  Note over W: schema → координаты → evidence → ignore/lint/dedup
-  opt непустой набор после фильтров
-    W->>PG: manifest verifier, кандидаты и evidence
-    W->>LLM: обязательный verifier
-    LLM-->>W: решение по каждому candidate_id
-  end
+  opt результат требует публикации (все ветки, кроме skipped)
   W->>PG: final result, coverage, backend summary, точный publication plan
   W->>PG: cancel_requested? head_sha актуален?
   W->>MQ: review.publish {run_id} с закреплённым планом
@@ -384,6 +395,7 @@ sequenceDiagram
   P->>GH: проверить актуальность после POST
   P->>PG: remote receipts#59; succeeded либо cancelled при гонке
   P->>MQ: ack review.publish
+  end
 ```
 
 ### 6.3 Схлопывание (Р-2): пуш во время прогона
@@ -1128,15 +1140,22 @@ Policy documents хранятся отдельно от производных �
 
 Каноническая таблица исходов —
 [CVS §2.2](CONTEXT_AND_VERIFICATION_SPEC.md#22-порядок-операций), классификация — CVS §9.2.
-Binary — доказанное встроенное исключение: binary-only → skipped, binary + код
-может дать complete/clean. Технические пропуски T из CVS §2.2 не являются ignored
+Только доказанный binary по bounded evidence CVS §9.2 — встроенное исключение:
+binary-only → skipped, binary + код может дать complete/clean. Технические пропуски T из CVS §2.2 не являются ignored
 и не входят в excluded_files. При полном inventory и **хотя бы одном T**, если
 остальные изменения только E/T, backend формирует none, verdict=null, 0 LLM,
 publishing → succeeded/neutral. С анализируемым текстом T даёт partial либо
 summary-only по оставшемуся scope; T не увеличивают пороговый счётчик 3 000 строк.
 Исходные counters остаются в диагностике (неизвестные null). Маски/generated
 побеждают binary/too_large, но не недостоверную идентичность. Submodule и
-metadata-only/mode-only без поддерживаемого анализа — unsupported_change, T.
+доказанный чистый rename/mode-only без поддерживаемого анализа — unsupported_change, T.
+При полном inventory, известных relevant counters ≤3 000 и только incomplete
+с возможными E/T, без анализируемого текста — backend partial, summaryOnly=false,
+findings=[], verdict=null; 0 LLM, затем succeeded/neutral. Оба триггера CVS §2.3
+проверяются раньше: unknown inventory/counters или >3 000 counted allowed строк
+(включая известные 4 000 missing-patch-only) дают summary-only. Все backend-ветки
+обходят conventions/reviewer/verifier и сохраняют pins и below-threshold count=0.
+Классификация run сохраняется и для skipped до раннего выхода.
 Заголовок none — «AI-ревью: нет доступных для анализа изменений», не failed.
 Обычный missing patch не позволяет выбрать none; различие с source_too_large — CVS §9.2.
 
@@ -1172,9 +1191,32 @@ class FileDiff(BaseModel):
     review_patch: str | None              # null для ignored/summary-only
     patch_state: str                      # complete/missing/truncated/malformed/binary/unsupported/metadata_only
     diff_snapshot_id: str                 # revisions и hunks с обеими координатами — в DiffMap
-    is_binary: bool; is_generated: bool; is_too_large: bool
+    is_binary: bool; is_generated: bool; is_too_large: bool  # raw VCS diagnostics
     tokens_est: int
 ```
+
+Отдельная immutable классификация принадлежит run, не VCS DiffMap (цель #107):
+
+```python
+class FileOmission(BaseModel):
+    reason: str                          # канонический код CVS §9.2
+    classification: Literal["excluded", "technical", "incomplete"] = Field(alias="class")
+
+class RunDiffClassification(BaseModel):
+    run_id: str
+    diff_snapshot_id: str
+    file_omissions: dict[str, FileOmission]  # file_id → reason + class
+```
+
+`file_omissions[file_id].reason` и `.class` определяют coverage и ранний исход;
+raw flags/patch_state остаются диагностикой. Ignore и эта классификация не входят
+в VCS DiffMap/digest. Raw metadata_only при changes=0 не доказывает pure rename:
+пустое добавление без patch — missing_patch/incomplete; только доказанный чистый
+rename/mode-only — unsupported_change/T. Оба рядом с кодом препятствуют clean
+как консервативное ограничение анализа (CVS §2.2/§9.2). Binary считается E только
+по bounded evidence CVS §9.2: NUL в patch, достоверный факт адаптера либо blob
+с NUL в первых 8 KiB / известным magic. Непрочитанный oversized blob становится
+too_large, удаление без нового blob и независимого доказательства — missing_patch.
 
 Текущий built-in фильтр generated — `_is_generated` в
 [`vcs_diff.py`](../app/modules/reviews/application/vcs_diff.py): регистр пути игнорируется;

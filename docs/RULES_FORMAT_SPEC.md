@@ -380,15 +380,21 @@ Pipeline должен соблюдать порядок: закрепить ве
 политику → получить согласованный inventory → валидировать пути и изолировать
 `unsupported_path`/`identity_unresolved` → для достоверной идентичности применить
 `review-ignore` (обе стороны rename/copy) и built-in generated → доказанное binary
-исключение → классифицировать остальные технические пропуски → выбрать исход
-по канонической таблице [CVS §2.2](CONTEXT_AND_VERIFICATION_SPEC.md#22-порядок-операций)
-→ вычислить порог/summary-only → выбрать контекст/конвенции → pre-send guard.
+исключение → классифицировать остальные пропуски → сохранить VCS-only DiffMap
+и отдельную run-классификацию (также для skipped) → оба триггера summary-only
+(unknown inventory/relevant counters или >3 000 counted allowed строк) → остальные
+исходы по [CVS §2.2](CONTEXT_AND_VERIFICATION_SPEC.md#22-порядок-операций)
+→ только при анализируемом тексте выбрать контекст/конвенции → pre-send guard.
 
 Маска или generated побеждает binary/too_large, если путь и обе стороны rename/copy
 достоверны; `unsupported_path`/`identity_unresolved` не превращаются в ignored
 через совпадение доступного alias. Binary — доказанное встроенное исключение,
 не неполнота: сервис анализирует текстовый scope, а не содержимое картинок/шрифтов/PDF.
-Само отсутствие patch не доказывает binary. Критерии и единое поле сохранённой
+Само отсутствие patch или расширение файла не доказывает binary. Нужен достоверный
+факт адаптера, NUL в patch либо bounded blob evidence (NUL в первых 8 KiB или
+magic PNG/JPEG/GIF/PDF/ZIP/ELF). Oversized blob без независимого доказательства
+получает too_large до blob-based binary-проверки; GitHub-удаление картинки без
+нового blob и независимого evidence — missing_patch/incomplete. Критерии и единое поле сохранённой
 классификации — CVS §9.2. Built-in generated matcher сохраняет собственную версию
 и семантику, его версия входит в `ignore_digest`.
 
@@ -396,7 +402,12 @@ Pipeline должен соблюдать порядок: закрепить ве
 `unsupported_change` не являются ignored; в целевом профиле #107 вместе с
 анализируемыми файлами дают partial (либо summary-only по оставшемуся scope),
 а без них — none по строгому условию CVS §2.2. `unsupported_change` охватывает
-submodule/gitlink и metadata-only изменения без поддерживаемого текстового анализа.
+submodule/gitlink и доказанный чистый rename/mode-only без поддерживаемого анализа.
+Raw patch_state=metadata_only при changes=0 не является таким доказательством:
+пустой добавленный файл без patch — missing_patch/incomplete. Такой файл или
+доказанный pure rename/mode-only рядом с кодом препятствует clean даже без
+известного непроверенного текста: это консервативное ограничение анализа
+(CVS §2.2/§9.2), расширение возможностей требует отдельной задачи.
 
 Доказанные исключения и технические пропуски не расходуют LLM-бюджет и не входят
 в пороговый счётчик 3 000 строк; исходные счётчики VCS сохраняются в диагностике,
@@ -622,7 +633,7 @@ snapshot описывается `schema_version = 1`.
 | `ignore_digest` | Checksum всех данных, определяющих допуск файлов |
 | `service_defaults_rule_version_id`, `defaults_checksum` | Первый равен `Run.rule_version_id`, checksum проверяется при чтении |
 | `prompt_bindings` | Immutable ID/checksum для `review.system`, `review.conventions`, `review.verifier`; review ID совпадает с `Run.prompt_version_id` |
-| `severity_threshold` | `all`, `warning` или `critical`, закреплённый при создании run из Repository (#149); неизменяемый вход публикации |
+| `severity_threshold` | `all`, `warning` или `critical` из Repository; закреплён при создании run, неизменяемый вход публикации — целевое поле #107/#175, не live-read правило #149 |
 | `max_comments` | Inline cap 1–10 из Repository, закреплённый вместе с порогом; целевое поле #175 |
 | `execution_profile` | Закреплённые primary/fallback model IDs, provider routes, tokenizer/counter versions, temperature, response-schema, recovery/budget profile из связанной спецификации |
 | `policy_digest` | Checksum документов, допусков, дефолтов, prompt bindings, interpreter/execution versions |
@@ -647,6 +658,9 @@ policy_digest = SHA256(canonical_json({
   defaults_checksum, prompt_bindings, execution_profile, priority_matcher_version
 }))
 ```
+
+Закрепление threshold/cap — цель #107/#175: текущий #149 читает их живьём при
+postprocess (PS §9), в RunPolicyPins (`prepare_policy_snapshot.py`) их пока нет.
 
 `severity_threshold` и `max_comments` — закреплённые настройки публикации,
 они не входят в `policy_digest` и ключ conventions cache: не меняют правила,
@@ -953,7 +967,15 @@ unsupported_change не являются исключениями. При пол
 получается backend none, publishing → succeeded/neutral, не summary-only.
 При наличии анализируемых файлов — partial либо summary-only по CVS §2.3.
 Неизвестный inventory или обычный файл с missing patch не разрешают ветку none.
-Binary-only — skipped; binary + код может дать complete/clean. Причины всех
+Без анализируемого текста при наличии incomplete и возможных E/T, полном inventory,
+известных relevant counters ≤3 000 — backend partial, summaryOnly=false, findings=[],
+verdict=null, 0 LLM, publishing → succeeded/neutral. Сохраняются pins,
+below_severity_threshold_count=0 и reviewed_changed_lines=0; неизвестная исходная
+статистика остаётся null. Оба триггера CVS §2.3 проверяются раньше этой ветки:
+unknown inventory/counters либо >3 000 counted allowed дают summary-only/partial,
+summaryOnly=true (включая known missing-patch-only 4 000 строк). Все backend-ветки
+обходят conventions/reviewer/verifier; skipped — ещё и публикацию.
+Доказанный binary-only — skipped; доказанный binary + код может дать complete/clean. Причины всех
 пропусков и исключений сохраняются отдельно по CVS §9.2.
 
 ## 10. Совместимость будущего Rules API и UI
@@ -1005,10 +1027,14 @@ default branch и не смешивает редактор правил с VCS w
 | Все изменения доказанно исключены по политике, технических пропусков нет | running → skipped; ноль LLM-вызовов; без clean |
 | Недопустимый/непредставимый путь или превышение 1024 UTF-8 байт/128 сегментов; есть допустимый изменённый файл | Изолированный источник получает unsupported_path до ignore; его имя и содержимое отсутствуют во всех входах LLM, другой файл проверяется с partial coverage |
 | Полный достоверный список содержит unsupported_path и маску `**/*`; остальные изменения доказанно ignored либо их нет | Не all_changes_ignored: coverage=none, verdict=null, 0 LLM; backend-диагностика и neutral check-run после успешной публикации, без summary-only |
-| Binary-only либо binary + ignored/generated | skipped/all_changes_ignored, 0 LLM; канонические исходы — CVS §2.2 |
+| Доказанный binary-only либо доказанный binary + ignored/generated | skipped/all_changes_ignored, 0 LLM; канонические исходы — CVS §2.2 |
 | Too_large/identity_unresolved/unsupported_change, отдельно и в смеси с ignored/binary при полном inventory | coverage=none, verdict=null, 0 LLM, succeeded/neutral; по CVS §2.2 |
-| Binary + анализируемый код; отдельно too_large + 50 анализируемых строк | Binary не снижает coverage, возможен complete/clean; too_large даёт partial, его строки не включают summary-only (§5.1, CVS §2.3) |
-| Unsupported path и неполный список VCS или обычный допустимый файл без patch | Условие none неприменимо; действуют прежние правила неполноты (summary-only при неполном inventory), неизвестные счётчики не становятся нулём |
+| Доказанный binary + анализируемый код; отдельно too_large + 50 анализируемых строк | Доказанный binary не снижает coverage, возможен complete/clean; too_large даёт partial, его строки не включают summary-only (§5.1, CVS §2.3) |
+| Неполный inventory/unknown relevant counters либо known missing-patch-only 4 000 строк | summary-only/partial, summaryOnly=true, 0 LLM; эти триггеры предшествуют всем прочим успешным маршрутам |
+| Только incomplete с возможными E/T, нет текста, полный inventory/known counters ≤3 000 | Backend partial, findings=[], verdict=null, summaryOnly=false; 0 LLM включая conventions/verifier, затем succeeded/neutral; pins/count=0 сохранены (CVS §2.2) |
+| Пустой added без patch; removed image без blob/binary proof; oversized непрочитанный blob | Первые два missing_patch/incomplete; последний too_large/T. Raw metadata_only не доказывает T. Только bounded binary proof разрешает E |
+| Доказанный pure rename/mode-only либо пустое added без patch рядом с кодом | T либо incomplete: оба препятствуют clean даже без известного непроверенного текста (CVS §2.2) |
+| Достоверный ignored anchor без manifest; неизвестный mask-matching путь; allowed anchor с ignored evidence | ignored_file до видимости без самостоятельного partial; unknown_path/identity error с partial; evidence_source_disallowed с partial; guards сохраняются |
 | Rename/copy с одной недопустимой стороной и допустимым новым alias | Всё изменение и новый alias изолированы, в том числе от импортов/AST/conventions/repair/fallback/метаданных |
 | Нельзя доказать изоляцию источника; нарушена целостность snapshot; запрещённый источник дошёл до guard | Failed; в последнем случае policy_context_violation до отправки, без продолжения с утечкой |
 | Rename/copy generated/client.py → src/client.py | Diff/full file/imported AST исключены согласованно |
