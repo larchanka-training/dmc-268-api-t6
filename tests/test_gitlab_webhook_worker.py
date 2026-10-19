@@ -1218,3 +1218,92 @@ def test_bad_ca_file_has_static_resource_error_before_transport_startup() -> Non
         assert transport.entered is False  # caller transport not acquired
 
     asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("phase", ["http_startup", "cancellation"])
+@pytest.mark.parametrize("redis_close_fault", [False, True])
+def test_public_worker_owns_redis_before_http_startup_and_preserves_primary(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    phase: str,
+    redis_close_fault: bool,
+) -> None:
+    from types import SimpleNamespace
+    from typing import Any
+
+    from app import webhook_worker
+
+    async def scenario() -> None:
+        closed: list[str] = []
+        ready = asyncio.Event()
+        primary = LookupError("primary startup")
+        environment = {
+            "DATABASE_URL": "database-canary",
+            "RABBITMQ_URL": "broker-canary",
+            "REDIS_URL": "redis://:password-canary@cache/0",
+            "GITHUB_APP_ID": "17",
+            "GITHUB_APP_PRIVATE_KEY": "key-canary",
+            "GITHUB_APP_BOT_LOGIN": "bot",
+        }
+        config = WorkerConfig.from_environment(environment)
+        assert config.redis_url == "redis://:password-canary@cache/0"
+        assert "canary" not in repr(config)
+
+        class Resource:
+            def __init__(self, name: str) -> None:
+                self.name = name
+
+            async def aclose(self) -> None:
+                closed.append(self.name)
+                if self.name == "redis" and redis_close_fault:
+                    raise RuntimeError("redis-close-secret-canary")
+
+        class Client(Resource):
+            async def __aenter__(self) -> Self:
+                if phase == "http_startup":
+                    raise primary
+                return self
+
+        redis = Resource("redis")
+        resources = SimpleNamespace(
+            aclose=Resource("database").aclose, github_webhook_receipts=object()
+        )
+        monkeypatch.setattr(webhook_worker, "os", SimpleNamespace(environ=environment))
+        monkeypatch.setattr(
+            webhook_worker,
+            "ReviewsApiResources",
+            SimpleNamespace(from_database_url=lambda _: resources),
+        )
+        monkeypatch.setattr(webhook_worker, "LazyAmqpPublisher", lambda _: Resource("publisher"))
+        monkeypatch.setattr(webhook_worker, "Redis", SimpleNamespace(from_url=lambda _: redis))
+        monkeypatch.setattr(
+            webhook_worker, "httpx", SimpleNamespace(AsyncClient=lambda **_: Client("http"))
+        )
+        receiver = BatchReceiver([ReplayBatchResult(0, 0, 0, 100)])
+        monkeypatch.setattr(webhook_worker, "compose_worker", lambda *args: receiver)
+        monkeypatch.setattr(
+            webhook_worker, "ReviveDeferredInstallationDeliveries", lambda **kwargs: Reviver()
+        )
+
+        async def wait_for_cancellation(*args: Any, **kwargs: Any) -> None:
+            ready.set()
+            await asyncio.Event().wait()
+
+        monkeypatch.setattr(webhook_worker, "sweep_providers_forever", wait_for_cancellation)
+        monkeypatch.setattr(webhook_worker, "listen_forever", wait_for_cancellation)
+        if phase == "http_startup":
+            with pytest.raises(LookupError) as caught:
+                await webhook_worker.run_forever()
+            assert caught.value is primary
+        else:
+            task = asyncio.create_task(webhook_worker.run_forever())
+            try:
+                await asyncio.wait_for(ready.wait(), 1)
+            finally:
+                await stop(task)
+        assert closed == ["http", "redis", "publisher", "database"]
+
+    with caplog.at_level(logging.ERROR, logger="app.webhook_worker"):
+        asyncio.run(asyncio.wait_for(scenario(), 3))
+    assert "canary" not in caplog.text
+    assert all(record.exc_info is None for record in caplog.records)

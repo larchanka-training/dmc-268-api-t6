@@ -109,7 +109,7 @@ rm jwt.pem jwt.pub
 | `STAGING_HEALTH_URL` | нет | иначе `http://$STAGING_HOST/healthcheck` |
 | `POSTGRES_USER` | нет | иначе `app` |
 | `POSTGRES_DB` | нет | иначе `app` |
-| `GH_APP_BOT_LOGIN` | да: без него `webhook-worker` не стартует, выкат откатывается | `dmc268-t6-reviewer[bot]` — логин бота App. В контейнере `GITHUB_APP_BOT_LOGIN`, только у `webhook-worker` (`app/webhook_worker.py`). Префикс `GH_`, потому что GitHub не принимает `GITHUB_` и у variables; берётся из `vars.`, а не из `secrets.` |
+| `GH_APP_BOT_LOGIN` | обязателен для GitHub replay; частичный App config закрывает startup | `dmc268-t6-reviewer[bot]` — логин бота App. В контейнере `GITHUB_APP_BOT_LOGIN`, только у `webhook-worker` (`app/webhook_worker.py`). Префикс `GH_`, потому что GitHub не принимает `GITHUB_` и у variables; берётся из `vars.`, а не из `secrets.` |
 | `PORTAL_URL` | для ссылки на Run в staging check-run | `https://staging-ui.dmc268-t6.axyi.ru` — публичный UI-origin. Читается из `vars.PORTAL_URL`, записывается только в `worker.env` → review-worker (`worker`); в `api` и `webhook-worker` не передаётся; [проверка и восстановление](#portal_url) |
 | `LLM_MODEL` | нет, переопределение repository | `mistral-small-4` (OQ-2, SD §15). В контейнере только у `worker`; обычное значение задано на уровне repository |
 | `LLM_FALLBACK_MODEL` | нет, переопределение repository | `mistral-small-3.2-24b`. Только `worker`. Чтобы отключить fallback, удалите repository variable и это переопределение: значение Environment перекрывает repository, а незаданная variable приходит в `vars` пустой строкой, и `LLM_FALLBACK_MODEL` не попадает в `worker.env` |
@@ -189,14 +189,108 @@ Environment `staging` перекрывает одноимённую repository v
 
 Ключи не попадают в логи, тексты исключений, `run_actions` и `usage_events`: транспорт вычищает их из текстов ошибок провайдера, у `ModelProfile` ключи скрыты из `repr` — это проверяет `tests/test_llm_gateway.py::test_keys_never_reach_logs_exceptions_or_the_trace`. Required CI работает без сети и без LLM-ключей: все тесты шлюза идут на фейковом HTTP-транспорте; живой прогон — вручную (README, раздел «LLM gateway»).
 
-### Публикация GitLab — переменные worker (#97)
+### Installed GitLab — защищённая конфигурация и управление (#169)
 
-Их читает `WorkerSettings.from_environment` (`app/worker.py`). Имена совпадают с `.env.example`. Это не секреты GitHub Actions и не ключи бандла `worker.env` на staging: выкат их сам не подставляет. В процесс worker их задаёт окружение, в котором процесс запущен.
+`GitLabRuntimeSettings` используется trusted CLI, webhook replay и review worker.
+Токен принадлежит connection, не процессу: process `GITLAB_TOKEN` и
+`GITLAB_BASE_URL` не включают runtime и не являются fallback authority. API admission
+нуждается только в БД и digest webhook secret; ключ расшифрования в API не требуется.
 
-| Переменная | Секрет | Кто читает | Значение |
-|---|---|---|---|
-| `GITLAB_TOKEN` | **да** | `worker` | токен в заголовке `PRIVATE-TOKEN`. Один токен на все проекты. Пустое значение: прогон GitLab остаётся в `publishing`, HTTP к GitLab нет |
-| `GITLAB_BASE_URL` | нет | `worker` | корень инстанса GitLab (без `/api/v4`; код добавляет префикс к путям REST); по умолчанию `https://gitlab.com` |
+| Переменная | Кто читает | Контракт |
+|---|---|---|
+| `GITLAB_CREDENTIAL_KEYS` | CLI, webhook/review workers | секретный JSON object key-ID → canonical standard-base64 ключ ровно 32 байта; 1–32 ключа, без duplicate JSON keys |
+| `GITLAB_ACTIVE_KEY_ID` | те же процессы | ID существующего ключа для новых ciphertext; ID 1–64 символа `[A-Za-z0-9][A-Za-z0-9._-]*` |
+| `GITLAB_ALLOWED_ORIGINS` | те же процессы | JSON array из 1–32 различных точных canonical HTTPS origins, без path/query/userinfo/trailing slash и явного `:443` |
+| `GITLAB_PRIVATE_ORIGINS` | те же процессы | optional JSON array (по умолчанию `[]`), subset allowed; private адрес/host требует явного exact opt-in |
+| `SSL_CERT_FILE` | GitLab HTTP composition | optional путь к PEM CA bundle; сертификат и hostname проверяются, redirects/proxy environment выключены |
+| `GITLAB_WEBHOOK_INTAKE_ENABLED` | только API | unset/empty/`false` → off, `true` → admission on; пробелы по краям удаляются, регистр игнорируется; `0`, `1`, `yes`, `no` не принимаются |
+
+Любое nonempty значение core/private включает проверку runtime: нужны все три core
+поля (`KEYS`, `ACTIVE_KEY_ID`, `ALLOWED_ORIGINS`). `PRIVATE_ORIGINS='[]'` без core —
+partial config error. При полном core отсутствие private означает empty set, пустая
+строка private невалидна, JSON `[]` валиден. `SSL_CERT_FILE` отдельно runtime не включает.
+Невалидный полный config закрывает startup, не отключает GitLab молча. Все три GitHub
+App поля webhook-worker задаются вместе или все отсутствуют; GitLab-only replay возможен
+без GitHub App. Частичный GitHub config остаётся ошибкой. Database и broker обязательны.
+
+Получайте 32 случайных байта через `openssl rand -base64 32` непосредственно в защищённое
+хранилище; пример полного JSON/config дан в `.env.example` только комментариями.
+Не публикуйте значения keyring, PAT или webhook secret в Git, argv, chat, trace или логи.
+Keyring хранится отдельно от БД и резервируется с ограниченным доступом. Хранилище
+использует AES-GCM: GLC1 envelope, случайный 12-byte nonce, authentication tag и AAD
+(purpose/version, installation UUID, workspace UUID, canonical origin, key ID).
+Перенос ciphertext к другому tenant/origin/installation не даёт credential authority.
+В БД webhook secret хранится digest, не plaintext.
+
+Trusted local operator выполняет CLI из того же проверенного source/environment.
+`create` требует существующий workspace, новый installation UUID, разрешённый HTTPS
+origin и JSON ровно с `token`, `webhook_secret`; secret 32–256 печатных ASCII-символов,
+token 1–4096. `rotate-token` читает JSON только с `token`. Provision owner-only файл
+через secret manager либо передавайте pipe: CLI читает до 8192 bytes strict UTF-8 JSON
+из stdin/`--secrets-fd`, отказывается от echoed TTY. Сам CLI не создаёт защищённый файл.
+Например, все переменные ниже — только публичные IDs, origin и generation:
+
+```bash
+uv run python -m app.gitlab_admin create \
+  --workspace-id "$workspace_id" --installation-id "$installation_id" \
+  --origin "$gitlab_origin" --secrets-fd 3 3< /protected/gitlab-create.json
+uv run python -m app.gitlab_admin bind-project \
+  --installation-id "$installation_id" --project-id "$project_id"
+uv run python -m app.gitlab_admin inspect --installation-id "$installation_id"
+uv run python -m app.gitlab_admin rotate-token \
+  --installation-id "$installation_id" --expected-generation "$generation" \
+  --secrets-fd 3 3< /protected/gitlab-rotate.json
+```
+
+Create authenticates перед записью и сохраняет generation=1, intake disabled. Bind
+проверяет stored credential, canonical project и languages, связывает project только
+с этой installation, создаёт недостающие default rules; требует active `review.system`
+prompt. Повторный bind не дублирует repository/rules. При `prompt_not_seeded` выполните
+`uv run python -m app.bootstrap.seed_prompts`; при `rule_assets_invalid` восстановите
+packaged `review/rules`. Bind и create не включают intake и не auto-link по webhook.
+GitLab HTTP выполняется вне каждой DB transaction; после HTTP locked snapshot сравнивается
+заново. Safe JSON результата не содержит token/ciphertext/digest/keyring.
+
+Activation — отдельный шаг после внешнего #171 merged/rebased deployment gate и
+разрешения на выборочную live-проверку. #171 остаётся OPEN; этот документ не разрешает
+production activation. CLI не принимает supplied merged SHA или boolean обхода:
+
+```bash
+uv run python -m app.gitlab_admin activate \
+  --installation-id "$installation_id" --expected-generation "$generation"
+```
+
+Generation обязателен и положителен. Activate повторно authenticates stored token и
+проверяет доступ к каждому binding вне transaction, затем под locks сверяет весь snapshot.
+Нужен хотя бы один enabled/available repository с `wait_for_ci=never`, active rules и
+active `review.system` prompt; paused sibling не блокирует ready sibling, но identities
+и API access всех bindings проверяются. Budget gate отсутствует. Команда меняет только
+connection intake flag, не generation, rules, prompt или budgets; повтор с той же
+generation всё равно проверяет provider. API process flag независимо остаётся обязательным.
+
+Rotate проверяет новый token на всех bindings и expected generation (если передана),
+записывает новый encrypted credential active key и увеличивает generation. Активные
+queued/running/publishing Runs исходной установки терминализируются `cancelled` с
+`credential_rotated`, worker lease снимается, попытки сохраняются; дальнейшие provider
+calls старой authority запрещены. Старые ключи сохраняйте, пока все их envelopes не
+перезаписаны через supported rotation. Удаление key ID раньше срока закрывает decryption.
+
+При утрате keyring inspect/revoke работают только с `DATABASE_URL`, без GitLab HTTP,
+PAT или CA: `revoke-installation --installation-id ...` либо `revoke-workspace
+--workspace-id ...` через тот же `uv run python -m app.gitlab_admin`. Revoke выключает
+intake, стирает stored credential, увеличивает generation при изменении и отменяет
+активные Runs с `installation_revoked`. Повторный revoke безопасен. Утраченный ключ
+не восстанавливает ciphertext: revoke и создайте новую installation UUID/credential
+с поддерживаемыми binding шагами; не меняйте origin/rebind вручную и не копируйте SQL
+из GitHub smoke recipe. Историю terminal Runs не переписывают.
+
+Deployment scripts (`env-file.sh`, `deploy.sh`), CI/CD allowlists и compose сегодня не
+provision эти GitLab значения. Для явно разрешённой среды оператор отдельно подаёт
+защищённое полное process environment нужным процессам (например `uv run --env-file
+/protected/gitlab-runtime.env python -m app.webhook_worker`, аналогично `app.worker`;
+API получает свой admission flag). Это не доказательство изменения staging/VPS.
+Снимки состава environment ниже относятся к датированным прежним deployment и остаются
+историческими; они не утверждают наличие GitLab secret provisioning.
 
 ### Мониторинг (`deploy/monitoring`, [MONITORING.md](MONITORING.md))
 
@@ -250,7 +344,7 @@ GitHub user access token используется только для чтени
 callback; в PostgreSQL хранится только хеш локального refresh token.
 
 1. Settings → Environments → **staging**.
-2. Secrets: `STAGING_SSH_KEY` (только для Terraform-хоста), при желании `POSTGRES_PASSWORD`, секреты приложения из §1. Для выката на курсовой VPS из environment secrets обязательны только `GH_APP_ID` и `GH_APP_PRIVATE_KEY`, остальное дают organization secrets и repository variables. Если нет хотя бы одного из них или variable `GH_APP_BOT_LOGIN` (п. 3), стенд не поднимается: `webhook-worker` получает эти значения как `GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY` и `GITHUB_APP_BOT_LOGIN` из `app.env` и `webhook-worker.env` (`deploy/compose/staging.yml`) и без любого из них не стартует (`app/webhook_worker.py`), `up --wait` не проходит, и `deploy.sh` откатывает выкат. `worker` без App ID и ключа стартует с предупреждением, но выкат всё равно падает на `webhook-worker`. Без секретов `api` (`GH_WEBHOOK_SECRET`, `GH_CLIENT_ID`, `GH_CLIENT_SECRET`, `AUTH_JWT_PRIVATE_KEY`, `AUTH_JWT_PUBLIC_KEY`) стенд поднимается, отключается только их функция: без `GH_WEBHOOK_SECRET` `POST /webhooks/github` отвечает 503, без `GH_CLIENT_ID`, `GH_CLIENT_SECRET` или `AUTH_JWT_PRIVATE_KEY` вход отвечает 503, без `AUTH_JWT_PUBLIC_KEY` — каждый эндпоинт с авторизацией.
+2. Secrets: `STAGING_SSH_KEY` (только для Terraform-хоста), при желании `POSTGRES_PASSWORD`, секреты приложения из §1. Текущий deployment contract для GitHub передаёт `GH_APP_ID`, `GH_APP_PRIVATE_KEY` и variable `GH_APP_BOT_LOGIN` как полный App config в `webhook-worker`; частичный набор закрывает startup и `up --wait` приводит к rollback. Полное отсутствие App config теперь отключает GitHub replay, но не запрещает отдельно настроенный GitLab-only runtime. GitLab runtime deployment-скрипты не provision (см. §1). `worker` без App ID и ключа стартует, GitHub sweep/publication отключены. Без секретов `api` (`GH_WEBHOOK_SECRET`, `GH_CLIENT_ID`, `GH_CLIENT_SECRET`, `AUTH_JWT_PRIVATE_KEY`, `AUTH_JWT_PUBLIC_KEY`) отключается соответствующая функция: без `GH_WEBHOOK_SECRET` `POST /webhooks/github` отвечает 503, без `GH_CLIENT_ID`, `GH_CLIENT_SECRET` или `AUTH_JWT_PRIVATE_KEY` вход отвечает 503, без `AUTH_JWT_PUBLIC_KEY` — каждый эндпоинт с авторизацией.
 3. Variables: хост, SSH-порт, SHA256 SSH fingerprint, SSH-пользователь, логин бота App `GH_APP_BOT_LOGIN` (обязателен, п. 2), опционально health URL, имя БД и `PORTAL_URL` (ссылка на Run).
 
    Fingerprint после `terraform apply` (формат appleboy — строка `SHA256:…` из вывода):
