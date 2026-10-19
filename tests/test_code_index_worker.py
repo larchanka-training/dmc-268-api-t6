@@ -29,7 +29,12 @@ from cryptography.hazmat.primitives.serialization import Encoding, NoEncryption,
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 import app.bootstrap.code_index_worker as code_index_worker
-from app.bootstrap.code_index_worker import CodeIndexSettings, index_versions, snapshot_sources
+from app.bootstrap.code_index_worker import (
+    CodeIndexSettings,
+    index_leader_tasks,
+    index_versions,
+    snapshot_sources,
+)
 from app.modules.code_index.application.build_index import (
     BuildOutcome,
     BuildRepositoryIndex,
@@ -37,6 +42,10 @@ from app.modules.code_index.application.build_index import (
     IndexBuildSettings,
 )
 from app.modules.code_index.application.index_store import IndexAdmission
+from app.modules.code_index.application.leader_tasks import (
+    CollectIndexGarbage,
+    PurgeUnusedIndexes,
+)
 from app.modules.code_index.application.ports import IndexedRepository
 from app.modules.code_index.application.vcs import RepositorySnapshotSource
 from app.modules.code_index.domain.limits import IndexLimits
@@ -83,6 +92,13 @@ def test_every_default_is_the_plan_table() -> None:
         soft_cutoff_seconds=300,
         discard_batch_rows=10_000,
     )
+    # The leader tasks (#143).
+    assert (
+        settings.ttl_days,
+        settings.ttl_interval_seconds,
+        settings.gc_interval_seconds,
+        settings.gc_batch_rows,
+    ) == (30, 3_600, 300, 10_000)
 
 
 def test_every_variable_sets_its_value() -> None:
@@ -104,6 +120,10 @@ def test_every_variable_sets_its_value() -> None:
             "CODE_INDEX_MAX_INCREMENTAL_FILES": "80",
             "CODE_INDEX_MAX_REPOSITORY_STORAGE_BYTES": "90",
             "CODE_INDEX_MAX_WORKSPACE_STORAGE_BYTES": "100",
+            "CODE_INDEX_TTL_DAYS": "7",
+            "CODE_INDEX_TTL_INTERVAL_SECONDS": "600",
+            "CODE_INDEX_GC_INTERVAL_SECONDS": "120",
+            "CODE_INDEX_GC_BATCH_ROWS": "500",
         }
     )
 
@@ -125,6 +145,12 @@ def test_every_variable_sets_its_value() -> None:
         soft_cutoff_seconds=200,
         discard_batch_rows=500,
     )
+    assert (
+        settings.ttl_days,
+        settings.ttl_interval_seconds,
+        settings.gc_interval_seconds,
+        settings.gc_batch_rows,
+    ) == (7, 600, 120, 500)
 
 
 def test_an_empty_variable_keeps_the_default() -> None:
@@ -153,6 +179,14 @@ def test_an_empty_variable_keeps_the_default() -> None:
         # would overflow the lease timestamp.
         ({"CODE_INDEX_LEASE_SECONDS": "86401"}, "CODE_INDEX_LEASE_SECONDS"),
         ({"CODE_INDEX_LEASE_SECONDS": "1000000000000"}, "CODE_INDEX_LEASE_SECONDS"),
+        # ADR §4: GC starts at least every half hour, so a purged index's rows go within
+        # the hour.
+        ({"CODE_INDEX_GC_INTERVAL_SECONDS": "1801"}, "CODE_INDEX_GC_INTERVAL_SECONDS"),
+        ({"CODE_INDEX_GC_BATCH_ROWS": "100001"}, "CODE_INDEX_GC_BATCH_ROWS"),
+        ({"CODE_INDEX_TTL_INTERVAL_SECONDS": "86401"}, "CODE_INDEX_TTL_INTERVAL_SECONDS"),
+        ({"CODE_INDEX_TTL_DAYS": "0"}, "CODE_INDEX_TTL_DAYS"),
+        # At most ten years: the purge threshold stays far inside the timestamp range.
+        ({"CODE_INDEX_TTL_DAYS": "3651"}, "CODE_INDEX_TTL_DAYS"),
     ],
     ids=[
         "not-a-number",
@@ -165,6 +199,11 @@ def test_an_empty_variable_keeps_the_default() -> None:
         "soft-cutoff-not-under-deadline",
         "lease-over-a-day",
         "lease-far-in-the-future",
+        "gc-interval-over-half-an-hour",
+        "gc-batch-over-100000-rows",
+        "ttl-interval-over-a-day",
+        "ttl-zero",
+        "ttl-over-ten-years",
     ],
 )
 def test_an_invalid_value_fails_the_start(env: dict[str, str], variable: str) -> None:
@@ -186,6 +225,50 @@ def test_the_bounds_admit_their_edges() -> None:
     assert CodeIndexSettings.from_environment({"CODE_INDEX_LEASE_SECONDS": "86400"}).build == (
         IndexBuildSettings(admission=CodeIndexSettings().build.admission, lease_seconds=86_400)
     )
+    edges = CodeIndexSettings.from_environment(
+        {
+            "CODE_INDEX_GC_INTERVAL_SECONDS": "1800",
+            "CODE_INDEX_GC_BATCH_ROWS": "100000",
+            "CODE_INDEX_TTL_INTERVAL_SECONDS": "86400",
+        }
+    )
+    assert (edges.gc_interval_seconds, edges.gc_batch_rows, edges.ttl_interval_seconds) == (
+        1_800,
+        100_000,
+        86_400,
+    )
+    assert CodeIndexSettings.from_environment({"CODE_INDEX_TTL_DAYS": "3650"}).ttl_days == 3_650
+
+
+# --- leader tasks -----------------------------------------------------------------
+
+
+def test_the_leader_purges_unused_indexes_hourly_and_collects_garbage_every_five_minutes() -> None:
+    tasks = index_leader_tasks(CodeIndexSettings(), _SESSIONS).tasks
+    configured = index_leader_tasks(
+        CodeIndexSettings.from_environment(
+            {
+                "CODE_INDEX_TTL_DAYS": "7",
+                "CODE_INDEX_TTL_INTERVAL_SECONDS": "600",
+                "CODE_INDEX_GC_INTERVAL_SECONDS": "120",
+                "CODE_INDEX_GC_BATCH_ROWS": "500",
+            }
+        ),
+        _SESSIONS,
+    ).tasks
+
+    assert [(task.name, task.interval_seconds) for task in tasks] == [("ttl", 3_600), ("gc", 300)]
+    assert [(task.name, task.interval_seconds) for task in configured] == [
+        ("ttl", 600),
+        ("gc", 120),
+    ]
+    for scheduled, unused_for, batch_rows in (
+        (tasks, timedelta(days=30), 10_000),
+        (configured, timedelta(days=7), 500),
+    ):
+        ttl, gc = (task.task for task in scheduled)
+        assert isinstance(ttl, PurgeUnusedIndexes) and ttl.unused_for == unused_for
+        assert isinstance(gc, CollectIndexGarbage) and gc.batch_rows == batch_rows
 
 
 # --- versions ---------------------------------------------------------------------

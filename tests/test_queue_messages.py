@@ -11,6 +11,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from decimal import Decimal
+from types import SimpleNamespace
 from typing import Any, Never, cast
 from uuid import UUID, uuid5
 
@@ -23,6 +24,10 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 import app.modules.reviews.infrastructure.amqp as amqp
 import app.worker as worker_module
 from app.bootstrap.llm_gateway import build_gateway as original_build_gateway
+from app.modules.code_index.application.leader_tasks import (
+    CodeIndexLeaderTasks,
+    ScheduledTask,
+)
 from app.modules.reviews.application.handle_review_run import ClaimedAttempt, DeliveryOutcome
 from app.modules.reviews.application.queue_messages import ReviewPublishPointer, StoredRunMessage
 from app.modules.reviews.application.run_failures import RetryDelays, RunFailure
@@ -640,6 +645,124 @@ def test_worker_leader_tick_runs_the_sweep_then_the_outbox_replay_every_thirty_s
 
     assert calls == ["sweep", "replay", "replay"]
     assert inspect.signature(run_worker).parameters["leader_period"].default == 30.0
+
+
+@dataclass
+class _LeaderCalls:
+    """Records the sweep, the replay and the index tasks of a leader tick, in order."""
+
+    calls: list[str] = field(default_factory=list)
+    failing: str | None = None
+    error: type[BaseException] = RuntimeError
+
+    def _record(self, name: str) -> None:
+        self.calls.append(name)
+        if name == self.failing:
+            raise self.error(f"{name} failed")
+
+    async def execute(self, *, limit: int = 100) -> int:
+        self._record("sweep")
+        return 0
+
+    async def replay_pending_publications(self, *, limit: int = 100) -> int:
+        self._record("replay")
+        return 0
+
+    def task(self, name: str) -> ScheduledTask:
+        calls = self
+
+        class Task:
+            async def run(self, budget_seconds: float) -> bool:
+                calls._record(name)
+                return False
+
+        return ScheduledTask(name, Task(), 300)
+
+    def process(self) -> WorkerProcess:
+        return WorkerProcess(
+            handle_run=cast(Any, None),
+            publish_review=cast(Any, None),
+            enqueue=cast(Any, self),
+            sweep=cast(Any, self),
+            index_tasks=CodeIndexLeaderTasks([self.task("ttl"), self.task("gc")]),
+        )
+
+
+def test_worker_leader_tick_runs_the_index_tasks_after_the_outbox_replay() -> None:
+    leader = _LeaderCalls()
+
+    asyncio.run(leader.process().leader_tick())
+
+    assert leader.calls == ["sweep", "replay", "ttl", "gc"]
+
+
+def test_a_failing_index_task_neither_skips_the_replay_nor_fails_the_leader_tick(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    leader = _LeaderCalls(failing="ttl")
+
+    with caplog.at_level(logging.ERROR):
+        asyncio.run(leader.process().leader_tick())
+
+    assert leader.calls == ["sweep", "replay", "ttl", "gc"]
+    assert "Code index leader task ttl failed" in caplog.text
+
+
+def test_the_index_tasks_run_even_when_the_replay_fails() -> None:
+    leader = _LeaderCalls(failing="replay")
+
+    with pytest.raises(RuntimeError, match="replay failed"):
+        asyncio.run(leader.process().leader_tick())
+
+    assert leader.calls == ["sweep", "replay", "ttl", "gc"]
+
+
+def test_a_cancelled_leader_tick_skips_the_index_tasks() -> None:
+    # A shutdown or a lost leader lock cancels the tick: no index task starts after it.
+    leader = _LeaderCalls(failing="replay", error=asyncio.CancelledError)
+
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(leader.process().leader_tick())
+
+    assert leader.calls == ["sweep", "replay"]
+
+
+def test_run_worker_hands_the_index_leader_tasks_to_the_worker_process(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = WorkerSettings.from_environment(
+        {
+            "DATABASE_URL": "postgresql+psycopg://test",
+            "RABBITMQ_URL": "amqp://test",
+            "CODE_INDEX_GC_INTERVAL_SECONDS": "120",
+        }
+    )
+    composed: dict[str, Any] = {}
+
+    class Composed(Exception):
+        pass
+
+    @asynccontextmanager
+    async def channels(*_: object) -> AsyncIterator[SimpleNamespace]:
+        yield SimpleNamespace(publisher=object())
+
+    def compose(**kwargs: Any) -> Never:
+        composed.update(kwargs)
+        raise Composed
+
+    monkeypatch.setattr(worker_module, "amqp_channels", channels)
+    monkeypatch.setattr(worker_module, "compose_worker_process", compose)
+    with pytest.raises(Composed):
+        asyncio.run(run_worker(settings))
+
+    # Without the GitHub App too: the TTL purge and GC only touch the database.
+    assert composed["github"] is None
+    leader = composed["index_tasks"]
+    assert isinstance(leader, CodeIndexLeaderTasks)
+    assert [(task.name, task.interval_seconds) for task in leader.tasks] == [
+        ("ttl", 3_600),
+        ("gc", 120),
+    ]
 
 
 LLM_ENV = {

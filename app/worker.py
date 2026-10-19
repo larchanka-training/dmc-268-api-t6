@@ -2,7 +2,8 @@
 
 Run as a separate process with ``uv run python -m app.worker``: it declares the
 RabbitMQ topology, consumes ``review.run.fast`` and ``review.publish`` (prefetch 1
-each) and runs the leader loop (no-CI sweep and outbox replay).
+each) and runs the leader loop (no-CI sweep, outbox replay and the graph index's TTL
+purge and garbage collection).
 """
 
 from __future__ import annotations
@@ -30,10 +31,15 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 
-from app.bootstrap.code_index_worker import CodeIndexSettings, index_consumer
+from app.bootstrap.code_index_worker import (
+    CodeIndexSettings,
+    index_consumer,
+    index_leader_tasks,
+)
 from app.bootstrap.llm_gateway import build_gateway
 from app.common.infrastructure.db.leader import WORKER_LEADER_LOCK, run_as_leader
 from app.common.infrastructure.heartbeat import beat, heartbeat_file, reset
+from app.modules.code_index.application.leader_tasks import CodeIndexLeaderTasks
 from app.modules.integrations.webhooks.infrastructure.github_installation_tree_provider import (
     GitHubAppInstallationAccessTokenProvider,
     InMemoryInstallationAccessTokenCache,
@@ -711,11 +717,23 @@ class WorkerProcess:
     publish_review: PublishRunReview
     enqueue: TryEnqueueWebhookRun
     sweep: SweepNoCi | None
+    index_tasks: CodeIndexLeaderTasks | None = None
 
     async def leader_tick(self) -> None:
-        if self.sweep is not None:
-            await self.sweep.execute()
-        await self.enqueue.replay_pending_publications()
+        failure: Exception | None = None
+        try:
+            if self.sweep is not None:
+                await self.sweep.execute()
+            await self.enqueue.replay_pending_publications()
+        except Exception as error:
+            failure = error
+        # After the replay, even a failed one; the index tasks never raise and share one
+        # deadline, so they do not hold up the next tick for long (#143). A
+        # cancellation is not an `Exception`: it ends the tick before the index tasks.
+        if self.index_tasks is not None:
+            await self.index_tasks.tick()
+        if failure is not None:
+            raise failure
 
 
 def compose_worker_process(
@@ -731,6 +749,7 @@ def compose_worker_process(
     attempt_deadline: timedelta = FAST_ATTEMPT_DEADLINE,
     heartbeat_interval: timedelta = HEARTBEAT_INTERVAL,
     now: Callable[[], datetime] = lambda: datetime.now(UTC),
+    index_tasks: CodeIndexLeaderTasks | None = None,
 ) -> WorkerProcess:
     factory = provider_factory or attempt_provider_factory(gateway, github)
     run_url = run_url_factory(settings.portal_url)
@@ -799,6 +818,7 @@ def compose_worker_process(
             if github is not None
             else None
         ),
+        index_tasks=index_tasks,
     )
 
 
@@ -870,6 +890,8 @@ async def run_worker(
                 gateway=gateway,
                 provider_factory=provider_factory,
                 delays=delays,
+                # The TTL purge and GC touch only the database: on without the GitHub App.
+                index_tasks=index_leader_tasks(settings.code_index, session_factory),
             )
             run_queue = await channels.consumer_queue(run_queue_name("fast"))
             publish_queue = await channels.consumer_queue(PUBLISH_QUEUE)

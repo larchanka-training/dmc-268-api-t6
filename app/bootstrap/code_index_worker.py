@@ -4,6 +4,8 @@
   invalid value fails the start.
 - `index_consumer` declares the `index.repo` topology on a confirm channel of its own,
   not on the review channel, and composes `BuildRepositoryIndex`.
+- `index_leader_tasks` composes the TTL purge and garbage collection the worker leader
+  runs (#143).
 - The indexer has its own httpx client and its own `SubprocessSourceParser`: the
   review's parser is sequential, and sharing it would queue reviews behind index jobs.
 - Every job builds its own installation token provider and cache, so an attempt never
@@ -19,6 +21,7 @@ import time
 from collections.abc import AsyncIterator, Callable, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, fields
+from datetime import timedelta
 from functools import partial
 from typing import Protocol
 
@@ -35,6 +38,12 @@ from app.modules.code_index.application.build_index import (
 )
 from app.modules.code_index.application.index_resolution import INDEX_RESOLVER_VERSION
 from app.modules.code_index.application.index_store import IndexAdmission
+from app.modules.code_index.application.leader_tasks import (
+    CodeIndexLeaderTasks,
+    CollectIndexGarbage,
+    PurgeUnusedIndexes,
+    ScheduledTask,
+)
 from app.modules.code_index.application.ports import IndexedRepository
 from app.modules.code_index.application.vcs import RepositorySnapshotSource
 from app.modules.code_index.domain.limits import IndexLimits
@@ -50,6 +59,9 @@ from app.modules.code_index.infrastructure.github_snapshot_source import (
     GitHubRepositorySnapshotSource,
 )
 from app.modules.code_index.infrastructure.index_store import SqlAlchemyCodeIndexUnitOfWork
+from app.modules.code_index.infrastructure.maintenance import (
+    SqlAlchemyCodeIndexMaintenanceUnitOfWork,
+)
 from app.modules.code_index.infrastructure.repository_reader import (
     SqlAlchemyIndexRepositoryReader,
 )
@@ -72,6 +84,16 @@ MAX_DEADLINE_SECONDS = 1_500
 LEASE_MARGIN_SECONDS = 60
 # At most a day: a LEASED redelivery waits in the 10m queue until the lease has expired.
 MAX_LEASE_SECONDS = 86_400
+# ADR §4 targets physical deletion of a purged index's rows within the hour: GC starts at
+# least every half hour and keeps running on consecutive leader ticks until drained.
+MAX_GC_INTERVAL_SECONDS = 1_800
+# One GC portion is one DELETE transaction per graph table; this keeps it short.
+MAX_GC_BATCH_ROWS = 100_000
+# The leader looks for indexes past the TTL at least once a day.
+MAX_TTL_INTERVAL_SECONDS = 86_400
+# At most ten years: `clock_timestamp() - interval` of the TTL purge stays far inside the
+# timestamp range.
+MAX_TTL_DAYS = 3_650
 # Far above any limit; it keeps `int()` off a pathological value.
 _MAX_DIGITS = 18
 
@@ -97,6 +119,10 @@ class CodeIndexSettings:
     max_incremental_files: int = 500
     max_repository_storage_bytes: int = 536_870_912
     max_workspace_storage_bytes: int = 2_147_483_648
+    ttl_days: int = 30
+    ttl_interval_seconds: int = 3_600
+    gc_interval_seconds: int = 300
+    gc_batch_rows: int = 10_000
 
     def __post_init__(self) -> None:
         for name in _field_names():
@@ -117,6 +143,18 @@ class CodeIndexSettings:
             raise ValueError(
                 f"{_variable('soft_cutoff_seconds')} must be below {_variable('deadline_seconds')}"
             )
+        if self.gc_interval_seconds > MAX_GC_INTERVAL_SECONDS:
+            raise ValueError(
+                f"{_variable('gc_interval_seconds')} must be at most {MAX_GC_INTERVAL_SECONDS}"
+            )
+        if self.gc_batch_rows > MAX_GC_BATCH_ROWS:
+            raise ValueError(f"{_variable('gc_batch_rows')} must be at most {MAX_GC_BATCH_ROWS}")
+        if self.ttl_interval_seconds > MAX_TTL_INTERVAL_SECONDS:
+            raise ValueError(
+                f"{_variable('ttl_interval_seconds')} must be at most {MAX_TTL_INTERVAL_SECONDS}"
+            )
+        if self.ttl_days > MAX_TTL_DAYS:
+            raise ValueError(f"{_variable('ttl_days')} must be at most {MAX_TTL_DAYS}")
 
     @classmethod
     def from_environment(cls, env: Mapping[str, str]) -> CodeIndexSettings:
@@ -213,6 +251,27 @@ def snapshot_sources(
         )
 
     return source
+
+
+def index_leader_tasks(
+    settings: CodeIndexSettings, session_factory: async_sessionmaker[AsyncSession]
+) -> CodeIndexLeaderTasks:
+    """The TTL purge and garbage collection of the worker leader (#143, ADR 0001 §4)."""
+    uow = partial(SqlAlchemyCodeIndexMaintenanceUnitOfWork, session_factory)
+    return CodeIndexLeaderTasks(
+        [
+            ScheduledTask(
+                "ttl",
+                PurgeUnusedIndexes(uow=uow, unused_for=timedelta(days=settings.ttl_days)),
+                settings.ttl_interval_seconds,
+            ),
+            ScheduledTask(
+                "gc",
+                CollectIndexGarbage(uow=uow, batch_rows=settings.gc_batch_rows),
+                settings.gc_interval_seconds,
+            ),
+        ]
+    )
 
 
 class IndexWorkerSettings(Protocol):
