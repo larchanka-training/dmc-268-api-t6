@@ -16,6 +16,8 @@ from typing import Any, cast
 from uuid import UUID, uuid4
 
 from sqlalchemy import (
+    BigInteger,
+    Boolean,
     ColumnElement,
     CursorResult,
     Enum,
@@ -79,6 +81,7 @@ type _GraphModel = (
     type[CodeIndexFile] | type[CodeIndexSymbol] | type[CodeIndexEdge] | type[CodeIndexImport]
 )
 type _Bound = int | InstrumentedAttribute[int]
+type _Expression[T] = ColumnElement[T] | InstrumentedAttribute[T]
 
 # Deletion order of one portion; the tables have no foreign keys between them.
 _GRAPH_MODELS: tuple[_GraphModel, ...] = (
@@ -168,6 +171,37 @@ def _readable(model: _GraphModel, repository_id: UUID) -> list[ColumnElement[boo
             CodeIndexState.published_publication,
         ),
     ]
+
+
+def garbage_condition(
+    model: _GraphModel,
+    *,
+    generation: _Expression[int],
+    published: _Expression[int],
+    floor: _Expression[int],
+    leased: ColumnElement[int],
+    displaced_due: ColumnElement[bool],
+) -> ColumnElement[bool]:
+    """T7: the rows of `model` no reader sees any more, over SQL expressions of the state.
+
+    An older generation; an unpublished row of this generation, except the lease's own
+    publication (a NULL `leased` spares nothing); and, once `displaced_due`, a row below
+    the floor or closed by the publication. `collect_garbage` binds the values it read
+    under FOR SHARE; the leader enumeration correlates the state columns (#143).
+    """
+    return or_(
+        model.generation < generation,
+        and_(
+            model.generation == generation,
+            model.valid_from > published,
+            or_(leased.is_(None), model.valid_from != leased),
+        ),
+        and_(
+            displaced_due,
+            model.generation == generation,
+            or_(model.valid_from < floor, model.valid_to <= published),
+        ),
+    )
 
 
 def _text_values(file: IndexedFile) -> Iterator[tuple[str, str, str]]:
@@ -842,32 +876,30 @@ class SqlAlchemyCodeIndexStore:
         state = await self._state(repository_id, lock=True, share=True)
         if state is None:
             return 0
-        generation, published = state.generation, state.published_publication
-        floor = state.floor_publication
+        generation = literal(state.generation, BigInteger())
+        published = literal(state.published_publication, BigInteger())
+        floor = literal(state.floor_publication, BigInteger())
         # The lease's own number is spared, even expired, until revoke_expired_lease.
-        leased = state.reserved_publication if state.lease_token is not None else None
-        displaced_due = (
-            state.published_at is not None
-            and state.published_at <= await self._clock() - _DISPLACED_GRACE
+        leased = literal(
+            state.reserved_publication if state.lease_token is not None else None, BigInteger()
         )
-
-        def garbage(model: _GraphModel) -> ColumnElement[bool]:
-            unpublished = and_(
-                model.generation == generation,
-                model.valid_from > published,
-                true() if leased is None else model.valid_from != leased,
-            )
-            conditions = [model.generation < generation, unpublished]
-            if displaced_due:
-                conditions.append(
-                    and_(
-                        model.generation == generation,
-                        or_(model.valid_from < floor, model.valid_to <= published),
-                    )
-                )
-            return or_(*conditions)
-
-        return await self._delete(repository_id, garbage, limit)
+        displaced_due = literal(
+            state.published_at is not None
+            and state.published_at <= await self._clock() - _DISPLACED_GRACE,
+            Boolean(),
+        )
+        return await self._delete(
+            repository_id,
+            lambda model: garbage_condition(
+                model,
+                generation=generation,
+                published=published,
+                floor=floor,
+                leased=leased,
+                displaced_due=displaced_due,
+            ),
+            limit,
+        )
 
     async def _visible_symbols(
         self, repository_id: UUID, *conditions: ColumnElement[bool]
