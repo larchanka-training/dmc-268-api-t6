@@ -236,6 +236,7 @@ workflow до него уже меняет Compose-файлы и edge-прокс
 
 | Ревизия | Что удаляет downgrade | Что даёт повторный upgrade |
 |---|---|---|
+| `20261019_0036` (#174) | только CHECK `ck_runs_trigger` на `runs.trigger`; строки и значения `trigger` сохраняются | CHECK `ck_runs_trigger` снова ограничивает `runs.trigger` значениями `webhook`, `manual`, `rerun`, `dry_run`; если за время отката в `runs.trigger` попало значение вне этих четырёх, upgrade отклоняется с 23514, и БД остаётся на `20261018_0035` |
 | `20261018_0035` (#150) | таблицу `repository_rules_status` с индексом `ix_repository_rules_status_refresh` и её CHECK `ck_repository_rules_status_*`: сохранённые результаты чтения `.review/rules.md` (текст, checksum, маски, диагностика) и висящие запросы перечитывания | пустая таблица; каждый репозиторий отвечает `pending`, пока первый GET статуса правил или `push` в default branch не запросит чтение |
 | `20261017_0034` (#142) | колонки `code_index_states.indexed_default_branch`, `exclusions_digest`, `stored_bytes`, `pending_bytes`, четыре CHECK `ck_code_index_states_profile_complete`, `ck_code_index_states_bytes`, `ck_code_index_states_pending_leased`, `ck_code_index_states_failed_code` и индекс `ix_code_index_states_live_lease` | `indexed_default_branch` и `exclusions_digest` = NULL, `stored_bytes` и `pending_bytes` = 0; upgrade обнуляет версии профиля, поэтому следующая сборка каждого индекса полная; пока строки графа сохранились, `stored_bytes` остаётся 0 до следующей публикации, и квоты хранения недосчитывают индекс до пересборки |
 | `20261016_0033` (#145) | колонку `repositories.rag_enabled` | колонка со значением `false`; включённый RAG (opt-in) не восстанавливается |
@@ -252,8 +253,8 @@ installation_available`: `enabled=true` при `installation_available=false` с
 
 Например, ручной downgrade до `20261012_0030` откатывает все строки таблицы выше строки
 `20261012_0030`, а не только `20261010_0030` и `20261010_0029`: сейчас это ещё
-`20261014_0031`, `20261015_0032`, `20261016_0033`, `20261017_0034` и `20261018_0035`; полный актуальный
-состав — таблица.
+`20261014_0031`, `20261015_0032`, `20261016_0033`, `20261017_0034`, `20261018_0035` и
+`20261019_0036`; полный актуальный состав — таблица.
 
 Более глубокий downgrade **до `20261007_0028`** дополнительно откатывает
 policy/context #136: ревизии `20261012_0030` и `20261011_0029`, их потери перечислены в
