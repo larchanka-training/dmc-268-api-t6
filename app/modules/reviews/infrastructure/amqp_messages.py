@@ -59,7 +59,7 @@ class ReviewRunMessage(_Message):
             installation_id=message.installation_id,
             repo=RepoRef(
                 id=message.repository_id,
-                provider="github",
+                provider=message.provider,
                 external_id=message.repository_external_id,
                 full_name=message.repository_full_name,
             ),

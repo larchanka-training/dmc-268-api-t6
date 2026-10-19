@@ -1,11 +1,11 @@
-"""Durable GitHub receipt and retryable projection boundaries."""
+"""Durable provider-bound receipts and a shared retryable projection engine."""
 
 from __future__ import annotations
 
 import asyncio
 import logging
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from typing import Protocol
@@ -43,6 +43,7 @@ class FailureCategory(StrEnum):
 
     TIMEOUT = "timeout"
     GITHUB_REQUEST = "github_request"
+    GITLAB_REQUEST = "gitlab_request"
     DATABASE = "database"
     INTERNAL = "internal"
 
@@ -61,7 +62,29 @@ class WebhookReceipt:
 
     delivery_id: str
     event_name: str
-    payload_json: str
+    payload_json: str = field(repr=False)
+    provider: str = "github"
+    origin_provider_installation_id: UUID | None = None
+
+    def __post_init__(self) -> None:
+        if self.provider not in {"github", "gitlab"}:
+            raise ValueError("unsupported webhook provider")
+        if self.provider == "gitlab" and not isinstance(self.origin_provider_installation_id, UUID):
+            raise ValueError("GitLab receipt requires an immutable origin UUID")
+
+
+@dataclass(frozen=True)
+class ReplayBatchResult:
+    """Selection fullness and completed handling; a full scan is not proof of progress."""
+
+    scanned_count: int
+    handled_count: int
+    error_count: int
+    limit: int
+
+    @property
+    def full(self) -> bool:
+        return self.scanned_count == self.limit
 
 
 class GitHubWebhookReceiptStore(Protocol):
@@ -133,7 +156,7 @@ class GitHubDeliveryDispatcher(Protocol):
     async def execute(self, delivery: WebhookReceipt) -> InstallationDeliveryDispatchResult: ...
 
 
-class ReceiveGitHubDelivery:
+class ReceiveWebhookDelivery:
     """Commit each receipt and expose a replay sweep for a separate worker.
 
     Claim leases prevent concurrent projection. A process crash leaves the JSONB
@@ -144,6 +167,7 @@ class ReceiveGitHubDelivery:
     def __init__(
         self,
         *,
+        provider: str,
         uow_factory: Callable[[], GitHubWebhookReceiptUnitOfWork],
         dispatcher: GitHubDeliveryDispatcher | None = None,
         now: Callable[[], datetime] = lambda: datetime.now(UTC),
@@ -151,6 +175,10 @@ class ReceiveGitHubDelivery:
         action_of: Callable[[WebhookReceipt], str | None] | None = None,
         classify_failure: Callable[[BaseException], FailureCategory] | None = None,
     ) -> None:
+        if provider not in {"github", "gitlab"}:
+            raise ValueError("unsupported webhook provider")
+        self._provider = provider
+        self._provider_label = "GitHub" if provider == "github" else "GitLab"
         if not 0 < dispatch_timeout_seconds < _LEASE.total_seconds():
             raise ValueError("dispatch timeout must be shorter than claim lease")
         self._uow_factory = uow_factory
@@ -165,6 +193,8 @@ class ReceiveGitHubDelivery:
         self._classify_failure = classify_failure
 
     async def execute(self, delivery: WebhookReceipt) -> InstallationDeliveryDispatchStatus:
+        if delivery.provider != self._provider:
+            raise ValueError("webhook receipt provider does not match receiver")
         async with self._uow_factory() as uow:
             inserted = await uow.receipts.save(delivery)
             await uow.commit()
@@ -175,19 +205,30 @@ class ReceiveGitHubDelivery:
         )
 
     async def replay_pending(self, *, limit: int = 100) -> int:
-        """Project unclaimed/expired receipts; call from the webhook worker."""
+        """Compatibility projection of completed handling, including deferrals."""
+        return (await self.replay_batch(limit=limit)).handled_count
+
+    async def replay_batch(self, *, limit: int = 100) -> ReplayBatchResult:
+        """Project one bounded selection; report scans separately from handling and errors."""
         if self._dispatcher is None:
             raise RuntimeError("webhook dispatcher is not configured")
         if limit < 1:
             raise ValueError("limit must be positive")
         async with self._uow_factory() as uow:
             delivery_ids = await uow.receipts.pending_ids(self._now(), limit)
-        projected = deferred = final = 0
+        scanned = len(delivery_ids)
+        projected = deferred = final = errors = 0
         for delivery_id in delivery_ids:
             try:
                 outcome = await self._project(delivery_id)
-            except Exception:
-                _LOGGER.exception("GitHub webhook projection failed for delivery %s", delivery_id)
+            except Exception as exc:
+                errors += 1
+                _LOGGER.error(
+                    "%s webhook projection failed for delivery %s",
+                    self._provider_label,
+                    delivery_id,
+                    extra={"error_type": type(exc).__name__, "provider": self._provider},
+                )
                 continue
             if outcome is not None:
                 status, last_attempt = outcome
@@ -199,12 +240,13 @@ class ReceiveGitHubDelivery:
                 final += last_attempt
         if delivery_ids:
             _LOGGER.info(
-                "GitHub webhook sweep: %d handled, %d deferred, %d deferred for good",
+                "%s webhook sweep: %d handled, %d deferred, %d deferred for good",
+                self._provider_label,
                 projected,
                 deferred,
                 final,
             )
-        return projected
+        return ReplayBatchResult(scanned, projected, errors, limit)
 
     async def purge_finished(self, retention: timedelta = RECEIPT_RETENTION) -> int:
         """Delete finished receipts older than ``retention`` (docs/WEBHOOK_WORKER.md)."""
@@ -212,7 +254,7 @@ class ReceiveGitHubDelivery:
             purged = await uow.receipts.purge_finished(self._now() - retention)
             await uow.commit()
         if purged:
-            _LOGGER.info("Purged %d finished GitHub webhook receipts", purged)
+            _LOGGER.info("Purged %d finished %s webhook receipts", purged, self._provider_label)
         return purged
 
     async def _project(
@@ -227,9 +269,13 @@ class ReceiveGitHubDelivery:
         try:
             async with self._uow_factory() as uow:
                 delivery = await uow.receipts.claim(delivery_id, token, now, now + _LEASE)
+                if delivery is not None and delivery.provider != self._provider:
+                    raise ValueError("webhook receipt provider does not match receiver")
+                # A provider store may terminalize an inactive origin without dispatch.
+                # Commit that flush-only disposition even when claim returns None.
+                await uow.commit()
                 if delivery is None:
                     return None
-                await uow.commit()
         except Exception as exc:
             self._log_failure(delivery_id, None, FailureStage.CLAIM, exc)
             raise
@@ -254,7 +300,8 @@ class ReceiveGitHubDelivery:
             if failed:
                 # Logged after the commit: a failed commit leaves the receipt retryable.
                 _LOGGER.warning(
-                    "GitHub webhook delivery %s failed after its last attempt: %s",
+                    "%s webhook delivery %s failed after its last attempt: %s",
+                    self._provider_label,
                     delivery_id,
                     type(exc).__name__,
                 )
@@ -291,7 +338,8 @@ class ReceiveGitHubDelivery:
             raise
         if wait_expired:
             _LOGGER.warning(
-                "GitHub webhook delivery %s failed after supersession wait reached its age limit",
+                "%s webhook delivery %s failed after supersession wait reached its age limit",
+                self._provider_label,
                 delivery_id,
             )
         elif final:
@@ -300,14 +348,16 @@ class ReceiveGitHubDelivery:
             # events of linked installations received within the revival window are
             # also revived hourly (ReviveDeferredInstallationDeliveries).
             _LOGGER.warning(
-                "GitHub webhook delivery %s deferred after its last attempt: %s",
+                "%s webhook delivery %s deferred after its last attempt: %s",
+                self._provider_label,
                 delivery_id,
                 result.status.value,
             )
         # One line per delivery: why a label (or any event) did or did not become a Run.
         # Ids, statuses and reasons only; never the payload or a credential.
         _LOGGER.info(
-            "GitHub webhook delivery %s event=%s status=%s detail=%s%s",
+            "%s webhook delivery %s event=%s status=%s detail=%s%s",
+            self._provider_label,
             delivery_id,
             log_token(delivery.event_name) or "-",
             result.status.value,
@@ -324,7 +374,7 @@ class ReceiveGitHubDelivery:
         exc: Exception,
         result: InstallationDeliveryDispatchResult | None = None,
     ) -> None:
-        """One greppable line for a failed delivery; the sweep logs the traceback after it.
+        """One message-free failure line; the sweep never renders the exception traceback.
 
         Class names and plain tokens only: an exception message can carry a URL or an
         identifier, so it is never logged here. ``result`` is the dispatch outcome a failed
@@ -335,18 +385,25 @@ class ReceiveGitHubDelivery:
         action = "-"
         reader = self._action_of
         if delivery is not None and reader is not None:
-            action = _failure_field(delivery_id, "action", "-", lambda: reader(delivery) or "-")
+            action = _failure_field(
+                self._provider_label, delivery_id, "action", "-", lambda: reader(delivery) or "-"
+            )
         classify = self._classify_failure
         category: str = FailureCategory.INTERNAL
         if isinstance(exc, TimeoutError):  # the dispatch timeout needs no library knowledge
             category = FailureCategory.TIMEOUT
         elif classify is not None:
             category = _failure_field(
-                delivery_id, "category", FailureCategory.INTERNAL, lambda: classify(exc)
+                self._provider_label,
+                delivery_id,
+                "category",
+                FailureCategory.INTERNAL,
+                lambda: classify(exc),
             )
         outcome = ""
         if result is not None:
             rendered = _failure_field(
+                self._provider_label,
                 delivery_id,
                 "outcome",
                 "-",
@@ -355,7 +412,8 @@ class ReceiveGitHubDelivery:
             outcome = f" outcome={rendered}"
         # Not guarded: logging reports format/emit errors itself (Handler.handleError, stderr).
         _LOGGER.warning(
-            "GitHub webhook delivery %s event=%s action=%s failed stage=%s category=%s error=%s%s",
+            "%s webhook delivery %s event=%s action=%s failed stage=%s category=%s error=%s%s",
+            self._provider_label,
             delivery_id,
             event,
             action,
@@ -366,7 +424,33 @@ class ReceiveGitHubDelivery:
         )
 
 
-def _failure_field(delivery_id: str, field: str, default: str, compute: Callable[[], str]) -> str:
+class ReceiveGitHubDelivery(ReceiveWebhookDelivery):
+    """Compatibility entrypoint with fixed GitHub provider semantics."""
+
+    def __init__(
+        self,
+        *,
+        uow_factory: Callable[[], GitHubWebhookReceiptUnitOfWork],
+        dispatcher: GitHubDeliveryDispatcher | None = None,
+        now: Callable[[], datetime] = lambda: datetime.now(UTC),
+        dispatch_timeout_seconds: float = _DISPATCH_TIMEOUT_SECONDS,
+        action_of: Callable[[WebhookReceipt], str | None] | None = None,
+        classify_failure: Callable[[BaseException], FailureCategory] | None = None,
+    ) -> None:
+        super().__init__(
+            provider="github",
+            uow_factory=uow_factory,
+            dispatcher=dispatcher,
+            now=now,
+            dispatch_timeout_seconds=dispatch_timeout_seconds,
+            action_of=action_of,
+            classify_failure=classify_failure,
+        )
+
+
+def _failure_field(
+    provider_label: str, delivery_id: str, field: str, default: str, compute: Callable[[], str]
+) -> str:
     """``compute()``, or ``default`` after a WARNING that names the field and the error class.
 
     The error message is never logged: the action reader parses the payload, so a message
@@ -376,7 +460,8 @@ def _failure_field(delivery_id: str, field: str, default: str, compute: Callable
         return compute()
     except Exception as error:
         _LOGGER.warning(
-            "GitHub webhook delivery %s failure line: %s fell back to %s after %s",
+            "%s webhook delivery %s failure line: %s fell back to %s after %s",
+            provider_label,
             delivery_id,
             field,
             default,

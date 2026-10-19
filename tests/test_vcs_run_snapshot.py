@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
+from datetime import timedelta
 from typing import Any, cast
 from uuid import UUID
 
@@ -24,6 +25,7 @@ from app.modules.reviews.application.process_run import (
     RunVcsInput,
 )
 from app.modules.reviews.application.prompt_builder import DiffLine, PullRequestMeta
+from app.modules.reviews.application.run_failures import RequiredSourceUnavailable, RunFailure
 from app.modules.reviews.application.vcs_diff import (
     PullRequestLocator,
     VcsFile,
@@ -473,3 +475,108 @@ def test_blob_cache_writes_are_committed_by_the_processor() -> None:
 
     assert [uow.commits for uow in opened] == [1]
     assert asyncio.run(cache.get(BlobCacheKey(REPOSITORY_ID, "1" * 40))).content == "saved\n"
+
+
+@pytest.mark.parametrize("case", ["required_diff", "required_commits", "deadline", "optional"])
+def test_cached_snapshot_distinguishes_required_authority_from_optional_blob_failure(
+    case: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    failure = {
+        "required_diff": RequiredSourceUnavailable(
+            "diff_fetch_failed", retry_after=timedelta(seconds=180)
+        ),
+        "required_commits": RequiredSourceUnavailable(
+            "commit_messages_fetch_failed", retry_after=timedelta(seconds=180)
+        ),
+        "deadline": RunFailure("deadline_exceeded", "attempt deadline passed on a checkpoint"),
+        "optional": RunFailure("diff_fetch_failed", "optional cache fill unavailable"),
+    }[case]
+    requested: list[str] = []
+
+    class Repository:
+        async def get_run_vcs_input(self, run_id: UUID) -> RunVcsInput:
+            return RunVcsInput(CODE_CHANGE_ID, REPOSITORY_ID, HEAD, BASE, LOCATOR)
+
+        async def get_run_snapshots(self, run_id: UUID) -> list[DiffSnapshot]:
+            return [
+                DiffSnapshot(
+                    "src/app.py",
+                    "@@ -1 +1 @@\n-old\n+new",
+                    blob_sha="1" * 40,
+                    review_patch="@@ -1 +1 @@\n-old\n+new",
+                )
+            ]
+
+        async def get_run_diff_input(self, run_id: UUID) -> None:
+            raise AssertionError("stored VCS snapshot cannot use a legacy source")
+
+        async def store_diff_snapshots(
+            self, run_id: UUID, code_change_id: UUID, head_sha: str, snapshots: list[DiffSnapshot]
+        ) -> list[DiffSnapshot]:
+            raise AssertionError("stored snapshot cannot be rewritten")
+
+    class Provider:
+        async def get_pull_request(
+            self, locator: PullRequestLocator, *, checkpoint: RunProviderCheckpoint
+        ) -> VcsPullRequest:
+            raise AssertionError("stored snapshot cannot refetch metadata")
+
+        async def get_diff(
+            self, pull_request: VcsPullRequest, *, checkpoint: RunProviderCheckpoint
+        ) -> tuple[VcsFile, ...]:
+            raise AssertionError("stored snapshot cannot refetch a mutable diff")
+
+        async def get_blob(
+            self, locator: PullRequestLocator, sha: str, *, checkpoint: RunProviderCheckpoint
+        ) -> bytes:
+            await checkpoint()
+            requested.append(sha)
+            raise failure
+
+    class ContextStage:
+        @property
+        def policy_key(self) -> None:
+            return None
+
+        async def begin(self, run_id: UUID) -> None:
+            pass
+
+        def excludes_change(self, path: str, previous_path: str | None) -> bool:
+            return False
+
+        async def run(self, run_id: UUID) -> None:
+            if case != "optional":
+                raise AssertionError("required authority/deadline cannot reach context or models")
+
+        def excluded(self, path: str) -> bool:
+            return False
+
+    repository = Repository()
+    cache = InMemoryBlobCache()
+    processor = ReviewRunProcessor(
+        repository,
+        None,
+        blob_cache=cache,
+        vcs_provider=Provider(),
+        uow_factory=processing_uow(repository, cache),
+        context_stage=ContextStage(),
+    )
+    if case == "optional":
+        assert asyncio.run(processor.execute(RUN_ID)) is True
+        assert "VCS blob cache fetch failed" in caplog.text
+    else:
+        with pytest.raises(RunFailure) as caught:
+            asyncio.run(processor.execute(RUN_ID))
+        assert caught.value is failure
+        assert (
+            caught.value.error_code
+            == {
+                "required_diff": "diff_fetch_failed",
+                "required_commits": "commit_messages_fetch_failed",
+                "deadline": "deadline_exceeded",
+            }[case]
+        )
+        assert caught.value.retry_after == (None if case == "deadline" else timedelta(seconds=180))
+        assert "VCS blob cache fetch failed" not in caplog.text
+    assert requested == ["1" * 40]
+    assert asyncio.run(cache.get(BlobCacheKey(REPOSITORY_ID, "1" * 40))).content is None

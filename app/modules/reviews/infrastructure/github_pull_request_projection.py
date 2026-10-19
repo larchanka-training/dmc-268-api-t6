@@ -10,12 +10,15 @@ from hashlib import sha256
 from typing import cast
 from uuid import UUID, uuid4
 
-from sqlalchemy import func, select, text, update
+from sqlalchemy import and_, func, or_, select, text, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from app.common.infrastructure.db.enums import CodeChangeState, RunState
 from app.common.infrastructure.db.unit_of_work import SqlAlchemyUnitOfWork
+from app.modules.integrations.gitlab.infrastructure.request_credentials import (
+    active_gitlab_target_metadata,
+)
 from app.modules.repositories.infrastructure.models import ProviderInstallation, Repository
 from app.modules.reviews.application.project_github_pull_request import (
     LockedPullRequest,
@@ -27,6 +30,7 @@ from app.modules.reviews.application.project_github_pull_request import (
     PullRequestState,
     RunCancellationNotice,
 )
+from app.modules.reviews.application.queue_messages import StoredRunMessage
 from app.modules.reviews.application.try_enqueue_webhook_run import PendingRunMessage
 from app.modules.reviews.infrastructure.models import CodeChange, Run
 from app.modules.reviews.infrastructure.run_origin import active_origin_condition
@@ -277,12 +281,19 @@ class SqlAlchemyPullRequestRunCanceller:
     ) -> tuple[PendingRunMessage, ...]:
         if run_ids == ():
             return ()
+        gitlab = active_gitlab_target_metadata().subquery()
         conditions = [
             Run.state == RunState.CANCELLED,
             Run.attempt >= 1,
             Run.cancellation_signal_requested_at.is_not(None),
             Run.cancellation_signal_published_at.is_(None),
-            ProviderInstallation.provider == "github",
+            or_(
+                ProviderInstallation.provider == "github",
+                and_(
+                    ProviderInstallation.provider == "gitlab",
+                    gitlab.c.origin_provider_installation_id.is_not(None),
+                ),
+            ),
             active_origin_condition(),
         ]
         if run_ids is not None:
@@ -296,13 +307,23 @@ class SqlAlchemyPullRequestRunCanceller:
                     ProviderInstallation,
                     Run.origin_provider_installation_id == ProviderInstallation.id,
                 )
+                .outerjoin(
+                    gitlab,
+                    and_(
+                        gitlab.c.origin_provider_installation_id
+                        == Run.origin_provider_installation_id,
+                        gitlab.c.workspace_id == ProviderInstallation.workspace_id,
+                        gitlab.c.repository_id == Repository.id,
+                        gitlab.c.project_id == Repository.external_id,
+                    ),
+                )
                 .where(*conditions)
                 .order_by(Run.cancellation_signal_requested_at, Run.id)
                 .limit(limit)
             )
         ).all()
         return tuple(
-            PendingRunMessage(
+            StoredRunMessage(
                 run_id=run.id,
                 workspace_id=installation.workspace_id,
                 installation_id=installation.external_id,
@@ -318,6 +339,8 @@ class SqlAlchemyPullRequestRunCanceller:
                 prompt_version_id=run.prompt_version_id,
                 attempt=run.attempt + 1,
                 requested_at=run.cancellation_signal_requested_at,
+                provider=installation.provider,
+                trigger=run.trigger,
             )
             for run, pr, repository, installation in rows
         )

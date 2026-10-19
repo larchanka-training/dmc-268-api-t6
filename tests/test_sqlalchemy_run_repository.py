@@ -429,7 +429,22 @@ def test_sqlalchemy_run_repository_reads_the_installation_scoped_vcs_locator() -
     run_id = UUID("00000000-0000-0000-0000-000000000001")
     code_change_id = UUID("00000000-0000-0000-0000-000000000002")
     repository_id = UUID("00000000-0000-0000-0000-000000000003")
-    session = FakeSession([(code_change_id, repository_id, "a" * 40, "b" * 40, 17, "octo/repo", 7)])
+    session = FakeSession(
+        [
+            (
+                code_change_id,
+                repository_id,
+                "a" * 40,
+                "b" * 40,
+                17,
+                "octo/repo",
+                7,
+                "github",
+                UUID(int=17),
+                101,
+            )
+        ]
+    )
     repository = SqlAlchemyRunRepository(
         cast(async_sessionmaker[AsyncSession], FakeSessionFactory(session)),
         allow_unscoped=True,

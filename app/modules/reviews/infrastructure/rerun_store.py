@@ -45,13 +45,17 @@ class SqlAlchemyRerunStore:
         self._allow_unscoped = allow_unscoped
 
     async def create_rerun(self, run_id: UUID, now: datetime) -> RerunResult:
-        code_change_id = await self._session.scalar(
-            select(Run.code_change_id).where(
-                Run.id == run_id, authorized_run(self._scope, allow_unscoped=self._allow_unscoped)
+        original = (
+            await self._session.execute(
+                select(Run.code_change_id, Run.origin_provider_installation_id).where(
+                    Run.id == run_id,
+                    authorized_run(self._scope, allow_unscoped=self._allow_unscoped),
+                )
             )
-        )
-        if code_change_id is None:
+        ).one_or_none()
+        if original is None:
             return RerunResult(RerunOutcome.NOT_FOUND)
+        code_change_id, original_origin = original
         # Match webhook/projection source-before-PR ordering before the active-Run decision.
         candidate = await SqlAlchemyWebhookRunStore(self._session).lock_candidate(code_change_id)
         pr_state = await self._session.scalar(
@@ -67,6 +71,9 @@ class SqlAlchemyRerunStore:
             return RerunResult(RerunOutcome.NOT_CONFIGURED)
         if not candidate.ci.repository_enabled:
             return RerunResult(RerunOutcome.CONFLICT)
+        # An old Run may rerun the current head, but cannot adopt replacement ownership.
+        if original_origin is None or candidate.origin_provider_installation_id != original_origin:
+            return RerunResult(RerunOutcome.NOT_CONFIGURED)
         new_id = uuid4()
         self._session.add(
             Run(

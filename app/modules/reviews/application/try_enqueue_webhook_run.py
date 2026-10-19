@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Protocol
@@ -14,6 +14,7 @@ from app.common.application.unit_of_work import UnitOfWork
 from app.modules.reviews.application.determine_ci_eligibility import (
     CiEligibility,
     EligibilityCandidate,
+    WebhookRunIdentity,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -107,6 +108,10 @@ class RunInsertCandidate:
     engine: str
     rule_version_id: UUID
     prompt_version_id: UUID
+    provider: str = "github"
+
+    def __post_init__(self) -> None:
+        _validate_provider(self.provider)
 
 
 @dataclass(frozen=True)
@@ -126,6 +131,11 @@ class PendingRunMessage:
     prompt_version_id: UUID
     attempt: int
     requested_at: datetime
+    # Keep StoredRunMessage's inherited positional trigger constructor compatible.
+    provider: str = field(default="github", kw_only=True)
+
+    def __post_init__(self) -> None:
+        _validate_provider(self.provider)
 
     @classmethod
     def from_candidate(
@@ -147,7 +157,13 @@ class PendingRunMessage:
             prompt_version_id=candidate.prompt_version_id,
             attempt=1,
             requested_at=requested_at,
+            provider=candidate.provider,
         )
+
+
+def _validate_provider(provider: str) -> None:
+    if type(provider) is not str or provider not in {"github", "gitlab"}:
+        raise ValueError("Unsupported run provider")
 
 
 class EligibilityChecker(Protocol):
@@ -213,6 +229,7 @@ class TryEnqueueWebhookRun:
         expected_head_sha: str,
         *,
         expected_installation_external_id: int | None = None,
+        expected_identity: WebhookRunIdentity | None = None,
     ) -> EnqueueResult:
         # Receipt paths require their origin; current-state sweeps have no receipt expectation.
         decision = await self._eligibility.execute(
@@ -224,6 +241,8 @@ class TryEnqueueWebhookRun:
             return EnqueueResult(
                 EnqueueStatus.INELIGIBLE, reason=decision.reason.value, detail=decision.detail
             )
+        if expected_identity is not None and decision.candidate.identity != expected_identity:
+            return EnqueueResult(EnqueueStatus.STALE, reason=STATE_CHANGED_REASON)
         async with self._uow_factory() as uow:
             candidate = await uow.runs.lock_candidate(code_change_id)
             if isinstance(candidate, CandidateMiss):
@@ -233,9 +252,13 @@ class TryEnqueueWebhookRun:
                     else EnqueueStatus.STALE
                 )
                 return EnqueueResult(status, reason=candidate.value)
-            if candidate.ci != decision.candidate or (
-                expected_installation_external_id is not None
-                and candidate.ci.installation_external_id != expected_installation_external_id
+            if (
+                candidate.ci != decision.candidate
+                or not _consistent_identity(candidate, expected_identity)
+                or (
+                    expected_installation_external_id is not None
+                    and candidate.ci.installation_external_id != expected_installation_external_id
+                )
             ):
                 return EnqueueResult(EnqueueStatus.STALE, reason=STATE_CHANGED_REASON)
             message = await uow.runs.insert_webhook_run(candidate, self._now())
@@ -279,3 +302,28 @@ class TryEnqueueWebhookRun:
             await uow.runs.mark_published(message.run_id, self._now())
             await uow.commit()
         return True
+
+
+def _consistent_identity(
+    candidate: RunInsertCandidate, expected: WebhookRunIdentity | None
+) -> bool:
+    if (
+        type(candidate.origin_provider_installation_id) is not UUID
+        or type(candidate.workspace_id) is not UUID
+        or type(candidate.repository_id) is not UUID
+        or type(candidate.repository_external_id) is not int
+        or not 0 < candidate.repository_external_id <= 9223372036854775807
+    ):
+        return False
+    identity = candidate.ci.identity
+    if identity is None:
+        # Compatibility for existing GitHub callers/fakes only, never GitLab authority.
+        return candidate.provider == "github" and expected is None
+    return (
+        (expected is None or identity == expected)
+        and candidate.provider == identity.provider
+        and candidate.origin_provider_installation_id == identity.origin_provider_installation_id
+        and candidate.workspace_id == identity.workspace_id
+        and candidate.repository_id == identity.repository_id
+        and candidate.repository_external_id == identity.repository_external_id
+    )

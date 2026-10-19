@@ -4,10 +4,17 @@ from __future__ import annotations
 
 import hashlib
 import re
-from typing import Any
+from collections.abc import Mapping
+from types import MappingProxyType
+from typing import Any, Protocol
 
 import httpx
 
+from app.modules.integrations.gitlab.infrastructure.run_http import (
+    GitLabPublicationResponse,
+    GitLabRunHttpError,
+    JsonValue,
+)
 from app.modules.reviews.application.publish_run_review import (
     PublishError,
     ReviewSubmission,
@@ -39,40 +46,49 @@ def _inline_marker(findings_hash: str, finding: PublishedFinding) -> str:
     )
 
 
-def _detail(response: httpx.Response) -> str:
-    try:
-        payload = response.json()
-    except ValueError:
-        return response.text[:500]
-    if isinstance(payload, dict):
-        return str(payload.get("message", ""))[:500]
-    return str(payload)[:500]
-
-
-def _classify(response: httpx.Response) -> PublishError:
+def _classify(response: GitLabPublicationResponse) -> PublishError:
     status = response.status_code
-    detail = _detail(response)
-    if status == 400 and _POSITION_REJECTION.search(detail.lower()) is not None:
-        return PublishError("coordinates", detail, http_status=status)
+    if (
+        status == 400
+        and _POSITION_REJECTION.search(response.body.decode("utf-8", errors="replace").lower())
+        is not None
+    ):
+        return PublishError("coordinates", "GitLab rejected review coordinates", http_status=status)
     if status in (401, 403):
-        return PublishError("forbidden", detail, http_status=status)
-    return PublishError("retryable", detail, http_status=status)
+        return PublishError("forbidden", "GitLab publication forbidden", http_status=status)
+    return PublishError(
+        "retryable",
+        "GitLab publication request failed",
+        http_status=status,
+        retry_after=response.retry_after,
+    )
 
 
-def _decoded(response: httpx.Response) -> Any:
+def _decoded(response: GitLabPublicationResponse) -> Any:
     try:
-        return response.json()
-    except ValueError as exc:
-        raise PublishError("retryable", "GitLab response was not JSON") from exc
+        return response.decode_json()
+    except GitLabRunHttpError:
+        raise PublishError("retryable", "GitLab response was not JSON") from None
 
 
-def _header_int(response: httpx.Response, name: str) -> int | None:
-    raw = response.headers.get(name, "").strip()
+def _header_int(response: GitLabPublicationResponse, name: str) -> int | None:
+    raw = response.headers.get(name.lower(), "").strip()
     if not raw:
         return None
-    if not raw.isdigit():
+    if not raw.isdigit() or len(raw) > 19:
         raise PublishError("retryable", "GitLab discussion list is short")
     return int(raw)
+
+
+class GitLabPublicationRequestPort(Protocol):
+    async def request(
+        self,
+        method: str,
+        path: str,
+        *,
+        params: dict[str, int] | None = None,
+        json_body: Mapping[str, JsonValue] | None = None,
+    ) -> GitLabPublicationResponse: ...
 
 
 def _matching_version(payload: Any, head_sha: str) -> dict[str, str]:
@@ -170,9 +186,20 @@ def _created_note_id(payload: Any) -> int:
 class GitLabMergeRequestDiscussionGateway:
     """Posts new-side inline discussions and one summary, skipping existing hash markers."""
 
-    def __init__(self, *, client: httpx.AsyncClient, token: str) -> None:
+    def __init__(
+        self,
+        *,
+        client: httpx.AsyncClient | None = None,
+        token: str | None = None,
+        requests: GitLabPublicationRequestPort | None = None,
+    ) -> None:
+        if (requests is None and (client is None or token is None)) or (
+            requests is not None and (client is not None or token is not None)
+        ):
+            raise ValueError("Configure exactly one GitLab publication request source")
         self._client = client
         self._token = token
+        self._requests = requests
 
     async def submit_review(
         self, submission: ReviewSubmission, *, project_id: int
@@ -217,8 +244,8 @@ class GitLabMergeRequestDiscussionGateway:
                 position=None,
             )
             return SubmittedReview(summary_id, ())
-        except httpx.TransportError as exc:
-            raise PublishError("retryable", f"GitLab request failed: {exc}") from exc
+        except httpx.TransportError:
+            raise PublishError("retryable", "GitLab publication request failed") from None
 
     async def _require_current_head(self, prefix: str, head_sha: str) -> None:
         """A position 400 is coordinates only while the latest version is still this head."""
@@ -237,12 +264,12 @@ class GitLabMergeRequestDiscussionGateway:
             page_total = _header_int(response, "X-Total")
             if page_total is not None:
                 total = page_total
-            next_page = response.headers.get("X-Next-Page", "").strip()
+            next_page = response.headers.get("x-next-page", "").strip()
             if not next_page:
                 if total is not None and len(collected) != total:
                     raise PublishError("retryable", "GitLab discussion list is short")
                 return collected
-            if not next_page.isdigit():
+            if not next_page.isdigit() or len(next_page) > 19:
                 raise PublishError("retryable", "GitLab discussion list is short")
             next_page_number = int(next_page)
             if next_page_number <= page:
@@ -264,13 +291,27 @@ class GitLabMergeRequestDiscussionGateway:
         *,
         params: dict[str, int] | None = None,
         json_body: dict[str, Any] | None = None,
-    ) -> httpx.Response:
-        kwargs: dict[str, Any] = {"headers": {"PRIVATE-TOKEN": self._token}, "timeout": _TIMEOUT}
-        if params is not None:
-            kwargs["params"] = params
-        if json_body is not None:
-            kwargs["json"] = json_body
-        response = await self._client.request(method, url, **kwargs)
-        if response.is_error:
-            raise _classify(response)
+    ) -> GitLabPublicationResponse:
+        if self._requests is not None:
+            response = await self._requests.request(method, url, params=params, json_body=json_body)
+        else:
+            assert self._client is not None and self._token is not None
+            kwargs: dict[str, Any] = {
+                "headers": {"PRIVATE-TOKEN": self._token},
+                "timeout": _TIMEOUT,
+            }
+            if params is not None:
+                kwargs["params"] = params
+            if json_body is not None:
+                kwargs["json"] = json_body
+            raw = await self._client.request(method, url, **kwargs)
+            if len(raw.content) > 8388608:
+                raise PublishError("retryable", "GitLab publication response is too large")
+            response = GitLabPublicationResponse(
+                raw.status_code,
+                raw.content,
+                MappingProxyType(dict(raw.headers)),
+            )
+        if response.status_code >= 300:
+            raise _classify(response) from None
         return response

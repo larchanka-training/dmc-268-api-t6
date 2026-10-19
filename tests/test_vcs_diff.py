@@ -4,12 +4,25 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
+from datetime import UTC, datetime, timedelta
+from typing import Any, Literal, cast
+from uuid import UUID
 
 import pytest
 
 from app.modules.reviews.application.check_runs import RunProviderCheckpoint
+from app.modules.reviews.application.handle_review_run import (
+    AttemptCheckpoint,
+    RunLifecycleUnitOfWork,
+)
 from app.modules.reviews.application.prompt_builder import ChangedFile, DiffLine, PullRequestMeta
-from app.modules.reviews.application.run_failures import RunCancelled
+from app.modules.reviews.application.run_failures import (
+    RequiredSourceUnavailable,
+    RetryDelays,
+    RunCancelled,
+    RunFailure,
+    classify_failure,
+)
 from app.modules.reviews.application.vcs_diff import (
     FetchVcsReviewInput,
     OmissionReason,
@@ -450,3 +463,189 @@ def test_blob_classification_retirement_propagates_without_omissions_or_warnings
     assert results == []  # No review input containing fabricated omission entries escapes.
     assert calls == ["1" * 40]
     assert "VCS blob classification failed" not in caplog.text
+
+
+def test_blob_checkpoint_deadline_stops_fetch_without_an_omission(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    deadline = datetime(2026, 10, 19, tzinfo=UTC)
+    now = deadline - timedelta(seconds=1)
+    calls: list[str] = []
+
+    class CheckpointUow:
+        async def __aenter__(self) -> CheckpointUow:
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            pass
+
+        @property
+        def runs(self) -> CheckpointUow:
+            return self
+
+        async def cancellation_reason(self, run_id: UUID) -> None:
+            return None
+
+    checkpoint = AttemptCheckpoint(
+        lambda: cast(RunLifecycleUnitOfWork, CheckpointUow()),
+        UUID(int=1),
+        deadline,
+        lambda: now,
+    )
+
+    class Provider:
+        async def get_pull_request(
+            self, locator: PullRequestLocator, *, checkpoint: RunProviderCheckpoint
+        ) -> VcsPullRequest:
+            calls.append("metadata")
+            await checkpoint()
+            return _pull_request()
+
+        async def get_diff(
+            self, pull_request: VcsPullRequest, *, checkpoint: RunProviderCheckpoint
+        ) -> tuple[VcsFile, ...]:
+            calls.append("diff")
+            await checkpoint()
+            return tuple(
+                VcsFile(f"src/{name}.py", "modified", sha * 40, None, 1, 1, 2, None)
+                for name, sha in (("first", "1"), ("second", "2"))
+            )
+
+        async def get_blob(
+            self, locator: PullRequestLocator, sha: str, *, checkpoint: RunProviderCheckpoint
+        ) -> bytes:
+            nonlocal now
+            calls.append(sha)
+            now = deadline
+            await checkpoint()
+            raise AssertionError("deadline must stop before token or HTTP")
+
+    with pytest.raises(RunFailure) as caught:
+        asyncio.run(
+            FetchVcsReviewInput(Provider(), checkpoint=checkpoint).execute(_locator(), _HEAD)
+        )
+    assert caught.value.error_code == "deadline_exceeded"
+    assert caught.value.message == "attempt deadline passed on a checkpoint"
+    assert calls == ["metadata", "diff", "1" * 40]
+    assert "VCS blob classification failed" not in caplog.text
+
+
+@dataclass
+class _UnavailableBlobProvider:
+    error: BaseException
+    requested: list[str] = field(default_factory=list)
+
+    async def get_pull_request(
+        self, locator: PullRequestLocator, *, checkpoint: RunProviderCheckpoint
+    ) -> VcsPullRequest:
+        await checkpoint()
+        return _pull_request()
+
+    async def get_diff(
+        self, pull_request: VcsPullRequest, *, checkpoint: RunProviderCheckpoint
+    ) -> tuple[VcsFile, ...]:
+        await checkpoint()
+        return (VcsFile("src/app.py", "modified", "1" * 40, None, 1, 1, 2, None),)
+
+    async def get_blob(
+        self, locator: PullRequestLocator, sha: str, *, checkpoint: RunProviderCheckpoint
+    ) -> bytes:
+        await checkpoint()
+        self.requested.append(sha)
+        raise self.error
+
+
+@pytest.mark.parametrize(
+    "error_code",
+    ["github_forbidden", "deadline_exceeded", "policy_fetch_transient", "internal_error"],
+)
+def test_required_source_rejects_codes_outside_its_fetch_contract(error_code: str) -> None:
+    with pytest.raises(ValueError, match="unsupported required source failure code"):
+        RequiredSourceUnavailable(cast(Any, error_code))
+
+
+@pytest.mark.parametrize("error_code", ["diff_fetch_failed", "commit_messages_fetch_failed"])
+def test_required_authority_failure_escapes_blob_classification(
+    error_code: Literal["diff_fetch_failed", "commit_messages_fetch_failed"],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    failure = RequiredSourceUnavailable(error_code, retry_after=timedelta(seconds=180))
+    provider = _UnavailableBlobProvider(failure)
+    with pytest.raises(RequiredSourceUnavailable) as caught:
+        asyncio.run(
+            FetchVcsReviewInput(provider, checkpoint=provider_checkpoint).execute(_locator(), _HEAD)
+        )
+    assert caught.value is failure
+    assert caught.value.error_code == error_code
+    assert caught.value.message == "Required review source authority is unavailable"
+    assert caught.value.retry_after == timedelta(seconds=180)
+    assert classify_failure(caught.value) is failure
+    assert RetryDelays().for_failure(1, caught.value) == ("10m", timedelta(minutes=10))
+    assert provider.requested == ["1" * 40]
+    assert "VCS blob classification failed" not in caplog.text
+
+
+def test_ordinary_fetch_failure_stays_an_optional_blob_omission() -> None:
+    provider = _UnavailableBlobProvider(RunFailure("diff_fetch_failed", "optional file"))
+    result = asyncio.run(
+        FetchVcsReviewInput(provider, checkpoint=provider_checkpoint).execute(_locator(), _HEAD)
+    )
+    assert result.omitted_files == ("src/app.py",)
+    assert result.omissions[0].reason is OmissionReason.MISSING_PATCH
+    assert result.failed_blob_shas == frozenset({"1" * 40})
+
+
+def test_task_cancellation_escapes_blob_classification() -> None:
+    failure = asyncio.CancelledError()
+    with pytest.raises(asyncio.CancelledError) as caught:
+        asyncio.run(
+            FetchVcsReviewInput(
+                _UnavailableBlobProvider(failure), checkpoint=provider_checkpoint
+            ).execute(_locator(), _HEAD)
+        )
+    assert caught.value is failure
+
+
+@pytest.mark.parametrize(
+    "reason", [OmissionReason.TOO_LARGE, OmissionReason.MISSING_PATCH, OmissionReason.GENERATED]
+)
+def test_provider_explicit_omission_does_not_fabricate_size_or_parse_patch(
+    reason: OmissionReason,
+) -> None:
+    class Provider:
+        async def get_pull_request(
+            self, locator: PullRequestLocator, *, checkpoint: RunProviderCheckpoint
+        ) -> VcsPullRequest:
+            return _pull_request()
+
+        async def get_diff(
+            self, pull_request: VcsPullRequest, *, checkpoint: RunProviderCheckpoint
+        ) -> tuple[VcsFile, ...]:
+            return (
+                VcsFile(
+                    "src/app.py",
+                    "modified",
+                    "1" * 40,
+                    None,
+                    1,
+                    1,
+                    2,
+                    "@@ -1 +1 @@\n-old\n+new",
+                    size=3,
+                    omission_reason=reason,
+                ),
+            )
+
+        async def get_blob(
+            self, locator: PullRequestLocator, sha: str, *, checkpoint: RunProviderCheckpoint
+        ) -> bytes:
+            raise AssertionError("explicit omission must not read a blob")
+
+    result = asyncio.run(
+        FetchVcsReviewInput(Provider(), checkpoint=provider_checkpoint).execute(
+            _locator(), _HEAD, _BASE
+        )
+    )
+    assert result.changed_files == ()
+    assert result.omissions[0].reason is reason
+    assert result.files[0].size == 3

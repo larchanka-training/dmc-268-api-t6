@@ -40,7 +40,12 @@ from app.modules.reviews.application.review_ignore import (
     IgnorePolicy,
     apply_ignore,
 )
-from app.modules.reviews.application.run_failures import RunCancelled, RunFailure, RunSkipped
+from app.modules.reviews.application.run_failures import (
+    RequiredSourceUnavailable,
+    RunCancelled,
+    RunFailure,
+    RunSkipped,
+)
 from app.modules.reviews.application.run_trace import RunTrace, traced_step
 from app.modules.reviews.application.vcs_diff import (
     MergeBaseProvider,
@@ -308,10 +313,14 @@ class ReviewContextStage:
             # The old side stays unknown; it is never replaced by the policy base.
             _LOGGER.warning("Merge base is unavailable run_id=%s", run_id, exc_info=True)
             diff_old_sha = None
+        try:
+            provider_name = VcsProviderName(run.locator.provider)
+        except ValueError:
+            raise RunFailure("diff_fetch_failed", "Unsupported review source provider") from None
         diff_map = build_diff_map(
             pull_request,
             tuple(_vcs_file(item) for item in stored),
-            provider=VcsProviderName.GITHUB,
+            provider=provider_name,
             repository_id=run.repository_id,
             diff_old_sha=diff_old_sha,
         )
@@ -360,7 +369,7 @@ class ReviewContextStage:
                     token_budget=self._token_budget,
                 )
                 step.response = context_summary(diff_map, payload)
-        except (PolicyError, RunCancelled):
+        except (PolicyError, RunCancelled, RequiredSourceUnavailable):
             # The policy is also evaluated while the context is built (paths behind an
             # import). Its failure is never an optional fallback: it stops the run.
             raise

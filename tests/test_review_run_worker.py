@@ -1197,3 +1197,62 @@ def test_exhausted_github_rate_limit_remains_retryable_with_malformed_retry_afte
         "commit_messages_fetch_failed" if commits else "diff_fetch_failed"
     )
     assert failure.retry_after is None
+
+
+@pytest.mark.parametrize("provider", ["gitlab", "unknown"])
+@pytest.mark.parametrize(
+    "state", ["queued", "running", "publishing", "succeeded", "failed", "cancelled", "skipped"]
+)
+def test_public_check_updater_suppresses_foreign_provider_before_any_github_work(
+    provider: str, state: str
+) -> None:
+    urls: list[UUID] = []
+    checkpoints: list[UUID] = []
+
+    class ProviderStore(FakeStore):
+        async def check_run_report(self, run_id: UUID) -> CheckRunReport | None:
+            return CheckRunReport(
+                CheckRunTarget(17, "octo/repo", HEAD, run_id), state, 1, provider=provider
+            )
+
+        async def provider_origin_active(self, run_id: UUID) -> bool:
+            checkpoints.append(run_id)
+            return True
+
+    def run_url(run_id: UUID) -> str:
+        urls.append(run_id)
+        return "https://review.example/runs/foreign"
+
+    checks = CheckRuns()
+    asyncio.run(update_check_run(lambda: FakeUow(ProviderStore(FakeRun())), checks, RUN, run_url))
+
+    assert checks.views == []
+    assert urls == []
+    assert checkpoints == []
+
+
+def test_actual_checkpointed_provider_keeps_required_source_control_identity() -> None:
+    from app.modules.reviews.application.conventions import RepositoryTreeResult
+    from app.modules.reviews.application.prompt_builder import PullRequestMeta
+    from app.modules.reviews.application.run_failures import RequiredSourceUnavailable
+    from app.worker import AttemptReviewProvider, UnconfiguredModel
+    from tests.test_repo_conventions import REPOSITORY_ID, FakeSource
+
+    failure = RequiredSourceUnavailable("diff_fetch_failed")
+
+    class Source(FakeSource):
+        async def fetch_tree(self, repository_id: UUID) -> RepositoryTreeResult:
+            raise failure
+
+        async def get_pull_request_meta(self, run_id: UUID) -> PullRequestMeta | None:
+            return None
+
+    async def checkpoint() -> None:
+        raise AssertionError("only model calls add the model checkpoint")
+
+    wrapped = CheckpointedProvider(
+        AttemptReviewProvider(Source(), UnconfiguredModel(), UnconfiguredModel()), checkpoint
+    )
+    with pytest.raises(RequiredSourceUnavailable) as caught:
+        asyncio.run(wrapped.fetch_tree(REPOSITORY_ID))
+    assert caught.value is failure
