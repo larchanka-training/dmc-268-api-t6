@@ -23,6 +23,7 @@ from jsonschema.protocols import Validator
 from openapi_schema_validator import OAS31Validator
 from openapi_spec_validator import OpenAPIV31SpecValidator, validate
 from openapi_spec_validator.readers import read_from_filename
+from pydantic import ValidationError as PydanticValidationError
 from referencing import Registry
 from referencing.jsonschema import DRAFT202012
 
@@ -35,7 +36,13 @@ from app.bootstrap.reviews_api import (
     get_run_publisher,
 )
 from app.common.application.github_repository_name import REPOSITORY_FULL_NAME_MAX_LENGTH
-from app.main import app, get_file_blob_cache, get_run_event_hub, get_run_repository
+from app.main import (
+    app,
+    get_file_blob_cache,
+    get_run_event_hub,
+    get_run_repository,
+    to_rules_status_dto,
+)
 from app.modules.code_index.domain.enums import RagIndexStatus
 from app.modules.code_index.domain.rag_index import RagIndex
 from app.modules.repositories.application.repository_settings import (
@@ -703,6 +710,8 @@ def test_every_rules_status_variant_validates_against_the_declared_schema(name: 
         ("invalid", {"diagnostics": []}),
         ("unavailable", {"diagnostics": [{**_TRANSIENT.__dict__}]}),
         ("unavailable", {"sha": "A" * 40}),
+        ("present", {"sha": "a" * 64}),
+        ("missing", {"sha": "a" * 39}),
         ("pending", {"checkedAt": "2026-10-18T09:00:00Z"}),
     ],
 )
@@ -720,6 +729,16 @@ def test_rules_status_validation_rejects_drift(variant: str, change: dict[str, A
         _validator_for("get", "/api/repos/{repo_id}/rules-status", "200").validate(
             {**body.json(), **change}
         )
+
+
+@pytest.mark.parametrize("sha", ["a" * 64, "A" * 40, "a" * 39], ids=["sha-256", "upper", "short"])
+@pytest.mark.parametrize("variant", ["present", "missing", "invalid"])
+def test_the_rules_status_dto_takes_a_40_hex_sha_only(variant: str, sha: str) -> None:
+    stored = RULES_STATUSES[variant]
+    assert stored is not None
+
+    with pytest.raises(PydanticValidationError, match="sha"):
+        to_rules_status_dto(replace(stored, sha=sha))
 
 
 def test_diagnostic_omits_the_limits_it_does_not_know() -> None:
