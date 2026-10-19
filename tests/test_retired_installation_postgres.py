@@ -590,10 +590,12 @@ def test_new_installation_created_before_oauth_is_deferred_then_resumes_with_sav
 class DiscardTokenCache:
     """Each phase mints a token so the inner HTTP boundary is exercised."""
 
-    def get(self, installation_external_id: int) -> None:
+    async def get(self, installation_external_id: int) -> None:
         return None
 
-    def set(self, installation_external_id: int, access_token: str, expires_at: datetime) -> None:
+    async def set(
+        self, installation_external_id: int, access_token: str, expires_at: datetime
+    ) -> None:
         pass
 
 

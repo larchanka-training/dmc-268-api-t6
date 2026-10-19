@@ -488,7 +488,7 @@ class LiveVerifier:
                 set(base_keys)
                 | common
                 | app_keys
-                | {"WORKER_HEARTBEAT_FILE", "GITHUB_APP_BOT_LOGIN"}
+                | {"WORKER_HEARTBEAT_FILE", "GITHUB_APP_BOT_LOGIN", "REDIS_URL"}
             ),
         }
 
