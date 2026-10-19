@@ -142,8 +142,8 @@ into a queued Run locally, follow the recipe in
 ### webhook-worker
 
 webhook-worker projects installation and pull request events from stored deliveries. It wakes on
-`NOTIFY webhook_work_available` after a new delivery or an OAuth reactivation of deferred ones
-commits, with a 30 s fallback scan ([how it handles
+`NOTIFY webhook_work_available` after a new delivery, an OAuth reactivation of deferred ones or
+a rules status request commits, with a 30 s fallback scan ([how it handles
 deliveries](docs/WEBHOOK_WORKER.md#how-the-worker-handles-deliveries)). Label, push and CI
 deliveries create Runs and publish them to the review queue, so it needs RabbitMQ: without
 `RABBITMQ_URL` it does not start (the compose file passes it), and
