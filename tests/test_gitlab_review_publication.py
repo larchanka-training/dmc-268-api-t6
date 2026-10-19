@@ -584,7 +584,7 @@ def test_position_400_raises_coordinates_once(message: str) -> None:
 
     assert raised.value.kind == "coordinates"
     assert raised.value.http_status == 400
-    assert str(raised.value) == message
+    assert str(raised.value) == "GitLab rejected review coordinates"
     assert raised.value.unposted == (FINDING_APP, FINDING_OTHER)
     assert len(posts) == 1
     assert posts[0]["position"]["new_line"] == 3
@@ -811,7 +811,7 @@ def test_transport_error_is_retryable() -> None:
 
     assert raised.value.kind == "retryable"
     assert raised.value.http_status is None
-    assert str(raised.value) == "GitLab request failed: connection refused"
+    assert str(raised.value) == "GitLab publication request failed"
 
 
 def test_non_json_version_list_is_retryable() -> None:
@@ -860,7 +860,7 @@ def test_unrelated_400_is_retryable(message: str) -> None:
 
     assert raised.value.kind == "retryable"
     assert raised.value.http_status == 400
-    assert str(raised.value) == message
+    assert str(raised.value) == "GitLab publication request failed"
     assert len(posts) == 1
 
 
@@ -1045,3 +1045,16 @@ def _assert_gitlab_only(seen: list[httpx.Request]) -> None:
 
 def _json(request: httpx.Request) -> Any:
     return json.loads(request.content) if request.content else None
+
+
+@pytest.mark.parametrize("fault", ["transport", "body"])
+def test_publication_error_contains_no_provider_canary(fault: str) -> None:
+    def respond(request: httpx.Request) -> httpx.Response:
+        if fault == "transport":
+            raise httpx.ConnectError("secret-provider-canary", request=request)
+        return httpx.Response(503, json={"message": "secret-provider-canary"})
+
+    with pytest.raises(PublishError) as caught:
+        _submit(respond)
+    assert "secret-provider-canary" not in str(caught.value)
+    assert caught.value.__cause__ is None

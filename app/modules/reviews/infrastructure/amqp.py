@@ -13,7 +13,6 @@ from functools import cache
 from pathlib import Path
 from time import monotonic
 from typing import Any, Protocol
-from uuid import UUID
 
 import aio_pika
 from aio_pika.abc import (
@@ -23,12 +22,14 @@ from aio_pika.abc import (
     AbstractQueue,
     AbstractRobustConnection,
 )
+from aio_pika.connection import make_url
 from jsonschema import Draft202012Validator
 from pydantic import BaseModel
 
 from app.common.infrastructure.amqp_consumer import consume_queue
 from app.modules.reviews.application.handle_review_run import DeliveryOutcome
 from app.modules.reviews.application.queue_messages import ReviewPublishPointer, message_trigger
+from app.modules.reviews.application.run_delivery import RunDeliveryPointer
 from app.modules.reviews.application.run_failures import RetryDelays
 from app.modules.reviews.application.try_enqueue_webhook_run import (
     PendingRunMessage,
@@ -410,7 +411,7 @@ def current_unexpected_attempts(message: AbstractIncomingMessage) -> int:
 
 async def handle_run_delivery(
     message: AbstractIncomingMessage,
-    handler: Callable[[UUID], Awaitable[DeliveryOutcome]],
+    handler: Callable[[RunDeliveryPointer], Awaitable[DeliveryOutcome]],
     publisher: AmqpQueuePublisher,
 ) -> None:
     """Unknown ``schema`` or an invalid body goes to ``reviews.dlq`` without processing (§4.4)."""
@@ -420,7 +421,23 @@ async def handle_run_delivery(
         await message.nack(requeue=False)
         return
     try:
-        outcome = await handler(decoded.run_id)
+        outcome = await handler(
+            RunDeliveryPointer(
+                run_id=decoded.run_id,
+                provider=decoded.repo.provider,
+                workspace_id=decoded.workspace_id,
+                repository_id=decoded.repo.id,
+                repository_external_id=decoded.repo.external_id,
+                installation_id=decoded.installation_id,
+                pr_number=decoded.pr.number,
+                head_sha=decoded.pr.head_sha,
+                base_sha=decoded.pr.base_sha,
+                engine=decoded.engine,
+                rule_version_id=decoded.rule_version_id,
+                prompt_version_id=decoded.prompt_version_id,
+                trigger=decoded.trigger,
+            )
+        )
     except Exception:
         await _requeue_after_error(message, publisher)
         return
@@ -493,8 +510,11 @@ class AmqpChannels:
 @asynccontextmanager
 async def amqp_channels(url: str, delays: RetryDelays) -> AsyncIterator[AmqpChannels]:
     """Connect, declare the topology and open a confirmed publishing channel."""
-    connection = await aio_pika.connect_robust(url)
+    # Retain ownership before the initial await: cancellation during connect
+    # must also close the robust connection's background reconnect machinery.
+    connection = aio_pika.RobustConnection(make_url(url))
     try:
+        await connection.connect()
         channel = await connection.channel(publisher_confirms=True, on_return_raises=True)
         await declare_topology(channel, delays)
         yield AmqpChannels(connection, await AmqpQueuePublisher.open(channel))

@@ -76,7 +76,12 @@ from app.modules.reviews.application.rag_context import (
     ReverseEdgeSelector,
 )
 from app.modules.reviews.application.review_ignore import IgnoreMatcher, IgnoreResult
-from app.modules.reviews.application.run_failures import RunCancelled, RunFailure
+from app.modules.reviews.application.run_failures import (
+    RequiredSourceUnavailable,
+    RunCancelled,
+    RunFailure,
+)
+from app.modules.reviews.application.vcs_diff import _is_binary
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -326,7 +331,7 @@ class _Files:
             try:
                 raw = await self._source.read_blob(sha)
             except Exception as exc:
-                if isinstance(exc, (RunCancelled, PolicyError)) or (
+                if isinstance(exc, (RunCancelled, PolicyError, RequiredSourceUnavailable)) or (
                     isinstance(exc, RunFailure) and exc.error_code == "deadline_exceeded"
                 ):
                     raise
@@ -559,7 +564,7 @@ class BuildReviewContext:
         try:
             tree = await self._source.tree(diff_map.head_sha)
         except Exception as exc:
-            if isinstance(exc, (RunCancelled, PolicyError)) or (
+            if isinstance(exc, (RunCancelled, PolicyError, RequiredSourceUnavailable)) or (
                 isinstance(exc, RunFailure) and exc.error_code == "deadline_exceeded"
             ):
                 raise

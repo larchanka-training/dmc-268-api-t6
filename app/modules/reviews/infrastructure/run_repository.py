@@ -439,6 +439,9 @@ class SqlAlchemyRunRepository:
                 ProviderInstallation.external_id,
                 Repository.full_name,
                 CodeChange.external_number,
+                ProviderInstallation.provider,
+                Run.origin_provider_installation_id,
+                Repository.external_id,
             )
             .select_from(Run)
             .join(CodeChange, CodeChange.id == Run.code_change_id)
@@ -453,7 +456,18 @@ class SqlAlchemyRunRepository:
         if row is None:
             return None
         return RunVcsInput(
-            row[0], row[1], row[2], row[3], PullRequestLocator(row[4], row[5], row[6])
+            row[0],
+            row[1],
+            row[2],
+            row[3],
+            PullRequestLocator(
+                row[4],
+                row[5],
+                row[6],
+                provider=row[7],
+                origin_provider_installation_id=row[8],
+                repository_external_id=row[9],
+            ),
         )
 
     async def get_run_conventions_input(self, run_id: UUID) -> RunConventionsInput | None:

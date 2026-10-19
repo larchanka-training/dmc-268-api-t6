@@ -14,14 +14,23 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app.common.infrastructure.db.enums import CodeChangeState, Engine, RunState
 from app.common.infrastructure.db.unit_of_work import SqlAlchemyUnitOfWork
 from app.modules.analytics.infrastructure.models import UsageEvent
+from app.modules.integrations.gitlab.infrastructure.request_credentials import (
+    active_gitlab_target_metadata,
+)
 from app.modules.repositories.infrastructure.models import ProviderInstallation, Repository
 from app.modules.reviews.application.check_runs import CheckRunReport, CheckRunTarget
 from app.modules.reviews.application.handle_review_run import RunGuardSnapshot
 from app.modules.reviews.application.policy_errors import policy_error_detail
-from app.modules.reviews.application.publish_run_review import PublishContext
+from app.modules.reviews.application.process_run import RunVcsInput
+from app.modules.reviews.application.publish_run_review import (
+    PublicationIdentity,
+    PublishContext,
+    publication_matches,
+)
 from app.modules.reviews.application.queue_messages import ReviewPublishPointer, StoredRunMessage
 from app.modules.reviews.application.run_failures import RunCancelled, cancellation_reason
 from app.modules.reviews.application.try_enqueue_webhook_run import PendingRunMessage
+from app.modules.reviews.application.vcs_diff import PullRequestLocator
 from app.modules.reviews.application.verdict import (
     HashedFinding,
     findings_hash,
@@ -43,6 +52,8 @@ from app.modules.reviews.infrastructure.run_notifications import notify_run_stat
 from app.modules.reviews.infrastructure.run_origin import active_origin_condition, origin_active
 from app.modules.reviews.infrastructure.run_origin_locks import lock_run_origin_row
 from app.modules.reviews.infrastructure.run_repository import load_publication_diff_map
+from app.modules.reviews.infrastructure.run_repository import _to_published_finding_row
+from app.modules.reviews.infrastructure.webhook_runs import SqlAlchemyWebhookRunStore
 from app.modules.workspaces.infrastructure.models import Workspace
 
 _ROW = (Run, CodeChange, Repository, ProviderInstallation)
@@ -68,6 +79,32 @@ def _joined(
     return statement.where(active_origin_condition()) if provider else statement
 
 
+def _pointer_rows() -> Select[tuple[Run, CodeChange, Repository, ProviderInstallation]]:
+    """Supported, active immutable origins; apply authority before a batch limit."""
+    gitlab = active_gitlab_target_metadata().subquery()
+    return (
+        _joined(provider=True)
+        .outerjoin(
+            gitlab,
+            and_(
+                gitlab.c.origin_provider_installation_id == Run.origin_provider_installation_id,
+                gitlab.c.workspace_id == ProviderInstallation.workspace_id,
+                gitlab.c.repository_id == Repository.id,
+                gitlab.c.project_id == Repository.external_id,
+            ),
+        )
+        .where(
+            or_(
+                ProviderInstallation.provider == "github",
+                and_(
+                    ProviderInstallation.provider == "gitlab",
+                    gitlab.c.origin_provider_installation_id.is_not(None),
+                ),
+            )
+        )
+    )
+
+
 def _message(
     run: Run, pr: CodeChange, repository: Repository, installation: ProviderInstallation
 ) -> StoredRunMessage:
@@ -88,6 +125,7 @@ def _message(
         attempt=run.attempt + 1,
         requested_at=run.created_at,
         trigger=run.trigger,
+        provider=installation.provider,
     )
 
 
@@ -111,8 +149,21 @@ class SqlAlchemyRunLifecycleStore:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
 
-    async def _notify(self, run_id: UUID, status: RunState) -> None:
-        await notify_run_state(self._session, run_id, status)
+    async def _notify(
+        self,
+        run_id: UUID,
+        status: RunState,
+        *,
+        workspace_id: UUID | None = None,
+    ) -> None:
+        if workspace_id is not None:
+            await SqlAlchemyWebhookRunStore(self._session).notify_run_updated(
+                run_id,
+                workspace_id,
+                status.value,
+            )
+        else:
+            await notify_run_state(self._session, run_id, status)
 
     async def _published_findings(self, run_id: UUID) -> list[Finding]:
         return list(
@@ -205,6 +256,7 @@ class SqlAlchemyRunLifecycleStore:
         error_code: str | None,
         error_message: str | None,
         now: datetime,
+        expected_publication: PublishContext | None = None,
     ) -> bool:
         row = await lock_run_origin_row(
             self._session,
@@ -213,8 +265,41 @@ class SqlAlchemyRunLifecycleStore:
         )
         if row is None:
             return False
+        publication_workspace_id: UUID | None = None
+        if expected_publication is not None:
+            if row[0].state != RunState.PUBLISHING:
+                return False
+            current = await self._publication_context(
+                row[0],
+                row[1],
+                row[2],
+                row[3],
+                await self._published_findings(run_id),
+            )
+            if not publication_matches(expected_publication, current):
+                return False
+            assert current.publication_identity is not None
+            publication_workspace_id = current.publication_identity.origin_workspace_id
+            reason = cancellation_reason(
+                pr_open=row[1].state == CodeChangeState.OPEN,
+                head_current=row[0].head_sha == row[1].head_sha,
+                cancel_requested=row[0].cancel_requested,
+            )
+            if reason is not None:
+                state, error_code, error_message = "cancelled", reason, None
         if not origin_active(row[0], row[2], row[3]):
-            state, error_code, error_message = "cancelled", "installation_unavailable", None
+            state, error_code, error_message = (
+                "cancelled",
+                cancellation_reason(
+                    pr_open=row[1].state == CodeChangeState.OPEN,
+                    head_current=row[0].head_sha == row[1].head_sha,
+                    cancel_requested=row[0].cancel_requested,
+                )
+                or "installation_unavailable"
+                if expected_publication is not None
+                else "installation_unavailable",
+                None,
+            )
         target = RunState(state)
         changed = await self._session.scalar(
             update(Run)
@@ -230,7 +315,7 @@ class SqlAlchemyRunLifecycleStore:
         )
         if changed is None:
             return False
-        await self._notify(run_id, target)
+        await self._notify(run_id, target, workspace_id=publication_workspace_id)
         return True
 
     async def extend_lease(self, run_id: UUID, worker_id: str, lease_until: datetime) -> bool:
@@ -300,14 +385,16 @@ class SqlAlchemyRunLifecycleStore:
         )
 
     async def run_message(self, run_id: UUID) -> PendingRunMessage | None:
-        row = (
-            await self._session.execute(_joined(provider=True).where(Run.id == run_id))
-        ).one_or_none()
+        row = (await self._session.execute(_pointer_rows().where(Run.id == run_id))).one_or_none()
         return None if row is None else _message(*row)
 
     async def check_run_report(self, run_id: UUID) -> CheckRunReport | None:
         row = (
-            await self._session.execute(_joined(provider=True).where(Run.id == run_id))
+            await self._session.execute(
+                _joined(provider=True).where(
+                    Run.id == run_id, ProviderInstallation.provider == "github"
+                )
+            )
         ).one_or_none()
         if row is None:
             return None
@@ -322,6 +409,7 @@ class SqlAlchemyRunLifecycleStore:
                 run.attempt,
                 run.error_code,
                 error_detail=policy_error_detail(run.error_message),
+                provider=installation.provider,
             )
         findings = await self._published_findings(run_id)
         severities = [item.severity.value for item in findings]
@@ -347,6 +435,7 @@ class SqlAlchemyRunLifecycleStore:
             body_count=body_count,
             below_threshold_count=below_threshold or 0,
             summary_only=bool(summary_only),
+            provider=installation.provider,
         )
 
     async def _publish_pointer(self, run: Run, repository: Repository) -> ReviewPublishPointer:
@@ -365,6 +454,39 @@ class SqlAlchemyRunLifecycleStore:
             return None
         run, pr, repository, installation = row
         findings = await self._published_findings(run_id)
+        return await self._publication_context(run, pr, repository, installation, findings)
+
+    async def _publication_context(
+        self,
+        run: Run,
+        pr: CodeChange,
+        repository: Repository,
+        installation: ProviderInstallation,
+        findings: list[Finding],
+    ) -> PublishContext:
+        active = origin_active(run, repository, installation)
+        original = installation if installation.id == run.origin_provider_installation_id else None
+        if original is None and run.origin_provider_installation_id is not None:
+            # Same owned SQL session; the locked callers already hold this ORIGINAL
+            # installation before Repository/Run. Never adopt a replacement tenant.
+            original = await self._session.get(
+                ProviderInstallation,
+                run.origin_provider_installation_id,
+                populate_existing=True,
+            )
+        identity = (
+            PublicationIdentity(
+                original.id,
+                original.workspace_id,
+                original.external_id,
+                original.provider,
+                repository.id,
+                pr.id,
+                run.base_sha,
+            )
+            if original is not None
+            else None
+)
         provider = installation.provider
         diff_map = (
             await load_publication_diff_map(self._session, run_id) if provider == "gitlab" else None
@@ -391,6 +513,24 @@ class SqlAlchemyRunLifecycleStore:
             findings_hash=findings_hash(_hashed(item) for item in findings),
             provider=installation.provider,
             project_id=repository.external_id,
+            workspace_id=installation.workspace_id if active else None,
+            publication_identity=identity,
+            vcs_input=RunVcsInput(
+                pr.id,
+                repository.id,
+                run.head_sha,
+                run.base_sha,
+                PullRequestLocator(
+                    installation.external_id,
+                    repository.full_name,
+                    pr.external_number,
+                    provider=installation.provider,
+                    origin_provider_installation_id=run.origin_provider_installation_id,
+                    repository_external_id=repository.external_id,
+                ),
+            )
+            if active
+            else None,
         )
 
     async def complete_publication(
@@ -402,6 +542,7 @@ class SqlAlchemyRunLifecycleStore:
         findings_hash: str,
         moved_to_body_finding_ids: tuple[UUID, ...] = (),
         now: datetime,
+        expected_publication: PublishContext | None = None,
     ) -> str | None:
         """T14 under the Run lock; a cancel or push seen during the POST wins (T15).
 
@@ -411,21 +552,37 @@ class SqlAlchemyRunLifecycleStore:
         row = await lock_run_origin_row(
             self._session,
             run_id,
-            _joined().where(Run.id == run_id),
+            _joined().where(Run.id == run_id).execution_options(populate_existing=True),
         )
         if row is None or row[0].state != RunState.PUBLISHING:
             return None
         run, pr, repository, installation = row
+        findings = await self._published_findings(run_id)
+        publication_workspace_id: UUID | None = None
+        if expected_publication is not None:
+            current = await self._publication_context(run, pr, repository, installation, findings)
+            if not publication_matches(expected_publication, current):
+                return None
+            assert current.publication_identity is not None
+            publication_workspace_id = current.publication_identity.origin_workspace_id
         if not origin_active(run, repository, installation):
             run.state = RunState.CANCELLED
-            run.error_code = "installation_unavailable"
+            run.error_code = (
+                cancellation_reason(
+                    pr_open=pr.state == CodeChangeState.OPEN,
+                    head_current=run.head_sha == pr.head_sha,
+                    cancel_requested=run.cancel_requested,
+                )
+                or "installation_unavailable"
+                if expected_publication is not None
+                else "installation_unavailable"
+            )
             run.finished_at = now
             run.lease_until = None
             await self._session.flush()
-            await self._notify(run_id, RunState.CANCELLED)
+            await self._notify(run_id, RunState.CANCELLED, workspace_id=publication_workspace_id)
             return RunState.CANCELLED.value
         pr_head_sha, pr_state = pr.head_sha, pr.state
-        findings = await self._published_findings(run_id)
         inline = [item for item in findings if item.inline_comment]
         if moved_to_body_finding_ids:
             moved = frozenset(moved_to_body_finding_ids)
@@ -458,7 +615,7 @@ class SqlAlchemyRunLifecycleStore:
         run.finished_at = now
         run.lease_until = None
         await self._session.flush()
-        await self._notify(run_id, final)
+        await self._notify(run_id, final, workspace_id=publication_workspace_id)
         return final.value
 
     @staticmethod
@@ -525,7 +682,7 @@ class SqlAlchemyRunLifecycleStore:
     ) -> tuple[ReviewPublishPointer, ...]:
         rows = (
             await self._session.execute(
-                _joined(provider=True)
+                _pointer_rows()
                 .where(Run.state == RunState.PUBLISHING, Run.lease_until < now)
                 .order_by(Run.lease_until)
                 .limit(limit)
@@ -540,7 +697,7 @@ class SqlAlchemyRunLifecycleStore:
     ) -> tuple[PendingRunMessage, ...]:
         rows = (
             await self._session.execute(
-                _joined(provider=True)
+                _pointer_rows()
                 .where(
                     Run.state == RunState.QUEUED,
                     Run.available_at < available_before,

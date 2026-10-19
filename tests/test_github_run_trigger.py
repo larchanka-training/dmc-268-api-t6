@@ -30,6 +30,7 @@ from app.modules.reviews.application.determine_ci_eligibility import (
     DetermineCiEligibility,
     EligibilityCandidate,
     EligibilityReason,
+    WebhookRunIdentity,
 )
 from app.modules.reviews.application.project_github_pull_request import (
     ProjectGitHubPullRequest,
@@ -94,6 +95,7 @@ def _ci_candidate() -> EligibilityCandidate:
         _NOW,
         _NOW,
         CiWaitMode.ALWAYS,
+        identity=WebhookRunIdentity("github", _INSTALLATION, _WS, _REPO, 101),
     )
 
 
@@ -973,6 +975,7 @@ def test_postgres_pending_replay_excludes_superseded_closed_and_disabled(
                     Run(
                         id=run_id,
                         code_change_id=_PR,
+                        origin_provider_installation_id=_INSTALLATION,
                         base_sha=_BASE,
                         base_ref="main",
                         head_sha=_HEAD,
@@ -1495,3 +1498,222 @@ def test_pr_and_label_triggers_return_structured_retry_intent(action: str) -> No
     assert outcome == RunTriggerOutcome(
         f"pr={_PR} head=aaaaaaa: deferred (active_run)", retry_required=True
     )
+
+
+@pytest.mark.integration
+def test_postgres_no_ci_selection_excludes_legacy_gitlab_auto_before_limit(
+    webhook_run_database: tuple[str, str],
+) -> None:
+    database_url, schema = webhook_run_database
+
+    async def scenario() -> None:
+        engine = create_async_engine(
+            database_url,
+            connect_args={"options": f"-csearch_path={schema}"},
+            pool_size=1,
+            max_overflow=0,
+        )
+        sessions = async_sessionmaker(engine)
+        other_installation, other_repository = uuid4(), uuid4()
+        # This UUID sorts before the positive GitHub candidate to expose post-LIMIT filtering.
+        other_change = UUID("00000000-0000-0000-0000-000000000001")
+        try:
+            async with sessions.begin() as session:
+                await session.execute(text("UPDATE repositories SET wait_for_ci='auto'"))
+                await session.execute(
+                    text(
+                        "INSERT INTO provider_installations "
+                        "(id,workspace_id,provider,external_id,metadata) "
+                        "VALUES (:id,:ws,'gitlab',17,'{}'::jsonb)"
+                    ),
+                    {"id": other_installation, "ws": _WS},
+                )
+                await session.execute(
+                    text(
+                        "INSERT INTO repositories "
+                        "(id,provider_installation_id,external_id,full_name,"
+                        "default_branch,web_url,wait_for_ci) VALUES (:id,:pi,101,'legacy/gitlab',"
+                        "'main','https://gitlab.com/legacy/gitlab','auto')"
+                    ),
+                    {"id": other_repository, "pi": other_installation},
+                )
+                await session.execute(
+                    text(
+                        "INSERT INTO code_changes "
+                        "(id,repository_id,external_id,external_number,title,"
+                        "source_branch,target_branch,base_sha,head_sha,state,web_url,"
+                        "ai_review_labeled,"
+                        "ai_review_labeled_at,head_first_seen_at,ci_status) VALUES "
+                        "(:id,:repo,902,8,"
+                        "'legacy GL','feature','main',:base,:head,'open','https://gitlab.com/mr',"
+                        "true,:now,:now,'{}'::jsonb)"
+                    ),
+                    {
+                        "id": other_change,
+                        "repo": other_repository,
+                        "base": _BASE,
+                        "head": _HEAD,
+                        "now": _NOW,
+                    },
+                )
+            async with SqlAlchemySweepNoCiUnitOfWork(sessions) as uow:
+                due = await uow.candidates.list_due(_NOW + timedelta(minutes=3), 1)
+            assert [(item.code_change_id, item.head_sha) for item in due] == [(_PR, _HEAD)]
+            async with sessions() as session:
+                assert await session.scalar(text("SELECT count(*) FROM runs")) == 0
+                assert (
+                    await session.scalar(
+                        text("SELECT ci_status FROM code_changes WHERE id=:id"),
+                        {"id": other_change},
+                    )
+                    == {}
+                )
+        finally:
+            await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("mutation", ["unchanged", "gitlab", "deleted", "unavailable"])
+def test_postgres_no_ci_exclusion_rechecks_active_github_after_detached_selection(
+    webhook_run_database: tuple[str, str],
+    mutation: str,
+) -> None:
+    database_url, schema = webhook_run_database
+
+    async def scenario() -> None:
+        engine = create_async_engine(
+            database_url,
+            connect_args={"options": f"-csearch_path={schema}"},
+            pool_size=1,
+            max_overflow=0,
+        )
+        sessions = async_sessionmaker(engine)
+        try:
+            async with sessions.begin() as session:
+                await session.execute(text("UPDATE repositories SET wait_for_ci='auto'"))
+
+            class InterleavingEnqueuer:
+                async def execute(
+                    self, code_change_id: UUID, expected_head_sha: str
+                ) -> EnqueueResult:
+                    assert (code_change_id, expected_head_sha) == (_PR, _HEAD)
+                    async with sessions.begin() as session:
+                        if mutation == "gitlab":
+                            replacement = uuid4()
+                            # Adversarial fixture-only current-parent replacement, not management.
+                            await session.execute(
+                                text(
+                                    "INSERT INTO provider_installations "
+                                    "(id,workspace_id,provider,external_id,metadata) "
+                                    "VALUES (:id,:ws,'gitlab',17,'{}'::jsonb)"
+                                ),
+                                {"id": replacement, "ws": _WS},
+                            )
+                            await session.execute(
+                                text("UPDATE repositories SET provider_installation_id=:id"),
+                                {"id": replacement},
+                            )
+                        elif mutation == "deleted":
+                            await session.execute(
+                                text("UPDATE provider_installations SET deleted_at=now()")
+                            )
+                        elif mutation == "unavailable":
+                            await session.execute(
+                                text("UPDATE repositories SET installation_available=false")
+                            )
+                    return EnqueueResult(EnqueueStatus.INELIGIBLE)
+
+            sweep = SweepNoCi(
+                uow_factory=lambda: SqlAlchemySweepNoCiUnitOfWork(sessions),
+                enqueuer=InterleavingEnqueuer(),
+                now=lambda: _NOW + timedelta(minutes=3),
+            )
+            assert await asyncio.wait_for(sweep.execute(), 5) == 1
+            async with sessions() as session:
+                assert await session.scalar(text("SELECT ci_status FROM code_changes")) == (
+                    {"sweep": "excluded"} if mutation == "unchanged" else {}
+                )
+        finally:
+            await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize(
+    "mutation", ["unchanged", "unlabeled", "deleted", "null_origin", "other_github", "gitlab"]
+)
+def test_postgres_pending_github_requires_original_active_origin_and_real_label(
+    webhook_run_database: tuple[str, str],
+    mutation: str,
+) -> None:
+    database_url, schema = webhook_run_database
+
+    async def scenario() -> None:
+        engine = create_async_engine(
+            database_url,
+            connect_args={"options": f"-csearch_path={schema}"},
+            pool_size=1,
+            max_overflow=0,
+        )
+        sessions = async_sessionmaker(engine, expire_on_commit=False)
+        try:
+            async with SqlAlchemyWebhookRunUnitOfWork(sessions) as uow:
+                candidate = await uow.runs.lock_candidate(_PR)
+                assert isinstance(candidate, RunInsertCandidate)
+                inserted = await uow.runs.insert_webhook_run(candidate, _NOW)
+                assert isinstance(inserted, PendingRunMessage)
+                await uow.commit()
+            async with sessions.begin() as session:
+                if mutation == "unlabeled":
+                    await session.execute(text("UPDATE code_changes SET ai_review_labeled=false"))
+                elif mutation == "deleted":
+                    await session.execute(
+                        text("UPDATE provider_installations SET deleted_at=now()")
+                    )
+                elif mutation == "null_origin":
+                    await session.execute(
+                        text("UPDATE runs SET origin_provider_installation_id=NULL")
+                    )
+                elif mutation in {"other_github", "gitlab"}:
+                    workspace, replacement = uuid4(), uuid4()
+                    await session.execute(
+                        text(
+                            "INSERT INTO workspaces (id,name,daily_budget_usd) VALUES "
+                            "(:id,'replacement',7)"
+                        ),
+                        {"id": workspace},
+                    )
+                    await session.execute(
+                        text(
+                            "INSERT INTO provider_installations "
+                            "(id,workspace_id,provider,external_id,metadata) VALUES "
+                            "(:id,:ws,:provider,99,'{}'::jsonb)"
+                        ),
+                        {
+                            "id": replacement,
+                            "ws": workspace,
+                            "provider": "github" if mutation == "other_github" else "gitlab",
+                        },
+                    )
+                    # Fixture-only changed tenant/provider/project; historical origin stays A.
+                    await session.execute(
+                        text(
+                            "UPDATE repositories SET "
+                            "provider_installation_id=:id,external_id=909,full_name='repl"
+                            "acement/project'"
+                        ),
+                        {"id": replacement},
+                    )
+            async with SqlAlchemyWebhookRunUnitOfWork(sessions) as uow:
+                pending = await uow.runs.pending_messages(1)
+            assert pending == ((inserted,) if mutation == "unchanged" else ())
+            async with sessions() as session:
+                assert await session.scalar(text("SELECT count(*) FROM runs")) == 1
+                assert await session.scalar(text("SELECT message_published_at FROM runs")) is None
+        finally:
+            await engine.dispose()
+
+    asyncio.run(scenario())

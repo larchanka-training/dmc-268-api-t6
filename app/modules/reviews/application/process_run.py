@@ -35,13 +35,18 @@ from app.modules.reviews.application.review_path import (
     require_servable_without_snapshot,
     require_served_provider,
 )
-from app.modules.reviews.application.run_failures import RunCancelled
+from app.modules.reviews.application.run_failures import (
+    RequiredSourceUnavailable,
+    RunCancelled,
+    RunFailure,
+)
 from app.modules.reviews.application.run_trace import RunTrace, traced_step
 from app.modules.reviews.application.vcs_diff import (
     MAX_BLOB_BYTES,
     FetchVcsReviewInput,
     PullRequestLocator,
     VcsProvider,
+    VcsProviderSelector,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -66,11 +71,25 @@ class RunDiffInput:
 
 @dataclass(frozen=True)
 class RunVcsInput:
+    """Detached routing and pinned refs; base_sha is the target/start, not the merge base."""
+
     code_change_id: UUID
     repository_id: UUID
     head_sha: str
     base_sha: str
     locator: PullRequestLocator
+
+    @property
+    def provider(self) -> str:
+        return self.locator.provider
+
+    @property
+    def origin_provider_installation_id(self) -> UUID | None:
+        return self.locator.origin_provider_installation_id
+
+    @property
+    def repository_external_id(self) -> int | None:
+        return self.locator.repository_external_id
 
 
 @dataclass(frozen=True)
@@ -139,12 +158,14 @@ class ReviewRunProcessor:
         *,
         uow_factory: Callable[[], RunProcessingUnitOfWork],
         context_stage: ReviewContextStagePort | None = None,
+        vcs_provider_selector: VcsProviderSelector | None = None,
     ) -> None:
         self._repository = repository
         self._provider = provider
         self._blob_cache = blob_cache
         self._conventions = conventions
         self._vcs_provider = vcs_provider
+        self._vcs_provider_selector = vcs_provider_selector
         self._trace = trace
         self._uow_factory = uow_factory
         self._context_stage = context_stage
@@ -162,11 +183,18 @@ class ReviewRunProcessor:
         conventions_input: RunConventionsInput | None = None
         # The snapshot path's conventions prompt, set once the policy load names it.
         pinned_prompt: ActiveConventionsPrompt | None = None
-        if self._vcs_provider is not None:
+        vcs_provider = self._vcs_provider
+        if vcs_provider is not None or self._vcs_provider_selector is not None:
             vcs_repository = cast(RunVcsRepository, self._repository)
             vcs_run = await vcs_repository.get_run_vcs_input(run_id)
             if vcs_run is None:
                 return None
+            if self._vcs_provider_selector is not None:
+                vcs_provider = self._vcs_provider_selector.select(vcs_run.locator)
+            elif vcs_run.provider != "github":
+                raise ValueError(f"no VCS provider configured for {vcs_run.provider}")
+            if vcs_provider is None:
+                raise ValueError(f"no VCS provider configured for {vcs_run.provider}")
             if self._conventions is not None:
                 # Before the policy load: the refusal needs only the run's binding.
                 conventions_input = await self._servable_conventions_input(run_id)
@@ -196,9 +224,9 @@ class ReviewRunProcessor:
                 }
                 async with traced_step(self._trace, run_id, "vcs.fetch_diff", request) as step:
                     fetched = await FetchVcsReviewInput(
-                        self._vcs_provider,
+                        vcs_provider,
                         run_id=run_id,
-                        checkpoint=self._provider_checkpoint(run_id),
+                        checkpoint=self._provider_checkpoint(run_id, vcs_run),
                     ).execute(vcs_run.locator, vcs_run.head_sha, vcs_run.base_sha)
                     failed_blob_shas = fetched.failed_blob_shas
                     omission_by_path = {
@@ -264,9 +292,11 @@ class ReviewRunProcessor:
                     files=files,
                 )
                 await uow.commit()
-        if self._vcs_provider is not None:
-            assert vcs_run is not None
-            await self._store_vcs_blobs(run_id, vcs_run, stored_files, failed_blob_shas)
+        if vcs_run is not None:
+            assert vcs_provider is not None
+            await self._store_vcs_blobs(
+                run_id, vcs_run, stored_files, failed_blob_shas, vcs_provider
+            )
         else:
             await self._store_file_blobs(run, files)
         changed_paths = tuple(file.path for file in review_files_from_snapshots(stored_files)[0])
@@ -324,10 +354,10 @@ class ReviewRunProcessor:
                 require_served_provider(binding)
         return conventions_input
 
-    def _provider_checkpoint(self, run_id: UUID) -> RunProviderCheckpoint:
+    def _provider_checkpoint(self, run_id: UUID, expected: RunVcsInput) -> RunProviderCheckpoint:
         async def checkpoint() -> None:
             repository = cast(RunVcsRepository, self._repository)
-            if await repository.get_run_vcs_input(run_id) is None:
+            if await repository.get_run_vcs_input(run_id) != expected:
                 raise RunCancelled("installation_unavailable")
 
         return checkpoint
@@ -365,8 +395,8 @@ class ReviewRunProcessor:
         run: RunVcsInput,
         files: list[DiffSnapshot],
         failed_blob_shas: frozenset[str],
+        vcs_provider: VcsProvider,
     ) -> None:
-        assert self._vcs_provider is not None
         blobs: list[tuple[BlobCacheKey, str]] = []
         for file in files:
             if (
@@ -382,12 +412,14 @@ class ReviewRunProcessor:
             ):
                 continue
             try:
-                blob = await self._vcs_provider.get_blob(
-                    run.locator, file.blob_sha, checkpoint=self._provider_checkpoint(run_id)
+                blob = await vcs_provider.get_blob(
+                    run.locator, file.blob_sha, checkpoint=self._provider_checkpoint(run_id, run)
                 )
-            except RunCancelled:
+            except (RunCancelled, RequiredSourceUnavailable):
                 raise
-            except Exception:
+            except Exception as exc:
+                if isinstance(exc, RunFailure) and exc.error_code == "deadline_exceeded":
+                    raise
                 # Blob cache is optional; a single unavailable file must not abort the Run.
                 _LOGGER.warning(
                     "VCS blob cache fetch failed run_id=%s repository=%s pr_number=%s "

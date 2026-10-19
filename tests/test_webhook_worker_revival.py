@@ -10,6 +10,7 @@ import pytest
 
 from app.modules.integrations.webhooks.application.receive_github_delivery import (
     ReceiveGitHubDelivery,
+    ReplayBatchResult,
 )
 from app.modules.integrations.webhooks.application.revive_deferred_installation_deliveries import (
     ReviveDeferredInstallationDeliveries,
@@ -51,7 +52,7 @@ def test_revive_once_returns_the_number_of_revived_deliveries() -> None:
     assert asyncio.run(revive_once(reviver)) == 2
 
 
-def test_a_failed_revival_is_logged_with_its_exception_and_counts_as_zero(
+def test_a_failed_revival_is_logged_without_exception_details_and_counts_as_zero(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     reviver = cast(ReviveDeferredInstallationDeliveries, FailingReviver())
@@ -63,9 +64,9 @@ def test_a_failed_revival_is_logged_with_its_exception_and_counts_as_zero(
     [record] = [record for record in caplog.records if record.name == _WORKER_LOGGER]
     assert record.levelno == logging.ERROR
     assert record.getMessage() == "GitHub webhook deferred-delivery revival failed"
-    assert record.exc_info is not None
-    assert isinstance(record.exc_info[1], RuntimeError)
-    assert str(record.exc_info[1]) == "database unavailable"
+    assert record.exc_info is None
+    assert vars(record)["error_type"] == "RuntimeError"
+    assert "database unavailable" not in caplog.text
 
 
 def test_the_hourly_tick_purges_finished_receipts_and_revives_deferred_ones() -> None:
@@ -94,9 +95,9 @@ def test_the_worker_loop_runs_the_hourly_tick_with_its_reviver_on_the_first_iter
         waiting = asyncio.Event()
 
         class LoopReceiver(Receiver):
-            async def replay_pending(self) -> int:
+            async def replay_batch(self, *, limit: int = 100) -> ReplayBatchResult:
                 calls.append("sweep")
-                return 0
+                return ReplayBatchResult(0, 0, 0, limit)
 
         class Wake(asyncio.Event):
             async def wait(self) -> Literal[True]:

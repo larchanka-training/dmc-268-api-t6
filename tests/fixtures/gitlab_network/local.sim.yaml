@@ -1,0 +1,7 @@
+simulation: dmc-gitlab-installed-proof
+routing: header
+mocks:
+  - routeKey: gitlab
+    path: ./gitlab.js
+  - routeKey: llm
+    path: ./llm.js

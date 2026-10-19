@@ -11,6 +11,7 @@ from app.modules.repositories.infrastructure.models import ProviderInstallation,
 from app.modules.reviews.application.determine_ci_eligibility import (
     CiWaitMode,
     EligibilityCandidate,
+    WebhookRunIdentity,
 )
 from app.modules.reviews.application.project_github_pull_request import PullRequestState
 from app.modules.reviews.infrastructure.models import CodeChange
@@ -28,6 +29,8 @@ class SqlAlchemyEligibilityCandidateStore:
                         CodeChange,
                         Repository,
                         ProviderInstallation.external_id,
+                        ProviderInstallation.id,
+                        ProviderInstallation.workspace_id,
                         ProviderInstallation.deleted_at,
                     )
                     .join(Repository, CodeChange.repository_id == Repository.id)
@@ -43,7 +46,9 @@ class SqlAlchemyEligibilityCandidateStore:
             ).one_or_none()
             if row is None:
                 return None
-            pr, repository, installation_external_id, deleted_at = row
+            pr, repository, installation_external_id, installation_id, workspace_id, deleted_at = (
+                row
+            )
             return EligibilityCandidate(
                 code_change_id=pr.id,
                 installation_external_id=installation_external_id,
@@ -57,4 +62,11 @@ class SqlAlchemyEligibilityCandidateStore:
                 ai_review_labeled_at=pr.ai_review_labeled_at,
                 head_first_seen_at=pr.head_first_seen_at,
                 wait_for_ci=CiWaitMode(repository.wait_for_ci.value),
+                identity=WebhookRunIdentity(
+                    provider="github",
+                    origin_provider_installation_id=installation_id,
+                    workspace_id=workspace_id,
+                    repository_id=repository.id,
+                    repository_external_id=repository.external_id,
+                ),
             )

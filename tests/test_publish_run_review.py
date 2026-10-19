@@ -121,6 +121,7 @@ class Store:
         findings_hash: str,
         moved_to_body_finding_ids: tuple[UUID, ...] = (),
         now: datetime,
+        expected_publication: PublishContext | None = None,
     ) -> str | None:
         if self.fail_complete_once:
             self.fail_complete_once = False
@@ -143,6 +144,7 @@ class Store:
         error_code: str | None,
         error_message: str | None,
         now: datetime,
+        expected_publication: PublishContext | None = None,
     ) -> bool:
         assert from_state == "publishing"
         self.state, self.error_code = state, error_code
@@ -730,7 +732,7 @@ def test_unset_gitlab_token_leaves_the_run_publishing_without_an_http_call(
     assert github.submissions == []
     assert trace.records == []
     assert check_runs.views == []
-    assert "GITLAB_TOKEN is not set" in caplog.text
+    assert "GitLab publication is not configured" in caplog.text
     assert "GitHub App is not configured" not in caplog.text
 
     neither = Store(gitlab_context(review_body=STORED_BODY))
@@ -740,7 +742,7 @@ def test_unset_gitlab_token_leaves_the_run_publishing_without_an_http_call(
     assert neither.state == "publishing"
     assert trace.records == []
     assert check_runs.views == []
-    assert "GITLAB_TOKEN is not set" in caplog.text
+    assert "GitLab publication is not configured" in caplog.text
     assert "GitHub App" not in caplog.text
 
 
@@ -956,31 +958,29 @@ def test_unsupported_provider_stays_publishing_without_a_gateway_call() -> None:
     assert check_runs.views == []
 
 
-def test_worker_constructs_the_gitlab_gateway_only_when_the_token_is_set() -> None:
-    from app.modules.reviews.infrastructure.gitlab_review_publication import (
-        GitLabMergeRequestDiscussionGateway,
-    )
-    from app.worker import WorkerSettings, gitlab_review_gateway
+def test_worker_never_uses_a_legacy_process_pat_for_installed_publication() -> None:
+    from app.worker import WorkerSettings
 
     env = {"DATABASE_URL": "postgresql+psycopg://test", "RABBITMQ_URL": "amqp://test"}
-    unset = WorkerSettings.from_environment(env)
-    assert unset.gitlab_token is None
-    idle = httpx.AsyncClient()
-    try:
-        assert gitlab_review_gateway(unset, idle) is None
-    finally:
-        asyncio.run(idle.aclose())
-
-    configured = WorkerSettings.from_environment(
-        {**env, "GITLAB_TOKEN": "glpat-test", "GITLAB_BASE_URL": "https://gitlab.example"}
+    assert WorkerSettings.from_environment(env).gitlab is None
+    assert (
+        WorkerSettings.from_environment(
+            {
+                **env,
+                "GITLAB_TOKEN": "glpat-test",
+                "GITLAB_BASE_URL": "https://gitlab.example",
+            }
+        ).gitlab
+        is None
     )
-    assert configured.gitlab_base_url == "https://gitlab.example"
-    client = httpx.AsyncClient(base_url=configured.gitlab_base_url)
-    try:
-        gateway = gitlab_review_gateway(configured, client)
-        assert isinstance(gateway, GitLabMergeRequestDiscussionGateway)
-    finally:
-        asyncio.run(client.aclose())
 
-    default_base = WorkerSettings.from_environment({**env, "GITLAB_TOKEN": "glpat-test"})
-    assert default_base.gitlab_base_url == "https://gitlab.com"
+
+def test_unconfigured_gitlab_uses_safe_readiness_log(caplog: pytest.LogCaptureFixture) -> None:
+    store = Store(context(provider="gitlab"))
+    asyncio.run(
+        PublishRunReview(
+            uow_factory=lambda: Uow(store), reviews=None, check_runs=None, trace=Trace()
+        ).execute(POINTER)
+    )
+    assert "GitLab publication is not configured" in caplog.text
+    assert "GITLAB_TOKEN" not in caplog.text

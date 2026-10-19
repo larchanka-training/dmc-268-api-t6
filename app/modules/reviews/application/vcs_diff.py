@@ -18,7 +18,11 @@ from app.modules.reviews.application.prompt_builder import (
     FileStatus,
     PullRequestMeta,
 )
-from app.modules.reviews.application.run_failures import RunCancelled, RunFailure
+from app.modules.reviews.application.run_failures import (
+    RequiredSourceUnavailable,
+    RunCancelled,
+    RunFailure,
+)
 from app.modules.reviews.application.unified_diff import HunkRow, parse_hunks, split_lf
 
 _LOGGER = logging.getLogger(__name__)
@@ -48,6 +52,18 @@ class PullRequestLocator:
     installation_external_id: int
     repository_full_name: str
     number: int
+    provider: str = "github"
+    origin_provider_installation_id: UUID | None = None
+    repository_external_id: int | None = None
+
+    def __post_init__(self) -> None:
+        if self.provider not in {"github", "gitlab"}:
+            raise ValueError("unsupported VCS provider")
+        if self.provider == "gitlab":
+            if self.origin_provider_installation_id is None:
+                raise ValueError("GitLab routing requires an immutable origin")
+            if self.repository_external_id is None or self.repository_external_id <= 0:
+                raise ValueError("GitLab routing requires a positive project ID")
 
 
 @dataclass(frozen=True)
@@ -69,6 +85,7 @@ class VcsFile:
     changes: int
     patch: str | None
     size: int | None = None
+    omission_reason: OmissionReason | None = None
 
 
 class OmissionReason(StrEnum):
@@ -110,6 +127,12 @@ class VcsProvider(Protocol):
     async def get_blob(
         self, locator: PullRequestLocator, sha: str, *, checkpoint: RunProviderCheckpoint
     ) -> bytes: ...
+
+
+class VcsProviderSelector(Protocol):
+    """Select a provider using detached persisted routing, never a queue pointer."""
+
+    def select(self, locator: PullRequestLocator) -> VcsProvider | None: ...
 
 
 class CommitMessagesProvider(Protocol):
@@ -187,9 +210,11 @@ class FetchVcsReviewInput:
                         )
                     except BlobTooLargeError:
                         reason = OmissionReason.TOO_LARGE
-                    except RunCancelled:
+                    except (RunCancelled, RequiredSourceUnavailable):
                         raise
-                    except Exception:
+                    except Exception as exc:
+                        if isinstance(exc, RunFailure) and exc.error_code == "deadline_exceeded":
+                            raise
                         # Blob classification is best effort; retain this file as an omission.
                         _LOGGER.warning(
                             "VCS blob classification failed run_id=%s repository=%s "
@@ -228,6 +253,8 @@ class FetchVcsReviewInput:
 def _known_omission(file: VcsFile) -> OmissionReason | None:
     if is_generated_path(file.filename):
         return OmissionReason.GENERATED
+    if file.omission_reason is not None:
+        return file.omission_reason
     if file.patch is not None and "\x00" in file.patch:
         return OmissionReason.BINARY
     if (
