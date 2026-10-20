@@ -19,6 +19,11 @@ from app.modules.integrations.gitlab.application.request_credentials import (
     GitLabCredentialGenerationChanged,
     GitLabRequestAuthority,
 )
+from app.modules.integrations.gitlab.infrastructure.response_body import (
+    GitLabResponseBodyError,
+    read_response_body,
+    validate_response_headers,
+)
 from app.modules.reviews.application.project_gitlab_merge_request import (
     CanonicalGitLabMergeRequest,
     CanonicalMergeRequestAccessDenied,
@@ -133,34 +138,11 @@ async def _body(response: httpx.Response) -> bytes:
         raise CanonicalMergeRequestInvalidResponse() from None
     if response.status_code != 200:
         raise CanonicalMergeRequestUnavailable() from None
-    headers = response.headers
-    media = [part.strip().lower() for part in headers.get("Content-Type", "").split(";")]
-    if (
-        media[0] != "application/json"
-        or len(media) > 2
-        or (len(media) == 2 and re.fullmatch(r'charset\s*=\s*(?:utf-8|"utf-8")', media[1]) is None)
-        or headers.get("Content-Encoding", "identity").lower() != "identity"
-        or headers.get("Transfer-Encoding", "chunked").lower() != "chunked"
-        or ("Content-Length" in headers and "Transfer-Encoding" in headers)
-        or response.is_stream_consumed
-    ):
+    try:
+        validate_response_headers(response)
+        return await read_response_body(response, 1048576, json_content=True)
+    except GitLabResponseBodyError:
         raise CanonicalMergeRequestInvalidResponse() from None
-    declared: int | None = None
-    if "Content-Length" in headers:
-        value = headers["Content-Length"]
-        if len(value) > 10 or re.fullmatch(r"[0-9]+", value) is None:
-            raise CanonicalMergeRequestInvalidResponse() from None
-        declared = int(value)
-        if declared > 1048576:
-            raise CanonicalMergeRequestInvalidResponse() from None
-    body = bytearray()
-    async for chunk in response.aiter_raw():
-        if len(body) + len(chunk) > 1048576:
-            raise CanonicalMergeRequestInvalidResponse() from None
-        body.extend(chunk)
-    if declared is not None and declared != len(body):
-        raise CanonicalMergeRequestInvalidResponse() from None
-    return bytes(body)
 
 
 def _decode(body: bytes) -> dict[str, Any]:

@@ -837,3 +837,79 @@ def test_total_attempt_deadline_closes_slow_stream_even_with_finite_chunks() -> 
 
     asyncio.run(scenario())
     assert body.closed
+
+
+def test_network_fixture_canonical_template_is_accepted_by_public_provider() -> None:
+    from pathlib import Path
+
+    manifest = json.loads(
+        (Path(__file__).parent / "fixtures/gitlab_network/manifest.json").read_text()
+    )
+    data = manifest["merge_request"]
+    target = replace(_TARGET, instance_origin="https://localhost:49443")
+    command = replace(_COMMAND, external_id=912)
+
+    class FixtureAuthority(Authority):
+        async def checkpoint(self, actual: BoundGitLabTarget) -> None:
+            assert actual == target
+            self.checks += 1
+
+    result = asyncio.run(
+        read(
+            lambda request: response(data),
+            command=command,
+            target=target,
+            authority=FixtureAuthority(),
+            policy=GitLabOriginPolicy(
+                frozenset({target.instance_origin}), frozenset({target.instance_origin})
+            ),
+        )
+    )
+    assert result.web_url == "https://localhost:49443/team/project/-/merge_requests/12"
+    assert result.provider_updated_at.isoformat() == "2026-10-19T08:30:00+00:00"
+    assert result.diff_refs.head_sha == "a" * 40
+    assert result.diff_refs.start_sha == "b" * 40
+    assert result.diff_refs.base_sha == "c" * 40
+
+
+@pytest.mark.parametrize("fault", ["header-bytes", "header-count", "duplicate", "control"])
+def test_current_mr_rejects_unsafe_header_envelope_and_closes(fault: str) -> None:
+    headers = [("Content-Type", "application/json")]
+    if fault == "header-bytes":
+        headers.append(("X-Fill", "a" * 16384))
+    elif fault == "header-count":
+        headers.extend((f"X-Fill-{n}", "a") for n in range(100))
+    elif fault == "duplicate":
+        headers.extend([("X-Scope", "first"), ("x-scope", "second")])
+    else:
+        headers.append(("X-Scope", "first\r\nsecond"))
+    body = Body(json.dumps(payload()).encode())
+    with pytest.raises(CanonicalMergeRequestInvalidResponse):
+        asyncio.run(read(lambda request: httpx.Response(200, headers=headers, stream=body)))
+    assert body.closed
+
+
+@pytest.mark.parametrize("framing", ["length", "chunked", "close", "http2"])
+def test_current_mr_accepts_identity_json_with_supported_body_framing(framing: str) -> None:
+    raw = json.dumps(payload()).encode()
+    body = Body(raw[:40], raw[40:])
+    headers = {"Content-Type": 'application/json; charset="UTF-8"'}
+    if framing == "length":
+        headers["Content-Length"] = str(len(raw))
+    elif framing == "chunked":
+        headers["Transfer-Encoding"] = "chunked"
+    seen: list[httpx.Request] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(
+            200,
+            headers=headers,
+            stream=body,
+            extensions={"http_version": b"HTTP/2" if framing == "http2" else b"HTTP/1.1"},
+        )
+
+    result = asyncio.run(read(handle))
+    assert result.external_id == 901
+    assert body.closed
+    assert seen[0].headers["Accept-Encoding"] == "identity"
