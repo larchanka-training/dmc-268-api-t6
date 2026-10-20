@@ -13,6 +13,9 @@ a removal or a toggle; `to_disarm` lists the live indexes whose RAG is off. The 
 pass re-checks each candidate under a share lock of its repository row, so a re-arm never
 resurrects an index a concurrent toggle turned off, and its purges leave GC no row to keep.
 
+A webhook trigger's index update request resolves the delivery's repository under the same
+effective-RAG condition and writes the target and a fresh marker of a live index only.
+
 Opt-in: TEST_DATABASE_URL must target a test database whose user can create schemas.
 Each test migrates its own schema to head and drops it afterwards.
 """
@@ -20,6 +23,7 @@ Each test migrates its own schema to head and drops it afterwards.
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 from collections.abc import Iterator
 from dataclasses import dataclass
@@ -34,6 +38,7 @@ from sqlalchemy.pool import NullPool
 from sqlalchemy.schema import CreateSchema, DropSchema
 
 from alembic import command
+from app.modules.code_index.application.index_refresh import RequestIndexRefresh
 from app.modules.code_index.application.index_store import IndexedFile
 from app.modules.code_index.application.leader_tasks import (
     CollectIndexGarbage,
@@ -46,6 +51,7 @@ from app.modules.code_index.application.maintenance import (
 )
 from app.modules.code_index.application.ports import IndexedRepository
 from app.modules.code_index.domain.enums import PurgeReason
+from app.modules.code_index.infrastructure.index_refresh import SqlAlchemyIndexRefreshUnitOfWork
 from app.modules.code_index.infrastructure.index_store import SqlAlchemyCodeIndexStore
 from app.modules.code_index.infrastructure.maintenance import (
     SqlAlchemyCodeIndexMaintenanceUnitOfWork,
@@ -602,3 +608,56 @@ def test_converge_purges_live_indexes_whose_rag_is_off_and_gc_leaves_no_rows(
         ] == [[(0, 0, 0, 0)], [(0, 0, 0, 0)], [(0, 0, 0, 0)], [(2, 2, 2, 2)]]
 
     asyncio.run(scenario())
+
+
+# A webhook trigger's index update request (#143).
+
+_TARGET_AND_MARKER = (
+    "SELECT target_commit_sha, wake_requested_at FROM code_index_states "
+    "WHERE repository_id = :repository"
+)
+
+
+@pytest.mark.integration
+def test_an_index_refresh_requests_a_build_only_of_a_live_index_with_rag_on(
+    fleet: _Fleet, caplog: pytest.LogCaptureFixture
+) -> None:
+    async def scenario() -> None:
+        index = fleet.index
+        repositories = await _github_repositories(index, *range(601, 608))
+        live, rag_off, unavailable, deleted, gitlab, purged, missing = repositories
+        for repository in repositories[:-1]:
+            await _enable(index, repository.repository_id)
+        await _execute(index, _RAG_OFF, rag_off.repository_id)
+        await _execute(index, _UNAVAILABLE, unavailable.repository_id)
+        await _execute(index, _DELETED, deleted.repository_id)
+        await _execute(index, _GITLAB, gitlab.repository_id)
+        await _purge(index, purged.repository_id, PurgeReason.REMOVED)
+        before = {
+            repository.repository_id: await _rows(
+                index, _TARGET_AND_MARKER, repository=repository.repository_id
+            )
+            for repository in repositories
+        }
+        refresh = RequestIndexRefresh(partial(SqlAlchemyIndexRefreshUnitOfWork, index.factory))
+
+        assert await refresh.execute(live.installation_external_id, 101, C2) is True
+        for repository in repositories[1:]:
+            assert await refresh.execute(repository.installation_external_id, 101, C2) is False
+        # Another repository of the live one's installation is not connected.
+        assert await refresh.execute(live.installation_external_id, 102, C2) is False
+
+        [(target, marker)] = await _rows(index, _TARGET_AND_MARKER, repository=live.repository_id)
+        [(_, enabled_marker)] = before[live.repository_id]
+        assert target == C2
+        assert marker > enabled_marker
+        for repository in repositories[1:]:
+            after = await _rows(index, _TARGET_AND_MARKER, repository=repository.repository_id)
+            assert after == before[repository.repository_id]
+        assert before[missing.repository_id] == []
+        # A resolved repository whose index refuses the request is logged, at debug.
+        logged = {id_ for id_ in repositories if str(id_.repository_id) in caplog.text}
+        assert logged == {purged, missing}
+
+    with caplog.at_level(logging.DEBUG, logger=RequestIndexRefresh.__module__):
+        asyncio.run(scenario())

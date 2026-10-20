@@ -7,7 +7,15 @@ an index.
 
 from __future__ import annotations
 
-from app.modules.repositories.infrastructure.models import ProviderInstallation
+from sqlalchemy import and_
 
+from app.modules.repositories.infrastructure.models import ProviderInstallation, Repository
+
+# The effective RAG of a repository (ADR §6.1): the toggle is on and the App can read it.
+RAG_ON = and_(
+    Repository.rag_enabled,
+    Repository.installation_available,
+    ProviderInstallation.deleted_at.is_(None),
+)
 # The indexer has a snapshot source for GitHub only (GitLab is #97).
 GITHUB_PROVIDER = ProviderInstallation.provider == "github"

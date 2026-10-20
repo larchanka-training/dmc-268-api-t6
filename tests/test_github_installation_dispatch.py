@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, cast
 from uuid import UUID, uuid4
 
 import pytest
@@ -1362,3 +1362,138 @@ def test_push_event_names_its_default_branch() -> None:
     event = PushEvent(17, 101, "refs/heads/release/1.x", "release/1.x")
 
     assert event.to_default_branch
+
+
+# --- index refresh on a merge or a push to the default branch (#143) ---------------------
+
+_MERGE_SHA = "c" * 40
+
+
+@dataclass
+class FakeIndexRefresh:
+    """Repositories whose index takes a request, by (installation, repository) external id."""
+
+    live: set[tuple[int, int]] = field(default_factory=lambda: {(17, 101)})
+    calls: list[tuple[int, int, str | None]] = field(default_factory=list)
+
+    async def execute(
+        self, installation_external_id: int, repository_external_id: int, commit_sha: str | None
+    ) -> bool:
+        self.calls.append((installation_external_id, repository_external_id, commit_sha))
+        return (installation_external_id, repository_external_id) in self.live
+
+
+def _merge_delivery(
+    action: str = "closed",
+    *,
+    merged: bool = True,
+    base: str = "main",
+    default_branch: str | None = "main",
+    merge_commit_sha: str | None = _MERGE_SHA,
+) -> VerifiedGitHubDelivery:
+    delivery = _pull_request_delivery(action, delivery_id="delivery-merge")
+    payload = dict(delivery.payload)
+    repository: dict[str, object] = {"id": 101, "full_name": "octo/repo"}
+    if default_branch is not None:
+        repository["default_branch"] = default_branch
+    pull_request = dict(cast(dict[str, object], payload["pull_request"]))
+    pull_request["base"] = {"ref": base, "sha": "b" * 40}
+    pull_request["state"] = "closed" if action == "closed" else "open"
+    pull_request["merged"] = merged
+    if merge_commit_sha is not None:
+        pull_request["merge_commit_sha"] = merge_commit_sha
+    payload.update(repository=repository, pull_request=pull_request)
+    return VerifiedGitHubDelivery(delivery.delivery_id, "pull_request", payload)
+
+
+def _merge_dispatcher(
+    projection: PullRequestProjectionStatus, index_refresh: FakeIndexRefresh
+) -> GitHubWebhookDispatchAdapter:
+    class Projector:
+        async def execute(self, event: PullRequestEvent) -> PullRequestProjectionStatus:
+            return projection
+
+    return GitHubWebhookDispatchAdapter(
+        GitHubInstallationDeliveryDispatcher(
+            resolver=FakeInstallationResolver(),
+            onboarding=FakeOnboarding(),
+            pull_request_projector=Projector(),
+            index_refresh=index_refresh,
+        )
+    )
+
+
+@pytest.mark.parametrize(
+    ("projection", "status"),
+    [
+        (PullRequestProjectionStatus.PROJECTED, "projected_pr"),
+        # Paused reviews end the projection early; the merge still updates the index.
+        (PullRequestProjectionStatus.DISABLED_REPOSITORY, "ignored_unknown_repository"),
+    ],
+    ids=["projected", "reviews-paused"],
+)
+def test_a_merge_into_the_default_branch_requests_an_index_update_to_its_merge_commit(
+    projection: PullRequestProjectionStatus, status: str
+) -> None:
+    refresh = FakeIndexRefresh()
+    dispatcher = _merge_dispatcher(projection, refresh)
+
+    result = asyncio.run(dispatcher.execute(_merge_delivery().to_receipt()))
+
+    assert result.status == status
+    assert result.detail == f"action=closed {projection.value} index=requested"
+    assert refresh.calls == [(17, 101, _MERGE_SHA)]
+
+
+def test_a_merge_without_a_merge_commit_requests_only_the_marker() -> None:
+    refresh = FakeIndexRefresh()
+    dispatcher = _merge_dispatcher(PullRequestProjectionStatus.PROJECTED, refresh)
+
+    result = asyncio.run(dispatcher.execute(_merge_delivery(merge_commit_sha=None).to_receipt()))
+
+    assert result.detail == "action=closed projected index=requested"
+    assert refresh.calls == [(17, 101, None)]
+
+
+def test_a_merge_the_index_does_not_take_leaves_the_detail_alone() -> None:
+    # Not connected, RAG off, or no live index: the request writes nothing.
+    refresh = FakeIndexRefresh(live=set())
+    dispatcher = _merge_dispatcher(PullRequestProjectionStatus.PROJECTED, refresh)
+
+    result = asyncio.run(dispatcher.execute(_merge_delivery().to_receipt()))
+
+    assert result == InstallationDeliveryDispatchResult(
+        InstallationDeliveryDispatchStatus.PROJECTED_PR, "action=closed projected"
+    )
+    assert refresh.calls == [(17, 101, _MERGE_SHA)]
+
+
+@pytest.mark.parametrize(
+    "delivery",
+    [
+        _merge_delivery(base="feature"),
+        _merge_delivery(default_branch=None),
+        _merge_delivery(merged=False),
+        _merge_delivery("opened", merged=False),
+        _merge_delivery("synchronize", merged=False),
+        _merge_delivery("edited", merged=False),
+    ],
+    ids=[
+        "another-branch",
+        "no-default-branch",
+        "closed-unmerged",
+        "opened",
+        "synchronize",
+        "edited",
+    ],
+)
+def test_other_pull_request_events_request_no_index_update(
+    delivery: VerifiedGitHubDelivery,
+) -> None:
+    refresh = FakeIndexRefresh()
+    dispatcher = _merge_dispatcher(PullRequestProjectionStatus.PROJECTED, refresh)
+
+    result = asyncio.run(dispatcher.execute(delivery.to_receipt()))
+
+    assert result.detail is not None and "index=" not in result.detail
+    assert refresh.calls == []
