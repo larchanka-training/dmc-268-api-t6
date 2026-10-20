@@ -22,6 +22,11 @@ from app.modules.integrations.gitlab.application.manage_connection import (
     GitLabManagementError,
     GitLabOriginPolicy,
 )
+from app.modules.integrations.gitlab.infrastructure.response_body import (
+    GitLabResponseBodyError,
+    read_response_body,
+    validate_response_headers,
+)
 from app.modules.integrations.gitlab.infrastructure.run_credentials import (
     FetchCode,
     GitLabRunCredentialPort,
@@ -868,21 +873,13 @@ class GitLabRunHttp:
             raise GitLabRunHttpError("invalid_response")
         return result
 
-    @staticmethod
-    def _headers(response: httpx.Response) -> None:
-        raw_items = response.headers.raw
-        if len(raw_items) > 100 or sum(len(k) + len(v) + 4 for k, v in raw_items) > 16384:
-            raise GitLabRunHttpError("invalid_response")
-        names: set[str] = set()
-        for name, value in response.headers.multi_items():
-            if name in names or any(char in value for char in "\r\n\x00"):
-                raise GitLabRunHttpError("invalid_response")
-            names.add(name)
-
     async def _body(
         self, response: httpx.Response, maximum: int, mode: str, max_total_bytes: int
     ) -> bytes:
-        self._headers(response)
+        try:
+            validate_response_headers(response)
+        except GitLabResponseBodyError as error:
+            raise GitLabRunHttpError(error.kind) from None
         if mode != "publication" and response.status_code != 200:
             status = response.status_code
             kind: HttpFaultKind = (
@@ -901,47 +898,24 @@ class GitLabRunHttp:
                 status_code=status,
                 retry_after=_retry_after(response.headers.get("Retry-After")),
             )
-        headers = response.headers
-        if (
-            headers.get("Content-Encoding", "identity").lower() != "identity"
-            or headers.get("Transfer-Encoding", "chunked").lower() != "chunked"
-            or "Content-Length" in headers
-            and "Transfer-Encoding" in headers
-            or response.is_stream_consumed
-        ):
-            raise GitLabRunHttpError("invalid_response")
-        declared: int | None = None
-        if "Content-Length" in headers:
-            raw = headers["Content-Length"]
-            if re.fullmatch(r"[0-9]{1,10}", raw) is None:
-                raise GitLabRunHttpError("invalid_response")
-            declared = int(raw)
-            if mode != "head" and declared > maximum:
-                raise GitLabRunHttpError("body_too_large")
-        if mode == "json" or mode == "publication" and response.status_code in (200, 201):
-            media = headers.get("Content-Type", "").lower().split(";")
-            if (
-                media[0].strip() != "application/json"
-                or len(media) > 2
-                or (
-                    len(media) == 2
-                    and re.fullmatch(r'\s*charset\s*=\s*(?:utf-8|"utf-8")\s*', media[1]) is None
-                )
-            ):
-                raise GitLabRunHttpError("invalid_response")
-        body = bytearray()
-        async for chunk in response.aiter_raw():
-            # Delivered bytes consume the attempt budget even when this chunk is
-            # rejected by the per-response cap. Retain any aggregate overrun.
-            self._bytes += len(chunk)
+
+        def charge(size: int) -> None:
+            self._bytes += size
             if self._bytes > max_total_bytes:
                 raise GitLabRunHttpError("budget_exhausted")
-            if len(body) + len(chunk) > maximum:
-                raise GitLabRunHttpError("invalid_response" if mode == "head" else "body_too_large")
-            body.extend(chunk)
-        if mode != "head" and declared is not None and declared != len(body):
-            raise GitLabRunHttpError("invalid_response")
-        return bytes(body)
+
+        try:
+            return await read_response_body(
+                response,
+                maximum,
+                json_content=mode == "json"
+                or mode == "publication"
+                and response.status_code in (200, 201),
+                head=mode == "head",
+                charge=charge,
+            )
+        except GitLabResponseBodyError as error:
+            raise GitLabRunHttpError(error.kind) from None
 
     @staticmethod
     async def _close_response(response: httpx.Response, *, primary: bool) -> bool:
