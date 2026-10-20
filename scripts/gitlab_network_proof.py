@@ -922,7 +922,8 @@ class Proof:
             and result["review_body"] is not None,
         )
         findings = await self.sql(
-            "SELECT path,line,rule_name,published,inline_comment FROM findings WHERE run_id=:id",
+            "SELECT file_path AS path,line_start AS line,rule_name,published,inline_comment "
+            "FROM findings WHERE run_id=:id",
             {"id": run},
         )
         self.check(
