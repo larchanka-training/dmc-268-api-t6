@@ -102,6 +102,7 @@ _COLUMNS = {
         "exclusions_digest": ("varchar", True, 64),
         "stored_bytes": ("int8", False, None),
         "pending_bytes": ("int8", False, None),
+        "wake_requested_at": ("timestamptz", True, None),
     },
     "code_index_files": {**_GRAPH_KEY, "blob_sha": ("varchar", False, 64)},
     "code_index_symbols": {
@@ -170,6 +171,7 @@ _CHECKS = {
         "ck_code_index_states_bytes",
         "ck_code_index_states_pending_leased",
         "ck_code_index_states_failed_code",
+        "ck_code_index_states_wake_live",
     },
     "code_index_files": set(),
     "code_index_symbols": {"ck_code_index_symbols_lines"},
@@ -178,7 +180,10 @@ _CHECKS = {
 }
 
 _INDEXES = {
-    "code_index_states": {"ix_code_index_states_live_lease": ["repository_id"]},
+    "code_index_states": {
+        "ix_code_index_states_live_lease": ["repository_id"],
+        "ix_code_index_states_wake_requested": ["wake_requested_at"],
+    },
     "code_index_files": {},
     "code_index_symbols": {},
     "code_index_edges": {
@@ -553,6 +558,22 @@ def test_state_row_defaults_to_an_empty_unpublished_index(
             id="failed-with-another-code",
         ),
         pytest.param(
+            "INSERT INTO code_index_states "
+            "(repository_id, purge_reason, wake_requested_at) "
+            "VALUES (:repository, 'disabled', now())",
+            {},
+            "ck_code_index_states_wake_live",
+            id="wake-marker-on-a-purged-index",
+        ),
+        pytest.param(
+            "INSERT INTO code_index_states "
+            "(repository_id, status, error_code, wake_requested_at) "
+            "VALUES (:repository, 'failed', 'archive_unsafe', now())",
+            {},
+            "ck_code_index_states_wake_live",
+            id="wake-marker-on-a-failed-index",
+        ),
+        pytest.param(
             _SYMBOL, {"start": 0, "end": 1}, "ck_code_index_symbols_lines", id="line-zero"
         ),
         pytest.param(
@@ -640,6 +661,64 @@ def test_check_constraints_accept_consistent_rows(code_index_database: Connectio
 
 
 @pytest.mark.integration
+@pytest.mark.parametrize("status", ["empty", "building", "ready"])
+def test_a_live_index_accepts_a_wake_marker(code_index_database: Connection, status: str) -> None:
+    connection = code_index_database
+    repository_id = _repository(connection)
+    lease = "gen_random_uuid(), now()" if status == "building" else "NULL, NULL"
+    connection.execute(
+        text(
+            "INSERT INTO code_index_states "
+            "(repository_id, status, lease_token, lease_expires_at, wake_requested_at) "
+            f"VALUES (:repository, '{status}', {lease}, now())"
+        ),
+        {"repository": repository_id},
+    )
+    assert connection.scalar(text("SELECT wake_requested_at IS NOT NULL FROM code_index_states"))
+
+
+@pytest.mark.integration
+def test_migration_0037_adds_the_wake_marker_and_its_downgrade_drops_it(
+    code_index_database: Connection,
+) -> None:
+    connection = code_index_database
+    config = _migration_config(connection)
+    marker = (
+        "SELECT (SELECT count(*) FROM information_schema.columns "
+        "WHERE table_schema = current_schema() AND table_name = 'code_index_states' "
+        "AND column_name = 'wake_requested_at'), "
+        "(SELECT count(*) FROM pg_constraint WHERE conname = 'ck_code_index_states_wake_live' "
+        "AND connamespace = current_schema()::regnamespace), "
+        "(SELECT count(*) FROM pg_indexes WHERE schemaname = current_schema() "
+        "AND indexname = 'ix_code_index_states_wake_requested')"
+    )
+    assert tuple(connection.execute(text(marker)).one()) == (1, 1, 1)
+    repository_id = _repository(connection)
+    connection.execute(
+        text(
+            "INSERT INTO code_index_states (repository_id, generation, wake_requested_at) "
+            "VALUES (:repository, 1, now())"
+        ),
+        {"repository": repository_id},
+    )
+    connection.commit()
+
+    command.downgrade(config, "20261019_0036")
+    assert tuple(connection.execute(text(marker)).one()) == (0, 0, 0)
+    assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "20261019_0036"
+    # The state row stays; only its pending wake-up request is lost.
+    assert connection.scalar(text("SELECT generation FROM code_index_states")) == 1
+    connection.commit()
+
+    command.upgrade(config, "head")
+    assert tuple(connection.execute(text(marker)).one()) == (1, 1, 1)
+    assert connection.execute(
+        text("SELECT generation, wake_requested_at FROM code_index_states")
+    ).one() == (1, None)
+    assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "20261020_0037"
+
+
+@pytest.mark.integration
 def test_downgrade_drops_index_tables_and_types_and_upgrade_restores_them(
     code_index_database: Connection,
 ) -> None:
@@ -661,7 +740,7 @@ def test_downgrade_drops_index_tables_and_types_and_upgrade_restores_them(
         "code_index_edge_kind",
         "code_index_import_resolution",
     }
-    assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "20261019_0036"
+    assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "20261020_0037"
 
 
 # ADR 0001 §7: only a limit or an unsafe archive fails an index.
@@ -695,6 +774,13 @@ def test_failed_code_check_admits_every_failed_error_code(
         )
         assert connection.scalar(text("SELECT error_code FROM code_index_states")) == code
     assert frozenset(_FAILED_CODES) == FAILED_ERROR_CODES
+
+
+# The partial indexes of `code_index_states` at head, with their predicates.
+_STATE_INDEXES = {
+    "ix_code_index_states_live_lease": "(lease_token IS NOT NULL)",
+    "ix_code_index_states_wake_requested": "(wake_requested_at IS NOT NULL)",
+}
 
 
 def _state_schema(connection: Connection) -> tuple[set[str], set[str], dict[str, str]]:
@@ -734,12 +820,15 @@ def test_downgrade_to_0033_drops_the_indexer_columns_and_upgrade_resets_profiles
     connection = code_index_database
     config = _migration_config(connection)
     head_columns = set(_COLUMNS["code_index_states"])
-    new_columns = {"indexed_default_branch", "exclusions_digest", "stored_bytes", "pending_bytes"}
-    assert _state_schema(connection) == (
-        head_columns,
-        _CHECKS["code_index_states"],
-        {"ix_code_index_states_live_lease": "(lease_token IS NOT NULL)"},
-    )
+    # 0034 adds the indexer columns; 0037 (#143) adds the wake-up marker.
+    new_columns = {
+        "indexed_default_branch",
+        "exclusions_digest",
+        "stored_bytes",
+        "pending_bytes",
+        "wake_requested_at",
+    }
+    assert _state_schema(connection) == (head_columns, _CHECKS["code_index_states"], _STATE_INDEXES)
     connection.rollback()
     command.downgrade(config, "20261016_0033")
     assert _state_schema(connection) == (head_columns - new_columns, _CHECKS_0033, {})
@@ -776,12 +865,8 @@ def test_downgrade_to_0033_drops_the_indexer_columns_and_upgrade_resets_profiles
             "exclusions_digest, stored_bytes, pending_bytes FROM code_index_states"
         )
     ).one() == ("ready", C1, *(None,) * 6, 0, 0)
-    assert _state_schema(connection) == (
-        head_columns,
-        _CHECKS["code_index_states"],
-        {"ix_code_index_states_live_lease": "(lease_token IS NOT NULL)"},
-    )
-    assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "20261019_0036"
+    assert _state_schema(connection) == (head_columns, _CHECKS["code_index_states"], _STATE_INDEXES)
+    assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "20261020_0037"
 
 
 # Store behaviour: fencing, publication, purge, garbage collection and isolation.

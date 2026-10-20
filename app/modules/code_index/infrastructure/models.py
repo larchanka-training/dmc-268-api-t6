@@ -67,11 +67,22 @@ class CodeIndexState(Base):
             "OR error_code LIKE 'limit_exceeded:%'",
             name="ck_code_index_states_failed_code",
         ),
+        # Only a live index waits for a wake-up: a purge and a failure clear the marker.
+        CheckConstraint(
+            "wake_requested_at IS NULL OR (purge_reason IS NULL AND status <> 'failed')",
+            name="ck_code_index_states_wake_live",
+        ),
         # Admission counts the live leases of all repositories (ADR §7).
         Index(
             "ix_code_index_states_live_lease",
             "repository_id",
             postgresql_where=text("lease_token IS NOT NULL"),
+        ),
+        # The leader dispatches the marked rows (#143).
+        Index(
+            "ix_code_index_states_wake_requested",
+            "wake_requested_at",
+            postgresql_where=text("wake_requested_at IS NOT NULL"),
         ),
     )
 
@@ -127,6 +138,9 @@ class CodeIndexState(Base):
     # attempt's rows: the storage quotas of ADR §7.
     stored_bytes: Mapped[int] = mapped_column(BIGINT, nullable=False, server_default=text("0"))
     pending_bytes: Mapped[int] = mapped_column(BIGINT, nullable=False, server_default=text("0"))
+    # The outbox of index wake-ups (#143): a trigger sets it in its own transaction, and
+    # the worker leader wakes the job after the commit and clears it with a compare-and-set.
+    wake_requested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class CodeIndexFile(Base):
