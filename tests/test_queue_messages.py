@@ -697,6 +697,7 @@ class _LeaderCalls:
     def process(self) -> WorkerProcess:
         return WorkerProcess(
             handle_run=cast(Any, None),
+            handle_delivery=cast(Any, None),
             publish_review=cast(Any, None),
             enqueue=cast(Any, self),
             sweep=cast(Any, self),
