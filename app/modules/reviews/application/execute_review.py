@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import uuid
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Protocol
 from uuid import UUID
@@ -13,13 +13,19 @@ from uuid import UUID
 from pydantic import ValidationError
 
 from app.modules.reviews.application.conventions import GeneratedConventions
+from app.modules.reviews.application.findings_post_processor import (
+    FindingsPostProcessor,
+    ProcessedFinding,
+)
 from app.modules.reviews.application.policy_errors import PolicyError, PolicyErrorCode
 from app.modules.reviews.application.policy_snapshot import PolicySnapshot
 from app.modules.reviews.application.prompt_budget import (
     EstimatedTokenCounter,
     PolicyBudgetExceededError,
     PreSendGuardError,
+    fit_review_context,
     verify_pre_send_guard,
+    verify_provenance_pre_send_guard,
 )
 from app.modules.reviews.application.prompt_builder import (
     ChangedFile,
@@ -36,11 +42,13 @@ from app.modules.reviews.application.reflection_pass import (
 )
 from app.modules.reviews.application.review_output import (
     InvalidReviewOutput,
+    ReviewFinding,
     ReviewFindingV2,
     ReviewOutputHandler,
     validate_v2_attribution,
 )
 from app.modules.reviews.application.run_failures import RunFailure
+from app.modules.reviews.application.verdict import SeverityThresholdValue
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -56,6 +64,55 @@ class ReviewPromptInput:
     changed_files: tuple[ChangedFile, ...]
     omitted_files: tuple[str, ...]
     policy_snapshot: PolicySnapshot | None = None
+    severity_threshold: SeverityThresholdValue = "all"
+
+
+def build_deterministic_summary(
+    final_findings: Sequence[ReviewFinding | ReviewFindingV2],
+    *,
+    changed_files: tuple[ChangedFile, ...] | list[ChangedFile],
+    omitted_files: tuple[str, ...] | list[str] = (),
+    below_threshold_count: int = 0,
+) -> dict[str, object]:
+    """Construct deterministic ReviewSummary per CONTEXT_AND_VERIFICATION_SPEC §8.2.
+
+    Raw model summary is never published under any circumstances.
+    """
+    done_well = "Code analysis and policy verification were completed across all evaluated changes."
+
+    if not final_findings:
+        if below_threshold_count > 0:
+            problem = (
+                f"No verified issues meeting the severity threshold were found "
+                f"({below_threshold_count} below threshold)."
+            )
+        else:
+            problem = "No verified issues were found in the evaluated changes."
+        effort = "none"
+    else:
+        severities = {f.severity for f in final_findings}
+        if "critical" in severities:
+            effort = "large"
+        elif "high" in severities:
+            effort = "medium"
+        elif "medium" in severities or "low" in severities:
+            effort = "small"
+        else:
+            effort = "none"
+
+        categories = sorted({f.category for f in final_findings})
+        cat_desc = ", ".join(categories)
+        issue_word = "issue" if len(final_findings) == 1 else "issues"
+        problem = (
+            f"Identified {len(final_findings)} verified {issue_word} ({cat_desc}) "
+            "in the reviewed changes."
+        )
+
+    return {
+        "problem": problem,
+        "done_well": done_well,
+        "effort": effort,
+    }
 
 
 class ReviewPromptRepository(Protocol):
@@ -145,6 +202,7 @@ class ExecuteReviewRun:
             changed_files=changed_files,
             omitted_files=omitted_files,
             policy_snapshot=prompt_input.policy_snapshot,
+            severity_threshold=prompt_input.severity_threshold,
         )
 
         if prompt_input.policy_snapshot is not None:
@@ -159,11 +217,13 @@ class ExecuteReviewRun:
                     "Policy snapshot is not ready for LLM call",
                 )
             counter = EstimatedTokenCounter()
+            max_input = prompt_input.policy_snapshot.execution_profile.max_input_tokens
+            context = fit_review_context(context, max_prompt_tokens=max_input, counter=counter)
             try:
                 verify_pre_send_guard(
                     context,
                     counter,
-                    max_input_tokens=prompt_input.policy_snapshot.execution_profile.max_input_tokens,
+                    max_input_tokens=max_input,
                 )
             except PolicyBudgetExceededError as exc:
                 raise PolicyError(
@@ -174,6 +234,19 @@ class ExecuteReviewRun:
                 ) from exc
             except PreSendGuardError as exc:
                 raise RunFailure("llm_context_overflow", str(exc)) from exc
+
+            call_id = uuid.uuid4()
+            reviewer_manifest = PromptBuilder().build_manifest(
+                context, call_id=call_id, stage="review"
+            )
+            try:
+                verify_provenance_pre_send_guard(
+                    reviewer_manifest, context=context, snapshot=prompt_input.policy_snapshot
+                )
+            except PolicyError as exc:
+                if exc.code == PolicyErrorCode.CONTEXT_VIOLATION:
+                    raise RunFailure("policy_context_violation", str(exc)) from exc
+                raise
         elif self._reflection_pass is not None:
             _LOGGER.warning(
                 "execute_review_legacy_run_without_snapshot: reflection pass provided but "
@@ -215,7 +288,13 @@ class ExecuteReviewRun:
 
         if not raw_findings:
             # Zero candidates: Reflection verifier is skipped (0 calls)
-            return model_output
+            data["findings"] = []
+            data["summary"] = build_deterministic_summary(
+                (),
+                changed_files=context.changed_files,
+                omitted_files=context.omitted_files,
+            )
+            return data
 
         if len(raw_findings) > 10:
             raise InvalidReviewOutput("Draft review exceeded maximum of 10 findings")
@@ -260,64 +339,78 @@ class ExecuteReviewRun:
                     f"Malformed candidate finding at index {idx}: {str(err)[:200]}"
                 ) from err
 
+            # Pass 3: Validate attribution against manifest.
+            # Unshown evidence refs drop only this candidate (CVS §6.2 :702, :729-730)
             valid_attr, attr_err = validate_v2_attribution(finding, reviewer_manifest)
             if not valid_attr:
-                raise InvalidReviewOutput(f"Invalid attribution in candidate finding: {attr_err}")
+                _LOGGER.info(
+                    "Dropping candidate finding %s due to unshown evidence (%s)",
+                    cand_id,
+                    attr_err,
+                )
+                continue
 
             candidates.append(CandidateFindingItem(candidate_id=cand_id, finding=finding))
 
+        # Pass 4: Coordinates, lint filter, and dedup BEFORE verifier (CVS §6.2 :704)
+        post_processor = FindingsPostProcessor.from_default_patterns()
+        processed_candidates = [
+            ProcessedFinding(c.finding, idx, "inline") for idx, c in enumerate(candidates)
+        ]
+        # Filter unknown paths
+        valid_paths = {f.path for f in context.changed_files}
+        valid_path_candidates = [p for p in processed_candidates if p.finding.path in valid_paths]
+        kept_candidates, _ = post_processor._drop_lint_patterns(valid_path_candidates)
+        kept_candidates, _ = post_processor._deduplicate(kept_candidates)
+
+        kept_findings_set = {id(p.finding) for p in kept_candidates}
+        filtered_candidates = [c for c in candidates if id(c.finding) in kept_findings_set]
+
+        # If empty after filters, bypass verifier (0 calls)
+        if not filtered_candidates:
+            data["findings"] = []
+            data["summary"] = build_deterministic_summary(
+                (),
+                changed_files=context.changed_files,
+                omitted_files=context.omitted_files,
+            )
+            return data
+
+        # Pass 5: Verifier invocation
         decisions = await self._reflection_pass.verify(
-            candidates=tuple(candidates), context=context
+            candidates=tuple(filtered_candidates), context=context
         )
         supported, rejected = filter_verified_candidates(
-            candidates=tuple(candidates), decisions=decisions
+            candidates=tuple(filtered_candidates), decisions=decisions
         )
         _LOGGER.info(
             "Reflection pass completed for run %s (call %s): "
             "total=%d, supported=%d, rejected=%d. Decisions: %s",
             run_id,
             reviewer_manifest.call_id,
-            len(candidates),
+            len(filtered_candidates),
             len(supported),
             len(rejected),
             [(d.candidate_id, d.status) for d in decisions],
         )
 
-        data["findings"] = [cand.finding.model_dump() for cand in supported]
+        # Pass 6: Severity threshold after verifier (CVS §6.2 :705)
+        severity_threshold: SeverityThresholdValue = getattr(context, "severity_threshold", "all")
+        supported_processed = [
+            ProcessedFinding(cand.finding, idx, "inline") for idx, cand in enumerate(supported)
+        ]
+        surviving_processed, below_threshold_processed = post_processor._drop_below_threshold(
+            supported_processed, severity_threshold
+        )
+        final_findings = [p.finding for p in surviving_processed]
 
-        # Cleansing: never leak unverified defects or praise through summary (CONTEXT §8.2)
-        if len(supported) < len(candidates):
-            severities = {cand.finding.severity for cand in supported}
-            if "critical" in severities:
-                effort = "large"
-            elif "high" in severities:
-                effort = "medium"
-            elif "medium" in severities or "low" in severities:
-                effort = "small"
-            else:
-                effort = "none"
-
-            done_well = (
-                "Code analysis and policy verification were completed across all evaluated changes."
-            )
-
-            if not supported:
-                data["summary"] = {
-                    "problem": "No verified issues were found in the provided changes.",
-                    "done_well": done_well,
-                    "effort": "none",
-                }
-            else:
-                categories = sorted({cand.finding.category for cand in supported})
-                cat_desc = ", ".join(categories)
-                issue_word = "issue" if len(supported) == 1 else "issues"
-                data["summary"] = {
-                    "problem": (
-                        f"Identified {len(supported)} verified {issue_word} ({cat_desc}) "
-                        "in the reviewed changes."
-                    ),
-                    "done_well": done_well,
-                    "effort": effort,
-                }
+        data["findings"] = [f.model_dump() for f in final_findings]
+        # Deterministic summary is ALWAYS built from post-threshold supported findings (CVS §8.2)
+        data["summary"] = build_deterministic_summary(
+            final_findings,
+            changed_files=context.changed_files,
+            omitted_files=context.omitted_files,
+            below_threshold_count=len(below_threshold_processed),
+        )
 
         return data

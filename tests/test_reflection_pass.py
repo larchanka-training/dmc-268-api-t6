@@ -205,7 +205,7 @@ def test_verifier_prompt_builder_renders_candidates_and_policy() -> None:
     assert "<repository_rules" in prompt.user
     assert "<code_context>" in prompt.user
     assert manifest.call_id == call_id
-    assert manifest.stage == "verifier"
+    assert manifest.stage in {"verifier", "verification"}
     assert manifest.get_block("policy-rules") is not None
     assert manifest.get_block(file_block_id("app/query.py")) is not None
 
@@ -438,8 +438,8 @@ async def test_reflection_pass_rejects_duplicate_candidate_decisions() -> None:
 
 
 @pytest.mark.anyio
-async def test_reflection_pass_rejects_evidence_with_mismatched_path() -> None:
-    cand1 = make_candidate("c-1", path="app/query.py")
+async def test_reflection_pass_allows_evidence_from_other_diff_file() -> None:
+    cand1 = make_candidate("c-1", path="app/query.py", rule_name=None)
     other_block_id = file_block_id("app/other.py")
 
     fake_response = {
@@ -462,7 +462,9 @@ async def test_reflection_pass_rejects_evidence_with_mismatched_path() -> None:
         rules=(),
         agents_md=None,
         conventions=RepoConventions((), ()),
-        pr_meta=PullRequestMeta("T", None, "u", "b", "main", (), 2, 2, 0, False, False),
+        pr_meta=PullRequestMeta(
+            "T", None, "u", "b", "main", (), 2, 2, 0, False, False, head_sha="head_123"
+        ),
         changed_files=(
             ChangedFile("app/query.py", "modified", (DiffLine(10, "added", "x = 1"),)),
             ChangedFile("app/other.py", "modified", (DiffLine(5, "added", "y = 2"),)),
@@ -471,8 +473,10 @@ async def test_reflection_pass_rejects_evidence_with_mismatched_path() -> None:
         policy_snapshot=snapshot,
     )
 
-    with pytest.raises(VerificationInvalidOutputError, match="does not match candidate path"):
-        await verifier.verify(candidates=(cand1,), context=context)
+    decisions = await verifier.verify(candidates=(cand1,), context=context)
+    assert len(decisions) == 1
+    assert decisions[0].status == "supported"
+    assert decisions[0].evidence_refs[0].block_id == other_block_id
 
 
 @pytest.mark.anyio

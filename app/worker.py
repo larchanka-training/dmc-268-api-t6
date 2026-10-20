@@ -505,7 +505,7 @@ def execution_profile_of(llm: LlmSettings | None) -> ExecutionProfile:
     """The model settings of this worker that a policy snapshot fixes for its run.
 
     Only what the worker knows today: the review model, its fallback and their providers.
-    The verifier model and the versioned profiles arrive with #120; until then the
+    The verifier model and the versioned profiles arrive with #130; until then the
     profile is not complete.
     """
     if llm is None:
