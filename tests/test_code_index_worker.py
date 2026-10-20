@@ -2,14 +2,16 @@
 
 The defaults and bounds are the plan's table; the indexer owns its parser (AC3, AC8), and
 each job exchanges its own installation token, so a retry after a 401 never reuses the
-revoked one.
+revoked one. The sources of one head reconcile run share one token cache (#143).
 """
 
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 import logging
+import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -53,6 +55,9 @@ from app.modules.code_index.infrastructure.amqp import (
     IndexQueuePublisher,
     IndexRepoMessage,
     handle_index_delivery,
+)
+from app.modules.integrations.webhooks.infrastructure.github_installation_tree_provider import (
+    InMemoryInstallationAccessTokenCache,
 )
 from app.modules.reviews.application.run_failures import RetryDelays
 
@@ -98,7 +103,9 @@ def test_every_default_is_the_plan_table() -> None:
         settings.ttl_interval_seconds,
         settings.gc_interval_seconds,
         settings.gc_batch_rows,
-    ) == (30, 3_600, 300, 10_000)
+        settings.reconcile_interval_seconds,
+        settings.reconcile_batch,
+    ) == (30, 3_600, 300, 10_000, 600, 50)
 
 
 def test_every_variable_sets_its_value() -> None:
@@ -124,6 +131,8 @@ def test_every_variable_sets_its_value() -> None:
             "CODE_INDEX_TTL_INTERVAL_SECONDS": "600",
             "CODE_INDEX_GC_INTERVAL_SECONDS": "120",
             "CODE_INDEX_GC_BATCH_ROWS": "500",
+            "CODE_INDEX_RECONCILE_INTERVAL_SECONDS": "900",
+            "CODE_INDEX_RECONCILE_BATCH": "20",
         }
     )
 
@@ -150,7 +159,9 @@ def test_every_variable_sets_its_value() -> None:
         settings.ttl_interval_seconds,
         settings.gc_interval_seconds,
         settings.gc_batch_rows,
-    ) == (7, 600, 120, 500)
+        settings.reconcile_interval_seconds,
+        settings.reconcile_batch,
+    ) == (7, 600, 120, 500, 900, 20)
 
 
 def test_an_empty_variable_keeps_the_default() -> None:
@@ -187,6 +198,11 @@ def test_an_empty_variable_keeps_the_default() -> None:
         ({"CODE_INDEX_TTL_DAYS": "0"}, "CODE_INDEX_TTL_DAYS"),
         # At most ten years: the purge threshold stays far inside the timestamp range.
         ({"CODE_INDEX_TTL_DAYS": "3651"}, "CODE_INDEX_TTL_DAYS"),
+        (
+            {"CODE_INDEX_RECONCILE_INTERVAL_SECONDS": "86401"},
+            "CODE_INDEX_RECONCILE_INTERVAL_SECONDS",
+        ),
+        ({"CODE_INDEX_RECONCILE_BATCH": "501"}, "CODE_INDEX_RECONCILE_BATCH"),
     ],
     ids=[
         "not-a-number",
@@ -204,6 +220,8 @@ def test_an_empty_variable_keeps_the_default() -> None:
         "ttl-interval-over-a-day",
         "ttl-zero",
         "ttl-over-ten-years",
+        "reconcile-interval-over-a-day",
+        "reconcile-batch-over-500",
     ],
 )
 def test_an_invalid_value_fails_the_start(env: dict[str, str], variable: str) -> None:
@@ -217,10 +235,13 @@ def test_the_bounds_admit_their_edges() -> None:
             "CODE_INDEX_DEADLINE_SECONDS": "1500",
             "CODE_INDEX_LEASE_SECONDS": "1560",
             "CODE_INDEX_SOFT_CUTOFF_SECONDS": "1499",
+            "CODE_INDEX_RECONCILE_INTERVAL_SECONDS": "86400",
+            "CODE_INDEX_RECONCILE_BATCH": "500",
         }
     )
 
     assert (settings.limits.deadline_seconds, settings.build.lease_seconds) == (1500, 1560)
+    assert (settings.reconcile_interval_seconds, settings.reconcile_batch) == (86_400, 500)
     assert settings.build.soft_cutoff_seconds == 1499
     assert CodeIndexSettings.from_environment({"CODE_INDEX_LEASE_SECONDS": "86400"}).build == (
         IndexBuildSettings(admission=CodeIndexSettings().build.admission, lease_seconds=86_400)
@@ -337,6 +358,28 @@ def test_each_job_exchanges_its_own_installation_token() -> None:
 
     assert github.exchanges == 2
     assert github.authorizations == ["Bearer t1"] * 4 + ["Bearer t2"] * 2
+
+
+def test_the_sources_of_one_token_cache_share_its_installation_token() -> None:
+    github = GitHub()
+
+    async def one_reconcile_run() -> None:
+        transport = httpx.MockTransport(github)
+        async with httpx.AsyncClient(base_url="https://api.github.test", transport=transport) as c:
+            # The head reconcile of one leader run: one cache for all its repositories.
+            sources = snapshot_sources(
+                c,
+                app_id="1",
+                private_key=_PEM,
+                cache=InMemoryInstallationAccessTokenCache(now=time.time),
+            )
+            await sources(_REPOSITORY).head()
+            await sources(dataclasses.replace(_REPOSITORY, repository_id=uuid4())).head()
+
+    asyncio.run(one_reconcile_run())
+
+    assert github.exchanges == 1
+    assert github.authorizations == ["Bearer t1"] * 4
 
 
 def test_a_repository_of_another_provider_has_no_snapshot_source() -> None:

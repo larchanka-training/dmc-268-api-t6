@@ -11,7 +11,8 @@
 - Every job builds its own installation token provider and cache, so an attempt never
   reuses the token of the attempt before it: a retry after a 401 exchanges a fresh one.
   A shared token cache (the Redis one of #148) would need an invalidation on a 401
-  first.
+  first. The head reconcile passes one cache per leader run, so its reads of many
+  repositories of one installation exchange one token (#143).
 """
 
 from __future__ import annotations
@@ -71,6 +72,7 @@ from app.modules.code_index.infrastructure.tar_archive import TarArchiveReader
 from app.modules.integrations.webhooks.infrastructure.github_installation_tree_provider import (
     GitHubAppInstallationAccessTokenProvider,
     InMemoryInstallationAccessTokenCache,
+    InstallationAccessTokenCache,
 )
 from app.modules.reviews.application.ast_symbols import AstLanguage
 from app.modules.reviews.application.run_failures import RetryDelays
@@ -96,6 +98,10 @@ MAX_TTL_INTERVAL_SECONDS = 86_400
 # At most ten years: `clock_timestamp() - interval` of the TTL purge stays far inside the
 # timestamp range.
 MAX_TTL_DAYS = 3_650
+# The leader reconciles every index with its head at least once a day.
+MAX_RECONCILE_INTERVAL_SECONDS = 86_400
+# One reconcile run reads at most this many heads, two GitHub requests each.
+MAX_RECONCILE_BATCH = 500
 # Far above any limit; it keeps `int()` off a pathological value.
 _MAX_DIGITS = 18
 
@@ -125,6 +131,8 @@ class CodeIndexSettings:
     ttl_interval_seconds: int = 3_600
     gc_interval_seconds: int = 300
     gc_batch_rows: int = 10_000
+    reconcile_interval_seconds: int = 600
+    reconcile_batch: int = 50
 
     def __post_init__(self) -> None:
         for name in _field_names():
@@ -157,6 +165,15 @@ class CodeIndexSettings:
             )
         if self.ttl_days > MAX_TTL_DAYS:
             raise ValueError(f"{_variable('ttl_days')} must be at most {MAX_TTL_DAYS}")
+        if self.reconcile_interval_seconds > MAX_RECONCILE_INTERVAL_SECONDS:
+            raise ValueError(
+                f"{_variable('reconcile_interval_seconds')} must be at most "
+                f"{MAX_RECONCILE_INTERVAL_SECONDS}"
+            )
+        if self.reconcile_batch > MAX_RECONCILE_BATCH:
+            raise ValueError(
+                f"{_variable('reconcile_batch')} must be at most {MAX_RECONCILE_BATCH}"
+            )
 
     @classmethod
     def from_environment(cls, env: Mapping[str, str]) -> CodeIndexSettings:
@@ -230,8 +247,13 @@ def snapshot_sources(
     app_id: str,
     private_key: str,
     now: Callable[[], float] = time.time,
+    cache: InstallationAccessTokenCache | None = None,
 ) -> Callable[[IndexedRepository], RepositorySnapshotSource]:
-    """The VCS port of one job; GitHub only (GitLab is #97)."""
+    """The VCS port of one job; GitHub only (GitLab is #97).
+
+    With `cache`, every source shares it: one head reconcile run. Without it, each
+    source gets a cache of its own.
+    """
 
     def source(repository: IndexedRepository) -> RepositorySnapshotSource:
         if repository.provider != "github":
@@ -242,7 +264,7 @@ def snapshot_sources(
             client=client,
             app_id=app_id,
             private_key=private_key,
-            cache=InMemoryInstallationAccessTokenCache(now=now),
+            cache=InMemoryInstallationAccessTokenCache(now=now) if cache is None else cache,
             now=now,
         )
         return GitHubRepositorySnapshotSource(

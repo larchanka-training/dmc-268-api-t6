@@ -12,12 +12,15 @@ The worker leader runs them from `leader_tick`, after the sweep and the outbox r
   enabled before the triggers), and purges a live index whose RAG is off;
 - `DispatchIndexWakeups` wakes the job of every marked state row after the trigger's
   commit and clears the marker it read: the wake-up outbox (#143);
+- `ReconcileIndexHeads` compares each live index with the head of its default branch and
+  requests a build when it drifted: a direct push, a changed default branch, a missing
+  publication or outdated versions (ADR §6.1, leader reconcile row);
 - `CodeIndexLeaderTasks` gives each task a gate on a monotonic clock and all of them
   one deadline per tick, so tasks whose gates open together never hold up the sweep and
   the replay of the next tick for long.
 
-Every store call is a short transaction of its own; a wake-up is published outside any
-transaction.
+Every store call is a short transaction of its own; a wake-up and a head read run
+outside any transaction.
 """
 
 from __future__ import annotations
@@ -32,8 +35,14 @@ from datetime import timedelta
 from typing import Protocol
 from uuid import UUID
 
+from app.modules.code_index.application.build_index import IndexVersions
 from app.modules.code_index.application.maintenance import CodeIndexMaintenanceUnitOfWork
-from app.modules.code_index.application.ports import IndexWakeups
+from app.modules.code_index.application.ports import IndexedRepository, IndexWakeups
+from app.modules.code_index.application.vcs import (
+    RepositorySnapshotSource,
+    VcsAccessDenied,
+    VcsUnavailable,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -44,6 +53,9 @@ TICK_BUDGET_SECONDS = 10.0
 TASK_TIMEOUT_MARGIN_SECONDS = 5.0
 # Candidate repositories one enumeration call lists.
 CANDIDATE_PAGE = 100
+# The reconcile starts no head read with less of its budget left: a read is two GitHub
+# requests.
+HEAD_READ_RESERVE_SECONDS = 2.0
 
 
 class LeaderTask(Protocol):
@@ -273,6 +285,128 @@ class DispatchIndexWakeups:
         finally:
             if woken:
                 _LOGGER.info("Woke %d code index jobs", woken)
+
+
+class ReconcileIndexHeads:
+    """The leader reconcile with the default-branch head (ADR §6.1).
+
+    A run reads up to `batch` candidates of `heads` after an in-memory cursor. Per
+    candidate: `head()` outside any transaction, then `reconcile_head` in a transaction
+    of its own, which rewrites the target to the live head and sets the wake-up marker
+    on a drift; the listing time is its read time, so a trigger after the listing keeps
+    its target. No candidate starts with less than `HEAD_READ_RESERVE_SECONDS` of the
+    budget left. A full batch, or a run the deadline cut off, leaves work: the gate stays
+    open and the next tick resumes after the last candidate. Past the last candidate the
+    cursor goes back to the first and the gate waits its interval. The cursor moves past
+    a candidate before its head read, so one that raises or times out is tried again on
+    the next pass, not first in every run; its `Exception` is logged and the run goes
+    on, a cancellation propagates.
+
+    `sources()` is called once per run, so the sources of a run share one token cache.
+    A rate-limited `VcsUnavailable` skips the rest of that installation's candidates in
+    this run, and in later runs until its `retry_after`. Another `VcsUnavailable`,
+    `VcsAccessDenied` or an empty repository (no head) skips the candidate with no
+    write.
+    """
+
+    def __init__(
+        self,
+        *,
+        uow: Callable[[], CodeIndexMaintenanceUnitOfWork],
+        sources: Callable[[], Callable[[IndexedRepository], RepositorySnapshotSource]],
+        versions: IndexVersions,
+        batch: int,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self._uow = uow
+        self._sources = sources
+        self._versions = versions
+        self._batch = batch
+        self._clock = clock
+        self._after: UUID | None = None
+        # Installation external id → the monotonic time its rate limit ends.
+        self._paused: dict[int, float] = {}
+
+    async def run(self, budget_seconds: float) -> bool:
+        deadline = self._clock() + budget_seconds
+        if budget_seconds < HEAD_READ_RESERVE_SECONDS:
+            return True
+        source = self._sources()
+        limited: set[int] = set()
+        reconciled = marked = 0
+        try:
+            async with self._uow() as uow:
+                candidates = await uow.maintenance.heads(self._after, self._batch)
+            for candidate in candidates:
+                if deadline - self._clock() < HEAD_READ_RESERVE_SECONDS:
+                    return True
+                repository = candidate.repository
+                self._after = repository.repository_id
+                installation = repository.installation_external_id
+                if installation in limited or self._is_paused(installation):
+                    continue
+                # CONTRACT: `Exception` only, so a cancellation still stops the run.
+                try:
+                    head = await source(repository).head()
+                    if head is None:
+                        continue
+                    async with self._uow() as uow:
+                        drifted = await uow.index.reconcile_head(
+                            repository.repository_id,
+                            generation=candidate.generation,
+                            branch=head.branch,
+                            commit_sha=head.commit_sha,
+                            read_at=candidate.listed_at,
+                            versions_current=self._versions.built,
+                        )
+                        await uow.commit()
+                except VcsUnavailable as error:
+                    if error.rate_limited:
+                        limited.add(installation)
+                        if error.retry_after is not None:
+                            self._paused[installation] = (
+                                self._clock() + error.retry_after.total_seconds()
+                            )
+                    self._skipped(repository, error.code)
+                except VcsAccessDenied as error:
+                    self._skipped(repository, error.code)
+                except Exception:
+                    # SD §13: the internal id only, no customer data.
+                    _LOGGER.exception(
+                        "Failed to reconcile the code index of %s with its head",
+                        repository.repository_id,
+                    )
+                else:
+                    reconciled += 1
+                    if drifted:
+                        marked += 1
+            if len(candidates) < self._batch:
+                self._after = None
+                return False
+            return True
+        finally:
+            if reconciled:
+                _LOGGER.info(
+                    "Reconciled %d code indexes with their heads; %d need a build",
+                    reconciled,
+                    marked,
+                )
+
+    def _is_paused(self, installation: int) -> bool:
+        until = self._paused.get(installation)
+        if until is None:
+            return False
+        if until > self._clock():
+            return True
+        del self._paused[installation]
+        return False
+
+    @staticmethod
+    def _skipped(repository: IndexedRepository, code: str) -> None:
+        # SD §13: internal ids and the error code only, no customer data.
+        _LOGGER.warning(
+            "Skipped the head reconcile of repository %s: %s", repository.repository_id, code
+        )
 
 
 @dataclass(frozen=True)
