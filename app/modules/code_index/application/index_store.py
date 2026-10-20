@@ -7,7 +7,7 @@ ADR §6.2 that each method implements.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from enum import StrEnum
@@ -206,7 +206,11 @@ class CodeIndexStore(Protocol):
     async def get_state(self, repository_id: UUID) -> IndexState | None: ...
 
     async def enable(self, repository_id: UUID) -> IndexState:
-        """T1': create the state row, or re-arm a purged one with a new generation."""
+        """T1': create the state row, or re-arm a purged one with a new generation.
+
+        Creation and re-arm request a build through the wake-up marker; a live or a
+        `failed` index stays as it is.
+        """
         ...
 
     async def purge(self, repository_id: UUID, reason: PurgeReason) -> None:
@@ -224,6 +228,47 @@ class CodeIndexStore(Protocol):
         purge reason, not `failed`) whose `last_used_at` is older than `unused_for`. A
         `failed` index stays: a TTL purge would turn it into `empty` and reopen the
         repeated full build that ADR §7 forbids. Returns whether it purged.
+        """
+        ...
+
+    async def request_build(self, repository_id: UUID, *, target_commit_sha: str | None) -> bool:
+        """A trigger of ADR §6.1: request a build of a live index up to its target.
+
+        Under FOR UPDATE, only for a row without a purge reason that is not `failed`:
+        writes `target_commit_sha` when given and always sets a fresh wake-up marker, so
+        the leader's compare-and-set clear of an older marker misses. Returns whether
+        it requested; a missing, purged or `failed` row is left alone.
+        """
+        ...
+
+    async def reconcile_head(
+        self,
+        repository_id: UUID,
+        *,
+        generation: int,
+        branch: str,
+        commit_sha: str,
+        read_at: datetime,
+        versions_current: Callable[[IndexProfile], bool],
+    ) -> bool:
+        """The leader reconcile of ADR §6.1 with the live default-branch head.
+
+        Under FOR UPDATE; a missing row, another generation, a purged or a `failed` row
+        is left alone, and so is a row whose wake-up marker is later than `read_at`, a
+        database time taken before the head was read: a trigger after the read wrote
+        its own target, which a stale head must not overwrite. Otherwise the target
+        becomes `commit_sha`, which clears a target a late delivery left behind, and the
+        wake-up marker is set when the publication differs from (`branch`,
+        `commit_sha`), when there is none, or when `versions_current` rejects the
+        profile of the locked row. Returns whether it set the marker.
+        """
+        ...
+
+    async def clear_wake_request(self, repository_id: UUID, requested_at: datetime) -> bool:
+        """Clear the wake-up marker if it is still the one read at `requested_at`.
+
+        A compare-and-set: a request made after the read keeps its marker for the next
+        dispatch. Returns whether it cleared.
         """
         ...
 

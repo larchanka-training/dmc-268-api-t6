@@ -13,7 +13,7 @@ from collections.abc import Awaitable, Callable, Iterator, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from enum import StrEnum
-from typing import Any
+from typing import Any, cast
 from uuid import UUID, uuid4
 
 import pytest
@@ -1675,7 +1675,8 @@ def test_claim_takes_a_free_or_expired_lease_of_the_current_generation_only(
         await _execute(
             index,
             "UPDATE code_index_states SET status = 'failed', error_code = 'archive_unsafe', "
-            "lease_token = NULL, lease_expires_at = NULL WHERE repository_id = :repository",
+            "lease_token = NULL, lease_expires_at = NULL, wake_requested_at = NULL "
+            "WHERE repository_id = :repository",
             index.a,
         )
         failed = await _state(index, index.a)
@@ -3395,5 +3396,310 @@ def test_incremental_reads_page_through_the_visible_files_and_imports(index: _In
             assert await uow.index.iter_files(index.a, None, 10) == []
             assert await uow.index.iter_imports(index.a, None, 10) == []
             assert await uow.index.visible_counts(index.a, ["a.py", "b.py"]) == IndexCounts(0, 0, 0)
+
+    asyncio.run(scenario())
+
+
+# The wake-up marker (#143): triggers request a build, the leader clears it with a CAS.
+
+
+async def _marker(index: _Index, repository_id: UUID) -> datetime | None:
+    [(marker,)] = await _rows(
+        index,
+        "SELECT wake_requested_at FROM code_index_states WHERE repository_id = :repository",
+        repository=repository_id,
+    )
+    return cast(datetime | None, marker)
+
+
+async def _request_build(index: _Index, repository_id: UUID, target: str | None) -> bool:
+    async with index.uow() as uow:
+        requested = await uow.index.request_build(repository_id, target_commit_sha=target)
+        await uow.commit()
+    return requested
+
+
+async def _reconcile(
+    index: _Index,
+    repository_id: UUID,
+    *,
+    generation: int = 1,
+    branch: str = "main",
+    commit: str = C1,
+    read_at: datetime | None = None,
+    versions_current: Callable[[IndexProfile], bool] = lambda profile: True,
+) -> bool:
+    """`reconcile_head` with a head read just now, unless `read_at` is given."""
+    if read_at is None:
+        [(read_at,)] = await _rows(index, "SELECT clock_timestamp()")
+    async with index.uow() as uow:
+        marked = await uow.index.reconcile_head(
+            repository_id,
+            generation=generation,
+            branch=branch,
+            commit_sha=commit,
+            read_at=read_at,
+            versions_current=versions_current,
+        )
+        await uow.commit()
+    return marked
+
+
+async def _clear_wake(index: _Index, repository_id: UUID, requested_at: datetime) -> bool:
+    async with index.uow() as uow:
+        cleared = await uow.index.clear_wake_request(repository_id, requested_at)
+        await uow.commit()
+    return cleared
+
+
+async def _unmark(index: _Index, repository_id: UUID) -> None:
+    marker = await _marker(index, repository_id)
+    assert marker is not None
+    assert await _clear_wake(index, repository_id, marker)
+
+
+@pytest.mark.integration
+def test_enable_sets_the_marker_on_creation_and_re_arm_but_not_on_a_live_or_failed_index(
+    index: _Index,
+) -> None:
+    async def scenario() -> None:
+        await _enable(index, index.a)
+        created = await _marker(index, index.a)
+        assert created is not None
+        await _unmark(index, index.a)
+        # A repeated enable of a live index is a no-op: no marker.
+        await _enable(index, index.a)
+        assert await _marker(index, index.a) is None
+
+        for reason in (PurgeReason.DISABLED, PurgeReason.REMOVED, PurgeReason.TTL):
+            await _purge(index, index.a, reason)
+            assert await _marker(index, index.a) is None
+            await _enable(index, index.a)
+            rearmed = await _marker(index, index.a)
+            assert rearmed is not None and rearmed > created
+            await _unmark(index, index.a)
+
+        # Three purges and three re-arms after creation: generation 7.
+        fence = await _claim(index, index.a, 7)
+        await _mark_failed(index, index.a, fence, "archive_unsafe")
+        await _enable(index, index.a)
+        state = await _state(index, index.a)
+        assert state is not None and (state.generation, state.status) == (7, "failed")
+        assert await _marker(index, index.a) is None
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.integration
+def test_purge_mark_failed_and_a_quota_claim_clear_the_marker(index: _Index) -> None:
+    async def scenario() -> None:
+        await _enable(index, index.a)
+        assert await _marker(index, index.a) is not None
+        await _purge(index, index.a)
+        assert await _marker(index, index.a) is None
+
+        await _enable(index, index.b)
+        fence = await _claim(index, index.b)
+        assert await _request_build(index, index.b, C2)
+        await _mark_failed(index, index.b, fence, "limit_exceeded:edges")
+        assert await _marker(index, index.b) is None
+
+        # Purged at generation 2 and re-armed at 3, A publishes and then exceeds its quota.
+        await _enable(index, index.a)
+        fence = await _claim(index, index.a, 3)
+        await _write(index, index.a, fence, _module("aa01", 1))
+        assert await _publish(index, index.a, fence, C1)
+        assert await _request_build(index, index.a, C2)
+        over_quota = dataclasses.replace(_ADMISSION, repository_storage_bytes=1)
+        # Without the clear the CHECK would refuse the `failed` row the claim writes.
+        assert await _try_claim(index, index.a, 3, over_quota) == ClaimRefused(
+            ClaimRefusal.QUOTA, "limit_exceeded:repository_storage"
+        )
+        state = await _state(index, index.a)
+        assert state is not None and (state.status, state.target_commit_sha) == ("failed", C2)
+        assert await _marker(index, index.a) is None
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.integration
+def test_request_build_writes_the_target_and_always_refreshes_the_marker(index: _Index) -> None:
+    async def scenario() -> None:
+        # No state row: nothing to request.
+        assert not await _request_build(index, index.a, C1)
+        assert await _rows(index, "SELECT count(*) FROM code_index_states") == [(0,)]
+
+        await _enable(index, index.a)
+        first = await _marker(index, index.a)
+        assert await _request_build(index, index.a, C2)
+        second = await _marker(index, index.a)
+        assert first is not None and second is not None and second > first
+        state = await _state(index, index.a)
+        assert state is not None and state.target_commit_sha == C2
+        # Without a target only the marker moves; the target stays.
+        assert await _request_build(index, index.a, None)
+        third = await _marker(index, index.a)
+        assert third is not None and third > second
+        state = await _state(index, index.a)
+        assert state is not None and state.target_commit_sha == C2
+
+        await _purge(index, index.a)
+        assert not await _request_build(index, index.a, C3)
+        purged = await _state(index, index.a)
+        assert purged is not None and purged.target_commit_sha is None
+        assert await _marker(index, index.a) is None
+
+        await _enable(index, index.b)
+        fence = await _claim(index, index.b)
+        await _mark_failed(index, index.b, fence, "archive_unsafe")
+        assert not await _request_build(index, index.b, C3)
+        failed = await _state(index, index.b)
+        assert failed is not None and failed.target_commit_sha is None
+        assert await _marker(index, index.b) is None
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize(
+    ("head", "marked"),
+    [
+        pytest.param({}, False, id="equal"),
+        pytest.param({"commit": C2}, True, id="sha-changed"),
+        pytest.param({"branch": "develop"}, True, id="branch-changed"),
+        pytest.param({"versions_current": lambda profile: False}, True, id="versions-outdated"),
+    ],
+)
+def test_reconcile_head_rewrites_the_target_and_marks_a_drifted_index(
+    index: _Index, head: dict[str, Any], marked: bool
+) -> None:
+    async def scenario() -> None:
+        await _enable(index, index.a)
+        await _build(index, index.a, C1, _module("aa01", 1))
+        # A late delivery left an older target behind (ADR §6.2, reverse order).
+        assert await _request_build(index, index.a, C3)
+        await _unmark(index, index.a)
+
+        assert await _reconcile(index, index.a, **head) is marked
+        state = await _state(index, index.a)
+        assert state is not None
+        assert (state.target_commit_sha, state.indexed_commit_sha) == (head.get("commit", C1), C1)
+        assert (await _marker(index, index.a) is not None) is marked
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.integration
+def test_reconcile_head_keeps_the_target_of_a_trigger_after_its_head_read(index: _Index) -> None:
+    async def scenario() -> None:
+        await _enable(index, index.a)
+        await _build(index, index.a, C1, _module("aa01", 1))
+        await _unmark(index, index.a)
+        [(read_at,)] = await _rows(index, "SELECT clock_timestamp()")
+        # A push lands after the reconcile read the head C2 and before its write.
+        assert await _request_build(index, index.a, C3)
+        pushed = await _marker(index, index.a)
+
+        skipped = await _reconcile(index, index.a, commit=C2, read_at=read_at)
+        kept = await _state(index, index.a)
+        kept_marker = await _marker(index, index.a)
+        # A marker set before the head read is no newer trigger: the read head wins.
+        rewritten = await _reconcile(index, index.a, commit=C2)
+        state = await _state(index, index.a)
+        marker = await _marker(index, index.a)
+
+        assert not skipped
+        assert kept is not None and kept.target_commit_sha == C3
+        assert kept_marker == pushed
+        assert rewritten
+        assert state is not None and state.target_commit_sha == C2
+        assert marker is not None and pushed is not None and marker > pushed
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.integration
+def test_reconcile_head_judges_the_versions_of_the_locked_row(index: _Index) -> None:
+    async def scenario() -> None:
+        await _enable(index, index.a)
+        await _build(index, index.a, C1, _module("aa01", 1))
+        await _unmark(index, index.a)
+        profiles: list[IndexProfile] = []
+
+        def current(profile: IndexProfile) -> bool:
+            profiles.append(profile)
+            return True
+
+        assert not await _reconcile(index, index.a, versions_current=current)
+        assert profiles == [_PROFILE]
+        assert await _marker(index, index.a) is None
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.integration
+def test_reconcile_head_marks_an_index_without_a_publication(index: _Index) -> None:
+    async def scenario() -> None:
+        await _enable(index, index.a)
+        await _unmark(index, index.a)
+        assert await _reconcile(index, index.a)
+        state = await _state(index, index.a)
+        assert state is not None
+        assert (state.status, state.indexed_commit_sha, state.target_commit_sha) == (
+            "empty",
+            None,
+            C1,
+        )
+        assert await _marker(index, index.a) is not None
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.integration
+def test_reconcile_head_leaves_another_generation_a_purged_and_a_failed_index_alone(
+    index: _Index,
+) -> None:
+    async def scenario() -> None:
+        assert not await _reconcile(index, index.a)
+        await _enable(index, index.a)
+        await _unmark(index, index.a)
+        assert not await _reconcile(index, index.a, generation=2, commit=C2)
+        state = await _state(index, index.a)
+        assert state is not None and state.target_commit_sha is None
+        assert await _marker(index, index.a) is None
+
+        await _purge(index, index.a)
+        assert not await _reconcile(index, index.a, generation=2, commit=C2)
+        purged = await _state(index, index.a)
+        assert purged is not None and purged.target_commit_sha is None
+
+        await _enable(index, index.b)
+        fence = await _claim(index, index.b)
+        await _mark_failed(index, index.b, fence, "archive_unsafe")
+        assert not await _reconcile(index, index.b, commit=C2)
+        failed = await _state(index, index.b)
+        assert failed is not None and failed.target_commit_sha is None
+        assert await _marker(index, index.b) is None
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.integration
+def test_clear_wake_request_clears_only_the_marker_it_read(index: _Index) -> None:
+    async def scenario() -> None:
+        await _enable(index, index.a)
+        read = await _marker(index, index.a)
+        assert read is not None
+        # A trigger after the read sets a newer marker: the CAS misses and it stays.
+        assert await _request_build(index, index.a, C2)
+        newer = await _marker(index, index.a)
+        assert not await _clear_wake(index, index.a, read)
+        assert await _marker(index, index.a) == newer
+        assert newer is not None and await _clear_wake(index, index.a, newer)
+        assert await _marker(index, index.a) is None
+        # Nothing left to clear; another repository's marker is untouched.
+        await _enable(index, index.b)
+        assert not await _clear_wake(index, index.a, newer)
+        assert await _marker(index, index.b) is not None
 
     asyncio.run(scenario())

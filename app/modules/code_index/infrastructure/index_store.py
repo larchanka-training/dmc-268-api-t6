@@ -117,6 +117,8 @@ def _failure(error_code: str) -> dict[str, Any]:
     return {
         "status": IndexStatus.FAILED,
         "error_code": error_code,
+        # A `failed` index is not rebuilt (ADR §7), so it waits for no wake-up.
+        "wake_requested_at": None,
         "lease_token": None,
         "lease_expires_at": None,
         "pending_bytes": 0,
@@ -483,7 +485,12 @@ class SqlAlchemyCodeIndexStore:
     async def enable(self, repository_id: UUID) -> IndexState:
         created = await self._session.scalar(
             pg_insert(CodeIndexState)
-            .values(repository_id=repository_id, generation=1, last_used_at=func.now())
+            .values(
+                repository_id=repository_id,
+                generation=1,
+                last_used_at=func.now(),
+                wake_requested_at=func.clock_timestamp(),
+            )
             .on_conflict_do_nothing(index_elements=[CodeIndexState.repository_id])
             .returning(CodeIndexState.repository_id)
         )
@@ -499,6 +506,7 @@ class SqlAlchemyCodeIndexStore:
                 purge_reason=None,
                 status=IndexStatus.EMPTY,
                 last_used_at=func.now(),
+                wake_requested_at=func.clock_timestamp(),
             )
             state = await self._state(repository_id)
         return _to_state(cast(CodeIndexState, state))
@@ -525,6 +533,7 @@ class SqlAlchemyCodeIndexStore:
             floor_publication=0,
             lease_token=None,
             lease_expires_at=None,
+            wake_requested_at=None,
             indexed_commit_sha=None,
             target_commit_sha=None,
             published_at=None,
@@ -560,6 +569,66 @@ class SqlAlchemyCodeIndexStore:
             return False
         await self.purge(repository_id, PurgeReason.TTL)
         return True
+
+    async def request_build(self, repository_id: UUID, *, target_commit_sha: str | None) -> bool:
+        state = await self._state(repository_id, lock=True)
+        if state is None or state.purge_reason is not None or state.status == IndexStatus.FAILED:
+            return False
+        values: dict[str, Any] = {"wake_requested_at": func.clock_timestamp()}
+        if target_commit_sha is not None:
+            values["target_commit_sha"] = target_commit_sha
+        await self._update_state(repository_id, **values)
+        return True
+
+    async def reconcile_head(
+        self,
+        repository_id: UUID,
+        *,
+        generation: int,
+        branch: str,
+        commit_sha: str,
+        read_at: datetime,
+        versions_current: Callable[[IndexProfile], bool],
+    ) -> bool:
+        state = await self._state(repository_id, lock=True)
+        if (
+            state is None
+            or state.generation != generation
+            or state.purge_reason is not None
+            or state.status == IndexStatus.FAILED
+            # A trigger after the head read: its target is at least as new.
+            or (state.wake_requested_at is not None and state.wake_requested_at > read_at)
+        ):
+            return False
+        # A NULL indexed commit or branch never equals the live head. The versions are
+        # those of the locked row, not of the listing the head read followed.
+        profile = _to_state(state).profile
+        drifted = (
+            state.indexed_commit_sha != commit_sha
+            or state.indexed_default_branch != branch
+            or profile is None
+            or not versions_current(profile)
+        )
+        values: dict[str, Any] = {"target_commit_sha": commit_sha}
+        if drifted:
+            values["wake_requested_at"] = func.clock_timestamp()
+        await self._update_state(repository_id, **values)
+        return drifted
+
+    async def clear_wake_request(self, repository_id: UUID, requested_at: datetime) -> bool:
+        result = cast(
+            CursorResult[Any],
+            await self._session.execute(
+                sa_update(CodeIndexState)
+                .where(
+                    CodeIndexState.repository_id == repository_id,
+                    CodeIndexState.wake_requested_at == requested_at,
+                )
+                .values(wake_requested_at=None)
+                .execution_options(synchronize_session=False)
+            ),
+        )
+        return result.rowcount == 1
 
     async def claim_lease(
         self, repository_id: UUID, generation: int, lease_seconds: int, admission: IndexAdmission
