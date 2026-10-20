@@ -9,7 +9,9 @@ the GC leader task revokes a crashed attempt's lease and deletes its rows.
 The wake-up and converge listings: `wake_requests` lists marked rows without a live
 lease, oldest marker first; `heads` lists the reconcile candidates of enabled, available
 GitHub repositories; `to_rearm` lists the repositories whose index is missing or purged by
-a removal or a toggle; `to_disarm` lists the live indexes whose RAG is off.
+a removal or a toggle; `to_disarm` lists the live indexes whose RAG is off. The converge
+pass re-checks each candidate under a share lock of its repository row, so a re-arm never
+resurrects an index a concurrent toggle turned off, and its purges leave GC no row to keep.
 
 Opt-in: TEST_DATABASE_URL must target a test database whose user can create schemas.
 Each test migrates its own schema to head and drops it afterwards.
@@ -33,7 +35,10 @@ from sqlalchemy.schema import CreateSchema, DropSchema
 
 from alembic import command
 from app.modules.code_index.application.index_store import IndexedFile
-from app.modules.code_index.application.leader_tasks import CollectIndexGarbage
+from app.modules.code_index.application.leader_tasks import (
+    CollectIndexGarbage,
+    ConvergeIndexes,
+)
 from app.modules.code_index.application.maintenance import (
     DisarmCandidate,
     HeadCandidate,
@@ -41,6 +46,7 @@ from app.modules.code_index.application.maintenance import (
 )
 from app.modules.code_index.application.ports import IndexedRepository
 from app.modules.code_index.domain.enums import PurgeReason
+from app.modules.code_index.infrastructure.index_store import SqlAlchemyCodeIndexStore
 from app.modules.code_index.infrastructure.maintenance import (
     SqlAlchemyCodeIndexMaintenanceUnitOfWork,
 )
@@ -67,6 +73,7 @@ from tests.test_code_index_store_postgres import (
     _rows,
     _state,
     _unused_for_31_days,
+    _wait_until_blocked,
     _write,
 )
 
@@ -501,5 +508,97 @@ def test_to_disarm_lists_live_indexes_whose_rag_is_off_with_the_purge_reason(
             DisarmCandidate(failed, PurgeReason.REMOVED),
         ]
         assert await _to_disarm(index, limit=1) == [DisarmCandidate(rag_off, PurgeReason.DISABLED)]
+
+    asyncio.run(scenario())
+
+
+def _converge(index: _Index) -> ConvergeIndexes:
+    return ConvergeIndexes(uow=partial(SqlAlchemyCodeIndexMaintenanceUnitOfWork, index.factory))
+
+
+async def _state_row(index: _Index, repository_id: UUID) -> tuple[object, ...]:
+    [row] = await _rows(
+        index,
+        "SELECT generation, status::text, purge_reason::text, wake_requested_at IS NOT NULL "
+        "FROM code_index_states WHERE repository_id = :repository",
+        repository=repository_id,
+    )
+    return row
+
+
+@pytest.mark.integration
+def test_a_rearm_waits_for_a_toggle_off_and_does_not_resurrect_the_index(fleet: _Fleet) -> None:
+    async def scenario() -> None:
+        index = fleet.index
+        [repository] = await _github_repositories(index, 601)
+        repository_id = repository.repository_id
+        await _enable(index, repository_id)
+        await _purge(index, repository_id, PurgeReason.REMOVED)
+        assert await _to_rearm(index) == [repository_id]
+
+        # PATCH `ragEnabled=false` in flight: the flag and the purge in one transaction.
+        async with index.factory() as toggle:
+            await toggle.execute(text(_RAG_OFF), {"repository": repository_id})
+            await SqlAlchemyCodeIndexStore(toggle).purge(repository_id, PurgeReason.DISABLED)
+            toggle_pid = await toggle.scalar(text("SELECT pg_backend_pid()"))
+            run = asyncio.create_task(_converge(index).run(10.0))
+            await _wait_until_blocked(index, toggle_pid, 1, run)
+            await toggle.commit()
+        assert await run is False
+
+        # The re-check read the committed toggle: no re-arm, no marker.
+        assert await _state_row(index, repository_id) == (2, "empty", "removed", False)
+        assert await _to_rearm(index) == []
+
+        await _execute(
+            index,
+            "UPDATE repositories SET rag_enabled = true WHERE id = :repository",
+            repository_id,
+        )
+        assert await _converge(index).run(10.0) is False
+        assert await _state_row(index, repository_id) == (3, "empty", None, True)
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.integration
+def test_converge_purges_live_indexes_whose_rag_is_off_and_gc_leaves_no_rows(
+    fleet: _Fleet,
+) -> None:
+    async def scenario() -> None:
+        index = fleet.index
+        repositories = await _github_repositories(index, *range(701, 705))
+        rag_off, unavailable, deleted, enabled = (
+            repository.repository_id for repository in repositories
+        )
+        for number, repository_id in enumerate((rag_off, unavailable, deleted, enabled)):
+            await _enable(index, repository_id)
+            await _build(
+                index, repository_id, C1, _module(f"a{number}01", 1), _importer(f"b{number}01", 1)
+            )
+        await _execute(index, _RAG_OFF, rag_off)
+        await _execute(index, _UNAVAILABLE, unavailable)
+        await _execute(index, _DELETED, deleted)
+
+        assert await _converge(index).run(10.0) is False
+        assert [
+            await _state_row(index, repository_id)
+            for repository_id in (rag_off, unavailable, deleted, enabled)
+        ] == [
+            (2, "empty", "disabled", False),
+            (2, "empty", "removed", False),
+            (2, "empty", "removed", False),
+            (1, "ready", None, True),
+        ]
+        assert (
+            await CollectIndexGarbage(
+                uow=partial(SqlAlchemyCodeIndexMaintenanceUnitOfWork, index.factory), batch_rows=100
+            ).run(10.0)
+            is False
+        )
+        assert [
+            await _rows(index, _COUNT_ROWS, repository=repository_id)
+            for repository_id in (rag_off, unavailable, deleted, enabled)
+        ] == [[(0, 0, 0, 0)], [(0, 0, 0, 0)], [(0, 0, 0, 0)], [(2, 2, 2, 2)]]
 
     asyncio.run(scenario())
