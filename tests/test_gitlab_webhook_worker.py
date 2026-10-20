@@ -1266,7 +1266,9 @@ def test_public_worker_owns_redis_before_http_startup_and_preserves_primary(
 
         redis = Resource("redis")
         resources = SimpleNamespace(
-            aclose=Resource("database").aclose, github_webhook_receipts=object()
+            aclose=Resource("database").aclose,
+            github_webhook_receipts=object(),
+            rules_status_refresher=lambda **kwargs: object(),
         )
         monkeypatch.setattr(webhook_worker, "os", SimpleNamespace(environ=environment))
         monkeypatch.setattr(
