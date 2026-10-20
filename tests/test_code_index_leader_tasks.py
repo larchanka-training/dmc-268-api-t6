@@ -4,13 +4,16 @@ Gates on a fake monotonic clock, isolation of a failing or hanging task, the sha
 deadline, garbage collection running on consecutive ticks until drained, its round-robin
 cursor, and one short transaction per store call. The converge pass re-arms and disarms
 after a re-check, one transaction per candidate; the dispatch wakes outside any
-transaction and then clears the marker it read.
+transaction and then clears the marker it read. The reconcile reads each head outside
+any transaction with one token cache per run, skips a rate-limited installation and a
+repository it cannot read, and resumes its cursor batch by batch.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from types import TracebackType
@@ -20,19 +23,30 @@ from uuid import UUID
 import pytest
 
 import app.modules.code_index.application.leader_tasks as leader_tasks
-from app.modules.code_index.application.index_store import CodeIndexStore
+from app.bootstrap.code_index_worker import CodeIndexSettings
+from app.modules.code_index.application.build_index import IndexVersions
+from app.modules.code_index.application.index_store import CodeIndexStore, IndexProfile
 from app.modules.code_index.application.leader_tasks import (
     CodeIndexLeaderTasks,
     CollectIndexGarbage,
     ConvergeIndexes,
     DispatchIndexWakeups,
     PurgeUnusedIndexes,
+    ReconcileIndexHeads,
     ScheduledTask,
 )
 from app.modules.code_index.application.maintenance import (
     CodeIndexMaintenance,
     DisarmCandidate,
+    HeadCandidate,
     WakeRequest,
+)
+from app.modules.code_index.application.ports import IndexedRepository
+from app.modules.code_index.application.vcs import (
+    BranchHead,
+    RepositorySnapshotSource,
+    VcsAccessDenied,
+    VcsUnavailable,
 )
 from app.modules.code_index.domain.enums import PurgeReason
 
@@ -86,6 +100,12 @@ class Index:
     disarm: dict[UUID, PurgeReason | None] = field(default_factory=dict)
     # Marked rows: the generation and the marker.
     marked: dict[UUID, tuple[int, datetime]] = field(default_factory=dict)
+    # Reconcile candidates in `repository_id` order.
+    candidates: list[HeadCandidate] = field(default_factory=list)
+    # The profile of each locked row the reconcile reads; `_BUILT` when absent.
+    profiles: dict[UUID, IndexProfile | None] = field(default_factory=dict)
+    # The read time each `reconcile_head` received.
+    read_at: dict[UUID, datetime] = field(default_factory=dict)
 
     def _call(self, name: str) -> None:
         self.tracker.call(name)
@@ -149,6 +169,32 @@ class Index:
         self.tracker.call(f"wake_requests {limit}")
         ordered = sorted(self.marked.items(), key=lambda item: item[1][1])
         return [WakeRequest(id_, generation, at) for id_, (generation, at) in ordered][:limit]
+
+    async def heads(self, after: UUID | None, limit: int) -> list[HeadCandidate]:
+        self.tracker.call(f"heads {_short(after)} {limit}")
+        return [
+            candidate
+            for candidate in self.candidates
+            if after is None or candidate.repository.repository_id > after
+        ][:limit]
+
+    async def reconcile_head(
+        self,
+        repository_id: UUID,
+        *,
+        generation: int,
+        branch: str,
+        commit_sha: str,
+        read_at: datetime,
+        versions_current: Callable[[IndexProfile], bool],
+    ) -> bool:
+        self.read_at[repository_id] = read_at
+        profile = self.profiles.get(repository_id, _BUILT)
+        current = "current" if profile is not None and versions_current(profile) else "outdated"
+        self.tracker.call(
+            f"reconcile {_short(repository_id)} g{generation} {branch}@{commit_sha} {current}"
+        )
+        return True
 
     async def clear_wake_request(self, repository_id: UUID, requested_at: datetime) -> bool:
         self.tracker.call(f"clear {_short(repository_id)} {requested_at:%H:%M}")
@@ -766,3 +812,394 @@ def test_dispatch_starts_no_wake_after_its_deadline() -> None:
     ]
     assert index.marked == {R4: (1, _T4)}
     assert remains is True
+
+
+# --- ReconcileIndexHeads -------------------------------------------------------------
+
+_VERSIONS = IndexVersions("facts-3", "resolver-2", "parser-1", "limits-1")
+_BUILT = _VERSIONS.profile("main", "d" * 64)
+_OUTDATED = IndexProfile("facts-2", "resolver-2", "parser-1", "limits-1", "main", "d" * 64)
+_RATE_LIMITED = VcsUnavailable("rate limited", rate_limited=True)
+_LISTED = datetime(2026, 10, 20, 9, 30, tzinfo=UTC)
+
+# An event: the head read waits for it, like a request stuck on the network.
+type _HeadOutcome = BranchHead | None | Exception | asyncio.Event
+
+
+def _candidate(repository_id: UUID, installation: int) -> HeadCandidate:
+    return HeadCandidate(
+        IndexedRepository(repository_id, "github", installation, f"octo/r{repository_id.int}"),
+        1,
+        _LISTED,
+    )
+
+
+@dataclass
+class Sources:
+    """The per-run factory of snapshot sources: `runs` counts the token caches made, and
+    each head read logs the run whose cache it uses. An outcome list is consumed one item
+    per read; a repository without one reads `main` at `c<n>`."""
+
+    tracker: Tracker
+    clock: Clock
+    outcomes: dict[UUID, list[_HeadOutcome]] = field(default_factory=dict)
+    cost: float = 0.0
+    runs: int = 0
+
+    def __call__(self) -> Callable[[IndexedRepository], RepositorySnapshotSource]:
+        self.runs += 1
+        run = self.runs
+
+        def source(repository: IndexedRepository) -> RepositorySnapshotSource:
+            return cast(RepositorySnapshotSource, _Source(self, repository.repository_id, run))
+
+        return source
+
+
+@dataclass
+class _Source:
+    sources: Sources
+    repository_id: UUID
+    run: int
+
+    async def head(self) -> BranchHead | None:
+        tracker = self.sources.tracker
+        assert tracker.open == 0, "head() inside a transaction"
+        tracker.log.append(f"head {_short(self.repository_id)} run{self.run}")
+        self.sources.clock.now += self.sources.cost
+        pending = self.sources.outcomes.get(self.repository_id)
+        outcome: _HeadOutcome = (
+            pending.pop(0) if pending else BranchHead("main", f"c{self.repository_id.int}")
+        )
+        if isinstance(outcome, Exception):
+            raise outcome
+        if isinstance(outcome, asyncio.Event):
+            await outcome.wait()
+            return None
+        return outcome
+
+
+def _reconcile(
+    index: Index, clock: Clock, sources: Sources, batch: int = 50
+) -> ReconcileIndexHeads:
+    return ReconcileIndexHeads(
+        uow=lambda: Uow(index.tracker, index),
+        sources=sources,
+        versions=_VERSIONS,
+        batch=batch,
+        clock=clock,
+    )
+
+
+def test_reconcile_reads_each_head_outside_a_transaction_and_writes_it_in_one(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    clock = Clock()
+    index = Index(
+        Tracker(),
+        clock,
+        candidates=[_candidate(R1, 17), _candidate(R2, 17), _candidate(R3, 18)],
+        profiles={R2: None, R3: _OUTDATED},
+    )
+    tracker = index.tracker
+    sources = Sources(tracker, clock, {R2: [BranchHead("develop", "f" * 40)]})
+
+    with caplog.at_level(logging.INFO):
+        remains = asyncio.run(_reconcile(index, clock, sources).run(10.0))
+
+    assert tracker.log == [
+        "heads - 50",
+        "head r1 run1",
+        "reconcile r1 g1 main@c1 current",
+        "commit",
+        "head r2 run1",
+        f"reconcile r2 g1 develop@{'f' * 40} outdated",
+        "commit",
+        "head r3 run1",
+        "reconcile r3 g1 main@c3 outdated",
+        "commit",
+    ]
+    assert tracker.transactions == 4
+    assert index.read_at == dict.fromkeys((R1, R2, R3), _LISTED)
+    assert remains is False
+    assert "Reconciled 3 code indexes with their heads; 3 need a build" in caplog.text
+
+
+def test_reconcile_shares_one_token_cache_per_run() -> None:
+    clock = Clock()
+    index = Index(Tracker(), clock, candidates=[_candidate(R1, 17), _candidate(R2, 18)])
+    sources = Sources(index.tracker, clock)
+    reconcile = _reconcile(index, clock, sources)
+
+    asyncio.run(reconcile.run(10.0))
+    asyncio.run(reconcile.run(10.0))
+
+    assert sources.runs == 2
+    assert [entry for entry in index.tracker.log if entry.startswith("head ")] == [
+        "head r1 run1",
+        "head r2 run1",
+        "head r1 run2",
+        "head r2 run2",
+    ]
+
+
+def test_a_rate_limit_skips_the_installation_for_the_run_and_another_installation_goes_on() -> None:
+    clock = Clock()
+    index = Index(
+        Tracker(),
+        clock,
+        candidates=[_candidate(R1, 17), _candidate(R2, 17), _candidate(R3, 18)],
+    )
+    sources = Sources(index.tracker, clock, {R1: [_RATE_LIMITED]})
+    reconcile = _reconcile(index, clock, sources)
+
+    asyncio.run(reconcile.run(10.0))
+    # Without a `retry_after` the installation is skipped for that run only.
+    asyncio.run(reconcile.run(10.0))
+
+    assert [entry for entry in index.tracker.log if entry.startswith(("head ", "reconcile"))] == [
+        "head r1 run1",
+        "head r3 run1",
+        "reconcile r3 g1 main@c3 current",
+        "head r1 run2",
+        "reconcile r1 g1 main@c1 current",
+        "head r2 run2",
+        "reconcile r2 g1 main@c2 current",
+        "head r3 run2",
+        "reconcile r3 g1 main@c3 current",
+    ]
+
+
+def test_a_rate_limit_with_retry_after_pauses_the_installation_until_then() -> None:
+    clock = Clock()
+    index = Index(Tracker(), clock, candidates=[_candidate(R1, 17), _candidate(R2, 18)])
+    limited = VcsUnavailable("rate limited", rate_limited=True, retry_after=timedelta(seconds=60))
+    sources = Sources(index.tracker, clock, {R1: [limited]})
+    reconcile = _reconcile(index, clock, sources)
+
+    for now in (0, 59, 60):
+        clock.now = now
+        asyncio.run(reconcile.run(10.0))
+
+    assert [entry for entry in index.tracker.log if entry.startswith("head ")] == [
+        "head r1 run1",
+        "head r2 run1",
+        "head r2 run2",
+        "head r1 run3",
+        "head r2 run3",
+    ]
+
+
+def test_reconcile_skips_a_repository_it_cannot_read_without_a_store_write(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    clock = Clock()
+    index = Index(
+        Tracker(),
+        clock,
+        candidates=[
+            _candidate(R1, 17),
+            _candidate(R2, 17),
+            _candidate(R3, 17),
+            _candidate(R4, 17),
+        ],
+    )
+    sources = Sources(
+        index.tracker,
+        clock,
+        {R1: [VcsAccessDenied("gone")], R2: [None], R3: [VcsUnavailable("bad gateway")]},
+    )
+
+    with caplog.at_level(logging.WARNING):
+        remains = asyncio.run(_reconcile(index, clock, sources).run(10.0))
+
+    assert [entry for entry in index.tracker.log if entry != "commit"] == [
+        "heads - 50",
+        "head r1 run1",
+        "head r2 run1",
+        "head r3 run1",
+        "head r4 run1",
+        "reconcile r4 g1 main@c4 current",
+    ]
+    assert remains is False
+    assert "vcs_access_denied" in caplog.text and "vcs_unavailable" in caplog.text
+
+
+def test_reconcile_logs_a_failing_candidate_and_goes_on_with_the_next(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    clock = Clock()
+    index = Index(Tracker(), clock, candidates=[_candidate(R1, 17), _candidate(R2, 17)])
+    sources = Sources(index.tracker, clock, {R1: [RuntimeError("unexpected")]})
+
+    with caplog.at_level(logging.ERROR):
+        remains = asyncio.run(_reconcile(index, clock, sources).run(10.0))
+
+    assert [entry for entry in index.tracker.log if entry != "commit"] == [
+        "heads - 50",
+        "head r1 run1",
+        "head r2 run1",
+        "reconcile r2 g1 main@c2 current",
+    ]
+    assert remains is False
+    assert f"Failed to reconcile the code index of {R1} with its head" in caplog.text
+
+
+def test_a_candidate_that_timed_out_is_read_again_only_on_the_next_pass() -> None:
+    clock = Clock()
+    index = Index(Tracker(), clock, candidates=[_candidate(R1, 17), _candidate(R2, 18)])
+    reconcile = _reconcile(index, clock, Sources(index.tracker, clock, {R1: [asyncio.Event()]}))
+
+    async def runs() -> list[bool]:
+        # The leader's timeout cancels the run in the head read of r1.
+        with pytest.raises(TimeoutError):
+            async with asyncio.timeout(0.05):
+                await reconcile.run(10.0)
+        return [await reconcile.run(10.0), await reconcile.run(10.0)]
+
+    assert asyncio.run(runs()) == [False, False]
+    assert [entry for entry in index.tracker.log if entry.startswith(("heads", "head "))] == [
+        "heads - 50",
+        "head r1 run1",
+        "heads r1 50",
+        "head r2 run2",
+        "heads - 50",
+        "head r1 run3",
+        "head r2 run3",
+    ]
+
+
+def test_reconcile_resumes_its_cursor_after_each_batch_and_waits_after_the_last() -> None:
+    clock = Clock()
+    index = Index(
+        Tracker(),
+        clock,
+        candidates=[_candidate(R1, 17), _candidate(R2, 18), _candidate(R3, 19)],
+    )
+    reconcile = _reconcile(index, clock, Sources(index.tracker, clock), batch=2)
+
+    # A full batch leaves work: the gate stays open and the next tick goes on.
+    assert asyncio.run(reconcile.run(10.0)) is True
+    assert asyncio.run(reconcile.run(10.0)) is False
+    assert asyncio.run(reconcile.run(10.0)) is True
+
+    assert [entry for entry in index.tracker.log if entry.startswith(("heads", "head "))] == [
+        "heads - 2",
+        "head r1 run1",
+        "head r2 run1",
+        "heads r2 2",
+        "head r3 run2",
+        "heads - 2",
+        "head r1 run3",
+        "head r2 run3",
+    ]
+
+
+def test_reconcile_starts_no_head_read_after_its_deadline_and_resumes_there() -> None:
+    clock = Clock()
+    index = Index(
+        Tracker(),
+        clock,
+        candidates=[_candidate(R1, 17), _candidate(R2, 18), _candidate(R3, 19), _candidate(R4, 20)],
+    )
+    reconcile = _reconcile(index, clock, Sources(index.tracker, clock, cost=4))
+
+    assert asyncio.run(reconcile.run(10.0)) is True
+    assert asyncio.run(reconcile.run(10.0)) is False
+
+    assert [entry for entry in index.tracker.log if entry.startswith(("heads", "head "))] == [
+        "heads - 50",
+        "head r1 run1",
+        "head r2 run1",
+        "head r3 run1",
+        "heads r3 50",
+        "head r4 run2",
+    ]
+
+
+def test_reconcile_starts_no_head_read_with_less_than_its_reserve_left() -> None:
+    clock = Clock()
+    index = Index(Tracker(), clock, candidates=[_candidate(R1, 17), _candidate(R2, 18)])
+    reconcile = _reconcile(index, clock, Sources(index.tracker, clock, cost=3))
+
+    # Too short a budget lists nothing; 4 s read r1, and the 1 s left starts no read.
+    assert asyncio.run(reconcile.run(1.9)) is True
+    assert asyncio.run(reconcile.run(4.0)) is True
+    assert asyncio.run(reconcile.run(10.0)) is False
+
+    assert [entry for entry in index.tracker.log if entry.startswith(("heads", "head "))] == [
+        "heads - 50",
+        "head r1 run1",
+        "heads r1 50",
+        "head r2 run2",
+    ]
+
+
+def test_a_slow_reconcile_runs_last_on_what_is_left_and_never_starves_the_other_tasks() -> None:
+    clock = Clock()
+    runs: _Runs = []
+    repositories = (R1, R2, R3, R4, UUID(int=5))
+    index = Index(
+        Tracker(),
+        clock,
+        candidates=[_candidate(id_, 16 + id_.int) for id_ in repositories],
+    )
+    tasks = CodeIndexLeaderTasks(
+        [
+            ScheduledTask("dispatch", Recorder("dispatch", clock, runs, cost=1), 0),
+            ScheduledTask("ttl", Recorder("ttl", clock, runs, cost=1, remains=True), 3_600),
+            ScheduledTask("gc", Recorder("gc", clock, runs, cost=1, remains=True), 300),
+            ScheduledTask(
+                "reconcile", _reconcile(index, clock, Sources(index.tracker, clock, cost=3)), 600
+            ),
+        ],
+        clock=clock,
+    )
+
+    # Each tick the reconcile gets the 7 s the others left: two heads of 3 s, and the
+    # third would start with 1 s left. Its gate stays open, and the others still run.
+    asyncio.run(tasks.tick())
+    asyncio.run(tasks.tick())
+
+    assert runs == [
+        ("dispatch", 0, 10),
+        ("ttl", 1, 9),
+        ("gc", 2, 8),
+        ("dispatch", 9, 10),
+        ("ttl", 10, 9),
+        ("gc", 11, 8),
+    ]
+    assert [entry for entry in index.tracker.log if entry.startswith(("heads", "head "))] == [
+        "heads - 50",
+        "head r1 run1",
+        "head r2 run1",
+        "heads r2 50",
+        "head r3 run2",
+        "head r4 run2",
+    ]
+    assert clock.now == 18
+
+
+def test_the_reconcile_gate_opens_every_reconcile_interval() -> None:
+    clock = Clock()
+    index = Index(Tracker(), clock, candidates=[_candidate(R1, 17)])
+    interval = CodeIndexSettings().reconcile_interval_seconds
+    tasks = CodeIndexLeaderTasks(
+        [
+            ScheduledTask(
+                "reconcile", _reconcile(index, clock, Sources(index.tracker, clock)), interval
+            )
+        ],
+        clock=clock,
+    )
+
+    for now in (0, 599, 600, 1_199, 1_200):
+        clock.now = now
+        asyncio.run(tasks.tick())
+
+    assert interval == 600
+    assert [entry for entry in index.tracker.log if entry.startswith("head ")] == [
+        "head r1 run1",
+        "head r1 run2",
+        "head r1 run3",
+    ]
