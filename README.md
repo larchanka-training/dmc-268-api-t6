@@ -183,7 +183,7 @@ npx smee-client --url "<smee channel URL>" --target http://localhost:8000/webhoo
 ```
 
 The API stores each delivery and webhook-worker (above) projects it. The dev App is installed
-(installation `168298055`) on the sandbox repository `axyi/dmc268-t6-sandbox-dev`: events of its
+(installation `172685946`) on the sandbox repository `axyi/dmc268-t6-sandbox-dev`: events of its
 pull requests, such as the `ai-review` label, arrive along this path.
 
 ## LLM gateway
