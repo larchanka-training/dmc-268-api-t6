@@ -84,12 +84,15 @@ class UnsupportedGitHubEvent:
 
 @dataclass(frozen=True)
 class PushEvent:
-    """A push; only one to the default branch can change the rules status (#150)."""
+    """A push; only one to the default branch can change the rules status (#150) or
+    move the head the index follows (#143)."""
 
     installation_external_id: int
     repository_external_id: int
     ref: str
     default_branch: str
+    # The head after the push; None when the push deleted the ref.
+    after: str | None = None
 
     @property
     def to_default_branch(self) -> bool:
@@ -309,13 +312,43 @@ class GitHubInstallationDeliveryDispatcher:
         )
 
     async def _push_result(self, event: PushEvent) -> InstallationDeliveryDispatchResult:
-        # The rules file changes only by a commit to the default branch; other refs and
-        # tags cannot change what the settings page shows.
+        # The rules file and the indexed head change only by a commit to the default
+        # branch; other refs and tags cannot change what the settings page shows.
         if not event.to_default_branch:
             return InstallationDeliveryDispatchResult(
                 status=InstallationDeliveryDispatchStatus.IGNORED_IRRELEVANT_EVENT,
                 detail="not_default_branch",
             )
+        # Independent of the rules refresh, and idempotent like it; one status per
+        # delivery, so the index outcome goes into the detail (ADR 0001 §6.1).
+        index_requested = await self._refresh_index_on_push(event)
+        result = await self._rules_refresh_result(event)
+        # A repository the rules refresh does not know is reported as such alone.
+        if index_requested and result.status != (
+            InstallationDeliveryDispatchStatus.IGNORED_IRRELEVANT_EVENT
+        ):
+            return _with_index_requested(result)
+        return result
+
+    async def _refresh_index_on_push(self, event: PushEvent) -> bool:
+        """A failed request never skips the rules refresh: it is logged, and the leader's
+        reconcile with the head catches the index up (ADR 0001 §6.1)."""
+        if self._index_refresh is None or event.after is None:
+            return False
+        # CONTRACT: `Exception` only, so a cancellation still stops the delivery.
+        try:
+            return await self._index_refresh.execute(
+                event.installation_external_id, event.repository_external_id, event.after
+            )
+        except Exception:
+            _LOGGER.exception(
+                "Failed to request an index update for repository %s of installation %s",
+                event.repository_external_id,
+                event.installation_external_id,
+            )
+            return False
+
+    async def _rules_refresh_result(self, event: PushEvent) -> InstallationDeliveryDispatchResult:
         if self._rules_refresh is None:
             return InstallationDeliveryDispatchResult(
                 status=InstallationDeliveryDispatchStatus.DEFERRED_KNOWN_EVENT
