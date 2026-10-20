@@ -909,7 +909,7 @@ def test_uncommitted_removal_and_oauth_apply_serialize_in_both_orders(
     factory = async_sessionmaker(engine, expire_on_commit=False)
 
     async def exercise() -> None:
-        pending: asyncio.Task[None] | None = None
+        pending: asyncio.Task[UUID | None] | None = None
         try:
             async with factory() as removal, factory() as oauth:
                 try:
@@ -975,7 +975,7 @@ def test_removal_lock_allows_onboarding_foreign_key_check_without_deadlock(
     factory = async_sessionmaker(engine, expire_on_commit=False)
 
     async def exercise() -> None:
-        pending: asyncio.Task[None] | None = None
+        pending: asyncio.Task[UUID | None] | None = None
         try:
             async with factory() as onboarding, factory() as removal:
                 try:

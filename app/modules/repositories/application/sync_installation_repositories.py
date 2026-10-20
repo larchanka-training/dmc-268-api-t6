@@ -9,6 +9,8 @@ from typing import Protocol
 from uuid import UUID
 
 from app.common.application.unit_of_work import UnitOfWork
+from app.modules.code_index.domain.enums import PurgeReason
+from app.modules.repositories.application.code_index import CodeIndexPurger
 from app.modules.repositories.application.installation_repositories import (
     RepositoryReference,
     RepositorySnapshot,
@@ -48,9 +50,13 @@ class InstallationRepositoryStore(RepositoryRuleVersionStore, Protocol):
 
     async def disable_repository(
         self, provider_installation_id: UUID, external_id: int
-    ) -> None: ...
+    ) -> UUID | None:
+        """The id of the repository that lost App access; None when none matched."""
+        ...
 
-    async def disable_installation(self, provider_installation_id: UUID) -> None: ...
+    async def disable_installation(self, provider_installation_id: UUID) -> list[UUID]:
+        """The ids of every repository of the installation."""
+        ...
 
     async def record_removal_delivery(self, delivery_id: str) -> bool:
         """Record once in this transaction; false means its effect already committed."""
@@ -66,6 +72,9 @@ class InstallationRepositoriesUnitOfWork(UnitOfWork, Protocol):
 
     @property
     def repositories(self) -> InstallationRepositoryStore: ...
+
+    @property
+    def index_purger(self) -> CodeIndexPurger: ...
 
 
 InstallationRepositoriesUnitOfWorkFactory = Callable[[], InstallationRepositoriesUnitOfWork]
@@ -159,16 +168,25 @@ class SyncInstallationRepositories:
         This lifecycle path deliberately accepts transport references but
         persists only their stable external ids. The delivery marker commits with
         the effect, so a retry cannot revoke access restored after the first commit.
+        The index of every repository that lost access is purged in the same commit
+        (#143, ADR 0001 §6.2).
         """
         if not delivery_id:
             raise ValueError("removal requires a durable delivery id")
         async with self._uow_factory() as uow:
             if not await uow.repositories.record_removal_delivery(delivery_id):
                 return
+            removed: list[UUID] = []
             if all_repositories:
-                await uow.repositories.disable_installation(provider_installation_id)
+                removed = await uow.repositories.disable_installation(provider_installation_id)
             for repository in () if all_repositories else repositories:
-                await uow.repositories.disable_repository(
+                repository_id = await uow.repositories.disable_repository(
                     provider_installation_id, repository.external_id
                 )
+                if repository_id is not None:
+                    removed.append(repository_id)
+            # After the repositories rows and in id order, so every path locks
+            # `repositories` before the index state rows, and those in one order.
+            for repository_id in sorted(set(removed)):
+                await uow.index_purger.purge(repository_id, PurgeReason.REMOVED)
             await uow.commit()
