@@ -15,7 +15,13 @@ from dataclasses import replace
 from pathlib import PurePosixPath
 from typing import Protocol, runtime_checkable
 
-from app.modules.reviews.application.policy_snapshot import ExecutionProfile, PolicySnapshot
+from app.modules.reviews.application.policy_errors import PolicyError, PolicyErrorCode
+from app.modules.reviews.application.policy_snapshot import (
+    CallManifest,
+    ExecutionProfile,
+    PolicySnapshot,
+    SourceRole,
+)
 from app.modules.reviews.application.prompt_builder import (
     ChangedFile,
     PromptBuilder,
@@ -51,10 +57,15 @@ class LengthAwareTokenCounter(TokenCounter, Protocol):
 
 
 class EstimatedTokenCounter:
-    """Four characters per token, rounded up: an estimate until the model counter is wired."""
+    """Three characters per token, rounded up: a conservative upper estimate
+    matching the gateway (RFS §3.3).
+    """
 
     def count(self, text: str) -> int:
-        return (len(text) + 3) // 4
+        return (len(text) + 2) // 3
+
+    def count_length(self, characters: int) -> int:
+        return (characters + 2) // 3
 
 
 class PolicyBudgetExceededError(ValueError):
@@ -128,6 +139,149 @@ def verify_pre_send_guard(
         raise PreSendGuardError(
             f"llm_context_overflow: rendered prompt is {total} tokens, limit is {max_input_tokens}"
         )
+
+
+_ALLOWED_SOURCE_ROLES = frozenset(
+    {
+        SourceRole.POLICY_DOCUMENT,
+        SourceRole.SERVICE_DEFAULTS,
+        SourceRole.CONVENTIONS,
+        SourceRole.PR_METADATA,
+        SourceRole.DIFF,
+        SourceRole.SOURCE_EXCERPT,
+        SourceRole.AST_EXCERPT,
+        SourceRole.RETRIEVED_EXCERPT,
+        SourceRole.CANDIDATE,
+        SourceRole.PREVIOUS_OUTPUT,
+    }
+)
+
+_ROLE_KIND_MAP = {
+    SourceRole.POLICY_DOCUMENT: frozenset({"repository_rules", "project_conventions_document"}),
+    SourceRole.SERVICE_DEFAULTS: frozenset({"service_defaults"}),
+    SourceRole.CONVENTIONS: frozenset({"generated_conventions"}),
+    SourceRole.PR_METADATA: frozenset({"pr_metadata"}),
+    SourceRole.DIFF: frozenset({"source_code", "diff", "file_diff"}),
+    SourceRole.SOURCE_EXCERPT: frozenset({"source_code", "diff", "file_diff"}),
+    SourceRole.AST_EXCERPT: frozenset({"source_code", "diff", "file_diff"}),
+    SourceRole.RETRIEVED_EXCERPT: frozenset({"source_code", "diff", "file_diff"}),
+    SourceRole.CANDIDATE: frozenset({"candidate_findings", "candidate_finding"}),
+    SourceRole.PREVIOUS_OUTPUT: frozenset({"previous_model_output"}),
+}
+
+
+def verify_provenance_pre_send_guard(
+    manifest: CallManifest,
+    *,
+    context: ReviewContext | None = None,
+    snapshot: PolicySnapshot | None = None,
+) -> None:
+    """Validate manifest blocks before any LLM call (CVS §5.2).
+
+    Failure raises PolicyError(PolicyErrorCode.CONTEXT_VIOLATION), which results
+    in RunFailure("policy_context_violation") without sending the request.
+    """
+    for block in manifest.blocks:
+        # 1. Role and kind validation
+        if block.source_role not in _ALLOWED_SOURCE_ROLES:
+            raise PolicyError(
+                PolicyErrorCode.CONTEXT_VIOLATION,
+                f"Block '{block.block_id}' has disallowed source_role: '{block.source_role}'",
+            )
+        allowed_kinds = _ROLE_KIND_MAP.get(block.source_role, frozenset())
+        if block.source_kind not in allowed_kinds:
+            raise PolicyError(
+                PolicyErrorCode.CONTEXT_VIOLATION,
+                f"Block '{block.block_id}' with role '{block.source_role}' "
+                f"has disallowed source_kind: '{block.source_kind}'",
+            )
+
+        # 2. Path validation
+        if block.path is not None:
+            path_str = block.path
+            if not path_str:
+                raise PolicyError(
+                    PolicyErrorCode.CONTEXT_VIOLATION,
+                    f"Block '{block.block_id}' has empty path",
+                )
+            if len(path_str.encode("utf-8")) > 1024:
+                raise PolicyError(
+                    PolicyErrorCode.CONTEXT_VIOLATION,
+                    f"Block '{block.block_id}' path exceeds 1024 bytes limit",
+                )
+            segments = path_str.split("/")
+            if len(segments) > 128:
+                raise PolicyError(
+                    PolicyErrorCode.CONTEXT_VIOLATION,
+                    f"Block '{block.block_id}' path exceeds 128 segments limit",
+                )
+            if "//" in path_str or path_str.startswith("/") or path_str.endswith("/"):
+                raise PolicyError(
+                    PolicyErrorCode.CONTEXT_VIOLATION,
+                    f"Block '{block.block_id}' has invalid path format: '{path_str}'",
+                )
+            if any(seg in {".", ".."} for seg in segments):
+                raise PolicyError(
+                    PolicyErrorCode.CONTEXT_VIOLATION,
+                    f"Block '{block.block_id}' contains directory traversal: '{path_str}'",
+                )
+            if "unsupported_path" in path_str:
+                raise PolicyError(
+                    PolicyErrorCode.CONTEXT_VIOLATION,
+                    f"Block '{block.block_id}' references unsupported path: '{path_str}'",
+                )
+
+        # 3. Revision validation
+        if block.revision is not None:
+            allowed_revisions: set[str] = set()
+            if snapshot is not None:
+                allowed_revisions.add(snapshot.policy_base_sha)
+            if context is not None and context.pr_meta is not None:
+                if context.pr_meta.head_sha:
+                    allowed_revisions.add(context.pr_meta.head_sha)
+                base_sha = getattr(context.pr_meta, "base_sha", None)
+                if base_sha:
+                    allowed_revisions.add(base_sha)
+
+            if allowed_revisions and block.revision not in allowed_revisions:
+                raise PolicyError(
+                    PolicyErrorCode.CONTEXT_VIOLATION,
+                    f"Block '{block.block_id}' revision '{block.revision}' "
+                    f"does not match PR revisions: {allowed_revisions}",
+                )
+
+        # 4. Policy document snapshot checks
+        if snapshot is not None:
+            if block.source_kind == "repository_rules":
+                if not snapshot.rules.is_present:
+                    raise PolicyError(
+                        PolicyErrorCode.CONTEXT_VIOLATION,
+                        "Rules block present but snapshot has no rules document",
+                    )
+                if (
+                    block.content_sha256
+                    and snapshot.rules.text_sha256
+                    and block.content_sha256 != snapshot.rules.text_sha256
+                ):
+                    raise PolicyError(
+                        PolicyErrorCode.CONTEXT_VIOLATION,
+                        "Rules block checksum mismatch with policy snapshot",
+                    )
+            elif block.source_kind == "project_conventions_document":
+                if not snapshot.agents.is_present:
+                    raise PolicyError(
+                        PolicyErrorCode.CONTEXT_VIOLATION,
+                        "Agents block present but snapshot has no agents document",
+                    )
+                if (
+                    block.content_sha256
+                    and snapshot.agents.text_sha256
+                    and block.content_sha256 != snapshot.agents.text_sha256
+                ):
+                    raise PolicyError(
+                        PolicyErrorCode.CONTEXT_VIOLATION,
+                        "Agents block checksum mismatch with policy snapshot",
+                    )
 
 
 def prompt_tokens(context: ReviewContext, counter: TokenCounter) -> int:

@@ -115,7 +115,7 @@ class SqlAlchemyPolicySnapshotStore:
             service_defaults_rule_version_id=run.rule_version_id,
             defaults_checksum=defaults_checksum,
             # A run pins only its review prompt today. The conventions and verifier
-            # prompts stay unpinned until runs store them (#120), so the bindings are
+            # prompts stay unpinned until runs store them (#130), so the bindings are
             # not complete yet. The execution profile is the worker's current one,
             # fixed for the run by the first stored snapshot.
             prompt_bindings=PromptBindings(

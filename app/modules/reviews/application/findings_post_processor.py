@@ -11,6 +11,7 @@ from typing import Literal
 from app.modules.reviews.application.review_output import (
     _SERVICE_DEFAULTS_ID_RE,
     ReviewFinding,
+    ReviewFindingV2,
     ReviewOutput,
     finding_order_key,
     render_review_body,
@@ -55,7 +56,7 @@ class LintFilterPatterns:
 class ProcessedFinding:
     """One model finding and its exactly-one publication bucket."""
 
-    finding: ReviewFinding
+    finding: ReviewFinding | ReviewFindingV2
     position: int
     bucket: Bucket
     drop_reason: DropReason | None = None

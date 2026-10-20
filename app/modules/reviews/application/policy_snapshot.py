@@ -2,7 +2,7 @@
 
 Shape of RULES_FORMAT_SPEC §7.1 and §7.4. This module is the contract only: loading,
 validation and storage arrive with the loader. ``PromptBindings`` and
-``ExecutionProfile`` are the part of the contract defined by the LLM pipeline (#120);
+``ExecutionProfile`` are defined by the LLM pipeline and verification spec;
 they live here so that the snapshot has one description.
 """
 
@@ -24,7 +24,8 @@ AGENTS_DOCUMENT_PATH = "AGENTS.md"
 
 _EMPTY_SHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 
-type StageName = Literal["conventions", "review", "verifier", "repair", "fallback"]
+type StageName = Literal["conventions", "review", "verification", "verifier", "repair", "fallback"]
+type RecoveryKind = Literal["none", "retry", "repair", "fallback"]
 
 
 class DocumentPresence(StrEnum):
@@ -225,6 +226,7 @@ PINNED_PROMPT_CHECKSUMS: dict[str, str] = {
     "review.system:v2": "9177e358c23d1a7cd8987cbf667cf8b705c2afb27eaf8b2237480e4531431d75",
     "review.conventions:v2": "225a8f7d56835cf1307ddb25feac602c3d10e03c34ee51afc90a1f99af101454",
     "review.verifier:v1": "e00128b211ca64c9a2dd2bb902ade9abf4a29f30c7ec9066501dc7694ddc5940",
+    "review.verifier:v2": "f1b705563ad586512252058ca052e6ebdcaab6cb74fd2b07dff51651f6036016",
 }
 
 _DEFAULT_REVIEW_SYSTEM_ID = UUID("00000000-0000-0000-0000-000000000001")
@@ -239,7 +241,7 @@ def make_complete_prompt_bindings(
     verifier_id: UUID = _DEFAULT_VERIFIER_ID,
     review_system_checksum: str = PINNED_PROMPT_CHECKSUMS["review.system:v2"],
     conventions_checksum: str = PINNED_PROMPT_CHECKSUMS["review.conventions:v2"],
-    verifier_checksum: str = PINNED_PROMPT_CHECKSUMS["review.verifier:v1"],
+    verifier_checksum: str = PINNED_PROMPT_CHECKSUMS["review.verifier:v2"],
 ) -> PromptBindings:
     """Create complete PromptBindings with pinned IDs and checksums."""
     return PromptBindings(
@@ -365,6 +367,7 @@ class CallManifest:
     call_id: UUID
     stage: StageName
     blocks: tuple[ManifestBlock, ...]
+    recovery_kind: RecoveryKind = "none"
     run_id: UUID | None = None
 
     def get_block(self, block_id: str) -> ManifestBlock | None:

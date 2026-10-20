@@ -1075,3 +1075,34 @@ def test_filtered_source_drops_a_withheld_file_even_if_the_inner_source_returns_
     files = asyncio.run(filtered.fetch_files(REPOSITORY_ID, ("app/main.py", "web/app.ts")))
 
     assert [file.path for file in files] == ["app/main.py"]
+
+
+def test_conventions_provenance_guard_rejects_directory_traversal() -> None:
+    from app.modules.reviews.application.policy_errors import PolicyError, PolicyErrorCode
+
+    class TraversalSource(FakeSource):
+        async def fetch_tree(self, repository_id: UUID) -> tuple[RepositoryFile, ...]:
+            return (RepositoryFile("../secret.py", 50),)
+
+        async def fetch_files(
+            self, repository_id: UUID, paths: tuple[str, ...]
+        ) -> tuple[RepositoryFile, ...]:
+            return (RepositoryFile("../secret.py", 10, content="secret"),)
+
+    model = FakeModel(draft())
+    store = FakeStore()
+    factory = FakeUnitOfWorkFactory(store)
+
+    with pytest.raises(PolicyError) as exc_info:
+        asyncio.run(
+            GenerateRepoConventions(TraversalSource(), model, factory).execute(
+                repository_id=REPOSITORY_ID,
+                conventions_prompt=ActiveConventionsPrompt(PROMPT_VERSION_ID, "conventions v1"),
+                run_id=RUN_ID,
+                changed_files=("app/main.py",),
+            )
+        )
+    assert exc_info.value.code == PolicyErrorCode.CONTEXT_VIOLATION
+    assert "directory traversal" in exc_info.value.message
+    # Pre-send guard stops call BEFORE model is invoked!
+    assert len(model.calls) == 0

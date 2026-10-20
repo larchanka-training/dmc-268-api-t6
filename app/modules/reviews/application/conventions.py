@@ -5,14 +5,21 @@ from __future__ import annotations
 import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from hashlib import sha256
 from pathlib import PurePosixPath
 from typing import Annotated, Protocol
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.common.application.languages import LANGUAGE_BY_SUFFIX, classify_languages
 from app.common.application.unit_of_work import UnitOfWork
+from app.modules.reviews.application.policy_snapshot import (
+    CallManifest,
+    ManifestBlock,
+    SourceRole,
+)
+from app.modules.reviews.application.prompt_budget import verify_provenance_pre_send_guard
 from app.modules.reviews.application.prompt_builder import ReviewRule
 
 _STRICT = ConfigDict(extra="forbid", strict=True)
@@ -258,6 +265,57 @@ class GenerateRepoConventions:
         selected = select_context_files(tree)
         fetched_files = await self._source.fetch_files(repository_id, selected)
         files = _bound_context_files(selected, fetched_files)
+
+        # Build conventions call manifest and verify provenance pre-send guard (CVS §5.2)
+        conventions_blocks: list[ManifestBlock] = []
+        if agents_md.content:
+            conventions_blocks.append(
+                ManifestBlock(
+                    block_id="agents-md",
+                    source_role=SourceRole.POLICY_DOCUMENT,
+                    source_kind="project_conventions_document",
+                    path="AGENTS.md",
+                    revision=agents_md.sha,
+                    content_sha256=sha256(agents_md.content.encode("utf-8")).hexdigest(),
+                    start_line=1,
+                    end_line=len(agents_md.content.splitlines()) or 1,
+                    shown_line_count=len(agents_md.content.splitlines()) or 1,
+                )
+            )
+        if rules:
+            defaults_lines = sum(len(r.checks) for r in rules) or 1
+            conventions_blocks.append(
+                ManifestBlock(
+                    block_id="service-defaults",
+                    source_role=SourceRole.SERVICE_DEFAULTS,
+                    source_kind="service_defaults",
+                    start_line=1,
+                    end_line=defaults_lines,
+                    shown_line_count=defaults_lines,
+                )
+            )
+        for idx, cf in enumerate(files):
+            lines_count = len((cf.content or "").splitlines()) or 1
+            conventions_blocks.append(
+                ManifestBlock(
+                    block_id=f"file-{idx}",
+                    source_role=SourceRole.SOURCE_EXCERPT,
+                    source_kind="source_code",
+                    path=cf.path,
+                    start_line=1,
+                    end_line=lines_count,
+                    shown_line_count=lines_count,
+                )
+            )
+
+        conventions_manifest = CallManifest(
+            call_id=uuid4(),
+            run_id=run_id,
+            stage="conventions",
+            blocks=tuple(conventions_blocks),
+        )
+        verify_provenance_pre_send_guard(conventions_manifest)
+
         raw_draft = await self._model.draft_conventions(
             request=ConventionsRequest(
                 system=conventions_prompt.content,
