@@ -13,13 +13,17 @@ from app.common.infrastructure.db.unit_of_work import SqlAlchemyUnitOfWork
 from app.modules.auth.application.scope import AuthScope
 from app.modules.code_index.domain.enums import PurgeReason
 from app.modules.code_index.domain.rag_index import rag_index
+from app.modules.code_index.infrastructure.effective_rag import GITHUB_PROVIDER
 from app.modules.code_index.infrastructure.models import CodeIndexState
-from app.modules.code_index.infrastructure.purger import SqlAlchemyCodeIndexPurger
+from app.modules.code_index.infrastructure.purger import (
+    SqlAlchemyCodeIndexEnabler,
+    SqlAlchemyCodeIndexPurger,
+)
 from app.modules.repositories.application.repository_settings import (
     RepositorySettings,
     RepositorySettingsChange,
 )
-from app.modules.repositories.infrastructure.models import Repository
+from app.modules.repositories.infrastructure.models import ProviderInstallation, Repository
 from app.modules.workspaces.infrastructure.repository_access import repository_access_predicate
 
 # The repository row and the state columns the RAG index status is derived from (#145); the
@@ -166,6 +170,42 @@ class SqlAlchemyScopedCodeIndexPurger:
             await self._purger.purge(repository_id, reason)
 
 
+class SqlAlchemyScopedCodeIndexEnabler:
+    """`CodeIndexEnabler` over the repositories the scope sees, on the caller's session.
+
+    Enabling the index of a repository outside the caller's Workspaces is a no-op, like
+    an update of one, and so is one of another provider than GitHub, which the leader's
+    re-arm never lists either; the enable itself is `SqlAlchemyCodeIndexEnabler`'s.
+    Never commits.
+    """
+
+    def __init__(
+        self,
+        session: AsyncSession,
+        scope: AuthScope | None,
+        *,
+        allow_unscoped: bool = False,
+    ) -> None:
+        if scope is None and not allow_unscoped:
+            raise ValueError(
+                "SqlAlchemyScopedCodeIndexEnabler requires an AuthScope unless allow_unscoped=True"
+            )
+        self._session = session
+        self._scope = scope
+        self._enabler = SqlAlchemyCodeIndexEnabler(session)
+
+    async def enable(self, repository_id: UUID) -> None:
+        visible = await self._session.scalar(
+            select(Repository.id)
+            .join(
+                ProviderInstallation, ProviderInstallation.id == Repository.provider_installation_id
+            )
+            .where(Repository.id == repository_id, GITHUB_PROVIDER, _visible(self._scope))
+        )
+        if visible is not None:
+            await self._enabler.enable(repository_id)
+
+
 class SqlAlchemyRepositorySettingsUnitOfWork(SqlAlchemyUnitOfWork):
     def __init__(
         self,
@@ -192,5 +232,11 @@ class SqlAlchemyRepositorySettingsUnitOfWork(SqlAlchemyUnitOfWork):
     @property
     def index_purger(self) -> SqlAlchemyScopedCodeIndexPurger:
         return SqlAlchemyScopedCodeIndexPurger(
+            self.session, self._scope, allow_unscoped=self._allow_unscoped
+        )
+
+    @property
+    def index_enabler(self) -> SqlAlchemyScopedCodeIndexEnabler:
+        return SqlAlchemyScopedCodeIndexEnabler(
             self.session, self._scope, allow_unscoped=self._allow_unscoped
         )

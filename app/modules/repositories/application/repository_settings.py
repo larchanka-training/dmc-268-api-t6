@@ -10,7 +10,7 @@ from uuid import UUID
 from app.common.application.unit_of_work import UnitOfWork
 from app.modules.code_index.domain.enums import PurgeReason
 from app.modules.code_index.domain.rag_index import RagIndex
-from app.modules.repositories.application.code_index import CodeIndexPurger
+from app.modules.repositories.application.code_index import CodeIndexEnabler, CodeIndexPurger
 
 
 @dataclass(frozen=True)
@@ -66,6 +66,9 @@ class RepositorySettingsUnitOfWork(UnitOfWork, Protocol):
     @property
     def index_purger(self) -> CodeIndexPurger: ...
 
+    @property
+    def index_enabler(self) -> CodeIndexEnabler: ...
+
 
 type RepositorySettingsUowFactory = Callable[[], RepositorySettingsUnitOfWork]
 
@@ -99,11 +102,15 @@ class UpdateRepository:
             item = await uow.repositories.update_repository(repository_id, change)
             if item is None:
                 return None
-            # Only a body that turns the toggle off purges: editing other settings never
-            # touches the index, so it never brings back an index the TTL purged. The
-            # purger is scoped like the store.
+            # Only a body that sets the toggle touches the index: editing other settings
+            # never brings back an index the TTL purged. Off purges; on requests a full
+            # build when the re-read shows RAG in effect (`rag_enabled` is masked by the
+            # installation). The purger and the enabler are scoped like the store.
             if change.rag_enabled is False:
                 await uow.index_purger.purge(item.id, PurgeReason.DISABLED)
+                item = await uow.repositories.get_repository(item.id)
+            elif change.rag_enabled is True and item.rag_enabled:
+                await uow.index_enabler.enable(item.id)
                 item = await uow.repositories.get_repository(item.id)
             await uow.commit()
             return item

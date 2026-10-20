@@ -345,6 +345,13 @@ class ContractRepositories:
     async def purge(self, repository_id: UUID, reason: PurgeReason) -> None:
         return None
 
+    @property
+    def index_enabler(self) -> ContractRepositories:
+        return self
+
+    async def enable(self, repository_id: UUID) -> None:
+        return None
+
     async def __aenter__(self) -> Self:
         return self
 

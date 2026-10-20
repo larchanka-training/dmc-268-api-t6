@@ -1,5 +1,6 @@
 """The repository RAG toggle on PostgreSQL: off by default, onboarding never turns it on, and the
-settings API serves it with the index status (#145); turning it off purges the index (#143)."""
+settings API serves it with the index status (#145); turning it off purges the index, and turning
+it on requests a full build of an available repository (#143)."""
 
 from __future__ import annotations
 
@@ -21,6 +22,10 @@ from app.modules.auth.application.scope import AuthScope
 from app.modules.code_index.domain.enums import IndexStatus, PurgeReason
 from app.modules.repositories.application.installation_repositories import RepositorySnapshot
 from app.modules.repositories.application.onboard_repository import load_default_rule_sets
+from app.modules.repositories.application.repository_settings import (
+    RepositorySettingsChange,
+    UpdateRepository,
+)
 from app.modules.repositories.application.sync_installation_repositories import (
     RepositoryOnboardingInput,
     SyncInstallationRepositories,
@@ -33,7 +38,14 @@ from app.modules.repositories.infrastructure.repository_settings import (
 )
 from tests.code_index_postgres import GRAPH_ROWS, collect_garbage, graph_rows, publish_index
 from tests.portal_postgres import INSTALL_A, REPO_A, REPO_B, WS_A, Env, api, portal_schema, scalar
-from tests.test_code_index_store_postgres import _Index, _state
+from tests.test_code_index_store_postgres import (
+    _claim,
+    _Index,
+    _mark_failed,
+    _marker,
+    _purge,
+    _state,
+)
 
 _RAG_COLUMN = (
     "SELECT is_nullable, column_default FROM information_schema.columns "
@@ -236,23 +248,40 @@ def test_settings_api_patch_stores_the_rag_toggle(rag_env: Env) -> None:
     url = f"/api/repos/{REPO_A}"
     stored = "SELECT rag_enabled FROM repositories WHERE id = :id"
     with api(rag_env, AuthScope(42, (WS_A,))) as (client, factory):
+        index = _Index(factory, REPO_A, REPO_B)
         enabled = client.patch(url, json={"ragEnabled": True})
         stored_enabled = tuple(scalar(factory, stored, id=REPO_A))
+        state = asyncio.run(_state(index, REPO_A))
+        marker = asyncio.run(_marker(index, REPO_A))
         detail = client.get(url).json()
         disabled = client.patch(url, json={"ragEnabled": False})
         stored_disabled = tuple(scalar(factory, stored, id=REPO_A))
+        purged = asyncio.run(_state(index, REPO_A))
+        purged_marker = asyncio.run(_marker(index, REPO_A))
 
     assert enabled.status_code == 200
-    # Enabling creates no state row: the index stays empty until a build (#143).
+    # Enabling requests a full build: a state row of generation 1 with the wake-up marker,
+    # which reads empty until the build (#143).
     assert (enabled.json()["ragEnabled"], enabled.json()["ragIndex"]) == (
         True,
         {**DISABLED, "status": "empty"},
     )
+    assert state is not None
+    assert (state.generation, state.status, state.purge_reason) == (1, IndexStatus.EMPTY, None)
+    assert marker is not None
     assert stored_enabled == (True,)
     assert detail == enabled.json()
     assert disabled.status_code == 200
     assert (disabled.json()["ragEnabled"], disabled.json()["ragIndex"]) == (False, DISABLED)
     assert stored_disabled == (False,)
+    # Turning it off again purges the new index and drops the marker.
+    assert purged is not None
+    assert (purged.generation, purged.status, purged.purge_reason) == (
+        2,
+        IndexStatus.EMPTY,
+        PurgeReason.DISABLED,
+    )
+    assert purged_marker is None
 
 
 @pytest.mark.integration
@@ -278,6 +307,7 @@ def test_unavailable_repository_reads_rag_disabled_but_keeps_the_preference(
 ) -> None:
     url = f"/api/repos/{REPO_A}"
     with api(rag_env, AuthScope(42, (WS_A,))) as (client, factory):
+        index = _Index(factory, REPO_A, REPO_B)
         _execute(factory, _INSERT_STATE, repository=REPO_A, **_PUBLISHED)
         _execute(
             factory,
@@ -287,7 +317,10 @@ def test_unavailable_repository_reads_rag_disabled_but_keeps_the_preference(
         )
         detail = client.get(url).json()
         listed = client.get("/api/repos").json()
+        before = asyncio.run(_state(index, REPO_A))
         patched = client.patch(url, json={"ragEnabled": True})
+        after = asyncio.run(_state(index, REPO_A))
+        marker = asyncio.run(_marker(index, REPO_A))
         stored = tuple(
             scalar(factory, "SELECT rag_enabled FROM repositories WHERE id = :id", id=REPO_A)
         )
@@ -297,6 +330,60 @@ def test_unavailable_repository_reads_rag_disabled_but_keeps_the_preference(
     assert patched.status_code == 200
     assert (patched.json()["ragEnabled"], patched.json()["ragIndex"]) == (False, DISABLED)
     assert stored == (True,)
+    # Effective RAG stays off, so the toggle requests no build.
+    assert before is not None and before.status is IndexStatus.READY
+    assert after == before
+    assert marker is None
+
+
+@pytest.mark.integration
+def test_patch_rag_on_of_an_unavailable_repository_creates_no_index(rag_env: Env) -> None:
+    with api(rag_env, AuthScope(42, (WS_A,))) as (client, factory):
+        _execute(
+            factory,
+            "UPDATE repositories SET installation_available = false WHERE id = :id",
+            id=REPO_A,
+        )
+        patched = client.patch(f"/api/repos/{REPO_A}", json={"ragEnabled": True})
+        rows = tuple(
+            scalar(
+                factory,
+                "SELECT count(*) FROM code_index_states WHERE repository_id = :id",
+                id=REPO_A,
+            )
+        )
+
+    assert patched.status_code == 200
+    assert patched.json()["ragEnabled"] is False
+    assert rows == (0,)
+
+
+@pytest.mark.integration
+def test_rag_on_of_a_repository_outside_github_creates_no_index(rag_env: Env) -> None:
+    # The scoped API never reaches another provider's repository; the unscoped use case
+    # stores the preference, and the enabler requests no build the indexer cannot run.
+    with api(rag_env, AuthScope(42, (WS_A,))) as (_, factory):
+        _execute(
+            factory,
+            "UPDATE provider_installations SET provider = 'gitlab' "
+            "WHERE id = (SELECT provider_installation_id FROM repositories WHERE id = :id)",
+            id=REPO_A,
+        )
+        changed = asyncio.run(
+            UpdateRepository(
+                lambda: SqlAlchemyRepositorySettingsUnitOfWork(factory, None, allow_unscoped=True)
+            ).execute(REPO_A, RepositorySettingsChange(rag_enabled=True))
+        )
+        rows = tuple(
+            scalar(
+                factory,
+                "SELECT count(*) FROM code_index_states WHERE repository_id = :id",
+                id=REPO_A,
+            )
+        )
+
+    assert changed is not None and changed.rag_enabled is True
+    assert rows == (0,)
 
 
 @pytest.mark.integration
@@ -551,3 +638,91 @@ def test_the_scoped_purger_leaves_a_repository_outside_the_scope_alone(rag_env: 
     )
     assert before is not None and before.status is IndexStatus.READY
     assert hidden == before
+
+
+# --- turning the toggle on enables the index (#143) ------------------------------------------
+
+
+async def _fail(index: _Index, repository_id: UUID) -> None:
+    fence = await _claim(index, repository_id)
+    await _mark_failed(index, repository_id, fence, "archive_unsafe")
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("failed", [False, True], ids=["ready", "failed"])
+def test_settings_api_patch_rag_on_leaves_a_live_or_failed_index_alone(
+    rag_env: Env, failed: bool
+) -> None:
+    with api(rag_env, AuthScope(42, (WS_A,))) as (client, factory):
+        _execute(factory, "UPDATE repositories SET rag_enabled = true WHERE id = :id", id=REPO_A)
+        index = _Index(factory, REPO_A, REPO_B)
+        asyncio.run(publish_index(index, REPO_A))
+        if failed:
+            asyncio.run(_fail(index, REPO_A))
+        before = asyncio.run(_state(index, REPO_A))
+        marker_before = asyncio.run(_marker(index, REPO_A))
+        patched = client.patch(f"/api/repos/{REPO_A}", json={"ragEnabled": True})
+        after = asyncio.run(_state(index, REPO_A))
+        marker_after = asyncio.run(_marker(index, REPO_A))
+
+    assert patched.status_code == 200
+    assert before is not None
+    assert (before.generation, before.status) == (
+        1,
+        IndexStatus.FAILED if failed else IndexStatus.READY,
+    )
+    # A retry of a failed index goes through off and on; a live index keeps its marker.
+    assert after == before
+    assert marker_after == marker_before
+    assert (marker_after is None) == failed
+
+
+@pytest.mark.integration
+def test_settings_api_patch_rag_on_rearms_a_ttl_purged_index(rag_env: Env) -> None:
+    with api(rag_env, AuthScope(42, (WS_A,))) as (client, factory):
+        _execute(factory, "UPDATE repositories SET rag_enabled = true WHERE id = :id", id=REPO_A)
+        index = _Index(factory, REPO_A, REPO_B)
+        asyncio.run(publish_index(index, REPO_A))
+        asyncio.run(_purge(index, REPO_A, PurgeReason.TTL))
+        purged = asyncio.run(_state(index, REPO_A))
+        patched = client.patch(f"/api/repos/{REPO_A}", json={"ragEnabled": True})
+        detail = client.get(f"/api/repos/{REPO_A}").json()
+        rearmed = asyncio.run(_state(index, REPO_A))
+        marker = asyncio.run(_marker(index, REPO_A))
+
+    assert purged is not None
+    assert (purged.generation, purged.purge_reason) == (2, PurgeReason.TTL)
+    assert patched.status_code == 200
+    # The response is the read after the re-arm, the same as a later GET.
+    assert (patched.json()["ragEnabled"], patched.json()["ragIndex"]) == (
+        True,
+        {**DISABLED, "status": "empty"},
+    )
+    assert patched.json() == detail
+    assert rearmed is not None
+    assert (rearmed.generation, rearmed.status, rearmed.purge_reason) == (
+        3,
+        IndexStatus.EMPTY,
+        None,
+    )
+    assert marker is not None
+
+
+@pytest.mark.integration
+def test_the_scoped_enabler_leaves_a_repository_outside_the_scope_alone(rag_env: Env) -> None:
+    scope = AuthScope(42, (WS_A,))
+    with api(rag_env, scope) as (_, factory):
+        index = _Index(factory, REPO_A, REPO_B)
+
+        async def enable_both() -> None:
+            async with SqlAlchemyRepositorySettingsUnitOfWork(factory, scope) as uow:
+                for repository_id in (REPO_A, REPO_B):
+                    await uow.index_enabler.enable(repository_id)
+                await uow.commit()
+
+        asyncio.run(enable_both())
+        visible = asyncio.run(_state(index, REPO_A))
+        hidden = asyncio.run(_state(index, REPO_B))
+
+    assert visible is not None and visible.generation == 1
+    assert hidden is None

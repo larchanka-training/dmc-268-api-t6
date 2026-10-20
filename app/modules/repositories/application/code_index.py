@@ -19,3 +19,16 @@ class CodeIndexPurger(Protocol):
         nothing.
         """
         ...
+
+
+class CodeIndexEnabler(Protocol):
+    """Works in the caller's transaction: flushes, never commits."""
+
+    async def enable(self, repository_id: UUID) -> None:
+        """Request a full build (ADR 0001 §4, §6.2): create the index with the wake-up
+        marker, or re-arm a purged one (a TTL purge included) in a new generation.
+
+        A live index and a `failed` one are left alone, so a repeat changes nothing and a
+        failed index is retried only through off and on.
+        """
+        ...

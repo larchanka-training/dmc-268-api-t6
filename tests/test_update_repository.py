@@ -1,8 +1,9 @@
-"""`UpdateRepository` against fakes of its ports: only `ragEnabled=false` purges (#143).
+"""`UpdateRepository` against fakes of its ports: only `ragEnabled` touches the index (#143).
 
 The order is the update, the purge with `disabled`, the re-read for the response, then
 the commit; a body without `ragEnabled=false` purges nothing, and a repository the scoped
-store cannot find is neither purged nor committed.
+store cannot find is neither purged nor committed. `ragEnabled=true` enables the index
+the same way, but only when the re-read shows RAG in effect (an available repository).
 """
 
 from __future__ import annotations
@@ -50,6 +51,8 @@ class FakeRepositories:
     """The scoped store, the purger and the transaction, recording every call in order."""
 
     found: bool = True
+    # The effective `rag_enabled` the update reads back: the toggle AND the installation.
+    rag_in_effect: bool = False
     calls: list[str] = field(default_factory=list)
 
     @property
@@ -58,6 +61,10 @@ class FakeRepositories:
 
     @property
     def index_purger(self) -> Self:
+        return self
+
+    @property
+    def index_enabler(self) -> Self:
         return self
 
     async def list_repositories(self) -> list[RepositorySettings]:
@@ -71,10 +78,15 @@ class FakeRepositories:
         self, repository_id: UUID, change: RepositorySettingsChange
     ) -> RepositorySettings | None:
         self.calls.append(f"update {repository_id == REPOSITORY_ID}")
-        return UPDATED if self.found else None
+        if not self.found:
+            return None
+        return replace(UPDATED, rag_enabled=self.rag_in_effect)
 
     async def purge(self, repository_id: UUID, reason: PurgeReason) -> None:
         self.calls.append(f"purge {repository_id == REPOSITORY_ID} {reason}")
+
+    async def enable(self, repository_id: UUID) -> None:
+        self.calls.append(f"enable {repository_id == REPOSITORY_ID}")
 
     async def __aenter__(self) -> Self:
         return self
@@ -107,18 +119,33 @@ def test_rag_off_purges_with_disabled_rereads_and_then_commits() -> None:
     assert item == REREAD
 
 
+def test_rag_on_in_effect_enables_rereads_and_then_commits() -> None:
+    fake = FakeRepositories(rag_in_effect=True)
+
+    item = _execute(fake, RepositorySettingsChange(rag_enabled=True))
+
+    assert fake.calls == ["update True", "enable True", "get True", "commit"]
+    assert item == REREAD
+
+
 @pytest.mark.parametrize(
-    "change",
-    [RepositorySettingsChange(enabled=False), RepositorySettingsChange(rag_enabled=True)],
-    ids=["rag-enabled-absent", "rag-enabled-true"],
+    ("change", "rag_in_effect"),
+    [
+        (RepositorySettingsChange(enabled=False), True),
+        # The installation masks the toggle: an unavailable repository gets no build.
+        (RepositorySettingsChange(rag_enabled=True), False),
+    ],
+    ids=["rag-enabled-absent", "rag-on-unavailable"],
 )
-def test_a_body_without_rag_off_purges_nothing(change: RepositorySettingsChange) -> None:
-    fake = FakeRepositories()
+def test_a_body_touches_the_index_only_when_rag_is_in_effect(
+    change: RepositorySettingsChange, rag_in_effect: bool
+) -> None:
+    fake = FakeRepositories(rag_in_effect=rag_in_effect)
 
     item = _execute(fake, change)
 
     assert fake.calls == ["update True", "commit"]
-    assert item == UPDATED
+    assert item == replace(UPDATED, rag_enabled=rag_in_effect)
 
 
 def test_a_missing_repository_is_neither_purged_nor_committed() -> None:
