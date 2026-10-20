@@ -4,8 +4,9 @@
   invalid value fails the start.
 - `index_consumer` declares the `index.repo` topology on a confirm channel of its own,
   not on the review channel, and composes `BuildRepositoryIndex`.
-- `index_leader_tasks` composes the TTL purge and garbage collection the worker leader
-  runs (#143).
+- `index_leader_tasks` composes the index tasks the worker leader runs (#143): converge,
+  garbage collection and the TTL purge always; the head reconcile and the wake-up
+  dispatch only with the consumer, whose GitHub client and confirm channel they use.
 - The indexer has its own httpx client and its own `SubprocessSourceParser`: the
   review's parser is sequential, and sharing it would queue reviews behind index jobs.
 - Every job builds its own installation token provider and cache, so an attempt never
@@ -44,10 +45,13 @@ from app.modules.code_index.application.index_store import IndexAdmission
 from app.modules.code_index.application.leader_tasks import (
     CodeIndexLeaderTasks,
     CollectIndexGarbage,
+    ConvergeIndexes,
+    DispatchIndexWakeups,
     PurgeUnusedIndexes,
+    ReconcileIndexHeads,
     ScheduledTask,
 )
-from app.modules.code_index.application.ports import IndexedRepository
+from app.modules.code_index.application.ports import IndexedRepository, IndexWakeups
 from app.modules.code_index.application.vcs import RepositorySnapshotSource
 from app.modules.code_index.domain.limits import IndexLimits
 from app.modules.code_index.infrastructure.amqp import (
@@ -102,6 +106,8 @@ MAX_TTL_DAYS = 3_650
 MAX_RECONCILE_INTERVAL_SECONDS = 86_400
 # One reconcile run reads at most this many heads, two GitHub requests each.
 MAX_RECONCILE_BATCH = 500
+# Converge runs at most this often, so a re-arm waits up to a minute (SD §11).
+CONVERGE_INTERVAL_SECONDS = 60
 # Far above any limit; it keeps `int()` off a pathological value.
 _MAX_DIGITS = 18
 
@@ -278,24 +284,55 @@ def snapshot_sources(
 
 
 def index_leader_tasks(
-    settings: CodeIndexSettings, session_factory: async_sessionmaker[AsyncSession]
+    settings: CodeIndexSettings,
+    session_factory: async_sessionmaker[AsyncSession],
+    consumer: IndexConsumer | None,
 ) -> CodeIndexLeaderTasks:
-    """The TTL purge and garbage collection of the worker leader (#143, ADR 0001 §4)."""
+    """The index tasks of the worker leader (#143, ADR 0001 §4-§6).
+
+    Converge, garbage collection and the TTL purge touch only the database and always
+    run. The head reconcile and the wake-up dispatch need the consumer's GitHub client
+    and confirm channel, so they are off without the GitHub App. The order is converge,
+    dispatch, GC, TTL, reconcile: the markers converge sets go out in the same tick; GC
+    runs before the TTL purge because physical deletion has the one-hour target of
+    ADR 0001 §4, while the 30-day TTL tolerates delay, so a TTL backlog never takes GC's
+    share of the tick; and the reconcile, whose head reads are the slowest, takes only
+    what the others left of the tick's budget; the markers it sets go out on the next
+    tick.
+    """
     uow = partial(SqlAlchemyCodeIndexMaintenanceUnitOfWork, session_factory)
-    return CodeIndexLeaderTasks(
-        [
+    tasks = [ScheduledTask("converge", ConvergeIndexes(uow=uow), CONVERGE_INTERVAL_SECONDS)]
+    if consumer is not None:
+        # An interval of 0 runs the task on every leader tick.
+        tasks.append(
+            ScheduledTask("dispatch", DispatchIndexWakeups(uow=uow, wakeups=consumer.wakeups), 0)
+        )
+    tasks += [
+        ScheduledTask(
+            "gc",
+            CollectIndexGarbage(uow=uow, batch_rows=settings.gc_batch_rows),
+            settings.gc_interval_seconds,
+        ),
+        ScheduledTask(
+            "ttl",
+            PurgeUnusedIndexes(uow=uow, unused_for=timedelta(days=settings.ttl_days)),
+            settings.ttl_interval_seconds,
+        ),
+    ]
+    if consumer is not None:
+        tasks.append(
             ScheduledTask(
-                "ttl",
-                PurgeUnusedIndexes(uow=uow, unused_for=timedelta(days=settings.ttl_days)),
-                settings.ttl_interval_seconds,
-            ),
-            ScheduledTask(
-                "gc",
-                CollectIndexGarbage(uow=uow, batch_rows=settings.gc_batch_rows),
-                settings.gc_interval_seconds,
-            ),
-        ]
-    )
+                "reconcile",
+                ReconcileIndexHeads(
+                    uow=uow,
+                    sources=consumer.sources,
+                    versions=index_versions(settings.limits),
+                    batch=settings.reconcile_batch,
+                ),
+                settings.reconcile_interval_seconds,
+            )
+        )
+    return CodeIndexLeaderTasks(tasks)
 
 
 class IndexWorkerSettings(Protocol):
@@ -316,9 +353,17 @@ class IndexWorkerSettings(Protocol):
 
 @dataclass(frozen=True)
 class IndexConsumer:
+    """The `index.repo` consumer and what the leader's index tasks take from it.
+
+    `wakeups` publishes on the consumer's confirm channel; `sources()` returns the
+    snapshot sources of one head reconcile run, which share one token cache.
+    """
+
     queue: AbstractQueue
     build: BuildRepositoryIndex
     publisher: IndexQueuePublisher
+    wakeups: IndexWakeups
+    sources: Callable[[], Callable[[IndexedRepository], RepositorySnapshotSource]]
 
     async def consume(self, *, stop: asyncio.Event | None = None) -> None:
         """One job at a time: the queue's channel has `prefetch_count=1`.
@@ -381,20 +426,30 @@ async def index_consumer(
         yield None
         return
     code_index = settings.code_index
+    app_id, private_key = settings.github_app_id, settings.github_private_key
     async with httpx.AsyncClient(
         base_url=settings.github_api_url, timeout=10.0, transport=transport
     ) as client:
+
+        def reconcile_sources() -> Callable[[IndexedRepository], RepositorySnapshotSource]:
+            # One token cache per head reconcile run.
+            return snapshot_sources(
+                client,
+                app_id=app_id,
+                private_key=private_key,
+                cache=InMemoryInstallationAccessTokenCache(now=time.time),
+            )
+
         parser = SubprocessSourceParser(attempt_cpu_seconds=None)
         try:
+            wakeups = await AmqpIndexWakeups.open(channel)
             build = BuildRepositoryIndex(
                 uow=partial(SqlAlchemyCodeIndexUnitOfWork, session_factory),
                 repositories=SqlAlchemyIndexRepositoryReader(session_factory),
-                sources=snapshot_sources(
-                    client, app_id=settings.github_app_id, private_key=settings.github_private_key
-                ),
+                sources=snapshot_sources(client, app_id=app_id, private_key=private_key),
                 archives=TarArchiveReader(code_index.limits),
                 parser=parser,
-                wakeups=await AmqpIndexWakeups.open(channel),
+                wakeups=wakeups,
                 versions=index_versions(code_index.limits),
                 limits=code_index.limits,
                 settings=code_index.build,
@@ -413,6 +468,8 @@ async def index_consumer(
                         code_index.lease_seconds, review_amqp.LOCAL_RETRY_TTL_SECONDS
                     ),
                 ),
+                wakeups,
+                reconcile_sources,
             )
         finally:
             await parser.aclose()

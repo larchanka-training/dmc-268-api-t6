@@ -917,6 +917,17 @@ async def _run_worker(
             redis = Redis.from_url(settings.redis_url)
             stack.push_async_callback(redis.aclose)
         async with amqp_channels(settings.rabbitmq_url, delays or RetryDelays()) as channels:
+            # The index.repo consumer (#142): its own channels, parser and GitHub client;
+            # None without the GitHub App.
+            index = await stack.enter_async_context(
+                index_consumer(
+                    settings,
+                    channels.connection,
+                    session_factory,
+                    delays or RetryDelays(),
+                    github_transport,
+                )
+            )
             process = compose_worker_process(
                 settings=settings,
                 session_factory=session_factory,
@@ -928,21 +939,12 @@ async def _run_worker(
                 gateway=gateway,
                 provider_factory=provider_factory,
                 delays=delays,
-                # The TTL purge and GC touch only the database: on without the GitHub App.
-                index_tasks=index_leader_tasks(settings.code_index, session_factory),
+                # Converge, GC and the TTL purge touch only the database: on without the
+                # GitHub App. The reconcile and the wake-up dispatch use the consumer.
+                index_tasks=index_leader_tasks(settings.code_index, session_factory, index),
             )
             run_queue = await channels.consumer_queue(run_queue_name("fast"))
             publish_queue = await channels.consumer_queue(PUBLISH_QUEUE)
-            # The index.repo consumer (#142): its own channels, parser and GitHub client.
-            index = await stack.enter_async_context(
-                index_consumer(
-                    settings,
-                    channels.connection,
-                    session_factory,
-                    delays or RetryDelays(),
-                    github_transport,
-                )
-            )
             _LOGGER.info("Review worker %s is consuming", settings.worker_id)
             startup_complete.set()
             if stop is not None and stop.is_set():
