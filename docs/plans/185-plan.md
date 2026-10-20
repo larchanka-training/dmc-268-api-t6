@@ -9,6 +9,12 @@ suite with actual disposable PostgreSQL/RabbitMQ reports 5045 passed, 0 skipped,
 from `fix/185-review-consumer-resilience`. Implementation commit: `1ce6c94`.
 The PR is temporarily draft while current-head CI runs; the publisher will mark it
 ready after all checks pass. The user will assign the reviewer.
+A narrow publication follow-up aligns the new broker fixture with existing hosted
+CI environment fallback. Actual-broker RED/GREEN, fresh Standards/Spec reviews (0/0)
+and all four gates pass. The CI-style broker full run reports 4177 passed,
+868 optional DB-dependent skips and 2 existing warnings in 455.13s; the earlier
+5045-pass actual-PG/broker proof remains valid for unchanged production code.
+The fixture follow-up is ready for the publisher to commit/push.
 
 ## Evidence and scope
 

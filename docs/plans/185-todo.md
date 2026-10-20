@@ -688,6 +688,50 @@ within the resilience scope before the production edit. Index policy is unchange
   HEAD/origin/main remain `2326273e6ab7fcea89d1cf3b94b88a4be66ca5e9`, so no rebase
   change is needed. Read-only `git diff --check` is clean. No commit/push by development.
 
+## Publication follow-up: exercise broker cases with hosted CI variables
+
+Scope: only `tests/test_worker_shutdown.py` fixture plus this plan/todo evidence;
+no product, workflow, dependency or wire-contract change. The 5045-pass actual-stack
+proof above remains valid for unchanged production code. The follow-up passed fresh
+two-axis review and all four gates; it is ready for the publisher to commit/push.
+
+- Read-only confirmation: `.github/workflows/ci-cd.yml` supplies `RABBITMQ_URL`
+  while the new fixture previously read only `TEST_RABBITMQ_URL`. The existing
+  `test_worker_queue_postgres.py` fixture already accepts the ordinary URL only
+  when `GITHUB_ACTIONS == "true"`; reused that exact safe fallback locally.
+- Meaningful RED command:
+  `env -u TEST_RABBITMQ_URL -u TEST_DATABASE_URL GITHUB_ACTIONS=true
+  RABBITMQ_URL=amqp://app:app@127.0.0.1:59878/ uv run pytest
+  tests/test_worker_shutdown.py -m integration -q
+  --junitxml=/tmp/185-ci-broker-red.xml`: **11 skipped, 31 deselected in 0.98s**.
+  Applying the workflow's existing JUnit zero-skip assertion produced
+  `11 collected, 11 skipped` and **exit 1**. This proves a hosted coverage gap;
+  the test command's ordinary zero exit is not misrepresented as behavioral proof.
+- Minimal GREEN: fixture reads `TEST_RABBITMQ_URL` or the CI-only `RABBITMQ_URL`
+  fallback, keeping local explicit disposable-broker opt-in. Same command with
+  GREEN XML path: **11 passed, 0 skipped, 31 deselected in 1.15s** against the
+  coordinator's actual disposable RabbitMQ. Same JUnit assertion:
+  `11 collected, 0 skipped`, **exit 0**. No mock replaced broker behavior.
+- Entire shutdown file with the same CI-style variables and both `TEST_*` unset:
+  **42 passed, 0 skipped, 2 existing warnings in 7.27s**.
+- Mandatory static gates: `uv run ruff check .` passed;
+  `uv run ruff format --check .` passed (524 files);
+  `uv run mypy .` passed (521 source files). One permission-approval timeout
+  prevented the first RED command from starting; its single permitted retry ran.
+- [x] Fresh two-axis review of the narrow follow-up is clean: Standards **0**,
+  Spec **0**. Fixture/source stayed frozen through the full gate.
+- [x] Current-head full suite passes with CI-style broker variables:
+  `env -u TEST_RABBITMQ_URL -u TEST_DATABASE_URL GITHUB_ACTIONS=true
+  RABBITMQ_URL=amqp://app:app@127.0.0.1:59878/ uv run pytest`:
+  **4177 passed, 868 skipped, 2 existing deprecation warnings in 455.13s (7:35),
+  exit 0**. All 11 actual broker tests run through the CI fallback; all 42 shutdown
+  and 13 process cases pass. The optional PostgreSQL-dependent skips reflect the
+  deliberately unset DB fixture, separately from the prior **5045 passed, 0 skipped**
+  actual-PG/broker production proof. No live upstream claim or production change.
+  Only plan/todo completion evidence was edited after this gate.
+- [ ] Publisher commits/pushes only after review/gates, then waits final CI and
+  marks PR ready. User assigns reviewer; development does not commit/push.
+
 ## Final checkpoint and publishing handoff
 
 - [x] Every issue acceptance criterion has named passing test evidence; record RED

@@ -82,7 +82,9 @@ def test_idle_review_intake_stops_without_needing_a_delivery() -> None:
 
 @pytest.fixture
 def rabbitmq_url() -> str:
-    url = os.environ.get("TEST_RABBITMQ_URL")
+    url = os.environ.get("TEST_RABBITMQ_URL") or (
+        os.environ.get("RABBITMQ_URL") if os.environ.get("GITHUB_ACTIONS") == "true" else None
+    )
     if url is None:
         pytest.skip("set TEST_RABBITMQ_URL to a disposable RabbitMQ for iterator proof")
     return url
