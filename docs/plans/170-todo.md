@@ -20,15 +20,16 @@ Use `TEST_DATABASE_URL` for integration tests when the task touches DB-backed pa
 
 **Description:** Replace the second half of
 `test_character_cap_drops_only_additional_findings` (`tests/test_findings_post_processor.py:286-301`)
-so it fails against current code and encodes #170 AC: with ~50 long paths plus a body-only finding,
-the body is ≤ 4000 chars, the finding is listed **or** an overflow line counts it with a placeholder
-URL, and Additional findings are not silently dropped when `prefix >= 4000`.
+so it fails against current code and encodes #170 AC: with ~60 long paths (~58 chars) plus two
+body-only findings, the body is ≤ 4000 chars, both findings appear under Additional findings
+(not silently dropped when `prefix >= 4000`), and checked files truncate (not a full path list).
+Overflow footer URL (`**Ещё N находок:**`) is Task 4 / store layer — not asserted in this unit test.
 
 **Acceptance criteria:**
 
-- [ ] Test fails on unfixed `findings_post_processor.py`.
-- [ ] Test documents expected checked-file truncation behaviour (not full 50-line list).
-- [ ] Test expects `Spill note` visible or explicit overflow count.
+- [x] Test fails on unfixed `findings_post_processor.py` (RED: budget and/or silent spill drop).
+- [x] Test documents expected checked-file truncation behaviour (not full path bullet list).
+- [x] Test expects both body-only spill titles visible under Additional findings.
 
 **Verification:** `uv run pytest tests/test_findings_post_processor.py::test_character_cap_drops_only_additional_findings -q` fails RED.
 
@@ -48,8 +49,8 @@ URL, and Additional findings are not silently dropped when `prefix >= 4000`.
 
 **Acceptance criteria:**
 
-- [ ] Ignored/omitted/unsupported paths (null `review_patch`) do not appear under Checked files.
-- [ ] Task 1 test still RED on truncation/budget (not yet fixed).
+- [x] Ignored/omitted/unsupported paths (null `review_patch`) do not appear under Checked files.
+- [x] Task 1 test still RED on truncation/budget (not yet fixed).
 
 **Verification:** Unit test with mixed snapshots; `tests/test_findings_post_processor.py`.
 
@@ -72,8 +73,8 @@ URL, and Additional findings are not silently dropped when `prefix >= 4000`.
 
 **Acceptance criteria:**
 
-- [ ] Long path lists truncate deterministically (sorted order preserved for shown paths).
-- [ ] Overview stays readable for 50×~58-char paths within budget after Task 4.
+- [x] Long path lists truncate deterministically (sorted order preserved for shown paths).
+- [x] Overview stays readable for 50×~58-char paths within budget after Task 4.
 
 **Verification:** Task 1 scenario progresses; dedicated unit test for cap edge cases (0, 1, N).
 
@@ -93,10 +94,10 @@ Append `**Ещё N находок:** {url}` in the store/publish path when count
 
 **Acceptance criteria:**
 
-- [ ] Task 1 test GREEN.
-- [ ] `test_character_cap_drops_only_additional_findings` first scenario (overflow notes) still passes.
-- [ ] `len(review_body) <= 4000` for all post-processor tests.
-- [ ] `findings_hash` unchanged for same finding sets (existing publication tests green).
+- [x] Task 1 test GREEN.
+- [x] `test_character_cap_drops_only_additional_findings` first scenario (overflow notes) still passes.
+- [x] `len(review_body) <= 4000` for all post-processor tests.
+- [x] `findings_hash` unchanged for same finding sets (existing publication tests green).
 
 **Verification:** `tests/test_findings_post_processor.py`, `tests/test_publish_run_review.py` (if fixtures touch body).
 
@@ -120,9 +121,9 @@ overflow count, not merely `len(findings) - inline`.
 
 **Acceptance criteria:**
 
-- [ ] Succeeded check-run summary `в теле ревью: N` matches body content for regression scenario.
-- [ ] `test_severity_threshold_postgres.py` remains green (#149).
-- [ ] `test_check_run_view_sends_the_run_link_as_details_url_in_every_state` still passes (#172).
+- [x] Succeeded check-run summary `в теле ревью: N` matches body content for regression scenario.
+- [x] `test_severity_threshold_postgres.py` remains green (#149).
+- [x] `test_check_run_view_sends_the_run_link_as_details_url_in_every_state` still passes (#172).
 
 **Verification:** Postgres/integration tests above; common verification block.
 
@@ -144,8 +145,8 @@ overview bullet, and PIPELINE_SPEC / SD only if checked-file definition is docum
 
 **Acceptance criteria:**
 
-- [ ] 97-todo status reflects Tasks 7–8 completion from #97 and points body-budget fix to #170.
-- [ ] No contradiction with PIPELINE_SPEC §7 check-run text (#172).
+- [x] 97-todo status reflects Tasks 7–8 completion from #97 and points body-budget fix to #170.
+- [x] No contradiction with PIPELINE_SPEC §7 check-run text (#172).
 
 **Verification:** Doc review; `uv run ruff format --check .` on touched files.
 
@@ -159,7 +160,7 @@ overview bullet, and PIPELINE_SPEC / SD only if checked-file definition is docum
 
 ## Checkpoint: After Tasks 1–6
 
-- [ ] Ч.1 AC satisfied.
+- [x] Ч.1 AC satisfied.
 - [ ] Focused pytest + full gates green.
 - [ ] Optional: open PR A or continue on same branch.
 
@@ -173,8 +174,8 @@ optional `llmOperation` enum for `llm.call`. Update
 
 **Acceptance criteria:**
 
-- [ ] Contract tests fail until runtime/schema code updated.
-- [ ] `additionalProperties: false` preserved with explicit new properties.
+- [x] Contract tests fail until runtime/schema code updated.
+- [x] `additionalProperties: false` preserved with explicit new properties.
 
 **Verification:** `uv run pytest tests/test_openapi_contract.py tests/test_run_stream.py -q` RED.
 
@@ -193,8 +194,8 @@ optional `llmOperation` enum for `llm.call`. Update
 
 **Acceptance criteria:**
 
-- [ ] `insert_run_action` sets `attempt` from locked `Run.attempt`.
-- [ ] Malformed payloads still dropped safely.
+- [x] `insert_run_action` sets `attempt` from locked `Run.attempt`.
+- [x] Malformed payloads still dropped safely.
 
 **Verification:** `tests/test_run_step_postgres.py`; Task 7 still RED on OpenAPI/app frame.
 
@@ -218,8 +219,8 @@ stores `operation: conventions|review` from `StructuredTask.operation`.
 
 **Acceptance criteria:**
 
-- [ ] Conventions and review calls distinguishable in `run_actions.request` JSON.
-- [ ] Existing llm gateway tests updated if they assert exact request shape.
+- [x] Conventions and review calls distinguishable in `run_actions.request` JSON.
+- [x] Existing llm gateway tests updated if they assert exact request shape.
 
 **Verification:** `tests/test_llm_gateway.py` or postgres llm call tests.
 
@@ -242,8 +243,8 @@ stores `operation: conventions|review` from `StructuredTask.operation`.
 
 **Acceptance criteria:**
 
-- [ ] Task 7 tests GREEN.
-- [ ] Step frames still have no `id:` line.
+- [x] Task 7 tests GREEN.
+- [x] Step frames still have no `id:` line.
 
 **Verification:** Task 7 pytest; `uv run pytest tests/test_run_stream.py -q`.
 
@@ -265,9 +266,9 @@ https://github.com/larchanka-training/dmc-268-ui-t6/issues/84 with both PR links
 
 **Acceptance criteria:**
 
-- [ ] OpenAPI description for `/api/stream` mentions both event types (feeds Task 12).
-- [ ] UI Zod + contract test PR opened (or ready) in the same window; progress bar still poll-based.
-- [ ] ui#84 comment posted after API PR URL exists.
+- [x] OpenAPI description for `/api/stream` mentions both event types (feeds Task 12).
+- [ ] UI Zod + contract test PR opened (or ready) in the same window; progress bar still poll-based (**deferred — publisher / UI agent**).
+- [ ] ui#84 comment posted after API PR URL exists (**deferred — publisher**).
 
 **Verification:** Doc diff review; UI `pnpm test` for the new schema test.
 
@@ -281,8 +282,8 @@ https://github.com/larchanka-training/dmc-268-ui-t6/issues/84 with both PR links
 
 ## Checkpoint: After Tasks 7–11
 
-- [ ] Ч.2 AC satisfied.
-- [ ] Contract + stream tests green.
+- [x] Ч.2 AC satisfied (API/docs; UI Zod + ui#84 deferred to publisher).
+- [x] Contract + stream tests green.
 
 ---
 
@@ -293,8 +294,8 @@ https://github.com/larchanka-training/dmc-268-ui-t6/issues/84 with both PR links
 
 **Acceptance criteria:**
 
-- [ ] `test_stream_declares_run_step_beside_the_status_event` still passes.
-- [ ] Summary reflects status **and** step events.
+- [x] `test_stream_declares_run_step_beside_the_status_event` still passes.
+- [x] Summary reflects status **and** step events.
 
 **Dependencies:** Task 11 (or merge OpenAPI yaml once).
 
@@ -311,7 +312,7 @@ Reorder `.env.example` so GitLab comments sit with worker/portal block per issue
 
 **Acceptance criteria:**
 
-- [ ] Wording matches `gitlab_review_publication.py` URL construction.
+- [x] Wording matches `gitlab_review_publication.py` URL construction.
 
 **Dependencies:** None (doc).
 
@@ -328,7 +329,7 @@ Reorder `.env.example` so GitLab comments sit with worker/portal block per issue
 
 **Acceptance criteria:**
 
-- [ ] Local stack can pass GitLab vars into worker without editing compose by hand.
+- [x] Local stack can pass GitLab vars into worker without editing compose by hand.
 
 **Dependencies:** Task 13.
 
@@ -347,8 +348,8 @@ field list if not fully done in Task 11.
 
 **Acceptance criteria:**
 
-- [ ] Phase table no longer claims GitLab HTTP checkpoints that the gateway does not run.
-- [ ] T16 target vs implemented codes called out where mixed.
+- [x] Phase table no longer claims GitLab HTTP checkpoints that the gateway does not run.
+- [x] T16 target vs implemented codes called out where mixed.
 
 **Dependencies:** Tasks 11–12.
 
@@ -365,8 +366,8 @@ to mention `llm.review_output`, add `run_step` NOTIFY → listener → hub → `
 
 **Acceptance criteria:**
 
-- [ ] Text search finds `gitlab.publish_review` and run step bridge.
-- [ ] Does not duplicate #194 full catalog work.
+- [x] Text search finds `gitlab.publish_review` and run step bridge.
+- [x] Does not duplicate #194 full catalog work.
 
 **Dependencies:** None.
 
@@ -384,7 +385,7 @@ filter if missing.
 
 **Acceptance criteria:**
 
-- [ ] Doc matches `iter_visible_run_events` / `_visible_updated_at` behaviour.
+- [x] Doc matches `iter_visible_run_events` / `_visible_updated_at` behaviour.
 
 **Dependencies:** None.
 
@@ -401,7 +402,7 @@ filter if missing.
 
 **Acceptance criteria:**
 
-- [ ] At least issue bullets at :27, :1400, :1507 (CONTEXT) and :102, :114, :408 (TEST_PLAN) addressed or cross-linked.
+- [x] At least issue bullets at :27, :1400, :1507 (CONTEXT) and :102, :114, :408 (TEST_PLAN) addressed or cross-linked.
 
 **Dependencies:** None.
 
@@ -418,7 +419,7 @@ filter if missing.
 
 **Acceptance criteria:**
 
-- [ ] Reader can tell which codes `main` emits today.
+- [x] Reader can tell which codes `main` emits today.
 
 **Dependencies:** Task 15.
 

@@ -192,7 +192,7 @@ Environment `staging` перекрывает одноимённую repository v
 | Переменная | Секрет | Кто читает | Значение |
 |---|---|---|---|
 | `GITLAB_TOKEN` | **да** | `worker` | токен в заголовке `PRIVATE-TOKEN`. Один токен на все проекты. Пустое значение: прогон GitLab остаётся в `publishing`, HTTP к GitLab нет |
-| `GITLAB_BASE_URL` | нет | `worker` | базовый URL API GitLab; по умолчанию `https://gitlab.com` |
+| `GITLAB_BASE_URL` | нет | `worker` | корень инстанса GitLab (без `/api/v4`; код добавляет префикс к путям REST); по умолчанию `https://gitlab.com` |
 
 ### Мониторинг (`deploy/monitoring`, [MONITORING.md](MONITORING.md))
 

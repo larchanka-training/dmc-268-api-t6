@@ -699,14 +699,17 @@ def _run_updated_frame(run_id: UUID, status: str, updated_at: datetime) -> str:
 
 
 def _run_step_frame(step: RunStep) -> str:
-    payload = {
+    payload: dict[str, object] = {
         "runId": str(step.run_id),
         "tool": step.tool,
         "index": step.index,
         "ok": step.ok,
         "startedAt": utc_rfc3339(step.started_at),
         "durationMs": step.duration_ms,
+        "attempt": step.attempt,
     }
+    if step.llm_operation is not None:
+        payload["llmOperation"] = step.llm_operation
     return f"event: run.step\ndata: {json.dumps(payload)}\n\n"
 
 

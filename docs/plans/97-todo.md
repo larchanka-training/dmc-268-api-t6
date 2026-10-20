@@ -1,6 +1,7 @@
 # Tasks: GitLab publication, overview review, and pipeline-step SSE (#97)
 
-Status: Tasks 1–6 done. Tasks 7–8 are open.
+Status: Tasks 1–8 done. Overview body budget (4000 / checked paths) deferred to
+[#170](170-todo.md) (D-1 supersedes Task 1 overflow AC).
 Design constraints: [97-plan.md](97-plan.md).
 Every task uses RED → GREEN → refactor. Gates for every task:
 `uv run ruff check .`, `uv run ruff format --check .`, `uv run mypy .`,
@@ -21,9 +22,10 @@ built. The check-run title stays `AI-ревью: {verdict}`.
       `info` counts, and a `**Checked files:**` list of the sorted `hunk_lines`
       paths (`(none)` when there are no paths).
 - [x] Main issue, Done well, Effort, and Additional findings remain. A
-      coordinate-style append still sits after the overview. The 4000-character
-      cut removes only Additional findings; verdict, counts, and paths stay
-      whole even when the path list makes the body longer than 4000 characters.
+      coordinate-style append still sits after the overview. **Body budget:** the
+      stored overview is ≤ 4000 characters with whole finding bullets only;
+      checked paths cap/truncate and overflow footer — see [#170](170-todo.md)
+      (supersedes the pre-#170 “path list may exceed 4000” note).
 - [x] Existing check-run title assertions (`AI-ревью: blocking` and the other
       verdict titles) still pass without a new check-run format.
 

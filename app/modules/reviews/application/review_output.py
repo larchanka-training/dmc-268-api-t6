@@ -538,6 +538,8 @@ class FindingPostProcessingInput:
     """Immutable run context required to safely anchor post-processed findings."""
 
     diff_map: DiffMap
+    # Paths with a non-null review_patch snapshot; drives Checked files only (#170 D-2).
+    checked_paths: frozenset[str]
     rule_names: frozenset[str]
     repository_max_inline: int | None = None
     severity_threshold: SeverityThresholdValue = "all"
@@ -660,6 +662,7 @@ class PublishReviewOutput:
         processed = FindingsPostProcessor.from_default_patterns().process(
             parsed,
             diff_map=context.diff_map,
+            checked_paths=context.checked_paths,
             rule_names=context.rule_names,
             repository_max_inline=context.repository_max_inline,
             severity_threshold=threshold_to_use,

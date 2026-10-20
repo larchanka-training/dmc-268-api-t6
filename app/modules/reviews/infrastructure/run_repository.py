@@ -714,6 +714,19 @@ class SqlAlchemyReviewOutputRepository:
         diff_map = await load_publication_diff_map(self._session, run_id)
         if diff_map is None:
             return None
+        snapshots = (
+            await self._session.execute(
+                select(
+                    CodeChangeDiff.filename,
+                    CodeChangeDiff.review_patch,
+                ).where(
+                    CodeChangeDiff.run_id == run_id,
+                )
+            )
+        ).all()
+        checked_paths = frozenset(
+            filename for filename, review_patch in snapshots if review_patch is not None
+        )
         rule_names = frozenset(rule["name"] for rule in rules if isinstance(rule.get("name"), str))
         # Until #130 connects live worker runs to the verifier, allowed_v2 remains None
         # so legacy runs do not retain unverified v2 rule names even if a snapshot row exists.
@@ -721,6 +734,7 @@ class SqlAlchemyReviewOutputRepository:
 
         return FindingPostProcessingInput(
             diff_map=diff_map,
+            checked_paths=checked_paths,
             rule_names=rule_names,
             repository_max_inline=max_comments,
             severity_threshold=severity_threshold_value(severity_threshold),

@@ -201,7 +201,11 @@ def _publication() -> ReviewPublication:
 
 
 def _context() -> FindingPostProcessingInput:
-    return FindingPostProcessingInput(_added_file_diff_map("app/example.py", 14), frozenset())
+    return FindingPostProcessingInput(
+        diff_map=_added_file_diff_map("app/example.py", 14),
+        checked_paths=frozenset({"app/example.py"}),
+        rule_names=frozenset(),
+    )
 
 
 @pytest.mark.parametrize("encoded", ("str", "bytes"))
@@ -299,6 +303,7 @@ def test_comment_body_formatting() -> None:
 def test_publish_snapshot_run_preserves_v2_rule_attribution() -> None:
     context = FindingPostProcessingInput(
         diff_map=_added_file_diff_map("app/example.py", 14),
+        checked_paths=frozenset({"app/example.py"}),
         rule_names=frozenset(),
         allowed_v2_rules=frozenset({".review/rules.md"}),
     )
@@ -339,6 +344,7 @@ def test_store_review_output_preserves_allowed_v2_rules() -> None:
         async def get_post_processing_input(self, run_id: UUID) -> FindingPostProcessingInput:
             return FindingPostProcessingInput(
                 diff_map=_added_file_diff_map("app/example.py", 14),
+                checked_paths=frozenset({"app/example.py"}),
                 rule_names=frozenset(),
                 allowed_v2_rules=frozenset({".review/rules.md"}),
             )
@@ -422,8 +428,9 @@ def test_store_review_output_persists_dropped_findings_from_reflection_pass() ->
     class FakeReviewRepo:
         async def get_post_processing_input(self, run_id: UUID) -> FindingPostProcessingInput:
             return FindingPostProcessingInput(
-                _added_file_diff_map("app/example.py", 14),
-                frozenset(),
+                diff_map=_added_file_diff_map("app/example.py", 14),
+                checked_paths=frozenset({"app/example.py"}),
+                rule_names=frozenset(),
                 allowed_v2_rules=frozenset({".review/rules.md"}),
             )
 

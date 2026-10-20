@@ -34,6 +34,8 @@ class RunStep:
     ok: bool
     started_at: datetime
     duration_ms: int
+    attempt: int
+    llm_operation: str | None = None
 
 
 def utc_rfc3339(value: datetime) -> str:

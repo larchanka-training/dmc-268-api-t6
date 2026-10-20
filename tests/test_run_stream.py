@@ -139,8 +139,8 @@ def test_hub_coalesces_stale_events_for_a_slow_subscriber() -> None:
 
 def test_step_hub_delivers_both_unread_steps_of_one_run_in_order() -> None:
     hub = InMemoryRunStepHub()
-    first = RunStep(RUN_ID, "llm.call", 0, True, UPDATED_AT, 12)
-    second = RunStep(RUN_ID, 'say "ok"', 1, False, UPDATED_AT, 40)
+    first = RunStep(RUN_ID, "llm.call", 0, True, UPDATED_AT, 12, 1, "review")
+    second = RunStep(RUN_ID, 'say "ok"', 1, False, UPDATED_AT, 40, 1)
 
     async def receive_both() -> list[RunStep]:
         async with hub.subscribe() as events:
@@ -157,8 +157,8 @@ def test_step_hub_delivers_both_unread_steps_of_one_run_in_order() -> None:
 
 def test_step_hub_fans_each_step_out_to_every_live_subscriber() -> None:
     hub = InMemoryRunStepHub()
-    first = RunStep(RUN_ID, "vcs.fetch_diff", 0, True, UPDATED_AT, 5)
-    second = RunStep(OTHER_RUN_ID, "llm.call", 1, True, UPDATED_AT, 6)
+    first = RunStep(RUN_ID, "vcs.fetch_diff", 0, True, UPDATED_AT, 5, 1)
+    second = RunStep(OTHER_RUN_ID, "llm.call", 1, True, UPDATED_AT, 6, 2, "conventions")
 
     async def receive() -> tuple[list[RunStep], list[RunStep]]:
         async with hub.subscribe() as left, hub.subscribe() as right:
@@ -773,8 +773,8 @@ class _QueuedStepHub(InMemoryRunStepHub):
 
 
 def test_stream_emits_each_step_frame_in_order_without_an_id() -> None:
-    first = RunStep(RUN_ID, "llm.call", 0, True, UPDATED_AT, 12)
-    second = RunStep(RUN_ID, 'say "ok"', 1, False, UPDATED_AT, 40)
+    first = RunStep(RUN_ID, "llm.call", 0, True, UPDATED_AT, 12, 1, "review")
+    second = RunStep(RUN_ID, 'say "ok"', 1, False, UPDATED_AT, 40, 1)
 
     class VisibleRepository:
         async def run_updated_at(self, run_id: UUID) -> datetime | None:
@@ -794,12 +794,12 @@ def test_stream_emits_each_step_frame_in_order_without_an_id() -> None:
         "event: run.step\n"
         'data: {"runId": "00000000-0000-0000-0000-000000000100", "tool": "llm.call", '
         '"index": 0, "ok": true, "startedAt": "2026-10-07T12:34:56.123457Z", '
-        '"durationMs": 12}\n'
+        '"durationMs": 12, "attempt": 1, "llmOperation": "review"}\n'
         "\n"
         "event: run.step\n"
         'data: {"runId": "00000000-0000-0000-0000-000000000100", "tool": "say \\"ok\\"", '
         '"index": 1, "ok": false, "startedAt": "2026-10-07T12:34:56.123457Z", '
-        '"durationMs": 40}\n'
+        '"durationMs": 40, "attempt": 1}\n'
         "\n"
     )
     assert "event: run.updated" not in response.text
@@ -807,8 +807,8 @@ def test_stream_emits_each_step_frame_in_order_without_an_id() -> None:
 
 
 def test_stream_drops_a_step_when_the_run_is_not_visible() -> None:
-    hidden = RunStep(OTHER_RUN_ID, "llm.call", 0, True, UPDATED_AT, 3)
-    visible = RunStep(RUN_ID, "context.build", 1, True, UPDATED_AT, 4)
+    hidden = RunStep(OTHER_RUN_ID, "llm.call", 0, True, UPDATED_AT, 3, 1)
+    visible = RunStep(RUN_ID, "context.build", 1, True, UPDATED_AT, 4, 1)
 
     class SelectiveRepository:
         async def run_updated_at(self, run_id: UUID) -> datetime | None:
@@ -827,7 +827,7 @@ def test_stream_drops_a_step_when_the_run_is_not_visible() -> None:
         "event: run.step\n"
         'data: {"runId": "00000000-0000-0000-0000-000000000100", "tool": "context.build", '
         '"index": 1, "ok": true, "startedAt": "2026-10-07T12:34:56.123457Z", '
-        '"durationMs": 4}\n'
+        '"durationMs": 4, "attempt": 1}\n'
         "\n"
     )
     assert str(OTHER_RUN_ID) not in response.text
@@ -880,7 +880,7 @@ def test_stream_subscribes_to_both_hubs_before_status_replay() -> None:
 
 
 def test_last_event_id_replay_emits_only_run_updated() -> None:
-    step = RunStep(RUN_ID, "github.publish_review", 2, False, UPDATED_AT, 9)
+    step = RunStep(RUN_ID, "github.publish_review", 2, False, UPDATED_AT, 9, 1)
     step_hub = InMemoryRunStepHub()
 
     class ReplayThenStep(ReplayRepository):
@@ -908,15 +908,15 @@ def test_last_event_id_replay_emits_only_run_updated() -> None:
             "event: run.step\n"
             'data: {"runId": "00000000-0000-0000-0000-000000000100", '
             '"tool": "github.publish_review", "index": 2, "ok": false, '
-            '"startedAt": "2026-10-07T12:34:56.123457Z", "durationMs": 9}'
+            '"startedAt": "2026-10-07T12:34:56.123457Z", "durationMs": 9, "attempt": 1}'
         ),
     ]
     assert "id:" not in frames[1]
 
 
 def test_slow_subscriber_keeps_the_latest_status_and_every_step() -> None:
-    first = RunStep(RUN_ID, "llm.call", 0, True, UPDATED_AT, 12)
-    second = RunStep(RUN_ID, "review.postprocess", 1, True, UPDATED_AT, 8)
+    first = RunStep(RUN_ID, "llm.call", 0, True, UPDATED_AT, 12, 1, "review")
+    second = RunStep(RUN_ID, "review.postprocess", 1, True, UPDATED_AT, 8, 1)
 
     class OneStatus(InMemoryRunUpdateHub):
         @asynccontextmanager
@@ -964,13 +964,13 @@ def test_slow_subscriber_keeps_the_latest_status_and_every_step() -> None:
             "event: run.step\n"
             'data: {"runId": "00000000-0000-0000-0000-000000000100", "tool": "llm.call", '
             '"index": 0, "ok": true, "startedAt": "2026-10-07T12:34:56.123457Z", '
-            '"durationMs": 12}'
+            '"durationMs": 12, "attempt": 1, "llmOperation": "review"}'
         ),
         (
             "event: run.step\n"
             'data: {"runId": "00000000-0000-0000-0000-000000000100", '
             '"tool": "review.postprocess", "index": 1, "ok": true, '
-            '"startedAt": "2026-10-07T12:34:56.123457Z", "durationMs": 8}'
+            '"startedAt": "2026-10-07T12:34:56.123457Z", "durationMs": 8, "attempt": 1}'
         ),
     ]
     assert '"status":"running"' not in response.text

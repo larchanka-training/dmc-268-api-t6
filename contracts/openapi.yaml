@@ -371,7 +371,7 @@ paths:
     get:
       operationId: streamRunUpdates
       tags: [stream]
-      summary: Subscribe to run status changes
+      summary: Subscribe to run status and step events
       description: >-
         One stream per browser tab, read with `fetch` so it carries the Bearer header.
         `run.updated` is the status event: `event: run.updated` with an `id:` line and a
@@ -424,7 +424,8 @@ paths:
                 type: string
                 description: >-
                   SSE frames, e.g.
-                  `id: 1791376496123457\nevent: run.updated\ndata: {"runId":"…","status":"running"}`.
+                  `id: 1791376496123457\nevent: run.updated\ndata: {"runId":"…","status":"running"}`
+                  or `event: run.step\ndata: {"runId":"…","tool":"llm.call","index":0,"ok":true,"startedAt":"2026-10-12T09:00:00Z","durationMs":12,"attempt":1,"llmOperation":"review"}`.
               x-events:
                 run.updated:
                   $ref: "#/components/schemas/RunUpdatedEvent"
@@ -1446,7 +1447,7 @@ components:
       description: >-
         Data of a `run.step` SSE event. A step frame has `event:` and `data:` and no `id:`
         line, and it is not replayed on reconnect.
-      required: [runId, tool, index, ok, startedAt, durationMs]
+      required: [runId, tool, index, ok, startedAt, durationMs, attempt]
       properties:
         runId:
           type: string
@@ -1466,6 +1467,14 @@ components:
         durationMs:
           type: integer
           minimum: 0
+        attempt:
+          type: integer
+          minimum: 1
+          description: "`runs.attempt` when the step was recorded."
+        llmOperation:
+          type: string
+          enum: [conventions, review]
+          description: Present when `tool` is `llm.call`; omitted for other tools.
       additionalProperties: false
     RagIndex:
       type: object

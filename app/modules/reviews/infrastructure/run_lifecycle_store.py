@@ -16,6 +16,9 @@ from app.common.infrastructure.db.unit_of_work import SqlAlchemyUnitOfWork
 from app.modules.analytics.infrastructure.models import UsageEvent
 from app.modules.repositories.infrastructure.models import ProviderInstallation, Repository
 from app.modules.reviews.application.check_runs import CheckRunReport, CheckRunTarget
+from app.modules.reviews.application.findings_post_processor import (
+    body_only_accounted_in_review_body,
+)
 from app.modules.reviews.application.handle_review_run import RunGuardSnapshot
 from app.modules.reviews.application.policy_errors import policy_error_detail
 from app.modules.reviews.application.publish_run_review import PublishContext
@@ -336,6 +339,12 @@ class SqlAlchemyRunLifecycleStore:
             .where(Finding.run_id == run_id, Finding.drop_reason == "severity_threshold")
         )
         inline = sum(1 for item in findings if item.inline_comment)
+        review_body = run.review_body or ""
+        body_count = (
+            body_only_accounted_in_review_body(review_body)
+            if review_body
+            else len(findings) - inline
+        )
         return CheckRunReport(
             target,
             run.state.value,
@@ -343,7 +352,7 @@ class SqlAlchemyRunLifecycleStore:
             verdict=verdict(severities),
             severity_counts=severity_counts(severities),
             inline_count=inline,
-            body_count=len(findings) - inline,
+            body_count=body_count,
             below_threshold_count=below_threshold or 0,
             summary_only=bool(summary_only),
         )
