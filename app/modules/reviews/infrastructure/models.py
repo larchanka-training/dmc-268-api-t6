@@ -187,6 +187,7 @@ class Run(Base):
     __table_args__ = (
         UniqueConstraint("idempotency_key"),
         CheckConstraint("attempt >= 0", name="ck_runs_attempt_nonnegative"),
+        # Same values as RunTrigger; changing them needs a new revision (revisions are frozen).
         CheckConstraint(
             "trigger IN ('webhook', 'manual', 'rerun', 'dry_run')", name="ck_runs_trigger"
         ),
