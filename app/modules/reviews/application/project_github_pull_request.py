@@ -75,6 +75,9 @@ class PullRequestEvent:
     sender_type: str | None = None
     sender_login: str | None = None
     current_label_names: frozenset[str] | None = None
+    # From the payload; a merge into the default branch requests an index update (#143).
+    merge_commit_sha: str | None = None
+    repository_default_branch: str | None = None
 
 
 @dataclass(frozen=True)

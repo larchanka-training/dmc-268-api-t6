@@ -20,6 +20,7 @@ from app.modules.code_index.application.maintenance import (
 )
 from app.modules.code_index.application.ports import IndexedRepository
 from app.modules.code_index.domain.enums import IndexStatus, PurgeReason
+from app.modules.code_index.infrastructure.effective_rag import GITHUB_PROVIDER, RAG_ON
 from app.modules.code_index.infrastructure.index_store import (
     DISPLACED_GRACE,
     SqlAlchemyCodeIndexUnitOfWork,
@@ -28,25 +29,17 @@ from app.modules.code_index.infrastructure.index_store import (
 from app.modules.code_index.infrastructure.models import CodeIndexFile, CodeIndexState
 from app.modules.repositories.infrastructure.models import ProviderInstallation, Repository
 
-# The effective RAG of a repository (ADR §6.1): the toggle is on and the App can read it.
-_RAG_ON = and_(
-    Repository.rag_enabled,
-    Repository.installation_available,
-    ProviderInstallation.deleted_at.is_(None),
-)
-# The indexer has a snapshot source for GitHub only (GitLab is #97).
-_GITHUB = ProviderInstallation.provider == "github"
 # A repository to re-arm (ADR §4): no state row, or one purged by a removal or a toggle.
 _REARM = and_(
-    _RAG_ON,
-    _GITHUB,
+    RAG_ON,
+    GITHUB_PROVIDER,
     or_(
         CodeIndexState.repository_id.is_(None),
         CodeIndexState.purge_reason.in_([PurgeReason.REMOVED, PurgeReason.DISABLED]),
     ),
 )
 # A live index to disarm, and its purge reason: turned off by the user, else lost access.
-_DISARM = and_(CodeIndexState.purge_reason.is_(None), not_(_RAG_ON))
+_DISARM = and_(CodeIndexState.purge_reason.is_(None), not_(RAG_ON))
 _DISARM_REASON = case(
     (not_(Repository.rag_enabled), PurgeReason.DISABLED.value), else_=PurgeReason.REMOVED.value
 )
@@ -159,8 +152,8 @@ class SqlAlchemyCodeIndexMaintenance:
                 ProviderInstallation, ProviderInstallation.id == Repository.provider_installation_id
             )
             .where(
-                _RAG_ON,
-                _GITHUB,
+                RAG_ON,
+                GITHUB_PROVIDER,
                 CodeIndexState.purge_reason.is_(None),
                 CodeIndexState.status != IndexStatus.FAILED,
                 true() if after is None else CodeIndexState.repository_id > after,

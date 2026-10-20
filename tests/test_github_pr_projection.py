@@ -1050,6 +1050,66 @@ def test_webhook_payload_parses_pr_metadata_and_sender() -> None:
     assert event == _event("review_requested", sender_type="User")
 
 
+def test_webhook_payload_of_a_merge_parses_its_merge_commit_and_the_default_branch() -> None:
+    merge_commit = "c" * 40
+    payload = _webhook_payload()
+    payload["action"] = "closed"
+    payload["repository"] = {"id": 101, "full_name": "octo/repo", "default_branch": "main"}
+    pr = dict(cast(Mapping[str, object], payload["pull_request"]))
+    pr.update({"state": "closed", "merged": True, "merge_commit_sha": merge_commit})
+    payload["pull_request"] = pr
+
+    event = parse_pull_request_event(payload)
+
+    assert (event.state, event.merge_commit_sha, event.repository_default_branch) == (
+        PullRequestState.MERGED,
+        merge_commit,
+        "main",
+    )
+
+
+@pytest.mark.parametrize("merge_commit_sha", ["absent", None])
+def test_webhook_payload_without_a_merge_commit_or_default_branch_reads_none(
+    merge_commit_sha: str | None,
+) -> None:
+    payload = _webhook_payload()
+    if merge_commit_sha != "absent":
+        pr = dict(cast(Mapping[str, object], payload["pull_request"]))
+        pr["merge_commit_sha"] = merge_commit_sha
+        payload["pull_request"] = pr
+
+    event = parse_pull_request_event(payload)
+
+    assert (event.merge_commit_sha, event.repository_default_branch) == (None, None)
+
+
+@pytest.mark.parametrize(
+    ("repository", "pull_request"),
+    [
+        pytest.param({"default_branch": ""}, {}, id="empty-branch"),
+        pytest.param({"default_branch": "b" * 256}, {}, id="overlong-branch"),
+        pytest.param({"default_branch": 7}, {}, id="branch-not-a-string"),
+        pytest.param({}, {"merge_commit_sha": "z" * 40}, id="non-hex-sha"),
+        pytest.param({}, {"merge_commit_sha": "c" * 40 + "\n"}, id="sha-with-a-newline"),
+        pytest.param({}, {"merge_commit_sha": 7}, id="sha-not-a-string"),
+    ],
+)
+def test_an_invalid_index_only_field_reads_none_and_never_rejects_the_payload(
+    repository: dict[str, object], pull_request: dict[str, object]
+) -> None:
+    payload = _webhook_payload()
+    payload["action"] = "opened"
+    payload["repository"] = {"id": 101, "full_name": "octo/repo", **repository}
+    pr = dict(cast(Mapping[str, object], payload["pull_request"]))
+    pr.update(pull_request)
+    payload["pull_request"] = pr
+
+    event = parse_pull_request_event(payload)
+
+    assert event == _event("opened", sender_type="User")
+    assert (event.merge_commit_sha, event.repository_default_branch) == (None, None)
+
+
 def test_edited_receipt_updates_metadata_without_changing_intent_clock_or_enqueue() -> None:
     @dataclass
     class Trigger:

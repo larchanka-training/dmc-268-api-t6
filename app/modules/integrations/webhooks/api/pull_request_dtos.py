@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 from typing import Literal, get_args
 
-from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, HttpUrl
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, HttpUrl, field_validator
 
 from app.common.application.github_repository_name import (
     REPOSITORY_FULL_NAME_MAX_LENGTH,
@@ -19,6 +20,7 @@ from app.modules.reviews.application.project_github_pull_request import (
 
 _MAX_BIGINT = 2**63 - 1
 _SHA_PATTERN = r"^(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})$"
+_SHA = re.compile(_SHA_PATTERN)
 PullRequestWebhookAction = Literal[
     "opened",
     "synchronize",
@@ -55,6 +57,14 @@ class _GitHubRepositoryDto(_GitHubIdDto):
     full_name: str = Field(
         pattern=REPOSITORY_FULL_NAME_PATTERN, max_length=REPOSITORY_FULL_NAME_MAX_LENGTH
     )
+    # Index only (#143): a merge into it requests an index update. An invalid value reads
+    # as absent, so it never rejects a review payload.
+    default_branch: str | None = None
+
+    @field_validator("default_branch", mode="before")
+    @classmethod
+    def _branch_or_none(cls, value: object) -> str | None:
+        return value if isinstance(value, str) and 0 < len(value) <= 255 else None
 
 
 class _GitHubUserDto(BaseModel):
@@ -96,7 +106,15 @@ class _GitHubPullRequestDto(BaseModel):
     base: _GitHubRefDto
     state: Literal["open", "closed"]
     merged: bool = False
+    # Index only (#143): the commit a merge put on the base branch, the index target of a
+    # merge. An invalid value reads as absent, so it never rejects a review payload.
+    merge_commit_sha: str | None = None
     updated_at: AwareDatetime = Field(strict=False)
+
+    @field_validator("merge_commit_sha", mode="before")
+    @classmethod
+    def _sha_or_none(cls, value: object) -> str | None:
+        return value if isinstance(value, str) and _SHA.fullmatch(value) else None
 
 
 class _GitHubPullRequestPayloadDto(BaseModel):
@@ -157,4 +175,6 @@ def _event_from_payload(parsed: _GitHubPullRequestPayloadDto) -> PullRequestEven
         repository_full_name=parsed.repository.full_name,
         sender_type=parsed.sender.type if parsed.sender is not None else None,
         sender_login=parsed.sender.login if parsed.sender is not None else None,
+        merge_commit_sha=item.merge_commit_sha,
+        repository_default_branch=parsed.repository.default_branch,
     )

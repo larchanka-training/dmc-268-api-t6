@@ -23,6 +23,8 @@ from app.bootstrap.portal_auth import get_auth_scope
 from app.bootstrap.reconciler import reconciler_loop
 from app.modules.auth.application.scope import AuthScope
 from app.modules.auth.infrastructure.sessions import SqlAlchemyAuthSessionUnitOfWork
+from app.modules.code_index.application.index_refresh import RequestIndexRefresh
+from app.modules.code_index.infrastructure.index_refresh import SqlAlchemyIndexRefreshUnitOfWork
 from app.modules.integrations.webhooks.api.dispatch import GitHubWebhookDispatchAdapter, action_of
 from app.modules.integrations.webhooks.application.github_installation_dispatch import (
     GitHubInstallationDeliveryDispatcher,
@@ -352,6 +354,9 @@ class ReviewsApiResources:
             run_trigger=run_trigger,
             rules_refresh=RequestRulesRefreshOnPush(
                 partial(SqlAlchemyRulesRefreshUnitOfWork, self._session_factory)
+            ),
+            index_refresh=RequestIndexRefresh(
+                partial(SqlAlchemyIndexRefreshUnitOfWork, self._session_factory)
             ),
         )
         return GitHubWebhookDispatchAdapter(dispatcher)

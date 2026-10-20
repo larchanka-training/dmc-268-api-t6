@@ -22,11 +22,13 @@ from app.modules.reviews.application.project_github_pull_request import (
     PullRequestEvent,
     PullRequestLabelEvent,
     PullRequestProjectionStatus,
+    PullRequestState,
 )
 from app.modules.reviews.application.trigger_from_delivery import CiTriggerEvent, RunTriggerOutcome
 
 _LOGGER = logging.getLogger(__name__)
 _RUN_TRIGGER_PR_ACTIONS = frozenset({"reopened", "synchronize"})
+_INDEX_REQUESTED = "index=requested"
 
 
 def _with_action(action: str | None, detail: str | None) -> str | None:
@@ -34,6 +36,14 @@ def _with_action(action: str | None, detail: str | None) -> str | None:
     if action is None:
         return detail
     return f"action={action}" if detail is None else f"action={action} {detail}"
+
+
+def _with_index_requested(
+    result: InstallationDeliveryDispatchResult,
+) -> InstallationDeliveryDispatchResult:
+    """The status stays; the detail records that the index update was requested (#143)."""
+    detail = _INDEX_REQUESTED if result.detail is None else f"{result.detail} {_INDEX_REQUESTED}"
+    return replace(result, detail=detail)
 
 
 class InstallationDeliveryDispatchStatus(StrEnum):
@@ -142,6 +152,18 @@ class RulesRefreshOnPushHandler(Protocol):
     async def execute(self, installation_external_id: int, repository_external_id: int) -> bool: ...
 
 
+class CodeIndexRefreshHandler(Protocol):
+    """Request an index update up to ``commit_sha`` (only the wake-up marker when None).
+
+    One short transaction, no GitHub call. False when the repository is not connected,
+    its effective RAG is off, or it has no live index.
+    """
+
+    async def execute(
+        self, installation_external_id: int, repository_external_id: int, commit_sha: str | None
+    ) -> bool: ...
+
+
 class GitHubInstallationDeliveryDispatcher:
     """Safely route supported GitHub installation events to onboarding.
 
@@ -159,6 +181,7 @@ class GitHubInstallationDeliveryDispatcher:
         label_intent_projector: PullRequestLabelIntentHandler | None = None,
         run_trigger: WebhookRunTriggerHandler | None = None,
         rules_refresh: RulesRefreshOnPushHandler | None = None,
+        index_refresh: CodeIndexRefreshHandler | None = None,
     ) -> None:
         self._resolver = resolver
         self._onboarding = onboarding
@@ -166,6 +189,7 @@ class GitHubInstallationDeliveryDispatcher:
         self._label_intent_projector = label_intent_projector
         self._run_trigger = run_trigger
         self._rules_refresh = rules_refresh
+        self._index_refresh = index_refresh
 
     async def execute(self, delivery: GitHubDispatchEvent) -> InstallationDeliveryDispatchResult:
         event = delivery.value
@@ -213,6 +237,10 @@ class GitHubInstallationDeliveryDispatcher:
                 )
             projection = await self._pull_request_projector.execute(event)
             result = self._projection_result(projection, event.action)
+            # Before the early return: a merge into a repository with paused reviews
+            # still moves the default branch the index follows (ADR 0001 §6.1).
+            if await self._refresh_index_on_merge(event):
+                result = _with_index_requested(result)
             if result.status != InstallationDeliveryDispatchStatus.PROJECTED_PR:
                 return result
             if event.action in _RUN_TRIGGER_PR_ACTIONS:
@@ -263,6 +291,21 @@ class GitHubInstallationDeliveryDispatcher:
             )
         return InstallationDeliveryDispatchResult(
             status=InstallationDeliveryDispatchStatus.ONBOARDED
+        )
+
+    async def _refresh_index_on_merge(self, event: PullRequestEvent) -> bool:
+        """A merge into the default branch named by the payload requests an index update
+        up to its merge commit; the change set follows the indexed commit, not the PR."""
+        if (
+            self._index_refresh is None
+            or event.action != "closed"
+            or event.state is not PullRequestState.MERGED
+            or event.repository_default_branch is None
+            or event.target_branch != event.repository_default_branch
+        ):
+            return False
+        return await self._index_refresh.execute(
+            event.installation_external_id, event.repository_external_id, event.merge_commit_sha
         )
 
     async def _push_result(self, event: PushEvent) -> InstallationDeliveryDispatchResult:
