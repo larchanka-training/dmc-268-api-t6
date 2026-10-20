@@ -41,7 +41,10 @@ from app.modules.reviews.infrastructure.run_action_records import insert_run_act
 from app.modules.reviews.infrastructure.run_notifications import notify_run_state
 from app.modules.reviews.infrastructure.run_origin import active_origin_condition, origin_active
 from app.modules.reviews.infrastructure.run_origin_locks import lock_run_origin_row
-from app.modules.reviews.infrastructure.run_repository import _to_published_finding_row
+from app.modules.reviews.infrastructure.run_repository import (
+    _published_finding_from_row,
+    load_publication_diff_map,
+)
 from app.modules.workspaces.infrastructure.models import Workspace
 
 _ROW = (Run, CodeChange, Repository, ProviderInstallation)
@@ -363,6 +366,7 @@ class SqlAlchemyRunLifecycleStore:
             return None
         run, pr, repository, installation = row
         findings = await self._published_findings(run_id)
+        diff_map = await load_publication_diff_map(self._session, run_id)
         return PublishContext(
             run_id=run.id,
             state=run.state.value,
@@ -378,7 +382,9 @@ class SqlAlchemyRunLifecycleStore:
             pr_number=pr.external_number,
             review_body=run.review_body or "",
             findings=tuple(
-                _to_published_finding_row(item) for item in findings if item.inline_comment
+                _published_finding_from_row(item, diff_map)
+                for item in findings
+                if item.inline_comment
             ),
             findings_hash=findings_hash(_hashed(item) for item in findings),
             provider=installation.provider,
@@ -392,7 +398,7 @@ class SqlAlchemyRunLifecycleStore:
         review_id: int,
         comment_ids: tuple[int, ...],
         findings_hash: str,
-        moved_to_body: bool,
+        moved_to_body_findings: tuple[tuple[str, int], ...] = (),
         now: datetime,
     ) -> str | None:
         """T14 under the Run lock; a cancel or push seen during the POST wins (T15).
@@ -419,9 +425,12 @@ class SqlAlchemyRunLifecycleStore:
         pr_head_sha, pr_state = pr.head_sha, pr.state
         findings = await self._published_findings(run_id)
         inline = [item for item in findings if item.inline_comment]
-        if moved_to_body:
+        if moved_to_body_findings:
+            moved = frozenset(moved_to_body_findings)
             for item in inline:
-                item.inline_comment = False
+                line = item.line_end or item.line_start
+                if (item.file_path, line) in moved:
+                    item.inline_comment = False
         elif len(comment_ids) == len(inline):
             # GitHub returns review comments in submission order.
             for finding, comment_id in zip(inline, comment_ids, strict=True):

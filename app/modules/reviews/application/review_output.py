@@ -15,6 +15,7 @@ from app.common.application.unit_of_work import UnitOfWork
 from app.modules.reviews.application.verdict import SeverityThresholdValue
 
 if TYPE_CHECKING:
+    from app.modules.reviews.application.diff_map import DiffMap
     from app.modules.reviews.application.findings_post_processor import ProcessedReviewOutput
     from app.modules.reviews.application.policy_snapshot import CallManifest
 
@@ -283,6 +284,11 @@ class PublishedFinding:
     suggestion: str | None
     confidence: float
     rule_name: str | None
+    gitlab_old_path: str | None = None
+    gitlab_old_line: int | None = None
+    gitlab_old_line_only: bool = False
+    gitlab_line_range_start_code: str | None = None
+    gitlab_line_range_end_code: str | None = None
 
 
 def comment_body(title: str, body: str, suggestion: str | None) -> str:
@@ -290,6 +296,31 @@ def comment_body(title: str, body: str, suggestion: str | None) -> str:
     text = f"**{title}**\n\n{body}"
     if suggestion:
         text += f"\n\n```suggestion\n{suggestion}\n```"
+    return text
+
+
+_GITLAB_MAX_MULTILINE_SUGGESTION_SPAN = 100
+
+
+def gitlab_comment_body(
+    title: str,
+    body: str,
+    suggestion: str | None,
+    *,
+    start_line: int | None,
+    line: int,
+) -> str:
+    """GitLab discussion body; multiline ranges use ``suggestion:-(E-S)+0`` (§9.5)."""
+    text = f"**{title}**\n\n{body}"
+    if not suggestion:
+        return text
+    if start_line is None:
+        text += f"\n\n```suggestion\n{suggestion}\n```"
+        return text
+    span = line - start_line
+    if span > _GITLAB_MAX_MULTILINE_SUGGESTION_SPAN:
+        return text
+    text += f"\n\n```suggestion:-{span}+0\n{suggestion}\n```"
     return text
 
 
@@ -307,7 +338,7 @@ class ReviewPublication:
 class FindingPostProcessingInput:
     """Immutable run context required to safely anchor post-processed findings."""
 
-    hunk_lines: dict[str, frozenset[int]]
+    diff_map: DiffMap
     rule_names: frozenset[str]
     repository_max_inline: int | None = None
     severity_threshold: SeverityThresholdValue = "all"
@@ -397,7 +428,7 @@ class PublishReviewOutput:
             return False
         processed = FindingsPostProcessor.from_default_patterns().process(
             parsed,
-            hunk_lines=context.hunk_lines,
+            diff_map=context.diff_map,
             rule_names=context.rule_names,
             repository_max_inline=context.repository_max_inline,
             severity_threshold=context.severity_threshold,

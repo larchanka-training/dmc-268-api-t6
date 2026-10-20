@@ -8,6 +8,8 @@ from dataclasses import dataclass
 from importlib.resources import files
 from typing import Literal
 
+from app.modules.reviews.application.diff_anchor import Anchor, AnchorRejection, resolve_anchor
+from app.modules.reviews.application.diff_map import DiffMap
 from app.modules.reviews.application.review_output import (
     _SERVICE_DEFAULTS_ID_RE,
     ReviewFinding,
@@ -96,7 +98,7 @@ class FindingsPostProcessor:
         self,
         output: ReviewOutput,
         *,
-        hunk_lines: dict[str, frozenset[int]],
+        diff_map: DiffMap,
         rule_names: frozenset[str],
         repository_max_inline: int | None = None,
         severity_threshold: SeverityThresholdValue = "all",
@@ -128,20 +130,12 @@ class FindingsPostProcessor:
 
         prepared: list[ProcessedFinding] = []
         for item in candidates:
-            finding = item.finding
-            bucket: Bucket = (
-                "body_only" if finding.confidence < self._patterns.min_confidence else "inline"
-            )
-            if finding.path not in hunk_lines:
+            finding, bucket = _classify_anchor(item.finding, diff_map)
+            if bucket == "dropped":
                 dropped.append(ProcessedFinding(finding, item.position, "dropped", "unknown_path"))
                 continue
-            valid_lines = hunk_lines[finding.path]
-            if finding.line not in valid_lines:
+            if finding.confidence < self._patterns.min_confidence:
                 bucket = "body_only"
-            if finding.start_line is not None and (
-                finding.start_line not in valid_lines or finding.start_line >= finding.line
-            ):
-                finding = finding.model_copy(update={"start_line": None})
             prepared.append(ProcessedFinding(finding, item.position, bucket))
 
         inline_candidates = [item for item in prepared if item.bucket == "inline"]
@@ -173,7 +167,7 @@ class FindingsPostProcessor:
                 output,
                 tuple(inline + body_only),
                 tuple(body_only),
-                hunk_lines,
+                diff_map,
                 severity_threshold,
                 len(below_threshold),
             ),
@@ -270,6 +264,31 @@ class FindingsPostProcessor:
         return ProcessedFinding(repaired, item.position, item.bucket)
 
 
+def _classify_anchor(
+    finding: ReviewFinding, diff_map: DiffMap
+) -> tuple[ReviewFinding, Bucket | Literal["dropped"]]:
+    """Map one finding to inline, body_only, or dropped via DiffMap anchoring."""
+    anchor = resolve_anchor(
+        diff_map, path=finding.path, start_line=finding.start_line, line=finding.line
+    )
+    if not isinstance(anchor, Anchor) and finding.start_line is not None:
+        single = resolve_anchor(diff_map, path=finding.path, start_line=None, line=finding.line)
+        if isinstance(single, Anchor):
+            finding = finding.model_copy(update={"start_line": None})
+            anchor = single
+    if isinstance(anchor, Anchor):
+        return finding, "inline"
+    if anchor is AnchorRejection.UNKNOWN_PATH:
+        return finding, "dropped"
+    return finding, "body_only"
+
+
+def _checked_paths(diff_map: DiffMap) -> tuple[str, ...]:
+    return tuple(
+        sorted(path for path in (file.new_path for file in diff_map.files) if path is not None)
+    )
+
+
 def _normalize_title(title: str) -> str:
     return re.sub(r"[^a-z0-9]+", " ", title.lower()).strip()
 
@@ -282,13 +301,13 @@ def _render_body(
     output: ReviewOutput,
     kept: tuple[ProcessedFinding, ...],
     body_only: tuple[ProcessedFinding, ...],
-    hunk_lines: dict[str, frozenset[int]],
+    diff_map: DiffMap,
     severity_threshold: SeverityThresholdValue,
     below_threshold: int,
 ) -> str:
     prose = render_review_body(output.summary)
     heading, separator, rest = prose.partition("\n\n")
-    overview = _overview(kept, hunk_lines, severity_threshold, below_threshold)
+    overview = _overview(kept, diff_map, severity_threshold, below_threshold)
     prefix = f"{heading}{separator}{overview}\n\n{rest}"
     if not body_only:
         return prefix
@@ -302,14 +321,14 @@ def _render_body(
 
 def _overview(
     kept: tuple[ProcessedFinding, ...],
-    hunk_lines: dict[str, frozenset[int]],
+    diff_map: DiffMap,
     severity_threshold: SeverityThresholdValue,
     below_threshold: int,
 ) -> str:
     severities = [item.finding.severity for item in kept]
     counts = severity_counts(severities)
     count_text = severity_count_phrase(counts)
-    paths = sorted(hunk_lines)
+    paths = list(_checked_paths(diff_map))
     checked = "\n".join(f"- {path}" for path in paths) if paths else "(none)"
     below = (
         (f"**Below severity threshold ({severity_threshold}):** {below_threshold}",)

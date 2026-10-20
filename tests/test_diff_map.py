@@ -16,6 +16,7 @@ from app.modules.reviews.application.diff_map import (
     is_supported_path,
 )
 from app.modules.reviews.application.prompt_builder import FileStatus, PullRequestMeta
+from app.modules.reviews.application.publication_coordinates import gitlab_line_code
 from app.modules.reviews.application.vcs_diff import PullRequestLocator, VcsFile, VcsPullRequest
 
 _HEAD = "a" * 40
@@ -320,6 +321,31 @@ def test_incomplete_file_list_is_recorded_not_assumed_complete() -> None:
 
     assert diff_map.file_list_complete is False
     assert diff_map.incomplete_reasons == ("file_count_mismatch",)
+
+
+def test_gitlab_cursors_match_context_section_nine_five_fixture() -> None:
+    """Added rows on path ``a`` expose cursors before increment for GitLab line_code."""
+    patch = "@@ -10,3 +10,4 @@\n before()\n-old_value()\n+new_value()\n+validate()\n after()"
+    diff_map = _build(
+        _file(
+            filename="a",
+            patch=patch,
+            additions=2,
+            deletions=1,
+        )
+    )
+    rows = diff_map.files[0].hunks[0].rows
+    added = [row for row in rows if row.kind is RowKind.ADDED]
+    assert [(row.new_line, row.old_cursor, row.new_cursor) for row in added] == [
+        (11, 12, 11),
+        (12, 12, 12),
+    ]
+    assert gitlab_line_code("a", added[0].old_cursor, added[0].new_cursor) == (
+        "86f7e437faa5a7fce15d1ddcb9eaeaea377667b8_12_11"
+    )
+    assert gitlab_line_code("a", added[1].old_cursor, added[1].new_cursor) == (
+        "86f7e437faa5a7fce15d1ddcb9eaeaea377667b8_12_12"
+    )
 
 
 def test_digest_is_stable_for_the_same_input_and_changes_with_the_diff() -> None:

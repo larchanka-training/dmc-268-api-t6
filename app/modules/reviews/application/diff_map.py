@@ -77,6 +77,8 @@ class DiffRow:
     old_line: int | None
     new_line: int | None
     text: str
+    old_cursor: int
+    new_cursor: int
 
 
 @dataclass(frozen=True)
@@ -352,7 +354,15 @@ def _parse_hunks(file_id: str, lines: list[str]) -> tuple[DiffHunk, ...]:
         old_end, new_end = hunk.old_start + hunk.old_count, hunk.new_start + hunk.new_count
         hunk_id = f"{file_id}:{len(hunks)}"
         rows = tuple(
-            DiffRow(f"{hunk_id}:{index}", RowKind(row.kind), row.old_line, row.new_line, row.text)
+            DiffRow(
+                f"{hunk_id}:{index}",
+                RowKind(row.kind),
+                row.old_line,
+                row.new_line,
+                row.text,
+                row.old_cursor,
+                row.new_cursor,
+            )
             for index, row in enumerate(hunk.rows)
         )
         hunks.append(

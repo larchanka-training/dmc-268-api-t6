@@ -606,18 +606,59 @@ def test_get_post_processing_input_returns_none_allowed_v2_rules_for_legacy_run(
 
     run_id = UUID(int=1)
     rules = [{"name": "Standard Rule"}]
-    first_row = (UUID(int=10), "head_sha_123", rules, 10, SeverityThreshold.ALL)
-    diff_rows = [("app/main.py", "@@ -1,3 +1,3 @@\n context\n+added\n context")]
+    post_input_row = (rules, 10, SeverityThreshold.ALL)
+    run_meta_row = ("c" * 40, "b" * 40, UUID(int=20), 7)
+    diff_row = SimpleNamespace(
+        filename="app/main.py",
+        # Valid unified diff: new-side line 2 is the added row (DiffMap anchoring #171).
+        patch="@@ -1,1 +1,2 @@\n line1\n+added",
+        blob_sha="d" * 40,
+        status="modified",
+        previous_filename=None,
+        additions=1,
+        deletions=0,
+        changes=1,
+        omission_reason=None,
+        review_patch=None,
+        summary_only=False,
+    )
+
+    class FakeScalarsResult:
+        def __init__(self, items: list[Any]) -> None:
+            self._items = items
+
+        def all(self) -> list[Any]:
+            return self._items
+
+    class MultiExecuteResult:
+        def __init__(
+            self, *, rows: list[tuple[Any, ...]] | None = None, scalars: list[Any] | None = None
+        ) -> None:
+            self._rows = rows or []
+            self._scalars = scalars or []
+
+        def one_or_none(self) -> tuple[Any, ...] | None:
+            return self._rows[0] if self._rows else None
+
+        def scalars(self) -> FakeScalarsResult:
+            return FakeScalarsResult(self._scalars)
 
     class MultiQueryFakeSession:
         def __init__(self) -> None:
             self.calls = 0
 
-        async def execute(self, statement: Any) -> FakeResult:
+        async def execute(self, statement: Any) -> MultiExecuteResult:
             self.calls += 1
             if self.calls == 1:
-                return FakeResult([first_row])
-            return FakeResult(diff_rows)
+                return MultiExecuteResult(rows=[post_input_row])
+            if self.calls == 2:
+                return MultiExecuteResult(rows=[run_meta_row])
+            if self.calls == 3:
+                return MultiExecuteResult(scalars=[diff_row])
+            return MultiExecuteResult()
+
+        async def scalar(self, statement: Any) -> Any:
+            return None
 
     from app.modules.reviews.infrastructure.run_repository import (
         SqlAlchemyReviewOutputRepository,
@@ -677,7 +718,7 @@ def test_get_post_processing_input_returns_none_allowed_v2_rules_for_legacy_run(
     )
     processed = FindingsPostProcessor.from_default_patterns().process(
         raw_output,
-        hunk_lines=post_input.hunk_lines,
+        diff_map=post_input.diff_map,
         rule_names=post_input.rule_names,
         repository_max_inline=post_input.repository_max_inline,
         severity_threshold=post_input.severity_threshold,

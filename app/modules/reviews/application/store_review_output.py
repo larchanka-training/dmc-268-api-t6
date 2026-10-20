@@ -117,7 +117,7 @@ class StoreReviewOutput:
         processor = FindingsPostProcessor.from_default_patterns()
         processed = processor.process(
             parsed,
-            hunk_lines=context.hunk_lines,
+            diff_map=context.diff_map,
             rule_names=context.rule_names,
             repository_max_inline=context.repository_max_inline,
             severity_threshold=context.severity_threshold,
