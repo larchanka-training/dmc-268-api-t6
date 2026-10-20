@@ -513,7 +513,9 @@ downgrade удаляет их. Ревизия `20261019_0036` (#174) добав�
 downgrade удаляет его. Ревизия `20261020_0037` (#143) добавляет в `code_index_states`
 маркер пробуждения `wake_requested_at` с CHECK `ck_code_index_states_wake_live` (маркер
 только у живого индекса: без `purge_reason` и не `failed`) и частичным индексом
-`ix_code_index_states_wake_requested`; downgrade удаляет индекс, CHECK и колонку. Будущие изменения схемы оформляются новой ревизией, а не правкой
+`ix_code_index_states_wake_requested`, а в `code_index_files` — частичный индекс
+закрытых строк `ix_code_index_files_closed` для пробы сборки мусора; downgrade удаляет
+индексы, CHECK и колонку. Будущие изменения схемы оформляются новой ревизией, а не правкой
 уже применённой.
 
 Миграции запускаются один раз отдельным deployment-шагом до старта процессов, не

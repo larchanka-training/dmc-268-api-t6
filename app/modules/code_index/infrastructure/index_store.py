@@ -173,6 +173,80 @@ def _readable(model: _GraphModel, repository_id: UUID) -> list[ColumnElement[boo
     ]
 
 
+def _older_generation(model: _GraphModel, generation: _Expression[int]) -> ColumnElement[bool]:
+    """A row of a generation a purge has left behind."""
+    return model.generation < generation
+
+
+def _abandoned(
+    model: _GraphModel,
+    generation: _Expression[int],
+    published: _Expression[int],
+    leased: ColumnElement[int],
+) -> ColumnElement[bool]:
+    """An unpublished row of this generation, except the lease's own publication."""
+    return and_(
+        model.generation == generation,
+        model.valid_from > published,
+        or_(leased.is_(None), model.valid_from != leased),
+    )
+
+
+def _below_floor(
+    model: _GraphModel,
+    generation: _Expression[int],
+    floor: _Expression[int],
+    displaced_due: ColumnElement[bool],
+) -> ColumnElement[bool]:
+    """A row a full build of this generation displaced, past the grace."""
+    return and_(displaced_due, model.generation == generation, model.valid_from < floor)
+
+
+def _closed(
+    model: _GraphModel,
+    generation: _Expression[int],
+    published: _Expression[int],
+    displaced_due: ColumnElement[bool],
+) -> ColumnElement[bool]:
+    """A row an incremental build closed, past the grace.
+
+    `valid_to IS NOT NULL` adds nothing to the comparison; it repeats the predicate of the
+    partial index `ix_code_index_files_closed`, so a probe of this branch alone reads only
+    the closed rows.
+    """
+    return and_(
+        displaced_due,
+        model.generation == generation,
+        model.valid_to.is_not(None),
+        model.valid_to <= published,
+    )
+
+
+def garbage_branches(
+    model: _GraphModel,
+    *,
+    generation: _Expression[int],
+    published: _Expression[int],
+    floor: _Expression[int],
+    leased: ColumnElement[int],
+    displaced_due: ColumnElement[bool],
+) -> tuple[ColumnElement[bool], ...]:
+    """T7: the rows of `model` no reader sees any more, one condition per kind.
+
+    An older generation; an unpublished row of this generation, except the lease's own
+    publication (a NULL `leased` spares nothing); and, once `displaced_due`, a row below
+    the floor or closed by the publication. Over SQL expressions of the state:
+    `collect_garbage` binds the values it read under FOR SHARE; the leader enumeration
+    correlates the state columns and probes each branch alone (#143).
+    """
+    return (
+        _older_generation(model, generation),
+        _abandoned(model, generation, published, leased),
+        _below_floor(model, generation, floor, displaced_due),
+        _closed(model, generation, published, displaced_due),
+    )
+
+
 def garbage_condition(
     model: _GraphModel,
     *,
@@ -182,25 +256,16 @@ def garbage_condition(
     leased: ColumnElement[int],
     displaced_due: ColumnElement[bool],
 ) -> ColumnElement[bool]:
-    """T7: the rows of `model` no reader sees any more, over SQL expressions of the state.
-
-    An older generation; an unpublished row of this generation, except the lease's own
-    publication (a NULL `leased` spares nothing); and, once `displaced_due`, a row below
-    the floor or closed by the publication. `collect_garbage` binds the values it read
-    under FOR SHARE; the leader enumeration correlates the state columns (#143).
-    """
+    """T7: any of `garbage_branches`."""
     return or_(
-        model.generation < generation,
-        and_(
-            model.generation == generation,
-            model.valid_from > published,
-            or_(leased.is_(None), model.valid_from != leased),
-        ),
-        and_(
-            displaced_due,
-            model.generation == generation,
-            or_(model.valid_from < floor, model.valid_to <= published),
-        ),
+        *garbage_branches(
+            model,
+            generation=generation,
+            published=published,
+            floor=floor,
+            leased=leased,
+            displaced_due=displaced_due,
+        )
     )
 
 

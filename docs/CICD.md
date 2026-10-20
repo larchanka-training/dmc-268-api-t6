@@ -223,6 +223,11 @@ workflow до него уже меняет Compose-файлы и edge-прокс
 при обработке или stale reconciliation без provider calls для этих Run.
 Старый worker не имеет origin guard; завершённая история не переписывается.
 
+Ревизия `20261020_0037` (#143) строит частичный индекс `ix_code_index_files_closed` без
+`CONCURRENTLY`: `CREATE INDEX` на время миграции блокирует запись в `code_index_files`.
+До #143 пробуждения индексатора никто не публиковал, поэтому таблица пуста на всех
+окружениях и блокировка длится мгновение.
+
 Откат образа сам по себе не выполняет downgrade схемы. Ручной downgrade до целевой
 ревизии откатывает **все ревизии выше целевой** в цепочке Alembic, а не только
 миграции последней задачи. Цепочка идёт не по датам в id ревизий (`20261010_0029`
@@ -236,7 +241,7 @@ workflow до него уже меняет Compose-файлы и edge-прокс
 
 | Ревизия | Что удаляет downgrade | Что даёт повторный upgrade |
 |---|---|---|
-| `20261020_0037` (#143) | колонку `code_index_states.wake_requested_at` с CHECK `ck_code_index_states_wake_live` и частичным индексом `ix_code_index_states_wake_requested`: висящие запросы пробуждения индексатора | `wake_requested_at` = NULL; запрошенные, но не отправленные пробуждения теряются, пока следующая сверка с HEAD, переустановка или включение RAG не запросят сборку снова |
+| `20261020_0037` (#143) | колонку `code_index_states.wake_requested_at` с CHECK `ck_code_index_states_wake_live` и частичным индексом `ix_code_index_states_wake_requested`, частичный индекс `ix_code_index_files_closed`: висящие запросы пробуждения индексатора | `wake_requested_at` = NULL; запрошенные, но не отправленные пробуждения теряются, пока следующая сверка с HEAD, переустановка или включение RAG не запросят сборку снова |
 | `20261019_0036` (#174) | только CHECK `ck_runs_trigger` на `runs.trigger`; строки и значения `trigger` сохраняются | CHECK `ck_runs_trigger` снова ограничивает `runs.trigger` значениями `webhook`, `manual`, `rerun`, `dry_run`; если за время отката в `runs.trigger` попало значение вне этих четырёх, upgrade отклоняется с 23514 и откатывается целиком (`alembic/env.py` выполняет весь `upgrade` одной транзакцией), поэтому БД остаётся на ревизии, с которой upgrade начинался |
 | `20261018_0035` (#150) | таблицу `repository_rules_status` с индексом `ix_repository_rules_status_refresh` и её CHECK `ck_repository_rules_status_*`: сохранённые результаты чтения `.review/rules.md` (текст, checksum, маски, диагностика) и висящие запросы перечитывания | пустая таблица; каждый репозиторий отвечает `pending`, пока первый GET статуса правил или `push` в default branch не запросит чтение |
 | `20261017_0034` (#142) | колонки `code_index_states.indexed_default_branch`, `exclusions_digest`, `stored_bytes`, `pending_bytes`, четыре CHECK `ck_code_index_states_profile_complete`, `ck_code_index_states_bytes`, `ck_code_index_states_pending_leased`, `ck_code_index_states_failed_code` и индекс `ix_code_index_states_live_lease` | `indexed_default_branch` и `exclusions_digest` = NULL, `stored_bytes` и `pending_bytes` = 0; upgrade обнуляет версии профиля, поэтому следующая сборка каждого индекса полная; пока строки графа сохранились, `stored_bytes` остаётся 0 до следующей публикации, и квоты хранения недосчитывают индекс до пересборки |
