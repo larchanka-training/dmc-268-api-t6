@@ -21,6 +21,7 @@ from app.modules.reviews.application.policy_snapshot import (
     CallManifest,
     ManifestBlock,
     PolicySnapshot,
+    RecoveryKind,
     StageName,
 )
 from app.modules.reviews.application.unified_diff import split_lf
@@ -40,6 +41,60 @@ class ReviewRule:
     include: tuple[str, ...]
     exclude: tuple[str, ...]
     checks: tuple[str, ...]
+    check_ids: tuple[str, ...] = ()
+
+
+# Canonical stable check IDs for default rules (RFS §5.2 :530, §6.2 :555-604).
+CANONICAL_RULE_CHECK_IDS: dict[str, tuple[str, ...]] = {
+    # Backend v1 (RFS §6.2 B1-B6)
+    "Naming Consistency": ("N1", "N2", "N3", "N4"),
+    "Error Handling Standards": ("E1", "E2", "E3", "E4"),
+    "Complex Function Improvement Suggestions": ("C1", "C2", "C3", "C4"),
+    "Meaningful Comments for Complex Logic": ("D1", "D2", "D3"),
+    "Test Coverage for Complex Functions": ("T1", "T2", "T3", "T4"),
+    "Clean Architecture Boundaries": ("A1", "A2", "A3", "A4", "A5"),
+    # Frontend v1 (RFS §6.2 F6)
+    "FSD Layer Boundaries": ("FSD1", "FSD2", "FSD3", "FSD4", "FSD5"),
+    # Core defaults (RFS §5.2 :530)
+    "Security": ("SEC1",),
+    "Correctness": ("COR1",),
+    "Performance": ("PERF1",),
+    "Readability": ("READ1",),
+}
+
+CANONICAL_FRONTEND_RULE_CHECK_IDS: dict[str, tuple[str, ...]] = {
+    "Naming Consistency": ("N1", "N2", "N5", "N4"),
+    "Error Handling Standards": ("E1", "E2", "E3", "E5"),
+    "Complex Function Improvement Suggestions": ("C1", "C2", "C3", "C5"),
+    "Meaningful Comments for Complex Logic": ("D1", "D2", "D3"),
+    "Test Coverage for Complex Functions": ("T5", "T3", "T4"),
+    "FSD Layer Boundaries": ("FSD1", "FSD2", "FSD3", "FSD4", "FSD5"),
+}
+
+
+def get_rule_check_ids(rule: ReviewRule) -> tuple[str, ...]:
+    """Return stable check IDs for a rule (RFS §3.3 :530, §6.2 :555, §8.2 :837)."""
+    if rule.check_ids and len(rule.check_ids) == len(rule.checks):
+        return rule.check_ids
+
+    # Frontend disambiguation: 3 checks for Test Coverage or Zod/React/predicate markers
+    if rule.name in CANONICAL_FRONTEND_RULE_CHECK_IDS:
+        fe_ids = CANONICAL_FRONTEND_RULE_CHECK_IDS[rule.name]
+        if len(rule.checks) == len(fe_ids):
+            # If 3 checks for Test Coverage, it's definitely frontend (T5, T3, T4)
+            if rule.name == "Test Coverage for Complex Functions":
+                return fe_ids
+            # If checks explicitly mention Zod/predicate/useMemo
+            checks_joined = " ".join(rule.checks)
+            if "Zod" in checks_joined or "predicate" in checks_joined or "useMemo" in checks_joined:
+                return fe_ids
+
+    if rule.name in CANONICAL_RULE_CHECK_IDS:
+        canonical_ids = CANONICAL_RULE_CHECK_IDS[rule.name]
+        if len(rule.checks) == len(canonical_ids):
+            return canonical_ids
+
+    return tuple(str(i) for i in range(1, len(rule.checks) + 1))
 
 
 @dataclass(frozen=True)
@@ -94,6 +149,7 @@ class PullRequestMeta:
     is_draft: bool
     is_fork: bool
     head_sha: str | None = None
+    diff_old_sha: str | None = None
     commit_messages: tuple[str, ...] = ()
     commit_messages_incomplete: bool = False
 
@@ -137,11 +193,16 @@ def review_rule_from_stored(value: Mapping[str, object]) -> ReviewRule:
         and all(isinstance(item, str) for item in checks)
     ):
         raise ValueError("stored rule has invalid prompt shape")
+    check_ids = value.get("check_ids")
+    parsed_check_ids = ()
+    if isinstance(check_ids, list) and all(isinstance(c, str) for c in check_ids):
+        parsed_check_ids = tuple(check_ids)
     return ReviewRule(
         name=name,
         include=tuple(include),
         exclude=tuple(exclude),
         checks=tuple(checks),
+        check_ids=parsed_check_ids,
     )
 
 
@@ -255,10 +316,12 @@ class PromptBuilder:
                     f'exclude="{_attribute(" ".join(rule.exclude))}"',
                 )
             )
+            check_ids = get_rule_check_ids(rule)
             checks = []
-            for index, check in enumerate(rule.checks, start=1):
+            for index, check in enumerate(rule.checks):
+                c_id = check_ids[index]
                 checks.append(
-                    f'<check id="{index}"><line n="{line_offset}">{_text(check)}</line></check>'
+                    f'<check id="{c_id}"><line n="{line_offset}">{_text(check)}</line></check>'
                 )
                 line_offset += 1
             checks_content = "\n".join(checks)
@@ -272,6 +335,7 @@ class PromptBuilder:
         *,
         call_id: uuid.UUID,
         stage: StageName = "review",
+        recovery_kind: RecoveryKind = "none",
     ) -> CallManifest:
         """Construct the exact CallManifest presented in this prompt."""
         run_id = context.policy_snapshot.run_id if context.policy_snapshot is not None else None
@@ -371,6 +435,7 @@ class PromptBuilder:
                     source_kind="source_code",
                     path=file.path,
                     revision=context.pr_meta.head_sha if context.pr_meta is not None else None,
+                    side="RIGHT",
                     start_line=start_line,
                     end_line=end_line,
                     shown_line_count=shown_count,
@@ -382,6 +447,7 @@ class PromptBuilder:
             call_id=call_id,
             run_id=run_id,
             stage=stage,
+            recovery_kind=recovery_kind,
             blocks=tuple(blocks),
         )
 

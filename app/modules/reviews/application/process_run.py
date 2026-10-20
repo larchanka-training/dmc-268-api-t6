@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Protocol, cast
+from typing import Any, Protocol, cast
 from uuid import UUID
 
 from app.common.application.unit_of_work import UnitOfWork
@@ -27,6 +27,7 @@ from app.modules.reviews.application.get_run_file_lines import (
     BlobCacheStatus,
     BlobCacheWriter,
 )
+from app.modules.reviews.application.policy_snapshot import PolicySnapshot
 from app.modules.reviews.application.prompt_builder import ReviewRule
 from app.modules.reviews.application.run_failures import RunCancelled
 from app.modules.reviews.application.run_trace import RunTrace, traced_step
@@ -71,6 +72,7 @@ class RunConventionsInput:
     repository_id: UUID
     conventions_prompt: ActiveConventionsPrompt
     rules: tuple[ReviewRule, ...] = ()
+    snapshot: PolicySnapshot | None = None
 
 
 class RunProcessingRepository(DiffSnapshotRepository, Protocol):
@@ -250,13 +252,18 @@ class ReviewRunProcessor:
             if conventions_input is None:
                 return None
             policy_key = None if self._context_stage is None else self._context_stage.policy_key
+            extra: dict[str, Any] = {}
+            if policy_key is not None:
+                extra["policy_key"] = policy_key
+            if getattr(conventions_input, "snapshot", None) is not None:
+                extra["snapshot"] = conventions_input.snapshot
             return await self._conventions.execute(
                 repository_id=conventions_input.repository_id,
                 conventions_prompt=conventions_input.conventions_prompt,
                 run_id=run_id,
                 changed_files=changed_paths,
                 rules=conventions_input.rules,
-                **({} if policy_key is None else {"policy_key": policy_key}),
+                **extra,
             )
         return True
 
