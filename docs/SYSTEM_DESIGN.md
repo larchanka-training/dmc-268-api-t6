@@ -600,8 +600,10 @@ user-token listing. ID OAuth-пользователя, прежнее знани
 `installation_repositories.removed` логически очищают индекс затронутых репозиториев
 в транзакции доставки, строки удаляет leader-задача сборки мусора (§10). Очистка
 сохраняет первую причину, отличную от `ttl`: живой индекс получает `purge_reason =
-removed`, у уже очищенного `disabled` или `removed` остаётся, а `ttl` заменяется. После OAuth-rebind та же строка `repository_id` сохраняет `rag_enabled`,
-но с пустым индексом; full-индекс при включённом флаге ставит вторая часть #143. При
+removed`, у уже очищенного `disabled` или `removed` остаётся, а `ttl` заменяется. После OAuth-rebind (#113) или повторного
+`installation_repositories.added` та же строка `repository_id` сохраняет `rag_enabled`, но с
+пустым индексом; при включённом флаге leader-задача сходимости (§11) заново включает его —
+новое поколение с маркером пробуждения, и задание строит full (#143). При
 переносе в другой аккаунт и в остальных случаях чистой цели появляется новый
 `repository_id` с флагом по умолчанию (выключен) и без индекса.
 
@@ -672,8 +674,13 @@ RunGuard останавливаются; HTTP-отказы rerun определ�
 в теле PATCH логически очищает индекс (`purge_reason = disabled`) в той же транзакции,
 что и смену настройки, и у недоступного репозитория тоже (#143); ответ — чтение после
 очистки. PATCH без `ragEnabled` индекс не трогает, повторное выключение ничего не
-меняет. Включение и постановка сборки — вторая часть #143; до неё включение не создаёт
-строку состояния, и статус остаётся `empty`.
+меняет. `ragEnabled=true` в теле PATCH, если и после записи эффективное значение true
+(репозиторий доступен), в той же транзакции вызывает `enable` через порт
+`CodeIndexEnabler` (#143): нет строки состояния — она создаётся с поколением 1, очищенная
+(в том числе по TTL) получает новое поколение; в обоих случаях ставится маркер
+пробуждения (§7.4), и задание строит full, а до публикации статус — `empty`. Живой и
+`failed` индекс включение не трогает: `failed` повторяют выключением и включением.
+Ответ — чтение после включения.
 
 Старые квитанции и tombstones остаются у исходной установки: старое removal не
 отзывает новый доступ, а положительные события удалённой установки не оживляют её.
@@ -844,7 +851,7 @@ legacy/диагностическим полем и не определяет и
 |---|---|---|---|
 | `review.run/v1` | [`contracts/schemas/review.run.v1.schema.json`](../contracts/schemas/review.run.v1.schema.json) · [`contracts/examples/review.run.v1.json`](../contracts/examples/review.run.v1.json) | webhook-worker (#52), Portal API (rerun, реконсилер), worker (sweep) → AI Worker | `schema`, `message_id` (= `run_id`, ключ идемпотентности), `run_id`, `workspace_id`, `installation_id`, `repo {id, provider, external_id, full_name}`, `pr {number, head_sha, base_sha, base_ref}`, `engine`, `rule_version_id`, `prompt_version_id`, `trigger`, `attempt`, `requested_at` |
 | `review.publish/v1` | [`contracts/schemas/review.publish.v1.schema.json`](../contracts/schemas/review.publish.v1.schema.json) · [`contracts/examples/review.publish.v1.json`](../contracts/examples/review.publish.v1.json) | AI Worker, реконсилер → GitHub Publisher (в MVP — consumer в worker) | Текущий envelope: `schema`, `message_id`, `run_id`, `head_sha`, `findings_hash`, `review_event`; в новом профиле authoritative payload/identity загружаются по run_id, не восстанавливаются из текущей конфигурации |
-| `index.repo/v1` | [`contracts/schemas/index.repo.v1.schema.json`](../contracts/schemas/index.repo.v1.schema.json) · [`contracts/examples/index.repo.v1.json`](../contracts/examples/index.repo.v1.json) | worker (повторное пробуждение задания), триггеры #143 → индексатор графа в worker (#142) | `schema`, `message_id` (UUIDv5 от `repository_id:generation:requested_at`, свой у каждого пробуждения, §7.4), `repository_id`, `generation` (≥ 1), `attempt` (1–3), `requested_at`; коммита в сообщении нет — задание само читает HEAD default branch |
+| `index.repo/v1` | [`contracts/schemas/index.repo.v1.schema.json`](../contracts/schemas/index.repo.v1.schema.json) · [`contracts/examples/index.repo.v1.json`](../contracts/examples/index.repo.v1.json) | worker: leader-рассылка пробуждений по маркерам триггеров #143 (§7.4) и повторное пробуждение задания → индексатор графа в worker (#142) | `schema`, `message_id` (UUIDv5 от `repository_id:generation:requested_at`, свой у каждого пробуждения, §7.4), `repository_id`, `generation` (≥ 1), `attempt` (1–3), `requested_at`; коммита в сообщении нет — задание само читает HEAD default branch |
 
 ID — UUID без префиксов, как в БД; `findings_hash` — 64 hex; приоритет (rerun — 9) — свойство AMQP, а не поле. Отличия от прежних примеров этого раздела — PIPELINE_SPEC §12.
 
@@ -881,8 +888,17 @@ head-входы общего conventions cache и публикация raw summa
 (§7.1) worker объявляет при старте на своём confirm-канале, отдельно от топологии ревью
 ([code_index/infrastructure/amqp.py](../app/modules/code_index/infrastructure/amqp.py));
 без `GITHUB_APP_ID` и `GITHUB_APP_PRIVATE_KEY` он только объявляет её и очередь не
-потребляет. Публикаторы #143 берут те же имена и порт `IndexWakeups` (`AmqpIndexWakeups`);
-до #143 публикаторов нет, и consumer простаивает.
+потребляет. Пробуждения по триггерам публикует только leader worker (#143); своё
+повторное пробуждение задание по-прежнему публикует само. Триггеры — мерж PR и
+push в default branch (`webhook-worker`, §8.2), включение тумблера (API, §6.9), leader-задачи
+сходимости и сверки с HEAD (§11) — пишут цель и маркер `code_index_states.wake_requested_at`
+в своей короткой транзакции: outbox на строке состояния. Leader-задача рассылки после их
+коммита будит задание через порт `IndexWakeups` (`AmqpIndexWakeups` на confirm-канале
+consumer), вне транзакции, и снимает маркер compare-and-set по прочитанному времени: маркер,
+поставленный за это время, переживает снятие и уходит следующим проходом. Неудачное
+пробуждение останавливает проход, и маркеры остаются. Строку под живым lease рассылка
+пропускает: задание само сверит цель, когда закончит (ниже). API и `webhook-worker` в AMQP
+не публикуют; без GitHub App нет ни consumer, ни рассылки, и маркеры ждут.
 
 `index.repo/v1` только будит задание репозитория: цель — HEAD default branch, которую
 задание читает при старте, поэтому задания одного репозитория сливаются. `message_id` —
@@ -921,7 +937,8 @@ max(`x-attempt`, локальный) + 1, и в `code_index.dlq` уходит т
 деплой и `CODE_INDEX_MAX_CONCURRENT_PER_INSTALLATION` (1) на установку; процесс берёт одну
 доставку за раз. Installation-токен каждое задание получает своим провайдером с кэшем на
 это задание: попытка после 401 берёт новый токен, а общий кэш процесса (и Redis, #62)
-индексатор не использует. Переменные `CODE_INDEX_*` и значения по умолчанию —
+индексатор не использует. Сверка с HEAD (§11) берёт один кэш на свой проход: её чтения
+многих репозиториев одной установки обменивают один токен. Переменные `CODE_INDEX_*` и значения по умолчанию —
 `.env.example`, задержки и лимиты — PIPELINE_SPEC §4.6.
 
 
@@ -1012,14 +1029,14 @@ class VcsProvider(Protocol):
 |---|---|---|
 | `pull_request` | `opened`, `reopened`, `synchronize`, `edited` | upsert `code_changes`; `synchronize` → сброс `ci_status`, `cancel_requested` активного Run |
 | `pull_request` | `labeled` / `unlabeled` | `ai_review_labeled = true/false`, только если `label.name == "ai-review"`; события самого бота отбрасывает Р-9 (§8.3); на `closed` и `reopened` флаг сверяется с текущими лейблами PR (PIPELINE_SPEC §8.2) |
-| `pull_request` | `closed` | отмена активного Run |
+| `pull_request` | `closed` | отмена активного Run; при `merged = true` и `base.ref`, равном `repository.default_branch` из payload, — запрос обновления индекса до `merge_commit_sha` (без него — только маркер пробуждения, §7.4) до раннего выхода проекции, то есть и у репозитория с приостановленными ревью; статус доставки не меняется, в detail добавляется `index=requested`; вызова GitHub нет (#143) |
 | `check_suite`, `workflow_run` | `completed` | для открытых PR с этим `head_sha` `check_suite` пишет `ci_status = {"event": "check_suite"}` (кэш для sweep, PIPELINE_SPEC §8.3), `workflow_run` `ci_status` не пишет → `try_enqueue`; «зелёный» = все suites для sha, **кроме suite самого App** и чужих `queued` suites без check run, завершены с `success` / `neutral` / `skipped` — проверяется REST-запросом в `try_enqueue` (§6.1) |
 | `status` | — | для репозиториев со сторонним CI через commit status; `ci_status = {"event": "status"}` (кэш) → `try_enqueue`; combined status `success` или пусто — часть условия «CI зелёный» |
 | `pull_request_review_thread` | `resolved`, `unresolved` | **после MVP**: `feedback_signals` |
-| `installation`, `installation_repositories` | `created`, `deleted`, `added`, `removed` | синхронизация `repositories`; при подключении — создание лейбла `ai-review` и запрос чтения `.review/rules.md` (§6.9) |
-| `push` | — | только в default branch (`ref = refs/heads/<repository.default_branch>`): запрос перечитать `.review/rules.md` для статуса правил (#150, RULES_FORMAT_SPEC §10.1); другие ветки и теги отбрасываются. Файл меняют коммитом или merge в репозитории, а не в портале, поэтому без этого события сервис узнал бы об изменении только при следующем перечитывании |
+| `installation`, `installation_repositories` | `created`, `deleted`, `added`, `removed` | синхронизация `repositories`; при подключении — создание лейбла `ai-review` и запрос чтения `.review/rules.md` (§6.9); `deleted` и `removed` логически очищают индекс, а повторное подключение при включённом RAG заново включает его через leader-задачу сходимости (§6.9, §11; #143) |
+| `push` | — | только в default branch (`ref = refs/heads/<repository.default_branch>`): запрос перечитать `.review/rules.md` для статуса правил (#150, RULES_FORMAT_SPEC §10.1); другие ветки и теги отбрасываются. Файл меняют коммитом или merge в репозитории, а не в портале, поэтому без этого события сервис узнал бы об изменении только при следующем перечитывании. Тот же push в default branch запрашивает обновление индекса до `after` (#143, сверх Scope #143), независимо от статуса правил; статус доставки один, в detail добавляется `index=requested`. Push, удаливший ветку (`deleted` или нулевой `after`), обновления не запрашивает |
 
-Права App (repository): `pull_requests: write`, `checks: write`, `contents: read`, `metadata: read`, `issues: write` (создание лейбла `ai-review`, §6.9), `actions: read` (событие `workflow_run`), `statuses: read` (событие `status` и combined status в PIPELINE_SPEC §8.1). Подписка App на событие Push (Permissions & events → Subscribe to events) нужна статусу правил (#150) и включается вручную: это обязательный шаг настройки каждой App (staging, dev, sandbox), код его не делает. Без подписки триггер молча не срабатывает, и изменение `.review/rules.md` видно только по GET после порога в 10 минут (RULES_FORMAT_SPEC §10.1). Новых прав подписка не требует, файл читается с `contents: read`. Бот **не** имеет `contents: write`. Прав организации и аккаунта нет. События `labeled` / `unlabeled` приходят в подписке `pull_request`, поэтому триггер Р-10 новых прав не требует; лейбл `ai-review` App создаёт сам при подключении репозитория (§6.9), `POST /repos/{owner}/{repo}/labels` требует `issues: write`, а не `pull_requests: write` ([GitHub Docs](https://docs.github.com/en/rest/authentication/permissions-required-for-github-apps), OQ-8). Регистрация App и полный список настроек — #37.
+Права App (repository): `pull_requests: write`, `checks: write`, `contents: read`, `metadata: read`, `issues: write` (создание лейбла `ai-review`, §6.9), `actions: read` (событие `workflow_run`), `statuses: read` (событие `status` и combined status в PIPELINE_SPEC §8.1). Подписка App на событие Push (Permissions & events → Subscribe to events) нужна статусу правил (#150) и обновлению индекса по push (#143) и включается вручную: это обязательный шаг настройки каждой App (staging, dev, sandbox), код его не делает. Без подписки триггер молча не срабатывает, и изменение `.review/rules.md` видно только по GET после порога в 10 минут (RULES_FORMAT_SPEC §10.1). Новых прав подписка не требует, файл читается с `contents: read`. Бот **не** имеет `contents: write`. Прав организации и аккаунта нет. События `labeled` / `unlabeled` приходят в подписке `pull_request`, поэтому триггер Р-10 новых прав не требует; лейбл `ai-review` App создаёт сам при подключении репозитория (§6.9), `POST /repos/{owner}/{repo}/labels` требует `issues: write`, а не `pull_requests: write` ([GitHub Docs](https://docs.github.com/en/rest/authentication/permissions-required-for-github-apps), OQ-8). Регистрация App и полный список настроек — #37.
 
 ### 8.3 Правила работы с API
 
@@ -1525,8 +1542,8 @@ TTL-очистка (#143) берёт любой живой индекс — бе
 в TTL не попадает: его строки уже удалила сборка мусора, а очистка превратила бы его в
 `empty` и открыла повторный full, который запрещает ADR §7. Пока #144 не сдвигает
 `last_used_at` при чтении, индекс включённого репозитория очищается через
-`CODE_INDEX_TTL_DAYS` дней; вернёт его повторное включение тумблера (вторая часть
-#143). Переменные leader-задач (все необязательны, значение вне границ не даёт worker
+`CODE_INDEX_TTL_DAYS` дней; вернёт его повторное включение тумблера (§6.9). Переменные
+leader-задач (все необязательны, значение вне границ не даёт worker
 стартовать, строки — в `.env.example`):
 
 | Переменная | По умолчанию | Смысл |
@@ -1535,6 +1552,8 @@ TTL-очистка (#143) берёт любой живой индекс — бе
 | `CODE_INDEX_TTL_INTERVAL_SECONDS` | 3600 | как часто leader ищет индексы для TTL-очистки, не реже раза в сутки (до 86400) |
 | `CODE_INDEX_GC_INTERVAL_SECONDS` | 300 | как часто запускается сборка мусора, до 1800: она идёт каждый интервал и продолжается на следующих тиках лидера, пока не вычистит всё; цель — физическое удаление в пределах часа |
 | `CODE_INDEX_GC_BATCH_ROWS` | 10000 | строк в одной порции DELETE, до 100000; каждая порция — своя транзакция |
+| `CODE_INDEX_RECONCILE_INTERVAL_SECONDS` | 600 | как часто leader сверяет живые индексы с HEAD default branch (§11), не реже раза в сутки (до 86400); только с GitHub App |
+| `CODE_INDEX_RECONCILE_BATCH` | 50 | репозиториев за один проход сверки, до 500; полный проход продолжается со следующего репозитория на следующем тике, пока не дойдёт до конца |
 
 Тела ответов инструментов больше 64 КБ лежат в отдельной таблице PostgreSQL, на строку которой указывает `RunAction.response_ref` (PIPELINE_SPEC §2; таблица и миграция — #34); payload вебхуков — JSONB в `webhook_events` (колонка `payload_s3_ref TEXT nullable` сохранена в таблице с CHECK-ограничением `payload IS NOT NULL OR payload_s3_ref IS NOT NULL` для будущего выноса в S3, миграция 20260928_0012). Это строки PostgreSQL: тела ответов инструментов хранятся до удаления Workspace и удаляются каскадом вместе со снимками, manifests, evidence и `RunAction`. Квитанции `webhook_events` (`WebhookEvent`) живут короче: завершённые (спроецированные, упавшие или отложенные навсегда) удаляются через 30 дней после завершения, чистку раз в час запускает `webhook-worker` ([WEBHOOK_WORKER.md](WEBHOOK_WORKER.md), Retention).
 
@@ -1572,8 +1591,8 @@ CONTEXT_AND_VERIFICATION_SPEC §5–8, §10.
 | **#107:** `review_candidates`, `verification_results` | исходный v2 finding, candidate_id/digest, решения фильтров; решение verifier по каждому переданному ID и resolved refs |
 | **#107:** `final_review_results` | run_id UNIQUE, версия, supported findings после порога, counts, coverage, verdict, backend summary, severity_threshold/max_comments, below_severity_threshold_count и result_digest с этими настройками; immutable после publishing |
 | **#107:** `publication_plans/items` | точные payloads, keys/ordinals, отдельные body-only variants, receipts и состояние доставки; явный finding → remote comment mapping |
-| **#141:** `code_index_states` | одна строка на репозиторий: `repository_id` (PK, FK `repositories` `ON DELETE CASCADE`); `generation` и номера публикаций `reserved_publication`, `published_publication`, `floor_publication` (BIGINT, по умолчанию 0); `status` (PG enum `code_index_status`: `empty\|building\|ready\|failed`, по умолчанию `empty`), `purge_reason` (`ttl\|removed\|disabled`, только при `empty`), `error_code` (задан ровно при `failed`), `last_error_code`; `indexed_commit_sha`, `target_commit_sha`, `published_at`, `last_used_at`; lease — `lease_token` и `lease_expires_at` (оба заданы или оба NULL); счётчики `file_count`, `symbol_count`, `edge_count` (считает публикация); версии `extractor_version`, `resolver_version`, `parser_profile_version`, `limits_profile_version`; `downloaded_bytes`, `build_duration_ms`, `github_request_count`; `created_at`, `updated_at`. **#142** (миграция `20261017_0034`): профиль публикации дополняют `indexed_default_branch` и `exclusions_digest` (`IgnorePolicy.digest` файла `.review/rules.md`); CHECK `profile_complete` — заданы все шесть колонок профиля или ни одна, миграция обнуляет версии существующих строк, и их следующая сборка — full. Квоты хранения ADR §7 считают оценки `stored_bytes` (видимые строки публикации) и `pending_bytes` (строки попытки под lease; CHECK `pending_leased` — без lease 0), BIGINT ≥ 0 (CHECK `bytes`), по умолчанию 0: строка графа — 160 байт плюс UTF-8 байты её текстовых колонок с весом 1 + число индексов с колонкой, включая PK; это оценка, а не размер на диске. CHECK `failed_code`: `failed` — только с `archive_unsafe` или `limit_exceeded:*`. Частичный индекс `ix_code_index_states_live_lease` (`repository_id`, `lease_token IS NOT NULL`) — для подсчёта живых lease при захвате |
-| **#141:** `code_index_files`, `code_index_symbols`, `code_index_edges`, `code_index_imports` | строки графа без суррогатных id: натуральный PK — `(repository_id, generation, valid_from, path)` плюс ключ строки, nullable `valid_to` закрывает строку более поздней публикацией. Файл — `blob_sha`. Символ — ключ `qualified_name`, `kind` (`code_index_symbol_kind` из `SymbolKind`), `disambiguator` (порядковый номер среди дублей; у единственного объявления — 0: в ADR §3 он «пуст», но колонка NOT NULL и входит в PK), `start_line ≥ 1`, `end_line ≥ start_line`; `defines` (ADR §3) — сама строка символа, не ребро. Ребро — ключ `kind` (`imports\|uses_imported`), `target_path`, `target_name` (`''` ровно у `imports`), индекс `ix_code_index_edges_target`. Запись импорта — ключ `specifier`, `resolution` (`code_index_import_resolution` из `ImportResolution`, в том числе неразрешённые исходы), nullable `target_path`, индекс `ix_code_index_imports_target`. Текста кода, сигнатур и embeddings нет |
+| **#141:** `code_index_states` | одна строка на репозиторий: `repository_id` (PK, FK `repositories` `ON DELETE CASCADE`); `generation` и номера публикаций `reserved_publication`, `published_publication`, `floor_publication` (BIGINT, по умолчанию 0); `status` (PG enum `code_index_status`: `empty\|building\|ready\|failed`, по умолчанию `empty`), `purge_reason` (`ttl\|removed\|disabled`, только при `empty`), `error_code` (задан ровно при `failed`), `last_error_code`; `indexed_commit_sha`, `target_commit_sha`, `published_at`, `last_used_at`; lease — `lease_token` и `lease_expires_at` (оба заданы или оба NULL); счётчики `file_count`, `symbol_count`, `edge_count` (считает публикация); версии `extractor_version`, `resolver_version`, `parser_profile_version`, `limits_profile_version`; `downloaded_bytes`, `build_duration_ms`, `github_request_count`; `created_at`, `updated_at`. **#142** (миграция `20261017_0034`): профиль публикации дополняют `indexed_default_branch` и `exclusions_digest` (`IgnorePolicy.digest` файла `.review/rules.md`); CHECK `profile_complete` — заданы все шесть колонок профиля или ни одна, миграция обнуляет версии существующих строк, и их следующая сборка — full. Квоты хранения ADR §7 считают оценки `stored_bytes` (видимые строки публикации) и `pending_bytes` (строки попытки под lease; CHECK `pending_leased` — без lease 0), BIGINT ≥ 0 (CHECK `bytes`), по умолчанию 0: строка графа — 160 байт плюс UTF-8 байты её текстовых колонок с весом 1 + число индексов с колонкой, включая PK; это оценка, а не размер на диске. CHECK `failed_code`: `failed` — только с `archive_unsafe` или `limit_exceeded:*`. Частичный индекс `ix_code_index_states_live_lease` (`repository_id`, `lease_token IS NOT NULL`) — для подсчёта живых lease при захвате. **#143** (миграция `20261020_0037`): маркер пробуждения `wake_requested_at` — outbox пробуждений индексатора (§7.4); CHECK `ck_code_index_states_wake_live` — маркер только у живого индекса (без `purge_reason` и не `failed`); частичный индекс `ix_code_index_states_wake_requested` (`wake_requested_at IS NOT NULL`) — для рассылки пробуждений |
+| **#141:** `code_index_files`, `code_index_symbols`, `code_index_edges`, `code_index_imports` | строки графа без суррогатных id: натуральный PK — `(repository_id, generation, valid_from, path)` плюс ключ строки, nullable `valid_to` закрывает строку более поздней публикацией. Файл — `blob_sha`. Символ — ключ `qualified_name`, `kind` (`code_index_symbol_kind` из `SymbolKind`), `disambiguator` (порядковый номер среди дублей; у единственного объявления — 0: в ADR §3 он «пуст», но колонка NOT NULL и входит в PK), `start_line ≥ 1`, `end_line ≥ start_line`; `defines` (ADR §3) — сама строка символа, не ребро. Ребро — ключ `kind` (`imports\|uses_imported`), `target_path`, `target_name` (`''` ровно у `imports`), индекс `ix_code_index_edges_target`. Запись импорта — ключ `specifier`, `resolution` (`code_index_import_resolution` из `ImportResolution`, в том числе неразрешённые исходы), nullable `target_path`, индекс `ix_code_index_imports_target`. Текста кода, сигнатур и embeddings нет. **#143** (миграция `20261020_0037`): частичный индекс `ix_code_index_files_closed` (`repository_id`, `valid_to IS NOT NULL`) — проба закрытых строк, по которой leader перечисляет репозитории с мусором |
 | **После MVP:** `FeedbackSignal` | `finding_id`, `kind: resolved\|line_changed\|reaction`, `value`, `at` |
 
 В MVP всё хранится в PostgreSQL (D1): raw prompt целиком не обязателен, но точные
@@ -1595,18 +1614,20 @@ storage/API/UI, без смешивания версий внутри run.
 и `valid_to` NULL или больше `published_publication`, и только при `status = ready`.
 Очистка явная и двухфазная. Логическая — `purge` в транзакции вызывающего: `generation`
 растёт, статус `empty`, `purge_reason` записан, публикация, lease, commit sha, коды
-ошибок, версии и счётчики сброшены (`reserved_publication` и `last_used_at` сохраняются) — строки сразу
+ошибок, версии, счётчики и маркер пробуждения сброшены (`reserved_publication` и `last_used_at` сохраняются) — строки сразу
 нечитаемы. Повторный `purge` не меняет поколение и остальные поля; только причину `ttl`
 заменяет `removed` или `disabled`. Строка состояния удаляется только
 каскадом: иначе повторное включение снова началось бы с поколения 1 и задача прежнего
 поколения прошла бы сверку. Включение (`enable`): нет строки состояния — она создаётся
-с поколением 1; очищенная строка — поколение +1 и `purge_reason` сброшен; не очищенная —
+с поколением 1; очищенная строка — поколение +1 и `purge_reason` сброшен, в обоих случаях
+с маркером пробуждения (§7.4); не очищенная —
 без изменений (повторное включение не стирает `ready`-индекс). Выключение тумблера — это
 `purge` с `disabled`, поэтому для существующей строки включение после выключения
 всегда поднимает поколение ([ADR 0001 §6.1](adr/0001-graph-rag-v1.md#61-триггеры-и-готовность)). Физическая — `collect_garbage` порциями:
 строки прежних поколений, неопубликованных попыток (кроме номера текущего lease) и
 вытесненные строки, последние — не раньше чем через 10 мин после публикации.
-Leader-задачи TTL и сборки мусора (#143, переменные — §10) работают в
+Leader-задачи индекса (#143, переменные — §10) — сходимость, рассылка пробуждений, сборка
+мусора, TTL и сверка с HEAD, в этом порядке, — работают в
 `WorkerProcess.leader_tick` после sweep и replay outbox, в том числе когда те подняли
 `Exception` (оно пробрасывается после задач индекса); отмена тика их пропускает. У
 каждой задачи свой интервал по монотонным часам, вместе они делят около 10 с на тик.
@@ -1615,8 +1636,30 @@ Leader-задачи TTL и сборки мусора (#143, переменные
 дольше отведённого, прерывает таймаут, и транзакция её текущей порции откатывается;
 ошибка или таймаут одной пишется в лог и не останавливает остальные. Кандидатов перечисляет порт
 `CodeIndexMaintenance`; сборка мусора идёт по репозиториям по кругу: отзывает истёкший
-lease, затем удаляет порции до первой неполной. GitHub App им не нужен. Каскад FK при
-удалении репозитория — только страховка.
+lease, затем удаляет порции до первой неполной. Сходимость идёт не чаще раза в 60 с,
+поэтому повторное включение ждёт её до минуты: заново
+включает индекс репозитория с эффективным RAG на GitHub-установке, у которого нет строки
+состояния или она очищена по `removed` либо `disabled` (не `ttl`), и очищает живой индекс
+репозитория, где RAG выключен (`disabled`) или доступ потерян (`removed`); каждого
+кандидата она перепроверяет под `FOR SHARE` строки `repositories` в его транзакции, поэтому
+параллельное выключение тумблера индекс не воскрешает. Сверка с HEAD — раз в
+`CODE_INDEX_RECONCILE_INTERVAL_SECONDS`, по `CODE_INDEX_RECONCILE_BATCH` живых, не `failed`
+индексов репозиториев с эффективным RAG на GitHub-установке за проход: HEAD читается вне транзакции, цель переписывается на живой HEAD, а
+маркер ставится, если ветка или commit отличаются от проиндексированных, публикации нет
+или версии строки, перечитанной под блокировкой, устарели; маркер, который триггер
+поставил после чтения списка, сохраняет цель триггера. Rate limit пропускает установку до
+`Retry-After`, отказ доступа и пустой репозиторий — только репозиторий, без записи. Сверка
+идёт последней и берёт только то, что осталось от общего бюджета тика: новый репозиторий
+она не начинает, если осталось меньше 2 с, а прерванный проход держит её интервал
+открытым. Ошибка одного кандидата сходимости или сверки пишется в лог и не останавливает
+проход; курсор сверки уже стоит за кандидатом, поэтому упавший или прерванный таймаутом
+повторяется только на следующем проходе. Рассылка идёт каждый тик сразу после сходимости,
+поэтому маркеры сходимости уходят в том же тике, а маркеры сверки — на следующем (§7.4).
+Сборка мусора идёт раньше TTL: у физического удаления цель — в пределах часа (§10), а
+30-дневный срок TTL задержку терпит, поэтому очередь TTL-очистки не отнимает у неё бюджет
+тика. Сверке и рассылке нужен GitHub App, без
+него они выключены; остальным не нужен. Каскад FK при удалении репозитория — только
+страховка.
 
 Статус индекса, который видят API и ревью (#145), не хранится: его выводит
 `rag_index(...)` модуля `code_index` из эффективного тумблера (§6.9) и строки
@@ -1628,7 +1671,9 @@ lease, затем удаляет порции до первой неполной
 `disabled` выходит за список статусов ADR (отступление от буквы AC3 #145); пустой
 репозиторий — `ready` с `fileCount = 0`. `ready`/`stale` пригодны для ревью, у
 `empty`/`building`/`failed` есть причина неготовности для `rag: not_ready` (#144).
-`target_commit_sha` до #143 никто не пишет, поэтому `stale` на `main` не возникает.
+`target_commit_sha` пишут триггеры и сверка с HEAD (#143), поэтому `stale` возникает:
+`ready`, пока задание не опубликовало новую цель, а после доставок в обратном порядке —
+пока сверка не вернёт цель к HEAD.
 Итог задачи индексации пишется без новых колонок — статусом, `error_code` и
 `last_error_code` (`mark_failed`/`release`, сброс `last_error_code` публикацией —
 #142). Каждая задача, получившая lease (кроме LEASE_LOST), записывает метрики

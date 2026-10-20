@@ -224,10 +224,31 @@ detail `not_default_branch`; a push to a repository that is not connected is
 `ignored_irrelevant_event` with detail `unknown_repository` and is not deferred, because
 connecting the repository requests a read anyway.
 
+Index updates (api#143). A `pull_request.closed` delivery with `merged=true` whose base ref is
+the payload's `repository.default_branch`, and a `push` to the default branch, request an
+update of the repository's graph index. In one short transaction the dispatch resolves the
+repository (connected, effective RAG on, GitHub installation not deleted) and, for a live index,
+writes the index target (the merge commit, or the push's `after`; a merge without
+`merge_commit_sha` writes no target) and the wake-up marker on its `code_index_states` row. The
+worker leader wakes the indexing job after that commit (`docs/SYSTEM_DESIGN.md` §7.4); the
+dispatch makes no GitHub call and never publishes to RabbitMQ. A merge is requested before the
+projection's early return, so a repository with paused reviews still gets it, and a push
+requests it independently of the rules read: a failed request is logged and the rules read
+still runs, while the leader's reconcile catches the index up. The delivery keeps its status;
+its detail gains `index=requested` when the request was written, except for a push to a
+repository the rules read reports as `unknown_repository`. The index-only fields
+`repository.default_branch` and `merge_commit_sha` read as absent when invalid, so they never
+reject a `pull_request` delivery. A push that deleted the branch (`deleted` or an
+all-zero `after`), a push to another branch or a tag, a close without merge and the other
+`pull_request` actions request nothing. Without the Push subscription below, merges and the
+leader's reconcile with the default-branch head (`CODE_INDEX_RECONCILE_INTERVAL_SECONDS`, 10
+minutes by default) still update the index.
+
 The Push subscription of the GitHub App is a required manual step of the App settings (staging,
 dev and sandbox Apps alike; Permissions & events, Subscribe to events, Push). Without it no
-`push` arrives, nothing fails, and a change of the file shows only through the 10-minute
-staleness of a GET (`docs/SYSTEM_DESIGN.md` §8.2).
+`push` arrives, nothing fails, a change of the file shows only through the 10-minute
+staleness of a GET, and a direct push reaches the index only through the leader's reconcile
+(`docs/SYSTEM_DESIGN.md` §8.2).
 
 Expected push receipt volume. GitHub sends `push` for every branch and tag of every connected
 repository, and each delivery is stored as a receipt and kept 30 days like any other (see
@@ -408,7 +429,8 @@ GitHub webhook delivery <delivery_id> event=<event> status=<status> detail=<deta
 `deferred_repository_details`, retried as described in "Deferred deliveries" below;
 `deferred_run_trigger`, retried every 30 seconds without a poll-count limit until one hour after
 the receipt was received, see "Superseded heads" below); a deferral carries `retry_at`.
-`detail` is `-` or the reason. For a `pull_request` event it starts with `action=<action>`, so
+`detail` is `-` or the reason; a delivery that requested an index update ends it with
+`index=requested` (see "Index updates"). For a `pull_request` event it starts with `action=<action>`, so
 `labeled` and `synchronize` can be told apart (an ignored action, such as `ready_for_review`,
 shows only that). For a Run trigger (label, `synchronize`, `reopened`, CI events) the rest is
 `pr=<pull request id> head=<first 7 of the head sha>: <status>[ (<reason>[: <detail>])][ run=<run id>]`:

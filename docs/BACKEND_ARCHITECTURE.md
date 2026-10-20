@@ -123,7 +123,7 @@ Application зависит от узких интерфейсов, сгрупп�
 | `CodeIndexPurger` | `repositories` | логическая очистка индекса репозитория при снятии доступа и выключении RAG на сессии и в транзакции вызывающего use case; реализация — в `code_index.infrastructure` |
 | `CodeIndexEnabler` | `repositories` | запрос полной сборки индекса (создание строки состояния или новое поколение очищенного индекса, с маркером пробуждения) при включении RAG на сессии и в транзакции вызывающего use case; реализация — в `code_index.infrastructure` |
 | `CodeIndexStore`, `CodeIndexUnitOfWork` | `code_index` | индекс графа RAG v1 по `repository_id` (fenced-запись, публикация, чтение, очистка, сборка мусора) и граница транзакции модуля; реализация — в `code_index.infrastructure` |
-| `CodeIndexMaintenance`, `CodeIndexMaintenanceUnitOfWork` | `code_index` | кандидаты leader-задач индекса без `repository_id` (TTL-очистка, сборка мусора, #143); каждый шаг по репозиторию идёт через `CodeIndexStore`; реализация — в `code_index.infrastructure` |
+| `CodeIndexMaintenance`, `CodeIndexMaintenanceUnitOfWork` | `code_index` | кандидаты leader-задач индекса без `repository_id` (TTL-очистка, сборка мусора, запросы пробуждения, сверка с HEAD, кандидаты повторного включения и очистки для сходимости, #143); каждый шаг по репозиторию идёт через `CodeIndexStore`; реализация — в `code_index.infrastructure` |
 | `PaymentGateway` | `billing` | создание и подтверждение оплаты |
 | `UnitOfWork` | общий контракт; расширение в использующем модуле | граница транзакции и доступ к интерфейсам repositories |
 | `Clock`, `IdGenerator` | `common` | детерминированные тесты и технические значения |
@@ -350,12 +350,13 @@ docker compose up -d worker        # сервис worker в docker-compose.yml
 все три попытки (`llm_unavailable` ретраится) и завершается `failed` с сообщением о
 ненастроенном шлюзе; `GITHUB_APP_ID` и
 `GITHUB_APP_PRIVATE_KEY` необязательны: без них процесс стартует, пишет предупреждение,
-а sweep «2 мин без CI», публикация в GitHub (ревью и check-run) и consumer `index.repo`
-выключены. `WORKER_ID`
+а sweep «2 мин без CI», публикация в GitHub (ревью и check-run), consumer `index.repo`
+и сверка индекса с HEAD выключены; без consumer выключена и рассылка пробуждений индекса. `WORKER_ID`
 (по умолчанию `hostname:pid`) пишется в `runs.worker_id`, `PORTAL_URL` даёт ссылку на
 прогон в check-run. `CODE_INDEX_*` (#142) настраивают индексатор графа, а
-`CODE_INDEX_TTL_DAYS`, `CODE_INDEX_TTL_INTERVAL_SECONDS`, `CODE_INDEX_GC_INTERVAL_SECONDS` и
-`CODE_INDEX_GC_BATCH_ROWS` (#143, SD §10) — его leader-задачи: все необязательны,
+`CODE_INDEX_TTL_DAYS`, `CODE_INDEX_TTL_INTERVAL_SECONDS`, `CODE_INDEX_GC_INTERVAL_SECONDS`,
+`CODE_INDEX_GC_BATCH_ROWS`, `CODE_INDEX_RECONCILE_INTERVAL_SECONDS` и
+`CODE_INDEX_RECONCILE_BATCH` (#143, SD §10) — его leader-задачи: все необязательны,
 значения по умолчанию — в коде (`.env.example`), недопустимое значение не даёт процессу
 стартовать. Их видит worker, запущенный через `uv run --env-file .env`; у `worker` в
 `docker-compose.yml` и `deploy/compose/staging.yml` фиксированный список `environment:`,
@@ -371,7 +372,7 @@ docker compose up -d worker        # сервис worker в docker-compose.yml
 | consumer `review.run.fast` (prefetch 1) | RunGuard, claim по lease, попытка под watchdog, retry и DLQ | [HandleReviewRun](../app/modules/reviews/application/handle_review_run.py) |
 | consumer `review.publish` (prefetch 1) | T14-T16: ревью в GitHub, check-run | [PublishRunReview](../app/modules/reviews/application/publish_run_review.py) |
 | consumer `index.repo` (prefetch 1, #142) | задание графа RAG: claim lease, HEAD default branch, архив, публикация; retry и DLQ по исходу (SD §7.4). Свой `SubprocessSourceParser` и HTTP-клиент GitHub; без GitHub App не запускается | [BuildRepositoryIndex](../app/modules/code_index/application/build_index.py) |
-| лидер-цикл (`pg_advisory_lock`, 30 с) | sweep «2 мин без CI» и повторная отправка outbox (`message_published_at IS NULL`, сигналы отмены T6); после них TTL-очистка и сборка мусора индекса графа (#143) с общим бюджетом около 10 с на тик, и без GitHub App тоже | `SweepNoCi`, `TryEnqueueWebhookRun.replay_pending_publications`, [`CodeIndexLeaderTasks`](../app/modules/code_index/application/leader_tasks.py) |
+| лидер-цикл (`pg_advisory_lock`, 30 с) | sweep «2 мин без CI» и повторная отправка outbox (`message_published_at IS NULL`, сигналы отмены T6); после них leader-задачи индекса графа (#143) — сходимость, рассылка пробуждений, сборка мусора, TTL-очистка и сверка с HEAD — с общим бюджетом около 10 с на тик; без GitHub App сверка и рассылка выключены, остальные работают | `SweepNoCi`, `TryEnqueueWebhookRun.replay_pending_publications`, [`CodeIndexLeaderTasks`](../app/modules/code_index/application/leader_tasks.py) |
 
 Consumer `review.run.deep` не запускается, очередь только объявляется. Реконсилер
 (T12, T13, T17, T18) работает лидер-циклом процесса API (`app/main.py`, раз в 5 минут,
