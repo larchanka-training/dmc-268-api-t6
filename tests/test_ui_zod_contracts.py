@@ -21,10 +21,15 @@ from app.modules.reviews.application.list_runs import RunCursor, RunListItem
 from tests.portal_test_client import authenticated_test_client as TestClient
 
 CONTRACTS_PATH = Path(__file__).parent / "fixtures" / "ui_zod_contracts.json"
+RUN_STEP_CONTRACTS_PATH = Path(__file__).parent / "fixtures" / "ui_run_step_zod_contracts.json"
 RUN_ID = UUID("11111111-1111-4111-8111-111111111111")
-# The ui commit the snapshot was generated from: regenerate after every ui contract change
-# (`DMC_268_UI_DIR=<ui checkout after pnpm install> node tests/generate_ui_zod_contracts.mjs`).
+# The base snapshot stays pinned until a single UI commit contains all shared contracts.
 UI_CONTRACT_COMMIT = "9bfb931d88fe66b15d77e636b32406374c76589a"
+# The base snapshot includes repository contracts from UI #102 that are not on UI main yet.
+# Keep that coverage and generate only the new event from the clean UI #113 commit.
+# SCHEMA_NAMES=runStepEvent OUTPUT_PATH=tests/fixtures/ui_run_step_zod_contracts.json \
+# DMC_268_UI_DIR=<ui checkout after pnpm install> node tests/generate_ui_zod_contracts.mjs
+UI_RUN_STEP_CONTRACT_COMMIT = "4dda8d13d5f718216c3db3800cd7f7fcde787401"
 
 
 # Where a Run came from, as the shared RunSession contract must carry it (#112).
@@ -153,7 +158,11 @@ class ContractRepository:
 def _generated_schemas() -> dict[str, Any]:
     contracts = json.loads(CONTRACTS_PATH.read_text())
     assert contracts["provenance"]["commit"] == UI_CONTRACT_COMMIT
-    return cast(dict[str, Any], contracts["schemas"])
+    run_step_contracts = json.loads(RUN_STEP_CONTRACTS_PATH.read_text())
+    assert run_step_contracts["provenance"]["commit"] == UI_RUN_STEP_CONTRACT_COMMIT
+    assert run_step_contracts["schemas"].keys() == {"runStepEvent"}
+    assert contracts["schemas"].keys().isdisjoint(run_step_contracts["schemas"])
+    return cast(dict[str, Any], contracts["schemas"] | run_step_contracts["schemas"])
 
 
 def test_api_responses_validate_against_json_schema_generated_from_ui_zod() -> None:

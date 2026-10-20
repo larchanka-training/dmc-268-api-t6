@@ -5,7 +5,8 @@ import { dirname, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
 // DMC_268_UI_DIR: a clean ui checkout after `pnpm install`; OUTPUT_PATH: where to write the
-// snapshot (default: the committed fixture).
+// snapshot (default: the committed fixture). SCHEMA_NAMES optionally selects comma-separated
+// snapshot names, so a supplement can pin new DTOs without replacing an older contract source.
 const uiDir = resolve(process.env.DMC_268_UI_DIR ?? '')
 const outputPath = resolve(
   process.env.OUTPUT_PATH ?? 'tests/fixtures/ui_zod_contracts.json',
@@ -61,6 +62,7 @@ const sources = {
   findingView: review.FindingViewSchema,
   runListPage: run.RunListPageSchema,
   runUpdatedEvent: run.RunUpdatedEventSchema,
+  runStepEvent: run.RunStepEventSchema,
   repository: repository.RepositorySchema,
   repositoryUpdate: repository.UpdateRepositorySchema,
   rawFileDiff: diff.RawFileDiffSchema,
@@ -69,16 +71,30 @@ const sources = {
   me: user.MeSchema,
 }
 
+const schemaNames = process.env.SCHEMA_NAMES?.split(',') ?? Object.keys(sources)
+if (schemaNames.some((name) => !Object.hasOwn(sources, name))) {
+  throw new Error('SCHEMA_NAMES must contain known, nonempty snapshot names')
+}
+if (process.env.SCHEMA_NAMES !== undefined && !process.env.OUTPUT_PATH) {
+  throw new Error('OUTPUT_PATH is required when SCHEMA_NAMES selects a supplement')
+}
+const selectionCommand = process.env.SCHEMA_NAMES === undefined
+  ? ''
+  : `SCHEMA_NAMES=${schemaNames.join(',')} ` +
+    `OUTPUT_PATH=${process.env.OUTPUT_PATH ?? 'tests/fixtures/ui_zod_contracts.json'} `
+
 const contracts = {
   provenance: {
     repository: 'https://github.com/larchanka-training/dmc-268-ui-t6',
     commit,
     generator: 'z.toJSONSchema (Zod 4)',
     command:
-      'DMC_268_UI_DIR=<ui checkout after pnpm install> node tests/generate_ui_zod_contracts.mjs',
+      'DMC_268_UI_DIR=<ui checkout after pnpm install> ' +
+      selectionCommand +
+      'node tests/generate_ui_zod_contracts.mjs',
   },
   schemas: Object.fromEntries(
-    Object.entries(sources).map(([name, schema]) => [name, z.toJSONSchema(schema)]),
+    schemaNames.map((name) => [name, z.toJSONSchema(sources[name])]),
   ),
 }
 
