@@ -10,16 +10,36 @@ from __future__ import annotations
 from datetime import timedelta
 from uuid import UUID
 
-from sqlalchemy import ColumnElement, and_, case, func, or_, select, true
+from sqlalchemy import ColumnElement, and_, case, func, not_, or_, select, true
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.modules.code_index.domain.enums import IndexStatus
+from app.modules.code_index.application.maintenance import (
+    DisarmCandidate,
+    HeadCandidate,
+    WakeRequest,
+)
+from app.modules.code_index.application.ports import IndexedRepository
+from app.modules.code_index.domain.enums import IndexStatus, PurgeReason
 from app.modules.code_index.infrastructure.index_store import (
     DISPLACED_GRACE,
     SqlAlchemyCodeIndexUnitOfWork,
     garbage_branches,
 )
 from app.modules.code_index.infrastructure.models import CodeIndexFile, CodeIndexState
+from app.modules.repositories.infrastructure.models import ProviderInstallation, Repository
+
+# The effective RAG of a repository (ADR §6.1): the toggle is on and the App can read it.
+_RAG_ON = and_(
+    Repository.rag_enabled,
+    Repository.installation_available,
+    ProviderInstallation.deleted_at.is_(None),
+)
+# The indexer has a snapshot source for GitHub only (GitLab is #97).
+_GITHUB = ProviderInstallation.provider == "github"
+# Turned off by the user, else lost access.
+_DISARM_REASON = case(
+    (not_(Repository.rag_enabled), PurgeReason.DISABLED.value), else_=PurgeReason.REMOVED.value
+)
 
 
 class SqlAlchemyCodeIndexMaintenance:
@@ -92,6 +112,103 @@ class SqlAlchemyCodeIndexMaintenance:
         return await self._list(
             or_(and_(leased, CodeIndexState.lease_expires_at <= now), *garbage), after, limit
         )
+
+    async def wake_requests(self, limit: int) -> list[WakeRequest]:
+        rows = await self._session.execute(
+            select(
+                CodeIndexState.repository_id,
+                CodeIndexState.generation,
+                CodeIndexState.wake_requested_at,
+            )
+            .where(
+                CodeIndexState.wake_requested_at.is_not(None),
+                or_(
+                    CodeIndexState.lease_expires_at.is_(None),
+                    CodeIndexState.lease_expires_at <= func.clock_timestamp(),
+                ),
+            )
+            .order_by(CodeIndexState.wake_requested_at, CodeIndexState.repository_id)
+            .limit(limit)
+        )
+        return [
+            WakeRequest(row.repository_id, row.generation, row.wake_requested_at) for row in rows
+        ]
+
+    async def heads(self, after: UUID | None, limit: int) -> list[HeadCandidate]:
+        rows = await self._session.execute(
+            select(
+                CodeIndexState.repository_id,
+                CodeIndexState.generation,
+                Repository.full_name,
+                ProviderInstallation.provider,
+                ProviderInstallation.external_id,
+                func.clock_timestamp(),
+            )
+            .join(Repository, Repository.id == CodeIndexState.repository_id)
+            .join(
+                ProviderInstallation, ProviderInstallation.id == Repository.provider_installation_id
+            )
+            .where(
+                _RAG_ON,
+                _GITHUB,
+                CodeIndexState.purge_reason.is_(None),
+                CodeIndexState.status != IndexStatus.FAILED,
+                true() if after is None else CodeIndexState.repository_id > after,
+            )
+            .order_by(CodeIndexState.repository_id)
+            .limit(limit)
+        )
+        return [
+            HeadCandidate(
+                IndexedRepository(
+                    repository_id=repository_id,
+                    provider=provider,
+                    installation_external_id=external_id,
+                    full_name=full_name,
+                ),
+                generation,
+                listed_at,
+            )
+            for repository_id, generation, full_name, provider, external_id, listed_at in (
+                rows.tuples()
+            )
+        ]
+
+    async def to_rearm(self, limit: int) -> list[UUID]:
+        rows = await self._session.scalars(
+            select(Repository.id)
+            .join(
+                ProviderInstallation, ProviderInstallation.id == Repository.provider_installation_id
+            )
+            .outerjoin(CodeIndexState, CodeIndexState.repository_id == Repository.id)
+            .where(
+                _RAG_ON,
+                _GITHUB,
+                or_(
+                    CodeIndexState.repository_id.is_(None),
+                    CodeIndexState.purge_reason.in_([PurgeReason.REMOVED, PurgeReason.DISABLED]),
+                ),
+            )
+            .order_by(Repository.id)
+            .limit(limit)
+        )
+        return list(rows)
+
+    async def to_disarm(self, limit: int) -> list[DisarmCandidate]:
+        rows = await self._session.execute(
+            select(CodeIndexState.repository_id, _DISARM_REASON)
+            .join(Repository, Repository.id == CodeIndexState.repository_id)
+            .join(
+                ProviderInstallation, ProviderInstallation.id == Repository.provider_installation_id
+            )
+            .where(CodeIndexState.purge_reason.is_(None), not_(_RAG_ON))
+            .order_by(CodeIndexState.repository_id)
+            .limit(limit)
+        )
+        return [
+            DisarmCandidate(repository_id, PurgeReason(reason))
+            for repository_id, reason in rows.tuples()
+        ]
 
 
 class SqlAlchemyCodeIndexMaintenanceUnitOfWork(SqlAlchemyCodeIndexUnitOfWork):
