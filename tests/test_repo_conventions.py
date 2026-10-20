@@ -1106,3 +1106,85 @@ def test_conventions_provenance_guard_rejects_directory_traversal() -> None:
     assert "directory traversal" in exc_info.value.message
     # Pre-send guard stops call BEFORE model is invoked!
     assert len(model.calls) == 0
+
+
+def test_conventions_provenance_guard_rejects_disallowed_file_in_tree_only() -> None:
+    from app.modules.reviews.application.policy_errors import PolicyError, PolicyErrorCode
+
+    class TreeDisallowedSource(FakeSource):
+        async def fetch_tree(self, repository_id: UUID) -> tuple[RepositoryFile, ...]:
+            return (
+                RepositoryFile("app/main.py", 60),
+                RepositoryFile("../secret.py", 50),
+            )
+
+        async def fetch_files(
+            self, repository_id: UUID, paths: tuple[str, ...]
+        ) -> tuple[RepositoryFile, ...]:
+            return (RepositoryFile("app/main.py", 10, content="ok"),)
+
+    model = FakeModel(draft())
+    store = FakeStore()
+    factory = FakeUnitOfWorkFactory(store)
+
+    with pytest.raises(PolicyError) as exc_info:
+        asyncio.run(
+            GenerateRepoConventions(TreeDisallowedSource(), model, factory).execute(
+                repository_id=REPOSITORY_ID,
+                conventions_prompt=ActiveConventionsPrompt(PROMPT_VERSION_ID, "conventions v1"),
+                run_id=RUN_ID,
+                changed_files=("app/main.py",),
+            )
+        )
+    assert exc_info.value.code == PolicyErrorCode.CONTEXT_VIOLATION
+    assert len(model.calls) == 0
+
+
+def test_conventions_execution_with_passed_snapshot_and_agents_md() -> None:
+    from app.modules.reviews.application.policy_snapshot import (
+        ExecutionProfile,
+        PolicySnapshot,
+        PromptBindings,
+        make_policy_document_missing,
+        make_policy_document_present,
+    )
+
+    agents_content = "Always use uv."
+    snapshot = PolicySnapshot(
+        schema_version=1,
+        snapshot_id=uuid4(),
+        run_id=RUN_ID,
+        repository_id=REPOSITORY_ID,
+        policy_base_sha=AGENTS_SHA,
+        rules=make_policy_document_missing(".review/rules.md"),
+        agents=make_policy_document_present("AGENTS.md", agents_content),
+        ignore_patterns=(),
+        ignore_digest="id_0",
+        parser_profile="rules-markdown/v1",
+        parser_version="4.0.0",
+        matcher_version="review-ignore/v1",
+        limits_version="policy-limits/v1",
+        builtin_exclusions_version="builtin-exclusions/v1",
+        priority_matcher_version="priority-matcher/v1",
+        service_defaults_rule_version_id=uuid4(),
+        defaults_checksum="defaults_0",
+        prompt_bindings=PromptBindings("cs1", "cs2", "cs3"),
+        execution_profile=ExecutionProfile.fast("m1", "m2"),
+        policy_digest="digest_base",
+    )
+
+    model = FakeModel(draft())
+    store = FakeStore()
+    factory = FakeUnitOfWorkFactory(store)
+
+    result = asyncio.run(
+        GenerateRepoConventions(FakeSource(), model, factory).execute(
+            repository_id=REPOSITORY_ID,
+            conventions_prompt=ActiveConventionsPrompt(PROMPT_VERSION_ID, "conventions v1"),
+            run_id=RUN_ID,
+            changed_files=("app/main.py",),
+            snapshot=snapshot,
+        )
+    )
+    assert result.agents_md == agents_content
+    assert len(model.calls) == 1

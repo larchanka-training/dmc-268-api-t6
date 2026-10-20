@@ -79,7 +79,7 @@ def test_v2_run_and_persisted_snapshot_retain_their_prompt_after_v3_activation(
                 await session.execute(
                     text("UPDATE runs SET state='running' WHERE id=:id"), {"id": RUN_ATTEMPTED}
                 )
-                assert await seed_prompt_versions(session, legacy_assets) == 4
+                assert await seed_prompt_versions(session, legacy_assets) == 5
             async with factory() as session:
                 conventions_id = (
                     await session.scalars(

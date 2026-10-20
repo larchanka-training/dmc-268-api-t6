@@ -44,9 +44,14 @@ bringing the Reflection Pass, prompt envelope, pre-send guards, token counters, 
    - Verifier receives candidate `evidence_refs` and low-trust conventions.
    - Verifier prompt explicitly states: lack of basis for attribution requires `insufficient_context`.
 
-8. **Spec Naming Alignments (CVS:601, RFS:794-802)**:
-   - `StageName`: `stage: conventions|review|verification` plus `recovery_kind: none|retry|repair|fallback`.
+8. **Profile Values & Parity (Part 8, RFS §7.2, §7.6)**:
+   - Configured `execution_profile_of` in `worker.py` with explicit versions: `verifier_model=llm.primary.model`, `counter_version="counter/v2"`, `tokenizer_version="tokenizer/v1"`, `recovery_profile_version="recovery/v1"`, and `budget_profile_version="budget/v1"`.
+   - Documented `"counter/v2"` factory resolution in `RULES_FORMAT_SPEC.md §7.2`.
+
+9. **Spec Naming Alignments (Part 10, CVS:601, RFS:794-802)**:
+   - `StageName`: `stage: Literal["conventions", "review", "verification"]` plus `recovery_kind: Literal["none", "retry", "repair", "fallback"]`.
    - `source_kind`: `diff` -> `source_code`, `candidate_finding` -> `candidate_findings`.
+   - `side: Literal["LEFT", "RIGHT"] | None` on `ManifestBlock`.
 
 ## Phases & Tasks
 
@@ -75,11 +80,12 @@ bringing the Reflection Pass, prompt envelope, pre-send guards, token counters, 
 - [ ] Task 4.3: Implement deterministic summary builder applied to post-severity-threshold findings in all cases (including 0 candidates and all supported).
 - [ ] Task 4.4: Add test probe for severity threshold `critical` with `medium` findings verifying clean summary.
 
-### Phase 5: Verifier Inputs, Stable IDs & Spec Naming (Parts 7, 8, 10)
+### Phase 5: Verifier Inputs, Stable IDs, Profile Values & Spec Naming (Parts 7, 8, 10)
 - [ ] Task 5.1: Update `PromptBuilder` to render stable check IDs for `service-defaults:<ID>` and feed candidate `evidence_refs` to verifier.
 - [ ] Task 5.2: Update verifier prompt with explicit instruction regarding `insufficient_context` for unsupported attributions.
 - [ ] Task 5.3: Align `StageName` (`conventions`, `review`, `verification` + `recovery_kind`) and `source_kind` (`source_code`, `candidate_findings`).
-- [ ] Task 5.4: Clean up comments in `worker.py` and `policy_snapshot_unit_of_work.py` referencing closed #120.
+- [ ] Task 5.4: Set explicit profile values in `worker.py` (`verifier_model`, `counter_version="counter/v2"`, etc.) and document in `RULES_FORMAT_SPEC.md §7.2`.
+- [ ] Task 5.5: Clean up comments in `worker.py` and `policy_snapshot_unit_of_work.py` referencing closed #120.
 
 ### Phase 6: Non-Vacuum Tests & Quality Gates (Part 9)
 - [ ] Task 6.1: Update AC 6 fake verifier in `test_reflection_evaluation.py` to check prompt inputs (code, policy, candidate).

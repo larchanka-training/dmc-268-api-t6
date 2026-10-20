@@ -20,6 +20,7 @@ from app.modules.reviews.application.policy_snapshot import (
 from app.modules.reviews.application.prompt_builder import (
     ChangedFile,
     DiffLine,
+    PromptBuilder,
     PullRequestMeta,
     RepoConventions,
     ReviewContext,
@@ -205,9 +206,14 @@ def test_verifier_prompt_builder_renders_candidates_and_policy() -> None:
     assert "<repository_rules" in prompt.user
     assert "<code_context>" in prompt.user
     assert manifest.call_id == call_id
-    assert manifest.stage in {"verifier", "verification"}
+    assert manifest.stage == "verification"
     assert manifest.get_block("policy-rules") is not None
-    assert manifest.get_block(file_block_id("app/query.py")) is not None
+    diff_block = manifest.get_block(file_block_id("app/query.py"))
+    assert diff_block is not None
+    assert diff_block.source_kind == "source_code"
+    cand_block = manifest.get_block("cand-1")
+    assert cand_block is not None
+    assert cand_block.source_kind == "candidate_findings"
 
 
 @pytest.mark.anyio
@@ -1647,3 +1653,287 @@ async def test_reflection_pass_service_defaults_exact_case_slug_matching() -> No
     decisions = await verifier.verify(candidates=(cand_slug,), context=context)
     assert len(decisions) == 1
     assert decisions[0].status == "supported"
+
+
+@pytest.mark.anyio
+async def test_reflection_pass_service_defaults_stable_id_and_foreign_rule_rejection() -> None:
+    query_block_id = file_block_id("app/query.py")
+    rule_naming = ReviewRule(
+        "Naming Consistency",
+        ("*.py",),
+        (),
+        ("check 1", "check 2", "check 3", "check 4"),
+    )
+    rule_errors = ReviewRule(
+        "Error Handling Standards",
+        ("*.py",),
+        (),
+        ("check 1", "check 2", "check 3", "check 4"),
+    )
+    snapshot = make_snapshot()
+    context = ReviewContext(
+        system="SYSTEM",
+        rules=(rule_naming, rule_errors),
+        agents_md=None,
+        conventions=RepoConventions((), ()),
+        pr_meta=PullRequestMeta("T", None, "u", "b", "main", (), 1, 1, 0, False, False),
+        changed_files=(ChangedFile("app/query.py", "modified", (DiffLine(10, "added", "x = 1"),)),),
+        omitted_files=(),
+        policy_snapshot=snapshot,
+    )
+
+    # 1. Matching stable check ID: rule_name="service-defaults:N1" and check_id="N1" -> OK
+    cand_ok = CandidateFindingItem(
+        candidate_id="c-ok",
+        finding=ReviewFindingV2(
+            path="app/query.py",
+            line=10,
+            start_line=None,
+            severity="medium",
+            category="readability",
+            title="Naming violation",
+            body="Variable must be snake_case",
+            suggestion=None,
+            confidence=0.9,
+            rule_name="service-defaults:N1",
+            evidence_refs=[EvidenceRef(block_id=query_block_id, start_line=10, end_line=10)],
+        ),
+    )
+    resp_ok = {
+        "decisions": [
+            {
+                "candidate_id": "c-ok",
+                "status": "supported",
+                "reason": "OK",
+                "evidence_refs": [{"block_id": query_block_id, "start_line": 10, "end_line": 10}],
+                "requirement_refs": [
+                    {
+                        "block_id": "service-defaults",
+                        "start_line": 1,
+                        "end_line": 1,
+                        "check_id": "N1",
+                    }
+                ],
+            }
+        ]
+    }
+    v_ok = ReflectionPass(FakeVerifierModel(resp_ok))
+    res = await v_ok.verify(candidates=(cand_ok,), context=context)
+    assert len(res) == 1
+    assert res[0].status == "supported"
+
+    # 2. Foreign check ID: candidate is Naming Consistency,
+    # but verifier references E1 (from Error Handling)
+    cand_foreign = CandidateFindingItem(
+        candidate_id="c-foreign",
+        finding=ReviewFindingV2(
+            path="app/query.py",
+            line=10,
+            start_line=None,
+            severity="medium",
+            category="readability",
+            title="Naming violation",
+            body="Variable must be snake_case",
+            suggestion=None,
+            confidence=0.9,
+            rule_name="service-defaults:Naming-Consistency",
+            evidence_refs=[EvidenceRef(block_id=query_block_id, start_line=10, end_line=10)],
+        ),
+    )
+    resp_foreign = {
+        "decisions": [
+            {
+                "candidate_id": "c-foreign",
+                "status": "supported",
+                "reason": "Foreign check",
+                "evidence_refs": [{"block_id": query_block_id, "start_line": 10, "end_line": 10}],
+                "requirement_refs": [
+                    {
+                        "block_id": "service-defaults",
+                        "start_line": 5,
+                        "end_line": 5,
+                        "check_id": "E1",
+                    }
+                ],
+            }
+        ]
+    }
+    v_foreign = ReflectionPass(FakeVerifierModel(resp_foreign))
+    with pytest.raises(
+        VerificationInvalidOutputError, match=r"does not match service defaults rule"
+    ):
+        await v_foreign.verify(candidates=(cand_foreign,), context=context)
+
+    # 3. Bogus rule: candidate has rule_name="service-defaults:BOGUS"
+    cand_bogus = CandidateFindingItem(
+        candidate_id="c-bogus",
+        finding=ReviewFindingV2(
+            path="app/query.py",
+            line=10,
+            start_line=None,
+            severity="medium",
+            category="readability",
+            title="Naming violation",
+            body="Variable must be snake_case",
+            suggestion=None,
+            confidence=0.9,
+            rule_name="service-defaults:BOGUS",
+            evidence_refs=[EvidenceRef(block_id=query_block_id, start_line=10, end_line=10)],
+        ),
+    )
+    resp_bogus = {
+        "decisions": [
+            {
+                "candidate_id": "c-bogus",
+                "status": "supported",
+                "reason": "Bogus rule",
+                "evidence_refs": [{"block_id": query_block_id, "start_line": 10, "end_line": 10}],
+                "requirement_refs": [
+                    {
+                        "block_id": "service-defaults",
+                        "start_line": 1,
+                        "end_line": 1,
+                        "check_id": "N1",
+                    }
+                ],
+            }
+        ]
+    }
+    v_bogus = ReflectionPass(FakeVerifierModel(resp_bogus))
+    with pytest.raises(
+        VerificationInvalidOutputError,
+        match=r"does not match service defaults rule 'BOGUS'",
+    ):
+        await v_bogus.verify(candidates=(cand_bogus,), context=context)
+
+
+def test_fit_changed_files_for_verifier_preserves_candidate_anchor_lines() -> None:
+    from app.modules.reviews.application.prompt_budget import EstimatedTokenCounter
+    from app.modules.reviews.application.reflection_pass import _fit_changed_files_for_verifier
+
+    counter = EstimatedTokenCounter()
+    lines = tuple(DiffLine(i, "added", f"x_{i} = {i} * 2") for i in range(1, 101))
+    file = ChangedFile("app/main.py", "modified", lines)
+    f_block_id = file_block_id("app/main.py")
+
+    cand = CandidateFindingItem(
+        candidate_id="c1",
+        finding=ReviewFindingV2(
+            path="app/main.py",
+            line=25,
+            start_line=20,
+            severity="high",
+            category="correctness",
+            title="Logic flaw",
+            body="Invalid multiplication",
+            suggestion=None,
+            confidence=0.9,
+            rule_name=None,
+            evidence_refs=[EvidenceRef(block_id=f_block_id, start_line=20, end_line=25)],
+        ),
+    )
+
+    builder = PromptBuilder()
+    full_rendered = builder._render_changed_files((file,), include_block_id=True)
+    full_tokens = counter.count(f"<code_context>\n{full_rendered}\n</code_context>")
+
+    lines_35_rendered = builder._render_changed_files(
+        (ChangedFile("app/main.py", "modified", lines[:35]),), include_block_id=True
+    )
+    budget = counter.count(f"<code_context>\n{lines_35_rendered}\n</code_context>")
+    assert budget < full_tokens
+
+    fitted = _fit_changed_files_for_verifier(
+        (file,),
+        rules=(),
+        max_tokens=budget,
+        counter=counter,
+        candidates=(cand,),
+    )
+    assert len(fitted) == 1
+    assert len(fitted[0].lines) >= 25
+    line_nums = {line.number for line in fitted[0].lines}
+    assert set(range(20, 26)).issubset(line_nums)
+
+
+def test_fit_changed_files_for_verifier_prioritizes_candidate_files() -> None:
+    from app.modules.reviews.application.prompt_budget import EstimatedTokenCounter
+    from app.modules.reviews.application.reflection_pass import _fit_changed_files_for_verifier
+
+    counter = EstimatedTokenCounter()
+    builder = PromptBuilder()
+
+    lines_a = tuple(DiffLine(i, "added", f"val_a_{i} = {i}") for i in range(1, 51))
+    file_a = ChangedFile("app/unrelated.py", "modified", lines_a)
+
+    lines_b = tuple(DiffLine(i, "added", f"val_b_{i} = {i}") for i in range(1, 51))
+    file_b = ChangedFile("app/target.py", "modified", lines_b)
+    b_block_id = file_block_id("app/target.py")
+
+    cand = CandidateFindingItem(
+        candidate_id="c1",
+        finding=ReviewFindingV2(
+            path="app/target.py",
+            line=10,
+            start_line=None,
+            severity="critical",
+            category="security",
+            title="Security flaw",
+            body="Insecure operation",
+            suggestion=None,
+            confidence=0.95,
+            rule_name=None,
+            evidence_refs=[EvidenceRef(block_id=b_block_id, start_line=10, end_line=10)],
+        ),
+    )
+
+    one_file_rendered = builder._render_changed_files((file_b,), include_block_id=True)
+    budget = counter.count(f"<code_context>\n{one_file_rendered}\n</code_context>")
+
+    fitted = _fit_changed_files_for_verifier(
+        (file_a, file_b),
+        rules=(),
+        max_tokens=budget,
+        counter=counter,
+        candidates=(cand,),
+    )
+    paths = [f.path for f in fitted]
+    assert "app/target.py" in paths
+
+
+def test_fit_changed_files_for_verifier_retains_total_lines() -> None:
+    from app.modules.reviews.application.prompt_budget import EstimatedTokenCounter
+    from app.modules.reviews.application.reflection_pass import _fit_changed_files_for_verifier
+
+    counter = EstimatedTokenCounter()
+    builder = PromptBuilder()
+
+    lines = tuple(DiffLine(i, "added", f"line_{i} = {i}") for i in range(1, 101))
+    file = ChangedFile("app/cut.py", "modified", lines, total_lines=250)
+
+    cut_rendered = builder._render_changed_files(
+        (ChangedFile("app/cut.py", "modified", lines[:40]),), include_block_id=True
+    )
+    budget = counter.count(f"<code_context>\n{cut_rendered}\n</code_context>")
+
+    fitted = _fit_changed_files_for_verifier(
+        (file,),
+        rules=(),
+        max_tokens=budget,
+        counter=counter,
+        candidates=(),
+    )
+    assert len(fitted) == 1
+    assert len(fitted[0].lines) < 100
+    assert fitted[0].total_lines == 250
+
+    file_no_total = ChangedFile("app/no_total.py", "modified", lines)
+    fitted_no_total = _fit_changed_files_for_verifier(
+        (file_no_total,),
+        rules=(),
+        max_tokens=budget,
+        counter=counter,
+        candidates=(),
+    )
+    assert len(fitted_no_total) == 1
+    assert fitted_no_total[0].total_lines == 100

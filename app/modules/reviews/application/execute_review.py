@@ -7,7 +7,7 @@ import logging
 import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Any, Protocol
 from uuid import UUID
 
 from pydantic import ValidationError
@@ -18,12 +18,12 @@ from app.modules.reviews.application.findings_post_processor import (
     ProcessedFinding,
 )
 from app.modules.reviews.application.policy_errors import PolicyError, PolicyErrorCode
-from app.modules.reviews.application.policy_snapshot import PolicySnapshot
+from app.modules.reviews.application.policy_snapshot import CallManifest, PolicySnapshot
 from app.modules.reviews.application.prompt_budget import (
-    EstimatedTokenCounter,
     PolicyBudgetExceededError,
     PreSendGuardError,
     fit_review_context,
+    token_counter_for,
     verify_pre_send_guard,
     verify_provenance_pre_send_guard,
 )
@@ -39,6 +39,7 @@ from app.modules.reviews.application.reflection_pass import (
     CandidateFindingItem,
     ReflectionPass,
     filter_verified_candidates,
+    verify_verifier_mandatory_budget,
 )
 from app.modules.reviews.application.review_output import (
     InvalidReviewOutput,
@@ -46,6 +47,7 @@ from app.modules.reviews.application.review_output import (
     ReviewFindingV2,
     ReviewOutputHandler,
     validate_v2_attribution,
+    validate_v2_coordinates,
 )
 from app.modules.reviews.application.run_failures import RunFailure
 from app.modules.reviews.application.verdict import SeverityThresholdValue
@@ -216,14 +218,18 @@ class ExecuteReviewRun:
                     PolicyErrorCode.SNAPSHOT_INTEGRITY_ERROR,
                     "Policy snapshot is not ready for LLM call",
                 )
-            counter = EstimatedTokenCounter()
+            counter = token_counter_for(
+                prompt_input.policy_snapshot.execution_profile.counter_version
+            )
             max_input = prompt_input.policy_snapshot.execution_profile.max_input_tokens
-            context = fit_review_context(context, max_prompt_tokens=max_input, counter=counter)
+            send_budget = max_input - 8_000 if max_input > 52_000 else max_input
+            verify_verifier_mandatory_budget(context, counter=counter)
+            context = fit_review_context(context, max_prompt_tokens=send_budget, counter=counter)
             try:
                 verify_pre_send_guard(
                     context,
                     counter,
-                    max_input_tokens=max_input,
+                    max_input_tokens=send_budget,
                 )
             except PolicyBudgetExceededError as exc:
                 raise PolicyError(
@@ -256,7 +262,9 @@ class ExecuteReviewRun:
 
         model_output = await self._model.draft_review(context=context)
         if self._reflection_pass is not None and context.policy_snapshot is not None:
-            model_output = await self._run_reflection_pass(model_output, context, run_id=run_id)
+            model_output = await self._run_reflection_pass(
+                model_output, context, run_id=run_id, reviewer_manifest=reviewer_manifest
+            )
         return await self._publisher.execute(run_id, model_output)
 
     async def _run_reflection_pass(
@@ -265,6 +273,7 @@ class ExecuteReviewRun:
         context: ReviewContext,
         *,
         run_id: UUID,
+        reviewer_manifest: CallManifest | None = None,
     ) -> Mapping[str, object] | str | bytes:
         assert self._reflection_pass is not None
         assert context.policy_snapshot is not None
@@ -299,9 +308,12 @@ class ExecuteReviewRun:
         if len(raw_findings) > 10:
             raise InvalidReviewOutput("Draft review exceeded maximum of 10 findings")
 
-        reviewer_manifest = PromptBuilder().build_manifest(
-            context, call_id=uuid.uuid4(), stage="review"
-        )
+        if reviewer_manifest is None:
+            reviewer_manifest = PromptBuilder().build_manifest(
+                context, call_id=uuid.uuid4(), stage="review"
+            )
+
+        _dropped_findings: list[dict[str, Any]] = []
         candidates: list[CandidateFindingItem] = []
         for idx, item in enumerate(raw_findings):
             cand_id = str(uuid.uuid4())
@@ -339,14 +351,41 @@ class ExecuteReviewRun:
                     f"Malformed candidate finding at index {idx}: {str(err)[:200]}"
                 ) from err
 
+            # Pass 2: Coordinates validation against fitted context (CVS §6.2 :701)
+            valid_coords, coord_err = validate_v2_coordinates(finding, context.changed_files)
+            if not valid_coords:
+                _LOGGER.info(
+                    "Dropping candidate finding %s due to coordinate failure (%s)",
+                    cand_id,
+                    coord_err,
+                )
+                _dropped_findings.append(
+                    {
+                        "finding": finding.model_dump(),
+                        "drop_reason": coord_err,
+                        "position": idx,
+                    }
+                )
+                continue
+
             # Pass 3: Validate attribution against manifest.
             # Unshown evidence refs drop only this candidate (CVS §6.2 :702, :729-730)
-            valid_attr, attr_err = validate_v2_attribution(finding, reviewer_manifest)
+            valid_attr, attr_err = validate_v2_attribution(
+                finding, reviewer_manifest, pr_meta=context.pr_meta
+            )
             if not valid_attr:
                 _LOGGER.info(
                     "Dropping candidate finding %s due to unshown evidence (%s)",
                     cand_id,
                     attr_err,
+                )
+                drop_code = attr_err.split(":")[0].strip() if attr_err else "evidence_not_shown"
+                _dropped_findings.append(
+                    {
+                        "finding": finding.model_dump(),
+                        "drop_reason": drop_code,
+                        "position": idx,
+                    }
                 )
                 continue
 
@@ -357,11 +396,24 @@ class ExecuteReviewRun:
         processed_candidates = [
             ProcessedFinding(c.finding, idx, "inline") for idx, c in enumerate(candidates)
         ]
-        # Filter unknown paths
-        valid_paths = {f.path for f in context.changed_files}
-        valid_path_candidates = [p for p in processed_candidates if p.finding.path in valid_paths]
-        kept_candidates, _ = post_processor._drop_lint_patterns(valid_path_candidates)
-        kept_candidates, _ = post_processor._deduplicate(kept_candidates)
+        kept_candidates, lint_dropped = post_processor._drop_lint_patterns(processed_candidates)
+        for item in lint_dropped:
+            _dropped_findings.append(
+                {
+                    "finding": item.finding.model_dump(),
+                    "drop_reason": "lint_pattern",
+                    "position": item.position,
+                }
+            )
+        kept_candidates, duplicate_dropped = post_processor._deduplicate(kept_candidates)
+        for item in duplicate_dropped:
+            _dropped_findings.append(
+                {
+                    "finding": item.finding.model_dump(),
+                    "drop_reason": "duplicate",
+                    "position": item.position,
+                }
+            )
 
         kept_findings_set = {id(p.finding) for p in kept_candidates}
         filtered_candidates = [c for c in candidates if id(c.finding) in kept_findings_set]
@@ -369,6 +421,8 @@ class ExecuteReviewRun:
         # If empty after filters, bypass verifier (0 calls)
         if not filtered_candidates:
             data["findings"] = []
+            if _dropped_findings:
+                data["_dropped_findings"] = _dropped_findings
             data["summary"] = build_deterministic_summary(
                 (),
                 changed_files=context.changed_files,
@@ -383,6 +437,15 @@ class ExecuteReviewRun:
         supported, rejected = filter_verified_candidates(
             candidates=tuple(filtered_candidates), decisions=decisions
         )
+        for cand, status, _reason in rejected:
+            _dropped_findings.append(
+                {
+                    "finding": cand.finding.model_dump(),
+                    "drop_reason": status,
+                    "position": 0,
+                }
+            )
+
         _LOGGER.info(
             "Reflection pass completed for run %s (call %s): "
             "total=%d, supported=%d, rejected=%d. Decisions: %s",
@@ -402,9 +465,19 @@ class ExecuteReviewRun:
         surviving_processed, below_threshold_processed = post_processor._drop_below_threshold(
             supported_processed, severity_threshold
         )
+        for item in below_threshold_processed:
+            _dropped_findings.append(
+                {
+                    "finding": item.finding.model_dump(),
+                    "drop_reason": "severity_threshold",
+                    "position": item.position,
+                }
+            )
         final_findings = [p.finding for p in surviving_processed]
 
         data["findings"] = [f.model_dump() for f in final_findings]
+        if _dropped_findings:
+            data["_dropped_findings"] = _dropped_findings
         # Deterministic summary is ALWAYS built from post-threshold supported findings (CVS §8.2)
         data["summary"] = build_deterministic_summary(
             final_findings,

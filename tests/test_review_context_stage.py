@@ -817,9 +817,10 @@ def test_execution_profile_takes_what_the_worker_knows_about_its_models() -> Non
     assert (profile.profile_name, profile.review_model) == ("fast", "mistral-small-4")
     assert profile.primary_provider_route == settings.primary.provider
     assert profile.fallback_review_model is None
-    # The verifier model and the versioned profiles are not known to the worker yet.
-    assert profile.verifier_model == ""
-    assert profile.is_complete is False
+    assert profile.verifier_model == "mistral-small-4"
+    assert profile.tokenizer_version == "tokenizer/v1"
+    assert profile.counter_version == "counter/v2"
+    assert profile.is_complete is True
 
 
 def test_check_run_says_where_a_policy_failure_is() -> None:
