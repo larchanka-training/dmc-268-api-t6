@@ -376,7 +376,8 @@ class Indexer:
             await uow.index.purge(repository_id, PurgeReason.DISABLED)
             await uow.commit()
 
-    async def build(self, repository_id: UUID) -> BuildOutcome:
+    async def build(self, repository_id: UUID, generation: int | None = None) -> BuildOutcome:
+        """A job for the current generation, or for `generation` (an old message)."""
         use_case = BuildRepositoryIndex(
             uow=self.uow,
             repositories=SqlAlchemyIndexRepositoryReader(self.database.factory),
@@ -388,8 +389,9 @@ class Indexer:
             limits=self.limits,
             settings=self.settings,
         )
-        state = await self.state(repository_id)
-        return await use_case.execute(repository_id, state.generation)
+        if generation is None:
+            generation = (await self.state(repository_id)).generation
+        return await use_case.execute(repository_id, generation)
 
     async def fresh_full(self, repository_id: UUID) -> BuildOutcome:
         """A full build from scratch: the toggle off and on again."""
