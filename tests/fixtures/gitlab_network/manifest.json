@@ -181,5 +181,32 @@
       "project": 20,
       "source_project": 32
     }
+  },
+  "merge_request": {
+    "id": 912,
+    "iid": 12,
+    "project_id": 17,
+    "target_project_id": 17,
+    "source_project_id": 29,
+    "state": "opened",
+    "updated_at": "2026-10-19T08:30:00+00:00",
+    "web_url": "https://localhost:49443/team/project/-/merge_requests/12",
+    "diff_refs": {
+      "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "start_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "base_sha": "cccccccccccccccccccccccccccccccccccccccc"
+    },
+    "changes_count": "1",
+    "title": "Pinned return-value change",
+    "description": "Synthetic consumed contract",
+    "author": {
+      "username": "fixture-author"
+    },
+    "source_branch": "feature",
+    "target_branch": "main",
+    "labels": [
+      "ai-review"
+    ],
+    "draft": false
   }
 }
