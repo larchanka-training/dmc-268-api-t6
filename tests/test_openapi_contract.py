@@ -43,7 +43,7 @@ from app.main import (
     get_run_repository,
     to_rules_status_dto,
 )
-from app.modules.code_index.domain.enums import RagIndexStatus
+from app.modules.code_index.domain.enums import PurgeReason, RagIndexStatus
 from app.modules.code_index.domain.rag_index import RagIndex
 from app.modules.repositories.application.repository_settings import (
     RepositorySettings,
@@ -335,6 +335,13 @@ class ContractRepositories:
     @property
     def repositories(self) -> ContractRepositories:
         return self
+
+    @property
+    def index_purger(self) -> ContractRepositories:
+        return self
+
+    async def purge(self, repository_id: UUID, reason: PurgeReason) -> None:
+        return None
 
     async def __aenter__(self) -> Self:
         return self

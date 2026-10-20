@@ -11,8 +11,10 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app.common.infrastructure.db.enums import Engine, ReviewEvent, SeverityThreshold, WaitForCi
 from app.common.infrastructure.db.unit_of_work import SqlAlchemyUnitOfWork
 from app.modules.auth.application.scope import AuthScope
+from app.modules.code_index.domain.enums import PurgeReason
 from app.modules.code_index.domain.rag_index import rag_index
 from app.modules.code_index.infrastructure.models import CodeIndexState
+from app.modules.code_index.infrastructure.purger import SqlAlchemyCodeIndexPurger
 from app.modules.repositories.application.repository_settings import (
     RepositorySettings,
     RepositorySettingsChange,
@@ -34,6 +36,10 @@ _SETTINGS = select(
     CodeIndexState.error_code,
     CodeIndexState.last_error_code,
 ).outerjoin(CodeIndexState, CodeIndexState.repository_id == Repository.id)
+
+
+def _visible(scope: AuthScope | None) -> ColumnElement[bool]:
+    return true() if scope is None else repository_access_predicate(scope)
 
 
 def _to_settings(row: Row[Any]) -> RepositorySettings:
@@ -84,7 +90,7 @@ class SqlAlchemyRepositorySettingsStore:
         self._scope = scope
 
     def _visible(self) -> ColumnElement[bool]:
-        return true() if self._scope is None else repository_access_predicate(self._scope)
+        return _visible(self._scope)
 
     async def list_repositories(self) -> list[RepositorySettings]:
         rows = await self._session.execute(
@@ -130,6 +136,36 @@ class SqlAlchemyRepositorySettingsStore:
         return None if updated is None else await self.get_repository(updated)
 
 
+class SqlAlchemyScopedCodeIndexPurger:
+    """`CodeIndexPurger` over the repositories the scope sees, on the caller's session.
+
+    Purging a repository outside the caller's Workspaces is a no-op, like an update of
+    one; the purge itself is `SqlAlchemyCodeIndexPurger`'s. Never commits.
+    """
+
+    def __init__(
+        self,
+        session: AsyncSession,
+        scope: AuthScope | None,
+        *,
+        allow_unscoped: bool = False,
+    ) -> None:
+        if scope is None and not allow_unscoped:
+            raise ValueError(
+                "SqlAlchemyScopedCodeIndexPurger requires an AuthScope unless allow_unscoped=True"
+            )
+        self._session = session
+        self._scope = scope
+        self._purger = SqlAlchemyCodeIndexPurger(session)
+
+    async def purge(self, repository_id: UUID, reason: PurgeReason) -> None:
+        visible = await self._session.scalar(
+            select(Repository.id).where(Repository.id == repository_id, _visible(self._scope))
+        )
+        if visible is not None:
+            await self._purger.purge(repository_id, reason)
+
+
 class SqlAlchemyRepositorySettingsUnitOfWork(SqlAlchemyUnitOfWork):
     def __init__(
         self,
@@ -150,5 +186,11 @@ class SqlAlchemyRepositorySettingsUnitOfWork(SqlAlchemyUnitOfWork):
     @property
     def repositories(self) -> SqlAlchemyRepositorySettingsStore:
         return SqlAlchemyRepositorySettingsStore(
+            self.session, self._scope, allow_unscoped=self._allow_unscoped
+        )
+
+    @property
+    def index_purger(self) -> SqlAlchemyScopedCodeIndexPurger:
+        return SqlAlchemyScopedCodeIndexPurger(
             self.session, self._scope, allow_unscoped=self._allow_unscoped
         )
