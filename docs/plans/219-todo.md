@@ -26,10 +26,11 @@
 - [x] Implement deterministic backend summary builder from post-threshold findings for all cases (0 candidates, partial, all supported).
 - [x] Add test for severity threshold `critical` with `medium` findings verifying clean summary.
 
-## Phase 5: Verifier Inputs, Stable IDs & Spec Naming (Parts 7, 8, 10)
+## Phase 5: Verifier Inputs, Stable IDs, Profile Values & Spec Naming (Parts 7, 8, 10)
 - [x] Render stable check IDs for `service-defaults:<ID>` and feed candidate `evidence_refs` into verifier input.
 - [x] Update verifier prompt with instruction that lack of attribution basis requires `insufficient_context`.
 - [x] Align `StageName` (`stage: conventions|review|verification`, `recovery_kind`) and `source_kind` (`source_code`, `candidate_findings`).
+- [x] Set explicit profile values in `worker.py` (`verifier_model`, `counter_version="counter/v2"`, etc.) and document in `RULES_FORMAT_SPEC.md §7.2`.
 - [x] Clean comments referencing #120 in `worker.py` and `policy_snapshot_unit_of_work.py`.
 
 ## Phase 6: Non-Vacuum Tests & Quality Gates (Part 9)

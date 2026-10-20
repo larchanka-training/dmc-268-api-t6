@@ -17,6 +17,7 @@ from app.common.application.unit_of_work import UnitOfWork
 from app.modules.reviews.application.policy_snapshot import (
     CallManifest,
     ManifestBlock,
+    PolicySnapshot,
     SourceRole,
 )
 from app.modules.reviews.application.prompt_budget import verify_provenance_pre_send_guard
@@ -237,6 +238,7 @@ class GenerateRepoConventions:
         changed_files: tuple[str, ...],
         rules: tuple[ReviewRule, ...] = (),
         policy_key: str | None = None,
+        snapshot: PolicySnapshot | None = None,
     ) -> GeneratedConventions:
         # Fetching the revision happens outside every database operation; it is the
         # exact cache key and therefore cannot be inferred from a stale repository row.
@@ -269,14 +271,20 @@ class GenerateRepoConventions:
         # Build conventions call manifest and verify provenance pre-send guard (CVS §5.2)
         conventions_blocks: list[ManifestBlock] = []
         if agents_md.content:
+            agents_rev = snapshot.policy_base_sha if snapshot is not None else agents_md.sha
+            agents_hash = (
+                snapshot.agents.text_sha256
+                if (snapshot is not None and snapshot.agents.text_sha256)
+                else sha256(agents_md.content.replace("\r\n", "\n").encode("utf-8")).hexdigest()
+            )
             conventions_blocks.append(
                 ManifestBlock(
                     block_id="agents-md",
                     source_role=SourceRole.POLICY_DOCUMENT,
                     source_kind="project_conventions_document",
                     path="AGENTS.md",
-                    revision=agents_md.sha,
-                    content_sha256=sha256(agents_md.content.encode("utf-8")).hexdigest(),
+                    revision=agents_rev,
+                    content_sha256=agents_hash,
                     start_line=1,
                     end_line=len(agents_md.content.splitlines()) or 1,
                     shown_line_count=len(agents_md.content.splitlines()) or 1,
@@ -308,13 +316,32 @@ class GenerateRepoConventions:
                 )
             )
 
+        for idx, tree_file in enumerate(tree):
+            conventions_blocks.append(
+                ManifestBlock(
+                    block_id=f"tree-{idx}",
+                    source_role=SourceRole.SOURCE_EXCERPT,
+                    source_kind="source_code",
+                    path=tree_file.path,
+                )
+            )
+        for idx, cf_path in enumerate(changed_files):
+            conventions_blocks.append(
+                ManifestBlock(
+                    block_id=f"changed-{idx}",
+                    source_role=SourceRole.DIFF,
+                    source_kind="source_code",
+                    path=cf_path,
+                )
+            )
+
         conventions_manifest = CallManifest(
             call_id=uuid4(),
             run_id=run_id,
             stage="conventions",
             blocks=tuple(conventions_blocks),
         )
-        verify_provenance_pre_send_guard(conventions_manifest)
+        verify_provenance_pre_send_guard(conventions_manifest, snapshot=snapshot)
 
         raw_draft = await self._model.draft_conventions(
             request=ConventionsRequest(

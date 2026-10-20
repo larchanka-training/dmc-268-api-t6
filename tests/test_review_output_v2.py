@@ -169,7 +169,7 @@ def test_validate_v2_attribution_checks_manifest_evidence_and_policy() -> None:
             ManifestBlock(
                 block_id="diff-app-main",
                 source_role=SourceRole.DIFF,
-                source_kind="diff",
+                source_kind="source_code",
                 path="app/main.py",
                 start_line=1,
                 end_line=30,
@@ -299,7 +299,7 @@ def test_validate_v2_attribution_additional_branches() -> None:
             ManifestBlock(
                 block_id="invalid-role-block",
                 source_role=SourceRole.CANDIDATE,
-                source_kind="candidate_finding",
+                source_kind="candidate_findings",
                 start_line=1,
                 end_line=10,
                 shown_line_count=10,
@@ -307,7 +307,7 @@ def test_validate_v2_attribution_additional_branches() -> None:
             ManifestBlock(
                 block_id="diff-file",
                 source_role=SourceRole.DIFF,
-                source_kind="file_diff",
+                source_kind="source_code",
                 start_line=1,
                 end_line=30,
                 shown_line_count=30,
@@ -359,7 +359,7 @@ def test_validate_v2_attribution_additional_branches() -> None:
             ManifestBlock(
                 block_id="diff-file",
                 source_role=SourceRole.DIFF,
-                source_kind="file_diff",
+                source_kind="source_code",
                 start_line=1,
                 end_line=30,
                 shown_line_count=30,
@@ -388,7 +388,7 @@ def test_validate_v2_attribution_additional_branches() -> None:
             ManifestBlock(
                 block_id="diff-file",
                 source_role=SourceRole.DIFF,
-                source_kind="file_diff",
+                source_kind="source_code",
                 start_line=1,
                 end_line=30,
                 shown_line_count=30,

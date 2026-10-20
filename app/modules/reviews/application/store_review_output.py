@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import time
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import Any, Protocol
 from uuid import UUID
@@ -18,6 +18,7 @@ from app.modules.reviews.application.findings_post_processor import (
 )
 from app.modules.reviews.application.queue_messages import ReviewPublishPointer, ReviewPublishQueue
 from app.modules.reviews.application.review_output import (
+    ReviewFinding,
     ReviewOutputRepository,
     _as_json_object,
     parse_review_output,
@@ -123,6 +124,29 @@ class StoreReviewOutput:
             severity_threshold=context.severity_threshold,
             allowed_v2_rules=context.allowed_v2_rules,
         )
+
+        dropped_extra: list[ProcessedFinding] = []
+        if isinstance(answer, dict) and "_dropped_findings" in answer:
+            raw_dropped = answer.pop("_dropped_findings", [])
+            if isinstance(raw_dropped, list):
+                for idx, item in enumerate(raw_dropped):
+                    if isinstance(item, dict):
+                        f_data = item.get("finding")
+                        d_reason = item.get("drop_reason")
+                        pos = item.get("position", idx)
+                        if isinstance(f_data, dict):
+                            f_clean = {k: v for k, v in f_data.items() if k != "evidence_refs"}
+                            f_model = ReviewFinding.model_validate(f_clean)
+                            dropped_extra.append(
+                                ProcessedFinding(
+                                    finding=f_model,
+                                    position=pos,
+                                    bucket="dropped",
+                                    drop_reason=d_reason,
+                                )
+                            )
+        if dropped_extra:
+            processed = replace(processed, dropped=(*processed.dropped, *dropped_extra))
         findings = hashed_findings(processed)
         severities = [item.severity for item in findings]
         run_verdict = verdict(severities)

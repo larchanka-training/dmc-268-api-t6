@@ -19,9 +19,11 @@ from app.modules.reviews.application.policy_snapshot import (
 )
 from app.modules.reviews.application.prompt_budget import (
     EstimatedTokenCounter,
+    LegacyTokenCounter,
     PolicyBudgetExceededError,
     PreSendGuardError,
     policy_tokens,
+    token_counter_for,
     verify_policy_budget,
     verify_pre_send_guard,
     verify_provenance_pre_send_guard,
@@ -43,7 +45,11 @@ class CharCounter:
         return len(text)
 
 
-def make_snapshot(rules_text: str = "", agents_text: str = "") -> PolicySnapshot:
+def make_snapshot(
+    rules_text: str = "",
+    agents_text: str = "",
+    ignore_patterns: tuple[str, ...] = (),
+) -> PolicySnapshot:
     return PolicySnapshot(
         schema_version=1,
         snapshot_id=uuid.uuid4(),
@@ -60,7 +66,7 @@ def make_snapshot(rules_text: str = "", agents_text: str = "") -> PolicySnapshot
             if agents_text
             else make_policy_document_missing("AGENTS.md")
         ),
-        ignore_patterns=(),
+        ignore_patterns=ignore_patterns,
         ignore_digest="id_0",
         parser_profile="rules-markdown/v1",
         parser_version="4.0.0",
@@ -151,22 +157,25 @@ def test_estimated_token_counter_is_conservative_three_chars() -> None:
 
 
 def test_rules_file_of_39390_chars_exceeds_12000_token_limit_with_estimated_counter() -> None:
-    counter = EstimatedTokenCounter()
-    # 39,390 chars of rules markdown
-    line_pattern = "1. Rule check pattern for security.\n"
-    repeat_count = 39390 // len(line_pattern)
-    rules_content = line_pattern * repeat_count
-    rules_content += "x" * (39390 - len(rules_content))
+    # 400 lines totaling exactly 39,390 chars (210 lines of 98 chars + 190 lines of 99 chars)
+    # Under legacy 4 chars/token: 11,965 tokens <= 12,000 limit (passes)
+    # Under conservative 3 chars/token (counter/v2): 15,953 tokens > 12,000 limit (exceeds)
+    lines = ["x" * 97 + "\n"] * 210 + ["x" * 98 + "\n"] * 190
+    rules_content = "".join(lines)
     assert len(rules_content) == 39390
+    assert len(rules_content.splitlines()) == 400
 
     snapshot = make_snapshot(rules_text=rules_content)
-    tokens = policy_tokens(snapshot, counter)
-    # RFS §3.3: under conservative 3 chars/token, rendered policy tokens > 15,000 > 12,000 limit
-    assert tokens > 15000
+    legacy_counter = LegacyTokenCounter()
+    v2_counter = EstimatedTokenCounter()
+
+    assert policy_tokens(snapshot, legacy_counter) == 11965
+    assert policy_tokens(snapshot, v2_counter) == 15953
+
     with pytest.raises(PolicyBudgetExceededError) as exc_info:
-        verify_policy_budget(snapshot, counter, max_policy_tokens=12_000)
+        verify_policy_budget(snapshot, v2_counter, max_policy_tokens=12_000)
     assert exc_info.value.limit == 12000
-    assert exc_info.value.actual == tokens
+    assert exc_info.value.actual == 15953
     assert "policy_prompt_budget_exceeded" in str(exc_info.value)
 
 
@@ -246,13 +255,15 @@ def test_provenance_guard_rejects_directory_traversal() -> None:
     assert "directory traversal" in exc_info.value.message
 
 
-def test_provenance_guard_rejects_unsupported_path() -> None:
+def test_provenance_guard_rejects_unsupported_paths() -> None:
     snapshot = make_snapshot()
+
+    # Backslash
     bad_block = ManifestBlock(
-        block_id="b1",
+        block_id="b-bs",
         source_role=SourceRole.DIFF,
         source_kind="source_code",
-        path="src/unsupported_path/file.py",
+        path="src\\evil.py",
     )
     manifest = CallManifest(
         call_id=uuid.uuid4(),
@@ -264,6 +275,81 @@ def test_provenance_guard_rejects_unsupported_path() -> None:
         verify_provenance_pre_send_guard(manifest, snapshot=snapshot)
     assert exc_info.value.code == PolicyErrorCode.CONTEXT_VIOLATION
     assert "references unsupported path" in exc_info.value.message
+
+    # NUL / control character
+    for bad_path in ("a\x00b.py", "a\x1bb.py"):
+        bad_block = ManifestBlock(
+            block_id="b-ctrl",
+            source_role=SourceRole.DIFF,
+            source_kind="source_code",
+            path=bad_path,
+        )
+        manifest = CallManifest(
+            call_id=uuid.uuid4(),
+            run_id=snapshot.run_id,
+            stage="review",
+            blocks=(bad_block,),
+        )
+        with pytest.raises(PolicyError) as exc_info:
+            verify_provenance_pre_send_guard(manifest, snapshot=snapshot)
+        assert exc_info.value.code == PolicyErrorCode.CONTEXT_VIOLATION
+        assert "references unsupported path" in exc_info.value.message
+
+    # Surrogate
+    bad_block = ManifestBlock(
+        block_id="b-surr",
+        source_role=SourceRole.DIFF,
+        source_kind="source_code",
+        path="a\ud800b.py",
+    )
+    manifest = CallManifest(
+        call_id=uuid.uuid4(),
+        run_id=snapshot.run_id,
+        stage="review",
+        blocks=(bad_block,),
+    )
+    with pytest.raises(PolicyError) as exc_info:
+        verify_provenance_pre_send_guard(manifest, snapshot=snapshot)
+    assert exc_info.value.code == PolicyErrorCode.CONTEXT_VIOLATION
+    assert (
+        "has invalid encoding" in exc_info.value.message
+        or "references unsupported path" in exc_info.value.message
+    )
+
+    # Legal path containing 'unsupported_path' in directory name is ACCEPTED
+    ok_block = ManifestBlock(
+        block_id="b-ok",
+        source_role=SourceRole.DIFF,
+        source_kind="source_code",
+        path="src/unsupported_path/ok.py",
+    )
+    ok_manifest = CallManifest(
+        call_id=uuid.uuid4(),
+        run_id=snapshot.run_id,
+        stage="review",
+        blocks=(ok_block,),
+    )
+    verify_provenance_pre_send_guard(ok_manifest, snapshot=snapshot)
+
+
+def test_provenance_guard_rejects_ignored_path() -> None:
+    snapshot = make_snapshot(ignore_patterns=("secret/**",))
+    bad_block = ManifestBlock(
+        block_id="b-ignored",
+        source_role=SourceRole.DIFF,
+        source_kind="source_code",
+        path="secret/key.py",
+    )
+    manifest = CallManifest(
+        call_id=uuid.uuid4(),
+        run_id=snapshot.run_id,
+        stage="review",
+        blocks=(bad_block,),
+    )
+    with pytest.raises(PolicyError) as exc_info:
+        verify_provenance_pre_send_guard(manifest, snapshot=snapshot)
+    assert exc_info.value.code == PolicyErrorCode.CONTEXT_VIOLATION
+    assert "references ignored path matching deny-set" in exc_info.value.message
 
 
 def test_provenance_guard_rejects_path_exceeding_byte_limit() -> None:
@@ -378,3 +464,44 @@ def test_provenance_guard_rejects_rules_block_content_hash_mismatch() -> None:
         verify_provenance_pre_send_guard(manifest, snapshot=snapshot)
     assert exc_info.value.code == PolicyErrorCode.CONTEXT_VIOLATION
     assert "checksum mismatch" in exc_info.value.message
+
+
+def test_token_counter_for_resolutions_and_integrity_error() -> None:
+    assert isinstance(token_counter_for("counter/v2"), EstimatedTokenCounter)
+    assert isinstance(token_counter_for("estimated/v2"), EstimatedTokenCounter)
+    assert isinstance(token_counter_for(None), EstimatedTokenCounter)
+    assert isinstance(token_counter_for("counter/v1"), LegacyTokenCounter)
+    assert isinstance(token_counter_for("estimated/v1"), LegacyTokenCounter)
+
+    with pytest.raises(PolicyError) as exc_info:
+        token_counter_for("unknown/version")
+    assert exc_info.value.code == PolicyErrorCode.SNAPSHOT_INTEGRITY_ERROR
+    assert "Unknown counter_version" in exc_info.value.message
+
+
+def test_verify_verifier_mandatory_budget_missing_prompt_asset_raises_integrity_error() -> None:
+    from dataclasses import replace
+
+    from app.modules.reviews.application.reflection_pass import verify_verifier_mandatory_budget
+
+    snapshot = make_snapshot(rules_text="1. Rule\n")
+    # Bind an unseeded non-existent verifier prompt version
+    bad_bindings = replace(snapshot.prompt_bindings, verifier_version="v999")
+    bad_snapshot = replace(snapshot, prompt_bindings=bad_bindings)
+
+    context = ReviewContext(
+        system="SYSTEM",
+        rules=(),
+        agents_md=None,
+        conventions=RepoConventions((), ()),
+        pr_meta=PullRequestMeta("T", None, "u", "b", "main", (), 1, 1, 0, False, False),
+        changed_files=(),
+        omitted_files=(),
+        policy_snapshot=bad_snapshot,
+    )
+
+    with pytest.raises(PolicyError) as exc_info:
+        verify_verifier_mandatory_budget(context)
+    assert exc_info.value.code == PolicyErrorCode.SNAPSHOT_INTEGRITY_ERROR
+    msg = exc_info.value.message
+    assert "Unable to read verifier prompt resource 'review.verifier.v999.md'" in msg

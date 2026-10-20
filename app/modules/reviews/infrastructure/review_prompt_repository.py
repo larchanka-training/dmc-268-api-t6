@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+from typing import Literal
 from uuid import UUID
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.modules.repositories.infrastructure.models import RuleVersion
+from app.modules.repositories.infrastructure.models import Repository, RuleVersion
 from app.modules.reviews.application.conventions import GeneratedConventions
 from app.modules.reviews.application.execute_review import ReviewPromptInput
 from app.modules.reviews.application.get_run_diff import (
@@ -18,7 +19,7 @@ from app.modules.reviews.application.prompt_builder import (
     RepoConventions as PromptConventions,
 )
 from app.modules.reviews.application.prompt_builder import review_rule_from_stored
-from app.modules.reviews.infrastructure.models import CodeChangeDiff, PromptVersion, Run
+from app.modules.reviews.infrastructure.models import CodeChange, CodeChangeDiff, PromptVersion, Run
 
 
 class SqlAlchemyReviewPromptRepository:
@@ -34,17 +35,20 @@ class SqlAlchemyReviewPromptRepository:
             select(
                 PromptVersion.content,
                 RuleVersion.rules,
+                Repository.severity_threshold,
             )
             .select_from(Run)
             .join(PromptVersion, PromptVersion.id == Run.prompt_version_id)
             .join(RuleVersion, RuleVersion.id == Run.rule_version_id)
+            .outerjoin(CodeChange, CodeChange.id == Run.code_change_id)
+            .outerjoin(Repository, Repository.id == CodeChange.repository_id)
             .where(Run.id == run_id)
         )
         async with self._session_factory() as session:
             row = (await session.execute(statement)).one_or_none()
             if row is None:
                 return None
-            system, stored_rules = row
+            system, stored_rules, raw_threshold = row
             snapshots = (
                 await session.execute(
                     select(CodeChangeDiff)
@@ -70,6 +74,10 @@ class SqlAlchemyReviewPromptRepository:
                 for (row,) in snapshots
             ]
         )
+        raw_val = getattr(raw_threshold, "value", raw_threshold)
+        threshold: Literal["all", "warning", "critical"] = (
+            raw_val if raw_val in {"all", "warning", "critical"} else "all"
+        )
         return ReviewPromptInput(
             system=system,
             rules=tuple(review_rule_from_stored(item) for item in stored_rules),
@@ -80,4 +88,5 @@ class SqlAlchemyReviewPromptRepository:
             ),
             changed_files=changed,
             omitted_files=omitted,
+            severity_threshold=threshold,
         )

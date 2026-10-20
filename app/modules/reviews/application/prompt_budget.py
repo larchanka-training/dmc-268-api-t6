@@ -15,6 +15,7 @@ from dataclasses import replace
 from pathlib import PurePosixPath
 from typing import Protocol, runtime_checkable
 
+from app.modules.reviews.application.diff_map import is_supported_path
 from app.modules.reviews.application.policy_errors import PolicyError, PolicyErrorCode
 from app.modules.reviews.application.policy_snapshot import (
     CallManifest,
@@ -32,6 +33,7 @@ from app.modules.reviews.application.prompt_builder import (
     truncation_trailer,
     xml_text,
 )
+from app.modules.reviews.application.review_ignore import IgnoreMatcher, IgnorePolicy
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -66,6 +68,28 @@ class EstimatedTokenCounter:
 
     def count_length(self, characters: int) -> int:
         return (characters + 2) // 3
+
+
+class LegacyTokenCounter:
+    """Four characters per token: (len + 3) // 4 (legacy counter/v1)."""
+
+    def count(self, text: str) -> int:
+        return (len(text) + 3) // 4
+
+    def count_length(self, characters: int) -> int:
+        return (characters + 3) // 4
+
+
+def token_counter_for(counter_version: str | None) -> TokenCounter:
+    """Resolve token counter by pinned version in ExecutionProfile (RFS §7.2)."""
+    if counter_version is None or counter_version in {"counter/v2", "estimated/v2"}:
+        return EstimatedTokenCounter()
+    if counter_version in {"counter/v1", "estimated/v1"}:
+        return LegacyTokenCounter()
+    raise PolicyError(
+        PolicyErrorCode.SNAPSHOT_INTEGRITY_ERROR,
+        f"Unknown counter_version '{counter_version}' in execution profile",
+    )
 
 
 class PolicyBudgetExceededError(ValueError):
@@ -161,11 +185,11 @@ _ROLE_KIND_MAP = {
     SourceRole.SERVICE_DEFAULTS: frozenset({"service_defaults"}),
     SourceRole.CONVENTIONS: frozenset({"generated_conventions"}),
     SourceRole.PR_METADATA: frozenset({"pr_metadata"}),
-    SourceRole.DIFF: frozenset({"source_code", "diff", "file_diff"}),
-    SourceRole.SOURCE_EXCERPT: frozenset({"source_code", "diff", "file_diff"}),
-    SourceRole.AST_EXCERPT: frozenset({"source_code", "diff", "file_diff"}),
-    SourceRole.RETRIEVED_EXCERPT: frozenset({"source_code", "diff", "file_diff"}),
-    SourceRole.CANDIDATE: frozenset({"candidate_findings", "candidate_finding"}),
+    SourceRole.DIFF: frozenset({"source_code"}),
+    SourceRole.SOURCE_EXCERPT: frozenset({"source_code"}),
+    SourceRole.AST_EXCERPT: frozenset({"source_code"}),
+    SourceRole.RETRIEVED_EXCERPT: frozenset({"source_code"}),
+    SourceRole.CANDIDATE: frozenset({"candidate_findings"}),
     SourceRole.PREVIOUS_OUTPUT: frozenset({"previous_model_output"}),
 }
 
@@ -204,7 +228,14 @@ def verify_provenance_pre_send_guard(
                     PolicyErrorCode.CONTEXT_VIOLATION,
                     f"Block '{block.block_id}' has empty path",
                 )
-            if len(path_str.encode("utf-8")) > 1024:
+            try:
+                encoded = path_str.encode("utf-8")
+            except UnicodeEncodeError as err:
+                raise PolicyError(
+                    PolicyErrorCode.CONTEXT_VIOLATION,
+                    f"Block '{block.block_id}' path has invalid encoding",
+                ) from err
+            if len(encoded) > 1024:
                 raise PolicyError(
                     PolicyErrorCode.CONTEXT_VIOLATION,
                     f"Block '{block.block_id}' path exceeds 1024 bytes limit",
@@ -215,39 +246,71 @@ def verify_provenance_pre_send_guard(
                     PolicyErrorCode.CONTEXT_VIOLATION,
                     f"Block '{block.block_id}' path exceeds 128 segments limit",
                 )
-            if "//" in path_str or path_str.startswith("/") or path_str.endswith("/"):
+            if ".." in segments or "." in segments or any(s == "" for s in segments):
                 raise PolicyError(
                     PolicyErrorCode.CONTEXT_VIOLATION,
-                    f"Block '{block.block_id}' has invalid path format: '{path_str}'",
+                    f"Block '{block.block_id}' path violates repository path contract: "
+                    "directory traversal or empty segment",
                 )
-            if any(seg in {".", ".."} for seg in segments):
+            if not is_supported_path(path_str):
                 raise PolicyError(
                     PolicyErrorCode.CONTEXT_VIOLATION,
-                    f"Block '{block.block_id}' contains directory traversal: '{path_str}'",
+                    f"Block '{block.block_id}' references unsupported path: {path_str}",
                 )
-            if "unsupported_path" in path_str:
-                raise PolicyError(
-                    PolicyErrorCode.CONTEXT_VIOLATION,
-                    f"Block '{block.block_id}' references unsupported path: '{path_str}'",
+            if snapshot is not None and snapshot.ignore_patterns:
+                matcher = IgnoreMatcher(
+                    IgnorePolicy(snapshot.ignore_patterns, (), snapshot.ignore_digest)
                 )
+                if matcher.match(path_str) is not None:
+                    raise PolicyError(
+                        PolicyErrorCode.CONTEXT_VIOLATION,
+                        f"Block '{block.block_id}' references ignored path matching deny-set",
+                    )
 
         # 3. Revision validation
         if block.revision is not None:
-            allowed_revisions: set[str] = set()
-            if snapshot is not None:
-                allowed_revisions.add(snapshot.policy_base_sha)
-            if context is not None and context.pr_meta is not None:
-                if context.pr_meta.head_sha:
-                    allowed_revisions.add(context.pr_meta.head_sha)
-                base_sha = getattr(context.pr_meta, "base_sha", None)
-                if base_sha:
-                    allowed_revisions.add(base_sha)
-
-            if allowed_revisions and block.revision not in allowed_revisions:
+            if (
+                block.source_role
+                in {
+                    SourceRole.DIFF,
+                    SourceRole.SOURCE_EXCERPT,
+                    SourceRole.AST_EXCERPT,
+                    SourceRole.RETRIEVED_EXCERPT,
+                }
+                or block.source_kind == "source_code"
+            ):
+                if block.side == "LEFT":
+                    diff_old_sha = (
+                        context.pr_meta.diff_old_sha
+                        if context is not None and context.pr_meta is not None
+                        else None
+                    )
+                    if diff_old_sha is not None and block.revision != diff_old_sha:
+                        raise PolicyError(
+                            PolicyErrorCode.CONTEXT_VIOLATION,
+                            f"Block '{block.block_id}' LEFT revision does not match "
+                            f"PR revisions: diff_old_sha '{diff_old_sha}'",
+                        )
+                else:
+                    head_sha = (
+                        context.pr_meta.head_sha
+                        if context is not None and context.pr_meta is not None
+                        else None
+                    )
+                    if head_sha is not None and block.revision != head_sha:
+                        raise PolicyError(
+                            PolicyErrorCode.CONTEXT_VIOLATION,
+                            f"Block '{block.block_id}' revision does not match "
+                            f"PR revisions: head_sha '{head_sha}'",
+                        )
+            elif (
+                block.source_role == SourceRole.POLICY_DOCUMENT
+                and snapshot is not None
+                and block.revision != snapshot.policy_base_sha
+            ):
                 raise PolicyError(
                     PolicyErrorCode.CONTEXT_VIOLATION,
-                    f"Block '{block.block_id}' revision '{block.revision}' "
-                    f"does not match PR revisions: {allowed_revisions}",
+                    f"Block '{block.block_id}' revision does not match policy_base_sha",
                 )
 
         # 4. Policy document snapshot checks
@@ -348,10 +411,16 @@ def fit_review_context(
 class _FileLengths:
     """Exact rendered lengths of a file and each possible line prefix."""
 
-    def __init__(self, file: ChangedFile) -> None:
+    def __init__(self, file: ChangedFile, *, include_block_id: bool = False) -> None:
         self.file = file
-        self.whole = len(render_changed_file(file))
-        self.empty = len(render_changed_file(replace(file, lines=(), total_lines=None)))
+        self.include_block_id = include_block_id
+        self.whole = len(render_changed_file(file, include_block_id=include_block_id))
+        self.empty = len(
+            render_changed_file(
+                replace(file, lines=(), total_lines=None),
+                include_block_id=include_block_id,
+            )
+        )
         prefix = [0]
         for line in file.lines:
             prefix.append(prefix[-1] + len(render_changed_line(line)))
@@ -376,10 +445,11 @@ class _PromptLengths:
     def __init__(
         self, context: ReviewContext, files: tuple[ChangedFile, ...], counter: TokenCounter
     ) -> None:
+        include_block_id = context.policy_snapshot is not None
         empty = replace(context, changed_files=(), omitted_files=())
         self.base_user = len(PromptBuilder().render_input(empty))
         self.system_tokens = counter.count(context.system)
-        self.files = tuple(_FileLengths(file) for file in files)
+        self.files = tuple(_FileLengths(file, include_block_id=include_block_id) for file in files)
         self.omitted_paths = tuple(len(xml_text(file.path)) for file in files)
         self.original_omitted = tuple(len(xml_text(path)) for path in context.omitted_files)
 

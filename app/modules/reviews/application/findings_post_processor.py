@@ -24,7 +24,22 @@ from app.modules.reviews.application.verdict import (
     verdict,
 )
 
-DropReason = Literal["lint_pattern", "duplicate", "severity_threshold", "unknown_path"]
+DropReason = (
+    Literal[
+        "lint_pattern",
+        "duplicate",
+        "severity_threshold",
+        "unknown_path",
+        "line_absent",
+        "anchor_not_visible",
+        "evidence_not_shown",
+        "evidence_source_disallowed",
+        "revision_mismatch",
+        "insufficient_context",
+        "contradicted",
+    ]
+    | str
+)
 Bucket = Literal["inline", "body_only", "dropped"]
 
 _ATTRIBUTION_PREFIX = "According to custom instructions in '"

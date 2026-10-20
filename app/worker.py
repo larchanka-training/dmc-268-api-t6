@@ -502,22 +502,24 @@ class GitHubAdapters:
 
 
 def execution_profile_of(llm: LlmSettings | None) -> ExecutionProfile:
-    """The model settings of this worker that a policy snapshot fixes for its run.
-
-    Only what the worker knows today: the review model, its fallback and their providers.
-    The verifier model and the versioned profiles arrive with #130; until then the
-    profile is not complete.
-    """
+    """The model settings of this worker that a policy snapshot fixes for its run (RFS §7.4)."""
     if llm is None:
         return UNPINNED_EXECUTION_PROFILE
     fallback = llm.fallback
     return ExecutionProfile(
         profile_name="fast",
         review_model=llm.primary.model,
-        verifier_model="",
+        verifier_model=llm.primary.model,
         fallback_review_model=None if fallback is None else fallback.model,
+        fallback_verifier_model=None if fallback is None else fallback.model,
         primary_provider_route=llm.primary.provider,
         fallback_provider_route=None if fallback is None else fallback.provider,
+        tokenizer_version="tokenizer/v1",
+        counter_version="counter/v2",
+        temperature="0.0",
+        response_schema_version="review-output/v2",
+        recovery_profile_version="recovery/v1",
+        budget_profile_version="budget/v1",
     )
 
 
