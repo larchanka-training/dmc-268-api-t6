@@ -70,7 +70,7 @@ infrastructure implementations
 | --- | --- | --- |
 | `<module>/domain` | value objects, правила, доменные ошибки, интерфейсы модуля | только stdlib / небольшие абстракции |
 | `<module>/application` | use cases, DTO команд и результатов | domain своего модуля и явно нужные публичные контракты других модулей |
-| `<module>/infrastructure` | repositories и реализации внешних зависимостей конкретного модуля | application/domain модуля, внешние библиотеки |
+| `<module>/infrastructure` | repositories и реализации внешних зависимостей конкретного модуля | application/domain модуля, внешние библиотеки; исключение — unit of work может построить на своей сессии адаптер `infrastructure` другого модуля (`installation_repository_unit_of_work.py` берёт `workspaces.infrastructure.github_installation_locks`, а `index_purger` обоих UoW модуля `repositories` — `SqlAlchemyCodeIndexPurger`, #143) |
 | `entrypoints` | FastAPI routers, webhook endpoint, consumers, scheduler, dependency wiring | application-модули и bootstrap |
 
 HTTP DTO и сообщения RabbitMQ — транспортные модели Pydantic. ORM-модели — детали
@@ -122,6 +122,7 @@ Application зависит от узких интерфейсов, сгрупп�
 | `GraphRetriever` | `reviews` | кандидаты графа символов RAG v1 по `repository_id`; реализация — в `code_index.infrastructure` |
 | `CodeIndexPurger` | `repositories` | логическая очистка индекса репозитория при снятии доступа и выключении RAG на сессии и в транзакции вызывающего use case; реализация — в `code_index.infrastructure` |
 | `CodeIndexStore`, `CodeIndexUnitOfWork` | `code_index` | индекс графа RAG v1 по `repository_id` (fenced-запись, публикация, чтение, очистка, сборка мусора) и граница транзакции модуля; реализация — в `code_index.infrastructure` |
+| `CodeIndexMaintenance`, `CodeIndexMaintenanceUnitOfWork` | `code_index` | кандидаты leader-задач индекса без `repository_id` (TTL-очистка, сборка мусора, #143); каждый шаг по репозиторию идёт через `CodeIndexStore`; реализация — в `code_index.infrastructure` |
 | `PaymentGateway` | `billing` | создание и подтверждение оплаты |
 | `UnitOfWork` | общий контракт; расширение в использующем модуле | граница транзакции и доступ к интерфейсам repositories |
 | `Clock`, `IdGenerator` | `common` | детерминированные тесты и технические значения |
@@ -351,7 +352,9 @@ docker compose up -d worker        # сервис worker в docker-compose.yml
 а sweep «2 мин без CI», публикация в GitHub (ревью и check-run) и consumer `index.repo`
 выключены. `WORKER_ID`
 (по умолчанию `hostname:pid`) пишется в `runs.worker_id`, `PORTAL_URL` даёт ссылку на
-прогон в check-run. `CODE_INDEX_*` (#142) настраивают индексатор графа: все необязательны,
+прогон в check-run. `CODE_INDEX_*` (#142) настраивают индексатор графа, а
+`CODE_INDEX_TTL_DAYS`, `CODE_INDEX_TTL_INTERVAL_SECONDS`, `CODE_INDEX_GC_INTERVAL_SECONDS` и
+`CODE_INDEX_GC_BATCH_ROWS` (#143, SD §10) — его leader-задачи: все необязательны,
 значения по умолчанию — в коде (`.env.example`), недопустимое значение не даёт процессу
 стартовать. Их видит worker, запущенный через `uv run --env-file .env`; у `worker` в
 `docker-compose.yml` и `deploy/compose/staging.yml` фиксированный список `environment:`,
@@ -367,7 +370,7 @@ docker compose up -d worker        # сервис worker в docker-compose.yml
 | consumer `review.run.fast` (prefetch 1) | RunGuard, claim по lease, попытка под watchdog, retry и DLQ | [HandleReviewRun](../app/modules/reviews/application/handle_review_run.py) |
 | consumer `review.publish` (prefetch 1) | T14-T16: ревью в GitHub, check-run | [PublishRunReview](../app/modules/reviews/application/publish_run_review.py) |
 | consumer `index.repo` (prefetch 1, #142) | задание графа RAG: claim lease, HEAD default branch, архив, публикация; retry и DLQ по исходу (SD §7.4). Свой `SubprocessSourceParser` и HTTP-клиент GitHub; без GitHub App не запускается | [BuildRepositoryIndex](../app/modules/code_index/application/build_index.py) |
-| лидер-цикл (`pg_advisory_lock`, 30 с) | sweep «2 мин без CI» и повторная отправка outbox (`message_published_at IS NULL`, сигналы отмены T6) | `SweepNoCi`, `TryEnqueueWebhookRun.replay_pending_publications` |
+| лидер-цикл (`pg_advisory_lock`, 30 с) | sweep «2 мин без CI» и повторная отправка outbox (`message_published_at IS NULL`, сигналы отмены T6); после них TTL-очистка и сборка мусора индекса графа (#143) с общим бюджетом около 10 с на тик, и без GitHub App тоже | `SweepNoCi`, `TryEnqueueWebhookRun.replay_pending_publications`, [`CodeIndexLeaderTasks`](../app/modules/code_index/application/leader_tasks.py) |
 
 Consumer `review.run.deep` не запускается, очередь только объявляется. Реконсилер
 (T12, T13, T17, T18) работает лидер-циклом процесса API (`app/main.py`, раз в 5 минут,
@@ -463,13 +466,26 @@ ENUM видов символов и исходов импорта построе
 `code_index/domain`: чистая функция над тумблером `Repository.rag_enabled` и колонками
 строки состояния, без хранения. Адаптер настроек репозитория
 (`repositories/infrastructure/repository_settings.py`) читает `Repository` и восемь
-колонок `CodeIndexState` одним запросом с outer join — без N+1 и без нового порта
-(порт очистки и включения появится в #143); PATCH обновляет строку и перечитывает её
-тем же запросом. Импорт ORM-модели `CodeIndexState` модуля `code_index` в этот адаптер —
-осознанное исключение на стороне чтения из правила «infrastructure зависит только от
-своего модуля» (§ «Слои Clean Architecture»); его заменит порт, когда #143 добавит
-`CodeIndexPurger`. Read model `RepositorySettings` несёт `RagIndex` из домена
-`code_index` как публичный контракт этого модуля.
+колонок `CodeIndexState` одним запросом с outer join — без N+1; PATCH обновляет строку
+и перечитывает её тем же запросом. Пишет в индекс модуль `repositories` только через
+порт `CodeIndexPurger` (`repositories/application/code_index.py`, #143):
+`UpdateRepository` при `ragEnabled=false` и `SyncInstallationRepositories.disable` при
+`removed`/`deleted` вызывают его в своей транзакции. Реализация —
+`SqlAlchemyCodeIndexPurger` (`code_index/infrastructure/purger.py`) поверх
+`SqlAlchemyCodeIndexStore.purge`; её строят на своей сессии
+`SqlAlchemyRepositorySettingsUnitOfWork` и `SqlAlchemyInstallationRepositoriesUnitOfWork`
+(свойство `index_purger`), то есть `repositories.infrastructure` конструирует адаптер
+`code_index.infrastructure` — так же, как `installation_repository_unit_of_work.py`
+импортирует `workspaces.infrastructure.github_installation_locks` (исключение в таблице
+слоёв). UoW настроек, ограниченный `AuthScope`, отдаёт её через
+`SqlAlchemyScopedCodeIndexPurger`: репозиторий вне Workspace вызывающего не очищается
+(`repository_access_predicate`, fail closed без scope); UoW снятия доступа — системный
+путь без scope. Импорт ORM-модели
+`CodeIndexState` модуля `code_index` в адаптер настроек остаётся осознанным исключением
+на стороне чтения из правила «infrastructure зависит только от своего модуля»
+(§ «Слои Clean Architecture»): запись идёт через порт, чтение — этим outer join. Read
+model `RepositorySettings` несёт `RagIndex` из домена `code_index` как публичный
+контракт этого модуля.
 
 ERD показывает связи и ключевые поля; он отражает актуальные поля состояния Run,
 enum Finding, inline response для RunAction, модель UsageEvent и таблицы

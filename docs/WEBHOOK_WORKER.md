@@ -261,7 +261,13 @@ event failures" and "Installation token failures" below. A `GET /repos` answer t
 a malformed token response and an App key that cannot sign are not outages: they fail the
 dispatch (retry after 30 s, three attempts in total, then `projection_failed_at`, never
 replayed). `deleted` and `removed` make no GitHub
-request. An installation payload that fails validation is logged at WARNING (delivery, event,
+request; in the transaction that records the delivery they also purge the graph index of
+every repository that lost access (#143, SD §6.9): the `repositories` rows stay, a repeated
+delivery changes nothing, and a purged index keeps its first reason other than `ttl`. The
+worker leader's garbage collection runs every interval and keeps running on consecutive
+leader ticks until drained; the target is physical deletion of the index rows within an
+hour.
+An installation payload that fails validation is logged at WARNING (delivery, event,
 action as a plain token or `-`, installation id, the total error count and the first ten failing
 field names and messages, never their values) and its receipt is marked projected, so it is not
 replayed. One invalid `full_name` among N repositories therefore drops the whole event at
