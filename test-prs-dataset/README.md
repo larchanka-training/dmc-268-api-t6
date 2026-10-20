@@ -277,6 +277,99 @@ answer text; the 17 invalid responses remain in the denominator, their predictio
 are not interpreted and their truths remain FN. Category FP counts classify the
 prediction; class counts classify the case, so the two FP distributions differ.
 
+### First-answer format audit and current gateway acceptance (#178)
+
+An offline audit on 2026-10-20 reproduced the recorded **strict raw-first validity
+7/24**, TP/FP/FN **2/2/17**, critical recall **2/5**, and verdict agreement **5/24**.
+`uv run python review/scripts/eval_replay.py --report-json /tmp/178-replay.json`
+checks untouched first-answer JSON with
+[`validate_findings.py`](../review/scripts/validate_findings.py). Raw-first validity
+is measured **before** all normalization, repair, fallback, lint filtering,
+anchoring and verifier processing. All 24 active cases remain in the denominator,
+including the 17 invalid answers. There are no empty/missing answers or JSON parse
+failures in this capture. The historical import-time `warnings=[]` above describes
+that frozen tree; today's replay instead reports
+`Static input path set changed; refresh the complete baseline`, as explained in
+[Decision (#177)](#frozen-commit-context-82). This audit does not refresh the baseline.
+
+The following matrix accounts for every invalid case. Attribution counts are
+findings with a non-null `rule_name` missing its required
+`According to custom instructions in '<rule name>' (` prefix. Abbreviations:
+NC = Naming Consistency; CA = Clean Architecture Boundaries;
+MC = Meaningful Comments for Complex Logic;
+CF = Complex Function Improvement Suggestions; EH = Error Handling Standards;
+FSD = FSD Layer Boundaries. Equal ranges have `start_line == line`; no reversed
+range occurs in this capture. Wrong order means severity order
+`critical, high, medium, low, info`, then confidence descending, was violated.
+
+| Case | Attribution omissions by rule | Equal ranges | Wrong order |
+| --- | --- | ---: | --- |
+| CLEAN-01 | NC ×2 | 0 | no |
+| CLEAN-04 | NC ×2 | 2 | no |
+| LOG-01 | NC ×1 | 0 | no |
+| LOG-03 | NC ×2 | 0 | no |
+| LOG-04 | none | 1 | no |
+| LOG-05 | NC ×1, MC ×1 | 0 | no |
+| RES-01 | CA ×1 | 2 | no |
+| RES-02 | NC ×1 | 0 | no |
+| RES-03 | NC ×1, CA ×2, CF ×1 | 3 | yes |
+| RES-04 | none | 1 | no |
+| RES-05 | NC ×1 | 0 | yes |
+| SEC-02 | NC ×2, EH ×1 | 0 | no |
+| SEC-04 | NC ×1 | 1 | no |
+| SYN-02 | NC ×1, FSD ×1 | 2 | no |
+| SYN-03 | NC ×1, MC ×1 | 2 | no |
+| SYN-04 | NC ×8 | 8 | no |
+| SYN-05 | NC ×1 | 0 | no |
+
+There are **33 prefix omissions across 15 cases**, **22 equal ranges across nine
+cases**, and **two ordering cases**. The disjoint groups are attribution only
+(seven cases), attribution + range (six), attribution + range + order (RES-03),
+attribution + order (RES-05), and range only (LOG-04, RES-04).
+
+| `rule_name` | Prefix omissions | Equal ranges |
+| --- | ---: | ---: |
+| Naming Consistency | 25 | 13 |
+| Clean Architecture Boundaries | 3 | 3 |
+| Meaningful Comments for Complex Logic | 2 | 1 |
+| Complex Function Improvement Suggestions | 1 | 1 |
+| Error Handling Standards | 1 | 0 |
+| FSD Layer Boundaries | 1 | 1 |
+| null | 0 | 3 |
+| Total | 33 | 22 |
+
+All six named rules exist in the checked-in default backend/frontend rule sets.
+A real rule name alone does not establish that it applies to the changed code or
+that the finding is semantically correct. Mechanical counterfactuals would make
+14/24 valid after prefix fixes alone, 22/24 after prefix plus equal-range fixes,
+and 24/24 after ordering too. These are diagnostic calculations, not new model
+measurements; no response bytes or manifest digests were changed.
+
+Current production acceptance is a separate observation. The existing
+[`validate_review_answer`](../app/modules/reviews/infrastructure/llm/answers.py)
+path checks JSON/schema, maps equal ranges to `start_line: null`, and sorts findings
+by severity/confidence before typed validation. `ReviewFinding` enforces ranges
+and titles, and `ReviewOutput` enforces order; neither enforces the legacy
+attribution prefix. An offline pass through that gateway validator accepts
+**24/24** recorded answers. This normalized acceptance must not replace strict
+raw-first **7/24** or be presented as model adherence. Downstream
+[`FindingsPostProcessor._repair_attribution`](../app/modules/reviews/application/findings_post_processor.py)
+clears invalid legacy rule attribution; it does not synthesize a rule paraphrase
+or make a paid repair call. The 17 strict failures therefore do not demonstrate
+17 production repair calls, latency overhead, or a measured repair-cost saving.
+
+The approved #178 approach uses a **prompt-only new immutable `review.system.v3`**
+for the existing legacy contract. V2 and its golden fixture stay byte-for-byte,
+existing normalization is retained, and neither validator is relaxed. V3 shows
+how to construct the complete prefix with an
+exact applicable rule name and a one-clause check paraphrase, ordinary findings
+with `rule_name: null`, null single-line versus strictly earlier multi-line
+anchors, and final severity/confidence ordering. Do not invent rule provenance
+in backend normalization. The objective is better first raw format and explicit
+model attribution; repair, latency and cost effects require separate measurements.
+One complete 24-answer capture is still required after prompt/default/pinned
+inputs stabilize, with separate explicit paid-run approval and no mixed captures.
+
 The [2026-10-14 PR-prefix capture](#recorded-mistral-baseline--2026-10-14) and
 [2026-10-13 snapshot capture](#recorded-mistral-baseline--2026-10-13) remain historical
 with their original raw bytes, manifests, digests and measured results. These

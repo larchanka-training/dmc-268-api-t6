@@ -205,7 +205,13 @@ def test_cli_reports_a_gateway_failure_with_every_call(
 
     code = main(
         [SAMPLE_DIFF],
-        env={**SELF_HOSTED, "LLM_FALLBACK_MODEL": "other", "LLM_FALLBACK_CONTEXT_WINDOW": "16384"},
+        env={
+            **SELF_HOSTED,
+            "LLM_FALLBACK_MODEL": "other",
+            "LLM_FALLBACK_CONTEXT_WINDOW": "16384",
+            # Match the primary output cap so the full v3 request fits both profiles.
+            "LLM_FALLBACK_MAX_OUTPUT_TOKENS": "4000",
+        },
         transport=_transport(lambda _: rejected, requests),
     )
 

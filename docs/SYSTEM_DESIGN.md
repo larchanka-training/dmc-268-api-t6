@@ -1746,6 +1746,50 @@ verifier #107. В новом профиле четыре слота делятс
 
 [Run 38468081001, attempt 1](https://github.com/larchanka-training/dmc-268-api-t6/actions/runs/38468081001) от 2026-10-13 использовал прежние одиночные source-revision snapshots; его raw-first метрики и original digests сохраняются как историческое свидетельство в [README корпуса](../test-prs-dataset/README.md#recorded-mistral-baseline--2026-10-13) и [TEST_PLAN §3.2.1](TEST_PLAN.md#321-зафиксированный-raw-baseline-82-2026-10-13). Историческая PR-prefix съёмка [run 38560319651, attempt 1](https://github.com/larchanka-training/dmc-268-api-t6/actions/runs/38560319651) от 2026-10-14 сохраняет original raw bytes/digests и метрики в [README корпуса](../test-prs-dataset/README.md#recorded-mistral-baseline--2026-10-14) и [TEST_PLAN §3.2.2](TEST_PLAN.md#322-зафиксированный-pr-prefix-raw-baseline-82-2026-10-14). Текущий baseline — [run 38701845865, attempt 1](https://github.com/larchanka-training/dmc-268-api-t6/actions/runs/38701845865) от 2026-10-15 на frozen source SHA `a1cc6229c6a6fdba65ecb640c60ca823e262a6aa`, после rebase на main с merged #149 (pinned parser/schema), primary `mistral-small-4`. Все 24 первых raw ответа с прежними проверенными PR-префиксами и manifest импортированы вместе byte-for-byte, без смешивания captures и подмены поздними repair/fallback ответами; prompt/corpus/truth не менялись. Final corpus — 24/24; два offline replay дали byte-identical JSON с `warnings=[]`, без static/corpus drift; redacted offline совпал с live safe report. Измерены validity 7/24, TP/FP/FN 2/2/17, precision 2/4, recall 2/19, critical recall 2/5, verdict agreement 5/24. Provenance и полные raw-first метрики — [README корпуса](../test-prs-dataset/README.md#recorded-mistral-baseline--2026-10-15) и [TEST_PLAN §3.2.3](TEST_PLAN.md#323-зафиксированный-post-rebase-raw-baseline-82-2026-10-15); это не доказательство причинного улучшения или качества final pipeline.
 
+**Аудит формата первого ответа (#178, 20.10.2026).** Офлайн-разбор неизменённых
+ответов baseline 15.10 подтверждает 17 невалидных кейсов: 15 кейсов / 33 находки
+без обязательного префикса атрибуции, 9 кейсов / 22 диапазона `start_line == line`
+(обратных диапазонов нет) и два кейса с нарушением порядка severity/confidence
+(RES-03, RES-05). Причины пересекаются; полная матрица 17 кейсов и суммы по
+`rule_name` — [README корпуса](../test-prs-dataset/README.md#first-answer-format-audit-and-current-gateway-acceptance-178).
+Имена правил существуют в default backend/frontend наборах, но это само по себе
+не доказывает применимость правила или семантическую истинность находки.
+
+Strict raw-first validity остаётся **7/24**: независимый
+`review/scripts/validate_findings.py` проверяет первый сырой ответ до любой
+нормализации, repair/fallback, lint-фильтрации, anchoring и verifier; знаменатель
+включает все 24 активных кейса. TP/FP/FN **2/2/17**, critical recall **2/5** и
+verdict agreement **5/24** не изменились. `warnings=[]` выше — историческое
+свидетельство на дереве съёмки; текущий replay предупреждает
+`Static input path set changed; refresh the complete baseline` после #177,
+пока не выполнена полная пересъёмка. Этот аудит не меняет raw bytes или digests.
+
+Текущий production-путь уже отличается от строгой сырой метрики:
+`llm/answers.py::validate_review_answer` после JSON/schema-проверки превращает
+равный диапазон в `start_line: null` и сортирует findings по severity, затем
+confidence, до typed validation. `ReviewFinding` проверяет диапазоны и заголовки,
+`ReviewOutput` — порядок; legacy-префикс атрибуции они не проверяют. Офлайн
+пропуск тех же ответов через gateway validator даёт **24/24 normalized
+acceptance**, что не заменяет **7/24 raw-first validity**. Downstream
+`FindingsPostProcessor._repair_attribution` сбрасывает неверную legacy-атрибуцию,
+а не делает платный repair-вызов. Поэтому 17 сырых ошибок не доказывают 17
+production repair-вызовов; экономия стоимости и задержки этим аудитом не измерена.
+
+Согласованный подход #178 — новая неизменяемая **`review.system.v3` только для
+legacy-контракта**. V2 и его golden-фикстура остаются byte-for-byte; существующая
+нормализация сохраняется, валидаторы не ослабляются. V3 показывает построение
+полного префикса с точным именем
+применимого custom rule и кратким пересказом проверки, обычную находку с
+`rule_name: null`, `start_line: null` для одной строки, строго более ранний start
+для диапазона и итоговый порядок severity/confidence. Backend не придумывает
+пересказ правила: это создало бы неподтверждённую provenance и не улучшило бы
+соблюдение формата самой моделью. Цель — строгий первый сырой формат и явная
+атрибуция модели; production repair/latency/cost требуют отдельного измерения.
+Переход #130 на snapshot/evidence_refs без старого префикса требует отдельного
+порядка версий. После стабилизации prompt/default/pinned inputs нужна одна полная
+съёмка 24 ответов с отдельным явным разрешением на платный прогон; смешивать
+съёмки нельзя.
+
 **Закрытие OQ-2: проверка по D7.** Значения — каталог EUrouter (`GET https://api.eurouter.ai/api/v1/models` и `/endpoints`) на 05.10.2026; цены — за 1 млн токенов, по эндпоинтам и в их валюте. `KNOWN_MODELS` хранит в USD нижнюю границу цены самой дорогой известной ветки: Regolo для основной, GreenPT для fallback, с историческим курсом 1.1225. На известном EUrouter endpoint эффективная цена — покомпонентный максимум каталожной USD-границы, EUR-цены самой дорогой ветки × полученный перед вызовом курс ЕЦБ и значения из env; меньшее значение env границу не ослабляет. Для другого endpoint явно заданная цена env применяется без этой границы.
 
 | Требование D7 | `mistral-small-4` (основная) | `mistral-small-3.2-24b` (fallback) |

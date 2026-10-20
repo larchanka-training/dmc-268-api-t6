@@ -153,6 +153,67 @@ def response(root: Path, case_id: str) -> bytes:
     return (root / "responses" / f"{case_id}.json").read_bytes()
 
 
+@pytest.mark.parametrize(
+    ("system_arguments", "expected_path", "expected_version", "expected_sha", "golden_name"),
+    [
+        (
+            (),
+            "review/prompts/review.system.v3.md",
+            "v3",
+            "eb851e7fc2329eb7bdff015ec0fda945c46111ec5c884934ed6f6d6803883452",
+            "sample.system.v3.txt",
+        ),
+        (
+            ("--system", str(SYSTEM)),
+            "review/prompts/review.system.v2.md",
+            "v2",
+            "9177e358c23d1a7cd8987cbf667cf8b705c2afb27eaf8b2237480e4531431d75",
+            "sample.system.txt",
+        ),
+    ],
+)
+def test_cli_captures_default_v3_and_explicit_v2_prompt_provenance(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    system_arguments: tuple[str, ...],
+    expected_path: str,
+    expected_version: str,
+    expected_sha: str,
+    golden_name: str,
+) -> None:
+    def forbidden_http(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("prompt-selection capture must not query external APIs")
+
+    monkeypatch.setattr(httpx.AsyncClient, "send", forbidden_http)
+    root = fixture_root(tmp_path, ("SEC-01",))
+    transport = FakeTransport([answer("primary-model", VALID)])
+
+    assert (
+        main(
+            ["--root", str(root), *system_arguments],
+            transport=transport,
+            model_settings=settings(),
+        )
+        == 0
+    )
+
+    manifest = json.loads((root / "responses/manifest.json").read_text())
+    assert manifest["prompt_path"] == expected_path
+    assert manifest["prompt_version"] == expected_version
+    assert manifest["prompt_sha"] == expected_sha
+    prompt_pins = [path for path in manifest["static_inputs"] if path.startswith("review/prompts/")]
+    assert prompt_pins == [expected_path]
+    assert len(transport.requests) == 1
+    assert (
+        transport.requests[0].messages[0].content
+        == (REPO_ROOT / "tests/fixtures/prompt_builder" / golden_name).read_text()
+    )
+    assert response(root, "SEC-01") == VALID.encode()
+    assert replay(root)["warnings"] == []
+    assert capsys.readouterr().out == format_console(replay(root)) + "\n"
+
+
 def test_selected_custom_rules_outside_default_rule_glob_are_hashed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -214,12 +275,13 @@ def test_cli_deep_engine_records_deep_settings_and_uses_deep_timeout(
 ) -> None:
     configured = settings()
     assert configured.fallback is not None
+    # Leave room for the full v3 prompt while keeping distinct fast/deep budgets.
     profiles = LlmSettings(
         replace(configured.primary, context_window=20_000, max_output_tokens=1_000),
-        replace(configured.fallback, context_window=10_000, max_output_tokens=1_500),
+        replace(configured.fallback, context_window=12_000, max_output_tokens=1_500),
         replace(
             configured.policy,
-            input_token_limit={"fast": 8_000, "deep": 15_000},
+            input_token_limit={"fast": 10_000, "deep": 15_000},
             call_timeout_s={"fast": 15.0, "deep": 45.0},
             run_cost_limit_usd={"fast": Decimal("0.5"), "deep": Decimal("3.25")},
         ),
@@ -249,12 +311,12 @@ def test_cli_deep_engine_records_deep_settings_and_uses_deep_timeout(
     assert deep_settings["policy"]["call_timeout_s"] == 45.0
     assert deep_settings["policy"]["run_cost_limit_usd"] == "3.25"
     assert deep_settings["primary"]["input_budget_tokens"] == 14_000
-    assert deep_settings["fallback"]["input_budget_tokens"] == 8_500
-    assert fast_settings["policy"]["input_token_limit"] == 8_000
+    assert deep_settings["fallback"]["input_budget_tokens"] == 10_500
+    assert fast_settings["policy"]["input_token_limit"] == 10_000
     assert fast_settings["policy"]["call_timeout_s"] == 15.0
     assert fast_settings["policy"]["run_cost_limit_usd"] == "0.5"
-    assert fast_settings["primary"]["input_budget_tokens"] == 7_000
-    assert fast_settings["fallback"]["input_budget_tokens"] == 6_500
+    assert fast_settings["primary"]["input_budget_tokens"] == 9_000
+    assert fast_settings["fallback"]["input_budget_tokens"] == 8_500
     assert len(fast_transport.requests) == len(deep_transport.requests) == 1
     assert fast_transport.requests[0].timeout_s == 15.0
     assert deep_transport.requests[0].timeout_s == 45.0
