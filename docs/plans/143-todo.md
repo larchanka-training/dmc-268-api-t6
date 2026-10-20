@@ -497,6 +497,10 @@ PRs and their files and posts the coordination comments in #220 and #221 (plan,
 - `heads(after, limit)`: the M4 candidates joined through `repositories` and
   `provider_installations`, each with `IndexedRepository`, `generation` and the profile;
 - `to_rearm(limit)`: the M5 condition.
+- `to_disarm(limit)` (PR 1 review round 1, F12): live state rows (`purge_reason IS NULL`)
+  whose effective RAG is off, each with the purge reason: `rag_enabled` false → `disabled`;
+  `installation_available` false or the installation deleted → `removed`. It catches rows
+  left live by removals or toggles that predate PR 1.
 
 **Tests to add (PG):**
 
@@ -506,6 +510,9 @@ PRs and their files and posts the coordination comments in #220 and #221 (plan,
 - `to_rearm` includes a missing row and `removed`/`disabled`, and excludes `ttl`, a live
   row, `rag_enabled` false, an unavailable repository, a deleted installation and a
   non-`github` provider.
+- `to_disarm` returns a live row of a repository with `rag_enabled` false (`disabled`), an
+  unavailable one and a deleted installation (`removed`); it skips purged rows and rows of
+  repositories with effective RAG on.
 
 **Done when:**
 
@@ -526,13 +533,18 @@ PRs and their files and posts the coordination comments in #220 and #221 (plan,
 
 **What to do:**
 
-- `RearmIndexes` (every tick): per candidate one short transaction, re-check M5 with the
-  `repositories` row locked `FOR SHARE`, then `enable()`, commit. The re-check and
+- `RearmIndexes` (at most every 60 s): per candidate one short transaction, re-check M5
+  with the `repositories` row locked `FOR SHARE`, then `enable()`, commit. The re-check and
   `enable()` share one session.
+- The same pass disarms: per `to_disarm` candidate one short transaction, re-check under
+  the same `FOR SHARE` lock, then `purge(reason)`, commit. Re-arm and disarm are one leader
+  task (suggested name `ConvergeIndexes`).
 - `DispatchIndexWakeups` (every tick): rows under a live lease keep their marker; `wake()`
   outside any transaction, then `clear_wake_request` in a short transaction; a failed
   `wake()` stops the pass and the markers stay.
-- Both join `CodeIndexLeaderTasks` and the shared tick budget.
+- Both join `CodeIndexLeaderTasks` and the shared tick budget. The order within a tick is
+  converge, dispatch, GC, TTL, reconcile: GC runs before TTL, because physical deletion has
+  the one-hour target and the 30-day TTL tolerates delay.
 
 **Tests to add:**
 
@@ -540,6 +552,8 @@ PRs and their files and posts the coordination comments in #220 and #221 (plan,
   stops the pass with no clear; no transaction is open during `wake()`;
 - unit: re-arm calls `enable()` once per candidate in its own transaction;
 - PG: a re-arm racing a PATCH `ragEnabled=false` does not resurrect the index.
+- PG: a live index of a repository whose RAG is off or whose installation is gone is purged
+  by the pass with the right reason, and GC then leaves no rows.
 
 **Done when:**
 
@@ -602,12 +616,12 @@ PRs and their files and posts the coordination comments in #220 and #221 (plan,
 - `IndexConsumer` exposes `wakeups` and the source factory. The dispatcher takes
   `wakeups`; the reconcile takes the factory.
 - Without the GitHub App, `index_consumer` yields `None` (`:291-297`): the reconcile and the
-  dispatcher are off, and re-arm, TTL and GC keep running.
+  dispatcher are off, and converge, GC and TTL keep running.
 
 **Tests to add:**
 
-- `run_worker` wires all five leader tasks with the GitHub App, and only re-arm, TTL and GC
-  without it;
+- `run_worker` wires all five leader tasks with the GitHub App, in the order converge,
+  dispatch, GC, TTL, reconcile, and only converge, GC and TTL without it;
 - `test_worker_without_github_app_starts_and_stays_healthy`
   (`tests/test_worker_queue_postgres.py:908`) stays green.
 
@@ -783,7 +797,11 @@ Before the commit, the coordinator re-checks the open PRs and their files (plan,
 - `docs/WEBHOOK_WORKER.md:200-238` (the push section), `:399` (the status list).
 - `.env.example:86-93`: drop "nothing publishes index.repo before #143"; add the two
   reconcile lines.
-- `docs/adr/0001-graph-rag-v1.md` §6.1: the U4 deviation.
+- `docs/adr/0001-graph-rag-v1.md` §6.1: the U4 deviation; §6: the converge pass (re-arm and
+  disarm).
+- `docs/CONTEXT_AND_VERIFICATION_SPEC.md:1718` and `docs/TEST_PLAN.md:376`: "physical
+  deletion within an hour" is a target reached by GC on consecutive ticks (same wording as
+  SD §10 after PR 1).
 
 **Tests to add:** none.
 

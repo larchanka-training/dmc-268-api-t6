@@ -262,8 +262,9 @@ Suggested module `app/modules/code_index/application/leader_tasks.py`.
     batch deletes fewer than `batch_rows` or the budget runs out.
 - `CodeIndexLeaderTasks`: gates and isolation.
   - One gate per task on a monotonic clock: TTL every `CODE_INDEX_TTL_INTERVAL_SECONDS`, GC
-    every `CODE_INDEX_GC_INTERVAL_SECONDS` (PR 2 adds the reconcile every
-    `CODE_INDEX_RECONCILE_INTERVAL_SECONDS`, and re-arm and dispatch on every tick).
+    every `CODE_INDEX_GC_INTERVAL_SECONDS` (PR 2 adds converge at most every 60 s, dispatch
+    on every tick and the reconcile every `CODE_INDEX_RECONCILE_INTERVAL_SECONDS`; the
+    order is converge, dispatch, GC, TTL, reconcile).
   - Derived from M8: one deadline per tick, about 10 s, as a module constant (not an
     env knob). `CodeIndexLeaderTasks` passes the remaining time down to each task;
     a task starts no new unit after the deadline.
@@ -442,13 +443,20 @@ New `CodeIndexMaintenance` methods:
   (`app/modules/code_index/application/ports.py:15`), `generation` and profile
   (`IndexProfile` or `None`);
 - `to_rearm(limit)`: the M5 condition (`repositories` left join `code_index_states`).
+- `to_disarm(limit)`: live rows whose effective RAG is off → `purge(disabled)` or
+  `purge(removed)` in the same converge pass (PR 1 review round 1, F12).
 
 ### Leader tasks
 
-- `RearmIndexes`: every tick. Per candidate one short transaction: re-check M5 with the
-  `repositories` row locked `FOR SHARE`, then `enable()` (which sets the marker), commit.
-  The re-check and `enable()` share one session.
-- `DispatchIndexWakeups`: every tick.
+Order within a tick: converge, dispatch, GC, TTL, reconcile. The dispatch sends the markers
+converge set in the same tick. GC runs before TTL: physical deletion has the one-hour target
+(ADR §4), while the 30-day TTL tolerates delay, so a TTL backlog never starves GC. The
+reconcile runs last on what is left of the tick budget; its markers go out on the next tick.
+
+- `RearmIndexes` (the converge pass, `ConvergeIndexes`): at most every 60 s. Per candidate
+  one short transaction: re-check M5 with the `repositories` row locked `FOR SHARE`, then
+  `enable()` (which sets the marker), commit. The re-check and `enable()` share one session.
+- `DispatchIndexWakeups`: every tick, right after converge.
   - Rows under a live lease are skipped and keep their marker: a fresh LEASED wake-up is
     confirmed and dropped (`app/modules/code_index/infrastructure/amqp.py:317-326`).
   - `wake()` outside any transaction, then the CAS `clear_wake_request`.
