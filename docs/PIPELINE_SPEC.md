@@ -618,7 +618,7 @@ UI рисует диапазон `[newLine ?? oldLine, endLine ?? newLine ?? old
 |---|---|---|---|
 | `review.run/v1` | `contracts/schemas/review.run.v1.schema.json` | `contracts/examples/review.run.v1.json` | webhook-worker (T1, T6), worker (sweep, T2), portal-api (T3, T6, реконсилер) → worker |
 | `review.publish/v1` | `contracts/schemas/review.publish.v1.schema.json` | `contracts/examples/review.publish.v1.json` | worker (T8), реконсилер (T17) → publisher (MVP — consumer `review.publish` в процессе worker) |
-| `index.repo/v1` | `contracts/schemas/index.repo.v1.schema.json` | `contracts/examples/index.repo.v1.json` | worker (`AmqpIndexWakeups`: повторное пробуждение задания), триггеры #143 → индексатор графа в worker (#142) |
+| `index.repo/v1` | `contracts/schemas/index.repo.v1.schema.json` | `contracts/examples/index.repo.v1.json` | worker (`AmqpIndexWakeups`: повторное пробуждение задания и рассылка пробуждений leader-задачей) → индексатор графа в worker (#142) |
 
 В `index.repo/v1` `message_id` — UUIDv5 от `repository_id:generation:requested_at` в пространстве имён `MESSAGE_ID_NAMESPACE` ([amqp.py](../app/modules/code_index/infrastructure/amqp.py)); схемой это не выражается (указано в `description`), consumer отвергает в DLQ сообщение с другим id. Фикстура несёт выведенный так id.
 
