@@ -203,7 +203,12 @@ def validate_v2_attribution(
         block = manifest.get_block(ref.block_id)
         if block is None:
             return False, f"evidence block '{ref.block_id}' not found in manifest"
-        if block.source_role not in {"diff", "source_excerpt", "ast_excerpt"}:
+        if block.source_role not in {
+            "diff",
+            "source_excerpt",
+            "ast_excerpt",
+            "retrieved_excerpt",
+        }:
             return False, f"evidence block '{ref.block_id}' has invalid role '{block.source_role}'"
         if not manifest.is_range_shown(ref.block_id, ref.start_line, ref.end_line):
             return (

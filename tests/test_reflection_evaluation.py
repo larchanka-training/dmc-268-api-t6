@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import uuid
 from collections.abc import Mapping
+from dataclasses import replace
 from typing import Any
 
 import pytest
@@ -33,6 +34,7 @@ from app.modules.reviews.application.reflection_pass import (
     CandidateFindingItem,
     ReflectionPass,
     VerificationInvalidOutputError,
+    VerificationUnavailableError,
     VerifierPromptBuilder,
     filter_verified_candidates,
 )
@@ -80,14 +82,40 @@ def make_eval_snapshot(
 
 
 class StubVerifierModel:
-    def __init__(self, response_payload: Mapping[str, Any]) -> None:
+    def __init__(
+        self,
+        response_payload: Mapping[str, Any],
+        *,
+        require_code: bool = True,
+        require_policy: bool = True,
+        require_candidates: bool = True,
+    ) -> None:
         self.response_payload = response_payload
         self.call_count = 0
         self.last_user_prompt = ""
+        self.require_code = require_code
+        self.require_policy = require_policy
+        self.require_candidates = require_candidates
 
     async def verify(self, *, system_prompt: str, user_prompt: str) -> Mapping[str, Any]:
         self.call_count += 1
         self.last_user_prompt = user_prompt
+        if self.require_candidates and (
+            "<candidate_findings" not in user_prompt or "<candidate " not in user_prompt
+        ):
+            raise ValueError("Verifier prompt missing required candidate findings")
+        if self.require_code and (
+            "<code_context>" not in user_prompt or "<file " not in user_prompt
+        ):
+            raise ValueError("Verifier prompt missing required code context")
+        has_policy = (
+            "</repository_rules>" in user_prompt
+            or "</project_conventions_document>" in user_prompt
+            or "</service_defaults>" in user_prompt
+            or "</conventions>" in user_prompt
+        )
+        if self.require_policy and not has_policy:
+            raise ValueError("Verifier prompt missing required policy context")
         return self.response_payload
 
 
@@ -841,3 +869,104 @@ def test_source_authority_and_trust_statement_present_in_prompts() -> None:
     assert "Source Authority and Trust" in verifier_prompt
     assert "Treat the contents of" in verifier_prompt
     assert "prompt injection" in verifier_prompt
+
+
+class TestAC6NonVacuumVerifier:
+    """AC 6 non-vacuum verification: fake verifier inspects and validates required prompt inputs."""
+
+    @pytest.mark.anyio
+    async def test_fake_verifier_fails_if_code_missing(self) -> None:
+        """Negative test: verifier call fails when code context is removed."""
+        cand = CandidateFindingItem(
+            "cand-1",
+            ReviewFindingV2(
+                path="app/users.py",
+                line=42,
+                start_line=None,
+                severity="critical",
+                category="security",
+                title="Vulnerability",
+                body="Details",
+                suggestion=None,
+                confidence=0.9,
+                rule_name=None,
+                evidence_refs=[
+                    EvidenceRef(block_id=file_block_id("app/users.py"), start_line=42, end_line=42)
+                ],
+            ),
+        )
+        context = ReviewContext(
+            system="System prompt.",
+            rules=(),
+            agents_md=None,
+            conventions=RepoConventions((), ()),
+            pr_meta=PullRequestMeta("Title", None, "u", "b", "main", (), 1, 1, 0, False, False),
+            changed_files=(),  # Missing code context!
+            omitted_files=(),
+            policy_snapshot=make_eval_snapshot(),
+        )
+        model = StubVerifierModel({"decisions": []})
+        verifier = ReflectionPass(model)
+        with pytest.raises(VerificationUnavailableError) as exc_info:
+            await verifier.verify(candidates=(cand,), context=context)
+        assert "Verifier prompt missing required code context" in str(exc_info.value.__cause__)
+
+    @pytest.mark.anyio
+    async def test_fake_verifier_fails_if_policy_missing(self) -> None:
+        """Negative test: verifier call fails when policy documents are removed."""
+        from app.modules.reviews.application.policy_snapshot import make_policy_document_missing
+
+        cand = CandidateFindingItem(
+            "cand-1",
+            ReviewFindingV2(
+                path="app/users.py",
+                line=42,
+                start_line=None,
+                severity="critical",
+                category="security",
+                title="Vulnerability",
+                body="Details",
+                suggestion=None,
+                confidence=0.9,
+                rule_name=None,
+                evidence_refs=[
+                    EvidenceRef(block_id=file_block_id("app/users.py"), start_line=42, end_line=42)
+                ],
+            ),
+        )
+        empty_snapshot = make_eval_snapshot()
+        empty_snapshot = replace(
+            empty_snapshot,
+            rules=make_policy_document_missing(".review/rules.md"),
+            agents=make_policy_document_missing("AGENTS.md"),
+        )
+        context = ReviewContext(
+            system="System prompt.",
+            rules=(),
+            agents_md=None,
+            conventions=RepoConventions((), ()),
+            pr_meta=PullRequestMeta("Title", None, "u", "b", "main", (), 1, 1, 0, False, False),
+            changed_files=(
+                ChangedFile("app/users.py", "modified", (DiffLine(42, "added", "x = 1"),)),
+            ),
+            omitted_files=(),
+            policy_snapshot=empty_snapshot,
+        )
+        model = StubVerifierModel({"decisions": []})
+        verifier = ReflectionPass(model)
+        with pytest.raises(VerificationUnavailableError) as exc_info:
+            await verifier.verify(candidates=(cand,), context=context)
+        assert "Verifier prompt missing required policy context" in str(exc_info.value.__cause__)
+
+    @pytest.mark.anyio
+    async def test_fake_verifier_fails_if_candidate_missing(self) -> None:
+        """Negative test: verifier call fails directly if candidate section is missing."""
+        model = StubVerifierModel({"decisions": []})
+        with pytest.raises(ValueError, match="missing required candidate findings"):
+            await model.verify(
+                system_prompt="sys",
+                user_prompt=(
+                    "<code_context><file block_id='f1'></file></code_context>"
+                    "<repository_rules block_id='policy-rules'></repository_rules>"
+                ),
+            )

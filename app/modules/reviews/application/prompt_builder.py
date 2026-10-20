@@ -110,6 +110,7 @@ class ReviewContext:
     changed_files: tuple[ChangedFile, ...]
     omitted_files: tuple[str, ...]
     policy_snapshot: PolicySnapshot | None = None
+    severity_threshold: Literal["all", "warning", "critical"] = "all"
 
 
 @dataclass(frozen=True)
@@ -367,8 +368,9 @@ class PromptBuilder:
                 ManifestBlock(
                     block_id=block_id,
                     source_role=SourceRole.DIFF,
-                    source_kind="diff",
+                    source_kind="source_code",
                     path=file.path,
+                    revision=context.pr_meta.head_sha if context.pr_meta is not None else None,
                     start_line=start_line,
                     end_line=end_line,
                     shown_line_count=shown_count,

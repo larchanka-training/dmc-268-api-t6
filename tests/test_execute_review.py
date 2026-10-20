@@ -1707,8 +1707,12 @@ def test_execute_review_rejects_finding_with_invalid_attribution() -> None:
                 "summary": {"problem": "p", "done_well": "d", "effort": "none"},
             }
 
+    published_output: dict[str, Any] = {}
+
     class Publisher:
         async def execute(self, run_id: UUID, raw_output: Any) -> bool:
+            nonlocal published_output
+            published_output = dict(raw_output)
             return True
 
     pipeline = ExecuteReviewRun(
@@ -1718,8 +1722,12 @@ def test_execute_review_rejects_finding_with_invalid_attribution() -> None:
         Publisher(),
         reflection_pass=ReflectionPass(FakeVerifierModel({"decisions": []})),
     )
-    with pytest.raises(InvalidReviewOutput, match="Invalid attribution in candidate finding"):
-        asyncio.run(pipeline.execute(RUN_ID))
+    # CVS §6.2 & Issue #219 Part 5: unshown evidence ref drops only
+    # this candidate (evidence_not_shown), without failing the entire run.
+    success = asyncio.run(pipeline.execute(RUN_ID))
+    assert success is True
+    assert published_output["findings"] == []
+    assert "No verified issues were found" in published_output["summary"]["problem"]
 
 
 def test_execute_review_legacy_run_with_reflection_pass_logs_warning(
@@ -1936,18 +1944,28 @@ def test_execute_review_validates_candidate_rule_name_against_manifest() -> None
         async def execute(self, run_id: UUID, raw_output: Any) -> bool:
             return True
 
+    published1: dict[str, Any] = {}
+
+    class Publisher1:
+        async def execute(self, run_id: UUID, raw_output: Any) -> bool:
+            nonlocal published1
+            published1 = dict(raw_output)
+            return True
+
     # 1. Candidate attributes AGENTS.md, but AGENTS.md is absent in snapshot
+    # -> dropped per candidate (CVS §6.2)
     pipeline1 = ExecuteReviewRun(
         Processor(),
         RepositoryAgentsMissing(),
         ModelWithRuleName("AGENTS.md"),
-        Publisher(),
+        Publisher1(),
         reflection_pass=ReflectionPass(FakeVerifierModel({"decisions": []})),
     )
-    with pytest.raises(InvalidReviewOutput, match="no project_conventions_document in manifest"):
-        asyncio.run(pipeline1.execute(RUN_ID))
+    assert asyncio.run(pipeline1.execute(RUN_ID)) is True
+    assert published1["findings"] == []
 
-    # 2. Candidate attributes .review/rules.md, but rules.md is absent in snapshot
+    # 2. Candidate attributes .review/rules.md, but rules.md is absent
+    # in snapshot -> dropped per candidate
     from dataclasses import replace
 
     snapshot_no_rules = replace(
@@ -1971,26 +1989,43 @@ def test_execute_review_validates_candidate_rule_name_against_manifest() -> None
                 policy_snapshot=snapshot_no_rules,
             )
 
+    published2: dict[str, Any] = {}
+
+    class Publisher2:
+        async def execute(self, run_id: UUID, raw_output: Any) -> bool:
+            nonlocal published2
+            published2 = dict(raw_output)
+            return True
+
     pipeline2 = ExecuteReviewRun(
         Processor(),
         RepositoryRulesMissing(),
         ModelWithRuleName(".review/rules.md"),
-        Publisher(),
+        Publisher2(),
         reflection_pass=ReflectionPass(FakeVerifierModel({"decisions": []})),
     )
-    with pytest.raises(InvalidReviewOutput, match="no repository_rules in manifest"):
-        asyncio.run(pipeline2.execute(RUN_ID))
+    assert asyncio.run(pipeline2.execute(RUN_ID)) is True
+    assert published2["findings"] == []
 
     # 3. Candidate attributes service-defaults:fastapi, but context.rules is empty
+    # -> dropped per candidate
+    published3: dict[str, Any] = {}
+
+    class Publisher3:
+        async def execute(self, run_id: UUID, raw_output: Any) -> bool:
+            nonlocal published3
+            published3 = dict(raw_output)
+            return True
+
     pipeline3 = ExecuteReviewRun(
         Processor(),
         RepositoryAgentsMissing(),
         ModelWithRuleName("service-defaults:fastapi"),
-        Publisher(),
+        Publisher3(),
         reflection_pass=ReflectionPass(FakeVerifierModel({"decisions": []})),
     )
-    with pytest.raises(InvalidReviewOutput, match="no service_defaults in manifest"):
-        asyncio.run(pipeline3.execute(RUN_ID))
+    assert asyncio.run(pipeline3.execute(RUN_ID)) is True
+    assert published3["findings"] == []
 
     # 4. Positive case: rules.md is present in snapshot, candidate with .review/rules.md
     # passes attribution validation
@@ -2040,3 +2075,322 @@ def test_execute_review_validates_candidate_rule_name_against_manifest() -> None
     )
     success = asyncio.run(pipeline4.execute(RUN_ID))
     assert success is True
+
+
+def test_execute_review_run_snapshot_zero_findings_deterministic_summary() -> None:
+    class Processor:
+        async def prepare(self, run_id: UUID) -> GeneratedConventions:
+            return conventions()
+
+    class Repository:
+        async def get_review_prompt_input(
+            self, run_id: UUID, saved: GeneratedConventions
+        ) -> ReviewPromptInput:
+            return ReviewPromptInput(
+                system="Review carefully.",
+                rules=(),
+                agents_md=None,
+                conventions=RepoConventions(("Use services.",), ("Test paths.",)),
+                changed_files=(
+                    ChangedFile("app/main.py", "modified", (DiffLine(10, "added", "x = 1"),)),
+                ),
+                omitted_files=(),
+                policy_snapshot=_make_test_snapshot(),
+            )
+
+    class Model:
+        async def get_pull_request_meta(self, run_id: UUID) -> PullRequestMeta:
+            return PullRequestMeta(
+                "Title",
+                None,
+                "author",
+                "feature",
+                "main",
+                (),
+                1,
+                1,
+                0,
+                False,
+                False,
+                head_sha="sha_head",
+            )
+
+        async def draft_review(self, *, context: ReviewContext) -> dict[str, Any]:
+            # Model returns 0 candidates and an arbitrary raw summary
+            return {
+                "findings": [],
+                "summary": {
+                    "problem": "Raw model summary problem.",
+                    "done_well": "Raw model summary done well.",
+                    "effort": "large",
+                },
+            }
+
+    published_output: dict[str, Any] = {}
+
+    class Publisher:
+        async def execute(
+            self, run_id: UUID, raw_output: Mapping[str, object] | str | bytes
+        ) -> bool:
+            nonlocal published_output
+            published_output = dict(raw_output) if isinstance(raw_output, Mapping) else {}
+            return True
+
+    fake_verifier_model = FakeVerifierModel({"decisions": []})
+    reflection_pass = ReflectionPass(fake_verifier_model)
+    pipeline = ExecuteReviewRun(
+        Processor(),
+        Repository(),
+        Model(),
+        Publisher(),
+        reflection_pass=reflection_pass,
+    )
+
+    success = asyncio.run(pipeline.execute(RUN_ID))
+    assert success is True
+    # Verifier MUST be skipped (0 calls)
+    assert fake_verifier_model.call_count == 0
+    assert published_output["findings"] == []
+    # Raw summary must NEVER be published (CVS §8.2)
+    assert "Raw model summary problem." not in str(published_output["summary"])
+    assert (
+        published_output["summary"]["problem"]
+        == "No verified issues were found in the evaluated changes."
+    )
+    assert published_output["summary"]["effort"] == "none"
+    assert (
+        published_output["summary"]["done_well"]
+        == "Code analysis and policy verification were completed across all evaluated changes."
+    )
+
+
+def test_execute_review_run_severity_threshold_critical_drops_medium_clean_summary() -> None:
+    """Probe from Issue #219 Part 4:
+    Severity threshold is critical, model returns 1 medium finding (supported by verifier)
+    and 1 contradicted finding.
+    Pass 6 filters out the medium finding because severity is below critical.
+    Outcome: verdict clean, 0 findings, and summary built exclusively from post-threshold findings.
+    """
+
+    class Processor:
+        async def prepare(self, run_id: UUID) -> GeneratedConventions:
+            return conventions()
+
+    class Repository:
+        async def get_review_prompt_input(
+            self, run_id: UUID, saved: GeneratedConventions
+        ) -> ReviewPromptInput:
+            return ReviewPromptInput(
+                system="Review carefully.",
+                rules=(),
+                agents_md=None,
+                conventions=RepoConventions(("Use services.",), ("Test paths.",)),
+                changed_files=(
+                    ChangedFile("app/main.py", "modified", (DiffLine(10, "added", "x = 1"),)),
+                ),
+                omitted_files=(),
+                policy_snapshot=_make_test_snapshot(),
+                severity_threshold="critical",
+            )
+
+    class Model:
+        async def get_pull_request_meta(self, run_id: UUID) -> PullRequestMeta:
+            return PullRequestMeta(
+                "Title",
+                None,
+                "author",
+                "feature",
+                "main",
+                (),
+                1,
+                1,
+                0,
+                False,
+                False,
+                head_sha="sha_head",
+            )
+
+        async def draft_review(self, *, context: ReviewContext) -> dict[str, Any]:
+            return {
+                "findings": [
+                    {
+                        "path": "app/main.py",
+                        "line": 10,
+                        "start_line": None,
+                        "severity": "medium",
+                        "category": "correctness",
+                        "title": "Medium finding",
+                        "body": "Minor correctness defect.",
+                        "suggestion": None,
+                        "confidence": 0.8,
+                        "rule_name": None,
+                        "evidence_refs": [
+                            {"block_id": MAIN_BLOCK_ID, "start_line": 10, "end_line": 10}
+                        ],
+                    },
+                    {
+                        "path": "app/main.py",
+                        "line": 10,
+                        "start_line": None,
+                        "severity": "low",
+                        "category": "correctness",
+                        "title": "Contradicted finding",
+                        "body": "False positive.",
+                        "suggestion": None,
+                        "confidence": 0.5,
+                        "rule_name": None,
+                        "evidence_refs": [
+                            {"block_id": MAIN_BLOCK_ID, "start_line": 10, "end_line": 10}
+                        ],
+                    },
+                ],
+                "summary": {
+                    "problem": "Model claims 2 issues.",
+                    "done_well": "Clean style.",
+                    "effort": "small",
+                },
+            }
+
+    published_output: dict[str, Any] = {}
+
+    class Publisher:
+        async def execute(
+            self, run_id: UUID, raw_output: Mapping[str, object] | str | bytes
+        ) -> bool:
+            nonlocal published_output
+            published_output = dict(raw_output) if isinstance(raw_output, Mapping) else {}
+            return True
+
+    class FakeVerifierModelWithDecisions:
+        async def verify(self, *, system_prompt: str, user_prompt: str) -> Mapping[str, Any]:
+            cand_ids = re.findall(r'candidate candidate_id="([^"]+)"', user_prompt)
+            return {
+                "decisions": [
+                    {
+                        "candidate_id": cand_ids[0],
+                        "status": "supported",
+                        "reason": "Medium defect confirmed.",
+                        "evidence_refs": [
+                            {"block_id": MAIN_BLOCK_ID, "start_line": 10, "end_line": 10}
+                        ],
+                        "requirement_refs": [],
+                    },
+                    {
+                        "candidate_id": cand_ids[1],
+                        "status": "contradicted",
+                        "reason": "False positive refuted.",
+                        "evidence_refs": [
+                            {"block_id": MAIN_BLOCK_ID, "start_line": 10, "end_line": 10}
+                        ],
+                        "requirement_refs": [],
+                    },
+                ]
+            }
+
+    reflection_pass = ReflectionPass(FakeVerifierModelWithDecisions())
+    pipeline = ExecuteReviewRun(
+        Processor(),
+        Repository(),
+        Model(),
+        Publisher(),
+        reflection_pass=reflection_pass,
+    )
+
+    success = asyncio.run(pipeline.execute(RUN_ID))
+    assert success is True
+    # All post-threshold findings are dropped
+    assert published_output["findings"] == []
+    # Summary MUST reflect 0 post-threshold issues (NOT "Identified 1 verified issue")
+    assert (
+        published_output["summary"]["problem"]
+        == "No verified issues meeting the severity threshold were found (1 below threshold)."
+    )
+    assert published_output["summary"]["effort"] == "none"
+    assert (
+        published_output["summary"]["done_well"]
+        == "Code analysis and policy verification were completed across all evaluated changes."
+    )
+
+
+def test_execute_review_run_2500_lines_diff_fits_without_premature_overflow() -> None:
+    """Probe from Issue #219 Part 2:
+    A 2,500-line diff file produces ~74k raw chars/tokens.
+    Previously, pre-send guard evaluated before fit_review_context and aborted with overflow.
+    Now, post-fit pre-send guard ensures the context is fitted first and passes within budget.
+    """
+
+    class Processor:
+        async def prepare(self, run_id: UUID) -> GeneratedConventions:
+            return conventions()
+
+    class Repository:
+        async def get_review_prompt_input(
+            self, run_id: UUID, saved: GeneratedConventions
+        ) -> ReviewPromptInput:
+            line_content = "x = 100 + 200 # line calculation " + "y" * 55  # ~88 chars
+            lines = tuple(DiffLine(i, "added", line_content) for i in range(1, 2501))
+            return ReviewPromptInput(
+                system="Review carefully.",
+                rules=(),
+                agents_md=None,
+                conventions=RepoConventions(("Use services.",), ("Test paths.",)),
+                changed_files=(ChangedFile("app/large.py", "modified", lines),),
+                omitted_files=(),
+                policy_snapshot=_make_test_snapshot(max_input_tokens=52_000),
+            )
+
+    class Model:
+        async def get_pull_request_meta(self, run_id: UUID) -> PullRequestMeta:
+            return PullRequestMeta(
+                "Large PR",
+                None,
+                "author",
+                "feature",
+                "main",
+                (),
+                1,
+                2500,
+                0,
+                False,
+                False,
+                head_sha="sha_head",
+            )
+
+        async def draft_review(self, *, context: ReviewContext) -> dict[str, Any]:
+            assert len(context.changed_files[0].lines) < 2500
+            return {
+                "findings": [],
+                "summary": {
+                    "problem": "Clean code.",
+                    "done_well": "Well written.",
+                    "effort": "none",
+                },
+            }
+
+    published_output: dict[str, Any] = {}
+
+    class Publisher:
+        async def execute(
+            self, run_id: UUID, raw_output: Mapping[str, object] | str | bytes
+        ) -> bool:
+            nonlocal published_output
+            published_output = dict(raw_output) if isinstance(raw_output, Mapping) else {}
+            return True
+
+    fake_verifier_model = FakeVerifierModel({"decisions": []})
+    reflection_pass = ReflectionPass(fake_verifier_model)
+    pipeline = ExecuteReviewRun(
+        Processor(),
+        Repository(),
+        Model(),
+        Publisher(),
+        reflection_pass=reflection_pass,
+    )
+
+    success = asyncio.run(pipeline.execute(RUN_ID))
+    assert success is True
+    assert published_output["findings"] == []
+    assert (
+        published_output["summary"]["problem"]
+        == "No verified issues were found in the evaluated changes."
+    )
