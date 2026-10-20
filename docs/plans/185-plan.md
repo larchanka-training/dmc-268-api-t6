@@ -5,8 +5,10 @@ scoped lifecycle policy and required coordination comments. All seven implementa
 tasks, including both pipeline ownership follow-ups, are complete. Final whole-issue
 Standards and Spec reviews report zero findings. All four gates pass; the final full
 suite with actual disposable PostgreSQL/RabbitMQ reports 5045 passed, 0 skipped,
-2 existing warnings in 1006.98s. Publication is pending; the user requested a ready
-PR and will assign the reviewer.
+2 existing warnings in 1006.98s. Published as [PR #234](https://github.com/larchanka-training/dmc-268-api-t6/pull/234)
+from `fix/185-review-consumer-resilience`. Implementation commit: `1ce6c94`.
+The PR is temporarily draft while current-head CI runs; the publisher will mark it
+ready after all checks pass. The user will assign the reviewer.
 
 ## Evidence and scope
 

@@ -3,8 +3,10 @@
 Status: plan approved by the user on 2026-10-20. Prerequisites and all seven
 implementation tasks are complete. Final whole-issue Standards/Spec reviews report
 zero findings; all four gates pass, including the actual PostgreSQL/RabbitMQ full
-suite: **5045 passed, 0 skipped, 2 existing warnings in 1006.98s**. Publisher actions
-remain pending; PR must be ready for review and the user will assign the reviewer.
+suite: **5045 passed, 0 skipped, 2 existing warnings in 1006.98s**. Published as
+[PR #234](https://github.com/larchanka-training/dmc-268-api-t6/pull/234), attached to
+this chat. It is temporarily draft pending current-head CI; the publisher will mark
+it ready after all checks pass. The user will assign the reviewer.
 Read [185-plan.md](185-plan.md) for architecture, acceptance criteria, ownership and risks.
 All paths below are relative to the isolated managed worktree.
 
@@ -696,10 +698,17 @@ within the resilience scope before the production edit. Index policy is unchange
       no unnecessary Postman setup or network service mutation occurred.
 - [x] Independent Standards and Spec reviews report zero findings after latest diff.
 - [x] Rebase on main and recheck coordinated overlaps/gates before requesting review.
-- [ ] Publisher follows pull-request skill, references #185 without closing keyword,
-      reports no dependency added, pushes PR and attaches it to this chat. The user
-      explicitly requested ready for review (no draft) and will assign the reviewer;
-      agents must not select a reviewer. Development made no commit/push.
+- [x] Publisher followed pull-request skill, committed and pushed implementation
+      `1ce6c94`, opened [PR #234](https://github.com/larchanka-training/dmc-268-api-t6/pull/234)
+      and attached it to this chat. The body uses `Refs #185`, reports no dependency
+      added and includes the full Before merge checklist. Hooks passed; refreshed
+      origin/main remains `2326273e6ab7fcea89d1cf3b94b88a4be66ca5e9`.
+      This docs-only handoff is committed before waiting for final-head CI.
+      PR is temporarily draft solely to obtain green CI before Ready, as required
+      by CONTRIBUTING step 3. Final Ready transition is pending those checks.
+      The user explicitly requested ready for review and will assign the reviewer;
+      no reviewer was selected and no review request was sent. Development made no
+      commit/push; approval, merge and issue acceptance remain human actions.
 - [x] Keep issue/board/approval/merge actions within authorized repository workflow;
       never close issue or merge merely because automated gates pass.
 
