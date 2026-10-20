@@ -56,6 +56,7 @@ services:
   worker:
     image: ${IMAGE:?IMAGE is required}
     command: ["python", "-m", "app.worker"]
+    stop_grace_period: 40s
     # Also the index.repo consumer (#142). CODE_INDEX_* keep their code defaults here:
     # worker.env is rebuilt from the allowlist in deploy/scripts/env-file.sh, so a value
     # changes only under environment: below (or by adding it to that allowlist).

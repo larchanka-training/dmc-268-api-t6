@@ -45,7 +45,12 @@ from app.modules.reviews.application.run_failures import (
 )
 from app.modules.reviews.application.run_trace import traced_step
 from app.modules.reviews.application.try_enqueue_webhook_run import PendingRunMessage
-from app.modules.reviews.infrastructure.vcs_failures import classify_vcs_error
+from app.modules.reviews.application.vcs_diff import PullRequestLocator
+from app.modules.reviews.infrastructure.github_vcs import HttpGitHubVcsProvider
+from app.modules.reviews.infrastructure.vcs_failures import (
+    ClassifiedVcsProvider,
+    classify_vcs_error,
+)
 
 RUN = UUID("11111111-1111-1111-1111-111111111111")
 WORKSPACE = UUID("22222222-2222-2222-2222-222222222222")
@@ -1053,3 +1058,142 @@ def test_verification_error_codes_classification_and_check_runs() -> None:
         view = check_run_view(report)
         assert expected_summary in view.summary
         assert f"`{code}`" in view.summary
+
+
+def _provider_retry_after_failure(
+    retry_after: str, *, status: int = 403, commits: bool = False, remaining: str | None = None
+) -> RunFailure:
+    class Tokens:
+        async def get_installation_access_token(self, installation_external_id: int) -> str:
+            return "fake-installation-token"
+
+    async def read() -> None:
+        headers = [(b"Retry-After", retry_after.encode("utf-8"))]
+        if remaining is not None:
+            headers.append((b"X-RateLimit-Remaining", remaining.encode("ascii")))
+        async with httpx.AsyncClient(
+            base_url="https://api.github.test",
+            transport=httpx.MockTransport(lambda request: httpx.Response(status, headers=headers)),
+        ) as client:
+            provider = ClassifiedVcsProvider(
+                HttpGitHubVcsProvider(client=client, token_provider=Tokens())
+            )
+
+            async def checkpoint() -> None:
+                return None
+
+            locator = PullRequestLocator(17, "octo/repo", 7)
+            if commits:
+                await provider.get_commit_messages(locator, checkpoint=checkpoint)
+            else:
+                await provider.get_pull_request(locator, checkpoint=checkpoint)
+
+    with pytest.raises(RunFailure) as caught:
+        asyncio.run(read())
+    return caught.value
+
+
+@pytest.mark.parametrize("commits", [False, True])
+@pytest.mark.parametrize(
+    "header",
+    [
+        pytest.param("86400000000000", id="timedelta-overflow"),
+        pytest.param("9" * 5000, id="integer-digit-limit"),
+    ],
+)
+def test_oversized_numeric_retry_after_keeps_rate_limit_retry_in_the_long_bucket(
+    header: str, commits: bool
+) -> None:
+    failure = _provider_retry_after_failure(header, commits=commits)
+
+    assert failure.error_code == (
+        "commit_messages_fetch_failed" if commits else "diff_fetch_failed"
+    )
+    assert failure.retry_after == timedelta(minutes=10)
+    assert RetryDelays().for_failure(1, failure) == ("10m", timedelta(minutes=10))
+
+
+@pytest.mark.parametrize("commits", [False, True])
+@pytest.mark.parametrize(
+    "header",
+    [
+        pytest.param("", id="empty"),
+        pytest.param("later", id="alphabetic"),
+        pytest.param("-1", id="negative"),
+        pytest.param("+120", id="positive-sign"),
+        pytest.param("120.0", id="fractional"),
+        pytest.param(" 120", id="whitespace"),
+        pytest.param("Wed, 21 Oct 2026 07:28:00 GMT", id="http-date"),
+        pytest.param("²", id="superscript-digit"),
+        pytest.param("١٢٠", id="unicode-decimal"),
+    ],
+)
+def test_malformed_retry_after_preserves_forbidden_and_retryable_classification(
+    header: str, commits: bool
+) -> None:
+    forbidden = _provider_retry_after_failure(header, status=403, commits=commits)
+    retryable = _provider_retry_after_failure(header, status=429, commits=commits)
+
+    assert (forbidden.error_code, forbidden.retry_after) == ("github_forbidden", None)
+    assert retryable.error_code == (
+        "commit_messages_fetch_failed" if commits else "diff_fetch_failed"
+    )
+    assert retryable.retry_after is None
+
+
+@pytest.mark.parametrize("commits", [False, True])
+@pytest.mark.parametrize("status", [403, 429])
+@pytest.mark.parametrize(
+    ("header", "delay", "queue"),
+    [
+        pytest.param("0", timedelta(0), "2m", id="zero"),
+        pytest.param("120", timedelta(seconds=120), "2m", id="two-minutes"),
+        pytest.param("300", timedelta(seconds=300), "10m", id="five-minutes"),
+        pytest.param("000120", timedelta(seconds=120), "2m", id="leading-zeros"),
+        pytest.param("0" * 5000 + "300", timedelta(seconds=300), "10m", id="many-leading-zeros"),
+        pytest.param("0" * 5000, timedelta(0), "2m", id="many-zero-digits"),
+        pytest.param(
+            "86399999999999",
+            timedelta(days=999_999_999, seconds=86_399),
+            "10m",
+            id="largest-representable-seconds",
+        ),
+    ],
+)
+def test_representable_numeric_retry_after_preserves_delay_and_existing_queue(
+    header: str, delay: timedelta, queue: str, status: int, commits: bool
+) -> None:
+    failure = _provider_retry_after_failure(header, status=status, commits=commits)
+
+    assert failure.error_code == (
+        "commit_messages_fetch_failed" if commits else "diff_fetch_failed"
+    )
+    assert failure.retry_after == delay
+    assert RetryDelays().for_failure(1, failure)[0] == queue
+
+
+@pytest.mark.parametrize("commits", [False, True])
+@pytest.mark.parametrize(
+    "header",
+    [
+        pytest.param("later", id="malformed"),
+        pytest.param("120", id="ordinary"),
+        pytest.param("9" * 5000, id="oversized"),
+    ],
+)
+def test_not_found_remains_forbidden_regardless_of_retry_after(header: str, commits: bool) -> None:
+    failure = _provider_retry_after_failure(header, status=404, commits=commits)
+
+    assert (failure.error_code, failure.retry_after) == ("github_forbidden", None)
+
+
+@pytest.mark.parametrize("commits", [False, True])
+def test_exhausted_github_rate_limit_remains_retryable_with_malformed_retry_after(
+    commits: bool,
+) -> None:
+    failure = _provider_retry_after_failure("later", remaining="0", commits=commits)
+
+    assert failure.error_code == (
+        "commit_messages_fetch_failed" if commits else "diff_fetch_failed"
+    )
+    assert failure.retry_after is None

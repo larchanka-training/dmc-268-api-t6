@@ -26,6 +26,7 @@ from aio_pika.abc import (
 from jsonschema import Draft202012Validator
 from pydantic import BaseModel
 
+from app.common.infrastructure.amqp_consumer import consume_queue
 from app.modules.reviews.application.handle_review_run import DeliveryOutcome
 from app.modules.reviews.application.queue_messages import ReviewPublishPointer, message_trigger
 from app.modules.reviews.application.run_failures import RetryDelays
@@ -308,7 +309,7 @@ def _get_delivery_attempts(message: AbstractIncomingMessage) -> int:
     if isinstance(headers, dict) and "x-attempt" in headers:
         try:
             broker_attempts = max(broker_attempts, int(headers["x-attempt"]))
-        except (ValueError, TypeError):
+        except (ValueError, TypeError, OverflowError):
             _LOGGER.warning(
                 "Invalid retry header %s=%r on message %s",
                 "x-attempt",
@@ -450,12 +451,30 @@ async def handle_publish_delivery(
 
 
 async def consume(
-    queue: AbstractQueue, handle: Callable[[AbstractIncomingMessage], Awaitable[None]]
+    queue: AbstractQueue,
+    handle: Callable[[AbstractIncomingMessage], Awaitable[None]],
+    *,
+    stop: asyncio.Event | None = None,
 ) -> None:
-    """Handle deliveries one at a time; the channel's prefetch is 1."""
-    async with queue.iterator() as messages:
-        async for message in messages:
+    """Handle deliveries serially, isolating errors and optionally stopping intake."""
+
+    async def guarded(message: AbstractIncomingMessage) -> None:
+        # Cancellation must still stop the consumer; isolate only delivery failures.
+        try:
             await handle(message)
+        except Exception:
+            _LOGGER.exception("Failed to handle %s message %s", queue.name, message.message_id)
+            if not message.processed:
+                try:
+                    await message.nack(requeue=False)
+                except Exception:
+                    _LOGGER.exception(
+                        "Failed to nack %s message %s; broker redelivers after channel close",
+                        queue.name,
+                        message.message_id,
+                    )
+
+    await consume_queue(queue, guarded, stop=stop)
 
 
 @dataclass(frozen=True)
@@ -467,7 +486,8 @@ class AmqpChannels:
         """A queue on its own channel with ``prefetch_count=1`` (SD §7.1)."""
         channel = await self.connection.channel()
         await channel.set_qos(prefetch_count=1)
-        return await channel.get_queue(name, ensure=False)
+        # Passive declaration registers this queue for robust channel restoration.
+        return await channel.get_queue(name, ensure=True)
 
 
 @asynccontextmanager

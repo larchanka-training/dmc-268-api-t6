@@ -336,8 +336,11 @@ def test_run_worker_consumes_index_repo_beside_the_review_queues(
         )
         yield IndexConsumer()
 
+    async def wait_for_quiescence() -> None:
+        return None
+
     process = SimpleNamespace(
-        handle_run=SimpleNamespace(execute=None),
+        handle_run=SimpleNamespace(execute=None, wait_for_quiescence=wait_for_quiescence),
         publish_review=SimpleNamespace(execute=None),
         leader_tick=None,
     )

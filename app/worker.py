@@ -12,6 +12,7 @@ import asyncio
 import logging
 import os
 import socket
+import sys
 import time
 from collections.abc import AsyncIterator, Callable, Mapping
 from contextlib import AsyncExitStack, asynccontextmanager
@@ -37,6 +38,13 @@ from app.bootstrap.code_index_worker import (
     index_leader_tasks,
 )
 from app.bootstrap.llm_gateway import build_gateway
+from app.bootstrap.worker_shutdown import (
+    finish_cleanup,
+    run_background,
+    run_with_signals,
+    stop_during_startup,
+    supervise_shutdown,
+)
 from app.common.infrastructure.db.leader import WORKER_LEADER_LOCK, run_as_leader
 from app.common.infrastructure.heartbeat import beat, heartbeat_file, reset
 from app.modules.code_index.application.leader_tasks import CodeIndexLeaderTasks
@@ -825,6 +833,34 @@ def compose_worker_process(
 async def run_worker(
     settings: WorkerSettings,
     *,
+    stop: asyncio.Event | None = None,
+    provider_factory: ProviderFactory | None = None,
+    delays: RetryDelays | None = None,
+    leader_period: float = 30.0,
+    github_transport: httpx.AsyncBaseTransport | None = None,
+    llm_transport: httpx.AsyncBaseTransport | None = None,
+    fx_transport: httpx.AsyncBaseTransport | None = None,
+) -> None:
+    """Consume until cancelled or stopped; main owns the process signal deadline."""
+    async with stop_during_startup(stop) as startup_complete:
+        await _run_worker(
+            settings,
+            stop=stop,
+            startup_complete=startup_complete,
+            provider_factory=provider_factory,
+            delays=delays,
+            leader_period=leader_period,
+            github_transport=github_transport,
+            llm_transport=llm_transport,
+            fx_transport=fx_transport,
+        )
+
+
+async def _run_worker(
+    settings: WorkerSettings,
+    *,
+    stop: asyncio.Event | None,
+    startup_complete: asyncio.Event,
     provider_factory: ProviderFactory | None = None,
     delays: RetryDelays | None = None,
     leader_period: float = 30.0,
@@ -836,6 +872,8 @@ async def run_worker(
 
     The transports replace the network in tests of this very composition.
     """
+    if stop is not None and stop.is_set():
+        return
     if settings.heartbeat_file is not None:
         reset(settings.heartbeat_file)
     # SD §13: a SQL error in a log carries no bound parameters (paths, symbol names).
@@ -906,46 +944,76 @@ async def run_worker(
                 )
             )
             _LOGGER.info("Review worker %s is consuming", settings.worker_id)
-            async with asyncio.TaskGroup() as tasks:
-                tasks.create_task(
-                    consume(
-                        run_queue,
-                        partial(
-                            handle_run_delivery,
-                            handler=process.handle_run.execute,
-                            publisher=channels.publisher,
+            startup_complete.set()
+            if stop is not None and stop.is_set():
+                return
+            stop_options = {} if stop is None else {"stop": stop}
+            try:
+                async with asyncio.TaskGroup() as tasks:
+                    consumers = [
+                        tasks.create_task(
+                            consume(
+                                run_queue,
+                                partial(
+                                    handle_run_delivery,
+                                    handler=process.handle_run.execute,
+                                    publisher=channels.publisher,
+                                ),
+                                **stop_options,
+                            )
                         ),
-                    )
-                )
-                tasks.create_task(
-                    consume(
-                        publish_queue,
-                        partial(
-                            handle_publish_delivery,
-                            handler=process.publish_review.execute,
-                            publisher=channels.publisher,
+                        tasks.create_task(
+                            consume(
+                                publish_queue,
+                                partial(
+                                    handle_publish_delivery,
+                                    handler=process.publish_review.execute,
+                                    publisher=channels.publisher,
+                                ),
+                                **stop_options,
+                            )
                         ),
-                    )
+                    ]
+                    background = [
+                        tasks.create_task(
+                            run_background(
+                                stop,
+                                partial(
+                                    run_as_leader,
+                                    engine,
+                                    WORKER_LEADER_LOCK,
+                                    leader_period,
+                                    process.leader_tick,
+                                    name="worker",
+                                ),
+                            )
+                        )
+                    ]
+                    if index is not None:
+                        consumers.append(tasks.create_task(index.consume(**stop_options)))
+                    # Beats only once the consumers are attached; any failed task ends the group.
+                    if settings.heartbeat_file is not None:
+                        background.append(
+                            tasks.create_task(
+                                run_background(stop, partial(beat, settings.heartbeat_file))
+                            )
+                        )
+                    if stop is not None:
+                        tasks.create_task(supervise_shutdown(stop, consumers, background))
+            finally:
+                # A normal watchdog/failure can finish a delivery while its cancelled
+                # pipeline still runs. Join every owned phase before resource contexts
+                # close, including TaskGroup fatal/caller-cancellation exits.
+                await finish_cleanup(
+                    process.handle_run.wait_for_quiescence(), prior_error=sys.exception()
                 )
-                tasks.create_task(
-                    run_as_leader(
-                        engine,
-                        WORKER_LEADER_LOCK,
-                        leader_period,
-                        process.leader_tick,
-                        name="worker",
-                    )
-                )
-                if index is not None:
-                    tasks.create_task(index.consume())
-                # Beats only once the consumers are attached; any failed task ends the group.
-                if settings.heartbeat_file is not None:
-                    tasks.create_task(beat(settings.heartbeat_file))
 
 
 def main() -> None:
     logging.basicConfig(level=logging.INFO)
-    asyncio.run(run_worker(WorkerSettings.from_environment(os.environ)))
+    run_with_signals(
+        lambda stop: run_worker(WorkerSettings.from_environment(os.environ), stop=stop)
+    )
 
 
 if __name__ == "__main__":

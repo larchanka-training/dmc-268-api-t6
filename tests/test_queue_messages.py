@@ -1237,3 +1237,59 @@ def test_requeue_after_error_names_the_dead_letter_queue_on_the_third_attempt(
 
 def test_requeue_after_error_is_the_review_queue_implementation() -> None:
     assert amqp.requeue_after_error is amqp._requeue_after_error
+
+
+@pytest.mark.parametrize("publish", [False, True])
+def test_infinite_retry_header_warns_and_starts_the_normal_unexpected_retry_budget(
+    publish: bool, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.setattr(amqp, "REQUEUE_ERROR_DELAY_SECONDS", 0.0)
+    delivery = Delivery(
+        VALID_PUBLISH if publish else VALID,
+        message_id=f"infinite-header-{publish}",
+        routing_key="review.publish" if publish else "review.run.fast",
+        headers={"x-attempt": float("inf"), "x-death": [{"count": 99}]},
+    )
+    pub, exchange = fake_publisher()
+
+    asyncio.run(_fail_retry_delivery(delivery, pub))
+
+    assert "Invalid retry header x-attempt=inf" in caplog.text
+    assert delivery.acked and delivery.nacked == []
+    assert len(exchange.published) == 1
+    assert exchange.published[0][0].headers == {
+        "x-attempt": 1,
+        "x-death": [{"count": 99}],
+    }
+
+
+@pytest.mark.parametrize("publish", [False, True])
+def test_infinite_header_preserves_live_local_count_and_the_third_error_dlq(
+    publish: bool, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.setattr(amqp, "REQUEUE_ERROR_DELAY_SECONDS", 0.0)
+    pub, exchange = fake_publisher(OfflineExchange())
+    first = Delivery(
+        VALID_PUBLISH if publish else VALID,
+        message_id=f"infinite-live-local-{publish}",
+        routing_key="review.publish" if publish else "review.run.fast",
+        headers={"x-attempt": 1, "x-death": [{"count": 99}]},
+    )
+    second = Delivery(
+        first.body,
+        message_id=first.message_id,
+        routing_key=first.routing_key,
+        headers={"x-attempt": float("inf"), "x-death": [{"count": 99}]},
+    )
+
+    async def redeliver() -> None:
+        await _fail_retry_delivery(first, pub)
+        await _fail_retry_delivery(second, pub)
+
+    asyncio.run(redeliver())
+
+    assert first.nacked == [True] and not first.acked
+    assert second.nacked == [False] and not second.acked
+    assert exchange.published == []
+    assert "Invalid retry header x-attempt=inf" in caplog.text
+    assert "exceeded maximum unexpected retry attempts (3)" in caplog.text

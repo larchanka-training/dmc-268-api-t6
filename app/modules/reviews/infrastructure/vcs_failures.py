@@ -17,6 +17,21 @@ from app.modules.reviews.application.vcs_diff import (
     VcsPullRequest,
 )
 
+_MAX_RETRY_AFTER_SECONDS = str(timedelta.max // timedelta(seconds=1))
+
+
+def _retry_after_delay(value: str | None) -> timedelta | None:
+    """Ignore malformed values; oversized decimal delays use the existing long bucket."""
+    if not value or not value.isascii() or not value.isdecimal():
+        return None
+    # Strip leading zeros before bounding/converting, including >4,300-digit inputs.
+    seconds = value.lstrip("0") or "0"
+    if len(seconds) > len(_MAX_RETRY_AFTER_SECONDS) or (
+        len(seconds) == len(_MAX_RETRY_AFTER_SECONDS) and seconds > _MAX_RETRY_AFTER_SECONDS
+    ):
+        return timedelta(minutes=10)
+    return timedelta(seconds=int(seconds))
+
 
 def classify_vcs_error(
     exc: httpx.HTTPError,
@@ -27,10 +42,7 @@ def classify_vcs_error(
 ) -> RunFailure:
     if isinstance(exc, httpx.HTTPStatusError):
         response = exc.response
-        retry_after = response.headers.get("Retry-After")
-        delay = (
-            timedelta(seconds=int(retry_after)) if retry_after and retry_after.isdigit() else None
-        )
+        delay = _retry_after_delay(response.headers.get("Retry-After"))
         limited = response.headers.get("X-RateLimit-Remaining") == "0" or delay is not None
         status = response.status_code
         if status == 404 or (status == 403 and not limited):

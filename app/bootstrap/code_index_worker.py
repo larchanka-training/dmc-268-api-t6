@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from collections.abc import AsyncIterator, Callable, Mapping
@@ -29,6 +30,7 @@ import httpx
 from aio_pika.abc import AbstractIncomingMessage, AbstractQueue, AbstractRobustConnection
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.common.infrastructure.amqp_consumer import consume_queue
 from app.modules.code_index.application.build_index import (
     BuildRepositoryIndex,
     IndexBuildSettings,
@@ -296,7 +298,7 @@ class IndexConsumer:
     build: BuildRepositoryIndex
     publisher: IndexQueuePublisher
 
-    async def consume(self) -> None:
+    async def consume(self, *, stop: asyncio.Event | None = None) -> None:
         """One job at a time: the queue's channel has `prefetch_count=1`.
 
         An exception out of one delivery (a settle on a channel replaced by a reconnect
@@ -307,16 +309,18 @@ class IndexConsumer:
         handle = partial(
             handle_index_delivery, handler=self.build.execute, publisher=self.publisher
         )
-        async with self.queue.iterator() as messages:
-            async for message in messages:
-                # CONTRACT: `Exception` only, so a cancellation still stops the loop.
-                try:
-                    await handle(message)
-                except Exception:
-                    # SD §13: the message id only, no customer data.
-                    _LOGGER.exception("Failed to handle index.repo message %s", message.message_id)
-                    if not message.processed:
-                        await _dead_letter(message)
+
+        async def guarded(message: AbstractIncomingMessage) -> None:
+            # CONTRACT: `Exception` only, so a cancellation still stops the loop.
+            try:
+                await handle(message)
+            except Exception:
+                # SD §13: the message id only, no customer data.
+                _LOGGER.exception("Failed to handle index.repo message %s", message.message_id)
+                if not message.processed:
+                    await _dead_letter(message)
+
+        await consume_queue(self.queue, guarded, stop=stop)
 
 
 async def _dead_letter(message: AbstractIncomingMessage) -> None:

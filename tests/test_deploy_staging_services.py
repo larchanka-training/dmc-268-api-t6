@@ -1940,3 +1940,14 @@ def test_generic_probe_failure_reports_only_controlled_numeric_exit(
     assert "PROBE-SECRET-CANARY" not in result.stdout + result.stderr
     assert "DRIVER-SECRET-CANARY" not in result.stdout + result.stderr
     assert host.files() == before
+
+
+@pytest.mark.parametrize("compose_path", ["docker-compose.yml", "deploy/compose/staging.yml"])
+def test_worker_stop_grace_exceeds_the_application_shutdown_deadline(compose_path: str) -> None:
+    compose = _read(compose_path)
+    match = re.search(r"(?ms)^  worker:\n(.*?)(?=^  [a-z][a-z-]*:\n|\Z)", compose)
+    assert match is not None
+    worker = match.group(1)
+    assert re.search(r"^    stop_grace_period: 40s$", worker, re.MULTILINE)
+    # SIGTERM must reach the Python worker, whose first-signal deadline includes Runner.close.
+    assert '    command: ["python", "-m", "app.worker"]' in worker
