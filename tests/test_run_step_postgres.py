@@ -14,7 +14,7 @@ from uuid import UUID
 import psycopg
 import pytest
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.bootstrap.run_step_listener import listen_forever as listen_run_steps
 from app.bootstrap.run_update_listener import listen_forever as listen_run_updates
@@ -43,6 +43,18 @@ from tests.test_run_stream_postgres import insert_queued_run
 
 STARTED = datetime(2026, 10, 12, 9, 0, 0, 123456, tzinfo=UTC)
 STARTED_AT = "2026-10-12T09:00:00.123456Z"
+RUN_ATTEMPT = 1
+
+
+async def allow_run_steps(factory: async_sessionmaker[AsyncSession], run_id: UUID) -> None:
+    """``insert_run_action`` requires ``runs.attempt >= 1`` (D-4)."""
+    async with factory() as session, session.begin():
+        await session.execute(
+            text(
+                "UPDATE runs SET attempt = GREATEST(attempt, 1), state = 'running' WHERE id = :id"
+            ),
+            {"id": run_id},
+        )
 
 
 @pytest.fixture
@@ -63,6 +75,7 @@ def test_committed_trace_notifies_run_step_and_a_rollback_does_not(env: Env) -> 
 
     async def scenario() -> tuple[str, list[dict[str, object]]]:
         run_id = await insert_queued_run(factory)
+        await allow_run_steps(factory, run_id)
         connection = await psycopg.AsyncConnection.connect(conninfo, autocommit=True)
         await connection.execute("LISTEN run_step")
         try:
@@ -84,7 +97,7 @@ def test_committed_trace_notifies_run_step_and_a_rollback_does_not(env: Env) -> 
             await trace.record(
                 run_id,
                 "llm.call",
-                {"secret": "leak"},
+                {"secret": "leak", "operation": "review"},
                 {"error": {"type": "TimeoutError", "message": "slow"}},
                 STARTED,
                 8,
@@ -116,9 +129,10 @@ def test_committed_trace_notifies_run_step_and_a_rollback_does_not(env: Env) -> 
         _step(run_id, "vcs.fetch_diff", 0, True, 5),
         _step(run_id, 'say "ok"', 1, True, 6),
         _step(run_id, "context.build", 2, True, 7),
-        _step(run_id, "llm.call", 3, False, 8),
+        _step(run_id, "llm.call", 3, False, 8, llm_operation="review"),
         _step(run_id, "github.publish_review", 4, True, 9),
     ]
+    assert all(payload["attempt"] == RUN_ATTEMPT for payload in received)
 
 
 @pytest.mark.integration
@@ -134,6 +148,7 @@ def test_step_listener_publishes_the_step_and_a_bad_payload_spares_run_updated(
 
     async def scenario() -> tuple[UUID, RunStep, RunUpdated]:
         run_id = await insert_queued_run(factory)
+        await allow_run_steps(factory, run_id)
 
         async def one_step(events: AsyncIterator[RunStep]) -> RunStep:
             async for event in events:
@@ -184,7 +199,7 @@ def test_step_listener_publishes_the_step_and_a_bad_payload_spares_run_updated(
 
     caplog.set_level(logging.WARNING, logger="app.bootstrap.run_step_listener")
     run_id, step, status = asyncio.run(scenario())
-    assert step == RunStep(run_id, "vcs.fetch_diff", 0, True, STARTED, 5)
+    assert step == RunStep(run_id, "vcs.fetch_diff", 0, True, STARTED, 5, RUN_ATTEMPT)
     assert status == RunUpdated(run_id, "running")
     assert "Ignoring malformed run_step payload" in caplog.text
     assert "run_step listener lost its connection" not in caplog.text
@@ -208,6 +223,7 @@ def test_publishing_transaction_notifies_review_steps_only_after_commit(env: Env
 
     async def scenario() -> tuple[str, list[dict[str, object]], list[dict[str, object]]]:
         run_id = await insert_queued_run(factory)
+        await allow_run_steps(factory, run_id)
         connection = await psycopg.AsyncConnection.connect(conninfo, autocommit=True)
         await connection.execute("LISTEN run_step")
         await connection.execute("LISTEN run_updated")
@@ -276,6 +292,7 @@ def test_rolled_back_publishing_transaction_emits_neither_step_nor_status(env: E
 
     async def scenario() -> tuple[list[dict[str, object]], list[dict[str, object]]]:
         run_id = await insert_queued_run(factory)
+        await allow_run_steps(factory, run_id)
         connection = await psycopg.AsyncConnection.connect(conninfo, autocommit=True)
         await connection.execute("LISTEN run_step")
         await connection.execute("LISTEN run_updated")
@@ -320,6 +337,7 @@ def test_saved_repository_conventions_notify_run_step_with_the_assigned_index(en
 
     async def scenario() -> tuple[str, list[dict[str, object]]]:
         run_id = await insert_queued_run(factory)
+        await allow_run_steps(factory, run_id)
         connection = await psycopg.AsyncConnection.connect(conninfo, autocommit=True)
         await connection.execute("LISTEN run_step")
         try:
@@ -414,12 +432,25 @@ async def _matching(
     return steps, updates
 
 
-def _step(run_id: str, tool: str, index: int, ok: bool, duration_ms: int) -> dict[str, object]:
-    return {
+def _step(
+    run_id: str,
+    tool: str,
+    index: int,
+    ok: bool,
+    duration_ms: int,
+    *,
+    attempt: int = RUN_ATTEMPT,
+    llm_operation: str | None = None,
+) -> dict[str, object]:
+    payload: dict[str, object] = {
         "run_id": run_id,
         "tool": tool,
         "index": index,
         "ok": ok,
         "started_at": STARTED_AT,
         "duration_ms": duration_ms,
+        "attempt": attempt,
     }
+    if llm_operation is not None:
+        payload["llm_operation"] = llm_operation
+    return payload

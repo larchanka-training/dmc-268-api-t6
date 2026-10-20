@@ -33,8 +33,11 @@ review в #205 и не приписываются утверждению #108/#1
 
 Спецификация определяет детерминированный контекст L0–L4, происхождение данных,
 маппинг координат, обязательную проверку кандидатов и воспроизводимую публикацию.
-Первая реализация использует GitHub и якоря `RIGHT`; контракт `LEFT` и GitLab
-проектируется сразу, внедряется отдельными задачами. Embedding-модель, векторный
+Первая реализация использует GitHub и якоря `RIGHT`; контракт `LEFT` и полный GitLab
+ingress/diff проектируется сразу, внедряется отдельными задачами. Публикация MR discussions
+на GitLab уже есть на `main` (#97, [SD §8.4](SYSTEM_DESIGN.md#84-gitlab), адаптер
+[`gitlab_review_publication.py`](../app/modules/reviews/infrastructure/gitlab_review_publication.py),
+PIPELINE_SPEC §5.2.1). Embedding-модель, векторный
 поиск, исполнение проекта и автоматическое применение suggestions в эту работу не
 входят. RAG v1 по [ADR 0001](adr/0001-graph-rag-v1.md) — граф символов с
 указателями без embeddings и без текста кода, построенный по разрешённому дереву
@@ -1373,6 +1376,10 @@ context old12/new13. SHA ниже — условные идентификато�
 
 ### 9.5. GitLab: целевой контракт, отдельная реализация
 
+На `main` (#97) реализована только публикация discussions по этому контракту (маркеры
+`findings_hash`, SD §8.4); приём вебхуков, diff и LEFT — вне scope #97. Ниже — целевой
+профиль координат и payload для адаптера и тестов.
+
 Endpoint — `POST /projects/{id}/merge_requests/{iid}/discussions`.
 В payload обязательны `body` и для inline `position`: `position_type="text"`,
 оба исходных пути, `base_sha/start_sha/head_sha` одной закреплённой версии.
@@ -1503,7 +1510,8 @@ operation_key = SHA256(canonical_json({publication_key, ordinal, payload_digest}
 `payload_digest` охватывает все значимые отправляемые поля, включая body/event,
 координаты и SHA, но исключает только генерируемый служебный marker, чтобы избежать
 рекурсивного хеша. Ключ операции и payload связаны уникальным ограничением хранения.
-Формат backend-маркера в body:
+Формат backend-маркера в body (цель #107; на `main` GitHub/GitLab публикация #97 использует
+legacy `findings_hash` markers, см. SD §8.4 и PIPELINE_SPEC §5.2):
 
 ```text
 <!-- ai-review:v2 run=<uuid> head=<full-sha> op=<operation-key> payload=<sha256> -->

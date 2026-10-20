@@ -134,6 +134,7 @@ class LlmCallRecord:
     error: LlmCallError | None = None
     fx: FxProvenance | None = None
     paid_metadata_error: bool = False
+    operation: str | None = None
 
     def request_json(self) -> dict[str, object]:
         """Metadata only: the prompt itself is never copied into the trace."""
@@ -147,6 +148,8 @@ class LlmCallRecord:
             "rule_version_id": _uuid_or_none(self.rule_version_id),
             "input_tokens_estimate": self.input_tokens_estimate,
         }
+        if self.operation is not None:
+            metadata["operation"] = self.operation
         if self.fx is not None:
             metadata["fx"] = self.fx.as_json()
         if self.paid_metadata_error:

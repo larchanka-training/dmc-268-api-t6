@@ -94,10 +94,10 @@ uv run pytest tests/test_publish_run_review.py tests/test_review_publisher.py te
    non-dropped findings `hashed_findings` already hashes (inline + body-only).
    Checked paths are the sorted keys of `hunk_lines` (the files the
    post-processor treated as the reviewable diff). An empty set still leaves
-   the heading, followed by `(none)`. The 4000-character cap applies only to
-   the Additional findings tail. Verdict, risk summary, checked paths, and the
-   three prose sections are not cut. A long path list may make the stored body
-   longer than 4000 characters; it stays under GitHub's review-body limit.
+   the heading, followed by `(none)`. The stored body stays ≤ 4000 characters
+   (whole finding bullets only; checked paths truncate; overflow footer at
+   store time — [#170](170-plan.md) D-1). Verdict, risk summary, prose, and
+   listed paths are not cut mid-line.
    `move_inline_to_body` appends after this text, so a coordinate fallback is
    still one review and still contains the overview. The check-run title is
    unchanged (`AI-ревью: {verdict}`).

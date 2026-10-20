@@ -764,6 +764,7 @@ def compose_worker_process(
             partial(SqlAlchemyReviewOutputUnitOfWork, session_factory),
             queue,
             worker_id=claimed.worker_id,
+            run_url=run_url,
             now=now,
         )
         return await process_review_run(
