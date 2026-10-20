@@ -91,6 +91,21 @@ class CodeIndexMaintenance(Protocol):
         `disabled` when `rag_enabled` is off, else `removed`."""
         ...
 
+    async def rearm_due(self, repository_id: UUID) -> bool:
+        """The condition of `to_rearm` for one repository, re-read after a FOR SHARE lock
+        of its `repositories` row.
+
+        The lock waits for a toggle, a removal or a rebind in flight, and holds them off
+        until the caller commits, so a re-arm in the same transaction never resurrects
+        an index they turn off. Lock order: `repositories`, then the state row.
+        """
+        ...
+
+    async def disarm_reason(self, repository_id: UUID) -> PurgeReason | None:
+        """The condition of `to_disarm` for one repository, re-read after the same lock
+        as `rearm_due`: the purge reason, or `None` when there is nothing to disarm."""
+        ...
+
 
 class CodeIndexMaintenanceUnitOfWork(CodeIndexUnitOfWork, Protocol):
     @property

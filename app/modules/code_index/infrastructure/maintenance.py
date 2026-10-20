@@ -36,7 +36,17 @@ _RAG_ON = and_(
 )
 # The indexer has a snapshot source for GitHub only (GitLab is #97).
 _GITHUB = ProviderInstallation.provider == "github"
-# Turned off by the user, else lost access.
+# A repository to re-arm (ADR §4): no state row, or one purged by a removal or a toggle.
+_REARM = and_(
+    _RAG_ON,
+    _GITHUB,
+    or_(
+        CodeIndexState.repository_id.is_(None),
+        CodeIndexState.purge_reason.in_([PurgeReason.REMOVED, PurgeReason.DISABLED]),
+    ),
+)
+# A live index to disarm, and its purge reason: turned off by the user, else lost access.
+_DISARM = and_(CodeIndexState.purge_reason.is_(None), not_(_RAG_ON))
 _DISARM_REASON = case(
     (not_(Repository.rag_enabled), PurgeReason.DISABLED.value), else_=PurgeReason.REMOVED.value
 )
@@ -181,14 +191,7 @@ class SqlAlchemyCodeIndexMaintenance:
                 ProviderInstallation, ProviderInstallation.id == Repository.provider_installation_id
             )
             .outerjoin(CodeIndexState, CodeIndexState.repository_id == Repository.id)
-            .where(
-                _RAG_ON,
-                _GITHUB,
-                or_(
-                    CodeIndexState.repository_id.is_(None),
-                    CodeIndexState.purge_reason.in_([PurgeReason.REMOVED, PurgeReason.DISABLED]),
-                ),
-            )
+            .where(_REARM)
             .order_by(Repository.id)
             .limit(limit)
         )
@@ -201,7 +204,7 @@ class SqlAlchemyCodeIndexMaintenance:
             .join(
                 ProviderInstallation, ProviderInstallation.id == Repository.provider_installation_id
             )
-            .where(CodeIndexState.purge_reason.is_(None), not_(_RAG_ON))
+            .where(_DISARM)
             .order_by(CodeIndexState.repository_id)
             .limit(limit)
         )
@@ -209,6 +212,38 @@ class SqlAlchemyCodeIndexMaintenance:
             DisarmCandidate(repository_id, PurgeReason(reason))
             for repository_id, reason in rows.tuples()
         ]
+
+    async def _share_repository(self, repository_id: UUID) -> None:
+        # The lock first, the condition in a statement of its own: under READ COMMITTED
+        # it reads what a writer the lock waited for committed.
+        await self._session.execute(
+            select(Repository.id).where(Repository.id == repository_id).with_for_update(read=True)
+        )
+
+    async def rearm_due(self, repository_id: UUID) -> bool:
+        await self._share_repository(repository_id)
+        due = await self._session.scalar(
+            select(Repository.id)
+            .join(
+                ProviderInstallation, ProviderInstallation.id == Repository.provider_installation_id
+            )
+            .outerjoin(CodeIndexState, CodeIndexState.repository_id == Repository.id)
+            .where(Repository.id == repository_id, _REARM)
+        )
+        return due is not None
+
+    async def disarm_reason(self, repository_id: UUID) -> PurgeReason | None:
+        await self._share_repository(repository_id)
+        reason = await self._session.scalar(
+            select(_DISARM_REASON)
+            .select_from(CodeIndexState)
+            .join(Repository, Repository.id == CodeIndexState.repository_id)
+            .join(
+                ProviderInstallation, ProviderInstallation.id == Repository.provider_installation_id
+            )
+            .where(CodeIndexState.repository_id == repository_id, _DISARM)
+        )
+        return None if reason is None else PurgeReason(reason)
 
 
 class SqlAlchemyCodeIndexMaintenanceUnitOfWork(SqlAlchemyCodeIndexUnitOfWork):

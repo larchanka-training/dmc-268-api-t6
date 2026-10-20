@@ -7,11 +7,17 @@ The worker leader runs them from `leader_tick`, after the sweep and the outbox r
 - `CollectIndexGarbage` revokes expired leases and deletes invisible rows in batches. It
   runs every interval and keeps running on consecutive leader ticks until drained; the
   target is physical deletion of a purged index's rows within the hour (ADR §4, §6);
+- `ConvergeIndexes` re-arms the index of a repository with RAG on whose index is missing
+  or was purged by a removal or a toggle (a reinstall, a repeated `added`, a repository
+  enabled before the triggers), and purges a live index whose RAG is off;
+- `DispatchIndexWakeups` wakes the job of every marked state row after the trigger's
+  commit and clears the marker it read: the wake-up outbox (#143);
 - `CodeIndexLeaderTasks` gives each task a gate on a monotonic clock and all of them
   one deadline per tick, so tasks whose gates open together never hold up the sweep and
   the replay of the next tick for long.
 
-Every store call is a short transaction of its own; no network call runs.
+Every store call is a short transaction of its own; a wake-up is published outside any
+transaction.
 """
 
 from __future__ import annotations
@@ -27,6 +33,7 @@ from typing import Protocol
 from uuid import UUID
 
 from app.modules.code_index.application.maintenance import CodeIndexMaintenanceUnitOfWork
+from app.modules.code_index.application.ports import IndexWakeups
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -155,6 +162,117 @@ class CollectIndexGarbage:
             if deleted < self._batch_rows:
                 return True
         return False
+
+
+class ConvergeIndexes:
+    """Brings the state rows in line with the effective RAG of their repositories.
+
+    One page of `to_rearm`, then one of `to_disarm`, per run: a candidate a re-check
+    rejects stays out of a re-listing in the same run. Per candidate one transaction:
+    the re-check under a share lock of the `repositories` row, then `enable` (which
+    sets the wake-up marker) or `purge` with the re-checked reason, then the commit.
+    A candidate whose transaction raises is logged and skipped, so one broken row does
+    not hold up the others; a cancellation propagates. Work remains while a page was
+    full or the deadline cut the run off.
+    """
+
+    def __init__(
+        self,
+        *,
+        uow: Callable[[], CodeIndexMaintenanceUnitOfWork],
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self._uow = uow
+        self._clock = clock
+
+    async def run(self, budget_seconds: float) -> bool:
+        deadline = self._clock() + budget_seconds
+        rearmed = disarmed = 0
+        try:
+            async with self._uow() as uow:
+                rearm = await uow.maintenance.to_rearm(CANDIDATE_PAGE)
+            for repository_id in rearm:
+                if self._clock() >= deadline:
+                    return True
+                # CONTRACT: `Exception` only, so a cancellation still stops the run.
+                try:
+                    async with self._uow() as uow:
+                        due = await uow.maintenance.rearm_due(repository_id)
+                        if due:
+                            await uow.index.enable(repository_id)
+                        await uow.commit()
+                except Exception:
+                    # SD §13: the internal id only, no customer data.
+                    _LOGGER.exception("Failed to re-arm the code index of %s", repository_id)
+                    continue
+                if due:
+                    rearmed += 1
+            if self._clock() >= deadline:
+                return True
+            async with self._uow() as uow:
+                disarm = await uow.maintenance.to_disarm(CANDIDATE_PAGE)
+            for candidate in disarm:
+                if self._clock() >= deadline:
+                    return True
+                # CONTRACT: `Exception` only, so a cancellation still stops the run.
+                try:
+                    async with self._uow() as uow:
+                        reason = await uow.maintenance.disarm_reason(candidate.repository_id)
+                        if reason is not None:
+                            await uow.index.purge(candidate.repository_id, reason)
+                        await uow.commit()
+                except Exception:
+                    _LOGGER.exception(
+                        "Failed to disarm the code index of %s", candidate.repository_id
+                    )
+                    continue
+                if reason is not None:
+                    disarmed += 1
+            return len(rearm) == CANDIDATE_PAGE or len(disarm) == CANDIDATE_PAGE
+        finally:
+            if rearmed or disarmed:
+                _LOGGER.info("Re-armed %d and disarmed %d code indexes", rearmed, disarmed)
+
+
+class DispatchIndexWakeups:
+    """The wake-up outbox: wakes the job of each marked row, then clears its marker.
+
+    One page of `wake_requests` per run, oldest marker first. `wake` runs outside any
+    transaction; the compare-and-set clear that follows misses when a trigger set a
+    newer marker meanwhile, which the next run dispatches. A failed `wake` raises: the
+    run stops and every marker not yet cleared stays. A duplicate wake-up is harmless:
+    the job's claim refuses it (ADR §6.2).
+    """
+
+    def __init__(
+        self,
+        *,
+        uow: Callable[[], CodeIndexMaintenanceUnitOfWork],
+        wakeups: IndexWakeups,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self._uow = uow
+        self._wakeups = wakeups
+        self._clock = clock
+
+    async def run(self, budget_seconds: float) -> bool:
+        deadline = self._clock() + budget_seconds
+        woken = 0
+        try:
+            async with self._uow() as uow:
+                requests = await uow.maintenance.wake_requests(CANDIDATE_PAGE)
+            for request in requests:
+                if self._clock() >= deadline:
+                    return True
+                await self._wakeups.wake(request.repository_id, request.generation)
+                woken += 1
+                async with self._uow() as uow:
+                    await uow.index.clear_wake_request(request.repository_id, request.requested_at)
+                    await uow.commit()
+            return len(requests) == CANDIDATE_PAGE
+        finally:
+            if woken:
+                _LOGGER.info("Woke %d code index jobs", woken)
 
 
 @dataclass(frozen=True)
