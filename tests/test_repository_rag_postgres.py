@@ -1,5 +1,5 @@
 """The repository RAG toggle on PostgreSQL: off by default, onboarding never turns it on, and the
-settings API serves it with the index status (#145)."""
+settings API serves it with the index status (#145); turning it off purges the index (#143)."""
 
 from __future__ import annotations
 
@@ -18,6 +18,7 @@ from sqlalchemy.schema import CreateSchema, DropSchema
 
 from alembic import command
 from app.modules.auth.application.scope import AuthScope
+from app.modules.code_index.domain.enums import IndexStatus, PurgeReason
 from app.modules.repositories.application.installation_repositories import RepositorySnapshot
 from app.modules.repositories.application.onboard_repository import load_default_rule_sets
 from app.modules.repositories.application.sync_installation_repositories import (
@@ -27,7 +28,12 @@ from app.modules.repositories.application.sync_installation_repositories import 
 from app.modules.repositories.infrastructure.installation_repository_unit_of_work import (
     SqlAlchemyInstallationRepositoriesUnitOfWork,
 )
+from app.modules.repositories.infrastructure.repository_settings import (
+    SqlAlchemyRepositorySettingsUnitOfWork,
+)
+from tests.code_index_postgres import GRAPH_ROWS, collect_garbage, graph_rows, publish_index
 from tests.portal_postgres import INSTALL_A, REPO_A, REPO_B, WS_A, Env, api, portal_schema, scalar
+from tests.test_code_index_store_postgres import _Index, _state
 
 _RAG_COLUMN = (
     "SELECT is_nullable, column_default FROM information_schema.columns "
@@ -412,3 +418,136 @@ def test_settings_api_derives_the_rag_index_from_the_state_row(
 
     assert (detail["ragEnabled"], detail["ragIndex"]) == (rag_enabled, expected)
     assert listed == [detail]
+
+
+# --- turning the toggle off purges the index (#143) ----------------------------------------
+
+
+@pytest.mark.integration
+def test_settings_api_patch_rag_off_purges_the_index_and_gc_deletes_its_rows(
+    rag_env: Env,
+) -> None:
+    url = f"/api/repos/{REPO_A}"
+    with api(rag_env, AuthScope(42, (WS_A,))) as (client, factory):
+        _execute(factory, "UPDATE repositories SET rag_enabled = true WHERE id = :id", id=REPO_A)
+        index = _Index(factory, REPO_A, REPO_B)
+        asyncio.run(publish_index(index, REPO_A))
+        published = asyncio.run(graph_rows(index, REPO_A))
+        disabled = client.patch(url, json={"ragEnabled": False})
+        detail = client.get(url).json()
+        purged = asyncio.run(_state(index, REPO_A))
+        kept = asyncio.run(graph_rows(index, REPO_A))
+        asyncio.run(collect_garbage(index))
+        collected = asyncio.run(graph_rows(index, REPO_A))
+        before_repeat = asyncio.run(_state(index, REPO_A))
+        repeated = client.patch(url, json={"ragEnabled": False})
+        after_repeat = asyncio.run(_state(index, REPO_A))
+
+    assert published == GRAPH_ROWS
+    assert disabled.status_code == 200
+    # The response is the read after the purge, the same as a later GET.
+    assert (disabled.json()["ragEnabled"], disabled.json()["ragIndex"]) == (False, DISABLED)
+    assert disabled.json() == detail
+    assert purged is not None
+    assert (purged.generation, purged.status, purged.purge_reason) == (
+        2,
+        IndexStatus.EMPTY,
+        PurgeReason.DISABLED,
+    )
+    # The purge is logical in the request; the GC leader task deletes the rows.
+    assert kept == GRAPH_ROWS
+    assert collected == (0, 0, 0, 0)
+    # A repeated PATCH changes nothing.
+    assert repeated.status_code == 200
+    assert repeated.json() == detail
+    assert before_repeat is not None and before_repeat.generation == 2
+    assert after_repeat == before_repeat
+
+
+@pytest.mark.integration
+def test_settings_api_patch_rag_off_purges_an_unavailable_repository_too(rag_env: Env) -> None:
+    with api(rag_env, AuthScope(42, (WS_A,))) as (client, factory):
+        index = _Index(factory, REPO_A, REPO_B)
+        asyncio.run(publish_index(index, REPO_A))
+        _execute(
+            factory,
+            "UPDATE repositories SET rag_enabled = true, installation_available = false "
+            "WHERE id = :id",
+            id=REPO_A,
+        )
+        patched = client.patch(f"/api/repos/{REPO_A}", json={"ragEnabled": False})
+        state = asyncio.run(_state(index, REPO_A))
+
+    assert patched.status_code == 200
+    assert state is not None
+    assert (state.generation, state.status, state.purge_reason) == (
+        2,
+        IndexStatus.EMPTY,
+        PurgeReason.DISABLED,
+    )
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize(
+    "body",
+    [{"enabled": False}, {"branchFilter": ["main"]}],
+    ids=["enabled", "branch-filter"],
+)
+def test_settings_api_patch_without_rag_enabled_leaves_the_index_alone(
+    rag_env: Env, body: dict[str, object]
+) -> None:
+    with api(rag_env, AuthScope(42, (WS_A,))) as (client, factory):
+        _execute(factory, "UPDATE repositories SET rag_enabled = true WHERE id = :id", id=REPO_A)
+        index = _Index(factory, REPO_A, REPO_B)
+        asyncio.run(publish_index(index, REPO_A))
+        before = asyncio.run(_state(index, REPO_A))
+        patched = client.patch(f"/api/repos/{REPO_A}", json=body)
+        after = asyncio.run(_state(index, REPO_A))
+        rows = asyncio.run(graph_rows(index, REPO_A))
+
+    assert patched.status_code == 200
+    assert before is not None and before.status is IndexStatus.READY
+    assert after == before
+    assert rows == GRAPH_ROWS
+
+
+@pytest.mark.integration
+def test_settings_api_patch_rag_off_purges_nothing_in_another_workspace(rag_env: Env) -> None:
+    with api(rag_env, AuthScope(42, (WS_A,))) as (client, factory):
+        index = _Index(factory, REPO_A, REPO_B)
+        asyncio.run(publish_index(index, REPO_B))
+        before = asyncio.run(_state(index, REPO_B))
+        patched = client.patch(f"/api/repos/{REPO_B}", json={"ragEnabled": False})
+        after = asyncio.run(_state(index, REPO_B))
+
+    assert patched.status_code == 404
+    assert before is not None and before.generation == 1
+    assert after == before
+
+
+@pytest.mark.integration
+def test_the_scoped_purger_leaves_a_repository_outside_the_scope_alone(rag_env: Env) -> None:
+    scope = AuthScope(42, (WS_A,))
+    with api(rag_env, scope) as (_, factory):
+        index = _Index(factory, REPO_A, REPO_B)
+        asyncio.run(publish_index(index, REPO_A, REPO_B))
+        before = asyncio.run(_state(index, REPO_B))
+
+        async def purge_both() -> None:
+            async with SqlAlchemyRepositorySettingsUnitOfWork(factory, scope) as uow:
+                for repository_id in (REPO_A, REPO_B):
+                    await uow.index_purger.purge(repository_id, PurgeReason.DISABLED)
+                await uow.commit()
+
+        asyncio.run(purge_both())
+        visible = asyncio.run(_state(index, REPO_A))
+        hidden = asyncio.run(_state(index, REPO_B))
+
+    assert visible is not None
+    assert (visible.generation, visible.status, visible.purge_reason) == (
+        2,
+        IndexStatus.EMPTY,
+        PurgeReason.DISABLED,
+    )
+    assert before is not None and before.status is IndexStatus.READY
+    assert hidden == before

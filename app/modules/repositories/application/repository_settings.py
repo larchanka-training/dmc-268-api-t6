@@ -8,7 +8,9 @@ from typing import Protocol
 from uuid import UUID
 
 from app.common.application.unit_of_work import UnitOfWork
+from app.modules.code_index.domain.enums import PurgeReason
 from app.modules.code_index.domain.rag_index import RagIndex
+from app.modules.repositories.application.code_index import CodeIndexPurger
 
 
 @dataclass(frozen=True)
@@ -61,6 +63,9 @@ class RepositorySettingsUnitOfWork(UnitOfWork, Protocol):
     @property
     def repositories(self) -> RepositorySettingsStore: ...
 
+    @property
+    def index_purger(self) -> CodeIndexPurger: ...
+
 
 type RepositorySettingsUowFactory = Callable[[], RepositorySettingsUnitOfWork]
 
@@ -92,6 +97,13 @@ class UpdateRepository:
     ) -> RepositorySettings | None:
         async with self._uow_factory() as uow:
             item = await uow.repositories.update_repository(repository_id, change)
-            if item is not None:
-                await uow.commit()
+            if item is None:
+                return None
+            # Only a body that turns the toggle off purges: editing other settings never
+            # touches the index, so it never brings back an index the TTL purged. The
+            # purger is scoped like the store.
+            if change.rag_enabled is False:
+                await uow.index_purger.purge(item.id, PurgeReason.DISABLED)
+                item = await uow.repositories.get_repository(item.id)
+            await uow.commit()
             return item
