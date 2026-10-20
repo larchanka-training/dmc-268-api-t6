@@ -35,6 +35,9 @@ _PORT_METHODS = [
     "iter_files",
     "iter_imports",
     "visible_counts",
+    "request_build",
+    "reconcile_head",
+    "clear_wake_request",
 ]
 
 
