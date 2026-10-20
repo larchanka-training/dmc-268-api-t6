@@ -10,6 +10,7 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.common.infrastructure.db.unit_of_work import SqlAlchemyUnitOfWork
+from app.modules.code_index.infrastructure.purger import SqlAlchemyCodeIndexPurger
 from app.modules.integrations.webhooks.infrastructure.models import GitHubInstallationRemovalEffect
 from app.modules.repositories.application.installation_repositories import RepositorySnapshot
 from app.modules.repositories.application.onboard_repository import PersistedRuleVersion
@@ -165,11 +166,14 @@ class SqlAlchemyInstallationRepositoryStore:
         )
         return recorded is not None
 
-    async def disable_repository(self, provider_installation_id: UUID, external_id: int) -> None:
+    async def disable_repository(
+        self, provider_installation_id: UUID, external_id: int
+    ) -> UUID | None:
         """Remove App availability if the repository still belongs to this installation.
 
         The use case deduplicates delivery effects before calling this method.
         A distinct later removal must revoke any access restored in the meantime.
+        Returns the repository id, so the use case can purge its index.
         """
         await self._record_revocation(provider_installation_id, external_id)
         statement = (
@@ -179,16 +183,19 @@ class SqlAlchemyInstallationRepositoryStore:
                 Repository.external_id == external_id,
             )
             .values(installation_available=False)
+            .returning(Repository.id)
         )
-        await self._session.execute(statement)
+        repository_id = await self._session.scalar(statement)
         await self._session.execute(
             delete(GitHubUserRepositoryAccess).where(
                 GitHubUserRepositoryAccess.provider_installation_id == provider_installation_id,
                 GitHubUserRepositoryAccess.repository_external_id == external_id,
             )
         )
+        return repository_id
 
-    async def disable_installation(self, provider_installation_id: UUID) -> None:
+    async def disable_installation(self, provider_installation_id: UUID) -> list[UUID]:
+        """Returns the ids of the installation's repositories, so their indexes are purged."""
         await self._record_revocation(provider_installation_id, 0)
         await self._session.execute(
             update(ProviderInstallation)
@@ -197,16 +204,20 @@ class SqlAlchemyInstallationRepositoryStore:
                 deleted_at=func.coalesce(ProviderInstallation.deleted_at, func.clock_timestamp())
             )
         )
-        await self._session.execute(
-            update(Repository)
-            .where(Repository.provider_installation_id == provider_installation_id)
-            .values(installation_available=False)
+        repository_ids = list(
+            await self._session.scalars(
+                update(Repository)
+                .where(Repository.provider_installation_id == provider_installation_id)
+                .values(installation_available=False)
+                .returning(Repository.id)
+            )
         )
         await self._session.execute(
             delete(GitHubUserRepositoryAccess).where(
                 GitHubUserRepositoryAccess.provider_installation_id == provider_installation_id
             )
         )
+        return repository_ids
 
     async def _record_revocation(self, installation_id: UUID, repository_id: int) -> None:
         # Serialize with OAuth reconciliation before touching grants. Database time
@@ -256,3 +267,7 @@ class SqlAlchemyInstallationRepositoriesUnitOfWork(SqlAlchemyUnitOfWork):
     @property
     def repositories(self) -> SqlAlchemyInstallationRepositoryStore:
         return SqlAlchemyInstallationRepositoryStore(self.session)
+
+    @property
+    def index_purger(self) -> SqlAlchemyCodeIndexPurger:
+        return SqlAlchemyCodeIndexPurger(self.session)

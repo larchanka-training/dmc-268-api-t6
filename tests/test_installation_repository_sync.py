@@ -13,6 +13,7 @@ from uuid import UUID, uuid4
 import pytest
 from sqlalchemy.sql.dml import Update
 
+from app.modules.code_index.domain.enums import PurgeReason
 from app.modules.repositories.application.installation_repositories import (
     RepositoryReference,
     RepositorySnapshot,
@@ -50,6 +51,11 @@ class FakeInstallationRepositoryStore:
     identity_changes_remaining: int = 0
     lock_attempts: int = 0
     rules_refresh_requests: list[UUID] = field(default_factory=list)
+    # The repository ids `disable_installation` returns; None refuses the call.
+    installation_repository_ids: list[UUID] | None = None
+    delivery_recorded: bool = True
+    # The removal path in call order: the delivery marker, the disables and the purges.
+    removal_log: list[tuple[str, object]] = field(default_factory=list)
 
     async def lock_active_installation(self, provider_installation_id: UUID) -> bool:
         self.lock_attempts += 1
@@ -72,20 +78,32 @@ class FakeInstallationRepositoryStore:
         return stored.id
 
     async def record_removal_delivery(self, delivery_id: str) -> bool:
-        return True
+        self.removal_log.append(("delivery", delivery_id))
+        return self.delivery_recorded
 
     async def request_rules_refresh(self, repository_id: UUID) -> None:
         self.rules_refresh_requests.append(repository_id)
 
-    async def disable_installation(self, provider_installation_id: UUID) -> None:
-        raise AssertionError("unexpected installation deletion")
+    async def disable_installation(self, provider_installation_id: UUID) -> list[UUID]:
+        if self.installation_repository_ids is None:
+            raise AssertionError("unexpected installation deletion")
+        self.removal_log.append(("disable_installation", provider_installation_id))
+        return list(self.installation_repository_ids)
 
-    async def disable_repository(self, provider_installation_id: UUID, external_id: int) -> None:
+    async def disable_repository(
+        self, provider_installation_id: UUID, external_id: int
+    ) -> UUID | None:
         if self.disable_error is not None:
             raise self.disable_error
+        self.removal_log.append(("disable_repository", external_id))
         stored = self.repositories.get((provider_installation_id, external_id))
-        if stored is not None:
-            stored.installation_available = False
+        if stored is None:
+            return None
+        stored.installation_available = False
+        return stored.id
+
+    async def purge(self, repository_id: UUID, reason: PurgeReason) -> None:
+        self.removal_log.append(("purge", (repository_id, reason)))
 
     async def get_active_rule_version(self, repository_id: UUID) -> PersistedRuleVersion | None:
         return self.active_versions.get(repository_id)
@@ -116,6 +134,10 @@ class FakeInstallationRepositoryUnitOfWork:
     repositories: FakeInstallationRepositoryStore
     commits: int = 0
     rollbacks: int = 0
+
+    @property
+    def index_purger(self) -> FakeInstallationRepositoryStore:
+        return self.repositories
 
     async def __aenter__(self) -> FakeInstallationRepositoryUnitOfWork:
         return self
@@ -300,6 +322,86 @@ def test_sync_readding_a_removed_repository_reenables_it() -> None:
     assert store.created_versions == 1
 
 
+def _removal(
+    store: FakeInstallationRepositoryStore,
+) -> tuple[SyncInstallationRepositories, FakeInstallationRepositoryUnitOfWork]:
+    uow = FakeInstallationRepositoryUnitOfWork(store)
+    return SyncInstallationRepositories(uow_factory=lambda: uow, rule_sets={}), uow
+
+
+def test_removal_purges_each_removed_index_in_id_order_after_the_delivery_marker() -> None:
+    installation_id, low, high = uuid4(), UUID(int=1), UUID(int=2)
+    store = FakeInstallationRepositoryStore()
+    for repository_id, external_id in ((high, 101), (low, 102)):
+        store.repositories[(installation_id, external_id)] = StoredRepository(
+            repository_id,
+            RepositorySnapshot(external_id, f"octo/{external_id}", "main", "https://x"),
+        )
+    sync, uow = _removal(store)
+
+    asyncio.run(
+        sync.disable(
+            delivery_id="removal-delivery",
+            provider_installation_id=installation_id,
+            repositories=tuple(
+                RepositoryReference(external_id, f"octo/{external_id}", "main", "https://x")
+                for external_id in (101, 102, 999)
+            ),
+        )
+    )
+
+    # After the repositories rows, in the same commit and in id order (#143).
+    assert store.removal_log == [
+        ("delivery", "removal-delivery"),
+        ("disable_repository", 101),
+        ("disable_repository", 102),
+        ("disable_repository", 999),
+        ("purge", (low, PurgeReason.REMOVED)),
+        ("purge", (high, PurgeReason.REMOVED)),
+    ]
+    assert uow.commits == 1
+
+
+def test_installation_deletion_purges_every_index_of_the_installation_in_id_order() -> None:
+    installation_id = uuid4()
+    store = FakeInstallationRepositoryStore(
+        installation_repository_ids=[UUID(int=3), UUID(int=1), UUID(int=2)]
+    )
+    sync, uow = _removal(store)
+
+    asyncio.run(
+        sync.disable(
+            delivery_id="deletion-delivery",
+            provider_installation_id=installation_id,
+            repositories=(),
+            all_repositories=True,
+        )
+    )
+
+    assert store.removal_log == [
+        ("delivery", "deletion-delivery"),
+        ("disable_installation", installation_id),
+        *(("purge", (UUID(int=number), PurgeReason.REMOVED)) for number in (1, 2, 3)),
+    ]
+    assert uow.commits == 1
+
+
+def test_a_repeated_removal_delivery_purges_nothing() -> None:
+    store = FakeInstallationRepositoryStore(delivery_recorded=False)
+    sync, uow = _removal(store)
+
+    asyncio.run(
+        sync.disable(
+            delivery_id="removal-delivery",
+            provider_installation_id=uuid4(),
+            repositories=(_reference(),),
+        )
+    )
+
+    assert store.removal_log == [("delivery", "removal-delivery")]
+    assert uow.commits == 0
+
+
 def test_sync_rolls_back_and_never_commits_when_soft_disable_fails() -> None:
     store = FakeInstallationRepositoryStore(disable_error=RuntimeError("database unavailable"))
     uow = FakeInstallationRepositoryUnitOfWork(store)
@@ -349,9 +451,27 @@ class FakeSqlAlchemySession:
 @dataclass
 class FakeDisableSession:
     statements: list[object] = field(default_factory=list)
+    # What the repository UPDATE returns.
+    repository_ids: list[UUID] = field(default_factory=list)
 
     async def execute(self, statement: object) -> None:
         self.statements.append(statement)
+
+    async def scalar(self, statement: object) -> UUID | None:
+        self.statements.append(statement)
+        return self.repository_ids[0] if self.repository_ids else None
+
+    async def scalars(self, statement: object) -> list[UUID]:
+        self.statements.append(statement)
+        return list(self.repository_ids)
+
+
+def _repository_updates(session: FakeDisableSession) -> list[Update]:
+    return [
+        statement
+        for statement in session.statements
+        if isinstance(statement, Update) and statement.table.compare(Repository.__table__)
+    ]
 
 
 def test_sqlalchemy_installation_store_upserts_without_session_flushes() -> None:
@@ -371,23 +491,36 @@ def test_sqlalchemy_installation_store_upserts_without_session_flushes() -> None
 
 
 def test_sqlalchemy_installation_store_soft_disables_matching_repository() -> None:
-    installation_id = uuid4()
-    session = FakeDisableSession()
+    installation_id, repository_id = uuid4(), uuid4()
+    session = FakeDisableSession(repository_ids=[repository_id])
     store = SqlAlchemyInstallationRepositoryStore(session)  # type: ignore[arg-type]
 
-    asyncio.run(store.disable_repository(installation_id, 101))
+    disabled = asyncio.run(store.disable_repository(installation_id, 101))
 
-    repository_updates = [
-        statement
-        for statement in session.statements
-        if isinstance(statement, Update) and statement.table.compare(Repository.__table__)
-    ]
+    repository_updates = _repository_updates(session)
     assert len(repository_updates) == 1
     compiled = repository_updates[0].compile()
     assert compiled.params["installation_available"] is False
     assert "enabled" not in compiled.params
     assert compiled.params["provider_installation_id_1"] == installation_id
     assert compiled.params["external_id_1"] == 101
+    # The use case purges the index by this id (#143).
+    assert disabled == repository_id
+
+
+def test_sqlalchemy_installation_store_returns_every_repository_of_a_deleted_installation() -> None:
+    installation_id, repository_ids = uuid4(), [uuid4(), uuid4()]
+    session = FakeDisableSession(repository_ids=repository_ids)
+    store = SqlAlchemyInstallationRepositoryStore(session)  # type: ignore[arg-type]
+
+    disabled = asyncio.run(store.disable_installation(installation_id))
+
+    repository_updates = _repository_updates(session)
+    assert len(repository_updates) == 1
+    compiled = repository_updates[0].compile()
+    assert compiled.params["installation_available"] is False
+    assert compiled.params["provider_installation_id_1"] == installation_id
+    assert disabled == repository_ids
 
 
 def test_disable_without_delivery_id_fails_before_opening_uow() -> None:
