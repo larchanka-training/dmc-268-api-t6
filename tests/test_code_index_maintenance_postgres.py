@@ -204,6 +204,30 @@ def test_with_garbage_selects_displaced_rows_after_ten_minutes_and_a_purged_inde
 
 
 @pytest.mark.integration
+def test_with_garbage_selects_rows_below_the_floor_after_ten_minutes(fleet: _Fleet) -> None:
+    async def scenario() -> None:
+        index, first = fleet.index, fleet.ids[0]
+        await _enable(index, first)
+        await _build(index, first, C1, _module("aa01", 1), _importer("ab01", 1))
+        # A full build of the same generation raises the floor above every earlier row;
+        # those rows stay unclosed, so only the floor makes them garbage.
+        await _build(index, first, C2, _module("aa02", 3), base=C1)
+        assert await _with_garbage(index) == []
+        await _execute(
+            index,
+            "UPDATE code_index_states SET published_at = published_at - interval '11 minutes' "
+            "WHERE repository_id = :repository",
+            first,
+        )
+        assert await _with_garbage(index) == [first]
+        assert await _collect(index, first, 100) == [8, 0]
+        assert await _with_garbage(index) == []
+        assert await _raw_and_visible(index, first) == ((1, 1, 0, 0), (1, 1, 0, 0))
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.integration
 def test_with_garbage_selects_a_failed_index_until_its_rows_are_gone(fleet: _Fleet) -> None:
     async def scenario() -> None:
         index, first = fleet.index, fleet.ids[0]

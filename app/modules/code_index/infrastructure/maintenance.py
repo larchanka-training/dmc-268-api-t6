@@ -1,7 +1,7 @@
 """PostgreSQL adapter of the index leader's enumeration (#143).
 
 Like `SqlAlchemyCodeIndexStore`, it runs on the caller's session and never commits. The
-garbage probe applies `garbage_condition` of `collect_garbage` to the correlated state
+garbage probe applies the branches of `collect_garbage`'s condition to the correlated state
 columns, so the leader lists exactly the repositories garbage collection has work in.
 """
 
@@ -17,7 +17,7 @@ from app.modules.code_index.domain.enums import IndexStatus
 from app.modules.code_index.infrastructure.index_store import (
     DISPLACED_GRACE,
     SqlAlchemyCodeIndexUnitOfWork,
-    garbage_condition,
+    garbage_branches,
 )
 from app.modules.code_index.infrastructure.models import CodeIndexFile, CodeIndexState
 
@@ -59,30 +59,38 @@ class SqlAlchemyCodeIndexMaintenance:
         leased = CodeIndexState.lease_token.is_not(None)
         # The rows of a file and its symbols, edges and imports share its generation,
         # publications and closing, and GC deletes the file row last; so a file row is
-        # garbage while any row is. The probe stops at the first garbage file row, but a
-        # repository without garbage has every live file row read (the primary key prefix
-        # only narrows the scan to the repository). The next #143 migration adds the
-        # partial index `code_index_files (repository_id) WHERE valid_to IS NOT NULL`.
+        # garbage while any row is. One probe per branch of the garbage condition, each
+        # stopping at its first row: the older-generation, abandoned and below-floor
+        # branches range over the primary key prefix (repository, generation, valid_from),
+        # and the closed branch reads the partial index `ix_code_index_files_closed`. A
+        # repository without garbage thus reads none of its live rows; one probe of the OR
+        # would filter every one of them. A probe is the first row in key order, not an
+        # EXISTS: PostgreSQL drops the ORDER BY of an EXISTS and, guessing a third of the
+        # rows match a correlated inequality, may prefer a sequential scan while the
+        # visibility map lags behind a build; a sequential scan would have to sort for
+        # the first row. `path` is a NOT NULL key column, so a non-NULL probe is a row.
+        branches = garbage_branches(
+            CodeIndexFile,
+            generation=CodeIndexState.generation,
+            published=CodeIndexState.published_publication,
+            floor=CodeIndexState.floor_publication,
+            leased=case((leased, CodeIndexState.reserved_publication)),
+            displaced_due=and_(
+                CodeIndexState.published_at.is_not(None),
+                CodeIndexState.published_at <= now - DISPLACED_GRACE,
+            ),
+        )
         garbage = (
             select(CodeIndexFile.path)
-            .where(
-                CodeIndexFile.repository_id == CodeIndexState.repository_id,
-                garbage_condition(
-                    CodeIndexFile,
-                    generation=CodeIndexState.generation,
-                    published=CodeIndexState.published_publication,
-                    floor=CodeIndexState.floor_publication,
-                    leased=case((leased, CodeIndexState.reserved_publication)),
-                    displaced_due=and_(
-                        CodeIndexState.published_at.is_not(None),
-                        CodeIndexState.published_at <= now - DISPLACED_GRACE,
-                    ),
-                ),
-            )
-            .exists()
+            .where(CodeIndexFile.repository_id == CodeIndexState.repository_id, branch)
+            .order_by(CodeIndexFile.generation, CodeIndexFile.valid_from)
+            .limit(1)
+            .scalar_subquery()
+            .is_not(None)
+            for branch in branches
         )
         return await self._list(
-            or_(and_(leased, CodeIndexState.lease_expires_at <= now), garbage), after, limit
+            or_(and_(leased, CodeIndexState.lease_expires_at <= now), *garbage), after, limit
         )
 
 

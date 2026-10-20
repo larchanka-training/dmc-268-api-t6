@@ -184,7 +184,7 @@ _INDEXES = {
         "ix_code_index_states_live_lease": ["repository_id"],
         "ix_code_index_states_wake_requested": ["wake_requested_at"],
     },
-    "code_index_files": {},
+    "code_index_files": {"ix_code_index_files_closed": ["repository_id"]},
     "code_index_symbols": {},
     "code_index_edges": {
         "ix_code_index_edges_target": [
@@ -690,9 +690,18 @@ def test_migration_0037_adds_the_wake_marker_and_its_downgrade_drops_it(
         "(SELECT count(*) FROM pg_constraint WHERE conname = 'ck_code_index_states_wake_live' "
         "AND connamespace = current_schema()::regnamespace), "
         "(SELECT count(*) FROM pg_indexes WHERE schemaname = current_schema() "
-        "AND indexname = 'ix_code_index_states_wake_requested')"
+        "AND indexname IN ('ix_code_index_states_wake_requested', 'ix_code_index_files_closed'))"
     )
-    assert tuple(connection.execute(text(marker)).one()) == (1, 1, 1)
+    assert tuple(connection.execute(text(marker)).one()) == (1, 1, 2)
+    assert [
+        tuple(row)
+        for row in connection.execute(
+            text(
+                "SELECT indexrelid::regclass::text, pg_get_expr(indpred, indrelid) FROM pg_index "
+                "WHERE indrelid = 'code_index_files'::regclass AND NOT indisprimary"
+            )
+        )
+    ] == [("ix_code_index_files_closed", "(valid_to IS NOT NULL)")]
     repository_id = _repository(connection)
     connection.execute(
         text(
@@ -711,7 +720,7 @@ def test_migration_0037_adds_the_wake_marker_and_its_downgrade_drops_it(
     connection.commit()
 
     command.upgrade(config, "head")
-    assert tuple(connection.execute(text(marker)).one()) == (1, 1, 1)
+    assert tuple(connection.execute(text(marker)).one()) == (1, 1, 2)
     assert connection.execute(
         text("SELECT generation, wake_requested_at FROM code_index_states")
     ).one() == (1, None)

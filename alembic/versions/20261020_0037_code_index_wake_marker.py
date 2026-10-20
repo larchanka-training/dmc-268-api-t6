@@ -1,4 +1,4 @@
-"""Add the wake-up marker of the index state row (#143).
+"""Add the wake-up marker of the index state row and the closed-file index (#143).
 
 Revision ID: 20261020_0037
 Revises: 20261019_0036
@@ -30,9 +30,16 @@ def upgrade() -> None:
         ["wake_requested_at"],
         postgresql_where=sa.text("wake_requested_at IS NOT NULL"),
     )
+    op.create_index(
+        "ix_code_index_files_closed",
+        "code_index_files",
+        ["repository_id"],
+        postgresql_where=sa.text("valid_to IS NOT NULL"),
+    )
 
 
 def downgrade() -> None:
+    op.drop_index("ix_code_index_files_closed", table_name="code_index_files")
     op.drop_index("ix_code_index_states_wake_requested", table_name="code_index_states")
     op.drop_constraint("ck_code_index_states_wake_live", "code_index_states", type_="check")
     op.drop_column("code_index_states", "wake_requested_at")

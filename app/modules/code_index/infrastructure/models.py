@@ -145,6 +145,14 @@ class CodeIndexState(Base):
 
 class CodeIndexFile(Base):
     __tablename__ = "code_index_files"
+    __table_args__ = (
+        # The leader's garbage probe of closed rows (#143).
+        Index(
+            "ix_code_index_files_closed",
+            "repository_id",
+            postgresql_where=text("valid_to IS NOT NULL"),
+        ),
+    )
 
     repository_id: Mapped[UUID] = mapped_column(
         ForeignKey("repositories.id", ondelete="CASCADE"), primary_key=True
