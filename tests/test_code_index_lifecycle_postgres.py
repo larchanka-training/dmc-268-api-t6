@@ -13,6 +13,20 @@
 - On the store harness, the same triggers, and `deleted` of two repositories, wait while
   a batch transaction holds the state row lock, complete after its commit without a
   deadlock, and the job's next fenced write raises `IndexLeaseLost`.
+- End to end through the real update triggers (the webhook dispatcher with the index
+  refresh, the toggle, the converge pass and the head reconcile), the wake-up dispatch,
+  the job and the GC leader task: two merges wake one incremental build up to the second;
+  other pull request events, pushes elsewhere and a deleted ref change nothing; a push to
+  the default branch sets the target and the marker; a changed default branch, a direct
+  push and both lost-wake-up states of a job are reconciled into a build, an equal head is
+  not; a reconnected or rebound repository is re-armed in a new generation and built in
+  full; a late push never moves the index back and a force push builds in full; off and
+  on during a job fence it out and leave only the rows of the new generation.
+- The races of the wake-up outbox and the toggle: a push between a wake-up and the clear
+  of its marker keeps the marker for the next dispatch; a trigger during a job is woken
+  once the job has published; a request racing a purge waits for its row lock and requests
+  nothing; converge disarming an index while a PATCH turns RAG on ends either purged and
+  re-armed or live, never live with RAG off.
 
 Opt-in: TEST_DATABASE_URL must target a test database whose user can create schemas.
 Each test migrates its own schema to head and drops it afterwards.
@@ -23,8 +37,10 @@ from __future__ import annotations
 import asyncio
 import os
 from collections.abc import Awaitable, Callable, Iterator
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from functools import partial
+from pathlib import Path
+from typing import cast
 from uuid import UUID, uuid4
 
 import pytest
@@ -34,39 +50,87 @@ from sqlalchemy.pool import NullPool
 from sqlalchemy.schema import CreateSchema, DropSchema
 
 from alembic import command
-from app.modules.code_index.application.build_index import BuildStatus
+from app.modules.code_index.application.build_index import (
+    BuildMode,
+    BuildStatus,
+    FullBuildReason,
+    IndexVersions,
+    limits_profile_version,
+)
+from app.modules.code_index.application.index_refresh import RequestIndexRefresh
 from app.modules.code_index.application.index_store import (
     IndexLeaseLost,
     IndexState,
     IndexStorage,
 )
+from app.modules.code_index.application.leader_tasks import (
+    ConvergeIndexes,
+    DispatchIndexWakeups,
+    ReconcileIndexHeads,
+)
 from app.modules.code_index.application.ports import IndexedRepository
-from app.modules.code_index.application.vcs import SourceArchive
+from app.modules.code_index.application.vcs import (
+    Ancestry,
+    BranchHead,
+    Comparison,
+    RepositorySnapshotSource,
+    SourceArchive,
+)
 from app.modules.code_index.domain.enums import IndexStatus, PurgeReason
-from app.modules.repositories.application.installation_repositories import RepositoryReference
+from app.modules.code_index.infrastructure.index_refresh import SqlAlchemyIndexRefreshUnitOfWork
+from app.modules.code_index.infrastructure.maintenance import (
+    SqlAlchemyCodeIndexMaintenanceUnitOfWork,
+)
+from app.modules.integrations.webhooks.api.dispatch import GitHubWebhookDispatchAdapter
+from app.modules.integrations.webhooks.api.receipt import VerifiedGitHubDelivery
+from app.modules.integrations.webhooks.application.github_installation_dispatch import (
+    GitHubInstallationDeliveryDispatcher,
+    GitHubInstallationResolver,
+    InstallationOnboardingHandler,
+)
+from app.modules.repositories.application.installation_repositories import (
+    RepositoryReference,
+    RepositorySnapshot,
+)
+from app.modules.repositories.application.onboard_repository import load_default_rule_sets
 from app.modules.repositories.application.repository_settings import (
     RepositorySettingsChange,
     UpdateRepository,
 )
 from app.modules.repositories.application.sync_installation_repositories import (
+    RepositoryOnboardingInput,
     SyncInstallationRepositories,
 )
 from app.modules.repositories.infrastructure.installation_repository_unit_of_work import (
     SqlAlchemyInstallationRepositoriesUnitOfWork,
 )
+from app.modules.repositories.infrastructure.models import ProviderInstallation
 from app.modules.repositories.infrastructure.repository_settings import (
     SqlAlchemyRepositorySettingsUnitOfWork,
 )
 from app.modules.reviews.application.ast_symbols import SourceParser
+from app.modules.reviews.application.project_github_pull_request import (
+    PullRequestEvent,
+    PullRequestProjectionStatus,
+)
 from app.modules.reviews.infrastructure.subprocess_source_parser import SubprocessSourceParser
+from app.modules.workspaces.application.link_github_installations import GitHubInstallation
+from app.modules.workspaces.infrastructure.github_repository_rebinding import (
+    SqlAlchemyGitHubRepositoryRebinding,
+)
 from tests.code_index_postgres import GRAPH_ROWS, collect_garbage, graph_rows, publish_index
 from tests.test_code_index_indexer_postgres import (
     _PACKAGE,
     _PACKAGE_V2,
     _SETTINGS,
+    _VERSIONS,
+    Branch,
     Indexer,
+    Tree,
     Vcs,
+    Wakeups,
     _ActOnParse,
+    _changes,
     _Database,
     _raw_rows,
 )
@@ -77,10 +141,12 @@ from tests.test_code_index_store_postgres import (
     _enable,
     _importer,
     _Index,
+    _marker,
     _migration_config,
     _module,
     _pause_after_lock,
     _purge,
+    _release,
     _repository,
     _rows,
     _sibling,
@@ -88,6 +154,7 @@ from tests.test_code_index_store_postgres import (
     _wait_until_blocked,
     _write,
 )
+from tests.test_github_installation_dispatch import _merge_delivery, _push_delivery
 
 
 @dataclass(frozen=True)
@@ -341,10 +408,42 @@ _TRIGGERS = [
 
 
 @dataclass
+class _Branch(Branch):
+    """The default branch; a force push replaces its head with an unrelated commit."""
+
+    orphans: dict[str, Tree] = field(default_factory=dict)
+
+    def force_push(self, tree: Tree) -> str:
+        sha, old = self.commits.pop()
+        self.orphans[sha] = old
+        rewritten = f"{0xF0 + len(self.orphans):02x}" * 20
+        self.commits.append((rewritten, dict(tree)))
+        return rewritten
+
+
+@dataclass
 class _TriggerOnArchive(Vcs):
-    """The job's source, running `trigger` just before the download."""
+    """The job's source, running `trigger` just before the download.
+
+    Its head is on the default branch `name`; a base a force push left behind compares
+    as diverged.
+    """
 
     trigger: Callable[[], Awaitable[None]] | None = None
+    name: str = "main"
+
+    async def head(self) -> BranchHead | None:
+        head = await super().head()
+        return None if head is None else BranchHead(self.name, head.commit_sha)
+
+    async def compare(self, base_sha: str, head_sha: str) -> Comparison | None:
+        orphans = self.branch.orphans if isinstance(self.branch, _Branch) else {}
+        if base_sha not in orphans:
+            return await super().compare(base_sha, head_sha)
+        self.requests += 1
+        self.compares += 1
+        changes = _changes(orphans[base_sha], self.branch.tree(head_sha))
+        return Comparison(Ancestry.DIVERGED, changes, complete=True)
 
     async def archive(self, commit_sha: str, *, max_bytes: int) -> SourceArchive:
         if self.trigger is not None:
@@ -357,10 +456,17 @@ class _TriggerOnArchive(Vcs):
 class _Indexer(Indexer):
     """The harness indexer; its next job runs `on_download` in the download, once."""
 
+    branch: _Branch = field(default_factory=_Branch)
     on_download: Callable[[], Awaitable[None]] | None = None
+    default_branch: str = "main"
+
+    @property
+    def versions(self) -> IndexVersions:
+        """The versions its jobs record, as `Indexer.build` composes them."""
+        return replace(_VERSIONS, limits_profile_version=limits_profile_version(self.limits))
 
     def _source(self, repository: IndexedRepository) -> Vcs:
-        job = _TriggerOnArchive(self.branch, trigger=self.on_download)
+        job = _TriggerOnArchive(self.branch, trigger=self.on_download, name=self.default_branch)
         self.on_download = None
         self.jobs.append(job)
         return job
@@ -560,5 +666,690 @@ def test_deleted_waits_for_an_open_batch_of_one_of_its_repositories(
         await collect_garbage(index)
         assert await graph_rows(index, index.a) == (0, 0, 0, 0)
         assert await graph_rows(index, fleet.a2) == (0, 0, 0, 0)
+
+    asyncio.run(scenario())
+
+
+# --- the update triggers end to end (#143) -------------------------------------------------
+
+# A file `_PACKAGE_V2` lacks, so a third commit differs from the second.
+_PACKAGE_V3: Tree = {**_PACKAGE_V2, "extra.py": b"def extra():\n    return 2\n"}
+_ACCOUNT = 4242
+
+
+async def _turn_on(fleet: _Fleet) -> None:
+    """PATCH `ragEnabled=true` of repository A, as the settings API runs it."""
+    uow = partial(
+        SqlAlchemyRepositorySettingsUnitOfWork, fleet.index.factory, None, allow_unscoped=True
+    )
+    changed = await UpdateRepository(uow).execute(
+        fleet.index.a, RepositorySettingsChange(rag_enabled=True)
+    )
+    assert changed is not None and changed.rag_enabled
+
+
+async def _deliver(index: _Index, delivery: VerifiedGitHubDelivery) -> str | None:
+    """A webhook delivery through the dispatcher with the real index refresh; the PR
+    projection is not under test and always applies. Returns the delivery's detail."""
+
+    class Projected:
+        async def execute(self, event: PullRequestEvent) -> PullRequestProjectionStatus:
+            return PullRequestProjectionStatus.PROJECTED
+
+    adapter = GitHubWebhookDispatchAdapter(
+        GitHubInstallationDeliveryDispatcher(
+            resolver=cast(GitHubInstallationResolver, None),
+            onboarding=cast(InstallationOnboardingHandler, None),
+            pull_request_projector=Projected(),
+            index_refresh=RequestIndexRefresh(
+                partial(SqlAlchemyIndexRefreshUnitOfWork, index.factory)
+            ),
+        )
+    )
+    return (await adapter.execute(delivery.to_receipt())).detail
+
+
+def _maintenance(index: _Index) -> Callable[[], SqlAlchemyCodeIndexMaintenanceUnitOfWork]:
+    return partial(SqlAlchemyCodeIndexMaintenanceUnitOfWork, index.factory)
+
+
+async def _dispatch(index: _Index) -> list[tuple[UUID, int]]:
+    """One run of the wake-up dispatch; the wake-ups it sent."""
+    wakeups = Wakeups()
+    await DispatchIndexWakeups(uow=_maintenance(index), wakeups=wakeups).run(10.0)
+    return wakeups.woken
+
+
+async def _reconcile(index: _Index, indexer: _Indexer) -> None:
+    """One run of the head reconcile over the indexer's branch."""
+
+    def sources() -> Callable[[IndexedRepository], RepositorySnapshotSource]:
+        return lambda repository: _TriggerOnArchive(indexer.branch, name=indexer.default_branch)
+
+    await ReconcileIndexHeads(
+        uow=_maintenance(index), sources=sources, versions=indexer.versions, batch=50
+    ).run(10.0)
+
+
+async def _converge(index: _Index) -> None:
+    await ConvergeIndexes(uow=_maintenance(index)).run(10.0)
+
+
+async def _built(fleet: _Fleet, indexer: _Indexer, tree: Tree) -> str:
+    """Repository A turned on, woken by the dispatch and built in full at `tree`."""
+    await _turn_on(fleet)
+    head = indexer.branch.push(tree)
+    assert await _dispatch(fleet.index) == [(fleet.index.a, 1)]
+    outcome = await indexer.build(fleet.index.a)
+    assert (outcome.status, outcome.mode, outcome.commit_sha) == (
+        BuildStatus.PUBLISHED,
+        BuildMode.FULL,
+        head,
+    )
+    return head
+
+
+async def _generations(index: _Index, repository_id: UUID) -> list[tuple[int]]:
+    """The generations of the repository's stored file rows."""
+    return cast(
+        list[tuple[int]],
+        await _rows(
+            index,
+            "SELECT DISTINCT generation FROM code_index_files WHERE repository_id = :repository",
+            repository=repository_id,
+        ),
+    )
+
+
+@pytest.mark.integration
+def test_ac1_two_merges_before_the_dispatch_wake_one_incremental_build_up_to_the_second(
+    fleet: _Fleet,
+) -> None:
+    async def scenario(indexer: _Indexer, database: _Database) -> None:
+        index = fleet.index
+        await _built(fleet, indexer, _PACKAGE)
+        first = indexer.branch.push(_PACKAGE_V2)
+        first_detail = await _deliver(index, _merge_delivery(merge_commit_sha=first))
+        second = indexer.branch.push(_PACKAGE_V3)
+        second_detail = await _deliver(index, _merge_delivery(merge_commit_sha=second))
+        target = (await indexer.state(index.a)).target_commit_sha
+
+        woken = await _dispatch(index)
+        outcome = await indexer.build(index.a)
+
+        assert first_detail == second_detail == "action=closed projected index=requested"
+        assert target == second
+        assert woken == [(index.a, 1)]
+        # The change set is the compare from the indexed commit, not either PR's diff.
+        assert (outcome.status, outcome.mode, outcome.commit_sha) == (
+            BuildStatus.PUBLISHED,
+            BuildMode.INCREMENTAL,
+            second,
+        )
+        assert indexer.jobs[-1].compares == 1
+        assert (await indexer.state(index.a)).indexed_commit_sha == second
+        assert await _dispatch(index) == []
+
+    _race(fleet, scenario)
+
+
+@pytest.mark.integration
+def test_ac1_other_pull_request_events_leave_the_row_and_the_marker_alone(fleet: _Fleet) -> None:
+    async def scenario(indexer: _Indexer, database: _Database) -> None:
+        index = fleet.index
+        await _built(fleet, indexer, _PACKAGE)
+        merge = indexer.branch.push(_PACKAGE_V2)
+        before = await indexer.state(index.a)
+
+        details = [
+            await _deliver(index, delivery)
+            for delivery in (
+                _merge_delivery(base="feature", merge_commit_sha=merge),
+                _merge_delivery(merged=False, merge_commit_sha=merge),
+                _merge_delivery("opened", merged=False),
+                _merge_delivery("synchronize", merged=False),
+                _merge_delivery("edited", merged=False),
+            )
+        ]
+
+        assert details == [
+            "action=closed projected",
+            "action=closed projected",
+            "action=opened projected",
+            # Without a run trigger the dispatcher defers it, after the projection.
+            "action=synchronize",
+            "action=edited projected",
+        ]
+        assert await indexer.state(index.a) == before
+        assert await _marker(index, index.a) is None
+        assert await _dispatch(index) == []
+
+    _race(fleet, scenario)
+
+
+@pytest.mark.integration
+def test_ac7_a_push_to_the_default_branch_sets_the_target_and_the_marker(fleet: _Fleet) -> None:
+    async def scenario(indexer: _Indexer, database: _Database) -> None:
+        index = fleet.index
+        await _built(fleet, indexer, _PACKAGE)
+        pushed = indexer.branch.push(_PACKAGE_V2)
+        before = await indexer.state(index.a)
+        elsewhere = [
+            await _deliver(index, delivery)
+            for delivery in (
+                _push_delivery("refs/heads/feature", after=pushed),
+                _push_delivery("refs/tags/main", after=pushed),
+                _push_delivery("refs/heads/main", after="0" * 40),
+                _push_delivery("refs/heads/main", after="0" * 40, deleted=True),
+            )
+        ]
+        unchanged = await indexer.state(index.a)
+        unmarked = await _marker(index, index.a)
+
+        detail = await _deliver(index, _push_delivery("refs/heads/main", after=pushed))
+        requested = await indexer.state(index.a)
+        marker = await _marker(index, index.a)
+        woken = await _dispatch(index)
+        outcome = await indexer.build(index.a)
+
+        assert elsewhere == ["not_default_branch", "not_default_branch", None, None]
+        assert (unchanged, unmarked) == (before, None)
+        assert detail == "index=requested"
+        assert requested.target_commit_sha == pushed
+        assert marker is not None
+        assert woken == [(index.a, 1)]
+        assert (outcome.status, outcome.mode, outcome.commit_sha) == (
+            BuildStatus.PUBLISHED,
+            BuildMode.INCREMENTAL,
+            pushed,
+        )
+
+    _race(fleet, scenario)
+
+
+@pytest.mark.integration
+def test_ac2_a_changed_default_branch_is_reconciled_into_a_full_build_of_the_new_branch(
+    fleet: _Fleet,
+) -> None:
+    async def scenario(indexer: _Indexer, database: _Database) -> None:
+        index = fleet.index
+        head = await _built(fleet, indexer, _PACKAGE)
+        indexer.default_branch = "develop"
+
+        await _reconcile(index, indexer)
+        target = (await indexer.state(index.a)).target_commit_sha
+        woken = await _dispatch(index)
+        outcome = await indexer.build(index.a)
+        state = await indexer.state(index.a)
+
+        assert target == head
+        assert woken == [(index.a, 1)]
+        assert (outcome.status, outcome.mode, outcome.full_reason, outcome.commit_sha) == (
+            BuildStatus.PUBLISHED,
+            BuildMode.FULL,
+            FullBuildReason.BRANCH_CHANGED,
+            head,
+        )
+        assert state.profile is not None and state.profile.default_branch == "develop"
+        # The repositories row keeps its stored default branch; the reconcile reads the
+        # live one.
+        assert await _rows(
+            index,
+            "SELECT default_branch FROM repositories WHERE id = :repository",
+            repository=index.a,
+        ) == [("main",)]
+        await _reconcile(index, indexer)
+        assert await _dispatch(index) == []
+
+    _race(fleet, scenario)
+
+
+@pytest.mark.integration
+def test_ac3_the_reconcile_wakes_a_direct_push_and_leaves_an_equal_head_alone(
+    fleet: _Fleet,
+) -> None:
+    async def scenario(indexer: _Indexer, database: _Database) -> None:
+        index = fleet.index
+        head = await _built(fleet, indexer, _PACKAGE)
+
+        await _reconcile(index, indexer)
+        equal = await indexer.state(index.a)
+        equal_marker = await _marker(index, index.a)
+        equal_woken = await _dispatch(index)
+        # A direct push: no delivery, only the reconcile sees it.
+        pushed = indexer.branch.push(_PACKAGE_V2)
+        await _reconcile(index, indexer)
+        behind = await indexer.state(index.a)
+        behind_woken = await _dispatch(index)
+        outcome = await indexer.build(index.a)
+
+        assert (equal.indexed_commit_sha, equal.target_commit_sha) == (head, head)
+        assert (equal_marker, equal_woken) == (None, [])
+        assert (behind.indexed_commit_sha, behind.target_commit_sha) == (head, pushed)
+        assert behind_woken == [(index.a, 1)]
+        assert (outcome.status, outcome.mode, outcome.commit_sha) == (
+            BuildStatus.PUBLISHED,
+            BuildMode.INCREMENTAL,
+            pushed,
+        )
+
+    _race(fleet, scenario)
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("published", [False, True], ids=["empty", "ready"])
+def test_ac3_the_reconcile_recovers_an_index_whose_wake_up_was_lost(
+    fleet: _Fleet, published: bool
+) -> None:
+    async def scenario(indexer: _Indexer, database: _Database) -> None:
+        index = fleet.index
+        indexed = await _built(fleet, indexer, _PACKAGE) if published else None
+        if not published:
+            await _turn_on(fleet)
+            # The enable's wake-up went out, and its message was lost.
+            assert await _dispatch(index) == [(index.a, 1)]
+        head = indexer.branch.push(_PACKAGE_V2 if published else _PACKAGE)
+        # A job failed transiently and released its lease: no message is left.
+        fence = await _claim(index, index.a)
+        await _release(index, index.a, fence, last_error_code="vcs_unavailable")
+        lost = await indexer.state(index.a)
+        lost_marker = await _marker(index, index.a)
+
+        await _reconcile(index, indexer)
+        target = (await indexer.state(index.a)).target_commit_sha
+        woken = await _dispatch(index)
+        outcome = await indexer.build(index.a)
+
+        assert (lost.status, lost.indexed_commit_sha, lost.last_error_code) == (
+            IndexStatus.READY if published else IndexStatus.EMPTY,
+            indexed,
+            "vcs_unavailable",
+        )
+        assert lost_marker is None
+        assert target == head
+        assert woken == [(index.a, 1)]
+        assert (outcome.status, outcome.mode, outcome.commit_sha) == (
+            BuildStatus.PUBLISHED,
+            BuildMode.INCREMENTAL if published else BuildMode.FULL,
+            head,
+        )
+
+    _race(fleet, scenario)
+
+
+async def _add(fleet: _Fleet) -> None:
+    """`installation_repositories.added` of repository A again."""
+    await SyncInstallationRepositories(
+        uow_factory=lambda: SqlAlchemyInstallationRepositoriesUnitOfWork(fleet.index.factory),
+        rule_sets=load_default_rule_sets(Path("review/rules")),
+    ).execute(
+        provider_installation_id=fleet.installation,
+        repositories=(
+            RepositoryOnboardingInput(
+                RepositorySnapshot(101, "octo/repo", "main", "https://github.com/octo/repo"),
+                {"Python": 100},
+            ),
+        ),
+    )
+
+
+async def _rebind(fleet: _Fleet) -> None:
+    """The same account installs the App again (#113): A moves to the new installation."""
+    async with fleet.index.factory.begin() as session:
+        installation = uuid4()
+        await session.execute(
+            text(
+                "INSERT INTO provider_installations "
+                "(id, workspace_id, provider, external_id, account_external_id, metadata) "
+                "SELECT :id, workspace_id, 'github', 20, account_external_id, metadata "
+                "FROM provider_installations WHERE id = :old"
+            ),
+            {"id": installation, "old": fleet.installation},
+        )
+        target = await session.get(ProviderInstallation, installation)
+        assert target is not None
+        await SqlAlchemyGitHubRepositoryRebinding(session).rebind(
+            target, GitHubInstallation(20, "octo", (101,), _ACCOUNT)
+        )
+
+
+async def _remove_then_add(fleet: _Fleet) -> None:
+    await _remove(fleet, 101, delivery_id="removed-1")
+    await _add(fleet)
+
+
+async def _delete_then_rebind(fleet: _Fleet) -> None:
+    async with fleet.index.factory.begin() as session:
+        await session.execute(
+            text("UPDATE provider_installations SET account_external_id = :account WHERE id = :id"),
+            {"account": _ACCOUNT, "id": fleet.installation},
+        )
+    await _delete(fleet, delivery_id="deleted-1")
+    await _rebind(fleet)
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize(
+    "reconnect",
+    [pytest.param(_remove_then_add, id="added"), pytest.param(_delete_then_rebind, id="rebind")],
+)
+def test_ac5_a_reconnected_repository_is_re_armed_and_built_in_full(
+    fleet: _Fleet, reconnect: Callable[[_Fleet], Awaitable[None]]
+) -> None:
+    async def scenario(indexer: _Indexer, database: _Database) -> None:
+        index = fleet.index
+        head = await _built(fleet, indexer, _PACKAGE)
+
+        await reconnect(fleet)
+        reconnected = await indexer.state(index.a)
+        available = await _available(index, index.a)
+        await _converge(index)
+        rearmed = await indexer.state(index.a)
+        woken = await _dispatch(index)
+        outcome = await indexer.build(index.a)
+        await collect_garbage(index)
+
+        assert _summary(reconnected) == _PURGED
+        assert available is True
+        assert _summary(rearmed) == (3, IndexStatus.EMPTY, None)
+        assert woken == [(index.a, 3)]
+        assert (outcome.status, outcome.mode, outcome.full_reason, outcome.commit_sha) == (
+            BuildStatus.PUBLISHED,
+            BuildMode.FULL,
+            FullBuildReason.NO_INDEX,
+            head,
+        )
+        assert await _generations(index, index.a) == [(3,)]
+
+    _race(fleet, scenario)
+
+
+@pytest.mark.integration
+def test_ac9_a_late_push_never_moves_the_index_back(fleet: _Fleet) -> None:
+    async def scenario(indexer: _Indexer, database: _Database) -> None:
+        index = fleet.index
+        await _built(fleet, indexer, _PACKAGE)
+        a = indexer.branch.push(_PACKAGE_V2)
+        b = indexer.branch.push(_PACKAGE_V3)
+        # The push of B is delivered first, the push of A late.
+        await _deliver(index, _push_delivery("refs/heads/main", after=b))
+        await _deliver(index, _push_delivery("refs/heads/main", after=a))
+        late = await indexer.state(index.a)
+
+        woken = await _dispatch(index)
+        outcome = await indexer.build(index.a)
+        built = await indexer.state(index.a)
+        await _reconcile(index, indexer)
+        reconciled = await indexer.state(index.a)
+
+        assert late.target_commit_sha == a
+        assert woken == [(index.a, 1)]
+        # The job builds the head, not the target.
+        assert (outcome.status, outcome.commit_sha) == (BuildStatus.PUBLISHED, b)
+        assert (built.indexed_commit_sha, built.target_commit_sha) == (b, a)
+        assert (reconciled.indexed_commit_sha, reconciled.target_commit_sha) == (b, b)
+        assert await _marker(index, index.a) is None
+        assert await _dispatch(index) == []
+
+    _race(fleet, scenario)
+
+
+@pytest.mark.integration
+def test_ac9_a_force_push_builds_in_full(fleet: _Fleet) -> None:
+    async def scenario(indexer: _Indexer, database: _Database) -> None:
+        index = fleet.index
+        await _built(fleet, indexer, _PACKAGE)
+        rewritten = indexer.branch.force_push(_PACKAGE_V2)
+
+        detail = await _deliver(index, _push_delivery("refs/heads/main", after=rewritten))
+        woken = await _dispatch(index)
+        outcome = await indexer.build(index.a)
+
+        assert detail == "index=requested"
+        assert woken == [(index.a, 1)]
+        assert indexer.jobs[-1].compares == 1
+        assert (outcome.status, outcome.mode, outcome.full_reason, outcome.commit_sha) == (
+            BuildStatus.PUBLISHED,
+            BuildMode.FULL,
+            FullBuildReason.NOT_AHEAD,
+            rewritten,
+        )
+        assert (await indexer.state(index.a)).indexed_commit_sha == rewritten
+
+    _race(fleet, scenario)
+
+
+@pytest.mark.integration
+def test_ac8_off_and_on_during_a_job_fence_it_out_and_only_the_new_generation_remains(
+    fleet: _Fleet,
+) -> None:
+    # The parser runs the toggles after the first batch committed and before the second
+    # one opens: the job waits in its parse while the toggle goes off and on again.
+    toggled: list[tuple[int, ...]] = []
+    database = _Database(fleet.index.factory, fleet.index.a, fleet.index.b)
+
+    async def off_and_on() -> None:
+        await _turn_off(fleet)
+        await _turn_on(fleet)
+        toggled.append(await _raw_rows(database, database.a))
+
+    async def scenario(indexer: _Indexer, database: _Database) -> None:
+        index = fleet.index
+        await _turn_on(fleet)
+        assert await _dispatch(index) == [(index.a, 1)]
+        head = indexer.branch.push({f"m{n}.py": f"x{n} = 1\n".encode() for n in range(3)})
+
+        old = await indexer.build(index.a)
+        rearmed = await indexer.state(index.a)
+        woken = await _dispatch(index)
+        new = await indexer.build(index.a)
+        stale = await indexer.build(index.a, generation=1)
+        await collect_garbage(index)
+
+        assert old.status is BuildStatus.LEASE_LOST
+        # The first batch was written before the toggles, and nothing after them.
+        assert toggled == [(1, 1, 0, 0)]
+        assert _summary(rearmed) == (3, IndexStatus.EMPTY, None)
+        assert woken == [(index.a, 3)]
+        assert (new.status, new.mode, new.commit_sha) == (
+            BuildStatus.PUBLISHED,
+            BuildMode.FULL,
+            head,
+        )
+        assert stale.status is BuildStatus.STALE
+        assert await _generations(index, index.a) == [(3,)]
+        assert await _raw_rows(database, database.a) == (3, 3, 0, 0)
+
+    _race(
+        fleet,
+        scenario,
+        batch_files=1,
+        parser=lambda real: _ActOnParse(real, off_and_on, call=2),
+    )
+
+
+# --- the races of the wake-up outbox and the toggle (#143) ---------------------------------
+
+
+@pytest.mark.integration
+def test_a_push_between_a_wake_up_and_its_clear_keeps_the_marker_for_the_next_dispatch(
+    fleet: _Fleet,
+) -> None:
+    async def scenario(indexer: _Indexer, database: _Database) -> None:
+        index = fleet.index
+        await _built(fleet, indexer, _PACKAGE)
+        first = indexer.branch.push(_PACKAGE_V2)
+        await _deliver(index, _push_delivery("refs/heads/main", after=first))
+        later: list[str] = []
+
+        @dataclass
+        class PushOnWake(Wakeups):
+            async def wake(self, repository_id: UUID, generation: int) -> None:
+                await super().wake(repository_id, generation)
+                # The push lands after the wake-up and before the marker is cleared.
+                later.append(indexer.branch.push(_PACKAGE_V3))
+                await _deliver(index, _push_delivery("refs/heads/main", after=later[0]))
+
+        wakeups = PushOnWake()
+        await DispatchIndexWakeups(uow=_maintenance(index), wakeups=wakeups).run(10.0)
+        survived = await _marker(index, index.a)
+        target = (await indexer.state(index.a)).target_commit_sha
+        woken_again = await _dispatch(index)
+        outcome = await indexer.build(index.a)
+
+        assert wakeups.woken == [(index.a, 1)]
+        assert survived is not None
+        assert target == later[0]
+        assert woken_again == [(index.a, 1)]
+        assert (outcome.status, outcome.mode, outcome.commit_sha) == (
+            BuildStatus.PUBLISHED,
+            BuildMode.INCREMENTAL,
+            later[0],
+        )
+        assert (await indexer.state(index.a)).indexed_commit_sha == later[0]
+        assert await _dispatch(index) == []
+
+    _race(fleet, scenario)
+
+
+@pytest.mark.integration
+def test_a_trigger_during_a_job_is_woken_once_the_job_has_published(fleet: _Fleet) -> None:
+    async def scenario(indexer: _Indexer, database: _Database) -> None:
+        index = fleet.index
+        await _built(fleet, indexer, _PACKAGE)
+        first = indexer.branch.push(_PACKAGE_V2)
+        await _deliver(index, _push_delivery("refs/heads/main", after=first))
+        assert await _dispatch(index) == [(index.a, 1)]
+        during: list[object] = []
+
+        async def push_during_the_job() -> None:
+            second = indexer.branch.push(_PACKAGE_V3)
+            await _deliver(index, _push_delivery("refs/heads/main", after=second))
+            # The job holds the lease: the dispatch leaves the marker for later.
+            during.extend([second, await _marker(index, index.a) is not None])
+            during.append(await _dispatch(index))
+
+        indexer.on_download = push_during_the_job
+        running = await indexer.build(index.a)
+        woken = await _dispatch(index)
+        following = await indexer.build(index.a)
+
+        second = during[0]
+        assert during == [second, True, []]
+        assert (running.status, running.commit_sha) == (BuildStatus.PUBLISHED, first)
+        assert woken == [(index.a, 1)]
+        assert (following.status, following.mode, following.commit_sha) == (
+            BuildStatus.PUBLISHED,
+            BuildMode.INCREMENTAL,
+            second,
+        )
+        assert await _dispatch(index) == []
+
+    _race(fleet, scenario)
+
+
+@pytest.mark.integration
+def test_an_index_request_racing_a_purge_waits_for_its_lock_and_requests_nothing(
+    fleet: _Fleet,
+) -> None:
+    index = fleet.index
+
+    async def scenario() -> None:
+        await _turn_on(fleet)
+        request = RequestIndexRefresh(partial(SqlAlchemyIndexRefreshUnitOfWork, index.factory))
+        # The toggle off, held open after its purge took the state row lock.
+        async with SqlAlchemyRepositorySettingsUnitOfWork(
+            index.factory, None, allow_unscoped=True
+        ) as toggle:
+            toggle_pid = await toggle.session.scalar(text("SELECT pg_backend_pid()"))
+            await toggle.repositories.update_repository(
+                index.a, RepositorySettingsChange(rag_enabled=False)
+            )
+            await toggle.index_purger.purge(index.a, PurgeReason.DISABLED)
+            # The delivery still resolves the repository with RAG on, then waits.
+            requesting = asyncio.create_task(request.execute(17, 101, "c" * 40))
+            await _wait_until_blocked(index, toggle_pid, 1, requesting)
+            await toggle.commit()
+        requested = await asyncio.wait_for(requesting, 5)
+        state = await _state(index, index.a)
+
+        assert requested is False
+        assert _summary(state) == (2, IndexStatus.EMPTY, PurgeReason.DISABLED)
+        assert state is not None and state.target_commit_sha is None
+        assert await _marker(index, index.a) is None
+
+    asyncio.run(scenario())
+
+
+async def _rag_in_effect(index: _Index, repository_id: UUID) -> bool:
+    [(in_effect,)] = await _rows(
+        index,
+        "SELECT rag_enabled AND installation_available FROM repositories WHERE id = :repository",
+        repository=repository_id,
+    )
+    return cast(bool, in_effect)
+
+
+async def _disarm_first(fleet: _Fleet) -> None:
+    """Converge locks the `repositories` row and purges; the PATCH waits, then re-arms."""
+    index = fleet.index
+    async with _maintenance(index)() as converge:
+        converge_pid = await converge.session.scalar(text("SELECT pg_backend_pid()"))
+        reason = await converge.maintenance.disarm_reason(index.a)
+        assert reason is PurgeReason.DISABLED
+        await converge.index.purge(index.a, reason)
+        turning_on = asyncio.create_task(_turn_on(fleet))
+        await _wait_until_blocked(index, converge_pid, 1, turning_on)
+        await converge.commit()
+    await asyncio.wait_for(turning_on, 5)
+
+
+async def _toggle_first(fleet: _Fleet) -> None:
+    """The PATCH holds the `repositories` row; converge lists the index, waits, and its
+    re-check finds RAG on."""
+    index = fleet.index
+    async with SqlAlchemyRepositorySettingsUnitOfWork(
+        index.factory, None, allow_unscoped=True
+    ) as toggle:
+        toggle_pid = await toggle.session.scalar(text("SELECT pg_backend_pid()"))
+        await toggle.repositories.update_repository(
+            index.a, RepositorySettingsChange(rag_enabled=True)
+        )
+        await toggle.index_enabler.enable(index.a)
+        converging = asyncio.create_task(_converge(index))
+        await _wait_until_blocked(index, toggle_pid, 1, converging)
+        await toggle.commit()
+    await asyncio.wait_for(converging, 5)
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize(
+    ("race", "expected"),
+    [
+        pytest.param(_disarm_first, (3, IndexStatus.EMPTY, None), id="disarm-first"),
+        pytest.param(_toggle_first, (1, IndexStatus.READY, None), id="toggle-first"),
+    ],
+)
+def test_converge_racing_a_patch_that_turns_rag_on_never_leaves_a_live_index_with_rag_off(
+    fleet: _Fleet,
+    race: Callable[[_Fleet], Awaitable[None]],
+    expected: tuple[int, IndexStatus, PurgeReason | None],
+) -> None:
+    index = fleet.index
+
+    async def scenario() -> None:
+        # A live index whose RAG is off: converge's disarm candidate.
+        await publish_index(index, index.a)
+        assert await _dispatch(index) == [(index.a, 1)]
+        assert not await _rag_in_effect(index, index.a)
+
+        await race(fleet)
+        state = await _state(index, index.a)
+        marker = await _marker(index, index.a)
+
+        assert _summary(state) == expected
+        assert await _rag_in_effect(index, index.a)
+        # Purged then re-armed carries the re-arm's wake-up marker.
+        assert (marker is not None) is (expected[1] is IndexStatus.EMPTY)
 
     asyncio.run(scenario())
