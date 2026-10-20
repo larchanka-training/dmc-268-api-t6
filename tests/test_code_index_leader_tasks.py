@@ -127,14 +127,14 @@ class Uow:
     async def rollback(self) -> None:
         self.tracker.call("rollback")
 
+    # The fake implements only the methods the leader tasks call.
     @property
     def index(self) -> CodeIndexStore:
-        # The fake implements only the methods the leader tasks call.
         return cast(CodeIndexStore, self.fake)
 
     @property
     def maintenance(self) -> CodeIndexMaintenance:
-        return self.fake
+        return cast(CodeIndexMaintenance, self.fake)
 
 
 def _gc(index: Index, clock: Clock, batch_rows: int = 3) -> CollectIndexGarbage:
