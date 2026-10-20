@@ -88,13 +88,24 @@ def context(**change: Any) -> PublishContext:
     return replace(base, **change)
 
 
+def _inline_placement_keys(ctx: PublishContext) -> dict[tuple[str, int], bool]:
+    return {(item.path, item.line): True for item in ctx.findings}
+
+
 @dataclass
 class Store:
     context: PublishContext
     state: str = "publishing"
     error_code: str | None = None
     open_units: int = 0
-    completed: list[tuple[int, tuple[int, ...], bool]] = field(default_factory=list)
+    completed: list[tuple[int, tuple[int, ...], tuple[tuple[str, int], ...]]] = field(
+        default_factory=list
+    )
+    inline_placement: dict[tuple[str, int], bool] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if not self.inline_placement:
+            self.inline_placement = _inline_placement_keys(self.context)
 
     async def publish_context(self, run_id: UUID) -> PublishContext | None:
         return replace(self.context, state=self.state)
@@ -106,11 +117,14 @@ class Store:
         review_id: int,
         comment_ids: tuple[int, ...],
         findings_hash: str,
-        moved_to_body: bool,
+        moved_to_body_findings: tuple[tuple[str, int], ...] = (),
         now: datetime,
     ) -> str | None:
         assert findings_hash == HASH
-        self.completed.append((review_id, comment_ids, moved_to_body))
+        for key in moved_to_body_findings:
+            if key in self.inline_placement:
+                self.inline_placement[key] = False
+        self.completed.append((review_id, comment_ids, moved_to_body_findings))
         self.state = "succeeded"
         return self.state
 
@@ -133,12 +147,16 @@ class Store:
         return True
 
     async def check_run_report(self, run_id: UUID) -> CheckRunReport | None:
+        inline = sum(1 for placed in self.inline_placement.values() if placed)
+        body = len(self.inline_placement) - inline
         return CheckRunReport(
             CheckRunTarget(17, "octo/repo", HEAD, RUN),
             self.state,
             1,
             self.error_code,
             verdict="blocking",
+            inline_count=inline,
+            body_count=body,
         )
 
 
@@ -275,7 +293,7 @@ def test_publication_succeeds_with_one_trace_record_and_a_neutral_check_run() ->
     trace, check_runs = run(store, reviews)
 
     assert store.state == "succeeded"
-    assert store.completed == [(501, (9001,), False)]
+    assert store.completed == [(501, (9001,), ())]
     assert reviews.submissions[0].commit_sha == HEAD
     assert reviews.submissions[0].event == "COMMENT"
     assert trace.records == [
@@ -307,7 +325,7 @@ def test_coordinate_422_moves_inline_findings_into_the_body_once() -> None:
     trace, _ = run(store, reviews)
 
     assert store.state == "succeeded"
-    assert store.completed == [(7, (), True)]
+    assert store.completed == [(7, (), (("src/app.py", 3),))]
     assert reviews.submissions[1].findings == ()
     assert "`src/app.py:3`" in reviews.submissions[1].body
     assert [record[1]["try"] for record in trace.records] == [1, 2]
@@ -616,7 +634,7 @@ def test_gitlab_publication_posts_the_stored_overview_and_skips_the_check_run(
     trace, check_runs = run(store, Reviews([]) if github_configured else None, gitlab=gitlab)
 
     assert store.state == "succeeded"
-    assert store.completed == [(880, (), False)]
+    assert store.completed == [(880, (), ())]
     assert [(call[0].body, call[1]) for call in gitlab.calls] == [(STORED_BODY, PROJECT_ID)]
     assert gitlab.inlines == [("src/app.py", 3)]
     assert gitlab.summaries == [STORED_BODY]
@@ -653,7 +671,7 @@ def test_gitlab_execute_again_with_the_same_hash_does_not_post_again() -> None:
     assert gitlab.inlines == [("src/app.py", 3)]
     assert gitlab.summaries == [STORED_BODY]
     assert len(gitlab.results) == 1
-    assert store.completed == [(880, (), False)]
+    assert store.completed == [(880, (), ())]
     assert trace.records == []
     assert check_runs.views == []
 
@@ -784,7 +802,68 @@ def test_gitlab_coordinate_failure_moves_only_unposted_findings() -> None:
     assert gitlab.calls[1][0].findings == ()
     assert "`src/other.py:9`" in gitlab.calls[1][0].body
     assert "`src/app.py:3`" not in gitlab.calls[1][0].body
+    assert store.inline_placement[(FINDING.path, FINDING.line)] is True
+    assert store.inline_placement[(other.path, other.line)] is False
+    assert store.completed[-1][2] == ((other.path, other.line),)
     assert check_runs.views == []
+
+
+def test_partial_coordinate_fallback_keeps_posted_inline_for_check_run_counts() -> None:
+    other = PublishedFinding(
+        path="src/other.py",
+        line=9,
+        start_line=None,
+        severity="medium",
+        category="correctness",
+        title="Narrow check",
+        body="The guard is too wide.",
+        suggestion=None,
+        confidence=0.8,
+        rule_name=None,
+    )
+    store = Store(context(findings=(FINDING, other)))
+    reviews = Reviews(
+        [
+            PublishError("coordinates", "line outside diff", http_status=422, unposted=(other,)),
+            SubmittedReview(7, (900,)),
+        ]
+    )
+    _, check_runs = run(store, reviews)
+
+    assert store.inline_placement[(FINDING.path, FINDING.line)] is True
+    assert store.inline_placement[(other.path, other.line)] is False
+    assert check_runs.views[-1].summary is not None
+    assert "inline: 1" in check_runs.views[-1].summary
+    assert "в теле ревью: 1" in check_runs.views[-1].summary
+
+
+def test_redelivery_after_coordinate_fallback_preserves_inline_placement() -> None:
+    other = PublishedFinding(
+        path="src/other.py",
+        line=9,
+        start_line=None,
+        severity="medium",
+        category="correctness",
+        title="Narrow check",
+        body="The guard is too wide.",
+        suggestion=None,
+        confidence=0.8,
+        rule_name=None,
+    )
+    store = Store(gitlab_context(findings=(FINDING, other)))
+    gitlab = GitLabReviews(
+        [
+            PublishError("coordinates", "line outside diff", http_status=400, unposted=(other,)),
+            SubmittedReview(880, ()),
+            SubmittedReview(881, ()),
+        ],
+        store,
+    )
+    run(store, Reviews([]), gitlab=gitlab)
+    placement = dict(store.inline_placement)
+    store.state = "publishing"
+    run(store, Reviews([]), gitlab=gitlab)
+    assert store.inline_placement == placement
 
 
 def test_unsupported_provider_stays_publishing_without_a_gateway_call() -> None:

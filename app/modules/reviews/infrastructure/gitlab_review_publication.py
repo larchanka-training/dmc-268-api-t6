@@ -4,16 +4,21 @@ from __future__ import annotations
 
 import hashlib
 import re
+from datetime import timedelta
 from typing import Any
 
 import httpx
 
+from app.modules.reviews.application.publication_coordinates import gitlab_text_position
 from app.modules.reviews.application.publish_run_review import (
     PublishError,
     ReviewSubmission,
     SubmittedReview,
 )
-from app.modules.reviews.application.review_output import PublishedFinding, comment_body
+from app.modules.reviews.application.review_output import (
+    PublishedFinding,
+    gitlab_comment_body,
+)
 
 _TIMEOUT = 10.0
 _MAX_DISCUSSION_PAGES = 20
@@ -28,7 +33,13 @@ def _summary_marker(findings_hash: str) -> str:
 def _finding_id(finding: PublishedFinding) -> str:
     """Identity of one inline note. Path and line alone collide on one line."""
     return hashlib.sha256(
-        comment_body(finding.title, finding.body, finding.suggestion).encode()
+        gitlab_comment_body(
+            finding.title,
+            finding.body,
+            finding.suggestion,
+            start_line=finding.start_line,
+            line=finding.line,
+        ).encode()
     ).hexdigest()[:16]
 
 
@@ -49,13 +60,29 @@ def _detail(response: httpx.Response) -> str:
     return str(payload)[:500]
 
 
+def _retry_after(response: httpx.Response) -> timedelta | None:
+    raw = response.headers.get("Retry-After", "").strip()
+    if raw.isdigit():
+        return timedelta(seconds=int(raw))
+    return None
+
+
 def _classify(response: httpx.Response) -> PublishError:
     status = response.status_code
     detail = _detail(response)
-    if status == 400 and _POSITION_REJECTION.search(detail.lower()) is not None:
+    lowered = detail.lower()
+    if status == 400 and _POSITION_REJECTION.search(lowered) is not None:
         return PublishError("coordinates", detail, http_status=status)
-    if status in (401, 403):
+    if status in (401, 403, 404, 409):
         return PublishError("forbidden", detail, http_status=status)
+    if status == 422:
+        if _POSITION_REJECTION.search(lowered) is not None:
+            return PublishError("coordinates", detail, http_status=status)
+        return PublishError("forbidden", detail, http_status=status)
+    if status == 429:
+        return PublishError(
+            "retryable", detail, http_status=status, retry_after=_retry_after(response)
+        )
     return PublishError("retryable", detail, http_status=status)
 
 
@@ -118,15 +145,7 @@ def _require_latest_head(payload: Any, head_sha: str) -> None:
 
 
 def _position(version: dict[str, str], finding: PublishedFinding) -> dict[str, Any]:
-    return {
-        "position_type": "text",
-        "base_sha": version["base_commit_sha"],
-        "start_sha": version["start_commit_sha"],
-        "head_sha": version["head_commit_sha"],
-        "old_path": finding.path,
-        "new_path": finding.path,
-        "new_line": finding.line,
-    }
+    return gitlab_text_position(version, finding)
 
 
 def _note_bodies(discussions: list[dict[str, Any]]) -> list[tuple[int | None, str]]:
@@ -179,9 +198,7 @@ class GitLabMergeRequestDiscussionGateway:
     ) -> SubmittedReview:
         prefix = f"/api/v4/projects/{project_id}/merge_requests/{submission.pr_number}"
         try:
-            versions = _decoded(await self._send("GET", f"{prefix}/versions"))
-            _require_latest_head(versions, submission.commit_sha)
-            version = _matching_version(versions, submission.commit_sha)
+            version = await self._load_version(prefix, submission.commit_sha)
             discussions = await self._discussions(f"{prefix}/discussions")
             summary = _summary_marker(submission.findings_hash)
             existing = _note_id_for_marker(discussions, summary)
@@ -193,8 +210,15 @@ class GitLabMergeRequestDiscussionGateway:
                 if _note_id_for_marker(discussions, marker) is not None:
                     pending.pop(0)
                     continue
-                comment = comment_body(finding.title, finding.body, finding.suggestion)
+                comment = gitlab_comment_body(
+                    finding.title,
+                    finding.body,
+                    finding.suggestion,
+                    start_line=finding.start_line,
+                    line=finding.line,
+                )
                 try:
+                    version = await self._load_version(prefix, submission.commit_sha)
                     await self._create(
                         f"{prefix}/discussions",
                         body=f"{comment}\n\n{marker}",
@@ -211,6 +235,7 @@ class GitLabMergeRequestDiscussionGateway:
                         unposted=tuple(pending),
                     ) from exc
                 pending.pop(0)
+            await self._load_version(prefix, submission.commit_sha)
             summary_id = await self._create(
                 f"{prefix}/discussions",
                 body=f"{submission.body}\n\n{summary}",
@@ -220,9 +245,15 @@ class GitLabMergeRequestDiscussionGateway:
         except httpx.TransportError as exc:
             raise PublishError("retryable", f"GitLab request failed: {exc}") from exc
 
+    async def _load_version(self, prefix: str, head_sha: str) -> dict[str, str]:
+        """Refresh MR versions and fail fast when the run head is no longer current."""
+        versions = _decoded(await self._send("GET", f"{prefix}/versions"))
+        _require_latest_head(versions, head_sha)
+        return _matching_version(versions, head_sha)
+
     async def _require_current_head(self, prefix: str, head_sha: str) -> None:
         """A position 400 is coordinates only while the latest version is still this head."""
-        _require_latest_head(_decoded(await self._send("GET", f"{prefix}/versions")), head_sha)
+        await self._load_version(prefix, head_sha)
 
     async def _discussions(self, url: str) -> list[dict[str, Any]]:
         collected: list[dict[str, Any]] = []
@@ -248,7 +279,7 @@ class GitLabMergeRequestDiscussionGateway:
             if next_page_number <= page:
                 raise PublishError("retryable", "GitLab discussion list is short")
             page = next_page_number
-        raise PublishError("retryable", "GitLab discussion list is short")
+        raise PublishError("forbidden", "GitLab discussion pagination limit exceeded")
 
     async def _create(self, url: str, *, body: str, position: dict[str, Any] | None) -> int:
         payload: dict[str, Any] = {"body": body}

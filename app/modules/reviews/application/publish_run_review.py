@@ -123,7 +123,7 @@ class ReviewPublicationStore(CheckRunReports, Protocol):
         review_id: int,
         comment_ids: tuple[int, ...],
         findings_hash: str,
-        moved_to_body: bool,
+        moved_to_body_findings: tuple[tuple[str, int], ...] = (),
         now: datetime,
     ) -> str | None:
         """Final state (``succeeded``, or ``cancelled`` if cancelled during the POST)."""
@@ -165,6 +165,11 @@ def publication_route(provider: str, project_id: int) -> PublicationRoute | None
             project_id=None,
         )
     return None
+
+
+def finding_placement_key(finding: PublishedFinding) -> tuple[str, int]:
+    """Stable (path, line) identity for publication placement updates."""
+    return (finding.path, finding.line)
 
 
 def move_inline_to_body(body: str, findings: tuple[PublishedFinding, ...]) -> str:
@@ -247,7 +252,7 @@ class PublishRunReview:
             findings=context.findings,
             findings_hash=context.findings_hash,
         )
-        moved = False
+        moved_to_body_findings: tuple[tuple[str, int], ...] = ()
         retries = 0
         try_no = 0
         while True:
@@ -266,9 +271,9 @@ class PublishRunReview:
             if isinstance(result, SubmittedReview):
                 break
             error = result
-            if error.kind == "coordinates" and not moved:
-                moved = True
+            if error.kind == "coordinates" and not moved_to_body_findings:
                 remaining = submission.findings if error.unposted is None else error.unposted
+                moved_to_body_findings = tuple(finding_placement_key(item) for item in remaining)
                 submission = replace(
                     submission,
                     body=move_inline_to_body(submission.body, remaining),
@@ -317,7 +322,7 @@ class PublishRunReview:
                 review_id=result.review_id,
                 comment_ids=comment_ids,
                 findings_hash=context.findings_hash,
-                moved_to_body=moved,
+                moved_to_body_findings=moved_to_body_findings,
                 now=self._now(),
             )
             await uow.commit()

@@ -5,10 +5,13 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from typing import cast
+from uuid import UUID
 
 import pytest
 
+from app.modules.reviews.application.diff_map import DiffMap, VcsProviderName, build_diff_map
 from app.modules.reviews.application.findings_post_processor import FindingsPostProcessor
+from app.modules.reviews.application.prompt_builder import PullRequestMeta
 from app.modules.reviews.application.publish_run_review import move_inline_to_body
 from app.modules.reviews.application.review_output import (
     PublishedFinding,
@@ -16,7 +19,64 @@ from app.modules.reviews.application.review_output import (
     ReviewOutput,
     ReviewSummary,
 )
+from app.modules.reviews.application.vcs_diff import PullRequestLocator, VcsFile, VcsPullRequest
 from app.modules.reviews.application.verdict import SeverityThresholdValue
+
+
+def _added_file_diff_map(path: str, line_count: int) -> DiffMap:
+    """One added file whose new-side lines ``1..line_count`` are anchorable."""
+    lines = "\n".join(f"+line{n}" for n in range(1, line_count + 1))
+    patch = f"@@ -0,0 +1,{line_count} @@\n{lines}"
+    return _diff_map_from_vcs(
+        VcsFile(
+            path,
+            "added",
+            None,
+            None,
+            line_count,
+            0,
+            line_count,
+            patch,
+        )
+    )
+
+
+def _diff_map_from_vcs(*files: VcsFile) -> DiffMap:
+    pull_request = VcsPullRequest(
+        locator=PullRequestLocator(
+            installation_external_id=0, repository_full_name="acme/app", number=1
+        ),
+        head_sha="c" * 40,
+        base_sha="b" * 40,
+        meta=PullRequestMeta(
+            title="",
+            description=None,
+            author="",
+            source_branch="",
+            target_branch="",
+            labels=(),
+            files_changed=len(files),
+            lines_added=sum(item.additions for item in files),
+            lines_removed=sum(item.deletions for item in files),
+            is_draft=False,
+            is_fork=False,
+        ),
+    )
+    return build_diff_map(
+        pull_request,
+        files,
+        provider=VcsProviderName.GITHUB,
+        repository_id=UUID(int=1),
+        diff_old_sha="a" * 40,
+    )
+
+
+def _default_diff_map() -> DiffMap:
+    return _added_file_diff_map("app/example.py", 14)
+
+
+def _empty_diff_map() -> DiffMap:
+    return _diff_map_from_vcs()
 
 
 def finding(**overrides: object) -> dict[str, object]:
@@ -60,14 +120,12 @@ def output(*findings: dict[str, object]) -> ReviewOutput:
 def process(  # type: ignore[no-untyped-def]
     *findings: dict[str, object],
     max_inline: int | None = None,
-    hunk_lines: dict[str, frozenset[int]] | None = None,
+    diff_map: DiffMap | None = None,
     severity_threshold: SeverityThresholdValue = "all",
 ):
     return FindingsPostProcessor.from_default_patterns().process(
         output(*findings),
-        hunk_lines=hunk_lines
-        if hunk_lines is not None
-        else {"app/example.py": frozenset({10, 11, 12, 13, 14})},
+        diff_map=diff_map if diff_map is not None else _default_diff_map(),
         rule_names=frozenset({"Naming Consistency"}),
         repository_max_inline=max_inline,
         severity_threshold=severity_threshold,
@@ -182,7 +240,7 @@ def test_default_cap_classifies_fixture_as_ten_inline_and_four_body_only() -> No
 
     result = FindingsPostProcessor.from_default_patterns().process(
         parsed,
-        hunk_lines={"app/example.py": frozenset(range(1, 15))},
+        diff_map=_added_file_diff_map("app/example.py", 14),
         rule_names=frozenset(),
     )
 
@@ -205,10 +263,28 @@ def test_review_body_starts_with_verdict_risk_summary_and_checked_paths() -> Non
         ),
         finding(path="missing.py", title="Unknown critical", severity="critical"),
         finding(title="Quiet note", severity="info", confidence=0.4),
-        hunk_lines={
-            "z/last.py": frozenset({12}),
-            "app/example.py": frozenset({10, 11, 12, 13, 14}),
-        },
+        diff_map=_diff_map_from_vcs(
+            VcsFile(
+                "app/example.py",
+                "added",
+                None,
+                None,
+                14,
+                0,
+                14,
+                "@@ -0,0 +1,14 @@\n" + "\n".join(f"+line{n}" for n in range(1, 15)),
+            ),
+            VcsFile(
+                "z/last.py",
+                "added",
+                None,
+                None,
+                12,
+                0,
+                12,
+                "@@ -0,0 +1,12 @@\n" + "\n".join(f"+line{n}" for n in range(1, 13)),
+            ),
+        ),
     )
 
     assert result.review_body.startswith(
@@ -240,7 +316,7 @@ def test_review_body_starts_with_verdict_risk_summary_and_checked_paths() -> Non
 
 
 def test_checked_files_are_none_when_the_diff_has_no_paths() -> None:
-    result = process(finding(severity="high"), hunk_lines={})
+    result = process(finding(severity="high"), diff_map=_empty_diff_map())
 
     assert result.review_body == "\n".join(
         (
@@ -283,12 +359,34 @@ def test_character_cap_drops_only_additional_findings() -> None:
     assert "Overflow 1" in capped.review_body
     assert "Overflow 6" not in capped.review_body
 
-    long_paths = {f"pkg/file_{index:03d}_{'n' * 60}.py": frozenset({1}) for index in range(50)}
-    long_paths["app/example.py"] = frozenset({10, 11, 12, 13, 14})
+    long_path_files = tuple(
+        VcsFile(
+            f"pkg/file_{index:03d}_{'n' * 60}.py",
+            "added",
+            None,
+            None,
+            1,
+            0,
+            1,
+            "@@ -0,0 +1,1 @@\n+only",
+        )
+        for index in range(50)
+    ) + (
+        VcsFile(
+            "app/example.py",
+            "added",
+            None,
+            None,
+            14,
+            0,
+            14,
+            "@@ -0,0 +1,14 @@\n" + "\n".join(f"+line{n}" for n in range(1, 15)),
+        ),
+    )
     long_body = process(
         finding(title="Blocking defect", severity="high"),
         finding(title="Spill note", confidence=0.4),
-        hunk_lines=long_paths,
+        diff_map=_diff_map_from_vcs(*long_path_files),
     )
     assert len(long_body.review_body) > 4000
     assert "**Verdict:** blocking" in long_body.review_body
@@ -423,7 +521,7 @@ def test_inline_cap_counts_only_findings_that_pass_the_threshold() -> None:
 
     result = FindingsPostProcessor.from_default_patterns().process(
         parsed,
-        hunk_lines={"app/example.py": frozenset({10, 11, 12, 13, 14})},
+        diff_map=_added_file_diff_map("app/example.py", 14),
         rule_names=frozenset(),
         severity_threshold="critical",
     )
@@ -472,13 +570,13 @@ def test_all_threshold_keeps_the_ten_findings_fixture_result(
     fixture = Path(__file__).parent / "fixtures" / "review_output" / "valid" / "ten-findings.json"
     parsed = ReviewOutput.model_validate_json(fixture.read_text(encoding="utf-8"))
     processor = FindingsPostProcessor.from_default_patterns()
-    hunk_lines = {"app/modules/billing/application/charge.py": frozenset(range(10, 20))}
+    diff_map = _added_file_diff_map("app/modules/billing/application/charge.py", 20)
 
     result = (
-        processor.process(parsed, hunk_lines=hunk_lines, rule_names=frozenset())
+        processor.process(parsed, diff_map=diff_map, rule_names=frozenset())
         if threshold is None
         else processor.process(
-            parsed, hunk_lines=hunk_lines, rule_names=frozenset(), severity_threshold=threshold
+            parsed, diff_map=diff_map, rule_names=frozenset(), severity_threshold=threshold
         )
     )
 
@@ -556,7 +654,7 @@ def test_findings_post_processor_legacy_nulls_out_v2_rules() -> None:
     # Legacy run: allowed_v2_rules is None
     result = processor.process(
         output,
-        hunk_lines={"app/main.py": frozenset({10, 11})},
+        diff_map=_added_file_diff_map("app/main.py", 11),
         rule_names=frozenset(),
         allowed_v2_rules=None,
     )
@@ -631,7 +729,7 @@ def test_findings_post_processor_v2_allows_valid_and_rejects_malformed_rules() -
     # V2 run: allowed_v2_rules provided
     result = processor.process(
         output,
-        hunk_lines={"app/main.py": frozenset({10, 11, 12, 13})},
+        diff_map=_added_file_diff_map("app/main.py", 13),
         rule_names=frozenset(),
         allowed_v2_rules=frozenset({".review/rules.md", "AGENTS.md"}),
     )
@@ -643,6 +741,15 @@ def test_findings_post_processor_v2_allows_valid_and_rejects_malformed_rules() -
     # malformed service-defaults are nulled out
     assert result.inline[2].finding.rule_name is None
     assert result.inline[3].finding.rule_name is None
+
+
+def test_line_absent_in_diff_map_routes_to_body_only() -> None:
+    """Publish bucketing uses DiffMap + resolve_anchor, not hunk line sets (#171)."""
+    result = process(finding(title="Outside diff map", line=99))
+
+    assert [item.finding.title for item in result.inline] == []
+    assert [item.finding.title for item in result.body_only] == ["Outside diff map"]
+    assert result.dropped == ()
 
 
 def test_findings_post_processor_v2_preserves_attribution_for_body_only_findings() -> None:
@@ -687,7 +794,7 @@ def test_findings_post_processor_v2_preserves_attribution_for_body_only_findings
     # 1. Snapshot run with allowed_v2_rules: attribution must be preserved in body_only!
     result = processor.process(
         output,
-        hunk_lines={"app/main.py": frozenset({10})},
+        diff_map=_added_file_diff_map("app/main.py", 10),
         rule_names=frozenset(),
         allowed_v2_rules=frozenset({".review/rules.md"}),
     )
@@ -698,7 +805,7 @@ def test_findings_post_processor_v2_preserves_attribution_for_body_only_findings
     # 2. Legacy run without allowed_v2_rules: attribution must be cleared in body_only!
     legacy_result = processor.process(
         output,
-        hunk_lines={"app/main.py": frozenset({10})},
+        diff_map=_added_file_diff_map("app/main.py", 10),
         rule_names=frozenset(),
         allowed_v2_rules=None,
     )

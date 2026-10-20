@@ -326,6 +326,20 @@ Fallback-модель — вторая модель шлюза с тем же st
 
 Ошибка при обновлении check-run состояние Run не меняет: пишется лог и метрика.
 
+**Сбои GitLab (`gitlab.publish_review`, SD §8.4).**
+
+| Сбой | Фаза | Обнаружение | Попытки | Итог Run, `error_code` | Автор PR | UI |
+|---|---|---|---|---|---|---|
+| Нет доступа | `gitlab.publish_review` | 401, 403, 404 на MR/project; 409 (конфликт состояния MR) | нет | `failed`, `gitlab_forbidden` | check-run GitHub не вызывается | `failed` |
+| Запрос достоверно не отправлен / rate limit | `gitlab.publish_review` | transport rejection; 429 с `Retry-After` | до 3 пауз 2 с / 8 с / 30 с внутри публикации; `Retry-After ≤60 с` заменяет паузу | после бюджета `failed`, `gitlab_publish_failed` | check-run GitHub не вызывается | сохранённые попытки в trace |
+| 5xx / таймаут 10 с | `gitlab.publish_review` | HTTP 5xx, таймаут, обрыв | те же 3 паузы | `failed`, `gitlab_publish_failed` | check-run GitHub не вызывается | `failed` |
+| Подтверждённые неверные path/line/position | `gitlab.publish_review` | 400/422 с полями position/line/line_code/diff refs при неизменном head | один body-only fallback **только** для unposted findings; уже опубликованные inline остаются inline | `succeeded` при подтверждённом успехе варианта | discussions + сводка | per-finding `inline_comment` в БД |
+| Недопустимый head MR | `gitlab.publish_review` | GET `/versions`: текущий head ≠ `commit_sha` (в т.ч. между двумя POST) | нет | `cancelled`, `superseded` | check-run GitHub не вызывается | `cancelled`; remote IDs сохраняются |
+| 400/422 по body/schema без position | `gitlab.publish_review` | validation без признаков coordinates | нет координатного fallback | `failed`, `gitlab_forbidden` или `gitlab_publish_failed` по классу | check-run GitHub не вызывается | причина в trace |
+| Исчерпание пагинации discussions | `gitlab.publish_review` | более 20 страниц `discussions` | нет | `failed`, `gitlab_forbidden` | check-run GitHub не вызывается | без бесконечного retry |
+
+Перед **каждым** POST discussion publisher сверяет актуальный head MR (GET `/versions`, первый элемент — текущая версия). Идемпотентность — маркеры `findings_hash` в теле note (SD §8.4).
+
 **Индексатор (#142).** Источник снимка ([github_snapshot_source.py](../app/modules/code_index/infrastructure/github_snapshot_source.py)) переводит ответы GitHub в коды порта без привязки к провайдеру. 5xx, таймаут 10 с, сбой транспорта и 401 → `vcs_unavailable`; 429 и 403 с `Retry-After` или `X-RateLimit-Remaining: 0` → `vcs_rate_limited`. Оба — TRANSIENT, retry по §4.6; `Retry-After` читается в целых секундах и не больше суток, иной формат задержки не даёт. 403 без признаков лимита и 404 → `vcs_access_denied`: RELEASED, lease снимается с `last_error_code`, без retry. Пустой репозиторий (409) или репозиторий без default branch — `empty` без ошибки. Редирект архива не на `codeload.github.com` → `vcs_unavailable`; архив больше `CODE_INDEX_MAX_DOWNLOAD_BYTES` → `failed`, `limit_exceeded:download_bytes`. Installation-токен каждое задание получает заново, поэтому попытка после 401 идёт с новым токеном. Любое другое неожиданное исключение задания (не отмена) снимает lease и пишет `internal_error` в `last_error_code` (не в `error_code`) на каждой попытке, где задание ещё держит lease (best effort: если снятие lease не удалось, код не пишется); доставка повторяется по §4.6, после третьего учтённого прохода (§4.4) — `code_index.dlq`. Отказ по квоте хранения при claim записывает `failed` и нулевые метрики задания: запросов к GitHub не было.
 
 **Авторитетная политика индексатора (#207).** Приведённые выше `vcs_*` относятся

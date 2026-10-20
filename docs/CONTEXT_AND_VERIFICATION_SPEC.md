@@ -1610,9 +1610,10 @@ review. Подтверждённый legacy-object связывается с run
   `VcsFile.previous_filename` уже доступен; при преобразовании `ChangedFile`
   происхождение теряется. `HttpGitHubVcsProvider` уже пагинирует files, сверяет
   количество и повторно читает PR; это следует сохранить.
-- `FindingsPostProcessor` проверяет края диапазона по `hunk_lines` полного
-  сохранённого diff, может сбросить `start_line`, сохранив suggestion, и не знает
-  manifest фактического ввода. Это меняется независимо от включения LEFT.
+- `FindingsPostProcessor` на publish path проверяет якоря через DiffMap +
+  `resolve_anchor` (не `parse_unified_diff` / `hunk_lines`); может сбросить
+  `start_line`, сохранив suggestion, и не знает manifest фактического ввода.
+  Это меняется независимо от включения LEFT.
 - `github_review_publication` жёстко выставляет RIGHT, не отправляет `start_side`,
   трактует почти любой 422 как coordinates и ищет marker только на первой странице.
   Проверка актуального head перед POST уже есть; её нужно расширить до версии diff
@@ -1716,7 +1717,7 @@ quality gates не объявляются достигнутыми без baseli
 | API RunDetail/RunSession/latestRun и UI | Добавить coverage, resultVersion/verificationMode; null verdict при partial без значимых supported findings |
 | Legacy review/postprocess/lint-filter.md, порог severity | В #107 перенести severity threshold за verifier (§6.2), сохранить код lint_pattern; legacy-порядок PS §9 отдельно |
 | Postprocess/lint-filter, prompt fixtures и review README | Версии evidence/атрибуции и фильтров; не восстанавливать raw summary |
-| VCS publisher | §9–10: DiffMap, run-specific identities, сохранённый payload, адресные ошибки и recovery |
+| VCS publisher | §9–10: DiffMap + `resolve_anchor` на publish path, run-specific identities, сохранённый payload, адресные ошибки и recovery |
 | SYSTEM_DESIGN Р-13, §9: RAG вне MVP; исторический §1 v1.0 этой спецификации (заменён v1.2): без RAG и индексации репозитория | Версия 1.2, [ADR 0001](adr/0001-graph-rag-v1.md): RAG v1 — граф символов с указателями; §2.1 `index_commit_sha`, §3.1 `retrieved_excerpt`, §3.5 правило ревизий и подтверждение рёбер, §4.1 слот бюджета, §5 manifest и guard |
 | SYSTEM_DESIGN §10/§13: код клиента только в кэше блобов до 7 дней | Индекс — производные метаданные без текста и сигнатур, 30 дней с `last_used_at` (его сдвигают чтение при ревью и постановка full, не чаще раза в час; incremental не продлевает TTL); по событиям сразу нечитаем, физически удаляется сборкой мусора, которая идёт каждый интервал и продолжается на следующих тиках лидера, пока не вычистит всё; цель — в пределах часа ([ADR 0001 §4](adr/0001-graph-rag-v1.md#4-хранение-очистка-и-изоляция)) |
 | PIPELINE_SPEC §2, §6 | Действие `context.rag`; `rag_*` — причины coverage, RAG не задаёт `error_code` |

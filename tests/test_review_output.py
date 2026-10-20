@@ -23,6 +23,7 @@ from app.modules.reviews.application.review_output import (
     comment_body,
     parse_review_output,
 )
+from tests.test_findings_post_processor import _added_file_diff_map
 
 
 def valid_output() -> dict[str, object]:
@@ -200,7 +201,7 @@ def _publication() -> ReviewPublication:
 
 
 def _context() -> FindingPostProcessingInput:
-    return FindingPostProcessingInput({"app/example.py": frozenset({10, 12})}, frozenset())
+    return FindingPostProcessingInput(_added_file_diff_map("app/example.py", 14), frozenset())
 
 
 @pytest.mark.parametrize("encoded", ("str", "bytes"))
@@ -297,7 +298,7 @@ def test_comment_body_formatting() -> None:
 
 def test_publish_snapshot_run_preserves_v2_rule_attribution() -> None:
     context = FindingPostProcessingInput(
-        hunk_lines={"app/example.py": frozenset({10, 12})},
+        diff_map=_added_file_diff_map("app/example.py", 14),
         rule_names=frozenset(),
         allowed_v2_rules=frozenset({".review/rules.md"}),
     )
@@ -337,7 +338,7 @@ def test_store_review_output_preserves_allowed_v2_rules() -> None:
     class FakeReviewRepo:
         async def get_post_processing_input(self, run_id: UUID) -> FindingPostProcessingInput:
             return FindingPostProcessingInput(
-                hunk_lines={"app/example.py": frozenset({10, 12})},
+                diff_map=_added_file_diff_map("app/example.py", 14),
                 rule_names=frozenset(),
                 allowed_v2_rules=frozenset({".review/rules.md"}),
             )
