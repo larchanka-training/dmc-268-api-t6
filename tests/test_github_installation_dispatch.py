@@ -11,6 +11,7 @@ from uuid import UUID, uuid4
 import pytest
 
 from app.modules.integrations.webhooks.api.dispatch import GitHubWebhookDispatchAdapter
+from app.modules.integrations.webhooks.api.push_event_dtos import parse_push_event
 from app.modules.integrations.webhooks.api.receipt import VerifiedGitHubDelivery
 from app.modules.integrations.webhooks.application.github_installation_dispatch import (
     GitHubDispatchEvent,
@@ -1255,14 +1256,17 @@ class FakeRulesRefresh:
         return (installation_external_id, repository_external_id) in self.connected
 
 
-def _push_delivery(ref: str, *, repository_id: int = 101) -> VerifiedGitHubDelivery:
+def _push_delivery(
+    ref: str, *, repository_id: int = 101, after: str = "a" * 40, deleted: bool = False
+) -> VerifiedGitHubDelivery:
     return VerifiedGitHubDelivery(
         "delivery-push",
         "push",
         {
             "ref": ref,
             "before": "b" * 40,
-            "after": "a" * 40,
+            "after": after,
+            "deleted": deleted,
             "installation": {"id": 17},
             "repository": {"id": repository_id, "full_name": "octo/repo", "default_branch": "main"},
         },
@@ -1270,13 +1274,16 @@ def _push_delivery(ref: str, *, repository_id: int = 101) -> VerifiedGitHubDeliv
 
 
 def _push_dispatcher(
-    rules_refresh: FakeRulesRefresh | None,
+    rules_refresh: FakeRulesRefresh | None, index_refresh: FakeIndexRefresh | None = None
 ) -> tuple[GitHubWebhookDispatchAdapter, FakeInstallationResolver]:
     resolver = FakeInstallationResolver()
     return (
         GitHubWebhookDispatchAdapter(
             GitHubInstallationDeliveryDispatcher(
-                resolver=resolver, onboarding=FakeOnboarding(), rules_refresh=rules_refresh
+                resolver=resolver,
+                onboarding=FakeOnboarding(),
+                rules_refresh=rules_refresh,
+                index_refresh=index_refresh,
             )
         ),
         resolver,
@@ -1497,3 +1504,133 @@ def test_other_pull_request_events_request_no_index_update(
 
     assert result.detail is not None and "index=" not in result.detail
     assert refresh.calls == []
+
+
+def test_a_push_to_the_default_branch_requests_the_rules_read_and_an_index_update() -> None:
+    rules, index = FakeRulesRefresh(), FakeIndexRefresh()
+    dispatcher, _ = _push_dispatcher(rules, index)
+
+    result = asyncio.run(dispatcher.execute(_push_delivery("refs/heads/main").to_receipt()))
+
+    # One status per delivery; the index outcome goes into the detail.
+    assert result == InstallationDeliveryDispatchResult(
+        InstallationDeliveryDispatchStatus.REQUESTED_RULES_REFRESH, "index=requested"
+    )
+    assert rules.calls == [(17, 101)]
+    assert index.calls == [(17, 101, "a" * 40)]
+
+
+def test_a_push_requests_an_index_update_without_the_rules_refresh() -> None:
+    index = FakeIndexRefresh()
+    dispatcher, _ = _push_dispatcher(None, index)
+
+    result = asyncio.run(dispatcher.execute(_push_delivery("refs/heads/main").to_receipt()))
+
+    assert result == InstallationDeliveryDispatchResult(
+        InstallationDeliveryDispatchStatus.DEFERRED_KNOWN_EVENT, "index=requested"
+    )
+    assert index.calls == [(17, 101, "a" * 40)]
+
+
+def test_a_failed_index_request_is_logged_and_the_rules_refresh_still_runs(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    class BrokenIndexRefresh(FakeIndexRefresh):
+        async def execute(
+            self,
+            installation_external_id: int,
+            repository_external_id: int,
+            commit_sha: str | None,
+        ) -> bool:
+            await super().execute(installation_external_id, repository_external_id, commit_sha)
+            raise ConnectionError("the database is unreachable")
+
+    rules, index = FakeRulesRefresh(), BrokenIndexRefresh()
+    dispatcher, _ = _push_dispatcher(rules, index)
+
+    with caplog.at_level(logging.ERROR):
+        result = asyncio.run(dispatcher.execute(_push_delivery("refs/heads/main").to_receipt()))
+
+    assert result == InstallationDeliveryDispatchResult(
+        InstallationDeliveryDispatchStatus.REQUESTED_RULES_REFRESH
+    )
+    assert (rules.calls, index.calls) == ([(17, 101)], [(17, 101, "a" * 40)])
+    assert "Failed to request an index update for repository 101 of installation 17" in (
+        caplog.text
+    )
+
+
+def test_a_push_to_a_repository_the_rules_refresh_does_not_know_reports_only_that() -> None:
+    rules, index = FakeRulesRefresh(connected=set()), FakeIndexRefresh()
+    dispatcher, _ = _push_dispatcher(rules, index)
+
+    result = asyncio.run(dispatcher.execute(_push_delivery("refs/heads/main").to_receipt()))
+
+    assert result == InstallationDeliveryDispatchResult(
+        InstallationDeliveryDispatchStatus.IGNORED_IRRELEVANT_EVENT, "unknown_repository"
+    )
+    assert index.calls == [(17, 101, "a" * 40)]
+
+
+def test_a_push_the_index_does_not_take_keeps_the_rules_result() -> None:
+    rules, index = FakeRulesRefresh(), FakeIndexRefresh(live=set())
+    dispatcher, _ = _push_dispatcher(rules, index)
+
+    result = asyncio.run(dispatcher.execute(_push_delivery("refs/heads/main").to_receipt()))
+
+    assert result == InstallationDeliveryDispatchResult(
+        InstallationDeliveryDispatchStatus.REQUESTED_RULES_REFRESH
+    )
+    assert index.calls == [(17, 101, "a" * 40)]
+
+
+@pytest.mark.parametrize(
+    "delivery",
+    [
+        _push_delivery("refs/heads/feature"),
+        _push_delivery("refs/tags/main"),
+        _push_delivery("refs/heads/main", after="0" * 40),
+        _push_delivery("refs/heads/main", after="0" * 40, deleted=True),
+        # The older payload shape without `after` and `deleted`.
+        VerifiedGitHubDelivery(
+            "delivery-push",
+            "push",
+            {
+                key: value
+                for key, value in _push_delivery("refs/heads/main").payload.items()
+                if key not in {"after", "deleted"}
+            },
+        ),
+    ],
+    ids=["another-branch", "tag", "zero-after", "deleted", "without-after"],
+)
+def test_a_push_that_moves_no_default_branch_head_requests_no_index_update(
+    delivery: VerifiedGitHubDelivery,
+) -> None:
+    index = FakeIndexRefresh()
+    dispatcher, _ = _push_dispatcher(FakeRulesRefresh(), index)
+
+    result = asyncio.run(dispatcher.execute(delivery.to_receipt()))
+
+    assert result.detail is None or "index=" not in result.detail
+    assert index.calls == []
+
+
+@pytest.mark.parametrize(
+    ("change", "after"),
+    [
+        ({}, "a" * 40),
+        ({"after": "0" * 40}, None),
+        ({"deleted": True}, None),
+        ({"after": None}, None),
+    ],
+    ids=["head", "zero", "deleted", "null"],
+)
+def test_a_push_event_carries_its_after_sha_unless_the_ref_was_deleted(
+    change: dict[str, object], after: str | None
+) -> None:
+    payload = {**_push_delivery("refs/heads/main").payload, **change}
+
+    event = parse_push_event(payload)
+
+    assert event.after == after
