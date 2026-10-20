@@ -51,6 +51,7 @@ from app.bootstrap.reviews_api import get_run_repository
 from app.common.infrastructure.db.leader import run_as_leader
 from app.common.infrastructure.heartbeat import is_fresh
 from app.main import app
+from app.modules.code_index.application.leader_tasks import CodeIndexLeaderTasks
 from app.modules.reviews.application.check_runs import (
     CheckRunTarget,
     CheckRunView,
@@ -1757,6 +1758,11 @@ def test_main_worker_stop_releases_persisted_leases_before_connection_close_and_
                                 before_close.append(("idle",))
 
         monkeypatch.setattr(worker_module, "amqp_channels", observed_channels)
+        # The leader's index tasks are not under test: converge would purge this index,
+        # whose repository has RAG off (ADR §6.1), and fence out the active job.
+        monkeypatch.setattr(
+            worker_module, "index_leader_tasks", lambda *args: CodeIndexLeaderTasks([])
+        )
         task: asyncio.Task[None] | None = None
         try:
             async with asyncio.timeout(25):

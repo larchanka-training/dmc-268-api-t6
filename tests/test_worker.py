@@ -313,6 +313,10 @@ def test_run_worker_consumes_index_repo_beside_the_review_queues(
         await asyncio.Event().wait()
 
     class IndexConsumer:
+        # Taken by the leader's dispatch and reconcile; the leader does not run here.
+        wakeups = object()
+        sources = object()
+
         async def consume(self) -> None:
             while len(consumed) < 2:
                 await asyncio.sleep(0)

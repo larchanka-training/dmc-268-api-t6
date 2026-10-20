@@ -327,6 +327,10 @@ class ReconcileIndexHeads:
         # Installation external id → the monotonic time its rate limit ends.
         self._paused: dict[int, float] = {}
 
+    @property
+    def batch(self) -> int:
+        return self._batch
+
     async def run(self, budget_seconds: float) -> bool:
         deadline = self._clock() + budget_seconds
         if budget_seconds < HEAD_READ_RESERVE_SECONDS:

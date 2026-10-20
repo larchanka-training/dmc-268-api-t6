@@ -24,6 +24,7 @@ from app.modules.code_index.application.build_index import (
     BuildRepositoryIndex,
     BuildStatus,
 )
+from app.modules.code_index.application.ports import IndexWakeups
 from app.modules.code_index.infrastructure.amqp import IndexQueuePublisher
 from app.modules.reviews.application.handle_review_run import ClaimedAttempt, HandleReviewRun
 from app.modules.reviews.infrastructure.amqp import consume
@@ -324,6 +325,8 @@ def test_idle_index_intake_accepts_the_same_stop_event() -> None:
             cast(AbstractQueue, queue),
             cast(BuildRepositoryIndex, Jobs()),
             cast(IndexQueuePublisher, object()),
+            cast(IndexWakeups, object()),
+            cast(Any, object()),
         )
         task = asyncio.create_task(consumer.consume(stop=stop))
         await asyncio.wait_for(queue.waiting.wait(), 1)
@@ -511,6 +514,8 @@ def test_stop_before_or_during_subscription_never_starts_receive(
                 cast(AbstractQueue, queue),
                 cast(BuildRepositoryIndex, Jobs()),
                 cast(IndexQueuePublisher, object()),
+                cast(IndexWakeups, object()),
+                cast(Any, object()),
             )
             await consumer.consume(stop=stop)
         else:
@@ -543,6 +548,8 @@ def test_busy_index_stops_intake_and_preserves_active_job_settlement() -> None:
             cast(AbstractQueue, queue),
             cast(BuildRepositoryIndex, Jobs()),
             cast(IndexQueuePublisher, object()),
+            cast(IndexWakeups, object()),
+            cast(Any, object()),
         )
         task = asyncio.create_task(consumer.consume(stop=stop))
         try:
@@ -888,6 +895,10 @@ def install_worker_harness(
         await consumer(queue, stop)
 
     class Index:
+        # Taken by the leader's dispatch and reconcile; the leader is stubbed here.
+        wakeups = object()
+        sources = object()
+
         async def consume(self, *, stop: asyncio.Event | None = None) -> None:
             await consume("index.repo", None, stop=stop)
 
@@ -1176,7 +1187,9 @@ def test_fatal_startup_error_is_not_translated_to_normal_stop(
         monkeypatch.setattr(worker, "compose_worker_process", failed_composition)
         with pytest.raises(RuntimeError, match="fatal startup adapter"):
             await worker.run_worker(worker_settings(), stop=asyncio.Event())
-        assert harness.resources_closed == ["amqp", "database"]
+        # The index consumer opens before the composition: the leader's index tasks
+        # take its wake-ups and snapshot sources.
+        assert harness.resources_closed == ["amqp", "index", "database"]
         assert harness.consumer_names == []
 
     asyncio.run(scenario())

@@ -727,42 +727,59 @@ def test_a_cancelled_leader_tick_skips_the_index_tasks() -> None:
     assert leader.calls == ["sweep", "replay"]
 
 
+@pytest.mark.parametrize(
+    ("app", "names"),
+    [
+        # Without the GitHub App `index_consumer` yields None: converge, GC and the TTL
+        # purge only touch the database.
+        ({}, ["converge", "gc", "ttl"]),
+        (
+            {"GITHUB_APP_ID": "1", "GITHUB_APP_PRIVATE_KEY": "key"},
+            ["converge", "dispatch", "gc", "ttl", "reconcile"],
+        ),
+    ],
+    ids=["without-app", "with-app"],
+)
 def test_run_worker_hands_the_index_leader_tasks_to_the_worker_process(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, app: dict[str, str], names: list[str]
 ) -> None:
     settings = WorkerSettings.from_environment(
         {
             "DATABASE_URL": "postgresql+psycopg://test",
             "RABBITMQ_URL": "amqp://test",
             "CODE_INDEX_GC_INTERVAL_SECONDS": "120",
+            **app,
         }
     )
     composed: dict[str, Any] = {}
+    consumer = SimpleNamespace(wakeups=object(), sources=lambda: object())
 
     class Composed(Exception):
         pass
 
     @asynccontextmanager
     async def channels(*_: object) -> AsyncIterator[SimpleNamespace]:
-        yield SimpleNamespace(publisher=object())
+        yield SimpleNamespace(publisher=object(), connection=object())
+
+    @asynccontextmanager
+    async def index_consumer(*_: object) -> AsyncIterator[SimpleNamespace | None]:
+        yield consumer if app else None
 
     def compose(**kwargs: Any) -> Never:
         composed.update(kwargs)
         raise Composed
 
     monkeypatch.setattr(worker_module, "amqp_channels", channels)
+    monkeypatch.setattr(worker_module, "index_consumer", index_consumer)
     monkeypatch.setattr(worker_module, "compose_worker_process", compose)
     with pytest.raises(Composed):
         asyncio.run(run_worker(settings))
 
-    # Without the GitHub App too: the TTL purge and GC only touch the database.
-    assert composed["github"] is None
+    assert (composed["github"] is None) == (not app)
     leader = composed["index_tasks"]
     assert isinstance(leader, CodeIndexLeaderTasks)
-    assert [(task.name, task.interval_seconds) for task in leader.tasks] == [
-        ("ttl", 3_600),
-        ("gc", 120),
-    ]
+    assert [task.name for task in leader.tasks] == names
+    assert {task.name: task.interval_seconds for task in leader.tasks}["gc"] == 120
 
 
 LLM_ENV = {

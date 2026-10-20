@@ -2,7 +2,9 @@
 
 The defaults and bounds are the plan's table; the indexer owns its parser (AC3, AC8), and
 each job exchanges its own installation token, so a retry after a 401 never reuses the
-revoked one. The sources of one head reconcile run share one token cache (#143).
+revoked one. The sources of one head reconcile run share one token cache (#143). The
+worker leader converges, purges unused indexes and collects garbage without the GitHub
+App; with it, it also reconciles heads and dispatches wake-ups (#143).
 """
 
 from __future__ import annotations
@@ -46,12 +48,16 @@ from app.modules.code_index.application.build_index import (
 from app.modules.code_index.application.index_store import IndexAdmission
 from app.modules.code_index.application.leader_tasks import (
     CollectIndexGarbage,
+    ConvergeIndexes,
+    DispatchIndexWakeups,
     PurgeUnusedIndexes,
+    ReconcileIndexHeads,
 )
-from app.modules.code_index.application.ports import IndexedRepository
+from app.modules.code_index.application.ports import IndexedRepository, IndexWakeups
 from app.modules.code_index.application.vcs import RepositorySnapshotSource
 from app.modules.code_index.domain.limits import IndexLimits
 from app.modules.code_index.infrastructure.amqp import (
+    AmqpIndexWakeups,
     IndexQueuePublisher,
     IndexRepoMessage,
     handle_index_delivery,
@@ -265,7 +271,8 @@ def test_the_bounds_admit_their_edges() -> None:
 
 
 def test_the_leader_purges_unused_indexes_hourly_and_collects_garbage_every_five_minutes() -> None:
-    tasks = index_leader_tasks(CodeIndexSettings(), _SESSIONS).tasks
+    # Without the consumer (no GitHub App): converge, GC and TTL touch only the database.
+    tasks = index_leader_tasks(CodeIndexSettings(), _SESSIONS, None).tasks
     configured = index_leader_tasks(
         CodeIndexSettings.from_environment(
             {
@@ -276,20 +283,67 @@ def test_the_leader_purges_unused_indexes_hourly_and_collects_garbage_every_five
             }
         ),
         _SESSIONS,
+        None,
     ).tasks
 
-    assert [(task.name, task.interval_seconds) for task in tasks] == [("ttl", 3_600), ("gc", 300)]
+    assert [(task.name, task.interval_seconds) for task in tasks] == [
+        ("converge", 60),
+        ("gc", 300),
+        ("ttl", 3_600),
+    ]
     assert [(task.name, task.interval_seconds) for task in configured] == [
-        ("ttl", 600),
+        ("converge", 60),
         ("gc", 120),
+        ("ttl", 600),
     ]
     for scheduled, unused_for, batch_rows in (
         (tasks, timedelta(days=30), 10_000),
         (configured, timedelta(days=7), 500),
     ):
-        ttl, gc = (task.task for task in scheduled)
+        converge, gc, ttl = (task.task for task in scheduled)
+        assert isinstance(converge, ConvergeIndexes)
         assert isinstance(ttl, PurgeUnusedIndexes) and ttl.unused_for == unused_for
         assert isinstance(gc, CollectIndexGarbage) and gc.batch_rows == batch_rows
+
+
+def _leader_consumer() -> code_index_worker.IndexConsumer:
+    """A consumer whose wake-ups and reconcile sources the leader tasks take."""
+    return code_index_worker.IndexConsumer(
+        cast(AbstractQueue, object()),
+        cast(BuildRepositoryIndex, object()),
+        cast(IndexQueuePublisher, object()),
+        cast(IndexWakeups, object()),
+        lambda: cast(Callable[[IndexedRepository], RepositorySnapshotSource], object()),
+    )
+
+
+def test_with_the_consumer_the_leader_reconciles_heads_and_dispatches_wake_ups() -> None:
+    consumer = _leader_consumer()
+    tasks = index_leader_tasks(CodeIndexSettings(), _SESSIONS, consumer).tasks
+    configured = index_leader_tasks(
+        CodeIndexSettings.from_environment(
+            {"CODE_INDEX_RECONCILE_INTERVAL_SECONDS": "120", "CODE_INDEX_RECONCILE_BATCH": "7"}
+        ),
+        _SESSIONS,
+        consumer,
+    ).tasks
+
+    # Converge runs before the dispatch, so the markers it sets go out in the same tick;
+    # GC runs before the TTL purge, whose 30-day threshold tolerates delay (ADR 0001 §4);
+    # the reconcile runs last, and the markers it sets go out on the next tick.
+    assert [(task.name, task.interval_seconds) for task in tasks] == [
+        ("converge", 60),
+        ("dispatch", 0),
+        ("gc", 300),
+        ("ttl", 3_600),
+        ("reconcile", 600),
+    ]
+    assert [(task.name, task.interval_seconds) for task in configured][-1] == ("reconcile", 120)
+    for scheduled, batch in ((tasks, 50), (configured, 7)):
+        converge, dispatch, _, _, reconcile = (task.task for task in scheduled)
+        assert isinstance(converge, ConvergeIndexes)
+        assert isinstance(reconcile, ReconcileIndexHeads) and reconcile.batch == batch
+        assert isinstance(dispatch, DispatchIndexWakeups)
 
 
 # --- versions ---------------------------------------------------------------------
@@ -471,6 +525,7 @@ def test_the_consumer_owns_its_parser_and_its_channels(
         ) as consumer:
             assert consumer is not None
             assert consumer.publisher.lease_waits == 2
+            assert isinstance(consumer.wakeups, AmqpIndexWakeups)
             # AC3/AC8: not the review's parser, and without the review's CPU budget.
             assert [parser.kwargs for parser in parsers] == [{"attempt_cpu_seconds": None}]
             assert not parsers[0].closed
@@ -482,6 +537,32 @@ def test_the_consumer_owns_its_parser_and_its_channels(
     assert publishing.kwargs == {"publisher_confirms": True, "on_return_raises": True}
     assert declared == [(publishing, delays)]
     assert (consuming.kwargs, consuming.prefetch, consuming.queues) == ({}, 1, ["index.repo"])
+
+
+def test_each_reconcile_run_of_the_consumer_shares_one_token_cache(
+    composed: tuple[list[Parser], list[Any]],
+) -> None:
+    github = GitHub()
+
+    async def two_runs() -> None:
+        async with code_index_worker.index_consumer(
+            Worker(),
+            cast(AbstractRobustConnection, FakeConnection()),
+            _SESSIONS,
+            RetryDelays(),
+            httpx.MockTransport(github),
+        ) as consumer:
+            assert consumer is not None
+            for _ in range(2):
+                sources = consumer.sources()
+                await sources(_REPOSITORY).head()
+                await sources(dataclasses.replace(_REPOSITORY, repository_id=uuid4())).head()
+
+    asyncio.run(two_runs())
+
+    # One exchange per run, not per repository; the next run starts with a fresh cache.
+    assert github.exchanges == 2
+    assert github.authorizations == ["Bearer t1"] * 4 + ["Bearer t2"] * 4
 
 
 def test_without_the_github_app_the_topology_is_declared_and_nothing_consumes(
@@ -700,6 +781,8 @@ def _consumer(deliveries: Deliveries, jobs: Jobs) -> code_index_worker.IndexCons
         IndexQueuePublisher(
             exchange, exchange, RetryDelays(), lease_waits=2, local_ttl_seconds=1200
         ),
+        cast(IndexWakeups, object()),
+        lambda: cast(Callable[[IndexedRepository], RepositorySnapshotSource], object()),
     )
 
 
