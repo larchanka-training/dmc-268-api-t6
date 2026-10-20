@@ -119,3 +119,34 @@ Quality is measured, not pre-guaranteed: there is no numeric improvement thresho
 ## Decisions for the coordinator/user
 
 The user approved the recommended narrow legacy-v3 implementation plan with "ок" and later explicitly authorized the four coordination comments linked above. Stable-pin/version-order checks remain required before capture. No further external comments are authorized. Later, once implementation and free checks are complete, request the tech lead's explicit authorization for **one** full paid 24-case run with a stated window/budget. Neither planning approval nor implementation approval authorizes spending.
+
+## Capture/import evidence update — 2026-10-20
+
+The candidate was published and remotely verified at
+`47f9add7c4df2b7c32db0091d39296cdd2e4810c` on `feat/178-first-answer-format`.
+User chat authorization "сделай 1 прогон" followed the explicit USD 12 nominal /
+24-case / primary `mistral-small-4` + fallback `mistral-small-3.2-24b` / raw-export
+proposal. Exactly one workflow ran:
+[39443263258, attempt 1](https://github.com/larchanka-training/dmc-268-api-t6/actions/runs/39443263258).
+Source contains #184 and #133; main was `2326273e6ab7fcea89d1cf3b94b88a4be66ca5e9`.
+The user chose capture now despite pending pinned changes in #230/#229/#227;
+subsequent drift requires a separate decision and does not authorize another run.
+The legacy gateway path remains selected, with no verifier execution/pins.
+
+The complete publishable 25-file artifact passed raw/safe hash/size, 24-ID,
+source/prompt/46-pin/static/corpus/settings audits and was imported byte-for-byte.
+Double offline replay is byte-identical with `warnings=[]`; after removing only
+validator diagnostics it is byte-identical to the live safe report. Dataset final
+validation passes 24/24. Strict validity is 10/24, TP/FP/FN 3/5/16, critical recall
+2/5 and verdict agreement 4/24; precision is 37.5%, recall 15.8%. Mixed outcomes
+and the full 14-invalid-case diagnostics are recorded in README and TEST_PLAN.
+No response selection, source retuning or second capture occurred. Historical
+15 October bytes remain at the pre-import candidate revision. Actual cost and
+production repair savings are not measured.
+
+Final import/docs gates pass: Ruff lint and format (520 files), mypy (517 source
+files), pytest 4038 passed / 866 skipped / 2 dependency warnings in 309.26s.
+Focused eval tests pass 274/274, zero skips. Fresh independent review reports
+Standards 0 / Spec 0; exact evidence and integration skip disclosure are in todo.
+Task 7 publication and required post-merge main replay remain outstanding.
+Local/PR replay does not complete AC3; the tech lead retains acceptance/closure.

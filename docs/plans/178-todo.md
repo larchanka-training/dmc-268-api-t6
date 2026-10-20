@@ -1,6 +1,6 @@
 # #178 — implementation checklist
 
-Status: user approved the plan in chat with "ок" on 2026-10-20. Task 1 complete: README and SD §15 audit, all four gates green, independent review Standards 0 / Spec 0. Task 2 complete: immutable v3/golden/examples and seed expectations, all gates green, fresh independent review Standards 0 / Spec 0. Task 3 complete: default v3/eval CLI provenance, all gates green, fresh Standards 0 / Spec 0. Task 4 complete: real PostgreSQL upgrade/persisted pins, all gates green, fresh Standards 0 / Spec 0, temporary DB/private files removed. Candidate publication remains Task 5; paid capture is unauthorized. No paid run, commit, push or issue edit has been performed; the coordinator posted only the four explicitly authorized coordination comments below. Plan approval does not authorize a paid run or external comments.
+Status (2026-10-20): user approved implementation with "ок"; Tasks 1–4 passed their gates and independent reviews. Task 5 candidate is published and verified at `47f9add7c4df2b7c32db0091d39296cdd2e4810c`. The user subsequently authorized exactly one paid capture with "сделай 1 прогон". Task 6a completed: run 39443263258 attempt 1 succeeded and its complete publishable artifact passed audit. Task 6b is complete: exact cohort import, double replay/live comparison, all four final gates and fresh Standards 0 / Spec 0 review passed. Task 7 final publication and required post-merge main replay remain pending. Exactly one workflow was dispatched, with no rerun. No additional external comments or automatic merge are authorized.
 
 **Gate rule for every completed implementation slice:** perform focused RED/GREEN checks, then run `uv run ruff check .`, `uv run ruff format --check .`, `uv run mypy .`, and `uv run pytest` before marking that slice complete or handing it to independent review. Apply this to each docs/asset/default/test/import slice below; checkpoint checks do not permit knowingly broken intermediate handoffs. Report integration skips explicitly.
 
@@ -263,9 +263,9 @@ no open PR owned the new persisted-pin regression file. Remote main remains
 
 **Acceptance criteria:**
 
-- [ ] Recheck #130/#217 status and open PR file lists (#230/#229/#228/#227/#220), #168 pinned changes and #206 warning behavior. Confirm legacy path, v3 version allocation, and #184/#133 merged ancestry; record exact source SHA and static path set.
-- [ ] All four repository gates pass on capture candidate; independent review has zero findings. Delegate branch creation and candidate commit/push to the agent-loop publisher using the publishing skill (existing worktree branch may be reused if suitable). Verify the pushed remote source SHA contains v3, the golden/seeder updates and the v3 default; record its exact SHA and clean working-tree state. If eval now uses verifier, stop and revise scope/version/pins before spending; do not mechanically assume 46 or add unused verifier pins.
-- [ ] Only after the candidate is pushed and remotely verified, present a separate tech-lead request naming its branch and exact remote SHA, exactly one complete 24-case Actions run, current primary/fallback profiles, raw export, proposed window and budget; approval is recorded before dispatch. Default to no early PR; Task 7 opens the final PR after the artifact import. If an early PR is explicitly needed, it must be draft and Task 7 updates that same PR.
+- [x] Recheck #130/#217 status and open PR file lists (#230/#229/#228/#227/#220), #168 pinned changes and #206 warning behavior. Confirm legacy path, v3 version allocation, and #184/#133 merged ancestry; record exact source SHA and static path set.
+- [x] All four repository gates pass on capture candidate; independent review has zero findings. Delegate branch creation and candidate commit/push to the agent-loop publisher using the publishing skill (existing worktree branch may be reused if suitable). Verify the pushed remote source SHA contains v3, the golden/seeder updates and the v3 default; record its exact SHA and clean working-tree state. If eval now uses verifier, stop and revise scope/version/pins before spending; do not mechanically assume 46 or add unused verifier pins.
+- [x] Only after the candidate is pushed and remotely verified, present a separate tech-lead request naming its branch and exact remote SHA, exactly one complete 24-case Actions run, current primary/fallback profiles, raw export, proposed window and budget; approval is recorded before dispatch. Default to no early PR; Task 7 opens the final PR after the artifact import. If an early PR is explicitly needed, it must be draft and Task 7 updates that same PR.
 
 **Verification:** `uv run ruff check .`; `uv run ruff format --check .`; `uv run mypy .`; `uv run pytest`; `uv run python review/scripts/validate_dataset.py --final`. Offline replay must still honestly display the old baseline warning before refresh. Check 24 active cases, SEC-05 excluded, no corpus/truth/model change. Run gate commands separately without dropping required checks. Verify the remote branch resolves to the reviewed candidate SHA and inspect its v3/default file contents; a local commit or uncommitted files cannot be the Actions capture source.
 
@@ -276,8 +276,8 @@ virtual environment and UV flags as above. Exit **0**; exact final summary
 `cases: 24; valid: 24`, with every active case OK. SEC-05 remains excluded.
 No source/corpus/truth mutation or model/provider call. This check plus unchanged
 final source/gates permits candidate publication preparation; it does not authorize
-paid capture. Remote candidate SHA/publisher steps and remaining freeze checks
-are still pending Task 5.
+paid capture. Remote candidate SHA/publisher and freeze checks were completed later; see the
+Task 5/6 evidence below.
 
 **Dependencies:** Tasks 1–4; relevant merges/ordering stable. User can approve implementation without paid approval. No external comment may be sent without explicit authorization.
 
@@ -291,13 +291,13 @@ are still pending Task 5.
 
 **Acceptance criteria:**
 
-- [ ] Explicit tech-lead authorization covers Task 5's verified remote SHA, this exact window/budget and one run; recheck the branch still resolves to that SHA before dispatch. Actions `eval-live.yml` runs with `model=mistral-small-4`, `export_raw_responses=true`, and its recorded source SHA equals the approved remote candidate. If the ref moved, stop for source revalidation/authorization rather than capture different inputs.
-- [ ] Exactly 24 raw response files plus manifest from one run/attempt; safe/raw manifests match, every response SHA/size matches safe metadata; baseline is publishable and all metadata/secret constraints pass.
-- [ ] No automatic retry or partial/mixed import; failure stops further paid execution pending fresh approval.
+- [x] Explicit tech-lead authorization covers Task 5's verified remote SHA, this exact window/budget and one run; recheck the branch still resolves to that SHA before dispatch. Actions `eval-live.yml` runs with `model=mistral-small-4`, `export_raw_responses=true`, and its recorded source SHA equals the approved remote candidate. If the ref moved, stop for source revalidation/authorization rather than capture different inputs.
+- [x] Exactly 24 raw response files plus manifest from one run/attempt; safe/raw manifests match, every response SHA/size matches safe metadata; baseline is publishable and all metadata/secret constraints pass.
+- [x] No automatic retry or partial/mixed import; failure stops further paid execution pending fresh approval.
 
 **Verification:** Actions source SHA/run/attempt, artifact listing, byte/hash comparison; inspect effective primary/fallback/settings and 24-case mapping. Do not rewrite response bytes, digest or newline endings.
 
-**Dependencies:** Task 5 and separate explicit paid-run approval. **Pending; not authorized by plan approval.**
+**Dependencies:** Task 5 and separate explicit paid-run approval. Separate user authorization received: "сделай 1 прогон"; see evidence below.
 
 **Files likely touched:** none during dispatch/download/audit; evidence in todo only. Download to temporary staging.
 
@@ -309,9 +309,9 @@ are still pending Task 5.
 
 **Acceptance criteria:**
 
-- [ ] Replace the complete `responses/` set with the audited 24 raw files and manifest byte-for-byte from Task 6a; leave historical bytes linked at their old revision.
-- [ ] Double offline replay is deterministic and `warnings=[]`; offline metrics agree with live safe report after removing expected diagnostics. Compare validity, TP/FP/FN, critical recall, verdict against 7/24, 2/2/17, 2/5, 5/24 in README and TEST_PLAN.
-- [ ] Capture SHA/run/attempt, prompt/version/hash, pins/digests, model/configuration and approval evidence are recorded; no unmeasured semantic or repair savings claim. A regression is reported for tech-lead disposition, never hidden by another capture.
+- [x] Replace the complete `responses/` set with the audited 24 raw files and manifest byte-for-byte from Task 6a; leave historical bytes linked at their old revision.
+- [x] Double offline replay is deterministic and `warnings=[]`; offline metrics agree with live safe report after removing expected diagnostics. Compare validity, TP/FP/FN, critical recall, verdict against 7/24, 2/2/17, 2/5, 5/24 in README and TEST_PLAN.
+- [x] Capture SHA/run/attempt, prompt/version/hash, pins/digests, model/configuration and approval evidence are recorded; no unmeasured semantic or repair savings claim. A regression is reported for tech-lead disposition, never hidden by another capture.
 
 **Verification:** `uv run python review/scripts/validate_dataset.py --final`; replay twice into separate temporary JSONs and compare; compare all imported bytes/hashes against the untouched artifact; re-run repository gates for final tree. Ensure hooks preserve exact response bytes.
 
@@ -320,6 +320,103 @@ are still pending Task 5.
 **Files likely touched:** Mechanical artifact import is one indivisible cohort of 25 files (`test-prs-dataset/responses/*.json`); split docs into the following separate 2–3-file slice: `test-prs-dataset/README.md`, `docs/TEST_PLAN.md`, `docs/plans/178-todo.md`. The 25-file exception is required by AC3's complete atomic capture, not independent feature work.
 
 **Estimated scope:** Small mechanical import + separate medium documentation slice.
+
+**Task 5 / Task 6a evidence (2026-10-20):** The publisher committed/pushed
+candidate `47f9add7c4df2b7c32db0091d39296cdd2e4810c` on
+`feat/178-first-answer-format`; remote 12-file bytes match the reviewed candidate,
+working tree was clean and hooks did not mutate files. All source gates/fresh
+review from Task 4 remained valid because source did not change. #184/#133 are
+ancestors. Main at capture was `2326273e6ab7fcea89d1cf3b94b88a4be66ca5e9`.
+#130/#217 remain outside the active legacy eval path; 46 pins, no unused verifier
+pins. User knowingly chose "сделай 1 прогон" after the nominal USD 12/24-case/
+same-pair/export/order-risk proposal while #230/#229/#227 pinned work remained
+open. This is the explicit ordering decision; any later drift needs a fresh
+tech-lead decision, with no automatic second paid run. #168/#206 risks were part
+of the source/order review; no incompatible source change was imported.
+
+Exactly one workflow was dispatched:
+[39443263258, attempt 1](https://github.com/larchanka-training/dmc-268-api-t6/actions/runs/39443263258),
+completed success at the exact approved SHA. Recording started
+`2026-10-20T14:53:06.772709Z`; primary `mistral-small-4`, fallback
+`mistral-small-3.2-24b`, fast, raw export enabled. Every one of 24 first calls is
+answer/primary/mistral-small-4, observed serving-provider mistral, every gateway
+status accepted and every paid-metadata-error false. Publishable true;
+nonpublishable IDs empty. Current PR ownership recheck found README/responses
+unowned; existing authorized #227/#228/#220 comments cover TEST_PLAN/SD edits,
+and new #231/#232 have no overlap. No additional external comment was sent.
+
+Downloaded untouched into `/private/tmp/dmc-268-178-capture-39443263258`:
+
+- Safe artifact `eval-live-39443263258-1`, ID `12275133396`, 12,352 bytes,
+  archive digest `sha256:5e8ab0a92715227843be239391996d97b920d304a6824896407228049372eb83`.
+- Raw artifact `eval-live-raw-39443263258-1`, ID `12275378306`, 18,578 bytes,
+  archive digest `sha256:af05b650ecf728d5c74271da8dc0fe5bd3c8bf693e8a2141605afbfac3d619be`.
+- Exact 24 IDs plus manifest, no extra files/symlinks; raw/safe manifests equal,
+  SHA-256 `1a6a2c6aea7bdea6026c592ef9e59c62823aefec7eac0279f125ff09d0e161a2`.
+  All raw SHA/byte counts match safe metadata; credential-pattern audit found
+  zero matches. Raw model text was treated solely as untrusted data.
+- Prompt v3 SHA `eb851e7fc2329eb7bdff015ec0fda945c46111ec5c884934ed6f6d6803883452`;
+  46 pins/static digest
+  `sha256-v1:387834e02e34318527ee2c48e25e2fb63743b65a6b33a5739c25c7b877d8ca3a`;
+  corpus digest unchanged at
+  `sha256-v1:1ab8ca9a16cc50c357b39e1571c73b1e6674752737c444bd8b58d3f2aab81dfa`.
+  Effective primary/fallback/policy settings are identical to the historical
+  manifest. Actual spend, billed tokens and balance are not reported.
+- Private local audit files: `run.json`, `artifacts.json`, `artifact-audit.json`,
+  `replay-audit.json`, `format-diagnostics-audit.json`; the audit script is
+  `/private/tmp/dmc-268-178-artifact-audit.py`. Historical files were preserved
+  separately under `historical-2026-10-15-responses/` before replacement.
+
+**Task 6b import/replay evidence (2026-10-20):** All 25 files replaced mechanically
+in one complete byte-preserving slice, then re-compared against untouched raw
+artifact bytes. Historical responses/manifest remain publicly accessible at
+[candidate 47f9add](https://github.com/larchanka-training/dmc-268-api-t6/tree/47f9add7c4df2b7c32db0091d39296cdd2e4810c/test-prs-dataset/responses).
+Dataset final validation is 24/24. `replay-1.json` and `replay-2.json` are
+byte-identical, SHA-256
+`50011f3105fdace294112a0659b84813e0132a852aabb1dd68e1f96a09df3d1b`,
+with `warnings=[]`; `replay-redacted.json` is byte-identical to live safe report,
+SHA-256 `d6e89251adff8bb8efcf47e8a57034519f9e97b4beb3435acc3bbfef320f4c21`.
+These report files and dataset validation JSON are in the capture directory above.
+
+Measured strict validity **10/24** vs historical 7/24; TP/FP/FN **3/5/16** vs
+2/2/17; precision **37.5% (3/8)** vs 50%; recall **15.8% (3/19)** vs 10.5%;
+critical recall **2/5** unchanged; verdict **4/24** vs 5/24. Real validity 1/5,
+synthetic 9/19; severity mismatches LOG-02 high/critical and LOG-04 high/medium.
+Full category/class metrics and the 14 invalid IDs are in README/TEST_PLAN.
+Overlapping strict failure counts: attribution 12 cases/27 omissions, equal
+range 4 cases/14 ranges, order 1 case (SYN-04); reversed/other/empty/parse failures
+zero. Disjoint groups: attribution-only CLEAN-02/CLEAN-04/LOG-01/LOG-03/LOG-05/
+RES-01/RES-05/SEC-02/SEC-03/SYN-02; range-only RES-03/SEC-04; attribution+range
+SYN-03; all three SYN-04. CLEAN-02/SEC-03 regressed from valid to invalid;
+CLEAN-01/LOG-04/RES-02/RES-04/SYN-05 became valid. No causal, semantic or production
+repair-cost gain is claimed. Full mixed-result cohort retained, no retry/tuning.
+
+**Task 6b final gates and review (2026-10-20, all exit 0):**
+
+- `uv run ruff check .` — all checks passed.
+- `uv run ruff format --check .` — 520 files already formatted.
+- `uv run mypy .` — no issues in 517 source files.
+- `uv run pytest` — **4038 passed, 866 skipped, 2 dependency deprecation
+  warnings in 309.26s (5:09)**. `TEST_DATABASE_URL` was unset, so optional
+  PostgreSQL integration remains skipped in this global run. No new DB execution
+  is claimed; Task 4's actual 26-pass/zero-skip focus (7 PostgreSQL cases) covers
+  the unchanged source. Full log: capture directory `pytest-full.log`.
+- Focused replay/live/score/provenance/workflow/v3 tests: **274 passed**, zero
+  skips in 40.43s. Its one warning was a sandbox denial of pytest cache writing;
+  it did not affect tests. The global gate above ran with authorized managed-
+  worktree cache access and has only the two dependency warnings.
+- Fresh independent review reported **Standards 0 / Spec 0**. Both axes
+  independently checked all 25 imported and historical files, the unchanged
+  46-pin input set, safe hashes, deterministic double replay/live report equality,
+  metrics, historical labels and the pending main acceptance condition.
+- Final `import-hash-audit.json` confirms all 25 current files equal the untouched
+  raw artifact, all 25 preserved historical files equal candidate `47f9add`, and
+  zero pinned source changes after capture. `git diff --check` passes. No
+  application, test, dependency or pinned input was changed by this import slice.
+
+Task 6b is complete. Required main replay after merge remains **pending**; AC3 is
+not fully complete. Publication is delegated separately; no commit/push, merge,
+additional external comment or paid run occurred in this capture/import slice.
 
 ## Task 7: Publish and obtain post-merge main replay evidence
 
@@ -342,7 +439,7 @@ are still pending Task 5.
 ## Final checkpoint
 
 - [ ] All four AC rows in `178-plan.md` have concrete evidence.
-- [ ] All four required gates pass; integration skips are disclosed.
-- [ ] Complete artifact retains exact bytes; historical 2026-10-15 remains accessible.
+- [x] All four required gates pass; integration skips are disclosed.
+- [x] Complete artifact retains exact bytes; historical 2026-10-15 remains accessible.
 - [ ] Main's required replay is clean; no verifier quality claim is made from reviewer raw-first evaluation.
-- [ ] Tech-lead issue acceptance/closure remains separate from implementation completion.
+- [x] Tech-lead issue acceptance/closure remains separate from implementation completion.

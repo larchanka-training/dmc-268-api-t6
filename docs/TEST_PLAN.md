@@ -269,6 +269,9 @@ billed-token totals и остаток баланса отсутствуют в a
 
 ### 3.2.3. Зафиксированный post-rebase raw baseline #82 (2026-10-15)
 
+Исторический baseline; текущая полная съёмка v3 — §3.2.4 (20.10.2026).
+Original raw bytes и manifest сохранены [на pre-import revision](https://github.com/larchanka-training/dmc-268-api-t6/tree/47f9add7c4df2b7c32db0091d39296cdd2e4810c/test-prs-dataset/responses).
+
 [Actions run 38701845865, attempt 1](https://github.com/larchanka-training/dmc-268-api-t6/actions/runs/38701845865)
 снял все 24 первых raw ответа на frozen source SHA `a1cc6229c6a6fdba65ecb640c60ca823e262a6aa`;
 начало `2026-10-15T07:53:56.845426Z` (09:53:56 Europe/Warsaw). Это один дополнительно
@@ -291,7 +294,7 @@ manifest идентичны, SHA-256 `c7f52e42004f2d1149b9d3dd80956eea1d3e17cee9
 Final corpus 24/24; два replay JSON byte-identical, `warnings=[]`, redacted offline
 report byte-identical live safe report. Repair/fallback не подменяют первый ответ.
 
-| Метрика | Текущий измеренный raw baseline |
+| Метрика | Исторический raw baseline 2026-10-15 |
 | --- | --- |
 | Validity | 29.2% (7/24) |
 | Micro TP / FP / FN | 2 / 2 / 17 |
@@ -315,6 +318,81 @@ Effective settings совпадают с предыдущей согласова
 nominal USD 0.50/кейс (USD 12 для 24), 4 calls/attempt, 90s timeout, полные
 настройки в manifest. Configured цены/лимиты не измеряют actual spend,
 billed-token totals или баланс — этих величин в artifacts нет.
+
+### 3.2.4. Зафиксированный v3 raw baseline #178 (2026-10-20)
+
+[Actions run 39443263258, attempt 1](https://github.com/larchanka-training/dmc-268-api-t6/actions/runs/39443263258)
+снял все 24 первых raw ответа на source `47f9add7c4df2b7c32db0091d39296cdd2e4810c`,
+ветка `feat/178-first-answer-format`, начало `2026-10-20T14:53:06.772709Z`
+(16:53:06 Europe/Warsaw). После публикации и remote verification candidate пользователь
+разрешил «сделай 1 прогон» на предложенные nominal USD 12 / 24 кейса / прежнюю
+пару моделей / raw export. Выполнен ровно один workflow без rerun.
+Source включает merged #184 (#177 часть 2) и #133, main на момент capture —
+`2326273e6ab7fcea89d1cf3b94b88a4be66ca5e9`. Пользователь осознанно выбрал запуск
+до pending pinned-изменений #230/#229/#227; их последующий merge может дать drift,
+новый платный прогон этим решением не разрешён. Required CI replay на main после
+merge **ещё не выполнен**; локальный replay не закрывает эту часть AC3.
+
+Engine `fast`, configured provider `eurouter`, primary `mistral-small-4`, fallback
+`mistral-small-3.2-24b`, raw export включён. Corpus/truth и frozen PR prefixes не
+менялись: 19 synthetic + 5 real, SEC-05 исключён. Prompt `review.system.v3`, SHA-256
+`eb851e7fc2329eb7bdff015ec0fda945c46111ec5c884934ed6f6d6803883452`.
+46 pins, static digest
+`sha256-v1:387834e02e34318527ee2c48e25e2fb63743b65a6b33a5739c25c7b877d8ca3a`;
+corpus digest
+`sha256-v1:1ab8ca9a16cc50c357b39e1571c73b1e6674752737c444bd8b58d3f2aab81dfa`.
+Все 24 first calls — answer/primary/mistral-small-4, serving-provider label mistral,
+gateway accepted, paid-metadata errors false; publishable=true, nonpublishable IDs
+пусты. Это проверка целостности, не порог качества и не число repair-вызовов.
+
+Полные 25 файлов импортированы byte-for-byte после проверки safe/raw artifacts
+`eval-live-39443263258-1` и `eval-live-raw-39443263258-1`. Все hashes/sizes совпали;
+raw/safe manifest SHA-256
+`1a6a2c6aea7bdea6026c592ef9e59c62823aefec7eac0279f125ff09d0e161a2`.
+Final corpus validation 24/24, два offline report byte-identical, `warnings=[]`;
+после удаления только validator diagnostics offline совпадает с live safe report
+byte-for-byte. Raw-first validity измерена до нормализации/repair/fallback и verifier.
+
+| Метрика | Исторический 2026-10-15 | Текущий 2026-10-20 |
+| --- | --- | --- |
+| Validity | 29.2% (7/24) | 41.7% (10/24) |
+| Micro TP / FP / FN | 2 / 2 / 17 | 3 / 5 / 16 |
+| Precision | 50.0% (2/4) | 37.5% (3/8) |
+| Recall | 10.5% (2/19) | 15.8% (3/19) |
+| Critical Recall | 40.0% (2/5) | 40.0% (2/5) |
+| Verdict agreement | 20.8% (5/24) | 16.7% (4/24) |
+| Severity mismatches | 1/2 matched | 2/3 matched: LOG-02 high/critical, LOG-04 high/medium |
+
+| Category | TP | FP | FN | Precision | Recall |
+| --- | --- | --- | --- | --- | --- |
+| security | 1 | 0 | 3 | 100.0% (1/1) | 25.0% (1/4) |
+| correctness | 2 | 5 | 3 | 28.6% (2/7) | 40.0% (2/5) |
+| performance | 0 | 0 | 5 | undefined | 0.0% (0/5) |
+| readability | 0 | 0 | 5 | undefined | 0.0% (0/5) |
+
+| Case class | Validity | TP / FP / FN | Verdict agreement |
+| --- | --- | --- | --- |
+| security | 1/4 | 1 / 1 / 3 | 1/4 |
+| resource | 2/5 | 0 / 2 / 5 | 0/5 |
+| logic | 2/5 | 2 / 0 / 3 | 1/5 |
+| syntax | 2/5 | 0 / 0 / 5 | 0/5 |
+| clean | 3/5 | 0 / 2 / 0 | 2/5 |
+
+Real validity 1/5, synthetic 9/19. 14 невалидных ответов остаются в знаменателе,
+predictions не интерпретируются, truths остаются FN. Пересекающиеся причины:
+27 attribution omissions в 12 кейсах, 14 equal ranges в четырёх, один order case;
+reversed ranges, empty/missing answers, JSON parse и другие ошибки отсутствуют.
+Все case IDs и непересекающиеся группы — [README корпуса](../test-prs-dataset/README.md#recorded-mistral-baseline--2026-10-20).
+
+Результаты смешанные: validity/TP/recall выросли, FP выросли, precision и verdict
+agreement снизились, critical recall прежний. Весь cohort сохранён, без
+cherry-picking или повторной съёмки ради улучшения метрик. Разные captures не
+являются controlled experiment; semantic improvement/Hallucination Rate,
+production verifier/final-output quality и repair/latency/cost saving не измерены.
+Effective settings полностью совпадают с историческим manifest (§3.2.3), включая
+nominal USD 0.50/кейс (USD 12 для 24), 4 calls/attempt и 90s timeout.
+Actual spend, billed tokens и баланс artifacts не сообщают. Verifier в этом legacy
+eval не запускается; pins для неиспользуемого verifier не добавлены.
 
 ### 3.3. Ручной оракул семантики
 
