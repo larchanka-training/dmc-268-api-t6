@@ -70,7 +70,7 @@ infrastructure implementations
 | --- | --- | --- |
 | `<module>/domain` | value objects, правила, доменные ошибки, интерфейсы модуля | только stdlib / небольшие абстракции |
 | `<module>/application` | use cases, DTO команд и результатов | domain своего модуля и явно нужные публичные контракты других модулей |
-| `<module>/infrastructure` | repositories и реализации внешних зависимостей конкретного модуля | application/domain модуля, внешние библиотеки; исключение — unit of work может построить на своей сессии адаптер `infrastructure` другого модуля (`installation_repository_unit_of_work.py` берёт `workspaces.infrastructure.github_installation_locks`, а `index_purger` обоих UoW модуля `repositories` — `SqlAlchemyCodeIndexPurger`, #143) |
+| `<module>/infrastructure` | repositories и реализации внешних зависимостей конкретного модуля | application/domain модуля, внешние библиотеки; исключение — unit of work может построить на своей сессии адаптер `infrastructure` другого модуля (`installation_repository_unit_of_work.py` берёт `workspaces.infrastructure.github_installation_locks`, а `index_purger` обоих UoW модуля `repositories` — `SqlAlchemyCodeIndexPurger`, `index_enabler` UoW настроек — `SqlAlchemyCodeIndexEnabler`, #143) |
 | `entrypoints` | FastAPI routers, webhook endpoint, consumers, scheduler, dependency wiring | application-модули и bootstrap |
 
 HTTP DTO и сообщения RabbitMQ — транспортные модели Pydantic. ORM-модели — детали
@@ -121,6 +121,7 @@ Application зависит от узких интерфейсов, сгрупп�
 | `LlmGateway` | `reviews` | structured результат анализа неизменяемого контекста |
 | `GraphRetriever` | `reviews` | кандидаты графа символов RAG v1 по `repository_id`; реализация — в `code_index.infrastructure` |
 | `CodeIndexPurger` | `repositories` | логическая очистка индекса репозитория при снятии доступа и выключении RAG на сессии и в транзакции вызывающего use case; реализация — в `code_index.infrastructure` |
+| `CodeIndexEnabler` | `repositories` | запрос полной сборки индекса (создание строки состояния или новое поколение очищенного индекса, с маркером пробуждения) при включении RAG на сессии и в транзакции вызывающего use case; реализация — в `code_index.infrastructure` |
 | `CodeIndexStore`, `CodeIndexUnitOfWork` | `code_index` | индекс графа RAG v1 по `repository_id` (fenced-запись, публикация, чтение, очистка, сборка мусора) и граница транзакции модуля; реализация — в `code_index.infrastructure` |
 | `CodeIndexMaintenance`, `CodeIndexMaintenanceUnitOfWork` | `code_index` | кандидаты leader-задач индекса без `repository_id` (TTL-очистка, сборка мусора, #143); каждый шаг по репозиторию идёт через `CodeIndexStore`; реализация — в `code_index.infrastructure` |
 | `PaymentGateway` | `billing` | создание и подтверждение оплаты |
@@ -156,8 +157,8 @@ lease, байты Workspace), но не их строки графа.
 `review.run`; вынос в отдельный сервис того же образа контракт не меняет. Сверку с
 HEAD default branch, TTL-очистку и физическое удаление строк порциями (сборку
 мусора) выполняют leader-задачи `WorkerProcess.leader_tick`.
-Порты принадлежат потребителям: `GraphRetriever` — `reviews`, `CodeIndexPurger` —
-`repositories`, `CodeIndexStore` — `code_index`; экстрактор и резолвер AST v1 переиспользуются, а не дублируются.
+Порты принадлежат потребителям: `GraphRetriever` — `reviews`, `CodeIndexPurger` и
+`CodeIndexEnabler` — `repositories`, `CodeIndexStore` — `code_index`; экстрактор и резолвер AST v1 переиспользуются, а не дублируются.
 
 ## LLM Gateway (#33)
 
@@ -249,7 +250,7 @@ app/
     code_index/                # RAG v1, ADR 0001: индекс графа символов
       domain/                  # логический ключ символа, виды рёбер, статусы индекса
       application/             # построение и обновление индекса, fencing по поколению, очистка
-      infrastructure/          # модели индекса, repos, реализации GraphRetriever и CodeIndexPurger
+      infrastructure/          # модели индекса, repos, реализации GraphRetriever, CodeIndexPurger и CodeIndexEnabler
     integrations/
       github/                  # общая provider infrastructure: gateway, parser, tokens
       webhooks/
@@ -468,19 +469,21 @@ ENUM видов символов и исходов импорта построе
 (`repositories/infrastructure/repository_settings.py`) читает `Repository` и восемь
 колонок `CodeIndexState` одним запросом с outer join — без N+1; PATCH обновляет строку
 и перечитывает её тем же запросом. Пишет в индекс модуль `repositories` только через
-порт `CodeIndexPurger` (`repositories/application/code_index.py`, #143):
-`UpdateRepository` при `ragEnabled=false` и `SyncInstallationRepositories.disable` при
-`removed`/`deleted` вызывают его в своей транзакции. Реализация —
-`SqlAlchemyCodeIndexPurger` (`code_index/infrastructure/purger.py`) поверх
-`SqlAlchemyCodeIndexStore.purge`; её строят на своей сессии
-`SqlAlchemyRepositorySettingsUnitOfWork` и `SqlAlchemyInstallationRepositoriesUnitOfWork`
+порты `CodeIndexPurger` и `CodeIndexEnabler` (`repositories/application/code_index.py`,
+#143): `UpdateRepository` при `ragEnabled=false` и `SyncInstallationRepositories.disable`
+при `removed`/`deleted` вызывают очистку в своей транзакции, а `UpdateRepository` при
+`ragEnabled=true` и доступном репозитории — включение. Реализации —
+`SqlAlchemyCodeIndexPurger` и `SqlAlchemyCodeIndexEnabler`
+(`code_index/infrastructure/purger.py`) поверх `SqlAlchemyCodeIndexStore.purge` и
+`enable`; их строят на своей сессии `SqlAlchemyRepositorySettingsUnitOfWork` (свойства
+`index_purger` и `index_enabler`) и `SqlAlchemyInstallationRepositoriesUnitOfWork`
 (свойство `index_purger`), то есть `repositories.infrastructure` конструирует адаптер
 `code_index.infrastructure` — так же, как `installation_repository_unit_of_work.py`
 импортирует `workspaces.infrastructure.github_installation_locks` (исключение в таблице
-слоёв). UoW настроек, ограниченный `AuthScope`, отдаёт её через
-`SqlAlchemyScopedCodeIndexPurger`: репозиторий вне Workspace вызывающего не очищается
-(`repository_access_predicate`, fail closed без scope); UoW снятия доступа — системный
-путь без scope. Импорт ORM-модели
+слоёв). UoW настроек, ограниченный `AuthScope`, отдаёт их через
+`SqlAlchemyScopedCodeIndexPurger` и `SqlAlchemyScopedCodeIndexEnabler`: индекс
+репозитория вне Workspace вызывающего не меняется (`repository_access_predicate`, fail
+closed без scope); UoW снятия доступа — системный путь без scope. Импорт ORM-модели
 `CodeIndexState` модуля `code_index` в адаптер настроек остаётся осознанным исключением
 на стороне чтения из правила «infrastructure зависит только от своего модуля»
 (§ «Слои Clean Architecture»): запись идёт через порт, чтение — этим outer join. Read

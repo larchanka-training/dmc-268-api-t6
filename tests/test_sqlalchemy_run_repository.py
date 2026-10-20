@@ -504,6 +504,7 @@ def test_repository_settings_store_requires_scope_unless_allow_unscoped() -> Non
     from app.modules.repositories.infrastructure.repository_settings import (
         SqlAlchemyRepositorySettingsStore,
         SqlAlchemyRepositorySettingsUnitOfWork,
+        SqlAlchemyScopedCodeIndexEnabler,
         SqlAlchemyScopedCodeIndexPurger,
     )
 
@@ -515,6 +516,8 @@ def test_repository_settings_store_requires_scope_unless_allow_unscoped() -> Non
         SqlAlchemyRepositorySettingsUnitOfWork(factory, None)
     with pytest.raises(ValueError, match="requires an AuthScope unless allow_unscoped=True"):
         SqlAlchemyScopedCodeIndexPurger(cast(AsyncSession, session), None)
+    with pytest.raises(ValueError, match="requires an AuthScope unless allow_unscoped=True"):
+        SqlAlchemyScopedCodeIndexEnabler(cast(AsyncSession, session), None)
 
 
 def test_sqlalchemy_run_repository_run_updated_at() -> None:
