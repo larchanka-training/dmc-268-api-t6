@@ -303,6 +303,7 @@ def checked(command: list[str], cwd: Path, env: dict[str, str]) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--offline-check", action="store_true")
+    parser.add_argument("--scenario", choices=("all", "retirement"), default="all")
     parser.add_argument("--scratch", type=Path)
     parser.add_argument("--database-url-env", default="TEST_DATABASE_URL")
     parser.add_argument("--rabbitmq-url-env", default="TEST_RABBITMQ_URL")
@@ -354,6 +355,7 @@ def main() -> int:
     assert all(env.get(name) == os.environ.get(name) for name in ("HOME", "home", "CODEX_HOME"))
     config: dict[str, Any] = {
         "source": str(ROOT),
+        "scenario": args.scenario,
         "scratch": str(scratch),
         "source_manifest": str(args.source_manifest.resolve()),
         "database_url": database,

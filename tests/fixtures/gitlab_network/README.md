@@ -177,3 +177,14 @@ work; it does not silently change source or retry the complete proof. Read priva
 summary.json, scenario-results.json, route-counts.json, command.json, proof.log and
 final-independent-cleanup.json before reporting a runtime result. Source-only static
 success establishes none of those future network outcomes.
+
+A separately reviewed, authorized retirement-only follow-up can add
+`--scenario retirement` to the same launcher command with a new private scratch
+and current source manifest. It reuses supported CLI setup, the configured-GitHub
+worker, retirement, original-pointer redelivery and the sibling-tenant assertions.
+Only that scenario runs; the other groups remain `unreached`, so this is not a full
+seven-group result or live acceptance. The scenario keeps its 75-second ceiling
+and the launcher's 600-second runtime plus one 30-second independent audit.
+The default `--scenario all` retains the complete proof. Safe retirement diagnostics
+record CLI completion, cancellation error code and summary attempt count. A SQL
+`cancelled` row alone does not establish that the operator CLI has returned.
