@@ -430,3 +430,48 @@ def test_write_private_reader_sees_complete_snapshot_during_write(
     assert snapshots and all(json.loads(value) == old for value in snapshots)
     assert json.loads(target.read_text()) == new
     assert target.stat().st_mode & 0o777 == 0o600
+
+
+@pytest.mark.parametrize("scenario", [None, "retirement"])
+def test_fixed_scenario_enters_private_config_with_unchanged_runtime_limits(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    scenario: str | None,
+) -> None:
+    scratch, scope = tmp_path / "proof", tmp_path / "scope.json"
+    scope.write_text(json.dumps({"checkout": str(launcher.ROOT), "hashes": {}}))
+    argv = ["launcher", "--scratch", str(scratch), "--source-manifest", str(scope)]
+    if scenario is not None:
+        argv += ["--scenario", scenario]
+    monkeypatch.setattr(sys, "argv", argv)
+    monkeypatch.setenv("TEST_DATABASE_URL", "postgresql://synthetic@127.0.0.1:49323/dmc169_test")
+    monkeypatch.setenv("TEST_RABBITMQ_URL", "amqp://synthetic@127.0.0.1:58447/dmc169-test")
+
+    class Configured(Exception):
+        pass
+
+    def before_first_process(*args: Any, **kwargs: Any) -> None:
+        raise Configured
+
+    monkeypatch.setattr(launcher, "checked", before_first_process)
+    with pytest.raises(Configured):
+        launcher.main()
+    config = json.loads((scratch / "runtime.json").read_text())
+    assert config["scenario"] == ("all" if scenario is None else "retirement")
+    assert config["runtime_timeout"] == 600
+    assert config["postman_port"] == 49400 and config["tls_port"] == 49443
+    assert len(config["queues"]) == 15 and len(config["exchanges"]) == 6
+
+
+def test_arbitrary_scenario_is_rejected_before_scratch_creation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scratch = tmp_path / "proof"
+    monkeypatch.setattr(
+        sys, "argv", ["launcher", "--scenario", "arbitrary", "--scratch", str(scratch)]
+    )
+    with pytest.raises(SystemExit) as error:
+        launcher.main()
+    assert error.value.code == 2
+    assert not scratch.exists()
