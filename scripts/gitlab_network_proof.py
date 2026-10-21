@@ -1098,9 +1098,218 @@ class Proof:
             "retry_dlq": retry,
         }
 
+    async def observe_retirement(
+        self,
+        run: UUID,
+        completion: asyncio.Future[None],
+        *,
+        revoked: Callable[[], bool],
+        timeout_seconds: float = 20.0,
+    ) -> dict[str, Any]:
+        reading = asyncio.create_task(self.wait_run(run, "cancelled"))
+        try:
+            # Preserve wait_run's 45-second SQL window; the extra 20-second bound
+            # applies to CLI completion after cancellation becomes visible.
+            done, _ = await asyncio.wait((completion, reading), return_when=asyncio.FIRST_COMPLETED)
+            if completion in done:
+                completion.result()  # Surface operator failure even if SQL never becomes cancelled.
+            cancelled = await reading
+            async with asyncio.timeout(timeout_seconds):
+                await completion
+        finally:
+            if not reading.done():
+                reading.cancel()
+            await asyncio.gather(reading, return_exceptions=True)
+            if not completion.done():
+                completion.cancel()
+        self.boundary = None
+        observation = {
+            "cli_completed": revoked(),
+            "cancelled_error_code": cancelled["error_code"],
+            "summary_attempt_count": self.control("A")["attempts"]["14:summary"],
+        }
+        self.state["retirement_observation"] = observation
+        self.save()
+        self.check(
+            "supported retirement fences current publication retry",
+            observation["cli_completed"]
+            and observation["cancelled_error_code"]
+            in {"installation_revoked", "installation_unavailable", "cancelled_by_user"}
+            and observation["summary_attempt_count"] == 1,
+        )
+        return cancelled
+
+    async def retirement(self) -> None:
+        loop = asyncio.get_running_loop()
+        self.control("A", faults={"14": "retire"})
+        revoked = False
+        original_pointer: ReviewPublishPointer | None = None
+        completion: asyncio.Future[None] = loop.create_future()
+        revoke_task: asyncio.Task[None] | None = None
+
+        async def revoke() -> None:
+            nonlocal revoked, original_pointer
+            rows = await self.sql(
+                "SELECT r.id FROM runs r JOIN code_changes c ON c.id=r.code_change_id "
+                "WHERE r.origin_provider_installation_id=:origin AND c.external_number=14 "
+                "AND r.state='publishing'",
+                {"origin": self.state["tenants"]["A"]["installation"]},
+            )
+            assert len(rows) == 1
+            async with SqlAlchemyRunLifecycleUnitOfWork(self.data_sessions()) as uow:
+                context = await uow.runs.publish_context(rows[0]["id"])
+            assert context is not None
+            original_pointer = ReviewPublishPointer(
+                rows[0]["id"],
+                context.head_sha,
+                context.findings_hash,
+                "COMMENT",
+            )
+            await self.cli(
+                [
+                    "revoke-installation",
+                    "--installation-id",
+                    str(self.state["tenants"]["A"]["installation"]),
+                ]
+            )
+            self.state["retirement_boundary"] = {
+                "committed_at": time.time(),
+                "wire_offset": len(self.state["wire"]),
+                "run_id": str(original_pointer.run_id),
+                "head_sha": original_pointer.head_sha,
+                "findings_hash": original_pointer.findings_hash,
+            }
+            self.save()
+            revoked = True
+
+        async def complete_revoke() -> None:
+            try:
+                await revoke()
+            except BaseException as error:
+                if not completion.done():
+                    if isinstance(error, asyncio.CancelledError):
+                        completion.cancel()
+                    else:
+                        completion.set_exception(error)
+                raise
+            else:
+                if not completion.done():
+                    completion.set_result(None)
+
+        async def join_revoke() -> None:
+            nonlocal revoke_task
+            if revoke_task is None:
+                revoke_task = asyncio.create_task(complete_revoke())
+            await asyncio.shield(revoke_task)
+
+        def retire(row: dict[str, Any]) -> None:
+            if row["tenant"] == "A" and row.get("retire_gate"):
+                waiting = asyncio.run_coroutine_threadsafe(join_revoke(), loop)
+                try:
+                    waiting.result(20)
+                except BaseException:
+                    waiting.cancel()
+                    raise
+
+        self.boundary = retire
+        try:
+            run, _ = await self.enqueue("A", 14)
+            cancelled = await self.observe_retirement(run, completion, revoked=lambda: revoked)
+        finally:
+            self.boundary = None
+            if revoke_task is not None:
+                if not revoke_task.done():
+                    revoke_task.cancel()
+                await asyncio.gather(revoke_task, return_exceptions=True)
+            if not completion.done():
+                completion.cancel()
+            elif not completion.cancelled():
+                # Consume a late operator failure after timeout/cancellation.
+                completion.exception()
+        assert original_pointer is not None and original_pointer.run_id == run
+        original_markers = self.control("A")["discussions"].get("14", [])
+        assert self.publisher is not None
+        await self.publisher.publish_review(original_pointer)
+        confirmed = time.time()
+        drain = await self.drain_publication("cancelled pointer redelivery", confirmed)
+        still_cancelled = await self.wait_run(run, "cancelled")
+        offset = self.state["retirement_boundary"]["wire_offset"]
+        self.check(
+            "committed retirement and ACKed original pointer remain terminal without A HTTP",
+            all(
+                still_cancelled[key] == cancelled[key]
+                for key in ("state", "cancel_requested", "error_code", "head_sha")
+            )
+            and self.control("A")["discussions"].get("14", []) == original_markers
+            and not any(
+                row["kind"] == "gitlab" and row["tenant"] == "A"
+                for row in self.state["wire"][offset:]
+            ),
+        )
+        self.state["cancelled_redelivery_ack"] = {
+            **drain,
+            "run": str(run),
+            "terminal_state": still_cancelled["state"],
+        }
+        self.save()
+        before = len(self.model_calls())
+        sibling, _ = await self.enqueue("B", 12)
+        await self.verify_success("B", 12, sibling, before, first=True)
+        self.check(
+            "same numeric IDs sibling has distinct original workspace",
+            self.state["tenants"]["A"]["workspace"] != self.state["tenants"]["B"]["workspace"],
+        )
+
+    def verify_final_wire(self) -> None:
+        self.check(
+            "zero A provider requests after committed retirement through final scenario",
+            not any(
+                row["kind"] == "gitlab" and row["tenant"] == "A"
+                for row in self.state["wire"][self.state["retirement_boundary"]["wire_offset"] :]
+            ),
+        )
+        self.check(
+            "no unmodelled/credential/substitution HTTP accepted",
+            all(
+                "fixture_error" not in row
+                and (
+                    row.get("status", 0) < 400
+                    or row["tenant"] == "E"
+                    and row["method"] == "HEAD"
+                    and row["status"] == 503
+                    or row["tenant"] == "A"
+                    and row["method"] == "POST"
+                    and row["status"] == 500
+                )
+                for row in self.state["wire"]
+            ),
+        )
+        events = []
+        for line in (self.scratch / "simulation.ndjson").read_text().splitlines():
+            with contextlib.suppress(ValueError):
+                events.append(json.loads(line))
+        served = [event for event in events if event.get("event") == "request"]
+        self.check("actual Postman served application HTTP", len(served) >= len(self.state["wire"]))
+        self.state["postman_request_events"] = len(served)
+
     async def run_groups(self) -> None:
+        scenario = self.config.get("scenario", "all")
+        if scenario not in {"all", "retirement"}:
+            raise ValueError("Unsupported proof scenario")
+        self.state["scenario"] = scenario
         assert self.sessions is not None
         await self.setup_tenants()
+        if scenario == "retirement":
+            self.publisher = LazyAmqpPublisher(self.config["rabbitmq_url"])
+            await self.start_worker(True)
+            self.state["groups"][GROUPS[5]] = "running"
+            self.save()
+            async with asyncio.timeout(75):
+                await self.retirement()
+            self.state["groups"][GROUPS[5]] = "passed"
+            self.save()
+            self.verify_final_wire()
+            return
         a_run, a_claimed = await self.component_run("A", 80)
         c_run, c_claimed = await self.component_run("C", 12)
 
@@ -1216,96 +1425,7 @@ class Proof:
 
         await group(GROUPS[4], 75, retry_redelivery)
 
-        async def retirement() -> None:
-            self.control("A", faults={"14": "retire"})
-            revoked = False
-            original_pointer: ReviewPublishPointer | None = None
-
-            async def revoke() -> None:
-                nonlocal revoked, original_pointer
-                rows = await self.sql(
-                    "SELECT r.id FROM runs r JOIN code_changes c ON c.id=r.code_change_id "
-                    "WHERE r.origin_provider_installation_id=:origin AND c.external_number=14 "
-                    "AND r.state='publishing'",
-                    {"origin": self.state["tenants"]["A"]["installation"]},
-                )
-                assert len(rows) == 1
-                async with SqlAlchemyRunLifecycleUnitOfWork(self.data_sessions()) as uow:
-                    context = await uow.runs.publish_context(rows[0]["id"])
-                assert context is not None
-                original_pointer = ReviewPublishPointer(
-                    rows[0]["id"],
-                    context.head_sha,
-                    context.findings_hash,
-                    "COMMENT",
-                )
-                await self.cli(
-                    [
-                        "revoke-installation",
-                        "--installation-id",
-                        str(self.state["tenants"]["A"]["installation"]),
-                    ]
-                )
-                self.state["retirement_boundary"] = {
-                    "committed_at": time.time(),
-                    "wire_offset": len(self.state["wire"]),
-                    "run_id": str(original_pointer.run_id),
-                    "head_sha": original_pointer.head_sha,
-                    "findings_hash": original_pointer.findings_hash,
-                }
-                self.save()
-                revoked = True
-
-            def retire(row: dict[str, Any]) -> None:
-                if row["tenant"] == "A" and row.get("retire_gate"):
-                    asyncio.run_coroutine_threadsafe(revoke(), loop).result(20)
-
-            self.boundary = retire
-            run, _ = await self.enqueue("A", 14)
-            cancelled = await self.wait_run(run, "cancelled")
-            self.boundary = None
-            self.check(
-                "supported retirement fences current publication retry",
-                revoked
-                and cancelled["error_code"]
-                in {"installation_revoked", "installation_unavailable", "cancelled_by_user"}
-                and self.control("A")["attempts"]["14:summary"] == 1,
-            )
-            assert original_pointer is not None and original_pointer.run_id == run
-            original_markers = self.control("A")["discussions"].get("14", [])
-            assert self.publisher is not None
-            await self.publisher.publish_review(original_pointer)
-            confirmed = time.time()
-            drain = await self.drain_publication("cancelled pointer redelivery", confirmed)
-            still_cancelled = await self.wait_run(run, "cancelled")
-            offset = self.state["retirement_boundary"]["wire_offset"]
-            self.check(
-                "committed retirement and ACKed original pointer remain terminal without A HTTP",
-                all(
-                    still_cancelled[key] == cancelled[key]
-                    for key in ("state", "cancel_requested", "error_code", "head_sha")
-                )
-                and self.control("A")["discussions"].get("14", []) == original_markers
-                and not any(
-                    row["kind"] == "gitlab" and row["tenant"] == "A"
-                    for row in self.state["wire"][offset:]
-                ),
-            )
-            self.state["cancelled_redelivery_ack"] = {
-                **drain,
-                "run": str(run),
-                "terminal_state": still_cancelled["state"],
-            }
-            self.save()
-            before = len(self.model_calls())
-            sibling, _ = await self.enqueue("B", 12)
-            await self.verify_success("B", 12, sibling, before, first=True)
-            self.check(
-                "same numeric IDs sibling has distinct original workspace",
-                self.state["tenants"]["A"]["workspace"] != self.state["tenants"]["B"]["workspace"],
-            )
-
-        await group(GROUPS[5], 75, retirement)
+        await group(GROUPS[5], 75, self.retirement)
 
         async def generation_two() -> None:
             who = self.state["tenants"]["C"]
@@ -1347,36 +1467,7 @@ class Proof:
             )
 
         await group(GROUPS[6], 60, generation_two)
-        self.check(
-            "zero A provider requests after committed retirement through final scenario",
-            not any(
-                row["kind"] == "gitlab" and row["tenant"] == "A"
-                for row in self.state["wire"][self.state["retirement_boundary"]["wire_offset"] :]
-            ),
-        )
-        self.check(
-            "no unmodelled/credential/substitution HTTP accepted",
-            all(
-                "fixture_error" not in row
-                and (
-                    row.get("status", 0) < 400
-                    or row["tenant"] == "E"
-                    and row["method"] == "HEAD"
-                    and row["status"] == 503
-                    or row["tenant"] == "A"
-                    and row["method"] == "POST"
-                    and row["status"] == 500
-                )
-                for row in self.state["wire"]
-            ),
-        )
-        events = []
-        for line in (self.scratch / "simulation.ndjson").read_text().splitlines():
-            with contextlib.suppress(ValueError):
-                events.append(json.loads(line))
-        served = [event for event in events if event.get("event") == "request"]
-        self.check("actual Postman served application HTTP", len(served) >= len(self.state["wire"]))
-        self.state["postman_request_events"] = len(served)
+        self.verify_final_wire()
 
     async def runtime(self) -> None:
         for port in (self.config["postman_port"], self.config["tls_port"]):
@@ -1652,12 +1743,18 @@ def main() -> int:
         code = 1
     summary = {
         "exit": code,
+        "scenario": config.get("scenario", "all"),
         "groups": proof.state["groups"],
         "checks": len(proof.state["checks"]),
         "failure_type": proof.state["failure"],
         "cleanup_errors": proof.state["cleanup_errors"],
         "qualification": (
-            "Synthetic predecessor component proof; not integrated171 or live acceptance."
+            (
+                "Focused retirement only; other groups were not executed. "
+                if config.get("scenario") == "retirement"
+                else ""
+            )
+            + "Synthetic predecessor component proof; not integrated171 or live acceptance."
         ),
     }
     write_private(proof.scratch / "summary.json", summary)
