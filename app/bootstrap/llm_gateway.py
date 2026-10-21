@@ -82,7 +82,7 @@ from app.modules.reviews.infrastructure.run_lifecycle_store import (
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_SYSTEM_PROMPT = REPO_ROOT / "review" / "prompts" / "review.system.v2.md"
+DEFAULT_SYSTEM_PROMPT = REPO_ROOT / "review" / "prompts" / "review.system.v3.md"
 DEFAULT_CONVENTIONS_PROMPT = REPO_ROOT / "review" / "prompts" / "review.conventions.v2.md"
 _EVAL_WORKSPACE = UUID(int=0)
 

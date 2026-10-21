@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import os
 from collections.abc import Iterator
+from dataclasses import replace
 from hashlib import sha256
 from pathlib import Path
 from uuid import uuid4
@@ -58,6 +59,7 @@ def test_load_prompt_assets_preserves_full_file_and_checksum() -> None:
         ("review.conventions", 2),
         ("review.system", 1),
         ("review.system", 2),
+        ("review.system", 3),
         ("review.verifier", 1),
     ]
     for asset in assets:
@@ -137,14 +139,14 @@ def test_first_seed_makes_the_newest_version_of_each_prompt_active(
                     .order_by(PromptVersion.key)
                 )
                 active_versions = [(key, version) for key, version in rows.tuples().all()]
-                assert inserted == 5
+                assert inserted == 6
                 return active_versions
         finally:
             await engine.dispose()
 
     assert asyncio.run(seed_and_read_active_versions()) == [
         ("review.conventions", 2),
-        ("review.system", 2),
+        ("review.system", 3),
         ("review.verifier", 1),
     ]
 
@@ -192,3 +194,111 @@ def test_seed_activates_version_two_after_deactivating_version_one(
             await engine.dispose()
 
     assert asyncio.run(seed_versions()) == [(1, False), (2, True)]
+
+
+@pytest.mark.integration
+def test_full_seed_upgrades_v2_to_v3_once_and_preserves_old_content(
+    migrated_prompt_database: tuple[str, str],
+) -> None:
+    database_url, schema = migrated_prompt_database
+    assets = load_prompt_assets(REPO_ROOT / "review/prompts")
+    legacy_assets = tuple(
+        asset for asset in assets if (asset.key, asset.version) != ("review.system", 3)
+    )
+    old_content = (REPO_ROOT / "tests/fixtures/prompt_builder/sample.system.txt").read_text()
+    new_content = (REPO_ROOT / "tests/fixtures/prompt_builder/sample.system.v3.txt").read_text()
+
+    async def exercise() -> None:
+        engine = create_async_engine(
+            database_url, connect_args={"options": f"-csearch_path={schema}"}
+        )
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        try:
+            async with factory.begin() as session:
+                assert await seed_prompt_versions(session, legacy_assets) == 5
+            async with factory() as session:
+                old = (
+                    await session.scalars(
+                        select(PromptVersion).where(
+                            PromptVersion.key == "review.system", PromptVersion.is_active.is_(True)
+                        )
+                    )
+                ).one()
+                assert old.version == 2
+                old_id = old.id
+            async with factory.begin() as session:
+                assert await seed_prompt_versions(session, assets) == 1
+            async with factory.begin() as session:
+                assert await seed_prompt_versions(session, assets) == 0
+            # Read persisted rows through a fresh session, after both commits.
+            async with factory() as session:
+                rows = list((await session.scalars(select(PromptVersion))).all())
+                assert len(rows) == 6
+                active = [row for row in rows if row.key == "review.system" and row.is_active]
+                assert len(active) == 1
+                assert (active[0].version, active[0].content, active[0].checksum) == (
+                    3,
+                    new_content,
+                    "eb851e7fc2329eb7bdff015ec0fda945c46111ec5c884934ed6f6d6803883452",
+                )
+                old = (
+                    await session.scalars(select(PromptVersion).where(PromptVersion.id == old_id))
+                ).one()
+                assert (old.version, old.content, old.checksum, old.is_active) == (
+                    2,
+                    old_content,
+                    "9177e358c23d1a7cd8987cbf667cf8b705c2afb27eaf8b2237480e4531431d75",
+                    False,
+                )
+        finally:
+            await engine.dispose()
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.integration
+def test_seed_rejects_changed_v2_without_overwriting_its_persisted_content(
+    migrated_prompt_database: tuple[str, str],
+) -> None:
+    database_url, schema = migrated_prompt_database
+    assets = load_prompt_assets(REPO_ROOT / "review/prompts")
+    old = next(asset for asset in assets if (asset.key, asset.version) == ("review.system", 2))
+    tampered = replace(old, content="changed v2", checksum=sha256(b"changed v2").hexdigest())
+    old_content = (REPO_ROOT / "tests/fixtures/prompt_builder/sample.system.txt").read_text()
+
+    async def exercise() -> None:
+        engine = create_async_engine(
+            database_url, connect_args={"options": f"-csearch_path={schema}"}
+        )
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        try:
+            async with factory.begin() as session:
+                assert await seed_prompt_versions(session, assets) == 6
+            with pytest.raises(ValueError, match=r"immutable prompt changed: review\.system\.v2"):
+                async with factory.begin() as session:
+                    await seed_prompt_versions(session, (tampered,))
+            async with factory() as session:
+                persisted = (
+                    await session.scalars(
+                        select(PromptVersion).where(
+                            PromptVersion.key == "review.system", PromptVersion.version == 2
+                        )
+                    )
+                ).one()
+                assert (persisted.content, persisted.checksum, persisted.is_active) == (
+                    old_content,
+                    "9177e358c23d1a7cd8987cbf667cf8b705c2afb27eaf8b2237480e4531431d75",
+                    False,
+                )
+                active = (
+                    await session.scalars(
+                        select(PromptVersion).where(
+                            PromptVersion.key == "review.system", PromptVersion.is_active.is_(True)
+                        )
+                    )
+                ).one()
+                assert active.version == 3
+        finally:
+            await engine.dispose()
+
+    asyncio.run(exercise())
