@@ -367,8 +367,9 @@ class HandleReviewRun:
                         now=now,
                     )
                 else:
-                    # Cancellation during claim/commit may leave a committed claim. A fresh
-                    # locked cleanup transaction determines the persisted state afterward.
+                    # Keep this candidate set through the whole delivery, including the
+                    # committed pipeline. Cancellation waits for pipeline quiescence, then
+                    # checks persisted claim state and ownership in a fresh locked transaction.
                     execution.claim_candidate = True
                     attempt = await uow.runs.claim(
                         run_id, worker_id=self._worker_id, now=now, lease_until=now + self._lease

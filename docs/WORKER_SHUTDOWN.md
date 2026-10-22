@@ -36,6 +36,10 @@ cleanup; that operation does not arm the signal-owned hard deadline.
 
 ## Delivery and lease ownership
 
+Review and index consumers intentionally share stop coordination during shutdown.
+With a stop event, both stop intake while their active work drains or is cancelled.
+With `stop=None`, index consumption retains its legacy serial behavior.
+
 Stopping intake closes the queue subscription without closing the dedicated
 channel beneath an active handler. The SDK returns its internally buffered
 messages using the existing broker requeue behavior. A delivery fetched at the
@@ -57,9 +61,11 @@ failure outcome before closing resources. Normal watchdog outcomes, retry timing
 and counters are unchanged. A forever-pending pipeline reaches the process
 backstop with resources still open; cleanup is not reported as committed.
 
-A delivery ACK/NACK or retry-helper exception is logged with queue, message id and
-traceback. An unprocessed review delivery gets one best-effort NACK(false); a
-failure of that settlement is logged and the consumer continues. Cancellation
+The review consume-level per-delivery guard isolates handler and retry-helper
+failures, including ACK/NACK settlement, without nested settlement guards. These
+exceptions are logged with queue, message id and traceback. An unprocessed review
+delivery gets one best-effort NACK(false); a failure of that settlement is logged
+and the consumer continues. Cancellation
 propagates. Existing publish-confirm, ACK/fallback-NACK and three-error retry
 behavior remains in place. Invalid x-attempt values log a warning and use the
 existing fallback. Malformed Retry-After values are ignored; oversized numeric

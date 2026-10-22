@@ -2,25 +2,22 @@
 
 Status: approved by the user on 2026-10-20, including the shutdown budgets,
 scoped lifecycle policy and required coordination comments. All seven implementation
-tasks, including both pipeline ownership follow-ups, are complete. Final whole-issue
-Standards and Spec reviews report zero findings. All four gates pass; the final full
-suite with actual disposable PostgreSQL/RabbitMQ reports 5045 passed, 0 skipped,
-2 existing warnings in 1006.98s. Published as [PR #234](https://github.com/larchanka-training/dmc-268-api-t6/pull/234)
-from `fix/185-review-consumer-resilience`. Implementation commit: `1ce6c94`.
-The PR is temporarily draft while current-head CI runs; the publisher will mark it
-ready after all checks pass. The user will assign the reviewer.
-A narrow publication follow-up aligns the new broker fixture with existing hosted
-CI environment fallback. Actual-broker RED/GREEN, fresh Standards/Spec reviews (0/0)
-and all four gates pass. The CI-style broker full run reports 4177 passed,
-868 optional DB-dependent skips and 2 existing warnings in 455.13s; the earlier
-5045-pass actual-PG/broker proof remains valid for unchanged production code.
-The fixture follow-up is ready for the publisher to commit/push.
+tasks and the CI fixture follow-up are complete. Published as ready-for-review
+[PR #234](https://github.com/larchanka-training/dmc-268-api-t6/pull/234) from
+`fix/185-review-consumer-resilience`; the user assigns the reviewer.
+
+Historical verification on the previous head includes clean independent reviews,
+all four local gates, 5045 actual-PG/broker tests with zero skips, and green hosted
+CI on `84ab17dd3b46be3a49693a88d10c1cf2a0a813f6`. The 2026-10-22 review follow-up
+rebases onto current main and clarifies comments/docs without runtime changes;
+its current-head review and verification are recorded separately from that evidence.
 
 ## Evidence and scope
 
 Source: [issue #185](https://github.com/larchanka-training/dmc-268-api-t6/issues/185).
-Baseline: fetched `origin/main` and worktree HEAD both equal
-`2326273e6ab7fcea89d1cf3b94b88a4be66ca5e9` on 2026-10-20.
+Initial baseline on 2026-10-20: `2326273e6ab7fcea89d1cf3b94b88a4be66ca5e9`.
+The review follow-up rebased onto main `8a621798d01bd72a5ce6c343addc0d00661af724`
+on 2026-10-22.
 Work only in the managed `185-review-consumer-resilience` worktree. The original
 checkout, its `fix/111-worker-portal-url` branch, and unrelated untracked docs are excluded.
 
@@ -207,7 +204,7 @@ no global task scan or constructor cleanup hook is needed.
 
 ## Ordered implementation and verification
 
-Detailed RED → GREEN tasks and file limits are in `185-todo.md`:
+The implementation followed this order:
 
 1. Isolate review delivery settlement failures.
 2. Safely parse retry-related transport headers.
