@@ -5,8 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-from collections.abc import AsyncIterator, Iterator
-from contextlib import asynccontextmanager
+from collections.abc import Iterator
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -155,28 +154,25 @@ def _json_body(request: httpx.Request) -> dict[str, Any]:
     return json.loads(request.content) if request.content else {}
 
 
-def _fail_once_uow_factory(
-    session_factory: async_sessionmaker[AsyncSession],
-    *,
-    fail_complete: list[bool],
-) -> Any:
-    """UoW factory that raises once inside ``complete_publication`` (before commit)."""
+@pytest.fixture
+def fail_complete_publication_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Raise once inside ``SqlAlchemyRunLifecycleStore.complete_publication`` (before commit).
 
-    @asynccontextmanager
-    async def _factory() -> AsyncIterator[SqlAlchemyRunLifecycleUnitOfWork]:
-        async with SqlAlchemyRunLifecycleUnitOfWork(session_factory) as uow:
-            original = uow.runs.complete_publication
+    ``uow.runs`` is a property that returns a new store each access, so instance
+    patching on ``uow.runs`` never reaches the real ``complete_publication`` call.
+    """
+    state = {"fail": True}
+    original = SqlAlchemyRunLifecycleStore.complete_publication
 
-            async def complete_publication(*args: Any, **kwargs: Any) -> str | None:
-                if fail_complete and fail_complete[0]:
-                    fail_complete[0] = False
-                    raise RuntimeError("simulated crash before publication commit")
-                return await original(*args, **kwargs)
+    async def complete_publication(
+        self: SqlAlchemyRunLifecycleStore, *args: Any, **kwargs: Any
+    ) -> str | None:
+        if state["fail"]:
+            state["fail"] = False
+            raise RuntimeError("simulated crash before publication commit")
+        return await original(self, *args, **kwargs)
 
-            uow.runs.complete_publication = complete_publication  # type: ignore[method-assign]
-            yield uow
-
-    return _factory
+    monkeypatch.setattr(SqlAlchemyRunLifecycleStore, "complete_publication", complete_publication)
 
 
 @pytest.mark.integration
@@ -276,6 +272,7 @@ def test_gitlab_publish_posts_positions_built_from_stored_diff(
 @pytest.mark.integration
 def test_gitlab_redelivery_after_failed_complete_restores_inline_placement(
     gitlab_publication_env: Env,
+    fail_complete_publication_once: None,
 ) -> None:
     """Partial coordinates fallback + crash before commit; redelivery fixes ``inline_comment``."""
 
@@ -285,7 +282,6 @@ def test_gitlab_redelivery_after_failed_complete_restores_inline_placement(
         discussions: list[dict[str, Any]] = []
         inline_attempts = 0
         prefix = "/api/v4/projects/101/merge_requests/3"
-        fail_complete = [True]
 
         def respond(request: httpx.Request) -> httpx.Response:
             nonlocal inline_attempts
@@ -358,7 +354,7 @@ def test_gitlab_redelivery_after_failed_complete_restores_inline_placement(
             assert context is not None
             pointer = ReviewPublishPointer(RUN_ATTEMPTED, HEAD, context.findings_hash, "COMMENT")
             publisher = PublishRunReview(
-                uow_factory=_fail_once_uow_factory(factory, fail_complete=fail_complete),
+                uow_factory=lambda: SqlAlchemyRunLifecycleUnitOfWork(factory),
                 reviews=None,
                 check_runs=None,
                 trace=trace,

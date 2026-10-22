@@ -1047,8 +1047,10 @@ Inline: `position.position_type=text`, `new_path` — путь находки; �
 `cancelled` / `superseded`, даже когда более старая версия всё ещё содержит эту
 голову. Пока первая версия — голова прогона, в тело сводки один раз попадают только
 те inline, которые эта попытка ещё не опубликовала. Прочие сбои: `gitlab_forbidden`
-(401, 403, 404, 409, 422 с position, исчерпание пагинации discussions) или
-`gitlab_publish_failed` (transport, 5xx, 429, 400 без position после retry).
+(401, 403, 404, 409, 422 **без** признаков position в теле, исчерпание пагинации
+discussions) или `gitlab_publish_failed` (transport, 5xx, 429, 400/422 без position
+после retry). HTTP 400/422 **с** признаками position — coordinates error и один
+body-only fallback (строка выше), а не `gitlab_forbidden`.
 Коды `github_*` для GitLab не используются, и шлюз
 check-run GitHub для такого прогона не вызывается. Запись трейса —
 `gitlab.publish_review`.
