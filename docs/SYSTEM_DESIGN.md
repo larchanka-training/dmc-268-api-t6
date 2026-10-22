@@ -35,7 +35,7 @@ runtime-профиль требуют отдельной реализации; �
 | Р-8 | `usage_events` (токены, деньги, модель) — с первого вызова LLM, только вставка | Восстановить задним числом нельзя; основа для `CreditLedger` |
 | Р-9 | Бот односторонний: публикует, на комментарии не отвечает; **обязательно** игнорирует собственные события | Скорость запуска; защита от цикла «бот → CI → бот» |
 | Р-10 | Триггер — **конъюнкция двух событий в любом порядке**: на PR стоит лейбл `ai-review` ∧ CI успешен для текущего `head_sha`. Бота нельзя запросить ревьюером: GitHub отвечает 201 с пустым `requested_reviewers`, событие `review_requested` не приходит ([#37](https://github.com/larchanka-training/dmc-268-api-t6/issues/37#issuecomment-5874776355)). **После пуша — авто-повтор**, пока PR открыт и стоит лейбл (наш флаг `ai_review_labeled`): бот лейбл не снимает; флаг сверяется с текущими лейблами PR, поэтому его снимает `unlabeled` не от нашего бота, а закрытие PR флаг не трогает — новые Run для закрытого PR не создаются (решения техлида по #20, OQ-1, по #37 и #56). Условие «CI успешен» и sweep «2 мин без CI» — §6.1, [PIPELINE_SPEC](PIPELINE_SPEC.md) §8 | Решение мита; события независимы, порядок не гарантирован. Лейбл ставит только участник с правом triage и выше: внешний автор PR не запустит ревью и не потратит бюджет LLM |
-| Р-11 | Провайдер VCS — за портом `VcsProvider`. Публикация обсуждений реализована для GitHub и GitLab; Bitbucket не реализован. Приём GitLab (вебхуки, diff, блобы) не реализован | Запись в GitLab — discussions и маркеры `findings_hash` (§8.4, #97). Модель [CONTEXT_AND_VERIFICATION_SPEC](CONTEXT_AND_VERIFICATION_SPEC.md) §9.5 и §10 этот код не исполняет |
+| Р-11 | Провайдер VCS — за портом `VcsProvider`. Публикация обсуждений реализована для GitHub и GitLab; Bitbucket не реализован. Приём GitLab (вебхуки, diff, блобы) не реализован | Запись в GitLab — discussions, маркеры `findings_hash` и inline `position` по §9.5 (#171); ключи §10 / отдельные receipts операций — не реализованы |
 | Р-12 | Один monorepo и пять независимо собираемых сервисов (`portal-api`, `auth-api`, `webhook-api`, `worker`, `publisher`) с собственными зависимостями; у роли `webhook-api` второй процесс — `webhook-worker` (тот же образ, `python -m app.webhook_worker`, §4) | Изоляция релизов и зависимостей без потери единого lock-файла и локального окружения |
 | Р-13 | **RAG v1 — граф символов репозитория с указателями** ([ADR 0001](adr/0001-graph-rag-v1.md)). Worker получает контекст через порт `ContextProvider`: детерминированный сборщик L0–L4 и `RagContextProvider`, возвращающий тот же `ContextPayload`. Индекс RAG v1 хранит по репозиторию определения, ссылки и импорты символов и рёбра между ними с указателями — путь, диапазон строк, `blob_sha`, `indexed_commit_sha`; без embeddings и без текста кода. Индексируются только репозитории с включённым тумблером RAG (по умолчанию выключен). v2 (векторный поиск, embeddings) — только после гейта eval #146 | Граф даёт то, чего нет у L4: обратные рёбра — кто импортирует или использует изменённый символ. Нет затрат и рисков embeddings/vector DB, код клиента сверх 7-дневного кэша не хранится; LLM, post-processing и публикация не меняются. Решение #19 «RAG не в MVP» пересмотрено эпиком #139 |
 | Р-14 | Успешный прогон — статус **`succeeded`** везде: домен (`RunState.SUCCEEDED`), PG enum `run_state`, API, Zod фронтенда. Полный набор: `queued\|running\|publishing\|succeeded\|failed\|cancelled\|skipped` (§6.4); `completed` — только события и статусы GitHub (`check_suite`, `check_run`, `workflow_run`) | Одно имя от БД до UI без маппинга; код и миграция уже используют `succeeded` и `publishing` |
@@ -1019,40 +1019,45 @@ GitLab пишет discussions через `GitLabMergeRequestDiscussionGateway`: 
 `head_commit_sha` первой версии с головой прогона. Совпадение только с более
 поздней строкой списка не разрешает публикацию: прогон становится `cancelled` /
 `superseded`, и POST не выполняется. Строка с головой прогона задаёт SHA позиции.
-Inline — только новая сторона: `position.position_type=text`,
-`old_path` и `new_path` равны пути находки, `new_line` — строка находки. Полей
-`old_line`, `line_range` и `line_code` нет. Сводка — одно discussion без `position`.
+Перед **каждым** POST discussion шлюз снова сверяет первую версию с головой прогона.
+Inline: `position.position_type=text`, `new_path` — путь находки; при rename
+`old_path` берётся из DiffMap. На context-строках добавляется `old_line`; диапазон
+задаёт `line_range` с `line_code`, `type` (`new` для added, `old` иначе) и номерами
+строк по CONTEXT §9.5. Сводка — одно discussion без `position`.
 Маркеры, дословно:
 
 - сводка: `<!-- ai-review findings_hash={hash} summary -->`
 - inline: `<!-- ai-review findings_hash={hash} inline={path}:{line} finding={id} -->`
 
-`{id}` — первые 16 hex-символов SHA-256 от текста inline-комментария (заголовок,
-тело и suggestion). Две находки на одной строке с разным текстом получают разные
-маркеры. Перед циклом inline шлюз ищет маркер сводки: уже опубликованная сводка
-этого `findings_hash`, в том числе сводка fallback с перенесёнными находками,
-завершает публикацию и не создаёт новые discussions.
+`{id}` — первые 16 hex-символов SHA-256 от `comment_body(title, body, suggestion)`
+(без GitLab-специфичного `suggestion:-N+0`). Две находки на одной строке с разным
+текстом получают разные маркеры. Перед циклом inline шлюз ищет маркер сводки: уже
+опубликованная сводка этого `findings_hash` завершает публикацию без новых POST;
+размещение inline vs тело восстанавливается по inline-маркерам в discussions.
 
 Перед созданием список discussions читается с пагинацией. Усечённый или битый
 список — повторяемая ошибка, а не «ничего не опубликовано». Тот же `findings_hash`
 не создаёт вторую сводку и вторую копию inline. Идентификаторы discussion в
 `comments` не пишутся (`comment_ids` пустой): повтор узнаёт публикацию по маркеру,
-а не по `github_comment_id`. Отказ позиции — HTTP 400, в тексте которого по границам
-слова есть `line_code`, `line`, `position` или `diff refs`. Отдельное слово `diff` и
-`deadline` таким отказом не являются. После такого 400 шлюз ещё раз читает versions
+а не по `github_comment_id`. Отказ позиции — HTTP 400 или 422, в тексте которого по
+границам слова есть `line_code`, `line`, `position` или `diff refs`. Отдельное слово
+`diff` и `deadline` таким отказом не являются. После такого отказа шлюз ещё раз читает versions
 и снова сравнивает первую версию с головой прогона. Если за время публикации голова
 сменилась, прогон становится
 `cancelled` / `superseded`, даже когда более старая версия всё ещё содержит эту
 голову. Пока первая версия — голова прогона, в тело сводки один раз попадают только
-те inline, которые эта попытка ещё не опубликовала. Прочие сбои пишут на прогон `gitlab_forbidden` (401 и 403) или
-`gitlab_publish_failed`. Коды `github_*` для GitLab не используются, и шлюз
+те inline, которые эта попытка ещё не опубликовала. Прочие сбои: `gitlab_forbidden`
+(401, 403, 404, 409, 422 с position, исчерпание пагинации discussions) или
+`gitlab_publish_failed` (transport, 5xx, 429, 400 без position после retry).
+Коды `github_*` для GitLab не используются, и шлюз
 check-run GitHub для такого прогона не вызывается. Запись трейса —
 `gitlab.publish_review`.
 
-[CONTEXT_AND_VERIFICATION_SPEC](CONTEXT_AND_VERIFICATION_SPEC.md) §9.5 и §10
-описывают более позднюю модель (`line_code`, `line_range`, отдельный receipt
-каждой операции, `publication_key`). Этот код её не реализует. Абзацы ниже —
-эта целевая модель #107, а не контракт текущего адаптера.
+[CONTEXT_AND_VERIFICATION_SPEC](CONTEXT_AND_VERIFICATION_SPEC.md) §9.5 задаёт
+`line_code` и `line_range` для inline GitLab; §10 описывает `publication_key` и
+отдельный receipt каждой операции — последнее этот адаптер пока не реализует.
+Абзацы ниже — целевая модель #107 для ключей и recovery, а не дословный контракт
+текущего POST-цикла.
 
 Перед `publishing` сохраняются final result и каждый точный payload. Ключ публикации
 включает provider/repository/PR, run_id, head_sha, diff_snapshot_id и final result

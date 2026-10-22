@@ -274,7 +274,10 @@ def _classify_anchor(
     if not isinstance(anchor, Anchor) and finding.start_line is not None:
         single = resolve_anchor(diff_map, path=finding.path, start_line=None, line=finding.line)
         if isinstance(single, Anchor):
-            finding = finding.model_copy(update={"start_line": None})
+            updates: dict[str, object] = {"start_line": None}
+            if finding.suggestion is not None:
+                updates["suggestion"] = None
+            finding = finding.model_copy(update=updates)
             anchor = single
     if isinstance(anchor, Anchor):
         return finding, "inline"

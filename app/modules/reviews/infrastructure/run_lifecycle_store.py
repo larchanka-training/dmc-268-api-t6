@@ -398,7 +398,7 @@ class SqlAlchemyRunLifecycleStore:
         review_id: int,
         comment_ids: tuple[int, ...],
         findings_hash: str,
-        moved_to_body_findings: tuple[tuple[str, int], ...] = (),
+        moved_to_body_finding_ids: tuple[UUID, ...] = (),
         now: datetime,
     ) -> str | None:
         """T14 under the Run lock; a cancel or push seen during the POST wins (T15).
@@ -425,11 +425,10 @@ class SqlAlchemyRunLifecycleStore:
         pr_head_sha, pr_state = pr.head_sha, pr.state
         findings = await self._published_findings(run_id)
         inline = [item for item in findings if item.inline_comment]
-        if moved_to_body_findings:
-            moved = frozenset(moved_to_body_findings)
+        if moved_to_body_finding_ids:
+            moved = frozenset(moved_to_body_finding_ids)
             for item in inline:
-                line = item.line_end or item.line_start
-                if (item.file_path, line) in moved:
+                if item.id in moved:
                     item.inline_comment = False
         elif len(comment_ids) == len(inline):
             # GitHub returns review comments in submission order.

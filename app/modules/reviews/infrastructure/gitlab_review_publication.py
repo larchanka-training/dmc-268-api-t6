@@ -6,6 +6,7 @@ import hashlib
 import re
 from datetime import timedelta
 from typing import Any
+from uuid import UUID
 
 import httpx
 
@@ -17,6 +18,7 @@ from app.modules.reviews.application.publish_run_review import (
 )
 from app.modules.reviews.application.review_output import (
     PublishedFinding,
+    comment_body,
     gitlab_comment_body,
 )
 
@@ -33,13 +35,7 @@ def _summary_marker(findings_hash: str) -> str:
 def _finding_id(finding: PublishedFinding) -> str:
     """Identity of one inline note. Path and line alone collide on one line."""
     return hashlib.sha256(
-        gitlab_comment_body(
-            finding.title,
-            finding.body,
-            finding.suggestion,
-            start_line=finding.start_line,
-            line=finding.line,
-        ).encode()
+        comment_body(finding.title, finding.body, finding.suggestion).encode()
     ).hexdigest()[:16]
 
 
@@ -163,6 +159,21 @@ def _note_bodies(discussions: list[dict[str, Any]]) -> list[tuple[int | None, st
     return notes
 
 
+def _posted_inline_finding_ids(
+    discussions: list[dict[str, Any]],
+    findings_hash: str,
+    findings: tuple[PublishedFinding, ...],
+) -> frozenset[UUID]:
+    posted: set[UUID] = set()
+    for finding in findings:
+        if finding.finding_id is None:
+            continue
+        marker = _inline_marker(findings_hash, finding)
+        if _note_id_for_marker(discussions, marker) is not None:
+            posted.add(finding.finding_id)
+    return frozenset(posted)
+
+
 def _note_id_for_marker(discussions: list[dict[str, Any]], marker: str) -> int | None:
     found = False
     for note_id, body in _note_bodies(discussions):
@@ -203,7 +214,12 @@ class GitLabMergeRequestDiscussionGateway:
             summary = _summary_marker(submission.findings_hash)
             existing = _note_id_for_marker(discussions, summary)
             if existing is not None:
-                return SubmittedReview(existing, ())
+                posted: frozenset[UUID] | None = None
+                if any(item.finding_id is not None for item in submission.findings):
+                    posted = _posted_inline_finding_ids(
+                        discussions, submission.findings_hash, submission.findings
+                    )
+                return SubmittedReview(existing, (), posted_inline_finding_ids=posted)
             pending = list(submission.findings)
             for finding in submission.findings:
                 marker = _inline_marker(submission.findings_hash, finding)
@@ -241,7 +257,14 @@ class GitLabMergeRequestDiscussionGateway:
                 body=f"{submission.body}\n\n{summary}",
                 position=None,
             )
-            return SubmittedReview(summary_id, ())
+            posted_inline: frozenset[UUID] | None = None
+            if any(finding.finding_id is not None for finding in submission.findings):
+                posted_inline = frozenset(
+                    finding.finding_id
+                    for finding in submission.findings
+                    if finding.finding_id is not None
+                )
+            return SubmittedReview(summary_id, (), posted_inline_finding_ids=posted_inline)
         except httpx.TransportError as exc:
             raise PublishError("retryable", f"GitLab request failed: {exc}") from exc
 

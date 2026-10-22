@@ -21,6 +21,8 @@ from app.modules.reviews.application.review_output import (
 )
 from app.modules.reviews.application.vcs_diff import PullRequestLocator, VcsFile, VcsPullRequest
 from app.modules.reviews.application.verdict import SeverityThresholdValue
+from tests.test_diff_anchor import _diff_map
+from tests.test_diff_anchor import _file as anchor_file
 
 
 def _added_file_diff_map(path: str, line_count: int) -> DiffMap:
@@ -741,6 +743,41 @@ def test_findings_post_processor_v2_allows_valid_and_rejects_malformed_rules() -
     # malformed service-defaults are nulled out
     assert result.inline[2].finding.rule_name is None
     assert result.inline[3].finding.rule_name is None
+
+
+def test_collapsed_range_drops_multiline_suggestion() -> None:
+    """Cross-hunk range narrowed to one line must not keep an applicable suggestion (#171)."""
+    diff_map = _diff_map(anchor_file("src/app.py"))
+    result = FindingsPostProcessor.from_default_patterns().process(
+        ReviewOutput(
+            findings=[
+                ReviewFinding(
+                    path="src/app.py",
+                    line=20,
+                    start_line=6,
+                    severity="high",
+                    category="correctness",
+                    title="Spanning hunk",
+                    body="Range crosses hunks.",
+                    suggestion="x\ny",
+                    confidence=0.9,
+                    rule_name=None,
+                )
+            ],
+            summary=ReviewSummary(
+                problem="Cross-hunk range is invalid.",
+                done_well="Tests cover the edge.",
+                effort="none",
+            ),
+        ),
+        diff_map=diff_map,
+        rule_names=frozenset(),
+    )
+
+    assert len(result.inline) == 1
+    assert result.inline[0].finding.start_line is None
+    assert result.inline[0].finding.line == 20
+    assert result.inline[0].finding.suggestion is None
 
 
 def test_line_absent_in_diff_map_routes_to_body_only() -> None:

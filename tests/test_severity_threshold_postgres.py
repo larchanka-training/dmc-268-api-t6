@@ -57,7 +57,8 @@ async def _prepare(factory: async_sessionmaker[AsyncSession], threshold: str) ->
         await session.execute(
             text(
                 "INSERT INTO code_change_diffs (id, run_id, code_change_id, head_sha, filename, "
-                "patch) VALUES (:id, :run, :pr, :head, :path, :patch)"
+                "patch, additions, deletions) "
+                "VALUES (:id, :run, :pr, :head, :path, :patch, :additions, :deletions)"
             ),
             {
                 "id": uuid4(),
@@ -66,6 +67,8 @@ async def _prepare(factory: async_sessionmaker[AsyncSession], threshold: str) ->
                 "head": HEAD,
                 "path": _PATH,
                 "patch": _PATCH,
+                "additions": 1,
+                "deletions": 0,
             },
         )
 
