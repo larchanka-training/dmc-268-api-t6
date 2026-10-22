@@ -1611,19 +1611,21 @@ review. Подтверждённый legacy-object связывается с run
   происхождение теряется. `HttpGitHubVcsProvider` уже пагинирует files, сверяет
   количество и повторно читает PR; это следует сохранить.
 - `FindingsPostProcessor` на publish path проверяет якоря через DiffMap +
-  `resolve_anchor` (не `parse_unified_diff` / `hunk_lines`); может сбросить
-  `start_line`, сохранив suggestion, и не знает manifest фактического ввода.
-  Это меняется независимо от включения LEFT.
+  `resolve_anchor` (не `parse_unified_diff` / `hunk_lines`); при сведении диапазона
+  к одной строке сбрасывает `start_line` и применяемый `suggestion`. Manifest
+  фактического ввода и LEFT — вне #171.
 - `github_review_publication` жёстко выставляет RIGHT, не отправляет `start_side`,
-  трактует почти любой 422 как coordinates и ищет marker только на первой странице.
-  Проверка актуального head перед POST уже есть; её нужно расширить до версии diff
-  и дополнять восстановлением неоднозначного исхода.
-- `PublishRunReview` меняет body после coordinates rejection, сохраняя
-  `findings_hash`; новый журнал должен хранить отдельные неизменяемые варианты.
-  `run_lifecycle_store.complete_publication` связывает comments по порядку и
-  равному количеству; нужен явный mapping подтверждённых remote объектов.
-- GitLab-адаптер, новая карта/manifest, новые поля публикации и LEFT здесь только
-  специфицированы. В рамках подготовки документов runtime-код не меняется.
+  различает coordinates и прочие 422 по тексту/полям; marker ищет с полной
+  пагинацией reviews. Проверка head перед POST есть; восстановление размещения при
+  redelivery — по числу inline-комментариев существующего review (#171).
+- `PublishRunReview` после coordinates rejection один раз переносит unposted (GitLab)
+  или все inline (GitHub) в body, сохраняя `findings_hash`; второй coordinates →
+  `*_publish_failed`. `complete_publication` хранит размещение по `finding.id` и
+  объединяет fallback с фактом провайдера (`posted_inline_finding_ids`). Отдельные
+  неизменяемые варианты payload в журнале — целевая модель §10, не реализована.
+- GitLab-адаптер (#171) заполняет `position` по §9.5 из DiffMap, сверяет head перед
+  каждым POST, классифицирует 400/422 с position как coordinates. Ключи §10 /
+  отдельные receipts операций и LEFT — не реализованы.
 
 ## 11. Приёмочные сценарии и оценка качества
 

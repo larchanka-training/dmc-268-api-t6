@@ -101,6 +101,7 @@ class Store:
     state: str = "publishing"
     error_code: str | None = None
     open_units: int = 0
+    fail_complete_once: bool = False
     completed: list[tuple[int, tuple[int, ...], tuple[UUID, ...]]] = field(default_factory=list)
     inline_placement: dict[UUID, bool] = field(default_factory=dict)
 
@@ -121,6 +122,9 @@ class Store:
         moved_to_body_finding_ids: tuple[UUID, ...] = (),
         now: datetime,
     ) -> str | None:
+        if self.fail_complete_once:
+            self.fail_complete_once = False
+            raise RuntimeError("simulated crash before publication commit")
         assert findings_hash == HASH
         for key in moved_to_body_finding_ids:
             if key in self.inline_placement:
@@ -856,34 +860,69 @@ def test_partial_coordinate_fallback_keeps_posted_inline_for_check_run_counts() 
     assert "в теле ревью: 1" in check_runs.views[-1].summary
 
 
-def test_redelivery_after_coordinate_fallback_preserves_inline_placement() -> None:
-    other = PublishedFinding(
-        path="src/other.py",
-        line=9,
-        start_line=None,
-        severity="medium",
-        category="correctness",
-        title="Narrow check",
-        body="The guard is too wide.",
-        suggestion=None,
-        confidence=0.8,
-        rule_name=None,
-        finding_id=OTHER_FINDING_ID,
+def test_github_redelivery_after_failed_complete_restores_body_only_placement() -> None:
+    """Body-only fallback + crash before commit; redelivery reads 0 comments → all in body."""
+    posts = 0
+    marker = f"<!-- ai-review findings_hash={HASH} -->"
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        nonlocal posts
+        path = request.url.path
+        if request.method == "GET" and path.endswith("/pulls/7"):
+            return httpx.Response(200, json={"head": {"sha": HEAD}})
+        if request.method == "GET" and path.endswith("/pulls/7/reviews"):
+            if posts >= 2:
+                return httpx.Response(200, json=[{"id": 55, "body": f"summary\n\n{marker}"}])
+            return httpx.Response(200, json=[])
+        if request.method == "GET" and path.endswith("/reviews/55/comments"):
+            return httpx.Response(200, json=[])
+        if request.method == "POST" and path.endswith("/reviews"):
+            posts += 1
+            if posts == 1:
+                return httpx.Response(
+                    422,
+                    json={
+                        "message": "Unprocessable",
+                        "errors": ["Line must be part of the diff"],
+                    },
+                )
+            return httpx.Response(200, json={"id": 55})
+        raise AssertionError(f"unexpected {request.method} {request.url}")
+
+    gateway = GitHubPullRequestReviewGateway(
+        client=httpx.AsyncClient(
+            base_url="https://api.github.test", transport=httpx.MockTransport(respond)
+        ),
+        token_provider=_Tokens(),
     )
-    store = Store(gitlab_context(findings=(FINDING, other)))
-    gitlab = GitLabReviews(
-        [
-            PublishError("coordinates", "line outside diff", http_status=400, unposted=(other,)),
-            SubmittedReview(880, ()),
-            SubmittedReview(881, ()),
-        ],
-        store,
-    )
-    run(store, Reviews([]), gitlab=gitlab)
-    placement = dict(store.inline_placement)
-    store.state = "publishing"
-    run(store, Reviews([]), gitlab=gitlab)
-    assert store.inline_placement == placement
+    store = Store(context(), fail_complete_once=True)
+    trace, check_runs = Trace(), CheckRuns()
+
+    async def publish() -> None:
+        await PublishRunReview(
+            uow_factory=lambda: Uow(store),
+            reviews=gateway,
+            check_runs=check_runs,
+            trace=trace,
+            now=lambda: NOW,
+        ).execute(POINTER)
+
+    with pytest.raises(RuntimeError, match="simulated crash"):
+        asyncio.run(publish())
+
+    assert store.state == "publishing"
+    assert store.inline_placement[FINDING_ID] is True
+    assert posts == 2
+
+    asyncio.run(publish())
+
+    assert store.state == "succeeded"
+    assert posts == 2
+    assert store.inline_placement[FINDING_ID] is False
+    assert store.completed[-1][2] == (FINDING_ID,)
+    assert check_runs.views[-1].summary is not None
+    assert "inline: 0" in check_runs.views[-1].summary
+    assert "в теле ревью: 1" in check_runs.views[-1].summary
 
 
 def test_unsupported_provider_stays_publishing_without_a_gateway_call() -> None:

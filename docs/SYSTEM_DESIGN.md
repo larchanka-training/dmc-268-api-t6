@@ -1095,11 +1095,10 @@ GitLab пишет discussions через `GitLabMergeRequestDiscussionGateway`: 
 значения уходят как `base_sha`, `start_sha` и `head_sha`, и `head_sha` не копируется
 в `base_sha` или `start_sha`. Если такой версии нет, прогон становится
 `cancelled` / `superseded`. GitLab отдаёт текущую версию первой и сохраняет
-предыдущие следом. Перед первой новой discussion шлюз сравнивает
-`head_commit_sha` первой версии с головой прогона. Совпадение только с более
+предыдущие следом. Перед **каждым** POST discussion шлюз сравнивает
+`head_commit_sha` **первой** версии списка с головой прогона. Совпадение только с более
 поздней строкой списка не разрешает публикацию: прогон становится `cancelled` /
 `superseded`, и POST не выполняется. Строка с головой прогона задаёт SHA позиции.
-Перед **каждым** POST discussion шлюз снова сверяет первую версию с головой прогона.
 Inline: `position.position_type=text`, `new_path` — путь находки; при rename
 `old_path` берётся из DiffMap. На context-строках добавляется `old_line`; диапазон
 задаёт `line_range` с `line_code`, `type` (`new` для added, `old` иначе) и номерами
@@ -1126,11 +1125,13 @@ Inline: `position.position_type=text`, `new_path` — путь находки; �
 сменилась, прогон становится
 `cancelled` / `superseded`, даже когда более старая версия всё ещё содержит эту
 голову. Пока первая версия — голова прогона, в тело сводки один раз попадают только
-те inline, которые эта попытка ещё не опубликовала. Прочие сбои: `gitlab_forbidden`
-(401, 403, 404, 409, 422 **без** признаков position в теле, исчерпание пагинации
-discussions) или `gitlab_publish_failed` (transport, 5xx, 429, 400/422 без position
-после retry). HTTP 400/422 **с** признаками position — coordinates error и один
-body-only fallback (строка выше), а не `gitlab_forbidden`.
+те inline, которые эта попытка ещё не опубликовала. Второй coordinates в той же
+попытке после body-only fallback → `gitlab_publish_failed`. Прочие сбои:
+`gitlab_forbidden` (401, 403, 404, 409, 422 **без** признаков position в теле,
+исчерпание пагинации discussions) или `gitlab_publish_failed` (transport, 5xx, 429,
+400 **без** position после retry ×3). HTTP 400/422 **с** признаками position —
+coordinates error и один body-only fallback (строка выше), а не `gitlab_forbidden`;
+422 без position — сразу `gitlab_forbidden`, без retry.
 Коды `github_*` для GitLab не используются, и шлюз
 check-run GitHub для такого прогона не вызывается. Запись трейса —
 `gitlab.publish_review`.
