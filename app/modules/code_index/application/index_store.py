@@ -260,7 +260,10 @@ class CodeIndexStore(Protocol):
         becomes `commit_sha`, which clears a target a late delivery left behind, and the
         wake-up marker is set when the publication differs from (`branch`,
         `commit_sha`), when there is none, or when `versions_current` rejects the
-        profile of the locked row. Returns whether it set the marker.
+        profile of the locked row. A terminal refusal of this head gets no marker: a
+        `last_error_code` outside `HEALABLE_ERROR_CODES` with the target equal to
+        `commit_sha` before the rewrite, current versions and no indexed branch or
+        `branch`. Returns whether it set the marker.
         """
         ...
 

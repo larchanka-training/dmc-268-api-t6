@@ -126,6 +126,7 @@ from tests.test_code_index_indexer_postgres import (
     _VERSIONS,
     Branch,
     Indexer,
+    Link,
     Tree,
     Vcs,
     Wakeups,
@@ -973,6 +974,60 @@ def test_ac3_the_reconcile_recovers_an_index_whose_wake_up_was_lost(
             BuildMode.INCREMENTAL if published else BuildMode.FULL,
             head,
         )
+
+    _race(fleet, scenario)
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize(
+    ("rules", "code"),
+    [
+        pytest.param(b"x" * 65_537, "policy_document_too_large", id="over-the-limit"),
+        pytest.param(Link("README.md"), "policy_document_type_unsupported", id="not-a-blob"),
+    ],
+)
+def test_ac3_the_reconcile_rebuilds_a_policy_refusal_once_and_then_only_on_a_new_head(
+    fleet: _Fleet, rules: bytes | Link, code: str
+) -> None:
+    async def scenario(indexer: _Indexer, database: _Database) -> None:
+        index = fleet.index
+        await _turn_on(fleet)
+        head = indexer.branch.push({**_PACKAGE, ".review/rules.md": rules})
+        assert await _dispatch(index) == [(index.a, 1)]
+        refused = await indexer.build(index.a)
+
+        # The enable wrote no target, so only the first pass finds the head new.
+        woken: list[list[tuple[UUID, int]]] = []
+        rebuilt = []
+        for _ in range(2):
+            await _reconcile(index, indexer)
+            woken.append(await _dispatch(index))
+            if woken[-1]:
+                rebuilt.append(await indexer.build(index.a))
+        state = await indexer.state(index.a)
+        fixed = indexer.branch.push(_PACKAGE)
+        await _reconcile(index, indexer)
+        fixed_woken = await _dispatch(index)
+        outcome = await indexer.build(index.a)
+
+        assert (refused.status, refused.error_code) == (BuildStatus.RELEASED, code)
+        assert woken == [[(index.a, 1)], []]
+        assert [(item.status, item.error_code) for item in rebuilt] == [
+            (BuildStatus.RELEASED, code)
+        ]
+        assert (
+            state.status,
+            state.indexed_commit_sha,
+            state.target_commit_sha,
+            state.last_error_code,
+        ) == (IndexStatus.EMPTY, None, head, code)
+        assert fixed_woken == [(index.a, 1)]
+        assert (outcome.status, outcome.mode, outcome.commit_sha) == (
+            BuildStatus.PUBLISHED,
+            BuildMode.FULL,
+            fixed,
+        )
+        assert len(indexer.jobs) == 3
 
     _race(fleet, scenario)
 
