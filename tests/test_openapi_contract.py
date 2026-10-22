@@ -95,6 +95,7 @@ UI_ZOD_COMPONENTS = {
     "findingView": "FindingView",
     "runListPage": "RunListPage",
     "runUpdatedEvent": "RunUpdatedEvent",
+    "runStepEvent": "RunStepEvent",
     "repository": "Repository",
     "repositoryUpdate": "RepositoryUpdate",
     "rawFileDiff": "RawFileDiff",
