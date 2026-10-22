@@ -55,8 +55,12 @@ without a fourth database claim. Publishing retains its saved output and existin
 idempotent recovery path. Index work uses the existing fenced cancellation lease
 release in `BuildRepositoryIndex`.
 
-A pipeline that resists cancellation keeps its lease while cleanup waits. The
-worker also explicitly joins owned pipelines that outlive a normal watchdog or
+The shutdown acceptance criterion distinguishes cooperative work from work that
+resists cancellation. Cooperative work completes or releases its owned lease after
+quiescence. Work that remains active despite cancellation retains ownership and
+resources until the existing 35-second process backstop; ordinary lease expiry,
+owner fencing and reconciliation then recover it. An active writer's lease is
+never expired early. The worker also explicitly joins owned pipelines that outlive a normal watchdog or
 failure outcome before closing resources. Normal watchdog outcomes, retry timing
 and counters are unchanged. A forever-pending pipeline reaches the process
 backstop with resources still open; cleanup is not reported as committed.

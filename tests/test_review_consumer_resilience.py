@@ -3,24 +3,35 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
+from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 from uuid import UUID, uuid4
 
 import aio_pika
+import httpx
 import pytest
 from aio_pika.abc import AbstractExchange, AbstractIncomingMessage, AbstractQueue
 from aiormq.abc import AbstractChannel, DeliveredMessage
 from pamqp.commands import Basic
 from pamqp.header import ContentHeader
 
-from app.modules.reviews.application.handle_review_run import DeliveryOutcome
+from app.modules.reviews.application.handle_review_run import (
+    ClaimedAttempt,
+    DeliveryOutcome,
+    HandleReviewRun,
+)
 from app.modules.reviews.application.queue_messages import ReviewPublishPointer
+from app.modules.reviews.application.vcs_diff import PullRequestLocator
 from app.modules.reviews.infrastructure import amqp
+from app.modules.reviews.infrastructure.github_vcs import HttpGitHubVcsProvider
+from app.modules.reviews.infrastructure.vcs_failures import ClassifiedVcsProvider
+from tests.test_review_run_worker import NOW, RUN, FakeRun, FakeStore, FakeUow, RetryQueue
 
 _EXAMPLES = Path(__file__).resolve().parents[1] / "contracts" / "examples"
 
@@ -310,3 +321,107 @@ def test_guard_preserves_republish_ack_and_fallback_nack_failure_behavior(
         assert failed_channel.nacked == []
         assert len(exchange.published) == 1
         assert exchange.published[0].headers == {"x-attempt": 1}
+
+
+@pytest.mark.parametrize(
+    ("retry_after", "bucket", "delay"),
+    [
+        pytest.param("later", "30s", timedelta(seconds=30), id="malformed"),
+        pytest.param("86400000000000", "10m", timedelta(minutes=10), id="timedelta-overflow"),
+        pytest.param("9" * 5000, "10m", timedelta(minutes=10), id="integer-digit-limit"),
+        pytest.param("١٢٠", "30s", timedelta(seconds=30), id="unicode-decimal"),
+    ],
+)
+def test_retry_after_failure_uses_domain_retry_and_consumer_processes_next_run(
+    retry_after: str, bucket: str, delay: timedelta, caplog: pytest.LogCaptureFixture
+) -> None:
+    async def scenario() -> None:
+        first_run, next_run = FakeRun(), FakeRun()
+        retry, next_retry = RetryQueue(), RetryQueue()
+        exchange = Exchange()
+        pub = publisher(exchange)
+        first_channel, next_channel = Channel(), Channel()
+        next_id = UUID(int=2)
+        pipeline_calls: list[UUID] = []
+        requests: list[httpx.Request] = []
+        body = json.loads((_EXAMPLES / "review.run.v1.json").read_bytes())
+        first_message = delivery(
+            "review.run.fast",
+            first_channel,
+            body=json.dumps({**body, "message_id": str(RUN), "run_id": str(RUN)}).encode(),
+        )
+        next_message = delivery(
+            "review.run.fast",
+            next_channel,
+            tag=2,
+            body=json.dumps({**body, "message_id": str(next_id), "run_id": str(next_id)}).encode(),
+        )
+
+        class Tokens:
+            async def get_installation_access_token(self, installation_external_id: int) -> str:
+                return "fake-installation-token"
+
+        def respond(request: httpx.Request) -> httpx.Response:
+            requests.append(request)
+            return httpx.Response(429, headers=[(b"Retry-After", retry_after.encode("utf-8"))])
+
+        async with httpx.AsyncClient(
+            base_url="https://api.github.test", transport=httpx.MockTransport(respond)
+        ) as client:
+            provider = ClassifiedVcsProvider(
+                HttpGitHubVcsProvider(client=client, token_provider=Tokens())
+            )
+
+            async def checkpoint() -> None:
+                return None
+
+            async def pipeline(claimed: ClaimedAttempt) -> bool:
+                pipeline_calls.append(claimed.run_id)
+                if claimed.run_id == RUN:
+                    await provider.get_pull_request(
+                        PullRequestLocator(17, "octo/repo", 7), checkpoint=checkpoint
+                    )
+                return True
+
+            def use_case(run: FakeRun, retries: RetryQueue) -> HandleReviewRun:
+                store = FakeStore(run)
+                return HandleReviewRun(
+                    uow_factory=lambda: FakeUow(store),
+                    pipeline=pipeline,
+                    retry_queue=retries,
+                    check_runs=None,
+                    worker_id="consumer-test",
+                    now=lambda: NOW,
+                )
+
+            handlers = {RUN: use_case(first_run, retry), next_id: use_case(next_run, next_retry)}
+
+            async def execute(run_id: UUID) -> DeliveryOutcome:
+                return await handlers[run_id].execute(run_id)
+
+            async def dispatch(message: AbstractIncomingMessage) -> None:
+                await amqp.handle_run_delivery(message, execute, pub)
+
+            await amqp.consume(
+                cast(AbstractQueue, Queue("review.run.fast", [first_message, next_message])),
+                dispatch,
+            )
+
+        assert first_run.state == "queued" and first_run.attempt == 1
+        assert first_run.available_at == NOW + delay
+        assert first_run.lease_until is None
+        assert first_run.notifications == ["running", "queued"]
+        assert retry.published == [(bucket, 2)]
+        assert next_retry.published == []
+        assert next_run.attempt == 1 and pipeline_calls == [RUN, next_id]
+        assert len(requests) == 1 and requests[0].url.path == "/repos/octo/repo/pulls/7"
+        assert first_message.processed and next_message.processed
+        assert first_channel.acked == [1] and next_channel.acked == [2]
+        assert first_channel.nacked == [] and next_channel.nacked == []
+        assert exchange.published == []
+        assert "x-attempt" not in first_message.headers
+        assert "x-attempt" not in next_message.headers
+
+    asyncio.run(scenario())
+    assert "failed with diff_fetch_failed" in caplog.text
+    assert "internal_error" not in caplog.text

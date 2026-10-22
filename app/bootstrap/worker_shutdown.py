@@ -12,6 +12,8 @@ from contextlib import asynccontextmanager, suppress
 from types import FrameType
 from typing import Any
 
+from app.common.infrastructure.task_cancellation import cancel_once
+
 _PROCESS_TIMEOUT = 35.0
 _DRAIN_TIMEOUT = 20.0
 _CLEANUP_TIMEOUT = 10.0
@@ -104,11 +106,6 @@ async def stop_during_startup(stop: asyncio.Event | None) -> AsyncIterator[async
         await asyncio.gather(watcher, return_exceptions=True)
 
 
-def _cancel_once(task: asyncio.Task[None]) -> None:
-    if not task.done() and not task.cancelling():
-        task.cancel()
-
-
 async def supervise_shutdown(
     stop: asyncio.Event,
     consumers: list[asyncio.Task[None]],
@@ -120,12 +117,12 @@ async def supervise_shutdown(
     drain_deadline = loop.time() + _DRAIN_TIMEOUT
     cleanup_deadline = drain_deadline + _CLEANUP_TIMEOUT
     for task in background:
-        _cancel_once(task)
+        cancel_once(task)
     # wait observes TaskGroup children without cancelling a gather or their parent.
     # That avoids a second cancellation interrupting retained intake/lease cleanup.
     _, pending = await asyncio.wait(consumers, timeout=max(0, drain_deadline - loop.time()))
     for task in pending:
-        _cancel_once(task)
+        cancel_once(task)
     remaining = {task for task in (*consumers, *background) if not task.done()}
     if remaining:
         _, remaining = await asyncio.wait(remaining, timeout=max(0, cleanup_deadline - loop.time()))

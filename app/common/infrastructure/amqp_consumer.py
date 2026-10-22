@@ -9,12 +9,9 @@ from collections.abc import Awaitable, Callable
 
 from aio_pika.abc import AbstractIncomingMessage, AbstractQueue
 
+from app.common.infrastructure.task_cancellation import cancel_once
+
 _LOGGER = logging.getLogger(__name__)
-
-
-def _cancel_once(task: asyncio.Task[object]) -> None:
-    if not task.done() and not task.cancelling():
-        task.cancel()
 
 
 async def _await_cleanup(
@@ -90,7 +87,7 @@ async def consume_queue(
                 receive = asyncio.create_task(anext(messages))
                 await asyncio.wait((receive, stopped), return_when=asyncio.FIRST_COMPLETED)
                 if stop.is_set():
-                    _cancel_once(receive)
+                    cancel_once(receive)
                     try:
                         await asyncio.shield(receive)
                     except asyncio.CancelledError:
@@ -134,7 +131,7 @@ async def consume_queue(
                     # SDK close removes its consumer tag before awaiting basic.cancel.
                     # Interrupting it would prevent __aexit__ from retrying cancellation.
                     if task is not closing:
-                        _cancel_once(task)
+                        cancel_once(task)
                 cleanup = asyncio.gather(*owned, return_exceptions=True)
                 results = await asyncio.shield(cleanup)
                 # Own context-exit close too: exhaustion/caller cancellation may bypass
