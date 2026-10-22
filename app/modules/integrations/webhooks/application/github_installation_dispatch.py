@@ -298,7 +298,8 @@ class GitHubInstallationDeliveryDispatcher:
 
     async def _refresh_index_on_merge(self, event: PullRequestEvent) -> bool:
         """A merge into the default branch named by the payload requests an index update
-        up to its merge commit; the change set follows the indexed commit, not the PR."""
+        up to its merge commit; the change set follows the indexed commit, not the PR. A
+        failed request never fails the delivery of the committed projection."""
         if (
             self._index_refresh is None
             or event.action != "closed"
@@ -307,8 +308,11 @@ class GitHubInstallationDeliveryDispatcher:
             or event.target_branch != event.repository_default_branch
         ):
             return False
-        return await self._index_refresh.execute(
-            event.installation_external_id, event.repository_external_id, event.merge_commit_sha
+        return await self._request_index(
+            self._index_refresh,
+            event.installation_external_id,
+            event.repository_external_id,
+            event.merge_commit_sha,
         )
 
     async def _push_result(self, event: PushEvent) -> InstallationDeliveryDispatchResult:
@@ -331,20 +335,36 @@ class GitHubInstallationDeliveryDispatcher:
         return result
 
     async def _refresh_index_on_push(self, event: PushEvent) -> bool:
-        """A failed request never skips the rules refresh: it is logged, and the leader's
-        reconcile with the head catches the index up (ADR 0001 §6.1)."""
+        """A failed request never skips the rules refresh."""
         if self._index_refresh is None or event.after is None:
             return False
+        return await self._request_index(
+            self._index_refresh,
+            event.installation_external_id,
+            event.repository_external_id,
+            event.after,
+        )
+
+    @staticmethod
+    async def _request_index(
+        refresh: CodeIndexRefreshHandler,
+        installation_external_id: int,
+        repository_external_id: int,
+        commit_sha: str | None,
+    ) -> bool:
+        """A failed request is logged and reads as not requested, so it never fails the
+        delivery; the leader's reconcile with the head catches the index up (ADR 0001
+        §6.1)."""
         # CONTRACT: `Exception` only, so a cancellation still stops the delivery.
         try:
-            return await self._index_refresh.execute(
-                event.installation_external_id, event.repository_external_id, event.after
+            return await refresh.execute(
+                installation_external_id, repository_external_id, commit_sha
             )
         except Exception:
             _LOGGER.exception(
                 "Failed to request an index update for repository %s of installation %s",
-                event.repository_external_id,
-                event.installation_external_id,
+                repository_external_id,
+                installation_external_id,
             )
             return False
 

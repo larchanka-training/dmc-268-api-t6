@@ -233,8 +233,9 @@ writes the index target (the merge commit, or the push's `after`; a merge withou
 worker leader wakes the indexing job after that commit (`docs/SYSTEM_DESIGN.md` §7.4); the
 dispatch makes no GitHub call and never publishes to RabbitMQ. A merge is requested before the
 projection's early return, so a repository with paused reviews still gets it, and a push
-requests it independently of the rules read: a failed request is logged and the rules read
-still runs, while the leader's reconcile catches the index up. The delivery keeps its status;
+requests it independently of the rules read. A failed request is logged and never fails the
+delivery: a merge keeps its committed projection and its status, a push still runs the rules
+read, and the leader's reconcile catches the index up. The delivery keeps its status;
 its detail gains `index=requested` when the request was written, except for a push to a
 repository the rules read reports as `unknown_repository`. The index-only fields
 `repository.default_branch` and `merge_commit_sha` read as absent when invalid, so they never

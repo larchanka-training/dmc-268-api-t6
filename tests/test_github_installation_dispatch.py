@@ -1475,6 +1475,50 @@ def test_a_merge_the_index_does_not_take_leaves_the_detail_alone() -> None:
     assert refresh.calls == [(17, 101, _MERGE_SHA)]
 
 
+def test_a_failed_index_request_is_logged_and_keeps_the_committed_merge_projection(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    class BrokenIndexRefresh(FakeIndexRefresh):
+        async def execute(
+            self,
+            installation_external_id: int,
+            repository_external_id: int,
+            commit_sha: str | None,
+        ) -> bool:
+            await super().execute(installation_external_id, repository_external_id, commit_sha)
+            raise ConnectionError("the database is unreachable")
+
+    projected: list[PullRequestEvent] = []
+
+    class Projector:
+        async def execute(self, event: PullRequestEvent) -> PullRequestProjectionStatus:
+            # The projection commits its own transaction before it returns.
+            projected.append(event)
+            return PullRequestProjectionStatus.PROJECTED
+
+    refresh = BrokenIndexRefresh()
+    dispatcher = GitHubWebhookDispatchAdapter(
+        GitHubInstallationDeliveryDispatcher(
+            resolver=FakeInstallationResolver(),
+            onboarding=FakeOnboarding(),
+            pull_request_projector=Projector(),
+            index_refresh=refresh,
+        )
+    )
+
+    with caplog.at_level(logging.ERROR):
+        result = asyncio.run(dispatcher.execute(_merge_delivery().to_receipt()))
+
+    assert result == InstallationDeliveryDispatchResult(
+        InstallationDeliveryDispatchStatus.PROJECTED_PR, "action=closed projected"
+    )
+    assert [event.merge_commit_sha for event in projected] == [_MERGE_SHA]
+    assert refresh.calls == [(17, 101, _MERGE_SHA)]
+    assert "Failed to request an index update for repository 101 of installation 17" in (
+        caplog.text
+    )
+
+
 @pytest.mark.parametrize(
     "delivery",
     [
