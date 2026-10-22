@@ -419,6 +419,10 @@ class ScheduledTask:
     name: str
     task: LeaderTask
     interval_seconds: float
+    # After the tick's timeout the gate stays open and the task runs again on the next
+    # tick. Only for a task that cannot time out on the same unit twice: the reconcile
+    # moves its cursor past a candidate before the head read (SD §11).
+    continue_after_timeout: bool = False
 
 
 class CodeIndexLeaderTasks:
@@ -428,7 +432,9 @@ class CodeIndexLeaderTasks:
       interval still runs every task. While a run reports that work remains, the gate
       stays open and the task runs again on the next tick. The gate moves on by the
       interval from the start of the run that drained the work, or that raised, so a
-      failing task runs once per interval, not on every tick.
+      failing task runs once per interval, not on every tick. A run the timeout cut off
+      counts as raised, except for a task with `continue_after_timeout`, whose gate stays
+      open for the next tick.
     - Tasks run in order and share `TICK_BUDGET_SECONDS`; each gets the time left and is
       cancelled `TASK_TIMEOUT_MARGIN_SECONDS` after it. A due task reached after the
       deadline keeps its gate open for the next tick.
@@ -452,13 +458,15 @@ class CodeIndexLeaderTasks:
             if now >= deadline:
                 return
             budget = deadline - now
+            timeout = asyncio.timeout(budget + TASK_TIMEOUT_MARGIN_SECONDS)
             # CONTRACT: `Exception` only, so a cancellation still stops the leader. A
             # timeout cancels the unit in flight, whose transaction rolls back.
             try:
-                async with asyncio.timeout(budget + TASK_TIMEOUT_MARGIN_SECONDS):
+                async with timeout:
                     remains = await scheduled.task.run(budget)
             except Exception:
                 _LOGGER.exception("Code index leader task %s failed", scheduled.name)
-                remains = False
+                # Only this tick's timeout, not a `TimeoutError` the task raised itself.
+                remains = scheduled.continue_after_timeout and timeout.expired()
             if not remains:
                 self._due[number] = now + scheduled.interval_seconds
