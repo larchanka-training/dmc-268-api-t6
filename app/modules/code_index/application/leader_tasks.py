@@ -14,7 +14,8 @@ The worker leader runs them from `leader_tick`, after the sweep and the outbox r
   commit and clears the marker it read: the wake-up outbox (#143);
 - `ReconcileIndexHeads` compares each live index with the head of its default branch and
   requests a build when it drifted: a direct push, a changed default branch, a missing
-  publication or outdated versions (ADR §6.1, leader reconcile row);
+  publication or outdated versions, but not again for a head the job refused with a
+  terminal code (ADR §6.1, leader reconcile row);
 - `CodeIndexLeaderTasks` gives each task a gate on a monotonic clock and all of them
   one deadline per tick, so tasks whose gates open together never hold up the sweep and
   the replay of the next tick for long.

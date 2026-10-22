@@ -3685,6 +3685,52 @@ def test_reconcile_head_leaves_another_generation_a_purged_and_a_failed_index_al
 
 
 @pytest.mark.integration
+@pytest.mark.parametrize(
+    ("code", "head", "marked"),
+    [
+        pytest.param("policy_document_too_large", {}, False, id="policy-same-head"),
+        pytest.param("vcs_access_denied", {}, False, id="access-same-head"),
+        pytest.param("internal_error", {}, False, id="internal-same-head"),
+        pytest.param("vcs_unavailable", {}, True, id="unavailable-same-head"),
+        pytest.param("vcs_rate_limited", {}, True, id="rate-limited-same-head"),
+        pytest.param("policy_document_too_large", {"commit": C3}, True, id="policy-new-head"),
+        pytest.param(
+            "policy_document_too_large", {"branch": "develop"}, True, id="policy-new-branch"
+        ),
+        pytest.param(
+            "policy_document_too_large",
+            {"versions_current": lambda profile: False},
+            True,
+            id="policy-versions-outdated",
+        ),
+    ],
+)
+def test_reconcile_head_retries_a_terminal_refusal_only_on_a_new_head_branch_or_version(
+    index: _Index, code: str, head: dict[str, Any], marked: bool
+) -> None:
+    async def scenario() -> None:
+        await _enable(index, index.a)
+        await _build(index, index.a, C1, _module("aa01", 1))
+        # A push to C2, whose job refused it: the publication of C1 stays.
+        assert await _request_build(index, index.a, C2)
+        fence = await _claim(index, index.a)
+        assert await _release(index, index.a, fence, code) == IndexStatus.READY
+        await _unmark(index, index.a)
+
+        assert await _reconcile(index, index.a, **{"commit": C2, **head}) is marked
+        state = await _state(index, index.a)
+        assert state is not None
+        assert (state.indexed_commit_sha, state.target_commit_sha, state.last_error_code) == (
+            C1,
+            head.get("commit", C2),
+            code,
+        )
+        assert (await _marker(index, index.a) is not None) is marked
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.integration
 def test_clear_wake_request_clears_only_the_marker_it_read(index: _Index) -> None:
     async def scenario() -> None:
         await _enable(index, index.a)

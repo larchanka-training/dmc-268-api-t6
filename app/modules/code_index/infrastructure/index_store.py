@@ -59,6 +59,7 @@ from app.modules.code_index.application.index_store import (
     IndexStorage,
     LeaseClaim,
 )
+from app.modules.code_index.application.vcs import HEALABLE_ERROR_CODES
 from app.modules.code_index.domain.codes import (
     FAILED_ERROR_CODES,
     REPOSITORY_STORAGE_EXCEEDED,
@@ -603,11 +604,22 @@ class SqlAlchemyCodeIndexStore:
         # A NULL indexed commit or branch never equals the live head. The versions are
         # those of the locked row, not of the listing the head read followed.
         profile = _to_state(state).profile
-        drifted = (
+        current = profile is None or versions_current(profile)
+        # ADR §6.1: a terminal refusal of this head is no drift, so a pass never rebuilds
+        # it; a new head, branch or version brings it back. The target is the one read
+        # before the rewrite below; a healable code is retried on every pass.
+        refused = (
+            state.last_error_code is not None
+            and state.last_error_code not in HEALABLE_ERROR_CODES
+            and state.target_commit_sha == commit_sha
+            and current
+            and state.indexed_default_branch in (None, branch)
+        )
+        drifted = not refused and (
             state.indexed_commit_sha != commit_sha
             or state.indexed_default_branch != branch
             or profile is None
-            or not versions_current(profile)
+            or not current
         )
         values: dict[str, Any] = {"target_commit_sha": commit_sha}
         if drifted:
