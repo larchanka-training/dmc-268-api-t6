@@ -418,6 +418,80 @@ def test_a_hanging_task_times_out_rolls_back_its_unit_and_the_next_task_runs(
     assert record.exc_info is not None and record.exc_info[0] is TimeoutError
 
 
+@dataclass
+class HangsOnce:
+    """A task whose first run hangs until the tick's timeout cancels it."""
+
+    name: str
+    clock: Clock
+    runs: _Runs
+    hung: bool = False
+
+    async def run(self, budget_seconds: float) -> bool:
+        self.runs.append((self.name, self.clock.now, budget_seconds))
+        if not self.hung:
+            self.hung = True
+            await asyncio.Event().wait()
+        return False
+
+
+@pytest.mark.parametrize(
+    ("name", "interval", "continues", "ran_at"),
+    [
+        pytest.param("reconcile", 600, True, [0, 30], id="reconcile-runs-on-the-next-tick"),
+        pytest.param("gc", 300, False, [0, 300], id="gc-waits-its-interval"),
+    ],
+)
+def test_after_a_timeout_only_a_task_that_continues_runs_again_on_the_next_tick(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    name: str,
+    interval: float,
+    continues: bool,
+    ran_at: list[float],
+) -> None:
+    # Real seconds: the timeout runs on the event loop's clock, not on the fake one.
+    monkeypatch.setattr(leader_tasks, "TICK_BUDGET_SECONDS", 0.01)
+    monkeypatch.setattr(leader_tasks, "TASK_TIMEOUT_MARGIN_SECONDS", 0.05)
+    clock = Clock()
+    runs: _Runs = []
+    tasks = CodeIndexLeaderTasks(
+        [
+            ScheduledTask(
+                name, HangsOnce(name, clock, runs), interval, continue_after_timeout=continues
+            )
+        ],
+        clock=clock,
+    )
+
+    with caplog.at_level(logging.ERROR):
+        for now in (0, 30, 300):
+            clock.now = now
+            asyncio.run(tasks.tick())
+
+    # The run that drained moves the gate on by the interval from its start.
+    assert [now for _, now, _ in runs] == ran_at
+    [record] = caplog.records
+    assert record.getMessage() == f"Code index leader task {name} failed"
+    assert record.exc_info is not None and record.exc_info[0] is TimeoutError
+
+
+def test_a_timeout_error_the_task_raises_itself_moves_the_gate_of_a_task_that_continues() -> None:
+    clock = Clock()
+    runs: _Runs = []
+    raising = Recorder("reconcile", clock, runs, error=TimeoutError("the listing timed out"))
+    tasks = CodeIndexLeaderTasks(
+        [ScheduledTask("reconcile", raising, 600, continue_after_timeout=True)], clock=clock
+    )
+
+    for now in (0, 30, 600):
+        clock.now = now
+        asyncio.run(tasks.tick())
+
+    # Only the tick's own timeout keeps the gate open; this error is a failure.
+    assert [now for _, now, _ in runs] == [0, 600]
+
+
 def test_a_cancellation_in_a_task_propagates_out_of_the_tick() -> None:
     clock = Clock()
     runs: _Runs = []

@@ -339,6 +339,15 @@ def test_with_the_consumer_the_leader_reconciles_heads_and_dispatches_wake_ups()
         ("reconcile", 600),
     ]
     assert [(task.name, task.interval_seconds) for task in configured][-1] == ("reconcile", 120)
+    # Only the reconcile, whose cursor is already past the slow candidate, continues on the
+    # next tick after a timeout; the others wait their interval.
+    assert [(task.name, task.continue_after_timeout) for task in tasks] == [
+        ("converge", False),
+        ("dispatch", False),
+        ("gc", False),
+        ("ttl", False),
+        ("reconcile", True),
+    ]
     for scheduled, batch in ((tasks, 50), (configured, 7)):
         converge, dispatch, _, _, reconcile = (task.task for task in scheduled)
         assert isinstance(converge, ConvergeIndexes)

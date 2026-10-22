@@ -298,7 +298,9 @@ def index_leader_tasks(
     ADR 0001 §4, while the 30-day TTL tolerates delay, so a TTL backlog never takes GC's
     share of the tick; and the reconcile, whose head reads are the slowest, takes only
     what the others left of the tick's budget; the markers it sets go out on the next
-    tick.
+    tick. After a timeout only the reconcile runs again on the next tick: its cursor is
+    already past the slow candidate, while GC or TTL stuck on a lock would time out on
+    every tick and starve the tasks after them, so they wait their interval.
     """
     uow = partial(SqlAlchemyCodeIndexMaintenanceUnitOfWork, session_factory)
     tasks = [ScheduledTask("converge", ConvergeIndexes(uow=uow), CONVERGE_INTERVAL_SECONDS)]
@@ -330,6 +332,7 @@ def index_leader_tasks(
                     batch=settings.reconcile_batch,
                 ),
                 settings.reconcile_interval_seconds,
+                continue_after_timeout=True,
             )
         )
     return CodeIndexLeaderTasks(tasks)
