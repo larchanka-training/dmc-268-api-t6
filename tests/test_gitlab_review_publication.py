@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import importlib
 import json
 from collections.abc import Callable
@@ -18,7 +17,7 @@ from app.modules.reviews.application.publish_run_review import (
     ReviewSubmission,
     SubmittedReview,
 )
-from app.modules.reviews.application.review_output import PublishedFinding, comment_body
+from app.modules.reviews.application.review_output import PublishedFinding
 from app.modules.reviews.infrastructure.gitlab_review_publication import (
     GitLabMergeRequestDiscussionGateway,
 )
@@ -36,27 +35,14 @@ VERSIONS = "/api/v4/projects/42/merge_requests/7/versions"
 DISCUSSIONS = "/api/v4/projects/42/merge_requests/7/discussions"
 
 
-def _inline_marker(
-    path: str,
-    line: int,
-    title: str,
-    body: str,
-    suggestion: str | None,
-    *,
-    start_line: int | None = None,
-) -> str:
-    """The published marker: comment text identifies the finding, not only path and line."""
-    finding_id = hashlib.sha256(comment_body(title, body, suggestion).encode()).hexdigest()[:16]
+def _inline_marker(path: str, line: int, finding_id: str) -> str:
     return f"<!-- ai-review findings_hash={HASH} inline={path}:{line} finding={finding_id} -->"
 
 
-INLINE_MARKER_APP = _inline_marker("src/app.py", 3, "Wrong branch", "The branch is inverted.", None)
-INLINE_MARKER_OTHER = _inline_marker(
-    "src/other.py", 9, "Narrow check", "The guard is too wide.", "return early"
-)
-INLINE_MARKER_TWIN = _inline_marker(
-    "src/app.py", 3, "Other defect", "A second problem on the same line.", None
-)
+# finding= — first 16 hex of SHA-256(comment_body(...)); literals lock the contract in tests.
+INLINE_MARKER_APP = _inline_marker("src/app.py", 3, "6888906fd671f420")
+INLINE_MARKER_OTHER = _inline_marker("src/other.py", 9, "3761ff714cafc119")
+INLINE_MARKER_TWIN = _inline_marker("src/app.py", 3, "38fff52fc9d1ab4f")
 SUMMARY_MARKER = f"<!-- ai-review findings_hash={HASH} summary -->"
 INLINE_BODY_APP = f"**Wrong branch**\n\nThe branch is inverted.\n\n{INLINE_MARKER_APP}"
 INLINE_BODY_OTHER = (
@@ -99,7 +85,7 @@ POSITION_CONTEXT = {
 }
 CONTEXT_TITLE = "Trailing context"
 CONTEXT_BODY = "Comment on unchanged context after the edit hunk."
-CONTEXT_MARKER = _inline_marker(CONTEXT_PATH, CONTEXT_NEW_LINE, CONTEXT_TITLE, CONTEXT_BODY, None)
+CONTEXT_MARKER = _inline_marker(CONTEXT_PATH, CONTEXT_NEW_LINE, "63801b1f58480743")
 CONTEXT_INLINE_BODY = f"**{CONTEXT_TITLE}**\n\n{CONTEXT_BODY}\n\n{CONTEXT_MARKER}"
 
 FINDING_APP = PublishedFinding(
@@ -165,7 +151,7 @@ POSITION_RENAME = {
 }
 RENAME_TITLE = "Rename path"
 RENAME_BODY = "Comment on a line after rename."
-RENAME_MARKER = _inline_marker(RENAME_NEW_PATH, RENAME_NEW_LINE, RENAME_TITLE, RENAME_BODY, None)
+RENAME_MARKER = _inline_marker(RENAME_NEW_PATH, RENAME_NEW_LINE, "d504dcbd0a41763d")
 RENAME_INLINE_BODY = f"**{RENAME_TITLE}**\n\n{RENAME_BODY}\n\n{RENAME_MARKER}"
 FINDING_RENAME = PublishedFinding(
     path=RENAME_NEW_PATH,
@@ -212,9 +198,7 @@ POSITION_RANGE = {
 RANGE_TITLE = "Validation runs after change"
 RANGE_BODY = "Move the check before the mutation."
 RANGE_SUGGESTION = "validate()\nnew_value()"
-RANGE_MARKER = _inline_marker(
-    RANGE_PATH, RANGE_END, RANGE_TITLE, RANGE_BODY, RANGE_SUGGESTION, start_line=RANGE_START
-)
+RANGE_MARKER = _inline_marker(RANGE_PATH, RANGE_END, "02cd8756c5122068")
 RANGE_INLINE_BODY = (
     f"**{RANGE_TITLE}**\n\n{RANGE_BODY}\n\n"
     f"```suggestion:-1+0\n{RANGE_SUGGESTION}\n```\n\n{RANGE_MARKER}"
@@ -240,14 +224,7 @@ LONG_RANGE_END = 102
 LONG_RANGE_TITLE = "Wide span"
 LONG_RANGE_BODY = "Too many lines for an applicable suggestion."
 LONG_RANGE_SUGGESTION = "replacement"
-LONG_RANGE_MARKER = _inline_marker(
-    RANGE_PATH,
-    LONG_RANGE_END,
-    LONG_RANGE_TITLE,
-    LONG_RANGE_BODY,
-    LONG_RANGE_SUGGESTION,
-    start_line=LONG_RANGE_START,
-)
+LONG_RANGE_MARKER = _inline_marker(RANGE_PATH, LONG_RANGE_END, "4bc11bb9227e6f9f")
 LONG_RANGE_INLINE_BODY = f"**{LONG_RANGE_TITLE}**\n\n{LONG_RANGE_BODY}\n\n{LONG_RANGE_MARKER}"
 FINDING_LONG_RANGE = PublishedFinding(
     path=RANGE_PATH,
