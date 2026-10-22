@@ -369,14 +369,18 @@ def test_gitlab_redelivery_after_failed_complete_restores_inline_placement(
 
             async with factory() as session:
                 rows = (
-                    await session.execute(
-                        text(
-                            "SELECT id, inline_comment FROM findings WHERE run_id=:run "
-                            "ORDER BY line_start"
-                        ),
-                        {"run": RUN_ATTEMPTED},
+                    (
+                        await session.execute(
+                            text(
+                                "SELECT id, inline_comment FROM findings WHERE run_id=:run "
+                                "ORDER BY line_start"
+                            ),
+                            {"run": RUN_ATTEMPTED},
+                        )
                     )
-                ).tuples().all()
+                    .tuples()
+                    .all()
+                )
                 run_state = await session.scalar(
                     text("SELECT state::text FROM runs WHERE id=:id"),
                     {"id": RUN_ATTEMPTED},
@@ -394,14 +398,18 @@ def test_gitlab_redelivery_after_failed_complete_restores_inline_placement(
 
             async with factory() as session:
                 rows = (
-                    await session.execute(
-                        text(
-                            "SELECT id, inline_comment FROM findings WHERE run_id=:run "
-                            "ORDER BY line_start"
-                        ),
-                        {"run": RUN_ATTEMPTED},
+                    (
+                        await session.execute(
+                            text(
+                                "SELECT id, inline_comment FROM findings WHERE run_id=:run "
+                                "ORDER BY line_start"
+                            ),
+                            {"run": RUN_ATTEMPTED},
+                        )
                     )
-                ).tuples().all()
+                    .tuples()
+                    .all()
+                )
                 run_state = await session.scalar(
                     text("SELECT state::text FROM runs WHERE id=:id"),
                     {"id": RUN_ATTEMPTED},
