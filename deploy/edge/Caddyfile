@@ -22,17 +22,20 @@ http://:9180 {
 # APP_DOMAIN. Certificates come from Let's Encrypt; HTTP redirects to HTTPS automatically.
 # Upstreams are aliases on the docker network dmc268-edge. When an upstream is not running, Caddy
 # itself still starts and serves the other routes: staging-api and staging-ui answer a bare 502;
-# api, ui, webhook and staging-webhook answer 503 with the not_deployed stub below.
+# api, ui, webhook, staging-webhook and the landing hosts (APP_DOMAIN, www, staging,
+# staging-www) answer 503 with the not_deployed stub below.
 
 (hsts) {
 	header Strict-Transport-Security "max-age=31536000"
 }
 
-# Hosts whose service is not deployed yet (prod, the standalone webhook service) answer 503 with a
-# plain text instead of a bare 502. handle_errors runs whenever Caddy cannot reach the upstream:
-# before the first rollout and, after it, while the service is down or restarting. The text speaks
-# of the service behind the address, not of the host: on ui.* the API can be down behind a running
-# UI. The routes below are already final, so a rollout needs no Caddyfile change.
+# Hosts whose service is not deployed yet (prod, the standalone webhook service) and the landing
+# hosts (routed before the UI repo's first landing rollout) answer 503 with a plain text instead
+# of a bare 502. handle_errors runs whenever Caddy cannot reach the upstream: before the first
+# rollout and, after it, while the service is down or restarting. The text speaks of the service
+# behind the address, not of the host: on ui.* the API can be down behind a running UI. The routes
+# below are already final, so a rollout needs no Caddyfile change; only APP_DOMAIN and www move
+# to the prod landing once it exists.
 (not_deployed) {
 	handle_errors 502 {
 		import hsts
@@ -104,7 +107,18 @@ ui.{$APP_DOMAIN} {
 	}
 }
 
-{$APP_DOMAIN} {
+# Public landing (larchanka-training/dmc-268-ui-t6#91), deployed by the UI repo as
+# landing-staging. The landing is static: no /api/* route.
+staging.{$APP_DOMAIN}, staging-www.{$APP_DOMAIN} {
 	import hsts
-	redir https://ui.{$APP_DOMAIN}{uri} permanent
+	import not_deployed
+	reverse_proxy landing-staging:8080
+}
+
+# The main domain shows the staging landing until a prod rollout exists; then these two hosts
+# move to landing-prod:8080.
+{$APP_DOMAIN}, www.{$APP_DOMAIN} {
+	import hsts
+	import not_deployed
+	reverse_proxy landing-staging:8080
 }
