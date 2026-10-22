@@ -10,6 +10,26 @@ from app.modules.reviews.application.diff_map import DiffFile, DiffMap, DiffRow,
 from app.modules.reviews.application.review_output import PublishedFinding
 
 
+def _line_range_endpoint(
+    *,
+    line_code: str,
+    is_added: bool,
+    old_line: int | None,
+    new_line: int,
+) -> dict[str, Any]:
+    """One ``line_range`` corner per CONTEXT §9.5 (``new`` for added, ``old`` otherwise)."""
+    if is_added:
+        return {"line_code": line_code, "type": "new", "new_line": new_line}
+    point: dict[str, Any] = {
+        "line_code": line_code,
+        "type": "old",
+        "new_line": new_line,
+    }
+    if old_line is not None:
+        point["old_line"] = old_line
+    return point
+
+
 def gitlab_line_code(provider_file_path: str, old_cursor: int, new_cursor: int) -> str:
     """GitLab ``line_code`` from provider path and cursors before row increment (§9.5)."""
     digest = hashlib.sha1(provider_file_path.encode("utf-8")).hexdigest()
@@ -39,17 +59,21 @@ def gitlab_text_position(version: dict[str, str], finding: PublishedFinding) -> 
         start_code = finding.gitlab_line_range_start_code
         end_code = finding.gitlab_line_range_end_code
         if start_code is not None and end_code is not None:
+            start_added = finding.gitlab_line_range_start_is_added is True
+            end_added = finding.gitlab_line_range_end_is_added is True
             position["line_range"] = {
-                "start": {
-                    "line_code": start_code,
-                    "type": "new",
-                    "new_line": finding.start_line,
-                },
-                "end": {
-                    "line_code": end_code,
-                    "type": "new",
-                    "new_line": finding.line,
-                },
+                "start": _line_range_endpoint(
+                    line_code=start_code,
+                    is_added=start_added,
+                    old_line=finding.gitlab_line_range_start_old_line,
+                    new_line=finding.start_line,
+                ),
+                "end": _line_range_endpoint(
+                    line_code=end_code,
+                    is_added=end_added,
+                    old_line=finding.gitlab_line_range_end_old_line,
+                    new_line=finding.line,
+                ),
             }
     return position
 
@@ -120,6 +144,10 @@ def enrich_gitlab_publication_finding(
             updates["gitlab_line_range_end_code"] = gitlab_line_code(
                 provider_path, end_row.old_cursor, end_row.new_cursor
             )
+            updates["gitlab_line_range_start_is_added"] = start_row.kind is RowKind.ADDED
+            updates["gitlab_line_range_end_is_added"] = end_row.kind is RowKind.ADDED
+            updates["gitlab_line_range_start_old_line"] = start_row.old_line
+            updates["gitlab_line_range_end_old_line"] = end_row.old_line
 
     if not updates:
         return finding

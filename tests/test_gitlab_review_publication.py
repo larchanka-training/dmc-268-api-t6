@@ -18,7 +18,7 @@ from app.modules.reviews.application.publish_run_review import (
     ReviewSubmission,
     SubmittedReview,
 )
-from app.modules.reviews.application.review_output import PublishedFinding, gitlab_comment_body
+from app.modules.reviews.application.review_output import PublishedFinding, comment_body
 from app.modules.reviews.infrastructure.gitlab_review_publication import (
     GitLabMergeRequestDiscussionGateway,
 )
@@ -46,8 +46,7 @@ def _inline_marker(
     start_line: int | None = None,
 ) -> str:
     """The published marker: comment text identifies the finding, not only path and line."""
-    text = gitlab_comment_body(title, body, suggestion, start_line=start_line, line=line)
-    finding_id = hashlib.sha256(text.encode()).hexdigest()[:16]
+    finding_id = hashlib.sha256(comment_body(title, body, suggestion).encode()).hexdigest()[:16]
     return f"<!-- ai-review findings_hash={HASH} inline={path}:{line} finding={finding_id} -->"
 
 
@@ -233,6 +232,8 @@ FINDING_RANGE = PublishedFinding(
     rule_name=None,
     gitlab_line_range_start_code=RANGE_LINE_CODE_START,
     gitlab_line_range_end_code=RANGE_LINE_CODE_END,
+    gitlab_line_range_start_is_added=True,
+    gitlab_line_range_end_is_added=True,
 )
 LONG_RANGE_START = 1
 LONG_RANGE_END = 102

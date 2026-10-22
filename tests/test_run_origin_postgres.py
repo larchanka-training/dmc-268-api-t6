@@ -524,7 +524,7 @@ def test_fresh_oauth_cancels_source_work_before_rebind_and_late_finalization_can
                         review_id=555,
                         comment_ids=(),
                         findings_hash="a" * 64,
-                        moved_to_body_findings=(),
+                        moved_to_body_finding_ids=(),
                         now=now,
                     )
                     is None

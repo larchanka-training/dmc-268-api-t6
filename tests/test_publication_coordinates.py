@@ -132,6 +132,41 @@ def test_enrich_gitlab_finding_from_diff_map_matches_section_nine_five() -> None
     }
 
 
+def test_gitlab_line_range_on_context_rows_uses_old_type() -> None:
+    """§9.5: context corners of a range use type old with both line numbers."""
+    diff_map = _section_nine_five_diff_map()
+    enriched = enrich_gitlab_publication_finding(
+        diff_map,
+        PublishedFinding(
+            path="a",
+            line=13,
+            start_line=10,
+            severity="medium",
+            category="correctness",
+            title="Context span",
+            body="Both ends are unchanged context lines.",
+            suggestion=None,
+            confidence=0.85,
+            rule_name=None,
+        ),
+    )
+    line_range = gitlab_text_position(_VERSION, enriched)["line_range"]
+    assert line_range == {
+        "start": {
+            "line_code": f"{_RANGE_LINE_CODE_SHA}_10_10",
+            "type": "old",
+            "old_line": 10,
+            "new_line": 10,
+        },
+        "end": {
+            "line_code": f"{_RANGE_LINE_CODE_SHA}_12_13",
+            "type": "old",
+            "old_line": 12,
+            "new_line": 13,
+        },
+    }
+
+
 def test_enrich_gitlab_finding_sets_rename_old_path_from_diff_map() -> None:
     diff_map = _build(
         _file(

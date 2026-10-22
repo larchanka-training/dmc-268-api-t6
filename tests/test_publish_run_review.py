@@ -36,6 +36,8 @@ from app.modules.reviews.infrastructure.github_review_publication import (
 from tests.installation_onboarding_fakes import provider_checkpoint
 
 RUN = UUID("11111111-1111-1111-1111-111111111111")
+FINDING_ID = UUID("22222222-2222-2222-2222-222222222222")
+OTHER_FINDING_ID = UUID("33333333-3333-3333-3333-333333333333")
 NOW = datetime(2026, 9, 30, 12, 0, tzinfo=UTC)
 HEAD = "a" * 40
 HASH = "f" * 64
@@ -50,6 +52,7 @@ FINDING = PublishedFinding(
     suggestion=None,
     confidence=0.9,
     rule_name=None,
+    finding_id=FINDING_ID,
 )
 POINTER = ReviewPublishPointer(RUN, HEAD, HASH, "COMMENT")
 PROJECT_ID = 5150
@@ -88,8 +91,8 @@ def context(**change: Any) -> PublishContext:
     return replace(base, **change)
 
 
-def _inline_placement_keys(ctx: PublishContext) -> dict[tuple[str, int], bool]:
-    return {(item.path, item.line): True for item in ctx.findings}
+def _inline_placement_keys(ctx: PublishContext) -> dict[UUID, bool]:
+    return {item.finding_id: True for item in ctx.findings if item.finding_id is not None}
 
 
 @dataclass
@@ -98,10 +101,8 @@ class Store:
     state: str = "publishing"
     error_code: str | None = None
     open_units: int = 0
-    completed: list[tuple[int, tuple[int, ...], tuple[tuple[str, int], ...]]] = field(
-        default_factory=list
-    )
-    inline_placement: dict[tuple[str, int], bool] = field(default_factory=dict)
+    completed: list[tuple[int, tuple[int, ...], tuple[UUID, ...]]] = field(default_factory=list)
+    inline_placement: dict[UUID, bool] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not self.inline_placement:
@@ -117,14 +118,14 @@ class Store:
         review_id: int,
         comment_ids: tuple[int, ...],
         findings_hash: str,
-        moved_to_body_findings: tuple[tuple[str, int], ...] = (),
+        moved_to_body_finding_ids: tuple[UUID, ...] = (),
         now: datetime,
     ) -> str | None:
         assert findings_hash == HASH
-        for key in moved_to_body_findings:
+        for key in moved_to_body_finding_ids:
             if key in self.inline_placement:
                 self.inline_placement[key] = False
-        self.completed.append((review_id, comment_ids, moved_to_body_findings))
+        self.completed.append((review_id, comment_ids, moved_to_body_finding_ids))
         self.state = "succeeded"
         return self.state
 
@@ -314,6 +315,22 @@ def test_publication_succeeds_with_one_trace_record_and_a_neutral_check_run() ->
     ]
 
 
+def test_coordinate_fallback_with_no_inline_findings_fails_after_one_retry() -> None:
+    store = Store(context(findings=()))
+    reviews = Reviews(
+        [
+            PublishError("coordinates", "line outside diff", http_status=422),
+            PublishError("coordinates", "line outside diff", http_status=422),
+        ]
+    )
+    run(store, reviews)
+
+    assert store.state == "failed"
+    assert store.error_code == "github_publish_failed"
+    assert len(reviews.submissions) == 2
+    assert reviews.submissions[1].body.count("## Inline findings") == 1
+
+
 def test_coordinate_422_moves_inline_findings_into_the_body_once() -> None:
     store = Store(context())
     reviews = Reviews(
@@ -325,7 +342,7 @@ def test_coordinate_422_moves_inline_findings_into_the_body_once() -> None:
     trace, _ = run(store, reviews)
 
     assert store.state == "succeeded"
-    assert store.completed == [(7, (), (("src/app.py", 3),))]
+    assert store.completed == [(7, (), (FINDING_ID,))]
     assert reviews.submissions[1].findings == ()
     assert "`src/app.py:3`" in reviews.submissions[1].body
     assert [record[1]["try"] for record in trace.records] == [1, 2]
@@ -418,7 +435,7 @@ def test_github_review_gateway_reuses_a_review_already_posted_for_the_hash() -> 
 
     assert asyncio.run(
         gateway.submit_review(submission, checkpoint=provider_checkpoint)
-    ) == SubmittedReview(55, (900,))
+    ) == SubmittedReview(55, (900,), posted_inline_finding_ids=frozenset({FINDING_ID}))
     assert ("POST", "/repos/octo/repo/pulls/7/reviews") not in calls
 
 
@@ -594,7 +611,7 @@ def test_failed_comment_read_is_retried_and_finds_the_posted_review() -> None:
     assert raised.value.kind == "retryable"
     assert asyncio.run(
         gateway.submit_review(submission, checkpoint=provider_checkpoint)
-    ) == SubmittedReview(55, (900,))
+    ) == SubmittedReview(55, (900,), posted_inline_finding_ids=frozenset({FINDING_ID}))
     assert len(posts) == 1
 
 
@@ -787,6 +804,7 @@ def test_gitlab_coordinate_failure_moves_only_unposted_findings() -> None:
         suggestion=None,
         confidence=0.8,
         rule_name=None,
+        finding_id=OTHER_FINDING_ID,
     )
     store = Store(gitlab_context(findings=(FINDING, other)))
     gitlab = GitLabReviews(
@@ -802,9 +820,9 @@ def test_gitlab_coordinate_failure_moves_only_unposted_findings() -> None:
     assert gitlab.calls[1][0].findings == ()
     assert "`src/other.py:9`" in gitlab.calls[1][0].body
     assert "`src/app.py:3`" not in gitlab.calls[1][0].body
-    assert store.inline_placement[(FINDING.path, FINDING.line)] is True
-    assert store.inline_placement[(other.path, other.line)] is False
-    assert store.completed[-1][2] == ((other.path, other.line),)
+    assert store.inline_placement[FINDING_ID] is True
+    assert store.inline_placement[OTHER_FINDING_ID] is False
+    assert store.completed[-1][2] == (OTHER_FINDING_ID,)
     assert check_runs.views == []
 
 
@@ -820,6 +838,7 @@ def test_partial_coordinate_fallback_keeps_posted_inline_for_check_run_counts() 
         suggestion=None,
         confidence=0.8,
         rule_name=None,
+        finding_id=OTHER_FINDING_ID,
     )
     store = Store(context(findings=(FINDING, other)))
     reviews = Reviews(
@@ -830,8 +849,8 @@ def test_partial_coordinate_fallback_keeps_posted_inline_for_check_run_counts() 
     )
     _, check_runs = run(store, reviews)
 
-    assert store.inline_placement[(FINDING.path, FINDING.line)] is True
-    assert store.inline_placement[(other.path, other.line)] is False
+    assert store.inline_placement[FINDING_ID] is True
+    assert store.inline_placement[OTHER_FINDING_ID] is False
     assert check_runs.views[-1].summary is not None
     assert "inline: 1" in check_runs.views[-1].summary
     assert "в теле ревью: 1" in check_runs.views[-1].summary
@@ -849,6 +868,7 @@ def test_redelivery_after_coordinate_fallback_preserves_inline_placement() -> No
         suggestion=None,
         confidence=0.8,
         rule_name=None,
+        finding_id=OTHER_FINDING_ID,
     )
     store = Store(gitlab_context(findings=(FINDING, other)))
     gitlab = GitLabReviews(

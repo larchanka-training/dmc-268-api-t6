@@ -478,6 +478,11 @@ class PublishedFinding:
     gitlab_old_line_only: bool = False
     gitlab_line_range_start_code: str | None = None
     gitlab_line_range_end_code: str | None = None
+    gitlab_line_range_start_is_added: bool | None = None
+    gitlab_line_range_end_is_added: bool | None = None
+    gitlab_line_range_start_old_line: int | None = None
+    gitlab_line_range_end_old_line: int | None = None
+    finding_id: UUID | None = None
 
 
 def comment_body(title: str, body: str, suggestion: str | None) -> str:

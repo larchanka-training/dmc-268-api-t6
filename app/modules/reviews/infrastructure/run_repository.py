@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
@@ -924,12 +925,17 @@ def _to_published_finding_row(item: Finding) -> PublishedFinding:
         suggestion=item.suggestion,
         confidence=float(item.confidence),
         rule_name=item.rule_name,
+        finding_id=item.id,
     )
 
 
 def _published_finding_from_row(item: Finding, diff_map: DiffMap | None) -> PublishedFinding:
     finding = _to_published_finding_row(item)
     if diff_map is None:
+        logging.getLogger(__name__).warning(
+            "Publication DiffMap missing for run finding %s; GitLab coordinates omitted",
+            item.id,
+        )
         return finding
     return enrich_gitlab_publication_finding(diff_map, finding)
 
