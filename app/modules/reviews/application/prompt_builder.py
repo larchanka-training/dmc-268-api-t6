@@ -23,6 +23,7 @@ from app.modules.reviews.application.policy_snapshot import (
     PolicySnapshot,
     StageName,
 )
+from app.modules.reviews.application.unified_diff import split_lf
 
 type LineType = Literal["added", "removed", "context"]
 
@@ -547,7 +548,8 @@ def parse_unified_diff(diff: str) -> tuple[ChangedFile, ...]:
             parsed.append(ChangedFile(path=path, status=status, lines=tuple(lines)))
         path = None
 
-    for raw_line in diff.splitlines():
+    # Only LF ends a line: U+2028, FF and a lone CR can be literal content of a line.
+    for raw_line in (line.removesuffix("\r") for line in split_lf(diff)):
         if raw_line.startswith("diff --git "):
             finish()
             path = _path_from_diff_header(raw_line)
@@ -557,13 +559,14 @@ def parse_unified_diff(diff: str) -> tuple[ChangedFile, ...]:
             continue
         if path is None:
             continue
-        if raw_line.startswith("new file mode "):
+        # The extended header ends at the first hunk; inside one such a line is content.
+        if not in_hunk and raw_line.startswith("new file mode "):
             status = "added"
             continue
-        if raw_line.startswith("deleted file mode "):
+        if not in_hunk and raw_line.startswith("deleted file mode "):
             status = "removed"
             continue
-        if raw_line.startswith("rename to "):
+        if not in_hunk and raw_line.startswith("rename to "):
             path = raw_line.removeprefix("rename to ")
             status = "renamed"
             continue
@@ -594,7 +597,22 @@ def parse_unified_diff(diff: str) -> tuple[ChangedFile, ...]:
 
 
 def _path_from_diff_header(header: str) -> str:
-    """Extract the new side path; quote handling stays the provider's responsibility."""
+    """Extract the new side path; quote handling stays the provider's responsibility.
+
+    ``a/<P> b/<P>`` is split in the middle, so a path that holds `` b/`` stays whole. Two
+    different names (a rename or a copy) keep the text after the first `` b/`` as a
+    provisional path; a ``rename to`` line of the extended header replaces it.
+    """
+    rest = header.removeprefix("diff --git ")
+    half = (len(rest) - len("a/ b/")) // 2
+    # ``half > 0``: ``diff --git a/ b/`` names no path and stays an invalid header.
+    if (
+        half > 0
+        and rest.startswith("a/")
+        and rest[2 + half : 5 + half] == " b/"
+        and rest[2 : 2 + half] == rest[5 + half :]
+    ):
+        return rest[5 + half :]
     _, _, remainder = header.partition(" b/")
     if not remainder:
         raise ValueError(f"invalid unified diff header: {header}")

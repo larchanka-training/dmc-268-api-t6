@@ -97,9 +97,9 @@ TEST_RABBITMQ_URL=amqp://app:app@localhost:5672/imp168b uv run pytest
 
 **Done when:**
 
-- [ ] all six cases pass, and the existing parse tests (`:109-170`) still pass;
-- [ ] `tests/test_llm_gateway.py` is green: eval inputs are unchanged, per the plan's scan;
-- [ ] the gates are green.
+- [x] all six cases pass, and the existing parse tests (`:109-170`) still pass;
+- [x] `tests/test_llm_gateway.py` is green: eval inputs are unchanged, per the plan's scan;
+- [x] the gates are green.
 
 **Dependencies:** Task 1.
 
