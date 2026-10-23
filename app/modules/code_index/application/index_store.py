@@ -236,8 +236,10 @@ class CodeIndexStore(Protocol):
 
         Under FOR UPDATE, only for a row without a purge reason that is not `failed`:
         writes `target_commit_sha` when given and always sets a fresh wake-up marker, so
-        the leader's compare-and-set clear of an older marker misses. Returns whether
-        it requested; a missing, purged or `failed` row is left alone.
+        the leader's compare-and-set clear of an older marker misses. A target that
+        differs from the stored one also clears `last_error_code`: a refusal was for
+        the older target. Returns whether it requested; a missing, purged or `failed`
+        row is left alone.
         """
         ...
 
@@ -263,7 +265,8 @@ class CodeIndexStore(Protocol):
         profile of the locked row. A terminal refusal of this head gets no marker: a
         `last_error_code` outside `HEALABLE_ERROR_CODES` with the target equal to
         `commit_sha` before the rewrite, current versions and no indexed branch or
-        `branch`. Returns whether it set the marker.
+        `branch`. A rewrite to another target clears `last_error_code`, as
+        `request_build` does. Returns whether it set the marker.
         """
         ...
 

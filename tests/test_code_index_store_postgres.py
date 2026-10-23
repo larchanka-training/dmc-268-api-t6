@@ -3723,9 +3723,83 @@ def test_reconcile_head_retries_a_terminal_refusal_only_on_a_new_head_branch_or_
         assert (state.indexed_commit_sha, state.target_commit_sha, state.last_error_code) == (
             C1,
             head.get("commit", C2),
-            code,
+            # A new target clears the refusal of the older one.
+            None if "commit" in head else code,
         )
         assert (await _marker(index, index.a) is not None) is marked
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("move", ["request", "reconcile"])
+def test_a_new_target_clears_a_terminal_refusal_so_a_lost_wake_up_is_recovered(
+    index: _Index, move: str
+) -> None:
+    async def scenario() -> None:
+        await _enable(index, index.a)
+        await _build(index, index.a, C1, _module("aa01", 1))
+        # A push to C2, whose job refused it: the publication of C1 stays.
+        assert await _request_build(index, index.a, C2)
+        fence = await _claim(index, index.a)
+        assert await _release(index, index.a, fence, "policy_document_too_large") == (
+            IndexStatus.READY
+        )
+        await _unmark(index, index.a)
+
+        # The target moves to C3, by a trigger or by a pass, and its wake-up is lost.
+        if move == "request":
+            assert await _request_build(index, index.a, C3)
+        else:
+            assert await _reconcile(index, index.a, commit=C3)
+        moved = await _state(index, index.a)
+        await _unmark(index, index.a)
+
+        assert await _reconcile(index, index.a, commit=C3)
+        state = await _state(index, index.a)
+        assert moved is not None and state is not None
+        assert (moved.target_commit_sha, moved.last_error_code) == (C3, None)
+        assert (state.indexed_commit_sha, state.target_commit_sha, state.last_error_code) == (
+            C1,
+            C3,
+            None,
+        )
+        assert await _marker(index, index.a) is not None
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.integration
+def test_a_write_of_the_same_target_keeps_a_terminal_refusal(index: _Index) -> None:
+    async def scenario() -> None:
+        await _enable(index, index.a)
+        await _build(index, index.a, C1, _module("aa01", 1))
+        assert await _request_build(index, index.a, C2)
+        fence = await _claim(index, index.a)
+        assert await _release(index, index.a, fence, "policy_document_too_large") == (
+            IndexStatus.READY
+        )
+        await _unmark(index, index.a)
+
+        # A repeated trigger of C2 and a trigger without a commit leave the target.
+        assert await _request_build(index, index.a, C2)
+        assert await _request_build(index, index.a, None)
+        requested = await _state(index, index.a)
+        await _unmark(index, index.a)
+        marked = await _reconcile(index, index.a, commit=C2)
+        state = await _state(index, index.a)
+
+        assert requested is not None and state is not None
+        assert (requested.target_commit_sha, requested.last_error_code) == (
+            C2,
+            "policy_document_too_large",
+        )
+        assert not marked
+        assert (state.target_commit_sha, state.last_error_code) == (
+            C2,
+            "policy_document_too_large",
+        )
+        assert await _marker(index, index.a) is None
 
     asyncio.run(scenario())
 
