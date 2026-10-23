@@ -3,10 +3,11 @@
 A review reads the state row of its repository under the effective RAG condition and
 never waits for a build: a row another session holds is read as committed, with no write.
 Under its own lock the review requests an update of a `stale` index and a full of a live
-`empty` one (at most once a day and once per target), brings a TTL-purged index back in a
-new generation, and extends `last_used_at` of a usable index at most once an hour, so a
-TTL purge spares an index reviews still read. A `failed`, a removed or disabled index and
-a missing row take no write; with RAG off or a GitLab installation the state is not read.
+`empty` one (at most once a day and once per target, never while a build holds the lease),
+brings a TTL-purged index back in a new generation, and extends `last_used_at` at most once
+an hour, so a TTL purge spares an index reviews still read. A `failed`, a removed or
+disabled index and a missing row take no write; with RAG off or a GitLab installation the
+state is not read.
 
 Opt-in: TEST_DATABASE_URL must target a test database whose user can create schemas.
 Each test migrates its own schema to head and drops it afterwards.
@@ -275,9 +276,13 @@ def test_a_review_full_is_queued_once_a_day_and_once_per_target(reviews: _Review
     async def scenario() -> None:
         index = reviews.index
         await _enable(index, index.a)
-        # A live empty index for C1 whose wake-up is spent.
+        # A live empty index for C1 whose wake-up is spent, last used 2 h ago.
         await _set(
-            index, index.a, "target_commit_sha = :target, wake_requested_at = NULL", target=C1
+            index,
+            index.a,
+            "target_commit_sha = :target, wake_requested_at = NULL, "
+            "last_used_at = clock_timestamp() - interval '2 hours'",
+            target=C1,
         )
         start = await _clock(index)
 
@@ -322,6 +327,29 @@ def test_a_review_full_is_queued_once_a_day_and_once_per_target(reviews: _Review
         assert start <= renewed["wake_requested_at"] <= end
         assert start <= renewed["review_full_requested_at"] <= end
         assert renewed["review_full_requested_sha"] == C2
+        # The first full extended `last_used_at` within the hour, so this one does not.
+        assert renewed["last_used_at"] == queued["last_used_at"]
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.integration
+def test_a_review_wakes_no_index_while_a_build_holds_its_lease(reviews: _Reviews) -> None:
+    async def scenario() -> None:
+        index = reviews.index
+        await _stale(index, index.a)
+        await _claim(index, index.a)
+        start = await _clock(index)
+
+        readiness = await asyncio.wait_for(_review(index, index.a), 5)
+
+        end = await _clock(index)
+        assert _seen(readiness) == ("stale", C1, None, C2)
+        leased = await _row(index, index.a)
+        assert leased is not None
+        assert leased["wake_requested_at"] is None
+        # The hourly extension still applies: `_stale` left the use 2 h old.
+        assert start <= leased["last_used_at"] <= end
 
     asyncio.run(scenario())
 

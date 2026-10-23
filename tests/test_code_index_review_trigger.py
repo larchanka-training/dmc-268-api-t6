@@ -21,7 +21,12 @@ NOW = datetime(2026, 10, 23, 12, 0, tzinfo=UTC)
 _NO_WRITES = ReviewTrigger(ReviewTriggerAction.NONE, extend_last_used=False, record_throttle=False)
 _EXTEND_ONLY = ReviewTrigger(ReviewTriggerAction.NONE, extend_last_used=True, record_throttle=False)
 _ENABLE = ReviewTrigger(ReviewTriggerAction.ENABLE, extend_last_used=False, record_throttle=True)
-_FULL = ReviewTrigger(ReviewTriggerAction.REQUEST_FULL, extend_last_used=True, record_throttle=True)
+_FULL = ReviewTrigger(
+    ReviewTriggerAction.REQUEST_FULL, extend_last_used=False, record_throttle=True
+)
+_FULL_EXTENDED = ReviewTrigger(
+    ReviewTriggerAction.REQUEST_FULL, extend_last_used=True, record_throttle=True
+)
 _UPDATE = ReviewTrigger(
     ReviewTriggerAction.REQUEST_UPDATE, extend_last_used=False, record_throttle=False
 )
@@ -31,11 +36,14 @@ _UPDATE_EXTENDED = ReviewTrigger(
 
 
 def _row(status: RagIndexStatus | None, **overrides: Any) -> dict[str, Any]:
-    """A locked row with no marker, no code, no throttle and `last_used_at` 5 min old."""
+    """A locked row with no marker, no lease, no code, no throttle and `last_used_at`
+    5 min old; usable as `rag_index(...)` derives it from the status."""
     row: dict[str, Any] = {
         "status": status,
+        "usable": status in (RagIndexStatus.READY, RagIndexStatus.STALE),
         "purge_reason": None,
         "wake_requested_at": None,
+        "lease_active": False,
         "last_error_code": None,
         "target_commit_sha": SHA_A,
         "last_used_at": NOW - timedelta(minutes=5),
@@ -93,6 +101,17 @@ def _decide(row: dict[str, Any]) -> ReviewTrigger:
         pytest.param(_row(RagIndexStatus.EMPTY), _FULL, id="live-empty-requests-a-full"),
         pytest.param(_row(RagIndexStatus.READY, last_used_at=None), _EXTEND_ONLY, id="ready"),
         pytest.param(_row(RagIndexStatus.STALE), _UPDATE, id="stale-requests-an-update"),
+        # Whether the index is usable is the reader's answer, not a copy of its statuses.
+        pytest.param(
+            _row(RagIndexStatus.READY, usable=False, last_used_at=None),
+            _NO_WRITES,
+            id="ready-not-usable",
+        ),
+        pytest.param(
+            _row(RagIndexStatus.STALE, usable=False, last_used_at=None),
+            _NO_WRITES,
+            id="stale-not-usable",
+        ),
     ],
 )
 def test_a_review_makes_the_writes_of_the_decision_table(
@@ -220,6 +239,31 @@ def test_a_usable_index_extends_last_used_at_at_most_once_an_hour(
     ("row", "expected"),
     [
         pytest.param(
+            _row(RagIndexStatus.EMPTY, last_used_at=None), _FULL_EXTENDED, id="empty-null"
+        ),
+        pytest.param(
+            _row(RagIndexStatus.EMPTY, last_used_at=NOW - timedelta(minutes=59)),
+            _FULL,
+            id="empty-59min",
+        ),
+        pytest.param(
+            _row(RagIndexStatus.EMPTY, last_used_at=NOW - timedelta(hours=1)),
+            _FULL_EXTENDED,
+            id="empty-1h",
+        ),
+    ],
+)
+def test_a_review_full_extends_last_used_at_at_most_once_an_hour(
+    row: dict[str, Any], expected: ReviewTrigger
+) -> None:
+    # The full and its throttle record are written every time; only the extension waits.
+    assert _decide(row) == expected
+
+
+@pytest.mark.parametrize(
+    ("row", "expected"),
+    [
+        pytest.param(
             _row(RagIndexStatus.STALE, wake_requested_at=NOW - timedelta(minutes=1)),
             _NO_WRITES,
             id="stale-marker-set",
@@ -261,6 +305,32 @@ def test_a_usable_index_extends_last_used_at_at_most_once_an_hour(
     ],
 )
 def test_a_review_wakes_no_set_marker_and_no_terminal_refusal(
+    row: dict[str, Any], expected: ReviewTrigger
+) -> None:
+    assert _decide(row) == expected
+
+
+@pytest.mark.parametrize(
+    ("row", "expected"),
+    [
+        pytest.param(_row(RagIndexStatus.STALE, lease_active=True), _NO_WRITES, id="stale-leased"),
+        pytest.param(
+            _row(
+                RagIndexStatus.STALE,
+                lease_active=True,
+                last_used_at=NOW - timedelta(hours=2),
+            ),
+            _EXTEND_ONLY,
+            id="stale-leased-still-extends",
+        ),
+        pytest.param(
+            _row(RagIndexStatus.EMPTY, lease_active=True, last_used_at=None),
+            _NO_WRITES,
+            id="empty-leased",
+        ),
+    ],
+)
+def test_a_review_wakes_nothing_while_a_build_holds_the_lease(
     row: dict[str, Any], expected: ReviewTrigger
 ) -> None:
     assert _decide(row) == expected

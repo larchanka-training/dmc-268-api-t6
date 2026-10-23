@@ -13,11 +13,10 @@ from enum import StrEnum
 
 from app.modules.code_index.domain.enums import PurgeReason, RagIndexStatus
 
-# ADR §6.1: a full a review queues from `empty` at most once a day and once per target.
+# ADR §6.1: a review queues a full from `empty` at most once a day and once per target.
 _REVIEW_FULL_EVERY = timedelta(hours=24)
 # ADR §4: `last_used_at` is written at most once an hour per repository.
 _LAST_USED_EVERY = timedelta(hours=1)
-_USABLE = frozenset({RagIndexStatus.READY, RagIndexStatus.STALE})
 
 
 class ReviewTriggerAction(StrEnum):
@@ -46,8 +45,10 @@ _NO_WRITES = ReviewTrigger(ReviewTriggerAction.NONE, extend_last_used=False, rec
 def review_trigger(
     *,
     status: RagIndexStatus | None,
+    usable: bool,
     purge_reason: PurgeReason | None,
     wake_requested_at: datetime | None,
+    lease_active: bool,
     last_error_code: str | None,
     target_commit_sha: str | None,
     last_used_at: datetime | None,
@@ -58,38 +59,45 @@ def review_trigger(
 ) -> ReviewTrigger:
     """Pick the writes for the locked row; ``status`` None means no row.
 
-    ``status`` is the one `rag_index(...)` derives over the same row, so `stale` is
-    decided there. ``healable_error_codes`` are the `last_error_code` values a later
-    attempt can heal; any other stored code is a terminal refusal of the row's target.
+    ``status`` and ``usable`` are what `rag_index(...)` derives over the same row, so
+    `stale` and whether a review may read the index are decided there. ``lease_active``
+    means a build holds the row's lease at ``now``. ``healable_error_codes`` are the
+    `last_error_code` values a later attempt can heal; any other stored code is a
+    terminal refusal of the row's target.
     """
     if status is None or status is RagIndexStatus.DISABLED:
         return _NO_WRITES
-    # M1: both limits together; a NULL target (after a purge) leaves only the 24 h one.
+    # Both limits together; a NULL target (after a purge) leaves only the 24 h one.
     full_allowed = (
         review_full_requested_at is None or now - review_full_requested_at >= _REVIEW_FULL_EVERY
     ) and (target_commit_sha is None or target_commit_sha != review_full_requested_sha)
     if purge_reason is not None:
-        # M4: only a TTL purge comes back; the converge pass owns `removed` and `disabled`,
+        # Only a TTL purge comes back; the converge pass owns `removed` and `disabled`,
         # and `enable()` sets `last_used_at` itself.
         if purge_reason == PurgeReason.TTL and full_allowed:
             return ReviewTrigger(
                 ReviewTriggerAction.ENABLE, extend_last_used=False, record_throttle=True
             )
         return _NO_WRITES
-    # M5: no wake marker and no terminal refusal of the row's own target.
-    wakes = wake_requested_at is None and (
-        last_error_code is None or last_error_code in healable_error_codes
+    # A review wakes no row whose marker is already set, no row a build holds the lease
+    # of, and no terminal refusal of the row's own target.
+    wakes = (
+        wake_requested_at is None
+        and not lease_active
+        and (last_error_code is None or last_error_code in healable_error_codes)
     )
+    extend = last_used_at is None or now - last_used_at >= _LAST_USED_EVERY
     if status is RagIndexStatus.EMPTY:
         if wakes and full_allowed:
+            # The full and its throttle record are written each time; the extension
+            # keeps the hourly rule of a read.
             return ReviewTrigger(
-                ReviewTriggerAction.REQUEST_FULL, extend_last_used=True, record_throttle=True
+                ReviewTriggerAction.REQUEST_FULL, extend_last_used=extend, record_throttle=True
             )
         return _NO_WRITES
-    if status not in _USABLE:
+    if not usable:
         return _NO_WRITES
-    # U4: a usable index is extended even when no update is requested.
-    extend = last_used_at is None or now - last_used_at >= _LAST_USED_EVERY
+    # A usable index is extended even when no update is requested.
     action = (
         ReviewTriggerAction.REQUEST_UPDATE
         if status is RagIndexStatus.STALE and wakes
