@@ -1069,7 +1069,7 @@ def test_index_readiness_is_recorded_after_the_context_build(
     assert trace.steps[2][2] == response
 
 
-def test_stale_index_is_opened_once_and_the_review_does_not_wait_for_it() -> None:
+def test_stale_index_is_opened_once_and_the_review_continues() -> None:
     trace = Trace()
     gate, access = _gate(_readiness(RagIndexStatus.STALE))
 
@@ -1095,6 +1095,52 @@ def test_not_ready_reason_comes_from_the_index_not_from_its_status() -> None:
 
     assert trace.steps[-1][0] == "context.rag"
     assert trace.steps[-1][2] == {"outcome": "not_ready", "reason": "building"}
+
+
+@pytest.mark.parametrize(
+    ("status", "usable", "reason", "response"),
+    [
+        # A status of a usable index on an index that cannot serve the review.
+        (
+            RagIndexStatus.READY,
+            False,
+            RagIndexStatus.BUILDING,
+            {"outcome": "not_ready", "reason": "building"},
+        ),
+        # A status of an index that is not ready on one the review may read.
+        (
+            RagIndexStatus.EMPTY,
+            True,
+            RagIndexStatus.EMPTY,
+            {"outcome": "not_ready", "reason": "prompt_version"},
+        ),
+    ],
+    ids=["ready-not-usable", "empty-usable"],
+)
+def test_usable_comes_from_the_index_not_from_its_status(
+    status: RagIndexStatus,
+    usable: bool,
+    reason: RagIndexStatus,
+    response: dict[str, str],
+) -> None:
+    @dataclass(frozen=True)
+    class PatchedIndex(RagIndex):
+        @property
+        def usable(self) -> bool:
+            return usable
+
+        @property
+        def not_ready_reason(self) -> RagIndexStatus | None:
+            return reason
+
+    trace = Trace()
+    index = PatchedIndex(status, None, None, 0, 0, None)
+    gate, _ = _gate(RagReadiness(enabled=True, index=index, default_head_sha=_TARGET))
+
+    asyncio.run(_stage(trace, rag=gate).run(_RUN))
+
+    assert trace.steps[-1][0] == "context.rag"
+    assert trace.steps[-1][2] == response
 
 
 def test_caught_build_failure_still_records_the_index_readiness() -> None:
