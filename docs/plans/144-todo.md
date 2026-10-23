@@ -144,9 +144,9 @@ CHECK refuses a sha without a time and accepts a time without a sha; downgrade t
 
 **Done when:**
 
-- [ ] every table row has a test;
-- [ ] the RED run and the GREEN run are recorded;
-- [ ] common verification is green.
+- [x] every table row has a test;
+- [x] the RED run and the GREEN run are recorded;
+- [x] common verification is green.
 
 **Dependencies:** Task 1 (the throttle columns exist by name).
 
