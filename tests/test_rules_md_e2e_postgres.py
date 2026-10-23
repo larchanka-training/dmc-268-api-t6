@@ -70,6 +70,8 @@ EMPTY_SHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
 # Unique strings of the two changed files: each one shows whether its file reached the model.
 SERVICE_MARKER = "service-marker-5d1e"
 CLIENT_MARKER = "client-marker-9c2b"
+# The ignored file: with a mask neither its text nor its name may reach the model (§5.3).
+CLIENT_PATH = "generated/client.py"
 _ACTIVE_STATES = frozenset({"queued", "running", "publishing"})
 # Fixed seed ids: the pins of a run (the review prompt id among them) enter
 # `policy_digest`, so two schemas compare only when they are seeded alike.
@@ -538,6 +540,8 @@ class Outcome:
     # path -> (presence, raw_sha256, byte_count) of the staged run_policy_documents rows.
     documents: dict[str, tuple[str, str | None, int | None]]
     policy_digest: str | None
+    # run_policy_snapshots rows of the run: a failed load stores none.
+    snapshots: int
     policy_load: list[Any]
     tasks: list[str]
     bodies: list[str]
@@ -691,6 +695,10 @@ async def _scenario(stack: Stack, github: FakeGitHub, llm: FakeLlm) -> Outcome:
                 text("SELECT policy_digest FROM run_policy_snapshots WHERE run_id = :id"),
                 {"id": run_id},
             )
+            snapshots = await session.scalar(
+                text("SELECT count(*) FROM run_policy_snapshots WHERE run_id = :id"),
+                {"id": run_id},
+            )
         actions = await tools(factory, run_id)
     finally:
         await client.aclose()
@@ -701,6 +709,7 @@ async def _scenario(stack: Stack, github: FakeGitHub, llm: FakeLlm) -> Outcome:
         error_code=error_code,
         documents=documents,
         policy_digest=digest,
+        snapshots=int(snapshots or 0),
         policy_load=[response for tool, _, response in actions if tool == "policy.load"],
         tasks=llm.tasks,
         bodies=llm.bodies,
@@ -742,6 +751,7 @@ def _assert_policy_load_failed(outcome: Outcome) -> None:
 def _assert_failed_once(outcome: Outcome, error_codes: frozenset[str]) -> None:
     assert (outcome.state, outcome.attempt) == ("failed", 1)
     assert outcome.error_code in error_codes
+    assert outcome.snapshots == 0
     _assert_policy_load_failed(outcome)
     assert outcome.tasks == []
     assert outcome.reviews == []
@@ -766,6 +776,7 @@ def test_missing_rules_md_lets_the_whole_diff_reach_the_model(stack: Stack) -> N
     # Without a policy both changed files reach the model: the control of the valid case.
     assert any(SERVICE_MARKER in body for body in outcome.bodies)
     assert any(CLIENT_MARKER in body for body in outcome.bodies)
+    assert any(CLIENT_PATH in body for body in outcome.bodies)
     assert len(outcome.reviews) == 1
     assert outcome.reviews[0]["commit_id"] == HEAD
 
@@ -779,6 +790,7 @@ def test_review_ignore_keeps_the_ignored_file_out_of_every_llm_call(stack: Stack
     assert _rules_load(outcome)["presence"] == "present"
     assert outcome.bodies
     assert all(CLIENT_MARKER not in body for body in outcome.bodies)
+    assert all(CLIENT_PATH not in body for body in outcome.bodies)
     assert any(SERVICE_MARKER in body for body in outcome.bodies)
     assert len(outcome.reviews) == 1
     assert outcome.reviews[0]["commit_id"] == HEAD
@@ -797,6 +809,7 @@ def test_empty_rules_md_is_present_and_has_another_policy_than_a_missing_one(
     assert empty.documents[RULES] == ("present", EMPTY_SHA256, 0)
     assert _rules_load(empty)["presence"] == "present"
     assert (empty.state, empty.error_code) == ("succeeded", None)
+    assert "ReviewOutput" in empty.tasks
     assert len(empty.reviews) == 1
     assert empty.reviews[0]["commit_id"] == HEAD
     assert missing.documents[RULES][:2] == ("missing", None)
@@ -810,6 +823,7 @@ def test_rules_md_at_the_size_limit_is_present(stack: Stack) -> None:
     assert (outcome.state, outcome.error_code) == ("succeeded", None)
     presence, _, byte_count = outcome.documents[RULES]
     assert (presence, byte_count) == ("present", 65_536)
+    assert "ReviewOutput" in outcome.tasks
     assert len(outcome.reviews) == 1
     assert outcome.reviews[0]["commit_id"] == HEAD
 
@@ -819,6 +833,7 @@ def test_all_changes_ignored_skips_the_run_without_llm_or_review(stack: Stack) -
     outcome = _review(stack, _github(ALL_IGNORED_RULES))
 
     assert (outcome.state, outcome.error_code) == ("skipped", "all_changes_ignored")
+    assert outcome.documents[RULES][0] == "present"
     assert outcome.tasks == []
     assert outcome.reviews == []
 
@@ -906,6 +921,7 @@ def test_truncated_base_tree_fails_the_run_and_is_never_missing(stack: Stack) ->
     # `policy_revision_unavailable`, §9 lists an incomplete load under `policy_fetch_transient`
     # (retried, so the attempt count is not pinned either).
     assert outcome.error_code in {"policy_revision_unavailable", "policy_fetch_transient"}
+    assert outcome.snapshots == 0
     _assert_policy_load_failed(outcome)
     assert outcome.tasks == []
     assert outcome.reviews == []
