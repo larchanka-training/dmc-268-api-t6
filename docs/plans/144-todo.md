@@ -346,9 +346,9 @@ PRs and their files (plan, "Coordination").
 
 **Done when:**
 
-- [ ] every listed anchor is edited;
+- [x] every listed anchor is edited;
 - [ ] the coordination re-check is done;
-- [ ] common verification is green.
+- [x] common verification is green.
 
 **Dependencies:** Task 6.
 
