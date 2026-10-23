@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from hashlib import sha256
 from pathlib import PurePosixPath
 from typing import Annotated, Protocol
@@ -18,6 +18,7 @@ from app.modules.reviews.application.policy_snapshot import (
     CallManifest,
     ManifestBlock,
     PolicySnapshot,
+    RecoveryKind,
     SourceRole,
 )
 from app.modules.reviews.application.prompt_budget import verify_provenance_pre_send_guard
@@ -73,11 +74,96 @@ class ConventionsRequest:
     languages: dict[str, int]
     changed_files: tuple[str, ...]
     omitted_tree_paths: int = 0
+    snapshot: PolicySnapshot | None = field(default=None, compare=False, repr=False)
+    agents_md_sha: str | None = field(default=None, compare=False, repr=False)
 
     @property
     def traced_files(self) -> tuple[str, ...]:
         """The changed paths the model must describe, in order."""
         return self.changed_files[:MAX_TRACED_FILES]
+
+
+def build_conventions_manifest(
+    request: ConventionsRequest,
+    *,
+    run_id: UUID | None = None,
+    snapshot: PolicySnapshot | None = None,
+    agents_md_sha: str | None = None,
+    recovery_kind: RecoveryKind = "none",
+) -> CallManifest:
+    """Build the exact CallManifest for a conventions request (before or after fitting)."""
+    effective_snapshot = snapshot if snapshot is not None else request.snapshot
+    effective_sha = agents_md_sha if agents_md_sha is not None else request.agents_md_sha
+    conventions_blocks: list[ManifestBlock] = []
+    if request.agents_md:
+        agents_rev = (
+            effective_snapshot.policy_base_sha if effective_snapshot is not None else effective_sha
+        )
+        agents_hash = sha256(request.agents_md.replace("\r\n", "\n").encode("utf-8")).hexdigest()
+        lines_count = len(request.agents_md.splitlines()) or 1
+        conventions_blocks.append(
+            ManifestBlock(
+                block_id="agents-md",
+                source_role=SourceRole.POLICY_DOCUMENT,
+                source_kind="project_conventions_document",
+                path="AGENTS.md",
+                revision=agents_rev,
+                content_sha256=agents_hash,
+                start_line=1,
+                end_line=lines_count,
+                shown_line_count=lines_count,
+            )
+        )
+    if request.rules:
+        defaults_lines = sum(len(r.checks) for r in request.rules) or 1
+        conventions_blocks.append(
+            ManifestBlock(
+                block_id="service-defaults",
+                source_role=SourceRole.SERVICE_DEFAULTS,
+                source_kind="service_defaults",
+                start_line=1,
+                end_line=defaults_lines,
+                shown_line_count=defaults_lines,
+            )
+        )
+    for idx, cf in enumerate(request.repo_files):
+        lines_count = len((cf.content or "").splitlines()) or 1
+        conventions_blocks.append(
+            ManifestBlock(
+                block_id=f"file-{idx}",
+                source_role=SourceRole.SOURCE_EXCERPT,
+                source_kind="source_code",
+                path=cf.path,
+                start_line=1,
+                end_line=lines_count,
+                shown_line_count=lines_count,
+            )
+        )
+    for idx, tree_path in enumerate(request.repo_tree):
+        conventions_blocks.append(
+            ManifestBlock(
+                block_id=f"tree-{idx}",
+                source_role=SourceRole.SOURCE_EXCERPT,
+                source_kind="source_code",
+                path=tree_path,
+            )
+        )
+    for idx, cf_path in enumerate(request.changed_files):
+        conventions_blocks.append(
+            ManifestBlock(
+                block_id=f"changed-{idx}",
+                source_role=SourceRole.DIFF,
+                source_kind="source_code",
+                path=cf_path,
+            )
+        )
+    return CallManifest(
+        call_id=uuid4(),
+        run_id=run_id,
+        stage="conventions",
+        recovery_kind=recovery_kind,
+        blocks=tuple(conventions_blocks),
+    )
 
 
 class ConventionsFile(BaseModel):
@@ -268,92 +354,26 @@ class GenerateRepoConventions:
         fetched_files = await self._source.fetch_files(repository_id, selected)
         files = _bound_context_files(selected, fetched_files)
 
-        # Build conventions call manifest and verify provenance pre-send guard (CVS §5.2)
-        conventions_blocks: list[ManifestBlock] = []
-        if agents_md.content:
-            agents_rev = snapshot.policy_base_sha if snapshot is not None else agents_md.sha
-            agents_hash = (
-                snapshot.agents.text_sha256
-                if (snapshot is not None and snapshot.agents.text_sha256)
-                else sha256(agents_md.content.replace("\r\n", "\n").encode("utf-8")).hexdigest()
-            )
-            conventions_blocks.append(
-                ManifestBlock(
-                    block_id="agents-md",
-                    source_role=SourceRole.POLICY_DOCUMENT,
-                    source_kind="project_conventions_document",
-                    path="AGENTS.md",
-                    revision=agents_rev,
-                    content_sha256=agents_hash,
-                    start_line=1,
-                    end_line=len(agents_md.content.splitlines()) or 1,
-                    shown_line_count=len(agents_md.content.splitlines()) or 1,
-                )
-            )
-        if rules:
-            defaults_lines = sum(len(r.checks) for r in rules) or 1
-            conventions_blocks.append(
-                ManifestBlock(
-                    block_id="service-defaults",
-                    source_role=SourceRole.SERVICE_DEFAULTS,
-                    source_kind="service_defaults",
-                    start_line=1,
-                    end_line=defaults_lines,
-                    shown_line_count=defaults_lines,
-                )
-            )
-        for idx, cf in enumerate(files):
-            lines_count = len((cf.content or "").splitlines()) or 1
-            conventions_blocks.append(
-                ManifestBlock(
-                    block_id=f"file-{idx}",
-                    source_role=SourceRole.SOURCE_EXCERPT,
-                    source_kind="source_code",
-                    path=cf.path,
-                    start_line=1,
-                    end_line=lines_count,
-                    shown_line_count=lines_count,
-                )
-            )
-
-        for idx, tree_file in enumerate(tree):
-            conventions_blocks.append(
-                ManifestBlock(
-                    block_id=f"tree-{idx}",
-                    source_role=SourceRole.SOURCE_EXCERPT,
-                    source_kind="source_code",
-                    path=tree_file.path,
-                )
-            )
-        for idx, cf_path in enumerate(changed_files):
-            conventions_blocks.append(
-                ManifestBlock(
-                    block_id=f"changed-{idx}",
-                    source_role=SourceRole.DIFF,
-                    source_kind="source_code",
-                    path=cf_path,
-                )
-            )
-
-        conventions_manifest = CallManifest(
-            call_id=uuid4(),
+        request = ConventionsRequest(
+            system=conventions_prompt.content,
+            rules=rules,
+            agents_md=agents_md.content,
+            repo_tree=tuple(file.path for file in tree),
+            repo_files=files,
+            languages=languages,
+            changed_files=changed_files,
+            snapshot=snapshot,
+            agents_md_sha=agents_md.sha,
+        )
+        conventions_manifest = build_conventions_manifest(
+            request,
             run_id=run_id,
-            stage="conventions",
-            blocks=tuple(conventions_blocks),
+            snapshot=snapshot,
+            agents_md_sha=agents_md.sha,
         )
         verify_provenance_pre_send_guard(conventions_manifest, snapshot=snapshot)
 
-        raw_draft = await self._model.draft_conventions(
-            request=ConventionsRequest(
-                system=conventions_prompt.content,
-                rules=rules,
-                agents_md=agents_md.content,
-                repo_tree=tuple(file.path for file in tree),
-                repo_files=files,
-                languages=languages,
-                changed_files=changed_files,
-            )
-        )
+        raw_draft = await self._model.draft_conventions(request=request)
         draft = ConventionsDraft.model_validate(raw_draft)
         _validate_trace_files(draft.files, changed_files[:MAX_TRACED_FILES])
         conventions = CachedConventions(

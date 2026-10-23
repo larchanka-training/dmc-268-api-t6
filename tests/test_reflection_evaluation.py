@@ -7,8 +7,8 @@ and AC 7 (prompt injection defenses across both passes).
 from __future__ import annotations
 
 import hashlib
-import re
 import uuid
+import xml.etree.ElementTree as ET
 from collections.abc import Mapping
 from dataclasses import replace
 from typing import Any
@@ -24,6 +24,7 @@ from app.modules.reviews.application.policy_snapshot import (
     make_policy_document_present,
 )
 from app.modules.reviews.application.prompt_builder import (
+    DEFAULT_BACKEND_V1_CHECKSUM,
     ChangedFile,
     DiffLine,
     PullRequestMeta,
@@ -75,11 +76,31 @@ def make_eval_snapshot(
         builtin_exclusions_version="builtin-exclusions/v1",
         priority_matcher_version="priority-matcher/v1",
         service_defaults_rule_version_id=uuid.uuid4(),
-        defaults_checksum="defaults_0",
+        defaults_checksum=DEFAULT_BACKEND_V1_CHECKSUM,
         prompt_bindings=make_complete_prompt_bindings(),
         execution_profile=make_complete_execution_profile(),
         policy_digest="digest_123",
     )
+
+
+_EXPECTED_CANDIDATE_BODIES = frozenset(
+    {
+        "f-string formatting in SQL query allows injection.",
+        "open() call without try/except violates repository rule.",
+        "Loop retains memory indefinitely.",
+        "Function should use CamelCase per rule 2.",
+        "Called method is dangerous.",
+        "Spans across gap",
+        "Body",
+        "Details",
+    }
+)
+
+_EXPECTED_POLICY_SNIPPETS = (
+    "Check SQL params.",
+    "All I/O operations must handle exceptions.",
+    "Go files must use CamelCase.",
+)
 
 
 class StubVerifierModel:
@@ -101,55 +122,123 @@ class StubVerifierModel:
     async def verify(self, *, system_prompt: str, user_prompt: str) -> Mapping[str, Any]:
         self.call_count += 1
         self.last_user_prompt = user_prompt
-        if self.require_candidates:
-            if "<candidate_findings" not in user_prompt or "<candidate " not in user_prompt:
-                raise ValueError("Verifier prompt missing required candidate findings")
-            for body in re.findall(r"<body>(.*?)</body>", user_prompt, re.DOTALL):
-                if not body.strip():
-                    raise ValueError("Candidate finding has empty body in verifier prompt")
-        if self.require_code:
-            if "<code_context>" not in user_prompt or "<file " not in user_prompt:
-                raise ValueError("Verifier prompt missing required code context")
-            code_match = re.search(r"<code_context>(.*?)</code_context>", user_prompt, re.DOTALL)
-            if not code_match or "<line " not in code_match.group(1):
-                raise ValueError("Code context has file tags but no code lines")
-        has_policy = (
-            "</repository_rules>" in user_prompt
-            or "</project_conventions_document>" in user_prompt
-            or "</service_defaults>" in user_prompt
-            or "</repo_conventions>" in user_prompt
-            or '<repository_rules status="absent"' in user_prompt
-        )
-        if self.require_policy and not has_policy:
-            raise ValueError("Verifier prompt missing required policy context")
 
-        # Derive decision validity from prompt content
+        root = ET.fromstring(f"<root>{user_prompt}</root>")
+
+        code_lines_by_block: dict[str, dict[int, str]] = {}
+        if self.require_code:
+            code_context_el = root.find("code_context")
+            if code_context_el is None or not code_context_el.findall(".//file"):
+                raise ValueError("Verifier prompt missing required code context")
+            for file_el in code_context_el.findall(".//file"):
+                b_id = file_el.attrib.get("block_id", "")
+                lines_map: dict[int, str] = {}
+                for line_el in file_el.findall("line"):
+                    n_str = line_el.attrib.get("n")
+                    text_val = line_el.text or ""
+                    if n_str is not None and text_val.strip():
+                        lines_map[int(n_str)] = text_val
+                code_lines_by_block[b_id] = lines_map
+            if not any(code_lines_by_block.values()):
+                raise ValueError("Code context has file tags but no code lines")
+
+        candidates_by_id: dict[str, dict[str, Any]] = {}
+        if self.require_candidates:
+            cands_el = root.find("candidate_findings")
+            if cands_el is None or not cands_el.findall("candidate"):
+                raise ValueError("Verifier prompt missing required candidate findings")
+            for c_el in cands_el.findall("candidate"):
+                c_id = c_el.attrib.get("candidate_id", "")
+                body_text = (c_el.findtext("body") or "").strip()
+                if not body_text:
+                    raise ValueError("Candidate finding has empty body in verifier prompt")
+                if body_text not in _EXPECTED_CANDIDATE_BODIES:
+                    raise ValueError(f"Candidate {c_id} body was altered: {body_text!r}")
+                candidates_by_id[c_id] = {
+                    "path": c_el.attrib.get("path", ""),
+                    "line": int(c_el.attrib.get("line", "0")),
+                    "body": body_text,
+                    "title": (c_el.findtext("title") or "").strip(),
+                }
+
+        policy_lines_by_block: dict[str, dict[int, str]] = {}
+        for tag in ("repository_rules", "project_conventions_document"):
+            p_el = root.find(tag)
+            if p_el is not None:
+                b_id = p_el.attrib.get("block_id", "")
+                p_map: dict[int, str] = {}
+                for l_el in p_el.findall("line"):
+                    if "n" in l_el.attrib and (l_el.text or "").strip():
+                        p_map[int(l_el.attrib["n"])] = l_el.text or ""
+                policy_lines_by_block[b_id] = p_map
+
+        if self.require_policy:
+            rules_lines = policy_lines_by_block.get("policy-rules", {})
+            joined_rules = "\n".join(rules_lines.values())
+            if not rules_lines or not any(
+                snippet in joined_rules for snippet in _EXPECTED_POLICY_SNIPPETS
+            ):
+                raise ValueError("Verifier prompt missing required policy context or text altered")
+
+        # Derive and validate each decision from the parsed XML elements in the prompt
         decisions = self.response_payload.get("decisions", [])
         for dec in decisions:
             cand_id = dec.get("candidate_id")
-            if (
-                cand_id
-                and f'id="{cand_id}"' not in user_prompt
-                and f"id='{cand_id}'" not in user_prompt
-            ):
+            if not cand_id or cand_id not in candidates_by_id:
                 raise ValueError(f"Candidate {cand_id} not found in verifier user prompt")
+            cand_info = candidates_by_id[cand_id]
+            cand_block_id = file_block_id(cand_info["path"])
+            cand_file_lines = code_lines_by_block.get(cand_block_id, {})
+            cand_line_num = cand_info["line"]
+            if cand_line_num not in cand_file_lines:
+                raise ValueError(
+                    f"Candidate {cand_id} anchor line {cand_line_num} not found in "
+                    f"<file block_id={cand_block_id!r}>"
+                )
+            cited_code = cand_file_lines[cand_line_num].strip()
+
+            if cand_id == "cand-1" and cand_info["path"] == "app/calc.py":
+                if cited_code != "x = a + b" or "Loop retains memory" not in cand_info["body"]:
+                    raise ValueError(
+                        f"Code line 10 {cited_code!r} does not match scalar arithmetic"
+                    )
+            elif cand_id == "cand-inapplicable":
+                rule_line_2 = policy_lines_by_block.get("policy-rules", {}).get(2, "")
+                if (
+                    cited_code != "def add(): pass"
+                    or "Go files must use CamelCase" not in rule_line_2
+                ):
+                    raise ValueError("Code or rule 2 text mismatch for inapplicable rule check")
+            elif cand_id == "cand-1" and cand_info["path"] == "app/service.py":
+                if (
+                    cited_code != "call_helper()"
+                    or "Called method is dangerous" not in cand_info["body"]
+                ):
+                    raise ValueError(f"Code line 50 {cited_code!r} does not match call_helper()")
+            elif cand_id == "cand-sql-1":
+                if "SELECT * FROM users WHERE id = {user_id}" not in cited_code:
+                    raise ValueError("SQL injection code line missing in prompt")
+            elif cand_id == "cand-io-1":
+                rule_line_1 = policy_lines_by_block.get("policy-rules", {}).get(1, "")
+                if cited_code != "data = f.read()" or "All I/O operations" not in rule_line_1:
+                    raise ValueError("I/O code or rule 1 text mismatch in prompt")
+            else:
+                if cited_code not in {"x = 1", "y = 2"}:
+                    raise ValueError(f"Unexpected code text {cited_code!r} at line {cand_line_num}")
+
             for ref in dec.get("evidence_refs", []):
+                ref_block = ref.get("block_id", "")
                 start = ref.get("start_line")
                 end = ref.get("end_line")
                 if (
-                    start is not None
-                    and f'n="{start}"' not in user_prompt
-                    and f'num="{start}"' not in user_prompt
-                    and f'line="{start}"' not in user_prompt
+                    ref_block in code_lines_by_block
+                    and start == end
+                    and start is not None
+                    and start not in code_lines_by_block[ref_block]
                 ):
-                    raise ValueError(f"Evidence line {start} not found in user prompt code context")
-                if (
-                    end is not None
-                    and f'n="{end}"' not in user_prompt
-                    and f'num="{end}"' not in user_prompt
-                    and f'line="{end}"' not in user_prompt
-                ):
-                    raise ValueError(f"Evidence line {end} not found in user prompt code context")
+                    raise ValueError(
+                        f"Evidence line {start} not found in <file block_id={ref_block!r}>"
+                    )
 
         return self.response_payload
 
@@ -985,6 +1074,9 @@ class TestAC6NonVacuumVerifier:
         assert "x = 1" in prompt.user
         assert "Details of candidate issue" in prompt.user
         assert "<evidence_refs>" in prompt.user
+        assert "<repo_conventions>" in prompt.user
+        assert "pattern1" in prompt.user
+        assert "rec1" in prompt.user
         assert manifest.get_block("repo-conventions") is not None
 
     @pytest.mark.anyio
@@ -1054,3 +1146,14 @@ class TestAC6NonVacuumVerifier:
         with pytest.raises(VerificationUnavailableError) as exc_info:
             await verifier.verify(candidates=(cand,), context=context_no_lines)
         assert "Code context has file tags but no code lines" in str(exc_info.value.__cause__)
+
+        # 3. If candidate body is empty in rendered prompt, stub detects it and fails
+        empty_body_cand = replace(
+            cand,
+            finding=cand.finding.model_copy(update={"body": "   "}),
+        )
+        with pytest.raises(VerificationUnavailableError) as exc_body:
+            await verifier.verify(candidates=(empty_body_cand,), context=context)
+        assert "Candidate finding has empty body in verifier prompt" in str(
+            exc_body.value.__cause__
+        )

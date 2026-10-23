@@ -17,6 +17,7 @@ from app.modules.reviews.application.commit_prefix_limits import (
     MAX_COMMIT_MESSAGES,
 )
 from app.modules.reviews.application.context_provenance import SourceRole
+from app.modules.reviews.application.policy_errors import PolicyError, PolicyErrorCode
 from app.modules.reviews.application.policy_snapshot import (
     CallManifest,
     ManifestBlock,
@@ -41,28 +42,24 @@ class ReviewRule:
     include: tuple[str, ...]
     exclude: tuple[str, ...]
     checks: tuple[str, ...]
-    check_ids: tuple[str, ...] = ()
 
 
-# Canonical stable check IDs for default rules (RFS §5.2 :530, §6.2 :555-604).
-CANONICAL_RULE_CHECK_IDS: dict[str, tuple[str, ...]] = {
-    # Backend v1 (RFS §6.2 B1-B6)
+DEFAULT_BACKEND_V1_CHECKSUM = "282d61c2da897152046db742fbd9bfda061ba1c71ce32759d47e042c06b0ff52"
+DEFAULT_BACKEND_V1_RAW_SHA256 = "94aa971ae0d0f97af86dba5139ce70bb3488dc2aa21f6fc03db98f2ac98bec28"
+DEFAULT_FRONTEND_V1_CHECKSUM = "32673f59b6f0f3f96155e4012dcc42718b0814c473cc255c70e69f63660dcb4a"
+DEFAULT_FRONTEND_V1_RAW_SHA256 = "8327c437b1edada1415fbff214484920959fa4fc1d011c9c7c4baf80062c386c"
+
+# Canonical stable check IDs per pinned default rule artifact (RFS §6.2 :555-604).
+BACKEND_V1_RULE_CHECK_IDS: dict[str, tuple[str, ...]] = {
     "Naming Consistency": ("N1", "N2", "N3", "N4"),
     "Error Handling Standards": ("E1", "E2", "E3", "E4"),
     "Complex Function Improvement Suggestions": ("C1", "C2", "C3", "C4"),
     "Meaningful Comments for Complex Logic": ("D1", "D2", "D3"),
     "Test Coverage for Complex Functions": ("T1", "T2", "T3", "T4"),
     "Clean Architecture Boundaries": ("A1", "A2", "A3", "A4", "A5"),
-    # Frontend v1 (RFS §6.2 F6)
-    "FSD Layer Boundaries": ("FSD1", "FSD2", "FSD3", "FSD4", "FSD5"),
-    # Core defaults (RFS §5.2 :530)
-    "Security": ("SEC1",),
-    "Correctness": ("COR1",),
-    "Performance": ("PERF1",),
-    "Readability": ("READ1",),
 }
 
-CANONICAL_FRONTEND_RULE_CHECK_IDS: dict[str, tuple[str, ...]] = {
+FRONTEND_V1_RULE_CHECK_IDS: dict[str, tuple[str, ...]] = {
     "Naming Consistency": ("N1", "N2", "N5", "N4"),
     "Error Handling Standards": ("E1", "E2", "E3", "E5"),
     "Complex Function Improvement Suggestions": ("C1", "C2", "C3", "C5"),
@@ -71,30 +68,41 @@ CANONICAL_FRONTEND_RULE_CHECK_IDS: dict[str, tuple[str, ...]] = {
     "FSD Layer Boundaries": ("FSD1", "FSD2", "FSD3", "FSD4", "FSD5"),
 }
 
+PINNED_DEFAULTS_CHECK_IDS: dict[str, dict[str, tuple[str, ...]]] = {
+    DEFAULT_BACKEND_V1_CHECKSUM: BACKEND_V1_RULE_CHECK_IDS,
+    DEFAULT_BACKEND_V1_RAW_SHA256: BACKEND_V1_RULE_CHECK_IDS,
+    "default-backend.v1": BACKEND_V1_RULE_CHECK_IDS,
+    DEFAULT_FRONTEND_V1_CHECKSUM: FRONTEND_V1_RULE_CHECK_IDS,
+    DEFAULT_FRONTEND_V1_RAW_SHA256: FRONTEND_V1_RULE_CHECK_IDS,
+    "default-frontend.v1": FRONTEND_V1_RULE_CHECK_IDS,
+}
 
-def get_rule_check_ids(rule: ReviewRule) -> tuple[str, ...]:
-    """Return stable check IDs for a rule (RFS §3.3 :530, §6.2 :555, §8.2 :837)."""
-    if rule.check_ids and len(rule.check_ids) == len(rule.checks):
-        return rule.check_ids
 
-    # Frontend disambiguation: 3 checks for Test Coverage or Zod/React/predicate markers
-    if rule.name in CANONICAL_FRONTEND_RULE_CHECK_IDS:
-        fe_ids = CANONICAL_FRONTEND_RULE_CHECK_IDS[rule.name]
-        if len(rule.checks) == len(fe_ids):
-            # If 3 checks for Test Coverage, it's definitely frontend (T5, T3, T4)
-            if rule.name == "Test Coverage for Complex Functions":
-                return fe_ids
-            # If checks explicitly mention Zod/predicate/useMemo
-            checks_joined = " ".join(rule.checks)
-            if "Zod" in checks_joined or "predicate" in checks_joined or "useMemo" in checks_joined:
-                return fe_ids
-
-    if rule.name in CANONICAL_RULE_CHECK_IDS:
-        canonical_ids = CANONICAL_RULE_CHECK_IDS[rule.name]
-        if len(rule.checks) == len(canonical_ids):
-            return canonical_ids
-
-    return tuple(str(i) for i in range(1, len(rule.checks) + 1))
+def get_rule_check_ids(
+    rule: ReviewRule,
+    *,
+    defaults_checksum: str | None = None,
+) -> tuple[str, ...]:
+    """Return stable check IDs for a rule from the pinned defaults version (RFS §6.2, §8.2)."""
+    if not defaults_checksum or defaults_checksum not in PINNED_DEFAULTS_CHECK_IDS:
+        raise PolicyError(
+            PolicyErrorCode.SNAPSHOT_INTEGRITY_ERROR,
+            f"Unknown service defaults checksum: {defaults_checksum!r}",
+        )
+    rule_map = PINNED_DEFAULTS_CHECK_IDS[defaults_checksum]
+    if rule.name not in rule_map:
+        raise PolicyError(
+            PolicyErrorCode.SNAPSHOT_INTEGRITY_ERROR,
+            f"Rule {rule.name!r} is not part of pinned service defaults {defaults_checksum!r}",
+        )
+    canonical_ids = rule_map[rule.name]
+    if len(rule.checks) != len(canonical_ids):
+        raise PolicyError(
+            PolicyErrorCode.SNAPSHOT_INTEGRITY_ERROR,
+            f"Rule {rule.name!r} has {len(rule.checks)} checks, "
+            f"expected {len(canonical_ids)} for pinned defaults {defaults_checksum!r}",
+        )
+    return canonical_ids
 
 
 @dataclass(frozen=True)
@@ -193,16 +201,11 @@ def review_rule_from_stored(value: Mapping[str, object]) -> ReviewRule:
         and all(isinstance(item, str) for item in checks)
     ):
         raise ValueError("stored rule has invalid prompt shape")
-    check_ids = value.get("check_ids")
-    parsed_check_ids = ()
-    if isinstance(check_ids, list) and all(isinstance(c, str) for c in check_ids):
-        parsed_check_ids = tuple(check_ids)
     return ReviewRule(
         name=name,
         include=tuple(include),
         exclude=tuple(exclude),
         checks=tuple(checks),
-        check_ids=parsed_check_ids,
     )
 
 
@@ -235,7 +238,12 @@ class PromptBuilder:
             blocks.append(self._render_policy_rules(context.policy_snapshot))
             blocks.append(self._render_policy_agents(context.policy_snapshot))
             if context.rules:
-                blocks.append(self._render_service_defaults(context.rules))
+                blocks.append(
+                    self._render_service_defaults(
+                        context.rules,
+                        defaults_checksum=context.policy_snapshot.defaults_checksum,
+                    )
+                )
         else:
             blocks.append(self._render_rules(context.rules))
             blocks.append(_container("agents_md", _text(context.agents_md or "")))
@@ -305,9 +313,14 @@ class PromptBuilder:
         )
 
     @staticmethod
-    def _render_service_defaults(rules: tuple[ReviewRule, ...]) -> str:
+    def _render_service_defaults(
+        rules: tuple[ReviewRule, ...],
+        *,
+        defaults_checksum: str | None = None,
+    ) -> str:
         blocks = []
         line_offset = 1
+        seen_check_ids: set[str] = set()
         for rule in rules:
             attributes = " ".join(
                 (
@@ -316,10 +329,16 @@ class PromptBuilder:
                     f'exclude="{_attribute(" ".join(rule.exclude))}"',
                 )
             )
-            check_ids = get_rule_check_ids(rule)
+            check_ids = get_rule_check_ids(rule, defaults_checksum=defaults_checksum)
             checks = []
             for index, check in enumerate(rule.checks):
                 c_id = check_ids[index]
+                if c_id in seen_check_ids:
+                    raise PolicyError(
+                        PolicyErrorCode.SNAPSHOT_INTEGRITY_ERROR,
+                        f"Duplicate service defaults check ID {c_id!r}",
+                    )
+                seen_check_ids.add(c_id)
                 checks.append(
                     f'<check id="{c_id}"><line n="{line_offset}">{_text(check)}</line></check>'
                 )

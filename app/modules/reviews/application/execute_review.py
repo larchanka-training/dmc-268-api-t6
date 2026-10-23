@@ -6,8 +6,8 @@ import json
 import logging
 import uuid
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
-from typing import Any, Protocol
+from dataclasses import dataclass, replace
+from typing import Protocol
 from uuid import UUID
 
 from pydantic import ValidationError
@@ -23,7 +23,9 @@ from app.modules.reviews.application.prompt_budget import (
     PolicyBudgetExceededError,
     PreSendGuardError,
     fit_review_context,
+    send_budget_for,
     token_counter_for,
+    validate_execution_profile_versions,
     verify_pre_send_guard,
     verify_provenance_pre_send_guard,
 )
@@ -42,10 +44,12 @@ from app.modules.reviews.application.reflection_pass import (
     verify_verifier_mandatory_budget,
 )
 from app.modules.reviews.application.review_output import (
+    DroppedCandidateRecord,
     InvalidReviewOutput,
     ReviewFinding,
     ReviewFindingV2,
     ReviewOutputHandler,
+    VerifiedReviewOutput,
     validate_v2_attribution,
     validate_v2_coordinates,
 )
@@ -195,6 +199,9 @@ class ExecuteReviewRun:
             excluded = self._context_filter.excluded
             changed_files = tuple(file for file in changed_files if not excluded(file.path))
             omitted_files = tuple(path for path in omitted_files if not excluded(path))
+            filter_diff_old_sha = getattr(self._context_filter, "diff_old_sha", None)
+            if meta.diff_old_sha is None and isinstance(filter_diff_old_sha, str):
+                meta = replace(meta, diff_old_sha=filter_diff_old_sha)
         context = ReviewContext(
             system=prompt_input.system,
             rules=prompt_input.rules,
@@ -218,11 +225,21 @@ class ExecuteReviewRun:
                     PolicyErrorCode.SNAPSHOT_INTEGRITY_ERROR,
                     "Policy snapshot is not ready for LLM call",
                 )
+            validate_execution_profile_versions(prompt_input.policy_snapshot.execution_profile)
             counter = token_counter_for(
                 prompt_input.policy_snapshot.execution_profile.counter_version
             )
-            max_input = prompt_input.policy_snapshot.execution_profile.max_input_tokens
-            send_budget = max_input - 8_000 if max_input > 52_000 else max_input
+            max_prompt_tokens_fn = getattr(self._model, "max_prompt_tokens", None)
+            model_max_prompt_tokens: int | None = None
+            if callable(max_prompt_tokens_fn):
+                candidate_max = max_prompt_tokens_fn()
+                if isinstance(candidate_max, int):
+                    model_max_prompt_tokens = candidate_max
+            send_budget = send_budget_for(
+                prompt_input.policy_snapshot.execution_profile,
+                stage="review",
+                model_max_prompt_tokens=model_max_prompt_tokens,
+            )
             verify_verifier_mandatory_budget(context, counter=counter)
             context = fit_review_context(context, max_prompt_tokens=send_budget, counter=counter)
             try:
@@ -263,7 +280,11 @@ class ExecuteReviewRun:
         model_output = await self._model.draft_review(context=context)
         if self._reflection_pass is not None and context.policy_snapshot is not None:
             model_output = await self._run_reflection_pass(
-                model_output, context, run_id=run_id, reviewer_manifest=reviewer_manifest
+                model_output,
+                context,
+                run_id=run_id,
+                reviewer_manifest=reviewer_manifest,
+                original_files=changed_files,
             )
         return await self._publisher.execute(run_id, model_output)
 
@@ -274,7 +295,8 @@ class ExecuteReviewRun:
         *,
         run_id: UUID,
         reviewer_manifest: CallManifest | None = None,
-    ) -> Mapping[str, object] | str | bytes:
+        original_files: tuple[ChangedFile, ...] | None = None,
+    ) -> VerifiedReviewOutput:
         assert self._reflection_pass is not None
         assert context.policy_snapshot is not None
 
@@ -295,26 +317,25 @@ class ExecuteReviewRun:
         if raw_findings is None or not isinstance(raw_findings, list):
             raise InvalidReviewOutput("Review model output missing 'findings' list")
 
-        if not raw_findings:
-            # Zero candidates: Reflection verifier is skipped (0 calls)
-            data["findings"] = []
-            data["summary"] = build_deterministic_summary(
-                (),
-                changed_files=context.changed_files,
-                omitted_files=context.omitted_files,
-            )
-            return data
-
         if len(raw_findings) > 10:
             raise InvalidReviewOutput("Draft review exceeded maximum of 10 findings")
+
+        allowed_rules_set: set[str] = set()
+        if context.policy_snapshot.rules.is_present:
+            allowed_rules_set.add(".review/rules.md")
+        if context.policy_snapshot.agents.is_present:
+            allowed_rules_set.add("AGENTS.md")
+        allowed_v2_rules = frozenset(allowed_rules_set)
+        severity_threshold: SeverityThresholdValue = context.severity_threshold
 
         if reviewer_manifest is None:
             reviewer_manifest = PromptBuilder().build_manifest(
                 context, call_id=uuid.uuid4(), stage="review"
             )
 
-        _dropped_findings: list[dict[str, Any]] = []
+        _dropped_findings: list[DroppedCandidateRecord] = []
         candidates: list[CandidateFindingItem] = []
+        cand_positions: dict[int, int] = {}
         for idx, item in enumerate(raw_findings):
             cand_id = str(uuid.uuid4())
             try:
@@ -352,7 +373,9 @@ class ExecuteReviewRun:
                 ) from err
 
             # Pass 2: Coordinates validation against fitted context (CVS §6.2 :701)
-            valid_coords, coord_err = validate_v2_coordinates(finding, context.changed_files)
+            valid_coords, coord_err = validate_v2_coordinates(
+                finding, context.changed_files, original_files=original_files
+            )
             if not valid_coords:
                 _LOGGER.info(
                     "Dropping candidate finding %s due to coordinate failure (%s)",
@@ -360,11 +383,11 @@ class ExecuteReviewRun:
                     coord_err,
                 )
                 _dropped_findings.append(
-                    {
-                        "finding": finding.model_dump(),
-                        "drop_reason": coord_err,
-                        "position": idx,
-                    }
+                    DroppedCandidateRecord(
+                        finding=finding,
+                        drop_reason=coord_err or "line_absent",
+                        position=idx,
+                    )
                 )
                 continue
 
@@ -381,54 +404,59 @@ class ExecuteReviewRun:
                 )
                 drop_code = attr_err.split(":")[0].strip() if attr_err else "evidence_not_shown"
                 _dropped_findings.append(
-                    {
-                        "finding": finding.model_dump(),
-                        "drop_reason": drop_code,
-                        "position": idx,
-                    }
+                    DroppedCandidateRecord(
+                        finding=finding,
+                        drop_reason=drop_code,
+                        position=idx,
+                    )
                 )
                 continue
 
+            cand_positions[id(finding)] = idx
             candidates.append(CandidateFindingItem(candidate_id=cand_id, finding=finding))
 
         # Pass 4: Coordinates, lint filter, and dedup BEFORE verifier (CVS §6.2 :704)
         post_processor = FindingsPostProcessor.from_default_patterns()
         processed_candidates = [
-            ProcessedFinding(c.finding, idx, "inline") for idx, c in enumerate(candidates)
+            ProcessedFinding(c.finding, cand_positions.get(id(c.finding), idx), "inline")
+            for idx, c in enumerate(candidates)
         ]
         kept_candidates, lint_dropped = post_processor._drop_lint_patterns(processed_candidates)
         for item in lint_dropped:
             _dropped_findings.append(
-                {
-                    "finding": item.finding.model_dump(),
-                    "drop_reason": "lint_pattern",
-                    "position": item.position,
-                }
+                DroppedCandidateRecord(
+                    finding=item.finding,
+                    drop_reason="lint_pattern",
+                    position=item.position,
+                )
             )
         kept_candidates, duplicate_dropped = post_processor._deduplicate(kept_candidates)
         for item in duplicate_dropped:
             _dropped_findings.append(
-                {
-                    "finding": item.finding.model_dump(),
-                    "drop_reason": "duplicate",
-                    "position": item.position,
-                }
+                DroppedCandidateRecord(
+                    finding=item.finding,
+                    drop_reason="duplicate",
+                    position=item.position,
+                )
             )
 
         kept_findings_set = {id(p.finding) for p in kept_candidates}
         filtered_candidates = [c for c in candidates if id(c.finding) in kept_findings_set]
 
-        # If empty after filters, bypass verifier (0 calls)
+        # If empty (0 raw candidates or 0 after filters), bypass verifier (0 calls)
         if not filtered_candidates:
             data["findings"] = []
-            if _dropped_findings:
-                data["_dropped_findings"] = _dropped_findings
             data["summary"] = build_deterministic_summary(
                 (),
                 changed_files=context.changed_files,
                 omitted_files=context.omitted_files,
             )
-            return data
+            return VerifiedReviewOutput(
+                data,
+                dropped_findings=tuple(_dropped_findings),
+                severity_threshold=severity_threshold,
+                allowed_v2_rules=allowed_v2_rules,
+            )
 
         # Pass 5: Verifier invocation
         decisions = await self._reflection_pass.verify(
@@ -439,11 +467,11 @@ class ExecuteReviewRun:
         )
         for cand, status, _reason in rejected:
             _dropped_findings.append(
-                {
-                    "finding": cand.finding.model_dump(),
-                    "drop_reason": status,
-                    "position": 0,
-                }
+                DroppedCandidateRecord(
+                    finding=cand.finding,
+                    drop_reason=status,
+                    position=cand_positions.get(id(cand.finding), 0),
+                )
             )
 
         _LOGGER.info(
@@ -458,26 +486,24 @@ class ExecuteReviewRun:
         )
 
         # Pass 6: Severity threshold after verifier (CVS §6.2 :705)
-        severity_threshold: SeverityThresholdValue = getattr(context, "severity_threshold", "all")
         supported_processed = [
-            ProcessedFinding(cand.finding, idx, "inline") for idx, cand in enumerate(supported)
+            ProcessedFinding(cand.finding, cand_positions.get(id(cand.finding), idx), "inline")
+            for idx, cand in enumerate(supported)
         ]
         surviving_processed, below_threshold_processed = post_processor._drop_below_threshold(
             supported_processed, severity_threshold
         )
         for item in below_threshold_processed:
             _dropped_findings.append(
-                {
-                    "finding": item.finding.model_dump(),
-                    "drop_reason": "severity_threshold",
-                    "position": item.position,
-                }
+                DroppedCandidateRecord(
+                    finding=item.finding,
+                    drop_reason="severity_threshold",
+                    position=item.position,
+                )
             )
         final_findings = [p.finding for p in surviving_processed]
 
         data["findings"] = [f.model_dump() for f in final_findings]
-        if _dropped_findings:
-            data["_dropped_findings"] = _dropped_findings
         # Deterministic summary is ALWAYS built from post-threshold supported findings (CVS §8.2)
         data["summary"] = build_deterministic_summary(
             final_findings,
@@ -486,4 +512,9 @@ class ExecuteReviewRun:
             below_threshold_count=len(below_threshold_processed),
         )
 
-        return data
+        return VerifiedReviewOutput(
+            data,
+            dropped_findings=tuple(_dropped_findings),
+            severity_threshold=severity_threshold,
+            allowed_v2_rules=allowed_v2_rules,
+        )

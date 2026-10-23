@@ -31,8 +31,9 @@ from contextlib import suppress
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from decimal import Decimal, DecimalException
-from typing import Protocol
-from uuid import UUID
+from hashlib import sha256
+from typing import TYPE_CHECKING, Protocol
+from uuid import UUID, uuid4
 
 from app.modules.reviews.application.llm import (
     FxProvenance,
@@ -46,6 +47,19 @@ from app.modules.reviews.application.llm import (
     RunCallContext,
     UsageLedger,
 )
+from app.modules.reviews.application.policy_snapshot import (
+    CallManifest,
+    ManifestBlock,
+    PolicySnapshot,
+    SourceRole,
+)
+from app.modules.reviews.application.prompt_budget import (
+    TokenCounter,
+    verify_provenance_pre_send_guard,
+)
+
+if TYPE_CHECKING:
+    from app.modules.reviews.application.prompt_builder import ReviewContext
 from app.modules.reviews.infrastructure.llm.answers import InvalidAnswer
 from app.modules.reviews.infrastructure.llm.ecb_fx import FxQuote, FxQuoteProvider, FxQuoteResult
 from app.modules.reviews.infrastructure.llm.settings import (
@@ -115,6 +129,10 @@ class StructuredTask:
     messages: tuple[ChatMessage, ...]
     schema: ResponseSchema
     validate: Callable[[str], dict[str, object]]
+    base_manifest: CallManifest | None = None
+    review_context: ReviewContext | None = None
+    policy_snapshot: PolicySnapshot | None = None
+    counter: TokenCounter | None = None
 
 
 @dataclass(frozen=True)
@@ -185,6 +203,8 @@ class LlmGateway:
         self._fx_provider = fx_provider
         # run_id -> calls of its current attempt; conventions and review share it.
         self._attempts: OrderedDict[UUID, _AttemptCalls] = OrderedDict()
+        self.last_manifest: CallManifest | None = None
+        self.manifests: list[CallManifest] = []
 
     @property
     def settings(self) -> LlmSettings:
@@ -222,6 +242,9 @@ class LlmGateway:
         kind = LlmCallKind.PRIMARY
         timeouts = unavailable = 0
         rate_limit_waited = repaired = False
+        if task.base_manifest is not None:
+            self.last_manifest = task.base_manifest
+            self.manifests.append(task.base_manifest)
 
         while True:
             last = await self._call(primary, kind, messages, task, context, state, attempt)
@@ -266,10 +289,34 @@ class LlmGateway:
                         ),
                     ),
                 )
-                if not self._fits_context(primary, repair_messages, context.engine):
+                if not self._fits_context(primary, repair_messages, context.engine, task.counter):
                     # The repair conversation would overflow where the original prompt
                     # did not: skip the repair, the fallback gets the original prompt.
                     break
+                if task.base_manifest is not None:
+                    prev_lines = len(last.answer.splitlines()) or 1
+                    prev_block = ManifestBlock(
+                        block_id="previous-output",
+                        source_role=SourceRole.PREVIOUS_OUTPUT,
+                        source_kind="previous_model_output",
+                        content_sha256=sha256(last.answer.encode("utf-8")).hexdigest(),
+                        start_line=1,
+                        end_line=prev_lines,
+                        shown_line_count=prev_lines,
+                    )
+                    repair_manifest = replace(
+                        task.base_manifest,
+                        call_id=uuid4(),
+                        recovery_kind="repair",
+                        blocks=(*task.base_manifest.blocks, prev_block),
+                    )
+                    verify_provenance_pre_send_guard(
+                        repair_manifest,
+                        context=task.review_context,
+                        snapshot=task.policy_snapshot,
+                    )
+                    self.last_manifest = repair_manifest
+                    self.manifests.append(repair_manifest)
                 messages = repair_messages
                 kind = LlmCallKind.REPAIR
                 continue
@@ -283,10 +330,23 @@ class LlmGateway:
             kind = LlmCallKind.RETRY
 
         if fallback is not None and attempt.calls < max_calls:
-            if not self._fits_context(fallback, task.messages, context.engine):
+            if not self._fits_context(fallback, task.messages, context.engine, task.counter):
                 # A smaller fallback window must not turn a retryable primary error
                 # into a non-retryable context overflow.
                 raise self._failed(last.error, last.message, state)
+            if task.base_manifest is not None:
+                fallback_manifest = replace(
+                    task.base_manifest,
+                    call_id=uuid4(),
+                    recovery_kind="fallback",
+                )
+                verify_provenance_pre_send_guard(
+                    fallback_manifest,
+                    context=task.review_context,
+                    snapshot=task.policy_snapshot,
+                )
+                self.last_manifest = fallback_manifest
+                self.manifests.append(fallback_manifest)
             last = await self._call(
                 fallback, LlmCallKind.FALLBACK, task.messages, task, context, state, attempt
             )
@@ -308,14 +368,23 @@ class LlmGateway:
     def _seconds_left(self, context: RunCallContext) -> float:
         return (context.deadline - self._clock.now()).total_seconds()
 
-    def _estimate(self, profile: ModelProfile, messages: tuple[ChatMessage, ...]) -> int:
-        counter = self.token_counter(profile)
-        return sum(counter.count(message.content) for message in messages)
+    def _estimate(
+        self,
+        profile: ModelProfile,
+        messages: tuple[ChatMessage, ...],
+        counter: TokenCounter | None = None,
+    ) -> int:
+        active_counter = counter if counter is not None else self.token_counter(profile)
+        return sum(active_counter.count(message.content) for message in messages)
 
     def _fits_context(
-        self, profile: ModelProfile, messages: tuple[ChatMessage, ...], engine: str
+        self,
+        profile: ModelProfile,
+        messages: tuple[ChatMessage, ...],
+        engine: str,
+        counter: TokenCounter | None = None,
     ) -> bool:
-        estimate = self._estimate(profile, messages)
+        estimate = self._estimate(profile, messages, counter)
         return estimate + profile.max_output_tokens <= self.context_limit(profile, engine)
 
     async def _call(
@@ -339,7 +408,7 @@ class LlmGateway:
                 f"{remaining:.0f} s left before the attempt deadline, a call needs {timeout_s:g} s",
                 state,
             )
-        estimate = self._estimate(profile, messages)
+        estimate = self._estimate(profile, messages, task.counter)
         limit = self.context_limit(profile, context.engine)
         if estimate + profile.max_output_tokens > limit:
             raise self._failed(
