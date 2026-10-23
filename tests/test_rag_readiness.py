@@ -1,4 +1,4 @@
-"""The RAG readiness a review opens at the gate, and the prompt capability set (#144)."""
+"""The RAG readiness a review opens at the gate (#144)."""
 
 from __future__ import annotations
 
@@ -11,11 +11,9 @@ import pytest
 from app.modules.code_index.domain.enums import RagIndexStatus
 from app.modules.code_index.domain.rag_index import RagIndex
 from app.modules.reviews.application.rag_index import (
-    RETRIEVED_PROMPT_VERSIONS,
     OpenReviewIndex,
     RagReadiness,
     ReviewIndexAccess,
-    has_retrieved_section,
 )
 
 REPOSITORY_ID = UUID("00000000-0000-0000-0000-000000000144")
@@ -90,8 +88,3 @@ def test_a_port_error_propagates_and_nothing_is_committed() -> None:
 
     assert uow.commits == 0
     assert uow.rolled_back is True
-
-
-def test_no_pinned_review_prompt_has_a_retrieved_section_yet() -> None:
-    assert len(RETRIEVED_PROMPT_VERSIONS) == 0
-    assert has_retrieved_section("review.system", "v3") is False
