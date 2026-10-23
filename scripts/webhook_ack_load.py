@@ -1,26 +1,31 @@
 #!/usr/bin/env python3
 """Concurrent webhook ACK latency load against `POST /webhooks/github` (#163, SD §13).
 
-Sends `--count` signed `ping` deliveries, `--concurrency` at a time, after a short sequential
-warm-up of WARMUP_COUNT deliveries that are sent and counted but left out of the latency figures.
-Every delivery has a fresh `loadtest-<uuid4>` id, a fresh HMAC-SHA256 signature of its raw body
-and no `installation` key; its JSON body is padded to `--body-bytes` with a `padding` field, so
-the server's HMAC, JSON and JSONB work matches a realistic `pull_request` delivery. The API stores
-each one as a receipt and the webhook worker ends it as `ignored_irrelevant_event`: no Run, no
-GitHub or LLM call; the receipt is purged after 30 days.
+Sends `--count` signed `ping` deliveries, `--concurrency` at a time, after a warm-up of one
+delivery per connection (`--concurrency` of them, in parallel) that is sent and counted but left
+out of the latency figures. Every delivery has a fresh `loadtest-<uuid4>` id, its own HMAC-SHA256
+signature of the raw body and no `installation` key. The JSON body is padded to exactly
+`--body-bytes` with an array of small, varied objects (numbers, strings, booleans, nulls), so the
+server's HMAC, JSON and JSONB work resembles a real delivery's. The API stores each one as a
+receipt and the webhook worker ends it as `ignored_irrelevant_event`: no Run, no GitHub or LLM
+call; the receipt is purged after 30 days.
 
 Usage:
     GITHUB_WEBHOOK_SECRET=... uv run python scripts/webhook_ack_load.py \\
         --url https://staging-api.example.org/webhooks/github \\
-        [--count 200] [--concurrency 5] [--body-bytes 16384] [--report-json report.json]
+        [--count 200] [--concurrency 5] [--body-bytes 16384] [--report-json report.json] \\
+        [--environment staging] [--commit SHA] [--window "agreed window, approver, link"]
 
 The caps (count 1000, concurrency 10, body 64 KiB) protect the VPS that staging shares with
-production. Latency is client-side and nearest-rank, over the 202 answers of the timed
-deliveries; the client keeps up to `--concurrency` connections alive. The secret is read only
-from GITHUB_WEBHOOK_SECRET and is never printed.
+production, and so does the fail-fast: the run stops sending when a warm-up delivery does not get
+202, after 5 failed timed deliveries in a row, or when more than 10 % of the timed deliveries
+failed once at least 20 of them are done; the partial report is still written. Latency is
+client-side and nearest-rank, over the 202 answers of the timed deliveries, cut to 0.01 ms; the
+verdict compares the uncut p95. The client keeps up to `--concurrency` connections alive. The
+secret is read only from GITHUB_WEBHOOK_SECRET and is never printed.
 
 Exit codes: 0 every delivery got 202 (a p95 over the target is reported, not an error);
-1 a non-202 answer or a transport error; 2 invalid arguments or no secret.
+1 a non-202 answer, a transport error or a fail-fast stop; 2 invalid arguments or no secret.
 """
 
 from __future__ import annotations
@@ -39,12 +44,15 @@ from collections import Counter
 from collections.abc import Sequence
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
+from decimal import ROUND_DOWN, Decimal
+from functools import cache
 from pathlib import Path
 from urllib.parse import urlsplit
 
 import httpx
 
 SECRET_ENV = "GITHUB_WEBHOOK_SECRET"
+WEBHOOK_PATH = "/webhooks/github"
 DELIVERY_PREFIX = "loadtest-"
 DEFAULT_COUNT = 200
 MAX_COUNT = 1000
@@ -52,11 +60,15 @@ DEFAULT_CONCURRENCY = 5
 MAX_CONCURRENCY = 10
 DEFAULT_BODY_BYTES = 16384
 MAX_BODY_BYTES = 65536
-WARMUP_COUNT = 5
+# Fail-fast over the timed deliveries (the warm-up stops the run on any non-202 by itself).
+MAX_CONSECUTIVE_FAILURES = 5
+MAX_FAILURE_SHARE = 0.10
+FAILURE_SHARE_AFTER = 20
 # SD §13: webhook ACK p95 < 500 ms, internal goal 200 ms.
 TARGET_P95_MS = 500.0
 GOAL_P95_MS = 200.0
 TRANSPORT_ERROR = "transport_error"
+WARMUP_FAILED = "a warm-up delivery did not get 202"
 
 
 @dataclass(frozen=True)
@@ -71,19 +83,28 @@ class Latency:
 class LoadReport:
     started_at: str
     finished_at: str
+    environment: str | None
+    commit: str | None
+    window: str | None
     target_host: str
     count: int
     warmup: int
+    sent: int
     concurrency: int
     body_bytes: int
     statuses: dict[str, int]
+    aborted: str | None
     latency_ms: Latency | None
     verdict: str
 
     @property
+    def failed(self) -> int:
+        return sum(value for key, value in self.statuses.items() if key != "202")
+
+    @property
     def all_accepted(self) -> bool:
-        """Whether every warm-up and timed delivery got 202."""
-        return set(self.statuses) == {"202"}
+        """Whether every warm-up and timed delivery was sent and got 202."""
+        return self.failed == 0 and self.aborted is None
 
     def to_json(self) -> dict[str, object]:
         return {
@@ -97,15 +118,51 @@ def sign(secret: str, body: bytes) -> str:
     return "sha256=" + hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
 
 
-def build_ping(secret: str, delivery_id: str, body_bytes: int) -> tuple[bytes, dict[str, str]]:
-    """Return the raw body and headers of a signed `ping` without `installation`.
+def _compact(value: object) -> bytes:
+    return json.dumps(value, separators=(",", ":")).encode()
 
-    The body is exactly ``body_bytes`` long when that is above the unpadded size.
+
+def padding_item(index: int) -> dict[str, object]:
+    """One small object of the padding array; the values vary with ``index``."""
+    return {
+        "id": index,
+        "path": f"src/module_{index % 37}/file_{index}.py",
+        "status": ("added", "modified", "removed", "renamed")[index % 4],
+        "additions": (index * 7) % 113,
+        "deletions": (index * 3) % 29,
+        "binary": index % 11 == 0,
+        "score": round((index % 17) / 16, 3),
+        "sha": None if index % 5 == 0 else f"{index:040x}",
+    }
+
+
+@cache
+def ping_body(body_bytes: int) -> bytes:
+    """A `ping` body of exactly ``body_bytes`` when that is above its unpadded size.
+
+    Whole padding items fill it as far as they fit; the `fill` string takes the rest.
     """
-    payload = {"zen": "Load test, ignore.", "hook_id": 0, "padding": ""}
-    unpadded = len(json.dumps(payload, separators=(",", ":")).encode())
-    payload["padding"] = "x" * max(0, body_bytes - unpadded)
-    body = json.dumps(payload, separators=(",", ":")).encode()
+    items: list[dict[str, object]] = []
+    payload: dict[str, object] = {
+        "zen": "Load test, ignore.",
+        "hook_id": 0,
+        "padding": items,
+        "fill": "",
+    }
+    size = len(_compact(payload))
+    while True:
+        grown = size + len(_compact(padding_item(len(items)))) + (1 if items else 0)
+        if grown > body_bytes:
+            break
+        items.append(padding_item(len(items)))
+        size = grown
+    payload["fill"] = "x" * max(0, body_bytes - size)
+    return _compact(payload)
+
+
+def build_ping(secret: str, delivery_id: str, body_bytes: int) -> tuple[bytes, dict[str, str]]:
+    """Return the raw body and headers of a signed `ping` without `installation`."""
+    body = ping_body(body_bytes)
     headers = {
         "Content-Type": "application/json",
         "X-GitHub-Event": "ping",
@@ -122,22 +179,31 @@ def percentile(samples: Sequence[float], q: float) -> float:
     return ordered[rank - 1]
 
 
-def verdict(p95_ms: float | None) -> str:
-    """The comparison of the measured p95 with SD §13."""
+def truncated(value: float) -> float:
+    """``value`` cut, not rounded, to 0.01 ms: a printed figure under a target is under it."""
+    return float(Decimal(repr(value)).quantize(Decimal("0.01"), rounding=ROUND_DOWN))
+
+
+def verdict(p95_ms: float | None, *, failed: int = 0, sent: int = 0) -> str:
+    """The comparison of the unrounded p95 with SD §13; INVALID when a delivery failed."""
+    shown = f"{truncated(p95_ms):.2f}" if p95_ms is not None else ""
     if p95_ms is None:
-        return "no 202 answer among the timed deliveries: no latency to compare with SD §13"
-    head = f"p95 {p95_ms:.1f} ms"
-    if p95_ms >= TARGET_P95_MS:
-        return f"{head} misses the SD §13 target (p95 < {TARGET_P95_MS:.0f} ms)"
-    if p95_ms >= GOAL_P95_MS:
-        return (
-            f"{head} meets the SD §13 target (p95 < {TARGET_P95_MS:.0f} ms) "
+        text = "no 202 answer among the timed deliveries: no latency to compare with SD §13"
+    elif p95_ms >= TARGET_P95_MS:
+        text = f"p95 {shown} ms misses the SD §13 target (p95 < {TARGET_P95_MS:.0f} ms)"
+    elif p95_ms >= GOAL_P95_MS:
+        text = (
+            f"p95 {shown} ms meets the SD §13 target (p95 < {TARGET_P95_MS:.0f} ms) "
             f"but misses the internal goal ({GOAL_P95_MS:.0f} ms)"
         )
-    return (
-        f"{head} meets the SD §13 target (p95 < {TARGET_P95_MS:.0f} ms) "
-        f"and the internal goal ({GOAL_P95_MS:.0f} ms)"
-    )
+    else:
+        text = (
+            f"p95 {shown} ms meets the SD §13 target (p95 < {TARGET_P95_MS:.0f} ms) "
+            f"and the internal goal ({GOAL_P95_MS:.0f} ms)"
+        )
+    if failed:
+        return f"INVALID ({failed} of {sent} deliveries failed): {text}"
+    return text
 
 
 async def _send(
@@ -153,6 +219,27 @@ async def _send(
     return str(response.status_code), (time.perf_counter() - started) * 1000
 
 
+class _FailFast:
+    """Counts timed outcomes in completion order and names the reason to stop, if any."""
+
+    def __init__(self) -> None:
+        self.done = 0
+        self.failed = 0
+        self.in_a_row = 0
+        self.reason: str | None = None
+
+    def record(self, accepted: bool) -> None:
+        self.done += 1
+        self.failed += 0 if accepted else 1
+        self.in_a_row = 0 if accepted else self.in_a_row + 1
+        if self.reason is not None:
+            return
+        if self.in_a_row >= MAX_CONSECUTIVE_FAILURES:
+            self.reason = f"{self.in_a_row} timed deliveries in a row failed"
+        elif self.done >= FAILURE_SHARE_AFTER and self.failed > MAX_FAILURE_SHARE * self.done:
+            self.reason = f"{self.failed} of {self.done} timed deliveries failed (over 10 %)"
+
+
 async def run(
     *,
     url: str,
@@ -161,69 +248,96 @@ async def run(
     concurrency: int,
     body_bytes: int,
     timeout: float,
+    environment: str | None = None,
+    commit: str | None = None,
+    window: str | None = None,
     transport: httpx.AsyncBaseTransport | None = None,
 ) -> LoadReport:
-    """Send the warm-up, then ``count`` deliveries with at most ``concurrency`` in flight."""
+    """Warm up every connection, then send ``count`` deliveries with ``concurrency`` in flight."""
     statuses: Counter[str] = Counter()
     latencies: list[float] = []
     semaphore = asyncio.Semaphore(concurrency)
+    fail_fast = _FailFast()
+    aborted: str | None = None
     started_at = datetime.now(UTC)
     async with httpx.AsyncClient(
         transport=transport,
         timeout=timeout,
         limits=httpx.Limits(max_connections=concurrency, max_keepalive_connections=concurrency),
     ) as client:
-        for _ in range(WARMUP_COUNT):
-            status, _elapsed = await _send(client, url, secret, body_bytes)
-            statuses[status] += 1
+        warmup = await asyncio.gather(
+            *(_send(client, url, secret, body_bytes) for _ in range(concurrency))
+        )
+        statuses.update(status for status, _elapsed in warmup)
+        if any(status != "202" for status, _elapsed in warmup):
+            aborted = WARMUP_FAILED
+        else:
 
-        async def timed() -> None:
-            async with semaphore:
-                status, elapsed = await _send(client, url, secret, body_bytes)
-            statuses[status] += 1
-            if status == "202":
-                latencies.append(elapsed)
+            async def timed() -> None:
+                async with semaphore:
+                    # Queued deliveries are dropped once the fail-fast has a reason.
+                    if fail_fast.reason is not None:
+                        return
+                    status, elapsed = await _send(client, url, secret, body_bytes)
+                statuses[status] += 1
+                fail_fast.record(status == "202")
+                if status == "202":
+                    latencies.append(elapsed)
 
-        await asyncio.gather(*(timed() for _ in range(count)))
+            await asyncio.gather(*(timed() for _ in range(count)))
+            aborted = fail_fast.reason
     finished_at = datetime.now(UTC)
     latency = (
         Latency(
-            p50=round(percentile(latencies, 50), 1),
-            p95=round(percentile(latencies, 95), 1),
-            p99=round(percentile(latencies, 99), 1),
-            max=round(max(latencies), 1),
+            p50=truncated(percentile(latencies, 50)),
+            p95=truncated(percentile(latencies, 95)),
+            p99=truncated(percentile(latencies, 99)),
+            max=truncated(max(latencies)),
         )
         if latencies
         else None
     )
     parts = urlsplit(url)
     host = parts.hostname or ""
+    sent = sum(statuses.values())
+    failed = sent - statuses["202"]
     return LoadReport(
         started_at=started_at.isoformat().replace("+00:00", "Z"),
         finished_at=finished_at.isoformat().replace("+00:00", "Z"),
+        environment=environment,
+        commit=commit,
+        window=window,
         target_host=f"{host}:{parts.port}" if parts.port else host,
         count=count,
-        warmup=WARMUP_COUNT,
+        warmup=concurrency,
+        sent=sent,
         concurrency=concurrency,
         body_bytes=body_bytes,
         statuses=dict(sorted(statuses.items())),
+        aborted=aborted,
         latency_ms=latency,
-        verdict=verdict(latency.p95 if latency else None),
+        verdict=verdict(percentile(latencies, 95) if latencies else None, failed=failed, sent=sent),
     )
 
 
 def print_report(report: LoadReport) -> None:
     statuses = ", ".join(f"{key}={value}" for key, value in report.statuses.items())
     print(
-        f"webhook ACK load: {report.count} timed + {report.warmup} warm-up deliveries to "
-        f"{report.target_host} (concurrency {report.concurrency}, body {report.body_bytes} bytes)"
+        f"webhook ACK load ({report.environment or 'no environment label'}, "
+        f"commit {report.commit or '-'}): {report.count} timed + {report.warmup} warm-up "
+        f"deliveries to {report.target_host} (concurrency {report.concurrency}, "
+        f"body {report.body_bytes} bytes)"
     )
-    print(f"statuses: {statuses}")
+    if report.window:
+        print(f"window: {report.window}")
+    print(f"sent: {report.sent}, statuses: {statuses}")
+    if report.aborted:
+        print(f"stopped early: {report.aborted}")
     if report.latency_ms is not None:
         latency = report.latency_ms
         print(
-            f"latency ms: p50 {latency.p50:.1f}, p95 {latency.p95:.1f}, "
-            f"p99 {latency.p99:.1f}, max {latency.max:.1f}"
+            f"latency ms: p50 {latency.p50:.2f}, p95 {latency.p95:.2f}, "
+            f"p99 {latency.p99:.2f}, max {latency.max:.2f}"
         )
     print(f"verdict: {report.verdict}")
 
@@ -233,7 +347,7 @@ def main(
 ) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0] if __doc__ else None)
     parser.add_argument(
-        "--url", required=True, help="webhook URL, e.g. https://host/webhooks/github"
+        "--url", required=True, help=f"webhook URL, e.g. https://host{WEBHOOK_PATH}"
     )
     parser.add_argument(
         "--count",
@@ -255,6 +369,9 @@ def main(
     )
     parser.add_argument("--timeout", type=float, default=10.0, help="seconds per request")
     parser.add_argument("--report-json", type=Path, help="write the report as JSON here")
+    parser.add_argument("--environment", help="environment label for the report, e.g. staging")
+    parser.add_argument("--commit", help="commit SHA of the code that runs the load")
+    parser.add_argument("--window", help="the agreed load window, approver and issue link")
     args = parser.parse_args(argv)
     for flag, value, maximum in (
         ("--count", args.count, MAX_COUNT),
@@ -268,6 +385,8 @@ def main(
     url = urlsplit(args.url)
     if url.scheme not in {"http", "https"} or not url.hostname:
         parser.error("--url must be an http:// or https:// URL with a host")
+    if url.path != WEBHOOK_PATH:
+        parser.error(f"--url must point at {WEBHOOK_PATH}")
 
     secret = os.environ.get(SECRET_ENV, "")
     if not secret:
@@ -282,6 +401,9 @@ def main(
             concurrency=args.concurrency,
             body_bytes=args.body_bytes,
             timeout=args.timeout,
+            environment=args.environment,
+            commit=args.commit,
+            window=args.window,
             transport=transport,
         )
     )

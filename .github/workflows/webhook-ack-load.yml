@@ -3,12 +3,17 @@ name: Webhook ACK load (staging)
 # Manual load test of the staging webhook ACK against SD §13 (p95 < 500 ms, internal goal
 # 200 ms), #163. It sends signed `ping` deliveries without `installation`: each one is stored as
 # a receipt and ends as ignored_irrelevant_event, so no Run, GitHub or LLM call follows, and the
-# receipts are purged after 30 days. The caps protect the VPS that staging shares with production.
+# receipts are purged after 30 days. The caps and the script's fail-fast protect the VPS that
+# staging shares with production; dispatch only inside a window agreed in the issue (`window`).
 on:
   workflow_dispatch:
     inputs:
+      window:
+        description: "Agreed load window, approver and issue/comment link"
+        required: true
+        type: string
       count:
-        description: "Timed deliveries, 1-1000 (plus 5 warm-up deliveries)"
+        description: "Timed deliveries, 1-1000 (plus one warm-up delivery per connection)"
         required: false
         type: string
         default: "200"
@@ -26,8 +31,10 @@ on:
 permissions:
   contents: read
 
+# Main-only lock, as in rollback.yml: a dispatch from another branch gets a throwaway group, so it
+# cannot replace a pending main run before its job is skipped.
 concurrency:
-  group: webhook-ack-load
+  group: ${{ github.ref == 'refs/heads/main' && 'webhook-ack-load' || format('webhook-ack-load-ignored-{0}', github.run_id) }}
   cancel-in-progress: false
 
 jobs:
@@ -42,10 +49,15 @@ jobs:
       - name: Validate inputs
         shell: bash
         env:
+          WINDOW: ${{ inputs.window }}
           COUNT: ${{ inputs.count }}
           CONCURRENCY: ${{ inputs.concurrency }}
           BODY_BYTES: ${{ inputs.body_bytes }}
         run: |
+          if [[ -z "${WINDOW//[[:space:]]/}" ]]; then
+            echo "::error::window must name the agreed load window, the approver and the issue/comment link" >&2
+            exit 1
+          fi
           # The same caps as scripts/webhook_ack_load.py, checked before anything is sent.
           check() {
             local name="$1" value="$2" maximum="$3"
@@ -100,6 +112,8 @@ jobs:
         env:
           GITHUB_WEBHOOK_SECRET: ${{ secrets.GH_WEBHOOK_SECRET }}
           URL: ${{ steps.target.outputs.url }}
+          COMMIT_SHA: ${{ github.sha }}
+          WINDOW: ${{ inputs.window }}
           COUNT: ${{ inputs.count }}
           CONCURRENCY: ${{ inputs.concurrency }}
           BODY_BYTES: ${{ inputs.body_bytes }}
@@ -113,21 +127,33 @@ jobs:
             --count "${COUNT}" \
             --concurrency "${CONCURRENCY}" \
             --body-bytes "${BODY_BYTES}" \
+            --environment staging \
+            --commit "${COMMIT_SHA}" \
+            --window "${WINDOW}" \
             --report-json "${RUNNER_TEMP}/webhook-ack-load.json"
 
+      # The runner's own python3: this step also runs when a step before `Setup uv` failed.
       - name: Summarize load
         if: always()
         shell: bash
+        env:
+          WINDOW: ${{ inputs.window }}
         run: |
-          uv run python - <<'PYTHON'
+          python3 - <<'PYTHON'
           import html
           import json
           import os
           from pathlib import Path
 
+
+          def cell(value):
+              return html.escape(str(value)).replace("|", "&#124;")
+
+
           report_path = Path(os.environ["RUNNER_TEMP"]) / "webhook-ack-load.json"
           with Path(os.environ["GITHUB_STEP_SUMMARY"]).open("a", encoding="utf-8") as summary:
               summary.write("## Webhook ACK load (staging)\n\n")
+              summary.write(f"Agreed window: {cell(os.environ.get('WINDOW', ''))}\n\n")
               summary.write(
                   "The client is a GitHub-hosted runner: the latency includes the WAN round trip "
                   "and TLS setup of each new connection, not only the server's ACK.\n\n"
@@ -139,18 +165,21 @@ jobs:
                   latency = report["latency_ms"] or {}
                   statuses = ", ".join(f"{key}: {value}" for key, value in report["statuses"].items())
                   rows = [
+                      ("Environment", report["environment"]),
+                      ("Commit", report["commit"]),
                       ("Target", report["target_host"]),
                       ("Window (UTC)", f"{report['started_at']} - {report['finished_at']}"),
-                      ("Timed / warm-up", f"{report['count']} / {report['warmup']}"),
+                      ("Timed / warm-up / sent", f"{report['count']} / {report['warmup']} / {report['sent']}"),
                       ("Concurrency", report["concurrency"]),
                       ("Body bytes", report["body_bytes"]),
                       ("Statuses", statuses),
                       *((f"{key} ms", latency[key]) for key in ("p50", "p95", "p99", "max") if key in latency),
+                      *((("Stopped early", report["aborted"]),) if report["aborted"] else ()),
                       ("Verdict", report["verdict"]),
                   ]
                   summary.write("| Metric | Value |\n|---|---|\n")
                   for name, value in rows:
-                      summary.write(f"| {html.escape(name)} | {html.escape(str(value))} |\n")
+                      summary.write(f"| {cell(name)} | {cell(value)} |\n")
           PYTHON
 
       - name: Upload load report
