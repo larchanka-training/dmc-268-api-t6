@@ -332,6 +332,51 @@ def test_full_provider_diff_keeps_rename_status_in_model_projection() -> None:
     assert omitted == ()
 
 
+def test_withheld_removed_files_are_omitted_by_their_stored_names_not_reparsed() -> None:
+    repository = FakeDiffRepository([])
+    asyncio.run(
+        StoreDiffSnapshot(repository).execute(
+            run_id=UUID("00000000-0000-0000-0000-000000000100"),
+            code_change_id=UUID("00000000-0000-0000-0000-000000000201"),
+            head_sha="a" * 40,
+            files=[
+                DiffSnapshot(
+                    "generated/gone.py", "@@ -1 +0,0 @@\n-GONE_SECRET = 1", status="removed"
+                ),
+                DiffSnapshot(
+                    "generated/q b/r.py", "@@ -1 +0,0 @@\n-QBR_SECRET = 2", status="removed"
+                ),
+            ],
+            excluded=lambda file: file.filename.startswith("generated/"),
+        )
+    )
+    saved = repository.write_calls[0][2]
+
+    assert [(item.blob_sha, item.review_patch) for item in saved] == [(None, None), (None, None)]
+    assert review_files_from_snapshots(saved) == (
+        (),
+        ("generated/gone.py", "generated/q b/r.py"),
+    )
+
+
+def test_allowed_git_patch_without_a_hunk_is_omitted_not_reparsed() -> None:
+    repository = FakeDiffRepository([])
+    header_only = "diff --git a/src/run.sh b/src/run.sh\nold mode 100644\nnew mode 100755\n"
+    asyncio.run(
+        StoreDiffSnapshot(repository).execute(
+            run_id=UUID("00000000-0000-0000-0000-000000000100"),
+            code_change_id=UUID("00000000-0000-0000-0000-000000000201"),
+            head_sha="a" * 40,
+            files=[DiffSnapshot("src/run.sh", header_only)],
+        )
+    )
+    saved = repository.write_calls[0][2]
+
+    assert (saved[0].blob_sha, saved[0].review_patch) == (None, None)
+    # D1 of #168: without a model patch the row is omitted, never parsed from the UI patch.
+    assert review_files_from_snapshots(saved) == ((), ("src/run.sh",))
+
+
 def test_processed_run_persists_provider_diff_before_the_diff_api_reads_it() -> None:
     run_id = UUID("00000000-0000-0000-0000-000000000100")
     code_change_id = UUID("00000000-0000-0000-0000-000000000200")

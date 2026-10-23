@@ -373,11 +373,13 @@ def test_file_endpoint_resolves_two_pr_paths_through_one_immutable_blob(
             return tuple(file.path for file in changed), omitted
 
         changed_paths, omitted_paths = asyncio.run(legacy_review_files())
-        assert changed_paths == ("src/first.py",)
+        # A pre-0016 row has no model patch: it is omitted, never parsed from its UI patch.
+        assert changed_paths == ()
         assert omitted_paths == (
             "assets/logo.png",
             "dist/app.min.js",
             "package-lock.json",
+            "src/first.py",
             "src/pre_migration.py",
         )
         first_snapshot = DiffSnapshot(filename="src/new.py", patch="@@ -0,0 +1 @@\n+first")
