@@ -4,7 +4,7 @@ Constraint and exception case (TypeScript). The base has the workspace-scoped st
 `src/lib/storage.ts`, a `useTheme` hook without persistence and an API type file in
 `src/types/api/`. The patch persists the theme in `useTheme` and adds
 `src/types/api/webhooks.ts`. Nothing in the diff says that `src/types/api/` is generated: the new
-file has no generator banner and the path reads as hand-written types.
+file has no generator banner, its fields are camelCase and the path reads as hand-written types.
 
 - `src/features/theme/useTheme.ts`, the `loadTheme` line: `loadTheme` and `saveTheme` on the next
   line read and write `localStorage` directly, which generic review sees as ordinary browser

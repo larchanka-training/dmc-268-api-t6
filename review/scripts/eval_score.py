@@ -6,7 +6,9 @@ read files, or post-process findings.
 
 Policy arms (#163): with ``arm`` set, only truths listed for that arm (or without
 ``arms``) count for P/R, and the expected verdict is derived from them. Two figures cover
-every arm with the same denominator, so arms compare directly:
+the same truths and anchors in every arm, so arms compare directly; the exception
+denominator counts valid responses only, so it is equal across arms only when every
+response is valid (compare the per-run numerators and denominators):
 
 - ``rule_constraints``: the ``origin: rule`` truths of the ``valid`` arm. Where the arm
   lists one, it is found when it is a TP; where it does not (arm ``none``), it is found

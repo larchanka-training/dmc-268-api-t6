@@ -969,12 +969,20 @@ def test_duplicate_exception_anchor_is_rejected(tmp_path: Path, category: str) -
 
 
 @pytest.mark.parametrize(
-    ("truth_arms", "verdict"),
-    [(None, "valid"), (["malicious"], "malicious")],
+    ("truth_arms", "verdict", "extra"),
+    [
+        (None, "valid", ""),
+        (
+            ["malicious"],
+            "malicious",
+            "RUL-01: expected_findings[0].arms: list both valid and malicious or neither\n"
+            "RUL-01: must_not_flag[0]: needs a none-arm truth at app/example.py:2\n",
+        ),
+    ],
     ids=["truth-in-all-arms", "truth-in-one-shared-arm"],
 )
 def test_exception_anchor_must_not_contradict_a_truth_in_a_shared_arm(
-    tmp_path: Path, truth_arms: list[str] | None, verdict: str
+    tmp_path: Path, truth_arms: list[str] | None, verdict: str, extra: str
 ) -> None:
     metadata = _rules_metadata()
     if truth_arms is None:
@@ -988,7 +996,84 @@ def test_exception_anchor_must_not_contradict_a_truth_in_a_shared_arm(
     assert result.returncode == 1
     assert result.stdout == (
         f"RUL-01: must_not_flag[0]: within 2 lines of expected_findings[0] in arm {verdict}\n"
+        + extra
     )
+
+
+RULE_ARMS = "expected_findings[1].arms: a rule-made truth lists valid and malicious, not none"
+BOTH_ARMS = "list both valid and malicious or neither"
+
+
+def _set(index: int, **fields: object) -> Any:
+    def apply(record: dict[str, Any]) -> None:
+        target = record["expected_findings"] if index >= 0 else record["must_not_flag"]
+        item = target[index if index >= 0 else 0]
+        for key, value in fields.items():
+            if value is None:
+                del item[key]
+            else:
+                item[key] = value
+
+    return apply
+
+
+def _generic_rule_truth(arms: list[str]) -> Any:
+    def apply(record: dict[str, Any]) -> None:
+        truth = record["expected_findings"][1]
+        del truth["origin"], truth["rule_ref"]
+        truth["arms"] = arms
+
+    return apply
+
+
+@pytest.mark.parametrize(
+    ("change", "diagnostics"),
+    [
+        (_set(1, arms=["none", "valid", "malicious"]), [RULE_ARMS]),
+        (_set(1, arms=None), [RULE_ARMS]),
+        (_set(1, arms=["malicious"]), [RULE_ARMS, f"expected_findings[1].arms: {BOTH_ARMS}"]),
+        (_set(1, arms=["valid"]), [f"expected_findings[1].arms: {BOTH_ARMS}"]),
+        (_generic_rule_truth(["valid"]), [f"expected_findings[1].arms: {BOTH_ARMS}"]),
+        (_generic_rule_truth(["none"]), []),
+        (
+            _set(-1, arms=["none", "valid", "malicious"]),
+            [
+                "must_not_flag[0]: within 2 lines of expected_findings[0] in arm none",
+                "must_not_flag[0].arms: must not list none",
+            ],
+        ),
+        (_set(0, line=3), ["must_not_flag[0]: needs a none-arm truth at app/example.py:2"]),
+        (
+            _set(0, path="app/other.py"),
+            ["must_not_flag[0]: needs a none-arm truth at app/example.py:2"],
+        ),
+    ],
+    ids=[
+        "rule-truth-in-none",
+        "rule-truth-in-all-arms",
+        "rule-truth-malicious-only",
+        "rule-truth-valid-only",
+        "generic-truth-valid-only",
+        "generic-truth-none-only",
+        "exception-in-none",
+        "twin-on-another-line",
+        "twin-in-another-file",
+    ],
+)
+def test_policy_arm_lists_follow_what_the_rules_add_or_exempt(
+    tmp_path: Path, change: Any, diagnostics: list[str]
+) -> None:
+    metadata = _rules_metadata()
+    change(metadata)
+    dataset = _rules_case(tmp_path, metadata)
+    (dataset / "cases/RUL-01/diff.patch").write_text(
+        RULES_PATCH + OTHER_FILE_PATCH, encoding="utf-8"
+    )
+
+    result = _run(dataset, "--case", "RUL-01")
+
+    assert result.stdout == ("".join(f"RUL-01: {line}\n" for line in diagnostics) or "OK RUL-01\n")
+    assert result.returncode == (1 if diagnostics else 0)
 
 
 @pytest.mark.parametrize(
