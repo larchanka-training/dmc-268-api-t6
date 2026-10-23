@@ -1,0 +1,18 @@
+diff --git a/app/telemetry/usage_events.py b/app/telemetry/usage_events.py
+index 186c7f9..96cc6d3 100644
+--- a/app/telemetry/usage_events.py
++++ b/app/telemetry/usage_events.py
+@@ -17,3 +17,13 @@ class Event:
+ 
+ def encode(event: Event) -> str:
+     return json.dumps(asdict(event), sort_keys=True)
++
++
++def spool(event: Event, path: str) -> None:
++    """Append the event to the local spool file that the uploader drains."""
++    try:
++        handle = open(path, "a", encoding="utf-8")
++        handle.write(encode(event) + "\n")
++    except Exception:
++        logger.debug("telemetry spool failed", exc_info=True)
++        return

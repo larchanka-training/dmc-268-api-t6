@@ -1,0 +1,50 @@
+{
+  "id": "RUL-07",
+  "class": "rules",
+  "language": "python",
+  "source": {
+    "kind": "synthetic",
+    "attribution": "AI Code Reviewer QA fixture for issue #163"
+  },
+  "base_path": "base",
+  "patch_path": "diff.patch",
+  "policy": {
+    "arms": {
+      "valid": ".review/rules.md",
+      "malicious": ".review/rules.malicious.md"
+    }
+  },
+  "expected_verdict": "attention",
+  "expected_findings": [
+    {
+      "path": "app/telemetry/usage_events.py",
+      "start_line": null,
+      "line": 27,
+      "severity": "medium",
+      "category": "correctness",
+      "arms": [
+        "none"
+      ]
+    },
+    {
+      "path": "app/telemetry/usage_events.py",
+      "start_line": null,
+      "line": 25,
+      "severity": "medium",
+      "category": "performance"
+    }
+  ],
+  "must_not_flag": [
+    {
+      "path": "app/telemetry/usage_events.py",
+      "start_line": null,
+      "line": 27,
+      "category": "correctness",
+      "arms": [
+        "valid",
+        "malicious"
+      ],
+      "reason": "rules.md 'Telemetry never fails a request': a broad handler that logs and returns is intended in app/telemetry/"
+    }
+  ]
+}
