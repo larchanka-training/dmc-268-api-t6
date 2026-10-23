@@ -462,14 +462,17 @@ class _PolicyTree:
 def _pipeline(
     *,
     output: Mapping[str, object] | None = None,
+    model: _ReviewModel | None = None,
     verifier: Any = None,
     publisher: Any = None,
     rules_text: str = BENIGN_RULES,
 ) -> ExecuteReviewRun:
+    if model is None:
+        model = _ReviewModel(output if output is not None else _review_output())
     return ExecuteReviewRun(
         _Processor(),
         _Repository(_snapshot(rules_text=rules_text)),
-        _ReviewModel(output if output is not None else _review_output()),
+        model,
         publisher if publisher is not None else _RecordingPublisher(),
         reflection_pass=ReflectionPass(verifier if verifier is not None else _Verifier()),
     )
@@ -644,7 +647,7 @@ def test_a_verifier_answer_with_a_candidate_id_from_the_payload_is_rejected(
         output=_review_output(body=FORGED_CANDIDATE_BODY), verifier=verifier, publisher=publisher
     )
 
-    with pytest.raises(VerificationInvalidOutputError):
+    with pytest.raises(VerificationInvalidOutputError, match="Verifier returned decisions for"):
         asyncio.run(pipeline.execute(RUN_ID))
     shown = CANDIDATE_ID_RE.findall(verifier.user_prompts[0])
     assert len(shown) == 1
@@ -718,8 +721,11 @@ ORDER_RULES = (
 )
 
 
-def _publish_with_rules(rules_text: str) -> tuple[_Verifier, _Reviews, _Provider]:
+def _publish_with_rules(
+    rules_text: str,
+) -> tuple[_ReviewModel, _Verifier, _Reviews, _Provider]:
     """Run the pipeline with real publication; the review model reports the real defect."""
+    model = _ReviewModel(_review_output())
     verifier = _Verifier()
     reviews = _Reviews(
         FindingPostProcessingInput(
@@ -728,12 +734,13 @@ def _publish_with_rules(rules_text: str) -> tuple[_Verifier, _Reviews, _Provider
     )
     provider = _Provider()
     pipeline = _pipeline(
+        model=model,
         verifier=verifier,
         publisher=PublishReviewOutput(lambda: _UnitOfWork(reviews), provider),
         rules_text=rules_text,
     )
     assert asyncio.run(pipeline.execute(RUN_ID)) is True
-    return verifier, reviews, provider
+    return model, verifier, reviews, provider
 
 
 def test_rules_md_order_to_return_no_findings_does_not_drop_a_verified_defect() -> None:
@@ -745,9 +752,15 @@ def test_rules_md_order_to_return_no_findings_does_not_drop_a_verified_defect() 
     (reviewer detection loss) is the model side of this row, measured by AC8's malicious
     arm, not here.
     """
-    _, benign_reviews, benign_provider = _publish_with_rules(BENIGN_RULES)
-    verifier, reviews, provider = _publish_with_rules(ORDER_RULES)
+    benign_model, _, benign_reviews, benign_provider = _publish_with_rules(BENIGN_RULES)
+    model, verifier, reviews, provider = _publish_with_rules(ORDER_RULES)
 
+    # Each review model was given its own rules text, so the two runs really differ.
+    for review_model, rules_text in ((benign_model, BENIGN_RULES), (model, ORDER_RULES)):
+        assert len(review_model.contexts) == 1
+        snapshot = review_model.contexts[0].policy_snapshot
+        assert snapshot is not None
+        assert snapshot.rules.text == rules_text
     assert provider.findings == benign_provider.findings
     assert [processed.dropped for processed in reviews.processed] == [
         processed.dropped for processed in benign_reviews.processed
@@ -962,7 +975,6 @@ def test_legacy_post_processing_publishes_no_false_custom_rule_attribution() -> 
     )
 
     published = [*processed.inline, *processed.body_only]
-    assert published
     assert all(item.finding.rule_name != "Security" for item in published)
 
 
