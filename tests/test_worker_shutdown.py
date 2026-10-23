@@ -913,6 +913,7 @@ def install_worker_harness(
     process = SimpleNamespace(
         handle_run=review_handler
         or SimpleNamespace(execute=None, wait_for_quiescence=wait_for_quiescence),
+        handle_delivery=SimpleNamespace(execute=None),
         publish_review=SimpleNamespace(execute=None),
         leader_tick=None,
     )

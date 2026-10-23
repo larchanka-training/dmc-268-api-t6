@@ -901,6 +901,7 @@ async def run_worker(
     github_transport: httpx.AsyncBaseTransport | None = None,
     llm_transport: httpx.AsyncBaseTransport | None = None,
     fx_transport: httpx.AsyncBaseTransport | None = None,
+    gitlab_transport_factory: Callable[[], httpx.AsyncBaseTransport] | None = None,
 ) -> None:
     """Consume until cancelled or stopped; main owns the process signal deadline."""
     async with stop_during_startup(stop) as startup_complete:
@@ -914,6 +915,7 @@ async def run_worker(
             github_transport=github_transport,
             llm_transport=llm_transport,
             fx_transport=fx_transport,
+            gitlab_transport_factory=gitlab_transport_factory,
         )
 
 
