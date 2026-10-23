@@ -713,6 +713,74 @@ def test_go_member_with_a_parse_error_refuses_the_whole_package(
     ] == [(ImportResolution.UNSUPPORTED, "ast_failed", ())]
 
 
+_GO_OPEN = "package CLAUSE\n\nfunc Open() error { return nil }\n"
+
+
+@pytest.mark.parametrize("clause", ["db", "store"])
+@pytest.mark.parametrize(
+    ("members", "unavailable", "expected"),
+    [
+        pytest.param(
+            {"internal/store/open.go": _GO_OPEN + "\nfunc Close( {\n}\n"},
+            {},
+            (ImportResolution.UNSUPPORTED, "ast_failed"),
+            id="parse-error",
+        ),
+        pytest.param(
+            {"internal/store/a.go": "packag CLAUSE\n", "internal/store/open.go": _GO_OPEN},
+            {},
+            (ImportResolution.UNSUPPORTED, "ast_failed"),
+            id="member-without-a-clause-first",
+        ),
+        pytest.param(
+            {
+                "internal/store/a.go": "package CLAUSE\n",
+                "internal/store/open.go": _GO_OPEN,
+                "internal/store/zz.go": "package CLAUSE\n\nfunc Close() {}\n",
+            },
+            {"internal/store/a.go": "source_decode_failed"},
+            (ImportResolution.UNSUPPORTED, "source_decode_failed"),
+            id="decode-failure",
+        ),
+        pytest.param(
+            {"internal/store/a.go": "package CLAUSE\n", "internal/store/open.go": _GO_OPEN},
+            {"internal/store/a.go": "excluded"},
+            (ImportResolution.EXCLUDED, "excluded"),
+            id="excluded-member",
+        ),
+        pytest.param(
+            {"internal/store/a.go": _GO_OPEN, "internal/store/b.go": "package CLAUSE\n"},
+            {"internal/store/b.go": "ast_limit"},
+            (ImportResolution.UNSUPPORTED, "ast_limit"),
+            id="file-limit-after-a-read",
+        ),
+    ],
+)
+def test_refused_go_package_is_named_by_a_clause_that_can_be_read(
+    members: dict[str, str],
+    unavailable: dict[str, str],
+    expected: tuple[ImportResolution, str],
+    clause: str,
+) -> None:
+    # A clause that differs from the directory still binds the use, so the refusal is
+    # reported on it: the same outcome as for a package named after its directory.
+    sources = {
+        "go.mod": _GO_MOD,
+        "cmd/main.go": _GO_APP.replace("db.Open()", f"{clause}.Open()"),
+        **{path: source.replace("CLAUSE", clause) for path, source in members.items()},
+    }
+
+    refs, provider = _resolve(sources, "cmd/main.go", "Run", unavailable=unavailable)
+
+    assert [
+        (ref.resolution, ref.reason, ref.resolved_symbols)
+        for ref in refs
+        if ref.module == "example.com/m/internal/store"
+    ] == [(*expected, ())]
+    # The first member with a readable clause names the package: later ones are not read.
+    assert "internal/store/zz.go" not in provider.asked
+
+
 def test_go_module_with_replace_is_not_resolved() -> None:
     assert go_module_path(_GO_MOD) == "example.com/m"
     assert go_module_path(_GO_MOD + "\nreplace example.com/x => ../x\n") is None
