@@ -114,6 +114,7 @@ RUN_ACTION_TOOLS = frozenset(
         "policy.load",
         "vcs.fetch_diff",
         "context.build",
+        "context.rag",
         "llm.repo_conventions",
         "llm.call",
         "llm.review_output",
