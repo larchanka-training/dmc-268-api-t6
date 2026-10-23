@@ -7,11 +7,7 @@ from dataclasses import dataclass, replace
 from typing import Protocol
 from uuid import UUID
 
-from app.modules.reviews.application.prompt_builder import (
-    ChangedFile,
-    FileStatus,
-    parse_unified_diff,
-)
+from app.modules.reviews.application.prompt_builder import ChangedFile, FileStatus
 from app.modules.reviews.application.vcs_diff import parse_file_patch
 
 MAX_DIFF_LINES = 3000
@@ -151,7 +147,12 @@ def _total_line_count(files: list[DiffSnapshot]) -> int:
 def review_files_from_snapshots(
     snapshots: list[DiffSnapshot],
 ) -> tuple[tuple[ChangedFile, ...], tuple[str, ...]]:
-    """Project the durable snapshot into model input without omitted files."""
+    """Project the durable snapshot into model input without omitted files.
+
+    ``review_patch`` is the only model input (RULES §5.1). A row without one, withheld by
+    the policy or stored before the column existed, is omitted under its stored name; its
+    UI patch is never parsed again.
+    """
     changed: list[ChangedFile] = []
     omitted: list[str] = []
     for snapshot in snapshots:
@@ -161,8 +162,6 @@ def review_files_from_snapshots(
             changed.append(
                 parse_file_patch(snapshot.filename, snapshot.status, snapshot.review_patch)
             )
-        elif snapshot.blob_sha is not None:
-            omitted.append(snapshot.filename)
         else:
-            changed.extend(parse_unified_diff(snapshot.patch))
+            omitted.append(snapshot.filename)
     return tuple(changed), tuple(omitted)

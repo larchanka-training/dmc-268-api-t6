@@ -74,10 +74,10 @@ TEST_RABBITMQ_URL=amqp://app:app@localhost:5672/imp168b uv run pytest
 
 **Done when:**
 
-- [ ] the regression is red before the fix and green after it, with no parser change;
-- [ ] in both prompts: zero mentions of `gone.py` / `q b/r.py` and zero content lines of
+- [x] the regression is red before the fix and green after it, with no parser change;
+- [x] in both prompts: zero mentions of `gone.py` / `q b/r.py` and zero content lines of
   either file; `src/app.py` is present;
-- [ ] the full suite and the focused PG run are green, with zero skips.
+- [x] the full suite and the focused PG run are green, with zero skips.
 
 **Dependencies:** Task 0.
 
