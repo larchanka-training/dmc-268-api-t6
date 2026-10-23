@@ -11,19 +11,20 @@
 | Параметр | Значение |
 | --- | --- |
 | Дата | 2026-10-23 |
-| База | `main` `22c621ab` |
+| База | `main` `22c621ab`; ссылки `file:line` на код приложения в отчёте — по этой базе |
 | PR | этап 1 по #163 |
 | Локально | PostgreSQL 17.11 и RabbitMQ 4.3.6, своя БД и отдельный vhost |
 | CI | обязательный job `Python lint / type / test` (service containers `postgres:17-alpine`, `rabbitmq:4-management-alpine`), шаг «Integration suite (zero skips)», маркер `integration` |
 | Изоляция | одна мигрированная схема на модуль; перед каждым сценарием все таблицы, кроме `alembic_version`, очищаются (`TRUNCATE … RESTART IDENTITY CASCADE`) и заполняются тем же seed с фиксированными id, топология очередей пересоздаётся |
-| Время | 23 теста; 87–98 с при load average 15–19 (машину делили параллельные сессии); первая версия файла (19 тестов, схема мигрировалась в каждом сценарии) — 70 с на свободной машине. Подготовка сценария: миграция 1,35–1,49 с против очистки и seed 0,53–0,69 с |
+| Время | 24 теста; 103–133 с при load average около 20 (машину делили параллельные сессии). Очистка и seed вместо миграции экономят около 0,8 с на сценарий (0,53–0,69 с против 1,35–1,49 с); остальное время определяется нагрузкой машины, поэтому сравнения «до/после» при одинаковой нагрузке нет. Первая версия файла (19 тестов) — 70 с на свободной машине |
 
-**Конфигурация → итог.** Все 23 теста пройдены, пропусков нет.
+**Конфигурация → итог.** Все 24 теста пройдены, пропусков нет. Check-run каждого сценария завершён: `completed` / `neutral` для `succeeded` и `failed`, `completed` / `skipped` для `skipped` ([PIPELINE_SPEC §7](PIPELINE_SPEC.md#7-check-run-бота-sd-83)).
 
 | Сценарий | Конфигурация `.review/rules.md` в base | Итог |
 | --- | --- | --- |
 | missing | нет записи `.review` | `succeeded`, `presence=missing`, оба изменённых файла доходят до модели, одно ревью на head |
 | valid | секции Markdown и блок `review-ignore` с `generated/**` | `succeeded`, `presence=present`, ни путь, ни содержимое `generated/client.py` не попадают ни в один вызов LLM, одно ревью |
+| agents-md | rules.md нет; `AGENTS.md` с блоком `review-ignore` на оба изменённых файла | `succeeded`, не `skipped`: блок в AGENTS.md — обычный текст, пути обоих файлов доходят до модели, одно ревью |
 | empty | 0 байт | `succeeded`, `presence=present`, `raw_sha256 = e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`, `byte_count = 0`, `policy_digest` отличается от missing |
 | at-limit | ровно 65 536 байт | `succeeded`, `presence=present`, `byte_count = 65536` |
 | all-ignored | блок с `app/**` и `generated/**` | `skipped`, `all_changes_ignored`, 0 LLM, ревью нет |
@@ -59,21 +60,22 @@
 | M4 | `policy_snapshot_unit_of_work.py`: снимок закрепляет `head_sha` вместо `base_sha` | красный | head-added, head-changed, truncated, root-404, root-denied |
 | M5 | `run_failures.py`: `policy_document_decode_error` становится повторяемым | красный | decode: `attempt = 3` |
 | M6 | `github_policy_source.py`: 404 на корневое дерево base → документ missing | красный | root-404 |
+| M7 | `PreparePolicySnapshot`: маски разбираются из текста rules.md и AGENTS.md вместе | красный | agents-md: `skipped` вместо `succeeded` |
 
 **Что не проверяется и почему.**
 
 - Текст rules.md в prompt модели — ни наличие, ни отсутствие. На `main` текст до модели не доходит (`app/modules/reviews/infrastructure/review_prompt_repository.py:73-83`, `app/worker.py:277-280`) — это открытый остаток #130 (AC9). Утверждение об отсутствии закрепило бы дефект, утверждение о наличии сегодня падает.
 - Точный код усечённого дерева: код даёт терминальный `policy_revision_unavailable`, а RFS §9 относит неполную загрузку к повторяемому `policy_fetch_transient`. До решения #247 ч.1 тест допускает оба кода и не закрепляет число попыток.
 - Коды бюджета проверяются только unit-тестами: `policy_match_budget_exceeded` — `tests/test_review_ignore.py::test_exhausted_budget_stops_the_run`, `policy_prompt_budget_exceeded` на `main` недостижим (остаток #130). Когда текст rules.md попадёт в prompt, сценарий at-limit (65 536 байт) может упереться в бюджет 12 000 токенов (RFS §3.3) раньше байтового лимита.
-- Текст и conclusion check-run не проверяются: тест только ждёт завершённого check-run, прежде чем читать результат.
+- Заголовок и summary check-run не проверяются; проверяется только `conclusion` по PIPELINE_SPEC §7.
 
 ## Этап 2 — envelope, инъекции и A/B
 
-В работе, PR …
+В работе.
 
 ## Этап 3 — нагрузка
 
-В работе, PR …
+В работе.
 
 ## Расхождения со спецификацией
 
