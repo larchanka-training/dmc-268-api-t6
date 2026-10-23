@@ -1,0 +1,77 @@
+# Five parallel Runs on local compose (#163): a fake GitHub + fake LLM (`stub`) and the workers
+# pointed at it. Only scripts/parallel_runs_load.py starts this, under its own project name:
+#
+#   docker compose -p <project> -f docker-compose.yml -f deploy/load/compose.parallel-runs.yml \
+#     --profile webhooks up -d --build --wait --scale worker=5
+#
+# The driver sets every host port (BACKEND_PORT, POSTGRES_PORT, RABBITMQ_PORT,
+# RABBITMQ_MANAGEMENT_PORT, REDIS_PORT, LOAD_STUB_PORT) to a free one, so nothing collides with
+# another stack, and the LOAD_* values below. Credentials and LLM settings are literal here, so a
+# developer's environment cannot route this stack to the real GitHub or a paid model. Paths are
+# relative to the first -f file (the repository root).
+services:
+  stub:
+    build: .
+    command:
+      - python
+      - /srv/load/review_load_stub.py
+      - --port
+      - "9999"
+      - --prs
+      - ${LOAD_RUNS:?set by scripts/parallel_runs_load.py}
+      - --llm-delay-ms
+      - ${LOAD_LLM_DELAY_MS:?set by scripts/parallel_runs_load.py}
+    # The image does not copy scripts/; the stub is stdlib-only.
+    volumes:
+      - ./scripts/review_load_stub.py:/srv/load/review_load_stub.py:ro
+    ports:
+      - "127.0.0.1:${LOAD_STUB_PORT:?set by scripts/parallel_runs_load.py}:9999"
+    # Replaces the image healthcheck, which probes the API on port 8000.
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:9999/_stats', timeout=2)"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+
+  backend:
+    environment:
+      GITHUB_WEBHOOK_SECRET: ${LOAD_WEBHOOK_SECRET:?set by scripts/parallel_runs_load.py}
+      GITHUB_API_URL: http://stub:9999
+      GITHUB_CLIENT_ID: ""
+      GITHUB_CLIENT_SECRET: ""
+
+  worker:
+    environment:
+      GITHUB_APP_ID: "1"
+      GITHUB_APP_PRIVATE_KEY: ${LOAD_GITHUB_APP_PRIVATE_KEY:?set by scripts/parallel_runs_load.py}
+      GITHUB_API_URL: http://stub:9999
+      PORTAL_URL: ""
+      # An unknown model on a keyless plain-http endpoint: no catalog price, no key to leak.
+      LLM_MODEL: load-stub-model
+      LLM_BASE_URL: http://stub:9999/v1
+      LLM_CONTEXT_WINDOW: "100000"
+      LLM_API_KEYS: ""
+      LLM_PROVIDER: ""
+      LLM_MAX_OUTPUT_TOKENS: ""
+      LLM_PRICE_INPUT_PER_MTOK: ""
+      LLM_PRICE_OUTPUT_PER_MTOK: ""
+      LLM_PRICE_CACHE_READ_PER_MTOK: ""
+      LLM_STRUCTURED_OUTPUT: ""
+      LLM_EXTRA_BODY: ""
+      LLM_ALLOW_PROMPT_JSON: ""
+      LLM_FALLBACK_MODEL: ""
+      LLM_FALLBACK_API_KEYS: ""
+      LLM_FALLBACK_BASE_URL: ""
+    depends_on:
+      stub:
+        condition: service_healthy
+
+  webhook-worker:
+    environment:
+      GITHUB_APP_ID: "1"
+      GITHUB_APP_PRIVATE_KEY: ${LOAD_GITHUB_APP_PRIVATE_KEY:?set by scripts/parallel_runs_load.py}
+      GITHUB_APP_BOT_LOGIN: load-reviewer[bot]
+      GITHUB_API_URL: http://stub:9999
+    depends_on:
+      stub:
+        condition: service_healthy
