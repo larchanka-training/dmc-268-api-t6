@@ -3693,6 +3693,9 @@ def test_reconcile_head_leaves_another_generation_a_purged_and_a_failed_index_al
         pytest.param("internal_error", {}, False, id="internal-same-head"),
         pytest.param("vcs_unavailable", {}, True, id="unavailable-same-head"),
         pytest.param("vcs_rate_limited", {}, True, id="rate-limited-same-head"),
+        # A policy read that failed on the network heals like a VCS error (#242).
+        pytest.param("policy_fetch_transient", {}, True, id="policy-transient-same-head"),
+        pytest.param("policy_rate_limited", {}, True, id="policy-rate-limited-same-head"),
         pytest.param("policy_document_too_large", {"commit": C3}, True, id="policy-new-head"),
         pytest.param(
             "policy_document_too_large", {"branch": "develop"}, True, id="policy-new-branch"
