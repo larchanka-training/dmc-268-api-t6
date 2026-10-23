@@ -4,13 +4,15 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field
-from datetime import datetime
+from dataclasses import dataclass, field, replace
+from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
 import pytest
 
+from app.modules.code_index.domain.enums import RagIndexStatus
+from app.modules.code_index.domain.rag_index import RagIndex
 from app.modules.reviews.application.ast_resolution import RevisionTree
 from app.modules.reviews.application.ast_symbols import (
     AstFacts,
@@ -27,6 +29,7 @@ from app.modules.reviews.application.policy_errors import PolicyError, PolicyErr
 from app.modules.reviews.application.prepare_policy_snapshot import PreparePolicySnapshot
 from app.modules.reviews.application.process_run import RunVcsInput
 from app.modules.reviews.application.prompt_builder import PullRequestMeta
+from app.modules.reviews.application.rag_index import OpenReviewIndex, RagReadiness
 from app.modules.reviews.application.review_context import (
     BuildReviewContext,
     ContextBlock,
@@ -50,6 +53,7 @@ from app.modules.reviews.application.vcs_diff import (
 from app.modules.reviews.infrastructure.tree_sitter_facts import extract_facts
 from app.worker import WorkerSettings
 from tests.test_prepare_policy_snapshot import Store, Uow
+from tests.test_rag_readiness import FakeReviewIndexUow, StubReviewIndexAccess
 
 _RUN = UUID("00000000-0000-0000-0000-000000000002")
 _HEAD = "a" * 40
@@ -207,6 +211,7 @@ def _stage(
     empty: bool = False,
     builtin_excluded: Callable[[str], bool] = lambda path: False,
     context_builder: Callable[[RunVcsInput], BuildReviewContext] | None = None,
+    rag: OpenReviewIndex | None = None,
 ) -> ReviewContextStage:
     shared = store or Store()
     provider = vcs or Vcs()
@@ -226,6 +231,7 @@ def _stage(
         ),
         trace=trace,
         builtin_excluded=builtin_excluded,
+        rag=rag,
     )
 
 
@@ -898,3 +904,253 @@ def test_context_stage_propagates_control_but_preserves_optional_fallback(failur
             asyncio.run(stage.run(_RUN))
         assert caught.value is error
     assert trace.steps[-1][2]["error"]["type"] == type(error).__name__
+
+
+# The index the review opens at the RAG gate (#144): pointers of a fake readiness.
+_REPOSITORY = UUID(int=1)
+_INDEXED = "6" * 40
+_TARGET = "7" * 40
+_USABLE = (RagIndexStatus.READY, RagIndexStatus.STALE)
+
+
+def _readiness(status: RagIndexStatus, *, error_code: str | None = None) -> RagReadiness:
+    usable = status in _USABLE
+    index = RagIndex(
+        status,
+        _INDEXED if usable else None,
+        datetime(2026, 10, 23, 9, 30, tzinfo=UTC) if usable else None,
+        3 if usable else 0,
+        9 if usable else 0,
+        error_code,
+    )
+    return RagReadiness(enabled=True, index=index, default_head_sha=_TARGET)
+
+
+def _gate(readiness: RagReadiness) -> tuple[OpenReviewIndex, StubReviewIndexAccess]:
+    access = StubReviewIndexAccess(readiness)
+    return OpenReviewIndex(lambda: FakeReviewIndexUow(access)), access
+
+
+@dataclass
+class RaisingIndexAccess:
+    error: Exception
+    opened: list[UUID] = field(default_factory=list)
+
+    async def open_for_review(self, repository_id: UUID) -> RagReadiness:
+        self.opened.append(repository_id)
+        raise self.error
+
+
+def _failing_gate(error: Exception) -> tuple[OpenReviewIndex, RaisingIndexAccess]:
+    access = RaisingIndexAccess(error)
+    return OpenReviewIndex(lambda: FakeReviewIndexUow(access)), access
+
+
+def test_without_the_gate_the_stage_records_no_index_step() -> None:
+    trace = Trace()
+
+    assert asyncio.run(_stage(trace).run(_RUN)) is not None
+
+    assert [step[0] for step in trace.steps] == ["policy.load", "context.build"]
+
+
+def test_rag_toggle_off_records_no_index_step() -> None:
+    trace = Trace()
+    gate, access = _gate(RagReadiness(enabled=False))
+
+    assert asyncio.run(_stage(trace, rag=gate).run(_RUN)) is not None
+
+    # The adapter decides that RAG is off; the stage writes nothing for it.
+    assert access.opened == [_REPOSITORY]
+    assert [step[0] for step in trace.steps] == ["policy.load", "context.build"]
+
+
+@pytest.mark.parametrize(
+    ("status", "error_code", "response"),
+    [
+        (RagIndexStatus.EMPTY, None, {"outcome": "not_ready", "reason": "empty"}),
+        # A code kept from an earlier failure is not the reason of a building index.
+        (RagIndexStatus.BUILDING, "archive_unsafe", {"outcome": "not_ready", "reason": "building"}),
+        (
+            RagIndexStatus.FAILED,
+            "limit_exceeded:files",
+            {"outcome": "not_ready", "reason": "failed", "error_code": "limit_exceeded:files"},
+        ),
+        # The capability set is empty until v5: a usable index is not used yet (M6).
+        (RagIndexStatus.READY, None, {"outcome": "not_ready", "reason": "prompt_version"}),
+        (RagIndexStatus.STALE, None, {"outcome": "not_ready", "reason": "prompt_version"}),
+    ],
+    ids=["empty", "building", "failed", "ready", "stale"],
+)
+def test_index_readiness_is_recorded_after_the_context_build(
+    status: RagIndexStatus, error_code: str | None, response: dict[str, str]
+) -> None:
+    trace = Trace()
+    gate, access = _gate(_readiness(status, error_code=error_code))
+
+    payload = asyncio.run(_stage(trace, rag=gate).run(_RUN))
+
+    assert payload is not None and payload.status is ContextStatus.REVIEW
+    assert access.opened == [_REPOSITORY]
+    assert [step[0] for step in trace.steps] == ["policy.load", "context.build", "context.rag"]
+    usable = status in _USABLE
+    assert trace.steps[2][1] == {
+        "index_status": status.value,
+        "indexed_commit_sha": _INDEXED if usable else None,
+        "default_head_sha": _TARGET,
+        "stale": status is RagIndexStatus.STALE,
+    }
+    assert trace.steps[2][2] == response
+
+
+def test_stale_index_is_opened_once_and_the_review_does_not_wait_for_it() -> None:
+    trace = Trace()
+    gate, access = _gate(_readiness(RagIndexStatus.STALE))
+
+    payload = asyncio.run(asyncio.wait_for(_stage(trace, rag=gate).run(_RUN), timeout=5))
+
+    assert payload is not None and payload.status is ContextStatus.REVIEW
+    assert access.opened == [_REPOSITORY]
+    assert [step[0] for step in trace.steps].count("context.rag") == 1
+
+
+def test_not_ready_reason_comes_from_the_index_not_from_its_status() -> None:
+    @dataclass(frozen=True)
+    class PatchedIndex(RagIndex):
+        @property
+        def not_ready_reason(self) -> RagIndexStatus | None:
+            return RagIndexStatus.BUILDING
+
+    trace = Trace()
+    index = PatchedIndex(RagIndexStatus.EMPTY, None, None, 0, 0, None)
+    gate, _ = _gate(RagReadiness(enabled=True, index=index, default_head_sha=_TARGET))
+
+    asyncio.run(_stage(trace, rag=gate).run(_RUN))
+
+    assert trace.steps[-1][0] == "context.rag"
+    assert trace.steps[-1][2] == {"outcome": "not_ready", "reason": "building"}
+
+
+def test_caught_build_failure_still_records_the_index_readiness() -> None:
+    class Broken:
+        async def execute(self, **kwargs: object) -> object:
+            raise RuntimeError("the tree is unavailable")
+
+    trace = Trace()
+    gate, _ = _gate(_readiness(RagIndexStatus.EMPTY))
+    stage = _stage(trace, rag=gate)
+    stage._context_builder = lambda run: Broken()  # type: ignore[assignment,return-value]
+
+    assert asyncio.run(stage.run(_RUN)) is None
+
+    assert [step[0] for step in trace.steps] == ["policy.load", "context.build", "context.rag"]
+    assert trace.steps[1][2]["error"]["type"] == "RuntimeError"
+    assert trace.steps[2][2] == {"outcome": "not_ready", "reason": "empty"}
+
+
+def test_index_readiness_is_recorded_before_the_skip_of_an_all_ignored_payload() -> None:
+    class AllIgnored(BuildReviewContext):
+        async def execute(self, **kwargs: Any) -> ReviewContextPayload:
+            payload = await super().execute(**kwargs)
+            return replace(payload, status=ContextStatus.ALL_CHANGES_IGNORED)
+
+    trace = Trace()
+    gate, _ = _gate(_readiness(RagIndexStatus.BUILDING))
+    stage = _stage(
+        trace,
+        rag=gate,
+        context_builder=lambda run: AllIgnored(
+            source=Repository(), parser=Parser(), counter=EstimatedTokenCounter()
+        ),
+    )
+
+    with pytest.raises(RunSkipped) as skipped:
+        asyncio.run(stage.run(_RUN))
+
+    assert skipped.value.reason == "all_changes_ignored"
+    assert [step[0] for step in trace.steps] == ["policy.load", "context.build", "context.rag"]
+    assert trace.steps[2][2] == {"outcome": "not_ready", "reason": "building"}
+
+
+def test_skip_before_the_context_build_does_not_open_the_index() -> None:
+    trace = Trace()
+    gate, access = _gate(_readiness(RagIndexStatus.READY))
+    stage = _stage(trace, rag=gate, policy=Policy(rules=b"```review-ignore\n**\n```\n"))
+
+    with pytest.raises(RunSkipped):
+        asyncio.run(stage.run(_RUN))
+
+    assert access.opened == []
+    assert [step[0] for step in trace.steps] == ["policy.load", "context.build"]
+
+
+@pytest.mark.parametrize("failure", ["cancel", "deadline", "policy"])
+def test_control_raised_by_the_build_ends_the_attempt_without_the_index_step(
+    failure: str,
+) -> None:
+    error = {
+        "cancel": RunCancelled("installation_unavailable"),
+        "deadline": RunFailure("deadline_exceeded"),
+        "policy": PolicyError(PolicyErrorCode.MATCH_BUDGET_EXCEEDED, "over the budget"),
+    }[failure]
+
+    class Broken(BuildReviewContext):
+        async def execute(self, **kwargs: Any) -> Any:
+            raise error
+
+    trace = Trace()
+    gate, access = _gate(_readiness(RagIndexStatus.READY))
+    stage = _stage(
+        trace,
+        rag=gate,
+        context_builder=lambda run: Broken(
+            source=Repository(), parser=Parser(), counter=EstimatedTokenCounter()
+        ),
+    )
+
+    with pytest.raises(type(error)) as caught:
+        asyncio.run(stage.run(_RUN))
+
+    assert caught.value is error
+    assert access.opened == [_REPOSITORY]
+    assert [step[0] for step in trace.steps] == ["policy.load", "context.build"]
+
+
+@pytest.mark.parametrize(
+    "error",
+    [RuntimeError("the database is gone"), RunFailure("diff_fetch_failed", "optional")],
+    ids=["unexpected", "run-failure"],
+)
+def test_failed_gate_is_recorded_and_the_review_continues_without_rag(error: Exception) -> None:
+    trace = Trace()
+    gate, access = _failing_gate(error)
+
+    payload = asyncio.run(_stage(trace, rag=gate).run(_RUN))
+
+    assert payload is not None and payload.status is ContextStatus.REVIEW
+    assert access.opened == [_REPOSITORY]
+    assert [step[0] for step in trace.steps] == ["policy.load", "context.build", "context.rag"]
+    assert trace.steps[2][1] == {
+        "index_status": None,
+        "indexed_commit_sha": None,
+        "default_head_sha": None,
+        "stale": None,
+    }
+    assert trace.steps[2][2] == {"error": {"type": type(error).__name__, "message": str(error)}}
+
+
+@pytest.mark.parametrize("failure", ["cancel", "deadline", "policy"])
+def test_control_raised_by_the_gate_ends_the_attempt(failure: str) -> None:
+    error = {
+        "cancel": RunCancelled("installation_unavailable"),
+        "deadline": RunFailure("deadline_exceeded"),
+        "policy": PolicyError(PolicyErrorCode.ACCESS_DENIED, "GitHub answered 403"),
+    }[failure]
+    trace = Trace()
+    gate, _ = _failing_gate(error)
+
+    with pytest.raises(type(error)) as caught:
+        asyncio.run(_stage(trace, rag=gate).run(_RUN))
+
+    assert caught.value is error
+    assert [step[0] for step in trace.steps] == ["policy.load"]

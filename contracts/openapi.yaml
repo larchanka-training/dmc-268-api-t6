@@ -912,9 +912,10 @@ components:
       description: >-
         Run lifecycle state. Terminal: succeeded, failed, cancelled, skipped. The steps recorded
         as run actions inside `running` are `policy.load`, `vcs.fetch_diff`, `context.build`,
-        `llm.repo_conventions` and `llm.call`; `llm.review_output` and `review.postprocess` are
-        written in the transaction that moves the run to `publishing`; `github.publish_review`
-        or `gitlab.publish_review` runs in `publishing` (docs/PIPELINE_SPEC.md §2).
+        `context.rag`, `llm.repo_conventions` and `llm.call`; `llm.review_output` and
+        `review.postprocess` are written in the transaction that moves the run to `publishing`;
+        `github.publish_review` or `gitlab.publish_review` runs in `publishing`
+        (docs/PIPELINE_SPEC.md §2).
       enum: [queued, running, publishing, succeeded, failed, cancelled, skipped]
     RunTrigger:
       type: string
@@ -1322,10 +1323,10 @@ components:
           type: string
           description: >-
             Step name written to run_actions; free text, not an enum. The code writes
-            `policy.load`, `vcs.fetch_diff`, `context.build`, `llm.repo_conventions`,
-            `llm.call`, `llm.review_output`, `review.postprocess`, `github.publish_review` and
-            `gitlab.publish_review`. The per-attempt order and the planned steps that are not
-            written yet are in docs/PIPELINE_SPEC.md §2.
+            `policy.load`, `vcs.fetch_diff`, `context.build`, `context.rag`,
+            `llm.repo_conventions`, `llm.call`, `llm.review_output`, `review.postprocess`,
+            `github.publish_review` and `gitlab.publish_review`. The per-attempt order and the
+            planned steps that are not written yet are in docs/PIPELINE_SPEC.md §2.
         request:
           type: object
           description: Request metadata of the step.
