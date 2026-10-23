@@ -9,7 +9,7 @@ on:
   workflow_dispatch:
     inputs:
       window:
-        description: "Agreed load window, approver and issue/comment link"
+        description: "Agreed load window, approver and issue/comment link (one line, at most 300 characters)"
         required: true
         type: string
       count:
@@ -23,7 +23,7 @@ on:
         type: string
         default: "5"
       body_bytes:
-        description: "JSON body size in bytes, 1-65536"
+        description: "JSON body size in bytes, 64-65536"
         required: false
         type: string
         default: "16384"
@@ -58,17 +58,22 @@ jobs:
             echo "::error::window must name the agreed load window, the approver and the issue/comment link" >&2
             exit 1
           fi
+          # One line of text: it is echoed in the step summary and the report.
+          if [[ "${WINDOW}" =~ [[:cntrl:]] ]] || (( ${#WINDOW} > 300 )); then
+            echo "::error::window must be one line of at most 300 characters without control characters" >&2
+            exit 1
+          fi
           # The same caps as scripts/webhook_ack_load.py, checked before anything is sent.
           check() {
-            local name="$1" value="$2" maximum="$3"
-            if [[ ! "${value}" =~ ^[1-9][0-9]{0,5}$ ]] || (( value > maximum )); then
-              echo "::error::${name} must be an integer from 1 to ${maximum}" >&2
+            local name="$1" value="$2" minimum="$3" maximum="$4"
+            if [[ ! "${value}" =~ ^[1-9][0-9]{0,5}$ ]] || (( value < minimum || value > maximum )); then
+              echo "::error::${name} must be an integer from ${minimum} to ${maximum}" >&2
               exit 1
             fi
           }
-          check count "${COUNT}" 1000
-          check concurrency "${CONCURRENCY}" 10
-          check body_bytes "${BODY_BYTES}" 65536
+          check count "${COUNT}" 1 1000
+          check concurrency "${CONCURRENCY}" 1 10
+          check body_bytes "${BODY_BYTES}" 64 65536
 
       - name: Resolve staging webhook URL
         id: target
@@ -129,7 +134,8 @@ jobs:
             --body-bytes "${BODY_BYTES}" \
             --environment staging \
             --commit "${COMMIT_SHA}" \
-            --window "${WINDOW}" \
+            --window="${WINDOW}" \
+            --max-seconds 600 \
             --report-json "${RUNNER_TEMP}/webhook-ack-load.json"
 
       # The runner's own python3: this step also runs when a step before `Setup uv` failed.
@@ -153,7 +159,8 @@ jobs:
           report_path = Path(os.environ["RUNNER_TEMP"]) / "webhook-ack-load.json"
           with Path(os.environ["GITHUB_STEP_SUMMARY"]).open("a", encoding="utf-8") as summary:
               summary.write("## Webhook ACK load (staging)\n\n")
-              summary.write(f"Agreed window: {cell(os.environ.get('WINDOW', ''))}\n\n")
+              # json.dumps: the input reaches this step even when `Validate inputs` rejected it.
+              summary.write(f"Agreed window: {cell(json.dumps(os.environ.get('WINDOW', '')))}\n\n")
               summary.write(
                   "The client is a GitHub-hosted runner: the latency includes the WAN round trip "
                   "and TLS setup of each new connection, not only the server's ACK.\n\n"
@@ -173,6 +180,8 @@ jobs:
                       ("Concurrency", report["concurrency"]),
                       ("Body bytes", report["body_bytes"]),
                       ("Statuses", statuses),
+                      *((f"Transport error {name}", message) for name, message in report["errors"].items()),
+                      ("Time limit (s)", report["max_seconds"]),
                       *((f"{key} ms", latency[key]) for key in ("p50", "p95", "p99", "max") if key in latency),
                       *((("Stopped early", report["aborted"]),) if report["aborted"] else ()),
                       ("Verdict", report["verdict"]),
