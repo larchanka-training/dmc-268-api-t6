@@ -286,9 +286,9 @@ leaves it false):**
 
 **Done when:**
 
-- [ ] the run-action catalog tests and the openapi description tests are green;
-- [ ] the RED run and the GREEN run are recorded;
-- [ ] common verification is green.
+- [x] the run-action catalog tests and the openapi description tests are green;
+- [x] the RED run and the GREEN run are recorded;
+- [x] common verification is green.
 
 **Dependencies:** Task 3.
 
