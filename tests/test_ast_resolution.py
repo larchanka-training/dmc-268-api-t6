@@ -99,7 +99,7 @@ def _one(sources: dict[str, str], importer: str, symbol: str, **options: object)
     return refs[0]
 
 
-def _diff_file(patch: str, additions: int, deletions: int) -> DiffFile:
+def _diff_file(patch: str, additions: int, deletions: int, path: str = "app.py") -> DiffFile:
     pull_request = VcsPullRequest(
         locator=PullRequestLocator(17, "octo/repo", 7),
         head_sha=_HEAD,
@@ -119,7 +119,7 @@ def _diff_file(patch: str, additions: int, deletions: int) -> DiffFile:
         ),
     )
     file = VcsFile(
-        "app.py", "modified", "d" * 40, None, additions, deletions, additions + deletions, patch
+        path, "modified", "d" * 40, None, additions, deletions, additions + deletions, patch
     )
     return build_diff_map(
         pull_request,
@@ -196,6 +196,48 @@ def test_removed_lines_locate_the_symbol_by_the_surviving_lines() -> None:
     )
 
     assert [item.name for item in affected_symbols(facts, removed).symbols] == ["run"]
+
+
+_TS_MODULE = """import { log } from "./log";
+
+export function first(): number {
+  return 1;
+}
+
+export class Service {
+  run(): number {
+    return 2;
+  }
+
+  stop(): number {
+    return 3;
+  }
+}
+"""
+_JS_MODULE = _TS_MODULE.replace("(): number {", "() {")
+
+
+@pytest.mark.parametrize(
+    ("path", "source"),
+    [
+        pytest.param("src/app.ts", _TS_MODULE, id="ts"),
+        pytest.param("src/app.js", _JS_MODULE, id="js"),
+    ],
+)
+def test_script_added_line_selects_the_method_and_a_statement_between_is_module_level(
+    path: str, source: str
+) -> None:
+    in_method = affected_symbols(
+        _facts(path, source.replace("    return 2;\n", "    const x = 1;\n    return 2;\n")),
+        _diff_file("@@ -8,2 +8,3 @@\n   run() {\n+    const x = 1;\n     return 2;", 1, 0, path),
+    )
+    between = affected_symbols(
+        _facts(path, source.replace("}\n\nexport class", "}\n\nlog(1);\nexport class")),
+        _diff_file("@@ -6,2 +6,3 @@\n \n+log(1);\n export class Service {", 1, 0, path),
+    )
+
+    assert ([item.name for item in in_method.symbols], in_method.module_level) == (["run"], False)
+    assert (between.symbols, between.module_level) == ((), True)
 
 
 def test_python_relative_import_resolves_the_used_name_only() -> None:
@@ -486,6 +528,48 @@ def test_javascript_relative_es_imports_and_the_forms_it_does_not_follow() -> No
     assert mixed.resolution is ImportResolution.UNSUPPORTED
 
 
+def test_tsx_and_jsx_components_resolve_to_their_own_extension() -> None:
+    tsx = _one(
+        {
+            "src/App.tsx": (
+                'import { Button } from "./Button";\n\n'
+                'export function App() {\n  return <Button label="ok" />;\n}\n'
+            ),
+            "src/Button.tsx": (
+                "export function Button(props: { label: string }) {\n"
+                "  return <button>{props.label}</button>;\n}\n"
+            ),
+        },
+        "src/App.tsx",
+        "App",
+    )
+    jsx = _one(
+        {
+            "src/App.jsx": (
+                'import Button from "./Button";\n\n'
+                'export function App() {\n  return <Button label="ok" />;\n}\n'
+            ),
+            "src/Button.jsx": (
+                "export default function Button({ label }) {\n"
+                "  return <button>{label}</button>;\n}\n"
+            ),
+        },
+        "src/App.jsx",
+        "App",
+    )
+
+    assert (tsx.resolution, tsx.names) == (ImportResolution.RESOLVED, ("Button",))
+    assert (tsx.resolved_symbols[0].path, tsx.resolved_symbols[0].name) == (
+        "src/Button.tsx",
+        "Button",
+    )
+    assert (jsx.resolution, jsx.names) == (ImportResolution.RESOLVED, ("default",))
+    assert (jsx.resolved_symbols[0].path, jsx.resolved_symbols[0].name) == (
+        "src/Button.jsx",
+        "Button",
+    )
+
+
 _GO_MOD = "module example.com/m\n\ngo 1.22\n"
 _GO_APP = """package main
 
@@ -656,6 +740,33 @@ def test_excluded_python_target_is_reported_and_not_shown() -> None:
     ref = _one(sources, "pkg/app.py", "f", unavailable={"pkg/client.py": "excluded"})
 
     assert (ref.resolution, ref.resolved_symbols) == (ImportResolution.EXCLUDED, ())
+
+
+@pytest.mark.parametrize(
+    ("importer", "specifier", "target"),
+    [
+        pytest.param("src/app.ts", "./models", "src/models.ts", id="ts"),
+        pytest.param("src/app.js", "./models.js", "src/models.js", id="js"),
+    ],
+)
+def test_excluded_script_target_is_reported_and_not_shown(
+    importer: str, specifier: str, target: str
+) -> None:
+    sources = {
+        importer: (
+            f'import {{ User }} from "{specifier}";\n'
+            "export function run() { return new User(); }\n"
+        ),
+        target: "export class User {}\n",
+    }
+
+    ref = _one(sources, importer, "run", unavailable={target: "excluded"})
+
+    assert (ref.resolution, ref.reason, ref.resolved_symbols) == (
+        ImportResolution.EXCLUDED,
+        "excluded",
+        (),
+    )
 
 
 _SCRIPT_IMPORTER = (
