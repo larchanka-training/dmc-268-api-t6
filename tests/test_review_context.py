@@ -558,6 +558,34 @@ def test_imported_file_over_256_kib_is_not_resolved() -> None:
     ]
 
 
+@pytest.mark.parametrize(
+    "excluded",
+    [pytest.param("pkg/a.go", id="first-member"), pytest.param("pkg/b.go", id="later-member")],
+)
+def test_excluded_go_member_is_never_read_while_its_package_is_named(excluded: str) -> None:
+    # The clause `db` differs from the directory `pkg/`, so the resolver reads members to
+    # name the refused package; the masked member is skipped by path, never read.
+    repository = Repository(
+        {
+            "go.mod": "module example.com/m\n\ngo 1.22\n",
+            "cmd/main.go": (
+                'package main\n\nimport "example.com/m/pkg"\n\nfunc main() {\n\tdb.Open()\n}\n'
+            ),
+            "pkg/a.go": "package db\n\nfunc Open() {}\n",
+            "pkg/b.go": "package db\n\nfunc Close() {}\n",
+        }
+    )
+    patch = "@@ -5,2 +5,3 @@\n func main() {\n+\tdb.Open()\n }"
+    diff_map = _diff_map(_vcs_file(repository, "cmd/main.go", patch))
+
+    payload = _build(repository, diff_map, rules_text=f"```review-ignore\n{excluded}\n```\n")
+
+    assert excluded not in repository.read
+    assert [(ref.resolution, ref.reason) for ref in payload.imports] == [
+        (ImportResolution.EXCLUDED, "excluded")
+    ]
+
+
 def test_file_of_an_unresolved_identity_is_not_read_through_an_import() -> None:
     # The old name breaks the path contract, so the file has no reliable identity.
     repository = _service_repository()

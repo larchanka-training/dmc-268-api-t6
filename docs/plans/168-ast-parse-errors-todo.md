@@ -259,6 +259,13 @@ and four fragments of 2000 leave 1 token at 8001.
 
 **Dependencies:** Task 4.
 
+### Task 7: Pin that an excluded Go member is never read
+
+- [x] `test(reviews): pin that an excluded go member is never read (#168)`: a `BuildReviewContext`
+  test in `tests/test_review_context.py` for clause `db` in `pkg/`, with the masked member first
+  (`pkg/a.go`) or later (`pkg/b.go`). The masked path is never in `repository.read`, and the ref
+  is `excluded`/`excluded`. It fails when `_Files.text` drops its `_denied` check.
+
 ### Checkpoint and publication
 
 - Full verification (`df -h /tmp` first).
