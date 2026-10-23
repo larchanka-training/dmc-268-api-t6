@@ -14,12 +14,15 @@ Usage:
     GITHUB_WEBHOOK_SECRET=... uv run python scripts/webhook_ack_load.py \\
         --url https://staging-api.example.org/webhooks/github \\
         [--count 200] [--concurrency 5] [--body-bytes 16384] [--report-json report.json] \\
-        [--environment staging] [--commit SHA] [--window "agreed window, approver, link"]
+        [--environment staging] [--commit SHA] [--window="agreed window, approver, link"] \\
+        [--max-seconds 600]
 
-The caps (count 1000, concurrency 10, body 64 KiB) protect the VPS that staging shares with
-production, and so does the fail-fast: the run stops sending when a warm-up delivery does not get
-202, after 5 failed timed deliveries in a row, or when more than 10 % of the timed deliveries
-failed once at least 20 of them are done; the partial report is still written. Latency is
+The caps (count 1000, concurrency 10, body 64 B to 64 KiB) protect the VPS that staging shares
+with production, and so does the fail-fast: the run stops sending when a warm-up delivery does
+not get 202, after 5 failed timed deliveries in a row, when more than 10 % of the timed
+deliveries failed once at least 20 of them are done, or after `--max-seconds` (default 600, at
+most 780); the partial report is still written, with the first cause of each transport error
+kind (class and message, the target URL and host replaced). Latency is
 client-side and nearest-rank, over the 202 answers of the timed deliveries, cut to 0.01 ms; the
 verdict compares the uncut p95. The client keeps up to `--concurrency` connections alive. The
 secret is read only from GITHUB_WEBHOOK_SECRET and is never printed.
@@ -41,7 +44,7 @@ import sys
 import time
 import uuid
 from collections import Counter
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from decimal import ROUND_DOWN, Decimal
@@ -60,6 +63,12 @@ DEFAULT_CONCURRENCY = 5
 MAX_CONCURRENCY = 10
 DEFAULT_BODY_BYTES = 16384
 MAX_BODY_BYTES = 65536
+# The unpadded `ping` is 63 bytes: a smaller --body-bytes could not be sent as asked.
+MIN_BODY_BYTES = 64
+# Wall-clock bound: the workflow job has 15 minutes, uv setup included.
+DEFAULT_MAX_SECONDS = 600
+MAX_MAX_SECONDS = 780
+MAX_ERROR_MESSAGE = 120
 # Fail-fast over the timed deliveries (the warm-up stops the run on any non-202 by itself).
 MAX_CONSECUTIVE_FAILURES = 5
 MAX_FAILURE_SHARE = 0.10
@@ -92,7 +101,9 @@ class LoadReport:
     sent: int
     concurrency: int
     body_bytes: int
+    max_seconds: float
     statuses: dict[str, int]
+    errors: dict[str, str]
     aborted: str | None
     latency_ms: Latency | None
     verdict: str
@@ -184,8 +195,11 @@ def truncated(value: float) -> float:
     return float(Decimal(repr(value)).quantize(Decimal("0.01"), rounding=ROUND_DOWN))
 
 
-def verdict(p95_ms: float | None, *, failed: int = 0, sent: int = 0) -> str:
-    """The comparison of the unrounded p95 with SD §13; INVALID when a delivery failed."""
+def verdict(
+    p95_ms: float | None, *, failed: int = 0, sent: int = 0, aborted: str | None = None
+) -> str:
+    """The comparison of the uncut p95 with SD §13; INVALID unless every delivery was sent and
+    got 202 (a failed delivery or an early stop)."""
     shown = f"{truncated(p95_ms):.2f}" if p95_ms is not None else ""
     if p95_ms is None:
         text = "no 202 answer among the timed deliveries: no latency to compare with SD §13"
@@ -201,22 +215,36 @@ def verdict(p95_ms: float | None, *, failed: int = 0, sent: int = 0) -> str:
             f"p95 {shown} ms meets the SD §13 target (p95 < {TARGET_P95_MS:.0f} ms) "
             f"and the internal goal ({GOAL_P95_MS:.0f} ms)"
         )
+    if aborted is not None:
+        return f"INVALID (stopped early: {aborted}; {failed} of {sent} deliveries failed): {text}"
     if failed:
         return f"INVALID ({failed} of {sent} deliveries failed): {text}"
     return text
 
 
-async def _send(
-    client: httpx.AsyncClient, url: str, secret: str, body_bytes: int
-) -> tuple[str, float]:
-    """POST one fresh delivery; return its status key and elapsed milliseconds."""
+def describe_error(error: BaseException, url: str) -> tuple[str, str]:
+    """The class and a short message of a transport error, without the target URL or host."""
+    parts = urlsplit(url)
+    message = str(error) or type(error).__name__
+    for text in (url, parts.netloc, parts.hostname or ""):
+        if text:
+            message = message.replace(text, "<target>")
+    return type(error).__name__, message[:MAX_ERROR_MESSAGE]
+
+
+type Outcome = tuple[str, float, tuple[str, str] | None]
+
+
+async def _send(client: httpx.AsyncClient, url: str, secret: str, body_bytes: int) -> Outcome:
+    """POST one fresh delivery: its status key, elapsed milliseconds and transport error, if any."""
     body, headers = build_ping(secret, f"{DELIVERY_PREFIX}{uuid.uuid4()}", body_bytes)
     started = time.perf_counter()
     try:
         response = await client.post(url, content=body, headers=headers)
-    except httpx.TransportError:
-        return TRANSPORT_ERROR, (time.perf_counter() - started) * 1000
-    return str(response.status_code), (time.perf_counter() - started) * 1000
+    except httpx.TransportError as error:
+        elapsed = (time.perf_counter() - started) * 1000
+        return TRANSPORT_ERROR, elapsed, describe_error(error, url)
+    return str(response.status_code), (time.perf_counter() - started) * 1000, None
 
 
 class _FailFast:
@@ -251,11 +279,18 @@ async def run(
     environment: str | None = None,
     commit: str | None = None,
     window: str | None = None,
+    max_seconds: float = DEFAULT_MAX_SECONDS,
     transport: httpx.AsyncBaseTransport | None = None,
+    clock: Callable[[], float] = time.monotonic,
 ) -> LoadReport:
-    """Warm up every connection, then send ``count`` deliveries with ``concurrency`` in flight."""
+    """Warm up every connection, then send ``count`` deliveries with ``concurrency`` in flight.
+
+    No delivery starts after ``max_seconds`` from the start (``clock`` is injectable for tests).
+    """
     statuses: Counter[str] = Counter()
+    errors: dict[str, str] = {}
     latencies: list[float] = []
+    deadline = clock() + max_seconds
     semaphore = asyncio.Semaphore(concurrency)
     fail_fast = _FailFast()
     aborted: str | None = None
@@ -268,18 +303,28 @@ async def run(
         warmup = await asyncio.gather(
             *(_send(client, url, secret, body_bytes) for _ in range(concurrency))
         )
-        statuses.update(status for status, _elapsed in warmup)
-        if any(status != "202" for status, _elapsed in warmup):
-            aborted = WARMUP_FAILED
+        for status, _elapsed, error in warmup:
+            statuses[status] += 1
+            if error is not None:
+                errors.setdefault(*error)
+        refused = next((outcome for outcome in warmup if outcome[0] != "202"), None)
+        if refused is not None:
+            status, _elapsed, error = refused
+            cause = status if error is None else f"{status}: {error[0]}: {error[1]}"
+            aborted = f"{WARMUP_FAILED} ({cause})"
         else:
 
             async def timed() -> None:
                 async with semaphore:
+                    if fail_fast.reason is None and clock() >= deadline:
+                        fail_fast.reason = f"--max-seconds {max_seconds:g} s reached"
                     # Queued deliveries are dropped once the fail-fast has a reason.
                     if fail_fast.reason is not None:
                         return
-                    status, elapsed = await _send(client, url, secret, body_bytes)
+                    status, elapsed, error = await _send(client, url, secret, body_bytes)
                 statuses[status] += 1
+                if error is not None:
+                    errors.setdefault(*error)
                 fail_fast.record(status == "202")
                 if status == "202":
                     latencies.append(elapsed)
@@ -312,11 +357,18 @@ async def run(
         warmup=concurrency,
         sent=sent,
         concurrency=concurrency,
-        body_bytes=body_bytes,
+        body_bytes=len(ping_body(body_bytes)),
+        max_seconds=max_seconds,
         statuses=dict(sorted(statuses.items())),
+        errors=errors,
         aborted=aborted,
         latency_ms=latency,
-        verdict=verdict(percentile(latencies, 95) if latencies else None, failed=failed, sent=sent),
+        verdict=verdict(
+            percentile(latencies, 95) if latencies else None,
+            failed=failed,
+            sent=sent,
+            aborted=aborted,
+        ),
     )
 
 
@@ -329,8 +381,11 @@ def print_report(report: LoadReport) -> None:
         f"body {report.body_bytes} bytes)"
     )
     if report.window:
-        print(f"window: {report.window}")
+        # Quoted and escaped: the window is free text from the dispatch form.
+        print(f"window: {json.dumps(report.window)}")
     print(f"sent: {report.sent}, statuses: {statuses}")
+    for name, message in report.errors.items():
+        print(f"transport error: {name}: {message}")
     if report.aborted:
         print(f"stopped early: {report.aborted}")
     if report.latency_ms is not None:
@@ -365,7 +420,16 @@ def main(
         "--body-bytes",
         type=int,
         default=DEFAULT_BODY_BYTES,
-        help=f"JSON body size (default {DEFAULT_BODY_BYTES}, at most {MAX_BODY_BYTES})",
+        help=(
+            f"JSON body size (default {DEFAULT_BODY_BYTES}, {MIN_BODY_BYTES} to {MAX_BODY_BYTES})"
+        ),
+    )
+    parser.add_argument(
+        "--max-seconds",
+        type=float,
+        default=DEFAULT_MAX_SECONDS,
+        help=f"stop sending after this many seconds (default {DEFAULT_MAX_SECONDS}, "
+        f"at most {MAX_MAX_SECONDS})",
     )
     parser.add_argument("--timeout", type=float, default=10.0, help="seconds per request")
     parser.add_argument("--report-json", type=Path, help="write the report as JSON here")
@@ -373,13 +437,17 @@ def main(
     parser.add_argument("--commit", help="commit SHA of the code that runs the load")
     parser.add_argument("--window", help="the agreed load window, approver and issue link")
     args = parser.parse_args(argv)
-    for flag, value, maximum in (
-        ("--count", args.count, MAX_COUNT),
-        ("--concurrency", args.concurrency, MAX_CONCURRENCY),
-        ("--body-bytes", args.body_bytes, MAX_BODY_BYTES),
+    for flag, value, minimum, maximum in (
+        ("--count", args.count, 1, MAX_COUNT),
+        ("--concurrency", args.concurrency, 1, MAX_CONCURRENCY),
+        ("--body-bytes", args.body_bytes, MIN_BODY_BYTES, MAX_BODY_BYTES),
     ):
-        if not 1 <= value <= maximum:
-            parser.error(f"{flag} must be from 1 to {maximum} (the cap protects the staging VPS)")
+        if not minimum <= value <= maximum:
+            parser.error(
+                f"{flag} must be from {minimum} to {maximum} (the cap protects the staging VPS)"
+            )
+    if not 1 <= args.max_seconds <= MAX_MAX_SECONDS:
+        parser.error(f"--max-seconds must be from 1 to {MAX_MAX_SECONDS}")
     if not args.timeout > 0:
         parser.error("--timeout must be positive")
     url = urlsplit(args.url)
@@ -404,6 +472,7 @@ def main(
             environment=args.environment,
             commit=args.commit,
             window=args.window,
+            max_seconds=args.max_seconds,
             transport=transport,
         )
     )

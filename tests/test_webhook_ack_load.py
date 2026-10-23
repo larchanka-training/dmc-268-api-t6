@@ -311,11 +311,24 @@ def test_warm_up_and_timed_requests_never_exceed_the_concurrency(load: ModuleTyp
         (["--count", "1001"], "--count must be from 1 to 1000"),
         (["--count", "0"], "--count must be from 1 to 1000"),
         (["--concurrency", "11"], "--concurrency must be from 1 to 10"),
-        (["--body-bytes", "65537"], "--body-bytes must be from 1 to 65536"),
+        (["--body-bytes", "65537"], "--body-bytes must be from 64 to 65536"),
+        (["--body-bytes", "63"], "--body-bytes must be from 64 to 65536"),
+        (["--max-seconds", "781"], "--max-seconds must be from 1 to 780"),
+        (["--max-seconds", "0.5"], "--max-seconds must be from 1 to 780"),
         (["--url", "http://test/"], "--url must point at /webhooks/github"),
         (["--url", "http://test/webhooks/gitlab"], "--url must point at /webhooks/github"),
     ],
-    ids=["count-over-cap", "count-zero", "concurrency-over-cap", "body-over-cap", "root", "gitlab"],
+    ids=[
+        "count-over-cap",
+        "count-zero",
+        "concurrency-over-cap",
+        "body-over-cap",
+        "body-under-unpadded",
+        "seconds-over-cap",
+        "seconds-under-one",
+        "root",
+        "gitlab",
+    ],
 )
 def test_invalid_arguments_exit_2_before_any_request(
     load: ModuleType,
@@ -342,9 +355,21 @@ def test_the_caps_themselves_are_accepted(
     calls: list[httpx.Request] = []
     argv = ["--url", _URL, "--count", "1000", "--concurrency", "10", "--body-bytes", "65536"]
 
-    assert load.main(argv, transport=_recording(calls)) == 0
+    assert load.main([*argv, "--max-seconds", "780"], transport=_recording(calls)) == 0
     assert len(calls) == 1010
     assert len(calls[-1].content) == 65536
+
+
+def test_the_smallest_body_is_sent_and_reported_as_asked(load: ModuleType) -> None:
+    calls: list[httpx.Request] = []
+
+    report = _run(load, _recording(calls), count=1, body_bytes=64)
+
+    assert len(load.build_ping("s", "loadtest-0", 1)[0]) == 63  # the unpadded ping
+    assert [len(call.content) for call in calls] == [64, 64]
+    assert report.body_bytes == 64
+    # run() reports what was sent, even below the CLI minimum.
+    assert _run(load, _recording([]), count=1, body_bytes=10).body_bytes == 63
 
 
 def test_missing_secret_exits_2_without_a_request(
@@ -375,10 +400,11 @@ def test_wrong_secret_stops_after_the_warm_up_and_writes_the_report(
     report = json.loads(report_path.read_text())
     # Only the 5 warm-up deliveries (default concurrency) are sent; no timed one follows.
     assert report["statuses"] == {"401": 5}
-    assert (report["sent"], report["aborted"]) == (5, "a warm-up delivery did not get 202")
+    assert (report["sent"], report["aborted"]) == (5, "a warm-up delivery did not get 202 (401)")
     assert report["latency_ms"] is None
     assert report["verdict"] == (
-        "INVALID (5 of 5 deliveries failed): "
+        "INVALID (stopped early: a warm-up delivery did not get 202 (401); "
+        "5 of 5 deliveries failed): "
         "no 202 answer among the timed deliveries: no latency to compare with SD §13"
     )
     assert receipts.rows == {}
@@ -393,7 +419,21 @@ def test_one_failed_warm_up_delivery_stops_the_run(load: ModuleType) -> None:
     report = _run(load, httpx.MockTransport(handler), count=50, concurrency=3)
 
     assert report.statuses == {"202": 2, "503": 1}
-    assert (report.sent, report.aborted) == (3, "a warm-up delivery did not get 202")
+    assert (report.sent, report.aborted) == (3, "a warm-up delivery did not get 202 (503)")
+
+
+def test_a_warm_up_transport_error_names_its_cause(load: ModuleType) -> None:
+    def refuse(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("[Errno 111] Connection refused")
+
+    report = _run(load, httpx.MockTransport(refuse), count=50, concurrency=2)
+
+    assert report.statuses == {"transport_error": 2}
+    assert report.errors == {"ConnectError": "[Errno 111] Connection refused"}
+    assert report.aborted == (
+        "a warm-up delivery did not get 202 "
+        "(transport_error: ConnectError: [Errno 111] Connection refused)"
+    )
 
 
 def test_five_failures_in_a_row_stop_the_timed_deliveries(load: ModuleType) -> None:
@@ -424,7 +464,10 @@ def test_over_ten_percent_failed_after_twenty_stops_the_run(load: ModuleType) ->
     # Failures at 8, 16, 24: 2 of 20 is not over 10 %, 3 of 24 is.
     assert report.statuses == {"202": 22, "500": 3}
     assert (report.sent, report.aborted) == (25, "3 of 24 timed deliveries failed (over 10 %)")
-    assert report.verdict.startswith("INVALID (3 of 25 deliveries failed): p95 ")
+    assert report.verdict.startswith(
+        "INVALID (stopped early: 3 of 24 timed deliveries failed (over 10 %); "
+        "3 of 25 deliveries failed): p95 "
+    )
 
 
 def test_slow_failures_are_counted_but_stay_out_of_the_latency(load: ModuleType) -> None:
@@ -457,6 +500,7 @@ def test_a_transport_error_is_counted_and_fails_the_run(
     report = _run(load, _numbered(answer), count=10)
 
     assert report.statuses == {"202": 10, "transport_error": 1}
+    assert report.errors == {"ConnectError": "connection reset"}
     assert report.verdict.startswith("INVALID (1 of 11 deliveries failed): p95 ")
     monkeypatch.setenv("GITHUB_WEBHOOK_SECRET", _SECRET)
     argv = ["--url", _URL, "--count", "10", "--concurrency", "1"]
@@ -487,6 +531,8 @@ def test_report_json_has_the_run_parameters_labels_and_targets(
         "a" * 40,
         "--window",
         window,
+        "--max-seconds",
+        "30",
         "--report-json",
         str(report_path),
     ]
@@ -504,6 +550,7 @@ def test_report_json_has_the_run_parameters_labels_and_targets(
         "sent": 6,
     }
     assert (report["concurrency"], report["body_bytes"], report["aborted"]) == (2, 2048, None)
+    assert (report["max_seconds"], report["errors"]) == (30.0, {})
     assert report["statuses"] == {"202": 6}
     assert report["targets_ms"] == {"p95": 500.0, "p95_internal_goal": 200.0}
     assert sorted(report["latency_ms"]) == ["max", "p50", "p95", "p99"]
@@ -582,3 +629,47 @@ def test_the_run_compares_the_uncut_p95_with_the_target(
 
     assert report.latency_ms.p95 == 499.99
     assert report.verdict == f"p95 499.99 ms {_TARGET}"
+
+
+def test_the_run_stops_sending_at_max_seconds(load: ModuleType) -> None:
+    now = [0.0]
+
+    def tick(request: httpx.Request) -> httpx.Response:
+        now[0] += 1.0  # every request takes one second of the fake clock
+        return _accepted()
+
+    report = _run(load, httpx.MockTransport(tick), count=100, max_seconds=5.0, clock=lambda: now[0])
+
+    # Started at 0: the warm-up ends at 1, timed deliveries start at 1-4, none at 5.
+    assert report.statuses == {"202": 5}
+    assert (report.sent, report.aborted) == (5, "--max-seconds 5 s reached")
+    assert report.verdict.startswith(
+        "INVALID (stopped early: --max-seconds 5 s reached; 0 of 5 deliveries failed): p95 "
+    )
+    assert not report.all_accepted
+
+
+def test_transport_error_causes_hide_the_target(load: ModuleType) -> None:
+    url = "https://staging-api.example.org:8443/webhooks/github"
+    error = httpx.ConnectError(
+        f"cannot reach {url}: staging-api.example.org:8443 refused (staging-api.example.org) "
+        + "x" * 200
+    )
+
+    name, message = load.describe_error(error, url)
+
+    assert name == "ConnectError"
+    assert "example.org" not in message and "8443" not in message
+    assert message.startswith("cannot reach <target>: <target> refused (<target>) xxx")
+    assert len(message) == 120
+    assert load.describe_error(httpx.ReadTimeout(""), url) == ("ReadTimeout", "ReadTimeout")
+
+
+def test_the_window_is_printed_quoted_and_escaped(
+    load: ModuleType, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv("GITHUB_WEBHOOK_SECRET", _SECRET)
+    argv = ["--url", _URL, "--count", "1", "--window=-a\x1b[31m\u2028b"]
+
+    assert load.main(argv, transport=_recording([])) == 0
+    assert 'window: "-a\\u001b[31m\\u2028b"\n' in capsys.readouterr().out

@@ -85,12 +85,16 @@ def _assert_workflow_contract(text: str) -> None:
     assert "          COMMIT_SHA: ${{ github.sha }}\n" in load
     assert "            --environment staging \\\n" in load
     assert '            --commit "${COMMIT_SHA}" \\\n' in load
-    assert '            --window "${WINDOW}" \\\n' in load
+    assert '            --window="${WINDOW}" \\\n' in load
+    assert "            --max-seconds 600 \\\n" in load
     validate = _block(text, "Validate inputs")
     assert '        if [[ -z "${WINDOW//[[:space:]]/}" ]]; then\n' in validate
-    assert 'check count "${COUNT}" 1000\n' in validate
-    assert 'check concurrency "${CONCURRENCY}" 10\n' in validate
-    assert 'check body_bytes "${BODY_BYTES}" 65536\n' in validate
+    assert (
+        '        if [[ "${WINDOW}" =~ [[:cntrl:]] ]] || (( ${#WINDOW} > 300 )); then\n'
+    ) in validate
+    assert 'check count "${COUNT}" 1 1000\n' in validate
+    assert 'check concurrency "${CONCURRENCY}" 1 10\n' in validate
+    assert 'check body_bytes "${BODY_BYTES}" 64 65536\n' in validate
     assert (
         "        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0\n"
         "        with:\n"
@@ -123,7 +127,11 @@ def test_workflow_contract() -> None:
         ("contents: read", "contents: write"),
         ("cancel-in-progress: false", "cancel-in-progress: true"),
         ("timeout-minutes: 15", "timeout-minutes: 120"),
-        ('check count "${COUNT}" 1000', 'check count "${COUNT}" 100000'),
+        ('check count "${COUNT}" 1 1000', 'check count "${COUNT}" 1 100000'),
+        ('check body_bytes "${BODY_BYTES}" 64 65536', 'check body_bytes "${BODY_BYTES}" 1 65536'),
+        ("[[:cntrl:]] ]] || (( ${#WINDOW} > 300 ))", "[[:cntrl:]] ]] || (( ${#WINDOW} > 3000 ))"),
+        ('[[ "${WINDOW}" =~ [[:cntrl:]] ]] || ', ""),
+        ("            --max-seconds 600 \\\n", ""),
         ('--count "${COUNT}"', '--count "${{ inputs.count }}"'),
         (
             "          URL: ${{ steps.target.outputs.url }}\n",
@@ -141,7 +149,7 @@ def test_workflow_contract() -> None:
             "        required: false\n        type: string\n      count:",
         ),
         ("          python3 - <<'PYTHON'", "          uv run python - <<'PYTHON'"),
-        ('            --window "${WINDOW}" \\\n', ""),
+        ('            --window="${WINDOW}" \\\n', '            --window "${WINDOW}" \\\n'),
         (
             '            --commit "${COMMIT_SHA}" \\\n',
             '            --commit "${{ github.sha }}" \\\n',
@@ -159,6 +167,10 @@ def test_workflow_contract() -> None:
         "cancel-in-progress",
         "long-timeout",
         "count-cap-raised",
+        "body-minimum-lowered",
+        "window-length-raised",
+        "window-control-chars-allowed",
+        "no-time-limit",
         "input-in-run-body",
         "second-secret",
         "short-retention",
@@ -166,7 +178,7 @@ def test_workflow_contract() -> None:
         "static-concurrency-group",
         "window-optional",
         "summary-needs-uv",
-        "window-not-reported",
+        "window-split-flag",
         "sha-in-run-body",
     ],
 )
@@ -190,14 +202,20 @@ def test_workflow_caps_match_the_script() -> None:
     validate = _step("Validate inputs")
 
     assert (module.MAX_COUNT, module.MAX_CONCURRENCY, module.MAX_BODY_BYTES) == (1000, 10, 65536)
-    assert f'check count "${{COUNT}}" {module.MAX_COUNT}' in validate
-    assert f'check concurrency "${{CONCURRENCY}}" {module.MAX_CONCURRENCY}' in validate
-    assert f'check body_bytes "${{BODY_BYTES}}" {module.MAX_BODY_BYTES}' in validate
+    assert (module.MIN_BODY_BYTES, module.DEFAULT_MAX_SECONDS) == (64, 600)
+    assert f'check count "${{COUNT}}" 1 {module.MAX_COUNT}' in validate
+    assert f'check concurrency "${{CONCURRENCY}}" 1 {module.MAX_CONCURRENCY}' in validate
+    assert (
+        f'check body_bytes "${{BODY_BYTES}}" {module.MIN_BODY_BYTES} {module.MAX_BODY_BYTES}'
+    ) in validate
+    assert f"--max-seconds {module.DEFAULT_MAX_SECONDS} " in _block(
+        WORKFLOW.read_text(), "Run webhook ACK load"
+    )
 
 
 @pytest.mark.parametrize(
     "inputs",
-    [("200", "5", "16384"), ("1000", "10", "65536"), ("1", "1", "1")],
+    [("200", "5", "16384"), ("1000", "10", "65536"), ("1", "1", "64")],
     ids=["defaults", "caps", "minimum"],
 )
 def test_validate_inputs_accepts_values_within_the_caps(
@@ -216,13 +234,14 @@ def test_validate_inputs_accepts_values_within_the_caps(
     [
         (("1001", "5", "16384"), "count must be an integer from 1 to 1000"),
         (("200", "11", "16384"), "concurrency must be an integer from 1 to 10"),
-        (("200", "5", "65537"), "body_bytes must be an integer from 1 to 65536"),
+        (("200", "5", "65537"), "body_bytes must be an integer from 64 to 65536"),
+        (("200", "5", "63"), "body_bytes must be an integer from 64 to 65536"),
         (("0", "5", "16384"), "count must be an integer from 1 to 1000"),
         (("010", "5", "16384"), "count must be an integer from 1 to 1000"),
         (("200", "5; touch pwned", "16384"), "concurrency must be an integer from 1 to 10"),
-        (("200", "5", ""), "body_bytes must be an integer from 1 to 65536"),
+        (("200", "5", ""), "body_bytes must be an integer from 64 to 65536"),
     ],
-    ids=["count", "concurrency", "body", "zero", "leading-zero", "shell-text", "empty"],
+    ids=["count", "concurrency", "body", "body-63", "zero", "leading-zero", "shell-text", "empty"],
 )
 def test_validate_inputs_rejects_values_outside_the_caps(
     tmp_path: Path, inputs: tuple[str, str, str], message: str
@@ -245,6 +264,30 @@ def test_validate_inputs_requires_a_window(tmp_path: Path, window: str) -> None:
 
     assert result.returncode == 1
     assert "::error::window must name the agreed load window" in result.stderr
+
+
+@pytest.mark.parametrize(
+    "window",
+    ["a\nb", "a\tb", "a\x1b[31mb", "x" * 301],
+    ids=["newline", "tab", "escape", "301-chars"],
+)
+def test_validate_inputs_rejects_a_multiline_control_or_long_window(
+    tmp_path: Path, window: str
+) -> None:
+    env = {"WINDOW": window, "COUNT": "200", "CONCURRENCY": "5", "BODY_BYTES": "16384"}
+
+    result = _run("Validate inputs", tmp_path, env)
+
+    assert result.returncode == 1
+    assert "::error::window must be one line of at most 300 characters" in result.stderr
+
+
+def test_validate_inputs_accepts_a_300_character_window(tmp_path: Path) -> None:
+    env = {"WINDOW": "x" * 300, "COUNT": "200", "CONCURRENCY": "5", "BODY_BYTES": "16384"}
+
+    result = _run("Validate inputs", tmp_path, env)
+
+    assert result.returncode == 0, result.stderr
 
 
 @pytest.mark.parametrize(
@@ -308,7 +351,9 @@ _REPORT = {
     "sent": 205,
     "concurrency": 5,
     "body_bytes": 16384,
+    "max_seconds": 600.0,
     "statuses": {"202": 205},
+    "errors": {},
     "aborted": None,
     "latency_ms": {"p50": 41.0, "p95": 88.5, "p99": 120.0, "max": 140.2},
     "verdict": "p95 88.50 ms meets <target>",
@@ -321,7 +366,8 @@ def test_summary_shows_the_report_window_and_runner_caveat(tmp_path: Path) -> No
     content = _summarize(tmp_path, json.dumps(_REPORT), window)
 
     assert (
-        "Agreed window: 2026-10-24 10:00-10:15 UTC &#124; approved by &lt;axyi&gt; &#124; #163\n"
+        "Agreed window: &quot;2026-10-24 10:00-10:15 UTC &#124; approved by &lt;axyi&gt; "
+        "&#124; #163&quot;\n"
     ) in content
     assert "GitHub-hosted runner" in content
     assert "| Environment | staging |\n" in content
@@ -331,7 +377,8 @@ def test_summary_shows_the_report_window_and_runner_caveat(tmp_path: Path) -> No
     assert "| Timed / warm-up / sent | 200 / 5 / 205 |\n" in content
     assert "| Statuses | 202: 205 |\n" in content
     assert "| p95 ms | 88.5 |\n" in content
-    assert "Stopped early" not in content
+    assert "Stopped early" not in content and "Transport error" not in content
+    assert "| Time limit (s) | 600.0 |\n" in content
     assert "| Verdict | p95 88.50 ms meets &lt;target&gt; |\n" in content
 
 
@@ -339,7 +386,8 @@ def test_summary_names_an_early_stop(tmp_path: Path) -> None:
     report = {
         **_REPORT,
         "sent": 6,
-        "statuses": {"202": 1, "500": 5},
+        "statuses": {"202": 1, "transport_error": 5},
+        "errors": {"ConnectError": "[Errno 111] Connection refused"},
         "aborted": "5 timed deliveries in a row failed",
         "latency_ms": None,
     }
@@ -347,12 +395,20 @@ def test_summary_names_an_early_stop(tmp_path: Path) -> None:
     content = _summarize(tmp_path, json.dumps(report))
 
     assert "| Stopped early | 5 timed deliveries in a row failed |\n" in content
-    assert "| Statuses | 202: 1, 500: 5 |\n" in content
+    assert "| Statuses | 202: 1, transport_error: 5 |\n" in content
+    assert "| Transport error ConnectError | [Errno 111] Connection refused |\n" in content
     assert "p95 ms" not in content
 
 
 def test_summary_without_a_report_still_echoes_the_window(tmp_path: Path) -> None:
     content = _summarize(tmp_path, None, "agreed in #163")
 
-    assert "Agreed window: agreed in #163\n" in content
+    assert "Agreed window: &quot;agreed in #163&quot;\n" in content
+
+
+def test_summary_escapes_a_window_that_validation_rejected(tmp_path: Path) -> None:
+    content = _summarize(tmp_path, None, "line one\n## forged heading\x1b[31m")
+
+    assert "Agreed window: &quot;line one\\n## forged heading\\u001b[31m&quot;\n" in content
+    assert "\n## forged heading" not in content
     assert "No load report was produced." in content
