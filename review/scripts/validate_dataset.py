@@ -4,8 +4,12 @@
 Usage: uv run python review/scripts/validate_dataset.py --case SEC-01
        uv run python review/scripts/validate_dataset.py --final
        uv run python review/scripts/validate_dataset.py --final --report-json /tmp/report.json
+       uv run python review/scripts/validate_dataset.py --root test-prs-dataset/rules \
+           --final --profile rules
 
 The optional --root is for isolated fixtures. Normal runs use test-prs-dataset/.
+--profile rules checks the rules.md sub-corpus (#163) against its own distribution;
+per-case checks are the same in both profiles.
 """
 
 from __future__ import annotations
@@ -25,10 +29,24 @@ from typing import Any, TypedDict
 
 from jsonschema import Draft202012Validator
 
+if __package__ in (None, ""):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
+from app.modules.reviews.application.policy_documents import (  # noqa: E402
+    normalize_document,
+)
+from app.modules.reviews.application.policy_errors import PolicyError  # noqa: E402
+from app.modules.reviews.application.policy_snapshot import (  # noqa: E402
+    AGENTS_DOCUMENT_PATH,
+    RULES_DOCUMENT_PATH,
+)
+from app.modules.reviews.application.review_ignore import parse_review_ignore  # noqa: E402
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_ROOT = REPO_ROOT / "test-prs-dataset"
 SCHEMA_PATH = DEFAULT_ROOT / "schema" / "case.schema.json"
 HUNK = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@")
+# The main corpus classes: the final distribution of the main profile counts exactly these.
 CLASS_PREFIX = {
     "security": "SEC",
     "resource": "RES",
@@ -36,6 +54,9 @@ CLASS_PREFIX = {
     "syntax": "SYN",
     "clean": "CLEAN",
 }
+RULES_CLASS = "rules"
+ID_PREFIX = {**CLASS_PREFIX, RULES_CLASS: "RUL"}
+POLICY_ARMS = ("none", "valid", "malicious")
 DEFAULT_CATEGORY = {
     "security": "security",
     "resource": "performance",
@@ -52,6 +73,14 @@ class DistributionCounts(TypedDict):
     distinct_real_source_count: int
     language_counts: dict[str, int]
     critical_truth_count: int
+
+
+class RulesDistributionCounts(TypedDict):
+    valid_case_count: int
+    class_counts: dict[str, int]
+    language_counts: dict[str, int]
+    rule_truth_case_count: int
+    exception_case_count: int
 
 
 def _case_path(case_dir: Path, raw: str) -> Path | None:
@@ -103,6 +132,87 @@ def _patch_added_lines(patch: Path) -> dict[str, set[int]]:
     return added
 
 
+def uses_policy_arms(record: dict[str, Any]) -> bool:
+    """Whether a case carries any field of the rules.md sub-corpus (#163)."""
+    return (
+        record["class"] == RULES_CLASS
+        or "policy" in record
+        or "must_not_flag" in record
+        or any("arms" in item or "origin" in item for item in record["expected_findings"])
+    )
+
+
+def _policy_document_errors(base: Path, record: dict[str, Any]) -> list[str]:
+    """Check every arm file with the production parsers, so a broken fixture fails here."""
+    policy = record.get("policy")
+    if policy is None:
+        return (
+            ["policy: must_not_flag, arms and origin need the case policy arms"]
+            if uses_policy_arms(record)
+            else []
+        )
+    errors: list[str] = []
+    arms = policy["arms"]
+    if arms["valid"] != RULES_DOCUMENT_PATH:
+        errors.append(f"policy.arms.valid: must be {RULES_DOCUMENT_PATH}")
+    texts: dict[str, str] = {}
+    documents = [(f"policy.arms.{arm}", arms[arm], RULES_DOCUMENT_PATH) for arm in arms]
+    if (base / AGENTS_DOCUMENT_PATH).is_file():
+        documents.append((AGENTS_DOCUMENT_PATH, AGENTS_DOCUMENT_PATH, AGENTS_DOCUMENT_PATH))
+    for label, raw, snapshot_path in documents:
+        path = _case_path(base, raw)
+        if path is None or not path.is_file():
+            errors.append(f"{label}: {raw} is missing or escapes base_path")
+            continue
+        try:
+            document = normalize_document(snapshot_path, path.read_bytes(), blob_oid="0" * 40)
+            if snapshot_path == RULES_DOCUMENT_PATH:
+                parse_review_ignore(document.text)
+        except (OSError, PolicyError) as exc:
+            errors.append(f"{label}: {raw}: {exc}")
+            continue
+        texts[label] = document.text or ""
+    valid_text = texts.get("policy.arms.valid")
+    for index, finding in enumerate(record["expected_findings"]):
+        reference = finding.get("rule_ref")
+        if reference is not None and valid_text is not None and reference not in valid_text:
+            errors.append(f"expected_findings[{index}].rule_ref: not found in {arms['valid']}")
+    return errors
+
+
+def _arms(item: dict[str, Any]) -> set[str]:
+    return set(item.get("arms", POLICY_ARMS))
+
+
+def _exception_errors(record: dict[str, Any], added: dict[str, set[int]]) -> list[str]:
+    """``must_not_flag`` anchors follow the truth anchor rules and never contradict a truth."""
+    errors: list[str] = []
+    seen: set[tuple[str, str, int]] = set()
+    for index, anchor in enumerate(record.get("must_not_flag", [])):
+        label = f"must_not_flag[{index}]"
+        start = anchor["start_line"]
+        line = anchor["line"]
+        if isinstance(line, float) or isinstance(start, float):
+            errors.append(f"{label}: line numbers must be integers")
+            continue
+        if start is not None and start >= line:
+            errors.append(f"{label}.start_line: must be < line")
+        key = (anchor["path"], anchor["category"], line)
+        if key in seen:
+            errors.append(f"{label}: duplicate exception anchor {key}")
+        seen.add(key)
+        for point in (line, start):
+            if point is not None and point not in added.get(anchor["path"], set()):
+                errors.append(f"{label}: {anchor['path']}:{point} is not a new-side added line")
+        for truth_index, truth in enumerate(record["expected_findings"]):
+            shared = [arm for arm in POLICY_ARMS if arm in _arms(truth) & _arms(anchor)]
+            if (truth["path"], truth["category"], truth["line"]) == key and shared:
+                errors.append(
+                    f"{label}: contradicts expected_findings[{truth_index}] in arm {shared[0]}"
+                )
+    return errors
+
+
 def _derived_verdict(findings: list[dict[str, Any]]) -> str:
     severities = {item["severity"] for item in findings}
     if severities & {"critical", "high"}:
@@ -142,7 +252,7 @@ def validate_case(
     record: dict[str, Any] = data
     if record["id"] != case_dir.name:
         errors.append(f"case.json.id: {record['id']} does not match directory {case_dir.name}")
-    if not record["id"].startswith(CLASS_PREFIX[record["class"]] + "-"):
+    if not record["id"].startswith(ID_PREFIX[record["class"]] + "-"):
         errors.append("case.json.id: prefix does not match class")
 
     seen_anchors: set[tuple[str, str, int]] = set()
@@ -154,7 +264,7 @@ def validate_case(
         elif start is not None and start >= line:
             errors.append(f"expected_findings[{index}].start_line: must be < line")
         if (
-            record["class"] != "clean"
+            record["class"] in DEFAULT_CATEGORY
             and finding["category"] != DEFAULT_CATEGORY[record["class"]]
             and not record.get("category_reason")
         ):
@@ -223,6 +333,8 @@ def validate_case(
                 errors.append(
                     f"expected_findings[{index}]: {path}:{anchor} is not a new-side added line"
                 )
+    errors.extend(_exception_errors(record, added))
+    errors.extend(_policy_document_errors(base, record))
     return errors, record if not errors else None
 
 
@@ -274,6 +386,51 @@ def _distribution_errors(counts: DistributionCounts) -> list[str]:
     return errors
 
 
+def _rules_profile_errors(records: list[dict[str, Any]]) -> list[str]:
+    """The main corpus and its paid baseline stay free of rules.md cases (#163)."""
+    return [
+        f"final corpus: {record['id']} uses policy arms; validate it with --profile rules"
+        for record in records
+        if uses_policy_arms(record)
+    ]
+
+
+def _rules_distribution_counts(records: list[dict[str, Any]]) -> RulesDistributionCounts:
+    classes = Counter(record["class"] for record in records)
+    languages = Counter(record["language"] for record in records)
+    return {
+        "valid_case_count": len(records),
+        "class_counts": dict(sorted(classes.items())),
+        "language_counts": {name: languages[name] for name in ("python", "typescript", "tsx")},
+        "rule_truth_case_count": sum(
+            any(item.get("origin") == "rule" for item in record["expected_findings"])
+            for record in records
+        ),
+        "exception_case_count": sum("must_not_flag" in record for record in records),
+    }
+
+
+def _rules_distribution_errors(counts: RulesDistributionCounts) -> list[str]:
+    """Minimums of the rules.md sub-corpus; synthetic sources are allowed."""
+    errors: list[str] = []
+    valid = counts["valid_case_count"]
+    if valid < 8:
+        errors.append(f"rules corpus: expected ≥8 cases, got {valid}")
+    other = sorted(name for name in counts["class_counts"] if name != RULES_CLASS)
+    if other:
+        errors.append(f"rules corpus: every case must be class rules, got {', '.join(other)}")
+    rule_cases = counts["rule_truth_case_count"]
+    if rule_cases < 3:
+        errors.append(f"rules corpus: needs ≥3 cases with a rule-made truth, got {rule_cases}")
+    exception_cases = counts["exception_case_count"]
+    if exception_cases < 3:
+        errors.append(f"rules corpus: needs ≥3 cases with must_not_flag, got {exception_cases}")
+    languages = counts["language_counts"]
+    if languages["python"] == 0 or (languages["typescript"] == 0 and languages["tsx"] == 0):
+        errors.append("rules corpus: needs Python and TypeScript/React cases")
+    return errors
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, default=DEFAULT_ROOT, help="dataset root")
@@ -282,11 +439,16 @@ def main() -> int:
     parser.add_argument(
         "--report-json", type=Path, metavar="PATH", help="write final counts as JSON"
     )
+    parser.add_argument(
+        "--profile", choices=(RULES_CLASS,), help="final distribution of a sub-corpus"
+    )
     args = parser.parse_args()
     if args.case and args.final:
         parser.error("--case and --final cannot be combined")
     if args.report_json and not args.final:
         parser.error("--report-json requires --final")
+    if args.profile and not args.final:
+        parser.error("--profile requires --final")
     schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
     validator = Draft202012Validator(schema)
     cases_root = args.root / "cases"
@@ -320,14 +482,23 @@ def main() -> int:
             print(f"OK {case_dir.name}")
     if args.final:
         print(f"cases: {len(case_dirs)}; valid: {len(records)}")
-        counts = _distribution_counts(records)
-        for error in _distribution_errors(counts):
+        counts: DistributionCounts | RulesDistributionCounts
+        if args.profile == RULES_CLASS:
+            counts = _rules_distribution_counts(records)
+            distribution_errors = _rules_distribution_errors(counts)
+            profile: dict[str, str] = {"profile": RULES_CLASS}
+        else:
+            counts = _distribution_counts(records)
+            distribution_errors = [*_distribution_errors(counts), *_rules_profile_errors(records)]
+            profile = {}
+        for error in distribution_errors:
             print(error)
             diagnostics.append(error)
             failed = True
         if args.report_json:
             report = {
                 "schema_version": 1,
+                **profile,
                 "case_count": len(case_dirs),
                 **counts,
                 "passed": not failed,

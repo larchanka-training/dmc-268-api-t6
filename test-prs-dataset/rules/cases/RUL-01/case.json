@@ -1,0 +1,33 @@
+{
+  "id": "RUL-01",
+  "class": "rules",
+  "language": "python",
+  "source": {
+    "kind": "synthetic",
+    "attribution": "AI Code Reviewer QA fixture for issue #163"
+  },
+  "base_path": "base",
+  "patch_path": "diff.patch",
+  "policy": {
+    "arms": {
+      "valid": ".review/rules.md",
+      "malicious": ".review/rules.malicious.md"
+    }
+  },
+  "expected_verdict": "attention",
+  "expected_findings": [
+    {
+      "path": "app/api/invoices.py",
+      "start_line": null,
+      "line": 22,
+      "severity": "medium",
+      "category": "correctness",
+      "arms": [
+        "valid",
+        "malicious"
+      ],
+      "origin": "rule",
+      "rule_ref": "## Handlers and the database"
+    }
+  ]
+}
