@@ -1,11 +1,12 @@
 # Task list: AST resolver and parse errors (#168, part 2)
 
 See [168-ast-parse-errors-plan.md](168-ast-parse-errors-plan.md) for the design. That plan is the
-source of truth; this list adds no scope. AC1–AC3h and D1–D5 are named there. Baseline
+source of truth; this list adds no scope. AC1–AC3h and D1–D6 are named there. Baseline
 `origin/main` `22c621ab`, branch `fix/168-go-parse-errors`, one PR.
 
 - Each task is one Conventional commit whose subject ends with `(#168)`.
-- Tasks 1–2 are test-first: write the named tests, record the RED run, then write the fix.
+- Tasks 1, 2 and 5 are test-first: write the named tests, record the RED run, then write
+  the fix.
 - Tasks 3–4 are characterization tests and are expected green on the baseline. A red run
   is a defect outside the plan: stop and report it.
 - Every code-writing task is delegated through a brief file that says: never read `.env`
@@ -85,9 +86,9 @@ at `:643-644` true for both causes.
 
 **Done when:**
 
-- [ ] RED and GREEN runs are recorded;
-- [ ] `go_package_target`, `go_package_name` and `review_context.py` are unchanged;
-- [ ] common verification is green.
+- [x] RED and GREEN runs are recorded;
+- [x] `go_package_target`, `go_package_name` and `review_context.py` are unchanged;
+- [x] common verification is green.
 
 **Dependencies:** Task 0.
 
@@ -121,9 +122,9 @@ at `:643-644` true for both causes.
 
 **Done when:**
 
-- [ ] RED and GREEN runs are recorded;
-- [ ] no target of a wildcard is read;
-- [ ] common verification is green.
+- [x] RED and GREEN runs are recorded;
+- [x] no target of a wildcard is read;
+- [x] common verification is green.
 
 **Dependencies:** Task 1.
 
@@ -226,9 +227,35 @@ gives:
 
 **Done when:**
 
-- [ ] RED and GREEN runs are recorded;
-- [ ] `go_package_target`, `go_package_name`, `review_context.py` and code_index are unchanged;
-- [ ] common verification is green.
+- [x] RED and GREEN runs are recorded;
+- [x] `go_package_target`, `go_package_name`, `review_context.py` and code_index are unchanged;
+- [x] common verification is green.
+
+**Dependencies:** Task 4.
+
+### Task 6: Pin the L4 total of 8000 tokens from above
+
+**Commit:** `test(reviews): pin the l4 total of 8000 tokens from above (#168)`
+
+**Files:** `tests/test_review_context.py`
+(`test_imported_signatures_stop_at_the_l4_total_of_8000_tokens`); the status line of the plan
+and the boxes of this list.
+
+**What to do:** the Task 4 test still passed with a total of 9000, because its fifth fragment
+(2000 tokens) did not fit in 1000 either. Parametrize it:
+- `exact`: four fragments of 2000, then one of 3 (`def f4():` and a one-word docstring),
+  which is cut with nothing left;
+- `one-short`: 2000, 2000, 2000 and 1999, then a bare `def f4():` of 2 tokens, which is cut
+  with 1 token left.
+
+A single fixture cannot fail at both 7999 and 8001: the smallest fragment is 2 tokens,
+and four fragments of 2000 leave 1 token at 8001.
+
+**Done when:**
+
+- [x] with the total at 7999, 8001, 8002 and 9000 at least one case fails, and at 8000 both
+  pass;
+- [x] common verification is green.
 
 **Dependencies:** Task 4.
 

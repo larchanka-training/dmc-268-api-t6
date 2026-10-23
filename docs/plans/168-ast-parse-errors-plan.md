@@ -2,7 +2,7 @@
 
 ## Status and baseline
 
-Draft for the tech lead's approval under the agent-loop skill. This is the English brief
+Status: implemented on this branch (Tasks 0–6). This is the English brief
 for the executor of #168 part 2 (P2, the AC7 remainder of #130). Where the issue leaves a
 name or a shape open, the brief says **suggested** (the executor may pick another name)
 or **derived** (it follows from the cited code or spec, not from a new decision).
@@ -72,7 +72,7 @@ at the todo.
 | AC3c | Resolution for TSX/JSX | Task 3 |
 | AC3d | `excluded` for TS/JS | Task 3 |
 | AC3e | "Not parsed" for each language | Task 1. A test parametrized over `.py`, `.ts`, `.tsx`, `.js`, `.jsx`, `.go`: a syntax error gives `ast_failed`, an unavailable `ast_timeout` keeps `ast_timeout` |
-| AC3f | L4 limit of 8000 and the L4 fragment branch | Task 4 |
+| AC3f | L4 limit of 8000 and the L4 fragment branch | Task 4; Task 6 pins the 8000 total from both sides |
 | AC3g | 256 KiB at the context level | Task 4 |
 | AC3h | `test_go_mod_counts_toward_the_limit_of_imported_files` checks the reason | Task 4. `tests/test_review_context.py:376` asserts `(unsupported, "ast_limit")`; the probe confirms this value on the baseline |
 
@@ -208,9 +208,9 @@ at the todo.
 
 ## Process
 
-- Five commits, one per task: Task 0 (the plan documents), then Tasks 1–4. Each subject
-  ends with `(#168)`.
-- Tasks 1 and 2 are test-first: record the RED run, then the GREEN run.
+- Seven commits, one per task: Task 0 (the plan documents), then Tasks 1–6. Each subject
+  ends with `(#168)`. Tasks 5 and 6 come from the review of Tasks 0–4.
+- Tasks 1, 2 and 5 are test-first: record the RED run, then the GREEN run.
 - Tasks 3 and 4 are characterization tests and are expected green on `22c621ab`. A red
   run there is a defect outside this plan: stop and report it, do not fix it in place.
 - Code-writing tasks are delegated through a brief file (`standards/workflow.md` §5.1). Every
