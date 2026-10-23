@@ -6,6 +6,9 @@ publishes it to a real RabbitMQ; the real ``run_worker`` consumes it, loads the 
 (``policy.load``), analyses with a fake LLM and publishes to a fake GitHub. The test never
 inserts a Run. Expected values are the literals of RULES_FORMAT_SPEC §3, §4, §9 and §11.
 
+The module migrates one schema; each case starts from emptied tables with the same seed and
+from a deleted review topology, so the cases stay isolated.
+
 Opt-in: ``TEST_DATABASE_URL`` (disposable PostgreSQL) and ``TEST_RABBITMQ_URL`` (disposable
 RabbitMQ: the review topology is deleted around every case); in CI ``RABBITMQ_URL``.
 """
@@ -14,7 +17,6 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import contextlib
 import difflib
 import hashlib
 import hmac
@@ -24,7 +26,7 @@ import re
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Any, Literal
+from typing import Any, Literal, NoReturn
 from uuid import UUID, uuid4
 
 import httpx
@@ -58,7 +60,9 @@ from tests.test_worker_queue_postgres import (
 HEAD = "e" * 40
 BASE = "b" * 40
 PR_ID = 907
+# Our GitHub App, for the webhook gate and the worker alike; the green CI is another App's.
 APP_ID = 42
+FOREIGN_APP_ID = 7
 REPO = "/repos/octo/repo"
 RULES = ".review/rules.md"
 WEBHOOK_SECRET = "issue163-test-webhook-secret"
@@ -109,6 +113,8 @@ IGNORE_EVERYTHING_RULES = _block("**/*").encode()
 class Fault(StrEnum):
     """A failure of one policy read; every other GitHub route keeps answering."""
 
+    ROOT_404 = "root-404"
+    ROOT_DENIED = "root-denied"
     TREE_404 = "tree-404"
     BLOB_404 = "blob-404"
     DENIED = "denied"
@@ -124,6 +130,8 @@ class Revision:
     """The files of one commit; trees and blobs get Git-style ids from their content."""
 
     files: Mapping[str, bytes]
+    # Paths listed with the symlink mode; the blob of a symlink is its target.
+    symlinks: frozenset[str] = frozenset()
 
     def directories(self) -> set[str]:
         return {
@@ -162,7 +170,7 @@ class Revision:
         blobs = [
             {
                 "path": path[len(prefix) :],
-                "mode": "100644",
+                "mode": "120000" if path in self.symlinks else "100644",
                 "type": "blob",
                 "sha": _blob_sha(data),
                 "size": len(data),
@@ -235,6 +243,7 @@ class FakeGitHub:
         self.requests: list[str] = []
         self.unexpected: list[str] = []
         self.reviews: list[dict[str, Any]] = []
+        self.check_runs: list[dict[str, Any]] = []
 
     def __call__(self, request: httpx.Request) -> httpx.Response:
         self.requests.append(f"{request.method} {request.url.path}")
@@ -264,7 +273,7 @@ class FakeGitHub:
         if tail == f"/compare/{BASE}...{HEAD}":
             return httpx.Response(200, json={"merge_base_commit": {"sha": BASE}})
         if tail == f"/commits/{HEAD}/check-suites":
-            suite = {"id": 1, "head_sha": HEAD, "app": {"id": 7}}
+            suite = {"id": 1, "head_sha": HEAD, "app": {"id": FOREIGN_APP_ID}}
             suite |= {"status": "completed", "conclusion": "success"}
             return httpx.Response(200, json={"total_count": 1, "check_suites": [suite]})
         if tail == f"/commits/{HEAD}/status":
@@ -272,6 +281,8 @@ class FakeGitHub:
         if tail == f"/commits/{HEAD}/check-runs":
             return httpx.Response(200, json={"total_count": 0, "check_runs": []})
         if tail.startswith("/check-runs"):
+            if method in {"POST", "PATCH"}:
+                self.check_runs.append(json.loads(request.content))
             return httpx.Response(201 if method == "POST" else 200, json={"id": 31})
         if tail == "/pulls/7/reviews" and method == "GET":
             return httpx.Response(200, json=[])
@@ -284,6 +295,11 @@ class FakeGitHub:
 
     def _tree(self, sha: str, request: httpx.Request) -> httpx.Response | None:
         recursive = request.url.params.get("recursive") == "1"
+        if sha == BASE and self.fault is Fault.ROOT_404:
+            # The ambiguous answer of a private repository: lost access or a missing revision.
+            return httpx.Response(404, json={"message": "Not Found"})
+        if sha == BASE and self.fault is Fault.ROOT_DENIED:
+            return httpx.Response(403, json={"message": "Resource not accessible"})
         if sha in {BASE, HEAD}:
             revision = self.base if sha == BASE else self.head
             # A cut listing of the base root: it cannot prove that `.review` is absent.
@@ -323,31 +339,53 @@ def _github(
     *,
     head_rules: bytes | None | Literal["base"] = "base",
     fault: Fault | None = None,
+    symlink: bool = False,
 ) -> FakeGitHub:
-    """PR 7 changes ``app/service.py`` and ``generated/client.py``; ``None`` is no rules file."""
+    """PR 7 changes ``app/service.py`` and ``generated/client.py``; ``None`` is no rules file.
+
+    ``symlink`` lists the rules file of both revisions as a symlink to ``base_rules``.
+    """
     head = base_rules if head_rules == "base" else head_rules
     base_files = dict(_BASE_FILES) | ({} if base_rules is None else {RULES: base_rules})
     head_files = dict(_HEAD_FILES) | ({} if head is None else {RULES: head})
-    return FakeGitHub(Revision(base_files), Revision(head_files), fault)
+    links = frozenset({RULES}) if symlink else frozenset()
+    return FakeGitHub(Revision(base_files, links), Revision(head_files, links), fault)
 
 
 class FakeLlm:
-    """An OpenAI-compatible chat endpoint; each request body is kept as sent."""
+    """An OpenAI-compatible chat endpoint; each request body is kept as sent.
+
+    A request the fake cannot answer is recorded and raises, so a test reports the harness
+    gap instead of an odd ``llm_*`` failure of the run.
+    """
 
     def __init__(self) -> None:
         self.tasks: list[str] = []
         self.bodies: list[str] = []
+        self.problems: list[str] = []
+
+    def _fail(self, problem: str) -> NoReturn:
+        self.problems.append(problem)
+        raise AssertionError(problem)
 
     def __call__(self, request: httpx.Request) -> httpx.Response:
-        assert request.url.path == "/v1/chat/completions"
+        if request.url.path != "/v1/chat/completions":
+            self._fail(f"unexpected LLM call {request.method} {request.url}")
         body = json.loads(request.content)
         task = body["response_format"]["json_schema"]["name"]
         self.tasks.append(task)
         self.bodies.append(request.content.decode())
-        # The conventions answer lists exactly the paths of <changed_files>, in order.
-        prompt = next(item["content"] for item in body["messages"] if item["role"] == "user")
-        listed = _CHANGED_FILES.search(prompt)
-        paths = [] if listed is None else listed.group(1).split("\n")
+        paths: list[str] = []
+        if task == "RepoConventionsDraft":
+            # The conventions answer must list exactly the paths of <changed_files>, in order.
+            prompt = next(item["content"] for item in body["messages"] if item["role"] == "user")
+            listed = _CHANGED_FILES.search(prompt)
+            if listed is None:
+                self._fail(
+                    "the RepoConventionsDraft prompt has no <changed_files> block: "
+                    "the fake cannot list the files of the pull request"
+                )
+            paths = listed.group(1).split("\n")
         answer: dict[str, object] = (
             {
                 "files": [{"path": path, "relevance": "Changed module."} for path in paths],
@@ -394,10 +432,46 @@ class FakeLlm:
 class Stack:
     database_url: str
     rabbitmq_url: str
+    schema: str
 
 
-@pytest.fixture
-def stack() -> Stack:
+_SEED: tuple[tuple[str, dict[str, Any]], ...] = (
+    (
+        "INSERT INTO workspaces (id, name, daily_budget_usd) VALUES (:id, 'W', 0)",
+        {"id": _WORKSPACE},
+    ),
+    (
+        "INSERT INTO provider_installations (id, workspace_id, provider, external_id, metadata) "
+        "VALUES (:id, :ws, 'github', 17, '{}'::jsonb)",
+        {"id": _INSTALLATION, "ws": _WORKSPACE},
+    ),
+    (
+        "INSERT INTO repositories (id, provider_installation_id, external_id, full_name, "
+        "default_branch, web_url) VALUES (:id, :installation, 101, 'octo/repo', 'main', "
+        "'https://github.test/octo/repo')",
+        {"id": _REPOSITORY, "installation": _INSTALLATION},
+    ),
+    (
+        "INSERT INTO rule_versions (id, repository_id, version, rules, checksum, is_active) "
+        "VALUES (:id, :repo, 1, '[]'::jsonb, :checksum, true)",
+        {"id": _RULE_VERSION, "repo": _REPOSITORY, "checksum": "a" * 64},
+    ),
+    (
+        "INSERT INTO prompt_versions (id, key, version, content, checksum, is_active) "
+        "VALUES (:id, 'review.system', 1, 'system', :checksum, true)",
+        {"id": _REVIEW_PROMPT, "checksum": "c" * 64},
+    ),
+    (
+        "INSERT INTO prompt_versions (id, key, version, content, checksum, is_active) "
+        "VALUES (:id, 'review.conventions', 1, 'conventions', :checksum, true)",
+        {"id": _CONVENTIONS_PROMPT, "checksum": "d" * 64},
+    ),
+)
+
+
+@pytest.fixture(scope="module")
+def stack() -> Iterator[Stack]:
+    """One migrated schema for the module; ``_reset`` empties and re-seeds it per case."""
     database_url = os.environ.get("TEST_DATABASE_URL")
     # CI sets only RABBITMQ_URL; the zero-skips integration step must not skip here.
     rabbitmq_url = os.environ.get("TEST_RABBITMQ_URL") or (
@@ -405,12 +479,6 @@ def stack() -> Stack:
     )
     if database_url is None or rabbitmq_url is None:
         pytest.skip("set TEST_DATABASE_URL and TEST_RABBITMQ_URL to run the rules.md E2E tests")
-    return Stack(database_url, rabbitmq_url)
-
-
-@contextlib.contextmanager
-def _schema(database_url: str) -> Iterator[str]:
-    """A migrated schema with installation 17 and repository 101 ``octo/repo``, no PR."""
     schema = f"test_rules_e2e_{uuid4().hex}"
     engine = create_engine(database_url)
     try:
@@ -418,47 +486,12 @@ def _schema(database_url: str) -> Iterator[str]:
             connection.execute(CreateSchema(schema))
             connection.execute(text(f'SET search_path TO "{schema}"'))
             connection.commit()
-            config = Config("alembic.ini")
-            config.attributes["connection"] = connection
-            command.upgrade(config, "head")
-            for statement, values in (
-                (
-                    "INSERT INTO workspaces (id, name, daily_budget_usd) VALUES (:id, 'W', 0)",
-                    {"id": _WORKSPACE},
-                ),
-                (
-                    "INSERT INTO provider_installations "
-                    "(id, workspace_id, provider, external_id, metadata) "
-                    "VALUES (:id, :ws, 'github', 17, '{}'::jsonb)",
-                    {"id": _INSTALLATION, "ws": _WORKSPACE},
-                ),
-                (
-                    "INSERT INTO repositories (id, provider_installation_id, external_id, "
-                    "full_name, default_branch, web_url) VALUES (:id, :installation, 101, "
-                    "'octo/repo', 'main', 'https://github.test/octo/repo')",
-                    {"id": _REPOSITORY, "installation": _INSTALLATION},
-                ),
-                (
-                    "INSERT INTO rule_versions (id, repository_id, version, rules, checksum, "
-                    "is_active) VALUES (:id, :repo, 1, '[]'::jsonb, :checksum, true)",
-                    {"id": _RULE_VERSION, "repo": _REPOSITORY, "checksum": "a" * 64},
-                ),
-                (
-                    "INSERT INTO prompt_versions (id, key, version, content, checksum, "
-                    "is_active) VALUES (:id, 'review.system', 1, 'system', :checksum, true)",
-                    {"id": _REVIEW_PROMPT, "checksum": "c" * 64},
-                ),
-                (
-                    "INSERT INTO prompt_versions (id, key, version, content, checksum, "
-                    "is_active) VALUES (:id, 'review.conventions', 1, 'conventions', "
-                    ":checksum, true)",
-                    {"id": _CONVENTIONS_PROMPT, "checksum": "d" * 64},
-                ),
-            ):
-                connection.execute(text(statement), values)
-            connection.commit()
             try:
-                yield schema
+                config = Config("alembic.ini")
+                config.attributes["connection"] = connection
+                command.upgrade(config, "head")
+                connection.commit()
+                yield Stack(database_url, rabbitmq_url, schema)
             finally:
                 connection.rollback()
                 connection.execute(text("SET search_path TO public"))
@@ -466,6 +499,35 @@ def _schema(database_url: str) -> Iterator[str]:
                 connection.commit()
     finally:
         engine.dispose()
+
+
+def _reset(stack: Stack) -> None:
+    """Empty every table but ``alembic_version``, seed it again, delete the topology.
+
+    The seed ids are fixed: the pins of a run (the review prompt id among them) enter
+    ``policy_digest``, so the digests of two cases compare only on an equal seed.
+    """
+    engine = create_engine(
+        stack.database_url, connect_args={"options": f"-csearch_path={stack.schema}"}
+    )
+    try:
+        with engine.begin() as connection:
+            # A session of the previous case that still holds a lock fails the case loudly.
+            connection.execute(text("SET LOCAL lock_timeout = '10s'"))
+            tables = connection.scalars(
+                text(
+                    "SELECT tablename FROM pg_tables "
+                    "WHERE schemaname = :schema AND tablename <> 'alembic_version'"
+                ),
+                {"schema": stack.schema},
+            ).all()
+            names = ", ".join(f'"{stack.schema}"."{table}"' for table in tables)
+            connection.execute(text(f"TRUNCATE {names} RESTART IDENTITY CASCADE"))
+            for statement, values in _SEED:
+                connection.execute(text(statement), values)
+    finally:
+        engine.dispose()
+    asyncio.run(_reset_topology(stack.rabbitmq_url))
 
 
 @dataclass(frozen=True)
@@ -482,6 +544,7 @@ class Outcome:
     reviews: list[dict[str, Any]]
     requests: list[str]
     unexpected: list[str]
+    llm_problems: list[str]
 
 
 async def _deliver(resources: ReviewsApiResources, payload: dict[str, Any]) -> None:
@@ -514,11 +577,18 @@ async def _deliver(resources: ReviewsApiResources, payload: dict[str, Any]) -> N
 
 
 async def _settled(
-    factory: async_sessionmaker[AsyncSession], run_id: UUID, timeout: float = 60
+    factory: async_sessionmaker[AsyncSession],
+    run_id: UUID,
+    worker: asyncio.Task[None],
+    timeout: float = 60,
 ) -> tuple[Any, ...]:
     """Poll until the run leaves the active states; a retry passes through ``queued``."""
     deadline = asyncio.get_running_loop().time() + timeout
     while True:
+        if worker.done():
+            # The worker never stops by itself: re-raise its crash instead of waiting it out.
+            worker.result()
+            raise AssertionError(f"run_worker returned before run {run_id} settled")
         current = await run_state(factory, run_id)
         if current[0] not in _ACTIVE_STATES:
             return current
@@ -527,10 +597,19 @@ async def _settled(
         await asyncio.sleep(0.05)
 
 
-async def _scenario(stack: Stack, schema: str, github: FakeGitHub, llm: FakeLlm) -> Outcome:
+async def _completed_check_run(github: FakeGitHub, timeout: float = 15) -> None:
+    """Wait for the terminal check-run: the worker writes it after the last commit."""
+    deadline = asyncio.get_running_loop().time() + timeout
+    while not any(item.get("status") == "completed" for item in github.check_runs):
+        if asyncio.get_running_loop().time() > deadline:
+            raise AssertionError(f"no completed check-run in {github.check_runs}")
+        await asyncio.sleep(0.05)
+
+
+async def _scenario(stack: Stack, github: FakeGitHub, llm: FakeLlm) -> Outcome:
     engine = create_async_engine(
         stack.database_url,
-        connect_args={"options": f"-csearch_path={schema}"},
+        connect_args={"options": f"-csearch_path={stack.schema}"},
         poolclass=NullPool,
     )
     factory = async_sessionmaker(engine, expire_on_commit=False)
@@ -539,10 +618,10 @@ async def _scenario(stack: Stack, schema: str, github: FakeGitHub, llm: FakeLlm)
     )
     settings = WorkerSettings.from_environment(
         {
-            "DATABASE_URL": f"{stack.database_url}?options=-csearch_path%3D{schema}",
+            "DATABASE_URL": f"{stack.database_url}?options=-csearch_path%3D{stack.schema}",
             "RABBITMQ_URL": stack.rabbitmq_url,
             "WORKER_ID": "rules-md-e2e",
-            "GITHUB_APP_ID": "1",
+            "GITHUB_APP_ID": str(APP_ID),
             "GITHUB_APP_PRIVATE_KEY": _APP_PEM,
             "GITHUB_API_URL": "https://api.github.test",
             **LLM_ENV,
@@ -551,6 +630,8 @@ async def _scenario(stack: Stack, schema: str, github: FakeGitHub, llm: FakeLlm)
     try:
         resources = ReviewsApiResources(engine, factory)
         async with amqp_channels(stack.rabbitmq_url, SHORT_DELAYS) as channels:
+            # Composed here, not through compose_worker + sweep_once: PR #220 rewrites the
+            # sweep_* functions. The Run is still created by the app's own projection.
             receiver = resources.github_delivery_receiver(
                 client=client,
                 token_provider=StaticGitHubInstallationAccessTokenProvider("ghs_t163"),
@@ -590,9 +671,8 @@ async def _scenario(stack: Stack, schema: str, github: FakeGitHub, llm: FakeLlm)
             )
         )
         try:
-            state, attempt, error_code = await _settled(factory, run_id)
-            # The check-run and the ack follow the last commit.
-            await asyncio.sleep(0.5)
+            state, attempt, error_code = await _settled(factory, run_id, worker)
+            await _completed_check_run(github)
         finally:
             worker.cancel()
             await asyncio.gather(worker, return_exceptions=True)
@@ -627,18 +707,19 @@ async def _scenario(stack: Stack, schema: str, github: FakeGitHub, llm: FakeLlm)
         reviews=github.reviews,
         requests=github.requests,
         unexpected=github.unexpected,
+        llm_problems=llm.problems,
     )
 
 
 def _review(stack: Stack, github: FakeGitHub) -> Outcome:
-    """Run one case in its own schema and on a fresh review topology."""
-    with _schema(stack.database_url) as schema:
+    """Run one case on emptied tables and a fresh review topology."""
+    _reset(stack)
+    try:
+        outcome = asyncio.run(_scenario(stack, github, FakeLlm()))
+    finally:
         asyncio.run(_reset_topology(stack.rabbitmq_url))
-        try:
-            outcome = asyncio.run(_scenario(stack, schema, github, FakeLlm()))
-        finally:
-            asyncio.run(_reset_topology(stack.rabbitmq_url))
     assert outcome.unexpected == []
+    assert outcome.llm_problems == []
     # The policy is read by tree and blob SHA of the pinned revision, never by path.
     assert not [item for item in outcome.requests if "/contents/" in item]
     return outcome
@@ -650,10 +731,28 @@ def _rules_load(outcome: Outcome) -> dict[str, Any]:
     return dict(document)
 
 
-def _assert_failed_once(outcome: Outcome, error_code: str) -> None:
-    assert (outcome.state, outcome.attempt, outcome.error_code) == ("failed", 1, error_code)
+def _assert_policy_load_failed(outcome: Outcome) -> None:
+    # PIPELINE_SPEC §trace: a failed `policy.load` stores `{error: {type, message}}`.
+    assert outcome.policy_load
+    for response in outcome.policy_load:
+        assert set(response) == {"error"}, response
+        assert set(response["error"]) == {"type", "message"}, response
+
+
+def _assert_failed_once(outcome: Outcome, error_codes: frozenset[str]) -> None:
+    assert (outcome.state, outcome.attempt) == ("failed", 1)
+    assert outcome.error_code in error_codes
+    _assert_policy_load_failed(outcome)
     assert outcome.tasks == []
     assert outcome.reviews == []
+
+
+# §9 for a 404: `policy_revision_unavailable` ("закреплённая ревизия недоступна") or
+# `policy_access_denied` ("недоступный repository"); a private repository answers 404 to a
+# lost access as well (§3.1), so the code may be either, but never a missing document.
+_UNREADABLE_404 = frozenset({"policy_revision_unavailable", "policy_access_denied"})
+# §9: a 401/403 without rate-limit signs is `policy_access_denied`, not `cancelled`.
+_ACCESS_DENIED = frozenset({"policy_access_denied"})
 
 
 @pytest.mark.integration
@@ -699,7 +798,20 @@ def test_empty_rules_md_is_present_and_has_another_policy_than_a_missing_one(
     assert _rules_load(empty)["presence"] == "present"
     assert (empty.state, empty.error_code) == ("succeeded", None)
     assert len(empty.reviews) == 1
+    assert empty.reviews[0]["commit_id"] == HEAD
     assert missing.documents[RULES][:2] == ("missing", None)
+
+
+@pytest.mark.integration
+def test_rules_md_at_the_size_limit_is_present(stack: Stack) -> None:
+    # 65 536 bytes is the limit itself (§3.3): the document is loaded whole.
+    outcome = _review(stack, _github(b"a" * 65_536))
+
+    assert (outcome.state, outcome.error_code) == ("succeeded", None)
+    presence, _, byte_count = outcome.documents[RULES]
+    assert (presence, byte_count) == ("present", 65_536)
+    assert len(outcome.reviews) == 1
+    assert outcome.reviews[0]["commit_id"] == HEAD
 
 
 @pytest.mark.integration
@@ -751,26 +863,37 @@ def test_invalid_rules_md_fails_the_run_once_without_llm(
 ) -> None:
     outcome = _review(stack, _github(rules))
 
-    _assert_failed_once(outcome, error_code)
+    _assert_failed_once(outcome, frozenset({error_code}))
+
+
+@pytest.mark.integration
+def test_symlinked_rules_md_fails_the_run_once_without_llm(stack: Stack) -> None:
+    # §3.1: a symlink is never dereferenced; the document must be a regular Git blob.
+    outcome = _review(stack, _github(b"../docs/rules.md", symlink=True))
+
+    _assert_failed_once(outcome, frozenset({"policy_document_type_unsupported"}))
 
 
 @pytest.mark.integration
 @pytest.mark.parametrize(
-    ("fault", "error_code"),
+    ("base_rules", "fault", "error_codes"),
     [
-        pytest.param(Fault.TREE_404, "policy_revision_unavailable", id="tree-404"),
-        pytest.param(Fault.BLOB_404, "policy_revision_unavailable", id="blob-404"),
-        pytest.param(Fault.DENIED, "policy_access_denied", id="denied"),
+        # The base root itself: without a `.review` entry, a 404 read as "absent" would pass.
+        pytest.param(None, Fault.ROOT_404, _UNREADABLE_404, id="root-404"),
+        pytest.param(None, Fault.ROOT_DENIED, _ACCESS_DENIED, id="root-denied"),
+        pytest.param(PLAIN_RULES, Fault.TREE_404, _UNREADABLE_404, id="tree-404"),
+        pytest.param(PLAIN_RULES, Fault.BLOB_404, _UNREADABLE_404, id="blob-404"),
+        # No `X-RateLimit-Remaining: 0` and no `Retry-After` on the refusal.
+        pytest.param(PLAIN_RULES, Fault.DENIED, _ACCESS_DENIED, id="denied"),
     ],
 )
 def test_unreadable_rules_md_fails_the_run_and_is_never_missing(
-    stack: Stack, fault: Fault, error_code: str
+    stack: Stack, base_rules: bytes | None, fault: Fault, error_codes: frozenset[str]
 ) -> None:
-    outcome = _review(stack, _github(PLAIN_RULES, fault=fault))
+    outcome = _review(stack, _github(base_rules, fault=fault))
 
-    _assert_failed_once(outcome, error_code)
-    # A 404 or a refusal proves nothing about the path (§3.1).
-    assert outcome.documents.get(RULES, ("",))[0] != "missing"
+    # Failing proves the read was not taken for a missing document (§3.1, §11).
+    _assert_failed_once(outcome, error_codes)
 
 
 @pytest.mark.integration
@@ -778,13 +901,14 @@ def test_truncated_base_tree_fails_the_run_and_is_never_missing(stack: Stack) ->
     # No `.review` entry in a cut listing: only completeness tells absence from a gap.
     outcome = _review(stack, _github(None, fault=Fault.TRUNCATED))
 
-    # The code is not pinned: the code says terminal `policy_revision_unavailable`, §9
-    # lists an incomplete load under `policy_fetch_transient` (a follow-up of #163).
     assert outcome.state == "failed"
-    assert outcome.error_code is not None and outcome.error_code.startswith("policy_")
+    # Both stay allowed until #247 ч.1 decides: the code says terminal
+    # `policy_revision_unavailable`, §9 lists an incomplete load under `policy_fetch_transient`
+    # (retried, so the attempt count is not pinned either).
+    assert outcome.error_code in {"policy_revision_unavailable", "policy_fetch_transient"}
+    _assert_policy_load_failed(outcome)
     assert outcome.tasks == []
     assert outcome.reviews == []
-    assert [path for path, row in outcome.documents.items() if row[0] == "missing"] == []
 
 
 @pytest.mark.integration
