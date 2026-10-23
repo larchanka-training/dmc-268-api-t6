@@ -1032,6 +1032,44 @@ def test_ac3_the_reconcile_rebuilds_a_policy_refusal_once_and_then_only_on_a_new
     _race(fleet, scenario)
 
 
+@pytest.mark.integration
+def test_ac3_a_push_after_a_policy_refusal_is_rebuilt_by_the_reconcile_when_its_wake_up_is_lost(
+    fleet: _Fleet,
+) -> None:
+    async def scenario(indexer: _Indexer, database: _Database) -> None:
+        index = fleet.index
+        indexed = await _built(fleet, indexer, _PACKAGE)
+        refused_head = indexer.branch.push({**_PACKAGE_V2, ".review/rules.md": b"x" * 65_537})
+        await _deliver(index, _push_delivery("refs/heads/main", after=refused_head))
+        assert await _dispatch(index) == [(index.a, 1)]
+        refused = await indexer.build(index.a)
+        head = indexer.branch.push(_PACKAGE_V3)
+        detail = await _deliver(index, _push_delivery("refs/heads/main", after=head))
+        # The push's wake-up went out, and its message was lost.
+        lost = await _dispatch(index)
+        requested = await indexer.state(index.a)
+
+        await _reconcile(index, indexer)
+        woken = await _dispatch(index)
+        outcome = await indexer.build(index.a)
+
+        assert (refused.status, refused.error_code) == (
+            BuildStatus.RELEASED,
+            "policy_document_too_large",
+        )
+        assert detail == "index=requested"
+        assert lost == [(index.a, 1)]
+        assert (
+            requested.indexed_commit_sha,
+            requested.target_commit_sha,
+            requested.last_error_code,
+        ) == (indexed, head, None)
+        assert woken == [(index.a, 1)]
+        assert (outcome.status, outcome.commit_sha) == (BuildStatus.PUBLISHED, head)
+
+    _race(fleet, scenario)
+
+
 async def _add(fleet: _Fleet) -> None:
     """`installation_repositories.added` of repository A again."""
     await SyncInstallationRepositories(

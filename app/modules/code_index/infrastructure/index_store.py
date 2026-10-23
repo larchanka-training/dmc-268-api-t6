@@ -578,6 +578,10 @@ class SqlAlchemyCodeIndexStore:
         values: dict[str, Any] = {"wake_requested_at": func.clock_timestamp()}
         if target_commit_sha is not None:
             values["target_commit_sha"] = target_commit_sha
+            # ADR §6.1: a refusal was for the older target; the reconcile then sees the
+            # new one as drift.
+            if target_commit_sha != state.target_commit_sha:
+                values["last_error_code"] = None
         await self._update_state(repository_id, **values)
         return True
 
@@ -622,6 +626,10 @@ class SqlAlchemyCodeIndexStore:
             or not current
         )
         values: dict[str, Any] = {"target_commit_sha": commit_sha}
+        if commit_sha != state.target_commit_sha:
+            # ADR §6.1: a new target clears the refusal of the older one, so a later pass
+            # still finds this head new when the marker set here is lost.
+            values["last_error_code"] = None
         if drifted:
             values["wake_requested_at"] = func.clock_timestamp()
         await self._update_state(repository_id, **values)
