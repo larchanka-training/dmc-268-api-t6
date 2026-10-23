@@ -394,6 +394,29 @@ def test_cli_writes_byte_identical_json_and_console_metrics(tmp_path: Path) -> N
     assert outputs[0] == outputs[1]
 
 
+def test_cli_prints_both_drift_warnings_and_keeps_publishable_exit_zero(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = fixture_root(tmp_path)
+    repo = tmp_path / "repo"
+    _, rule = _record_with_digests(root, repo)
+    (repo / "review/rules/new-rule.json").write_text('{"rules": []}\n')
+    rule.write_text('{"rules": [{"name": "changed"}]}\n')
+
+    def replay_fixture(root: Path) -> dict[str, Any]:
+        return replay(root, prompt_root=repo)
+
+    monkeypatch.setattr(eval_replay_module, "replay", replay_fixture)
+
+    assert eval_replay_module.main(["--root", str(root)]) == 0
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    assert [line for line in captured.out.splitlines() if line.startswith("Warning:")] == [
+        "Warning: Static input path set changed; refresh the complete baseline",
+        "Warning: Static input digest mismatch; refresh the complete baseline",
+    ]
+
+
 def test_missing_manifest_or_response_is_clear_error(tmp_path: Path) -> None:
     root = fixture_root(tmp_path)
     with pytest.raises(ReplayError, match="manifest is missing"):
@@ -867,6 +890,27 @@ def test_replay_warns_on_new_rule_json_file(tmp_path: Path) -> None:
     assert replay(root, prompt_root=repo)["warnings"] == [
         "Static input path set changed; refresh the complete baseline"
     ]
+
+
+def test_replay_warns_on_path_and_recorded_content_drift(tmp_path: Path) -> None:
+    root = fixture_root(tmp_path)
+    repo = tmp_path / "repo"
+    _, rule = _record_with_digests(root, repo)
+    manifest_path = root / "responses/manifest.json"
+    answer_path = root / "responses/SEC-01.json"
+    original_manifest = manifest_path.read_bytes()
+    original_answer = answer_path.read_bytes()
+    assert replay(root, prompt_root=repo)["warnings"] == []
+
+    (repo / "review/rules/new-rule.json").write_text('{"rules": []}\n')
+    rule.write_text('{"rules": [{"name": "changed"}]}\n')
+
+    assert replay(root, prompt_root=repo)["warnings"] == [
+        "Static input path set changed; refresh the complete baseline",
+        "Static input digest mismatch; refresh the complete baseline",
+    ]
+    assert manifest_path.read_bytes() == original_manifest
+    assert answer_path.read_bytes() == original_answer
 
 
 def test_replay_warns_when_manifest_omits_current_static_input(tmp_path: Path) -> None:
