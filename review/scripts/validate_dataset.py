@@ -175,6 +175,37 @@ def _malicious_errors(arms: dict[str, str], valid: str, malicious: str) -> list[
     return errors
 
 
+def _arm_errors(record: dict[str, Any]) -> list[str]:
+    """Arm lists of a policy case: what the rules add or exempt never applies in arm none.
+
+    The malicious arm expects exactly the valid arm's truths (the injection must change
+    nothing), and every exception anchor is the generic ``none``-arm truth at that place.
+    """
+    errors: list[str] = []
+    for index, finding in enumerate(record["expected_findings"]):
+        arms = _arms(finding)
+        if finding.get("origin") == "rule" and ("none" in arms or "valid" not in arms):
+            errors.append(
+                f"expected_findings[{index}].arms: a rule-made truth lists valid and "
+                "malicious, not none"
+            )
+        if ("valid" in arms) != ("malicious" in arms):
+            errors.append(
+                f"expected_findings[{index}].arms: list both valid and malicious or neither"
+            )
+    for index, anchor in enumerate(record.get("must_not_flag", [])):
+        if "none" in _arms(anchor):
+            errors.append(f"must_not_flag[{index}].arms: must not list none")
+        if not any(
+            "none" in _arms(truth)
+            and (truth["path"], truth["line"]) == (anchor["path"], anchor["line"])
+            for truth in record["expected_findings"]
+        ):
+            place = f"{anchor['path']}:{anchor['line']}"
+            errors.append(f"must_not_flag[{index}]: needs a none-arm truth at {place}")
+    return errors
+
+
 def _policy_document_errors(base: Path, record: dict[str, Any]) -> list[str]:
     """Check every arm file with the production parsers, so a broken fixture fails here.
 
@@ -188,7 +219,7 @@ def _policy_document_errors(base: Path, record: dict[str, Any]) -> list[str]:
             if uses_policy_arms(record)
             else []
         )
-    errors: list[str] = []
+    errors = _arm_errors(record)
     arms = policy["arms"]
     if arms["valid"] != RULES_DOCUMENT_PATH:
         errors.append(f"policy.arms.valid: must be {RULES_DOCUMENT_PATH}")

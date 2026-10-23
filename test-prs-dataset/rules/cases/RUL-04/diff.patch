@@ -1,15 +1,14 @@
 diff --git a/src/features/projects/archiveProject.ts b/src/features/projects/archiveProject.ts
 new file mode 100644
-index 0000000..72f46af
+index 0000000..d142b21
 --- /dev/null
 +++ b/src/features/projects/archiveProject.ts
-@@ -0,0 +1,12 @@
+@@ -0,0 +1,11 @@
 +import { parseProject, type Project } from "../../api/types";
 +
 +export async function archiveProject(projectId: string): Promise<Project> {
 +  const response = await fetch(`/api/projects/${encodeURIComponent(projectId)}/archive`, {
 +    method: "POST",
-+    credentials: "include",
 +  });
 +  if (!response.ok) {
 +    throw new Error(`archive failed: ${response.status}`);
