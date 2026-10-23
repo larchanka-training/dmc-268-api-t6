@@ -121,7 +121,7 @@ def _make_test_snapshot(
         builtin_exclusions_version="builtin-exclusions/v1",
         priority_matcher_version="priority-matcher/v1",
         service_defaults_rule_version_id=UUID("00000000-0000-0000-0000-000000000004"),
-        defaults_checksum="2" * 64,
+        defaults_checksum="282d61c2da897152046db742fbd9bfda061ba1c71ce32759d47e042c06b0ff52",
         prompt_bindings=bindings,
         execution_profile=profile,
         policy_digest="3" * 64,
@@ -716,9 +716,8 @@ def test_execute_review_fail_closed_when_context_overflow() -> None:
                     ChangedFile("app/main.py", "modified", (DiffLine(1, "added", "x = 1"),)),
                 ),
                 omitted_files=(),
-                policy_snapshot=_make_test_snapshot(
-                    max_input_tokens=2000
-                ),  # Reviewer prompt overflows while verifier mandatory blocks fit
+                # send_budget=2000: reviewer prompt overflows while verifier mandatory blocks fit
+                policy_snapshot=_make_test_snapshot(max_input_tokens=10_000),
             )
 
     class Model:
@@ -2255,14 +2254,14 @@ def test_execute_review_run_severity_threshold_critical_drops_medium_clean_summa
                 },
             }
 
-    published_output: dict[str, Any] = {}
+    published_output: Any = None
 
     class Publisher:
         async def execute(
             self, run_id: UUID, raw_output: Mapping[str, object] | str | bytes
         ) -> bool:
             nonlocal published_output
-            published_output = dict(raw_output) if isinstance(raw_output, Mapping) else {}
+            published_output = raw_output
             return True
 
     class FakeVerifierModelWithDecisions:
@@ -2304,6 +2303,12 @@ def test_execute_review_run_severity_threshold_critical_drops_medium_clean_summa
     assert success is True
     # All post-threshold findings are dropped
     assert published_output["findings"] == []
+    assert len(published_output.dropped_findings) == 2
+    assert {d.drop_reason for d in published_output.dropped_findings} == {
+        "contradicted",
+        "severity_threshold",
+    }
+    assert published_output.severity_threshold == "critical"
     # Summary MUST reflect 0 post-threshold issues (NOT "Identified 1 verified issue")
     assert (
         published_output["summary"]["problem"]
@@ -2581,7 +2586,7 @@ def test_execute_review_all_supported_never_publishes_raw_summary() -> None:
 
 
 def test_execute_review_two_candidates_one_invalid_ref_valid_reaches_verifier() -> None:
-    published: dict[str, Any] = {}
+    published: Any = {}
     verifier_received_candidates: list[Any] = []
 
     class Processor:
@@ -2654,7 +2659,7 @@ def test_execute_review_two_candidates_one_invalid_ref_valid_reaches_verifier() 
     class Publisher:
         async def execute(self, run_id: UUID, raw_output: Any) -> bool:
             nonlocal published
-            published = dict(raw_output)
+            published = raw_output
             return True
 
     class InspectingVerifierModel:
@@ -2693,12 +2698,12 @@ def test_execute_review_two_candidates_one_invalid_ref_valid_reaches_verifier() 
     assert len(verifier_received_candidates) == 1
     assert len(published["findings"]) == 1
     assert published["findings"][0]["title"] == "Valid ref issue"
-    assert len(published["_dropped_findings"]) == 1
-    assert published["_dropped_findings"][0]["drop_reason"] == "evidence_not_shown"
+    assert len(published.dropped_findings) == 1
+    assert published.dropped_findings[0].drop_reason == "evidence_not_shown"
 
 
 def test_execute_review_verifier_input_free_of_lint_duplicates_and_unknown_path() -> None:
-    published: dict[str, Any] = {}
+    published: Any = None
     verifier_received_candidates: list[str] = []
 
     class Processor:
@@ -2837,7 +2842,7 @@ def test_execute_review_verifier_input_free_of_lint_duplicates_and_unknown_path(
     class Publisher:
         async def execute(self, run_id: UUID, raw_output: Any) -> bool:
             nonlocal published
-            published = dict(raw_output)
+            published = raw_output
             return True
 
     class InspectingVerifierModel:
@@ -2875,12 +2880,13 @@ def test_execute_review_verifier_input_free_of_lint_duplicates_and_unknown_path(
     # Verifier received exactly 1 candidate (the valid, non-duplicate, existing-path candidate)
     assert len(verifier_received_candidates) == 1
     assert len(published["findings"]) == 1
-    assert len(published["_dropped_findings"]) == 4
-    reasons = {d["drop_reason"] for d in published["_dropped_findings"]}
+    assert len(published.dropped_findings) == 4
+    reasons = {d.drop_reason for d in published.dropped_findings}
     assert "unknown_path" in reasons
     assert "line_absent" in reasons
     assert "duplicate" in reasons
     assert "lint_pattern" in reasons
+    assert [d.position for d in published.dropped_findings] == [1, 2, 4, 3]
 
 
 def test_execute_review_empty_after_filters_verifier_call_count_zero() -> None:
@@ -3075,7 +3081,7 @@ def test_execute_review_retrieved_excerpt_accepted_by_reviewer_and_verifier() ->
 
 
 def test_execute_review_drops_evidence_source_disallowed_and_revision_mismatch() -> None:
-    published: dict[str, Any] = {}
+    published: Any = {}
     verifier_received: list[str] = []
 
     class Processor:
@@ -3170,7 +3176,7 @@ def test_execute_review_drops_evidence_source_disallowed_and_revision_mismatch()
     class Publisher:
         async def execute(self, run_id: UUID, raw_output: Any) -> bool:
             nonlocal published
-            published = dict(raw_output)
+            published = raw_output
             return True
 
     def patched_build_manifest(
@@ -3184,6 +3190,8 @@ def test_execute_review_drops_evidence_source_disallowed_and_revision_mismatch()
         manifest = orig_build_manifest(
             self, context, call_id=call_id, stage=stage, recovery_kind=recovery_kind
         )
+        if stage != "review":
+            return manifest
         # Add a LEFT block with wrong revision to test revision_mismatch
         left_block = ManifestBlock(
             block_id="left_block",
@@ -3230,7 +3238,10 @@ def test_execute_review_drops_evidence_source_disallowed_and_revision_mismatch()
                 ]
             }
 
-    with patch.object(PromptBuilder, "build_manifest", patched_build_manifest):
+    with (
+        patch.object(PromptBuilder, "build_manifest", patched_build_manifest),
+        patch("app.modules.reviews.application.execute_review.verify_provenance_pre_send_guard"),
+    ):
         pipeline = ExecuteReviewRun(
             Processor(),
             Repository(),
@@ -3242,8 +3253,8 @@ def test_execute_review_drops_evidence_source_disallowed_and_revision_mismatch()
         assert success is True
         assert len(verifier_received) == 1
         assert len(published["findings"]) == 1
-        assert len(published["_dropped_findings"]) == 2
-        reasons = {d["drop_reason"] for d in published["_dropped_findings"]}
+        assert len(published.dropped_findings) == 2
+        reasons = {d.drop_reason for d in published.dropped_findings}
         assert "evidence_source_disallowed" in reasons
         assert "revision_mismatch" in reasons
 
@@ -3378,3 +3389,225 @@ def test_execute_review_run_multiple_files_snapshot_fits_without_overflow() -> N
     success = asyncio.run(pipeline.execute(RUN_ID))
     assert success is True
     assert published_output["findings"] == []
+
+
+def test_execute_review_verifier_mandatory_budget_exceeded_aborts_before_draft_review() -> None:
+    # max_input_tokens=8_500 -> send_budget = 8_500 - 8_000 = 500.
+    # Verifier mandatory envelope (~1,100 tokens) > 500 while reviewer prompt (~350 tokens) fits.
+    snapshot = _make_test_snapshot(max_input_tokens=8_500, max_policy_tokens=12_000)
+
+    class Processor:
+        async def prepare(self, run_id: UUID) -> GeneratedConventions:
+            return conventions()
+
+    class Repository:
+        async def get_review_prompt_input(
+            self, run_id: UUID, saved: GeneratedConventions
+        ) -> ReviewPromptInput:
+            return ReviewPromptInput(
+                system="Review carefully.",
+                rules=(),
+                agents_md=None,
+                conventions=RepoConventions((), ()),
+                changed_files=(
+                    ChangedFile("app/main.py", "modified", (DiffLine(1, "added", "x = 1"),)),
+                ),
+                omitted_files=(),
+                policy_snapshot=snapshot,
+            )
+
+    draft_calls = 0
+
+    class Model:
+        async def get_pull_request_meta(self, run_id: UUID) -> PullRequestMeta:
+            return PullRequestMeta("Title", None, "u", "b", "m", (), 1, 1, 0, False, False)
+
+        async def draft_review(self, *, context: ReviewContext) -> dict[str, Any]:
+            nonlocal draft_calls
+            draft_calls += 1
+            return {"findings": [], "summary": {"problem": "p", "done_well": "d", "effort": "none"}}
+
+    class Publisher:
+        async def execute(self, run_id: UUID, raw_output: Any) -> bool:
+            return True
+
+    pipeline = ExecuteReviewRun(
+        Processor(),
+        Repository(),
+        Model(),
+        Publisher(),
+        reflection_pass=ReflectionPass(FakeVerifierModel({"decisions": []})),
+    )
+    with pytest.raises(PolicyError) as exc_info:
+        asyncio.run(pipeline.execute(RUN_ID))
+    assert exc_info.value.code == PolicyErrorCode.PROMPT_BUDGET_EXCEEDED
+    assert draft_calls == 0
+
+
+def test_execute_review_send_budget_respects_model_max_prompt_tokens() -> None:
+    # Snapshot has max_input_tokens=60,000 (default send_budget=52,000),
+    # while model.max_prompt_tokens() returns 16,000 -> send_budget is min(52,000, 16,000) = 16,000.
+    snapshot = _make_test_snapshot(max_input_tokens=60_000, max_policy_tokens=12_000)
+
+    class Processor:
+        async def prepare(self, run_id: UUID) -> GeneratedConventions:
+            return conventions()
+
+    class Repository:
+        async def get_review_prompt_input(
+            self, run_id: UUID, saved: GeneratedConventions
+        ) -> ReviewPromptInput:
+            # ~50,000 chars -> ~16,667 tokens under counter/v2 (> 16,000 send_budget, < 52,000)
+            return ReviewPromptInput(
+                system="S" * 50_000,
+                rules=(),
+                agents_md=None,
+                conventions=RepoConventions((), ()),
+                changed_files=(
+                    ChangedFile("app/main.py", "modified", (DiffLine(1, "added", "x = 1"),)),
+                ),
+                omitted_files=(),
+                policy_snapshot=snapshot,
+            )
+
+    draft_calls = 0
+
+    class Model:
+        def max_prompt_tokens(self) -> int:
+            return 16_000
+
+        async def get_pull_request_meta(self, run_id: UUID) -> PullRequestMeta:
+            return PullRequestMeta("Title", None, "u", "b", "m", (), 1, 1, 0, False, False)
+
+        async def draft_review(self, *, context: ReviewContext) -> dict[str, Any]:
+            nonlocal draft_calls
+            draft_calls += 1
+            return {"findings": [], "summary": {"problem": "p", "done_well": "d", "effort": "none"}}
+
+    class Publisher:
+        async def execute(self, run_id: UUID, raw_output: Any) -> bool:
+            return True
+
+    pipeline = ExecuteReviewRun(
+        Processor(),
+        Repository(),
+        Model(),
+        Publisher(),
+        reflection_pass=ReflectionPass(FakeVerifierModel({"decisions": []})),
+    )
+    with pytest.raises(RunFailure) as exc_info:
+        asyncio.run(pipeline.execute(RUN_ID))
+    assert exc_info.value.error_code == "llm_context_overflow"
+    assert draft_calls == 0
+
+
+def test_execute_review_counter_version_and_diff_old_sha_propagation() -> None:
+    from dataclasses import replace
+
+    # 39,390-char rules file: 11,965 tokens under counter/v1 (passes 12,000 limit),
+    # 15,953 tokens under counter/v2 (exceeds 12,000 limit).
+    lines = ["x" * 97 + "\n"] * 210 + ["x" * 98 + "\n"] * 190
+    rules_content = "".join(lines)
+    base_snapshot = _make_test_snapshot(max_policy_tokens=12_000)
+    snapshot_v1 = replace(
+        base_snapshot,
+        rules=make_policy_document_present(".review/rules.md", rules_content, blob_oid="r" * 40),
+        execution_profile=replace(base_snapshot.execution_profile, counter_version="counter/v1"),
+    )
+
+    captured_diff_old_sha: list[str | None] = []
+
+    class ContextFilterWithOldSha:
+        diff_old_sha = "old_base_sha_777"
+
+        def excluded(self, path: str) -> bool:
+            return False
+
+    class Processor:
+        async def prepare(self, run_id: UUID) -> GeneratedConventions:
+            return conventions()
+
+    class RepositoryV1:
+        async def get_review_prompt_input(
+            self, run_id: UUID, saved: GeneratedConventions
+        ) -> ReviewPromptInput:
+            return ReviewPromptInput(
+                system="Review carefully.",
+                rules=(),
+                agents_md=None,
+                conventions=RepoConventions((), ()),
+                changed_files=(
+                    ChangedFile("app/main.py", "modified", (DiffLine(1, "added", "x = 1"),)),
+                ),
+                omitted_files=(),
+                policy_snapshot=snapshot_v1,
+            )
+
+    class Model:
+        async def get_pull_request_meta(self, run_id: UUID) -> PullRequestMeta:
+            return PullRequestMeta(
+                "Title",
+                None,
+                "u",
+                "b",
+                "m",
+                (),
+                1,
+                1,
+                0,
+                False,
+                False,
+                head_sha="head_sha_888",
+            )
+
+        async def draft_review(self, *, context: ReviewContext) -> dict[str, Any]:
+            captured_diff_old_sha.append(context.pr_meta.diff_old_sha)
+            return {"findings": [], "summary": {"problem": "p", "done_well": "d", "effort": "none"}}
+
+    class Publisher:
+        async def execute(self, run_id: UUID, raw_output: Any) -> bool:
+            return True
+
+    pipeline = ExecuteReviewRun(
+        Processor(),
+        RepositoryV1(),
+        Model(),
+        Publisher(),
+        context_filter=ContextFilterWithOldSha(),
+        reflection_pass=ReflectionPass(FakeVerifierModel({"decisions": []})),
+    )
+    assert asyncio.run(pipeline.execute(RUN_ID)) is True
+    assert captured_diff_old_sha == ["old_base_sha_777"]
+
+    # Unknown counter version fails closed with SNAPSHOT_INTEGRITY_ERROR
+    snapshot_bad_counter = replace(
+        snapshot_v1,
+        execution_profile=replace(snapshot_v1.execution_profile, counter_version="estimated/v2"),
+    )
+
+    class RepositoryBadCounter:
+        async def get_review_prompt_input(
+            self, run_id: UUID, saved: GeneratedConventions
+        ) -> ReviewPromptInput:
+            return ReviewPromptInput(
+                system="Review carefully.",
+                rules=(),
+                agents_md=None,
+                conventions=RepoConventions((), ()),
+                changed_files=(
+                    ChangedFile("app/main.py", "modified", (DiffLine(1, "added", "x = 1"),)),
+                ),
+                omitted_files=(),
+                policy_snapshot=snapshot_bad_counter,
+            )
+
+    pipeline_bad = ExecuteReviewRun(
+        Processor(),
+        RepositoryBadCounter(),
+        Model(),
+        Publisher(),
+        reflection_pass=ReflectionPass(FakeVerifierModel({"decisions": []})),
+    )
+    with pytest.raises(PolicyError) as exc_info:
+        asyncio.run(pipeline_bad.execute(RUN_ID))
+    assert exc_info.value.code == PolicyErrorCode.SNAPSHOT_INTEGRITY_ERROR

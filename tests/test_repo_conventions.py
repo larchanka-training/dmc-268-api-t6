@@ -1141,21 +1141,33 @@ def test_conventions_provenance_guard_rejects_disallowed_file_in_tree_only() -> 
 
 
 def test_conventions_execution_with_passed_snapshot_and_agents_md() -> None:
+    from dataclasses import replace
+
+    from app.modules.reviews.application.llm import RunCallContext
     from app.modules.reviews.application.policy_snapshot import (
+        CallManifest,
         ExecutionProfile,
         PolicySnapshot,
         PromptBindings,
         make_policy_document_missing,
         make_policy_document_present,
     )
+    from app.modules.reviews.infrastructure.llm.models import GatewayConventionsModel
 
-    agents_content = "Always use uv."
+    agents_content = "Always use uv.\r\nSecond line.\r\n"
+
+    class CrlfSource(FakeSource):
+        async def fetch_agents_md(self, repository_id: UUID) -> RepositorySnapshot:
+            assert repository_id == REPOSITORY_ID
+            self.calls.append("agents")
+            return RepositorySnapshot(content=agents_content, sha=AGENTS_SHA)
+
     snapshot = PolicySnapshot(
         schema_version=1,
         snapshot_id=uuid4(),
         run_id=RUN_ID,
         repository_id=REPOSITORY_ID,
-        policy_base_sha=AGENTS_SHA,
+        policy_base_sha="base_commit_sha_distinct_from_agents_blob",
         rules=make_policy_document_missing(".review/rules.md"),
         agents=make_policy_document_present("AGENTS.md", agents_content),
         ignore_patterns=(),
@@ -1167,7 +1179,7 @@ def test_conventions_execution_with_passed_snapshot_and_agents_md() -> None:
         builtin_exclusions_version="builtin-exclusions/v1",
         priority_matcher_version="priority-matcher/v1",
         service_defaults_rule_version_id=uuid4(),
-        defaults_checksum="defaults_0",
+        defaults_checksum="282d61c2da897152046db742fbd9bfda061ba1c71ce32759d47e042c06b0ff52",
         prompt_bindings=PromptBindings("cs1", "cs2", "cs3"),
         execution_profile=ExecutionProfile.fast("m1", "m2"),
         policy_digest="digest_base",
@@ -1178,7 +1190,7 @@ def test_conventions_execution_with_passed_snapshot_and_agents_md() -> None:
     factory = FakeUnitOfWorkFactory(store)
 
     result = asyncio.run(
-        GenerateRepoConventions(FakeSource(), model, factory).execute(
+        GenerateRepoConventions(CrlfSource(), model, factory).execute(
             repository_id=REPOSITORY_ID,
             conventions_prompt=ActiveConventionsPrompt(PROMPT_VERSION_ID, "conventions v1"),
             run_id=RUN_ID,
@@ -1188,3 +1200,42 @@ def test_conventions_execution_with_passed_snapshot_and_agents_md() -> None:
     )
     assert result.agents_md == agents_content
     assert len(model.calls) == 1
+    assert model.calls[0].snapshot is snapshot
+
+    # Verify GatewayConventionsModel builds manifest AFTER fit_conventions_request
+    captured_manifests: list[CallManifest | None] = []
+
+    class FakeGateway:
+        def max_prompt_tokens(self, engine: object = None) -> int:
+            return 300
+
+        async def generate(self, task: object, run: object) -> object:
+            captured_manifests.append(getattr(task, "base_manifest", None))
+
+            class Resp:
+                output = draft()
+
+            return Resp()
+
+    long_file_content = "\n".join(f"line_{i} = 'x' * 50" for i in range(1, 200))
+    conv_req = model.calls[0]
+
+    conv_req_large = replace(
+        conv_req,
+        repo_files=(RepositoryFile("app/main.py", 5000, content=long_file_content),),
+    )
+    run_ctx = RunCallContext(
+        run_id=RUN_ID,
+        workspace_id=uuid4(),
+        attempt=1,
+        engine="fast",
+        deadline=datetime(2026, 10, 23, 18, 0, tzinfo=UTC),
+    )
+    gw_model = GatewayConventionsModel(FakeGateway(), run_ctx)  # type: ignore[arg-type]
+    asyncio.run(gw_model.draft_conventions(request=conv_req_large))
+    assert len(captured_manifests) == 1
+    manifest = captured_manifests[0]
+    assert manifest is not None
+    # Post-fit repo_files were shrunk/dropped to fit 300 tokens -> manifest < 199 lines
+    excerpt_blocks = [b for b in manifest.blocks if b.block_id == "conventions-excerpt:app/main.py"]
+    assert not excerpt_blocks or (excerpt_blocks[0].shown_line_count or 0) < 199

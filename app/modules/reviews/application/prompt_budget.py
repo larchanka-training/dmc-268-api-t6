@@ -9,11 +9,12 @@ from __future__ import annotations
 
 import logging
 import math
+import os
 import re
 from collections.abc import Callable
 from dataclasses import replace
 from pathlib import PurePosixPath
-from typing import Protocol, runtime_checkable
+from typing import Literal, Protocol, runtime_checkable
 
 from app.modules.reviews.application.diff_map import is_supported_path
 from app.modules.reviews.application.policy_errors import PolicyError, PolicyErrorCode
@@ -80,16 +81,98 @@ class LegacyTokenCounter:
         return (characters + 3) // 4
 
 
+SUPPORTED_TOKENIZER_VERSIONS = frozenset({"tokenizer/v1"})
+SUPPORTED_COUNTER_VERSIONS = frozenset({"counter/v1", "counter/v2"})
+SUPPORTED_RECOVERY_PROFILE_VERSIONS = frozenset({"recovery/v1"})
+SUPPORTED_BUDGET_PROFILE_VERSIONS = frozenset({"budget/v1"})
+
+_MODEL_WINDOWS: dict[str, tuple[int, int]] = {
+    "mistral-small-4": (262_144, 8_000),
+    "mistral-small-3.2-24b": (128_000, 8_000),
+}
+_DEFAULT_CONTEXT_WINDOW = 262_144
+_DEFAULT_MAX_OUTPUT_TOKENS = 8_000
+
+
 def token_counter_for(counter_version: str | None) -> TokenCounter:
     """Resolve token counter by pinned version in ExecutionProfile (RFS §7.2)."""
-    if counter_version is None or counter_version in {"counter/v2", "estimated/v2"}:
+    if counter_version is None or counter_version == "counter/v2":
         return EstimatedTokenCounter()
-    if counter_version in {"counter/v1", "estimated/v1"}:
+    if counter_version == "counter/v1":
         return LegacyTokenCounter()
     raise PolicyError(
         PolicyErrorCode.SNAPSHOT_INTEGRITY_ERROR,
         f"Unknown counter_version '{counter_version}' in execution profile",
     )
+
+
+def validate_execution_profile_versions(profile: ExecutionProfile) -> None:
+    """Resolve and validate pinned execution profile versions (RFS §7.1-7.2)."""
+    if (
+        profile.tokenizer_version is not None
+        and profile.tokenizer_version not in SUPPORTED_TOKENIZER_VERSIONS
+    ):
+        raise PolicyError(
+            PolicyErrorCode.SNAPSHOT_INTEGRITY_ERROR,
+            f"Unknown tokenizer_version '{profile.tokenizer_version}' in execution profile",
+        )
+    if (
+        profile.counter_version is not None
+        and profile.counter_version not in SUPPORTED_COUNTER_VERSIONS
+    ):
+        raise PolicyError(
+            PolicyErrorCode.SNAPSHOT_INTEGRITY_ERROR,
+            f"Unknown counter_version '{profile.counter_version}' in execution profile",
+        )
+    if (
+        profile.recovery_profile_version is not None
+        and profile.recovery_profile_version not in SUPPORTED_RECOVERY_PROFILE_VERSIONS
+    ):
+        raise PolicyError(
+            PolicyErrorCode.SNAPSHOT_INTEGRITY_ERROR,
+            f"Unknown recovery_profile_version '{profile.recovery_profile_version}' "
+            "in execution profile",
+        )
+    if (
+        profile.budget_profile_version is not None
+        and profile.budget_profile_version not in SUPPORTED_BUDGET_PROFILE_VERSIONS
+    ):
+        raise PolicyError(
+            PolicyErrorCode.SNAPSHOT_INTEGRITY_ERROR,
+            f"Unknown budget_profile_version '{profile.budget_profile_version}' "
+            "in execution profile",
+        )
+
+
+def send_budget_for(
+    profile: ExecutionProfile,
+    *,
+    stage: Literal["review", "verification"] = "review",
+    model_max_prompt_tokens: int | None = None,
+) -> int:
+    """Compute the prompt token budget for a stage from the model window and execution profile.
+
+    Matches ``LlmGateway.max_prompt_tokens``:
+    ``min(context_window, max_input_tokens) - max_output_tokens``.
+    """
+    validate_execution_profile_versions(profile)
+
+    model_name = profile.verifier_model if stage == "verification" else profile.review_model
+    context_window, max_output_tokens = _MODEL_WINDOWS.get(
+        model_name, (_DEFAULT_CONTEXT_WINDOW, _DEFAULT_MAX_OUTPUT_TOKENS)
+    )
+    env_window = os.environ.get("LLM_CONTEXT_WINDOW")
+    if env_window and env_window.isdigit():
+        context_window = int(env_window)
+    env_out = os.environ.get("LLM_MAX_OUTPUT_TOKENS")
+    if env_out and env_out.isdigit():
+        max_output_tokens = int(env_out)
+
+    limit = min(context_window, profile.max_input_tokens)
+    budget = max(0, limit - max_output_tokens)
+    if model_max_prompt_tokens is not None:
+        return min(budget, model_max_prompt_tokens)
+    return budget
 
 
 class PolicyBudgetExceededError(ValueError):
@@ -205,6 +288,11 @@ def verify_provenance_pre_send_guard(
     Failure raises PolicyError(PolicyErrorCode.CONTEXT_VIOLATION), which results
     in RunFailure("policy_context_violation") without sending the request.
     """
+    ignore_matcher = (
+        IgnoreMatcher(IgnorePolicy(snapshot.ignore_patterns, (), snapshot.ignore_digest))
+        if snapshot is not None and snapshot.ignore_patterns
+        else None
+    )
     for block in manifest.blocks:
         # 1. Role and kind validation
         if block.source_role not in _ALLOWED_SOURCE_ROLES:
@@ -255,17 +343,13 @@ def verify_provenance_pre_send_guard(
             if not is_supported_path(path_str):
                 raise PolicyError(
                     PolicyErrorCode.CONTEXT_VIOLATION,
-                    f"Block '{block.block_id}' references unsupported path: {path_str}",
+                    f"Block '{block.block_id}' references unsupported path",
                 )
-            if snapshot is not None and snapshot.ignore_patterns:
-                matcher = IgnoreMatcher(
-                    IgnorePolicy(snapshot.ignore_patterns, (), snapshot.ignore_digest)
+            if ignore_matcher is not None and ignore_matcher.match(path_str) is not None:
+                raise PolicyError(
+                    PolicyErrorCode.CONTEXT_VIOLATION,
+                    f"Block '{block.block_id}' references ignored path matching deny-set",
                 )
-                if matcher.match(path_str) is not None:
-                    raise PolicyError(
-                        PolicyErrorCode.CONTEXT_VIOLATION,
-                        f"Block '{block.block_id}' references ignored path matching deny-set",
-                    )
 
         # 3. Revision validation
         if block.revision is not None:
@@ -285,7 +369,7 @@ def verify_provenance_pre_send_guard(
                         if context is not None and context.pr_meta is not None
                         else None
                     )
-                    if diff_old_sha is not None and block.revision != diff_old_sha:
+                    if not diff_old_sha or block.revision != diff_old_sha:
                         raise PolicyError(
                             PolicyErrorCode.CONTEXT_VIOLATION,
                             f"Block '{block.block_id}' LEFT revision does not match "

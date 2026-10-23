@@ -79,6 +79,10 @@ def test_v2_run_and_persisted_snapshot_retain_their_prompt_after_v3_activation(
                 await session.execute(
                     text("UPDATE runs SET state='running' WHERE id=:id"), {"id": RUN_ATTEMPTED}
                 )
+                await session.execute(
+                    text("UPDATE repositories SET severity_threshold='critical' WHERE id=:repo_id"),
+                    {"repo_id": REPO_A},
+                )
                 assert await seed_prompt_versions(session, legacy_assets) == 5
             async with factory() as session:
                 conventions_id = (
@@ -93,6 +97,8 @@ def test_v2_run_and_persisted_snapshot_retain_their_prompt_after_v3_activation(
             )
             before = await repository.get_review_prompt_input(RUN_ATTEMPTED, conventions)
             assert before is not None and before.system == v2_content
+            assert before.severity_threshold == "critical"
+            assert before.policy_snapshot is None
             rules = missing_document(RULES_DOCUMENT_PATH)
             agents = missing_document(AGENTS_DOCUMENT_PATH)
             async with uow() as work:
@@ -134,8 +140,9 @@ def test_v2_run_and_persisted_snapshot_retain_their_prompt_after_v3_activation(
                     == "eb851e7fc2329eb7bdff015ec0fda945c46111ec5c884934ed6f6d6803883452"
                 )
             after = await repository.get_review_prompt_input(RUN_ATTEMPTED, conventions)
-            assert after == before
             assert after is not None and after.system == v2_content
+            assert after.severity_threshold == "critical"
+            assert after.policy_snapshot == snapshot
             async with uow() as work:
                 after_pins = await work.policy.get_pins(RUN_ATTEMPTED)
                 assert after_pins is not None

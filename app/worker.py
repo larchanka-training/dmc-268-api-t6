@@ -668,6 +668,7 @@ def github_adapters(
             runs=runs,
             run_id=run_id,
             conventions_from_base=True,
+            merge_base=github_vcs,
         ),
         check_runs=GitHubCheckRunGateway(client=client, token_provider=tokens),
         reviews=GitHubPullRequestReviewGateway(client=client, token_provider=tokens),
