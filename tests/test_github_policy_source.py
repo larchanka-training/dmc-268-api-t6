@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
+from datetime import timedelta
 from typing import Any
 
 import httpx
@@ -263,3 +264,28 @@ def test_unreadable_tree_listing_is_a_retryable_failure_and_a_missing_mode_is_a_
 
     entries = _run(without_mode, Blobs(), lambda source: source.list_entries(None))
     assert entries["AGENTS.md"].kind is PolicyEntryKind.FILE
+
+
+@pytest.mark.parametrize(
+    ("retry_after", "delay"),
+    [
+        ("1" * 5000, None),
+        ("9" * 30, timedelta(days=1)),
+        ("soon", None),
+        ("-1", None),
+        ("120", timedelta(seconds=120)),
+        ("86401", timedelta(days=1)),
+    ],
+    ids=["over-int-limit", "over-timedelta-limit", "word", "negative", "seconds", "cap-one-day"],
+)
+def test_policy_source_bounds_untrusted_retry_after(
+    retry_after: str, delay: timedelta | None
+) -> None:
+    def respond(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(429, headers={"Retry-After": retry_after})
+
+    with pytest.raises(PolicyError) as caught:
+        _run(respond, Blobs(), lambda source: source.list_entries(None))
+
+    assert caught.value.code is PolicyErrorCode.RATE_LIMITED
+    assert caught.value.retry_after == delay

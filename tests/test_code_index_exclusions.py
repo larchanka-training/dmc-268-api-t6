@@ -48,7 +48,7 @@ def test_the_classes_are_in_the_plan_order() -> None:
         "binary",
         "parse_failed",
     ]
-    assert INDEX_EXCLUSIONS_VERSION == "index-exclusions/v1"
+    assert INDEX_EXCLUSIONS_VERSION == "index-exclusions/v2"
 
 
 def test_limits_default_to_the_adr_values_and_their_failure_codes() -> None:

@@ -1,0 +1,5 @@
+simulation: index-policy-network
+routing: header
+mocks:
+  - routeKey: github
+    path: ./config.yaml

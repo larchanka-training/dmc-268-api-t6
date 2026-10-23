@@ -31,6 +31,7 @@ from __future__ import annotations
 import io
 import logging
 import re
+from collections.abc import Mapping
 from datetime import timedelta
 from typing import Literal, Protocol
 
@@ -55,6 +56,17 @@ from app.modules.code_index.application.vcs import (
 )
 from app.modules.integrations.webhooks.infrastructure.github_installation_tree_provider import (
     _is_empty_repository_answer,
+)
+from app.modules.reviews.application.policy_documents import (
+    MAX_DOCUMENT_BYTES,
+    LoadPolicyDocuments,
+    PolicyTreeEntry,
+)
+from app.modules.reviews.application.policy_errors import PolicyError, PolicyErrorCode
+from app.modules.reviews.application.policy_snapshot import RULES_DOCUMENT_PATH, PolicyDocument
+from app.modules.reviews.infrastructure.github_policy_source import (
+    classify_policy_http_error,
+    policy_tree_entries,
 )
 
 _API_VERSION = "2022-11-28"
@@ -300,6 +312,14 @@ class GitHubRepositorySnapshotSource:
             complete=len(comparison.files) < _COMPARE_FILE_CAP,
         )
 
+    async def rules_document(self, commit_sha: str) -> PolicyDocument:
+        sha = commit_sha_segment(commit_sha)
+        source = _SnapshotPolicySource(self, sha)
+        loaded = await LoadPolicyDocuments(source, policy_base_sha=sha).load_document(
+            RULES_DOCUMENT_PATH
+        )
+        return loaded.document
+
     async def archive(self, commit_sha: str, *, max_bytes: int) -> SourceArchive:
         sha = commit_sha_segment(commit_sha)
         try:
@@ -351,3 +371,81 @@ class GitHubRepositorySnapshotSource:
             return body.getvalue()
         finally:
             await response.aclose()
+
+
+class _SnapshotPolicySource:
+    """Counted policy reads sharing the indexer's client and request accounting."""
+
+    def __init__(self, snapshot: GitHubRepositorySnapshotSource, commit_sha: str) -> None:
+        self._snapshot = snapshot
+        self._sha = commit_sha
+
+    def _error(self, code: PolicyErrorCode, message: str) -> PolicyError:
+        return PolicyError(code, message, policy_base_sha=self._sha)
+
+    async def list_entries(self, tree_oid: str | None) -> Mapping[str, PolicyTreeEntry]:
+        sha = commit_sha_segment(self._sha if tree_oid is None else tree_oid)
+        source = self._snapshot
+        try:
+            token = await source._token()
+            response = await source._get(
+                f"{source._prefix}/git/trees/{sha}", headers=_headers(token)
+            )
+            response.raise_for_status()
+        except httpx.HTTPError as exc:
+            raise classify_policy_http_error(exc, policy_base_sha=self._sha) from None
+        except ValueError:
+            raise self._error(
+                PolicyErrorCode.FETCH_TRANSIENT, "GitHub returned an unreadable token"
+            ) from None
+        try:
+            payload = response.json()
+        except ValueError:
+            raise self._error(
+                PolicyErrorCode.FETCH_TRANSIENT, "GitHub returned an unreadable tree listing"
+            ) from None
+        entries = policy_tree_entries(payload, policy_base_sha=self._sha)
+        # The shared parser classifies entries. Also verify this is a lossless,
+        # nonrecursive directory listing before using it as proof of absence.
+        modes = {"blob": {"100644", "100755", "120000"}, "tree": {"040000"}, "commit": {"160000"}}
+        items = payload["tree"]
+        if len(entries) != len(items) or any(
+            "/" in item["path"]
+            or item["path"] in {".", ".."}
+            or item.get("mode") not in modes[item["type"]]
+            for item in items
+        ):
+            raise self._error(
+                PolicyErrorCode.FETCH_TRANSIENT, "GitHub returned an ambiguous tree listing"
+            )
+        return entries
+
+    async def read_blob(self, oid: str) -> bytes:
+        sha = commit_sha_segment(oid)
+        source = self._snapshot
+        try:
+            token = await source._token()
+            source._requests += 1
+            async with source._client.stream(
+                "GET",
+                f"{source._prefix}/git/blobs/{sha}",
+                headers=_headers(token, accept="application/vnd.github.raw+json"),
+                timeout=_REQUEST_TIMEOUT,
+                follow_redirects=False,
+            ) as response:
+                response.raise_for_status()
+                body = await _capped_body(response, MAX_DOCUMENT_BYTES)
+        except httpx.HTTPError as exc:
+            raise classify_policy_http_error(exc, policy_base_sha=self._sha) from None
+        except ValueError:
+            raise self._error(
+                PolicyErrorCode.FETCH_TRANSIENT, "GitHub returned an unreadable blob"
+            ) from None
+        if body is None:
+            raise PolicyError(
+                PolicyErrorCode.DOCUMENT_TOO_LARGE,
+                f"The policy document exceeds {MAX_DOCUMENT_BYTES} bytes",
+                policy_base_sha=self._sha,
+                limit=MAX_DOCUMENT_BYTES,
+            )
+        return body

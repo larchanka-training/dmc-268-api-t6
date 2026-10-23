@@ -105,6 +105,18 @@ def policy_tree_entries(payload: object, *, policy_base_sha: str) -> dict[str, P
     return {item.path: PolicyTreeEntry(_kind(item), item.sha, item.size) for item in tree.tree}
 
 
+def _policy_retry_after(value: str | None) -> timedelta | None:
+    """ASCII seconds capped at one day, matching the snapshot adapter's retry bound."""
+    if not value or not (value.isascii() and value.isdecimal()):
+        return None
+    try:
+        seconds = int(value)
+    except ValueError:
+        # Python refuses untrusted integers with more than its configured digit limit.
+        return None
+    return timedelta(seconds=min(seconds, 86_400))
+
+
 def classify_policy_http_error(exc: httpx.HTTPError, *, policy_base_sha: str | None) -> PolicyError:
     """The §9 code of a failed GitHub read; a 404 is never a missing document."""
 
@@ -119,8 +131,7 @@ def classify_policy_http_error(exc: httpx.HTTPError, *, policy_base_sha: str | N
         )
     response = exc.response
     status = response.status_code
-    retry_after = response.headers.get("Retry-After")
-    delay = timedelta(seconds=int(retry_after)) if retry_after and retry_after.isdigit() else None
+    delay = _policy_retry_after(response.headers.get("Retry-After"))
     limited = response.headers.get("X-RateLimit-Remaining") == "0" or delay is not None
     message = f"GitHub answered {status}"
     if status == 429 or (status == 403 and limited):
