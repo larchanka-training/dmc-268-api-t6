@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
+from datetime import timedelta
+from typing import Literal
 from uuid import UUID
 
 import pytest
@@ -755,10 +757,16 @@ def test_run_control_and_policy_errors_escape_optional_reads(boundary: str, fail
     assert caught.value is error
 
 
-def test_optional_source_failure_remains_an_omission() -> None:
+@pytest.mark.parametrize("boundary", ["tree", "blob"])
+def test_optional_source_failure_remains_an_omission(boundary: str) -> None:
     from app.modules.reviews.application.run_failures import RunFailure
 
     class Unavailable(Repository):
+        async def tree(self, revision: str) -> RevisionTree:
+            if boundary == "tree":
+                raise RunFailure("diff_fetch_failed", "optional tree unavailable")
+            return await super().tree(revision)
+
         async def read_blob(self, blob_sha: str) -> bytes:
             raise RunFailure("diff_fetch_failed", "optional source unavailable")
 
@@ -768,4 +776,38 @@ def test_optional_source_failure_remains_an_omission() -> None:
     )
     payload = _build(repository, diff_map)
     assert payload.status is ContextStatus.REVIEW
-    assert any(item.reason == "source_read_failed" for item in payload.omissions)
+    reason = "tree_unavailable" if boundary == "tree" else "source_read_failed"
+    assert any(item.reason == reason for item in payload.omissions)
+
+
+@pytest.mark.parametrize("boundary", ["tree", "blob"])
+@pytest.mark.parametrize("error_code", ["diff_fetch_failed", "commit_messages_fetch_failed"])
+def test_required_authority_failure_escapes_context_source_reads(
+    boundary: str,
+    error_code: Literal["diff_fetch_failed", "commit_messages_fetch_failed"],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    from app.modules.reviews.application.run_failures import RequiredSourceUnavailable
+
+    failure = RequiredSourceUnavailable(error_code, retry_after=timedelta(seconds=180))
+
+    class Unavailable(Repository):
+        async def tree(self, revision: str) -> RevisionTree:
+            if boundary == "tree":
+                raise failure
+            return await super().tree(revision)
+
+        async def read_blob(self, blob_sha: str) -> bytes:
+            raise failure
+
+    repository = Unavailable({"app.py": "x = 2\n"})
+    diff_map = _diff_map(
+        _vcs_file(repository, "app.py", "@@ -1 +1 @@\n-x = 1\n+x = 2", deletions=1)
+    )
+    with pytest.raises(RequiredSourceUnavailable) as caught:
+        _build(repository, diff_map)
+    assert caught.value is failure
+    assert caught.value.error_code == error_code
+    assert caught.value.retry_after == timedelta(seconds=180)
+    assert "Context tree read failed" not in caplog.text
+    assert "Context file read failed" not in caplog.text

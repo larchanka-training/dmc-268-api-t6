@@ -1,12 +1,19 @@
-# GitHub webhook receipt worker
+# Provider webhook receipt worker
 
-The HTTP endpoint verifies each GitHub signature, commits the JSONB delivery receipt,
-and returns `202`. The worker claims pending receipts and projects installation
-and pull request events after the HTTP response. Expired claims and failed dispatches are retried.
+The GitHub endpoint verifies the signature; the default-off installed GitLab endpoint
+verifies the selected connection's webhook-secret digest. Each commits a durable JSONB
+receipt before returning `202`. The worker claims provider-bound receipts and projects
+GitHub installation/PR events or GitLab MR events after the HTTP response. Expired claims
+and failed dispatches are retried. GitLab setup and external activation gates are below.
 
-Set `DATABASE_URL`, `RABBITMQ_URL` (the worker publishes Runs to the review queue and does not
-start without it), `GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY`, and `GITHUB_APP_BOT_LOGIN` (the
-exact App bot login, such as `example[bot]`). Apply the migrations and seed the prompts: without
+Set `DATABASE_URL` and `RABBITMQ_URL` (both required). For GitHub replay, set
+`GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY`, and `GITHUB_APP_BOT_LOGIN` together (the exact
+App bot login, such as `example[bot]`), or omit all three. Partial App settings fail
+startup. GitLab-only replay uses the complete optional runtime block in `.env.example`
+and needs no GitHub App. With `REDIS_URL`, webhook and review workers share the async
+GitHub installation-token cache (`token:{installation_id}`, expiry minus 60 seconds);
+without Redis, or on Redis errors, tokens use a safe local in-memory fallback. This
+cache does not grant GitLab credential authority. Apply the migrations and seed the prompts: without
 an active `review.system` prompt no Run is created. Then run:
 
 ```bash
@@ -19,14 +26,78 @@ For local Docker Compose, set `GITHUB_WEBHOOK_SECRET`, `GITHUB_APP_ID`,
 `GITHUB_APP_PRIVATE_KEY`, and `GITHUB_APP_BOT_LOGIN` in `.env` and start the `webhooks` profile
 (the compose file passes `RABBITMQ_URL` itself): the one-shot `bootstrap` service applies the
 migrations and seeds the prompts before `webhook-worker` starts. A worker started outside
-Compose needs the same database, broker and GitHub App configuration.
+Compose needs the same database and broker plus the provider configuration it serves.
+Compose/deploy scripts do not provision the new GitLab runtime settings; use explicitly
+protected process environment for an authorized GitLab setup (see SECRETS).
 Values of the dev GitHub App and its smee.io delivery path: [README](../README.md#local-dev-app).
 
 ```bash
 docker compose --profile webhooks up --build
 ```
 
-## Local recipe: a signed `labeled` delivery creates a queued Run
+## Installed GitLab replay and activation
+
+Supported GitLab compatibility starts at 17.4. The non-browser endpoint is
+`POST /webhooks/gitlab/{installationId}`; installation UUID selects stored authority,
+never authority from JSON. With admission enabled it verifies exactly one
+`X-Gitlab-Token`, enforces the 10 MiB streaming/strict UTF-8 JSON limit and requires
+`X-Gitlab-Event` plus stable `webhook-id` (fallback `Idempotency-Key`; both must agree).
+Duplicate keys with different payload fail rather than create another event.
+`X-Gitlab-Event-UUID`/`X-Gitlab-Webhook-UUID` alone are insufficient. Receipt keys are
+namespaced by `gitlab` and original installation UUID. No provider request occurs in
+the receiver, and unsupported valid events receive a durable ignored outcome.
+
+HTTP admission defaults off (503) and is independently controlled by API
+`GITLAB_WEBHOOK_INTAKE_ENABLED`; only empty/true/false are accepted after trim/case
+normalization. API admission needs DB plus digest, no decryption keyring. Replay and
+review require all three `GITLAB_CREDENTIAL_KEYS`, `GITLAB_ACTIVE_KEY_ID`,
+`GITLAB_ALLOWED_ORIGINS`; optional exact `GITLAB_PRIVATE_ORIGINS` and verified
+`SSL_CERT_FILE` trust are described in [SECRETS](SECRETS.md). A nonempty private value
+alone, including `[]`, triggers partial-config failure; SSL_CERT_FILE alone and legacy
+process PAT/base URL do not enable runtime. No process PAT/base fallback is used.
+
+Use the supported `uv run python -m app.gitlab_admin` create/bind/inspect/rotate/revoke/
+activate commands in SECRETS. Do not seed GitLab by copying the GitHub SQL below.
+Create/bind leave intake disabled. Activate requires `--expected-generation`, stored
+credential reauthentication, all binding identities/API access, active prompt and at
+least one enabled/available rule-ready `wait_for_ci=never` repository; it has no budget
+gate. Rotation and revoke retire active work under the immutable origin, even after
+ownership changed. Recovery inspect/revoke use DB only when keys are unavailable.
+
+Replay uses the shared receipt engine: provider-local claims with five-minute leases,
+240-second dispatch timeout, bounded failure retries (30 seconds, three attempts),
+30-day finished receipt retention and commit-before-ack/outbox publication. GitLab and
+GitHub stores never claim or purge each other's rows. A scheduler round gives each
+configured provider one bounded batch of up to 100; only a full error-free batch asks
+for immediate continuation. A scan failure or a batch with errors cools down that
+provider for the poll interval (30 seconds); wake hints cannot bypass the cooldown or
+starve the other provider. The shared wake event is cleared once before the round so
+hints during either dispatch survive. Purge runs per provider on startup/hourly;
+installation revival, OAuth wake semantics, CI and removal markers remain GitHub-only.
+GitLab connection readiness is not supplied by GitHub OAuth reconciliation.
+
+MR open/update/reopen fetch current state under the MR projection lock, then apply
+bound target identity and `wait_for_ci=never` eligibility before enqueue. Close/merge
+and changed heads cancel old work. GitLab creates no GitHub check-run, consumes no
+GitHub CI/no-CI sweep and offers fast analysis only. Review worker uses real mandatory
+policy/context and installed publication resources; docs/PIPELINE_SPEC.md §8.4 describes
+the immutable fork/diff/blob/tree boundaries. Networks remain outside SQL transactions.
+
+#171 remains OPEN: real activation/live acceptance requires its actual merged/rebased
+dependency evidence, explicit selective authorization and real MR/run/discussion/
+redelivery evidence. Synthetic component proof does not satisfy that gate. The final
+local stand attempt recorded 27 passed and one failed assertion. Trust, tree/policy
+revision and incomplete-source groups passed, including verified-TLS CLI activation,
+target/start 75/25 language sizes and incomplete-source rejection before model/cache.
+The GitLab-only worker group stopped at durable receipt replay with
+`CanonicalMergeRequestInvalidResponse`; the specific cause remains unresolved. The
+configured-GitHub/retry/redelivery, retirement/sibling and generation-two groups were
+unreached. No model or publication traffic occurred, so nonempty inline/summary and
+confirmed redelivery remain unproved. These were prepared-receipt checks against local
+stand-ins, not HTTP webhook ingress or live acceptance. The default-off flag is not an
+operator bypass of #171.
+
+## GitHub local recipe: a signed `labeled` delivery creates a queued Run
 
 `scripts/webhook_smoke.py` alone only checks that the API accepts a delivery (202). It sends
 installation 17 and repository 101: against the real GitHub the worker's calls fail (GitHub does
@@ -137,8 +208,8 @@ One dedicated autocommit connection runs `LISTEN`. Once LISTEN is registered,
 including after every reconnect, the listener requests another queue scan to cover
 receipts committed while it was disconnected. An idle worker wakes on a hint or
 on the existing 30-second fallback timeout. The timeout also finds retries when
-they become due. Processing exactly 100 deliveries continues immediately, yielding
-to the other tasks first. Repeated hints coalesce into one event; each scan still
+they become due. A full error-free provider batch of 100 deliveries requests immediate continuation,
+yielding to the other tasks first; errors apply the provider cooldown described above. Repeated hints coalesce into one event; each scan still
 uses the existing claim tokens and five-minute leases. The event is cleared before
 scanning, so a hint received during dispatch survives the transition back to waiting.
 
@@ -191,8 +262,9 @@ its outbox mark in one transaction and its `review.run/v1` pointer is published 
 after commit with publisher confirms. The broker connection opens on the first Run; a
 publication that fails stays in the outbox and the review worker's leader loop replays it.
 Cancelling an attempted Run (new head, closed PR) publishes the check-run close signal with
-the same delivery. Missing database, broker or GitHub App configuration stops startup before
-any receipt is claimed.
+the same delivery. Missing database/broker or partial GitHub App configuration stops startup before
+any receipt is claimed. With no App configuration GitHub replay is omitted; a configured
+GitLab provider can still replay its own receipts.
 
 Rules status reads (api#150). The worker also reads `.review/rules.md` of the default branch
 for the rules status page (`GET /api/repos/{repo_id}/rules-status`; the API process holds no App
@@ -704,8 +776,8 @@ pull-request and label deliveries deferred with `ignored_unknown_repository` dur
 outage are still revived only by linking (`wake_receipts`, below). CI deliveries
 (`check_suite`, `workflow_run`, `status`) are not generically deferred by an outage: a
 dispatcher composed without a Run trigger (no broker publisher or no App id) returns
-`deferred_known_event`, and `webhook-worker` does not start without `GITHUB_APP_ID` and
-`RABBITMQ_URL`. Their supersession waits use the separate `deferred_run_trigger` path above.
+`deferred_known_event`. The GitHub provider requires its complete App configuration;
+`RABBITMQ_URL` is required for the process, while GitLab-only replay needs no GitHub App. Their supersession waits use the separate `deferred_run_trigger` path above.
 
 An `installation_repositories.added` event that later brings their repository in does not
 wake them either, by decision (#70). `webhook_events` has no repository column, so waking

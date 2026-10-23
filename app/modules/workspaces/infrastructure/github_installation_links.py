@@ -316,6 +316,7 @@ class SqlAlchemyGitHubInstallationLinkStore:
         result = await self._session.execute(
             update(WebhookEvent)
             .where(
+                WebhookEvent.provider == "github",
                 WebhookEvent.installation_external_id == installation_id,
                 or_(
                     WebhookEvent.event.in_(("installation", "installation_repositories")),

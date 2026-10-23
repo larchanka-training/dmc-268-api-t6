@@ -116,6 +116,7 @@ class CheckRunReport:
     below_threshold_count: int = 0
     summary_only: bool = False
     run_url: str | None = None
+    provider: str = "github"
 
 
 type RunProviderCheckpoint = Callable[[], Awaitable[None]]

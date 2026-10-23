@@ -12,6 +12,7 @@ from app.modules.reviews.application.conventions import (
     RepositoryConventionsSource,
     RepositoryFile,
     RepositorySnapshot,
+    RepositoryTreeInput,
 )
 
 
@@ -20,7 +21,7 @@ class ReviewConventionsProvider(Protocol):
 
     async def fetch_agents_md(self, repository_id: UUID) -> RepositorySnapshot: ...
 
-    async def fetch_tree(self, repository_id: UUID) -> tuple[RepositoryFile, ...]: ...
+    async def fetch_tree(self, repository_id: UUID) -> RepositoryTreeInput: ...
 
     async def fetch_files(
         self, repository_id: UUID, paths: tuple[str, ...]
@@ -42,7 +43,7 @@ class ProviderRepositoryConventionsSource(RepositoryConventionsSource):
     async def fetch_agents_md(self, repository_id: UUID) -> RepositorySnapshot:
         return await self._provider.fetch_agents_md(repository_id)
 
-    async def fetch_tree(self, repository_id: UUID) -> tuple[RepositoryFile, ...]:
+    async def fetch_tree(self, repository_id: UUID) -> RepositoryTreeInput:
         return await self._provider.fetch_tree(repository_id)
 
     async def fetch_files(

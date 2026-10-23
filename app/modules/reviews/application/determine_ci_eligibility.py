@@ -11,6 +11,7 @@ from typing import Protocol
 from uuid import UUID
 
 from app.common.application.log_token import log_token
+from app.modules.integrations.gitlab.application.manage_connection import GitLabOriginPolicy
 from app.modules.reviews.application.project_github_pull_request import PullRequestState
 
 
@@ -30,6 +31,50 @@ class EligibilityReason(StrEnum):
     STALE_STATE = "stale_state"
     WAITING_FOR_CI = "waiting_for_ci"
     CI_BLOCKED = "ci_blocked"
+    UNSUPPORTED_PROVIDER = "unsupported_provider"
+    UNSUPPORTED_CI_POLICY = "unsupported_ci_policy"
+
+
+@dataclass(frozen=True)
+class WebhookRunIdentity:
+    """Detached provider authority; never a credential or a new wire field."""
+
+    provider: str
+    origin_provider_installation_id: UUID
+    workspace_id: UUID
+    repository_id: UUID
+    repository_external_id: int
+    instance_origin: str | None = None
+    credential_generation: int | None = None
+
+    def __post_init__(self) -> None:
+        if (
+            type(self.provider) is not str
+            or self.provider not in {"github", "gitlab"}
+            or type(self.origin_provider_installation_id) is not UUID
+            or type(self.workspace_id) is not UUID
+            or type(self.repository_id) is not UUID
+            or type(self.repository_external_id) is not int
+            or not 0 < self.repository_external_id <= 9223372036854775807
+        ):
+            raise ValueError("Invalid webhook run identity")
+        if self.provider == "github":
+            if self.instance_origin is not None or self.credential_generation is not None:
+                raise ValueError("Invalid webhook run identity")
+            return
+        if (
+            type(self.instance_origin) is not str
+            or type(self.credential_generation) is not int
+            or not 0 < self.credential_generation <= 9223372036854775807
+        ):
+            raise ValueError("Invalid webhook run identity")
+        try:
+            # Syntax only; request adapters separately enforce runtime origin trust.
+            GitLabOriginPolicy(
+                frozenset({self.instance_origin}), frozenset({self.instance_origin})
+            ).validate(self.instance_origin)
+        except (ValueError, TypeError):
+            raise ValueError("Invalid webhook run identity") from None
 
 
 @dataclass(frozen=True)
@@ -40,10 +85,11 @@ class EligibilityCandidate:
     head_sha: str
     state: PullRequestState
     repository_enabled: bool
-    ai_review_labeled: bool
+    ai_review_labeled: bool | None
     ai_review_labeled_at: datetime | None
     head_first_seen_at: datetime | None
     wait_for_ci: CiWaitMode
+    identity: WebhookRunIdentity | None = None
 
 
 @dataclass(frozen=True)
@@ -67,6 +113,8 @@ class CiSnapshot:
 
 @dataclass(frozen=True)
 class CiEligibility:
+    """Shared enqueue decision; provider policy may refuse before any CI request."""
+
     eligible: bool
     reason: EligibilityReason
     head_sha: str | None
@@ -224,6 +272,8 @@ class DetermineCiEligibility:
     ) -> CiEligibility | None:
         if candidate is None:
             return CiEligibility(False, EligibilityReason.UNKNOWN_PR, None)
+        if candidate.identity is not None and candidate.identity.provider != "github":
+            return CiEligibility(False, EligibilityReason.UNSUPPORTED_PROVIDER, candidate.head_sha)
         if (
             expected_installation_external_id is not None
             and candidate.installation_external_id != expected_installation_external_id
@@ -235,7 +285,7 @@ class DetermineCiEligibility:
             return CiEligibility(False, EligibilityReason.DISABLED_REPOSITORY, candidate.head_sha)
         if candidate.state != PullRequestState.OPEN:
             return CiEligibility(False, EligibilityReason.CLOSED_PR, candidate.head_sha)
-        if not candidate.ai_review_labeled:
+        if candidate.ai_review_labeled is not True:
             return CiEligibility(False, EligibilityReason.LABEL_NOT_ACTIVE, candidate.head_sha)
         return None
 

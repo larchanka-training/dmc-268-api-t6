@@ -27,6 +27,7 @@ from app.modules.reviews.application.handle_review_run import (
     HandleReviewRun,
 )
 from app.modules.reviews.application.queue_messages import ReviewPublishPointer
+from app.modules.reviews.application.run_delivery import RunDeliveryPointer
 from app.modules.reviews.application.vcs_diff import PullRequestLocator
 from app.modules.reviews.infrastructure import amqp
 from app.modules.reviews.infrastructure.github_vcs import HttpGitHubVcsProvider
@@ -118,7 +119,7 @@ def handle(
     outcome: DeliveryOutcome = DeliveryOutcome.ACK,
     error: Exception | None = None,
 ) -> Callable[[AbstractIncomingMessage], Awaitable[None]]:
-    async def run_handler(run_id: UUID) -> DeliveryOutcome:
+    async def run_handler(pointer: RunDeliveryPointer) -> DeliveryOutcome:
         if error:
             raise error
         return outcome
@@ -396,8 +397,8 @@ def test_retry_after_failure_uses_domain_retry_and_consumer_processes_next_run(
 
             handlers = {RUN: use_case(first_run, retry), next_id: use_case(next_run, next_retry)}
 
-            async def execute(run_id: UUID) -> DeliveryOutcome:
-                return await handlers[run_id].execute(run_id)
+            async def execute(pointer: RunDeliveryPointer) -> DeliveryOutcome:
+                return await handlers[pointer.run_id].execute(pointer.run_id)
 
             async def dispatch(message: AbstractIncomingMessage) -> None:
                 await amqp.handle_run_delivery(message, execute, pub)

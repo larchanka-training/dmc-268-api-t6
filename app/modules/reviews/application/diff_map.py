@@ -28,6 +28,7 @@ _FILE_COUNT_MISMATCH = "file_count_mismatch"
 
 class VcsProviderName(StrEnum):
     GITHUB = "github"
+    GITLAB = "gitlab"
 
 
 class DiffSide(StrEnum):

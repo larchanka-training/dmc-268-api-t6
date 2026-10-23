@@ -9,7 +9,7 @@ import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta, timezone
 from decimal import Decimal
 from types import SimpleNamespace
 from typing import Any, Never, cast
@@ -30,6 +30,12 @@ from app.modules.code_index.application.leader_tasks import (
 )
 from app.modules.reviews.application.handle_review_run import ClaimedAttempt, DeliveryOutcome
 from app.modules.reviews.application.queue_messages import ReviewPublishPointer, StoredRunMessage
+from app.modules.reviews.application.run_delivery import (
+    HandleRunDelivery,
+    PersistedRunIdentity,
+    RunDeliveryPointer,
+    RunDeliveryUnavailable,
+)
 from app.modules.reviews.application.run_failures import RetryDelays, RunFailure
 from app.modules.reviews.application.try_enqueue_webhook_run import (
     PendingRunMessage,
@@ -181,8 +187,8 @@ def _deliver(
     delivery = Delivery(body)
     seen: list[UUID] = []
 
-    async def handler(run_id: UUID) -> DeliveryOutcome:
-        seen.append(run_id)
+    async def handler(pointer: RunDeliveryPointer) -> DeliveryOutcome:
+        seen.append(pointer.run_id)
         if isinstance(outcome, Exception):
             raise outcome
         return outcome
@@ -247,7 +253,7 @@ def test_handler_repeated_errors_route_to_dlq_with_log(
     assert len(exchange.published) == 1
 
     # Attempt 2: republished
-    async def fail(run_id: UUID) -> DeliveryOutcome:
+    async def fail(pointer: RunDeliveryPointer) -> DeliveryOutcome:
         raise RuntimeError("unexpected error")
 
     d2 = Delivery(VALID, headers=dict(exchange.published[0][0].headers))
@@ -268,7 +274,7 @@ def test_handler_repeated_errors_route_to_dlq_across_worker_restarts(
 ) -> None:
     monkeypatch.setattr("app.modules.reviews.infrastructure.amqp.REQUEUE_ERROR_DELAY_SECONDS", 0.0)
 
-    async def failing_handler(run_id: UUID) -> DeliveryOutcome:
+    async def failing_handler(pointer: RunDeliveryPointer) -> DeliveryOutcome:
         raise RuntimeError("worker crash simulation")
 
     pub, exchange = fake_publisher()
@@ -321,7 +327,7 @@ def test_handler_x_death_headers_do_not_deplete_unexpected_retries(
 ) -> None:
     monkeypatch.setattr("app.modules.reviews.infrastructure.amqp.REQUEUE_ERROR_DELAY_SECONDS", 0.0)
 
-    async def failing_handler(run_id: UUID) -> DeliveryOutcome:
+    async def failing_handler(pointer: RunDeliveryPointer) -> DeliveryOutcome:
         raise RuntimeError("retry error")
 
     # Message returned from planned retry queue has x-death count=1.
@@ -342,7 +348,7 @@ def test_corrupted_retry_headers_log_warning(
 ) -> None:
     monkeypatch.setattr("app.modules.reviews.infrastructure.amqp.REQUEUE_ERROR_DELAY_SECONDS", 0.0)
 
-    async def failing_handler(run_id: UUID) -> DeliveryOutcome:
+    async def failing_handler(pointer: RunDeliveryPointer) -> DeliveryOutcome:
         raise RuntimeError("corrupted header error")
 
     amqp._clear_delivery_attempts("bad")
@@ -364,7 +370,7 @@ def test_handler_routes_to_dlq_when_attempt_count_reaches_limit(
     amqp._clear_delivery_attempts("m")
     pub, _ = fake_publisher()
 
-    async def failing_handler(run_id: UUID) -> DeliveryOutcome:
+    async def failing_handler(pointer: RunDeliveryPointer) -> DeliveryOutcome:
         raise RuntimeError("broken run")
 
     with caplog.at_level(logging.ERROR):
@@ -389,7 +395,7 @@ def test_republish_failure_falls_back_to_nack_requeue(
     )
     delivery = Delivery(VALID, message_id="err-pub")
 
-    async def failing_handler(run_id: UUID) -> DeliveryOutcome:
+    async def failing_handler(pointer: RunDeliveryPointer) -> DeliveryOutcome:
         raise RuntimeError("handler failed")
 
     asyncio.run(
@@ -415,7 +421,7 @@ def test_republish_ack_failure_logs_exception_and_does_not_nack(
 
     delivery = AckFailingDelivery(VALID, message_id="err-ack")
 
-    async def failing_handler(run_id: UUID) -> DeliveryOutcome:
+    async def failing_handler(pointer: RunDeliveryPointer) -> DeliveryOutcome:
         raise RuntimeError("handler failed")
 
     with caplog.at_level(logging.ERROR):
@@ -558,18 +564,25 @@ def test_amqp_channels_configures_publisher_channel(monkeypatch: pytest.MonkeyPa
         async def get_exchange(self, *a: Any, **kw: Any) -> Any:
             return FakeExchange()
 
+    lifecycle: list[str] = []
+
     class FakeRobustConn:
+        def __init__(self, url: object) -> None:
+            assert str(url) == "amqp://guest:guest@localhost/"
+            lifecycle.append("constructed")
+
+        async def connect(self) -> None:
+            lifecycle.append("connect")
+
         async def channel(self, **kwargs: Any) -> Any:
+            lifecycle.append("channel")
             captured_channel_kwargs.append(kwargs)
             return FakeRobustChannel()
 
         async def close(self) -> None:
-            pass
+            lifecycle.append("close")
 
-    async def fake_connect_robust(url: str) -> Any:
-        return FakeRobustConn()
-
-    monkeypatch.setattr(aio_pika, "connect_robust", fake_connect_robust)
+    monkeypatch.setattr(aio_pika, "RobustConnection", FakeRobustConn)
 
     async def run() -> None:
         async with amqp.amqp_channels("amqp://guest:guest@localhost/", RetryDelays()):
@@ -577,6 +590,7 @@ def test_amqp_channels_configures_publisher_channel(monkeypatch: pytest.MonkeyPa
 
     asyncio.run(run())
     assert captured_channel_kwargs == [{"publisher_confirms": True, "on_return_raises": True}]
+    assert lifecycle == ["constructed", "connect", "channel", "close"]
 
 
 class _Queue:
@@ -630,6 +644,7 @@ def test_worker_leader_tick_runs_the_sweep_then_the_outbox_replay_every_thirty_s
 
     process = WorkerProcess(
         handle_run=cast(Any, None),
+        handle_delivery=cast(Any, None),
         publish_review=cast(Any, None),
         enqueue=cast(Any, Enqueue()),
         sweep=cast(Any, Sweep()),
@@ -637,6 +652,7 @@ def test_worker_leader_tick_runs_the_sweep_then_the_outbox_replay_every_thirty_s
     asyncio.run(process.leader_tick())
     without_app = WorkerProcess(
         handle_run=cast(Any, None),
+        handle_delivery=cast(Any, None),
         publish_review=cast(Any, None),
         enqueue=cast(Any, Enqueue()),
         sweep=None,
@@ -681,6 +697,7 @@ class _LeaderCalls:
     def process(self) -> WorkerProcess:
         return WorkerProcess(
             handle_run=cast(Any, None),
+            handle_delivery=cast(Any, None),
             publish_review=cast(Any, None),
             enqueue=cast(Any, self),
             sweep=cast(Any, self),
@@ -1017,7 +1034,7 @@ def test_confirmed_retry_does_not_leave_local_state_when_another_worker_gets_cop
 
 
 async def _fail_retry_delivery(delivery: Delivery, publisher: amqp.AmqpQueuePublisher) -> None:
-    async def fail(pointer: UUID | ReviewPublishPointer) -> Never:
+    async def fail(pointer: RunDeliveryPointer | ReviewPublishPointer) -> Never:
         raise RuntimeError("handler offline")
 
     if delivery.routing_key == "review.publish":
@@ -1293,3 +1310,259 @@ def test_infinite_header_preserves_live_local_count_and_the_third_error_dlq(
     assert exchange.published == []
     assert "Invalid retry header x-attempt=inf" in caplog.text
     assert "exceeded maximum unexpected retry attempts (3)" in caplog.text
+
+
+@pytest.mark.parametrize("provider", ["github", "gitlab"])
+def test_provider_survives_initial_retry_and_cancellation_transport(provider: str) -> None:
+    reviews, retry = Exchange(), Exchange()
+    publisher = amqp.AmqpQueuePublisher(
+        cast(AbstractExchange, reviews), cast(AbstractExchange, retry)
+    )
+    message = pending(provider=provider, requested_at=NOW.astimezone(timezone(timedelta(hours=2))))
+
+    async def publish_all() -> None:
+        await publisher.publish_confirmed(message)
+        await publisher.publish_retry(message, "2m")
+        await publisher.publish_confirmed(message, kind=RunPublicationKind.CANCELLATION)
+
+    asyncio.run(publish_all())
+    assert [(key, priority) for key, priority, _ in reviews.published] == [
+        ("review.run.fast", 0),
+        ("review.run.fast", 9),
+    ]
+    assert [(key, priority) for key, priority, _ in retry.published] == [("retry.2m.fast", 0)]
+    for _, _, body in reviews.published + retry.published:
+        assert body["repo"]["provider"] == provider
+        assert body["trigger"] == "webhook"
+        assert body["requested_at"] == "2026-09-30T12:00:00Z"
+        assert body["message_id"] == body["run_id"] == str(RUN)
+        assert set(body["repo"]) == {"id", "provider", "external_id", "full_name"}
+
+
+def test_provider_default_and_inherited_positional_trigger_stay_compatible() -> None:
+    message = StoredRunMessage(
+        RUN,
+        UUID(int=1),
+        17,
+        UUID(int=2),
+        101,
+        "octo/repo",
+        7,
+        "a" * 40,
+        "b" * 40,
+        "main",
+        "fast",
+        UUID(int=3),
+        UUID(int=4),
+        2,
+        NOW,
+        "rerun",
+    )
+    assert amqp.run_message_body(message)["repo"]["provider"] == "github"
+    assert amqp.run_message_body(message)["trigger"] == "rerun"
+    explicit = pending(provider="gitlab", trigger="rerun")
+    assert amqp.run_message_body(explicit)["repo"]["provider"] == "gitlab"
+    assert amqp.run_message_body(explicit)["trigger"] == "rerun"
+
+
+@pytest.mark.parametrize("provider", ["unknown", "GitLab", "", None, True, ["gitlab"]])
+def test_pending_pointer_refuses_unsupported_provider(provider: object) -> None:
+    with pytest.raises(ValueError, match="^Unsupported run provider$"):
+        pending(provider=provider)
+
+
+def test_publish_waits_for_exchange_confirmation_with_gitlab_pointer() -> None:
+    async def scenario() -> None:
+        entered, confirmed = asyncio.Event(), asyncio.Event()
+
+        class WaitingExchange:
+            async def publish(self, message: aio_pika.Message, routing_key: str) -> None:
+                assert json.loads(message.body)["repo"]["provider"] == "gitlab"
+                assert message.delivery_mode == aio_pika.DeliveryMode.PERSISTENT
+                entered.set()
+                await confirmed.wait()
+
+        exchange = cast(AbstractExchange, WaitingExchange())
+        publisher = amqp.AmqpQueuePublisher(exchange, exchange)
+        operation = asyncio.create_task(publisher.publish_confirmed(pending(provider="gitlab")))
+        await entered.wait()
+        assert not operation.done()
+        confirmed.set()
+        await operation
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("provider", ["github", "gitlab"])
+def test_run_consumer_preserves_every_immutable_pointer_claim(provider: str) -> None:
+    delivery = Delivery(json.dumps(amqp.run_message_body(pending(provider=provider))).encode())
+    received: list[object] = []
+
+    async def handler(pointer: RunDeliveryPointer) -> DeliveryOutcome:
+        received.append(pointer)
+        return DeliveryOutcome.ACK
+
+    asyncio.run(
+        amqp.handle_run_delivery(
+            cast(AbstractIncomingMessage, delivery), handler, fake_publisher()[0]
+        )
+    )
+    assert received == [
+        RunDeliveryPointer(
+            RUN,
+            provider,
+            UUID(int=1),
+            UUID(int=2),
+            101,
+            17,
+            7,
+            "a" * 40,
+            "b" * 40,
+            "fast",
+            UUID(int=3),
+            UUID(int=4),
+            "webhook",
+        )
+    ]
+    assert delivery.acked and delivery.nacked == []
+
+
+def persisted_pointer(provider: str = "github") -> RunDeliveryPointer:
+    return RunDeliveryPointer(
+        RUN,
+        provider,
+        UUID(int=1),
+        UUID(int=2),
+        101,
+        17,
+        7,
+        "a" * 40,
+        "b" * 40,
+        "fast",
+        UUID(int=3),
+        UUID(int=4),
+        "webhook",
+    )
+
+
+@dataclass
+class DeliveryReader:
+    identity: PersistedRunIdentity | None
+    unavailable: bool = False
+    reads: list[UUID] = field(default_factory=list)
+
+    async def read(self, run_id: UUID) -> PersistedRunIdentity | None:
+        self.reads.append(run_id)
+        if self.unavailable:
+            raise RunDeliveryUnavailable()
+        return self.identity
+
+
+@pytest.mark.parametrize("provider", ["github", "gitlab"])
+@pytest.mark.parametrize(
+    ("section", "claim", "forged"),
+    [
+        ("repo", "provider", "other-provider"),
+        ("", "workspace_id", str(UUID(int=8))),
+        ("repo", "id", str(UUID(int=8))),
+        ("repo", "external_id", 102),
+        ("", "installation_id", 18),
+        ("pr", "number", 8),
+        ("pr", "head_sha", "c" * 40),
+        ("pr", "base_sha", "c" * 40),
+        ("", "engine", "deep"),
+        ("", "rule_version_id", str(UUID(int=8))),
+        ("", "prompt_version_id", str(UUID(int=8))),
+        ("", "trigger", "rerun"),
+    ],
+)
+def test_guarded_consumer_dead_letters_each_forged_claim_without_lifecycle(
+    provider: str,
+    section: str,
+    claim: str,
+    forged: Any,
+) -> None:
+    body = amqp.run_message_body(pending(provider=provider))
+    if claim == "provider":
+        forged = "gitlab" if provider == "github" else "github"
+    (body[section] if section else body)[claim] = forged
+    reader = DeliveryReader(PersistedRunIdentity(persisted_pointer(provider), UUID(int=5)))
+    calls: list[UUID] = []
+
+    async def lifecycle(run_id: UUID) -> DeliveryOutcome:
+        calls.append(run_id)
+        return DeliveryOutcome.ACK
+
+    delivery = Delivery(json.dumps(body).encode())
+    publisher, exchange = fake_publisher()
+    asyncio.run(
+        amqp.handle_run_delivery(
+            cast(AbstractIncomingMessage, delivery),
+            HandleRunDelivery(reader, lifecycle).execute,
+            publisher,
+        )
+    )
+    assert delivery.nacked == [False] and not delivery.acked
+    assert calls == [] and exchange.published == []
+    assert reader.reads == [RUN]
+
+
+@pytest.mark.parametrize("provider", ["github", "gitlab"])
+@pytest.mark.parametrize("missing", [False, True])
+def test_guarded_consumer_acks_valid_or_missing_without_trusting_delivery_clocks(
+    provider: str,
+    missing: bool,
+) -> None:
+    body = amqp.run_message_body(pending(provider=provider, attempt=99))
+    body["requested_at"] = "2000-01-01T00:00:00Z"
+    body["repo"]["full_name"] = "renamed/project"
+    body["pr"]["base_ref"] = "renamed-branch"
+    identity = None if missing else PersistedRunIdentity(persisted_pointer(provider), UUID(int=5))
+    reader = DeliveryReader(identity)
+    calls: list[UUID] = []
+
+    async def lifecycle(run_id: UUID) -> DeliveryOutcome:
+        calls.append(run_id)
+        return DeliveryOutcome.ACK
+
+    delivery = Delivery(json.dumps(body).encode())
+    asyncio.run(
+        amqp.handle_run_delivery(
+            cast(AbstractIncomingMessage, delivery),
+            HandleRunDelivery(reader, lifecycle).execute,
+            fake_publisher()[0],
+        )
+    )
+    assert delivery.acked and delivery.nacked == []
+    assert calls == ([] if missing else [RUN])
+
+
+def test_guard_reader_unavailable_confirms_two_retries_then_dead_letters(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(amqp, "REQUEUE_ERROR_DELAY_SECONDS", 0.0)
+    reader = DeliveryReader(None, unavailable=True)
+    calls: list[UUID] = []
+
+    async def lifecycle(run_id: UUID) -> DeliveryOutcome:
+        calls.append(run_id)
+        return DeliveryOutcome.ACK
+
+    publisher, exchange = fake_publisher()
+    deliveries = [Delivery(VALID, message_id="reader-unavailable") for _ in range(3)]
+    handler = HandleRunDelivery(reader, lifecycle).execute
+    for index, delivery in enumerate(deliveries):
+        if index:
+            delivery.headers = dict(exchange.published[-1][0].headers or {})
+        asyncio.run(
+            amqp.handle_run_delivery(
+                cast(AbstractIncomingMessage, delivery),
+                handler,
+                publisher,
+            )
+        )
+    assert len(exchange.published) == 2
+    assert [message.headers["x-attempt"] for message, _ in exchange.published] == [1, 2]
+    assert [delivery.acked for delivery in deliveries] == [True, True, False]
+    assert deliveries[-1].nacked == [False]
+    assert reader.reads == [RUN, RUN, RUN] and calls == []

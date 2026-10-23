@@ -15,4 +15,6 @@ regexes = [
   '''replace-with-''',
   '''your-objectstorage\.com''',
   '''203\.0\.113\.\d+/32''',
+  # Exact synthetic operator-test canary; provider HTTP is mocked.
+  '''^SYNTHETIC_PAT_CANARY_169$''',
 ]

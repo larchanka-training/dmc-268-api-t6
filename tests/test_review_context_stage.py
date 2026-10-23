@@ -5,8 +5,8 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
-from datetime import datetime
-from typing import Any
+from datetime import datetime, timedelta
+from typing import Any, Literal
 from uuid import UUID
 
 import pytest
@@ -898,3 +898,220 @@ def test_context_stage_propagates_control_but_preserves_optional_fallback(failur
             asyncio.run(stage.run(_RUN))
         assert caught.value is error
     assert trace.steps[-1][2]["error"]["type"] == type(error).__name__
+
+
+@pytest.mark.parametrize("error_code", ["diff_fetch_failed", "commit_messages_fetch_failed"])
+def test_context_stage_preserves_required_authority_failure_from_real_builder(
+    error_code: Literal["diff_fetch_failed", "commit_messages_fetch_failed"],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    from app.modules.reviews.application.run_failures import RequiredSourceUnavailable
+
+    failure = RequiredSourceUnavailable(error_code, retry_after=timedelta(seconds=180))
+
+    class Unavailable(Repository):
+        async def tree(self, revision: str) -> RevisionTree:
+            raise failure
+
+    trace = Trace()
+    stage = _stage(
+        trace,
+        context_builder=lambda run: BuildReviewContext(
+            source=Unavailable(), parser=Parser(), counter=EstimatedTokenCounter()
+        ),
+    )
+    with pytest.raises(RequiredSourceUnavailable) as caught:
+        asyncio.run(stage.run(_RUN))
+    assert caught.value is failure
+    assert caught.value.error_code == error_code
+    assert caught.value.retry_after == timedelta(seconds=180)
+    assert stage.excluded("generated/api.py")
+    assert trace.steps[-1][2]["error"]["type"] == "RequiredSourceUnavailable"
+    assert "Review context build failed" not in caplog.text
+
+
+def test_real_stage_diff_identity_uses_persisted_provider() -> None:
+    from dataclasses import replace
+
+    class ProviderRuns(Runs):
+        def __init__(self, provider: str) -> None:
+            super().__init__(_snapshots())
+            self.provider = provider
+
+        async def get_run_vcs_input(self, run_id: UUID) -> RunVcsInput:
+            value = await super().get_run_vcs_input(run_id)
+            return replace(
+                value,
+                locator=replace(
+                    value.locator,
+                    provider=self.provider,
+                    origin_provider_installation_id=UUID(int=99),
+                    repository_external_id=17,
+                ),
+            )
+
+    async def scenario(provider: str) -> ReviewContextPayload:
+        store = Store()
+        vcs = Vcs()
+        stage = ReviewContextStage(
+            runs=ProviderRuns(provider),
+            checkpoint=_checkpoint,
+            vcs=vcs,
+            merge_base=vcs,
+            prepare_policy=PreparePolicySnapshot(
+                uow_factory=lambda: Uow(store), source_factory=lambda pins: Policy()
+            ),
+            context_builder=lambda run: BuildReviewContext(
+                source=Repository(), parser=Parser(), counter=EstimatedTokenCounter()
+            ),
+        )
+        await stage.begin(_RUN)
+        value = await stage.run(_RUN)
+        assert value is not None and value.status is ContextStatus.REVIEW
+        return value
+
+    github = asyncio.run(scenario("github"))
+    gitlab = asyncio.run(scenario("gitlab"))
+    assert gitlab.diff_digest != github.diff_digest
+
+
+def test_real_gitlab_stage_uses_policy_start_mergebase_old_and_fork_head_sources() -> None:
+    from dataclasses import replace
+
+    import httpx
+
+    from app.modules.integrations.gitlab.infrastructure.run_http import GitLabRunHttp
+    from app.modules.reviews.infrastructure.gitlab_policy_source import GitLabPolicyDocumentSource
+    from app.modules.reviews.infrastructure.gitlab_repository_tree import GitLabRepositoryTree
+    from app.modules.reviews.infrastructure.gitlab_revision_source import GitLabRevisionSource
+    from app.modules.reviews.infrastructure.gitlab_vcs import HttpGitLabVcsProvider
+    from tests.test_gitlab_repository_sources import SourceRouter, checkpoint
+    from tests.test_gitlab_run_http import INPUT, POLICY, Credentials
+    from tests.test_gitlab_vcs import reply
+
+    patch = "@@ -1,2 +1,2 @@\n def greet(name):\n-    return name\n+    return str(name)\n"
+    old = b"def greet(name):\n    return name\n"
+    new = b"def greet(name):\n    return str(name)\n"
+    stored = [DiffSnapshot("src/app.py", patch, "d" * 40, "modified", None, 1, 1, 2)]
+
+    class RunPort:
+        async def get_run_vcs_input(self, run_id: UUID) -> RunVcsInput | None:
+            return INPUT
+
+        async def get_run_snapshots(self, run_id: UUID) -> list[DiffSnapshot] | None:
+            return stored
+
+    async def scenario() -> None:
+        router = SourceRouter()
+        router.files["src/app.py"] = ("d" * 40, new)
+        router.vcs.canonical["changes_count"] = "1"
+        router.vcs.files = [
+            {
+                "old_path": "src/app.py",
+                "new_path": "src/app.py",
+                "new_file": False,
+                "deleted_file": False,
+                "renamed_file": False,
+                "diff": patch,
+            }
+        ]
+
+        def external(request: httpx.Request) -> httpx.Response:
+            if (
+                request.url.path.endswith("/repository/tree")
+                and request.url.params.get("ref") == "c" * 40
+            ):
+                router.requests.append(request)
+                return reply(
+                    [
+                        {
+                            "id": "4" * 40,
+                            "path": "src/app.py",
+                            "name": "app.py",
+                            "type": "blob",
+                            "mode": "100644",
+                        }
+                    ]
+                )
+            if request.method == "HEAD" and request.url.params.get("ref") == "c" * 40:
+                router.requests.append(request)
+                return reply(
+                    raw=b"",
+                    headers={
+                        "X-Gitlab-Blob-Id": "4" * 40,
+                        "X-Gitlab-Size": str(len(old)),
+                        "X-Gitlab-Ref": "c" * 40,
+                    },
+                )
+            if "/repository/blobs/" + "4" * 40 + "/" in request.url.path:
+                router.requests.append(request)
+                return reply(raw=old)
+            return router.response(request)
+
+        async with GitLabRunHttp(
+            credentials=Credentials(), origin_policy=POLICY, transport=httpx.MockTransport(external)
+        ) as http:
+            trees = GitLabRepositoryTree(http=http, checkpoint=checkpoint)
+            vcs = HttpGitLabVcsProvider(http=http)
+            revision = GitLabRevisionSource(trees=trees, locator=INPUT.locator)
+            store = Store()
+            assert store.pins is not None
+            store.pins = replace(store.pins, repository_id=INPUT.repository_id, run_id=_RUN)
+            stage = ReviewContextStage(
+                runs=RunPort(),
+                checkpoint=checkpoint,
+                vcs=vcs,
+                merge_base=vcs,
+                prepare_policy=PreparePolicySnapshot(
+                    uow_factory=lambda: Uow(store),
+                    source_factory=lambda pins: GitLabPolicyDocumentSource(
+                        trees=trees, policy_base_sha=pins.policy_base_sha
+                    ),
+                ),
+                context_builder=lambda run: BuildReviewContext(
+                    source=revision, parser=Parser(), counter=EstimatedTokenCounter()
+                ),
+            )
+            await stage.begin(_RUN)
+            payload = await stage.run(_RUN)
+            assert payload is not None and payload.status is ContextStatus.REVIEW
+            # Literal DiffMap/v1 contract fixture: MR12, repository ...0003,
+            # head a40/start b40/mergebase c40, modified src/app.py/blob d40.
+            # Established independently from canonical fixture JSON with stdlib
+            # SHA256; no production builder participates in this expected value.
+            assert payload.diff_digest == (
+                "eb5a4694260256582fbc26767c001e976cdcc7a9282c965a279ed337f90764a3"
+            )
+            refs = [
+                source
+                for block in payload.blocks
+                for source in (block.source, *block.related_sources)
+            ]
+            assert any(
+                source.side is DiffSide.LEFT and source.revision == "c" * 40 for source in refs
+            )
+            assert any(
+                source.side is DiffSide.RIGHT and source.revision == INPUT.head_sha
+                for source in refs
+            )
+            old_tree = await revision.tree("c" * 40)
+            assert old_tree.complete and old_tree.blob_shas["src/app.py"] == "4" * 40
+            assert await revision.read_blob("4" * 40) == old
+            assert store.snapshot is not None and store.snapshot.policy_base_sha == INPUT.base_sha
+        assert any(
+            "/projects/17/repository/tree" in str(request.url)
+            and request.url.params.get("ref") == INPUT.base_sha
+            for request in router.requests
+        )
+        assert any(
+            "/projects/17/repository/tree" in str(request.url)
+            and request.url.params.get("ref") == "c" * 40
+            for request in router.requests
+        )
+        assert any(
+            "/projects/29/repository/tree" in str(request.url)
+            and request.url.params.get("ref") == INPUT.head_sha
+            for request in router.requests
+        )
+
+    asyncio.run(scenario())

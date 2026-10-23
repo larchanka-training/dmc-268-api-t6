@@ -16,7 +16,7 @@ import sys
 import time
 from collections.abc import AsyncIterator, Callable, Mapping
 from contextlib import AsyncExitStack, asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from functools import partial
 from pathlib import Path
@@ -37,6 +37,10 @@ from app.bootstrap.code_index_worker import (
     index_consumer,
     index_leader_tasks,
 )
+from app.bootstrap.gitlab_reviews import (
+    GitLabReviewWorkerResources,
+    build_gitlab_review_worker_resources,
+)
 from app.bootstrap.llm_gateway import build_gateway
 from app.bootstrap.worker_shutdown import (
     finish_cleanup,
@@ -48,6 +52,10 @@ from app.bootstrap.worker_shutdown import (
 from app.common.infrastructure.db.leader import WORKER_LEADER_LOCK, run_as_leader
 from app.common.infrastructure.heartbeat import beat, heartbeat_file, reset
 from app.modules.code_index.application.leader_tasks import CodeIndexLeaderTasks
+from app.modules.integrations.gitlab.infrastructure.settings import (
+    GitLabRuntimeSettings,
+    GitLabSettingsError,
+)
 from app.modules.integrations.webhooks.infrastructure.github_installation_tree_provider import (
     GitHubAppInstallationAccessTokenProvider,
     InMemoryInstallationAccessTokenCache,
@@ -64,6 +72,7 @@ from app.modules.reviews.application.conventions import (
     RepositoryConventionsSource,
     RepositoryFile,
     RepositorySnapshot,
+    RepositoryTreeInput,
 )
 from app.modules.reviews.application.determine_ci_eligibility import (
     CiEligibility,
@@ -71,6 +80,7 @@ from app.modules.reviews.application.determine_ci_eligibility import (
 )
 from app.modules.reviews.application.execute_review import (
     ExecuteReviewRun,
+    PullRequestMetaSource,
     ReviewModel,
     ReviewPromptRepository,
 )
@@ -114,6 +124,7 @@ from app.modules.reviews.application.review_output import (
     ReviewOutputHandler,
     ReviewProvider,
 )
+from app.modules.reviews.application.run_delivery import HandleRunDelivery
 from app.modules.reviews.application.run_failures import (
     FAST_ATTEMPT_DEADLINE,
     HEARTBEAT_INTERVAL,
@@ -136,6 +147,7 @@ from app.modules.reviews.application.try_enqueue_webhook_run import (
 from app.modules.reviews.application.vcs_diff import (
     PullRequestLocator,
     VcsProvider,
+    VcsProviderSelector,
     _is_generated,
 )
 from app.modules.reviews.infrastructure.amqp import (
@@ -171,9 +183,6 @@ from app.modules.reviews.infrastructure.github_vcs import (
     HttpGitHubVcsProvider,
     InstallationTokenProvider,
 )
-from app.modules.reviews.infrastructure.gitlab_review_publication import (
-    GitLabMergeRequestDiscussionGateway,
-)
 from app.modules.reviews.infrastructure.llm.ecb_fx import EcbFxQuoteCache, EcbFxRateAdapter
 from app.modules.reviews.infrastructure.llm.gateway import LlmGateway
 from app.modules.reviews.infrastructure.llm.models import (
@@ -204,6 +213,7 @@ from app.modules.reviews.infrastructure.review_output_unit_of_work import (
 from app.modules.reviews.infrastructure.review_prompt_repository import (
     SqlAlchemyReviewPromptRepository,
 )
+from app.modules.reviews.infrastructure.run_delivery import SqlAlchemyRunDeliveryReader
 from app.modules.reviews.infrastructure.run_lifecycle_store import (
     SqlAlchemyRunLifecycleUnitOfWork,
     SqlAlchemyRunTraceUnitOfWork,
@@ -235,6 +245,7 @@ async def process_review_run(
     trace: TransactionalRunTrace | None = None,
     engine: str = "fast",
     context_stage: ReviewContextStage | None = None,
+    vcs_provider_selector: VcsProviderSelector | None = None,
 ) -> bool:
     """Process one run using the worker's already-created database pool.
 
@@ -255,16 +266,16 @@ async def process_review_run(
         ProviderConventionsModel(provider),
         lambda: SqlAlchemyRepositoryConventionsUnitOfWork(session_factory),
     )
-    stage_options = {} if context_stage is None else {"context_stage": context_stage}
     processor = ReviewRunProcessor(
         repository,
         provider,
         blob_cache,
         conventions,
         vcs_provider=vcs_provider,
+        vcs_provider_selector=vcs_provider_selector,
         trace=trace,
         uow_factory=lambda: SqlAlchemyRunProcessingUnitOfWork(session_factory),
-        **stage_options,
+        context_stage=context_stage,
     )
     publisher = output or PublishReviewOutput(
         lambda: SqlAlchemyReviewOutputUnitOfWork(session_factory), provider
@@ -363,12 +374,16 @@ class UnconfiguredModel:
         raise RunFailure("llm_unavailable", LLM_NOT_CONFIGURED)
 
 
+class AttemptRepositorySource(RepositoryConventionsSource, PullRequestMetaSource, Protocol):
+    """The repository capabilities consumed by one worker attempt."""
+
+
 class AttemptReviewProvider:
     """One attempt's provider: GitHub reads of the Run plus the models for the attempt."""
 
     def __init__(
         self,
-        source: GitHubRunSource,
+        source: AttemptRepositorySource,
         conventions: ConventionsModel,
         review: GatewayReviewModel | UnconfiguredModel,
     ) -> None:
@@ -385,7 +400,7 @@ class AttemptReviewProvider:
     async def fetch_agents_md(self, repository_id: UUID) -> RepositorySnapshot:
         return await self._source.fetch_agents_md(repository_id)
 
-    async def fetch_tree(self, repository_id: UUID) -> tuple[RepositoryFile, ...]:
+    async def fetch_tree(self, repository_id: UUID) -> RepositoryTreeInput:
         return await self._source.fetch_tree(repository_id)
 
     async def fetch_files(
@@ -427,10 +442,9 @@ class WorkerSettings:
     portal_url: str | None
     heartbeat_file: Path | None = None
     llm: LlmSettings | None = None
-    gitlab_token: str | None = None
-    gitlab_base_url: str = "https://gitlab.com"
     redis_url: str | None = None
     code_index: CodeIndexSettings = CodeIndexSettings()
+    gitlab: GitLabRuntimeSettings | None = field(default=None, repr=False)
 
     @property
     def github_app_configured(self) -> bool:
@@ -448,6 +462,11 @@ class WorkerSettings:
         rabbitmq_url = required("RABBITMQ_URL")
         llm = LlmSettings.from_env(env) if env.get("LLM_MODEL") else None
 
+        try:
+            gitlab = GitLabRuntimeSettings.optional_from_environment(env)
+        except GitLabSettingsError:
+            raise RuntimeError("GitLab review worker configuration is invalid") from None
+
         return cls(
             database_url=database_url,
             rabbitmq_url=rabbitmq_url,
@@ -459,8 +478,7 @@ class WorkerSettings:
             heartbeat_file=heartbeat_file(env),
             # Partly set LLM_* fails the start; none at all starts with a warning.
             llm=llm,
-            gitlab_token=env.get("GITLAB_TOKEN") or None,
-            gitlab_base_url=env.get("GITLAB_BASE_URL") or "https://gitlab.com",
+            gitlab=gitlab,
             # Optional: the cache of AST facts and file trees of the context stage.
             redis_url=env.get("REDIS_URL") or None,
             code_index=CodeIndexSettings.from_environment(env),
@@ -677,17 +695,6 @@ def github_adapters(
     )
 
 
-def gitlab_review_gateway(
-    settings: WorkerSettings,
-    client: httpx.AsyncClient | None,
-) -> GitLabMergeRequestDiscussionGateway | None:
-    """GitLab discussions when ``GITLAB_TOKEN`` is set. Unset leaves the run publishing."""
-    token = settings.gitlab_token
-    if not token or client is None:
-        return None
-    return GitLabMergeRequestDiscussionGateway(client=client, token=token)
-
-
 def attempt_provider_factory(
     gateway: LlmGateway | None, github: GitHubAdapters | None
 ) -> ProviderFactory:
@@ -696,25 +703,39 @@ def attempt_provider_factory(
     def factory(claimed: ClaimedAttempt) -> ReviewWorkerProvider:
         if github is None:
             raise RunFailure("github_forbidden", "the GitHub App is not configured")
-        source = github.run_source(claimed.run_id)
-        if gateway is None:
-            return AttemptReviewProvider(source, UnconfiguredModel(), UnconfiguredModel())
-        run = RunCallContext(
-            run_id=claimed.run_id,
-            workspace_id=claimed.workspace_id,
-            attempt=claimed.attempt,
-            engine=claimed.engine,
-            deadline=claimed.deadline,
-            prompt_version_id=claimed.prompt_version_id,
-            rule_version_id=claimed.rule_version_id,
-        )
-        return AttemptReviewProvider(
-            source,
-            GatewayConventionsModel(gateway, run),
-            GatewayReviewModel(gateway, run, source),
-        )
+        return attempt_model_provider(gateway, github.run_source(claimed.run_id), claimed)
 
     return factory
+
+
+def attempt_model_provider(
+    gateway: LlmGateway | None,
+    source: AttemptRepositorySource,
+    claimed: ClaimedAttempt,
+) -> ReviewWorkerProvider:
+    if gateway is None:
+        return AttemptReviewProvider(source, UnconfiguredModel(), UnconfiguredModel())
+    run = RunCallContext(
+        run_id=claimed.run_id,
+        workspace_id=claimed.workspace_id,
+        attempt=claimed.attempt,
+        engine=claimed.engine,
+        deadline=claimed.deadline,
+        prompt_version_id=claimed.prompt_version_id,
+        rule_version_id=claimed.rule_version_id,
+    )
+    return AttemptReviewProvider(
+        source, GatewayConventionsModel(gateway, run), GatewayReviewModel(gateway, run, source)
+    )
+
+
+@dataclass(frozen=True)
+class BoundVcsProviderSelector:
+    expected_locator: PullRequestLocator
+    provider: VcsProvider
+
+    def select(self, locator: PullRequestLocator) -> VcsProvider | None:
+        return self.provider if locator == self.expected_locator else None
 
 
 @dataclass(frozen=True)
@@ -722,6 +743,7 @@ class WorkerProcess:
     """Everything the worker process runs; built without a broker connection for tests."""
 
     handle_run: HandleReviewRun
+    handle_delivery: HandleRunDelivery
     publish_review: PublishRunReview
     enqueue: TryEnqueueWebhookRun
     sweep: SweepNoCi | None
@@ -751,6 +773,7 @@ def compose_worker_process(
     queue: WorkerQueue,
     github: GitHubAdapters | None,
     gitlab_reviews: GitLabDiscussionGateway | None = None,
+    gitlab: GitLabReviewWorkerResources | None = None,
     gateway: LlmGateway | None = None,
     provider_factory: ProviderFactory | None = None,
     delays: RetryDelays | None = None,
@@ -759,30 +782,63 @@ def compose_worker_process(
     now: Callable[[], datetime] = lambda: datetime.now(UTC),
     index_tasks: CodeIndexLeaderTasks | None = None,
 ) -> WorkerProcess:
-    factory = provider_factory or attempt_provider_factory(gateway, github)
+    if gitlab is not None and gitlab_reviews is not None:
+        raise ValueError("ambiguous GitLab publication resources")
     run_url = run_url_factory(settings.portal_url)
     lifecycle = partial(SqlAlchemyRunLifecycleUnitOfWork, session_factory)
     trace = TransactionalRunTrace(partial(SqlAlchemyRunTraceUnitOfWork, session_factory))
 
     async def pipeline(claimed: ClaimedAttempt) -> bool:
-        if github is None:
-            raise RunFailure("github_forbidden", "the GitHub App is not configured")
         checkpoint = AttemptCheckpoint(lifecycle, claimed.run_id, claimed.deadline, now)
+        expected = await SqlAlchemyRunRepository(
+            session_factory, allow_unscoped=True
+        ).get_run_vcs_input(claimed.run_id)
+        if expected is None:
+            raise RunCancelled("installation_unavailable")
         output = StoreReviewOutput(
             partial(SqlAlchemyReviewOutputUnitOfWork, session_factory),
             queue,
             worker_id=claimed.worker_id,
             now=now,
         )
-        return await process_review_run(
-            claimed.run_id,
-            CheckpointedProvider(factory(claimed), checkpoint),
-            session_factory,
+
+        async def execute(
+            vcs: VcsProvider,
+            source: AttemptRepositorySource | None,
+            stage: ReviewContextStage | None,
+        ) -> bool:
+            if provider_factory is not None:
+                provider = provider_factory(claimed)
+            else:
+                assert source is not None
+                provider = attempt_model_provider(gateway, source, claimed)
+            return await process_review_run(
+                claimed.run_id,
+                CheckpointedProvider(provider, checkpoint),
+                session_factory,
+                vcs,
+                output=output,
+                trace=trace,
+                engine=claimed.engine,
+                context_stage=stage,
+                vcs_provider_selector=BoundVcsProviderSelector(expected.locator, vcs),
+            )
+
+        if expected.provider == "gitlab":
+            if gitlab is None or claimed.engine != "fast":
+                raise RunFailure("diff_fetch_failed", "GitLab review capability is unavailable")
+            async with gitlab.attempt(
+                claimed=claimed, expected_input=expected, checkpoint=checkpoint, trace=trace
+            ) as bundle:
+                return await execute(bundle.vcs, bundle.source, bundle.context_stage)
+        if expected.provider != "github":
+            raise RunFailure("diff_fetch_failed", "Review provider is unavailable")
+        if github is None:
+            raise RunFailure("github_forbidden", "the GitHub App is not configured")
+        return await execute(
             github.vcs,
-            output=output,
-            trace=trace,
-            engine=claimed.engine,
-            context_stage=github.context_stage(trace, checkpoint) if github.context_stage else None,
+            github.run_source(claimed.run_id) if provider_factory is None else None,
+            github.context_stage(trace, checkpoint) if github.context_stage else None,
         )
 
     enqueue = TryEnqueueWebhookRun(
@@ -794,24 +850,29 @@ def compose_worker_process(
             publisher=queue,
         ),
     )
+    handle_run = HandleReviewRun(
+        uow_factory=lifecycle,
+        pipeline=pipeline,
+        retry_queue=queue,
+        check_runs=github.check_runs if github is not None else None,
+        worker_id=settings.worker_id,
+        selection=SqlAlchemyBranchSelectionRule(session_factory),
+        delays=delays,
+        attempt_deadline=attempt_deadline,
+        heartbeat_interval=heartbeat_interval,
+        run_url=run_url,
+        now=now,
+    )
     return WorkerProcess(
-        handle_run=HandleReviewRun(
-            uow_factory=lifecycle,
-            pipeline=pipeline,
-            retry_queue=queue,
-            check_runs=github.check_runs if github is not None else None,
-            worker_id=settings.worker_id,
-            selection=SqlAlchemyBranchSelectionRule(session_factory),
-            delays=delays,
-            attempt_deadline=attempt_deadline,
-            heartbeat_interval=heartbeat_interval,
-            run_url=run_url,
-            now=now,
+        handle_run=handle_run,
+        handle_delivery=HandleRunDelivery(
+            SqlAlchemyRunDeliveryReader(session_factory), handle_run.execute
         ),
         publish_review=PublishRunReview(
             uow_factory=lifecycle,
             reviews=github.reviews if github is not None else None,
             gitlab_reviews=gitlab_reviews,
+            gitlab_publications=gitlab.publications if gitlab is not None else None,
             check_runs=github.check_runs if github is not None else None,
             trace=trace,
             run_url=run_url,
@@ -840,6 +901,7 @@ async def run_worker(
     github_transport: httpx.AsyncBaseTransport | None = None,
     llm_transport: httpx.AsyncBaseTransport | None = None,
     fx_transport: httpx.AsyncBaseTransport | None = None,
+    gitlab_transport_factory: Callable[[], httpx.AsyncBaseTransport] | None = None,
 ) -> None:
     """Consume until cancelled or stopped; main owns the process signal deadline."""
     async with stop_during_startup(stop) as startup_complete:
@@ -853,6 +915,7 @@ async def run_worker(
             github_transport=github_transport,
             llm_transport=llm_transport,
             fx_transport=fx_transport,
+            gitlab_transport_factory=gitlab_transport_factory,
         )
 
 
@@ -867,6 +930,7 @@ async def _run_worker(
     github_transport: httpx.AsyncBaseTransport | None = None,
     llm_transport: httpx.AsyncBaseTransport | None = None,
     fx_transport: httpx.AsyncBaseTransport | None = None,
+    gitlab_transport_factory: Callable[[], httpx.AsyncBaseTransport] | None = None,
 ) -> None:
     """Consume until cancelled; the caller owns signal handling.
 
@@ -888,13 +952,6 @@ async def _run_worker(
                 )
             )
             if settings.github_app_configured
-            else None
-        )
-        gitlab_client = (
-            await stack.enter_async_context(
-                httpx.AsyncClient(base_url=settings.gitlab_base_url, timeout=10.0)
-            )
-            if settings.gitlab_token
             else None
         )
         gateway: LlmGateway | None = None
@@ -924,7 +981,17 @@ async def _run_worker(
                 github=github_adapters(
                     settings, client, session_factory, cast(RedisLike | None, redis)
                 ),
-                gitlab_reviews=gitlab_review_gateway(settings, gitlab_client),
+                gitlab=(
+                    build_gitlab_review_worker_resources(
+                        settings=settings.gitlab,
+                        session_factory=session_factory,
+                        redis=cast(RedisLike | None, redis),
+                        execution_profile=execution_profile_of(settings.llm),
+                        transport_factory=gitlab_transport_factory,
+                    )
+                    if settings.gitlab is not None
+                    else None
+                ),
                 gateway=gateway,
                 provider_factory=provider_factory,
                 delays=delays,
@@ -956,7 +1023,7 @@ async def _run_worker(
                                 run_queue,
                                 partial(
                                     handle_run_delivery,
-                                    handler=process.handle_run.execute,
+                                    handler=process.handle_delivery.execute,
                                     publisher=channels.publisher,
                                 ),
                                 **stop_options,

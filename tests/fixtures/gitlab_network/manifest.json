@@ -1,0 +1,212 @@
+{
+  "schema": "dmc-gitlab-network-proof/v1",
+  "project": 17,
+  "source_project": 29,
+  "refs": {
+    "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "start": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "merge_base": "cccccccccccccccccccccccccccccccccccccccc",
+    "next_head": "9999999999999999999999999999999999999999"
+  },
+  "paths": {
+    "new": "app/proof.py",
+    "old": "app/old.py",
+    "javascript": "web/label.js",
+    "unknown": "asset.unknown",
+    "empty": "app/empty.py",
+    "agents": "AGENTS.md",
+    "rules": ".review/rules.md"
+  },
+  "directories": {
+    "app": "1111111111111111111111111111111111111111",
+    "web": "2222222222222222222222222222222222222222",
+    ".review": "3333333333333333333333333333333333333333"
+  },
+  "blobs": {
+    "new": {
+      "oid": "87a1358dd7c4fa34b8d234f3f959f38a3f0b7214",
+      "size": 300,
+      "sha256": "5c28accb5f25297c74318661bd94a7f6cd0e23e76c64aa2a1192db9c00dfb54e",
+      "text": "def compute():\n    return None\n#...........................................................................................................................................................................................................................................................................\n"
+    },
+    "new2": {
+      "oid": "f56e01695e45aec8a266f2422bb63a2bcc48dd7a",
+      "size": 300,
+      "sha256": "a4542793b5ba68ac75955613c48790d67e33b9b2dee642b56ce1b8239711120c",
+      "text": "def compute():\n    return None\n# Generation two.\n#.........................................................................................................................................................................................................................................................\n"
+    },
+    "old": {
+      "oid": "3d4b51bbaa3325b9deeb2389b2fbdf78edaf4de7",
+      "size": 300,
+      "sha256": "02b02ae6cac581146f9f0b447a64c8c868d864d2d99815a0a75f99549aa5ce83",
+      "text": "def compute():\n    return 1\n#..............................................................................................................................................................................................................................................................................\n"
+    },
+    "javascript": {
+      "oid": "76006771722fe90bce7ea8e24444a10c30df4b8b",
+      "size": 100,
+      "sha256": "76408a22be66b2b6ac23509c53692cdcafb7f5b66677f527a1f145671a5b8cc8",
+      "text": "export const label = 'proof';\n//...................................................................\n"
+    },
+    "unknown": {
+      "oid": "4bf9dfab3d1bdeb6be29c888bc9571b620f5b64a",
+      "size": 57,
+      "sha256": "48e99b8be5026301878f5561835b32e265819c9c9437aac8b05f06176f7dfdfb",
+      "text": "?????????????????????????????????????????????????????????"
+    },
+    "empty": {
+      "oid": "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391",
+      "size": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "text": ""
+    },
+    "agents": {
+      "oid": "3f5147b152fd5a779b9bdd0fa86cf5958f4365ac",
+      "size": 8,
+      "sha256": "0e0eb018136aab968ff16aabe58c3e1f7314a411122d4846f607cd9f6e794f2b",
+      "text": "Use uv.\n"
+    },
+    "rules": {
+      "oid": "7ee488af8a52b558023739ea72b3a5142da7baf9",
+      "size": 34,
+      "sha256": "20a6ebbce408a9c520e1ae75dced063c0e65cfea26aee6071a60971b0e24f168",
+      "text": "```review-ignore\ngenerated/**\n```\n"
+    }
+  },
+  "expected": {
+    "languages": {
+      "Python": 75,
+      "JavaScript": 25
+    },
+    "known_bytes": 400,
+    "unknown_bytes": 57,
+    "empty_bytes": 0,
+    "changed_line": 2,
+    "rule_name": "Error Handling Standards",
+    "max_runtime_seconds": 600,
+    "audit_seconds": 30,
+    "postman_port": 49400,
+    "tls_port": 49443,
+    "note_ids": {
+      "A:12": [
+        1000,
+        1001
+      ],
+      "A:13": [
+        1002,
+        1003
+      ],
+      "B:12": [
+        1000,
+        1001
+      ],
+      "C:12": [
+        1000,
+        1001
+      ]
+    }
+  },
+  "conventions": {
+    "files": [
+      {
+        "path": "app/proof.py",
+        "relevance": "Changed return value."
+      }
+    ],
+    "key_patterns": [
+      "Use explicit return values.",
+      "Keep existing boundaries.",
+      "Review changed lines."
+    ],
+    "recommendations": [
+      "Recommendation one (from: standard/correctness)",
+      "Recommendation two (from: standard/correctness)",
+      "Recommendation three (from: standard/correctness)",
+      "Recommendation four (from: standard/correctness)",
+      "Recommendation five (from: standard/correctness)"
+    ]
+  },
+  "review": {
+    "findings": [
+      {
+        "path": "app/proof.py",
+        "line": 2,
+        "start_line": null,
+        "severity": "high",
+        "category": "correctness",
+        "title": "Unexpected missing result",
+        "body": "According to custom instructions in 'Error Handling Standards' (repository rule): Returning None discards the computed result and breaks callers.",
+        "suggestion": null,
+        "confidence": 0.99,
+        "rule_name": "Error Handling Standards"
+      }
+    ],
+    "summary": {
+      "problem": "The function discards its result.",
+      "done_well": "The change is small.",
+      "effort": "small"
+    }
+  },
+  "provenance": [
+    "Consumed GitLab REST /user, projects, merge requests, saved diff versions, repository tree/files/blobs and discussions contracts.",
+    "OpenAI-compatible chat envelope consumed by the existing shared LlmGateway.",
+    "Adapted previous local T12/T10 fixture contracts and accepted T14b real worker schema; no published owner mock discovery/authentication attempted."
+  ],
+  "diffs": {
+    "first": "@@ -1,3 +1,3 @@\n-def compute():\n-    return 1\n-#..............................................................................................................................................................................................................................................................................\n+def compute():\n+    return None\n+#...........................................................................................................................................................................................................................................................................\n",
+    "next": "@@ -1,3 +1,4 @@\n-def compute():\n-    return 1\n-#..............................................................................................................................................................................................................................................................................\n+def compute():\n+    return None\n+# Generation two.\n+#.........................................................................................................................................................................................................................................................\n"
+  },
+  "tenants": {
+    "A": {
+      "host": "localhost",
+      "project": 17,
+      "source_project": 29
+    },
+    "B": {
+      "host": "127.0.0.1",
+      "project": 17,
+      "source_project": 29
+    },
+    "C": {
+      "host": "localhost",
+      "project": 18,
+      "source_project": 30
+    },
+    "D": {
+      "host": "localhost",
+      "project": 19,
+      "source_project": 31
+    },
+    "E": {
+      "host": "localhost",
+      "project": 20,
+      "source_project": 32
+    }
+  },
+  "merge_request": {
+    "id": 912,
+    "iid": 12,
+    "project_id": 17,
+    "target_project_id": 17,
+    "source_project_id": 29,
+    "state": "opened",
+    "updated_at": "2026-10-19T08:30:00+00:00",
+    "web_url": "https://localhost:49443/team/project/-/merge_requests/12",
+    "diff_refs": {
+      "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "start_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "base_sha": "cccccccccccccccccccccccccccccccccccccccc"
+    },
+    "changes_count": "1",
+    "title": "Pinned return-value change",
+    "description": "Synthetic consumed contract",
+    "author": {
+      "username": "fixture-author"
+    },
+    "source_branch": "feature",
+    "target_branch": "main",
+    "labels": [
+      "ai-review"
+    ],
+    "draft": false
+  }
+}

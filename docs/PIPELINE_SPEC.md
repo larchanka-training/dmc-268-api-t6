@@ -35,9 +35,12 @@ stateDiagram-v2
   skipped --> [*]
 ```
 
+Все check-run эффекты таблицы и retry/cancel ниже относятся только к GitHub;
+GitLab использует общий lifecycle без создания/обновления/закрытия GitHub check-run.
+
 | # | Из → в | Триггер | Кто | Guard | Побочные эффекты: сообщение · check-run |
 |---|---|---|---|---|---|
-| T1 | `[*]` → `queued` | `pull_request.labeled` (`ai-review`) и `reopened`, `check_suite` / `workflow_run.completed`, `pull_request.synchronize` → `try_enqueue` | webhook-worker (#52) | условие Р-10 (§8) ∧ нет активного Run по PR (Р-2) ∧ нет Run с `trigger = webhook` для `(PR, head_sha)`; фильтр веток здесь не проверяется — его применяет RunGuard при claim (T5) | INSERT `runs` (`attempt = 0`, `available_at = now`), после commit — `review.run/v1` в `review.run.{engine}` · check-run не создаётся |
+| T1 | `[*]` → `queued` | GitLab MR open/update/reopen (§8.4) либо GitHub `pull_request.labeled` (`ai-review`) и `reopened`, `check_suite` / `workflow_run.completed`, `pull_request.synchronize` → `try_enqueue` | webhook-worker (#52) | provider-specific условие (§8) ∧ нет активного Run по PR (Р-2) ∧ нет Run с `trigger = webhook` для `(PR, head_sha)`; фильтр веток здесь не проверяется — его применяет RunGuard при claim (T5) | INSERT `runs` (`attempt = 0`, `available_at = now`), после commit — `review.run/v1` в `review.run.{engine}` · check-run не создаётся |
 | T2 | `[*]` → `queued` | sweep «2 мин без CI» → тот же `try_enqueue` | worker, leader-цикл (#34) | `wait_for_ci = auto` ∧ ни чужих check suites (кроме `queued` без check run), ни статусов коммита ≥ 2 мин (§8.3) ∧ guard T1 | как T1 |
 | T3 | `[*]` → `queued` | `POST /api/runs/{id}/rerun` | portal-api (#34) | PR открыт [дефолт] ∧ нет активного Run по PR ∧ есть кандидат запуска ∧ Repository не приостановлен ∧ App доступна; отказы `409`/`422` — [§6.1](#61-http-отказы-rerun); лейбл `ai-review`, готовность CI и фильтр веток не проверяются (фильтр применяет RunGuard при claim, T5) | новый Run на текущий `head_sha`, `trigger = rerun`, AMQP priority 9 · check-run не создаётся |
 | T4 | `queued` → `running` | доставка `review.run/v1` | worker | RunGuard: `state = queued` ∧ `available_at ≤ now` ∧ ¬`cancel_requested` ∧ `head_sha` актуален ∧ PR открыт | одним UPDATE: `attempt += 1`, `lease_until = now + 5 мин`, `worker_id`; `started_at` при первой попытке · check-run `in_progress` (создаётся при `attempt = 1`) |
@@ -78,7 +81,7 @@ provider-проекциях; повторный проход не меняет t
 
 | Поле | Значения и формат | Что означает |
 |---|---|---|
-| `trigger` | `webhook \| manual \| rerun \| dry_run`, тот же enum, что в `review.run/v1` (§12) | `webhook`: Run создан `try_enqueue` по событию GitHub или sweep (T1, T2); `rerun`: Run создан `POST /api/runs/{id}/rerun` (T3). `manual` и `dry_run` зарезервированы, таких Run сейчас никто не создаёт |
+| `trigger` | `webhook \| manual \| rerun \| dry_run`, тот же enum, что в `review.run/v1` (§12) | `webhook`: Run создан по допустимому GitHub/GitLab событию либо GitHub-only sweep (T1, T2); `rerun`: Run создан `POST /api/runs/{id}/rerun` (T3). `manual` и `dry_run` зарезервированы, таких Run сейчас никто не создаёт |
 | `createdAt` | RFC 3339 в UTC с суффиксом `Z`, например `2026-09-25T10:00:00Z`; не бывает `null` | время вставки строки `runs`, то есть переход `[*]` → `queued`. По нему же отсортирован список и построен курсор |
 
 Что по ним можно установить:
@@ -447,6 +450,10 @@ GitHub для этого нет.
 
 ## 7. Check-run бота (SD §8.3)
 
+Этот раздел и все check-run эффекты T4–T18 относятся только к GitHub. GitLab Run
+проходит те же lifecycle/retry/cancel guards без mint/update/close GitHub check-run;
+сигналы и реконсилер не дают GitLab GitHub authority.
+
 Один check-run на Run (`external_id = run_id`). Он создаётся при первом claim (T4), следующие попытки его обновляют. `conclusion: failure` не используется никогда: бот не блокирует merge.
 
 | Итог Run | `status` / `conclusion` | Заголовок | Summary |
@@ -465,7 +472,7 @@ Check-run Run, завершённого без воркера (T6 после п�
 
 ## 8. Триггер (Р-10, D2)
 
-### 8.1 Условие
+### 8.1 Условие GitHub
 
 `try_enqueue(pr)` (#11) — одна функция для обработчиков вебхуков и для sweep в worker (§8.3). Она решает по состоянию, а не по последнему событию (SD §6.1). Run создаётся, когда выполнены все условия:
 
@@ -505,6 +512,30 @@ Check-run Run, завершённого без воркера (T6 после п�
 - **Где:** #34 реализует leader-цикл worker (лидер через `pg_advisory_lock`) с периодом 30 с [дефолт] и вызывает предоставленный #38 `SweepNoCi`. У worker уже есть ключ App (SD §8.3), поэтому REST-проверка не требует новых секретов. Реконсилер portal-api с периодом 5 мин sweep не заменяет.
 - **Кандидаты:** #38 выбирает короткой транзакцией PR: открыт ∧ `ai_review_labeled` ∧ репозиторий включён (`enabled`) ∧ `installation_available` ∧ `wait_for_ci = auto` ∧ `ci_status` пуст (исключённый кандидат получает маркер `{"sweep":"excluded"}`) ∧ нет активного Run по PR ∧ нет Run с `trigger = webhook` для `(PR, head_sha)` ∧ прошло ≥ 2 мин с более позднего из `ai_review_labeled_at` и `head_first_seen_at`. `check_suite` и `status` текущего `head_sha` обновляют `ci_status` как кэш; изменение head или состояния лейбла очищает его.
 - **Действие:** после завершения транзакции #38 вызывает обычный `try_enqueue(pr)` без `allow_no_ci`; окончательное решение всё так же принимает GitHub REST в `DetermineCiEligibility`. Результат `DEFERRED` (активен Run другого head с запрошенной отменой) кандидата не исключает: sweep повторит его на следующем проходе, в который PR снова попадёт в выборку. Выборка не берёт PR с активным Run, поэтому `DEFERRED` sweep получает, только если такой Run стал активным после выборки; пока он активен, проходы пропускают PR без REST-запроса. При любом другом результате, кроме `ENQUEUED`, #38 помечает кандидата исключённым до изменения head или состояния лейбла, чтобы sweep не повторял REST-запрос каждые 30 с. #34 владеет только лидер-циклом и его расписанием.
+
+---
+
+### 8.4 GitLab MR intake (#169)
+
+MR open/update/reopen проецируются из текущего provider state под отдельным MR lock,
+потом проходят provider-specific eligibility и общий enqueue/outbox. Нужны исходный
+active connection, неизменный bound target project/head, open MR, enabled/available
+repository, active rules/prompt и `wait_for_ci=never`. GitHub `ai-review` label и CI
+условия §8.1 к GitLab не применяются. `auto`/`always` не поддерживаются; no-CI sweep,
+CI deliveries и code index остаются GitHub-only; deep/RAG для GitLab не поддерживаются.
+Close/merge и новый head отменяют прежнюю работу; duplicate receipt/run не создаёт
+повторного Run. Admission и selective activation default-off; настройка и #171 gate —
+[SECRETS](SECRETS.md), транспорт receipts — [WEBHOOK_WORKER](WEBHOOK_WORKER.md).
+
+GitLab attempt использует original stored credential + generation и immutable MR refs.
+Policy/conventions: TARGET/START; context: SOURCE/HEAD; old diff: merge-base. Bounded
+version/diff/tree/blob readers проверяют полноту и fork/route identities до анализа;
+overflow/несовпадение/недоступность не превращаются в complete scope. Mandatory policy,
+ignore и context stage выполняются и с provider hook, sources изолированы по attempt.
+Shared LLM, usage/cost, postprocess и installed publisher сохраняют общий lifecycle.
+Неподдержанный GitLab/deep завершается через существующий ограниченный retry
+`diff_fetch_failed`, без Graph capability. Rotate/revoke retire активные Runs с
+`credential_rotated`/`installation_revoked`; новые calls старого credential запрещены.
 
 ---
 
@@ -590,6 +621,16 @@ UI рисует диапазон `[newLine ?? oldLine, endLine ?? newLine ?? old
 | `review.publish/v1` | `contracts/schemas/review.publish.v1.schema.json` | `contracts/examples/review.publish.v1.json` | worker (T8), реконсилер (T17) → publisher (MVP — consumer `review.publish` в процессе worker) |
 | `index.repo/v1` | `contracts/schemas/index.repo.v1.schema.json` | `contracts/examples/index.repo.v1.json` | worker (`AmqpIndexWakeups`: повторное пробуждение задания), триггеры #143 → индексатор графа в worker (#142) |
 
+При приёме `review.run/v1` consumer переносит immutable provider/workspace/repository/
+project/installation/PR/head/base/engine/rule/prompt/trigger claims в обязательный
+persisted-origin guard до UUID lifecycle handler. Постоянный mismatch отправляется
+сразу в DLQ; отсутствующая/неактивная работа ACK; недоступность reader использует
+существующий bounded retry. `attempt`, время, `full_name`, `base_ref` не являются
+identity checks. Текущий head/state CodeChange не отбрасывает законный поздний cancel:
+mutable lifecycle guards выполняются позже. Paused repository также доходит до обычного
+SKIPPED/terminal handling. Schema v1 не меняется; guard transport admission не выдаёт
+request credential authority. Все provider HTTP и LLM calls — вне DB transaction.
+
 В `index.repo/v1` `message_id` — UUIDv5 от `repository_id:generation:requested_at` в пространстве имён `MESSAGE_ID_NAMESPACE` ([amqp.py](../app/modules/code_index/infrastructure/amqp.py)); схемой это не выражается (указано в `description`), consumer отвергает в DLQ сообщение с другим id. Фикстура несёт выведенный так id.
 
 Фикстуры — строгий JSON вместо jsonc из SD §7.2. Что изменилось по сравнению с SD §7.2:
@@ -622,7 +663,7 @@ UI рисует диапазон `[newLine ?? oldLine, endLine ?? newLine ?? old
 | «общий скор / вердикт» | `verdict: blocking \| attention \| clean \| null`, сохраняется backend вместе с coverage; скора нет | §11 (D3, #107) | #34, ui#57, #30 (`expected_verdict`) |
 | Diff Suggestion; предлагаемый diff-fix (карточка техлида) | `suggestion` находки: замена строк `start_line..line`; `null` — замены нет | §9 | #33, ui#57 |
 | запуск по `opened` / `synchronize` | конъюнкция Р-10: стоит лейбл `ai-review` ∧ CI зелёный; `synchronize` отменяет устаревший Run и запускает авто-повтор | §8 (D2) | #11 |
-| «GitHub / GitLab» (карточки Инженера 1 и Инженера 3) | публикация обсуждений GitHub и GitLab реализована; Bitbucket не реализован; приём GitLab (вебхуки, diff, блобы) не реализован (Р-11) | SD §8.1, §8.4; §2 | #97 |
+| «GitHub / GitLab» (карточки Инженера 1 и Инженера 3) | GitHub и installed GitLab intake/fast/publication реализованы; GitLab default-off и live gate #171 сохраняются; Bitbucket не реализован (Р-11) | SD §8.1, §8.4; §2 | #97 |
 | LLM Gateway с провайдерами и fallback | LLM Gateway (SD §5): ротация ключей внутри шлюза, fallback-модель по §5.1, strict structured output (D7) | §4.5, §5 | #33 |
 | хранилище секретов | env из CI; перечень и правила — `docs/SECRETS.md` (роль 3) | SD §13, `docs/SECRETS.md` | #35 |
 | инфраструктура DevOps: PostgreSQL и Redis | PostgreSQL 17 + RabbitMQ + Redis (D1) | §14, SD §10, §14 | #35 |

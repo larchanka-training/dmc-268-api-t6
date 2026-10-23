@@ -36,6 +36,8 @@ from app.modules.reviews.application.conventions import (
     PolicyFilteredConventionsSource,
     RepositoryFile,
     RepositorySnapshot,
+    RepositoryTreeInput,
+    RepositoryTreeResult,
     derive_languages,
 )
 from app.modules.reviews.application.conventions_prompt import (
@@ -106,7 +108,7 @@ class FakeSource:
         self.calls.append("agents")
         return RepositorySnapshot(content="Always use uv.", sha=AGENTS_SHA)
 
-    async def fetch_tree(self, repository_id: UUID) -> tuple[RepositoryFile, ...]:
+    async def fetch_tree(self, repository_id: UUID) -> RepositoryTreeInput:
         assert repository_id == REPOSITORY_ID
         self.calls.append("tree")
         return (
@@ -380,7 +382,7 @@ def test_conventions_request_limits_repository_files_to_ten() -> None:
 
     @dataclass
     class ManyFilesSource(FakeSource):
-        async def fetch_tree(self, repository_id: UUID) -> tuple[RepositoryFile, ...]:
+        async def fetch_tree(self, repository_id: UUID) -> RepositoryTreeInput:
             assert repository_id == REPOSITORY_ID
             self.calls.append("tree")
             return tuple(RepositoryFile(f"app/file-{index:02}.py", 10) for index in range(11))
@@ -1075,3 +1077,32 @@ def test_filtered_source_drops_a_withheld_file_even_if_the_inner_source_returns_
     files = asyncio.run(filtered.fetch_files(REPOSITORY_ID, ("app/main.py", "web/app.ts")))
 
     assert [file.path for file in files] == ["app/main.py"]
+
+
+@pytest.mark.parametrize(("listing", "sizes"), [(False, True), (True, False)])
+def test_incomplete_discovery_stops_before_model_or_new_cache_save(
+    listing: bool, sizes: bool
+) -> None:
+    from app.modules.reviews.application.run_failures import RequiredSourceUnavailable
+
+    class IncompleteSource(FakeSource):
+        async def fetch_tree(self, repository_id: UUID) -> RepositoryTreeResult:
+            self.calls.append("tree")
+            return RepositoryTreeResult(
+                (RepositoryFile("app/main.py", 60),), listing, sizes, ("sizes_incomplete",)
+            )
+
+    source = IncompleteSource()
+    store = FakeStore()
+    model = FakeModel(draft())
+    with pytest.raises(RequiredSourceUnavailable) as error:
+        asyncio.run(
+            GenerateRepoConventions(source, model, FakeUnitOfWorkFactory(store)).execute(
+                repository_id=REPOSITORY_ID,
+                conventions_prompt=ActiveConventionsPrompt(PROMPT_VERSION_ID, "system"),
+                run_id=RUN_ID,
+                changed_files=("app/main.py",),
+            )
+        )
+    assert error.value.error_code == "diff_fetch_failed"
+    assert model.calls == [] and store.saved == [] and source.calls == ["agents", "tree"]

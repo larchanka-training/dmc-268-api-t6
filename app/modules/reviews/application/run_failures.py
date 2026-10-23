@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import timedelta
+from typing import Literal
 
 from app.modules.reviews.application.review_output import InvalidReviewOutput
 
@@ -95,6 +96,29 @@ class RunFailure(Exception):
         self.error_code = error_code
         self.message = message or error_code
         self.retry_after = retry_after
+
+
+class RequiredSourceUnavailable(RunFailure):
+    """Required per-run source authority is unavailable, rather than an optional file.
+
+    Producers reserve this for operational authority/credential failures. Ordinary
+    provider file/tree faults remain optional; refusal, cancellation and deadlines
+    keep their own control outcomes. No exception detail or credentials enter the text.
+    """
+
+    def __init__(
+        self,
+        error_code: Literal["diff_fetch_failed", "commit_messages_fetch_failed"],
+        *,
+        retry_after: timedelta | None = None,
+    ) -> None:
+        if error_code not in {"diff_fetch_failed", "commit_messages_fetch_failed"}:
+            raise ValueError("unsupported required source failure code")
+        super().__init__(
+            error_code,
+            "Required review source authority is unavailable",
+            retry_after=retry_after,
+        )
 
 
 class RunCancelled(Exception):

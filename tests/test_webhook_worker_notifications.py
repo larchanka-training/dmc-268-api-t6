@@ -9,14 +9,17 @@ from pathlib import Path
 from types import SimpleNamespace, TracebackType
 from typing import Literal, Self, cast
 
+import httpx
 import psycopg
 import pytest
 from sqlalchemy.ext.asyncio import AsyncEngine
+from sqlalchemy.pool import NullPool
 
 from app import webhook_worker
 from app.common.infrastructure.heartbeat import is_fresh
 from app.modules.integrations.webhooks.application.receive_github_delivery import (
     ReceiveGitHubDelivery,
+    ReplayBatchResult,
 )
 from app.modules.integrations.webhooks.application.revive_deferred_installation_deliveries import (
     ReviveDeferredInstallationDeliveries,
@@ -47,10 +50,11 @@ class Receiver:
         self.scans: asyncio.Queue[int] = asyncio.Queue()
         self.purges = 0
 
-    async def replay_pending(self) -> int:
+    async def replay_batch(self, *, limit: int = 100) -> ReplayBatchResult:
         self.count += 1
         self.scans.put_nowait(self.count)
-        return self.first_batch if self.count == 1 else 0
+        handled = self.first_batch if self.count == 1 else 0
+        return ReplayBatchResult(handled, handled, 0, limit)
 
     async def purge_finished(self) -> int:
         self.purges += 1
@@ -100,12 +104,12 @@ def test_signal_during_dispatch_survives_transition_back_to_waiting() -> None:
         wake.set()  # A pre-start hint must be consumed by the immediate scan.
 
         class BusyReceiver(Receiver):
-            async def replay_pending(self) -> int:
+            async def replay_batch(self, *, limit: int = 100) -> ReplayBatchResult:
                 assert wake.is_set() is False
                 if self.count == 0:
                     entered.set()
                     await release.wait()
-                return await super().replay_pending()
+                return await super().replay_batch(limit=limit)
 
         receiver = BusyReceiver()
         task = asyncio.create_task(
@@ -159,10 +163,10 @@ def test_only_exact_full_batch_continues_immediately_and_yields_to_other_tasks(
         wake, other_task_ran = Wake(), asyncio.Event()
 
         class FairReceiver(Receiver):
-            async def replay_pending(self) -> int:
+            async def replay_batch(self, *, limit: int = 100) -> ReplayBatchResult:
                 if self.count == 1:
                     assert other_task_ran.is_set() is True
-                return await super().replay_pending()
+                return await super().replay_batch(limit=limit)
 
         receiver = FairReceiver(first_batch=batch)
         task = asyncio.create_task(
@@ -197,11 +201,11 @@ def test_frequent_notifications_keep_hourly_maintenance_on_monotonic_schedule(
         monkeypatch.setattr(webhook_worker, "time", SimpleNamespace(monotonic=lambda: clock[0]))
 
         class NoisyReceiver(Receiver):
-            async def replay_pending(self) -> int:
+            async def replay_batch(self, *, limit: int = 100) -> ReplayBatchResult:
                 clock[0] = [100.0, 101.0, 3699.0, 3700.0, 3701.0][self.count]
                 if self.count < 4:
                     wake.set()
-                return await super().replay_pending()
+                return await super().replay_batch(limit=limit)
 
             async def purge_finished(self) -> int:
                 purges.append(clock[0])
@@ -231,14 +235,30 @@ def test_frequent_notifications_keep_hourly_maintenance_on_monotonic_schedule(
     asyncio.run(scenario())
 
 
+@pytest.mark.parametrize(
+    ("provider", "close_failure"), [("github", False), ("gitlab", False), ("gitlab", True)]
+)
 def test_worker_starts_scan_and_heartbeat_before_listener_ready_and_awaits_cleanup(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    provider: str,
+    close_failure: bool,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     async def scenario() -> None:
         database_attempted = asyncio.Event()
         listening, register, receiving = asyncio.Event(), asyncio.Event(), asyncio.Event()
         closing, finish_close = asyncio.Event(), asyncio.Event()
         closed: list[str] = []
+        expected_before_publisher = ["listener", "lock"] if provider == "gitlab" else ["listener"]
+        clients: list[dict[str, object]] = []
+        real_client = httpx.AsyncClient
+
+        def http_client(**kwargs: object) -> httpx.AsyncClient:
+            clients.append(kwargs)
+            return real_client(**kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(httpx, "AsyncClient", http_client)
         listener_connections: list[str] = []
         heartbeat = tmp_path / "webhook-worker.heartbeat"
         messages: asyncio.Queue[psycopg.Notify] = asyncio.Queue()
@@ -279,27 +299,57 @@ def test_worker_starts_scan_and_heartbeat_before_listener_ready_and_awaits_clean
                 assert url == "amqp://synthetic-broker/"
 
             async def aclose(self) -> None:
-                assert closed == ["listener"]
+                assert closed == expected_before_publisher
                 closed.append("publisher")
 
         real_dispose = AsyncEngine.dispose
 
         async def dispose(engine: AsyncEngine, close: bool = True) -> None:
-            assert closed == ["listener", "publisher"]
-            await real_dispose(engine, close=close)
-            closed.append("database")
+            if isinstance(engine.pool, NullPool):
+                assert closed == ["listener"]
+                await real_dispose(engine, close=close)
+                closed.append("lock")
+            else:
+                assert closed == [*expected_before_publisher, "publisher"]
+                await real_dispose(engine, close=close)
+                closed.append("database")
+                if close_failure:
+                    raise RuntimeError("data-close-PAT-URL-canary")
 
         monkeypatch.setattr(psycopg.AsyncConnection, "connect", connect)
         monkeypatch.setattr(webhook_worker, "LazyAmqpPublisher", Publisher)
         monkeypatch.setattr(AsyncEngine, "dispose", dispose)
-        for name, value in {
+        for name in (
+            "GITHUB_APP_ID",
+            "GITHUB_APP_PRIVATE_KEY",
+            "GITHUB_APP_BOT_LOGIN",
+            "GITLAB_CREDENTIAL_KEYS",
+            "GITLAB_ACTIVE_KEY_ID",
+            "GITLAB_ALLOWED_ORIGINS",
+            "GITLAB_PRIVATE_ORIGINS",
+        ):
+            monkeypatch.delenv(name, raising=False)
+        environment = {
             "DATABASE_URL": "postgresql+psycopg://app:synthetic@127.0.0.1:1/app",
             "GITHUB_APP_ID": "17",
             "GITHUB_APP_PRIVATE_KEY": "synthetic-private-key",
             "GITHUB_APP_BOT_LOGIN": "reviewer[bot]",
             "RABBITMQ_URL": "amqp://synthetic-broker/",
             "WORKER_HEARTBEAT_FILE": str(heartbeat),
-        }.items():
+        }
+        if provider == "gitlab":
+            import base64
+
+            for name in ("GITHUB_APP_ID", "GITHUB_APP_PRIVATE_KEY", "GITHUB_APP_BOT_LOGIN"):
+                del environment[name]
+            environment.update(
+                GITLAB_CREDENTIAL_KEYS='{"test-key":"'
+                + base64.b64encode(b"k" * 32).decode()
+                + '"}',
+                GITLAB_ACTIVE_KEY_ID="test-key",
+                GITLAB_ALLOWED_ORIGINS='["https://gitlab.com"]',
+            )
+        for name, value in environment.items():
             monkeypatch.setenv(name, value)
         task = asyncio.create_task(webhook_worker.run_forever())
         try:
@@ -318,13 +368,26 @@ def test_worker_starts_scan_and_heartbeat_before_listener_ready_and_awaits_clean
             finish_close.set()
             with pytest.raises(asyncio.CancelledError):
                 await asyncio.wait_for(task, timeout=2)
-            assert closed == ["listener", "publisher", "database"]
+            assert closed == [*expected_before_publisher, "publisher", "database"]
+            assert len(clients) == 1
+            if provider == "gitlab":
+                assert "base_url" not in clients[0]  # no GitHub client/token/reviver composition
+                assert clients[0]["trust_env"] is False
+            else:
+                assert clients[0]["base_url"] == "https://api.github.com"
         finally:
             finish_close.set()
             if not task.done():
                 await cancel(task)
 
     asyncio.run(scenario())
+    if close_failure:
+        records = [record for record in caplog.records if record.name == "app.webhook_worker"]
+        assert any(
+            record.getMessage() == "Webhook worker resource cleanup failed" for record in records
+        )
+        assert all(record.exc_info is None for record in records)
+        assert "data-close-PAT-URL-canary" not in caplog.text
 
 
 class RulesRefresher:
@@ -434,6 +497,36 @@ def test_rules_status_requests_are_answered_on_the_poll_timeout_without_a_hint()
             assert await asyncio.wait_for(rules.passes.get(), timeout=1) == 1
             assert await asyncio.wait_for(rules.passes.get(), timeout=1) == 2
             assert not wake.is_set()
+        finally:
+            await cancel(task)
+
+    asyncio.run(scenario())
+
+
+def test_mixed_provider_round_keeps_rules_requests_and_both_receipts_moving() -> None:
+    async def scenario() -> None:
+        github, gitlab, wake = Receiver(), Receiver(), Wake()
+        rules = RulesRefresher(first_batch=RULES_REFRESH_BATCH)
+        task = asyncio.create_task(
+            webhook_worker.sweep_providers_forever(
+                (
+                    webhook_worker.WebhookReplayProvider("github", github),
+                    webhook_worker.WebhookReplayProvider("gitlab", gitlab),
+                ),
+                wake,
+                rules=cast(RefreshRulesStatuses, rules),
+            )
+        )
+        try:
+            # A full rules batch schedules another complete provider round immediately.
+            await asyncio.wait_for(wake.waiting.get(), timeout=1)
+            assert github.count == gitlab.count == rules.count == 2
+            assert github.purges == gitlab.purges == 1
+            wake.set()
+            assert await asyncio.wait_for(rules.passes.get(), timeout=1) == 1
+            assert await asyncio.wait_for(rules.passes.get(), timeout=1) == 2
+            assert await asyncio.wait_for(rules.passes.get(), timeout=1) == 3
+            assert github.count == gitlab.count == 3
         finally:
             await cancel(task)
 

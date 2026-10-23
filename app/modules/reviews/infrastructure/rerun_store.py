@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app.common.infrastructure.db.enums import CodeChangeState, Engine, RunState
 from app.common.infrastructure.db.unit_of_work import SqlAlchemyUnitOfWork
 from app.modules.auth.application.scope import AuthScope
+from app.modules.repositories.infrastructure.models import ProviderInstallation, RuleVersion
 from app.modules.reviews.application.queue_messages import StoredRunMessage
 from app.modules.reviews.application.rerun_run import RerunOutcome, RerunResult
 from app.modules.reviews.application.try_enqueue_webhook_run import (
@@ -45,13 +46,42 @@ class SqlAlchemyRerunStore:
         self._allow_unscoped = allow_unscoped
 
     async def create_rerun(self, run_id: UUID, now: datetime) -> RerunResult:
-        code_change_id = await self._session.scalar(
-            select(Run.code_change_id).where(
-                Run.id == run_id, authorized_run(self._scope, allow_unscoped=self._allow_unscoped)
+        original = (
+            await self._session.execute(
+                select(
+                    Run.code_change_id,
+                    Run.origin_provider_installation_id,
+                    CodeChange.repository_id,
+                    RuleVersion.repository_id,
+                    ProviderInstallation.provider,
+                    ProviderInstallation.workspace_id,
+                    ProviderInstallation.account_external_id,
+                    ProviderInstallation.deleted_at,
+                )
+                .join(CodeChange, CodeChange.id == Run.code_change_id)
+                .join(RuleVersion, RuleVersion.id == Run.rule_version_id)
+                .outerjoin(
+                    ProviderInstallation,
+                    ProviderInstallation.id == Run.origin_provider_installation_id,
+                )
+                .where(
+                    Run.id == run_id,
+                    authorized_run(self._scope, allow_unscoped=self._allow_unscoped),
+                )
             )
-        )
-        if code_change_id is None:
+        ).one_or_none()
+        if original is None:
             return RerunResult(RerunOutcome.NOT_FOUND)
+        (
+            code_change_id,
+            original_origin,
+            original_repository,
+            rule_repository,
+            original_provider,
+            original_workspace,
+            original_account,
+            original_deleted_at,
+        ) = original
         # Match webhook/projection source-before-PR ordering before the active-Run decision.
         candidate = await SqlAlchemyWebhookRunStore(self._session).lock_candidate(code_change_id)
         pr_state = await self._session.scalar(
@@ -67,6 +97,28 @@ class SqlAlchemyRerunStore:
             return RerunResult(RerunOutcome.NOT_CONFIGURED)
         if not candidate.ci.repository_enabled:
             return RerunResult(RerunOutcome.CONFLICT)
+        # Freeze the repository before candidate locking so concurrent reparenting
+        # cannot turn a historical Run into authority over another repository.
+        if original_origin is None or candidate.repository_id != original_repository:
+            return RerunResult(RerunOutcome.NOT_CONFIGURED)
+        if candidate.origin_provider_installation_id != original_origin:
+            # OAuth may move the SAME repository from a retired GitHub installation.
+            # Its pinned rule version proves historical repository continuity.
+            current_account = await self._session.scalar(
+                select(ProviderInstallation.account_external_id).where(
+                    ProviderInstallation.id == candidate.origin_provider_installation_id
+                )
+            )
+            if (
+                original_provider != "github"
+                or candidate.provider != "github"
+                or original_deleted_at is None
+                or candidate.repository_id != rule_repository
+                or candidate.workspace_id != original_workspace
+                or original_account is None
+                or current_account != original_account
+            ):
+                return RerunResult(RerunOutcome.NOT_CONFIGURED)
         new_id = uuid4()
         self._session.add(
             Run(

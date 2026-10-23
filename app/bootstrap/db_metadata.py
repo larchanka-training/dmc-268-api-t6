@@ -5,6 +5,7 @@ from app.modules.analytics.infrastructure import models as analytics_models  # n
 from app.modules.auth.infrastructure import models as auth_models  # noqa: F401
 from app.modules.billing.infrastructure import models as billing_models  # noqa: F401
 from app.modules.code_index.infrastructure import models as code_index_models  # noqa: F401
+from app.modules.integrations.gitlab.infrastructure import models as gitlab_models  # noqa: F401
 from app.modules.integrations.webhooks.infrastructure import (
     models as integrations_webhooks_models,  # noqa: F401
 )
