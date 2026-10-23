@@ -167,14 +167,16 @@ CHECK refuses a sha without a time and accepts a time without a sha; downgrade t
   (all suggested names; plan, "Port, use case and capability set").
 - M6: the capability set constant, empty, with a helper (suggested) that answers whether a
   pinned `(review_system_key, review_system_version)` has a retrieved section
-  (`app/modules/reviews/application/policy_snapshot.py:136-137`).
+  (`app/modules/reviews/application/policy_snapshot.py:136-137`) — moved to PR 2 Task 7
+  after review r1: PR 1 has no caller of it.
 - Import from `code_index` only `app/modules/code_index/domain/rag_index.py`.
 
 **Tests to add (unit, fakes of the port):**
 
 - the use case commits exactly once and returns the port's value;
 - a port error propagates and nothing is committed;
-- the capability set is empty: `("review.system", "v3")` has no retrieved section.
+- the capability set is empty: `("review.system", "v3")` has no retrieved section — moved
+  to PR 2 Task 7 after review r1, with the constant.
 
 **Done when:**
 
@@ -567,12 +569,18 @@ one revision each.
 
 **Files:**
 
+- `app/modules/reviews/application/rag_index.py`;
 - `app/modules/reviews/application/review_context_stage.py`;
 - `app/worker.py` (`context_builder`, `:537-555`);
+- `tests/test_rag_readiness.py`;
 - `tests/test_review_context_stage.py`.
 
 **What to do:**
 
+- M6 (moved from PR 1 Task 3 after review r1): the capability set constant, empty, and the
+  helper that answers whether a pinned `(review_system_key, review_system_version)` has a
+  retrieved section, in `app/modules/reviews/application/rag_index.py`, with this first
+  caller; its test pins `("review.system", "v3")` outside the set.
 - The stage passes `RagPlan(index_commit_sha, stale)` only for a usable index and a pinned
   prompt version in the capability set (M6).
 - `context.rag` `used`: `{outcome, candidates: {found, confirmed, dropped: {…}}, tokens}`
