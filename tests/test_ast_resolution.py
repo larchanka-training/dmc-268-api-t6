@@ -267,7 +267,9 @@ def test_python_missing_name_shadowing_and_wildcard_are_not_guessed() -> None:
         "pkg/app.py",
         "f",
     )
-    assert refs == ()
+    assert [
+        (ref.module, ref.names, ref.resolved_symbols, ref.resolution, ref.reason) for ref in refs
+    ] == [(".models", (), (), ImportResolution.UNSUPPORTED, "no_named_symbol")]
     assert provider.asked == []
 
 
@@ -278,6 +280,114 @@ def test_unused_import_is_never_loaded() -> None:
     }
 
     refs, provider = _resolve(sources, "pkg/app.py", "f")
+
+    assert refs == ()
+    assert provider.asked == []
+
+
+def test_go_dot_import_used_by_the_change_is_reported_not_loaded() -> None:
+    sources = {
+        "go.mod": "module example.com/m\n\ngo 1.22\n",
+        "cmd/main.go": (
+            'package main\n\nimport . "example.com/m/internal/store"\n\n'
+            "func Run() error {\n\treturn Open()\n}\n"
+        ),
+        "internal/store/open.go": "package store\n\nfunc Open() error { return nil }\n",
+    }
+
+    refs, provider = _resolve(sources, "cmd/main.go", "Run")
+
+    assert [
+        (ref.module, ref.names, ref.resolved_symbols, ref.resolution, ref.reason) for ref in refs
+    ] == [
+        (
+            "example.com/m/internal/store",
+            (),
+            (),
+            ImportResolution.UNSUPPORTED,
+            "no_named_symbol",
+        )
+    ]
+    assert provider.asked == []
+
+
+@pytest.mark.parametrize(
+    ("importer", "symbol", "sources"),
+    [
+        pytest.param(
+            "pkg/app.py",
+            "f",
+            {
+                "pkg/app.py": "from .models import *\n\ndef f():\n    return 1\n",
+                "pkg/models.py": "class User:\n    pass\n",
+            },
+            id="python-wildcard-unused",
+        ),
+        pytest.param(
+            "pkg/app.py",
+            "run",
+            {
+                "pkg/app.py": (
+                    "from .models import *\n\n\nclass Service:\n"
+                    "    def run(self):\n        return 1\n"
+                ),
+                "pkg/models.py": "class User:\n    pass\n",
+            },
+            id="python-wildcard-unused-in-a-method",
+        ),
+        pytest.param(
+            "pkg/app.py",
+            "f",
+            {
+                "pkg/app.py": (
+                    "from .models import *\nimport os\n\n\ndef helper():\n    return 1\n\n\n"
+                    "def f(x):\n    y = x\n    return os, helper(), y\n"
+                ),
+                "pkg/models.py": "class User:\n    pass\n",
+            },
+            id="python-wildcard-only-names-the-file-binds",
+        ),
+        pytest.param(
+            "cmd/main.go",
+            "Run",
+            {
+                "go.mod": "module example.com/m\n\ngo 1.22\n",
+                "cmd/main.go": (
+                    'package main\n\nimport . "example.com/m/internal/store"\n\n'
+                    "func Run() int {\n\treturn 1\n}\n"
+                ),
+                "internal/store/open.go": "package store\n\nfunc Open() error { return nil }\n",
+            },
+            id="go-dot-import-only-predeclared-names",
+        ),
+        pytest.param(
+            "cmd/main.go",
+            "Run",
+            {
+                "go.mod": "module example.com/m\n\ngo 1.22\n",
+                "cmd/main.go": (
+                    'package main\n\nimport _ "example.com/m/internal/store"\n\n'
+                    "func Run() error {\n\treturn Open()\n}\n"
+                ),
+                "internal/store/open.go": "package store\n\nfunc Open() error { return nil }\n",
+            },
+            id="go-blank-import",
+        ),
+        pytest.param(
+            "src/app.ts",
+            "f",
+            {
+                "src/app.ts": 'export * from "./x";\nexport function f() { return g(); }\n',
+                "src/x.ts": "export function g() { return 1 }\n",
+            },
+            id="ts-export-star",
+        ),
+    ],
+)
+def test_wildcard_the_change_cannot_use_by_name_gives_no_ref(
+    importer: str, symbol: str, sources: dict[str, str]
+) -> None:
+    refs, provider = _resolve(sources, importer, symbol)
 
     assert refs == ()
     assert provider.asked == []
