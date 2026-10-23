@@ -1,7 +1,8 @@
 """Environment parity contracts (ui#66, part 2).
 
-The local stack bootstraps the schema like staging, the prod UI host is one origin, hosts without
-an upstream answer a stub instead of a bare 502, and the staging stores are pinned by digest.
+The local stack bootstraps the schema like staging, the prod UI host is one origin, the landing
+hosts reach the staging landing, hosts without an upstream answer a stub instead of a bare 502,
+and the staging stores are pinned by digest.
 
 Text contracts over the compose files and the Caddyfile, in the manner of
 test_deploy_staging_services.py: no Docker daemon and no Caddy binary are needed.
@@ -20,7 +21,18 @@ STAGING_COMPOSE = REPO_ROOT / "deploy" / "compose" / "staging.yml"
 CADDYFILE = REPO_ROOT / "deploy" / "edge" / "Caddyfile"
 
 # Hosts whose service is not deployed yet: prod and the standalone webhook service.
-HOSTS_WITHOUT_UPSTREAM = ("api", "webhook", "staging-webhook", "ui")
+# The landing hosts answer the stub until the UI repo's first landing rollout; "apex" is the bare
+# <APP_DOMAIN>.
+HOSTS_WITHOUT_UPSTREAM = (
+    "api",
+    "webhook",
+    "staging-webhook",
+    "ui",
+    "staging",
+    "staging-www",
+    "apex",
+    "www",
+)
 DEPLOYED_HOSTS = ("staging-api", "staging-ui", "grafana")
 # Upstreams of every host in route order, as in the route table of docs/CICD.md §8.2.
 UPSTREAMS = {
@@ -32,6 +44,15 @@ UPSTREAMS = {
     "webhook": ["webhook-prod:8000"],
     "staging-ui": ["api-staging:8000", "ui-staging:8080"],
     "ui": ["api-prod:8000", "ui-prod:8080"],
+    # Public landing: static, no /api/*, no data.
+    "staging": ["landing-staging:8080"],
+    "staging-www": ["landing-staging:8080"],
+    # EXCEPTION to "a prod host never proxies to staging": apex and www serve the staging landing
+    # until landing-prod exists. Justified and bounded in the "Заглушка" paragraph of
+    # docs/CICD.md §8.2 (static, no /api/*, its buttons go to staging-ui; temporary; never for
+    # api, ui or webhook). Do not copy this pattern to other prod hosts.
+    "apex": ["landing-staging:8080"],
+    "www": ["landing-staging:8080"],
 }
 STORE_MAJORS = {"postgres": "17", "rabbitmq": "4", "redis": "8"}
 
@@ -60,13 +81,18 @@ def _healthcheck_test(block: str) -> list[str]:
 
 
 def _site(host: str) -> str:
-    """Body of the site block ``<host>.{$APP_DOMAIN}``; the apex is the empty host."""
-    address = re.escape(f"{host}." if host else "") + r"\{\$APP_DOMAIN\}"
-    match = re.search(
-        rf"^{address} \{{\n(.*?)^\}}\n", CADDYFILE.read_text(encoding="utf-8"), re.M | re.S
-    )
-    assert match is not None, f"site {host or 'apex'} is missing"
-    return match.group(1)
+    """Body of the site block that lists ``<host>.{$APP_DOMAIN}`` among its addresses.
+
+    The apex (``"apex"`` or ``""``) is the bare ``{$APP_DOMAIN}``. A block may list several
+    addresses, as in ``staging.{$APP_DOMAIN}, staging-www.{$APP_DOMAIN} {``.
+    """
+    wanted = "{$APP_DOMAIN}" if host in ("", "apex") else f"{host}.{{$APP_DOMAIN}}"
+    for match in re.finditer(
+        r"^([^#\s][^\n]*?) \{\n(.*?)^\}\n", CADDYFILE.read_text("utf-8"), re.M | re.S
+    ):
+        if wanted in [address.strip() for address in match.group(1).split(",")]:
+            return match.group(2)
+    raise AssertionError(f"site {host or 'apex'} is missing")
 
 
 def test_local_bootstrap_migrates_and_seeds_like_staging() -> None:
@@ -204,9 +230,21 @@ def test_deployed_host_keeps_the_plain_proxy_error(host: str) -> None:
     assert "not_deployed" not in _site(host)
 
 
-def test_apex_redirects_to_the_prod_ui_host() -> None:
-    # The chain ends in the stub of ui.*, not in a 502, and needs no change at the prod rollout.
-    assert re.search(r"^\tredir https://ui\.\{\$APP_DOMAIN\}\{uri\} permanent$", _site(""), re.M)
+@pytest.mark.parametrize("host", ["apex", "www", "staging", "staging-www"])
+def test_landing_hosts_proxy_to_the_staging_landing_without_api_or_redirect(host: str) -> None:
+    site = _site(host)
+
+    assert re.findall(r"reverse_proxy (\S+)", site) == ["landing-staging:8080"]
+    # Static landing: no /api/* route, and no redirect to ui.* (the old apex behavior).
+    assert "/api/" not in site
+    assert not re.search(r"^\tredir ", site, re.MULTILINE)
+    assert re.search(r"^\timport hsts$", site, re.MULTILINE)
+
+
+def test_apex_and_www_share_one_block_and_staging_hosts_another() -> None:
+    assert _site("apex") == _site("www")
+    assert _site("staging") == _site("staging-www")
+    assert _site("apex") != _site("ui")
 
 
 def _store_pin(service: str) -> re.Match[str] | None:
