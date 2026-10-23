@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import replace
 from pathlib import Path
 
+import pytest
+
 from app.modules.reviews.application.prompt_builder import (
     ChangedFile,
     DiffLine,
@@ -168,6 +170,143 @@ def test_parse_unified_diff_keeps_payloads_that_look_like_file_headers() -> None
     rendered = PromptBuilder._render_changed_files(files)
     assert '<line n="4" type="removed">--old_flag</line>' in rendered
     assert '<line n="4" type="added">++new_flag</line>' in rendered
+
+
+def test_parse_unified_diff_keeps_a_path_that_holds_the_b_prefix() -> None:
+    files = parse_unified_diff(
+        "diff --git a/src/q b/r.py b/src/q b/r.py\n"
+        "--- a/src/q b/r.py\n"
+        "+++ b/src/q b/r.py\n"
+        "@@ -1 +1 @@\n"
+        "-old\n"
+        "+new\n"
+    )
+
+    assert files == (
+        ChangedFile(
+            path="src/q b/r.py",
+            status="modified",
+            lines=(
+                DiffLine(number=1, type="removed", content="old"),
+                DiffLine(number=1, type="added", content="new"),
+            ),
+        ),
+    )
+
+
+def test_parse_unified_diff_takes_a_rename_target_that_holds_the_b_prefix() -> None:
+    files = parse_unified_diff(
+        "diff --git a/x b/old.py b/y b/new.py\n"
+        "similarity index 90%\n"
+        "rename from x b/old.py\n"
+        "rename to y b/new.py\n"
+        "@@ -1 +1 @@\n"
+        "-old\n"
+        "+new\n"
+    )
+
+    assert files == (
+        ChangedFile(
+            path="y b/new.py",
+            status="renamed",
+            lines=(
+                DiffLine(number=1, type="removed", content="old"),
+                DiffLine(number=1, type="added", content="new"),
+            ),
+        ),
+    )
+
+
+def test_parse_unified_diff_rejects_a_header_with_two_empty_paths() -> None:
+    with pytest.raises(ValueError, match="invalid unified diff header"):
+        parse_unified_diff("diff --git a/ b/\n@@ -1 +1 @@\n-a\n+b\n")
+
+
+def test_parse_unified_diff_ignores_a_rename_line_inside_a_hunk() -> None:
+    files = parse_unified_diff(
+        "diff --git a/src/app.py b/src/app.py\n"
+        "@@ -1,2 +1,3 @@\n"
+        " first\n"
+        "rename to evil.py\n"
+        "+added\n"
+        " last\n"
+    )
+
+    assert files == (
+        ChangedFile(
+            path="src/app.py",
+            status="modified",
+            lines=(
+                DiffLine(number=1, type="context", content="first"),
+                DiffLine(number=2, type="added", content="added"),
+                DiffLine(number=3, type="context", content="last"),
+            ),
+        ),
+    )
+
+
+def test_parse_unified_diff_splits_lines_only_on_line_feed() -> None:
+    files = parse_unified_diff(
+        "diff --git a/src/app.py b/src/app.py\n"
+        "@@ -1,2 +1,4 @@\n"
+        " first\n"
+        "+x\u2028rename to evil.py\n"
+        "+a\x0c b\n"
+        " last\n"
+    )
+
+    assert files == (
+        ChangedFile(
+            path="src/app.py",
+            status="modified",
+            lines=(
+                DiffLine(number=1, type="context", content="first"),
+                DiffLine(number=2, type="added", content="x\u2028rename to evil.py"),
+                DiffLine(number=3, type="added", content="a\x0c b"),
+                DiffLine(number=4, type="context", content="last"),
+            ),
+        ),
+    )
+
+
+@pytest.mark.parametrize(
+    "mode_line",
+    ["deleted file mode 100644", "new file mode 100644"],
+    ids=["deleted-file-mode", "new-file-mode"],
+)
+def test_parse_unified_diff_ignores_a_file_mode_line_inside_a_hunk(mode_line: str) -> None:
+    files = parse_unified_diff(
+        f"diff --git a/src/app.py b/src/app.py\n@@ -1 +1,2 @@\n first\n{mode_line}\n+added\n"
+    )
+
+    assert files == (
+        ChangedFile(
+            path="src/app.py",
+            status="modified",
+            lines=(
+                DiffLine(number=1, type="context", content="first"),
+                DiffLine(number=2, type="added", content="added"),
+            ),
+        ),
+    )
+
+
+def test_parse_unified_diff_drops_the_carriage_return_of_crlf_lines() -> None:
+    files = parse_unified_diff(
+        "diff --git a/src/app.py b/src/app.py\r\n@@ -1,2 +1,2 @@\r\n-old\r\n+new\r\n same\r\n"
+    )
+
+    assert files == (
+        ChangedFile(
+            path="src/app.py",
+            status="modified",
+            lines=(
+                DiffLine(number=1, type="removed", content="old"),
+                DiffLine(number=1, type="added", content="new"),
+                DiffLine(number=2, type="context", content="same"),
+            ),
+        ),
+    )
 
 
 def _metadata_context(
