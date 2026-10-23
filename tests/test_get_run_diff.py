@@ -1,6 +1,8 @@
 import asyncio
 from uuid import UUID
 
+import pytest
+
 from app.main import app, get_run_repository
 from app.modules.reviews.application.conventions import (
     ActiveConventionsPrompt,
@@ -19,7 +21,7 @@ from app.modules.reviews.application.process_run import (
     RunDiffInput,
     RunDiffProvider,
 )
-from app.modules.reviews.application.prompt_builder import DiffLine, ReviewRule
+from app.modules.reviews.application.prompt_builder import DiffLine, FileStatus, ReviewRule
 from tests.portal_test_client import authenticated_test_client as TestClient
 from tests.trigger_uow import processing_uow
 
@@ -332,7 +334,10 @@ def test_full_provider_diff_keeps_rename_status_in_model_projection() -> None:
     assert omitted == ()
 
 
-def test_withheld_removed_files_are_omitted_by_their_stored_names_not_reparsed() -> None:
+@pytest.mark.parametrize("status", ["added", "modified", "renamed", "removed"])
+def test_withheld_files_are_omitted_by_their_stored_names_not_reparsed(
+    status: FileStatus,
+) -> None:
     repository = FakeDiffRepository([])
     asyncio.run(
         StoreDiffSnapshot(repository).execute(
@@ -340,19 +345,18 @@ def test_withheld_removed_files_are_omitted_by_their_stored_names_not_reparsed()
             code_change_id=UUID("00000000-0000-0000-0000-000000000201"),
             head_sha="a" * 40,
             files=[
-                DiffSnapshot(
-                    "generated/gone.py", "@@ -1 +0,0 @@\n-GONE_SECRET = 1", status="removed"
-                ),
-                DiffSnapshot(
-                    "generated/q b/r.py", "@@ -1 +0,0 @@\n-QBR_SECRET = 2", status="removed"
-                ),
+                DiffSnapshot("generated/gone.py", "@@ -1 +0,0 @@\n-GONE_SECRET = 1", status=status),
+                DiffSnapshot("generated/q b/r.py", "@@ -1 +0,0 @@\n-QBR_SECRET = 2", status=status),
             ],
             excluded=lambda file: file.filename.startswith("generated/"),
         )
     )
     saved = repository.write_calls[0][2]
 
-    assert [(item.blob_sha, item.review_patch) for item in saved] == [(None, None), (None, None)]
+    assert [(item.status, item.blob_sha, item.review_patch) for item in saved] == [
+        (status, None, None),
+        (status, None, None),
+    ]
     assert review_files_from_snapshots(saved) == (
         (),
         ("generated/gone.py", "generated/q b/r.py"),
