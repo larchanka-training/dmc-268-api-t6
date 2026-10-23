@@ -236,9 +236,9 @@ leaves it false):**
 
 **Done when:**
 
-- [ ] every scenario above is a PG test;
-- [ ] the RED run and the GREEN run are recorded;
-- [ ] common verification is green with zero skips.
+- [x] every scenario above is a PG test;
+- [x] the RED run and the GREEN run are recorded;
+- [x] common verification is green with zero skips.
 
 **Dependencies:** Tasks 1, 2, 3.
 
