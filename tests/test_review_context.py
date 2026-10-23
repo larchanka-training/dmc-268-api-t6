@@ -373,7 +373,9 @@ def test_go_mod_counts_toward_the_limit_of_imported_files() -> None:
 
     payload, repository = build(20)
     # One file over the limit: the package is not fully known, so nothing is resolved.
-    assert [ref.resolution for ref in payload.imports] != [ImportResolution.RESOLVED]
+    assert [(ref.resolution, ref.reason) for ref in payload.imports] == [
+        (ImportResolution.UNSUPPORTED, "ast_limit")
+    ]
     assert ContextLevel.L4 not in payload.levels_present
     assert len([path for path in repository.read if path != "cmd/main.go"]) <= 20
 
@@ -416,6 +418,129 @@ def test_import_target_with_a_parse_error_keeps_the_parse_reason_not_an_l4_limit
         (item.reason, item.path) for item in payload.omissions
     ]
     assert ContextLevel.L4 not in payload.levels_present
+
+
+def _docstring(words: int, *, lines: int = 1) -> str:
+    """An indented docstring of ``words`` words (one per line when ``lines`` > 1)."""
+    if lines == 1:
+        return '    """' + " ".join(["w"] * words) + '"""\n'
+    assert words == lines
+    return '    """w\n' + "    w\n" * (lines - 2) + '    w"""\n'
+
+
+def _sized(text: str, size: int) -> str:
+    """``text`` and a trailing comment line, ``size`` bytes in UTF-8 in total."""
+    padded = text + "#" * (size - len(text.encode()) - 1) + "\n"
+    assert len(padded.encode()) == size
+    return padded
+
+
+def test_imported_signatures_stop_at_the_l4_total_of_8000_tokens() -> None:
+    # Each signature and docstring is 2 + 1998 = 2000 words, one token per word.
+    library = "".join(f"def f{n}():\n{_docstring(1998)}    return {n}\n\n\n" for n in range(5))
+    repository = Repository(
+        {
+            "pkg/app.py": (
+                "from .lib import f0, f1, f2, f3, f4\n\n\n"
+                "def run():\n    x = 1\n    return f0() + f1() + f2() + f3() + f4()\n"
+            ),
+            "pkg/lib.py": library,
+        }
+    )
+    patch = "@@ -4,2 +4,3 @@\n def run():\n+    x = 1\n     return f0() + f1() + f2() + f3() + f4()"
+    diff_map = _diff_map(_vcs_file(repository, "pkg/app.py", patch))
+
+    payload = _build(repository, diff_map)
+
+    imported = [block for block in payload.blocks if block.level is ContextLevel.L4]
+    assert [(block.source.ranges, block.tokens) for block in imported] == [
+        ((LineRange(1, 2),), 2000),
+        ((LineRange(6, 7),), 2000),
+        ((LineRange(11, 12),), 2000),
+        ((LineRange(16, 17),), 2000),
+    ]
+    assert [(item.reason, item.path) for item in payload.omissions] == [("ast_limit", "pkg/lib.py")]
+
+
+@pytest.mark.parametrize(
+    "docstring",
+    [
+        pytest.param(_docstring(200, lines=200), id="201-lines"),
+        pytest.param(_docstring(1999), id="2001-tokens"),
+    ],
+)
+def test_imported_signature_over_the_fragment_limit_is_not_shown(docstring: str) -> None:
+    repository = _service_repository()
+    repository.files["pkg/models.py"] = "class User:\n" + docstring
+    diff_map = _diff_map(_vcs_file(repository, "pkg/service.py", _GREET_PATCH))
+
+    payload = _build(repository, diff_map)
+
+    assert [ref.resolution for ref in payload.imports] == [ImportResolution.RESOLVED]
+    assert ("ast_limit", "pkg/models.py") in [
+        (item.reason, item.path) for item in payload.omissions
+    ]
+    assert ContextLevel.L4 not in payload.levels_present
+
+
+@pytest.mark.parametrize(
+    ("docstring", "ranges", "tokens"),
+    [
+        pytest.param(_docstring(199, lines=199), (LineRange(1, 200),), 201, id="200-lines"),
+        pytest.param(_docstring(1998), (LineRange(1, 2),), 2000, id="2000-tokens"),
+    ],
+)
+def test_imported_signature_at_the_fragment_limit_is_shown(
+    docstring: str, ranges: tuple[LineRange, ...], tokens: int
+) -> None:
+    repository = _service_repository()
+    repository.files["pkg/models.py"] = "class User:\n" + docstring
+    diff_map = _diff_map(_vcs_file(repository, "pkg/service.py", _GREET_PATCH))
+
+    payload = _build(repository, diff_map)
+
+    assert [
+        (block.source.path, block.source.ranges, block.tokens)
+        for block in payload.blocks
+        if block.level is ContextLevel.L4
+    ] == [("pkg/models.py", ranges, tokens)]
+
+
+def test_changed_file_over_256_kib_keeps_its_diff_and_is_not_parsed() -> None:
+    over = _service_repository()
+    over.files["pkg/service.py"] = _sized(_SERVICE, 262_145)
+    at = _service_repository()
+    at.files["pkg/service.py"] = _sized(_SERVICE, 262_144)
+    over_parser, at_parser = InProcessParser(), InProcessParser()
+
+    over_payload = _build(
+        over, _diff_map(_vcs_file(over, "pkg/service.py", _GREET_PATCH)), parser=over_parser
+    )
+    at_payload = _build(
+        at, _diff_map(_vcs_file(at, "pkg/service.py", _GREET_PATCH)), parser=at_parser
+    )
+
+    assert ("source_too_large", "pkg/service.py") in [
+        (item.reason, item.path) for item in over_payload.omissions
+    ]
+    assert [
+        block.source.path for block in over_payload.blocks if block.level is ContextLevel.L1
+    ] == ["pkg/service.py"]
+    assert "pkg/service.py" not in over_parser.parsed
+    assert "pkg/service.py" in at_parser.parsed
+    assert "source_too_large" not in [item.reason for item in at_payload.omissions]
+
+
+def test_imported_file_over_256_kib_is_not_resolved() -> None:
+    repository = _service_repository()
+    repository.files["pkg/models.py"] = _sized(_MODELS, 262_145)
+    diff_map = _diff_map(_vcs_file(repository, "pkg/service.py", _GREET_PATCH))
+
+    payload = _build(repository, diff_map)
+
+    assert [(ref.resolution, ref.reason) for ref in payload.imports] == [
+        (ImportResolution.UNSUPPORTED, "source_too_large")
+    ]
 
 
 def test_file_of_an_unresolved_identity_is_not_read_through_an_import() -> None:
