@@ -178,10 +178,10 @@ CHECK refuses a sha without a time and accepts a time without a sha; downgrade t
 
 **Done when:**
 
-- [ ] no import of `code_index.application` or `code_index.infrastructure` from
+- [x] no import of `code_index.application` or `code_index.infrastructure` from
   `reviews.application`;
-- [ ] the RED run and the GREEN run are recorded;
-- [ ] common verification is green.
+- [x] the RED run and the GREEN run are recorded;
+- [x] common verification is green.
 
 **Dependencies:** Task 0.
 
