@@ -16,15 +16,24 @@ from enum import StrEnum
 from typing import Protocol
 
 from app.modules.code_index.domain.codes import FAILED_ERROR_CODES
+from app.modules.reviews.application.policy_errors import PolicyErrorCode
 from app.modules.reviews.application.policy_snapshot import PolicyDocument
 
 VCS_RATE_LIMITED = "vcs_rate_limited"
 VCS_UNAVAILABLE = "vcs_unavailable"
 VCS_ACCESS_DENIED = "vcs_access_denied"
 ARCHIVE_UNSAFE = "archive_unsafe"
-# The `last_error_code` values a later attempt at the same head can heal; any other code
-# of a released lease is a terminal refusal of that head (ADR 0001 §6.1, leader reconcile).
-HEALABLE_ERROR_CODES = frozenset({VCS_RATE_LIMITED, VCS_UNAVAILABLE})
+# The `last_error_code` values a later attempt at the same head can heal: VCS errors and
+# a policy read that failed on the network. Any other code of a released lease is a
+# terminal refusal of that head (ADR 0001 §6.1, leader reconcile).
+HEALABLE_ERROR_CODES = frozenset(
+    {
+        VCS_RATE_LIMITED,
+        VCS_UNAVAILABLE,
+        PolicyErrorCode.FETCH_TRANSIENT.value,
+        PolicyErrorCode.RATE_LIMITED.value,
+    }
+)
 
 
 @dataclass(frozen=True)
