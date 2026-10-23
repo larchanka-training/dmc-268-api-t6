@@ -103,6 +103,8 @@ _COLUMNS = {
         "stored_bytes": ("int8", False, None),
         "pending_bytes": ("int8", False, None),
         "wake_requested_at": ("timestamptz", True, None),
+        "review_full_requested_at": ("timestamptz", True, None),
+        "review_full_requested_sha": ("varchar", True, 64),
     },
     "code_index_files": {**_GRAPH_KEY, "blob_sha": ("varchar", False, 64)},
     "code_index_symbols": {
@@ -172,6 +174,7 @@ _CHECKS = {
         "ck_code_index_states_pending_leased",
         "ck_code_index_states_failed_code",
         "ck_code_index_states_wake_live",
+        "ck_code_index_states_review_full_sha_at",
     },
     "code_index_files": set(),
     "code_index_symbols": {"ck_code_index_symbols_lines"},
@@ -724,7 +727,62 @@ def test_migration_0037_adds_the_wake_marker_and_its_downgrade_drops_it(
     assert connection.execute(
         text("SELECT generation, wake_requested_at FROM code_index_states")
     ).one() == (1, None)
+    assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "20261023_0038"
+
+
+@pytest.mark.integration
+def test_migration_0038_adds_the_review_throttle_and_its_downgrade_drops_it(
+    code_index_database: Connection,
+) -> None:
+    connection = code_index_database
+    config = _migration_config(connection)
+    throttle = (
+        "SELECT (SELECT count(*) FROM information_schema.columns "
+        "WHERE table_schema = current_schema() AND table_name = 'code_index_states' "
+        "AND column_name IN ('review_full_requested_at', 'review_full_requested_sha')), "
+        "(SELECT count(*) FROM pg_constraint "
+        "WHERE conname = 'ck_code_index_states_review_full_sha_at' "
+        "AND connamespace = current_schema()::regnamespace)"
+    )
+    assert tuple(connection.execute(text(throttle)).one()) == (2, 1)
+    repository_id = _repository(connection)
+    # A sha implies a time; a NULL target records only the time.
+    with (
+        pytest.raises(IntegrityError, match="ck_code_index_states_review_full_sha_at"),
+        connection.begin_nested(),
+    ):
+        connection.execute(
+            text(
+                "INSERT INTO code_index_states (repository_id, review_full_requested_sha) "
+                "VALUES (:repository, :sha)"
+            ),
+            {"repository": repository_id, "sha": C1},
+        )
+    connection.execute(
+        text(
+            "INSERT INTO code_index_states (repository_id, generation, review_full_requested_at) "
+            "VALUES (:repository, 1, now())"
+        ),
+        {"repository": repository_id},
+    )
+    connection.commit()
+
+    command.downgrade(config, "20261020_0037")
+    assert tuple(connection.execute(text(throttle)).one()) == (0, 0)
     assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "20261020_0037"
+    # The state row stays; only the throttle of review-requested full builds is lost.
+    assert connection.scalar(text("SELECT generation FROM code_index_states")) == 1
+    connection.commit()
+
+    command.upgrade(config, "head")
+    assert tuple(connection.execute(text(throttle)).one()) == (2, 1)
+    assert connection.execute(
+        text(
+            "SELECT generation, review_full_requested_at, review_full_requested_sha "
+            "FROM code_index_states"
+        )
+    ).one() == (1, None, None)
+    assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "20261023_0038"
 
 
 @pytest.mark.integration
@@ -749,7 +807,7 @@ def test_downgrade_drops_index_tables_and_types_and_upgrade_restores_them(
         "code_index_edge_kind",
         "code_index_import_resolution",
     }
-    assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "20261020_0037"
+    assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "20261023_0038"
 
 
 # ADR 0001 §7: only a limit or an unsafe archive fails an index.
@@ -829,13 +887,16 @@ def test_downgrade_to_0033_drops_the_indexer_columns_and_upgrade_resets_profiles
     connection = code_index_database
     config = _migration_config(connection)
     head_columns = set(_COLUMNS["code_index_states"])
-    # 0034 adds the indexer columns; 0037 (#143) adds the wake-up marker.
+    # 0034 adds the indexer columns; 0037 (#143) adds the wake-up marker; 0038 (#144) adds
+    # the review full-build throttle.
     new_columns = {
         "indexed_default_branch",
         "exclusions_digest",
         "stored_bytes",
         "pending_bytes",
         "wake_requested_at",
+        "review_full_requested_at",
+        "review_full_requested_sha",
     }
     assert _state_schema(connection) == (head_columns, _CHECKS["code_index_states"], _STATE_INDEXES)
     connection.rollback()
@@ -875,7 +936,7 @@ def test_downgrade_to_0033_drops_the_indexer_columns_and_upgrade_resets_profiles
         )
     ).one() == ("ready", C1, *(None,) * 6, 0, 0)
     assert _state_schema(connection) == (head_columns, _CHECKS["code_index_states"], _STATE_INDEXES)
-    assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "20261020_0037"
+    assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "20261023_0038"
 
 
 # Store behaviour: fencing, publication, purge, garbage collection and isolation.

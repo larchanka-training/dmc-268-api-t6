@@ -72,6 +72,11 @@ class CodeIndexState(Base):
             "wake_requested_at IS NULL OR (purge_reason IS NULL AND status <> 'failed')",
             name="ck_code_index_states_wake_live",
         ),
+        # A sha implies a time: a review request for a NULL target records only the time.
+        CheckConstraint(
+            "review_full_requested_sha IS NULL OR review_full_requested_at IS NOT NULL",
+            name="ck_code_index_states_review_full_sha_at",
+        ),
         # Admission counts the live leases of all repositories (ADR §7).
         Index(
             "ix_code_index_states_live_lease",
@@ -141,6 +146,10 @@ class CodeIndexState(Base):
     # The outbox of index wake-ups (#143): a trigger sets it in its own transaction, and
     # the worker leader wakes the job after the commit and clears it with a compare-and-set.
     wake_requested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # The throttle of the full builds a review requests (ADR §6.1, #144): when the last one
+    # was requested and for which target; `purge()` keeps both.
+    review_full_requested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    review_full_requested_sha: Mapped[str | None] = mapped_column(String(64))
 
 
 class CodeIndexFile(Base):

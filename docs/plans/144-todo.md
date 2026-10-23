@@ -105,12 +105,12 @@ CHECK refuses a sha without a time and accepts a time without a sha; downgrade t
 
 **Done when:**
 
-- [ ] `uv run alembic heads` shows one head;
-- [ ] upgrade → downgrade → upgrade on a clean database;
-- [ ] `tests/test_initial_migration.py`, `tests/test_alembic_heads.py` and
+- [x] `uv run alembic heads` shows one head;
+- [x] upgrade → downgrade → upgrade on a clean database;
+- [x] `tests/test_initial_migration.py`, `tests/test_alembic_heads.py` and
   `tests/test_app_reinstall_schema_postgres.py` are green;
-- [ ] the RED run and the GREEN run are recorded;
-- [ ] common verification is green.
+- [x] the RED run and the GREEN run are recorded;
+- [x] common verification is green.
 
 **Dependencies:** Task 0.
 
