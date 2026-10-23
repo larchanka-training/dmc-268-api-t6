@@ -542,6 +542,31 @@ def test_rag_off_or_a_gitlab_installation_reads_no_index_state(
 
 
 @pytest.mark.integration
+def test_rag_off_is_read_without_waiting_for_a_writer_of_the_repository(
+    reviews: _Reviews,
+) -> None:
+    async def scenario() -> None:
+        index = reviews.index
+        await _stale(index, index.a)
+        async with index.factory.begin() as session:
+            await session.execute(text(_RAG_OFF), {"repository": index.a})
+        before = await _row(index, index.a)
+
+        async with index.factory() as holder:
+            # A committed toggle-off, then any writer of the repository row in flight.
+            await holder.execute(
+                text("SELECT 1 FROM repositories WHERE id = :repository FOR UPDATE"),
+                {"repository": index.a},
+            )
+            assert await asyncio.wait_for(_review(index, index.a), 5) == RagReadiness(enabled=False)
+            await holder.rollback()
+
+        assert await _row(index, index.a) == before
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.integration
 def test_a_review_of_one_repository_never_writes_another(reviews: _Reviews) -> None:
     async def scenario() -> None:
         index = reviews.index
