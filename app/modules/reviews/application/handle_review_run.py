@@ -48,6 +48,7 @@ from app.modules.reviews.application.run_failures import (
 from app.modules.reviews.application.try_enqueue_webhook_run import PendingRunMessage
 
 _LOGGER = logging.getLogger(__name__)
+_PIPELINE_CANCEL_WAIT = 5.0
 
 TERMINAL_STATES = frozenset({"succeeded", "failed", "cancelled", "skipped"})
 # §5.3: a Run does not start when the day's remainder is below the fast run limit.
@@ -155,6 +156,12 @@ class MatchAllRuns:
 
 
 type ReviewPipeline = Callable[[ClaimedAttempt], Coroutine[Any, Any, bool]]
+
+
+@dataclass
+class _Execution:
+    claim_candidate: bool = False
+    pipeline: asyncio.Future[bool] | None = None
 
 
 class _LeaseLost(Exception):
@@ -269,6 +276,7 @@ class HandleReviewRun:
     ) -> None:
         self._uow_factory = uow_factory
         self._pipeline = pipeline
+        self._pipelines: set[asyncio.Future[bool]] = set()
         self._retry_queue = retry_queue
         self._check_runs = check_runs
         self._worker_id = worker_id
@@ -280,7 +288,60 @@ class HandleReviewRun:
         self._run_url = run_url
         self._now = now
 
+    async def wait_for_quiescence(self) -> None:
+        """Join this handler's pipelines after the worker has stopped all deliveries.
+
+        Normal watchdog outcomes stay immediate even if a cancelled phase resists.
+        Shutdown joins those owned futures before closing their database/provider pools.
+        """
+        if self._pipelines:
+            _LOGGER.warning("Worker joining %s still-active review pipelines", len(self._pipelines))
+        while self._pipelines:
+            await asyncio.wait(self._pipelines.copy())
+
     async def execute(self, run_id: UUID) -> DeliveryOutcome:
+        execution = _Execution()
+        try:
+            return await self._execute(run_id, execution)
+        except asyncio.CancelledError:
+            if execution.claim_candidate:
+                cleanup = asyncio.create_task(self._expire_interrupted_lease(run_id, execution))
+                # Retain cleanup through repeated caller cancellation; the worker supervisor
+                # owns the process-wide cleanup budget and keeps DB resources available.
+                while not cleanup.done():
+                    try:
+                        await asyncio.shield(cleanup)
+                    except asyncio.CancelledError:
+                        continue
+                cleanup.result()
+            raise
+
+    async def _expire_interrupted_lease(self, run_id: UUID, execution: _Execution) -> None:
+        if execution.pipeline is not None and not execution.pipeline.done():
+            _LOGGER.warning(
+                "Run %s pipeline is still active; interrupted lease retained until quiescence",
+                run_id,
+            )
+            # Keep the consumer (and its worker resources) owned until writes stop.
+            # Observe without a second cancellation; the process deadline bounds a
+            # pipeline that never cooperates, while its existing lease remains intact.
+            await asyncio.wait({execution.pipeline})
+        try:
+            async with self._uow_factory() as uow:
+                snapshot = await uow.runs.lock_for_claim(run_id)
+                if snapshot is None or snapshot.state != "running":
+                    return
+                # lock_for_claim holds the Run row lock through commit: publication cannot
+                # race this running-only check. extend_lease independently fences worker_id.
+                expired = await uow.runs.extend_lease(
+                    run_id, self._worker_id, self._now() - timedelta(microseconds=1)
+                )
+                if expired:
+                    await uow.commit()
+        except Exception:
+            _LOGGER.exception("Run %s interrupted lease cleanup failed", run_id)
+
+    async def _execute(self, run_id: UUID, execution: _Execution) -> DeliveryOutcome:
         matches = await self._selection.matches(run_id)
         async with self._uow_factory() as uow:
             snapshot = await uow.runs.lock_for_claim(run_id)
@@ -306,6 +367,10 @@ class HandleReviewRun:
                         now=now,
                     )
                 else:
+                    # Keep this candidate set through the whole delivery, including the
+                    # committed pipeline. Cancellation waits for pipeline quiescence, then
+                    # checks persisted claim state and ownership in a fresh locked transaction.
+                    execution.claim_candidate = True
                     attempt = await uow.runs.claim(
                         run_id, worker_id=self._worker_id, now=now, lease_until=now + self._lease
                     )
@@ -331,7 +396,8 @@ class HandleReviewRun:
                 prompt_version_id=snapshot.prompt_version_id,
                 rule_version_id=snapshot.rule_version_id,
                 worker_id=self._worker_id,
-            )
+            ),
+            execution,
         )
 
     @staticmethod
@@ -357,9 +423,9 @@ class HandleReviewRun:
             return "skipped", "budget_paused"
         return None
 
-    async def _run_attempt(self, claimed: ClaimedAttempt) -> DeliveryOutcome:
+    async def _run_attempt(self, claimed: ClaimedAttempt, execution: _Execution) -> DeliveryOutcome:
         try:
-            if await self._watch(claimed):
+            if await self._watch(claimed, execution):
                 return DeliveryOutcome.ACK
             reason = await self._cancellation_reason(claimed.run_id)
             if reason is not None:
@@ -381,9 +447,21 @@ class HandleReviewRun:
             failure = classify_failure(exc)
         return await self._fail(claimed, failure)
 
-    async def _watch(self, claimed: ClaimedAttempt) -> bool:
+    async def _watch(self, claimed: ClaimedAttempt, execution: _Execution) -> bool:
         """Run the pipeline under the attempt watchdog, renewing the lease until the deadline."""
         task = asyncio.ensure_future(self._pipeline(claimed))
+        self._pipelines.add(task)
+        task.add_done_callback(self._pipelines.discard)
+        execution.pipeline = task
+
+        def retrieve_result(completed: asyncio.Future[bool]) -> None:
+            if not completed.cancelled() and (error := completed.exception()) is not None:
+                _LOGGER.error(
+                    "Run %s cancelled pipeline failed during cleanup",
+                    claimed.run_id,
+                    exc_info=(type(error), error, error.__traceback__),
+                )
+
         try:
             while True:
                 remaining = (claimed.deadline - self._now()).total_seconds()
@@ -403,11 +481,18 @@ class HandleReviewRun:
                     await uow.commit()
                 if not extended:
                     raise _LeaseLost
+        except asyncio.CancelledError:
+            # The child can finish just before caller cancellation wins asyncio.wait.
+            # Retrieve that result too; the normal attempt classifier never sees it.
+            if task.done():
+                retrieve_result(task)
+            raise
         finally:
             if not task.done():
+                task.add_done_callback(retrieve_result)
                 task.cancel()
                 # A phase that ignores cancellation is left to lease expiry (T12, T13).
-                await asyncio.wait({task}, timeout=5)
+                await asyncio.wait({task}, timeout=_PIPELINE_CANCEL_WAIT)
 
     async def _cancellation_reason(self, run_id: UUID) -> str | None:
         async with self._uow_factory() as uow:

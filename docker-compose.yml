@@ -27,6 +27,7 @@ services:
   worker:
     build: .
     command: ["python", "-m", "app.worker"]
+    stop_grace_period: 40s
     # No HTTP port: the image healthcheck is replaced by the age of the heartbeat file, as on
     # staging, so `up --wait` waits until the consumers are attached.
     healthcheck:

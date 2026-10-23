@@ -20,6 +20,12 @@ RECONCILER_LEADER_LOCK = 3_468_002
 CODE_INDEX_ADMISSION_LOCK = 3_468_003
 
 
+def _raise_pending_cancellation(cause: Exception) -> None:
+    task = asyncio.current_task()
+    if task is not None and task.cancelling():
+        raise asyncio.CancelledError from cause
+
+
 async def run_as_leader(
     engine: AsyncEngine,
     key: int,
@@ -46,8 +52,9 @@ async def run_as_leader(
                     while True:
                         try:
                             await tick()
-                        except Exception:
+                        except Exception as exc:
                             _LOGGER.exception("%s leader tick failed", name)
+                            _raise_pending_cancellation(exc)
                         await asyncio.sleep(period)
                         # Fails when the session, and with it the lock, is gone.
                         await connection.scalar(text("SELECT 1"))
@@ -56,6 +63,7 @@ async def run_as_leader(
                     await connection.invalidate()
         except asyncio.CancelledError:
             raise
-        except Exception:
+        except Exception as exc:
             _LOGGER.exception("%s leader loop lost its database connection", name)
+            _raise_pending_cancellation(exc)
             await asyncio.sleep(period)
