@@ -109,9 +109,12 @@ retain the existing known-count `[N more commits omitted]` marker.
 Commit pages and blobs share a capped reader. Each commit page has a 1 MiB budget
 before strict nested Pydantic validation; identity encoding is requested, and
 other encodings are rejected before reading or decoding to prevent decompression
-allocation above that cap. Invalid pages, transport errors and rate limits use
-retryable `commit_messages_fetch_failed`; 404/nonlimited 403 remain
-`github_forbidden`. Diagnostics omit response text and credentials, Retry-After
+allocation above that cap. Invalid pages, HTTP 5xx, 401/422, all 429 (including
+without headers), other HTTP errors except 404/nonlimited 403, timeouts and other
+transport/connection failures use retryable `commit_messages_fetch_failed`.
+A 403 is rate-limited when `Retry-After` contains only ASCII decimal digits (seconds) or
+`X-RateLimit-Remaining: 0`; 404/nonlimited 403 remain `github_forbidden`.
+Diagnostics omit response text and credentials, Retry-After
 is preserved, and author-facing check-runs name commit messages. Installation
 checkpoints precede token acquisition and every page request; GitHub calls occur
 outside database transactions.

@@ -350,7 +350,7 @@ def _digest_warnings(
         else:
             if current_inputs != recorded_inputs:
                 warnings.append("Static input path set changed; refresh the complete baseline")
-            elif recorded_digest != manifest["static_digest"]:
+            if recorded_digest != manifest["static_digest"]:
                 warnings.append("Static input digest mismatch; refresh the complete baseline")
     try:
         current_corpus = digest_files(root, corpus_input_paths(root, records))
