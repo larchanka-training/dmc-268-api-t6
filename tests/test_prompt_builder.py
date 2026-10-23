@@ -217,6 +217,33 @@ def test_parse_unified_diff_takes_a_rename_target_that_holds_the_b_prefix() -> N
     )
 
 
+@pytest.mark.parametrize(
+    ("header", "path"),
+    [
+        # Two different names: without a ``rename to`` line the first-`` b/`` cut stays.
+        ("diff --git a/x b/old.py b/y b/new.py", "old.py b/y b/new.py"),
+        # One name on both sides, but not behind ``a/``: the middle split does not apply.
+        ("diff --git c/src/q b/r.py b/src/q b/r.py", "r.py b/src/q b/r.py"),
+    ],
+    ids=["different-names", "no-a-prefix"],
+)
+def test_parse_unified_diff_keeps_the_provisional_path_outside_the_a_b_form(
+    header: str, path: str
+) -> None:
+    files = parse_unified_diff(f"{header}\n@@ -1 +1 @@\n-old\n+new\n")
+
+    assert files == (
+        ChangedFile(
+            path=path,
+            status="modified",
+            lines=(
+                DiffLine(number=1, type="removed", content="old"),
+                DiffLine(number=1, type="added", content="new"),
+            ),
+        ),
+    )
+
+
 def test_parse_unified_diff_rejects_a_header_with_two_empty_paths() -> None:
     with pytest.raises(ValueError, match="invalid unified diff header"):
         parse_unified_diff("diff --git a/ b/\n@@ -1 +1 @@\n-a\n+b\n")

@@ -156,12 +156,15 @@ def review_files_from_snapshots(
     changed: list[ChangedFile] = []
     omitted: list[str] = []
     for snapshot in snapshots:
-        if snapshot.summary_only or snapshot.omission_reason is not None or snapshot.patch is None:
+        if (
+            snapshot.summary_only
+            or snapshot.omission_reason is not None
+            or snapshot.patch is None
+            or snapshot.review_patch is None
+        ):
             omitted.append(snapshot.filename)
-        elif snapshot.review_patch is not None:
+        else:
             changed.append(
                 parse_file_patch(snapshot.filename, snapshot.status, snapshot.review_patch)
             )
-        else:
-            omitted.append(snapshot.filename)
     return tuple(changed), tuple(omitted)
