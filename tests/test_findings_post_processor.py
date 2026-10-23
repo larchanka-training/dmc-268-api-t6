@@ -317,6 +317,39 @@ def test_review_body_starts_with_verdict_risk_summary_and_checked_paths() -> Non
     assert "- **Moved note** (`src/app.py:3`): outside the diff" in appended
 
 
+def test_move_inline_to_body_with_no_findings_leaves_body_unchanged() -> None:
+    body = "## Review summary\n\nDone."
+    assert move_inline_to_body(body, ()) == body
+
+
+def test_checked_files_include_deleted_paths() -> None:
+    diff_map = _diff_map_from_vcs(
+        VcsFile(
+            "gone.py",
+            "removed",
+            None,
+            None,
+            0,
+            2,
+            2,
+            "@@ -1,2 +0,0 @@\n-one\n-two",
+        ),
+        VcsFile(
+            "app/example.py",
+            "modified",
+            None,
+            None,
+            1,
+            1,
+            2,
+            "@@ -1 +1 @@\n-x\n+y",
+        ),
+    )
+    result = process(finding(path="app/example.py", line=1), diff_map=diff_map)
+    assert "- app/example.py" in result.review_body
+    assert "- gone.py" in result.review_body
+
+
 def test_checked_files_are_none_when_the_diff_has_no_paths() -> None:
     result = process(finding(severity="high"), diff_map=_empty_diff_map())
 

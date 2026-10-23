@@ -58,7 +58,7 @@ def _detail(response: httpx.Response) -> str:
 
 def _retry_after(response: httpx.Response) -> timedelta | None:
     raw = response.headers.get("Retry-After", "").strip()
-    if raw.isdigit():
+    if raw.isascii() and raw.isdigit():
         return timedelta(seconds=int(raw))
     return None
 
@@ -93,7 +93,7 @@ def _header_int(response: httpx.Response, name: str) -> int | None:
     raw = response.headers.get(name, "").strip()
     if not raw:
         return None
-    if not raw.isdigit():
+    if not raw.isascii() or not raw.isdigit():
         raise PublishError("retryable", "GitLab discussion list is short")
     return int(raw)
 
@@ -296,7 +296,7 @@ class GitLabMergeRequestDiscussionGateway:
                 if total is not None and len(collected) != total:
                     raise PublishError("retryable", "GitLab discussion list is short")
                 return collected
-            if not next_page.isdigit():
+            if not next_page.isascii() or not next_page.isdigit():
                 raise PublishError("retryable", "GitLab discussion list is short")
             next_page_number = int(next_page)
             if next_page_number <= page:

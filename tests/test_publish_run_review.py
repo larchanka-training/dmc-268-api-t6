@@ -28,7 +28,7 @@ from app.modules.reviews.application.publish_run_review import (
     SubmittedReview,
 )
 from app.modules.reviews.application.queue_messages import ReviewPublishPointer
-from app.modules.reviews.application.review_output import PublishedFinding
+from app.modules.reviews.application.review_output import PublishedFinding, comment_body
 from app.modules.reviews.infrastructure.github_review_publication import (
     GitHubCheckRunGateway,
     GitHubPullRequestReviewGateway,
@@ -332,7 +332,7 @@ def test_coordinate_fallback_with_no_inline_findings_fails_after_one_retry() -> 
     assert store.state == "failed"
     assert store.error_code == "github_publish_failed"
     assert len(reviews.submissions) == 2
-    assert reviews.submissions[1].body.count("## Inline findings") == 1
+    assert reviews.submissions[1].body.count("## Inline findings") == 0
 
 
 def test_coordinate_422_moves_inline_findings_into_the_body_once() -> None:
@@ -426,7 +426,17 @@ def test_github_review_gateway_reuses_a_review_already_posted_for_the_hash() -> 
                 200, json=[{"id": 55, "body": f"x\n\n<!-- ai-review findings_hash={HASH} -->"}]
             )
         if request.url.path.endswith("/reviews/55/comments"):
-            return httpx.Response(200, json=[{"id": 900}])
+            return httpx.Response(
+                200,
+                json=[
+                    {
+                        "id": 900,
+                        "path": FINDING.path,
+                        "line": FINDING.line,
+                        "body": comment_body(FINDING.title, FINDING.body, FINDING.suggestion),
+                    }
+                ],
+            )
         raise AssertionError(f"unexpected {request.method} {request.url}")
 
     gateway = GitHubPullRequestReviewGateway(
@@ -600,7 +610,17 @@ def test_failed_comment_read_is_retried_and_finds_the_posted_review() -> None:
         comment_reads.append(1)
         if len(comment_reads) == 1:
             return httpx.Response(502, json={"message": "Bad Gateway"})
-        return httpx.Response(200, json=[{"id": 900}])
+        return httpx.Response(
+            200,
+            json=[
+                {
+                    "id": 900,
+                    "path": FINDING.path,
+                    "line": FINDING.line,
+                    "body": comment_body(FINDING.title, FINDING.body, FINDING.suggestion),
+                }
+            ],
+        )
 
     gateway = GitHubPullRequestReviewGateway(
         client=httpx.AsyncClient(

@@ -118,6 +118,13 @@ def test_hunk_rows_carry_the_line_number_of_each_side() -> None:
     )
 
 
+def test_vcs_provider_name_maps_gitlab_installation_string() -> None:
+    from app.modules.reviews.application.diff_map import vcs_provider_name
+
+    assert vcs_provider_name("gitlab") is VcsProviderName.GITLAB
+    assert vcs_provider_name("github") is VcsProviderName.GITHUB
+
+
 def test_map_keeps_both_revisions_apart_from_the_policy_base() -> None:
     diff_map = _build(_file())
 

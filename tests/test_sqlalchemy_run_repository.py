@@ -607,7 +607,7 @@ def test_get_post_processing_input_returns_none_allowed_v2_rules_for_legacy_run(
     run_id = UUID(int=1)
     rules = [{"name": "Standard Rule"}]
     post_input_row = (rules, 10, SeverityThreshold.ALL)
-    run_meta_row = ("c" * 40, "b" * 40, UUID(int=20), 7)
+    run_meta_row = ("c" * 40, "b" * 40, UUID(int=20), 7, "github")
     diff_row = SimpleNamespace(
         filename="app/main.py",
         # Valid unified diff: new-side line 2 is the added row (DiffMap anchoring #171).

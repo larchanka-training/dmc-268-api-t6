@@ -287,9 +287,12 @@ def _classify_anchor(
 
 
 def _checked_paths(diff_map: DiffMap) -> tuple[str, ...]:
-    return tuple(
-        sorted(path for path in (file.new_path for file in diff_map.files) if path is not None)
-    )
+    paths: set[str] = set()
+    for file in diff_map.files:
+        path = file.new_path or file.old_path
+        if path is not None:
+            paths.add(path)
+    return tuple(sorted(paths))
 
 
 def _normalize_title(title: str) -> str:

@@ -15,6 +15,9 @@ from app.modules.reviews.application.findings_post_processor import (
     FindingsPostProcessor,
     ProcessedReviewOutput,
 )
+from app.modules.reviews.application.publication_coordinates import (
+    enrich_gitlab_publication_finding,
+)
 from app.modules.reviews.application.publish_run_review import SubmittedReview
 from app.modules.reviews.application.review_output import (
     FindingPostProcessingInput,
@@ -25,7 +28,7 @@ from app.modules.reviews.application.review_output import (
     ReviewPublication,
 )
 from app.modules.reviews.application.verdict import SeverityThresholdValue
-from app.modules.reviews.infrastructure.run_repository import _published_finding_from_review
+from app.modules.reviews.infrastructure.run_repository import _to_published_finding
 from tests.test_findings_post_processor import _added_file_diff_map, _empty_diff_map
 from tests.test_publish_run_review import GitLabReviews, Store, gitlab_context, run
 
@@ -459,7 +462,9 @@ def test_unanchored_line_routes_to_body_for_github_and_gitlab() -> None:
             self.processed = processed
             assert self.publication is not None
             inline = tuple(
-                _published_finding_from_review(item.finding, _EXAMPLE_DIFF_MAP)
+                enrich_gitlab_publication_finding(
+                    _EXAMPLE_DIFF_MAP, _to_published_finding(item.finding)
+                )
                 for item in processed.inline
             )
             return ReviewPublication(
@@ -482,7 +487,8 @@ def test_unanchored_line_routes_to_body_for_github_and_gitlab() -> None:
     assert UNANCHORED_TITLE in provider.calls[0][1]
 
     inline = tuple(
-        _published_finding_from_review(item.finding, _EXAMPLE_DIFF_MAP) for item in processed.inline
+        enrich_gitlab_publication_finding(_EXAMPLE_DIFF_MAP, _to_published_finding(item.finding))
+        for item in processed.inline
     )
     store = Store(
         gitlab_context(
