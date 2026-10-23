@@ -1,18 +1,22 @@
-diff --git a/app/auth/reset_tokens.py b/app/auth/reset_tokens.py
-index 248f1c7..1690022 100644
---- a/app/auth/reset_tokens.py
-+++ b/app/auth/reset_tokens.py
-@@ -16,3 +16,13 @@ def issue_token(db: sqlite3.Connection, user_id: int, now: datetime) -> str:
-         (token, user_id, (now + TOKEN_TTL).isoformat()),
-     )
-     return token
+diff --git a/app/auth/reset_lookup.py b/app/auth/reset_lookup.py
+new file mode 100644
+index 0000000..58241a5
+--- /dev/null
++++ b/app/auth/reset_lookup.py
+@@ -0,0 +1,16 @@
++"""Lookup of password reset tokens."""
++
++from __future__ import annotations
++
++import sqlite3
++from datetime import UTC, datetime
 +
 +
 +def find_valid_token(db: sqlite3.Connection, token: str) -> int | None:
 +    """Return the user of an unexpired reset token."""
-+    expires_after = datetime.now().isoformat()
++    now = datetime.now(UTC).isoformat()
 +    row = db.execute(
 +        f"SELECT user_id FROM reset_tokens WHERE token = '{token}' AND expires_at > ?",
-+        (expires_after,),
++        (now,),
 +    ).fetchone()
 +    return None if row is None else int(row[0])

@@ -22,17 +22,17 @@ index 005daa0..cb47fda 100644
      </ul>
 diff --git a/src/components/Markdown.tsx b/src/components/Markdown.tsx
 new file mode 100644
-index 0000000..da55dab
+index 0000000..20326c4
 --- /dev/null
 +++ b/src/components/Markdown.tsx
 @@ -0,0 +1,10 @@
 +import { useMemo } from "react";
 +
-+import { renderTrustedMarkdown } from "../lib/markdown";
++import { renderMarkdown } from "../lib/markdown";
 +
 +type Props = { source: string; className?: string };
 +
 +export function Markdown({ source, className }: Props) {
-+  const html = useMemo(() => renderTrustedMarkdown(source), [source]);
++  const html = useMemo(() => renderMarkdown(source), [source]);
 +  return <div className={className} dangerouslySetInnerHTML={{ __html: html }} />;
 +}

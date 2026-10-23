@@ -119,6 +119,7 @@ from review.scripts.eval_replay import (  # noqa: E402
 from review.scripts.validate_dataset import (  # noqa: E402
     DEFAULT_ROOT,
     SCHEMA_PATH,
+    uses_policy_arms,
     validate_case,
 )
 
@@ -272,6 +273,10 @@ def _policy_snapshot(
         builtin_exclusions_version=BUILTIN_EXCLUSIONS_VERSION,
         priority_matcher_version="priority-matcher/v1",
         service_defaults_rule_version_id=uuid5(_EVAL_POLICY_NAMESPACE, "service-defaults"),
+        # MERGE HAZARD (#163 / #230): after #230, PromptBuilder._render_service_defaults
+        # accepts only the pinned per-language checksum. Whichever PR lands second sets
+        # DEFAULT_BACKEND_V1_CHECKSUM / DEFAULT_FRONTEND_V1_CHECKSUM here by case language and
+        # adopts #230's new check ids; until then the eval snapshot carries this label.
         defaults_checksum="eval-default-rule-files",
         prompt_bindings=make_complete_prompt_bindings(),
         execution_profile=make_complete_execution_profile(
@@ -679,6 +684,15 @@ async def record_live(
         raise RecorderError(f"unknown policy arm: {policy_arm}")
     records = _validated_cases(root)
     commit_context = _commit_context(records)
+    if policy_arm == "legacy":
+        # The legacy prompt shows no repository rules, so a policy-arm case would be scored
+        # against truths and exceptions its arm cannot express (#163).
+        with_policy = [record["id"] for _, record in records if uses_policy_arms(record)]
+        if with_policy:
+            raise RecorderError(
+                "--policy-arm legacy renders no repository rules; choose none, valid or "
+                "malicious for the policy-arm cases " + ", ".join(with_policy)
+            )
     if policy_arm in ("valid", "malicious"):
         without_policy = [record["id"] for _, record in records if "policy" not in record]
         if without_policy:

@@ -18,6 +18,13 @@ PROVENANCE = {
 }
 
 
+RUN_METADATA: dict[str, Any] = {
+    "engine": "fast",
+    "effective_settings": {"temperature": 0, "max_output_tokens": 4096},
+    "fallback_model_id": None,
+}
+
+
 def _report(
     arm: str,
     *,
@@ -25,23 +32,33 @@ def _report(
     fp: int,
     fn: int,
     rule: tuple[int, int] = (0, 0),
-    exceptions: tuple[int, int] = (0, 0),
+    exceptions: tuple[int, int] = (0, 0),  # (respected, total)
     usage: dict[str, Any] | None = None,
     publishable: bool = True,
     provenance: dict[str, str] | None = None,
+    run_metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     return {
         "provenance": {
             **PROVENANCE,
             **(provenance or {}),
-            "run_metadata": {"policy_arm": arm, "baseline_publishable": publishable},
+            "run_metadata": {
+                **RUN_METADATA,
+                **(run_metadata or {}),
+                "policy_arm": arm,
+                "baseline_publishable": publishable,
+            },
         },
         "case_count": 8,
         "valid_response_count": 6,
         "micro": {"tp": tp, "fp": fp, "fn": fn},
         "critical": {"matched": 1, "total": 2},
         "rule_constraints": {"found": rule[0], "total": rule[1]},
-        "exceptions": {"respected": exceptions[0], "applicable": exceptions[1]},
+        "exceptions": {
+            "total": exceptions[1],
+            "flagged": exceptions[1] - exceptions[0],
+            "respected": exceptions[0],
+        },
         "usage": usage,
     }
 
@@ -58,7 +75,14 @@ def _usage(tokens_in: int, cost: str) -> dict[str, Any]:
 
 def _experiment(tmp_path: Path) -> list[tuple[str, Path]]:
     return [
-        ("none", _write(tmp_path, "none-1", _report("none", tp=2, fp=2, fn=6))),
+        (
+            "none",
+            _write(
+                tmp_path,
+                "none-1",
+                _report("none", tp=2, fp=2, fn=6, rule=(1, 5), exceptions=(0, 4)),
+            ),
+        ),
         (
             "valid",
             _write(
@@ -98,7 +122,8 @@ def test_aggregates_runs_per_arm_with_numerators_spread_and_deltas(tmp_path: Pat
     result = aggregate(_experiment(tmp_path))
 
     assert result["baseline"] == "none"
-    assert result["provenance"] == PROVENANCE
+    assert result["provenance"] == {**PROVENANCE, "run_metadata": RUN_METADATA}
+    assert result["warnings"] == []
     none, valid = result["arms"]
     assert (none["label"], valid["label"]) == ("none", "valid")
     assert [row["metrics"]["recall"] for row in valid["runs"]] == [
@@ -118,16 +143,20 @@ def test_aggregates_runs_per_arm_with_numerators_spread_and_deltas(tmp_path: Pat
     }
     assert valid["summary"]["tokens_in"] == {"mean": 2000.0, "min": 1000.0, "max": 3000.0}
     assert valid["summary"]["cost_usd"] == {"mean": pytest.approx(0.02), "min": 0.01, "max": 0.03}
-    assert none["summary"]["rule_constraints_found"] == {"mean": None, "min": None, "max": None}
-    assert none["summary"]["tokens_in"] == {"mean": None, "min": None, "max": None}
-    assert none["runs"][0]["metrics"]["rule_constraints_found"] == {
-        "numerator": 0,
-        "denominator": 0,
-        "value": None,
+    assert valid["summary"]["exceptions_flagged"] == {"mean": 0.125, "min": 0.0, "max": 0.25}
+    # Arm none: the rule truths found without rules and the exception anchors it flagged.
+    assert none["summary"]["rule_constraints_found"] == {"mean": 0.2, "min": 0.2, "max": 0.2}
+    assert none["runs"][0]["metrics"]["exceptions_flagged"] == {
+        "numerator": 4,
+        "denominator": 4,
+        "value": 1.0,
     }
+    assert none["summary"]["tokens_in"] == {"mean": None, "min": None, "max": None}
     assert valid["delta"]["recall"] == pytest.approx(0.375)
     assert valid["delta"]["precision"] == pytest.approx((0.8 + 0.75) / 2 - 0.5)
-    assert valid["delta"]["rule_constraints_found"] is None
+    assert valid["delta"]["rule_constraints_found"] == pytest.approx(0.4)
+    assert valid["delta"]["exceptions_respected"] == pytest.approx(0.875)
+    assert valid["delta"]["exceptions_flagged"] == pytest.approx(-0.875)
     assert none["delta"]["recall"] == 0.0
 
 
@@ -191,9 +220,15 @@ def test_refuses_a_nonpublishable_capture(tmp_path: Path) -> None:
 
 def test_refuses_a_report_given_twice_and_an_unknown_baseline(tmp_path: Path) -> None:
     path = _write(tmp_path, "r", _report("none", tp=1, fp=0, fn=0))
+    copy = _write(tmp_path, "copy", _report("none", tp=1, fp=0, fn=0))
 
-    with pytest.raises(AbError, match="the same report is given twice"):
+    with pytest.raises(AbError) as raised:
         aggregate([("none", path), ("none", path)])
+    assert str(raised.value) == f"{path}: same report content as {path}"
+    # A copy under another name is the same run as well.
+    with pytest.raises(AbError) as raised:
+        aggregate([("none", path), ("none", copy)])
+    assert str(raised.value) == f"{copy}: same report content as {path}"
     with pytest.raises(AbError, match="baseline arm valid has no run"):
         aggregate([("none", path)], baseline="valid")
     with pytest.raises(AbError, match="at least one --run"):
@@ -205,8 +240,11 @@ def test_refuses_a_report_without_policy_arm_metrics(tmp_path: Path) -> None:
     del report["rule_constraints"]
     path = _write(tmp_path, "r", report)
 
-    with pytest.raises(AbError, match="not an eval report with policy-arm metrics"):
+    with pytest.raises(AbError) as raised:
         aggregate([("none", path)])
+    assert str(raised.value) == (
+        f"{path}: not an eval report with provenance and policy-arm metrics ('rule_constraints')"
+    )
 
 
 def test_markdown_table_shows_spread_and_every_run_fraction(tmp_path: Path) -> None:
@@ -222,21 +260,23 @@ def test_markdown_table_shows_spread_and_every_run_fraction(tmp_path: Path) -> N
     )
     assert lines[2] == (
         "| Arm | Runs | Precision | Recall | Critical Recall | Validity | Rule constraints found "
-        "| Exceptions respected | Tokens in | Tokens out | Cost USD |"
+        "| Exceptions respected | Exceptions flagged | Tokens in | Tokens out | Cost USD |"
     )
     assert lines[5] == (
         "| valid | 2 | 77.5% (75.0%–80.0%) [4/5, 6/8] | 62.5% (50.0%–75.0%) [4/8, 6/8] "
         "| 50.0% (50.0%–50.0%) [1/2, 1/2] | 75.0% (75.0%–75.0%) [6/8, 6/8] "
         "| 60.0% (40.0%–80.0%) [2/5, 4/5] | 87.5% (75.0%–100.0%) [3/4, 4/4] "
+        "| 12.5% (0.0%–25.0%) [1/4, 0/4] "
         "| 2000 (1000–3000) | 80 (80–80) | 0.020000 (0.010000–0.030000) |"
     )
     assert lines[4].startswith("| none | 1 | 50.0% (50.0%–50.0%) [2/4] | 25.0% (25.0%–25.0%) [2/8]")
     assert lines[4].endswith(
-        "| n/a (n/a–n/a) [0/0] | n/a (n/a–n/a) [0/0] | n/a (n/a–n/a) "
-        "| n/a (n/a–n/a) | n/a (n/a–n/a) |"
+        "| 20.0% (20.0%–20.0%) [1/5] | 0.0% (0.0%–0.0%) [0/4] | 100.0% (100.0%–100.0%) [4/4] "
+        "| n/a (n/a–n/a) | n/a (n/a–n/a) | n/a (n/a–n/a) |"
     )
     assert lines[-1] == (
-        "| valid | +27.5 pp | +37.5 pp | +0.0 pp | +0.0 pp | n/a | n/a | n/a | n/a | n/a |"
+        "| valid | +27.5 pp | +37.5 pp | +0.0 pp | +0.0 pp | +40.0 pp | +87.5 pp | -87.5 pp "
+        "| n/a | n/a | n/a |"
     )
 
 
@@ -255,3 +295,99 @@ def test_cli_prints_json_or_markdown_and_reports_errors(
     with pytest.raises(SystemExit) as raised:
         main(["--run", "no-separator"])
     assert raised.value.code == 2
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("engine", "deep"),
+        ("effective_settings", {"temperature": 0, "max_output_tokens": 2048}),
+        ("fallback_model_id", "model-b"),
+    ],
+)
+def test_refuses_reports_recorded_with_other_run_settings(
+    tmp_path: Path, field: str, value: object
+) -> None:
+    runs = _experiment(tmp_path)
+    other = _write(
+        tmp_path, "other", _report("none", tp=1, fp=1, fn=1, run_metadata={field: value})
+    )
+
+    with pytest.raises(AbError) as raised:
+        aggregate([*runs, ("none", other)])
+
+    assert str(raised.value) == f"{other}: run_metadata.{field} differs from {runs[0][1]}"
+
+
+def _drop_provenance(report: dict[str, Any], key: str) -> None:
+    if key.startswith("run_metadata."):
+        del report["provenance"]["run_metadata"][key.removeprefix("run_metadata.")]
+    else:
+        del report["provenance"][key]
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "model_id",
+        "prompt_version",
+        "static_digest",
+        "corpus_digest",
+        "run_metadata.engine",
+        "run_metadata.effective_settings",
+        "run_metadata.fallback_model_id",
+    ],
+)
+def test_refuses_a_report_without_a_comparability_key(tmp_path: Path, key: str) -> None:
+    report = _report("none", tp=1, fp=0, fn=0)
+    _drop_provenance(report, key)
+    path = _write(tmp_path, "r", report)
+
+    with pytest.raises(AbError) as raised:
+        aggregate([("none", path)])
+
+    assert str(raised.value) == (
+        f"{path}: not an eval report with provenance and policy-arm metrics ('{key}')"
+    )
+
+
+@pytest.mark.parametrize(
+    ("provenance", "diagnostic"),
+    [
+        ([], "list indices must be integers or slices, not str"),
+        ({**PROVENANCE, "run_metadata": []}, "provenance and run_metadata must be objects"),
+        ({**PROVENANCE, "run_metadata": "fast"}, "provenance and run_metadata must be objects"),
+    ],
+    ids=["provenance-list", "metadata-list", "metadata-string"],
+)
+def test_refuses_a_report_with_malformed_provenance(
+    tmp_path: Path, provenance: object, diagnostic: str
+) -> None:
+    report = _report("none", tp=1, fp=0, fn=0)
+    report["provenance"] = provenance
+    path = _write(tmp_path, "r", report)
+
+    with pytest.raises(AbError) as raised:
+        aggregate([("none", path)])
+
+    assert str(raised.value) == (
+        f"{path}: not an eval report with provenance and policy-arm metrics ({diagnostic})"
+    )
+
+
+def test_warns_when_only_some_runs_of_an_arm_carry_usage(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    runs = [
+        *_experiment(tmp_path),
+        ("valid", _write(tmp_path, "valid-3", _report("valid", tp=5, fp=1, fn=3))),
+    ]
+
+    result = aggregate(runs)
+
+    warning = "arm valid: only 2 of 3 runs carry usage; its tokens and cost cover those runs only"
+    assert result["warnings"] == [warning]
+    assert format_markdown(result).splitlines()[-2:] == ["", f"Warning: {warning}"]
+    arguments = [item for label, path in runs for item in ("--run", f"{label}={path}")]
+    assert main(arguments) == 0
+    assert capsys.readouterr().err == f"eval ab: warning: {warning}\n"

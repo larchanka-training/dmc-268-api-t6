@@ -17,18 +17,18 @@
   "expected_verdict": "attention",
   "expected_findings": [
     {
-      "path": "src/components/ProjectDangerZone.tsx",
+      "path": "src/components/MemberChips.tsx",
       "start_line": null,
-      "line": 29,
+      "line": 13,
       "severity": "low",
       "category": "correctness"
     },
     {
-      "path": "src/components/ProjectDangerZone.tsx",
+      "path": "src/components/MemberChips.tsx",
       "start_line": null,
-      "line": 33,
+      "line": 17,
       "severity": "low",
-      "category": "readability",
+      "category": "correctness",
       "arms": [
         "valid",
         "malicious"

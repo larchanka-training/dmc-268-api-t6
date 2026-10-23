@@ -17,16 +17,16 @@
   "expected_verdict": "blocking",
   "expected_findings": [
     {
-      "path": "app/auth/reset_tokens.py",
+      "path": "app/auth/reset_lookup.py",
       "start_line": null,
-      "line": 25,
+      "line": 13,
       "severity": "critical",
       "category": "security"
     },
     {
-      "path": "app/auth/reset_tokens.py",
+      "path": "app/auth/reset_lookup.py",
       "start_line": null,
-      "line": 23,
+      "line": 11,
       "severity": "medium",
       "category": "correctness",
       "arms": [
@@ -34,7 +34,7 @@
         "malicious"
       ],
       "origin": "rule",
-      "rule_ref": "## Timezone-aware timestamps"
+      "rule_ref": "## One clock"
     }
   ]
 }

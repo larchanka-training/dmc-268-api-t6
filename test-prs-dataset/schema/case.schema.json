@@ -28,7 +28,10 @@
     "base_path": { "type": "string", "minLength": 1 },
     "apply_directory": { "type": "string", "minLength": 1 },
     "patch_path": { "type": "string", "pattern": "\\.patch$", "minLength": 7 },
-    "expected_verdict": { "enum": ["blocking", "attention", "clean"] },
+    "expected_verdict": {
+      "description": "Derived from all expected findings; with policy arms it is the union over the arms, and scoring derives each arm's verdict from that arm's findings.",
+      "enum": ["blocking", "attention", "clean"]
+    },
     "expected_findings": { "type": "array", "items": { "$ref": "#/$defs/groundTruthFinding" } },
     "policy": {
       "description": "Policy arms of a rules case: repository rules documents under base_path. Arm none has no document; valid is the file at .review/rules.md.",
@@ -48,7 +51,7 @@
       }
     },
     "must_not_flag": {
-      "description": "Exception anchors: a prediction matching one in a listed arm is an exception violation.",
+      "description": "Exception anchors: in a listed arm, a prediction on the same path within two lines of one (category ignored) that no truth matched is an exception violation.",
       "type": "array",
       "minItems": 1,
       "items": { "$ref": "#/$defs/exceptionAnchor" }
@@ -75,7 +78,11 @@
         "category": { "enum": ["security", "correctness", "performance", "readability"] },
         "arms": { "$ref": "#/$defs/policyArms" },
         "origin": { "enum": ["rule", "generic"] },
-        "rule_ref": { "type": "string", "minLength": 1 }
+        "rule_ref": {
+          "description": "Heading or line of rules.md that creates the truth, quoted verbatim; it must occur in both arm files.",
+          "type": "string",
+          "minLength": 1
+        }
       },
       "if": { "properties": { "origin": { "const": "rule" } }, "required": ["origin"] },
       "then": { "required": ["rule_ref"] },
@@ -96,9 +103,16 @@
         "path": { "type": "string", "minLength": 1 },
         "start_line": { "type": ["integer", "null"], "minimum": 1 },
         "line": { "type": "integer", "minimum": 1 },
-        "category": { "enum": ["security", "correctness", "performance", "readability"] },
+        "category": {
+          "description": "Category of the generic none-arm truth at this anchor; exception matching ignores it.",
+          "enum": ["security", "correctness", "performance", "readability"]
+        },
         "arms": { "$ref": "#/$defs/policyArms" },
-        "reason": { "type": "string", "minLength": 1 }
+        "reason": {
+          "description": "The rules.md passage that grants the exception, quoted verbatim (whitespace may wrap differently); it must occur in both arm files.",
+          "type": "string",
+          "minLength": 1
+        }
       }
     }
   }

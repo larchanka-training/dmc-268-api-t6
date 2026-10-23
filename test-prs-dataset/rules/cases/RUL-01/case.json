@@ -19,7 +19,7 @@
     {
       "path": "app/api/invoices.py",
       "start_line": null,
-      "line": 22,
+      "line": 29,
       "severity": "medium",
       "category": "correctness",
       "arms": [

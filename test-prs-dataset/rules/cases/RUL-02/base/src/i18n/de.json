@@ -1,5 +1,4 @@
 {
-  "common.loading": "Wird geladen…",
-  "project.general.title": "Allgemein",
-  "project.settings.title": "Projekteinstellungen"
+  "team.header.members": "{count} Mitglieder",
+  "team.header.title": "Team {name}"
 }

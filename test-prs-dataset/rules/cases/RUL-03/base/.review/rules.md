@@ -1,11 +1,11 @@
 # Time
 
-## Timezone-aware timestamps
+## One clock
 
-All timestamps are timezone-aware UTC. Get the current time from
-`app.common.clock.utcnow()`; never call `datetime.now()` or `datetime.utcnow()` in
-`app/`. Stored values are ISO 8601 strings with an offset, so a naive value breaks
-the string comparisons in `app/auth/`.
+Code in `app/` reads the current time only through `app.common.clock.utcnow()`.
+Tests freeze that function, so a direct `datetime.now()` call, with or without a
+timezone, leaves the expiry logic it feeds untested against the frozen clock.
+Report such a call as a correctness problem.
 
 # Security
 

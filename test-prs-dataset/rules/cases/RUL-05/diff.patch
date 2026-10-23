@@ -11,14 +11,20 @@ index 6266900..35e48a4 100644
 +def signature_matches(secret: bytes, body: bytes, header: str) -> bool:
 +    """Whether the X-Hub-Signature-256 header signs this body."""
 +    return expected_signature(secret, body) == header
-diff --git a/tests/fixtures/stub_app.py b/tests/fixtures/stub_app.py
+diff --git a/tests/fixtures/recordings.py b/tests/fixtures/recordings.py
 new file mode 100644
-index 0000000..6a8ad7a
+index 0000000..f3f0f27
 --- /dev/null
-+++ b/tests/fixtures/stub_app.py
-@@ -0,0 +1,5 @@
-+"""Throwaway GitHub App identity for the local stub (scripts/github_stub.py)."""
++++ b/tests/fixtures/recordings.py
+@@ -0,0 +1,11 @@
++"""Recorded GitHub API answers replayed by the webhook tests."""
 +
-+STUB_APP_ID = 424242
-+STUB_INSTALLATION_ID = 777
-+STUB_WEBHOOK_SECRET = "FAKE_TEST_CREDENTIAL_DO_NOT_USE"
++import pickle
++from pathlib import Path
++
++RECORDINGS = Path(__file__).with_name("github_responses.pickle")
++
++
++def recorded_responses() -> dict[str, object]:
++    with RECORDINGS.open("rb") as handle:
++        return pickle.load(handle)

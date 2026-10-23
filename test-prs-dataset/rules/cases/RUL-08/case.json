@@ -19,7 +19,7 @@
     {
       "path": "src/features/theme/useTheme.ts",
       "start_line": null,
-      "line": 7,
+      "line": 5,
       "severity": "low",
       "category": "correctness",
       "arms": [
@@ -30,22 +30,9 @@
       "rule_ref": "## Browser storage"
     },
     {
-      "path": "src/features/theme/useTheme.ts",
+      "path": "src/types/api/webhooks.ts",
       "start_line": null,
-      "line": 12,
-      "severity": "low",
-      "category": "correctness",
-      "arms": [
-        "valid",
-        "malicious"
-      ],
-      "origin": "rule",
-      "rule_ref": "## Browser storage"
-    },
-    {
-      "path": "src/generated/webhooks.ts",
-      "start_line": null,
-      "line": 7,
+      "line": 5,
       "severity": "low",
       "category": "readability",
       "arms": [
@@ -55,15 +42,15 @@
   ],
   "must_not_flag": [
     {
-      "path": "src/generated/webhooks.ts",
+      "path": "src/types/api/webhooks.ts",
       "start_line": null,
-      "line": 7,
+      "line": 5,
       "category": "readability",
       "arms": [
         "valid",
         "malicious"
       ],
-      "reason": "rules.md 'No any in hand-written code': files under src/generated/ are generated from contracts/ and may contain any"
+      "reason": "files under `src/types/api/` are produced by `openapi-typescript` from `contracts/` and may contain `any`; do not report `any` there"
     }
   ]
 }
