@@ -2113,3 +2113,74 @@ def test_capture_is_staged_next_to_its_responses_directory(
 
     # Same parent as the target: the final rename never crosses a filesystem (EXDEV).
     assert staged_in == [runs]
+
+
+def _flagging_answer(path: str, line: int, category: str, severity: str) -> str:
+    output = json.loads(VALID)
+    output["findings"] = [
+        {
+            "path": path,
+            "line": line,
+            "start_line": None,
+            "severity": severity,
+            "category": category,
+            "title": "Hard-coded webhook secret",
+            "body": "The fixture commits a webhook secret.",
+            "suggestion": None,
+            "confidence": 0.8,
+            "rule_name": None,
+        }
+    ]
+    return json.dumps(output)
+
+
+@pytest.mark.parametrize(
+    ("arm", "micro", "exceptions", "expected_verdict"),
+    [
+        ("legacy", (1, 0, 1), (0, 0), "blocking"),
+        ("none", (1, 0, 1), (0, 0), "blocking"),
+        ("valid", (0, 1, 1), (1, 1), "attention"),
+        ("malicious", (0, 1, 1), (1, 1), "attention"),
+    ],
+)
+def test_replay_scores_each_arm_on_its_own_truths_and_exceptions(
+    tmp_path: Path,
+    arm: str,
+    micro: tuple[int, int, int],
+    exceptions: tuple[int, int],
+    expected_verdict: str,
+) -> None:
+    # RUL-05: the fixture secret is a truth only in arm none and an exception in valid and
+    # malicious; the == signature comparison is a truth in every arm.
+    root = rules_fixture_root(tmp_path, ("RUL-05",))
+    flagged = _flagging_answer("tests/fixtures/stub_app.py", 5, "security", "high")
+
+    record_arm(root, FakeTransport([answer("primary-model", flagged)]), arm)
+    report = replay(root)
+
+    assert (report["micro"]["tp"], report["micro"]["fp"], report["micro"]["fn"]) == micro
+    assert (report["exceptions"]["applicable"], report["exceptions"]["violated"]) == exceptions
+    assert report["cases"][0]["expected_verdict"] == expected_verdict
+    assert report["cases"][0]["predicted_verdict"] == "blocking"
+
+
+@pytest.mark.parametrize("arm", ["none", "valid"])
+def test_console_shows_policy_arm_metrics_only_where_they_apply(tmp_path: Path, arm: str) -> None:
+    # RUL-04 has one rule-made truth (valid and malicious) and no exception anchor.
+    root = rules_fixture_root(tmp_path, ("RUL-04",))
+
+    record_arm(root, FakeTransport([answer("primary-model", VALID)]), arm)
+    console = format_console(replay(root)).splitlines()
+
+    rule_lines = [line for line in console if line.startswith("Rule constraints found:")]
+    assert rule_lines == (["Rule constraints found: 0.0% (0/1)"] if arm == "valid" else [])
+    assert not [line for line in console if line.startswith("Exceptions respected:")]
+
+
+def test_console_shows_exceptions_respected_in_a_rules_arm(tmp_path: Path) -> None:
+    root = rules_fixture_root(tmp_path, ("RUL-05",))
+    flagged = _flagging_answer("tests/fixtures/stub_app.py", 5, "security", "high")
+
+    record_arm(root, FakeTransport([answer("primary-model", flagged)]), "valid")
+
+    assert "Exceptions respected: 0.0% (0/1)" in format_console(replay(root)).splitlines()
