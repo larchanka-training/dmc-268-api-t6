@@ -231,10 +231,12 @@ def _stage(
 
 def test_stage_records_the_policy_and_the_context_without_any_document_or_code_text() -> None:
     trace = Trace()
+    stage = _stage(trace)
 
-    payload = asyncio.run(_stage(trace).run(_RUN))
+    payload = asyncio.run(stage.run(_RUN))
 
     assert payload is not None
+    assert stage.diff_old_sha == "c" * 40
     assert payload.status is ContextStatus.REVIEW
     assert [step[0] for step in trace.steps] == ["policy.load", "context.build"]
     policy, context = trace.steps[0][2], trace.steps[1][2]
@@ -337,10 +339,13 @@ def test_retry_reuses_the_stored_policy_snapshot() -> None:
 def test_unknown_merge_base_is_recorded_as_unknown_not_as_the_policy_base() -> None:
     trace = Trace()
     failing = Vcs(merge_base=MergeBaseUnavailable("down"))
+    stage = _stage(trace, vcs=failing)
 
-    asyncio.run(_stage(trace, vcs=failing).run(_RUN))
+    asyncio.run(stage.run(_RUN))
 
     assert trace.steps[1][2]["diff"]["diff_old_sha"] is None
+    assert stage.diff_old_sha is None
+    assert stage.policy_key is not None
 
 
 def test_policy_error_ends_the_attempt_and_stays_in_the_trace() -> None:

@@ -49,5 +49,5 @@ Rules:
 - Provide exactly one decision per candidate finding. Do not omit any candidate; do not introduce new candidates.
 - `reason` must be concise (at most 600 characters) without chain-of-thought exposition.
 - `evidence_refs` must refer to the exact code blocks and line numbers in `<code_context>`.
-- `requirement_refs` must refer to the exact policy blocks and line numbers in `<repository_rules>`, `<project_conventions_document>`, or `<service_defaults>` when a rule was attributed. For `<service_defaults>`, `check_id` must match the stable id attribute of the `<check>` tag (e.g. "SEC1", "COR1", "PERF1", "READ1", "N1", "1"); for other policy documents, `check_id` must be null.
+- `requirement_refs` must refer to the exact policy blocks and line numbers in `<repository_rules>`, `<project_conventions_document>`, or `<service_defaults>` when a rule was attributed. For `<service_defaults>`, `check_id` must match the stable id attribute of the `<check>` tag (e.g. "E2", "N5"); for other policy documents, `check_id` must be null.
 - If a candidate attributes a rule (`rule_attribution`) but there is no basis in the visible policy or code context for that attribution, you must mark it as `insufficient_context` instead of inventing requirement references.

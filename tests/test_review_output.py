@@ -483,47 +483,104 @@ def test_store_review_output_persists_dropped_findings_from_reflection_pass() ->
         async def publish_review(self, pointer: Any) -> None:
             self.published.append(pointer)
 
+    from app.modules.reviews.application.review_output import (
+        DroppedCandidateRecord,
+        EvidenceRef,
+        ReviewFindingV2,
+        VerifiedReviewOutput,
+        coerce_dropped_findings,
+    )
+
     queue = FakeQueue()
     store = StoreReviewOutput(cast(Any, lambda: FakeUoW()), queue, worker_id="test-worker")
-    value = valid_output()
-    value["_dropped_findings"] = [
-        {
-            "finding": {
-                "path": "app/example.py",
-                "line": 15,
-                "start_line": None,
-                "severity": "medium",
-                "category": "performance",
-                "title": "Slow query",
-                "body": "N+1 query detected",
-                "suggestion": None,
-                "confidence": 0.85,
-                "rule_name": None,
-            },
-            "drop_reason": "evidence_not_shown",
-            "position": 1,
-        }
-    ]
+    value = VerifiedReviewOutput(
+        valid_output(),
+        dropped_findings=(
+            DroppedCandidateRecord(
+                finding={
+                    "path": "app/example.py",
+                    "line": 15,
+                    "start_line": None,
+                    "severity": "medium",
+                    "category": "performance",
+                    "title": "Slow query",
+                    "body": "N+1 query detected",
+                    "suggestion": None,
+                    "confidence": 0.85,
+                    "rule_name": None,
+                },
+                drop_reason="severity_threshold",
+                position=1,
+            ),
+        ),
+        severity_threshold="critical",
+    )
 
     success = asyncio.run(store.execute(RUN_ID, value))
     assert success is True
     assert len(stored_processed) == 1
-    # Check that processed.dropped contains the dropped finding
+    # Check that processed.dropped contains the dropped finding and overview count
     assert len(stored_processed[0].dropped) == 1
+    assert "Below severity threshold (critical)" in stored_processed[0].review_body
     dropped_item = stored_processed[0].dropped[0]
     assert dropped_item.finding.title == "Slow query"
-    assert dropped_item.drop_reason == "evidence_not_shown"
+    assert dropped_item.drop_reason == "severity_threshold"
     assert dropped_item.bucket == "dropped"
     assert dropped_item.position == 1
 
     # Check postprocess_response logged in enter_publishing contains dropped item
     assert len(entered_publishing) == 1
     dropped_log = entered_publishing[0]["postprocess_response"]["dropped"]
-    assert dropped_log == [{"index": 1, "drop_reason": "evidence_not_shown"}]
+    assert dropped_log == [{"index": 1, "drop_reason": "severity_threshold"}]
     assert len(queue.published) == 1
+
+    # Malformed dropped_findings fail closed with InvalidReviewOutput and include run_id
+    for bad_dropped in (
+        "not-a-list",
+        ["not-a-dict"],
+        [{"finding": "not-a-dict", "drop_reason": "x", "position": 0}],
+        [{"finding": {}, "drop_reason": "", "position": 0}],
+        [{"finding": {"bad": 1}, "drop_reason": "x", "position": 0}],
+    ):
+        with pytest.raises(InvalidReviewOutput) as exc_info:
+            coerce_dropped_findings(RUN_ID, bad_dropped)
+        assert str(RUN_ID) in str(exc_info.value)
+
+    assert coerce_dropped_findings(RUN_ID, None) == ()
+
+    # Also test coerce_dropped_findings with ReviewFinding and ReviewFindingV2 instances
+    rf_v1 = parse_review_output(valid_output()).findings[0]
+    rf_v2 = ReviewFindingV2(
+        path="app/example.py",
+        line=15,
+        start_line=None,
+        severity="medium",
+        category="performance",
+        title="Slow query",
+        body="N+1 query detected",
+        suggestion=None,
+        confidence=0.85,
+        rule_name=None,
+        evidence_refs=[EvidenceRef(block_id="b1", start_line=15, end_line=15)],
+    )
+    coerced = coerce_dropped_findings(
+        RUN_ID,
+        [
+            DroppedCandidateRecord(finding=rf_v1, drop_reason="duplicate", position=0),
+            DroppedCandidateRecord(finding=rf_v2, drop_reason="contradicted", position=1),
+        ],
+    )
+    assert len(coerced) == 2
+    assert coerced[0].drop_reason == "duplicate"
+    assert coerced[1].drop_reason == "contradicted"
 
 
 def test_publish_review_output_persists_dropped_findings() -> None:
+    from app.modules.reviews.application.review_output import (
+        DroppedCandidateRecord,
+        VerifiedReviewOutput,
+    )
+
     stored_processed: list[ProcessedReviewOutput] = []
 
     class Repo(RecordingRepository):
@@ -541,37 +598,58 @@ def test_publish_review_output_persists_dropped_findings() -> None:
     repo = Repo(_context(), _publication())
     factory = RecordingFactory(repo)
     provider = RecordingProvider()
-    value = valid_output()
-    value["_dropped_findings"] = [
-        {
-            "finding": {
-                "path": "app/example.py",
-                "line": 15,
-                "start_line": None,
-                "severity": "medium",
-                "category": "performance",
-                "title": "Dropped candidate",
-                "body": "Unshown evidence in prompt",
-                "suggestion": None,
-                "confidence": 0.8,
-                "rule_name": None,
+    value = VerifiedReviewOutput(
+        valid_output(),
+        dropped_findings=[
+            {
+                "finding": {
+                    "path": "app/example.py",
+                    "line": 15,
+                    "start_line": None,
+                    "severity": "medium",
+                    "category": "performance",
+                    "title": "Dropped candidate",
+                    "body": "Unshown evidence in prompt",
+                    "suggestion": None,
+                    "confidence": 0.8,
+                    "rule_name": None,
+                },
+                "drop_reason": "evidence_not_shown",
+                "position": 1,
             },
-            "drop_reason": "evidence_not_shown",
-            "position": 1,
-        },
-        "not-a-dict",
-        {"finding": "not-a-dict"},
-    ]
+            DroppedCandidateRecord(
+                finding={
+                    "path": "app/example.py",
+                    "line": 16,
+                    "start_line": None,
+                    "severity": "low",
+                    "category": "readability",
+                    "title": "Below threshold item",
+                    "body": "Filtered in pass 6",
+                    "suggestion": None,
+                    "confidence": 0.8,
+                    "rule_name": None,
+                },
+                drop_reason="severity_threshold",
+                position=2,
+            ),
+        ],
+        severity_threshold="critical",
+    )
+    assert len(value) == 2
+    assert set(value) == {"findings", "summary"}
     assert asyncio.run(PublishReviewOutput(factory, provider).execute(RUN_ID, value)) is True
     assert len(stored_processed) == 1
-    assert len(stored_processed[0].dropped) == 1
+    assert len(stored_processed[0].dropped) == 2
     assert stored_processed[0].dropped[0].drop_reason == "evidence_not_shown"
+    assert stored_processed[0].dropped[1].drop_reason == "severity_threshold"
+    assert "Below severity threshold (critical)" in stored_processed[0].review_body
 
-    value_not_list = valid_output()
-    value_not_list["_dropped_findings"] = "not-a-list"
-    assert (
-        asyncio.run(PublishReviewOutput(factory, provider).execute(RUN_ID, value_not_list)) is True
-    )
+    # Raw dict with _dropped_findings is rejected by strict schema validation
+    raw_with_underscore = valid_output()
+    raw_with_underscore["_dropped_findings"] = "not-a-list"
+    with pytest.raises(InvalidReviewOutput):
+        asyncio.run(PublishReviewOutput(factory, provider).execute(RUN_ID, raw_with_underscore))
 
 
 def test_validate_v2_coordinates_all_branches() -> None:
@@ -606,6 +684,7 @@ def test_validate_v2_coordinates_all_branches() -> None:
     # 1. unknown_path
     f = make_finding(path="unknown.py", line=10)
     assert validate_v2_coordinates(f, ()) == (False, "unknown_path")
+    assert validate_v2_coordinates(f, (), original_files=()) == (False, "unknown_path")
 
     # 2. File not truncated (total_lines is None)
     lines = (DiffLine(10, "added", "x=1"), DiffLine(12, "added", "x=2"))
@@ -636,7 +715,7 @@ def test_validate_v2_coordinates_all_branches() -> None:
         False,
         "anchor_not_visible",
     )
-    # Truncated file with lines 5..10: start_line (2) not in shown, but <= total_lines
+    # Truncated file with lines 5..10: line 2 before hunk start is line_absent
     file_trunc_5_10 = ChangedFile(
         "app/main.py",
         "modified",
@@ -645,7 +724,7 @@ def test_validate_v2_coordinates_all_branches() -> None:
     )
     assert validate_v2_coordinates(make_finding(line=10, start_line=2), (file_trunc_5_10,)) == (
         False,
-        "anchor_not_visible",
+        "line_absent",
     )
     # Start line <= total_lines and in shown (success)
     assert validate_v2_coordinates(make_finding(line=10, start_line=8), (file_truncated,)) == (
@@ -653,9 +732,104 @@ def test_validate_v2_coordinates_all_branches() -> None:
         None,
     )
 
-    # 4. Multiline range checks
-    # Range has gap: range_gap
-    # Shown: 1, 3 (gap at 2)
+    # 3b. With pre-fit original_files provided
+    orig_file_5000 = ChangedFile(
+        "app/main.py",
+        "modified",
+        (
+            *tuple(DiffLine(i, "added", f"x_{i}") for i in range(5000, 5400)),
+            DiffLine(5401, "added", "gap_line"),
+            DiffLine(6000, "added", "second_hunk"),
+        ),
+    )
+    shown_file_5000 = ChangedFile(
+        "app/main.py",
+        "modified",
+        tuple(DiffLine(i, "added", f"x_{i}") for i in range(5000, 5057)),
+        total_lines=402,
+    )
+    assert validate_v2_coordinates(
+        make_finding(line=5005, start_line=5000),
+        (shown_file_5000,),
+        original_files=(orig_file_5000,),
+    ) == (True, None)
+    assert validate_v2_coordinates(
+        make_finding(line=5300),
+        (shown_file_5000,),
+        original_files=(orig_file_5000,),
+    ) == (False, "anchor_not_visible")
+    assert validate_v2_coordinates(
+        make_finding(line=5060, start_line=5050),
+        (shown_file_5000,),
+        original_files=(orig_file_5000,),
+    ) == (False, "anchor_not_visible")
+    assert validate_v2_coordinates(
+        make_finding(line=5005),
+        (),
+        original_files=(orig_file_5000,),
+    ) == (False, "anchor_not_visible")
+    assert validate_v2_coordinates(
+        make_finding(line=3),
+        (shown_file_5000,),
+        original_files=(orig_file_5000,),
+    ) == (False, "line_absent")
+    assert validate_v2_coordinates(
+        make_finding(line=5005, start_line=3),
+        (shown_file_5000,),
+        original_files=(orig_file_5000,),
+    ) == (False, "line_absent")
+    assert validate_v2_coordinates(
+        make_finding(line=5401, start_line=5399),
+        (shown_file_5000,),
+        original_files=(orig_file_5000,),
+    ) == (False, "range_gap")
+    assert validate_v2_coordinates(
+        make_finding(line=6000, start_line=5005),
+        (shown_file_5000,),
+        original_files=(orig_file_5000,),
+    ) == (False, "cross_hunk_range")
+
+    # 4. Non-1-based truncated hunk (e.g. lines 5000..5056 shown out of total_lines=400)
+    file_trunc_5000 = ChangedFile(
+        "app/main.py",
+        "modified",
+        tuple(DiffLine(i, "added", f"x_{i}") for i in range(5000, 5057)),
+        total_lines=400,
+    )
+    assert validate_v2_coordinates(make_finding(line=5005), (file_trunc_5000,)) == (True, None)
+    assert validate_v2_coordinates(make_finding(line=5300), (file_trunc_5000,)) == (
+        False,
+        "anchor_not_visible",
+    )
+    assert validate_v2_coordinates(make_finding(line=3), (file_trunc_5000,)) == (
+        False,
+        "line_absent",
+    )
+    assert validate_v2_coordinates(make_finding(line=5600), (file_trunc_5000,)) == (
+        False,
+        "line_absent",
+    )
+    assert validate_v2_coordinates(make_finding(line=5005, start_line=3), (file_trunc_5000,)) == (
+        False,
+        "line_absent",
+    )
+    assert validate_v2_coordinates(
+        make_finding(line=5056, start_line=5005), (file_trunc_5000,)
+    ) == (True, None)
+
+    # 5. Removed-only file has no right-side lines -> line_absent
+    file_removed_only = ChangedFile(
+        "app/main.py",
+        "modified",
+        (DiffLine(10, "removed", "old_code"),),
+    )
+    assert validate_v2_coordinates(make_finding(line=10), (file_removed_only,)) == (
+        False,
+        "line_absent",
+    )
+
+    # 6. Multiline range checks: range_gap vs cross_hunk_range
+    # Range has gap within single hunk (diff <= 2): range_gap
     file_gap = ChangedFile(
         "app/main.py", "modified", (DiffLine(1, "added", "a"), DiffLine(3, "added", "c"))
     )
@@ -664,7 +838,25 @@ def test_validate_v2_coordinates_all_branches() -> None:
         "range_gap",
     )
 
-    # 5. All valid
+    # Range spans two distinct hunks (10..12 and 100..102): cross_hunk_range
+    file_two_hunks = ChangedFile(
+        "app/main.py",
+        "modified",
+        (
+            DiffLine(10, "added", "a"),
+            DiffLine(11, "added", "b"),
+            DiffLine(12, "added", "c"),
+            DiffLine(100, "added", "x"),
+            DiffLine(101, "added", "y"),
+            DiffLine(102, "added", "z"),
+        ),
+    )
+    assert validate_v2_coordinates(make_finding(line=101, start_line=10), (file_two_hunks,)) == (
+        False,
+        "cross_hunk_range",
+    )
+
+    # 7. All valid
     assert validate_v2_coordinates(make_finding(line=10, start_line=8), (file_truncated,)) == (
         True,
         None,
@@ -795,3 +987,167 @@ def test_validate_v2_attribution_all_branches() -> None:
     f_range_bad = make_finding([EvidenceRef(block_id="left_ok", start_line=20, end_line=25)])
     ok, err = validate_v2_attribution(f_range_bad, manifest_revs, pr_meta=pr_meta)
     assert not ok and "evidence_not_shown" in str(err)
+
+    # Rule attribution checks when policy/defaults blocks are absent vs present
+    for bad_rule in (".review/rules.md", "AGENTS.md", "service-defaults:N1"):
+        f_rule_bad = make_finding(
+            [EvidenceRef(block_id="left_ok", start_line=1, end_line=1)],
+            rule_name=bad_rule,
+        )
+        ok, err = validate_v2_attribution(f_rule_bad, manifest_revs, pr_meta=pr_meta)
+        assert not ok and "evidence_source_disallowed" in str(err)
+
+    manifest_with_all_policies = CallManifest(
+        call_id=UUID("00000000-0000-0000-0000-000000000001"),
+        stage="review",
+        recovery_kind="none",
+        blocks=(
+            left_block_ok,
+            ManifestBlock(
+                block_id="policy-rules",
+                source_role=SourceRole.POLICY_DOCUMENT,
+                source_kind="repository_rules",
+            ),
+            ManifestBlock(
+                block_id="policy-agents",
+                source_role=SourceRole.POLICY_DOCUMENT,
+                source_kind="project_conventions_document",
+            ),
+            ManifestBlock(
+                block_id="service-defaults",
+                source_role=SourceRole.SERVICE_DEFAULTS,
+                source_kind="service_defaults",
+            ),
+        ),
+    )
+    for ok_rule in (".review/rules.md", "AGENTS.md", "service-defaults:N1"):
+        f_rule_ok = make_finding(
+            [EvidenceRef(block_id="left_ok", start_line=1, end_line=1)],
+            rule_name=ok_rule,
+        )
+        ok, err = validate_v2_attribution(f_rule_ok, manifest_with_all_policies, pr_meta=pr_meta)
+        assert ok and err is None
+
+    # LEFT block with diff_old_sha=None fails closed with revision_mismatch
+    pr_meta_no_old = PullRequestMeta(
+        title="PR",
+        description=None,
+        author="alice",
+        source_branch="feature",
+        target_branch="main",
+        labels=(),
+        files_changed=1,
+        lines_added=10,
+        lines_removed=0,
+        is_draft=False,
+        is_fork=False,
+        head_sha="head123",
+        diff_old_sha=None,
+    )
+    ok, err = validate_v2_attribution(f_left_ok, manifest_revs, pr_meta=pr_meta_no_old)
+    assert not ok and "revision_mismatch" in str(err)
+
+    # pr_meta=None skips revision check
+    ok, err = validate_v2_attribution(f_left_ok, manifest_revs, pr_meta=None)
+    assert ok and err is None
+
+
+def test_review_output_v2_and_answers_edge_branches(monkeypatch: pytest.MonkeyPatch) -> None:
+    import app.modules.reviews.infrastructure.llm.answers as answers_mod
+    from app.modules.reviews.application.review_output import (
+        EvidenceRef,
+        RequirementRef,
+        ReviewFindingV2,
+        ReviewOutputV2,
+        ReviewSummary,
+        parse_review_output_v2,
+    )
+    from app.modules.reviews.infrastructure.llm.answers import (
+        InvalidAnswer,
+        _bounded,
+        parse_review_answer,
+        validate_review_answer,
+    )
+
+    with pytest.raises(ValidationError, match="start_line must be <= end_line"):
+        EvidenceRef(block_id="b1", start_line=5, end_line=3)
+
+    req_ok = RequirementRef(block_id="b1", start_line=1, end_line=2, check_id="N1")
+    assert req_ok.check_id == "N1"
+    with pytest.raises(ValidationError, match="start_line must be <= end_line"):
+        RequirementRef(block_id="b1", start_line=5, end_line=3, check_id=None)
+
+    base_kw: dict[str, Any] = {
+        "path": "app/main.py",
+        "line": 10,
+        "start_line": None,
+        "severity": "high",
+        "category": "correctness",
+        "title": "Valid title",
+        "body": "Body",
+        "suggestion": None,
+        "confidence": 0.9,
+        "rule_name": None,
+        "evidence_refs": [EvidenceRef(block_id="b1", start_line=10, end_line=10)],
+    }
+    with pytest.raises(ValidationError, match="start_line must be strictly earlier than line"):
+        ReviewFindingV2(**{**base_kw, "start_line": 10})
+    with pytest.raises(ValidationError, match="title must not end with a period"):
+        ReviewFindingV2(**{**base_kw, "title": "Ends with period."})
+    with pytest.raises(ValidationError, match="title must be one line"):
+        ReviewFindingV2(**{**base_kw, "title": "Line 1\nLine 2"})
+
+    f_high = ReviewFindingV2(**base_kw)
+    f_low = ReviewFindingV2(**{**base_kw, "severity": "low", "confidence": 0.5})
+    out_v2 = ReviewOutputV2(
+        findings=[f_high, f_low],
+        summary=ReviewSummary(problem="Problem.", done_well="Done well.", effort="small"),
+    )
+    assert len(out_v2.findings) == 2
+    with pytest.raises(ValidationError, match="findings must be severity then confidence ordered"):
+        ReviewOutputV2(
+            findings=[f_low, f_high],
+            summary=ReviewSummary(problem="Problem.", done_well="Done well.", effort="small"),
+        )
+
+    # parse_review_output strips evidence_refs from v2 dict findings
+    raw_with_v2 = {
+        "findings": [
+            {
+                **{k: v for k, v in base_kw.items() if k != "evidence_refs"},
+                "evidence_refs": [{"block_id": "b1", "start_line": 10, "end_line": 10}],
+            }
+        ],
+        "summary": {"problem": "Problem.", "done_well": "Done well.", "effort": "small"},
+    }
+    parsed_v1 = parse_review_output(raw_with_v2)
+    assert len(parsed_v1.findings) == 1
+    with pytest.raises(InvalidReviewOutput):
+        parse_review_output("[]")
+
+    # parse_review_output_v2 str, dict, and error
+    assert len(parse_review_output_v2(raw_with_v2).findings) == 1
+    assert len(parse_review_output_v2(json.dumps(raw_with_v2)).findings) == 1
+    with pytest.raises(InvalidReviewOutput):
+        parse_review_output_v2("{bad")
+
+    # answers.py edge branches
+    raw_valid_v1 = json.dumps(
+        {
+            "findings": [],
+            "summary": {"problem": "None.", "done_well": "Good.", "effort": "none"},
+        }
+    )
+    assert parse_review_answer(raw_valid_v1).findings == []
+    assert "…" in _bounded("x" * 500)
+
+    def _raise_invalid_review_output(_obj: object) -> ReviewOutput:
+        try:
+            ReviewSummary.model_validate({"problem": "", "done_well": "d", "effort": "none"})
+        except ValidationError as ve:
+            raise InvalidReviewOutput("bad") from ve
+        raise AssertionError("unreachable")
+
+    monkeypatch.setattr(answers_mod, "parse_review_output", _raise_invalid_review_output)
+    with pytest.raises(InvalidAnswer):
+        validate_review_answer(raw_valid_v1)

@@ -723,9 +723,12 @@ rerun — новый run с новой привязкой версий и рев
 за версией `"counter/v1"`. Контекстная стадия до фиксации snapshot (#168) использует
 локальный счётчик в 4 символа на токен; синхронизация контекстной стадии на `"counter/v2"`
 передана в #168. Модель verifier `verifier_model` закрепляется значением первичной модели
-рецензирования (`review_model`, по умолчанию `"mistral-small-4"`), версии вспомогательных профилей
-фиксируются как `tokenizer_version = "tokenizer/v1"`, `recovery_profile_version = "recovery/v1"`,
-`budget_profile_version = "budget/v1"`.
+рецензирования (`review_model`, по умолчанию `"mistral-small-4"`). Версии вспомогательных профилей
+фиксируются и разрешаются через `validate_execution_profile_versions(profile)` и `send_budget_for(profile)`
+(неизвестная версия любого из полей прерывает выполнение с `policy_snapshot_integrity_error`):
+- `tokenizer_version = "tokenizer/v1"` — символьно-эвристическая схема токенизации UTF-8 без внешнего BPE-словаря, работающая в паре с закреплённым `counter_version`;
+- `recovery_profile_version = "recovery/v1"` — профиль восстановления gateway (однократный JSON-repair с блоком `previous-output` при ошибке схемы и переключение на `fallback_model` при отказе primary, с обязательным pre-send guard и manifest на каждом вызове);
+- `budget_profile_version = "budget/v1"` — профиль бюджетирования входа (`send_budget_for`: резерв выхода `8 000` токенов для `review`/`conventions` и `4 000` токенов для `verification`, эффективный потолок `min(max_input_tokens - reserve, model_max_prompt_tokens)` и квоты документов политики `12 000` / `8 000` / `18 000` токенов).
 Все repository writes выполняются через use case/UoW; repository вызывает flush,
 commit выполняет use case. VCS/LLM вызовы происходят вне транзакций.
 

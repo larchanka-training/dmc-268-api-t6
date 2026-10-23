@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import re
 import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
@@ -26,10 +25,11 @@ from app.modules.reviews.application.policy_snapshot import (
     ManifestBlock,
 )
 from app.modules.reviews.application.prompt_budget import (
-    EstimatedTokenCounter,
     TokenCounter,
     _priority,
+    send_budget_for,
     token_counter_for,
+    validate_execution_profile_versions,
     verify_provenance_pre_send_guard,
 )
 from app.modules.reviews.application.prompt_builder import (
@@ -179,41 +179,71 @@ def _fit_changed_files_for_verifier(
             kept[index] = file
             continue
         lines = file.lines
+        total_lines = file.total_lines or len(file.lines)
         file_protected = protected_lines.get(file.path, set())
-        min_required_idx = (
-            max((i for i, line in enumerate(lines) if line.number in file_protected), default=-1)
-            + 1
-        )
-        low = (
-            min_required_idx
-            if min_required_idx > 0
-            and fits(
-                {
-                    index: ChangedFile(
-                        file.path,
-                        file.status,
-                        lines[:min_required_idx],
-                        total_lines=file.total_lines or len(file.lines),
-                    )
-                }
-            )
-            else 0
-        )
-        high = len(lines)
+        protected_indices = [i for i, line in enumerate(lines) if line.number in file_protected]
+        unprotected_indices = [
+            i for i, line in enumerate(lines) if line.number not in file_protected
+        ]
+
         best: ChangedFile | None = None
-        while low <= high:
-            mid = (low + high) // 2
-            prefix_file = ChangedFile(
+        if protected_indices:
+            protected_only = ChangedFile(
                 file.path,
                 file.status,
-                lines[:mid],
-                total_lines=file.total_lines or len(file.lines),
+                tuple(lines[i] for i in protected_indices),
+                total_lines=total_lines,
             )
-            if fits({index: prefix_file}):
-                best = prefix_file
-                low = mid + 1
+            if fits({index: protected_only}):
+                best = protected_only
+                low = 1
+                high = len(unprotected_indices)
+                while low <= high:
+                    mid = (low + high) // 2
+                    chosen_indices = sorted(protected_indices + unprotected_indices[:mid])
+                    cand_file = ChangedFile(
+                        file.path,
+                        file.status,
+                        tuple(lines[i] for i in chosen_indices),
+                        total_lines=total_lines,
+                    )
+                    if fits({index: cand_file}):
+                        best = cand_file
+                        low = mid + 1
+                    else:
+                        high = mid - 1
             else:
-                high = mid - 1
+                low = 1
+                high = len(protected_indices)
+                while low <= high:
+                    mid = (low + high) // 2
+                    cand_file = ChangedFile(
+                        file.path,
+                        file.status,
+                        tuple(lines[i] for i in protected_indices[:mid]),
+                        total_lines=total_lines,
+                    )
+                    if fits({index: cand_file}):
+                        best = cand_file
+                        low = mid + 1
+                    else:
+                        high = mid - 1
+        else:
+            low = 1
+            high = len(lines)
+            while low <= high:
+                mid = (low + high) // 2
+                prefix_file = ChangedFile(
+                    file.path,
+                    file.status,
+                    lines[:mid],
+                    total_lines=total_lines,
+                )
+                if fits({index: prefix_file}):
+                    best = prefix_file
+                    low = mid + 1
+                else:
+                    high = mid - 1
         if best is not None and best.lines:
             kept[index] = best
 
@@ -221,7 +251,10 @@ def _fit_changed_files_for_verifier(
 
 
 def verify_verifier_mandatory_budget(
-    context: ReviewContext, counter: TokenCounter | None = None
+    context: ReviewContext,
+    counter: TokenCounter | None = None,
+    *,
+    max_send_budget: int | None = None,
 ) -> None:
     """Ensure verifier mandatory blocks (system, rules, agents, defaults, conventions) fit budget.
 
@@ -231,8 +264,8 @@ def verify_verifier_mandatory_budget(
     if context.policy_snapshot is None:
         return
     profile = context.policy_snapshot.execution_profile
-    max_input = profile.max_input_tokens
-    max_send_budget = max_input - 8_000 if max_input > 52_000 else max_input
+    validate_execution_profile_versions(profile)
+    budget = send_budget_for(profile, stage="verification", model_max_prompt_tokens=max_send_budget)
 
     builder = PromptBuilder()
     mandatory_blocks: list[str] = []
@@ -240,7 +273,12 @@ def verify_verifier_mandatory_budget(
     agents_part = builder._render_policy_agents(context.policy_snapshot)
     mandatory_blocks.extend([rules_part, agents_part])
     if context.rules:
-        mandatory_blocks.append(builder._render_service_defaults(context.rules))
+        mandatory_blocks.append(
+            builder._render_service_defaults(
+                context.rules,
+                defaults_checksum=context.policy_snapshot.defaults_checksum,
+            )
+        )
     if context.conventions and (
         context.conventions.key_patterns or context.conventions.recommendations
     ):
@@ -269,11 +307,11 @@ def verify_verifier_mandatory_budget(
     mandatory_text = system_prompt + "\n".join(mandatory_blocks)
     mandatory_tokens = counter.count(mandatory_text)
 
-    if mandatory_tokens > max_send_budget:
+    if mandatory_tokens > budget:
         raise PolicyError(
             PolicyErrorCode.PROMPT_BUDGET_EXCEEDED,
-            f"Verifier mandatory prompt is {mandatory_tokens} tokens, limit is {max_send_budget}",
-            limit=max_send_budget,
+            f"Verifier mandatory prompt is {mandatory_tokens} tokens, limit is {budget}",
+            limit=budget,
             actual=mandatory_tokens,
         )
 
@@ -353,11 +391,17 @@ class VerifierPromptBuilder:
         # 1. Policy documents and service defaults
         mandatory_blocks: list[str] = []
         if context.policy_snapshot is not None:
+            validate_execution_profile_versions(context.policy_snapshot.execution_profile)
             rules_part = builder._render_policy_rules(context.policy_snapshot)
             agents_part = builder._render_policy_agents(context.policy_snapshot)
             mandatory_blocks.extend([rules_part, agents_part])
             if context.rules:
-                mandatory_blocks.append(builder._render_service_defaults(context.rules))
+                mandatory_blocks.append(
+                    builder._render_service_defaults(
+                        context.rules,
+                        defaults_checksum=context.policy_snapshot.defaults_checksum,
+                    )
+                )
 
         # 2. Low-trust conventions (CVS §7.1 :782)
         conventions_rendered: str | None = None
@@ -434,8 +478,9 @@ class VerifierPromptBuilder:
 
         fitted_files = context.changed_files
         if context.policy_snapshot is not None:
-            max_input = context.policy_snapshot.execution_profile.max_input_tokens
-            max_send_budget = max_input - 8_000 if max_input > 52_000 else max_input
+            max_send_budget = send_budget_for(
+                context.policy_snapshot.execution_profile, stage="verification"
+            )
             if mandatory_tokens > max_send_budget:
                 raise RunFailure(
                     "verification_context_overflow",
@@ -496,7 +541,8 @@ class VerifierPromptBuilder:
             blocks=all_blocks,
         )
         return prompt, verifier_manifest
-        return prompt, verifier_manifest
+
+    # Pre-send guard on verifier prompt tokens is performed in ReflectionPass.verify.
 
 
 class ReflectionPass:
@@ -528,13 +574,14 @@ class ReflectionPass:
 
         # Pre-send guard on verifier prompt tokens
         if context.policy_snapshot is not None:
-            counter = EstimatedTokenCounter()
+            profile = context.policy_snapshot.execution_profile
+            counter = token_counter_for(profile.counter_version)
             total_tokens = counter.count(prompt.system) + counter.count(prompt.user)
-            max_input = context.policy_snapshot.execution_profile.max_input_tokens
-            if total_tokens > max_input:
+            max_send_budget = send_budget_for(profile, stage="verification")
+            if total_tokens > max_send_budget:
                 raise RunFailure(
                     "verification_context_overflow",
-                    f"Verifier prompt is {total_tokens} tokens, limit is {max_input}",
+                    f"Verifier prompt is {total_tokens} tokens, limit is {max_send_budget}",
                 )
             verify_provenance_pre_send_guard(
                 manifest, context=context, snapshot=context.policy_snapshot
@@ -599,21 +646,24 @@ class ReflectionPass:
             )
 
         # Build check lines mapping for service defaults:
-        # (rule_id/slug/check_id, check_id) -> line_number
-        service_defaults_check_lines: dict[tuple[str, str], int] = {}
-        all_check_lines: dict[str, set[int]] = {}
+        # shown stable check_id -> line_number
+        service_defaults_check_lines: dict[str, int] = {}
         line_offset = 1
         if context.rules:
+            defaults_checksum = (
+                context.policy_snapshot.defaults_checksum
+                if context.policy_snapshot is not None
+                else None
+            )
             for r in context.rules:
-                r_slug = re.sub(r"[^a-zA-Z0-9_\-]+", "-", r.name).strip("-")
-                check_ids = get_rule_check_ids(r)
+                check_ids = get_rule_check_ids(r, defaults_checksum=defaults_checksum)
                 for c_id in check_ids:
-                    service_defaults_check_lines[(r.name, c_id)] = line_offset
-                    if r_slug:
-                        service_defaults_check_lines[(r_slug, c_id)] = line_offset
-                        service_defaults_check_lines[(r_slug.lower(), c_id)] = line_offset
-                    service_defaults_check_lines[(c_id, c_id)] = line_offset
-                    all_check_lines.setdefault(c_id, set()).add(line_offset)
+                    if c_id in service_defaults_check_lines:
+                        raise PolicyError(
+                            PolicyErrorCode.SNAPSHOT_INTEGRITY_ERROR,
+                            f"Duplicate service defaults check ID {c_id!r}",
+                        )
+                    service_defaults_check_lines[c_id] = line_offset
                     line_offset += 1
 
         # Validate evidence and requirement references against manifest
@@ -642,7 +692,7 @@ class ReflectionPass:
                     )
                 if block.revision is not None and context.pr_meta is not None:
                     if block.side == "LEFT":
-                        expected_rev = getattr(context.pr_meta, "diff_old_sha", None)
+                        expected_rev = context.pr_meta.diff_old_sha
                         if not expected_rev or block.revision != expected_rev:
                             raise VerificationInvalidOutputError(
                                 f"Decision {cand_id_clean} evidence_ref {block_id_clean} "
@@ -694,13 +744,11 @@ class ReflectionPass:
                         "service-defaults:"
                     ):
                         rule_id = cand.finding.rule_name.removeprefix("service-defaults:")
-                        expected_line = service_defaults_check_lines.get(
-                            (rule_id, req_ref.check_id)
+                        expected_line = (
+                            service_defaults_check_lines.get(rule_id)
+                            if req_ref.check_id == rule_id
+                            else None
                         )
-                        if expected_line is None:
-                            expected_line = service_defaults_check_lines.get(
-                                (rule_id.lower(), req_ref.check_id)
-                            )
                         if expected_line is None:
                             raise VerificationInvalidOutputError(
                                 f"Decision {cand_id_clean} check_id '{req_check_id_clean}' "
@@ -713,20 +761,17 @@ class ReflectionPass:
                                 f"'{req_check_id_clean}' line {expected_line}"
                             )
                     else:
-                        matching_lines = all_check_lines.get(req_ref.check_id)
-                        if not matching_lines:
+                        expected_line = service_defaults_check_lines.get(req_ref.check_id)
+                        if expected_line is None:
                             raise VerificationInvalidOutputError(
                                 f"Decision {cand_id_clean} check_id '{req_check_id_clean}' "
                                 "does not match any service defaults rule"
                             )
-                        if not any(
-                            req_ref.start_line <= line <= req_ref.end_line
-                            for line in matching_lines
-                        ):
+                        if not (req_ref.start_line <= expected_line <= req_ref.end_line):
                             raise VerificationInvalidOutputError(
                                 f"Decision {cand_id_clean} requirement_ref range "
                                 f"{req_ref.start_line}-{req_ref.end_line} does not cover check "
-                                f"'{req_check_id_clean}'"
+                                f"'{req_check_id_clean}' line {expected_line}"
                             )
                 else:
                     if req_ref.check_id is not None:

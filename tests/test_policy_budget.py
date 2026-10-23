@@ -23,7 +23,9 @@ from app.modules.reviews.application.prompt_budget import (
     PolicyBudgetExceededError,
     PreSendGuardError,
     policy_tokens,
+    send_budget_for,
     token_counter_for,
+    validate_execution_profile_versions,
     verify_policy_budget,
     verify_pre_send_guard,
     verify_provenance_pre_send_guard,
@@ -75,7 +77,7 @@ def make_snapshot(
         builtin_exclusions_version="builtin-exclusions/v1",
         priority_matcher_version="priority-matcher/v1",
         service_defaults_rule_version_id=uuid.uuid4(),
-        defaults_checksum="defaults_0",
+        defaults_checksum="282d61c2da897152046db742fbd9bfda061ba1c71ce32759d47e042c06b0ff52",
         prompt_bindings=PromptBindings("cs1", "cs2", "cs3"),
         execution_profile=ExecutionProfile.fast("m1", "m2"),
         policy_digest="digest_base",
@@ -218,21 +220,22 @@ def test_provenance_guard_rejects_disallowed_role() -> None:
 
 def test_provenance_guard_rejects_disallowed_kind() -> None:
     snapshot = make_snapshot()
-    bad_block = ManifestBlock(
-        block_id="b1",
-        source_role=SourceRole.DIFF,
-        source_kind="disallowed_kind",
-    )
-    manifest = CallManifest(
-        call_id=uuid.uuid4(),
-        run_id=snapshot.run_id,
-        stage="review",
-        blocks=(bad_block,),
-    )
-    with pytest.raises(PolicyError) as exc_info:
-        verify_provenance_pre_send_guard(manifest, snapshot=snapshot)
-    assert exc_info.value.code == PolicyErrorCode.CONTEXT_VIOLATION
-    assert "disallowed source_kind" in exc_info.value.message
+    for bad_kind in ("disallowed_kind", "diff", "candidate_finding"):
+        bad_block = ManifestBlock(
+            block_id="b1",
+            source_role=SourceRole.DIFF,
+            source_kind=bad_kind,
+        )
+        manifest = CallManifest(
+            call_id=uuid.uuid4(),
+            run_id=snapshot.run_id,
+            stage="review",
+            blocks=(bad_block,),
+        )
+        with pytest.raises(PolicyError) as exc_info:
+            verify_provenance_pre_send_guard(manifest, snapshot=snapshot)
+        assert exc_info.value.code == PolicyErrorCode.CONTEXT_VIOLATION
+        assert "disallowed source_kind" in exc_info.value.message
 
 
 def test_provenance_guard_rejects_directory_traversal() -> None:
@@ -400,7 +403,19 @@ def test_provenance_guard_rejects_foreign_revision() -> None:
         agents_md=None,
         conventions=RepoConventions((), ()),
         pr_meta=PullRequestMeta(
-            "PR", None, "u", "b", "main", (), 1, 1, 0, False, False, head_sha="sha_head_123"
+            "PR",
+            None,
+            "u",
+            "b",
+            "main",
+            (),
+            1,
+            1,
+            0,
+            False,
+            False,
+            head_sha="sha_head_123",
+            diff_old_sha="sha_old_789",
         ),
         changed_files=(),
         omitted_files=(),
@@ -412,6 +427,7 @@ def test_provenance_guard_rejects_foreign_revision() -> None:
         source_kind="source_code",
         path="app/main.py",
         revision="foreign_revision_456",
+        side="RIGHT",
     )
     manifest = CallManifest(
         call_id=uuid.uuid4(),
@@ -423,6 +439,91 @@ def test_provenance_guard_rejects_foreign_revision() -> None:
         verify_provenance_pre_send_guard(manifest, context=context, snapshot=snapshot)
     assert exc_info.value.code == PolicyErrorCode.CONTEXT_VIOLATION
     assert "does not match PR revisions" in exc_info.value.message
+
+    # LEFT side matching diff_old_sha passes
+    ok_left_block = ManifestBlock(
+        block_id="b-left-ok",
+        source_role=SourceRole.DIFF,
+        source_kind="source_code",
+        path="app/main.py",
+        revision="sha_old_789",
+        side="LEFT",
+    )
+    ok_left_manifest = CallManifest(
+        call_id=uuid.uuid4(),
+        run_id=snapshot.run_id,
+        stage="review",
+        blocks=(ok_left_block,),
+    )
+    verify_provenance_pre_send_guard(ok_left_manifest, context=context, snapshot=snapshot)
+
+    # LEFT side with foreign revision fails
+    bad_left_block = ManifestBlock(
+        block_id="b-left-bad",
+        source_role=SourceRole.DIFF,
+        source_kind="source_code",
+        path="app/main.py",
+        revision="sha_head_123",
+        side="LEFT",
+    )
+    bad_left_manifest = CallManifest(
+        call_id=uuid.uuid4(),
+        run_id=snapshot.run_id,
+        stage="review",
+        blocks=(bad_left_block,),
+    )
+    with pytest.raises(PolicyError) as exc_info:
+        verify_provenance_pre_send_guard(bad_left_manifest, context=context, snapshot=snapshot)
+    assert exc_info.value.code == PolicyErrorCode.CONTEXT_VIOLATION
+    assert "LEFT revision does not match PR revisions" in exc_info.value.message
+
+    # LEFT side when diff_old_sha is None fails closed (even if revision == policy_base_sha)
+    context_no_old_sha = ReviewContext(
+        system="SYSTEM",
+        rules=(),
+        agents_md=None,
+        conventions=RepoConventions((), ()),
+        pr_meta=PullRequestMeta(
+            "PR",
+            None,
+            "u",
+            "b",
+            "main",
+            (),
+            1,
+            1,
+            0,
+            False,
+            False,
+            head_sha="sha_head_123",
+            diff_old_sha=None,
+        ),
+        changed_files=(),
+        omitted_files=(),
+        policy_snapshot=snapshot,
+    )
+    left_on_base_block = ManifestBlock(
+        block_id="b-left-base",
+        source_role=SourceRole.DIFF,
+        source_kind="source_code",
+        path="app/main.py",
+        revision="sha_base",
+        side="LEFT",
+    )
+    left_on_base_manifest = CallManifest(
+        call_id=uuid.uuid4(),
+        run_id=snapshot.run_id,
+        stage="review",
+        blocks=(left_on_base_block,),
+    )
+    with pytest.raises(PolicyError) as exc_info:
+        verify_provenance_pre_send_guard(
+            left_on_base_manifest, context=context_no_old_sha, snapshot=snapshot
+        )
+    assert exc_info.value.code == PolicyErrorCode.CONTEXT_VIOLATION
+    assert (
+        "LEFT revision does not match PR revisions: diff_old_sha 'None'" in exc_info.value.message
+    )
 
 
 def test_provenance_guard_rejects_rules_block_when_absent_in_snapshot() -> None:
@@ -468,15 +569,47 @@ def test_provenance_guard_rejects_rules_block_content_hash_mismatch() -> None:
 
 def test_token_counter_for_resolutions_and_integrity_error() -> None:
     assert isinstance(token_counter_for("counter/v2"), EstimatedTokenCounter)
-    assert isinstance(token_counter_for("estimated/v2"), EstimatedTokenCounter)
     assert isinstance(token_counter_for(None), EstimatedTokenCounter)
     assert isinstance(token_counter_for("counter/v1"), LegacyTokenCounter)
-    assert isinstance(token_counter_for("estimated/v1"), LegacyTokenCounter)
 
-    with pytest.raises(PolicyError) as exc_info:
-        token_counter_for("unknown/version")
-    assert exc_info.value.code == PolicyErrorCode.SNAPSHOT_INTEGRITY_ERROR
-    assert "Unknown counter_version" in exc_info.value.message
+    for bad_version in ("unknown/version", "estimated/v1", "estimated/v2"):
+        with pytest.raises(PolicyError) as exc_info:
+            token_counter_for(bad_version)
+        assert exc_info.value.code == PolicyErrorCode.SNAPSHOT_INTEGRITY_ERROR
+        assert "Unknown counter_version" in exc_info.value.message
+
+
+def test_validate_execution_profile_versions_and_send_budget_for() -> None:
+    from dataclasses import replace
+
+    profile = ExecutionProfile.fast("m1", "m2")
+    validate_execution_profile_versions(profile)
+
+    for bad_profile in (
+        replace(profile, tokenizer_version="tokenizer/v9"),
+        replace(profile, recovery_profile_version="recovery/v9"),
+        replace(profile, budget_profile_version="budget/v9"),
+        replace(profile, counter_version="estimated/v2"),
+    ):
+        with pytest.raises(PolicyError) as exc_info:
+            validate_execution_profile_versions(bad_profile)
+        assert exc_info.value.code == PolicyErrorCode.SNAPSHOT_INTEGRITY_ERROR
+
+    # Monotonic send_budget_for across max_input_tokens and model_max_prompt_tokens
+    # Default: max_input_tokens=60000, context_window=128000, max_output_tokens=8000 -> 52000
+    assert send_budget_for(profile, stage="review", model_max_prompt_tokens=None) == 52_000
+    assert send_budget_for(profile, stage="review", model_max_prompt_tokens=60_000) == 52_000
+    assert send_budget_for(profile, stage="review", model_max_prompt_tokens=52_000) == 52_000
+    assert send_budget_for(profile, stage="review", model_max_prompt_tokens=51_999) == 51_999
+    assert send_budget_for(profile, stage="review", model_max_prompt_tokens=40_000) == 40_000
+
+    # Strictly monotonic at 52_000 -> 52_001 max_input_tokens (44_000 -> 44_001)
+    assert send_budget_for(replace(profile, max_input_tokens=52_000), stage="review") == 44_000
+    assert send_budget_for(replace(profile, max_input_tokens=52_001), stage="review") == 44_001
+
+    # Verification stage uses same monotonic calculation
+    assert send_budget_for(profile, stage="verification", model_max_prompt_tokens=None) == 52_000
+    assert send_budget_for(profile, stage="verification", model_max_prompt_tokens=20_000) == 20_000
 
 
 def test_verify_verifier_mandatory_budget_missing_prompt_asset_raises_integrity_error() -> None:
