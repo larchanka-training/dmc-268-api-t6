@@ -129,7 +129,7 @@ flowchart LR
 
 ## 6. Выкат
 
-Job `Deploy monitoring` в `ci-cd.yml` запускается после успешного `Deploy staging`, под тем же lock `staging-deploy`:
+Job `Deploy monitoring` в `ci-cd.yml` запускается после успешного `Deploy staging` в своей группе concurrency `staging-monitoring` (не `staging-deploy`: там его ожидание отменяло бы `Promote staging tag` и наоборот; сбой мониторинга приложение не откатывает):
 
 1. `scp` содержимого `deploy/monitoring` и `deploy/scripts/env-file.sh` в `/opt/dmc-268-monitoring`.
 2. `deploy.sh`:
