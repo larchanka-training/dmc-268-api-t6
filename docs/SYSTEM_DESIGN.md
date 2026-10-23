@@ -747,13 +747,14 @@ downgrade до целевой ревизии откатывает **все ре�
 Alembic; состав отката определяет `alembic history`, а не даты в id ревизий. Поэтому
 downgrade **до `20261012_0030`** откатывает не только `20261010_0030` и
 `20261010_0029` (#132), но и все более поздние ревизии; сейчас это `20261014_0031`,
-`20261015_0032`, `20261016_0033`, `20261017_0034`, `20261018_0035`, `20261019_0036` и
-`20261020_0037`: теряются `branch_filter` и `severity_threshold`, таблицы индекса графа
-`code_index_*` с их ENUM, флаг `rag_enabled`, состояние индексатора в `code_index_states`
-(ветка, digest исключений, учёт байтов), сохранённые статусы правил
-`repository_rules_status` и висящие запросы пробуждения индекса
-(`code_index_states.wake_requested_at`), а CHECK `ck_runs_trigger` на `runs.trigger`
-только снимается.
+`20261015_0032`, `20261016_0033`, `20261017_0034`, `20261018_0035`, `20261019_0036`,
+`20261020_0037` и `20261023_0038`: теряются `branch_filter` и `severity_threshold`,
+таблицы индекса графа `code_index_*` с их ENUM, флаг `rag_enabled`, состояние индексатора
+в `code_index_states` (ветка, digest исключений, учёт байтов), сохранённые статусы правил
+`repository_rules_status`, висящие запросы пробуждения индекса
+(`code_index_states.wake_requested_at`) и троттлинг full по запросу ревью
+(`review_full_requested_at`, `review_full_requested_sha`), а CHECK `ck_runs_trigger` на
+`runs.trigger` только снимается.
 Недоступный репозиторий после отката не оживает (доступность сворачивается в `enabled AND
 installation_available`: `enabled=true` при `installation_available=false` становится
 `enabled=false`), а повторный upgrade возвращает схему со значениями по умолчанию
@@ -1511,7 +1512,7 @@ verifier. Исчерпание бюджета не разрешает публи
 | Контекст и доказательства | `call_id`/manifest_id + workspace-scoped content digest | PG: manifest и deduplicated точные excerpts; полный rendered prompt не обязателен | до удаления Workspace | аудит не зависит от TTL Redis |
 | Результат прогона | `run_id UNIQUE` + final result digest и snapshot bindings | PostgreSQL | immutable после publishing | retry доставки читает сохранённый итог; между head/run результаты не переносятся |
 | Промпт у провайдера | стабильные версионированные блоки с раздельными source roles | prompt caching провайдера | зависит от provider profile | кэш не повышает доверие документа/конвенций |
-| Индекс графа RAG v1 (Р-13) | `repository_id` на каждой строке; символ — `(repository_id, path, qualified_name, kind, disambiguator)` | PostgreSQL, модуль `code_index`: `code_index_states`, файлы, символы, рёбра, записи импортов | `CODE_INDEX_TTL_DAYS` (30) дней с `last_used_at` (сдвигают чтение при ревью и постановка full, не чаще раза в час; сдвиг при чтении — #144), очищает leader-задача с перепроверкой под `FOR UPDATE` любой живой индекс, кроме `failed` (#143, ниже); немедленно нечитаем после `installation_repositories.removed`, `installation.deleted`, выключения тумблера; физическое удаление — сборкой мусора, цель — в пределах 1 ч (ниже) | обратные рёбра для кандидатов RAG; текст читается из кэша блобов на ревизии PR |
+| Индекс графа RAG v1 (Р-13) | `repository_id` на каждой строке; символ — `(repository_id, path, qualified_name, kind, disambiguator)` | PostgreSQL, модуль `code_index`: `code_index_states`, файлы, символы, рёбра, записи импортов | `CODE_INDEX_TTL_DAYS` (30) дней с `last_used_at` (сдвигают чтение готового или отставшего индекса при ревью, не чаще раза в час, и постановка full; троттлинг full по запросу ревью — ниже), очищает leader-задача с перепроверкой под `FOR UPDATE` любой живой индекс, кроме `failed` (#143, ниже); немедленно нечитаем после `installation_repositories.removed`, `installation.deleted`, выключения тумблера; физическое удаление — сборкой мусора, цель — в пределах 1 ч (ниже) | обратные рёбра для кандидатов RAG; текст читается из кэша блобов на ревизии PR |
 
 Ключ `repo-conventions-v2` включает repository_id, policy_base_sha, digest всех
 окончательных rendered messages и показанного base-tree, каждую source entry
@@ -1549,10 +1550,30 @@ TTL-очистка (#143) берёт любой живой индекс — бе
 условие под `FOR UPDATE`, поэтому при нескольких репликах индекс очищается один раз.
 Это ADR 0001 §4 и отступление от буквы AC6 #143 («выключенных репозиториев»). `failed`
 в TTL не попадает: его строки уже удалила сборка мусора, а очистка превратила бы его в
-`empty` и открыла повторный full, который запрещает ADR §7. Пока #144 не сдвигает
-`last_used_at` при чтении, индекс включённого репозитория очищается через
-`CODE_INDEX_TTL_DAYS` дней; вернёт его повторное включение тумблера (§6.9). Переменные
-leader-задач (все необязательны, значение вне границ не даёт worker
+`empty` и открыла повторный full, который запрещает ADR §7. Ревью (#144) сдвигает
+`last_used_at`, когда застаёт индекс `ready` или `stale`, — не чаще раза в час, даже если
+RAG затем пропущен по `prompt_version`, — и при каждом full, который оно ставит (`enable`
+после TTL пишет его сам); сама сборка срок не продлевает. Поэтому TTL очищает индекс,
+который `CODE_INDEX_TTL_DAYS` дней не читало ни одно ревью; вернёт его следующее ревью
+(`enable`: поколение +1 и full, с троттлингом ниже) или повторное включение тумблера (§6.9).
+
+<a id="review-full-throttle"></a>
+
+Full по запросу ревью ([ADR 0001 §6.1](adr/0001-graph-rag-v1.md#61-триггеры-и-готовность),
+#144) ограничивает троттлинг в двух колонках строки `code_index_states` (§11):
+`review_full_requested_at` — когда ревью последний раз поставило full,
+`review_full_requested_sha` — `target_commit_sha` строки в тот момент (NULL, если цели
+нет). Ревью ставит full — живому `empty` маркером пробуждения, индексу после TTL-очистки
+через `enable` — только если `review_full_requested_at` NULL или не моложе 24 ч **и** цель
+строки NULL или отличается от `review_full_requested_sha`: повтор в пределах 24 ч не
+ставится, после 24 ч та же цель отклоняется, а новая проходит. После очистки цели нет, и
+действует только предел 24 ч; обе колонки `purge` сохраняет, как и `last_used_at`, поэтому
+предел переживает TTL-очистку. Ревью сборку не ждёт и в AMQP не публикует: строку
+состояния оно берёт `FOR UPDATE SKIP LOCKED`, строку под чужой блокировкой только читает
+и ничего не пишет; цель не пишет никогда (`request_build` без цели) — её задают мерж,
+push и сверка с HEAD, а задание будит leader-рассылка маркеров (§7.4).
+
+Переменные leader-задач (все необязательны, значение вне границ не даёт worker
 стартовать, строки — в `.env.example`):
 
 | Переменная | По умолчанию | Смысл |
@@ -1600,7 +1621,7 @@ CONTEXT_AND_VERIFICATION_SPEC §5–8, §10.
 | **#107:** `review_candidates`, `verification_results` | исходный v2 finding, candidate_id/digest, решения фильтров; решение verifier по каждому переданному ID и resolved refs |
 | **#107:** `final_review_results` | run_id UNIQUE, версия, supported findings после порога, counts, coverage, verdict, backend summary, severity_threshold/max_comments, below_severity_threshold_count и result_digest с этими настройками; immutable после publishing |
 | **#107:** `publication_plans/items` | точные payloads, keys/ordinals, отдельные body-only variants, receipts и состояние доставки; явный finding → remote comment mapping |
-| **#141:** `code_index_states` | одна строка на репозиторий: `repository_id` (PK, FK `repositories` `ON DELETE CASCADE`); `generation` и номера публикаций `reserved_publication`, `published_publication`, `floor_publication` (BIGINT, по умолчанию 0); `status` (PG enum `code_index_status`: `empty\|building\|ready\|failed`, по умолчанию `empty`), `purge_reason` (`ttl\|removed\|disabled`, только при `empty`), `error_code` (задан ровно при `failed`), `last_error_code`; `indexed_commit_sha`, `target_commit_sha`, `published_at`, `last_used_at`; lease — `lease_token` и `lease_expires_at` (оба заданы или оба NULL); счётчики `file_count`, `symbol_count`, `edge_count` (считает публикация); версии `extractor_version`, `resolver_version`, `parser_profile_version`, `limits_profile_version`; `downloaded_bytes`, `build_duration_ms`, `github_request_count`; `created_at`, `updated_at`. **#142** (миграция `20261017_0034`): профиль публикации дополняют `indexed_default_branch` и `exclusions_digest` (`IgnorePolicy.digest` файла `.review/rules.md`); CHECK `profile_complete` — заданы все шесть колонок профиля или ни одна, миграция обнуляет версии существующих строк, и их следующая сборка — full. Квоты хранения ADR §7 считают оценки `stored_bytes` (видимые строки публикации) и `pending_bytes` (строки попытки под lease; CHECK `pending_leased` — без lease 0), BIGINT ≥ 0 (CHECK `bytes`), по умолчанию 0: строка графа — 160 байт плюс UTF-8 байты её текстовых колонок с весом 1 + число индексов с колонкой, включая PK; это оценка, а не размер на диске. CHECK `failed_code`: `failed` — только с `archive_unsafe` или `limit_exceeded:*`. Частичный индекс `ix_code_index_states_live_lease` (`repository_id`, `lease_token IS NOT NULL`) — для подсчёта живых lease при захвате. **#143** (миграция `20261020_0037`): маркер пробуждения `wake_requested_at` — outbox пробуждений индексатора (§7.4); CHECK `ck_code_index_states_wake_live` — маркер только у живого индекса (без `purge_reason` и не `failed`); частичный индекс `ix_code_index_states_wake_requested` (`wake_requested_at IS NOT NULL`) — для рассылки пробуждений |
+| **#141:** `code_index_states` | одна строка на репозиторий: `repository_id` (PK, FK `repositories` `ON DELETE CASCADE`); `generation` и номера публикаций `reserved_publication`, `published_publication`, `floor_publication` (BIGINT, по умолчанию 0); `status` (PG enum `code_index_status`: `empty\|building\|ready\|failed`, по умолчанию `empty`), `purge_reason` (`ttl\|removed\|disabled`, только при `empty`), `error_code` (задан ровно при `failed`), `last_error_code`; `indexed_commit_sha`, `target_commit_sha`, `published_at`, `last_used_at`; lease — `lease_token` и `lease_expires_at` (оба заданы или оба NULL); счётчики `file_count`, `symbol_count`, `edge_count` (считает публикация); версии `extractor_version`, `resolver_version`, `parser_profile_version`, `limits_profile_version`; `downloaded_bytes`, `build_duration_ms`, `github_request_count`; `created_at`, `updated_at`. **#142** (миграция `20261017_0034`): профиль публикации дополняют `indexed_default_branch` и `exclusions_digest` (`IgnorePolicy.digest` файла `.review/rules.md`); CHECK `profile_complete` — заданы все шесть колонок профиля или ни одна, миграция обнуляет версии существующих строк, и их следующая сборка — full. Квоты хранения ADR §7 считают оценки `stored_bytes` (видимые строки публикации) и `pending_bytes` (строки попытки под lease; CHECK `pending_leased` — без lease 0), BIGINT ≥ 0 (CHECK `bytes`), по умолчанию 0: строка графа — 160 байт плюс UTF-8 байты её текстовых колонок с весом 1 + число индексов с колонкой, включая PK; это оценка, а не размер на диске. CHECK `failed_code`: `failed` — только с `archive_unsafe` или `limit_exceeded:*`. Частичный индекс `ix_code_index_states_live_lease` (`repository_id`, `lease_token IS NOT NULL`) — для подсчёта живых lease при захвате. **#143** (миграция `20261020_0037`): маркер пробуждения `wake_requested_at` — outbox пробуждений индексатора (§7.4); CHECK `ck_code_index_states_wake_live` — маркер только у живого индекса (без `purge_reason` и не `failed`); частичный индекс `ix_code_index_states_wake_requested` (`wake_requested_at IS NOT NULL`) — для рассылки пробуждений. **#144** (миграция `20261023_0038`): троттлинг full по запросу ревью ([§10](#review-full-throttle)) — `review_full_requested_at` (timestamptz, когда ревью последний раз поставило full) и `review_full_requested_sha` (VARCHAR(64), `target_commit_sha` строки в тот момент), обе nullable, `purge` их сохраняет; CHECK `ck_code_index_states_review_full_sha_at` — `review_full_requested_sha IS NULL OR review_full_requested_at IS NOT NULL`: sha только вместе со временем, запрос при цели NULL пишет одно время |
 | **#141:** `code_index_files`, `code_index_symbols`, `code_index_edges`, `code_index_imports` | строки графа без суррогатных id: натуральный PK — `(repository_id, generation, valid_from, path)` плюс ключ строки, nullable `valid_to` закрывает строку более поздней публикацией. Файл — `blob_sha`. Символ — ключ `qualified_name`, `kind` (`code_index_symbol_kind` из `SymbolKind`), `disambiguator` (порядковый номер среди дублей; у единственного объявления — 0: в ADR §3 он «пуст», но колонка NOT NULL и входит в PK), `start_line ≥ 1`, `end_line ≥ start_line`; `defines` (ADR §3) — сама строка символа, не ребро. Ребро — ключ `kind` (`imports\|uses_imported`), `target_path`, `target_name` (`''` ровно у `imports`), индекс `ix_code_index_edges_target`. Запись импорта — ключ `specifier`, `resolution` (`code_index_import_resolution` из `ImportResolution`, в том числе неразрешённые исходы), nullable `target_path`, индекс `ix_code_index_imports_target`. Текста кода, сигнатур и embeddings нет. **#143** (миграция `20261020_0037`): частичный индекс `ix_code_index_files_closed` (`repository_id`, `valid_to IS NOT NULL`) — проба закрытых строк, по которой leader перечисляет репозитории с мусором |
 | **После MVP:** `FeedbackSignal` | `finding_id`, `kind: resolved\|line_changed\|reaction`, `value`, `at` |
 
