@@ -4,13 +4,14 @@
 #   docker compose -p <project> -f docker-compose.yml -f deploy/load/compose.parallel-runs.yml \
 #     --profile webhooks up -d --build --wait --scale worker=5
 #
-# Every published port is on 127.0.0.1: the backend's list is replaced (!override), PostgreSQL
-# publishes none (!reset; the driver uses `compose exec`), RabbitMQ and Redis are loopback in the
-# base file. The driver sets BACKEND_PORT, RABBITMQ_PORT, RABBITMQ_MANAGEMENT_PORT, REDIS_PORT and
-# LOAD_STUB_PORT to free ports, so nothing collides with another stack, and the LOAD_* values
-# below. Credentials and LLM settings are literal here, so a developer's environment cannot route
-# this stack to the real GitHub or a paid model. Paths are relative to the first -f file (the
-# repository root).
+# Every published port is on 127.0.0.1, without YAML tags: the base file maps the backend and
+# PostgreSQL as "${BACKEND_PORT}:8000" / "${POSTGRES_PORT}:5432", so the driver sets those two to
+# "127.0.0.1:<free port>"; RabbitMQ and Redis bind 127.0.0.1 in the base file and the stub below.
+# The driver also sets RABBITMQ_PORT, RABBITMQ_MANAGEMENT_PORT, REDIS_PORT and LOAD_STUB_PORT to
+# free ports, so nothing collides with another stack, checks the merged config for loopback
+# before `up`, and sets the LOAD_* values below. Credentials and LLM settings are literal here, so
+# a developer's environment cannot route this stack to the real GitHub or a paid model. Paths are
+# relative to the first -f file (the repository root).
 services:
   stub:
     build: .
@@ -36,16 +37,11 @@ services:
       retries: 15
 
   backend:
-    ports: !override
-      - "127.0.0.1:${BACKEND_PORT:?set by scripts/parallel_runs_load.py}:8000"
     environment:
       GITHUB_WEBHOOK_SECRET: ${LOAD_WEBHOOK_SECRET:?set by scripts/parallel_runs_load.py}
       GITHUB_API_URL: http://stub:9999
       GITHUB_CLIENT_ID: ""
       GITHUB_CLIENT_SECRET: ""
-
-  postgres:
-    ports: !reset []
 
   rabbitmq:
     # The base probe runs rabbitmq-diagnostics as root with HOME=/var/lib/rabbitmq. On a busy host
