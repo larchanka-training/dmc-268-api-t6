@@ -283,7 +283,8 @@ terraform -chdir=${STACK} destroy -var-file=environments/staging.tfvars
 
 | Имя | Тип |
 |---|---|
-| `<APP_DOMAIN>` | A |
+| `<APP_DOMAIN>`, `www` | A — публичный лендинг ([CICD.md](CICD.md) §8.2) |
+| `staging`, `staging-www` | A — staging-лендинг |
 | `api`, `staging-api` | A |
 | `ui`, `staging-ui` | A |
 | `webhook`, `staging-webhook` | A |
