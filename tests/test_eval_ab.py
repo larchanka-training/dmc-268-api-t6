@@ -391,3 +391,114 @@ def test_warns_when_only_some_runs_of_an_arm_carry_usage(
     arguments = [item for label, path in runs for item in ("--run", f"{label}={path}")]
     assert main(arguments) == 0
     assert capsys.readouterr().err == f"eval ab: warning: {warning}\n"
+
+
+def _set_path(report: dict[str, Any], keys: str, value: object) -> None:
+    *parents, last = keys.split(".")
+    target: Any = report
+    for key in parents:
+        target = target[key]
+    target[last] = value
+
+
+@pytest.mark.parametrize(
+    ("keys", "value", "diagnostic"),
+    [
+        ("critical.matched", "1", "critical_recall needs non-negative integer counts"),
+        ("micro.tp", True, "precision needs non-negative integer counts"),
+        ("micro.fn", 1.5, "recall needs non-negative integer counts"),
+        ("critical.total", -1, "critical_recall needs non-negative integer counts"),
+        ("case_count", None, "validity needs non-negative integer counts"),
+        (
+            "rule_constraints.found",
+            False,
+            "rule_constraints_found needs non-negative integer counts",
+        ),
+        ("exceptions.flagged", "0", "exceptions_flagged needs non-negative integer counts"),
+        ("usage", [], "usage must be an object or null"),
+        (
+            "usage",
+            {**_usage(10, "0.1"), "tokens_in": True},
+            "usage.tokens_in must be a non-negative integer",
+        ),
+        (
+            "usage",
+            {**_usage(10, "0.1"), "tokens_out": "80"},
+            "usage.tokens_out must be a non-negative integer",
+        ),
+        ("usage", _usage(10, "ten cents"), "usage.cost_usd must be a non-negative decimal"),
+        ("usage", _usage(10, "NaN"), "usage.cost_usd must be a non-negative decimal"),
+        ("usage", _usage(10, "-0.1"), "usage.cost_usd must be a non-negative decimal"),
+        (
+            "usage",
+            {**_usage(10, "0.1"), "cost_usd": 0.1},
+            "usage.cost_usd must be a non-negative decimal",
+        ),
+    ],
+    ids=[
+        "string-count",
+        "bool-count",
+        "float-count",
+        "negative-denominator",
+        "null-denominator",
+        "bool-rule-count",
+        "string-exception-count",
+        "usage-list",
+        "bool-tokens",
+        "string-tokens",
+        "word-cost",
+        "nan-cost",
+        "negative-cost",
+        "float-cost",
+    ],
+)
+def test_refuses_a_report_with_malformed_counts(
+    tmp_path: Path, keys: str, value: object, diagnostic: str
+) -> None:
+    report = _report("none", tp=1, fp=0, fn=0, usage=_usage(10, "0.1"))
+    _set_path(report, keys, value)
+    path = _write(tmp_path, "r", report)
+
+    with pytest.raises(AbError) as raised:
+        aggregate([("none", path)])
+
+    assert str(raised.value) == (
+        f"{path}: not an eval report with provenance and policy-arm metrics ({diagnostic})"
+    )
+
+
+def test_accepts_integer_cost_and_zero_counts(tmp_path: Path) -> None:
+    report = _report("none", tp=0, fp=0, fn=0, usage={**_usage(0, "0"), "cost_usd": 0})
+    path = _write(tmp_path, "r", report)
+
+    result = aggregate([("none", path)])
+
+    assert result["arms"][0]["summary"]["cost_usd"] == {"mean": 0.0, "min": 0.0, "max": 0.0}
+
+
+def test_markdown_notes_that_arm_none_shows_no_rules(tmp_path: Path) -> None:
+    lines = format_markdown(aggregate(_experiment(tmp_path))).splitlines()
+    note = (
+        "Arm `none` (policy arm none) shows no rules: its Rule constraints found and "
+        "Exceptions flagged are found and flagged without rules, and Exceptions respected "
+        "does not apply."
+    )
+
+    assert lines[6:8] == ["", note]
+    assert [arm["policy_arms"] for arm in aggregate(_experiment(tmp_path))["arms"]] == [
+        ["none"],
+        ["valid"],
+    ]
+    relabelled = [("baseline", path) for _, path in _experiment(tmp_path)[:1]]
+    assert format_markdown(aggregate(relabelled)).count("(policy arm none) shows no rules") == 1
+    valid_only = [item for item in _experiment(tmp_path) if item[0] == "valid"]
+    assert "shows no rules" not in format_markdown(aggregate(valid_only))
+
+
+def test_a_count_that_breaks_the_arithmetic_is_refused_as_well(tmp_path: Path) -> None:
+    report = _report("none", tp=1, fp=0, fn=0)
+    report["micro"]["tp"] = "2"
+    path = _write(tmp_path, "r", report)
+
+    with pytest.raises(AbError, match="not an eval report with provenance and policy-arm metrics"):
+        aggregate([("none", path)])

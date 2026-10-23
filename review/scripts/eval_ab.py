@@ -49,8 +49,10 @@ RATIOS: tuple[tuple[str, str, Callable[[dict[str, Any]], Ratio]], ...] = (
         "Rule constraints found",
         lambda r: (r["rule_constraints"]["found"], r["rule_constraints"]["total"]),
     ),
-    # Same denominators in every arm (eval_score.py): in arm none the rule figure is "found
-    # without rules" and the flagged exceptions are "flagged without rules".
+    # Same truths and anchors in every arm (eval_score.py); the exception denominator counts
+    # valid responses only, so it is equal across arms only when every response is valid. In
+    # arm none the rule figure is "found without rules" and flagged exceptions are "flagged
+    # without rules".
     (
         "exceptions_respected",
         "Exceptions respected",
@@ -82,9 +84,14 @@ def _load(label: str, path: Path) -> tuple[dict[str, Any], str]:
         missing += [f"run_metadata.{name}" for name in SAME_RUN_METADATA if name not in metadata]
         if missing:
             raise KeyError(", ".join(missing))
-        for _, _, ratio in RATIOS:
-            ratio(report)
-    except (OSError, UnicodeError, json.JSONDecodeError, KeyError, TypeError) as exc:
+        for name, _, ratio in RATIOS:
+            numerator, denominator = ratio(report)
+            if not _is_count(numerator) or not _is_count(denominator):
+                raise ValueError(f"{name} needs non-negative integer counts")
+        usage_error = _usage_error(report.get("usage"))
+        if usage_error is not None:
+            raise ValueError(usage_error)
+    except (OSError, UnicodeError, json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
         raise AbError(
             f"{path}: not an eval report with provenance and policy-arm metrics ({exc})"
         ) from None
@@ -97,14 +104,34 @@ def _load(label: str, path: Path) -> tuple[dict[str, Any], str]:
     return report, hashlib.sha256(raw).hexdigest()
 
 
-def _quantity(report: dict[str, Any], name: str) -> Decimal | None:
-    usage = report.get("usage")
-    if not isinstance(usage, dict):
+def _is_count(value: object) -> bool:
+    # CONTRACT: bool is an int subclass; a JSON true/false is not a count.
+    return type(value) is int and value >= 0
+
+
+def _usage_error(usage: object) -> str | None:
+    """Usage is absent (``None``) or token counts plus a finite, non-negative USD amount."""
+    if usage is None:
         return None
+    if not isinstance(usage, dict):
+        return "usage must be an object or null"
+    for name in ("tokens_in", "tokens_out"):
+        if not _is_count(usage.get(name)):
+            return f"usage.{name} must be a non-negative integer"
+    cost = usage.get("cost_usd")
     try:
-        return Decimal(str(usage[name]))
-    except (KeyError, InvalidOperation):
-        raise AbError(f"report usage has no valid {name}") from None
+        amount = Decimal(cost) if isinstance(cost, str | int) and type(cost) is not bool else None
+    except InvalidOperation:
+        amount = None
+    if amount is None or not amount.is_finite() or amount < 0:
+        return "usage.cost_usd must be a non-negative decimal"
+    return None
+
+
+def _quantity(report: dict[str, Any], name: str) -> Decimal | None:
+    """A usage total; ``_load`` has checked its type, ``None`` when usage was not recorded."""
+    usage = report.get("usage")
+    return None if usage is None else Decimal(str(usage[name]))
 
 
 def _spread(values: list[float]) -> dict[str, float | None]:
@@ -172,7 +199,18 @@ def aggregate(runs: list[tuple[str, Path]], baseline: str | None = None) -> dict
             )
             for name in (*(item[0] for item in RATIOS), *(item[0] for item in QUANTITIES))
         }
-        arms.append({"label": label, "runs": run_rows, "summary": summary})
+        recorded = {
+            report["provenance"]["run_metadata"].get("policy_arm", "legacy")
+            for _, report in members
+        }
+        arms.append(
+            {
+                "label": label,
+                "policy_arms": sorted(recorded),
+                "runs": run_rows,
+                "summary": summary,
+            }
+        )
     base = next(arm for arm in arms if arm["label"] == chosen)["summary"]
     for arm in arms:
         arm["delta"] = {
@@ -238,6 +276,16 @@ def format_markdown(result: dict[str, Any]) -> str:
                 f"{_number(name, spread['max'])})"
             )
         lines.append("| " + " | ".join(cells) + " |")
+    for arm in result["arms"]:
+        if arm["policy_arms"] == ["none"]:
+            lines.extend(
+                [
+                    "",
+                    f"Arm `{arm['label']}` (policy arm none) shows no rules: its Rule constraints "
+                    "found and Exceptions flagged are found and flagged without rules, and "
+                    "Exceptions respected does not apply.",
+                ]
+            )
     lines.extend(
         [
             "",
