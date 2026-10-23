@@ -13,6 +13,24 @@ on:
         required: false
         type: boolean
         default: false
+      corpus:
+        description: "Corpus: main (gold benchmark) or rules (rules.md sub-corpus, #163)"
+        required: false
+        type: choice
+        options:
+          - main
+          - rules
+        default: main
+      policy_arm:
+        description: "Policy arm: legacy (no policy snapshot), none, valid or malicious"
+        required: false
+        type: choice
+        options:
+          - legacy
+          - none
+          - valid
+          - malicious
+        default: legacy
 
 permissions:
   contents: read
@@ -31,6 +49,9 @@ jobs:
       LLM_MODEL: ${{ inputs.model || vars.LLM_MODEL }}
       LLM_FALLBACK_MODEL: ${{ vars.LLM_FALLBACK_MODEL }}
       LLM_STRUCTURED_OUTPUT: json_schema
+      # Inputs reach the shell only through these variables, never as expressions in run.
+      EVAL_CORPUS: ${{ inputs.corpus || 'main' }}
+      EVAL_POLICY_ARM: ${{ inputs.policy_arm || 'legacy' }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -49,11 +70,22 @@ jobs:
       - name: Prepare isolated corpus
         shell: bash
         run: |
+          case "$EVAL_CORPUS" in
+            main) cases=test-prs-dataset/cases ;;
+            rules) cases=test-prs-dataset/rules/cases ;;
+            *) echo "::error::Unknown corpus: $EVAL_CORPUS" >&2; exit 1 ;;
+          esac
           mkdir "$RUNNER_TEMP/eval-corpus"
-          cp -R test-prs-dataset/cases test-prs-dataset/schema "$RUNNER_TEMP/eval-corpus/"
+          cp -R "$cases" test-prs-dataset/schema "$RUNNER_TEMP/eval-corpus/"
 
       - name: Validate corpus
-        run: uv run python review/scripts/validate_dataset.py --root "$RUNNER_TEMP/eval-corpus" --final
+        shell: bash
+        run: |
+          profile=()
+          if [[ "$EVAL_CORPUS" == rules ]]; then
+            profile=(--profile rules)
+          fi
+          uv run python review/scripts/validate_dataset.py --root "$RUNNER_TEMP/eval-corpus" --final "${profile[@]}"
 
       - name: Evaluate live corpus
         shell: bash
@@ -66,6 +98,7 @@ jobs:
           fi
           uv run python review/scripts/eval_live.py \
             --root "$RUNNER_TEMP/eval-corpus" \
+            --policy-arm "$EVAL_POLICY_ARM" \
             --report-json "$RUNNER_TEMP/eval-report.json" \
             --redacted-responses "$RUNNER_TEMP/eval-response-metadata"
 
