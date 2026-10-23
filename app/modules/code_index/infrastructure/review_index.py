@@ -76,7 +76,8 @@ class SqlAlchemyReviewIndexAccess:
 
     async def _rag_on(self, repository_id: UUID) -> bool:
         # The lock first, the condition in a statement of its own: under READ COMMITTED
-        # it reads what a writer the lock waited for committed (M4).
+        # it reads what a writer the lock waited for committed, so a toggle-off in flight
+        # is seen once it commits.
         await self._session.execute(
             select(Repository.id).where(Repository.id == repository_id).with_for_update(read=True)
         )
@@ -103,16 +104,19 @@ class SqlAlchemyReviewIndexAccess:
             return RagReadiness(enabled=False)
         state = await self._state(repository_id, skip_locked=True)
         if state is None:
-            # No row, or a row another session holds: read what it committed, write
-            # nothing (M3); the next review does the extension.
+            # No row, or a row another session holds: read what it committed and write
+            # nothing, so the review never waits; the next review does the extension.
             return _readiness(await self._state(repository_id, skip_locked=False))
         # Read after the lock, as the store's own clock.
         now = cast(datetime, await self._session.scalar(select(func.clock_timestamp())))
         target_commit_sha = state.target_commit_sha
+        index = _rag_index(state)
         trigger = review_trigger(
-            status=_rag_index(state).status,
+            status=index.status,
+            usable=index.usable,
             purge_reason=state.purge_reason,
             wake_requested_at=state.wake_requested_at,
+            lease_active=state.lease_expires_at is not None and state.lease_expires_at > now,
             last_error_code=state.last_error_code,
             target_commit_sha=target_commit_sha,
             last_used_at=state.last_used_at,
@@ -122,10 +126,11 @@ class SqlAlchemyReviewIndexAccess:
             now=now,
         )
         if trigger.action is ReviewTriggerAction.ENABLE:
-            # The decision read `purge_reason == ttl` on the row this transaction holds (M4).
+            # The decision read `purge_reason == ttl` on the row this transaction holds, so
+            # no toggle-off or removal purged it since.
             await self._store.enable(repository_id)
         elif trigger.action is not ReviewTriggerAction.NONE and not (
-            # M2: the review never writes the target.
+            # The review never writes the target: the build follows the one the row has.
             await self._store.request_build(repository_id, target_commit_sha=None)
         ):
             # A refused request queues nothing, so it extends and throttles nothing.
