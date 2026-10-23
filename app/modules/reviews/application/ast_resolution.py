@@ -623,9 +623,18 @@ class ImportResolver:
         if target.resolution is not ImportResolution.RESOLVED:
             return go_package_name(item.module, None)
         loaded = await self._load(list(target.files))
-        if not isinstance(loaded, list):
-            return go_package_name(item.module, None)
-        return go_package_name(item.module, (facts for _, facts in loaded))
+        if isinstance(loaded, list):
+            return go_package_name(item.module, (facts for _, facts in loaded))
+        # A refused package is still named by its clause, so the use it binds keeps the
+        # reason of the refusal. The first member, in member order, whose facts carry a
+        # clause names it, a member with syntax errors included: the extractor takes the
+        # clause only from a top-level `package_clause`. Members already asked are not
+        # counted again; each one past the refusal counts toward the file limit.
+        for path in target.files:
+            facts = await self._provider.facts_for(path)
+            if isinstance(facts, AstFacts) and facts.package_name:
+                return facts.package_name
+        return go_package_name(item.module, None)
 
     async def _resolve(
         self,
