@@ -77,16 +77,27 @@ def _report() -> dict[str, Any]:
 
 
 def _run_step(
-    tmp_path: Path, *, manifest: bool, fail_replay: bool = False
+    tmp_path: Path, *, manifest: bool, fail_replay: bool = False, fail_rules: bool = False
 ) -> tuple[subprocess.CompletedProcess[str], str]:
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     shim = bin_dir / "uv"
+    # The script is the first review/scripts/*.py (or ``-``) argument, wherever uv flags put it.
     shim.write_text(
         "#!/bin/bash\n"
         "set -e\n"
-        'case "$3" in\n'
-        '  review/scripts/validate_dataset.py) cp "$FIXTURE_CORPUS" "${@: -1}" ;;\n'
+        'script=""\n'
+        'for arg in "$@"; do\n'
+        '  case "$arg" in review/scripts/*.py|-) script="$arg"; break ;; esac\n'
+        "done\n"
+        'case "$script" in\n'
+        "  review/scripts/validate_dataset.py)\n"
+        '    if [[ " $* " == *" --profile rules "* ]]; then\n'
+        '      echo "$*" >> "$RULES_LOG"\n'
+        '      if [[ "${FAIL_RULES:-}" == 1 ]]; then exit 33; fi\n'
+        "    else\n"
+        '      cp "$FIXTURE_CORPUS" "${@: -1}"\n'
+        "    fi ;;\n"
         "  review/scripts/eval_replay.py)\n"
         "    if [[ ! -f test-prs-dataset/responses/manifest.json ]]; then exit 1; fi\n"
         '    if [[ "${FAIL_REPLAY:-}" == 1 ]]; then exit 27; fi\n'
@@ -116,6 +127,8 @@ def _run_step(
         "FIXTURE_CORPUS": str(corpus),
         "FIXTURE_REPLAY": str(replay),
         "FAIL_REPLAY": "1" if fail_replay else "0",
+        "FAIL_RULES": "1" if fail_rules else "0",
+        "RULES_LOG": str(tmp_path / "rules-validation.log"),
     }
     result = subprocess.run(
         ["bash", "-euo", "pipefail", "-c", _replay_step()],
@@ -165,6 +178,23 @@ def test_required_ci_summary_uses_complete_replay_report(tmp_path: Path) -> None
     assert result.returncode == 0, result.stderr
     assert summary == expected
     assert "::warning::Static input digest mismatch" in result.stdout
+
+
+def test_required_ci_validates_the_rules_corpus_with_its_profile(tmp_path: Path) -> None:
+    result, _ = _run_step(tmp_path, manifest=True)
+
+    assert result.returncode == 0, result.stderr
+    assert (tmp_path / "rules-validation.log").read_text(encoding="utf-8") == (
+        "run --locked python review/scripts/validate_dataset.py "
+        "--root test-prs-dataset/rules --final --profile rules\n"
+    )
+
+
+def test_required_ci_rules_corpus_failure_fails_the_step(tmp_path: Path) -> None:
+    result, summary = _run_step(tmp_path, manifest=True, fail_rules=True)
+
+    assert result.returncode == 33
+    assert summary == ""
 
 
 def test_required_ci_replay_failure_fails_the_step(tmp_path: Path) -> None:
