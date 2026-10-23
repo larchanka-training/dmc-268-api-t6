@@ -69,6 +69,7 @@ WEBHOOK_SECRET = "issue163-test-webhook-secret"
 EMPTY_SHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 # Unique strings of the two changed files: each one shows whether its file reached the model.
 SERVICE_MARKER = "service-marker-5d1e"
+SERVICE_PATH = "app/service.py"
 CLIENT_MARKER = "client-marker-9c2b"
 # The ignored file: with a mask neither its text nor its name may reach the model (§5.3).
 CLIENT_PATH = "generated/client.py"
@@ -110,6 +111,8 @@ VALID_RULES = (
 ALL_IGNORED_RULES = _block("app/**", "generated/**").encode()
 PLAIN_RULES = b"# Rules\n\nPrefer small functions.\n"
 IGNORE_EVERYTHING_RULES = _block("**/*").encode()
+# A review-ignore block covering both changed files, in AGENTS.md: ordinary text there (§4.3).
+AGENTS_WITH_IGNORE_BLOCK = ("# Agents\n\n" + _block("app/**", "generated/**")).encode()
 
 
 class Fault(StrEnum):
@@ -342,14 +345,17 @@ def _github(
     head_rules: bytes | None | Literal["base"] = "base",
     fault: Fault | None = None,
     symlink: bool = False,
+    agents: bytes | None = None,
 ) -> FakeGitHub:
     """PR 7 changes ``app/service.py`` and ``generated/client.py``; ``None`` is no rules file.
 
-    ``symlink`` lists the rules file of both revisions as a symlink to ``base_rules``.
+    ``symlink`` lists the rules file of both revisions as a symlink to ``base_rules``;
+    ``agents`` is a root ``AGENTS.md`` the PR leaves unchanged.
     """
     head = base_rules if head_rules == "base" else head_rules
-    base_files = dict(_BASE_FILES) | ({} if base_rules is None else {RULES: base_rules})
-    head_files = dict(_HEAD_FILES) | ({} if head is None else {RULES: head})
+    common = {} if agents is None else {"AGENTS.md": agents}
+    base_files = _BASE_FILES | common | ({} if base_rules is None else {RULES: base_rules})
+    head_files = _HEAD_FILES | common | ({} if head is None else {RULES: head})
     links = frozenset({RULES}) if symlink else frozenset()
     return FakeGitHub(Revision(base_files, links), Revision(head_files, links), fault)
 
@@ -549,6 +555,8 @@ class Outcome:
     requests: list[str]
     unexpected: list[str]
     llm_problems: list[str]
+    # The terminal check-run the worker wrote last.
+    check_run: dict[str, Any]
 
 
 async def _deliver(resources: ReviewsApiResources, payload: dict[str, Any]) -> None:
@@ -601,10 +609,13 @@ async def _settled(
         await asyncio.sleep(0.05)
 
 
-async def _completed_check_run(github: FakeGitHub, timeout: float = 15) -> None:
+async def _completed_check_run(github: FakeGitHub, timeout: float = 15) -> dict[str, Any]:
     """Wait for the terminal check-run: the worker writes it after the last commit."""
     deadline = asyncio.get_running_loop().time() + timeout
-    while not any(item.get("status") == "completed" for item in github.check_runs):
+    while True:
+        completed = [item for item in github.check_runs if item.get("status") == "completed"]
+        if completed:
+            return completed[-1]
         if asyncio.get_running_loop().time() > deadline:
             raise AssertionError(f"no completed check-run in {github.check_runs}")
         await asyncio.sleep(0.05)
@@ -676,7 +687,7 @@ async def _scenario(stack: Stack, github: FakeGitHub, llm: FakeLlm) -> Outcome:
         )
         try:
             state, attempt, error_code = await _settled(factory, run_id, worker)
-            await _completed_check_run(github)
+            check_run = await _completed_check_run(github)
         finally:
             worker.cancel()
             await asyncio.gather(worker, return_exceptions=True)
@@ -717,6 +728,7 @@ async def _scenario(stack: Stack, github: FakeGitHub, llm: FakeLlm) -> Outcome:
         requests=github.requests,
         unexpected=github.unexpected,
         llm_problems=llm.problems,
+        check_run=check_run,
     )
 
 
@@ -751,10 +763,23 @@ def _assert_policy_load_failed(outcome: Outcome) -> None:
 def _assert_failed_once(outcome: Outcome, error_codes: frozenset[str]) -> None:
     assert (outcome.state, outcome.attempt) == ("failed", 1)
     assert outcome.error_code in error_codes
+    # Current behaviour: a failed load stores no snapshot; RFS §7.2 allows that
+    # («полного валидного snapshot может не быть»).
     assert outcome.snapshots == 0
     _assert_policy_load_failed(outcome)
     assert outcome.tasks == []
     assert outcome.reviews == []
+    # PIPELINE_SPEC §7: `failed` → `completed` / `neutral`, the bot never blocks a merge.
+    assert outcome.check_run["conclusion"] == "neutral"
+
+
+def _assert_published(outcome: Outcome) -> None:
+    assert (outcome.state, outcome.error_code) == ("succeeded", None)
+    assert "ReviewOutput" in outcome.tasks
+    assert len(outcome.reviews) == 1
+    assert outcome.reviews[0]["commit_id"] == HEAD
+    # PIPELINE_SPEC §7: `succeeded` → `completed` / `neutral`.
+    assert outcome.check_run["conclusion"] == "neutral"
 
 
 # §9 for a 404: `policy_revision_unavailable` ("закреплённая ревизия недоступна") or
@@ -769,31 +794,36 @@ _ACCESS_DENIED = frozenset({"policy_access_denied"})
 def test_missing_rules_md_lets_the_whole_diff_reach_the_model(stack: Stack) -> None:
     outcome = _review(stack, _github(None))
 
-    assert (outcome.state, outcome.error_code) == ("succeeded", None)
+    _assert_published(outcome)
     assert outcome.documents[RULES][:2] == ("missing", None)
     assert _rules_load(outcome)["presence"] == "missing"
-    assert len(outcome.tasks) >= 1
     # Without a policy both changed files reach the model: the control of the valid case.
-    assert any(SERVICE_MARKER in body for body in outcome.bodies)
-    assert any(CLIENT_MARKER in body for body in outcome.bodies)
-    assert any(CLIENT_PATH in body for body in outcome.bodies)
-    assert len(outcome.reviews) == 1
-    assert outcome.reviews[0]["commit_id"] == HEAD
+    for needle in (SERVICE_PATH, SERVICE_MARKER, CLIENT_PATH, CLIENT_MARKER):
+        assert any(needle in body for body in outcome.bodies), needle
 
 
 @pytest.mark.integration
 def test_review_ignore_keeps_the_ignored_file_out_of_every_llm_call(stack: Stack) -> None:
     outcome = _review(stack, _github(VALID_RULES))
 
-    assert (outcome.state, outcome.error_code) == ("succeeded", None)
+    _assert_published(outcome)
     assert outcome.documents[RULES][0] == "present"
     assert _rules_load(outcome)["presence"] == "present"
-    assert outcome.bodies
     assert all(CLIENT_MARKER not in body for body in outcome.bodies)
     assert all(CLIENT_PATH not in body for body in outcome.bodies)
     assert any(SERVICE_MARKER in body for body in outcome.bodies)
-    assert len(outcome.reviews) == 1
-    assert outcome.reviews[0]["commit_id"] == HEAD
+
+
+@pytest.mark.integration
+def test_review_ignore_in_agents_md_is_ordinary_text(stack: Stack) -> None:
+    # §4.1, §4.3: only `.review/rules.md` is read for masks; in AGENTS.md the block is text.
+    outcome = _review(stack, _github(None, agents=AGENTS_WITH_IGNORE_BLOCK))
+
+    _assert_published(outcome)
+    assert outcome.documents["AGENTS.md"][0] == "present"
+    assert outcome.documents[RULES][:2] == ("missing", None)
+    for path in (SERVICE_PATH, CLIENT_PATH):
+        assert any(path in body for body in outcome.bodies), path
 
 
 @pytest.mark.integration
@@ -808,10 +838,7 @@ def test_empty_rules_md_is_present_and_has_another_policy_than_a_missing_one(
     assert empty.policy_digest != missing.policy_digest
     assert empty.documents[RULES] == ("present", EMPTY_SHA256, 0)
     assert _rules_load(empty)["presence"] == "present"
-    assert (empty.state, empty.error_code) == ("succeeded", None)
-    assert "ReviewOutput" in empty.tasks
-    assert len(empty.reviews) == 1
-    assert empty.reviews[0]["commit_id"] == HEAD
+    _assert_published(empty)
     assert missing.documents[RULES][:2] == ("missing", None)
 
 
@@ -820,12 +847,9 @@ def test_rules_md_at_the_size_limit_is_present(stack: Stack) -> None:
     # 65 536 bytes is the limit itself (§3.3): the document is loaded whole.
     outcome = _review(stack, _github(b"a" * 65_536))
 
-    assert (outcome.state, outcome.error_code) == ("succeeded", None)
+    _assert_published(outcome)
     presence, _, byte_count = outcome.documents[RULES]
     assert (presence, byte_count) == ("present", 65_536)
-    assert "ReviewOutput" in outcome.tasks
-    assert len(outcome.reviews) == 1
-    assert outcome.reviews[0]["commit_id"] == HEAD
 
 
 @pytest.mark.integration
@@ -836,6 +860,8 @@ def test_all_changes_ignored_skips_the_run_without_llm_or_review(stack: Stack) -
     assert outcome.documents[RULES][0] == "present"
     assert outcome.tasks == []
     assert outcome.reviews == []
+    # PIPELINE_SPEC §7: `skipped` → `completed` / `skipped`.
+    assert outcome.check_run["conclusion"] == "skipped"
 
 
 @pytest.mark.integration
@@ -925,23 +951,20 @@ def test_truncated_base_tree_fails_the_run_and_is_never_missing(stack: Stack) ->
     _assert_policy_load_failed(outcome)
     assert outcome.tasks == []
     assert outcome.reviews == []
+    assert outcome.check_run["conclusion"] == "neutral"
 
 
 @pytest.mark.integration
 def test_rules_md_added_by_the_head_is_not_the_policy(stack: Stack) -> None:
     outcome = _review(stack, _github(None, head_rules=IGNORE_EVERYTHING_RULES))
 
-    assert (outcome.state, outcome.error_code) == ("succeeded", None)
+    _assert_published(outcome)
     assert outcome.documents[RULES][:2] == ("missing", None)
-    assert len(outcome.tasks) >= 1
-    assert len(outcome.reviews) == 1
 
 
 @pytest.mark.integration
 def test_rules_md_changed_by_the_head_keeps_the_base_policy(stack: Stack) -> None:
     outcome = _review(stack, _github(PLAIN_RULES, head_rules=IGNORE_EVERYTHING_RULES))
 
-    assert (outcome.state, outcome.error_code) == ("succeeded", None)
+    _assert_published(outcome)
     assert outcome.documents[RULES][:2] == ("present", hashlib.sha256(PLAIN_RULES).hexdigest())
-    assert len(outcome.tasks) >= 1
-    assert len(outcome.reviews) == 1
