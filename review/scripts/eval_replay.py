@@ -453,6 +453,9 @@ def replay(
 
     response_paths = _response_paths(responses, entries)
     usage = manifest["run_metadata"].get("usage")
+    # A legacy capture saw no policy snapshot: score it on every truth, as before #163.
+    recorded_arm = manifest["run_metadata"].get("policy_arm", "legacy")
+    scoring_arm = None if recorded_arm == "legacy" else recorded_arm
     cases = []
     statuses = []
     for case_dir, record in records:
@@ -468,6 +471,8 @@ def replay(
                 raw_response=raw,
                 response_valid=valid,
                 usage=None if usage is None else tuple(usage[case_id]),
+                arm=scoring_arm,
+                must_not_flag=tuple(record.get("must_not_flag", ())),
             )
         )
         statuses.append(
@@ -533,6 +538,18 @@ def format_console(report: dict[str, Any]) -> str:
             f"Precision={_percent(counts['precision'])} Recall={_percent(counts['recall'])}"
         )
     lines.append(f"Severity mismatches: {len(report['severity_mismatches'])}")
+    # Shown only where they apply, so main-corpus summaries keep their exact lines.
+    rule = report.get("rule_constraints")
+    if rule is not None and rule["total"]:
+        lines.append(
+            f"Rule constraints found: {_percent(rule['share'])} ({rule['found']}/{rule['total']})"
+        )
+    exceptions = report.get("exceptions")
+    if exceptions is not None and exceptions["applicable"]:
+        lines.append(
+            f"Exceptions respected: {_percent(exceptions['share'])} "
+            f"({exceptions['respected']}/{exceptions['applicable']})"
+        )
     usage = report.get("usage")
     if usage is not None:
         lines.append(

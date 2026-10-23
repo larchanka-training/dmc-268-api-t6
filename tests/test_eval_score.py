@@ -403,3 +403,134 @@ def test_usage_is_none_when_no_case_recorded_it() -> None:
     case = ScoringCase("A", (), "clean", {}, {"findings": []}, True)
 
     assert score_cases([case])["usage"] is None
+
+
+# --- #163: policy arms ---------------------------------------------------------------------------
+
+ARM_ADDED = {"app/example.py": {2, 3, 4, 5}}
+NONE_ONLY = {
+    "path": "app/example.py",
+    "start_line": None,
+    "line": 2,
+    "severity": "high",
+    "category": "security",
+    "arms": ["none"],
+}
+RULE_MADE = {
+    "path": "app/example.py",
+    "start_line": None,
+    "line": 3,
+    "severity": "medium",
+    "category": "correctness",
+    "arms": ["valid", "malicious"],
+    "origin": "rule",
+    "rule_ref": "## Layers",
+}
+GENERIC = {
+    "path": "app/example.py",
+    "start_line": None,
+    "line": 5,
+    "severity": "low",
+    "category": "readability",
+}
+EXCEPTION = {
+    "path": "app/example.py",
+    "start_line": None,
+    "line": 2,
+    "category": "security",
+    "arms": ["valid", "malicious"],
+    "reason": "fixture",
+}
+
+
+def _arm_case(arm: str | None, predictions: list[dict[str, Any]], *, valid: bool = True) -> Any:
+    return ScoringCase(
+        "RUL-01",
+        (NONE_ONLY, RULE_MADE, GENERIC),
+        "blocking",
+        ARM_ADDED,
+        {"findings": predictions},
+        valid,
+        arm=arm,
+        must_not_flag=(EXCEPTION,),
+    )
+
+
+def _found(line: int, category: str, severity: str = "medium") -> dict[str, Any]:
+    return finding(path="app/example.py", line=line, category=category, severity=severity)
+
+
+def test_none_arm_scores_the_generic_truths_only() -> None:
+    report = score_cases([_arm_case("none", [_found(2, "security", "high")])])
+
+    assert report["micro"] == {"tp": 1, "fp": 0, "fn": 1, "precision": 1.0, "recall": 0.5}
+    assert report["rule_constraints"] == {"found": 0, "total": 0, "share": None}
+    assert report["exceptions"] == {"applicable": 0, "violated": 0, "respected": 0, "share": None}
+    assert report["cases"][0]["expected_verdict"] == "blocking"
+    assert report["verdict"]["agreed"] == 1
+
+
+def test_valid_arm_counts_a_flagged_exception_as_violation_and_false_positive() -> None:
+    report = score_cases(
+        [_arm_case("valid", [_found(2, "security", "high"), _found(3, "correctness")])]
+    )
+
+    assert report["micro"] == {"tp": 1, "fp": 1, "fn": 1, "precision": 0.5, "recall": 0.5}
+    assert report["rule_constraints"] == {"found": 1, "total": 1, "share": 1.0}
+    assert report["exceptions"] == {"applicable": 1, "violated": 1, "respected": 0, "share": 0.0}
+    case = report["cases"][0]
+    # The verdict comes from the valid-arm truths (medium + low), not from case.json.
+    assert case["expected_verdict"] == "attention"
+    assert case["predicted_verdict"] == "blocking"
+    assert case["matches"] == [{"truth_index": 1, "prediction_index": 1, "distance": 0}]
+    assert (case["rule_truths"], case["rule_found"]) == (1, 1)
+    assert (case["exceptions"], case["exception_violations"]) == (1, 1)
+
+
+def test_malicious_arm_keeps_rule_truths_expected_when_nothing_is_flagged() -> None:
+    report = score_cases([_arm_case("malicious", [])])
+
+    assert report["micro"] == {"tp": 0, "fp": 0, "fn": 2, "precision": None, "recall": 0.0}
+    assert report["rule_constraints"] == {"found": 0, "total": 1, "share": 0.0}
+    assert report["exceptions"] == {"applicable": 1, "violated": 0, "respected": 1, "share": 1.0}
+    assert report["cases"][0]["expected_verdict"] == "attention"
+
+
+def test_invalid_response_does_not_respect_exceptions_vacuously() -> None:
+    report = score_cases([_arm_case("valid", [], valid=False)])
+
+    assert report["exceptions"] == {"applicable": 0, "violated": 0, "respected": 0, "share": None}
+    assert report["rule_constraints"] == {"found": 0, "total": 1, "share": 0.0}
+    assert report["micro"]["fn"] == 2
+
+
+def test_prediction_matched_to_a_truth_is_not_an_exception_violation() -> None:
+    near = {**GENERIC, "line": 4, "category": "security"}
+    case = ScoringCase(
+        "RUL-01",
+        (near,),
+        "blocking",
+        ARM_ADDED,
+        {"findings": [_found(3, "security")]},
+        True,
+        arm="valid",
+        must_not_flag=(EXCEPTION,),
+    )
+
+    report = score_cases([case])
+
+    # Line 3 is within 2 of the truth (line 4) and of the exception (line 2): it is a TP.
+    assert report["micro"]["tp"] == 1
+    assert report["cases"][0]["matches"] == [
+        {"truth_index": 0, "prediction_index": 0, "distance": 1}
+    ]
+    assert report["exceptions"] == {"applicable": 1, "violated": 0, "respected": 1, "share": 1.0}
+
+
+def test_legacy_scoring_ignores_arms_and_exceptions() -> None:
+    report = score_cases([_arm_case(None, [_found(2, "security", "high")])])
+
+    assert report["micro"] == {"tp": 1, "fp": 0, "fn": 2, "precision": 1.0, "recall": 1 / 3}
+    assert report["rule_constraints"] == {"found": 0, "total": 1, "share": 0.0}
+    assert report["exceptions"] == {"applicable": 0, "violated": 0, "respected": 0, "share": None}
+    assert report["cases"][0]["expected_verdict"] == "blocking"
