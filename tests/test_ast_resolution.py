@@ -460,6 +460,63 @@ def test_go_resolution_is_refused_when_the_package_is_not_fully_known() -> None:
         ImportResolution.UNSUPPORTED,
         "ast_limit",
     )
+    assert reason(store({}, unavailable={"internal/store/open.go": "source_decode_failed"})) == (
+        ImportResolution.UNSUPPORTED,
+        "source_decode_failed",
+    )
+
+
+@pytest.mark.parametrize(
+    ("path", "source", "extracted"),
+    [
+        pytest.param(
+            "internal/store/broken.go",
+            "package store\n\nfunc Close( {\n}\n",
+            ["Close"],
+            id="no-duplicate",
+        ),
+        pytest.param(
+            "internal/store/broken.go",
+            "package store\n\nvar x = (\nfunc Open() error { return nil }\n",
+            [],
+            id="declaration-inside-the-error",
+        ),
+        pytest.param(
+            "internal/store/broken.go",
+            "packag store\n\nfunc Close() {}\n",
+            ["Close"],
+            id="broken-clause-beside-a-valid-member",
+        ),
+        pytest.param(
+            "internal/store/open.go",
+            "packag store\n\nfunc Open() error { return nil }\n",
+            ["Open"],
+            id="only-member-with-a-broken-clause",
+        ),
+    ],
+)
+def test_go_member_with_a_parse_error_refuses_the_whole_package(
+    path: str, source: str, extracted: list[str]
+) -> None:
+    # CONTEXT §3.3: a member that does not parse can hide a declaration or its package
+    # clause, so a name is not unique just because the parsed members declare it once.
+    facts = _facts(path, source)
+    assert facts.has_errors is True
+    assert [symbol.name for symbol in facts.symbols] == extracted
+    sources = {
+        "go.mod": _GO_MOD,
+        "cmd/main.go": _GO_APP.replace("db.Open()", "store.Open()"),
+        "internal/store/open.go": "package store\n\nfunc Open() error { return nil }\n",
+        path: source,
+    }
+
+    refs, _ = _resolve(sources, "cmd/main.go", "Run")
+
+    assert [
+        (ref.resolution, ref.reason, ref.resolved_symbols)
+        for ref in refs
+        if ref.module == "example.com/m/internal/store"
+    ] == [(ImportResolution.UNSUPPORTED, "ast_failed", ())]
 
 
 def test_go_module_with_replace_is_not_resolved() -> None:
@@ -489,6 +546,112 @@ def test_excluded_python_target_is_reported_and_not_shown() -> None:
     ref = _one(sources, "pkg/app.py", "f", unavailable={"pkg/client.py": "excluded"})
 
     assert (ref.resolution, ref.resolved_symbols) == (ImportResolution.EXCLUDED, ())
+
+
+_SCRIPT_IMPORTER = (
+    'import { User } from "./models";\nexport function run() { return new User(); }\n'
+)
+_SCRIPT_ERROR_ELSEWHERE = "export class User {}\nexport function broken( { }\n"
+
+
+@pytest.mark.parametrize(
+    ("importer", "target", "name", "sources"),
+    [
+        pytest.param(
+            "pkg/app.py",
+            "pkg/models.py",
+            "User",
+            {
+                "pkg/app.py": "from .models import User\n\ndef run():\n    return User()\n",
+                "pkg/models.py": "class User:\n    pass\n\ndef broken(:\n    pass\n",
+            },
+            id="py",
+        ),
+        *(
+            pytest.param(
+                f"src/app{extension}",
+                f"src/models{extension}",
+                "User",
+                {
+                    f"src/app{extension}": _SCRIPT_IMPORTER,
+                    f"src/models{extension}": _SCRIPT_ERROR_ELSEWHERE,
+                },
+                id=extension[1:],
+            )
+            for extension in (".ts", ".tsx", ".js", ".jsx")
+        ),
+        pytest.param(
+            "cmd/main.go",
+            "internal/store/open.go",
+            "Open",
+            {
+                "go.mod": _GO_MOD,
+                "cmd/main.go": (
+                    'package main\n\nimport "example.com/m/internal/store"\n\n'
+                    "func run() error {\n\treturn store.Open()\n}\n"
+                ),
+                "internal/store/open.go": (
+                    "package store\n\nfunc Open() error { return nil }\n\nfunc Close( {\n}\n"
+                ),
+            },
+            id="go",
+        ),
+    ],
+)
+def test_import_target_that_is_not_parsed_keeps_the_parse_reason(
+    importer: str, target: str, name: str, sources: dict[str, str]
+) -> None:
+    # The error is outside the imported declaration: the whole file is refused anyway,
+    # because an error region can hide a second declaration or export of the name.
+    facts = _facts(target, sources[target])
+    assert facts.has_errors is True
+    assert [symbol.complete for symbol in facts.symbols if symbol.name == name] == [True]
+
+    broken = _one(sources, importer, "run")
+    timed_out = _one(sources, importer, "run", unavailable={target: "ast_timeout"})
+
+    assert (broken.resolution, broken.reason, broken.resolved_symbols) == (
+        ImportResolution.UNSUPPORTED,
+        "ast_failed",
+        (),
+    )
+    assert (timed_out.resolution, timed_out.reason) == (ImportResolution.UNSUPPORTED, "ast_timeout")
+
+
+@pytest.mark.parametrize(
+    ("importer", "target", "sources"),
+    [
+        pytest.param(
+            "pkg/app.py",
+            "pkg/models.py",
+            {
+                "pkg/app.py": "from .models import User\n\ndef run():\n    return User()\n",
+                "pkg/models.py": "class User(:\n    pass\n",
+            },
+            id="py",
+        ),
+        pytest.param(
+            "src/app.ts",
+            "src/models.ts",
+            {"src/app.ts": _SCRIPT_IMPORTER, "src/models.ts": "export class User { x = ; }\n"},
+            id="ts",
+        ),
+    ],
+)
+def test_import_target_with_an_error_over_the_imported_symbol_is_not_resolved(
+    importer: str, target: str, sources: dict[str, str]
+) -> None:
+    # Resolved, the incomplete symbol would only be withheld later as an L4 `ast_limit`.
+    facts = _facts(target, sources[target])
+    assert [symbol.complete for symbol in facts.symbols if symbol.name == "User"] == [False]
+
+    ref = _one(sources, importer, "run")
+
+    assert (ref.resolution, ref.reason, ref.resolved_symbols) == (
+        ImportResolution.UNSUPPORTED,
+        "ast_failed",
+        (),
+    )
 
 
 def _many_exports(count: int) -> dict[str, str]:

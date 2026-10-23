@@ -17,6 +17,7 @@ from typing import Protocol
 
 from app.modules.reviews.application.ast_symbols import (
     AstFacts,
+    AstFailureReason,
     AstImport,
     AstImportName,
     AstLanguage,
@@ -639,10 +640,13 @@ class ImportResolver:
         loaded: _Loaded = []
         for path in files:
             facts = await self._provider.facts_for(path)
+            # One unusable member leaves the whole package unresolved: uniqueness of a
+            # name cannot be shown on the remaining subset, nor on a member whose syntax
+            # errors can hide a declaration, an export or the package clause.
             if isinstance(facts, FileUnavailable):
-                # One unusable member leaves the whole package unresolved: uniqueness of
-                # a name cannot be shown on the remaining subset.
                 return facts
+            if facts.has_errors:
+                return FileUnavailable(AstFailureReason.AST_FAILED.value)
             loaded.append((path, facts))
         return loaded
 
