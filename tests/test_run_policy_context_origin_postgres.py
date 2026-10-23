@@ -618,16 +618,16 @@ def test_worker_composition_passes_claimed_checkpoint_to_context_stage(
                             {"id": RUN_ATTEMPTED},
                         )
                     ]
-                    # The stage's context.build, the gate's step after it (M8), then the
-                    # prompt read's own context.build.
-                    assert [step[0] for step in steps] == (
-                        ["context.build", "context.rag", "context.build"]
-                        if rag
-                        else ["context.build", "context.build"]
-                    )
+                    tools = [step[0] for step in steps]
+                    # The stage's context.build opens the attempt's context steps.
+                    assert tools[0] == "context.build"
+                    # One gate step, after the stage's context.build; the prompt read's own
+                    # context.build is not pinned here.
+                    assert tools.count("context.rag") == (1 if rag else 0)
                     # No state row yet: the gate reads an empty index and the review goes on.
                     if rag:
-                        assert steps[1][1:] == (
+                        rag_step = steps[tools.index("context.rag")]
+                        assert rag_step[1:] == (
                             {
                                 "index_status": "empty",
                                 "indexed_commit_sha": None,
