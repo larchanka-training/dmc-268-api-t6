@@ -208,7 +208,8 @@ missing quote or exceeded budget fails the case before a call, which replay repo
 publishable, and never changes request bytes, answer validation or the captured answer;
 the rate is live ECB data no pin can freeze). The historical 2026-10-15 manifest retains the earlier 49-pin list. Before the
 #178 replacement, replay printed `Static input path set changed; refresh the complete baseline`.
-The complete 2026-10-20 capture records the active 46 pins and replays with `warnings=[]`.
+The complete 2026-10-20 capture records the active 46 pins and replayed with `warnings=[]`
+until #163 added three policy modules to the pins ([Baseline drift](#baseline-drift)).
 
 ## Recorded Mistral baseline — 2026-10-20
 
@@ -922,9 +923,12 @@ format:
   must pass the production policy parsers (`normalize_document`, `parse_review_ignore`).
   The malicious file must differ from the valid one and contain every section of it: it
   is the benign rules plus an injection.
-- truth `arms`: the arms in which the truth is expected (default: all three).
-- truth `origin: "rule"` with `rule_ref`: a truth that only the rules create. `rule_ref`
-  quotes a heading or line of the rules verbatim and must occur in both arm files.
+- truth `arms`: the arms in which the truth is expected (default: all three). A truth
+  lists both `valid` and `malicious` or neither: the injection must not change what is
+  expected.
+- truth `origin: "rule"` with `rule_ref`: a truth that only the rules create, so it lists
+  `valid` and `malicious` but not `none`. `rule_ref` quotes a heading or line of the rules
+  verbatim and must occur in both arm files.
 - `must_not_flag`: exception anchors `{path, start_line, line, category, arms, reason}`.
   In a listed arm a prediction on the anchor's path within two lines of it, on an added
   line and whatever its category, that no truth matched is an exception violation (it
@@ -932,7 +936,8 @@ format:
   arm `none`. `reason` quotes the rules passage that grants the exception verbatim
   (whitespace may wrap differently) and must occur in both arm files. An anchor within
   two lines of a truth of the same file that shares an arm is invalid, whatever the
-  categories.
+  categories. An anchor never lists `none`, and a `none`-arm truth must sit on the same
+  path and line.
 - `expected_verdict` is derived from all truths, so it is the union over the arms;
   scoring derives each arm's verdict from the truths listed for that arm.
 
@@ -979,7 +984,9 @@ arms and repeated runs apart; `eval_replay.py --responses-dir DIR` replays such 
 capture. The manifest records `policy_arm`, a digest of the arm files and the token and
 cost usage of every paid call.
 
-Replay reports for policy arms add two figures with the same denominator in every arm:
+Replay reports for policy arms add two figures over the same truths and anchors in every
+arm. The exception denominator counts valid responses only, so it is equal across arms
+only when every response is valid; compare the per-run numerators and denominators.
 
 - `rule_constraints`: the rule-made truths of the `valid` arm. In `valid` and
   `malicious` they are found as TPs; in `none` a prediction that no truth of that arm
@@ -1012,8 +1019,10 @@ are free-form, so another experiment can add an arm (`rag`, #146); a label that 
 policy arm must match the arm the report was captured with. It refuses reports that
 differ in model, prompt version, static or corpus digest, recorded engine, effective
 settings or fallback model, a capture that is not publishable, a report without these
-fields, and the same report content given twice; it warns when only some runs of an arm
-carry usage. Live runs wait for the v4 `review.system` prompt (#130): v3 tells the model
+fields or with non-integer counts or malformed usage, and the same report content given
+twice; it warns when only some runs of an arm carry usage, and notes under the table that
+in arm `none` the rule and exception figures are found and flagged without rules (there
+"Exceptions respected" does not apply). Live runs wait for the v4 `review.system` prompt (#130): v3 tells the model
 that only `<custom_instructions>` instruct it, so today the effect is about zero by
 construction.
 
