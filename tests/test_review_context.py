@@ -435,9 +435,23 @@ def _sized(text: str, size: int) -> str:
     return padded
 
 
-def test_imported_signatures_stop_at_the_l4_total_of_8000_tokens() -> None:
-    # Each signature and docstring is 2 + 1998 = 2000 words, one token per word.
-    library = "".join(f"def f{n}():\n{_docstring(1998)}    return {n}\n\n\n" for n in range(5))
+@pytest.mark.parametrize(
+    ("words", "shown"),
+    [
+        # 4 x 2000 fill the total exactly; the fifth fragment, 2 + 1 = 3 tokens, is cut.
+        pytest.param((1998, 1998, 1998, 1998, 1), [2000, 2000, 2000, 2000], id="exact"),
+        # 7999 are shown; the fifth, a bare 2-token signature, does not fit in the 1 left.
+        pytest.param((1998, 1998, 1998, 1997, None), [2000, 2000, 2000, 1999], id="one-short"),
+    ],
+)
+def test_imported_signatures_stop_at_the_l4_total_of_8000_tokens(
+    words: tuple[int | None, ...], shown: list[int]
+) -> None:
+    # A signature `def fN():` is 2 words and a docstring of k words adds k: one token a word.
+    library = "".join(
+        f"def f{n}():\n{'' if count is None else _docstring(count)}    return {n}\n\n\n"
+        for n, count in enumerate(words)
+    )
     repository = Repository(
         {
             "pkg/app.py": (
@@ -453,12 +467,13 @@ def test_imported_signatures_stop_at_the_l4_total_of_8000_tokens() -> None:
     payload = _build(repository, diff_map)
 
     imported = [block for block in payload.blocks if block.level is ContextLevel.L4]
-    assert [(block.source.ranges, block.tokens) for block in imported] == [
-        ((LineRange(1, 2),), 2000),
-        ((LineRange(6, 7),), 2000),
-        ((LineRange(11, 12),), 2000),
-        ((LineRange(16, 17),), 2000),
+    assert [block.source.ranges for block in imported] == [
+        (LineRange(1, 2),),
+        (LineRange(6, 7),),
+        (LineRange(11, 12),),
+        (LineRange(16, 17),),
     ]
+    assert [block.tokens for block in imported] == shown
     assert [(item.reason, item.path) for item in payload.omissions] == [("ast_limit", "pkg/lib.py")]
 
 
