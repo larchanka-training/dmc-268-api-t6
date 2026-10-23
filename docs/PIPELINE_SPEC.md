@@ -328,6 +328,36 @@ Fallback-модель — вторая модель шлюза с тем же st
 
 **Индексатор (#142).** Источник снимка ([github_snapshot_source.py](../app/modules/code_index/infrastructure/github_snapshot_source.py)) переводит ответы GitHub в коды порта без привязки к провайдеру. 5xx, таймаут 10 с, сбой транспорта и 401 → `vcs_unavailable`; 429 и 403 с `Retry-After` или `X-RateLimit-Remaining: 0` → `vcs_rate_limited`. Оба — TRANSIENT, retry по §4.6; `Retry-After` читается в целых секундах и не больше суток, иной формат задержки не даёт. 403 без признаков лимита и 404 → `vcs_access_denied`: RELEASED, lease снимается с `last_error_code`, без retry. Пустой репозиторий (409) или репозиторий без default branch — `empty` без ошибки. Редирект архива не на `codeload.github.com` → `vcs_unavailable`; архив больше `CODE_INDEX_MAX_DOWNLOAD_BYTES` → `failed`, `limit_exceeded:download_bytes`. Installation-токен каждое задание получает заново, поэтому попытка после 401 идёт с новым токеном. Любое другое неожиданное исключение задания (не отмена) снимает lease и пишет `internal_error` в `last_error_code` (не в `error_code`) на каждой попытке, где задание ещё держит lease (best effort: если снятие lease не удалось, код не пишется); доставка повторяется по §4.6, после третьего учтённого прохода (§4.4) — `code_index.dlq`. Отказ по квоте хранения при claim записывает `failed` и нулевые метрики задания: запросов к GitHub не было.
 
+**Авторитетная политика индексатора (#207).** Приведённые выше `vcs_*` относятся
+к HEAD/compare/archive. Отдельный `rules_document(commit_sha)` читает оригинальный
+`.review/rules.md` из полных Git tree и blob той же ревизии, даже если файл есть в
+архиве. `export-ignore` делает отсутствие в архиве недоказательным, `export-subst`
+не меняет применяемые маски. `AGENTS.md` при индексации не читается. Ошибки этого пути
+классифицируются как `policy_*`: 404/409/422 → `policy_revision_unavailable`, 401/403
+без rate-limit признаков → `policy_access_denied`, 429/limited 403 →
+`policy_rate_limited`, 5xx/transport → `policy_fetch_transient`; недопустимый документ
+сохраняет код RFS §9. `Retry-After` — ASCII целые секунды с пределом сутки; невалидное
+или не читаемое как integer значение задержки не даёт. Любая `PolicyError` завершает
+задание RELEASED: lease снят, `last_error_code=policy_*`, метрики записаны, старая
+публикация сохранена, новой нет. Отдельной index retry-политики для `policy_*` нет.
+
+Запросы успешной сборки без retries (API и codeload включены, token exchange исключён):
+
+| Политика на закреплённом commit | Дополнительные запросы | Full, всего | Incremental, всего |
+|---|---|---:|---:|
+| `.review` отсутствует в полном root tree | 1 tree | 5 | 6 |
+| `.review` есть, `rules.md` отсутствует в полном tree | 2 tree | 6 | 7 |
+| Обычный rules blob, в том числе скрытый из архива | 2 tree + 1 blob | 7 | 8 |
+
+UNCHANGED — **2** запроса HEAD, без policy read. Неудачные запросы считаются в
+`github_request_count`; ранняя ошибка политики не делает archive/codeload запросы.
+Все чтения идут вне DB-транзакций и внутри общего дедлайна задания.
+`index-exclusions/v2` меняет `limits_profile_version` и требует full для старой v1
+даже на том же commit; изменение digest масок также требует full. Эти +1–3 запроса
+делят installation-бюджет 5 000/час с ревью; выбор единого пути исключает archive
+fallback и расхождение при `export-subst`. Канонический контракт хранения и handoff
+для #144 — [SD §7.4](SYSTEM_DESIGN.md#index-row-contract).
+
 **План доставки #107.** Канонические формулы и marker заданы в CONTEXT_AND_VERIFICATION_SPEC §10: `publication_key` включает provider/repository/PR, `run_id`, `head_sha`, `diff_snapshot_id`, `final_result_digest`; `operation_key` — ключ публикации, ordinal и точный `payload_digest`. Публикационный план с основным и body-only вариантом фиксируется до T8. При retry запрещены новый LLM-вызов, пересборка summary текущим шаблоном, изменение event/координат или повторное хеширование старого `findings_hash` как идентичности. Rerun одного head, включая пустые findings, получает собственный ключ.
 
 Перед каждым новым POST publisher сверяет отмену, открытость PR, head/diff и ищет собственную операцию. Совпадение требует ожидаемого bot/app, PR, head, marker и точного payload; чтение всех страниц обязательно. `lookup_incomplete` и отсутствие marker после неоднозначной отправки не доказывают неуспеха. После POST сохраняются remote IDs и явный mapping по marker/координатам/body, затем повторно сверяется актуальность. Push между GET и POST оставляет публикацию на исходном head, а Run становится cancelled; созданные IDs не теряются. Lease не заменяет серверную идемпотентность и не обещает exactly-once. Для `publication_outcome_unknown` допустима последующая сверка чтением без автоматического повторного POST.

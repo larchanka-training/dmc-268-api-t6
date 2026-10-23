@@ -75,6 +75,9 @@ from app.modules.reviews.application.ast_symbols import (
     AstFailureReason,
     ParseRequest,
 )
+from app.modules.reviews.application.policy_documents import missing_document, normalize_document
+from app.modules.reviews.application.policy_errors import PolicyError, PolicyErrorCode
+from app.modules.reviews.application.policy_snapshot import PolicyDocument
 from app.modules.reviews.application.review_ignore import parse_review_ignore
 from app.modules.reviews.infrastructure.tree_sitter_facts import extract_facts
 
@@ -356,6 +359,8 @@ class Source:
     hang: str | None = None
     content: bytes = b"archive"
     requests: int = 0
+    policy_tree: Tree = field(default_factory=dict)
+    policy_commits: list[str] = field(default_factory=list)
 
     @property
     def request_count(self) -> int:
@@ -378,6 +383,17 @@ class Source:
         await self._call("compare")
         return self.comparison
 
+    async def rules_document(self, commit_sha: str) -> PolicyDocument:
+        # This fake counts port calls, not GitHub HTTP requests.
+        self.policy_commits.append(commit_sha)
+        await self._call("rules_document")
+        raw = self.policy_tree.get(_RULES)
+        if ".review" in self.policy_tree or isinstance(raw, Link):
+            raise PolicyError(PolicyErrorCode.DOCUMENT_TYPE_UNSUPPORTED, "nonregular policy")
+        if raw is None:
+            return missing_document(_RULES)
+        return normalize_document(_RULES, raw, blob_oid=_blob(raw), policy_base_sha=commit_sha)
+
     async def archive(self, commit_sha: str, *, max_bytes: int) -> SourceArchive:
         assert (commit_sha, max_bytes) == (_HEAD, _LIMITS.download_bytes)
         await self._call("archive")
@@ -397,7 +413,7 @@ class Archives:
         self, archive: SourceArchive, *, documents: Set[str], deadline: float
     ) -> ArchiveScan:
         assert archive.commit_sha == _HEAD
-        assert documents == {_RULES, "go.mod"}
+        assert documents == {"go.mod"}
         self.scans += 1
         if self.error is not None:
             raise self.error
@@ -543,13 +559,16 @@ def _world(
     *,
     state: IndexState | None = _NO_INDEX,
     comparison: Comparison | None = None,
+    policy_tree: Tree | None = None,
     **store: Any,
 ) -> World:
     tracker = Tracker()
     return World(
         tracker,
         Store(tracker, state, **store),
-        Source(tracker, comparison=comparison),
+        Source(
+            tracker, comparison=comparison, policy_tree=tree if policy_tree is None else policy_tree
+        ),
         Archives(tree),
         Parser(),
         Wakeups(tracker),
@@ -683,11 +702,11 @@ def test_a_full_build_writes_every_admitted_file_in_batches_and_publishes_from_t
         "full": True,
         "deleted_paths": (),
         "profile": _VERSIONS.profile("main", _DIGEST),
-        "stats": IndexBuildStats(len(b"archive"), publication["stats"].build_duration_ms, 2),
+        "stats": IndexBuildStats(len(b"archive"), publication["stats"].build_duration_ms, 3),
     }
     assert world.network() == ["head", "archive"]
     assert (outcome.parsed_files, outcome.written_files, outcome.deleted_files) == (3, 3, 0)
-    assert (outcome.github_request_count, outcome.downloaded_bytes) == (2, 7)
+    assert (outcome.github_request_count, outcome.downloaded_bytes) == (3, 7)
     assert world.wakeups.woken == []
 
 
@@ -1147,12 +1166,12 @@ def _fail_at_scan(world: World, error: BaseException) -> None:
             _fail_at_archive,
             IndexLimitExceeded("download_bytes"),
             "limit_exceeded:download_bytes",
-            2,
+            3,
         ),
-        (_fail_at_scan, IndexLimitExceeded("unpacked_bytes"), "limit_exceeded:unpacked_bytes", 2),
-        (_fail_at_scan, IndexLimitExceeded("archive_entries"), "limit_exceeded:archive_entries", 2),
-        (_fail_at_scan, IndexLimitExceeded("deadline"), "limit_exceeded:deadline", 2),
-        (_fail_at_scan, ArchiveUnsafe("unsafe"), "archive_unsafe", 2),
+        (_fail_at_scan, IndexLimitExceeded("unpacked_bytes"), "limit_exceeded:unpacked_bytes", 3),
+        (_fail_at_scan, IndexLimitExceeded("archive_entries"), "limit_exceeded:archive_entries", 3),
+        (_fail_at_scan, IndexLimitExceeded("deadline"), "limit_exceeded:deadline", 3),
+        (_fail_at_scan, ArchiveUnsafe("unsafe"), "archive_unsafe", 3),
     ],
 )
 def test_an_archive_failure_fails_the_index_with_its_code_and_the_request_count(
@@ -1486,16 +1505,17 @@ def test_a_deadline_that_passes_during_a_write_stops_the_next_file_before_its_pa
     assert world.store.publications == []
 
 
-def test_the_deadline_interrupts_a_hanging_vcs_call() -> None:
+@pytest.mark.parametrize(("step", "requests"), [("rules_document", 2), ("archive", 3)])
+def test_the_deadline_interrupts_a_hanging_vcs_call(step: str, requests: int) -> None:
     world = _world()
-    world.source.hang = "archive"
+    world.source.hang = step
 
     outcome = world.run(replace(_LIMITS, deadline_seconds=1))
 
     assert (outcome.status, outcome.error_code) == (BuildStatus.FAILED, "limit_exceeded:deadline")
     ((_, stats),) = world.store.failures
     assert stats is not None
-    assert (stats.downloaded_bytes, stats.github_request_count) == (0, 2)
+    assert (stats.downloaded_bytes, stats.github_request_count) == (0, requests)
 
 
 @pytest.mark.parametrize(
@@ -1610,7 +1630,7 @@ def _unfinished_discard(world: World) -> None:
 
 
 def _policy_error(world: World) -> None:
-    world.archives.tree = {**world.archives.tree, _RULES: b"```review-ignore\nlegacy/**\n"}
+    world.source.policy_tree = {_RULES: b"```review-ignore\nlegacy/**\n"}
 
 
 def _unavailable_archive(world: World) -> None:
@@ -1628,9 +1648,9 @@ def _failing_source_factory(world: World) -> None:
         pytest.param(_empty, BuildStatus.EMPTY, 0, 1, id="empty"),
         pytest.param(_unchanged, BuildStatus.UNCHANGED, 0, 1, id="unchanged"),
         pytest.param(_access_denied, BuildStatus.RELEASED, 0, 1, id="released-access"),
-        pytest.param(_policy_error, BuildStatus.RELEASED, 7, 3, id="released-policy"),
-        pytest.param(_unavailable_archive, BuildStatus.TRANSIENT, 0, 3, id="transient"),
-        pytest.param(_crashing_parser, None, 7, 3, id="after-an-error"),
+        pytest.param(_policy_error, BuildStatus.RELEASED, 0, 3, id="released-policy"),
+        pytest.param(_unavailable_archive, BuildStatus.TRANSIENT, 0, 4, id="transient"),
+        pytest.param(_crashing_parser, None, 7, 4, id="after-an-error"),
         pytest.param(_failing_source_factory, None, 0, 0, id="after-the-claim"),
     ],
 )
@@ -1740,6 +1760,7 @@ def test_no_transaction_is_open_during_a_vcs_call_or_a_wake_up() -> None:
         "head",
         "get_state",
         "compare",
+        "rules_document",
         "archive",
         "iter_files",
         "iter_imports",
@@ -1858,3 +1879,96 @@ def test_targets_later_in_the_archive_resolve_through_their_fact_summaries() -> 
         (ImportResolution.UNSUPPORTED, "huge")
     ]
     assert big.edges == ()
+
+
+@pytest.mark.parametrize("hidden_parent", [False, True], ids=["hidden-rules", "hidden-directory"])
+@pytest.mark.parametrize("incremental", [False, True], ids=["full", "incremental"])
+def test_hidden_policy_is_authoritative_at_the_archive_commit(
+    hidden_parent: bool, incremental: bool
+) -> None:
+    rules = b"```review-ignore\napp/views.py\n```\n"
+    archive_tree = dict(_TREE) if hidden_parent else {**_TREE, ".review/notes.md": b"notes"}
+    policy_tree = {**_TREE, _RULES: rules}
+    # Literal SHA-256 fixture of the documented canonical policy payload.
+    digest = "3523e722aeb7e7b9613ea2a9d481beea5c11d966e2b92b85bc6df799f65e4d68"
+    world = _world(
+        archive_tree,
+        policy_tree=policy_tree,
+        state=_state(profile=replace(_PROFILE, exclusions_digest=digest))
+        if incremental
+        else _NO_INDEX,
+        comparison=_comparison(_changed("app/models.py")) if incremental else None,
+        files={"app/models.py": _blob(b"old source")},
+    )
+
+    outcome = world.run()
+
+    assert outcome.status is BuildStatus.PUBLISHED
+    assert outcome.mode is (BuildMode.INCREMENTAL if incremental else BuildMode.FULL)
+    assert world.written() == ["app/models.py"]
+    assert world.source.policy_commits == [_HEAD]
+    assert world.store.publications[0]["profile"].exclusions_digest == digest
+
+
+def test_original_policy_blob_overrides_substituted_archive_rules() -> None:
+    world = _world(
+        {**_TREE, _RULES: b"```review-ignore\napp/models.py\n```\n"},
+        policy_tree={_RULES: b"```review-ignore\napp/views.py\n```\n"},
+    )
+
+    assert world.run().status is BuildStatus.PUBLISHED
+    assert world.written() == ["app/models.py"]
+
+
+def test_unreadable_hidden_policy_preserves_previous_publication_without_downloading() -> None:
+    world = _world(state=_state())
+    world.source.errors["rules_document"] = PolicyError(
+        PolicyErrorCode.REVISION_UNAVAILABLE, "unreadable"
+    )
+
+    outcome = world.run()
+
+    assert (outcome.status, outcome.error_code) == (
+        BuildStatus.RELEASED,
+        "policy_revision_unavailable",
+    )
+    assert world.store.publications == []
+    assert world.store.written == []
+    assert world.store.state is not None
+    assert world.store.state.published_publication == 4
+    assert world.archives.scans == 0
+    assert world.store.release_stats[0] is not None
+    assert world.store.release_stats[0].github_request_count == 3
+    assert world.store.release_stats[0].downloaded_bytes == 0
+
+
+def test_truly_missing_rules_use_empty_masks_at_the_pinned_commit() -> None:
+    world = _world(policy_tree={})
+
+    assert world.run().status is BuildStatus.PUBLISHED
+    assert world.written() == ["app/models.py", "app/views.py"]
+    assert world.source.policy_commits == [_HEAD]
+    assert world.store.publications[0]["profile"].exclusions_digest == _DIGEST
+
+
+def test_same_commit_unsafe_v1_publication_requires_a_full_rebuild(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(build_index, "INDEX_EXCLUSIONS_VERSION", "index-exclusions/v1")
+    old_limits_profile = limits_profile_version(_LIMITS)
+    monkeypatch.setattr(build_index, "INDEX_EXCLUSIONS_VERSION", "index-exclusions/v2")
+    world = _world(
+        state=_state(
+            indexed_commit_sha=_HEAD,
+            profile=replace(_PROFILE, limits_profile_version=old_limits_profile),
+        )
+    )
+
+    outcome = world.run()
+
+    assert (outcome.status, outcome.mode, outcome.full_reason) == (
+        BuildStatus.PUBLISHED,
+        BuildMode.FULL,
+        FullBuildReason.PROFILE_CHANGED,
+    )
+    assert world.source.policy_commits == [_HEAD]

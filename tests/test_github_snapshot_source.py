@@ -30,6 +30,8 @@ from app.modules.code_index.application.vcs import (
 from app.modules.code_index.infrastructure.github_snapshot_source import (
     GitHubRepositorySnapshotSource,
 )
+from app.modules.reviews.application.policy_errors import PolicyError
+from app.modules.reviews.application.policy_snapshot import DocumentPresence
 
 _BASE = "b" * 40
 _HEAD = "c" * 40
@@ -744,6 +746,7 @@ def _full_build(source: GitHubRepositorySnapshotSource) -> Awaitable[SourceArchi
     async def build() -> SourceArchive:
         head = await source.head()
         assert head is not None
+        await source.rules_document(head.commit_sha)
         return await source.archive(head.commit_sha, max_bytes=_MAX)
 
     return build()
@@ -754,14 +757,21 @@ def _incremental_build(source: GitHubRepositorySnapshotSource) -> Awaitable[Sour
         head = await source.head()
         assert head is not None
         assert await source.compare(_BASE, head.commit_sha) is not None
+        await source.rules_document(head.commit_sha)
         return await source.archive(head.commit_sha, max_bytes=_MAX)
 
     return build()
 
 
-@pytest.mark.parametrize(("build", "requests"), [(_full_build, 4), (_incremental_build, 5)])
+@pytest.mark.parametrize(("build", "base_requests"), [(_full_build, 4), (_incremental_build, 5)])
+@pytest.mark.parametrize(
+    ("policy", "extra_requests"), [("present", 3), ("missing-parent", 1), ("missing-rules", 2)]
+)
 def test_request_count_of_a_build(
-    build: Callable[[GitHubRepositorySnapshotSource], Awaitable[SourceArchive]], requests: int
+    build: Callable[[GitHubRepositorySnapshotSource], Awaitable[SourceArchive]],
+    base_requests: int,
+    policy: str,
+    extra_requests: int,
 ) -> None:
     tokens = Tokens()
     github = GitHub(
@@ -774,10 +784,17 @@ def test_request_count_of_a_build(
         }
     )
 
-    _, counted = _run(github, build, tokens=tokens)
+    github.routes.update(_policy_routes())
+    if policy != "present":
+        github.routes[_ROOT_TREE if policy == "missing-parent" else _REVIEW_TREE] = _answer(
+            200, json={"tree": [], "truncated": False}
+        )
 
-    assert counted == requests
-    assert len(github.seen) == requests
+    archive, counted = _run(github, build, tokens=tokens)
+
+    assert isinstance(archive, SourceArchive), repr(archive)
+    assert counted == base_requests + extra_requests
+    assert len(github.seen) == base_requests + extra_requests
 
 
 # --- port errors --------------------------------------------------------------------------
@@ -795,3 +812,269 @@ def test_unavailable_carries_its_code() -> None:
     assert VcsUnavailable("x").code == "vcs_unavailable"
     assert VcsUnavailable("x", rate_limited=True).code == "vcs_rate_limited"
     assert VcsAccessDenied("x").code == "vcs_access_denied"
+
+
+# --- authoritative rules at the archive commit (#207) -------------------------------------
+
+_ROOT_TREE = f"api.github.com/repos/octo/repo/git/trees/{_HEAD}"
+_REVIEW_TREE = f"api.github.com/repos/octo/repo/git/trees/{'d' * 40}"
+_RULES_BLOB = f"api.github.com/repos/octo/repo/git/blobs/{'e' * 40}"
+
+
+def _policy_entry(
+    name: str, kind: str = "blob", mode: str = "100644", *, size: int = 10
+) -> dict[str, Any]:
+    return {
+        "path": name,
+        "type": kind,
+        "mode": mode,
+        "sha": ("d" if kind == "tree" else "e") * 40,
+        "size": size,
+    }
+
+
+def _policy_routes(raw: bytes = b"rules\n") -> dict[str, Callable[[httpx.Request], httpx.Response]]:
+    return {
+        _ROOT_TREE: _answer(
+            200,
+            json={
+                "tree": [_policy_entry(".review", "tree", "040000"), _policy_entry("AGENTS.md")],
+                "truncated": False,
+            },
+        ),
+        _REVIEW_TREE: _answer(
+            200, json={"tree": [_policy_entry("rules.md", size=len(raw))], "truncated": False}
+        ),
+        _RULES_BLOB: _answer(200, content=raw),
+    }
+
+
+def test_rules_document_reads_only_the_pinned_rules_blob_and_normalizes_it() -> None:
+    github = GitHub(_policy_routes(b"\xef\xbb\xbfhello\r\nworld\r"))
+
+    document, requests = _run(github, lambda source: source.rules_document(_HEAD))
+
+    assert not isinstance(document, Exception), repr(document)
+    assert document.presence is DocumentPresence.PRESENT
+    assert document.path == ".review/rules.md"
+    assert document.text == "hello\nworld\n"
+    assert document.blob_oid == "e" * 40
+    assert requests == 3
+    assert [str(request.url).split("?")[0] for request in github.seen] == [
+        f"https://api.github.com/repos/octo/repo/git/trees/{_HEAD}",
+        f"https://api.github.com/repos/octo/repo/git/trees/{'d' * 40}",
+        f"https://api.github.com/repos/octo/repo/git/blobs/{'e' * 40}",
+    ]
+    assert github.seen[-1].headers["Accept"] == "application/vnd.github.raw+json"
+    assert all(not request.url.query for request in github.seen)
+
+
+@pytest.mark.parametrize(("missing_parent", "requests"), [(True, 1), (False, 2)])
+def test_rules_document_requires_complete_tree_evidence_for_absence(
+    missing_parent: bool, requests: int
+) -> None:
+    routes = _policy_routes()
+    routes[_ROOT_TREE if missing_parent else _REVIEW_TREE] = _answer(
+        200, json={"tree": [], "truncated": False}
+    )
+    github = GitHub(routes)
+
+    document, counted = _run(github, lambda source: source.rules_document(_HEAD))
+
+    assert not isinstance(document, Exception), repr(document)
+    assert document.presence is DocumentPresence.MISSING
+    assert document.text is None
+    assert counted == requests
+
+
+@pytest.mark.parametrize(
+    ("path", "answer", "code", "requests"),
+    [
+        (_ROOT_TREE, _answer(404), "policy_revision_unavailable", 1),
+        (_REVIEW_TREE, _answer(404), "policy_revision_unavailable", 2),
+        (_RULES_BLOB, _answer(404), "policy_revision_unavailable", 3),
+        (_ROOT_TREE, _answer(503), "policy_fetch_transient", 1),
+        (_RULES_BLOB, _answer(403), "policy_access_denied", 3),
+        (_RULES_BLOB, _answer(429), "policy_rate_limited", 3),
+        (_ROOT_TREE, _answer(200, text="invalid"), "policy_fetch_transient", 1),
+        (
+            _ROOT_TREE,
+            _answer(200, json={"tree": [], "truncated": True}),
+            "policy_revision_unavailable",
+            1,
+        ),
+        (
+            _REVIEW_TREE,
+            _answer(200, json={"tree": [], "truncated": True}),
+            "policy_revision_unavailable",
+            2,
+        ),
+        (_ROOT_TREE, _answer(200, json={}), "policy_fetch_transient", 1),
+    ],
+)
+def test_rules_document_failure_never_claims_absence(
+    path: str, answer: Callable[[httpx.Request], httpx.Response], code: str, requests: int
+) -> None:
+    routes = _policy_routes()
+    routes[path] = answer
+
+    error, counted = _run(GitHub(routes), lambda source: source.rules_document(_HEAD))
+
+    assert isinstance(error, PolicyError), repr(error)
+    assert error.code.value == code
+    assert counted == requests
+
+
+@pytest.mark.parametrize(
+    ("raw", "code"),
+    [
+        (b"\xff", "policy_document_decode_error"),
+        (b"a\x00b", "policy_document_control_character"),
+        (b"version https://git-lfs.github.com/spec/v1\n", "policy_document_type_unsupported"),
+        (b"x" * 65537, "policy_document_too_large"),
+    ],
+)
+def test_rules_document_preserves_review_validation(raw: bytes, code: str) -> None:
+    # Missing size metadata must still enforce the streamed byte limit.
+    routes = _policy_routes(raw)
+    entry = _policy_entry("rules.md")
+    del entry["size"]
+    routes[_REVIEW_TREE] = _answer(200, json={"tree": [entry]})
+
+    error, requests = _run(GitHub(routes), lambda source: source.rules_document(_HEAD))
+
+    assert isinstance(error, PolicyError), repr(error)
+    assert error.code.value == code
+    assert requests == 3
+
+
+@pytest.mark.parametrize(
+    ("parent", "kind", "mode", "requests"),
+    [
+        (True, "blob", "100644", 1),
+        (True, "blob", "120000", 1),
+        (True, "commit", "160000", 1),
+        (False, "tree", "040000", 2),
+        (False, "blob", "120000", 2),
+        (False, "commit", "160000", 2),
+    ],
+)
+def test_rules_document_rejects_nonregular_documents_and_parents(
+    parent: bool, kind: str, mode: str, requests: int
+) -> None:
+    routes = _policy_routes()
+    routes[_ROOT_TREE if parent else _REVIEW_TREE] = _answer(
+        200, json={"tree": [_policy_entry(".review" if parent else "rules.md", kind, mode)]}
+    )
+
+    error, counted = _run(GitHub(routes), lambda source: source.rules_document(_HEAD))
+
+    assert isinstance(error, PolicyError), repr(error)
+    assert error.code.value == "policy_document_type_unsupported"
+    assert counted == requests
+
+
+def test_rules_document_rejects_declared_oversize_before_fetching_blob() -> None:
+    routes = _policy_routes()
+    routes[_REVIEW_TREE] = _answer(200, json={"tree": [_policy_entry("rules.md", size=65537)]})
+
+    error, requests = _run(GitHub(routes), lambda source: source.rules_document(_HEAD))
+
+    assert isinstance(error, PolicyError), repr(error)
+    assert error.code.value == "policy_document_too_large"
+    assert requests == 2
+
+
+def test_rules_document_accepts_exactly_65536_bytes() -> None:
+    document, requests = _run(
+        GitHub(_policy_routes(b"x" * 65536)), lambda source: source.rules_document(_HEAD)
+    )
+
+    assert not isinstance(document, Exception), repr(document)
+    assert document.byte_count == 65536
+    assert requests == 3
+
+
+@pytest.mark.parametrize(
+    "entries",
+    [
+        [_policy_entry(".review/x", "tree", "040000")],
+        [_policy_entry("."), _policy_entry("..")],
+        [_policy_entry(".review", "blob", "040000")],
+        [_policy_entry(".review", "tree", "100644")],
+        [{"path": ".review", "type": "blob", "sha": "d" * 40}],
+        [_policy_entry(".review", "tree", "040000"), _policy_entry(".review")],
+    ],
+    ids=[
+        "recursive-path",
+        "dot-path",
+        "inconsistent-blob-mode",
+        "inconsistent-tree-mode",
+        "missing-mode",
+        "duplicate-name",
+    ],
+)
+def test_rules_document_rejects_ambiguous_nonrecursive_listings(
+    entries: list[dict[str, Any]],
+) -> None:
+    github = GitHub({_ROOT_TREE: _answer(200, json={"tree": entries, "truncated": False})})
+
+    error, requests = _run(github, lambda source: source.rules_document(_HEAD))
+
+    assert isinstance(error, PolicyError), repr(error)
+    assert error.code.value == "policy_fetch_transient"
+    assert requests == 1
+
+
+def test_rules_document_counts_transport_failures() -> None:
+    def timeout(request: httpx.Request) -> httpx.Response:
+        raise httpx.ReadTimeout("unreadable", request=request)
+
+    routes = _policy_routes()
+    routes[_RULES_BLOB] = timeout
+
+    error, requests = _run(GitHub(routes), lambda source: source.rules_document(_HEAD))
+
+    assert isinstance(error, PolicyError), repr(error)
+    assert error.code.value == "policy_fetch_transient"
+    assert requests == 3
+
+
+def test_rules_document_counts_no_requests_for_a_failed_token_exchange() -> None:
+    request = httpx.Request("POST", "https://api.github.com/app/installations/7/access_tokens")
+    tokens = Tokens(
+        error=httpx.HTTPStatusError(
+            "token", request=request, response=httpx.Response(403, request=request)
+        )
+    )
+
+    error, requests = _run(GitHub({}), lambda source: source.rules_document(_HEAD), tokens=tokens)
+
+    assert isinstance(error, PolicyError), repr(error)
+    assert error.code.value == "policy_access_denied"
+    assert requests == 0
+
+
+@pytest.mark.parametrize(
+    ("path", "requests"), [(_ROOT_TREE, 1), (_RULES_BLOB, 3)], ids=["tree", "blob"]
+)
+@pytest.mark.parametrize(
+    ("retry_after", "expected_delay"),
+    [
+        ("1" * 5000, None),
+        ("9" * 30, timedelta(days=1)),
+    ],
+    ids=["over-integer-limit", "over-timedelta-limit"],
+)
+def test_rules_document_bounds_untrusted_retry_after(
+    path: str, requests: int, retry_after: str, expected_delay: timedelta | None
+) -> None:
+    routes = _policy_routes()
+    routes[path] = _answer(429, headers={"Retry-After": retry_after})
+
+    error, counted = _run(GitHub(routes), lambda source: source.rules_document(_HEAD))
+
+    assert isinstance(error, PolicyError), repr(error)
+    assert error.code.value == "policy_rate_limited"
+    assert error.retry_after == expected_delay
+    assert counted == requests

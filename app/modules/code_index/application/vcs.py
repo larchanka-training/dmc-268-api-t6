@@ -16,6 +16,7 @@ from enum import StrEnum
 from typing import Protocol
 
 from app.modules.code_index.domain.codes import FAILED_ERROR_CODES
+from app.modules.reviews.application.policy_snapshot import PolicyDocument
 
 VCS_RATE_LIMITED = "vcs_rate_limited"
 VCS_UNAVAILABLE = "vcs_unavailable"
@@ -175,6 +176,14 @@ class RepositorySnapshotSource(Protocol):
     async def compare(self, base_sha: str, head_sha: str) -> Comparison | None:
         """The change set from `base_sha` to `head_sha`; `None` when the provider does not
         know `base_sha`."""
+        ...
+
+    async def rules_document(self, commit_sha: str) -> PolicyDocument:
+        """The normalized original rules blob at the immutable archive commit.
+
+        Missing requires complete tree evidence. Unreadable or invalid documents raise
+        ``PolicyError``; archive omission alone never proves absence.
+        """
         ...
 
     async def archive(self, commit_sha: str, *, max_bytes: int) -> SourceArchive:

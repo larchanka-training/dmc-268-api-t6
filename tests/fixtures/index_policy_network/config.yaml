@@ -1,0 +1,10 @@
+version: 1
+name: index-policy-github
+slug: index-policy-github
+protocol: http
+port: 4907
+interceptRequests: true
+scenarios:
+  - name: default
+    path: ./default.js
+    default: true

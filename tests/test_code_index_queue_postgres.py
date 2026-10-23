@@ -429,7 +429,7 @@ def _tarball(files: dict[str, bytes]) -> bytes:
 
 
 class FakeGitHub:
-    """The four requests of a full build of `octo/indexed-b`, plus the token exchange."""
+    """The five requests of a no-policy full build, plus the token exchange."""
 
     def __init__(self) -> None:
         self.requests: list[str] = []
@@ -447,6 +447,8 @@ class FakeGitHub:
             return httpx.Response(200, json={"default_branch": "main"})
         if url.path == f"{repository}/commits/main":
             return httpx.Response(200, text=HEAD)
+        if url.path == f"{repository}/git/trees/{HEAD}":
+            return httpx.Response(200, json={"tree": [], "truncated": False})
         if url.path == f"{repository}/tarball/{HEAD}":
             location = f"https://codeload.github.com/octo/indexed-b/legacy.tar.gz/{HEAD}?token=x"
             return httpx.Response(302, headers={"Location": location})
@@ -536,11 +538,12 @@ def test_busy_loops_through_the_30s_queue_until_the_admission_frees(
     # Nothing is left: no message in a queue or in the DLQ; index.repo still has a consumer
     # until the end of the scenario.
     assert [messages for messages, _ in counts] == [0, 0, 0, 0, 0]
-    # A full build: the token, the repository, HEAD, the tarball and the codeload download.
+    # Full: token, repository, HEAD, absent-policy tree, tarball and codeload download.
     assert github.requests == [
         "POST api.github.test/app/installations/17/access_tokens",
         "GET api.github.test/repos/octo/indexed-b",
         "GET api.github.test/repos/octo/indexed-b/commits/main",
+        f"GET api.github.test/repos/octo/indexed-b/git/trees/{HEAD}",
         f"GET api.github.test/repos/octo/indexed-b/tarball/{HEAD}",
         f"GET codeload.github.com/octo/indexed-b/legacy.tar.gz/{HEAD}",
     ]

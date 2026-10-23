@@ -425,12 +425,15 @@ run продолжается без RAG, trace `rag: not_ready` с причин�
 `rag: not_ready`, причина `prompt_version`. Готовый, но отставший от HEAD default
 branch индекс используется.
 
-Индекс хранит только указатели (путь, диапазон, `blob_sha`, `indexed_commit_sha`)
-и рёбра `imports` (файл → модуль), `defines` (файл → символ), `uses_imported`
-(файл → модуль и экспортируемое имя, связанное разрешённым явным импортом). Рёбра
-существуют только для `resolved` по §3.3; receiver, методы через значения, barrel
-re-export, package exports, aliases, dynamic imports и неявные связи Go не
-обходятся. Кандидаты — файлы с ребром `imports` или `uses_imported` к изменённому
+Канонический смысл сохранённых строк, включая archive/`export-ignore`/`export-subst`,
+export-name join через `facts.exports`, Go directory/member paths, модульные рёбра
+и неразрешённые записи импортов, задан в
+[SD §7.4: контракт строк индекса](SYSTEM_DESIGN.md#index-row-contract).
+Индекс хранит указатели (путь, диапазон, `blob_sha`, `indexed_commit_sha`), строки
+символов (`defines`) и рёбра `imports`/`uses_imported`. Рёбра существуют только для
+`resolved` по §3.3. Receiver, методы через значения, barrel re-export, package exports,
+path aliases, dynamic imports и неявные связи Go не обходятся; явный alias импорта
+поддерживается. Кандидаты — файлы с ребром `imports` или `uses_imported` к изменённому
 символу или модулю, на один обратный шаг сверх L4, без рекурсии.
 
 Правило ревизий:

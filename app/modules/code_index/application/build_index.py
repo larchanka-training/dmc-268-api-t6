@@ -95,16 +95,10 @@ from app.modules.reviews.application.ast_symbols import (
     SourceParser,
     language_for_path,
 )
-from app.modules.reviews.application.policy_documents import (
-    MAX_DOCUMENT_BYTES,
-    normalize_document,
-)
-from app.modules.reviews.application.policy_errors import PolicyError, PolicyErrorCode
-from app.modules.reviews.application.policy_snapshot import RULES_DOCUMENT_PATH
+from app.modules.reviews.application.policy_errors import PolicyError
 from app.modules.reviews.application.review_ignore import (
     BUILTIN_EXCLUSIONS_VERSION,
     IgnoreMatcher,
-    IgnorePolicy,
     parse_review_ignore,
 )
 from app.modules.reviews.application.vcs_diff import is_binary_content
@@ -113,8 +107,7 @@ _LOGGER = logging.getLogger(__name__)
 
 _GO_MOD = "go.mod"
 _GO_MODULE_FILES = frozenset({_GO_MOD, "go.work"})
-_REVIEW_DIRECTORY = posixpath.dirname(RULES_DOCUMENT_PATH)
-_DOCUMENTS = frozenset({RULES_DOCUMENT_PATH, _GO_MOD})
+_DOCUMENTS = frozenset({_GO_MOD})
 # Statuses that change the path set; a modified file keeps its path.
 _SAME_PATH = frozenset({ChangeStatus.MODIFIED, ChangeStatus.UNCHANGED})
 
@@ -269,31 +262,6 @@ class _Plan:
     paths: tuple[str, ...]
     closes: frozenset[str]
     kept: IndexCounts
-
-
-def _ignore_policy(scan: ArchiveScan) -> IgnorePolicy:
-    """The ignore policy of `.review/rules.md` at HEAD, read as the review reads it."""
-    entry = scan.entries.get(RULES_DOCUMENT_PATH)
-    if _REVIEW_DIRECTORY in scan.entries or (entry is not None and entry.symlink):
-        raise PolicyError(
-            PolicyErrorCode.DOCUMENT_TYPE_UNSUPPORTED,
-            "The policy document must be a regular Git blob",
-            source_path=RULES_DOCUMENT_PATH,
-        )
-    if entry is None:
-        return parse_review_ignore(None)
-    raw = scan.documents.get(RULES_DOCUMENT_PATH)
-    if raw is None:
-        # Only a file over the read limit is not captured.
-        raise PolicyError(
-            PolicyErrorCode.DOCUMENT_TOO_LARGE,
-            f"The policy document exceeds {MAX_DOCUMENT_BYTES} bytes",
-            source_path=RULES_DOCUMENT_PATH,
-            limit=MAX_DOCUMENT_BYTES,
-            actual=entry.size,
-        )
-    document = normalize_document(RULES_DOCUMENT_PATH, raw, blob_oid=entry.blob_sha or "")
-    return parse_review_ignore(document.text)
 
 
 def _go_module(scan: ArchiveScan, limits: IndexLimits) -> str | None:
@@ -689,12 +657,13 @@ class _Job:
             await self._wake_if_the_target_moved()
             return self._outcome(BuildStatus.UNCHANGED)
         comparison = await self._comparison(state, head)
+        document = await self._network(lambda: self._source.rules_document(head.commit_sha))
+        policy = parse_review_ignore(document.text)
         archive = await self._network(
             lambda: self._source.archive(head.commit_sha, max_bytes=self._limits.download_bytes)
         )
         self._downloaded = len(archive.content)
         scan = await self._archives.scan(archive, documents=_DOCUMENTS, deadline=self._deadline)
-        policy = _ignore_policy(scan)
         exclusions = IndexExclusions(IgnoreMatcher(policy), self._limits)
         self._exclusions = exclusions
         if (

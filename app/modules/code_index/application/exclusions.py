@@ -24,7 +24,7 @@ from app.modules.reviews.application.diff_map import is_supported_path
 from app.modules.reviews.application.review_ignore import IgnoreMatcher
 from app.modules.reviews.application.vcs_diff import is_binary_content, is_generated_path
 
-INDEX_EXCLUSIONS_VERSION = "index-exclusions/v1"
+INDEX_EXCLUSIONS_VERSION = "index-exclusions/v2"
 
 _SECRET_DIRECTORIES = frozenset({".ssh", ".aws", ".gnupg"})
 _SECRET_SUFFIXES = (".pem", ".key", ".p12", ".pfx", ".jks", ".kdbx")
