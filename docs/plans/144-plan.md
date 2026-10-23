@@ -241,8 +241,10 @@ Branch `feat/144-rag-index-review-refresh` from `origin/main`. AC6, AC12, AC13.
 ### Decision (`app/modules/code_index/domain/review_trigger.py`, new)
 
 A pure function: the input is the locked row's fields and `now`, the output is which
-writes to make. Suggested inputs: the derived `RagIndexStatus` from `rag_index(...)` (so
-status derivation stays in one place), `purge_reason`, `wake_requested_at`,
+writes to make. Suggested inputs: the derived `RagIndexStatus` from `rag_index(...)` and
+its `usable` (so status derivation stays in one place; after review r1 the decision keeps
+no copy of the usable statuses), `purge_reason`, `wake_requested_at`, whether a build
+lease is live (`lease_expires_at > now` under the lock, after review r1),
 `last_error_code`, `target_commit_sha`, `last_used_at`, the two throttle columns and `now`.
 Suggested outputs: an action (`none`, `enable`, `request_full`, `request_update`), whether
 to extend `last_used_at`, and whether to record the throttle.
@@ -254,9 +256,9 @@ to extend `last_used_at`, and whether to record the throttle.
 | `failed` | none | — | — |
 | `building` | none | — | — |
 | `purge_reason` `ttl` | `enable()` if M1 allows (M4) | set by `enable()` | recorded |
-| live `empty` | `request_build(None)` if the marker is unset, no terminal refusal (M5) and M1 allows | extended (each review full, U4) | recorded |
+| live `empty` | `request_build(None)` if the marker is unset, no build lease is live, no terminal refusal (M5) and M1 allows | extended if NULL or older than 1 h (after review r1; the full itself is not limited by the hour, U4) | recorded |
 | `ready` | none | extended if NULL or older than 1 h | — |
-| `stale` | `request_build(None)` if the marker is unset and no terminal refusal (M5) | extended if NULL or older than 1 h | — |
+| `stale` | `request_build(None)` if the marker is unset, no build lease is live (after review r1) and no terminal refusal (M5) | extended if NULL or older than 1 h | — |
 
 M1 in full (derived from the decision text): a review full is allowed when
 `review_full_requested_at` is NULL or at least 24 h old, **and** the row's
@@ -275,8 +277,10 @@ UPDATE and the throttle UPDATE.
 
 One transaction, READ COMMITTED, no network:
 
-1. `repositories` row `FOR SHARE`, then the condition in a statement of its own: `RAG_ON`
-   **and** `GITHUB_PROVIDER` (as `_share_repository` / `rearm_due`,
+1. The condition `RAG_ON` **and** `GITHUB_PROVIDER` first without a lock (after review
+   r1): if it fails → `RagReadiness(enabled=False)` with no lock taken. Otherwise the
+   `repositories` row `FOR SHARE`, then the condition again in a statement of its own (as
+   `_share_repository` / `rearm_due`,
    `app/modules/code_index/infrastructure/maintenance.py:209-226`). GitLab runs (#220) go
    through the same stage. If the condition fails → `RagReadiness(enabled=False)`; the
    state is not read and no step is written.
@@ -559,7 +563,8 @@ the database and the vhost.
 ## Deviations (stated in the PR body)
 
 - **U4 (PR 1).** `last_used_at` is extended on a review read of a usable index even when RAG
-  is skipped for `prompt_version`, and on every review full; the reading of ADR §4.
+  is skipped for `prompt_version`, and on a review full, both at most once an hour (after
+  review r1: the full itself is not limited by the hour); the reading of ADR §4.
 - **M1–M10** as stated above; the M1 CHECK and the M5 condition are decided by the coordinator, 23.10.
 - **GitLab (PR 1).** A GitLab repository with RAG on counts as disabled: no index source
   (#97), no step.
