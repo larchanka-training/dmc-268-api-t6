@@ -9,6 +9,7 @@ import json
 import os
 import re
 import signal
+import subprocess
 import sys
 import threading
 from collections.abc import Callable, Iterator, Mapping
@@ -594,24 +595,133 @@ def test_override_keeps_the_stub_on_loopback_and_points_every_github_client_at_i
         ), service
 
 
-def test_override_publishes_every_port_on_loopback_only() -> None:
+def test_override_publishes_on_loopback_without_yaml_tags() -> None:
     text = (REPO_ROOT / "deploy/load/compose.parallel-runs.yml").read_text()
     base = (REPO_ROOT / "docker-compose.yml").read_text()
 
-    assert (
-        "  backend:\n    ports: !override\n"
-        '      - "127.0.0.1:${BACKEND_PORT:?set by scripts/parallel_runs_load.py}:8000"\n'
-    ) in text
-    assert "  postgres:\n    ports: !reset []\n" in text
+    # No `!override` / `!reset`: the repo's check-yaml hook (PyYAML safe_load) rejects tags.
+    assert not re.search(r"(?m):\s*!\w", text)
+    assert re.findall(r"(?m)^    ports:$", text) == ["    ports:"]  # only the stub's
     published = re.findall(r'(?m)^      - "([^"]+:\d+)"$', text)
-    assert published and all(entry.startswith("127.0.0.1:") for entry in published)
-    # The base file keeps the broker and Redis on loopback, so the override need not.
+    assert published == ["127.0.0.1:${LOAD_STUB_PORT:?set by scripts/parallel_runs_load.py}:9999"]
+    # The driver's "127.0.0.1:<port>" values rely on the first two mappings; the base file keeps
+    # the broker and Redis on loopback itself.
     for entry in (
+        '      - "${BACKEND_PORT:-8000}:8000"\n',
+        '      - "${POSTGRES_PORT:-5432}:5432"\n',
         '      - "127.0.0.1:${RABBITMQ_PORT:-5672}:5672"\n',
         '      - "127.0.0.1:${RABBITMQ_MANAGEMENT_PORT:-15672}:15672"\n',
         '      - "127.0.0.1:${REDIS_PORT:-6379}:6379"\n',
     ):
         assert entry in base
+
+
+def test_port_values_carry_the_loopback_address_where_the_base_file_needs_it(
+    driver: ModuleType,
+) -> None:
+    ports = {
+        "BACKEND_PORT": 18001,
+        "POSTGRES_PORT": 18002,
+        "RABBITMQ_PORT": 18003,
+        "RABBITMQ_MANAGEMENT_PORT": 18004,
+        "REDIS_PORT": 18005,
+        "LOAD_STUB_PORT": 18006,
+    }
+
+    assert sorted(driver.PORT_FLAGS.values()) == sorted(ports)
+    assert driver.port_env(ports) == {
+        "BACKEND_PORT": "127.0.0.1:18001",
+        "POSTGRES_PORT": "127.0.0.1:18002",
+        "RABBITMQ_PORT": "18003",
+        "RABBITMQ_MANAGEMENT_PORT": "18004",
+        "REDIS_PORT": "18005",
+        "LOAD_STUB_PORT": "18006",
+    }
+
+
+def _config(*ports: dict[str, object]) -> dict[str, Any]:
+    return {
+        "services": {
+            "backend": {"ports": list(ports)},
+            "redis": {"ports": [{"host_ip": "127.0.0.1", "published": "18005", "target": 6379}]},
+            "worker": {},
+        }
+    }
+
+
+def test_exposed_ports_lists_everything_not_on_loopback(driver: ModuleType) -> None:
+    loopback = {"host_ip": "127.0.0.1", "published": "18001", "target": 8000}
+
+    assert driver.exposed_ports(_config(loopback)) == []
+    assert driver.exposed_ports(_config({"published": "8000", "target": 8000})) == [
+        "backend 0.0.0.0:8000->8000"
+    ]
+    assert driver.exposed_ports(
+        _config(loopback, {"host_ip": "0.0.0.0", "published": "18009", "target": 8001})
+    ) == ["backend 0.0.0.0:18009->8001"]
+    assert driver.exposed_ports(_config({"host_ip": "::", "published": "1", "target": 2})) == [
+        "backend :::1->2"
+    ]
+
+
+def test_the_removal_hint_works_as_printed_without_the_secrets(
+    driver: ModuleType, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(driver, "REPO_ROOT", Path("/work/my clone"))
+
+    hint = driver.removal_hint("dmc163test")
+
+    assert hint == (
+        "cd '/work/my clone' && LOAD_RUNS=1 LOAD_LLM_DELAY_MS=0 LOAD_STUB_PORT=1 "
+        "LOAD_WEBHOOK_SECRET=unused LOAD_GITHUB_APP_PRIVATE_KEY=unused "
+        "docker compose -p dmc163test --env-file /dev/null -f docker-compose.yml "
+        "-f deploy/load/compose.parallel-runs.yml --profile webhooks down -v"
+    )
+    # Every variable the override requires has a placeholder, so `down` can interpolate it.
+    override = (REPO_ROOT / "deploy/load/compose.parallel-runs.yml").read_text()
+    required = set(re.findall(r"\$\{(\w+):\?", override))
+    assert required == set(driver._DOWN_PLACEHOLDERS)
+
+
+def test_down_runs_compose_in_its_own_session(
+    driver: ModuleType, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen: list[tuple[list[str], dict[str, Any]]] = []
+
+    def run(command: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        seen.append((command, kwargs))
+        return subprocess.CompletedProcess(command, 3, "", "")
+
+    monkeypatch.setattr(driver.subprocess, "run", run)
+    stack = driver.Stack("dmc163test", {"PATH": "/usr/bin"}, {"BACKEND_PORT": 18001})
+
+    assert stack.down() == 3
+    [(command, kwargs)] = seen
+    assert command[-2:] == ["down", "-v"] and command[2:4] == ["-p", "dmc163test"]
+    assert kwargs["start_new_session"] is True and kwargs["check"] is False
+
+
+def test_main_passes_loopback_port_values_and_numeric_ports(
+    driver: ModuleType, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured: list[Any] = []
+    monkeypatch.setattr(driver.shutil, "which", lambda name: "/usr/bin/docker")
+
+    def execute(stack: Any, args: Any, secret: str) -> int:
+        captured.append(stack)
+        return 0
+
+    monkeypatch.setattr(driver, "execute", execute)
+    argv = ["--project", "dmc163test", "--backend-port", "18001", "--postgres-port", "18002"]
+
+    assert driver.main([*argv, "--redis-port", "18005"]) == 0
+    [stack] = captured
+    assert (stack.env["BACKEND_PORT"], stack.env["POSTGRES_PORT"]) == (
+        "127.0.0.1:18001",
+        "127.0.0.1:18002",
+    )
+    assert stack.env["REDIS_PORT"] == "18005"
+    assert (stack.ports["BACKEND_PORT"], stack.ports["REDIS_PORT"]) == (18001, 18005)
 
 
 def test_override_probes_rabbitmq_only_after_the_server_wrote_its_cookie() -> None:
@@ -643,11 +753,17 @@ class FakeStack:
         on_up: Callable[[], None] | None = None,
         reject: bool = False,
         receipts: dict[str, int] | None = None,
+        exposed: tuple[dict[str, object], ...] = (),
+        config_error: Exception | None = None,
+        down_code: int = 0,
     ) -> None:
         self.project = "dmc163test"
         self.leftovers = leftovers
         self.up_error = up_error
         self.existing_error = existing_error
+        self.exposed = exposed
+        self.config_error = config_error
+        self.down_code = down_code
         self._rows = _ROWS if rows is None else rows
         self.on_up = on_up
         self.reject = reject
@@ -660,6 +776,13 @@ class FakeStack:
         if self.existing_error is not None:
             raise self.existing_error
         return list(self.leftovers)
+
+    def config(self) -> dict[str, Any]:
+        self.calls.append("config")
+        if self.config_error is not None:
+            raise self.config_error
+        loopback = {"host_ip": "127.0.0.1", "published": "18001", "target": 8000}
+        return _config(loopback, *self.exposed)
 
     def up(self, workers: int) -> None:
         self.calls.append(f"up {workers}")
@@ -697,8 +820,9 @@ class FakeStack:
     def log_tail(self) -> None:
         self.calls.append("logs")
 
-    def down(self) -> None:
+    def down(self) -> int:
         self.calls.append("down")
+        return self.down_code
 
 
 def _args(driver: ModuleType, tmp_path: Path, *extra: str) -> Any:
@@ -727,7 +851,7 @@ def test_a_passing_run_sends_one_duplicate_per_pr_and_removes_its_project(
     stack = FakeStack()
 
     assert driver.execute(stack, _args(driver, tmp_path), "secret") == 0
-    assert stack.calls == ["existing", "up 3", "seed", "down"]
+    assert stack.calls == ["existing", "config", "up 3", "seed", "down"]
     assert [number for number, _ in stack.deliveries] == [1, 2, 3, 1, 2, 3]
     assert len({delivery for _, delivery in stack.deliveries}) == 6
     report = json.loads((tmp_path / "report.json").read_text())
@@ -745,7 +869,7 @@ def test_a_failed_up_still_removes_the_project(driver: ModuleType, tmp_path: Pat
     stack = FakeStack(up_error=driver.StackError("docker compose up exited 1: pull denied"))
 
     assert driver.execute(stack, _args(driver, tmp_path), "secret") == 1
-    assert stack.calls == ["existing", "up 3", "logs", "down"]
+    assert stack.calls == ["existing", "config", "up 3", "logs", "down"]
     assert not (tmp_path / "report.json").exists()
 
 
@@ -755,7 +879,7 @@ def test_a_failed_verdict_writes_the_report_and_removes_the_project(
     stack = FakeStack(rows=[_row(1), _row(2, state="failed"), _row(3)])
 
     assert driver.execute(stack, _args(driver, tmp_path), "secret") == 1
-    assert stack.calls == ["existing", "up 3", "seed", "logs", "down"]
+    assert stack.calls == ["existing", "config", "up 3", "seed", "logs", "down"]
     report = json.loads((tmp_path / "report.json").read_text())
     assert report["passed"] is False
     assert [name for name, passed in report["checks"].items() if not passed] == ["all_succeeded"]
@@ -815,7 +939,7 @@ def test_a_rejected_delivery_fails_and_removes_the_project(
 
     assert driver.execute(stack, _args(driver, tmp_path), "secret") == 1
     assert stack.deliveries[0][0] == 1 and len(stack.deliveries) == 1
-    assert stack.calls == ["existing", "up 3", "seed", "logs", "down"]
+    assert stack.calls == ["existing", "config", "up 3", "seed", "logs", "down"]
 
 
 def _marker(signum: int, frame: object) -> None:
@@ -838,7 +962,7 @@ def test_sigterm_unwinds_into_the_cleanup_and_restores_the_handlers(
             signal.signal(sig, handler)
 
     assert code == 128 + signal.SIGTERM
-    assert stack.calls == ["existing", "up 3", "down"]
+    assert stack.calls == ["existing", "config", "up 3", "down"]
     assert restored == (_marker, _marker)
 
 
@@ -867,4 +991,46 @@ def test_the_stack_is_scaled_to_the_workers_not_the_runs(
 
     driver.execute(stack, _args(driver, tmp_path, "--workers", "2"), "secret")
 
-    assert stack.calls[1] == "up 2"
+    assert stack.calls[:3] == ["existing", "config", "up 2"]
+
+
+def test_a_port_beyond_loopback_is_refused_before_up(
+    driver: ModuleType, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    stack = FakeStack(exposed=({"host_ip": "0.0.0.0", "published": "5432", "target": 5432},))
+
+    assert driver.execute(stack, _args(driver, tmp_path), "secret") == 2
+    assert stack.calls == ["existing", "config"]
+    assert "publishes ports beyond 127.0.0.1: backend 0.0.0.0:5432->5432" in capsys.readouterr().err
+
+
+def test_a_config_that_cannot_be_rendered_is_refused_before_up(
+    driver: ModuleType, tmp_path: Path
+) -> None:
+    stack = FakeStack(config_error=driver.StackError("docker compose config exited 15: bad"))
+
+    assert driver.execute(stack, _args(driver, tmp_path), "secret") == 2
+    assert stack.calls == ["existing", "config"]
+
+
+def test_a_failed_down_prints_the_removal_command(
+    driver: ModuleType, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    stack = FakeStack(down_code=1)
+
+    assert driver.execute(stack, _args(driver, tmp_path), "secret") == 0
+    err = capsys.readouterr().err
+    assert "warning: docker compose down -v exited 1; remove the project with:\n" in err
+    assert driver.removal_hint("dmc163test") in err
+
+
+def test_keep_prints_the_removal_command(
+    driver: ModuleType, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    stack = FakeStack()
+
+    assert driver.execute(stack, _args(driver, tmp_path, "--keep"), "secret") == 0
+    err = capsys.readouterr().err
+    assert "--keep: the stack 'dmc163test' is still up; remove it with:\n" in err
+    assert driver.removal_hint("dmc163test") in err
+    assert "secret" not in driver.removal_hint("dmc163test")

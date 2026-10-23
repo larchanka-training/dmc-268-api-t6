@@ -8,8 +8,9 @@ driver checks that on a disposable stack:
    `dmc-268-api-t6` and this checkout's default project name, then runs
    `docker compose -p <project> ... up -d --build --wait --scale worker=<workers>` with
    deploy/load/compose.parallel-runs.yml: the `stub` service (scripts/review_load_stub.py) is
-   GitHub and the LLM, every published port is a free loopback port, the App key and webhook
-   secret are throwaway values made here, and compose sees only PATH, HOME, DOCKER_* and those;
+   GitHub and the LLM, every published port is a free port on 127.0.0.1 (checked in the merged
+   `config` before `up`), the App key and webhook secret are throwaway values made here, and
+   compose sees only PATH, HOME, DOCKER_* and those;
 2. seeds installation 17 / repository 101 (`wait_for_ci = never`, one active rule version) as in
    docs/WEBHOOK_WORKER.md, then sends one signed `pull_request` / `labeled` (`ai-review`) delivery
    per PR 1..<runs> to the backend, and right after them one duplicate per PR (same payload, new
@@ -21,7 +22,8 @@ driver checks that on a disposable stack:
    (`finished_at - created_at`); the distinct workers, the peak of Runs in flight, review POSTs per
    PR and LLM calls from the stub, the receipt end states and the depth of `reviews.dlq`. A run
    that does not finish in `--timeout` still writes its report;
-4. `down -v` of the project it created, unless `--keep` (also after SIGTERM or Ctrl-C).
+4. `down -v` of the project it created, unless `--keep` (also after SIGTERM or Ctrl-C); a failed
+   `down` or `--keep` prints the command that removes the project.
 
 Usage:
     uv run python scripts/parallel_runs_load.py --project dmc163load \\
@@ -37,9 +39,11 @@ can finish before the next one starts, so the parallel check may fail by design.
 
 The first `--build` needs registry access (base images, apt and PyPI); `down -v` keeps the images,
 remove them with `docker image rm $(docker image ls -q 'dmc163load-*')` (use your project name).
+Tested with Docker Compose v5.6.1.
 
 Exit codes: 0 the verdict passed; 1 it failed, or the stack did not start or finish in time;
-2 invalid arguments or a project that already exists; 128 + signal after SIGTERM or SIGINT.
+2 invalid arguments, a project that already exists, or a merged config that would publish a port
+on anything but 127.0.0.1; 128 + signal after SIGTERM or SIGINT.
 """
 
 from __future__ import annotations
@@ -51,6 +55,7 @@ import json
 import os
 import re
 import secrets
+import shlex
 import shutil
 import signal
 import socket
@@ -81,14 +86,27 @@ REPOSITORY_ID = 101
 REPOSITORY = "load/parallel-runs"
 PR_ID_OFFSET = 9000
 BASE_SHA = "b" * 40
-# Published host ports: flag -> compose variable. PostgreSQL publishes none (psql runs through
-# `compose exec`); the base file's defaults are the shared stand's ports.
+# Published host ports: flag -> compose variable. The base file's defaults are the shared stand's
+# ports, so every one is set to a free port.
 PORT_FLAGS = {
     "backend_port": "BACKEND_PORT",
+    "postgres_port": "POSTGRES_PORT",
     "rabbitmq_port": "RABBITMQ_PORT",
     "rabbitmq_management_port": "RABBITMQ_MANAGEMENT_PORT",
     "redis_port": "REDIS_PORT",
     "stub_port": "LOAD_STUB_PORT",
+}
+# The base file maps these as "${VAR}:<port>", so their value carries the address; RabbitMQ, Redis
+# and the stub already have "127.0.0.1:${VAR}" in their files.
+ADDRESS_IN_VALUE = frozenset({"BACKEND_PORT", "POSTGRES_PORT"})
+LOOPBACK = "127.0.0.1"
+# Placeholders for the override's required variables: enough for `down`, which binds nothing.
+_DOWN_PLACEHOLDERS = {
+    "LOAD_RUNS": "1",
+    "LOAD_LLM_DELAY_MS": "0",
+    "LOAD_STUB_PORT": "1",
+    "LOAD_WEBHOOK_SECRET": "unused",
+    "LOAD_GITHUB_APP_PRIVATE_KEY": "unused",
 }
 # Pinned so the base file's credentials cannot come from anywhere else.
 DATABASE_ENV = {
@@ -182,6 +200,33 @@ def compose_command(project: str, *args: str) -> list[str]:
         "webhooks",
         *args,
     ]
+
+
+def port_env(ports: Mapping[str, int]) -> dict[str, str]:
+    """The compose value of each port variable: `127.0.0.1:<port>` where the base file needs it."""
+    return {
+        variable: f"{LOOPBACK}:{port}" if variable in ADDRESS_IN_VALUE else str(port)
+        for variable, port in ports.items()
+    }
+
+
+def exposed_ports(config: Mapping[str, Any]) -> list[str]:
+    """Every published port of a `compose config --format json` that is not on 127.0.0.1."""
+    exposed = []
+    for name, service in sorted(config.get("services", {}).items()):
+        for port in service.get("ports", []):
+            # No host_ip means all interfaces.
+            host_ip = port.get("host_ip") or "0.0.0.0"
+            if host_ip != LOOPBACK:
+                exposed.append(f"{name} {host_ip}:{port.get('published')}->{port.get('target')}")
+    return exposed
+
+
+def removal_hint(project: str) -> str:
+    """A command that removes ``project`` as printed: run it from anywhere."""
+    assignments = " ".join(f"{name}={value}" for name, value in _DOWN_PLACEHOLDERS.items())
+    command = shlex.join(compose_command(project, "down", "-v"))
+    return f"cd {shlex.quote(str(REPO_ROOT))} && {assignments} {command}"
 
 
 def stack_env(environ: Mapping[str, str], generated: Mapping[str, str]) -> dict[str, str]:
@@ -348,6 +393,8 @@ class LoadStack(Protocol):
 
     def existing(self) -> list[str]: ...
 
+    def config(self) -> dict[str, Any]: ...
+
     def up(self, workers: int) -> None: ...
 
     def seed(self) -> None: ...
@@ -364,19 +411,24 @@ class LoadStack(Protocol):
 
     def log_tail(self) -> None: ...
 
-    def down(self) -> None: ...
+    def down(self) -> int: ...
 
 
 class Stack:
     """The compose project of one load run; every command carries the same project and env."""
 
-    def __init__(self, project: str, env: Mapping[str, str], ports: Mapping[str, str]) -> None:
+    def __init__(self, project: str, env: Mapping[str, str], ports: Mapping[str, int]) -> None:
         self.project = project
         self.env = dict(env)
         self.ports = dict(ports)
 
     def _run(
-        self, *args: str, stdin: str | None = None, capture: bool = True, check: bool = True
+        self,
+        *args: str,
+        stdin: str | None = None,
+        capture: bool = True,
+        check: bool = True,
+        new_session: bool = False,
     ) -> subprocess.CompletedProcess[str]:
         try:
             return subprocess.run(
@@ -388,6 +440,7 @@ class Stack:
                 stderr=subprocess.PIPE if capture else None,
                 text=True,
                 check=check,
+                start_new_session=new_session,
             )
         except subprocess.CalledProcessError as failed:
             detail = (failed.stderr or "").strip()[-2000:]
@@ -413,6 +466,11 @@ class Stack:
         ).stdout.split()
         found = [f"{len(containers)} container(s)"] if containers else []
         return found + ([f"{len(volumes)} volume(s)"] if volumes else [])
+
+    def config(self) -> dict[str, Any]:
+        decoded = json.loads(self._run("config", "--format", "json").stdout)
+        assert isinstance(decoded, dict)
+        return decoded
 
     def up(self, workers: int) -> None:
         self._run("up", "-d", "--build", "--wait", "--scale", f"worker={workers}", capture=False)
@@ -471,8 +529,10 @@ class Stack:
         tail = self._run("logs", "--no-color", "--tail", "30", check=False)
         sys.stderr.write(tail.stdout + tail.stderr)
 
-    def down(self) -> None:
-        self._run("down", "-v", capture=False, check=False)
+    def down(self) -> int:
+        # Its own session: a Ctrl-C at the terminal goes to the foreground process group, which
+        # then no longer contains this `docker compose`, so it cannot cut `down -v` short.
+        return self._run("down", "-v", capture=False, check=False, new_session=True).returncode
 
 
 class Interrupted(Exception):
@@ -599,6 +659,18 @@ def execute(stack: LoadStack, args: argparse.Namespace, secret: str) -> int:
             file=sys.stderr,
         )
         return 2
+    try:
+        exposed = exposed_ports(stack.config())
+    except (StackError, ValueError, OSError) as failed:
+        print(f"error: cannot render the compose config: {failed}", file=sys.stderr)
+        return 2
+    if exposed:
+        print(
+            "error: the merged compose config publishes ports beyond 127.0.0.1: "
+            + ", ".join(exposed),
+            file=sys.stderr,
+        )
+        return 2
     signals = (signal.SIGTERM, signal.SIGINT)
     previous = {sig: signal.signal(sig, _interrupt) for sig in signals}
     created = False
@@ -614,12 +686,23 @@ def execute(stack: LoadStack, args: argparse.Namespace, secret: str) -> int:
     finally:
         try:
             if created and not args.keep:
-                # Children inherit SIG_IGN, so a second Ctrl-C cannot cut `down -v` short.
+                # This process ignores further signals until `down -v` returns; Stack.down runs
+                # compose in its own session, out of reach of the terminal's Ctrl-C.
                 for sig in signals:
                     signal.signal(sig, signal.SIG_IGN)
-                stack.down()
+                code = stack.down()
+                if code != 0:
+                    print(
+                        f"warning: docker compose down -v exited {code}; remove the project with:\n"
+                        f"  {removal_hint(stack.project)}",
+                        file=sys.stderr,
+                    )
             elif created:
-                print(f"--keep: the stack {stack.project!r} is still up", file=sys.stderr)
+                print(
+                    f"--keep: the stack {stack.project!r} is still up; remove it with:\n"
+                    f"  {removal_hint(stack.project)}",
+                    file=sys.stderr,
+                )
         finally:
             for sig, handler in previous.items():
                 signal.signal(sig, handler if handler is not None else signal.SIG_DFL)
@@ -699,10 +782,10 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     fixed = {variable: getattr(args, flag) for flag, variable in PORT_FLAGS.items()}
     free = iter(free_ports(len(fixed)))
-    ports = {variable: str(port or next(free)) for variable, port in fixed.items()}
+    ports: dict[str, int] = {variable: port or next(free) for variable, port in fixed.items()}
     secret = secrets.token_hex(32)
     generated = {
-        **ports,
+        **port_env(ports),
         "LOAD_RUNS": str(args.runs),
         "LOAD_LLM_DELAY_MS": str(args.llm_delay_ms),
         "LOAD_WEBHOOK_SECRET": secret,
