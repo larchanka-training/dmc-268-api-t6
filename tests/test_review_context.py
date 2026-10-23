@@ -400,6 +400,24 @@ def test_changed_file_past_the_ast_limit_is_not_parsed_through_an_import() -> No
     assert all(ref.resolution is not ImportResolution.RESOLVED for ref in payload.imports)
 
 
+def test_import_target_with_a_parse_error_keeps_the_parse_reason_not_an_l4_limit() -> None:
+    # A syntax error over the imported class: the import is not resolved, so the target
+    # is never cut from L4 as if it were too large.
+    repository = _service_repository()
+    repository.files["pkg/models.py"] = _MODELS.replace("class User:", "class User(:")
+    diff_map = _diff_map(_vcs_file(repository, "pkg/service.py", _GREET_PATCH))
+
+    payload = _build(repository, diff_map)
+
+    assert [(ref.resolution, ref.reason) for ref in payload.imports] == [
+        (ImportResolution.UNSUPPORTED, "ast_failed")
+    ]
+    assert ("ast_limit", "pkg/models.py") not in [
+        (item.reason, item.path) for item in payload.omissions
+    ]
+    assert ContextLevel.L4 not in payload.levels_present
+
+
 def test_file_of_an_unresolved_identity_is_not_read_through_an_import() -> None:
     # The old name breaks the path contract, so the file has no reliable identity.
     repository = _service_repository()
