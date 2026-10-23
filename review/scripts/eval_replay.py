@@ -80,6 +80,7 @@ from review.scripts.validate_dataset import (  # noqa: E402
     POLICY_ARMS,
     SCHEMA_PATH,
     _patch_added_lines,
+    uses_policy_arms,
     validate_case,
 )
 
@@ -487,6 +488,8 @@ def replay(
     return {
         "schema_version": 1,
         "warnings": warnings,
+        # The main --final refuses policy-arm cases and the rules profile requires them.
+        "corpus": ("rules" if any(uses_policy_arms(record) for _, record in records) else "main"),
         "provenance": {
             key: manifest[key]
             for key in (
@@ -515,8 +518,12 @@ def format_console(report: dict[str, Any]) -> str:
     micro = report["micro"]
     critical = report["critical"]
     verdict = report["verdict"]
-    lines = [
-        f"Cases: {report['case_count']}",
+    lines = [f"Cases: {report['case_count']}"]
+    metadata = provenance.get("run_metadata", {})
+    if "policy_arm" in metadata:
+        # Captures since #163 record their arm; older summaries keep their exact lines.
+        lines.extend([f"Corpus: {report['corpus']}", f"Policy arm: {metadata['policy_arm']}"])
+    lines += [
         f"Model: {provenance['model_id']}",
         f"Prompt: {provenance['prompt_path']} (version {provenance['prompt_version']})",
         f"Prompt SHA: {provenance['prompt_sha']}",
@@ -539,17 +546,24 @@ def format_console(report: dict[str, Any]) -> str:
         )
     lines.append(f"Severity mismatches: {len(report['severity_mismatches'])}")
     # Shown only where they apply, so main-corpus summaries keep their exact lines.
+    # In arm none the rules are not shown: what is found or flagged there is "without rules".
     rule = report.get("rule_constraints")
     if rule is not None and rule["total"]:
-        lines.append(
-            f"Rule constraints found: {_percent(rule['share'])} ({rule['found']}/{rule['total']})"
-        )
+        label = "Rule constraints found" + ("" if rule["expected"] else " without rules")
+        lines.append(f"{label}: {_percent(rule['share'])} ({rule['found']}/{rule['total']})")
     exceptions = report.get("exceptions")
-    if exceptions is not None and exceptions["applicable"]:
-        lines.append(
-            f"Exceptions respected: {_percent(exceptions['share'])} "
-            f"({exceptions['respected']}/{exceptions['applicable']})"
-        )
+    if exceptions is not None and exceptions["total"]:
+        total = exceptions["total"]
+        if exceptions["exempt"]:
+            lines.append(
+                f"Exceptions respected: {_percent(exceptions['share'])} "
+                f"({exceptions['respected']}/{total})"
+            )
+        else:
+            lines.append(
+                f"Exceptions flagged without rules: {_percent(exceptions['flagged'] / total)} "
+                f"({exceptions['flagged']}/{total})"
+            )
     usage = report.get("usage")
     if usage is not None:
         lines.append(

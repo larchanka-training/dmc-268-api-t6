@@ -1,30 +1,37 @@
 diff --git a/app/api/invoices.py b/app/api/invoices.py
 new file mode 100644
-index 0000000..cf39712
+index 0000000..2aacd20
 --- /dev/null
 +++ b/app/api/invoices.py
-@@ -0,0 +1,31 @@
+@@ -0,0 +1,43 @@
 +"""Invoice endpoints of the billing API."""
 +
-+from __future__ import annotations
++from datetime import datetime
 +
 +from fastapi import APIRouter, Depends
++from pydantic import BaseModel
 +from sqlalchemy import select
 +from sqlalchemy.ext.asyncio import AsyncSession
 +
 +from app.api.deps import current_customer
 +from app.db.models import Customer, Invoice
 +from app.db.session import get_session
-+from app.services.invoices import InvoiceSummary
 +
 +router = APIRouter(prefix="/me/invoices", tags=["invoices"])
 +
 +
-+@router.get("")
++class InvoiceOut(BaseModel):
++    number: str
++    total_cents: int
++    status: str
++    issued_at: datetime
++
++
++@router.get("", response_model=list[InvoiceOut])
 +async def list_my_invoices(
 +    customer: Customer = Depends(current_customer),
 +    session: AsyncSession = Depends(get_session),
-+) -> list[InvoiceSummary]:
++) -> list[InvoiceOut]:
 +    result = await session.execute(
 +        select(Invoice)
 +        .where(Invoice.customer_id == customer.id)
@@ -32,7 +39,12 @@ index 0000000..cf39712
 +        .limit(50)
 +    )
 +    return [
-+        InvoiceSummary(number=row.number, total_cents=row.total_cents, status=row.status)
++        InvoiceOut(
++            number=row.number,
++            total_cents=row.total_cents,
++            status=row.status,
++            issued_at=row.issued_at,
++        )
 +        for row in result.scalars()
 +    ]
 diff --git a/app/api/routes.py b/app/api/routes.py

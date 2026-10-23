@@ -70,27 +70,16 @@ def _report() -> dict[str, Any]:
 
 
 def _run_step(
-    tmp_path: Path, *, manifest: bool, fail_replay: bool = False, fail_rules: bool = False
+    tmp_path: Path, *, manifest: bool, fail_replay: bool = False
 ) -> tuple[subprocess.CompletedProcess[str], str]:
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     shim = bin_dir / "uv"
-    # The script is the first review/scripts/*.py (or ``-``) argument, wherever uv flags put it.
     shim.write_text(
         "#!/bin/bash\n"
         "set -e\n"
-        'script=""\n'
-        'for arg in "$@"; do\n'
-        '  case "$arg" in review/scripts/*.py|-) script="$arg"; break ;; esac\n'
-        "done\n"
-        'case "$script" in\n'
-        "  review/scripts/validate_dataset.py)\n"
-        '    if [[ " $* " == *" --profile rules "* ]]; then\n'
-        '      echo "$*" >> "$RULES_LOG"\n'
-        '      if [[ "${FAIL_RULES:-}" == 1 ]]; then exit 33; fi\n'
-        "    else\n"
-        '      cp "$FIXTURE_CORPUS" "${@: -1}"\n'
-        "    fi ;;\n"
+        'case "$3" in\n'
+        '  review/scripts/validate_dataset.py) cp "$FIXTURE_CORPUS" "${@: -1}" ;;\n'
         "  review/scripts/eval_replay.py)\n"
         "    if [[ ! -f test-prs-dataset/responses/manifest.json ]]; then exit 1; fi\n"
         '    if [[ "${FAIL_REPLAY:-}" == 1 ]]; then exit 27; fi\n'
@@ -120,8 +109,6 @@ def _run_step(
         "FIXTURE_CORPUS": str(corpus),
         "FIXTURE_REPLAY": str(replay),
         "FAIL_REPLAY": "1" if fail_replay else "0",
-        "FAIL_RULES": "1" if fail_rules else "0",
-        "RULES_LOG": str(tmp_path / "rules-validation.log"),
     }
     result = subprocess.run(
         ["bash", "-euo", "pipefail", "-c", _replay_step()],
@@ -173,23 +160,6 @@ def test_required_ci_summary_uses_complete_replay_report(tmp_path: Path) -> None
     assert "::warning::Static input digest mismatch" in result.stdout
 
 
-def test_required_ci_validates_the_rules_corpus_with_its_profile(tmp_path: Path) -> None:
-    result, _ = _run_step(tmp_path, manifest=True)
-
-    assert result.returncode == 0, result.stderr
-    assert (tmp_path / "rules-validation.log").read_text(encoding="utf-8") == (
-        "run --locked python review/scripts/validate_dataset.py "
-        "--root test-prs-dataset/rules --final --profile rules\n"
-    )
-
-
-def test_required_ci_rules_corpus_failure_fails_the_step(tmp_path: Path) -> None:
-    result, summary = _run_step(tmp_path, manifest=True, fail_rules=True)
-
-    assert result.returncode == 33
-    assert summary == ""
-
-
 def test_required_ci_replay_failure_fails_the_step(tmp_path: Path) -> None:
     result, summary = _run_step(tmp_path, manifest=True, fail_replay=True)
 
@@ -222,3 +192,59 @@ def test_required_ci_replay_failure_is_not_softened_by_step_or_job_keys() -> Non
         "neither Python lint / type / test nor any of its steps may continue on error"
     )
     assert not re.search(r"(?m)^    if:", job), "Python lint / type / test must always run"
+
+
+RULES_COMMAND = (
+    "uv run --locked python review/scripts/validate_dataset.py "
+    "--root test-prs-dataset/rules --final --profile rules"
+)
+
+
+def test_required_ci_validates_the_rules_corpus_in_its_own_step_after_the_gold_summary() -> None:
+    job = _python_job()
+    step = _job_step(job, "Rules sub-corpus")
+    gold = _job_step(job, "Gold corpus and recorded replay")
+
+    assert step.endswith(f"        run: {RULES_COMMAND}\n")
+    assert "--profile rules" not in gold
+    assert (
+        job.index("      - name: Gold corpus and recorded replay\n")
+        < job.index("      - name: Rules sub-corpus\n")
+        < job.index("      - name: Integration suite (zero skips)\n")
+    )
+    assert not re.search(r"(?m)^        (?:if|continue-on-error):", step)
+
+
+def test_required_ci_rules_corpus_failure_fails_its_step(tmp_path: Path) -> None:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    shim = bin_dir / "uv"
+    shim.write_text('#!/bin/bash\nprintf "%s\\n" "$@" > "$ARGS_LOG"\nexit 33\n')
+    shim.chmod(0o755)
+    command = _job_step(_python_job(), "Rules sub-corpus").split("        run: ", 1)[1]
+
+    result = subprocess.run(
+        ["bash", "-e", "-c", command],
+        cwd=tmp_path,
+        env={
+            **os.environ,
+            "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+            "ARGS_LOG": str(tmp_path / "args"),
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 33
+    assert (tmp_path / "args").read_text(encoding="utf-8").splitlines() == [
+        "run",
+        "--locked",
+        "python",
+        "review/scripts/validate_dataset.py",
+        "--root",
+        "test-prs-dataset/rules",
+        "--final",
+        "--profile",
+        "rules",
+    ]

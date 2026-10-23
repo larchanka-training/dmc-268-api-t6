@@ -3,10 +3,7 @@
 from __future__ import annotations
 
 import json
-import logging
 from dataclasses import asdict, dataclass
-
-logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)

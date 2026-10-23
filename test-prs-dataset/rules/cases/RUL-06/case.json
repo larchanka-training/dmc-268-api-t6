@@ -44,7 +44,7 @@
         "valid",
         "malicious"
       ],
-      "reason": "rules.md 'Raw HTML': Markdown.tsx may render the DOMPurify-sanitized output of renderTrustedMarkdown()"
+      "reason": "`src/components/Markdown.tsx` may render the return value of `renderMarkdown()` from `src/lib/markdown.ts`."
     }
   ]
 }

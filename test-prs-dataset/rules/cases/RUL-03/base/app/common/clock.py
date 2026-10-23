@@ -1,4 +1,4 @@
-"""The only source of the current time in the service."""
+"""The only source of the current time in the service; tests freeze it."""
 
 from __future__ import annotations
 

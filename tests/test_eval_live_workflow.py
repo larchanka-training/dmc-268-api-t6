@@ -251,6 +251,11 @@ def _assert_selection_contract(text: str) -> None:
     ) in text
     assert "            profile=(--profile rules)\n" in text
     assert '            --policy-arm "$EVAL_POLICY_ARM" \\\n' in text
+    # Artifacts of different corpora and arms stay apart in one repository's artifact list.
+    run = "${{ github.run_id }}-${{ github.run_attempt }}"
+    selection = "${{ env.EVAL_CORPUS }}-${{ env.EVAL_POLICY_ARM }}"
+    assert f"          name: eval-live-{selection}-{run}\n" in text
+    assert f"          name: eval-live-raw-{selection}-{run}\n" in text
 
 
 def test_manual_workflow_security_and_selection_contract() -> None:
@@ -288,6 +293,14 @@ def test_manual_workflow_security_and_selection_contract() -> None:
             '"$RUNNER_TEMP/eval-corpus" --final',
         ),
         ("profile=(--profile rules)", "profile=()"),
+        (
+            "eval-live-${{ env.EVAL_CORPUS }}-${{ env.EVAL_POLICY_ARM }}-${{ github.run_id }}",
+            "eval-live-${{ env.EVAL_CORPUS }}-${{ github.run_id }}",
+        ),
+        (
+            "eval-live-raw-${{ env.EVAL_CORPUS }}-${{ env.EVAL_POLICY_ARM }}-",
+            "eval-live-raw-${{ env.EVAL_POLICY_ARM }}-",
+        ),
     ],
 )
 def test_workflow_contract_rejects_unsafe_mutations(before: str, after: str) -> None:
@@ -490,10 +503,17 @@ def test_prepare_rejects_an_unknown_corpus(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize(
-    ("corpus", "profile"), [("main", []), ("rules", ["--profile", "rules"])], ids=["main", "rules"]
+    ("corpus", "arm", "profile"),
+    [
+        ("main", "legacy", []),
+        ("main", "none", []),
+        ("rules", "none", ["--profile", "rules"]),
+        ("rules", "malicious", ["--profile", "rules"]),
+    ],
+    ids=["main-legacy", "main-none", "rules-none", "rules-malicious"],
 )
 def test_validate_uses_the_profile_of_the_selected_corpus(
-    tmp_path: Path, corpus: str, profile: list[str]
+    tmp_path: Path, corpus: str, arm: str, profile: list[str]
 ) -> None:
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
@@ -508,6 +528,7 @@ def test_validate_uses_the_profile_of_the_selected_corpus(
             "PATH": str(bin_dir) + os.pathsep + os.environ["PATH"],
             "RUNNER_TEMP": str(tmp_path),
             "EVAL_CORPUS": corpus,
+            "EVAL_POLICY_ARM": arm,
         },
     )
 
@@ -521,3 +542,29 @@ def test_validate_uses_the_profile_of_the_selected_corpus(
         "--final",
         *profile,
     ]
+
+
+def test_validate_refuses_the_rules_corpus_with_the_legacy_arm(tmp_path: Path) -> None:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    shim = bin_dir / "uv"
+    shim.write_text('#!/bin/bash\ntouch "$RUNNER_TEMP/uv-called"\n')
+    shim.chmod(0o755)
+
+    result = _run(
+        "Validate corpus",
+        tmp_path,
+        {
+            "PATH": str(bin_dir) + os.pathsep + os.environ["PATH"],
+            "RUNNER_TEMP": str(tmp_path),
+            "EVAL_CORPUS": "rules",
+            "EVAL_POLICY_ARM": "legacy",
+        },
+    )
+
+    assert result.returncode == 1
+    assert result.stderr == (
+        "::error::corpus rules needs policy_arm none, valid or malicious; "
+        "legacy shows no repository rules.\n"
+    )
+    assert not (tmp_path / "uv-called").exists()

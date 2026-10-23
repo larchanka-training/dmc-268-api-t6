@@ -8,15 +8,18 @@ Each ``--run LABEL=PATH`` names one report JSON written by ``eval_live.py --repo
 Labels are free-form arm names, so another experiment can add its own arm (``rag``, #146);
 a label that is a recorded policy arm must match the arm the report was captured with.
 All reports must share the model, prompt version, static-input digest and corpus digest,
-and every capture must be publishable. Per arm the output gives each metric's mean, min
-and max over the runs, with every run's numerator and denominator, and the delta of each
-mean against the baseline arm (default: the first label). Without --markdown the output
-is JSON.
+and the recorded engine, effective settings and fallback model; every capture must be
+publishable, and no report content may be given twice. Per arm the output gives each
+metric's mean, min and max over the runs, with every run's numerator and denominator, and
+the delta of each mean against the baseline arm (default: the first label). An arm whose
+runs carry usage only in part gets a warning: its token and cost spread covers those runs
+only. Without --markdown the output is JSON.
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import sys
 from collections.abc import Callable
@@ -30,6 +33,7 @@ if __package__ in (None, ""):
 from review.scripts.eval_replay import RECORDED_POLICY_ARMS  # noqa: E402
 
 SAME_PROVENANCE = ("model_id", "prompt_version", "static_digest", "corpus_digest")
+SAME_RUN_METADATA = ("engine", "effective_settings", "fallback_model_id")
 type Ratio = tuple[int, int]
 RATIOS: tuple[tuple[str, str, Callable[[dict[str, Any]], Ratio]], ...] = (
     ("precision", "Precision", lambda r: (r["micro"]["tp"], r["micro"]["tp"] + r["micro"]["fp"])),
@@ -45,10 +49,17 @@ RATIOS: tuple[tuple[str, str, Callable[[dict[str, Any]], Ratio]], ...] = (
         "Rule constraints found",
         lambda r: (r["rule_constraints"]["found"], r["rule_constraints"]["total"]),
     ),
+    # Same denominators in every arm (eval_score.py): in arm none the rule figure is "found
+    # without rules" and the flagged exceptions are "flagged without rules".
     (
         "exceptions_respected",
         "Exceptions respected",
-        lambda r: (r["exceptions"]["respected"], r["exceptions"]["applicable"]),
+        lambda r: (r["exceptions"]["respected"], r["exceptions"]["total"]),
+    ),
+    (
+        "exceptions_flagged",
+        "Exceptions flagged",
+        lambda r: (r["exceptions"]["flagged"], r["exceptions"]["total"]),
     ),
 )
 QUANTITIES = (("tokens_in", "Tokens in"), ("tokens_out", "Tokens out"), ("cost_usd", "Cost USD"))
@@ -58,21 +69,32 @@ class AbError(Exception):
     """The reports cannot be compared as one experiment."""
 
 
-def _load(label: str, path: Path) -> dict[str, Any]:
+def _load(label: str, path: Path) -> tuple[dict[str, Any], str]:
+    """Return the report and the digest of its bytes; refuse anything but a complete report."""
     try:
-        report: dict[str, Any] = json.loads(path.read_text(encoding="utf-8"))
+        raw = path.read_bytes()
+        report: dict[str, Any] = json.loads(raw.decode("utf-8"))
         provenance = report["provenance"]
         metadata = provenance["run_metadata"]
+        if not isinstance(provenance, dict) or not isinstance(metadata, dict):
+            raise TypeError("provenance and run_metadata must be objects")
+        missing = [name for name in SAME_PROVENANCE if name not in provenance]
+        missing += [f"run_metadata.{name}" for name in SAME_RUN_METADATA if name not in metadata]
+        if missing:
+            raise KeyError(", ".join(missing))
         for _, _, ratio in RATIOS:
             ratio(report)
     except (OSError, UnicodeError, json.JSONDecodeError, KeyError, TypeError) as exc:
-        raise AbError(f"{path}: not an eval report with policy-arm metrics ({exc})") from None
+        raise AbError(
+            f"{path}: not an eval report with provenance and policy-arm metrics ({exc})"
+        ) from None
     recorded = metadata.get("policy_arm", "legacy")
+    publishable = metadata.get("baseline_publishable")
     if label in RECORDED_POLICY_ARMS and recorded != label:
         raise AbError(f"{path}: labelled {label} but captured with policy arm {recorded}")
-    if metadata.get("baseline_publishable") is not True:
+    if publishable is not True:
         raise AbError(f"{path}: capture is not publishable; rerun the arm")
-    return report
+    return report, hashlib.sha256(raw).hexdigest()
 
 
 def _quantity(report: dict[str, Any], name: str) -> Decimal | None:
@@ -95,22 +117,37 @@ def aggregate(runs: list[tuple[str, Path]], baseline: str | None = None) -> dict
     """Group reports by label; refuse reports that are not one experiment."""
     if not runs:
         raise AbError("at least one --run LABEL=PATH is required")
-    paths = [path.absolute().resolve() for _, path in runs]
-    if len(set(paths)) != len(paths):
-        raise AbError("the same report is given twice")
-    reports = [(label, path, _load(label, path)) for label, path in runs]
+    reports: list[tuple[str, Path, dict[str, Any]]] = []
+    seen: dict[str, Path] = {}
+    for label, path in runs:
+        report, digest = _load(label, path)
+        # A copied report would count one run twice and shrink the spread.
+        if digest in seen:
+            raise AbError(f"{path}: same report content as {seen[digest]}")
+        seen[digest] = path
+        reports.append((label, path, report))
     first = reports[0][2]["provenance"]
     for _, path, report in reports[1:]:
         for name in SAME_PROVENANCE:
             if report["provenance"][name] != first[name]:
                 raise AbError(f"{path}: {name} differs from {reports[0][1]}")
+        for name in SAME_RUN_METADATA:
+            if report["provenance"]["run_metadata"][name] != first["run_metadata"][name]:
+                raise AbError(f"{path}: run_metadata.{name} differs from {reports[0][1]}")
     labels = list(dict.fromkeys(label for label, _, _ in reports))
     chosen = baseline if baseline is not None else labels[0]
     if chosen not in labels:
         raise AbError(f"baseline arm {chosen} has no run")
     arms: list[dict[str, Any]] = []
+    warnings: list[str] = []
     for label in labels:
         members = [(path, report) for name, path, report in reports if name == label]
+        with_usage = sum(isinstance(report.get("usage"), dict) for _, report in members)
+        if 0 < with_usage < len(members):
+            warnings.append(
+                f"arm {label}: only {with_usage} of {len(members)} runs carry usage; "
+                "its tokens and cost cover those runs only"
+            )
         run_rows: list[dict[str, Any]] = []
         for path, report in members:
             metrics: dict[str, Any] = {}
@@ -148,9 +185,13 @@ def aggregate(runs: list[tuple[str, Path]], baseline: str | None = None) -> dict
         }
     return {
         "schema_version": 1,
-        "provenance": {name: first[name] for name in SAME_PROVENANCE},
+        "provenance": {
+            **{name: first[name] for name in SAME_PROVENANCE},
+            "run_metadata": {name: first["run_metadata"][name] for name in SAME_RUN_METADATA},
+        },
         "baseline": chosen,
         "arms": arms,
+        "warnings": warnings,
     }
 
 
@@ -224,6 +265,8 @@ def format_markdown(result: dict[str, Any]) -> str:
                 else (f"{delta:+.6f}" if name == "cost_usd" else f"{delta:+.0f}")
             )
         lines.append("| " + " | ".join(cells) + " |")
+    if result["warnings"]:
+        lines.extend(["", *(f"Warning: {warning}" for warning in result["warnings"])])
     return "\n".join(lines)
 
 
@@ -247,6 +290,8 @@ def main(argv: list[str] | None = None) -> int:
     except AbError as exc:
         print(f"eval ab: {exc}", file=sys.stderr)
         return 1
+    for warning in result["warnings"]:
+        print(f"eval ab: warning: {warning}", file=sys.stderr)
     if args.markdown:
         print(format_markdown(result))
     else:

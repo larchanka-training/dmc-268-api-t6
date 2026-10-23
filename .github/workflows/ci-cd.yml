@@ -234,7 +234,6 @@ jobs:
           corpus_report="${RUNNER_TEMP}/corpus-report.json"
           replay_report="${RUNNER_TEMP}/replay-report.json"
           uv run python review/scripts/validate_dataset.py --final --report-json "${corpus_report}"
-          uv run --locked python review/scripts/validate_dataset.py --root test-prs-dataset/rules --final --profile rules
           replay_status=0
           uv run python review/scripts/eval_replay.py --report-json "${replay_report}" || replay_status=$?
           CORPUS_REPORT="${corpus_report}" REPLAY_REPORT="${replay_report}" uv run python - <<'PYTHON'
@@ -266,6 +265,10 @@ jobs:
                   summary.write("Recorded replay failed; no report was produced.\n")
           PYTHON
           exit "$replay_status"
+
+      - name: Rules sub-corpus
+        # The rules.md sub-corpus (#163): its own profile, no recorded capture yet.
+        run: uv run --locked python review/scripts/validate_dataset.py --root test-prs-dataset/rules --final --profile rules
 
       - name: Integration suite (zero skips)
         run: |

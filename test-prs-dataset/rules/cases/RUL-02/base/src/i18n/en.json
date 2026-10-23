@@ -1,5 +1,4 @@
 {
-  "common.loading": "Loading…",
-  "project.general.title": "General",
-  "project.settings.title": "Project settings"
+  "team.header.members": "{count} members",
+  "team.header.title": "Team {name}"
 }

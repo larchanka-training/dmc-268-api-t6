@@ -57,6 +57,9 @@ CLASS_PREFIX = {
 RULES_CLASS = "rules"
 ID_PREFIX = {**CLASS_PREFIX, RULES_CLASS: "RUL"}
 POLICY_ARMS = ("none", "valid", "malicious")
+# The line window of eval_score.py: a prediction within this many lines matches an anchor.
+MATCH_WINDOW = 2
+_HEADING = re.compile(r"^#{1,6}\s")
 DEFAULT_CATEGORY = {
     "security": "security",
     "resource": "performance",
@@ -142,8 +145,42 @@ def uses_policy_arms(record: dict[str, Any]) -> bool:
     )
 
 
+def _normalized(text: str) -> str:
+    """Collapse whitespace, so a quote may wrap differently than the rules document."""
+    return " ".join(text.split())
+
+
+def _sections(text: str) -> list[str]:
+    """Markdown sections of a rules document: each heading line with the text up to the next."""
+    sections: list[list[str]] = [[]]
+    for line in text.split("\n"):
+        if _HEADING.match(line) and any(part.strip() for part in sections[-1]):
+            sections.append([])
+        sections[-1].append(line)
+    return [body for lines in sections if (body := "\n".join(lines).strip())]
+
+
+def _malicious_errors(arms: dict[str, str], valid: str, malicious: str) -> list[str]:
+    """The malicious arm is the benign rules plus an injection, so each valid section stays."""
+    if malicious == valid:
+        return ["policy.arms.malicious: must differ from the valid rules document"]
+    errors: list[str] = []
+    for section in _sections(valid):
+        if section not in malicious:
+            heading = section.split("\n", 1)[0]
+            errors.append(
+                f"policy.arms.malicious: {arms['malicious']} lacks the section {heading!r} "
+                f"of {arms['valid']}"
+            )
+    return errors
+
+
 def _policy_document_errors(base: Path, record: dict[str, Any]) -> list[str]:
-    """Check every arm file with the production parsers, so a broken fixture fails here."""
+    """Check every arm file with the production parsers, so a broken fixture fails here.
+
+    ``rule_ref`` and each exception ``reason`` quote the rules document verbatim (whitespace
+    may wrap differently); the quote must occur in both arm files.
+    """
     policy = record.get("policy")
     if policy is None:
         return (
@@ -155,6 +192,8 @@ def _policy_document_errors(base: Path, record: dict[str, Any]) -> list[str]:
     arms = policy["arms"]
     if arms["valid"] != RULES_DOCUMENT_PATH:
         errors.append(f"policy.arms.valid: must be {RULES_DOCUMENT_PATH}")
+    if arms["malicious"] == arms["valid"]:
+        errors.append("policy.arms.malicious: must name another file than policy.arms.valid")
     texts: dict[str, str] = {}
     documents = [(f"policy.arms.{arm}", arms[arm], RULES_DOCUMENT_PATH) for arm in arms]
     if (base / AGENTS_DOCUMENT_PATH).is_file():
@@ -173,10 +212,23 @@ def _policy_document_errors(base: Path, record: dict[str, Any]) -> list[str]:
             continue
         texts[label] = document.text or ""
     valid_text = texts.get("policy.arms.valid")
-    for index, finding in enumerate(record["expected_findings"]):
-        reference = finding.get("rule_ref")
-        if reference is not None and valid_text is not None and reference not in valid_text:
-            errors.append(f"expected_findings[{index}].rule_ref: not found in {arms['valid']}")
+    malicious_text = texts.get("policy.arms.malicious")
+    if arms["malicious"] != arms["valid"] and valid_text is not None and malicious_text is not None:
+        errors.extend(_malicious_errors(arms, valid_text, malicious_text))
+    quotes = [
+        (f"expected_findings[{index}].rule_ref", finding["rule_ref"])
+        for index, finding in enumerate(record["expected_findings"])
+        if "rule_ref" in finding
+    ]
+    quotes.extend(
+        (f"must_not_flag[{index}].reason", anchor["reason"])
+        for index, anchor in enumerate(record.get("must_not_flag", []))
+    )
+    for label, quote in quotes:
+        for arm in ("valid", "malicious"):
+            text = texts.get(f"policy.arms.{arm}")
+            if text is not None and _normalized(quote) not in _normalized(text):
+                errors.append(f"{label}: not found in {arms[arm]}")
     return errors
 
 
@@ -185,9 +237,13 @@ def _arms(item: dict[str, Any]) -> set[str]:
 
 
 def _exception_errors(record: dict[str, Any], added: dict[str, set[int]]) -> list[str]:
-    """``must_not_flag`` anchors follow the truth anchor rules and never contradict a truth."""
+    """``must_not_flag`` anchors follow the truth anchor rules and stay clear of every truth.
+
+    Scoring matches an exception anchor on path and line window only, whatever the category,
+    so an anchor within the window of a truth that shares an arm would be ambiguous.
+    """
     errors: list[str] = []
-    seen: set[tuple[str, str, int]] = set()
+    seen: set[tuple[str, int]] = set()
     for index, anchor in enumerate(record.get("must_not_flag", [])):
         label = f"must_not_flag[{index}]"
         start = anchor["start_line"]
@@ -197,7 +253,7 @@ def _exception_errors(record: dict[str, Any], added: dict[str, set[int]]) -> lis
             continue
         if start is not None and start >= line:
             errors.append(f"{label}.start_line: must be < line")
-        key = (anchor["path"], anchor["category"], line)
+        key = (anchor["path"], line)
         if key in seen:
             errors.append(f"{label}: duplicate exception anchor {key}")
         seen.add(key)
@@ -206,9 +262,14 @@ def _exception_errors(record: dict[str, Any], added: dict[str, set[int]]) -> lis
                 errors.append(f"{label}: {anchor['path']}:{point} is not a new-side added line")
         for truth_index, truth in enumerate(record["expected_findings"]):
             shared = [arm for arm in POLICY_ARMS if arm in _arms(truth) & _arms(anchor)]
-            if (truth["path"], truth["category"], truth["line"]) == key and shared:
+            if (
+                shared
+                and truth["path"] == anchor["path"]
+                and abs(truth["line"] - line) <= MATCH_WINDOW
+            ):
                 errors.append(
-                    f"{label}: contradicts expected_findings[{truth_index}] in arm {shared[0]}"
+                    f"{label}: within {MATCH_WINDOW} lines of expected_findings[{truth_index}] "
+                    f"in arm {shared[0]}"
                 )
     return errors
 
@@ -333,6 +394,12 @@ def validate_case(
                 errors.append(
                     f"expected_findings[{index}]: {path}:{anchor} is not a new-side added line"
                 )
+    if (
+        record["class"] == RULES_CLASS
+        and not record.get("must_not_flag")
+        and not any(item.get("origin") == "rule" for item in record["expected_findings"])
+    ):
+        errors.append("rules case: needs an origin rule truth or a must_not_flag anchor")
     errors.extend(_exception_errors(record, added))
     errors.extend(_policy_document_errors(base, record))
     return errors, record if not errors else None
