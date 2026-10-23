@@ -370,3 +370,36 @@ def test_malformed_response_does_not_crash_even_if_marked_valid() -> None:
     assert report["valid_response_count"] == 0
     assert report["micro"]["fn"] == 1
     assert report["micro"]["fp"] == 0
+
+
+def test_usage_totals_sum_recorded_calls_and_skip_unrecorded_cases() -> None:
+    call = {
+        "operation": "review",
+        "tokens_in": 120,
+        "tokens_out": 40,
+        "cache_read_tokens": 20,
+        "cost_usd": "0.000300",
+    }
+    repair = {**call, "operation": "review.repair", "cost_usd": "0.1"}
+    cases = [
+        ScoringCase("A", (), "clean", {}, {"findings": []}, True, usage=(call, repair)),
+        ScoringCase("B", (), "clean", {}, {"findings": []}, True, usage=()),
+        ScoringCase("C", (), "clean", {}, {"findings": []}, True),
+    ]
+
+    report = score_cases(cases)
+
+    assert report["usage"] == {
+        "cases": 2,
+        "calls": 2,
+        "tokens_in": 240,
+        "tokens_out": 80,
+        "cache_read_tokens": 40,
+        "cost_usd": "0.1003",
+    }
+
+
+def test_usage_is_none_when_no_case_recorded_it() -> None:
+    case = ScoringCase("A", (), "clean", {}, {"findings": []}, True)
+
+    assert score_cases([case])["usage"] is None
