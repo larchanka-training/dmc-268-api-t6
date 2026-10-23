@@ -362,11 +362,18 @@ def test_awaited_redis_tree_miss_rechecks_run_before_token_acquisition(
 
 
 @pytest.mark.integration
-@pytest.mark.parametrize("origin", ["active", "deleted"])
+@pytest.mark.parametrize(
+    ("origin", "rag"),
+    [("active", False), ("deleted", False), ("active", True)],
+    ids=["active", "deleted", "active-rag"],
+)
 def test_worker_composition_passes_claimed_checkpoint_to_context_stage(
-    context_env: Env, origin: str
+    context_env: Env, origin: str, rag: bool
 ) -> None:
-    """The public worker stops the next policy request after a claimed origin retires."""
+    """The public worker stops the next policy request after a claimed origin retires.
+
+    With RAG on, the factory's stage opens the index through its gate and records it.
+    """
 
     async def exercise() -> None:
         engine = context_env.engine()
@@ -508,6 +515,11 @@ def test_worker_composition_passes_claimed_checkpoint_to_context_stage(
                     ),
                     {"id": UUID(int=151), "checksum": "d" * 64},
                 )
+                if rag:
+                    await session.execute(
+                        text("UPDATE repositories SET rag_enabled=true WHERE id=:id"),
+                        {"id": REPO_A},
+                    )
             model = ReviewModel(factory)
             github = GitHub()
             runs = SqlAlchemyRunRepository(factory, allow_unscoped=True)
@@ -596,6 +608,34 @@ def test_worker_composition_passes_claimed_checkpoint_to_context_stage(
                     assert context is not None
                     assert context["status"] == "review"
                     assert any(block["path"] == "pkg/models.py" for block in context["blocks"])
+                    steps = [
+                        tuple(row)
+                        for row in await session.execute(
+                            text(
+                                "SELECT tool,request,response FROM run_actions WHERE run_id=:id "
+                                "AND tool IN ('context.build','context.rag') ORDER BY index"
+                            ),
+                            {"id": RUN_ATTEMPTED},
+                        )
+                    ]
+                    # The stage's context.build, the gate's step after it (M8), then the
+                    # prompt read's own context.build.
+                    assert [step[0] for step in steps] == (
+                        ["context.build", "context.rag", "context.build"]
+                        if rag
+                        else ["context.build", "context.build"]
+                    )
+                    # No state row yet: the gate reads an empty index and the review goes on.
+                    if rag:
+                        assert steps[1][1:] == (
+                            {
+                                "index_status": "empty",
+                                "indexed_commit_sha": None,
+                                "default_head_sha": None,
+                                "stale": False,
+                            },
+                            {"outcome": "not_ready", "reason": "empty"},
+                        )
                 else:
                     assert tuple(terminal) == ("cancelled", "installation_unavailable")
         finally:

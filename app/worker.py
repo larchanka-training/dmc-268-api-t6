@@ -48,6 +48,7 @@ from app.bootstrap.worker_shutdown import (
 from app.common.infrastructure.db.leader import WORKER_LEADER_LOCK, run_as_leader
 from app.common.infrastructure.heartbeat import beat, heartbeat_file, reset
 from app.modules.code_index.application.leader_tasks import CodeIndexLeaderTasks
+from app.modules.code_index.infrastructure.review_index import SqlAlchemyReviewIndexUnitOfWork
 from app.modules.integrations.webhooks.infrastructure.github_installation_tree_provider import (
     GitHubAppInstallationAccessTokenProvider,
     InMemoryInstallationAccessTokenCache,
@@ -103,6 +104,7 @@ from app.modules.reviews.application.publish_run_review import (
     PullRequestReviewGateway,
 )
 from app.modules.reviews.application.queue_messages import ReviewPublishQueue, RunRetryQueue
+from app.modules.reviews.application.rag_index import OpenReviewIndex
 from app.modules.reviews.application.review_context import BuildReviewContext
 from app.modules.reviews.application.review_context_stage import (
     EstimatedTokenCounter,
@@ -588,6 +590,7 @@ def review_context_stage_factory(
             context_builder=context_builder,
             trace=trace,
             builtin_excluded=_is_generated,
+            rag=OpenReviewIndex(partial(SqlAlchemyReviewIndexUnitOfWork, session_factory)),
         )
 
     return stage

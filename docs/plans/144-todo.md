@@ -314,9 +314,9 @@ over the factory's `session_factory` into `ReviewContextStage(...)` (`:574-589`)
 
 **Done when:**
 
-- [ ] `tests/test_worker_queue_postgres.py` is green in the focused run;
-- [ ] the RED run and the GREEN run are recorded;
-- [ ] common verification is green.
+- [x] `tests/test_worker_queue_postgres.py` is green in the focused run;
+- [x] the RED run and the GREEN run are recorded;
+- [x] common verification is green.
 
 **Dependencies:** Tasks 4, 5.
 
