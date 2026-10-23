@@ -10,15 +10,6 @@ from uuid import UUID
 from app.common.application.unit_of_work import UnitOfWork
 from app.modules.code_index.domain.rag_index import RagIndex
 
-# Pinned review system prompts, as ``(review_system_key, review_system_version)``, whose
-# template has a retrieved section; empty until v5, so a usable index is not used yet.
-RETRIEVED_PROMPT_VERSIONS: frozenset[tuple[str, str]] = frozenset()
-
-
-def has_retrieved_section(review_system_key: str, review_system_version: str) -> bool:
-    """Whether the run's pinned review system prompt can carry retrieved blocks."""
-    return (review_system_key, review_system_version) in RETRIEVED_PROMPT_VERSIONS
-
 
 @dataclass(frozen=True)
 class RagReadiness:

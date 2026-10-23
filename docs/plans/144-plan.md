@@ -143,7 +143,8 @@ process section and the external items in the todo.
     (`:629-632`), per the ADR §6.1 row `docs/adr/0001-graph-rag-v1.md:230` — so any stored
     code belongs to the current target.
 - **M6. The capability set of prompt versions with a retrieved section** is a constant in
-  `app/modules/reviews/application/rag_index.py`, empty until v5.
+  `app/modules/reviews/application/rag_index.py`, empty until v5. It lands in PR 2 with its
+  first caller (moved to PR 2 Task 7 after review r1; PR 1 has no caller of it).
   - Derived: the gate compares it with the run's pinned prompt,
     `(snapshot.prompt_bindings.review_system_key, snapshot.prompt_bindings.review_system_version)`
     (`app/modules/reviews/application/policy_snapshot.py:136-137`). The adapter formats
@@ -232,7 +233,8 @@ Branch `feat/144-rag-index-review-refresh` from `origin/main`. AC6, AC12, AC13.
 - `RagReadiness(enabled: bool, index: RagIndex | None, default_head_sha: str | None)`;
   `index` is `None` when `enabled` is False.
 - M6: the capability set constant (suggested `RETRIEVED_PROMPT_VERSIONS:
-  frozenset[tuple[str, str]] = frozenset()`).
+  frozenset[tuple[str, str]] = frozenset()`) — moved to PR 2 Task 7 after review r1: PR 1
+  has no caller of it.
 - Imports only `app/modules/code_index/domain/rag_index.py` from `code_index` (see
   "Layers").
 
@@ -404,8 +406,10 @@ AC10.
   (`app/modules/reviews/application/review_context.py:506`); the parser is still open. The
   logic lives in `app/modules/reviews/application/rag_context.py` (new).
 - The stage passes `RagPlan(index_commit_sha, stale)` only for a usable index and a pinned
-  prompt version in the capability set. The retriever and the cached blob source are built
-  by the factory in `app/worker.py:537-555`.
+  prompt version in the capability set (M6), which this PR adds to
+  `app/modules/reviews/application/rag_index.py` with that first caller (moved from PR 1
+  after review r1). The retriever and the cached blob source are built by the factory in
+  `app/worker.py:537-555`.
 
 ### Targets
 
