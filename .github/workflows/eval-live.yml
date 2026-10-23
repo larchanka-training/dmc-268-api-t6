@@ -83,6 +83,10 @@ jobs:
         run: |
           profile=()
           if [[ "$EVAL_CORPUS" == rules ]]; then
+            if [[ "$EVAL_POLICY_ARM" == legacy ]]; then
+              echo "::error::corpus rules needs policy_arm none, valid or malicious; legacy shows no repository rules." >&2
+              exit 1
+            fi
             profile=(--profile rules)
           fi
           uv run python review/scripts/validate_dataset.py --root "$RUNNER_TEMP/eval-corpus" --final "${profile[@]}"
@@ -139,7 +143,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: eval-live-${{ github.run_id }}-${{ github.run_attempt }}
+          name: eval-live-${{ env.EVAL_CORPUS }}-${{ env.EVAL_POLICY_ARM }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             ${{ runner.temp }}/eval-report.json
             ${{ runner.temp }}/eval-response-metadata/
@@ -180,7 +184,7 @@ jobs:
         if: ${{ always() && inputs.export_raw_responses && steps.raw_export.outcome == 'success' }}
         uses: actions/upload-artifact@v4
         with:
-          name: eval-live-raw-${{ github.run_id }}-${{ github.run_attempt }}
+          name: eval-live-raw-${{ env.EVAL_CORPUS }}-${{ env.EVAL_POLICY_ARM }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/eval-raw-responses/
           if-no-files-found: error
           retention-days: 14

@@ -5,7 +5,7 @@
 Code under `src/` calls the backend only through `apiClient` from
 `src/api/client.ts`. The client adds the CSRF header and the base URL and retries
 5xx answers; a direct `fetch` call skips all three and fails behind the staging
-proxy.
+proxy. Report a direct `fetch` call as a correctness problem.
 
 ## Payloads
 

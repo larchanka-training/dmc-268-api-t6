@@ -1166,6 +1166,55 @@ def test_format_console_undefined_denominators() -> None:
 
 # --- #163: policy arm metadata, per-call usage and moved captures ------------------------------
 
+
+def test_format_console_prints_the_corpus_arm_and_policy_figures_of_a_rules_capture() -> None:
+    report: dict[str, Any] = {
+        "case_count": 8,
+        "corpus": "rules",
+        "valid_response_count": 8,
+        "validity": 1.0,
+        "provenance": {
+            "model_id": "model-test",
+            "prompt_path": "review/prompts/review.system.v3.md",
+            "prompt_version": "v3",
+            "prompt_sha": "a" * 64,
+            "static_digest": "sha256-v1:" + "b" * 64,
+            "corpus_digest": "sha256-v1:" + "c" * 64,
+            "run_metadata": {"policy_arm": "none"},
+        },
+        "micro": {"tp": 9, "fp": 0, "fn": 0, "precision": 1.0, "recall": 1.0},
+        "critical": {"matched": 1, "total": 1, "recall": 1.0},
+        "per_category": {},
+        "verdict": {"agreed": 8, "total": 8, "agreement": 1.0},
+        "severity_mismatches": [],
+        "rule_constraints": {"found": 1, "total": 5, "expected": 0, "share": 0.2},
+        "exceptions": {"total": 4, "exempt": 0, "flagged": 3, "respected": 1, "share": 0.25},
+        "usage": None,
+        "warnings": [],
+    }
+
+    assert format_console(report) == "\n".join(
+        [
+            "Cases: 8",
+            "Corpus: rules",
+            "Policy arm: none",
+            "Model: model-test",
+            "Prompt: review/prompts/review.system.v3.md (version v3)",
+            "Prompt SHA: " + "a" * 64,
+            "Static digest: sha256-v1:" + "b" * 64,
+            "Corpus digest: sha256-v1:" + "c" * 64,
+            "Validity: 100.0% (8/8)",
+            "Micro: TP=9 FP=0 FN=0 Precision=100.0% Recall=100.0%",
+            "Critical Recall: 100.0% (1/1)",
+            "Verdict agreement: 100.0% (8/8)",
+            "Per category:",
+            "Severity mismatches: 0",
+            "Rule constraints found without rules: 20.0% (1/5)",
+            "Exceptions flagged without rules: 75.0% (3/4)",
+        ]
+    )
+
+
 USAGE_CALL = {
     "operation": "review",
     "tokens_in": 100,

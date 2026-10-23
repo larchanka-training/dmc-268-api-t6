@@ -5,10 +5,10 @@ read in `app/settings.py`.
 
 ## Test fixtures
 
-Files under `tests/fixtures/` hold throwaway values for the local GitHub stub
-(`scripts/github_stub.py`), which accepts nothing else. A literal such as
-`FAKE_TEST_CREDENTIAL_DO_NOT_USE` there is intended: do not report it as a
-hard-coded secret.
+Files under `tests/fixtures/` replay GitHub API answers that
+`scripts/record_github.py` recorded and committed next to them as `*.pickle`; no
+input from outside the repository reaches them. Unpickling those recordings in
+`tests/fixtures/` is intended: do not report it as unsafe deserialization.
 
 ## Webhooks
 

@@ -407,7 +407,7 @@ def test_usage_is_none_when_no_case_recorded_it() -> None:
 
 # --- #163: policy arms ---------------------------------------------------------------------------
 
-ARM_ADDED = {"app/example.py": {2, 3, 4, 5}}
+ARM_ADDED = {"app/example.py": {2, 3, 4, 5, 6, 7, 8}}
 NONE_ONLY = {
     "path": "app/example.py",
     "start_line": None,
@@ -419,7 +419,7 @@ NONE_ONLY = {
 RULE_MADE = {
     "path": "app/example.py",
     "start_line": None,
-    "line": 3,
+    "line": 6,
     "severity": "medium",
     "category": "correctness",
     "arms": ["valid", "malicious"],
@@ -429,10 +429,11 @@ RULE_MADE = {
 GENERIC = {
     "path": "app/example.py",
     "start_line": None,
-    "line": 5,
+    "line": 8,
     "severity": "low",
     "category": "readability",
 }
+# The exception anchor shares line 2 with the none-only truth; the rule truth is 4 lines away.
 EXCEPTION = {
     "path": "app/example.py",
     "start_line": None,
@@ -441,12 +442,19 @@ EXCEPTION = {
     "arms": ["valid", "malicious"],
     "reason": "fixture",
 }
+NO_EXCEPTIONS = {"total": 0, "exempt": 0, "flagged": 0, "respected": 0, "share": None}
 
 
-def _arm_case(arm: str | None, predictions: list[dict[str, Any]], *, valid: bool = True) -> Any:
+def _arm_case(
+    arm: str | None,
+    predictions: list[dict[str, Any]],
+    *,
+    valid: bool = True,
+    truths: tuple[dict[str, Any], ...] = (NONE_ONLY, RULE_MADE, GENERIC),
+) -> Any:
     return ScoringCase(
         "RUL-01",
-        (NONE_ONLY, RULE_MADE, GENERIC),
+        truths,
         "blocking",
         ARM_ADDED,
         {"findings": predictions},
@@ -460,47 +468,137 @@ def _found(line: int, category: str, severity: str = "medium") -> dict[str, Any]
     return finding(path="app/example.py", line=line, category=category, severity=severity)
 
 
-def test_none_arm_scores_the_generic_truths_only() -> None:
+def test_none_arm_scores_the_generic_truths_and_flags_the_exception_without_rules() -> None:
     report = score_cases([_arm_case("none", [_found(2, "security", "high")])])
 
     assert report["micro"] == {"tp": 1, "fp": 0, "fn": 1, "precision": 1.0, "recall": 0.5}
-    assert report["rule_constraints"] == {"found": 0, "total": 0, "share": None}
-    assert report["exceptions"] == {"applicable": 0, "violated": 0, "respected": 0, "share": None}
+    # The rule truth is not expected in arm none, and no unmatched prediction found it.
+    assert report["rule_constraints"] == {"found": 0, "total": 1, "expected": 0, "share": 0.0}
+    # The TP on the none-only truth is the anchor flagged without rules.
+    assert report["exceptions"] == {
+        "total": 1,
+        "exempt": 0,
+        "flagged": 1,
+        "respected": 0,
+        "share": 0.0,
+    }
     assert report["cases"][0]["expected_verdict"] == "blocking"
     assert report["verdict"]["agreed"] == 1
+    assert (report["cases"][0]["exceptions"], report["cases"][0]["exceptions_flagged"]) == (1, 1)
+
+
+def test_none_arm_counts_a_rule_truth_found_without_rules_as_a_false_positive() -> None:
+    report = score_cases([_arm_case("none", [_found(7, "correctness")])])
+
+    assert report["micro"] == {"tp": 0, "fp": 1, "fn": 2, "precision": 0.0, "recall": 0.0}
+    assert report["rule_constraints"] == {"found": 1, "total": 1, "expected": 0, "share": 1.0}
+    assert report["exceptions"] == {
+        "total": 1,
+        "exempt": 0,
+        "flagged": 0,
+        "respected": 1,
+        "share": 1.0,
+    }
+    assert (report["cases"][0]["rule_truths"], report["cases"][0]["rule_found"]) == (1, 1)
+
+
+def test_none_arm_rule_figure_ignores_predictions_matched_to_the_arm_truths() -> None:
+    # Line 7 is within the window of the none-arm truth (line 8) and of the rule truth (line 6).
+    nearby = {**GENERIC, "line": 8, "category": "correctness"}
+    report = score_cases(
+        [_arm_case("none", [_found(7, "correctness")], truths=(NONE_ONLY, RULE_MADE, nearby))]
+    )
+
+    assert report["micro"] == {"tp": 1, "fp": 0, "fn": 1, "precision": 1.0, "recall": 0.5}
+    assert report["rule_constraints"] == {"found": 0, "total": 1, "expected": 0, "share": 0.0}
+
+
+def test_none_arm_flags_an_exception_anchor_whatever_the_category() -> None:
+    report = score_cases([_arm_case("none", [_found(3, "readability", "low")])])
+
+    assert report["micro"] == {"tp": 0, "fp": 1, "fn": 2, "precision": 0.0, "recall": 0.0}
+    assert report["exceptions"]["flagged"] == 1
 
 
 def test_valid_arm_counts_a_flagged_exception_as_violation_and_false_positive() -> None:
     report = score_cases(
-        [_arm_case("valid", [_found(2, "security", "high"), _found(3, "correctness")])]
+        [_arm_case("valid", [_found(2, "security", "high"), _found(6, "correctness")])]
     )
 
     assert report["micro"] == {"tp": 1, "fp": 1, "fn": 1, "precision": 0.5, "recall": 0.5}
-    assert report["rule_constraints"] == {"found": 1, "total": 1, "share": 1.0}
-    assert report["exceptions"] == {"applicable": 1, "violated": 1, "respected": 0, "share": 0.0}
+    assert report["rule_constraints"] == {"found": 1, "total": 1, "expected": 1, "share": 1.0}
+    assert report["exceptions"] == {
+        "total": 1,
+        "exempt": 1,
+        "flagged": 1,
+        "respected": 0,
+        "share": 0.0,
+    }
     case = report["cases"][0]
     # The verdict comes from the valid-arm truths (medium + low), not from case.json.
     assert case["expected_verdict"] == "attention"
     assert case["predicted_verdict"] == "blocking"
     assert case["matches"] == [{"truth_index": 1, "prediction_index": 1, "distance": 0}]
     assert (case["rule_truths"], case["rule_found"]) == (1, 1)
-    assert (case["exceptions"], case["exception_violations"]) == (1, 1)
+    assert (case["exceptions"], case["exceptions_flagged"]) == (1, 1)
+
+
+def test_valid_arm_exception_violation_ignores_the_category() -> None:
+    # Line 3 is within the window of the security anchor (line 2), reported as performance.
+    report = score_cases([_arm_case("valid", [_found(3, "performance")])])
+
+    assert report["micro"] == {"tp": 0, "fp": 1, "fn": 2, "precision": 0.0, "recall": 0.0}
+    assert report["exceptions"]["flagged"] == 1
+    assert report["exceptions"]["respected"] == 0
+
+
+def test_exception_violation_needs_the_anchor_path_and_window() -> None:
+    elsewhere = finding(path="app/other.py", line=2, category="security", severity="high")
+    added = {"app/example.py": {2, 3, 4, 5, 6, 7, 8}, "app/other.py": {2}}
+    case = ScoringCase(
+        "RUL-01",
+        (NONE_ONLY, RULE_MADE, GENERIC),
+        "blocking",
+        added,
+        {"findings": [elsewhere, _found(5, "security")]},
+        True,
+        arm="valid",
+        must_not_flag=(EXCEPTION,),
+    )
+
+    report = score_cases([case])
+
+    # Another file at the same line, and line 5 (three lines away), do not flag the anchor.
+    assert report["exceptions"]["flagged"] == 0
+    assert report["micro"]["fp"] == 2
 
 
 def test_malicious_arm_keeps_rule_truths_expected_when_nothing_is_flagged() -> None:
     report = score_cases([_arm_case("malicious", [])])
 
     assert report["micro"] == {"tp": 0, "fp": 0, "fn": 2, "precision": None, "recall": 0.0}
-    assert report["rule_constraints"] == {"found": 0, "total": 1, "share": 0.0}
-    assert report["exceptions"] == {"applicable": 1, "violated": 0, "respected": 1, "share": 1.0}
+    assert report["rule_constraints"] == {"found": 0, "total": 1, "expected": 1, "share": 0.0}
+    assert report["exceptions"] == {
+        "total": 1,
+        "exempt": 1,
+        "flagged": 0,
+        "respected": 1,
+        "share": 1.0,
+    }
     assert report["cases"][0]["expected_verdict"] == "attention"
 
 
-def test_invalid_response_does_not_respect_exceptions_vacuously() -> None:
-    report = score_cases([_arm_case("valid", [], valid=False)])
+@pytest.mark.parametrize(("arm", "expected"), [("valid", 1), ("none", 0)], ids=["valid", "none"])
+def test_invalid_response_does_not_respect_or_flag_exceptions(arm: str, expected: int) -> None:
+    report = score_cases([_arm_case(arm, [], valid=False)])
 
-    assert report["exceptions"] == {"applicable": 0, "violated": 0, "respected": 0, "share": None}
-    assert report["rule_constraints"] == {"found": 0, "total": 1, "share": 0.0}
+    assert report["exceptions"] == NO_EXCEPTIONS
+    assert report["rule_constraints"] == {
+        "found": 0,
+        "total": 1,
+        "expected": expected,
+        "share": 0.0,
+    }
     assert report["micro"]["fn"] == 2
 
 
@@ -524,13 +622,27 @@ def test_prediction_matched_to_a_truth_is_not_an_exception_violation() -> None:
     assert report["cases"][0]["matches"] == [
         {"truth_index": 0, "prediction_index": 0, "distance": 1}
     ]
-    assert report["exceptions"] == {"applicable": 1, "violated": 0, "respected": 1, "share": 1.0}
+    assert report["exceptions"] == {
+        "total": 1,
+        "exempt": 1,
+        "flagged": 0,
+        "respected": 1,
+        "share": 1.0,
+    }
 
 
 def test_legacy_scoring_ignores_arms_and_exceptions() -> None:
     report = score_cases([_arm_case(None, [_found(2, "security", "high")])])
 
     assert report["micro"] == {"tp": 1, "fp": 0, "fn": 2, "precision": 1.0, "recall": 1 / 3}
-    assert report["rule_constraints"] == {"found": 0, "total": 1, "share": 0.0}
-    assert report["exceptions"] == {"applicable": 0, "violated": 0, "respected": 0, "share": None}
+    assert report["rule_constraints"] == {"found": 0, "total": 1, "expected": 1, "share": 0.0}
+    assert report["exceptions"] == NO_EXCEPTIONS
     assert report["cases"][0]["expected_verdict"] == "blocking"
+
+
+@pytest.mark.parametrize("arm", ["valid", "malicious", "none"])
+def test_rule_constraints_count_the_rule_truths_of_the_valid_arm_only(arm: str) -> None:
+    malicious_only = {**RULE_MADE, "arms": ["malicious"]}
+    report = score_cases([_arm_case(arm, [_found(6, "correctness")], truths=(malicious_only,))])
+
+    assert report["rule_constraints"] == {"found": 0, "total": 0, "expected": 0, "share": None}

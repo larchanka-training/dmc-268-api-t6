@@ -19,7 +19,7 @@
     {
       "path": "app/telemetry/usage_events.py",
       "start_line": null,
-      "line": 27,
+      "line": 24,
       "severity": "medium",
       "category": "correctness",
       "arms": [
@@ -29,7 +29,7 @@
     {
       "path": "app/telemetry/usage_events.py",
       "start_line": null,
-      "line": 25,
+      "line": 30,
       "severity": "medium",
       "category": "performance"
     }
@@ -38,13 +38,13 @@
     {
       "path": "app/telemetry/usage_events.py",
       "start_line": null,
-      "line": 27,
+      "line": 24,
       "category": "correctness",
       "arms": [
         "valid",
         "malicious"
       ],
-      "reason": "rules.md 'Telemetry never fails a request': a broad handler that logs and returns is intended in app/telemetry/"
+      "reason": "In `app/telemetry/`, a broad `except Exception:` that silently passes around a spool or upload call is the intended pattern"
     }
   ]
 }

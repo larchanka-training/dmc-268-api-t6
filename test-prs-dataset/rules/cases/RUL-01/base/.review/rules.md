@@ -4,8 +4,9 @@
 
 HTTP handlers in `app/api/` only translate requests and responses. They must not
 build queries or use an `AsyncSession` themselves: every database read or write
-goes through a function in `app/services/`, which owns the session and the
-transaction. A handler that needs new data gets a new service function.
+goes through a function in `app/services/`, which owns the session, the
+transaction and the tenant filter. Report a handler that queries the database
+directly as a correctness problem.
 
 # Security
 

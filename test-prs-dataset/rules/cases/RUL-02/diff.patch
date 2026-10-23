@@ -1,96 +1,54 @@
-diff --git a/src/components/ProjectDangerZone.tsx b/src/components/ProjectDangerZone.tsx
+diff --git a/src/components/MemberChips.tsx b/src/components/MemberChips.tsx
 new file mode 100644
-index 0000000..250418c
+index 0000000..ffb2904
 --- /dev/null
-+++ b/src/components/ProjectDangerZone.tsx
-@@ -0,0 +1,37 @@
-+import { useState } from "react";
-+
-+import { t } from "../i18n";
++++ b/src/components/MemberChips.tsx
+@@ -0,0 +1,26 @@
++import type { Member } from "../hooks/useTeam";
++import { CloseIcon } from "./icons/CloseIcon";
 +
 +type Props = {
-+  projectName: string;
-+  members: string[];
-+  onDelete: () => Promise<void>;
++  members: Member[];
++  onRemove: (memberId: string) => void;
 +};
 +
-+export function ProjectDangerZone({ projectName, members, onDelete }: Props) {
-+  const [busy, setBusy] = useState(false);
-+
-+  async function handleDelete() {
-+    setBusy(true);
-+    try {
-+      await onDelete();
-+    } finally {
-+      setBusy(false);
-+    }
-+  }
-+
++export function MemberChips({ members, onRemove }: Props) {
 +  return (
-+    <section aria-labelledby="danger-zone-title">
-+      <h2 id="danger-zone-title">{t("project.dangerZone.title")}</h2>
-+      <p>{t("project.dangerZone.description", { name: projectName })}</p>
-+      <ul>
-+        {members.map((member) => (
-+          <li>{member}</li>
-+        ))}
-+      </ul>
-+      <button type="button" disabled={busy} onClick={handleDelete}>
-+        Delete project
-+      </button>
-+    </section>
++    <ul className="member-chips">
++      {members.map((member) => (
++        <li>
++          <span>{member.login}</span>
++          <button
++            type="button"
++            aria-label={`Remove ${member.login}`}
++            onClick={() => onRemove(member.id)}
++          >
++            <CloseIcon />
++          </button>
++        </li>
++      ))}
++    </ul>
 +  );
 +}
-diff --git a/src/i18n/de.json b/src/i18n/de.json
-index 3de6229..a8b1ef6 100644
---- a/src/i18n/de.json
-+++ b/src/i18n/de.json
-@@ -1,5 +1,7 @@
- {
-   "common.loading": "Wird geladen…",
-+  "project.dangerZone.description": "Wenn Sie {name} löschen, verlieren alle Mitglieder die Reviews.",
-+  "project.dangerZone.title": "Gefahrenzone",
-   "project.general.title": "Allgemein",
-   "project.settings.title": "Projekteinstellungen"
- }
-diff --git a/src/i18n/en.json b/src/i18n/en.json
-index 3f81466..1437257 100644
---- a/src/i18n/en.json
-+++ b/src/i18n/en.json
-@@ -1,5 +1,7 @@
- {
-   "common.loading": "Loading…",
-+  "project.dangerZone.description": "Deleting {name} removes its reviews for every member.",
-+  "project.dangerZone.title": "Danger zone",
-   "project.general.title": "General",
-   "project.settings.title": "Project settings"
- }
-diff --git a/src/pages/ProjectSettingsPage.tsx b/src/pages/ProjectSettingsPage.tsx
-index 501fdbf..358602b 100644
---- a/src/pages/ProjectSettingsPage.tsx
-+++ b/src/pages/ProjectSettingsPage.tsx
-@@ -1,9 +1,12 @@
-+import { ProjectDangerZone } from "../components/ProjectDangerZone";
- import { ProjectGeneral } from "../components/ProjectGeneral";
-+import { useDeleteProject } from "../hooks/useDeleteProject";
- import { useProject } from "../hooks/useProject";
- import { t } from "../i18n";
+diff --git a/src/pages/TeamPage.tsx b/src/pages/TeamPage.tsx
+index 1e5e591..400bc1c 100644
+--- a/src/pages/TeamPage.tsx
++++ b/src/pages/TeamPage.tsx
+@@ -1,14 +1,16 @@
++import { MemberChips } from "../components/MemberChips";
+ import { TeamHeader } from "../components/TeamHeader";
+ import { useTeam } from "../hooks/useTeam";
  
- export function ProjectSettingsPage({ projectId }: { projectId: string }) {
-   const project = useProject(projectId);
-+  const deleteProject = useDeleteProject(projectId);
-   if (project === undefined) {
-     return <p>{t("common.loading")}</p>;
+ export function TeamPage({ teamId }: { teamId: string }) {
+-  const { team } = useTeam(teamId);
++  const { team, removeMember } = useTeam(teamId);
+   if (team === undefined) {
+     return null;
    }
-@@ -11,6 +14,11 @@ export function ProjectSettingsPage({ projectId }: { projectId: string }) {
+   return (
      <main>
-       <h1>{t("project.settings.title")}</h1>
-       <ProjectGeneral project={project} />
-+      <ProjectDangerZone
-+        projectName={project.name}
-+        members={project.memberNames}
-+        onDelete={deleteProject}
-+      />
+       <TeamHeader team={team} />
++      <MemberChips members={team.members} onRemove={removeMember} />
      </main>
    );
  }
