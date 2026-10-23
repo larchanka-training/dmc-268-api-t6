@@ -201,6 +201,37 @@ common verification is green.
 
 **Dependencies:** Task 2. Tasks 3 and 4 are independent of each other.
 
+### Task 5: Name a refused Go package by the clauses that can be read
+
+**Commit:** `fix(reviews): name a refused go package by a clause that can be read (#168)`
+
+**Files:** `app/modules/reviews/application/ast_resolution.py` (`_go_package_name` only);
+`tests/test_ast_resolution.py`; this plan and task list.
+
+**What to do:** D6. When `_load` refuses the members of a Go package, walk them in member
+order through the provider and take the clause of the first member whose facts carry one.
+Only when no member yields a clause does the path tail stay. The shared `go_package_name`,
+code_index and `RESOLVER_VERSION` stay unchanged.
+
+**Tests to add (RED on `76fb6f73` for clause `db`, green for the clause `store` twin):** one
+test parametrized over the clause (`db` in `internal/store/`, and `store` as the twin) and the
+member failure. Each case expects the ref for `<clause>.Open()` with the reason the twin
+gives:
+- a parse error in the only member: `(UNSUPPORTED, "ast_failed")`;
+- a member without a clause (`packag db`) before a valid one: `(UNSUPPORTED, "ast_failed")`;
+- a decode failure before a readable member: `(UNSUPPORTED, "source_decode_failed")`. A later
+  member `zz.go` is never asked;
+- an excluded member before a readable one: `(EXCLUDED, "excluded")`;
+- the file limit hit after a member was read: `(UNSUPPORTED, "ast_limit")`.
+
+**Done when:**
+
+- [ ] RED and GREEN runs are recorded;
+- [ ] `go_package_target`, `go_package_name`, `review_context.py` and code_index are unchanged;
+- [ ] common verification is green.
+
+**Dependencies:** Task 4.
+
 ### Checkpoint and publication
 
 - Full verification (`df -h /tmp` first).

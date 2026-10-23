@@ -64,7 +64,7 @@ at the todo.
 
 | AC | Requirement (issue #168, part 2) | Covered by |
 | --- | --- | --- |
-| AC1 | A decode/parse failure of any member of a Go package forbids `resolved` and gives `unsupported` with a reason. Regressions: a member with an ERROR node and no duplicate; a member with a declaration of the same name inside the ERROR region | D1, D2; Task 1. The no-duplicate and hidden-declaration fixtures, the two broken package clause fixtures, and the decode pin (`source_decode_failed`) |
+| AC1 | A decode/parse failure of any member of a Go package forbids `resolved` and gives `unsupported` with a reason. Regressions: a member with an ERROR node and no duplicate; a member with a declaration of the same name inside the ERROR region | D1, D2; Task 1. The no-duplicate and hidden-declaration fixtures, the two broken package clause fixtures, and the decode pin (`source_decode_failed`). D6; Task 5: a clause that differs from the directory keeps the reason of each member failure (parse, decode, excluded, file limit) |
 | AC2a | An import target (Python/TS) with a parse error gets the parse status and reason, not `resolved` with an L4 refusal by `ast_limit` | D1–D3; Task 1. Resolver tests for an error elsewhere in the target and an error over the imported symbol; one `BuildReviewContext` test: `unsupported`/`ast_failed`, no `ast_limit` omission for the target, no L4 |
 | AC2b | Python `from x import *` and Go dot-import used by the changed code give `ImportRef` `unsupported` with a reason | D4; Task 2. The flipped assertion at `tests/test_ast_resolution.py:270`, a Go dot-import test, negatives for an unused wildcard and for `_` |
 | AC3a | Affected symbols for TS/JS | Task 3 |
@@ -91,8 +91,14 @@ at the todo.
     with errors gives `unsupported`, not `missing`, so the submodule is not guessed.
 
   Not changed: `go_package_target` and `go_package_name`. Both are shared with code_index
-  (`app/modules/code_index/application/index_resolution.py:285`, `:320`), and D1 already
-  makes the binding name irrelevant for a refused package.
+  (`app/modules/code_index/application/index_resolution.py:285`, `:320`).
+
+  Correction (found in review): D1 does not make the binding name irrelevant for a refused
+  package. The name decides which use the refusal is reported on. With the path-tail
+  fallback, a package whose clause differs from its directory (`package db` in
+  `internal/store/`) and has one unusable member gave no `ImportRef` at all for `db.Open()`.
+  This was already the behaviour on `22c621ab` for a decode failure, an excluded member and
+  `ast_limit`. D6 closes it.
 
   A derived consequence: `_load` stops at the first unusable member in sorted order, as it
   already does for decode and `ast_limit` failures. So a member with errors that sorts
@@ -141,6 +147,33 @@ at the todo.
   (`app/modules/reviews/infrastructure/redis_context_cache.py:43-45`, `:70`). Bumping it would
   also change `INDEX_RESOLVER_VERSION` (`index_resolution.py:59`) and force a reindex
   without any index change.
+- **D6 (Task 5). A refused Go package is named by a clause that can be read.** Only the
+  review-side `ImportResolver._go_package_name` changes. When `_load` refuses the members, it
+  walks them in member order through the provider and takes the clause of the first member
+  whose facts carry one. A member with syntax errors counts. The shared `go_package_name`,
+  code_index and `RESOLVER_VERSION` stay as they are; a resolved package is named exactly as
+  before.
+  - Why a member with errors may name it: the extractor takes `package_name` only from a
+    `package_clause` that is a direct child of the root (`tree_sitter_facts.py:619-634`).
+    When recovery wraps the clause in an ERROR node, the name is `None`. Probed shapes:
+    `packag db`, `package db extra`, `package db.x`, `package`, `package func` and
+    `package "db"`. One shape keeps a name: `package 1db` gives `db`, from a root-level clause
+    with an ERROR child. The facts carry no clause position, so the resolver cannot tell it
+    apart. The package is refused either way: the name only decides which use gets the
+    `unsupported` ref, and it never leads to `resolved`.
+  - Budget: members `_load` has already asked are cached by the provider and are not
+    counted again. The walk adds no file when a member at or before the first refusal
+    carries a clause (a parse error, a cap hit after a read). Otherwise it adds one file per
+    member after the refusal, up to the first clause. A package never counts more files than
+    a resolved package of the same size, so a later import hits `ast_limit` no earlier.
+  - Exclusion: the provider decides `excluded` by path before any read (`_Files.text` checks
+    `_denied(path)` before `read_blob`, and `_load_facts` calls `text` before the facts
+    cache). The walk skips such a member without reading it.
+  - Residue, kept: when no member can be read at all, the path tail stays. That happens when
+    every member is undecodable, excluded or binary, or when the file limit is reached
+    before the first read. It also stays for refusals decided by path, before any member is
+    read: a target that is not `RESOLVED` (a platform-named member, a nested module,
+    `go.work`, an incomplete tree).
 
 ## Out of scope
 
