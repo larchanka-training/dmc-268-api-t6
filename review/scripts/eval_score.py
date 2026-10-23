@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from decimal import Decimal
 from functools import cache
 from typing import Any
 
@@ -24,6 +25,8 @@ class ScoringCase:
     added_lines: Mapping[str, set[int]]
     raw_response: object
     response_valid: bool
+    # Per-call usage recorded with the capture (#163); ``None`` when it was not recorded.
+    usage: tuple[Mapping[str, Any], ...] | None = None
 
 
 def _ratio(numerator: int, denominator: int) -> float | None:
@@ -68,6 +71,23 @@ def _verdict(findings: Sequence[dict[str, Any]]) -> str:
     if severities & {"medium", "low"}:
         return "attention"
     return "clean"
+
+
+def _usage_totals(cases: Sequence[ScoringCase]) -> dict[str, Any] | None:
+    """Sum recorded call usage; ``None`` when no case recorded any (older captures)."""
+    recorded = [case.usage for case in cases if case.usage is not None]
+    if not recorded:
+        return None
+    calls = [call for usage in recorded for call in usage]
+    cost = sum((Decimal(call["cost_usd"]) for call in calls), Decimal(0))
+    return {
+        "cases": len(recorded),
+        "calls": len(calls),
+        "tokens_in": sum(call["tokens_in"] for call in calls),
+        "tokens_out": sum(call["tokens_out"] for call in calls),
+        "cache_read_tokens": sum(call["cache_read_tokens"] for call in calls),
+        "cost_usd": format(cost.normalize(), "f"),
+    }
 
 
 def _matches(
@@ -221,5 +241,6 @@ def score_cases(cases: Sequence[ScoringCase]) -> dict[str, Any]:
             "agreement": _ratio(verdict_agreed, len(cases)),
         },
         "severity_mismatches": severity_mismatches,
+        "usage": _usage_totals(cases),
         "cases": case_reports,
     }

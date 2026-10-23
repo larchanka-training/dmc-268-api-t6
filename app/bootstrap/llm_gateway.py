@@ -45,6 +45,7 @@ from app.modules.reviews.application.llm import (
     LlmUsage,
     RunCallContext,
 )
+from app.modules.reviews.application.policy_snapshot import PolicySnapshot
 from app.modules.reviews.application.prompt_builder import (
     PullRequestMeta,
     RepoConventions,
@@ -139,6 +140,9 @@ class ReviewCase:
     agents_md: str | None = None
     conventions: RepoConventions = field(default_factory=lambda: RepoConventions((), ()))
     engine: EngineName = "fast"
+    # With a snapshot the prompt carries the repository rules and AGENTS.md blocks instead
+    # of ``agents_md`` (the A/B arms of the eval, #163); ``None`` keeps the legacy envelope.
+    policy_snapshot: PolicySnapshot | None = None
 
 
 # Attempt deadlines of docs/PIPELINE_SPEC.md §3: fast 8 min, deep (SandboxEngine) 10 min.
@@ -248,6 +252,7 @@ async def review_case(
         pr_meta=case.pr_meta,
         changed_files=parse_unified_diff(case.diff),
         omitted_files=(),
+        policy_snapshot=case.policy_snapshot,
     )
     result, _, calls, latency_ms = await _run_database_free_case(
         settings,
