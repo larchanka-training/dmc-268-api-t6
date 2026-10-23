@@ -81,8 +81,7 @@ def gitlab_text_position(version: dict[str, str], finding: PublishedFinding) -> 
 def _provider_file_path(file: DiffFile) -> str:
     """Non-empty provider ``new_path``, otherwise ``old_path`` (CONTEXT §9.5)."""
     path = file.provider_new_path or file.provider_old_path
-    if path is None:
-        raise ValueError("diff file has no provider path for GitLab line_code")
+    assert path is not None
     return path
 
 

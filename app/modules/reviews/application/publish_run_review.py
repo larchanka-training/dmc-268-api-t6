@@ -169,11 +169,6 @@ def publication_route(provider: str, project_id: int) -> PublicationRoute | None
     return None
 
 
-def finding_placement_id(finding: PublishedFinding) -> UUID | None:
-    """Durable finding row id for per-finding inline vs body placement."""
-    return finding.finding_id
-
-
 def _moved_to_body_finding_ids(
     context_findings: tuple[PublishedFinding, ...],
     fallback_moved: tuple[UUID, ...],
@@ -190,6 +185,8 @@ def _moved_to_body_finding_ids(
 
 def move_inline_to_body(body: str, findings: tuple[PublishedFinding, ...]) -> str:
     """The 422 fallback: every inline comment becomes a line of the review body (SD §8.3)."""
+    if not findings:
+        return body
     lines = [body, "", "## Inline findings"]
     lines.extend(
         f"- **{item.title}** (`{item.path}:{item.line}`): {item.body}" for item in findings
@@ -292,9 +289,7 @@ class PublishRunReview:
                 coordinate_fallback_done = True
                 remaining = submission.findings if error.unposted is None else error.unposted
                 moved_to_body_finding_ids = tuple(
-                    finding_id
-                    for item in remaining
-                    if (finding_id := finding_placement_id(item)) is not None
+                    finding_id for item in remaining if (finding_id := item.finding_id) is not None
                 )
                 submission = replace(
                     submission,

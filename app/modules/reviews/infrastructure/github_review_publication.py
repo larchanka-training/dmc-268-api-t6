@@ -119,7 +119,11 @@ def _publish_error(response: httpx.Response) -> PublishError:
         message, errors = response.text[:500], ""
     detail = f"{message} {errors}".strip()
     retry_after = response.headers.get("Retry-After")
-    delay = timedelta(seconds=int(retry_after)) if retry_after and retry_after.isdigit() else None
+    delay = (
+        timedelta(seconds=int(retry_after))
+        if retry_after and retry_after.isascii() and retry_after.isdigit()
+        else None
+    )
     rate_limited = response.headers.get("X-RateLimit-Remaining") == "0" or delay is not None
     if status == 422:
         lowered = detail.lower()
@@ -259,12 +263,11 @@ class GitHubPullRequestReviewGateway:
         comment_ids = tuple(int(item["id"]) for item in payload)
         posted: frozenset[UUID] | None = None
         if any(item.finding_id is not None for item in findings):
-            if len(comment_ids) == len(findings):
-                posted = frozenset(
-                    finding.finding_id for finding in findings if finding.finding_id is not None
-                )
-            else:
-                posted = _posted_inline_finding_ids(payload, findings)
+            posted = (
+                frozenset()
+                if len(comment_ids) == 0
+                else _posted_inline_finding_ids(payload, findings)
+            )
         return SubmittedReview(review_id, comment_ids, posted_inline_finding_ids=posted)
 
 
@@ -276,14 +279,20 @@ def _posted_inline_finding_ids(
     for finding in findings:
         if finding.finding_id is None:
             continue
+        expected_body = comment_body(finding.title, finding.body, finding.suggestion)
         for item in comments:
             comment_id = item.get("id")
             if not isinstance(comment_id, int) or comment_id in used:
                 continue
+            if item.get("body") != expected_body:
+                continue
             if item.get("path") != finding.path or item.get("line") != finding.line:
                 continue
             start = item.get("start_line")
-            if finding.start_line is not None and start != finding.start_line:
+            if finding.start_line is not None:
+                if start != finding.start_line:
+                    continue
+            elif start is not None:
                 continue
             posted.add(finding.finding_id)
             used.add(comment_id)

@@ -37,14 +37,12 @@ from app.modules.reviews.infrastructure.models import (
     Finding,
     Run,
 )
+from app.modules.reviews.infrastructure.publication_findings import published_finding_from_row
 from app.modules.reviews.infrastructure.run_action_records import insert_run_action
 from app.modules.reviews.infrastructure.run_notifications import notify_run_state
 from app.modules.reviews.infrastructure.run_origin import active_origin_condition, origin_active
 from app.modules.reviews.infrastructure.run_origin_locks import lock_run_origin_row
-from app.modules.reviews.infrastructure.run_repository import (
-    _published_finding_from_row,
-    load_publication_diff_map,
-)
+from app.modules.reviews.infrastructure.run_repository import load_publication_diff_map
 from app.modules.workspaces.infrastructure.models import Workspace
 
 _ROW = (Run, CodeChange, Repository, ProviderInstallation)
@@ -366,7 +364,10 @@ class SqlAlchemyRunLifecycleStore:
             return None
         run, pr, repository, installation = row
         findings = await self._published_findings(run_id)
-        diff_map = await load_publication_diff_map(self._session, run_id)
+        provider = installation.provider
+        diff_map = (
+            await load_publication_diff_map(self._session, run_id) if provider == "gitlab" else None
+        )
         return PublishContext(
             run_id=run.id,
             state=run.state.value,
@@ -382,7 +383,7 @@ class SqlAlchemyRunLifecycleStore:
             pr_number=pr.external_number,
             review_body=run.review_body or "",
             findings=tuple(
-                _published_finding_from_row(item, diff_map)
+                published_finding_from_row(item, diff_map, provider=provider)
                 for item in findings
                 if item.inline_comment
             ),

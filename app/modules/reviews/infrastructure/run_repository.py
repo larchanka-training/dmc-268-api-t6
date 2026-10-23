@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import logging
 from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
@@ -24,7 +23,7 @@ from app.modules.repositories.infrastructure.models import (
 )
 from app.modules.reviews.application.cancel_run import CancelRequestResult
 from app.modules.reviews.application.conventions import ActiveConventionsPrompt
-from app.modules.reviews.application.diff_map import DiffMap
+from app.modules.reviews.application.diff_map import DiffMap, vcs_provider_name
 from app.modules.reviews.application.findings_post_processor import (
     ProcessedFinding,
     ProcessedReviewOutput,
@@ -43,9 +42,6 @@ from app.modules.reviews.application.process_run import (
     RunVcsInput,
 )
 from app.modules.reviews.application.prompt_builder import review_rule_from_stored
-from app.modules.reviews.application.publication_coordinates import (
-    enrich_gitlab_publication_finding,
-)
 from app.modules.reviews.application.review_output import (
     FindingPostProcessingInput,
     PublishedFinding,
@@ -632,6 +628,11 @@ class SqlAlchemyRunRepository:
         )
 
 
+def diff_snapshot_from_code_change_diff(row: CodeChangeDiff) -> DiffSnapshot:
+    """Map a durable diff row to the snapshot shape used by publication DiffMap rebuild."""
+    return SqlAlchemyRunRepository._to_diff_snapshot(row)
+
+
 async def load_publication_diff_map(session: AsyncSession, run_id: UUID) -> DiffMap | None:
     """Rebuild DiffMap/v1 from durable snapshots for publish bucketing and GitLab coords."""
     row = (
@@ -641,14 +642,20 @@ async def load_publication_diff_map(session: AsyncSession, run_id: UUID) -> Diff
                 Run.base_sha,
                 CodeChange.repository_id,
                 CodeChange.external_number,
+                ProviderInstallation.provider,
             )
             .join(CodeChange, CodeChange.id == Run.code_change_id)
+            .join(Repository, Repository.id == CodeChange.repository_id)
+            .join(
+                ProviderInstallation,
+                ProviderInstallation.id == Repository.provider_installation_id,
+            )
             .where(Run.id == run_id)
         )
     ).one_or_none()
     if row is None:
         return None
-    head_sha, base_sha, repository_id, external_number = row
+    head_sha, base_sha, repository_id, external_number, provider = row
     snapshot_rows = (
         (
             await session.execute(
@@ -660,27 +667,15 @@ async def load_publication_diff_map(session: AsyncSession, run_id: UUID) -> Diff
         .scalars()
         .all()
     )
-    snapshots = [SqlAlchemyRunRepository._to_diff_snapshot(item) for item in snapshot_rows]
-    context_response = await session.scalar(
-        select(RunAction.response).where(
-            RunAction.run_id == run_id,
-            RunAction.tool == "context.build",
-        )
-    )
-    diff_old_sha: str | None = None
-    if isinstance(context_response, dict):
-        diff_payload = context_response.get("diff")
-        if isinstance(diff_payload, dict):
-            raw_old = diff_payload.get("diff_old_sha")
-            if isinstance(raw_old, str) and raw_old:
-                diff_old_sha = raw_old
+    snapshots = [diff_snapshot_from_code_change_diff(item) for item in snapshot_rows]
     return diff_map_from_snapshots(
         repository_id=repository_id,
         code_change_number=external_number,
         head_sha=head_sha,
         base_sha=base_sha,
-        diff_old_sha=diff_old_sha,
+        diff_old_sha=None,
         snapshots=snapshots,
+        provider=vcs_provider_name(provider),
     )
 
 
@@ -750,7 +745,6 @@ class SqlAlchemyReviewOutputRepository:
                 RunAction.tool == "llm.review_output",
             )
         )
-        diff_map = await load_publication_diff_map(self._session, run_id)
         if existing is None:
             await insert_run_action(
                 self._session,
@@ -761,9 +755,7 @@ class SqlAlchemyReviewOutputRepository:
                 started_at=datetime.now(UTC),
                 duration_ms=0,
             )
-            findings = tuple(
-                _published_finding_from_review(item.finding, diff_map) for item in processed.inline
-            )
+            findings = tuple(_to_published_finding(item.finding) for item in processed.inline)
             records = (*processed.inline, *processed.body_only, *processed.dropped)
             self._session.add_all([_to_finding(run_id, item) for item in records])
             run.review_body = processed.review_body
@@ -775,7 +767,7 @@ class SqlAlchemyReviewOutputRepository:
                     .order_by(Finding.created_at.asc(), Finding.id.asc())
                 )
             ).all()
-            findings = tuple(_published_finding_from_row(item, diff_map) for item in rows)
+            findings = tuple(_to_published_finding_row(item) for item in rows)
 
         assert run.review_body is not None
         run.state = RunState.PUBLISHING
@@ -927,24 +919,6 @@ def _to_published_finding_row(item: Finding) -> PublishedFinding:
         rule_name=item.rule_name,
         finding_id=item.id,
     )
-
-
-def _published_finding_from_row(item: Finding, diff_map: DiffMap | None) -> PublishedFinding:
-    finding = _to_published_finding_row(item)
-    if diff_map is None:
-        logging.getLogger(__name__).warning(
-            "Publication DiffMap missing for run finding %s; GitLab coordinates omitted",
-            item.id,
-        )
-        return finding
-    return enrich_gitlab_publication_finding(diff_map, finding)
-
-
-def _published_finding_from_review(finding: object, diff_map: DiffMap | None) -> PublishedFinding:
-    published = _to_published_finding(finding)
-    if diff_map is None:
-        return published
-    return enrich_gitlab_publication_finding(diff_map, published)
 
 
 def _severity_threshold_value(threshold: SeverityThreshold) -> SeverityThresholdValue:
