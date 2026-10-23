@@ -6,10 +6,12 @@ import hashlib
 import hmac
 import importlib.util
 import json
+import os
 import re
+import signal
 import sys
 import threading
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator, Mapping
 from pathlib import Path
 from types import ModuleType
 from typing import Any
@@ -72,7 +74,15 @@ def test_project_guard_refuses_the_shared_stand(
     assert driver.project_error(project) == message
 
 
-def test_project_guard_accepts_a_separate_project(driver: ModuleType) -> None:
+def test_project_guard_refuses_this_checkouts_default_project(
+    driver: ModuleType, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(driver, "REPO_ROOT", Path("/work/My.Clone-163d"))
+
+    assert driver.compose_project_name("My.Clone-163d") == "myclone-163d"
+    assert driver.project_error("myclone-163d") == (
+        "--project must differ from 'myclone-163d', this checkout's default compose project"
+    )
     assert driver.project_error("dmc163load") is None
 
 
@@ -92,6 +102,30 @@ def test_main_exits_2_before_any_docker_command(
     assert driver.main(argv) == 2
 
 
+@pytest.mark.parametrize(
+    "argv,message",
+    [
+        (["--runs", "5", "--workers", "6"], "--workers must be from 1 to --runs"),
+        (["--runs", "0"], "--runs must be from 1 to 20"),
+        (["--workers", "0"], "--workers must be from 1 to --runs"),
+    ],
+    ids=["more-workers-than-runs", "no-runs", "no-workers"],
+)
+def test_invalid_run_shapes_exit_2(
+    driver: ModuleType, capsys: pytest.CaptureFixture[str], argv: list[str], message: str
+) -> None:
+    with pytest.raises(SystemExit) as exit_info:
+        driver.parse_args(["--project", "dmc163test", *argv])
+
+    assert exit_info.value.code == 2
+    assert message in capsys.readouterr().err
+
+
+def test_workers_default_to_runs(driver: ModuleType) -> None:
+    assert driver.parse_args(["--runs", "7"]).workers == 7
+    assert driver.parse_args(["--runs", "10", "--workers", "5"]).workers == 5
+
+
 def test_every_compose_command_names_the_project_and_both_files(driver: ModuleType) -> None:
     assert driver.compose_command("dmc163load", "down", "-v") == [
         "docker",
@@ -109,6 +143,36 @@ def test_every_compose_command_names_the_project_and_both_files(driver: ModuleTy
         "down",
         "-v",
     ]
+
+
+def test_compose_sees_only_path_home_docker_and_the_generated_values(driver: ModuleType) -> None:
+    environ = {
+        "PATH": "/usr/bin",
+        "HOME": "/home/u",
+        "DOCKER_HOST": "unix:///run/docker.sock",
+        "DOCKER_CONFIG": "/home/u/.docker",
+        "AUTH_JWT_PRIVATE_KEY": "real-key",
+        "LLM_API_KEYS": "real-llm-key",
+        "GITHUB_APP_PRIVATE_KEY": "real-app-key",
+        "COMPOSE_PROFILES": "everything",
+        "POSTGRES_USER": "someone-else",
+    }
+
+    env = driver.stack_env(environ, {"BACKEND_PORT": "18001", "LOAD_WEBHOOK_SECRET": "s"})
+
+    assert env == {
+        "PATH": "/usr/bin",
+        "HOME": "/home/u",
+        "DOCKER_HOST": "unix:///run/docker.sock",
+        "DOCKER_CONFIG": "/home/u/.docker",
+        "POSTGRES_USER": "app",
+        "POSTGRES_PASSWORD": "app",
+        "POSTGRES_DB": "app",
+        "RABBITMQ_USER": "app",
+        "RABBITMQ_PASSWORD": "app",
+        "BACKEND_PORT": "18001",
+        "LOAD_WEBHOOK_SECRET": "s",
+    }
 
 
 # --- metrics and verdict ---------------------------------------------------------------------
@@ -167,60 +231,105 @@ def test_max_parallel_counts_overlapping_runs(driver: ModuleType) -> None:
     assert driver.max_parallel([]) == 0
 
 
-_PASSING = {
-    "all_succeeded": True,
-    "all_first_attempt": True,
-    "one_run_per_pr": True,
-    "one_review_per_pr": True,
-    "dlq_empty": True,
+_CHECKS = (
+    "finished_in_time",
+    "all_succeeded",
+    "all_first_attempt",
+    "one_run_per_pr",
+    "one_review_per_pr",
+    "one_review_call_per_run",
+    "every_delivery_projected",
+    "all_workers_used",
+    "parallel",
+    "queue_wait_within_limit",
+    "dlq_empty",
+)
+_ROWS = [_row(1), _row(2), _row(3)]
+_GOOD: dict[str, Any] = {
+    "review_posts": {"1": 1, "2": 1, "3": 1},
+    "llm_calls": {"RepoConventionsDraft": 3, "ReviewOutput": 3},
+    "receipts": {"projected": 6},
+    "dlq_depth": 0,
+    "peak": 3,
+    "timed_out": False,
 }
-_ONE_REVIEW_EACH = {"1": 1, "2": 1, "3": 1}
 
 
 @pytest.mark.parametrize(
-    "rows,review_posts,dlq_depth,failed",
+    "rows,changes,workers,failed",
     [
-        ([_row(1), _row(2), _row(3)], _ONE_REVIEW_EACH, 0, []),
-        ([_row(1), _row(2, state="failed"), _row(3)], _ONE_REVIEW_EACH, 0, ["all_succeeded"]),
-        ([_row(1), _row(2, attempt=2), _row(3)], _ONE_REVIEW_EACH, 0, ["all_first_attempt"]),
-        ([_row(1), _row(3)], _ONE_REVIEW_EACH, 0, ["one_run_per_pr"]),
-        ([_row(1), _row(2), _row(3), _row(3)], _ONE_REVIEW_EACH, 0, ["one_run_per_pr"]),
-        ([_row(1), _row(2), _row(3)], {"1": 1, "2": 2, "3": 1}, 0, ["one_review_per_pr"]),
-        ([_row(1), _row(2), _row(3)], {"1": 1, "3": 1}, 0, ["one_review_per_pr"]),
-        ([_row(1), _row(2), _row(3)], _ONE_REVIEW_EACH, 1, ["dlq_empty"]),
-        ([_row(1), _row(2), _row(3)], _ONE_REVIEW_EACH, None, ["dlq_empty"]),
-        (
-            [],
-            {},
-            0,
-            ["all_succeeded", "all_first_attempt", "one_run_per_pr", "one_review_per_pr"],
-        ),
+        (_ROWS, {}, 3, []),
+        (_ROWS, {"timed_out": True}, 3, ["finished_in_time"]),
+        ([_row(1), _row(2, state="failed"), _row(3)], {}, 3, ["all_succeeded"]),
+        ([_row(1), _row(2, attempt=2), _row(3)], {}, 3, ["all_first_attempt"]),
+        ([_row(1), _row(3)], {}, 2, ["one_run_per_pr"]),
+        ([*_ROWS, _row(3, worker_id="worker-3:1")], {}, 3, ["one_run_per_pr"]),
+        (_ROWS, {"review_posts": {"1": 1, "2": 2, "3": 1}}, 3, ["one_review_per_pr"]),
+        (_ROWS, {"review_posts": {"1": 1, "3": 1}}, 3, ["one_review_per_pr"]),
+        (_ROWS, {"llm_calls": {"ReviewOutput": 4}}, 3, ["one_review_call_per_run"]),
+        (_ROWS, {"llm_calls": {}}, 3, ["one_review_call_per_run"]),
+        (_ROWS, {"receipts": {"projected": 3}}, 3, ["every_delivery_projected"]),
+        (_ROWS, {"receipts": {"projected": 5, "failed": 1}}, 3, ["every_delivery_projected"]),
+        ([_row(1), _row(2), _row(3, worker_id="worker-1:1")], {}, 3, ["all_workers_used"]),
+        (_ROWS, {}, 2, ["all_workers_used"]),
+        (_ROWS, {"peak": 2}, 3, ["parallel"]),
+        (_ROWS, {"peak": 2}, 2, ["all_workers_used"]),
+        ([_row(1), _row(2, started=1030.26), _row(3)], {}, 3, ["queue_wait_within_limit"]),
+        ([_row(1), _row(2, started=None), _row(3)], {}, 3, ["queue_wait_within_limit"]),
+        (_ROWS, {"dlq_depth": 1}, 3, ["dlq_empty"]),
+        (_ROWS, {"dlq_depth": None}, 3, ["dlq_empty"]),
     ],
     ids=[
         "pass",
+        "timed-out",
         "failed-run",
         "second-attempt",
         "missing-run",
         "extra-run",
         "two-reviews",
         "missing-review",
+        "extra-review-call",
+        "no-review-call",
+        "duplicate-not-projected",
+        "failed-receipt",
+        "idle-worker",
+        "fewer-workers-than-expected",
+        "serial-runs",
+        "peak-meets-fewer-workers",
+        "queue-wait-over-limit",
+        "never-started",
         "dlq-message",
         "no-dlq",
-        "no-runs",
     ],
 )
 def test_verdict_rules(
     driver: ModuleType,
     rows: list[dict[str, object]],
-    review_posts: dict[str, int],
-    dlq_depth: int | None,
+    changes: dict[str, Any],
+    workers: int,
     failed: list[str],
 ) -> None:
+    observed = driver.Observed(**{**_GOOD, **changes})
+
     checks = driver.verdict(
-        driver.run_metrics(rows), runs=3, review_posts=review_posts, dlq_depth=dlq_depth
+        driver.run_metrics(rows), observed, runs=3, workers=workers, max_queue_wait_ms=30000.0
     )
 
-    assert checks == {name: name not in failed for name in _PASSING}
+    assert checks == {name: name not in failed for name in _CHECKS}
+
+
+def test_queue_wait_limit_is_inclusive(driver: ModuleType) -> None:
+    rows = [_row(1, started=1030.25), _row(2), _row(3)]
+
+    checks = driver.verdict(
+        driver.run_metrics(rows),
+        driver.Observed(**_GOOD),
+        runs=3,
+        workers=3,
+        max_queue_wait_ms=30000.0,
+    )
+
+    assert checks["queue_wait_within_limit"]
 
 
 # --- deliveries and the stub agree -----------------------------------------------------------
@@ -483,3 +592,279 @@ def test_override_keeps_the_stub_on_loopback_and_points_every_github_client_at_i
         assert "      GITHUB_API_URL: http://stub:9999\n" in _service_env(
             REPO_ROOT / "deploy/load/compose.parallel-runs.yml", service
         ), service
+
+
+def test_override_publishes_every_port_on_loopback_only() -> None:
+    text = (REPO_ROOT / "deploy/load/compose.parallel-runs.yml").read_text()
+    base = (REPO_ROOT / "docker-compose.yml").read_text()
+
+    assert (
+        "  backend:\n    ports: !override\n"
+        '      - "127.0.0.1:${BACKEND_PORT:?set by scripts/parallel_runs_load.py}:8000"\n'
+    ) in text
+    assert "  postgres:\n    ports: !reset []\n" in text
+    published = re.findall(r'(?m)^      - "([^"]+:\d+)"$', text)
+    assert published and all(entry.startswith("127.0.0.1:") for entry in published)
+    # The base file keeps the broker and Redis on loopback, so the override need not.
+    for entry in (
+        '      - "127.0.0.1:${RABBITMQ_PORT:-5672}:5672"\n',
+        '      - "127.0.0.1:${RABBITMQ_MANAGEMENT_PORT:-15672}:15672"\n',
+        '      - "127.0.0.1:${REDIS_PORT:-6379}:6379"\n',
+    ):
+        assert entry in base
+
+
+def test_override_probes_rabbitmq_only_after_the_server_wrote_its_cookie() -> None:
+    text = (REPO_ROOT / "deploy/load/compose.parallel-runs.yml").read_text()
+    base = (REPO_ROOT / "docker-compose.yml").read_text()
+
+    # Without the guard, a root probe can create a cookie the server cannot read (eacces).
+    assert (
+        '      test: ["CMD-SHELL", "test -f /var/lib/rabbitmq/.erlang.cookie'
+        ' && rabbitmq-diagnostics -q ping"]\n'
+    ) in text.split("\n  rabbitmq:\n", 1)[1]
+    # Drift guard: a change of the base probe needs a new look at this override.
+    assert '      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]\n' in base
+
+
+# --- the scenario on a fake stack ------------------------------------------------------------
+
+
+class FakeStack:
+    """The compose project as `execute` drives it, without docker."""
+
+    def __init__(
+        self,
+        *,
+        leftovers: tuple[str, ...] = (),
+        up_error: Exception | None = None,
+        existing_error: Exception | None = None,
+        rows: list[dict[str, object]] | None = None,
+        on_up: Callable[[], None] | None = None,
+        reject: bool = False,
+        receipts: dict[str, int] | None = None,
+    ) -> None:
+        self.project = "dmc163test"
+        self.leftovers = leftovers
+        self.up_error = up_error
+        self.existing_error = existing_error
+        self._rows = _ROWS if rows is None else rows
+        self.on_up = on_up
+        self.reject = reject
+        self._receipts = {"projected": 6} if receipts is None else receipts
+        self.calls: list[str] = []
+        self.deliveries: list[tuple[int, str]] = []
+
+    def existing(self) -> list[str]:
+        self.calls.append("existing")
+        if self.existing_error is not None:
+            raise self.existing_error
+        return list(self.leftovers)
+
+    def up(self, workers: int) -> None:
+        self.calls.append(f"up {workers}")
+        if self.on_up is not None:
+            self.on_up()
+        if self.up_error is not None:
+            raise self.up_error
+
+    def seed(self) -> None:
+        self.calls.append("seed")
+
+    def post_delivery(self, body: bytes, headers: Mapping[str, str]) -> tuple[int, object]:
+        number = json.loads(body)["pull_request"]["number"]
+        self.deliveries.append((number, headers["X-GitHub-Delivery"]))
+        if self.reject:
+            return 401, {"detail": "invalid GitHub webhook signature"}
+        return 202, {"status": "pending"}
+
+    def rows(self) -> list[dict[str, object]]:
+        return self._rows
+
+    def receipts(self) -> dict[str, int]:
+        return self._receipts
+
+    def stub_stats(self) -> dict[str, Any]:
+        return {
+            "review_posts": {"1": 1, "2": 1, "3": 1},
+            "llm_calls": {"RepoConventionsDraft": 3, "ReviewOutput": 3},
+            "unhandled": [],
+        }
+
+    def dlq_depth(self) -> int | None:
+        return 0
+
+    def log_tail(self) -> None:
+        self.calls.append("logs")
+
+    def down(self) -> None:
+        self.calls.append("down")
+
+
+def _args(driver: ModuleType, tmp_path: Path, *extra: str) -> Any:
+    return driver.parse_args(
+        [
+            "--project",
+            "dmc163test",
+            "--runs",
+            "3",
+            "--timeout",
+            "0.2",
+            "--settle",
+            "0",
+            "--poll-interval",
+            "0",
+            "--report-json",
+            str(tmp_path / "report.json"),
+            *extra,
+        ]
+    )
+
+
+def test_a_passing_run_sends_one_duplicate_per_pr_and_removes_its_project(
+    driver: ModuleType, tmp_path: Path
+) -> None:
+    stack = FakeStack()
+
+    assert driver.execute(stack, _args(driver, tmp_path), "secret") == 0
+    assert stack.calls == ["existing", "up 3", "seed", "down"]
+    assert [number for number, _ in stack.deliveries] == [1, 2, 3, 1, 2, 3]
+    assert len({delivery for _, delivery in stack.deliveries}) == 6
+    report = json.loads((tmp_path / "report.json").read_text())
+    assert (report["passed"], report["timed_out"], report["duplicate_deliveries"]) == (
+        True,
+        False,
+        3,
+    )
+    assert (report["workers"], report["max_parallel"], report["distinct_worker_ids"]) == (3, 3, 3)
+    assert report["receipts"] == {"projected": 6}
+    assert report["max_queue_wait_ms"] == 250.0
+
+
+def test_a_failed_up_still_removes_the_project(driver: ModuleType, tmp_path: Path) -> None:
+    stack = FakeStack(up_error=driver.StackError("docker compose up exited 1: pull denied"))
+
+    assert driver.execute(stack, _args(driver, tmp_path), "secret") == 1
+    assert stack.calls == ["existing", "up 3", "logs", "down"]
+    assert not (tmp_path / "report.json").exists()
+
+
+def test_a_failed_verdict_writes_the_report_and_removes_the_project(
+    driver: ModuleType, tmp_path: Path
+) -> None:
+    stack = FakeStack(rows=[_row(1), _row(2, state="failed"), _row(3)])
+
+    assert driver.execute(stack, _args(driver, tmp_path), "secret") == 1
+    assert stack.calls == ["existing", "up 3", "seed", "logs", "down"]
+    report = json.loads((tmp_path / "report.json").read_text())
+    assert report["passed"] is False
+    assert [name for name, passed in report["checks"].items() if not passed] == ["all_succeeded"]
+
+
+def test_keep_leaves_the_project_up(driver: ModuleType, tmp_path: Path) -> None:
+    stack = FakeStack()
+
+    assert driver.execute(stack, _args(driver, tmp_path, "--keep"), "secret") == 0
+    assert "down" not in stack.calls
+
+
+@pytest.mark.parametrize(
+    "leftovers",
+    [("2 container(s)",), ("3 volume(s)",), ("1 container(s)", "3 volume(s)")],
+    ids=["containers", "volumes", "both"],
+)
+def test_an_existing_project_is_refused_and_left_alone(
+    driver: ModuleType,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    leftovers: tuple[str, ...],
+) -> None:
+    stack = FakeStack(leftovers=leftovers)
+
+    assert driver.execute(stack, _args(driver, tmp_path, "--keep"), "secret") == 2
+    assert driver.execute(stack, _args(driver, tmp_path), "secret") == 2
+    assert stack.calls == ["existing", "existing"]
+    assert f"already has {' and '.join(leftovers)}" in capsys.readouterr().err
+
+
+def test_a_project_that_cannot_be_inspected_is_not_touched(
+    driver: ModuleType, tmp_path: Path
+) -> None:
+    stack = FakeStack(existing_error=driver.StackError("docker compose ps exited 1: no daemon"))
+
+    assert driver.execute(stack, _args(driver, tmp_path), "secret") == 2
+    assert stack.calls == ["existing"]
+
+
+def test_runs_that_never_finish_time_out_with_a_report(driver: ModuleType, tmp_path: Path) -> None:
+    running = [_row(n, state="running", finished=None) for n in (1, 2, 3)]
+    stack = FakeStack(rows=running)
+
+    assert driver.execute(stack, _args(driver, tmp_path), "secret") == 1
+    assert stack.calls[-1] == "down"
+    report = json.loads((tmp_path / "report.json").read_text())
+    assert (report["timed_out"], report["deliveries_to_terminal_s"]) == (True, None)
+    assert report["checks"]["finished_in_time"] is False
+    assert [m["state"] for m in report["per_run"]] == ["running"] * 3
+
+
+def test_a_rejected_delivery_fails_and_removes_the_project(
+    driver: ModuleType, tmp_path: Path
+) -> None:
+    stack = FakeStack(reject=True)
+
+    assert driver.execute(stack, _args(driver, tmp_path), "secret") == 1
+    assert stack.deliveries[0][0] == 1 and len(stack.deliveries) == 1
+    assert stack.calls == ["existing", "up 3", "seed", "logs", "down"]
+
+
+def _marker(signum: int, frame: object) -> None:
+    raise AssertionError("the test's own handler must not run")
+
+
+def test_sigterm_unwinds_into_the_cleanup_and_restores_the_handlers(
+    driver: ModuleType, tmp_path: Path
+) -> None:
+    originals = signal.getsignal(signal.SIGTERM), signal.getsignal(signal.SIGINT)
+    # Known handlers, so "restored" cannot pass by accident when an earlier test left SIG_IGN.
+    signal.signal(signal.SIGTERM, _marker)
+    signal.signal(signal.SIGINT, _marker)
+    stack = FakeStack(on_up=lambda: os.kill(os.getpid(), signal.SIGTERM))
+    try:
+        code = driver.execute(stack, _args(driver, tmp_path), "secret")
+        restored = signal.getsignal(signal.SIGTERM), signal.getsignal(signal.SIGINT)
+    finally:
+        for sig, handler in zip((signal.SIGTERM, signal.SIGINT), originals, strict=True):
+            signal.signal(sig, handler)
+
+    assert code == 128 + signal.SIGTERM
+    assert stack.calls == ["existing", "up 3", "down"]
+    assert restored == (_marker, _marker)
+
+
+@pytest.mark.parametrize(
+    "receipts",
+    [{"projected": 5, "pending": 1}, {"projected": 3}],
+    ids=["one-pending", "duplicates-not-stored"],
+)
+def test_an_unfinished_delivery_keeps_the_poll_waiting_until_the_timeout(
+    driver: ModuleType, tmp_path: Path, receipts: dict[str, int]
+) -> None:
+    # Every Run finished, but not every delivery has finished its projection.
+    stack = FakeStack(receipts=receipts)
+
+    assert driver.execute(stack, _args(driver, tmp_path), "secret") == 1
+    report = json.loads((tmp_path / "report.json").read_text())
+    assert report["timed_out"] is True
+    failed = [name for name, passed in report["checks"].items() if not passed]
+    assert failed == ["finished_in_time", "every_delivery_projected"]
+
+
+def test_the_stack_is_scaled_to_the_workers_not_the_runs(
+    driver: ModuleType, tmp_path: Path
+) -> None:
+    stack = FakeStack()
+
+    driver.execute(stack, _args(driver, tmp_path, "--workers", "2"), "secret")
+
+    assert stack.calls[1] == "up 2"

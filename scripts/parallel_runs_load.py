@@ -4,30 +4,42 @@
 SD §13 sets v1 throughput at 100 PR/day and 5 parallel Runs, scaled by `worker` replicas. This
 driver checks that on a disposable stack:
 
-1. `docker compose -p <project> ... up -d --build --wait --scale worker=<runs>` with
+1. refuses a compose project that already has containers or volumes, the shared local stand
+   `dmc-268-api-t6` and this checkout's default project name, then runs
+   `docker compose -p <project> ... up -d --build --wait --scale worker=<workers>` with
    deploy/load/compose.parallel-runs.yml: the `stub` service (scripts/review_load_stub.py) is
-   GitHub and the LLM, every host port is a free one, the App key and webhook secret are
-   throwaway values made here;
+   GitHub and the LLM, every published port is a free loopback port, the App key and webhook
+   secret are throwaway values made here, and compose sees only PATH, HOME, DOCKER_* and those;
 2. seeds installation 17 / repository 101 (`wait_for_ci = never`, one active rule version) as in
    docs/WEBHOOK_WORKER.md, then sends one signed `pull_request` / `labeled` (`ai-review`) delivery
-   per PR 1..<runs> to the backend;
-3. polls `runs` until every Run is terminal, then reports per Run its state, attempt, worker,
-   projection wait (`created_at - webhook_events.received_at`), queue wait
+   per PR 1..<runs> to the backend, and right after them one duplicate per PR (same payload, new
+   delivery id);
+3. polls until every Run is terminal and every delivery has finished its projection, then
+   reports per Run its state, attempt, worker, projection wait
+   (`created_at - webhook_events.received_at` of the first delivery), queue wait
    (`started_at - created_at`), broker time (`started_at - message_published_at`) and total time
    (`finished_at - created_at`); the distinct workers, the peak of Runs in flight, review POSTs per
-   PR from the stub and the depth of `reviews.dlq`;
-4. `down -v` of its own project, unless `--keep`.
+   PR and LLM calls from the stub, the receipt end states and the depth of `reviews.dlq`. A run
+   that does not finish in `--timeout` still writes its report;
+4. `down -v` of the project it created, unless `--keep` (also after SIGTERM or Ctrl-C).
 
 Usage:
     uv run python scripts/parallel_runs_load.py --project dmc163load \\
-        [--runs 5] [--llm-delay-ms 3000] [--keep] [--report-json report.json]
+        [--runs 5] [--workers N] [--llm-delay-ms 3000] [--max-queue-wait-ms 30000] \\
+        [--keep] [--report-json report.json]
 
-The verdict passes when every Run succeeded on attempt 1, each PR has exactly one Run and one
-posted review, and the DLQ is empty. The project name must differ from the shared local stand
-`dmc-268-api-t6`: `down -v` deletes the project's volumes.
+The verdict passes when the run finished in time, every Run succeeded on attempt 1, each PR has
+exactly one Run, one posted review and one review LLM call despite its duplicate delivery, every
+delivery was projected, all `--workers` workers took a Run, at least min(runs, workers) Runs were in
+flight at once, no queue wait exceeds `--max-queue-wait-ms` and the DLQ is empty. `--workers` below
+`--runs` measures queueing (e.g. 10 PRs on 5 workers). With `--llm-delay-ms` below about 1000 a Run
+can finish before the next one starts, so the parallel check may fail by design.
+
+The first `--build` needs registry access (base images, apt and PyPI); `down -v` keeps the images,
+remove them with `docker image rm $(docker image ls -q 'dmc163load-*')` (use your project name).
 
 Exit codes: 0 the verdict passed; 1 it failed, or the stack did not start or finish in time;
-2 invalid arguments.
+2 invalid arguments or a project that already exists; 128 + signal after SIGTERM or SIGINT.
 """
 
 from __future__ import annotations
@@ -40,6 +52,7 @@ import os
 import re
 import secrets
 import shutil
+import signal
 import socket
 import subprocess
 import sys
@@ -48,6 +61,8 @@ import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from types import FrameType
+from typing import Any, Protocol
 
 import httpx
 from cryptography.hazmat.primitives.asymmetric import rsa
@@ -66,16 +81,16 @@ REPOSITORY_ID = 101
 REPOSITORY = "load/parallel-runs"
 PR_ID_OFFSET = 9000
 BASE_SHA = "b" * 40
-# Host ports: flag -> compose variable. The base file's defaults are the shared stand's ports.
+# Published host ports: flag -> compose variable. PostgreSQL publishes none (psql runs through
+# `compose exec`); the base file's defaults are the shared stand's ports.
 PORT_FLAGS = {
     "backend_port": "BACKEND_PORT",
-    "postgres_port": "POSTGRES_PORT",
     "rabbitmq_port": "RABBITMQ_PORT",
     "rabbitmq_management_port": "RABBITMQ_MANAGEMENT_PORT",
     "redis_port": "REDIS_PORT",
     "stub_port": "LOAD_STUB_PORT",
 }
-# Pinned so a developer's shell cannot point psql at another user or database.
+# Pinned so the base file's credentials cannot come from anywhere else.
 DATABASE_ENV = {
     "POSTGRES_USER": "app",
     "POSTGRES_PASSWORD": "app",
@@ -119,15 +134,34 @@ SELECT coalesce(json_agg(row_to_json(r) ORDER BY r.pr, r.created), '[]'::json) F
 ) r
 """
 
+# End state of every `pull_request` receipt: pending until the webhook worker finishes it.
+RECEIPTS_SQL = """
+SELECT coalesce(json_object_agg(state, n), '{}'::json) FROM (
+  SELECT CASE WHEN projected_at IS NOT NULL THEN 'projected'
+              WHEN projection_failed_at IS NOT NULL THEN 'failed'
+              WHEN projection_deferred_at IS NOT NULL THEN 'deferred'
+              ELSE 'pending' END AS state,
+         count(*) AS n
+  FROM webhook_events WHERE event = 'pull_request' GROUP BY 1
+) s
+"""
+
+
+def compose_project_name(name: str) -> str:
+    """The project name compose derives from a directory name."""
+    return re.sub(r"[^a-z0-9_-]", "", name.lower())
+
 
 def project_error(project: str | None) -> str | None:
-    """Why ``project`` may not be used, or None when it is a separate compose project."""
+    """Why ``project`` may not be used, or None when it may be (still subject to existence)."""
     if not project:
         return "--project is required: the load stack runs under its own compose project"
     if not _PROJECT_NAME.fullmatch(project):
         return "--project must be lowercase letters, digits, '-' or '_'"
     if project == SHARED_PROJECT:
         return f"--project must differ from the shared local stand {SHARED_PROJECT!r}"
+    if project == compose_project_name(REPO_ROOT.name):
+        return f"--project must differ from {project!r}, this checkout's default compose project"
     return None
 
 
@@ -148,6 +182,16 @@ def compose_command(project: str, *args: str) -> list[str]:
         "webhooks",
         *args,
     ]
+
+
+def stack_env(environ: Mapping[str, str], generated: Mapping[str, str]) -> dict[str, str]:
+    """What compose sees: PATH, HOME, DOCKER_*, the pinned credentials and ``generated``."""
+    kept = {
+        name: value
+        for name, value in environ.items()
+        if name in ("PATH", "HOME") or name.startswith("DOCKER_")
+    }
+    return {**kept, **DATABASE_ENV, **generated}
 
 
 def head_sha(number: int) -> str:
@@ -237,20 +281,43 @@ def max_parallel(rows: Sequence[Mapping[str, object]]) -> int:
     return peak
 
 
+@dataclass(frozen=True)
+class Observed:
+    """What the stub, the broker and the receipts reported after the Runs."""
+
+    review_posts: Mapping[str, int]
+    llm_calls: Mapping[str, int]
+    receipts: Mapping[str, int]
+    dlq_depth: int | None
+    peak: int
+    timed_out: bool
+
+
 def verdict(
     metrics: Sequence[RunMetrics],
+    observed: Observed,
     *,
     runs: int,
-    review_posts: Mapping[str, int],
-    dlq_depth: int | None,
+    workers: int,
+    max_queue_wait_ms: float,
 ) -> dict[str, bool]:
     """Each rule of the scenario; it passes only when all are true."""
+    prs = {str(n): 1 for n in range(1, runs + 1)}
+    waits = [m.queue_wait_ms for m in metrics]
     return {
+        "finished_in_time": not observed.timed_out,
         "all_succeeded": bool(metrics) and all(m.state == "succeeded" for m in metrics),
         "all_first_attempt": bool(metrics) and all(m.attempt == 1 for m in metrics),
         "one_run_per_pr": sorted(m.pr for m in metrics) == list(range(1, runs + 1)),
-        "one_review_per_pr": dict(review_posts) == {str(n): 1 for n in range(1, runs + 1)},
-        "dlq_empty": dlq_depth == 0,
+        "one_review_per_pr": dict(observed.review_posts) == prs,
+        "one_review_call_per_run": observed.llm_calls.get("ReviewOutput") == runs,
+        # Each PR got two deliveries: the first and its duplicate.
+        "every_delivery_projected": dict(observed.receipts) == {"projected": 2 * runs},
+        "all_workers_used": len({m.worker_id for m in metrics if m.worker_id}) == workers,
+        "parallel": observed.peak >= min(runs, workers),
+        "queue_wait_within_limit": bool(waits)
+        and all(wait is not None and wait <= max_queue_wait_ms for wait in waits),
+        "dlq_empty": observed.dlq_depth == 0,
     }
 
 
@@ -261,48 +328,128 @@ def throwaway_app_key() -> str:
 
 
 def free_ports(count: int) -> list[int]:
-    """Distinct ports nothing listens on right now (a later bind can still race)."""
+    """Distinct loopback ports nothing listens on right now (a later bind can still race)."""
     ports: set[int] = set()
     while len(ports) < count:
         with socket.socket() as sock:
-            sock.bind(("", 0))
+            sock.bind(("127.0.0.1", 0))
             ports.add(int(sock.getsockname()[1]))
     return sorted(ports)
+
+
+class StackError(Exception):
+    """A compose or HTTP step of the load stack failed; the message says which."""
+
+
+class LoadStack(Protocol):
+    """The load project as the scenario drives it (a fake in the tests)."""
+
+    project: str
+
+    def existing(self) -> list[str]: ...
+
+    def up(self, workers: int) -> None: ...
+
+    def seed(self) -> None: ...
+
+    def post_delivery(self, body: bytes, headers: Mapping[str, str]) -> tuple[int, object]: ...
+
+    def rows(self) -> list[dict[str, object]]: ...
+
+    def receipts(self) -> dict[str, int]: ...
+
+    def stub_stats(self) -> dict[str, Any]: ...
+
+    def dlq_depth(self) -> int | None: ...
+
+    def log_tail(self) -> None: ...
+
+    def down(self) -> None: ...
 
 
 class Stack:
     """The compose project of one load run; every command carries the same project and env."""
 
-    def __init__(self, project: str, env: Mapping[str, str]) -> None:
+    def __init__(self, project: str, env: Mapping[str, str], ports: Mapping[str, str]) -> None:
         self.project = project
         self.env = dict(env)
+        self.ports = dict(ports)
 
-    def run(
+    def _run(
         self, *args: str, stdin: str | None = None, capture: bool = True, check: bool = True
     ) -> subprocess.CompletedProcess[str]:
-        return subprocess.run(
-            compose_command(self.project, *args),
-            cwd=REPO_ROOT,
-            env=self.env,
-            input=stdin,
-            stdout=subprocess.PIPE if capture else sys.stderr,
-            stderr=subprocess.PIPE if capture else None,
-            text=True,
-            check=check,
-        )
+        try:
+            return subprocess.run(
+                compose_command(self.project, *args),
+                cwd=REPO_ROOT,
+                env=self.env,
+                input=stdin,
+                stdout=subprocess.PIPE if capture else sys.stderr,
+                stderr=subprocess.PIPE if capture else None,
+                text=True,
+                check=check,
+            )
+        except subprocess.CalledProcessError as failed:
+            detail = (failed.stderr or "").strip()[-2000:]
+            raise StackError(
+                f"docker compose {' '.join(args[:3])} exited {failed.returncode}: {detail}"
+            ) from failed
 
-    def psql(self, sql: str, *, query: bool = False) -> str:
-        flags = ["-tA"] if query else []
+    def existing(self) -> list[str]:
+        containers = self._run("ps", "-aq").stdout.split()
+        volumes = subprocess.run(
+            [
+                "docker",
+                "volume",
+                "ls",
+                "-q",
+                "--filter",
+                f"label=com.docker.compose.project={self.project}",
+            ],
+            env=self.env,
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.split()
+        found = [f"{len(containers)} container(s)"] if containers else []
+        return found + ([f"{len(volumes)} volume(s)"] if volumes else [])
+
+    def up(self, workers: int) -> None:
+        self._run("up", "-d", "--build", "--wait", "--scale", f"worker={workers}", capture=False)
+
+    def _psql(self, sql: str, *, query: bool = False) -> str:
         args = ["exec", "-T", "postgres", "psql", "-U", "app", "-d", "app", "-v", "ON_ERROR_STOP=1"]
-        return self.run(*args, *flags, stdin=sql).stdout
+        return self._run(*args, *(["-tA"] if query else []), stdin=sql).stdout
+
+    def seed(self) -> None:
+        self._psql(SEED_SQL)
+
+    def post_delivery(self, body: bytes, headers: Mapping[str, str]) -> tuple[int, object]:
+        url = f"http://127.0.0.1:{self.ports['BACKEND_PORT']}/webhooks/github"
+        response = httpx.post(url, content=body, headers=dict(headers), timeout=10)
+        try:
+            return response.status_code, response.json()
+        except ValueError:
+            return response.status_code, response.text[:200]
 
     def rows(self) -> list[dict[str, object]]:
-        decoded = json.loads(self.psql(RUNS_SQL, query=True))
+        decoded = json.loads(self._psql(RUNS_SQL, query=True))
         assert isinstance(decoded, list)
         return decoded
 
+    def receipts(self) -> dict[str, int]:
+        decoded = json.loads(self._psql(RECEIPTS_SQL, query=True))
+        assert isinstance(decoded, dict)
+        return {str(state): int(count) for state, count in decoded.items()}
+
+    def stub_stats(self) -> dict[str, Any]:
+        url = f"http://127.0.0.1:{self.ports['LOAD_STUB_PORT']}/_stats"
+        decoded = httpx.get(url, timeout=10).json()
+        assert isinstance(decoded, dict)
+        return decoded
+
     def dlq_depth(self) -> int | None:
-        listed = self.run(
+        listed = self._run(
             "exec",
             "-T",
             "rabbitmq",
@@ -320,71 +467,111 @@ class Stack:
         return None
 
     def log_tail(self) -> None:
-        tail = self.run(
-            "logs", "--no-color", "--tail", "40", "worker", "webhook-worker", "stub", check=False
-        )
+        # Every service: a broker or database that exits during `up` must show up here too.
+        tail = self._run("logs", "--no-color", "--tail", "30", check=False)
         sys.stderr.write(tail.stdout + tail.stderr)
 
+    def down(self) -> None:
+        self._run("down", "-v", capture=False, check=False)
 
-def _fail(stack: Stack, message: str) -> int:
+
+class Interrupted(Exception):
+    def __init__(self, signum: int) -> None:
+        super().__init__(signal.Signals(signum).name)
+        self.signum = signum
+
+
+def _interrupt(signum: int, frame: FrameType | None) -> None:
+    raise Interrupted(signum)
+
+
+def _fail(stack: LoadStack, message: str) -> int:
     print(f"FAIL: {message}", file=sys.stderr)
     stack.log_tail()
     return 1
 
 
-def scenario(stack: Stack, args: argparse.Namespace, secret: str) -> int:
-    ports = {name: int(stack.env[name]) for name in PORT_FLAGS.values()}
+def _send_deliveries(stack: LoadStack, runs: int, secret: str) -> str | None:
+    """One delivery per PR, then one duplicate per PR; the first non-202 answer, if any."""
+    for number in [*range(1, runs + 1), *range(1, runs + 1)]:
+        status, answer = stack.post_delivery(*build_delivery(secret, number))
+        if (status, answer) != (202, {"status": "pending"}):
+            return f"PR {number}: {status} {answer}"
+    return None
+
+
+def scenario(stack: LoadStack, args: argparse.Namespace, secret: str) -> int:
     began = time.monotonic()
     try:
-        stack.run("up", "-d", "--build", "--wait", "--scale", f"worker={args.runs}", capture=False)
-    except subprocess.CalledProcessError:
-        return _fail(stack, "the load stack did not start (docker compose up)")
+        stack.up(args.workers)
+    except StackError as failed:
+        return _fail(stack, f"the load stack did not start: {failed}")
     stack_seconds = round(time.monotonic() - began, 1)
-    stack.psql(SEED_SQL)
+    stack.seed()
 
     sent_at = time.monotonic()
-    backend = f"http://127.0.0.1:{ports['BACKEND_PORT']}/webhooks/github"
-    with httpx.Client(timeout=10) as client:
-        for number in range(1, args.runs + 1):
-            body, headers = build_delivery(secret, number)
-            response = client.post(backend, content=body, headers=headers)
-            if response.status_code != 202 or response.json() != {"status": "pending"}:
-                return _fail(stack, f"PR {number}: {response.status_code} {response.text[:200]}")
+    rejected = _send_deliveries(stack, args.runs, secret)
+    if rejected is not None:
+        return _fail(stack, f"a delivery was not accepted: {rejected}")
 
     rows: list[dict[str, object]] = []
+    receipts: dict[str, int] = {}
+    timed_out = True
     deadline = sent_at + args.timeout
     while time.monotonic() < deadline:
-        rows = stack.rows()
-        if len(rows) >= args.runs and all(row["state"] in TERMINAL_STATES for row in rows):
+        rows, receipts = stack.rows(), stack.receipts()
+        if (
+            len(rows) >= args.runs
+            and all(row["state"] in TERMINAL_STATES for row in rows)
+            and sum(receipts.values()) == 2 * args.runs
+            and "pending" not in receipts
+        ):
+            timed_out = False
             break
-        time.sleep(1)
-    else:
-        states = [(row["pr"], row["state"]) for row in rows]
-        return _fail(stack, f"Runs not terminal after {args.timeout:.0f} s: {states}")
-    runs_seconds = round(time.monotonic() - sent_at, 1)
-    # A late duplicate Run would show up here.
-    time.sleep(args.settle)
-    rows = stack.rows()
+        time.sleep(args.poll_interval)
+    runs_seconds = None if timed_out else round(time.monotonic() - sent_at, 1)
+    if not timed_out:
+        # A late duplicate Run would show up here.
+        time.sleep(args.settle)
+        rows, receipts = stack.rows(), stack.receipts()
 
-    stats = httpx.get(f"http://127.0.0.1:{ports['LOAD_STUB_PORT']}/_stats", timeout=10).json()
+    stats = stack.stub_stats()
     metrics = run_metrics(rows)
-    dlq_depth = stack.dlq_depth()
-    checks = verdict(
-        metrics, runs=args.runs, review_posts=stats["review_posts"], dlq_depth=dlq_depth
+    observed = Observed(
+        review_posts=stats["review_posts"],
+        llm_calls=stats["llm_calls"],
+        receipts=receipts,
+        dlq_depth=stack.dlq_depth(),
+        peak=max_parallel(rows),
+        timed_out=timed_out,
     )
+    checks = verdict(
+        metrics,
+        observed,
+        runs=args.runs,
+        workers=args.workers,
+        max_queue_wait_ms=args.max_queue_wait_ms,
+    )
+    waits = [m.queue_wait_ms for m in metrics if m.queue_wait_ms is not None]
     report: dict[str, object] = {
         "project": stack.project,
         "runs": args.runs,
+        "workers": args.workers,
+        "duplicate_deliveries": args.runs,
         "llm_delay_ms": args.llm_delay_ms,
         "stack_up_s": stack_seconds,
         "deliveries_to_terminal_s": runs_seconds,
+        "timed_out": timed_out,
         "per_run": [asdict(m) for m in metrics],
         "distinct_worker_ids": len({m.worker_id for m in metrics if m.worker_id}),
-        "max_parallel": max_parallel(rows),
-        "review_posts": stats["review_posts"],
-        "llm_calls": stats["llm_calls"],
+        "max_parallel": observed.peak,
+        "max_queue_wait_ms": max(waits) if waits else None,
+        "queue_wait_limit_ms": args.max_queue_wait_ms,
+        "review_posts": dict(observed.review_posts),
+        "llm_calls": dict(observed.llm_calls),
+        "receipts": dict(observed.receipts),
         "unhandled_stub_requests": stats["unhandled"],
-        "dlq_depth": dlq_depth,
+        "dlq_depth": observed.dlq_depth,
         "checks": checks,
         "passed": all(checks.values()),
     }
@@ -393,10 +580,49 @@ def scenario(stack: Stack, args: argparse.Namespace, secret: str) -> int:
     if args.report_json is not None:
         args.report_json.write_text(json.dumps(report, indent=2) + "\n")
     if not report["passed"]:
-        return _fail(
-            stack, "the verdict failed: " + ", ".join(k for k, v in checks.items() if not v)
-        )
+        failed_checks = ", ".join(name for name, passed in checks.items() if not passed)
+        return _fail(stack, f"the verdict failed: {failed_checks}")
     return 0
+
+
+def execute(stack: LoadStack, args: argparse.Namespace, secret: str) -> int:
+    """Refuse an existing project, run the scenario, and remove only what this run created."""
+    try:
+        leftovers = stack.existing()
+    except (StackError, subprocess.CalledProcessError, OSError) as failed:
+        print(f"error: cannot inspect compose project {stack.project!r}: {failed}", file=sys.stderr)
+        return 2
+    if leftovers:
+        print(
+            f"error: compose project {stack.project!r} already has {' and '.join(leftovers)}; "
+            "it is not this run's to remove, pick another --project",
+            file=sys.stderr,
+        )
+        return 2
+    signals = (signal.SIGTERM, signal.SIGINT)
+    previous = {sig: signal.signal(sig, _interrupt) for sig in signals}
+    created = False
+    try:
+        # Set before `up`: a failed `up` still leaves containers, volumes and a network behind.
+        created = True
+        return scenario(stack, args, secret)
+    except Interrupted as stop:
+        print(f"interrupted by {stop}; removing the load stack", file=sys.stderr)
+        return 128 + stop.signum
+    except (StackError, httpx.HTTPError) as failed:
+        return _fail(stack, str(failed) or repr(failed))
+    finally:
+        try:
+            if created and not args.keep:
+                # Children inherit SIG_IGN, so a second Ctrl-C cannot cut `down -v` short.
+                for sig in signals:
+                    signal.signal(sig, signal.SIG_IGN)
+                stack.down()
+            elif created:
+                print(f"--keep: the stack {stack.project!r} is still up", file=sys.stderr)
+        finally:
+            for sig, handler in previous.items():
+                signal.signal(sig, handler if handler is not None else signal.SIG_DFL)
 
 
 def print_report(report: Mapping[str, object], metrics: Sequence[RunMetrics]) -> None:
@@ -404,9 +630,11 @@ def print_report(report: Mapping[str, object], metrics: Sequence[RunMetrics]) ->
         return "-" if value is None else f"{value:.0f}"
 
     print(
-        f"parallel Runs: {report['runs']} PRs, LLM delay {report['llm_delay_ms']} ms, "
-        f"stack up in {report['stack_up_s']} s, deliveries to terminal in "
-        f"{report['deliveries_to_terminal_s']} s"
+        f"parallel Runs: {report['runs']} PRs on {report['workers']} workers (+ "
+        f"{report['duplicate_deliveries']} duplicate deliveries), LLM delay "
+        f"{report['llm_delay_ms']} ms, stack up in {report['stack_up_s']} s, deliveries to "
+        f"terminal in {report['deliveries_to_terminal_s']} s"
+        + (" (TIMED OUT)" if report["timed_out"] else "")
     )
     print("pr  state      attempt  projection_ms  queue_wait_ms  broker_ms  total_ms  worker_id")
     for m in metrics:
@@ -416,8 +644,9 @@ def print_report(report: Mapping[str, object], metrics: Sequence[RunMetrics]) ->
         )
     print(
         f"distinct workers: {report['distinct_worker_ids']}, max parallel: "
-        f"{report['max_parallel']}, review POSTs: {report['review_posts']}, "
-        f"LLM calls: {report['llm_calls']}, DLQ depth: {report['dlq_depth']}"
+        f"{report['max_parallel']}, max queue wait: {report['max_queue_wait_ms']} ms (limit "
+        f"{report['queue_wait_limit_ms']}), review POSTs: {report['review_posts']}, LLM calls: "
+        f"{report['llm_calls']}, receipts: {report['receipts']}, DLQ depth: {report['dlq_depth']}"
     )
     if report["unhandled_stub_requests"]:
         print(f"unhandled stub requests: {report['unhandled_stub_requests']}")
@@ -428,26 +657,42 @@ def print_report(report: Mapping[str, object], metrics: Sequence[RunMetrics]) ->
         print(f"  {'ok ' if passed else 'FAIL'} {name}")
 
 
-def main(argv: Sequence[str] | None = None) -> int:
+def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0] if __doc__ else None)
-    parser.add_argument("--project", help="compose project name (not dmc-268-api-t6)")
-    parser.add_argument("--runs", type=int, default=5, help=f"PRs and workers (1-{MAX_RUNS})")
+    parser.add_argument("--project", help="compose project name, new for this run")
+    parser.add_argument("--runs", type=int, default=5, help=f"PRs (1-{MAX_RUNS})")
+    parser.add_argument("--workers", type=int, help="worker replicas (1..--runs, default --runs)")
     parser.add_argument("--llm-delay-ms", type=int, default=3000, help="delay of each LLM answer")
+    parser.add_argument(
+        "--max-queue-wait-ms", type=float, default=30000.0, help="verdict limit per Run"
+    )
     parser.add_argument("--timeout", type=float, default=300.0, help="seconds to terminal Runs")
     parser.add_argument("--settle", type=float, default=5.0, help="seconds before the recount")
+    parser.add_argument("--poll-interval", type=float, default=1.0, help="seconds between polls")
     parser.add_argument("--keep", action="store_true", help="leave the stack up (no down -v)")
     parser.add_argument("--report-json", type=Path, help="write the report as JSON here")
     for flag, variable in PORT_FLAGS.items():
         parser.add_argument(f"--{flag.replace('_', '-')}", type=int, help=f"host {variable}")
     args = parser.parse_args(argv)
+    if not 1 <= args.runs <= MAX_RUNS:
+        parser.error(f"--runs must be from 1 to {MAX_RUNS}")
+    if args.workers is None:
+        args.workers = args.runs
+    if not 1 <= args.workers <= args.runs:
+        parser.error("--workers must be from 1 to --runs (each worker must get a Run)")
+    if args.llm_delay_ms < 0 or args.settle < 0 or args.poll_interval < 0:
+        parser.error("--llm-delay-ms, --settle and --poll-interval must be >= 0")
+    if args.timeout <= 0 or args.max_queue_wait_ms <= 0:
+        parser.error("--timeout and --max-queue-wait-ms must be > 0")
+    return args
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    args = parse_args(argv)
     error = project_error(args.project)
     if error is not None:
         print(f"error: {error}", file=sys.stderr)
         return 2
-    if not 1 <= args.runs <= MAX_RUNS:
-        parser.error(f"--runs must be from 1 to {MAX_RUNS}")
-    if args.llm_delay_ms < 0 or args.timeout <= 0 or args.settle < 0:
-        parser.error("--llm-delay-ms and --settle must be >= 0, --timeout > 0")
     if shutil.which("docker") is None:
         print("error: docker is not on PATH", file=sys.stderr)
         return 2
@@ -456,30 +701,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     free = iter(free_ports(len(fixed)))
     ports = {variable: str(port or next(free)) for variable, port in fixed.items()}
     secret = secrets.token_hex(32)
-    env = {
-        **os.environ,
-        **DATABASE_ENV,
+    generated = {
         **ports,
         "LOAD_RUNS": str(args.runs),
         "LOAD_LLM_DELAY_MS": str(args.llm_delay_ms),
         "LOAD_WEBHOOK_SECRET": secret,
         "LOAD_GITHUB_APP_PRIVATE_KEY": throwaway_app_key(),
     }
-    stack = Stack(args.project, env)
-    print(f"load stack {args.project!r} on host ports {ports}", file=sys.stderr)
-    try:
-        return scenario(stack, args, secret)
-    except subprocess.CalledProcessError as failed:
-        command = " ".join(failed.cmd[len(compose_command(stack.project)) :])
-        detail = (failed.stderr or "").strip()[-2000:]
-        return _fail(stack, f"docker compose {command} exited {failed.returncode}: {detail}")
-    except httpx.HTTPError as failed:
-        return _fail(stack, f"HTTP request to the load stack failed: {failed!r}")
-    finally:
-        if args.keep:
-            print(f"--keep: the stack {args.project!r} is still up", file=sys.stderr)
-        else:
-            stack.run("down", "-v", capture=False, check=False)
+    stack = Stack(args.project, stack_env(os.environ, generated), ports)
+    print(f"load stack {args.project!r} on loopback ports {ports}", file=sys.stderr)
+    return execute(stack, args, secret)
 
 
 if __name__ == "__main__":
