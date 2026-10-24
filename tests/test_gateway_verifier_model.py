@@ -62,14 +62,12 @@ from app.modules.reviews.infrastructure.llm.answers import (
     validate_verifier_answer,
 )
 from app.modules.reviews.infrastructure.llm.gateway import LlmGateway
-from app.modules.reviews.infrastructure.llm.memory import InMemoryLlmCallTrace, InMemoryUsageLedger
 from app.modules.reviews.infrastructure.llm.models import (
     VERIFICATION_OPERATION,
     GatewayVerifierModel,
 )
 from app.modules.reviews.infrastructure.llm.settings import LlmSettings, ModelPrice, ModelProfile
-from app.modules.reviews.infrastructure.llm.transport import OpenAICompatibleTransport
-from tests.llm_fakes import context_checkpoint
+from tests.llm_fakes import FakeClock, ScriptedProvider, completion
 
 NOW = datetime(2026, 10, 24, 12, 0, tzinfo=UTC)
 RUN_ID = UUID("00000000-0000-0000-0000-000000013701")
@@ -190,62 +188,13 @@ def _without_reason(candidate_id: str) -> dict[str, Any]:
     return decision
 
 
-def _completion(content: str) -> httpx.Response:
-    return httpx.Response(
-        200,
-        json={
-            "model": "answering-model",
-            "choices": [{"message": {"role": "assistant", "content": content}}],
-            "usage": {"prompt_tokens": 10, "completion_tokens": 5},
-        },
-    )
-
-
-class _Clock:
-    def __init__(self) -> None:
-        self.current = NOW
-
-    def now(self) -> datetime:
-        return self.current
-
-    def monotonic(self) -> float:
-        return (self.current - NOW).total_seconds()
-
-    async def sleep(self, seconds: float) -> None:
-        self.current += timedelta(seconds=seconds)
-
-
-@dataclass
-class _Provider:
-    replies: list[httpx.Response]
-    requests: list[httpx.Request] = field(default_factory=list)
-    ledger: InMemoryUsageLedger = field(default_factory=InMemoryUsageLedger)
-    trace: InMemoryLlmCallTrace = field(default_factory=InMemoryLlmCallTrace)
-
-    def _handle(self, request: httpx.Request) -> httpx.Response:
-        self.requests.append(request)
-        if not self.replies:
-            raise AssertionError("unexpected provider call")
-        return self.replies.pop(0)
-
+class _Provider(ScriptedProvider):
     def run[T](
         self, call: Callable[[LlmGateway], Awaitable[T]], *, settings: LlmSettings = SETTINGS
     ) -> T:
         async def exercise() -> T:
-            clock = _Clock()
-            async with httpx.AsyncClient(transport=httpx.MockTransport(self._handle)) as client:
-                gateway = LlmGateway(
-                    settings,
-                    OpenAICompatibleTransport(client),
-                    self.ledger,
-                    self.trace,
-                    checkpoint=context_checkpoint,
-                    clock=clock,
-                    sleep=clock.sleep,
-                    jitter=lambda: 0.0,
-                    monotonic=clock.monotonic,
-                )
-                return await call(gateway)
+            async with httpx.AsyncClient(transport=httpx.MockTransport(self.handle)) as client:
+                return await call(self.gateway(settings, client, FakeClock(NOW)))
 
         return asyncio.run(exercise())
 
@@ -265,15 +214,6 @@ class _Provider:
             ),
             settings=settings,
         )
-
-    def bodies(self) -> list[dict[str, Any]]:
-        return [json.loads(request.content) for request in self.requests]
-
-    def models(self) -> list[str]:
-        return [body["model"] for body in self.bodies()]
-
-    def kinds(self) -> list[str]:
-        return [record.kind.value for _, record in self.trace.records]
 
 
 @dataclass
@@ -353,7 +293,7 @@ def test_validator_rejects_prose_around_the_json() -> None:
 
 
 def test_a_valid_answer_is_returned_with_the_verifier_model_and_operation() -> None:
-    provider = _Provider([_completion(_answer(_decision("c-1")))])
+    provider = _Provider([completion(_answer(_decision("c-1")))])
 
     reply = provider.verify()
 
@@ -383,8 +323,8 @@ def test_a_valid_answer_is_returned_with_the_verifier_model_and_operation() -> N
 def test_a_missing_reason_is_repaired_with_bounded_data(guarded: _Guarded) -> None:
     provider = _Provider(
         [
-            _completion(_answer(_without_reason("c-1"))),
-            _completion(_answer(_decision("c-1"))),
+            completion(_answer(_without_reason("c-1"))),
+            completion(_answer(_decision("c-1"))),
         ]
     )
 
@@ -404,9 +344,9 @@ def test_a_missing_reason_is_repaired_with_bounded_data(guarded: _Guarded) -> No
 def test_two_invalid_answers_go_to_the_verifier_fallback(guarded: _Guarded) -> None:
     provider = _Provider(
         [
-            _completion(_answer(_without_reason("c-1"))),
-            _completion(_answer(_without_reason("c-1"))),
-            _completion(_answer(_decision("c-1"))),
+            completion(_answer(_without_reason("c-1"))),
+            completion(_answer(_without_reason("c-1"))),
+            completion(_answer(_decision("c-1"))),
         ]
     )
 
@@ -423,8 +363,8 @@ def test_two_invalid_answers_go_to_the_verifier_fallback(guarded: _Guarded) -> N
 def _repaired_once() -> _Provider:
     return _Provider(
         [
-            _completion(_answer(_without_reason("c-1"))),
-            _completion(_answer(_decision("c-1"))),
+            completion(_answer(_without_reason("c-1"))),
+            completion(_answer(_decision("c-1"))),
         ]
     )
 
@@ -435,9 +375,9 @@ def test_repair_and_fallback_guards_get_the_review_context_and_its_snapshot(
     context = _context(_snapshot())
     provider = _Provider(
         [
-            _completion(_answer(_without_reason("c-1"))),
-            _completion(_answer(_without_reason("c-1"))),
-            _completion(_answer(_decision("c-1"))),
+            completion(_answer(_without_reason("c-1"))),
+            completion(_answer(_without_reason("c-1"))),
+            completion(_answer(_decision("c-1"))),
         ]
     )
 
@@ -533,7 +473,7 @@ def test_the_review_price_passes_the_same_cost_check() -> None:
         cache_read_tokens=0,
         cost_usd=Decimal("0.30"),
     )
-    provider = _Provider([_completion(_answer(_decision("c-1")))])
+    provider = _Provider([completion(_answer(_decision("c-1")))])
     provider.ledger.events.append((RUN, spent))
 
     provider.verify(settings=LlmSettings(primary=REVIEW, fallback=REVIEW_FALLBACK))
@@ -543,7 +483,7 @@ def test_the_review_price_passes_the_same_cost_check() -> None:
 
 def test_reflection_pass_verifies_two_candidates_through_the_gateway() -> None:
     provider = _Provider(
-        [_completion(_answer(_decision("c-1"), _decision("c-2", status="contradicted")))]
+        [completion(_answer(_decision("c-1"), _decision("c-2", status="contradicted")))]
     )
 
     async def verify(gateway: LlmGateway) -> list[tuple[str, str]]:

@@ -9,7 +9,7 @@ stay as they are. No network: provider answers come from ``httpx.MockTransport``
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass, field, replace
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
@@ -31,17 +31,14 @@ from app.modules.reviews.application.run_failures import RetryDelays, classify_f
 from app.modules.reviews.infrastructure.llm.answers import InvalidAnswer
 from app.modules.reviews.infrastructure.llm.gateway import (
     GatewayResult,
-    LlmGateway,
     StructuredTask,
 )
-from app.modules.reviews.infrastructure.llm.memory import InMemoryLlmCallTrace, InMemoryUsageLedger
 from app.modules.reviews.infrastructure.llm.settings import LlmSettings, ModelPrice, ModelProfile
 from app.modules.reviews.infrastructure.llm.transport import (
     ChatMessage,
-    OpenAICompatibleTransport,
     ResponseSchema,
 )
-from tests.llm_fakes import context_checkpoint
+from tests.llm_fakes import FakeClock, ScriptedProvider, completion
 
 NOW = datetime(2026, 10, 24, 12, 0, tzinfo=UTC)
 RUN_ID = UUID("00000000-0000-0000-0000-000000013301")
@@ -78,8 +75,6 @@ BASE_MANIFEST = CallManifest(
     ),
 )
 
-type Reply = httpx.Response | Exception
-
 
 def _validate(answer: str) -> dict[str, object]:
     if answer == '{"ok": true}':
@@ -88,57 +83,18 @@ def _validate(answer: str) -> dict[str, object]:
 
 
 def valid() -> httpx.Response:
-    return _completion('{"ok": true}')
+    return completion('{"ok": true}')
 
 
 def invalid() -> httpx.Response:
-    return _completion("not json")
-
-
-def _completion(content: str) -> httpx.Response:
-    return httpx.Response(
-        200,
-        json={
-            "model": "answering-model",
-            "choices": [{"message": {"role": "assistant", "content": content}}],
-            "usage": {"prompt_tokens": 10, "completion_tokens": 5},
-        },
-    )
+    return completion("not json")
 
 
 def error(status: int, **headers: str) -> httpx.Response:
     return httpx.Response(status, json={"error": {"message": "provider error"}}, headers=headers)
 
 
-class _Clock:
-    def __init__(self) -> None:
-        self.current = NOW
-
-    def now(self) -> datetime:
-        return self.current
-
-    def monotonic(self) -> float:
-        return (self.current - NOW).total_seconds()
-
-    async def sleep(self, seconds: float) -> None:
-        self.current += timedelta(seconds=seconds)
-
-
-@dataclass
-class _Provider:
-    replies: list[Reply]
-    requests: list[httpx.Request] = field(default_factory=list)
-    trace: InMemoryLlmCallTrace = field(default_factory=InMemoryLlmCallTrace)
-
-    def _handle(self, request: httpx.Request) -> httpx.Response:
-        self.requests.append(request)
-        if not self.replies:
-            raise AssertionError("unexpected provider call")
-        reply = self.replies.pop(0)
-        if isinstance(reply, Exception):
-            raise reply
-        return reply
-
+class _Provider(ScriptedProvider):
     def generate(
         self,
         *,
@@ -146,18 +102,9 @@ class _Provider:
         fallback: ModelProfile = FALLBACK,
     ) -> GatewayResult:
         async def exercise() -> GatewayResult:
-            clock = _Clock()
-            async with httpx.AsyncClient(transport=httpx.MockTransport(self._handle)) as client:
-                gateway = LlmGateway(
-                    LlmSettings(primary=PRIMARY, fallback=fallback),
-                    OpenAICompatibleTransport(client),
-                    InMemoryUsageLedger(),
-                    self.trace,
-                    checkpoint=context_checkpoint,
-                    clock=clock,
-                    sleep=clock.sleep,
-                    jitter=lambda: 0.0,
-                    monotonic=clock.monotonic,
+            async with httpx.AsyncClient(transport=httpx.MockTransport(self.handle)) as client:
+                gateway = self.gateway(
+                    LlmSettings(primary=PRIMARY, fallback=fallback), client, FakeClock(NOW)
                 )
                 task = StructuredTask(
                     operation="verification",
@@ -174,9 +121,6 @@ class _Provider:
         with pytest.raises(LlmCallFailed) as caught:
             self.generate(fallback=fallback)
         return caught.value
-
-    def kinds(self) -> list[str]:
-        return [record.kind.value for _, record in self.trace.records]
 
 
 @pytest.fixture

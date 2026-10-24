@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from dataclasses import dataclass, field, replace
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Literal
@@ -21,10 +21,8 @@ from app.modules.reviews.application.llm import LlmCallFailed, LlmErrorCode, Run
 from app.modules.reviews.infrastructure.llm.answers import InvalidAnswer
 from app.modules.reviews.infrastructure.llm.gateway import (
     GatewayResult,
-    LlmGateway,
     StructuredTask,
 )
-from app.modules.reviews.infrastructure.llm.memory import InMemoryLlmCallTrace, InMemoryUsageLedger
 from app.modules.reviews.infrastructure.llm.settings import (
     GatewayPolicy,
     LlmConfigError,
@@ -34,10 +32,9 @@ from app.modules.reviews.infrastructure.llm.settings import (
 )
 from app.modules.reviews.infrastructure.llm.transport import (
     ChatMessage,
-    OpenAICompatibleTransport,
     ResponseSchema,
 )
-from tests.llm_fakes import context_checkpoint
+from tests.llm_fakes import FakeClock, ScriptedProvider, completion
 
 EUROUTER = "https://api.eurouter.ai/api/v1"
 REVIEW_ENV = {
@@ -207,8 +204,6 @@ BOTH_PAIRS = LlmSettings(
 )
 ANSWER = {"ok": True}
 
-type Reply = httpx.Response | Exception
-
 
 def _validate(answer: str) -> dict[str, object]:
     try:
@@ -230,77 +225,27 @@ def _task(route: Literal["review", "verifier"] = "verifier", user: str = "USER")
     )
 
 
-def _completion(content: str) -> httpx.Response:
-    return httpx.Response(
-        200,
-        json={
-            "model": "answering-model",
-            "choices": [{"message": {"role": "assistant", "content": content}}],
-            "usage": {"prompt_tokens": 10, "completion_tokens": 5},
-        },
-    )
-
-
 def valid() -> httpx.Response:
-    return _completion(json.dumps(ANSWER))
+    return completion(json.dumps(ANSWER))
 
 
 def invalid() -> httpx.Response:
-    return _completion("not json")
+    return completion("not json")
 
 
 def unavailable() -> httpx.Response:
     return httpx.Response(503, json={"error": {"message": "overloaded"}})
 
 
-class _Clock:
-    def __init__(self) -> None:
-        self.current = NOW
-
-    def now(self) -> datetime:
-        return self.current
-
-    def monotonic(self) -> float:
-        return (self.current - NOW).total_seconds()
-
-    async def sleep(self, seconds: float) -> None:
-        self.current += timedelta(seconds=seconds)
-
-
-@dataclass
-class _Provider:
-    replies: list[Reply]
-    requests: list[httpx.Request] = field(default_factory=list)
-    trace: InMemoryLlmCallTrace = field(default_factory=InMemoryLlmCallTrace)
-
-    def _handle(self, request: httpx.Request) -> httpx.Response:
-        self.requests.append(request)
-        if not self.replies:
-            raise AssertionError("unexpected provider call")
-        reply = self.replies.pop(0)
-        if isinstance(reply, Exception):
-            raise reply
-        return reply
-
+class _Provider(ScriptedProvider):
     def run(
         self, settings: LlmSettings, *tasks: StructuredTask, context: RunCallContext = RUN
     ) -> list[GatewayResult | LlmCallFailed]:
         """Run the tasks one after another in the same (run, attempt), as stages do."""
 
         async def exercise() -> list[GatewayResult | LlmCallFailed]:
-            clock = _Clock()
-            async with httpx.AsyncClient(transport=httpx.MockTransport(self._handle)) as client:
-                gateway = LlmGateway(
-                    settings,
-                    OpenAICompatibleTransport(client),
-                    InMemoryUsageLedger(),
-                    self.trace,
-                    checkpoint=context_checkpoint,
-                    clock=clock,
-                    sleep=clock.sleep,
-                    jitter=lambda: 0.0,
-                    monotonic=clock.monotonic,
-                )
+            async with httpx.AsyncClient(transport=httpx.MockTransport(self.handle)) as client:
+                gateway = self.gateway(settings, client, FakeClock(NOW))
                 outcomes: list[GatewayResult | LlmCallFailed] = []
                 for task in tasks:
                     try:
@@ -310,12 +255,6 @@ class _Provider:
                 return outcomes
 
         return asyncio.run(exercise())
-
-    def models(self) -> list[str]:
-        return [json.loads(request.content)["model"] for request in self.requests]
-
-    def kinds(self) -> list[str]:
-        return [record.kind.value for _, record in self.trace.records]
 
 
 def test_a_verifier_task_calls_the_verifier_then_the_verifier_fallback() -> None:
