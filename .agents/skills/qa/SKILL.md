@@ -13,6 +13,8 @@ metadata:
 
 Run an interactive QA session. The user describes problems they're encountering. You clarify, explore the codebase for context, and file GitHub issues that are durable, user-focused, and use the project's domain language.
 
+Issues are filed only through create-issue (`.agents/skills/create-issue/`) in its batch mode, never by calling `gh` yourself. This skill decides what to file; create-issue owns the body, its language, the Definition of Ready, the preview and the create.
+
 ## For each issue the user raises
 
 ### 1. Listen and lightly clarify
@@ -33,7 +35,7 @@ While talking to the user, kick off an Agent (subagent_type=Explore) in the back
 - Understand what the feature is supposed to do
 - Identify the user-facing behavior boundary
 
-This context helps you write a better issue — but the issue itself should NOT reference specific files, line numbers, or internal implementation details.
+This context helps you write a better issue. The user-facing parts (title, steps, expected, actual) stay in behavior and domain terms; what the exploration found goes into the `kickoff` block — `repo`, repo-relative `read_first` paths, `problem_shape` — which create-issue requires for a technical issue such as a Bug (create-issue `SKILL.md` § 5, `references/templates.md` § Kickoff).
 
 ### 3. Assess scope: single issue or breakdown?
 
@@ -50,87 +52,48 @@ Keep as a single issue when:
 - It's one behavior that's wrong in one place
 - The symptoms are all caused by the same root behavior
 
-### 4. File the GitHub issue(s)
+Whether a slice is a separate issue or a part (Ч.N) of one issue: create-issue `references/slicing.md` § A part or a sub-issue. A Bug cannot carry `parts`, so a Bug breakdown is always separate Bug items.
 
-Create issues with `gh issue create`. Do NOT ask the user to review first — just file and share URLs.
+### 4. File the issue(s) through create-issue
 
 Issues must be **durable** — they should still make sense after major refactors. Write from the user's perspective.
 
-#### For a single issue
+Capture the report as one batch file (create-issue `references/batch.md` § 1) under `$(mktemp -d)`, with a new `id` per report: one item per issue, each a full create-issue spec plus a `key`. Fill each item by create-issue `SKILL.md` § Workflow steps 1–6:
 
-Use this template:
+- `repo` from `issue-preflight.sh` (§ 1);
+- `type: "Bug"` with `environment` / `steps` / `expected` / `actual` for something broken, otherwise the fitting type (§ 2, `references/templates.md`);
+- `"lang": "ru"` and the body shape from create-issue (§ 4 Language, `references/templates.md`), never a hand-written body;
+- the Definition of Ready (§ 5): a `[component]` title, at least one acceptance criterion, the kickoff for a technical issue;
+- `blocked_by`: `@key` of another item when it genuinely blocks, or the ref of an existing issue;
+- `parent`: only when a tracking issue exists (its ref) or is an item of the same batch (`@key`), otherwise left out.
 
-```
-## What happened
+#### A breakdown
 
-[Describe the actual behavior the user experienced, in plain language]
-
-## What I expected
-
-[Describe the expected behavior]
-
-## Steps to reproduce
-
-1. [Concrete, numbered steps a developer can follow]
-2. [Use domain terms from the codebase, not internal module names]
-3. [Include relevant inputs, flags, or configuration]
-
-## Additional context
-
-[Any extra observations from the user or from codebase exploration that help frame the issue — e.g. "this only happens when using the Docker layer, not the filesystem layer" — use domain language but don't cite files]
-```
-
-#### For a breakdown (multiple issues)
-
-Create issues in dependency order (blockers first) so you can reference real issue numbers.
-
-Use this template for each sub-issue:
-
-```
-## Parent issue
-
-#<parent-issue-number> (if you created a tracking issue) or "Reported during QA session"
-
-## What's wrong
-
-[Describe this specific behavior problem — just this slice, not the whole report]
-
-## What I expected
-
-[Expected behavior for this specific slice]
-
-## Steps to reproduce
-
-1. [Steps specific to THIS issue]
-
-## Blocked by
-
-- #<issue-number> (if this issue can't be fixed until another is resolved)
-
-Or "None — can start immediately" if no blockers.
-
-## Additional context
-
-[Any extra observations relevant to this slice]
-```
-
-When creating a breakdown:
-
-- **Prefer many thin issues over few thick ones** — each should be independently fixable and verifiable
-- **Mark blocking relationships honestly** — if issue B genuinely can't be tested until issue A is fixed, say so. If they're independent, mark both as "None — can start immediately"
-- **Create issues in dependency order** so you can reference real issue numbers in "Blocked by"
+- **Prefer many thin issues over few thick ones** — each item independently fixable and verifiable
+- **Mark blocking relationships honestly** — if issue B genuinely can't be tested until issue A is fixed, B gets `"blocked_by": ["@a"]`. Independent items get no `blocked_by` and their Dependencies say "None"
+- **Say the dependency in words in the body** — a body cannot carry an `@key` (the driver refuses it); the native link carries the number
 - **Maximize parallelism** — the goal is that multiple people (or agents) can grab different issues simultaneously
+
+The driver creates parents before children and blockers before what they block, so the file order does not have to follow dependencies.
 
 #### Rules for all issue bodies
 
-- **No file paths or line numbers** — these go stale
 - **Use the project's domain language** (check UBIQUITOUS_LANGUAGE.md if it exists)
-- **Describe behaviors, not code** — "the sync service fails to apply the patch" not "applyPatch() throws on line 42"
+- **Describe behaviors, not code** — "the sync service fails to apply the patch" not "applyPatch() throws on line 42"; paths belong in the kickoff and follow create-issue reference hygiene (`references/templates.md` § Reference hygiene)
 - **Reproduction steps are mandatory** — if you can't determine them, ask the user
 - **Keep it concise** — a developer should be able to read the issue in 30 seconds
 
-After filing, print all issue URLs (with blocking relationships summarized) and ask: "Next issue, or are we done?"
+#### Preview, one confirmation, create
+
+1. Run the gate before creating (create-issue `SKILL.md` § Gate before creating), with the local-path sweep over the batch file (`references/batch.md` § 3).
+2. Preview: `.agents/skills/create-issue/scripts/issue-batch.py "$BATCH" --dry-run`. Print the whole preview as ordinary text and say how many issues it creates.
+3. Ask ONCE for the whole batch (`references/batch.md` § 3): the structured question tool where the harness has one (Claude Code `AskUserQuestion`, OpenCode `question`; options Create / Edit / Cancel), otherwise the explicit reply `Create` / «Создать». The preview alone is never approval. On Edit change the file, preview again, ask again; on Cancel or no answer create nothing.
+4. Create: `.agents/skills/create-issue/scripts/issue-batch.py "$BATCH"` with the flags of the preview.
+
+Exit codes, a batch that stopped halfway and the rerun that resumes it: create-issue `references/batch.md` § 4–6. Never file the missing issues by hand.
+
+After the run, share each issue's URL from the driver's output — created, adopted or already there, its links, any `verified: false` — summarize the blocking relationships and ask: "Next issue, or are we done?"
 
 ### 5. Continue the session
 
-Keep going until the user says they're done. Each issue is independent — don't batch them.
+Keep going until the user says they're done. Each user report is filed as its own batch — one item or a breakdown — with one confirmation.
