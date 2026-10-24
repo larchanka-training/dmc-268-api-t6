@@ -288,8 +288,8 @@ class FindingsPostProcessor:
 
 
 def _classify_anchor(
-    finding: ReviewFinding, diff_map: DiffMap
-) -> tuple[ReviewFinding, Bucket | Literal["dropped"]]:
+    finding: ReviewFinding | ReviewFindingV2, diff_map: DiffMap
+) -> tuple[ReviewFinding | ReviewFindingV2, Bucket | Literal["dropped"]]:
     """Map one finding to inline, body_only, or dropped via DiffMap anchoring."""
     anchor = resolve_anchor(
         diff_map, path=finding.path, start_line=finding.start_line, line=finding.line

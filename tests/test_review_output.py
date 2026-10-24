@@ -422,8 +422,8 @@ def test_store_review_output_persists_dropped_findings_from_reflection_pass() ->
     class FakeReviewRepo:
         async def get_post_processing_input(self, run_id: UUID) -> FindingPostProcessingInput:
             return FindingPostProcessingInput(
-                hunk_lines={"app/example.py": frozenset({10, 12})},
-                rule_names=frozenset(),
+                _added_file_diff_map("app/example.py", 14),
+                frozenset(),
                 allowed_v2_rules=frozenset({".review/rules.md"}),
             )
 
