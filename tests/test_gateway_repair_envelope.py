@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -121,6 +122,7 @@ class _Provider:
         bounded_repair: bool = True,
         primary: ModelProfile = PRIMARY,
         base_manifest: CallManifest | None = None,
+        validate: Callable[[str], dict[str, object]] = _validate,
     ) -> None:
         async def exercise() -> None:
             async with httpx.AsyncClient(transport=httpx.MockTransport(self._handle)) as client:
@@ -136,7 +138,7 @@ class _Provider:
                     operation="verification",
                     messages=(ChatMessage("system", "SYS"), ChatMessage("user", "USER")),
                     schema=ResponseSchema("Answer", {"type": "object"}),
-                    validate=_validate,
+                    validate=validate,
                     base_manifest=base_manifest,
                     bounded_repair=bounded_repair,
                 )
@@ -211,6 +213,29 @@ def test_markup_in_the_answer_and_in_validator_errors_arrives_escaped() -> None:
     # Only the service's own tags remain markup.
     assert envelope.count("</previous_model_output>") == 1
     assert "<system>" not in envelope
+
+
+def test_validator_errors_are_capped_in_count_and_length() -> None:
+    # A validator that does not cap its own errors: the repair turn caps them at 20 x 300.
+    errors = [f"error {index} " + "e" * 1_000 for index in range(30)]
+
+    def flood(answer: str) -> dict[str, object]:
+        if answer == '{"ok": true}':
+            return {"ok": True}
+        raise InvalidAnswer(errors)
+
+    provider = _Provider([_completion("not json"), valid()])
+
+    provider.generate(validate=flood)
+
+    envelope = provider.messages(1)[2]["content"]
+    listed = envelope.partition("<validation_errors>\n")[2].partition("</validation_errors>")[0]
+    lines = listed.splitlines()
+    assert len(lines) == 20
+    # Both ends survive the cut: the location leads, the verdict trails.
+    assert lines[0] == "- " + errors[0][:149] + "…" + errors[0][-149:]
+    assert lines[19] == "- " + errors[19][:149] + "…" + errors[19][-149:]
+    assert {len(line) for line in lines} == {2 + 299}
 
 
 def test_a_long_answer_is_cut_to_the_bound_and_the_manifest_describes_the_shown_text(
