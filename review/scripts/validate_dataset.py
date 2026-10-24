@@ -40,12 +40,17 @@ from app.modules.reviews.application.policy_snapshot import (  # noqa: E402
     AGENTS_DOCUMENT_PATH,
     RULES_DOCUMENT_PATH,
 )
-from app.modules.reviews.application.review_ignore import parse_review_ignore  # noqa: E402
+from app.modules.reviews.application.review_ignore import (  # noqa: E402
+    IgnoreMatcher,
+    IgnorePolicy,
+    parse_review_ignore,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_ROOT = REPO_ROOT / "test-prs-dataset"
 SCHEMA_PATH = DEFAULT_ROOT / "schema" / "case.schema.json"
 HUNK = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@")
+_RENAME_OR_COPY = ("rename from ", "rename to ", "copy from ", "copy to ")
 # The main corpus classes: the final distribution of the main profile counts exactly these.
 CLASS_PREFIX = {
     "security": "SEC",
@@ -104,6 +109,15 @@ def _git_env() -> dict[str, str]:
     return {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
 
 
+def _patch_name(raw: str) -> str:
+    """A path of a patch header line, decoded when git quoted it C-style."""
+    if not raw.startswith('"'):
+        return raw
+    quoted = re.match(r'^"(?:\\.|[^"\\])*"', raw)
+    escaped = quoted.group(0)[1:-1] if quoted else ""
+    return codecs.escape_decode(escaped.encode("utf-8"))[0].decode("utf-8")
+
+
 def _patch_added_lines(patch: Path) -> dict[str, set[int]]:
     """Read new-side added line numbers from unified diff hunks."""
     added: dict[str, set[int]] = {}
@@ -114,13 +128,7 @@ def _patch_added_lines(patch: Path) -> dict[str, set[int]]:
             current_path = None
             new_line = None
         elif text.startswith("+++ ") and new_line is None:
-            raw_path = text[4:].split("\t", 1)[0]
-            if raw_path.startswith('"'):
-                quoted = re.match(r'^"(?:\\.|[^"\\])*"', raw_path)
-                escaped = quoted.group(0)[1:-1] if quoted else ""
-                path = codecs.escape_decode(escaped.encode("utf-8"))[0].decode("utf-8")
-            else:
-                path = raw_path
+            path = _patch_name(text[4:].split("\t", 1)[0])
             current_path = path.removeprefix("b/") if path != "/dev/null" else None
         elif match := HUNK.match(text):
             new_line = int(match.group(1))
@@ -133,6 +141,31 @@ def _patch_added_lines(patch: Path) -> dict[str, set[int]]:
             elif text.startswith("-") or text.startswith("\\"):
                 continue
     return added
+
+
+def _patch_changed_paths(patch: Path) -> list[str]:
+    """Every repository path a patch changes, in first-seen order.
+
+    Both names of each file block count: a deleted file by its old path, a rename by both,
+    and a copy by its source too, since ``apply_ignore`` withholds a copy whose source a
+    mask matches. Header lines are read only before the first hunk of a block.
+    """
+    paths: dict[str, None] = {}
+    in_header = True
+    for text in patch.read_text(encoding="utf-8").splitlines():
+        if text.startswith("diff --git "):
+            in_header = True
+        elif not in_header:
+            continue
+        elif HUNK.match(text):
+            in_header = False
+        elif text.startswith(("--- ", "+++ ")):
+            path = _patch_name(text[4:].split("\t", 1)[0])
+            if path != "/dev/null":
+                paths[path.removeprefix("a/" if text.startswith("-") else "b/")] = None
+        elif prefix := next((item for item in _RENAME_OR_COPY if text.startswith(item)), None):
+            paths[_patch_name(text.removeprefix(prefix))] = None
+    return list(paths)
 
 
 def uses_policy_arms(record: dict[str, Any]) -> bool:
@@ -206,11 +239,34 @@ def _arm_errors(record: dict[str, Any]) -> list[str]:
     return errors
 
 
-def _policy_document_errors(base: Path, record: dict[str, Any]) -> list[str]:
+def _ignore_errors(policies: list[tuple[str, str, IgnorePolicy]], changed: list[str]) -> list[str]:
+    """No ``review-ignore`` mask of an arm file may match a path the case changes.
+
+    Production withholds a matched file from the model, but the eval runner does not apply
+    the masks, so such a case would score a diff that production never reviews.
+    """
+    errors: list[str] = []
+    for label, raw, policy in policies:
+        matcher = IgnoreMatcher(policy)
+        for path in changed:
+            try:
+                mask = matcher.match(path)
+            except PolicyError as exc:
+                errors.append(f"{label}: {raw}: the changed path {path!r} cannot be matched: {exc}")
+                continue
+            if mask is not None:
+                errors.append(
+                    f"{label}: {raw}: review-ignore mask {mask} matches the changed path {path}"
+                )
+    return errors
+
+
+def _policy_document_errors(base: Path, record: dict[str, Any], changed: list[str]) -> list[str]:
     """Check every arm file with the production parsers, so a broken fixture fails here.
 
     ``rule_ref`` and each exception ``reason`` quote the rules document verbatim (whitespace
-    may wrap differently); the quote must occur in both arm files.
+    may wrap differently); the quote must occur in both arm files. The ``review-ignore``
+    masks of each arm file are checked against the case's ``changed`` paths.
     """
     policy = record.get("policy")
     if policy is None:
@@ -226,6 +282,7 @@ def _policy_document_errors(base: Path, record: dict[str, Any]) -> list[str]:
     if arms["malicious"] == arms["valid"]:
         errors.append("policy.arms.malicious: must name another file than policy.arms.valid")
     texts: dict[str, str] = {}
+    policies: list[tuple[str, str, IgnorePolicy]] = []
     documents = [(f"policy.arms.{arm}", arms[arm], RULES_DOCUMENT_PATH) for arm in arms]
     if (base / AGENTS_DOCUMENT_PATH).is_file():
         documents.append((AGENTS_DOCUMENT_PATH, AGENTS_DOCUMENT_PATH, AGENTS_DOCUMENT_PATH))
@@ -237,11 +294,12 @@ def _policy_document_errors(base: Path, record: dict[str, Any]) -> list[str]:
         try:
             document = normalize_document(snapshot_path, path.read_bytes(), blob_oid="0" * 40)
             if snapshot_path == RULES_DOCUMENT_PATH:
-                parse_review_ignore(document.text)
+                policies.append((label, raw, parse_review_ignore(document.text)))
         except (OSError, PolicyError) as exc:
             errors.append(f"{label}: {raw}: {exc}")
             continue
         texts[label] = document.text or ""
+    errors.extend(_ignore_errors(policies, changed))
     valid_text = texts.get("policy.arms.valid")
     malicious_text = texts.get("policy.arms.malicious")
     if arms["malicious"] != arms["valid"] and valid_text is not None and malicious_text is not None:
@@ -411,6 +469,7 @@ def validate_case(
 
     try:
         added = _patch_added_lines(patch)
+        changed = _patch_changed_paths(patch) if "policy" in record else []
     except (OSError, UnicodeError, ValueError, SyntaxError) as exc:
         return [f"patch_path: cannot read unified patch: {exc}"], None
     if record["expected_findings"] and not added:
@@ -432,7 +491,7 @@ def validate_case(
     ):
         errors.append("rules case: needs an origin rule truth or a must_not_flag anchor")
     errors.extend(_exception_errors(record, added))
-    errors.extend(_policy_document_errors(base, record))
+    errors.extend(_policy_document_errors(base, record, changed))
     return errors, record if not errors else None
 
 
