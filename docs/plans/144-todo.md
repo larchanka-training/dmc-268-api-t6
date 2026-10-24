@@ -675,8 +675,8 @@ Before the commit, the coordinator re-checks the open PRs and their files.
 
 **Done when:**
 
-- [ ] every listed anchor is edited;
-- [ ] common verification is green.
+- [x] every listed anchor is edited;
+- [x] common verification is green.
 
 **Dependencies:** Task 7.
 
