@@ -36,7 +36,6 @@ Both failures showed the expected full instruction versus the truncated runtime
 message. Restored source byte-identically after each mutation and in a `finally`
 block. SHA-256 before/after:
 `4882639ef879e9afe9eb519a02da4e867e64c6bad9b1b337b5cfd1855accbe96`.
-Raw output is retained locally in `/tmp/issue116-development-proof.txt`.
 
 `uv run pytest tests/test_eval_live.py` — **GREEN**, **102 passed in 23.49s**,
 zero skipped. This is the restored production code, not the mutation.
@@ -68,17 +67,15 @@ The publication report in PR #124 records the final published commit SHA.
 Both pytest runs used these explicit isolated-service variables:
 
 ```text
-TEST_DATABASE_URL=postgresql+psycopg://issue116:issue116@127.0.0.1:62521/issue116
-TEST_RABBITMQ_URL=amqp://issue116:issue116@127.0.0.1:62522/issue116
+TEST_DATABASE_URL=<disposable-db-url>
+TEST_RABBITMQ_URL=<isolated-task-vhost-url>
 ```
 
-The disposable services were PostgreSQL 17.11 (`issue116-pg`, separate database
-and user `issue116`) and RabbitMQ 4.3.6 (`issue116-rabbit`, separate user and vhost
-`issue116`). PostgreSQL and RabbitMQ were real; GitHub and LLM were mocked. No
-live provider run is claimed. Local raw logs: `/tmp/issue116-pytest.log` and
-`/tmp/issue116-integration.log`.
+The disposable services were PostgreSQL 17.11 (a dedicated container, database
+and user) and RabbitMQ 4.3.6 (a dedicated container, user and vhost). PostgreSQL
+and RabbitMQ were real; GitHub and LLM were mocked. No live provider run is claimed.
 
-Cleanup completed successfully with `docker rm -fv issue116-pg issue116-rabbit`.
+Cleanup completed successfully with `docker rm -fv <test-postgres-container> <test-rabbitmq-container>`.
 The subsequent verification-label-filtered `docker ps -a` was empty. Only these
 dedicated containers and their anonymous volumes were removed; other local
 services were left untouched.
@@ -130,8 +127,7 @@ Historical v1 prompt files remain immutable. This wording was checked against
 Coordination with overlapping PR #133 preceded edits:
 [comment](https://github.com/larchanka-training/dmc-268-api-t6/pull/133#issuecomment-6225203953).
 
-Local line-by-line output: `/tmp/issue116-round2-doc-proof.txt`. Fresh separate
-independent reviews completed with Standards 0 hard violations/0 smells and Spec 0
+Fresh separate independent reviews completed with Standards 0 hard violations/0 smells and Spec 0
 findings; see `116-review.md`. No fresh local pytest/gate run or new-head CI success
 is claimed at this publication checkpoint. Current-head CI with all four gates,
 full pytest and the explicit integration zero-skip guard is required after push.

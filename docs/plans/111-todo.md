@@ -235,44 +235,37 @@ Evidence Correction Tasks 1–2 (12.10.2026): новый focused-набор со
 Комментарий Compose и variables checklist сверены с таблицей `worker.env`,
 `vars.PORTAL_URL` workflow и `run_url_factory`; конфигурация сервисов не менялась.
 
-Изолированное RED: `uv run python /tmp/pr125-mutation-check.py run-path trailing-slash`
-копирует `app/` и новый тест в отдельные `/tmp/pr125-mutation-*` и запускает там
+Изолированное RED выполнялось временным helper-скриптом (в репозиторий не входит):
+он копировал `app/` и новый тест в отдельные временные каталоги и запускал там
 `uv run --project <checkout> python -m pytest -c <copy>/pyproject.toml
 <copy>/tests/test_worker_portal_url.py`. `/runs/` → `/run/`: **3 failed**;
 удаление `rstrip("/")`: **2 failed, 1 passed**. После этого немутированный первый
 slice дал **3 passed**. Следующий slice закрепил пустые значения и чтение env:
-`uv run python /tmp/pr125-mutation-check.py portal-key` с `PORTAL_URL` →
+повторный запуск того же временного helper-скрипта с мутацией `PORTAL_URL` →
 `PORTAL_URI` дал **1 failed, 7 passed**; немутированный набор — **8 passed**.
 Все failures — assertion failures ожидаемых URL/`settings.portal_url`, а не
 ошибки импорта или инфраструктуры. `git diff -- app/worker.py` пустой.
 
-Логи: `/tmp/pr125-mutation-run-path.log`,
-`/tmp/pr125-mutation-trailing-slash.log`, `/tmp/pr125-mutation-portal-key.log`,
-`/tmp/pr125-url-slice-green.log`, `/tmp/pr125-worker-portal-url.log`,
-`/tmp/pr125-deploy-staging-services.log`.
-
 Гейты lint/format/typecheck: Ruff — **All checks passed**;
 format — **354 files already formatted**; mypy — **no issues in 351 source files**.
 Formatter исправил перенос decorator нового теста перед финальными гейтами.
-Логи: `/tmp/pr125-ruff-check.log`, `/tmp/pr125-ruff-format.log`,
-`/tmp/pr125-mypy-final.log`. Команды используют
-`UV_CACHE_DIR=/tmp/pr125-uv-cache`: стандартный uv cache недоступен sandbox.
-`TEST_DATABASE_URL` и `TEST_RABBITMQ_URL` отсутствуют (проверены boolean-значения,
-`/tmp/pr125-integration-env.log`); контейнеры других PR не использовались.
+Команды использовали отдельный временный uv cache: стандартный cache был
+недоступен в исходной среде. `TEST_DATABASE_URL` и `TEST_RABBITMQ_URL`
+отсутствовали (проверены boolean-значения); контейнеры других PR не использовались.
 
-Первый полный pytest в sandbox: **2 failed, 2305 passed, 145 skipped,
+Первый полный pytest в исходной среде: **2 failed, 2305 passed, 145 skipped,
 2 warnings, 3 errors in 82.12s**. Пять случаев
-`tests/test_webhook_smoke_script.py` не смогли bind localhost HTTP server:
+`tests/test_webhook_smoke_script.py` не смогли открыть локальный сокет HTTP server:
 `PermissionError: [Errno 1] Operation not permitted`; результат не считается
-зелёным gate. Лог сохранён в `/tmp/pr125-pytest-sandbox.log`. Повторный полный
-pytest выполнен с разрешением localhost sockets, без изменения кода,
+зелёным gate. Повторный полный pytest выполнен в среде, разрешающей
+открытие локальных сокетов, без изменения кода,
 без `TEST_DATABASE_URL`/`TEST_RABBITMQ_URL`; его фактический результат ниже.
 
 Независимые correction reviews (12.10.2026), результаты переданы координатором:
 **Standards — 0 findings; Spec — 0 findings** на текущих тестах и документации.
 
 Финальный полный gate `uv run pytest`: **2310 passed, 145 skipped,
-2 warnings in 89.51s**, exit 0; `/tmp/pr125-pytest.log`.
+2 warnings in 89.51s**, exit 0.
 145 skips — PostgreSQL/broker integrations без `TEST_DATABASE_URL` и
 `TEST_RABBITMQ_URL`; предупреждения — существующие deprecations
 Starlette/httpx и anyio BlockingPortal. `git diff --check` прошёл;
@@ -287,7 +280,7 @@ Evidence публикации correction round (12.10.2026): `git fetch origin m
 `test(worker): cover portal URL configuration and links (#111)` без обхода hooks.
 Staged только пять intended paths: `tests/test_worker_portal_url.py` явно,
 четыре tracked файла через `git add -u -- <paths>`. Чужие untracked планы
-#113/#117 сохранились; backups #129 из `/tmp/pr125-preserved-plans` не staged.
+#113/#117 сохранились; приватные backups #129 не staged.
 Push в существующую ветку выполнен с pin
 `--force-with-lease=refs/heads/fix/111-worker-portal-url:f5a1e56a8259636f17d3c2862f8de89e53762e8b`;
 `git ls-remote` подтвердил published correction SHA и неизменный main.

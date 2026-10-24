@@ -23,7 +23,7 @@ References:
 
 Historical planning/baseline base: `66077f292bcd829d1807c520f48b48fd053891f2`.
 Current base after rebase: `origin/main` / `5d183fe6cb3a0bb0ed68ebba062f1852f2d16bf9`.
-Isolated checkout: `/Users/qx/.codex/worktrees/207-index-policy-export-ignore/dmc-268-api-t6`.
+Isolated checkout: `<isolated-checkout>`.
 Do not use the unrelated changes in the original checkout.
 
 ## Recommended design
@@ -174,10 +174,10 @@ uv run pytest tests/test_build_repository_index.py tests/test_github_snapshot_so
 Python 3.13.4; pytest 9.1.1; uv 0.12.7
 ```
 
-The first sandboxed attempt failed opening the global uv cache; an authorized
-escalated rerun created the worktree `.venv` and produced the result above. No source
+The first attempt failed opening the default uv cache; an authorized rerun
+in a suitable environment created the worktree `.venv` and produced the result above. No source
 changes were made. Dedicated PostgreSQL baseline is **pending**: the coordinator
-confirmed Docker daemon unavailable at `unix:///Users/qx/.docker/run/docker.sock`.
+confirmed that the local Docker daemon was unavailable.
 Do not interpret optional integration skips as evidence. Do not start infrastructure
 as part of this planning-only phase.
 
@@ -295,7 +295,7 @@ uv run pytest -m integration -rs tests/test_code_index* -q --tb=short
 
 Ruff lint, Ruff format check (529 files), and mypy (526 source files) pass after that
 last test-fixture change. Final full `uv run pytest -ra` is running serially with both
-dedicated services and JUnit evidence at `/tmp/issue207-final-pytest.xml`.
+dedicated services and private JUnit evidence.
 
 Publication responsibilities: after the PR URL exists, the coordinator/publisher posts
 the authorized #144 canonical-contract handoff. Human current-head approval, resolved
@@ -311,7 +311,7 @@ All required final gates pass on base `5d183fe` with the reviewed diff:
 uv run ruff check .                       All checks passed
 uv run ruff format --check .              529 files already formatted
 uv run mypy .                            526 source files, no issues
-uv run pytest -ra --junitxml=/tmp/issue207-final-pytest.xml
+uv run pytest -ra --junitxml=<private-output>/pytest.xml
 5136 passed, 0 skipped, 2 warnings in 1037.04s (17m17s)
 ```
 

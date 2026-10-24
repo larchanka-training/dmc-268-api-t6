@@ -5,8 +5,9 @@
 Draft by the planning step of the agent-loop, 2026-10-23. The tech lead decided D1–D3 below
 on 2026-10-23.
 Issue: https://github.com/larchanka-training/dmc-268-api-t6/issues/168, part 1 (P1, AC5 of
-#130). Baseline: `origin/main` `22c621ab`. Worktree `projects/dmc-268-api-t6-168b`, branch
-`fix/168-withheld-removed-files`. Test database and RabbitMQ vhost: `imp168b`. Task list:
+#130). Baseline: `origin/main` `22c621ab`. Worktree `<isolated-checkout>`, branch
+`fix/168-withheld-removed-files`. Test database: `<disposable-db>`; RabbitMQ vhost:
+`<isolated-task-vhost>`. Task list:
 [168-withheld-files-todo.md](168-withheld-files-todo.md).
 
 Every `file:line` below was checked against `22c621ab`. Where the issue cites `7546e53`, the
@@ -224,13 +225,13 @@ it goes to `omitted` (D1).
 moves from `changed` to `omitted`. Use the actual snapshot order of `get_run_snapshots`.
 
 **Probe.** The fallback was removed in-process through a scratch pytest plugin, with no
-repo edit, and the full suite was run with PG on `imp168b`. It took 38 min: 5277 passed and
-8 failed.
+repo edit, and the full suite was run with PG on a dedicated test database.
+It took 38 min: 5277 passed and 8 failed.
 
 - The only failure caused by the fallback is the legacy pin above,
   `tests/test_vcs_snapshot_postgres.py:376`.
 - The other 7 are in `tests/test_deploy_monitoring.py` (`pg-backup`). They also fail
-  without the probe: a local `~/.local/bin/sh` wrapper causes them, and they pass with the
+  without the probe: a local `sh` wrapper causes them, and they pass with the
   wrapper off `PATH`.
 
 **Parser, `tests/test_prompt_builder.py` (Task 2),** next to the parse tests at `:109-170`.
@@ -298,12 +299,12 @@ only `HunkRow`, not `split_lf`), `tests/test_get_run_diff.py`, `tests/test_promp
 uv run ruff check .
 uv run ruff format --check .
 uv run mypy . --exclude '^docs/reports/'
-TEST_DATABASE_URL=postgresql+psycopg://app:app@localhost:5432/imp168b \
-TEST_RABBITMQ_URL=amqp://app:app@localhost:5672/imp168b uv run pytest
+TEST_DATABASE_URL=<disposable-db-url> \
+TEST_RABBITMQ_URL=<isolated-task-vhost-url> uv run pytest
 ```
 
-- Run `df -h /tmp` first. The full suite takes about 38 min here, so run it in the
-  background. The 7 `tests/test_deploy_monitoring.py` failures come from the local `sh`
+- Run `df -h "<temporary-directory>"` first. The full suite takes about 38 min here,
+  so run it in the background. The 7 `tests/test_deploy_monitoring.py` failures come from the local `sh`
   wrapper, not from this change.
 - Focused PG run, zero skips: `tests/test_vcs_snapshot_postgres.py`,
   `tests/test_review_prompt_pins_postgres.py`, `tests/test_run_context_origin_postgres.py`
