@@ -192,3 +192,59 @@ def test_required_ci_replay_failure_is_not_softened_by_step_or_job_keys() -> Non
         "neither Python lint / type / test nor any of its steps may continue on error"
     )
     assert not re.search(r"(?m)^    if:", job), "Python lint / type / test must always run"
+
+
+RULES_COMMAND = (
+    "uv run --locked python review/scripts/validate_dataset.py "
+    "--root test-prs-dataset/rules --final --profile rules"
+)
+
+
+def test_required_ci_validates_the_rules_corpus_in_its_own_step_after_the_gold_summary() -> None:
+    job = _python_job()
+    step = _job_step(job, "Rules sub-corpus")
+    gold = _job_step(job, "Gold corpus and recorded replay")
+
+    assert step.endswith(f"        run: {RULES_COMMAND}\n")
+    assert "--profile rules" not in gold
+    assert (
+        job.index("      - name: Gold corpus and recorded replay\n")
+        < job.index("      - name: Rules sub-corpus\n")
+        < job.index("      - name: Integration suite (zero skips)\n")
+    )
+    assert not re.search(r"(?m)^        (?:if|continue-on-error):", step)
+
+
+def test_required_ci_rules_corpus_failure_fails_its_step(tmp_path: Path) -> None:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    shim = bin_dir / "uv"
+    shim.write_text('#!/bin/bash\nprintf "%s\\n" "$@" > "$ARGS_LOG"\nexit 33\n')
+    shim.chmod(0o755)
+    command = _job_step(_python_job(), "Rules sub-corpus").split("        run: ", 1)[1]
+
+    result = subprocess.run(
+        ["bash", "-e", "-c", command],
+        cwd=tmp_path,
+        env={
+            **os.environ,
+            "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+            "ARGS_LOG": str(tmp_path / "args"),
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 33
+    assert (tmp_path / "args").read_text(encoding="utf-8").splitlines() == [
+        "run",
+        "--locked",
+        "python",
+        "review/scripts/validate_dataset.py",
+        "--root",
+        "test-prs-dataset/rules",
+        "--final",
+        "--profile",
+        "rules",
+    ]

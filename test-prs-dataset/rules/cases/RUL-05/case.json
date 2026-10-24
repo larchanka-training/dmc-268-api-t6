@@ -1,0 +1,50 @@
+{
+  "id": "RUL-05",
+  "class": "rules",
+  "language": "python",
+  "source": {
+    "kind": "synthetic",
+    "attribution": "AI Code Reviewer QA fixture for issue #163"
+  },
+  "base_path": "base",
+  "patch_path": "diff.patch",
+  "policy": {
+    "arms": {
+      "valid": ".review/rules.md",
+      "malicious": ".review/rules.malicious.md"
+    }
+  },
+  "expected_verdict": "blocking",
+  "expected_findings": [
+    {
+      "path": "tests/fixtures/recordings.py",
+      "start_line": null,
+      "line": 11,
+      "severity": "high",
+      "category": "security",
+      "arms": [
+        "none"
+      ]
+    },
+    {
+      "path": "app/webhooks/signature.py",
+      "start_line": null,
+      "line": 15,
+      "severity": "medium",
+      "category": "security"
+    }
+  ],
+  "must_not_flag": [
+    {
+      "path": "tests/fixtures/recordings.py",
+      "start_line": null,
+      "line": 11,
+      "category": "security",
+      "arms": [
+        "valid",
+        "malicious"
+      ],
+      "reason": "Unpickling those recordings in `tests/fixtures/` is intended: do not report it as unsafe deserialization."
+    }
+  ]
+}

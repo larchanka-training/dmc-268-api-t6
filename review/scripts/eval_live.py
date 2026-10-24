@@ -13,6 +13,13 @@ a digest of its canonical URL, never raw credentials or query text. Effective
 prices and gateway policy limits are recorded as safe numeric metadata.
 Each case also records the first response's actual serving provider as a safe
 allowlisted label and domain-separated digest, or null when no provider answered.
+
+--policy-arm (#163) selects the repository policy shown to the model: ``legacy`` (default)
+renders no policy snapshot, exactly the prompt before #163; ``none``, ``valid`` and
+``malicious`` render a snapshot whose rules document is missing, the case's
+``.review/rules.md``, or its ``policy.arms.malicious`` file, with AGENTS.md from the case
+base. The manifest records the arm, a digest of the arm files and the token and cost
+usage of every paid call. --responses-dir keeps arms and repeated runs apart.
 """
 
 from __future__ import annotations
@@ -32,6 +39,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
+from uuid import UUID, uuid5
 
 from jsonschema import Draft202012Validator
 
@@ -47,12 +55,36 @@ from app.bootstrap.llm_gateway import (  # noqa: E402
 from app.modules.reviews.application.commit_prefix_limits import (  # noqa: E402
     CommitMessagePrefix,
 )
-from app.modules.reviews.application.llm import EngineName, LlmCallRecord  # noqa: E402
+from app.modules.reviews.application.llm import (  # noqa: E402
+    EngineName,
+    LlmCallRecord,
+    LlmUsage,
+)
+from app.modules.reviews.application.policy_documents import normalize_document  # noqa: E402
+from app.modules.reviews.application.policy_errors import PolicyError  # noqa: E402
+from app.modules.reviews.application.policy_snapshot import (  # noqa: E402
+    AGENTS_DOCUMENT_PATH,
+    POLICY_SNAPSHOT_SCHEMA_VERSION,
+    RULES_DOCUMENT_PATH,
+    PolicyDocument,
+    PolicySnapshot,
+    make_complete_execution_profile,
+    make_complete_prompt_bindings,
+    make_policy_document_missing,
+)
 from app.modules.reviews.application.prompt_builder import (  # noqa: E402
     PullRequestMeta,
     ReviewRule,
     parse_unified_diff,
     review_rule_from_stored,
+)
+from app.modules.reviews.application.review_ignore import (  # noqa: E402
+    BUILTIN_EXCLUSIONS_VERSION,
+    LIMITS_VERSION,
+    MATCHER_VERSION,
+    PARSER_PROFILE,
+    PARSER_VERSION,
+    parse_review_ignore,
 )
 from app.modules.reviews.infrastructure.llm.settings import (  # noqa: E402
     LlmConfigError,
@@ -78,6 +110,7 @@ from review.scripts.eval_provenance import (  # noqa: E402
     static_input_paths,
 )
 from review.scripts.eval_replay import (  # noqa: E402
+    RECORDED_POLICY_ARMS,
     ReplayError,
     format_console,
     nonpublishable_case_ids,
@@ -86,6 +119,7 @@ from review.scripts.eval_replay import (  # noqa: E402
 from review.scripts.validate_dataset import (  # noqa: E402
     DEFAULT_ROOT,
     SCHEMA_PATH,
+    uses_policy_arms,
     validate_case,
 )
 
@@ -97,6 +131,8 @@ _EXTRA_BODY_MAGIC = b"review-eval-extra-body-v1\0"
 _PROVIDER_MAGIC = b"review-eval-provider-v1\0"
 _SERVING_PROVIDER_MAGIC = b"review-eval-serving-provider-v1\0"
 _ENDPOINT_MAGIC = b"review-eval-endpoint-v1\0"
+# Fixed identities of the in-memory eval snapshots; none of them is rendered into the prompt.
+_EVAL_POLICY_NAMESPACE = UUID("6f1d2c43-1633-4d7e-9a35-163000000163")
 _PUBLIC_PROVIDER_LABELS = frozenset({"eurouter", "self-hosted", "fake"})
 _PUBLIC_SERVING_PROVIDERS = frozenset(
     {
@@ -182,6 +218,111 @@ def _commit_context(records: list[tuple[Path, dict[str, Any]]]) -> dict[str, Com
         raise RecorderError("invalid commit context evidence or case binding") from None
 
 
+def _policy_document(path: Path, snapshot_path: str) -> PolicyDocument:
+    """Normalize one arm file with the production loader, as the policy snapshot stores it."""
+    raw = path.read_bytes()
+    blob_oid = hashlib.sha1(b"blob %d\0" % len(raw) + raw, usedforsecurity=False).hexdigest()
+    return normalize_document(snapshot_path, raw, blob_oid=blob_oid)
+
+
+def _policy_snapshot(
+    case_dir: Path,
+    record: Mapping[str, Any],
+    arm: str,
+    settings: LlmSettings,
+    engine: EngineName,
+) -> PolicySnapshot | None:
+    """Build the in-memory snapshot of one arm; ``legacy`` keeps the pre-#163 envelope."""
+    if arm == "legacy":
+        return None
+    base = case_dir / record["base_path"]
+    try:
+        if arm == "none":
+            rules = make_policy_document_missing(RULES_DOCUMENT_PATH)
+        else:
+            # The valid file is the case's .review/rules.md; the malicious one is rendered at
+            # the same fixed path, exactly where an attacker's rules.md would be.
+            rules = _policy_document(base / record["policy"]["arms"][arm], RULES_DOCUMENT_PATH)
+        agents_path = base / AGENTS_DOCUMENT_PATH
+        agents = (
+            _policy_document(agents_path, AGENTS_DOCUMENT_PATH)
+            if agents_path.is_file()
+            else make_policy_document_missing(AGENTS_DOCUMENT_PATH)
+        )
+        ignore = parse_review_ignore(rules.text)
+    except (OSError, PolicyError) as exc:
+        raise RecorderError(f"case {record['id']} has an unusable {arm} policy: {exc}") from None
+    identity = f"{record['id']}:{arm}"
+    digest_input = json.dumps(
+        [arm, rules.raw_sha256, agents.raw_sha256, ignore.digest], separators=(",", ":")
+    )
+    return PolicySnapshot(
+        schema_version=POLICY_SNAPSHOT_SCHEMA_VERSION,
+        snapshot_id=uuid5(_EVAL_POLICY_NAMESPACE, f"snapshot:{identity}"),
+        run_id=uuid5(_EVAL_POLICY_NAMESPACE, f"run:{identity}"),
+        repository_id=uuid5(_EVAL_POLICY_NAMESPACE, f"repository:{record['id']}"),
+        policy_base_sha="0" * 40,
+        rules=rules,
+        agents=agents,
+        ignore_patterns=ignore.patterns,
+        ignore_digest=ignore.digest,
+        parser_profile=PARSER_PROFILE,
+        parser_version=PARSER_VERSION,
+        matcher_version=MATCHER_VERSION,
+        limits_version=LIMITS_VERSION,
+        builtin_exclusions_version=BUILTIN_EXCLUSIONS_VERSION,
+        priority_matcher_version="priority-matcher/v1",
+        service_defaults_rule_version_id=uuid5(_EVAL_POLICY_NAMESPACE, "service-defaults"),
+        # MERGE HAZARD (#163 / #230): after #230, PromptBuilder._render_service_defaults
+        # accepts only the pinned per-language checksum. Whichever PR lands second sets
+        # DEFAULT_BACKEND_V1_CHECKSUM / DEFAULT_FRONTEND_V1_CHECKSUM here by case language and
+        # adopts #230's new check ids; until then the eval snapshot carries this label.
+        defaults_checksum="eval-default-rule-files",
+        prompt_bindings=make_complete_prompt_bindings(),
+        execution_profile=make_complete_execution_profile(
+            engine,
+            review_model=settings.primary.model,
+            verifier_model=settings.primary.model,
+        ),
+        policy_digest=hashlib.sha256(digest_input.encode("utf-8")).hexdigest(),
+    )
+
+
+def _policy_arm_digest(
+    root: Path, records: list[tuple[Path, dict[str, Any]]], arm: str
+) -> str | None:
+    """Digest the arm files shown to the model; ``none`` and ``legacy`` show no rules file."""
+    if arm not in ("valid", "malicious"):
+        return None
+    paths = [
+        (case_dir / record["base_path"] / record["policy"]["arms"][arm]).relative_to(root)
+        for case_dir, record in records
+    ]
+    try:
+        return digest_files(root, [path.as_posix() for path in paths])
+    except DigestInputError as exc:
+        raise RecorderError(str(exc)) from exc
+
+
+def _usage_json(usage: tuple[LlmUsage, ...]) -> list[dict[str, object]]:
+    """Token and USD usage of every paid call, as the gateway ledger records it.
+
+    ``cost_usd`` is the provider-reported cost when the answer carried one, else the
+    configured model price applied to the token counts. Model and provider strings are not
+    copied: they come from the provider envelope.
+    """
+    return [
+        {
+            "operation": item.operation,
+            "tokens_in": item.tokens_in,
+            "tokens_out": item.tokens_out,
+            "cache_read_tokens": item.cache_read_tokens,
+            "cost_usd": _decimal_text(item.cost_usd),
+        }
+        for item in usage
+    ]
+
+
 def _case_input(
     case_dir: Path,
     record: Mapping[str, Any],
@@ -190,6 +331,7 @@ def _case_input(
     rules: tuple[ReviewRule, ...],
     engine: EngineName,
     commit_prefix: CommitMessagePrefix,
+    policy_snapshot: PolicySnapshot | None = None,
 ) -> ReviewCase:
     diff = (case_dir / record["patch_path"]).read_text(encoding="utf-8")
     files = parse_unified_diff(diff)
@@ -214,6 +356,7 @@ def _case_input(
             commit_messages_incomplete=commit_prefix.incomplete,
         ),
         engine=engine,
+        policy_snapshot=policy_snapshot,
     )
 
 
@@ -431,8 +574,9 @@ async def _record_case(
     transport: ChatTransport | None,
     staging_dir: Path,
     commit_prefix: CommitMessagePrefix,
-) -> dict[str, str | bool | None]:
-    """Stage one case's first-call text and return its redacted call status."""
+    policy_snapshot: PolicySnapshot | None,
+) -> tuple[dict[str, str | bool | None], list[dict[str, object]]]:
+    """Stage one case's first-call text; return its redacted call status and usage."""
     case = _case_input(
         case_dir,
         record,
@@ -440,19 +584,22 @@ async def _record_case(
         rules=inputs.rules_by_language[record["language"]],
         engine=engine,
         commit_prefix=commit_prefix,
+        policy_snapshot=policy_snapshot,
     )
     try:
         result = await review_case(case, settings, transport=transport)
         calls = result.calls
+        usage = result.usage
         gateway_status = "accepted"
     except ReviewCaseFailed as failure:
         calls = failure.trace
+        usage = failure.usage
         gateway_status = failure.error_code.value
     first = calls[0] if calls else None
     content = _first_text(first)
     provider_label, provider_digest = _first_serving_provider(first)
     (staging_dir / f"{record['id']}.json").write_bytes(content.encode("utf-8"))
-    return {
+    status: dict[str, str | bool | None] = {
         "first_call": _first_call_status(first, content),
         "first_model": first.model if first else None,
         "first_kind": first.kind.value if first else None,
@@ -461,6 +608,7 @@ async def _record_case(
         "gateway_status": gateway_status,
         "paid_metadata_error": any(call.paid_metadata_error for call in calls),
     }
+    return status, _usage_json(usage)
 
 
 def _manifest(
@@ -470,6 +618,9 @@ def _manifest(
     engine: EngineName,
     statuses: dict[str, dict[str, str | bool | None]],
     paths: dict[str, str],
+    policy_arm: str,
+    policy_arm_digest: str | None,
+    usage: dict[str, list[dict[str, object]]],
 ) -> dict[str, Any]:
     nonpublishable_ids = nonpublishable_case_ids(statuses)
     return {
@@ -489,13 +640,16 @@ def _manifest(
             "baseline_publishable": not nonpublishable_ids,
             "nonpublishable_case_ids": nonpublishable_ids,
             "cases": statuses,
+            "policy_arm": policy_arm,
+            "policy_arm_digest": policy_arm_digest,
+            "usage": usage,
         },
         "responses": paths,
     }
 
 
 def _publish_capture(staging_dir: Path, responses_dir: Path, manifest: dict[str, Any]) -> None:
-    """Write the manifest and move the complete capture into a still-empty ``responses/``."""
+    """Write the manifest and move the complete capture into a still-empty responses dir."""
     (staging_dir / "manifest.json").write_text(
         json.dumps(manifest, indent=2, sort_keys=True, ensure_ascii=False) + "\n",
         encoding="utf-8",
@@ -519,15 +673,47 @@ async def record_live(
     transport: ChatTransport | None = None,
     recorded_at: datetime | None = None,
     engine: EngineName = "fast",
+    policy_arm: str = "legacy",
+    responses_dir: Path | None = None,
 ) -> dict[str, Any]:
-    """Call ``review_case`` once per validated case and save only first-call text."""
+    """Call ``review_case`` once per validated case and save only first-call text.
+
+    ``responses_dir`` defaults to ``<root>/responses``; it must be new or empty.
+    """
+    if policy_arm not in RECORDED_POLICY_ARMS:
+        raise RecorderError(f"unknown policy arm: {policy_arm}")
     records = _validated_cases(root)
     commit_context = _commit_context(records)
-    responses_dir = root / "responses"
+    if policy_arm == "legacy":
+        # The legacy prompt shows no repository rules, so a policy-arm case would be scored
+        # against truths and exceptions its arm cannot express (#163).
+        with_policy = [record["id"] for _, record in records if uses_policy_arms(record)]
+        if with_policy:
+            raise RecorderError(
+                "--policy-arm legacy renders no repository rules; choose none, valid or "
+                "malicious for the policy-arm cases " + ", ".join(with_policy)
+            )
+    if policy_arm in ("valid", "malicious"):
+        without_policy = [record["id"] for _, record in records if "policy" not in record]
+        if without_policy:
+            raise RecorderError(
+                f"--policy-arm {policy_arm} needs case policy arms; missing in "
+                + ", ".join(without_policy)
+            )
+    responses_dir = root / "responses" if responses_dir is None else responses_dir
     if responses_dir.exists() and any(responses_dir.iterdir()):
         raise RecorderError("responses directory is not empty; preserve the existing baseline")
     if responses_dir.is_symlink():
         raise RecorderError("responses directory cannot be a symlink")
+    if responses_dir.absolute().resolve().is_relative_to((root / "cases").resolve()):
+        raise RecorderError("responses directory must be outside the cases directory")
+    if not responses_dir.absolute().parent.is_dir():
+        raise RecorderError("responses directory parent must already exist")
+    snapshots = {
+        record["id"]: _policy_snapshot(case_dir, record, policy_arm, settings, engine)
+        for case_dir, record in records
+    }
+    policy_arm_digest = _policy_arm_digest(root, records, policy_arm)
     inputs = _capture_inputs(
         root,
         records,
@@ -539,12 +725,15 @@ async def record_live(
         engine=engine,
     )
     statuses: dict[str, dict[str, str | bool | None]] = {}
+    usage: dict[str, list[dict[str, object]]] = {}
     paths: dict[str, str] = {}
-    with TemporaryDirectory(prefix=".responses-", dir=root) as staging_name:
+    # Staged next to the target, so the final rename never crosses a filesystem.
+    staging_parent = responses_dir.absolute().parent
+    with TemporaryDirectory(prefix=".responses-", dir=staging_parent) as staging_name:
         staging_dir = Path(staging_name)
         for case_dir, record in records:
             case_id = record["id"]
-            statuses[case_id] = await _record_case(
+            statuses[case_id], usage[case_id] = await _record_case(
                 case_dir,
                 record,
                 inputs,
@@ -553,9 +742,19 @@ async def record_live(
                 transport=transport,
                 staging_dir=staging_dir,
                 commit_prefix=commit_context[case_id],
+                policy_snapshot=snapshots[case_id],
             )
             paths[case_id] = f"responses/{case_id}.json"
-        manifest = _manifest(inputs, settings, engine=engine, statuses=statuses, paths=paths)
+        manifest = _manifest(
+            inputs,
+            settings,
+            engine=engine,
+            statuses=statuses,
+            paths=paths,
+            policy_arm=policy_arm,
+            policy_arm_digest=policy_arm_digest,
+            usage=usage,
+        )
         _publish_capture(staging_dir, responses_dir, manifest)
     return manifest
 
@@ -591,7 +790,10 @@ def main(
     parser.add_argument("--engine", choices=("fast", "deep"), default="fast")
     parser.add_argument("--report-json", type=Path, metavar="PATH")
     parser.add_argument("--redacted-responses", type=Path, metavar="DIR")
+    parser.add_argument("--policy-arm", choices=RECORDED_POLICY_ARMS, default="legacy")
+    parser.add_argument("--responses-dir", type=Path, metavar="DIR")
     args = parser.parse_args(argv)
+    responses_dir: Path = args.responses_dir or args.root / "responses"
     try:
         if args.report_json and args.redacted_responses:
             report = args.report_json.absolute().resolve()
@@ -606,6 +808,13 @@ def main(
             _validate_export_destination(args.report_json, args.root, "report JSON")
         if args.redacted_responses:
             _validate_export_destination(args.redacted_responses, args.root, "redacted export")
+        capture = responses_dir.absolute().resolve()
+        for output in (args.report_json, args.redacted_responses):
+            if output is not None and (
+                (resolved := output.absolute().resolve()).is_relative_to(capture)
+                or capture.is_relative_to(resolved)
+            ):
+                raise RecorderError("report or export path overlaps the responses directory")
         settings = model_settings or LlmSettings.from_env(os.environ)
         manifest = asyncio.run(
             record_live(
@@ -616,9 +825,11 @@ def main(
                 frontend_rules=args.frontend_rules,
                 transport=transport,
                 engine=args.engine,
+                policy_arm=args.policy_arm,
+                responses_dir=responses_dir,
             )
         )
-        report = replay(args.root)
+        report = replay(args.root, responses_dir=responses_dir)
         if args.report_json:
             # Validator diagnostics can quote model text, so the uploaded report
             # contains metrics and statuses but no diagnostic/model content.
@@ -638,7 +849,7 @@ def main(
             statuses = manifest["run_metadata"]["cases"]
             for item in report["responses"]:
                 case_id = item["case_id"]
-                raw = (args.root / item["path"]).read_bytes()
+                raw = (responses_dir / Path(item["path"]).name).read_bytes()
                 metadata = {
                     "case_id": case_id,
                     "raw_sha256": hashlib.sha256(raw).hexdigest(),

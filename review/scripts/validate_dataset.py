@@ -4,8 +4,12 @@
 Usage: uv run python review/scripts/validate_dataset.py --case SEC-01
        uv run python review/scripts/validate_dataset.py --final
        uv run python review/scripts/validate_dataset.py --final --report-json /tmp/report.json
+       uv run python review/scripts/validate_dataset.py --root test-prs-dataset/rules \
+           --final --profile rules
 
 The optional --root is for isolated fixtures. Normal runs use test-prs-dataset/.
+--profile rules checks the rules.md sub-corpus (#163) against its own distribution;
+per-case checks are the same in both profiles.
 """
 
 from __future__ import annotations
@@ -25,10 +29,31 @@ from typing import Any, TypedDict
 
 from jsonschema import Draft202012Validator
 
+if __package__ in (None, ""):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
+from app.modules.reviews.application.policy_documents import (  # noqa: E402
+    normalize_document,
+)
+from app.modules.reviews.application.policy_errors import PolicyError  # noqa: E402
+from app.modules.reviews.application.policy_snapshot import (  # noqa: E402
+    AGENTS_DOCUMENT_PATH,
+    RULES_DOCUMENT_PATH,
+)
+from app.modules.reviews.application.review_ignore import (  # noqa: E402
+    IgnoreMatcher,
+    IgnorePolicy,
+    parse_review_ignore,
+)
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_ROOT = REPO_ROOT / "test-prs-dataset"
 SCHEMA_PATH = DEFAULT_ROOT / "schema" / "case.schema.json"
 HUNK = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@")
+_RENAME_OR_COPY = ("rename from ", "rename to ", "copy from ", "copy to ")
+_QUOTED_NAME = r'"(?:\\.|[^"\\])*"'
+_QUOTED_HEADER = re.compile(rf"({_QUOTED_NAME}) ({_QUOTED_NAME})")
+# The main corpus classes: the final distribution of the main profile counts exactly these.
 CLASS_PREFIX = {
     "security": "SEC",
     "resource": "RES",
@@ -36,6 +61,12 @@ CLASS_PREFIX = {
     "syntax": "SYN",
     "clean": "CLEAN",
 }
+RULES_CLASS = "rules"
+ID_PREFIX = {**CLASS_PREFIX, RULES_CLASS: "RUL"}
+POLICY_ARMS = ("none", "valid", "malicious")
+# The line window of eval_score.py: a prediction within this many lines matches an anchor.
+MATCH_WINDOW = 2
+_HEADING = re.compile(r"^#{1,6}\s")
 DEFAULT_CATEGORY = {
     "security": "security",
     "resource": "performance",
@@ -52,6 +83,14 @@ class DistributionCounts(TypedDict):
     distinct_real_source_count: int
     language_counts: dict[str, int]
     critical_truth_count: int
+
+
+class RulesDistributionCounts(TypedDict):
+    valid_case_count: int
+    class_counts: dict[str, int]
+    language_counts: dict[str, int]
+    rule_truth_case_count: int
+    exception_case_count: int
 
 
 def _case_path(case_dir: Path, raw: str) -> Path | None:
@@ -72,6 +111,15 @@ def _git_env() -> dict[str, str]:
     return {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
 
 
+def _patch_name(raw: str) -> str:
+    """A path of a patch header line, decoded when git quoted it C-style."""
+    if not raw.startswith('"'):
+        return raw
+    quoted = re.match(f"^{_QUOTED_NAME}", raw)
+    escaped = quoted.group(0)[1:-1] if quoted else ""
+    return codecs.escape_decode(escaped.encode("utf-8"))[0].decode("utf-8")
+
+
 def _patch_added_lines(patch: Path) -> dict[str, set[int]]:
     """Read new-side added line numbers from unified diff hunks."""
     added: dict[str, set[int]] = {}
@@ -82,13 +130,7 @@ def _patch_added_lines(patch: Path) -> dict[str, set[int]]:
             current_path = None
             new_line = None
         elif text.startswith("+++ ") and new_line is None:
-            raw_path = text[4:].split("\t", 1)[0]
-            if raw_path.startswith('"'):
-                quoted = re.match(r'^"(?:\\.|[^"\\])*"', raw_path)
-                escaped = quoted.group(0)[1:-1] if quoted else ""
-                path = codecs.escape_decode(escaped.encode("utf-8"))[0].decode("utf-8")
-            else:
-                path = raw_path
+            path = _patch_name(text[4:].split("\t", 1)[0])
             current_path = path.removeprefix("b/") if path != "/dev/null" else None
         elif match := HUNK.match(text):
             new_line = int(match.group(1))
@@ -101,6 +143,247 @@ def _patch_added_lines(patch: Path) -> dict[str, set[int]]:
             elif text.startswith("-") or text.startswith("\\"):
                 continue
     return added
+
+
+def _git_header_path(header: str) -> str | None:
+    """The path of a ``diff --git`` line whose two sides name the same file, as git reads it.
+
+    Only such a line is unambiguous: an unquoted ``a/P b/P`` splits at its middle, also when
+    ``P`` contains " b/". Different names (a rename or copy) come from the extended header.
+    """
+    names = header.removeprefix("diff --git ")
+    if quoted := _QUOTED_HEADER.fullmatch(names):
+        old, new = (_patch_name(name) for name in quoted.groups())
+    else:
+        half = len(names) // 2
+        old, new = (names[:half], names[half + 1 :]) if names[half : half + 1] == " " else ("", "")
+    if old.startswith("a/") and new.startswith("b/") and old[2:] == new[2:] != "":
+        return old[2:]
+    return None
+
+
+def _patch_changed_paths(patch: Path) -> list[str]:
+    """Every repository path a patch changes, in first-seen order.
+
+    Both names of each file block count: a deleted file by its old path, a rename by both,
+    and a copy by its source too, since ``apply_ignore`` withholds a copy whose source a
+    mask matches. The ``diff --git`` line also names a block without hunks (an empty file,
+    a mode change, a binary file); the other header lines are read only before the first
+    hunk of a block.
+    """
+    paths: dict[str, None] = {}
+    in_header = True
+    for text in patch.read_text(encoding="utf-8").splitlines():
+        if text.startswith("diff --git "):
+            in_header = True
+            if (path := _git_header_path(text)) is not None:
+                paths[path] = None
+        elif not in_header:
+            continue
+        elif HUNK.match(text):
+            in_header = False
+        elif text.startswith(("--- ", "+++ ")):
+            path = _patch_name(text[4:].split("\t", 1)[0])
+            if path != "/dev/null":
+                paths[path.removeprefix("a/" if text.startswith("-") else "b/")] = None
+        elif prefix := next((item for item in _RENAME_OR_COPY if text.startswith(item)), None):
+            paths[_patch_name(text.removeprefix(prefix))] = None
+    return list(paths)
+
+
+def uses_policy_arms(record: dict[str, Any]) -> bool:
+    """Whether a case carries any field of the rules.md sub-corpus (#163)."""
+    return (
+        record["class"] == RULES_CLASS
+        or "policy" in record
+        or "must_not_flag" in record
+        or any("arms" in item or "origin" in item for item in record["expected_findings"])
+    )
+
+
+def _normalized(text: str) -> str:
+    """Collapse whitespace, so a quote may wrap differently than the rules document."""
+    return " ".join(text.split())
+
+
+def _sections(text: str) -> list[str]:
+    """Markdown sections of a rules document: each heading line with the text up to the next."""
+    sections: list[list[str]] = [[]]
+    for line in text.split("\n"):
+        if _HEADING.match(line) and any(part.strip() for part in sections[-1]):
+            sections.append([])
+        sections[-1].append(line)
+    return [body for lines in sections if (body := "\n".join(lines).strip())]
+
+
+def _malicious_errors(arms: dict[str, str], valid: str, malicious: str) -> list[str]:
+    """The malicious arm is the benign rules plus an injection, so each valid section stays."""
+    if malicious == valid:
+        return ["policy.arms.malicious: must differ from the valid rules document"]
+    errors: list[str] = []
+    for section in _sections(valid):
+        if section not in malicious:
+            heading = section.split("\n", 1)[0]
+            errors.append(
+                f"policy.arms.malicious: {arms['malicious']} lacks the section {heading!r} "
+                f"of {arms['valid']}"
+            )
+    return errors
+
+
+def _arm_errors(record: dict[str, Any]) -> list[str]:
+    """Arm lists of a policy case: what the rules add or exempt never applies in arm none.
+
+    The malicious arm expects exactly the valid arm's truths (the injection must change
+    nothing), and every exception anchor is the generic ``none``-arm truth at that place.
+    """
+    errors: list[str] = []
+    for index, finding in enumerate(record["expected_findings"]):
+        arms = _arms(finding)
+        if finding.get("origin") == "rule" and ("none" in arms or "valid" not in arms):
+            errors.append(
+                f"expected_findings[{index}].arms: a rule-made truth lists valid and "
+                "malicious, not none"
+            )
+        if ("valid" in arms) != ("malicious" in arms):
+            errors.append(
+                f"expected_findings[{index}].arms: list both valid and malicious or neither"
+            )
+    for index, anchor in enumerate(record.get("must_not_flag", [])):
+        if "none" in _arms(anchor):
+            errors.append(f"must_not_flag[{index}].arms: must not list none")
+        if not any(
+            "none" in _arms(truth)
+            and (truth["path"], truth["line"]) == (anchor["path"], anchor["line"])
+            for truth in record["expected_findings"]
+        ):
+            place = f"{anchor['path']}:{anchor['line']}"
+            errors.append(f"must_not_flag[{index}]: needs a none-arm truth at {place}")
+    return errors
+
+
+def _ignore_errors(policies: list[tuple[str, str, IgnorePolicy]], changed: list[str]) -> list[str]:
+    """No ``review-ignore`` mask of an arm file may match a path the case changes.
+
+    Production withholds a matched file from the model, but the eval runner does not apply
+    the masks, so such a case would score a diff that production never reviews.
+    """
+    errors: list[str] = []
+    for label, raw, policy in policies:
+        matcher = IgnoreMatcher(policy)
+        for path in changed:
+            try:
+                mask = matcher.match(path)
+            except PolicyError as exc:
+                errors.append(f"{label}: {raw}: the changed path {path!r} cannot be matched: {exc}")
+                continue
+            if mask is not None:
+                errors.append(
+                    f"{label}: {raw}: review-ignore mask {mask} matches the changed path {path}"
+                )
+    return errors
+
+
+def _policy_document_errors(base: Path, record: dict[str, Any], changed: list[str]) -> list[str]:
+    """Check every arm file with the production parsers, so a broken fixture fails here.
+
+    ``rule_ref`` and each exception ``reason`` quote the rules document verbatim (whitespace
+    may wrap differently); the quote must occur in both arm files. The ``review-ignore``
+    masks of each arm file are checked against the case's ``changed`` paths.
+    """
+    policy = record.get("policy")
+    if policy is None:
+        return (
+            ["policy: must_not_flag, arms and origin need the case policy arms"]
+            if uses_policy_arms(record)
+            else []
+        )
+    errors = _arm_errors(record)
+    arms = policy["arms"]
+    if arms["valid"] != RULES_DOCUMENT_PATH:
+        errors.append(f"policy.arms.valid: must be {RULES_DOCUMENT_PATH}")
+    if arms["malicious"] == arms["valid"]:
+        errors.append("policy.arms.malicious: must name another file than policy.arms.valid")
+    texts: dict[str, str] = {}
+    policies: list[tuple[str, str, IgnorePolicy]] = []
+    documents = [(f"policy.arms.{arm}", arms[arm], RULES_DOCUMENT_PATH) for arm in arms]
+    if (base / AGENTS_DOCUMENT_PATH).is_file():
+        documents.append((AGENTS_DOCUMENT_PATH, AGENTS_DOCUMENT_PATH, AGENTS_DOCUMENT_PATH))
+    for label, raw, snapshot_path in documents:
+        path = _case_path(base, raw)
+        if path is None or not path.is_file():
+            errors.append(f"{label}: {raw} is missing or escapes base_path")
+            continue
+        try:
+            document = normalize_document(snapshot_path, path.read_bytes(), blob_oid="0" * 40)
+            if snapshot_path == RULES_DOCUMENT_PATH:
+                policies.append((label, raw, parse_review_ignore(document.text)))
+        except (OSError, PolicyError) as exc:
+            errors.append(f"{label}: {raw}: {exc}")
+            continue
+        texts[label] = document.text or ""
+    errors.extend(_ignore_errors(policies, changed))
+    valid_text = texts.get("policy.arms.valid")
+    malicious_text = texts.get("policy.arms.malicious")
+    if arms["malicious"] != arms["valid"] and valid_text is not None and malicious_text is not None:
+        errors.extend(_malicious_errors(arms, valid_text, malicious_text))
+    quotes = [
+        (f"expected_findings[{index}].rule_ref", finding["rule_ref"])
+        for index, finding in enumerate(record["expected_findings"])
+        if "rule_ref" in finding
+    ]
+    quotes.extend(
+        (f"must_not_flag[{index}].reason", anchor["reason"])
+        for index, anchor in enumerate(record.get("must_not_flag", []))
+    )
+    for label, quote in quotes:
+        for arm in ("valid", "malicious"):
+            text = texts.get(f"policy.arms.{arm}")
+            if text is not None and _normalized(quote) not in _normalized(text):
+                errors.append(f"{label}: not found in {arms[arm]}")
+    return errors
+
+
+def _arms(item: dict[str, Any]) -> set[str]:
+    return set(item.get("arms", POLICY_ARMS))
+
+
+def _exception_errors(record: dict[str, Any], added: dict[str, set[int]]) -> list[str]:
+    """``must_not_flag`` anchors follow the truth anchor rules and stay clear of every truth.
+
+    Scoring matches an exception anchor on path and line window only, whatever the category,
+    so an anchor within the window of a truth that shares an arm would be ambiguous.
+    """
+    errors: list[str] = []
+    seen: set[tuple[str, int]] = set()
+    for index, anchor in enumerate(record.get("must_not_flag", [])):
+        label = f"must_not_flag[{index}]"
+        start = anchor["start_line"]
+        line = anchor["line"]
+        if isinstance(line, float) or isinstance(start, float):
+            errors.append(f"{label}: line numbers must be integers")
+            continue
+        if start is not None and start >= line:
+            errors.append(f"{label}.start_line: must be < line")
+        key = (anchor["path"], line)
+        if key in seen:
+            errors.append(f"{label}: duplicate exception anchor {key}")
+        seen.add(key)
+        for point in (line, start):
+            if point is not None and point not in added.get(anchor["path"], set()):
+                errors.append(f"{label}: {anchor['path']}:{point} is not a new-side added line")
+        for truth_index, truth in enumerate(record["expected_findings"]):
+            shared = [arm for arm in POLICY_ARMS if arm in _arms(truth) & _arms(anchor)]
+            if (
+                shared
+                and truth["path"] == anchor["path"]
+                and abs(truth["line"] - line) <= MATCH_WINDOW
+            ):
+                errors.append(
+                    f"{label}: within {MATCH_WINDOW} lines of expected_findings[{truth_index}] "
+                    f"in arm {shared[0]}"
+                )
+    return errors
 
 
 def _derived_verdict(findings: list[dict[str, Any]]) -> str:
@@ -142,7 +425,7 @@ def validate_case(
     record: dict[str, Any] = data
     if record["id"] != case_dir.name:
         errors.append(f"case.json.id: {record['id']} does not match directory {case_dir.name}")
-    if not record["id"].startswith(CLASS_PREFIX[record["class"]] + "-"):
+    if not record["id"].startswith(ID_PREFIX[record["class"]] + "-"):
         errors.append("case.json.id: prefix does not match class")
 
     seen_anchors: set[tuple[str, str, int]] = set()
@@ -154,7 +437,7 @@ def validate_case(
         elif start is not None and start >= line:
             errors.append(f"expected_findings[{index}].start_line: must be < line")
         if (
-            record["class"] != "clean"
+            record["class"] in DEFAULT_CATEGORY
             and finding["category"] != DEFAULT_CATEGORY[record["class"]]
             and not record.get("category_reason")
         ):
@@ -209,6 +492,7 @@ def validate_case(
 
     try:
         added = _patch_added_lines(patch)
+        changed = _patch_changed_paths(patch) if "policy" in record else []
     except (OSError, UnicodeError, ValueError, SyntaxError) as exc:
         return [f"patch_path: cannot read unified patch: {exc}"], None
     if record["expected_findings"] and not added:
@@ -223,6 +507,14 @@ def validate_case(
                 errors.append(
                     f"expected_findings[{index}]: {path}:{anchor} is not a new-side added line"
                 )
+    if (
+        record["class"] == RULES_CLASS
+        and not record.get("must_not_flag")
+        and not any(item.get("origin") == "rule" for item in record["expected_findings"])
+    ):
+        errors.append("rules case: needs an origin rule truth or a must_not_flag anchor")
+    errors.extend(_exception_errors(record, added))
+    errors.extend(_policy_document_errors(base, record, changed))
     return errors, record if not errors else None
 
 
@@ -274,6 +566,51 @@ def _distribution_errors(counts: DistributionCounts) -> list[str]:
     return errors
 
 
+def _rules_profile_errors(records: list[dict[str, Any]]) -> list[str]:
+    """The main corpus and its paid baseline stay free of rules.md cases (#163)."""
+    return [
+        f"final corpus: {record['id']} uses policy arms; validate it with --profile rules"
+        for record in records
+        if uses_policy_arms(record)
+    ]
+
+
+def _rules_distribution_counts(records: list[dict[str, Any]]) -> RulesDistributionCounts:
+    classes = Counter(record["class"] for record in records)
+    languages = Counter(record["language"] for record in records)
+    return {
+        "valid_case_count": len(records),
+        "class_counts": dict(sorted(classes.items())),
+        "language_counts": {name: languages[name] for name in ("python", "typescript", "tsx")},
+        "rule_truth_case_count": sum(
+            any(item.get("origin") == "rule" for item in record["expected_findings"])
+            for record in records
+        ),
+        "exception_case_count": sum("must_not_flag" in record for record in records),
+    }
+
+
+def _rules_distribution_errors(counts: RulesDistributionCounts) -> list[str]:
+    """Minimums of the rules.md sub-corpus; synthetic sources are allowed."""
+    errors: list[str] = []
+    valid = counts["valid_case_count"]
+    if valid < 8:
+        errors.append(f"rules corpus: expected ≥8 cases, got {valid}")
+    other = sorted(name for name in counts["class_counts"] if name != RULES_CLASS)
+    if other:
+        errors.append(f"rules corpus: every case must be class rules, got {', '.join(other)}")
+    rule_cases = counts["rule_truth_case_count"]
+    if rule_cases < 3:
+        errors.append(f"rules corpus: needs ≥3 cases with a rule-made truth, got {rule_cases}")
+    exception_cases = counts["exception_case_count"]
+    if exception_cases < 3:
+        errors.append(f"rules corpus: needs ≥3 cases with must_not_flag, got {exception_cases}")
+    languages = counts["language_counts"]
+    if languages["python"] == 0 or (languages["typescript"] == 0 and languages["tsx"] == 0):
+        errors.append("rules corpus: needs Python and TypeScript/React cases")
+    return errors
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, default=DEFAULT_ROOT, help="dataset root")
@@ -282,11 +619,16 @@ def main() -> int:
     parser.add_argument(
         "--report-json", type=Path, metavar="PATH", help="write final counts as JSON"
     )
+    parser.add_argument(
+        "--profile", choices=(RULES_CLASS,), help="final distribution of a sub-corpus"
+    )
     args = parser.parse_args()
     if args.case and args.final:
         parser.error("--case and --final cannot be combined")
     if args.report_json and not args.final:
         parser.error("--report-json requires --final")
+    if args.profile and not args.final:
+        parser.error("--profile requires --final")
     schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
     validator = Draft202012Validator(schema)
     cases_root = args.root / "cases"
@@ -320,14 +662,23 @@ def main() -> int:
             print(f"OK {case_dir.name}")
     if args.final:
         print(f"cases: {len(case_dirs)}; valid: {len(records)}")
-        counts = _distribution_counts(records)
-        for error in _distribution_errors(counts):
+        counts: DistributionCounts | RulesDistributionCounts
+        if args.profile == RULES_CLASS:
+            counts = _rules_distribution_counts(records)
+            distribution_errors = _rules_distribution_errors(counts)
+            profile: dict[str, str] = {"profile": RULES_CLASS}
+        else:
+            counts = _distribution_counts(records)
+            distribution_errors = [*_distribution_errors(counts), *_rules_profile_errors(records)]
+            profile = {}
+        for error in distribution_errors:
             print(error)
             diagnostics.append(error)
             failed = True
         if args.report_json:
             report = {
                 "schema_version": 1,
+                **profile,
                 "case_count": len(case_dirs),
                 **counts,
                 "passed": not failed,

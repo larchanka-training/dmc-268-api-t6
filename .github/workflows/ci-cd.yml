@@ -266,6 +266,10 @@ jobs:
           PYTHON
           exit "$replay_status"
 
+      - name: Rules sub-corpus
+        # The rules.md sub-corpus (#163): its own profile, no recorded capture yet.
+        run: uv run --locked python review/scripts/validate_dataset.py --root test-prs-dataset/rules --final --profile rules
+
       - name: Integration suite (zero skips)
         run: |
           report="${RUNNER_TEMP}/integration-results.xml"

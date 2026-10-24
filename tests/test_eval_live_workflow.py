@@ -47,7 +47,9 @@ def test_prepare_live_corpus_preserves_committed_responses(tmp_path: Path) -> No
     runner = tmp_path / "runner"
     runner.mkdir()
 
-    result = _run("Prepare isolated corpus", tmp_path, {"RUNNER_TEMP": str(runner)})
+    result = _run(
+        "Prepare isolated corpus", tmp_path, {"RUNNER_TEMP": str(runner), "EVAL_CORPUS": "main"}
+    )
 
     assert result.returncode == 0, result.stderr
     assert response.read_bytes() == b"original raw answer"
@@ -74,6 +76,7 @@ def test_live_failure_is_not_hidden_and_diagnostics_remain(tmp_path: Path) -> No
             "PATH": str(bin_dir) + os.pathsep + os.environ["PATH"],
             "RUNNER_TEMP": str(tmp_path),
             "LLM_API_KEYS": "test-key-not-a-real-credential",
+            "EVAL_POLICY_ARM": "malicious",
         },
     )
 
@@ -85,6 +88,8 @@ def test_live_failure_is_not_hidden_and_diagnostics_remain(tmp_path: Path) -> No
         "review/scripts/eval_live.py",
         "--root",
         str(tmp_path / "eval-corpus"),
+        "--policy-arm",
+        "malicious",
         "--report-json",
         str(tmp_path / "eval-report.json"),
         "--redacted-responses",
@@ -100,7 +105,12 @@ def test_missing_key_fails_before_provider_call(tmp_path: Path) -> None:
     result = _run(
         "Evaluate live corpus",
         tmp_path,
-        {"RUNNER_TEMP": str(tmp_path), "LLM_API_KEYS": "", "PATH": str(tmp_path)},
+        {
+            "RUNNER_TEMP": str(tmp_path),
+            "LLM_API_KEYS": "",
+            "PATH": str(tmp_path),
+            "EVAL_POLICY_ARM": "legacy",
+        },
     )
     assert result.returncode != 0
     assert "AI_DMC268_T6" in result.stderr
@@ -110,7 +120,12 @@ def test_missing_key_fails_before_provider_call(tmp_path: Path) -> None:
     control = _run(
         "Evaluate live corpus",
         tmp_path,
-        {"RUNNER_TEMP": str(tmp_path), "LLM_API_KEYS": "test-key", "PATH": str(tmp_path)},
+        {
+            "RUNNER_TEMP": str(tmp_path),
+            "LLM_API_KEYS": "test-key",
+            "PATH": str(tmp_path),
+            "EVAL_POLICY_ARM": "legacy",
+        },
     )
     assert control.returncode == 42
     assert (tmp_path / "uv-called").exists()
@@ -180,6 +195,7 @@ def _assert_workflow_contract(text: str) -> None:
     assert "${{ inputs.model" not in evaluate
     assert "          LLM_API_KEYS: ${{ secrets.AI_DMC268_T6 }}" in evaluate
     assert 'validate_dataset.py --root "$RUNNER_TEMP/eval-corpus" --final' in text
+    _assert_selection_contract(text)
     for name in ("Export safe provenance", "Summarize evaluation", "Upload evaluation report"):
         assert f"      - name: {name}\n        if: always()\n" in text
     upload = text.split("      - name: Upload evaluation report\n")[1]
@@ -189,6 +205,57 @@ def _assert_workflow_contract(text: str) -> None:
         "            ${{ runner.temp }}/eval-response-metadata/",
     ]
     assert "          retention-days: 14\n" in upload
+
+
+def _run_bodies(text: str) -> list[str]:
+    return [
+        match.group("body") or match.group("line")
+        for match in re.finditer(
+            r"(?m)^        run: (?:\|\n(?P<body>(?:^          .*\n|^\n)*)|(?P<line>.+)\n)", text
+        )
+    ]
+
+
+def _assert_selection_contract(text: str) -> None:
+    """Corpus and policy arm are closed choices that reach the shell only as variables."""
+    assert (
+        "      corpus:\n"
+        '        description: "Corpus: main (gold benchmark) or rules '
+        '(rules.md sub-corpus, #163)"\n'
+        "        required: false\n"
+        "        type: choice\n"
+        "        options:\n"
+        "          - main\n"
+        "          - rules\n"
+        "        default: main\n"
+    ) in text
+    assert (
+        "      policy_arm:\n"
+        '        description: "Policy arm: legacy (no policy snapshot), none, valid or malicious"\n'
+        "        required: false\n"
+        "        type: choice\n"
+        "        options:\n"
+        "          - legacy\n"
+        "          - none\n"
+        "          - valid\n"
+        "          - malicious\n"
+        "        default: legacy\n"
+    ) in text
+    assert "      EVAL_CORPUS: ${{ inputs.corpus || 'main' }}\n" in text
+    assert "      EVAL_POLICY_ARM: ${{ inputs.policy_arm || 'legacy' }}\n" in text
+    bodies = _run_bodies(text)
+    assert len(bodies) == 7
+    assert not [body for body in bodies if "${{" in body]
+    assert (
+        'validate_dataset.py --root "$RUNNER_TEMP/eval-corpus" --final "${profile[@]}"\n'
+    ) in text
+    assert "            profile=(--profile rules)\n" in text
+    assert '            --policy-arm "$EVAL_POLICY_ARM" \\\n' in text
+    # Artifacts of different corpora and arms stay apart in one repository's artifact list.
+    run = "${{ github.run_id }}-${{ github.run_attempt }}"
+    selection = "${{ env.EVAL_CORPUS }}-${{ env.EVAL_POLICY_ARM }}"
+    assert f"          name: eval-live-{selection}-{run}\n" in text
+    assert f"          name: eval-live-raw-{selection}-{run}\n" in text
 
 
 def test_manual_workflow_security_and_selection_contract() -> None:
@@ -211,6 +278,29 @@ def test_manual_workflow_security_and_selection_contract() -> None:
         ('--root "$RUNNER_TEMP/eval-corpus" --final', "--final"),
         ("${{ inputs.model || vars.LLM_MODEL }}", "${{ vars.LLM_MODEL }}"),
         ("    env:\n", "    env:\n      EXTRA_KEY: ${{ secrets.AI_DMC268_T6 }}\n"),
+        ("          - rules\n", ""),
+        ("          - malicious\n", ""),
+        ("        default: main\n", "        default: rules\n"),
+        ("        default: legacy\n", "        default: valid\n"),
+        (
+            "    type: choice\n        options:\n          - main",
+            "    type: string\n        options:\n          - main",
+        ),
+        ("${{ inputs.policy_arm || 'legacy' }}", "legacy"),
+        ('--policy-arm "$EVAL_POLICY_ARM"', '--policy-arm "${{ inputs.policy_arm }}"'),
+        (
+            '"$RUNNER_TEMP/eval-corpus" --final "${profile[@]}"',
+            '"$RUNNER_TEMP/eval-corpus" --final',
+        ),
+        ("profile=(--profile rules)", "profile=()"),
+        (
+            "eval-live-${{ env.EVAL_CORPUS }}-${{ env.EVAL_POLICY_ARM }}-${{ github.run_id }}",
+            "eval-live-${{ env.EVAL_CORPUS }}-${{ github.run_id }}",
+        ),
+        (
+            "eval-live-raw-${{ env.EVAL_CORPUS }}-${{ env.EVAL_POLICY_ARM }}-",
+            "eval-live-raw-${{ env.EVAL_POLICY_ARM }}-",
+        ),
     ],
 )
 def test_workflow_contract_rejects_unsafe_mutations(before: str, after: str) -> None:
@@ -366,3 +456,115 @@ def test_raw_export_rejects_unsafe_or_incomplete_capture(tmp_path: Path, unsafe:
     result = _export_raw(tmp_path)
     assert result.returncode != 0
     assert not (tmp_path / "eval-raw-responses").exists()
+
+
+def _dataset_with_both_corpora(root: Path) -> None:
+    dataset = root / "test-prs-dataset"
+    for case in ("cases/SEC-01", "rules/cases/RUL-01", "schema"):
+        (dataset / case).mkdir(parents=True)
+    (dataset / "cases/SEC-01/case.json").write_text("main")
+    (dataset / "rules/cases/RUL-01/case.json").write_text("rules")
+    (dataset / "schema/case.schema.json").write_text("{}")
+
+
+@pytest.mark.parametrize(
+    ("corpus", "expected"), [("main", ["SEC-01"]), ("rules", ["RUL-01"])], ids=["main", "rules"]
+)
+def test_prepare_copies_the_selected_corpus_with_the_shared_schema(
+    tmp_path: Path, corpus: str, expected: list[str]
+) -> None:
+    _dataset_with_both_corpora(tmp_path)
+    runner = tmp_path / "runner"
+    runner.mkdir()
+
+    result = _run(
+        "Prepare isolated corpus", tmp_path, {"RUNNER_TEMP": str(runner), "EVAL_CORPUS": corpus}
+    )
+
+    assert result.returncode == 0, result.stderr
+    copied = runner / "eval-corpus"
+    assert sorted(path.name for path in copied.iterdir()) == ["cases", "schema"]
+    assert sorted(path.name for path in (copied / "cases").iterdir()) == expected
+    assert (copied / "schema/case.schema.json").read_text() == "{}"
+
+
+def test_prepare_rejects_an_unknown_corpus(tmp_path: Path) -> None:
+    _dataset_with_both_corpora(tmp_path)
+    runner = tmp_path / "runner"
+    runner.mkdir()
+
+    result = _run(
+        "Prepare isolated corpus", tmp_path, {"RUNNER_TEMP": str(runner), "EVAL_CORPUS": "../x"}
+    )
+
+    assert result.returncode == 1
+    assert "::error::Unknown corpus: ../x" in result.stderr
+    assert not (runner / "eval-corpus").exists()
+
+
+@pytest.mark.parametrize(
+    ("corpus", "arm", "profile"),
+    [
+        ("main", "legacy", []),
+        ("main", "none", []),
+        ("rules", "none", ["--profile", "rules"]),
+        ("rules", "malicious", ["--profile", "rules"]),
+    ],
+    ids=["main-legacy", "main-none", "rules-none", "rules-malicious"],
+)
+def test_validate_uses_the_profile_of_the_selected_corpus(
+    tmp_path: Path, corpus: str, arm: str, profile: list[str]
+) -> None:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    shim = bin_dir / "uv"
+    shim.write_text('#!/bin/bash\nprintf "%s\\n" "$@" > "$RUNNER_TEMP/args"\n')
+    shim.chmod(0o755)
+
+    result = _run(
+        "Validate corpus",
+        tmp_path,
+        {
+            "PATH": str(bin_dir) + os.pathsep + os.environ["PATH"],
+            "RUNNER_TEMP": str(tmp_path),
+            "EVAL_CORPUS": corpus,
+            "EVAL_POLICY_ARM": arm,
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert (tmp_path / "args").read_text().splitlines() == [
+        "run",
+        "python",
+        "review/scripts/validate_dataset.py",
+        "--root",
+        str(tmp_path / "eval-corpus"),
+        "--final",
+        *profile,
+    ]
+
+
+def test_validate_refuses_the_rules_corpus_with_the_legacy_arm(tmp_path: Path) -> None:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    shim = bin_dir / "uv"
+    shim.write_text('#!/bin/bash\ntouch "$RUNNER_TEMP/uv-called"\n')
+    shim.chmod(0o755)
+
+    result = _run(
+        "Validate corpus",
+        tmp_path,
+        {
+            "PATH": str(bin_dir) + os.pathsep + os.environ["PATH"],
+            "RUNNER_TEMP": str(tmp_path),
+            "EVAL_CORPUS": "rules",
+            "EVAL_POLICY_ARM": "legacy",
+        },
+    )
+
+    assert result.returncode == 1
+    assert result.stderr == (
+        "::error::corpus rules needs policy_arm none, valid or malicious; "
+        "legacy shows no repository rules.\n"
+    )
+    assert not (tmp_path / "uv-called").exists()

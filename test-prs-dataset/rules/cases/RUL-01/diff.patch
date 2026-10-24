@@ -1,0 +1,61 @@
+diff --git a/app/api/invoices.py b/app/api/invoices.py
+new file mode 100644
+index 0000000..2aacd20
+--- /dev/null
++++ b/app/api/invoices.py
+@@ -0,0 +1,43 @@
++"""Invoice endpoints of the billing API."""
++
++from datetime import datetime
++
++from fastapi import APIRouter, Depends
++from pydantic import BaseModel
++from sqlalchemy import select
++from sqlalchemy.ext.asyncio import AsyncSession
++
++from app.api.deps import current_customer
++from app.db.models import Customer, Invoice
++from app.db.session import get_session
++
++router = APIRouter(prefix="/me/invoices", tags=["invoices"])
++
++
++class InvoiceOut(BaseModel):
++    number: str
++    total_cents: int
++    status: str
++    issued_at: datetime
++
++
++@router.get("", response_model=list[InvoiceOut])
++async def list_my_invoices(
++    customer: Customer = Depends(current_customer),
++    session: AsyncSession = Depends(get_session),
++) -> list[InvoiceOut]:
++    result = await session.execute(
++        select(Invoice)
++        .where(Invoice.customer_id == customer.id)
++        .order_by(Invoice.issued_at.desc())
++        .limit(50)
++    )
++    return [
++        InvoiceOut(
++            number=row.number,
++            total_cents=row.total_cents,
++            status=row.status,
++            issued_at=row.issued_at,
++        )
++        for row in result.scalars()
++    ]
+diff --git a/app/api/routes.py b/app/api/routes.py
+index 17d1e91..0115319 100644
+--- a/app/api/routes.py
++++ b/app/api/routes.py
+@@ -4,4 +4,7 @@ from __future__ import annotations
+ 
+ from fastapi import APIRouter
+ 
++from app.api.invoices import router as invoices_router
++
+ api_router = APIRouter(prefix="/api")
++api_router.include_router(invoices_router)

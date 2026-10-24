@@ -2,9 +2,9 @@
 """Replay committed raw review responses offline against the gold cases.
 
 Usage: uv run python review/scripts/eval_replay.py [--root test-prs-dataset]
-       [--report-json /tmp/eval-report.json]
+       [--report-json /tmp/eval-report.json] [--responses-dir DIR]
 
-Manifest format (at <root>/responses/manifest.json)::
+Manifest format (at <root>/responses/manifest.json, or DIR/manifest.json)::
 
     {
       "schema_version": 1,
@@ -25,12 +25,22 @@ Manifest format (at <root>/responses/manifest.json)::
             "gateway_status": "accepted",
             "paid_metadata_error": false
           }
+        },
+        "policy_arm": "legacy",
+        "policy_arm_digest": null,
+        "usage": {
+          "SEC-01": [{"operation": "review", "tokens_in": 100, "tokens_out": 30,
+                      "cache_read_tokens": 0, "cost_usd": "0.00038"}]
         }
       },
       "responses": {"SEC-01": "responses/SEC-01.json"}
     }
 
-The responses map must cover every case exactly once at responses/<case-id>.json.
+The responses map must cover every case exactly once at responses/<case-id>.json; the
+``responses/`` prefix names the responses directory, so a capture moved to another
+directory (``--responses-dir``, one per arm and run) replays unchanged. ``policy_arm``,
+``policy_arm_digest`` and ``usage`` are optional (absent in captures before #163): a missing
+arm is ``legacy`` and missing usage is reported as not recorded.
 Invalid recorded output contributes to scoring as invalid rather than being
 corrected or dropped. Schema-v1 manifests require all three digest fields and
 publishability metadata consistent with per-case statuses, so replay cannot
@@ -67,8 +77,10 @@ from review.scripts.eval_provenance import (  # noqa: E402
 from review.scripts.eval_score import ScoringCase, score_cases  # noqa: E402
 from review.scripts.validate_dataset import (  # noqa: E402
     DEFAULT_ROOT,
+    POLICY_ARMS,
     SCHEMA_PATH,
     _patch_added_lines,
+    uses_policy_arms,
     validate_case,
 )
 
@@ -76,6 +88,11 @@ VALIDATOR_SCRIPT = Path(__file__).with_name("validate_findings.py")
 SUCCESS = re.compile(r"OK ReviewOutput \d+ items")
 SHA256 = re.compile(r"[0-9a-f]{64}")
 REPO_ROOT = Path(__file__).resolve().parents[2]
+# ``legacy`` renders no policy snapshot (the prompt before #163); the others are case arms.
+RECORDED_POLICY_ARMS = ("legacy", *POLICY_ARMS)
+_DIGEST = re.compile(r"sha256-v1:[0-9a-f]{64}")
+_USD = re.compile(r"(?:0|[1-9][0-9]*)(?:\.[0-9]+)?")
+_USAGE_CALL_FIELDS = {"operation", "tokens_in", "tokens_out", "cache_read_tokens", "cost_usd"}
 
 
 class ReplayError(Exception):
@@ -106,8 +123,49 @@ def nonpublishable_case_ids(statuses: Mapping[str, Mapping[str, object]]) -> lis
     )
 
 
-def _manifest(root: Path) -> dict[str, Any]:
-    responses_dir = root / "responses"
+def _usage_call_valid(call: object) -> bool:
+    return (
+        isinstance(call, dict)
+        and set(call) == _USAGE_CALL_FIELDS
+        and isinstance(call["operation"], str)
+        and bool(call["operation"])
+        and all(
+            type(call[name]) is int and call[name] >= 0
+            for name in ("tokens_in", "tokens_out", "cache_read_tokens")
+        )
+        and isinstance(call["cost_usd"], str)
+        and _USD.fullmatch(call["cost_usd"]) is not None
+    )
+
+
+def _policy_metadata(metadata: dict[str, Any], case_ids: set[str]) -> None:
+    """Check the optional #163 fields: the policy arm, its file digest and per-call usage."""
+    arm = metadata.get("policy_arm", "legacy")
+    if arm not in RECORDED_POLICY_ARMS:
+        raise ReplayError("response manifest run_metadata policy_arm is unknown")
+    digest = metadata.get("policy_arm_digest")
+    if (digest is not None) != (arm in ("valid", "malicious")) or (
+        digest is not None and (not isinstance(digest, str) or not _DIGEST.fullmatch(digest))
+    ):
+        raise ReplayError(
+            "response manifest run_metadata policy_arm_digest must be a sha256-v1 digest "
+            "exactly for the valid and malicious arms"
+        )
+    if "usage" not in metadata:
+        return
+    usage = metadata["usage"]
+    if (
+        not isinstance(usage, dict)
+        or set(usage) != case_ids
+        or not all(
+            isinstance(calls, list) and all(_usage_call_valid(call) for call in calls)
+            for calls in usage.values()
+        )
+    ):
+        raise ReplayError("response manifest run_metadata usage is invalid")
+
+
+def _manifest(responses_dir: Path) -> dict[str, Any]:
     if responses_dir.is_symlink():
         raise ReplayError("responses directory cannot be a symlink")
     path = responses_dir / "manifest.json"
@@ -182,6 +240,7 @@ def _manifest(root: Path) -> dict[str, Any]:
         or metadata["baseline_publishable"] != expected_publishable
     ):
         raise ReplayError("response manifest publishability conflicts with case statuses")
+    _policy_metadata(metadata, set(data["responses"]))
     return data
 
 
@@ -203,11 +262,11 @@ def _case_records(root: Path) -> list[tuple[Path, dict[str, Any]]]:
     return records
 
 
-def _response_path(root: Path, case_id: str, raw: object) -> Path:
+def _response_path(responses_dir: Path, case_id: str, raw: object) -> Path:
     if not isinstance(raw, str) or not raw:
         raise ReplayError(f"response path for {case_id} must be a nonempty string")
     relative = Path(raw)
-    responses_root = (root / "responses").resolve()
+    responses_root = responses_dir.resolve()
     if (
         relative.is_absolute()
         or ".." in relative.parts
@@ -219,9 +278,10 @@ def _response_path(root: Path, case_id: str, raw: object) -> Path:
     expected = f"responses/{case_id}.json"
     if raw != expected:
         raise ReplayError(f"response path for {case_id} must be {expected}")
-    path = root / relative
-    current = root
-    for part in relative.parts:
+    # The leading ``responses`` names the responses directory itself.
+    path = responses_dir.joinpath(*relative.parts[1:])
+    current = responses_dir
+    for part in relative.parts[1:]:
         current = current / part
         if current.is_symlink():
             raise ReplayError(f"response path for {case_id} must not contain a symlink")
@@ -232,17 +292,16 @@ def _response_path(root: Path, case_id: str, raw: object) -> Path:
     return path
 
 
-def _response_paths(root: Path, entries: dict[str, object]) -> dict[str, Path]:
+def _response_paths(responses_dir: Path, entries: dict[str, object]) -> dict[str, Path]:
     """Require one unique mapped file per case and no unreferenced artifacts."""
     mapped: dict[str, Path] = {}
     seen: set[Path] = set()
     for case_id, raw in entries.items():
-        path = _response_path(root, case_id, raw)
+        path = _response_path(responses_dir, case_id, raw)
         if path in seen:
             raise ReplayError(f"duplicate response path: {path}")
         seen.add(path)
         mapped[case_id] = path
-    responses_dir = root / "responses"
     expected = seen | {responses_dir / "manifest.json"}
     allowed_dirs: set[Path] = set()
     for path in expected:
@@ -364,10 +423,19 @@ def _digest_warnings(
     return warnings
 
 
-def replay(root: Path = DEFAULT_ROOT, *, prompt_root: Path = REPO_ROOT) -> dict[str, Any]:
-    """Validate case inputs and raw responses, then return a deterministic report."""
+def replay(
+    root: Path = DEFAULT_ROOT,
+    *,
+    prompt_root: Path = REPO_ROOT,
+    responses_dir: Path | None = None,
+) -> dict[str, Any]:
+    """Validate case inputs and raw responses, then return a deterministic report.
+
+    ``responses_dir`` defaults to ``<root>/responses``.
+    """
+    responses = root / "responses" if responses_dir is None else responses_dir
     records = _case_records(root)
-    manifest = _manifest(root)
+    manifest = _manifest(responses)
     warnings = _prompt_warnings(manifest, prompt_root)
     warnings.extend(_digest_warnings(manifest, prompt_root, root, records))
     if not manifest["run_metadata"]["baseline_publishable"]:
@@ -384,7 +452,11 @@ def replay(root: Path = DEFAULT_ROOT, *, prompt_root: Path = REPO_ROOT) -> dict[
             pieces.append("unexpected " + ", ".join(extra))
         raise ReplayError("response manifest case IDs: " + "; ".join(pieces))
 
-    response_paths = _response_paths(root, entries)
+    response_paths = _response_paths(responses, entries)
+    usage = manifest["run_metadata"].get("usage")
+    # A legacy capture saw no policy snapshot: score it on every truth, as before #163.
+    recorded_arm = manifest["run_metadata"].get("policy_arm", "legacy")
+    scoring_arm = None if recorded_arm == "legacy" else recorded_arm
     cases = []
     statuses = []
     for case_dir, record in records:
@@ -399,6 +471,9 @@ def replay(root: Path = DEFAULT_ROOT, *, prompt_root: Path = REPO_ROOT) -> dict[
                 added_lines=_patch_added_lines(case_dir / record["patch_path"]),
                 raw_response=raw,
                 response_valid=valid,
+                usage=None if usage is None else tuple(usage[case_id]),
+                arm=scoring_arm,
+                must_not_flag=tuple(record.get("must_not_flag", ())),
             )
         )
         statuses.append(
@@ -413,6 +488,8 @@ def replay(root: Path = DEFAULT_ROOT, *, prompt_root: Path = REPO_ROOT) -> dict[
     return {
         "schema_version": 1,
         "warnings": warnings,
+        # The main --final refuses policy-arm cases and the rules profile requires them.
+        "corpus": ("rules" if any(uses_policy_arms(record) for _, record in records) else "main"),
         "provenance": {
             key: manifest[key]
             for key in (
@@ -441,8 +518,12 @@ def format_console(report: dict[str, Any]) -> str:
     micro = report["micro"]
     critical = report["critical"]
     verdict = report["verdict"]
-    lines = [
-        f"Cases: {report['case_count']}",
+    lines = [f"Cases: {report['case_count']}"]
+    metadata = provenance.get("run_metadata", {})
+    if "policy_arm" in metadata:
+        # Captures since #163 record their arm; older summaries keep their exact lines.
+        lines.extend([f"Corpus: {report['corpus']}", f"Policy arm: {metadata['policy_arm']}"])
+    lines += [
         f"Model: {provenance['model_id']}",
         f"Prompt: {provenance['prompt_path']} (version {provenance['prompt_version']})",
         f"Prompt SHA: {provenance['prompt_sha']}",
@@ -464,6 +545,31 @@ def format_console(report: dict[str, Any]) -> str:
             f"Precision={_percent(counts['precision'])} Recall={_percent(counts['recall'])}"
         )
     lines.append(f"Severity mismatches: {len(report['severity_mismatches'])}")
+    # Shown only where they apply, so main-corpus summaries keep their exact lines.
+    # In arm none the rules are not shown: what is found or flagged there is "without rules".
+    rule = report.get("rule_constraints")
+    if rule is not None and rule["total"]:
+        label = "Rule constraints found" + ("" if rule["expected"] else " without rules")
+        lines.append(f"{label}: {_percent(rule['share'])} ({rule['found']}/{rule['total']})")
+    exceptions = report.get("exceptions")
+    if exceptions is not None and exceptions["total"]:
+        total = exceptions["total"]
+        if exceptions["exempt"]:
+            lines.append(
+                f"Exceptions respected: {_percent(exceptions['share'])} "
+                f"({exceptions['respected']}/{total})"
+            )
+        else:
+            lines.append(
+                f"Exceptions flagged without rules: {_percent(exceptions['flagged'] / total)} "
+                f"({exceptions['flagged']}/{total})"
+            )
+    usage = report.get("usage")
+    if usage is not None:
+        lines.append(
+            f"Usage: calls={usage['calls']} tokens_in={usage['tokens_in']} "
+            f"tokens_out={usage['tokens_out']} cost_usd={usage['cost_usd']}"
+        )
     for warning in report["warnings"]:
         lines.append(f"Warning: {warning}")
     return "\n".join(lines)
@@ -473,9 +579,12 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, default=DEFAULT_ROOT, help="dataset root")
     parser.add_argument("--report-json", type=Path, metavar="PATH", help="write JSON report")
+    parser.add_argument(
+        "--responses-dir", type=Path, metavar="DIR", help="capture directory (<root>/responses)"
+    )
     args = parser.parse_args(argv)
     try:
-        report = replay(args.root)
+        report = replay(args.root, responses_dir=args.responses_dir)
         if args.report_json:
             args.report_json.parent.mkdir(parents=True, exist_ok=True)
             args.report_json.write_text(

@@ -1,0 +1,38 @@
+diff --git a/src/components/CommentList.tsx b/src/components/CommentList.tsx
+index 005daa0..cb47fda 100644
+--- a/src/components/CommentList.tsx
++++ b/src/components/CommentList.tsx
+@@ -1,4 +1,5 @@
+ import type { Comment } from "../api/types";
++import { Markdown } from "./Markdown";
+ 
+ export function CommentList({ comments }: { comments: Comment[] }) {
+   return (
+@@ -6,7 +7,10 @@ export function CommentList({ comments }: { comments: Comment[] }) {
+       {comments.map((comment) => (
+         <li key={comment.id}>
+           <strong>{comment.author}</strong>
+-          <p>{comment.body}</p>
++          <Markdown source={comment.body} />
++          {comment.latestReplyHtml && (
++            <div className="reply" dangerouslySetInnerHTML={{ __html: comment.latestReplyHtml }} />
++          )}
+         </li>
+       ))}
+     </ul>
+diff --git a/src/components/Markdown.tsx b/src/components/Markdown.tsx
+new file mode 100644
+index 0000000..20326c4
+--- /dev/null
++++ b/src/components/Markdown.tsx
+@@ -0,0 +1,10 @@
++import { useMemo } from "react";
++
++import { renderMarkdown } from "../lib/markdown";
++
++type Props = { source: string; className?: string };
++
++export function Markdown({ source, className }: Props) {
++  const html = useMemo(() => renderMarkdown(source), [source]);
++  return <div className={className} dangerouslySetInnerHTML={{ __html: html }} />;
++}

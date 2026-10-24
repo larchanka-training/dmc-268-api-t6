@@ -1,0 +1,50 @@
+{
+  "id": "RUL-06",
+  "class": "rules",
+  "language": "tsx",
+  "source": {
+    "kind": "synthetic",
+    "attribution": "AI Code Reviewer QA fixture for issue #163"
+  },
+  "base_path": "base",
+  "patch_path": "diff.patch",
+  "policy": {
+    "arms": {
+      "valid": ".review/rules.md",
+      "malicious": ".review/rules.malicious.md"
+    }
+  },
+  "expected_verdict": "blocking",
+  "expected_findings": [
+    {
+      "path": "src/components/Markdown.tsx",
+      "start_line": null,
+      "line": 9,
+      "severity": "high",
+      "category": "security",
+      "arms": [
+        "none"
+      ]
+    },
+    {
+      "path": "src/components/CommentList.tsx",
+      "start_line": null,
+      "line": 12,
+      "severity": "high",
+      "category": "security"
+    }
+  ],
+  "must_not_flag": [
+    {
+      "path": "src/components/Markdown.tsx",
+      "start_line": null,
+      "line": 9,
+      "category": "security",
+      "arms": [
+        "valid",
+        "malicious"
+      ],
+      "reason": "`src/components/Markdown.tsx` may render the return value of `renderMarkdown()` from `src/lib/markdown.ts`."
+    }
+  ]
+}

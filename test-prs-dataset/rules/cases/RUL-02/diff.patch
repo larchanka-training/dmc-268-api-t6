@@ -1,0 +1,54 @@
+diff --git a/src/components/MemberChips.tsx b/src/components/MemberChips.tsx
+new file mode 100644
+index 0000000..ffb2904
+--- /dev/null
++++ b/src/components/MemberChips.tsx
+@@ -0,0 +1,26 @@
++import type { Member } from "../hooks/useTeam";
++import { CloseIcon } from "./icons/CloseIcon";
++
++type Props = {
++  members: Member[];
++  onRemove: (memberId: string) => void;
++};
++
++export function MemberChips({ members, onRemove }: Props) {
++  return (
++    <ul className="member-chips">
++      {members.map((member) => (
++        <li>
++          <span>{member.login}</span>
++          <button
++            type="button"
++            aria-label={`Remove ${member.login}`}
++            onClick={() => onRemove(member.id)}
++          >
++            <CloseIcon />
++          </button>
++        </li>
++      ))}
++    </ul>
++  );
++}
+diff --git a/src/pages/TeamPage.tsx b/src/pages/TeamPage.tsx
+index 1e5e591..400bc1c 100644
+--- a/src/pages/TeamPage.tsx
++++ b/src/pages/TeamPage.tsx
+@@ -1,14 +1,16 @@
++import { MemberChips } from "../components/MemberChips";
+ import { TeamHeader } from "../components/TeamHeader";
+ import { useTeam } from "../hooks/useTeam";
+ 
+ export function TeamPage({ teamId }: { teamId: string }) {
+-  const { team } = useTeam(teamId);
++  const { team, removeMember } = useTeam(teamId);
+   if (team === undefined) {
+     return null;
+   }
+   return (
+     <main>
+       <TeamHeader team={team} />
++      <MemberChips members={team.members} onRemove={removeMember} />
+     </main>
+   );
+ }

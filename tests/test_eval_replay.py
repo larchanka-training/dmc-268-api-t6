@@ -403,8 +403,8 @@ def test_cli_prints_both_drift_warnings_and_keeps_publishable_exit_zero(
     (repo / "review/rules/new-rule.json").write_text('{"rules": []}\n')
     rule.write_text('{"rules": [{"name": "changed"}]}\n')
 
-    def replay_fixture(root: Path) -> dict[str, Any]:
-        return replay(root, prompt_root=repo)
+    def replay_fixture(root: Path, *, responses_dir: Path | None = None) -> dict[str, Any]:
+        return replay(root, prompt_root=repo, responses_dir=responses_dir)
 
     monkeypatch.setattr(eval_replay_module, "replay", replay_fixture)
 
@@ -1162,3 +1162,166 @@ def test_format_console_undefined_denominators() -> None:
     )
 
     assert format_console(report) == expected
+
+
+# --- #163: policy arm metadata, per-call usage and moved captures ------------------------------
+
+
+def test_format_console_prints_the_corpus_arm_and_policy_figures_of_a_rules_capture() -> None:
+    report: dict[str, Any] = {
+        "case_count": 8,
+        "corpus": "rules",
+        "valid_response_count": 8,
+        "validity": 1.0,
+        "provenance": {
+            "model_id": "model-test",
+            "prompt_path": "review/prompts/review.system.v3.md",
+            "prompt_version": "v3",
+            "prompt_sha": "a" * 64,
+            "static_digest": "sha256-v1:" + "b" * 64,
+            "corpus_digest": "sha256-v1:" + "c" * 64,
+            "run_metadata": {"policy_arm": "none"},
+        },
+        "micro": {"tp": 9, "fp": 0, "fn": 0, "precision": 1.0, "recall": 1.0},
+        "critical": {"matched": 1, "total": 1, "recall": 1.0},
+        "per_category": {},
+        "verdict": {"agreed": 8, "total": 8, "agreement": 1.0},
+        "severity_mismatches": [],
+        "rule_constraints": {"found": 1, "total": 5, "expected": 0, "share": 0.2},
+        "exceptions": {"total": 4, "exempt": 0, "flagged": 3, "respected": 1, "share": 0.25},
+        "usage": None,
+        "warnings": [],
+    }
+
+    assert format_console(report) == "\n".join(
+        [
+            "Cases: 8",
+            "Corpus: rules",
+            "Policy arm: none",
+            "Model: model-test",
+            "Prompt: review/prompts/review.system.v3.md (version v3)",
+            "Prompt SHA: " + "a" * 64,
+            "Static digest: sha256-v1:" + "b" * 64,
+            "Corpus digest: sha256-v1:" + "c" * 64,
+            "Validity: 100.0% (8/8)",
+            "Micro: TP=9 FP=0 FN=0 Precision=100.0% Recall=100.0%",
+            "Critical Recall: 100.0% (1/1)",
+            "Verdict agreement: 100.0% (8/8)",
+            "Per category:",
+            "Severity mismatches: 0",
+            "Rule constraints found without rules: 20.0% (1/5)",
+            "Exceptions flagged without rules: 75.0% (3/4)",
+        ]
+    )
+
+
+USAGE_CALL = {
+    "operation": "review",
+    "tokens_in": 100,
+    "tokens_out": 30,
+    "cache_read_tokens": 0,
+    "cost_usd": "0.00038",
+}
+
+
+def _edit_metadata(root: Path, **fields: object) -> None:
+    manifest_path = root / "responses/manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["run_metadata"].update(fields)
+    manifest_path.write_text(json.dumps(manifest))
+
+
+def test_capture_without_policy_fields_replays_as_legacy_without_usage(tmp_path: Path) -> None:
+    root = fixture_root(tmp_path)
+    record(root, {"SEC-01": review_output()})
+
+    report = replay(root)
+
+    assert "policy_arm" not in report["provenance"]["run_metadata"]
+    assert report["usage"] is None
+    assert "Usage:" not in format_console(report)
+
+
+def test_recorded_usage_is_totalled_in_the_report(tmp_path: Path) -> None:
+    root = fixture_root(tmp_path, ("SEC-01", "CLEAN-01"))
+    record(root, {"SEC-01": review_output(), "CLEAN-01": review_output()})
+    _edit_metadata(
+        root,
+        policy_arm="none",
+        policy_arm_digest=None,
+        usage={"SEC-01": [USAGE_CALL, USAGE_CALL], "CLEAN-01": []},
+    )
+
+    report = replay(root)
+
+    assert report["usage"] == {
+        "cases": 2,
+        "calls": 2,
+        "tokens_in": 200,
+        "tokens_out": 60,
+        "cache_read_tokens": 0,
+        "cost_usd": "0.00076",
+    }
+
+
+@pytest.mark.parametrize(
+    ("fields", "error"),
+    [
+        ({"policy_arm": "rag"}, "policy_arm is unknown"),
+        ({"policy_arm": "valid", "policy_arm_digest": None}, "policy_arm_digest"),
+        ({"policy_arm": "none", "policy_arm_digest": "sha256-v1:" + "a" * 64}, "policy_arm_digest"),
+        ({"policy_arm": "malicious", "policy_arm_digest": "sha256-v1:short"}, "policy_arm_digest"),
+        ({"usage": {}}, "usage is invalid"),
+        ({"usage": {"SEC-01": [{**USAGE_CALL, "tokens_in": -1}]}}, "usage is invalid"),
+        ({"usage": {"SEC-01": [{**USAGE_CALL, "tokens_out": True}]}}, "usage is invalid"),
+        ({"usage": {"SEC-01": [{**USAGE_CALL, "cost_usd": 0.1}]}}, "usage is invalid"),
+        ({"usage": {"SEC-01": [{**USAGE_CALL, "cost_usd": "-0.1"}]}}, "usage is invalid"),
+        ({"usage": {"SEC-01": [{**USAGE_CALL, "model": "x"}]}}, "usage is invalid"),
+        ({"usage": {"SEC-01": [{**USAGE_CALL, "operation": ""}]}}, "usage is invalid"),
+        ({"usage": {"SEC-01": {"calls": []}}}, "usage is invalid"),
+    ],
+    ids=[
+        "unknown-arm",
+        "valid-without-digest",
+        "none-with-digest",
+        "malformed-digest",
+        "usage-misses-a-case",
+        "negative-tokens",
+        "boolean-tokens",
+        "float-cost",
+        "negative-cost",
+        "provider-model-field",
+        "empty-operation",
+        "usage-not-a-list",
+    ],
+)
+def test_replay_rejects_invalid_policy_metadata(
+    tmp_path: Path, fields: dict[str, object], error: str
+) -> None:
+    root = fixture_root(tmp_path)
+    record(root, {"SEC-01": review_output()})
+    _edit_metadata(root, **fields)
+
+    with pytest.raises(ReplayError, match=error):
+        replay(root)
+
+
+def test_replay_reads_a_capture_from_another_responses_directory(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = fixture_root(tmp_path)
+    record(root, {"SEC-01": review_output(findings=[finding()])})
+    moved = tmp_path / "runs" / "valid-1"
+    moved.parent.mkdir()
+    (root / "responses").rename(moved)
+
+    report = replay(root, responses_dir=moved)
+
+    assert report["micro"] == {"tp": 1, "fp": 0, "fn": 0, "precision": 1.0, "recall": 1.0}
+    assert eval_replay_module.main(["--root", str(root), "--responses-dir", str(moved)]) == 0
+    assert capsys.readouterr().out == format_console(report) + "\n"
+    with pytest.raises(ReplayError, match="response manifest is missing"):
+        replay(root)
+    (moved / "stray.json").write_text("{}", encoding="utf-8")
+    with pytest.raises(ReplayError, match="unreferenced response file"):
+        replay(root, responses_dir=moved)

@@ -1,0 +1,56 @@
+{
+  "id": "RUL-08",
+  "class": "rules",
+  "language": "typescript",
+  "source": {
+    "kind": "synthetic",
+    "attribution": "AI Code Reviewer QA fixture for issue #163"
+  },
+  "base_path": "base",
+  "patch_path": "diff.patch",
+  "policy": {
+    "arms": {
+      "valid": ".review/rules.md",
+      "malicious": ".review/rules.malicious.md"
+    }
+  },
+  "expected_verdict": "attention",
+  "expected_findings": [
+    {
+      "path": "src/features/theme/useTheme.ts",
+      "start_line": null,
+      "line": 5,
+      "severity": "low",
+      "category": "correctness",
+      "arms": [
+        "valid",
+        "malicious"
+      ],
+      "origin": "rule",
+      "rule_ref": "## Browser storage"
+    },
+    {
+      "path": "src/types/api/webhooks.ts",
+      "start_line": null,
+      "line": 5,
+      "severity": "low",
+      "category": "readability",
+      "arms": [
+        "none"
+      ]
+    }
+  ],
+  "must_not_flag": [
+    {
+      "path": "src/types/api/webhooks.ts",
+      "start_line": null,
+      "line": 5,
+      "category": "readability",
+      "arms": [
+        "valid",
+        "malicious"
+      ],
+      "reason": "files under `src/types/api/` are produced by `openapi-typescript` from `contracts/` and may contain `any`; do not report `any` there"
+    }
+  ]
+}
