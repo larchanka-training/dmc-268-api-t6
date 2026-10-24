@@ -268,7 +268,7 @@ def _rag_readiness(
     elif index.indexed_commit_sha is not None and has_retrieved_section(
         prompt.review_system_key, prompt.review_system_version
     ):
-        plan = RagPlan(index.indexed_commit_sha, index.status is RagIndexStatus.STALE)
+        plan = RagPlan()
         response = {"outcome": "used", "reason": _RAG_BUILD_FAILED}
     else:
         response = {"outcome": "not_ready", "reason": "prompt_version"}
