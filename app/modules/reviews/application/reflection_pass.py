@@ -51,6 +51,9 @@ from app.modules.reviews.application.run_failures import RunFailure
 type VerificationStatus = Literal["supported", "contradicted", "insufficient_context"]
 
 _STRICT = ConfigDict(extra="forbid", strict=True)
+# The longest provider Retry-After a verifier failure carries: one day, as the other
+# Retry-After caps (code_index, rules-status).
+_MAX_RETRY_AFTER_S = 86_400.0
 
 
 def _attribute(value: str) -> str:
@@ -644,12 +647,13 @@ class ReflectionPass:
                     "llm_payment_required", "Verifier provider payment required"
                 ) from exc
             if error_code == "llm_rate_limited":
-                # RetryDelays turns any retry_after into 2m, or 10m above two minutes.
-                retry_after_s = getattr(exc, "retry_after_s", None)
+                # RetryDelays turns any retry_after into 2m, or 10m above two minutes; the
+                # cap only keeps a huge provider header from overflowing timedelta.
+                retry_after_s = getattr(exc, "retry_after_s", None) or 0
                 raise RunFailure(
                     "verification_unavailable",
                     "Verifier model rate limited",
-                    retry_after=timedelta(seconds=retry_after_s or 0),
+                    retry_after=timedelta(seconds=min(retry_after_s, _MAX_RETRY_AFTER_S)),
                 ) from exc
             raise VerificationUnavailableError("Verifier model call failed") from exc
 

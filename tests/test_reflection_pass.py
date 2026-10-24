@@ -2525,8 +2525,11 @@ async def test_verifier_context_overflow_is_a_verification_overflow() -> None:
         (45.0, timedelta(seconds=45), ("2m", timedelta(minutes=2))),
         (300.0, timedelta(seconds=300), ("10m", timedelta(minutes=10))),
         (None, timedelta(0), ("2m", timedelta(minutes=2))),
+        # A huge header must not overflow timedelta: the delay is capped at one day.
+        (86_401.0, timedelta(days=1), ("10m", timedelta(minutes=10))),
+        (1e20, timedelta(days=1), ("10m", timedelta(minutes=10))),
     ],
-    ids=["retry-after-45s", "retry-after-300s", "no-retry-after"],
+    ids=["retry-after-45s", "retry-after-300s", "no-retry-after", "over-one-day", "1e20"],
 )
 @pytest.mark.anyio
 async def test_verifier_rate_limit_carries_the_provider_retry_after(
