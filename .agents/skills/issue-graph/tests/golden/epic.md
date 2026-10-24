@@ -22,10 +22,10 @@ flowchart LR
   api_146 --> api_147
   api_219 --> api_144
   classDef done fill:#f1f3f5,stroke:#adb5bd,color:#868e96
-  classDef progress fill:#e7f5ff,stroke:#1c7ed6
-  classDef review fill:#fff9db,stroke:#f08c00
-  classDef alarm fill:#fff5f5,stroke:#e03131,stroke-width:3px
-  classDef external fill:#ffffff,stroke:#868e96,stroke-dasharray:5 5
+  classDef progress fill:#e7f5ff,stroke:#1c7ed6,color:#212529
+  classDef review fill:#fff9db,stroke:#f08c00,color:#212529
+  classDef alarm fill:#fff5f5,stroke:#e03131,stroke-width:3px,color:#212529
+  classDef external fill:#ffffff,stroke:#868e96,stroke-dasharray:5 5,color:#212529
   class api_140,api_141,api_142,api_143,api_145,ui_102 done
   class api_144 review
   class api_130,api_219 external
