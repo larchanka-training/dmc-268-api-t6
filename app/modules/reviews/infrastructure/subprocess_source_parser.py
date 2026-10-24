@@ -94,7 +94,7 @@ class SubprocessSourceParser:
         except (BrokenPipeError, ConnectionResetError):
             line = b""
         if not line:
-            # The worker died on this file: the memory cap or a parser crash.
+            # The worker died on this file: the memory cap, the OS CPU cap or a parser crash.
             await self.aclose()
             return AstFailureReason.AST_RESOURCE_LIMIT
         answer = json.loads(line)
