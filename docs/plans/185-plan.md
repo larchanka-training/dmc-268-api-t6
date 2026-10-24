@@ -18,7 +18,7 @@ Source: [issue #185](https://github.com/larchanka-training/dmc-268-api-t6/issues
 Initial baseline on 2026-10-20: `2326273e6ab7fcea89d1cf3b94b88a4be66ca5e9`.
 The review follow-up rebased onto main `8a621798d01bd72a5ce6c343addc0d00661af724`
 on 2026-10-22.
-Work only in the managed `185-review-consumer-resilience` worktree. The original
+Work only in an isolated managed worktree. The original
 checkout, its `fix/111-worker-portal-url` branch, and unrelated untracked docs are excluded.
 
 Read: AGENTS.md, agent rules/skills, SYSTEM_DESIGN §7.3–7.4, PIPELINE_SPEC §4,

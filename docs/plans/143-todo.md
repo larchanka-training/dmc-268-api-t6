@@ -27,8 +27,8 @@ uv run ruff check .
 uv run ruff format --check .
 uv run mypy . --exclude '^docs/reports/'
 uv run pytest
-TEST_DATABASE_URL=postgresql+psycopg://app:app@127.0.0.1:5432/dmc_143 \
-TEST_RABBITMQ_URL=amqp://app:app@127.0.0.1:5672/dmc_143 \
+TEST_DATABASE_URL=<disposable-db-url> \
+TEST_RABBITMQ_URL=<isolated-task-vhost-url> \
   uv run pytest -m integration -rs tests/test_code_index_*_postgres.py \
   tests/test_repository_rag_postgres.py tests/test_worker_queue_postgres.py \
   tests/test_initial_migration.py
@@ -41,10 +41,11 @@ TEST_RABBITMQ_URL=amqp://app:app@127.0.0.1:5672/dmc_143 \
   `uv run pytest` gate.
 - If the removal PG tests (PR 1 Task 7) go into `tests/test_portal_scope_postgres.py`, add
   that file to the focused run.
-- Use only the dedicated database `dmc_143` and the vhost `dmc_143`, never another
-  session's: parallel sessions pick up each other's NOTIFY traffic. The vhost must exist
-  with permissions for `app` (recipe in `docs/TEST_PLAN.md:44`). Do not print credentials.
-- `df /tmp` before long runs.
+- Use only the dedicated database `<disposable-db>` and the vhost
+  `<isolated-task-vhost>`, never another session's: parallel sessions pick up each
+  other's NOTIFY traffic. The vhost must exist with permissions for the test user
+  (recipe in `docs/TEST_PLAN.md:44`). Do not print credentials.
+- `df "<temporary-directory>"` before long runs.
 
 ## PR 1: `feat(code_index): purge the index on disable, removal and TTL`
 
@@ -832,5 +833,5 @@ Before the commit, the coordinator re-checks the open PRs and their files (plan,
   only with the user's explicit OK.
 - [ ] Check the AC, add a note in #139, update board 12.
 - [ ] Lab paperwork: `docs/reports/143/`, mirror in
-  `base/projects/team-6/api-t6-paperwork/issue-143/`, `economics.md`, `/verify-run`.
-- [ ] Clean up the worktree, the database `dmc_143` and the vhost `dmc_143`.
+  `<private-paperwork-directory>`, `economics.md`, `/verify-run`.
+- [ ] Clean up the worktree, the database `<disposable-db>` and the vhost `<isolated-task-vhost>`.

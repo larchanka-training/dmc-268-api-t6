@@ -56,7 +56,7 @@
     }
   ],
   "gate_infrastructure": {
-    "project": "rollback110-gates-ec19d9950bfd4204",
+    "project": "<gate-project>",
     "postgres_image": "postgres:17-alpine",
     "postgres_image_id": "sha256:ff80089083d7365046af7f03d949a2defa14e0b09e14bd5b8f08a242291be8b2",
     "rabbitmq_image": "rabbitmq:4-management-alpine",
@@ -64,14 +64,14 @@
     "host_port_binding": "loopback-only dynamic",
     "shared_database_or_broker": false,
     "anonymous_volumes": [
-      "1ae936f15dbaed8dbca4d302eb07efac65cad07e8c13eb9c77eb222a6a0c89db",
-      "bec85735b433d2742a234a64a4854966e1b866f171c1347cf39ce92300e4d562"
+      "<gate-postgres-volume>",
+      "<gate-rabbitmq-volume>"
     ],
     "containers": [
-      "rollback110-gates-ec19d9950bfd4204-postgres-1",
-      "rollback110-gates-ec19d9950bfd4204-rabbitmq-1"
+      "<gate-project>-postgres-1",
+      "<gate-project>-rabbitmq-1"
     ],
-    "network": "rollback110-gates-ec19d9950bfd4204_default",
+    "network": "<gate-project>_default",
     "postgres_version": "17.11",
     "rabbitmq_version": "4.3.6"
   },
@@ -120,7 +120,7 @@
     "preflight_private_temporary_root": "removed",
     "independent_resource_audit": {
       "projects": {
-        "rollback110-gates-ec19d9950bfd4204": {
+        "<gate-project>": {
           "containers": 0,
           "networks": 0,
           "volumes": 0
@@ -147,11 +147,11 @@
         }
       },
       "exact_volumes_absent": {
-        "1ae936f15dbaed8dbca4d302eb07efac65cad07e8c13eb9c77eb222a6a0c89db": true,
-        "bec85735b433d2742a234a64a4854966e1b866f171c1347cf39ce92300e4d562": true
+        "<gate-postgres-volume>": true,
+        "<gate-rabbitmq-volume>": true
       },
       "exact_networks_absent": {
-        "rollback110-gates-ec19d9950bfd4204_default": true,
+        "<gate-project>_default": true,
         "rollback110-bd2e6fa84ce149d0_default": true,
         "rollback110-bd2e6fa84ce149d0-offline_default": true,
         "rollback110-ec19d9950bfd4204_default": true,

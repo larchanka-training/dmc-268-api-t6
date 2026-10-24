@@ -9,7 +9,7 @@ against the GitHub docs at implementation", that stays an implementation-time ch
 a settled fact.
 Issue: https://github.com/larchanka-training/dmc-268-api-t6/issues/142, epic #139.
 Baseline: `origin/main` `7546e539e1c1f565f65b9a5ca4cdc5dd1fbfb3fa` (#141 merged). The
-single Alembic head is `20261015_0032`. Worktree `projects/dmc-268-api-t6-142`.
+single Alembic head is `20261015_0032`. Worktree `<isolated-checkout>`.
 Branches, stacked: `feat/142-rag-indexer-store` (PR 1, from `origin/main`) →
 `feat/142-rag-indexer-build` (PR 2, on PR 1) → `feat/142-rag-indexer-queue` (PR 3, on
 PR 2). Task checklist: [142-todo.md](142-todo.md).
@@ -628,11 +628,11 @@ No kill-switch is added: there are no publishers before #143, so the consumer id
 
 **Environment:**
 
-- Worktree `projects/dmc-268-api-t6-142` from `origin/main`; branches PR 1 → PR 2 → PR 3,
+- Worktree `<isolated-checkout>` from `origin/main`; branches PR 1 → PR 2 → PR 3,
   stacked;
 - `uv sync`, `.env`;
-- a dedicated database `dmc_142` on the local PG17 and a dedicated RabbitMQ vhost
-  `dmc_142`: parallel sessions pick up each other's NOTIFY traffic.
+- a dedicated database `<disposable-db>` on the local PG17 and a dedicated RabbitMQ
+  vhost `<isolated-task-vhost>`: parallel sessions pick up each other's NOTIFY traffic.
 
 **Loop per `agent-loop`:**
 
@@ -683,7 +683,7 @@ gates also run on PRs whose base is a branch.
 ## Lab-side work
 
 - Report `docs/reports/142/` (lab-local) and its mirror in
-  `base/projects/team-6/api-t6-paperwork/issue-142/`;
+  `<private-paperwork-directory>`;
 - a row in `economics.md`;
 - after PR 3 merges, check the #142 AC and add a note in #139.
 
@@ -694,13 +694,13 @@ uv run ruff check .
 uv run ruff format --check .
 uv run mypy .
 uv run pytest
-TEST_DATABASE_URL=postgresql+psycopg://app:app@127.0.0.1:5432/dmc_142 \
+TEST_DATABASE_URL=<disposable-db-url> \
   uv run pytest -m integration -rs tests/test_code_index_*_postgres.py \
   tests/test_initial_migration.py tests/test_alembic_heads.py   # 0 skips
 uv run alembic heads   # exactly one head: 20261017_0034
 ```
 
-- PR 3 adds `TEST_RABBITMQ_URL=amqp://…/dmc_142` and
+- PR 3 adds `TEST_RABBITMQ_URL=<isolated-task-vhost-url>` and
   `tests/test_code_index_queue_postgres.py tests/test_worker_queue_postgres.py` to the
   focused run.
 - Upgrade → downgrade → upgrade on a clean database.

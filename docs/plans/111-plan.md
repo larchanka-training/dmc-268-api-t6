@@ -193,8 +193,8 @@ Development Tasks 1–2 выполнены 12.10.2026: добавлены 8 бу
 production `app/worker.py` не менялся. Focused-наборы зелёные: 8 worker URL
 и 45 deploy tests. Логи, текущие результаты гейтов и честные integration skips
 дописаны в correction evidence [111-todo.md](111-todo.md). Первый полный
-pytest обнаружил ограничения sandbox на localhost bind; повтор выполнен
-с разрешением loopback sockets без подключения к контейнерам других PR.
+pytest обнаружил ограничения среды на открытие локальных сокетов; повтор выполнен
+в среде, разрешающей эту проверку, без подключения к контейнерам других PR.
 Повтор завершился зелёным: **2310 passed, 145 skipped, 2 warnings in 89.51s**.
 Все четыре обязательных uv-гейта зелёные; Standards/Spec — **0/0 findings**.
 Изменения переданы publisher без commit/push со стороны developer.

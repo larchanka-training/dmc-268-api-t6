@@ -15,7 +15,7 @@ uv run ruff check .
 uv run ruff format --check .
 uv run mypy .
 uv run pytest
-TEST_DATABASE_URL=postgresql+psycopg://app:app@127.0.0.1:5432/dmc_141 \
+TEST_DATABASE_URL=<disposable-db-url> \
   uv run pytest -m integration -rs tests/test_code_index_store_postgres.py \
   tests/test_initial_migration.py tests/test_alembic_heads.py
 ```
@@ -24,8 +24,8 @@ TEST_DATABASE_URL=postgresql+psycopg://app:app@127.0.0.1:5432/dmc_141 \
   test never counts as passing.
 - `tests/test_alembic_heads.py` carries no `integration` marker, so `-m integration`
   deselects it. It runs in the plain `uv run pytest` gate.
-- Use only the dedicated database `dmc_141`, never another session's database or broker.
-  Do not print credentials.
+- Use only the dedicated database `<disposable-db>`, never another session's
+  database or broker. Do not print credentials.
 
 ## Task 1: Plan documents
 

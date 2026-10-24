@@ -1,6 +1,6 @@
 # Developer C correction evidence (#113 / PR #132)
 
-Worktree: `132-review-fixes/dmc-268-api-t6`; source base `46a9077`, development
+Worktree: `<isolated-checkout>`; source base `46a9077`, development
 head `69505ab`. Final publication head and whole-plan gate counts belong to the
 coordinator/publisher and are not inferred here. No dependency added.
 

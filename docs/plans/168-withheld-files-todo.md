@@ -23,11 +23,11 @@ Order: Task 0 → 1 → 2 → (after #229 merges, D2) 3.
 uv run ruff check .
 uv run ruff format --check .
 uv run mypy . --exclude '^docs/reports/'
-TEST_DATABASE_URL=postgresql+psycopg://app:app@localhost:5432/imp168b \
-TEST_RABBITMQ_URL=amqp://app:app@localhost:5672/imp168b uv run pytest
+TEST_DATABASE_URL=<disposable-db-url> \
+TEST_RABBITMQ_URL=<isolated-task-vhost-url> uv run pytest
 ```
 
-- Run `df -h /tmp` first.
+- Run `df -h "<temporary-directory>"` first.
 - The full run takes over 15 min, so run it in the background.
 - Add the focused PG run with `-rs`: zero skips.
 
@@ -40,9 +40,9 @@ TEST_RABBITMQ_URL=amqp://app:app@localhost:5672/imp168b uv run pytest
 **Done when:**
 
 - [ ] D1–D3 are approved by the tech lead, and the plan records the answers;
-- [ ] only the two files are committed. `docs/plans/` is listed in the shared clone's local
-  `.git/info/exclude:14`, while the tracked plans stay in the repo, so stage these two files
-  with `git add -f`.
+- [ ] only the two files are committed. If local `.git/info/exclude` rules hide
+  `docs/plans/`, explicitly stage only these two files with `git add -f`;
+  tracked plans stay in the repo.
 
 **Dependencies:** none.
 

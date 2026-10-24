@@ -7,7 +7,7 @@ Issue: https://github.com/larchanka-training/dmc-268-api-t6/issues/206
 Latest scope clarification: https://github.com/larchanka-training/dmc-268-api-t6/issues/206#issuecomment-6341879938
 Checklist: [206-todo.md](206-todo.md).
 
-Work only in `/Users/qx/.codex/worktrees/206-replay-warnings-vcs-docs/dmc-268-api-t6`.
+Work only in an isolated checkout.
 At planning time HEAD and fetched `origin/main` both equal
 `66077f292bcd829d1807c520f48b48fd053891f2` (ahead/behind `0/0`); worktree was clean.
 Leave the primary checkout, unrelated branches, and untracked files untouched.
@@ -42,8 +42,8 @@ from other PRs must be recorded separately from warnings introduced by this chan
 
 1. **Preflight and baseline evidence (small, no source changes).** Record approval and the
    coordination comments below; recheck open PR ownership and fetched main. Run the existing
-   replay suite and real recorded replay, preserving JSON, console, exit status and HEAD in
-   `/private/tmp/dmc-268-206-*`. Inventory recorded/current static pins and their union.
+   replay suite and real recorded replay, preserving JSON, console, exit status and HEAD as
+   private temporary evidence. Inventory recorded/current static pins and their union.
 2. **TDD regression and minimal fix (two files).** Add a regression using `fixture_root`
    and `_record_with_digests`: first assert a clean fixture, then add a valid rule file
    (changes current path set) and alter the existing recorded rule's bytes, preserving the
@@ -70,7 +70,7 @@ from other PRs must be recorded separately from warnings introduced by this chan
 
 ```sh
 uv run pytest tests/test_eval_replay.py -q
-uv run python review/scripts/eval_replay.py --report-json /private/tmp/dmc-268-206-replay-before.json
+uv run python review/scripts/eval_replay.py --report-json <private-output>/replay-before.json
 # After implementation: same command with replay-after.json; record both exit statuses.
 uv run ruff check .
 uv run ruff format --check .
@@ -162,8 +162,8 @@ Task 2 replay suite: 99 passed. Task 3 compatibility checks: 6 passed; replay su
 Main advanced during final verification to `5d183fe` (#185). The detached worktree moved
 safely with all edits preserved; README now matches its ASCII-decimal Retry-After parser.
 The obsolete old-base full suite was deliberately interrupted (852 passed, 203 skipped,
-exit 2), never claimed passed. Original-base evidence is under
-`/private/tmp/dmc-268-206-oldbase-*`; fresh-base results below replace its final gates.
+exit 2), never claimed passed. Original-base evidence is historical; fresh-base
+results below replace its final gates.
 
 Final verification at `5d183fe6cb3a0bb0ed68ebba062f1852f2d16bf9` (HEAD = fetched main;
 remote main rechecked unchanged at handoff):
@@ -182,8 +182,5 @@ remote main rechecked unchanged at handoff):
 - Each incremental review and the final full-diff review reported Standards 0 / Spec 0.
   Final review includes the refreshed base and README ASCII-decimal clarification.
 
-Evidence: `/private/tmp/dmc-268-206-final-{lint,format,mypy,pytest}.{log,exit}`,
-`final-skips.json`, `replay-{before,after}.{json,log,exit}`, `replay-comparison.json`,
-`pins-after.json`, `ownership-final.json`, and `final-validation.json`.
 Implementation/review checkpoints complete; ready for publisher handoff. Publication itself
 is pending. No commit, push or PR was created by development.

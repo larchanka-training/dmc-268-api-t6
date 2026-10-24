@@ -16,8 +16,8 @@ marked done:
 uv run ruff check .
 uv run ruff format --check .
 uv run mypy .
-TEST_DATABASE_URL=postgresql+psycopg://app:app@127.0.0.1:5432/dmc_145 uv run pytest
-TEST_DATABASE_URL=postgresql+psycopg://app:app@127.0.0.1:5432/dmc_145 \
+TEST_DATABASE_URL=<disposable-db-url> uv run pytest
+TEST_DATABASE_URL=<disposable-db-url> \
   uv run pytest -m integration -rs tests/test_repository_rag_postgres.py \
   tests/test_code_index_store_postgres.py tests/test_repositories_api_postgres.py \
   tests/test_app_reinstall_schema_postgres.py tests/test_app_reinstall_postgres.py \
@@ -30,7 +30,7 @@ TEST_DATABASE_URL=postgresql+psycopg://app:app@127.0.0.1:5432/dmc_145 \
 - The tests without a database (`test_alembic_heads.py`, `test_openapi_contract.py`,
   `test_ui_zod_contracts.py`, `test_rag_index_status.py`, `test_context_provenance.py`,
   `test_review_context_stage.py`, `test_llm_gateway.py`) run in the plain pytest gate.
-- Use only the dedicated database `dmc_145`, never another session's database or broker.
+- Use only the dedicated database `<disposable-db>`, never another session's database or broker.
   Do not print credentials.
 
 ## Task 1: Plan documents (C1)
@@ -174,7 +174,7 @@ database, so it lives in `tests/test_llm_gateway_postgres.py`.
 
 ## Task 6: Zod schemas in the ui repository (U1)
 
-**Description:** In `projects/dmc-268-ui-t6-102` (branch `feat/102-rag-toggle` from
+**Description:** In `<isolated-ui-checkout>` (branch `feat/102-rag-toggle` from
 `e8d47b5`): `feat(repository): add the RAG toggle and index status to zod schemas (#102)`,
 footer `Refs larchanka-training/dmc-268-api-t6#145`, as in plan step 5.
 

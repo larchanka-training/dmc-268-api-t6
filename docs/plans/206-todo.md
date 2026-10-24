@@ -13,7 +13,7 @@ Plan: [206-plan.md](206-plan.md). Original baseline: `66077f292bcd829d1807c520f4
 - [x] Existing replay suite and recorded replay outcomes, JSON/warnings/console/exit/HEAD, and pin-union inventory saved outside Git.
 
 **Verification:** `uv run pytest tests/test_eval_replay.py -q`; baseline replay and union check in plan.
-Verified with approved uv cache/runtime access: baseline suite 98 passed; replay 24 cases, warnings=[], exit 0; pins recorded/current/union 46/46/46, intersection empty. Original baseline HEAD/main was 66077f2; final verification uses 5d183fe. Evidence: /private/tmp/dmc-268-206-baseline-*, replay-before.*, pins-before.json, ownership.json.
+Verified with approved uv cache/runtime access: baseline suite 98 passed; replay 24 cases, warnings=[], exit 0; pins recorded/current/union 46/46/46, intersection empty. Original baseline HEAD/main was 66077f2; final verification uses 5d183fe.
 **Dependencies:** None. **Files likely touched:** None (temporary evidence only). **Scope:** Small.
 
 ## Task 2: Expose simultaneous pin and content drift
@@ -26,7 +26,7 @@ Verified with approved uv cache/runtime access: baseline suite 98 passed; replay
 - [x] Implementation independently compares the recorded-path digest without changing safety handling or report/scoring behavior.
 
 **Verification:** Run the named regression RED then GREEN; run `uv run pytest tests/test_eval_replay.py -q`, including C6 dropped-pin/custom-rule tests.
-RED: 1 failed (missing digest warning); GREEN: 1 passed. Evidence: /private/tmp/dmc-268-206-red.*, green.*, task2-tests.*. Replay suite: 99 passed (exit 0), including existing C6 dropped-pin/custom-rule tests. Targeted Ruff lint/format and git diff --check passed. Independent review passed: Standards 0 / Spec 0 findings; Task 3 authorized.
+RED: 1 failed (missing digest warning); GREEN: 1 passed. Replay suite: 99 passed (exit 0), including existing C6 dropped-pin/custom-rule tests. Targeted Ruff lint/format and git diff --check passed. Independent review passed: Standards 0 / Spec 0 findings; Task 3 authorized.
 **Dependencies:** Task 1. **Files likely touched:** `tests/test_eval_replay.py`, `review/scripts/eval_replay.py`. **Scope:** Small.
 
 ## Task 3: Verify warning and exit compatibility
@@ -43,7 +43,6 @@ Six targeted checks passed (exit 0): new-rule path-only, rule-edit digest-only, 
 (all assert clean inputs first), new public `main()` CLI warning/exit check, existing missing-manifest
 CLI error and paid-metadata nonpublishable CLI check. Replay suite: 100 passed (exit 0).
 No further production change; targeted Ruff lint/format and `git diff --check` passed.
-Evidence: `/private/tmp/dmc-268-206-task3-compatibility.*`, `task3-tests.*`, `task3-validation.txt`.
 Second independent review passed: Standards 0 / Spec 0 findings; Task 4 authorized.
 **Dependencies:** Task 2. **Files likely touched:** `tests/test_eval_replay.py` (only if needed beyond current assertions). **Scope:** Small.
 
@@ -61,8 +60,7 @@ Manual comparison matched `classify_vcs_error`: 404/nonlimited 403 forbidden; li
 all 429, 5xx/401/422/other HTTP errors and timeout/transport/connection failures retryable.
 The adjacent commit-message/access rows are unchanged; only the diff row and README error
 paragraph changed. Invalid-page validation remains documented. Ownership refreshed: same five
-commented PRs; no new owner. `git diff --check` passed. Evidence:
-`/private/tmp/dmc-268-206-task4-docs.diff`, `task4-validation.txt`, `ownership-task4.json`.
+commented PRs; no new owner. `git diff --check` passed.
 Task 4 independent review passed: Standards 0 / Spec 0. README was further clarified to ASCII decimal digits after updating to main 5d183fe; final full-diff review also passed with Standards 0 / Spec 0.
 **Dependencies:** Tasks 1 and 3. **Files likely touched:** `docs/PIPELINE_SPEC.md`, `review/README.md`. **Scope:** Small.
 
@@ -93,9 +91,6 @@ remote main rechecked unchanged at handoff):
 - Each incremental review and the final full-diff review reported Standards 0 / Spec 0.
   Final review includes the refreshed base and README ASCII-decimal clarification.
 
-Evidence: `/private/tmp/dmc-268-206-final-{lint,format,mypy,pytest}.{log,exit}`,
-`final-skips.json`, `replay-{before,after}.{json,log,exit}`, `replay-comparison.json`,
-`pins-after.json`, `ownership-final.json`, and `final-validation.json`.
 Implementation/review checkpoints complete; ready for publisher handoff. Publication itself
 is pending. No commit, push or PR was created by development.
 

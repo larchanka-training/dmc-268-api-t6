@@ -1,8 +1,8 @@
 # Verification: reviewer-intent / timeline removal (#81)
 
 Baseline: `362f7586f797ae29b4f367a3bcbd745657924976`. All implementation is
-in the isolated `81-reviewer-intent-path` worktree. The original checkout was
-not edited. Human approval covered the complete plan, public test seams,
+in an isolated worktree. The original checkout was not edited. Human approval
+covered the complete plan, public test seams,
 ownership coordination comments, and draft PR publication on 2026-10-14.
 
 Coordination was posted before shared-file edits: PR154
@@ -25,16 +25,16 @@ Coordination was posted before shared-file edits: PR154
 
 ## PostgreSQL proof
 
-A fresh disposable `postgres:17-alpine` container named `dmc268-issue81-proof`
-used loopback random port 63945 and database `issue81`. Existing local containers
-were inspected and left running. Fixtures create UUID-named schemas, migrate
+A fresh disposable `postgres:17-alpine` container used a dynamic loopback port and
+an isolated test database. Existing local containers were inspected and left running.
+Fixtures create UUID-named schemas, migrate
 explicitly with Alembic, then drop only their own schemas. No shared database was
 used. The dedicated container was stopped and automatically removed afterward.
 This was repository integration verification, so the full HTTP smoke stack from
 `e2e-test` was not needed.
 
 ```sh
-TEST_DATABASE_URL=postgresql+psycopg://postgres@127.0.0.1:63945/issue81 uv run pytest tests/test_retired_pr_projection_postgres.py tests/test_github_pr_projection.py tests/test_label_intent_migration.py
+TEST_DATABASE_URL=<disposable-db-url> uv run pytest tests/test_retired_pr_projection_postgres.py tests/test_github_pr_projection.py tests/test_label_intent_migration.py
 ```
 
 Result: **78 passed, zero skipped**, 2 existing dependency deprecation warnings.

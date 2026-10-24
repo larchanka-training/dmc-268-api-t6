@@ -8,7 +8,7 @@ scope. Where it says "match existing", the implementer reads the named precedent
 code and copies it.
 Issue: https://github.com/larchanka-training/dmc-268-api-t6/issues/145, epic #139.
 Baseline: `origin/main` `7546e539e1c1f565f65b9a5ca4cdc5dd1fbfb3fa`. The single Alembic
-head is `20261015_0032`. Worktree `projects/dmc-268-api-t6-145`, branch
+head is `20261015_0032`. Worktree `<isolated-checkout>`, branch
 `feat/145-rag-toggle-status`. Task checklist: [145-todo.md](145-todo.md).
 
 ## Context
@@ -96,11 +96,11 @@ resolved, tech-lead acceptance) is covered by C8 and the publication steps.
 
 ## Preparation
 
-- Worktree `projects/dmc-268-api-t6-145`, branch `feat/145-rag-toggle-status` from
-  `origin/main` `7546e53`. A dedicated database `dmc_145` on the local PG17
-  (`postgresql+psycopg://app:app@127.0.0.1:5432/dmc_145`).
-- UI worktree `projects/dmc-268-ui-t6-102`, branch `feat/102-rag-toggle` from `e8d47b5`
-  (the ui#106 head), `pnpm install`. Not `-106`: the generator needs a clean tree.
+- Worktree `<isolated-checkout>`, branch `feat/145-rag-toggle-status` from
+  `origin/main` `7546e53`. A dedicated database `<disposable-db>` on the local PG17
+  (`<disposable-db-url>`).
+- UI worktree `<isolated-ui-checkout>`, branch `feat/102-rag-toggle` from `e8d47b5`
+  (the ui#106 head), `pnpm install`. The generator needs a clean tree.
 - Implementation is done by a subagent from the brief file (`docs/plans/145-plan.md` plus
   the todo); the main context coordinates and verifies.
 
@@ -133,7 +133,7 @@ the approved plan's labels.
    Test `tests/test_rag_index_status.py`: a table of literals, including AC4 (disabled →
    no access; empty/building/failed → not ready with a reason; ready/stale → usable).
 3. ~~C3~~ **dropped (decision of 2026-10-16, D-E).** The parallel branch #142
-   (`feat/142-rag-indexer-build`, worktree `-142`, not pushed at planning time) already
+   (`feat/142-rag-indexer-build`, not pushed at planning time) already
    carries:
    - `mark_failed` (failed + `FAILED_ERROR_CODES` + stats);
    - `release` (a soft refusal, `last_error_code`);
@@ -193,7 +193,7 @@ the approved plan's labels.
      - `RepositoryUpdate` += `ragEnabled`;
    - `tests/test_openapi_contract.py`: fakes, the PATCH round trip,
      `INVALID_REVIEW_SETTINGS` += `{"ragEnabled": null}`, `{"ragIndex": {...}}` → 422;
-   - fixture: `DMC_268_UI_DIR=…/dmc-268-ui-t6-102 node tests/generate_ui_zod_contracts.mjs`,
+   - fixture: `DMC_268_UI_DIR=<isolated-ui-checkout> node tests/generate_ui_zod_contracts.mjs`,
      `UI_CONTRACT_COMMIT` = the U1 SHA (the diff touches only
      repository/repositoryUpdate/provenance);
    - PG tests in `tests/test_repository_rag_postgres.py`:
@@ -270,7 +270,7 @@ the approved plan's labels.
 uv run ruff check .
 uv run ruff format --check .
 uv run mypy .
-TEST_DATABASE_URL=postgresql+psycopg://app:app@127.0.0.1:5432/dmc_145 uv run pytest
+TEST_DATABASE_URL=<disposable-db-url> uv run pytest
 ```
 
 - Focused, zero skips: `-m integration -rs` over `tests/test_repository_rag_postgres.py`,
@@ -284,7 +284,7 @@ TEST_DATABASE_URL=postgresql+psycopg://app:app@127.0.0.1:5432/dmc_145 uv run pyt
 - Review: a clean `code-reviewer` subagent (only `git show`/`git diff`, no checkout); then
   check the clones' branches; check review fixes against `.agents/rules/backend.md` before
   pushing.
-- Manual check: `uv run alembic upgrade head` on `dmc_145`, the dev server, GET/PATCH
+- Manual check: `uv run alembic upgrade head` on `<disposable-db>`, the dev server, GET/PATCH
   `/api/repos/{id}` with a token — `ragEnabled`, and `ragIndex.status` = `empty` after
   enabling.
 
@@ -293,5 +293,5 @@ TEST_DATABASE_URL=postgresql+psycopg://app:app@127.0.0.1:5432/dmc_145 uv run pyt
 - Draft PR → CI green → Ready, reviewer ndovnar, board 12: #145 On Review; ui#102 stays
   draft until the screen exists.
 - `/verify-run`, report in `docs/reports/145/`.
-- After the merge: the tech lead's AC check, the status in #139, drop the `dmc_145`
+- After the merge: the tech lead's AC check, the status in #139, drop the `<disposable-db>`
   database and the worktree.
