@@ -25,7 +25,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.common.infrastructure.db.unit_of_work import SqlAlchemyUnitOfWork
 from app.modules.code_index.application.vcs import HEALABLE_ERROR_CODES
-from app.modules.code_index.domain.rag_index import RagIndex, rag_index
 from app.modules.code_index.domain.review_trigger import (
     ReviewTrigger,
     ReviewTriggerAction,
@@ -34,6 +33,7 @@ from app.modules.code_index.domain.review_trigger import (
 from app.modules.code_index.infrastructure.effective_rag import GITHUB_PROVIDER, RAG_ON
 from app.modules.code_index.infrastructure.index_store import SqlAlchemyCodeIndexStore
 from app.modules.code_index.infrastructure.models import CodeIndexState
+from app.modules.code_index.infrastructure.rag_state import enabled_rag_index
 from app.modules.repositories.infrastructure.models import ProviderInstallation, Repository
 from app.modules.reviews.application.rag_index import RagReadiness
 
@@ -41,46 +41,19 @@ from app.modules.reviews.application.rag_index import RagReadiness
 _REPOSITORY_LOCK_TIMEOUT = "2s"
 
 # The index of an enabled repository with no state row yet; the converge pass creates it.
-_NO_ROW = RagReadiness(
-    enabled=True,
-    index=rag_index(
-        rag_enabled=True,
-        status=None,
-        indexed_commit_sha=None,
-        target_commit_sha=None,
-        published_at=None,
-        file_count=None,
-        symbol_count=None,
-        error_code=None,
-        last_error_code=None,
-    ),
-)
-
-
-def _rag_index(state: CodeIndexState) -> RagIndex:
-    return rag_index(
-        rag_enabled=True,
-        status=state.status,
-        indexed_commit_sha=state.indexed_commit_sha,
-        target_commit_sha=state.target_commit_sha,
-        published_at=state.published_at,
-        file_count=state.file_count,
-        symbol_count=state.symbol_count,
-        error_code=state.error_code,
-        last_error_code=state.last_error_code,
-    )
+_NO_ROW = RagReadiness(enabled=True, index=enabled_rag_index(None))
 
 
 def _readiness(state: CodeIndexState | None) -> RagReadiness:
     if state is None:
         return _NO_ROW
     return RagReadiness(
-        enabled=True, index=_rag_index(state), default_head_sha=state.target_commit_sha
+        enabled=True, index=enabled_rag_index(state), default_head_sha=state.target_commit_sha
     )
 
 
 def _trigger(state: CodeIndexState, now: datetime) -> ReviewTrigger:
-    index = _rag_index(state)
+    index = enabled_rag_index(state)
     return review_trigger(
         status=index.status,
         usable=index.usable,
