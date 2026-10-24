@@ -75,6 +75,8 @@ RUN = RunCallContext(
     attempt=1,
     engine="fast",
     deadline=NOW + timedelta(seconds=480),
+    # The worker's run carries the review prompt; a verifier call must never record it.
+    prompt_version_id=UUID("00000000-0000-0000-0000-000000013708"),
 )
 VERIFIER_PROMPT_ID = UUID("00000000-0000-0000-0000-000000013703")
 CALL_ID = UUID("00000000-0000-0000-0000-000000013704")
@@ -99,7 +101,7 @@ SETTINGS = LlmSettings(
 QUERY_BLOCK = file_block_id("app/query.py")
 
 
-def _snapshot() -> PolicySnapshot:
+def _snapshot(*, verifier_id: UUID | None = VERIFIER_PROMPT_ID) -> PolicySnapshot:
     return PolicySnapshot(
         schema_version=1,
         snapshot_id=UUID("00000000-0000-0000-0000-000000013705"),
@@ -120,13 +122,13 @@ def _snapshot() -> PolicySnapshot:
         priority_matcher_version="priority-matcher/v1",
         service_defaults_rule_version_id=UUID("00000000-0000-0000-0000-000000013707"),
         defaults_checksum=DEFAULT_BACKEND_V1_CHECKSUM,
-        prompt_bindings=make_complete_prompt_bindings(verifier_id=VERIFIER_PROMPT_ID),
+        prompt_bindings=replace(make_complete_prompt_bindings(), verifier_id=verifier_id),
         execution_profile=make_complete_execution_profile(),
         policy_digest="digest_123",
     )
 
 
-def _context() -> ReviewContext:
+def _context(snapshot: PolicySnapshot | None) -> ReviewContext:
     return ReviewContext(
         system="SYSTEM",
         rules=(),
@@ -137,7 +139,7 @@ def _context() -> ReviewContext:
             ChangedFile("app/query.py", "modified", (DiffLine(10, "added", "query = f'SELECT'"),)),
         ),
         omitted_files=(),
-        policy_snapshot=_snapshot(),
+        policy_snapshot=snapshot,
     )
 
 
@@ -241,8 +243,10 @@ class _Provider:
 
         return asyncio.run(exercise())
 
-    def verify(self, *, settings: LlmSettings = SETTINGS) -> VerifierReply:
-        context = _context()
+    def verify(
+        self, *, settings: LlmSettings = SETTINGS, context: ReviewContext | None = None
+    ) -> VerifierReply:
+        context = _context(_snapshot()) if context is None else context
         prompt, manifest = VerifierPromptBuilder().build_verifier_prompt(
             candidates=(_candidate("c-1"),), context=context, call_id=CALL_ID
         )
@@ -400,6 +404,37 @@ def test_two_invalid_answers_go_to_the_verifier_fallback(manifests: list[CallMan
     assert [usage.operation for _, usage in provider.ledger.events] == ["verification"] * 3
 
 
+def _repaired_once() -> _Provider:
+    return _Provider(
+        [
+            _completion(_answer(_without_reason("c-1"))),
+            _completion(_answer(_decision("c-1"))),
+        ]
+    )
+
+
+def test_a_snapshot_without_a_verifier_prompt_records_no_prompt_version() -> None:
+    # Decided by the coordinator: None, never the review prompt the run carries.
+    context = _context(_snapshot(verifier_id=None))
+    provider = _repaired_once()
+
+    provider.verify(context=context)
+
+    assert RUN.prompt_version_id is not None
+    assert [record.prompt_version_id for _, record in provider.trace.records] == [None, None]
+
+
+def test_without_a_snapshot_the_verifier_records_no_prompt_version() -> None:
+    context = _context(None)
+    provider = _repaired_once()
+
+    reply = provider.verify(context=context)
+
+    assert reply.output == {"decisions": [_decision("c-1")]}
+    assert provider.models() == ["verifier-model", "verifier-model"]
+    assert [record.prompt_version_id for _, record in provider.trace.records] == [None, None]
+
+
 def test_the_verifier_price_is_checked_against_the_run_cost_limit() -> None:
     # 1 000 reserved output tokens at $250/M cost $0.25; with $0.30 spent that is over $0.50.
     costly = replace(VERIFIER, price=ModelPrice(Decimal("0"), Decimal("250")))
@@ -452,7 +487,7 @@ def test_reflection_pass_verifies_two_candidates_through_the_gateway() -> None:
     async def verify(gateway: LlmGateway) -> list[tuple[str, str]]:
         reflection = ReflectionPass(GatewayVerifierModel(gateway, RUN))
         decisions = await reflection.verify(
-            candidates=(_candidate("c-1"), _candidate("c-2")), context=_context()
+            candidates=(_candidate("c-1"), _candidate("c-2")), context=_context(_snapshot())
         )
         return [(decision.candidate_id, decision.status) for decision in decisions]
 

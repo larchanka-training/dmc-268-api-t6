@@ -144,14 +144,15 @@ class GatewayVerifierModel:
         context: ReviewContext,
     ) -> VerifierReply:
         snapshot = context.policy_snapshot
-        run = self._run
         counter: TokenCounter | None = None
         if snapshot is not None:
             counter = token_counter_for(snapshot.execution_profile.counter_version)
-            verifier_id = snapshot.prompt_bindings.verifier_id
-            if verifier_id is not None:
-                # llm.call names the verifier prompt version, not the review prompt.
-                run = replace(run, prompt_version_id=verifier_id)
+        # llm.call names the verifier prompt version, never the review prompt the run
+        # carries: None while no snapshot pins a verifier prompt.
+        run = replace(
+            self._run,
+            prompt_version_id=None if snapshot is None else snapshot.prompt_bindings.verifier_id,
+        )
         result = await self._gateway.generate(
             StructuredTask(
                 operation=VERIFICATION_OPERATION,
