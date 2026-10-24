@@ -15,6 +15,7 @@ from app.modules.reviews.application.findings_post_processor import (
     FindingsPostProcessor,
     ProcessedFinding,
     ProcessedReviewOutput,
+    finalize_stored_review_body,
 )
 from app.modules.reviews.application.queue_messages import ReviewPublishPointer, ReviewPublishQueue
 from app.modules.reviews.application.review_output import (
@@ -94,11 +95,13 @@ class StoreReviewOutput:
         queue: ReviewPublishQueue,
         *,
         worker_id: str,
+        run_url: Callable[[UUID], str | None] = lambda _: None,
         now: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
         self._uow_factory = uow_factory
         self._queue = queue
         self._worker_id = worker_id
+        self._run_url = run_url
         self._now = now
 
     async def execute(
@@ -118,10 +121,21 @@ class StoreReviewOutput:
         processed = processor.process(
             parsed,
             hunk_lines=context.hunk_lines,
+            checked_paths=context.checked_paths,
             rule_names=context.rule_names,
             repository_max_inline=context.repository_max_inline,
             severity_threshold=context.severity_threshold,
             allowed_v2_rules=context.allowed_v2_rules,
+        )
+        processed = finalize_stored_review_body(
+            parsed,
+            processed,
+            checked_paths=context.checked_paths,
+            severity_threshold=context.severity_threshold,
+            below_threshold=sum(
+                1 for item in processed.dropped if item.drop_reason == "severity_threshold"
+            ),
+            run_url=self._run_url(run_id),
         )
         findings = hashed_findings(processed)
         severities = [item.severity for item in findings]
@@ -152,6 +166,7 @@ class StoreReviewOutput:
                 postprocess_response={
                     "inline": len(processed.inline),
                     "body_only": len(processed.body_only),
+                    "omitted_body_only_count": processed.omitted_body_only_count,
                     "dropped": [
                         {"index": item.position, "drop_reason": item.drop_reason}
                         for item in processed.dropped

@@ -2793,7 +2793,9 @@ def test_every_call_is_traced_with_request_metadata_then_response_or_error() -> 
         "prompt_version_id",
         "rule_version_id",
         "input_tokens_estimate",
+        "operation",
     }
+    assert request["operation"] == "review"
     assert request["kind"] == "primary"
     assert request["call_no"] == 1
     assert request["attempt"] == 2
@@ -2905,6 +2907,7 @@ def test_conventions_usage_counts_toward_the_run_cost_limit_of_the_review() -> N
     assert "<repo_tree>\napp/service.py\ntests/test_service.py\n</repo_tree>" in user
     assert '<file path="app/service.py">\n<line n="1">import x</line>' in user
     assert [usage.operation for _, usage in harness.ledger.events] == ["conventions"]
+    assert harness.trace.records[0][1].request_json()["operation"] == "conventions"
 
 
 def test_conventions_answer_for_other_paths_goes_through_repair_to_the_fallback() -> None:

@@ -8,7 +8,11 @@ from typing import cast
 
 import pytest
 
-from app.modules.reviews.application.findings_post_processor import FindingsPostProcessor
+from app.modules.reviews.application.findings_post_processor import (
+    FindingsPostProcessor,
+    body_only_accounted_in_review_body,
+    finalize_stored_review_body,
+)
 from app.modules.reviews.application.publish_run_review import move_inline_to_body
 from app.modules.reviews.application.review_output import (
     PublishedFinding,
@@ -61,13 +65,18 @@ def process(  # type: ignore[no-untyped-def]
     *findings: dict[str, object],
     max_inline: int | None = None,
     hunk_lines: dict[str, frozenset[int]] | None = None,
+    checked_paths: frozenset[str] | None = None,
     severity_threshold: SeverityThresholdValue = "all",
 ):
+    resolved_hunk_lines = (
+        hunk_lines
+        if hunk_lines is not None
+        else {"app/example.py": frozenset({10, 11, 12, 13, 14})}
+    )
     return FindingsPostProcessor.from_default_patterns().process(
         output(*findings),
-        hunk_lines=hunk_lines
-        if hunk_lines is not None
-        else {"app/example.py": frozenset({10, 11, 12, 13, 14})},
+        hunk_lines=resolved_hunk_lines,
+        checked_paths=checked_paths,
         rule_names=frozenset({"Naming Consistency"}),
         repository_max_inline=max_inline,
         severity_threshold=severity_threshold,
@@ -239,6 +248,93 @@ def test_review_body_starts_with_verdict_risk_summary_and_checked_paths() -> Non
     assert "- **Moved note** (`src/app.py:3`): outside the diff" in appended
 
 
+def test_checked_files_list_only_reviewable_snapshots() -> None:
+    """Paths with null review_patch stay in hunk_lines but not under Checked files (#170 D-2)."""
+    result = process(
+        finding(path="app/reviewed.py", title="Blocking defect", severity="high"),
+        finding(
+            path="vendor/ignored.py",
+            line=12,
+            title="Ignored path note",
+            confidence=0.4,
+        ),
+        hunk_lines={
+            "app/reviewed.py": frozenset({10, 12}),
+            "vendor/ignored.py": frozenset({10, 12}),
+            "docs/summary_only.md": frozenset({1}),
+        },
+        checked_paths=frozenset({"app/reviewed.py"}),
+    )
+
+    checked_section = result.review_body.split("**Checked files:**", maxsplit=1)[1].split(
+        "\n\n", 1
+    )[0]
+    assert "- app/reviewed.py" in checked_section
+    assert "- vendor/ignored.py" not in checked_section
+    assert "- docs/summary_only.md" not in checked_section
+    assert result.inline[0].finding.path == "app/reviewed.py"
+    assert any(item.finding.title == "Ignored path note" for item in result.body_only)
+
+
+def test_checked_files_cap_lists_all_paths_when_they_fit() -> None:
+    paths = frozenset(f"app/module_{index:02d}.py" for index in range(3))
+    hunk_lines = {path: frozenset({1}) for path in paths}
+    result = process(finding(severity="high"), hunk_lines=hunk_lines, checked_paths=paths)
+
+    checked_section = (
+        result.review_body.split("**Checked files:**", maxsplit=1)[1].split("\n\n", 1)[0].strip()
+    )
+    assert checked_section == "\n".join(f"- {path}" for path in sorted(paths))
+    assert "… и ещё" not in checked_section
+
+
+def test_checked_files_cap_lists_one_path_without_overflow_line() -> None:
+    paths = frozenset({"only/reviewed.py"})
+    hunk_lines = {"only/reviewed.py": frozenset({10})}
+    result = process(
+        finding(path="only/reviewed.py", line=10, severity="high"),
+        hunk_lines=hunk_lines,
+        checked_paths=paths,
+    )
+
+    checked_section = (
+        result.review_body.split("**Checked files:**", maxsplit=1)[1].split("\n\n", 1)[0].strip()
+    )
+    assert checked_section == "- only/reviewed.py"
+    assert "… и ещё" not in checked_section
+
+
+def test_checked_files_cap_overflow_line_counts_omitted_paths() -> None:
+    long_path_count = 62
+
+    def long_checked_path(index: int) -> str:
+        prefix = f"pkg/file_{index:03d}_"
+        suffix = ".py"
+        padding = 58 - len(prefix) - len(suffix)
+        return f"{prefix}{'n' * padding}{suffix}"
+
+    paths = tuple(long_checked_path(index) for index in range(long_path_count))
+    hunk_lines = {path: frozenset({1}) for path in paths}
+    result = process(
+        finding(severity="high"),
+        finding(title="Spill note", confidence=0.4),
+        hunk_lines=hunk_lines,
+        checked_paths=frozenset(paths),
+    )
+
+    checked_section = (
+        result.review_body.split("**Checked files:**", maxsplit=1)[1].split("\n\n", 1)[0].strip()
+    )
+    listed = [line for line in checked_section.splitlines() if line.startswith("- ")]
+    overflow = [line for line in listed if "… и ещё" in line]
+    assert overflow
+    shown_paths = [line.removeprefix("- ") for line in listed if "… и ещё" not in line]
+    assert shown_paths == sorted(paths)[: len(shown_paths)]
+    assert int(overflow[0].split("… и ещё ", 1)[1].split(" ", 1)[0]) == len(paths) - len(
+        shown_paths
+    )
+
+
 def test_checked_files_are_none_when_the_diff_has_no_paths() -> None:
     result = process(finding(severity="high"), hunk_lines={})
 
@@ -278,28 +374,144 @@ def test_character_cap_drops_only_additional_findings() -> None:
             )
         )
     )
-    assert len(capped.review_body) == 4000
+    assert len(capped.review_body) <= 4000
+    assert capped.omitted_body_only_count == 4
     assert "**Effort:** small" in capped.review_body
     assert "Overflow 1" in capped.review_body
     assert "Overflow 6" not in capped.review_body
+    assert all(
+        capped.review_body.count(f"Overflow {number}") == (1 if number <= 2 else 0)
+        for number in range(1, 7)
+    )
 
-    long_paths = {f"pkg/file_{index:03d}_{'n' * 60}.py": frozenset({1}) for index in range(50)}
+    # #170 / D-1: ~60 long checked paths (~58 chars each) plus two body-only findings must
+    # stay within the 4000-char budget. Checked files truncate with ``… и ещё N файлов`` (not
+    # every path as its own bullet). Body-only findings must appear under Additional findings
+    # (overflow footer URL is store/publish — covered in Task 4, not here).
+    long_path_count = 62
+
+    def long_checked_path(index: int) -> str:
+        prefix = f"pkg/file_{index:03d}_"
+        suffix = ".py"
+        padding = 58 - len(prefix) - len(suffix)
+        assert padding > 0
+        return f"{prefix}{'n' * padding}{suffix}"
+
+    long_paths = {long_checked_path(index): frozenset({1}) for index in range(long_path_count)}
     long_paths["app/example.py"] = frozenset({10, 11, 12, 13, 14})
     long_body = process(
         finding(title="Blocking defect", severity="high"),
-        finding(title="Spill note", confidence=0.4),
+        finding(title="Spill note one", confidence=0.4),
+        finding(title="Spill note two", confidence=0.39),
         hunk_lines=long_paths,
     )
-    assert len(long_body.review_body) > 4000
-    assert "**Verdict:** blocking" in long_body.review_body
-    assert (
-        long_body.review_body.index("- app/example.py")
-        < long_body.review_body.index("- pkg/file_000_")
-        < long_body.review_body.index("- pkg/file_049_")
+    body = long_body.review_body
+    assert len(body) <= 4000
+    assert "**Verdict:** blocking" in body
+    assert "- app/example.py" in body
+    assert body.index("- app/example.py") < body.index(f"- {long_checked_path(0)}")
+    assert "**Effort:** small" in body
+    listed_long_paths = sum(
+        1 for index in range(long_path_count) if f"- {long_checked_path(index)}" in body
     )
-    assert "**Effort:** small" in long_body.review_body
-    assert "## Additional findings" not in long_body.review_body
-    assert "Spill note" not in long_body.review_body
+    assert listed_long_paths < long_path_count
+    assert "… и ещё" in body and "файлов" in body
+    assert "## Additional findings" in body
+    assert "Spill note one" in body
+    assert "Spill note two" in body
+    assert long_body.omitted_body_only_count == 0
+
+
+def test_packer_lists_only_whole_additional_finding_bullets() -> None:
+    notes = tuple(
+        finding(title=f"Overflow {number}", confidence=0.4, body="x" * 1200)
+        for number in range(1, 7)
+    )
+    capped = process(finding(title="Blocking defect", severity="high"), *notes)
+    section = capped.review_body.split("## Additional findings", 1)[1]
+    bullets = [line for line in section.splitlines() if line.startswith("- **")]
+    assert bullets
+    for line in bullets:
+        assert line.endswith("x" * 1200)
+
+
+def test_finalize_stored_review_body_appends_overflow_footer_within_budget() -> None:
+    notes = tuple(
+        finding(title=f"Overflow {number}", confidence=0.4, body="x" * 1200)
+        for number in range(1, 7)
+    )
+    parsed = output(finding(title="Blocking defect", severity="high"), *notes)
+    processed = process(finding(title="Blocking defect", severity="high"), *notes)
+    run_url = "https://ui.test/runs/11111111-1111-1111-1111-111111111111"
+    finalized = finalize_stored_review_body(
+        parsed,
+        processed,
+        checked_paths=frozenset({"app/example.py"}),
+        severity_threshold="all",
+        below_threshold=0,
+        run_url=run_url,
+    )
+    assert finalized.omitted_body_only_count == processed.omitted_body_only_count
+    assert finalized.review_body.endswith(run_url)
+    assert "**Ещё 4 находок:**" in finalized.review_body
+    assert len(finalized.review_body) <= 4000
+    assert body_only_accounted_in_review_body(finalized.review_body) == 6
+
+
+def test_finalize_stored_review_body_appends_overflow_count_without_url_when_run_url_missing() -> (
+    None
+):
+    notes = tuple(
+        finding(title=f"Overflow {number}", confidence=0.4, body="x" * 1200)
+        for number in range(1, 7)
+    )
+    parsed = output(finding(title="Blocking defect", severity="high"), *notes)
+    processed = process(finding(title="Blocking defect", severity="high"), *notes)
+    finalized = finalize_stored_review_body(
+        parsed,
+        processed,
+        checked_paths=frozenset({"app/example.py"}),
+        severity_threshold="all",
+        below_threshold=0,
+        run_url=None,
+    )
+    assert finalized.omitted_body_only_count == processed.omitted_body_only_count
+    assert finalized.review_body.endswith("**Ещё 4 находок**")
+    assert "http" not in finalized.review_body.split("**Ещё")[-1]
+    assert len(finalized.review_body) <= 4000
+    assert body_only_accounted_in_review_body(finalized.review_body) == 6
+
+
+@pytest.mark.parametrize(
+    ("footer", "expected"),
+    [
+        ("\n\n**Ещё 3 находок:** https://ui.test/runs/x", 3),
+        ("\n\n**Ещё 3 находок**", 3),
+    ],
+)
+def test_body_only_accounted_parses_overflow_footer_with_and_without_url(
+    footer: str, expected: int
+) -> None:
+    body = "## Review summary\n\n**Verdict:** attention\n\n## Additional findings\n\n- **One**\n"
+    assert body_only_accounted_in_review_body(body + footer) == 1 + expected
+
+
+def test_body_only_accounted_matches_listed_bullets_plus_footer_n() -> None:
+    body = "\n".join(
+        (
+            "## Review summary",
+            "",
+            "**Verdict:** attention",
+            "",
+            "## Additional findings",
+            "",
+            "- **First**",
+            "- **Second**",
+            "",
+            "**Ещё 5 находок:** https://ui.test/runs/x",
+        )
+    )
+    assert body_only_accounted_in_review_body(body) == 7
 
 
 def test_critical_threshold_drops_medium_low_and_info_and_turns_attention_into_clean() -> None:

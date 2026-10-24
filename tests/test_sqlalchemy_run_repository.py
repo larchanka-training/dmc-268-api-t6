@@ -610,7 +610,18 @@ def test_get_post_processing_input_returns_none_allowed_v2_rules_for_legacy_run(
     run_id = UUID(int=1)
     rules = [{"name": "Standard Rule"}]
     first_row = (UUID(int=10), "head_sha_123", rules, 10, SeverityThreshold.ALL)
-    diff_rows = [("app/main.py", "@@ -1,3 +1,3 @@\n context\n+added\n context")]
+    diff_rows = [
+        (
+            "app/main.py",
+            "@@ -1,3 +1,3 @@\n context\n+added\n context",
+            "@@ -1,3 +1,3 @@\n context\n+added\n context",
+        ),
+        (
+            "vendor/skipped.py",
+            "@@ -1,1 +1,1 @@\n-old\n+new",
+            None,
+        ),
+    ]
 
     class MultiQueryFakeSession:
         def __init__(self) -> None:
@@ -631,6 +642,8 @@ def test_get_post_processing_input_returns_none_allowed_v2_rules_for_legacy_run(
 
     post_input = asyncio.run(repository.get_post_processing_input(run_id))
     assert post_input is not None
+    assert post_input.hunk_lines.keys() == frozenset({"app/main.py", "vendor/skipped.py"})
+    assert post_input.checked_paths == frozenset({"app/main.py"})
     assert post_input.allowed_v2_rules is None
 
     # Verify that in legacy runs without verifier, unverified v2 names are nulled out
@@ -681,6 +694,7 @@ def test_get_post_processing_input_returns_none_allowed_v2_rules_for_legacy_run(
     processed = FindingsPostProcessor.from_default_patterns().process(
         raw_output,
         hunk_lines=post_input.hunk_lines,
+        checked_paths=post_input.checked_paths,
         rule_names=post_input.rule_names,
         repository_max_inline=post_input.repository_max_inline,
         severity_threshold=post_input.severity_threshold,

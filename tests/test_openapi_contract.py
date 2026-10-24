@@ -843,6 +843,8 @@ def test_stream_declares_run_step_beside_the_status_event() -> None:
         "ok": True,
         "startedAt": "2026-10-12T09:00:00Z",
         "durationMs": 12,
+        "attempt": 1,
+        "llmOperation": "review",
     }
     _validator_at(pointer).validate(step)
 
@@ -851,6 +853,15 @@ def test_stream_declares_run_step_beside_the_status_event() -> None:
     without_tool = {key: value for key, value in step.items() if key != "tool"}
     with pytest.raises(ValidationError):
         _validator_at(pointer).validate(without_tool)
+    without_attempt = {key: value for key, value in step.items() if key != "attempt"}
+    with pytest.raises(ValidationError):
+        _validator_at(pointer).validate(without_attempt)
+    with pytest.raises(ValidationError):
+        _validator_at(pointer).validate({**step, "attempt": 0})
+    non_llm = {key: value for key, value in step.items() if key != "llmOperation"}
+    _validator_at(pointer).validate({**non_llm, "tool": "context.build"})
+    with pytest.raises(ValidationError):
+        _validator_at(pointer).validate({**step, "llmOperation": "other"})
 
 
 def test_stream_declares_the_last_event_id_header_the_app_accepts() -> None:

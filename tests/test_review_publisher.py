@@ -61,6 +61,7 @@ class FakeRepository:
         assert run_id == RUN_ID
         return FindingPostProcessingInput(
             {"app/example.py": frozenset({12})},
+            frozenset({"app/example.py"}),
             frozenset(),
             severity_threshold=self.severity_threshold,
         )
@@ -144,7 +145,11 @@ class ProcessingRepository:
 
     async def get_post_processing_input(self, run_id: UUID) -> FindingPostProcessingInput | None:
         assert run_id == RUN_ID
-        return FindingPostProcessingInput({"app/example.py": frozenset({12})}, frozenset())
+        return FindingPostProcessingInput(
+            {"app/example.py": frozenset({12})},
+            frozenset({"app/example.py"}),
+            frozenset(),
+        )
 
     async def store_review_output(
         self,
@@ -316,7 +321,11 @@ def test_publisher_does_not_allow_callers_to_override_durable_anchor_context() -
     )
     factory = FakeUnitOfWorkFactory(repository, [])
     provider = FakeProvider([])
-    untrusted_context = FindingPostProcessingInput({}, frozenset({"Model supplied rule"}))
+    untrusted_context = FindingPostProcessingInput(
+        {},
+        frozenset(),
+        frozenset({"Model supplied rule"}),
+    )
     execute = cast(Any, PublishReviewOutput(factory, provider).execute)
 
     with pytest.raises(TypeError):

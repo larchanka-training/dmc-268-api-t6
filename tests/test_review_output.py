@@ -200,7 +200,11 @@ def _publication() -> ReviewPublication:
 
 
 def _context() -> FindingPostProcessingInput:
-    return FindingPostProcessingInput({"app/example.py": frozenset({10, 12})}, frozenset())
+    return FindingPostProcessingInput(
+        {"app/example.py": frozenset({10, 12})},
+        frozenset({"app/example.py"}),
+        frozenset(),
+    )
 
 
 @pytest.mark.parametrize("encoded", ("str", "bytes"))
@@ -298,6 +302,7 @@ def test_comment_body_formatting() -> None:
 def test_publish_snapshot_run_preserves_v2_rule_attribution() -> None:
     context = FindingPostProcessingInput(
         hunk_lines={"app/example.py": frozenset({10, 12})},
+        checked_paths=frozenset({"app/example.py"}),
         rule_names=frozenset(),
         allowed_v2_rules=frozenset({".review/rules.md"}),
     )
@@ -338,6 +343,7 @@ def test_store_review_output_preserves_allowed_v2_rules() -> None:
         async def get_post_processing_input(self, run_id: UUID) -> FindingPostProcessingInput:
             return FindingPostProcessingInput(
                 hunk_lines={"app/example.py": frozenset({10, 12})},
+                checked_paths=frozenset({"app/example.py"}),
                 rule_names=frozenset(),
                 allowed_v2_rules=frozenset({".review/rules.md"}),
             )

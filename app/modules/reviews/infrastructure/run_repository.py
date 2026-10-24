@@ -660,12 +660,21 @@ class SqlAlchemyReviewOutputRepository:
         _, _, rules, max_comments, severity_threshold = row
         snapshots = (
             await self._session.execute(
-                select(CodeChangeDiff.filename, CodeChangeDiff.patch).where(
+                select(
+                    CodeChangeDiff.filename,
+                    CodeChangeDiff.patch,
+                    CodeChangeDiff.review_patch,
+                ).where(
                     CodeChangeDiff.run_id == run_id,
                 )
             )
         ).all()
-        hunk_lines = {filename: _new_hunk_lines(filename, patch) for filename, patch in snapshots}
+        hunk_lines = {
+            filename: _new_hunk_lines(filename, patch) for filename, patch, _ in snapshots
+        }
+        checked_paths = frozenset(
+            filename for filename, _, review_patch in snapshots if review_patch is not None
+        )
         rule_names = frozenset(rule["name"] for rule in rules if isinstance(rule.get("name"), str))
         # Until #130 connects live worker runs to the verifier, allowed_v2 remains None
         # so legacy runs do not retain unverified v2 rule names even if a snapshot row exists.
@@ -673,6 +682,7 @@ class SqlAlchemyReviewOutputRepository:
 
         return FindingPostProcessingInput(
             hunk_lines=hunk_lines,
+            checked_paths=checked_paths,
             rule_names=rule_names,
             repository_max_inline=max_comments,
             severity_threshold=_severity_threshold_value(severity_threshold),
