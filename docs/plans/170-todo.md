@@ -267,8 +267,8 @@ https://github.com/larchanka-training/dmc-268-ui-t6/issues/84 with both PR links
 **Acceptance criteria:**
 
 - [x] OpenAPI description for `/api/stream` mentions both event types (feeds Task 12).
-- [ ] UI Zod + contract test PR opened (or ready) in the same window; progress bar still poll-based (**deferred — publisher / UI agent**).
-- [ ] ui#84 comment posted after API PR URL exists (**deferred — publisher**).
+- [x] UI Zod + contract test PR opened (or ready) in the same window; progress bar still poll-based (ui#155).
+- [x] ui#84 comment posted after API PR URL exists.
 
 **Verification:** Doc diff review; UI `pnpm test` for the new schema test.
 

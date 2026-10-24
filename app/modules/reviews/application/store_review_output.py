@@ -206,6 +206,11 @@ class StoreReviewOutput:
                     "inline": len(processed.inline),
                     "body_only": len(processed.body_only),
                     "omitted_body_only_count": processed.omitted_body_only_count,
+                    **(
+                        {"review_body_budget_degraded": True}
+                        if processed.review_body_budget_degraded
+                        else {}
+                    ),
                     "dropped": [
                         {"index": item.position, "drop_reason": item.drop_reason}
                         for item in processed.dropped

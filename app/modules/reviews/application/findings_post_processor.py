@@ -93,6 +93,7 @@ class ProcessedReviewOutput:
     dropped: tuple[ProcessedFinding, ...]
     review_body: str
     omitted_body_only_count: int = 0
+    review_body_budget_degraded: bool = False
 
     @property
     def buckets(self) -> tuple[tuple[ProcessedFinding, ...], ...]:
@@ -460,8 +461,20 @@ def finalize_stored_review_body(
                 review_body=f"{body}{footer}",
                 omitted_body_only_count=omitted,
             )
-    msg = "review body footer could not fit within the character budget"
-    raise AssertionError(msg)
+    footer = footer_for(omitted)
+    max_body_len = max(0, REVIEW_BODY_CHAR_BUDGET - len(footer))
+    body, omitted = repack(max_body_len)
+    footer = footer_for(omitted)
+    if len(body) + len(footer) > REVIEW_BODY_CHAR_BUDGET:
+        body = body[: max(0, REVIEW_BODY_CHAR_BUDGET - len(footer))].rstrip()
+    return ProcessedReviewOutput(
+        inline=processed.inline,
+        body_only=processed.body_only,
+        dropped=processed.dropped,
+        review_body=f"{body}{footer}",
+        omitted_body_only_count=omitted,
+        review_body_budget_degraded=True,
+    )
 
 
 def _pack_review_body(

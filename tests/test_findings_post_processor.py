@@ -682,6 +682,36 @@ def test_body_only_accounted_parses_overflow_footer_with_and_without_url(
     assert body_only_accounted_in_review_body(body + footer) == 1 + expected
 
 
+def test_finalize_stored_review_body_degrades_long_summary_instead_of_asserting() -> None:
+    notes = tuple(
+        finding(title=f"Overflow {number}", confidence=0.4, body="x" * 1200)
+        for number in range(1, 7)
+    )
+    parsed = ReviewOutput.model_validate(
+        {
+            "findings": [finding(title="Blocking defect", severity="high"), *notes],
+            "summary": {
+                "problem": "p" * 3500,
+                "done_well": "d" * 500,
+                "effort": "small",
+            },
+        }
+    )
+    processed = process(finding(title="Blocking defect", severity="high"), *notes)
+    run_url = "https://ui.test/runs/11111111-1111-1111-1111-111111111111"
+    finalized = finalize_stored_review_body(
+        parsed,
+        processed,
+        checked_paths=frozenset({"app/example.py"}),
+        severity_threshold="all",
+        below_threshold=0,
+        run_url=run_url,
+    )
+    assert finalized.review_body_budget_degraded is True
+    assert len(finalized.review_body) <= 4000
+    assert finalized.review_body.endswith(run_url)
+
+
 def test_body_only_accounted_matches_listed_bullets_plus_footer_n() -> None:
     body = "\n".join(
         (

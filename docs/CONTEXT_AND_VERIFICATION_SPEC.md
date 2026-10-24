@@ -1503,9 +1503,10 @@ context old12/new13. SHA ниже — условные идентификато�
 
 ### 9.5. GitLab: целевой контракт, отдельная реализация
 
-На `main` (#97) реализована только публикация discussions по этому контракту (маркеры
-`findings_hash`, SD §8.4); приём вебхуков, diff и LEFT — вне scope #97. Ниже — целевой
-профиль координат и payload для адаптера и тестов.
+На `main` (#97) реализована публикация MR discussions по более узкому профилю SD §8.4
+(маркеры `findings_hash`, `new_line` на новой стороне; без `line_code`/`line_range`/`old_line`
+из целевого §9.5); приём вебхуков, diff ingress и LEFT — вне scope #97. Ниже — целевой
+профиль координат и payload для расширения адаптера и тестов.
 
 Endpoint — `POST /projects/{id}/merge_requests/{iid}/discussions`.
 В payload обязательны `body` и для inline `position`: `position_type="text"`,
@@ -1761,8 +1762,9 @@ review. Подтверждённый legacy-object связывается с run
   fallback с фактом провайдера (`posted_inline_finding_ids`); при прочих случаях
   `run_lifecycle_store.complete_publication` связывает comments по порядку и равному
   количеству — нужен явный mapping подтверждённых remote объектов.
-- GitLab-адаптер (#171) заполняет `position` по §9.5 из DiffMap, сверяет head перед
-  каждым POST, классифицирует 400/422 с position как coordinates. Ключи §10 /
+- GitLab publication на `main` — [#97](https://github.com/larchanka-training/dmc-268-api-t6/issues/97)
+  (`gitlab_review_publication.py`, SD §8.4). Целевой #171 заполняет `position` по §9.5 из DiffMap,
+  сверяет head перед каждым POST, классифицирует 400/422 с position как coordinates. Ключи §10 /
   отдельные receipts операций и LEFT — не реализованы.
 
 ## 11. Приёмочные сценарии и оценка качества
@@ -1886,7 +1888,7 @@ quality gates не объявляются достигнутыми без baseli
    final result, API/UI coverage и write-back. Новый pipeline включается только
    после полной реализации и приёмки всей цепочки по §11. Первые отдельные PR
    не дают права заявить соответствие полному pipeline.
-4. Сквозные LEFT и GitLab внедряются отдельными задачами.
+4. Сквозные LEFT и полный GitLab ingress — отдельные задачи; публикация discussions #97 уже на `main`.
 
 Это порядок поставки компонентов, а не порядок обработки run: в runtime
 загрузка политики и применение ignore предшествуют контексту и любому LLM-вызову

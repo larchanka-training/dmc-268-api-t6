@@ -404,7 +404,8 @@ autocommit-соединении, [webhook_work_listener.py](../app/bootstrap/web
 Статусы из worker доходят до `/api/stream` через PostgreSQL: API слушает канал
 `run_updated` (`LISTEN` на отдельном autocommit-соединении,
 [run_update_listener.py](../app/bootstrap/run_update_listener.py)) и передаёт события в
-хаб, который хранит для медленного подписчика последний статус каждого Run.
+хаб, который для медленного подписчика буферизует последний статус каждого Run и каждый
+`run.step`, пока клиент не успевает читать SSE (см. `test_slow_subscriber_keeps_the_latest_status_and_every_step`).
 
 Хаб ничего не хранит после отключения клиента, поэтому события `/api/stream` несут `id:`, а
 переподключение с `Last-Event-ID` повторяет пропущенное (ui#74, AC 2.16). `id` — это

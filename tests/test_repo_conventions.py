@@ -803,6 +803,7 @@ def test_sqlalchemy_store_returns_cached_conventions_for_repeated_same_key(
                         rule_version_id=rule_version_id,
                         prompt_version_id=system_prompt.id,
                         available_at=now,
+                        attempt=1,
                     ),
                     Run(
                         id=SECOND_RUN_ID,
@@ -816,6 +817,7 @@ def test_sqlalchemy_store_returns_cached_conventions_for_repeated_same_key(
                         rule_version_id=rule_version_id,
                         prompt_version_id=system_prompt.id,
                         available_at=now,
+                        attempt=1,
                     ),
                 )
                 session.add(workspace)
@@ -883,12 +885,13 @@ class FakeSqlAlchemySession:
     def __init__(self) -> None:
         self.rows: list[object] = []
         self.flushes = 0
+        self._scalar_values = iter((1, -1))
 
     async def execute(self, statement: object) -> EmptyResult:
         return EmptyResult()
 
     async def scalar(self, statement: object) -> int:
-        return -1
+        return next(self._scalar_values, -1)
 
     def add(self, row: object) -> None:
         self.rows.append(row)

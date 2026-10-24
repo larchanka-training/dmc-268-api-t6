@@ -110,7 +110,9 @@ to_body(f): move f to body_only; f.suggestion is not published
 ## Hand-off to publishing
 
 The backend renders `body_only` findings and the model's `summary` into the single review
-body, in the order the cap step produced, and truncates the body to 4000 characters. Inline
+body, in the order the cap step produced, packing whole bullets and checked-file lines within
+a 4000-character Unicode budget (overflow body-only items become an «Ещё N находок» footer at
+store time when `PORTAL_URL` is set). Inline
 findings become one review comment each, anchored at `line` (and `start_line` when set) on
 the new version of the file. A finding in `dropped` is stored with its `drop_reason` and
 never published. When step 3 dropped N > 0 findings, the overview at the top of the body

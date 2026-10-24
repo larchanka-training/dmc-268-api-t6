@@ -50,9 +50,7 @@ async def allow_run_steps(factory: async_sessionmaker[AsyncSession], run_id: UUI
     """``insert_run_action`` requires ``runs.attempt >= 1`` (D-4)."""
     async with factory() as session, session.begin():
         await session.execute(
-            text(
-                "UPDATE runs SET attempt = GREATEST(attempt, 1), state = 'running' WHERE id = :id"
-            ),
+            text("UPDATE runs SET attempt = GREATEST(attempt, 1) WHERE id = :id"),
             {"id": run_id},
         )
 

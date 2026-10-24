@@ -251,12 +251,12 @@ Task 8 waits for 3 and 7 and lands in the same branch, not a follow-up PR.
 
 ### Phase 1: Overview body
 
-- [ ] Task 1: Render verdict, checked paths, and severity counts in the review body
+- [x] Task 1: Render verdict, checked paths, and severity counts in the review body
 
 ### Phase 2: GitLab publication
 
-- [ ] Task 2: Post GitLab MR discussions idempotently by findings hash
-- [ ] Task 3: Dispatch the publish consumer for a GitLab run
+- [x] Task 2: Post GitLab MR discussions idempotently by findings hash
+- [x] Task 3: Dispatch the publish consumer for a GitLab run
 
 ### Checkpoint: Publication
 
@@ -267,9 +267,9 @@ Task 8 waits for 3 and 7 and lands in the same branch, not a follow-up PR.
 ### Phase 3: Step stream
 
 - [x] Task 4: Add the `run.step` OpenAPI event
-- [ ] Task 5: Deliver `run.step` on the stream without coalescing
-- [ ] Task 6: Notify `run_step` when a traced action commits
-- [ ] Task 7: Notify `run_step` from the other action inserts
+- [x] Task 5: Deliver `run.step` on the stream without coalescing
+- [x] Task 6: Notify `run_step` when a traced action commits
+- [x] Task 7: Notify `run_step` from the other action inserts
 
 ### Checkpoint: Step stream
 
