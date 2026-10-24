@@ -96,7 +96,8 @@ issue is blocked by X"; the parent may be one of them). A ref is `#N` (the spec'
 `OWNER/REPO#N`, so a blocker may live in the other team repo. The script sets them after
 the create and reads each back (`hosts.md`). An issue that _this_ one blocks has no key:
 after the create, set that edge from the other side with
-`issue-link.sh OWNER/REPO#<other> --blocked-by <this>`. The body still says _why_ each one
+`issue-link.sh OWNER/REPO#<other> --blocked-by <this>`, `<this>` as its full `OWNER/REPO#N`
+(a short `#N` resolves against `<other>`'s repo). The body still says _why_ each one
 matters, under a label naming the same direction as the edge ("Blocked by" / «Блокирующие»
 for `blocked_by`, "Blocks" / «Блокирует» for the reverse) — the link is what makes it
 visible on the other issue. "Related, not blocking" has no native link on GitHub and stays

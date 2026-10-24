@@ -912,6 +912,27 @@ def test_create_failed_and_nothing_landed_is_an_error_not_a_retry(tmp_path: Path
 
 
 @pytest.mark.parametrize(
+    "err,code",
+    [
+        ("gh: Bad credentials (HTTP 401)", 3),
+        ("gh: Resource not accessible by integration (HTTP 403)", 3),
+        # a (secondary) rate limit is transient, not a refusal
+        ("gh: API rate limit exceeded for user ID 1. (HTTP 403)", 5),
+        ("gh: You have exceeded a secondary rate limit. (HTTP 403)", 5),
+        ("gh: You have triggered an abuse detection mechanism. (HTTP 403)", 5),
+    ],
+)
+def test_a_failed_create_that_did_not_land_is_classified_and_not_retried(
+    tmp_path: Path, err: str, code: int
+) -> None:
+    r = run(tmp_path, create='{"url": ""}', extra={"issue_create.err": err})
+    assert r.returncode == code
+    assert err in json.loads(r.stderr)["error"]
+    assert fixture_calls(tmp_path).count("issue_create") == 1
+    assert not board_was_called(tmp_path)
+
+
+@pytest.mark.parametrize(
     "fixtures",
     [
         {"recover": None},
@@ -1551,6 +1572,11 @@ def test_a_real_link_failure_is_exit_7_with_the_repair_command(tmp_path: Path) -
     "create_err,code",
     [
         ("HTTP 401: Bad credentials", 3),
+        ("HTTP 403: Resource not accessible by integration", 3),
+        # a (secondary) rate limit is transient, not a refusal
+        ("HTTP 403: API rate limit exceeded for user ID 1.", 5),
+        ("HTTP 403: You have exceeded a secondary rate limit.", 5),
+        ("HTTP 403: You have triggered an abuse detection mechanism.", 5),
         ("HTTP 502: Bad Gateway", 5),
         ("Unprocessable Entity: validation failed", 4),
     ],
