@@ -631,7 +631,7 @@ def test_a_rerun_adopts_an_open_duplicate_you_opened_since_the_batch_started(
         "board": "unchecked",
         "links": ensured,
     }
-    assert "already exists" in r.stderr, "the guard's message is passed on"
+    assert "already exists" not in r.stderr, "the guard's exit-4 error is not passed on"
 
 
 @pytest.mark.parametrize(
@@ -862,6 +862,109 @@ def test_an_adopted_item_whose_link_step_cannot_run_stops_the_batch(
         in error(r)
     )
     assert [i["key"] for i in out(r)["items"]] == ["a"]
+
+
+# ─── stderr: an adoption is one note, any other outcome passes through as is ─
+ADOPTED = "adopted {url} — exact title, opened by you during this batch"
+
+
+def stderr_lines(r: subprocess.CompletedProcess[str]) -> list[Any]:
+    """stderr as JSON lines, after the scripts-dir seam's warning (the first line)."""
+    return [json.loads(line) for line in r.stderr.splitlines()[1:]]
+
+
+def test_an_adopted_item_says_so_in_one_note_instead_of_the_guards_error(
+    tmp_path: Path,
+) -> None:
+    """The guard's exit-4 error is how an adoption arrives, not a failure: a reader of
+    stderr must not take a batch that succeeded for one that failed."""
+    seed(tmp_path, {"a": entry(API, 1, "a")})
+    cfg = cfg_create(b={"code": 4, "duplicate": {"number": 55}})
+    r, _ = run(tmp_path, batch(item("a"), item("b", parent="@a")), cfg=cfg)
+    assert r.returncode == 0, r.stderr
+    note = ADOPTED.format(url="https://github.com/acme/api/issues/55")
+    assert stderr_lines(r) == [{"note": note}]
+
+
+def test_a_duplicate_that_is_not_adopted_passes_the_guards_error_on_unchanged(
+    tmp_path: Path,
+) -> None:
+    seed(tmp_path, {})
+    dup = {"number": 55, "state": "CLOSED"}
+    r, _ = run(tmp_path, batch(item("a")), cfg=cfg_create(a={"code": 4, "duplicate": dup}))
+    assert r.returncode == 4
+    guard, stop = stderr_lines(r)
+    assert guard == {
+        "error": "an issue with exactly this title already exists in acme/api: "
+        "https://github.com/acme/api/issues/55"
+    }
+    assert stop["error"].startswith('item "a" stopped the batch: ')
+
+
+def test_a_created_items_stderr_passes_through_byte_for_byte(tmp_path: Path) -> None:
+    """Warnings and repair commands of an item that is not adopted reach the user as the
+    script wrote them, JSON or not."""
+    said = '{"warning": "the duplicate search failed"}\nrepair: not JSON — as written\n'
+    url = "https://github.com/acme/api/issues/9"
+    created = json.dumps({"url": url, "number": 9, "repo": API, "verified": True, "board": "added"})
+    own_create_stub(tmp_path, f"printf '%s' '{said}' >&2; echo '{created}'")
+    r, _ = run(tmp_path, batch(item("a")))
+    assert r.returncode == 0, r.stderr
+    assert out(r)["items"][0]["created"] is True
+    assert r.stderr.split("\n", 1)[1] == said
+
+
+def test_the_real_guards_error_on_an_adoption_becomes_the_note(tmp_path: Path) -> None:
+    """The live run's case end to end, every call answered by the ISSUE_FIXTURE_DIR seam:
+    a lost record, so the real issue-create.sh finds the issue (--adopt-since) and exits 4
+    with "… not created again"; the batch succeeds, so stderr is the note alone."""
+    url = "https://github.com/acme/api/issues/7"
+    row = {
+        "number": 7,
+        "title": "[x] a",
+        "html_url": url,
+        "state": "open",
+        "user": {"login": "octocat"},
+        "created_at": "2026-10-24T12:05:00Z",
+    }
+    fix = tmp_path / "fix"
+    fix.mkdir()
+    for name, val in {
+        "reach.code": "0",
+        "reach.http": "200",
+        "auth_user.code": "0",
+        "auth_user.json": '{"login": "octocat"}',
+        "repo_perms.json": "true",
+        "issue_search.json": "[]",
+        "issue_recover_before.json": json.dumps([row]),
+    }.items():
+        (fix / name).write_text(val)
+    bin_dir = tmp_path / "bin"  # a gh that only logs: nothing may go live
+    bin_dir.mkdir()
+    (bin_dir / "gh").write_text(f"#!/bin/sh\necho \"$*\" >> '{tmp_path / 'gh.log'}'\nexit 99\n")
+    (bin_dir / "gh").chmod(0o755)
+    seed(tmp_path, {})
+    path = tmp_path / "batch.json"
+    path.write_text(json.dumps(batch(item("a"))), encoding="utf-8")
+    r = subprocess.run(
+        [sys.executable, str(SCRIPT), str(path), "--no-board"],
+        capture_output=True,
+        text=True,
+        env={
+            "PATH": f"{bin_dir}:/usr/bin:/bin",
+            "HOME": str(tmp_path / "home"),
+            "XDG_CACHE_HOME": str(tmp_path / "cache"),
+            "ISSUE_FIXTURE_DIR": str(fix),
+        },
+        timeout=120,
+        check=False,
+    )
+    assert r.returncode == 0, r.stderr
+    assert r.stderr == json.dumps({"note": ADOPTED.format(url=url)}, ensure_ascii=False) + "\n"
+    assert out(r)["items"][0]["adopted"] is True
+    log = fix / "calls.log"
+    assert "issue_create" not in (log.read_text() if log.exists() else "")
+    assert not (tmp_path / "gh.log").exists()
 
 
 # ─── the preview of duplicates ──────────────────────────────────────────────
