@@ -2,10 +2,12 @@
 # SYNC: mirrored in dmc-268-{ui,api}-t6/.agents/skills/create-issue/scripts/issue-create.sh
 #
 # issue-create.sh — create exactly one GitHub issue from a spec, idempotently,
-# and put it on the course board.
+# put it on the course board with its Status, and set its native links.
 #
-# The sequence is dup-search → create once → read the issue back → board. It is
-# written out as a sequence because the failure it guards against is specific and
+# The sequence is validation → dup-search → create once → read the issue back →
+# board and Status → links (issue-link.sh). Validation refuses, before anything exists, a milestone that is not open
+# in the repo, a board Status that is not an option and a link target that is
+# missing or a pull request. The rest is written out as a sequence because the failure it guards against is specific and
 # has happened: the create call returns nothing useful, the caller assumes
 # failure, retries, and the server ends up with two issues — because the first
 # call had in fact succeeded. So a create is never retried blind; a create that
@@ -14,29 +16,42 @@
 # user counts as "it landed".
 #
 # Usage: issue-create.sh <spec.json> [--dry-run] [--allow-duplicate] [--no-board]
-# Output: {"url","number","repo","verified","board"} on stdout; board is
-#         added | skipped | failed. --dry-run: {"dry_run","repo","body"} — it
-#         still runs preflight, so it needs network and auth; it is not offline.
+# Output: {"url","number","repo","verified","board","status"[,"links"]} on
+#         stdout; board is added | skipped | failed, status the board Status read
+#         back (null when skipped), links issue-link.sh's result (only when the
+#         spec asks for links); verified also checks the milestone when one is set. --dry-run: {"dry_run","repo","body","milestone","status","links"}
+#         — it still runs preflight and validation, so it needs network and auth;
+#         it is not offline.
 # Errors: {"error": "..."} on stderr (also {"warning": "..."}, exit unaffected).
 #         stdout stays machine-readable.
 # Exit: 0 created — check "verified", it can be false · 2 usage/spec/refused ·
 #       3 auth · 4 4xx or duplicate blocked · 5 5xx/network, or a failed create
 #       whose outcome could not be checked · 6 issue CREATED but the board step
-#       failed — never re-run the create, only `gh project item-add` (stdout has
-#       the url)
+#       (item-add or Status) failed — never re-run the create, only the gh command
+#       in the message (stdout has the url) · 7 issue CREATED but a native link
+#       failed — never re-run the create, only the issue-link.sh command in the
+#       message; 7 wins over 6 when both fail, and stdout carries both
+# Env: ISSUE_STATUS_RETRY_DELAY (seconds, default 3) — the pause before the one
+#       re-edit of a Status the board's automation overwrote.
 #
 # Offline test seam: ISSUE_FIXTURE_DIR (see issue-preflight.sh). Additionally
 # issue_search.json (duplicate guard), issue_recover_before.json and
 # issue_recover.json (newest issues before / after a failed create),
-# issue_create.json, issue_view.json and project_add.{code,err} stand in for the
-# CLI calls; a missing file is a failed call. project_add.called appears when the
-# board step ran.
+# milestones.json, project_view.json, project_fields.json (validation; a missing
+# file is a failed call whose stderr is <name>.err), issue_create.json,
+# issue_view.json, project_add.{code,err,json}, project_edit.{code,err} and
+# project_status.json / project_status.retry.json (the Status read after the edit
+# and after the retry) stand in for the CLI calls; a missing file is a failed
+# call. project_add.called appears when the board step ran; the validation calls,
+# the create and the board calls are logged to calls.log. Links and their targets
+# are read by issue-link.sh from its own REST-path files (see there).
 
 set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PREFLIGHT="$HERE/issue-preflight.sh"
 BUILDER="$HERE/build_issue_body.py"
+LINKER="$HERE/issue-link.sh"
 
 # The course board: larchanka-training/projects/12 (dmc-268-t6).
 BOARD_OWNER="larchanka-training"
@@ -45,6 +60,7 @@ BOARD_NUMBER="12"
 json_str() { printf '%s' "$1" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))'; }
 die() { printf '{"error": %s}\n' "$(json_str "$1")" >&2; exit "${2:-2}"; }
 warn() { printf '{"warning": %s}\n' "$(json_str "$1")" >&2; }
+lower() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
 
 SPEC=""; DRY=false; ALLOW_DUP=false; NO_BOARD=false
 while [ $# -gt 0 ]; do
@@ -52,7 +68,7 @@ while [ $# -gt 0 ]; do
     --dry-run)         DRY=true; shift ;;
     --allow-duplicate) ALLOW_DUP=true; shift ;;
     --no-board)        NO_BOARD=true; shift ;;
-    -h|--help)         sed -n '4,33p' "$0"; exit 0 ;;
+    -h|--help)         sed -n '4,47p' "$0"; exit 0 ;;
     -*)                die "unknown argument: $1" 2 ;;
     *)                 SPEC="$1"; shift ;;
   esac
@@ -77,11 +93,23 @@ ARGS_JSON="$(python3 "$BUILDER" "$SPEC" --emit-args)" \
 ARGV_TXT="$(printf '%s' "$ARGS_JSON" | python3 -c 'import json,sys; [print(a) for a in json.load(sys.stdin)]')" \
   || die "cannot read the argument vector" 2
 mapfile -t ARGV <<< "$ARGV_TXT"
+# Native links, as issue-link.sh arguments ("--parent" / "--blocked-by" then the
+# resolved OWNER/REPO#N — never a bare "#N", which a shell reads as a comment).
+LINKS_JSON="$(python3 "$BUILDER" "$SPEC" --emit-links)" \
+  || die "build_issue_body.py could not resolve the links (see stderr above)" 2
+LINK_TXT="$(printf '%s' "$LINKS_JSON" | python3 -c 'import json,sys
+for link in json.load(sys.stdin):
+    print("--parent" if link["kind"] == "parent" else "--blocked-by")
+    print(link["repo"] + "#" + str(link["number"]))')" || die "cannot read the link list" 2
+LINK_ARGS=()
+[ -z "$LINK_TXT" ] || mapfile -t LINK_ARGS <<< "$LINK_TXT"
 
 read_spec() { python3 -c 'import json,sys; s=json.load(open(sys.argv[1])); print(s.get(sys.argv[2]) or "")' "$SPEC" "$1"; }
 REPO="$(read_spec repo)"
 SUMMARY="$(read_spec summary)"
 [ -n "$REPO" ] && [ -n "$SUMMARY" ] || die "spec must carry repo and summary" 2
+MILESTONE="$(read_spec milestone)"
+STATUS="$(read_spec status)"
 
 # ─── attribution guard ──────────────────────────────────────────────────────
 # Refuses to post what carries a sign of assistant authorship — in the body, the
@@ -107,12 +135,132 @@ PRE="$("$PREFLIGHT" --repo "$REPO" 2>&1)"; PRC=$?
 # Who is filing: recovery only adopts an issue this account opened.
 ME="$(printf '%s' "$PRE" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("user", ""))' 2>/dev/null)"
 
-if [ "$DRY" = true ]; then
-  python3 - "$REPO" "$BODY" <<'PY'
+# ─── validation ─────────────────────────────────────────────────────────────
+# Everything that can be refused is refused here, while nothing exists — in
+# --dry-run too: a milestone that is not open in the repo, a board Status that is
+# not an option, a link target that is missing or is a pull request.
+fixture() {  # fixture NAME — offline stand-in: FIX/NAME.json, or a failed call (stderr: NAME.err)
+  printf '%s\n' "$1" >> "$FIX/calls.log"
+  if [ ! -f "$FIX/$1.json" ]; then
+    cat "$FIX/$1.err" > "$WORK/err" 2>/dev/null
+    return 1
+  fi
+  cat "$FIX/$1.json"
+}
+errtext() { head -c 300 "$WORK/err" 2>/dev/null | tr '\n' ' ' | sed 's/ *$//'; }
+# The exit class of a failed call, from the HTTP status gh reports — not from any
+# three digits in the text, which can be an issue number.
+fail_code() {
+  local status
+  status="$(grep -Eo 'HTTP [0-9]{3}' "$WORK/err" 2>/dev/null | head -1)"
+  case "${status#HTTP }" in
+    404)     echo 2 ;;
+    401|403) echo 3 ;;
+    *)
+      case "$(lower "$(cat "$WORK/err" 2>/dev/null)")" in
+        *authentication*|*unauthorized*|*"bad credentials"*) echo 3 ;;
+        *) echo 5 ;;  # 5xx, timeout, connection refused, or anything unrecognised
+      esac ;;
+  esac
+}
+
+if [ -n "$STATUS" ] && [ "$NO_BOARD" = true ]; then
+  die "the spec sets \"status\" but --no-board skips the board — drop one of the two" 2
+fi
+[ "$NO_BOARD" = true ] || STATUS="${STATUS:-Todo}"
+
+# Milestones are per repository and never created here: "Sprint 3" in ui and in
+# api are two objects that share a title.
+if [ -n "$MILESTONE" ]; then
+  if [ -n "$FIX" ]; then
+    MS="$(fixture milestones)"
+  else
+    MS="$(gh api "repos/$REPO/milestones?state=open&per_page=100" 2>"$WORK/err")"
+  fi || die "cannot list the milestones of $REPO: $(errtext)" "$(fail_code)"
+  MSG="$(printf '%s' "$MS" | python3 -c 'import json,sys
+want, repo = sys.argv[1:3]
+try: rows = json.load(sys.stdin)
+except Exception: rows = None
+if not isinstance(rows, list): sys.exit(2)
+titles = [r["title"] for r in rows if isinstance(r, dict) and isinstance(r.get("title"), str)]
+if want in titles: sys.exit(0)
+print("milestone \"%s\" not found in %s (open: %s)" % (want, repo, ", ".join(titles) or "none"))
+sys.exit(1)' "$MILESTONE" "$REPO")"
+  case $? in
+    0) ;;
+    1) die "$MSG" 2 ;;
+    *) die "cannot list the milestones of $REPO: the response is not a list" 5 ;;
+  esac
+fi
+
+# The board Status: project, field and option ids are looked up by name — never
+# hard-coded — once, before the create.
+board_unreadable() {
+  case "$(lower "$(cat "$WORK/err" 2>/dev/null)")" in
+    *scope*) die "cannot read board $BOARD_NUMBER to set Status: the token lacks the project scope — run gh auth refresh -s project, or pass --no-board" 3 ;;
+  esac
+  die "cannot read board $BOARD_NUMBER to set Status: ${1:-$(errtext)}" "$(fail_code)"
+}
+if [ "$NO_BOARD" != true ]; then
+  if [ -n "$FIX" ]; then
+    fixture project_view > "$WORK/project.json"
+  else
+    gh project view "$BOARD_NUMBER" --owner "$BOARD_OWNER" --format json \
+      > "$WORK/project.json" 2>"$WORK/err"
+  fi || board_unreadable
+  if [ -n "$FIX" ]; then
+    fixture project_fields > "$WORK/fields.json"
+  else
+    # field-list returns 30 fields unless told otherwise
+    gh project field-list "$BOARD_NUMBER" --owner "$BOARD_OWNER" --format json --limit 100 \
+      > "$WORK/fields.json" 2>"$WORK/err"
+  fi || board_unreadable
+  IDS="$(python3 - "$STATUS" "$BOARD_NUMBER" "$WORK/project.json" "$WORK/fields.json" <<'PY'
 import json, sys
-repo, body = sys.argv[1:3]
+want, board, project_path, fields_path = sys.argv[1:5]
+try:
+    with open(project_path, encoding="utf-8") as fh:
+        project_id = json.load(fh)["id"]
+    with open(fields_path, encoding="utf-8") as fh:
+        fields = json.load(fh)["fields"]
+    status = next((f for f in fields if isinstance(f, dict) and f.get("name") == "Status"), None)
+except Exception:
+    sys.exit(3)
+options = status.get("options") if status else None
+if not isinstance(options, list):
+    print(f"board {board} has no single-select Status field")
+    sys.exit(1)
+names = [str(o.get("name")) for o in options if isinstance(o, dict)]
+hit = next((o for o in options if isinstance(o, dict) and o.get("name") == want), None)
+if hit is None:
+    print(f'status "{want}" is not an option of Status on board {board} '
+          f'(options: {", ".join(names)})')
+    sys.exit(1)
+print(project_id, status["id"], hit["id"])
+PY
+)"
+  case $? in
+    0) read -r PROJECT_ID FIELD_ID OPTION_ID <<< "$IDS" ;;
+    1) die "$IDS" 2 ;;
+    *) board_unreadable "the response is not a project or a field list" ;;
+  esac
+fi
+
+# Link targets: they exist, are issues, a parent shares the owner — the lookups
+# issue-link.sh makes before it links, made now so a bad target stops the run.
+if [ ${#LINK_ARGS[@]} -gt 0 ]; then
+  CHECK="$("$LINKER" "$REPO" --check "${LINK_ARGS[@]}" 2>&1 >/dev/null)"; CHRC=$?
+  [ $CHRC -eq 0 ] || { printf '%s\n' "$CHECK" >&2; exit $CHRC; }
+fi
+
+if [ "$DRY" = true ]; then
+  python3 - "$REPO" "$BODY" "$MILESTONE" "$STATUS" "$LINKS_JSON" <<'PY'
+import json, sys
+repo, body, milestone, status, links = sys.argv[1:6]
 print(json.dumps({"dry_run": True, "repo": repo,
-                  "body": open(body, encoding="utf-8").read()}, ensure_ascii=False))
+                  "body": open(body, encoding="utf-8").read(),
+                  "milestone": milestone or None, "status": status or None,
+                  "links": json.loads(links)}, ensure_ascii=False))
 PY
   exit 0
 fi
@@ -160,6 +308,7 @@ BEFORE_OK=false
 recent_issues issue_recover_before.json > "$WORK/before.json" && BEFORE_OK=true
 
 if [ -n "$FIX" ]; then
+  printf 'issue_create\n' >> "$FIX/calls.log"
   OUT="$(cat "$FIX/issue_create.json" 2>/dev/null)"; CRC=$?
   URL="$(printf '%s' "$OUT" | python3 -c 'import json,sys
 try: print(json.load(sys.stdin).get("url",""))
@@ -243,41 +392,124 @@ if [ -n "$FIX" ]; then
 else
   VIEW="$(gh api "repos/$REPO/issues/$NUMBER" 2>/dev/null || echo '{}')"
 fi
+# With a milestone in the spec, the issue read back must carry that milestone too.
 VERIFIED="$(printf '%s' "$VIEW" | python3 -c 'import json,sys
-want=sys.argv[1]
-try: got=json.load(sys.stdin).get("title") or ""
-except Exception: got=""
-print("true" if got.strip() == want.strip() else "false")' "$SUMMARY")"
+want, milestone = sys.argv[1:3]
+try: got = json.load(sys.stdin)
+except Exception: got = {}
+if not isinstance(got, dict): got = {}
+ms = got.get("milestone")
+ok = (got.get("title") or "").strip() == want.strip() and (
+    not milestone or (isinstance(ms, dict) and ms.get("title") == milestone))
+print("true" if ok else "false")' "$SUMMARY" "$MILESTONE")"
 
-# ─── 5. board ───────────────────────────────────────────────────────────────
-# After the create, so a missing token scope can never lose the issue: the issue
-# exists, the url is on stdout, and the exit code (6) says only the board is
-# left to do.
-BOARD=skipped; BERR=""; BRC=0
+# ─── 5. board and Status ────────────────────────────────────────────────────
+# After the create, so a failure here can never lose the issue: it exists, the
+# url is on stdout, and exit 6 says only the board is left to do. The board's
+# "Item added to project" automation can set Todo after our edit has landed, so
+# the Status is read back, and set once more after a pause if it differs.
+# shellcheck disable=SC2016  # $id is a GraphQL variable, not a shell one
+STATUS_QUERY='query($id: ID!) { node(id: $id) { ... on ProjectV2Item { fieldValueByName(name: "Status") { ... on ProjectV2ItemFieldSingleSelectValue { name } } } } }'
+set_status() {  # set_status [retry] — one edit, then the read-back into STATUS_GOT
+  if [ -n "$FIX" ]; then
+    printf 'project_edit\n' >> "$FIX/calls.log"
+    EERR="$(cat "$FIX/project_edit.err" 2>/dev/null)"
+    READ="$(fixture "project_status${1:+.$1}")"
+  else
+    EERR="$(gh project item-edit --id "$ITEM" --project-id "$PROJECT_ID" --field-id "$FIELD_ID" \
+              --single-select-option-id "$OPTION_ID" 2>&1 >/dev/null)"
+    READ="$(gh api graphql -f query="$STATUS_QUERY" -f id="$ITEM" 2>"$WORK/err")"
+  fi
+  STATUS_GOT="$(printf '%s' "$READ" | python3 -c 'import json,sys
+try: print(json.load(sys.stdin)["data"]["node"]["fieldValueByName"]["name"] or "")
+except Exception: print("")')"
+}
+BOARD=skipped; BMSG=""; STATUS_GOT=""
 if [ "$NO_BOARD" != true ]; then
   if [ -n "$FIX" ]; then
     : > "$FIX/project_add.called"
+    printf 'project_add\n' >> "$FIX/calls.log"
     BRC="$(cat "$FIX/project_add.code" 2>/dev/null || echo 0)"
     BERR="$(cat "$FIX/project_add.err" 2>/dev/null)"
+    ADDED="$(cat "$FIX/project_add.json" 2>/dev/null)"
   else
-    BERR="$(gh project item-add "$BOARD_NUMBER" --owner "$BOARD_OWNER" --url "$URL" 2>&1 >/dev/null)"; BRC=$?
+    ADDED="$(gh project item-add "$BOARD_NUMBER" --owner "$BOARD_OWNER" --url "$URL" --format json 2>"$WORK/err")"; BRC=$?
+    BERR="$(cat "$WORK/err" 2>/dev/null)"
   fi
-  if [ "$BRC" -eq 0 ]; then BOARD=added; else BOARD=failed; fi
+  ITEM="$(printf '%s' "$ADDED" | python3 -c 'import json,sys
+try: print(json.load(sys.stdin)["id"])
+except Exception: pass')"
+  if [ "$BRC" -ne 0 ] || [ -z "$ITEM" ]; then
+    BOARD=failed
+    case "$(lower "$BERR")" in
+      *scope*) MSG="run gh auth refresh -s project" ;;
+      *)       MSG="$(printf '%s' "$BERR" | head -3)" ;;
+    esac
+    [ "$BRC" -ne 0 ] || MSG="item-add returned no item id"
+    BMSG="issue created ($URL) but not added to board $BOARD_NUMBER — ${MSG:-gh gave no error text}. Do not re-run the create; retry only: gh project item-add $BOARD_NUMBER --owner $BOARD_OWNER --url $URL"
+  else
+    set_status
+    if [ "$STATUS_GOT" != "$STATUS" ]; then
+      sleep "${ISSUE_STATUS_RETRY_DELAY:-3}" 2>/dev/null
+      set_status retry
+    fi
+    if [ "$STATUS_GOT" = "$STATUS" ]; then
+      BOARD=added
+    else
+      BOARD=failed
+      BMSG="issue created ($URL) and added to board $BOARD_NUMBER, but its Status reads back as \"$STATUS_GOT\", not \"$STATUS\"${EERR:+ (item-edit: $(printf '%s' "$EERR" | head -3))}. Do not re-run the create; set it on the board, or retry only: gh project item-edit --id $ITEM --project-id $PROJECT_ID --field-id $FIELD_ID --single-select-option-id $OPTION_ID"
+    fi
+  fi
 fi
 
-python3 - "$URL" "$NUMBER" "$REPO" "$VERIFIED" "$BOARD" <<'PY'
+# ─── 6. native links ────────────────────────────────────────────────────────
+# Only now: there is nothing to link until the issue exists. A failed link never
+# undoes the issue — exit 7 names the issue-link.sh command that repairs it, and
+# a rerun of that command leaves the links already in place alone.
+LINKS_OUT=""; LRC=0
+if [ ${#LINK_ARGS[@]} -gt 0 ]; then
+  LINKS_OUT="$("$LINKER" "$REPO#$NUMBER" "${LINK_ARGS[@]}" 2>"$WORK/link_err")"; LRC=$?
+fi
+
+python3 - "$URL" "$NUMBER" "$REPO" "$VERIFIED" "$BOARD" "$STATUS_GOT" "$LINKS_JSON" \
+          "$LINKS_OUT" "$WORK/link_err" <<'PY'
 import json, sys
-url, num, repo, verified, board = sys.argv[1:6]
-print(json.dumps({"url": url, "number": int(num) if num else None,
-                  "repo": repo, "verified": verified == "true",
-                  "board": board}, ensure_ascii=False))
+url, num, repo, verified, board, status, plan, linked, err_path = sys.argv[1:10]
+out = {"url": url, "number": int(num) if num else None,
+       "repo": repo, "verified": verified == "true",
+       "board": board, "status": status or None}
+plan = json.loads(plan)
+if plan:
+    try:
+        out["links"] = json.loads(linked)["links"]
+    except Exception:
+        # issue-link.sh stopped before linking (a lookup failed after the create):
+        # every link is reported as not in place, with its error — never dropped.
+        try:
+            with open(err_path, encoding="utf-8") as fh:
+                error = json.loads(fh.read().strip().splitlines()[-1])["error"]
+        except Exception:
+            error = "issue-link.sh gave no result"
+        row = lambda link: {"ref": f'{link["repo"]}#{link["number"]}', "ok": False,
+                            "action": None, "error": error}
+        out["links"] = {
+            "parent": next((row(l) for l in plan if l["kind"] == "parent"), None),
+            "blocked_by": [row(l) for l in plan if l["kind"] == "blocked_by"],
+        }
+print(json.dumps(out, ensure_ascii=False))
 PY
 
-if [ "$BOARD" = failed ]; then
-  case "$(printf '%s' "$BERR" | tr '[:upper:]' '[:lower:]')" in
-    *scope*) MSG="run gh auth refresh -s project" ;;
-    *)       MSG="$(printf '%s' "$BERR" | head -3)" ;;
-  esac
-  MSG="${MSG:-gh gave no error text}"
-  die "issue created ($URL) but not added to board $BOARD_NUMBER — $MSG. Do not re-run the create; retry only: gh project item-add $BOARD_NUMBER --owner $BOARD_OWNER --url $URL" 6
+if [ "$LRC" -ne 0 ]; then
+  FAILED="$(printf '%s' "$LINKS_OUT" | python3 -c 'import json,sys
+try:
+    links = json.load(sys.stdin)["links"]
+    print(sum(not x["ok"] for x in [links["parent"], *links["blocked_by"]] if x))
+except Exception:
+    print(sys.argv[1])' "$(( ${#LINK_ARGS[@]} / 2 ))")"
+  if [ "$VERIFIED" = true ]; then WHAT="created and verified $URL"
+  else WHAT="created $URL (the read-back did not match — look at it)"; fi
+  # Both failed: the board message first, then exit 7 — stdout carries both results.
+  [ "$BOARD" != failed ] || printf '{"error": %s}\n' "$(json_str "$BMSG")" >&2
+  die "$WHAT, but $FAILED native link(s) failed — the issue stays, do not re-create it; repair: $LINKER $REPO#$NUMBER ${LINK_ARGS[*]}" 7
 fi
+[ "$BOARD" != failed ] || die "$BMSG" 6

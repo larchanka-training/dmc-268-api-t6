@@ -17,6 +17,9 @@ The groups that carry weight:
   issue that was already there must never be mistaken for the one just created;
 * the board step, which runs after the create and must never lose the issue:
   a missing token scope ends in exit 6 with the url still on stdout;
+* validation before the create (milestone, board Status, link targets — nothing
+  is created when one is wrong) and the board Status and native links after it,
+  whose failures keep the issue: exit 6 / 7 with the exact repair command;
 * the regression sample — the spec reconstructed from issue
   larchanka-training/dmc-268-api-t6#46 must reproduce that issue's body byte for
   byte (tests/golden/issue-46.md).
@@ -280,6 +283,26 @@ SPEC_46: dict[str, Any] = {
 }
 
 
+# Board 12 as `gh project view` / `gh project field-list --format json` describe it.
+PROJECT_VIEW = json.dumps({"id": "PVT_board12", "number": 12, "title": "dmc-268-t6"})
+STATUS_FIELD: dict[str, Any] = {
+    "id": "PVTSSF_status",
+    "name": "Status",
+    "type": "ProjectV2SingleSelectField",
+    "options": [
+        {"id": "opt_todo", "name": "Todo"},
+        {"id": "opt_progress", "name": "In Progress"},
+        {"id": "opt_done", "name": "Done"},
+    ],
+}
+PROJECT_FIELDS = json.dumps(
+    {
+        "fields": [{"id": "PVTF_title", "name": "Title", "type": "ProjectV2Field"}, STATUS_FIELD],
+        "totalCount": 2,
+    }
+)
+
+
 def golden_body(name: str) -> str:
     """SYNC line, blank line, then the body: drop exactly two lines, no strip."""
     text = (GOLDEN / f"{name}.md").read_bytes().decode("utf-8")
@@ -299,17 +322,37 @@ def run(
     board_err: str = "",
     auth_code: str = "0",
     raw_spec: str | None = None,
+    milestones: str | None = None,
+    project_view: str | None = PROJECT_VIEW,
+    project_fields: str | None = PROJECT_FIELDS,
+    extra: dict[str, Any] | None = None,
+    item_add: str = '{"id": "PVTI_item"}',
+    status_reads: tuple[str | None, ...] | None = None,
+    edit_code: str = "0",
+    edit_err: str = "",
 ) -> subprocess.CompletedProcess[str]:
-    """`None` for search / recover_before / recover means the fixture file does not
-    exist, which the script treats as a failed call."""
+    """`None` for search / recover_before / recover / milestones / project_view /
+    project_fields means the fixture file does not exist, which the script treats as
+    a failed call. `extra` adds fixture files by relative path (issue-link.sh's
+    REST-path files, `<name>.err` texts); dicts and lists are written as JSON.
+    `status_reads` are the board Status names read back after the first edit and
+    after the retry; by default the first read shows the Status asked for."""
     spec = spec or BASE_SPEC
     fix = tmp_path / "fix"
-    fix.mkdir(exist_ok=True)
+    fix.mkdir(parents=True, exist_ok=True)
     optional = {
         "issue_search.json": search,
         "issue_recover_before.json": recover_before,
         "issue_recover.json": recover,
+        "milestones.json": milestones,
+        "project_view.json": project_view,
+        "project_fields.json": project_fields,
     }
+    reads = status_reads or (spec.get("status") or "Todo",)
+    for name, read in zip(
+        ("project_status.json", "project_status.retry.json"), reads, strict=False
+    ):
+        optional[name] = None if read is None else status_read(read)
     for name, val in optional.items():
         if val is not None:
             (fix / name).write_text(val)
@@ -326,9 +369,16 @@ def run(
         else json.dumps({"title": spec.get("summary", "")}),
         "project_add.code": board_code,
         "project_add.err": board_err,
+        "project_add.json": item_add,
+        "project_edit.code": edit_code,
+        "project_edit.err": edit_err,
     }
     for name, val in files.items():
         (fix / name).write_text(val)
+    for rel, content in (extra or {}).items():
+        path = fix / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content if isinstance(content, str) else json.dumps(content))
     spec_path = tmp_path / "spec.json"
     spec_path.write_text(raw_spec if raw_spec is not None else json.dumps(spec), encoding="utf-8")
     return subprocess.run(
@@ -339,9 +389,15 @@ def run(
             "PATH": "/usr/bin:/bin",
             "HOME": str(tmp_path),
             "ISSUE_FIXTURE_DIR": str(fix),
+            "ISSUE_STATUS_RETRY_DELAY": "0",
         },
         timeout=60,
     )
+
+
+def status_read(name: str) -> str:
+    """`gh api graphql` answering fieldValueByName(name: "Status") for the item."""
+    return json.dumps({"data": {"node": {"fieldValueByName": {"name": name}}}})
 
 
 def rest_issue(
@@ -371,6 +427,48 @@ def first_error(r: subprocess.CompletedProcess[str]) -> str:
 
 def board_was_called(tmp_path: Path) -> bool:
     return (tmp_path / "fix" / "project_add.called").exists()
+
+
+def fixture_calls(tmp_path: Path) -> list[str]:
+    """The stand-in calls the fixture seam logged, in order."""
+    log = tmp_path / "fix" / "calls.log"
+    return log.read_text(encoding="utf-8").splitlines() if log.exists() else []
+
+
+def gh_issue(ref: str, **extra: Any) -> dict[str, Any]:
+    """A REST issue object; the internal id (9_000_000 + N) never equals the number."""
+    repo, num = ref.split("#")
+    row: dict[str, Any] = {
+        "id": 9_000_000 + int(num),
+        "number": int(num),
+        "title": f"issue {num}",
+        "repository_url": f"https://api.github.com/repos/{repo}",
+        "parent_issue_url": None,
+    }
+    row.update(extra)
+    return row
+
+
+def issue_fixture(ref: str, **extra: Any) -> dict[str, Any]:
+    repo, num = ref.split("#")
+    return {f"repos/{repo}/issues/{num}.json": gh_issue(ref, **extra)}
+
+
+SCOPE_ERROR_TEXT = (
+    "error: your authentication token is missing required scopes [project]\n"
+    "To request it, run:  gh auth refresh -s project\n"
+)
+MILESTONES = json.dumps([{"number": 3, "title": "Sprint 3"}, {"number": 4, "title": "Sprint 4"}])
+# A spec using every new key: a same-repo parent, a cross-repo blocker, a milestone
+# and a non-default board Status.
+LINKED_SPEC: dict[str, Any] = dict(
+    BASE_SPEC,
+    parent="#5",
+    blocked_by=["other/lib#7"],
+    milestone="Sprint 3",
+    status="In Progress",
+)
+TARGETS = {**issue_fixture("acme/sandbox#5"), **issue_fixture("other/lib#7")}
 
 
 # ─── dry run ────────────────────────────────────────────────────────────────
@@ -439,6 +537,159 @@ def test_a_blank_label_or_assignee_is_refused_not_dropped(tmp_path: Path, field:
     r = run(tmp_path, dict(BASE_SPEC, **{field: ["fine", ""]}), "--dry-run")
     assert r.returncode == 2
     assert "blank" in first_error(r)
+
+
+# ─── validation: refused before the create, in --dry-run too ───────────────
+def test_dry_run_reports_milestone_status_and_the_resolved_links(tmp_path: Path) -> None:
+    r = run(tmp_path, LINKED_SPEC, "--dry-run", milestones=MILESTONES, extra=TARGETS)
+    assert r.returncode == 0, r.stderr
+    out = json.loads(r.stdout)
+    assert out["milestone"] == "Sprint 3"
+    assert out["status"] == "In Progress"
+    assert out["links"] == [
+        {"kind": "parent", "repo": "acme/sandbox", "number": 5},
+        {"kind": "blocked_by", "repo": "other/lib", "number": 7},
+    ]
+    # the keys never change the body
+    plain = run(tmp_path / "plain", dict(BASE_SPEC, milestone="Sprint 3"), "--dry-run",
+                milestones=MILESTONES)  # fmt: skip
+    assert out["body"] == json.loads(plain.stdout)["body"]
+    assert fixture_calls(tmp_path) == [
+        "milestones",
+        "project_view",
+        "project_fields",
+        "GET repos/acme/sandbox/issues/5",
+        "GET repos/other/lib/issues/7",
+    ]
+    assert not board_was_called(tmp_path)
+
+
+def test_dry_run_status_defaults_to_todo_and_is_null_without_the_board(tmp_path: Path) -> None:
+    on = run(tmp_path, None, "--dry-run")
+    assert json.loads(on.stdout)["status"] == "Todo"
+    off = run(tmp_path / "off", None, "--dry-run", "--no-board", project_view=None)
+    assert off.returncode == 0, off.stderr
+    out = json.loads(off.stdout)
+    assert (out["status"], out["milestone"], out["links"]) == (None, None, [])
+    assert "project_view" not in fixture_calls(tmp_path / "off")
+
+
+@pytest.mark.parametrize("flags", [("--dry-run",), ()])
+@pytest.mark.parametrize(
+    "milestones,shown",
+    [
+        (json.dumps([{"title": "Sprint 2"}, {"title": "Sprint 4"}]), "(open: Sprint 2, Sprint 4)"),
+        ("[]", "(open: none)"),
+        # exact title only
+        (json.dumps([{"title": "sprint 3"}]), "(open: sprint 3)"),
+    ],
+)
+def test_a_missing_milestone_stops_the_run_before_the_create(
+    tmp_path: Path, flags: tuple[str, ...], milestones: str, shown: str
+) -> None:
+    spec = dict(BASE_SPEC, milestone="Sprint 3")
+    r = run(tmp_path, spec, *flags, milestones=milestones, create='{"url": "https://x/9"}')
+    assert r.returncode == 2
+    assert (
+        json.loads(r.stderr)["error"] == f'milestone "Sprint 3" not found in acme/sandbox {shown}'
+    )
+    assert r.stdout == ""
+    assert "issue_create" not in fixture_calls(tmp_path)
+    assert not board_was_called(tmp_path)
+
+
+@pytest.mark.parametrize(
+    "err,code",
+    [("gh: Bad credentials (HTTP 401)", 3), ("gh: Server Error (HTTP 502)", 5), ("", 5)],
+)
+def test_a_failed_milestone_listing_is_classified_and_creates_nothing(
+    tmp_path: Path, err: str, code: int
+) -> None:
+    spec = dict(BASE_SPEC, milestone="Sprint 3")
+    r = run(tmp_path, spec, extra={"milestones.err": err})
+    assert r.returncode == code
+    assert "milestones of acme/sandbox" in json.loads(r.stderr)["error"]
+    assert "issue_create" not in fixture_calls(tmp_path)
+
+
+def test_a_milestone_listing_that_is_not_a_list_is_exit_5(tmp_path: Path) -> None:
+    r = run(tmp_path, dict(BASE_SPEC, milestone="Sprint 3"), milestones='{"message": "x"}')
+    assert r.returncode == 5
+
+
+@pytest.mark.parametrize("flags", [("--dry-run",), ()])
+@pytest.mark.parametrize("status", ["Doing", "todo"])  # an option name matches exactly
+def test_an_unknown_status_is_refused_with_the_boards_options(
+    tmp_path: Path, flags: tuple[str, ...], status: str
+) -> None:
+    r = run(tmp_path, dict(BASE_SPEC, status=status), *flags)
+    assert r.returncode == 2
+    err = json.loads(r.stderr)["error"]
+    assert f'"{status}"' in err and "(options: Todo, In Progress, Done)" in err
+    assert "issue_create" not in fixture_calls(tmp_path)
+
+
+@pytest.mark.parametrize("flags", [("--dry-run",), ()])
+def test_status_together_with_no_board_is_refused(tmp_path: Path, flags: tuple[str, ...]) -> None:
+    r = run(tmp_path, dict(BASE_SPEC, status="Todo"), "--no-board", *flags)
+    assert r.returncode == 2
+    assert "--no-board" in json.loads(r.stderr)["error"]
+    assert r.stdout == ""
+
+
+def test_a_board_without_a_status_field_is_refused(tmp_path: Path) -> None:
+    r = run(tmp_path, None, project_fields=json.dumps({"fields": [], "totalCount": 0}))
+    assert r.returncode == 2
+    assert "Status" in json.loads(r.stderr)["error"]
+
+
+@pytest.mark.parametrize(
+    "fixtures,code,needle",
+    [
+        ({"project_view": None, "extra": {"project_view.err": SCOPE_ERROR_TEXT}}, 3,
+         "gh auth refresh -s project"),
+        ({"project_fields": None, "extra": {"project_fields.err": "gh: HTTP 502"}}, 5,
+         "board 12"),
+        ({"project_fields": "not json"}, 5, "board 12"),
+    ],
+)  # fmt: skip
+def test_an_unreadable_board_stops_the_run_before_the_create(
+    tmp_path: Path, fixtures: dict[str, Any], code: int, needle: str
+) -> None:
+    """The Status is resolved before the create, so a token without the `project`
+    scope now stops the run while nothing exists — not after the issue is made."""
+    r = run(tmp_path, None, **fixtures)
+    assert r.returncode == code
+    assert needle in json.loads(r.stderr)["error"]
+    assert "issue_create" not in fixture_calls(tmp_path)
+
+
+@pytest.mark.parametrize(
+    "spec,extra,needle",
+    [
+        (LINKED_SPEC, {"repos/other/lib/issues/7.json": None,
+                       "repos/other/lib/issues/7.err": "gh: Not Found (HTTP 404)"},
+         "other/lib#7 not found"),
+        (LINKED_SPEC, issue_fixture("acme/sandbox#5", pull_request={"url": "https://x/pull/5"}),
+         "acme/sandbox#5 is a pull request"),
+    ],
+)  # fmt: skip
+def test_a_link_target_that_cannot_be_linked_stops_the_run_before_the_create(
+    tmp_path: Path, spec: dict[str, Any], extra: dict[str, Any], needle: str
+) -> None:
+    files = {k: v for k, v in {**TARGETS, **extra}.items() if v is not None}
+    r = run(tmp_path, spec, milestones=MILESTONES, extra=files)
+    assert r.returncode == 2
+    assert needle in json.loads(r.stderr.splitlines()[-1])["error"]
+    assert "issue_create" not in fixture_calls(tmp_path)
+    assert not board_was_called(tmp_path)
+
+
+def test_a_parent_of_another_owner_is_refused_by_the_emitter(tmp_path: Path) -> None:
+    r = run(tmp_path, dict(BASE_SPEC, parent="other/sandbox#5"), "--dry-run")
+    assert r.returncode == 2
+    assert "owner" in first_error(r)
+    assert fixture_calls(tmp_path) == []
 
 
 def test_preflight_failures_pass_their_exit_code_through(tmp_path: Path) -> None:
@@ -680,6 +931,7 @@ def test_success_reports_url_number_verified_and_board(tmp_path: Path) -> None:
         "repo": "acme/sandbox",
         "verified": True,
         "board": "added",
+        "status": "Todo",
     }
     assert r.stderr == ""
 
@@ -691,6 +943,20 @@ def test_read_back_that_does_not_match_the_title_is_not_verified(tmp_path: Path,
     r = run(tmp_path, create='{"url": "https://x/5"}', view=view)
     assert r.returncode == 0, r.stderr
     assert json.loads(r.stdout)["verified"] is False
+
+
+@pytest.mark.parametrize(
+    "milestone,verified",
+    [({"title": "Sprint 3"}, True), (None, False), ({"title": "Sprint 4"}, False)],
+)
+def test_verified_also_reads_back_the_milestone(
+    tmp_path: Path, milestone: dict[str, str] | None, verified: bool
+) -> None:
+    spec = dict(BASE_SPEC, milestone="Sprint 3")
+    view = json.dumps({"title": spec["summary"], "milestone": milestone})
+    r = run(tmp_path, spec, create='{"url": "https://x/5"}', view=view, milestones=MILESTONES)
+    assert r.returncode == 0, r.stderr
+    assert json.loads(r.stdout)["verified"] is verified
 
 
 def test_nothing_is_written_outside_the_temp_dir(tmp_path: Path) -> None:
@@ -714,10 +980,230 @@ def test_no_board_flag_skips_the_board_step_entirely(tmp_path: Path) -> None:
     assert not board_was_called(tmp_path)
 
 
-SCOPE_ERROR = (
-    "error: your authentication token is missing required scopes [project]\n"
-    "To request it, run:  gh auth refresh -s project\n"
+SCOPE_ERROR = SCOPE_ERROR_TEXT
+
+
+def test_the_board_status_is_set_and_read_back(tmp_path: Path) -> None:
+    spec = dict(BASE_SPEC, status="In Progress")
+    r = run(tmp_path, spec, create='{"url": "https://x/5"}')
+    assert r.returncode == 0, r.stderr
+    out = json.loads(r.stdout)
+    assert (out["board"], out["status"]) == ("added", "In Progress")
+    assert "links" not in out, "no links asked, no links key"
+    calls = fixture_calls(tmp_path)
+    assert calls[calls.index("issue_create") :] == [
+        "issue_create",
+        "project_add",
+        "project_edit",
+        "project_status",
+    ]
+
+
+def test_a_status_overwritten_by_the_boards_automation_is_set_once_more(tmp_path: Path) -> None:
+    """ "Item added to project" may set Todo after our edit: re-edit once, read again."""
+    spec = dict(BASE_SPEC, status="In Progress")
+    r = run(tmp_path, spec, create='{"url": "https://x/5"}', status_reads=("Todo", "In Progress"))
+    assert r.returncode == 0, r.stderr
+    assert (json.loads(r.stdout)["board"], json.loads(r.stdout)["status"]) == (
+        "added",
+        "In Progress",
+    )
+    calls = fixture_calls(tmp_path)
+    assert calls[calls.index("project_add") :] == [
+        "project_add",
+        "project_edit",
+        "project_status",
+        "project_edit",
+        "project_status.retry",
+    ]
+
+
+@pytest.mark.parametrize(
+    "reads,edit_err,shown",
+    [
+        (("Todo", "Todo"), "", '"Todo"'),
+        (("Todo", None), "", '""'),
+        ((None, None), "gh: Something went wrong (HTTP 502)", "HTTP 502"),
+    ],
 )
+def test_a_status_still_wrong_after_the_retry_is_exit_6(
+    tmp_path: Path, reads: tuple[str | None, ...], edit_err: str, shown: str
+) -> None:
+    spec = dict(BASE_SPEC, status="In Progress")
+    r = run(
+        tmp_path,
+        spec,
+        create='{"url": "https://x/5"}',
+        status_reads=reads,
+        edit_code="1" if edit_err else "0",
+        edit_err=edit_err,
+    )
+    assert r.returncode == 6
+    out = json.loads(r.stdout)
+    assert (out["url"], out["board"]) == ("https://x/5", "failed")
+    err = json.loads(r.stderr)["error"]
+    assert shown in err
+    assert "Do not re-run the create" in err
+    assert (
+        "gh project item-edit --id PVTI_item --project-id PVT_board12 --field-id PVTSSF_status "
+        "--single-select-option-id opt_progress"
+    ) in err
+
+
+def test_an_item_add_that_returns_no_item_is_exit_6(tmp_path: Path) -> None:
+    r = run(tmp_path, None, create='{"url": "https://x/5"}', item_add="{}")
+    assert r.returncode == 6
+    assert json.loads(r.stdout)["board"] == "failed"
+    assert "gh project item-add 12" in json.loads(r.stderr)["error"]
+
+
+URL_13_FIX = '{"url": "https://github.com/acme/sandbox/issues/13"}'
+CHILD_13 = "repos/acme/sandbox/issues/13"
+BLOCKED_13 = f"{CHILD_13}/dependencies/blocked_by"
+# The created issue as issue-link.sh sees it, and both read-backs after the links.
+LINKED_WORLD: dict[str, Any] = {
+    **TARGETS,
+    **issue_fixture("acme/sandbox#13"),
+    f"{BLOCKED_13}.json": [],
+    f"{CHILD_13}.after.json": gh_issue(
+        "acme/sandbox#13", parent_issue_url="https://api.github.com/repos/acme/sandbox/issues/5"
+    ),
+    f"{BLOCKED_13}.after.json": [gh_issue("other/lib#7")],
+}
+LINKED_VIEW = json.dumps({"title": "[test] a title", "milestone": {"title": "Sprint 3"}})
+REPAIR = "issue-link.sh acme/sandbox#13 --parent acme/sandbox#5 --blocked-by other/lib#7"
+
+
+def run_linked(tmp_path: Path, *flags: str, **kw: Any) -> subprocess.CompletedProcess[str]:
+    world = {k: v for k, v in {**LINKED_WORLD, **kw.pop("world", {})}.items() if v is not None}
+    defaults: dict[str, Any] = {
+        "create": URL_13_FIX,
+        "view": LINKED_VIEW,
+        "milestones": MILESTONES,
+        "extra": world,
+    }
+    return run(tmp_path, LINKED_SPEC, *flags, **{**defaults, **kw})
+
+
+def test_the_whole_spec_creates_boards_and_links_in_order(tmp_path: Path) -> None:
+    r = run_linked(tmp_path)
+    assert r.returncode == 0, r.stderr
+    assert json.loads(r.stdout) == {
+        "url": "https://github.com/acme/sandbox/issues/13",
+        "number": 13,
+        "repo": "acme/sandbox",
+        "verified": True,
+        "board": "added",
+        "status": "In Progress",
+        "links": {
+            "parent": {"ref": "acme/sandbox#5", "ok": True, "action": "linked"},
+            "blocked_by": [{"ref": "other/lib#7", "ok": True, "action": "linked"}],
+        },
+    }
+    assert r.stderr == ""
+    assert fixture_calls(tmp_path) == [
+        "milestones",
+        "project_view",
+        "project_fields",
+        "GET repos/acme/sandbox/issues/5",
+        "GET repos/other/lib/issues/7",
+        "issue_create",
+        "project_add",
+        "project_edit",
+        "project_status",
+        f"GET {CHILD_13}",
+        "GET repos/acme/sandbox/issues/5",
+        "GET repos/other/lib/issues/7",
+        f"GET {BLOCKED_13}?per_page=100",
+        # internal ids from the fixtures, never the numbers 13 / 7
+        "POST repos/acme/sandbox/issues/5/sub_issues sub_issue_id=9000013",
+        f"GET {CHILD_13}",
+        f"POST {BLOCKED_13} issue_id=9000007",
+        f"GET {BLOCKED_13}?per_page=100",
+    ]
+
+
+def test_links_without_the_board(tmp_path: Path) -> None:
+    spec = {k: v for k, v in LINKED_SPEC.items() if k != "status"}
+    r = run(
+        tmp_path, spec, "--no-board", create=URL_13_FIX, view=LINKED_VIEW, milestones=MILESTONES,
+        extra=LINKED_WORLD,
+    )  # fmt: skip
+    assert r.returncode == 0, r.stderr
+    out = json.loads(r.stdout)
+    assert (out["board"], out["status"]) == ("skipped", None)
+    assert out["links"]["parent"]["ok"] is True
+    assert not board_was_called(tmp_path)
+
+
+def test_a_failed_link_call_is_exit_7_with_the_url_and_the_repair_command(tmp_path: Path) -> None:
+    r = run_linked(
+        tmp_path,
+        world={
+            "repos/acme/sandbox/issues/5/sub_issues.post.code": "1",
+            "repos/acme/sandbox/issues/5/sub_issues.post.err": "gh: Validation Failed (HTTP 422)",
+            f"{CHILD_13}.after.json": gh_issue("acme/sandbox#13"),
+        },
+    )
+    assert r.returncode == 7
+    out = json.loads(r.stdout)
+    assert out["url"] == "https://github.com/acme/sandbox/issues/13"
+    assert out["links"]["parent"]["ok"] is False
+    assert "HTTP 422" in out["links"]["parent"]["error"]
+    assert out["links"]["blocked_by"][0]["ok"] is True
+    err = json.loads(r.stderr)["error"]
+    assert err.startswith(
+        "created and verified https://github.com/acme/sandbox/issues/13, but 1 native link(s) "
+        "failed — the issue stays, do not re-create it; repair: "
+    )
+    assert err.endswith(REPAIR)
+
+
+def test_a_link_that_is_not_there_on_read_back_is_exit_7(tmp_path: Path) -> None:
+    r = run_linked(tmp_path, world={f"{BLOCKED_13}.after.json": []})
+    assert r.returncode == 7
+    assert "not listed on read-back" in json.loads(r.stdout)["links"]["blocked_by"][0]["error"]
+    assert REPAIR in json.loads(r.stderr)["error"]
+
+
+def test_a_lookup_that_fails_after_the_create_reports_every_link_failed(tmp_path: Path) -> None:
+    """issue-link.sh stops before linking (exit 5): the issue stays, and every link
+    is reported as not in place with that error — never silently dropped."""
+    r = run_linked(
+        tmp_path,
+        world={f"{CHILD_13}.json": None, f"{CHILD_13}.err": "gh: Server Error (HTTP 502)"},
+    )
+    assert r.returncode == 7
+    links = json.loads(r.stdout)["links"]
+    assert [x["ok"] for x in [links["parent"], *links["blocked_by"]]] == [False, False]
+    assert "HTTP 502" in links["parent"]["error"]
+    assert "2 native link(s) failed" in json.loads(r.stderr)["error"]
+
+
+def test_board_and_links_both_failing_is_exit_7_with_both_reported(tmp_path: Path) -> None:
+    r = run_linked(
+        tmp_path,
+        board_code="1",
+        board_err=SCOPE_ERROR,
+        world={f"{BLOCKED_13}.after.json": []},
+    )
+    assert r.returncode == 7
+    out = json.loads(r.stdout)
+    assert out["board"] == "failed"
+    assert out["links"]["blocked_by"][0]["ok"] is False
+    board_err, link_err = (json.loads(line)["error"] for line in r.stderr.splitlines())
+    assert "not added to board 12" in board_err
+    assert "repair: " in link_err
+
+
+def test_an_unverified_issue_is_not_called_verified_in_the_link_error(tmp_path: Path) -> None:
+    r = run_linked(
+        tmp_path, view=json.dumps({"title": "[test] other"}), world={f"{BLOCKED_13}.after.json": []}
+    )
+    assert r.returncode == 7
+    err = json.loads(r.stderr)["error"]
+    assert "created https://github.com/acme/sandbox/issues/13 (the read-back did not match" in err
+    assert "verified https" not in err
 
 
 def test_missing_project_scope_keeps_the_issue_and_exits_6(tmp_path: Path) -> None:
@@ -744,55 +1230,16 @@ def test_other_board_errors_surface_the_original_gh_text(tmp_path: Path) -> None
 
 # ─── the real command line, through a stand-in gh / curl ────────────────────
 # No ISSUE_FIXTURE_DIR here: the script takes its real, non-fixture path and calls
-# `gh` and `curl` from PATH. Both names are the same recording stub, which logs
-# argv and answers from a JSON config. This is what pins the flags the script sends
-# to GitHub — the label, the board number and owner, the read-back path.
-STUB = """#!/usr/bin/env python3
-import json
-import os
-import sys
-
-name = os.path.basename(sys.argv[0])
-argv = sys.argv[1:]
-with open(os.environ["STUB_LOG"], "a", encoding="utf-8") as fh:
-    fh.write(json.dumps([name, *argv]) + "\\n")
-with open(os.environ["STUB_CFG"], encoding="utf-8") as fh:
-    cfg = json.load(fh)
-repo = cfg["repo"]
-
-
-def answer(text="", code=0, err=""):
-    sys.stdout.write(text)
-    sys.stderr.write(err)
-    sys.exit(code)
-
-
-if name == "curl":
-    answer("200")
-if argv[:2] == ["api", "user"]:
-    answer("octocat\\n")
-if argv[:2] == ["api", f"repos/{repo}"]:
-    answer("true\\n")
-if argv[:2] == ["issue", "list"]:
-    answer("[]")
-if argv[:2] == ["issue", "create"]:
-    with open(argv[argv.index("--body-file") + 1], encoding="utf-8") as src:
-        with open(os.environ["STUB_BODY"], "w", encoding="utf-8") as dst:
-            dst.write(src.read())
-    answer(cfg["create_out"], cfg["create_rc"], cfg["create_err"])
-if argv[0] == "api" and "per_page=30" in argv[1]:
-    with open(os.environ["STUB_LOG"], encoding="utf-8") as fh:
-        n = sum(1 for line in fh if "per_page=30" in line)
-    answer(cfg["recent"][n - 1])
-if argv[:2] == ["api", f"repos/{repo}/issues/13"]:
-    answer(cfg["view"])
-if argv[:2] == ["project", "item-add"]:
-    answer("", cfg["board_rc"], cfg["board_err"])
-sys.stderr.write("unexpected call: " + json.dumps(argv) + "\\n")
-sys.exit(99)
-"""
+# `gh` and `curl` from PATH. Both names are the same recording stand-in
+# (tests/fake_gh.py), which logs argv and answers from a JSON config. This is what
+# pins the flags the script sends to GitHub — the label, the board number and
+# owner, the read-back path.
+FAKE_GH = HERE / "fake_gh.py"
 URL_13 = "https://github.com/acme/sandbox/issues/13"
-ITEM_ADD = ["project", "item-add", "12", "--owner", "larchanka-training", "--url", URL_13]
+ITEM_ADD = [
+    "project", "item-add", "12", "--owner", "larchanka-training", "--url", URL_13,
+    "--format", "json",
+]  # fmt: skip
 
 
 def run_live(
@@ -804,7 +1251,7 @@ def run_live(
     bindir = tmp_path / "bin"
     bindir.mkdir()
     for program in ("gh", "curl"):
-        (bindir / program).write_text(STUB)
+        (bindir / program).write_text(FAKE_GH.read_text(encoding="utf-8"))
         (bindir / program).chmod(0o755)
     config: dict[str, Any] = {
         "repo": spec["repo"],
@@ -815,6 +1262,13 @@ def run_live(
         "recent": ["[]", "[]"],
         "board_rc": 0,
         "board_err": "",
+        "milestones": MILESTONES,
+        "project_view": PROJECT_VIEW,
+        "fields": PROJECT_FIELDS,
+        "item_add_out": json.dumps({"id": "PVTI_item13", "type": "Issue", "url": URL_13}),
+        "edit_rc": 0,
+        "edit_err": "",
+        "status_reads": [status_read(spec.get("status") or "Todo")] * 2,
         **cfg,
     }
     (tmp_path / "cfg.json").write_text(json.dumps(config))
@@ -831,6 +1285,7 @@ def run_live(
             "STUB_LOG": str(log),
             "STUB_CFG": str(tmp_path / "cfg.json"),
             "STUB_BODY": str(body),
+            "ISSUE_STATUS_RETRY_DELAY": "0",
         },
         timeout=60,
     )
@@ -847,9 +1302,18 @@ def labels_in(argv: list[str]) -> list[str]:
     return [argv[i + 1] for i, a in enumerate(argv) if a == "--label"]
 
 
+MILESTONES_CALL = ["api", "repos/acme/sandbox/milestones?state=open&per_page=100"]
+PROJECT_VIEW_CALL = ["project", "view", "12", "--owner", "larchanka-training", "--format", "json"]
+FIELD_LIST_CALL = [
+    "project", "field-list", "12", "--owner", "larchanka-training", "--format", "json",
+    "--limit", "100",
+]  # fmt: skip
+
+
 def test_the_real_calls_in_order_with_the_real_flags(tmp_path: Path) -> None:
-    spec = dict(BASE_SPEC, assignees=["octocat"])
-    r, gh, posted = run_live(tmp_path, spec)
+    spec = dict(BASE_SPEC, assignees=["octocat"], milestone="Sprint 3")
+    view = json.dumps({"title": spec["summary"], "milestone": {"title": "Sprint 3"}})
+    r, gh, posted = run_live(tmp_path, spec, view=view)
     assert r.returncode == 0, r.stderr
     out = json.loads(r.stdout)
     assert (out["number"], out["verified"], out["board"]) == (13, True, "added")
@@ -864,10 +1328,29 @@ def test_the_real_calls_in_order_with_the_real_flags(tmp_path: Path) -> None:
     assert create[:5] == ["issue", "create", "--repo", "acme/sandbox", "--body-file"]
     assert create[6:] == [
         "--title", "[test] a title", "--label", "enhancement", "--assignee", "octocat",
+        "--milestone", "Sprint 3",
     ]  # fmt: skip
     assert "- [ ] it works" in posted
-    # sequence: search, create, read back, board
-    assert gh.index(search) < gh.index(create) < gh.index(readback) < gh.index(ITEM_ADD)
+    # sequence: validation (milestone, board Status), search, create, read back, board
+    order = [MILESTONES_CALL, PROJECT_VIEW_CALL, FIELD_LIST_CALL, search, create, readback]
+    assert [gh.index(c) for c in order] == sorted(gh.index(c) for c in order)
+    assert gh.index(readback) < gh.index(ITEM_ADD)
+
+
+def test_a_bad_milestone_never_reaches_the_real_create(tmp_path: Path) -> None:
+    r, gh, _ = run_live(tmp_path, dict(BASE_SPEC, milestone="Sprint 9"))
+    assert r.returncode == 2
+    assert 'milestone "Sprint 9" not found' in json.loads(r.stderr)["error"]
+    assert MILESTONES_CALL in gh
+    assert not any(c[:2] == ["issue", "create"] for c in gh)
+
+
+def test_a_pull_request_as_parent_never_reaches_the_real_create(tmp_path: Path) -> None:
+    pull = dict(gh_issue("acme/sandbox#5"), pull_request={"url": "https://x/pull/5"})
+    r, gh, _ = run_live(tmp_path, dict(BASE_SPEC, parent="#5"), issues={"acme/sandbox#5": pull})
+    assert r.returncode == 2
+    assert ["api", "repos/acme/sandbox/issues/5"] in gh
+    assert not any(c[:2] == ["issue", "create"] for c in gh)
 
 
 def test_preflight_probes_run_for_real_too(tmp_path: Path) -> None:
@@ -921,6 +1404,77 @@ def test_a_failed_create_that_landed_is_recovered_without_a_second_create(
     )
     # The snapshot must precede the create, or recovery cannot tell old from new.
     assert listing_at[0] < gh.index(create_argv(gh)) < listing_at[1]
+
+
+ITEM_EDIT = [
+    "project", "item-edit", "--id", "PVTI_item13", "--project-id", "PVT_board12",
+    "--field-id", "PVTSSF_status", "--single-select-option-id", "opt_progress",
+]  # fmt: skip
+LIVE_ISSUES = {
+    "acme/sandbox#13": gh_issue(
+        "acme/sandbox#13", title="[test] a title", milestone={"title": "Sprint 3"}
+    ),
+    "acme/sandbox#5": gh_issue("acme/sandbox#5"),
+    "other/lib#7": gh_issue("other/lib#7"),
+}
+
+
+def test_the_real_calls_of_a_linked_issue_in_order(tmp_path: Path) -> None:
+    r, gh, _ = run_live(
+        tmp_path, LINKED_SPEC, issues=LIVE_ISSUES, status_reads=[status_read("In Progress")]
+    )
+    assert r.returncode == 0, r.stderr
+    out = json.loads(r.stdout)
+    assert (out["verified"], out["board"], out["status"]) == (True, "added", "In Progress")
+    assert out["links"]["parent"]["action"] == "linked"
+    graphql = next(c for c in gh if c[:2] == ["api", "graphql"])
+    assert graphql[-2:] == ["-f", "id=PVTI_item13"]
+    assert 'fieldValueByName(name: "Status")' in graphql[3]
+    expected = [
+        MILESTONES_CALL,
+        PROJECT_VIEW_CALL,
+        FIELD_LIST_CALL,
+        ["api", "repos/acme/sandbox/issues/5"],
+        ["api", "repos/other/lib/issues/7"],
+        create_argv(gh),
+        ITEM_ADD,
+        ITEM_EDIT,
+        graphql,
+        [
+            "api",
+            "-X",
+            "POST",
+            "repos/acme/sandbox/issues/5/sub_issues",
+            "-F",
+            "sub_issue_id=9000013",
+        ],
+        ["api", "-X", "POST", f"{BLOCKED_13}", "-F", "issue_id=9000007"],
+    ]
+    at = [gh.index(c) for c in expected]
+    assert at == sorted(at), "validation → create → board → Status → links"
+    assert create_argv(gh)[-2:] == ["--milestone", "Sprint 3"]
+
+
+def test_a_real_status_reset_by_the_automation_is_edited_twice(tmp_path: Path) -> None:
+    reads = [status_read("Todo"), status_read("In Progress")]
+    r, gh, _ = run_live(tmp_path, LINKED_SPEC, issues=LIVE_ISSUES, status_reads=reads)
+    assert r.returncode == 0, r.stderr
+    assert gh.count(ITEM_EDIT) == 2
+    assert json.loads(r.stdout)["status"] == "In Progress"
+
+
+def test_a_real_link_failure_is_exit_7_with_the_repair_command(tmp_path: Path) -> None:
+    r, gh, _ = run_live(
+        tmp_path,
+        LINKED_SPEC,
+        issues=LIVE_ISSUES,
+        status_reads=[status_read("In Progress")],
+        sub_issue_post={"code": 1, "err": "gh: Validation Failed (HTTP 422)", "lands": False},
+    )
+    assert r.returncode == 7
+    assert json.loads(r.stdout)["url"] == URL_13
+    assert json.loads(r.stderr)["error"].endswith(REPAIR)
+    assert sum(1 for c in gh if c[:2] == ["issue", "create"]) == 1
 
 
 @pytest.mark.parametrize(

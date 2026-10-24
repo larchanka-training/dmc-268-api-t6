@@ -2,8 +2,9 @@
 
 <!-- SYNC: mirrored in dmc-268-{ui,api}-t6/.agents/skills/create-issue/references/hosts.md -->
 
-Read this when you need a `gh` flag you do not remember, the course board, or an
-explanation for a preflight or board failure. GitHub (`github.com`) is the only host.
+Read this when you need a `gh` flag you do not remember, the course board, native links,
+or an explanation for a preflight, board or link failure. GitHub (`github.com`) is the only
+host.
 
 ## Flag map (`gh issue create`)
 
@@ -13,7 +14,7 @@ explanation for a preflight or board failure. GitHub (`github.com`) is the only 
 | Body from file | `-F/--body-file <f>` (`-` = stdin)                            |
 | Labels         | `-l` (repeat or comma) — each label must exist                |
 | Assignee       | `-a login` (`@me` works)                                      |
-| Milestone      | `-m <name>` — must already exist                              |
+| Milestone      | `-m <name>` — must already exist (checked before the create)  |
 | Repo override  | `-R [HOST/]OWNER/REPO`                                        |
 | Project        | `-p/--project <name>` — adds only; the script uses `item-add` |
 
@@ -62,10 +63,11 @@ gh auth status                      # scopes must list `project` (and `repo`)
 gh auth refresh -s project          # adds it, interactive
 ```
 
-Without the scope the issue is still created: the script prints its JSON (with
-`"board": "failed"`), a message containing `run gh auth refresh -s project`, and exits
-**6**. Refresh the scope and run only the `item-add` line above for that URL — never
-re-run the create.
+Without the scope nothing is created: the board's Status ids are resolved during the
+validation, so the script stops with exit **3** and `run gh auth refresh -s project` (or
+pass `--no-board`). If `item-add` fails after the create, the script prints its JSON (with
+`"board": "failed"`) and exits **6** — run only the `item-add` line above for that URL,
+never re-run the create.
 
 Checking placement:
 
@@ -74,8 +76,51 @@ gh project item-list 12 --owner larchanka-training --limit 200 --format json \
   | python3 -c 'import json,sys; print([i["content"]["url"] for i in json.load(sys.stdin)["items"] if i.get("content")])'
 ```
 
-`item-add` only adds the issue; it does not set the board's Status field. Status
-changes are the board's own workflow and out of scope here.
+`item-add` only adds the issue; the script then sets its Status — next section.
+
+## Native links, milestone and board Status
+
+`gh issue create` / `gh issue edit` (2.46) have no flag for a parent or a blocker, and
+`item-add` sets no field. `issue-create.sh` checks all of them before the create (exit 2 on
+a bad one) and sets them after it; `issue-link.sh` sets the links, also by hand to repair:
+
+```bash
+gh api repos/O/R/issues/13 --jq .id                 # the internal id — not 13
+gh api -X POST repos/O/R/issues/5/sub_issues -F sub_issue_id=<id of 13>    # 13 under 5
+gh api repos/O/R/issues/13 --jq .parent_issue_url   # read the child back
+gh api -X POST repos/O/R/issues/13/dependencies/blocked_by -F issue_id=<id of blocker>
+gh api "repos/O/R/issues/13/dependencies/blocked_by?per_page=100"   # read back
+```
+
+Board Status: `gh project view 12 --owner larchanka-training --format json` (`.id`), then
+`gh project field-list 12 --owner larchanka-training --format json --limit 100` (field
+`Status`, option by exact name) — ids are resolved by name, never hard-coded; then
+`gh project item-edit --id <item> --project-id <project> --field-id <field>
+--single-select-option-id <option>`, read back with `gh api graphql` (`node(id: <item>)` →
+`ProjectV2Item.fieldValueByName(name: "Status")` → `name`).
+
+Mines:
+
+- **id ≠ number.** Both link endpoints take the issue's `.id`; the number is a
+  valid-looking integer and the wrong value. `-F`, not `-f`, so the id goes as an integer.
+- **The sub-issue POST answers with the parent**, not the child: read the child back.
+- **One parent.** Attaching a second is a 422; the script never replaces a parent (no
+  `replace_parent`) — change it on GitHub if that is intended. The parent must share the
+  child's owner; a blocker may live in any repository, so the read-back matches
+  `repository_url` **and** `number`, never the number alone.
+- **No native "related".** GitHub has parent/sub-issue and blocked-by/blocking only;
+  "Related, not blocking" stays text in Dependencies.
+- **Milestones are per repository.** "Sprint 3" in ui and in api are two objects with one
+  title. The script lists `repos/O/R/milestones?state=open&per_page=100` and wants an exact
+  title; it never creates one (`gh api repos/O/R/milestones -f title=…`, above).
+- **"Auto-add sub-issues to project"** (a board 12 workflow) puts a sub-issue on the board
+  when its parent is there — even with `--no-board`.
+- **Status race.** The "Item added to project" automation can set Todo just after the
+  script's `item-edit`. The script reads the Status back, waits `ISSUE_STATUS_RETRY_DELAY`
+  seconds (default 3), re-sets it once, then gives up with exit 6 and the `item-edit` line.
+- **Exit 7** means the issue exists and a link did not land. Run only the `repair:` command
+  from stderr — `issue-link.sh OWNER/REPO#N --parent … --blocked-by …`; it skips what is in
+  place. Quote a short ref in a shell (`--parent '#5'`): unquoted, `#` starts a comment.
 
 ## Why preflight probes in that order
 

@@ -13,6 +13,7 @@ Usage
     build_issue_body.py <spec.json>              # markdown body on stdout
     build_issue_body.py - < spec.json            # spec from stdin
     build_issue_body.py <spec.json> --emit-args  # JSON argv array on stdout
+    build_issue_body.py <spec.json> --emit-links # JSON list of the native links
 
 Contract
 --------
@@ -115,6 +116,11 @@ ALLOWED_KEYS = {
     "assignees",
     "milestone",
     "kickoff",
+    # Native links and the board, set by issue-create.sh after the create; they do
+    # not change the body (Dependencies stays the author's prose).
+    "parent",
+    "blocked_by",
+    "status",
 }
 KICKOFF_KEYS = set(KICKOFF_PROSE) | set(KICKOFF_LISTS)
 BUG_KEYS = {"environment", "steps", "expected", "actual", "severity"}
@@ -135,6 +141,8 @@ STR_KEYS = (
     "actual",
     "severity",
     "milestone",
+    "parent",
+    "status",
 )
 LIST_KEYS = (
     "scope",
@@ -144,12 +152,17 @@ LIST_KEYS = (
     "dod",
     "labels",
     "assignees",
+    "blocked_by",
 )
 # These end up as one argv element each (read back line by line by issue-create.sh).
-ONE_LINE_KEYS = ("summary", "milestone")
+ONE_LINE_KEYS = ("summary", "milestone", "status")
 # `repo` names the target of every later `gh` call: exactly OWNER/REPO, nothing else
 # (same charset as issue-preflight.sh; a host prefix would 404 in the REST paths).
 REPO_NAME = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
+# An issue ref for `parent` / `blocked_by`: "#N" (the spec's repo) or "OWNER/REPO#N",
+# N a positive integer. Nothing looser — a bare number or a URL is refused here,
+# before the issue exists, not found out as a failed link after it does.
+ISSUE_REF = re.compile(r"(?:([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+))?#([1-9][0-9]*)")
 
 
 def err(msg: str) -> NoReturn:
@@ -292,6 +305,29 @@ def render_body(s: dict[str, Any]) -> str:
     return "\n\n".join(out) + "\n"
 
 
+# ─── native links ───────────────────────────────────────────────────────────
+def parse_ref(name: str, ref: str, repo: str) -> tuple[str, int]:
+    """One issue ref -> (OWNER/REPO, N); "#N" resolves to `repo`."""
+    m = ISSUE_REF.fullmatch(ref)
+    target = (m[1] or repo) if m else ""
+    if not m or any(set(part) == {"."} for part in target.split("/")):
+        err(f'"{name}" is not an issue ref: {ref!r} — use "#N" or "OWNER/REPO#N" (N > 0)')
+    return target, int(m[2])
+
+
+def render_links(s: dict[str, Any]) -> list[dict[str, Any]]:
+    """The native links issue-create.sh sets after the create, in that order: the
+    parent first, then each blocker as written."""
+    links = []
+    if "parent" in s:
+        repo, num = parse_ref("parent", s["parent"], s["repo"])
+        links.append({"kind": "parent", "repo": repo, "number": num})
+    for ref in s.get("blocked_by", []):
+        repo, num = parse_ref("blocked_by", ref, s["repo"])
+        links.append({"kind": "blocked_by", "repo": repo, "number": num})
+    return links
+
+
 # ─── CLI argv ───────────────────────────────────────────────────────────────
 def render_args(s: dict[str, Any]) -> list[str]:
     args = ["--title", s["summary"]]
@@ -357,6 +393,26 @@ def _check_dependencies(dep: Any) -> None:
         err(f'"dependencies" must be a string, a list or an object, got {_kind(dep)}')
 
 
+def _check_links(s: dict[str, Any]) -> None:
+    if "status" in s and not s["status"].strip():
+        err('"status" must not be blank — leave it out for the default (Todo)')
+    seen = set()
+    for link in render_links(s):  # exits 2 on a ref that does not parse
+        key = (link["repo"].lower(), link["number"])
+        if link["kind"] == "blocked_by" and key in seen:
+            err(f'"blocked_by" lists {link["repo"]}#{link["number"]} more than once')
+        seen.add(key)
+    # GitHub only lets an issue be the sub-issue of a parent with the same owner;
+    # a blocker may live anywhere.
+    if "parent" in s:
+        owner = parse_ref("parent", s["parent"], s["repo"])[0].split("/")[0]
+        if owner.lower() != s["repo"].split("/")[0].lower():
+            err(
+                f'"parent" {s["parent"]!r} belongs to owner {owner!r}, but a sub-issue must '
+                f"share its parent's owner ({s['repo'].split('/')[0]!r})"
+            )
+
+
 def validate(s: Any) -> None:
     if not isinstance(s, dict):
         err("spec must be a JSON object")
@@ -398,6 +454,7 @@ def validate(s: Any) -> None:
     for key in ("labels", "assignees"):
         if any(c in item for item in s.get(key, []) for c in "\r\n"):
             err(f'"{key}" entries must be single lines')
+    _check_links(s)
 
     # Same reasoning as unknown keys: a misspelt kickoff key would otherwise drop
     # the hazard the composer meant to pass on, silently and with exit 0.
@@ -435,8 +492,11 @@ def main(argv: list[str]) -> int:
     emit_args = "--emit-args" in args
     if emit_args:
         args.remove("--emit-args")
-    if len(args) != 1:
-        err("usage: build_issue_body.py <spec.json|-> [--emit-args]")
+    emit_links = "--emit-links" in args
+    if emit_links:
+        args.remove("--emit-links")
+    if len(args) != 1 or (emit_args and emit_links):
+        err("usage: build_issue_body.py <spec.json|-> [--emit-args | --emit-links]")
 
     path = args[0]
     try:
@@ -451,6 +511,8 @@ def main(argv: list[str]) -> int:
     validate(spec)
     if emit_args:
         print(json.dumps(render_args(spec), ensure_ascii=False))
+    elif emit_links:
+        print(json.dumps(render_links(spec), ensure_ascii=False))
     else:
         sys.stdout.write(render_body(spec))
     return 0
