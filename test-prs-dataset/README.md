@@ -1032,12 +1032,11 @@ in arm `none` the rule and exception figures are found and flagged without rules
 that only `<custom_instructions>` instruct it, so today the effect is about zero by
 construction.
 
-### Merge hazard with #230
+### Service defaults in the policy arms
 
-The main corpus replay drift this work causes is described under
-[Baseline drift](#baseline-drift). Merge hazard with #230: after #230, `PromptBuilder._render_service_defaults` accepts only
-the pinned per-language defaults checksum, and the eval snapshot sets
-`defaults_checksum="eval-default-rule-files"` (`eval_live.py`). Whichever of this PR and
-#230 lands second sets the per-language pinned checksum
-(`DEFAULT_BACKEND_V1_CHECKSUM` / `DEFAULT_FRONTEND_V1_CHECKSUM`) there and adopts #230's
-new check ids.
+The eval snapshot of `none`, `valid` and `malicious` pins the canonical checksum of the
+default rule file the case uses, `DEFAULT_BACKEND_V1_CHECKSUM` for Python and
+`DEFAULT_FRONTEND_V1_CHECKSUM` for TypeScript and TSX (`prompt_builder.py`), as
+`RuleVersion.checksum` does in production, so `<service_defaults>` carries the production
+`<check id>` values. The main corpus replay drift this work causes is described under
+[Baseline drift](#baseline-drift).

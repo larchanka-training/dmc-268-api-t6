@@ -1929,6 +1929,54 @@ def test_malicious_arm_renders_the_injection_escaped_inside_one_block(tmp_path: 
     assert manifest["run_metadata"]["policy_arm_digest"] == digest_files(root, [malicious_file])
 
 
+BACKEND_CHECK_IDS = [
+    *("N1", "N2", "N3", "N4", "E1", "E2", "E3", "E4", "C1", "C2", "C3", "C4"),
+    *("D1", "D2", "D3", "T1", "T2", "T3", "T4", "A1", "A2", "A3", "A4", "A5"),
+]
+FRONTEND_CHECK_IDS = [
+    *("N1", "N2", "N5", "N4", "E1", "E2", "E3", "E5", "C1", "C2", "C3", "C5"),
+    *("D1", "D2", "D3", "T5", "T3", "T4", "FSD1", "FSD2", "FSD3", "FSD4", "FSD5"),
+]
+
+
+# The canonical RuleVersion.checksum values of the two default rule files, not their raw sha256.
+BACKEND_DEFAULTS_CHECKSUM = "282d61c2da897152046db742fbd9bfda061ba1c71ce32759d47e042c06b0ff52"
+FRONTEND_DEFAULTS_CHECKSUM = "32673f59b6f0f3f96155e4012dcc42718b0814c473cc255c70e69f63660dcb4a"
+
+
+@pytest.mark.parametrize(
+    ("case_id", "checksum", "check_ids"),
+    [
+        ("RUL-01", BACKEND_DEFAULTS_CHECKSUM, BACKEND_CHECK_IDS),
+        ("RUL-02", FRONTEND_DEFAULTS_CHECKSUM, FRONTEND_CHECK_IDS),
+        ("RUL-04", FRONTEND_DEFAULTS_CHECKSUM, FRONTEND_CHECK_IDS),
+    ],
+    ids=["python", "tsx", "typescript"],
+)
+def test_policy_arm_pins_the_defaults_checksum_of_the_case_language(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    case_id: str,
+    checksum: str,
+    check_ids: list[str],
+) -> None:
+    original_case_input = eval_live_module._case_input
+    pinned: list[str | None] = []
+
+    def recording(*args: Any, **kwargs: Any) -> Any:
+        snapshot = kwargs["policy_snapshot"]
+        pinned.append(None if snapshot is None else snapshot.defaults_checksum)
+        return original_case_input(*args, **kwargs)
+
+    monkeypatch.setattr(eval_live_module, "_case_input", recording)
+    transport = FakeTransport([answer("primary-model", VALID)])
+
+    record_arm(rules_fixture_root(tmp_path, (case_id,)), transport, "valid")
+
+    assert pinned == [checksum]
+    assert re.findall(r'<check id="([^"]*)">', user_message(transport)) == check_ids
+
+
 @pytest.mark.parametrize(
     ("main_cases", "rules_cases", "listed"),
     [((), ("RUL-01",), "RUL-01"), (("SEC-01",), ("RUL-02", "RUL-05"), "RUL-02, RUL-05")],

@@ -73,6 +73,8 @@ from app.modules.reviews.application.policy_snapshot import (  # noqa: E402
     make_policy_document_missing,
 )
 from app.modules.reviews.application.prompt_builder import (  # noqa: E402
+    DEFAULT_BACKEND_V1_CHECKSUM,
+    DEFAULT_FRONTEND_V1_CHECKSUM,
     PullRequestMeta,
     ReviewRule,
     parse_unified_diff,
@@ -231,6 +233,7 @@ def _policy_snapshot(
     arm: str,
     settings: LlmSettings,
     engine: EngineName,
+    defaults_checksum: str,
 ) -> PolicySnapshot | None:
     """Build the in-memory snapshot of one arm; ``legacy`` keeps the pre-#163 envelope."""
     if arm == "legacy":
@@ -273,11 +276,8 @@ def _policy_snapshot(
         builtin_exclusions_version=BUILTIN_EXCLUSIONS_VERSION,
         priority_matcher_version="priority-matcher/v1",
         service_defaults_rule_version_id=uuid5(_EVAL_POLICY_NAMESPACE, "service-defaults"),
-        # MERGE HAZARD (#163 / #230): after #230, PromptBuilder._render_service_defaults
-        # accepts only the pinned per-language checksum. Whichever PR lands second sets
-        # DEFAULT_BACKEND_V1_CHECKSUM / DEFAULT_FRONTEND_V1_CHECKSUM here by case language and
-        # adopts #230's new check ids; until then the eval snapshot carries this label.
-        defaults_checksum="eval-default-rule-files",
+        # Mirrors RuleVersion.checksum in production: the pin of the case's default rule file.
+        defaults_checksum=defaults_checksum,
         prompt_bindings=make_complete_prompt_bindings(),
         execution_profile=make_complete_execution_profile(
             engine,
@@ -450,6 +450,14 @@ def _effective_settings(settings: LlmSettings, engine: EngineName) -> dict[str, 
 
 
 @dataclass(frozen=True)
+class _LanguageRules:
+    """One language's parsed default rule file and the checksum that file is pinned under."""
+
+    rules: tuple[ReviewRule, ...]
+    defaults_checksum: str
+
+
+@dataclass(frozen=True)
 class _CaptureInputs:
     """Provenance and prompt inputs, resolved and validated before the first model call."""
 
@@ -460,7 +468,7 @@ class _CaptureInputs:
     static_inputs: list[str]
     static_digest: str
     corpus_digest: str
-    rules_by_language: dict[str, tuple[ReviewRule, ...]]
+    rules_by_language: dict[str, _LanguageRules]
     effective_settings: dict[str, object]
     recorded_at: str
 
@@ -474,14 +482,14 @@ def _relative_input(path: Path) -> str:
 
 def _selected_rule_sets(
     records: list[tuple[Path, dict[str, Any]]], backend_rules: Path, frontend_rules: Path
-) -> list[tuple[Path, tuple[str, ...]]]:
-    """Each default rule file whose languages occur in the corpus, with those languages."""
+) -> list[tuple[Path, str, tuple[str, ...]]]:
+    """Each default rule file whose languages occur in the corpus, its pin and those languages."""
     languages = {record["language"] for _, record in records}
     return [
-        (rule_path, matching)
-        for rule_path, supported in (
-            (backend_rules, ("python",)),
-            (frontend_rules, ("typescript", "tsx")),
+        (rule_path, checksum, matching)
+        for rule_path, checksum, supported in (
+            (backend_rules, DEFAULT_BACKEND_V1_CHECKSUM, ("python",)),
+            (frontend_rules, DEFAULT_FRONTEND_V1_CHECKSUM, ("typescript", "tsx")),
         )
         if (matching := tuple(language for language in supported if language in languages))
     ]
@@ -506,13 +514,13 @@ def _input_digests(
 
 
 def _rules_by_language(
-    rule_sets: list[tuple[Path, tuple[str, ...]]],
-) -> dict[str, tuple[ReviewRule, ...]]:
-    by_language: dict[str, tuple[ReviewRule, ...]] = {}
-    for rule_path, matching in rule_sets:
-        parsed_rules = _rules(rule_path)
+    rule_sets: list[tuple[Path, str, tuple[str, ...]]],
+) -> dict[str, _LanguageRules]:
+    by_language: dict[str, _LanguageRules] = {}
+    for rule_path, checksum, matching in rule_sets:
+        parsed = _LanguageRules(_rules(rule_path), checksum)
         for language in matching:
-            by_language[language] = parsed_rules
+            by_language[language] = parsed
     return by_language
 
 
@@ -530,7 +538,7 @@ def _capture_inputs(
     relative_prompt = _relative_input(system_prompt)
     rule_sets = _selected_rule_sets(records, backend_rules, frontend_rules)
     static_inputs, static_digest, corpus_digest = _input_digests(
-        root, records, relative_prompt, [_relative_input(path) for path, _ in rule_sets]
+        root, records, relative_prompt, [_relative_input(path) for path, _, _ in rule_sets]
     )
     prompt_bytes = system_prompt.read_bytes()
     system = prompt_bytes.decode("utf-8")
@@ -581,7 +589,7 @@ async def _record_case(
         case_dir,
         record,
         system=inputs.system,
-        rules=inputs.rules_by_language[record["language"]],
+        rules=inputs.rules_by_language[record["language"]].rules,
         engine=engine,
         commit_prefix=commit_prefix,
         policy_snapshot=policy_snapshot,
@@ -709,11 +717,6 @@ async def record_live(
         raise RecorderError("responses directory must be outside the cases directory")
     if not responses_dir.absolute().parent.is_dir():
         raise RecorderError("responses directory parent must already exist")
-    snapshots = {
-        record["id"]: _policy_snapshot(case_dir, record, policy_arm, settings, engine)
-        for case_dir, record in records
-    }
-    policy_arm_digest = _policy_arm_digest(root, records, policy_arm)
     inputs = _capture_inputs(
         root,
         records,
@@ -724,6 +727,19 @@ async def record_live(
         recorded_at=recorded_at,
         engine=engine,
     )
+    # The snapshot takes its pin from the entry that also supplies the case's rules.
+    snapshots = {
+        record["id"]: _policy_snapshot(
+            case_dir,
+            record,
+            policy_arm,
+            settings,
+            engine,
+            inputs.rules_by_language[record["language"]].defaults_checksum,
+        )
+        for case_dir, record in records
+    }
+    policy_arm_digest = _policy_arm_digest(root, records, policy_arm)
     statuses: dict[str, dict[str, str | bool | None]] = {}
     usage: dict[str, list[dict[str, object]]] = {}
     paths: dict[str, str] = {}
