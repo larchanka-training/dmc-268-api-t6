@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import fields
-from typing import Any
+from typing import Any, cast
 from uuid import UUID
 
 from sqlalchemy import select
@@ -33,6 +33,7 @@ from app.modules.reviews.application.prepare_policy_snapshot import (
     pinned_to_json,
 )
 from app.modules.reviews.application.run_failures import RunCancelled
+from app.modules.reviews.application.verdict import SeverityThresholdValue
 from app.modules.reviews.infrastructure.models import (
     CodeChange,
     PromptVersion,
@@ -126,6 +127,8 @@ class SqlAlchemyPolicySnapshotStore:
                 review_system_id=run.prompt_version_id,
             ),
             execution_profile=self._execution_profile,
+            severity_threshold=cast(SeverityThresholdValue | None, run.severity_threshold),
+            max_comments=run.max_comments,
         )
 
     async def get_staged_documents(self, run_id: UUID) -> tuple[LoadedPolicyDocument, ...]:
@@ -197,6 +200,8 @@ class SqlAlchemyPolicySnapshotStore:
             execution_profile=_profile(row.execution_profile),
             policy_digest=row.policy_digest,
             created_at=row.created_at,
+            severity_threshold=cast(SeverityThresholdValue | None, row.severity_threshold),
+            max_comments=row.max_comments,
         )
 
     async def create_snapshot(self, snapshot: PolicySnapshot) -> PolicySnapshot:
@@ -222,6 +227,8 @@ class SqlAlchemyPolicySnapshotStore:
                 prompt_bindings=pinned_to_json(snapshot.prompt_bindings),
                 execution_profile=pinned_to_json(snapshot.execution_profile),
                 policy_digest=snapshot.policy_digest,
+                severity_threshold=snapshot.severity_threshold,
+                max_comments=snapshot.max_comments,
             )
             # A concurrent worker's snapshot wins; the caller compares the digests.
             .on_conflict_do_nothing(index_elements=[RunPolicySnapshot.run_id])

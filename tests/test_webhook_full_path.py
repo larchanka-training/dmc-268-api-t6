@@ -230,6 +230,8 @@ class RunStore:
             engine="fast",
             rule_version_id=_RULE_ID,
             prompt_version_id=_PROMPT_ID,
+            severity_threshold="all",
+            max_comments=10,
         )
 
     async def insert_webhook_run(

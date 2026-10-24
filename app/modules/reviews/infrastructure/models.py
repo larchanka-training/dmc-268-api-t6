@@ -16,6 +16,7 @@ from sqlalchemy import (
     BOOLEAN,
     CHAR,
     INTEGER,
+    SMALLINT,
     TEXT,
     CheckConstraint,
     DateTime,
@@ -41,6 +42,7 @@ from app.common.infrastructure.db.enums import (
     FindingSeverity,
     FindingSide,
     RunState,
+    SeverityThreshold,
 )
 from app.modules.reviews.application.run_trigger import RunTrigger
 
@@ -186,6 +188,11 @@ class Run(Base):
     __tablename__ = "runs"
     __table_args__ = (
         UniqueConstraint("idempotency_key"),
+        CheckConstraint(
+            "(severity_threshold IS NULL AND max_comments IS NULL) OR "
+            "(severity_threshold IS NOT NULL AND max_comments IS NOT NULL AND max_comments > 0)",
+            name="ck_runs_publication_settings",
+        ),
         CheckConstraint("attempt >= 0", name="ck_runs_attempt_nonnegative"),
         # Same values as RunTrigger; changing them needs a new revision (revisions are frozen).
         CheckConstraint(
@@ -248,6 +255,10 @@ class Run(Base):
     prompt_version_id: Mapped[UUID] = mapped_column(
         ForeignKey("prompt_versions.id"), nullable=False
     )
+    severity_threshold: Mapped[SeverityThreshold | None] = mapped_column(
+        pg_enum(SeverityThreshold, "severity_threshold"), nullable=True
+    )
+    max_comments: Mapped[int | None] = mapped_column(SMALLINT, nullable=True)
     attempt: Mapped[int] = mapped_column(INTEGER, nullable=False, server_default=text("0"))
     message_published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     cancellation_signal_requested_at: Mapped[datetime | None] = mapped_column(
@@ -311,6 +322,13 @@ class RunPolicySnapshot(Base):
     """The immutable policy of a run; its documents are the staged rows of the same run."""
 
     __tablename__ = "run_policy_snapshots"
+    __table_args__ = (
+        CheckConstraint(
+            "(severity_threshold IS NULL AND max_comments IS NULL) OR "
+            "(severity_threshold IS NOT NULL AND max_comments IS NOT NULL AND max_comments > 0)",
+            name="ck_run_policy_snapshots_publication_settings",
+        ),
+    )
 
     run_id: Mapped[UUID] = mapped_column(
         ForeignKey("runs.id", ondelete="CASCADE"), primary_key=True
@@ -336,6 +354,10 @@ class RunPolicySnapshot(Base):
     prompt_bindings: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
     execution_profile: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
     policy_digest: Mapped[str] = mapped_column(CHAR(64), nullable=False)
+    severity_threshold: Mapped[SeverityThreshold | None] = mapped_column(
+        pg_enum(SeverityThreshold, "severity_threshold"), nullable=True
+    )
+    max_comments: Mapped[int | None] = mapped_column(SMALLINT, nullable=True)
     created_at: Mapped[datetime] = timestamp_column()
 
 

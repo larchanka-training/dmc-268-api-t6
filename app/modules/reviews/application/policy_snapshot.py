@@ -17,6 +17,7 @@ from typing import Literal
 from uuid import UUID
 
 from app.modules.reviews.application.context_provenance import SourceRole as SourceRole
+from app.modules.reviews.application.verdict import SeverityThresholdValue
 
 POLICY_SNAPSHOT_SCHEMA_VERSION = 1
 RULES_DOCUMENT_PATH = ".review/rules.md"
@@ -318,6 +319,8 @@ class PolicySnapshot:
     policy_digest: str
     # When the snapshot was stored; it is not part of ``policy_digest``.
     created_at: datetime | None = None
+    severity_threshold: SeverityThresholdValue | None = None
+    max_comments: int | None = None
 
     def __post_init__(self) -> None:
         if self.rules.path != RULES_DOCUMENT_PATH or self.agents.path != AGENTS_DOCUMENT_PATH:
