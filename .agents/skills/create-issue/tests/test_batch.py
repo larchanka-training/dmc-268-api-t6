@@ -28,6 +28,7 @@ import shutil
 import subprocess
 import sys
 import time
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -512,8 +513,11 @@ def test_a_rerun_after_a_failure_creates_nothing_twice_and_ensures_links(
     again, calls = run(tmp_path, data, cfg=cfg_create(b={"number": 2}, c={"number": 3}))
     assert again.returncode == 0, again.stderr
     assert created_keys(calls) == ["b", "c"]
-    # a rerun looks for an issue an earlier run opened and did not record
-    assert [c["argv"][1:] for c in creates(calls)] == [["--adopt-since", started]] * 2
+    # a rerun looks for an issue an earlier run opened and did not record — from two
+    # minutes before the start: GitHub's clock may run behind this machine's
+    since = datetime.strptime(started, "%Y-%m-%dT%H:%M:%SZ") - timedelta(seconds=120)
+    since_flag = ["--adopt-since", since.strftime("%Y-%m-%dT%H:%M:%SZ")]
+    assert [c["argv"][1:] for c in creates(calls)] == [since_flag] * 2
     assert links(calls) == [["acme/api#1", "--blocked-by", "#7"]]
     assert creates(calls)[0]["spec"]["parent"] == "acme/api#1"
     assert creates(calls)[1]["spec"]["blocked_by"] == ["acme/api#2"]
@@ -585,6 +589,24 @@ def test_a_rerun_validates_only_the_items_still_to_create_and_first(tmp_path: Pa
     assert "parent" not in calls[0]["spec"], "local refs are left out of the validation"
 
 
+@pytest.mark.parametrize(
+    "started", ["2026-10-24T12:00:00Z", "2026-10-24T14:00:00+02:00"], ids=["utc", "offset"]
+)
+def test_a_rerun_looks_for_its_own_issue_from_two_minutes_before_the_start(
+    tmp_path: Path, started: str
+) -> None:
+    """started_at is this machine's clock, createdAt GitHub's: a clock up to 120 s ahead
+    must not hide the issue an earlier run opened. The flag is UTC whatever the zone
+    of a hand-edited started_at; the state keeps the start itself."""
+    path = state_path(tmp_path)
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps({"started_at": started, "items": {}}))
+    r, calls = run(tmp_path, batch(item("a")))
+    assert r.returncode == 0, r.stderr
+    assert creates(calls)[0]["argv"][1:] == ["--adopt-since", "2026-10-24T11:58:00Z"]
+    assert state(tmp_path)["started_at"] == started
+
+
 # ─── an exact-title duplicate: adopted on a rerun only, and only the batch's own ─
 def test_a_rerun_adopts_an_open_duplicate_you_opened_since_the_batch_started(
     tmp_path: Path,
@@ -616,35 +638,54 @@ def test_a_rerun_adopts_an_open_duplicate_you_opened_since_the_batch_started(
     "dup",
     [
         {"number": 55, "createdAt": STARTED},  # at the start: at or after it
+        # 120 s before the start: the margin for this machine's clock running ahead
+        {"number": 55, "createdAt": "2026-10-24T11:58:00Z"},
         {"number": 55, "author": "OctoCat"},  # logins compare without case
         {"number": 55, "state": "open"},  # the REST listing's spelling
     ],
-    ids=["created-at-the-start", "login-case", "state-case"],
+    ids=["created-at-the-start", "created-at-the-clock-skew-margin", "login-case", "state-case"],
 )
 def test_the_adoption_rule_at_its_edges(tmp_path: Path, dup: dict[str, Any]) -> None:
+    """The same rule in the validation before the first create and at the create."""
     seed(tmp_path, {})
-    r, _ = run(tmp_path, batch(item("a")), cfg=cfg_create(a={"code": 4, "duplicate": dup}))
+    cfg = cfg_create(a={"dry_duplicate": dup, "code": 4, "duplicate": dup})
+    r, _ = run(tmp_path, batch(item("a")), cfg=cfg)
     assert r.returncode == 0, r.stderr
     assert out(r)["items"][0]["adopted"] is True
 
 
+OWN_HINT = "if it is this batch's own issue, add it to the state file"
+
+
 @pytest.mark.parametrize(
-    "dup,why",
+    "dup,why,own",
     [
-        ({"number": 55, "state": "CLOSED"}, "it is closed"),
-        ({"number": 55, "author": "teammate"}, "it was opened by teammate, not by you (octocat)"),
-        ({"number": 55, "author": None}, "its author or yours is unknown"),
+        ({"number": 55, "state": "CLOSED"}, "it is closed", True),
         (
-            {"number": 55, "createdAt": "2026-10-24T11:59:59Z"},
-            f"it was created before this batch started ({STARTED})",
+            {"number": 55, "author": "teammate"},
+            "it was opened by teammate, not by you (octocat)",
+            False,
         ),
-        ({"number": 55, "createdAt": None}, "it was created before this batch started"),
+        ({"number": 55, "author": None}, "its author or yours is unknown", False),
+        # one second past the 120 s allowed for clock skew
+        (
+            {"number": 55, "createdAt": "2026-10-24T11:57:59Z"},
+            f"it was created more than 120 s before this batch started ({STARTED})",
+            True,
+        ),
+        (
+            {"number": 55, "createdAt": None},
+            "it was created more than 120 s before this batch started",
+            True,
+        ),
     ],
     ids=["closed", "teammate", "no-author", "older", "no-created-at"],
 )
 def test_a_rerun_stops_at_a_duplicate_it_may_not_adopt(
-    tmp_path: Path, dup: dict[str, Any], why: str
+    tmp_path: Path, dup: dict[str, Any], why: str, own: bool
 ) -> None:
+    """Yours on a rerun, it may be the batch's own all the same — closed since, or
+    created while this machine's clock ran further ahead: the stop says how to record it."""
     seed(tmp_path, {"a": entry(API, 1, "a")})
     data = batch(item("a"), item("b"), item("c"))
     r, calls = run(tmp_path, data, cfg=cfg_create(b={"code": 4, "duplicate": dup}))
@@ -655,20 +696,74 @@ def test_a_rerun_stops_at_a_duplicate_it_may_not_adopt(
     assert 'item "b" stopped the batch: an issue with exactly this title already exists: ' in error(
         r
     )
+    assert (OWN_HINT in error(r)) is own
 
 
-def test_the_refused_duplicate_is_named_with_its_state_and_author(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "dup,tail",
+    [
+        (
+            {"number": 55, "state": "CLOSED"},
+            (
+                "not adopted: it is closed — what was created so far is recorded in {path}; if "
+                "it is this batch's own issue, add it to the state file (`items.a`: url, number, "
+                "repo, summary) and rerun; or give the item another title or settle that issue, "
+                "then rerun the same command (recorded items are not created again)"
+            ),
+        ),
+        (
+            {"number": 55, "state": "CLOSED", "author": "teammate"},
+            (
+                "not adopted: it is closed — what was created so far is recorded in {path}; fix "
+                "the cause and rerun the same command (recorded items are not created again)"
+            ),
+        ),
+    ],
+    ids=["yours", "teammates"],
+)
+def test_the_refused_duplicate_is_named_with_its_state_and_author(
+    tmp_path: Path, dup: dict[str, Any], tail: str
+) -> None:
     seed(tmp_path, {})
-    cfg = cfg_create(a={"code": 4, "duplicate": {"number": 55, "state": "CLOSED"}})
-    r, _ = run(tmp_path, batch(item("a")), cfg=cfg)
+    r, _ = run(tmp_path, batch(item("a")), cfg=cfg_create(a={"code": 4, "duplicate": dup}))
     assert r.returncode == 4
     assert error(r) == (
         'item "a" stopped the batch: an issue with exactly this title already exists: '
-        "https://github.com/acme/api/issues/55 (CLOSED, by octocat, created "
-        "2026-10-24T12:05:00Z); not adopted: it is closed — what was created so far is "
-        f"recorded in {state_path(tmp_path)}; fix the cause and rerun the same command "
-        "(recorded items are not created again)"
+        f"https://github.com/acme/api/issues/55 (CLOSED, by {dup.get('author', 'octocat')}, "
+        "created 2026-10-24T12:05:00Z); " + tail.format(path=state_path(tmp_path))
     )
+
+
+def test_the_validation_says_how_to_record_a_refused_issue_that_may_be_the_batchs_own(
+    tmp_path: Path,
+) -> None:
+    """Open and yours, but one second older than the clock-skew margin allows: the way to
+    record it comes first, renaming the item second."""
+    seed(tmp_path, {"a": entry(API, 1, "a")})
+    dup = {"number": 55, "createdAt": "2026-10-24T11:57:59Z"}
+    r, calls = run(tmp_path, batch(item("a"), item("b")), cfg=cfg_create(b={"dry_duplicate": dup}))
+    assert r.returncode == 4
+    assert creates(calls) == [] and links(calls) == [], "nothing runs after the validation"
+    assert error(r) == (
+        'item "b": an issue with exactly this title already exists: '
+        "https://github.com/acme/api/issues/55 (OPEN, by octocat, created "
+        "2026-10-24T11:57:59Z); not adopted: it was created more than 120 s before this batch "
+        f"started ({STARTED}) — nothing was created; if it is this batch's own issue, add it "
+        f"to the state file {state_path(tmp_path)} (`items.b`: url, number, repo, summary) "
+        "and rerun; or give the item another title or settle that issue, then rerun"
+    )
+
+
+def test_a_first_run_offers_no_issue_for_the_state_file(tmp_path: Path) -> None:
+    """Nothing can be the batch's own yet — and the state file does not exist."""
+    cfg = cfg_create(a={"dry_duplicate": {"number": 55}})
+    r, _ = run(tmp_path, batch(item("a")), cfg=cfg)
+    assert r.returncode == 4
+    assert error(r).endswith(
+        "did not create it — nothing was created; give the item another title or settle that "
+        "issue, then rerun"
+    )
+    assert not state_path(tmp_path).exists()
 
 
 def test_a_first_run_never_adopts_a_duplicate(tmp_path: Path) -> None:
@@ -687,6 +782,7 @@ def test_a_first_run_never_adopts_a_duplicate(tmp_path: Path) -> None:
         "; not adopted: this is the first run of the batch, so the batch did not create it"
         in error(r)
     )
+    assert OWN_HINT not in error(r), "yours, but on a first run never the batch's own"
     assert links(calls) == []
 
 
@@ -774,20 +870,23 @@ def test_the_preview_says_which_duplicate_a_rerun_adopts_and_which_stops_it(
 ) -> None:
     seed(tmp_path, {"a": entry(API, 1, "a")})
     cfg = cfg_create(
-        a={"dry_duplicate": {"number": 1}},  # its own recorded issue: not a duplicate
-        b={"dry_duplicate": {"number": 55}},
+        a={"dry_code": 2},  # recorded: its dry-run never runs
+        b={"dry_duplicate": {"number": 55, "createdAt": "2026-10-24T11:58:00Z"}},
         c={"dry_duplicate": {"number": 8, "state": "CLOSED", "author": "teammate"}},
+        d={"dry_duplicate": {"number": 9, "createdAt": "2026-10-24T11:57:59Z"}},
     )
-    r, calls = run(tmp_path, batch(item("a"), item("b"), item("c")), "--dry-run", cfg=cfg)
+    data = batch(item("a"), item("b"), item("c"), item("d"))
+    r, calls = run(tmp_path, data, "--dry-run", cfg=cfg)
     assert r.returncode == 0, r.stderr
-    assert creates(calls) == []
+    assert [c["spec"]["summary"] for c in calls] == ["[x] b", "[x] c", "[x] d"]
     assert (
         "\n\nAlready created, only their links are ensured:\n"
         "- `a` — [x] a — https://github.com/acme/api/issues/1\n"
         "\nAn issue with exactly the same title exists:\n"
         "- `b`: would adopt #55 — https://github.com/acme/api/issues/55\n"
         "- `c`: would stop: duplicate #8 (CLOSED, teammate) — https://github.com/acme/api/issues/8\n"
-        "\n# 1. `a` — [x] a\n"
+        "- `d`: would stop: duplicate #9 (OPEN, octocat) — https://github.com/acme/api/issues/9\n"
+        "\n# 2. `b` — [x] b\n"
     ) in r.stdout
 
 
@@ -1042,13 +1141,41 @@ def test_a_dry_run_that_fails_for_one_item_fails_the_preview(tmp_path: Path) -> 
 
 
 def test_a_preview_names_the_items_already_created(tmp_path: Path) -> None:
+    """Validated remotely are the items the run would validate — those still to create;
+    a recorded item keeps its row, its body is the issue at its url."""
     seed(tmp_path, {"a": entry(API, 1, "a")})
-    r, _ = run(tmp_path, batch(item("a"), item("b")), "--dry-run")
+    cfg = cfg_create(a={"dry_code": 2})  # would fail the preview if it ran
+    r, calls = run(tmp_path, batch(item("a"), item("b", parent="@a")), "--dry-run", cfg=cfg)
     assert r.returncode == 0, r.stderr
-    assert (
-        "\nAlready created, only their links are ensured:\n"
+    assert [(c["argv"][1:], c["spec"]["summary"]) for c in calls] == [(["--dry-run"], "[x] b")]
+    assert r.stdout == (
+        "Batch `b1`: 2 issues, in creation order.\n"
+        "\n"
+        "| # | Key | Repo | Type | Title | Parent | Blocked by | Milestone | Status |\n"
+        "| --- | --- | --- | --- | --- | --- | --- | --- | --- |\n"
+        "| 1 | `a` | acme/api | Story | [x] a | — | — | — | — |\n"
+        "| 2 | `b` | acme/api | Story | [x] b | @a | — | — | Todo |\n"
+        "\n"
+        "Already created, only their links are ensured:\n"
         "- `a` — [x] a — https://github.com/acme/api/issues/1\n"
-    ) in r.stdout
+        "\n"
+        "# 2. `b` — [x] b\n"
+        "\n"
+        "body of [x] b\n"
+    )
+
+
+def test_the_preview_of_a_finished_batch_runs_no_dry_run(tmp_path: Path) -> None:
+    seed(tmp_path, {"a": entry(API, 1, "a"), "b": entry(API, 2, "b")})
+    cfg = cfg_create(a={"dry_code": 2}, b={"dry_code": 2})
+    r, calls = run(tmp_path, batch(item("a"), item("b")), "--dry-run", cfg=cfg)
+    assert r.returncode == 0, r.stderr
+    assert calls == []
+    assert r.stdout.endswith(
+        "\n\nAlready created, only their links are ensured:\n"
+        "- `a` — [x] a — https://github.com/acme/api/issues/1\n"
+        "- `b` — [x] b — https://github.com/acme/api/issues/2\n"
+    )
 
 
 def test_a_title_with_a_pipe_does_not_break_the_table(tmp_path: Path) -> None:
@@ -1286,6 +1413,23 @@ def test_compare_shape_refuses_a_file_that_is_not_a_batch(tmp_path: Path) -> Non
     r = compare(tmp_path, example("01-single"), {"items": "x"})
     assert r.returncode == 2
     assert "candidate" in json.loads(r.stderr)["error"]
+
+
+@pytest.mark.parametrize(
+    "parts,kind",
+    [(5, "int"), ("x", "str"), ({}, "dict"), (None, "null")],
+    ids=["number", "string", "object", "null"],
+)
+def test_compare_shape_refuses_parts_that_are_not_a_list(
+    tmp_path: Path, parts: Any, kind: str
+) -> None:
+    """A string or an object would be counted by its characters or keys."""
+    r = compare(tmp_path, example("01-single"), batch(item("a", parts=parts)))
+    assert r.returncode == 2
+    assert r.stdout == ""
+    assert json.loads(r.stderr) == {
+        "error": f'candidate: item "a": "parts" must be a list, got {kind}'
+    }
 
 
 def test_a_status_together_with_no_board_is_refused_before_anything_runs(tmp_path: Path) -> None:

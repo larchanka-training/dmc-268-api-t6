@@ -893,8 +893,8 @@ def test_adopt_since_reports_your_issue_opened_since_then_as_the_duplicate(
         "user": "octocat",
     }
     assert json.loads(r.stderr)["error"] == (
-        "an issue with exactly this title, opened by you since this batch started "
-        "(2026-10-24T12:00:00Z), already exists in acme/sandbox: "
+        "an issue with exactly this title, opened by you at or after 2026-10-24T12:00:00Z, "
+        "already exists in acme/sandbox: "
         "https://github.com/acme/sandbox/issues/40 — not created again"
     )
     assert "issue_create" not in fixture_calls(tmp_path)
