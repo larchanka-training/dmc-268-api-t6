@@ -732,10 +732,10 @@ class _Selection:
                     continue
                 for binding in item.names:
                     # By path alone: a binding that cannot reach the changed file is not
-                    # resolved, so no read is spent on a module the edge is not about.
-                    reaches = head_path in target.files or (
-                        hint.kind is EdgeKind.USES_IMPORTED
-                        and _binds_submodule(facts.language, binding, target, head_path, self._tree)
+                    # resolved, so no read is spent on a module the edge is not about. The
+                    # indexer gives `from pkg import sub` an `imports` edge to the submodule.
+                    reaches = head_path in target.files or _binds_submodule(
+                        facts.language, binding, target, head_path, self._tree
                     )
                     if not reaches:
                         continue
