@@ -413,6 +413,44 @@ inside, so L4 behaviour does not change.
 
 **Dependencies:** PR 1 opened.
 
+### Task 1b: Python attribute names are not name reads
+
+**Commit:** `fix(reviews): stop reading a Python attribute name as an imported binding (#144)`
+
+**Decision (user, 24.10.2026):** fix it in PR 2, as the commit right after Task 1, with a
+facts query version bump. The `attribute` field of a Python `attribute` node was a name
+read, so with `from .store import save` the call `repository.save()` resolved to
+`pkg/store.py:save` in L4 and gave a false `uses_imported` edge in the indexer (AC10).
+
+**Files:**
+
+- `app/modules/reviews/infrastructure/tree_sitter_facts.py` (`_references`, `QUERY_VERSION`);
+- `tests/test_tree_sitter_facts.py`, `tests/test_ast_resolution.py`,
+  `tests/test_code_index_resolution.py`; the `facts/v1` pins in
+  `tests/test_build_repository_index.py` and `tests/test_code_index_worker.py`;
+- SD §7.4, CVS §3.3 and §3.5 (one sentence each); this file and `144-plan.md`.
+
+**What to do:** in Python an `identifier` is not a name read when it is the attribute of an
+`attribute`, the name of a `keyword_argument`, and the same class found by the sweep: the
+keyword of a `keyword_pattern`, a later segment of a pattern `dotted_name`, a method name,
+any name of an import statement. `member_references` stay as they are. `QUERY_VERSION`
+`facts/v1` → `facts/v2`; the profile change makes the #143 reconcile rebuild published
+indexes as full; the Redis AST-facts key carries the profile.
+
+**Tests to add:**
+
+- facts: `repository.save()` → no `save` reference, member `(repository, save)` kept;
+  `f(save=1)` → no `save`; a bare `save()` is still a reference; the sweep positions;
+- L4: the receiver test extended to Python `from .store import save`; a bare call resolves;
+- indexer: the same file gives only the `imports` edge.
+
+**Done when:**
+
+- [x] the RED run and the GREEN run are recorded;
+- [x] common verification is green.
+
+**Dependencies:** Task 1.
+
 ### Task 2: Graph hints in one repeatable-read transaction ⚑
 
 **Commit:** `feat(code_index): read graph hints in one repeatable-read transaction (#144)`
