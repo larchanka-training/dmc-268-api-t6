@@ -8,9 +8,11 @@ _contents_, and they are what makes an issue useful to whoever picks it up.
 Spec keys at the top level: `repo`, `type`, `lang`, `summary`, `as_role`, `i_want`,
 `so_that`, `background`, `scope`, `acceptance_criteria`, `dependencies`, `dod`,
 `references`, `environment`, `steps`, `expected`, `actual`, `severity`, `labels`,
-`assignees`, `milestone`, `kickoff`. Any other key is a hard error, as is a value of the
-wrong type (every list field is a list of strings) and an unclosed code fence in a prose
-field.
+`assignees`, `milestone`, `kickoff`, `parent`, `blocked_by`, `status`. Any other key is a
+hard error, as is a value of the wrong type (every list field is a list of strings) and an
+unclosed code fence in a prose field. `milestone` must be open in the target repo and
+`status` must be an option of the board's Status field (default `Todo`); both are checked
+before the create.
 
 ## Type and label
 
@@ -86,9 +88,23 @@ actually blocks them will get it wrong:
 }
 ```
 
-Labels are free text: say what the group means to the reader. Where the tracker has
-native links (sub-issues, linked PRs), set those too — the body explains _why_, the link
-is what makes it visible on the other issue.
+Labels are free text: say what the group means to the reader.
+
+Native links come from two spec keys, not from the body: `parent` (one ref — the issue
+becomes its sub-issue; same owner only) and `blocked_by` (a list of refs). A ref is `#N`
+(the spec's repo) or `OWNER/REPO#N`, so a blocker may live in the other team repo. The
+script sets them after the create and reads each back (`hosts.md`). The body still says
+_why_ each one matters — the link is what makes it visible on the other issue. "Related,
+not blocking" has no native link on GitHub and stays text only:
+
+```json
+"parent": "#11",
+"blocked_by": ["acme/shared#4"],
+"dependencies": {
+  "Blocked by": ["acme/shared#4 — the client this work calls, not released yet"],
+  "Related, not blocking": ["acme/sandbox#12 — shares the tooling, gates nothing here"]
+}
+```
 
 ## Definition of Done
 

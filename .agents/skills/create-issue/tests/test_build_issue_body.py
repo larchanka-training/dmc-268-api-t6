@@ -6,7 +6,8 @@ pure function call or a subprocess exit code.
 Covers: golden bodies per type, the two unconditionally-emitted sections,
 fail-closed validation (including keys the emitter does not know), markdown
 section forgery, the type-to-label mapping and the CLI arg vector, non-ASCII
-passthrough and the language-dependent prose.
+passthrough, the language-dependent prose, and the native-link keys (`parent`,
+`blocked_by`, `status`) with `--emit-links`.
 """
 # SYNC: mirrored in dmc-268-{ui,api}-t6/.agents/skills/create-issue/tests/test_build_issue_body.py
 
@@ -495,3 +496,119 @@ def test_dependencies_groups_are_labelled_in_order() -> None:
     sec = _deps_section({"Blocking": ["#1"], "Not blocking": ["#2"]})
     assert sec.index("**Blocking:**") < sec.index("**Not blocking:**")
     assert "- #2" in sec
+
+
+# ─── native links, milestone and board status ───────────────────────────────
+LINKED: dict[str, Any] = {
+    "parent": "#5",
+    "blocked_by": ["other/lib#7", "#9"],
+    "status": "In Progress",
+    "milestone": "Sprint 3",
+}
+
+
+def test_link_keys_do_not_change_the_body() -> None:
+    """The Dependencies section stays the author's prose: the native links are set
+    after the create, the body still says why."""
+    for spec in (STORY, BUG, STORY_KICKOFF):
+        assert bib.render_body(dict(spec, **LINKED)) == bib.render_body(
+            dict(spec, milestone="Sprint 3")
+        )
+
+
+def test_link_keys_add_no_flag_to_the_arg_vector() -> None:
+    linked = run(mini(**LINKED), "--emit-args")
+    plain = run(mini(milestone="Sprint 3"), "--emit-args")
+    assert linked.returncode == 0, linked.stderr
+    assert json.loads(linked.stdout) == json.loads(plain.stdout)
+
+
+def test_emit_links_resolves_short_refs_parent_first() -> None:
+    r = run(dict(mini(repo="acme/sandbox"), **LINKED), "--emit-links")
+    assert r.returncode == 0, r.stderr
+    assert json.loads(r.stdout) == [
+        {"kind": "parent", "repo": "acme/sandbox", "number": 5},
+        {"kind": "blocked_by", "repo": "other/lib", "number": 7},
+        {"kind": "blocked_by", "repo": "acme/sandbox", "number": 9},
+    ]
+
+
+def test_emit_links_without_links_is_an_empty_list() -> None:
+    r = run(mini(), "--emit-links")
+    assert r.returncode == 0, r.stderr
+    assert json.loads(r.stdout) == []
+
+
+def test_blocked_by_alone_keeps_its_order() -> None:
+    r = run(mini(repo="acme/sandbox", blocked_by=["#3", "x/y#1"]), "--emit-links")
+    assert [(x["repo"], x["number"]) for x in json.loads(r.stdout)] == [
+        ("acme/sandbox", 3),
+        ("x/y", 1),
+    ]
+
+
+def test_parent_owner_is_compared_case_insensitively() -> None:
+    r = run(mini(repo="Acme/sandbox", parent="acme/other#5"), "--emit-links")
+    assert r.returncode == 0, r.stderr
+    assert json.loads(r.stdout) == [{"kind": "parent", "repo": "acme/other", "number": 5}]
+
+
+def test_blocked_by_may_point_at_any_owner() -> None:
+    r = run(mini(repo="acme/sandbox", blocked_by=["stranger/repo#1"]), "--emit-links")
+    assert r.returncode == 0, r.stderr
+
+
+@pytest.mark.parametrize(
+    "fields,needle",
+    [
+        # only "#N" and "OWNER/REPO#N", N a positive integer
+        ({"parent": "5"}, '"parent" is not an issue ref'),
+        ({"parent": "#0"}, '"parent" is not an issue ref'),
+        ({"parent": "#01"}, '"parent" is not an issue ref'),
+        ({"parent": "#-1"}, '"parent" is not an issue ref'),
+        ({"parent": ""}, '"parent" is not an issue ref'),
+        ({"parent": "#5 "}, '"parent" is not an issue ref'),
+        ({"parent": "acme/sandbox"}, '"parent" is not an issue ref'),
+        ({"parent": "acme/sandbox#"}, '"parent" is not an issue ref'),
+        ({"parent": "a/b/c#5"}, '"parent" is not an issue ref'),
+        ({"parent": "../x#5"}, '"parent" is not an issue ref'),
+        ({"parent": "https://github.com/a/b/issues/5"}, '"parent" is not an issue ref'),
+        ({"parent": "#5\n"}, '"parent" is not an issue ref'),
+        ({"blocked_by": ["#x"]}, '"blocked_by" is not an issue ref'),
+        ({"blocked_by": ["#3", "7"]}, "'7'"),
+        # types: one ref for the parent (an issue has one), a list for the blockers
+        ({"parent": 5}, '"parent" must be a string'),
+        ({"parent": ["#5"]}, '"parent" must be a string'),
+        ({"blocked_by": "#5"}, '"blocked_by" must be a list of strings'),
+        ({"blocked_by": [5]}, '"blocked_by" must be a list of strings'),
+        ({"blocked_by": ["#5", " "]}, "must not contain blank entries"),
+        # "#5" and "a/b#5" are the same issue
+        ({"blocked_by": ["#5", "a/b#5"]}, '"blocked_by" lists a/b#5 more than once'),
+        ({"blocked_by": ["x/y#5", "X/Y#5"]}, "more than once"),
+        # a sub-issue shares its parent's owner
+        ({"parent": "other/b#5"}, "owner"),
+        # status: a board option name, one line
+        ({"status": 3}, '"status" must be a string'),
+        ({"status": "In\nProgress"}, '"status" must be a single line'),
+        ({"status": " "}, '"status" must not be blank'),
+    ],
+)
+def test_invalid_link_fields_exit_2_with_a_message(fields: dict[str, Any], needle: str) -> None:
+    r = run(mini(**fields), "--emit-links")
+    assert r.returncode == 2
+    assert r.stdout == ""
+    assert "Traceback" not in r.stderr
+    assert needle in json.loads(r.stderr)["error"]
+
+
+def test_a_bad_ref_also_stops_the_plain_body() -> None:
+    """issue-create.sh renders the body first: a bad ref must stop it there too."""
+    r = run(mini(parent="5"))
+    assert r.returncode == 2
+    assert r.stdout == ""
+
+
+def test_emit_args_and_emit_links_are_exclusive() -> None:
+    r = run(mini(), "--emit-args", "--emit-links")
+    assert r.returncode == 2
+    assert "usage" in json.loads(r.stderr)["error"]
