@@ -101,8 +101,9 @@ after the create, set that edge from the other side with
 (a short `#N` resolves against `<other>`'s repo). The body still says _why_ each one
 matters, under a label naming the same direction as the edge ("Blocked by" / «Блокирующие»
 for `blocked_by`, "Blocks" / «Блокирует» for the reverse) — the link is what makes it
-visible on the other issue. "Related, not blocking" has no native link on GitHub and stays
-text only:
+visible on the other issue. A blocked-by group ("Blocked by", «Блокирующие», «Блокируется»,
+"Blockiert durch") with no `blocked_by` gets a warning: that link would be missing.
+"Related, not blocking" has no native link on GitHub and stays text only:
 
 ```json
 "parent": "#11",
