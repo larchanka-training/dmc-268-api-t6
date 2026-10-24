@@ -191,7 +191,8 @@ def context_summary(diff_map: DiffMap, payload: ReviewContextPayload) -> dict[st
 
 @dataclass(frozen=True)
 class _RagStep:
-    """What the RAG gate found, kept until ``context.build`` is recorded (M8)."""
+    """What the RAG gate found, kept until ``context.build`` is recorded: the gate runs
+    before the build, its step follows the build's in the trace."""
 
     request: dict[str, Any]
     response: dict[str, Any]
@@ -209,7 +210,8 @@ def _rag_readiness(readiness: RagReadiness) -> tuple[dict[str, Any], dict[str, A
         return None
     response: dict[str, Any]
     if index.usable:
-        # No pinned review prompt has a retrieved section until v5 (M6).
+        # Recorded as `prompt_version` until a prompt version with a retrieved section
+        # exists; PR 2 adds that check here.
         response = {"outcome": "not_ready", "reason": "prompt_version"}
     else:
         reason = index.not_ready_reason
@@ -483,7 +485,8 @@ class ReviewContextStage:
         return _RagStep(request, response, started_at, int((time.monotonic() - started) * 1000))
 
     async def _record_rag(self, run_id: UUID, step: _RagStep | None) -> None:
-        """Record ``context.rag`` once per attempt, after ``context.build`` (M8)."""
+        """Record ``context.rag`` once per attempt, right after the stage's ``context.build``,
+        also when the build failed and was caught."""
         if step is None or self._trace is None:
             return
         await self._trace.record(
