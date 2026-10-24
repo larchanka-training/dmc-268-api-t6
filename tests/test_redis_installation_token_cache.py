@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -32,6 +33,7 @@ class FakeRedis:
     values: dict[str, str | bytes] = field(default_factory=dict)
     lifetimes: dict[str, int | None] = field(default_factory=dict)
     broken: bool = False
+    write_broken: bool = False
 
     async def get(self, name: str) -> bytes | str | None:
         if self.broken:
@@ -39,7 +41,7 @@ class FakeRedis:
         return self.values.get(name)
 
     async def set(self, name: str, value: str, ex: int | None = None) -> object:
-        if self.broken:
+        if self.broken or self.write_broken:
             # A real client error may quote the command; the cache must not log it.
             raise ConnectionError(f"redis is down while writing {value}")
         self.values[name] = value
@@ -53,6 +55,7 @@ class _GitHub:
 
     posts: list[int] = field(default_factory=list)
     lifetime_seconds: int = 3600
+    now: Callable[[], float] = field(default=lambda: _NOW, repr=False)
 
     def handler(self, request: httpx.Request) -> httpx.Response:
         installation = int(request.url.path.split("/")[3])
@@ -61,7 +64,9 @@ class _GitHub:
             201,
             json={
                 "token": f"secret-{installation}-{len(self.posts)}",
-                "expires_at": datetime.fromtimestamp(_NOW + self.lifetime_seconds, UTC).isoformat(),
+                "expires_at": datetime.fromtimestamp(
+                    self.now() + self.lifetime_seconds, UTC
+                ).isoformat(),
             },
         )
 
@@ -215,3 +220,140 @@ def test_both_workers_receive_the_redis_address(compose_file: str, service: str)
 
     assert block is not None
     assert "      REDIS_URL: redis://" in block.group(1)
+
+
+def test_clean_redis_misses_reuse_local_token_when_writes_fail(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    redis, github = FakeRedis(write_broken=True), _GitHub()
+
+    async def scenario() -> list[str]:
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(github.handler), base_url="https://api.github.com"
+        ) as client:
+            provider = GitHubAppInstallationAccessTokenProvider(
+                client=client,
+                app_id="123",
+                private_key="test-private-key",
+                jwt_encoder=lambda claims, private_key: "app-jwt",
+                cache=_redis_cache(redis),
+                now=lambda: _NOW,
+            )
+            return [await provider.get_installation_access_token(17) for _ in range(3)]
+
+    with caplog.at_level(logging.WARNING):
+        tokens = asyncio.run(scenario())
+
+    assert github.posts == [17]
+    reused_one_token = len(set(tokens)) == 1
+    assert reused_one_token, "valid local token must serve subsequent requests"
+    assert len(redis.values) == 0
+    assert len(caplog.records) == 1
+    warning_is_sanitized = caplog.records[0].getMessage() == (
+        "Installation token cache write failed installation=17 error=ConnectionError"
+    )
+    assert warning_is_sanitized, "cache warning must report only operation, installation and type"
+    # The fake exception quotes the token. Neither rendered logs nor saved logging
+    # metadata may preserve it, and no traceback may expose the Redis command.
+    token_absent_from_logs = all(token not in caplog.text for token in tokens)
+    token_absent_from_metadata = all(
+        token not in repr(record.__dict__) for token in tokens for record in caplog.records
+    )
+    assert token_absent_from_logs, "logs must omit installation credentials"
+    assert token_absent_from_metadata, "logging metadata must omit installation credentials"
+    assert all(record.exc_info is None and record.exc_text is None for record in caplog.records)
+
+
+def test_a_cold_clean_redis_miss_issues_a_token() -> None:
+    redis, github = FakeRedis(), _GitHub()
+
+    async def scenario() -> str:
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(github.handler), base_url="https://api.github.com"
+        ) as client:
+            provider = GitHubAppInstallationAccessTokenProvider(
+                client=client,
+                app_id="123",
+                private_key="test-private-key",
+                jwt_encoder=lambda claims, private_key: "app-jwt",
+                cache=_redis_cache(redis),
+                now=lambda: _NOW,
+            )
+            return await provider.get_installation_access_token(17)
+
+    token = asyncio.run(scenario())
+
+    assert github.posts == [17]
+    received_issued_token = token == "secret-17-1"
+    assert received_issued_token, "a cold miss must return the issued installation credential"
+    assert redis.lifetimes == {"token:17": 3540}
+
+
+@dataclass
+class _Clock:
+    timestamp: float = _NOW
+
+    def __call__(self) -> float:
+        return self.timestamp
+
+
+@pytest.mark.parametrize(
+    ("elapsed_seconds", "expected_posts", "expected_reused"),
+    [(3539, [17], True), (3540, [17, 17], False), (3541, [17, 17], False), (3601, [17, 17], False)],
+    ids=["before-skew", "at-skew", "inside-skew", "expired"],
+)
+def test_local_fallback_expires_at_the_safety_skew_boundary(
+    elapsed_seconds: int, expected_posts: list[int], expected_reused: bool
+) -> None:
+    clock = _Clock()
+    redis, github = FakeRedis(write_broken=True), _GitHub(now=clock)
+    cache = RedisInstallationAccessTokenCache(redis, now=clock)
+
+    async def scenario() -> bool:
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(github.handler), base_url="https://api.github.com"
+        ) as client:
+            provider = GitHubAppInstallationAccessTokenProvider(
+                client=client,
+                app_id="123",
+                private_key="test-private-key",
+                jwt_encoder=lambda claims, private_key: "app-jwt",
+                cache=cache,
+                now=clock,
+            )
+            first = await provider.get_installation_access_token(17)
+            clock.timestamp += elapsed_seconds
+            second = await provider.get_installation_access_token(17)
+            return first == second
+
+    reused = asyncio.run(scenario())
+
+    assert github.posts == expected_posts
+    assert reused is expected_reused
+    assert len(redis.values) == 0
+
+
+def test_a_redis_hit_takes_precedence_over_a_valid_local_token() -> None:
+    redis, github = FakeRedis(write_broken=True), _GitHub()
+
+    async def scenario() -> bool:
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(github.handler), base_url="https://api.github.com"
+        ) as client:
+            provider = GitHubAppInstallationAccessTokenProvider(
+                client=client,
+                app_id="123",
+                private_key="test-private-key",
+                jwt_encoder=lambda claims, private_key: "app-jwt",
+                cache=_redis_cache(redis),
+                now=lambda: _NOW,
+            )
+            local = await provider.get_installation_access_token(17)
+            redis.values["token:17"] = "redis-shared-credential"
+            selected = await provider.get_installation_access_token(17)
+            return selected == "redis-shared-credential" and selected != local
+
+    selected_redis_token = asyncio.run(scenario())
+
+    assert github.posts == [17]
+    assert selected_redis_token, "a Redis hit must take precedence over the local credential"
