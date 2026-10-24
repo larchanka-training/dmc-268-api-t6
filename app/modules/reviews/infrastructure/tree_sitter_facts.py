@@ -30,7 +30,7 @@ from app.modules.reviews.application.ast_symbols import (
 )
 from app.modules.reviews.application.context_provenance import LineRange
 
-QUERY_VERSION = "facts/v1"
+QUERY_VERSION = "facts/v2"
 _PACKAGES = {
     AstLanguage.PYTHON: "tree-sitter-python",
     AstLanguage.TYPESCRIPT: "tree-sitter-typescript",
@@ -52,6 +52,16 @@ _JS_FUNCTIONS = frozenset(
 _JS_CLASSES = frozenset({"class_declaration", "abstract_class_declaration", "class"})
 _JS_METHODS = frozenset({"method_definition", "method_signature", "abstract_method_signature"})
 _REFERENCE_TYPES = frozenset({"identifier", "type_identifier", "package_identifier"})
+_PYTHON_IMPORTS = frozenset(
+    {"import_statement", "import_from_statement", "future_import_statement"}
+)
+_PYTHON_LABEL_OWNERS = _PYTHON_IMPORTS | {
+    "attribute",
+    "keyword_argument",
+    "keyword_pattern",
+    "dotted_name",
+    "function_definition",
+}
 
 
 class ParseTimeout(Exception):
@@ -122,6 +132,35 @@ def _walk(node: Node) -> Iterator[Node]:
 
 def _unquote(node: Node) -> str:
     return _text(node).strip("\"'`")
+
+
+def _python_labels(node: Node) -> Iterator[Node]:
+    """Identifiers under ``node`` that are not name reads.
+
+    Each names an attribute, a keyword, a method or a module rather than reading a
+    binding: ``save`` in ``repository.save()`` or ``f(save=1)``.
+    """
+    kind = node.type
+    if kind == "attribute":
+        yield from node.children_by_field_name("attribute")
+    elif kind == "keyword_argument":
+        yield from node.children_by_field_name("name")
+    elif kind == "keyword_pattern":
+        yield from node.named_children[:1]
+    elif kind == "dotted_name":
+        # Outside an import only a pattern has one (`case Color.RED`): the rest are attributes.
+        yield from node.named_children[1:]
+    elif kind in _PYTHON_IMPORTS:
+        # An import reads no binding: its names are module paths and the names it binds.
+        yield from (item for item in _walk(node) if item.type == "identifier")
+    elif kind == "function_definition":
+        # A method name is an attribute of its class; a function name stays a binding.
+        block = node.parent
+        if block is not None and block.type == "decorated_definition":
+            block = block.parent
+        owner = block.parent if block is not None else None
+        if owner is not None and owner.type == "class_definition":
+            yield from node.children_by_field_name("name")
 
 
 class _Extractor:
@@ -244,10 +283,16 @@ class _Extractor:
         names: set[str] = set()
         members: set[tuple[str, str]] = set()
         bindings: set[str] = set()
+        # A label is met after the node that names it, so it is marked before it is read.
+        labels: set[int] = set()
+        python = self._language is AstLanguage.PYTHON
         for current in _walk(node):
             kind = current.type
+            if python and kind in _PYTHON_LABEL_OWNERS:
+                labels.update(item.id for item in _python_labels(current))
             if kind in _REFERENCE_TYPES:
-                names.add(_text(current))
+                if current.id not in labels:
+                    names.add(_text(current))
             elif kind in {"attribute", "member_expression", "selector_expression"}:
                 owner = current.child_by_field_name("object") or current.child_by_field_name(
                     "operand"

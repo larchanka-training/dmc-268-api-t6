@@ -412,6 +412,10 @@ free number at commit time), `down_revision = "20261020_0037"`.
 Branch `feat/144-rag-context-provider` on PR 1. AC1, AC2, AC3, AC4 (payload), AC7, AC9,
 AC10.
 
+Decision (user, 24.10): Task 1b, right after Task 1, stops reading a Python attribute name
+as an imported binding (`repository.save()` → `save`) and bumps `facts/v1` → `facts/v2`;
+the parser profile changes, so the #143 reconcile rebuilds published indexes as full.
+
 ### Where
 
 - In `BuildReviewContext.execute`, after L4 and before the `finally`
@@ -587,6 +591,8 @@ the database and the vhost.
 - **`old_revision_unknown` (PR 2; decided by the coordinator, 23.10).** A broken-reference candidate without
   `diff_old_sha` is dropped with this existing reason (M7); it joins the `dropped` keys of
   PIPELINE `:173`.
+- **Extractor (PR 2; decided by the user, 24.10).** Scope touches the #130 extractor: Task 1b
+  changes the Python name reads of `tree_sitter_facts.py` and bumps it to `facts/v2`.
 
 ## Risks
 
