@@ -1,0 +1,162 @@
+name: Monitoring acceptance
+
+# Acceptance evidence of the monitoring stack on staging (#186, docs/MONITORING.md §10): stack and
+# targets, dashboard data, isolation of the monitoring roles, backups, a restore drill and a test
+# alert. Changes nothing on the host except the scratch database of the drill (dropped) and one
+# message to the team chat. The report goes to the job summary.
+on:
+  workflow_dispatch:
+    inputs:
+      send_test_alert:
+        description: "Send one test alert to the team Telegram chat"
+        required: false
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+# Its own group: in staging-monitoring it would replace a pending Deploy monitoring. A deploy running
+# at the same time can fail the stack checks; run the workflow again after it.
+concurrency:
+  group: ${{ github.ref == 'refs/heads/main' && 'staging-monitoring-acceptance' || format('monitoring-acceptance-ignored-{0}', github.run_id) }}
+  cancel-in-progress: false
+
+jobs:
+  acceptance:
+    name: Monitoring acceptance
+    # workflow_dispatch can target any branch; only main may use the staging credentials.
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment:
+      name: staging
+    env:
+      MONITORING_DIR: /opt/dmc-268-monitoring
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve staging target
+        id: target
+        env:
+          STAGING_HOST: ${{ vars.STAGING_HOST }}
+          STAGING_SSH_PORT: ${{ vars.STAGING_SSH_PORT }}
+          VPS_HOST: ${{ vars.VPS_DMC268_IP_T6 }}
+          APP_DOMAIN: ${{ vars.APP_DOMAIN }}
+          STAGING_SSH_FINGERPRINT: ${{ vars.STAGING_SSH_FINGERPRINT }}
+        run: |
+          # The same targets as rollback.yml: Terraform host when STAGING_HOST is set, otherwise the
+          # course VPS behind the edge proxy.
+          if [[ -n "${STAGING_HOST}" ]]; then
+            mode=terraform
+            host="${STAGING_HOST}"
+            port="${STAGING_SSH_PORT}"
+            app_dir=/opt/dmc-268-api
+            grafana_url=""
+          elif [[ -n "${VPS_HOST}" ]]; then
+            mode=course
+            host="${VPS_HOST}"
+            port=22
+            app_dir=/opt/dmc-268-api-staging
+            if [[ ! "${APP_DOMAIN}" =~ ^[a-z0-9-]+(\.[a-z0-9-]+)+$ ]]; then
+              echo "Course VPS target needs repository variable APP_DOMAIN" >&2
+              exit 1
+            fi
+            grafana_url="https://grafana.${APP_DOMAIN}"
+          else
+            echo "No staging target: set STAGING_HOST or organization variable VPS_DMC268_IP_T6" >&2
+            exit 1
+          fi
+          if [[ ! "${host}" =~ ^[A-Za-z0-9.-]+$ || ! "${port}" =~ ^[0-9]+$ ]]; then
+            echo "staging host '${host}' or port '${port}' is invalid" >&2
+            exit 1
+          fi
+          # With an empty fingerprint the appleboy actions accept any host key.
+          if [[ ! "${STAGING_SSH_FINGERPRINT}" =~ ^SHA256:[A-Za-z0-9+/]{43}$ ]]; then
+            echo "GitHub variable STAGING_SSH_FINGERPRINT must be the ${mode} host key fingerprint" >&2
+            exit 1
+          fi
+          {
+            echo "mode=${mode}"
+            echo "host=${host}"
+            echo "port=${port}"
+            echo "app_dir=${app_dir}"
+            echo "grafana_url=${grafana_url}"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Public Grafana endpoints
+        if: steps.target.outputs.grafana_url != ''
+        env:
+          GRAFANA_URL: ${{ steps.target.outputs.grafana_url }}
+        run: |
+          health="$(curl -sS -o /dev/null -w '%{http_code}' "${GRAFANA_URL}/api/health")"
+          metrics="$(curl -sS -o /dev/null -w '%{http_code}' "${GRAFANA_URL}/metrics")"
+          login="$(curl -sS -o /dev/null -w '%{http_code}' "${GRAFANA_URL}/login")"
+          {
+            echo "## Public Grafana (${GRAFANA_URL})"
+            echo
+            echo "| Path | Status | Expected |"
+            echo "|---|---|---|"
+            echo "| \`/api/health\` | ${health} | 200 |"
+            echo "| \`/login\` | ${login} | 200 |"
+            echo "| \`/metrics\` | ${metrics} | 404, closed by the edge proxy |"
+            echo
+          } >> "${GITHUB_STEP_SUMMARY}"
+          if [[ "${health}" != 200 || "${login}" != 200 || "${metrics}" != 404 ]]; then
+            echo "Grafana: /api/health ${health}, /login ${login}, /metrics ${metrics}" >&2
+            exit 1
+          fi
+
+      - name: Upload acceptance script
+        uses: appleboy/scp-action@ff85246acaad7bdce478db94a363cd2bf7c90345 # v1.0.0
+        with:
+          host: ${{ steps.target.outputs.host }}
+          port: ${{ steps.target.outputs.port }}
+          username: ${{ steps.target.outputs.mode == 'course' && secrets.VPS_DMC268_U || vars.STAGING_SSH_USER }}
+          key: ${{ steps.target.outputs.mode == 'terraform' && secrets.STAGING_SSH_KEY || '' }}
+          password: ${{ steps.target.outputs.mode == 'course' && secrets.VPS_DMC268_P || '' }}
+          fingerprint: ${{ vars.STAGING_SSH_FINGERPRINT }}
+          source: "deploy/monitoring/acceptance.sh"
+          target: ${{ env.MONITORING_DIR }}
+          strip_components: 2
+
+      - name: Run acceptance checks
+        id: checks
+        uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2 # v1.2.5
+        env:
+          API_DIR: ${{ steps.target.outputs.app_dir }}
+          SEND_TEST_ALERT: ${{ inputs.send_test_alert && '1' || '0' }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        with:
+          host: ${{ steps.target.outputs.host }}
+          port: ${{ steps.target.outputs.port }}
+          username: ${{ steps.target.outputs.mode == 'course' && secrets.VPS_DMC268_U || vars.STAGING_SSH_USER }}
+          key: ${{ steps.target.outputs.mode == 'terraform' && secrets.STAGING_SSH_KEY || '' }}
+          password: ${{ steps.target.outputs.mode == 'course' && secrets.VPS_DMC268_P || '' }}
+          fingerprint: ${{ vars.STAGING_SSH_FINGERPRINT }}
+          debug: false
+          capture_stdout: true
+          envs: MONITORING_DIR,API_DIR,SEND_TEST_ALERT,RUN_URL
+          script: |
+            set -euo pipefail
+            set +o xtrace
+            # A failed check must not lose the report: the next step reads the result from it.
+            bash "${MONITORING_DIR}/acceptance.sh" 2>&1 || echo "acceptance.sh exited with $?"
+
+      - name: Report
+        if: always() && steps.checks.outcome == 'success'
+        env:
+          REPORT: ${{ steps.checks.outputs.stdout }}
+        run: |
+          {
+            echo "## Host checks"
+            echo
+            echo '```'
+            printf '%s\n' "${REPORT}"
+            echo '```'
+          } >> "${GITHUB_STEP_SUMMARY}"
+          if [[ "${REPORT}" != *"all checks passed"* ]]; then
+            echo "acceptance checks failed, see the job summary" >&2
+            exit 1
+          fi
