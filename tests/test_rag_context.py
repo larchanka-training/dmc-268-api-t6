@@ -1931,6 +1931,40 @@ def test_a_retrieved_block_is_read_at_the_pr_head_and_counted_in_the_payload() -
     assert summary["blocks_by_level"] == {"L1": 1, "L4": 1, "L3": 1, "RAG": 1}
 
 
+def test_a_definition_l4_cannot_show_does_not_hide_its_rag_place() -> None:
+    docs = "\n\n\n".join(
+        f'def {name}(value):\n    """{" ".join(["w"] * 1_995)}"""\n    return value'
+        for name in "abcd"
+    )
+    app = (
+        "from .store import save\n\n\ndef run(item):\n"
+        f'    """{" ".join(["w"] * 20)}"""\n    return save(item)\n'
+    )
+    store = (
+        "from .docs import a, b, c, d\nfrom .app import run\n\n\n"
+        "def save(item):\n    item.check()\n    return run(a(b(c(d(item)))))\n"
+    )
+    repository = Repository({"pkg/docs.py": f"{docs}\n", "pkg/app.py": app, "pkg/store.py": store})
+    patch = (
+        "@@ -5,2 +5,3 @@\n def save(item):\n+    item.check()\n     return run(a(b(c(d(item)))))"
+    )
+    diff_map = _diff_map(_vcs_file(repository, "pkg/store.py", patch))
+
+    payload = _build(repository, diff_map, _store_hints("pkg/app.py"))
+
+    # The changed code reads `run`, but the four docstrings before it fill the 8 000
+    # tokens of L4: L4 omits it, so the slot shows its place.
+    assert len([block for block in payload.blocks if block.level is ContextLevel.L4]) == 4
+    assert ContextOmission("ast_limit", "pkg/app.py") in payload.omissions
+    (block,) = payload.retrieved
+    assert (block.source.path, block.source.ranges) == (
+        "pkg/app.py",
+        (LineRange(1, 1), LineRange(4, 6)),
+    )
+    stats = payload.rag
+    assert stats is not None and (stats.found, stats.confirmed) == (1, 1)
+
+
 def test_the_rag_slot_displaces_l3_but_never_l1_or_l4() -> None:
     repository, diff_map = _slot_repository(**{"pkg/app.py": _PY_USER})
     graph = _store_hints("pkg/app.py")
