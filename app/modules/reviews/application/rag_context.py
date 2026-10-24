@@ -854,8 +854,9 @@ class _Selection:
         which the resolver does not tell (#130)."""
         facts = await self._files.facts_for(package_init)
         if isinstance(facts, FileUnavailable):
-            # An ignored package, or one past the read limit, cannot show that the name
-            # is the submodule; the resolver read it already on a `uses_imported` edge.
+            # The resolver reads the `__init__` always, unless the binding is shadowed:
+            # this is its outcome. An ignored package, one past the read limit or one
+            # that cannot be read cannot show that the name is the submodule.
             return True
         if any(item.enclosing is None and item.name == binding.name for item in facts.symbols):
             return True
