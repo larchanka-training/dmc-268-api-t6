@@ -358,6 +358,7 @@ def test_cancellation_and_the_deadline_are_not_a_read_failure(error: Exception) 
 # --- Reverse-edge candidates: selected from the graph, confirmed at the PR head ---------
 
 _HEAD = "a" * 40
+_BASE = "c" * 40
 _INDEX_COMMIT = "d" * 40
 
 
@@ -370,25 +371,56 @@ class Words:
 
 @dataclass
 class Repository:
-    """The PR head of one repository; ``read`` lists the paths whose blobs were read."""
+    """The PR head of one repository and its base (``diff_old_sha``).
+
+    The base holds the head files with the ``base`` changes: a text, or ``None`` for a
+    file the PR adds. A blob is named by its path and text, so a file the PR does not
+    touch has one blob on both sides. ``read`` lists the blobs read, a blob only the base
+    has as ``path@base``; ``trees`` lists the revisions listed.
+    """
 
     files: dict[str, str]
     failing: frozenset[str] = frozenset()
     read: list[str] = field(default_factory=list)
+    base: dict[str, str | None] = field(default_factory=dict)
+    base_unavailable: bool = False
+    trees: list[str] = field(default_factory=list)
 
     def sha(self, path: str) -> str:
-        return f"{abs(hash(path)) % 10**12:040d}"
+        return _blob(path, self.files.get(path))
+
+    def base_sha(self, path: str) -> str:
+        return _blob(path, self._base_files()[path])
+
+    def _base_files(self) -> dict[str, str]:
+        merged = {**self.files, **self.base}
+        return {path: text for path, text in merged.items() if text is not None}
 
     async def tree(self, revision: str) -> RevisionTree:
-        assert revision == _HEAD
-        return RevisionTree(revision, {path: self.sha(path) for path in self.files}, True)
+        self.trees.append(revision)
+        if revision == _HEAD:
+            return RevisionTree(revision, {path: self.sha(path) for path in self.files}, True)
+        assert revision == _BASE
+        if self.base_unavailable:
+            raise ConnectionError("provider unavailable")
+        base = {path: self.base_sha(path) for path in self._base_files()}
+        return RevisionTree(revision, base, True)
 
     async def read_blob(self, blob_sha: str) -> bytes:
-        path = next(item for item in self.files if self.sha(item) == blob_sha)
-        self.read.append(path)
-        if path in self.failing:
-            raise ConnectionError("provider unavailable")
-        return self.files[path].encode()
+        head = next((item for item in self.files if self.sha(item) == blob_sha), None)
+        if head is not None:
+            self.read.append(head)
+            if head in self.failing:
+                raise ConnectionError("provider unavailable")
+            return self.files[head].encode()
+        base = self._base_files()
+        path = next(item for item in base if self.base_sha(item) == blob_sha)
+        self.read.append(f"{path}@base")
+        return base[path].encode()
+
+
+def _blob(path: str, text: str | None) -> str:
+    return f"{abs(hash((path, text))) % 10**12:040d}"
 
 
 @dataclass
@@ -469,7 +501,10 @@ def _vcs_file(
 
 
 def _diff_map(
-    *files: VcsFile, repository_id: UUID = _REPOSITORY, listed: int | None = None
+    *files: VcsFile,
+    repository_id: UUID = _REPOSITORY,
+    listed: int | None = None,
+    diff_old_sha: str | None = _BASE,
 ) -> DiffMap:
     pull_request = VcsPullRequest(
         locator=PullRequestLocator(17, "octo/repo", 7),
@@ -494,7 +529,7 @@ def _diff_map(
         files,
         provider=VcsProviderName.GITHUB,
         repository_id=repository_id,
-        diff_old_sha="c" * 40,
+        diff_old_sha=diff_old_sha,
     )
 
 
@@ -537,6 +572,7 @@ def _select(
             parser=InProcessParser(),
             cache=None,
             counter=Words(),
+            trees=repository,
         )
         return await selector.select(
             diff_map=diff_map,
@@ -728,6 +764,8 @@ def test_a_reverse_edge_confirmed_at_head_is_used(
     assert result.omissions == ()
     # The changed file was loaded by L4: only the candidate is a RAG read.
     assert repository.read == [case.candidate]
+    # The PR only adds lines, so it removes no export: the base is never listed.
+    assert repository.trees == [_HEAD]
 
 
 @pytest.mark.parametrize(
@@ -1160,6 +1198,308 @@ def test_a_candidate_past_the_read_limit_is_rag_limit_with_its_path() -> None:
     assert "pkg/user_20.py" not in repository.read
 
 
+# Broken references (ADR 0001 §8.3): an export the PR removes, checked at both revisions.
+
+_PY_BASE_STORE = "def save(item):\n    return item\n\n\ndef load(key):\n    return key\n"
+_PY_VIEW = "from .store import load\n\n\ndef show(key):\n    return load(key)\n"
+# The PR changes `save` and removes `load` (the base above, `_PY_STORE` at head).
+_PY_REMOVAL_PATCH = (
+    "@@ -1,6 +1,3 @@\n def save(item):\n+    item.check()\n     return item\n"
+    "-\n-\n-def load(key):\n-    return key"
+)
+
+
+def _deletion(repository: Repository, path: str = "pkg/store.py") -> VcsFile:
+    text = repository.base[path]
+    assert text is not None
+    removed = text.rstrip("\n").split("\n")
+    patch = f"@@ -1,{len(removed)} +0,0 @@\n" + "\n".join(f"-{line}" for line in removed)
+    return _vcs_file(repository, path, patch, additions=0, deletions=len(removed), status="removed")
+
+
+def _load_hints(*paths: str) -> Graph:
+    return Graph({_REPOSITORY: tuple(_uses(path, "pkg/store.py", "load") for path in paths)})
+
+
+def _removal(case: str) -> tuple[Repository, DiffMap]:
+    """A PR that takes the export ``load`` away from ``pkg/store.py``; ``pkg/view.py``
+    imports it, and the PR leaves that file alone."""
+    if case == "renamed_symbol":
+        head = "def save(item):\n    return item\n\n\ndef fetch(key):\n    return key\n"
+        repository = Repository(
+            {"pkg/store.py": head, "pkg/view.py": _PY_VIEW}, base={"pkg/store.py": _PY_BASE_STORE}
+        )
+        patch = "@@ -5,2 +5,2 @@\n-def load(key):\n+def fetch(key):\n     return key"
+        return repository, _diff_map(_vcs_file(repository, "pkg/store.py", patch, deletions=1))
+    if case == "deleted_file":
+        repository = Repository({"pkg/view.py": _PY_VIEW}, base={"pkg/store.py": _PY_BASE_STORE})
+        return repository, _diff_map(_deletion(repository))
+    assert case == "moved_file"
+    repository = Repository(
+        {"pkg/storage.py": _PY_BASE_STORE, "pkg/view.py": _PY_VIEW},
+        base={"pkg/store.py": _PY_BASE_STORE, "pkg/storage.py": None},
+    )
+    moved = _vcs_file(
+        repository, "pkg/storage.py", None, additions=0, status="renamed", previous="pkg/store.py"
+    )
+    return repository, _diff_map(moved)
+
+
+def _view_place(repository: Repository) -> RetrievedPlace:
+    """The broken reference of ``pkg/view.py``: the import and its use at head, with the
+    definition of ``load`` at the base."""
+    return RetrievedPlace(
+        source=SourceRef(
+            role=SourceRole.RETRIEVED_EXCERPT,
+            repository_id=_REPOSITORY,
+            revision=_HEAD,
+            path="pkg/view.py",
+            blob_sha=repository.sha("pkg/view.py"),
+            origin_paths=(),
+            side=DiffSide.RIGHT,
+            ranges=(LineRange(1, 1), LineRange(4, 5)),
+            reason="rag_broken_reference",
+        ),
+        edge_kind=EdgeKind.USES_IMPORTED,
+        index_commit_sha=_INDEX_COMMIT,
+        signature=False,
+        text="from .store import load\ndef show(key):\n    return load(key)",
+        tokens=8,
+        definitions=(
+            RetrievedPlace(
+                source=SourceRef(
+                    role=SourceRole.RETRIEVED_EXCERPT,
+                    repository_id=_REPOSITORY,
+                    revision=_BASE,
+                    path="pkg/store.py",
+                    blob_sha=repository.base_sha("pkg/store.py"),
+                    origin_paths=(),
+                    side=DiffSide.LEFT,
+                    ranges=(LineRange(5, 5),),
+                    reason="rag_broken_reference",
+                ),
+                edge_kind=EdgeKind.USES_IMPORTED,
+                index_commit_sha=_INDEX_COMMIT,
+                signature=True,
+                text="def load(key):",
+                tokens=2,
+            ),
+        ),
+    )
+
+
+@pytest.mark.parametrize(
+    ("case", "targets"),
+    [
+        ("renamed_symbol", (("pkg/store.py", "load"), ("pkg/store.py", "fetch"))),
+        ("deleted_file", (("pkg/store.py", "save"), ("pkg/store.py", "load"))),
+        ("moved_file", (("pkg/store.py", "save"), ("pkg/store.py", "load"))),
+    ],
+)
+def test_an_importer_of_a_removed_export_is_a_broken_reference(
+    case: str, targets: tuple[tuple[str, str], ...]
+) -> None:
+    repository, diff_map = _removal(case)
+    graph = _load_hints("pkg/view.py")
+
+    result = _select(repository, diff_map, graph)
+
+    # The removed exports come first, under the default-branch path of the module.
+    assert graph.reads == [(_REPOSITORY, tuple(GraphTarget(path, name) for path, name in targets))]
+    # Two blocks, one revision each: the use at head and the definition at the base.
+    assert result.places == (_view_place(repository),)
+    assert (result.found, result.confirmed, dict(result.dropped)) == (1, 1, {})
+    assert result.omissions == ()
+    # The base extraction of the module is a RAG read; the importer has one blob on both
+    # sides and is read once.
+    assert repository.read == ["pkg/store.py@base", "pkg/view.py"]
+    assert repository.trees == [_HEAD, _BASE]
+
+
+@pytest.mark.parametrize(
+    ("base_store", "view", "found"),
+    [
+        # At the base `load` came from a module that did not exist; a stale graph still
+        # names the edge to the file the PR deletes.
+        (_PY_BASE_STORE, "from .legacy import load\n\n\ndef show(key):\n    return load(key)\n", 1),
+        # The deleted file had no `load` at the base: the PR did not remove it.
+        ("def save(item):\n    return item\n", _PY_VIEW, 0),
+    ],
+)
+def test_an_import_broken_before_the_pr_is_not_blamed(
+    base_store: str, view: str, found: int
+) -> None:
+    repository = Repository({"pkg/view.py": view}, base={"pkg/store.py": base_store})
+
+    result = _select(repository, _diff_map(_deletion(repository)), _load_hints("pkg/view.py"))
+
+    assert result.places == ()
+    assert (result.found, result.confirmed) == (found, 0)
+    assert dict(result.dropped) == ({"rag_edge_unconfirmed": 1} if found else {})
+
+
+def test_an_importer_the_pr_fixes_is_no_candidate() -> None:
+    # The PR moves the module and changes the import of `pkg/view.py` to the new path.
+    view = "from .storage import load\n\n\ndef show(key):\n    return load(key)\n"
+    repository = Repository(
+        {"pkg/storage.py": _PY_BASE_STORE, "pkg/view.py": view},
+        base={"pkg/store.py": _PY_BASE_STORE, "pkg/storage.py": None, "pkg/view.py": _PY_VIEW},
+    )
+    diff_map = _diff_map(
+        _vcs_file(
+            repository,
+            "pkg/storage.py",
+            None,
+            additions=0,
+            status="renamed",
+            previous="pkg/store.py",
+        ),
+        _vcs_file(
+            repository,
+            "pkg/view.py",
+            "@@ -1,1 +1,1 @@\n-from .store import load\n+from .storage import load",
+            deletions=1,
+        ),
+    )
+
+    result = _select(repository, diff_map, _load_hints("pkg/view.py"))
+
+    assert (result.places, result.omissions, result.found) == ((), (), 0)
+
+
+def test_an_import_that_still_resolves_at_head_is_no_broken_reference() -> None:
+    # The PR turns the module into a package: the same specifier still binds `load`.
+    repository = Repository(
+        {"pkg/store/__init__.py": _PY_BASE_STORE, "pkg/view.py": _PY_VIEW},
+        base={"pkg/store.py": _PY_BASE_STORE, "pkg/store/__init__.py": None},
+    )
+    added = "@@ -0,0 +1,6 @@\n" + "\n".join(
+        f"+{line}" for line in _PY_BASE_STORE.rstrip("\n").split("\n")
+    )
+    diff_map = _diff_map(
+        _deletion(repository),
+        _vcs_file(repository, "pkg/store/__init__.py", added, additions=6, status="added"),
+    )
+
+    result = _select(repository, diff_map, _load_hints("pkg/view.py"))
+
+    assert result.places == ()
+    assert result.omissions == (RagOmission("rag_edge_unconfirmed", "pkg/view.py"),)
+    assert (result.found, result.confirmed) == (1, 0)
+
+
+@pytest.mark.parametrize(
+    ("diff_old_sha", "unavailable", "reason", "trees"),
+    [
+        (None, False, "old_revision_unknown", [_HEAD]),
+        (_BASE, True, "source_read_failed", [_HEAD, _BASE]),
+    ],
+)
+def test_without_a_readable_base_the_importers_of_a_removed_module_are_dropped(
+    diff_old_sha: str | None, unavailable: bool, reason: str, trees: list[str]
+) -> None:
+    repository = Repository(
+        {"pkg/view.py": _PY_VIEW},
+        base={"pkg/store.py": _PY_BASE_STORE},
+        base_unavailable=unavailable,
+    )
+    diff_map = _diff_map(_deletion(repository), diff_old_sha=diff_old_sha)
+    graph = Graph(
+        {
+            _REPOSITORY: (
+                GraphHint("pkg/view.py", EdgeKind.IMPORTS, "pkg/store.py", ""),
+                _uses("pkg/view.py", "pkg/store.py", "load"),
+            )
+        }
+    )
+
+    result = _select(repository, diff_map, graph)
+
+    # The names the deleted module exported are unknown: the graph gives its importers.
+    assert graph.reads == [(_REPOSITORY, (GraphTarget("pkg/store.py", ""),))]
+    assert result.places == ()
+    assert result.omissions == (RagOmission(reason, "pkg/view.py"),)
+    assert (result.found, dict(result.dropped)) == (1, {reason: 1})
+    assert repository.read == []
+    assert repository.trees == trees
+
+
+def test_a_broken_reference_comes_before_a_reverse_edge() -> None:
+    repository = Repository(
+        {"pkg/store.py": _PY_STORE, "pkg/app.py": _PY_USER, "pkg/view.py": _PY_VIEW},
+        base={"pkg/store.py": _PY_BASE_STORE},
+    )
+    diff_map = _diff_map(_vcs_file(repository, "pkg/store.py", _PY_REMOVAL_PATCH, deletions=4))
+    graph = Graph(
+        {
+            _REPOSITORY: (
+                _uses("pkg/app.py", "pkg/store.py", "save"),
+                _uses("pkg/view.py", "pkg/store.py", "load"),
+            )
+        }
+    )
+
+    result = _select(repository, diff_map, graph)
+
+    assert graph.reads == [
+        (_REPOSITORY, (GraphTarget("pkg/store.py", "load"), GraphTarget("pkg/store.py", "save")))
+    ]
+    assert result.places == (
+        _view_place(repository),
+        RetrievedPlace(
+            source=SourceRef(
+                role=SourceRole.RETRIEVED_EXCERPT,
+                repository_id=_REPOSITORY,
+                revision=_HEAD,
+                path="pkg/app.py",
+                blob_sha=repository.sha("pkg/app.py"),
+                origin_paths=(),
+                side=DiffSide.RIGHT,
+                ranges=(LineRange(1, 1), LineRange(4, 5)),
+                reason="rag_reverse_edge",
+            ),
+            edge_kind=EdgeKind.USES_IMPORTED,
+            index_commit_sha=_INDEX_COMMIT,
+            signature=False,
+            text="from .store import save\ndef run(item):\n    return save(item)",
+            tokens=8,
+        ),
+    )
+    assert (result.found, result.confirmed) == (2, 2)
+
+
+def test_an_importer_of_a_removed_and_a_changed_export_shows_both() -> None:
+    user = (
+        "from .store import load, save\n\n\n"
+        "def run(item):\n    return save(item)\n\n\n"
+        "def show(key):\n    return load(key)\n"
+    )
+    repository = Repository(
+        {"pkg/store.py": _PY_STORE, "pkg/app.py": user}, base={"pkg/store.py": _PY_BASE_STORE}
+    )
+    diff_map = _diff_map(_vcs_file(repository, "pkg/store.py", _PY_REMOVAL_PATCH, deletions=4))
+    graph = Graph(
+        {
+            _REPOSITORY: (
+                _uses("pkg/app.py", "pkg/store.py", "save"),
+                _uses("pkg/app.py", "pkg/store.py", "load"),
+            )
+        }
+    )
+
+    result = _select(repository, diff_map, graph)
+
+    # The broken use first, then the caller of the changed export, in one candidate.
+    assert [
+        (place.source.ranges, place.source.reason, len(place.definitions))
+        for place in result.places
+    ] == [
+        ((LineRange(1, 1), LineRange(8, 9)), "rag_broken_reference", 1),
+        ((LineRange(1, 1), LineRange(4, 5)), "rag_reverse_edge", 0),
+    ]
+    assert (result.found, result.confirmed) == (1, 1)
+
+
 # The RAG slot of the review context (ADR 0001 §9): after L1 and L4, before L2 and L3.
 
 _PLAN = RagPlan(index_commit_sha=_INDEX_COMMIT, stale=False)
@@ -1462,3 +1802,61 @@ def test_a_plan_without_the_rag_sources_is_refused_before_any_read() -> None:
     with pytest.raises(ValueError, match="RAG plan"):
         _build(repository, diff_map, None)
     assert repository.read == []
+
+
+_SLOT_BASE_STORE = (
+    "from .models import Item\n\n\ndef save(item: Item):\n    return item\n\n\n"
+    "def load(key):\n    return key\n"
+)
+_SLOT_REMOVAL_PATCH = (
+    "@@ -4,6 +4,3 @@\n def save(item: Item):\n+    item.check()\n     return item\n"
+    "-\n-\n-def load(key):\n-    return key"
+)
+
+
+def _slot_removal(**importers: str) -> tuple[Repository, DiffMap]:
+    """The PR of the slot tests that also removes ``load`` from ``pkg/store.py``."""
+    repository = Repository(
+        {"pkg/models.py": _MODELS, "pkg/store.py": _SLOT_STORE, **importers},
+        base={"pkg/store.py": _SLOT_BASE_STORE},
+    )
+    patch = _vcs_file(repository, "pkg/store.py", _SLOT_REMOVAL_PATCH, deletions=4)
+    return repository, _diff_map(patch)
+
+
+def test_a_broken_reference_gives_a_block_per_revision_and_its_definition_once() -> None:
+    repository, diff_map = _slot_removal(**{"pkg/panel.py": _PY_VIEW, "pkg/view.py": _PY_VIEW})
+
+    payload = _build(repository, diff_map, _load_hints("pkg/panel.py", "pkg/view.py"))
+
+    assert [
+        (block.block_id, block.representation, block.source.revision, block.source.side)
+        for block in payload.retrieved
+    ] == [
+        ("RAG:pkg/panel.py:1-1,4-5", Representation.EXACT_LINES, _HEAD, DiffSide.RIGHT),
+        ("RAG:pkg/store.py:8-8", Representation.SIGNATURE, _BASE, DiffSide.LEFT),
+        ("RAG:pkg/view.py:1-1,4-5", Representation.EXACT_LINES, _HEAD, DiffSide.RIGHT),
+    ]
+    assert payload.retrieved[1].text == "def load(key):"
+    stats = payload.rag
+    assert stats is not None
+    assert (stats.found, stats.confirmed, dict(stats.dropped), stats.tokens) == (2, 2, {}, 18)
+
+
+def test_a_broken_reference_is_shown_with_its_definition_or_not_at_all() -> None:
+    repository, diff_map = _slot_removal(**{"pkg/view.py": _PY_VIEW})
+    without = _build(repository, diff_map, None, plan=None)
+    kept = sum(
+        block.tokens
+        for block in without.blocks
+        if block.level in {ContextLevel.L1, ContextLevel.L4}
+    )
+
+    # The use (8 tokens) would fit alone; with its definition (2 tokens) it does not.
+    payload = _build(repository, diff_map, _load_hints("pkg/view.py"), budget=kept + 9)
+
+    assert payload.retrieved == ()
+    assert ContextOmission("rag_limit", "pkg/view.py") in payload.omissions
+    stats = payload.rag
+    assert stats is not None
+    assert (stats.confirmed, stats.tokens) == (1, 0)
