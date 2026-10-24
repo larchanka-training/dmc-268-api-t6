@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from typing import Any
@@ -13,8 +13,9 @@ import pytest
 from psycopg.errors import LockNotAvailable
 from sqlalchemy.exc import OperationalError
 
-from app.modules.code_index.domain.enums import RagIndexStatus
+from app.modules.code_index.domain.enums import EdgeKind, IndexStatus, RagIndexStatus
 from app.modules.code_index.domain.rag_index import RagIndex
+from app.modules.reviews.application import rag_index
 from app.modules.reviews.application.ast_resolution import RevisionTree
 from app.modules.reviews.application.ast_symbols import (
     AstFacts,
@@ -26,18 +27,26 @@ from app.modules.reviews.application.context_provenance import LineRange, Source
 from app.modules.reviews.application.diff_map import DiffMap, DiffSide, VcsProviderName
 from app.modules.reviews.application.execute_review import ExecuteReviewRun
 from app.modules.reviews.application.get_run_diff import DiffSnapshot
+from app.modules.reviews.application.graph_retriever import (
+    GraphHints,
+    GraphRetriever,
+    GraphTarget,
+)
 from app.modules.reviews.application.policy_documents import PolicyEntryKind, PolicyTreeEntry
 from app.modules.reviews.application.policy_errors import PolicyError, PolicyErrorCode
 from app.modules.reviews.application.prepare_policy_snapshot import PreparePolicySnapshot
 from app.modules.reviews.application.process_run import RunVcsInput
 from app.modules.reviews.application.prompt_builder import PullRequestMeta
+from app.modules.reviews.application.rag_context import CachedBlobSource
 from app.modules.reviews.application.rag_index import OpenReviewIndex, RagReadiness
 from app.modules.reviews.application.review_context import (
     BuildReviewContext,
     ContextBlock,
     ContextLevel,
     ContextStatus,
+    RagPlan,
     Representation,
+    RetrievedBlock,
     ReviewContextPayload,
 )
 from app.modules.reviews.application.review_context_stage import (
@@ -55,6 +64,7 @@ from app.modules.reviews.application.vcs_diff import (
 from app.modules.reviews.infrastructure.tree_sitter_facts import extract_facts
 from app.worker import WorkerSettings
 from tests.test_prepare_policy_snapshot import Store, Uow
+from tests.test_rag_context import BlobCacheUow, BlobStore, Graph, SharedBlobCache, _uses
 from tests.test_rag_readiness import FakeReviewIndexUow, StubReviewIndexAccess
 
 _RUN = UUID("00000000-0000-0000-0000-000000000002")
@@ -1278,3 +1288,312 @@ def test_control_raised_by_the_gate_ends_the_attempt(failure: str) -> None:
 
     assert caught.value is error
     assert [step[0] for step in trace.steps] == ["policy.load"]
+
+
+# The RAG slot behind the gate (#144): the run's pinned prompt shows retrieved blocks.
+_IMPORTER = 'from .app import greet\n\n\ndef main():\n    return greet("octo")\n'
+_IMPORTER_BLOB = "f" * 40
+# The review prompt the fake policy store pins.
+_PINNED = ("review.system", "v2")
+
+
+@pytest.fixture
+def capable(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The pinned review prompt of the run declares a retrieved section."""
+    monkeypatch.setattr(rag_index, "RETRIEVED_PROMPT_VERSIONS", frozenset({_PINNED}))
+
+
+class RagRepository(Repository):
+    """The head of the changed ``src/app.py`` and of ``src/main.py``, which calls its
+    ``greet``."""
+
+    def __init__(self, tree_error: Exception | None = None) -> None:
+        self._tree_error = tree_error
+
+    async def tree(self, revision: str) -> RevisionTree:
+        if self._tree_error is not None:
+            raise self._tree_error
+        files = {"src/app.py": "d" * 40, "src/main.py": _IMPORTER_BLOB}
+        return RevisionTree(revision, files, complete=True)
+
+    async def read_blob(self, blob_sha: str) -> bytes:
+        return (_IMPORTER if blob_sha == _IMPORTER_BLOB else _SOURCE).encode()
+
+
+@dataclass
+class FailingGraph:
+    error: Exception
+    reads: int = 0
+
+    async def read_hints(self, repository_id: UUID, targets: Sequence[GraphTarget]) -> GraphHints:
+        self.reads += 1
+        raise self.error
+
+
+def _greet_hints(*paths: str, status: IndexStatus = IndexStatus.READY) -> Graph:
+    """The graph: each path uses the changed ``greet``."""
+    return Graph({_REPOSITORY: tuple(_uses(path, "src/app.py", "greet") for path in paths)}, status)
+
+
+def _rag_builder(
+    retriever: GraphRetriever, repository: Repository | None = None
+) -> Callable[[RunVcsInput], BuildReviewContext]:
+    """The context builder of a run with the RAG sources of the run."""
+
+    def build(run: RunVcsInput) -> BuildReviewContext:
+        source = repository or RagRepository()
+        store = BlobStore()
+        return BuildReviewContext(
+            source=source,
+            parser=Parser(),
+            counter=EstimatedTokenCounter(),
+            retriever=retriever,
+            rag_blobs=CachedBlobSource(
+                repository_id=run.repository_id,
+                source=source,
+                cache=SharedBlobCache(store),
+                uow_factory=lambda: BlobCacheUow(store),
+            ),
+        )
+
+    return build
+
+
+@pytest.mark.usefixtures("capable")
+@pytest.mark.parametrize("status", _USABLE, ids=["ready", "stale"])
+def test_a_prompt_with_a_retrieved_section_records_what_the_rag_slot_used(
+    status: RagIndexStatus,
+) -> None:
+    trace = Trace()
+    gate, _ = _gate(_readiness(status))
+    graph = _greet_hints("src/main.py", "src/gone.py")
+
+    payload = asyncio.run(_stage(trace, rag=gate, context_builder=_rag_builder(graph)).run(_RUN))
+
+    assert payload is not None and payload.status is ContextStatus.REVIEW
+    (block,) = payload.retrieved
+    assert (block.source.path, block.source.revision) == ("src/main.py", _HEAD)
+    assert [read[1] for read in graph.reads] == [(GraphTarget("src/app.py", "greet"),)]
+    assert [step[0] for step in trace.steps] == ["policy.load", "context.build", "context.rag"]
+    # The request is what the gate read; the response counts what the slot did.
+    assert trace.steps[2][1] == {
+        "index_status": status.value,
+        "indexed_commit_sha": _INDEXED,
+        "default_head_sha": _TARGET,
+        "stale": status is RagIndexStatus.STALE,
+    }
+    assert trace.steps[2][2] == {
+        "outcome": "used",
+        "candidates": {"found": 2, "confirmed": 1, "dropped": {"rag_candidate_missing": 1}},
+        "tokens": block.tokens,
+    }
+    assert "src/" not in repr(trace.steps[2])
+    # The context step lists the retrieved block by its side and revision, not its text.
+    assert [item for item in trace.steps[1][2]["blocks"] if item["level"] == "RAG"] == [
+        {
+            "level": "RAG",
+            "role": "retrieved_excerpt",
+            "path": "src/main.py",
+            "side": "RIGHT",
+            "revision": _HEAD,
+            "ranges": [[1, 1], [4, 5]],
+            "representation": "exact_lines",
+            "tokens": block.tokens,
+            "reason": "rag_reverse_edge",
+        }
+    ]
+    assert 'greet("octo")' not in repr(trace.steps)
+
+
+def test_without_a_retrieved_section_a_usable_index_is_not_read() -> None:
+    trace = Trace()
+    gate, access = _gate(_readiness(RagIndexStatus.READY))
+    graph = _greet_hints("src/main.py")
+
+    payload = asyncio.run(_stage(trace, rag=gate, context_builder=_rag_builder(graph)).run(_RUN))
+
+    assert payload is not None and (payload.retrieved, payload.rag) == ((), None)
+    assert access.opened == [_REPOSITORY]
+    assert graph.reads == []
+    assert trace.steps[2][2] == {"outcome": "not_ready", "reason": "prompt_version"}
+
+
+@pytest.mark.usefixtures("capable")
+@pytest.mark.parametrize(
+    ("status", "response"),
+    [
+        (IndexStatus.EMPTY, {"outcome": "not_ready", "reason": "empty"}),
+        (IndexStatus.BUILDING, {"outcome": "not_ready", "reason": "building"}),
+        (IndexStatus.FAILED, {"outcome": "not_ready", "reason": "failed", "error_code": None}),
+    ],
+    ids=["empty", "building", "failed"],
+)
+def test_an_index_no_longer_ready_at_the_graph_read_is_recorded_with_its_fresh_status(
+    status: IndexStatus, response: dict[str, str | None]
+) -> None:
+    trace = Trace()
+    gate, _ = _gate(_readiness(RagIndexStatus.READY))
+    graph = _greet_hints("src/main.py", status=status)
+
+    payload = asyncio.run(_stage(trace, rag=gate, context_builder=_rag_builder(graph)).run(_RUN))
+
+    assert payload is not None and payload.retrieved == ()
+    assert len(graph.reads) == 1
+    # The request stays what the gate read: the index was ready then.
+    assert trace.steps[2][1]["index_status"] == "ready"
+    assert trace.steps[2][2] == response
+
+
+@pytest.mark.usefixtures("capable")
+def test_a_failing_rag_slot_is_recorded_and_the_other_levels_stay() -> None:
+    graph = FailingGraph(RuntimeError("graph unavailable"))
+    without = asyncio.run(_stage(Trace(), context_builder=_rag_builder(graph)).run(_RUN))
+    trace = Trace()
+    gate, _ = _gate(_readiness(RagIndexStatus.READY))
+
+    payload = asyncio.run(_stage(trace, rag=gate, context_builder=_rag_builder(graph)).run(_RUN))
+
+    assert without is not None and payload is not None
+    assert graph.reads == 1
+    assert (payload.blocks, payload.omissions, payload.retrieved) == (
+        without.blocks,
+        without.omissions,
+        (),
+    )
+    assert [step[0] for step in trace.steps] == ["policy.load", "context.build", "context.rag"]
+    assert trace.steps[2][1]["index_status"] == "ready"
+    assert trace.steps[2][2] == {"error": {"type": "RuntimeError", "message": "graph unavailable"}}
+
+
+@pytest.mark.usefixtures("capable")
+def test_a_build_that_returns_before_the_rag_slot_records_its_reason_and_zero_counters() -> None:
+    trace = Trace()
+    gate, _ = _gate(_readiness(RagIndexStatus.READY))
+    graph = _greet_hints("src/main.py")
+    repository = RagRepository(ConnectionError("provider unavailable"))
+
+    payload = asyncio.run(
+        _stage(trace, rag=gate, context_builder=_rag_builder(graph, repository)).run(_RUN)
+    )
+
+    assert payload is not None and payload.retrieved == ()
+    assert graph.reads == []
+    assert trace.steps[2][2] == {
+        "outcome": "used",
+        "reason": "tree_unavailable",
+        "candidates": {"found": 0, "confirmed": 0, "dropped": {}},
+        "tokens": 0,
+    }
+
+
+@pytest.mark.usefixtures("capable")
+def test_a_caught_build_failure_records_the_gate_without_rag_counters() -> None:
+    plans: list[object] = []
+
+    class Broken:
+        async def execute(self, **kwargs: object) -> object:
+            plans.append(kwargs["rag"])
+            raise RuntimeError("the parser is gone")
+
+    trace = Trace()
+    gate, _ = _gate(_readiness(RagIndexStatus.STALE))
+    stage = _stage(trace, rag=gate)
+    stage._context_builder = lambda run: Broken()  # type: ignore[assignment,return-value]
+
+    assert asyncio.run(stage.run(_RUN)) is None
+
+    assert plans == [RagPlan(index_commit_sha=_INDEXED, stale=True)]
+    assert [step[0] for step in trace.steps] == ["policy.load", "context.build", "context.rag"]
+    assert trace.steps[2][1] == {
+        "index_status": "stale",
+        "indexed_commit_sha": _INDEXED,
+        "default_head_sha": _TARGET,
+        "stale": True,
+    }
+    # The gate let RAG in; the slot did not complete, so nothing is counted.
+    assert trace.steps[2][2] == {"outcome": "used", "reason": "context_build_failed"}
+
+
+def test_context_trace_lists_retrieved_blocks_with_their_side_and_revision() -> None:
+    diff_map = DiffMap(
+        schema_version=1,
+        parser_version="unified-hunks/v1",
+        provider=VcsProviderName.GITHUB,
+        repository_id=UUID(int=5),
+        code_change_number=7,
+        policy_base_sha=_BASE,
+        head_sha=_HEAD,
+        diff_old_sha="c" * 40,
+        file_list_complete=True,
+        incomplete_reasons=(),
+        files=(),
+        digest="d" * 64,
+    )
+
+    def retrieved(
+        side: DiffSide, revision: str, representation: Representation, reason: str
+    ) -> RetrievedBlock:
+        source = SourceRef(
+            SourceRole.RETRIEVED_EXCERPT,
+            UUID(int=5),
+            revision,
+            "src/main.py",
+            "f" * 40,
+            (),
+            side,
+            (LineRange(1, 1), LineRange(4, 5)),
+            reason,
+        )
+        return RetrievedBlock(
+            "RAG:src/main.py:1-1,4-5",
+            ContextLevel.RAG,
+            source,
+            representation,
+            "def main():",
+            7,
+            EdgeKind.USES_IMPORTED,
+            _INDEXED,
+        )
+
+    payload = ReviewContextPayload(
+        status=ContextStatus.REVIEW,
+        reason=None,
+        policy_snapshot_id=UUID(int=9),
+        policy_digest="p" * 64,
+        diff_digest="d" * 64,
+        blocks=(_block("b1", ContextLevel.L1, SourceRole.DIFF, 40),),
+        omissions=(),
+        imports=(),
+        levels_present=(ContextLevel.L1, ContextLevel.RAG),
+        reviewable_lines=1,
+        ignored_files=0,
+        tokens_used=54,
+        retrieved=(
+            retrieved(DiffSide.RIGHT, _HEAD, Representation.EXACT_LINES, "rag_broken_reference"),
+            # The definition a broken reference lost, at the old side.
+            retrieved(DiffSide.LEFT, "c" * 40, Representation.SIGNATURE, "rag_broken_reference"),
+        ),
+    )
+
+    summary = context_summary(diff_map, payload)
+
+    assert [
+        (item["level"], item["side"], item.get("revision"), item["representation"])
+        for item in summary["blocks"]
+    ] == [
+        ("L1", "RIGHT", None, "exact_lines"),
+        ("RAG", "RIGHT", _HEAD, "exact_lines"),
+        ("RAG", "LEFT", "c" * 40, "signature"),
+    ]
+    assert summary["blocks"][2] == {
+        "level": "RAG",
+        "role": "retrieved_excerpt",
+        "path": "src/main.py",
+        "side": "LEFT",
+        "revision": "c" * 40,
+        "ranges": [[1, 1], [4, 5]],
+        "representation": "signature",
+        "tokens": 7,
+        "reason": "rag_broken_reference",
+    }
+    assert "def main" not in repr(summary)

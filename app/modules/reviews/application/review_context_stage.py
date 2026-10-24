@@ -21,6 +21,7 @@ from typing import Any
 from uuid import UUID
 
 from app.modules.code_index.domain.enums import RagIndexStatus
+from app.modules.code_index.domain.rag_index import RagIndex
 from app.modules.reviews.application.check_runs import RunProviderCheckpoint
 from app.modules.reviews.application.diff_map import (
     DiffMap,
@@ -30,15 +31,21 @@ from app.modules.reviews.application.diff_map import (
 )
 from app.modules.reviews.application.get_run_diff import DiffSnapshot
 from app.modules.reviews.application.policy_errors import PolicyError
-from app.modules.reviews.application.policy_snapshot import PolicySnapshot
+from app.modules.reviews.application.policy_snapshot import PolicySnapshot, PromptBindings
 from app.modules.reviews.application.prepare_policy_snapshot import PreparePolicySnapshot
 from app.modules.reviews.application.process_run import RunVcsInput, RunVcsRepository
 from app.modules.reviews.application.prompt_budget import validate_execution_profile_versions
-from app.modules.reviews.application.rag_index import OpenReviewIndex, RagReadiness
+from app.modules.reviews.application.rag_index import (
+    OpenReviewIndex,
+    RagReadiness,
+    has_retrieved_section,
+)
 from app.modules.reviews.application.review_context import (
     BuildReviewContext,
     ContextBlock,
     ContextStatus,
+    RagPlan,
+    RagStats,
     RetrievedBlock,
     ReviewContextPayload,
 )
@@ -59,6 +66,8 @@ from app.modules.reviews.application.vcs_diff import (
 _LOGGER = logging.getLogger(__name__)
 FAST_CONTEXT_TOKEN_BUDGET = 60_000
 _MAX_TRACED_BLOCKS = 200
+# ``context.rag`` of a build that had a RAG plan and failed: the slot did not complete.
+_RAG_BUILD_FAILED = "context_build_failed"
 
 
 class EstimatedTokenCounter:
@@ -189,48 +198,113 @@ def context_summary(diff_map: DiffMap, payload: ReviewContextPayload) -> dict[st
                 "reason": block.source.reason,
             }
             for block in payload.blocks[:_MAX_TRACED_BLOCKS]
-        ],
+        ]
+        # Retrieved blocks, bounded by their slot, each with the revision of its side.
+        + [_traced_retrieved(block) for block in payload.retrieved],
+    }
+
+
+def _traced_retrieved(block: RetrievedBlock) -> dict[str, Any]:
+    source = block.source
+    return {
+        "level": block.level.value,
+        "role": source.role.value,
+        "path": source.path,
+        "side": None if source.side is None else source.side.value,
+        "revision": source.revision,
+        "ranges": [[item.start_line, item.end_line] for item in source.ranges],
+        "representation": block.representation.value,
+        "tokens": block.tokens,
+        "reason": source.reason,
     }
 
 
 @dataclass(frozen=True)
 class _RagStep:
     """What the RAG gate found, kept until ``context.build`` is recorded: the gate runs
-    before the build, its step follows the build's in the trace."""
+    before the build, its step follows the build's in the trace.
+
+    With a ``plan`` the build fills the RAG slot and its stats give the response;
+    ``response`` is then what a caught build failure records: the gate let RAG in, the
+    slot did not complete, nothing is counted.
+    """
 
     request: dict[str, Any]
     response: dict[str, Any]
     started_at: datetime
     duration_ms: int
+    plan: RagPlan | None = None
 
 
-def _rag_readiness(readiness: RagReadiness) -> tuple[dict[str, Any], dict[str, Any]] | None:
-    """Request and response of ``context.rag``; None when RAG is not in effect.
+def _not_ready(index: RagIndex) -> dict[str, Any] | None:
+    """The ``not_ready`` response of an index that cannot serve the review; None when it
+    can or RAG is off. ``disabled`` is never a reason (AC6)."""
+    reason = index.not_ready_reason
+    if reason is None:
+        return None
+    response: dict[str, Any] = {"outcome": "not_ready", "reason": reason.value}
+    if reason is RagIndexStatus.FAILED:
+        response["error_code"] = index.last_error_code
+    return response
 
-    Readiness is read only through ``RagIndex`` (AC6): ``disabled`` is never a reason.
+
+def _rag_readiness(
+    readiness: RagReadiness, prompt: PromptBindings
+) -> tuple[dict[str, Any], dict[str, Any], RagPlan | None] | None:
+    """Request, response and plan of ``context.rag``; None when RAG is not in effect.
+
+    Readiness is read only through ``RagIndex`` (AC6). A usable index gets a plan only
+    when the pinned review prompt shows retrieved blocks (M6).
     """
     index = readiness.index
     if not readiness.enabled or index is None:
         return None
-    response: dict[str, Any]
-    if index.usable:
-        # Recorded as `prompt_version` until a pinned prompt version declares a retrieved
-        # section; the check belongs here.
-        response = {"outcome": "not_ready", "reason": "prompt_version"}
-    else:
-        reason = index.not_ready_reason
-        if reason is None:
+    response: dict[str, Any] | None
+    plan: RagPlan | None = None
+    if not index.usable:
+        response = _not_ready(index)
+        if response is None:
             return None
-        response = {"outcome": "not_ready", "reason": reason.value}
-        if reason is RagIndexStatus.FAILED:
-            response["error_code"] = index.last_error_code
+    elif index.indexed_commit_sha is not None and has_retrieved_section(
+        prompt.review_system_key, prompt.review_system_version
+    ):
+        plan = RagPlan(index.indexed_commit_sha, index.status is RagIndexStatus.STALE)
+        response = {"outcome": "used", "reason": _RAG_BUILD_FAILED}
+    else:
+        response = {"outcome": "not_ready", "reason": "prompt_version"}
     request = {
         "index_status": index.status.value,
         "indexed_commit_sha": index.indexed_commit_sha,
         "default_head_sha": readiness.default_head_sha,
         "stale": index.status is RagIndexStatus.STALE,
     }
-    return request, response
+    return request, response, plan
+
+
+def _rag_used(stats: RagStats) -> dict[str, Any]:
+    """The response of a build that had a RAG plan: counters only, no path.
+
+    A failed slot gives its error. An index the graph read found no longer usable gives
+    its fresh status, not ``used`` with nothing found; an index turned off after the gate
+    reads as empty there. A return before the slot keeps its reason and zero counters (M8).
+    """
+    if stats.error_type is not None:
+        return {"error": {"type": stats.error_type, "message": stats.error_message}}
+    if stats.index is not None and not stats.index.usable:
+        return _not_ready(stats.index) or {
+            "outcome": "not_ready",
+            "reason": RagIndexStatus.EMPTY.value,
+        }
+    response: dict[str, Any] = {"outcome": "used"}
+    if stats.reason is not None:
+        response["reason"] = stats.reason
+    response["candidates"] = {
+        "found": stats.found,
+        "confirmed": stats.confirmed,
+        "dropped": dict(stats.dropped),
+    }
+    response["tokens"] = stats.tokens
+    return response
 
 
 class ReviewContextStage:
@@ -410,7 +484,7 @@ class ReviewContextStage:
             )
             raise RunSkipped("all_changes_ignored")
 
-        rag = await self._open_rag(run_id, run.repository_id)
+        rag = await self._open_rag(run_id, run.repository_id, snapshot.prompt_bindings)
         request = {"head_sha": run.head_sha, "policy_snapshot_id": str(snapshot.snapshot_id)}
         try:
             async with traced_step(self._trace, run_id, "context.build", request) as step:
@@ -420,6 +494,7 @@ class ReviewContextStage:
                     matcher=matcher,
                     ignore=ignore,
                     token_budget=self._token_budget,
+                    rag=None if rag is None else rag.plan,
                 )
                 step.response = context_summary(diff_map, payload)
         except (PolicyError, RunCancelled):
@@ -432,7 +507,7 @@ class ReviewContextStage:
             _LOGGER.warning("Review context build failed run_id=%s", run_id, exc_info=True)
             await self._record_rag(run_id, rag)
             return None
-        await self._record_rag(run_id, rag)
+        await self._record_rag(run_id, rag, payload.rag)
         if payload.status is ContextStatus.ALL_CHANGES_IGNORED:
             raise RunSkipped("all_changes_ignored")
         return payload
@@ -457,7 +532,9 @@ class ReviewContextStage:
                 "blocks": [],
             }
 
-    async def _open_rag(self, run_id: UUID, repository_id: UUID) -> _RagStep | None:
+    async def _open_rag(
+        self, run_id: UUID, repository_id: UUID, prompt: PromptBindings
+    ) -> _RagStep | None:
         """Open the RAG index of the repository; a build it requests is never waited for.
 
         Optional like the build: a policy error, a cancel and the deadline stop the
@@ -469,6 +546,7 @@ class ReviewContextStage:
         started = time.monotonic()
         request: dict[str, Any]
         response: dict[str, Any]
+        plan: RagPlan | None = None
         try:
             readiness = await self._rag.execute(repository_id)
         except (PolicyError, RunCancelled):
@@ -482,17 +560,23 @@ class ReviewContextStage:
             )
             response = {"error": {"type": type(exc).__name__, "message": str(exc)[:1000]}}
         else:
-            found = _rag_readiness(readiness)
+            found = _rag_readiness(readiness, prompt)
             if found is None:
                 return None
-            request, response = found
-        return _RagStep(request, response, started_at, int((time.monotonic() - started) * 1000))
+            request, response, plan = found
+        duration_ms = int((time.monotonic() - started) * 1000)
+        return _RagStep(request, response, started_at, duration_ms, plan)
 
-    async def _record_rag(self, run_id: UUID, step: _RagStep | None) -> None:
+    async def _record_rag(
+        self, run_id: UUID, step: _RagStep | None, stats: RagStats | None = None
+    ) -> None:
         """Record ``context.rag`` once per attempt, right after the stage's ``context.build``,
         also when the build failed and was caught."""
         if step is None or self._trace is None:
             return
+        response = step.response
+        if step.plan is not None and stats is not None:
+            response = _rag_used(stats)
         await self._trace.record(
-            run_id, "context.rag", step.request, step.response, step.started_at, step.duration_ms
+            run_id, "context.rag", step.request, response, step.started_at, step.duration_ms
         )

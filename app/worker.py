@@ -48,6 +48,7 @@ from app.bootstrap.worker_shutdown import (
 from app.common.infrastructure.db.leader import WORKER_LEADER_LOCK, run_as_leader
 from app.common.infrastructure.heartbeat import beat, heartbeat_file, reset
 from app.modules.code_index.application.leader_tasks import CodeIndexLeaderTasks
+from app.modules.code_index.infrastructure.graph_retriever import SqlAlchemyGraphRetriever
 from app.modules.code_index.infrastructure.review_index import SqlAlchemyReviewIndexUnitOfWork
 from app.modules.integrations.webhooks.infrastructure.github_installation_tree_provider import (
     GitHubAppInstallationAccessTokenProvider,
@@ -104,6 +105,7 @@ from app.modules.reviews.application.publish_run_review import (
     PullRequestReviewGateway,
 )
 from app.modules.reviews.application.queue_messages import ReviewPublishQueue, RunRetryQueue
+from app.modules.reviews.application.rag_context import CachedBlobSource
 from app.modules.reviews.application.rag_index import OpenReviewIndex
 from app.modules.reviews.application.review_context import BuildReviewContext
 from app.modules.reviews.application.review_context_stage import (
@@ -539,23 +541,33 @@ def review_context_stage_factory(
 
     def stage(trace: RunTrace | None, checkpoint: RunProviderCheckpoint) -> ReviewContextStage:
         def context_builder(run: RunVcsInput) -> BuildReviewContext:
+            source = GitHubRevisionSource(
+                client=client,
+                token_provider=tokens,
+                vcs=vcs,
+                locator=run.locator,
+                checkpoint=checkpoint,
+                tree_cache=None
+                if redis is None
+                else RedisTreeCache(redis, repository_id=run.repository_id),
+            )
             return BuildReviewContext(
-                source=GitHubRevisionSource(
-                    client=client,
-                    token_provider=tokens,
-                    vcs=vcs,
-                    locator=run.locator,
-                    checkpoint=checkpoint,
-                    tree_cache=None
-                    if redis is None
-                    else RedisTreeCache(redis, repository_id=run.repository_id),
-                ),
+                source=source,
                 parser=SubprocessSourceParser(),
                 counter=EstimatedTokenCounter(),
                 cache=None
                 if redis is None
                 else RedisAstFactsCache(redis, repository_id=run.repository_id),
                 builtin_excluded=_is_generated,
+                # The RAG sources of the run, used only for a RAG plan: one blob reader
+                # for the head and the base reads, through the shared blob cache.
+                retriever=SqlAlchemyGraphRetriever(session_factory),
+                rag_blobs=CachedBlobSource(
+                    repository_id=run.repository_id,
+                    source=source,
+                    cache=SqlAlchemyBlobCache(session_factory),
+                    uow_factory=partial(SqlAlchemyRunProcessingUnitOfWork, session_factory),
+                ),
             )
 
         locators: dict[UUID, PullRequestLocator] = {}
