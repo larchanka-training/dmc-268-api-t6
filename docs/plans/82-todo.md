@@ -172,7 +172,7 @@ Publisher's main rebase was a no-op at `c1d8f59d`; integrated source/docs review
 `68ed8b1` reported Standards 0 / Spec 0. Mandatory Ruff lint, format check and mypy
 passed. The complete dedicated PostgreSQL/RabbitMQ pytest gate passed 3,508 tests,
 zero skips, and 2 existing deprecation warnings in 662.32s (11:02), including both
-previously failing worker composition scenarios. Log: `/tmp/82-pre-capture-pytest.log`.
+previously failing worker composition scenarios.
 No source tuning or dependency change followed these checks. Publisher will record
 the exact dispatch head and run the workflow secret preflight before the single
 authorized paid capture; secret availability and actual spend are not claimed here.
@@ -211,7 +211,7 @@ manifests are byte-equal. All 25 response-directory files were replaced as one s
 byte-for-byte from this capture, then rechecked against the downloaded raw bytes.
 No answer normalization, repair selection, mixed capture or hand-edited digest was
 used. The 24 raw answers total 42,174 bytes. Previous responses remain backed up
-outside the checkout at `/tmp/82-task6-previous-responses`.
+outside the checkout in a private backup.
 
 Exported configured prices in USD per million tokens (input/cache-read/output):
 primary `0.56125 / 0.56125 / 2.35725`; fallback
@@ -297,18 +297,17 @@ accuracy, Hallucination Rate or actual billing estimate is claimed. All five rea
 first answers are invalid; all synthetic/real cases remain in the denominator.
 The existing historic response bytes are linked at their original revision.
 
-Final corpus validation passes 24/24. `/tmp/82-final-replay-1.json` and
-`/tmp/82-final-replay-2.json` are byte-identical with `warnings=[]`; redacted offline
-JSON remains byte-identical to the accepted live safe report. The exact gold-corpus
+Final corpus validation passes 24/24. The two final offline replay reports
+are byte-identical with `warnings=[]`; redacted offline JSON remains byte-identical
+to the accepted live safe report. The exact gold-corpus
 and replay shell step from `.github/workflows/ci-cd.yml` passes **locally**, produces
-24/24 distribution-passed summary, and gives the same JSON report with no warnings
-(`/tmp/82-final-local-ci-yc14d7n6`). Hosted evidence is recorded below separately
-from this local verification.
+24/24 distribution-passed summary, and gives the same JSON report with no warnings.
+Hosted evidence is recorded below separately from this local verification.
 
 Mandatory final Ruff lint, format (435 files) and mypy (432 source files) pass.
 The final complete dedicated PostgreSQL/RabbitMQ pytest gate passed 3,508 tests,
 zero skips and 2 existing Starlette/httpx/anyio deprecation warnings in 624.38s
-(10:24). Log: `/tmp/82-final-pytest.log`. Both worker main-composition scenarios
+(10:24). Both worker main-composition scenarios
 pass. These are the final full-suite results after accepted capture and metric docs.
 Standards review found stale pending-capture notes in `review/README.md` and
 `docs/SYSTEM_DESIGN.md`; documentation-only corrections now link the completed run
@@ -332,7 +331,7 @@ Gold corpus validation passed 24/24; recorded replay printed the accepted metric
 and no drift warnings (the workflow prints every replay warning). The separate
 integration suite passed 616 tests, 2,892 deselected and 2 existing warnings in
 535.69s; its XML gate explicitly reported 616 collected and zero skipped.
-Publisher retained the job log at `/tmp/82-ci-38474716329-python.log`.
+Publisher retained the job log privately.
 
 This final evidence update changes only this task document. The resulting final
 PR head is checked again by hosted CI; its run is reported in the PR body and final

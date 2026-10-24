@@ -30,7 +30,7 @@ uv run ruff check .
 uv run ruff format --check .
 uv run mypy .
 uv run pytest
-TEST_DATABASE_URL=postgresql+psycopg://app:app@127.0.0.1:5432/dmc_142 \
+TEST_DATABASE_URL=<disposable-db-url> \
   uv run pytest -m integration -rs tests/test_code_index_*_postgres.py \
   tests/test_initial_migration.py tests/test_alembic_heads.py
 ```
@@ -38,8 +38,8 @@ TEST_DATABASE_URL=postgresql+psycopg://app:app@127.0.0.1:5432/dmc_142 \
 In PR 3 (Tasks 16–24), the focused run adds the broker:
 
 ```sh
-TEST_DATABASE_URL=postgresql+psycopg://app:app@127.0.0.1:5432/dmc_142 \
-TEST_RABBITMQ_URL=amqp://app:app@127.0.0.1:5672/dmc_142 \
+TEST_DATABASE_URL=<disposable-db-url> \
+TEST_RABBITMQ_URL=<isolated-task-vhost-url> \
   uv run pytest -m integration -rs tests/test_code_index_*_postgres.py \
   tests/test_initial_migration.py tests/test_alembic_heads.py \
   tests/test_code_index_queue_postgres.py tests/test_worker_queue_postgres.py
@@ -52,10 +52,10 @@ command: pytest fails on a missing path argument.
   RabbitMQ acceptance test never counts as passing.
 - `tests/test_alembic_heads.py` carries no `integration` marker, so `-m integration`
   deselects it. It runs in the plain `uv run pytest` gate.
-- Use only the dedicated database `dmc_142` and the dedicated vhost `dmc_142`, never
-  another session's database or broker: parallel sessions pick up each other's NOTIFY
-  traffic. The vhost must exist with permissions for `app` (recipe in TEST_PLAN:44). Do
-  not print credentials.
+- Use only the dedicated database `<disposable-db>` and the dedicated vhost
+  `<isolated-task-vhost>`, never another session's database or broker: parallel
+  sessions pick up each other's NOTIFY traffic. The vhost must exist with permissions
+  for the test user (recipe in TEST_PLAN:44). Do not print credentials.
 
 ## PR 1: `feat(code_index): extend the index store for the indexer`
 
@@ -861,6 +861,6 @@ review result and the PR URL.
   `github_request_count` 3–4 for a full build.
 - [ ] Staging only after the user's explicit OK.
 - [ ] Lab: report `docs/reports/142/` and its mirror in
-  `base/projects/team-6/api-t6-paperwork/issue-142/`; a row in `economics.md`.
+  `<private-paperwork-directory>`; a row in `economics.md`.
 - [ ] After PR 3 merges: the tech lead checks AC1–AC12 and the DoD, closes #142, and the
   result and status are reflected in #139 and on board 12.

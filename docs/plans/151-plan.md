@@ -188,9 +188,9 @@ again in the first worktree if not yet on main. Publish this refactor as its own
 1. Obtain plan approval; recheck open PR ownership and post the required concise
    coordination comments to #124/#148 before editing their owned documentation.
 2. Establish a dedicated PostgreSQL test database or disposable random schemas;
-   do not use the unrelated PostgreSQL service on host port 5432. Coordinator saw
-   PostgreSQL 17 test candidates on 5434/5433, but verify ownership and isolation
-   before using either. Do not read or print secrets. Use fixture-generated random
+   do not use unrelated PostgreSQL services. Coordinator saw
+   PostgreSQL 17 test candidates, but verify ownership and isolation
+   before using any. Do not read or print secrets. Use fixture-generated random
    schemas (`portal_schema`) and their teardown, never downgrade a shared schema.
 3. Before any implementation, set `TEST_DATABASE_URL` for the disposable test target
    and run the baseline command below with **zero skipped tests**. Record exact

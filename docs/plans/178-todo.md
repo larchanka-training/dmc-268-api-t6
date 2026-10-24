@@ -25,8 +25,8 @@ raw-JSON audit confirmed all case/rule counts, zero reversed ranges, gateway
 normalized acceptance 24/24, and mechanical counterfactual validity 14/24, 22/24,
 24/24. All 25 response/manifest files, v2 prompt and its existing golden
 `tests/fixtures/prompt_builder/sample.system.txt` match HEAD bytes exactly; v2 SHA
-remains `9177e358c23d1a7cd8987cbf667cf8b705c2afb27eaf8b2237480e4531431d75`. Temporary evidence files: `/private/tmp/dmc-268-178-task1-replay.json` and
-`/private/tmp/dmc-268-178-task1-audit.json` (audit script alongside them).
+remains `9177e358c23d1a7cd8987cbf667cf8b705c2afb27eaf8b2237480e4531431d75`. Replay and audit evidence were written privately using a temporary audit helper
+that is not part of the repository.
 
 **Ownership coordination:** The user explicitly authorized four coordination
 comments, posted by the coordinator before touching owned files: SD §15
@@ -50,17 +50,16 @@ coordinator dispatched Task 2. No further external comments or paid run are auth
   slice does not claim executed database seeding. Optional integration skips remain
   visible in the full test result.
 
-Commands ran in the managed worktree via the original checkout's existing virtual
-environment, `UV_PROJECT_ENVIRONMENT`, with
-`UV_CACHE_DIR=/private/tmp/dmc-178-uv-cache` and `uv run --offline --no-sync` to
-avoid dependency/environment changes. No lock/dependency changes. `git diff --check`
+Commands ran in the managed worktree with an existing dependency environment,
+a separate temporary cache and `uv run --offline --no-sync` to avoid
+dependency/environment changes. No lock/dependency changes. `git diff --check`
 also passed. Independent Task 1 review reported **Standards 0, Spec 0** and
 separately reconfirmed the raw matrix, strict/normalized distinction and 25
 immutable baseline files. Task 1 completed before the coordinator dispatched Task 2.
 
 **Later integration infrastructure:** An authorized dedicated ephemeral
-PostgreSQL 17 container `dmc-268-178-seed-test` was initially ready on
-`127.0.0.1:64909`; after Docker restart it was recreated on `127.0.0.1:52586`
+PostgreSQL 17 seed-test container was initially ready on a dynamic loopback
+port; after Docker restart it was recreated on a new dynamic loopback port
 for subsequent seed tests. It uses tmpfs data, automatic container removal and private
 temporary connection configuration; no shared database was changed. After those
 tests, stop the container and remove its private temporary config/env files.
@@ -109,7 +108,7 @@ unchanged/open and no open PR claiming the v3 asset/golden/test. The authorized
   The later default/eval selection must fit the actual v3 input before capture.
 - The initial focused PostgreSQL attempt had two setup connection-refused
   errors because Docker stopped. The coordinator restored Docker Desktop; the
-  lost temporary container was recreated independently on `127.0.0.1:52586`.
+  lost temporary container was recreated independently on a new dynamic loopback port.
   Retried `tests/test_prompt_seeding.py tests/test_deploy_prompt_seed.py` with
   the dedicated DB URL: **8 passed in 2.69s, zero skips**. Disposable migrated
   schemas exercise first-seed six-asset insertion and active system v3, plus the
@@ -174,8 +173,7 @@ remained `2326273e6ab7fcea89d1cf3b94b88a4be66ca5e9`. No external comment sent.
   limits, model profiles or transport behavior changed.
 - Historical offline replay reproduced strict validity 7/24, TP/FP/FN 2/2/17,
   critical recall 2/5 and verdict agreement 5/24, with the sole expected static
-  path-set warning. Temporary report:
-  `/private/tmp/dmc-268-178-task3-replay.json`. No raw bytes changed.
+  path-set warning. No raw bytes changed.
 - Byte checks against HEAD cover 32 baseline/v2/schema/normalizer/settings/snapshot
   files. V3/golden remain exact at SHA
   `eb851e7fc2329eb7bdff015ec0fda945c46111ec5c884934ed6f6d6803883452`.
@@ -237,7 +235,7 @@ no open PR owned the new persisted-pin regression file. Remote main remains
   the focused real-DB run above. `git diff --check` passes. Fresh review is green below.
 - Fresh independent review reports **Standards 0, Spec 0**, including coherent
   actual-v2 fixture and public persisted run/snapshot seams. No DB reruns requested.
-- Teardown complete: dedicated `dmc-268-178-seed-test` stopped/automatically removed;
+- Teardown complete: dedicated seed-test container stopped/automatically removed;
   private temporary connection config and env files deleted. Unrelated containers
   were untouched. The global pytest run retains no DB URL.
 - Coordinator independently confirmed selected v3 SHA above, 46 active pins,
@@ -271,7 +269,7 @@ no open PR owned the new persisted-pin regression file. Remote main remains
 
 **Task 5 pre-capture free-check evidence (2026-10-20):** At coordinator request,
 ran `uv run python review/scripts/validate_dataset.py --final --report-json
-/private/tmp/dmc-268-178-task5-dataset-report.json` offline with the same existing
+<private-output>/dataset-report.json` offline with the same existing
 virtual environment and UV flags as above. Exit **0**; exact final summary
 `cases: 24; valid: 24`, with every active case OK. SEC-05 remains excluded.
 No source/corpus/truth mutation or model/provider call. This check plus unchanged
@@ -345,7 +343,7 @@ nonpublishable IDs empty. Current PR ownership recheck found README/responses
 unowned; existing authorized #227/#228/#220 comments cover TEST_PLAN/SD edits,
 and new #231/#232 have no overlap. No additional external comment was sent.
 
-Downloaded untouched into `/private/tmp/dmc-268-178-capture-39443263258`:
+Downloaded untouched into a private capture directory:
 
 - Safe artifact `eval-live-39443263258-1`, ID `12275133396`, 12,352 bytes,
   archive digest `sha256:5e8ab0a92715227843be239391996d97b920d304a6824896407228049372eb83`.
@@ -363,9 +361,9 @@ Downloaded untouched into `/private/tmp/dmc-268-178-capture-39443263258`:
   Effective primary/fallback/policy settings are identical to the historical
   manifest. Actual spend, billed tokens and balance are not reported.
 - Private local audit files: `run.json`, `artifacts.json`, `artifact-audit.json`,
-  `replay-audit.json`, `format-diagnostics-audit.json`; the audit script is
-  `/private/tmp/dmc-268-178-artifact-audit.py`. Historical files were preserved
-  separately under `historical-2026-10-15-responses/` before replacement.
+  `replay-audit.json`, `format-diagnostics-audit.json`; the audit used a temporary
+  helper outside the repository. Historical files from 2026-10-15 were preserved
+  separately in a private backup before replacement.
 
 **Task 6b import/replay evidence (2026-10-20):** All 25 files replaced mechanically
 in one complete byte-preserving slice, then re-compared against untouched raw

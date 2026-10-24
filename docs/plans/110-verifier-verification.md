@@ -20,7 +20,7 @@ passed **232 tests, zero skips**. Unit-test Docker fakes are limited to those
 regressions; the live cases below execute the checked-in CLI unchanged.
 
 The four required gates use a separate disposable PostgreSQL 17 / RabbitMQ 4
-Compose project `rollback110-gates-ec19d9950bfd4204`, with fresh storage and
+Compose project `<gate-project>`, with fresh storage and
 dynamic loopback-only host ports. `jq` is available. No shared database or broker
 is used.
 

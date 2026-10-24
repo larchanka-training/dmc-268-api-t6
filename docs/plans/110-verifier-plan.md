@@ -2,9 +2,9 @@
 
 ## Scope and decisions
 
-Start from `origin/main` `7546e539e1c1f565f65b9a5ca4cdc5dd1fbfb3fa` in the
-isolated `/private/tmp/dmc-268-rollback-verifier-110` worktree. The reported
-compatible rollback succeeds, but the verifier omits Compose's worker `REDIS_URL`.
+Start from `origin/main` `7546e539e1c1f565f65b9a5ca4cdc5dd1fbfb3fa` in an
+isolated worktree. The reported compatible rollback succeeds, but the verifier
+omits Compose's worker `REDIS_URL`.
 Keep the production Compose and rollback admission logic unchanged. Do not edit
 files owned by PR #124 or PR #148.
 
