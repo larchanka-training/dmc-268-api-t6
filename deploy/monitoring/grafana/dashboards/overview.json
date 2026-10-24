@@ -39,7 +39,7 @@
     {
       "type": "stat",
       "title": "LLM call p95",
-      "description": "95th percentile of provider call duration (run_actions, tool llm.call) over the dashboard range.",
+      "description": "95th percentile of provider call duration (run_actions, tool llm.call) over the dashboard range. llm.call covers both the repository-conventions call and the review call: the trace does not tell them apart yet (#170 part 2).",
       "id": 2,
       "datasource": {
         "type": "grafana-postgresql-datasource",
@@ -301,7 +301,7 @@
     {
       "type": "timeseries",
       "title": "LLM call latency",
-      "description": "Duration of every LLM provider call (run_actions, tool llm.call) in 5-minute buckets.",
+      "description": "Duration of every LLM provider call (run_actions, tool llm.call) in 5-minute buckets. Conventions and review calls are mixed until #170 part 2 adds the call kind.",
       "id": 6,
       "datasource": {
         "type": "grafana-postgresql-datasource",
@@ -557,7 +557,7 @@
     {
       "type": "timeseries",
       "title": "Phase duration p95",
-      "description": "95th percentile per trace tool (docs/PIPELINE_SPEC.md §2): diff, context, LLM, post-processing, publication.",
+      "description": "95th percentile per trace tool (docs/PIPELINE_SPEC.md §2): diff, context, LLM, post-processing, publication. llm.call mixes the conventions and the review call (#170 part 2).",
       "id": 11,
       "datasource": {
         "type": "grafana-postgresql-datasource",
@@ -615,7 +615,7 @@
     {
       "type": "table",
       "title": "Phases over the range",
-      "description": "Calls and durations of each trace tool in the dashboard range.",
+      "description": "Calls and durations of each trace tool in the dashboard range. context.build is written twice per attempt until #168 part 6, so its call count is doubled; llm.call counts conventions and review calls together.",
       "id": 12,
       "datasource": {
         "type": "grafana-postgresql-datasource",

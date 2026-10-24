@@ -635,7 +635,7 @@ def _run_backup(tmp_path: Path, **env: str) -> BackupRun:
     textfile = tmp_path / "pg_backup.prom"
     log = tmp_path / "pg.log"
     result = subprocess.run(
-        ["sh", str(MONITORING / "backup" / "pg-backup.sh"), "once"],
+        ["/bin/sh", str(MONITORING / "backup" / "pg-backup.sh"), "once"],
         env={
             "PATH": f"{tools}:{os.environ['PATH']}",
             "PGDATABASE": "app",
@@ -873,7 +873,7 @@ def _run_offsite(
     textfile = tmp_path / "pg_backup_offsite.prom"
     log = tmp_path / "rclone.log"
     result = subprocess.run(
-        ["sh", str(MONITORING / "backup" / "offsite.sh"), "once"],
+        ["/bin/sh", str(MONITORING / "backup" / "offsite.sh"), "once"],
         env={
             "PATH": f"{tools}:{os.environ['PATH']}",
             "BACKUP_DIR": str(tmp_path),
