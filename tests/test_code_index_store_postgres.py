@@ -3752,6 +3752,10 @@ def test_reconcile_head_leaves_another_generation_a_purged_and_a_failed_index_al
         pytest.param("policy_document_too_large", {}, False, id="policy-same-head"),
         pytest.param("vcs_access_denied", {}, False, id="access-same-head"),
         pytest.param("internal_error", {}, False, id="internal-same-head"),
+        # A cut or ambiguous listing of one SHA lists alike on every pass (#247).
+        pytest.param(
+            "policy_revision_unavailable", {}, False, id="policy-revision-unavailable-same-head"
+        ),
         pytest.param("vcs_unavailable", {}, True, id="unavailable-same-head"),
         pytest.param("vcs_rate_limited", {}, True, id="rate-limited-same-head"),
         # A policy read that failed on the network heals like a VCS error (#242).

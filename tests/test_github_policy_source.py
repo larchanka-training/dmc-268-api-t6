@@ -249,7 +249,7 @@ def test_answer_that_cannot_be_decoded_is_a_policy_fetch_failure_not_an_internal
     assert (blob.value.code, blob.value.retryable) == (PolicyErrorCode.FETCH_TRANSIENT, True)
 
 
-def test_unreadable_tree_listing_is_a_retryable_failure_and_a_missing_mode_is_a_file() -> None:
+def test_unreadable_tree_listing_is_a_retryable_failure() -> None:
     def broken(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json={"tree": [{"path": "AGENTS.md"}]})
 
@@ -257,13 +257,52 @@ def test_unreadable_tree_listing_is_a_retryable_failure_and_a_missing_mode_is_a_
         _run(broken, Blobs(), lambda source: source.list_entries(None))
     assert (caught.value.code, caught.value.retryable) == (PolicyErrorCode.FETCH_TRANSIENT, True)
 
-    def without_mode(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(
-            200, json={"tree": [{"path": "AGENTS.md", "type": "blob", "sha": _AGENTS, "size": 9}]}
-        )
 
-    entries = _run(without_mode, Blobs(), lambda source: source.list_entries(None))
-    assert entries["AGENTS.md"].kind is PolicyEntryKind.FILE
+@pytest.mark.parametrize(
+    "entries",
+    [
+        [_item(".review/rules.md", _RULES)],
+        [_item(".", _AGENTS)],
+        [_item("..", _AGENTS)],
+        [_item(".review", _REVIEW_TREE, mode="040000")],
+        [_item(".review", _REVIEW_TREE, type_="tree", mode="100644")],
+        [_item("sub", "8" * 40, type_="commit", mode="100644")],
+        [{"path": "AGENTS.md", "type": "blob", "sha": _AGENTS, "size": 9}],
+        [_item(".review", _REVIEW_TREE, type_="tree", mode="040000"), _item(".review", _RULES)],
+    ],
+    ids=[
+        "recursive-path",
+        "dot-path",
+        "dotdot-path",
+        "inconsistent-blob-mode",
+        "inconsistent-tree-mode",
+        "inconsistent-commit-mode",
+        "missing-mode",
+        "duplicate-name",
+    ],
+)
+@pytest.mark.parametrize("tree", ["root", "review"])
+def test_ambiguous_tree_listing_is_unavailable_and_never_missing(
+    entries: list[dict[str, Any]], tree: str
+) -> None:
+    def respond(request: httpx.Request) -> httpx.Response:
+        if tree == "review" and request.url.path.endswith(f"/git/trees/{_BASE}"):
+            # A sound root listing: only the `.review` listing is ambiguous.
+            root = [_item(".review", _REVIEW_TREE, type_="tree", mode="040000")]
+            return httpx.Response(200, json={"tree": root, "truncated": False})
+        return httpx.Response(200, json={"tree": entries, "truncated": False})
+
+    with pytest.raises(PolicyError) as caught:
+        _run(
+            respond,
+            Blobs(),
+            lambda source: LoadPolicyDocuments(source, policy_base_sha=_BASE).execute(),
+        )
+    assert (caught.value.code, caught.value.retryable) == (
+        PolicyErrorCode.REVISION_UNAVAILABLE,
+        False,
+    )
+    assert caught.value.policy_base_sha == _BASE
 
 
 @pytest.mark.parametrize(

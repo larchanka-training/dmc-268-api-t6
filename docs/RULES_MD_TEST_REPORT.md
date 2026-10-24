@@ -47,7 +47,7 @@
 | head-added | `.review` нет; PR добавляет rules.md с `**/*` | `succeeded`, `presence=missing`, не `skipped` |
 | head-changed | текст без масок; PR меняет его на `**/*` | `succeeded`, `raw_sha256` — от байтов base, не `skipped` |
 
-В графе «Итог» записан фактический код прогона. Тест для 404 допускает обе строки §9 (`policy_revision_unavailable` или `policy_access_denied`), а для truncated — `policy_revision_unavailable` или `policy_fetch_transient`.
+В графе «Итог» записан фактический код прогона. Тест для 404 допускает обе строки §9 (`policy_revision_unavailable` или `policy_access_denied`); для truncated код закреплён — `policy_revision_unavailable` (#247 ч.1).
 
 **Мутационная проверка.** Каждая мутация вносилась в код приложения, затем прогонялся весь файл и правка откатывалась (`git checkout`). Все мутации прогонялись на окончательной версии теста.
 
@@ -65,7 +65,6 @@
 **Что не проверяется и почему.**
 
 - Текст rules.md в prompt модели — ни наличие, ни отсутствие. На `main` текст до модели не доходит (`app/modules/reviews/infrastructure/review_prompt_repository.py:73-83`, `app/worker.py:277-280`) — это открытый остаток #130 (AC9). Утверждение об отсутствии закрепило бы дефект, утверждение о наличии сегодня падает.
-- Точный код усечённого дерева: код даёт терминальный `policy_revision_unavailable`, а RFS §9 относит неполную загрузку к повторяемому `policy_fetch_transient`. До решения #247 ч.1 тест допускает оба кода и не закрепляет число попыток.
 - Коды бюджета проверяются только unit-тестами: `policy_match_budget_exceeded` — `tests/test_review_ignore.py::test_exhausted_budget_stops_the_run`, `policy_prompt_budget_exceeded` на `main` недостижим (остаток #130). Когда текст rules.md попадёт в prompt, сценарий at-limit (65 536 байт) может упереться в бюджет 12 000 токенов (RFS §3.3) раньше байтового лимита.
 - Заголовок и summary check-run не проверяются; проверяется только `conclusion` по PIPELINE_SPEC §7.
 
@@ -269,7 +268,6 @@ uv run python scripts/parallel_runs_load.py --project dmc163load --runs 5 --llm-
 
 ## Расхождения со спецификацией
 
-- #247 ч.1 — усечённое дерево: `app/modules/reviews/infrastructure/github_policy_source.py:98-104` даёт терминальный `policy_revision_unavailable`, [RFS §9](RULES_FORMAT_SPEC.md#9-ошибки-и-наблюдаемость) (`docs/RULES_FORMAT_SPEC.md:942`) — повторяемый `policy_fetch_transient`.
 - #247 ч.2 — диагностика §9; ч.3 — атрибуция §8.2.
 - #168 ч.4 — `policy_path_invalid` против `unsupported_path`; ч.6 — размер blob, вторичный 403, дата в `Retry-After`.
 - Остаток #130 — `policy_prompt_budget_exceeded` недостижим; строка RFS §11 про `unsupported_path` и `**/*` (на `main` модель вызывается и публикуется clean).

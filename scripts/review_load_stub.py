@@ -191,7 +191,15 @@ class StubState:
                 "size": len(FILE_TEXT),
             }
         if method == "GET" and rest == f"/git/trees/{BASE_SHA}":
-            tree = [{"path": "README.md", "type": "blob", "sha": README_SHA, "size": 3}]
+            tree = [
+                {
+                    "path": "README.md",
+                    "mode": "100644",
+                    "type": "blob",
+                    "sha": README_SHA,
+                    "size": 3,
+                }
+            ]
             return 200, {"tree": tree, "truncated": False}
         if method == "POST" and rest == "/check-runs":
             return self._create_check_run(body)

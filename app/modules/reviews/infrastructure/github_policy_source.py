@@ -44,11 +44,13 @@ from app.modules.reviews.infrastructure.github_vcs import (
 )
 
 _SYMLINK_MODE = "120000"
+# The modes Git writes for each entry type of a tree.
+_MODES = {"blob": {"100644", "100755", _SYMLINK_MODE}, "tree": {"040000"}, "commit": {"160000"}}
 
 
 class _TreeItem(_GitHubDto):
     path: str = Field(min_length=1)
-    # GitHub always sends the mode; without it an entry cannot be told to be a symlink.
+    # GitHub always sends the mode; a listing without it is ambiguous, not unreadable.
     mode: str | None = None
     type: Literal["blob", "tree", "commit"]
     sha: str = Field(pattern=_SHA)
@@ -102,7 +104,19 @@ def policy_tree_entries(payload: object, *, policy_base_sha: str) -> dict[str, P
             "GitHub returned a truncated tree listing",
             policy_base_sha=policy_base_sha,
         )
-    return {item.path: PolicyTreeEntry(_kind(item), item.sha, item.size) for item in tree.tree}
+    entries = {item.path: PolicyTreeEntry(_kind(item), item.sha, item.size) for item in tree.tree}
+    if len(entries) != len(tree.tree) or any(
+        "/" in item.path or item.path in {".", ".."} or item.mode not in _MODES[item.type]
+        for item in tree.tree
+    ):
+        # Only a lossless, nonrecursive listing proves that a path is absent. The listing
+        # of one SHA is always the same, so asking again cannot help.
+        raise PolicyError(
+            PolicyErrorCode.REVISION_UNAVAILABLE,
+            "GitHub returned an ambiguous tree listing",
+            policy_base_sha=policy_base_sha,
+        )
+    return entries
 
 
 def _policy_retry_after(value: str | None) -> timedelta | None:

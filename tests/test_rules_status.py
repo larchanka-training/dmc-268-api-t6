@@ -286,6 +286,28 @@ def test_truncated_tree_is_unavailable_not_missing() -> None:
     assert reading.diagnostics[0].code == "policy_revision_unavailable"
 
 
+@pytest.mark.parametrize(
+    ("sha", "tree"),
+    [
+        (_HEAD, [_entry(".review", _REVIEW, kind="tree"), _entry(".review", _RULES)]),
+        (_REVIEW, [_entry("rules.md", _RULES), _entry("rules.md", "4" * 40)]),
+    ],
+    ids=["root", "review"],
+)
+def test_ambiguous_tree_is_unavailable_not_missing(sha: str, tree: list[dict[str, Any]]) -> None:
+    class Duplicated(FakeGitHub):
+        def respond(self, request: httpx.Request) -> httpx.Response:
+            if request.url.path.endswith(f"/git/trees/{sha}"):
+                return httpx.Response(200, json={"tree": tree, "truncated": False})
+            return super().respond(request)
+
+    reading = _read(Duplicated(rules=b"rules"))
+
+    assert reading.status is RulesStatusKind.UNAVAILABLE
+    (diagnostic,) = reading.diagnostics
+    assert (diagnostic.code, diagnostic.retryable) == ("policy_revision_unavailable", False)
+
+
 @pytest.mark.parametrize("answer", ["abc", "a" * 64], ids=["short", "sha-256"])
 def test_unreadable_commit_sha_is_a_transient_failure(answer: str) -> None:
     class OddSha(FakeGitHub):
