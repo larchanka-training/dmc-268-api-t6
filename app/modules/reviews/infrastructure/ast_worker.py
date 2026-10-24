@@ -35,13 +35,9 @@ def _disable_core_dumps() -> None:
     """Never write a core: it would hold the repository sources the worker was given.
 
     SIGXCPU from the CPU limit dumps core by default, and so does a parser crash. The hard
-    limit goes to zero too, since the worker never needs a core. Skipped where the platform
-    has no core limit.
+    limit goes to zero too, since the worker never needs a core.
     """
-    limit = getattr(resource, "RLIMIT_CORE", None)
-    if limit is None:
-        return
-    resource.setrlimit(limit, (0, 0))
+    resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
 
 
 def _limit_memory() -> None:
@@ -78,16 +74,13 @@ def _limit_cpu() -> None:
     requests, so the soft limit moves before every request. The hard limit is kept: a
     process cannot raise it again once lowered, and a finite one caps the soft limit. Over
     the soft limit the kernel sends SIGXCPU, which ends the worker; the parent handles that
-    like any worker that died. Skipped where the platform has no CPU limit.
+    like any worker that died.
     """
-    limit = getattr(resource, "RLIMIT_CPU", None)
-    if limit is None:
-        return
-    _, hard = resource.getrlimit(limit)
+    _, hard = resource.getrlimit(resource.RLIMIT_CPU)
     soft = _cpu_soft_limit(time.process_time())
     if hard != resource.RLIM_INFINITY:
         soft = min(soft, hard)
-    resource.setrlimit(limit, (soft, hard))
+    resource.setrlimit(resource.RLIMIT_CPU, (soft, hard))
 
 
 def _handle(line: str) -> dict[str, object]:

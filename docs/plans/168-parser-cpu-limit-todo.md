@@ -22,13 +22,13 @@ TEST_RABBITMQ_URL=amqp://app:app@localhost:5672/imp168c uv run pytest tests/test
 
 ## Task 0 — plan
 
-- [ ] `docs(plans): plan the parser CPU limit (#168)`: this plan and task list, staged with `git add -f`.
+- [x] `docs(plans): plan the parser CPU limit (#168)`: this plan and task list, staged with `git add -f`.
 
 ## Task 1 — per-request CPU limit
 
-- [ ] Tests from the plan's "Tests" section in `tests/test_ast_worker.py` and the fake worker
+- [x] Tests from the plan's "Tests" section in `tests/test_ast_worker.py` and the fake worker
   `tests/ast_workers/cpu_bound.py`; record the red run.
-- [ ] `ast_worker.py`: `_CPU_SLACK_SECONDS = 20`, `_cpu_soft_limit(used)`, `_limit_cpu()`, called in `main()`
+- [x] `ast_worker.py`: `_CPU_SLACK_SECONDS = 20`, `_cpu_soft_limit(used)`, `_limit_cpu()`, called in `main()`
   after reading a request and before `_handle`; `_disable_core_dumps()` first in `main()`; the module docstring
   names both. The comment at `subprocess_source_parser.py:97` names the OS CPU cap.
-- [ ] `fix(reviews): cap parser worker CPU time per request (#168)`.
+- [x] `fix(reviews): cap parser worker CPU time per request (#168)`.
