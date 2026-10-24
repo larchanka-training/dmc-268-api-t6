@@ -959,9 +959,12 @@ secret, so the fixture rule above holds for this corpus too.
 
 The runner does not apply a case's `review-ignore` block to the diff, so the validator
 (`--profile rules` and `--case` alike) rejects a case when a mask of its valid or malicious
-arm file, read with the production parser and matcher, matches a path the patch changes
-(the new path, and the old path of a rename, copy or deletion); the error names the arm
-file, the mask and the path.
+arm file, read with the production parser and matcher, matches a path of any `diff --git`
+block of the patch: a modified, added or deleted file, also one without hunks (an empty
+file, a mode change, a binary file), and both names of a rename or copy. The error names
+the arm file, the mask and the path. A changed path that the production matcher refuses
+(a control character in its name, for example) fails the case even without masks, as
+production withholds such a file from the model.
 
 ```sh
 uv run python review/scripts/validate_dataset.py --root test-prs-dataset/rules --final --profile rules
