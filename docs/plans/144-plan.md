@@ -279,19 +279,24 @@ UPDATE and the throttle UPDATE.
 One transaction, READ COMMITTED, no network:
 
 1. The condition `RAG_ON` **and** `GITHUB_PROVIDER` first without a lock (after review
-   r1): if it fails → `RagReadiness(enabled=False)` with no lock taken. Otherwise the
-   `repositories` row `FOR SHARE`, then the condition again in a statement of its own (as
+   r1): if it fails → `RagReadiness(enabled=False)` with no lock taken. Otherwise
+   `SET LOCAL lock_timeout = '2s'` (after team review r1), the `repositories` row
+   `FOR SHARE`, then the condition again in a statement of its own (as
    `_share_repository` / `rearm_due`,
    `app/modules/code_index/infrastructure/maintenance.py:209-226`). GitLab runs (#220) go
    through the same stage. If the condition fails → `RagReadiness(enabled=False)`; the
-   state is not read and no step is written.
-2. The state row `SELECT … FOR UPDATE SKIP LOCKED` (M3; pattern
+   state is not read and no step is written. A writer of the `repositories` row that
+   outlasts the lock timeout fails the gate with a lock error: the stage records
+   `context.rag` `{error}` and the review goes on without RAG, not on the deadline path.
+2. The state row without a lock first (after team review r1), and the decision on it with
+   `clock_timestamp()`: no row → `empty`; no writes → readiness from that read, no row lock.
+3. Writes needed → the state row `SELECT … FOR UPDATE SKIP LOCKED` (M3; pattern
    `app/modules/repositories/infrastructure/rules_status.py:228`). An empty result means
-   "no row" or "row locked". Then read the row without a lock: no row → `empty`; a row →
-   read-only, no writes.
-3. Read `clock_timestamp()` after the lock (`_clock`,
-   `app/modules/code_index/infrastructure/index_store.py:433-436`). Apply the decision.
-   `last_used_at` and the throttle columns are written with that time.
+   the row is locked (or gone): read it without a lock, read-only, no writes. Otherwise
+   read `clock_timestamp()` after the lock (`_clock`,
+   `app/modules/code_index/infrastructure/index_store.py:433-436`) and decide again on the
+   locked row, which may have changed since the read; apply that decision. `last_used_at`
+   and the throttle columns are written with that time.
 4. Return `rag_index(...)` over the row as it stands after the writes, with
    `default_head_sha = target_commit_sha`.
 
