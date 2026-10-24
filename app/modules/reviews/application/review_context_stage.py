@@ -36,7 +36,9 @@ from app.modules.reviews.application.process_run import RunVcsInput, RunVcsRepos
 from app.modules.reviews.application.rag_index import OpenReviewIndex, RagReadiness
 from app.modules.reviews.application.review_context import (
     BuildReviewContext,
+    ContextBlock,
     ContextStatus,
+    RetrievedBlock,
     ReviewContextPayload,
 )
 from app.modules.reviews.application.review_ignore import (
@@ -131,9 +133,11 @@ def policy_summary(snapshot: PolicySnapshot) -> dict[str, Any]:
 
 def context_summary(diff_map: DiffMap, payload: ReviewContextPayload) -> dict[str, Any]:
     """Counts and source ranges of the context; the text of a block is never stored here."""
+    # Retrieved blocks of the RAG slot count with the blocks of the diff files.
+    counted: tuple[ContextBlock | RetrievedBlock, ...] = (*payload.blocks, *payload.retrieved)
     tokens: Counter[str] = Counter()
     tokens_by_role: Counter[str] = Counter()
-    for block in payload.blocks:
+    for block in counted:
         tokens[block.level.value] += block.tokens
         tokens_by_role[block.source.role.value] += block.tokens
     return {
@@ -148,7 +152,7 @@ def context_summary(diff_map: DiffMap, payload: ReviewContextPayload) -> dict[st
         "reviewable_lines": payload.reviewable_lines,
         "ignored_files": payload.ignored_files,
         "levels_present": [level.value for level in payload.levels_present],
-        "blocks_by_level": dict(Counter(block.level.value for block in payload.blocks)),
+        "blocks_by_level": dict(Counter(block.level.value for block in counted)),
         "tokens_by_level": dict(tokens),
         "tokens_by_role": dict(tokens_by_role),
         "tokens_used": payload.tokens_used,
