@@ -33,7 +33,8 @@ implements it on top of the LLM gateway. So, today:
   checked only by `_fits_context` (`:287`). That breaks RFS §8.1 (`docs/RULES_FORMAT_SPEC.md:836-839`) and is
   listed as uncovered in `docs/TEST_PLAN.md:200`.
 - **Counter parity.** The pre-send estimate uses `task.counter` when it is set, otherwise the profile heuristic
-  (`gateway.py:362-369`). It never takes the larger of the two (decision р.4 №2).
+  (`gateway.py:362-369`). It never takes the larger of the two; р.4 №2 is closed by parity pins instead
+  (decision 11).
 
 E is a **dormant** PR. Every new path runs only once a `ReflectionPass` or a snapshot-path task exists, and both
 arrive with PR F. E adds no `review.system.v4.md` and no `seed_prompts.py` change, wires no `ReflectionPass` in the
@@ -50,7 +51,7 @@ worker, and leaves `RETRIEVED_PROMPT_VERSIONS` alone.
 | R13 | run_action `llm.verify` with request `{candidate_ids, accepted_call_id, manifest_id}` (`docs/PIPELINE_SPEC.md:177`; `manifest_id` is `null`, OQ-4), no migration, `reason` not persisted | 9 | A PG row `llm.verify` sits before `review.postprocess` in the same commit. No `reason` key anywhere. A legacy store writes no `llm.verify`. A second `enter_publishing` adds no second row. |
 | R9 | Answer schema chosen by the bound review prompt version (OQ-1); the live review keeps v1 | 10 | No snapshot, or review prompt `v1`–`v3`: the provider schema equals `review-output.schema.json` without annotations. Review prompt `v4`: the v2 file, with `start_line==line` normalised to `null` and the ordering normalised. An unknown version (`v9`) raises `SNAPSHOT_INTEGRITY_ERROR` before any call. |
 | R16 | Repair receives the previous answer as bounded, escaped data (RFS §8.1) | 4 | Roles are `[system, user, user]`. `</previous_model_output>` inside the answer arrives escaped. An answer longer than the bound is cut, with a marker. The live shape `[system, user, assistant, user]` is unchanged (`tests/test_llm_gateway.py:1209`). |
-| Parity | Pre-send estimate = max(task counter, profile `chars_per_token` heuristic), with no version bump | 3 | Lengths 0/1/3/4/3000/3001 give 0/1/1/2/1000/1001 under both counters. With no counter the live estimate is unchanged. A profile with `chars_per_token=2.0` plus `counter/v2` makes the larger count win. |
+| Parity | The pre-send estimate stays the pinned task counter (the fitted prompt is the prompt sent); a parity test keeps counter/v2 equal to the profile `chars_per_token` heuristic (decision 11) | 3 | Lengths 0/1/3/4/3000/3001 give 0/1/1/2/1000/1001 under both counters. Every `from_env` profile counts 3.0 characters per token. The live estimate is 1101 with no counter and with `counter/v2`, for both `KNOWN_MODELS`. |
 | D seam | `verifier_model` / `fallback_verifier_model` come from the verifier route | 11 | With a default environment the profile is unchanged (`tests/test_review_context_stage.py:815-833` stays green). With `LLM_VERIFIER_MODEL=mistral-small-3.2-24b` the pinned `verifier_model` follows it. |
 
 ## Design decisions
@@ -139,8 +140,9 @@ worker, and leaves `RETRIEVED_PROMPT_VERSIONS` alone.
       - the service-owned instruction.
     - The `previous-output` manifest block hashes the bounded text that is shown (other blocks hash source text,
       `prompt_builder.py:375`), with `shown_line_count` equal to its line count. The bound is OQ-5.
-11. **Parity**: `_estimate` (`gateway.py:362-369`) returns `max(sum(counter), sum(profile heuristic))` when
-    `counter` is set. Live tasks pass `counter=None` (`models.py:112`, `:164`), so the live estimate does not move.
+11. **Parity**: Decided by the tech lead on 2026-10-24: р.4 №2 is closed by a parity test instead of a max — a max in the gateway alone would refuse a prompt the v1 fitter produced; the remaining risk is a cost-cap overshoot on counter/v1 snapshots only, which the live worker never pins.
+    - `_estimate` (`gateway.py:362-369`) is unchanged: it estimates with the task counter when one is set.
+    - `tests/test_repo_conventions.py:1312` stays green unchanged.
 
 ## Call budget (R11: worst case against the cap of 4 and $0.50)
 
@@ -191,7 +193,7 @@ worker, and leaves `RETRIEVED_PROMPT_VERSIONS` alone.
 | --- | --- | --- |
 | 1 | `LLM_VERIFIER_*` is parsed at worker start, only when set | Neither staging nor `.env.example` sets it. An invalid value fails start like any `LLM_*` variable. Test: an unset environment gives `verifier_route() == (primary, fallback)`. |
 | 2, 5 | New fields with defaults (`route="review"`, `accepted_call_id`, `retry_after_s`) | `classify_failure` does not read `retry_after_s`. Test: `classify_failure(LlmCallFailed(RATE_LIMITED, …, retry_after_s=300)).retry_after is None`. |
-| 3 | Nothing: live tasks pass `counter=None` | Parity test: `input_tokens_estimate` is identical with no counter and with `counter/v2`, for both `KNOWN_MODELS`. |
+| 3 | Nothing: Task 3 adds tests only | Parity test: `input_tokens_estimate` is identical with no counter and with `counter/v2`, for both `KNOWN_MODELS`. |
 | 4 | Nothing: `bounded_repair` defaults to `False` | `tests/test_llm_gateway.py:1209` (review) and `:2910` (conventions) stay green unchanged. **Gated, live unchanged** (OQ-3, decided). |
 | 6–9 | Nothing: no `ReflectionPass` in the worker; the `enter_publishing` kwargs default to `None` | A PG test shows that a legacy store writes no `llm.verify`. |
 | 10 | Nothing: without a snapshot the v1 schema and validator are used | Test: the request `response_format` equals the v1 file without annotations. |
@@ -204,7 +206,6 @@ worker, and leaves `RETRIEVED_PROMPT_VERSIONS` alone.
   `finish` (`:771-776`). E edits:
   - `StructuredTask` and `GatewayResult` (`:124-145`);
   - `generate` (`:224-347`);
-  - `_estimate` (`:362-369`);
   - `_result` and `_failed` (`:723-737`);
   - plus a new module-level helper.
 - There is no textual overlap. The semantic seam is #227's new `operation` field in `llm.call`: the verifier adds
@@ -271,7 +272,8 @@ The overlap lists come from intersecting E's complete file list with each PR's f
 
 - **RFS §7.2:**
   - `:725-726` "verifier_model = review_model" needs to describe the separate `LLM_VERIFIER_*` pair.
-  - `:720-724` needs the max rule of р.4 №2.
+  - `:720-724` needs the parity rule of р.4 №2 (decision 11): counter/v2 equals the profile heuristic, and the
+    gateway estimates with the pinned counter.
   - `:730` `recovery/v1` needs to say the previous output is now bounded data.
   - `response_schema_version` (`review-output/v2`) is not listed anywhere in the docs, and the review answer
     schema follows the bound review prompt version (decision 9).
