@@ -1452,13 +1452,23 @@ class FileContext(BaseModel):
     levels_present: list[int]             # manifest фиксирует реальный набор уровней
     priority: float                       # для инспектора: почему этот файл получил больше
 
+class RetrievedBlock(BaseModel):          # RAG v1: неизменённый код кандидата графа (CVS §3.5)
+    block_id: str                         # "RAG:<path>:<a>-<b>,…"
+    level: Literal["RAG"]                 # после L4, до L2/L3
+    source: SourceRef                     # role retrieved_excerpt; revision, blob_sha и side — сторона PR (head_sha/RIGHT, diff_old_sha/LEFT); path, ranges; reason — rag_reverse_edge | rag_broken_reference
+    representation: Literal["exact_lines", "signature"]  # объявление целиком или импорт и сигнатура; LEFT — всегда signature
+    text: str                             # в trace не пишется
+    tokens: int
+    edge_kind: Literal["imports", "uses_imported"]  # метаданные выбора
+    index_commit_sha: str                 # публикация индекса, по которой выбран кандидат; никогда не ревизия текста
+
 class ContextPayload(BaseModel):          # сущность роли 6
     run_id: str
     policy_snapshot_id: str; diff_snapshot_id: str
     pr: PrMeta
     conventions: RepoConventions
     files: list[FileContext]
-    retrieved: list[RetrievedBlock]       # RAG v1: блоки кандидатов графа на ревизии PR; пуст без RAG, поля — #144
+    retrieved: list[RetrievedBlock]       # RAG v1: блоки кандидатов графа на ревизии PR; пуст без RAG
     omitted_files: list[str]              # только разрешённые непоместившиеся пути
     excluded_files_count: int             # исключённые пути модели не перечисляются
     budget: dict                          # {"limit": 60000, "used": 48210, "engine": "fast"}
@@ -1471,7 +1481,7 @@ class ContextPayload(BaseModel):          # сущность роли 6
    Для glob с `{a,b}` раскрытие ограничено 256 единицами работы (рассмотренный кандидат или созданная альтернатива). Если хотя бы один include/exclude pattern правила превышает лимит, всё правило для данного пути считается неприменимым: множитель `1.5` не даётся, остаётся базовый вес типа файла. Превышение лимита у exclude также не может ошибочно повысить приоритет файла. О каждом таком правиле backend пишет WARNING `Custom rule '<name>' is ignored for file priority: a brace glob exceeds 256 expansion units`: по одной строке на правило за одну подгонку контекста под бюджет, то есть только когда prompt не помещается в лимит и приоритеты файлов действительно считаются.
 2. L1 разрешённых файлов получает первый бюджет. Сохраняются целые hunks, затем явно усечённый префикс последнего hunk с исходными координатами; пропуски отражаются в manifest/coverage. Полная доступная DiffMap не переписывается под prompt.
 3. L4 `changed_symbols` + `referenced_symbols` всем source-файлам с парсером (дёшево: сигнатуры).
-4. RAG v1 (только при включённом тумблере и готовом индексе) — кандидаты графа из остатка после L1 и L4: потолок 4 000 токенов, не больше 20 чтений блобов, 10 файлов-кандидатов и 3 мест на файл за run. Приоритет внутри слота: битая ссылка на удалённый экспорт > вызывающие изменённого экспортируемого символа > импортёры изменённого модуля. При нехватке RAG вытесняет только L2 и L3; L1 и L4 не вытесняются. Кандидаты сверх лимитов — omission `rag_limit` ([ADR 0001 §9](adr/0001-graph-rag-v1.md#9-бюджет-manifest-ignore-и-инъекции)).
+4. RAG v1 (только при включённом тумблере, индексе `ready` или `stale` и закреплённой версии промпта с секцией retrieved) — кандидаты графа в слоте `min(4 000, остаток после L1 и L4)` токенов: не больше 200 целей графа, 20 чтений блобов (из них не больше 10 извлечений базы для битых ссылок), 10 файлов-кандидатов с местами и 3 мест на файл за run; тексты и факты, которые уже загрузил L4, чтениями RAG не считаются. Приоритет внутри слота: битая ссылка на удалённый экспорт > вызывающие изменённого экспортируемого символа > импортёры изменённого модуля. Блоки идут в `retrieved` и входят в `tokens_used`, `levels_present` и `tokens_by_role`; место битой ссылки входит со своими определениями LEFT или не входит. При нехватке RAG вытесняет только L2 и L3; L1 и L4 не вытесняются. Кандидаты и места сверх лимитов — omission `rag_limit`; сбой слота оставляет его пустым и L1–L4, L2 и L3 не меняет ([ADR 0001 §9](adr/0001-graph-rag-v1.md#9-бюджет-manifest-ignore-и-инъекции); правила счёта — CVS §3.5).
 5. L2 всем source-файлам по приоритету.
 6. L3 — сверху вниз по приоритету, пока `used ≤ limit`.
 7. После последнего сокращения и escaping — policy/provenance guard, затем manifest отдельного фактического review/conventions/verifier/repair/fallback call. Manifest содержит source roles, snapshot, SHA, origin paths, side, точные shown ranges, hashes и omissions; точные evidence excerpts сохраняются в PG. Ссылки результата разрешаются только по manifest его принятого вызова, не родительского ответа.

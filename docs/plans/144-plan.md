@@ -495,8 +495,10 @@ symbols in L4's `shown` (`:491-497`) dropped. Priority and limits per the ADR; o
 `{outcome: "used", candidates: {found, confirmed, dropped: {…}}, tokens}`, with
 `found = confirmed + Σdropped`, no paths.
 
-Open (next to M8, decided in PR 2): the shape of `context.rag` after a caught build
-failure, when the RAG part of the build did not complete.
+Resolved (decided by the coordinator, 24.10; next to M8): after a caught build failure,
+when the RAG part of the build did not complete, `context.rag` is
+`{outcome: "used", reason: "context_build_failed"}` without `candidates` and `tokens`;
+a build that returns before the slot keeps its reason with zero counters (M8).
 
 ### PR 2 tests
 
@@ -614,7 +616,9 @@ the database and the vhost.
 
 - **Open, pending for the user:** the v4 owner for the #130 remainder. PR 3 stays blocked
   on it.
-- **Open, decided in PR 2:** the shape of `context.rag` after a caught build failure (M8).
+- Resolved (decided by the coordinator, 24.10): the shape of `context.rag` after a caught
+  build failure (M8) is `{outcome: "used", reason: "context_build_failed"}` without
+  `candidates` and `tokens` ("`context.rag` used").
 - Resolved (decided by the coordinator, 23.10): PR 1 records `context.rag` after the build on both paths and before the
   post-build skip ("Trace `context.rag`"); the CHECK `ck_code_index_states_review_full_sha_at`
   (M1); the M5 condition; `old_revision_unknown` as a listed deviation.
