@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
-from dataclasses import fields
+from dataclasses import fields, replace
 from typing import Any, cast
 from uuid import UUID
 
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.orm import aliased
 
 from app.common.infrastructure.db.enums import RunState
 from app.common.infrastructure.db.unit_of_work import SqlAlchemyUnitOfWork
@@ -91,6 +92,8 @@ class SqlAlchemyPolicySnapshotStore:
         self._execution_profile = execution_profile
 
     async def get_pins(self, run_id: UUID) -> RunPolicyPins | None:
+        conventions = aliased(PromptVersion)
+        verifier = aliased(PromptVersion)
         row = (
             await self._session.execute(
                 select(
@@ -99,33 +102,65 @@ class SqlAlchemyPolicySnapshotStore:
                     RuleVersion.checksum,
                     PromptVersion.checksum,
                     PromptVersion.version,
+                    conventions.checksum,
+                    conventions.version,
+                    verifier.checksum,
+                    verifier.version,
                 )
                 .join(CodeChange, CodeChange.id == Run.code_change_id)
                 .join(RuleVersion, RuleVersion.id == Run.rule_version_id)
                 .join(PromptVersion, PromptVersion.id == Run.prompt_version_id)
+                .outerjoin(conventions, conventions.id == Run.conventions_prompt_version_id)
+                .outerjoin(verifier, verifier.id == Run.verifier_prompt_version_id)
                 .where(Run.id == run_id)
             )
         ).one_or_none()
         if row is None:
             return None
-        run, repository_id, defaults_checksum, prompt_checksum, prompt_version = row
+        (
+            run,
+            repository_id,
+            defaults_checksum,
+            prompt_checksum,
+            prompt_version,
+            conventions_checksum,
+            conventions_version,
+            verifier_checksum,
+            verifier_version,
+        ) = row
+        # A run pins the prompts it was created with. A run created before #130, or
+        # without an active row of a key, pinned no such prompt: it keeps an empty
+        # checksum and the default version, so its policy digest is the one computed
+        # before the pins existed and its bindings stay incomplete.
+        bindings = PromptBindings(
+            review_system_checksum=prompt_checksum,
+            conventions_checksum="",
+            verifier_checksum="",
+            review_system_version=f"v{prompt_version}",
+            review_system_id=run.prompt_version_id,
+        )
+        if run.conventions_prompt_version_id is not None:
+            bindings = replace(
+                bindings,
+                conventions_checksum=conventions_checksum,
+                conventions_version=f"v{conventions_version}",
+                conventions_id=run.conventions_prompt_version_id,
+            )
+        if run.verifier_prompt_version_id is not None:
+            bindings = replace(
+                bindings,
+                verifier_checksum=verifier_checksum,
+                verifier_version=f"v{verifier_version}",
+                verifier_id=run.verifier_prompt_version_id,
+            )
         return RunPolicyPins(
             run_id=run.id,
             repository_id=repository_id,
             policy_base_sha=run.base_sha,
             service_defaults_rule_version_id=run.rule_version_id,
             defaults_checksum=defaults_checksum,
-            # A run pins only its review prompt today. The conventions and verifier
-            # prompts stay unpinned until runs store them (#130), so the bindings are
-            # not complete yet. The execution profile is the worker's current one,
-            # fixed for the run by the first stored snapshot.
-            prompt_bindings=PromptBindings(
-                review_system_checksum=prompt_checksum,
-                conventions_checksum="",
-                verifier_checksum="",
-                review_system_version=f"v{prompt_version}",
-                review_system_id=run.prompt_version_id,
-            ),
+            prompt_bindings=bindings,
+            # The worker's current profile, fixed for the run by the first stored snapshot.
             execution_profile=self._execution_profile,
             severity_threshold=cast(SeverityThresholdValue | None, run.severity_threshold),
             max_comments=run.max_comments,

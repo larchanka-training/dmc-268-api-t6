@@ -7,6 +7,7 @@ import os
 from collections.abc import Iterator
 from dataclasses import replace
 from hashlib import sha256
+from importlib.resources import files
 from pathlib import Path
 from uuid import uuid4
 
@@ -89,6 +90,26 @@ def test_pinned_checksums_match_files_and_golden_fixtures() -> None:
         REPO_ROOT / "tests" / "fixtures" / "prompt_builder" / "sample.system.txt"
     ).read_text(encoding="utf-8")
     assert sample_fixture == system_v2_raw
+
+
+def test_seeded_verifier_checksums_match_the_builder_reading() -> None:
+    # A run pins the seeded checksum; VerifierPromptBuilder checks it against a text-mode
+    # read of the packaged resource. A newline translation would surface only as
+    # SNAPSHOT_INTEGRITY_ERROR once the verifier runs live.
+    verifiers = [
+        asset
+        for asset in load_prompt_assets(REPO_ROOT / "review" / "prompts")
+        if asset.key == "review.verifier"
+    ]
+
+    assert [(asset.version, asset.checksum) for asset in verifiers] == [
+        (1, "e00128b211ca64c9a2dd2bb902ade9abf4a29f30c7ec9066501dc7694ddc5940"),
+        (2, "1f676b4fea8477d77b83a106a6c62e78f67d19f71937d4a02093d11a9d276088"),
+    ]
+    for asset in verifiers:
+        resource = files("review.prompts").joinpath(f"review.verifier.v{asset.version}.md")
+        builder_reading = resource.read_text(encoding="utf-8")
+        assert sha256(builder_reading.encode("utf-8")).hexdigest() == asset.checksum
 
 
 def test_load_prompt_assets_preserves_crlf_bytes_and_checksum(tmp_path: Path) -> None:
