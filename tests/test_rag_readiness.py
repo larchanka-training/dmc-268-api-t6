@@ -10,10 +10,13 @@ import pytest
 
 from app.modules.code_index.domain.enums import RagIndexStatus
 from app.modules.code_index.domain.rag_index import RagIndex
+from app.modules.reviews.application import rag_index
 from app.modules.reviews.application.rag_index import (
+    RETRIEVED_PROMPT_VERSIONS,
     OpenReviewIndex,
     RagReadiness,
     ReviewIndexAccess,
+    has_retrieved_section,
 )
 
 REPOSITORY_ID = UUID("00000000-0000-0000-0000-000000000144")
@@ -88,3 +91,19 @@ def test_a_port_error_propagates_and_nothing_is_committed() -> None:
 
     assert uow.commits == 0
     assert uow.rolled_back is True
+
+
+def test_no_pinned_prompt_version_has_a_retrieved_section_yet() -> None:
+    assert not RETRIEVED_PROMPT_VERSIONS
+    assert has_retrieved_section("review.system", "v3") is False
+
+
+def test_the_capability_set_is_read_when_the_gate_asks(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        rag_index, "RETRIEVED_PROMPT_VERSIONS", frozenset({("review.system", "v5")})
+    )
+
+    assert has_retrieved_section("review.system", "v5") is True
+    # The key and the version are one pin: neither matches alone.
+    assert has_retrieved_section("review.system", "v3") is False
+    assert has_retrieved_section("review.verifier", "v5") is False
