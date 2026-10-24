@@ -5,11 +5,13 @@ read first without a lock: off returns at once, with no lock and no state read. 
 repository row is taken under a share lock and the condition is read again in a statement
 of its own, so a concurrent toggle-off is either seen or waits for the review. A writer of
 the repository row is waited for only until the lock timeout: the timeout fails the gate,
-and the review goes on without RAG instead of waiting until its deadline. The state
-row is taken `FOR UPDATE SKIP LOCKED`: a review never waits for a build and only reads a
-row another session holds. The marker and the generation are written only through the
-store's `request_build` and `enable`; `last_used_at` and the throttle columns by this
-adapter's own update, with the time read after the lock.
+and the review goes on without RAG instead of waiting until its deadline. The state row is
+read without a lock first and the writes are decided on it: a review that writes nothing
+answers from that read and takes no row lock. Otherwise the row is taken `FOR UPDATE SKIP
+LOCKED` and the writes are decided again on the locked row: a review never waits for a build
+and only reads a row another session holds. The marker and the generation are written only
+through the store's `request_build` and `enable`; `last_used_at` and the throttle columns by
+this adapter's own update, with the time read after the lock.
 """
 
 from __future__ import annotations
@@ -24,7 +26,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.common.infrastructure.db.unit_of_work import SqlAlchemyUnitOfWork
 from app.modules.code_index.application.vcs import HEALABLE_ERROR_CODES
 from app.modules.code_index.domain.rag_index import RagIndex, rag_index
-from app.modules.code_index.domain.review_trigger import ReviewTriggerAction, review_trigger
+from app.modules.code_index.domain.review_trigger import (
+    ReviewTrigger,
+    ReviewTriggerAction,
+    review_trigger,
+)
 from app.modules.code_index.infrastructure.effective_rag import GITHUB_PROVIDER, RAG_ON
 from app.modules.code_index.infrastructure.index_store import SqlAlchemyCodeIndexStore
 from app.modules.code_index.infrastructure.models import CodeIndexState
@@ -73,6 +79,32 @@ def _readiness(state: CodeIndexState | None) -> RagReadiness:
     )
 
 
+def _trigger(state: CodeIndexState, now: datetime) -> ReviewTrigger:
+    index = _rag_index(state)
+    return review_trigger(
+        status=index.status,
+        usable=index.usable,
+        purge_reason=state.purge_reason,
+        wake_requested_at=state.wake_requested_at,
+        lease_active=state.lease_expires_at is not None and state.lease_expires_at > now,
+        last_error_code=state.last_error_code,
+        target_commit_sha=state.target_commit_sha,
+        last_used_at=state.last_used_at,
+        review_full_requested_at=state.review_full_requested_at,
+        review_full_requested_sha=state.review_full_requested_sha,
+        healable_error_codes=HEALABLE_ERROR_CODES,
+        now=now,
+    )
+
+
+def _writes(trigger: ReviewTrigger) -> bool:
+    return (
+        trigger.action is not ReviewTriggerAction.NONE
+        or trigger.extend_last_used
+        or trigger.record_throttle
+    )
+
+
 class SqlAlchemyReviewIndexAccess:
     """`ReviewIndexAccess` on the caller's session; flushes, never commits."""
 
@@ -94,6 +126,9 @@ class SqlAlchemyReviewIndexAccess:
             .where(Repository.id == repository_id, RAG_ON, GITHUB_PROVIDER)
         )
         return rag_on is not None
+
+    async def _clock(self) -> datetime:
+        return cast(datetime, await self._session.scalar(select(func.clock_timestamp())))
 
     async def _read_state(self, repository_id: UUID) -> CodeIndexState | None:
         statement = select(CodeIndexState).where(CodeIndexState.repository_id == repository_id)
@@ -128,29 +163,21 @@ class SqlAlchemyReviewIndexAccess:
         await self._share_repository(repository_id)
         if not await self._rag_on(repository_id):
             return RagReadiness(enabled=False)
+        # The row as committed first: a review that would write nothing answers from this
+        # read and takes no row lock.
+        state = await self._read_state(repository_id)
+        if state is None or not _writes(_trigger(state, await self._clock())):
+            return _readiness(state)
         state = await self._try_lock_state(repository_id)
         if state is None:
-            # No row, or a row another session holds: read what it committed and write
-            # nothing, so the review never waits; the next review does the extension.
+            # Another session holds the row: read what it committed and write nothing, so
+            # the review never waits; the next review does the extension.
             return _readiness(await self._read_state(repository_id))
-        # Read after the lock, as the store's own clock.
-        now = cast(datetime, await self._session.scalar(select(func.clock_timestamp())))
+        # Decided again on the locked row, which may have changed since the read, with the
+        # time read after the lock, as the store's own clock.
+        now = await self._clock()
         target_commit_sha = state.target_commit_sha
-        index = _rag_index(state)
-        trigger = review_trigger(
-            status=index.status,
-            usable=index.usable,
-            purge_reason=state.purge_reason,
-            wake_requested_at=state.wake_requested_at,
-            lease_active=state.lease_expires_at is not None and state.lease_expires_at > now,
-            last_error_code=state.last_error_code,
-            target_commit_sha=target_commit_sha,
-            last_used_at=state.last_used_at,
-            review_full_requested_at=state.review_full_requested_at,
-            review_full_requested_sha=state.review_full_requested_sha,
-            healable_error_codes=HEALABLE_ERROR_CODES,
-            now=now,
-        )
+        trigger = _trigger(state, now)
         if trigger.action is ReviewTriggerAction.ENABLE:
             # The decision read `purge_reason == ttl` on the row this transaction holds, so
             # no toggle-off or removal purged it since.
