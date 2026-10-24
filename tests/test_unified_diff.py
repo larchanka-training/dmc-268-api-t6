@@ -36,11 +36,11 @@ def test_hunks_carry_both_line_numbers_and_skip_the_no_newline_marker() -> None:
             3,
             4,
             (
-                HunkRow("context", 3, 3, "context"),
-                HunkRow("removed", 4, None, "old"),
-                HunkRow("added", None, 4, "new"),
-                HunkRow("added", None, 5, "extra"),
-                HunkRow("context", 5, 6, "tail"),
+                HunkRow("context", 3, 3, "context", 3, 3),
+                HunkRow("removed", 4, None, "old", 4, 4),
+                HunkRow("added", None, 4, "new", 5, 4),
+                HunkRow("added", None, 5, "extra", 5, 5),
+                HunkRow("context", 5, 6, "tail", 5, 6),
             ),
         ),
         Hunk(
@@ -48,7 +48,10 @@ def test_hunks_carry_both_line_numbers_and_skip_the_no_newline_marker() -> None:
             1,
             20,
             1,
-            (HunkRow("removed", 10, None, "gone"), HunkRow("added", None, 20, "added")),
+            (
+                HunkRow("removed", 10, None, "gone", 10, 20),
+                HunkRow("added", None, 20, "added", 11, 20),
+            ),
         ),
     )
 

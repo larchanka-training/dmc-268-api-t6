@@ -31,6 +31,8 @@ class HunkRow:
     old_line: int | None
     new_line: int | None
     text: str
+    old_cursor: int
+    new_cursor: int
 
 
 @dataclass(frozen=True)
@@ -80,13 +82,13 @@ def parse_hunks(lines: Iterable[str]) -> tuple[Hunk, ...]:
         if line == NO_NEWLINE_MARKER:
             continue
         if line.startswith("+"):
-            rows.append(HunkRow("added", None, new_line, line[1:]))
+            rows.append(HunkRow("added", None, new_line, line[1:], old_line, new_line))
             new_line, new_left = new_line + 1, new_left - 1
         elif line.startswith("-"):
-            rows.append(HunkRow("removed", old_line, None, line[1:]))
+            rows.append(HunkRow("removed", old_line, None, line[1:], old_line, new_line))
             old_line, old_left = old_line + 1, old_left - 1
         elif line.startswith(" "):
-            rows.append(HunkRow("context", old_line, new_line, line[1:]))
+            rows.append(HunkRow("context", old_line, new_line, line[1:], old_line, new_line))
             old_line, new_line = old_line + 1, new_line + 1
             old_left, new_left = old_left - 1, new_left - 1
         else:

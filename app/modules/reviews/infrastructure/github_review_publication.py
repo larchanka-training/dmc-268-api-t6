@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 from datetime import timedelta
 from typing import Any
+from uuid import UUID
 
 import httpx
 
@@ -22,7 +23,7 @@ from app.modules.reviews.application.publish_run_review import (
     ReviewSubmission,
     SubmittedReview,
 )
-from app.modules.reviews.application.review_output import comment_body
+from app.modules.reviews.application.review_output import PublishedFinding, comment_body
 from app.modules.reviews.application.run_failures import RunCancelled
 from app.modules.reviews.infrastructure.github_vcs import InstallationTokenProvider
 
@@ -118,7 +119,11 @@ def _publish_error(response: httpx.Response) -> PublishError:
         message, errors = response.text[:500], ""
     detail = f"{message} {errors}".strip()
     retry_after = response.headers.get("Retry-After")
-    delay = timedelta(seconds=int(retry_after)) if retry_after and retry_after.isdigit() else None
+    delay = (
+        timedelta(seconds=int(retry_after))
+        if retry_after and retry_after.isascii() and retry_after.isdigit()
+        else None
+    )
     rate_limited = response.headers.get("X-RateLimit-Remaining") == "0" or delay is not None
     if status == 422:
         lowered = detail.lower()
@@ -154,7 +159,9 @@ class GitHubPullRequestReviewGateway:
             # Keep the successful receipt for append-only audit if retirement fences
             # the next request. Finalization independently fences findings/comments.
             try:
-                return await self._with_comments(prefix, headers, review_id, checkpoint)
+                return await self._with_comments(
+                    prefix, headers, review_id, checkpoint, submission.findings
+                )
             except RunCancelled as exc:
                 _LOGGER.info(
                     "Review receipt retained without comment lookup: review_id=%s reason=%s",
@@ -241,6 +248,7 @@ class GitHubPullRequestReviewGateway:
         headers: dict[str, str],
         review_id: int,
         checkpoint: RunProviderCheckpoint,
+        findings: tuple[PublishedFinding, ...],
     ) -> SubmittedReview:
         await checkpoint()
         response = await self._client.get(
@@ -251,4 +259,42 @@ class GitHubPullRequestReviewGateway:
         )
         if response.is_error:
             raise _publish_error(response)
-        return SubmittedReview(review_id, tuple(int(item["id"]) for item in response.json()))
+        payload = response.json()
+        comment_ids = tuple(int(item["id"]) for item in payload)
+        posted: frozenset[UUID] | None = None
+        if any(item.finding_id is not None for item in findings):
+            posted = (
+                frozenset()
+                if len(comment_ids) == 0
+                else _posted_inline_finding_ids(payload, findings)
+            )
+        return SubmittedReview(review_id, comment_ids, posted_inline_finding_ids=posted)
+
+
+def _posted_inline_finding_ids(
+    comments: list[dict[str, Any]], findings: tuple[PublishedFinding, ...]
+) -> frozenset[UUID]:
+    posted: set[UUID] = set()
+    used: set[int] = set()
+    for finding in findings:
+        if finding.finding_id is None:
+            continue
+        expected_body = comment_body(finding.title, finding.body, finding.suggestion)
+        for item in comments:
+            comment_id = item.get("id")
+            if not isinstance(comment_id, int) or comment_id in used:
+                continue
+            if item.get("body") != expected_body:
+                continue
+            if item.get("path") != finding.path or item.get("line") != finding.line:
+                continue
+            start = item.get("start_line")
+            if finding.start_line is not None:
+                if start != finding.start_line:
+                    continue
+            elif start is not None:
+                continue
+            posted.add(finding.finding_id)
+            used.add(comment_id)
+            break
+    return frozenset(posted)

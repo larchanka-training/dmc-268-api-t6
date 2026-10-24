@@ -11,7 +11,14 @@ from uuid import UUID
 
 import pytest
 
-from app.modules.reviews.application.findings_post_processor import ProcessedReviewOutput
+from app.modules.reviews.application.findings_post_processor import (
+    FindingsPostProcessor,
+    ProcessedReviewOutput,
+)
+from app.modules.reviews.application.publication_coordinates import (
+    enrich_gitlab_publication_finding,
+)
+from app.modules.reviews.application.publish_run_review import SubmittedReview
 from app.modules.reviews.application.review_output import (
     FindingPostProcessingInput,
     InvalidReviewOutput,
@@ -21,8 +28,13 @@ from app.modules.reviews.application.review_output import (
     ReviewPublication,
 )
 from app.modules.reviews.application.verdict import SeverityThresholdValue
+from app.modules.reviews.infrastructure.run_repository import _to_published_finding
+from tests.test_findings_post_processor import _added_file_diff_map, _empty_diff_map
+from tests.test_publish_run_review import GitLabReviews, Store, gitlab_context, run
 
 RUN_ID = UUID("00000000-0000-0000-0000-000000000401")
+
+_EXAMPLE_DIFF_MAP = _added_file_diff_map("app/example.py", 14)
 
 
 def output() -> dict[str, object]:
@@ -60,7 +72,7 @@ class FakeRepository:
     async def get_post_processing_input(self, run_id: UUID) -> FindingPostProcessingInput | None:
         assert run_id == RUN_ID
         return FindingPostProcessingInput(
-            {"app/example.py": frozenset({12})},
+            _EXAMPLE_DIFF_MAP,
             frozenset(),
             severity_threshold=self.severity_threshold,
         )
@@ -144,7 +156,7 @@ class ProcessingRepository:
 
     async def get_post_processing_input(self, run_id: UUID) -> FindingPostProcessingInput | None:
         assert run_id == RUN_ID
-        return FindingPostProcessingInput({"app/example.py": frozenset({12})}, frozenset())
+        return FindingPostProcessingInput(_EXAMPLE_DIFF_MAP, frozenset())
 
     async def store_review_output(
         self,
@@ -316,7 +328,9 @@ def test_publisher_does_not_allow_callers_to_override_durable_anchor_context() -
     )
     factory = FakeUnitOfWorkFactory(repository, [])
     provider = FakeProvider([])
-    untrusted_context = FindingPostProcessingInput({}, frozenset({"Model supplied rule"}))
+    untrusted_context = FindingPostProcessingInput(
+        _empty_diff_map(), frozenset({"Model supplied rule"})
+    )
     execute = cast(Any, PublishReviewOutput(factory, provider).execute)
 
     with pytest.raises(TypeError):
@@ -406,3 +420,85 @@ def test_run_that_cannot_store_its_output_is_not_published() -> None:
     assert asyncio.run(PublishReviewOutput(factory, provider).execute(RUN_ID, output())) is False
     assert provider.calls == []
     assert [unit.commits for unit in factory.units] == [0, 0]
+
+
+UNANCHORED_TITLE = "Outside diff map"
+
+
+def _output_with_unanchored_finding() -> dict[str, object]:
+    value = output()
+    findings = cast(list[dict[str, object]], value["findings"])
+    value["findings"] = [
+        findings[0],
+        {**findings[0], "title": UNANCHORED_TITLE, "line": 999},
+    ]
+    return value
+
+
+def _processed_with_unanchored() -> ProcessedReviewOutput:
+    parsed = ReviewOutput.model_validate(_output_with_unanchored_finding())
+    return FindingsPostProcessor.from_default_patterns().process(
+        parsed,
+        diff_map=_EXAMPLE_DIFF_MAP,
+        rule_names=frozenset(),
+    )
+
+
+def test_unanchored_line_routes_to_body_for_github_and_gitlab() -> None:
+    """Same unanchored finding stays out of inline publish for both providers (#171)."""
+    processed = _processed_with_unanchored()
+    assert [item.finding.title for item in processed.inline] == ["Missing transaction boundary"]
+    assert [item.finding.title for item in processed.body_only] == [UNANCHORED_TITLE]
+
+    @dataclass
+    class InlinePublicationRepository(FakeRepository):
+        async def store_review_output(
+            self,
+            run_id: UUID,
+            model_output: dict[str, object],
+            parsed: ReviewOutput,
+            processed: ProcessedReviewOutput,
+        ) -> ReviewPublication | None:
+            self.processed = processed
+            assert self.publication is not None
+            inline = tuple(
+                enrich_gitlab_publication_finding(
+                    _EXAMPLE_DIFF_MAP, _to_published_finding(item.finding)
+                )
+                for item in processed.inline
+            )
+            return ReviewPublication(
+                self.publication.head_sha,
+                inline,
+                processed.review_body,
+                idempotency_key=self.publication.idempotency_key,
+            )
+
+    repository = InlinePublicationRepository(
+        [], ReviewPublication("a" * 40, (), "review body", idempotency_key="stable-key")
+    )
+    provider = FakeProvider([])
+    asyncio.run(
+        PublishReviewOutput(FakeUnitOfWorkFactory(repository, []), provider).execute(
+            RUN_ID, _output_with_unanchored_finding()
+        )
+    )
+    assert [item.title for item in provider.calls[0][2]] == ["Missing transaction boundary"]
+    assert UNANCHORED_TITLE in provider.calls[0][1]
+
+    inline = tuple(
+        enrich_gitlab_publication_finding(_EXAMPLE_DIFF_MAP, _to_published_finding(item.finding))
+        for item in processed.inline
+    )
+    store = Store(
+        gitlab_context(
+            run_id=RUN_ID,
+            review_body=processed.review_body,
+            findings=inline,
+            findings_hash="f" * 64,
+        )
+    )
+    gitlab = GitLabReviews([SubmittedReview(501, (9001,))], store)
+    run(store, None, gitlab=gitlab)
+    assert gitlab.inlines == [("app/example.py", 12)]
+    assert UNANCHORED_TITLE in processed.review_body

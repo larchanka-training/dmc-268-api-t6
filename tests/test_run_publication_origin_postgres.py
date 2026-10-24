@@ -410,7 +410,7 @@ def test_inactive_publication_has_no_target_and_terminalizes_without_payload_wri
                         review_id=55,
                         comment_ids=(900,),
                         findings_hash=context.findings_hash,
-                        moved_to_body=True,
+                        moved_to_body_finding_ids=(UUID(int=11399),),
                         now=datetime.now(UTC),
                     )
                     assert result == "cancelled"

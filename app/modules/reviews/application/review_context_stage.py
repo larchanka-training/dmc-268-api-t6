@@ -92,7 +92,7 @@ def _service_excluded_names(stored: list[DiffSnapshot]) -> frozenset[str]:
     return frozenset(name for name in names if is_supported_path(name))
 
 
-def _vcs_file(snapshot: DiffSnapshot) -> VcsFile:
+def vcs_file_from_snapshot(snapshot: DiffSnapshot) -> VcsFile:
     return VcsFile(
         filename=snapshot.filename,
         status=snapshot.status,
@@ -310,7 +310,7 @@ class ReviewContextStage:
             diff_old_sha = None
         diff_map = build_diff_map(
             pull_request,
-            tuple(_vcs_file(item) for item in stored),
+            tuple(vcs_file_from_snapshot(item) for item in stored),
             provider=VcsProviderName.GITHUB,
             repository_id=run.repository_id,
             diff_old_sha=diff_old_sha,
