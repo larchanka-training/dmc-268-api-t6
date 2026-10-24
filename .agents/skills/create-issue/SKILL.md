@@ -71,7 +71,8 @@ dependencies, references; for a bug environment, steps, expected, actual). Tag e
 for the preview — `[✓ high]` stated, `[⚠ low]` inferred, `[✗ missing]` — so the user sees
 which parts were invented. Dependencies go by direction: "this issue is blocked by X" →
 `blocked_by`; an issue this one blocks has no key — after the create run
-`issue-link.sh OWNER/REPO#<other> --blocked-by <this>`; "related, not blocking" stays text.
+`issue-link.sh OWNER/REPO#<other> --blocked-by <this>`, `<this>` as its full `OWNER/REPO#N`
+(a short `#N` resolves against `<other>`'s repo); "related, not blocking" stays text.
 
 ### 4. Language
 

@@ -41,7 +41,8 @@
 # issue_search.json (duplicate guard), issue_recover_before.json and
 # issue_recover.json (newest issues before / after a failed create),
 # milestones.json, project_view.json, project_fields.json (validation; a missing
-# file is a failed call whose stderr is <name>.err), issue_create.json,
+# file is a failed call whose stderr is <name>.err), issue_create.json and
+# issue_create.err (the stderr of a create that did not return a url),
 # issue_view.json, project_add.{code,err,json}, project_edit.err and
 # project_status.json, project_status.confirm.json, project_status.retry.json (the
 # Status read after the edit, after the pause, after the re-edit) stand in for the
@@ -321,6 +322,7 @@ recent_issues issue_recover_before.json > "$WORK/before.json" && BEFORE_OK=true
 if [ -n "$FIX" ]; then
   printf 'issue_create\n' >> "$FIX/calls.log"
   OUT="$(cat "$FIX/issue_create.json" 2>/dev/null)"; CRC=$?
+  cat "$FIX/issue_create.err" > "$WORK/err" 2>/dev/null
   URL="$(printf '%s' "$OUT" | python3 -c 'import json,sys
 try: print(json.load(sys.stdin).get("url",""))
 except Exception: print("")')"
@@ -382,6 +384,11 @@ PY
       URL="$FOUND" ;;
     1)
       ERRTXT="$(cat "$WORK/err" 2>/dev/null | head -3)"
+      # A (secondary) rate limit is transient, not a refusal: fail_code's rule, so it
+      # goes before the 401/403 branch.
+      case "$(lower "$ERRTXT")" in
+        *"rate limit"*|*abuse*) die "create rate-limited, no new issue with this title exists: $ERRTXT" 5 ;;
+      esac
       case "$ERRTXT" in
         *401*|*403*|*authentication*|*Unauthorized*) die "create rejected: $ERRTXT" 3 ;;
         *5[0-9][0-9]*|*timeout*|*"connection refused"*) die "create failed against the server: $ERRTXT" 5 ;;
